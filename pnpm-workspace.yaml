@@ -1,0 +1,8 @@
+packages:
+    - "modules/*"
+allowBuilds:
+    esbuild: true
+    msgpackr-extract: false
+minimumReleaseAgeExclude:
+    - "@effect/sql-sqlite-node@4.0.0-beta.97"
+    - effect@4.0.0-beta.97

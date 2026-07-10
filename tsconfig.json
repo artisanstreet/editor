@@ -1,0 +1,22 @@
+{
+	"compilerOptions": {
+		"allowImportingTsExtensions": true,
+		"exactOptionalPropertyTypes": true,
+		"lib": ["ES2024"],
+		"module": "ESNext",
+		"moduleResolution": "Bundler",
+		"noEmit": true,
+		"noImplicitOverride": true,
+		"noUncheckedIndexedAccess": true,
+		"paths": {
+			"@artisan/backend": ["./modules/backend/src/index.ts"],
+			"@artisan/protocol": ["./modules/protocol/src/index.ts"]
+		},
+		"skipLibCheck": true,
+		"strict": true,
+		"target": "ES2024",
+		"types": ["node", "vitest/globals"],
+		"verbatimModuleSyntax": true
+	},
+	"include": ["modules/**/*.ts", ".tests/**/*.ts", "drizzle.config.ts", "vitest.config.ts"]
+}
