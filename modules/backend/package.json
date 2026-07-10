@@ -11,6 +11,8 @@
 		"@effect/sql-sqlite-node": "4.0.0-beta.97",
 		"drizzle-orm": "1.0.0-rc.4",
 		"effect": "4.0.0-beta.97",
-		"node-pty": "1.1.0"
+		"ipaddr.js": "2.4.0",
+		"node-pty": "1.1.0",
+		"parse5": "8.0.1"
 	}
 }

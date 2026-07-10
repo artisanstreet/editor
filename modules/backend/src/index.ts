@@ -10,6 +10,98 @@ export { ProtocolRouter } from "./protocol/protocol-router";
 export { ProtocolServer } from "./protocol/protocol-server";
 export { AgentOrchestrator } from "./orchestration/agent-orchestrator";
 export {
+	Filesystem,
+	FilesystemError,
+	type FilesystemChange,
+	type FilesystemEntry,
+	type FilesystemEntryKind,
+	type FilesystemOperation,
+	type FilesystemPathChange,
+	type FilesystemWatchOverflow,
+} from "./filesystem/filesystem";
+export { make_node_filesystem_layer } from "./filesystem/node-filesystem";
+export {
+	Git,
+	GitError,
+	type GitDiffPatch,
+	type GitDiffStats,
+	type GitFileSummary,
+	type GitOperation,
+	type GitRepository,
+} from "./git/git";
+export { make_git_layer, make_node_git_layer, type NodeGitOptions } from "./git/node-git";
+export {
+	make_node_process_runner_layer,
+	NodeProcessRunnerLive,
+	type NodeProcessRunnerOptions,
+} from "./git/node-process-runner";
+export {
+	ProcessRunner,
+	ProcessRunnerError,
+	type ProcessRunnerInput,
+	type ProcessRunnerOperation,
+	type ProcessRunnerResult,
+	type ProcessRunnerShape,
+} from "./git/process-runner";
+export {
+	PreviewHealthProbe,
+	PreviewHealthProbeError,
+	PreviewTarget,
+	PreviewTargetClock,
+	PreviewTargetError,
+	type PreviewHealthProbeResult,
+	type PreviewTargetErrorCode,
+	type PreviewTargetEvent,
+	type PreviewTargetHealth,
+	type PreviewTargetRecord,
+	type PreviewTargetRegistration,
+	type PreviewTargetSource,
+	type PreviewTargetState,
+} from "./preview/preview-target";
+export {
+	make_preview_target_layer,
+	PreviewTargetClockLive,
+	type PreviewTargetOptions,
+} from "./preview/preview-target-service";
+export {
+	RichLinkAssetStore,
+	RichLinkAssetStoreError,
+	RichLinkAssetStoreLive,
+	make_in_memory_rich_link_asset_store_layer,
+	type RichLinkAsset,
+	type RichLinkAssetMetadata,
+	type RichLinkAssetStoreErrorCode,
+	type RichLinkAssetStoreInput,
+	type RichLinkAssetStoreLimits,
+	type RichLinkAssetStoreOptions,
+} from "./preview/rich-link-asset-store";
+export {
+	RichLinkClock,
+	RichLinkDnsError,
+	RichLinkDnsResolver,
+	RichLinkHttpTransport,
+	RichLinkMetadata,
+	RichLinkMetadataCache,
+	RichLinkMetadataError,
+	RichLinkTransportError,
+	type RichLinkCacheEntry,
+	type RichLinkCacheMetadata,
+	type RichLinkFavicon,
+	type RichLinkHttpRequest,
+	type RichLinkHttpResponse,
+	type RichLinkMetadataDocument,
+	type RichLinkMetadataErrorCode,
+	type RichLinkMetadataResult,
+	type RichLinkResolvedAddress,
+	type RichLinkTransportErrorCode,
+} from "./preview/rich-link-metadata";
+export {
+	make_node_rich_link_metadata_layer,
+	make_rich_link_metadata_layer,
+	type NodeRichLinkMetadataOptions,
+	type RichLinkMetadataOptions,
+} from "./preview/rich-link-service";
+export {
 	NodePtyTerminalDriverLive,
 	make_node_pty_terminal_driver_layer,
 	type NodePtyTerminalDriverOptions,
