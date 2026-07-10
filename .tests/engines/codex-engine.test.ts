@@ -20,6 +20,14 @@ function chunks_from_text(text: string, split_at: number) {
 	return [bytes.subarray(0, split_at), bytes.subarray(split_at)];
 }
 
+function never_chunks(): AsyncIterable<Uint8Array> {
+	return {
+		[Symbol.asyncIterator]: () => ({
+			next: () => new Promise<IteratorResult<Uint8Array>>(() => undefined),
+		}),
+	};
+}
+
 function make_handle(chunks: ReadonlyArray<Uint8Array>, writes: Array<string>): CodexProcessHandle {
 	return {
 		Close: Effect.void,
@@ -164,9 +172,7 @@ describe("Codex engine probe", () => {
 						Stderr: (async function* () {
 							yield encoder.encode("diagnostic output");
 						})(),
-						Stdout: (async function* () {
-							await new Promise<never>(() => undefined);
-						})(),
+						Stdout: never_chunks(),
 						Write: () => Effect.void,
 					} satisfies CodexProcessHandle;
 				}),
