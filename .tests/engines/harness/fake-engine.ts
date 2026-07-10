@@ -66,7 +66,12 @@ function command_intent(command: EngineCommand) {
 		case "respond_approval":
 			return JSON.stringify([command._tag, command.approval_id, command.approved]);
 		case "respond_question":
-			return JSON.stringify([command._tag, command.question_id, command.text]);
+			return JSON.stringify([
+				command._tag,
+				Object.entries(command.answers).sort(([left], [right]) =>
+					left.localeCompare(right),
+				),
+			]);
 		case "cancel":
 		case "close":
 			return JSON.stringify([command._tag]);
@@ -320,8 +325,9 @@ function open_fake_run(
 								: {
 										...base,
 										_tag: "agent_message_completed" as const,
-										message: command.text,
-										turn_id: command.question_id,
+										message: Object.values(command.answers).flat().join("\n"),
+										turn_id:
+											Object.keys(command.answers)[0] ?? command.command_id,
 									};
 
 					yield* Offer(observation);

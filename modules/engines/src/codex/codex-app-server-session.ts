@@ -281,6 +281,7 @@ export function open_codex_app_server_session(
 				}
 
 				yield* Queue.end(notification_ingress);
+				yield* Queue.end(notifications);
 				yield* Queue.end(diagnostics);
 
 				return true;

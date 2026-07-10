@@ -1,6 +1,7 @@
 import process from "node:process";
 
 const decoder = new TextDecoder();
+const keep_alive = setInterval(() => undefined, 1_000);
 
 process.stdin.on("data", (chunk) => {
 	const lines = decoder.decode(chunk, { stream: true }).split("\n").filter(Boolean);
@@ -24,4 +25,7 @@ process.stdin.on("data", (chunk) => {
 	}
 });
 
-process.on("SIGTERM", () => process.exit(143));
+process.on("SIGTERM", () => {
+	clearInterval(keep_alive);
+	process.exit(143);
+});

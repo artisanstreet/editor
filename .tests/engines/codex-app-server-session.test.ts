@@ -124,6 +124,30 @@ describe("Codex app-server session", () => {
 		expect(response.result).toEqual({ count: 8 });
 	});
 
+	it("finalizes when the downstream notification queue is full and unconsumed", async () => {
+		const finalized = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const session = yield* make_session({
+						notification_capacity: 1,
+						notification_ingress_capacity: 16,
+					});
+
+					yield* session.Request("scenario/notificationFlood", { count: 8 });
+				}),
+			).pipe(
+				Effect.provide(CodexProcessFactoryLive),
+				Effect.as(true),
+				Effect.timeoutOrElse({
+					duration: 1_000,
+					orElse: () => Effect.succeed(false),
+				}),
+			),
+		);
+
+		expect(finalized).toBe(true);
+	});
+
 	it("fails the session explicitly when lossless notification ingress overflows", async () => {
 		const result = await Effect.runPromise(
 			Effect.scoped(

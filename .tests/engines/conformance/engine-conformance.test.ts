@@ -54,6 +54,14 @@ describe("Engine conformance", () => {
 					for (const command of EngineCommandScenarios) {
 						yield* run.Send(command);
 					}
+					yield* run.Send({
+						_tag: "respond_question",
+						answers: {
+							"question-2": ["Keep the current branch"],
+							"question-1": ["Use the current workspace"],
+						},
+						command_id: "command-question",
+					});
 
 					const command_events = yield* run.Events.pipe(
 						Stream.take(3),

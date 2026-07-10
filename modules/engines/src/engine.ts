@@ -37,11 +37,11 @@ export interface EngineDescriptor {
 	readonly transport: string;
 }
 
-/** Carries model and permission preferences chosen by the caller. @since 0.2.0 */
+/** Carries model and provider-resolved permission preferences chosen by the caller. @since 0.2.0 */
 export interface EngineRunMetadata {
 	readonly model?: string;
+	readonly permission_profile?: string;
 	readonly permission_metadata?: Readonly<Record<string, string | boolean | number | null>>;
-	readonly profile?: string;
 }
 
 /** Supplies the caller-owned context shared by started and resumed runs. @since 0.2.0 */
@@ -102,6 +102,7 @@ export interface EngineRawProvenance {
 	readonly native_id?: string | number;
 	readonly native_method?: string;
 	readonly protocol_version?: string;
+	readonly raw_frame_base64?: string;
 	readonly transport: string;
 }
 
@@ -174,7 +175,7 @@ export interface EngineTerminalActivityObservation extends EngineObservationBase
 /** Reports a tool lifecycle event without exposing provider-specific tool types. @since 0.2.0 */
 export interface EngineToolObservation extends EngineObservationBase {
 	readonly _tag: "tool";
-	readonly action: "started" | "completed" | "failed";
+	readonly action: "started" | "progress" | "completed" | "failed";
 	readonly detail?: string;
 	readonly tool_id: string;
 	readonly tool_name: string;
@@ -192,6 +193,7 @@ export interface EngineSearchObservation extends EngineObservationBase {
 	readonly _tag: "search";
 	readonly query: string;
 	readonly result_count?: number;
+	readonly state: "started" | "completed";
 }
 
 /** Reports a provider-native action that has no canonical tool equivalent. @since 0.2.0 */
@@ -213,7 +215,7 @@ export interface EngineApprovalObservation extends EngineObservationBase {
 /** Reports a question request or its resolution. @since 0.2.0 */
 export interface EngineQuestionObservation extends EngineObservationBase {
 	readonly _tag: "question";
-	readonly answer?: string;
+	readonly answers?: ReadonlyArray<string>;
 	readonly question_id: string;
 	readonly state: "requested" | "resolved";
 	readonly text: string;
@@ -222,7 +224,17 @@ export interface EngineQuestionObservation extends EngineObservationBase {
 /** Reports provider context compaction. @since 0.2.0 */
 export interface EngineCompactionObservation extends EngineObservationBase {
 	readonly _tag: "compaction";
+	readonly state: "started" | "completed";
 	readonly summary?: string;
+}
+
+/** Streams a provider-authored reasoning summary without exposing private reasoning text. @since 0.3.0 */
+export interface EngineReasoningSummaryDeltaObservation extends EngineObservationBase {
+	readonly _tag: "reasoning_summary_delta";
+	readonly delta: string;
+	readonly item_id: string;
+	readonly summary_index: number;
+	readonly turn_id: string;
 }
 
 /** Reports provider usage measured for the run or one turn. @since 0.2.0 */
@@ -259,6 +271,7 @@ export type EngineObservation =
 	| EngineProcessDiagnosticObservation
 	| EngineProtocolDiagnosticObservation
 	| EngineQuestionObservation
+	| EngineReasoningSummaryDeltaObservation
 	| EngineRunStateObservation
 	| EngineRunTerminalObservation
 	| EngineSearchObservation
@@ -285,9 +298,8 @@ export interface EngineRespondApprovalCommand {
 /** Answers a pending question. @since 0.2.0 */
 export interface EngineRespondQuestionCommand {
 	readonly _tag: "respond_question";
+	readonly answers: Readonly<Record<string, ReadonlyArray<string>>>;
 	readonly command_id: string;
-	readonly question_id: string;
-	readonly text: string;
 }
 
 /** Cancels the active run. @since 0.2.0 */
@@ -345,10 +357,25 @@ export class EngineCommandIdConflictError extends Data.TaggedError("EngineComman
 	readonly command_id: string;
 }> {}
 
+/** Represents a command whose provider request target is absent or already resolved. @since 0.3.0 */
+export class EngineCommandTargetError extends Data.TaggedError("EngineCommandTargetError")<{
+	readonly artisan_run_id: string;
+	readonly command_id: string;
+	readonly target_id: string;
+	readonly target: "approval" | "question";
+}> {}
+
 /** Represents a command rejected because the local event buffer is full. @since 0.2.0 */
 export class EngineBackpressureError extends Data.TaggedError("EngineBackpressureError")<{
 	readonly artisan_run_id: string;
 	readonly capacity: number;
+}> {}
+
+/** Represents invalid adapter configuration rejected before provider work begins. @since 0.3.0 */
+export class EngineConfigurationError extends Data.TaggedError("EngineConfigurationError")<{
+	readonly engine_id: string;
+	readonly option: string;
+	readonly value: unknown;
 }> {}
 
 /** Represents a non-billable probe phase exceeding its configured deadline. @since 0.2.0 */
@@ -380,6 +407,8 @@ export class EngineRegistryError extends Data.TaggedError("EngineRegistryError")
 export type EngineFailure =
 	| EngineBackpressureError
 	| EngineCommandIdConflictError
+	| EngineCommandTargetError
+	| EngineConfigurationError
 	| EngineProbeTimeoutError
 	| EngineProcessError
 	| EngineProtocolError
@@ -393,6 +422,7 @@ export type EngineFailure =
 export type EngineCommandFailure =
 	| EngineBackpressureError
 	| EngineCommandIdConflictError
+	| EngineCommandTargetError
 	| EngineProcessError
 	| EngineProtocolError
 	| EngineRunClosedError

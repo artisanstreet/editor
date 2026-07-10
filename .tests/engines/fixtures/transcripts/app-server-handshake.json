@@ -1,0 +1,28 @@
+{
+	"args": [],
+	"chunks": [
+		{
+			"at_ms": 0,
+			"chunk_base64": "eyJpZCI6MSwibWV0aG9kIjoiaW5pdGlhbGl6ZSIsInBhcmFtcyI6eyJjYXBhYmlsaXRpZXMiOnsiZXhwZXJpbWVudGFsQXBpIjpmYWxzZSwicmVxdWVzdEF0dGVzdGF0aW9uIjpmYWxzZX0sImNsaWVudEluZm8iOnsibmFtZSI6InRyYW5zY3JpcHQtdGVzdCIsInZlcnNpb24iOiIwLjMuMCJ9fX0K",
+			"stream": "stdin"
+		},
+		{
+			"at_ms": 10,
+			"chunk_base64": "eyJpZCI6MSwicmVzdWx0Ijp7ImNvZGV4SG9tZSI6IkM6XFxjb2RleCIsInBsYXRmb3JtRmFtaWx5Ijoid2luZG93cyIsInBsYXRmb3JtT3MiOiJ3aW4zMiIsInVzZXJBZ2VudCI6InRyYW5zY3JpcHQgc25vd21hbjog4g==",
+			"stream": "stdout"
+		},
+		{
+			"at_ms": 11,
+			"chunk_base64": "mIMifX0K",
+			"stream": "stdout"
+		},
+		{
+			"at_ms": 50,
+			"chunk_base64": "eyJtZXRob2QiOiJpbml0aWFsaXplZCJ9Cg==",
+			"stream": "stdin"
+		}
+	],
+	"command": "codex app-server",
+	"exit_code": 0,
+	"exit_signal": null
+}

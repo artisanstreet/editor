@@ -8,7 +8,7 @@ export const EngineOpenScenarios: Readonly<Record<"resume" | "start", EngineOpen
 		model: "test-model",
 		next_text: "Continue the existing task",
 		permission_metadata: { filesystem: "read-write" },
-		profile: "test-profile",
+		permission_profile: "test-profile",
 		resume_token: {
 			native_thread_id: "native-thread-resume",
 			opaque_checkpoint: "checkpoint-1",
@@ -21,7 +21,7 @@ export const EngineOpenScenarios: Readonly<Record<"resume" | "start", EngineOpen
 		initial_text: "Start the task",
 		model: "test-model",
 		permission_metadata: { filesystem: "read-write" },
-		profile: "test-profile",
+		permission_profile: "test-profile",
 		working_directory: "C:\\workspace",
 	},
 };
@@ -37,9 +37,11 @@ export const EngineCommandScenarios = [
 	},
 	{
 		_tag: "respond_question",
+		answers: {
+			"question-1": ["Use the current workspace"],
+			"question-2": ["Keep the current branch"],
+		},
 		command_id: "command-question",
-		question_id: "question-1",
-		text: "Use the current workspace",
 	},
 ] as const satisfies ReadonlyArray<EngineCommand>;
 

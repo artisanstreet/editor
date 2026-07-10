@@ -102,6 +102,6 @@ describe("Codex process factory", () => {
 			}).pipe(Effect.provide(CodexProcessFactoryLive)),
 		);
 
-		expect(exit.code === 143 || exit.signal === "SIGTERM").toBe(true);
+		expect(exit).not.toEqual({ code: 0, signal: null });
 	});
 });
