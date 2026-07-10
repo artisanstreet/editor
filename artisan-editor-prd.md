@@ -162,6 +162,86 @@ SvelteKit/SER compatibility and cross-platform feature parity are proven.
 Neither shell should define the frontend, backend/core, or engine adapter
 interfaces.
 
+## Engine Modules And Conformance Harness
+
+The canonical product term should be `Engine`, not `Provider`. An Engine is an
+executable agent harness Artisan can discover, start, resume, steer, cancel, and
+observe, such as Codex CLI or Claude Code. A Provider is descriptive metadata
+about the company, authentication source, models, and rate/subscription context
+behind an Engine. Core orchestration should depend on Engines.
+
+Production engine integrations should live in one obvious module with one
+folder per engine. The initial shape should be:
+
+```text
+modules/engines/src/
+  engine.ts
+  registry.ts
+  codex/
+    codex-engine.ts
+    codex-process.ts
+    codex-protocol.ts
+    codex-normalizer.ts
+```
+
+Future `claude/`, `gemini/`, and other folders should implement the same Engine
+interface. Adding a folder should not silently activate an engine; the backend
+composition root should register adapters explicitly so duplicate ids, missing
+Layers, and unsupported capabilities fail visibly at build or startup time.
+
+Each Engine should declare capabilities rather than forcing fake parity. Initial
+capabilities should include availability/version discovery, authentication
+state, start, resume, streaming events, steering, approvals, cancellation,
+subagents, model selection, and native tool visibility. Unsupported features
+should be explicit capability states, not missing methods or runtime guesses.
+
+Unit parser tests are necessary but not an adequate release gate. Artisan needs
+an Engine Conformance Harness that exercises the Engine interface and the real
+process boundary. Test infrastructure should live outside production source:
+
+```text
+.tests/engines/
+  harness/
+  scenarios/
+  fixtures/
+    codex/
+  conformance/
+  live/
+```
+
+The harness should support three interchangeable engine backends:
+
+- A deterministic fake executable launched as a real child process, exercising
+  stdin, stdout, stderr, chunk boundaries, backpressure, signals, and exit codes.
+- Recorded and sanitized native transcripts replayed byte-for-byte, preserving
+  fragmentation, delays, malformed frames, and provider schema drift cases.
+- Opt-in live runs against the locally installed Engine for compatibility smoke
+  testing and new-fixture recording; paid/subscription-backed live tests should
+  never run silently in ordinary CI.
+
+An Engine Scenario should describe user inputs, native process frames, timing or
+fault injections, expected canonical events, expected final projections, and
+cleanup invariants. The same scenario should be runnable against the fake
+executable, transcript replay, and a compatible live Engine where practical.
+
+The conformance suite should cover discovery, startup, normal completion,
+stream fragmentation, interleaved stdout/stderr, approvals, steering,
+cancellation, resume, process crash, timeout, malformed output, duplicate native
+events, abrupt transport loss, backend restart, and orphan-process cleanup.
+
+The deepest integration harness should run a real backend runtime with a
+temporary workspace, temporary Git repository, temporary SQLite database,
+in-memory or MessagePort transport, deterministic clock/ids, and a fake Engine
+process. It should drive commands through the public protocol router and assert
+only observable protocol output, durable ledger records, rebuilt projections,
+filesystem/git effects, and process cleanup.
+
+Property and state-machine tests should enforce invariants across generated
+action sequences: one durable acceptance per command id, no duplicated side
+effects after retry, contiguous per-stream sequences, replay-equivalent
+projections, terminal states after every process exit, correlated observable
+actions, and no leaked processes or handles.
+
 ## Frontend-Backend Contract
 
 Artisan should have a hard frontend/backend split. The frontend is the UI
@@ -1885,6 +1965,12 @@ Right pane relationship:
   migration, replay, and engine-specific round-tripping.
 - The `engines/**` module should own external agent engine adapters and keep
   CLI/provider-specific parsing out of the rest of the app.
+- The production Engine module should use one folder per executable integration,
+  beginning with `codex/`, and one explicit registry composed through Effect
+  Layers. Folder discovery or implicit runtime registration should not be used.
+- Engine and Provider should remain distinct domain terms. Core orchestration
+  depends on Engine capabilities; provider, model, auth, and subscription data
+  are metadata surfaced by an Engine.
 - V1 engine support should focus on Codex CLI and Claude Code CLI.
 - The Codex adapter should prefer `codex app-server` over stdio JSONL because
   it is the rich-client interface for threads, turns, approvals, and streamed
@@ -1919,6 +2005,19 @@ Right pane relationship:
   interface and the canonical event ledger.
 - Engine adapter tests should verify that provider/CLI-specific output becomes
   the correct Artisan events.
+- Every Engine adapter should pass one shared conformance suite at the Engine
+  interface rather than defining only adapter-specific unit tests.
+- The Engine Conformance Harness should include a real fake child process,
+  byte-faithful transcript replay, and explicitly opt-in live CLI smoke tests.
+- Scenario tests should exercise fragmented and interleaved process IO,
+  approvals, steering, cancellation, resume, crashes, hangs, malformed frames,
+  duplicate native events, restart, and orphan-process cleanup.
+- End-to-end engine scenarios should use a real backend runtime, temporary
+  SQLite database, temporary workspace/Git repository, deterministic clock and
+  ids, and an in-memory or MessagePort transport.
+- Property/state-machine tests should verify idempotency, stream continuity,
+  replay equivalence, lifecycle terminality, event correlation, and resource
+  cleanup over generated action sequences.
 - Core session tests should verify that event streams project into correct
   thread, file, git, terminal, and run state.
 - Protocol contract tests should verify command validation, event schema
@@ -2231,3 +2330,11 @@ Right pane relationship:
   stream-local sequences. Rejected commands return correlated receipts;
   malformed messages return protocol-error envelopes. Hello negotiation,
   subscriptions, ACK cursors, and replay remain the next protocol slice.
+- 2026-07-10: Engine integrations should use one explicit `engines` module with
+  one folder per executable harness, beginning with Codex. Engine is the core
+  term; Provider describes vendor/model/auth metadata rather than the runtime
+  integration seam.
+- 2026-07-10: Engine testing elevated from parser unit tests to a first-class
+  conformance harness with a fake child process, native transcript replay,
+  opt-in live CLI tests, full backend scenarios, fault injection, and
+  property/state-machine invariants.
