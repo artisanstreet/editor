@@ -2416,3 +2416,16 @@ Right pane relationship:
   Favicon bytes are magic-checked, content-addressed, and retained behind a
   bounded backend asset store; local preview targets use a separate explicit
   localhost registry.
+- 2026-07-10: Multi-agent orchestration now uses a durable graph of groups,
+  agent identities, assignments, monotonic run attempts, dependency edges,
+  joins, artifacts, and exact raw observations. Dispatch is bounded per group;
+  restart recovery terminalizes abandoned ownership before retrying.
+- 2026-07-10: The shell-neutral MessagePort layer now owns version bootstrap,
+  connection fencing, request correlation, exact-envelope retries, event ACKs,
+  cursor replay, projection subscriptions, heartbeat recovery, and isolated
+  binary stream backpressure. Renderer-safe entry points cannot import backend,
+  Node, or Electron runtime modules.
+- 2026-07-10: Concurrency tests should synchronize on observable protocol or
+  lifecycle events rather than fixed sleeps. Interrupted requests retain a
+  bounded correlation tombstone until their late response is consumed; stale
+  turn tests wait for both the replacement turn and stale completion.
