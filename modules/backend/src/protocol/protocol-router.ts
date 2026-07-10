@@ -10,12 +10,28 @@ import {
 } from "@artisan/protocol";
 
 import { type JournalStoreError } from "../persistence/journal-store";
+import { type OrchestrationError } from "../persistence/orchestration-repository";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { CommandRouter } from "./command-router";
 
 const describe_journal_error = pipe(
-	Match.type<JournalStoreError>(),
+	Match.type<JournalStoreError | OrchestrationError>(),
 	Match.tagsExhaustive({
+		OrchestrationCommandConflict: (): ProtocolErrorDetail => ({
+			code: "command.id_conflict",
+			message: "This command id has already been used for different intent.",
+			retryable: false,
+		}),
+		OrchestrationNotFound: (error): ProtocolErrorDetail => ({
+			code: `${error.resource}.not_found`,
+			message: `The requested ${error.resource} does not exist.`,
+			retryable: false,
+		}),
+		OrchestrationFailure: (): ProtocolErrorDetail => ({
+			code: "orchestration.unavailable",
+			message: "The command could not be durably orchestrated.",
+			retryable: true,
+		}),
 		CommandIdConflict: (): ProtocolErrorDetail => ({
 			code: "command.id_conflict",
 			message: "This command id has already been used for different intent.",
@@ -52,7 +68,10 @@ export const ProtocolRouterLive = Layer.effect(
 		const commands = yield* CommandRouter;
 		const metadata = yield* RuntimeMetadata;
 
-		const MakeRejectedReceipt = (command: CommandEnvelope, error: JournalStoreError) =>
+		const MakeRejectedReceipt = (
+			command: CommandEnvelope,
+			error: JournalStoreError | OrchestrationError,
+		) =>
 			Effect.gen(function* () {
 				const message_id = yield* metadata.MakeId("message");
 				const sent_at = yield* metadata.Now;

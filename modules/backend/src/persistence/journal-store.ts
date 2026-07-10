@@ -478,7 +478,14 @@ export const JournalStoreLive = Layer.effect(
 
 		const AcceptThreadCreate = (command: CommandEnvelope) =>
 			Effect.gen(function* () {
-				const payload_json = JSON.stringify(command.payload);
+				if (command.payload.type !== "thread.create") {
+					return yield* new JournalInvariantError({
+						message: "Thread creation requires a thread.create command payload",
+					});
+				}
+
+				const payload = command.payload;
+				const payload_json = JSON.stringify(payload);
 				const raw_origin_json = command.raw_origin
 					? JSON.stringify(command.raw_origin)
 					: null;
@@ -546,7 +553,7 @@ export const JournalStoreLive = Layer.effect(
 									occurred_at: existing_event.occurred_at,
 									payload: {
 										type: "thread.created" as const,
-										title: command.payload.title,
+										title: payload.title,
 									},
 									...(command.raw_origin
 										? { raw_origin: command.raw_origin }
@@ -576,7 +583,7 @@ export const JournalStoreLive = Layer.effect(
 							const stream_id = `thread:${command.thread_id}`;
 							const event_payload = {
 								type: "thread.created" as const,
-								title: command.payload.title,
+								title: payload.title,
 							};
 
 							yield* transaction.insert(JournalCommands).values({
@@ -598,7 +605,7 @@ export const JournalStoreLive = Layer.effect(
 							yield* transaction.insert(Threads).values({
 								created_at: occurred_at,
 								thread_id: command.thread_id,
-								title: command.payload.title,
+								title: payload.title,
 								updated_at: occurred_at,
 							});
 

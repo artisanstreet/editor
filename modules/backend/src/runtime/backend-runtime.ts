@@ -1,8 +1,12 @@
 import { Layer, ManagedRuntime } from "effect";
 
+import { type Engine, make_engine_registry_layer } from "@artisan/engines";
+
+import { AgentOrchestratorLive } from "../orchestration/agent-orchestrator";
 import { make_database_layer } from "../persistence/database";
 import { JournalNotifierLive } from "../persistence/journal-notifier";
 import { JournalStoreLive } from "../persistence/journal-store";
+import { OrchestrationRepositoryLive } from "../persistence/orchestration-repository";
 import { ThreadReadModelLive } from "../persistence/thread-read-model";
 import { CommandRouterLive } from "../protocol/command-router";
 import {
@@ -16,6 +20,7 @@ import { RuntimeMetadataLive } from "./runtime-metadata";
 
 export interface BackendOptions {
 	readonly database_path: string;
+	readonly engines?: ReadonlyArray<Engine>;
 	readonly migrations_path: string;
 	readonly protocol?: Partial<ProtocolConnectionOptions>;
 }
@@ -30,14 +35,27 @@ export function make_backend_layer(options: BackendOptions) {
 		RuntimeMetadataLive,
 		JournalNotifierLive,
 	);
-	const persistence = Layer.mergeAll(JournalStoreLive, ThreadReadModelLive).pipe(
-		Layer.provideMerge(infrastructure),
+	const persistence = Layer.mergeAll(
+		JournalStoreLive,
+		OrchestrationRepositoryLive,
+		ThreadReadModelLive,
+	).pipe(Layer.provideMerge(infrastructure));
+	const engine_registry = make_engine_registry_layer(options.engines ?? []);
+	const orchestration = AgentOrchestratorLive.pipe(
+		Layer.provideMerge(persistence),
+		Layer.provideMerge(engine_registry),
 	);
 	const threads = ThreadCommandsLive.pipe(Layer.provideMerge(persistence));
-	const commands = CommandRouterLive.pipe(Layer.provideMerge(threads));
+	const commands = CommandRouterLive.pipe(
+		Layer.provideMerge(threads),
+		Layer.provideMerge(orchestration),
+	);
 	const routing = ProtocolRouterLive.pipe(Layer.provideMerge(commands));
 
-	return make_protocol_server_layer(protocol_options).pipe(Layer.provideMerge(routing));
+	return make_protocol_server_layer(protocol_options).pipe(
+		Layer.provideMerge(routing),
+		Layer.provideMerge(persistence),
+	);
 }
 
 export function make_backend_runtime(options: BackendOptions) {

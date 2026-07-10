@@ -6,9 +6,11 @@
 		".": "./src/index.ts"
 	},
 	"dependencies": {
+		"@artisan/engines": "workspace:*",
 		"@artisan/protocol": "workspace:*",
 		"@effect/sql-sqlite-node": "4.0.0-beta.97",
 		"drizzle-orm": "1.0.0-rc.4",
-		"effect": "4.0.0-beta.97"
+		"effect": "4.0.0-beta.97",
+		"node-pty": "1.1.0"
 	}
 }

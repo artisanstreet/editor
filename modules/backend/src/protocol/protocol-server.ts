@@ -32,11 +32,13 @@ import {
 	type SubscribeEnvelope,
 	type ThreadListItem,
 	type ThreadListQueryEnvelope,
+	type ThreadWorkQueryEnvelope,
 	type UnsubscribeEnvelope,
 } from "@artisan/protocol";
 
 import { JournalNotifier } from "../persistence/journal-notifier";
 import { JournalStore } from "../persistence/journal-store";
+import { OrchestrationRepository } from "../persistence/orchestration-repository";
 import { ThreadReadModel } from "../persistence/thread-read-model";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import {
@@ -114,7 +116,11 @@ function latest_journal_sequence(fallback: number, events: ReadonlyArray<EventEn
 	return events.reduce((sequence, event) => Math.max(sequence, event.journal_sequence), fallback);
 }
 
-function thread_item_from_event(event: EventEnvelope): ThreadListItem {
+function thread_item_from_event(event: EventEnvelope): ThreadListItem | undefined {
+	if (event.payload.type !== "thread.created") {
+		return undefined;
+	}
+
 	return {
 		created_at: event.sent_at,
 		thread_id: event.thread_id,
@@ -142,6 +148,7 @@ export function make_protocol_server_layer(
 			const metadata = yield* RuntimeMetadata;
 			const notifier = yield* JournalNotifier;
 			const router = yield* ProtocolRouter;
+			const orchestration = yield* OrchestrationRepository;
 			const thread_read_model = yield* ThreadReadModel;
 
 			const Open = Effect.gen(function* () {
@@ -260,6 +267,12 @@ export function make_protocol_server_layer(
 						for (const [subscription_id, subscription] of Object.entries(
 							current.subscriptions,
 						)) {
+							const thread_item = thread_item_from_event(event);
+
+							if (!thread_item) {
+								continue;
+							}
+
 							const message_id = yield* metadata.MakeId("message");
 							const sequence = subscription.sequence + 1;
 
@@ -268,7 +281,7 @@ export function make_protocol_server_layer(
 								kind: "thread.list.upsert",
 								message_id,
 								origin: "backend",
-								payload: thread_item_from_event(event),
+								payload: thread_item,
 								protocol_version: 1,
 								schema_version: 1,
 								sent_at: event.sent_at,
@@ -476,6 +489,36 @@ export function make_protocol_server_layer(
 								current,
 								"projection.unavailable",
 								"The thread projection could not be read.",
+								true,
+								query.message_id,
+							),
+						),
+					);
+
+				const HandleWorkQuery = (query: ThreadWorkQueryEnvelope, current: ReadyState) =>
+					orchestration.GetWork(query.payload.thread_id).pipe(
+						Effect.flatMap((work) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "thread.work.query.result",
+									message_id,
+									origin: "backend",
+									payload: work ? { work } : {},
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"projection.unavailable",
+								"The thread work projection could not be read.",
 								true,
 								query.message_id,
 							),
@@ -747,6 +790,8 @@ export function make_protocol_server_layer(
 							return HandleCommand(envelope);
 						case "thread.list.query":
 							return HandleQuery(envelope, current);
+						case "thread.work.query":
+							return HandleWorkQuery(envelope, current);
 						case "subscribe":
 							return HandleSubscribe(envelope, current);
 						case "unsubscribe":
@@ -757,6 +802,8 @@ export function make_protocol_server_layer(
 							return HandleReplay(envelope, current);
 						case "heartbeat.pong":
 							return HandlePong(envelope, current);
+						default:
+							return Effect.void;
 					}
 				};
 
@@ -796,7 +843,7 @@ export function make_protocol_server_layer(
 							return;
 						}
 
-						return yield* HandleReadyEnvelope(envelope, current);
+						yield* HandleReadyEnvelope(envelope, current);
 					});
 
 				const Receive = (input: unknown) =>

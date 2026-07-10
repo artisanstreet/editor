@@ -55,8 +55,51 @@ export const ThreadCreateCommand = Schema.Struct({
 
 export type ThreadCreateCommand = typeof ThreadCreateCommand.Type;
 
+/** Queues user text for a thread or steers its active capable run. */
+export const ThreadSendMessageCommand = Schema.Struct({
+	type: Schema.Literal("thread.send_message"),
+	engine_id: Identifier,
+	text: Schema.NonEmptyString,
+	working_directory: Schema.NonEmptyString,
+});
+
+export type ThreadSendMessageCommand = typeof ThreadSendMessageCommand.Type;
+
+/** Steers the currently active run using provider-neutral user text. */
+export const RunSteerCommand = Schema.Struct({
+	type: Schema.Literal("run.steer"),
+	text: Schema.NonEmptyString,
+});
+
+/** Requests cancellation of the currently active run. */
+export const RunCancelCommand = Schema.Struct({ type: Schema.Literal("run.cancel") });
+
+/** Closes the currently active run and releases its live resources. */
+export const RunCloseCommand = Schema.Struct({ type: Schema.Literal("run.close") });
+
+/** Resolves one durable approval interaction. */
+export const RunRespondApprovalCommand = Schema.Struct({
+	type: Schema.Literal("run.respond_approval"),
+	approval_id: Identifier,
+	approved: Schema.Boolean,
+});
+
+/** Resolves one durable question interaction. */
+export const RunRespondQuestionCommand = Schema.Struct({
+	type: Schema.Literal("run.respond_question"),
+	answers: Schema.Record(Identifier, Schema.NonEmptyArray(Schema.NonEmptyString)),
+});
+
 /** Unions every command payload accepted by the V1 control channel. */
-export const CommandPayload = Schema.Union([ThreadCreateCommand]);
+export const CommandPayload = Schema.Union([
+	ThreadCreateCommand,
+	ThreadSendMessageCommand,
+	RunSteerCommand,
+	RunCancelCommand,
+	RunCloseCommand,
+	RunRespondApprovalCommand,
+	RunRespondQuestionCommand,
+]);
 
 export type CommandPayload = typeof CommandPayload.Type;
 
@@ -155,8 +198,73 @@ export const ThreadCreatedEvent = Schema.Struct({
 
 export type ThreadCreatedEvent = typeof ThreadCreatedEvent.Type;
 
+/** Records user text that is durably queued for a future run. */
+export const ThreadMessageQueuedEvent = Schema.Struct({
+	type: Schema.Literal("thread.message_queued"),
+	message_id: Identifier,
+	reason: Schema.Literals(["no_active_run", "steering_rejected", "unsupported"]),
+	text: Schema.NonEmptyString,
+});
+
+/** Records user text accepted as a steering request for a live run. */
+export const ThreadMessageSteeringEvent = Schema.Struct({
+	type: Schema.Literal("thread.message_steering"),
+	message_id: Identifier,
+	text: Schema.NonEmptyString,
+});
+
+/** Records an authoritative lifecycle state for one durable run. */
+export const RunLifecycleEvent = Schema.Struct({
+	type: Schema.Literal("run.lifecycle"),
+	state: Schema.Literals([
+		"queued",
+		"running",
+		"waiting",
+		"interrupted",
+		"completed",
+		"cancelled",
+		"failed",
+		"closed",
+	]),
+});
+
+/** Persists the complete assistant response while omitting transient deltas. */
+export const AssistantMessageCompletedEvent = Schema.Struct({
+	type: Schema.Literal("assistant.message_completed"),
+	message_id: Identifier,
+	text: Schema.NonEmptyString,
+});
+
+/** Persists a provider-neutral approval request or its response. */
+export const ApprovalInteractionEvent = Schema.Struct({
+	type: Schema.Literal("interaction.approval"),
+	approval_id: Identifier,
+	approved: Schema.optional(Schema.Boolean),
+	description: Schema.NonEmptyString,
+	state: Schema.Literals(["requested", "resolved"]),
+});
+
+/** Persists a provider-neutral question request or its response. */
+export const QuestionInteractionEvent = Schema.Struct({
+	type: Schema.Literal("interaction.question"),
+	answers: Schema.optional(
+		Schema.Record(Identifier, Schema.NonEmptyArray(Schema.NonEmptyString)),
+	),
+	question_id: Identifier,
+	state: Schema.Literals(["requested", "resolved"]),
+	text: Schema.NonEmptyString,
+});
+
 /** Unions every durable event payload emitted by the V1 backend. */
-export const EventPayload = Schema.Union([ThreadCreatedEvent]);
+export const EventPayload = Schema.Union([
+	ThreadCreatedEvent,
+	ThreadMessageQueuedEvent,
+	ThreadMessageSteeringEvent,
+	RunLifecycleEvent,
+	AssistantMessageCompletedEvent,
+	ApprovalInteractionEvent,
+	QuestionInteractionEvent,
+]);
 
 export type EventPayload = typeof EventPayload.Type;
 
@@ -222,6 +330,47 @@ export const ThreadListQueryResultEnvelope = Schema.Struct({
 });
 
 export type ThreadListQueryResultEnvelope = typeof ThreadListQueryResultEnvelope.Type;
+
+/** Describes the durable work state coordinated for one thread. */
+export const ThreadWorkItem = Schema.Struct({
+	agent_id: Identifier,
+	display_name: Schema.NonEmptyString,
+	engine_id: Identifier,
+	native_thread_id: Schema.optional(Identifier),
+	role: Schema.NonEmptyString,
+	run_id: Identifier,
+	status: Schema.Literals([
+		"queued",
+		"running",
+		"waiting",
+		"interrupted",
+		"completed",
+		"cancelled",
+		"failed",
+		"closed",
+	]),
+});
+
+export type ThreadWorkItem = typeof ThreadWorkItem.Type;
+
+/** Requests the current durable coordinator work for one thread. */
+export const ThreadWorkQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("thread.work.query"),
+	payload: Schema.Struct({ thread_id: Identifier }),
+});
+
+export type ThreadWorkQueryEnvelope = typeof ThreadWorkQueryEnvelope.Type;
+
+/** Returns the durable coordinator work for one thread. */
+export const ThreadWorkQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("thread.work.query.result"),
+	payload: Schema.Struct({ work: Schema.optional(ThreadWorkItem) }),
+});
+
+export type ThreadWorkQueryResultEnvelope = typeof ThreadWorkQueryResultEnvelope.Type;
 
 /** Requests ordered updates for the thread-list projection. */
 export const SubscribeEnvelope = Schema.Struct({
@@ -362,6 +511,7 @@ export const InboundControlEnvelope = Schema.Union([
 	HelloEnvelope,
 	CommandEnvelope,
 	ThreadListQueryEnvelope,
+	ThreadWorkQueryEnvelope,
 	SubscribeEnvelope,
 	UnsubscribeEnvelope,
 	AckEnvelope,
@@ -379,6 +529,7 @@ export const OutboundControlEnvelope = Schema.Union([
 	EventEnvelope,
 	ProtocolErrorEnvelope,
 	ThreadListQueryResultEnvelope,
+	ThreadWorkQueryResultEnvelope,
 	SubscriptionStartedEnvelope,
 	SubscriptionStoppedEnvelope,
 	ThreadListSnapshotEnvelope,
