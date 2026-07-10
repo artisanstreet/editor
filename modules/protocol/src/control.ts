@@ -126,6 +126,222 @@ export const TerminalRestartCommand = Schema.Struct({
 	terminal_id: Identifier,
 });
 
+/** Describes the bounded resource surface delegated to one assignment. */
+export const AssignmentScope = Schema.Struct({
+	kind: Schema.Literals([
+		"repo",
+		"files",
+		"branch",
+		"issue",
+		"test",
+		"terminal",
+		"document",
+		"custom",
+	]),
+	value: Schema.NonEmptyString,
+	write_access: Schema.Boolean,
+});
+
+export type AssignmentScope = typeof AssignmentScope.Type;
+
+/** Describes the workspace boundary selected for one assignment. */
+export const AssignmentWorkspace = Schema.Struct({
+	workspace_id: Identifier,
+	working_directory: Schema.NonEmptyString,
+	isolation: Schema.Literals(["shared", "isolated"]),
+});
+
+export type AssignmentWorkspace = typeof AssignmentWorkspace.Type;
+
+/** Describes provider-neutral permissions granted to one assignment. */
+export const AssignmentPermissionPolicy = Schema.Struct({
+	approval: Schema.Literals(["never", "on_request", "always"]),
+	network_access: Schema.Boolean,
+	write_access: Schema.Boolean,
+	metadata: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+});
+
+export type AssignmentPermissionPolicy = typeof AssignmentPermissionPolicy.Type;
+
+const has_graph_control_character = (value: string) =>
+	[...value].some((character) => {
+		const code = character.codePointAt(0)!;
+
+		return code <= 31 || code === 127 || (code >= 128 && code <= 159);
+	});
+
+const graph_visible_name = Schema.String.check(
+	Schema.makeFilter<string>((value) => {
+		const normalized = value.trim().replace(/\s+/g, " ");
+
+		return value.length > 256
+			? "Expected at most 256 input characters"
+			: has_graph_control_character(value)
+				? "Expected visible text without control characters"
+				: normalized.length === 0 || normalized.length > 64
+					? "Expected between 1 and 64 visible characters"
+					: undefined;
+	}),
+);
+
+const graph_visible_role = Schema.String.check(
+	Schema.makeFilter<string>((value) => {
+		const normalized = value.trim().replace(/\s+/g, " ");
+
+		return value.length > 256
+			? "Expected a role with at most 256 input characters"
+			: has_graph_control_character(value)
+				? "Expected a role without control characters"
+				: normalized.length === 0 || normalized.length > 64
+					? "Expected a role between 1 and 64 visible characters"
+					: undefined;
+	}),
+);
+
+const graph_status_input = Schema.String.check(
+	Schema.makeFilter<string>((value) => {
+		const normalized = value.trim().replace(/\s+/g, " ");
+
+		return value.length > 8192
+			? "Expected at most 8192 status input characters"
+			: has_graph_control_character(value)
+				? "Expected status text without control characters"
+				: normalized.length === 0 || normalized.length > 4096
+					? "Expected between 1 and 4096 visible status characters"
+					: undefined;
+	}),
+);
+
+const graph_short_status = Schema.String.check(
+	Schema.makeFilter<string>((value) =>
+		value.length > 0 && value.length <= 160 && !has_graph_control_character(value)
+			? undefined
+			: "Expected at most 160 visible status characters",
+	),
+);
+
+const graph_action_status = Schema.String.check(
+	Schema.makeFilter<string>((value) =>
+		value.length > 0 && value.length <= 240 && !has_graph_control_character(value)
+			? undefined
+			: "Expected at most 240 visible status characters",
+	),
+);
+
+/** Defines one bounded unit of intent in a fan-out orchestration group. */
+export const AssignmentSpec = Schema.Struct({
+	assignment_id: Identifier,
+	agent_id: Schema.optional(Identifier),
+	display_name: Schema.optional(graph_visible_name),
+	role: graph_visible_role,
+	scope: AssignmentScope,
+	engine_id: Identifier,
+	profile: Schema.NonEmptyString,
+	workspace: AssignmentWorkspace,
+	permission_policy: AssignmentPermissionPolicy,
+	summary_contract: Schema.NonEmptyString,
+	parent_node_id: Identifier,
+	expected_result: Schema.NonEmptyString,
+	instructions: Schema.NonEmptyString,
+	max_attempts: Schema.optional(PositiveInt),
+});
+
+export type AssignmentSpec = typeof AssignmentSpec.Type;
+
+/** Defines one explicit dependency or result-flow graph edge. */
+export const GraphEdgeSpec = Schema.Struct({
+	edge_id: Identifier,
+	from_node_id: Identifier,
+	to_node_id: Identifier,
+	kind: Schema.Literals(["dependency", "result"]),
+});
+
+export type GraphEdgeSpec = typeof GraphEdgeSpec.Type;
+
+/** Defines one explicit join node and its selected upstream assignments. */
+export const JoinSpec = Schema.Struct({
+	join_id: Identifier,
+	strategy: Schema.Literals(["require_all", "first_success", "synthesize", "review"]),
+	upstream_assignment_ids: Schema.NonEmptyArray(Identifier),
+	downstream_assignment_id: Schema.optional(Identifier),
+});
+
+export type JoinSpec = typeof JoinSpec.Type;
+
+/** Starts a durable fan-out orchestration group with at least two assignments. */
+export const OrchestrationGroupStartCommand = Schema.Struct({
+	type: Schema.Literal("orchestration.group.start"),
+	group_id: Identifier,
+	assignments: Schema.Array(AssignmentSpec).check(Schema.isMinLength(2)),
+	edges: Schema.optional(Schema.Array(GraphEdgeSpec)),
+	joins: Schema.optional(Schema.Array(JoinSpec)),
+	name_bank: Schema.optional(Schema.NonEmptyArray(graph_visible_name)),
+	max_concurrency: Schema.optional(PositiveInt),
+});
+
+/** Renames an Artisan-owned agent identity inside one visible group. */
+export const AgentInstanceRenameCommand = Schema.Struct({
+	type: Schema.Literal("agent_instance.rename"),
+	group_id: Identifier,
+	agent_id: Identifier,
+	display_name: graph_visible_name,
+});
+
+/** Records a compact, observable status heartbeat without private reasoning. */
+export const AssignmentHeartbeatCommand = Schema.Struct({
+	type: Schema.Literal("assignment.heartbeat"),
+	group_id: Identifier,
+	assignment_id: Identifier,
+	short_description: graph_status_input,
+	current_action: graph_status_input,
+	blocked_reason: Schema.optional(graph_status_input),
+	confidence: Schema.Number.check(
+		Schema.isGreaterThanOrEqualTo(0),
+		Schema.isLessThanOrEqualTo(1),
+	),
+	updated_at: IsoDateTime,
+});
+
+export type AssignmentHeartbeatCommand = typeof AssignmentHeartbeatCommand.Type;
+
+/** Steers the current run attempt for an assignment when its engine permits it. */
+export const AssignmentSteerCommand = Schema.Struct({
+	type: Schema.Literal("assignment.steer"),
+	group_id: Identifier,
+	assignment_id: Identifier,
+	text: Schema.NonEmptyString,
+});
+
+/** Stops the current run attempt for an assignment when its engine permits it. */
+export const AssignmentStopCommand = Schema.Struct({
+	type: Schema.Literal("assignment.stop"),
+	group_id: Identifier,
+	assignment_id: Identifier,
+});
+
+/** Requests a pause for an assignment and records an explicit unsupported outcome. */
+export const AssignmentPauseCommand = Schema.Struct({
+	type: Schema.Literal("assignment.pause"),
+	group_id: Identifier,
+	assignment_id: Identifier,
+});
+
+/** Requests a resume for an assignment and records an explicit unsupported outcome. */
+export const AssignmentResumeCommand = Schema.Struct({
+	type: Schema.Literal("assignment.resume"),
+	group_id: Identifier,
+	assignment_id: Identifier,
+});
+
+/** Queues a fresh agent_run attempt for a terminal assignment. */
+export const AssignmentRetryCommand = Schema.Struct({
+	type: Schema.Literal("assignment.retry"),
+	group_id: Identifier,
+	assignment_id: Identifier,
+});
+
+export type AssignmentRetryCommand = typeof AssignmentRetryCommand.Type;
+
 /** Steers the currently active run using provider-neutral user text. */
 export const RunSteerCommand = Schema.Struct({
 	type: Schema.Literal("run.steer"),
@@ -162,6 +378,14 @@ export const CommandPayload = Schema.Union([
 	TerminalKillCommand,
 	TerminalCloseCommand,
 	TerminalRestartCommand,
+	OrchestrationGroupStartCommand,
+	AgentInstanceRenameCommand,
+	AssignmentHeartbeatCommand,
+	AssignmentSteerCommand,
+	AssignmentStopCommand,
+	AssignmentPauseCommand,
+	AssignmentResumeCommand,
+	AssignmentRetryCommand,
 	RunSteerCommand,
 	RunCancelCommand,
 	RunCloseCommand,
@@ -349,6 +573,227 @@ export const TerminalSession = Schema.Struct({
 
 export type TerminalSession = typeof TerminalSession.Type;
 
+/** Enumerates the durable lifecycle language shared by graph projections. */
+export const OrchestrationLifecycleState = Schema.Literals([
+	"queued",
+	"running",
+	"waiting",
+	"blocked",
+	"joining",
+	"summarized",
+	"stopped",
+	"failed",
+	"complete",
+]);
+
+export type OrchestrationLifecycleState = typeof OrchestrationLifecycleState.Type;
+
+/** Describes one visible fan-out graph owned by a parent Artisan thread. */
+export const OrchestrationGroup = Schema.Struct({
+	group_id: Identifier,
+	thread_id: Identifier,
+	coordinator_agent_id: Identifier,
+	state: OrchestrationLifecycleState,
+	max_concurrency: PositiveInt,
+	version: PositiveInt,
+	created_at: IsoDateTime,
+	updated_at: IsoDateTime,
+});
+
+export type OrchestrationGroup = typeof OrchestrationGroup.Type;
+
+/** Describes one durable Artisan identity independently from provider identity. */
+export const AgentInstance = Schema.Struct({
+	agent_id: Identifier,
+	group_id: Identifier,
+	display_name: graph_visible_name,
+	role: graph_visible_role,
+	created_at: IsoDateTime,
+	updated_at: IsoDateTime,
+});
+
+export type AgentInstance = typeof AgentInstance.Type;
+
+/** Describes one compact assignment heartbeat safe for visible projection use. */
+export const AssignmentHeartbeat = Schema.Struct({
+	short_description: graph_short_status,
+	current_action: graph_action_status,
+	blocked_reason: Schema.optional(graph_action_status),
+	confidence: Schema.Number.check(
+		Schema.isGreaterThanOrEqualTo(0),
+		Schema.isLessThanOrEqualTo(1),
+	),
+	updated_at: IsoDateTime,
+});
+
+export type AssignmentHeartbeat = typeof AssignmentHeartbeat.Type;
+
+/** Describes one durable delegated assignment and its current attempt projection. */
+export const Assignment = Schema.Struct({
+	assignment_id: Identifier,
+	group_id: Identifier,
+	agent_id: Identifier,
+	role: graph_visible_role,
+	scope: AssignmentScope,
+	engine_id: Identifier,
+	profile: Schema.NonEmptyString,
+	workspace: AssignmentWorkspace,
+	permission_policy: AssignmentPermissionPolicy,
+	summary_contract: Schema.NonEmptyString,
+	parent_node_id: Identifier,
+	expected_result: Schema.NonEmptyString,
+	instructions: Schema.NonEmptyString,
+	state: OrchestrationLifecycleState,
+	current_attempt: PositiveInt,
+	max_attempts: PositiveInt,
+	active_run_id: Schema.optional(Identifier),
+	heartbeat: Schema.optional(AssignmentHeartbeat),
+	created_at: IsoDateTime,
+	updated_at: IsoDateTime,
+});
+
+export type Assignment = typeof Assignment.Type;
+
+/** Retains provider-native run identity without treating it as Artisan identity. */
+export const ProviderNativeIdentity = Schema.Struct({
+	thread_id: Schema.optional(Schema.NonEmptyString),
+	run_id: Schema.optional(Schema.NonEmptyString),
+	display_name: Schema.optional(graph_visible_name),
+});
+
+export type ProviderNativeIdentity = typeof ProviderNativeIdentity.Type;
+
+/** Describes one monotonic execution attempt linked to an assignment. */
+export const AgentRun = Schema.Struct({
+	run_id: Identifier,
+	group_id: Identifier,
+	assignment_id: Identifier,
+	agent_id: Identifier,
+	attempt: PositiveInt,
+	engine_id: Identifier,
+	profile: Schema.NonEmptyString,
+	state: OrchestrationLifecycleState,
+	native_thread_id: Schema.optional(Schema.NonEmptyString),
+	native_identity: Schema.optional(ProviderNativeIdentity),
+	raw_origin: Schema.optional(RawOrigin),
+	last_observation_sequence: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+	created_at: IsoDateTime,
+	updated_at: IsoDateTime,
+	completed_at: Schema.optional(IsoDateTime),
+});
+
+export type AgentRun = typeof AgentRun.Type;
+
+/** Describes one explicit durable join node in an orchestration graph. */
+export const Join = Schema.Struct({
+	join_id: Identifier,
+	group_id: Identifier,
+	strategy: Schema.Literals(["require_all", "first_success", "synthesize", "review"]),
+	state: OrchestrationLifecycleState,
+	upstream_assignment_ids: Schema.NonEmptyArray(Identifier),
+	downstream_assignment_id: Schema.optional(Identifier),
+	selected_assignment_id: Schema.optional(Identifier),
+	created_at: IsoDateTime,
+	updated_at: IsoDateTime,
+});
+
+export type Join = typeof Join.Type;
+
+/** Describes one durable graph edge without inferring topology from timestamps. */
+export const GraphEdge = Schema.Struct({
+	edge_id: Identifier,
+	group_id: Identifier,
+	from_node_id: Identifier,
+	to_node_id: Identifier,
+	kind: Schema.Literals(["dependency", "result"]),
+});
+
+export type GraphEdge = typeof GraphEdge.Type;
+
+/** Describes one durable result artifact produced by an agent_run. */
+export const Artifact = Schema.Struct({
+	artifact_id: Identifier,
+	group_id: Identifier,
+	assignment_id: Identifier,
+	run_id: Identifier,
+	kind: Schema.Literals(["summary", "finding", "log", "file", "diff", "custom"]),
+	label: Schema.NonEmptyString,
+	content: Schema.optional(Schema.NonEmptyString),
+	uri: Schema.optional(Schema.NonEmptyString),
+	raw_origin: Schema.optional(RawOrigin),
+	created_at: IsoDateTime,
+});
+
+export type Artifact = typeof Artifact.Type;
+
+/** Provides the complete provider-neutral projection for one orchestration group. */
+export const OrchestrationGraph = Schema.Struct({
+	group: OrchestrationGroup,
+	agent_instances: Schema.Array(AgentInstance),
+	assignments: Schema.Array(Assignment),
+	agent_runs: Schema.Array(AgentRun),
+	joins: Schema.Array(Join),
+	edges: Schema.Array(GraphEdge),
+	artifacts: Schema.Array(Artifact),
+	journal_sequence: JournalSequence,
+});
+
+export type OrchestrationGraph = typeof OrchestrationGraph.Type;
+
+/** Records one durable graph-node lifecycle transition. */
+export const OrchestrationGraphLifecycleEvent = Schema.Struct({
+	type: Schema.Literal("orchestration.graph.lifecycle"),
+	group_id: Identifier,
+	node_type: Schema.Literals(["orchestration_group", "assignment", "agent_run", "join"]),
+	node_id: Identifier,
+	state: OrchestrationLifecycleState,
+	action: Schema.NonEmptyString,
+	attempt: Schema.optional(PositiveInt),
+});
+
+export type OrchestrationGraphLifecycleEvent = typeof OrchestrationGraphLifecycleEvent.Type;
+
+/** Records a visible heartbeat projected for one assignment. */
+export const AssignmentHeartbeatEvent = Schema.Struct({
+	type: Schema.Literal("assignment.heartbeat"),
+	group_id: Identifier,
+	assignment_id: Identifier,
+	heartbeat: AssignmentHeartbeat,
+});
+
+export type AssignmentHeartbeatEvent = typeof AssignmentHeartbeatEvent.Type;
+
+/** Records a durable rename of an Artisan-owned agent identity. */
+export const AgentInstanceRenamedEvent = Schema.Struct({
+	type: Schema.Literal("agent_instance.renamed"),
+	group_id: Identifier,
+	agent_id: Identifier,
+	display_name: graph_visible_name,
+});
+
+export type AgentInstanceRenamedEvent = typeof AgentInstanceRenamedEvent.Type;
+
+/** Records an explicit capability outcome for an assignment control command. */
+export const AssignmentControlEvent = Schema.Struct({
+	type: Schema.Literal("assignment.control"),
+	group_id: Identifier,
+	assignment_id: Identifier,
+	action: Schema.Literals(["steer", "stop", "pause", "resume"]),
+	outcome: Schema.Literals(["accepted", "unsupported", "rejected", "ambiguous"]),
+	reason: Schema.optional(Schema.NonEmptyString),
+});
+
+export type AssignmentControlEvent = typeof AssignmentControlEvent.Type;
+
+/** Records one result artifact added to the durable graph. */
+export const ArtifactRecordedEvent = Schema.Struct({
+	type: Schema.Literal("artifact.recorded"),
+	group_id: Identifier,
+	artifact: Artifact,
+});
+
+export type ArtifactRecordedEvent = typeof ArtifactRecordedEvent.Type;
+
 /** Records a durable terminal lifecycle transition. */
 export const TerminalLifecycleEvent = Schema.Struct({
 	type: Schema.Literal("terminal.lifecycle"),
@@ -379,6 +824,11 @@ export const EventPayload = Schema.Union([
 	ApprovalInteractionEvent,
 	QuestionInteractionEvent,
 	TerminalLifecycleEvent,
+	OrchestrationGraphLifecycleEvent,
+	AssignmentHeartbeatEvent,
+	AgentInstanceRenamedEvent,
+	AssignmentControlEvent,
+	ArtifactRecordedEvent,
 ]);
 
 export type EventPayload = typeof EventPayload.Type;
@@ -506,13 +956,34 @@ export const TerminalListQueryResultEnvelope = Schema.Struct({
 
 export type TerminalListQueryResultEnvelope = typeof TerminalListQueryResultEnvelope.Type;
 
+/** Requests the complete durable projection for one orchestration group. */
+export const OrchestrationGraphQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("orchestration.graph.query"),
+	payload: Schema.Struct({ group_id: Identifier }),
+});
+
+export type OrchestrationGraphQueryEnvelope = typeof OrchestrationGraphQueryEnvelope.Type;
+
+/** Returns one provider-neutral orchestration graph projection. */
+export const OrchestrationGraphQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("orchestration.graph.query.result"),
+	payload: Schema.Struct({ graph: OrchestrationGraph }),
+});
+
+export type OrchestrationGraphQueryResultEnvelope =
+	typeof OrchestrationGraphQueryResultEnvelope.Type;
+
 /** Requests ordered updates for the thread-list projection. */
 export const SubscribeEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
 	kind: Schema.Literal("subscribe"),
-	payload: Schema.Struct({
-		type: Schema.Literal("thread.list"),
-	}),
+	payload: Schema.Union([
+		Schema.Struct({ type: Schema.Literal("thread.list") }),
+		Schema.Struct({ type: Schema.Literal("orchestration.graph"), group_id: Identifier }),
+	]),
 	subscription_id: Identifier,
 });
 
@@ -579,6 +1050,32 @@ export const ThreadListUpsertEnvelope = Schema.Struct({
 });
 
 export type ThreadListUpsertEnvelope = typeof ThreadListUpsertEnvelope.Type;
+
+/** Provides the initial graph projection for one ordered subscription. */
+export const OrchestrationGraphSnapshotEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	journal_sequence: JournalSequence,
+	kind: Schema.Literal("orchestration.graph.snapshot"),
+	payload: Schema.Struct({ graph: OrchestrationGraph }),
+	sequence: StreamSequence,
+	stream_id: Identifier,
+	subscription_id: Identifier,
+});
+
+export type OrchestrationGraphSnapshotEnvelope = typeof OrchestrationGraphSnapshotEnvelope.Type;
+
+/** Delivers an ordered replacement patch for one graph subscription. */
+export const OrchestrationGraphPatchEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	journal_sequence: JournalSequence,
+	kind: Schema.Literal("orchestration.graph.patch"),
+	payload: Schema.Struct({ graph: OrchestrationGraph }),
+	sequence: StreamSequence,
+	stream_id: Identifier,
+	subscription_id: Identifier,
+});
+
+export type OrchestrationGraphPatchEnvelope = typeof OrchestrationGraphPatchEnvelope.Type;
 
 /** Acknowledges the highest contiguous journal position and durable event cursors. */
 export const AckEnvelope = Schema.Struct({
@@ -647,6 +1144,7 @@ export const InboundControlEnvelope = Schema.Union([
 	ThreadListQueryEnvelope,
 	ThreadWorkQueryEnvelope,
 	TerminalListQueryEnvelope,
+	OrchestrationGraphQueryEnvelope,
 	SubscribeEnvelope,
 	UnsubscribeEnvelope,
 	AckEnvelope,
@@ -666,10 +1164,13 @@ export const OutboundControlEnvelope = Schema.Union([
 	ThreadListQueryResultEnvelope,
 	ThreadWorkQueryResultEnvelope,
 	TerminalListQueryResultEnvelope,
+	OrchestrationGraphQueryResultEnvelope,
 	SubscriptionStartedEnvelope,
 	SubscriptionStoppedEnvelope,
 	ThreadListSnapshotEnvelope,
 	ThreadListUpsertEnvelope,
+	OrchestrationGraphSnapshotEnvelope,
+	OrchestrationGraphPatchEnvelope,
 	ReplayCompleteEnvelope,
 	HeartbeatPingEnvelope,
 ]);

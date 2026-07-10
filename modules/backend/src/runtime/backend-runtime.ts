@@ -2,6 +2,8 @@ import { Layer, ManagedRuntime } from "effect";
 
 import { type Engine, make_engine_registry_layer } from "@artisan/engines";
 
+import { AgentGraphOrchestratorLive } from "../orchestration/agent-graph-orchestrator";
+import { AgentGraphRepositoryLive } from "../orchestration/agent-graph-repository";
 import { AgentOrchestratorLive } from "../orchestration/agent-orchestrator";
 import { make_database_layer } from "../persistence/database";
 import { JournalNotifierLive } from "../persistence/journal-notifier";
@@ -50,6 +52,12 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(persistence),
 		Layer.provideMerge(engine_registry),
 	);
+	const graph_persistence = AgentGraphRepositoryLive.pipe(Layer.provideMerge(infrastructure));
+	const graph = AgentGraphOrchestratorLive.pipe(
+		Layer.provideMerge(graph_persistence),
+		Layer.provideMerge(engine_registry),
+		Layer.provideMerge(infrastructure),
+	);
 	const threads = ThreadCommandsLive.pipe(Layer.provideMerge(persistence));
 	const terminal_persistence = TerminalRepositoryLive.pipe(Layer.provideMerge(infrastructure));
 	const terminal_driver = options.terminal_driver ?? NodePtyTerminalDriverLive;
@@ -62,6 +70,7 @@ export function make_backend_layer(options: BackendOptions) {
 	const commands = CommandRouterLive.pipe(
 		Layer.provideMerge(threads),
 		Layer.provideMerge(orchestration),
+		Layer.provideMerge(graph),
 		Layer.provideMerge(terminals),
 	);
 	const routing = ProtocolRouterLive.pipe(
@@ -71,6 +80,8 @@ export function make_backend_layer(options: BackendOptions) {
 
 	return make_protocol_server_layer(protocol_options).pipe(
 		Layer.provideMerge(routing),
+		Layer.provideMerge(graph),
+		Layer.provideMerge(graph_persistence),
 		Layer.provideMerge(persistence),
 	);
 }

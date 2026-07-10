@@ -10,6 +10,22 @@ export { ProtocolRouter } from "./protocol/protocol-router";
 export { ProtocolServer } from "./protocol/protocol-server";
 export { AgentOrchestrator } from "./orchestration/agent-orchestrator";
 export {
+	AgentGraphOrchestrator,
+	AgentGraphOrchestratorLive,
+} from "./orchestration/agent-graph-orchestrator";
+export {
+	AgentGraphCommandConflict,
+	AgentGraphFailure,
+	AgentGraphInvalid,
+	AgentGraphNotFound,
+	AgentGraphRepository,
+	AgentGraphRepositoryLive,
+	type AcceptedAgentGraphCommand,
+	type AgentGraphControlClaim,
+	type AgentGraphError,
+	type PendingAgentRun,
+} from "./orchestration/agent-graph-repository";
+export {
 	Filesystem,
 	FilesystemError,
 	type FilesystemChange,

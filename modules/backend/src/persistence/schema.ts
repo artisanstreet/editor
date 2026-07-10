@@ -161,6 +161,175 @@ export const OrchestrationOutbox = sqliteTable(
 	],
 );
 
+export const OrchestrationGroups = sqliteTable(
+	"orchestration_groups",
+	{
+		group_id: text("group_id").primaryKey(),
+		thread_id: text("thread_id").notNull(),
+		coordinator_agent_id: text("coordinator_agent_id").notNull(),
+		state: text("state").notNull(),
+		max_concurrency: integer("max_concurrency").notNull(),
+		version: integer("version").notNull(),
+		journal_sequence: integer("journal_sequence").notNull(),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		index("orchestration_groups_thread_id_index").on(table.thread_id),
+		index("orchestration_groups_state_index").on(table.state),
+	],
+);
+
+export const AgentInstances = sqliteTable(
+	"agent_instances",
+	{
+		agent_id: text("agent_id").primaryKey(),
+		group_id: text("group_id").notNull(),
+		display_name: text("display_name").notNull(),
+		role: text("role").notNull(),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("agent_instances_group_display_name_unique").on(
+			table.group_id,
+			table.display_name,
+		),
+		index("agent_instances_group_id_index").on(table.group_id),
+	],
+);
+
+export const Assignments = sqliteTable(
+	"assignments",
+	{
+		assignment_id: text("assignment_id").primaryKey(),
+		group_id: text("group_id").notNull(),
+		agent_id: text("agent_id").notNull(),
+		role: text("role").notNull(),
+		scope_json: text("scope_json").notNull(),
+		engine_id: text("engine_id").notNull(),
+		profile: text("profile").notNull(),
+		workspace_json: text("workspace_json").notNull(),
+		permission_policy_json: text("permission_policy_json").notNull(),
+		summary_contract: text("summary_contract").notNull(),
+		parent_node_id: text("parent_node_id").notNull(),
+		expected_result: text("expected_result").notNull(),
+		instructions: text("instructions").notNull(),
+		state: text("state").notNull(),
+		current_attempt: integer("current_attempt").notNull(),
+		max_attempts: integer("max_attempts").notNull(),
+		active_run_id: text("active_run_id"),
+		heartbeat_json: text("heartbeat_json"),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		index("assignments_group_id_index").on(table.group_id),
+		index("assignments_state_index").on(table.state),
+		index("assignments_active_run_id_index").on(table.active_run_id),
+	],
+);
+
+export const AgentRuns = sqliteTable(
+	"agent_runs",
+	{
+		run_id: text("run_id").primaryKey(),
+		group_id: text("group_id").notNull(),
+		assignment_id: text("assignment_id").notNull(),
+		agent_id: text("agent_id").notNull(),
+		attempt: integer("attempt").notNull(),
+		engine_id: text("engine_id").notNull(),
+		profile: text("profile").notNull(),
+		state: text("state").notNull(),
+		dispatch_status: text("dispatch_status").notNull(),
+		owner_instance_id: text("owner_instance_id"),
+		native_thread_id: text("native_thread_id"),
+		native_resume_json: text("native_resume_json"),
+		native_identity_json: text("native_identity_json"),
+		raw_origin_json: text("raw_origin_json"),
+		last_observation_sequence: integer("last_observation_sequence").notNull(),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+		completed_at: text("completed_at"),
+	},
+	(table) => [
+		uniqueIndex("agent_runs_assignment_attempt_unique").on(table.assignment_id, table.attempt),
+		index("agent_runs_group_id_index").on(table.group_id),
+		index("agent_runs_dispatch_status_index").on(table.dispatch_status),
+		index("agent_runs_assignment_id_index").on(table.assignment_id),
+	],
+);
+
+export const OrchestrationJoins = sqliteTable(
+	"orchestration_joins",
+	{
+		join_id: text("join_id").primaryKey(),
+		group_id: text("group_id").notNull(),
+		strategy: text("strategy").notNull(),
+		state: text("state").notNull(),
+		upstream_assignment_ids_json: text("upstream_assignment_ids_json").notNull(),
+		downstream_assignment_id: text("downstream_assignment_id"),
+		selected_assignment_id: text("selected_assignment_id"),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [index("orchestration_joins_group_id_index").on(table.group_id)],
+);
+
+export const OrchestrationGraphEdges = sqliteTable(
+	"orchestration_graph_edges",
+	{
+		edge_id: text("edge_id").primaryKey(),
+		group_id: text("group_id").notNull(),
+		from_node_id: text("from_node_id").notNull(),
+		to_node_id: text("to_node_id").notNull(),
+		kind: text("kind").notNull(),
+		dispatch_dependency: integer("dispatch_dependency").notNull(),
+	},
+	(table) => [index("orchestration_graph_edges_group_id_index").on(table.group_id)],
+);
+
+export const OrchestrationArtifacts = sqliteTable(
+	"orchestration_artifacts",
+	{
+		artifact_id: text("artifact_id").primaryKey(),
+		group_id: text("group_id").notNull(),
+		assignment_id: text("assignment_id").notNull(),
+		run_id: text("run_id").notNull(),
+		kind: text("kind").notNull(),
+		label: text("label").notNull(),
+		content: text("content"),
+		uri: text("uri"),
+		raw_origin_json: text("raw_origin_json"),
+		created_at: text("created_at").notNull(),
+	},
+	(table) => [
+		index("orchestration_artifacts_group_id_index").on(table.group_id),
+		index("orchestration_artifacts_assignment_id_index").on(table.assignment_id),
+	],
+);
+
+export const OrchestrationGraphCommands = sqliteTable(
+	"orchestration_graph_commands",
+	{
+		message_id: text("message_id").primaryKey(),
+		group_id: text("group_id").notNull(),
+		assignment_id: text("assignment_id"),
+		run_id: text("run_id"),
+		action: text("action").notNull(),
+		status: text("status").notNull(),
+		outcome: text("outcome"),
+		journal_sequence: integer("journal_sequence"),
+		failure: text("failure"),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		index("orchestration_graph_commands_group_id_index").on(table.group_id),
+		index("orchestration_graph_commands_status_index").on(table.status),
+	],
+);
+
 export const TerminalSessions = sqliteTable(
 	"terminal_sessions",
 	{

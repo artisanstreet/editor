@@ -9,6 +9,7 @@ import {
 	type ProtocolErrorEnvelope,
 } from "@artisan/protocol";
 
+import { type AgentGraphError } from "../orchestration/agent-graph-repository";
 import { type JournalStoreError } from "../persistence/journal-store";
 import { type OrchestrationError } from "../persistence/orchestration-repository";
 import type { TerminalSessionError } from "../terminal/terminal-sessions";
@@ -16,8 +17,28 @@ import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { CommandRouter } from "./command-router";
 
 const describe_journal_error = pipe(
-	Match.type<JournalStoreError | OrchestrationError | TerminalSessionError>(),
+	Match.type<AgentGraphError | JournalStoreError | OrchestrationError | TerminalSessionError>(),
 	Match.tagsExhaustive({
+		AgentGraphCommandConflict: (): ProtocolErrorDetail => ({
+			code: "command.id_conflict",
+			message: "This command id has already been used for different intent.",
+			retryable: false,
+		}),
+		AgentGraphNotFound: (error): ProtocolErrorDetail => ({
+			code: `${error.resource}.not_found`,
+			message: `The requested ${error.resource} does not exist.`,
+			retryable: false,
+		}),
+		AgentGraphInvalid: (error): ProtocolErrorDetail => ({
+			code: "orchestration.graph_invalid",
+			message: error.message,
+			retryable: false,
+		}),
+		AgentGraphFailure: (): ProtocolErrorDetail => ({
+			code: "orchestration.unavailable",
+			message: "The graph command could not be durably orchestrated.",
+			retryable: true,
+		}),
 		OrchestrationCommandConflict: (): ProtocolErrorDetail => ({
 			code: "command.id_conflict",
 			message: "This command id has already been used for different intent.",
@@ -96,7 +117,7 @@ export const ProtocolRouterLive = Layer.effect(
 
 		const MakeRejectedReceipt = (
 			command: CommandEnvelope,
-			error: JournalStoreError | OrchestrationError | TerminalSessionError,
+			error: AgentGraphError | JournalStoreError | OrchestrationError | TerminalSessionError,
 		) =>
 			Effect.gen(function* () {
 				const message_id = yield* metadata.MakeId("message");

@@ -23,6 +23,7 @@ import {
 	type HeartbeatPongEnvelope,
 	type HelloEnvelope,
 	type InboundControlEnvelope,
+	type OrchestrationGraphQueryEnvelope,
 	type OutboundControlEnvelope,
 	type PreNegotiationProtocolErrorEnvelope,
 	type ProtocolErrorDetail,
@@ -37,6 +38,7 @@ import {
 	type UnsubscribeEnvelope,
 } from "@artisan/protocol";
 
+import { AgentGraphOrchestrator } from "../orchestration/agent-graph-orchestrator";
 import { JournalNotifier } from "../persistence/journal-notifier";
 import { JournalStore } from "../persistence/journal-store";
 import { OrchestrationRepository } from "../persistence/orchestration-repository";
@@ -57,10 +59,22 @@ interface PendingHeartbeat {
 	readonly nonce: string;
 }
 
-interface ProjectionSubscription {
+interface ThreadListProjectionSubscription {
+	readonly _tag: "thread.list";
 	readonly sequence: number;
 	readonly stream_id: string;
 }
+
+interface OrchestrationGraphProjectionSubscription {
+	readonly _tag: "orchestration.graph";
+	readonly group_id: string;
+	readonly sequence: number;
+	readonly stream_id: string;
+}
+
+type ProjectionSubscription =
+	| OrchestrationGraphProjectionSubscription
+	| ThreadListProjectionSubscription;
 
 interface AwaitingHelloState {
 	readonly _tag: "AwaitingHello";
@@ -131,6 +145,16 @@ function thread_item_from_event(event: EventEnvelope): ThreadListItem | undefine
 	};
 }
 
+function graph_group_id_from_event(event: EventEnvelope) {
+	return event.payload.type === "orchestration.graph.lifecycle" ||
+		event.payload.type === "assignment.heartbeat" ||
+		event.payload.type === "agent_instance.renamed" ||
+		event.payload.type === "assignment.control" ||
+		event.payload.type === "artifact.recorded"
+		? event.payload.group_id
+		: undefined;
+}
+
 /** Owns scoped, transport-neutral Artisan control connections. */
 export class ProtocolServer extends Context.Service<
 	ProtocolServer,
@@ -146,6 +170,7 @@ export function make_protocol_server_layer(
 		ProtocolServer,
 		Effect.gen(function* () {
 			const options = yield* DecodeProtocolConnectionOptions(input_options);
+			const graph = yield* AgentGraphOrchestrator;
 			const journal = yield* JournalStore;
 			const metadata = yield* RuntimeMetadata;
 			const notifier = yield* JournalNotifier;
@@ -270,28 +295,52 @@ export function make_protocol_server_layer(
 						for (const [subscription_id, subscription] of Object.entries(
 							current.subscriptions,
 						)) {
-							const thread_item = thread_item_from_event(event);
-
-							if (!thread_item) {
-								continue;
-							}
-
 							const message_id = yield* metadata.MakeId("message");
 							const sequence = subscription.sequence + 1;
 
-							yield* Enqueue({
-								journal_sequence: event.journal_sequence,
-								kind: "thread.list.upsert",
-								message_id,
-								origin: "backend",
-								payload: thread_item,
-								protocol_version: 1,
-								schema_version: 1,
-								sent_at: event.sent_at,
-								sequence,
-								stream_id: subscription.stream_id,
-								subscription_id,
-							});
+							if (subscription._tag === "thread.list") {
+								const thread_item = thread_item_from_event(event);
+
+								if (!thread_item) {
+									continue;
+								}
+
+								yield* Enqueue({
+									journal_sequence: event.journal_sequence,
+									kind: "thread.list.upsert",
+									message_id,
+									origin: "backend",
+									payload: thread_item,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at: event.sent_at,
+									sequence,
+									stream_id: subscription.stream_id,
+									subscription_id,
+								});
+							} else {
+								const group_id = graph_group_id_from_event(event);
+
+								if (group_id !== subscription.group_id) {
+									continue;
+								}
+
+								const projection = yield* graph.GetGraph(group_id);
+
+								yield* Enqueue({
+									journal_sequence: projection.journal_sequence,
+									kind: "orchestration.graph.patch",
+									message_id,
+									origin: "backend",
+									payload: { graph: projection },
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at: event.sent_at,
+									sequence,
+									stream_id: subscription.stream_id,
+									subscription_id,
+								});
+							}
 
 							subscriptions = {
 								...subscriptions,
@@ -561,6 +610,39 @@ export function make_protocol_server_layer(
 						),
 					);
 
+				const HandleGraphQuery = (
+					query: OrchestrationGraphQueryEnvelope,
+					current: ReadyState,
+				) =>
+					graph.GetGraph(query.payload.group_id).pipe(
+						Effect.flatMap((projection) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "orchestration.graph.query.result",
+									message_id,
+									origin: "backend",
+									payload: { graph: projection },
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"projection.unavailable",
+								"The orchestration graph projection could not be read.",
+								true,
+								query.message_id,
+							),
+						),
+					);
+
 				const HandleSubscribe = (subscribe: SubscribeEnvelope, current: ReadyState) =>
 					Effect.gen(function* () {
 						if (current.subscriptions[subscribe.subscription_id]) {
@@ -575,6 +657,69 @@ export function make_protocol_server_layer(
 							return;
 						}
 
+						if (subscribe.payload.type === "orchestration.graph") {
+							const group_id = subscribe.payload.group_id;
+
+							return yield* graph.GetGraph(group_id).pipe(
+								Effect.flatMap((projection) =>
+									Effect.gen(function* () {
+										const started_id = yield* metadata.MakeId("message");
+										const snapshot_id = yield* metadata.MakeId("message");
+										const sent_at = yield* metadata.Now;
+										const stream_id = `projection:orchestration.graph:${group_id}:${subscribe.subscription_id}`;
+										const subscription: OrchestrationGraphProjectionSubscription =
+											{
+												_tag: "orchestration.graph",
+												group_id,
+												sequence: 0,
+												stream_id,
+											};
+
+										yield* Ref.set(state, {
+											...current,
+											subscriptions: {
+												...current.subscriptions,
+												[subscribe.subscription_id]: subscription,
+											},
+										});
+										yield* Enqueue({
+											correlation_id: subscribe.message_id,
+											kind: "subscription.started",
+											message_id: started_id,
+											origin: "backend",
+											payload: { stream_id },
+											protocol_version: 1,
+											schema_version: 1,
+											sent_at,
+											subscription_id: subscribe.subscription_id,
+										});
+										yield* Enqueue({
+											journal_sequence: projection.journal_sequence,
+											kind: "orchestration.graph.snapshot",
+											message_id: snapshot_id,
+											origin: "backend",
+											payload: { graph: projection },
+											protocol_version: 1,
+											schema_version: 1,
+											sent_at,
+											sequence: 0,
+											stream_id,
+											subscription_id: subscribe.subscription_id,
+										});
+									}),
+								),
+								Effect.catch(() =>
+									EnqueueError(
+										current,
+										"projection.unavailable",
+										"The orchestration graph projection could not be read.",
+										true,
+										subscribe.message_id,
+									),
+								),
+							);
+						}
+
 						return yield* thread_read_model.Snapshot().pipe(
 							Effect.flatMap((snapshot) =>
 								Effect.gen(function* () {
@@ -582,7 +727,11 @@ export function make_protocol_server_layer(
 									const snapshot_id = yield* metadata.MakeId("message");
 									const sent_at = yield* metadata.Now;
 									const stream_id = `projection:thread.list:${subscribe.subscription_id}`;
-									const subscription = { sequence: 0, stream_id };
+									const subscription: ThreadListProjectionSubscription = {
+										_tag: "thread.list",
+										sequence: 0,
+										stream_id,
+									};
 
 									yield* Ref.set(state, {
 										...current,
@@ -830,6 +979,8 @@ export function make_protocol_server_layer(
 							return HandleWorkQuery(envelope, current);
 						case "terminal.list.query":
 							return HandleTerminalListQuery(envelope, current);
+						case "orchestration.graph.query":
+							return HandleGraphQuery(envelope, current);
 						case "subscribe":
 							return HandleSubscribe(envelope, current);
 						case "unsubscribe":
