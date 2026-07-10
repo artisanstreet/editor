@@ -10,6 +10,7 @@
 		"noUncheckedIndexedAccess": true,
 		"paths": {
 			"@artisan/backend": ["./modules/backend/src/index.ts"],
+			"@artisan/engines": ["./modules/engines/src/index.ts"],
 			"@artisan/protocol": ["./modules/protocol/src/index.ts"]
 		},
 		"skipLibCheck": true,
