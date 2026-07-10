@@ -13,27 +13,29 @@ function make_engine(id: string): Engine {
 		Effect.fail(new EngineUnsupportedOperationError({ engine_id: id, operation }));
 
 	return {
-		Approve: () => unsupported("approval"),
-		Cancel: () => unsupported("cancel"),
-		Close: () => unsupported("close"),
 		Descriptor: {
 			capabilities: {
-				approval: "unsupported",
-				cancel: "unsupported",
-				close: "unsupported",
-				inspect: "unsupported",
-				resume: "unsupported",
-				start: "unsupported",
-				steer: "unsupported",
+				approval: { state: "unsupported" },
+				auth: { state: "unsupported" },
+				cancel: { state: "unsupported" },
+				close: { state: "unsupported" },
+				events: { state: "unsupported" },
+				model_selection: { state: "unsupported" },
+				native_tools: { state: "unsupported" },
+				probe: { state: "unsupported" },
+				question: { state: "unsupported" },
+				raw_frames: { state: "unsupported" },
+				resume: { state: "unsupported" },
+				start: { state: "unsupported" },
+				steer: { state: "unsupported" },
+				subagents: { state: "unsupported" },
 			},
 			display_name: id,
 			id,
 			transport: "test",
 		},
-		Inspect: () => unsupported("inspect"),
-		Resume: () => unsupported("resume"),
-		Start: () => unsupported("start"),
-		Steer: () => unsupported("steer"),
+		Open: () => unsupported("open"),
+		Probe: () => unsupported("probe"),
 	};
 }
 

@@ -1,14 +1,15 @@
 import { describe, expect, it } from "vitest";
-import { Effect, Layer } from "effect";
+import { Effect, Exit, Fiber, Layer } from "effect";
+import { TestClock } from "effect/testing";
 
 import {
+	CodexEngine,
 	CodexProcessFactory,
 	CodexProcessFactoryLive,
-	make_codex_engine,
+	CodexEngineDescriptor,
+	make_codex_engine_layer,
 	type CodexProcessHandle,
 } from "@artisan/engines";
-
-import { run_engine_inspection_scenario } from "./conformance";
 
 const encoder = new TextEncoder();
 const snowman = String.fromCodePoint(0x2603);
@@ -37,7 +38,7 @@ function make_handle(chunks: ReadonlyArray<Uint8Array>, writes: Array<string>): 
 	};
 }
 
-describe("Codex engine inspection", () => {
+describe("Codex engine probe", () => {
 	it("discovers the version and completes initialize through a fake process factory", async () => {
 		const commands: Array<ReadonlyArray<string>> = [];
 		const writes: Array<string> = [];
@@ -70,55 +71,127 @@ describe("Codex engine inspection", () => {
 				}),
 		});
 
-		await run_engine_inspection_scenario(
-			{
-				engine: make_codex_engine(),
-				input: { client_name: "artisan-conformance", client_version: "0.1.0" },
-				name: "version and initialize",
-				verify: (inspection) => {
-					expect(inspection.version).toBe("0.142.5");
-					expect(inspection.metadata.user_agent).toBe(user_agent);
-				},
-			},
-			process_layer,
+		const probe = await Effect.runPromise(
+			Effect.gen(function* () {
+				const engine = yield* CodexEngine;
+
+				return yield* engine.Probe({
+					client_name: "artisan-conformance",
+					client_version: "0.2.0",
+				});
+			}).pipe(Effect.provide(make_codex_engine_layer().pipe(Layer.provide(process_layer)))),
 		);
+
+		expect(probe.version).toBe("0.142.5");
+		expect(probe.metadata.user_agent).toBe(user_agent);
+		expect(probe.authentication.state).toBe("unknown");
+		expect(probe.capabilities.probe.state).toBe("supported");
 
 		expect(commands).toEqual([["--version"], ["app-server", "--stdio"]]);
 		expect(JSON.parse(writes[0] ?? "{}")).toMatchObject({
 			id: 1,
 			method: "initialize",
 			params: {
-				clientInfo: { name: "artisan-conformance", version: "0.1.0" },
+				clientInfo: { name: "artisan-conformance", version: "0.2.0" },
 			},
 		});
 	});
 
-	it("fails start and resume explicitly until the run slice exists", async () => {
-		const engine = make_codex_engine();
+	it("advertises Open honestly until the run slice exists", async () => {
+		await expect(
+			Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const engine = yield* CodexEngine;
 
-		await expect(
-			Effect.runPromise(
-				engine
-					.Start({ working_directory: "C:\\workspace" })
-					.pipe(Effect.provide(CodexProcessFactoryLive)),
+						return yield* engine.Open({
+							_tag: "start",
+							artisan_run_id: "artisan-run-1",
+							initial_text: "Start the task",
+							working_directory: "C:\\workspace",
+						});
+					}).pipe(
+						Effect.provide(
+							make_codex_engine_layer().pipe(Layer.provide(CodexProcessFactoryLive)),
+						),
+					),
+				),
 			),
-		).rejects.toMatchObject({ _tag: "EngineUnsupportedOperationError", operation: "start" });
-		await expect(
-			Effect.runPromise(
-				engine.Resume({ run_id: "run_1" }).pipe(Effect.provide(CodexProcessFactoryLive)),
-			),
-		).rejects.toMatchObject({ _tag: "EngineUnsupportedOperationError", operation: "resume" });
+		).rejects.toMatchObject({ _tag: "EngineUnsupportedOperationError", operation: "open" });
+		expect(CodexEngineDescriptor.capabilities.start).toMatchObject({ state: "unsupported" });
+		expect(CodexEngineDescriptor.capabilities.events).toMatchObject({ state: "unsupported" });
 	});
 
 	const live_it = process.env.ARTISAN_ENGINE_LIVE === "1" ? it : it.skip;
 
 	live_it("performs only the live version and initialize smoke check", async () => {
-		const inspection = await Effect.runPromise(
-			make_codex_engine()
-				.Inspect({ client_name: "artisan-engine-smoke", client_version: "0.1.0" })
-				.pipe(Effect.provide(CodexProcessFactoryLive)),
+		const probe = await Effect.runPromise(
+			Effect.gen(function* () {
+				const engine = yield* CodexEngine;
+
+				return yield* engine.Probe({
+					client_name: "artisan-engine-smoke",
+					client_version: "0.2.0",
+				});
+			}).pipe(
+				Effect.provide(
+					make_codex_engine_layer().pipe(Layer.provide(CodexProcessFactoryLive)),
+				),
+			),
 		);
 
-		expect(inspection.version).toBe("0.142.5");
+		expect(probe.version).toBe("0.142.5");
+	});
+
+	it("times out a stalled initialize probe and closes the process", async () => {
+		let close_count = 0;
+		let spawn_count = 0;
+		const process_layer = Layer.succeed(CodexProcessFactory, {
+			Spawn: () =>
+				Effect.sync(() => {
+					spawn_count += 1;
+
+					if (spawn_count === 1) {
+						return make_handle([encoder.encode("codex-cli 0.142.5\n")], []);
+					}
+
+					return {
+						Close: Effect.sync(() => {
+							close_count += 1;
+						}),
+						Exit: Effect.never,
+						Kill: () => Effect.void,
+						Stderr: (async function* () {
+							yield encoder.encode("diagnostic output");
+						})(),
+						Stdout: (async function* () {
+							await new Promise<never>(() => undefined);
+						})(),
+						Write: () => Effect.void,
+					} satisfies CodexProcessHandle;
+				}),
+		});
+		const exit = await Effect.runPromise(
+			Effect.gen(function* () {
+				const engine = yield* CodexEngine;
+				const probe_fiber = yield* engine
+					.Probe({ client_name: "timeout-test", client_version: "0.2.0" })
+					.pipe(Effect.forkChild);
+
+				yield* TestClock.adjust(10);
+
+				return yield* Fiber.await(probe_fiber);
+			}).pipe(
+				Effect.provide(TestClock.layer()),
+				Effect.provide(
+					make_codex_engine_layer({ initialize_timeout_ms: 10 }).pipe(
+						Layer.provide(process_layer),
+					),
+				),
+			),
+		);
+
+		expect(Exit.isFailure(exit)).toBe(true);
+		expect(close_count).toBe(1);
 	});
 });

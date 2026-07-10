@@ -1,51 +1,62 @@
-import { Effect } from "effect";
+import { Context, Effect, Layer } from "effect";
 
 import {
 	type Engine,
-	type EngineApprovalInput,
-	type EngineCancelInput,
-	type EngineCloseInput,
 	type EngineDescriptor,
-	type EngineInspectInput,
-	type EngineInspection,
-	type EngineResumeInput,
-	type EngineStartInput,
-	type EngineSteerInput,
+	type EngineProbe,
+	type EngineProbeInput,
+	EngineProbeTimeoutError,
 	EngineProcessError,
 	EngineProtocolError,
 	EngineUnavailableError,
 	EngineUnsupportedOperationError,
 } from "../engine";
 import { CodexJsonlFramer, CodexJsonlMalformedLineError } from "./codex-jsonl";
-import { CodexProcessFactory, type CodexProcessHandle } from "./codex-process";
+import {
+	CodexProcessFactory,
+	type CodexProcessHandle,
+	type CodexProcessSpawnInput,
+} from "./codex-process";
 import {
 	CodexTransportMetadata,
 	DecodeCodexInitializeResponse,
 	make_codex_initialize_request,
 } from "./codex-protocol";
 
-/** Identifies the first supported Codex engine adapter. @since 0.1.0 */
+/** Identifies the Codex adapter and its currently available capabilities. @since 0.2.0 */
 export const CodexEngineDescriptor: EngineDescriptor = {
 	capabilities: {
-		approval: "unsupported",
-		cancel: "unsupported",
-		close: "unsupported",
-		inspect: "supported",
-		resume: "unsupported",
-		start: "unsupported",
-		steer: "unsupported",
+		approval: { reason: "Open is not implemented", state: "unsupported" },
+		auth: { reason: "Initialize does not verify authenticated access", state: "experimental" },
+		cancel: { reason: "Open is not implemented", state: "unsupported" },
+		close: { reason: "Open is not implemented", state: "unsupported" },
+		events: { reason: "Open is not implemented", state: "unsupported" },
+		model_selection: { reason: "Open is not implemented", state: "unsupported" },
+		native_tools: { reason: "Open is not implemented", state: "unsupported" },
+		probe: { state: "supported" },
+		question: { reason: "Open is not implemented", state: "unsupported" },
+		raw_frames: { reason: "Open is not implemented", state: "unsupported" },
+		resume: { reason: "Open is not implemented", state: "unsupported" },
+		start: { reason: "Open is not implemented", state: "unsupported" },
+		steer: { reason: "Open is not implemented", state: "unsupported" },
+		subagents: { reason: "Open is not implemented", state: "unsupported" },
 	},
 	display_name: "Codex CLI",
 	id: "codex",
 	transport: CodexTransportMetadata.transport,
 };
 
-/** Configures the Codex executable used by an engine adapter. @since 0.1.0 */
+/** Configures the Codex executable and non-billable probe deadlines. @since 0.2.0 */
 export interface CodexEngineOptions {
 	readonly executable?: string;
+	readonly initialize_timeout_ms?: number;
+	readonly version_timeout_ms?: number;
 }
 
-function read_stdout(handle: CodexProcessHandle) {
+/** Provides a dependency-free Codex engine assembled by its Layer. @since 0.2.0 */
+export class CodexEngine extends Context.Service<CodexEngine, Engine>()("Artisan/CodexEngine") {}
+
+function ReadStdout(handle: CodexProcessHandle) {
 	return Effect.tryPromise({
 		try: async () => {
 			const chunks: Array<Uint8Array> = [];
@@ -56,11 +67,21 @@ function read_stdout(handle: CodexProcessHandle) {
 
 			return chunks;
 		},
-		catch: (cause) => new EngineProcessError({ cause, operation: "exit" }),
+		catch: (cause) => new EngineProcessError({ cause, operation: "read" }),
 	});
 }
 
-function read_initialize_response(handle: CodexProcessHandle) {
+function DrainStderr(handle: CodexProcessHandle) {
+	return Effect.tryPromise({
+		try: async () => {
+			for await (const _chunk of handle.Stderr) {
+			}
+		},
+		catch: (cause) => new EngineProcessError({ cause, operation: "read" }),
+	});
+}
+
+function ReadInitializeResponse(handle: CodexProcessHandle) {
 	return Effect.tryPromise({
 		try: async () => {
 			const framer = new CodexJsonlFramer();
@@ -99,11 +120,11 @@ function read_initialize_response(handle: CodexProcessHandle) {
 		catch: (cause) =>
 			cause instanceof CodexJsonlMalformedLineError
 				? new EngineProtocolError({ engine_id: "codex", message: cause.message })
-				: new EngineProcessError({ cause, operation: "exit" }),
+				: new EngineProcessError({ cause, operation: "read" }),
 	});
 }
 
-function parse_codex_version(chunks: ReadonlyArray<Uint8Array>) {
+function ParseCodexVersion(chunks: ReadonlyArray<Uint8Array>) {
 	const output = new TextDecoder().decode(
 		chunks.reduce((combined, chunk) => {
 			const next = new Uint8Array(combined.length + chunk.length);
@@ -126,7 +147,7 @@ function parse_codex_version(chunks: ReadonlyArray<Uint8Array>) {
 			);
 }
 
-function validate_codex_transport_version(version: string) {
+function ValidateCodexTransportVersion(version: string) {
 	return version === CodexTransportMetadata.cli_version
 		? Effect.void
 		: Effect.fail(
@@ -137,49 +158,76 @@ function validate_codex_transport_version(version: string) {
 			);
 }
 
-function unsupported(operation: EngineUnsupportedOperationError["operation"]) {
-	return Effect.fail(new EngineUnsupportedOperationError({ engine_id: "codex", operation }));
+function RunProbePhase<A, E>(
+	factory: typeof CodexProcessFactory.Service,
+	spawn_input: CodexProcessSpawnInput,
+	phase: EngineProbeTimeoutError["phase"],
+	timeout_ms: number,
+	Use: (handle: CodexProcessHandle) => Effect.Effect<A, E>,
+) {
+	const Run = Effect.gen(function* () {
+		const handle = yield* factory.Spawn(spawn_input);
+
+		return yield* Effect.scoped(
+			Effect.gen(function* () {
+				yield* Effect.forkScoped(DrainStderr(handle).pipe(Effect.ignore));
+
+				return yield* Use(handle);
+			}),
+		).pipe(Effect.ensuring(handle.Close));
+	});
+
+	return Run.pipe(
+		Effect.timeoutOrElse({
+			duration: timeout_ms,
+			orElse: () =>
+				Effect.fail(new EngineProbeTimeoutError({ engine_id: "codex", phase, timeout_ms })),
+		}),
+	);
 }
 
-/**
- * Creates the Codex engine foundation with a non-billable inspect handshake.
- *
- * @since 0.1.0
- * @param options - Optional executable override used by integration environments.
- * @returns An engine requiring a `CodexProcessFactory` service when run.
- */
-export function make_codex_engine(options: CodexEngineOptions = {}): Engine<CodexProcessFactory> {
+function make_codex_engine(
+	factory: typeof CodexProcessFactory.Service,
+	options: CodexEngineOptions,
+): Engine {
 	const executable = options.executable ?? "codex";
-	const Inspect = (input: EngineInspectInput) =>
+	const initialize_timeout_ms = options.initialize_timeout_ms ?? 5_000;
+	const version_timeout_ms = options.version_timeout_ms ?? 5_000;
+	const Probe = (input: EngineProbeInput) =>
 		Effect.gen(function* () {
-			const factory = yield* CodexProcessFactory;
-			const version_process = yield* factory.Spawn({
-				args: ["--version"],
-				command: executable,
-				shell: process.platform === "win32",
-			});
-			const version_chunks = yield* read_stdout(version_process).pipe(
-				Effect.ensuring(version_process.Close),
+			const version_chunks = yield* RunProbePhase(
+				factory,
+				{
+					args: ["--version"],
+					command: executable,
+					shell: process.platform === "win32",
+				},
+				"version",
+				version_timeout_ms,
+				ReadStdout,
 			);
-			const version = yield* parse_codex_version(version_chunks);
+			const version = yield* ParseCodexVersion(version_chunks);
 
-			yield* validate_codex_transport_version(version);
+			yield* ValidateCodexTransportVersion(version);
 
-			const initialize_process = yield* factory.Spawn({
-				args: ["app-server", "--stdio"],
-				command: executable,
-				shell: process.platform === "win32",
-			});
 			const request = make_codex_initialize_request(
 				input.client_name ?? "artisan-editor",
-				input.client_version ?? "0.1.0",
+				input.client_version ?? "0.2.0",
 			);
-			const response = yield* initialize_process
-				.Write(new TextEncoder().encode(`${JSON.stringify(request)}\n`))
-				.pipe(
-					Effect.andThen(read_initialize_response(initialize_process)),
-					Effect.ensuring(initialize_process.Close),
-				);
+			const response = yield* RunProbePhase(
+				factory,
+				{
+					args: ["app-server", "--stdio"],
+					command: executable,
+					shell: process.platform === "win32",
+				},
+				"initialize",
+				initialize_timeout_ms,
+				(handle) =>
+					handle
+						.Write(new TextEncoder().encode(`${JSON.stringify(request)}\n`))
+						.pipe(Effect.andThen(ReadInitializeResponse(handle))),
+			);
 			const initialized = yield* DecodeCodexInitializeResponse(response).pipe(
 				Effect.mapError(
 					() =>
@@ -191,6 +239,11 @@ export function make_codex_engine(options: CodexEngineOptions = {}): Engine<Code
 			);
 
 			return {
+				authentication: {
+					reason: "Initialize does not verify authenticated access",
+					state: "unknown",
+				},
+				capabilities: CodexEngineDescriptor.capabilities,
 				descriptor: CodexEngineDescriptor,
 				metadata: {
 					codex_home: initialized.result.codexHome,
@@ -198,18 +251,37 @@ export function make_codex_engine(options: CodexEngineOptions = {}): Engine<Code
 					platform_os: initialized.result.platformOs,
 					user_agent: initialized.result.userAgent,
 				},
+				ready: true,
 				version,
-			} satisfies EngineInspection;
+			} satisfies EngineProbe;
 		});
 
 	return {
-		Approve: (_input: EngineApprovalInput) => unsupported("approval"),
-		Cancel: (_input: EngineCancelInput) => unsupported("cancel"),
-		Close: (_input: EngineCloseInput) => unsupported("close"),
 		Descriptor: CodexEngineDescriptor,
-		Inspect,
-		Resume: (_input: EngineResumeInput) => unsupported("resume"),
-		Start: (_input: EngineStartInput) => unsupported("start"),
-		Steer: (_input: EngineSteerInput) => unsupported("steer"),
+		Open: () =>
+			Effect.fail(
+				new EngineUnsupportedOperationError({ engine_id: "codex", operation: "open" }),
+			),
+		Probe,
 	};
+}
+
+/**
+ * Builds the Codex engine Layer and captures its process factory at composition.
+ *
+ * @since 0.2.0
+ * @param options - Executable override and phase-specific probe deadlines.
+ * @returns A Layer whose public engine has no process dependency in its Effects.
+ */
+export function make_codex_engine_layer(
+	options: CodexEngineOptions = {},
+): Layer.Layer<CodexEngine, never, CodexProcessFactory> {
+	return Layer.effect(
+		CodexEngine,
+		Effect.gen(function* () {
+			const factory = yield* CodexProcessFactory;
+
+			return make_codex_engine(factory, options);
+		}),
+	);
 }

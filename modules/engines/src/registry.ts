@@ -2,24 +2,24 @@ import { Context, Effect, Layer } from "effect";
 
 import { type Engine, EngineRegistryError } from "./engine";
 
-/** Provides explicit lookup and enumeration for registered engine adapters. @since 0.1.0 */
+/** Provides explicit lookup and enumeration for registered engine adapters. @since 0.2.0 */
 export class EngineRegistry extends Context.Service<
 	EngineRegistry,
 	{
-		readonly Get: (engine_id: string) => Effect.Effect<Engine<any>, EngineRegistryError>;
-		readonly List: Effect.Effect<ReadonlyArray<Engine<any>>>;
+		readonly Get: (engine_id: string) => Effect.Effect<Engine, EngineRegistryError>;
+		readonly List: Effect.Effect<ReadonlyArray<Engine>>;
 	}
 >()("Artisan/EngineRegistry") {}
 
 /**
  * Builds an engine registry from an explicit adapter list.
  *
- * @since 0.1.0
+ * @since 0.2.0
  * @param engines - The complete set of engine adapters to expose.
  * @returns A layer that fails when two adapters share an engine identifier.
  */
 export function make_engine_registry_layer(
-	engines: ReadonlyArray<Engine<any>>,
+	engines: ReadonlyArray<Engine>,
 ): Layer.Layer<EngineRegistry, EngineRegistryError> {
 	const duplicate = engines.find(
 		(engine, index) =>
