@@ -110,17 +110,24 @@ describe("TerminalDriver node-pty adapter", () => {
 			Effect.scoped(
 				Effect.gen(function* () {
 					const terminal = yield* open_node_terminal(
-						`let count = 0; setInterval(() => process.stdout.write("chunk-" + count++ + "\\n"), 10);`,
+						`process.stdout.write("x".repeat(65_536)); setInterval(() => {}, 1_000);`,
 					);
 
 					return yield* terminal.Exit.pipe(
 						Effect.timeoutOrElse({
-							duration: 2_000,
+							duration: 5_000,
 							orElse: () => Effect.die("terminal overflow did not stop the PTY"),
 						}),
 					);
 				}),
-			).pipe(Effect.provide(make_node_pty_terminal_driver_layer({ output_capacity: 1 }))),
+			).pipe(
+				Effect.provide(
+					make_node_pty_terminal_driver_layer({
+						output_capacity: 1,
+						output_chunk_bytes: 1_024,
+					}),
+				),
+			),
 		);
 
 		expect(exit.reason).toBe("output_overflow");

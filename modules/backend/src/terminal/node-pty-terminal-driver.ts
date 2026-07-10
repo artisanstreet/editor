@@ -16,6 +16,7 @@ import {
 export interface NodePtyTerminalDriverOptions {
 	readonly close_timeout_ms?: number;
 	readonly output_capacity?: number;
+	readonly output_chunk_bytes?: number;
 }
 
 interface TerminalState {
@@ -66,6 +67,7 @@ function make_handle(
 	pty: IPty,
 	close_timeout_ms: number,
 	output_capacity: number,
+	output_chunk_bytes: number,
 ): Effect.Effect<TerminalDriverHandle, never, Scope.Scope> {
 	return Effect.gen(function* () {
 		const output = yield* Queue.dropping<Uint8Array, Cause.Done<void>>(output_capacity);
@@ -111,26 +113,28 @@ function make_handle(
 		data_listener = pty.onData((data) => {
 			const bytes = new TextEncoder().encode(data);
 
-			Effect.runFork(
-				Queue.offer(output, bytes).pipe(
-					Effect.flatMap((accepted) => {
-						if (accepted) {
-							return Effect.void;
-						}
+			for (let offset = 0; offset < bytes.length; offset += output_chunk_bytes) {
+				const chunk = bytes.slice(offset, offset + output_chunk_bytes);
 
-						const terminal_exit: TerminalDriverExit = {
-							exit_code: null,
-							reason: "output_overflow",
-							signal: null,
-						};
+				if (Queue.offerUnsafe(output, chunk)) {
+					continue;
+				}
 
-						return try_native("output", () => pty.kill()).pipe(
-							Effect.ignore,
-							Effect.andThen(Finish(terminal_exit)),
-						);
-					}),
-				),
-			);
+				const terminal_exit: TerminalDriverExit = {
+					exit_code: null,
+					reason: "output_overflow",
+					signal: null,
+				};
+
+				Effect.runFork(
+					try_native("output", () => pty.kill()).pipe(
+						Effect.ignore,
+						Effect.andThen(Finish(terminal_exit)),
+					),
+				);
+
+				return;
+			}
 		});
 		exit_listener = pty.onExit(({ exitCode, signal }) => {
 			Effect.runFork(
@@ -206,12 +210,14 @@ function make_handle(
 export function make_node_pty_terminal_driver_layer(options: NodePtyTerminalDriverOptions = {}) {
 	const close_timeout_ms = options.close_timeout_ms ?? 1_000;
 	const output_capacity = options.output_capacity ?? 512;
+	const output_chunk_bytes = options.output_chunk_bytes ?? 16_384;
 
 	return Layer.succeed(TerminalDriver, {
 		Open: (input) =>
 			Effect.gen(function* () {
 				yield* validate_positive("close_timeout_ms", close_timeout_ms);
 				yield* validate_open_input(input, output_capacity);
+				yield* validate_positive("output_chunk_bytes", output_chunk_bytes);
 
 				const pty = yield* Effect.try({
 					try: () =>
@@ -229,7 +235,12 @@ export function make_node_pty_terminal_driver_layer(options: NodePtyTerminalDriv
 					catch: (cause) => terminal_error("spawn", cause),
 				});
 
-				return yield* make_handle(pty, close_timeout_ms, output_capacity);
+				return yield* make_handle(
+					pty,
+					close_timeout_ms,
+					output_capacity,
+					output_chunk_bytes,
+				);
 			}),
 	});
 }

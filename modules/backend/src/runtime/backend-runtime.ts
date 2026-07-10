@@ -16,6 +16,10 @@ import {
 import { ProtocolRouterLive } from "../protocol/protocol-router";
 import { make_protocol_server_layer } from "../protocol/protocol-server";
 import { ThreadCommandsLive } from "../threads/thread-commands";
+import { NodePtyTerminalDriverLive } from "../terminal/node-pty-terminal-driver";
+import { TerminalDriver } from "../terminal/terminal-driver";
+import { TerminalRepositoryLive } from "../terminal/terminal-repository";
+import { TerminalSessionServiceLive } from "../terminal/terminal-sessions";
 import { RuntimeMetadataLive } from "./runtime-metadata";
 
 export interface BackendOptions {
@@ -23,6 +27,7 @@ export interface BackendOptions {
 	readonly engines?: ReadonlyArray<Engine>;
 	readonly migrations_path: string;
 	readonly protocol?: Partial<ProtocolConnectionOptions>;
+	readonly terminal_driver?: Layer.Layer<TerminalDriver>;
 }
 
 export function make_backend_layer(options: BackendOptions) {
@@ -46,11 +51,23 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(engine_registry),
 	);
 	const threads = ThreadCommandsLive.pipe(Layer.provideMerge(persistence));
+	const terminal_persistence = TerminalRepositoryLive.pipe(Layer.provideMerge(infrastructure));
+	const terminal_driver = options.terminal_driver ?? NodePtyTerminalDriverLive;
+	const terminals = TerminalSessionServiceLive.pipe(
+		Layer.provideMerge(persistence),
+		Layer.provideMerge(terminal_persistence),
+		Layer.provideMerge(terminal_driver),
+		Layer.provideMerge(infrastructure),
+	);
 	const commands = CommandRouterLive.pipe(
 		Layer.provideMerge(threads),
 		Layer.provideMerge(orchestration),
+		Layer.provideMerge(terminals),
 	);
-	const routing = ProtocolRouterLive.pipe(Layer.provideMerge(commands));
+	const routing = ProtocolRouterLive.pipe(
+		Layer.provideMerge(commands),
+		Layer.provideMerge(terminals),
+	);
 
 	return make_protocol_server_layer(protocol_options).pipe(
 		Layer.provideMerge(routing),

@@ -23,6 +23,22 @@ export {
 	type TerminalDriverOperation,
 } from "./terminal/terminal-driver";
 export {
+	TerminalSessionService,
+	TerminalSessionServiceLive,
+	type TerminalCommandAcceptance,
+	type TerminalSessionError,
+} from "./terminal/terminal-sessions";
+export {
+	TerminalCommandConflict,
+	TerminalInvariantError,
+	TerminalNotActive,
+	TerminalNotFound,
+	TerminalPersistenceFailure,
+	TerminalRepository,
+	TerminalRepositoryLive,
+	type TerminalRepositoryError,
+} from "./terminal/terminal-repository";
+export {
 	make_backend_layer,
 	make_backend_runtime,
 	type BackendOptions,

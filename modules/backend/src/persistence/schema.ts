@@ -160,3 +160,46 @@ export const OrchestrationOutbox = sqliteTable(
 		index("orchestration_outbox_run_id_index").on(table.run_id),
 	],
 );
+
+export const TerminalSessions = sqliteTable(
+	"terminal_sessions",
+	{
+		terminal_id: text("terminal_id").primaryKey(),
+		thread_id: text("thread_id").notNull(),
+		workspace_id: text("workspace_id").notNull(),
+		working_directory: text("working_directory").notNull(),
+		executable: text("executable").notNull(),
+		args_json: text("args_json").notNull(),
+		env_json: text("env_json"),
+		cols: integer("cols").notNull(),
+		generation: integer("generation").notNull(),
+		rows: integer("rows").notNull(),
+		pid: integer("pid"),
+		owner_instance_id: text("owner_instance_id").notNull(),
+		state: text("state").notNull(),
+		exit_code: integer("exit_code"),
+		exit_signal: integer("exit_signal"),
+		exit_reason: text("exit_reason"),
+		failure: text("failure"),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+		closed_at: text("closed_at"),
+	},
+	(table) => [
+		index("terminal_sessions_thread_workspace_index").on(table.thread_id, table.workspace_id),
+		index("terminal_sessions_state_index").on(table.state),
+	],
+);
+
+export const TerminalCommands = sqliteTable("terminal_commands", {
+	message_id: text("message_id").primaryKey(),
+	terminal_id: text("terminal_id").notNull(),
+	generation: integer("generation").notNull(),
+	claimed_session_json: text("claimed_session_json").notNull(),
+	payload_json: text("payload_json").notNull(),
+	status: text("status").notNull(),
+	journal_sequence: integer("journal_sequence"),
+	failure: text("failure"),
+	created_at: text("created_at").notNull(),
+	updated_at: text("updated_at").notNull(),
+});

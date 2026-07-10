@@ -3,6 +3,7 @@ import { Context, Data, Effect, Layer, Schema } from "effect";
 
 import {
 	EventEnvelope,
+	EventPayload,
 	JournalSequence,
 	StreamCursor,
 	type CommandEnvelope,
@@ -34,6 +35,16 @@ export interface ReplayRequest {
 	readonly stream_cursors?: ReadonlyArray<StreamCursor>;
 }
 
+export interface JournalEventInput {
+	readonly agent_id?: string;
+	readonly causation_id: string;
+	readonly correlation_id: string;
+	readonly payload: EventPayload;
+	readonly raw_origin?: RawOrigin;
+	readonly run_id?: string;
+	readonly thread_id: string;
+}
+
 export class CommandIdConflict extends Data.TaggedError("CommandIdConflict")<{
 	readonly message_id: string;
 }> {}
@@ -62,6 +73,12 @@ export class JournalStore extends Context.Service<
 		readonly AcceptThreadCreate: (
 			command: CommandEnvelope,
 		) => Effect.Effect<ThreadCreateAcceptance, JournalStoreError>;
+		readonly AppendEvent: (
+			input: JournalEventInput,
+		) => Effect.Effect<EventEnvelope, JournalStoreError>;
+		readonly ReadCorrelatedEvents: (
+			correlation_id: string,
+		) => Effect.Effect<ReadonlyArray<EventEnvelope>, JournalStoreError>;
 		readonly ReadCurrentCursors: () => Effect.Effect<
 			ReadonlyArray<StreamCursor>,
 			JournalStoreError
@@ -338,6 +355,106 @@ export const JournalStoreLive = Layer.effect(
 						);
 					}),
 					Effect.mapError(normalize_journal_error),
+				);
+
+		const ReadCorrelatedEvents = (correlation_id: string) =>
+			database.client
+				.select({
+					agent_id: JournalEvents.agent_id,
+					causation_id: JournalEvents.causation_id,
+					correlation_id: JournalEvents.correlation_id,
+					event_id: JournalEvents.event_id,
+					event_type: JournalEvents.event_type,
+					journal_sequence: JournalEvents.sequence,
+					occurred_at: JournalEvents.occurred_at,
+					origin: JournalEvents.origin,
+					payload_json: JournalEvents.payload_json,
+					raw_origin_json: JournalEvents.raw_origin_json,
+					run_id: JournalEvents.run_id,
+					schema_version: JournalEvents.schema_version,
+					sequence: JournalEvents.stream_sequence,
+					stream_id: JournalEvents.stream_id,
+					thread_id: JournalEvents.thread_id,
+				})
+				.from(JournalEvents)
+				.where(eq(JournalEvents.correlation_id, correlation_id))
+				.orderBy(asc(JournalEvents.sequence))
+				.pipe(
+					Effect.flatMap((events) => Effect.forEach(events, ReconstructEventEnvelope)),
+					Effect.mapError(normalize_journal_error),
+				);
+
+		const AppendEvent = (input: JournalEventInput) =>
+			database.client
+				.transaction((transaction) =>
+					Effect.gen(function* () {
+						const stream_id = `thread:${input.thread_id}`;
+						const [stream] = yield* transaction
+							.select({ last_sequence: EventStreams.last_sequence })
+							.from(EventStreams)
+							.where(eq(EventStreams.stream_id, stream_id))
+							.limit(1);
+						const sequence = (stream?.last_sequence ?? 0) + 1;
+						const event_id = yield* metadata.MakeId("event");
+						const occurred_at = yield* metadata.Now;
+
+						if (stream) {
+							yield* transaction
+								.update(EventStreams)
+								.set({ last_sequence: sequence })
+								.where(eq(EventStreams.stream_id, stream_id));
+						} else {
+							yield* transaction.insert(EventStreams).values({
+								last_sequence: sequence,
+								stream_id,
+							});
+						}
+
+						const [inserted] = yield* transaction
+							.insert(JournalEvents)
+							.values({
+								agent_id: input.agent_id ?? null,
+								causation_id: input.causation_id,
+								correlation_id: input.correlation_id,
+								event_id,
+								event_type: input.payload.type,
+								occurred_at,
+								origin: "backend",
+								payload_json: JSON.stringify(input.payload),
+								raw_origin_json: input.raw_origin
+									? JSON.stringify(input.raw_origin)
+									: null,
+								run_id: input.run_id ?? null,
+								schema_version: 1,
+								stream_id,
+								stream_sequence: sequence,
+								thread_id: input.thread_id,
+							})
+							.returning({ journal_sequence: JournalEvents.sequence });
+
+						return {
+							...(input.agent_id ? { agent_id: input.agent_id } : {}),
+							causation_id: input.causation_id,
+							correlation_id: input.correlation_id,
+							journal_sequence: inserted!.journal_sequence,
+							kind: "event" as const,
+							message_id: event_id,
+							origin: "backend" as const,
+							payload: input.payload,
+							protocol_version: 1 as const,
+							...(input.raw_origin ? { raw_origin: input.raw_origin } : {}),
+							...(input.run_id ? { run_id: input.run_id } : {}),
+							schema_version: 1 as const,
+							sequence,
+							sent_at: occurred_at,
+							stream_id,
+							thread_id: input.thread_id,
+						} satisfies EventEnvelope;
+					}),
+				)
+				.pipe(
+					Effect.mapError(normalize_journal_error),
+					Effect.tap((event) => notifier.Publish(event.journal_sequence)),
 				);
 
 		const ReadCurrentCursors = () =>
@@ -663,7 +780,9 @@ export const JournalStoreLive = Layer.effect(
 
 		return {
 			AcceptThreadCreate,
+			AppendEvent,
 			ReadCurrentCursors,
+			ReadCorrelatedEvents,
 			ReadReplay,
 			ReadWatermark,
 			ValidateReplayPoint,

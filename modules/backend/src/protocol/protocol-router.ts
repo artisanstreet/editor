@@ -11,11 +11,12 @@ import {
 
 import { type JournalStoreError } from "../persistence/journal-store";
 import { type OrchestrationError } from "../persistence/orchestration-repository";
+import type { TerminalSessionError } from "../terminal/terminal-sessions";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { CommandRouter } from "./command-router";
 
 const describe_journal_error = pipe(
-	Match.type<JournalStoreError | OrchestrationError>(),
+	Match.type<JournalStoreError | OrchestrationError | TerminalSessionError>(),
 	Match.tagsExhaustive({
 		OrchestrationCommandConflict: (): ProtocolErrorDetail => ({
 			code: "command.id_conflict",
@@ -30,6 +31,31 @@ const describe_journal_error = pipe(
 		OrchestrationFailure: (): ProtocolErrorDetail => ({
 			code: "orchestration.unavailable",
 			message: "The command could not be durably orchestrated.",
+			retryable: true,
+		}),
+		TerminalCommandConflict: (): ProtocolErrorDetail => ({
+			code: "command.id_conflict",
+			message: "This command id has already been used for different intent.",
+			retryable: false,
+		}),
+		TerminalNotFound: (): ProtocolErrorDetail => ({
+			code: "terminal.not_found",
+			message: "The requested terminal does not exist.",
+			retryable: false,
+		}),
+		TerminalNotActive: (): ProtocolErrorDetail => ({
+			code: "terminal.not_active",
+			message: "The requested terminal is not active.",
+			retryable: false,
+		}),
+		TerminalInvariantError: (): ProtocolErrorDetail => ({
+			code: "terminal.invariant_failed",
+			message: "The stored terminal state is invalid.",
+			retryable: false,
+		}),
+		TerminalPersistenceFailure: (): ProtocolErrorDetail => ({
+			code: "terminal.unavailable",
+			message: "The terminal command could not be durably completed.",
 			retryable: true,
 		}),
 		CommandIdConflict: (): ProtocolErrorDetail => ({
@@ -70,7 +96,7 @@ export const ProtocolRouterLive = Layer.effect(
 
 		const MakeRejectedReceipt = (
 			command: CommandEnvelope,
-			error: JournalStoreError | OrchestrationError,
+			error: JournalStoreError | OrchestrationError | TerminalSessionError,
 		) =>
 			Effect.gen(function* () {
 				const message_id = yield* metadata.MakeId("message");

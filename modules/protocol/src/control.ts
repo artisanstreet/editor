@@ -37,6 +37,14 @@ const NegotiatedBackendTraceMetadata = {
 	protocol_version: NegotiatedProtocolVersion,
 };
 
+const EnvironmentVariableName = Schema.String.check(
+	Schema.makeFilter<string>((name) =>
+		name.length === 0 || name.includes("=") || name.includes(String.fromCharCode(0))
+			? "Expected a non-empty environment variable name without equals or null"
+			: undefined,
+	),
+);
+
 /** Describes the thread projection sent in list results and subscriptions. */
 export const ThreadListItem = Schema.Struct({
 	created_at: IsoDateTime,
@@ -64,6 +72,59 @@ export const ThreadSendMessageCommand = Schema.Struct({
 });
 
 export type ThreadSendMessageCommand = typeof ThreadSendMessageCommand.Type;
+
+/** Opens a durable pseudoterminal owned by a thread workspace. */
+export const TerminalOpenCommand = Schema.Struct({
+	type: Schema.Literal("terminal.open"),
+	terminal_id: Identifier,
+	workspace_id: Identifier,
+	working_directory: Schema.NonEmptyString,
+	executable: Schema.NonEmptyString,
+	args: Schema.Array(Schema.String),
+	env: Schema.optional(Schema.Record(EnvironmentVariableName, Schema.String)),
+	cols: PositiveInt,
+	rows: PositiveInt,
+});
+
+/** Writes UTF-8 text to one active terminal. */
+export const TerminalWriteCommand = Schema.Struct({
+	type: Schema.Literal("terminal.write"),
+	terminal_id: Identifier,
+	data: Schema.String,
+});
+
+/** Changes the visible dimensions of one active terminal. */
+export const TerminalResizeCommand = Schema.Struct({
+	type: Schema.Literal("terminal.resize"),
+	terminal_id: Identifier,
+	cols: PositiveInt,
+	rows: PositiveInt,
+});
+
+/** Clears the visible screen buffer of one active terminal. */
+export const TerminalClearCommand = Schema.Struct({
+	type: Schema.Literal("terminal.clear"),
+	terminal_id: Identifier,
+});
+
+/** Sends a termination signal to one active terminal. */
+export const TerminalKillCommand = Schema.Struct({
+	type: Schema.Literal("terminal.kill"),
+	terminal_id: Identifier,
+	signal: Schema.optional(Schema.String),
+});
+
+/** Closes one terminal and releases its native PTY resource. */
+export const TerminalCloseCommand = Schema.Struct({
+	type: Schema.Literal("terminal.close"),
+	terminal_id: Identifier,
+});
+
+/** Starts a new PTY generation from a closed or failed terminal's saved configuration. */
+export const TerminalRestartCommand = Schema.Struct({
+	type: Schema.Literal("terminal.restart"),
+	terminal_id: Identifier,
+});
 
 /** Steers the currently active run using provider-neutral user text. */
 export const RunSteerCommand = Schema.Struct({
@@ -94,6 +155,13 @@ export const RunRespondQuestionCommand = Schema.Struct({
 export const CommandPayload = Schema.Union([
 	ThreadCreateCommand,
 	ThreadSendMessageCommand,
+	TerminalOpenCommand,
+	TerminalWriteCommand,
+	TerminalResizeCommand,
+	TerminalClearCommand,
+	TerminalKillCommand,
+	TerminalCloseCommand,
+	TerminalRestartCommand,
 	RunSteerCommand,
 	RunCancelCommand,
 	RunCloseCommand,
@@ -255,6 +323,52 @@ export const QuestionInteractionEvent = Schema.Struct({
 	text: Schema.NonEmptyString,
 });
 
+/** Describes durable metadata for a terminal session. */
+export const TerminalSession = Schema.Struct({
+	terminal_id: Identifier,
+	thread_id: Identifier,
+	workspace_id: Identifier,
+	working_directory: Schema.NonEmptyString,
+	executable: Schema.NonEmptyString,
+	args: Schema.Array(Schema.String),
+	cols: PositiveInt,
+	generation: PositiveInt,
+	rows: PositiveInt,
+	pid: Schema.optional(PositiveInt),
+	state: Schema.Literals(["opening", "active", "closed", "failed"]),
+	exit_code: Schema.optional(Schema.Int),
+	exit_signal: Schema.optional(Schema.Int),
+	exit_reason: Schema.optional(
+		Schema.Literals(["closed", "exited", "killed", "output_overflow"]),
+	),
+	failure: Schema.optional(Schema.NonEmptyString),
+	created_at: IsoDateTime,
+	updated_at: IsoDateTime,
+	closed_at: Schema.optional(IsoDateTime),
+});
+
+export type TerminalSession = typeof TerminalSession.Type;
+
+/** Records a durable terminal lifecycle transition. */
+export const TerminalLifecycleEvent = Schema.Struct({
+	type: Schema.Literal("terminal.lifecycle"),
+	action: Schema.Literals([
+		"opened",
+		"written",
+		"resized",
+		"cleared",
+		"killed",
+		"closed",
+		"restarted",
+		"exited",
+		"failed",
+		"recovered",
+	]),
+	terminal: TerminalSession,
+});
+
+export type TerminalLifecycleEvent = typeof TerminalLifecycleEvent.Type;
+
 /** Unions every durable event payload emitted by the V1 backend. */
 export const EventPayload = Schema.Union([
 	ThreadCreatedEvent,
@@ -264,6 +378,7 @@ export const EventPayload = Schema.Union([
 	AssistantMessageCompletedEvent,
 	ApprovalInteractionEvent,
 	QuestionInteractionEvent,
+	TerminalLifecycleEvent,
 ]);
 
 export type EventPayload = typeof EventPayload.Type;
@@ -371,6 +486,25 @@ export const ThreadWorkQueryResultEnvelope = Schema.Struct({
 });
 
 export type ThreadWorkQueryResultEnvelope = typeof ThreadWorkQueryResultEnvelope.Type;
+
+/** Requests terminal metadata for one thread workspace. */
+export const TerminalListQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("terminal.list.query"),
+	payload: Schema.Struct({ thread_id: Identifier, workspace_id: Identifier }),
+});
+
+export type TerminalListQueryEnvelope = typeof TerminalListQueryEnvelope.Type;
+
+/** Returns durable terminal metadata without replaying transient PTY output. */
+export const TerminalListQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("terminal.list.query.result"),
+	payload: Schema.Struct({ terminals: Schema.Array(TerminalSession) }),
+});
+
+export type TerminalListQueryResultEnvelope = typeof TerminalListQueryResultEnvelope.Type;
 
 /** Requests ordered updates for the thread-list projection. */
 export const SubscribeEnvelope = Schema.Struct({
@@ -512,6 +646,7 @@ export const InboundControlEnvelope = Schema.Union([
 	CommandEnvelope,
 	ThreadListQueryEnvelope,
 	ThreadWorkQueryEnvelope,
+	TerminalListQueryEnvelope,
 	SubscribeEnvelope,
 	UnsubscribeEnvelope,
 	AckEnvelope,
@@ -530,6 +665,7 @@ export const OutboundControlEnvelope = Schema.Union([
 	ProtocolErrorEnvelope,
 	ThreadListQueryResultEnvelope,
 	ThreadWorkQueryResultEnvelope,
+	TerminalListQueryResultEnvelope,
 	SubscriptionStartedEnvelope,
 	SubscriptionStoppedEnvelope,
 	ThreadListSnapshotEnvelope,

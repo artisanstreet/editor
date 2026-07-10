@@ -33,6 +33,7 @@ import {
 	type ThreadListItem,
 	type ThreadListQueryEnvelope,
 	type ThreadWorkQueryEnvelope,
+	type TerminalListQueryEnvelope,
 	type UnsubscribeEnvelope,
 } from "@artisan/protocol";
 
@@ -41,6 +42,7 @@ import { JournalStore } from "../persistence/journal-store";
 import { OrchestrationRepository } from "../persistence/orchestration-repository";
 import { ThreadReadModel } from "../persistence/thread-read-model";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import { TerminalSessionService } from "../terminal/terminal-sessions";
 import {
 	DecodeProtocolConnectionOptions,
 	DefaultProtocolConnectionOptions,
@@ -149,6 +151,7 @@ export function make_protocol_server_layer(
 			const notifier = yield* JournalNotifier;
 			const router = yield* ProtocolRouter;
 			const orchestration = yield* OrchestrationRepository;
+			const terminals = yield* TerminalSessionService;
 			const thread_read_model = yield* ThreadReadModel;
 
 			const Open = Effect.gen(function* () {
@@ -525,6 +528,39 @@ export function make_protocol_server_layer(
 						),
 					);
 
+				const HandleTerminalListQuery = (
+					query: TerminalListQueryEnvelope,
+					current: ReadyState,
+				) =>
+					terminals.List(query.payload.thread_id, query.payload.workspace_id).pipe(
+						Effect.flatMap((terminals) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "terminal.list.query.result",
+									message_id,
+									origin: "backend",
+									payload: { terminals },
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"projection.unavailable",
+								"The terminal projection could not be read.",
+								true,
+								query.message_id,
+							),
+						),
+					);
+
 				const HandleSubscribe = (subscribe: SubscribeEnvelope, current: ReadyState) =>
 					Effect.gen(function* () {
 						if (current.subscriptions[subscribe.subscription_id]) {
@@ -792,6 +828,8 @@ export function make_protocol_server_layer(
 							return HandleQuery(envelope, current);
 						case "thread.work.query":
 							return HandleWorkQuery(envelope, current);
+						case "terminal.list.query":
+							return HandleTerminalListQuery(envelope, current);
 						case "subscribe":
 							return HandleSubscribe(envelope, current);
 						case "unsubscribe":
