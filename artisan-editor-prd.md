@@ -674,6 +674,39 @@ Artisan should model agents as product objects:
 - `artifacts`: findings, diffs, logs, branches, terminal sessions, and files
   produced by that agent.
 
+Durable orchestration model:
+
+- An `orchestration_group` is one visible fan-out graph owned by a parent
+  Artisan thread. It records the coordinator, policy, aggregate state, and join
+  strategy.
+- An `agent_instance` is the durable Artisan identity and display personality.
+  It may participate in more than one assignment over its lifetime, while each
+  provider-native identity remains origin metadata.
+- An `assignment` is a bounded unit of delegated intent: role, scope,
+  instructions, permissions, workspace, expected result, and parent graph
+  node. Reassignment creates a new assignment rather than mutating history.
+- An `agent_run` is one execution attempt for an assignment. Retries and engine
+  failover create new runs linked to the same assignment, preserving every
+  attempt and its native resume identity.
+- A `join` is an explicit graph node that waits for selected upstream
+  assignments and applies a named strategy such as synthesize, review,
+  first-success, or require-all. Joins are durable work, not an implicit final
+  prompt hidden inside the coordinator transcript.
+- Graph edges express dependency and result flow. They must never be inferred
+  later from timestamps or nested provider transcripts.
+- Group, assignment, run, and join transitions use monotonic durable state
+  machines. Provider events may enrich them but cannot reopen a terminal
+  attempt.
+- Dispatch uses durable leases and an outbox so a backend restart can recover
+  unstarted work, mark abandoned attempts interrupted, and retry only when the
+  assignment policy permits it.
+- Workspace isolation belongs to each assignment. Shared-workspace execution
+  is an explicit policy; write-capable parallel assignments should default to
+  separate worktrees once worktree management exists.
+- The public protocol exposes graph snapshots and ordered patches. Raw native
+  subagent events remain inspectable, but the frontend never reconstructs the
+  orchestration graph from provider-specific output.
+
 Agent name bank:
 
 - Artisan should let the user provide a custom list of playful agent display
@@ -711,16 +744,16 @@ UI requirements:
 - Agent rows should use the same two-line identity/status pattern as thread
   rows:
 
-  ```text
-  Bob
-  -> Refactoring your landing page.
-  ```
+    ```text
+    Bob
+    -> Refactoring your landing page.
+    ```
 
 - The first line is the stable, playful `display_name`.
 - The second line is a live work description supplied by the agent or
   coordinator, not a duplicate of the role label.
 - Examples: `Gibby -> Auditing the routing layer`, `Bob -> Refactoring your
-  landing page`, `Sprocket -> Running the visual regression tests`.
+landing page`, `Sprocket -> Running the visual regression tests`.
 - Multi-agent work should support keyboard and command-palette actions such as
   steer, stop, open thread, open diff, promote finding, and summarize now.
 
@@ -736,7 +769,7 @@ Agent status heartbeat:
 - The coordinator should request this status immediately after delegating work,
   so the user does not stare at generic agent names while workers spin up.
 - The status should be human, specific, and present-tense: `Refactoring the
-  landing page`, `Comparing auth adapters`, `Waiting on test output`.
+landing page`, `Comparing auth adapters`, `Waiting on test output`.
 - Status descriptions must not reveal private chain-of-thought. They describe
   observable work and intent, not internal reasoning.
 - If an agent cannot provide a status, Artisan falls back to the assignment
@@ -1008,14 +1041,14 @@ Terminology:
 
 Platform findings:
 
-| Platform | Possible | Recommended v1 |
-| --- | --- | --- |
-| macOS Dock | Electron exposes `app.dock.setIcon`, `setBadge`, and progress. Native AppKit also supports custom Dock tile drawing through `NSDockTile`. | Use a subtle pulsing/sprite-swapped Dock icon or Dock progress while work is active. Prefer low-frequency updates and restore the normal icon on idle. |
-| macOS menu bar | Electron Tray lives in the menu bar extras area and supports image updates. | Optional: animate/swap a compact monochrome status icon if Artisan adds a tray/menu-bar item. |
-| Windows taskbar | Electron supports taskbar progress, `setOverlayIcon`, and `flashFrame`. Windows docs explicitly say overlay icons should not be frequently changed or animated. | Use indeterminate/determinate taskbar progress for active work, plus optional static overlay for long-lived status. Do not animate the taskbar overlay. |
-| Windows notification area | Electron Tray supports notification-area icons and image updates. | Optional: animate/swap tray icon frames for working status, with reduced-motion and battery/perf guardrails. |
-| Linux taskbar/dock | Behavior depends on desktop environment. Electron progress supports Windows, macOS, and Unity-style environments, but generic Linux dock/taskbar animation is not reliable. | Best effort only: use window/projection state in-app, tray/status notifier where supported, and Unity progress when available. |
-| Linux tray/status notifier | Tray location and support varies by desktop environment. StatusNotifierItem supports icon and overlay concepts, but visualization support is not uniform. | Optional best effort. Do not make critical status depend on tray animation. |
+| Platform                   | Possible                                                                                                                                                                    | Recommended v1                                                                                                                                          |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| macOS Dock                 | Electron exposes `app.dock.setIcon`, `setBadge`, and progress. Native AppKit also supports custom Dock tile drawing through `NSDockTile`.                                   | Use a subtle pulsing/sprite-swapped Dock icon or Dock progress while work is active. Prefer low-frequency updates and restore the normal icon on idle.  |
+| macOS menu bar             | Electron Tray lives in the menu bar extras area and supports image updates.                                                                                                 | Optional: animate/swap a compact monochrome status icon if Artisan adds a tray/menu-bar item.                                                           |
+| Windows taskbar            | Electron supports taskbar progress, `setOverlayIcon`, and `flashFrame`. Windows docs explicitly say overlay icons should not be frequently changed or animated.             | Use indeterminate/determinate taskbar progress for active work, plus optional static overlay for long-lived status. Do not animate the taskbar overlay. |
+| Windows notification area  | Electron Tray supports notification-area icons and image updates.                                                                                                           | Optional: animate/swap tray icon frames for working status, with reduced-motion and battery/perf guardrails.                                            |
+| Linux taskbar/dock         | Behavior depends on desktop environment. Electron progress supports Windows, macOS, and Unity-style environments, but generic Linux dock/taskbar animation is not reliable. | Best effort only: use window/projection state in-app, tray/status notifier where supported, and Unity progress when available.                          |
+| Linux tray/status notifier | Tray location and support varies by desktop environment. StatusNotifierItem supports icon and overlay concepts, but visualization support is not uniform.                   | Optional best effort. Do not make critical status depend on tray animation.                                                                             |
 
 Design rules:
 
@@ -1112,7 +1145,7 @@ Behavior:
 - Providers/engines that do not support native sync should receive the prompt
   through the Artisan harness/instruction layer at run time.
 - The UI should clearly indicate whether a provider is `synced`, `applied at run
-  time`, `unsupported`, or `sync failed`.
+time`, `unsupported`, or `sync failed`.
 - Sync should be explicit and inspectable. Do not silently overwrite provider
   config without making the target and status visible.
 - This should not become a provider-sync control panel full of dials. The default
@@ -1845,6 +1878,34 @@ Right pane relationship:
   ledger.
 - The terminal orchestrator should model terminals as first-class session
   objects with stable identity, status, metadata, and readable output.
+- The terminal orchestrator should depend on a deep `TerminalDriver` Effect
+  Service. The Electron production adapter should use Microsoft `node-pty`
+  `1.1.0` behind that seam, while deterministic and real-child test drivers
+  exercise the same orchestration contract without exposing native PTY types.
+- The backend should run in one Electron utility process and own all PTY
+  instances there. `node-pty` is not thread-safe, so PTY ownership should not
+  be distributed across worker threads. Individual terminals remain scoped
+  Effect resources even though one backend process owns the native library.
+- Terminal bytes should flow over the dedicated bounded stream MessagePort.
+  Terminal lifecycle and meaningful state transitions belong in the durable
+  ledger, but individual output chunks and keystrokes do not.
+- Filesystem access should be a root-capability service. Public operations use
+  project-relative paths, resolve every existing ancestor against the real
+  filesystem, reject traversal and symlink escapes, and keep native absolute
+  paths out of renderer-owned state.
+- The raw filesystem service should own safe reads, atomic writes, renames,
+  metadata, watch events, and a trash adapter. It should not infer agent
+  authorship from timestamps or watcher order.
+- A separate change-tracking service should record controlled writes with
+  thread, run, agent, command, before/after identity, and review state. Watcher
+  events represent external or unattributed changes until they can be matched
+  to a controlled operation.
+- Git reads should use argv-only process execution behind an Effect Service,
+  with bounded stdout, stderr, and patch bytes. Porcelain parsing belongs in
+  the Git adapter; the public model exposes staged, unstaged, untracked,
+  conflicted, branch, head, worktree, and aggregate diff facts.
+- Git mutations are a separate approval-bearing command surface. A read model
+  must not quietly grow checkout, reset, clean, commit, or push methods.
 - The right pane should be a persistent session stack, not a hidden or rarely
   opened drawer.
 - Tabs should be user-owned. AI activity should surface changed files without
@@ -2186,20 +2247,20 @@ Right pane relationship:
   and previews all share one model.
 - Future brainstorming should keep updating this PRD rather than starting over.
 - Open questions to resolve later:
-  - Which engine should be supported first?
-  - Which Codex executable path is reliably spawnable on Windows when the
-    desktop app installed the CLI?
-  - Does Codex app-server expose all v1 approval behavior through the stable API,
-    or does Artisan need the experimental app-server capability?
-  - Can Claude Code's stream-json input mode support one long-running Artisan
-    session cleanly, or should v1 spawn one process per turn and resume by
-    session id?
-  - What structured output or machine-readable mode can each target CLI provide?
-  - How much terminal control should Artisan own directly versus delegate to
-    engines?
-  - How should approvals, sandboxing, and user permissions be represented?
-  - What minimum Monaco feature set is required for the first usable editor?
-  - Should thread history and workspace state be stored locally only at first?
+    - Which engine should be supported first?
+    - Which Codex executable path is reliably spawnable on Windows when the
+      desktop app installed the CLI?
+    - Does Codex app-server expose all v1 approval behavior through the stable API,
+      or does Artisan need the experimental app-server capability?
+    - Can Claude Code's stream-json input mode support one long-running Artisan
+      session cleanly, or should v1 spawn one process per turn and resume by
+      session id?
+    - What structured output or machine-readable mode can each target CLI provide?
+    - How much terminal control should Artisan own directly versus delegate to
+      engines?
+    - How should approvals, sandboxing, and user permissions be represented?
+    - What minimum Monaco feature set is required for the first usable editor?
+    - Should thread history and workspace state be stored locally only at first?
 
 ## Decision Log
 
@@ -2338,3 +2399,20 @@ Right pane relationship:
   conformance harness with a fake child process, native transcript replay,
   opt-in live CLI tests, full backend scenarios, fault injection, and
   property/state-machine invariants.
+- 2026-07-10: Terminal execution assigned to a deep `TerminalDriver` Service.
+  Electron production should host Microsoft `node-pty` `1.1.0` in the single
+  backend utility process, with terminal bytes carried over the dedicated
+  stream MessagePort and only lifecycle facts written durably.
+- 2026-07-10: Terminal commands claim durable intent before PTY side effects
+  and use at-most-once recovery for ambiguous dispatch. Session generations
+  prevent stale retries from affecting restarted terminals; projection state,
+  lifecycle events, stream cursors, and command completion commit atomically.
+- 2026-07-10: Filesystem and Git reads became project-scoped deep Services.
+  Filesystem paths are root-confined across traversal and symlink ancestors;
+  Git uses argv-only bounded process execution. Attributed change tracking and
+  approved Git mutations remain separate higher-level surfaces.
+- 2026-07-10: External rich-link metadata uses per-hop public-address
+  validation and pinned HTTP(S) connections that preserve Host and TLS SNI.
+  Favicon bytes are magic-checked, content-addressed, and retained behind a
+  bounded backend asset store; local preview targets use a separate explicit
+  localhost registry.
