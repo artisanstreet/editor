@@ -31,7 +31,7 @@ describe("protocol lifecycle", () => {
 			sent_at: "2026-07-10T08:00:00.000Z",
 			payload: {
 				last_journal_sequence: 12,
-				resume_cursors: [{ stream_id: "thread:thread_1", sequence: 4 }],
+				event_cursors: [{ stream_id: "thread:thread_1", sequence: 4 }],
 				supported_protocol_versions: [1],
 			},
 		};
@@ -51,7 +51,7 @@ describe("protocol lifecycle", () => {
 			sent_at: "2026-07-10T08:00:00.000Z",
 			payload: {
 				last_journal_sequence: 0,
-				resume_cursors: [],
+				event_cursors: [],
 				supported_protocol_versions: [1],
 			},
 		};
@@ -85,7 +85,7 @@ describe("protocol lifecycle", () => {
 			correlation_id: "hello_1",
 			payload: {
 				connection_id: "connection_1",
-				current_cursors: [],
+				current_event_cursors: [],
 				heartbeat_interval_ms: 15_000,
 				heartbeat_timeout_ms: 45_000,
 				journal_sequence: 12,
@@ -141,7 +141,7 @@ describe("protocol lifecycle", () => {
 			...make_trace("ack", "frontend"),
 			payload: {
 				journal_sequence: -1,
-				stream_cursors: [{ stream_id: "thread:thread_1", sequence: -1 }],
+				event_cursors: [{ stream_id: "thread:thread_1", sequence: -1 }],
 			},
 		};
 
@@ -153,7 +153,7 @@ describe("protocol lifecycle", () => {
 			...make_trace("replay", "frontend"),
 			payload: {
 				after_journal_sequence: 12,
-				stream_cursors: [{ stream_id: "thread:thread_1", sequence: 4 }],
+				event_cursors: [{ stream_id: "thread:thread_1", sequence: 4 }],
 			},
 		};
 

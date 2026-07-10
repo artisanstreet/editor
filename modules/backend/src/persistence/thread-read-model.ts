@@ -1,0 +1,104 @@
+import { asc, desc } from "drizzle-orm";
+import { Context, Data, Effect, Layer, Schema } from "effect";
+
+import { JournalSequence, ThreadListItem } from "@artisan/protocol";
+
+import { Database } from "./database";
+import { JournalEvents, Threads } from "./schema";
+import { JournalInvariantError } from "./journal-store";
+
+export class ThreadReadModelFailure extends Data.TaggedError("ThreadReadModelFailure")<{
+	readonly cause: unknown;
+}> {}
+
+export type ThreadReadModelError = JournalInvariantError | ThreadReadModelFailure;
+
+export interface ThreadSnapshot {
+	readonly journal_sequence: number;
+	readonly threads: ReadonlyArray<ThreadListItem>;
+}
+
+export class ThreadReadModel extends Context.Service<
+	ThreadReadModel,
+	{
+		readonly Snapshot: () => Effect.Effect<ThreadSnapshot, ThreadReadModelError>;
+	}
+>()("Artisan/ThreadReadModel") {}
+
+const DecodeJournalSequence = (value: unknown) =>
+	Schema.decodeUnknownEffect(JournalSequence)(value).pipe(
+		Effect.mapError(
+			() =>
+				new JournalInvariantError({
+					message: "Thread snapshot watermark is not a valid journal sequence",
+				}),
+		),
+	);
+
+const DecodePersistedJournalSequence = (value: unknown) =>
+	DecodeJournalSequence(value).pipe(
+		Effect.flatMap((sequence) => {
+			if (sequence === 0) {
+				return new JournalInvariantError({
+					message: "Thread snapshot watermark must be greater than zero",
+				});
+			}
+
+			return Effect.succeed(sequence);
+		}),
+	);
+
+const DecodeThreadListItem = (value: unknown) =>
+	Schema.decodeUnknownEffect(ThreadListItem, { onExcessProperty: "error" })(value).pipe(
+		Effect.mapError(
+			() =>
+				new JournalInvariantError({
+					message: "Thread projection row does not match the protocol schema",
+				}),
+		),
+	);
+
+function normalize_thread_read_model_error(error: unknown): ThreadReadModelError {
+	if (error instanceof JournalInvariantError) {
+		return error;
+	}
+
+	return new ThreadReadModelFailure({ cause: error });
+}
+
+export const ThreadReadModelLive = Layer.effect(
+	ThreadReadModel,
+	Effect.gen(function* () {
+		const database = yield* Database;
+
+		const Snapshot = () =>
+			database.client
+				.transaction((transaction) =>
+					Effect.gen(function* () {
+						const thread_rows = yield* transaction
+							.select({
+								created_at: Threads.created_at,
+								thread_id: Threads.thread_id,
+								title: Threads.title,
+								updated_at: Threads.updated_at,
+							})
+							.from(Threads)
+							.orderBy(asc(Threads.created_at), asc(Threads.thread_id));
+						const [watermark] = yield* transaction
+							.select({ journal_sequence: JournalEvents.sequence })
+							.from(JournalEvents)
+							.orderBy(desc(JournalEvents.sequence))
+							.limit(1);
+						const journal_sequence = watermark
+							? yield* DecodePersistedJournalSequence(watermark.journal_sequence)
+							: 0;
+						const threads = yield* Effect.forEach(thread_rows, DecodeThreadListItem);
+
+						return { journal_sequence, threads };
+					}),
+				)
+				.pipe(Effect.mapError(normalize_thread_read_model_error));
+
+		return { Snapshot };
+	}),
+);

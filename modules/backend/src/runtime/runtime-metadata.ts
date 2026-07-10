@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 
 import { Context, Effect, Layer } from "effect";
 
-export type RuntimeIdPrefix = "event" | "message";
+export type RuntimeIdPrefix = "connection" | "event" | "heartbeat" | "message" | "stream_ticket";
 
 export class RuntimeMetadata extends Context.Service<
 	RuntimeMetadata,

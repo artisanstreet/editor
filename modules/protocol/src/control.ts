@@ -74,8 +74,8 @@ export const HelloEnvelope = Schema.Struct({
 	...FrontendTraceMetadata,
 	kind: Schema.Literal("hello"),
 	payload: Schema.Struct({
+		event_cursors: Schema.Array(StreamCursor),
 		last_journal_sequence: JournalSequence,
-		resume_cursors: Schema.Array(StreamCursor),
 		supported_protocol_versions: Schema.NonEmptyArray(ProtocolVersion),
 	}),
 });
@@ -89,7 +89,7 @@ export const WelcomeEnvelope = Schema.Struct({
 	kind: Schema.Literal("welcome"),
 	payload: Schema.Struct({
 		connection_id: Identifier,
-		current_cursors: Schema.Array(StreamCursor),
+		current_event_cursors: Schema.Array(StreamCursor),
 		heartbeat_interval_ms: PositiveInt,
 		heartbeat_timeout_ms: PositiveInt,
 		journal_sequence: JournalSequence,
@@ -269,7 +269,7 @@ export const SubscriptionStoppedEnvelope = Schema.Struct({
 
 export type SubscriptionStoppedEnvelope = typeof SubscriptionStoppedEnvelope.Type;
 
-/** Provides the initial complete state for a thread-list subscription stream. */
+/** Provides ephemeral thread-list state; reconnecting clients request a fresh snapshot. */
 export const ThreadListSnapshotEnvelope = Schema.Struct({
 	...NegotiatedBackendTraceMetadata,
 	journal_sequence: JournalSequence,
@@ -284,7 +284,7 @@ export const ThreadListSnapshotEnvelope = Schema.Struct({
 
 export type ThreadListSnapshotEnvelope = typeof ThreadListSnapshotEnvelope.Type;
 
-/** Delivers one ordered thread-list upsert after a subscription snapshot. */
+/** Delivers one connection-local thread-list upsert after a subscription snapshot. */
 export const ThreadListUpsertEnvelope = Schema.Struct({
 	...NegotiatedBackendTraceMetadata,
 	journal_sequence: JournalSequence,
@@ -297,13 +297,13 @@ export const ThreadListUpsertEnvelope = Schema.Struct({
 
 export type ThreadListUpsertEnvelope = typeof ThreadListUpsertEnvelope.Type;
 
-/** Acknowledges the highest contiguous durable position and per-stream cursors. */
+/** Acknowledges the highest contiguous journal position and durable event cursors. */
 export const AckEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
 	kind: Schema.Literal("ack"),
 	payload: Schema.Struct({
+		event_cursors: Schema.Array(StreamCursor),
 		journal_sequence: JournalSequence,
-		stream_cursors: Schema.Array(StreamCursor),
 	}),
 });
 
@@ -315,7 +315,7 @@ export const ReplayEnvelope = Schema.Struct({
 	kind: Schema.Literal("replay"),
 	payload: Schema.Struct({
 		after_journal_sequence: JournalSequence,
-		stream_cursors: Schema.optional(Schema.Array(StreamCursor)),
+		event_cursors: Schema.optional(Schema.Array(StreamCursor)),
 	}),
 });
 
@@ -327,7 +327,7 @@ export const ReplayCompleteEnvelope = Schema.Struct({
 	correlation_id: Identifier,
 	kind: Schema.Literal("replay.complete"),
 	payload: Schema.Struct({
-		current_cursors: Schema.Array(StreamCursor),
+		current_event_cursors: Schema.Array(StreamCursor),
 		journal_sequence: JournalSequence,
 	}),
 });

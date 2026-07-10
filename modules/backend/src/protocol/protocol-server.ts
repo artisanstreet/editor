@@ -1,0 +1,933 @@
+import {
+	Cause,
+	Clock,
+	Context,
+	Deferred,
+	Effect,
+	Exit,
+	Layer,
+	PubSub,
+	Queue,
+	Ref,
+	Scope,
+	Semaphore,
+	Stream,
+} from "effect";
+
+import {
+	DecodeInboundControlEnvelope,
+	SupportedProtocolVersions,
+	type AckEnvelope,
+	type CommandEnvelope,
+	type EventEnvelope,
+	type HeartbeatPongEnvelope,
+	type HelloEnvelope,
+	type InboundControlEnvelope,
+	type OutboundControlEnvelope,
+	type PreNegotiationProtocolErrorEnvelope,
+	type ProtocolErrorDetail,
+	type ProtocolErrorEnvelope,
+	type ReplayEnvelope,
+	type StreamCursor,
+	type SubscribeEnvelope,
+	type ThreadListItem,
+	type ThreadListQueryEnvelope,
+	type UnsubscribeEnvelope,
+} from "@artisan/protocol";
+
+import { JournalNotifier } from "../persistence/journal-notifier";
+import { JournalStore } from "../persistence/journal-store";
+import { ThreadReadModel } from "../persistence/thread-read-model";
+import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import {
+	DecodeProtocolConnectionOptions,
+	DefaultProtocolConnectionOptions,
+	type ProtocolConnection,
+	type ProtocolConnectionOptions,
+} from "./protocol-connection";
+import { ProtocolRouter } from "./protocol-router";
+
+interface PendingHeartbeat {
+	readonly deadline_ms: number;
+	readonly message_id: string;
+	readonly nonce: string;
+}
+
+interface ProjectionSubscription {
+	readonly sequence: number;
+	readonly stream_id: string;
+}
+
+interface AwaitingHelloState {
+	readonly _tag: "AwaitingHello";
+	readonly last_activity_ms: number;
+}
+
+interface ReadyState {
+	readonly _tag: "Ready";
+	readonly acknowledged_cursors: Readonly<Record<string, number>>;
+	readonly acknowledged_journal_sequence: number;
+	readonly connection_id: string;
+	readonly delivered_cursors: Readonly<Record<string, number>>;
+	readonly delivered_journal_sequence: number;
+	readonly last_activity_ms: number;
+	readonly pending_heartbeat?: PendingHeartbeat;
+	readonly stream_ticket: string;
+	readonly subscriptions: Readonly<Record<string, ProjectionSubscription>>;
+}
+
+interface RejectedState {
+	readonly _tag: "Rejected";
+	readonly last_activity_ms: number;
+}
+
+interface ClosedState {
+	readonly _tag: "Closed";
+}
+
+type ConnectionState = AwaitingHelloState | ReadyState | RejectedState | ClosedState;
+
+function cursors_to_record(cursors: ReadonlyArray<StreamCursor>) {
+	return Object.fromEntries(cursors.map((cursor) => [cursor.stream_id, cursor.sequence]));
+}
+
+function record_to_cursors(cursors: Readonly<Record<string, number>>) {
+	return Object.entries(cursors)
+		.map(([stream_id, sequence]) => ({ sequence, stream_id }))
+		.sort((left, right) => left.stream_id.localeCompare(right.stream_id));
+}
+
+function apply_event_cursors(
+	cursors: Readonly<Record<string, number>>,
+	events: ReadonlyArray<EventEnvelope>,
+) {
+	return events.reduce<Readonly<Record<string, number>>>(
+		(current, event) => ({
+			...current,
+			[event.stream_id]: Math.max(current[event.stream_id] ?? 0, event.sequence),
+		}),
+		cursors,
+	);
+}
+
+function latest_journal_sequence(fallback: number, events: ReadonlyArray<EventEnvelope>) {
+	return events.reduce((sequence, event) => Math.max(sequence, event.journal_sequence), fallback);
+}
+
+function thread_item_from_event(event: EventEnvelope): ThreadListItem {
+	return {
+		created_at: event.sent_at,
+		thread_id: event.thread_id,
+		title: event.payload.title,
+		updated_at: event.sent_at,
+	};
+}
+
+/** Owns scoped, transport-neutral Artisan control connections. */
+export class ProtocolServer extends Context.Service<
+	ProtocolServer,
+	{
+		readonly Open: Effect.Effect<ProtocolConnection, never, Scope.Scope>;
+	}
+>()("Artisan/ProtocolServer") {}
+
+export function make_protocol_server_layer(
+	input_options: ProtocolConnectionOptions = DefaultProtocolConnectionOptions,
+) {
+	return Layer.effect(
+		ProtocolServer,
+		Effect.gen(function* () {
+			const options = yield* DecodeProtocolConnectionOptions(input_options);
+			const journal = yield* JournalStore;
+			const metadata = yield* RuntimeMetadata;
+			const notifier = yield* JournalNotifier;
+			const router = yield* ProtocolRouter;
+			const thread_read_model = yield* ThreadReadModel;
+
+			const Open = Effect.gen(function* () {
+				const connection_scope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
+					Scope.close(scope, Exit.succeed(undefined)),
+				);
+				const initial_time = yield* Clock.currentTimeMillis;
+				const outbound = yield* Effect.acquireRelease(
+					Queue.bounded<OutboundControlEnvelope>(options.outbound_capacity),
+					Queue.shutdown,
+				).pipe(Scope.provide(connection_scope));
+				const journal_subscription = yield* notifier.Subscribe.pipe(
+					Scope.provide(connection_scope),
+				);
+				const state = yield* Ref.make<ConnectionState>({
+					_tag: "AwaitingHello",
+					last_activity_ms: initial_time,
+				});
+				const closed = yield* Deferred.make<void>();
+				const connection_ready = yield* Deferred.make<void>();
+				const receive_lock = yield* Semaphore.make(1);
+
+				const Enqueue = (envelope: OutboundControlEnvelope) =>
+					Queue.offer(outbound, envelope).pipe(Effect.asVoid);
+
+				yield* Scope.addFinalizer(
+					connection_scope,
+					Semaphore.withPermit(receive_lock)(
+						Effect.gen(function* () {
+							yield* Ref.set(state, { _tag: "Closed" });
+							yield* Deferred.succeed(connection_ready, undefined);
+							yield* Deferred.succeed(closed, undefined);
+						}),
+					),
+				);
+
+				const BeginClose = Semaphore.withPermit(receive_lock)(
+					Effect.gen(function* () {
+						const current = yield* Ref.get(state);
+
+						if (current._tag === "Closed") {
+							return false;
+						}
+
+						yield* Ref.set(state, { _tag: "Closed" });
+						yield* Deferred.succeed(connection_ready, undefined);
+
+						return true;
+					}),
+				);
+
+				const RequestClose = BeginClose.pipe(
+					Effect.flatMap((should_close) =>
+						should_close
+							? Scope.close(connection_scope, Exit.succeed(undefined)).pipe(
+									Effect.forkDetach,
+									Effect.asVoid,
+								)
+							: Effect.void,
+					),
+				);
+				const Close = RequestClose.pipe(Effect.andThen(Deferred.await(closed)));
+
+				const MakeError = (
+					current: ConnectionState,
+					detail: ProtocolErrorDetail,
+					correlation_id?: string,
+				) =>
+					Effect.gen(function* () {
+						const message_id = yield* metadata.MakeId("message");
+						const sent_at = yield* metadata.Now;
+
+						if (current._tag !== "Ready") {
+							const error: PreNegotiationProtocolErrorEnvelope = {
+								kind: "protocol.error",
+								message_id,
+								origin: "backend",
+								payload: detail,
+								schema_version: 1,
+								sent_at,
+								...(correlation_id ? { correlation_id } : {}),
+							};
+
+							return error;
+						}
+
+						const error: ProtocolErrorEnvelope = {
+							kind: "protocol.error",
+							message_id,
+							origin: "backend",
+							payload: detail,
+							protocol_version: 1,
+							schema_version: 1,
+							sent_at,
+							...(correlation_id ? { correlation_id } : {}),
+						};
+
+						return error;
+					});
+
+				const EnqueueError = (
+					current: ConnectionState,
+					code: string,
+					message: string,
+					retryable: boolean,
+					correlation_id?: string,
+				) =>
+					MakeError(current, { code, message, retryable }, correlation_id).pipe(
+						Effect.flatMap(Enqueue),
+					);
+
+				const EnqueueProjectionPatches = (current: ReadyState, event: EventEnvelope) =>
+					Effect.gen(function* () {
+						let subscriptions = current.subscriptions;
+
+						for (const [subscription_id, subscription] of Object.entries(
+							current.subscriptions,
+						)) {
+							const message_id = yield* metadata.MakeId("message");
+							const sequence = subscription.sequence + 1;
+
+							yield* Enqueue({
+								journal_sequence: event.journal_sequence,
+								kind: "thread.list.upsert",
+								message_id,
+								origin: "backend",
+								payload: thread_item_from_event(event),
+								protocol_version: 1,
+								schema_version: 1,
+								sent_at: event.sent_at,
+								sequence,
+								stream_id: subscription.stream_id,
+								subscription_id,
+							});
+
+							subscriptions = {
+								...subscriptions,
+								[subscription_id]: { ...subscription, sequence },
+							};
+						}
+
+						return subscriptions;
+					});
+
+				const DeliverLiveEvents = (events: ReadonlyArray<EventEnvelope>) =>
+					Effect.gen(function* () {
+						const current = yield* Ref.get(state);
+
+						if (current._tag !== "Ready") {
+							return;
+						}
+
+						let subscriptions = current.subscriptions;
+						const new_events = events.filter(
+							(event) => event.journal_sequence > current.delivered_journal_sequence,
+						);
+
+						for (const event of new_events) {
+							yield* Enqueue(event);
+							subscriptions = yield* EnqueueProjectionPatches(
+								{ ...current, subscriptions },
+								event,
+							);
+						}
+
+						yield* Ref.set(state, {
+							...current,
+							delivered_cursors: apply_event_cursors(
+								current.delivered_cursors,
+								new_events,
+							),
+							delivered_journal_sequence: latest_journal_sequence(
+								current.delivered_journal_sequence,
+								new_events,
+							),
+							subscriptions,
+						});
+					});
+
+				const EnqueueReplayEvents = (events: ReadonlyArray<EventEnvelope>) =>
+					Effect.gen(function* () {
+						const current = yield* Ref.get(state);
+
+						if (current._tag !== "Ready") {
+							return;
+						}
+
+						yield* Effect.forEach(events, Enqueue, { discard: true });
+						yield* Ref.set(state, {
+							...current,
+							delivered_cursors: apply_event_cursors(
+								current.delivered_cursors,
+								events,
+							),
+							delivered_journal_sequence: latest_journal_sequence(
+								current.delivered_journal_sequence,
+								events,
+							),
+						});
+					});
+
+				const HandleHello = (hello: HelloEnvelope, current: AwaitingHelloState) =>
+					Effect.gen(function* () {
+						const supports_version = hello.payload.supported_protocol_versions.includes(
+							SupportedProtocolVersions[0],
+						);
+
+						if (!supports_version) {
+							yield* EnqueueError(
+								current,
+								"protocol.unsupported_version",
+								"No supported protocol version was offered.",
+								false,
+								hello.message_id,
+							);
+							yield* Ref.set(state, {
+								_tag: "Rejected",
+								last_activity_ms: current.last_activity_ms,
+							});
+
+							return;
+						}
+
+						return yield* journal
+							.ReadReplay({
+								after_journal_sequence: hello.payload.last_journal_sequence,
+								stream_cursors: hello.payload.event_cursors,
+							})
+							.pipe(
+								Effect.flatMap((events) =>
+									Effect.gen(function* () {
+										const connection_id = yield* metadata.MakeId("connection");
+										const stream_ticket =
+											yield* metadata.MakeId("stream_ticket");
+										const welcome_id = yield* metadata.MakeId("message");
+										const replay_id = yield* metadata.MakeId("message");
+										const sent_at = yield* metadata.Now;
+										const delivered_cursors = apply_event_cursors(
+											cursors_to_record(hello.payload.event_cursors),
+											events,
+										);
+										const journal_sequence = latest_journal_sequence(
+											hello.payload.last_journal_sequence,
+											events,
+										);
+										const ready: ReadyState = {
+											_tag: "Ready",
+											acknowledged_cursors: cursors_to_record(
+												hello.payload.event_cursors,
+											),
+											acknowledged_journal_sequence:
+												hello.payload.last_journal_sequence,
+											connection_id,
+											delivered_cursors,
+											delivered_journal_sequence: journal_sequence,
+											last_activity_ms: current.last_activity_ms,
+											stream_ticket,
+											subscriptions: {},
+										};
+
+										yield* Enqueue({
+											correlation_id: hello.message_id,
+											kind: "welcome",
+											message_id: welcome_id,
+											origin: "backend",
+											payload: {
+												connection_id,
+												current_event_cursors:
+													record_to_cursors(delivered_cursors),
+												heartbeat_interval_ms:
+													options.heartbeat_interval_ms,
+												heartbeat_timeout_ms: options.heartbeat_timeout_ms,
+												journal_sequence,
+												stream_ticket,
+											},
+											protocol_version: 1,
+											schema_version: 1,
+											sent_at,
+										});
+										yield* Ref.set(state, ready);
+										yield* Effect.forEach(events, Enqueue, { discard: true });
+										yield* Enqueue({
+											correlation_id: hello.message_id,
+											kind: "replay.complete",
+											message_id: replay_id,
+											origin: "backend",
+											payload: {
+												current_event_cursors:
+													record_to_cursors(delivered_cursors),
+												journal_sequence,
+											},
+											protocol_version: 1,
+											schema_version: 1,
+											sent_at,
+										});
+										yield* Deferred.succeed(connection_ready, undefined);
+									}),
+								),
+								Effect.catch(() =>
+									EnqueueError(
+										current,
+										"protocol.resume_invalid",
+										"The supplied resume cursor does not match the journal.",
+										false,
+										hello.message_id,
+									),
+								),
+							);
+					});
+
+				const HandleQuery = (query: ThreadListQueryEnvelope, current: ReadyState) =>
+					thread_read_model.Snapshot().pipe(
+						Effect.flatMap((snapshot) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "thread.list.query.result",
+									message_id,
+									origin: "backend",
+									payload: snapshot,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"projection.unavailable",
+								"The thread projection could not be read.",
+								true,
+								query.message_id,
+							),
+						),
+					);
+
+				const HandleSubscribe = (subscribe: SubscribeEnvelope, current: ReadyState) =>
+					Effect.gen(function* () {
+						if (current.subscriptions[subscribe.subscription_id]) {
+							yield* EnqueueError(
+								current,
+								"subscription.already_exists",
+								"The subscription id is already active.",
+								false,
+								subscribe.message_id,
+							);
+
+							return;
+						}
+
+						return yield* thread_read_model.Snapshot().pipe(
+							Effect.flatMap((snapshot) =>
+								Effect.gen(function* () {
+									const started_id = yield* metadata.MakeId("message");
+									const snapshot_id = yield* metadata.MakeId("message");
+									const sent_at = yield* metadata.Now;
+									const stream_id = `projection:thread.list:${subscribe.subscription_id}`;
+									const subscription = { sequence: 0, stream_id };
+
+									yield* Ref.set(state, {
+										...current,
+										subscriptions: {
+											...current.subscriptions,
+											[subscribe.subscription_id]: subscription,
+										},
+									});
+									yield* Enqueue({
+										correlation_id: subscribe.message_id,
+										kind: "subscription.started",
+										message_id: started_id,
+										origin: "backend",
+										payload: { stream_id },
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at,
+										subscription_id: subscribe.subscription_id,
+									});
+									yield* Enqueue({
+										journal_sequence: snapshot.journal_sequence,
+										kind: "thread.list.snapshot",
+										message_id: snapshot_id,
+										origin: "backend",
+										payload: { threads: snapshot.threads },
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at,
+										sequence: 0,
+										stream_id,
+										subscription_id: subscribe.subscription_id,
+									});
+								}),
+							),
+							Effect.catch(() =>
+								EnqueueError(
+									current,
+									"projection.unavailable",
+									"The thread projection could not be read.",
+									true,
+									subscribe.message_id,
+								),
+							),
+						);
+					});
+
+				const HandleUnsubscribe = (unsubscribe: UnsubscribeEnvelope, current: ReadyState) =>
+					Effect.gen(function* () {
+						if (!current.subscriptions[unsubscribe.subscription_id]) {
+							yield* EnqueueError(
+								current,
+								"subscription.not_found",
+								"The subscription id is not active.",
+								false,
+								unsubscribe.message_id,
+							);
+
+							return;
+						}
+
+						const message_id = yield* metadata.MakeId("message");
+						const sent_at = yield* metadata.Now;
+						const subscriptions = { ...current.subscriptions };
+
+						delete subscriptions[unsubscribe.subscription_id];
+						yield* Ref.set(state, { ...current, subscriptions });
+						yield* Enqueue({
+							correlation_id: unsubscribe.message_id,
+							kind: "subscription.stopped",
+							message_id,
+							origin: "backend",
+							payload: {},
+							protocol_version: 1,
+							schema_version: 1,
+							sent_at,
+							subscription_id: unsubscribe.subscription_id,
+						});
+					});
+
+				const HandleAck = (ack: AckEnvelope, current: ReadyState) =>
+					Effect.gen(function* () {
+						const invalid_journal =
+							ack.payload.journal_sequence < current.acknowledged_journal_sequence ||
+							ack.payload.journal_sequence > current.delivered_journal_sequence;
+						const invalid_stream = ack.payload.event_cursors.some((cursor) => {
+							const acknowledged =
+								current.acknowledged_cursors[cursor.stream_id] ?? 0;
+							const delivered = current.delivered_cursors[cursor.stream_id] ?? 0;
+
+							return cursor.sequence < acknowledged || cursor.sequence > delivered;
+						});
+
+						if (invalid_journal || invalid_stream) {
+							yield* EnqueueError(
+								current,
+								"protocol.invalid_ack",
+								"The acknowledgement is outside the delivered range.",
+								false,
+								ack.message_id,
+							);
+
+							return;
+						}
+
+						const valid_replay_point = yield* journal
+							.ValidateReplayPoint({
+								after_journal_sequence: ack.payload.journal_sequence,
+								stream_cursors: ack.payload.event_cursors,
+							})
+							.pipe(
+								Effect.as(true),
+								Effect.catch(() => Effect.succeed(false)),
+							);
+
+						if (!valid_replay_point) {
+							yield* EnqueueError(
+								current,
+								"protocol.invalid_ack",
+								"The acknowledgement does not identify a durable replay point.",
+								false,
+								ack.message_id,
+							);
+
+							return;
+						}
+
+						yield* Ref.set(state, {
+							...current,
+							acknowledged_cursors: {
+								...current.acknowledged_cursors,
+								...cursors_to_record(ack.payload.event_cursors),
+							},
+							acknowledged_journal_sequence: ack.payload.journal_sequence,
+						});
+					});
+
+				const HandleReplay = (replay: ReplayEnvelope, current: ReadyState) =>
+					journal
+						.ReadReplay({
+							after_journal_sequence: replay.payload.after_journal_sequence,
+							...(replay.payload.event_cursors
+								? { stream_cursors: replay.payload.event_cursors }
+								: {}),
+						})
+						.pipe(
+							Effect.flatMap((events) =>
+								Effect.gen(function* () {
+									const message_id = yield* metadata.MakeId("message");
+									const sent_at = yield* metadata.Now;
+
+									yield* EnqueueReplayEvents(events);
+									const updated = yield* Ref.get(state);
+
+									if (updated._tag !== "Ready") {
+										return;
+									}
+
+									yield* Enqueue({
+										correlation_id: replay.message_id,
+										kind: "replay.complete",
+										message_id,
+										origin: "backend",
+										payload: {
+											current_event_cursors: record_to_cursors(
+												updated.delivered_cursors,
+											),
+											journal_sequence: updated.delivered_journal_sequence,
+										},
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at,
+									});
+								}),
+							),
+							Effect.catch(() =>
+								EnqueueError(
+									current,
+									"protocol.replay_invalid",
+									"The replay cursor does not match the journal.",
+									false,
+									replay.message_id,
+								),
+							),
+						);
+
+				const HandlePong = (pong: HeartbeatPongEnvelope, current: ReadyState) =>
+					Effect.gen(function* () {
+						const pending = current.pending_heartbeat;
+						const matches =
+							pending?.message_id === pong.correlation_id &&
+							pending.nonce === pong.payload.nonce;
+
+						if (!matches) {
+							yield* EnqueueError(
+								current,
+								"protocol.invalid_heartbeat",
+								"The heartbeat response does not match an active ping.",
+								false,
+								pong.message_id,
+							);
+
+							return;
+						}
+
+						const { pending_heartbeat: _, ...without_pending } = current;
+
+						yield* Ref.set(state, without_pending);
+					});
+
+				const HandleCommand = (command: CommandEnvelope) =>
+					Effect.gen(function* () {
+						const output = yield* router.Route(command);
+						const events = output.filter(
+							(envelope): envelope is EventEnvelope => envelope.kind === "event",
+						);
+						const non_events = output.filter((envelope) => envelope.kind !== "event");
+
+						yield* Effect.forEach(non_events, Enqueue, { discard: true });
+
+						const current = yield* Ref.get(state);
+						const new_events =
+							current._tag === "Ready"
+								? events.filter(
+										(event) =>
+											event.journal_sequence >
+											current.delivered_journal_sequence,
+									)
+								: [];
+
+						if (new_events.length > 0) {
+							yield* DeliverLiveEvents(new_events);
+						}
+					});
+
+				const HandleReadyEnvelope = (
+					envelope: Exclude<InboundControlEnvelope, HelloEnvelope>,
+					current: ReadyState,
+				) => {
+					switch (envelope.kind) {
+						case "command":
+							return HandleCommand(envelope);
+						case "thread.list.query":
+							return HandleQuery(envelope, current);
+						case "subscribe":
+							return HandleSubscribe(envelope, current);
+						case "unsubscribe":
+							return HandleUnsubscribe(envelope, current);
+						case "ack":
+							return HandleAck(envelope, current);
+						case "replay":
+							return HandleReplay(envelope, current);
+						case "heartbeat.pong":
+							return HandlePong(envelope, current);
+					}
+				};
+
+				const HandleEnvelope = (envelope: InboundControlEnvelope) =>
+					Effect.gen(function* () {
+						const current = yield* Ref.get(state);
+
+						if (current._tag === "Closed" || current._tag === "Rejected") {
+							return;
+						}
+
+						if (current._tag === "AwaitingHello") {
+							if (envelope.kind !== "hello") {
+								yield* EnqueueError(
+									current,
+									"protocol.handshake_required",
+									"A hello frame is required before negotiated traffic.",
+									false,
+									envelope.message_id,
+								);
+
+								return;
+							}
+
+							return yield* HandleHello(envelope, current);
+						}
+
+						if (envelope.kind === "hello") {
+							yield* EnqueueError(
+								current,
+								"protocol.already_negotiated",
+								"The connection has already negotiated a protocol version.",
+								false,
+								envelope.message_id,
+							);
+
+							return;
+						}
+
+						return yield* HandleReadyEnvelope(envelope, current);
+					});
+
+				const Receive = (input: unknown) =>
+					Semaphore.withPermit(receive_lock)(
+						Effect.gen(function* () {
+							const current = yield* Ref.get(state);
+
+							if (current._tag === "Closed" || current._tag === "Rejected") {
+								return;
+							}
+
+							const last_activity_ms = yield* Clock.currentTimeMillis;
+
+							yield* Ref.set(state, { ...current, last_activity_ms });
+
+							return yield* DecodeInboundControlEnvelope(input).pipe(
+								Effect.flatMap(HandleEnvelope),
+								Effect.catch(() =>
+									EnqueueError(
+										current,
+										"protocol.invalid_message",
+										"The message does not match the Artisan control protocol.",
+										false,
+									),
+								),
+							);
+						}),
+					);
+
+				const DeliverJournalTail = Semaphore.withPermit(receive_lock)(
+					Effect.gen(function* () {
+						const current = yield* Ref.get(state);
+
+						if (current._tag !== "Ready") {
+							return;
+						}
+
+						return yield* journal
+							.ReadReplay({
+								after_journal_sequence: current.delivered_journal_sequence,
+							})
+							.pipe(
+								Effect.flatMap(DeliverLiveEvents),
+								Effect.catch(() =>
+									EnqueueError(
+										current,
+										"journal.replay_failed",
+										"Live journal delivery could not be resumed.",
+										true,
+									),
+								),
+							);
+					}),
+				);
+
+				const JournalTail = Deferred.await(connection_ready).pipe(
+					Effect.andThen(
+						Effect.forever(
+							PubSub.take(journal_subscription).pipe(
+								Effect.andThen(DeliverJournalTail),
+							),
+						),
+					),
+				);
+
+				const HeartbeatTick = Semaphore.withPermit(receive_lock)(
+					Effect.gen(function* () {
+						const current = yield* Ref.get(state);
+						const now = yield* Clock.currentTimeMillis;
+
+						if (current._tag === "Closed") {
+							return false;
+						}
+
+						if (current._tag === "Rejected" || current._tag === "AwaitingHello") {
+							return now - current.last_activity_ms >= options.heartbeat_timeout_ms;
+						}
+
+						if (current.pending_heartbeat) {
+							return now >= current.pending_heartbeat.deadline_ms;
+						}
+
+						if (now - current.last_activity_ms < options.heartbeat_interval_ms) {
+							return false;
+						}
+
+						const message_id = yield* metadata.MakeId("heartbeat");
+						const nonce = yield* metadata.MakeId("heartbeat");
+						const sent_at = yield* metadata.Now;
+
+						yield* Enqueue({
+							kind: "heartbeat.ping",
+							message_id,
+							origin: "backend",
+							payload: { nonce },
+							protocol_version: 1,
+							schema_version: 1,
+							sent_at,
+						});
+						yield* Ref.set(state, {
+							...current,
+							pending_heartbeat: {
+								deadline_ms: now + options.heartbeat_timeout_ms,
+								message_id,
+								nonce,
+							},
+						});
+
+						return false;
+					}),
+				).pipe(
+					Effect.flatMap((should_close) => (should_close ? RequestClose : Effect.void)),
+				);
+				const Heartbeat = Effect.forever(
+					Effect.sleep(options.heartbeat_interval_ms).pipe(Effect.andThen(HeartbeatTick)),
+				);
+
+				yield* Effect.forkIn(JournalTail, connection_scope);
+				yield* Effect.forkIn(Heartbeat, connection_scope);
+
+				return {
+					Close,
+					Closed: Deferred.await(closed),
+					Outbound: Stream.fromQueue(outbound).pipe(
+						Stream.catchCauseIf(Cause.hasInterruptsOnly, () => Stream.empty),
+					),
+					Receive,
+				};
+			});
+
+			return { Open };
+		}),
+	);
+}
