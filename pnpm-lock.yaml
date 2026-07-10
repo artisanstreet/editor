@@ -17,6 +17,9 @@ importers:
       '@artisan/protocol':
         specifier: workspace:*
         version: link:modules/protocol
+      '@artisan/transport':
+        specifier: workspace:*
+        version: link:modules/transport
       '@types/node':
         specifier: 26.1.1
         version: 26.1.1
@@ -26,6 +29,9 @@ importers:
       effect:
         specifier: 4.0.0-beta.97
         version: 4.0.0-beta.97
+      es-module-lexer:
+        specifier: 2.3.0
+        version: 2.3.0
       oxfmt:
         specifier: 0.58.0
         version: 0.58.0
@@ -74,6 +80,18 @@ importers:
 
   modules/protocol:
     dependencies:
+      effect:
+        specifier: 4.0.0-beta.97
+        version: 4.0.0-beta.97
+
+  modules/transport:
+    dependencies:
+      '@artisan/backend':
+        specifier: workspace:*
+        version: link:../backend
+      '@artisan/protocol':
+        specifier: workspace:*
+        version: link:../protocol
       effect:
         specifier: 4.0.0-beta.97
         version: 4.0.0-beta.97

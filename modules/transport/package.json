@@ -1,0 +1,20 @@
+{
+	"name": "@artisan/transport",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts",
+		"./client": "./src/client.ts",
+		"./connector": "./src/connector.ts",
+		"./message-port": "./src/message-port.ts",
+		"./node": "./src/node-message-port.ts",
+		"./electron-shapes": "./src/electron-message-port.ts",
+		"./server": "./src/server.ts",
+		"./wire": "./src/wire.ts"
+	},
+	"dependencies": {
+		"@artisan/backend": "workspace:*",
+		"@artisan/protocol": "workspace:*",
+		"effect": "4.0.0-beta.97"
+	}
+}

@@ -1,0 +1,266 @@
+import { MessageChannel, type MessagePort } from "node:worker_threads";
+
+import { Effect, Exit, Layer, ManagedRuntime, Stream } from "effect";
+
+import { DecodeOutboundControlEnvelope } from "@artisan/protocol";
+import {
+	ArtisanClient,
+	MessagePortConnector,
+	MessagePortConnectorError,
+	TransportRuntimeLive,
+	DecodeTransportFrame,
+	make_artisan_client_layer,
+	type ArtisanClientOptions,
+	type MessagePortConnection,
+	type MessagePortLike,
+} from "@artisan/transport";
+import { adapt_node_message_port } from "@artisan/transport/node";
+import {
+	BinaryStreamSource,
+	BinaryStreamSourceError,
+	MessagePortTransportServer,
+	make_message_port_transport_server_layer,
+	type MessagePortTransportServerOptions,
+} from "@artisan/transport/server";
+
+import {
+	make_fake_protocol_server,
+	type FakeProtocolOptions,
+	type FakeProtocolSnapshot,
+} from "./fake-protocol-server";
+
+interface NativeSession {
+	readonly control_client: MessagePort;
+	readonly control_server: MessagePort;
+	readonly stream_client: MessagePort;
+	readonly stream_server: MessagePort;
+}
+
+/** Configures one real-MessageChannel integration harness. */
+export interface TransportHarnessOptions {
+	readonly binary_streams?: Readonly<Record<string, ReadonlyArray<Uint8Array>>>;
+	readonly client?: ArtisanClientOptions;
+	readonly drop_first_command_receipt?: boolean;
+	readonly protocol?: FakeProtocolOptions;
+	readonly server?: MessagePortTransportServerOptions;
+}
+
+/** Reports connector ownership and injected-fault observations. */
+export interface MessageChannelConnectorSnapshot {
+	readonly active_sessions: number;
+	readonly connections: number;
+	readonly dropped_command_receipts: number;
+	readonly server_failures: number;
+}
+
+/** Owns one client, server, fake backend, and their managed scopes. */
+export interface TransportTestHarness {
+	readonly client: typeof ArtisanClient.Service;
+	readonly close_current_connection: () => void;
+	readonly connector_snapshot: () => MessageChannelConnectorSnapshot;
+	readonly dispose: () => Promise<void>;
+	readonly protocol_snapshot: () => FakeProtocolSnapshot;
+	readonly server: typeof MessagePortTransportServer.Service;
+}
+
+function close_native_session(session: NativeSession) {
+	session.control_client.close();
+	session.control_server.close();
+	session.stream_client.close();
+	session.stream_server.close();
+}
+
+const is_command_receipt = (message: unknown) =>
+	DecodeTransportFrame(message).pipe(
+		Effect.flatMap((frame) =>
+			frame.kind === "transport.control"
+				? DecodeOutboundControlEnvelope(frame.payload).pipe(
+						Effect.map((envelope) => envelope.kind === "command.receipt"),
+					)
+				: Effect.succeed(false),
+		),
+		Effect.catch(() => Effect.succeed(false)),
+	);
+
+function make_binary_source_layer(
+	binary_streams: Readonly<Record<string, ReadonlyArray<Uint8Array>>>,
+) {
+	return Layer.succeed(BinaryStreamSource, {
+		Open: (stream_id) => {
+			const chunks = binary_streams[stream_id];
+
+			return chunks
+				? Effect.succeed(
+						Stream.fromIterable(chunks).pipe(Stream.map((chunk) => chunk.slice())),
+					)
+				: Effect.fail(
+						new BinaryStreamSourceError({
+							cause: new Error("test stream not found"),
+							code: "not_found",
+							stream_id,
+						}),
+					);
+		},
+	});
+}
+
+function make_message_channel_connector(
+	server: typeof MessagePortTransportServer.Service,
+	drop_first_command_receipt: boolean,
+) {
+	const active_sessions = new Set<NativeSession>();
+	let connections = 0;
+	let dropped_command_receipts = 0;
+	let server_failures = 0;
+
+	const Connect = Effect.gen(function* () {
+		const control = new MessageChannel();
+		const stream = new MessageChannel();
+		const native_session: NativeSession = {
+			control_client: control.port1,
+			control_server: control.port2,
+			stream_client: stream.port1,
+			stream_server: stream.port2,
+		};
+
+		connections += 1;
+		active_sessions.add(native_session);
+
+		const adapt = (port: MessagePort) =>
+			adapt_node_message_port(port).pipe(
+				Effect.mapError((cause) => new MessagePortConnectorError({ cause })),
+			);
+		const client_control = yield* adapt(control.port1);
+		const client_stream = yield* adapt(stream.port1);
+		const raw_server_control = yield* adapt(control.port2);
+		const server_stream = yield* adapt(stream.port2);
+		const server_control: MessagePortLike = {
+			...raw_server_control,
+			Send: (message, transfer) =>
+				Effect.gen(function* () {
+					const should_drop =
+						drop_first_command_receipt && dropped_command_receipts === 0
+							? yield* is_command_receipt(message)
+							: false;
+
+					if (should_drop) {
+						dropped_command_receipts += 1;
+						close_native_session(native_session);
+
+						return;
+					}
+
+					yield* raw_server_control.Send(message, transfer);
+				}),
+		};
+		const server_ports: MessagePortConnection = {
+			control_port: server_control,
+			stream_port: server_stream,
+		};
+
+		yield* server.Serve(server_ports).pipe(
+			Effect.exit,
+			Effect.tap((exit) =>
+				Effect.sync(() => {
+					if (Exit.isFailure(exit)) {
+						server_failures += 1;
+					}
+				}),
+			),
+			Effect.ensuring(
+				Effect.sync(() => {
+					active_sessions.delete(native_session);
+				}),
+			),
+			Effect.forkScoped,
+		);
+		yield* Effect.addFinalizer(() =>
+			Effect.sync(() => {
+				active_sessions.delete(native_session);
+				close_native_session(native_session);
+			}),
+		);
+
+		return {
+			control_port: client_control,
+			stream_port: client_stream,
+		} satisfies MessagePortConnection;
+	});
+	const layer = Layer.succeed(MessagePortConnector, { Connect });
+	const close_current_connection = () => {
+		const current = [...active_sessions].at(-1);
+
+		if (current) {
+			close_native_session(current);
+		}
+	};
+	const snapshot = (): MessageChannelConnectorSnapshot => ({
+		active_sessions: active_sessions.size,
+		connections,
+		dropped_command_receipts,
+		server_failures,
+	});
+
+	return { close_current_connection, layer, snapshot };
+}
+
+/** Creates a scoped transport stack while every ordinary test remains offline. */
+export async function make_transport_test_harness(
+	options: TransportHarnessOptions = {},
+): Promise<TransportTestHarness> {
+	const fake_protocol = make_fake_protocol_server(options.protocol);
+	const binary_streams = options.binary_streams ?? {
+		"asset:asset_1": [Uint8Array.of(1, 2), Uint8Array.of(3, 4, 5)],
+	};
+	const server_layer = make_message_port_transport_server_layer(options.server).pipe(
+		Layer.provide(fake_protocol.layer),
+		Layer.provide(make_binary_source_layer(binary_streams)),
+		Layer.provide(TransportRuntimeLive),
+	);
+	const server_runtime = ManagedRuntime.make(server_layer);
+	const server = await server_runtime.runPromise(MessagePortTransportServer);
+	const connector = make_message_channel_connector(
+		server,
+		options.drop_first_command_receipt ?? false,
+	);
+	const client_layer = make_artisan_client_layer(options.client).pipe(
+		Layer.provide(connector.layer),
+		Layer.provide(TransportRuntimeLive),
+	);
+	const client_runtime = ManagedRuntime.make(client_layer);
+	const client = await client_runtime.runPromise(ArtisanClient);
+	let disposed = false;
+
+	const dispose = async () => {
+		if (disposed) {
+			return;
+		}
+
+		disposed = true;
+		await Effect.runPromise(client.Dispose);
+		await client_runtime.dispose();
+		await server_runtime.dispose();
+	};
+
+	return {
+		client,
+		close_current_connection: connector.close_current_connection,
+		connector_snapshot: connector.snapshot,
+		dispose,
+		protocol_snapshot: fake_protocol.snapshot,
+		server,
+	};
+}
+
+/** Waits for one asynchronous lifecycle observation with a strict deadline. */
+export async function wait_for(predicate: () => boolean, timeout_ms = 2_000): Promise<void> {
+	const deadline = Date.now() + timeout_ms;
+
+	while (!predicate()) {
+		if (Date.now() >= deadline) {
+			throw new Error("Timed out waiting for transport test condition");
+		}
+
+		await new Promise((resolve) => setTimeout(resolve, 5));
+	}
+}

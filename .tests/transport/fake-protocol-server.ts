@@ -1,0 +1,651 @@
+import { Deferred, Effect, Layer, Queue, Stream } from "effect";
+
+import { ProtocolServer, type ProtocolConnection } from "@artisan/backend";
+import {
+	DecodeInboundControlEnvelope,
+	type AckEnvelope,
+	type CommandEnvelope,
+	type EventEnvelope,
+	type HeartbeatPongEnvelope,
+	type HelloEnvelope,
+	type InboundControlEnvelope,
+	type OrchestrationGraph,
+	type OutboundControlEnvelope,
+	type StreamCursor,
+	type SubscribeEnvelope,
+	type ThreadListItem,
+} from "@artisan/protocol";
+
+interface StoredCommand {
+	readonly envelope: CommandEnvelope;
+	readonly event: EventEnvelope;
+	readonly fingerprint: string;
+}
+
+type LocalSubscription =
+	| {
+			readonly _tag: "orchestration.graph";
+			readonly group_id: string;
+			readonly stream_id: string;
+			sequence: number;
+	  }
+	| {
+			readonly _tag: "thread.list";
+			readonly stream_id: string;
+			sequence: number;
+	  };
+
+interface LiveConnection {
+	readonly deliver_event: (event: EventEnvelope) => Effect.Effect<void>;
+}
+
+/** Configures deterministic protocol behavior used by transport integration tests. */
+export interface FakeProtocolOptions {
+	readonly duplicate_query_result?: boolean;
+	readonly heartbeat_after_welcome?: boolean;
+	readonly query_delay_ms?: number;
+}
+
+/** Exposes immutable observations from the durable fake protocol server. */
+export interface FakeProtocolSnapshot {
+	readonly acknowledgements: ReadonlyArray<AckEnvelope>;
+	readonly active_connections: number;
+	readonly active_subscriptions: number;
+	readonly command_attempts: ReadonlyArray<CommandEnvelope>;
+	readonly hellos: ReadonlyArray<HelloEnvelope>;
+	readonly opened_connections: number;
+	readonly pongs: ReadonlyArray<HeartbeatPongEnvelope>;
+	readonly received_kinds: ReadonlyArray<InboundControlEnvelope["kind"]>;
+	readonly subscriptions: ReadonlyArray<SubscribeEnvelope>;
+}
+
+/** Supplies a Layer and observations for one durable fake backend. */
+export interface FakeProtocolHarness {
+	readonly layer: Layer.Layer<ProtocolServer>;
+	readonly snapshot: () => FakeProtocolSnapshot;
+}
+
+function ordered_cursors(events: ReadonlyArray<EventEnvelope>): ReadonlyArray<StreamCursor> {
+	const cursors = new Map<string, number>();
+
+	for (const event of events) {
+		cursors.set(event.stream_id, Math.max(cursors.get(event.stream_id) ?? 0, event.sequence));
+	}
+
+	return [...cursors]
+		.map(([stream_id, sequence]) => ({ sequence, stream_id }))
+		.sort((left, right) => left.stream_id.localeCompare(right.stream_id));
+}
+
+function command_fingerprint(command: CommandEnvelope) {
+	return JSON.stringify(command);
+}
+
+/** Creates a durable in-memory ProtocolServer with connection-local projections. */
+export function make_fake_protocol_server(options: FakeProtocolOptions = {}): FakeProtocolHarness {
+	const acknowledgements: Array<AckEnvelope> = [];
+	const command_attempts: Array<CommandEnvelope> = [];
+	const commands = new Map<string, StoredCommand>();
+	const events: Array<EventEnvelope> = [];
+	const graphs = new Map<string, OrchestrationGraph>();
+	const hellos: Array<HelloEnvelope> = [];
+	const live_connections = new Set<LiveConnection>();
+	const pongs: Array<HeartbeatPongEnvelope> = [];
+	const received_kinds: Array<InboundControlEnvelope["kind"]> = [];
+	const subscription_attempts: Array<SubscribeEnvelope> = [];
+	const threads = new Map<string, ThreadListItem>();
+	let active_connections = 0;
+	let active_subscriptions = 0;
+	let id_sequence = 0;
+	let opened_connections = 0;
+
+	const next_id = (prefix: string) => {
+		id_sequence += 1;
+
+		return `${prefix}_${id_sequence}`;
+	};
+	const now = () => new Date(Date.UTC(2026, 6, 10, 8, 0, id_sequence)).toISOString();
+	const backend_trace = () => ({
+		message_id: next_id("backend_message"),
+		origin: "backend" as const,
+		protocol_version: 1 as const,
+		schema_version: 1 as const,
+		sent_at: now(),
+	});
+	const get_graph = (group_id: string) => {
+		const existing = graphs.get(group_id);
+
+		if (existing) {
+			return existing;
+		}
+
+		const timestamp = now();
+		const graph: OrchestrationGraph = {
+			agent_instances: [
+				{
+					agent_id: `coordinator:${group_id}`,
+					created_at: timestamp,
+					display_name: "Coordinator",
+					group_id,
+					role: "coordinator",
+					updated_at: timestamp,
+				},
+			],
+			agent_runs: [],
+			artifacts: [],
+			assignments: [],
+			edges: [],
+			group: {
+				coordinator_agent_id: `coordinator:${group_id}`,
+				created_at: timestamp,
+				group_id,
+				max_concurrency: 2,
+				state: "running",
+				thread_id: `thread:${group_id}`,
+				updated_at: timestamp,
+				version: 1,
+			},
+			joins: [],
+			journal_sequence: events.at(-1)?.journal_sequence ?? 0,
+		};
+
+		graphs.set(group_id, graph);
+
+		return graph;
+	};
+	const rename_graph_agent = (
+		group_id: string,
+		agent_id: string,
+		display_name: string,
+		journal_sequence: number,
+	) => {
+		const graph = get_graph(group_id);
+		const timestamp = now();
+		const agent_instances = graph.agent_instances.map((agent) =>
+			agent.agent_id === agent_id ? { ...agent, display_name, updated_at: timestamp } : agent,
+		);
+		const updated: OrchestrationGraph = {
+			...graph,
+			agent_instances,
+			group: {
+				...graph.group,
+				updated_at: timestamp,
+				version: graph.group.version + 1,
+			},
+			journal_sequence,
+		};
+
+		graphs.set(group_id, updated);
+
+		return updated;
+	};
+
+	const open = Effect.gen(function* () {
+		const outbound = yield* Effect.acquireRelease(
+			Queue.unbounded<OutboundControlEnvelope>(),
+			Queue.shutdown,
+		);
+		const closed = yield* Deferred.make<void>();
+		const subscriptions = new Map<string, LocalSubscription>();
+		let negotiated = false;
+		let locally_closed = false;
+
+		opened_connections += 1;
+		active_connections += 1;
+
+		const enqueue = (envelope: OutboundControlEnvelope) =>
+			Queue.offer(outbound, envelope).pipe(Effect.asVoid);
+
+		const close = Effect.gen(function* () {
+			if (locally_closed) {
+				return;
+			}
+
+			locally_closed = true;
+			live_connections.delete(live_connection);
+			active_connections -= 1;
+			active_subscriptions -= subscriptions.size;
+			subscriptions.clear();
+			yield* Queue.shutdown(outbound);
+			yield* Deferred.succeed(closed, undefined);
+		});
+
+		const deliver_event = (event: EventEnvelope) =>
+			Effect.gen(function* () {
+				if (!negotiated || locally_closed) {
+					return;
+				}
+
+				yield* enqueue(event);
+
+				for (const [subscription_id, subscription] of subscriptions) {
+					if (
+						subscription._tag === "thread.list" &&
+						event.payload.type === "thread.created"
+					) {
+						subscription.sequence += 1;
+						yield* enqueue({
+							...backend_trace(),
+							journal_sequence: event.journal_sequence,
+							kind: "thread.list.upsert",
+							payload: threads.get(event.thread_id)!,
+							sequence: subscription.sequence,
+							stream_id: subscription.stream_id,
+							subscription_id,
+						});
+					}
+
+					if (
+						subscription._tag === "orchestration.graph" &&
+						event.payload.type === "agent_instance.renamed" &&
+						event.payload.group_id === subscription.group_id
+					) {
+						subscription.sequence += 1;
+						yield* enqueue({
+							...backend_trace(),
+							journal_sequence: event.journal_sequence,
+							kind: "orchestration.graph.patch",
+							payload: { graph: get_graph(subscription.group_id) },
+							sequence: subscription.sequence,
+							stream_id: subscription.stream_id,
+							subscription_id,
+						});
+					}
+				}
+			});
+		const live_connection: LiveConnection = { deliver_event };
+
+		yield* Effect.addFinalizer(() => close);
+
+		const reject_before_hello = (input: InboundControlEnvelope) =>
+			enqueue({
+				...backend_trace(),
+				correlation_id: input.message_id,
+				kind: "protocol.error",
+				payload: {
+					code: "protocol.handshake_required",
+					message: "A hello envelope is required before domain traffic.",
+					retryable: false,
+				},
+			});
+
+		const handle_hello = (hello: HelloEnvelope) =>
+			Effect.gen(function* () {
+				hellos.push(hello);
+
+				if (!hello.payload.supported_protocol_versions.includes(1)) {
+					yield* enqueue({
+						message_id: next_id("protocol_error"),
+						origin: "backend",
+						schema_version: 1,
+						sent_at: now(),
+						correlation_id: hello.message_id,
+						kind: "protocol.error",
+						payload: {
+							code: "protocol.unsupported_version",
+							message: "No offered protocol version is supported.",
+							retryable: false,
+						},
+					});
+
+					return;
+				}
+
+				negotiated = true;
+				live_connections.add(live_connection);
+				const replay = events.filter(
+					(event) => event.journal_sequence > hello.payload.last_journal_sequence,
+				);
+				const current_cursors = ordered_cursors(events);
+				const journal_sequence = events.at(-1)?.journal_sequence ?? 0;
+
+				yield* enqueue({
+					...backend_trace(),
+					correlation_id: hello.message_id,
+					kind: "welcome",
+					payload: {
+						connection_id: next_id("protocol_connection"),
+						current_event_cursors: current_cursors,
+						heartbeat_interval_ms: 100,
+						heartbeat_timeout_ms: 500,
+						journal_sequence,
+						stream_ticket: next_id("stream_ticket"),
+					},
+				});
+				yield* Effect.forEach(replay, enqueue, { discard: true });
+				yield* enqueue({
+					...backend_trace(),
+					correlation_id: hello.message_id,
+					kind: "replay.complete",
+					payload: {
+						current_event_cursors: current_cursors,
+						journal_sequence,
+					},
+				});
+
+				if (options.heartbeat_after_welcome) {
+					yield* enqueue({
+						...backend_trace(),
+						kind: "heartbeat.ping",
+						payload: { nonce: next_id("heartbeat_nonce") },
+					});
+				}
+			});
+
+		const handle_command = (command: CommandEnvelope) =>
+			Effect.gen(function* () {
+				command_attempts.push(command);
+				const fingerprint = command_fingerprint(command);
+				const previous = commands.get(command.message_id);
+
+				if (previous && previous.fingerprint !== fingerprint) {
+					yield* enqueue({
+						...backend_trace(),
+						causation_id: command.message_id,
+						correlation_id: command.message_id,
+						kind: "command.receipt",
+						payload: {
+							error: {
+								code: "command.id_conflict",
+								message: "The command id was reused with different content.",
+								retryable: false,
+							},
+							status: "rejected",
+						},
+						thread_id: command.thread_id,
+					});
+
+					return;
+				}
+
+				if (previous) {
+					yield* enqueue({
+						...backend_trace(),
+						causation_id: command.message_id,
+						correlation_id: command.message_id,
+						kind: "command.receipt",
+						payload: {
+							journal_sequence: previous.event.journal_sequence,
+							status: "duplicate",
+						},
+						thread_id: command.thread_id,
+					});
+
+					return;
+				}
+
+				const journal_sequence = events.length + 1;
+				let event: EventEnvelope;
+
+				if (command.payload.type === "agent_instance.rename") {
+					const stream_id = `orchestration:${command.payload.group_id}`;
+					const sequence =
+						events.filter((candidate) => candidate.stream_id === stream_id).length + 1;
+
+					rename_graph_agent(
+						command.payload.group_id,
+						command.payload.agent_id,
+						command.payload.display_name,
+						journal_sequence,
+					);
+					event = {
+						...backend_trace(),
+						causation_id: command.message_id,
+						correlation_id: command.message_id,
+						journal_sequence,
+						kind: "event",
+						payload: {
+							agent_id: command.payload.agent_id,
+							display_name: command.payload.display_name,
+							group_id: command.payload.group_id,
+							type: "agent_instance.renamed",
+						},
+						sequence,
+						stream_id,
+						thread_id: command.thread_id,
+					};
+				} else {
+					const title =
+						command.payload.type === "thread.create"
+							? command.payload.title
+							: `Command ${command.message_id}`;
+
+					event = {
+						...backend_trace(),
+						causation_id: command.message_id,
+						correlation_id: command.message_id,
+						journal_sequence,
+						kind: "event",
+						payload: { title, type: "thread.created" },
+						sequence: 1,
+						stream_id: `thread:${command.thread_id}`,
+						thread_id: command.thread_id,
+					};
+					const item: ThreadListItem = {
+						created_at: event.sent_at,
+						thread_id: command.thread_id,
+						title,
+						updated_at: event.sent_at,
+					};
+
+					threads.set(command.thread_id, item);
+				}
+
+				events.push(event);
+				commands.set(command.message_id, { envelope: command, event, fingerprint });
+				yield* enqueue({
+					...backend_trace(),
+					causation_id: command.message_id,
+					correlation_id: command.message_id,
+					kind: "command.receipt",
+					payload: { journal_sequence, status: "accepted" },
+					thread_id: command.thread_id,
+				});
+				yield* Effect.forEach(
+					live_connections,
+					(connection) => connection.deliver_event(event),
+					{ discard: true },
+				);
+			});
+
+		const handle_subscribe = (subscribe: SubscribeEnvelope) =>
+			Effect.gen(function* () {
+				subscription_attempts.push(subscribe);
+
+				if (subscriptions.has(subscribe.subscription_id)) {
+					return;
+				}
+
+				active_subscriptions += 1;
+
+				if (subscribe.payload.type === "orchestration.graph") {
+					const graph = get_graph(subscribe.payload.group_id);
+					const stream_id = `projection:orchestration.graph:${subscribe.payload.group_id}:${subscribe.subscription_id}`;
+
+					subscriptions.set(subscribe.subscription_id, {
+						_tag: "orchestration.graph",
+						group_id: subscribe.payload.group_id,
+						sequence: 0,
+						stream_id,
+					});
+					yield* enqueue({
+						...backend_trace(),
+						correlation_id: subscribe.message_id,
+						kind: "subscription.started",
+						payload: { stream_id },
+						subscription_id: subscribe.subscription_id,
+					});
+					yield* enqueue({
+						...backend_trace(),
+						journal_sequence: graph.journal_sequence,
+						kind: "orchestration.graph.snapshot",
+						payload: { graph },
+						sequence: 0,
+						stream_id,
+						subscription_id: subscribe.subscription_id,
+					});
+
+					return;
+				}
+
+				const stream_id = `projection:thread.list:${subscribe.subscription_id}`;
+
+				subscriptions.set(subscribe.subscription_id, {
+					_tag: "thread.list",
+					sequence: 0,
+					stream_id,
+				});
+				yield* enqueue({
+					...backend_trace(),
+					correlation_id: subscribe.message_id,
+					kind: "subscription.started",
+					payload: { stream_id },
+					subscription_id: subscribe.subscription_id,
+				});
+				yield* enqueue({
+					...backend_trace(),
+					journal_sequence: events.at(-1)?.journal_sequence ?? 0,
+					kind: "thread.list.snapshot",
+					payload: { threads: [...threads.values()] },
+					sequence: 0,
+					stream_id,
+					subscription_id: subscribe.subscription_id,
+				});
+			});
+
+		const handle = (input: InboundControlEnvelope) =>
+			Effect.gen(function* () {
+				received_kinds.push(input.kind);
+
+				if (!negotiated && input.kind !== "hello") {
+					yield* reject_before_hello(input);
+
+					return;
+				}
+
+				switch (input.kind) {
+					case "hello":
+						yield* handle_hello(input);
+
+						return;
+					case "command":
+						yield* handle_command(input);
+
+						return;
+					case "thread.list.query":
+						if (options.query_delay_ms) {
+							yield* Effect.sleep(options.query_delay_ms);
+						}
+
+						const result: OutboundControlEnvelope = {
+							...backend_trace(),
+							correlation_id: input.message_id,
+							kind: "thread.list.query.result",
+							payload: {
+								journal_sequence: events.at(-1)?.journal_sequence ?? 0,
+								threads: [...threads.values()],
+							},
+						};
+
+						yield* enqueue(result);
+
+						if (options.duplicate_query_result) {
+							yield* enqueue(result);
+						}
+
+						return;
+					case "thread.work.query":
+						yield* enqueue({
+							...backend_trace(),
+							correlation_id: input.message_id,
+							kind: "thread.work.query.result",
+							payload: {},
+						});
+
+						return;
+					case "terminal.list.query":
+						yield* enqueue({
+							...backend_trace(),
+							correlation_id: input.message_id,
+							kind: "terminal.list.query.result",
+							payload: { terminals: [] },
+						});
+
+						return;
+					case "subscribe":
+						yield* handle_subscribe(input);
+
+						return;
+					case "unsubscribe":
+						if (subscriptions.delete(input.subscription_id)) {
+							active_subscriptions -= 1;
+						}
+						yield* enqueue({
+							...backend_trace(),
+							correlation_id: input.message_id,
+							kind: "subscription.stopped",
+							payload: {},
+							subscription_id: input.subscription_id,
+						});
+
+						return;
+					case "ack":
+						acknowledgements.push(input);
+
+						return;
+					case "heartbeat.pong":
+						pongs.push(input);
+
+						return;
+					case "replay":
+						yield* Effect.forEach(
+							events.filter(
+								(event) =>
+									event.journal_sequence > input.payload.after_journal_sequence,
+							),
+							enqueue,
+							{ discard: true },
+						);
+
+						return;
+					case "orchestration.graph.query":
+						yield* enqueue({
+							...backend_trace(),
+							correlation_id: input.message_id,
+							kind: "orchestration.graph.query.result",
+							payload: { graph: get_graph(input.payload.group_id) },
+						});
+
+						return;
+				}
+			});
+
+		const receive = (input: unknown) =>
+			DecodeInboundControlEnvelope(input).pipe(
+				Effect.flatMap(handle),
+				Effect.catch(() => Effect.void),
+			);
+		const connection: ProtocolConnection = {
+			Close: close,
+			Closed: Deferred.await(closed),
+			Outbound: Stream.fromQueue(outbound),
+			Receive: receive,
+		};
+
+		return connection;
+	});
+	const layer = Layer.succeed(ProtocolServer, { Open: open });
+	const snapshot = (): FakeProtocolSnapshot => ({
+		acknowledgements: [...acknowledgements],
+		active_connections,
+		active_subscriptions,
+		command_attempts: [...command_attempts],
+		hellos: [...hellos],
+		opened_connections,
+		pongs: [...pongs],
+		received_kinds: [...received_kinds],
+		subscriptions: [...subscription_attempts],
+	});
+
+	return { layer, snapshot };
+}
