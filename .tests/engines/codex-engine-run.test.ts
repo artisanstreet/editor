@@ -283,6 +283,34 @@ describe("Codex engine run", () => {
 		});
 	});
 
+	it("steers the new turn started with resumed next text", async () => {
+		process.env.FAKE_APP_SERVER_SCENARIO = "resume-active-next-text";
+
+		const steer = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const engine = yield* CodexEngine;
+					const run = yield* engine.Open({
+						_tag: "resume",
+						artisan_run_id: "run-active-resume-next-text",
+						next_text: "Start a new turn",
+						resume_token: { native_thread_id: "thread-resumed" },
+						working_directory: "C:\\workspace",
+					});
+					const result = yield* run
+						.Send({ _tag: "steer", command_id: "steer-new-turn", text: "Continue" })
+						.pipe(Effect.exit);
+
+					yield* run.Send({ _tag: "close", command_id: "close-new-turn" });
+
+					return result;
+				}),
+			).pipe(Effect.provide(make_layer())),
+		);
+
+		expect(Exit.isSuccess(steer)).toBe(true);
+	});
+
 	it("ignores stale turn completion when a newer native turn is active", async () => {
 		process.env.FAKE_APP_SERVER_SCENARIO = "stale-turn";
 
@@ -290,14 +318,38 @@ describe("Codex engine run", () => {
 			Effect.scoped(
 				Effect.gen(function* () {
 					const engine = yield* CodexEngine;
+					const newer_turn_ready = yield* Deferred.make<void>();
+					const stale_completion_ready = yield* Deferred.make<void>();
 					const run = yield* engine.Open({
 						_tag: "start",
 						artisan_run_id: "run-stale-turn",
 						initial_text: "Start",
 						working_directory: "C:\\workspace",
 					});
+					const events_fiber = yield* run.Events.pipe(
+						Stream.tap((event) => {
+							if (event._tag !== "turn_state") {
+								return Effect.void;
+							}
 
-					yield* Effect.sleep(25);
+							if (event.state === "started" && event.turn_id === "turn-newer") {
+								return Deferred.succeed(newer_turn_ready, undefined).pipe(
+									Effect.ignore,
+								);
+							}
+
+							return event.state === "completed"
+								? Deferred.succeed(stale_completion_ready, undefined).pipe(
+										Effect.ignore,
+									)
+								: Effect.void;
+						}),
+						Stream.runCollect,
+						Effect.forkChild,
+					);
+
+					yield* Deferred.await(newer_turn_ready);
+					yield* Deferred.await(stale_completion_ready);
 
 					const steer = yield* run
 						.Send({ _tag: "steer", command_id: "steer-newer", text: "Continue" })
@@ -305,7 +357,7 @@ describe("Codex engine run", () => {
 
 					yield* run.Send({ _tag: "close", command_id: "close-stale-test" });
 
-					return { events: yield* run.Events.pipe(Stream.runCollect), steer };
+					return { events: yield* Fiber.join(events_fiber), steer };
 				}),
 			).pipe(Effect.provide(make_layer())),
 		);

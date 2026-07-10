@@ -169,7 +169,9 @@ function handle_request(request) {
 		const resumed = request.method === "thread/resume";
 		const turns =
 			resumed &&
-			["resume-active", "steer-failure"].includes(process.env.FAKE_APP_SERVER_SCENARIO)
+			["resume-active", "resume-active-next-text", "steer-failure"].includes(
+				process.env.FAKE_APP_SERVER_SCENARIO,
+			)
 				? [make_turn("turn-live")]
 				: [];
 		const thread = make_thread(thread_id, turns);
@@ -189,13 +191,17 @@ function handle_request(request) {
 
 	if (request.method === "turn/start") {
 		active_turn_id = `turn-${received.length}`;
-		write_frame({
-			method: "turn/started",
-			params: {
-				threadId: request.params.threadId,
-				turn: make_turn(active_turn_id),
-			},
-		});
+
+		if (process.env.FAKE_APP_SERVER_SCENARIO !== "resume-active-next-text") {
+			write_frame({
+				method: "turn/started",
+				params: {
+					threadId: request.params.threadId,
+					turn: make_turn(active_turn_id),
+				},
+			});
+		}
+
 		respond(request.id, { turn: make_turn(active_turn_id) });
 
 		if (process.env.FAKE_APP_SERVER_SCENARIO === "stale-turn") {
