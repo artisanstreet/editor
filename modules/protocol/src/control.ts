@@ -5,6 +5,7 @@ import {
 	IsoDateTime,
 	JournalSequence,
 	NegotiatedProtocolVersion,
+	PositiveInt,
 	ProtocolVersion,
 	RawOrigin,
 	SchemaVersion,
@@ -84,10 +85,15 @@ export type HelloEnvelope = typeof HelloEnvelope.Type;
 /** Confirms the negotiated version and exposes the backend's current replay cursors. */
 export const WelcomeEnvelope = Schema.Struct({
 	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
 	kind: Schema.Literal("welcome"),
 	payload: Schema.Struct({
+		connection_id: Identifier,
 		current_cursors: Schema.Array(StreamCursor),
+		heartbeat_interval_ms: PositiveInt,
+		heartbeat_timeout_ms: PositiveInt,
 		journal_sequence: JournalSequence,
+		stream_ticket: Identifier,
 	}),
 });
 
@@ -183,6 +189,17 @@ export const ProtocolErrorEnvelope = Schema.Struct({
 });
 
 export type ProtocolErrorEnvelope = typeof ProtocolErrorEnvelope.Type;
+
+/** Reports a negotiation failure before a protocol version can be selected. */
+export const PreNegotiationProtocolErrorEnvelope = Schema.Struct({
+	...BackendTraceMetadata,
+	causation_id: Schema.optional(Identifier),
+	correlation_id: Schema.optional(Identifier),
+	kind: Schema.Literal("protocol.error"),
+	payload: ProtocolErrorDetail,
+});
+
+export type PreNegotiationProtocolErrorEnvelope = typeof PreNegotiationProtocolErrorEnvelope.Type;
 
 /** Requests the current thread-list projection from the backend. */
 export const ThreadListQueryEnvelope = Schema.Struct({
@@ -317,9 +334,9 @@ export const ReplayCompleteEnvelope = Schema.Struct({
 
 export type ReplayCompleteEnvelope = typeof ReplayCompleteEnvelope.Type;
 
-/** Checks liveness for an otherwise idle control connection. */
+/** Checks client liveness from the backend side of an idle control connection. */
 export const HeartbeatPingEnvelope = Schema.Struct({
-	...NegotiatedFrontendTraceMetadata,
+	...NegotiatedBackendTraceMetadata,
 	kind: Schema.Literal("heartbeat.ping"),
 	payload: Schema.Struct({
 		nonce: Identifier,
@@ -328,9 +345,9 @@ export const HeartbeatPingEnvelope = Schema.Struct({
 
 export type HeartbeatPingEnvelope = typeof HeartbeatPingEnvelope.Type;
 
-/** Responds to a heartbeat using the ping identifier and nonce. */
+/** Responds from the frontend using the backend ping identifier and nonce. */
 export const HeartbeatPongEnvelope = Schema.Struct({
-	...NegotiatedBackendTraceMetadata,
+	...NegotiatedFrontendTraceMetadata,
 	correlation_id: Identifier,
 	kind: Schema.Literal("heartbeat.pong"),
 	payload: Schema.Struct({
@@ -349,7 +366,7 @@ export const InboundControlEnvelope = Schema.Union([
 	UnsubscribeEnvelope,
 	AckEnvelope,
 	ReplayEnvelope,
-	HeartbeatPingEnvelope,
+	HeartbeatPongEnvelope,
 ]);
 
 export type InboundControlEnvelope = typeof InboundControlEnvelope.Type;
@@ -357,6 +374,7 @@ export type InboundControlEnvelope = typeof InboundControlEnvelope.Type;
 /** Encodes every backend-to-client frame emitted on the control channel. */
 export const OutboundControlEnvelope = Schema.Union([
 	WelcomeEnvelope,
+	PreNegotiationProtocolErrorEnvelope,
 	CommandReceiptEnvelope,
 	EventEnvelope,
 	ProtocolErrorEnvelope,
@@ -366,7 +384,7 @@ export const OutboundControlEnvelope = Schema.Union([
 	ThreadListSnapshotEnvelope,
 	ThreadListUpsertEnvelope,
 	ReplayCompleteEnvelope,
-	HeartbeatPongEnvelope,
+	HeartbeatPingEnvelope,
 ]);
 
 export type OutboundControlEnvelope = typeof OutboundControlEnvelope.Type;

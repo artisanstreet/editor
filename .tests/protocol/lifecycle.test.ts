@@ -3,8 +3,10 @@ import { describe, expect, it } from "vitest";
 
 import {
 	DecodeInboundControlEnvelope,
+	DecodeOutboundControlEnvelope,
+	DecodeStreamEnvelope,
 	EncodeOutboundControlEnvelope,
-	StreamChunkEnvelope,
+	EncodeStreamEnvelope,
 	StreamEnvelope,
 } from "@artisan/protocol";
 
@@ -59,7 +61,8 @@ describe("protocol lifecycle", () => {
 
 	it("rejects unsupported or unrecognised inbound shapes", async () => {
 		const unsupported_version = {
-			...make_trace("heartbeat.ping", "frontend"),
+			...make_trace("heartbeat.pong", "frontend"),
+			correlation_id: "message_1",
 			protocol_version: 2,
 			payload: { nonce: "ping_1" },
 		};
@@ -74,6 +77,44 @@ describe("protocol lifecycle", () => {
 		await expect(
 			Effect.runPromise(DecodeInboundControlEnvelope(unknown_kind)),
 		).rejects.toBeDefined();
+	});
+
+	it("decodes welcome binding and heartbeat configuration", async () => {
+		const welcome = {
+			...make_trace("welcome", "backend"),
+			correlation_id: "hello_1",
+			payload: {
+				connection_id: "connection_1",
+				current_cursors: [],
+				heartbeat_interval_ms: 15_000,
+				heartbeat_timeout_ms: 45_000,
+				journal_sequence: 12,
+				stream_ticket: "stream_ticket_1",
+			},
+		};
+
+		await expect(Effect.runPromise(DecodeOutboundControlEnvelope(welcome))).resolves.toEqual(
+			welcome,
+		);
+	});
+
+	it("allows a versionless protocol error before negotiation", async () => {
+		const error = {
+			kind: "protocol.error",
+			message_id: "error_1",
+			origin: "backend",
+			schema_version: 1,
+			sent_at: "2026-07-10T08:00:00.000Z",
+			payload: {
+				code: "protocol.unsupported_version",
+				message: "No supported protocol version was offered.",
+				retryable: false,
+			},
+		};
+
+		await expect(Effect.runPromise(DecodeOutboundControlEnvelope(error))).resolves.toEqual(
+			error,
+		);
 	});
 
 	it("decodes thread-list queries and subscription requests", async () => {
@@ -121,19 +162,19 @@ describe("protocol lifecycle", () => {
 		);
 	});
 
-	it("decodes heartbeat pings and encodes correlated pongs", async () => {
+	it("encodes backend heartbeat pings and decodes correlated frontend pongs", async () => {
 		const ping = {
-			...make_trace("heartbeat.ping", "frontend"),
+			...make_trace("heartbeat.ping", "backend"),
 			payload: { nonce: "ping_1" },
 		};
 		const pong = {
-			...make_trace("heartbeat.pong", "backend"),
+			...make_trace("heartbeat.pong", "frontend"),
 			correlation_id: "message_1",
 			payload: { nonce: "ping_1" },
 		};
 
-		await expect(Effect.runPromise(DecodeInboundControlEnvelope(ping))).resolves.toEqual(ping);
-		await expect(Effect.runPromise(EncodeOutboundControlEnvelope(pong))).resolves.toEqual(pong);
+		await expect(Effect.runPromise(EncodeOutboundControlEnvelope(ping))).resolves.toEqual(ping);
+		await expect(Effect.runPromise(DecodeInboundControlEnvelope(pong))).resolves.toEqual(pong);
 	});
 
 	it("validates reserved stream frames with portable encoded binary data", async () => {
@@ -153,9 +194,7 @@ describe("protocol lifecycle", () => {
 			},
 		};
 
-		const decoded = await Effect.runPromise(
-			Schema.decodeUnknownEffect(StreamEnvelope, { onExcessProperty: "error" })(input),
-		);
+		const decoded = await Effect.runPromise(DecodeStreamEnvelope(input));
 
 		expect(decoded).toEqual({
 			...input,
@@ -164,9 +203,7 @@ describe("protocol lifecycle", () => {
 				encoding: "base64",
 			},
 		});
-		await expect(
-			Effect.runPromise(Schema.encodeUnknownEffect(StreamChunkEnvelope)(decoded)),
-		).resolves.toEqual(input);
+		await expect(Effect.runPromise(EncodeStreamEnvelope(decoded))).resolves.toEqual(input);
 	});
 
 	it("validates stream binding, readiness, and end frames", async () => {

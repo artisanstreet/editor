@@ -14,6 +14,13 @@ export const ProtocolVersion = Schema.Int.check(
 	}),
 );
 
+/** Validates a positive integer used for bounded timing and capacity values. */
+export const PositiveInt = Schema.Int.check(
+	Schema.isGreaterThan(0, {
+		message: "Expected a positive integer",
+	}),
+);
+
 /** Lists the protocol versions supported by this Artisan V1 implementation. */
 export const SupportedProtocolVersions = [1] as const;
 
