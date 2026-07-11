@@ -68,6 +68,16 @@ import {
 	GuidanceProviderRegistry,
 	make_platform_guidance_provider_registry_layer,
 } from "../guidance/provider-mirrors";
+import { make_codex_model_behaviour_probe_layer } from "../model-behaviour/codex-probe";
+import { ModelBehaviourConfigFilesLive } from "../model-behaviour/model-behaviour-config-files";
+import {
+	EmptyModelBehaviourProviderRegistryLive,
+	make_desktop_model_behaviour_provider_registry_layer,
+	ModelBehaviourProviderRegistry,
+} from "../model-behaviour/model-behaviour-provider";
+import { ModelBehaviourRepositoryLive } from "../model-behaviour/model-behaviour-repository";
+import { ModelBehaviourRegistryError } from "../model-behaviour/model-behaviour-registry";
+import { ModelBehaviourServiceLive } from "../model-behaviour/model-behaviour-service";
 
 export interface BackendOptions {
 	readonly database_path: string;
@@ -75,6 +85,10 @@ export interface BackendOptions {
 	readonly guidance?: Partial<GlobalGuidanceServiceOptions>;
 	readonly guidance_provider_registry?: Layer.Layer<GuidanceProviderRegistry>;
 	readonly migrations_path: string;
+	readonly model_behaviour_provider_registry?: Layer.Layer<
+		ModelBehaviourProviderRegistry,
+		ModelBehaviourRegistryError
+	>;
 	readonly protocol?: Partial<ProtocolConnectionOptions>;
 	readonly project_locator?: Layer.Layer<ProjectLocator>;
 	readonly retention_clock?: Layer.Layer<ThreadRetentionClock>;
@@ -93,9 +107,18 @@ export interface DesktopGuidanceOptions {
 	readonly providers?: ReadonlyArray<GlobalGuidanceProvider>;
 }
 
+/** Configures provider-native Model Behaviour discovery for desktop composition. */
+export interface DesktopModelBehaviourOptions {
+	readonly backups_directory?: string;
+	readonly codex_command?: string;
+	readonly codex_home?: string;
+	readonly home_directory?: string;
+}
+
 /** Extends the portable backend options with desktop provider-path discovery. */
 export interface DesktopBackendOptions extends BackendOptions {
 	readonly guidance_platform?: DesktopGuidanceOptions;
+	readonly model_behaviour_platform?: DesktopModelBehaviourOptions;
 }
 
 export function make_backend_layer(options: BackendOptions) {
@@ -124,6 +147,16 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(guidance_repository),
 		Layer.provideMerge(GuidanceFileStoreLive),
 		Layer.provideMerge(options.guidance_provider_registry ?? EmptyGuidanceProviderRegistryLive),
+		Layer.provideMerge(infrastructure),
+	);
+	const model_behaviour_repository = ModelBehaviourRepositoryLive.pipe(
+		Layer.provideMerge(infrastructure),
+	);
+	const model_behaviour = ModelBehaviourServiceLive.pipe(
+		Layer.provideMerge(model_behaviour_repository),
+		Layer.provideMerge(
+			options.model_behaviour_provider_registry ?? EmptyModelBehaviourProviderRegistryLive,
+		),
 		Layer.provideMerge(infrastructure),
 	);
 	const orchestration = AgentOrchestratorLive.pipe(
@@ -219,6 +252,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(metadata_refinement),
 		Layer.provideMerge(project_affinity_coordination),
 		Layer.provideMerge(guidance),
+		Layer.provideMerge(model_behaviour),
 	);
 }
 
@@ -254,12 +288,38 @@ function make_desktop_guidance_registry(options: DesktopBackendOptions) {
 	}).pipe(Layer.provide(GuidanceFileStoreLive));
 }
 
+function make_desktop_model_behaviour_registry(options: DesktopBackendOptions) {
+	const configured_home_directory = options.model_behaviour_platform?.home_directory;
+	const home_directory = configured_home_directory ?? homedir();
+	const codex_home =
+		options.model_behaviour_platform?.codex_home ??
+		(configured_home_directory === undefined ? process.env.CODEX_HOME : undefined) ??
+		join(home_directory, ".codex");
+	const model_behaviour_directory = join(dirname(options.database_path), "model-behaviour");
+	const probe = make_codex_model_behaviour_probe_layer({
+		...(options.model_behaviour_platform?.codex_command === undefined
+			? {}
+			: { command: options.model_behaviour_platform.codex_command }),
+		cwd: dirname(options.database_path),
+	}).pipe(Layer.provide(NodeProcessRunnerLive));
+
+	return make_desktop_model_behaviour_provider_registry_layer({
+		backups_directory:
+			options.model_behaviour_platform?.backups_directory ??
+			join(model_behaviour_directory, "backups"),
+		codex_config_path: join(codex_home, "config.toml"),
+	}).pipe(Layer.provideMerge(ModelBehaviourConfigFilesLive), Layer.provideMerge(probe));
+}
+
 /** Builds the production desktop layer with opinionated platform guidance discovery. */
 export function make_desktop_backend_layer(options: DesktopBackendOptions) {
 	return make_backend_layer({
 		...options,
 		guidance_provider_registry:
 			options.guidance_provider_registry ?? make_desktop_guidance_registry(options),
+		model_behaviour_provider_registry:
+			options.model_behaviour_provider_registry ??
+			make_desktop_model_behaviour_registry(options),
 		project_locator:
 			options.project_locator ??
 			make_node_project_locator_layer().pipe(Layer.provide(NodeProcessRunnerLive)),

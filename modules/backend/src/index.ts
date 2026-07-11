@@ -28,6 +28,83 @@ export {
 	make_runtime_guidance_adapter,
 	make_unsupported_guidance_adapter,
 } from "./guidance/provider-mirrors";
+export {
+	CodexModelBehaviourProbe,
+	make_codex_model_behaviour_probe_layer,
+	type CodexModelBehaviourProbeAvailable,
+	type CodexModelBehaviourProbeOptions,
+	type CodexModelBehaviourProbeResult,
+	type CodexModelBehaviourProbeUnavailable,
+} from "./model-behaviour/codex-probe";
+export {
+	codex_auto_compaction_native_key,
+	CodexModelBehaviourConfigError,
+	patch_codex_model_behaviour,
+	read_codex_model_behaviour,
+	type CodexModelBehaviourValue,
+} from "./model-behaviour/codex-config";
+export {
+	make_model_behaviour_config_files_layer,
+	ModelBehaviourConfigFileBackupError,
+	ModelBehaviourConfigFileReadError,
+	ModelBehaviourConfigFileReplaceError,
+	ModelBehaviourConfigFileRestoreError,
+	ModelBehaviourConfigFiles,
+	ModelBehaviourConfigFilesLive,
+	ModelBehaviourConfigFileWriteError,
+	type ModelBehaviourConfigFileHooks,
+	type ModelBehaviourConfigFileReplaceOptions,
+	type ModelBehaviourConfigFileReplaceResult,
+	type ModelBehaviourConfigFileSnapshot,
+} from "./model-behaviour/model-behaviour-config-files";
+export {
+	EmptyModelBehaviourProviderRegistryLive,
+	make_codex_model_behaviour_provider,
+	make_desktop_model_behaviour_provider_registry_layer,
+	make_inactive_model_behaviour_provider,
+	make_model_behaviour_provider_registry_layer,
+	ModelBehaviourProviderError,
+	ModelBehaviourProviderRegistry,
+	type DesktopModelBehaviourProviderOptions,
+	type ModelBehaviourProviderAdapter,
+	type ModelBehaviourProviderApplyInput,
+	type ModelBehaviourProviderApplyResult,
+	type ModelBehaviourProviderErrorCode,
+	type ModelBehaviourProviderObservation,
+} from "./model-behaviour/model-behaviour-provider";
+export {
+	BuildModelBehaviourCapabilities,
+	make_codex_auto_compaction_mapping,
+	make_model_behaviour_capability_registry_layer,
+	make_unavailable_auto_compaction_mapping,
+	make_unsupported_auto_compaction_mapping,
+	ModelBehaviourCapabilityRegistry,
+	ModelBehaviourRegistryError,
+	type ModelBehaviourProviderMapping,
+} from "./model-behaviour/model-behaviour-registry";
+export {
+	model_behaviour_thread_id,
+	ModelBehaviourRepository,
+	ModelBehaviourRepositoryLive,
+	type ModelBehaviourCommit,
+	type ModelBehaviourCommitResult,
+	type ModelBehaviourEvent,
+	type ModelBehaviourOperation,
+	type ModelBehaviourPreflight,
+	type ModelBehaviourProviderCommit,
+	type ModelBehaviourReadResult,
+	type ModelBehaviourRepositoryError,
+} from "./model-behaviour/model-behaviour-repository";
+export {
+	ModelBehaviourConflict,
+	ModelBehaviourInvariantError,
+	ModelBehaviourService,
+	ModelBehaviourServiceLive,
+	type ModelBehaviourMutationResult,
+	type ModelBehaviourMutationTrace,
+	type ModelBehaviourServiceError,
+} from "./model-behaviour/model-behaviour-service";
+export { hash_model_behaviour_value } from "./model-behaviour/model-behaviour-value";
 export { ThreadErasure, ThreadErasureFailure } from "./threads/thread-erasure";
 export {
 	ThreadRetention,
@@ -237,4 +314,5 @@ export {
 	type BackendOptions,
 	type DesktopBackendOptions,
 	type DesktopGuidanceOptions,
+	type DesktopModelBehaviourOptions,
 } from "./runtime/backend-runtime";
