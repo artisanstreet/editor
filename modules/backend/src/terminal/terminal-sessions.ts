@@ -24,6 +24,7 @@ import {
 import {
 	TerminalInvariantError,
 	TerminalNotActive,
+	TerminalNotFound,
 	TerminalRepository,
 	type StoredTerminalSession,
 	type TerminalCommand,
@@ -66,6 +67,7 @@ export class TerminalSessionService extends Context.Service<
 		readonly Output: (
 			terminal_id: string,
 		) => Effect.Effect<Stream.Stream<Uint8Array>, TerminalSessionError>;
+		readonly QuiesceThread: (thread_id: string) => Effect.Effect<void, TerminalSessionError>;
 	}
 >()("Artisan/TerminalSessionService") {}
 
@@ -112,6 +114,7 @@ export const TerminalSessionServiceLive = Layer.effect(
 		const repository = yield* TerminalRepository;
 		const service_scope = yield* Scope.make();
 		const live_terminals = yield* Ref.make(new Map<string, LiveTerminal>());
+		const quiesced_threads = yield* Ref.make(new Set<string>());
 		const command_lock = yield* Semaphore.make(1);
 
 		const RemoveLive = (terminal_id: string, generation: number) =>
@@ -377,6 +380,11 @@ export const TerminalSessionServiceLive = Layer.effect(
 		const HandleUnlocked = (command: CommandEnvelope) =>
 			Effect.gen(function* () {
 				const payload = command.payload as TerminalCommand;
+
+				if ((yield* Ref.get(quiesced_threads)).has(command.thread_id)) {
+					return yield* new TerminalNotFound({ terminal_id: payload.terminal_id });
+				}
+
 				const claim = yield* repository.Claim(command, metadata.instance_id);
 
 				if (claim.status === "duplicate") {
@@ -408,6 +416,28 @@ export const TerminalSessionServiceLive = Layer.effect(
 				);
 			}
 		});
+		const QuiesceThread = (thread_id: string) =>
+			Semaphore.withPermit(command_lock)(
+				Effect.gen(function* () {
+					yield* Ref.update(quiesced_threads, (current) =>
+						new Set(current).add(thread_id),
+					);
+					const terminals = [...(yield* Ref.get(live_terminals)).values()].filter(
+						(live) => live.thread_id === thread_id,
+					);
+
+					yield* Effect.forEach(
+						terminals,
+						(live) => live.handle.Close.pipe(Effect.ignore),
+						{ concurrency: "unbounded", discard: true },
+					);
+					yield* Effect.forEach(
+						terminals,
+						(live) => Deferred.await(live.done).pipe(Effect.ignore),
+						{ concurrency: "unbounded", discard: true },
+					);
+				}),
+			);
 
 		const Shutdown = Effect.gen(function* () {
 			const terminals = [...(yield* Ref.get(live_terminals)).values()];
@@ -439,6 +469,7 @@ export const TerminalSessionServiceLive = Layer.effect(
 							: Effect.fail(new TerminalNotActive({ terminal_id }));
 					}),
 				),
+			QuiesceThread,
 		};
 	}),
 );

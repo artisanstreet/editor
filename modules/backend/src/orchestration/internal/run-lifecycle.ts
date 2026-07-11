@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, ne } from "drizzle-orm";
+import { and, asc, eq, inArray, ne, notExists } from "drizzle-orm";
 import { Effect, Schema } from "effect";
 
 import type { EngineObservation, EngineRunTerminalState } from "@artisan/engines";
@@ -14,6 +14,7 @@ import {
 	Assignments,
 	OrchestrationArtifacts,
 	OrchestrationGroups,
+	ThreadErasureClaims,
 } from "../../persistence/schema";
 import {
 	AgentGraphInvalid,
@@ -68,7 +69,22 @@ export function make_run_lifecycle(
 		database.client
 			.update(AgentRuns)
 			.set({ dispatch_status: "dispatching", owner_instance_id: instance_id })
-			.where(and(eq(AgentRuns.run_id, run_id), eq(AgentRuns.dispatch_status, "queued")))
+			.where(
+				and(
+					eq(AgentRuns.run_id, run_id),
+					eq(AgentRuns.dispatch_status, "queued"),
+					notExists(
+						database.client
+							.select({ thread_id: ThreadErasureClaims.thread_id })
+							.from(OrchestrationGroups)
+							.innerJoin(
+								ThreadErasureClaims,
+								eq(ThreadErasureClaims.thread_id, OrchestrationGroups.thread_id),
+							)
+							.where(eq(OrchestrationGroups.group_id, AgentRuns.group_id)),
+					),
+				),
+			)
 			.returning({ run_id: AgentRuns.run_id })
 			.pipe(
 				Effect.map((rows) => rows.length === 1),

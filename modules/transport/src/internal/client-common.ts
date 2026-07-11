@@ -49,6 +49,8 @@ export type PendingRequestEnvelope = Extract<
 			| "orchestration.graph.query"
 			| "terminal.list.query"
 			| "thread.list.query"
+			| "thread.retention.query"
+			| "thread.retention.update"
 			| "thread.work.query";
 	}
 >;
@@ -62,6 +64,7 @@ export type PendingResultEnvelope = Extract<
 			| "orchestration.graph.query.result"
 			| "terminal.list.query.result"
 			| "thread.list.query.result"
+			| "thread.retention.query.result"
 			| "thread.work.query.result";
 	}
 >;

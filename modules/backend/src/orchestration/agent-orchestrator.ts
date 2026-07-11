@@ -1,4 +1,4 @@
-import { Context, Effect, Exit, Layer, Ref, Scope, Stream } from "effect";
+import { Context, Deferred, Effect, Exit, Layer, Ref, Scope, Stream } from "effect";
 
 import { EngineRegistry, type EngineCommand, type EngineRun } from "@artisan/engines";
 import type { CommandEnvelope } from "@artisan/protocol";
@@ -9,10 +9,13 @@ import {
 	type OrchestrationError,
 	type PendingWork,
 } from "../persistence/orchestration-repository";
+import { MakeThreadDispatchFence } from "../threads/internal/thread-dispatch-fence";
 
 interface LiveRun {
+	readonly done: Deferred.Deferred<void>;
 	readonly run: EngineRun;
 	readonly scope: Scope.Scope;
+	readonly thread_id: string;
 }
 
 type DispatchState = "idle" | "running" | "pending";
@@ -25,6 +28,7 @@ export class AgentOrchestrator extends Context.Service<
 			command: CommandEnvelope,
 		) => Effect.Effect<AcceptedOrchestrationCommand, OrchestrationError>;
 		readonly Recover: Effect.Effect<void, OrchestrationError>;
+		readonly QuiesceThread: (thread_id: string) => Effect.Effect<void>;
 	}
 >()("Artisan/AgentOrchestrator") {}
 
@@ -36,6 +40,7 @@ export const AgentOrchestratorLive = Layer.effect(
 		const service_scope = yield* Scope.make();
 		const live_runs = yield* Ref.make(new Map<string, LiveRun>());
 		const dispatch_state = yield* Ref.make<DispatchState>("idle");
+		const dispatch_fence = yield* MakeThreadDispatchFence;
 
 		const RemoveLiveRun = (run_id: string, run_scope: Scope.Scope) =>
 			Effect.gen(function* () {
@@ -86,10 +91,15 @@ export const AgentOrchestratorLive = Layer.effect(
 				Effect.andThen(live.run.Closed),
 				Effect.asVoid,
 				Effect.catch(() => Effect.void),
-				Effect.ensuring(RemoveLiveRun(work.run_id, live.scope)),
+				Effect.ensuring(
+					Effect.gen(function* () {
+						yield* Deferred.succeed(live.done, undefined);
+						yield* RemoveLiveRun(work.run_id, live.scope);
+					}),
+				),
 			);
 
-		const StartRun = (work: PendingWork) =>
+		const StartRunUnfenced = (work: PendingWork) =>
 			Effect.gen(function* () {
 				if ((yield* Ref.get(live_runs)).has(work.run_id)) {
 					return;
@@ -153,7 +163,13 @@ export const AgentOrchestratorLive = Layer.effect(
 					return;
 				}
 
-				const live = { run, scope: run_scope } satisfies LiveRun;
+				const done = yield* Deferred.make<void>();
+				const live = {
+					done,
+					run,
+					scope: run_scope,
+					thread_id: work.thread_id,
+				} satisfies LiveRun;
 				yield* Ref.update(live_runs, (runs) => new Map(runs).set(work.run_id, live));
 				const completed = yield* repository.CompleteOutbox(work.command_id).pipe(
 					Effect.as(true),
@@ -169,8 +185,10 @@ export const AgentOrchestratorLive = Layer.effect(
 
 				yield* Effect.forkIn(ObserveRun(work, live), service_scope);
 			});
+		const StartRun = (work: PendingWork) =>
+			dispatch_fence.Run(work.thread_id, StartRunUnfenced(work)).pipe(Effect.asVoid);
 
-		const SendToLiveRun = (work: PendingWork) =>
+		const SendToLiveRunUnfenced = (work: PendingWork) =>
 			Effect.gen(function* () {
 				const claimed = yield* repository.ClaimOutbox(work.command_id);
 
@@ -232,6 +250,8 @@ export const AgentOrchestratorLive = Layer.effect(
 					yield* repository.MarkOutboxUndeliverable(work.command_id);
 				}
 			});
+		const SendToLiveRun = (work: PendingWork) =>
+			dispatch_fence.Run(work.thread_id, SendToLiveRunUnfenced(work)).pipe(Effect.asVoid);
 
 		const DispatchPending = Effect.gen(function* () {
 			const pending = yield* repository.GetPending();
@@ -299,10 +319,37 @@ export const AgentOrchestratorLive = Layer.effect(
 			yield* repository.MarkInterrupted();
 			yield* WakeDispatcher;
 		});
+		const QuiesceLiveRuns = (thread_id: string) =>
+			Effect.gen(function* () {
+				const runs = yield* Ref.modify(live_runs, (current) => {
+					const matching = [...current.entries()].filter(
+						([, live]) => live.thread_id === thread_id,
+					);
+					const next = new Map(current);
+
+					for (const [run_id] of matching) {
+						next.delete(run_id);
+					}
+
+					return [matching.map(([, live]) => live), next] as const;
+				});
+
+				yield* Effect.forEach(
+					runs,
+					(live) => Scope.close(live.scope, Exit.succeed(undefined)),
+					{ concurrency: "unbounded", discard: true },
+				);
+				yield* Effect.forEach(runs, (live) => Deferred.await(live.done), {
+					concurrency: "unbounded",
+					discard: true,
+				});
+			});
+		const QuiesceThread = (thread_id: string) =>
+			dispatch_fence.Quiesce(thread_id, QuiesceLiveRuns(thread_id));
 
 		yield* repository.MarkInterrupted();
 		yield* WakeDispatcher;
 
-		return { Handle, Recover };
+		return { Handle, QuiesceThread, Recover };
 	}),
 );

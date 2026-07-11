@@ -87,6 +87,7 @@ export interface PendingAgentRun {
 	readonly run_id: string;
 	readonly scope: AssignmentScope;
 	readonly summary_contract: string;
+	readonly thread_id: string;
 	readonly workspace: AssignmentWorkspace;
 }
 

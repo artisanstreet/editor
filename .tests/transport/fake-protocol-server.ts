@@ -14,12 +14,20 @@ import {
 	type StreamCursor,
 	type SubscribeEnvelope,
 	type ThreadListItem,
+	type ThreadRetentionPolicy,
+	type ThreadRetentionUpdateEnvelope,
 } from "@artisan/protocol";
 
 interface StoredCommand {
 	readonly envelope: CommandEnvelope;
 	readonly event: EventEnvelope;
 	readonly fingerprint: string;
+}
+
+interface StoredRetentionUpdate {
+	readonly envelope: ThreadRetentionUpdateEnvelope;
+	readonly fingerprint: string;
+	readonly journal_sequence: number;
 }
 
 type LocalSubscription =
@@ -56,11 +64,13 @@ export interface FakeProtocolSnapshot {
 	readonly opened_connections: number;
 	readonly pongs: ReadonlyArray<HeartbeatPongEnvelope>;
 	readonly received_kinds: ReadonlyArray<InboundControlEnvelope["kind"]>;
+	readonly retention_update_attempts: ReadonlyArray<ThreadRetentionUpdateEnvelope>;
 	readonly subscriptions: ReadonlyArray<SubscribeEnvelope>;
 }
 
 /** Supplies a Layer and observations for one durable fake backend. */
 export interface FakeProtocolHarness {
+	readonly EraseThread: (thread_id: string) => Effect.Effect<void>;
 	readonly layer: Layer.Layer<ProtocolServer>;
 	readonly snapshot: () => FakeProtocolSnapshot;
 }
@@ -92,8 +102,11 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 	const live_connections = new Set<LiveConnection>();
 	const pongs: Array<HeartbeatPongEnvelope> = [];
 	const received_kinds: Array<InboundControlEnvelope["kind"]> = [];
+	const retention_update_attempts: Array<ThreadRetentionUpdateEnvelope> = [];
+	const retention_updates = new Map<string, StoredRetentionUpdate>();
 	const subscription_attempts: Array<SubscribeEnvelope> = [];
 	const threads = new Map<string, ThreadListItem>();
+	let retention_policy: ThreadRetentionPolicy = { enabled: true, inactivity_days: 7 };
 	let active_connections = 0;
 	let active_subscriptions = 0;
 	let id_sequence = 0;
@@ -229,6 +242,22 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 							journal_sequence: event.journal_sequence,
 							kind: "thread.list.upsert",
 							payload: threads.get(event.thread_id)!,
+							sequence: subscription.sequence,
+							stream_id: subscription.stream_id,
+							subscription_id,
+						});
+					}
+
+					if (
+						subscription._tag === "thread.list" &&
+						event.payload.type === "thread.erased"
+					) {
+						subscription.sequence += 1;
+						yield* enqueue({
+							...backend_trace(),
+							journal_sequence: event.journal_sequence,
+							kind: "thread.list.remove",
+							payload: { thread_id: event.thread_id },
 							sequence: subscription.sequence,
 							stream_id: subscription.stream_id,
 							subscription_id,
@@ -422,9 +451,17 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 						thread_id: command.thread_id,
 					};
 					const item: ThreadListItem = {
+						activity_version: 0,
 						created_at: event.sent_at,
+						current_goal: title,
+						last_activity_at: event.sent_at,
+						live_status: "Idle",
+						metadata_version: 0,
+						pinned: false,
 						thread_id: command.thread_id,
 						title,
+						title_locked: false,
+						title_source: "initial",
 						updated_at: event.sent_at,
 					};
 
@@ -440,6 +477,89 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 					kind: "command.receipt",
 					payload: { journal_sequence, status: "accepted" },
 					thread_id: command.thread_id,
+				});
+				yield* Effect.forEach(
+					live_connections,
+					(connection) => connection.deliver_event(event),
+					{ discard: true },
+				);
+			});
+
+		const handle_retention_update = (update: ThreadRetentionUpdateEnvelope) =>
+			Effect.gen(function* () {
+				retention_update_attempts.push(update);
+				const fingerprint = JSON.stringify(update);
+				const previous = retention_updates.get(update.message_id);
+				const internal_thread_id = "settings/thread-retention";
+
+				if (previous && previous.fingerprint !== fingerprint) {
+					yield* enqueue({
+						...backend_trace(),
+						causation_id: update.message_id,
+						correlation_id: update.message_id,
+						kind: "command.receipt",
+						payload: {
+							error: {
+								code: "command.id_conflict",
+								message: "The command id was reused with different content.",
+								retryable: false,
+							},
+							status: "rejected",
+						},
+						thread_id: internal_thread_id,
+					});
+
+					return;
+				}
+
+				if (previous) {
+					yield* enqueue({
+						...backend_trace(),
+						causation_id: update.message_id,
+						correlation_id: update.message_id,
+						kind: "command.receipt",
+						payload: {
+							journal_sequence: previous.journal_sequence,
+							status: "duplicate",
+						},
+						thread_id: internal_thread_id,
+					});
+
+					return;
+				}
+
+				const journal_sequence = events.length + 1;
+				const stream_id = `thread:${internal_thread_id}`;
+				const sequence = events.filter((event) => event.stream_id === stream_id).length + 1;
+				const event: EventEnvelope = {
+					...backend_trace(),
+					causation_id: update.message_id,
+					correlation_id: update.message_id,
+					journal_sequence,
+					kind: "event",
+					payload: {
+						policy: update.payload,
+						type: "thread.retention.updated",
+					},
+					sequence,
+					stream_id,
+					thread_id: internal_thread_id,
+				};
+
+				retention_policy = update.payload;
+				events.push(event);
+				retention_updates.set(update.message_id, {
+					envelope: update,
+					fingerprint,
+					journal_sequence,
+				});
+				yield* enqueue({
+					...backend_trace(),
+					causation_id: update.message_id,
+					correlation_id: update.message_id,
+					kind: "command.receipt",
+					payload: { journal_sequence, status: "accepted" },
+					thread_id: internal_thread_id,
 				});
 				yield* Effect.forEach(
 					live_connections,
@@ -554,6 +674,19 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 						}
 
 						return;
+					case "thread.retention.query":
+						yield* enqueue({
+							...backend_trace(),
+							correlation_id: input.message_id,
+							kind: "thread.retention.query.result",
+							payload: retention_policy,
+						});
+
+						return;
+					case "thread.retention.update":
+						yield* handle_retention_update(input);
+
+						return;
 					case "thread.work.query":
 						yield* enqueue({
 							...backend_trace(),
@@ -635,6 +768,35 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 		return connection;
 	});
 	const layer = Layer.succeed(ProtocolServer, { Open: open });
+	const EraseThread = (thread_id: string) =>
+		Effect.gen(function* () {
+			if (!threads.delete(thread_id)) {
+				return;
+			}
+
+			const journal_sequence = events.length + 1;
+			const stream_id = `thread:${thread_id}`;
+			const sequence = events.filter((event) => event.stream_id === stream_id).length + 1;
+			const event_id = `thread_erased_${thread_id}`;
+			const event: EventEnvelope = {
+				...backend_trace(),
+				causation_id: event_id,
+				correlation_id: event_id,
+				journal_sequence,
+				kind: "event",
+				payload: { type: "thread.erased" },
+				sequence,
+				stream_id,
+				thread_id,
+			};
+
+			events.push(event);
+			yield* Effect.forEach(
+				live_connections,
+				(connection) => connection.deliver_event(event),
+				{ discard: true },
+			);
+		});
 	const snapshot = (): FakeProtocolSnapshot => ({
 		acknowledgements: [...acknowledgements],
 		active_connections,
@@ -644,8 +806,9 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 		opened_connections,
 		pongs: [...pongs],
 		received_kinds: [...received_kinds],
+		retention_update_attempts: [...retention_update_attempts],
 		subscriptions: [...subscription_attempts],
 	});
 
-	return { layer, snapshot };
+	return { EraseThread, layer, snapshot };
 }

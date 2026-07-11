@@ -16,9 +16,11 @@ import {
 	JournalEvents,
 	TerminalCommands,
 	TerminalSessions,
+	ThreadErasureClaims,
 	Threads,
 } from "../persistence/schema";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import { RecordThreadActivity } from "../threads/internal/thread-activity";
 
 export type TerminalCommand = Extract<
 	CommandEnvelope["payload"],
@@ -323,6 +325,13 @@ export const TerminalRepositoryLive = Layer.effect(
 					type: "terminal.lifecycle" as const,
 				} satisfies TerminalLifecycleEvent;
 
+				yield* RecordThreadActivity(
+					transaction,
+					input.terminal.thread_id,
+					occurred_at,
+					payload,
+				);
+
 				if (stream) {
 					yield* transaction
 						.update(EventStreams)
@@ -488,6 +497,18 @@ export const TerminalRepositoryLive = Layer.effect(
 				.transaction((transaction) =>
 					Effect.gen(function* () {
 						const payload = command.payload as TerminalCommand;
+						const [erasure_claim] = yield* transaction
+							.select({ thread_id: ThreadErasureClaims.thread_id })
+							.from(ThreadErasureClaims)
+							.where(eq(ThreadErasureClaims.thread_id, command.thread_id))
+							.limit(1);
+
+						if (erasure_claim) {
+							return yield* new TerminalNotFound({
+								terminal_id: payload.terminal_id,
+							});
+						}
+
 						const [existing_command] = yield* transaction
 							.select({
 								agent_id: JournalCommands.agent_id,

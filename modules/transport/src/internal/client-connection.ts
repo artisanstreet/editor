@@ -362,6 +362,7 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 					case "orchestration.graph.query.result":
 					case "terminal.list.query.result":
 					case "thread.list.query.result":
+					case "thread.retention.query.result":
 					case "thread.work.query.result":
 						return handlers.requests.Resolve(envelope);
 					case "event":
@@ -396,6 +397,7 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 						return handlers.subscriptions.HandleStarted(envelope);
 					case "thread.list.snapshot":
 					case "thread.list.upsert":
+					case "thread.list.remove":
 					case "orchestration.graph.snapshot":
 					case "orchestration.graph.patch":
 						return handlers.subscriptions.HandleUpdate(envelope);

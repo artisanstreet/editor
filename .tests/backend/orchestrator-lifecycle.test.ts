@@ -281,7 +281,9 @@ describe("agent orchestrator lifecycle supervision", () => {
 				}),
 			),
 		);
-		await new Promise((resolve) => setTimeout(resolve, 30));
+		await expect
+			.poll(() => instrumented.instrumentation.events_consumed(), { timeout: 2_000 })
+			.toBe(1);
 
 		await runtime.dispose();
 

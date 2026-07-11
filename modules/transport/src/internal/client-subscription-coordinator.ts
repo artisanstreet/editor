@@ -48,7 +48,8 @@ type ProjectionEnvelope = Extract<
 			| "orchestration.graph.patch"
 			| "orchestration.graph.snapshot"
 			| "thread.list.snapshot"
-			| "thread.list.upsert";
+			| "thread.list.upsert"
+			| "thread.list.remove";
 	}
 >;
 
@@ -311,7 +312,9 @@ export const make_client_subscription_coordinator = (
 		): ProjectionOffer => {
 			if (
 				subscription._tag === "thread.list" &&
-				(envelope.kind === "thread.list.snapshot" || envelope.kind === "thread.list.upsert")
+				(envelope.kind === "thread.list.snapshot" ||
+					envelope.kind === "thread.list.upsert" ||
+					envelope.kind === "thread.list.remove")
 			) {
 				const update: ThreadListUpdate =
 					envelope.kind === "thread.list.snapshot"
@@ -320,11 +323,17 @@ export const make_client_subscription_coordinator = (
 								threads: envelope.payload.threads,
 								type: "snapshot",
 							}
-						: {
-								journal_sequence: envelope.journal_sequence,
-								thread: envelope.payload,
-								type: "upsert",
-							};
+						: envelope.kind === "thread.list.upsert"
+							? {
+									journal_sequence: envelope.journal_sequence,
+									thread: envelope.payload,
+									type: "upsert",
+								}
+							: {
+									journal_sequence: envelope.journal_sequence,
+									thread_id: envelope.payload.thread_id,
+									type: "remove",
+								};
 
 				return Queue.offerUnsafe(subscription.queue, update) ? "offered" : "overflow";
 			}

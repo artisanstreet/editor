@@ -7,6 +7,7 @@ import type {
 	StreamCursor,
 	TerminalSession,
 	ThreadListItem,
+	ThreadRetentionPolicy,
 	ThreadWorkItem,
 } from "@artisan/protocol";
 
@@ -51,6 +52,13 @@ export interface ArtisanCommandReceipt {
 	readonly status: "accepted" | "duplicate";
 }
 
+/** Supplies the public retention setting and optional durable retry identity. */
+export interface ArtisanThreadRetentionUpdateInput {
+	readonly command_id?: string;
+	readonly enabled: boolean;
+	readonly inactivity_days: number;
+}
+
 /** Exposes the last event positions applied before an ACK or reconnect hello. */
 export interface ArtisanClientCursors {
 	readonly event_cursors: ReadonlyArray<StreamCursor>;
@@ -70,7 +78,7 @@ export type OrchestrationGraphUpdate =
 			readonly type: "patch";
 	  };
 
-/** Delivers a race-safe thread-list snapshot or ordered upsert. */
+/** Delivers a race-safe thread-list snapshot, upsert, or removal. */
 export type ThreadListUpdate =
 	| {
 			readonly journal_sequence: number;
@@ -81,6 +89,11 @@ export type ThreadListUpdate =
 			readonly journal_sequence: number;
 			readonly thread: ThreadListItem;
 			readonly type: "upsert";
+	  }
+	| {
+			readonly journal_sequence: number;
+			readonly thread_id: string;
+			readonly type: "remove";
 	  };
 
 /** Configures bounded client queues, reconnect timing, and request concurrency. */
@@ -111,6 +124,7 @@ export class ArtisanClient extends Context.Service<
 		readonly GetOrchestrationGraph: (
 			group_id: string,
 		) => Effect.Effect<OrchestrationGraph, ArtisanClientError>;
+		readonly GetThreadRetentionPolicy: Effect.Effect<ThreadRetentionPolicy, ArtisanClientError>;
 		readonly GetThreadWork: (
 			thread_id: string,
 		) => Effect.Effect<Option.Option<ThreadWorkItem>, ArtisanClientError>;
@@ -145,5 +159,8 @@ export class ArtisanClient extends Context.Service<
 			ArtisanClientError,
 			Scope.Scope
 		>;
+		readonly UpdateThreadRetentionPolicy: (
+			input: ArtisanThreadRetentionUpdateInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 	}
 >()("Artisan/ArtisanClient") {}

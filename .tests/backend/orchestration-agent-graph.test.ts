@@ -315,6 +315,25 @@ describe("durable multi-agent graph", () => {
 				scope: { kind: "files", value: "src/assignment_b.ts", write_access: true },
 				workspace: { isolation: "isolated", workspace_id: "workspace_assignment_b" },
 			});
+			expect(fake.runs.map(({ input }) => input.permission_policy)).toEqual(
+				expect.arrayContaining([
+					{
+						approval: "on_request",
+						network_access: true,
+						write_access: false,
+					},
+					{
+						approval: "on_request",
+						network_access: false,
+						write_access: true,
+					},
+					{
+						approval: "on_request",
+						network_access: false,
+						write_access: false,
+					},
+				]),
+			);
 			expect(
 				graph.agent_runs.map(({ native_identity, native_thread_id }) => ({
 					native_identity,

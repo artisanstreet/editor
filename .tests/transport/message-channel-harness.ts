@@ -2,6 +2,7 @@ import { MessageChannel, type MessagePort } from "node:worker_threads";
 
 import { Effect, Exit, Layer, ManagedRuntime, Stream } from "effect";
 
+import { ProtocolServer } from "@artisan/backend";
 import { DecodeOutboundControlEnvelope } from "@artisan/protocol";
 import {
 	ArtisanClient,
@@ -59,9 +60,16 @@ export interface TransportTestHarness {
 	readonly close_current_connection: () => void;
 	readonly connector_snapshot: () => MessageChannelConnectorSnapshot;
 	readonly dispose: () => Promise<void>;
+	readonly erase_thread: (thread_id: string) => Effect.Effect<void>;
 	readonly protocol_snapshot: () => FakeProtocolSnapshot;
 	readonly server: typeof MessagePortTransportServer.Service;
 }
+
+/** Owns the real MessageChannel stack around a supplied protocol server. */
+export type ProtocolTransportTestHarness = Omit<
+	TransportTestHarness,
+	"erase_thread" | "protocol_snapshot"
+>;
 
 function close_native_session(session: NativeSession) {
 	session.control_client.close();
@@ -204,16 +212,15 @@ function make_message_channel_connector(
 	return { close_current_connection, layer, snapshot };
 }
 
-/** Creates a scoped transport stack while every ordinary test remains offline. */
-export async function make_transport_test_harness(
-	options: TransportHarnessOptions = {},
-): Promise<TransportTestHarness> {
-	const fake_protocol = make_fake_protocol_server(options.protocol);
+async function make_transport_stack(
+	protocol_layer: Layer.Layer<ProtocolServer>,
+	options: TransportHarnessOptions,
+): Promise<ProtocolTransportTestHarness> {
 	const binary_streams = options.binary_streams ?? {
 		"asset:asset_1": [Uint8Array.of(1, 2), Uint8Array.of(3, 4, 5)],
 	};
 	const server_layer = make_message_port_transport_server_layer(options.server).pipe(
-		Layer.provide(fake_protocol.layer),
+		Layer.provide(protocol_layer),
 		Layer.provide(make_binary_source_layer(binary_streams)),
 		Layer.provide(TransportRuntimeLive),
 	);
@@ -247,9 +254,30 @@ export async function make_transport_test_harness(
 		close_current_connection: connector.close_current_connection,
 		connector_snapshot: connector.snapshot,
 		dispose,
-		protocol_snapshot: fake_protocol.snapshot,
 		server,
 	};
+}
+
+/** Creates a scoped transport stack while every ordinary test remains offline. */
+export async function make_transport_test_harness(
+	options: TransportHarnessOptions = {},
+): Promise<TransportTestHarness> {
+	const fake_protocol = make_fake_protocol_server(options.protocol);
+	const harness = await make_transport_stack(fake_protocol.layer, options);
+
+	return {
+		...harness,
+		erase_thread: fake_protocol.EraseThread,
+		protocol_snapshot: fake_protocol.snapshot,
+	};
+}
+
+/** Wraps an actual backend ProtocolServer in the real MessagePort transport stack. */
+export function make_transport_test_harness_with_protocol_server(
+	protocol_server: typeof ProtocolServer.Service,
+	options: Omit<TransportHarnessOptions, "protocol"> = {},
+): Promise<ProtocolTransportTestHarness> {
+	return make_transport_stack(Layer.succeed(ProtocolServer, protocol_server), options);
 }
 
 /** Waits for one asynchronous lifecycle observation with a strict deadline. */

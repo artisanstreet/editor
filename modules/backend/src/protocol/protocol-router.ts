@@ -13,11 +13,18 @@ import { type AgentGraphError } from "../orchestration/agent-graph-repository";
 import { type JournalStoreError } from "../persistence/journal-store";
 import { type OrchestrationError } from "../persistence/orchestration-repository";
 import type { TerminalSessionError } from "../terminal/terminal-sessions";
+import type { ThreadMetadataError } from "../threads/thread-metadata-repository";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { CommandRouter } from "./command-router";
 
 const describe_journal_error = pipe(
-	Match.type<AgentGraphError | JournalStoreError | OrchestrationError | TerminalSessionError>(),
+	Match.type<
+		| AgentGraphError
+		| JournalStoreError
+		| OrchestrationError
+		| TerminalSessionError
+		| ThreadMetadataError
+	>(),
 	Match.tagsExhaustive({
 		AgentGraphCommandConflict: (): ProtocolErrorDetail => ({
 			code: "command.id_conflict",
@@ -89,6 +96,16 @@ const describe_journal_error = pipe(
 			message: `Thread ${error.thread_id} already exists.`,
 			retryable: false,
 		}),
+		ThreadReservedScope: (): ProtocolErrorDetail => ({
+			code: "thread.reserved_scope",
+			message: "This thread id belongs to an internal Artisan settings scope.",
+			retryable: false,
+		}),
+		ThreadNotFound: (error): ProtocolErrorDetail => ({
+			code: "thread.not_found",
+			message: `Thread ${error.thread_id} does not exist.`,
+			retryable: false,
+		}),
 		JournalInvariantError: (): ProtocolErrorDetail => ({
 			code: "journal.invariant_failed",
 			message: "The journal could not reconstruct the accepted command.",
@@ -117,7 +134,12 @@ export const ProtocolRouterLive = Layer.effect(
 
 		const MakeRejectedReceipt = (
 			command: CommandEnvelope,
-			error: AgentGraphError | JournalStoreError | OrchestrationError | TerminalSessionError,
+			error:
+				| AgentGraphError
+				| JournalStoreError
+				| OrchestrationError
+				| TerminalSessionError
+				| ThreadMetadataError,
 		) =>
 			Effect.gen(function* () {
 				const message_id = yield* metadata.MakeId("message");

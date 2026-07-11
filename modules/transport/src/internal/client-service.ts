@@ -5,6 +5,8 @@ import {
 	type OrchestrationGraphQueryEnvelope,
 	type TerminalListQueryEnvelope,
 	type ThreadListQueryEnvelope,
+	type ThreadRetentionQueryEnvelope,
+	type ThreadRetentionUpdateEnvelope,
 	type ThreadWorkQueryEnvelope,
 } from "@artisan/protocol";
 
@@ -14,6 +16,7 @@ import {
 	type ArtisanClientOptions,
 	type ArtisanCommandInput,
 	type ArtisanCommandReceipt,
+	type ArtisanThreadRetentionUpdateInput,
 } from "../client-contract";
 import { TransportRuntime } from "../transport-runtime";
 import { client_error, validate_client_options } from "./client-common";
@@ -169,6 +172,58 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					: yield* Effect.die("thread list response narrowed incorrectly");
 			});
 
+			const get_thread_retention_policy = Effect.gen(function* () {
+				const trace = yield* connection.MakeTrace;
+				const envelope: ThreadRetentionQueryEnvelope = {
+					...trace,
+					kind: "thread.retention.query",
+					payload: {},
+				};
+				const result = yield* requests.Request(envelope, "thread.retention.query.result");
+
+				return result.kind === "thread.retention.query.result"
+					? result.payload
+					: yield* Effect.die("thread retention response narrowed incorrectly");
+			});
+
+			const update_thread_retention_policy = (input: ArtisanThreadRetentionUpdateInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const command_id = input.command_id ?? trace.message_id;
+					const envelope: ThreadRetentionUpdateEnvelope = {
+						...trace,
+						message_id: command_id,
+						kind: "thread.retention.update",
+						payload: {
+							enabled: input.enabled,
+							inactivity_days: input.inactivity_days,
+						},
+					};
+					const result = yield* requests.Request(envelope, "command.receipt");
+
+					if (result.kind !== "command.receipt") {
+						return yield* Effect.die("thread retention receipt narrowed incorrectly");
+					}
+
+					if (result.payload.status === "rejected") {
+						return yield* Effect.fail(
+							client_error(
+								"protocol",
+								result.payload.error.message,
+								result.payload.error,
+								result.payload.error.retryable,
+								result.payload.error.code,
+							),
+						);
+					}
+
+					return {
+						command_id,
+						journal_sequence: result.payload.journal_sequence,
+						status: result.payload.status,
+					} satisfies ArtisanCommandReceipt;
+				});
+
 			const get_thread_work = (thread_id: string) =>
 				Effect.gen(function* () {
 					const trace = yield* connection.MakeTrace;
@@ -224,6 +279,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				Errors: Stream.fromQueue(errors),
 				Events: subscriptions.Events,
 				GetOrchestrationGraph: get_orchestration_graph,
+				GetThreadRetentionPolicy: get_thread_retention_policy,
 				GetThreadWork: get_thread_work,
 				ListTerminals: list_terminals,
 				ListThreads: list_threads,
@@ -231,6 +287,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				OpenTerminalOutput: (terminal_id) => streams.Open(`terminal:${terminal_id}`),
 				SubscribeOrchestrationGraph: subscriptions.SubscribeOrchestrationGraph,
 				SubscribeThreadList: subscriptions.SubscribeThreadList,
+				UpdateThreadRetentionPolicy: update_thread_retention_policy,
 			};
 		}),
 	);

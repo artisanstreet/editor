@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, notExists, or } from "drizzle-orm";
 import { Context, Data, Effect, Layer, Schema } from "effect";
 
 import {
@@ -23,9 +23,11 @@ import {
 	OrchestrationOutbox,
 	OrchestrationRawObservations,
 	OrchestrationRuns,
+	ThreadErasureClaims,
 	Threads,
 } from "./schema";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import { RecordThreadActivity } from "../threads/internal/thread-activity";
 
 type WorkStatus = ThreadWorkItem["status"];
 type OutboxKind = "start" | "steer" | "cancel" | "close" | "respond_approval" | "respond_question";
@@ -159,6 +161,13 @@ export const OrchestrationRepositoryLive = Layer.effect(
 				const sequence = (stream?.last_sequence ?? 0) + 1;
 				const event_id = yield* metadata.MakeId("event");
 				const occurred_at = yield* metadata.Now;
+
+				yield* RecordThreadActivity(
+					transaction,
+					input.thread_id,
+					occurred_at,
+					input.payload,
+				);
 
 				if (stream) {
 					yield* transaction
@@ -685,7 +694,22 @@ export const OrchestrationRepositoryLive = Layer.effect(
 					OrchestrationRuns,
 					eq(OrchestrationOutbox.run_id, OrchestrationRuns.run_id),
 				)
-				.where(eq(OrchestrationOutbox.status, "pending"))
+				.where(
+					and(
+						eq(OrchestrationOutbox.status, "pending"),
+						notExists(
+							database.client
+								.select({ thread_id: ThreadErasureClaims.thread_id })
+								.from(ThreadErasureClaims)
+								.where(
+									eq(
+										ThreadErasureClaims.thread_id,
+										OrchestrationOutbox.thread_id,
+									),
+								),
+						),
+					),
+				)
 				.orderBy(asc(OrchestrationOutbox.created_at), asc(OrchestrationOutbox.command_id))
 				.pipe(
 					Effect.flatMap((rows) =>
@@ -739,6 +763,17 @@ export const OrchestrationRepositoryLive = Layer.effect(
 						and(
 							eq(OrchestrationOutbox.command_id, command_id),
 							eq(OrchestrationOutbox.status, "pending"),
+							notExists(
+								database.client
+									.select({ thread_id: ThreadErasureClaims.thread_id })
+									.from(ThreadErasureClaims)
+									.where(
+										eq(
+											ThreadErasureClaims.thread_id,
+											OrchestrationOutbox.thread_id,
+										),
+									),
+							),
 						),
 					)
 					.returning({ command_id: OrchestrationOutbox.command_id });

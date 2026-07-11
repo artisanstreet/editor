@@ -4,6 +4,7 @@ import { EngineRegistry, type EngineCommand, type EngineRun } from "@artisan/eng
 import type { CommandEnvelope, OrchestrationGraph } from "@artisan/protocol";
 
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import { MakeThreadDispatchFence } from "../threads/internal/thread-dispatch-fence";
 import {
 	AgentGraphRepository,
 	type AcceptedAgentGraphCommand,
@@ -21,6 +22,7 @@ interface LiveAgentRun {
 	readonly group_id: string;
 	readonly run: EngineRun;
 	readonly scope: Scope.Closeable;
+	readonly thread_id: string;
 }
 
 type DispatchState = "idle" | "pending" | "running";
@@ -34,6 +36,7 @@ export class AgentGraphOrchestrator extends Context.Service<
 		) => Effect.Effect<AcceptedAgentGraphCommand, AgentGraphError>;
 		readonly GetGraph: (group_id: string) => Effect.Effect<OrchestrationGraph, AgentGraphError>;
 		readonly Recover: Effect.Effect<void, AgentGraphError>;
+		readonly QuiesceThread: (thread_id: string) => Effect.Effect<void>;
 	}
 >()("Artisan/AgentGraphOrchestrator") {}
 
@@ -50,6 +53,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 		const service_scope = yield* Scope.make();
 		const live_runs = yield* Ref.make(new Map<string, LiveAgentRun>());
 		const dispatch_state = yield* Ref.make<DispatchState>("idle");
+		const dispatch_fence = yield* MakeThreadDispatchFence;
 
 		const remove_live = (run_id: string, run_scope: Scope.Closeable) =>
 			Effect.gen(function* () {
@@ -111,6 +115,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 					group_id: work.group_id,
 					run,
 					scope: run_scope,
+					thread_id: work.thread_id,
 				} satisfies LiveAgentRun;
 
 				yield* Ref.update(live_runs, (runs) => new Map(runs).set(work.run_id, live));
@@ -122,7 +127,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 				.FailRunStart(work.run_id, metadata.instance_id, failure)
 				.pipe(Effect.andThen(wake_dispatcher()));
 
-		const start_run = (work: PendingAgentRun) =>
+		const start_run_unfenced = (work: PendingAgentRun) =>
 			Effect.gen(function* () {
 				if ((yield* Ref.get(live_runs)).has(work.run_id)) {
 					return;
@@ -156,12 +161,11 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 								`Summary contract: ${work.summary_contract}`,
 							].join("\n\n"),
 							model: work.profile,
-							permission_metadata: {
+							permission_policy: {
 								approval: work.permission_policy.approval,
 								network_access: work.permission_policy.network_access,
 								write_access: work.permission_policy.write_access,
 							},
-							permission_profile: work.permission_policy.approval,
 							working_directory: work.workspace.working_directory,
 						})
 						.pipe(Scope.provide(run_scope), Effect.exit);
@@ -193,6 +197,8 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 					),
 				);
 			});
+		const start_run = (work: PendingAgentRun) =>
+			dispatch_fence.Run(work.thread_id, start_run_unfenced(work)).pipe(Effect.asVoid);
 
 		const select_dispatchable = (
 			pending: ReadonlyArray<PendingAgentRun>,
@@ -271,7 +277,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 					);
 		};
 
-		const handle_control = (command: CommandEnvelope) =>
+		const handle_control_unfenced = (command: CommandEnvelope) =>
 			Effect.gen(function* () {
 				const claim = yield* repository.ClaimControl(command);
 
@@ -364,6 +370,21 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 					command_failure_message(delivered.cause),
 				);
 			});
+		const handle_control = (command: CommandEnvelope) =>
+			Effect.gen(function* () {
+				const result = yield* dispatch_fence.Run(
+					command.thread_id,
+					handle_control_unfenced(command),
+				);
+
+				if (result._tag === "None") {
+					return yield* new AgentGraphInvalid({
+						message: `Thread ${command.thread_id} is quiesced`,
+					});
+				}
+
+				return result.value;
+			});
 
 		const handle = (command: CommandEnvelope) => {
 			const payload = command.payload as AgentGraphCommand;
@@ -392,6 +413,32 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 		const recover = repository
 			.Recover(metadata.instance_id)
 			.pipe(Effect.andThen(wake_dispatcher()));
+		const QuiesceLiveRuns = (thread_id: string) =>
+			Effect.gen(function* () {
+				const runs = yield* Ref.modify(live_runs, (current) => {
+					const matching = [...current.entries()].filter(
+						([, live]) => live.thread_id === thread_id,
+					);
+					const next = new Map(current);
+
+					for (const [run_id] of matching) {
+						next.delete(run_id);
+					}
+
+					return [matching.map(([, live]) => live), next] as const;
+				});
+
+				yield* Effect.forEach(runs, (live) => Scope.close(live.scope, Exit.void), {
+					concurrency: "unbounded",
+					discard: true,
+				});
+				yield* Effect.forEach(runs, (live) => Deferred.await(live.done), {
+					concurrency: "unbounded",
+					discard: true,
+				});
+			});
+		const QuiesceThread = (thread_id: string) =>
+			dispatch_fence.Quiesce(thread_id, QuiesceLiveRuns(thread_id));
 		const shutdown = Effect.gen(function* () {
 			const runs = [...(yield* Ref.get(live_runs)).values()];
 
@@ -412,6 +459,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 		return {
 			GetGraph: repository.GetGraph,
 			Handle: handle,
+			QuiesceThread,
 			Recover: recover,
 		};
 	}),

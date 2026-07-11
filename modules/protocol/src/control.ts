@@ -12,6 +12,27 @@ import {
 	StreamCursor,
 	StreamSequence,
 } from "./common";
+import {
+	ThreadActivityRecordCommand,
+	ThreadArchiveCommand,
+	ThreadContentErasedEvent,
+	ThreadCreateCommand,
+	ThreadCreatedEvent,
+	ThreadErasedEvent,
+	ThreadListItem,
+	ThreadMetadataRefineCommand,
+	ThreadMetadataUpdatedEvent,
+	ThreadPinCommand,
+	ThreadRefinementIgnoredEvent,
+	ThreadRenameCommand,
+	ThreadRestoreCommand,
+	ThreadRetentionPolicy,
+	ThreadRetentionPolicyUpdatedEvent,
+	ThreadRetentionUpdateCommand,
+	ThreadUnpinCommand,
+} from "./thread";
+
+export * from "./thread";
 
 const FrontendTraceMetadata = {
 	message_id: Identifier,
@@ -44,24 +65,6 @@ const EnvironmentVariableName = Schema.String.check(
 			: undefined,
 	),
 );
-
-/** Describes the thread projection sent in list results and subscriptions. */
-export const ThreadListItem = Schema.Struct({
-	created_at: IsoDateTime,
-	thread_id: Identifier,
-	title: Schema.NonEmptyString,
-	updated_at: IsoDateTime,
-});
-
-export type ThreadListItem = typeof ThreadListItem.Type;
-
-/** Defines the currently supported command payloads. */
-export const ThreadCreateCommand = Schema.Struct({
-	type: Schema.Literal("thread.create"),
-	title: Schema.NonEmptyString,
-});
-
-export type ThreadCreateCommand = typeof ThreadCreateCommand.Type;
 
 /** Queues user text for a thread or steers its active capable run. */
 export const ThreadSendMessageCommand = Schema.Struct({
@@ -370,6 +373,14 @@ export const RunRespondQuestionCommand = Schema.Struct({
 /** Unions every command payload accepted by the V1 control channel. */
 export const CommandPayload = Schema.Union([
 	ThreadCreateCommand,
+	ThreadRenameCommand,
+	ThreadMetadataRefineCommand,
+	ThreadActivityRecordCommand,
+	ThreadPinCommand,
+	ThreadUnpinCommand,
+	ThreadArchiveCommand,
+	ThreadRestoreCommand,
+	ThreadRetentionUpdateCommand,
 	ThreadSendMessageCommand,
 	TerminalOpenCommand,
 	TerminalWriteCommand,
@@ -481,14 +492,6 @@ export const CommandReceiptEnvelope = Schema.Struct({
 });
 
 export type CommandReceiptEnvelope = typeof CommandReceiptEnvelope.Type;
-
-/** Defines the event payload emitted when a thread is created. */
-export const ThreadCreatedEvent = Schema.Struct({
-	type: Schema.Literal("thread.created"),
-	title: Schema.NonEmptyString,
-});
-
-export type ThreadCreatedEvent = typeof ThreadCreatedEvent.Type;
 
 /** Records user text that is durably queued for a future run. */
 export const ThreadMessageQueuedEvent = Schema.Struct({
@@ -817,6 +820,11 @@ export type TerminalLifecycleEvent = typeof TerminalLifecycleEvent.Type;
 /** Unions every durable event payload emitted by the V1 backend. */
 export const EventPayload = Schema.Union([
 	ThreadCreatedEvent,
+	ThreadContentErasedEvent,
+	ThreadErasedEvent,
+	ThreadMetadataUpdatedEvent,
+	ThreadRefinementIgnoredEvent,
+	ThreadRetentionPolicyUpdatedEvent,
 	ThreadMessageQueuedEvent,
 	ThreadMessageSteeringEvent,
 	RunLifecycleEvent,
@@ -895,6 +903,34 @@ export const ThreadListQueryResultEnvelope = Schema.Struct({
 });
 
 export type ThreadListQueryResultEnvelope = typeof ThreadListQueryResultEnvelope.Type;
+
+/** Requests the current global inactive-thread retention policy. */
+export const ThreadRetentionQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("thread.retention.query"),
+	payload: Schema.Struct({}),
+});
+
+export type ThreadRetentionQueryEnvelope = typeof ThreadRetentionQueryEnvelope.Type;
+
+/** Returns the current global inactive-thread retention policy. */
+export const ThreadRetentionQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("thread.retention.query.result"),
+	payload: ThreadRetentionPolicy,
+});
+
+export type ThreadRetentionQueryResultEnvelope = typeof ThreadRetentionQueryResultEnvelope.Type;
+
+/** Updates the global inactive-thread retention policy without a synthetic thread id. */
+export const ThreadRetentionUpdateEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("thread.retention.update"),
+	payload: ThreadRetentionPolicy,
+});
+
+export type ThreadRetentionUpdateEnvelope = typeof ThreadRetentionUpdateEnvelope.Type;
 
 /** Describes the durable work state coordinated for one thread. */
 export const ThreadWorkItem = Schema.Struct({
@@ -1051,6 +1087,19 @@ export const ThreadListUpsertEnvelope = Schema.Struct({
 
 export type ThreadListUpsertEnvelope = typeof ThreadListUpsertEnvelope.Type;
 
+/** Removes one erased thread from an ordered connection-local thread list. */
+export const ThreadListRemoveEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	journal_sequence: JournalSequence,
+	kind: Schema.Literal("thread.list.remove"),
+	payload: Schema.Struct({ thread_id: Identifier }),
+	sequence: StreamSequence,
+	stream_id: Identifier,
+	subscription_id: Identifier,
+});
+
+export type ThreadListRemoveEnvelope = typeof ThreadListRemoveEnvelope.Type;
+
 /** Provides the initial graph projection for one ordered subscription. */
 export const OrchestrationGraphSnapshotEnvelope = Schema.Struct({
 	...NegotiatedBackendTraceMetadata,
@@ -1142,6 +1191,8 @@ export const InboundControlEnvelope = Schema.Union([
 	HelloEnvelope,
 	CommandEnvelope,
 	ThreadListQueryEnvelope,
+	ThreadRetentionQueryEnvelope,
+	ThreadRetentionUpdateEnvelope,
 	ThreadWorkQueryEnvelope,
 	TerminalListQueryEnvelope,
 	OrchestrationGraphQueryEnvelope,
@@ -1162,6 +1213,7 @@ export const OutboundControlEnvelope = Schema.Union([
 	EventEnvelope,
 	ProtocolErrorEnvelope,
 	ThreadListQueryResultEnvelope,
+	ThreadRetentionQueryResultEnvelope,
 	ThreadWorkQueryResultEnvelope,
 	TerminalListQueryResultEnvelope,
 	OrchestrationGraphQueryResultEnvelope,
@@ -1169,6 +1221,7 @@ export const OutboundControlEnvelope = Schema.Union([
 	SubscriptionStoppedEnvelope,
 	ThreadListSnapshotEnvelope,
 	ThreadListUpsertEnvelope,
+	ThreadListRemoveEnvelope,
 	OrchestrationGraphSnapshotEnvelope,
 	OrchestrationGraphPatchEnvelope,
 	ReplayCompleteEnvelope,

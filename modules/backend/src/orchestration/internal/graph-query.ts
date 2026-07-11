@@ -1,4 +1,4 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, notExists } from "drizzle-orm";
 import { Effect } from "effect";
 
 import {
@@ -8,7 +8,12 @@ import {
 	type OrchestrationGraph,
 } from "@artisan/protocol";
 
-import { AgentRuns, Assignments, OrchestrationGroups } from "../../persistence/schema";
+import {
+	AgentRuns,
+	Assignments,
+	OrchestrationGroups,
+	ThreadErasureClaims,
+} from "../../persistence/schema";
 import {
 	AgentGraphNotFound,
 	normalize_graph_error,
@@ -117,12 +122,25 @@ export function make_graph_query(context: GraphContext, codecs: PersistedGraphCo
 				run_id: AgentRuns.run_id,
 				scope_json: Assignments.scope_json,
 				summary_contract: Assignments.summary_contract,
+				thread_id: OrchestrationGroups.thread_id,
 				workspace_json: Assignments.workspace_json,
 			})
 			.from(AgentRuns)
 			.innerJoin(Assignments, eq(AgentRuns.assignment_id, Assignments.assignment_id))
 			.innerJoin(OrchestrationGroups, eq(AgentRuns.group_id, OrchestrationGroups.group_id))
-			.where(eq(AgentRuns.dispatch_status, "queued"))
+			.where(
+				and(
+					eq(AgentRuns.dispatch_status, "queued"),
+					notExists(
+						database.client
+							.select({ thread_id: ThreadErasureClaims.thread_id })
+							.from(ThreadErasureClaims)
+							.where(
+								eq(ThreadErasureClaims.thread_id, OrchestrationGroups.thread_id),
+							),
+					),
+				),
+			)
 			.orderBy(asc(AgentRuns.created_at), asc(AgentRuns.run_id))
 			.pipe(
 				Effect.flatMap((rows) =>
@@ -158,6 +176,7 @@ export function make_graph_query(context: GraphContext, codecs: PersistedGraphCo
 								run_id: row.run_id,
 								scope,
 								summary_contract: row.summary_contract,
+								thread_id: row.thread_id,
 								workspace,
 							} satisfies PendingAgentRun;
 						}),

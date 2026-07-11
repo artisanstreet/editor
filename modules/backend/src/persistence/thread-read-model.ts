@@ -1,5 +1,5 @@
-import { asc, desc } from "drizzle-orm";
-import { Context, Data, Effect, Layer, Schema } from "effect";
+import { asc, desc, eq } from "drizzle-orm";
+import { Context, Data, Effect, Layer, Option, Schema } from "effect";
 
 import { JournalSequence, ThreadListItem } from "@artisan/protocol";
 
@@ -21,6 +21,9 @@ export interface ThreadSnapshot {
 export class ThreadReadModel extends Context.Service<
 	ThreadReadModel,
 	{
+		readonly Lookup: (
+			thread_id: string,
+		) => Effect.Effect<Option.Option<ThreadListItem>, ThreadReadModelError>;
 		readonly Snapshot: () => Effect.Effect<ThreadSnapshot, ThreadReadModelError>;
 	}
 >()("Artisan/ThreadReadModel") {}
@@ -58,6 +61,17 @@ const DecodeThreadListItem = (value: unknown) =>
 		),
 	);
 
+const DecodePersistedThread = (thread: typeof Threads.$inferSelect) => {
+	const { archived_at, current_goal, rename_suggestion, ...required } = thread;
+
+	return DecodeThreadListItem({
+		...required,
+		...(archived_at === null ? {} : { archived_at }),
+		...(current_goal === null ? {} : { current_goal }),
+		...(rename_suggestion === null ? {} : { rename_suggestion }),
+	});
+};
+
 function normalize_thread_read_model_error(error: unknown): ThreadReadModelError {
 	if (error instanceof JournalInvariantError) {
 		return error;
@@ -70,18 +84,27 @@ export const ThreadReadModelLive = Layer.effect(
 	ThreadReadModel,
 	Effect.gen(function* () {
 		const database = yield* Database;
+		const Lookup = (thread_id: string) =>
+			database.client
+				.select()
+				.from(Threads)
+				.where(eq(Threads.thread_id, thread_id))
+				.limit(1)
+				.pipe(
+					Effect.flatMap(([thread]) =>
+						thread
+							? DecodePersistedThread(thread).pipe(Effect.map(Option.some))
+							: Effect.succeed(Option.none()),
+					),
+					Effect.mapError(normalize_thread_read_model_error),
+				);
 
 		const Snapshot = () =>
 			database.client
 				.transaction((transaction) =>
 					Effect.gen(function* () {
 						const thread_rows = yield* transaction
-							.select({
-								created_at: Threads.created_at,
-								thread_id: Threads.thread_id,
-								title: Threads.title,
-								updated_at: Threads.updated_at,
-							})
+							.select()
 							.from(Threads)
 							.orderBy(asc(Threads.created_at), asc(Threads.thread_id));
 						const [watermark] = yield* transaction
@@ -92,13 +115,13 @@ export const ThreadReadModelLive = Layer.effect(
 						const journal_sequence = watermark
 							? yield* DecodePersistedJournalSequence(watermark.journal_sequence)
 							: 0;
-						const threads = yield* Effect.forEach(thread_rows, DecodeThreadListItem);
+						const threads = yield* Effect.forEach(thread_rows, DecodePersistedThread);
 
 						return { journal_sequence, threads };
 					}),
 				)
 				.pipe(Effect.mapError(normalize_thread_read_model_error));
 
-		return { Snapshot };
+		return { Lookup, Snapshot };
 	}),
 );

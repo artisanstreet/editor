@@ -9,11 +9,19 @@ import type {
 
 import { JournalStore, type JournalStoreError } from "../persistence/journal-store";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import { ThreadMetadataRepository, type ThreadMetadataError } from "./thread-metadata-repository";
+import { ThreadRetentionPolicyService } from "./thread-retention-policy";
 
 export class ThreadCommands extends Context.Service<
 	ThreadCommands,
 	{
 		readonly HandleCreate: (
+			command: CommandEnvelope,
+		) => Effect.Effect<ReadonlyArray<OutboundEnvelope>, JournalStoreError>;
+		readonly HandleMetadata: (
+			command: CommandEnvelope,
+		) => Effect.Effect<ReadonlyArray<OutboundEnvelope>, ThreadMetadataError>;
+		readonly HandleRetentionPolicy: (
 			command: CommandEnvelope,
 		) => Effect.Effect<ReadonlyArray<OutboundEnvelope>, JournalStoreError>;
 	}
@@ -24,6 +32,34 @@ export const ThreadCommandsLive = Layer.effect(
 	Effect.gen(function* () {
 		const journal = yield* JournalStore;
 		const metadata = yield* RuntimeMetadata;
+		const repository = yield* ThreadMetadataRepository;
+		const retention_policy = yield* ThreadRetentionPolicyService;
+
+		const MakeOutput = (
+			command: CommandEnvelope,
+			status: "accepted" | "duplicate",
+			event: EventEnvelope,
+		) =>
+			Effect.gen(function* () {
+				const receipt_id = yield* metadata.MakeId("message");
+				const receipt_time = yield* metadata.Now;
+				const receipt: CommandReceiptEnvelope = {
+					causation_id: command.message_id,
+					correlation_id: command.message_id,
+					kind: "command.receipt",
+					message_id: receipt_id,
+					origin: "backend",
+					payload: { journal_sequence: event.journal_sequence, status },
+					protocol_version: 1,
+					schema_version: 1,
+					sent_at: receipt_time,
+					thread_id: command.thread_id,
+					...(command.agent_id ? { agent_id: command.agent_id } : {}),
+					...(command.run_id ? { run_id: command.run_id } : {}),
+				};
+
+				return [receipt, event];
+			});
 
 		const HandleCreate = (command: CommandEnvelope) =>
 			Effect.gen(function* () {
@@ -71,7 +107,23 @@ export const ThreadCommandsLive = Layer.effect(
 
 				return [receipt, event];
 			});
+		const HandleMetadata = (command: CommandEnvelope) =>
+			repository
+				.Accept(command)
+				.pipe(
+					Effect.flatMap((accepted) =>
+						MakeOutput(command, accepted.status, accepted.event),
+					),
+				);
+		const HandleRetentionPolicy = (command: CommandEnvelope) =>
+			retention_policy
+				.Update(command)
+				.pipe(
+					Effect.flatMap((accepted) =>
+						MakeOutput(command, accepted.status, accepted.event),
+					),
+				);
 
-		return { HandleCreate };
+		return { HandleCreate, HandleMetadata, HandleRetentionPolicy };
 	}),
 );

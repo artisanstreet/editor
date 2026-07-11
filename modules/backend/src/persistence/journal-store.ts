@@ -15,6 +15,8 @@ import { Database } from "./database";
 import { EventStreams, JournalCommands, JournalEvents, Threads } from "./schema";
 import { JournalNotifier } from "./journal-notifier";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import { RecordThreadActivity } from "../threads/internal/thread-activity";
+import { is_settings_scope_id } from "../settings/internal-scope";
 
 export interface ThreadCreateAcceptance {
 	readonly agent_id?: string;
@@ -53,6 +55,10 @@ export class ThreadAlreadyExists extends Data.TaggedError("ThreadAlreadyExists")
 	readonly thread_id: string;
 }> {}
 
+export class ThreadReservedScope extends Data.TaggedError("ThreadReservedScope")<{
+	readonly thread_id: string;
+}> {}
+
 export class JournalInvariantError extends Data.TaggedError("JournalInvariantError")<{
 	readonly message: string;
 }> {}
@@ -64,6 +70,7 @@ export class JournalStoreFailure extends Data.TaggedError("JournalStoreFailure")
 export type JournalStoreError =
 	| CommandIdConflict
 	| ThreadAlreadyExists
+	| ThreadReservedScope
 	| JournalInvariantError
 	| JournalStoreFailure;
 
@@ -102,6 +109,7 @@ function normalize_journal_error(error: unknown): JournalStoreError {
 	if (
 		error instanceof CommandIdConflict ||
 		error instanceof ThreadAlreadyExists ||
+		error instanceof ThreadReservedScope ||
 		error instanceof JournalInvariantError
 	) {
 		return error;
@@ -398,6 +406,13 @@ export const JournalStoreLive = Layer.effect(
 						const event_id = yield* metadata.MakeId("event");
 						const occurred_at = yield* metadata.Now;
 
+						yield* RecordThreadActivity(
+							transaction,
+							input.thread_id,
+							occurred_at,
+							input.payload,
+						);
+
 						if (stream) {
 							yield* transaction
 								.update(EventStreams)
@@ -601,6 +616,10 @@ export const JournalStoreLive = Layer.effect(
 					});
 				}
 
+				if (is_settings_scope_id(command.thread_id)) {
+					return yield* new ThreadReservedScope({ thread_id: command.thread_id });
+				}
+
 				const payload = command.payload;
 				const payload_json = JSON.stringify(payload);
 				const raw_origin_json = command.raw_origin
@@ -720,9 +739,17 @@ export const JournalStoreLive = Layer.effect(
 							});
 
 							yield* transaction.insert(Threads).values({
+								activity_version: 0,
 								created_at: occurred_at,
+								current_goal: payload.title,
+								last_activity_at: occurred_at,
+								live_status: "Idle",
+								metadata_version: 0,
+								pinned: false,
 								thread_id: command.thread_id,
 								title: payload.title,
+								title_locked: false,
+								title_source: "initial",
 								updated_at: occurred_at,
 							});
 

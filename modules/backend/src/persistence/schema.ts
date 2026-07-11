@@ -58,11 +58,44 @@ export const JournalEvents = sqliteTable(
 	],
 );
 
-export const Threads = sqliteTable("threads", {
-	thread_id: text("thread_id").primaryKey(),
-	title: text("title").notNull(),
-	created_at: text("created_at").notNull(),
+export const Threads = sqliteTable(
+	"threads",
+	{
+		thread_id: text("thread_id").primaryKey(),
+		title: text("title").notNull(),
+		title_source: text("title_source").notNull().default("initial"),
+		title_locked: integer("title_locked", { mode: "boolean" }).notNull().default(false),
+		live_status: text("live_status").notNull().default("Idle"),
+		current_goal: text("current_goal"),
+		rename_suggestion: text("rename_suggestion"),
+		last_activity_at: text("last_activity_at").notNull().default("1970-01-01T00:00:00.000Z"),
+		activity_version: integer("activity_version").notNull().default(0),
+		metadata_version: integer("metadata_version").notNull().default(0),
+		pinned: integer("pinned", { mode: "boolean" }).notNull().default(false),
+		archived_at: text("archived_at"),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		index("threads_retention_candidates_index").on(table.pinned, table.last_activity_at),
+	],
+);
+
+export const ThreadRetentionPolicies = sqliteTable("thread_retention_policies", {
+	policy_id: integer("policy_id").primaryKey(),
+	enabled: integer("enabled", { mode: "boolean" }).notNull(),
+	inactivity_days: integer("inactivity_days").notNull(),
 	updated_at: text("updated_at").notNull(),
+});
+
+export const ThreadErasureClaims = sqliteTable("thread_erasure_claims", {
+	thread_id: text("thread_id").primaryKey(),
+	claimed_at: text("claimed_at").notNull(),
+});
+
+export const ThreadTombstones = sqliteTable("thread_tombstones", {
+	thread_id: text("thread_id").primaryKey(),
+	deleted_at: text("deleted_at").notNull(),
 });
 
 export const OrchestrationCoordinators = sqliteTable("orchestration_coordinators", {

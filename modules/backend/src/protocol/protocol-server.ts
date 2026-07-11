@@ -6,6 +6,7 @@ import {
 	Effect,
 	Exit,
 	Layer,
+	Option,
 	PubSub,
 	Queue,
 	Ref,
@@ -33,6 +34,8 @@ import {
 	type SubscribeEnvelope,
 	type ThreadListItem,
 	type ThreadListQueryEnvelope,
+	type ThreadRetentionQueryEnvelope,
+	type ThreadRetentionUpdateEnvelope,
 	type ThreadWorkQueryEnvelope,
 	type TerminalListQueryEnvelope,
 	type UnsubscribeEnvelope,
@@ -45,6 +48,11 @@ import { OrchestrationRepository } from "../persistence/orchestration-repository
 import { ThreadReadModel } from "../persistence/thread-read-model";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { TerminalSessionService } from "../terminal/terminal-sessions";
+import { thread_activity_kind_from_event } from "../threads/internal/thread-activity";
+import {
+	thread_retention_policy_thread_id,
+	ThreadRetentionPolicyService,
+} from "../threads/thread-retention-policy";
 import {
 	DecodeProtocolConnectionOptions,
 	DefaultProtocolConnectionOptions,
@@ -133,16 +141,42 @@ function latest_journal_sequence(fallback: number, events: ReadonlyArray<EventEn
 }
 
 function thread_item_from_event(event: EventEnvelope): ThreadListItem | undefined {
-	if (event.payload.type !== "thread.created") {
-		return undefined;
+	if (event.payload.type === "thread.metadata.updated") {
+		return event.payload.thread;
 	}
 
-	return {
-		created_at: event.sent_at,
-		thread_id: event.thread_id,
-		title: event.payload.title,
-		updated_at: event.sent_at,
-	};
+	return event.payload.type === "thread.created"
+		? {
+				activity_version: 0,
+				created_at: event.sent_at,
+				current_goal: event.payload.title,
+				last_activity_at: event.sent_at,
+				live_status: "Idle",
+				metadata_version: 0,
+				pinned: false,
+				thread_id: event.thread_id,
+				title: event.payload.title,
+				title_locked: false,
+				title_source: "initial",
+				updated_at: event.sent_at,
+			}
+		: undefined;
+}
+
+type ThreadListProjectionPatch =
+	| { readonly _tag: "Remove"; readonly thread_id: string }
+	| { readonly _tag: "Upsert"; readonly thread: ThreadListItem };
+
+function direct_thread_list_patch_from_event(
+	event: EventEnvelope,
+): ThreadListProjectionPatch | undefined {
+	if (event.payload.type === "thread.erased") {
+		return { _tag: "Remove", thread_id: event.thread_id };
+	}
+
+	const thread = thread_item_from_event(event);
+
+	return thread ? { _tag: "Upsert", thread } : undefined;
 }
 
 function graph_group_id_from_event(event: EventEnvelope) {
@@ -178,6 +212,7 @@ export function make_protocol_server_layer(
 			const orchestration = yield* OrchestrationRepository;
 			const terminals = yield* TerminalSessionService;
 			const thread_read_model = yield* ThreadReadModel;
+			const retention_policy = yield* ThreadRetentionPolicyService;
 
 			const Open = Effect.gen(function* () {
 				const connection_scope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
@@ -291,6 +326,23 @@ export function make_protocol_server_layer(
 				const EnqueueProjectionPatches = (current: ReadyState, event: EventEnvelope) =>
 					Effect.gen(function* () {
 						let subscriptions = current.subscriptions;
+						const has_thread_list = Object.values(current.subscriptions).some(
+							(subscription) => subscription._tag === "thread.list",
+						);
+						let thread_patch = direct_thread_list_patch_from_event(event);
+
+						if (
+							has_thread_list &&
+							!thread_patch &&
+							thread_activity_kind_from_event(event.payload) !== undefined
+						) {
+							const thread = yield* thread_read_model.Lookup(event.thread_id);
+
+							thread_patch = Option.match(thread, {
+								onNone: () => undefined,
+								onSome: (item) => ({ _tag: "Upsert" as const, thread: item }),
+							});
+						}
 
 						for (const [subscription_id, subscription] of Object.entries(
 							current.subscriptions,
@@ -299,25 +351,39 @@ export function make_protocol_server_layer(
 							const sequence = subscription.sequence + 1;
 
 							if (subscription._tag === "thread.list") {
-								const thread_item = thread_item_from_event(event);
-
-								if (!thread_item) {
+								if (!thread_patch) {
 									continue;
 								}
 
-								yield* Enqueue({
-									journal_sequence: event.journal_sequence,
-									kind: "thread.list.upsert",
-									message_id,
-									origin: "backend",
-									payload: thread_item,
-									protocol_version: 1,
-									schema_version: 1,
-									sent_at: event.sent_at,
-									sequence,
-									stream_id: subscription.stream_id,
-									subscription_id,
-								});
+								if (thread_patch._tag === "Remove") {
+									yield* Enqueue({
+										journal_sequence: event.journal_sequence,
+										kind: "thread.list.remove",
+										message_id,
+										origin: "backend",
+										payload: { thread_id: thread_patch.thread_id },
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at: event.sent_at,
+										sequence,
+										stream_id: subscription.stream_id,
+										subscription_id,
+									});
+								} else {
+									yield* Enqueue({
+										journal_sequence: event.journal_sequence,
+										kind: "thread.list.upsert",
+										message_id,
+										origin: "backend",
+										payload: thread_patch.thread,
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at: event.sent_at,
+										sequence,
+										stream_id: subscription.stream_id,
+										subscription_id,
+									});
+								}
 							} else {
 								const group_id = graph_group_id_from_event(event);
 
@@ -541,6 +607,39 @@ export function make_protocol_server_layer(
 								current,
 								"projection.unavailable",
 								"The thread projection could not be read.",
+								true,
+								query.message_id,
+							),
+						),
+					);
+
+				const HandleRetentionQuery = (
+					query: ThreadRetentionQueryEnvelope,
+					current: ReadyState,
+				) =>
+					retention_policy.Read.pipe(
+						Effect.flatMap((policy) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "thread.retention.query.result",
+									message_id,
+									origin: "backend",
+									payload: policy,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"retention.unavailable",
+								"The thread retention policy could not be read.",
 								true,
 								query.message_id,
 							),
@@ -965,6 +1064,20 @@ export function make_protocol_server_layer(
 							yield* DeliverLiveEvents(new_events);
 						}
 					});
+				const HandleRetentionUpdate = (update: ThreadRetentionUpdateEnvelope) =>
+					HandleCommand({
+						kind: "command",
+						message_id: update.message_id,
+						origin: update.origin,
+						payload: {
+							...update.payload,
+							type: "thread.retention.update",
+						},
+						protocol_version: update.protocol_version,
+						schema_version: update.schema_version,
+						sent_at: update.sent_at,
+						thread_id: thread_retention_policy_thread_id,
+					});
 
 				const HandleReadyEnvelope = (
 					envelope: Exclude<InboundControlEnvelope, HelloEnvelope>,
@@ -975,6 +1088,10 @@ export function make_protocol_server_layer(
 							return HandleCommand(envelope);
 						case "thread.list.query":
 							return HandleQuery(envelope, current);
+						case "thread.retention.query":
+							return HandleRetentionQuery(envelope, current);
+						case "thread.retention.update":
+							return HandleRetentionUpdate(envelope);
 						case "thread.work.query":
 							return HandleWorkQuery(envelope, current);
 						case "terminal.list.query":

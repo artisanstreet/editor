@@ -18,18 +18,36 @@ import {
 import { ProtocolRouterLive } from "../protocol/protocol-router";
 import { make_protocol_server_layer } from "../protocol/protocol-server";
 import { ThreadCommandsLive } from "../threads/thread-commands";
+import { ThreadErasureLive } from "../threads/thread-erasure";
+import { ThreadMetadataRepositoryLive } from "../threads/thread-metadata-repository";
+import {
+	ThreadResourceQuiescer,
+	ThreadResourceQuiescerLive,
+} from "../threads/thread-resource-quiescer";
+import { ThreadRetentionPolicyServiceLive } from "../threads/thread-retention-policy";
+import {
+	ThreadRetentionClock,
+	ThreadRetentionClockLive,
+	ThreadRetentionLive,
+	ThreadRetentionScheduler,
+	ThreadRetentionSchedulerLive,
+} from "../threads/thread-retention";
 import { NodePtyTerminalDriverLive } from "../terminal/node-pty-terminal-driver";
 import { TerminalDriver } from "../terminal/terminal-driver";
 import { TerminalRepositoryLive } from "../terminal/terminal-repository";
 import { TerminalSessionServiceLive } from "../terminal/terminal-sessions";
-import { RuntimeMetadataLive } from "./runtime-metadata";
+import { RuntimeMetadata, RuntimeMetadataLive } from "./runtime-metadata";
 
 export interface BackendOptions {
 	readonly database_path: string;
 	readonly engines?: ReadonlyArray<Engine>;
 	readonly migrations_path: string;
 	readonly protocol?: Partial<ProtocolConnectionOptions>;
+	readonly retention_clock?: Layer.Layer<ThreadRetentionClock>;
+	readonly retention_scheduler?: Layer.Layer<ThreadRetentionScheduler>;
+	readonly runtime_metadata?: Layer.Layer<RuntimeMetadata>;
 	readonly terminal_driver?: Layer.Layer<TerminalDriver>;
+	readonly thread_resource_quiescer?: Layer.Layer<ThreadResourceQuiescer>;
 }
 
 export function make_backend_layer(options: BackendOptions) {
@@ -39,7 +57,7 @@ export function make_backend_layer(options: BackendOptions) {
 	};
 	const infrastructure = Layer.mergeAll(
 		make_database_layer(options),
-		RuntimeMetadataLive,
+		options.runtime_metadata ?? RuntimeMetadataLive,
 		JournalNotifierLive,
 	);
 	const persistence = Layer.mergeAll(
@@ -58,7 +76,13 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(engine_registry),
 		Layer.provideMerge(infrastructure),
 	);
-	const threads = ThreadCommandsLive.pipe(Layer.provideMerge(persistence));
+	const thread_metadata = ThreadMetadataRepositoryLive.pipe(Layer.provideMerge(infrastructure));
+	const retention_policy = ThreadRetentionPolicyServiceLive.pipe(Layer.provideMerge(persistence));
+	const threads = ThreadCommandsLive.pipe(
+		Layer.provideMerge(persistence),
+		Layer.provideMerge(thread_metadata),
+		Layer.provideMerge(retention_policy),
+	);
 	const terminal_persistence = TerminalRepositoryLive.pipe(Layer.provideMerge(infrastructure));
 	const terminal_driver = options.terminal_driver ?? NodePtyTerminalDriverLive;
 	const terminals = TerminalSessionServiceLive.pipe(
@@ -73,6 +97,23 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(graph),
 		Layer.provideMerge(terminals),
 	);
+	const resource_quiescer =
+		options.thread_resource_quiescer ??
+		ThreadResourceQuiescerLive.pipe(
+			Layer.provideMerge(orchestration),
+			Layer.provideMerge(graph),
+			Layer.provideMerge(terminals),
+		);
+	const erasure = ThreadErasureLive.pipe(
+		Layer.provideMerge(resource_quiescer),
+		Layer.provideMerge(infrastructure),
+	);
+	const retention = ThreadRetentionLive.pipe(
+		Layer.provideMerge(options.retention_clock ?? ThreadRetentionClockLive),
+		Layer.provideMerge(options.retention_scheduler ?? ThreadRetentionSchedulerLive),
+		Layer.provideMerge(retention_policy),
+		Layer.provideMerge(erasure),
+	);
 	const routing = ProtocolRouterLive.pipe(
 		Layer.provideMerge(commands),
 		Layer.provideMerge(terminals),
@@ -80,9 +121,12 @@ export function make_backend_layer(options: BackendOptions) {
 
 	return make_protocol_server_layer(protocol_options).pipe(
 		Layer.provideMerge(routing),
+		Layer.provideMerge(retention_policy),
 		Layer.provideMerge(graph),
 		Layer.provideMerge(graph_persistence),
 		Layer.provideMerge(persistence),
+		Layer.provideMerge(erasure),
+		Layer.provideMerge(retention),
 	);
 }
 

@@ -95,6 +95,129 @@ describe("ArtisanClient over MessagePorts", () => {
 		}
 	});
 
+	it("reads and durably updates retention policy without exposing an internal thread id", async () => {
+		const harness = await make_transport_test_harness();
+
+		try {
+			const initial = await Effect.runPromise(harness.client.GetThreadRetentionPolicy);
+			const receipt = await Effect.runPromise(
+				harness.client.UpdateThreadRetentionPolicy({
+					command_id: "retention_policy_1",
+					enabled: false,
+					inactivity_days: 30,
+				}),
+			);
+			const updated = await Effect.runPromise(harness.client.GetThreadRetentionPolicy);
+			const conflict = await Effect.runPromise(
+				harness.client
+					.UpdateThreadRetentionPolicy({
+						command_id: "retention_policy_1",
+						enabled: true,
+						inactivity_days: 7,
+					})
+					.pipe(Effect.flip),
+			);
+			const attempts = harness.protocol_snapshot().retention_update_attempts;
+
+			expect(initial).toEqual({ enabled: true, inactivity_days: 7 });
+			expect(receipt).toEqual({
+				command_id: "retention_policy_1",
+				journal_sequence: 1,
+				status: "accepted",
+			});
+			expect(updated).toEqual({ enabled: false, inactivity_days: 30 });
+			expect(conflict).toMatchObject({
+				code: "protocol",
+				protocol_code: "command.id_conflict",
+				retryable: false,
+			});
+			expect(attempts).toHaveLength(2);
+			expect(attempts[0]).not.toHaveProperty("thread_id");
+			expect(attempts.map((attempt) => attempt.kind)).toEqual([
+				"thread.retention.update",
+				"thread.retention.update",
+			]);
+		} finally {
+			await harness.dispose();
+		}
+	});
+
+	it("retries the exact retention update after its durable receipt is lost", async () => {
+		const harness = await make_transport_test_harness({
+			client: { reconnect_delay_ms: 5 },
+			drop_first_command_receipt: true,
+		});
+
+		try {
+			const receipt = await Effect.runPromise(
+				harness.client.UpdateThreadRetentionPolicy({
+					command_id: "retention_retry_1",
+					enabled: true,
+					inactivity_days: 14,
+				}),
+			);
+
+			await wait_for(() => harness.connector_snapshot().connections >= 2);
+
+			const attempts = harness.protocol_snapshot().retention_update_attempts;
+
+			expect(receipt).toEqual({
+				command_id: "retention_retry_1",
+				journal_sequence: 1,
+				status: "duplicate",
+			});
+			expect(attempts).toHaveLength(2);
+			expect(attempts[1]).toEqual(attempts[0]);
+			expect(await Effect.runPromise(harness.client.GetThreadRetentionPolicy)).toEqual({
+				enabled: true,
+				inactivity_days: 14,
+			});
+		} finally {
+			await harness.dispose();
+		}
+	});
+
+	it("delivers one ordered thread-list removal and omits erased threads from queries", async () => {
+		const harness = await make_transport_test_harness();
+
+		try {
+			const updates = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const stream = yield* harness.client.SubscribeThreadList;
+						const updates_fiber = yield* stream.pipe(
+							Stream.take(3),
+							Stream.runCollect,
+							Effect.forkScoped,
+						);
+
+						yield* harness.client.Command({
+							command_id: "create_then_erase",
+							payload: { title: "Erase through projection", type: "thread.create" },
+							thread_id: "thread_erased",
+						});
+						yield* harness.erase_thread("thread_erased");
+
+						return [...(yield* Fiber.join(updates_fiber))];
+					}),
+				),
+			);
+
+			expect(updates).toMatchObject([
+				{ type: "snapshot" },
+				{ thread: { thread_id: "thread_erased" }, type: "upsert" },
+				{
+					journal_sequence: 2,
+					thread_id: "thread_erased",
+					type: "remove",
+				},
+			]);
+			expect(await Effect.runPromise(harness.client.ListThreads)).toEqual([]);
+		} finally {
+			await harness.dispose();
+		}
+	});
+
 	it("queries a graph and delivers its ordered snapshot and replacement patch", async () => {
 		const harness = await make_transport_test_harness();
 

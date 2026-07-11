@@ -8,6 +8,17 @@ export {
 } from "./protocol/protocol-connection";
 export { ProtocolRouter } from "./protocol/protocol-router";
 export { ProtocolServer } from "./protocol/protocol-server";
+export { ThreadErasure, ThreadErasureFailure } from "./threads/thread-erasure";
+export {
+	ThreadRetention,
+	ThreadRetentionClock,
+	ThreadRetentionFailure,
+	ThreadRetentionScheduler,
+} from "./threads/thread-retention";
+export {
+	ThreadResourceQuiescer,
+	ThreadResourceQuiescenceFailure,
+} from "./threads/thread-resource-quiescer";
 export { AgentOrchestrator } from "./orchestration/agent-orchestrator";
 export {
 	AgentGraphOrchestrator,

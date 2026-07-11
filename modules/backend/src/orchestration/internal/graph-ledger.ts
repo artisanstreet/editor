@@ -17,6 +17,7 @@ import {
 } from "../agent-graph-model";
 import { command_matches, type GraphContext, type GraphTransaction } from "./graph-context";
 import type { PersistedGraphCodecs } from "./persisted-graph-codecs";
+import { RecordThreadActivity } from "../../threads/internal/thread-activity";
 
 export interface GraphLedger {
 	readonly append_event: (
@@ -82,6 +83,8 @@ export function make_graph_ledger(
 			const sequence = (stream?.last_sequence ?? 0) + 1;
 			const event_id = yield* metadata.MakeId("event");
 			const occurred_at = yield* metadata.Now;
+
+			yield* RecordThreadActivity(transaction, input.thread_id, occurred_at, input.payload);
 
 			if (stream) {
 				yield* transaction
