@@ -57,6 +57,33 @@ describe("project affinity policy", () => {
 		});
 	});
 
+	it("treats worktree and diff ownership as high-integrity Git evidence", () => {
+		const decision = decide_project_affinity([
+			...evidence(ProjectAlpha, "git_branch", "project_mention"),
+			...evidence(ProjectBeta, "git_worktree", "git_worktree", "git_diff", "process_owner"),
+		]);
+
+		expect(decision.primary_project).toEqual(ProjectBeta);
+		expect(decision.scores[0]).toMatchObject({
+			project: ProjectBeta,
+			score: 80,
+		});
+	});
+
+	it("requires separate high-integrity events before automatically rehoming", () => {
+		const decision = decide_project_affinity(
+			evidence(ProjectBeta, "git_root", "git_worktree", "git_branch", "git_diff").map(
+				(item) => ({ ...item, source_journal_sequence: 42 }),
+			),
+		);
+
+		expect(decision.primary_project).toBeUndefined();
+		expect(decision.rehome_suggestion).toEqual({
+			project: ProjectBeta,
+			score: 92,
+		});
+	});
+
 	it("keeps close multi-repository candidates linked instead of forcing a winner", () => {
 		const decision = decide_project_affinity([
 			...evidence(ProjectAlpha, "git_root", "terminal_working_directory", "thread_metadata"),

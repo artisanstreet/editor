@@ -1,6 +1,6 @@
 import { Context, Effect, Layer, Option, PubSub, Ref, Schedule, Semaphore } from "effect";
 
-import type { EventEnvelope, ProjectAffinityEvidenceKind } from "@artisan/protocol";
+import type { EventEnvelope, ProjectAffinityEvidenceKind, ProjectRef } from "@artisan/protocol";
 
 import { JournalNotifier } from "../persistence/journal-notifier";
 import { JournalStore, type JournalStoreError } from "../persistence/journal-store";
@@ -15,6 +15,13 @@ interface ProjectPathObservation {
 	readonly kind: ProjectAffinityEvidenceKind;
 	readonly path: string;
 }
+
+interface ProjectDirectObservation {
+	readonly kind: ProjectAffinityEvidenceKind;
+	readonly project: ProjectRef;
+}
+
+type ProjectObservation = ProjectDirectObservation | ProjectPathObservation;
 
 export type ThreadProjectAffinityCoordinatorError =
 	| JournalStoreError
@@ -37,7 +44,7 @@ export const ThreadProjectAffinityCoordinatorDisabled = Layer.succeed(
 	},
 );
 
-function observations_from_event(event: EventEnvelope): ReadonlyArray<ProjectPathObservation> {
+function observations_from_event(event: EventEnvelope): ReadonlyArray<ProjectObservation> {
 	const payload = event.payload;
 
 	if (payload.type === "thread.message_queued" || payload.type === "thread.message_steering") {
@@ -46,6 +53,10 @@ function observations_from_event(event: EventEnvelope): ReadonlyArray<ProjectPat
 				kind: "active_working_directory",
 				path: payload.working_directory,
 			},
+			...(payload.mentioned_projects ?? []).map((project) => ({
+				kind: "project_mention" as const,
+				project,
+			})),
 		];
 	}
 
@@ -60,6 +71,7 @@ function observations_from_event(event: EventEnvelope): ReadonlyArray<ProjectPat
 				kind: active ? "active_working_directory" : "historical_working_directory",
 				path: payload.working_directory,
 			},
+			{ kind: "process_owner", path: payload.working_directory },
 		];
 	}
 
@@ -69,6 +81,7 @@ function observations_from_event(event: EventEnvelope): ReadonlyArray<ProjectPat
 				kind: "terminal_working_directory",
 				path: payload.terminal.working_directory,
 			},
+			{ kind: "process_owner", path: payload.terminal.working_directory },
 		];
 	}
 
@@ -77,7 +90,45 @@ function observations_from_event(event: EventEnvelope): ReadonlyArray<ProjectPat
 		(payload.artifact.kind === "file" || payload.artifact.kind === "diff") &&
 		payload.artifact.uri
 	) {
-		return [{ kind: "file_artifact", path: payload.artifact.uri }];
+		return [
+			{ kind: "file_artifact", path: payload.artifact.uri },
+			...(payload.artifact.kind === "diff"
+				? ([{ kind: "file_mutation", path: payload.artifact.uri }] as const)
+				: []),
+		];
+	}
+
+	if (payload.type === "filesystem.mutation") {
+		return [
+			{ kind: "file_mutation", path: payload.path },
+			...(payload.destination_path === undefined
+				? []
+				: ([{ kind: "file_mutation", path: payload.destination_path }] as const)),
+		];
+	}
+
+	if (payload.type === "process.ownership") {
+		return [{ kind: "process_owner", path: payload.working_directory }];
+	}
+
+	if (payload.type === "git.workspace.observed") {
+		return [
+			{ kind: "git_root", path: payload.root_path },
+			{ kind: "git_worktree", path: payload.worktree_path },
+			...(payload.branch === undefined
+				? []
+				: ([{ kind: "git_branch", path: payload.root_path }] as const)),
+			...(!payload.has_diff && payload.changed_file_count === 0
+				? []
+				: ([{ kind: "git_diff", path: payload.root_path }] as const)),
+		];
+	}
+
+	if (payload.type === "thread.metadata.updated") {
+		return (payload.mentioned_projects ?? []).map((project) => ({
+			kind: "thread_metadata" as const,
+			project,
+		}));
 	}
 
 	return [];
@@ -116,25 +167,40 @@ export const ThreadProjectAffinityCoordinatorLive = Layer.effect(
 
 				const unique_observations = new Map(
 					observations.map((observation) => [
-						`${observation.kind}:${observation.path}`,
+						"project" in observation
+							? `${observation.kind}:project:${observation.project.project_id}`
+							: `${observation.kind}:path:${observation.path}`,
 						observation,
 					]),
 				);
 
 				yield* Effect.forEach(unique_observations.values(), (observation) =>
 					Effect.gen(function* () {
+						const direct_project = "project" in observation;
+						const location = direct_project
+							? observation.project.root_path
+							: observation.path;
 						const located = yield* locator
-							.Locate(observation.path)
+							.Locate(location)
 							.pipe(Effect.catch(() => Effect.succeed(Option.none())));
 
 						if (Option.isNone(located)) {
 							return;
 						}
 
-						const kinds: ReadonlyArray<ProjectAffinityEvidenceKind> = [
+						if (
+							direct_project &&
+							located.value.project.project_id !== observation.project.project_id
+						) {
+							return;
+						}
+
+						const kinds = new Set<ProjectAffinityEvidenceKind>([
 							observation.kind,
-							...(located.value.source === "git_root" ? (["git_root"] as const) : []),
-						];
+							...(!direct_project && located.value.source === "git_root"
+								? (["git_root"] as const)
+								: []),
+						]);
 
 						yield* Effect.forEach(kinds, (kind) =>
 							repository.ObserveEvidence({

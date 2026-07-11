@@ -82,6 +82,7 @@ function make_evidence(input: {
 	readonly observed_at?: string;
 	readonly project: ProjectRef;
 	readonly source_event_id?: string;
+	readonly source_journal_sequence?: number;
 }): ThreadProjectAffinityEvidenceInput {
 	return {
 		basis_affinity_version: input.basis_affinity_version ?? 0,
@@ -90,7 +91,7 @@ function make_evidence(input: {
 		observed_at: input.observed_at ?? "2026-07-11T12:00:00.000Z",
 		project: input.project,
 		source_event_id: input.source_event_id ?? `source_${input.evidence_id}`,
-		source_journal_sequence: 1,
+		source_journal_sequence: input.source_journal_sequence ?? 1,
 		thread_id: "thread_affinity",
 	};
 }
@@ -126,6 +127,7 @@ describe("thread project affinity repository", () => {
 							evidence_id: "evidence_git_root",
 							kind: "git_root",
 							project: ProjectAlpha,
+							source_journal_sequence: 1,
 						}),
 					);
 					const suggested = yield* project_affinity.ObserveEvidence(
@@ -133,6 +135,7 @@ describe("thread project affinity repository", () => {
 							evidence_id: "evidence_file_mutation",
 							kind: "file_mutation",
 							project: ProjectAlpha,
+							source_journal_sequence: 2,
 						}),
 					);
 					const rehomed = yield* project_affinity.ObserveEvidence(
@@ -140,6 +143,7 @@ describe("thread project affinity repository", () => {
 							evidence_id: "evidence_active_cwd",
 							kind: "active_working_directory",
 							project: ProjectAlpha,
+							source_journal_sequence: 3,
 						}),
 					);
 					const snapshot = yield* threads.Snapshot();
@@ -211,6 +215,12 @@ describe("thread project affinity repository", () => {
 						...first_input,
 						evidence_id: "evidence_replay_2",
 					});
+					const replayed_after_projection_change =
+						yield* project_affinity.ObserveEvidence({
+							...first_input,
+							basis_affinity_version: 1,
+							evidence_id: "evidence_replay_after_projection_change",
+						});
 					const conflict = yield* project_affinity
 						.ObserveEvidence({
 							...first_input,
@@ -238,6 +248,7 @@ describe("thread project affinity repository", () => {
 						events: yield* database.client.select().from(JournalEvents),
 						first,
 						future,
+						replayed_after_projection_change,
 						snapshot: yield* threads.Snapshot(),
 					};
 				}),
@@ -249,6 +260,8 @@ describe("thread project affinity repository", () => {
 			expect(result.first.status).toBe("accepted");
 			expect(result.duplicate.status).toBe("duplicate");
 			expect(result.duplicate.event).toEqual(result.first.event);
+			expect(result.replayed_after_projection_change.status).toBe("duplicate");
+			expect(result.replayed_after_projection_change.event).toEqual(result.first.event);
 			expect(result.conflict._tag).toBe("Failure");
 			expect(result.future._tag).toBe("Failure");
 			expect(result.evidence).toHaveLength(1);
@@ -347,13 +360,14 @@ describe("thread project affinity repository", () => {
 							["locked_file", "file_mutation"],
 							["locked_cwd", "active_working_directory"],
 						] as const,
-						([evidence_id, kind]) =>
+						([evidence_id, kind], index) =>
 							project_affinity.ObserveEvidence(
 								make_evidence({
 									basis_affinity_version: 1,
 									evidence_id,
 									kind,
 									project: ProjectBeta,
+									source_journal_sequence: index + 1,
 								}),
 							),
 					);

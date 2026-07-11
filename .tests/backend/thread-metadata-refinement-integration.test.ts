@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { Effect, Layer } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { CommandEnvelope } from "@artisan/protocol";
+import type { CommandEnvelope, ProjectRef } from "@artisan/protocol";
 import { make_backend_runtime, ProtocolRouter } from "@artisan/backend";
 
 import { Database } from "../../modules/backend/src/persistence/database";
@@ -17,6 +17,12 @@ import { ThreadMetadataRepository } from "../../modules/backend/src/threads/thre
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];
+
+const ProjectArtisan: ProjectRef = {
+	display_name: "Artisan Editor",
+	project_id: "project_artisan",
+	root_path: "C:/work/artisan-editor",
+};
 
 async function make_database_path() {
 	const directory = await mkdtemp(join(tmpdir(), "artisan-metadata-refinement-"));
@@ -49,7 +55,11 @@ function make_command(message_id: string, payload: CommandEnvelope["payload"]): 
 	};
 }
 
-function make_refinement(operation_id: string, source_event_id = "source_message_1") {
+function make_refinement(
+	operation_id: string,
+	source_event_id = "source_message_1",
+	mentioned_projects?: ReadonlyArray<ProjectRef>,
+) {
 	return {
 		operation_id,
 		payload: {
@@ -57,6 +67,7 @@ function make_refinement(operation_id: string, source_event_id = "source_message
 			basis_metadata_version: 0,
 			current_goal: "Ship automatic thread metadata",
 			live_status: "Refining thread identity",
+			...(mentioned_projects === undefined ? {} : { mentioned_projects }),
 			rename_suggestion: "Automatic metadata refinement",
 			title: "Build automatic metadata refinement",
 			type: "thread.metadata.refine" as const,
@@ -98,7 +109,9 @@ describe("automatic thread metadata refinement integration", () => {
 						}),
 					);
 					const first = yield* repository.Refine(
-						make_refinement("metadata-refine:source_message_1"),
+						make_refinement("metadata-refine:source_message_1", "source_message_1", [
+							ProjectArtisan,
+						]),
 					);
 					const duplicate = yield* repository.Refine({
 						...make_refinement("different_operation_id"),
@@ -142,6 +155,10 @@ describe("automatic thread metadata refinement integration", () => {
 				causation_id: "source_message_1",
 				correlation_id: "metadata-refine:source_message_1",
 				origin: "backend",
+			});
+			expect(JSON.parse(refinement_event!.payload_json)).toMatchObject({
+				mentioned_projects: [ProjectArtisan],
+				type: "thread.metadata.updated",
 			});
 			expect(result.thread).toMatchObject({
 				current_goal: "Ship automatic thread metadata",

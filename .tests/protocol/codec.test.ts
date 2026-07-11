@@ -108,6 +108,21 @@ describe("protocol codec", () => {
 		await expect(Effect.runPromise(DecodeCommandEnvelope(input))).resolves.toEqual(input);
 	});
 
+	it("roundtrips resolved project mentions through metadata refinement commands", async () => {
+		const input = {
+			...make_input(),
+			payload: {
+				basis_activity_version: 1,
+				basis_metadata_version: 1,
+				live_status: "Working",
+				mentioned_projects,
+				type: "thread.metadata.refine",
+			},
+		};
+
+		await expect(Effect.runPromise(DecodeCommandEnvelope(input))).resolves.toEqual(input);
+	});
+
 	it("roundtrips content-free project-affinity event payloads", async () => {
 		const events = [
 			{

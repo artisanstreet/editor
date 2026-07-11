@@ -156,7 +156,6 @@ function is_affinity_command_payload(
 
 function evidence_matches(input: ThreadProjectAffinityEvidenceInput, existing: EvidenceRow) {
 	return (
-		existing.basis_affinity_version === input.basis_affinity_version &&
 		existing.kind === input.kind &&
 		existing.observed_at === input.observed_at &&
 		existing.project_id === input.project.project_id &&

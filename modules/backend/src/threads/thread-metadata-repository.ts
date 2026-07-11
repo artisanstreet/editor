@@ -267,6 +267,9 @@ const MakeTransition = (
 			return {
 				event_payload: {
 					change: "metadata",
+					...(payload.mentioned_projects === undefined
+						? {}
+						: { mentioned_projects: payload.mentioned_projects }),
 					thread: projection,
 					type: "thread.metadata.updated",
 				} satisfies ThreadMetadataUpdatedEvent,

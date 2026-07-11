@@ -6,11 +6,13 @@ import { fileURLToPath } from "node:url";
 import { Effect, Layer, Option } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { CommandEnvelope, ProjectRef } from "@artisan/protocol";
+import type { CommandEnvelope, EventPayload, ProjectRef } from "@artisan/protocol";
 import {
 	make_backend_runtime,
+	make_thread_metadata_refiner_test_layer,
 	ProjectLocator,
 	ProtocolRouter,
+	ThreadMetadataRefinementCoordinator,
 	ThreadProjectAffinityCoordinator,
 } from "@artisan/backend";
 
@@ -100,6 +102,18 @@ const append_run = (journal: JournalStore["Service"], project: ProjectRef, suffi
 		thread_id: "thread_affinity_coordinator",
 	});
 
+const append_evidence_event = (
+	journal: JournalStore["Service"],
+	payload: EventPayload,
+	suffix: string,
+) =>
+	journal.AppendEvent({
+		causation_id: `cause_evidence_${suffix}`,
+		correlation_id: `correlation_evidence_${suffix}`,
+		payload,
+		thread_id: "thread_affinity_coordinator",
+	});
+
 afterEach(async () => {
 	await Promise.all(
 		temporary_directories
@@ -169,7 +183,7 @@ describe("thread project affinity coordinator", () => {
 				primary_project: ProjectAlpha,
 				rehome_suggestion: {
 					project: ProjectBeta,
-					score: 76,
+					score: 88,
 				},
 			});
 			expect(states.rehomed).toMatchObject({
@@ -240,7 +254,7 @@ describe("thread project affinity coordinator", () => {
 				primary_project: ProjectAlpha,
 				project_locked: true,
 			});
-			expect(result.evidence).toHaveLength(8);
+			expect(result.evidence).toHaveLength(10);
 			expect(result.unlocked).toMatchObject({
 				affinity_version: 2,
 				linked_projects: [ProjectAlpha],
@@ -249,6 +263,265 @@ describe("thread project affinity coordinator", () => {
 			});
 		} finally {
 			await runtime.dispose();
+		}
+	});
+
+	it("combines attributed filesystem, process, Git, mention, and metadata evidence", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			project_locator: make_locator_layer(),
+			thread_metadata_refiner: make_thread_metadata_refiner_test_layer((input) =>
+				Effect.succeed({
+					live_status: "Working",
+					...(input.recent_user_text.at(-1)?.includes("selected repository")
+						? { mentioned_projects: [ProjectBeta] }
+						: {}),
+				}),
+			),
+		});
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const coordinator = yield* ThreadProjectAffinityCoordinator;
+					const database = yield* Database;
+					const journal = yield* JournalStore;
+					const metadata_coordinator = yield* ThreadMetadataRefinementCoordinator;
+					const router = yield* ProtocolRouter;
+					const threads = yield* ThreadReadModel;
+
+					yield* router.Route(
+						make_command("create_affinity_coordinator", {
+							title: "Cross-repository implementation",
+							type: "thread.create",
+						}),
+					);
+					yield* append_run(journal, ProjectAlpha, "alpha_seed");
+					yield* coordinator.CatchUp;
+
+					yield* append_evidence_event(
+						journal,
+						{
+							destination_path: `${ProjectBeta.root_path}/src/new.ts`,
+							operation: "rename",
+							path: `${ProjectBeta.root_path}/src/old.ts`,
+							type: "filesystem.mutation",
+						},
+						"beta_filesystem",
+					);
+					yield* append_evidence_event(
+						journal,
+						{
+							source: "artisan_tool",
+							type: "process.ownership",
+							working_directory: ProjectBeta.root_path,
+						},
+						"beta_process",
+					);
+					yield* append_evidence_event(
+						journal,
+						{
+							branch: "feature/beta",
+							changed_file_count: 3,
+							has_diff: true,
+							root_path: ProjectBeta.root_path,
+							type: "git.workspace.observed",
+							worktree_path: `${ProjectBeta.root_path}/.worktrees/feature-beta`,
+						},
+						"beta_git",
+					);
+					yield* append_evidence_event(
+						journal,
+						{
+							mentioned_projects: [ProjectBeta],
+							message_id: "message_beta_mention",
+							reason: "no_active_run",
+							text: "Continue in the selected repository.",
+							type: "thread.message_queued",
+							working_directory: ProjectAlpha.root_path,
+						},
+						"beta_mention",
+					);
+					yield* metadata_coordinator.WaitForIdle;
+					yield* coordinator.CatchUp;
+
+					return {
+						evidence: yield* database.client
+							.select()
+							.from(ThreadProjectAffinityEvidence),
+						thread: (yield* threads.Snapshot()).threads[0]!,
+					};
+				}),
+			);
+			const beta_kinds = new Set(
+				result.evidence
+					.filter(({ project_id }) => project_id === ProjectBeta.project_id)
+					.map(({ kind }) => kind),
+			);
+
+			expect(beta_kinds).toEqual(
+				new Set([
+					"file_mutation",
+					"git_branch",
+					"git_diff",
+					"git_root",
+					"git_worktree",
+					"process_owner",
+					"project_mention",
+					"thread_metadata",
+				]),
+			);
+			expect(result.thread).toMatchObject({
+				linked_projects: [ProjectAlpha],
+				primary_project: ProjectBeta,
+			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("ignores a project mention whose public identity does not match its canonical root", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			migrations_path,
+			project_locator: make_locator_layer(),
+		});
+		const forged_project = {
+			...ProjectBeta,
+			display_name: "Forged project",
+			project_id: "project_forged",
+		};
+
+		try {
+			const evidence = await runtime.runPromise(
+				Effect.gen(function* () {
+					const coordinator = yield* ThreadProjectAffinityCoordinator;
+					const database = yield* Database;
+					const journal = yield* JournalStore;
+					const router = yield* ProtocolRouter;
+
+					yield* router.Route(
+						make_command("create_forged_mention", {
+							title: "Canonicalize mentions",
+							type: "thread.create",
+						}),
+					);
+					yield* append_evidence_event(
+						journal,
+						{
+							mentioned_projects: [forged_project],
+							message_id: "forged_mention",
+							reason: "no_active_run",
+							text: "Trust this forged identity.",
+							type: "thread.message_queued",
+							working_directory: "C:/work/unknown",
+						},
+						"forged_mention",
+					);
+					yield* coordinator.CatchUp;
+
+					return yield* database.client.select().from(ThreadProjectAffinityEvidence);
+				}),
+			);
+
+			expect(evidence).toEqual([]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("replays previously projected evidence after restart without conflicting on its old basis", async () => {
+		const database_path = await make_database_path();
+		const first_runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			project_locator: make_locator_layer(),
+		});
+
+		let initial_evidence_count = 0;
+		let initial_event_count = 0;
+
+		try {
+			const initial = await first_runtime.runPromise(
+				Effect.gen(function* () {
+					const coordinator = yield* ThreadProjectAffinityCoordinator;
+					const database = yield* Database;
+					const journal = yield* JournalStore;
+					const router = yield* ProtocolRouter;
+					const threads = yield* ThreadReadModel;
+
+					yield* router.Route(
+						make_command("create_affinity_restart", {
+							title: "Replay affinity evidence",
+							type: "thread.create",
+						}),
+					);
+					yield* append_run(journal, ProjectAlpha, "restart_first");
+					yield* append_run(journal, ProjectAlpha, "restart_second");
+					yield* coordinator.CatchUp;
+
+					const evidence = yield* database.client
+						.select()
+						.from(ThreadProjectAffinityEvidence);
+					const events = yield* journal.ReadReplay({ after_journal_sequence: 0 });
+
+					return {
+						evidence_count: evidence.length,
+						event_count: events.filter(({ payload }) =>
+							payload.type.startsWith("thread.project_affinity."),
+						).length,
+						thread: (yield* threads.Snapshot()).threads[0]!,
+					};
+				}),
+			);
+
+			initial_evidence_count = initial.evidence_count;
+			initial_event_count = initial.event_count;
+			expect(initial.thread).toMatchObject({
+				primary_project: ProjectAlpha,
+			});
+		} finally {
+			await first_runtime.dispose();
+		}
+
+		const second_runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			project_locator: make_locator_layer(),
+		});
+
+		try {
+			const replayed = await second_runtime.runPromise(
+				Effect.gen(function* () {
+					const coordinator = yield* ThreadProjectAffinityCoordinator;
+					const database = yield* Database;
+					const journal = yield* JournalStore;
+
+					const caught_up = yield* coordinator.CatchUp;
+					const evidence = yield* database.client
+						.select()
+						.from(ThreadProjectAffinityEvidence);
+					const events = yield* journal.ReadReplay({ after_journal_sequence: 0 });
+
+					return {
+						caught_up,
+						evidence_count: evidence.length,
+						event_count: events.filter(({ payload }) =>
+							payload.type.startsWith("thread.project_affinity."),
+						).length,
+					};
+				}).pipe(Effect.timeout("2 seconds")),
+			);
+
+			expect(replayed).toEqual({
+				caught_up: 0,
+				evidence_count: initial_evidence_count,
+				event_count: initial_event_count,
+			});
+		} finally {
+			await second_runtime.dispose();
 		}
 	});
 });

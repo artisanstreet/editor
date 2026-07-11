@@ -17,7 +17,10 @@ export const ProjectAffinityWeights: Readonly<
 	active_working_directory: { cap: 36, weight: 18 },
 	file_artifact: { cap: 30, weight: 15 },
 	file_mutation: { cap: 48, weight: 24 },
+	git_branch: { cap: 16, weight: 8 },
+	git_diff: { cap: 40, weight: 20 },
 	git_root: { cap: 40, weight: 40 },
+	git_worktree: { cap: 48, weight: 24 },
 	historical_working_directory: { cap: 18, weight: 6 },
 	process_owner: { cap: 24, weight: 12 },
 	project_mention: { cap: 20, weight: 10 },
@@ -43,7 +46,10 @@ export const ProjectAffinityRecencyLimits: Partial<
 	active_working_directory: 4,
 	file_artifact: 8,
 	file_mutation: 8,
+	git_branch: 4,
+	git_diff: 8,
 	git_root: 4,
+	git_worktree: 4,
 	process_owner: 4,
 	terminal_working_directory: 4,
 };
@@ -69,7 +75,9 @@ export interface ProjectAffinityDecision {
 const high_integrity_evidence = new Set<ProjectAffinityEvidenceKind>([
 	"active_working_directory",
 	"file_mutation",
+	"git_diff",
 	"git_root",
+	"git_worktree",
 ]);
 
 function contributing_evidence(evidence: ReadonlyArray<ProjectAffinityEvidence>) {
@@ -106,25 +114,29 @@ export function decide_project_affinity(
 		string,
 		{
 			counts: Map<ProjectAffinityEvidenceKind, number>;
-			has_high_integrity_evidence: boolean;
+			high_integrity_sources: Set<number>;
 			project: ProjectRef;
 		}
 	>();
 
-	for (const item of contributing_evidence(evidence)) {
+	for (const [index, item] of contributing_evidence(evidence).entries()) {
 		const current = projects.get(item.project.project_id) ?? {
 			counts: new Map<ProjectAffinityEvidenceKind, number>(),
-			has_high_integrity_evidence: false,
+			high_integrity_sources: new Set<number>(),
 			project: item.project,
 		};
 
 		current.counts.set(item.kind, (current.counts.get(item.kind) ?? 0) + 1);
-		current.has_high_integrity_evidence ||= high_integrity_evidence.has(item.kind);
+
+		if (high_integrity_evidence.has(item.kind)) {
+			current.high_integrity_sources.add(item.source_journal_sequence ?? index + 1);
+		}
+
 		projects.set(item.project.project_id, current);
 	}
 
 	const scored = [...projects.values()]
-		.map(({ counts, has_high_integrity_evidence, project }) => {
+		.map(({ counts, high_integrity_sources, project }) => {
 			const evidence_counts = [...counts.entries()]
 				.sort(([left], [right]) => left.localeCompare(right))
 				.map(([kind, count]) => ({ count, kind }));
@@ -138,7 +150,7 @@ export function decide_project_affinity(
 			);
 
 			return {
-				has_high_integrity_evidence,
+				has_corroborated_high_integrity_evidence: high_integrity_sources.size >= 2,
 				projection: { evidence: evidence_counts, project, score },
 			};
 		})
@@ -155,7 +167,7 @@ export function decide_project_affinity(
 		winner &&
 		winner.projection.score >= ProjectAffinityThresholds.automatic_score &&
 		lead >= ProjectAffinityThresholds.automatic_lead &&
-		winner.has_high_integrity_evidence
+		winner.has_corroborated_high_integrity_evidence
 			? winner.projection.project
 			: undefined;
 	const rehome_suggestion =

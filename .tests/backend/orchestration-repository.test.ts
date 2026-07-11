@@ -98,6 +98,13 @@ describe("orchestration repository hardening", () => {
 			"thread_1",
 			{
 				engine_id: "engine_1",
+				mentioned_projects: [
+					{
+						display_name: "Beta",
+						project_id: "project_beta",
+						root_path: "C:/work/beta",
+					},
+				],
 				text: "Start",
 				type: "thread.send_message",
 				working_directory: "C:/work",
@@ -125,6 +132,16 @@ describe("orchestration repository hardening", () => {
 			expect(duplicate.events).toEqual(
 				expect.arrayContaining([
 					expect.objectContaining({
+						payload: expect.objectContaining({
+							mentioned_projects: [
+								{
+									display_name: "Beta",
+									project_id: "project_beta",
+									root_path: "C:/work/beta",
+								},
+							],
+							type: "thread.message_queued",
+						}),
 						raw_origin: { provider: "fixture", reference: "command_1" },
 					}),
 				]),

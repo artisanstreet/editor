@@ -531,6 +531,9 @@ export const OrchestrationRepositoryLive = Layer.effect(
 									correlation_id: command.message_id,
 									payload: {
 										message_id: command.message_id,
+										...(payload.mentioned_projects === undefined
+											? {}
+											: { mentioned_projects: payload.mentioned_projects }),
 										reason:
 											current_run && is_active_status(current_run.status)
 												? "unsupported"
@@ -581,6 +584,9 @@ export const OrchestrationRepositoryLive = Layer.effect(
 									correlation_id: command.message_id,
 									payload: {
 										message_id: command.message_id,
+										...(payload.mentioned_projects === undefined
+											? {}
+											: { mentioned_projects: payload.mentioned_projects }),
 										text: payload.text,
 										type: "thread.message_steering",
 										working_directory: payload.working_directory,

@@ -1,6 +1,6 @@
 import { Context, Effect, Layer } from "effect";
 
-import type { ThreadListItem } from "@artisan/protocol";
+import type { ProjectRef, ThreadListItem } from "@artisan/protocol";
 
 /** Identifies the lifecycle event that caused a metadata refinement request. */
 export type ThreadMetadataRefinementTrigger =
@@ -29,6 +29,7 @@ export interface ThreadMetadataRefinementRequest extends ThreadMetadataRefinerIn
 export interface ThreadMetadataRefinement {
 	readonly current_goal?: string;
 	readonly live_status: string;
+	readonly mentioned_projects?: ReadonlyArray<ProjectRef>;
 	readonly rename_suggestion?: string;
 	readonly title?: string;
 }
