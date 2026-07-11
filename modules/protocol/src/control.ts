@@ -1,6 +1,16 @@
 import { Schema } from "effect";
 
 import {
+	WorkspaceChangeListQuery,
+	WorkspaceChangeListQueryResult,
+	WorkspaceChangeReviewRequest,
+	WorkspaceChangeRollbackRequest,
+	WorkspaceChangeUpdatedEvent,
+	WorkspaceFileReadQuery,
+	WorkspaceFileReadQueryResult,
+	WorkspaceFileReplaceRequest,
+} from "./workspace-changes";
+import {
 	Identifier,
 	IsoDateTime,
 	JournalSequence,
@@ -58,6 +68,7 @@ import {
 export * from "./thread";
 export * from "./guidance";
 export * from "./model-behaviour";
+export * from "./workspace-changes";
 
 const FrontendTraceMetadata = {
 	message_id: Identifier,
@@ -890,6 +901,7 @@ export const EventPayload = Schema.Union([
 	GlobalGuidanceProviderReconciledEvent,
 	ModelBehaviourSettingUpdatedEvent,
 	ModelBehaviourProviderReconciledEvent,
+	WorkspaceChangeUpdatedEvent,
 	ThreadMessageQueuedEvent,
 	ThreadMessageSteeringEvent,
 	RunLifecycleEvent,
@@ -1055,6 +1067,78 @@ export const GlobalGuidanceRetryEnvelope = Schema.Struct({
 });
 
 export type GlobalGuidanceRetryEnvelope = typeof GlobalGuidanceRetryEnvelope.Type;
+
+/** Requests the current text and identity for one canonical workspace file. */
+export const WorkspaceFileReadQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("workspace.file.read.query"),
+	payload: WorkspaceFileReadQuery,
+});
+
+export type WorkspaceFileReadQueryEnvelope = typeof WorkspaceFileReadQueryEnvelope.Type;
+
+/** Returns the current text and identity for one correlated workspace file query. */
+export const WorkspaceFileReadQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("workspace.file.read.query.result"),
+	payload: WorkspaceFileReadQueryResult,
+});
+
+export type WorkspaceFileReadQueryResultEnvelope = typeof WorkspaceFileReadQueryResultEnvelope.Type;
+
+/** Requests an attributed replacement of one existing UTF-8 regular workspace file. */
+export const WorkspaceFileReplaceEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	agent_id: Identifier,
+	kind: Schema.Literal("workspace.file.replace"),
+	payload: WorkspaceFileReplaceRequest,
+	raw_origin: Schema.optional(RawOrigin),
+	run_id: Identifier,
+	thread_id: Identifier,
+});
+
+export type WorkspaceFileReplaceEnvelope = typeof WorkspaceFileReplaceEnvelope.Type;
+
+/** Requests a review transition for one workspace change attributed to a thread. */
+export const WorkspaceChangeReviewEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("workspace.change.review"),
+	payload: WorkspaceChangeReviewRequest,
+	thread_id: Identifier,
+});
+
+export type WorkspaceChangeReviewEnvelope = typeof WorkspaceChangeReviewEnvelope.Type;
+
+/** Requests a guarded rollback transition for one workspace change attributed to a thread. */
+export const WorkspaceChangeRollbackEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("workspace.change.rollback"),
+	payload: WorkspaceChangeRollbackRequest,
+	thread_id: Identifier,
+});
+
+export type WorkspaceChangeRollbackEnvelope = typeof WorkspaceChangeRollbackEnvelope.Type;
+
+/** Requests workspace changes attributed to one thread and optionally one workspace. */
+export const WorkspaceChangeListQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("workspace.change.list.query"),
+	payload: WorkspaceChangeListQuery,
+});
+
+export type WorkspaceChangeListQueryEnvelope = typeof WorkspaceChangeListQueryEnvelope.Type;
+
+/** Returns the durable workspace-change projection for one correlated list query. */
+export const WorkspaceChangeListQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("workspace.change.list.query.result"),
+	payload: WorkspaceChangeListQueryResult,
+});
+
+export type WorkspaceChangeListQueryResultEnvelope =
+	typeof WorkspaceChangeListQueryResultEnvelope.Type;
 
 /** Requests the curated Model Behaviour registry and current reconciliation state. */
 export const ModelBehaviourQueryEnvelope = Schema.Struct({
@@ -1364,6 +1448,11 @@ export const InboundControlEnvelope = Schema.Union([
 	ThreadListQueryEnvelope,
 	ThreadRetentionQueryEnvelope,
 	ThreadRetentionUpdateEnvelope,
+	WorkspaceFileReadQueryEnvelope,
+	WorkspaceFileReplaceEnvelope,
+	WorkspaceChangeReviewEnvelope,
+	WorkspaceChangeRollbackEnvelope,
+	WorkspaceChangeListQueryEnvelope,
 	GlobalGuidanceQueryEnvelope,
 	GlobalGuidanceUpdateEnvelope,
 	GlobalGuidanceSelectionEnvelope,
@@ -1394,6 +1483,8 @@ export const OutboundControlEnvelope = Schema.Union([
 	ProtocolErrorEnvelope,
 	ThreadListQueryResultEnvelope,
 	ThreadRetentionQueryResultEnvelope,
+	WorkspaceFileReadQueryResultEnvelope,
+	WorkspaceChangeListQueryResultEnvelope,
 	GlobalGuidanceQueryResultEnvelope,
 	ModelBehaviourQueryResultEnvelope,
 	ThreadWorkQueryResultEnvelope,
