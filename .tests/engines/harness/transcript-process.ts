@@ -181,6 +181,7 @@ function make_handle(
 				),
 			);
 		},
+		EndInput: Effect.void,
 	};
 }
 

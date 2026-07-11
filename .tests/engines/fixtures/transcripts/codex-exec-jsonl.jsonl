@@ -1,0 +1,14 @@
+{"type":"thread.started","thread_id":"thread-exec-sanitized"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"reasoning-1","type":"reasoning","text":"Inspecting the adapter contract."}}
+{"type":"item.started","item":{"id":"command-1","type":"command_execution","command":"pnpm test","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"command-1","type":"command_execution","command":"pnpm test","aggregated_output":"tests passed\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"file-1","type":"file_change","changes":[{"path":"src/example.ts","kind":"update"}],"status":"completed"}}
+{"type":"item.started","item":{"id":"search-1","type":"web_search","query":"Codex exec JSONL","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"search-1","type":"web_search","query":"Codex exec JSONL","status":"completed"}}
+{"type":"item.started","item":{"id":"tool-1","type":"mcp_tool_call","server":"docs","tool":"search","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"tool-1","type":"mcp_tool_call","server":"docs","tool":"search","status":"completed"}}
+{"type":"item.completed","item":{"id":"plan-1","type":"plan_update","items":[{"text":"Inspect","completed":true},{"text":"Implement","completed":false}]}}
+{"type":"item.completed","item":{"id":"message-1","type":"agent_message","text":"Fallback complete."}}
+{"type":"future.event","payload":{"retained":true}}
+{"type":"turn.completed","usage":{"input_tokens":120,"cached_input_tokens":40,"output_tokens":30,"reasoning_output_tokens":10}}

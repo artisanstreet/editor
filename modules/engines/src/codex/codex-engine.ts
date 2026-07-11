@@ -1,20 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
-import {
-	Cause,
-	Context,
-	Deferred,
-	Effect,
-	Exit,
-	Layer,
-	Queue,
-	Ref,
-	Schema,
-	Scope,
-	Semaphore,
-	Stream,
-} from "effect";
+import { Cause, Context, Effect, Exit, Layer, Ref, Schema, Scope, Semaphore, Stream } from "effect";
 
 import {
 	type Engine,
@@ -27,8 +14,6 @@ import {
 	type EngineProbe,
 	type EngineProbeInput,
 	type EngineRun,
-	type EngineRunTerminalState,
-	EngineBackpressureError,
 	EngineCommandIdConflictError,
 	EngineCommandTargetError,
 	EngineConfigurationError,
@@ -39,17 +24,16 @@ import {
 	EngineUnavailableError,
 } from "../engine";
 import { normalise_codex_notification } from "./codex-normalizer";
+import { make_codex_exec_engine } from "./codex-exec-engine";
 import {
 	open_codex_app_server_session,
 	type CodexAppServerDiagnostic,
 	type CodexAppServerSessionFailure,
 } from "./codex-app-server-session";
-import {
-	CodexProcessFactory,
-	type CodexProcessHandle,
-	type CodexProcessSpawnInput,
-} from "./codex-process";
+import { CodexProcessFactory, type CodexProcessSpawnInput } from "./codex-process";
 import { CodexTransportMetadata } from "./codex-protocol";
+import { MakeCodexAppServerEventBuffer } from "./internal/codex-app-server-event-buffer";
+import { MakeCodexAppServerThreadOptions } from "./internal/codex-permissions";
 
 /** Identifies the Codex adapter and its currently available capabilities. @since 0.3.0 */
 export const CodexEngineDescriptor: EngineDescriptor = {
@@ -88,12 +72,17 @@ export const CodexEngineDescriptor: EngineDescriptor = {
 
 /** Configures the Codex executable, transport buffers, and non-billable probe deadlines. @since 0.3.0 */
 export interface CodexEngineOptions {
+	readonly app_server_max_frame_bytes?: number;
 	readonly executable_args?: ReadonlyArray<string>;
 	readonly event_capacity?: number;
 	readonly executable?: string;
+	readonly exec_max_frame_bytes?: number;
+	readonly exec_max_stderr_bytes?: number;
+	readonly exec_max_stdout_bytes?: number;
+	readonly exec_timeout_ms?: number;
 	readonly initialize_timeout_ms?: number;
 	readonly request_timeout_ms?: number;
-	readonly shell?: boolean;
+	readonly transport_selection?: "app_server_only" | "prefer_app_server_with_exec_fallback";
 	readonly version_timeout_ms?: number;
 }
 
@@ -103,10 +92,7 @@ export class CodexEngine extends Context.Service<CodexEngine, Engine>()("Artisan
 interface CodexRunState {
 	readonly active_turn_id: string | undefined;
 	readonly approvals: ReadonlyMap<string, PendingApproval>;
-	readonly buffered_count: number;
-	readonly closed: boolean;
 	readonly command_intents: ReadonlyMap<string, string>;
-	readonly next_sequence: number;
 	readonly questions: ReadonlyMap<string, PendingQuestion>;
 }
 
@@ -152,42 +138,39 @@ const ThreadResponseSchema = Schema.Struct({
 });
 const TurnResponseSchema = Schema.Struct({ turn: Schema.Struct({ id: Schema.String }) });
 
-function ReadStdout(handle: CodexProcessHandle) {
+function ReadBoundedStream(
+	stream: AsyncIterable<Uint8Array>,
+	channel: "stderr" | "stdout",
+	max_bytes: number,
+) {
 	return Effect.tryPromise({
 		try: async () => {
-			const chunks: Array<Uint8Array> = [];
+			const output = new Uint8Array(max_bytes);
+			let length = 0;
 
-			for await (const chunk of handle.Stdout) {
-				chunks.push(chunk);
+			for await (const chunk of stream) {
+				if (length + chunk.length > max_bytes) {
+					throw new EngineProtocolError({
+						engine_id: "codex",
+						message: `Codex --version ${channel} exceeded ${max_bytes} bytes`,
+					});
+				}
+
+				output.set(chunk, length);
+				length += chunk.length;
 			}
 
-			return chunks;
+			return output.slice(0, length);
 		},
-		catch: (cause) => new EngineProcessError({ cause, operation: "read" }),
+		catch: (cause) =>
+			cause instanceof EngineProtocolError
+				? cause
+				: new EngineProcessError({ cause, operation: "read" }),
 	});
 }
 
-function DrainStderr(handle: CodexProcessHandle) {
-	return Effect.tryPromise({
-		try: async () => {
-			for await (const _chunk of handle.Stderr) {
-			}
-		},
-		catch: (cause) => new EngineProcessError({ cause, operation: "read" }),
-	});
-}
-
-function ParseCodexVersion(chunks: ReadonlyArray<Uint8Array>) {
-	const output = new TextDecoder().decode(
-		chunks.reduce((combined, chunk) => {
-			const next = new Uint8Array(combined.length + chunk.length);
-
-			next.set(combined);
-			next.set(chunk, combined.length);
-
-			return next;
-		}, new Uint8Array()),
-	);
+function ParseCodexVersion(stdout: Uint8Array) {
+	const output = new TextDecoder().decode(stdout);
 	const version = output.match(/\b(\d+\.\d+\.\d+)\b/)?.[1];
 
 	return version
@@ -231,13 +214,28 @@ function RunVersionProbe(
 	return Effect.gen(function* () {
 		const handle = yield* factory.Spawn(spawn_input);
 
-		return yield* Effect.scoped(
-			Effect.gen(function* () {
-				yield* Effect.forkScoped(DrainStderr(handle).pipe(Effect.ignore));
+		return yield* Effect.all(
+			[
+				ReadBoundedStream(handle.Stdout, "stdout", 64 * 1_024),
+				ReadBoundedStream(handle.Stderr, "stderr", 64 * 1_024),
+				handle.Exit,
+			],
+			{ concurrency: "unbounded" },
+		).pipe(
+			Effect.ensuring(handle.Close),
+			Effect.flatMap(([stdout, stderr, process_exit]) => {
+				if (process_exit.code === 0) return Effect.succeed(stdout);
 
-				return yield* ReadStdout(handle);
+				const detail = new TextDecoder().decode(stderr).trim();
+
+				return Effect.fail(
+					new EngineUnavailableError({
+						engine_id: "codex",
+						message: `Codex --version exited with code ${String(process_exit.code)}${detail.length === 0 ? "" : `: ${detail}`}`,
+					}),
+				);
 			}),
-		).pipe(Effect.ensuring(handle.Close));
+		);
 	}).pipe(
 		Effect.timeoutOrElse({
 			duration: timeout_ms,
@@ -344,16 +342,6 @@ function make_text_input(text: string) {
 	return [{ text, text_elements: [], type: "text" }];
 }
 
-function make_thread_options(input: EngineOpenInput) {
-	return {
-		cwd: input.working_directory,
-		...(input.model === undefined ? {} : { model: input.model }),
-		...(input.permission_profile === undefined
-			? {}
-			: { permissions: input.permission_profile }),
-	};
-}
-
 function default_codex_executable() {
 	const configured_executable = process.env.ARTISAN_CODEX_EXECUTABLE;
 	const local_app_data = process.env.LOCALAPPDATA;
@@ -378,32 +366,32 @@ function default_codex_executable() {
 	return existsSync(winget_executable) ? winget_executable : "codex";
 }
 
-function make_codex_engine(
+function make_codex_app_server_engine(
 	factory: typeof CodexProcessFactory.Service,
 	options: CodexEngineOptions,
 ): Engine {
+	const app_server_max_frame_bytes = options.app_server_max_frame_bytes ?? 8 * 1_024 * 1_024;
 	const executable = options.executable ?? default_codex_executable();
 	const event_capacity = options.event_capacity ?? 256;
 	const executable_args = options.executable_args ?? [];
 	const request_timeout_ms = options.request_timeout_ms ?? 10_000;
 	const initialize_timeout_ms = options.initialize_timeout_ms ?? request_timeout_ms;
-	const shell = options.shell ?? (process.platform === "win32" && executable === "codex");
 	const version_timeout_ms = options.version_timeout_ms ?? 5_000;
 	const spawn = {
 		args: [...executable_args, "app-server", "--stdio"],
 		command: executable,
-		shell,
 	};
 	const OpenSession = () =>
-		open_codex_app_server_session({ request_timeout_ms, spawn }).pipe(
-			Effect.provideService(CodexProcessFactory, factory),
-			MapSessionFailure,
-		);
+		open_codex_app_server_session({
+			max_frame_bytes: app_server_max_frame_bytes,
+			request_timeout_ms,
+			spawn,
+		}).pipe(Effect.provideService(CodexProcessFactory, factory), MapSessionFailure);
 	const Probe = (input: EngineProbeInput): Effect.Effect<EngineProbe, EngineFailure> =>
 		Effect.gen(function* () {
 			const version_chunks = yield* RunVersionProbe(
 				factory,
-				{ args: [...executable_args, "--version"], command: executable, shell },
+				{ args: [...executable_args, "--version"], command: executable },
 				version_timeout_ms,
 			);
 			const version = yield* ParseCodexVersion(version_chunks);
@@ -477,109 +465,35 @@ function make_codex_engine(
 	const Open = (input: EngineOpenInput): Effect.Effect<EngineRun, EngineFailure, Scope.Scope> =>
 		Effect.gen(function* () {
 			yield* ValidateEventCapacity(event_capacity);
+			const thread_options = yield* MakeCodexAppServerThreadOptions(input);
 
 			const version_chunks = yield* RunVersionProbe(
 				factory,
-				{ args: [...executable_args, "--version"], command: executable, shell },
+				{ args: [...executable_args, "--version"], command: executable },
 				version_timeout_ms,
 			);
 			const version = yield* ParseCodexVersion(version_chunks);
 
 			yield* ValidateCodexTransportVersion(version);
 
-			const events = yield* Queue.unbounded<EngineObservation, Cause.Done<void>>();
 			const run_scope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
 				Scope.close(scope, Exit.succeed(undefined)),
 			);
 			const session = yield* OpenSession().pipe(Scope.provide(run_scope));
-			const closed = yield* Deferred.make<EngineRunTerminalState>();
 			const command_lock = yield* Semaphore.make(1);
 			const state = yield* Ref.make<CodexRunState>({
 				active_turn_id: undefined,
 				approvals: new Map(),
-				buffered_count: 0,
-				closed: false,
 				command_intents: new Map(),
-				next_sequence: 0,
 				questions: new Map(),
 			});
-
-			const Finish = (terminal_state: EngineRunTerminalState) =>
-				Effect.gen(function* () {
-					const should_finish = yield* Ref.modify(state, (current) =>
-						current.closed
-							? ([false, current] as const)
-							: ([true, { ...current, closed: true }] as const),
-					);
-
-					if (!should_finish) {
-						return;
-					}
-
-					const sequence = yield* Ref.modify(
-						state,
-						(current) =>
-							[
-								current.next_sequence + 1,
-								{ ...current, next_sequence: current.next_sequence + 1 },
-							] as const,
-					);
-
-					yield* Queue.offer(events, {
-						_tag: "run_terminal",
-						artisan_run_id: input.artisan_run_id,
-						observation_id: `${input.artisan_run_id}:terminal:${sequence}`,
-						raw: {
-							engine_id: "codex",
-							frame: { source: "run-lifecycle", terminal_state },
-							protocol_version: CodexTransportMetadata.protocol_version,
-							transport: CodexTransportMetadata.transport,
-						},
-						sequence,
-						state: terminal_state,
-					});
-					yield* Deferred.succeed(closed, terminal_state);
-					yield* Queue.end(events);
-					yield* session.Close.pipe(Effect.ignore);
-				}).pipe(Effect.uninterruptible);
-			const Emit = (observation: EngineObservation) =>
-				Effect.gen(function* () {
-					const next = yield* Ref.modify(state, (current) => {
-						if (current.closed || current.buffered_count >= event_capacity) {
-							return [undefined, current] as const;
-						}
-
-						return [
-							current.next_sequence + 1,
-							{
-								...current,
-								buffered_count: current.buffered_count + 1,
-								next_sequence: current.next_sequence + 1,
-							},
-						] as const;
-					});
-
-					if (next === undefined) {
-						const current = yield* Ref.get(state);
-
-						if (!current.closed) {
-							yield* Finish("failed");
-						}
-
-						return yield* Effect.fail(
-							new EngineBackpressureError({
-								artisan_run_id: input.artisan_run_id,
-								capacity: event_capacity,
-							}),
-						);
-					}
-
-					yield* Queue.offer(events, {
-						...observation,
-						observation_id: `${observation.observation_id}:sequence:${next}`,
-						sequence: next,
-					});
-				});
+			const event_buffer = yield* MakeCodexAppServerEventBuffer({
+				artisan_run_id: input.artisan_run_id,
+				capacity: event_capacity,
+				CloseSession: session.Close.pipe(Effect.ignore),
+			});
+			const Finish = event_buffer.Finish;
+			const Emit = event_buffer.Emit;
 			const RememberObservation = (observation: EngineObservation) =>
 				Ref.update(state, (current) => {
 					if (
@@ -705,9 +619,9 @@ function make_codex_engine(
 				session.Request(
 					input._tag === "start" ? "thread/start" : "thread/resume",
 					input._tag === "start"
-						? make_thread_options(input)
+						? thread_options
 						: {
-								...make_thread_options(input),
+								...thread_options,
 								threadId: input.resume_token.native_thread_id,
 							},
 				),
@@ -791,7 +705,7 @@ function make_codex_engine(
 							);
 						}
 
-						if (current.closed && command._tag !== "close") {
+						if ((yield* event_buffer.IsClosed) && command._tag !== "close") {
 							return yield* Effect.fail(
 								new EngineRunClosedError({
 									artisan_run_id: input.artisan_run_id,
@@ -993,15 +907,8 @@ function make_codex_engine(
 
 			return {
 				artisan_run_id: input.artisan_run_id,
-				Closed: Deferred.await(closed),
-				Events: Stream.fromQueue(events).pipe(
-					Stream.mapEffect((event) =>
-						Ref.update(state, (current) => ({
-							...current,
-							buffered_count: Math.max(0, current.buffered_count - 1),
-						})).pipe(Effect.as(event)),
-					),
-				),
+				Closed: event_buffer.Closed,
+				Events: event_buffer.Events,
 				native_thread_id: thread.thread.id,
 				resume_token: {
 					native_thread_id: thread.thread.id,
@@ -1014,6 +921,30 @@ function make_codex_engine(
 		});
 
 	return { Descriptor: CodexEngineDescriptor, Open, Probe };
+}
+
+function selection_failure_reason(exit: Exit.Exit<EngineProbe, EngineFailure>) {
+	if (Exit.isSuccess(exit)) {
+		return exit.value.authentication.reason ?? "Codex app-server authentication is unavailable";
+	}
+
+	const error = Cause.squash(exit.cause);
+
+	if (error instanceof EngineProbeTimeoutError) {
+		return `Codex app-server ${error.phase} probe timed out after ${error.timeout_ms}ms`;
+	}
+
+	if (error instanceof EngineProcessError) {
+		return `Codex app-server process ${error.operation} failed during startup readiness`;
+	}
+
+	if (error instanceof EngineProtocolError || error instanceof EngineUnavailableError) {
+		return error.message.trim().length > 0
+			? error.message
+			: `Codex app-server ${error._tag} during startup readiness`;
+	}
+
+	return "Codex app-server startup readiness failed before run creation";
 }
 
 /**
@@ -1030,8 +961,32 @@ export function make_codex_engine_layer(
 		CodexEngine,
 		Effect.gen(function* () {
 			const factory = yield* CodexProcessFactory;
+			const app_server_engine = make_codex_app_server_engine(factory, options);
 
-			return make_codex_engine(factory, options);
+			if (options.transport_selection === "app_server_only") {
+				return app_server_engine;
+			}
+
+			const probe = yield* app_server_engine
+				.Probe({ client_name: "artisan-transport-selection", client_version: "0.3.0" })
+				.pipe(Effect.exit);
+
+			if (Exit.isSuccess(probe) && probe.value.ready) {
+				return app_server_engine;
+			}
+
+			return make_codex_exec_engine({
+				event_capacity: options.event_capacity ?? 256,
+				executable: options.executable ?? default_codex_executable(),
+				executable_args: options.executable_args ?? [],
+				fallback_reason: selection_failure_reason(probe),
+				factory,
+				max_frame_bytes: options.exec_max_frame_bytes ?? 256 * 1_024,
+				max_stderr_bytes: options.exec_max_stderr_bytes ?? 1_024 * 1_024,
+				max_stdout_bytes: options.exec_max_stdout_bytes ?? 8 * 1_024 * 1_024,
+				timeout_ms: options.exec_timeout_ms ?? 30 * 60 * 1_000,
+				version_timeout_ms: options.version_timeout_ms ?? 5_000,
+			});
 		}),
 	);
 }

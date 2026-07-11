@@ -7,8 +7,11 @@ export const EngineOpenScenarios: Readonly<Record<"resume" | "start", EngineOpen
 		artisan_run_id: "artisan-run-resume",
 		model: "test-model",
 		next_text: "Continue the existing task",
-		permission_metadata: { filesystem: "read-write" },
-		permission_profile: "test-profile",
+		permission_policy: {
+			approval: "on_request",
+			network_access: false,
+			write_access: true,
+		},
 		resume_token: {
 			native_thread_id: "native-thread-resume",
 			opaque_checkpoint: "checkpoint-1",
@@ -20,8 +23,11 @@ export const EngineOpenScenarios: Readonly<Record<"resume" | "start", EngineOpen
 		artisan_run_id: "artisan-run-start",
 		initial_text: "Start the task",
 		model: "test-model",
-		permission_metadata: { filesystem: "read-write" },
-		permission_profile: "test-profile",
+		permission_policy: {
+			approval: "on_request",
+			network_access: false,
+			write_access: true,
+		},
 		working_directory: "C:\\workspace",
 	},
 };

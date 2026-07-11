@@ -37,11 +37,21 @@ export interface EngineDescriptor {
 	readonly transport: string;
 }
 
-/** Carries model and provider-resolved permission preferences chosen by the caller. @since 0.2.0 */
+/** Defines provider-neutral approval and runtime access requested for one run. @since 0.3.0 */
+export interface EnginePermissionPolicy {
+	readonly approval: "never" | "on_request" | "always";
+	readonly network_access: boolean;
+	readonly write_access: boolean;
+}
+
+/** Represents one provider-scoped adapter option value. @since 0.3.0 */
+export type EngineProviderOptionValue = string | boolean | number | null;
+
+/** Carries canonical policy and provider-owned preferences chosen by the caller. @since 0.2.0 */
 export interface EngineRunMetadata {
 	readonly model?: string;
-	readonly permission_profile?: string;
-	readonly permission_metadata?: Readonly<Record<string, string | boolean | number | null>>;
+	readonly permission_policy?: EnginePermissionPolicy;
+	readonly provider_options?: Readonly<Record<string, EngineProviderOptionValue>>;
 }
 
 /** Supplies the caller-owned context shared by started and resumed runs. @since 0.2.0 */
@@ -381,7 +391,7 @@ export class EngineConfigurationError extends Data.TaggedError("EngineConfigurat
 /** Represents a non-billable probe phase exceeding its configured deadline. @since 0.2.0 */
 export class EngineProbeTimeoutError extends Data.TaggedError("EngineProbeTimeoutError")<{
 	readonly engine_id: string;
-	readonly phase: "initialize" | "version";
+	readonly phase: "initialize" | "version" | "authentication";
 	readonly timeout_ms: number;
 }> {}
 

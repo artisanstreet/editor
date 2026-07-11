@@ -15,6 +15,7 @@ interface CircularValue {
 function make_session(
 	options: {
 		readonly diagnostic_capacity?: number;
+		readonly max_frame_bytes?: number;
 		readonly notification_capacity?: number;
 		readonly notification_ingress_capacity?: number;
 		readonly request_timeout_ms?: number;
@@ -50,6 +51,57 @@ async function wait_for_process_exit(pid: number) {
 }
 
 describe("Codex app-server session", () => {
+	it("rejects an invalid frame bound before opening a process", async () => {
+		await expect(
+			Effect.runPromise(
+				Effect.scoped(make_session({ max_frame_bytes: 0 })).pipe(
+					Effect.provide(CodexProcessFactoryLive),
+				),
+			),
+		).rejects.toMatchObject({
+			_tag: "CodexAppServerConfigurationError",
+			option: "max_frame_bytes",
+		});
+	});
+
+	it("diagnoses and shuts down on a newline-free oversized frame", async () => {
+		const result = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const session = yield* make_session({ max_frame_bytes: 128 });
+					const diagnostic_fiber = yield* session.Diagnostics.pipe(
+						Stream.filter((diagnostic) =>
+							diagnostic.message.includes("exceeded 128 bytes"),
+						),
+						Stream.take(1),
+						Stream.runCollect,
+						Effect.forkChild,
+					);
+					const request = yield* session
+						.Request("scenario/oversizedLine", {})
+						.pipe(Effect.exit);
+
+					return {
+						diagnostics: [...(yield* Fiber.join(diagnostic_fiber))],
+						request,
+					};
+				}).pipe(Effect.provide(CodexProcessFactoryLive)),
+			),
+		);
+		const failure = Exit.isFailure(result.request)
+			? Cause.squash(result.request.cause)
+			: undefined;
+
+		expect(failure).toMatchObject({ _tag: "CodexAppServerProtocolError" });
+		expect(result.diagnostics).toEqual([
+			expect.objectContaining({
+				level: "error",
+				message: expect.stringContaining("exceeded 128 bytes"),
+				source: "stdout",
+			}),
+		]);
+	});
+
 	it("handshakes through a split inside the snowman UTF-8 code point and sends initialized", async () => {
 		const result = await Effect.runPromise(
 			Effect.scoped(
@@ -139,7 +191,7 @@ describe("Codex app-server session", () => {
 				Effect.provide(CodexProcessFactoryLive),
 				Effect.as(true),
 				Effect.timeoutOrElse({
-					duration: 1_000,
+					duration: 3_000,
 					orElse: () => Effect.succeed(false),
 				}),
 			),

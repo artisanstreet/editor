@@ -11,7 +11,87 @@ let active_turn_id = null;
 let approval_resolved = false;
 let questions_resolved = false;
 
+const thread_start_params = new Set([
+	"approvalPolicy",
+	"approvalsReviewer",
+	"baseInstructions",
+	"config",
+	"cwd",
+	"developerInstructions",
+	"ephemeral",
+	"model",
+	"modelProvider",
+	"personality",
+	"sandbox",
+	"serviceName",
+	"serviceTier",
+	"sessionStartSource",
+	"threadSource",
+]);
+const thread_resume_params = new Set([
+	"approvalPolicy",
+	"approvalsReviewer",
+	"baseInstructions",
+	"config",
+	"cwd",
+	"developerInstructions",
+	"model",
+	"modelProvider",
+	"personality",
+	"sandbox",
+	"serviceTier",
+	"threadId",
+]);
+
+if (process.argv.includes("exec")) {
+	const { run_fake_codex_exec } = await import("./fake-codex-exec.mjs");
+
+	await run_fake_codex_exec();
+
+	if (
+		["hang", "hang-ignore-term", "stderr-overflow"].includes(
+			process.env.FAKE_CODEX_EXEC_SCENARIO,
+		)
+	) {
+		await new Promise(() => {});
+	}
+
+	process.exit(0);
+}
+
 if (process.argv.includes("--version")) {
+	const version_scenarios = [
+		process.env.FAKE_APP_SERVER_SCENARIO,
+		process.env.FAKE_CODEX_EXEC_SCENARIO,
+	];
+
+	if (version_scenarios.includes("version-fragmented")) {
+		process.stdout.write("codex-cli 0.");
+		await new Promise((resolve) => setImmediate(resolve));
+		process.stdout.write("142.5\n");
+		process.exit(0);
+	}
+
+	if (version_scenarios.includes("version-stdout-overflow")) {
+		await new Promise((resolve) => process.stdout.write("x".repeat(64 * 1_024 + 1), resolve));
+		process.exit(0);
+	}
+
+	if (version_scenarios.includes("version-stderr-overflow")) {
+		await new Promise((resolve) => process.stderr.write("x".repeat(64 * 1_024 + 1), resolve));
+		process.exit(0);
+	}
+
+	if (process.env.FAKE_CODEX_EXEC_SCENARIO === "version-timeout") {
+		setInterval(() => {}, 1_000);
+		await new Promise(() => {});
+	}
+
+	if (process.env.FAKE_CODEX_EXEC_SCENARIO === "version-nonzero") {
+		process.stderr.write("version probe rejected\n");
+		process.exit(19);
+	}
+
 	process.stdout.write("codex-cli 0.142.5\n");
 	process.exit(0);
 }
@@ -117,10 +197,33 @@ function respond(id, result, options) {
 	write_frame({ id, result }, options);
 }
 
+function validate_thread_params(request) {
+	const allowed = request.method === "thread/start" ? thread_start_params : thread_resume_params;
+	const unknown = Object.keys(request.params ?? {}).filter((key) => !allowed.has(key));
+
+	if (unknown.length === 0) {
+		return true;
+	}
+
+	write_frame({
+		error: {
+			code: -32602,
+			message: `Unknown ${request.method} params: ${unknown.join(", ")}`,
+		},
+		id: request.id,
+	});
+
+	return false;
+}
+
 function handle_request(request) {
 	received.push(request);
 
 	if (request.method === "initialize") {
+		if (process.env.FAKE_APP_SERVER_SCENARIO === "exec-fallback") {
+			process.exit(23);
+		}
+
 		if (process.env.FAKE_APP_SERVER_SCENARIO === "stall-initialize") {
 			return;
 		}
@@ -164,6 +267,26 @@ function handle_request(request) {
 	}
 
 	if (request.method === "thread/start" || request.method === "thread/resume") {
+		if (!validate_thread_params(request)) {
+			return;
+		}
+
+		if (process.env.FAKE_APP_SERVER_REQUEST_FILE) {
+			appendFileSync(
+				process.env.FAKE_APP_SERVER_REQUEST_FILE,
+				`${JSON.stringify({ method: request.method, params: request.params })}\n`,
+			);
+		}
+
+		if (process.env.FAKE_APP_SERVER_SCENARIO === "thread-start-failure") {
+			write_frame({
+				error: { code: -32010, message: "thread start failed ambiguously" },
+				id: request.id,
+			});
+
+			return;
+		}
+
 		const thread_id =
 			request.method === "thread/resume" ? request.params.threadId : "thread-started";
 		const resumed = request.method === "thread/resume";
@@ -191,6 +314,15 @@ function handle_request(request) {
 
 	if (request.method === "turn/start") {
 		active_turn_id = `turn-${received.length}`;
+
+		if (process.env.FAKE_APP_SERVER_SCENARIO === "turn-start-failure") {
+			write_frame({
+				error: { code: -32011, message: "turn start failed ambiguously" },
+				id: request.id,
+			});
+
+			return;
+		}
 
 		if (process.env.FAKE_APP_SERVER_SCENARIO !== "resume-active-next-text") {
 			write_frame({
@@ -380,6 +512,12 @@ function handle_request(request) {
 		}
 
 		respond(request.id, { count });
+
+		return;
+	}
+
+	if (request.method === "scenario/oversizedLine") {
+		process.stdout.write(`{"type":"fixture.oversized","payload":"${"x".repeat(4_096)}`);
 
 		return;
 	}

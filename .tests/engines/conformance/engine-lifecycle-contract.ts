@@ -69,17 +69,28 @@ export async function assert_engine_lifecycle_contract(
 	expect(result.probe.ready).toBe(true);
 	expect(result.probe.authentication.state).toBe("authenticated");
 	expect(result.probe.capabilities.events.state).toBe("supported");
-	expect(result.native_thread_id).toBe(
-		open_input._tag === "resume"
-			? open_input.resume_token.native_thread_id
-			: `native:${open_input.artisan_run_id}`,
-	);
-	expect(Exit.isSuccess(result.first)).toBe(true);
-	expect(Exit.isSuccess(result.duplicate)).toBe(true);
-	expect(error_from(result.conflict)).toMatchObject({
-		_tag: "EngineCommandIdConflictError",
-		command_id: "shared-steer",
-	});
+	if (open_input._tag === "resume") {
+		expect(result.native_thread_id).toBe(open_input.resume_token.native_thread_id);
+	} else {
+		expect(result.native_thread_id.length).toBeGreaterThan(0);
+	}
+
+	if (engine.Descriptor.capabilities.steer.state === "supported") {
+		expect(Exit.isSuccess(result.first)).toBe(true);
+		expect(Exit.isSuccess(result.duplicate)).toBe(true);
+		expect(error_from(result.conflict)).toMatchObject({
+			_tag: "EngineCommandIdConflictError",
+			command_id: "shared-steer",
+		});
+	} else {
+		for (const unsupported of [result.first, result.duplicate, result.conflict]) {
+			expect(error_from(unsupported)).toMatchObject({
+				_tag: "EngineUnsupportedCommandError",
+				command: "steer",
+				command_id: "shared-steer",
+			});
+		}
+	}
 	expect(error_from(result.after_close)).toMatchObject({
 		_tag: "EngineRunClosedError",
 		command_id: "shared-after-close",

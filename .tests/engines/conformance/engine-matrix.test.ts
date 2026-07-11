@@ -1,10 +1,18 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
-import { afterEach, describe, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { Effect, Layer, Schema } from "effect";
 
-import { CodexEngine, CodexProcessFactoryLive, make_codex_engine_layer } from "@artisan/engines";
+import {
+	ClaudeEngine,
+	ClaudeEngineDescriptor,
+	CodexEngine,
+	CodexProcessFactoryLive,
+	EngineProcessFactoryLive,
+	make_claude_engine_layer,
+	make_codex_engine_layer,
+} from "@artisan/engines";
 
 import { make_fake_engine } from "../harness/fake-engine";
 import { make_transcript_sequence_replay } from "../harness/transcript-process";
@@ -13,8 +21,10 @@ import { EngineTranscriptSequence } from "../transcript";
 import { assert_engine_lifecycle_contract } from "./engine-lifecycle-contract";
 
 const fixture_path = fileURLToPath(new URL("../fixtures/fake-app-server.mjs", import.meta.url));
+const claude_fixture_path = fileURLToPath(new URL("../fixtures/fake-claude.mjs", import.meta.url));
 const transcript_path = new URL("../fixtures/transcripts/engine-lifecycle.json", import.meta.url);
 const original_scenario = process.env.FAKE_APP_SERVER_SCENARIO;
+const original_claude_scenario = process.env.FAKE_CLAUDE_SCENARIO;
 
 const codex_open_input = {
 	_tag: "resume" as const,
@@ -26,15 +36,51 @@ const codex_open_input = {
 	working_directory: "C:\\workspace",
 };
 
+const claude_open_input = {
+	_tag: "start" as const,
+	artisan_run_id: "claude-shared-lifecycle",
+	initial_text: "Exercise the shared lifecycle contract",
+	provider_options: { "claude.permission_mode": "default" },
+	working_directory: process.cwd(),
+};
+
 afterEach(() => {
 	if (original_scenario === undefined) {
 		delete process.env.FAKE_APP_SERVER_SCENARIO;
 	} else {
 		process.env.FAKE_APP_SERVER_SCENARIO = original_scenario;
 	}
+
+	if (original_claude_scenario === undefined) {
+		delete process.env.FAKE_CLAUDE_SCENARIO;
+	} else {
+		process.env.FAKE_CLAUDE_SCENARIO = original_claude_scenario;
+	}
 });
 
 describe("Shared Engine lifecycle contract", () => {
+	it("includes Claude's provider-neutral capability declaration", () => {
+		expect(ClaudeEngineDescriptor.id).toBe("claude");
+		expect(ClaudeEngineDescriptor.capabilities.events.state).toBe("supported");
+		expect(ClaudeEngineDescriptor.capabilities.steer.state).toBe("unsupported");
+	});
+
+	it("passes through the Claude Code process adapter", async () => {
+		process.env.FAKE_CLAUDE_SCENARIO = "conformance";
+
+		const engine = await Effect.runPromise(
+			ClaudeEngine.pipe(
+				Effect.provide(
+					make_claude_engine_layer({
+						executable: process.execPath,
+						executable_args: [claude_fixture_path],
+					}).pipe(Layer.provide(EngineProcessFactoryLive)),
+				),
+			),
+		);
+
+		await assert_engine_lifecycle_contract(engine, claude_open_input);
+	}, 15_000);
 	it("passes through the deterministic in-memory adapter", async () => {
 		await assert_engine_lifecycle_contract(make_fake_engine(), EngineOpenScenarios.resume);
 	});
@@ -48,14 +94,14 @@ describe("Shared Engine lifecycle contract", () => {
 					make_codex_engine_layer({
 						executable: process.execPath,
 						executable_args: [fixture_path],
-						shell: false,
+						transport_selection: "app_server_only",
 					}).pipe(Layer.provide(CodexProcessFactoryLive)),
 				),
 			),
 		);
 
 		await assert_engine_lifecycle_contract(engine, codex_open_input);
-	});
+	}, 15_000);
 
 	it("passes through the recorded Codex process transcript", async () => {
 		const source = await readFile(transcript_path, "utf8");
@@ -78,7 +124,7 @@ describe("Shared Engine lifecycle contract", () => {
 					make_codex_engine_layer({
 						executable: process.execPath,
 						executable_args: [fixture_path],
-						shell: false,
+						transport_selection: "app_server_only",
 					}).pipe(Layer.provide(replay.Layer)),
 				),
 			),

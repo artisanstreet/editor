@@ -34,6 +34,7 @@ import {
 import {
 	CodexJsonlFramer,
 	CodexJsonlMalformedLineError,
+	CodexJsonlOversizedLineError,
 	type CodexJsonlDecode,
 	type CodexJsonlFrame,
 } from "./codex-jsonl";
@@ -42,6 +43,7 @@ import { CodexProcessFactory, type CodexProcessSpawnInput } from "./codex-proces
 /** Configures one scoped Codex app-server process and its bounded transport buffers. @since 0.3.0 */
 export interface CodexAppServerSessionOptions {
 	readonly diagnostic_capacity?: number;
+	readonly max_frame_bytes?: number;
 	readonly notification_capacity?: number;
 	readonly notification_ingress_capacity?: number;
 	readonly request_timeout_ms?: number;
@@ -190,12 +192,14 @@ export function open_codex_app_server_session(
 	CodexProcessFactory | Scope.Scope
 > {
 	const diagnostic_capacity = options.diagnostic_capacity ?? 128;
+	const max_frame_bytes = options.max_frame_bytes ?? 8 * 1_024 * 1_024;
 	const notification_capacity = options.notification_capacity ?? 128;
 	const notification_ingress_capacity = options.notification_ingress_capacity ?? 128;
 	const request_timeout_ms = options.request_timeout_ms ?? 10_000;
 
 	return Effect.gen(function* () {
 		yield* ValidatePositiveOption("diagnostic_capacity", diagnostic_capacity);
+		yield* ValidatePositiveOption("max_frame_bytes", max_frame_bytes);
 		yield* ValidatePositiveOption("notification_capacity", notification_capacity);
 		yield* ValidatePositiveOption(
 			"notification_ingress_capacity",
@@ -215,7 +219,10 @@ export function open_codex_app_server_session(
 			notification_capacity,
 		);
 		const close_complete = yield* Deferred.make<void>();
-		const stdout_drained = yield* Deferred.make<void, EngineProcessError>();
+		const stdout_drained = yield* Deferred.make<
+			void,
+			CodexAppServerProtocolError | EngineProcessError
+		>();
 		const state = yield* Ref.make<SessionState>({
 			closed: false,
 			close_requested: false,
@@ -426,9 +433,22 @@ export function open_codex_app_server_session(
 					return;
 				}
 
+				if (decode instanceof CodexJsonlOversizedLineError) {
+					const message = `Codex app-server JSONL frame exceeded ${decode.max_frame_bytes} bytes after receiving ${decode.size_bytes} bytes`;
+
+					yield* EmitDiagnostic({
+						frame_sequence,
+						level: "error",
+						message,
+						source: "stdout",
+					});
+
+					return yield* Effect.fail(new CodexAppServerProtocolError({ message }));
+				}
+
 				yield* ProcessFrame(decode, frame_sequence);
 			});
-		const framer = new CodexJsonlFramer();
+		const framer = new CodexJsonlFramer({ max_frame_bytes });
 		const ReadFramedStdout = Stream.fromAsyncIterable(
 			handle.Stdout,
 			(cause) => new EngineProcessError({ cause, operation: "read" }),
@@ -443,7 +463,10 @@ export function open_codex_app_server_session(
 			Effect.catchEager((error) =>
 				Finish(error, {
 					level: "error",
-					message: `Codex app-server stdout reader failed: ${error.operation}`,
+					message:
+						error instanceof EngineProcessError
+							? `Codex app-server stdout reader failed: ${error.operation}`
+							: error.message,
 					source: "process",
 				}).pipe(
 					Effect.andThen(Deferred.fail(stdout_drained, error)),

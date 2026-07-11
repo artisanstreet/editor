@@ -1,0 +1,5 @@
+{"type":"system","subtype":"init","session_id":"sanitized-session","model":"fake","tools":["Bash","Edit","WebSearch"],"permissionMode":"default"}
+{"type":"stream_event","session_id":"sanitized-session","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"cafe"}}}
+{"type":"assistant","session_id":"sanitized-session","message":{"content":[{"type":"text","text":"done"},{"type":"thinking","thinking":"[redacted]"},{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"printf ok"}}]}}
+{"type":"user","session_id":"sanitized-session","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"ok"}]}}
+{"type":"result","subtype":"success","session_id":"sanitized-session","usage":{"input_tokens":4,"output_tokens":5}}

@@ -30,7 +30,7 @@ function make_layer(options: { readonly initialize_timeout_ms?: number } = {}) {
 		executable_args: [fixture_path],
 		initialize_timeout_ms: options.initialize_timeout_ms ?? 5_000,
 		request_timeout_ms: 5_000,
-		shell: false,
+		transport_selection: "app_server_only",
 	}).pipe(Layer.provide(CodexProcessFactoryLive));
 }
 
@@ -70,6 +70,40 @@ describe("Codex engine probe", () => {
 		});
 		expect(probe.ready).toBe(true);
 	});
+
+	it("parses a version fragmented across stdout chunks", async () => {
+		process.env.FAKE_APP_SERVER_SCENARIO = "version-fragmented";
+
+		const probe = await Effect.runPromise(
+			Effect.gen(function* () {
+				const engine = yield* CodexEngine;
+
+				return yield* engine.Probe({});
+			}).pipe(Effect.provide(make_layer())),
+		);
+
+		expect(probe.version).toBe("0.142.5");
+	});
+
+	it.each(["stdout", "stderr"] as const)(
+		"bounds app-server version %s before transport selection",
+		async (channel) => {
+			process.env.FAKE_APP_SERVER_SCENARIO = `version-${channel}-overflow`;
+
+			await expect(
+				Effect.runPromise(
+					Effect.gen(function* () {
+						const engine = yield* CodexEngine;
+
+						return yield* engine.Probe({});
+					}).pipe(Effect.provide(make_layer())),
+				),
+			).rejects.toMatchObject({
+				_tag: "EngineProtocolError",
+				message: `Codex --version ${channel} exceeded 65536 bytes`,
+			});
+		},
+	);
 
 	it("reports a distinct initialize timeout and closes the stalled app-server", async () => {
 		process.env.FAKE_APP_SERVER_SCENARIO = "stall-initialize";

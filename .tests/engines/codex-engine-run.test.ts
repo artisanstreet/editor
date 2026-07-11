@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -12,9 +13,11 @@ import {
 	make_codex_engine_layer,
 	type EngineObservation,
 } from "@artisan/engines";
+import { MakeCodexAppServerEventBuffer } from "../../modules/engines/src/codex/internal/codex-app-server-event-buffer";
 
 const fixture_path = fileURLToPath(new URL("./fixtures/fake-app-server.mjs", import.meta.url));
 const original_pid_file = process.env.FAKE_APP_SERVER_PID_FILE;
+const original_request_file = process.env.FAKE_APP_SERVER_REQUEST_FILE;
 const original_scenario = process.env.FAKE_APP_SERVER_SCENARIO;
 
 afterEach(() => {
@@ -29,14 +32,25 @@ afterEach(() => {
 	} else {
 		process.env.FAKE_APP_SERVER_PID_FILE = original_pid_file;
 	}
+
+	if (original_request_file === undefined) {
+		delete process.env.FAKE_APP_SERVER_REQUEST_FILE;
+	} else {
+		process.env.FAKE_APP_SERVER_REQUEST_FILE = original_request_file;
+	}
 });
 
-function make_layer(options: { readonly event_capacity?: number } = {}) {
+function make_layer(
+	options: {
+		readonly event_capacity?: number;
+		readonly transport_selection?: "app_server_only" | "prefer_app_server_with_exec_fallback";
+	} = {},
+) {
 	return make_codex_engine_layer({
 		...options,
 		executable: process.execPath,
 		executable_args: [fixture_path],
-		shell: false,
+		transport_selection: options.transport_selection ?? "app_server_only",
 	}).pipe(Layer.provide(CodexProcessFactoryLive));
 }
 
@@ -89,7 +103,11 @@ describe("Codex engine run", () => {
 						artisan_run_id: "run-complete",
 						initial_text: "Hello",
 						model: "gpt-5",
-						permission_profile: ":workspace",
+						permission_policy: {
+							approval: "on_request",
+							network_access: false,
+							write_access: true,
+						},
 						working_directory: "C:\\workspace",
 					});
 
@@ -110,6 +128,162 @@ describe("Codex engine run", () => {
 			},
 		});
 		expect(terminals(collected)).toEqual([expect.objectContaining({ state: "completed" })]);
+	});
+
+	it("sends exact legacy permission fields for thread start and resume", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "artisan-codex-requests-"));
+		const request_path = join(directory, "thread-requests.jsonl");
+
+		process.env.FAKE_APP_SERVER_REQUEST_FILE = request_path;
+		process.env.FAKE_APP_SERVER_SCENARIO = "complete";
+
+		try {
+			await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const engine = yield* CodexEngine;
+						const started = yield* engine.Open({
+							_tag: "start",
+							artisan_run_id: "permission-start",
+							initial_text: "Start",
+							model: "gpt-5",
+							permission_policy: {
+								approval: "never",
+								network_access: true,
+								write_access: true,
+							},
+							working_directory: "C:\\workspace",
+						});
+
+						yield* started.Events.pipe(Stream.runDrain);
+
+						const resumed = yield* engine.Open({
+							_tag: "resume",
+							artisan_run_id: "permission-resume",
+							permission_policy: {
+								approval: "on_request",
+								network_access: false,
+								write_access: false,
+							},
+							resume_token: { native_thread_id: "thread-resumed" },
+							working_directory: "C:\\workspace",
+						});
+
+						yield* resumed.Send({
+							_tag: "close",
+							command_id: "close-permission-resume",
+						});
+						yield* resumed.Events.pipe(Stream.runDrain);
+					}),
+				).pipe(Effect.provide(make_layer({ transport_selection: "app_server_only" }))),
+			);
+
+			const requests = (await readFile(request_path, "utf8"))
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+
+			expect(requests).toEqual([
+				{
+					method: "thread/start",
+					params: {
+						approvalPolicy: "never",
+						config: { sandbox_workspace_write: { network_access: true } },
+						cwd: "C:\\workspace",
+						model: "gpt-5",
+						sandbox: "workspaceWrite",
+					},
+				},
+				{
+					method: "thread/resume",
+					params: {
+						approvalPolicy: "on-request",
+						cwd: "C:\\workspace",
+						sandbox: "readOnly",
+						threadId: "thread-resumed",
+					},
+				},
+			]);
+		} finally {
+			await rm(directory, { force: true, recursive: true });
+		}
+	});
+
+	it.each([
+		{
+			label: "approval always",
+			metadata: {
+				permission_policy: {
+					approval: "always",
+					network_access: false,
+					write_access: true,
+				},
+			},
+			option: "permission_policy.approval",
+		},
+		{
+			label: "network access in read-only mode",
+			metadata: {
+				permission_policy: {
+					approval: "never",
+					network_access: true,
+					write_access: false,
+				},
+			},
+			option: "permission_policy.network_access",
+		},
+		{
+			label: "an unknown provider option",
+			metadata: {
+				provider_options: { "codex.unknown": true },
+			},
+			option: "provider_options.codex.unknown",
+		},
+		{
+			label: "an exec-only provider option on app-server",
+			metadata: {
+				provider_options: { "codex.exec.profile": "fixture-profile" },
+			},
+			option: "provider_options.codex.exec.profile",
+		},
+	] as const)("rejects $label before spawning or requesting", async ({ metadata, option }) => {
+		const directory = await mkdtemp(join(tmpdir(), "artisan-codex-policy-reject-"));
+		const pid_path = join(directory, "app-server.pid");
+		const request_path = join(directory, "thread-requests.jsonl");
+
+		process.env.FAKE_APP_SERVER_PID_FILE = pid_path;
+		process.env.FAKE_APP_SERVER_REQUEST_FILE = request_path;
+		process.env.FAKE_APP_SERVER_SCENARIO = "complete";
+
+		try {
+			const opened = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const engine = yield* CodexEngine;
+
+						return yield* engine
+							.Open({
+								_tag: "start",
+								artisan_run_id: `policy-reject-${option}`,
+								initial_text: "Must not reach Codex",
+								...metadata,
+								working_directory: "C:\\workspace",
+							})
+							.pipe(Effect.exit);
+					}),
+				).pipe(Effect.provide(make_layer({ transport_selection: "app_server_only" }))),
+			);
+			const failure = Exit.isFailure(opened) ? Cause.squash(opened.cause) : undefined;
+
+			expect(failure).toMatchObject({
+				_tag: "EngineConfigurationError",
+				option,
+			});
+			expect(existsSync(pid_path)).toBe(false);
+			expect(existsSync(request_path)).toBe(false);
+		} finally {
+			await rm(directory, { force: true, recursive: true });
+		}
 	});
 
 	it("assigns deterministic unique ids to repeated process diagnostics", async () => {
@@ -470,6 +644,95 @@ describe("Codex engine run", () => {
 		expect(result.terminal).toBe("failed");
 		expect(terminals(result.events)).toEqual([expect.objectContaining({ state: "failed" })]);
 	});
+
+	it.each([
+		["cancel", "cancelled"],
+		["close", "closed"],
+	] as const)(
+		"keeps app-server terminal last when a diagnostic emit races %s",
+		async (_command, terminal_state) => {
+			const result = await Effect.runPromise(
+				Effect.gen(function* () {
+					const allow_enqueue = yield* Deferred.make<void>();
+					const emit_reserved = yield* Deferred.make<void>();
+					const finish_started = yield* Deferred.make<void>();
+					const close_count = yield* Ref.make(0);
+					const buffer = yield* MakeCodexAppServerEventBuffer({
+						artisan_run_id: `app-race-${terminal_state}`,
+						BeforeEnqueue: () =>
+							Deferred.succeed(emit_reserved, undefined).pipe(
+								Effect.andThen(Deferred.await(allow_enqueue)),
+								Effect.asVoid,
+							),
+						BeforeFinish: Deferred.succeed(finish_started, undefined).pipe(
+							Effect.asVoid,
+						),
+						capacity: 4,
+						CloseSession: Ref.update(close_count, (count) => count + 1),
+					});
+					const events_fiber = yield* buffer.Events.pipe(
+						Stream.runCollect,
+						Effect.forkChild,
+					);
+					const emit_fiber = yield* buffer
+						.Emit({
+							_tag: "process_diagnostic",
+							artisan_run_id: `app-race-${terminal_state}`,
+							level: "info",
+							message: "diagnostic reserved before terminal",
+							observation_id: `app-race-${terminal_state}:diagnostic`,
+							raw: {
+								engine_id: "codex",
+								frame: { source: "diagnostic-race-test" },
+								transport: "stdio-jsonl",
+							},
+							sequence: 0,
+						})
+						.pipe(Effect.forkChild);
+
+					yield* Deferred.await(emit_reserved);
+
+					const finish_fiber = yield* buffer
+						.Finish(terminal_state)
+						.pipe(Effect.forkChild);
+
+					yield* Deferred.await(finish_started);
+					yield* Deferred.succeed(allow_enqueue, undefined);
+					yield* Fiber.join(emit_fiber);
+					yield* Fiber.join(finish_fiber);
+
+					const late_emit = yield* buffer
+						.Emit({
+							_tag: "process_diagnostic",
+							artisan_run_id: `app-race-${terminal_state}`,
+							level: "info",
+							message: "must not follow terminal",
+							observation_id: `app-race-${terminal_state}:late`,
+							raw: {
+								engine_id: "codex",
+								frame: { source: "late-race-test" },
+								transport: "stdio-jsonl",
+							},
+							sequence: 0,
+						})
+						.pipe(Effect.exit);
+
+					return {
+						close_count: yield* Ref.get(close_count),
+						events: [...(yield* Fiber.join(events_fiber))],
+						late_emit,
+					};
+				}),
+			);
+			const terminal_events = terminals(result.events);
+
+			expect(result.events.map((event) => event.sequence)).toEqual([1, 2]);
+			expect(terminal_events).toEqual([expect.objectContaining({ state: terminal_state })]);
+			expect(result.events.at(-1)).toEqual(terminal_events[0]);
+			expect(Exit.isFailure(result.late_emit)).toBe(true);
+			expect(result.close_count).toBe(1);
+		},
+	);
 
 	it("rejects invalid event capacity before spawning Codex", async () => {
 		const exit = await Effect.runPromise(
