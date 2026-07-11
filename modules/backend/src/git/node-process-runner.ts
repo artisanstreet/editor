@@ -112,6 +112,10 @@ export function make_node_process_runner_layer(options: NodeProcessRunnerOptions
 					try: () =>
 						spawn(input.command, [...input.args], {
 							cwd: input.cwd,
+							env:
+								input.environment === undefined
+									? process.env
+									: { ...process.env, ...input.environment },
 							shell: false,
 							windowsHide: true,
 						}),

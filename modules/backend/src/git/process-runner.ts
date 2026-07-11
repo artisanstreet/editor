@@ -15,6 +15,7 @@ export interface ProcessRunnerInput {
 	readonly args: ReadonlyArray<string>;
 	readonly command: string;
 	readonly cwd: string;
+	readonly environment?: Readonly<Record<string, string | undefined>>;
 	readonly max_stderr_bytes?: number;
 	readonly max_stdout_bytes?: number;
 }

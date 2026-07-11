@@ -67,6 +67,21 @@ describe("ProcessRunner", () => {
 		expect(error.operation).toBe("spawn");
 	});
 
+	it("applies isolated environment overrides without shell interpolation", async () => {
+		const root = await make_root();
+		const runner = await make_runner();
+		const result = await Effect.runPromise(
+			runner.Run({
+				args: ["-e", 'process.stdout.write(process.env.ARTISAN_PROBE ?? "missing")'],
+				command: process.execPath,
+				cwd: root,
+				environment: { ARTISAN_PROBE: "present with spaces" },
+			}),
+		);
+
+		expect(Buffer.from(result.stdout).toString("utf8")).toBe("present with spaces");
+	});
+
 	it("interrupts and cleans up a long-running child", async () => {
 		const root = await make_root();
 		const runner = await make_runner();
