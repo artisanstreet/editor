@@ -78,6 +78,7 @@ import {
 import { ModelBehaviourRepositoryLive } from "../model-behaviour/model-behaviour-repository";
 import { ModelBehaviourRegistryError } from "../model-behaviour/model-behaviour-registry";
 import { ModelBehaviourServiceLive } from "../model-behaviour/model-behaviour-service";
+import { WorkspaceEvidenceRecorderLive } from "../workspace/workspace-evidence-recorder";
 
 export interface BackendOptions {
 	readonly database_path: string;
@@ -136,6 +137,7 @@ export function make_backend_layer(options: BackendOptions) {
 		OrchestrationRepositoryLive,
 		ThreadReadModelLive,
 	).pipe(Layer.provideMerge(infrastructure));
+	const workspace_evidence = WorkspaceEvidenceRecorderLive.pipe(Layer.provideMerge(persistence));
 	const engine_registry = make_engine_registry_layer(options.engines ?? []);
 	const guidance_repository = GlobalGuidanceRepositoryLive.pipe(Layer.provideMerge(persistence));
 	const guidance_directory = join(dirname(options.database_path), "guidance");
@@ -253,6 +255,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(project_affinity_coordination),
 		Layer.provideMerge(guidance),
 		Layer.provideMerge(model_behaviour),
+		Layer.provideMerge(workspace_evidence),
 	);
 }
 

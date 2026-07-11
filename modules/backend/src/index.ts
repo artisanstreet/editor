@@ -168,6 +168,18 @@ export {
 	ThreadProjectAffinityCoordinatorLive,
 	type ThreadProjectAffinityCoordinatorError,
 } from "./threads/thread-project-affinity-coordinator";
+export {
+	WorkspaceEvidenceConflict,
+	WorkspaceEvidenceInvalid,
+	WorkspaceEvidenceRecorder,
+	WorkspaceEvidenceRecorderLive,
+	type FilesystemMutationEvidenceInput,
+	type GitWorkspaceObservedEvidenceInput,
+	type ProcessOwnershipEvidenceInput,
+	type WorkspaceEvidenceAcceptance,
+	type WorkspaceEvidenceRecorderError,
+	type WorkspaceEvidenceTrace,
+} from "./workspace/workspace-evidence-recorder";
 export { AgentOrchestrator } from "./orchestration/agent-orchestrator";
 export {
 	AgentGraphOrchestrator,

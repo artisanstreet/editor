@@ -5,13 +5,14 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Deferred, Effect, Fiber, Layer, Ref, Stream } from "effect";
+import { Deferred, Effect, Fiber, Layer, Option, Ref, Stream } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { EventEnvelope } from "@artisan/protocol";
+import type { EventEnvelope, ProjectRef } from "@artisan/protocol";
 import {
 	make_backend_runtime,
 	make_codex_auto_compaction_mapping,
+	make_thread_metadata_refiner_test_layer,
 	make_codex_model_behaviour_provider,
 	make_guidance_provider_registry_layer,
 	make_inactive_model_behaviour_provider,
@@ -20,8 +21,12 @@ import {
 	make_unsupported_auto_compaction_mapping,
 	ModelBehaviourConfigFiles,
 	ModelBehaviourService,
+	ProjectLocator,
 	ProtocolServer,
 	ThreadErasure,
+	ThreadMetadataRefinementCoordinator,
+	ThreadProjectAffinityCoordinator,
+	WorkspaceEvidenceRecorder,
 } from "@artisan/backend";
 import type { ThreadListUpdate } from "@artisan/transport";
 import { Database } from "../../modules/backend/src/persistence/database";
@@ -34,6 +39,7 @@ import {
 	ModelBehaviourProviderStates,
 	ModelBehaviourSettings,
 	ThreadErasureClaims,
+	ThreadProjectAffinityEvidence,
 } from "../../modules/backend/src/persistence/schema";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
 
@@ -45,6 +51,18 @@ import {
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 
 const temporary_directories: Array<string> = [];
+
+const ProjectAlpha: ProjectRef = {
+	display_name: "Alpha",
+	project_id: "project_alpha",
+	root_path: "C:/work/alpha",
+};
+
+const ProjectBeta: ProjectRef = {
+	display_name: "Beta",
+	project_id: "project_beta",
+	root_path: "C:/work/beta",
+};
 
 async function make_database_path() {
 	const directory = await mkdtemp(join(tmpdir(), "artisan-client-protocol-server-"));
@@ -64,6 +82,24 @@ function make_metadata_layer(now: { value: string }) {
 	});
 }
 
+function make_project_locator_layer() {
+	return Layer.succeed(ProjectLocator, {
+		Locate: (location) => {
+			const project = location.includes("beta")
+				? ProjectBeta
+				: location.includes("alpha")
+					? ProjectAlpha
+					: undefined;
+
+			return Effect.succeed(
+				project === undefined
+					? Option.none()
+					: Option.some({ project, source: "git_root" as const }),
+			);
+		},
+	});
+}
+
 afterEach(async () => {
 	await Promise.all(
 		temporary_directories
@@ -73,6 +109,140 @@ afterEach(async () => {
 });
 
 describe("ArtisanClient with the backend ProtocolServer", () => {
+	it("projects a multi-source project rehome through real MessagePorts", async () => {
+		const database_path = await make_database_path();
+		const now = { value: "2026-07-11T18:00:00.000Z" };
+		const runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			project_locator: make_project_locator_layer(),
+			runtime_metadata: make_metadata_layer(now),
+			thread_metadata_refiner: make_thread_metadata_refiner_test_layer((input) =>
+				Effect.succeed({
+					live_status: "Working",
+					...(input.recent_user_text.at(-1)?.includes("Beta repository")
+						? { mentioned_projects: [ProjectBeta] }
+						: {}),
+				}),
+			),
+		});
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const coordinator = await runtime.runPromise(ThreadProjectAffinityCoordinator);
+		const database = await runtime.runPromise(Database);
+		const journal = await runtime.runPromise(JournalStore);
+		const metadata_coordinator = await runtime.runPromise(ThreadMetadataRefinementCoordinator);
+		const workspace_evidence = await runtime.runPromise(WorkspaceEvidenceRecorder);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
+		const thread_id = "thread_public_affinity";
+
+		try {
+			const result = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const updates = yield* harness.client.SubscribeThreadList;
+						const rehomed = yield* updates.pipe(
+							Stream.filter(
+								(update) =>
+									update.type === "upsert" &&
+									update.thread.thread_id === thread_id &&
+									update.thread.primary_project?.project_id ===
+										ProjectBeta.project_id,
+							),
+							Stream.runHead,
+							Effect.forkScoped,
+						);
+
+						yield* harness.client.Command({
+							command_id: "create_public_affinity",
+							payload: {
+								title: "Cross-repository public projection",
+								type: "thread.create",
+							},
+							thread_id,
+						});
+						yield* journal.AppendEvent({
+							causation_id: "alpha_run_cause",
+							correlation_id: "alpha_run_correlation",
+							payload: {
+								state: "running",
+								type: "run.lifecycle",
+								working_directory: ProjectAlpha.root_path,
+							},
+							run_id: "alpha_run",
+							thread_id,
+						});
+						yield* coordinator.CatchUp;
+
+						now.value = "2026-07-11T18:01:00.000Z";
+						yield* workspace_evidence.RecordFilesystemMutation({
+							destination_path: `${ProjectBeta.root_path}/src/new.ts`,
+							operation: "rename",
+							operation_id: "beta_filesystem",
+							path: `${ProjectBeta.root_path}/src/old.ts`,
+							thread_id,
+						});
+						yield* workspace_evidence.RecordProcessOwnership({
+							operation_id: "beta_process",
+							source: "artisan_tool",
+							thread_id,
+							working_directory: ProjectBeta.root_path,
+						});
+						yield* workspace_evidence.RecordGitWorkspaceObserved({
+							branch: "feature/beta",
+							changed_file_count: 4,
+							has_diff: true,
+							operation_id: "beta_git",
+							root_path: ProjectBeta.root_path,
+							thread_id,
+							worktree_path: `${ProjectBeta.root_path}/.worktrees/feature-beta`,
+						});
+						yield* journal.AppendEvent({
+							causation_id: "beta_mention_cause",
+							correlation_id: "beta_mention_correlation",
+							payload: {
+								mentioned_projects: [ProjectBeta],
+								message_id: "beta_mention_message",
+								reason: "no_active_run",
+								text: "Continue in the selected Beta repository.",
+								type: "thread.message_queued",
+								working_directory: ProjectBeta.root_path,
+							},
+							thread_id,
+						});
+						yield* metadata_coordinator.WaitForIdle;
+						yield* coordinator.CatchUp;
+
+						return {
+							projection: (yield* harness.client.ListThreads)[0]!,
+							update: Option.getOrThrow(yield* Fiber.join(rehomed)),
+						};
+					}),
+				),
+			);
+			const evidence = await Effect.runPromise(
+				database.client.select().from(ThreadProjectAffinityEvidence),
+			);
+			const persisted = JSON.stringify(evidence);
+
+			expect(result.update).toMatchObject({
+				thread: {
+					linked_projects: [ProjectAlpha],
+					primary_project: ProjectBeta,
+				},
+				type: "upsert",
+			});
+			expect(result.projection).toMatchObject({
+				linked_projects: [ProjectAlpha],
+				primary_project: ProjectBeta,
+			});
+			expect(persisted).not.toContain("Continue in the selected Beta repository.");
+			expect(persisted).not.toContain("feature/beta");
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
 	it("reconciles Model Behaviour through real MessagePorts without persisting config content", async () => {
 		const database_path = await make_database_path();
 		const root = dirname(database_path);
