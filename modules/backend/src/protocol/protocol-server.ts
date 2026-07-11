@@ -29,6 +29,10 @@ import {
 	type HeartbeatPongEnvelope,
 	type HelloEnvelope,
 	type InboundControlEnvelope,
+	type ModelBehaviourDriftResolutionEnvelope,
+	type ModelBehaviourQueryEnvelope,
+	type ModelBehaviourRetryEnvelope,
+	type ModelBehaviourUpdateEnvelope,
 	type OrchestrationGraphQueryEnvelope,
 	type OutboundControlEnvelope,
 	type PreNegotiationProtocolErrorEnvelope,
@@ -54,6 +58,12 @@ import {
 	GlobalGuidanceInvariantError,
 	GlobalGuidanceService,
 } from "../guidance/guidance-service";
+import { model_behaviour_thread_id } from "../model-behaviour/model-behaviour-repository";
+import {
+	ModelBehaviourConflict,
+	ModelBehaviourInvariantError,
+	ModelBehaviourService,
+} from "../model-behaviour/model-behaviour-service";
 import { JournalNotifier } from "../persistence/journal-notifier";
 import {
 	CommandIdConflict,
@@ -205,6 +215,38 @@ function guidance_error_detail(error: unknown): ProtocolErrorDetail {
 	};
 }
 
+function model_behaviour_error_detail(error: unknown): ProtocolErrorDetail {
+	if (error instanceof CommandIdConflict) {
+		return {
+			code: "command.id_conflict",
+			message: "This command id has already been used for different intent.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof ModelBehaviourConflict) {
+		return {
+			code: "model_behaviour.conflict",
+			message: error.message,
+			retryable: false,
+		};
+	}
+
+	if (error instanceof JournalInvariantError || error instanceof ModelBehaviourInvariantError) {
+		return {
+			code: "model_behaviour.invariant_failed",
+			message: "The canonical Model Behaviour state failed validation.",
+			retryable: false,
+		};
+	}
+
+	return {
+		code: "model_behaviour.unavailable",
+		message: "Model Behaviour settings could not be durably reconciled.",
+		retryable: true,
+	};
+}
+
 function thread_item_from_event(event: EventEnvelope): ThreadListItem | undefined {
 	if (event.payload.type === "thread.metadata.updated") {
 		return event.payload.thread;
@@ -278,6 +320,7 @@ export function make_protocol_server_layer(
 			const options = yield* DecodeProtocolConnectionOptions(input_options);
 			const graph = yield* AgentGraphOrchestrator;
 			const guidance = yield* GlobalGuidanceService;
+			const model_behaviour = yield* ModelBehaviourService;
 			const journal = yield* JournalStore;
 			const metadata = yield* RuntimeMetadata;
 			const notifier = yield* JournalNotifier;
@@ -746,6 +789,39 @@ export function make_protocol_server_layer(
 								current,
 								"guidance.unavailable",
 								"Global guidance could not be read or reconciled.",
+								true,
+								query.message_id,
+							),
+						),
+					);
+
+				const HandleModelBehaviourQuery = (
+					query: ModelBehaviourQueryEnvelope,
+					current: ReadyState,
+				) =>
+					model_behaviour.Get.pipe(
+						Effect.flatMap((snapshot) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "model_behaviour.query.result",
+									message_id,
+									origin: "backend",
+									payload: snapshot,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"model_behaviour.unavailable",
+								"Model Behaviour settings could not be read or reconciled.",
 								true,
 								query.message_id,
 							),
@@ -1261,6 +1337,90 @@ export function make_protocol_server_layer(
 						),
 					);
 				};
+				type ModelBehaviourMutationEnvelope =
+					| ModelBehaviourDriftResolutionEnvelope
+					| ModelBehaviourRetryEnvelope
+					| ModelBehaviourUpdateEnvelope;
+				const HandleModelBehaviourMutation = (envelope: ModelBehaviourMutationEnvelope) => {
+					const trace = {
+						message_id: envelope.message_id,
+						origin: envelope.origin,
+						sent_at: envelope.sent_at,
+					};
+					const operation =
+						envelope.kind === "model_behaviour.update"
+							? model_behaviour.Update({ ...trace, ...envelope.payload })
+							: envelope.kind === "model_behaviour.drift.resolve"
+								? model_behaviour.ResolveDrift({ ...trace, ...envelope.payload })
+								: model_behaviour.RetrySync({ ...trace, ...envelope.payload });
+
+					return operation.pipe(
+						Effect.flatMap((result) =>
+							Effect.gen(function* () {
+								const events = yield* journal.ReadCorrelatedEvents(
+									envelope.message_id,
+								);
+								const journal_sequence =
+									events.at(-1)?.journal_sequence ??
+									(yield* journal.ReadWatermark());
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									causation_id: envelope.message_id,
+									correlation_id: envelope.message_id,
+									kind: "command.receipt",
+									message_id,
+									origin: "backend",
+									payload: {
+										journal_sequence,
+										status: result.status,
+									},
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+									thread_id: model_behaviour_thread_id,
+								});
+
+								const latest = yield* Ref.get(state);
+								const undelivered =
+									latest._tag === "Ready"
+										? events.filter(
+												(event) =>
+													event.journal_sequence >
+													latest.delivered_journal_sequence,
+											)
+										: [];
+
+								if (undelivered.length > 0) {
+									yield* DeliverLiveEvents(undelivered);
+								}
+							}),
+						),
+						Effect.catch((error) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									causation_id: envelope.message_id,
+									correlation_id: envelope.message_id,
+									kind: "command.receipt",
+									message_id,
+									origin: "backend",
+									payload: {
+										error: model_behaviour_error_detail(error),
+										status: "rejected",
+									},
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+									thread_id: model_behaviour_thread_id,
+								});
+							}),
+						),
+					);
+				};
 
 				const HandleReadyEnvelope = (
 					envelope: Exclude<InboundControlEnvelope, HelloEnvelope>,
@@ -1282,6 +1442,12 @@ export function make_protocol_server_layer(
 						case "guidance.drift.resolve":
 						case "guidance.sync.retry":
 							return HandleGuidanceMutation(envelope);
+						case "model_behaviour.query":
+							return HandleModelBehaviourQuery(envelope, current);
+						case "model_behaviour.update":
+						case "model_behaviour.drift.resolve":
+						case "model_behaviour.sync.retry":
+							return HandleModelBehaviourMutation(envelope);
 						case "thread.work.query":
 							return HandleWorkQuery(envelope, current);
 						case "terminal.list.query":
