@@ -14,10 +14,18 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Branch: `codex/backend-services`
 - [x] Package manager: pnpm 11.7.0
 - [x] Stack: TypeScript 7, Effect 4 beta, Drizzle 1 RC, SQLite
-- [x] Latest code checkpoint: `7defe4b feat: record attributed workspace evidence`
+- [x] Latest code checkpoint: `e7048cb feat: persist workspace change projections`
 - [x] Model Behaviour is committed as focused protocol, persistence, provider, service, composition, transport, and security changes.
-- [x] Private remote: `origin` -> `https://github.com/sandersonstabo/artisan-editor.git`.
-- [x] Active work is committed in small coherent checkpoints and pushed to the current feature branch after verification; never push `master` without explicit approval.
+- [x] Private remote: `origin` -> `https://github.com/sandersonstabo/artisan-editor.git`; GitHub visibility was verified as `PRIVATE` on 2026-07-11.
+- [x] Active work is committed in small, focused, independently understandable checkpoints and pushed to the current feature branch immediately after verification; never push `main` or `master` without explicit approval.
+- [x] Local and remote state are checked at session start, after each push, and before handoff. Confirm the current branch tracks `origin` and that local `HEAD` matches its upstream after pushing.
+
+## Active Uncommitted Work
+
+- [x] Durable workspace change command/projection persistence is committed and pushed at `e7048cb`.
+- [ ] Finish the SQLite-backed rollback snapshot store currently present in the worktree.
+- [ ] Add bounded retry and deterministic coverage for transient SQLite writer contention before committing the snapshot milestone.
+- [ ] Re-run focused snapshot/erasure tests, migration checks, and the full validation suite before the next code commit.
 
 ## Completed Checkpoints
 
@@ -141,5 +149,7 @@ Implemented, independently reviewed, committed, and verified:
 - [ ] Use another Sol only for a critical review or to unblock work that Terra cannot complete after a better brief.
 - [ ] Keep worker write scopes disjoint and require focused verification reports.
 - [ ] Update this memory whenever checked state or remaining work changes.
-- [ ] Keep commits small, coherent, and independently understandable; do not accumulate an entire milestone in one commit.
-- [ ] Push the current feature branch to `origin` after every verified coherent commit and confirm the remote branch advanced.
+- [ ] Check the tracked remote at session start and before handoff. Fetch when needed, report divergence, and never overwrite remote work implicitly.
+- [ ] Keep commits small, focused, coherent, and independently understandable. Commit each verified checkpoint instead of accumulating an entire milestone or mixing unrelated changes.
+- [ ] Push the current feature branch to `origin` immediately after every verified coherent commit and at every natural checkpoint. Do not leave completed commits only on the local machine.
+- [ ] After every push, verify that local `HEAD` equals the upstream branch head and record the new checkpoint in this file.
