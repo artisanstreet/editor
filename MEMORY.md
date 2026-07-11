@@ -14,9 +14,10 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Branch: `codex/backend-services`
 - [x] Package manager: pnpm 11.7.0
 - [x] Stack: TypeScript 7, Effect 4 beta, Drizzle 1 RC, SQLite
-- [x] Latest code checkpoint: `1ecade0 test: cover model behaviour message ports`
+- [x] Latest code checkpoint: `7defe4b feat: record attributed workspace evidence`
 - [x] Model Behaviour is committed as focused protocol, persistence, provider, service, composition, transport, and security changes.
-- [ ] No Git remote is configured, so commits cannot currently be pushed.
+- [x] Private remote: `origin` -> `https://github.com/sandersonstabo/artisan-editor.git`.
+- [x] Active work is committed in small coherent checkpoints and pushed to the current feature branch after verification; never push `master` without explicit approval.
 
 ## Completed Checkpoints
 
@@ -63,14 +64,26 @@ Closed review and delivery gates:
 - [x] Independent P0-P2 re-review of staged publication, hard-link restoration, and backup-directory privacy is clean.
 - [x] The milestone was split into focused commits from `917ed8e` through `1ecade0`.
 
+## Completed Project Affinity Evidence Milestone
+
+Implemented, independently reviewed, committed, and verified:
+
+- [x] Canonical filesystem mutation, process ownership, Git root/worktree/branch/diff, explicit project mention, and metadata evidence kinds.
+- [x] `WorkspaceEvidenceRecorder` validates tool input with Effect Schema, preserves run/agent/raw-origin attribution, rejects changed operation intent, and returns exact duplicates across restart.
+- [x] Public project mentions are resolved through `ProjectLocator`; forged project identities are discarded and only the canonical reference is persisted as affinity evidence.
+- [x] Automatic rehome requires corroborating high-integrity journal events, so one dirty Git inspection cannot move a thread by itself.
+- [x] Metadata evidence is emitted through the real refinement worker/repository path rather than fabricated directly in tests.
+- [x] Historical affinity evidence replays after restart without treating its old projection basis as changed intent.
+- [x] A real MessagePort subscription and list query observe the multi-source rehome projection.
+- [x] Independent P0-P2 review is clean after the replay fix; the two-runtime regression passed 20 repeated runs.
+- [x] Last full validation: 71 test files, 483 passed, 3 intentionally skipped; format, lint, and typecheck passed.
+- [x] Focused commits: `3da881a feat: complete project affinity evidence` and `7defe4b feat: record attributed workspace evidence`.
+
 ## Remaining Backend Work
 
-### Project Affinity
+### Project Affinity Follow-Through
 
-- [ ] Add attributed filesystem write/process evidence.
-- [ ] Add explicit repo/project mention evidence.
-- [ ] Add branch, worktree, Git diff, and metadata evidence.
-- [ ] Prove multi-source rehome behavior through public protocol scenarios.
+- [ ] Bind future controlled filesystem, Git, and process tool adapters to `WorkspaceEvidenceRecorder`; raw watcher activity remains deliberately non-authoritative. This is tracked with the M2 Files/Git work below.
 
 ### Marketplace: Skills And MCP
 
@@ -128,3 +141,5 @@ Closed review and delivery gates:
 - [ ] Use another Sol only for a critical review or to unblock work that Terra cannot complete after a better brief.
 - [ ] Keep worker write scopes disjoint and require focused verification reports.
 - [ ] Update this memory whenever checked state or remaining work changes.
+- [ ] Keep commits small, coherent, and independently understandable; do not accumulate an entire milestone in one commit.
+- [ ] Push the current feature branch to `origin` after every verified coherent commit and confirm the remote branch advanced.
