@@ -158,6 +158,33 @@ export const GlobalGuidanceProviderSync = sqliteTable("global_guidance_provider_
 	updated_at: text("updated_at").notNull(),
 });
 
+/** Stores the one curated provider-neutral model behaviour setting. */
+export const ModelBehaviourSettings = sqliteTable("model_behaviour_settings", {
+	setting_id: text("setting_id").primaryKey(),
+	value_json: text("value_json").notNull(),
+	version: integer("version").notNull(),
+	updated_at: text("updated_at").notNull(),
+});
+
+/** Stores content-free reconciliation metadata for each provider setting mapping. */
+export const ModelBehaviourProviderStates = sqliteTable(
+	"model_behaviour_provider_states",
+	{
+		provider_id: text("provider_id").notNull(),
+		setting_id: text("setting_id").notNull(),
+		status: text("status").notNull(),
+		native_key: text("native_key"),
+		target_path: text("target_path"),
+		observed_hash: text("observed_hash"),
+		applied_hash: text("applied_hash"),
+		ignored_drift_hash: text("ignored_drift_hash"),
+		backup_path: text("backup_path"),
+		last_error_code: text("last_error_code"),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [primaryKey({ columns: [table.provider_id, table.setting_id] })],
+);
+
 export const ThreadErasureClaims = sqliteTable("thread_erasure_claims", {
 	thread_id: text("thread_id").primaryKey(),
 	claimed_at: text("claimed_at").notNull(),
