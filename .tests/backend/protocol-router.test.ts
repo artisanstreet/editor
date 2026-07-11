@@ -76,7 +76,7 @@ describe("protocol router", () => {
 				correlation_id: "message_1",
 				thread_id: "thread_1",
 				payload: {
-					journal_sequence: 1,
+					journal_sequence: 2,
 					status: "accepted",
 				},
 			});
@@ -87,7 +87,7 @@ describe("protocol router", () => {
 				thread_id: "thread_1",
 				stream_id: "thread:thread_1",
 				sequence: 1,
-				journal_sequence: 1,
+				journal_sequence: 2,
 				payload: {
 					type: "thread.created",
 					title: "Backend foundation",
@@ -126,7 +126,7 @@ describe("protocol router", () => {
 			expect(receipt).toMatchObject({
 				kind: "command.receipt",
 				payload: {
-					journal_sequence: 1,
+					journal_sequence: 2,
 					status: "duplicate",
 				},
 			});
@@ -226,7 +226,7 @@ describe("protocol router", () => {
 				kind: "command.receipt",
 				payload: {
 					status: "accepted",
-					journal_sequence: 2,
+					journal_sequence: 3,
 				},
 			});
 		} finally {
@@ -245,13 +245,13 @@ describe("protocol router", () => {
 			expect(first_output[1]).toMatchObject({
 				stream_id: "thread:thread_1",
 				sequence: 1,
-				journal_sequence: 1,
+				journal_sequence: 2,
 			});
 
 			expect(second_output[1]).toMatchObject({
 				stream_id: "thread:thread_2",
 				sequence: 1,
-				journal_sequence: 2,
+				journal_sequence: 3,
 			});
 		} finally {
 			await runtime.dispose();

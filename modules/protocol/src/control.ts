@@ -31,8 +31,19 @@ import {
 	ThreadRetentionUpdateCommand,
 	ThreadUnpinCommand,
 } from "./thread";
+import {
+	GlobalGuidanceCanonicalUpdatedEvent,
+	GlobalGuidanceDriftResolutionRequest,
+	GlobalGuidanceProviderReconciledEvent,
+	GlobalGuidanceRetryRequest,
+	GlobalGuidanceSelectionRequest,
+	GlobalGuidanceSelectionRequiredEvent,
+	GlobalGuidanceSnapshot,
+	GlobalGuidanceUpdateRequest,
+} from "./guidance";
 
 export * from "./thread";
+export * from "./guidance";
 
 const FrontendTraceMetadata = {
 	message_id: Identifier,
@@ -825,6 +836,9 @@ export const EventPayload = Schema.Union([
 	ThreadMetadataUpdatedEvent,
 	ThreadRefinementIgnoredEvent,
 	ThreadRetentionPolicyUpdatedEvent,
+	GlobalGuidanceCanonicalUpdatedEvent,
+	GlobalGuidanceSelectionRequiredEvent,
+	GlobalGuidanceProviderReconciledEvent,
 	ThreadMessageQueuedEvent,
 	ThreadMessageSteeringEvent,
 	RunLifecycleEvent,
@@ -931,6 +945,62 @@ export const ThreadRetentionUpdateEnvelope = Schema.Struct({
 });
 
 export type ThreadRetentionUpdateEnvelope = typeof ThreadRetentionUpdateEnvelope.Type;
+
+/** Requests the canonical global guidance content and current reconciliation state. */
+export const GlobalGuidanceQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("guidance.query"),
+	payload: Schema.Struct({}),
+});
+
+export type GlobalGuidanceQueryEnvelope = typeof GlobalGuidanceQueryEnvelope.Type;
+
+/** Returns canonical guidance content without ever routing it through the event ledger. */
+export const GlobalGuidanceQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("guidance.query.result"),
+	payload: GlobalGuidanceSnapshot,
+});
+
+export type GlobalGuidanceQueryResultEnvelope = typeof GlobalGuidanceQueryResultEnvelope.Type;
+
+/** Replaces the canonical guidance file through the backend-owned file workflow. */
+export const GlobalGuidanceUpdateEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("guidance.update"),
+	payload: GlobalGuidanceUpdateRequest,
+});
+
+export type GlobalGuidanceUpdateEnvelope = typeof GlobalGuidanceUpdateEnvelope.Type;
+
+/** Selects one freshly rediscovered first-run provider value. */
+export const GlobalGuidanceSelectionEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("guidance.selection"),
+	payload: GlobalGuidanceSelectionRequest,
+});
+
+export type GlobalGuidanceSelectionEnvelope = typeof GlobalGuidanceSelectionEnvelope.Type;
+
+/** Resolves one exact provider drift observation. */
+export const GlobalGuidanceDriftResolutionEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("guidance.drift.resolve"),
+	payload: GlobalGuidanceDriftResolutionRequest,
+});
+
+export type GlobalGuidanceDriftResolutionEnvelope =
+	typeof GlobalGuidanceDriftResolutionEnvelope.Type;
+
+/** Retries one provider's opinionated sync strategy without adding a settings toggle. */
+export const GlobalGuidanceRetryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("guidance.sync.retry"),
+	payload: GlobalGuidanceRetryRequest,
+});
+
+export type GlobalGuidanceRetryEnvelope = typeof GlobalGuidanceRetryEnvelope.Type;
 
 /** Describes the durable work state coordinated for one thread. */
 export const ThreadWorkItem = Schema.Struct({
@@ -1193,6 +1263,11 @@ export const InboundControlEnvelope = Schema.Union([
 	ThreadListQueryEnvelope,
 	ThreadRetentionQueryEnvelope,
 	ThreadRetentionUpdateEnvelope,
+	GlobalGuidanceQueryEnvelope,
+	GlobalGuidanceUpdateEnvelope,
+	GlobalGuidanceSelectionEnvelope,
+	GlobalGuidanceDriftResolutionEnvelope,
+	GlobalGuidanceRetryEnvelope,
 	ThreadWorkQueryEnvelope,
 	TerminalListQueryEnvelope,
 	OrchestrationGraphQueryEnvelope,
@@ -1214,6 +1289,7 @@ export const OutboundControlEnvelope = Schema.Union([
 	ProtocolErrorEnvelope,
 	ThreadListQueryResultEnvelope,
 	ThreadRetentionQueryResultEnvelope,
+	GlobalGuidanceQueryResultEnvelope,
 	ThreadWorkQueryResultEnvelope,
 	TerminalListQueryResultEnvelope,
 	OrchestrationGraphQueryResultEnvelope,

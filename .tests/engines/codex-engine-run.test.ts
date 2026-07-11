@@ -130,7 +130,7 @@ describe("Codex engine run", () => {
 		expect(terminals(collected)).toEqual([expect.objectContaining({ state: "completed" })]);
 	});
 
-	it("sends exact legacy permission fields for thread start and resume", async () => {
+	it("maps global guidance natively for thread start and resume without changing user text", async () => {
 		const directory = await mkdtemp(join(tmpdir(), "artisan-codex-requests-"));
 		const request_path = join(directory, "thread-requests.jsonl");
 
@@ -145,6 +145,10 @@ describe("Codex engine run", () => {
 						const started = yield* engine.Open({
 							_tag: "start",
 							artisan_run_id: "permission-start",
+							global_guidance: {
+								content: "Use project guidance.",
+								source_file: "C:\\workspace\\AGENTS.md",
+							},
 							initial_text: "Start",
 							model: "gpt-5",
 							permission_policy: {
@@ -160,6 +164,11 @@ describe("Codex engine run", () => {
 						const resumed = yield* engine.Open({
 							_tag: "resume",
 							artisan_run_id: "permission-resume",
+							global_guidance: {
+								content: "Use project guidance.",
+								source_file: "C:\\workspace\\AGENTS.md",
+							},
+							next_text: "Resume",
 							permission_policy: {
 								approval: "on_request",
 								network_access: false,
@@ -190,8 +199,16 @@ describe("Codex engine run", () => {
 						approvalPolicy: "never",
 						config: { sandbox_workspace_write: { network_access: true } },
 						cwd: "C:\\workspace",
+						developerInstructions: "Use project guidance.",
 						model: "gpt-5",
 						sandbox: "workspaceWrite",
+					},
+				},
+				{
+					method: "turn/start",
+					params: {
+						input: [{ text: "Start", text_elements: [], type: "text" }],
+						threadId: "thread-started",
 					},
 				},
 				{
@@ -199,7 +216,15 @@ describe("Codex engine run", () => {
 					params: {
 						approvalPolicy: "on-request",
 						cwd: "C:\\workspace",
+						developerInstructions: "Use project guidance.",
 						sandbox: "readOnly",
+						threadId: "thread-resumed",
+					},
+				},
+				{
+					method: "turn/start",
+					params: {
+						input: [{ text: "Resume", text_elements: [], type: "text" }],
 						threadId: "thread-resumed",
 					},
 				},
@@ -245,6 +270,13 @@ describe("Codex engine run", () => {
 				provider_options: { "codex.exec.profile": "fixture-profile" },
 			},
 			option: "provider_options.codex.exec.profile",
+		},
+		{
+			label: "an empty global guidance source file",
+			metadata: {
+				global_guidance: { content: "Guidance", source_file: "" },
+			},
+			option: "global_guidance.source_file",
 		},
 	] as const)("rejects $label before spawning or requesting", async ({ metadata, option }) => {
 		const directory = await mkdtemp(join(tmpdir(), "artisan-codex-policy-reject-"));

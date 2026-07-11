@@ -46,6 +46,11 @@ export type PendingRequestEnvelope = Extract<
 	{
 		readonly kind:
 			| "command"
+			| "guidance.drift.resolve"
+			| "guidance.query"
+			| "guidance.selection"
+			| "guidance.sync.retry"
+			| "guidance.update"
 			| "orchestration.graph.query"
 			| "terminal.list.query"
 			| "thread.list.query"
@@ -61,6 +66,7 @@ export type PendingResultEnvelope = Extract<
 	{
 		readonly kind:
 			| "command.receipt"
+			| "guidance.query.result"
 			| "orchestration.graph.query.result"
 			| "terminal.list.query.result"
 			| "thread.list.query.result"

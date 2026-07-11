@@ -10,6 +10,7 @@ export type EngineCapabilityName =
 	| "cancel"
 	| "close"
 	| "events"
+	| "global_guidance"
 	| "model_selection"
 	| "native_tools"
 	| "probe"
@@ -54,10 +55,59 @@ export interface EngineRunMetadata {
 	readonly provider_options?: Readonly<Record<string, EngineProviderOptionValue>>;
 }
 
+/**
+ * Carries normalized global guidance and the canonical file from which it was loaded.
+ *
+ * @example
+ * ```ts
+ * const guidance: EngineGlobalGuidance = {
+ *   content: "Keep user instructions separate from project guidance.",
+ *   source_file: "C:\\workspace\\AGENTS.md",
+ * };
+ * ```
+ *
+ * @since 0.5.0
+ */
+export interface EngineGlobalGuidance {
+	readonly content: string;
+	readonly source_file: string;
+}
+
 /** Supplies the caller-owned context shared by started and resumed runs. @since 0.2.0 */
 export interface EngineRunContext extends EngineRunMetadata {
 	readonly artisan_run_id: string;
+	readonly global_guidance?: EngineGlobalGuidance;
 	readonly working_directory: string;
+}
+
+/**
+ * Validates global guidance before an adapter contacts its provider.
+ *
+ * @example
+ * ```ts
+ * yield* ValidateEngineGlobalGuidance("codex", input.global_guidance);
+ * ```
+ *
+ * @since 0.5.0
+ * @param engine_id - Stable adapter identifier included in a configuration failure.
+ * @param global_guidance - Optional normalized guidance selected for this run.
+ * @returns An effect that completes when the source file is nonempty.
+ */
+export function ValidateEngineGlobalGuidance(
+	engine_id: string,
+	global_guidance: EngineGlobalGuidance | undefined,
+): Effect.Effect<void, EngineConfigurationError> {
+	return global_guidance === undefined ||
+		(typeof global_guidance.source_file === "string" &&
+			global_guidance.source_file.trim().length > 0)
+		? Effect.void
+		: Effect.fail(
+				new EngineConfigurationError({
+					engine_id,
+					option: "global_guidance.source_file",
+					value: global_guidance.source_file,
+				}),
+			);
 }
 
 /** Carries provider-owned state that can reopen a run without inventing a checkpoint. @since 0.2.0 */

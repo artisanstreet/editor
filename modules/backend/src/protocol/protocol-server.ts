@@ -21,6 +21,11 @@ import {
 	type AckEnvelope,
 	type CommandEnvelope,
 	type EventEnvelope,
+	type GlobalGuidanceDriftResolutionEnvelope,
+	type GlobalGuidanceQueryEnvelope,
+	type GlobalGuidanceRetryEnvelope,
+	type GlobalGuidanceSelectionEnvelope,
+	type GlobalGuidanceUpdateEnvelope,
 	type HeartbeatPongEnvelope,
 	type HelloEnvelope,
 	type InboundControlEnvelope,
@@ -42,8 +47,20 @@ import {
 } from "@artisan/protocol";
 
 import { AgentGraphOrchestrator } from "../orchestration/agent-graph-orchestrator";
+import { GuidanceFileStoreFailure } from "../guidance/file-store";
+import { global_guidance_thread_id } from "../guidance/guidance-repository";
+import {
+	GlobalGuidanceConflict,
+	GlobalGuidanceInvariantError,
+	GlobalGuidanceService,
+} from "../guidance/guidance-service";
 import { JournalNotifier } from "../persistence/journal-notifier";
-import { JournalStore } from "../persistence/journal-store";
+import {
+	CommandIdConflict,
+	JournalInvariantError,
+	JournalStore,
+	JournalStoreFailure,
+} from "../persistence/journal-store";
 import { OrchestrationRepository } from "../persistence/orchestration-repository";
 import { ThreadReadModel } from "../persistence/thread-read-model";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
@@ -140,6 +157,54 @@ function latest_journal_sequence(fallback: number, events: ReadonlyArray<EventEn
 	return events.reduce((sequence, event) => Math.max(sequence, event.journal_sequence), fallback);
 }
 
+function guidance_error_detail(error: unknown): ProtocolErrorDetail {
+	if (error instanceof CommandIdConflict) {
+		return {
+			code: "command.id_conflict",
+			message: "This command id has already been used for different intent.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof GlobalGuidanceConflict) {
+		return {
+			code: "guidance.conflict",
+			message: "The provider guidance changed; refresh before retrying.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof JournalInvariantError) {
+		return {
+			code: "journal.invariant_failed",
+			message: "The journal could not reconstruct the guidance command.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof GlobalGuidanceInvariantError) {
+		return {
+			code: "guidance.invariant_failed",
+			message: "The canonical guidance state failed validation.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof GuidanceFileStoreFailure || error instanceof JournalStoreFailure) {
+		return {
+			code: "guidance.unavailable",
+			message: "Global guidance could not be durably updated.",
+			retryable: true,
+		};
+	}
+
+	return {
+		code: "guidance.unavailable",
+		message: "Global guidance could not be durably updated.",
+		retryable: true,
+	};
+}
+
 function thread_item_from_event(event: EventEnvelope): ThreadListItem | undefined {
 	if (event.payload.type === "thread.metadata.updated") {
 		return event.payload.thread;
@@ -205,6 +270,7 @@ export function make_protocol_server_layer(
 		Effect.gen(function* () {
 			const options = yield* DecodeProtocolConnectionOptions(input_options);
 			const graph = yield* AgentGraphOrchestrator;
+			const guidance = yield* GlobalGuidanceService;
 			const journal = yield* JournalStore;
 			const metadata = yield* RuntimeMetadata;
 			const notifier = yield* JournalNotifier;
@@ -646,6 +712,39 @@ export function make_protocol_server_layer(
 						),
 					);
 
+				const HandleGuidanceQuery = (
+					query: GlobalGuidanceQueryEnvelope,
+					current: ReadyState,
+				) =>
+					guidance.Get.pipe(
+						Effect.flatMap((snapshot) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "guidance.query.result",
+									message_id,
+									origin: "backend",
+									payload: snapshot,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"guidance.unavailable",
+								"Global guidance could not be read or reconciled.",
+								true,
+								query.message_id,
+							),
+						),
+					);
+
 				const HandleWorkQuery = (query: ThreadWorkQueryEnvelope, current: ReadyState) =>
 					orchestration.GetWork(query.payload.thread_id).pipe(
 						Effect.flatMap((work) =>
@@ -1078,6 +1177,83 @@ export function make_protocol_server_layer(
 						sent_at: update.sent_at,
 						thread_id: thread_retention_policy_thread_id,
 					});
+				type GuidanceMutationEnvelope =
+					| GlobalGuidanceDriftResolutionEnvelope
+					| GlobalGuidanceRetryEnvelope
+					| GlobalGuidanceSelectionEnvelope
+					| GlobalGuidanceUpdateEnvelope;
+				const HandleGuidanceMutation = (envelope: GuidanceMutationEnvelope) => {
+					const trace = {
+						message_id: envelope.message_id,
+						origin: envelope.origin,
+						sent_at: envelope.sent_at,
+					};
+					const operation =
+						envelope.kind === "guidance.update"
+							? guidance.Update({ ...trace, content: envelope.payload.content })
+							: envelope.kind === "guidance.selection"
+								? guidance.Select({ ...trace, ...envelope.payload })
+								: envelope.kind === "guidance.drift.resolve"
+									? guidance.ResolveDrift({ ...trace, ...envelope.payload })
+									: guidance.RetrySync({ ...trace, ...envelope.payload });
+
+					return operation.pipe(
+						Effect.flatMap(({ acceptance }) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									causation_id: envelope.message_id,
+									correlation_id: envelope.message_id,
+									kind: "command.receipt",
+									message_id,
+									origin: "backend",
+									payload: {
+										journal_sequence: acceptance.event.journal_sequence,
+										status: acceptance.status,
+									},
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+									thread_id: global_guidance_thread_id,
+								});
+
+								const latest = yield* Ref.get(state);
+
+								if (
+									latest._tag === "Ready" &&
+									acceptance.event.journal_sequence >
+										latest.delivered_journal_sequence
+								) {
+									yield* DeliverLiveEvents([acceptance.event]);
+								}
+							}),
+						),
+						Effect.catch((error) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									causation_id: envelope.message_id,
+									correlation_id: envelope.message_id,
+									kind: "command.receipt",
+									message_id,
+									origin: "backend",
+									payload: {
+										error: guidance_error_detail(error),
+										status: "rejected",
+									},
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+									thread_id: global_guidance_thread_id,
+								});
+							}),
+						),
+					);
+				};
 
 				const HandleReadyEnvelope = (
 					envelope: Exclude<InboundControlEnvelope, HelloEnvelope>,
@@ -1092,6 +1268,13 @@ export function make_protocol_server_layer(
 							return HandleRetentionQuery(envelope, current);
 						case "thread.retention.update":
 							return HandleRetentionUpdate(envelope);
+						case "guidance.query":
+							return HandleGuidanceQuery(envelope, current);
+						case "guidance.update":
+						case "guidance.selection":
+						case "guidance.drift.resolve":
+						case "guidance.sync.retry":
+							return HandleGuidanceMutation(envelope);
 						case "thread.work.query":
 							return HandleWorkQuery(envelope, current);
 						case "terminal.list.query":

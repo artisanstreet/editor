@@ -135,7 +135,10 @@ const negotiate = (connection: ProtocolConnection, hello = make_hello()) =>
 	Effect.gen(function* () {
 		yield* connection.Receive(hello);
 
-		return yield* take_outbound(connection, 2);
+		return yield* take_until_outbound(
+			connection,
+			(envelope) => envelope.kind === "replay.complete",
+		);
 	});
 
 afterEach(async () => {
@@ -216,18 +219,19 @@ describe("protocol server", () => {
 						const query = yield* take_outbound(connection, 1);
 
 						yield* connection.Receive(
-							make_ack("ack_valid", 1, [
+							make_ack("ack_valid", 2, [
+								{ sequence: 1, stream_id: "settings:guidance" },
 								{ sequence: 1, stream_id: "thread:thread_1" },
 							]),
 						);
 						yield* connection.Receive(
-							make_ack("ack_duplicate_cursor", 1, [
+							make_ack("ack_duplicate_cursor", 2, [
 								{ sequence: 1, stream_id: "thread:thread_1" },
 								{ sequence: 1, stream_id: "thread:thread_1" },
 							]),
 						);
 						yield* connection.Receive(
-							make_ack("ack_projection_cursor", 1, [
+							make_ack("ack_projection_cursor", 2, [
 								{
 									sequence: 1,
 									stream_id: "projection:thread.list:subscription_1",
@@ -235,7 +239,7 @@ describe("protocol server", () => {
 							]),
 						);
 						yield* connection.Receive(
-							make_ack("ack_out_of_range", 2, [
+							make_ack("ack_out_of_range", 3, [
 								{ sequence: 2, stream_id: "thread:thread_1" },
 							]),
 						);
@@ -249,17 +253,23 @@ describe("protocol server", () => {
 
 			expect(output.handshake.map((envelope) => envelope.kind)).toEqual([
 				"welcome",
+				"event",
 				"replay.complete",
 			]);
+			expect(output.handshake[1]).toMatchObject({
+				journal_sequence: 1,
+				payload: { type: "guidance.canonical.updated" },
+				stream_id: "settings:guidance",
+			});
 			expect(output.command).toMatchObject([
 				{
 					correlation_id: "command_1",
 					kind: "command.receipt",
-					payload: { journal_sequence: 1, status: "accepted" },
+					payload: { journal_sequence: 2, status: "accepted" },
 				},
 				{
 					correlation_id: "command_1",
-					journal_sequence: 1,
+					journal_sequence: 2,
 					kind: "event",
 				},
 			]);
@@ -268,7 +278,7 @@ describe("protocol server", () => {
 					correlation_id: "query_1",
 					kind: "thread.list.query.result",
 					payload: {
-						journal_sequence: 1,
+						journal_sequence: 2,
 						threads: [{ thread_id: "thread_1", title: "Protocol integration" }],
 					},
 				},
@@ -340,7 +350,7 @@ describe("protocol server", () => {
 					kind: "command.receipt",
 					payload: { status: "accepted" },
 				},
-				{ kind: "event", journal_sequence: 1 },
+				{ kind: "event", journal_sequence: 2 },
 				{
 					kind: "thread.list.upsert",
 					payload: { thread_id: "thread_1", title: "Protocol integration" },
@@ -393,7 +403,8 @@ describe("protocol server", () => {
 						const reconnecting_connection = yield* open_connection;
 
 						yield* reconnecting_connection.Receive(
-							make_hello("hello_reconnect", 1, [
+							make_hello("hello_reconnect", 2, [
+								{ sequence: 1, stream_id: "settings:guidance" },
 								{ sequence: 1, stream_id: "thread:thread_1" },
 							]),
 						);
@@ -409,7 +420,7 @@ describe("protocol server", () => {
 				"replay.complete",
 			]);
 			expect(replay[1]).toMatchObject({
-				journal_sequence: 2,
+				journal_sequence: 3,
 				payload: { title: "Missing event", type: "thread.created" },
 				thread_id: "thread_2",
 			});
@@ -442,7 +453,7 @@ describe("protocol server", () => {
 			expect(observer_event).toMatchObject([
 				{
 					correlation_id: "command_1",
-					journal_sequence: 1,
+					journal_sequence: 2,
 					kind: "event",
 					thread_id: "thread_1",
 				},

@@ -400,11 +400,17 @@ describe("thread retention", () => {
 			expect(result.erased).toEqual(["thread_expired"]);
 			expect(result.repeated).toEqual([]);
 			expect(result.replay.map((event) => event.payload)).toEqual([
+				{
+					byte_count: 0,
+					content_hash:
+						"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+					type: "guidance.canonical.updated",
+				},
 				{ type: "thread.content_erased" },
 				{ type: "thread.erased" },
 			]);
-			expect(result.replay.map((event) => event.journal_sequence)).toEqual([1, 2]);
-			expect(result.replay.map((event) => event.sequence)).toEqual([1, 2]);
+			expect(result.replay.map((event) => event.journal_sequence)).toEqual([1, 2, 3]);
+			expect(result.replay.map((event) => event.sequence)).toEqual([1, 1, 2]);
 			expect(JSON.stringify(result.replay)).not.toContain("Expired thread");
 			expect(result.recreate[0]).toMatchObject({
 				payload: { status: "rejected" },
@@ -413,14 +419,30 @@ describe("thread retention", () => {
 			expect(result.counts).toMatchObject({
 				artifacts: [],
 				claims: [],
-				commands: [],
-				event_streams: [{ last_sequence: 2, stream_id: "thread:thread_expired" }],
+				commands: [
+					{
+						origin: "backend",
+						payload_type: "guidance.canonical.commit",
+						thread_id: "settings/guidance",
+					},
+				],
+				event_streams: [
+					{ last_sequence: 1, stream_id: "settings:guidance" },
+					{ last_sequence: 2, stream_id: "thread:thread_expired" },
+				],
 				events: [
 					{
+						event_type: "guidance.canonical.updated",
+						sequence: 1,
+						stream_id: "settings:guidance",
+						stream_sequence: 1,
+						thread_id: "settings/guidance",
+					},
+					{
 						agent_id: null,
-						causation_id: "thread_content_erased_1",
-						correlation_id: "thread_content_erased_1",
-						event_id: "thread_content_erased_1",
+						causation_id: "thread_content_erased_2",
+						correlation_id: "thread_content_erased_2",
+						event_id: "thread_content_erased_2",
 						event_type: "thread.content_erased",
 						occurred_at: "1970-01-01T00:00:00.000Z",
 						origin: "backend",
@@ -428,7 +450,7 @@ describe("thread retention", () => {
 						raw_origin_json: null,
 						run_id: null,
 						schema_version: 1,
-						sequence: 1,
+						sequence: 2,
 						stream_id: "thread:thread_expired",
 						stream_sequence: 1,
 						thread_id: "thread_expired",
@@ -445,7 +467,7 @@ describe("thread retention", () => {
 						raw_origin_json: null,
 						run_id: null,
 						schema_version: 1,
-						sequence: 2,
+						sequence: 3,
 						stream_id: "thread:thread_expired",
 						stream_sequence: 2,
 						thread_id: "thread_expired",

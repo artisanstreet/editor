@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { Deferred, Effect, Layer, Queue, Stream } from "effect";
 
 import { ProtocolServer, type ProtocolConnection } from "@artisan/backend";
@@ -6,6 +8,12 @@ import {
 	type AckEnvelope,
 	type CommandEnvelope,
 	type EventEnvelope,
+	type GlobalGuidanceDriftResolutionEnvelope,
+	type GlobalGuidanceQueryEnvelope,
+	type GlobalGuidanceRetryEnvelope,
+	type GlobalGuidanceSelectionEnvelope,
+	type GlobalGuidanceSnapshot,
+	type GlobalGuidanceUpdateEnvelope,
 	type HeartbeatPongEnvelope,
 	type HelloEnvelope,
 	type InboundControlEnvelope,
@@ -26,6 +34,11 @@ interface StoredCommand {
 
 interface StoredRetentionUpdate {
 	readonly envelope: ThreadRetentionUpdateEnvelope;
+	readonly fingerprint: string;
+	readonly journal_sequence: number;
+}
+
+interface StoredGuidanceMutation {
 	readonly fingerprint: string;
 	readonly journal_sequence: number;
 }
@@ -65,6 +78,12 @@ export interface FakeProtocolSnapshot {
 	readonly pongs: ReadonlyArray<HeartbeatPongEnvelope>;
 	readonly received_kinds: ReadonlyArray<InboundControlEnvelope["kind"]>;
 	readonly retention_update_attempts: ReadonlyArray<ThreadRetentionUpdateEnvelope>;
+	readonly guidance_drift_attempts: ReadonlyArray<GlobalGuidanceDriftResolutionEnvelope>;
+	readonly guidance_query_attempts: ReadonlyArray<GlobalGuidanceQueryEnvelope>;
+	readonly guidance_retry_attempts: ReadonlyArray<GlobalGuidanceRetryEnvelope>;
+	readonly guidance_selection_attempts: ReadonlyArray<GlobalGuidanceSelectionEnvelope>;
+	readonly guidance_snapshot: GlobalGuidanceSnapshot;
+	readonly guidance_update_attempts: ReadonlyArray<GlobalGuidanceUpdateEnvelope>;
 	readonly subscriptions: ReadonlyArray<SubscribeEnvelope>;
 }
 
@@ -91,6 +110,10 @@ function command_fingerprint(command: CommandEnvelope) {
 	return JSON.stringify(command);
 }
 
+function guidance_hash(content: string) {
+	return createHash("sha256").update(content).digest("hex");
+}
+
 /** Creates a durable in-memory ProtocolServer with connection-local projections. */
 export function make_fake_protocol_server(options: FakeProtocolOptions = {}): FakeProtocolHarness {
 	const acknowledgements: Array<AckEnvelope> = [];
@@ -104,6 +127,12 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 	const received_kinds: Array<InboundControlEnvelope["kind"]> = [];
 	const retention_update_attempts: Array<ThreadRetentionUpdateEnvelope> = [];
 	const retention_updates = new Map<string, StoredRetentionUpdate>();
+	const guidance_mutations = new Map<string, StoredGuidanceMutation>();
+	const guidance_drift_attempts: Array<GlobalGuidanceDriftResolutionEnvelope> = [];
+	const guidance_query_attempts: Array<GlobalGuidanceQueryEnvelope> = [];
+	const guidance_retry_attempts: Array<GlobalGuidanceRetryEnvelope> = [];
+	const guidance_selection_attempts: Array<GlobalGuidanceSelectionEnvelope> = [];
+	const guidance_update_attempts: Array<GlobalGuidanceUpdateEnvelope> = [];
 	const subscription_attempts: Array<SubscribeEnvelope> = [];
 	const threads = new Map<string, ThreadListItem>();
 	let retention_policy: ThreadRetentionPolicy = { enabled: true, inactivity_days: 7 };
@@ -111,6 +140,35 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 	let active_subscriptions = 0;
 	let id_sequence = 0;
 	let opened_connections = 0;
+	let guidance_snapshot: GlobalGuidanceSnapshot = {
+		candidates: [],
+		content: "Initial guidance\n",
+		metadata: {
+			canonical: {
+				byte_count: 17,
+				content_hash: "1111111111111111111111111111111111111111111111111111111111111111",
+				selected_provider: "codex",
+				status: "ready",
+				updated_at: "2026-07-10T08:00:00.000Z",
+			},
+			providers: [
+				{
+					applied_byte_count: 17,
+					applied_hash:
+						"1111111111111111111111111111111111111111111111111111111111111111",
+					path: "C:/guidance/codex.md",
+					provider: "codex",
+					status: "synced",
+					updated_at: "2026-07-10T08:00:00.000Z",
+				},
+				{
+					provider: "claude",
+					status: "unsupported",
+					updated_at: "2026-07-10T08:00:00.000Z",
+				},
+			],
+		},
+	};
 
 	const next_id = (prefix: string) => {
 		id_sequence += 1;
@@ -568,6 +626,138 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 				);
 			});
 
+		const handle_guidance_query = (query: GlobalGuidanceQueryEnvelope) =>
+			Effect.gen(function* () {
+				guidance_query_attempts.push(query);
+
+				yield* enqueue({
+					...backend_trace(),
+					correlation_id: query.message_id,
+					kind: "guidance.query.result",
+					payload: guidance_snapshot,
+				});
+			});
+
+		const handle_guidance_mutation = (
+			mutation:
+				| GlobalGuidanceDriftResolutionEnvelope
+				| GlobalGuidanceRetryEnvelope
+				| GlobalGuidanceSelectionEnvelope
+				| GlobalGuidanceUpdateEnvelope,
+		) =>
+			Effect.gen(function* () {
+				if (mutation.kind === "guidance.update") {
+					guidance_update_attempts.push(mutation);
+				} else if (mutation.kind === "guidance.selection") {
+					guidance_selection_attempts.push(mutation);
+				} else if (mutation.kind === "guidance.drift.resolve") {
+					guidance_drift_attempts.push(mutation);
+				} else {
+					guidance_retry_attempts.push(mutation);
+				}
+
+				const fingerprint = JSON.stringify(mutation);
+				const previous = guidance_mutations.get(mutation.message_id);
+
+				if (previous && previous.fingerprint !== fingerprint) {
+					yield* enqueue({
+						...backend_trace(),
+						causation_id: mutation.message_id,
+						correlation_id: mutation.message_id,
+						kind: "command.receipt",
+						payload: {
+							error: {
+								code: "command.id_conflict",
+								message: "The command id was reused with different content.",
+								retryable: false,
+							},
+							status: "rejected",
+						},
+						thread_id: "settings/guidance",
+					});
+
+					return;
+				}
+
+				if (previous) {
+					yield* enqueue({
+						...backend_trace(),
+						causation_id: mutation.message_id,
+						correlation_id: mutation.message_id,
+						kind: "command.receipt",
+						payload: {
+							journal_sequence: previous.journal_sequence,
+							status: "duplicate",
+						},
+						thread_id: "settings/guidance",
+					});
+
+					return;
+				}
+
+				const journal_sequence = events.length + 1;
+				const stream_id = "settings:guidance";
+				const sequence = events.filter((event) => event.stream_id === stream_id).length + 1;
+				const content =
+					mutation.kind === "guidance.update"
+						? mutation.payload.content
+						: guidance_snapshot.content;
+				const content_hash = guidance_hash(content);
+				const selected_provider =
+					mutation.kind === "guidance.selection"
+						? mutation.payload.provider
+						: guidance_snapshot.metadata.canonical.selected_provider;
+				const updated_at = now();
+
+				guidance_snapshot = {
+					...guidance_snapshot,
+					content,
+					metadata: {
+						...guidance_snapshot.metadata,
+						canonical: {
+							...guidance_snapshot.metadata.canonical,
+							byte_count: Buffer.byteLength(content),
+							content_hash,
+							selected_provider,
+							status: "ready",
+							updated_at,
+						},
+					},
+				};
+				const event: EventEnvelope = {
+					...backend_trace(),
+					causation_id: mutation.message_id,
+					correlation_id: mutation.message_id,
+					journal_sequence,
+					kind: "event",
+					payload: {
+						byte_count: Buffer.byteLength(content),
+						content_hash,
+						selected_provider,
+						type: "guidance.canonical.updated",
+					},
+					sequence,
+					stream_id,
+					thread_id: "settings/guidance",
+				};
+
+				events.push(event);
+				guidance_mutations.set(mutation.message_id, { fingerprint, journal_sequence });
+				yield* enqueue({
+					...backend_trace(),
+					causation_id: mutation.message_id,
+					correlation_id: mutation.message_id,
+					kind: "command.receipt",
+					payload: { journal_sequence, status: "accepted" },
+					thread_id: "settings/guidance",
+				});
+				yield* Effect.forEach(
+					live_connections,
+					(connection) => connection.deliver_event(event),
+					{ discard: true },
+				);
+			});
+
 		const handle_subscribe = (subscribe: SubscribeEnvelope) =>
 			Effect.gen(function* () {
 				subscription_attempts.push(subscribe);
@@ -685,6 +875,17 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 						return;
 					case "thread.retention.update":
 						yield* handle_retention_update(input);
+
+						return;
+					case "guidance.query":
+						yield* handle_guidance_query(input);
+
+						return;
+					case "guidance.update":
+					case "guidance.selection":
+					case "guidance.drift.resolve":
+					case "guidance.sync.retry":
+						yield* handle_guidance_mutation(input);
 
 						return;
 					case "thread.work.query":
@@ -807,6 +1008,12 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 		pongs: [...pongs],
 		received_kinds: [...received_kinds],
 		retention_update_attempts: [...retention_update_attempts],
+		guidance_drift_attempts: [...guidance_drift_attempts],
+		guidance_query_attempts: [...guidance_query_attempts],
+		guidance_retry_attempts: [...guidance_retry_attempts],
+		guidance_selection_attempts: [...guidance_selection_attempts],
+		guidance_snapshot,
+		guidance_update_attempts: [...guidance_update_attempts],
 		subscriptions: [...subscription_attempts],
 	});
 

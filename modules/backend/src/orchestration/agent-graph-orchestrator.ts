@@ -1,8 +1,9 @@
-import { Context, Deferred, Effect, Exit, Layer, Ref, Scope, Stream } from "effect";
+import { Context, Deferred, Effect, Exit, Layer, Option, Ref, Scope, Stream } from "effect";
 
 import { EngineRegistry, type EngineCommand, type EngineRun } from "@artisan/engines";
 import type { CommandEnvelope, OrchestrationGraph } from "@artisan/protocol";
 
+import { GlobalGuidanceService } from "../guidance/guidance-service";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { MakeThreadDispatchFence } from "../threads/internal/thread-dispatch-fence";
 import {
@@ -48,6 +49,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 	AgentGraphOrchestrator,
 	Effect.gen(function* () {
 		const engines = yield* EngineRegistry;
+		const guidance = yield* GlobalGuidanceService;
 		const metadata = yield* RuntimeMetadata;
 		const repository = yield* AgentGraphRepository;
 		const service_scope = yield* Scope.make();
@@ -147,6 +149,21 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 					return;
 				}
 
+				const resolved_guidance = yield* guidance
+					.ResolveForEngine(work.engine_id)
+					.pipe(Effect.exit);
+
+				if (
+					Exit.isFailure(resolved_guidance) ||
+					(Option.isSome(resolved_guidance.value) &&
+						engine.value.Descriptor.capabilities.global_guidance.state ===
+							"unsupported")
+				) {
+					yield* fail_start(work, "Global guidance could not be applied to this engine.");
+
+					return;
+				}
+
 				const run_scope = yield* Scope.make();
 				let transferred = false;
 
@@ -155,6 +172,9 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 						.Open({
 							_tag: "start",
 							artisan_run_id: work.run_id,
+							...(Option.isSome(resolved_guidance.value)
+								? { global_guidance: resolved_guidance.value.value }
+								: {}),
 							initial_text: [
 								work.instructions,
 								`Expected result: ${work.expected_result}`,

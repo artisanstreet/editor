@@ -32,6 +32,7 @@ import {
 	EngineUnsupportedCommandError,
 	EngineUnavailableError,
 	EngineProbeTimeoutError,
+	ValidateEngineGlobalGuidance,
 } from "../engine";
 import { EngineProcessFactory, type EngineProcessSpawnInput } from "../process/process";
 import {
@@ -62,6 +63,7 @@ export const ClaudeEngineDescriptor: EngineDescriptor = {
 		cancel: { state: "supported" },
 		close: { state: "supported" },
 		events: { state: "supported" },
+		global_guidance: { state: "supported" },
 		model_selection: { state: "supported" },
 		native_tools: {
 			state: "experimental",
@@ -175,15 +177,38 @@ function validate_provider_options(input: EngineOpenInput) {
 		return fail_configuration("provider_options.claude.permission_mode", permission_mode);
 	}
 
-	const prompt_file = options["claude.append_system_prompt_file"];
+	const configured_prompt_file = options["claude.append_system_prompt_file"];
 	if (
-		prompt_file !== undefined &&
-		(typeof prompt_file !== "string" || prompt_file.length === 0)
+		configured_prompt_file !== undefined &&
+		(typeof configured_prompt_file !== "string" || configured_prompt_file.length === 0)
 	) {
-		return fail_configuration("provider_options.claude.append_system_prompt_file", prompt_file);
+		return fail_configuration(
+			"provider_options.claude.append_system_prompt_file",
+			configured_prompt_file,
+		);
 	}
 
-	return Effect.succeed({ permission_mode, prompt_file });
+	return ValidateEngineGlobalGuidance("claude", input.global_guidance).pipe(
+		Effect.flatMap(() => {
+			const guidance_prompt_file = input.global_guidance?.source_file;
+
+			if (
+				guidance_prompt_file !== undefined &&
+				configured_prompt_file !== undefined &&
+				guidance_prompt_file !== configured_prompt_file
+			) {
+				return fail_configuration(
+					"provider_options.claude.append_system_prompt_file",
+					configured_prompt_file,
+				);
+			}
+
+			return Effect.succeed({
+				permission_mode,
+				prompt_file: guidance_prompt_file ?? configured_prompt_file,
+			});
+		}),
+	);
 }
 
 function make_spawn_input(

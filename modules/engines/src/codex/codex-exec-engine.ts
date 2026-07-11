@@ -1,6 +1,11 @@
 import { Effect } from "effect";
 
-import { type Engine, type EngineCapabilities } from "../engine";
+import {
+	type Engine,
+	type EngineCapabilities,
+	EngineUnsupportedOperationError,
+	ValidateEngineGlobalGuidance,
+} from "../engine";
 import type { CodexProcessFactory } from "./codex-process";
 import { OpenCodexExecRun } from "./internal/codex-exec-run";
 import { ProbeCodexExecVersion } from "./internal/codex-exec-probe";
@@ -19,6 +24,10 @@ export const codex_exec_capabilities: EngineCapabilities = {
 	cancel: { state: "supported" },
 	close: { state: "supported" },
 	events: { state: "supported" },
+	global_guidance: {
+		state: "unsupported",
+		reason: "V1 exec has no proven per-run native instruction channel; synced guidance files are managed outside this input.",
+	},
 	model_selection: { state: "supported" },
 	native_tools: {
 		state: "experimental",
@@ -94,7 +103,18 @@ export function make_codex_exec_engine(options: CodexExecEngineOptions): Engine 
 			})),
 		);
 	const Open: Engine["Open"] = (input) =>
-		Probe({}).pipe(
+		ValidateEngineGlobalGuidance("codex", input.global_guidance).pipe(
+			Effect.andThen(() =>
+				input.global_guidance === undefined
+					? Effect.void
+					: Effect.fail(
+							new EngineUnsupportedOperationError({
+								engine_id: "codex",
+								operation: "global_guidance",
+							}),
+						),
+			),
+			Effect.andThen(Probe({})),
 			Effect.andThen(
 				OpenCodexExecRun(
 					{

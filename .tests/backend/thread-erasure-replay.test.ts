@@ -113,6 +113,13 @@ function take_outbound(connection: ProtocolConnection, count: number) {
 	return connection.Outbound.pipe(Stream.take(count), Stream.runCollect);
 }
 
+function take_through_replay_complete(connection: ProtocolConnection) {
+	return connection.Outbound.pipe(
+		Stream.takeUntil((envelope) => envelope.kind === "replay.complete"),
+		Stream.runCollect,
+	);
+}
+
 function event_envelopes(envelopes: ReadonlyArray<OutboundControlEnvelope>) {
 	return envelopes.filter((envelope) => envelope.kind === "event");
 }
@@ -147,7 +154,7 @@ describe("thread erasure replay", () => {
 						const live = yield* server.Open;
 
 						yield* live.Receive(make_hello("hello_live"));
-						yield* take_outbound(live, 2);
+						yield* take_through_replay_complete(live);
 						yield* live.Receive(make_subscribe("live_threads"));
 						yield* take_outbound(live, 2);
 
@@ -247,12 +254,13 @@ describe("thread erasure replay", () => {
 						const reconnect = yield* server.Open;
 
 						yield* reconnect.Receive(
-							make_hello("hello_reconnect", 2, [
+							make_hello("hello_reconnect", 3, [
+								{ sequence: 1, stream_id: "settings:guidance" },
 								{ sequence: 1, stream_id: "thread:thread_erased" },
 								{ sequence: 1, stream_id: "thread:thread_kept" },
 							]),
 						);
-						const reconnect_replay = yield* take_outbound(reconnect, 7);
+						const reconnect_replay = yield* take_through_replay_complete(reconnect);
 
 						yield* reconnect.Receive(make_subscribe("fresh_threads"));
 						const fresh_subscription = yield* take_outbound(reconnect, 2);
@@ -306,6 +314,7 @@ describe("thread erasure replay", () => {
 				(event) => event.thread_id === "thread_kept",
 			);
 			const serialized_replay = JSON.stringify(result.full_replay);
+			const serialized_reconnect_replay = JSON.stringify(result.reconnect_replay);
 
 			expect(result.erased).toEqual(["thread_erased"]);
 			expect(result.repeated).toEqual([]);
@@ -315,7 +324,7 @@ describe("thread erasure replay", () => {
 			]);
 			expect(removals).toMatchObject([
 				{
-					journal_sequence: 6,
+					journal_sequence: 7,
 					kind: "thread.list.remove",
 					payload: { thread_id: "thread_erased" },
 					sequence: 6,
@@ -326,13 +335,24 @@ describe("thread erasure replay", () => {
 				"thread.list.remove",
 			]);
 			expect(result.erased_delivery[0]).toMatchObject({
-				journal_sequence: 6,
+				journal_sequence: 7,
 				payload: { type: "thread.erased" },
 			});
 
 			expect(result.full_replay.map((event) => event.journal_sequence)).toEqual([
-				1, 2, 3, 4, 5, 6, 7,
+				1, 2, 3, 4, 5, 6, 7, 8,
 			]);
+			expect(result.full_replay[0]).toMatchObject({
+				journal_sequence: 1,
+				payload: {
+					byte_count: 0,
+					content_hash:
+						"e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+					type: "guidance.canonical.updated",
+				},
+				stream_id: "settings:guidance",
+				thread_id: "settings/guidance",
+			});
 			expect(erased_stream.map((event) => event.sequence)).toEqual([1, 2, 3, 4]);
 			expect(erased_stream.map((event) => event.payload.type)).toEqual([
 				"thread.content_erased",
@@ -351,8 +371,13 @@ describe("thread erasure replay", () => {
 			expect(serialized_replay).not.toContain("Private erased artifact diff");
 			expect(serialized_replay).not.toContain("secret_raw_reference");
 			expect(serialized_replay).not.toContain("secret_agent");
+			expect(serialized_reconnect_replay).not.toContain("Secret erased title");
+			expect(serialized_reconnect_replay).not.toContain("Private erased message body");
+			expect(serialized_reconnect_replay).not.toContain("Private erased artifact diff");
+			expect(serialized_reconnect_replay).not.toContain("secret_raw_reference");
+			expect(serialized_reconnect_replay).not.toContain("secret_agent");
 
-			expect(replay_events.map((event) => event.journal_sequence)).toEqual([3, 4, 5, 6, 7]);
+			expect(replay_events.map((event) => event.journal_sequence)).toEqual([4, 5, 6, 7, 8]);
 			expect(
 				replay_events
 					.filter((event) => event.thread_id === "thread_erased")
@@ -367,18 +392,21 @@ describe("thread erasure replay", () => {
 				kind: "replay.complete",
 				payload: {
 					current_event_cursors: [
+						{ sequence: 1, stream_id: "settings:guidance" },
 						{ sequence: 4, stream_id: "thread:thread_erased" },
 						{ sequence: 3, stream_id: "thread:thread_kept" },
 					],
-					journal_sequence: 7,
+					journal_sequence: 8,
 				},
 			});
 
 			expect(result.current_cursors).toEqual([
+				{ sequence: 1, stream_id: "settings:guidance" },
 				{ sequence: 4, stream_id: "thread:thread_erased" },
 				{ sequence: 3, stream_id: "thread:thread_kept" },
 			]);
 			expect(result.streams).toEqual([
+				{ last_sequence: 1, stream_id: "settings:guidance" },
 				{ last_sequence: 4, stream_id: "thread:thread_erased" },
 				{ last_sequence: 3, stream_id: "thread:thread_kept" },
 			]);

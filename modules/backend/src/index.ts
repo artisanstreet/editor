@@ -8,6 +8,26 @@ export {
 } from "./protocol/protocol-connection";
 export { ProtocolRouter } from "./protocol/protocol-router";
 export { ProtocolServer } from "./protocol/protocol-server";
+export {
+	GlobalGuidanceConflict,
+	GlobalGuidanceInvariantError,
+	GlobalGuidanceService,
+	make_global_guidance_service_layer,
+	type GlobalGuidanceMutationResult,
+	type GlobalGuidanceMutationTrace,
+	type GlobalGuidanceServiceError,
+	type GlobalGuidanceServiceOptions,
+} from "./guidance/guidance-service";
+export {
+	EmptyGuidanceProviderRegistryLive,
+	GuidanceProviderRegistry,
+	make_claude_guidance_adapter,
+	make_codex_guidance_adapter,
+	make_guidance_provider_registry_layer,
+	make_platform_guidance_provider_registry_layer,
+	make_runtime_guidance_adapter,
+	make_unsupported_guidance_adapter,
+} from "./guidance/provider-mirrors";
 export { ThreadErasure, ThreadErasureFailure } from "./threads/thread-erasure";
 export {
 	ThreadRetention,
@@ -160,5 +180,9 @@ export {
 export {
 	make_backend_layer,
 	make_backend_runtime,
+	make_desktop_backend_layer,
+	make_desktop_backend_runtime,
 	type BackendOptions,
+	type DesktopBackendOptions,
+	type DesktopGuidanceOptions,
 } from "./runtime/backend-runtime";

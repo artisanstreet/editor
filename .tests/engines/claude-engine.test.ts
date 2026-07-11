@@ -62,6 +62,7 @@ describe("Claude Code engine", () => {
 	it("declares truthful V1 capabilities", () => {
 		expect(ClaudeEngineDescriptor.capabilities.steer.state).toBe("unsupported");
 		expect(ClaudeEngineDescriptor.capabilities.approval.state).toBe("unsupported");
+		expect(ClaudeEngineDescriptor.capabilities.global_guidance.state).toBe("supported");
 		expect(ClaudeEngineDescriptor.capabilities.resume.state).toBe("supported");
 	});
 
@@ -140,6 +141,104 @@ describe("Claude Code engine", () => {
 			),
 		);
 		expect(native_thread_id).toBe("resume-session");
+	});
+
+	it("maps guidance source to one native prompt-file flag and preserves start and resume user text", async () => {
+		const directory = await mkdtemp(join(process.cwd(), ".claude-guidance-test-"));
+		const invocation = join(directory, "invocations.jsonl");
+		const guidance = {
+			content: "Use project guidance.",
+			source_file: "C:\\workspace\\AGENTS.md",
+		};
+
+		process.env.FAKE_CLAUDE_INVOCATION_FILE = invocation;
+
+		try {
+			const engine = await get_engine();
+
+			await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const started = yield* engine.Open({
+							...open_input(),
+							global_guidance: guidance,
+						});
+						yield* started.Events.pipe(Stream.runDrain);
+						const resumed = yield* engine.Open({
+							...open_input("resume"),
+							global_guidance: guidance,
+							provider_options: {
+								"claude.append_system_prompt_file": guidance.source_file,
+							},
+						});
+						yield* resumed.Events.pipe(Stream.runDrain);
+					}),
+				),
+			);
+
+			const records = (await readFile(invocation, "utf8"))
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			const run_args = records.filter((record) => record.args?.includes("-p") === true);
+			const run_stdin = records.filter((record) => record.stdin !== undefined);
+
+			expect(run_args).toHaveLength(2);
+			expect(run_stdin).toHaveLength(2);
+			expect(run_args.map((record) => record.args)).toEqual(
+				expect.arrayContaining([
+					expect.arrayContaining(["--append-system-prompt-file", guidance.source_file]),
+					expect.arrayContaining(["--append-system-prompt-file", guidance.source_file]),
+				]),
+			);
+			for (const record of run_args) {
+				expect(
+					(record.args as string[]).filter(
+						(arg) => arg === "--append-system-prompt-file",
+					),
+				).toHaveLength(1);
+			}
+			expect(JSON.parse(run_stdin[0].stdin).message.content).toBe("hello");
+			expect(JSON.parse(run_stdin[1].stdin).message.content).toBe("continue");
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects conflicting prompt-file guidance before spawning", async () => {
+		let spawn_count = 0;
+		const factory = Layer.succeed(EngineProcessFactory, {
+			Spawn: () => {
+				spawn_count += 1;
+				return Effect.die("spawned");
+			},
+		});
+		const engine = await Effect.runPromise(
+			ClaudeEngine.pipe(
+				Effect.provide(
+					make_claude_engine_layer({ executable }).pipe(Layer.provide(factory)),
+				),
+			),
+		);
+		const result = await Effect.runPromise(
+			Effect.scoped(
+				Effect.exit(
+					engine.Open({
+						...open_input(),
+						global_guidance: {
+							content: "Guidance",
+							source_file: "C:\\workspace\\AGENTS.md",
+						},
+						provider_options: {
+							"claude.append_system_prompt_file": "C:\\workspace\\CLAUDE.md",
+						},
+					}),
+				),
+			),
+		);
+
+		expect(Exit.isFailure(result)).toBe(true);
+		expect(spawn_count).toBe(0);
 	});
 
 	it("does not fabricate an empty user turn when resume text is absent", async () => {

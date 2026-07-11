@@ -436,9 +436,9 @@ describe("terminal session orchestration", () => {
 				{ payload: { status: "accepted" } },
 				{ payload: { action: "opened", type: "terminal.lifecycle" } },
 			]);
-			expect(accepted[0]!.payload).toHaveProperty("journal_sequence", 2);
+			expect(accepted[0]!.payload).toHaveProperty("journal_sequence", 3);
 			expect(duplicate).toMatchObject([
-				{ payload: { journal_sequence: 2, status: "duplicate" } },
+				{ payload: { journal_sequence: 3, status: "duplicate" } },
 				{ payload: { action: "opened", type: "terminal.lifecycle" } },
 			]);
 			expect(lifecycle_event(duplicate)).toEqual(lifecycle_event(accepted));

@@ -1,6 +1,10 @@
 import { Effect } from "effect";
 
-import { type EngineOpenInput, EngineConfigurationError } from "../../engine";
+import {
+	type EngineOpenInput,
+	EngineConfigurationError,
+	ValidateEngineGlobalGuidance,
+} from "../../engine";
 
 type CodexApprovalPolicy = "never" | "on-request";
 type CodexSandbox = "read-only" | "workspace-write";
@@ -118,12 +122,16 @@ function ResolveCodexPermissions(input: EngineOpenInput, transport: CodexTranspo
 
 /** Builds exact legacy app-server thread fields from canonical permission policy. */
 export function MakeCodexAppServerThreadOptions(input: EngineOpenInput) {
-	return ResolveCodexPermissions(input, "app-server").pipe(
+	return ValidateEngineGlobalGuidance("codex", input.global_guidance).pipe(
+		Effect.andThen(ResolveCodexPermissions(input, "app-server")),
 		Effect.map((permissions) => ({
 			...(permissions.approval_policy === undefined
 				? {}
 				: { approvalPolicy: permissions.approval_policy }),
 			cwd: input.working_directory,
+			...(input.global_guidance === undefined
+				? {}
+				: { developerInstructions: input.global_guidance.content }),
 			...(input.model === undefined ? {} : { model: input.model }),
 			...(permissions.network_access === undefined
 				? {}

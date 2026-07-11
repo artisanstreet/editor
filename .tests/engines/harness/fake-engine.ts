@@ -92,6 +92,7 @@ function make_capabilities(
 		cancel: command_capability_state("cancel"),
 		close: command_capability_state("close"),
 		events: capability("supported"),
+		global_guidance: capability("supported"),
 		model_selection: capability("supported"),
 		native_tools: capability("unsupported", "The fake has no provider-native tools"),
 		probe: capability("supported"),

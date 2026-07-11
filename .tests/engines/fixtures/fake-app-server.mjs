@@ -313,6 +313,13 @@ function handle_request(request) {
 	}
 
 	if (request.method === "turn/start") {
+		if (process.env.FAKE_APP_SERVER_REQUEST_FILE) {
+			appendFileSync(
+				process.env.FAKE_APP_SERVER_REQUEST_FILE,
+				`${JSON.stringify({ method: request.method, params: request.params })}\n`,
+			);
+		}
+
 		active_turn_id = `turn-${received.length}`;
 
 		if (process.env.FAKE_APP_SERVER_SCENARIO === "turn-start-failure") {

@@ -16,6 +16,7 @@ import {
 	make_codex_engine_layer,
 	type EngineObservation,
 } from "@artisan/engines";
+import { make_codex_exec_engine } from "../../modules/engines/src/codex/codex-exec-engine";
 import { MakeCodexExecEventBuffer } from "../../modules/engines/src/codex/internal/codex-exec-event-buffer";
 import { WatchCodexExecTimeout } from "../../modules/engines/src/codex/internal/codex-exec-run";
 
@@ -684,6 +685,7 @@ describe("Codex exec fallback", () => {
 				capabilities: {
 					approval: { state: "unsupported" },
 					cancel: { state: "supported" },
+					global_guidance: { state: "unsupported" },
 					resume: { state: "unsupported" },
 					steer: { state: "unsupported" },
 				},
@@ -737,5 +739,49 @@ describe("Codex exec fallback", () => {
 		} finally {
 			await rm(directory, { force: true, recursive: true });
 		}
+	});
+
+	it("rejects runtime global guidance before any exec provider side effect", async () => {
+		let spawn_count = 0;
+		const engine = make_codex_exec_engine({
+			event_capacity: 16,
+			executable: "codex",
+			executable_args: [],
+			fallback_reason: "test fallback",
+			factory: {
+				Spawn: () => {
+					spawn_count += 1;
+					return Effect.die("spawned");
+				},
+			},
+			max_frame_bytes: 1_024,
+			max_stderr_bytes: 1_024,
+			max_stdout_bytes: 1_024,
+			timeout_ms: 1_000,
+			version_timeout_ms: 1_000,
+		});
+		const result = await Effect.runPromise(
+			Effect.scoped(
+				Effect.exit(
+					engine.Open({
+						_tag: "start",
+						artisan_run_id: "exec-guidance-reject",
+						global_guidance: {
+							content: "Do not pass this to argv.",
+							source_file: "C:\\workspace\\AGENTS.md",
+						},
+						initial_text: "User text stays separate.",
+						working_directory: "C:\\workspace",
+					}),
+				),
+			),
+		);
+
+		expect(Exit.isFailure(result)).toBe(true);
+		expect(failure_from(result)).toMatchObject({
+			_tag: "EngineUnsupportedOperationError",
+			operation: "global_guidance",
+		});
+		expect(spawn_count).toBe(0);
 	});
 });

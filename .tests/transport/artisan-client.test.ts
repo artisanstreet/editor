@@ -177,6 +177,101 @@ describe("ArtisanClient over MessagePorts", () => {
 		}
 	});
 
+	it("reads and mutates every global guidance operation", async () => {
+		const harness = await make_transport_test_harness();
+
+		try {
+			const initial = await Effect.runPromise(harness.client.GetGlobalGuidance);
+			const update = await Effect.runPromise(
+				harness.client.UpdateGlobalGuidance({
+					command_id: "guidance_update_1",
+					content: "Updated guidance\n",
+				}),
+			);
+			const selection = await Effect.runPromise(
+				harness.client.SelectGlobalGuidance({
+					command_id: "guidance_selection_1",
+					content_hash: "2".repeat(64),
+					provider: "claude",
+				}),
+			);
+			const drift = await Effect.runPromise(
+				harness.client.ResolveGlobalGuidanceDrift({
+					action: "ignore",
+					command_id: "guidance_drift_1",
+					observed_hash: "3".repeat(64),
+					provider: "codex",
+				}),
+			);
+			const retry = await Effect.runPromise(
+				harness.client.RetryGlobalGuidanceSync({
+					command_id: "guidance_retry_1",
+					provider: "codex",
+				}),
+			);
+			const conflict = await Effect.runPromise(
+				harness.client
+					.UpdateGlobalGuidance({
+						command_id: "guidance_update_1",
+						content: "Changed intent\n",
+					})
+					.pipe(Effect.flip),
+			);
+			const snapshot = harness.protocol_snapshot();
+
+			expect(initial.metadata.canonical.status).toBe("ready");
+			expect(update).toMatchObject({
+				command_id: "guidance_update_1",
+				status: "accepted",
+			});
+			expect(selection).toMatchObject({ status: "accepted" });
+			expect(drift).toMatchObject({ status: "accepted" });
+			expect(retry).toMatchObject({ status: "accepted" });
+			expect(conflict).toMatchObject({
+				code: "protocol",
+				protocol_code: "command.id_conflict",
+				retryable: false,
+			});
+			expect(snapshot.guidance_query_attempts).toHaveLength(1);
+			expect(snapshot.guidance_update_attempts).toHaveLength(2);
+			expect(snapshot.guidance_selection_attempts).toHaveLength(1);
+			expect(snapshot.guidance_drift_attempts).toHaveLength(1);
+			expect(snapshot.guidance_retry_attempts).toHaveLength(1);
+			expect(snapshot.guidance_snapshot.content).toBe("Updated guidance\n");
+		} finally {
+			await harness.dispose();
+		}
+	});
+
+	it("retries an exact guidance update after its durable receipt is lost", async () => {
+		const harness = await make_transport_test_harness({
+			client: { reconnect_delay_ms: 5 },
+			drop_first_command_receipt: true,
+		});
+
+		try {
+			const receipt = await Effect.runPromise(
+				harness.client.UpdateGlobalGuidance({
+					command_id: "guidance_retry_update_1",
+					content: "Retry guidance\n",
+				}),
+			);
+
+			await wait_for(() => harness.connector_snapshot().connections >= 2);
+
+			const attempts = harness.protocol_snapshot().guidance_update_attempts;
+
+			expect(receipt).toMatchObject({
+				command_id: "guidance_retry_update_1",
+				status: "duplicate",
+			});
+			expect(attempts).toHaveLength(2);
+			expect(attempts[1]).toEqual(attempts[0]);
+		} finally {
+			await harness.dispose();
+		}
+	});
+
 	it("delivers one ordered thread-list removal and omits erased threads from queries", async () => {
 		const harness = await make_transport_test_harness();
 

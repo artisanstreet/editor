@@ -141,7 +141,10 @@ const negotiate = (connection: ProtocolConnection, hello = make_hello()) =>
 	Effect.gen(function* () {
 		yield* connection.Receive(hello);
 
-		return yield* take_outbound(connection, 2);
+		return yield* connection.Outbound.pipe(
+			Stream.takeUntil((envelope) => envelope.kind === "replay.complete"),
+			Stream.runCollect,
+		);
 	});
 
 afterEach(async () => {
@@ -242,7 +245,7 @@ describe("protocol connection lifecycle", () => {
 			{
 				correlation_id: "query_reconnect",
 				kind: "thread.list.query.result",
-				payload: { journal_sequence: 0, threads: [] },
+				payload: { journal_sequence: 1, threads: [] },
 			},
 		]);
 	});

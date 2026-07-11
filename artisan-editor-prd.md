@@ -1193,6 +1193,78 @@ Precedence:
 If a provider has different precedence rules, the adapter should document the
 difference and expose it in the sync status/details.
 
+## Model Behaviour Settings
+
+Settings should include a first-class `Model Behaviour` tab for useful model and
+engine behavior that providers currently hide in config files, flags, or
+undocumented-looking advanced menus. Users should not need to know that Codex
+calls a value `model_auto_compact_token_limit`, where a TOML file lives, or which
+CLI flag controls the equivalent behavior.
+
+Product rules:
+
+- Expose one canonical Artisan control for one genuinely shared concept. Do not
+  render duplicate Codex, Claude, and future-provider versions of the same dial.
+- Start with high-value behavior such as automatic compaction trigger, default
+  reasoning/effort, response verbosity, and other stable options proven useful
+  across at least one supported engine. This is a curated product surface, not a
+  generated form for every provider config key.
+- Each setting row should show the icons of providers that support it. Support
+  states should distinguish `supported`, `experimental`, `runtime only`, and
+  `unsupported`; icons need accessible names and concise tooltips rather than
+  color-only meaning.
+- When two providers expose similarly named options with materially different
+  semantics, keep them in the same understandable group but do not pretend they
+  are equivalent. The adapter should explain the difference in compact details.
+- Show scope and activation timing beside the control: `global default`,
+  `current session`, `new threads`, `next turn`, `immediate`, or `restart
+required`. Existing runs must not silently change when a provider only reads
+  config at thread creation.
+- The Settings tab owns global defaults. The right session pane may expose a
+  temporary session override for a high-traffic control, but message bubbles
+  should remain free of persistent model configuration.
+- For token-valued controls, distinguish a trigger such as auto-compaction from
+  the model's maximum context capacity. Validate provider/model limits and show
+  units directly; never imply that raising a trigger increases context length.
+- If none of the installed/configured engines support a control, keep it
+  discoverable but disabled with a precise reason. Do not silently accept a
+  setting that no active engine can apply.
+
+Backend contract:
+
+- A versioned `ModelBehaviourCapability` registry should own the canonical
+  setting id, value schema, bounds, scope, activation timing, support state, and
+  provider mapping. The frontend renders this projection instead of hardcoding
+  provider options.
+- Engine adapters translate canonical values into native config keys, startup
+  fields, or runtime arguments. Raw provider names remain origin metadata and
+  inspectable details, not the primary API or UI vocabulary.
+- Global values are Artisan-owned source-of-truth settings. Where a provider
+  must read a global config file, Artisan may sync only the keys it owns while
+  preserving comments, formatting where practical, profiles, unknown keys, and
+  unrelated credentials.
+- Provider config must be parsed and written with a structured format-aware
+  implementation. Never patch TOML, JSON, or YAML with ad hoc string
+  replacement.
+- Before changing an existing provider value, create recoverable backup evidence
+  and expose the target path/key plus sync status. Detect later external drift
+  and offer `import`, `overwrite`, or `ignore` rather than entering a write war.
+- Version-gate mappings against the installed CLI. If an option disappeared or
+  changed shape, mark that provider mapping unavailable and leave its config
+  untouched.
+- Persist canonical settings, hashes, support metadata, and reconciliation
+  events. Never ingest an entire provider config into SQLite because nearby
+  fields may contain credentials or unrelated private configuration.
+- Applying a setting must be durable and idempotent. A lost receipt may retry the
+  exact operation without duplicate config writes, backups, or events; reusing
+  an operation id with a changed value is a conflict.
+
+The initial compaction control should expose the provider-neutral concept
+`auto-compaction trigger (tokens)`. For Codex, the adapter may map that to
+`model_auto_compact_token_limit` for newly started threads when the installed
+version supports it. The UI must describe it as the compaction trigger, not the
+context-window size.
+
 ## Marketplace
 
 Artisan should expose extension-style additions through a first-class
@@ -1769,6 +1841,12 @@ Right pane relationship:
 89. As a developer, I want the app icon, Dock/taskbar, or tray/menu-bar surface
     to show a subtle working indicator when agents are active, so that I can see
     Artisan is working even when the window is not focused.
+90. As a developer, I want a unified Model Behaviour settings tab for useful
+    provider options such as auto-compaction, so that I can tune model behavior
+    without editing config files or learning vendor-specific keys.
+91. As a developer, I want each behavior control to show which providers support
+    it and when it takes effect, so that a unified UI never hides meaningful
+    capability differences.
 
 ## Implementation Decisions
 
@@ -2167,6 +2245,16 @@ Right pane relationship:
 - First-run guidance tests should verify provider discovery, identical-value
   dedupe, multiple-value selection prompts, backup/recovery before overwrite,
   sync-back to supported providers, and later drift detection.
+- Model Behaviour tests should verify capability-driven provider badges,
+  canonical value validation, global versus session scope, activation timing,
+  CLI-version gating, and truthful unsupported/runtime-only states.
+- Provider-config reconciliation tests should round-trip real TOML/JSON/YAML
+  fixtures while preserving unknown keys and unrelated credentials, then prove
+  backup-before-write, drift import/overwrite/ignore, exact retry idempotency,
+  changed-intent conflict, and no secret-bearing config snapshots in SQLite.
+- Auto-compaction tests should verify token bounds, the distinction between a
+  compaction trigger and maximum context, Codex key mapping where supported, and
+  application to newly started rather than already-running threads.
 - Marketplace UI tests should verify category browsing, search, item detail
   pages, install/connect flows, global/workspace/project scopes, compatibility
   display, permissions, sync status, and uninstall/disconnect paths.
@@ -2429,3 +2517,49 @@ Right pane relationship:
   lifecycle events rather than fixed sleeps. Interrupted requests retain a
   bounded correlation tombstone until their late response is consumed; stale
   turn tests wait for both the replacement turn and stale completion.
+- 2026-07-11: Thread identity is a versioned durable projection. Automatic
+  refinements carry activity/metadata basis versions, stale refinements are
+  ignored, and a manual rename permanently protects the visible title unless
+  the user explicitly changes it again.
+- 2026-07-11: Retention erasure uses a durable claim, quiesces ordinary runs,
+  graph agents, and terminals behind dispatch fences, then tombstones the
+  thread. Historical ledger positions are preserved as content-free redacted
+  events so global and stream cursors remain contiguous without retaining
+  erased prompts, outputs, raw observations, or artifact metadata.
+- 2026-07-11: Codex transport selection is startup-only: use app-server when
+  its bounded probe succeeds, otherwise select `codex exec --json`. Never
+  downgrade after ambiguous app-server side effects. Both transports retain
+  exact raw frames and normalize through the same Engine contract.
+- 2026-07-11: Claude Code V1 uses one print-mode `stream-json` process per turn
+  with subscription-backed auth and native session resume. Unsupported
+  approval, question, steering, and subagent channels remain explicitly
+  unsupported rather than inferred from transcript text.
+- 2026-07-11: Windows CLI ownership uses one private kill-on-close Job Object
+  per Engine run. A waiting detached process host proves its identity over the
+  original IPC channel while its candidate process handle is held; only then
+  is it assigned and allowed to spawn the provider CLI. This removes PID-tree
+  discovery/reuse races and isolates concurrent agent process trees.
+- 2026-07-11: Shared engine process, JSONL framing, and event-buffer services
+  own bounded bytes, terminal-last sequencing, typed spawn failures,
+  cancellation, and cleanup across Codex and Claude. Missing resume text does
+  not fabricate an empty Claude user turn.
+- 2026-07-11: Thread retention policy is opinionated and small: enabled by
+  default at seven inactive days, configurable as one meaningful setting, and
+  pinned threads are exempt. Startup and periodic cleanup share the same
+  deterministic service path and durable restart recovery.
+- 2026-07-11: Settings gain a capability-driven `Model Behaviour` tab for a
+  curated set of hidden provider options. Canonical controls show provider
+  support icons, scope, and activation timing; adapters own versioned native
+  config/runtime mappings, structured writes, backups, and drift handling. The
+  first explicit control is the auto-compaction token trigger for new threads,
+  which must not be presented as model context capacity.
+- 2026-07-11: Canonical global guidance is implemented as an atomic file plus a
+  content-free SQLite projection and event stream. First-run provider values are
+  normalized and deduplicated, conflicting values require an exact user choice,
+  and the complete candidate set is revalidated before a choice can overwrite
+  provider mirrors. Canonical and provider writes use observed-hash conditional
+  replacement, preserve the exact raced value in backup, and never overwrite a
+  concurrently created target. Stale drift commands are fenced before side
+  effects, exact retries are independent of later canonical/provider changes,
+  and runtime-only guidance reaches Codex/Claude through a separate Engine field
+  without changing user or assignment text.

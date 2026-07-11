@@ -46,6 +46,7 @@ export const CodexEngineDescriptor: EngineDescriptor = {
 		cancel: { state: "supported" },
 		close: { state: "supported" },
 		events: { state: "supported" },
+		global_guidance: { state: "supported" },
 		model_selection: { state: "supported" },
 		native_tools: {
 			state: "experimental",

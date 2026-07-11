@@ -1,17 +1,29 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Deferred, Effect, Fiber, Layer, Ref, Stream } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { EventEnvelope } from "@artisan/protocol";
-import { make_backend_runtime, ProtocolServer, ThreadErasure } from "@artisan/backend";
+import {
+	make_backend_runtime,
+	make_guidance_provider_registry_layer,
+	ProtocolServer,
+	ThreadErasure,
+} from "@artisan/backend";
 import type { ThreadListUpdate } from "@artisan/transport";
 import { Database } from "../../modules/backend/src/persistence/database";
 import { JournalStore } from "../../modules/backend/src/persistence/journal-store";
-import { ThreadErasureClaims } from "../../modules/backend/src/persistence/schema";
+import {
+	GlobalGuidanceCanonical,
+	GlobalGuidanceProviderSync,
+	JournalCommands,
+	JournalEvents,
+	ThreadErasureClaims,
+} from "../../modules/backend/src/persistence/schema";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
 
 import {
@@ -50,6 +62,208 @@ afterEach(async () => {
 });
 
 describe("ArtisanClient with the backend ProtocolServer", () => {
+	it("queries and updates global guidance through real MessagePorts", async () => {
+		const database_path = await make_database_path();
+		const canonical_path = join(dirname(database_path), "guidance", "GLOBAL.md");
+		const runtime = make_backend_runtime({
+			database_path,
+			guidance: { canonical_path },
+			migrations_path,
+			runtime_metadata: make_metadata_layer({ value: "2026-07-10T18:00:00.000Z" }),
+		});
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const database = await runtime.runPromise(Database);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
+
+		try {
+			const initial = await Effect.runPromise(harness.client.GetGlobalGuidance);
+			const receipt = await Effect.runPromise(
+				harness.client.UpdateGlobalGuidance({
+					command_id: "real_guidance_update_1",
+					content: "Real transport guidance\n",
+				}),
+			);
+			const updated = await Effect.runPromise(harness.client.GetGlobalGuidance);
+			const canonical_file = await readFile(canonical_path, "utf8");
+			const metadata_rows = await Effect.runPromise(
+				Effect.gen(function* () {
+					const canonical = yield* database.client.select().from(GlobalGuidanceCanonical);
+					const providers = yield* database.client
+						.select()
+						.from(GlobalGuidanceProviderSync);
+					const commands = yield* database.client.select().from(JournalCommands);
+					const events = yield* database.client.select().from(JournalEvents);
+
+					return { canonical, commands, events, providers };
+				}),
+			);
+			const query_event_count = metadata_rows.events.length;
+			const queried = await Effect.runPromise(harness.client.GetGlobalGuidance);
+			const after_query_events = await Effect.runPromise(
+				database.client.select().from(JournalEvents),
+			);
+			const changed_content = await Effect.runPromise(
+				harness.client
+					.UpdateGlobalGuidance({
+						command_id: "real_guidance_update_1",
+						content: "Changed real transport guidance\n",
+					})
+					.pipe(Effect.flip),
+			);
+			const after_conflict = await Effect.runPromise(harness.client.GetGlobalGuidance);
+			const after_conflict_file = await readFile(canonical_path, "utf8");
+			const after_conflict_rows = await Effect.runPromise(
+				Effect.gen(function* () {
+					return {
+						canonical: yield* database.client.select().from(GlobalGuidanceCanonical),
+						commands: yield* database.client.select().from(JournalCommands),
+						events: yield* database.client.select().from(JournalEvents),
+					};
+				}),
+			);
+			const journal_rows = JSON.stringify({
+				commands: metadata_rows.commands,
+				events: metadata_rows.events,
+			});
+
+			expect(initial.content).toBe("");
+			expect(receipt).toMatchObject({
+				command_id: "real_guidance_update_1",
+				status: "accepted",
+			});
+			expect(updated.content).toBe("Real transport guidance\n");
+			expect(canonical_file).toBe("Real transport guidance\n");
+			expect(metadata_rows.canonical).toHaveLength(1);
+			expect(metadata_rows.canonical[0]).toMatchObject({
+				byte_count: Buffer.byteLength("Real transport guidance\n"),
+				content_hash: updated.metadata.canonical.content_hash,
+				status: "ready",
+			});
+			expect(metadata_rows.providers).toEqual([]);
+			expect(metadata_rows.commands).toHaveLength(2);
+			expect(metadata_rows.events).toHaveLength(2);
+			expect(metadata_rows.events.map((event) => event.stream_id)).toEqual([
+				"settings:guidance",
+				"settings:guidance",
+			]);
+			expect(journal_rows).toContain(updated.metadata.canonical.content_hash);
+			expect(journal_rows).not.toContain("Real transport guidance");
+			expect(queried).toEqual(updated);
+			expect(after_query_events).toHaveLength(query_event_count);
+			expect(changed_content).toMatchObject({
+				code: "protocol",
+				protocol_code: "command.id_conflict",
+				retryable: false,
+			});
+			expect(after_conflict).toEqual(updated);
+			expect(after_conflict_file).toBe(canonical_file);
+			expect(after_conflict_rows.commands).toHaveLength(metadata_rows.commands.length);
+			expect(after_conflict_rows.events).toHaveLength(metadata_rows.events.length);
+			expect(after_conflict_rows.canonical).toEqual(metadata_rows.canonical);
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
+	it("rejects a stale first-run source and accepts an exact provider candidate", async () => {
+		const database_path = await make_database_path();
+		const root = dirname(database_path);
+		const canonical_path = join(root, "guidance", "GLOBAL.md");
+		const codex_content = "Codex candidate guidance\n";
+		const claude_content = "Claude candidate guidance\n";
+		const candidate = (provider: "claude" | "codex", content: string, path: string) => ({
+			Discover: Effect.succeed({
+				_tag: "Present" as const,
+				content,
+				hash: createHash("sha256").update(content).digest("hex"),
+				modified_at: "2026-07-10T17:00:00.000Z",
+				path,
+			}),
+			mode: "native_file" as const,
+			provider,
+		});
+		const runtime = make_backend_runtime({
+			database_path,
+			guidance: { canonical_path },
+			guidance_provider_registry: make_guidance_provider_registry_layer([
+				candidate("codex", codex_content, join(root, "providers", "AGENTS.md")),
+				candidate("claude", claude_content, join(root, "providers", "CLAUDE.md")),
+			]),
+			migrations_path,
+			runtime_metadata: make_metadata_layer({ value: "2026-07-10T18:00:00.000Z" }),
+		});
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const database = await runtime.runPromise(Database);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
+
+		try {
+			const initial = await Effect.runPromise(harness.client.GetGlobalGuidance);
+			const before_conflict = await Effect.runPromise(
+				Effect.all({
+					canonical: database.client.select().from(GlobalGuidanceCanonical),
+					commands: database.client.select().from(JournalCommands),
+					events: database.client.select().from(JournalEvents),
+					providers: database.client.select().from(GlobalGuidanceProviderSync),
+				}),
+			);
+			const stale = await Effect.runPromise(
+				harness.client
+					.SelectGlobalGuidance({
+						command_id: "stale_guidance_selection",
+						content_hash: "f".repeat(64),
+						provider: "codex",
+					})
+					.pipe(Effect.flip),
+			);
+			const after_conflict = await Effect.runPromise(
+				Effect.all({
+					canonical: database.client.select().from(GlobalGuidanceCanonical),
+					commands: database.client.select().from(JournalCommands),
+					events: database.client.select().from(JournalEvents),
+					providers: database.client.select().from(GlobalGuidanceProviderSync),
+				}),
+			);
+			const codex_candidate = initial.candidates.find(
+				({ provider }) => provider === "codex",
+			)!;
+			const accepted = await Effect.runPromise(
+				harness.client.SelectGlobalGuidance({
+					command_id: "valid_guidance_selection",
+					content_hash: codex_candidate.content_hash,
+					provider: "codex",
+				}),
+			);
+			const selected = await Effect.runPromise(harness.client.GetGlobalGuidance);
+			const persisted = await Effect.runPromise(
+				Effect.all({
+					canonical: database.client.select().from(GlobalGuidanceCanonical),
+					commands: database.client.select().from(JournalCommands),
+					events: database.client.select().from(JournalEvents),
+					providers: database.client.select().from(GlobalGuidanceProviderSync),
+				}),
+			);
+			const persisted_json = JSON.stringify(persisted);
+
+			expect(initial.metadata.canonical.status).toBe("selection_required");
+			expect(initial.candidates).toHaveLength(2);
+			expect(stale).toMatchObject({
+				code: "protocol",
+				protocol_code: "guidance.conflict",
+				retryable: false,
+			});
+			expect(after_conflict).toEqual(before_conflict);
+			expect(accepted.status).toBe("accepted");
+			expect(selected.content).toBe(codex_content);
+			expect(await readFile(canonical_path, "utf8")).toBe(codex_content);
+			expect(persisted_json).not.toContain(codex_content.trim());
+			expect(persisted_json).not.toContain(claude_content.trim());
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
 	it("replays an interleaved journal through real MessagePorts without resurrecting erased content", async () => {
 		const database_path = await make_database_path();
 		const now = { value: "2026-07-10T18:00:00.000Z" };
@@ -78,6 +292,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 						const initial_snapshot = yield* Deferred.make<void>();
 						const reconnect_snapshot = yield* Deferred.make<void>();
 						const removal_delivered = yield* Deferred.make<void>();
+						const guidance_delivered = yield* Deferred.make<void>();
 						const replayed_kept_event = yield* Deferred.make<void>();
 						const updates = yield* Ref.make<ReadonlyArray<ThreadListUpdate>>([]);
 						const events = yield* Ref.make<ReadonlyArray<EventEnvelope>>([]);
@@ -120,13 +335,26 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 								Effect.gen(function* () {
 									yield* Ref.update(events, (current) => [...current, event]);
 
-									if (event.journal_sequence === 6) {
+									if (event.payload.type === "guidance.canonical.updated") {
+										yield* Deferred.succeed(guidance_delivered, undefined).pipe(
+											Effect.asVoid,
+										);
+									}
+
+									if (
+										event.payload.type === "thread.erased" &&
+										event.thread_id === "thread_erased"
+									) {
 										yield* Deferred.succeed(erasure_delivered, undefined).pipe(
 											Effect.asVoid,
 										);
 									}
 
-									if (event.journal_sequence === 7) {
+									if (
+										event.payload.type === "thread.message_queued" &&
+										event.thread_id === "thread_kept" &&
+										event.payload.text === "Surviving later event"
+									) {
 										yield* Deferred.succeed(
 											replayed_kept_event,
 											undefined,
@@ -138,6 +366,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 							Effect.forkScoped,
 						);
 
+						yield* Deferred.await(guidance_delivered);
 						yield* Deferred.await(initial_snapshot);
 
 						yield* harness.client.Command({
@@ -241,7 +470,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 					Effect.gen(function* () {
 						const events = current_replay_harness.client.Events;
 						const replay_fiber = yield* events.pipe(
-							Stream.take(7),
+							Stream.take(8),
 							Stream.runCollect,
 							Effect.forkScoped,
 						);
@@ -262,11 +491,20 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			);
 			const serialized_replay = JSON.stringify(replayed_events);
 
-			expect(output.events.map((event) => event.journal_sequence)).toEqual([
-				1, 2, 3, 4, 5, 6, 7,
+			expect(output.events[0]).toMatchObject({
+				journal_sequence: 1,
+				payload: { type: "guidance.canonical.updated" },
+				stream_id: "settings:guidance",
+				thread_id: "settings/guidance",
+			});
+			expect(output.events[0]?.payload).not.toHaveProperty("content");
+			expect(output.events.slice(1).map((event) => event.journal_sequence)).toEqual([
+				2, 3, 4, 5, 6, 7, 8,
 			]);
-			expect(output.events.map((event) => event.sequence)).toEqual([1, 1, 2, 2, 3, 4, 3]);
-			expect(output.events.map((event) => event.thread_id)).toEqual([
+			expect(output.events.slice(1).map((event) => event.sequence)).toEqual([
+				1, 1, 2, 2, 3, 4, 3,
+			]);
+			expect(output.events.slice(1).map((event) => event.thread_id)).toEqual([
 				"thread_erased",
 				"thread_kept",
 				"thread_erased",
@@ -287,7 +525,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			);
 			expect(removal_index).toBeGreaterThan(0);
 			expect(output.updates[removal_index]).toMatchObject({
-				journal_sequence: 6,
+				journal_sequence: 7,
 				thread_id: "thread_erased",
 				type: "remove",
 			});
@@ -305,10 +543,11 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			);
 			expect(output.cursors).toEqual({
 				event_cursors: [
+					{ sequence: 1, stream_id: "settings:guidance" },
 					{ sequence: 4, stream_id: "thread:thread_erased" },
 					{ sequence: 3, stream_id: "thread:thread_kept" },
 				],
-				last_journal_sequence: 7,
+				last_journal_sequence: 8,
 			});
 			expect(serialized_replay).not.toContain("Secret erased title");
 			expect(serialized_replay).not.toContain("Private erased message body");

@@ -1,4 +1,4 @@
-import { Context, Deferred, Effect, Exit, Layer, Ref, Scope, Stream } from "effect";
+import { Context, Deferred, Effect, Exit, Layer, Option, Ref, Scope, Stream } from "effect";
 
 import { EngineRegistry, type EngineCommand, type EngineRun } from "@artisan/engines";
 import type { CommandEnvelope } from "@artisan/protocol";
@@ -9,6 +9,7 @@ import {
 	type OrchestrationError,
 	type PendingWork,
 } from "../persistence/orchestration-repository";
+import { GlobalGuidanceService } from "../guidance/guidance-service";
 import { MakeThreadDispatchFence } from "../threads/internal/thread-dispatch-fence";
 
 interface LiveRun {
@@ -36,6 +37,7 @@ export const AgentOrchestratorLive = Layer.effect(
 	AgentOrchestrator,
 	Effect.gen(function* () {
 		const engines = yield* EngineRegistry;
+		const guidance = yield* GlobalGuidanceService;
 		const repository = yield* OrchestrationRepository;
 		const service_scope = yield* Scope.make();
 		const live_runs = yield* Ref.make(new Map<string, LiveRun>());
@@ -129,11 +131,28 @@ export const AgentOrchestratorLive = Layer.effect(
 					return;
 				}
 
+				const resolved_guidance = yield* guidance
+					.ResolveForEngine(work.engine_id)
+					.pipe(Effect.exit);
+
+				if (
+					Exit.isFailure(resolved_guidance) ||
+					(Option.isSome(resolved_guidance.value) &&
+						engine.Descriptor.capabilities.global_guidance.state === "unsupported")
+				) {
+					yield* MarkStartFailure(work);
+
+					return;
+				}
+
 				const run_scope = yield* Scope.make();
 				const run = yield* engine
 					.Open({
 						_tag: "start",
 						artisan_run_id: work.run_id,
+						...(Option.isSome(resolved_guidance.value)
+							? { global_guidance: resolved_guidance.value.value }
+							: {}),
 						initial_text: work.payload.text,
 						working_directory: work.working_directory,
 					})

@@ -20,6 +20,7 @@ function make_engine(id: string): Engine {
 				cancel: { state: "unsupported" },
 				close: { state: "unsupported" },
 				events: { state: "unsupported" },
+				global_guidance: { state: "unsupported" },
 				model_selection: { state: "unsupported" },
 				native_tools: { state: "unsupported" },
 				probe: { state: "unsupported" },

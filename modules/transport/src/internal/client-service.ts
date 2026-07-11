@@ -2,6 +2,11 @@ import { Cause, Effect, Layer, Option, Queue, Ref, Stream } from "effect";
 
 import {
 	type CommandEnvelope,
+	type GlobalGuidanceDriftResolutionEnvelope,
+	type GlobalGuidanceQueryEnvelope,
+	type GlobalGuidanceRetryEnvelope,
+	type GlobalGuidanceSelectionEnvelope,
+	type GlobalGuidanceUpdateEnvelope,
 	type OrchestrationGraphQueryEnvelope,
 	type TerminalListQueryEnvelope,
 	type ThreadListQueryEnvelope,
@@ -12,6 +17,10 @@ import {
 
 import {
 	ArtisanClient,
+	type ArtisanGlobalGuidanceDriftInput,
+	type ArtisanGlobalGuidanceRetryInput,
+	type ArtisanGlobalGuidanceSelectionInput,
+	type ArtisanGlobalGuidanceUpdateInput,
 	type ArtisanClientError,
 	type ArtisanClientOptions,
 	type ArtisanCommandInput,
@@ -186,6 +195,107 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					: yield* Effect.die("thread retention response narrowed incorrectly");
 			});
 
+			const get_global_guidance = Effect.gen(function* () {
+				const trace = yield* connection.MakeTrace;
+				const envelope: GlobalGuidanceQueryEnvelope = {
+					...trace,
+					kind: "guidance.query",
+					payload: {},
+				};
+				const result = yield* requests.Request(envelope, "guidance.query.result");
+
+				return result.kind === "guidance.query.result"
+					? result.payload
+					: yield* Effect.die("global guidance response narrowed incorrectly");
+			});
+
+			type GuidanceMutationEnvelope =
+				| GlobalGuidanceDriftResolutionEnvelope
+				| GlobalGuidanceRetryEnvelope
+				| GlobalGuidanceSelectionEnvelope
+				| GlobalGuidanceUpdateEnvelope;
+			const send_guidance_mutation = (envelope: GuidanceMutationEnvelope) =>
+				Effect.gen(function* () {
+					const result = yield* requests.Request(envelope, "command.receipt");
+
+					if (result.kind !== "command.receipt") {
+						return yield* Effect.die("global guidance receipt narrowed incorrectly");
+					}
+
+					if (result.payload.status === "rejected") {
+						return yield* Effect.fail(
+							client_error(
+								"protocol",
+								result.payload.error.message,
+								result.payload.error,
+								result.payload.error.retryable,
+								result.payload.error.code,
+							),
+						);
+					}
+
+					return {
+						command_id: envelope.message_id,
+						journal_sequence: result.payload.journal_sequence,
+						status: result.payload.status,
+					} satisfies ArtisanCommandReceipt;
+				});
+			const update_global_guidance = (input: ArtisanGlobalGuidanceUpdateInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: GlobalGuidanceUpdateEnvelope = {
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "guidance.update",
+						payload: { content: input.content },
+					};
+
+					return yield* send_guidance_mutation(envelope);
+				});
+			const select_global_guidance = (input: ArtisanGlobalGuidanceSelectionInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: GlobalGuidanceSelectionEnvelope = {
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "guidance.selection",
+						payload: {
+							content_hash: input.content_hash,
+							provider: input.provider,
+						},
+					};
+
+					return yield* send_guidance_mutation(envelope);
+				});
+			const resolve_global_guidance_drift = (input: ArtisanGlobalGuidanceDriftInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: GlobalGuidanceDriftResolutionEnvelope = {
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "guidance.drift.resolve",
+						payload: {
+							action: input.action,
+							observed_hash: input.observed_hash,
+							provider: input.provider,
+						},
+					};
+
+					return yield* send_guidance_mutation(envelope);
+				});
+			const retry_global_guidance_sync = (input: ArtisanGlobalGuidanceRetryInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: GlobalGuidanceRetryEnvelope = {
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "guidance.sync.retry",
+						payload: { provider: input.provider },
+					};
+
+					return yield* send_guidance_mutation(envelope);
+				});
+
 			const update_thread_retention_policy = (input: ArtisanThreadRetentionUpdateInput) =>
 				Effect.gen(function* () {
 					const trace = yield* connection.MakeTrace;
@@ -279,14 +389,19 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				Errors: Stream.fromQueue(errors),
 				Events: subscriptions.Events,
 				GetOrchestrationGraph: get_orchestration_graph,
+				GetGlobalGuidance: get_global_guidance,
 				GetThreadRetentionPolicy: get_thread_retention_policy,
 				GetThreadWork: get_thread_work,
 				ListTerminals: list_terminals,
 				ListThreads: list_threads,
 				OpenAsset: (asset_id) => streams.Open(`asset:${asset_id}`),
 				OpenTerminalOutput: (terminal_id) => streams.Open(`terminal:${terminal_id}`),
+				ResolveGlobalGuidanceDrift: resolve_global_guidance_drift,
+				RetryGlobalGuidanceSync: retry_global_guidance_sync,
+				SelectGlobalGuidance: select_global_guidance,
 				SubscribeOrchestrationGraph: subscriptions.SubscribeOrchestrationGraph,
 				SubscribeThreadList: subscriptions.SubscribeThreadList,
+				UpdateGlobalGuidance: update_global_guidance,
 				UpdateThreadRetentionPolicy: update_thread_retention_policy,
 			};
 		}),

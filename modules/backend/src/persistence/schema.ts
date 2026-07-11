@@ -88,6 +88,32 @@ export const ThreadRetentionPolicies = sqliteTable("thread_retention_policies", 
 	updated_at: text("updated_at").notNull(),
 });
 
+/** Stores only content-free metadata for the one canonical global guidance file. */
+export const GlobalGuidanceCanonical = sqliteTable("global_guidance_canonical", {
+	canonical_id: integer("canonical_id").primaryKey(),
+	content_hash: text("content_hash"),
+	byte_count: integer("byte_count"),
+	status: text("status").notNull(),
+	selected_provider: text("selected_provider"),
+	updated_at: text("updated_at").notNull(),
+});
+
+/** Stores metadata-only reconciliation state for each native provider mirror. */
+export const GlobalGuidanceProviderSync = sqliteTable("global_guidance_provider_sync", {
+	provider: text("provider").primaryKey(),
+	status: text("status").notNull(),
+	path: text("path"),
+	modified_at: text("modified_at"),
+	observed_hash: text("observed_hash"),
+	observed_byte_count: integer("observed_byte_count"),
+	applied_hash: text("applied_hash"),
+	applied_byte_count: integer("applied_byte_count"),
+	ignored_drift_hash: text("ignored_drift_hash"),
+	backup_path: text("backup_path"),
+	last_error_code: text("last_error_code"),
+	updated_at: text("updated_at").notNull(),
+});
+
 export const ThreadErasureClaims = sqliteTable("thread_erasure_claims", {
 	thread_id: text("thread_id").primaryKey(),
 	claimed_at: text("claimed_at").notNull(),
