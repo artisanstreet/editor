@@ -102,7 +102,7 @@ flowchart TB
     AiderCli["Aider"]
     Shell["Shell processes"]
     Git["Git"]
-    Browser["Browser/WebView previews"]
+    Browser["User's external browser"]
     FileSystem["Workspace filesystem"]
   end
 
@@ -596,7 +596,8 @@ actions where Artisan needs direct visibility, user trust, or consistent UI:
 - Start, read, write to, restart, and stop terminals.
 - Read and write workspace files when Artisan wants first-class diff tracking.
 - Query git status and diffs.
-- Open or inspect local previews.
+- Open local previews in the user's external browser and inspect their backend
+  health/metadata without embedding the page in Artisan.
 - Request approval for risky actions.
 - Record a native engine action when the engine used something Artisan does not
   directly control.
@@ -869,6 +870,33 @@ Security and privacy rules:
 - Avoid sending cookies or user browser credentials.
 - Cap response size and never execute page scripts.
 - Preserve the original URL even when metadata resolution fails.
+
+## External Browser Policy
+
+Artisan Editor must never ship an integrated browser, WebView, browser tab, or
+embedded page-preview surface. Electron's Chromium runtime exists only to render
+the Artisan application UI; it is not a general-purpose browser bundled into the
+product experience.
+
+Reasons:
+
+- Embedded browsers add substantial memory use and interaction lag.
+- WebView and app-level scaling frequently diverge from the user's real browser.
+- The user's extensions, profiles, cookies, developer tooling, accessibility
+  configuration, and browser preferences are absent or incomplete.
+- Maintaining a second browser surface creates security and compatibility work
+  that does not improve Artisan's core coding workflows.
+
+Preview behavior:
+
+- Opening a local web preview launches the user's configured external browser.
+- Artisan may own preview-server lifecycle, port discovery, health, logs, and
+  URL state, but it does not render the page.
+- Browser inspection or automation must use an explicit external-browser
+  connector/session and remain attributable; it must not silently create an
+  embedded browser.
+- File, Markdown, image, diff, and code previews may still render as native
+  Artisan editor surfaces because they are not general web browsing.
 
 ## Thread Retention Policy
 
@@ -1700,7 +1728,8 @@ Right pane relationship:
 34. As a developer, I want engine-owned tools to still be logged in normalized
     form, so that provider-native behavior can be reviewed consistently.
 35. As a developer, I want Artisan-owned tools to be directly controllable by the
-    app, so that files, terminals, git, and browser previews can be reliable.
+    app, so that files, terminals, git, and external-browser preview launches can
+    be reliable.
 36. As a developer, I want one session ledger to drive the panes, so that chat,
     tabs, changed files, terminals, and git state agree with each other.
 37. As a developer, I want durable project planning notes, so that brainstorming
@@ -2021,7 +2050,7 @@ Right pane relationship:
   the backend with caching, timeouts, redirect limits, response-size limits, and
   no browser credentials.
 - The main pane should be the user's active workspace for chat, editor, diff,
-  and preview states.
+  and native file-preview states. Web application previews open externally.
 - Monaco is the intended editor foundation.
 - SvelteKit is the intended frontend foundation.
 - Vite+ is the intended scaffold and project maintenance tool for SvelteKit,
@@ -2317,6 +2346,9 @@ Right pane relationship:
 - Building a Pi-style generic multi-provider model runtime as the v1 core.
 - Executing page scripts or using browser credentials when resolving link
   metadata.
+- Shipping an integrated browser, WebView, embedded browser tab, or in-app web
+  application preview. Local web previews always open in the user's external
+  browser.
 - Auto-deleting pinned threads.
 - Auto-moving manually project-locked threads.
 - Silently overwriting provider guidance/config without visible sync status.
@@ -2504,6 +2536,10 @@ Right pane relationship:
   Favicon bytes are magic-checked, content-addressed, and retained behind a
   bounded backend asset store; local preview targets use a separate explicit
   localhost registry.
+- 2026-07-11: Integrated browsing was rejected permanently. Artisan may own
+  preview servers, URLs, health, and attributable automation, but local web
+  previews open in the user's configured external browser so their extensions,
+  profile, scaling, and native performance remain intact.
 - 2026-07-10: Multi-agent orchestration now uses a durable graph of groups,
   agent identities, assignments, monotonic run attempts, dependency edges,
   joins, artifacts, and exact raw observations. Dispatch is bounded per group;
