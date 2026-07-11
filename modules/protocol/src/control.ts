@@ -45,9 +45,18 @@ import {
 	GlobalGuidanceSnapshot,
 	GlobalGuidanceUpdateRequest,
 } from "./guidance";
+import {
+	ModelBehaviourDriftResolutionRequest,
+	ModelBehaviourProviderReconciledEvent,
+	ModelBehaviourRetryRequest,
+	ModelBehaviourSettingUpdatedEvent,
+	ModelBehaviourSnapshot,
+	ModelBehaviourUpdateRequest,
+} from "./model-behaviour";
 
 export * from "./thread";
 export * from "./guidance";
+export * from "./model-behaviour";
 
 const FrontendTraceMetadata = {
 	message_id: Identifier,
@@ -850,6 +859,8 @@ export const EventPayload = Schema.Union([
 	GlobalGuidanceCanonicalUpdatedEvent,
 	GlobalGuidanceSelectionRequiredEvent,
 	GlobalGuidanceProviderReconciledEvent,
+	ModelBehaviourSettingUpdatedEvent,
+	ModelBehaviourProviderReconciledEvent,
 	ThreadMessageQueuedEvent,
 	ThreadMessageSteeringEvent,
 	RunLifecycleEvent,
@@ -1012,6 +1023,53 @@ export const GlobalGuidanceRetryEnvelope = Schema.Struct({
 });
 
 export type GlobalGuidanceRetryEnvelope = typeof GlobalGuidanceRetryEnvelope.Type;
+
+/** Requests the curated Model Behaviour registry and current reconciliation state. */
+export const ModelBehaviourQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("model_behaviour.query"),
+	payload: Schema.Struct({}),
+});
+
+export type ModelBehaviourQueryEnvelope = typeof ModelBehaviourQueryEnvelope.Type;
+
+/** Returns canonical controls and content-free provider reconciliation metadata. */
+export const ModelBehaviourQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("model_behaviour.query.result"),
+	payload: ModelBehaviourSnapshot,
+});
+
+export type ModelBehaviourQueryResultEnvelope = typeof ModelBehaviourQueryResultEnvelope.Type;
+
+/** Replaces one canonical global model behavior and reconciles capable providers. */
+export const ModelBehaviourUpdateEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("model_behaviour.update"),
+	payload: ModelBehaviourUpdateRequest,
+});
+
+export type ModelBehaviourUpdateEnvelope = typeof ModelBehaviourUpdateEnvelope.Type;
+
+/** Resolves one exact provider-native drift observation. */
+export const ModelBehaviourDriftResolutionEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("model_behaviour.drift.resolve"),
+	payload: ModelBehaviourDriftResolutionRequest,
+});
+
+export type ModelBehaviourDriftResolutionEnvelope =
+	typeof ModelBehaviourDriftResolutionEnvelope.Type;
+
+/** Retries one provider mapping without changing the canonical setting. */
+export const ModelBehaviourRetryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("model_behaviour.sync.retry"),
+	payload: ModelBehaviourRetryRequest,
+});
+
+export type ModelBehaviourRetryEnvelope = typeof ModelBehaviourRetryEnvelope.Type;
 
 /** Describes the durable work state coordinated for one thread. */
 export const ThreadWorkItem = Schema.Struct({
@@ -1279,6 +1337,10 @@ export const InboundControlEnvelope = Schema.Union([
 	GlobalGuidanceSelectionEnvelope,
 	GlobalGuidanceDriftResolutionEnvelope,
 	GlobalGuidanceRetryEnvelope,
+	ModelBehaviourQueryEnvelope,
+	ModelBehaviourUpdateEnvelope,
+	ModelBehaviourDriftResolutionEnvelope,
+	ModelBehaviourRetryEnvelope,
 	ThreadWorkQueryEnvelope,
 	TerminalListQueryEnvelope,
 	OrchestrationGraphQueryEnvelope,
@@ -1301,6 +1363,7 @@ export const OutboundControlEnvelope = Schema.Union([
 	ThreadListQueryResultEnvelope,
 	ThreadRetentionQueryResultEnvelope,
 	GlobalGuidanceQueryResultEnvelope,
+	ModelBehaviourQueryResultEnvelope,
 	ThreadWorkQueryResultEnvelope,
 	TerminalListQueryResultEnvelope,
 	OrchestrationGraphQueryResultEnvelope,
