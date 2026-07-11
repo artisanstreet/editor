@@ -1,3 +1,4 @@
+import { promises as fs } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
@@ -10,7 +11,15 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { EventEnvelope } from "@artisan/protocol";
 import {
 	make_backend_runtime,
+	make_codex_auto_compaction_mapping,
+	make_codex_model_behaviour_provider,
 	make_guidance_provider_registry_layer,
+	make_inactive_model_behaviour_provider,
+	make_model_behaviour_config_files_layer,
+	make_model_behaviour_provider_registry_layer,
+	make_unsupported_auto_compaction_mapping,
+	ModelBehaviourConfigFiles,
+	ModelBehaviourService,
 	ProtocolServer,
 	ThreadErasure,
 } from "@artisan/backend";
@@ -22,6 +31,8 @@ import {
 	GlobalGuidanceProviderSync,
 	JournalCommands,
 	JournalEvents,
+	ModelBehaviourProviderStates,
+	ModelBehaviourSettings,
 	ThreadErasureClaims,
 } from "../../modules/backend/src/persistence/schema";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
@@ -62,6 +73,243 @@ afterEach(async () => {
 });
 
 describe("ArtisanClient with the backend ProtocolServer", () => {
+	it("reconciles Model Behaviour through real MessagePorts without persisting config content", async () => {
+		const database_path = await make_database_path();
+		const root = dirname(database_path);
+		const config_path = join(root, "codex home", "config.toml");
+		const files = await Effect.runPromise(
+			Effect.service(ModelBehaviourConfigFiles).pipe(
+				Effect.provide(make_model_behaviour_config_files_layer()),
+			),
+		);
+		const codex_mapping = make_codex_auto_compaction_mapping({
+			installed_version: "0.142.5",
+			mapping_available: true,
+		});
+		const registry = make_model_behaviour_provider_registry_layer([
+			make_codex_model_behaviour_provider({
+				backups_directory: join(root, "model-behaviour", "backups"),
+				files,
+				mapping: codex_mapping,
+				target_path: config_path,
+			}),
+			make_inactive_model_behaviour_provider(
+				make_unsupported_auto_compaction_mapping(
+					"claude",
+					"Claude Code has no equivalent supported mapping.",
+				),
+			),
+		]);
+		const runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			model_behaviour_provider_registry: registry,
+			runtime_metadata: make_metadata_layer({ value: "2026-07-10T18:00:00.000Z" }),
+		});
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const database = await runtime.runPromise(Database);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
+		const original = '# retained\napi_key = "secret-never-in-sqlite"\n';
+
+		try {
+			await fs.mkdir(dirname(config_path), { recursive: true });
+			await fs.writeFile(config_path, original, "utf8");
+
+			const initial = await Effect.runPromise(harness.client.GetModelBehaviour);
+			const accepted = await Effect.runPromise(
+				harness.client.UpdateModelBehaviour({
+					command_id: "real_model_behaviour_update",
+					setting_id: "auto_compaction_trigger_tokens",
+					value: { type: "integer", value: 250_000 },
+				}),
+			);
+			const duplicate = await Effect.runPromise(
+				harness.client.UpdateModelBehaviour({
+					command_id: "real_model_behaviour_update",
+					setting_id: "auto_compaction_trigger_tokens",
+					value: { type: "integer", value: 250_000 },
+				}),
+			);
+			const changed_intent = await Effect.runPromise(
+				harness.client
+					.UpdateModelBehaviour({
+						command_id: "real_model_behaviour_update",
+						setting_id: "auto_compaction_trigger_tokens",
+						value: { type: "integer", value: 300_000 },
+					})
+					.pipe(Effect.flip),
+			);
+			const updated = await Effect.runPromise(harness.client.GetModelBehaviour);
+			const updated_content = await readFile(config_path, "utf8");
+
+			await fs.writeFile(
+				config_path,
+				`${updated_content.replace("250000", "300000")}external = true\n`,
+				"utf8",
+			);
+			const drifted = await Effect.runPromise(harness.client.GetModelBehaviour);
+			const codex_drift = drifted.providers.find(
+				({ provider_id }) => provider_id === "codex",
+			)!;
+			const ignored = await Effect.runPromise(
+				harness.client.ResolveModelBehaviourDrift({
+					action: "ignore",
+					command_id: "real_model_behaviour_ignore",
+					observed_hash: codex_drift.observed_hash!,
+					provider_id: "codex",
+					setting_id: "auto_compaction_trigger_tokens",
+				}),
+			);
+			const ignored_snapshot = await Effect.runPromise(harness.client.GetModelBehaviour);
+			const persisted = await Effect.runPromise(
+				Effect.all({
+					commands: database.client.select().from(JournalCommands),
+					events: database.client.select().from(JournalEvents),
+					providers: database.client.select().from(ModelBehaviourProviderStates),
+					settings: database.client.select().from(ModelBehaviourSettings),
+				}),
+			);
+			const persisted_json = JSON.stringify(persisted);
+
+			expect(initial.settings[0]!.value).toEqual({ type: "provider_default" });
+			expect(accepted.status).toBe("accepted");
+			expect(duplicate).toMatchObject({
+				journal_sequence: accepted.journal_sequence,
+				status: "duplicate",
+			});
+			expect(changed_intent).toMatchObject({
+				code: "protocol",
+				protocol_code: "command.id_conflict",
+				retryable: false,
+			});
+			expect(updated.settings[0]!.value).toEqual({ type: "integer", value: 250_000 });
+			expect(updated_content).toContain('api_key = "secret-never-in-sqlite"');
+			expect(updated_content).toContain("model_auto_compact_token_limit = 250000");
+			expect(codex_drift.status).toBe("drift_detected");
+			expect(ignored.status).toBe("accepted");
+			expect(
+				ignored_snapshot.providers.find(({ provider_id }) => provider_id === "codex")!
+					.status,
+			).toBe("drift_ignored");
+			expect(persisted_json).not.toContain("secret-never-in-sqlite");
+			expect(persisted.settings).toHaveLength(1);
+			expect(persisted.providers).toHaveLength(2);
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
+	it("replays offline Model Behaviour events once and in order after reconnect", async () => {
+		const database_path = await make_database_path();
+		const root = dirname(database_path);
+		const config_path = join(root, "codex home", "config.toml");
+		const files = await Effect.runPromise(
+			Effect.service(ModelBehaviourConfigFiles).pipe(
+				Effect.provide(make_model_behaviour_config_files_layer()),
+			),
+		);
+		const codex_mapping = make_codex_auto_compaction_mapping({
+			installed_version: "0.142.5",
+			mapping_available: true,
+		});
+		const registry = make_model_behaviour_provider_registry_layer([
+			make_codex_model_behaviour_provider({
+				backups_directory: join(root, "model-behaviour", "backups"),
+				files,
+				mapping: codex_mapping,
+				target_path: config_path,
+			}),
+			make_inactive_model_behaviour_provider(
+				make_unsupported_auto_compaction_mapping(
+					"claude",
+					"Claude Code has no equivalent supported mapping.",
+				),
+			),
+		]);
+		const runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			model_behaviour_provider_registry: registry,
+			runtime_metadata: make_metadata_layer({ value: "2026-07-10T18:30:00.000Z" }),
+		});
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const service = await runtime.runPromise(ModelBehaviourService);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server, {
+			client: { reconnect_delay_ms: 100 },
+		});
+
+		try {
+			const initial_events = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const fiber = yield* harness.client.Events.pipe(
+							Stream.filter((event) =>
+								event.payload.type.startsWith("model_behaviour."),
+							),
+							Stream.take(2),
+							Stream.runCollect,
+							Effect.forkScoped,
+						);
+
+						yield* harness.client.GetModelBehaviour;
+
+						return yield* Fiber.join(fiber);
+					}),
+				),
+			);
+			const replayed = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const fiber = yield* harness.client.Events.pipe(
+							Stream.filter((event) =>
+								event.payload.type.startsWith("model_behaviour."),
+							),
+							Stream.take(3),
+							Stream.runCollect,
+							Effect.forkScoped,
+						);
+
+						yield* Effect.sync(harness.close_current_connection);
+						yield* service.Update({
+							message_id: "offline_model_behaviour_update",
+							origin: "frontend",
+							sent_at: "2026-07-10T18:30:00.000Z",
+							setting_id: "auto_compaction_trigger_tokens",
+							value: { type: "integer", value: 250_000 },
+						});
+						yield* Effect.promise(() =>
+							wait_for(() => harness.connector_snapshot().connections >= 2),
+						);
+
+						return yield* Fiber.join(fiber);
+					}),
+				),
+			);
+			const initial = Array.from(initial_events);
+			const events = Array.from(replayed);
+
+			expect(initial.map((event) => event.payload.type)).toEqual([
+				"model_behaviour.provider.reconciled",
+				"model_behaviour.provider.reconciled",
+			]);
+			expect(events.map((event) => event.payload.type)).toEqual([
+				"model_behaviour.setting.updated",
+				"model_behaviour.provider.reconciled",
+				"model_behaviour.provider.reconciled",
+			]);
+			expect(events.map((event) => event.journal_sequence)).toEqual(
+				[...events]
+					.map((event) => event.journal_sequence)
+					.sort((left, right) => left - right),
+			);
+			expect(new Set(events.map((event) => event.message_id)).size).toBe(3);
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
 	it("queries and updates global guidance through real MessagePorts", async () => {
 		const database_path = await make_database_path();
 		const canonical_path = join(dirname(database_path), "guidance", "GLOBAL.md");
