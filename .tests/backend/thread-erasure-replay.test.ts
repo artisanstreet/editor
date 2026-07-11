@@ -26,6 +26,8 @@ import {
 	JournalCommands,
 	JournalEvents,
 	ThreadErasureClaims,
+	WorkspaceChangeOperations,
+	WorkspaceChanges,
 } from "../../modules/backend/src/persistence/schema";
 import { ThreadReadModel } from "../../modules/backend/src/persistence/thread-read-model";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
@@ -229,6 +231,45 @@ describe("thread erasure replay", () => {
 							thread_id: "thread_erased",
 						});
 						const erased_artifact = yield* take_outbound(live, 2);
+						const content_identity = JSON.stringify({
+							algorithm: "sha256",
+							byte_count: 1,
+							content_hash: "a".repeat(64),
+						});
+
+						yield* database.client.insert(WorkspaceChangeOperations).values({
+							action: "replace",
+							agent_id: "secret_workspace_agent",
+							change_id: "secret_workspace_change",
+							created_at: now.value,
+							expected_identity_json: content_identity,
+							lifecycle: "committed",
+							message_id: "secret_workspace_command",
+							path: "secret.ts",
+							request_fingerprint: "b".repeat(64),
+							result_identity_json: content_identity,
+							run_id: "secret_workspace_run",
+							sent_at: now.value,
+							thread_id: "thread_erased",
+							updated_at: now.value,
+							workspace_id: "secret_workspace",
+						});
+						yield* database.client.insert(WorkspaceChanges).values({
+							after_identity_json: content_identity,
+							agent_id: "secret_workspace_agent",
+							before_identity_json: content_identity,
+							change_id: "secret_workspace_change",
+							created_at: now.value,
+							path: "secret.ts",
+							review_state: "needs_review",
+							rollback_state: "available",
+							run_id: "secret_workspace_run",
+							source_command_id: "secret_workspace_command",
+							thread_id: "thread_erased",
+							updated_at: now.value,
+							version: 1,
+							workspace_id: "secret_workspace",
+						});
 
 						yield* database.client.insert(ThreadErasureClaims).values({
 							claimed_at: "2026-07-10T18:04:00.000Z",
@@ -290,6 +331,12 @@ describe("thread erasure replay", () => {
 							repeated,
 							streams: yield* database.client.select().from(EventStreams),
 							thread_snapshot: yield* threads.Snapshot(),
+							workspace_change_operations: yield* database.client
+								.select()
+								.from(WorkspaceChangeOperations),
+							workspace_changes: yield* database.client
+								.select()
+								.from(WorkspaceChanges),
 						};
 					}),
 				),
@@ -429,6 +476,8 @@ describe("thread erasure replay", () => {
 			expect(
 				result.journal_events.filter((event) => event.thread_id === "thread_erased"),
 			).toHaveLength(4);
+			expect(result.workspace_change_operations).toEqual([]);
+			expect(result.workspace_changes).toEqual([]);
 		} finally {
 			await runtime.dispose();
 		}

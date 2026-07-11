@@ -185,6 +185,69 @@ export const ModelBehaviourProviderStates = sqliteTable(
 	(table) => [primaryKey({ columns: [table.provider_id, table.setting_id] })],
 );
 
+/** Stores idempotent, content-free workspace change operation lifecycles. */
+export const WorkspaceChangeOperations = sqliteTable(
+	"workspace_change_operations",
+	{
+		message_id: text("message_id").primaryKey(),
+		action: text("action").notNull(),
+		request_fingerprint: text("request_fingerprint").notNull(),
+		change_id: text("change_id").notNull(),
+		thread_id: text("thread_id").notNull(),
+		run_id: text("run_id"),
+		agent_id: text("agent_id"),
+		raw_origin_json: text("raw_origin_json"),
+		workspace_id: text("workspace_id"),
+		path: text("path"),
+		expected_identity_json: text("expected_identity_json"),
+		result_identity_json: text("result_identity_json"),
+		lifecycle: text("lifecycle").notNull(),
+		evidence_recorded: integer("evidence_recorded", { mode: "boolean" })
+			.notNull()
+			.default(false),
+		journal_sequence: integer("journal_sequence"),
+		sent_at: text("sent_at").notNull(),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("workspace_change_operations_change_action_unique").on(
+			table.change_id,
+			table.action,
+		),
+		index("workspace_change_operations_change_id_index").on(table.change_id),
+	],
+);
+
+/** Stores durable, source-free workspace change projections. */
+export const WorkspaceChanges = sqliteTable(
+	"workspace_changes",
+	{
+		change_id: text("change_id").primaryKey(),
+		source_command_id: text("source_command_id").notNull(),
+		thread_id: text("thread_id").notNull(),
+		workspace_id: text("workspace_id").notNull(),
+		path: text("path").notNull(),
+		before_identity_json: text("before_identity_json").notNull(),
+		after_identity_json: text("after_identity_json").notNull(),
+		run_id: text("run_id").notNull(),
+		agent_id: text("agent_id").notNull(),
+		raw_origin_json: text("raw_origin_json"),
+		review_state: text("review_state").notNull(),
+		rollback_state: text("rollback_state").notNull(),
+		reviewed_at: text("reviewed_at"),
+		rolled_back_at: text("rolled_back_at"),
+		version: integer("version").notNull(),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("workspace_changes_source_command_unique").on(table.source_command_id),
+		index("workspace_changes_thread_id_index").on(table.thread_id),
+		index("workspace_changes_thread_workspace_index").on(table.thread_id, table.workspace_id),
+	],
+);
+
 export const ThreadErasureClaims = sqliteTable("thread_erasure_claims", {
 	thread_id: text("thread_id").primaryKey(),
 	claimed_at: text("claimed_at").notNull(),
