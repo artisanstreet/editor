@@ -360,6 +360,7 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 				switch (envelope.kind) {
 					case "command.receipt":
 					case "guidance.query.result":
+					case "model_behaviour.query.result":
 					case "orchestration.graph.query.result":
 					case "terminal.list.query.result":
 					case "thread.list.query.result":

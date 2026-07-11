@@ -17,6 +17,11 @@ import {
 	type HeartbeatPongEnvelope,
 	type HelloEnvelope,
 	type InboundControlEnvelope,
+	type ModelBehaviourDriftResolutionEnvelope,
+	type ModelBehaviourQueryEnvelope,
+	type ModelBehaviourRetryEnvelope,
+	type ModelBehaviourSnapshot,
+	type ModelBehaviourUpdateEnvelope,
 	type OrchestrationGraph,
 	type OutboundControlEnvelope,
 	type StreamCursor,
@@ -39,6 +44,11 @@ interface StoredRetentionUpdate {
 }
 
 interface StoredGuidanceMutation {
+	readonly fingerprint: string;
+	readonly journal_sequence: number;
+}
+
+interface StoredModelBehaviourMutation {
 	readonly fingerprint: string;
 	readonly journal_sequence: number;
 }
@@ -84,6 +94,11 @@ export interface FakeProtocolSnapshot {
 	readonly guidance_selection_attempts: ReadonlyArray<GlobalGuidanceSelectionEnvelope>;
 	readonly guidance_snapshot: GlobalGuidanceSnapshot;
 	readonly guidance_update_attempts: ReadonlyArray<GlobalGuidanceUpdateEnvelope>;
+	readonly model_behaviour_drift_attempts: ReadonlyArray<ModelBehaviourDriftResolutionEnvelope>;
+	readonly model_behaviour_query_attempts: ReadonlyArray<ModelBehaviourQueryEnvelope>;
+	readonly model_behaviour_retry_attempts: ReadonlyArray<ModelBehaviourRetryEnvelope>;
+	readonly model_behaviour_snapshot: ModelBehaviourSnapshot;
+	readonly model_behaviour_update_attempts: ReadonlyArray<ModelBehaviourUpdateEnvelope>;
 	readonly subscriptions: ReadonlyArray<SubscribeEnvelope>;
 }
 
@@ -133,6 +148,11 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 	const guidance_retry_attempts: Array<GlobalGuidanceRetryEnvelope> = [];
 	const guidance_selection_attempts: Array<GlobalGuidanceSelectionEnvelope> = [];
 	const guidance_update_attempts: Array<GlobalGuidanceUpdateEnvelope> = [];
+	const model_behaviour_mutations = new Map<string, StoredModelBehaviourMutation>();
+	const model_behaviour_drift_attempts: Array<ModelBehaviourDriftResolutionEnvelope> = [];
+	const model_behaviour_query_attempts: Array<ModelBehaviourQueryEnvelope> = [];
+	const model_behaviour_retry_attempts: Array<ModelBehaviourRetryEnvelope> = [];
+	const model_behaviour_update_attempts: Array<ModelBehaviourUpdateEnvelope> = [];
 	const subscription_attempts: Array<SubscribeEnvelope> = [];
 	const threads = new Map<string, ThreadListItem>();
 	let retention_policy: ThreadRetentionPolicy = { enabled: true, inactivity_days: 7 };
@@ -168,6 +188,63 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 				},
 			],
 		},
+	};
+	let model_behaviour_snapshot: ModelBehaviourSnapshot = {
+		capabilities: [
+			{
+				control: {
+					kind: "integer",
+					maximum: 2_000_000,
+					minimum: 16_384,
+					step: 128,
+					unit: "tokens",
+				},
+				description:
+					"Token threshold that triggers automatic history compaction; this does not change model context capacity.",
+				display_name: "Auto-compaction trigger",
+				provider_support: [
+					{
+						activation_timing: "new_threads",
+						details: "Codex reads this global value when a thread starts.",
+						native_key: "model_auto_compact_token_limit",
+						provider_id: "codex",
+						state: "supported",
+					},
+					{
+						activation_timing: "new_threads",
+						details: "Claude Code has no equivalent supported mapping.",
+						provider_id: "claude",
+						state: "unsupported",
+					},
+				],
+				scope: "global_default",
+				setting_id: "auto_compaction_trigger_tokens",
+			},
+		],
+		providers: [
+			{
+				native_key: "model_auto_compact_token_limit",
+				provider_id: "codex",
+				setting_id: "auto_compaction_trigger_tokens",
+				status: "provider_default",
+				updated_at: "1970-01-01T00:00:00.000Z",
+			},
+			{
+				provider_id: "claude",
+				setting_id: "auto_compaction_trigger_tokens",
+				status: "unsupported",
+				updated_at: "1970-01-01T00:00:00.000Z",
+			},
+		],
+		registry_version: 1,
+		settings: [
+			{
+				setting_id: "auto_compaction_trigger_tokens",
+				updated_at: "1970-01-01T00:00:00.000Z",
+				value: { type: "provider_default" },
+				version: 0,
+			},
+		],
 	};
 
 	const next_id = (prefix: string) => {
@@ -660,7 +737,10 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 					guidance_retry_attempts.push(mutation);
 				}
 
-				const fingerprint = JSON.stringify(mutation);
+				const fingerprint = JSON.stringify({
+					kind: mutation.kind,
+					payload: mutation.payload,
+				});
 				const previous = guidance_mutations.get(mutation.message_id);
 
 				if (previous && previous.fingerprint !== fingerprint) {
@@ -760,6 +840,151 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 					(connection) => connection.deliver_event(event),
 					{ discard: true },
 				);
+			});
+
+		const handle_model_behaviour_query = (query: ModelBehaviourQueryEnvelope) =>
+			Effect.gen(function* () {
+				model_behaviour_query_attempts.push(query);
+
+				yield* enqueue({
+					...backend_trace(),
+					correlation_id: query.message_id,
+					kind: "model_behaviour.query.result",
+					payload: model_behaviour_snapshot,
+				});
+			});
+
+		const handle_model_behaviour_mutation = (
+			mutation:
+				| ModelBehaviourDriftResolutionEnvelope
+				| ModelBehaviourRetryEnvelope
+				| ModelBehaviourUpdateEnvelope,
+		) =>
+			Effect.gen(function* () {
+				if (mutation.kind === "model_behaviour.update") {
+					model_behaviour_update_attempts.push(mutation);
+				} else if (mutation.kind === "model_behaviour.drift.resolve") {
+					model_behaviour_drift_attempts.push(mutation);
+				} else {
+					model_behaviour_retry_attempts.push(mutation);
+				}
+
+				const fingerprint = JSON.stringify(mutation);
+				const previous = model_behaviour_mutations.get(mutation.message_id);
+
+				if (previous && previous.fingerprint !== fingerprint) {
+					yield* enqueue({
+						...backend_trace(),
+						causation_id: mutation.message_id,
+						correlation_id: mutation.message_id,
+						kind: "command.receipt",
+						payload: {
+							error: {
+								code: "command.id_conflict",
+								message: "The command id was reused with different content.",
+								retryable: false,
+							},
+							status: "rejected",
+						},
+						thread_id: "settings/model-behaviour",
+					});
+
+					return;
+				}
+
+				if (previous) {
+					yield* enqueue({
+						...backend_trace(),
+						causation_id: mutation.message_id,
+						correlation_id: mutation.message_id,
+						kind: "command.receipt",
+						payload: {
+							journal_sequence: previous.journal_sequence,
+							status: "duplicate",
+						},
+						thread_id: "settings/model-behaviour",
+					});
+
+					return;
+				}
+
+				const journal_sequence = events.length + model_behaviour_mutations.size + 1;
+				const updated_at = now();
+
+				if (mutation.kind === "model_behaviour.update") {
+					const [setting] = model_behaviour_snapshot.settings;
+					const applied_hash = createHash("sha256")
+						.update(JSON.stringify(mutation.payload.value))
+						.digest("hex");
+
+					if (setting) {
+						model_behaviour_snapshot = {
+							...model_behaviour_snapshot,
+							providers: model_behaviour_snapshot.providers.map((provider) =>
+								provider.provider_id === "codex" &&
+								provider.setting_id === mutation.payload.setting_id
+									? {
+											...provider,
+											applied_hash,
+											observed_hash: applied_hash,
+											status:
+												mutation.payload.value.type === "provider_default"
+													? ("provider_default" as const)
+													: ("synced" as const),
+											updated_at,
+										}
+									: provider,
+							),
+							settings: [
+								{
+									...setting,
+									updated_at,
+									value: mutation.payload.value,
+									version: setting.version + 1,
+								},
+							],
+						};
+					}
+				} else {
+					const is_drift_resolution = mutation.kind === "model_behaviour.drift.resolve";
+					const observed_hash = is_drift_resolution
+						? mutation.payload.observed_hash
+						: undefined;
+					const provider_status =
+						is_drift_resolution && mutation.payload.action === "ignore"
+							? ("drift_ignored" as const)
+							: ("synced" as const);
+					const providers = model_behaviour_snapshot.providers.map((provider) =>
+						provider.provider_id === mutation.payload.provider_id &&
+						provider.setting_id === mutation.payload.setting_id
+							? {
+									...provider,
+									...(observed_hash === undefined ? {} : { observed_hash }),
+									...(provider_status === "drift_ignored" &&
+									observed_hash !== undefined
+										? { ignored_drift_hash: observed_hash }
+										: {}),
+									status: provider_status,
+									updated_at,
+								}
+							: provider,
+					);
+
+					model_behaviour_snapshot = { ...model_behaviour_snapshot, providers };
+				}
+
+				model_behaviour_mutations.set(mutation.message_id, {
+					fingerprint,
+					journal_sequence,
+				});
+				yield* enqueue({
+					...backend_trace(),
+					causation_id: mutation.message_id,
+					correlation_id: mutation.message_id,
+					kind: "command.receipt",
+					payload: { journal_sequence, status: "accepted" },
+					thread_id: "settings/model-behaviour",
+				});
 			});
 
 		const handle_subscribe = (subscribe: SubscribeEnvelope) =>
@@ -892,6 +1117,16 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 						yield* handle_guidance_mutation(input);
 
 						return;
+					case "model_behaviour.query":
+						yield* handle_model_behaviour_query(input);
+
+						return;
+					case "model_behaviour.update":
+					case "model_behaviour.drift.resolve":
+					case "model_behaviour.sync.retry":
+						yield* handle_model_behaviour_mutation(input);
+
+						return;
 					case "thread.work.query":
 						yield* enqueue({
 							...backend_trace(),
@@ -1018,6 +1253,16 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 		guidance_selection_attempts: [...guidance_selection_attempts],
 		guidance_snapshot,
 		guidance_update_attempts: [...guidance_update_attempts],
+		model_behaviour_drift_attempts: [...model_behaviour_drift_attempts],
+		model_behaviour_query_attempts: [...model_behaviour_query_attempts],
+		model_behaviour_retry_attempts: [...model_behaviour_retry_attempts],
+		model_behaviour_snapshot: {
+			...model_behaviour_snapshot,
+			capabilities: [...model_behaviour_snapshot.capabilities],
+			providers: [...model_behaviour_snapshot.providers],
+			settings: [...model_behaviour_snapshot.settings],
+		},
+		model_behaviour_update_attempts: [...model_behaviour_update_attempts],
 		subscriptions: [...subscription_attempts],
 	});
 

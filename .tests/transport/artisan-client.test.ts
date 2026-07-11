@@ -272,6 +272,101 @@ describe("ArtisanClient over MessagePorts", () => {
 		}
 	});
 
+	it("reads and mutates every Model Behaviour operation", async () => {
+		const harness = await make_transport_test_harness();
+
+		try {
+			const initial = await Effect.runPromise(harness.client.GetModelBehaviour);
+			const update = await Effect.runPromise(
+				harness.client.UpdateModelBehaviour({
+					command_id: "model_behaviour_update_1",
+					setting_id: "auto_compaction_trigger_tokens",
+					value: { type: "integer", value: 250_000 },
+				}),
+			);
+			const drift = await Effect.runPromise(
+				harness.client.ResolveModelBehaviourDrift({
+					action: "ignore",
+					command_id: "model_behaviour_drift_1",
+					observed_hash: "3".repeat(64),
+					provider_id: "codex",
+					setting_id: "auto_compaction_trigger_tokens",
+				}),
+			);
+			const retry = await Effect.runPromise(
+				harness.client.RetryModelBehaviourSync({
+					command_id: "model_behaviour_retry_1",
+					provider_id: "codex",
+					setting_id: "auto_compaction_trigger_tokens",
+				}),
+			);
+			const conflict = await Effect.runPromise(
+				harness.client
+					.UpdateModelBehaviour({
+						command_id: "model_behaviour_update_1",
+						setting_id: "auto_compaction_trigger_tokens",
+						value: { type: "integer", value: 300_000 },
+					})
+					.pipe(Effect.flip),
+			);
+			const current = await Effect.runPromise(harness.client.GetModelBehaviour);
+			const snapshot = harness.protocol_snapshot();
+
+			expect(initial.settings[0]!.value).toEqual({ type: "provider_default" });
+			expect(update).toMatchObject({
+				command_id: "model_behaviour_update_1",
+				status: "accepted",
+			});
+			expect(drift).toMatchObject({ status: "accepted" });
+			expect(retry).toMatchObject({ status: "accepted" });
+			expect(conflict).toMatchObject({
+				code: "protocol",
+				protocol_code: "command.id_conflict",
+				retryable: false,
+			});
+			expect(current.settings[0]!.value).toEqual({ type: "integer", value: 250_000 });
+			expect(snapshot.model_behaviour_query_attempts).toHaveLength(2);
+			expect(snapshot.model_behaviour_update_attempts).toHaveLength(2);
+			expect(snapshot.model_behaviour_drift_attempts).toHaveLength(1);
+			expect(snapshot.model_behaviour_retry_attempts).toHaveLength(1);
+			expect(JSON.stringify(snapshot.model_behaviour_snapshot)).not.toContain(
+				"config.toml =",
+			);
+		} finally {
+			await harness.dispose();
+		}
+	});
+
+	it("retries an exact Model Behaviour update after its durable receipt is lost", async () => {
+		const harness = await make_transport_test_harness({
+			client: { reconnect_delay_ms: 5 },
+			drop_first_command_receipt: true,
+		});
+
+		try {
+			const receipt = await Effect.runPromise(
+				harness.client.UpdateModelBehaviour({
+					command_id: "model_behaviour_retry_update_1",
+					setting_id: "auto_compaction_trigger_tokens",
+					value: { type: "integer", value: 250_000 },
+				}),
+			);
+
+			await wait_for(() => harness.connector_snapshot().connections >= 2);
+
+			const attempts = harness.protocol_snapshot().model_behaviour_update_attempts;
+
+			expect(receipt).toMatchObject({
+				command_id: "model_behaviour_retry_update_1",
+				status: "duplicate",
+			});
+			expect(attempts).toHaveLength(2);
+			expect(attempts[1]).toEqual(attempts[0]);
+		} finally {
+			await harness.dispose();
+		}
+	});
+
 	it("delivers one ordered thread-list removal and omits erased threads from queries", async () => {
 		const harness = await make_transport_test_harness();
 

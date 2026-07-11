@@ -7,6 +7,10 @@ import {
 	type GlobalGuidanceRetryEnvelope,
 	type GlobalGuidanceSelectionEnvelope,
 	type GlobalGuidanceUpdateEnvelope,
+	type ModelBehaviourDriftResolutionEnvelope,
+	type ModelBehaviourQueryEnvelope,
+	type ModelBehaviourRetryEnvelope,
+	type ModelBehaviourUpdateEnvelope,
 	type OrchestrationGraphQueryEnvelope,
 	type TerminalListQueryEnvelope,
 	type ThreadListQueryEnvelope,
@@ -21,6 +25,9 @@ import {
 	type ArtisanGlobalGuidanceRetryInput,
 	type ArtisanGlobalGuidanceSelectionInput,
 	type ArtisanGlobalGuidanceUpdateInput,
+	type ArtisanModelBehaviourDriftInput,
+	type ArtisanModelBehaviourRetryInput,
+	type ArtisanModelBehaviourUpdateInput,
 	type ArtisanClientError,
 	type ArtisanClientOptions,
 	type ArtisanCommandInput,
@@ -296,6 +303,98 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					return yield* send_guidance_mutation(envelope);
 				});
 
+			const get_model_behaviour = Effect.gen(function* () {
+				const trace = yield* connection.MakeTrace;
+				const envelope: ModelBehaviourQueryEnvelope = {
+					...trace,
+					kind: "model_behaviour.query",
+					payload: {},
+				};
+				const result = yield* requests.Request(envelope, "model_behaviour.query.result");
+
+				return result.kind === "model_behaviour.query.result"
+					? result.payload
+					: yield* Effect.die("Model Behaviour response narrowed incorrectly");
+			});
+
+			type ModelBehaviourMutationEnvelope =
+				| ModelBehaviourDriftResolutionEnvelope
+				| ModelBehaviourRetryEnvelope
+				| ModelBehaviourUpdateEnvelope;
+			const send_model_behaviour_mutation = (envelope: ModelBehaviourMutationEnvelope) =>
+				Effect.gen(function* () {
+					const result = yield* requests.Request(envelope, "command.receipt");
+
+					if (result.kind !== "command.receipt") {
+						return yield* Effect.die("Model Behaviour receipt narrowed incorrectly");
+					}
+
+					if (result.payload.status === "rejected") {
+						return yield* Effect.fail(
+							client_error(
+								"protocol",
+								result.payload.error.message,
+								result.payload.error,
+								result.payload.error.retryable,
+								result.payload.error.code,
+							),
+						);
+					}
+
+					return {
+						command_id: envelope.message_id,
+						journal_sequence: result.payload.journal_sequence,
+						status: result.payload.status,
+					} satisfies ArtisanCommandReceipt;
+				});
+			const update_model_behaviour = (input: ArtisanModelBehaviourUpdateInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ModelBehaviourUpdateEnvelope = {
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "model_behaviour.update",
+						payload: {
+							setting_id: input.setting_id,
+							value: input.value,
+						},
+					};
+
+					return yield* send_model_behaviour_mutation(envelope);
+				});
+			const resolve_model_behaviour_drift = (input: ArtisanModelBehaviourDriftInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ModelBehaviourDriftResolutionEnvelope = {
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "model_behaviour.drift.resolve",
+						payload: {
+							action: input.action,
+							observed_hash: input.observed_hash,
+							provider_id: input.provider_id,
+							setting_id: input.setting_id,
+						},
+					};
+
+					return yield* send_model_behaviour_mutation(envelope);
+				});
+			const retry_model_behaviour_sync = (input: ArtisanModelBehaviourRetryInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ModelBehaviourRetryEnvelope = {
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "model_behaviour.sync.retry",
+						payload: {
+							provider_id: input.provider_id,
+							setting_id: input.setting_id,
+						},
+					};
+
+					return yield* send_model_behaviour_mutation(envelope);
+				});
+
 			const update_thread_retention_policy = (input: ArtisanThreadRetentionUpdateInput) =>
 				Effect.gen(function* () {
 					const trace = yield* connection.MakeTrace;
@@ -390,6 +489,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				Events: subscriptions.Events,
 				GetOrchestrationGraph: get_orchestration_graph,
 				GetGlobalGuidance: get_global_guidance,
+				GetModelBehaviour: get_model_behaviour,
 				GetThreadRetentionPolicy: get_thread_retention_policy,
 				GetThreadWork: get_thread_work,
 				ListTerminals: list_terminals,
@@ -397,11 +497,14 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				OpenAsset: (asset_id) => streams.Open(`asset:${asset_id}`),
 				OpenTerminalOutput: (terminal_id) => streams.Open(`terminal:${terminal_id}`),
 				ResolveGlobalGuidanceDrift: resolve_global_guidance_drift,
+				ResolveModelBehaviourDrift: resolve_model_behaviour_drift,
 				RetryGlobalGuidanceSync: retry_global_guidance_sync,
+				RetryModelBehaviourSync: retry_model_behaviour_sync,
 				SelectGlobalGuidance: select_global_guidance,
 				SubscribeOrchestrationGraph: subscriptions.SubscribeOrchestrationGraph,
 				SubscribeThreadList: subscriptions.SubscribeThreadList,
 				UpdateGlobalGuidance: update_global_guidance,
+				UpdateModelBehaviour: update_model_behaviour,
 				UpdateThreadRetentionPolicy: update_thread_retention_policy,
 			};
 		}),

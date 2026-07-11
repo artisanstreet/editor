@@ -51,6 +51,10 @@ export type PendingRequestEnvelope = Extract<
 			| "guidance.selection"
 			| "guidance.sync.retry"
 			| "guidance.update"
+			| "model_behaviour.drift.resolve"
+			| "model_behaviour.query"
+			| "model_behaviour.sync.retry"
+			| "model_behaviour.update"
 			| "orchestration.graph.query"
 			| "terminal.list.query"
 			| "thread.list.query"
@@ -67,6 +71,7 @@ export type PendingResultEnvelope = Extract<
 		readonly kind:
 			| "command.receipt"
 			| "guidance.query.result"
+			| "model_behaviour.query.result"
 			| "orchestration.graph.query.result"
 			| "terminal.list.query.result"
 			| "thread.list.query.result"

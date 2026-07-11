@@ -7,6 +7,10 @@ import type {
 	GlobalGuidanceProvider,
 	GlobalGuidanceSelectionRequest,
 	GlobalGuidanceSnapshot,
+	ModelBehaviourDriftResolutionRequest,
+	ModelBehaviourRetryRequest,
+	ModelBehaviourSnapshot,
+	ModelBehaviourUpdateRequest,
 	OrchestrationGraph,
 	StreamCursor,
 	TerminalSession,
@@ -85,6 +89,21 @@ export interface ArtisanGlobalGuidanceRetryInput {
 	readonly provider: GlobalGuidanceProvider;
 }
 
+/** Supplies one canonical Model Behaviour update and optional durable retry identity. */
+export interface ArtisanModelBehaviourUpdateInput extends ModelBehaviourUpdateRequest {
+	readonly command_id?: string;
+}
+
+/** Resolves one exact provider drift observation without exposing native config content. */
+export interface ArtisanModelBehaviourDriftInput extends ModelBehaviourDriftResolutionRequest {
+	readonly command_id?: string;
+}
+
+/** Retries one fixed provider mapping through the canonical control. */
+export interface ArtisanModelBehaviourRetryInput extends ModelBehaviourRetryRequest {
+	readonly command_id?: string;
+}
+
 /** Exposes the last event positions applied before an ACK or reconnect hello. */
 export interface ArtisanClientCursors {
 	readonly event_cursors: ReadonlyArray<StreamCursor>;
@@ -151,6 +170,7 @@ export class ArtisanClient extends Context.Service<
 			group_id: string,
 		) => Effect.Effect<OrchestrationGraph, ArtisanClientError>;
 		readonly GetGlobalGuidance: Effect.Effect<GlobalGuidanceSnapshot, ArtisanClientError>;
+		readonly GetModelBehaviour: Effect.Effect<ModelBehaviourSnapshot, ArtisanClientError>;
 		readonly GetThreadRetentionPolicy: Effect.Effect<ThreadRetentionPolicy, ArtisanClientError>;
 		readonly GetThreadWork: (
 			thread_id: string,
@@ -189,14 +209,23 @@ export class ArtisanClient extends Context.Service<
 		readonly ResolveGlobalGuidanceDrift: (
 			input: ArtisanGlobalGuidanceDriftInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly ResolveModelBehaviourDrift: (
+			input: ArtisanModelBehaviourDriftInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly RetryGlobalGuidanceSync: (
 			input: ArtisanGlobalGuidanceRetryInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RetryModelBehaviourSync: (
+			input: ArtisanModelBehaviourRetryInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly SelectGlobalGuidance: (
 			input: ArtisanGlobalGuidanceSelectionInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly UpdateGlobalGuidance: (
 			input: ArtisanGlobalGuidanceUpdateInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly UpdateModelBehaviour: (
+			input: ArtisanModelBehaviourUpdateInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly UpdateThreadRetentionPolicy: (
 			input: ArtisanThreadRetentionUpdateInput,
