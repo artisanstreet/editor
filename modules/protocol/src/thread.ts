@@ -40,7 +40,10 @@ export const ProjectAffinityEvidenceKind = Schema.Literals([
 	"active_working_directory",
 	"file_artifact",
 	"file_mutation",
+	"git_branch",
+	"git_diff",
 	"git_root",
+	"git_worktree",
 	"historical_working_directory",
 	"process_owner",
 	"project_mention",
@@ -208,6 +211,7 @@ export const ThreadMetadataUpdatedEvent = Schema.Struct({
 		"restore",
 		"unpin",
 	]),
+	mentioned_projects: Schema.optional(Schema.Array(ProjectRef)),
 	thread: ThreadListItem,
 	type: Schema.Literal("thread.metadata.updated"),
 });

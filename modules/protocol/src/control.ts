@@ -23,6 +23,7 @@ import {
 	ThreadMetadataRefineCommand,
 	ThreadMetadataUpdatedEvent,
 	ThreadPinCommand,
+	ProjectRef,
 	ThreadProjectAffinityIgnoredEvent,
 	ThreadProjectAffinityUpdatedEvent,
 	ThreadProjectAssignCommand,
@@ -94,6 +95,7 @@ const EnvironmentVariableName = Schema.String.check(
 export const ThreadSendMessageCommand = Schema.Struct({
 	type: Schema.Literal("thread.send_message"),
 	engine_id: Identifier,
+	mentioned_projects: Schema.optional(Schema.Array(ProjectRef)),
 	text: Schema.NonEmptyString,
 	working_directory: Schema.NonEmptyString,
 });
@@ -523,6 +525,7 @@ export type CommandReceiptEnvelope = typeof CommandReceiptEnvelope.Type;
 export const ThreadMessageQueuedEvent = Schema.Struct({
 	type: Schema.Literal("thread.message_queued"),
 	message_id: Identifier,
+	mentioned_projects: Schema.optional(Schema.Array(ProjectRef)),
 	reason: Schema.Literals(["no_active_run", "steering_rejected", "unsupported"]),
 	text: Schema.NonEmptyString,
 	working_directory: Schema.NonEmptyString,
@@ -532,6 +535,7 @@ export const ThreadMessageQueuedEvent = Schema.Struct({
 export const ThreadMessageSteeringEvent = Schema.Struct({
 	type: Schema.Literal("thread.message_steering"),
 	message_id: Identifier,
+	mentioned_projects: Schema.optional(Schema.Array(ProjectRef)),
 	text: Schema.NonEmptyString,
 	working_directory: Schema.NonEmptyString,
 });
@@ -577,6 +581,31 @@ export const QuestionInteractionEvent = Schema.Struct({
 	question_id: Identifier,
 	state: Schema.Literals(["requested", "resolved"]),
 	text: Schema.NonEmptyString,
+});
+
+/** Records an attributed filesystem mutation without retaining file content. */
+export const FilesystemMutationEvent = Schema.Struct({
+	destination_path: Schema.optional(Schema.NonEmptyString),
+	operation: Schema.Literals(["create", "write", "delete", "rename"]),
+	path: Schema.NonEmptyString,
+	type: Schema.Literal("filesystem.mutation"),
+});
+
+/** Records the workspace that owns an observed process without process output. */
+export const ProcessOwnershipEvent = Schema.Struct({
+	source: Schema.Literals(["engine", "terminal", "artisan_tool", "git"]),
+	type: Schema.Literal("process.ownership"),
+	working_directory: Schema.NonEmptyString,
+});
+
+/** Records content-free Git workspace state that contributes to project affinity. */
+export const GitWorkspaceObservedEvent = Schema.Struct({
+	branch: Schema.optional(Schema.NonEmptyString),
+	changed_file_count: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+	has_diff: Schema.Boolean,
+	root_path: Schema.NonEmptyString,
+	type: Schema.Literal("git.workspace.observed"),
+	worktree_path: Schema.NonEmptyString,
 });
 
 /** Describes durable metadata for a terminal session. */
@@ -867,6 +896,9 @@ export const EventPayload = Schema.Union([
 	AssistantMessageCompletedEvent,
 	ApprovalInteractionEvent,
 	QuestionInteractionEvent,
+	FilesystemMutationEvent,
+	ProcessOwnershipEvent,
+	GitWorkspaceObservedEvent,
 	TerminalLifecycleEvent,
 	OrchestrationGraphLifecycleEvent,
 	AssignmentHeartbeatEvent,
