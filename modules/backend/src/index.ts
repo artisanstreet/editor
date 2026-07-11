@@ -39,6 +39,58 @@ export {
 	ThreadResourceQuiescer,
 	ThreadResourceQuiescenceFailure,
 } from "./threads/thread-resource-quiescer";
+export {
+	ThreadMetadataRefinementCoordinator,
+	ThreadMetadataRefinementCoordinatorDisabled,
+	ThreadMetadataRefinementCoordinatorLive,
+	ThreadMetadataRefinementPending,
+	type ThreadMetadataRefinementCoordinatorError,
+} from "./threads/thread-metadata-refinement-coordinator";
+export {
+	make_thread_metadata_refinement_worker_layer,
+	ThreadMetadataRefinementWorker,
+	type ThreadMetadataRefinementSubmission,
+	type ThreadMetadataRefinementWorkerOptions,
+} from "./threads/thread-metadata-refinement-worker";
+export {
+	bound_thread_metadata_refiner_input,
+	make_thread_metadata_refiner_test_layer,
+	ThreadMetadataRefiner,
+	ThreadMetadataRefinerLive,
+	type ThreadMetadataRefinement,
+	type ThreadMetadataRefinementRequest,
+	type ThreadMetadataRefinementTrigger,
+	type ThreadMetadataRefinerInput,
+} from "./threads/thread-metadata-refiner";
+export {
+	ThreadMetadataRefinementIntent,
+	ThreadMetadataRepository,
+	type ThreadMetadataAcceptance,
+	type ThreadMetadataError,
+} from "./threads/thread-metadata-repository";
+export {
+	make_node_project_locator_layer,
+	EmptyProjectLocatorLive,
+	ProjectLocator,
+	ProjectLocatorError,
+	type ProjectLocation,
+	type ProjectLocationSource,
+	type ProjectLocatorOperation,
+} from "./threads/project-locator";
+export {
+	ThreadProjectAffinityEvidenceInput,
+	ThreadProjectAffinityNotFound,
+	ThreadProjectAffinityRepository,
+	ThreadProjectAffinityRepositoryLive,
+	type ThreadProjectAffinityAcceptance,
+	type ThreadProjectAffinityError,
+} from "./threads/thread-project-affinity-repository";
+export {
+	ThreadProjectAffinityCoordinator,
+	ThreadProjectAffinityCoordinatorDisabled,
+	ThreadProjectAffinityCoordinatorLive,
+	type ThreadProjectAffinityCoordinatorError,
+} from "./threads/thread-project-affinity-coordinator";
 export { AgentOrchestrator } from "./orchestration/agent-orchestrator";
 export {
 	AgentGraphOrchestrator,

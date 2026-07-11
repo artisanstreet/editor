@@ -23,6 +23,10 @@ import {
 	ThreadMetadataRefineCommand,
 	ThreadMetadataUpdatedEvent,
 	ThreadPinCommand,
+	ThreadProjectAffinityIgnoredEvent,
+	ThreadProjectAffinityUpdatedEvent,
+	ThreadProjectAssignCommand,
+	ThreadProjectUnlockCommand,
 	ThreadRefinementIgnoredEvent,
 	ThreadRenameCommand,
 	ThreadRestoreCommand,
@@ -385,6 +389,8 @@ export const RunRespondQuestionCommand = Schema.Struct({
 export const CommandPayload = Schema.Union([
 	ThreadCreateCommand,
 	ThreadRenameCommand,
+	ThreadProjectAssignCommand,
+	ThreadProjectUnlockCommand,
 	ThreadMetadataRefineCommand,
 	ThreadActivityRecordCommand,
 	ThreadPinCommand,
@@ -510,6 +516,7 @@ export const ThreadMessageQueuedEvent = Schema.Struct({
 	message_id: Identifier,
 	reason: Schema.Literals(["no_active_run", "steering_rejected", "unsupported"]),
 	text: Schema.NonEmptyString,
+	working_directory: Schema.NonEmptyString,
 });
 
 /** Records user text accepted as a steering request for a live run. */
@@ -517,11 +524,13 @@ export const ThreadMessageSteeringEvent = Schema.Struct({
 	type: Schema.Literal("thread.message_steering"),
 	message_id: Identifier,
 	text: Schema.NonEmptyString,
+	working_directory: Schema.NonEmptyString,
 });
 
 /** Records an authoritative lifecycle state for one durable run. */
 export const RunLifecycleEvent = Schema.Struct({
 	type: Schema.Literal("run.lifecycle"),
+	working_directory: Schema.NonEmptyString,
 	state: Schema.Literals([
 		"queued",
 		"running",
@@ -835,6 +844,8 @@ export const EventPayload = Schema.Union([
 	ThreadErasedEvent,
 	ThreadMetadataUpdatedEvent,
 	ThreadRefinementIgnoredEvent,
+	ThreadProjectAffinityUpdatedEvent,
+	ThreadProjectAffinityIgnoredEvent,
 	ThreadRetentionPolicyUpdatedEvent,
 	GlobalGuidanceCanonicalUpdatedEvent,
 	GlobalGuidanceSelectionRequiredEvent,

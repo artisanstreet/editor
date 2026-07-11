@@ -14,6 +14,7 @@ import { type JournalStoreError } from "../persistence/journal-store";
 import { type OrchestrationError } from "../persistence/orchestration-repository";
 import type { TerminalSessionError } from "../terminal/terminal-sessions";
 import type { ThreadMetadataError } from "../threads/thread-metadata-repository";
+import type { ThreadProjectAffinityError } from "../threads/thread-project-affinity-repository";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { CommandRouter } from "./command-router";
 
@@ -24,6 +25,7 @@ const describe_journal_error = pipe(
 		| OrchestrationError
 		| TerminalSessionError
 		| ThreadMetadataError
+		| ThreadProjectAffinityError
 	>(),
 	Match.tagsExhaustive({
 		AgentGraphCommandConflict: (): ProtocolErrorDetail => ({
@@ -106,6 +108,11 @@ const describe_journal_error = pipe(
 			message: `Thread ${error.thread_id} does not exist.`,
 			retryable: false,
 		}),
+		ThreadProjectAffinityNotFound: (error): ProtocolErrorDetail => ({
+			code: "thread.not_found",
+			message: `Thread ${error.thread_id} does not exist.`,
+			retryable: false,
+		}),
 		JournalInvariantError: (): ProtocolErrorDetail => ({
 			code: "journal.invariant_failed",
 			message: "The journal could not reconstruct the accepted command.",
@@ -139,7 +146,8 @@ export const ProtocolRouterLive = Layer.effect(
 				| JournalStoreError
 				| OrchestrationError
 				| TerminalSessionError
-				| ThreadMetadataError,
+				| ThreadMetadataError
+				| ThreadProjectAffinityError,
 		) =>
 			Effect.gen(function* () {
 				const message_id = yield* metadata.MakeId("message");

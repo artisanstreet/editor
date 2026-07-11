@@ -389,6 +389,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 								reason: "no_active_run",
 								text: "Private erased message body",
 								type: "thread.message_queued",
+								working_directory: "C:/workspace/erased",
 							},
 							thread_id: "thread_erased",
 						});
@@ -397,7 +398,11 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 						yield* journal.AppendEvent({
 							causation_id: "kept_run_cause",
 							correlation_id: "kept_run_correlation",
-							payload: { state: "running", type: "run.lifecycle" },
+							payload: {
+								state: "running",
+								type: "run.lifecycle",
+								working_directory: "C:/workspace/kept",
+							},
 							run_id: "kept_run",
 							thread_id: "thread_kept",
 						});
@@ -441,6 +446,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 								reason: "unsupported",
 								text: "Surviving later event",
 								type: "thread.message_queued",
+								working_directory: "C:/workspace/kept",
 							},
 							thread_id: "thread_kept",
 						});

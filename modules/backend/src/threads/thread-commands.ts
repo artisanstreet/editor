@@ -10,6 +10,10 @@ import type {
 import { JournalStore, type JournalStoreError } from "../persistence/journal-store";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { ThreadMetadataRepository, type ThreadMetadataError } from "./thread-metadata-repository";
+import {
+	ThreadProjectAffinityRepository,
+	type ThreadProjectAffinityError,
+} from "./thread-project-affinity-repository";
 import { ThreadRetentionPolicyService } from "./thread-retention-policy";
 
 export class ThreadCommands extends Context.Service<
@@ -24,6 +28,12 @@ export class ThreadCommands extends Context.Service<
 		readonly HandleRetentionPolicy: (
 			command: CommandEnvelope,
 		) => Effect.Effect<ReadonlyArray<OutboundEnvelope>, JournalStoreError>;
+		readonly HandleProjectAffinity: (
+			command: CommandEnvelope,
+		) => Effect.Effect<
+			ReadonlyArray<OutboundEnvelope>,
+			JournalStoreError | ThreadProjectAffinityError
+		>;
 	}
 >()("Artisan/ThreadCommands") {}
 
@@ -33,6 +43,7 @@ export const ThreadCommandsLive = Layer.effect(
 		const journal = yield* JournalStore;
 		const metadata = yield* RuntimeMetadata;
 		const repository = yield* ThreadMetadataRepository;
+		const project_affinity = yield* ThreadProjectAffinityRepository;
 		const retention_policy = yield* ThreadRetentionPolicyService;
 
 		const MakeOutput = (
@@ -123,7 +134,15 @@ export const ThreadCommandsLive = Layer.effect(
 						MakeOutput(command, accepted.status, accepted.event),
 					),
 				);
+		const HandleProjectAffinity = (command: CommandEnvelope) =>
+			project_affinity
+				.Accept(command)
+				.pipe(
+					Effect.flatMap((accepted) =>
+						MakeOutput(command, accepted.status, accepted.event),
+					),
+				);
 
-		return { HandleCreate, HandleMetadata, HandleRetentionPolicy };
+		return { HandleCreate, HandleMetadata, HandleProjectAffinity, HandleRetentionPolicy };
 	}),
 );

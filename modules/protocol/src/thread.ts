@@ -26,9 +26,60 @@ export const ThreadTitleSource = Schema.Literals(["initial", "automatic", "manua
 
 export type ThreadTitleSource = typeof ThreadTitleSource.Type;
 
+/** Identifies one canonical local workspace project. */
+export const ProjectRef = Schema.Struct({
+	display_name: Schema.NonEmptyString,
+	project_id: Identifier,
+	root_path: Schema.NonEmptyString,
+});
+
+export type ProjectRef = typeof ProjectRef.Type;
+
+/** Enumerates content-free evidence categories used by deterministic scoring. */
+export const ProjectAffinityEvidenceKind = Schema.Literals([
+	"active_working_directory",
+	"file_artifact",
+	"file_mutation",
+	"git_root",
+	"historical_working_directory",
+	"process_owner",
+	"project_mention",
+	"terminal_working_directory",
+	"thread_metadata",
+]);
+
+export type ProjectAffinityEvidenceKind = typeof ProjectAffinityEvidenceKind.Type;
+
+/** Counts unique durable evidence facts contributing to one project score. */
+export const ProjectAffinityEvidenceCount = Schema.Struct({
+	count: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+	kind: ProjectAffinityEvidenceKind,
+});
+
+export type ProjectAffinityEvidenceCount = typeof ProjectAffinityEvidenceCount.Type;
+
+/** Projects one deterministic affinity score for a candidate project. */
+export const ProjectAffinityScore = Schema.Struct({
+	evidence: Schema.Array(ProjectAffinityEvidenceCount),
+	project: ProjectRef,
+	score: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(100)),
+});
+
+export type ProjectAffinityScore = typeof ProjectAffinityScore.Type;
+
+/** Suggests a scored project move against one exact affinity projection version. */
+export const ThreadProjectRehomeSuggestion = Schema.Struct({
+	basis_affinity_version: StreamSequence,
+	project: ProjectRef,
+	score: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0), Schema.isLessThanOrEqualTo(100)),
+});
+
+export type ThreadProjectRehomeSuggestion = typeof ThreadProjectRehomeSuggestion.Type;
+
 /** Describes the durable thread projection sent to sidebar clients. */
 export const ThreadListItem = Schema.Struct({
 	activity_version: StreamSequence,
+	affinity_version: StreamSequence,
 	archived_at: Schema.optional(IsoDateTime),
 	created_at: IsoDateTime,
 	current_goal: Schema.optional(Schema.NonEmptyString),
@@ -36,7 +87,12 @@ export const ThreadListItem = Schema.Struct({
 	live_status: Schema.NonEmptyString,
 	metadata_version: StreamSequence,
 	pinned: Schema.Boolean,
+	primary_project: Schema.optional(ProjectRef),
+	project_affinity_scores: Schema.Array(ProjectAffinityScore),
+	project_locked: Schema.Boolean,
 	rename_suggestion: Schema.optional(Schema.NonEmptyString),
+	rehome_suggestion: Schema.optional(ThreadProjectRehomeSuggestion),
+	linked_projects: Schema.Array(ProjectRef),
 	thread_id: Identifier,
 	title: Schema.NonEmptyString,
 	title_locked: Schema.Boolean,
@@ -61,6 +117,22 @@ export const ThreadRenameCommand = Schema.Struct({
 });
 
 export type ThreadRenameCommand = typeof ThreadRenameCommand.Type;
+
+/** Unconditionally pins a thread to the user's project in durable command order. */
+export const ThreadProjectAssignCommand = Schema.Struct({
+	project: ProjectRef,
+	type: Schema.Literal("thread.project.assign"),
+});
+
+export type ThreadProjectAssignCommand = typeof ThreadProjectAssignCommand.Type;
+
+/** Returns a manually pinned thread to automatic project-affinity management. */
+export const ThreadProjectUnlockCommand = Schema.Struct({
+	basis_affinity_version: StreamSequence,
+	type: Schema.Literal("thread.project.unlock"),
+});
+
+export type ThreadProjectUnlockCommand = typeof ThreadProjectUnlockCommand.Type;
 
 /** Applies asynchronous auto-managed metadata against explicit projection versions. */
 export const ThreadMetadataRefineCommand = Schema.Struct({
@@ -150,6 +222,24 @@ export const ThreadRefinementIgnoredEvent = Schema.Struct({
 });
 
 export type ThreadRefinementIgnoredEvent = typeof ThreadRefinementIgnoredEvent.Type;
+
+/** Records a durable replacement of a thread's project-affinity projection. */
+export const ThreadProjectAffinityUpdatedEvent = Schema.Struct({
+	change: Schema.Literals(["assigned", "observed", "rehomed", "suggested", "unlocked"]),
+	thread: ThreadListItem,
+	type: Schema.Literal("thread.project_affinity.updated"),
+});
+
+export type ThreadProjectAffinityUpdatedEvent = typeof ThreadProjectAffinityUpdatedEvent.Type;
+
+/** Records an affinity input that could not alter the current projection. */
+export const ThreadProjectAffinityIgnoredEvent = Schema.Struct({
+	basis_affinity_version: StreamSequence,
+	reason: Schema.Literals(["locked", "stale_basis"]),
+	type: Schema.Literal("thread.project_affinity.ignored"),
+});
+
+export type ThreadProjectAffinityIgnoredEvent = typeof ThreadProjectAffinityIgnoredEvent.Type;
 
 /** Records a durable update to the global inactive-thread retention policy. */
 export const ThreadRetentionPolicyUpdatedEvent = Schema.Struct({

@@ -1,8 +1,9 @@
 import { asc, desc, eq } from "drizzle-orm";
 import { Context, Data, Effect, Layer, Option, Schema } from "effect";
 
-import { JournalSequence, ThreadListItem } from "@artisan/protocol";
+import { JournalSequence, type ThreadListItem } from "@artisan/protocol";
 
+import { DecodeThreadProjection } from "../threads/internal/thread-projection";
 import { Database } from "./database";
 import { JournalEvents, Threads } from "./schema";
 import { JournalInvariantError } from "./journal-store";
@@ -51,27 +52,6 @@ const DecodePersistedJournalSequence = (value: unknown) =>
 		}),
 	);
 
-const DecodeThreadListItem = (value: unknown) =>
-	Schema.decodeUnknownEffect(ThreadListItem, { onExcessProperty: "error" })(value).pipe(
-		Effect.mapError(
-			() =>
-				new JournalInvariantError({
-					message: "Thread projection row does not match the protocol schema",
-				}),
-		),
-	);
-
-const DecodePersistedThread = (thread: typeof Threads.$inferSelect) => {
-	const { archived_at, current_goal, rename_suggestion, ...required } = thread;
-
-	return DecodeThreadListItem({
-		...required,
-		...(archived_at === null ? {} : { archived_at }),
-		...(current_goal === null ? {} : { current_goal }),
-		...(rename_suggestion === null ? {} : { rename_suggestion }),
-	});
-};
-
 function normalize_thread_read_model_error(error: unknown): ThreadReadModelError {
 	if (error instanceof JournalInvariantError) {
 		return error;
@@ -93,7 +73,7 @@ export const ThreadReadModelLive = Layer.effect(
 				.pipe(
 					Effect.flatMap(([thread]) =>
 						thread
-							? DecodePersistedThread(thread).pipe(Effect.map(Option.some))
+							? DecodeThreadProjection(thread).pipe(Effect.map(Option.some))
 							: Effect.succeed(Option.none()),
 					),
 					Effect.mapError(normalize_thread_read_model_error),
@@ -115,7 +95,7 @@ export const ThreadReadModelLive = Layer.effect(
 						const journal_sequence = watermark
 							? yield* DecodePersistedJournalSequence(watermark.journal_sequence)
 							: 0;
-						const threads = yield* Effect.forEach(thread_rows, DecodePersistedThread);
+						const threads = yield* Effect.forEach(thread_rows, DecodeThreadProjection);
 
 						return { journal_sequence, threads };
 					}),

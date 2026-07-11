@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
 	index,
 	integer,
@@ -7,22 +8,32 @@ import {
 	uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
-export const JournalCommands = sqliteTable("journal_commands", {
-	message_id: text("message_id").primaryKey(),
-	schema_version: integer("schema_version").notNull(),
-	thread_id: text("thread_id").notNull(),
-	run_id: text("run_id"),
-	assigned_run_id: text("assigned_run_id"),
-	agent_id: text("agent_id"),
-	causation_id: text("causation_id"),
-	origin: text("origin").notNull(),
-	raw_origin_json: text("raw_origin_json"),
-	sent_at: text("sent_at").notNull(),
-	payload_type: text("payload_type").notNull(),
-	payload_json: text("payload_json").notNull(),
-	status: text("status").notNull(),
-	accepted_at: text("accepted_at").notNull(),
-});
+export const JournalCommands = sqliteTable(
+	"journal_commands",
+	{
+		message_id: text("message_id").primaryKey(),
+		schema_version: integer("schema_version").notNull(),
+		thread_id: text("thread_id").notNull(),
+		run_id: text("run_id"),
+		assigned_run_id: text("assigned_run_id"),
+		agent_id: text("agent_id"),
+		causation_id: text("causation_id"),
+		origin: text("origin").notNull(),
+		raw_origin_json: text("raw_origin_json"),
+		sent_at: text("sent_at").notNull(),
+		payload_type: text("payload_type").notNull(),
+		payload_json: text("payload_json").notNull(),
+		status: text("status").notNull(),
+		accepted_at: text("accepted_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("journal_commands_refinement_source_unique")
+			.on(table.thread_id, table.causation_id)
+			.where(
+				sql`${table.origin} = 'backend' AND ${table.payload_type} = 'thread.metadata.refine'`,
+			),
+	],
+);
 
 export const EventStreams = sqliteTable("event_streams", {
 	stream_id: text("stream_id").primaryKey(),
@@ -71,6 +82,13 @@ export const Threads = sqliteTable(
 		last_activity_at: text("last_activity_at").notNull().default("1970-01-01T00:00:00.000Z"),
 		activity_version: integer("activity_version").notNull().default(0),
 		metadata_version: integer("metadata_version").notNull().default(0),
+		affinity_version: integer("affinity_version").notNull().default(0),
+		primary_project_id: text("primary_project_id"),
+		primary_project_json: text("primary_project_json"),
+		linked_projects_json: text("linked_projects_json").notNull().default("[]"),
+		project_locked: integer("project_locked", { mode: "boolean" }).notNull().default(false),
+		project_affinity_scores_json: text("project_affinity_scores_json").notNull().default("[]"),
+		rehome_suggestion_json: text("rehome_suggestion_json"),
 		pinned: integer("pinned", { mode: "boolean" }).notNull().default(false),
 		archived_at: text("archived_at"),
 		created_at: text("created_at").notNull(),
@@ -78,6 +96,32 @@ export const Threads = sqliteTable(
 	},
 	(table) => [
 		index("threads_retention_candidates_index").on(table.pinned, table.last_activity_at),
+		index("threads_primary_project_index").on(table.primary_project_id),
+	],
+);
+
+/** Stores idempotent, content-free evidence used to calculate project affinity. */
+export const ThreadProjectAffinityEvidence = sqliteTable(
+	"thread_project_affinity_evidence",
+	{
+		basis_affinity_version: integer("basis_affinity_version").notNull(),
+		evidence_id: text("evidence_id").primaryKey(),
+		kind: text("kind").notNull(),
+		observed_at: text("observed_at").notNull(),
+		project_id: text("project_id").notNull(),
+		project_json: text("project_json").notNull(),
+		source_event_id: text("source_event_id").notNull(),
+		source_journal_sequence: integer("source_journal_sequence").notNull(),
+		thread_id: text("thread_id").notNull(),
+	},
+	(table) => [
+		index("thread_project_affinity_evidence_thread_index").on(table.thread_id),
+		uniqueIndex("thread_project_affinity_evidence_source_unique").on(
+			table.thread_id,
+			table.source_event_id,
+			table.kind,
+			table.project_id,
+		),
 	],
 );
 

@@ -1,0 +1,315 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+import { Effect, Schedule } from "effect";
+import { afterEach, describe, expect, it } from "vitest";
+
+import type { CommandEnvelope } from "@artisan/protocol";
+import {
+	make_backend_runtime,
+	make_thread_metadata_refiner_test_layer,
+	ProtocolRouter,
+	ThreadMetadataRefinementCoordinator,
+	type ThreadMetadataRefinerInput,
+} from "@artisan/backend";
+
+import { JournalStore } from "../../modules/backend/src/persistence/journal-store";
+import { ThreadReadModel } from "../../modules/backend/src/persistence/thread-read-model";
+
+const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
+const temporary_directories: Array<string> = [];
+
+async function make_database_path() {
+	const directory = await mkdtemp(join(tmpdir(), "artisan-refinement-coordinator-"));
+
+	temporary_directories.push(directory);
+
+	return join(directory, "artisan.db");
+}
+
+function make_command(message_id: string, payload: CommandEnvelope["payload"]): CommandEnvelope {
+	return {
+		kind: "command",
+		message_id,
+		origin: "frontend",
+		payload,
+		protocol_version: 1,
+		schema_version: 1,
+		sent_at: "2026-07-11T14:00:00.000Z",
+		thread_id: "thread_coordinator",
+	};
+}
+
+const append_user_message = (journal: JournalStore["Service"], text: string, suffix: string) =>
+	journal.AppendEvent({
+		causation_id: `cause_${suffix}`,
+		correlation_id: `correlation_${suffix}`,
+		payload: {
+			message_id: `user_message_${suffix}`,
+			reason: "no_active_run",
+			text,
+			type: "thread.message_queued",
+			working_directory: "C:/workspace/artisan",
+		},
+		thread_id: "thread_coordinator",
+	});
+
+afterEach(async () => {
+	await Promise.all(
+		temporary_directories
+			.splice(0)
+			.map((directory) => rm(directory, { force: true, recursive: true })),
+	);
+});
+
+describe("thread metadata refinement coordinator", () => {
+	it("uses the latest meaningful trigger with accumulated provider-neutral context", async () => {
+		const database_path = await make_database_path();
+		const seen: ThreadMetadataRefinerInput[] = [];
+		const refiner = make_thread_metadata_refiner_test_layer((input) =>
+			Effect.sync(() => {
+				seen.push(input);
+				const latest_text = input.recent_user_text.at(-1)!;
+
+				return {
+					current_goal: latest_text,
+					live_status: `Refined ${input.trigger}`,
+					rename_suggestion: `Refined ${latest_text}`,
+					title: `Refined ${latest_text}`,
+				};
+			}),
+		);
+		const runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			thread_metadata_refiner: refiner,
+		});
+
+		try {
+			const thread = await runtime.runPromise(
+				Effect.gen(function* () {
+					const coordinator = yield* ThreadMetadataRefinementCoordinator;
+					const journal = yield* JournalStore;
+					const router = yield* ProtocolRouter;
+					const threads = yield* ThreadReadModel;
+
+					yield* router.Route(
+						make_command("create_coordinator", {
+							title: "Initial coordinator title",
+							type: "thread.create",
+						}),
+					);
+					yield* journal.AppendEvent({
+						causation_id: "artifact_cause",
+						correlation_id: "artifact_correlation",
+						payload: {
+							artifact: {
+								artifact_id: "artifact_file",
+								assignment_id: "assignment_1",
+								created_at: "2026-07-11T14:00:00.000Z",
+								group_id: "group_1",
+								kind: "file",
+								label: "thread-metadata-refiner.ts",
+								run_id: "run_1",
+								uri: "C:/work/artisan/modules/backend/thread-metadata-refiner.ts",
+							},
+							group_id: "group_1",
+							type: "artifact.recorded",
+						},
+						thread_id: "thread_coordinator",
+					});
+					yield* append_user_message(journal, "First direction", "first");
+					yield* journal.AppendEvent({
+						causation_id: "run_cause",
+						correlation_id: "run_correlation",
+						payload: {
+							state: "running",
+							type: "run.lifecycle",
+							working_directory: "C:/workspace/artisan",
+						},
+						run_id: "run_1",
+						thread_id: "thread_coordinator",
+					});
+					yield* journal.AppendEvent({
+						causation_id: "steer_cause",
+						correlation_id: "steer_correlation",
+						payload: {
+							message_id: "user_message_latest",
+							text: "Latest direction",
+							type: "thread.message_steering",
+							working_directory: "C:/workspace/artisan",
+						},
+						thread_id: "thread_coordinator",
+					});
+					yield* coordinator.WaitForIdle;
+
+					return (yield* threads.Snapshot()).threads[0]!;
+				}),
+			);
+			const latest = seen.at(-1)!;
+			const calls_after_idle = seen.length;
+
+			expect(latest.trigger).toBe("user_message");
+			expect(latest.recent_user_text).toEqual(["First direction", "Latest direction"]);
+			expect(latest.recent_files).toContain(
+				"C:/work/artisan/modules/backend/thread-metadata-refiner.ts",
+			);
+			expect(thread).toMatchObject({
+				current_goal: "Latest direction",
+				title: "Refined Latest direction",
+				title_source: "automatic",
+			});
+
+			await runtime.runPromise(
+				Effect.gen(function* () {
+					const coordinator = yield* ThreadMetadataRefinementCoordinator;
+
+					yield* coordinator.WaitForIdle;
+				}),
+			);
+
+			expect(seen).toHaveLength(calls_after_idle);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("replays a missed source after restart and skips it on later replays", async () => {
+		const database_path = await make_database_path();
+		const first_runtime = make_backend_runtime({ database_path, migrations_path });
+
+		try {
+			await first_runtime.runPromise(
+				Effect.gen(function* () {
+					const journal = yield* JournalStore;
+					const router = yield* ProtocolRouter;
+
+					yield* router.Route(
+						make_command("create_replay", {
+							title: "Before replay",
+							type: "thread.create",
+						}),
+					);
+					yield* append_user_message(journal, "Recovered direction", "replay");
+				}),
+			);
+		} finally {
+			await first_runtime.dispose();
+		}
+
+		const second_seen: ThreadMetadataRefinerInput[] = [];
+		const second_runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			thread_metadata_refiner: make_thread_metadata_refiner_test_layer((input) =>
+				Effect.sync(() => {
+					second_seen.push(input);
+					const latest_text = input.recent_user_text.at(-1)!;
+
+					return {
+						current_goal: latest_text,
+						live_status: "Recovered",
+						title: "Recovered thread title",
+					};
+				}),
+			),
+		});
+
+		try {
+			const title = await second_runtime.runPromise(
+				Effect.gen(function* () {
+					const coordinator = yield* ThreadMetadataRefinementCoordinator;
+					const threads = yield* ThreadReadModel;
+
+					yield* coordinator.WaitForIdle;
+
+					return (yield* threads.Snapshot()).threads[0]!.title;
+				}),
+			);
+
+			expect(second_seen).toHaveLength(1);
+			expect(title).toBe("Recovered thread title");
+		} finally {
+			await second_runtime.dispose();
+		}
+
+		const third_seen: ThreadMetadataRefinerInput[] = [];
+		const third_runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			thread_metadata_refiner: make_thread_metadata_refiner_test_layer((input) =>
+				Effect.sync(() => {
+					third_seen.push(input);
+
+					return { live_status: "Should not run" };
+				}),
+			),
+		});
+
+		try {
+			await third_runtime.runPromise(
+				Effect.gen(function* () {
+					const coordinator = yield* ThreadMetadataRefinementCoordinator;
+
+					yield* coordinator.WaitForIdle;
+				}),
+			);
+
+			expect(third_seen).toHaveLength(0);
+		} finally {
+			await third_runtime.dispose();
+		}
+	});
+
+	it("retries a failed refinement before advancing the replay cursor", async () => {
+		const database_path = await make_database_path();
+		let attempts = 0;
+		const runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			thread_metadata_refiner: make_thread_metadata_refiner_test_layer(() =>
+				Effect.suspend(() => {
+					attempts += 1;
+
+					return attempts === 1
+						? Effect.fail(new Error("temporary refiner failure"))
+						: Effect.succeed({
+								live_status: "Recovered",
+								title: "Recovered after retry",
+							});
+				}),
+			),
+		});
+
+		try {
+			const title = await runtime.runPromise(
+				Effect.gen(function* () {
+					const coordinator = yield* ThreadMetadataRefinementCoordinator;
+					const journal = yield* JournalStore;
+					const router = yield* ProtocolRouter;
+					const threads = yield* ThreadReadModel;
+
+					yield* router.Route(
+						make_command("create_retry", {
+							title: "Before retry",
+							type: "thread.create",
+						}),
+					);
+					yield* append_user_message(journal, "Retry this refinement", "retry");
+					yield* coordinator.WaitForIdle.pipe(
+						Effect.retry({ schedule: Schedule.spaced("5 millis") }),
+					);
+
+					return (yield* threads.Snapshot()).threads[0]!.title;
+				}),
+			);
+
+			expect(attempts).toBeGreaterThanOrEqual(2);
+			expect(title).toBe("Recovered after retry");
+		} finally {
+			await runtime.dispose();
+		}
+	});
+});

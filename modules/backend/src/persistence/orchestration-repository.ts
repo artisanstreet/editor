@@ -537,6 +537,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 												: "no_active_run",
 										text: payload.text,
 										type: "thread.message_queued",
+										working_directory: payload.working_directory,
 									},
 									...(command.raw_origin
 										? { raw_origin: command.raw_origin }
@@ -550,7 +551,11 @@ export const OrchestrationRepositoryLive = Layer.effect(
 									agent_id,
 									causation_id: command.message_id,
 									correlation_id: command.message_id,
-									payload: { state: "queued", type: "run.lifecycle" },
+									payload: {
+										state: "queued",
+										type: "run.lifecycle",
+										working_directory: payload.working_directory,
+									},
 									...(command.raw_origin
 										? { raw_origin: command.raw_origin }
 										: {}),
@@ -578,6 +583,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 										message_id: command.message_id,
 										text: payload.text,
 										type: "thread.message_steering",
+										working_directory: payload.working_directory,
 									},
 									...(command.raw_origin
 										? { raw_origin: command.raw_origin }
@@ -851,7 +857,11 @@ export const OrchestrationRepositoryLive = Layer.effect(
 								agent_id: run.agent_id,
 								causation_id: run_id,
 								correlation_id: run_id,
-								payload: { state: "running", type: "run.lifecycle" },
+								payload: {
+									state: "running",
+									type: "run.lifecycle",
+									working_directory: run.working_directory,
+								},
 								run_id,
 								thread_id: run.thread_id,
 							}),
@@ -936,6 +946,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 									reason: "steering_rejected",
 									text: message.text,
 									type: "thread.message_queued",
+									working_directory: prior_run.working_directory,
 								},
 								run_id,
 								thread_id: message.thread_id,
@@ -944,7 +955,11 @@ export const OrchestrationRepositoryLive = Layer.effect(
 								agent_id: coordinator.agent_id,
 								causation_id: command_id,
 								correlation_id: command_id,
-								payload: { state: "queued", type: "run.lifecycle" },
+								payload: {
+									state: "queued",
+									type: "run.lifecycle",
+									working_directory: prior_run.working_directory,
+								},
 								run_id,
 								thread_id: message.thread_id,
 							}),
@@ -1044,11 +1059,13 @@ export const OrchestrationRepositoryLive = Layer.effect(
 															? "waiting"
 															: "running",
 													type: "run.lifecycle",
+													working_directory: run.working_directory,
 												} satisfies EventPayload)
 											: observation._tag === "run_terminal"
 												? ({
 														state: observation.state,
 														type: "run.lifecycle",
+														working_directory: run.working_directory,
 													} satisfies EventPayload)
 												: undefined;
 
@@ -1215,7 +1232,11 @@ export const OrchestrationRepositoryLive = Layer.effect(
 									agent_id: run.agent_id,
 									causation_id: `recovery:${run.run_id}`,
 									correlation_id: run.run_id,
-									payload: { state: "interrupted", type: "run.lifecycle" },
+									payload: {
+										state: "interrupted",
+										type: "run.lifecycle",
+										working_directory: run.working_directory,
+									},
 									run_id: run.run_id,
 									thread_id: run.thread_id,
 								}),

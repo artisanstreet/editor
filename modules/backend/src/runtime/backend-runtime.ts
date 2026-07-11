@@ -9,6 +9,7 @@ import type { GlobalGuidanceProvider } from "@artisan/protocol";
 import { AgentGraphOrchestratorLive } from "../orchestration/agent-graph-orchestrator";
 import { AgentGraphRepositoryLive } from "../orchestration/agent-graph-repository";
 import { AgentOrchestratorLive } from "../orchestration/agent-orchestrator";
+import { NodeProcessRunnerLive } from "../git/node-process-runner";
 import { make_database_layer } from "../persistence/database";
 import { JournalNotifierLive } from "../persistence/journal-notifier";
 import { JournalStoreLive } from "../persistence/journal-store";
@@ -24,6 +25,21 @@ import { make_protocol_server_layer } from "../protocol/protocol-server";
 import { ThreadCommandsLive } from "../threads/thread-commands";
 import { ThreadErasureLive } from "../threads/thread-erasure";
 import { ThreadMetadataRepositoryLive } from "../threads/thread-metadata-repository";
+import {
+	ThreadMetadataRefinementCoordinatorDisabled,
+	ThreadMetadataRefinementCoordinatorLive,
+} from "../threads/thread-metadata-refinement-coordinator";
+import { make_thread_metadata_refinement_worker_layer } from "../threads/thread-metadata-refinement-worker";
+import {
+	ThreadMetadataRefiner,
+	ThreadMetadataRefinerLive,
+} from "../threads/thread-metadata-refiner";
+import { make_node_project_locator_layer, ProjectLocator } from "../threads/project-locator";
+import {
+	ThreadProjectAffinityCoordinatorDisabled,
+	ThreadProjectAffinityCoordinatorLive,
+} from "../threads/thread-project-affinity-coordinator";
+import { ThreadProjectAffinityRepositoryLive } from "../threads/thread-project-affinity-repository";
 import {
 	ThreadResourceQuiescer,
 	ThreadResourceQuiescerLive,
@@ -60,10 +76,12 @@ export interface BackendOptions {
 	readonly guidance_provider_registry?: Layer.Layer<GuidanceProviderRegistry>;
 	readonly migrations_path: string;
 	readonly protocol?: Partial<ProtocolConnectionOptions>;
+	readonly project_locator?: Layer.Layer<ProjectLocator>;
 	readonly retention_clock?: Layer.Layer<ThreadRetentionClock>;
 	readonly retention_scheduler?: Layer.Layer<ThreadRetentionScheduler>;
 	readonly runtime_metadata?: Layer.Layer<RuntimeMetadata>;
 	readonly terminal_driver?: Layer.Layer<TerminalDriver>;
+	readonly thread_metadata_refiner?: Layer.Layer<ThreadMetadataRefiner>;
 	readonly thread_resource_quiescer?: Layer.Layer<ThreadResourceQuiescer>;
 }
 
@@ -121,10 +139,37 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(guidance),
 	);
 	const thread_metadata = ThreadMetadataRepositoryLive.pipe(Layer.provideMerge(infrastructure));
+	const metadata_refinement =
+		options.thread_metadata_refiner === undefined
+			? ThreadMetadataRefinementCoordinatorDisabled
+			: ThreadMetadataRefinementCoordinatorLive.pipe(
+					Layer.provideMerge(
+						make_thread_metadata_refinement_worker_layer().pipe(
+							Layer.provideMerge(options.thread_metadata_refiner),
+							Layer.provideMerge(thread_metadata),
+						),
+					),
+					Layer.provideMerge(thread_metadata),
+					Layer.provideMerge(persistence),
+					Layer.provideMerge(infrastructure),
+				);
+	const project_affinity = ThreadProjectAffinityRepositoryLive.pipe(
+		Layer.provideMerge(infrastructure),
+	);
+	const project_affinity_coordination =
+		options.project_locator === undefined
+			? ThreadProjectAffinityCoordinatorDisabled
+			: ThreadProjectAffinityCoordinatorLive.pipe(
+					Layer.provideMerge(options.project_locator),
+					Layer.provideMerge(project_affinity),
+					Layer.provideMerge(persistence),
+					Layer.provideMerge(infrastructure),
+				);
 	const retention_policy = ThreadRetentionPolicyServiceLive.pipe(Layer.provideMerge(persistence));
 	const threads = ThreadCommandsLive.pipe(
 		Layer.provideMerge(persistence),
 		Layer.provideMerge(thread_metadata),
+		Layer.provideMerge(project_affinity),
 		Layer.provideMerge(retention_policy),
 	);
 	const terminal_persistence = TerminalRepositoryLive.pipe(Layer.provideMerge(infrastructure));
@@ -171,6 +216,8 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(persistence),
 		Layer.provideMerge(erasure),
 		Layer.provideMerge(retention),
+		Layer.provideMerge(metadata_refinement),
+		Layer.provideMerge(project_affinity_coordination),
 		Layer.provideMerge(guidance),
 	);
 }
@@ -213,6 +260,10 @@ export function make_desktop_backend_layer(options: DesktopBackendOptions) {
 		...options,
 		guidance_provider_registry:
 			options.guidance_provider_registry ?? make_desktop_guidance_registry(options),
+		project_locator:
+			options.project_locator ??
+			make_node_project_locator_layer().pipe(Layer.provide(NodeProcessRunnerLive)),
+		thread_metadata_refiner: options.thread_metadata_refiner ?? ThreadMetadataRefinerLive,
 	});
 }
 

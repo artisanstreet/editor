@@ -510,12 +510,16 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 					};
 					const item: ThreadListItem = {
 						activity_version: 0,
+						affinity_version: 0,
 						created_at: event.sent_at,
 						current_goal: title,
 						last_activity_at: event.sent_at,
 						live_status: "Idle",
+						linked_projects: [],
 						metadata_version: 0,
 						pinned: false,
+						project_affinity_scores: [],
+						project_locked: false,
 						thread_id: command.thread_id,
 						title,
 						title_locked: false,

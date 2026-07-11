@@ -209,16 +209,23 @@ function thread_item_from_event(event: EventEnvelope): ThreadListItem | undefine
 	if (event.payload.type === "thread.metadata.updated") {
 		return event.payload.thread;
 	}
+	if (event.payload.type === "thread.project_affinity.updated") {
+		return event.payload.thread;
+	}
 
 	return event.payload.type === "thread.created"
 		? {
 				activity_version: 0,
+				affinity_version: 0,
 				created_at: event.sent_at,
 				current_goal: event.payload.title,
 				last_activity_at: event.sent_at,
 				live_status: "Idle",
 				metadata_version: 0,
 				pinned: false,
+				linked_projects: [],
+				project_affinity_scores: [],
+				project_locked: false,
 				thread_id: event.thread_id,
 				title: event.payload.title,
 				title_locked: false,

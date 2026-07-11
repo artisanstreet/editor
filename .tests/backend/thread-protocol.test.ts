@@ -33,13 +33,17 @@ describe("thread protocol", () => {
 		);
 		const projection = Schema.decodeUnknownSync(ThreadListItem)({
 			activity_version: 1,
+			affinity_version: 0,
 			archived_at: undefined,
 			created_at: "2026-07-10T17:00:00.000Z",
 			current_goal: "Ship durable thread identity",
 			last_activity_at: "2026-07-10T18:00:00.000Z",
+			linked_projects: [],
 			live_status: "Idle",
 			metadata_version: 1,
 			pinned: false,
+			project_affinity_scores: [],
+			project_locked: false,
 			rename_suggestion: undefined,
 			thread_id: "thread_1",
 			title: "Durable thread identity",

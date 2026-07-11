@@ -1,12 +1,17 @@
-import { asc, eq } from "drizzle-orm";
+import { and, asc, eq, or } from "drizzle-orm";
 import { Context, Data, Effect, Layer, Schema } from "effect";
 
 import {
 	EventEnvelope,
+	Identifier,
+	ThreadMetadataRefineCommand,
 	ThreadListItem,
 	type CommandEnvelope,
 	type EventPayload,
+	type ProjectAffinityScore,
+	type ProjectRef,
 	type RawOrigin,
+	type ThreadProjectRehomeSuggestion,
 	type ThreadMetadataUpdatedEvent,
 } from "@artisan/protocol";
 
@@ -27,6 +32,7 @@ import {
 } from "../persistence/journal-store";
 import { JournalNotifier } from "../persistence/journal-notifier";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import { DecodeThreadProjection } from "./internal/thread-projection";
 
 type ThreadMetadataCommand = Extract<
 	CommandEnvelope["payload"],
@@ -42,16 +48,50 @@ type ThreadMetadataCommand = Extract<
 	}
 >;
 
+interface MetadataOperation {
+	readonly agent_id?: string;
+	readonly causation_id?: string;
+	readonly event_causation_id: string;
+	readonly message_id: string;
+	readonly origin: "backend" | "frontend";
+	readonly payload: ThreadMetadataCommand;
+	readonly raw_origin?: RawOrigin;
+	readonly retry_policy: "exact" | "source";
+	readonly run_id?: string;
+	readonly schema_version: number;
+	readonly sent_at?: string;
+	readonly thread_id: string;
+}
+
+interface StoredMetadataCommand {
+	readonly agent_id: string | null;
+	readonly causation_id: string | null;
+	readonly origin: string;
+	readonly payload_json: string;
+	readonly payload_type: string;
+	readonly raw_origin_json: string | null;
+	readonly run_id: string | null;
+	readonly schema_version: number;
+	readonly sent_at: string;
+	readonly thread_id: string;
+}
+
 interface StoredThreadProjection {
 	readonly activity_version: number;
+	readonly affinity_version: number;
 	readonly archived_at: string | null;
 	readonly created_at: string;
 	readonly current_goal: string | null;
 	readonly last_activity_at: string;
 	readonly live_status: string;
+	readonly linked_projects: ReadonlyArray<ProjectRef>;
 	readonly metadata_version: number;
 	readonly pinned: boolean;
+	readonly primary_project: ProjectRef | null;
+	readonly project_affinity_scores: ReadonlyArray<ProjectAffinityScore>;
+	readonly project_locked: boolean;
 	readonly rename_suggestion: string | null;
+	readonly rehome_suggestion: ThreadProjectRehomeSuggestion | null;
 	readonly thread_id: string;
 	readonly title: string;
 	readonly title_locked: boolean;
@@ -64,6 +104,16 @@ export interface ThreadMetadataAcceptance {
 	readonly event: EventEnvelope;
 	readonly status: "accepted" | "duplicate";
 }
+
+/** Carries one backend-owned refinement proposal with durable source-event identity. */
+export const ThreadMetadataRefinementIntent = Schema.Struct({
+	operation_id: Identifier,
+	payload: ThreadMetadataRefineCommand,
+	source_event_id: Identifier,
+	thread_id: Identifier,
+});
+
+export type ThreadMetadataRefinementIntent = typeof ThreadMetadataRefinementIntent.Type;
 
 /** Reports a metadata command targeting an absent, erasing, or erased thread. */
 export class ThreadNotFound extends Data.TaggedError("ThreadNotFound")<{
@@ -79,11 +129,25 @@ export class ThreadMetadataRepository extends Context.Service<
 		readonly Accept: (
 			command: CommandEnvelope,
 		) => Effect.Effect<ThreadMetadataAcceptance, ThreadMetadataError>;
+		readonly Refine: (
+			intent: ThreadMetadataRefinementIntent,
+		) => Effect.Effect<ThreadMetadataAcceptance, ThreadMetadataError>;
+		readonly WasRefined: (
+			source_event_id: string,
+			thread_id: string,
+		) => Effect.Effect<boolean, ThreadMetadataError>;
 	}
 >()("Artisan/ThreadMetadataRepository") {}
 
 const DecodeThreadListItem = (input: StoredThreadProjection) => {
-	const { archived_at, current_goal, rename_suggestion, ...required } = input;
+	const {
+		archived_at,
+		current_goal,
+		primary_project,
+		rename_suggestion,
+		rehome_suggestion,
+		...required
+	} = input;
 
 	return Schema.decodeUnknownEffect(ThreadListItem, {
 		onExcessProperty: "error",
@@ -91,7 +155,9 @@ const DecodeThreadListItem = (input: StoredThreadProjection) => {
 		...required,
 		...(archived_at === null ? {} : { archived_at }),
 		...(current_goal === null ? {} : { current_goal }),
+		...(primary_project === null ? {} : { primary_project }),
 		...(rename_suggestion === null ? {} : { rename_suggestion }),
+		...(rehome_suggestion === null ? {} : { rehome_suggestion }),
 	}).pipe(
 		Effect.mapError(
 			() =>
@@ -102,33 +168,60 @@ const DecodeThreadListItem = (input: StoredThreadProjection) => {
 	);
 };
 
-function command_matches(
-	command: CommandEnvelope,
-	existing: {
-		readonly agent_id: string | null;
-		readonly causation_id: string | null;
-		readonly origin: string;
-		readonly payload_json: string;
-		readonly raw_origin_json: string | null;
-		readonly run_id: string | null;
-		readonly schema_version: number;
-		readonly sent_at: string;
-		readonly thread_id: string;
-	},
-) {
-	return (
-		existing.payload_json === JSON.stringify(command.payload) &&
-		existing.thread_id === command.thread_id &&
-		existing.run_id === (command.run_id ?? null) &&
-		existing.agent_id === (command.agent_id ?? null) &&
-		existing.causation_id === (command.causation_id ?? null) &&
-		existing.origin === command.origin &&
+function operation_matches(operation: MetadataOperation, existing: StoredMetadataCommand) {
+	const identity_matches =
+		existing.agent_id === (operation.agent_id ?? null) &&
+		existing.causation_id === (operation.causation_id ?? null) &&
+		existing.origin === operation.origin &&
+		existing.payload_type === operation.payload.type &&
 		existing.raw_origin_json ===
-			(command.raw_origin ? JSON.stringify(command.raw_origin) : null) &&
-		existing.schema_version === command.schema_version &&
-		existing.sent_at === command.sent_at
+			(operation.raw_origin ? JSON.stringify(operation.raw_origin) : null) &&
+		existing.run_id === (operation.run_id ?? null) &&
+		existing.schema_version === operation.schema_version &&
+		existing.thread_id === operation.thread_id;
+
+	if (!identity_matches || operation.retry_policy === "source") {
+		return identity_matches;
+	}
+
+	return (
+		existing.payload_json === JSON.stringify(operation.payload) &&
+		existing.sent_at === operation.sent_at
 	);
 }
+
+function is_metadata_command(
+	payload: CommandEnvelope["payload"],
+): payload is ThreadMetadataCommand {
+	return (
+		payload.type === "thread.activity.record" ||
+		payload.type === "thread.archive" ||
+		payload.type === "thread.metadata.refine" ||
+		payload.type === "thread.pin" ||
+		payload.type === "thread.rename" ||
+		payload.type === "thread.restore" ||
+		payload.type === "thread.unpin"
+	);
+}
+
+const DecodeJson = <A>(
+	value: string,
+	schema: Schema.ConstraintDecoder<A, never>,
+	context: string,
+) =>
+	Effect.try({
+		catch: () => new JournalInvariantError({ message: `${context} JSON is malformed` }),
+		try: () => JSON.parse(value) as unknown,
+	}).pipe(
+		Effect.flatMap(
+			Schema.decodeUnknownEffect(schema, {
+				onExcessProperty: "error",
+			}),
+		),
+		Effect.mapError(
+			() => new JournalInvariantError({ message: `${context} does not match its schema` }),
+		),
+	);
 
 function max_timestamp(left: string, right: string) {
 	return left < right ? right : left;
@@ -260,11 +353,19 @@ export const ThreadMetadataRepositoryLive = Layer.effect(
 		const metadata = yield* RuntimeMetadata;
 		const notifier = yield* JournalNotifier;
 
-		const ReadDuplicate = (command: CommandEnvelope) =>
+		const ReadDuplicate = (message_id: string) =>
 			database.client
 				.select()
 				.from(JournalEvents)
-				.where(eq(JournalEvents.correlation_id, command.message_id))
+				.where(
+					and(
+						eq(JournalEvents.correlation_id, message_id),
+						or(
+							eq(JournalEvents.event_type, "thread.metadata.updated"),
+							eq(JournalEvents.event_type, "thread.refinement.ignored"),
+						),
+					),
+				)
 				.orderBy(asc(JournalEvents.sequence))
 				.limit(1)
 				.pipe(
@@ -272,100 +373,161 @@ export const ThreadMetadataRepositoryLive = Layer.effect(
 						if (!row) {
 							return Effect.fail(
 								new JournalInvariantError({
-									message: `Command ${command.message_id} has no metadata event`,
+									message: `Command ${message_id} has no metadata event`,
 								}),
 							);
 						}
 
-						return Schema.decodeUnknownEffect(EventEnvelope, {
-							onExcessProperty: "error",
-						})({
-							agent_id: row.agent_id ?? undefined,
-							causation_id: row.causation_id,
-							correlation_id: row.correlation_id,
-							journal_sequence: row.sequence,
-							kind: "event",
-							message_id: row.event_id,
-							origin: row.origin,
-							payload: JSON.parse(row.payload_json) as unknown,
-							protocol_version: 1,
+						return Effect.all({
+							payload: DecodeJson(
+								row.payload_json,
+								EventEnvelope.fields.payload,
+								`Command ${message_id} metadata event payload`,
+							),
 							raw_origin:
 								row.raw_origin_json === null
-									? undefined
-									: (JSON.parse(row.raw_origin_json) as RawOrigin),
-							run_id: row.run_id ?? undefined,
-							schema_version: row.schema_version,
-							sequence: row.stream_sequence,
-							sent_at: row.occurred_at,
-							stream_id: row.stream_id,
-							thread_id: row.thread_id,
+									? Effect.succeed(undefined)
+									: DecodeJson(
+											row.raw_origin_json,
+											EventEnvelope.fields.raw_origin,
+											`Command ${message_id} metadata event raw origin`,
+										),
 						}).pipe(
-							Effect.mapError(
-								() =>
-									new JournalInvariantError({
-										message: `Command ${command.message_id} metadata event is invalid`,
-									}),
+							Effect.flatMap(({ payload, raw_origin }) =>
+								Schema.decodeUnknownEffect(EventEnvelope, {
+									onExcessProperty: "error",
+								})({
+									...(row.agent_id === null ? {} : { agent_id: row.agent_id }),
+									causation_id: row.causation_id,
+									correlation_id: row.correlation_id,
+									journal_sequence: row.sequence,
+									kind: "event",
+									message_id: row.event_id,
+									origin: row.origin,
+									payload,
+									protocol_version: 1,
+									...(raw_origin === undefined ? {} : { raw_origin }),
+									...(row.run_id === null ? {} : { run_id: row.run_id }),
+									schema_version: row.schema_version,
+									sequence: row.stream_sequence,
+									sent_at: row.occurred_at,
+									stream_id: row.stream_id,
+									thread_id: row.thread_id,
+								}),
+							),
+							Effect.mapError((error) =>
+								error instanceof JournalInvariantError
+									? error
+									: new JournalInvariantError({
+											message: `Command ${message_id} metadata event is invalid`,
+										}),
 							),
 						);
 					}),
 					Effect.mapError(normalize_error),
 				);
 
-		const Accept = (command: CommandEnvelope) =>
+		const AcceptOperation = (operation: MetadataOperation) =>
 			Effect.gen(function* () {
-				const payload = command.payload as ThreadMetadataCommand;
+				const payload = operation.payload;
 				const accepted = yield* database.client.transaction((transaction) =>
 					Effect.gen(function* () {
 						const [existing_command] = yield* transaction
-							.select({
-								agent_id: JournalCommands.agent_id,
-								causation_id: JournalCommands.causation_id,
-								origin: JournalCommands.origin,
-								payload_json: JournalCommands.payload_json,
-								raw_origin_json: JournalCommands.raw_origin_json,
-								run_id: JournalCommands.run_id,
-								schema_version: JournalCommands.schema_version,
-								sent_at: JournalCommands.sent_at,
-								thread_id: JournalCommands.thread_id,
-							})
+							.select()
 							.from(JournalCommands)
-							.where(eq(JournalCommands.message_id, command.message_id))
+							.where(eq(JournalCommands.message_id, operation.message_id))
 							.limit(1);
 
 						if (existing_command) {
-							if (!command_matches(command, existing_command)) {
+							if (!operation_matches(operation, existing_command)) {
 								return yield* new CommandIdConflict({
-									message_id: command.message_id,
+									message_id: operation.message_id,
 								});
 							}
 
-							return { _tag: "Duplicate" as const };
+							return {
+								_tag: "Duplicate" as const,
+								message_id: operation.message_id,
+							};
+						}
+
+						if (operation.retry_policy === "source") {
+							const source_event_id = operation.causation_id;
+
+							if (!source_event_id) {
+								return yield* new JournalInvariantError({
+									message: "Automatic thread refinement has no source event",
+								});
+							}
+
+							const [existing_source] = yield* transaction
+								.select()
+								.from(JournalCommands)
+								.where(
+									and(
+										eq(JournalCommands.causation_id, source_event_id),
+										eq(JournalCommands.origin, "backend"),
+										eq(JournalCommands.payload_type, "thread.metadata.refine"),
+										eq(JournalCommands.thread_id, operation.thread_id),
+									),
+								)
+								.limit(1);
+
+							if (existing_source) {
+								if (!operation_matches(operation, existing_source)) {
+									return yield* new CommandIdConflict({
+										message_id: operation.message_id,
+									});
+								}
+
+								return {
+									_tag: "Duplicate" as const,
+									message_id: existing_source.message_id,
+								};
+							}
 						}
 
 						const [blocked] = yield* transaction
 							.select({ thread_id: ThreadErasureClaims.thread_id })
 							.from(ThreadErasureClaims)
-							.where(eq(ThreadErasureClaims.thread_id, command.thread_id))
+							.where(eq(ThreadErasureClaims.thread_id, operation.thread_id))
 							.limit(1);
 						const [deleted] = yield* transaction
 							.select({ thread_id: ThreadTombstones.thread_id })
 							.from(ThreadTombstones)
-							.where(eq(ThreadTombstones.thread_id, command.thread_id))
+							.where(eq(ThreadTombstones.thread_id, operation.thread_id))
 							.limit(1);
 						const [current] = yield* transaction
 							.select()
 							.from(Threads)
-							.where(eq(Threads.thread_id, command.thread_id))
+							.where(eq(Threads.thread_id, operation.thread_id))
 							.limit(1);
 
 						if (!current || blocked || deleted) {
-							return yield* new ThreadNotFound({ thread_id: command.thread_id });
+							return yield* new ThreadNotFound({ thread_id: operation.thread_id });
 						}
 
+						const current_projection = yield* DecodeThreadProjection(current);
+						const stored_current: StoredThreadProjection = {
+							...current_projection,
+							affinity_version: current_projection.affinity_version,
+							archived_at: current_projection.archived_at ?? null,
+							current_goal: current_projection.current_goal ?? null,
+							linked_projects: current_projection.linked_projects,
+							primary_project: current_projection.primary_project ?? null,
+							project_affinity_scores: current_projection.project_affinity_scores,
+							project_locked: current_projection.project_locked,
+							rename_suggestion: current_projection.rename_suggestion ?? null,
+							rehome_suggestion: current_projection.rehome_suggestion ?? null,
+						};
 						const occurred_at = yield* metadata.Now;
-						const transition = yield* MakeTransition(current, payload, occurred_at);
+						const transition = yield* MakeTransition(
+							stored_current,
+							payload,
+							occurred_at,
+						);
 						const event_payload = transition.event_payload;
-						const stream_id = `thread:${command.thread_id}`;
+						const stream_id = `thread:${operation.thread_id}`;
 						const [stream] = yield* transaction
 							.select({ last_sequence: EventStreams.last_sequence })
 							.from(EventStreams)
@@ -374,7 +536,7 @@ export const ThreadMetadataRepositoryLive = Layer.effect(
 
 						if (!stream) {
 							return yield* new JournalInvariantError({
-								message: `Thread ${command.thread_id} has no event stream`,
+								message: `Thread ${operation.thread_id} has no event stream`,
 							});
 						}
 
@@ -383,20 +545,20 @@ export const ThreadMetadataRepositoryLive = Layer.effect(
 
 						yield* transaction.insert(JournalCommands).values({
 							accepted_at: occurred_at,
-							agent_id: command.agent_id ?? null,
-							causation_id: command.causation_id ?? null,
-							message_id: command.message_id,
-							origin: command.origin,
-							payload_json: JSON.stringify(command.payload),
-							payload_type: command.payload.type,
-							raw_origin_json: command.raw_origin
-								? JSON.stringify(command.raw_origin)
+							agent_id: operation.agent_id ?? null,
+							causation_id: operation.causation_id ?? null,
+							message_id: operation.message_id,
+							origin: operation.origin,
+							payload_json: JSON.stringify(operation.payload),
+							payload_type: operation.payload.type,
+							raw_origin_json: operation.raw_origin
+								? JSON.stringify(operation.raw_origin)
 								: null,
-							run_id: command.run_id ?? null,
-							schema_version: command.schema_version,
-							sent_at: command.sent_at,
+							run_id: operation.run_id ?? null,
+							schema_version: operation.schema_version,
+							sent_at: operation.sent_at ?? occurred_at,
 							status: "accepted",
-							thread_id: command.thread_id,
+							thread_id: operation.thread_id,
 						});
 						if (transition.projection) {
 							const projection = transition.projection;
@@ -417,7 +579,7 @@ export const ThreadMetadataRepositoryLive = Layer.effect(
 									title_source: projection.title_source,
 									updated_at: projection.updated_at,
 								})
-								.where(eq(Threads.thread_id, command.thread_id));
+								.where(eq(Threads.thread_id, operation.thread_id));
 						}
 						yield* transaction
 							.update(EventStreams)
@@ -426,51 +588,56 @@ export const ThreadMetadataRepositoryLive = Layer.effect(
 						const [event_row] = yield* transaction
 							.insert(JournalEvents)
 							.values({
-								agent_id: command.agent_id ?? null,
-								causation_id: command.message_id,
-								correlation_id: command.message_id,
+								agent_id: operation.agent_id ?? null,
+								causation_id: operation.event_causation_id,
+								correlation_id: operation.message_id,
 								event_id,
 								event_type: event_payload.type,
 								occurred_at,
 								origin: "backend",
 								payload_json: JSON.stringify(event_payload),
-								raw_origin_json: command.raw_origin
-									? JSON.stringify(command.raw_origin)
+								raw_origin_json: operation.raw_origin
+									? JSON.stringify(operation.raw_origin)
 									: null,
-								run_id: command.run_id ?? null,
+								run_id: operation.run_id ?? null,
 								schema_version: 1,
 								stream_id,
 								stream_sequence: sequence,
-								thread_id: command.thread_id,
+								thread_id: operation.thread_id,
 							})
 							.returning({ journal_sequence: JournalEvents.sequence });
 
 						return {
 							_tag: "Accepted" as const,
 							event: {
-								...(command.agent_id ? { agent_id: command.agent_id } : {}),
-								causation_id: command.message_id,
-								correlation_id: command.message_id,
+								...(operation.agent_id ? { agent_id: operation.agent_id } : {}),
+								causation_id: operation.event_causation_id,
+								correlation_id: operation.message_id,
 								journal_sequence: event_row!.journal_sequence,
 								kind: "event" as const,
 								message_id: event_id,
 								origin: "backend" as const,
 								payload: event_payload,
 								protocol_version: 1 as const,
-								...(command.raw_origin ? { raw_origin: command.raw_origin } : {}),
-								...(command.run_id ? { run_id: command.run_id } : {}),
+								...(operation.raw_origin
+									? { raw_origin: operation.raw_origin }
+									: {}),
+								...(operation.run_id ? { run_id: operation.run_id } : {}),
 								schema_version: 1 as const,
 								sequence,
 								sent_at: occurred_at,
 								stream_id,
-								thread_id: command.thread_id,
+								thread_id: operation.thread_id,
 							} satisfies EventEnvelope,
 						};
 					}),
 				);
 
 				if (accepted._tag === "Duplicate") {
-					return { event: yield* ReadDuplicate(command), status: "duplicate" as const };
+					return {
+						event: yield* ReadDuplicate(accepted.message_id),
+						status: "duplicate" as const,
+					};
 				}
 
 				yield* notifier.Publish(accepted.event.journal_sequence);
@@ -478,6 +645,73 @@ export const ThreadMetadataRepositoryLive = Layer.effect(
 				return { event: accepted.event, status: "accepted" as const };
 			}).pipe(Effect.mapError(normalize_error));
 
-		return { Accept };
+		const Accept = (command: CommandEnvelope) => {
+			if (!is_metadata_command(command.payload)) {
+				return Effect.fail(
+					new JournalInvariantError({
+						message: "Thread metadata received an unsupported command",
+					}),
+				);
+			}
+
+			return AcceptOperation({
+				...(command.agent_id ? { agent_id: command.agent_id } : {}),
+				...(command.causation_id ? { causation_id: command.causation_id } : {}),
+				event_causation_id: command.message_id,
+				message_id: command.message_id,
+				origin: "frontend",
+				payload: command.payload,
+				...(command.raw_origin ? { raw_origin: command.raw_origin } : {}),
+				retry_policy: "exact",
+				...(command.run_id ? { run_id: command.run_id } : {}),
+				schema_version: command.schema_version,
+				sent_at: command.sent_at,
+				thread_id: command.thread_id,
+			});
+		};
+
+		const Refine = (intent: ThreadMetadataRefinementIntent) =>
+			Schema.decodeUnknownEffect(ThreadMetadataRefinementIntent, {
+				onExcessProperty: "error",
+			})(intent).pipe(
+				Effect.mapError(
+					() =>
+						new JournalInvariantError({
+							message: "Automatic thread metadata refinement intent is invalid",
+						}),
+				),
+				Effect.flatMap((decoded) =>
+					AcceptOperation({
+						causation_id: decoded.source_event_id,
+						event_causation_id: decoded.source_event_id,
+						message_id: decoded.operation_id,
+						origin: "backend",
+						payload: decoded.payload,
+						retry_policy: "source",
+						schema_version: 1,
+						thread_id: decoded.thread_id,
+					}),
+				),
+			);
+
+		const WasRefined = (source_event_id: string, thread_id: string) =>
+			database.client
+				.select({ message_id: JournalCommands.message_id })
+				.from(JournalCommands)
+				.where(
+					and(
+						eq(JournalCommands.causation_id, source_event_id),
+						eq(JournalCommands.origin, "backend"),
+						eq(JournalCommands.payload_type, "thread.metadata.refine"),
+						eq(JournalCommands.thread_id, thread_id),
+					),
+				)
+				.limit(1)
+				.pipe(
+					Effect.map((rows) => rows.length > 0),
+					Effect.mapError(normalize_error),
+				);
+
+		return { Accept, Refine, WasRefined };
 	}),
 );
