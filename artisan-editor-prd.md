@@ -653,9 +653,9 @@ module. Its interface should stay small:
   implementation plan.
 
 Everything complicated should live behind that module: native engine subagent
-features, CLI thread switching, worktree isolation, sandbox inheritance,
-approval routing, result summarization, conflict detection, timeout handling,
-and cost/usage visibility.
+features, CLI thread switching, shared-workspace mutation coordination, sandbox
+inheritance, approval routing, result summarization, conflict detection,
+timeout handling, and cost/usage visibility.
 
 Artisan should model agents as product objects:
 
@@ -668,8 +668,8 @@ Artisan should model agents as product objects:
 - `native_agent_name`: provider-specific agent name, if the engine has one.
 - `native_display_name`: provider-specific nickname or label, if the engine has
   one.
-- `scope`: repo, files, branch/worktree, issue, test command, terminal, or
-  document set.
+- `scope`: repo, files, change set, issue, test command, terminal, or document
+  set.
 - `status`: current lifecycle state.
 - `summary_contract`: what the agent must return to the coordinator.
 - `artifacts`: findings, diffs, logs, branches, terminal sessions, and files
@@ -701,12 +701,64 @@ Durable orchestration model:
 - Dispatch uses durable leases and an outbox so a backend restart can recover
   unstarted work, mark abandoned attempts interrupted, and retry only when the
   assignment policy permits it.
-- Workspace isolation belongs to each assignment. Shared-workspace execution
-  is an explicit policy; write-capable parallel assignments should default to
-  separate worktrees once worktree management exists.
 - The public protocol exposes graph snapshots and ordered patches. Raw native
   subagent events remain inspectable, but the frontend never reconstructs the
   orchestration graph from provider-specific output.
+
+### Shared Workspace Collaboration Contract
+
+Artisan should follow the user's existing Git mental model rather than replacing
+it with hidden agent infrastructure. The user opens a project, chooses or creates
+the branch that represents the intended body of work, and then asks agents to
+work. From that point onward, the visible checkout is the work. Every accepted
+agent edit should appear in that checkout, in its ordinary `git diff`, and in the
+pull request created from that branch.
+
+The user should never need a cleanup session to discover which worktree, hidden
+branch, temporary commit, or agent-owned directory contains the implementation.
+There must be one obvious answer to "where is my work?": the workspace and branch
+currently shown by Artisan. The right pane's branch, changed-file, and diff state
+must describe that same checkout rather than an aggregate reconstructed from
+hidden copies.
+
+This produces the following product invariants:
+
+- All agents in an orchestration group collaborate in the same checked-out
+  workspace and current branch, whether that branch is `main`, `master`, or a
+  user-selected feature branch. Accepted changes become immediately visible to
+  every other agent working there.
+- Artisan must never create, attach, hide, retain, or clean up Git worktrees for
+  agent isolation. Provider features that normally create worktrees must be
+  disabled, bypassed, or adapted before they can run as an Artisan writer.
+- Artisan must not silently create per-agent branches or temporary commits to
+  coordinate ordinary edits. Branch creation, checkout, commit, merge, rebase,
+  and push remain explicit user-visible Git actions.
+- The Artisan mutation protocol, durable change ledger, and bounded claims are
+  the concurrency authority. They attribute edits, serialize or reject
+  overlapping writes, expose conflicts, and recover interrupted mutations in
+  the shared checkout.
+- Agents must read the latest accepted workspace state before applying a change.
+  An agent cannot continue writing against a private stale copy while another
+  agent's accepted edits remain invisible to it.
+- Non-overlapping claims may execute concurrently. Overlapping claims must be
+  queued, rejected, or returned for explicit reconciliation; Artisan must not
+  solve the overlap by silently forking the filesystem.
+- Starting, stopping, retrying, or deleting an agent must not move its work to a
+  different directory. Completed and partial accepted changes remain visible in
+  the shared workspace and retain their operation and agent attribution.
+- A Git repository must not be required for change tracking, review, rollback,
+  or multi-agent collaboration. Git remains an optional integration for status,
+  commits, remotes, pull requests, and user-directed branch operations after
+  Artisan has coordinated the live workspace.
+- Work that genuinely requires an incompatible dependency tree or destructive
+  experimentation should use a separately opened project workspace chosen
+  explicitly by the user. Artisan must present that as a different workspace,
+  not disguise it as an implementation detail of the current task.
+
+The no-worktree rule is a product guarantee, not a default that providers,
+models, advanced settings, or orchestration policies may override. If an engine
+cannot perform a write-capable assignment without creating a worktree, Artisan
+should report that capability as unsupported and use another execution path.
 
 Agent name bank:
 
@@ -2041,10 +2093,14 @@ Right pane relationship:
   thread, run, agent, command, before/after identity, and review state. Watcher
   events represent external or unattributed changes until they can be matched
   to a controlled operation.
+- The change-tracking service is authoritative even when the workspace has no
+  `.git` directory. Concurrent agents edit one shared branch and coordinate
+  through durable Artisan claims rather than Git indexes, temporary commits,
+  branches, or worktrees.
 - Git reads should use argv-only process execution behind an Effect Service,
   with bounded stdout, stderr, and patch bytes. Porcelain parsing belongs in
   the Git adapter; the public model exposes staged, unstaged, untracked,
-  conflicted, branch, head, worktree, and aggregate diff facts.
+  conflicted, branch, head, working-tree, and aggregate diff facts.
 - Git mutations are a separate approval-bearing command surface. A read model
   must not quietly grow checkout, reset, clean, commit, or push methods.
 - The right pane should be a persistent session stack, not a hidden or rarely
@@ -2294,6 +2350,17 @@ Right pane relationship:
 - Agent orchestration tests should verify agent roster projections, fan-out
   group topology, visible identity mapping, steering, stop/close behavior,
   result joins, and native-provider metadata preservation.
+- Shared-workspace orchestration tests should verify that parallel writers use
+  the one visible checkout and current branch, observe each other's accepted
+  changes, serialize or reject overlapping claims, and leave no Git worktrees,
+  hidden branches, temporary commits, or agent-owned checkout directories after
+  success, failure, cancellation, retry, or backend restart.
+- Non-Git workspace tests should run the same concurrent change, attribution,
+  review, rollback, and restart scenarios in a folder without `.git`, proving
+  that Git is not the source of truth for Artisan collaboration.
+- Branch-integrity tests should verify that Artisan never changes the selected
+  branch as a side effect of spawning an agent and that the visible branch diff
+  contains every accepted agent edit intended for the eventual pull request.
 - Agent name bank tests should verify user-supplied names, uniqueness within a
   fan-out group, role label preservation, exhausted-list fallback, and provider
   nickname metadata preservation.
@@ -2640,3 +2707,11 @@ Right pane relationship:
   writer/delete sharing, and keeps in-flight reads alive across deterministic
   store closure. Exact-handle replacement/finalization and production MSVC
   loading remain later gates.
+- 2026-07-12: Multi-agent writes use one shared checked-out workspace and branch.
+  Artisan does not create Git worktrees for agent isolation; its mutation
+  protocol and durable change ledger coordinate overlapping edits and work even
+  when the folder is not a Git repository.
+- 2026-07-12: The no-worktree rule is a user-facing product guarantee. The
+  selected workspace and branch are the single discoverable location of all
+  accepted agent work; providers may not create hidden worktrees, branches, or
+  temporary commits behind that mental model.
