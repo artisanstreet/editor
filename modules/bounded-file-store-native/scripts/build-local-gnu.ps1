@@ -1,3 +1,7 @@
+param(
+	[switch]$TestHooks
+)
+
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
@@ -6,8 +10,14 @@ if ($env:ARTISAN_RUN_NATIVE_ADDON_SMOKE -ne "1") {
 }
 
 $module_root = Split-Path -Parent $PSScriptRoot
-$repository_root = Resolve-Path (Join-Path $module_root "..\..")
-$output = Join-Path $repository_root ".dist\bounded-file-store-native"
+$repository_root = (Resolve-Path (Join-Path $module_root "..\..")).Path
+$output_name = if ($TestHooks) {
+	"bounded-file-store-native-gnu-test"
+} else {
+	"bounded-file-store-native-gnu"
+}
+$output = Join-Path $repository_root ".dist\$output_name"
+$target_directory = Join-Path $output "cargo"
 $napi_dependency_link_placeholder = Join-Path $output "gnu-node-link-placeholder"
 $winget_packages = Join-Path $env:LOCALAPPDATA "Microsoft\WinGet\Packages"
 $winlibs = Get-ChildItem -LiteralPath $winget_packages -Directory -Filter "BrechtSanders.WinLibs.POSIX.UCRT*" |
@@ -35,6 +45,20 @@ foreach ($required in @($gcc, $dlltool, $napi, $tsc)) {
 	}
 }
 
+foreach ($directory in @(
+		(Join-Path $repository_root ".dist"),
+		$output,
+		$target_directory,
+		$napi_dependency_link_placeholder
+	)) {
+	if (
+		(Test-Path -LiteralPath $directory) -and
+		((Get-Item -Force -LiteralPath $directory).Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+	) {
+		throw "Refusing to build through a reparse directory: $directory"
+	}
+}
+
 New-Item -ItemType Directory -Path $napi_dependency_link_placeholder -Force | Out-Null
 
 $placeholder_dll = Join-Path $napi_dependency_link_placeholder "libnode.dll"
@@ -49,16 +73,48 @@ if (!(Test-Path -LiteralPath $placeholder_dll -PathType Leaf) -or !(Test-Path -L
 	}
 }
 
+$environment_names = @(
+	"PATH",
+	"RUSTUP_TOOLCHAIN",
+	"CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER",
+	"CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS",
+	"LIBNODE_PATH",
+	"ARTISAN_RUN_NATIVE_READ_SMOKE"
+)
+$saved_environment = @{}
+
+foreach ($name in $environment_names) {
+	$saved_environment[$name] = [Environment]::GetEnvironmentVariable($name, "Process")
+}
+
+try {
 $env:PATH = "$winlibs_bin;$env:USERPROFILE\.cargo\bin;$env:PATH"
 $env:RUSTUP_TOOLCHAIN = "1.97.0-x86_64-pc-windows-gnu"
 $env:CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER = $gcc
 $env:CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS = "-C dlltool=$dlltool -C link-self-contained=no"
 $env:LIBNODE_PATH = $napi_dependency_link_placeholder
+$arguments = @(
+	"build",
+	"--platform",
+	"--release",
+	"--target",
+	"x86_64-pc-windows-gnu",
+	"--target-dir",
+	$target_directory,
+	"--output-dir",
+	$output,
+	"--js",
+	"index.cjs"
+)
+
+if ($TestHooks) {
+	$arguments += @("--features", "native-test-hooks")
+}
 
 Push-Location $module_root
 
 try {
-	& $napi build --platform --target x86_64-pc-windows-gnu --target-dir "../../.dist/bounded-file-store-native/cargo" --output-dir "../../.dist/bounded-file-store-native" --js index.cjs
+	& $napi @arguments
 
 	if ($LASTEXITCODE -ne 0) {
 		throw "The GNU N-API build failed"
@@ -81,18 +137,26 @@ if ($LASTEXITCODE -ne 0) {
 
 $direct_descriptor = $direct_descriptor_json | ConvertFrom-Json
 
-if ($direct_descriptor.operatingSystem -ne "windows" -or $direct_descriptor.architecture -ne "x86_64" -or $direct_descriptor.target -ne "x86_64-pc-windows-gnu") {
+if (
+	$direct_descriptor.operatingSystem -ne "windows" -or
+	$direct_descriptor.architecture -ne "x86_64" -or
+	$direct_descriptor.target -ne "x86_64-pc-windows-gnu" -or
+	$direct_descriptor.testHooksEnabled -ne [bool]$TestHooks
+) {
 	throw "The direct GNU N-API smoke descriptor was unexpected: $($direct_descriptor | ConvertTo-Json -Compress)"
 }
 
 if (Test-Path -LiteralPath $loader_binding) {
-	throw "Refusing to overwrite an existing production MSVC binding: $loader_binding"
+	throw "Refusing to overwrite an existing generated-loader binding: $loader_binding"
 }
 
-Copy-Item -LiteralPath $binding -Destination $loader_binding
+$temporary_loader_alias_created = $false
 
 try {
-	$loader_descriptor_json = & node -e "const binding = require(process.argv[1]); process.stdout.write(JSON.stringify(binding.getNativeBuildDescriptor()));" $module_root
+	New-Item -ItemType HardLink -Path $loader_binding -Value $binding -ErrorAction Stop | Out-Null
+	$temporary_loader_alias_created = $true
+
+	$loader_descriptor_json = & node -e "const binding = require(process.argv[1]); process.stdout.write(JSON.stringify(binding.getNativeBuildDescriptor()));" $loader
 
 	if ($LASTEXITCODE -ne 0) {
 		throw "The generated GNU N-API package loader failed to load"
@@ -100,37 +164,51 @@ try {
 
 	$loader_descriptor = $loader_descriptor_json | ConvertFrom-Json
 
-	if ($loader_descriptor.operatingSystem -ne "windows" -or $loader_descriptor.architecture -ne "x86_64" -or $loader_descriptor.target -ne "x86_64-pc-windows-gnu") {
+	if (
+		$loader_descriptor.operatingSystem -ne "windows" -or
+		$loader_descriptor.architecture -ne "x86_64" -or
+		$loader_descriptor.target -ne "x86_64-pc-windows-gnu" -or
+		$loader_descriptor.testHooksEnabled -ne [bool]$TestHooks
+	) {
 		throw "The generated-loader GNU smoke descriptor was unexpected: $($loader_descriptor | ConvertTo-Json -Compress)"
 	}
 
 	$env:ARTISAN_RUN_NATIVE_READ_SMOKE = "1"
-	& node (Join-Path $repository_root ".tests\bounded-file-store-native\native-read-smoke.cjs") $module_root
+	& node (Join-Path $repository_root ".tests\bounded-file-store-native\native-read-smoke.cjs") $loader
 
 	if ($LASTEXITCODE -ne 0) {
 		throw "The native bounded file store read smoke test failed"
 	}
 
-	$replace_smoke_failed = $false
-
 	if ($env:ARTISAN_RUN_NATIVE_REPLACE_SMOKE -eq "1") {
-		& node (Join-Path $repository_root ".tests\bounded-file-store-native\native-replace-smoke.cjs") $module_root
+		& node (Join-Path $repository_root ".tests\bounded-file-store-native\native-replace-smoke.cjs") $loader
 
 		if ($LASTEXITCODE -ne 0) {
-			$replace_smoke_failed = $true
+			throw "The native bounded file store replacement smoke test failed"
+		}
+	}
+
+	if ($env:ARTISAN_RUN_NATIVE_CRASH_SMOKE -eq "1") {
+		& node (Join-Path $repository_root ".tests\bounded-file-store-native\native-replace-crash-smoke.cjs") $loader
+
+		if ($LASTEXITCODE -ne 0) {
+			throw "The native bounded file store crash recovery smoke test failed"
 		}
 	}
 } finally {
-	Remove-Item -LiteralPath $loader_binding -Force
+	if ($temporary_loader_alias_created) {
+		Remove-Item -LiteralPath $loader_binding -Force
+	}
 }
 
-$type_smoke_source = @'
+if (!$TestHooks) {
+	$type_smoke_source = @'
 import {
 	getNativeBuildDescriptor,
 	NativeBoundedRegularFileStore,
 	type NativeReplaceRegularFileOptions,
 	type NativeBuildDescriptor,
-} from "../../modules/bounded-file-store-native";
+} from "./index";
 
 const descriptor: NativeBuildDescriptor = getNativeBuildDescriptor();
 const test_hooks_enabled: boolean = descriptor.testHooksEnabled;
@@ -155,23 +233,25 @@ void finalization;
 store.close();
 '@
 
-[System.IO.File]::WriteAllText($type_smoke, $type_smoke_source, [System.Text.UTF8Encoding]::new($false))
+	[System.IO.File]::WriteAllText($type_smoke, $type_smoke_source, [System.Text.UTF8Encoding]::new($false))
 
-try {
-	& $tsc --ignoreConfig --noEmit --strict --skipLibCheck --module ESNext --moduleResolution Bundler --target ES2024 $type_smoke
+	try {
+		& $tsc --ignoreConfig --noEmit --strict --skipLibCheck --module ESNext --moduleResolution Bundler --target ES2024 $type_smoke
 
-	if ($LASTEXITCODE -ne 0) {
-		throw "The generated N-API declaration consumer failed to typecheck"
+		if ($LASTEXITCODE -ne 0) {
+			throw "The generated N-API declaration consumer failed to typecheck"
+		}
+	} finally {
+		Remove-Item -LiteralPath $type_smoke -Force
 	}
-} finally {
-	Remove-Item -LiteralPath $type_smoke -Force
-}
-
-if ($replace_smoke_failed) {
-	throw "The native bounded file store replacement smoke test failed"
 }
 
 [PSCustomObject]@{
 	direct = $direct_descriptor
 	loader = $loader_descriptor
 } | ConvertTo-Json -Compress
+} finally {
+	foreach ($name in $environment_names) {
+		[Environment]::SetEnvironmentVariable($name, $saved_environment[$name], "Process")
+	}
+}
