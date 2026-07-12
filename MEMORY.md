@@ -14,9 +14,10 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Branch: `codex/backend-services`
 - [x] Package manager: pnpm 11.7.0
 - [x] Stack: TypeScript 7, Effect 4 beta, Drizzle 1 RC, SQLite
-- [x] Latest verified implementation checkpoint: `54feea9 feat: discard rejected mutation bytes`
-- [x] Local `HEAD`, upstream, and `origin/codex/backend-services` were equal at `54feea9` before this documentation update.
+- [x] Latest verified implementation checkpoint: `cc9bedc feat: execute controlled workspace replacements`
+- [x] Local `HEAD`, upstream, and `origin/codex/backend-services` were equal at `cc9bedc` before this documentation update.
 - [x] `ARTISAN_RUN_NATIVE_ADDON_SMOKE=1 pnpm --filter @artisan/bounded-file-store-native verify:local` is the canonical native gate and passes locally for production reads/replacement, test-hook races, and process-crash recovery.
+- [x] Routine development verification is local-first. Do not recreate temporary GitHub Actions, remote runners, or similar testing detours; future CI is a real clean-checkout/release gate and never a substitute for local validation.
 - [x] Model Behaviour is committed as focused protocol, persistence, provider, service, composition, transport, and security changes.
 - [x] Local GitHub account: `sandersonstabo`; `origin` -> `https://github.com/sandersonstabo/artisan-editor.git`; GitHub visibility was verified as `PRIVATE` on 2026-07-12.
 - [x] Commit every coherent, verified checkpoint as a small, focused, independently understandable change. Never bundle unrelated dirty work into the same commit and never push `main` or `master` without explicit approval.
@@ -126,7 +127,7 @@ Implemented, independently reviewed, committed, and verified:
 - [x] Diagnosis-only phase tracing was removed after acceptance. Fresh independent review found no P0-P2 cleanup regression and confirmed all 13 crash call sites plus the replacement rendezvous remain unchanged.
 - [x] GNU default/test-hook checks and Clippy pass with warnings denied. The local verifier restores its caller environment, rejects reparse output children, never clobbers MSVC output, and removes temporary loader aliases on success or failure.
 - [x] Focused commits: `68fb9ed fix: recognize competing native receipts` and `fc3e818 test: verify native mutation locally`.
-- [x] The temporary GitHub Actions workflow was removed at the user's request. Local execution completed repeatedly without another bugcheck; the original `rcbottom.sys` incident evidence remains preserved as history.
+- [x] The temporary GitHub Actions workflow was removed at the user's request and must not be recreated for routine testing. The canonical native gate passed locally again on 2026-07-12 without another bugcheck; the original `rcbottom.sys` incident evidence remains preserved as history.
 
 ## Completed Scoped Native Effect Adapter
 
