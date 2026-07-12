@@ -180,6 +180,32 @@ export {
 	type WorkspaceEvidenceRecorderError,
 	type WorkspaceEvidenceTrace,
 } from "./workspace/workspace-evidence-recorder";
+export {
+	WorkspaceChangeIdConflict,
+	WorkspaceChangeRepository,
+	WorkspaceChangeRepositoryLive,
+	WorkspaceChangeTransitionError,
+	type ClaimReplace,
+	type ClaimReview,
+	type ClaimRollback,
+	type WorkspaceChangeClaim,
+	type WorkspaceChangeCommit,
+	type WorkspaceChangeEvent,
+	type WorkspaceChangeOperation,
+	type WorkspaceChangeRepositoryError,
+} from "./workspace/workspace-change-repository";
+export {
+	WorkspaceSnapshotStore,
+	WorkspaceSnapshotStoreConflict,
+	WorkspaceSnapshotStoreInvalid,
+	WorkspaceSnapshotStoreLive,
+	WorkspaceSnapshotStoreUnavailable,
+	type WorkspaceSnapshotConsumeInput,
+	type WorkspaceSnapshotExistsInput,
+	type WorkspaceSnapshotReadInput,
+	type WorkspaceSnapshotStageInput,
+	type WorkspaceSnapshotStoreError,
+} from "./workspace/workspace-snapshot-store";
 export { AgentOrchestrator } from "./orchestration/agent-orchestrator";
 export {
 	AgentGraphOrchestrator,

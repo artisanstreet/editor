@@ -28,6 +28,7 @@ import {
 	ThreadErasureClaims,
 	WorkspaceChangeOperations,
 	WorkspaceChanges,
+	WorkspaceChangeSnapshots,
 } from "../../modules/backend/src/persistence/schema";
 import { ThreadReadModel } from "../../modules/backend/src/persistence/thread-read-model";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
@@ -270,6 +271,16 @@ describe("thread erasure replay", () => {
 							version: 1,
 							workspace_id: "secret_workspace",
 						});
+						yield* database.client.insert(WorkspaceChangeSnapshots).values({
+							byte_count: 22,
+							change_id: "secret_workspace_snapshot",
+							content: Buffer.from("private rollback bytes"),
+							content_hash: "c".repeat(64),
+							created_at: now.value,
+							state: "available",
+							thread_id: "thread_erased",
+							updated_at: now.value,
+						});
 
 						yield* database.client.insert(ThreadErasureClaims).values({
 							claimed_at: "2026-07-10T18:04:00.000Z",
@@ -337,6 +348,9 @@ describe("thread erasure replay", () => {
 							workspace_changes: yield* database.client
 								.select()
 								.from(WorkspaceChanges),
+							workspace_change_snapshots: yield* database.client
+								.select()
+								.from(WorkspaceChangeSnapshots),
 						};
 					}),
 				),
@@ -478,6 +492,7 @@ describe("thread erasure replay", () => {
 			).toHaveLength(4);
 			expect(result.workspace_change_operations).toEqual([]);
 			expect(result.workspace_changes).toEqual([]);
+			expect(result.workspace_change_snapshots).toEqual([]);
 		} finally {
 			await runtime.dispose();
 		}

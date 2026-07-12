@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { NodeCrypto } from "@effect/platform-node-shared";
 import { Layer, ManagedRuntime } from "effect";
 
 import { type Engine, make_engine_registry_layer } from "@artisan/engines";
@@ -78,7 +79,9 @@ import {
 import { ModelBehaviourRepositoryLive } from "../model-behaviour/model-behaviour-repository";
 import { ModelBehaviourRegistryError } from "../model-behaviour/model-behaviour-registry";
 import { ModelBehaviourServiceLive } from "../model-behaviour/model-behaviour-service";
+import { WorkspaceChangeRepositoryLive } from "../workspace/workspace-change-repository";
 import { WorkspaceEvidenceRecorderLive } from "../workspace/workspace-evidence-recorder";
+import { WorkspaceSnapshotStoreLive } from "../workspace/workspace-snapshot-store";
 
 export interface BackendOptions {
 	readonly database_path: string;
@@ -138,6 +141,13 @@ export function make_backend_layer(options: BackendOptions) {
 		ThreadReadModelLive,
 	).pipe(Layer.provideMerge(infrastructure));
 	const workspace_evidence = WorkspaceEvidenceRecorderLive.pipe(Layer.provideMerge(persistence));
+	const workspace_changes = WorkspaceChangeRepositoryLive.pipe(
+		Layer.provideMerge(infrastructure),
+	);
+	const workspace_snapshots = WorkspaceSnapshotStoreLive.pipe(
+		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(infrastructure),
+	);
 	const engine_registry = make_engine_registry_layer(options.engines ?? []);
 	const guidance_repository = GlobalGuidanceRepositoryLive.pipe(Layer.provideMerge(persistence));
 	const guidance_directory = join(dirname(options.database_path), "guidance");
@@ -255,7 +265,9 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(project_affinity_coordination),
 		Layer.provideMerge(guidance),
 		Layer.provideMerge(model_behaviour),
+		Layer.provideMerge(workspace_changes),
 		Layer.provideMerge(workspace_evidence),
+		Layer.provideMerge(workspace_snapshots),
 	);
 }
 

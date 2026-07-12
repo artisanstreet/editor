@@ -1,5 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
+	blob,
+	check,
 	index,
 	integer,
 	primaryKey,
@@ -7,6 +9,8 @@ import {
 	text,
 	uniqueIndex,
 } from "drizzle-orm/sqlite-core";
+
+import { workspace_text_maximum_bytes } from "@artisan/protocol";
 
 export const JournalCommands = sqliteTable(
 	"journal_commands",
@@ -245,6 +249,49 @@ export const WorkspaceChanges = sqliteTable(
 		uniqueIndex("workspace_changes_source_command_unique").on(table.source_command_id),
 		index("workspace_changes_thread_id_index").on(table.thread_id),
 		index("workspace_changes_thread_workspace_index").on(table.thread_id, table.workspace_id),
+	],
+);
+
+/** Stores opaque rollback bytes outside all journal and workspace-change projections. */
+export const WorkspaceChangeSnapshots = sqliteTable(
+	"workspace_change_snapshots",
+	{
+		change_id: text("change_id").primaryKey(),
+		thread_id: text("thread_id").notNull(),
+		state: text("state").notNull(),
+		content: blob("content", { mode: "buffer" }),
+		byte_count: integer("byte_count"),
+		content_hash: text("content_hash"),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		index("workspace_change_snapshots_thread_id_index").on(table.thread_id),
+		check(
+			"workspace_change_snapshots_state_check",
+			sql`${table.state} IN ('available', 'consumed')`,
+		),
+		check(
+			"workspace_change_snapshots_content_check",
+			sql`
+				(
+					${table.state} = 'available'
+					AND ${table.content} IS NOT NULL
+					AND ${table.byte_count} IS NOT NULL
+					AND ${table.content_hash} IS NOT NULL
+					AND length(${table.content}) = ${table.byte_count}
+					AND ${table.byte_count} BETWEEN 0 AND ${sql.raw(String(workspace_text_maximum_bytes))}
+					AND length(${table.content_hash}) = 64
+					AND ${table.content_hash} NOT GLOB '*[^0-9a-f]*'
+				)
+				OR (
+					${table.state} = 'consumed'
+					AND ${table.content} IS NULL
+					AND ${table.byte_count} IS NULL
+					AND ${table.content_hash} IS NULL
+				)
+			`,
+		),
 	],
 );
 
