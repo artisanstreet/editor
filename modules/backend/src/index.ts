@@ -255,6 +255,20 @@ export {
 	type ReplaceRegularFileResult,
 } from "./filesystem/bounded-regular-file-store";
 export {
+	BuildNativeBoundedRegularFileStore,
+	make_native_bounded_regular_file_store_layer,
+	NativeBoundedRegularFileStoreInitializationError,
+	type NativeBoundedRegularFileStoreOptions,
+} from "./filesystem/native-bounded-regular-file-store";
+export {
+	make_workspace_bounded_regular_file_store_registry_layer,
+	WorkspaceBoundedRegularFileStoreNotFoundError,
+	WorkspaceBoundedRegularFileStoreRegistrationError,
+	WorkspaceBoundedRegularFileStoreRegistry,
+	type WorkspaceBoundedRegularFileStoreRegistration,
+	type WorkspaceBoundedRegularFileStoreRegistryOptions,
+} from "./filesystem/workspace-bounded-regular-file-store-registry";
+export {
 	Filesystem,
 	FilesystemError,
 	type FilesystemChange,

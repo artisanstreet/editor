@@ -50,6 +50,9 @@ importers:
 
   modules/backend:
     dependencies:
+      '@artisan/bounded-file-store-native':
+        specifier: workspace:*
+        version: link:../bounded-file-store-native
       '@artisan/engines':
         specifier: workspace:*
         version: link:../engines
