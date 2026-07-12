@@ -1502,6 +1502,35 @@ fn create_stage(
 
     let mut stage = snapshot_from_opened(opened, options.maximum_bytes, true)?;
     test_hook::trace("done:stage-snapshot-read");
+    test_hook::trace(if stage.data.bytes == options.replacement {
+        "check:stage-bytes-match"
+    } else {
+        "check:stage-bytes-mismatch"
+    });
+    test_hook::trace(if stage.data.metadata.links == 1 {
+        "check:stage-link-count-match"
+    } else {
+        "check:stage-link-count-mismatch"
+    });
+    test_hook::trace(
+        if !same_identity(&stage.data.metadata, &target.data.metadata) {
+            "check:stage-identity-distinct"
+        } else {
+            "check:stage-identity-reused"
+        },
+    );
+    test_hook::trace(
+        if stage.data.metadata.attributes == target.data.metadata.attributes {
+            "check:stage-attributes-match"
+        } else {
+            "check:stage-attributes-mismatch"
+        },
+    );
+    test_hook::trace(if stage.data.security == target.data.security {
+        "check:stage-security-match"
+    } else {
+        "check:stage-security-mismatch"
+    });
 
     if stage.data.bytes != options.replacement
         || stage.data.metadata.links != 1
