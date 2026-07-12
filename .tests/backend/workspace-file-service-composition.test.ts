@@ -25,6 +25,8 @@ import { JournalStore } from "../../modules/backend/src/persistence/journal-stor
 import {
 	OrchestrationCoordinators,
 	OrchestrationRuns,
+	WorkspaceChangeSnapshots,
+	WorkspaceMutationPayloads,
 } from "../../modules/backend/src/persistence/schema";
 import { Database } from "../../modules/backend/src/persistence/database";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
@@ -37,6 +39,7 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 type NativeController = {
+	readonly change_next_replacement: () => void;
 	readonly close_attempts: { value: number };
 	readonly finalization_attempts: { value: number };
 	readonly load_attempts: { value: number };
@@ -76,6 +79,16 @@ function payload_input(content: string) {
 	};
 }
 
+function rollback_payload_input() {
+	return {
+		action: "rollback" as const,
+		expected_identity: content_identity(encoder.encode("after")),
+		message_id: "rollback_message",
+		replacement_identity: content_identity(encoder.encode("before")),
+		thread_id: "thread_workspace_file",
+	};
+}
+
 function replacement_input(content = "after") {
 	return {
 		agent_id: "agent_workspace_file",
@@ -88,6 +101,25 @@ function replacement_input(content = "after") {
 		sent_at: now,
 		thread_id: "thread_workspace_file",
 		workspace_id: "workspace_file",
+	};
+}
+
+function review_input() {
+	return {
+		change_id: "change_workspace_file",
+		message_id: "review_message",
+		sent_at: now,
+		thread_id: "thread_workspace_file",
+	};
+}
+
+function rollback_input() {
+	return {
+		change_id: "change_workspace_file",
+		expected_after: content_identity(encoder.encode("after")),
+		message_id: "rollback_message",
+		sent_at: now,
+		thread_id: "thread_workspace_file",
 	};
 }
 
@@ -132,6 +164,7 @@ function make_native_controller(): NativeController {
 	const load_attempts = { value: 0 };
 	const replace_attempts = { value: 0 };
 	const receipts = new Map<string, NativeReplacementOptions>();
+	let remaining_changed_results = 0;
 	let remaining_finalization_failures = 0;
 
 	class FakeNativeBoundedRegularFileStore {
@@ -186,6 +219,12 @@ function make_native_controller(): NativeController {
 				return "AlreadyReplaced";
 			}
 
+			if (remaining_changed_results > 0) {
+				remaining_changed_results -= 1;
+
+				return "Changed";
+			}
+
 			const target = join(this.root, options.path);
 			const current = new Uint8Array(await readFile(target));
 			const matches =
@@ -206,6 +245,9 @@ function make_native_controller(): NativeController {
 	}
 
 	return {
+		change_next_replacement: () => {
+			remaining_changed_results += 1;
+		},
 		close_attempts,
 		finalization_attempts,
 		load_attempts,
@@ -322,11 +364,50 @@ function TerminalizeBaseRun() {
 	});
 }
 
+function InstallSnapshotConsumeFailure() {
+	return Effect.gen(function* () {
+		const database = yield* Database;
+
+		yield* database.client.run(`
+			CREATE TRIGGER fail_workspace_snapshot_consume
+			BEFORE UPDATE OF state ON workspace_change_snapshots
+			WHEN NEW.state = 'consumed'
+			BEGIN
+				SELECT RAISE(ABORT, 'deterministic snapshot consume failure');
+			END
+		`);
+	});
+}
+
+function RemoveSnapshotConsumeFailure() {
+	return Effect.gen(function* () {
+		const database = yield* Database;
+
+		yield* database.client.run("DROP TRIGGER fail_workspace_snapshot_consume");
+	});
+}
+
 function Replace(input = replacement_input()) {
 	return Effect.gen(function* () {
 		const service = yield* WorkspaceFileService;
 
 		return yield* service.Replace(input);
+	});
+}
+
+function Review() {
+	return Effect.gen(function* () {
+		const service = yield* WorkspaceFileService;
+
+		return yield* service.Review(review_input());
+	});
+}
+
+function Rollback() {
+	return Effect.gen(function* () {
+		const service = yield* WorkspaceFileService;
+
+		return yield* service.Rollback(rollback_input());
 	});
 }
 
@@ -361,6 +442,43 @@ function InspectCommittedReplacement(content: string) {
 				expected_identity: input.expected_before,
 				thread_id: input.thread_id,
 			}),
+		};
+	});
+}
+
+function InspectRollback() {
+	const replacement = replacement_input();
+	const rollback = rollback_input();
+	const payload = rollback_payload_input();
+
+	return Effect.gen(function* () {
+		const changes = yield* WorkspaceChangeRepository;
+		const database = yield* Database;
+		const journal = yield* JournalStore;
+		const payloads = yield* WorkspaceMutationPayloadStore;
+		const snapshots = yield* WorkspaceSnapshotStore;
+
+		return {
+			change_list: yield* changes.List(replacement.thread_id, replacement.workspace_id),
+			evidence: yield* journal.ReadCorrelatedEvents(
+				"workspace_evidence:rollback_message:correlation",
+			),
+			operation: yield* changes.ReadOperation(rollback.message_id),
+			payload_available: yield* payloads.Resume(payload).pipe(Effect.exit),
+			payload_rows: yield* database.client.select().from(WorkspaceMutationPayloads),
+			payload_record_state: yield* payloads.HasRecord(payload).pipe(Effect.exit),
+			snapshot_rows: yield* database.client.select().from(WorkspaceChangeSnapshots),
+			snapshot_available: yield* snapshots.Exists({
+				change_id: rollback.change_id,
+				thread_id: rollback.thread_id,
+			}),
+			snapshot_state: yield* snapshots
+				.Read({
+					change_id: rollback.change_id,
+					expected_identity: replacement.expected_before,
+					thread_id: rollback.thread_id,
+				})
+				.pipe(Effect.exit),
 		};
 	});
 }
@@ -591,6 +709,317 @@ describe("WorkspaceFileService production composition", () => {
 		}
 
 		expect(controller.close_attempts.value).toBe(2);
+	});
+
+	it("reviews and rolls back through the pinned source authority after its run terminates", async () => {
+		const { database_path, root } = await make_workspace();
+		const controller = make_native_controller();
+		const first_runtime = make_runtime(
+			database_path,
+			root,
+			controller,
+			"workspace_file_rollback_first",
+		);
+		let rollback_event: unknown;
+
+		try {
+			await first_runtime.runPromise(SeedBaseRun(root));
+			await first_runtime.runPromise(Replace());
+			await first_runtime.runPromise(TerminalizeBaseRun());
+			const reviewed = await first_runtime.runPromise(Review());
+			const rolled_back = await first_runtime.runPromise(Rollback());
+			const persisted = await first_runtime.runPromise(InspectRollback());
+
+			rollback_event = rolled_back.event;
+
+			expect(reviewed.status).toBe("accepted");
+			expect(rolled_back.status).toBe("accepted");
+			expect(decoder.decode(await readFile(join(root, "src", "example.ts")))).toBe("before");
+			expect(persisted.operation).toMatchObject({
+				_tag: "Some",
+				value: { evidence_recorded: true, lifecycle: "committed" },
+			});
+			expect(persisted.change_list.changes).toMatchObject([
+				{
+					change_id: "change_workspace_file",
+					review_state: "rolled_back",
+					rollback_state: "consumed",
+					version: 3,
+				},
+			]);
+			expect(persisted.evidence).toHaveLength(1);
+			expect(persisted.evidence[0]).toMatchObject({
+				payload: {
+					operation: "write",
+					path: "src/example.ts",
+					type: "filesystem.mutation",
+				},
+			});
+			expect(persisted.evidence[0]?.agent_id).toBeUndefined();
+			expect(persisted.evidence[0]?.run_id).toBeUndefined();
+			expect(persisted.payload_record_state).toMatchObject({
+				_tag: "Success",
+				value: true,
+			});
+			expect(persisted.payload_available).toMatchObject({ _tag: "Failure" });
+			expect(persisted.snapshot_available).toBe(false);
+			expect(persisted.snapshot_state).toMatchObject({ _tag: "Failure" });
+			expect(controller.replace_attempts.value).toBe(2);
+			expect(controller.finalization_attempts.value).toBe(2);
+		} finally {
+			await first_runtime.dispose();
+		}
+
+		const second_runtime = make_runtime(
+			database_path,
+			root,
+			controller,
+			"workspace_file_rollback_second",
+		);
+
+		try {
+			const duplicate = await second_runtime.runPromise(Rollback());
+			const persisted = await second_runtime.runPromise(InspectRollback());
+
+			expect(duplicate).toEqual({ event: rollback_event, status: "duplicate" });
+			expect(controller.replace_attempts.value).toBe(2);
+			expect(controller.finalization_attempts.value).toBe(2);
+			expect(persisted.evidence).toHaveLength(1);
+			expect(persisted.snapshot_available).toBe(false);
+			expect(persisted.payload_available).toMatchObject({ _tag: "Failure" });
+		} finally {
+			await second_runtime.dispose();
+		}
+
+		expect(controller.close_attempts.value).toBe(2);
+		expect(controller.load_attempts.value).toBe(2);
+	});
+
+	it("recovers an applied rollback after restart without replacing the file again", async () => {
+		const { database_path, root } = await make_workspace();
+		const controller = make_native_controller();
+		const first_runtime = make_runtime(
+			database_path,
+			root,
+			controller,
+			"workspace_file_rollback_recovery_first",
+		);
+
+		try {
+			await first_runtime.runPromise(SeedBaseRun(root));
+			await first_runtime.runPromise(Replace());
+			await first_runtime.runPromise(TerminalizeBaseRun());
+			controller.fail_next_finalization();
+
+			await expect(first_runtime.runPromise(Rollback())).rejects.toMatchObject({
+				operation: "rollback",
+				reason: "failed",
+			});
+			expect(decoder.decode(await readFile(join(root, "src", "example.ts")))).toBe("before");
+		} finally {
+			await first_runtime.dispose();
+		}
+
+		const second_runtime = make_runtime(
+			database_path,
+			root,
+			controller,
+			"workspace_file_rollback_recovery_second",
+		);
+
+		try {
+			const recovered = await second_runtime.runPromise(Rollback());
+			const persisted = await second_runtime.runPromise(InspectRollback());
+
+			expect(recovered.status).toBe("accepted");
+			expect(controller.replace_attempts.value).toBe(2);
+			expect(controller.finalization_attempts.value).toBe(3);
+			expect(persisted.operation).toMatchObject({
+				_tag: "Some",
+				value: { evidence_recorded: true, lifecycle: "committed" },
+			});
+			expect(persisted.change_list.changes).toMatchObject([
+				{ review_state: "rolled_back", rollback_state: "consumed", version: 2 },
+			]);
+			expect(persisted.evidence).toHaveLength(1);
+			expect(persisted.snapshot_available).toBe(false);
+			expect(persisted.payload_available).toMatchObject({ _tag: "Failure" });
+		} finally {
+			await second_runtime.dispose();
+		}
+
+		expect(controller.close_attempts.value).toBe(2);
+		expect(controller.load_attempts.value).toBe(2);
+	});
+
+	it("recovers committed rollback cleanup after snapshot consumption aborts", async () => {
+		const { database_path, root } = await make_workspace();
+		const controller = make_native_controller();
+		const first_runtime = make_runtime(
+			database_path,
+			root,
+			controller,
+			"workspace_file_rollback_cleanup_first",
+		);
+
+		try {
+			await first_runtime.runPromise(SeedBaseRun(root));
+			await first_runtime.runPromise(Replace());
+			await first_runtime.runPromise(TerminalizeBaseRun());
+			await first_runtime.runPromise(InstallSnapshotConsumeFailure());
+
+			try {
+				await expect(first_runtime.runPromise(Rollback())).rejects.toMatchObject({
+					operation: "rollback",
+					reason: "failed",
+				});
+			} finally {
+				await first_runtime.runPromise(RemoveSnapshotConsumeFailure());
+			}
+
+			const checkpoint = await first_runtime.runPromise(InspectRollback());
+
+			expect(checkpoint.operation).toMatchObject({
+				_tag: "Some",
+				value: { evidence_recorded: false, lifecycle: "committed" },
+			});
+			expect(checkpoint.change_list.changes).toMatchObject([
+				{ review_state: "rolled_back", rollback_state: "consumed", version: 2 },
+			]);
+			expect(checkpoint.evidence).toEqual([]);
+			expect(checkpoint.snapshot_rows).toContainEqual(
+				expect.objectContaining({
+					change_id: "change_workspace_file",
+					content: expect.any(Uint8Array),
+					state: "available",
+				}),
+			);
+			expect(checkpoint.payload_rows).toContainEqual(
+				expect.objectContaining({
+					expected: expect.any(Uint8Array),
+					message_id: "rollback_message",
+					state: "available",
+				}),
+			);
+			expect(controller.replace_attempts.value).toBe(2);
+			expect(controller.finalization_attempts.value).toBe(2);
+		} finally {
+			await first_runtime.dispose();
+		}
+
+		const second_runtime = make_runtime(
+			database_path,
+			root,
+			controller,
+			"workspace_file_rollback_cleanup_second",
+		);
+
+		try {
+			const duplicate = await second_runtime.runPromise(Rollback());
+			const settled = await second_runtime.runPromise(InspectRollback());
+
+			expect(duplicate.status).toBe("duplicate");
+			expect(controller.replace_attempts.value).toBe(2);
+			expect(controller.finalization_attempts.value).toBe(2);
+			expect(settled.operation).toMatchObject({
+				_tag: "Some",
+				value: { evidence_recorded: true, lifecycle: "committed" },
+			});
+			expect(settled.evidence).toHaveLength(1);
+			expect(settled.snapshot_rows).toContainEqual(
+				expect.objectContaining({
+					change_id: "change_workspace_file",
+					content: null,
+					state: "consumed",
+				}),
+			);
+			expect(settled.payload_rows).toContainEqual(
+				expect.objectContaining({
+					expected: null,
+					message_id: "rollback_message",
+					replacement: null,
+					state: "consumed",
+				}),
+			);
+		} finally {
+			await second_runtime.dispose();
+		}
+
+		expect(controller.close_attempts.value).toBe(2);
+		expect(controller.load_attempts.value).toBe(2);
+	});
+
+	it("keeps a native-rejected rollback terminal while erasing its staged payload", async () => {
+		const { database_path, root } = await make_workspace();
+		const controller = make_native_controller();
+		const first_runtime = make_runtime(
+			database_path,
+			root,
+			controller,
+			"workspace_file_rollback_changed_first",
+		);
+
+		try {
+			await first_runtime.runPromise(SeedBaseRun(root));
+			await first_runtime.runPromise(Replace());
+			await first_runtime.runPromise(TerminalizeBaseRun());
+			controller.change_next_replacement();
+
+			await expect(first_runtime.runPromise(Rollback())).rejects.toMatchObject({
+				operation: "rollback",
+				reason: "changed",
+			});
+		} finally {
+			await first_runtime.dispose();
+		}
+
+		const second_runtime = make_runtime(
+			database_path,
+			root,
+			controller,
+			"workspace_file_rollback_changed_second",
+		);
+
+		try {
+			await expect(second_runtime.runPromise(Rollback())).rejects.toMatchObject({
+				operation: "rollback",
+				reason: "changed",
+			});
+			const persisted = await second_runtime.runPromise(InspectRollback());
+
+			expect(decoder.decode(await readFile(join(root, "src", "example.ts")))).toBe("after");
+			expect(controller.replace_attempts.value).toBe(2);
+			expect(controller.finalization_attempts.value).toBe(1);
+			expect(persisted.operation).toMatchObject({
+				_tag: "Some",
+				value: { lifecycle: "rejected" },
+			});
+			expect(persisted.change_list.changes).toMatchObject([
+				{ review_state: "needs_review", rollback_state: "available", version: 1 },
+			]);
+			expect(persisted.evidence).toEqual([]);
+			expect(persisted.payload_record_state).toMatchObject({ _tag: "Failure" });
+			expect(persisted.payload_available).toMatchObject({ _tag: "Failure" });
+			expect(persisted.payload_rows).toContainEqual(
+				expect.objectContaining({
+					expected: null,
+					expected_byte_count: null,
+					expected_hash: null,
+					message_id: "rollback_message",
+					replacement: null,
+					replacement_byte_count: null,
+					replacement_hash: null,
+					state: "consumed",
+				}),
+			);
+			expect(persisted.snapshot_available).toBe(true);
+			expect(persisted.snapshot_state).toMatchObject({ _tag: "Success" });
+		} finally {
+			await second_runtime.dispose();
+		}
+
+		expect(controller.close_attempts.value).toBe(2);
+		expect(controller.load_attempts.value).toBe(2);
 	});
 
 	it("rejects mutation through the default empty bounded registry", async () => {
