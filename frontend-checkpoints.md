@@ -39,7 +39,7 @@ This is the build order for the Artisan renderer, not a list of screens to mock 
 - [ ] Add `better-svelte-check`, oxfmt, oxlint, Vitest, and component/browser testing commands to the workspace validation path.
 - [x] Add package boundaries that allow imports from `@artisan/protocol` and `@artisan/transport` but fail if renderer code imports `@artisan/backend`, Electron, Node-only adapters, Drizzle, or engine packages.
 - [x] Establish `src/lib/styles/global.css` and `fonts.css`, route-local `components/`, shared `components/custom/`, and shadcn-owned `components/ui/`.
-- [ ] Add a test-only frontend runtime that can supply a typed `ArtisanClient` fixture without teaching components whether the source is fake or live.
+- [x] Add a test-only frontend runtime that can supply a typed `ArtisanClient` fixture without teaching components whether the source is fake or live.
 
 **Exit gate:** the package builds and validates in the monorepo, a minimal route renders through SER, and an import-boundary test rejects every forbidden dependency.
 
@@ -51,7 +51,7 @@ This is the build order for the Artisan renderer, not a list of screens to mock 
 - [x] Choose licensed body, heading, and mono fonts; reserve Cal Sans with `-0.05em` tracking for the Artisan Editor wordmark as specified by the PRD.
 - [x] Define density tokens around compact 28–36px controls, 16px icons, pane gutters, row heights, editor tabs, and right-pane sections.
 - [x] Define surface levels and stop arbitrary one-off shadows, radii, opacity values, and transition durations from spreading through components.
-- [ ] Build a frontend-only visual fixture route covering typography, buttons, inputs, menus, tooltips, badges, status rows, tabs, empty states, skeletons, banners, permission prompts, diffs, and terminal chrome.
+- [x] Build a frontend-only visual fixture route covering typography, buttons, inputs, menus, tooltips, badges, status rows, tabs, empty states, skeletons, banners, permission prompts, diffs, and terminal chrome.
 - [ ] Test light, dark, high-contrast, 200% zoom, reduced motion, long labels, and keyboard focus.
 
 **Exit gate:** every primitive used by the shell has approved semantic tokens and interaction states, with no Barekey code, asset, or unlicensed font copied into Artisan.

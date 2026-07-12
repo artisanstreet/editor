@@ -35,7 +35,11 @@
 	--radius-pane: 0.75rem;
 	--radius-control: 0.5rem;
 	--radius-raised: 0.625rem;
+	--radius-pill: 999px;
 	--shadow-xs: 0 1px 2px oklch(0.05 0.01 264 / 0.28);
+	--shadow-focus: 0 0 0 2px color-mix(in oklch, var(--focus) 22%, transparent);
+	--shadow-overlay: 0 0.875rem 2.375rem color-mix(in oklch, var(--canvas) 60%, transparent);
+	--shadow-status: 0 0 0 3px color-mix(in oklch, var(--run-complete) 18%, transparent);
 	--density-row: 2rem;
 	--density-control: 2rem;
 	--density-rail: 2.25rem;
@@ -47,6 +51,7 @@
 	--duration-fast: 130ms;
 	--duration-medium: 190ms;
 	--duration-slow: 280ms;
+	--duration-ambient: 1200ms;
 	--ease-smooth-out: cubic-bezier(0.2, 0.8, 0.2, 1);
 
 	--panel-open-dur: var(--duration-medium);

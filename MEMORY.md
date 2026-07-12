@@ -347,7 +347,18 @@ Implemented, independently reviewed, committed, and verified:
 - [x] Root `pnpm run validate` now includes the production frontend build, so future SER/Svelte compiler regressions fail the monorepo gate.
 - [x] Frontend scaffold checkpoint `9312359` was pushed to `origin/codex/backend-services`; local `HEAD` and the upstream branch both resolved to `9312359a147e97dc011ec8c6b4b704ab0d14683b` immediately after the push.
 - [ ] `better-svelte-check` is not available as a portable published package, so its checkpoint remains open; production build, TypeScript, import-boundary, and source-layout gates are green in the meantime.
-- [ ] The test-only typed `ArtisanClient` fixture Layer, the complete visual-fixture route, persisted pane preferences, and browser-level layout/accessibility coverage remain the next frontend foundation slices.
+- [x] Added the test-only typed `ArtisanClient` fixture Layer and complete visual-fixture route. Persisted pane preferences and browser-level layout/accessibility coverage remain the next frontend foundation slices.
+
+## Frontend Fixture Runtime And Visual Lab
+
+- [x] Added an explicitly fixture-only `Layer.succeed(ArtisanClient, ...)` that satisfies the complete current renderer-safe client contract with deterministic protocol-shaped threads, orchestration, terminals, settings, streams, receipts, and not-found failures. Production source tests prove that no composition root silently selects it.
+- [x] Fixture values decode through the public Effect Schemas; the guidance fixture's byte count and SHA-256 are verified against its actual content.
+- [x] Added `/visual-fixtures` as a compositional, renderer-only lab covering typography, controls, inputs, disclosure actions, tooltips, navigation groups, badges, status rows, empty/loading states, banners, permission prompts, diffs, terminal chrome, and explicit unavailable states.
+- [x] The lab provides local dark/light, high-contrast, reduced-motion, whole-interface 200% scale, and long-label stress modes. These are design affordances, not a substitute for the still-open browser zoom and accessibility gate.
+- [x] Independent review findings were resolved: every Tabler component is imported under its rendered name, the popup uses honest disclosure semantics, closing restores focus only while open, and all visual radii, shadows, focus rings, and ambient durations use shared semantic tokens.
+- [x] All fixture behaviors remain `Effect.gen` programs, streams use Effect's Stream API for the concrete streaming contract, SER owns visual-lab execution, and no direct Effect runner exists in the new source or tests.
+- [x] Focused verification: the frontend production build passed, all five frontend test files passed 26 tests, and the fixture/runtime-focused suite passed 11 tests after review fixes.
+- [x] Full `pnpm run validate` passed after the backend owner formatted its concurrent work: formatting, lint, root TypeScript, the production SER/Svelte build, and 90 test files passed with 732 tests and 3 intentional skips.
 
 ## Frontend Typeface Prototype
 
