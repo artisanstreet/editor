@@ -1,5 +1,5 @@
 import { NodeCrypto, NodeFileSystem, NodePath } from "@effect/platform-node-shared";
-import { Context, Data, Effect, Layer, Schema } from "effect";
+import { Context, Data, Effect, FileSystem, Layer, Schema } from "effect";
 
 import { Identifier } from "@artisan/protocol";
 
@@ -12,8 +12,16 @@ const WorkspaceFilesystemRegistration = Schema.Struct({
 	workspace_id: Identifier,
 });
 
+const WorkspaceFilesystemAuthorization = Schema.Struct({
+	working_directory: Schema.NonEmptyString,
+	workspace_id: Identifier,
+});
+
 /** Supplies one backend-owned root while retaining the opaque workspace identity. */
 export type WorkspaceFilesystemRegistration = typeof WorkspaceFilesystemRegistration.Type;
+
+/** Supplies the workspace and existing directory that must prove the same authority. */
+export type WorkspaceFilesystemAuthorization = typeof WorkspaceFilesystemAuthorization.Type;
 
 /** Exposes root-confined file operations without an absolute-path resolver. */
 export type WorkspaceFilesystem = Omit<typeof Filesystem.Service, "Resolve">;
@@ -34,10 +42,23 @@ export class WorkspaceFilesystemNotFoundError extends Data.TaggedError(
 	readonly workspace_id: string;
 }> {}
 
+/** Reports a working directory that cannot prove authority over its workspace. */
+export class WorkspaceFilesystemAuthorizationError extends Data.TaggedError(
+	"WorkspaceFilesystemAuthorizationError",
+)<{
+	readonly workspace_id: string;
+}> {}
+
 /** Owns the opaque backend filesystem capabilities registered for known workspaces. */
 export class WorkspaceFilesystemRegistry extends Context.Service<
 	WorkspaceFilesystemRegistry,
 	{
+		readonly Authorize: (
+			input: WorkspaceFilesystemAuthorization,
+		) => Effect.Effect<
+			{ readonly filesystem: WorkspaceFilesystem; readonly workspace_id: string },
+			WorkspaceFilesystemAuthorizationError | WorkspaceFilesystemNotFoundError
+		>;
 		readonly Get: (
 			workspace_id: string,
 		) => Effect.Effect<
@@ -54,6 +75,10 @@ function registration_error(message: string, cause?: unknown, workspace_id?: str
 		...(workspace_id === undefined ? {} : { workspace_id }),
 		message,
 	});
+}
+
+function authorization_error(workspace_id: string) {
+	return new WorkspaceFilesystemAuthorizationError({ workspace_id });
 }
 
 function BuildWorkspaceFilesystemRegistry(registrations: ReadonlyArray<unknown>) {
@@ -133,6 +158,9 @@ function BuildWorkspaceFilesystemRegistry(registrations: ReadonlyArray<unknown>)
 			);
 		}
 
+		const canonical_roots = new Map(
+			roots.map(({ root, workspace_id }) => [workspace_id, root]),
+		);
 		const by_workspace_id = new Map(
 			filesystems.map(({ filesystem, workspace_id }) => {
 				const { Resolve: _, ...workspace_filesystem } = filesystem;
@@ -148,8 +176,43 @@ function BuildWorkspaceFilesystemRegistry(registrations: ReadonlyArray<unknown>)
 				? Effect.fail(new WorkspaceFilesystemNotFoundError({ workspace_id }))
 				: Effect.succeed({ filesystem, workspace_id });
 		};
+		const file_system = yield* FileSystem.FileSystem;
+		const Authorize = (input: WorkspaceFilesystemAuthorization) =>
+			Schema.decodeUnknownEffect(WorkspaceFilesystemAuthorization, {
+				onExcessProperty: "error",
+			})(input).pipe(
+				Effect.mapError(() => authorization_error(input.workspace_id)),
+				Effect.flatMap((authorization) =>
+					Effect.gen(function* () {
+						const authorized = yield* Get(authorization.workspace_id);
+						const canonical_root = canonical_roots.get(authorization.workspace_id)!;
+						const working_directory = yield* file_system
+							.realPath(authorization.working_directory)
+							.pipe(
+								Effect.mapError(() =>
+									authorization_error(authorization.workspace_id),
+								),
+							);
+						const entry = yield* file_system
+							.stat(working_directory)
+							.pipe(
+								Effect.mapError(() =>
+									authorization_error(authorization.workspace_id),
+								),
+							);
 
-		return { Get, ListWorkspaceIds };
+						if (entry.type !== "Directory" || working_directory !== canonical_root) {
+							return yield* Effect.fail(
+								authorization_error(authorization.workspace_id),
+							);
+						}
+
+						return authorized;
+					}),
+				),
+			);
+
+		return { Authorize, Get, ListWorkspaceIds };
 	});
 }
 

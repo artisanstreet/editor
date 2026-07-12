@@ -68,6 +68,74 @@ describe("WorkspaceFilesystemRegistry", () => {
 		});
 	});
 
+	it("authorizes only the registered canonical root without exposing it", async () => {
+		const root = await make_root();
+		const alias = join(tmpdir(), `artisan workspace authorization alias ${Date.now()}`);
+
+		roots.push(alias);
+		await fs.symlink(root, alias, "junction");
+
+		const registry = await Effect.runPromise(
+			make_registry([{ root, workspace_id: "workspace-a" }]),
+		);
+		const exact = await Effect.runPromise(
+			registry.Authorize({ working_directory: root, workspace_id: "workspace-a" }),
+		);
+		const aliased = await Effect.runPromise(
+			registry.Authorize({ working_directory: alias, workspace_id: "workspace-a" }),
+		);
+
+		expect(Object.keys(exact).toSorted()).toEqual(["filesystem", "workspace_id"]);
+		expect("Resolve" in exact.filesystem).toBe(false);
+		expect(aliased).toEqual(exact);
+	});
+
+	it("rejects unauthorized, missing, and non-directory working directories", async () => {
+		const root = await make_root();
+		const other_root = await make_root();
+		const file = join(root, "file.txt");
+		const missing = join(root, "missing");
+
+		await fs.writeFile(file, "file");
+
+		const registry = await Effect.runPromise(
+			make_registry([{ root, workspace_id: "workspace-a" }]),
+		);
+		const failures = await Promise.all(
+			[other_root, missing, file].map((working_directory) =>
+				Effect.runPromise(
+					registry
+						.Authorize({ working_directory, workspace_id: "workspace-a" })
+						.pipe(Effect.flip),
+				),
+			),
+		);
+
+		for (const failure of failures) {
+			expect(failure).toMatchObject({
+				_tag: "WorkspaceFilesystemAuthorizationError",
+				workspace_id: "workspace-a",
+			});
+			expect(failure).not.toHaveProperty("cause");
+			expect(JSON.stringify(failure)).not.toContain(root);
+		}
+	});
+
+	it("keeps unknown workspace authorization opaque", async () => {
+		const root = await make_root();
+		const registry = await Effect.runPromise(make_registry([]));
+		const failure = await Effect.runPromise(
+			registry
+				.Authorize({ working_directory: root, workspace_id: "missing" })
+				.pipe(Effect.flip),
+		);
+
+		expect(failure).toMatchObject({
+			_tag: "WorkspaceFilesystemNotFoundError",
+			workspace_id: "missing",
+		});
+	});
+
 	it("rejects duplicate IDs and canonical root aliases", async () => {
 		const root = await make_root();
 		const alias = join(tmpdir(), `artisan workspace alias ${Date.now()}`);
