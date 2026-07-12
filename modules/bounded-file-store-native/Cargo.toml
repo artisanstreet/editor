@@ -1,0 +1,17 @@
+[package]
+name = "bounded-file-store-native"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+build = "build.rs"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+napi = { version = "=3.10.3", features = ["napi9"] }
+napi-derive = "=3.5.9"
+
+[build-dependencies]
+napi-build = "=2.3.2"
