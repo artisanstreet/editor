@@ -38,8 +38,14 @@ jobs:
             - name: Install workspace dependencies
               run: pnpm install --frozen-lockfile
 
-            - name: Validate non-native workspace
-              run: pnpm run validate
+            - name: Check workspace formatting
+              run: pnpm run format:check
+
+            - name: Lint workspace
+              run: pnpm run lint
+
+            - name: Typecheck workspace
+              run: pnpm run check
 
             - name: Check native formatting
               working-directory: modules/bounded-file-store-native
