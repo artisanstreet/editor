@@ -190,31 +190,24 @@ function set_attributes(file, flags) {
 }
 
 function read_attributes(file) {
-	const script =
-		"$ErrorActionPreference = 'Stop'; [int](Get-Item -Force -LiteralPath $env:ARTISAN_NATIVE_SMOKE_FILE).Attributes";
-	return Number(
-		execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
-			encoding: "utf8",
-			env: { ...process.env, ARTISAN_NATIVE_SMOKE_FILE: file },
-		}).trim(),
-	);
+	return execFileSync("attrib.exe", [file], { encoding: "utf8" }).trim();
 }
 
 function read_security_descriptor(file) {
-	const script =
-		"$ErrorActionPreference = 'Stop'; $acl = Get-Acl -LiteralPath $env:ARTISAN_NATIVE_SMOKE_FILE; $acl.Sddl";
-	return execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
-		encoding: "utf8",
-		env: { ...process.env, ARTISAN_NATIVE_SMOKE_FILE: file },
-	}).trim();
+	const snapshot = path.join(os.tmpdir(), `artisan-native-acl-${randomUUID()}.txt`);
+
+	try {
+		execFileSync("icacls.exe", [file, "/save", snapshot, "/c", "/q"], { stdio: "ignore" });
+
+		return fs.readFileSync(snapshot, "utf16le");
+	} finally {
+		fs.rmSync(snapshot, { force: true });
+	}
 }
 
 function protect_security_descriptor(file) {
-	const script =
-		"$ErrorActionPreference = 'Stop'; $acl = Get-Acl -LiteralPath $env:ARTISAN_NATIVE_SMOKE_FILE; $acl.SetAccessRuleProtection($true, $true); Set-Acl -LiteralPath $env:ARTISAN_NATIVE_SMOKE_FILE -AclObject $acl";
-	execFileSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", script], {
+	execFileSync("icacls.exe", [file, "/inheritancelevel:d", "/c", "/q"], {
 		stdio: "ignore",
-		env: { ...process.env, ARTISAN_NATIVE_SMOKE_FILE: file },
 	});
 }
 
@@ -637,7 +630,7 @@ async function preserve_windows_metadata() {
 	protect_security_descriptor(target);
 	const before_attributes = read_attributes(target);
 	const before_security = read_security_descriptor(target);
-	assert.match(before_security, /D:P/);
+	assert.match(before_security, /D:P/u);
 	const operation_id = "metadata-operation";
 	const store = open_store(root);
 	try {
