@@ -14,8 +14,8 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Branch: `codex/backend-services`
 - [x] Package manager: pnpm 11.7.0
 - [x] Stack: TypeScript 7, Effect 4 beta, Drizzle 1 RC, SQLite
-- [x] Latest verified implementation checkpoint: `cc9bedc feat: execute controlled workspace replacements`
-- [x] Local `HEAD`, upstream, and `origin/codex/backend-services` were equal at `cc9bedc` before this documentation update.
+- [x] Latest verified implementation checkpoint: `a3c9bbd test: harden workspace file recovery harness`
+- [x] Local `HEAD`, upstream, and `origin/codex/backend-services` were equal at `a3c9bbd` before this documentation update.
 - [x] `ARTISAN_RUN_NATIVE_ADDON_SMOKE=1 pnpm --filter @artisan/bounded-file-store-native verify:local` is the canonical native gate and passes locally for production reads/replacement, test-hook races, and process-crash recovery.
 - [x] Routine development verification is local-first. Do not recreate temporary GitHub Actions, remote runners, or similar testing detours; future CI is a real clean-checkout/release gate and never a substitute for local validation.
 - [x] Model Behaviour is committed as focused protocol, persistence, provider, service, composition, transport, and security changes.
@@ -52,8 +52,21 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Transient expected/replacement byte-pair persistence is committed and pushed at `c143986` with its deep recovery harness at `dade5c0`. The private payload table is hash/length constrained, consumed into non-resurrectable tombstones, deleted during thread erasure, and never copied into commands, events, operations, or public projections.
 - [x] Thread erasure now treats every unsettled or still-available workspace mutation as a durable retention fence at `bc37306`. Complete claim and erasure transactions retry bounded SQLite contention, stale post-quiescence claims release without erasing live work, and deterministic two-runtime barriers cover Stage and MarkApplied overlap.
 - [x] Rejected mutations now discard exact payload and rollback-snapshot bytes into non-resurrectable tombstones at `54feea9`, after validating canonical operation/projection identity and private-row integrity. Exact retries and concurrent two-runtime cleanup converge without exposing content.
-- [ ] Build the controlled read/replace/review/rollback service around the filesystem registry, workspace-change repository, snapshot store, evidence recorder, and public protocol.
-- [ ] Prove filesystem mutation crash windows, exact retries, authorization races, and restart recovery through the real production composition.
+- [x] Controlled UTF-8 reads and recoverable attributed replacements are composed into the production backend runtime at `566ceb2`, with real SQLite/repository/authority/payload/snapshot/evidence coverage at `47c28e8` and `a3c9bbd`.
+- [x] The real composition harness proves accepted replacement, exact committed retry after a terminal run, applied/finalization recovery after restart without a second replacement, terminal changed replay without a projection/evidence/snapshot, portable empty-registry denial, full fake-native option forwarding, and scoped acquisition/release counts.
+- [ ] Add review and guarded rollback execution, including a user/control-plane mutation authority that does not borrow an expired agent run grant.
+- [ ] Expose read/replace/list/review/rollback through the typed public protocol and client after rollback execution exists.
+- [ ] Extend the real service harness with synchronized two-runtime replacement convergence and deterministic SQLite contention/erasure overlap.
+
+## Completed Controlled Workspace Read And Replace Composition
+
+- [x] `WorkspaceFileServiceLive` is built at the runtime composition root from explicit Effect Services and Layers; dependency Layers remain private to service construction while the existing repositories stay independently available from the backend runtime.
+- [x] Production reads use only the registry's restricted reader. Production replacements use atomic run authority, the pinned bounded mutation capability, strict UTF-8 identities, private payload/snapshot recovery, native conditional replacement/finalization, durable change projection, and attributed evidence.
+- [x] The deterministic fake native module validates the complete replacement/finalization option set and preserves receipt state across runtime recreation, while real SQLite migrations and production repositories own every durable transition.
+- [x] Restart tests terminalize the original base run before exact duplicate, applied, and rejected retries. Duplicate/recovery paths issue no second native replacement, and rejected retry remains source-free and side-effect free.
+- [x] Local verification passed TypeScript, scoped Oxfmt/Oxlint, 24 focused service/authority/composition tests, and the full suite with 90 test files, 726 passing tests, and 3 intentional skips.
+- [x] Fresh independent P0-P2 re-review is clean after strengthening durable settlement assertions, native interface fidelity, runtime disposal, portable read denial, and acquisition/release checks.
+- [x] Focused commits: `566ceb2 feat: compose controlled workspace files`, `47c28e8 test: compose workspace file service`, and `a3c9bbd test: harden workspace file recovery harness`.
 
 ## Completed Checkpoints
 
@@ -264,7 +277,8 @@ Implemented, independently reviewed, committed, and verified:
 
 - [x] Add attributed controlled-write operation history, changed-file/diff projections, review/rollback state, and private rollback snapshot persistence.
 - [x] Add atomic run/agent/workspace authorization and durable mutation-claim pinning.
-- [ ] Add controlled filesystem read/replace/review/rollback execution and public protocol commands. Native Layers, terminal rejection, and exact recovery payload persistence now exist; execution/recovery composition remains.
+- [x] Add controlled filesystem read/replace execution and real restart/recovery composition through the production Layer graph.
+- [ ] Add review/rollback execution and public read/replace/list/review/rollback protocol commands. Rollback still needs a user/control-plane authority and complete recovery loop.
 - [ ] Add Git worktree inventory, durable change/session projections, approved mutations, and public protocol commands.
 - [ ] Complete the canonical surface taxonomy: Work, Time, Guidance, Routines, Capabilities, Processes, Changes, Permissions, and native actions.
 - [ ] Add explicit intake risk classification, assumptions, usage aggregation, and workspace conflict/review handling.
