@@ -1,17 +1,23 @@
-import { fchmod, fstat } from "node:fs";
+import { fchmod } from "node:fs";
 
 import { Context, Data, Effect, Layer, Option, PlatformError, Schema, Stream } from "effect";
 import { FileSystem } from "effect/FileSystem";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
+import {
+	ReadFileIdentity,
+	same_file_identity,
+	type FileIdentity,
+} from "../filesystem/file-identity";
+
 /** Identifies the host permission model used to restrict a private file. */
 export type PrivateFilePermissionsPlatformKind = "posix" | "win32";
 
-/** Identifies one opened file across path replacement races. */
-export interface PrivateFileIdentity {
-	readonly device: bigint;
-	readonly inode: bigint;
-}
+/** Preserves the private-file identity type exported by the original module. */
+export type PrivateFileIdentity = FileIdentity;
+
+/** Preserves the private-file identity reader exported by the original module. */
+export const ReadPrivateFileIdentity = ReadFileIdentity;
 
 /** Captures POSIX permission bits before a private file is restricted. */
 export class PosixPrivateFilePermissionsSnapshot extends Data.TaggedClass(
@@ -307,10 +313,6 @@ function make_windows_acl_command(
 	);
 }
 
-function same_identity(left: PrivateFileIdentity, right: PrivateFileIdentity) {
-	return left.device === right.device && left.inode === right.inode;
-}
-
 const StoredPrivateFileIdentity = Schema.Struct({
 	device: Schema.BigIntFromString,
 	inode: Schema.BigIntFromString,
@@ -369,32 +371,6 @@ function Fchmod(descriptor: number, mode: number) {
 	});
 }
 
-const uint64_modulus = 1n << 64n;
-
-function normalize_uint64(value: bigint) {
-	return value < 0n ? value + uint64_modulus : value;
-}
-
-/** Reads the exact bigint identity for an Effect-managed file descriptor. */
-export function ReadPrivateFileIdentity(descriptor: number) {
-	return Effect.callback<PrivateFileIdentity, NodeJS.ErrnoException>((resume) => {
-		fstat(descriptor, { bigint: true }, (cause, info) => {
-			if (cause !== null) {
-				resume(Effect.fail(cause));
-
-				return;
-			}
-
-			resume(
-				Effect.succeed({
-					device: normalize_uint64(info.dev),
-					inode: normalize_uint64(info.ino),
-				}),
-			);
-		});
-	});
-}
-
 function ApplyPosixOwned(
 	file_system: FileSystem,
 	path: string,
@@ -406,7 +382,7 @@ function ApplyPosixOwned(
 			const file = yield* file_system.open(path, { flag: "r+" });
 			const current_identity = yield* ReadPrivateFileIdentity(file.fd);
 
-			if (!same_identity(current_identity, identity)) {
+			if (!same_file_identity(current_identity, identity)) {
 				return false;
 			}
 
