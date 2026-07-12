@@ -92,6 +92,7 @@ import { ModelBehaviourRegistryError } from "../model-behaviour/model-behaviour-
 import { ModelBehaviourServiceLive } from "../model-behaviour/model-behaviour-service";
 import { WorkspaceChangeRepositoryLive } from "../workspace/workspace-change-repository";
 import { WorkspaceEvidenceRecorderLive } from "../workspace/workspace-evidence-recorder";
+import { WorkspaceFileServiceLive } from "../workspace/workspace-file-service";
 import { WorkspaceMutationAuthorityLive } from "../workspace/workspace-mutation-authority";
 import { WorkspaceSnapshotStoreLive } from "../workspace/workspace-snapshot-store";
 import { WorkspaceMutationPayloadStoreLive } from "../workspace/workspace-mutation-payload-store";
@@ -183,6 +184,19 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(workspace_bounded_filesystems),
 		Layer.provideMerge(workspace_changes),
 		Layer.provideMerge(infrastructure),
+	);
+	const workspace_files = WorkspaceFileServiceLive.pipe(
+		Layer.provide(
+			Layer.mergeAll(
+				NodeCrypto.layer,
+				workspace_authority,
+				workspace_bounded_filesystems,
+				workspace_changes,
+				workspace_evidence,
+				workspace_mutation_payloads,
+				workspace_snapshots,
+			),
+		),
 	);
 	const engine_registry = make_engine_registry_layer(options.engines ?? []);
 	const guidance_repository = GlobalGuidanceRepositoryLive.pipe(Layer.provideMerge(persistence));
@@ -301,6 +315,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(project_affinity_coordination),
 		Layer.provideMerge(guidance),
 		Layer.provideMerge(model_behaviour),
+		Layer.provideMerge(workspace_files),
 		Layer.provideMerge(workspace_changes),
 		Layer.provideMerge(workspace_evidence),
 		Layer.provideMerge(workspace_authority),
