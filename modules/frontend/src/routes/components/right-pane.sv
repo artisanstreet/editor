@@ -1,9 +1,11 @@
 <script lang="ts" effect>
+	import { Effect } from "effect";
 	import {
 		IconActivity as Activity,
 		IconBrandWindows as BrandWindows,
 		IconGitBranch as GitBranch,
 		IconLock as Lock,
+		IconLayoutSidebarRightCollapse as CollapseRight,
 		IconNetwork as Network,
 		IconRobot as Robot,
 		IconTerminal2 as Terminal2,
@@ -11,13 +13,24 @@
 
 	import { agent_fixtures, change_fixtures, permission_fixtures, session_fixture } from "./editor-fixtures";
 
-	let { instance_id }: { instance_id: string } = $props();
+	let { instance_id, on_collapse }: { instance_id: string; on_collapse?: Effect.Effect<void> } = $props();
+
+	const CollapsePane = Effect.gen(function* () {
+		if (on_collapse !== undefined) {
+			yield* on_collapse;
+		}
+	});
 </script>
 
 <aside class="right-pane" aria-label="Session">
 	<header class="session-header">
 		<div><strong>Session</strong><span>Preview data</span></div>
 		<span class="fixture-badge">Fixture</span>
+		{#if on_collapse}
+			<button class="collapse-pane" type="button" aria-label="Collapse session pane" title="Collapse session pane" onclick={yield* CollapsePane}>
+				<CollapseRight size={17} stroke={1.7} aria-hidden="true" />
+			</button>
+		{/if}
 	</header>
 
 	<div class="session-scroll">
@@ -108,12 +121,37 @@
 	}
 
 	.fixture-badge {
+		margin-left: auto;
 		padding: 3px 6px;
 		border: 1px solid var(--line);
 		border-radius: var(--radius-sm);
 		background: var(--pane-inset);
 		text-transform: uppercase;
 		letter-spacing: 0.07em;
+	}
+
+	.collapse-pane {
+		display: grid;
+		width: 28px;
+		height: 28px;
+		flex: 0 0 auto;
+		place-items: center;
+		border: 1px solid transparent;
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--text-muted);
+		cursor: pointer;
+	}
+
+	.collapse-pane:hover {
+		border-color: var(--line);
+		background: var(--raised);
+		color: var(--text-primary);
+	}
+
+	.collapse-pane:focus-visible {
+		outline: 2px solid var(--focus);
+		outline-offset: -2px;
 	}
 
 	.session-scroll {

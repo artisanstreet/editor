@@ -23,6 +23,9 @@ importers:
       '@effect/platform-node-shared':
         specifier: 4.0.0-beta.97
         version: 4.0.0-beta.97(effect@4.0.0-beta.97)
+      '@effect/vitest':
+        specifier: 4.0.0-beta.97
+        version: 4.0.0-beta.97(effect@4.0.0-beta.97)(vitest@4.1.10(@types/node@26.1.1)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))
       '@types/node':
         specifier: 26.1.1
         version: 26.1.1
@@ -114,6 +117,9 @@ importers:
       '@artisan/transport':
         specifier: workspace:*
         version: link:../transport
+      '@effect/platform-browser':
+        specifier: 4.0.0-beta.97
+        version: 4.0.0-beta.97(effect@4.0.0-beta.97)
       '@fontsource-variable/jetbrains-mono':
         specifier: 5.2.8
         version: 5.2.8
@@ -221,6 +227,11 @@ packages:
   '@drizzle-team/brocli@0.12.0':
     resolution: {integrity: sha512-mlUE+rZ8CatQekLhnaiN91Iemdd+e2gFKooGlnRB3oPTL3VghLfX24dx7HrzMNeC1JrIB/0kpsfyty3f5HNfxQ==}
 
+  '@effect/platform-browser@4.0.0-beta.97':
+    resolution: {integrity: sha512-CPF5Wk+OIR4/D6cvI1QEigL/f6cASTv5v8zBn7d2130KB3DFFsSgqplxaZB56vASb4WFBkQ1l8z+dbtosx5RxA==}
+    peerDependencies:
+      effect: ^4.0.0-beta.97
+
   '@effect/platform-node-shared@4.0.0-beta.97':
     resolution: {integrity: sha512-sAlygOlDLLERk7fC24f7Aa4G3wkEbGyyMEileHTHU2fThiPYSGMqNRK1LLnNr17m2+JR7BHbycwXkJkM18BAQw==}
     engines: {node: '>=18.0.0'}
@@ -231,6 +242,12 @@ packages:
     resolution: {integrity: sha512-mzP67KmXK2vGU3GrlOdM0TWST7mWI8kMNqPu7Gl2I30eSv+DmBes1qYVIQWUnE3b5ka2LCP7iFzjxNjtIfqn8g==}
     peerDependencies:
       effect: ^4.0.0-beta.97
+
+  '@effect/vitest@4.0.0-beta.97':
+    resolution: {integrity: sha512-1dH6LBWSZyqnTV7ZO+yIpPGPf/xd7RtFfvQ4ZpTy9elzFN+wr1YBFpHSCr8+BfXOml6b8g9Mtj5eDy1qjbizUA==}
+    peerDependencies:
+      effect: ^4.0.0-beta.97
+      vitest: ^3.0.0 || ^4.0.0
 
   '@emnapi/core@1.11.1':
     resolution: {integrity: sha512-RSvbQmHzdKzNsLYa/wHrbc3KN4sYLKAdPZxqiM2HATqv/SBk2/ENSHpvXGaLOMcsAyz0poEGqkmmKYG3OWiJEQ==}
@@ -2636,6 +2653,11 @@ snapshots:
 
   '@drizzle-team/brocli@0.12.0': {}
 
+  '@effect/platform-browser@4.0.0-beta.97(effect@4.0.0-beta.97)':
+    dependencies:
+      effect: 4.0.0-beta.97
+      multipasta: 0.2.8
+
   '@effect/platform-node-shared@4.0.0-beta.97(effect@4.0.0-beta.97)':
     dependencies:
       '@types/ws': 8.18.1
@@ -2648,6 +2670,11 @@ snapshots:
   '@effect/sql-sqlite-node@4.0.0-beta.97(effect@4.0.0-beta.97)':
     dependencies:
       effect: 4.0.0-beta.97
+
+  '@effect/vitest@4.0.0-beta.97(effect@4.0.0-beta.97)(vitest@4.1.10(@types/node@26.1.1)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))':
+    dependencies:
+      effect: 4.0.0-beta.97
+      vitest: 4.1.10(@types/node@26.1.1)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0))
 
   '@emnapi/core@1.11.1':
     dependencies:

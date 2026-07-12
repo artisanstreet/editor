@@ -107,7 +107,7 @@
 		align-items: center;
 		justify-content: space-between;
 		gap: 12px;
-		padding: 0 10px 0 14px;
+		padding: 0 var(--pane-action-space, 10px) 0 14px;
 		border-bottom: 1px solid var(--line);
 	}
 
@@ -329,17 +329,7 @@
 		font-size: 9px;
 	}
 
-	@media (max-width: 1279px) {
-		.workspace-header {
-			padding-right: 48px;
-		}
-	}
-
 	@media (max-width: 799px) {
-		.workspace-header {
-			padding-right: 82px;
-		}
-
 		.workspace-title span {
 			display: none;
 		}

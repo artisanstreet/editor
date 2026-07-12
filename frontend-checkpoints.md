@@ -65,7 +65,7 @@ This is the build order for the Artisan renderer, not a list of screens to mock 
 - [x] Give the main pane separate mode controls and file-tab controls; do not merge those two concepts into one tab group.
 - [x] Give the right pane a persistent, dense session stack with quiet empty states.
 - [x] Collapse or hide the right pane before the main pane becomes narrower than its useful minimum; then collapse the left pane to an icon rail or overlay.
-- [ ] Persist only local presentation preferences such as pane sizes and collapse state.
+- [x] Persist only local presentation preferences such as pane sizes and collapse state.
 
 **Exit gate:** layout tests cover common desktop widths, narrow windows, zoom, independent scrolling, pane priority, and focus order without starting a development server.
 

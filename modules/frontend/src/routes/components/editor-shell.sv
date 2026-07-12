@@ -1,6 +1,10 @@
 <script lang="ts" effect>
 	import { Effect } from "effect";
 	import { IconLayoutSidebar as PanelLeft, IconLayoutSidebarRight as PanelRight } from "@tabler/icons-svelte";
+	import {
+		DefaultShellPresentationState,
+		ShellPresentationPreferences,
+	} from "$lib/runtime/shell-presentation-preferences";
 
 	import LeftPane from "./left-pane.sv";
 	import MainPane from "./main-pane.sv";
@@ -8,16 +12,51 @@
 
 	type EdgePane = "left" | "right";
 
+	const shell_presentation_preferences = yield* ShellPresentationPreferences;
+	const initial_presentation = yield* shell_presentation_preferences.Load;
+
 	let left_open = $state(false);
 	let right_open = $state(false);
+	let left_collapsed = $state(initial_presentation.left_collapsed);
+	let right_collapsed = $state(initial_presentation.right_collapsed);
 	let selected_thread = $state("thread-editor");
 	let draft_threads = $state(0);
+
+	const SavePresentation = Effect.gen(function* () {
+		yield* shell_presentation_preferences.Save({
+			...DefaultShellPresentationState,
+			left_collapsed,
+			right_collapsed,
+		});
+	});
 
 	const OpenPane = (pane: EdgePane) =>
 		Effect.gen(function* () {
 			left_open = pane === "left";
 			right_open = pane === "right";
 		});
+
+	const ExpandLeft = Effect.gen(function* () {
+		left_collapsed = false;
+		yield* SavePresentation;
+	});
+
+	const ExpandRight = Effect.gen(function* () {
+		right_collapsed = false;
+		yield* SavePresentation;
+	});
+
+	const CollapseLeft = Effect.gen(function* () {
+		left_collapsed = true;
+		left_open = false;
+		yield* SavePresentation;
+	});
+
+	const CollapseRight = Effect.gen(function* () {
+		right_collapsed = true;
+		right_open = false;
+		yield* SavePresentation;
+	});
 
 	const ClosePanes = Effect.gen(function* () {
 		left_open = false;
@@ -43,9 +82,15 @@
 
 <svelte:window onkeydown={yield* HandleKeydown(event.key)} />
 
-<div class="editor-shell" data-left-open={left_open} data-right-open={right_open}>
+<div
+	class="editor-shell"
+	data-left-collapsed={left_collapsed}
+	data-left-open={left_open}
+	data-right-collapsed={right_collapsed}
+	data-right-open={right_open}
+>
 	<div class="pane-slot desktop-left-slot">
-		<LeftPane compact={false} instance_id="desktop-left" {selected_thread} {draft_threads} on_select_thread={SelectThread} on_new_chat={NewChat} />
+		<LeftPane compact={false} instance_id="desktop-left" {selected_thread} {draft_threads} on_select_thread={SelectThread} on_new_chat={NewChat} on_collapse={CollapseLeft} />
 	</div>
 
 	<div class="left-rail-slot">
@@ -54,10 +99,16 @@
 
 	<main class="main-slot">
 		<div class="compact-pane-actions" aria-label="Open workspace panes">
-			<button class="pane-toggle left-toggle" type="button" aria-label="Open thread navigation" onclick={yield* OpenPane("left")}>
+			<button class="pane-toggle desktop-left-toggle" type="button" aria-label="Expand thread navigation" onclick={yield* ExpandLeft}>
 				<PanelLeft size={18} stroke={1.7} aria-hidden="true" />
 			</button>
-			<button class="pane-toggle right-toggle" type="button" aria-label="Open session pane" onclick={yield* OpenPane("right")}>
+			<button class="pane-toggle desktop-right-toggle" type="button" aria-label="Expand session pane" onclick={yield* ExpandRight}>
+				<PanelRight size={18} stroke={1.7} aria-hidden="true" />
+			</button>
+			<button class="pane-toggle responsive-left-toggle" type="button" aria-label="Open thread navigation" onclick={yield* OpenPane("left")}>
+				<PanelLeft size={18} stroke={1.7} aria-hidden="true" />
+			</button>
+			<button class="pane-toggle responsive-right-toggle" type="button" aria-label="Open session pane" onclick={yield* OpenPane("right")}>
 				<PanelRight size={18} stroke={1.7} aria-hidden="true" />
 			</button>
 		</div>
@@ -65,7 +116,7 @@
 	</main>
 
 	<div class="pane-slot desktop-right-slot">
-		<RightPane instance_id="desktop-right" />
+		<RightPane instance_id="desktop-right" on_collapse={CollapseRight} />
 	</div>
 
 	<div class="pane-slot left-overlay t-panel-slide" data-open={left_open} aria-hidden={!left_open} inert={!left_open}>
@@ -83,6 +134,8 @@
 
 <style>
 	.editor-shell {
+		--pane-action-space: 10px;
+
 		display: grid;
 		grid-template-columns: 272px minmax(720px, 1fr) 340px;
 		gap: 12px;
@@ -113,6 +166,10 @@
 
 	.left-rail-slot,
 	.compact-pane-actions,
+	.desktop-left-toggle,
+	.desktop-right-toggle,
+	.responsive-left-toggle,
+	.responsive-right-toggle,
 	.pane-backdrop {
 		display: none;
 	}
@@ -127,6 +184,44 @@
 		background: var(--raised);
 		color: var(--text-secondary);
 		cursor: pointer;
+	}
+
+	.editor-shell[data-left-collapsed="true"] {
+		grid-template-columns: 56px minmax(720px, 1fr) 340px;
+		--pane-action-space: 48px;
+	}
+
+	.editor-shell[data-right-collapsed="true"] {
+		grid-template-columns: 272px minmax(720px, 1fr);
+		--pane-action-space: 48px;
+	}
+
+	.editor-shell[data-left-collapsed="true"][data-right-collapsed="true"] {
+		grid-template-columns: 56px minmax(720px, 1fr);
+		--pane-action-space: 82px;
+	}
+
+	.editor-shell[data-left-collapsed="true"] .desktop-left-slot,
+	.editor-shell[data-right-collapsed="true"] .desktop-right-slot {
+		display: none;
+	}
+
+	.editor-shell[data-left-collapsed="true"] .left-rail-slot,
+	.editor-shell[data-left-collapsed="true"] .compact-pane-actions,
+	.editor-shell[data-left-collapsed="true"] .desktop-left-toggle,
+	.editor-shell[data-right-collapsed="true"] .compact-pane-actions,
+	.editor-shell[data-right-collapsed="true"] .desktop-right-toggle {
+		display: grid;
+	}
+
+	.editor-shell[data-left-collapsed="true"] .compact-pane-actions,
+	.editor-shell[data-right-collapsed="true"] .compact-pane-actions {
+		position: absolute;
+		top: 10px;
+		right: 10px;
+		z-index: 10;
+		display: flex;
+		gap: 6px;
 	}
 
 	.pane-toggle:hover {
@@ -144,14 +239,44 @@
 		.editor-shell {
 			grid-template-columns: 240px minmax(720px, 1fr) 280px;
 		}
+
+		.editor-shell[data-left-collapsed="true"] {
+			grid-template-columns: 56px minmax(720px, 1fr) 280px;
+		}
+
+		.editor-shell[data-right-collapsed="true"] {
+			grid-template-columns: 240px minmax(720px, 1fr);
+		}
+
+		.editor-shell[data-left-collapsed="true"][data-right-collapsed="true"] {
+			grid-template-columns: 56px minmax(720px, 1fr);
+		}
 	}
 
 	@media (max-width: 1279px) {
 		.editor-shell {
+			--pane-action-space: 48px;
+
 			grid-template-columns: 240px minmax(0, 1fr);
 		}
 
-		.desktop-right-slot {
+		.editor-shell[data-left-collapsed="true"],
+		.editor-shell[data-right-collapsed="true"],
+		.editor-shell[data-left-collapsed="true"][data-right-collapsed="true"] {
+			grid-template-columns: 240px minmax(0, 1fr);
+		}
+
+		.editor-shell .desktop-right-slot {
+			display: none;
+		}
+
+		.editor-shell[data-left-collapsed="true"] .desktop-left-slot {
+			display: block;
+		}
+
+		.editor-shell[data-left-collapsed="true"] .left-rail-slot,
+		.editor-shell[data-left-collapsed="true"] .desktop-left-toggle,
+		.editor-shell[data-right-collapsed="true"] .desktop-right-toggle {
 			display: none;
 		}
 
@@ -169,7 +294,7 @@
 			transform: translateX(0);
 		}
 
-		.right-toggle,
+		.responsive-right-toggle,
 		.pane-backdrop {
 			display: grid;
 		}
@@ -192,33 +317,41 @@
 		}
 	}
 
-	.left-toggle {
-		display: none;
-	}
-
 	@media (min-width: 800px) and (max-width: 999px) {
-		.editor-shell {
+		.editor-shell,
+		.editor-shell[data-left-collapsed="true"],
+		.editor-shell[data-right-collapsed="true"],
+		.editor-shell[data-left-collapsed="true"][data-right-collapsed="true"] {
 			grid-template-columns: 56px minmax(0, 1fr);
 		}
 
-		.desktop-left-slot {
+		.editor-shell .desktop-left-slot,
+		.editor-shell[data-left-collapsed="true"] .desktop-left-slot {
 			display: none;
 		}
 
-		.left-rail-slot {
+		.editor-shell .left-rail-slot,
+		.editor-shell[data-left-collapsed="true"] .left-rail-slot {
 			display: block;
 		}
 	}
 
 	@media (max-width: 799px) {
-		.editor-shell {
+		.editor-shell,
+		.editor-shell[data-left-collapsed="true"],
+		.editor-shell[data-right-collapsed="true"],
+		.editor-shell[data-left-collapsed="true"][data-right-collapsed="true"] {
+			--pane-action-space: 82px;
+
 			grid-template-columns: minmax(0, 1fr);
 			gap: 0;
 			padding: 6px;
 		}
 
-		.desktop-left-slot,
-		.left-rail-slot {
+		.editor-shell .desktop-left-slot,
+		.editor-shell[data-left-collapsed="true"] .desktop-left-slot,
+		.editor-shell .left-rail-slot,
+		.editor-shell[data-left-collapsed="true"] .left-rail-slot {
 			display: none;
 		}
 
@@ -236,8 +369,8 @@
 			transform: translateX(0);
 		}
 
-		.left-toggle,
-		.right-toggle,
+		.responsive-left-toggle,
+		.responsive-right-toggle,
 		.pane-backdrop {
 			display: grid;
 		}

@@ -361,6 +361,15 @@ Implemented, independently reviewed, committed, and verified:
 - [x] Full `pnpm run validate` passed after the backend owner formatted its concurrent work: formatting, lint, root TypeScript, the production SER/Svelte build, and 90 test files passed with 732 tests and 3 intentional skips.
 - [x] Frontend fixture/runtime checkpoint `c8011a0` was pushed to `origin/codex/backend-services`; local `HEAD` and upstream both resolved to `c8011a0e366488538e262daea2cd0a64120dcb9e` immediately after the push.
 
+## Frontend Shell Presentation Preferences
+
+- [x] Added a versioned `ShellPresentationPreferences` Effect Service backed by Effect's browser `KeyValueStore` Layer; malformed or unsupported persisted state repairs to safe defaults.
+- [x] Browser storage acquisition defects fall back to Effect's memory `KeyValueStore`, and an Effect-owned regression test proves startup remains available without `localStorage`.
+- [x] Explicit desktop left/right collapse and expand actions persist, while responsive overlay open, Escape, and backdrop closure remain ephemeral.
+- [x] Desktop collapse uses the 56px left rail and removes the right column; responsive breakpoints ignore desktop collapse state without exposing controls that appear to do nothing.
+- [x] The frontend production build, focused lint, diff check, and 16 preference/layout tests pass. Independent P0-P2 review and re-review are clean.
+- [x] Full `pnpm run validate` passed after the backend loop settled: formatting, lint, root TypeScript, the production SER/Svelte build, and 92 test files passed with 754 tests and 3 intentional skips.
+
 ## Frontend Typeface Prototype
 
 - [x] Built `Artisan Neo` v0.1 as an OFL-licensed derivative of the verified Inter 4.1 release. This is the usable application and visual prototype; it is not yet an original proprietary typeface.

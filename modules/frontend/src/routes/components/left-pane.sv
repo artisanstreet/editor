@@ -5,6 +5,7 @@
 		IconBrandDatabricks as BrandDatabricks,
 		IconChevronDown as ChevronDown,
 		IconLayoutGrid as LayoutGrid,
+		IconLayoutSidebarLeftCollapse as CollapseLeft,
 		IconMessagePlus as MessagePlus,
 		IconPin as Pin,
 	} from "@tabler/icons-svelte";
@@ -18,6 +19,7 @@
 		draft_threads,
 		on_select_thread,
 		on_new_chat,
+		on_collapse,
 	}: {
 		compact?: boolean;
 		instance_id: string;
@@ -25,6 +27,7 @@
 		draft_threads: number;
 		on_select_thread: (thread_id: string) => Effect.Effect<void>;
 		on_new_chat: Effect.Effect<void>;
+		on_collapse?: Effect.Effect<void>;
 	} = $props();
 	const threads_title_id = $derived(`${instance_id}-threads-title`);
 
@@ -36,12 +39,23 @@
 	const NewChat = Effect.gen(function* () {
 		yield* on_new_chat;
 	});
+
+	const CollapsePane = Effect.gen(function* () {
+		if (on_collapse !== undefined) {
+			yield* on_collapse;
+		}
+	});
 </script>
 
 <aside class:compact class="left-pane" aria-label="Thread navigation">
 	<header class="brand-row">
 		<span class="brand-mark"><BrandDatabricks size={19} stroke={1.7} aria-hidden="true" /></span>
 		{#if !compact}<span class="brand-name">Artisan</span><span class="fixture-tag">Fixture</span>{/if}
+		{#if on_collapse}
+			<button class="collapse-pane" type="button" aria-label="Collapse thread navigation" title="Collapse thread navigation" onclick={yield* CollapsePane}>
+				<CollapseLeft size={17} stroke={1.7} aria-hidden="true" />
+			</button>
+		{/if}
 	</header>
 
 	<nav class="primary-actions" aria-label="Workspace actions">
@@ -129,6 +143,25 @@
 		font-size: 10px;
 		text-transform: uppercase;
 		letter-spacing: 0.08em;
+	}
+
+	.collapse-pane {
+		display: grid;
+		width: 28px;
+		height: 28px;
+		flex: 0 0 auto;
+		place-items: center;
+		border: 1px solid transparent;
+		border-radius: var(--radius-sm);
+		background: transparent;
+		color: var(--text-muted);
+		cursor: pointer;
+	}
+
+	.collapse-pane:hover {
+		border-color: var(--line);
+		background: var(--raised);
+		color: var(--text-primary);
 	}
 
 	.primary-actions {
@@ -281,8 +314,15 @@
 	}
 
 	.action:focus-visible,
-	.thread-row:focus-visible {
+	.thread-row:focus-visible,
+	.collapse-pane:focus-visible {
 		outline: 2px solid var(--focus);
 		outline-offset: -2px;
+	}
+
+	@media (max-width: 1279px) {
+		.collapse-pane {
+			display: none;
+		}
 	}
 </style>

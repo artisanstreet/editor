@@ -1,92 +1,244 @@
 import { readFileSync, readdirSync } from "node:fs";
 import { extname, join, relative, resolve } from "node:path";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, layer } from "@effect/vitest";
+import { Context, Effect, Layer } from "effect";
 
 const frontend_source = resolve("modules/frontend/src");
 const source_extensions = new Set([".css", ".html", ".sv", ".svelte", ".ts"]);
 
-function source_files(directory: string): ReadonlyArray<string> {
-	return readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
-		const path = join(directory, entry.name);
+interface FrontendSource {
+	readonly file: string;
+	readonly source: string;
+}
 
-		return entry.isDirectory()
-			? source_files(path)
-			: source_extensions.has(extname(entry.name))
-				? [path]
-				: [];
+class FrontendSources extends Context.Service<
+	FrontendSources,
+	{
+		readonly aggregate: string;
+		readonly sources: ReadonlyArray<FrontendSource>;
+	}
+>()("Artisan/Test/FrontendSources") {}
+
+const SourceFiles = (directory: string): Effect.Effect<ReadonlyArray<string>, unknown> =>
+	Effect.gen(function* () {
+		const entries = yield* Effect.try(() => readdirSync(directory, { withFileTypes: true }));
+		const files: Array<string> = [];
+
+		for (const entry of entries) {
+			const path = join(directory, entry.name);
+
+			if (entry.isDirectory()) {
+				files.push(...(yield* SourceFiles(path)));
+			} else if (source_extensions.has(extname(entry.name))) {
+				files.push(path);
+			}
+		}
+
+		return files;
 	});
-}
 
-const files = source_files(frontend_source);
-const sources = files.map((file) => ({ file, source: readFileSync(file, "utf8") }));
-const aggregate_source = sources.map(({ source }) => source).join("\n");
+const FrontendSourcesLive = Layer.effect(
+	FrontendSources,
+	Effect.gen(function* () {
+		const files = yield* SourceFiles(frontend_source);
+		const sources: Array<FrontendSource> = [];
+		const aggregate: Array<string> = [];
 
-function expect_source(pattern: RegExp, label: string) {
-	const matches = sources.filter(({ source }) => pattern.test(source));
+		for (const file of files) {
+			const source = yield* Effect.try(() => readFileSync(file, "utf8"));
 
-	expect(
-		matches.map(({ file }) => relative(frontend_source, file)),
-		`Expected frontend source to implement ${label}`,
-	).not.toEqual([]);
-}
+			sources.push({ file, source });
+			aggregate.push(source);
+		}
+
+		return FrontendSources.of({ aggregate: aggregate.join("\n"), sources });
+	}),
+);
+
+const ExpectSource = (sources: ReadonlyArray<FrontendSource>, pattern: RegExp, label: string) =>
+	Effect.gen(function* () {
+		yield* Effect.void;
+
+		const matches: Array<string> = [];
+
+		for (const source of sources) {
+			if (pattern.test(source.source)) {
+				matches.push(relative(frontend_source, source.file));
+			}
+		}
+
+		expect(matches, `Expected frontend source to implement ${label}`).not.toEqual([]);
+	});
 
 describe("three-pane shell source layout", () => {
-	it("defines the exact desktop grid and viewport ownership", () => {
-		expect(aggregate_source).toContain("272px minmax(720px, 1fr) 340px");
-		expect_source(/100dvh/, "a dynamic-viewport-height shell");
-		expect_source(/editor-shell/, "the editor shell boundary");
-	});
+	layer(FrontendSourcesLive)((it) => {
+		it.effect("loads and saves desktop pane preferences through the Effect Service", () =>
+			Effect.gen(function* () {
+				const { aggregate } = yield* FrontendSources;
 
-	it("collapses the right pane before the left pane becomes a rail", () => {
-		expect(aggregate_source).toContain("max-width: 1367px");
-		expect_source(
-			/@media\s*\([^)]*max-width:\s*1279px[^)]*\)/,
-			"the right-pane collapse breakpoint",
+				expect(aggregate).toContain("yield* ShellPresentationPreferences");
+				expect(aggregate).toContain("yield* shell_presentation_preferences.Load");
+				expect(aggregate).toContain("shell_presentation_preferences.Save");
+				expect(aggregate).toContain("DefaultShellPresentationState");
+				expect(aggregate).not.toMatch(/Effect\.run\w*/);
+			}),
 		);
-		expect(aggregate_source).toContain("max-width: 999px");
-		expect(aggregate_source).toMatch(/max-width:\s*1279px[\s\S]*?right-slot/);
-		expect(aggregate_source).toMatch(/max-width:\s*999px[\s\S]*?left-rail-slot/);
-	});
 
-	it("provides mobile overlays for both secondary panes", () => {
-		expect_source(
-			/@media\s*\([^)]*max-width:\s*(?:999|799)px[^)]*\)/,
-			"a mobile overlay breakpoint",
+		it.effect("defines the exact desktop grid and viewport ownership", () =>
+			Effect.gen(function* () {
+				const { aggregate, sources } = yield* FrontendSources;
+
+				expect(aggregate).toContain("272px minmax(720px, 1fr) 340px");
+				yield* ExpectSource(sources, /100dvh/, "a dynamic-viewport-height shell");
+				yield* ExpectSource(sources, /editor-shell/, "the editor shell boundary");
+			}),
 		);
-		expect(aggregate_source).toContain("Open thread navigation");
-		expect(aggregate_source).toContain("Open session pane");
-		expect(aggregate_source).toMatch(/(?:t-panel|edge-panel)/);
-		expect(aggregate_source).toContain("data-open");
-	});
 
-	it("exposes labelled regions and independently named pane content", () => {
-		for (const label of ["Thread navigation", "Workspace", "Session"]) {
-			expect(aggregate_source).toMatch(
-				new RegExp(`<(?:aside|main|section)[^>]*aria-label=["']${label}["']`),
-			);
-		}
-		expect_source(/thread-list/, "the independently scrollable thread list");
-	});
+		it.effect("collapses the right pane before the left pane becomes a rail", () =>
+			Effect.gen(function* () {
+				const { aggregate, sources } = yield* FrontendSources;
 
-	it("keeps workspace modes separate from file tabs", () => {
-		expect(aggregate_source).toMatch(/workspace-mode-switcher/);
-		expect(aggregate_source).toMatch(/file-tab-strip/);
-		expect(aggregate_source.match(/role=["']group["']/g)?.length ?? 0).toBeGreaterThanOrEqual(
-			2,
+				expect(aggregate).toContain("max-width: 1367px");
+				yield* ExpectSource(
+					sources,
+					/@media\s*\([^)]*max-width:\s*1279px[^)]*\)/,
+					"the right-pane collapse breakpoint",
+				);
+				expect(aggregate).toContain("max-width: 999px");
+				expect(aggregate).toMatch(/max-width:\s*1279px[\s\S]*?right-slot/);
+				expect(aggregate).toMatch(/max-width:\s*999px[\s\S]*?left-rail-slot/);
+			}),
 		);
-	});
 
-	it("labels preview-only data and supplies a reduced-motion state", () => {
-		expect(aggregate_source).toContain("Preview data");
-		expect_source(/prefers-reduced-motion:\s*reduce/, "the reduced-motion override");
-	});
+		it.effect("provides mobile overlays for both secondary panes", () =>
+			Effect.gen(function* () {
+				const { aggregate, sources } = yield* FrontendSources;
 
-	it("contains no Barekey names or copied asset references", () => {
-		const violations = sources
-			.filter(({ file, source }) => /barekey|usebarekey/i.test(`${file}\n${source}`))
-			.map(({ file }) => relative(frontend_source, file));
+				yield* ExpectSource(
+					sources,
+					/@media\s*\([^)]*max-width:\s*(?:999|799)px[^)]*\)/,
+					"a mobile overlay breakpoint",
+				);
+				expect(aggregate).toContain("Open thread navigation");
+				expect(aggregate).toContain("Open session pane");
+				expect(aggregate).toMatch(/(?:t-panel|edge-panel)/);
+				expect(aggregate).toContain("data-open");
+				expect(aggregate).toContain("const OpenPane =");
+				expect(aggregate).not.toMatch(/OpenPane[\s\S]{0,180}\.Save\(/);
+				expect(aggregate).toContain("const ClosePanes = Effect.gen");
+				expect(aggregate).not.toMatch(/ClosePanes[\s\S]{0,160}\.Save\(/);
+			}),
+		);
 
-		expect(violations).toEqual([]);
+		it.effect("persists explicit desktop collapse without persisting overlay closure", () =>
+			Effect.gen(function* () {
+				const { aggregate } = yield* FrontendSources;
+
+				expect(aggregate).toContain("data-left-collapsed={left_collapsed}");
+				expect(aggregate).toContain("data-right-collapsed={right_collapsed}");
+				expect(aggregate).toContain("const CollapseLeft = Effect.gen");
+				expect(aggregate).toContain("const CollapseRight = Effect.gen");
+				expect(aggregate).toContain("const ExpandLeft = Effect.gen");
+				expect(aggregate).toContain("const ExpandRight = Effect.gen");
+				expect(aggregate).toMatch(/CollapseLeft[\s\S]{0,180}yield\* SavePresentation/);
+				expect(aggregate).toMatch(/CollapseRight[\s\S]{0,180}yield\* SavePresentation/);
+				expect(aggregate).toMatch(/ExpandLeft[\s\S]{0,140}yield\* SavePresentation/);
+				expect(aggregate).toMatch(/ExpandRight[\s\S]{0,140}yield\* SavePresentation/);
+				expect(aggregate).toContain('aria-label="Collapse thread navigation"');
+				expect(aggregate).toContain('aria-label="Collapse session pane"');
+				expect(aggregate).toMatch(
+					/max-width:\s*1279px[\s\S]*?\.collapse-pane[\s\S]*?display:\s*none/,
+				);
+			}),
+		);
+
+		it.effect(
+			"uses the compact rail and removes the right column for desktop collapse states",
+			() =>
+				Effect.gen(function* () {
+					const { aggregate } = yield* FrontendSources;
+
+					expect(aggregate).toContain('data-left-collapsed="true"');
+					expect(aggregate).toContain('data-right-collapsed="true"');
+					expect(aggregate).toContain("56px minmax(720px, 1fr) 340px");
+					expect(aggregate).toContain("272px minmax(720px, 1fr)");
+					expect(aggregate).toContain("56px minmax(720px, 1fr) 280px");
+					expect(aggregate).toContain("240px minmax(720px, 1fr)");
+					expect(aggregate).toMatch(/data-left-collapsed[\s\S]*?left-rail-slot/);
+					expect(aggregate).toMatch(/data-right-collapsed[\s\S]*?desktop-right-slot/);
+				}),
+		);
+
+		it.effect("reserves inherited header space for exactly the visible pane actions", () =>
+			Effect.gen(function* () {
+				const { aggregate } = yield* FrontendSources;
+
+				expect(aggregate).toContain("--pane-action-space: 10px");
+				expect(aggregate).toContain("--pane-action-space: 48px");
+				expect(aggregate).toContain("--pane-action-space: 82px");
+				expect(aggregate).toContain("var(--pane-action-space, 10px)");
+				expect(aggregate).not.toMatch(
+					/workspace-header[\s\S]{0,180}padding-right:\s*(?:48|82)px/,
+				);
+			}),
+		);
+
+		it.effect("exposes labelled regions and independently named pane content", () =>
+			Effect.gen(function* () {
+				const { aggregate, sources } = yield* FrontendSources;
+
+				for (const label of ["Thread navigation", "Workspace", "Session"]) {
+					expect(aggregate).toMatch(
+						new RegExp(`<(?:aside|main|section)[^>]*aria-label=["']${label}["']`),
+					);
+				}
+				yield* ExpectSource(
+					sources,
+					/thread-list/,
+					"the independently scrollable thread list",
+				);
+			}),
+		);
+
+		it.effect("keeps workspace modes separate from file tabs", () =>
+			Effect.gen(function* () {
+				const { aggregate } = yield* FrontendSources;
+
+				expect(aggregate).toMatch(/workspace-mode-switcher/);
+				expect(aggregate).toMatch(/file-tab-strip/);
+				expect(aggregate.match(/role=["']group["']/g)?.length ?? 0).toBeGreaterThanOrEqual(
+					2,
+				);
+			}),
+		);
+
+		it.effect("labels preview-only data and supplies a reduced-motion state", () =>
+			Effect.gen(function* () {
+				const { aggregate, sources } = yield* FrontendSources;
+
+				expect(aggregate).toContain("Preview data");
+				yield* ExpectSource(
+					sources,
+					/prefers-reduced-motion:\s*reduce/,
+					"the reduced-motion override",
+				);
+			}),
+		);
+
+		it.effect("contains no Barekey names or copied asset references", () =>
+			Effect.gen(function* () {
+				const { sources } = yield* FrontendSources;
+				const violations: Array<string> = [];
+
+				for (const source of sources) {
+					if (/barekey|usebarekey/i.test(`${source.file}\n${source.source}`)) {
+						violations.push(relative(frontend_source, source.file));
+					}
+				}
+
+				expect(violations).toEqual([]);
+			}),
+		);
 	});
 });
