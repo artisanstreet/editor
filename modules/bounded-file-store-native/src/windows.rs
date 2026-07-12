@@ -24,14 +24,17 @@ use windows_sys::{
     Win32::{
         Foundation::{
             CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, HANDLE, INVALID_HANDLE_VALUE,
-            NTSTATUS, OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE, STATUS_ACCESS_DENIED,
+            LocalFree, NTSTATUS, OBJ_CASE_INSENSITIVE, OBJ_DONT_REPARSE, STATUS_ACCESS_DENIED,
             STATUS_CANT_WAIT, STATUS_DELETE_PENDING, STATUS_FILE_DELETED, STATUS_LOCK_NOT_GRANTED,
             STATUS_NO_SUCH_FILE, STATUS_OBJECT_NAME_COLLISION, STATUS_OBJECT_NAME_EXISTS,
             STATUS_OBJECT_NAME_NOT_FOUND, STATUS_OBJECT_PATH_NOT_FOUND, STATUS_OPLOCK_NOT_GRANTED,
             STATUS_RETRY, STATUS_SHARING_VIOLATION, STATUS_USER_MAPPED_FILE, UNICODE_STRING,
         },
         Security::{
-            Authorization::{SE_FILE_OBJECT, SetSecurityInfo},
+            Authorization::{
+                ConvertSecurityDescriptorToStringSecurityDescriptorW, SDDL_REVISION_1,
+                SE_FILE_OBJECT, SetSecurityInfo,
+            },
             DACL_SECURITY_INFORMATION, GROUP_SECURITY_INFORMATION, GetKernelObjectSecurity,
             GetSecurityDescriptorDacl, OWNER_SECURITY_INFORMATION,
             PROTECTED_DACL_SECURITY_INFORMATION, SE_DACL_PROTECTED, SECURITY_DESCRIPTOR,
@@ -120,8 +123,17 @@ struct Metadata {
 
 #[derive(Clone)]
 struct SecurityDescriptorBuffer {
+    canonical: Vec<u16>,
     storage: Vec<usize>,
     length: usize,
+}
+
+struct LocalSecurityString(*mut u16);
+
+impl Drop for LocalSecurityString {
+    fn drop(&mut self) {
+        unsafe { LocalFree(self.0 as _) };
+    }
 }
 
 impl SecurityDescriptorBuffer {
@@ -146,7 +158,7 @@ impl SecurityDescriptorBuffer {
 
 impl PartialEq for SecurityDescriptorBuffer {
     fn eq(&self, other: &Self) -> bool {
-        self.as_bytes() == other.as_bytes()
+        self.canonical == other.canonical
     }
 }
 
@@ -1933,10 +1945,38 @@ fn security_descriptor(
         return Err(Failed);
     }
 
+    let canonical = canonical_security_descriptor(storage.as_ptr() as _)?;
+
     Ok(SecurityDescriptorBuffer {
+        canonical,
         storage,
         length: written as usize,
     })
+}
+
+fn canonical_security_descriptor(
+    descriptor: *const SECURITY_DESCRIPTOR,
+) -> std::result::Result<Vec<u16>, AttemptError> {
+    let mut canonical = std::ptr::null_mut();
+    let mut length = 0;
+    let succeeded = unsafe {
+        ConvertSecurityDescriptorToStringSecurityDescriptorW(
+            descriptor as _,
+            SDDL_REVISION_1,
+            SECURITY_INFORMATION,
+            &mut canonical,
+            &mut length,
+        )
+    };
+
+    if succeeded == 0 || canonical.is_null() || length == 0 {
+        return Err(Failed);
+    }
+
+    let canonical = LocalSecurityString(canonical);
+    let normalized = unsafe { slice::from_raw_parts(canonical.0, length as usize) }.to_vec();
+
+    Ok(normalized)
 }
 
 fn apply_dacl(handle: HANDLE, descriptor: &SecurityDescriptorBuffer) -> bool {
