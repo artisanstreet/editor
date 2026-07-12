@@ -29,6 +29,13 @@ import {
 	type ThreadListItem,
 	type ThreadRetentionPolicy,
 	type ThreadRetentionUpdateEnvelope,
+	type WorkspaceChange,
+	type WorkspaceChangeListQueryEnvelope,
+	type WorkspaceChangeReviewEnvelope,
+	type WorkspaceChangeRollbackEnvelope,
+	type WorkspaceFileReadQueryEnvelope,
+	type WorkspaceFileReadQueryResult,
+	type WorkspaceFileReplaceEnvelope,
 } from "@artisan/protocol";
 
 interface StoredCommand {
@@ -49,6 +56,11 @@ interface StoredGuidanceMutation {
 }
 
 interface StoredModelBehaviourMutation {
+	readonly fingerprint: string;
+	readonly journal_sequence: number;
+}
+
+interface StoredWorkspaceMutation {
 	readonly fingerprint: string;
 	readonly journal_sequence: number;
 }
@@ -99,6 +111,12 @@ export interface FakeProtocolSnapshot {
 	readonly model_behaviour_retry_attempts: ReadonlyArray<ModelBehaviourRetryEnvelope>;
 	readonly model_behaviour_snapshot: ModelBehaviourSnapshot;
 	readonly model_behaviour_update_attempts: ReadonlyArray<ModelBehaviourUpdateEnvelope>;
+	readonly workspace_change_events: ReadonlyArray<EventEnvelope>;
+	readonly workspace_change_list_attempts: ReadonlyArray<WorkspaceChangeListQueryEnvelope>;
+	readonly workspace_change_review_attempts: ReadonlyArray<WorkspaceChangeReviewEnvelope>;
+	readonly workspace_change_rollback_attempts: ReadonlyArray<WorkspaceChangeRollbackEnvelope>;
+	readonly workspace_file_read_attempts: ReadonlyArray<WorkspaceFileReadQueryEnvelope>;
+	readonly workspace_file_replace_attempts: ReadonlyArray<WorkspaceFileReplaceEnvelope>;
 	readonly subscriptions: ReadonlyArray<SubscribeEnvelope>;
 }
 
@@ -153,6 +171,12 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 	const model_behaviour_query_attempts: Array<ModelBehaviourQueryEnvelope> = [];
 	const model_behaviour_retry_attempts: Array<ModelBehaviourRetryEnvelope> = [];
 	const model_behaviour_update_attempts: Array<ModelBehaviourUpdateEnvelope> = [];
+	const workspace_changes = new Map<string, StoredWorkspaceMutation>();
+	const workspace_change_list_attempts: Array<WorkspaceChangeListQueryEnvelope> = [];
+	const workspace_change_review_attempts: Array<WorkspaceChangeReviewEnvelope> = [];
+	const workspace_change_rollback_attempts: Array<WorkspaceChangeRollbackEnvelope> = [];
+	const workspace_file_read_attempts: Array<WorkspaceFileReadQueryEnvelope> = [];
+	const workspace_file_replace_attempts: Array<WorkspaceFileReplaceEnvelope> = [];
 	const subscription_attempts: Array<SubscribeEnvelope> = [];
 	const threads = new Map<string, ThreadListItem>();
 	let retention_policy: ThreadRetentionPolicy = { enabled: true, inactivity_days: 7 };
@@ -253,6 +277,37 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 		return `${prefix}_${id_sequence}`;
 	};
 	const now = () => new Date(Date.UTC(2026, 6, 10, 8, 0, id_sequence)).toISOString();
+	const workspace_file_content = "fixture workspace content\n";
+	const workspace_file_identity = {
+		algorithm: "sha256" as const,
+		byte_count: Buffer.byteLength(workspace_file_content),
+		content_hash: "2222222222222222222222222222222222222222222222222222222222222222",
+	};
+	const workspace_file_result: WorkspaceFileReadQueryResult = {
+		content: workspace_file_content,
+		identity: workspace_file_identity,
+		path: "src/main.ts",
+		workspace_id: "workspace_fixture",
+	};
+	let workspace_change: WorkspaceChange = {
+		after_identity: workspace_file_identity,
+		agent_id: "agent_fixture",
+		before_identity: {
+			...workspace_file_identity,
+			content_hash: "3333333333333333333333333333333333333333333333333333333333333333",
+		},
+		change_id: "change_fixture",
+		created_at: "2026-07-10T08:00:00.000Z",
+		path: "src/main.ts",
+		review_state: "needs_review",
+		rollback_state: "available",
+		run_id: "run_fixture",
+		source_command_id: "replace_fixture",
+		thread_id: "thread_fixture",
+		updated_at: "2026-07-10T08:00:00.000Z",
+		version: 1,
+		workspace_id: "workspace_fixture",
+	};
 	const backend_trace = () => ({
 		message_id: next_id("backend_message"),
 		origin: "backend" as const,
@@ -869,7 +924,10 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 					model_behaviour_retry_attempts.push(mutation);
 				}
 
-				const fingerprint = JSON.stringify(mutation);
+				const fingerprint = JSON.stringify({
+					kind: mutation.kind,
+					payload: mutation.payload,
+				});
 				const previous = model_behaviour_mutations.get(mutation.message_id);
 
 				if (previous && previous.fingerprint !== fingerprint) {
@@ -985,6 +1043,203 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 					payload: { journal_sequence, status: "accepted" },
 					thread_id: "settings/model-behaviour",
 				});
+			});
+
+		const handle_workspace_read = (query: WorkspaceFileReadQueryEnvelope) =>
+			Effect.gen(function* () {
+				workspace_file_read_attempts.push(query);
+				yield* enqueue({
+					...backend_trace(),
+					correlation_id: query.message_id,
+					kind: "workspace.file.read.query.result",
+					payload: {
+						...workspace_file_result,
+						path: query.payload.path,
+						workspace_id: query.payload.workspace_id,
+					},
+				});
+			});
+		const handle_workspace_change_list = (query: WorkspaceChangeListQueryEnvelope) =>
+			Effect.gen(function* () {
+				workspace_change_list_attempts.push(query);
+				const matches =
+					workspace_change.thread_id === query.payload.thread_id &&
+					(query.payload.workspace_id === undefined ||
+						workspace_change.workspace_id === query.payload.workspace_id);
+
+				yield* enqueue({
+					...backend_trace(),
+					correlation_id: query.message_id,
+					kind: "workspace.change.list.query.result",
+					payload: {
+						changes: matches ? [workspace_change] : [],
+						journal_sequence: events.length,
+					},
+				});
+			});
+
+		type WorkspaceMutationEnvelope =
+			| WorkspaceChangeReviewEnvelope
+			| WorkspaceChangeRollbackEnvelope
+			| WorkspaceFileReplaceEnvelope;
+		const handle_workspace_mutation = (mutation: WorkspaceMutationEnvelope) =>
+			Effect.gen(function* () {
+				if (mutation.kind === "workspace.file.replace") {
+					workspace_file_replace_attempts.push(mutation);
+				} else if (mutation.kind === "workspace.change.review") {
+					workspace_change_review_attempts.push(mutation);
+				} else {
+					workspace_change_rollback_attempts.push(mutation);
+				}
+
+				const fingerprint = JSON.stringify({
+					agent_id: "agent_id" in mutation ? mutation.agent_id : undefined,
+					kind: mutation.kind,
+					message_id: mutation.message_id,
+					origin: mutation.origin,
+					payload: mutation.payload,
+					raw_origin: "raw_origin" in mutation ? mutation.raw_origin : undefined,
+					run_id: "run_id" in mutation ? mutation.run_id : undefined,
+					sent_at: mutation.sent_at,
+					thread_id: mutation.thread_id,
+				});
+				const previous = workspace_changes.get(mutation.message_id);
+
+				if (previous && previous.fingerprint !== fingerprint) {
+					yield* enqueue({
+						...backend_trace(),
+						causation_id: mutation.message_id,
+						correlation_id: mutation.message_id,
+						kind: "command.receipt",
+						payload: {
+							error: {
+								code: "command.id_conflict",
+								message: "The command id was reused with different content.",
+								retryable: false,
+							},
+							status: "rejected",
+						},
+						thread_id: mutation.thread_id,
+					});
+
+					return;
+				}
+
+				if (previous) {
+					yield* enqueue({
+						...backend_trace(),
+						causation_id: mutation.message_id,
+						correlation_id: mutation.message_id,
+						kind: "command.receipt",
+						payload: {
+							journal_sequence: previous.journal_sequence,
+							status: "duplicate",
+						},
+						thread_id: mutation.thread_id,
+					});
+
+					return;
+				}
+
+				const action =
+					mutation.kind === "workspace.file.replace"
+						? ("recorded" as const)
+						: mutation.kind === "workspace.change.review"
+							? ("reviewed" as const)
+							: ("rolled_back" as const);
+				const next_change: WorkspaceChange =
+					mutation.kind === "workspace.file.replace"
+						? {
+								...workspace_change,
+								after_identity: {
+									algorithm: "sha256",
+									byte_count: Buffer.byteLength(mutation.payload.content),
+									content_hash: createHash("sha256")
+										.update(mutation.payload.content)
+										.digest("hex"),
+								},
+								agent_id: mutation.agent_id,
+								before_identity: mutation.payload.expected_before,
+								change_id: mutation.payload.change_id,
+								created_at: mutation.sent_at,
+								path: mutation.payload.path,
+								...(mutation.raw_origin === undefined
+									? {}
+									: { raw_origin: mutation.raw_origin }),
+								review_state: "needs_review",
+								rollback_state: "available",
+								run_id: mutation.run_id,
+								source_command_id: mutation.message_id,
+								thread_id: mutation.thread_id,
+								updated_at: mutation.sent_at,
+								version: 1,
+								workspace_id: mutation.payload.workspace_id,
+							}
+						: mutation.kind === "workspace.change.review"
+							? {
+									...workspace_change,
+									change_id: mutation.payload.change_id,
+									review_state: "reviewed",
+									reviewed_at: mutation.sent_at,
+									updated_at: mutation.sent_at,
+									version: workspace_change.version + 1,
+								}
+							: {
+									...workspace_change,
+									change_id: mutation.payload.change_id,
+									review_state: "rolled_back",
+									rollback_state: "consumed",
+									rolled_back_at: mutation.sent_at,
+									updated_at: mutation.sent_at,
+									version: workspace_change.version + 1,
+								};
+				const journal_sequence = events.length + 1;
+				const stream_id = `thread:${mutation.thread_id}`;
+				const sequence = events.filter((event) => event.stream_id === stream_id).length + 1;
+				const event: EventEnvelope = {
+					...backend_trace(),
+					...(mutation.kind === "workspace.file.replace"
+						? {
+								agent_id: mutation.agent_id,
+								...(mutation.raw_origin === undefined
+									? {}
+									: { raw_origin: mutation.raw_origin }),
+								run_id: mutation.run_id,
+							}
+						: {}),
+					causation_id: mutation.message_id,
+					correlation_id: mutation.message_id,
+					journal_sequence,
+					kind: "event",
+					payload: {
+						action,
+						change: next_change,
+						type: "workspace.change.updated",
+					},
+					sequence,
+					stream_id,
+					thread_id: mutation.thread_id,
+				};
+
+				workspace_change = next_change;
+				events.push(event);
+				workspace_changes.set(mutation.message_id, { fingerprint, journal_sequence });
+				yield* enqueue({
+					...backend_trace(),
+					causation_id: mutation.message_id,
+					correlation_id: mutation.message_id,
+					kind: "command.receipt",
+					payload: {
+						journal_sequence,
+						status: "accepted",
+					},
+					thread_id: mutation.thread_id,
+				});
+				yield* Effect.forEach(
+					live_connections,
+					(connection) => connection.deliver_event(event),
+					{ discard: true },
+				);
 			});
 
 		const handle_subscribe = (subscribe: SubscribeEnvelope) =>
@@ -1127,6 +1382,20 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 						yield* handle_model_behaviour_mutation(input);
 
 						return;
+					case "workspace.file.read.query":
+						yield* handle_workspace_read(input);
+
+						return;
+					case "workspace.change.list.query":
+						yield* handle_workspace_change_list(input);
+
+						return;
+					case "workspace.file.replace":
+					case "workspace.change.review":
+					case "workspace.change.rollback":
+						yield* handle_workspace_mutation(input);
+
+						return;
 					case "thread.work.query":
 						yield* enqueue({
 							...backend_trace(),
@@ -1263,6 +1532,14 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 			settings: [...model_behaviour_snapshot.settings],
 		},
 		model_behaviour_update_attempts: [...model_behaviour_update_attempts],
+		workspace_change_events: events.filter(
+			(event) => event.payload.type === "workspace.change.updated",
+		),
+		workspace_change_list_attempts: [...workspace_change_list_attempts],
+		workspace_change_review_attempts: [...workspace_change_review_attempts],
+		workspace_change_rollback_attempts: [...workspace_change_rollback_attempts],
+		workspace_file_read_attempts: [...workspace_file_read_attempts],
+		workspace_file_replace_attempts: [...workspace_file_replace_attempts],
 		subscriptions: [...subscription_attempts],
 	});
 

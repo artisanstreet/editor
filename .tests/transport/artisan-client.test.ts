@@ -95,6 +95,170 @@ describe("ArtisanClient over MessagePorts", () => {
 		}
 	});
 
+	it("exposes typed workspace queries and mutations with attributed envelopes", async () => {
+		const harness = await make_transport_test_harness();
+
+		try {
+			const read = await Effect.runPromise(
+				harness.client.ReadWorkspaceFile({
+					path: "src/main.ts",
+					workspace_id: "workspace_fixture",
+				}),
+			);
+			const listed = await Effect.runPromise(
+				harness.client.ListWorkspaceChanges({
+					thread_id: "thread_fixture",
+					workspace_id: "workspace_fixture",
+				}),
+			);
+			const replace = await Effect.runPromise(
+				harness.client.ReplaceWorkspaceFile({
+					agent_id: "agent_fixture",
+					change_id: "change_replace",
+					command_id: "workspace_replace_1",
+					content: "updated workspace content\n",
+					expected_before: read.identity,
+					path: "src/main.ts",
+					run_id: "run_fixture",
+					thread_id: "thread_fixture",
+					workspace_id: "workspace_fixture",
+				}),
+			);
+			const review_input = {
+				change_id: "change_fixture",
+				command_id: "workspace_review_1",
+				thread_id: "thread_fixture",
+			};
+			const review = await Effect.runPromise(
+				harness.client.ReviewWorkspaceChange(review_input),
+			);
+			const rollback = await Effect.runPromise(
+				harness.client.RollbackWorkspaceChange({
+					change_id: "change_fixture",
+					command_id: "workspace_rollback_1",
+					expected_after: listed.changes[0]!.after_identity,
+					thread_id: "thread_fixture",
+				}),
+			);
+			const rejected = await Effect.runPromise(
+				harness.client
+					.ReviewWorkspaceChange({
+						change_id: "different_change",
+						command_id: review_input.command_id,
+						thread_id: review_input.thread_id,
+					})
+					.pipe(Effect.flip),
+			);
+
+			expect(read).toMatchObject({
+				content: "fixture workspace content\n",
+				path: "src/main.ts",
+				workspace_id: "workspace_fixture",
+			});
+			expect(listed).toMatchObject({
+				changes: [{ change_id: "change_fixture" }],
+				journal_sequence: 0,
+			});
+			expect([replace, review, rollback]).toMatchObject([
+				{ command_id: "workspace_replace_1", status: "accepted" },
+				{ command_id: "workspace_review_1", status: "accepted" },
+				{ command_id: "workspace_rollback_1", status: "accepted" },
+			]);
+			expect(rejected).toBeInstanceOf(ArtisanClientError);
+			expect(rejected).toMatchObject({
+				code: "protocol",
+				protocol_code: "command.id_conflict",
+				retryable: false,
+			});
+
+			const snapshot = harness.protocol_snapshot();
+			expect(snapshot.workspace_file_read_attempts[0]).toMatchObject({
+				kind: "workspace.file.read.query",
+				payload: { path: "src/main.ts", workspace_id: "workspace_fixture" },
+			});
+			expect(snapshot.workspace_file_replace_attempts[0]).toMatchObject({
+				agent_id: "agent_fixture",
+				kind: "workspace.file.replace",
+				message_id: "workspace_replace_1",
+				run_id: "run_fixture",
+				thread_id: "thread_fixture",
+			});
+			expect(snapshot.workspace_change_review_attempts).toHaveLength(2);
+			expect(snapshot.workspace_change_rollback_attempts[0]).toMatchObject({
+				kind: "workspace.change.rollback",
+				message_id: "workspace_rollback_1",
+				thread_id: "thread_fixture",
+			});
+		} finally {
+			await harness.dispose();
+		}
+	});
+
+	it("retries the exact workspace mutation envelope after a dropped receipt", async () => {
+		const harness = await make_transport_test_harness({
+			drop_first_command_receipt: true,
+			client: { reconnect_delay_ms: 5 },
+		});
+
+		try {
+			const output = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const event_fiber = yield* harness.client.Events.pipe(
+							Stream.filter(
+								(event) =>
+									event.payload.type === "workspace.change.updated" &&
+									event.correlation_id === "workspace_retry_1",
+							),
+							Stream.take(1),
+							Stream.runCollect,
+							Effect.forkScoped,
+						);
+						const receipt = yield* harness.client.ReplaceWorkspaceFile({
+							agent_id: "agent_fixture",
+							change_id: "change_retry",
+							command_id: "workspace_retry_1",
+							content: "retry content\n",
+							expected_before: {
+								algorithm: "sha256",
+								byte_count: 26,
+								content_hash:
+									"2222222222222222222222222222222222222222222222222222222222222222",
+							},
+							path: "src/main.ts",
+							run_id: "run_fixture",
+							thread_id: "thread_fixture",
+							workspace_id: "workspace_fixture",
+						});
+
+						return { events: [...(yield* Fiber.join(event_fiber))], receipt };
+					}),
+				),
+			);
+
+			await wait_for(() => harness.connector_snapshot().connections >= 2);
+			const snapshot = harness.protocol_snapshot();
+			const attempts = snapshot.workspace_file_replace_attempts;
+
+			expect(output.receipt).toMatchObject({
+				command_id: "workspace_retry_1",
+				status: "duplicate",
+			});
+			expect(attempts).toHaveLength(2);
+			expect(attempts[1]).toEqual(attempts[0]);
+			expect(snapshot.workspace_change_events).toHaveLength(1);
+			expect(output.events).toMatchObject([
+				{
+					correlation_id: "workspace_retry_1",
+					payload: { action: "recorded", type: "workspace.change.updated" },
+				},
+			]);
+			expect(output.events[0]!.journal_sequence).toBe(output.receipt.journal_sequence);
+		} finally {
+			await harness.dispose();
+		}
+	});
+
 	it("reads and durably updates retention policy without exposing an internal thread id", async () => {
 		const harness = await make_transport_test_harness();
 

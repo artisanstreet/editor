@@ -292,6 +292,13 @@ export const FixtureArtisanClientService = {
 	ListThreads: Effect.gen(function* () {
 		return yield* Effect.succeed(fixture_artisan_client_data.threads);
 	}),
+	ListWorkspaceChanges: () =>
+		Effect.gen(function* () {
+			return {
+				changes: [],
+				journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+			};
+		}),
 	OpenAsset: (asset_id) =>
 		Effect.gen(function* () {
 			const output = fixture_artisan_client_data.asset_output[asset_id];
@@ -312,6 +319,12 @@ export const FixtureArtisanClientService = {
 
 			return Stream.fromIterable([output]);
 		}),
+	ReadWorkspaceFile: () =>
+		FixtureFailure("Fixture workspace files are unavailable in this visual dataset."),
+	ReplaceWorkspaceFile: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-workspace-replace");
+		}),
 	ResolveGlobalGuidanceDrift: (input) =>
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-guidance-drift");
@@ -327,6 +340,14 @@ export const FixtureArtisanClientService = {
 	RetryModelBehaviourSync: (input) =>
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-model-behaviour-retry");
+		}),
+	ReviewWorkspaceChange: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-workspace-review");
+		}),
+	RollbackWorkspaceChange: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-workspace-rollback");
 		}),
 	SelectGlobalGuidance: (input) =>
 		Effect.gen(function* () {

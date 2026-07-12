@@ -60,7 +60,12 @@ export type PendingRequestEnvelope = Extract<
 			| "thread.list.query"
 			| "thread.retention.query"
 			| "thread.retention.update"
-			| "thread.work.query";
+			| "thread.work.query"
+			| "workspace.file.read.query"
+			| "workspace.file.replace"
+			| "workspace.change.list.query"
+			| "workspace.change.review"
+			| "workspace.change.rollback";
 	}
 >;
 
@@ -76,7 +81,9 @@ export type PendingResultEnvelope = Extract<
 			| "terminal.list.query.result"
 			| "thread.list.query.result"
 			| "thread.retention.query.result"
-			| "thread.work.query.result";
+			| "thread.work.query.result"
+			| "workspace.file.read.query.result"
+			| "workspace.change.list.query.result";
 	}
 >;
 

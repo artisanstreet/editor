@@ -2,6 +2,11 @@ import { Cause, Effect, Layer, Option, Queue, Ref, Stream } from "effect";
 
 import {
 	type CommandEnvelope,
+	type WorkspaceChangeListQueryEnvelope,
+	type WorkspaceChangeReviewEnvelope,
+	type WorkspaceChangeRollbackEnvelope,
+	type WorkspaceFileReadQueryEnvelope,
+	type WorkspaceFileReplaceEnvelope,
 	type GlobalGuidanceDriftResolutionEnvelope,
 	type GlobalGuidanceQueryEnvelope,
 	type GlobalGuidanceRetryEnvelope,
@@ -32,6 +37,11 @@ import {
 	type ArtisanClientOptions,
 	type ArtisanCommandInput,
 	type ArtisanCommandReceipt,
+	type ArtisanWorkspaceChangeListInput,
+	type ArtisanWorkspaceChangeReviewInput,
+	type ArtisanWorkspaceChangeRollbackInput,
+	type ArtisanWorkspaceFileReadInput,
+	type ArtisanWorkspaceFileReplaceInput,
 	type ArtisanThreadRetentionUpdateInput,
 } from "../client-contract";
 import { TransportRuntime } from "../transport-runtime";
@@ -187,6 +197,123 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					? result.payload.threads
 					: yield* Effect.die("thread list response narrowed incorrectly");
 			});
+
+			const read_workspace_file = (input: ArtisanWorkspaceFileReadInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: WorkspaceFileReadQueryEnvelope = {
+						...trace,
+						kind: "workspace.file.read.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"workspace.file.read.query.result",
+					);
+
+					return result.kind === "workspace.file.read.query.result"
+						? result.payload
+						: yield* Effect.die("workspace file read response narrowed incorrectly");
+				});
+			const list_workspace_changes = (input: ArtisanWorkspaceChangeListInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: WorkspaceChangeListQueryEnvelope = {
+						...trace,
+						kind: "workspace.change.list.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"workspace.change.list.query.result",
+					);
+
+					return result.kind === "workspace.change.list.query.result"
+						? result.payload
+						: yield* Effect.die("workspace change list response narrowed incorrectly");
+				});
+
+			type WorkspaceMutationEnvelope =
+				| WorkspaceChangeReviewEnvelope
+				| WorkspaceChangeRollbackEnvelope
+				| WorkspaceFileReplaceEnvelope;
+			const send_workspace_mutation = (envelope: WorkspaceMutationEnvelope) =>
+				Effect.gen(function* () {
+					const result = yield* requests.Request(envelope, "command.receipt");
+
+					if (result.kind !== "command.receipt") {
+						return yield* Effect.die("workspace mutation receipt narrowed incorrectly");
+					}
+
+					if (result.payload.status === "rejected") {
+						return yield* Effect.fail(
+							client_error(
+								"protocol",
+								result.payload.error.message,
+								result.payload.error,
+								result.payload.error.retryable,
+								result.payload.error.code,
+							),
+						);
+					}
+
+					return {
+						command_id: envelope.message_id,
+						journal_sequence: result.payload.journal_sequence,
+						status: result.payload.status,
+					} satisfies ArtisanCommandReceipt;
+				});
+			const replace_workspace_file = (input: ArtisanWorkspaceFileReplaceInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: WorkspaceFileReplaceEnvelope = {
+						...trace,
+						agent_id: input.agent_id,
+						kind: "workspace.file.replace",
+						message_id: input.command_id ?? trace.message_id,
+						payload: {
+							change_id: input.change_id,
+							content: input.content,
+							expected_before: input.expected_before,
+							path: input.path,
+							workspace_id: input.workspace_id,
+						},
+						run_id: input.run_id,
+						thread_id: input.thread_id,
+						...(input.raw_origin === undefined ? {} : { raw_origin: input.raw_origin }),
+					};
+
+					return yield* send_workspace_mutation(envelope);
+				});
+			const review_workspace_change = (input: ArtisanWorkspaceChangeReviewInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: WorkspaceChangeReviewEnvelope = {
+						...trace,
+						kind: "workspace.change.review",
+						message_id: input.command_id ?? trace.message_id,
+						payload: { change_id: input.change_id },
+						thread_id: input.thread_id,
+					};
+
+					return yield* send_workspace_mutation(envelope);
+				});
+			const rollback_workspace_change = (input: ArtisanWorkspaceChangeRollbackInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: WorkspaceChangeRollbackEnvelope = {
+						...trace,
+						kind: "workspace.change.rollback",
+						message_id: input.command_id ?? trace.message_id,
+						payload: {
+							change_id: input.change_id,
+							expected_after: input.expected_after,
+						},
+						thread_id: input.thread_id,
+					};
+
+					return yield* send_workspace_mutation(envelope);
+				});
 
 			const get_thread_retention_policy = Effect.gen(function* () {
 				const trace = yield* connection.MakeTrace;
@@ -492,14 +619,19 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				GetModelBehaviour: get_model_behaviour,
 				GetThreadRetentionPolicy: get_thread_retention_policy,
 				GetThreadWork: get_thread_work,
+				ListWorkspaceChanges: list_workspace_changes,
 				ListTerminals: list_terminals,
 				ListThreads: list_threads,
 				OpenAsset: (asset_id) => streams.Open(`asset:${asset_id}`),
 				OpenTerminalOutput: (terminal_id) => streams.Open(`terminal:${terminal_id}`),
+				ReadWorkspaceFile: read_workspace_file,
 				ResolveGlobalGuidanceDrift: resolve_global_guidance_drift,
 				ResolveModelBehaviourDrift: resolve_model_behaviour_drift,
 				RetryGlobalGuidanceSync: retry_global_guidance_sync,
 				RetryModelBehaviourSync: retry_model_behaviour_sync,
+				ReplaceWorkspaceFile: replace_workspace_file,
+				ReviewWorkspaceChange: review_workspace_change,
+				RollbackWorkspaceChange: rollback_workspace_change,
 				SelectGlobalGuidance: select_global_guidance,
 				SubscribeOrchestrationGraph: subscriptions.SubscribeOrchestrationGraph,
 				SubscribeThreadList: subscriptions.SubscribeThreadList,

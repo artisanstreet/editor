@@ -7,6 +7,7 @@ import type {
 	GlobalGuidanceProvider,
 	GlobalGuidanceSelectionRequest,
 	GlobalGuidanceSnapshot,
+	ContentIdentity,
 	ModelBehaviourDriftResolutionRequest,
 	ModelBehaviourRetryRequest,
 	ModelBehaviourSnapshot,
@@ -17,6 +18,11 @@ import type {
 	ThreadListItem,
 	ThreadRetentionPolicy,
 	ThreadWorkItem,
+	RawOrigin,
+	WorkspaceFileReadQuery,
+	WorkspaceFileReadQueryResult,
+	WorkspaceFileReplaceRequest,
+	WorkspaceChangeListQueryResult,
 } from "@artisan/protocol";
 
 /** Identifies a typed frontend client failure. */
@@ -58,6 +64,39 @@ export interface ArtisanCommandReceipt {
 	readonly command_id: string;
 	readonly journal_sequence: number;
 	readonly status: "accepted" | "duplicate";
+}
+
+/** Supplies the workspace file identity needed for one read query. */
+export interface ArtisanWorkspaceFileReadInput extends WorkspaceFileReadQuery {}
+
+/** Supplies attributed replacement content and its optimistic-concurrency identity. */
+export interface ArtisanWorkspaceFileReplaceInput extends WorkspaceFileReplaceRequest {
+	readonly agent_id: string;
+	readonly command_id?: string;
+	readonly raw_origin?: RawOrigin;
+	readonly run_id: string;
+	readonly thread_id: string;
+}
+
+/** Supplies the thread and optional workspace scope for a change projection query. */
+export interface ArtisanWorkspaceChangeListInput {
+	readonly thread_id: string;
+	readonly workspace_id?: string;
+}
+
+/** Supplies the durable identity and attribution for a review transition. */
+export interface ArtisanWorkspaceChangeReviewInput {
+	readonly change_id: string;
+	readonly command_id?: string;
+	readonly thread_id: string;
+}
+
+/** Supplies the durable identity and attribution for a guarded rollback. */
+export interface ArtisanWorkspaceChangeRollbackInput {
+	readonly change_id: string;
+	readonly command_id?: string;
+	readonly expected_after: ContentIdentity;
+	readonly thread_id: string;
 }
 
 /** Supplies the public retention setting and optional durable retry identity. */
@@ -180,6 +219,9 @@ export class ArtisanClient extends Context.Service<
 			workspace_id: string,
 		) => Effect.Effect<ReadonlyArray<TerminalSession>, ArtisanClientError>;
 		readonly ListThreads: Effect.Effect<ReadonlyArray<ThreadListItem>, ArtisanClientError>;
+		readonly ListWorkspaceChanges: (
+			input: ArtisanWorkspaceChangeListInput,
+		) => Effect.Effect<WorkspaceChangeListQueryResult, ArtisanClientError>;
 		readonly OpenAsset: (
 			asset_id: string,
 		) => Effect.Effect<
@@ -194,6 +236,9 @@ export class ArtisanClient extends Context.Service<
 			ArtisanClientError,
 			Scope.Scope
 		>;
+		readonly ReadWorkspaceFile: (
+			input: ArtisanWorkspaceFileReadInput,
+		) => Effect.Effect<WorkspaceFileReadQueryResult, ArtisanClientError>;
 		readonly SubscribeThreadList: Effect.Effect<
 			Stream.Stream<ThreadListUpdate, ArtisanClientError>,
 			ArtisanClientError,
@@ -229,6 +274,15 @@ export class ArtisanClient extends Context.Service<
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly UpdateThreadRetentionPolicy: (
 			input: ArtisanThreadRetentionUpdateInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly ReplaceWorkspaceFile: (
+			input: ArtisanWorkspaceFileReplaceInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly ReviewWorkspaceChange: (
+			input: ArtisanWorkspaceChangeReviewInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RollbackWorkspaceChange: (
+			input: ArtisanWorkspaceChangeRollbackInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 	}
 >()("Artisan/ArtisanClient") {}
