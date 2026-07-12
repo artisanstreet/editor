@@ -48,6 +48,11 @@ import {
 	type ThreadWorkQueryEnvelope,
 	type TerminalListQueryEnvelope,
 	type UnsubscribeEnvelope,
+	type WorkspaceChangeListQueryEnvelope,
+	type WorkspaceChangeReviewEnvelope,
+	type WorkspaceChangeRollbackEnvelope,
+	type WorkspaceFileReadQueryEnvelope,
+	type WorkspaceFileReplaceEnvelope,
 } from "@artisan/protocol";
 
 import { AgentGraphOrchestrator } from "../orchestration/agent-graph-orchestrator";
@@ -80,6 +85,11 @@ import {
 	thread_retention_policy_thread_id,
 	ThreadRetentionPolicyService,
 } from "../threads/thread-retention-policy";
+import { WorkspaceChangeRepository } from "../workspace/workspace-change-repository";
+import {
+	WorkspaceFileService,
+	WorkspaceFileServiceError,
+} from "../workspace/workspace-file-service";
 import {
 	DecodeProtocolConnectionOptions,
 	DefaultProtocolConnectionOptions,
@@ -247,6 +257,22 @@ function model_behaviour_error_detail(error: unknown): ProtocolErrorDetail {
 	};
 }
 
+function workspace_error_detail(error: unknown): ProtocolErrorDetail {
+	if (error instanceof WorkspaceFileServiceError && error.reason === "changed") {
+		return {
+			code: "workspace.conflict",
+			message: "The workspace file changed before the requested mutation could apply.",
+			retryable: false,
+		};
+	}
+
+	return {
+		code: "workspace.unavailable",
+		message: "The workspace operation could not be completed.",
+		retryable: true,
+	};
+}
+
 function thread_item_from_event(event: EventEnvelope): ThreadListItem | undefined {
 	if (event.payload.type === "thread.metadata.updated") {
 		return event.payload.thread;
@@ -329,6 +355,8 @@ export function make_protocol_server_layer(
 			const terminals = yield* TerminalSessionService;
 			const thread_read_model = yield* ThreadReadModel;
 			const retention_policy = yield* ThreadRetentionPolicyService;
+			const workspace_changes = yield* WorkspaceChangeRepository;
+			const workspace_files = yield* WorkspaceFileService;
 
 			const Open = Effect.gen(function* () {
 				const connection_scope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
@@ -924,6 +952,76 @@ export function make_protocol_server_layer(
 						),
 					);
 
+				const HandleWorkspaceFileReadQuery = (
+					query: WorkspaceFileReadQueryEnvelope,
+					current: ReadyState,
+				) =>
+					workspace_files.Read(query.payload).pipe(
+						Effect.flatMap((result) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "workspace.file.read.query.result",
+									message_id,
+									origin: "backend",
+									payload: result,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch((error) => {
+							const detail = workspace_error_detail(error);
+
+							return EnqueueError(
+								current,
+								detail.code,
+								detail.message,
+								detail.retryable,
+								query.message_id,
+							);
+						}),
+					);
+
+				const HandleWorkspaceChangeListQuery = (
+					query: WorkspaceChangeListQueryEnvelope,
+					current: ReadyState,
+				) =>
+					workspace_changes
+						.List(query.payload.thread_id, query.payload.workspace_id)
+						.pipe(
+							Effect.flatMap((result) =>
+								Effect.gen(function* () {
+									const message_id = yield* metadata.MakeId("message");
+									const sent_at = yield* metadata.Now;
+
+									yield* Enqueue({
+										correlation_id: query.message_id,
+										kind: "workspace.change.list.query.result",
+										message_id,
+										origin: "backend",
+										payload: result,
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at,
+									});
+								}),
+							),
+							Effect.catch(() =>
+								EnqueueError(
+									current,
+									"projection.unavailable",
+									"The workspace change projection could not be read.",
+									true,
+									query.message_id,
+								),
+							),
+						);
+
 				const HandleSubscribe = (subscribe: SubscribeEnvelope, current: ReadyState) =>
 					Effect.gen(function* () {
 						if (current.subscriptions[subscribe.subscription_id]) {
@@ -1421,6 +1519,83 @@ export function make_protocol_server_layer(
 						),
 					);
 				};
+				type WorkspaceMutationEnvelope =
+					| WorkspaceChangeReviewEnvelope
+					| WorkspaceChangeRollbackEnvelope
+					| WorkspaceFileReplaceEnvelope;
+				const HandleWorkspaceMutation = (envelope: WorkspaceMutationEnvelope) => {
+					const operation =
+						envelope.kind === "workspace.file.replace"
+							? workspace_files.Replace({
+									...envelope.payload,
+									agent_id: envelope.agent_id,
+									message_id: envelope.message_id,
+									raw_origin: envelope.raw_origin,
+									run_id: envelope.run_id,
+									sent_at: envelope.sent_at,
+									thread_id: envelope.thread_id,
+								})
+							: envelope.kind === "workspace.change.review"
+								? workspace_files.Review({
+										...envelope.payload,
+										message_id: envelope.message_id,
+										sent_at: envelope.sent_at,
+										thread_id: envelope.thread_id,
+									})
+								: workspace_files.Rollback({
+										...envelope.payload,
+										message_id: envelope.message_id,
+										sent_at: envelope.sent_at,
+										thread_id: envelope.thread_id,
+									});
+
+					return operation.pipe(
+						Effect.matchEffect({
+							onFailure: (error) => {
+								const detail = workspace_error_detail(error);
+
+								return Effect.gen(function* () {
+									const message_id = yield* metadata.MakeId("message");
+									const sent_at = yield* metadata.Now;
+
+									yield* Enqueue({
+										causation_id: envelope.message_id,
+										correlation_id: envelope.message_id,
+										kind: "command.receipt",
+										message_id,
+										origin: "backend",
+										payload: { error: detail, status: "rejected" },
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at,
+										thread_id: envelope.thread_id,
+									});
+								});
+							},
+							onSuccess: (acceptance) =>
+								Effect.gen(function* () {
+									const message_id = yield* metadata.MakeId("message");
+									const sent_at = yield* metadata.Now;
+
+									yield* Enqueue({
+										causation_id: envelope.message_id,
+										correlation_id: envelope.message_id,
+										kind: "command.receipt",
+										message_id,
+										origin: "backend",
+										payload: {
+											journal_sequence: acceptance.event.journal_sequence,
+											status: acceptance.status,
+										},
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at,
+										thread_id: envelope.thread_id,
+									});
+								}),
+						}),
+					);
+				};
 
 				const HandleReadyEnvelope = (
 					envelope: Exclude<InboundControlEnvelope, HelloEnvelope>,
@@ -1435,6 +1610,14 @@ export function make_protocol_server_layer(
 							return HandleRetentionQuery(envelope, current);
 						case "thread.retention.update":
 							return HandleRetentionUpdate(envelope);
+						case "workspace.file.read.query":
+							return HandleWorkspaceFileReadQuery(envelope, current);
+						case "workspace.change.list.query":
+							return HandleWorkspaceChangeListQuery(envelope, current);
+						case "workspace.file.replace":
+						case "workspace.change.review":
+						case "workspace.change.rollback":
+							return HandleWorkspaceMutation(envelope);
 						case "guidance.query":
 							return HandleGuidanceQuery(envelope, current);
 						case "guidance.update":
