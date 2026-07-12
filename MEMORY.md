@@ -14,8 +14,9 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Branch: `codex/backend-services`
 - [x] Package manager: pnpm 11.7.0
 - [x] Stack: TypeScript 7, Effect 4 beta, Drizzle 1 RC, SQLite
-- [x] Latest repository checkpoint: `dd6c99c docs: define shared workspace coordination`
-- [x] Latest verified remote checkpoint: `dd6c99c docs: define shared workspace coordination`
+- [x] Latest verified implementation checkpoint: `fc3e818 test: verify native mutation locally`
+- [x] Local `HEAD`, upstream, and `origin/codex/backend-services` were equal at `fc3e818` before this documentation update.
+- [x] `ARTISAN_RUN_NATIVE_ADDON_SMOKE=1 pnpm --filter @artisan/bounded-file-store-native verify:local` is the canonical native gate and passes locally for production reads/replacement, test-hook races, and process-crash recovery.
 - [x] Model Behaviour is committed as focused protocol, persistence, provider, service, composition, transport, and security changes.
 - [x] Local GitHub account: `sandersonstabo`; `origin` -> `https://github.com/sandersonstabo/artisan-editor.git`; GitHub visibility was verified as `PRIVATE` on 2026-07-12.
 - [x] Commit every coherent, verified checkpoint as a small, focused, independently understandable change. Never bundle unrelated dirty work into the same commit and never push `main` or `master` without explicit approval.
@@ -23,17 +24,17 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Check local and remote state at session start, after each push, and before handoff. Confirm the branch tracks `origin` and that local `HEAD` equals its upstream after every push.
 - [x] The PRD now makes one visible shared checkout and selected branch a product guarantee. Artisan must coordinate writers through durable mutation claims and must never create hidden worktrees, per-agent branches, or temporary commits.
 
-## Native Mutation Safety Hold
+## Native Mutation Incident And Local Authorization
 
-- [ ] Do not load or execute the native addon on this AMD RAID host. This explicitly forbids `pnpm --filter @artisan/bounded-file-store-native build:debug:gnu`, which unconditionally loads the binding and runs native read smoke even without mutation flags, plus either native smoke script. Compilation, formatting, linting, static review, and non-native repository tests remain allowed; runtime verification must use an isolated Windows environment on a different storage stack until the host driver is remediated and a separate safety decision is recorded.
+- [x] The user explicitly classified the BSOD as a one-off on 2026-07-12 and authorized local native execution. The prior host safety hold is lifted; keep the explicit `ARTISAN_RUN_NATIVE_ADDON_SMOKE=1` gate so ordinary validation never loads the addon silently.
 - [x] Windows bugchecked at 08:45:50 with `0xD1 DRIVER_IRQL_NOT_LESS_OR_EQUAL`: `0x000000d1 (0x0, 0x2, 0x1, 0xfffff8052abb750f)`. WinDbg analysis of the preserved copy at `C:\Users\Sander\Desktop\071226-17781-01.dmp` attributes the null write directly to `rcbottom.sys+0x750f`, AMD-RAID Bottom Service version `9.3.3-00218`; the captured stack contains no Node, N-API, NTFS, or Artisan frame.
 - [x] The dump's failure bucket is `AV_rcbottom!unknown_function`. `rcbottom.sys` is the boot storage driver used by this machine's actual RAID-backed disks, so it must not be disabled or removed as a workaround. Driver or BIOS changes require an explicit human decision, a current backup, and the motherboard/AMD recovery procedure.
-- [x] Correlation with the native harness remains strong: generated addon files were written at 08:45:41, the first concurrent replacement root was created at 08:45:43, and that unfinished root retained a valid 1 MiB stage/backup/published-target receipt after reboot. Preserve `C:\Users\Sander\AppData\Local\Temp\artisan-native-replace-5hTN29` and the copied dump as incident evidence.
-- [x] Independent static ABI review found no Rust memory corruption, dangling handle, double close, or malformed EA record. It found four-byte-short `FILE_RENAME_INFORMATION` and `FILE_LINK_INFORMATION` allocations plus an incorrect secondary read of `IO_STATUS_BLOCK.Status` after synchronous `NtFlushBuffersFile`; all three are fixed in the dirty native implementation.
-- [x] The corrected native crate passes `cargo fmt`, GNU `cargo check`, and GNU Clippy with warnings denied without loading or executing the addon.
-- [x] A fresh independent review of the complete corrected native diff reports no remaining P0-P2 finding. Residual acceptance risk is runtime NTFS, EA, ACL, share-mode, crash-window, and cross-process race behavior in the isolated Windows harness.
-- [x] Standard `build:debug:gnu` no longer enables mutation smoke implicitly. Mutation smoke now requires `ARTISAN_RUN_NATIVE_REPLACE_SMOKE=1`, and the concurrent race phase separately requires `ARTISAN_RUN_NATIVE_RACE_SMOKE=1`.
-- [ ] Treat the authenticated native mutation implementation and rewritten harness as unaccepted dirty work until the complete corrected diff passes fresh independent static review and the mutation, recovery, and race harnesses pass in a disposable Windows environment outside this RAID storage stack.
+- [x] Correlation with the native harness remains strong: generated addon files were written at 08:45:41, the first concurrent replacement root was created at 08:45:43, and that unfinished root retained a valid 1 MiB stage/backup/published-target receipt after reboot. Preserve `C:\Users\Sander\AppData\Local\Temp\artisan-native-replace-5hTN29`, the copied dump, and `C:\Users\Sander\Desktop\071226-bounded-file-store-native-gnu.node` (`SHA256 2FA0F3DE54816E5DABDD84E4A392E18E3A57BF558F48BBBDD6D43919C480E2E3`) as incident evidence.
+- [x] Independent static ABI review found no Rust memory corruption, dangling handle, double close, or malformed EA record. It found four-byte-short `FILE_RENAME_INFORMATION` and `FILE_LINK_INFORMATION` allocations plus an incorrect secondary read of `IO_STATUS_BLOCK.Status` after synchronous `NtFlushBuffersFile`; all three are fixed in the accepted native implementation.
+- [x] The corrected native crate passes `cargo fmt`, GNU default/test-hook `cargo check`, and GNU default/test-hook Clippy with warnings denied without loading or executing the addon.
+- [x] Fresh independent reviews of the corrected native implementation, authenticated foreign-operation handling, and local build gate report no remaining P0-P2 finding.
+- [x] `build:local:gnu` uses isolated GNU release outputs. `verify:local` runs production read/full replacement first, then one test-hook build for deterministic races and every crash window; all addon execution remains explicit opt-in.
+- [x] The authenticated native mutation implementation is accepted for fixed local NTFS and process-crash recovery through the local gate. This does not claim power-loss atomicity or universal filesystem support.
 
 ## Active Work
 
@@ -44,7 +45,7 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] The narrow `BoundedRegularFileStore` seam and explicitly non-adversarial Node adapter are committed and pushed at `98ef0b3`, `011dff5`, and `720cfaa`. Two-phase receipts retain the exact stage and original backup until SQLite durably records `applied`, then finalization removes them idempotently. Crash, corruption, mode, artifact, and concurrency coverage is green, including 50 synchronized exact-ID and 50 competing-ID stress runs. Independent final P0-P2 review is clean.
 - [x] The private `@artisan/bounded-file-store-native` N-API package scaffold is committed and pushed at `dfc08bb`. Rust/NAPI versions are pinned, production output targets Windows x64 MSVC under `.dist`, and the pinned GNU development build proves direct binding load, generated CommonJS loader load, and generated declaration consumption without exposing any filesystem method. Independent P0-P2 review is clean.
 - [x] Native Windows pinned-root bounded reads are committed and pushed at `e915763` and `d5ec0bc`. The N-API class accepts only absolute fixed-drive local NTFS roots, resolves children through open directory handles, rejects reparse/private/alias/multiply-linked paths, denies concurrent writers/deletion, and gives in-flight async reads an exact root lease across `close()`.
-- [ ] Complete native exact-handle conditional replacement and finalization on Windows local NTFS with process-crash recovery and best-effort flush hardening. Do not claim power-loss atomicity or universal filesystem support. Koffi remains rejected for this security-critical adapter because maintaining Windows NT ABI structures and syscalls in TypeScript is too fragile.
+- [x] Native exact-handle conditional replacement and finalization on Windows local NTFS is complete and accepted with authenticated receipts, process-crash recovery, metadata preservation, deterministic race coverage, and best-effort flush hardening. The contract does not claim power-loss atomicity or universal filesystem support. Koffi remains rejected for this security-critical adapter because maintaining Windows NT ABI structures and syscalls in TypeScript is too fragile.
 - [ ] Build the controlled read/replace/review/rollback service around the filesystem registry, workspace-change repository, snapshot store, evidence recorder, and public protocol.
 - [ ] Prove filesystem mutation crash windows, exact retries, authorization races, and restart recovery through the real production composition.
 
@@ -76,7 +77,7 @@ Implemented, independently reviewed, committed, and verified:
 - [x] Focused conditional and registry suites pass 31 tests, plus 50 synchronized exact-ID stress runs and 50 synchronized competing-ID stress runs. Full validation passes 78 test files, 567 tests, and 3 intentional skips.
 - [x] Independent final P0-P2 review is clean after fixing stage-missing/backup-present finalization.
 - [x] Focused commits: `98ef0b3 feat: define bounded regular file store`, `011dff5 feat: add recoverable node file replacement`, and `720cfaa test: prove conditional file replacement recovery`.
-- [ ] Production composition remains blocked on native exact-handle replace/finalize operations and the Effect adapter around the N-API class; the current Node adapter is deliberately named `non_adversarial` and is referenced only by its focused harness.
+- [ ] Production composition now depends on the Effect adapter around the accepted N-API class; the current Node adapter is deliberately named `non_adversarial` and remains referenced only by its focused harness.
 
 ## Completed Native Package Scaffold
 
@@ -103,7 +104,24 @@ Implemented, independently reviewed, committed, and verified:
 - [x] Ten consecutive native build/loader/type/runtime smoke runs pass. Rust format, GNU Clippy with warnings denied, and full repository validation pass with 78 Vitest files, 567 passing tests, and 3 intentional skips.
 - [x] Independent review found and closed initial P1 gaps for 8.3/hard-link aliases and explicit local-volume admission; final P0-P2 re-review is clean.
 - [x] Focused commits: `e915763 feat: read files through pinned native roots` and `d5ec0bc test: prove native root confinement`.
-- [ ] Production MSVC compilation/loading remains an explicit CI/platform gate because this machine has no usable MSVC linker.
+- [x] Production MSVC compilation/loading passed in the historical one-off runner before that temporary workflow was removed. The maintained runtime gate is local GNU; MSVC and Electron packaging remain future release-platform checks.
+
+## Completed Native Exact-Handle Replacement And Finalization
+
+Implemented, independently reviewed, committed, and verified:
+
+- [x] The N-API constructor binds one pinned root to an exact 32-byte receipt key. Replacement and finalization validate the operation id, normalized relative path, expected/replacement bytes, and byte limit before asynchronous native work begins.
+- [x] Root-derived HMAC-SHA256 NTFS EA receipts authenticate the namespace, expected/replacement digests, exact file identities, peer identities, and lifecycle role. Wrong keys, corrupt markers, replayed artifacts, cross-root artifacts, and ambiguous state fail closed.
+- [x] Exact-handle no-overwrite rename/link operations preserve the original backup and replacement stage until SQLite can durably record application and request idempotent finalization. Recovery covers creating-stage, staged, backup, published, finalizing, and restoring states.
+- [x] Stages inherit ordinary file attributes and semantically equivalent owner/group/DACL security. Raw descriptors remain available for creation/application while canonical SDDL comparison avoids false failures from equivalent Windows descriptor encodings.
+- [x] Production replacement coverage passes changed targets, validation, authenticated recovery, corrupt/unmarked collisions, tamper/replay, wrong keys, Windows hidden/read-only attributes, protected DACLs, close leases, and case-insensitive namespaces.
+- [x] A deterministic foreign-operation regression proves that a second operation returns `Changed` only after authenticating the first operation's root receipt and exact self identity; wrong-key, corruption, replay, and same-operation changed-intent paths remain failures.
+- [x] The test-hook build retains only proof-bearing two-party race rendezvous and crash hooks. Five same-operation and five competing-operation races pass with exact outcomes, and all eleven distinct process-crash windows recover correctly.
+- [x] Local command `ARTISAN_RUN_NATIVE_ADDON_SMOKE=1 pnpm --filter @artisan/bounded-file-store-native verify:local` builds dedicated production/test-hook GNU release outputs, validates direct and generated loaders plus declarations, then passes reads, full replacement/recovery, deterministic races, and process-crash recovery.
+- [x] Diagnosis-only phase tracing was removed after acceptance. Fresh independent review found no P0-P2 cleanup regression and confirmed all 13 crash call sites plus the replacement rendezvous remain unchanged.
+- [x] GNU default/test-hook checks and Clippy pass with warnings denied. The local verifier restores its caller environment, rejects reparse output children, never clobbers MSVC output, and removes temporary loader aliases on success or failure.
+- [x] Focused commits: `68fb9ed fix: recognize competing native receipts` and `fc3e818 test: verify native mutation locally`.
+- [x] The temporary GitHub Actions workflow was removed at the user's request. Local execution completed repeatedly without another bugcheck; the original `rcbottom.sys` incident evidence remains preserved as history.
 
 ## Completed Rollback Snapshot Foundation
 
