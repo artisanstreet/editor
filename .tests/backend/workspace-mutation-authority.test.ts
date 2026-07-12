@@ -426,6 +426,37 @@ describe("WorkspaceMutationAuthority", () => {
 		}
 	});
 
+	it("returns a typed conflict without a filesystem for a rejected exact retry", async () => {
+		const workspace = await make_workspace();
+
+		await mkdir(workspace.root);
+
+		const runtime = make_runtime(workspace.database_path, workspace.root);
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					yield* SeedBase(workspace.root);
+					yield* Admit();
+
+					const repository = yield* WorkspaceChangeRepository;
+
+					yield* repository.RejectChanged("message_1");
+
+					return yield* Effect.exit(Admit());
+				}),
+			);
+
+			expect(JSON.stringify(result)).toContain("WorkspaceMutationAuthorityConflict");
+			expect(JSON.stringify(result)).toContain("operation_rejected");
+			expect(JSON.stringify(result)).not.toContain("filesystem");
+			expect(JSON.stringify(result)).not.toContain(workspace.root);
+			expect(JSON.stringify(result)).not.toContain("src/example.ts");
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("denies base coordinator, run, thread, agent, and active-run mismatches without partial rows", async () => {
 		for (const options of [
 			{ active_run_id: "other_run" },

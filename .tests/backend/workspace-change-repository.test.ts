@@ -109,6 +109,37 @@ function replace_claim(message_id = "message_replace", change_id = "change_1") {
 	};
 }
 
+function rollback_claim(message_id = "message_rollback", change_id = "change_1") {
+	return {
+		_tag: "rollback" as const,
+		change_id,
+		expected_after: after_identity,
+		message_id,
+		request_fingerprint: "f".repeat(64),
+		sent_at: "2026-07-11T19:00:00.000Z",
+		thread_id: "thread_1",
+	};
+}
+
+function workspace_change_row(change_id: string, source_command_id: string) {
+	return {
+		after_identity_json: JSON.stringify(after_identity),
+		agent_id: "agent_forged",
+		before_identity_json: JSON.stringify(before_identity),
+		change_id,
+		created_at: "2026-07-11T19:00:00.000Z",
+		path: "src/forged.ts",
+		review_state: "needs_review",
+		rollback_state: "available",
+		run_id: "run_forged",
+		source_command_id,
+		thread_id: "thread_1",
+		updated_at: "2026-07-11T19:00:00.000Z",
+		version: 1,
+		workspace_id: "workspace_forged",
+	};
+}
+
 afterEach(async () => {
 	await Promise.all(
 		temporary_directories
@@ -550,6 +581,388 @@ describe("workspace change repository", () => {
 		}
 	});
 
+	it("persists terminal changed rejections without creating journal state", async () => {
+		const database_path = await make_database_path();
+		const first_runtime = make_runtime(database_path);
+
+		try {
+			const rejected = await first_runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* WorkspaceChangeRepository;
+
+					yield* SeedThreads(database);
+					yield* repository.ClaimReplace(replace_claim());
+
+					return yield* repository.RejectChanged("message_replace");
+				}),
+			);
+
+			expect(rejected).toMatchObject({
+				evidence_recorded: false,
+				lifecycle: "rejected",
+			});
+			expect(rejected).not.toHaveProperty("journal_sequence");
+		} finally {
+			await first_runtime.dispose();
+		}
+
+		const second_runtime = make_runtime(database_path);
+
+		try {
+			const result = await second_runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* WorkspaceChangeRepository;
+
+					return {
+						commands: yield* database.client.select().from(JournalCommands),
+						changes: yield* database.client.select().from(WorkspaceChanges),
+						events: yield* database.client.select().from(JournalEvents),
+						operation: yield* repository.ReadOperation("message_replace"),
+						retry: yield* repository.ClaimReplace(replace_claim()),
+					};
+				}),
+			);
+
+			expect(result.retry).toMatchObject({
+				_tag: "rejected",
+				operation: { lifecycle: "rejected" },
+			});
+			expect(result.operation).toMatchObject({
+				_tag: "Some",
+				value: { lifecycle: "rejected" },
+			});
+			expect(result.commands).toEqual([]);
+			expect(result.events).toEqual([]);
+			expect(result.changes).toEqual([]);
+		} finally {
+			await second_runtime.dispose();
+		}
+	});
+
+	it("retries rejected rollbacks and keeps changed conflicts immutable", async () => {
+		const runtime = make_runtime(await make_database_path());
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* WorkspaceChangeRepository;
+
+					yield* SeedThreads(database);
+					yield* repository.ClaimReplace(replace_claim());
+					yield* repository.MarkApplied({
+						_tag: "replace",
+						message_id: "message_replace",
+						result_identity: after_identity,
+					});
+					yield* repository.CommitRecorded("message_replace");
+					yield* repository.ClaimRollback(rollback_claim());
+					yield* repository.RejectChanged("message_rollback");
+
+					return {
+						change_conflict: yield* repository
+							.ClaimRollback(rollback_claim("message_rollback_other"))
+							.pipe(Effect.exit),
+						intent_conflict: yield* repository
+							.ClaimRollback({
+								...rollback_claim(),
+								request_fingerprint: "e".repeat(64),
+							})
+							.pipe(Effect.exit),
+						retry: yield* repository.ClaimRollback(rollback_claim()),
+					};
+				}),
+			);
+
+			expect(result.retry).toMatchObject({
+				_tag: "rejected",
+				operation: { action: "rollback", lifecycle: "rejected" },
+			});
+			expect(JSON.stringify(result.change_conflict)).toContain("WorkspaceChangeIdConflict");
+			expect(JSON.stringify(result.intent_conflict)).toContain("CommandIdConflict");
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("makes changed rejection idempotent and rejects terminal or review transitions", async () => {
+		const runtime = make_runtime(await make_database_path());
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* WorkspaceChangeRepository;
+
+					yield* SeedThreads(database);
+					yield* repository.ClaimReplace(replace_claim());
+					const first_rejection = yield* repository.RejectChanged("message_replace");
+					const duplicate_rejection = yield* repository.RejectChanged("message_replace");
+					const applied = yield* repository
+						.MarkApplied({
+							_tag: "replace",
+							message_id: "message_replace",
+							result_identity: after_identity,
+						})
+						.pipe(Effect.exit);
+					const committed = yield* repository
+						.CommitRecorded("message_replace")
+						.pipe(Effect.exit);
+
+					yield* repository.ClaimReplace(replace_claim("message_committed", "change_2"));
+					yield* repository.MarkApplied({
+						_tag: "replace",
+						message_id: "message_committed",
+						result_identity: after_identity,
+					});
+					yield* repository.CommitRecorded("message_committed");
+					yield* repository.ClaimReplace(replace_claim("message_applied", "change_3"));
+					yield* repository.MarkApplied({
+						_tag: "replace",
+						message_id: "message_applied",
+						result_identity: after_identity,
+					});
+					yield* repository.ClaimReview({
+						_tag: "review",
+						change_id: "change_2",
+						message_id: "message_review",
+						request_fingerprint: "d".repeat(64),
+						sent_at: "2026-07-11T19:00:00.000Z",
+						thread_id: "thread_1",
+					});
+
+					return {
+						applied,
+						committed,
+						committed_rejection: yield* repository
+							.RejectChanged("message_committed")
+							.pipe(Effect.exit),
+						duplicate_rejection,
+						first_rejection,
+						applied_rejection: yield* repository
+							.RejectChanged("message_applied")
+							.pipe(Effect.exit),
+						review_rejection: yield* repository
+							.RejectChanged("message_review")
+							.pipe(Effect.exit),
+					};
+				}),
+			);
+
+			expect(result.first_rejection).toEqual(result.duplicate_rejection);
+			for (const failure of [
+				result.applied,
+				result.applied_rejection,
+				result.committed,
+				result.committed_rejection,
+				result.review_rejection,
+			]) {
+				expect(JSON.stringify(failure)).toContain("WorkspaceChangeTransitionError");
+			}
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("fails closed when rejected operations conceal command or event state", async () => {
+		const runtime = make_runtime(await make_database_path());
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* WorkspaceChangeRepository;
+
+					yield* SeedThreads(database);
+					yield* repository.ClaimReplace(replace_claim());
+					yield* database.client.insert(JournalCommands).values({
+						accepted_at: "2026-07-11T19:00:00.000Z",
+						message_id: "message_replace",
+						origin: "frontend",
+						payload_json: '{"type":"thread.send_message"}',
+						payload_type: "thread.send_message",
+						schema_version: 1,
+						sent_at: "2026-07-11T19:00:00.000Z",
+						status: "accepted",
+						thread_id: "thread_1",
+					});
+					const command_before_rejection = yield* repository
+						.RejectChanged("message_replace")
+						.pipe(Effect.exit);
+
+					yield* database.client.delete(JournalCommands);
+					yield* repository.RejectChanged("message_replace");
+					yield* database.client.insert(JournalCommands).values({
+						accepted_at: "2026-07-11T19:00:00.000Z",
+						message_id: "message_replace",
+						origin: "frontend",
+						payload_json: '{"type":"thread.send_message"}',
+						payload_type: "thread.send_message",
+						schema_version: 1,
+						sent_at: "2026-07-11T19:00:00.000Z",
+						status: "accepted",
+						thread_id: "thread_1",
+					});
+					const command_on_claim_retry = yield* repository
+						.ClaimReplace(replace_claim())
+						.pipe(Effect.exit);
+
+					yield* database.client.delete(JournalCommands);
+					yield* repository.ClaimReplace(replace_claim("message_event", "change_event"));
+					yield* database.client.insert(JournalEvents).values({
+						causation_id: "message_event",
+						correlation_id: "message_event",
+						event_id: "event_forged",
+						event_type: "thread.created",
+						occurred_at: "2026-07-11T19:00:00.000Z",
+						origin: "backend",
+						payload_json: '{"type":"thread.created"}',
+						schema_version: 1,
+						stream_id: "thread:thread_1",
+						stream_sequence: 1,
+						thread_id: "thread_1",
+					});
+					const event_before_rejection = yield* repository
+						.RejectChanged("message_event")
+						.pipe(Effect.exit);
+
+					yield* database.client.delete(JournalEvents);
+					yield* repository.RejectChanged("message_event");
+					yield* database.client.insert(JournalEvents).values({
+						causation_id: "message_event",
+						correlation_id: "message_event",
+						event_id: "event_forged_retry",
+						event_type: "thread.created",
+						occurred_at: "2026-07-11T19:00:00.000Z",
+						origin: "backend",
+						payload_json: '{"type":"thread.created"}',
+						schema_version: 1,
+						stream_id: "thread:thread_1",
+						stream_sequence: 1,
+						thread_id: "thread_1",
+					});
+
+					return {
+						command_before_rejection,
+						command_on_claim_retry,
+						event_before_rejection,
+						event_on_reject_retry: yield* repository
+							.RejectChanged("message_event")
+							.pipe(Effect.exit),
+					};
+				}),
+			);
+
+			for (const failure of Object.values(result)) {
+				expect(JSON.stringify(failure)).toContain("JournalInvariantError");
+			}
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("fails closed for replace projections under either immutable alias", async () => {
+		const runtime = make_runtime(await make_database_path());
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* WorkspaceChangeRepository;
+
+					yield* SeedThreads(database);
+					yield* repository.ClaimReplace(replace_claim());
+					yield* repository.RejectChanged("message_replace");
+					yield* database.client
+						.insert(WorkspaceChanges)
+						.values(workspace_change_row("change_forged", "message_replace"));
+					const source_command_retry = yield* repository
+						.ClaimReplace(replace_claim())
+						.pipe(Effect.exit);
+
+					yield* database.client.delete(WorkspaceChanges);
+					yield* repository.ClaimReplace(
+						replace_claim("message_canonical", "change_canonical"),
+					);
+					yield* database.client
+						.insert(WorkspaceChanges)
+						.values(workspace_change_row("change_canonical", "message_forged"));
+					const canonical_before_rejection = yield* repository
+						.RejectChanged("message_canonical")
+						.pipe(Effect.exit);
+
+					yield* database.client.delete(WorkspaceChanges);
+					yield* repository.RejectChanged("message_canonical");
+					yield* database.client
+						.insert(WorkspaceChanges)
+						.values(workspace_change_row("change_canonical", "message_forged"));
+
+					return {
+						canonical_before_rejection,
+						canonical_on_reject_retry: yield* repository
+							.RejectChanged("message_canonical")
+							.pipe(Effect.exit),
+						source_command_retry,
+					};
+				}),
+			);
+
+			for (const failure of Object.values(result)) {
+				expect(JSON.stringify(failure)).toContain("JournalInvariantError");
+			}
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("fails closed when a rejected rollback projection has been consumed", async () => {
+		const runtime = make_runtime(await make_database_path());
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* WorkspaceChangeRepository;
+
+					yield* SeedThreads(database);
+					yield* repository.ClaimReplace(replace_claim());
+					yield* repository.MarkApplied({
+						_tag: "replace",
+						message_id: "message_replace",
+						result_identity: after_identity,
+					});
+					yield* repository.CommitRecorded("message_replace");
+					yield* repository.ClaimRollback(rollback_claim());
+					yield* repository.RejectChanged("message_rollback");
+					yield* database.client.update(WorkspaceChanges).set({
+						review_state: "rolled_back",
+						rollback_state: "consumed",
+						rolled_back_at: "2026-07-11T19:00:01.000Z",
+						updated_at: "2026-07-11T19:00:01.000Z",
+						version: 2,
+					});
+
+					return {
+						claim_retry: yield* repository
+							.ClaimRollback(rollback_claim())
+							.pipe(Effect.exit),
+						reject_retry: yield* repository
+							.RejectChanged("message_rollback")
+							.pipe(Effect.exit),
+					};
+				}),
+			);
+
+			for (const failure of Object.values(result)) {
+				expect(JSON.stringify(failure)).toContain("WorkspaceChangeTransitionError");
+			}
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("replays per-thread streams and permits review followed by rollback", async () => {
 		const database_path = await make_database_path();
 		const runtime = make_runtime(database_path);
@@ -853,6 +1266,51 @@ describe("workspace change repository", () => {
 		}
 	});
 
+	it("fences changed rejection once thread erasure begins or completes", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_runtime(database_path);
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* WorkspaceChangeRepository;
+
+					yield* SeedThreads(database);
+					yield* repository.ClaimReplace(replace_claim());
+					yield* database.client.insert(ThreadErasureClaims).values({
+						claimed_at: "2026-07-11T19:00:01.000Z",
+						thread_id: "thread_1",
+					});
+
+					const claimed_fence = yield* repository
+						.RejectChanged("message_replace")
+						.pipe(Effect.exit);
+
+					yield* database.client.delete(ThreadErasureClaims);
+					yield* database.client.delete(Threads);
+					yield* database.client.insert(ThreadTombstones).values({
+						deleted_at: "2026-07-11T19:00:02.000Z",
+						thread_id: "thread_1",
+					});
+
+					return {
+						claimed_fence,
+						tombstone_fence: yield* repository
+							.RejectChanged("message_replace")
+							.pipe(Effect.exit),
+					};
+				}),
+			);
+
+			for (const failure of [result.claimed_fence, result.tombstone_fence]) {
+				expect(JSON.stringify(failure)).toContain("WorkspaceChangeTransitionError");
+			}
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("rejects corrupted operation and projection lifecycle combinations", async () => {
 		const database_path = await make_database_path();
 		const runtime = make_runtime(database_path);
@@ -896,6 +1354,109 @@ describe("workspace change repository", () => {
 			await runtime.dispose();
 		}
 	});
+
+	it("fails closed for malformed rejected operation state", async () => {
+		const runtime = make_runtime(await make_database_path());
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* WorkspaceChangeRepository;
+
+					yield* SeedThreads(database);
+					yield* repository.ClaimReplace(replace_claim());
+					yield* repository.RejectChanged("message_replace");
+					yield* database.client
+						.update(WorkspaceChangeOperations)
+						.set({ journal_sequence: 1 });
+					const journal_sequence = yield* repository
+						.ReadOperation("message_replace")
+						.pipe(Effect.exit);
+
+					yield* database.client
+						.update(WorkspaceChangeOperations)
+						.set({ evidence_recorded: true, journal_sequence: null });
+					const evidence_recorded = yield* repository
+						.ReadOperation("message_replace")
+						.pipe(Effect.exit);
+
+					yield* database.client
+						.update(WorkspaceChangeOperations)
+						.set({ agent_id: null, evidence_recorded: false });
+					const action_shape = yield* repository
+						.ReadOperation("message_replace")
+						.pipe(Effect.exit);
+
+					yield* repository.ClaimReplace(replace_claim("message_committed", "change_2"));
+					yield* repository.MarkApplied({
+						_tag: "replace",
+						message_id: "message_committed",
+						result_identity: after_identity,
+					});
+					yield* repository.CommitRecorded("message_committed");
+					yield* repository.ClaimReview({
+						_tag: "review",
+						change_id: "change_2",
+						message_id: "message_review",
+						request_fingerprint: "d".repeat(64),
+						sent_at: "2026-07-11T19:00:00.000Z",
+						thread_id: "thread_1",
+					});
+					yield* database.client
+						.update(WorkspaceChangeOperations)
+						.set({ lifecycle: "rejected" });
+					const review = yield* repository
+						.ReadOperation("message_review")
+						.pipe(Effect.exit);
+
+					return { action_shape, evidence_recorded, journal_sequence, review };
+				}),
+			);
+
+			for (const failure of Object.values(result)) {
+				expect(JSON.stringify(failure)).toContain("JournalInvariantError");
+			}
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("converges concurrent changed rejections for one message", async () => {
+		const database_path = await make_database_path();
+		const first_runtime = make_runtime(database_path);
+		const second_runtime = make_runtime(database_path);
+
+		try {
+			await first_runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* WorkspaceChangeRepository;
+
+					yield* SeedThreads(database);
+					yield* repository.ClaimReplace(replace_claim());
+				}),
+			);
+
+			const rejections = await Promise.all([
+				first_runtime.runPromise(
+					Effect.service(WorkspaceChangeRepository).pipe(
+						Effect.flatMap((repository) => repository.RejectChanged("message_replace")),
+					),
+				),
+				second_runtime.runPromise(
+					Effect.service(WorkspaceChangeRepository).pipe(
+						Effect.flatMap((repository) => repository.RejectChanged("message_replace")),
+					),
+				),
+			]);
+
+			expect(rejections).toEqual([rejections[0], rejections[0]]);
+			expect(rejections[0]).toMatchObject({ lifecycle: "rejected" });
+		} finally {
+			await Promise.all([first_runtime.dispose(), second_runtime.dispose()]);
+		}
+	}, 10_000);
 
 	it("rejects a workspace claim that collides with an existing journal command", async () => {
 		const database_path = await make_database_path();

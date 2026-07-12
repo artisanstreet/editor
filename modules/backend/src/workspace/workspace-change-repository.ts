@@ -1,4 +1,4 @@
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, or } from "drizzle-orm";
 import { Context, Data, Effect, Layer, Option, Schema } from "effect";
 
 import {
@@ -34,7 +34,7 @@ import {
 } from "../persistence/journal-store";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 
-const WorkspaceChangeLifecycle = Schema.Literals(["claimed", "applied", "committed"]);
+const WorkspaceChangeLifecycle = Schema.Literals(["claimed", "applied", "committed", "rejected"]);
 const RequestFingerprint = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/));
 const JournalSequence = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));
 
@@ -134,6 +134,7 @@ export type WorkspaceChangeOperation = typeof WorkspaceChangeOperation.Type;
 export type WorkspaceChangeClaim =
 	| { readonly _tag: "claimed"; readonly operation: WorkspaceChangeOperation }
 	| { readonly _tag: "incomplete_retry"; readonly operation: WorkspaceChangeOperation }
+	| { readonly _tag: "rejected"; readonly operation: WorkspaceChangeOperation }
 	| {
 			readonly _tag: "duplicate";
 			readonly event: WorkspaceChangeEvent;
@@ -188,6 +189,9 @@ export class WorkspaceChangeRepository extends Context.Service<
 						readonly result_identity: ContentIdentityValue;
 				  }
 				| { readonly _tag: "rollback"; readonly message_id: string },
+		) => Effect.Effect<WorkspaceChangeOperation, WorkspaceChangeRepositoryError>;
+		readonly RejectChanged: (
+			message_id: string,
 		) => Effect.Effect<WorkspaceChangeOperation, WorkspaceChangeRepositoryError>;
 		readonly CommitRecorded: (
 			message_id: string,
@@ -281,6 +285,12 @@ function raw_origins_match(left: RawOriginValue | undefined, right: RawOriginVal
 function operation_state_is_valid(operation: WorkspaceChangeOperation) {
 	const is_committed = operation.lifecycle === "committed";
 	const has_journal_sequence = operation.journal_sequence !== undefined;
+
+	if (operation.lifecycle === "rejected") {
+		return (
+			operation.action !== "review" && !operation.evidence_recorded && !has_journal_sequence
+		);
+	}
 
 	return (
 		is_committed === has_journal_sequence &&
@@ -688,6 +698,60 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 				return stored;
 			});
 
+		const ValidateRejectedState = (
+			transaction: typeof database.client,
+			operation: WorkspaceChangeOperation,
+		) =>
+			Effect.gen(function* () {
+				const [command] = yield* transaction
+					.select({ message_id: JournalCommands.message_id })
+					.from(JournalCommands)
+					.where(eq(JournalCommands.message_id, operation.message_id))
+					.limit(1);
+				const [event] = yield* transaction
+					.select({ event_id: JournalEvents.event_id })
+					.from(JournalEvents)
+					.where(eq(JournalEvents.correlation_id, operation.message_id))
+					.limit(1);
+
+				if (command || event) {
+					return yield* new JournalInvariantError({
+						message: `Rejected workspace operation ${operation.message_id} has journal state`,
+					});
+				}
+
+				if (operation.action === "replace") {
+					const [projection] = yield* transaction
+						.select({ change_id: WorkspaceChanges.change_id })
+						.from(WorkspaceChanges)
+						.where(
+							or(
+								eq(WorkspaceChanges.change_id, operation.change_id),
+								eq(WorkspaceChanges.source_command_id, operation.message_id),
+							),
+						)
+						.limit(1);
+
+					if (projection) {
+						return yield* new JournalInvariantError({
+							message: `Rejected workspace operation ${operation.message_id} has projection state`,
+						});
+					}
+
+					return;
+				}
+
+				if (operation.action === "rollback") {
+					yield* ValidateTransition(transaction, operation);
+
+					return;
+				}
+
+				return yield* new JournalInvariantError({
+					message: `Rejected workspace operation ${operation.message_id} has invalid action`,
+				});
+			});
+
 		const ReadOperation = (message_id: string) =>
 			database.client
 				.select()
@@ -888,6 +952,12 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 								};
 							}
 
+							if (operation.lifecycle === "rejected") {
+								yield* ValidateRejectedState(transaction, operation);
+
+								return { _tag: "rejected" as const, operation };
+							}
+
 							const [command] = yield* transaction
 								.select({ message_id: JournalCommands.message_id })
 								.from(JournalCommands)
@@ -1066,6 +1136,70 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 						}
 
 						return yield* DecodeOperation({ ...row, lifecycle: "applied", updated_at });
+					}),
+				)
+				.pipe(Effect.mapError(normalize_error));
+
+		const RejectChanged = (message_id: string) =>
+			database.client
+				.transaction((transaction) =>
+					Effect.gen(function* () {
+						const [row] = yield* transaction
+							.select()
+							.from(WorkspaceChangeOperations)
+							.where(eq(WorkspaceChangeOperations.message_id, message_id))
+							.limit(1);
+
+						if (!row)
+							return yield* new WorkspaceChangeTransitionError({
+								message: `Workspace operation ${message_id} is missing`,
+							});
+
+						const operation = yield* DecodeOperation(row);
+
+						yield* EnsureLiveThread(transaction, operation.thread_id);
+
+						if (operation.action === "review")
+							return yield* new WorkspaceChangeTransitionError({
+								message: `Workspace operation ${message_id} cannot be rejected`,
+							});
+
+						if (operation.lifecycle === "rejected") {
+							yield* ValidateRejectedState(transaction, operation);
+
+							return operation;
+						}
+
+						if (operation.lifecycle !== "claimed")
+							return yield* new WorkspaceChangeTransitionError({
+								message: `Workspace operation ${message_id} cannot be rejected`,
+							});
+
+						yield* ValidateRejectedState(transaction, operation);
+
+						const updated_at = yield* metadata.Now;
+						const [updated] = yield* transaction
+							.update(WorkspaceChangeOperations)
+							.set({ lifecycle: "rejected", updated_at })
+							.where(
+								and(
+									eq(WorkspaceChangeOperations.message_id, message_id),
+									eq(WorkspaceChangeOperations.lifecycle, "claimed"),
+								),
+							)
+							.returning({ message_id: WorkspaceChangeOperations.message_id });
+
+						if (!updated) {
+							return yield* new WorkspaceChangeTransitionError({
+								message: `Workspace operation ${message_id} changed before it was rejected`,
+							});
+						}
+
+						return yield* DecodeOperation({
+							...row,
+							lifecycle: "rejected",
+							updated_at,
+						});
 					}),
 				)
 				.pipe(Effect.mapError(normalize_error));
@@ -1430,6 +1564,7 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 			List,
 			MarkApplied,
 			MarkEvidenceRecorded,
+			RejectChanged,
 			ReadChange,
 			ReadOperation,
 		};

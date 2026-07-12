@@ -143,10 +143,16 @@ export class WorkspaceMutationAuthorityDenied extends Data.TaggedError(
 	"WorkspaceMutationAuthorityDenied",
 )<{ readonly reason: WorkspaceMutationAuthorityDenialReason }> {}
 
-/** Reports a reused operation identity whose immutable authority no longer matches. */
+/** Reports a reused operation whose durable state prevents mutation admission. */
 export class WorkspaceMutationAuthorityConflict extends Data.TaggedError(
 	"WorkspaceMutationAuthorityConflict",
-)<{ readonly reason: "authority_conflict" | "operation_conflict" | "unpinned_operation" }> {}
+)<{
+	readonly reason:
+		| "authority_conflict"
+		| "operation_conflict"
+		| "operation_rejected"
+		| "unpinned_operation";
+}> {}
 
 /** Conceals corrupt state and unexpected persistence failures from mutation callers. */
 export class WorkspaceMutationAuthorityFailure extends Data.TaggedError(
@@ -612,6 +618,14 @@ export const WorkspaceMutationAuthorityLive = Layer.effect(
 									yield* FenceExactRetry(transaction, existing_authority);
 
 									const accepted = yield* ClaimRepositoryReplace(claim);
+
+									if (accepted._tag === "rejected") {
+										return yield* Effect.fail(
+											new WorkspaceMutationAuthorityConflict({
+												reason: "operation_rejected",
+											}),
+										);
+									}
 
 									return {
 										authority: grant_from_stored(existing_authority),
