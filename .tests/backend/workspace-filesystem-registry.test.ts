@@ -55,6 +55,9 @@ describe("WorkspaceFilesystemRegistry", () => {
 		]);
 		expect(Object.keys(first).toSorted()).toEqual(["filesystem", "workspace_id"]);
 		expect("Resolve" in first.filesystem).toBe(false);
+		expect("ReadRegularFile" in first.filesystem).toBe(false);
+		expect("ReplaceRegularFile" in first.filesystem).toBe(false);
+		expect("FinalizeRegularFileReplacement" in first.filesystem).toBe(false);
 		expect(JSON.stringify(first)).not.toContain(first_root);
 	});
 
