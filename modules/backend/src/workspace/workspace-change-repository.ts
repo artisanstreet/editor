@@ -17,6 +17,7 @@ import {
 
 import { Database } from "../persistence/database";
 import { JournalNotifier } from "../persistence/journal-notifier";
+import { RetrySqliteWrite } from "../persistence/sqlite-write-retry";
 import {
 	EventStreams,
 	JournalCommands,
@@ -1138,7 +1139,7 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 						return yield* DecodeOperation({ ...row, lifecycle: "applied", updated_at });
 					}),
 				)
-				.pipe(Effect.mapError(normalize_error));
+				.pipe(RetrySqliteWrite, Effect.mapError(normalize_error));
 
 		const RejectChanged = (message_id: string) =>
 			database.client

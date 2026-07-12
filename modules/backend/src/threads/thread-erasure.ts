@@ -1,8 +1,9 @@
-import { and, eq, inArray, lte, sql } from "drizzle-orm";
+import { and, eq, exists, inArray, lte, not, notInArray, or, sql } from "drizzle-orm";
 import { Context, Data, Effect, Layer } from "effect";
 
 import { Database } from "../persistence/database";
 import { JournalNotifier } from "../persistence/journal-notifier";
+import { RetrySqliteWrite } from "../persistence/sqlite-write-retry";
 import {
 	AgentInstances,
 	AgentRuns,
@@ -66,35 +67,80 @@ export const ThreadErasureLive = Layer.effect(
 			.orderBy(ThreadErasureClaims.claimed_at, ThreadErasureClaims.thread_id)
 			.pipe(Effect.map((rows) => rows.map((row) => row.thread_id)));
 
-		const ClaimExpired = (cutoff: string, claimed_at: string) =>
-			database.client.transaction((transaction) =>
-				Effect.gen(function* () {
-					const candidates = yield* transaction
-						.select({ thread_id: Threads.thread_id })
-						.from(Threads)
-						.where(
-							and(eq(Threads.pinned, false), lte(Threads.last_activity_at, cutoff)),
-						)
-						.orderBy(Threads.last_activity_at, Threads.thread_id);
+		const IsPendingWorkspaceMutation = or(
+			notInArray(WorkspaceChangeOperations.lifecycle, ["claimed", "committed", "rejected"]),
+			exists(
+				database.client
+					.select({ message_id: WorkspaceMutationPayloads.message_id })
+					.from(WorkspaceMutationPayloads)
+					.where(
+						and(
+							eq(
+								WorkspaceMutationPayloads.message_id,
+								WorkspaceChangeOperations.message_id,
+							),
+							or(
+								eq(WorkspaceMutationPayloads.state, "available"),
+								eq(WorkspaceChangeOperations.lifecycle, "claimed"),
+							),
+						),
+					),
+			),
+		);
 
-					yield* Effect.forEach(
-						candidates,
-						(candidate) =>
-							transaction
-								.insert(ThreadErasureClaims)
-								.values({ claimed_at, thread_id: candidate.thread_id })
-								.onConflictDoNothing()
-								.pipe(Effect.asVoid),
-						{ discard: true },
-					);
-				}),
-			);
+		const ClaimExpired = (cutoff: string, claimed_at: string) =>
+			database.client
+				.transaction((transaction) =>
+					Effect.gen(function* () {
+						const candidates = yield* transaction
+							.select({ thread_id: Threads.thread_id })
+							.from(Threads)
+							.where(
+								and(
+									eq(Threads.pinned, false),
+									lte(Threads.last_activity_at, cutoff),
+									not(
+										exists(
+											database.client
+												.select({
+													message_id:
+														WorkspaceChangeOperations.message_id,
+												})
+												.from(WorkspaceChangeOperations)
+												.where(
+													and(
+														eq(
+															WorkspaceChangeOperations.thread_id,
+															Threads.thread_id,
+														),
+														IsPendingWorkspaceMutation,
+													),
+												),
+										),
+									),
+								),
+							)
+							.orderBy(Threads.last_activity_at, Threads.thread_id);
+
+						yield* Effect.forEach(
+							candidates,
+							(candidate) =>
+								transaction
+									.insert(ThreadErasureClaims)
+									.values({ claimed_at, thread_id: candidate.thread_id })
+									.onConflictDoNothing()
+									.pipe(Effect.asVoid),
+							{ discard: true },
+						);
+					}),
+				)
+				.pipe(RetrySqliteWrite);
 
 		const EraseClaimed = (thread_id: string, deleted_at: string) =>
 			Effect.gen(function* () {
 				yield* resources.Quiesce(thread_id);
 
-				const journal_sequence = yield* database.client.transaction((transaction) =>
+				const ErasureTransaction = database.client.transaction((transaction) =>
 					Effect.gen(function* () {
 						const [claim] = yield* transaction
 							.select({ thread_id: ThreadErasureClaims.thread_id })
@@ -103,6 +149,25 @@ export const ThreadErasureLive = Layer.effect(
 							.limit(1);
 
 						if (!claim) {
+							return undefined;
+						}
+
+						const [pending_mutation] = yield* transaction
+							.select({ message_id: WorkspaceChangeOperations.message_id })
+							.from(WorkspaceChangeOperations)
+							.where(
+								and(
+									eq(WorkspaceChangeOperations.thread_id, thread_id),
+									IsPendingWorkspaceMutation,
+								),
+							)
+							.limit(1);
+
+						if (pending_mutation) {
+							yield* transaction
+								.delete(ThreadErasureClaims)
+								.where(eq(ThreadErasureClaims.thread_id, thread_id));
+
 							return undefined;
 						}
 
@@ -278,6 +343,7 @@ export const ThreadErasureLive = Layer.effect(
 						return erasure_event!.journal_sequence;
 					}),
 				);
+				const journal_sequence = yield* RetrySqliteWrite(ErasureTransaction);
 
 				if (journal_sequence === undefined) {
 					return false;

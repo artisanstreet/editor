@@ -1157,7 +1157,7 @@ describe("WorkspaceMutationPayloadStore", () => {
 		}
 	});
 
-	it("removes private payload rows through the real ThreadErasure service", async () => {
+	it("preserves pending payload rows when real ThreadErasure releases its claim", async () => {
 		const database_path = await make_database_path();
 		const runtime = make_backend_runtime({
 			database_path,
@@ -1212,6 +1212,8 @@ describe("WorkspaceMutationPayloadStore", () => {
 						after_payloads: yield* database.client
 							.select()
 							.from(WorkspaceMutationPayloads),
+						claims: yield* database.client.select().from(ThreadErasureClaims),
+						threads: yield* database.client.select().from(Threads),
 						before,
 						erased,
 					};
@@ -1219,9 +1221,11 @@ describe("WorkspaceMutationPayloadStore", () => {
 			);
 
 			expect(result.before).toHaveLength(1);
-			expect(result.erased).toEqual([thread_id]);
-			expect(result.after_payloads).toEqual([]);
-			expect(result.after_operations).toEqual([]);
+			expect(result.erased).toEqual([]);
+			expect(result.claims).toEqual([]);
+			expect(result.after_payloads).toHaveLength(1);
+			expect(result.after_operations).toHaveLength(1);
+			expect(result.threads).toHaveLength(1);
 		} finally {
 			await runtime.dispose();
 		}
