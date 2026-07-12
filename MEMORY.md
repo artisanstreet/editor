@@ -385,6 +385,20 @@ Implemented, independently reviewed, committed, and verified:
 - [x] Full `pnpm run validate` passed after the backend loop settled: formatting, lint, root TypeScript, the production SER/Svelte build, and 92 test files passed with 754 tests and 3 intentional skips.
 - [x] Shell-presentation checkpoint `14a7d9d` was pushed to `origin/codex/backend-services`; local `HEAD` and upstream both resolved to `14a7d9d9d83e98a82fc712a4419471b07423b659` immediately after the push.
 
+## Frontend Workspace And Tab Model
+
+- [x] Added an immutable, renderer-owned workspace model for editor/chat/orchestrator mode state, user-owned file tabs, recents, changed files, and bounded overflow without introducing a capability Service or mutable singleton.
+- [x] The model uses explicit ADTs for preview/open/pinned ownership, file/diff content, clean/dirty state, agent-change badges, tab mutation outcomes, and revision/incarnation-bound dirty-close consent.
+- [x] Preview replacement, explicit-open/double-click/edit promotion, monotonic pinning, dirty close/reopen races, injective diff identities, changed-file isolation, badge replacement, mode preservation, recent ordering, active overflow, successor selection, and duplicate opens pass 19 focused Effect tests.
+- [x] Independent P0-P2 review and two re-review rounds are clean after closing preview ownership, dirty-consent, stale-diff, pinned-demotion, diff-edit, tab-incarnation, and composite-ID findings.
+- [x] Brought the fixture `ArtisanClient` forward to the backend's newly published list/read/replace/review/rollback workspace methods, with protocol-shaped fixture data and Effect-owned contract tests; the combined model/fixture suites pass 24 tests and root TypeScript is green.
+- [x] Integrated the model into the main pane with simultaneous open/pinned/dirty/diff/preview/agent-change states, exact dirty-close confirmation, truthful before/after fixture diffs, breadcrumbs, repeatable recent/changed/overflow navigation, and an active-first horizontally scrollable tab strip.
+- [x] Added Ctrl/Cmd+P fixture quick open with search, arrow/Enter/Escape/Tab handling, focus containment and prior-focus restoration across close/reopen races, keyboard-selection reveal, transitions.dev modal motion, and reduced-motion fallback.
+- [x] Text Editor, Chat, and Orchestrator retain real viewport positions plus active file, draft, and selected node through mode switches. All UI behavior remains SER-owned and no direct Effect runner, timer, Promise, or fake backend command was introduced.
+- [x] The focused model/UI/fixture suite passes 32 tests, the production frontend build passes, and final independent P0-P2 re-review is clean after truthful-diff, physical-overflow, state-label, select-reset, focus-return, and keyboard-reveal fixes.
+- [ ] Browser-level layout and accessibility verification remains open because no development server was requested; source/build evidence cannot fully prove physical scrolling, focus containment/restoration, native select reset, or narrow diff layout.
+- [x] Full `pnpm run validate` passed from an isolated detached snapshot containing current `HEAD` plus exactly this staged frontend checkpoint: formatting, lint, root TypeScript, the production SER/Svelte build, and 95 test files passed with 787 tests and 3 intentional skips. The backend loop's unrelated unfinished files were excluded without modification.
+
 ## Frontend Typeface Prototype
 
 - [x] Built `Artisan Neo` v0.1 as an OFL-licensed derivative of the verified Inter 4.1 release. This is the usable application and visual prototype; it is not yet an original proprietary typeface.

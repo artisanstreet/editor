@@ -86,12 +86,12 @@ This is the build order for the Artisan renderer, not a list of screens to mock 
 
 **Status: Fixture-ready.** The tab model is frontend-owned, but file discovery and stable live file integration are not complete.
 
-- [ ] Implement the main modes: `Text Editor`, `Chat`, and `Orchestrator`.
-- [ ] Preserve active file, editor state, transcript scroll, composer draft, and selected orchestration node when switching modes.
-- [ ] Implement normal, preview, pinned, dirty, diff-preview, and agent-change tab states plus overflow navigation.
-- [ ] Replace an unpinned preview tab on temporary navigation and promote it on edit, double-click, or explicit pin.
-- [ ] Surface changed files without opening every agent-touched file.
-- [ ] Add quick-open, breadcrumbs, recent files, changed files, and tab overflow before considering a heavy file tree.
+- [x] Implement the main modes: `Text Editor`, `Chat`, and `Orchestrator`.
+- [x] Preserve active file, editor state, transcript scroll, composer draft, and selected orchestration node when switching modes.
+- [x] Implement normal, preview, pinned, dirty, diff-preview, and agent-change tab states plus overflow navigation.
+- [x] Replace an unpinned preview tab on temporary navigation and promote it on edit, double-click, or explicit pin.
+- [x] Surface changed files without opening every agent-touched file.
+- [x] Add quick-open, breadcrumbs, recent files, changed files, and tab overflow before considering a heavy file tree.
 
 **Exit gate:** pure tab-model tests cover preview replacement, promotion, dirty preservation, close behavior, overflow, change badges, and mode switching with no backend dependency.
 

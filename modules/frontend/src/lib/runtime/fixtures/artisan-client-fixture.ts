@@ -9,6 +9,8 @@ import type {
 	ThreadListItem,
 	ThreadRetentionPolicy,
 	ThreadWorkItem,
+	WorkspaceChange,
+	WorkspaceFileReadQueryResult,
 } from "@artisan/protocol";
 import {
 	ArtisanClient,
@@ -32,6 +34,8 @@ export interface FixtureArtisanClientData {
 	readonly thread_retention_policy: ThreadRetentionPolicy;
 	readonly thread_work: ThreadWorkItem;
 	readonly threads: ReadonlyArray<ThreadListItem>;
+	readonly workspace_changes: ReadonlyArray<WorkspaceChange>;
+	readonly workspace_files: Readonly<Record<string, WorkspaceFileReadQueryResult>>;
 }
 
 const fixture_timestamp = "2026-07-12T10:00:00.000Z";
@@ -212,6 +216,44 @@ export const fixture_artisan_client_data = {
 			updated_at: fixture_timestamp,
 		},
 	],
+	workspace_changes: [
+		{
+			after_identity: {
+				algorithm: "sha256",
+				byte_count: 29,
+				content_hash: "ddf066ee341c060cca67ed6faa462602690b490d98c6fecdf607c447754e14bb",
+			},
+			agent_id: "agent-terra",
+			before_identity: {
+				algorithm: "sha256",
+				byte_count: 30,
+				content_hash: "7bc245364a34f5905e223f7cd0230d6ce53a1b74c389c593d725aa2ff856e918",
+			},
+			change_id: "change-fixture-runtime",
+			created_at: fixture_timestamp,
+			path: "modules/frontend/src/lib/fixture.ts",
+			review_state: "needs_review",
+			rollback_state: "available",
+			run_id: "run-editor-shell",
+			source_command_id: "command-fixture-replace",
+			thread_id: "thread-editor-shell",
+			updated_at: fixture_timestamp,
+			version: 1,
+			workspace_id: "workspace-artisan-editor",
+		},
+	],
+	workspace_files: {
+		"workspace-artisan-editor:modules/frontend/src/lib/fixture.ts": {
+			content: "export const fixture = true;\n",
+			identity: {
+				algorithm: "sha256",
+				byte_count: 29,
+				content_hash: "ddf066ee341c060cca67ed6faa462602690b490d98c6fecdf607c447754e14bb",
+			},
+			path: "modules/frontend/src/lib/fixture.ts",
+			workspace_id: "workspace-artisan-editor",
+		},
+	},
 } satisfies FixtureArtisanClientData;
 
 const FixtureFailure = (message: string) =>
@@ -292,10 +334,23 @@ export const FixtureArtisanClientService = {
 	ListThreads: Effect.gen(function* () {
 		return yield* Effect.succeed(fixture_artisan_client_data.threads);
 	}),
-	ListWorkspaceChanges: () =>
+	ListWorkspaceChanges: (input) =>
 		Effect.gen(function* () {
+			yield* Effect.void;
+
+			const changes: Array<WorkspaceChange> = [];
+
+			for (const change of fixture_artisan_client_data.workspace_changes) {
+				if (
+					change.thread_id === input.thread_id &&
+					(input.workspace_id === undefined || change.workspace_id === input.workspace_id)
+				) {
+					changes.push(change);
+				}
+			}
+
 			return {
-				changes: [],
+				changes,
 				journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
 			};
 		}),
@@ -319,8 +374,19 @@ export const FixtureArtisanClientService = {
 
 			return Stream.fromIterable([output]);
 		}),
-	ReadWorkspaceFile: () =>
-		FixtureFailure("Fixture workspace files are unavailable in this visual dataset."),
+	ReadWorkspaceFile: (input) =>
+		Effect.gen(function* () {
+			const key = `${input.workspace_id}:${input.path}`;
+			const workspace_files: FixtureArtisanClientData["workspace_files"] =
+				fixture_artisan_client_data.workspace_files;
+			const file = workspace_files[key];
+
+			if (file === undefined) {
+				return yield* FixtureFailure(`Unknown fixture workspace file: ${key}`);
+			}
+
+			return file;
+		}),
 	ReplaceWorkspaceFile: (input) =>
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-workspace-replace");

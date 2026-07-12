@@ -1,12 +1,182 @@
+import { Effect, Option } from "effect";
+
+import {
+	CreateWorkspaceState,
+	EditTab,
+	OpenDiffPreview,
+	OpenPreview,
+	PinTab,
+	RecordAgentChange,
+	UpdateChatView,
+	UpdateEditorView,
+	UpdateOrchestratorView,
+	type TabMutationOutcome,
+	type WorkspaceFileReference,
+	type WorkspaceState,
+} from "$lib/workspace/workspace-tab-model";
+
 export type EditorMode = "editor" | "chat" | "orchestrator";
 
-export type FileFixture = {
-	readonly id: string;
-	readonly name: string;
-	readonly language: string;
-	readonly path: string;
+export type FileFixture = WorkspaceFileReference & {
 	readonly lines: ReadonlyArray<{ readonly number: number; readonly code: string }>;
+	readonly before_lines?: ReadonlyArray<{ readonly number: number; readonly code: string }>;
 };
+
+const typescript_fixture_lines: FileFixture["lines"] = [
+	{ number: 1, code: 'import { Effect } from "effect";' },
+	{ number: 2, code: "" },
+	{ number: 3, code: "export const InspectWorkspace = Effect.gen(function* () {" },
+	{ number: 4, code: "  const workspace = yield* WorkspaceService;" },
+	{ number: 5, code: "" },
+	{ number: 6, code: "  return yield* workspace.inspect;" },
+	{ number: 7, code: "});" },
+];
+
+export const file_fixtures: ReadonlyArray<FileFixture> = [
+	{
+		id: "workspace-service",
+		name: "workspace-service.ts",
+		language: "TypeScript",
+		path: "modules/core/src/workspace/workspace-service.ts",
+		before_lines: [
+			{ number: 1, code: 'import { Effect } from "effect";' },
+			{ number: 2, code: "" },
+			{ number: 3, code: "export const InspectWorkspace = Effect.void;" },
+			{ number: 4, code: "export const ReplaceWorkspace = Effect.void;" },
+		],
+		lines: typescript_fixture_lines,
+	},
+	{
+		id: "workspace-protocol",
+		name: "workspace-protocol.ts",
+		language: "TypeScript",
+		path: "modules/protocol/src/workspace-protocol.ts",
+		lines: typescript_fixture_lines,
+	},
+	{
+		id: "workspace-test",
+		name: "workspace-service.test.ts",
+		language: "TypeScript",
+		path: ".tests/backend/workspace-service.test.ts",
+		lines: typescript_fixture_lines,
+	},
+	{
+		id: "workspace-style",
+		name: "global.css",
+		language: "CSS",
+		path: "modules/frontend/src/lib/styles/global.css",
+		before_lines: [
+			{ number: 1, code: ":root {" },
+			{ number: 2, code: "  --canvas: oklch(0.18 0.01 264);" },
+			{ number: 3, code: "  --pane: oklch(0.2 0.01 264);" },
+			{ number: 4, code: "  --focus: oklch(0.68 0.11 242);" },
+			{ number: 5, code: "}" },
+		],
+		lines: [
+			{ number: 1, code: ":root {" },
+			{ number: 2, code: "  --canvas: oklch(0.145 0.007 264);" },
+			{ number: 3, code: "  --pane: oklch(0.175 0.008 264);" },
+			{ number: 4, code: "  --focus: oklch(0.72 0.13 242);" },
+			{ number: 5, code: "}" },
+		],
+	},
+	{
+		id: "editor-shell",
+		name: "editor-shell.sv",
+		language: "Svelte",
+		path: "modules/frontend/src/routes/components/editor-shell.sv",
+		lines: [
+			{ number: 1, code: '<script lang="ts" effect>' },
+			{ number: 2, code: "  const preferences = yield* ShellPresentationPreferences;" },
+			{ number: 3, code: "  const state = yield* preferences.Load;" },
+			{ number: 4, code: "</script>" },
+		],
+	},
+	{
+		id: "runtime-client",
+		name: "artisan-client.ts",
+		language: "TypeScript",
+		path: "modules/transport/src/artisan-client.ts",
+		lines: typescript_fixture_lines,
+	},
+	{
+		id: "changed-only",
+		name: "workspace-recovery.ts",
+		language: "TypeScript",
+		path: "modules/backend/src/workspace/workspace-recovery.ts",
+		before_lines: [
+			{ number: 1, code: 'import { Effect } from "effect";' },
+			{ number: 2, code: "" },
+			{ number: 3, code: "export const RecoverWorkspace = Effect.void;" },
+		],
+		lines: [
+			{ number: 1, code: 'import { Effect } from "effect";' },
+			{ number: 2, code: "" },
+			{ number: 3, code: "export const RecoverWorkspace = Effect.gen(function* () {" },
+			{ number: 4, code: "  yield* WorkspaceRecovery.Reconcile;" },
+			{ number: 5, code: "});" },
+		],
+	},
+];
+
+export const FileFixtureById = (file_id: string) =>
+	Effect.gen(function* () {
+		yield* Effect.void;
+
+		for (const file of file_fixtures) {
+			if (file.id === file_id) {
+				return file;
+			}
+		}
+
+		return yield* Effect.die(`Unknown workspace fixture file: ${file_id}`);
+	});
+
+const UpdatedState = (outcome: TabMutationOutcome) =>
+	Effect.gen(function* () {
+		if (outcome._tag === "Updated") {
+			return outcome.state;
+		}
+
+		return yield* Effect.die(`Fixture tab mutation failed: ${outcome._tag}`);
+	});
+
+export const CreateWorkspaceFixtureState = (): Effect.Effect<WorkspaceState> =>
+	Effect.gen(function* () {
+		const [service, protocol, test, style, shell, , changed_only] = file_fixtures;
+		let state = yield* CreateWorkspaceState([service!, protocol!, test!]);
+
+		state = yield* UpdatedState(yield* PinTab(state, "file:workspace-protocol"));
+		state = yield* UpdatedState(yield* EditTab(state, "file:workspace-test"));
+		state = yield* OpenDiffPreview(state, style!, "fixture-change-style-17");
+		state = yield* UpdatedState(yield* PinTab(state, state.tabs.at(-1)!.id));
+		state = yield* OpenPreview(state, shell!);
+		state = yield* RecordAgentChange(state, service!, {
+			agent_name: "Terra",
+			added: 7,
+			removed: 4,
+		});
+		state = yield* RecordAgentChange(state, changed_only!, {
+			agent_name: "Luna",
+			added: 5,
+			removed: 3,
+		});
+		state = yield* UpdateEditorView(state, {
+			scroll_top: 84,
+			cursor_line: 7,
+			cursor_column: 31,
+		});
+		state = yield* UpdateChatView(state, {
+			draft: "Can you explain the workspace service boundary?",
+			transcript_scroll_top: 52,
+		});
+		state = yield* UpdateOrchestratorView(state, {
+			selected_node_id: Option.some("node-terra"),
+			graph_scroll_top: 36,
+		});
+
+		return state;
+	});
 
 export const thread_fixtures = [
 	{ id: "thread-editor", title: "Shape the editor shell", meta: "2 min ago", active: true },
@@ -15,71 +185,6 @@ export const thread_fixtures = [
 	{ id: "thread-provider", title: "Provider capability matrix", meta: "Fri", active: false },
 	{ id: "thread-permissions", title: "Permission policy pass", meta: "Thu", active: false },
 ] as const;
-
-export const file_fixtures: ReadonlyArray<FileFixture> = [
-	{
-		id: "workspace-service",
-		name: "workspace-service.ts",
-		language: "TypeScript",
-		path: "modules/core/src/workspace/workspace-service.ts",
-		lines: [
-			{ number: 1, code: 'import { Context, Effect, Layer } from "effect";' },
-			{ number: 2, code: "" },
-			{ number: 3, code: "export class WorkspaceService extends Context.Service(" },
-			{ number: 4, code: '  "@artisan/WorkspaceService",' },
-			{ number: 5, code: "  {" },
-			{ number: 6, code: "    effect: Effect.gen(function* () {" },
-			{ number: 7, code: "      const workspace = yield* WorkspaceRepository;" },
-			{ number: 8, code: "" },
-			{ number: 9, code: "      const inspect = Effect.gen(function* () {" },
-			{ number: 10, code: "        return yield* workspace.current;" },
-			{ number: 11, code: "      });" },
-			{ number: 12, code: "" },
-			{ number: 13, code: "      return { inspect } as const;" },
-			{ number: 14, code: "    })," },
-			{ number: 15, code: "  }," },
-			{ number: 16, code: ") {}" },
-		],
-	},
-	{
-		id: "workspace-protocol",
-		name: "workspace-protocol.ts",
-		language: "TypeScript",
-		path: "modules/protocol/src/workspace-protocol.ts",
-		lines: [
-			{ number: 1, code: 'import { Schema } from "effect";' },
-			{ number: 2, code: "" },
-			{ number: 3, code: "export const WorkspaceId = Schema.String.pipe(" },
-			{ number: 4, code: '  Schema.brand("WorkspaceId"),' },
-			{ number: 5, code: ");" },
-			{ number: 6, code: "" },
-			{ number: 7, code: "export const WorkspaceState = Schema.Struct({" },
-			{ number: 8, code: "  id: WorkspaceId," },
-			{ number: 9, code: "  branch: Schema.String," },
-			{ number: 10, code: "  dirty: Schema.Boolean," },
-			{ number: 11, code: "});" },
-		],
-	},
-	{
-		id: "workspace-test",
-		name: "workspace-service.test.ts",
-		language: "TypeScript",
-		path: "modules/core/.tests/workspace-service.test.ts",
-		lines: [
-			{ number: 1, code: 'import { Effect, Layer } from "effect";' },
-			{ number: 2, code: 'import { describe, expect, it } from "vitest";' },
-			{ number: 3, code: "" },
-			{ number: 4, code: 'describe("WorkspaceService", () => {' },
-			{ number: 5, code: '  it.effect("reads the selected workspace", () =>' },
-			{ number: 6, code: "    Effect.gen(function* () {" },
-			{ number: 7, code: "      const service = yield* WorkspaceService;" },
-			{ number: 8, code: "      expect(yield* service.inspect).toBeDefined();" },
-			{ number: 9, code: "    })," },
-			{ number: 10, code: "  );" },
-			{ number: 11, code: "});" },
-		],
-	},
-];
 
 export const session_fixture = {
 	id: "ses_01JARTISAN",

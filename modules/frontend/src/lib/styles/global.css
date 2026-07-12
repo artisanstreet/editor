@@ -65,6 +65,11 @@
 	--tabs-pill-bg: var(--raised);
 	--tabs-text-muted: var(--text-muted);
 	--tabs-text-active: var(--text-primary);
+	--modal-open-dur: 250ms;
+	--modal-close-dur: 150ms;
+	--modal-scale: 0.96;
+	--modal-scale-close: 0.96;
+	--modal-ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 .light {
@@ -199,6 +204,10 @@
 		--panel-translate-y: 0;
 		--panel-blur: 0;
 		--tabs-dur: 1ms;
+		--modal-open-dur: 1ms;
+		--modal-close-dur: 1ms;
+		--modal-scale: 1;
+		--modal-scale-close: 1;
 	}
 
 	*,
