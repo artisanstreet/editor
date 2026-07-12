@@ -331,6 +331,7 @@ Implemented, independently reviewed, committed, and verified:
 - [x] Verification: `pnpm --filter @artisan/frontend run build` passed; three frontend architecture files passed 15 tests; the full `pnpm run validate` passed 87 files with 711 tests and 3 intentional skips.
 - [x] Independent frontend review findings were resolved before the milestone: responsive controls no longer cover mode buttons, duplicated responsive pane instances share shell-owned state and use unique ARIA IDs, file tabs no longer advertise a fake close action, and the button groups use honest keyboard semantics.
 - [x] Root `pnpm run validate` now includes the production frontend build, so future SER/Svelte compiler regressions fail the monorepo gate.
+- [x] Frontend scaffold checkpoint `9312359` was pushed to `origin/codex/backend-services`; local `HEAD` and the upstream branch both resolved to `9312359a147e97dc011ec8c6b4b704ab0d14683b` immediately after the push.
 - [ ] `better-svelte-check` is not available as a portable published package, so its checkpoint remains open; production build, TypeScript, import-boundary, and source-layout gates are green in the meantime.
 - [ ] The test-only typed `ArtisanClient` fixture Layer, the complete visual-fixture route, persisted pane preferences, and browser-level layout/accessibility coverage remain the next frontend foundation slices.
 
