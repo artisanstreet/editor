@@ -4,6 +4,7 @@ const { createHash, randomUUID } = require("node:crypto");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+const { inspect } = require("node:util");
 
 if (process.platform !== "win32" || process.env.ARTISAN_RUN_NATIVE_REPLACE_SMOKE !== "1") {
 	process.exit(0);
@@ -660,6 +661,35 @@ async function preserve_windows_metadata() {
 	}
 }
 
+async function published_competing_operation() {
+	const root = make_root();
+	const relative_path = "competing-publication.txt";
+	const target = write_file(root, relative_path, "old");
+	const first_store = open_store(root);
+	const second_store = open_store(root);
+
+	try {
+		assert.equal(
+			await first_store.replaceRegularFile(options("first-publication", relative_path)),
+			"Replaced",
+		);
+		assert.equal(
+			await second_store.replaceRegularFile(options("second-publication", relative_path)),
+			"Changed",
+		);
+		assert.deepEqual(fs.readFileSync(target), Buffer.from("new"));
+		assert.equal(artifact_names(root).length, 2);
+		await first_store.finalizeRegularFileReplacement(
+			options("first-publication", relative_path),
+		);
+		assert.equal(artifact_names(root).length, 0);
+	} finally {
+		close_store(second_store);
+		close_store(first_store);
+		cleanup_root(root);
+	}
+}
+
 async function concurrent_replacement() {
 	for (let attempt = 0; attempt < 5; attempt += 1) {
 		const root = make_root();
@@ -822,6 +852,7 @@ async function main() {
 					["authenticated tamper and replay", authenticated_tamper_and_replay],
 					["wrong key", wrong_key],
 					["Windows metadata", preserve_windows_metadata],
+					["published competing operation", published_competing_operation],
 					["close and namespace", close_and_namespace],
 				];
 
@@ -850,10 +881,16 @@ async function main() {
 main().catch((error) => {
 	cleanup_all();
 	const cleanup_errors = take_cleanup_failures();
-	console.error(
+	const failure =
 		cleanup_errors.length > 0
 			? new AggregateError([error, ...cleanup_errors], "native replacement smoke failed")
-			: error,
+			: error;
+
+	console.error(
+		inspect(failure, {
+			colors: process.stderr.isTTY,
+			depth: null,
+		}),
 	);
 	process.exitCode = 1;
 });

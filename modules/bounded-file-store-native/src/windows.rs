@@ -427,7 +427,15 @@ fn replace_without_receipt(
     let Some(mut target) = target else {
         return Ok(ReplaceOutcome::Changed);
     };
-    if let Some(marker) = read_valid_marker(root, &target, options)? {
+    if let Some(marker) = read_authenticated_marker(root, &target)? {
+        if marker.namespace != receipt::namespace(&options.operation_id, &options.path) {
+            return Ok(ReplaceOutcome::Changed);
+        }
+
+        if !marker_matches_options(&marker, options) {
+            return Err(Failed);
+        }
+
         match marker.role {
             ReceiptRole::Finalizing
                 if valid_target_only_marker(&target, &marker, options, true) =>
@@ -1054,6 +1062,21 @@ fn read_valid_marker(
     snapshot: &Snapshot,
     options: &ReplaceRegularFileOptions,
 ) -> std::result::Result<Option<Marker>, AttemptError> {
+    let Some(marker) = read_authenticated_marker(root, snapshot)? else {
+        return Ok(None);
+    };
+
+    if !marker_matches_options(&marker, options) {
+        return Err(Failed);
+    }
+
+    Ok(Some(marker))
+}
+
+fn read_authenticated_marker(
+    root: &RootHandle,
+    snapshot: &Snapshot,
+) -> std::result::Result<Option<Marker>, AttemptError> {
     let Some(marker) =
         receipt::read(snapshot.opened.file.0, &root.receipt_key).map_err(|_| Failed)?
     else {
@@ -1067,15 +1090,17 @@ fn read_valid_marker(
             && marker.self_id == snapshot.data.metadata.id
     };
 
-    if marker.namespace != receipt::namespace(&options.operation_id, &options.path)
-        || marker.expected != receipt::hash(&options.expected)
-        || marker.replacement != receipt::hash(&options.replacement)
-        || !valid_self
-    {
+    if !valid_self {
         return Err(Failed);
     }
 
     Ok(Some(marker))
+}
+
+fn marker_matches_options(marker: &Marker, options: &ReplaceRegularFileOptions) -> bool {
+    marker.namespace == receipt::namespace(&options.operation_id, &options.path)
+        && marker.expected == receipt::hash(&options.expected)
+        && marker.replacement == receipt::hash(&options.replacement)
 }
 
 fn write_marker(
