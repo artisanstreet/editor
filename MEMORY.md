@@ -398,6 +398,7 @@ Implemented, independently reviewed, committed, and verified:
 - [x] The focused model/UI/fixture suite passes 32 tests, the production frontend build passes, and final independent P0-P2 re-review is clean after truthful-diff, physical-overflow, state-label, select-reset, focus-return, and keyboard-reveal fixes.
 - [ ] Browser-level layout and accessibility verification remains open because no development server was requested; source/build evidence cannot fully prove physical scrolling, focus containment/restoration, native select reset, or narrow diff layout.
 - [x] Full `pnpm run validate` passed from an isolated detached snapshot containing current `HEAD` plus exactly this staged frontend checkpoint: formatting, lint, root TypeScript, the production SER/Svelte build, and 95 test files passed with 787 tests and 3 intentional skips. The backend loop's unrelated unfinished files were excluded without modification.
+- [x] User-owned workspace/tab checkpoint `08e7eca` was pushed to `origin/codex/backend-services`; local `HEAD` and upstream both resolved to `08e7ecac6e2745bcf40f16977182840dda723400` immediately after the push.
 
 ## Frontend Typeface Prototype
 
