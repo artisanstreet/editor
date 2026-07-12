@@ -248,6 +248,13 @@ export {
 	type PendingAgentRun,
 } from "./orchestration/agent-graph-repository";
 export {
+	BoundedRegularFileStore,
+	BoundedRegularFileStoreError,
+	type BoundedRegularFileStoreOperation,
+	type ReplaceRegularFileOptions,
+	type ReplaceRegularFileResult,
+} from "./filesystem/bounded-regular-file-store";
+export {
 	Filesystem,
 	FilesystemError,
 	type FilesystemChange,
