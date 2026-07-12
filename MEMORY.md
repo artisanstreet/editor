@@ -14,8 +14,8 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Branch: `codex/backend-services`
 - [x] Package manager: pnpm 11.7.0
 - [x] Stack: TypeScript 7, Effect 4 beta, Drizzle 1 RC, SQLite
-- [x] Latest code checkpoint: `720cfaa test: prove conditional file replacement recovery`
-- [x] Latest remote checkpoint: `720cfaa test: prove conditional file replacement recovery`
+- [x] Latest code checkpoint: `dfc08bb build: scaffold native file store package`
+- [x] Latest remote checkpoint: `dfc08bb build: scaffold native file store package`
 - [x] Model Behaviour is committed as focused protocol, persistence, provider, service, composition, transport, and security changes.
 - [x] Local GitHub account: `sandersonstabo`; `origin` -> `https://github.com/sandersonstabo/artisan-editor.git`; GitHub visibility was verified as `PRIVATE` on 2026-07-12.
 - [x] Commit every coherent, verified checkpoint as a small, focused, independently understandable change. Never bundle unrelated dirty work into the same commit and never push `main` or `master` without explicit approval.
@@ -29,7 +29,8 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Transactional run/agent/workspace authority is committed and pushed at `7cbe507`.
 - [x] Recovery-only access to staged rollback bytes is committed and pushed at `b81fa19`.
 - [x] The narrow `BoundedRegularFileStore` seam and explicitly non-adversarial Node adapter are committed and pushed at `98ef0b3`, `011dff5`, and `720cfaa`. Two-phase receipts retain the exact stage and original backup until SQLite durably records `applied`, then finalization removes them idempotently. Crash, corruption, mode, artifact, and concurrency coverage is green, including 50 synchronized exact-ID and 50 competing-ID stress runs. Independent final P0-P2 review is clean.
-- [ ] Build the production bounded regular-file adapter with handle-relative native operations through a focused Rust N-API addon. Effect 4 beta 97 and Node 24 expose path-based `rename`, `link`, and `remove`, so the reviewed Node adapter cannot prevent a hostile same-user process from swapping an ancestor or leaf between validation and mutation. Koffi is rejected for this security-critical adapter because maintaining Windows NT ABI structures and syscalls in TypeScript is too fragile. Do not compose or describe the Node adapter as production race-proof confinement.
+- [x] The private `@artisan/bounded-file-store-native` N-API package scaffold is committed and pushed at `dfc08bb`. Rust/NAPI versions are pinned, production output targets Windows x64 MSVC under `.dist`, and the pinned GNU development build proves direct binding load, generated CommonJS loader load, and generated declaration consumption without exposing any filesystem method. Independent P0-P2 review is clean.
+- [ ] Build the first production bounded regular-file adapter for Windows 10 1809+/Windows 11 x64 on local NTFS. Pin the root, reject reparse traversal, and use exact open-handle rename, hard-link publication, and deletion through Rust `windows-sys`/NT APIs. Promise process-crash recovery and best-effort flush hardening, not power-loss atomicity or universal filesystem support. Koffi remains rejected for this security-critical adapter because maintaining Windows NT ABI structures and syscalls in TypeScript is too fragile.
 - [ ] Build the controlled read/replace/review/rollback service around the filesystem registry, workspace-change repository, snapshot store, evidence recorder, and public protocol.
 - [ ] Prove filesystem mutation crash windows, exact retries, authorization races, and restart recovery through the real production composition.
 
@@ -62,6 +63,18 @@ Implemented, independently reviewed, committed, and verified:
 - [x] Independent final P0-P2 review is clean after fixing stage-missing/backup-present finalization.
 - [x] Focused commits: `98ef0b3 feat: define bounded regular file store`, `011dff5 feat: add recoverable node file replacement`, and `720cfaa test: prove conditional file replacement recovery`.
 - [ ] Production composition remains blocked on the Rust N-API handle-relative adapter and its platform matrix; the current Node adapter is deliberately named `non_adversarial` and is referenced only by its focused harness.
+
+## Completed Native Package Scaffold
+
+Implemented, independently reviewed, committed, and verified:
+
+- [x] Private workspace package `@artisan/bounded-file-store-native` uses NAPI-RS v3 and a pinned Rust 1.97.0 toolchain; Rust source, Cargo state, and package metadata remain isolated under `modules/bounded-file-store-native`.
+- [x] Production build metadata targets `x86_64-pc-windows-msvc`; generated loader, declarations, native artifacts, and Cargo intermediates are written only beneath `.dist/bounded-file-store-native`.
+- [x] A user-scoped GNU verification path uses WinLibs UCRT without treating its binary as production. It smoke-loads the direct binding and generated `index.cjs` package loader, then typechecks a consumer against the generated declarations.
+- [x] The scaffold exports only `getNativeBuildDescriptor`; no filesystem capability or backend composition exists yet.
+- [x] `cargo fmt --check`, GNU Clippy with warnings denied, frozen pnpm install, full repository validation, and independent P0-P2 review pass.
+- [x] Local machine state: rustup 1.29.0, Rust 1.97.0 GNU/MSVC toolchains, and portable WinLibs UCRT 16.1 are installed. Visual Studio Build Tools did not install because its elevated bootstrapper could not proceed; production MSVC load remains an explicit CI/platform gate.
+- [x] Focused commit: `dfc08bb build: scaffold native file store package`.
 
 ## Completed Rollback Snapshot Foundation
 
@@ -199,7 +212,7 @@ Implemented, independently reviewed, committed, and verified:
 - [x] Frontend is UI-only. Backend owns provider processes, terminals, filesystem/Git, persistence, policy, and reconciliation.
 - [x] Control uses typed MessagePort request/result plus durable events; streams use separate bounded MessagePorts.
 - [x] SQLite is the journal/projection store. Full provider configs, credentials, and secrets never enter journal payloads.
-- [x] Production conditional file mutation uses a focused Rust N-API adapter with handle-relative platform operations. The path-based Node implementation remains a non-adversarial development and deterministic-test adapter only.
+- [x] Production conditional file mutation uses a focused Rust N-API adapter with handle-relative platform operations. Windows x64 on local NTFS is the first target and guarantees process-crash recovery, not power-loss atomicity. The path-based Node implementation remains a non-adversarial development and deterministic-test adapter only.
 - [x] Provider CLIs remain the optimized native harnesses. Artisan adapts their I/O rather than replacing them with a generic API-key harness.
 - [x] Canonical Artisan surfaces and registries map to provider-native capabilities with truthful unsupported/runtime-only states.
 - [x] Model picker, behavior controls, Git state, and other lower-frequency controls belong in the right pane.

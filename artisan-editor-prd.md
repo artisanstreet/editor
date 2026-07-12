@@ -2013,6 +2013,19 @@ Right pane relationship:
   path-based mutation cannot close hostile same-user ancestor and leaf swap
   races. The path-based Node adapter is a non-adversarial development and test
   implementation and must not be wired into production controlled mutation.
+- The first native production target should be Windows 10 1809+/Windows 11 x64
+  on a local NTFS volume. It should pin the root directory, reject reparse-point
+  traversal, and mutate exact open file handles for no-overwrite rename,
+  hard-link publication, and receipt deletion. Unsupported OS, filesystem, or
+  primitive combinations should fail closed before mutation.
+- Windows receipt recovery should promise convergence after process crashes.
+  File and metadata flushes are best-effort durability hardening; Artisan must
+  not claim that a multi-step replacement is atomic across power loss, storage
+  firmware, arbitrary filesystem drivers, or remote volumes.
+- macOS and Linux adapters should follow behind the same Effect Service only
+  after their native primitive sets and race harnesses prove a truthful support
+  level. Platform differences are capability states, not user-facing tuning
+  dials and not a reason to weaken the Windows implementation.
 - A separate change-tracking service should record controlled writes with
   thread, run, agent, command, before/after identity, and review state. Watcher
   events represent external or unattributed changes until they can be matched
