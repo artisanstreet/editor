@@ -1,5 +1,5 @@
 import { Context, Crypto, Data, Effect, Encoding, Layer, Schema } from "effect";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, or, sql } from "drizzle-orm";
 
 import {
 	ContentIdentity,
@@ -52,6 +52,12 @@ const ExistsInput = Schema.Struct({
 	change_id: Identifier,
 	thread_id: Identifier,
 });
+const DiscardRejectedReplaceInput = Schema.Struct({
+	change_id: Identifier,
+	expected_identity: ContentIdentity,
+	replace_message_id: Identifier,
+	thread_id: Identifier,
+});
 const ContentHash = /^[0-9a-f]{64}$/;
 
 type ReplaceLifecycle = "applied" | "claimed" | "committed";
@@ -71,12 +77,21 @@ export type WorkspaceSnapshotConsumeInput = typeof ConsumeInput.Type;
 /** Supplies the thread authority required to inspect snapshot availability. */
 export type WorkspaceSnapshotExistsInput = typeof ExistsInput.Type;
 
+/** Selects a rejected replacement whose private rollback snapshot should be discarded. */
+export type WorkspaceSnapshotDiscardRejectedReplaceInput = typeof DiscardRejectedReplaceInput.Type;
+
 /** Reports malformed snapshot-store input before it reaches private storage. */
 export class WorkspaceSnapshotStoreInvalid extends Data.TaggedError(
 	"WorkspaceSnapshotStoreInvalid",
 )<{
 	readonly change_id?: string;
-	readonly operation: "consume" | "exists" | "read" | "resume" | "stage";
+	readonly operation:
+		| "consume"
+		| "discard_rejected_replace"
+		| "exists"
+		| "read"
+		| "resume"
+		| "stage";
 }> {}
 
 /** Reports a change ID already bound to a different available snapshot. */
@@ -92,7 +107,13 @@ export class WorkspaceSnapshotStoreUnavailable extends Data.TaggedError(
 	"WorkspaceSnapshotStoreUnavailable",
 )<{
 	readonly change_id?: string;
-	readonly operation: "consume" | "exists" | "read" | "resume" | "stage";
+	readonly operation:
+		| "consume"
+		| "discard_rejected_replace"
+		| "exists"
+		| "read"
+		| "resume"
+		| "stage";
 }> {}
 
 /** Represents failures returned by private workspace rollback snapshot operations. */
@@ -107,6 +128,9 @@ export class WorkspaceSnapshotStore extends Context.Service<
 	{
 		readonly Consume: (
 			input: WorkspaceSnapshotConsumeInput,
+		) => Effect.Effect<void, WorkspaceSnapshotStoreError>;
+		readonly DiscardRejectedReplace: (
+			input: WorkspaceSnapshotDiscardRejectedReplaceInput,
 		) => Effect.Effect<void, WorkspaceSnapshotStoreError>;
 		readonly Exists: (
 			input: WorkspaceSnapshotExistsInput,
@@ -422,6 +446,68 @@ export const WorkspaceSnapshotStoreLive = Layer.effect(
 				return rollback.lifecycle;
 			});
 
+		const EnsureRejectedReplaceWithoutProjection = (
+			transaction: typeof database.client,
+			input: WorkspaceSnapshotDiscardRejectedReplaceInput,
+		) =>
+			Effect.gen(function* () {
+				yield* EnsureLiveThread(
+					transaction,
+					input.thread_id,
+					"discard_rejected_replace",
+					input.change_id,
+				);
+
+				const [replace] = yield* transaction
+					.select({
+						action: WorkspaceChangeOperations.action,
+						change_id: WorkspaceChangeOperations.change_id,
+						expected_identity_json: WorkspaceChangeOperations.expected_identity_json,
+						lifecycle: WorkspaceChangeOperations.lifecycle,
+						thread_id: WorkspaceChangeOperations.thread_id,
+					})
+					.from(WorkspaceChangeOperations)
+					.where(eq(WorkspaceChangeOperations.message_id, input.replace_message_id))
+					.limit(1);
+
+				if (
+					!replace ||
+					replace.thread_id !== input.thread_id ||
+					replace.lifecycle !== "rejected"
+				) {
+					return yield* Effect.fail(
+						make_unavailable("discard_rejected_replace", input.change_id),
+					);
+				}
+
+				const canonical_identity = yield* DecodeStoredIdentity(
+					replace.expected_identity_json,
+					"discard_rejected_replace",
+					input.change_id,
+				);
+				const [projection] = yield* transaction
+					.select({ change_id: WorkspaceChanges.change_id })
+					.from(WorkspaceChanges)
+					.where(
+						or(
+							eq(WorkspaceChanges.change_id, input.change_id),
+							eq(WorkspaceChanges.source_command_id, input.replace_message_id),
+						),
+					)
+					.limit(1);
+
+				if (
+					replace.action !== "replace" ||
+					replace.change_id !== input.change_id ||
+					projection ||
+					!identities_match(canonical_identity, input.expected_identity)
+				) {
+					return yield* Effect.fail(
+						make_unavailable("discard_rejected_replace", input.change_id),
+					);
+				}
+			});
+
 		const Stage = (
 			input: WorkspaceSnapshotStageInput,
 		): Effect.Effect<
@@ -669,10 +755,133 @@ export const WorkspaceSnapshotStoreLive = Layer.effect(
 				.pipe(Effect.mapError((error) => conceal_error(error, "consume", change_id)));
 		};
 
+		const DiscardRejectedReplace = (
+			input: WorkspaceSnapshotDiscardRejectedReplaceInput,
+		): Effect.Effect<void, WorkspaceSnapshotStoreError> => {
+			const change_id = change_id_from_unknown(input);
+
+			return Decode(DiscardRejectedReplaceInput, input, "discard_rejected_replace")
+				.pipe(
+					Effect.flatMap((decoded) =>
+						metadata.Now.pipe(
+							Effect.flatMap((now) =>
+								RetrySqliteWrite(
+									database.client.transaction((transaction) =>
+										Effect.gen(function* () {
+											yield* EnsureRejectedReplaceWithoutProjection(
+												transaction,
+												decoded,
+											);
+
+											const [stored] = yield* transaction
+												.select({
+													byte_count: WorkspaceChangeSnapshots.byte_count,
+													content: WorkspaceChangeSnapshots.content,
+													content_hash:
+														WorkspaceChangeSnapshots.content_hash,
+													state: WorkspaceChangeSnapshots.state,
+													thread_id: WorkspaceChangeSnapshots.thread_id,
+												})
+												.from(WorkspaceChangeSnapshots)
+												.where(
+													eq(
+														WorkspaceChangeSnapshots.change_id,
+														decoded.change_id,
+													),
+												)
+												.limit(1);
+
+											if (!stored) return;
+											if (stored.thread_id !== decoded.thread_id)
+												return yield* Effect.fail(
+													make_unavailable(
+														"discard_rejected_replace",
+														decoded.change_id,
+													),
+												);
+											if (stored.state === "consumed") {
+												if (
+													stored.content !== null ||
+													stored.byte_count !== null ||
+													stored.content_hash !== null
+												)
+													return yield* Effect.fail(
+														make_unavailable(
+															"discard_rejected_replace",
+															decoded.change_id,
+														),
+													);
+
+												return;
+											}
+											if (stored.state !== "available")
+												return yield* Effect.fail(
+													make_unavailable(
+														"discard_rejected_replace",
+														decoded.change_id,
+													),
+												);
+
+											yield* ReadAvailableSnapshot(
+												transaction,
+												decoded,
+												"discard_rejected_replace",
+											);
+
+											const consumed = yield* transaction
+												.update(WorkspaceChangeSnapshots)
+												.set({
+													byte_count: null,
+													content: null,
+													content_hash: null,
+													state: "consumed",
+													updated_at: now,
+												})
+												.where(
+													and(
+														eq(
+															WorkspaceChangeSnapshots.change_id,
+															decoded.change_id,
+														),
+														eq(
+															WorkspaceChangeSnapshots.thread_id,
+															decoded.thread_id,
+														),
+														eq(
+															WorkspaceChangeSnapshots.state,
+															"available",
+														),
+													),
+												)
+												.returning({
+													change_id: WorkspaceChangeSnapshots.change_id,
+												});
+
+											if (consumed.length !== 1)
+												return yield* Effect.fail(
+													make_unavailable(
+														"discard_rejected_replace",
+														decoded.change_id,
+													),
+												);
+										}),
+									),
+								),
+							),
+						),
+					),
+				)
+				.pipe(
+					Effect.mapError((error) =>
+						conceal_error(error, "discard_rejected_replace", change_id),
+					),
+				);
+		};
+
 		const ReadAvailableSnapshot = (
 			transaction: typeof database.client,
 			input: WorkspaceSnapshotReadInput,
-			operation: "read" | "resume",
+			operation: "discard_rejected_replace" | "read" | "resume",
 		) =>
 			Effect.gen(function* () {
 				const [metadata_row] = yield* transaction
@@ -866,6 +1075,6 @@ export const WorkspaceSnapshotStoreLive = Layer.effect(
 				.pipe(Effect.mapError((error) => conceal_error(error, "exists", change_id)));
 		};
 
-		return { Consume, Exists, Read, Resume, Stage };
+		return { Consume, DiscardRejectedReplace, Exists, Read, Resume, Stage };
 	}),
 );

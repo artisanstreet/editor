@@ -34,7 +34,7 @@ const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", i
 const temporary_directories: Array<string> = [];
 
 type MutationAction = "replace" | "rollback";
-type MutationLifecycle = "applied" | "claimed" | "committed";
+type MutationLifecycle = "applied" | "claimed" | "committed" | "rejected";
 
 function identity(content: Uint8Array) {
 	return {
@@ -118,6 +118,35 @@ function SeedOperation(options: {
 			sent_at: "2026-07-12T12:45:00.000Z",
 			thread_id: options.thread_id,
 			updated_at: "2026-07-12T12:45:00.000Z",
+		});
+	});
+}
+
+function SeedReplaceProjection(options: {
+	readonly after: Uint8Array;
+	readonly before: Uint8Array;
+	readonly change_id: string;
+	readonly source_command_id: string;
+	readonly thread_id: string;
+}) {
+	return Effect.gen(function* () {
+		const database = yield* Database;
+
+		yield* database.client.insert(WorkspaceChanges).values({
+			after_identity_json: JSON.stringify(identity(options.after)),
+			agent_id: `agent_${options.change_id}`,
+			before_identity_json: JSON.stringify(identity(options.before)),
+			change_id: options.change_id,
+			created_at: "2026-07-12T12:45:00.000Z",
+			path: `src/${options.change_id}.ts`,
+			review_state: "needs_review",
+			rollback_state: "available",
+			run_id: `run_${options.change_id}`,
+			source_command_id: options.source_command_id,
+			thread_id: options.thread_id,
+			updated_at: "2026-07-12T12:45:00.000Z",
+			version: 1,
+			workspace_id: `workspace_${options.thread_id}`,
 		});
 	});
 }
@@ -240,6 +269,265 @@ afterEach(async () => {
 });
 
 describe("WorkspaceMutationPayloadStore", () => {
+	it("consumes rejected replace bytes into a tombstone that Stage and Resume cannot resurrect", async () => {
+		const runtime = make_runtime(await make_database_path());
+		const expected = bytes("rejected replace before");
+		const replacement = bytes("rejected replace after");
+		const input = stage_input(
+			"replace",
+			"replace_rejected_cleanup",
+			"thread_rejected_replace_cleanup",
+			expected,
+			replacement,
+		);
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const store = yield* WorkspaceMutationPayloadStore;
+
+					yield* SeedThread(input.thread_id);
+					yield* SeedOperation({
+						action: "replace",
+						expected,
+						message_id: input.message_id,
+						replacement,
+						thread_id: input.thread_id,
+					});
+					yield* store.Stage(input);
+					yield* UpdateLifecycle(input.message_id, "rejected");
+					yield* store.Consume(resume_input(input));
+					yield* store.Consume(resume_input(input));
+
+					return {
+						resume: yield* store.Resume(resume_input(input)).pipe(Effect.exit),
+						row: (yield* database.client.select().from(WorkspaceMutationPayloads))[0],
+						stage: yield* store.Stage(input).pipe(Effect.exit),
+					};
+				}),
+			);
+
+			expect_failure_tag(result.resume, "WorkspaceMutationPayloadStoreUnavailable");
+			expect_failure_tag(result.stage, "WorkspaceMutationPayloadStoreUnavailable");
+			expect(result.row).toMatchObject({
+				state: "consumed",
+				expected: null,
+				expected_byte_count: null,
+				expected_hash: null,
+				replacement: null,
+				replacement_byte_count: null,
+				replacement_hash: null,
+			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("consumes rejected rollback bytes while the unchanged projection remains available", async () => {
+		const runtime = make_runtime(await make_database_path());
+		const thread_id = "thread_rejected_rollback_cleanup";
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const store = yield* WorkspaceMutationPayloadStore;
+
+					yield* SeedThread(thread_id);
+					const context = yield* SeedRollbackContext({
+						suffix: "rejected_rollback_cleanup",
+						thread_id,
+					});
+					const input = stage_input(
+						"rollback",
+						context.rollback_message_id,
+						thread_id,
+						context.after,
+						context.before,
+					);
+
+					yield* store.Stage(input);
+					yield* UpdateLifecycle(input.message_id, "rejected");
+					yield* store.Consume(resume_input(input));
+
+					return {
+						projection: (yield* database.client.select().from(WorkspaceChanges))[0],
+						row: (yield* database.client.select().from(WorkspaceMutationPayloads))[0],
+						resume: yield* store.Resume(resume_input(input)).pipe(Effect.exit),
+						stage: yield* store.Stage(input).pipe(Effect.exit),
+					};
+				}),
+			);
+
+			expect(result.projection).toMatchObject({ rollback_state: "available" });
+			expect(result.row).toMatchObject({
+				state: "consumed",
+				expected: null,
+				replacement: null,
+			});
+			expect_failure_tag(result.resume, "WorkspaceMutationPayloadStoreUnavailable");
+			expect_failure_tag(result.stage, "WorkspaceMutationPayloadStoreUnavailable");
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("converges two runtimes that consume the same rejected payload", async () => {
+		const database_path = await make_database_path();
+		const first_runtime = make_runtime(database_path);
+		const second_runtime = make_runtime(database_path);
+		const expected = bytes("concurrent rejected before");
+		const replacement = bytes("concurrent rejected after");
+		const input = stage_input(
+			"replace",
+			"replace_rejected_concurrent",
+			"thread_rejected_concurrent",
+			expected,
+			replacement,
+		);
+
+		try {
+			await first_runtime.runPromise(
+				Effect.gen(function* () {
+					const store = yield* WorkspaceMutationPayloadStore;
+
+					yield* SeedThread(input.thread_id);
+					yield* SeedOperation({
+						action: "replace",
+						expected,
+						message_id: input.message_id,
+						replacement,
+						thread_id: input.thread_id,
+					});
+					yield* store.Stage(input);
+					yield* UpdateLifecycle(input.message_id, "rejected");
+				}),
+			);
+			await Promise.all(
+				[first_runtime, second_runtime].map((runtime) =>
+					runtime.runPromise(
+						Effect.service(WorkspaceMutationPayloadStore).pipe(
+							Effect.flatMap((store) => store.Consume(resume_input(input))),
+						),
+					),
+				),
+			);
+			const [row] = await first_runtime.runPromise(
+				Effect.service(Database).pipe(
+					Effect.flatMap((database) =>
+						database.client.select().from(WorkspaceMutationPayloads),
+					),
+				),
+			);
+
+			expect(row).toMatchObject({ state: "consumed", expected: null, replacement: null });
+		} finally {
+			await Promise.all([first_runtime.dispose(), second_runtime.dispose()]);
+		}
+	});
+
+	it("rejects a rejected replace payload when a projection aliases its source command", async () => {
+		const runtime = make_runtime(await make_database_path());
+		const expected = bytes("private rejected alias before");
+		const replacement = bytes("private rejected alias after");
+		const input = stage_input(
+			"replace",
+			"replace_rejected_projection_alias",
+			"thread_rejected_projection_alias",
+			expected,
+			replacement,
+		);
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const store = yield* WorkspaceMutationPayloadStore;
+
+					yield* SeedThread(input.thread_id);
+					yield* SeedOperation({
+						action: "replace",
+						expected,
+						message_id: input.message_id,
+						replacement,
+						thread_id: input.thread_id,
+					});
+					yield* store.Stage(input);
+					yield* UpdateLifecycle(input.message_id, "rejected");
+					yield* SeedReplaceProjection({
+						after: replacement,
+						before: expected,
+						change_id: "change_rejected_projection_alias_forged",
+						source_command_id: input.message_id,
+						thread_id: input.thread_id,
+					});
+
+					return {
+						exit: yield* store.Consume(resume_input(input)).pipe(Effect.exit),
+						row: (yield* database.client.select().from(WorkspaceMutationPayloads))[0],
+					};
+				}),
+			);
+			const serialized = JSON.stringify(result.exit);
+
+			expect_failure_tag(result.exit, "WorkspaceMutationPayloadStoreUnavailable");
+			expect(serialized).not.toContain(new TextDecoder().decode(expected));
+			expect(serialized).not.toContain(new TextDecoder().decode(replacement));
+			expect(result.row).toMatchObject({ state: "available" });
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("rejects cleanup of a corrupt rejected payload without exposing bytes", async () => {
+		const runtime = make_runtime(await make_database_path());
+		const expected = bytes("private corrupt rejected before");
+		const replacement = bytes("private corrupt rejected after");
+		const input = stage_input(
+			"replace",
+			"replace_rejected_corrupt_cleanup",
+			"thread_rejected_corrupt_cleanup",
+			expected,
+			replacement,
+		);
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const store = yield* WorkspaceMutationPayloadStore;
+
+					yield* SeedThread(input.thread_id);
+					yield* SeedOperation({
+						action: "replace",
+						expected,
+						message_id: input.message_id,
+						replacement,
+						thread_id: input.thread_id,
+					});
+					yield* store.Stage(input);
+					yield* UpdateLifecycle(input.message_id, "rejected");
+					yield* database.client
+						.update(WorkspaceMutationPayloads)
+						.set({ expected_hash: "f".repeat(64) });
+
+					return {
+						exit: yield* store.Consume(resume_input(input)).pipe(Effect.exit),
+						row: (yield* database.client.select().from(WorkspaceMutationPayloads))[0],
+					};
+				}),
+			);
+			const serialized = JSON.stringify(result.exit);
+
+			expect_failure_tag(result.exit, "WorkspaceMutationPayloadStoreUnavailable");
+			expect(serialized).not.toContain(new TextDecoder().decode(expected));
+			expect(serialized).not.toContain(new TextDecoder().decode(replacement));
+			expect(result.row).toMatchObject({ state: "available" });
+		} finally {
+			await runtime.dispose();
+		}
+	});
 	it.each(["claimed", "applied"] as const)(
 		"resumes exact replace bytes after restart while the operation is %s",
 		async (lifecycle) => {

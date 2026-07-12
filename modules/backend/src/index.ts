@@ -201,6 +201,7 @@ export {
 	WorkspaceSnapshotStoreLive,
 	WorkspaceSnapshotStoreUnavailable,
 	type WorkspaceSnapshotConsumeInput,
+	type WorkspaceSnapshotDiscardRejectedReplaceInput,
 	type WorkspaceSnapshotExistsInput,
 	type WorkspaceSnapshotReadInput,
 	type WorkspaceSnapshotResumeInput,

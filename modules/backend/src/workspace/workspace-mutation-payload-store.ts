@@ -1,5 +1,5 @@
 import { Context, Crypto, Data, Effect, Encoding, Layer, Schema } from "effect";
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, or, sql } from "drizzle-orm";
 
 import {
 	ContentIdentity,
@@ -235,7 +235,8 @@ export const WorkspaceMutationPayloadStoreLive = Layer.effect(
 					row.thread_id !== input.thread_id ||
 					(row.lifecycle !== "claimed" &&
 						row.lifecycle !== "applied" &&
-						row.lifecycle !== "committed")
+						row.lifecycle !== "committed" &&
+						!(operation === "consume" && row.lifecycle === "rejected"))
 				)
 					return yield* Effect.fail(make_unavailable(operation, input.message_id));
 
@@ -252,6 +253,23 @@ export const WorkspaceMutationPayloadStoreLive = Layer.effect(
 						operation,
 						input.message_id,
 					);
+					if (row.lifecycle === "rejected") {
+						const [projection] = yield* transaction
+							.select({ change_id: WorkspaceChanges.change_id })
+							.from(WorkspaceChanges)
+							.where(
+								or(
+									eq(WorkspaceChanges.change_id, row.change_id),
+									eq(WorkspaceChanges.source_command_id, row.message_id),
+								),
+							)
+							.limit(1);
+
+						if (projection)
+							return yield* Effect.fail(
+								make_unavailable(operation, input.message_id),
+							);
+					}
 				} else {
 					const [change] = yield* transaction
 						.select({
@@ -274,12 +292,17 @@ export const WorkspaceMutationPayloadStoreLive = Layer.effect(
 						row.lifecycle === "committed" &&
 						change?.review_state === "rolled_back" &&
 						change.rollback_state === "consumed";
+					const is_rejected_rollback =
+						row.lifecycle === "rejected" &&
+						(change?.review_state === "needs_review" ||
+							change?.review_state === "reviewed") &&
+						change.rollback_state === "available";
 
 					if (
 						!change ||
 						change.thread_id !== input.thread_id ||
 						change.source_command_id === input.message_id ||
-						(!is_available_rollback && !is_consumed_rollback)
+						(!is_available_rollback && !is_consumed_rollback && !is_rejected_rollback)
 					)
 						return yield* Effect.fail(make_unavailable(operation, input.message_id));
 					const before_identity = yield* DecodeIdentity(
@@ -347,7 +370,7 @@ export const WorkspaceMutationPayloadStoreLive = Layer.effect(
 		const ReadAvailable = (
 			transaction: typeof database.client,
 			input: WorkspaceMutationPayloadResumeInput,
-			operation: "resume" | "stage",
+			operation: "consume" | "resume" | "stage",
 		) =>
 			Effect.gen(function* () {
 				const [row] = yield* transaction
@@ -451,11 +474,14 @@ export const WorkspaceMutationPayloadStoreLive = Layer.effect(
 								.from(WorkspaceMutationPayloads)
 								.where(eq(WorkspaceMutationPayloads.message_id, decoded.message_id))
 								.limit(1);
-							if (canonical.lifecycle !== "claimed" && !preexisting)
+							if (
+								canonical.lifecycle !== "claimed" &&
+								canonical.lifecycle !== "applied"
+							)
 								return yield* Effect.fail(
 									make_unavailable("stage", decoded.message_id),
 								);
-							if (canonical.lifecycle === "committed")
+							if (canonical.lifecycle === "applied" && !preexisting)
 								return yield* Effect.fail(
 									make_unavailable("stage", decoded.message_id),
 								);
@@ -525,7 +551,10 @@ export const WorkspaceMutationPayloadStoreLive = Layer.effect(
 								decoded,
 								"resume",
 							);
-							if (canonical.lifecycle === "committed")
+							if (
+								canonical.lifecycle === "committed" ||
+								canonical.lifecycle === "rejected"
+							)
 								return yield* Effect.fail(
 									make_unavailable("resume", decoded.message_id),
 								);
@@ -564,13 +593,27 @@ export const WorkspaceMutationPayloadStoreLive = Layer.effect(
 												"consume",
 											);
 
-											if (canonical.lifecycle !== "committed")
+											if (
+												canonical.lifecycle !== "committed" &&
+												canonical.lifecycle !== "rejected"
+											)
 												return yield* Effect.fail(
 													make_unavailable("consume", decoded.message_id),
 												);
 
 											const [stored] = yield* transaction
 												.select({
+													expected: WorkspaceMutationPayloads.expected,
+													expected_byte_count:
+														WorkspaceMutationPayloads.expected_byte_count,
+													expected_hash:
+														WorkspaceMutationPayloads.expected_hash,
+													replacement:
+														WorkspaceMutationPayloads.replacement,
+													replacement_byte_count:
+														WorkspaceMutationPayloads.replacement_byte_count,
+													replacement_hash:
+														WorkspaceMutationPayloads.replacement_hash,
 													state: WorkspaceMutationPayloads.state,
 													thread_id: WorkspaceMutationPayloads.thread_id,
 												})
@@ -587,7 +630,26 @@ export const WorkspaceMutationPayloadStoreLive = Layer.effect(
 												return yield* Effect.fail(
 													make_unavailable("consume", decoded.message_id),
 												);
-											if (stored.state === "consumed") return;
+											if (stored.state === "consumed") {
+												if (
+													stored.expected !== null ||
+													stored.expected_byte_count !== null ||
+													stored.expected_hash !== null ||
+													stored.replacement !== null ||
+													stored.replacement_byte_count !== null ||
+													stored.replacement_hash !== null
+												)
+													return yield* Effect.fail(
+														make_unavailable(
+															"consume",
+															decoded.message_id,
+														),
+													);
+
+												return;
+											}
+
+											yield* ReadAvailable(transaction, decoded, "consume");
 
 											const consumed = yield* transaction
 												.update(WorkspaceMutationPayloads)

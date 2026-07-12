@@ -263,6 +263,45 @@ function CommitReplace(
 	});
 }
 
+function RejectReplace(change_id: string) {
+	return Effect.gen(function* () {
+		const database = yield* Database;
+
+		yield* database.client.run(
+			`UPDATE workspace_change_operations SET lifecycle = 'rejected' WHERE message_id = '${replace_message_id(change_id)}'`,
+		);
+	});
+}
+
+function SeedChangeProjection(options: {
+	readonly before: Uint8Array;
+	readonly change_id: string;
+	readonly source_command_id: string;
+	readonly thread_id: string;
+}) {
+	return Effect.gen(function* () {
+		const database = yield* Database;
+		const now = "2026-07-11T20:00:01.000Z";
+
+		yield* database.client.insert(WorkspaceChanges).values({
+			after_identity_json: JSON.stringify(after_identity(options.change_id)),
+			agent_id: `agent_${options.change_id}`,
+			before_identity_json: JSON.stringify(identity(options.before)),
+			change_id: options.change_id,
+			created_at: now,
+			path: `src/${options.change_id}.ts`,
+			review_state: "needs_review",
+			rollback_state: "available",
+			run_id: `run_${options.change_id}`,
+			source_command_id: options.source_command_id,
+			thread_id: options.thread_id,
+			updated_at: now,
+			version: 1,
+			workspace_id: `workspace_${options.thread_id}`,
+		});
+	});
+}
+
 function SeedRollbackOperation(
 	change_id: string,
 	thread_id: string,
@@ -325,6 +364,23 @@ function consume_input(change_id: string, thread_id: string, variant = "canonica
 	};
 }
 
+function discard_rejected_replace_input(change_id: string, thread_id: string, content: Uint8Array) {
+	return {
+		change_id,
+		expected_identity: identity(content),
+		replace_message_id: replace_message_id(change_id),
+		thread_id,
+	};
+}
+
+function expect_snapshot_unavailable_without_bytes(exit: unknown, content: Uint8Array) {
+	const serialized = JSON.stringify(exit);
+	const source = new TextDecoder().decode(content);
+
+	expect(serialized).toContain("WorkspaceSnapshotStoreUnavailable");
+	expect(serialized).not.toContain(source);
+}
+
 function within_timeout<A>(promise: Promise<A>) {
 	return Promise.race([
 		promise,
@@ -351,6 +407,429 @@ afterEach(async () => {
 });
 
 describe("WorkspaceSnapshotStore", () => {
+	it("accepts repeated rejected cleanup when Changed happened before snapshot staging", async () => {
+		const runtime = make_runtime(await make_database_path());
+		const change_id = "change_rejected_snapshot_absent";
+		const thread_id = "thread_rejected_snapshot_absent";
+		const content = new TextEncoder().encode("absent rejected snapshot before");
+
+		try {
+			const rows = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const snapshots = yield* WorkspaceSnapshotStore;
+					const input = discard_rejected_replace_input(change_id, thread_id, content);
+
+					yield* SeedThread(thread_id);
+					yield* SeedReplaceClaim(change_id, thread_id, content);
+					yield* database.client.run(
+						`UPDATE workspace_change_operations SET lifecycle = 'rejected' WHERE message_id = '${replace_message_id(change_id)}'`,
+					);
+					yield* snapshots.DiscardRejectedReplace(input);
+					yield* snapshots.DiscardRejectedReplace(input);
+
+					return yield* database.client.select().from(WorkspaceChangeSnapshots);
+				}),
+			);
+
+			expect(rows).toEqual([]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("discards a rejected replace snapshot across restart and never resumes it", async () => {
+		const database_path = await make_database_path();
+		const change_id = "change_rejected_snapshot_restart";
+		const thread_id = "thread_rejected_snapshot_restart";
+		const content = new TextEncoder().encode("rejected snapshot before");
+		const first_runtime = make_runtime(database_path);
+
+		try {
+			await first_runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const snapshots = yield* WorkspaceSnapshotStore;
+
+					yield* SeedThread(thread_id);
+					yield* SeedReplaceClaim(change_id, thread_id, content);
+					yield* snapshots.Stage(stage_input(change_id, thread_id, content));
+					yield* database.client.run(
+						`UPDATE workspace_change_operations SET lifecycle = 'rejected' WHERE message_id = '${replace_message_id(change_id)}'`,
+					);
+					yield* snapshots.DiscardRejectedReplace(
+						discard_rejected_replace_input(change_id, thread_id, content),
+					);
+				}),
+			);
+		} finally {
+			await first_runtime.dispose();
+		}
+
+		const second_runtime = make_runtime(database_path);
+
+		try {
+			const result = await second_runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const snapshots = yield* WorkspaceSnapshotStore;
+					const input = discard_rejected_replace_input(change_id, thread_id, content);
+
+					yield* snapshots.DiscardRejectedReplace(input);
+
+					return {
+						resume: yield* snapshots
+							.Resume(read_input(change_id, thread_id, content))
+							.pipe(Effect.exit),
+						row: (yield* database.client.select().from(WorkspaceChangeSnapshots))[0],
+						stage: yield* snapshots
+							.Stage(stage_input(change_id, thread_id, content))
+							.pipe(Effect.exit),
+					};
+				}),
+			);
+
+			expect(result.row).toMatchObject({
+				state: "consumed",
+				byte_count: null,
+				content: null,
+				content_hash: null,
+			});
+			expect(JSON.stringify(result.resume)).toContain("WorkspaceSnapshotStoreUnavailable");
+			expect(JSON.stringify(result.stage)).toContain("WorkspaceSnapshotStoreUnavailable");
+		} finally {
+			await second_runtime.dispose();
+		}
+	});
+
+	it("converges two runtimes that discard the same rejected replace snapshot", async () => {
+		const database_path = await make_database_path();
+		const change_id = "change_rejected_snapshot_concurrent";
+		const thread_id = "thread_rejected_snapshot_concurrent";
+		const content = new TextEncoder().encode("concurrent rejected snapshot before");
+		const first_runtime = make_runtime(database_path);
+		const second_runtime = make_runtime(database_path);
+
+		try {
+			await first_runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const snapshots = yield* WorkspaceSnapshotStore;
+
+					yield* SeedThread(thread_id);
+					yield* SeedReplaceClaim(change_id, thread_id, content);
+					yield* snapshots.Stage(stage_input(change_id, thread_id, content));
+					yield* database.client.run(
+						`UPDATE workspace_change_operations SET lifecycle = 'rejected' WHERE message_id = '${replace_message_id(change_id)}'`,
+					);
+				}),
+			);
+			const input = discard_rejected_replace_input(change_id, thread_id, content);
+
+			await Promise.all(
+				[first_runtime, second_runtime].map((runtime) =>
+					runtime.runPromise(
+						Effect.service(WorkspaceSnapshotStore).pipe(
+							Effect.flatMap((snapshots) => snapshots.DiscardRejectedReplace(input)),
+						),
+					),
+				),
+			);
+			const [row] = await first_runtime.runPromise(
+				Effect.service(Database).pipe(
+					Effect.flatMap((database) =>
+						database.client.select().from(WorkspaceChangeSnapshots),
+					),
+				),
+			);
+
+			expect(row).toMatchObject({ state: "consumed", content: null });
+		} finally {
+			await Promise.all([first_runtime.dispose(), second_runtime.dispose()]);
+		}
+	});
+
+	it.each(["message", "thread", "expected_identity"] as const)(
+		"rejects an absent snapshot with the wrong %s without exposing bytes",
+		async (variant) => {
+			const runtime = make_runtime(await make_database_path());
+			const change_id = `change_rejected_snapshot_wrong_${variant}`;
+			const thread_id = `thread_rejected_snapshot_wrong_${variant}`;
+			const content = new TextEncoder().encode(`private rejected snapshot wrong ${variant}`);
+
+			try {
+				const result = await runtime.runPromise(
+					Effect.gen(function* () {
+						const database = yield* Database;
+						const snapshots = yield* WorkspaceSnapshotStore;
+						const canonical = discard_rejected_replace_input(
+							change_id,
+							thread_id,
+							content,
+						);
+						const input =
+							variant === "message"
+								? {
+										...canonical,
+										replace_message_id: `wrong_${canonical.replace_message_id}`,
+									}
+								: variant === "thread"
+									? { ...canonical, thread_id: `wrong_${thread_id}` }
+									: {
+											...canonical,
+											expected_identity: identity(
+												new TextEncoder().encode("different identity"),
+											),
+										};
+
+						yield* SeedThread(thread_id);
+						yield* SeedReplaceClaim(change_id, thread_id, content);
+						yield* RejectReplace(change_id);
+
+						return {
+							exit: yield* snapshots.DiscardRejectedReplace(input).pipe(Effect.exit),
+							rows: yield* database.client.select().from(WorkspaceChangeSnapshots),
+						};
+					}),
+				);
+
+				expect_snapshot_unavailable_without_bytes(result.exit, content);
+				expect(result.rows).toEqual([]);
+			} finally {
+				await runtime.dispose();
+			}
+		},
+	);
+
+	it.each(["claimed", "applied", "committed"] as const)(
+		"rejects an absent snapshot while the replace lifecycle is %s",
+		async (lifecycle) => {
+			const runtime = make_runtime(await make_database_path());
+			const change_id = `change_rejected_snapshot_lifecycle_${lifecycle}`;
+			const thread_id = `thread_rejected_snapshot_lifecycle_${lifecycle}`;
+			const content = new TextEncoder().encode(`private lifecycle snapshot ${lifecycle}`);
+
+			try {
+				const result = await runtime.runPromise(
+					Effect.gen(function* () {
+						const database = yield* Database;
+						const snapshots = yield* WorkspaceSnapshotStore;
+
+						yield* SeedThread(thread_id);
+						yield* SeedReplaceClaim(change_id, thread_id, content);
+						yield* database.client.run(
+							`UPDATE workspace_change_operations SET lifecycle = '${lifecycle}' WHERE message_id = '${replace_message_id(change_id)}'`,
+						);
+
+						return {
+							exit: yield* snapshots
+								.DiscardRejectedReplace(
+									discard_rejected_replace_input(change_id, thread_id, content),
+								)
+								.pipe(Effect.exit),
+							rows: yield* database.client.select().from(WorkspaceChangeSnapshots),
+						};
+					}),
+				);
+
+				expect_snapshot_unavailable_without_bytes(result.exit, content);
+				expect(result.rows).toEqual([]);
+			} finally {
+				await runtime.dispose();
+			}
+		},
+	);
+
+	it.each(["review", "rollback"] as const)(
+		"rejects an absent snapshot for a rejected %s operation",
+		async (action) => {
+			const runtime = make_runtime(await make_database_path());
+			const change_id = `change_rejected_snapshot_action_${action}`;
+			const thread_id = `thread_rejected_snapshot_action_${action}`;
+			const content = new TextEncoder().encode(`private action snapshot ${action}`);
+
+			try {
+				const result = await runtime.runPromise(
+					Effect.gen(function* () {
+						const database = yield* Database;
+						const snapshots = yield* WorkspaceSnapshotStore;
+
+						yield* SeedThread(thread_id);
+						yield* SeedReplaceClaim(change_id, thread_id, content);
+						yield* database.client.run(
+							`UPDATE workspace_change_operations SET action = '${action}', lifecycle = 'rejected' WHERE message_id = '${replace_message_id(change_id)}'`,
+						);
+
+						return yield* snapshots
+							.DiscardRejectedReplace(
+								discard_rejected_replace_input(change_id, thread_id, content),
+							)
+							.pipe(Effect.exit);
+					}),
+				);
+
+				expect_snapshot_unavailable_without_bytes(result, content);
+			} finally {
+				await runtime.dispose();
+			}
+		},
+	);
+
+	it.each(["change_id", "source_command_id"] as const)(
+		"rejects an absent snapshot with a forged projection matched by %s",
+		async (alias) => {
+			const runtime = make_runtime(await make_database_path());
+			const change_id = `change_rejected_snapshot_projection_${alias}`;
+			const thread_id = `thread_rejected_snapshot_projection_${alias}`;
+			const content = new TextEncoder().encode(`private projection snapshot ${alias}`);
+
+			try {
+				const result = await runtime.runPromise(
+					Effect.gen(function* () {
+						const snapshots = yield* WorkspaceSnapshotStore;
+
+						yield* SeedThread(thread_id);
+						yield* SeedReplaceClaim(change_id, thread_id, content);
+						yield* RejectReplace(change_id);
+						yield* SeedChangeProjection({
+							before: content,
+							change_id: alias === "change_id" ? change_id : `alias_${change_id}`,
+							source_command_id:
+								alias === "source_command_id"
+									? replace_message_id(change_id)
+									: `forged_source_${change_id}`,
+							thread_id,
+						});
+
+						return yield* snapshots
+							.DiscardRejectedReplace(
+								discard_rejected_replace_input(change_id, thread_id, content),
+							)
+							.pipe(Effect.exit);
+					}),
+				);
+
+				expect_snapshot_unavailable_without_bytes(result, content);
+			} finally {
+				await runtime.dispose();
+			}
+		},
+	);
+
+	it.each(["content", "hash", "count"] as const)(
+		"rejects rejected cleanup when available snapshot %s is corrupt",
+		async (corruption) => {
+			const runtime = make_runtime(await make_database_path());
+			const change_id = `change_rejected_snapshot_corrupt_${corruption}`;
+			const thread_id = `thread_rejected_snapshot_corrupt_${corruption}`;
+			const content = new TextEncoder().encode(`private corrupt snapshot ${corruption}`);
+
+			try {
+				const result = await runtime.runPromise(
+					Effect.gen(function* () {
+						const database = yield* Database;
+						const snapshots = yield* WorkspaceSnapshotStore;
+
+						yield* SeedThread(thread_id);
+						yield* SeedReplaceClaim(change_id, thread_id, content);
+						yield* snapshots.Stage(stage_input(change_id, thread_id, content));
+						yield* RejectReplace(change_id);
+						yield* database.client.run("PRAGMA ignore_check_constraints = ON");
+
+						if (corruption === "content") {
+							yield* database.client
+								.update(WorkspaceChangeSnapshots)
+								.set({ content: Buffer.from("corrupt snapshot") });
+						} else if (corruption === "hash") {
+							yield* database.client
+								.update(WorkspaceChangeSnapshots)
+								.set({ content_hash: "f".repeat(64) });
+						} else {
+							yield* database.client
+								.update(WorkspaceChangeSnapshots)
+								.set({ byte_count: content.byteLength + 1 });
+						}
+
+						yield* database.client.run("PRAGMA ignore_check_constraints = OFF");
+						const exit = yield* snapshots
+							.DiscardRejectedReplace(
+								discard_rejected_replace_input(change_id, thread_id, content),
+							)
+							.pipe(Effect.exit);
+
+						return {
+							exit,
+							row: (yield* database.client
+								.select()
+								.from(WorkspaceChangeSnapshots))[0],
+						};
+					}),
+				);
+
+				expect_snapshot_unavailable_without_bytes(result.exit, content);
+				expect(result.row).toMatchObject({ state: "available" });
+			} finally {
+				await runtime.dispose();
+			}
+		},
+	);
+
+	it.each(["claim", "tombstone"] as const)(
+		"rejects rejected cleanup after a thread erasure %s",
+		async (erasure) => {
+			const runtime = make_runtime(await make_database_path());
+			const change_id = `change_rejected_snapshot_erasure_${erasure}`;
+			const thread_id = `thread_rejected_snapshot_erasure_${erasure}`;
+			const content = new TextEncoder().encode(`private erasure snapshot ${erasure}`);
+
+			try {
+				const result = await runtime.runPromise(
+					Effect.gen(function* () {
+						const database = yield* Database;
+						const snapshots = yield* WorkspaceSnapshotStore;
+
+						yield* SeedThread(thread_id);
+						yield* SeedReplaceClaim(change_id, thread_id, content);
+						yield* snapshots.Stage(stage_input(change_id, thread_id, content));
+						yield* RejectReplace(change_id);
+
+						if (erasure === "claim") {
+							yield* database.client.insert(ThreadErasureClaims).values({
+								claimed_at: "2026-07-11T20:00:01.000Z",
+								thread_id,
+							});
+						} else {
+							yield* database.client.run(
+								`DELETE FROM threads WHERE thread_id = '${thread_id}'`,
+							);
+							yield* database.client.insert(ThreadTombstones).values({
+								deleted_at: "2026-07-11T20:00:02.000Z",
+								thread_id,
+							});
+						}
+
+						const exit = yield* snapshots
+							.DiscardRejectedReplace(
+								discard_rejected_replace_input(change_id, thread_id, content),
+							)
+							.pipe(Effect.exit);
+
+						return {
+							exit,
+							row: (yield* database.client
+								.select()
+								.from(WorkspaceChangeSnapshots))[0],
+						};
+					}),
+				);
+
+				expect_snapshot_unavailable_without_bytes(result.exit, content);
+				expect(result.row).toMatchObject({ state: "available" });
+			} finally {
+				await runtime.dispose();
+			}
+		},
+	);
 	it("stages exact bytes, reads a defensive copy, retries, and survives restart", async () => {
 		const database_path = await make_database_path();
 		const thread_id = "thread_snapshot_restart";
@@ -1304,6 +1783,9 @@ describe("WorkspaceSnapshotStore", () => {
 
 					return {
 						consume: yield* Effect.exit(snapshots.Consume(null as never)),
+						discard_rejected_replace: yield* Effect.exit(
+							snapshots.DiscardRejectedReplace(null as never),
+						),
 						exists: yield* Effect.exit(snapshots.Exists(null as never)),
 						read: yield* Effect.exit(snapshots.Read(null as never)),
 						resume: yield* Effect.exit(snapshots.Resume(null as never)),
