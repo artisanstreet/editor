@@ -105,6 +105,16 @@ try {
 	if ($LASTEXITCODE -ne 0) {
 		throw "The native bounded file store read smoke test failed"
 	}
+
+	$replace_smoke_failed = $false
+
+	if ($env:ARTISAN_RUN_NATIVE_REPLACE_SMOKE -eq "1") {
+		& node (Join-Path $repository_root ".tests\bounded-file-store-native\native-replace-smoke.cjs") $module_root
+
+		if ($LASTEXITCODE -ne 0) {
+			$replace_smoke_failed = $true
+		}
+	}
 } finally {
 	Remove-Item -LiteralPath $loader_binding -Force
 }
@@ -113,15 +123,28 @@ $type_smoke_source = @'
 import {
 	getNativeBuildDescriptor,
 	NativeBoundedRegularFileStore,
+	type NativeReplaceRegularFileOptions,
 	type NativeBuildDescriptor,
 } from "../../modules/bounded-file-store-native";
 
 const descriptor: NativeBuildDescriptor = getNativeBuildDescriptor();
-const store = new NativeBoundedRegularFileStore("C:\\");
+const store = new NativeBoundedRegularFileStore("C:\\", new Uint8Array(32));
 const bytes: Promise<Uint8Array> = store.readRegularFile("file.txt", 1024);
+const replace_options: NativeReplaceRegularFileOptions = {
+	expected: new Uint8Array([1]),
+	replacement: new Uint8Array([2]),
+	maximumBytes: 1024,
+	operationId: "typed-operation",
+	path: "file.txt",
+};
+const replacement: Promise<"Replaced" | "AlreadyReplaced" | "Changed"> =
+	store.replaceRegularFile(replace_options);
+const finalization: Promise<void> = store.finalizeRegularFileReplacement(replace_options);
 
 void descriptor;
 void bytes;
+void replacement;
+void finalization;
 store.close();
 '@
 
@@ -135,6 +158,10 @@ try {
 	}
 } finally {
 	Remove-Item -LiteralPath $type_smoke -Force
+}
+
+if ($replace_smoke_failed) {
+	throw "The native bounded file store replacement smoke test failed"
 }
 
 [PSCustomObject]@{

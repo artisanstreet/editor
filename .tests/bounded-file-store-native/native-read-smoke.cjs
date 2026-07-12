@@ -6,6 +6,7 @@ const path = require("node:path");
 
 const module_root = process.argv[2];
 const { NativeBoundedRegularFileStore } = require(module_root);
+const receipt_key = new Uint8Array(32).fill(0x41);
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "artisan-native-read-"));
 const outside = fs.mkdtempSync(path.join(os.tmpdir(), "artisan-native-outside-"));
 
@@ -53,7 +54,7 @@ async function main() {
 		fs.writeFileSync(path.join(outside, "outside.bin"), "outside");
 		fs.symlinkSync(outside, path.join(root, "junction"), "junction");
 
-		const store = new NativeBoundedRegularFileStore(root);
+		const store = new NativeBoundedRegularFileStore(root, receipt_key);
 		assert.deepEqual(await store.readRegularFile("bytes.bin", 3), Buffer.from([0xff, 0, 1]));
 		assert.deepEqual(await store.readRegularFile("empty.bin", 1), Buffer.alloc(0));
 		assert.deepEqual(await store.readRegularFile("nested/bytes.bin", 2), Buffer.from([2, 3]));
@@ -120,19 +121,25 @@ async function main() {
 		assert.equal((await in_flight).length, 1024 * 1024 * 16);
 		await rejects_opaque(() => store.readRegularFile("bytes.bin", 3));
 
-		throws_opaque(() => new NativeBoundedRegularFileStore(""));
-		throws_opaque(() => new NativeBoundedRegularFileStore("."));
+		for (const key of [new Uint8Array(0), new Uint8Array(31), new Uint8Array(33)]) {
+			throws_opaque(() => new NativeBoundedRegularFileStore(root, key));
+		}
+		throws_opaque(() => new NativeBoundedRegularFileStore("", receipt_key));
+		throws_opaque(() => new NativeBoundedRegularFileStore(".", receipt_key));
 		throws_opaque(
-			() => new NativeBoundedRegularFileStore("\\\\server\\share"),
+			() => new NativeBoundedRegularFileStore("\\\\server\\share", receipt_key),
 			["server", "share"],
 		);
-		throws_opaque(() => new NativeBoundedRegularFileStore(`${root}\0suffix`), ["suffix"]);
 		throws_opaque(
-			() => new NativeBoundedRegularFileStore(path.join(root, "bytes.bin")),
+			() => new NativeBoundedRegularFileStore(`${root}\0suffix`, receipt_key),
+			["suffix"],
+		);
+		throws_opaque(
+			() => new NativeBoundedRegularFileStore(path.join(root, "bytes.bin"), receipt_key),
 			["bytes.bin"],
 		);
 		throws_opaque(
-			() => new NativeBoundedRegularFileStore(path.join(root, "junction")),
+			() => new NativeBoundedRegularFileStore(path.join(root, "junction"), receipt_key),
 			["junction"],
 		);
 	} finally {
