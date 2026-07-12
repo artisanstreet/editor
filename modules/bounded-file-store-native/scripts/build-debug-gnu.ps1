@@ -1,6 +1,10 @@
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+if ($env:ARTISAN_RUN_NATIVE_ADDON_SMOKE -ne "1") {
+	throw "Set ARTISAN_RUN_NATIVE_ADDON_SMOKE=1 only in an approved native verification environment"
+}
+
 $module_root = Split-Path -Parent $PSScriptRoot
 $repository_root = Resolve-Path (Join-Path $module_root "..\..")
 $output = Join-Path $repository_root ".dist\bounded-file-store-native"
@@ -100,6 +104,7 @@ try {
 		throw "The generated-loader GNU smoke descriptor was unexpected: $($loader_descriptor | ConvertTo-Json -Compress)"
 	}
 
+	$env:ARTISAN_RUN_NATIVE_READ_SMOKE = "1"
 	& node (Join-Path $repository_root ".tests\bounded-file-store-native\native-read-smoke.cjs") $module_root
 
 	if ($LASTEXITCODE -ne 0) {
@@ -128,6 +133,7 @@ import {
 } from "../../modules/bounded-file-store-native";
 
 const descriptor: NativeBuildDescriptor = getNativeBuildDescriptor();
+const test_hooks_enabled: boolean = descriptor.testHooksEnabled;
 const store = new NativeBoundedRegularFileStore("C:\\", new Uint8Array(32));
 const bytes: Promise<Uint8Array> = store.readRegularFile("file.txt", 1024);
 const replace_options: NativeReplaceRegularFileOptions = {
@@ -142,6 +148,7 @@ const replacement: Promise<"Replaced" | "AlreadyReplaced" | "Changed"> =
 const finalization: Promise<void> = store.finalizeRegularFileReplacement(replace_options);
 
 void descriptor;
+void test_hooks_enabled;
 void bytes;
 void replacement;
 void finalization;

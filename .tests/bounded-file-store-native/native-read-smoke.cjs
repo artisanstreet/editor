@@ -4,7 +4,11 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 
-const module_root = process.argv[2];
+if (process.platform !== "win32" || process.env.ARTISAN_RUN_NATIVE_READ_SMOKE !== "1") {
+	process.exit(0);
+}
+
+const module_root = path.resolve(process.argv[2]);
 const { NativeBoundedRegularFileStore } = require(module_root);
 const receipt_key = new Uint8Array(32).fill(0x41);
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "artisan-native-read-"));

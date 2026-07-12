@@ -7,6 +7,7 @@ use std::{
 };
 
 mod receipt;
+mod test_hook;
 
 use napi::Result;
 use windows_sys::{
@@ -323,6 +324,9 @@ pub(crate) fn replace_regular_file(
     root: &RootHandle,
     options: &ReplaceRegularFileOptions,
 ) -> Result<ReplaceOutcome> {
+    test_hook::wait_for_replace_race()
+        .map_err(|_| native_error("native test rendezvous failed"))?;
+
     let _mutation = root
         .mutation
         .lock()
@@ -478,6 +482,8 @@ fn replace_without_receipt(
         NameMutation::Collision => return Err(Transient),
     }
 
+    test_hook::crash_at("backup-renamed");
+
     write_marker(
         root,
         &target,
@@ -489,6 +495,7 @@ fn replace_without_receipt(
 
     flush_parent(parent_handle(&target.opened, root));
     refresh_snapshot(&mut target, options.maximum_bytes, true)?;
+    test_hook::crash_at("backup-marked");
 
     if target.data.bytes != options.expected
         || target.data.metadata.links != 1
@@ -607,6 +614,8 @@ fn replace_stage_only(
         NameMutation::Collision => return Err(Transient),
     }
 
+    test_hook::crash_at("backup-renamed");
+
     let mut backup = target;
     write_marker(
         root,
@@ -618,6 +627,7 @@ fn replace_stage_only(
     )?;
     flush_parent(parent_handle(&backup.opened, root));
     refresh_snapshot(&mut backup, options.maximum_bytes, true)?;
+    test_hook::crash_at("backup-marked");
     let backup_marker = read_valid_marker(root, &backup, options)?.ok_or(Failed)?;
 
     if !valid_unpublished_receipt(&stage, &stage_marker, &backup, &backup_marker, options) {
@@ -743,6 +753,8 @@ fn recover_backup_only(
                 backup_marker = read_valid_marker(root, &backup, options)?.ok_or(Failed)?;
             }
 
+            test_hook::crash_at("restoring-marked");
+
             if backup_marker.role != ReceiptRole::Restoring {
                 return Err(Failed);
             }
@@ -758,6 +770,7 @@ fn recover_backup_only(
 
             flush_parent(parent_handle(&backup.opened, root));
             refresh_snapshot(&mut backup, options.maximum_bytes, true)?;
+            test_hook::crash_at("target-restored");
 
             let restored = open_mutation_snapshot_optional(
                 root,
@@ -811,6 +824,7 @@ fn publish(
     )? {
         NameMutation::Applied => {
             flush_parent(parent_handle(&stage.opened, root));
+            test_hook::crash_at("target-published");
             verify_published(root, options, &mut stage, &mut backup)?;
 
             Ok(ReplaceOutcome::Replaced)
@@ -1150,6 +1164,8 @@ fn complete_finalization(
         return Err(Failed);
     }
 
+    test_hook::crash_at("finalizing-marked");
+
     if let Some((backup, backup_marker)) = backup.as_mut() {
         refresh_snapshot(backup, options.maximum_bytes, true)?;
         *backup_marker = read_valid_marker(root, backup, options)?.ok_or(Failed)?;
@@ -1167,6 +1183,8 @@ fn complete_finalization(
         delete_snapshot(root, backup)?;
     }
 
+    test_hook::crash_at("backup-deleted");
+
     refresh_snapshot(&mut stage, options.maximum_bytes, true)?;
     let final_marker = read_valid_marker(root, &stage, options)?.ok_or(Failed)?;
 
@@ -1183,6 +1201,7 @@ fn complete_finalization(
     let receipt_parent = duplicate_handle(parent_handle(&stage.opened, root))?;
 
     delete_snapshot(root, stage)?;
+    test_hook::crash_at("stage-deleted");
     clear_marker_and_flush(surviving_target.0, receipt_parent.0)
 }
 
@@ -1209,6 +1228,7 @@ fn finish_restoration(
 
     drop(target);
     delete_snapshot(root, backup)?;
+    test_hook::crash_at("restoration-backup-deleted");
     clear_marker_and_flush(surviving_target.0, receipt_parent.0)
 }
 
@@ -1423,6 +1443,8 @@ fn create_stage(
         parents,
     };
 
+    test_hook::crash_at("creating-stage");
+
     write_exact(opened.file.0, &options.replacement)?;
 
     if unsafe { FlushFileBuffers(opened.file.0) } == 0 {
@@ -1461,6 +1483,7 @@ fn create_stage(
         options,
     )?;
     refresh_snapshot(&mut stage, options.maximum_bytes, true)?;
+    test_hook::crash_at("stage-ready");
 
     let proof = stage.data.clone();
     drop(stage);

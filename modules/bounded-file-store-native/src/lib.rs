@@ -14,6 +14,7 @@ pub struct NativeBuildDescriptor {
     pub architecture: String,
     pub operating_system: String,
     pub target: String,
+    pub test_hooks_enabled: bool,
 }
 
 #[napi(object)]
@@ -31,6 +32,7 @@ pub fn get_native_build_descriptor() -> NativeBuildDescriptor {
         architecture: std::env::consts::ARCH.to_owned(),
         operating_system: std::env::consts::OS.to_owned(),
         target: env!("ARTISAN_NATIVE_TARGET").to_owned(),
+        test_hooks_enabled: cfg!(feature = "native-test-hooks"),
     }
 }
 

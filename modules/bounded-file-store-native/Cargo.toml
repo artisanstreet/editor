@@ -9,6 +9,9 @@ publish = false
 [lib]
 crate-type = ["cdylib"]
 
+[features]
+native-test-hooks = []
+
 [dependencies]
 napi = { version = "=3.10.3", features = ["napi9"] }
 napi-derive = "=3.5.9"

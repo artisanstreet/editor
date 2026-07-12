@@ -6,6 +6,7 @@
 	"types": "../../.dist/bounded-file-store-native/index.d.ts",
 	"scripts": {
 		"build": "napi build --platform --release --target x86_64-pc-windows-msvc --target-dir ../../.dist/bounded-file-store-native/cargo --output-dir ../../.dist/bounded-file-store-native --js index.cjs",
+		"build:test-hooks": "napi build --platform --release --target x86_64-pc-windows-msvc --features native-test-hooks --target-dir ../../.dist/bounded-file-store-native-test/cargo --output-dir ../../.dist/bounded-file-store-native-test --js index.cjs",
 		"build:debug:gnu": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-debug-gnu.ps1"
 	},
 	"devDependencies": {

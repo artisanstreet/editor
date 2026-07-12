@@ -23,6 +23,9 @@ Electron's ASAR archive.
 linker is unavailable. It requires Rust `1.97.0-x86_64-pc-windows-gnu` and the
 user-scoped `BrechtSanders.WinLibs.POSIX.UCRT` winget package.
 
+The script loads the generated addon and runs native smoke, so it also requires
+an explicit `ARTISAN_RUN_NATIVE_ADDON_SMOKE=1` safety opt-in.
+
 NAPI-RS resolves Node-API symbols dynamically from the running `node.exe`, but
 its GNU build scripts still require `LIBNODE_PATH` and `-lnode`. The local script
 therefore creates an ignored DLL/import-library placeholder that exports no
