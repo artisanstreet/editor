@@ -369,6 +369,7 @@ Implemented, independently reviewed, committed, and verified:
 - [x] Desktop collapse uses the 56px left rail and removes the right column; responsive breakpoints ignore desktop collapse state without exposing controls that appear to do nothing.
 - [x] The frontend production build, focused lint, diff check, and 16 preference/layout tests pass. Independent P0-P2 review and re-review are clean.
 - [x] Full `pnpm run validate` passed after the backend loop settled: formatting, lint, root TypeScript, the production SER/Svelte build, and 92 test files passed with 754 tests and 3 intentional skips.
+- [x] Shell-presentation checkpoint `14a7d9d` was pushed to `origin/codex/backend-services`; local `HEAD` and upstream both resolved to `14a7d9d9d83e98a82fc712a4419471b07423b659` immediately after the push.
 
 ## Frontend Typeface Prototype
 
