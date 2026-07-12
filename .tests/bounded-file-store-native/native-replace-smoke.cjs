@@ -162,12 +162,23 @@ function write_file(root, relative_path, value) {
 	return target;
 }
 
-async function race_results(operations) {
+async function race_results(race_name, attempt, operations) {
 	process.env.ARTISAN_NATIVE_TEST_REPLACE_BARRIER = randomUUID();
 
 	try {
 		const settled = await Promise.allSettled(
-			operations.map((operation) => Promise.resolve().then(operation)),
+			operations.map(({ name, run }) =>
+				Promise.resolve()
+					.then(run)
+					.catch((cause) => {
+						const detail = cause instanceof Error ? cause.stack : String(cause);
+
+						throw new Error(
+							`replacement race ${race_name} attempt ${attempt + 1} ${name} failed\n${detail}`,
+							{ cause },
+						);
+					}),
+			),
 		);
 		const failures = settled
 			.filter((result) => result.status === "rejected")
@@ -657,23 +668,29 @@ async function concurrent_replacement() {
 		const concurrent_new = Buffer.alloc(1024 * 1024, 8);
 		write_file(root, relative_path, concurrent_old);
 		try {
-			const results = await race_results([
-				() =>
-					run_race_operation(
-						root,
-						"same-operation",
-						relative_path,
-						concurrent_old,
-						concurrent_new,
-					),
-				() =>
-					run_race_operation(
-						root,
-						"same-operation",
-						relative_path,
-						concurrent_old,
-						concurrent_new,
-					),
+			const results = await race_results("same operation", attempt, [
+				{
+					name: "first caller",
+					run: () =>
+						run_race_operation(
+							root,
+							"same-operation",
+							relative_path,
+							concurrent_old,
+							concurrent_new,
+						),
+				},
+				{
+					name: "second caller",
+					run: () =>
+						run_race_operation(
+							root,
+							"same-operation",
+							relative_path,
+							concurrent_old,
+							concurrent_new,
+						),
+				},
 			]);
 			assert.deepEqual(results.slice().sort(), ["AlreadyReplaced", "Replaced"]);
 			assert.equal(artifact_names(root).length, 2);
@@ -684,26 +701,32 @@ async function concurrent_replacement() {
 		const competing_root = make_root();
 		const competing_target = write_file(competing_root, relative_path, concurrent_old);
 		try {
-			const results = await race_results([
-				() =>
-					run_race_operation(
-						competing_root,
-						"first-operation",
-						relative_path,
-						concurrent_old,
-						concurrent_new,
-					),
-				() =>
-					run_race_operation(
-						competing_root,
-						"second-operation",
-						relative_path,
-						concurrent_old,
-						concurrent_new,
-					),
+			const results = await race_results("competing operations", attempt, [
+				{
+					name: "first operation",
+					run: () =>
+						run_race_operation(
+							competing_root,
+							"first-operation",
+							relative_path,
+							concurrent_old,
+							concurrent_new,
+						),
+				},
+				{
+					name: "second operation",
+					run: () =>
+						run_race_operation(
+							competing_root,
+							"second-operation",
+							relative_path,
+							concurrent_old,
+							concurrent_new,
+						),
+				},
 			]);
 			assert.deepEqual(results.slice().sort(), ["Changed", "Replaced"]);
-			assert.deepEqual(fs.readFileSync(competing_target), Buffer.from("new"));
+			assert.deepEqual(fs.readFileSync(competing_target), concurrent_new);
 			assert.equal(artifact_names(competing_root).length, 2);
 		} finally {
 			cleanup_root(competing_root);
@@ -788,20 +811,19 @@ async function close_and_namespace() {
 }
 
 async function main() {
-	const phases = [
-		["basic replacement", basic_replacement],
-		["changed and validation", changed_and_validation],
-		["authenticated recovery", authenticated_recovery],
-		["corrupt artifacts and collision", corrupt_and_collision],
-		["authenticated tamper and replay", authenticated_tamper_and_replay],
-		["wrong key", wrong_key],
-		["Windows metadata", preserve_windows_metadata],
-		["close and namespace", close_and_namespace],
-	];
-
-	if (process.env.ARTISAN_RUN_NATIVE_RACE_SMOKE === "1") {
-		phases.push(["concurrent replacement", concurrent_replacement]);
-	}
+	const phases =
+		process.env.ARTISAN_RUN_NATIVE_RACE_SMOKE === "1"
+			? [["concurrent replacement", concurrent_replacement]]
+			: [
+					["basic replacement", basic_replacement],
+					["changed and validation", changed_and_validation],
+					["authenticated recovery", authenticated_recovery],
+					["corrupt artifacts and collision", corrupt_and_collision],
+					["authenticated tamper and replay", authenticated_tamper_and_replay],
+					["wrong key", wrong_key],
+					["Windows metadata", preserve_windows_metadata],
+					["close and namespace", close_and_namespace],
+				];
 
 	for (const [name, operation] of phases) {
 		let operation_error;
