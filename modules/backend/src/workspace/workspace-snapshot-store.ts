@@ -40,6 +40,7 @@ const ReadInput = Schema.Struct({
 	expected_identity: ContentIdentity,
 	thread_id: Identifier,
 });
+const ResumeInput = ReadInput;
 
 const ConsumeInput = Schema.Struct({
 	change_id: Identifier,
@@ -61,6 +62,9 @@ export type WorkspaceSnapshotStageInput = typeof StageInput.Type;
 /** Supplies the expected identity required to read one rollback snapshot. */
 export type WorkspaceSnapshotReadInput = typeof ReadInput.Type;
 
+/** Supplies the expected identity required to resume an uncommitted replacement. */
+export type WorkspaceSnapshotResumeInput = typeof ResumeInput.Type;
+
 /** Supplies the thread authority required to permanently consume one snapshot. */
 export type WorkspaceSnapshotConsumeInput = typeof ConsumeInput.Type;
 
@@ -72,7 +76,7 @@ export class WorkspaceSnapshotStoreInvalid extends Data.TaggedError(
 	"WorkspaceSnapshotStoreInvalid",
 )<{
 	readonly change_id?: string;
-	readonly operation: "consume" | "exists" | "read" | "stage";
+	readonly operation: "consume" | "exists" | "read" | "resume" | "stage";
 }> {}
 
 /** Reports a change ID already bound to a different available snapshot. */
@@ -88,7 +92,7 @@ export class WorkspaceSnapshotStoreUnavailable extends Data.TaggedError(
 	"WorkspaceSnapshotStoreUnavailable",
 )<{
 	readonly change_id?: string;
-	readonly operation: "consume" | "exists" | "read" | "stage";
+	readonly operation: "consume" | "exists" | "read" | "resume" | "stage";
 }> {}
 
 /** Represents failures returned by private workspace rollback snapshot operations. */
@@ -109,6 +113,9 @@ export class WorkspaceSnapshotStore extends Context.Service<
 		) => Effect.Effect<boolean, WorkspaceSnapshotStoreError>;
 		readonly Read: (
 			input: WorkspaceSnapshotReadInput,
+		) => Effect.Effect<Uint8Array, WorkspaceSnapshotStoreError>;
+		readonly Resume: (
+			input: WorkspaceSnapshotResumeInput,
 		) => Effect.Effect<Uint8Array, WorkspaceSnapshotStoreError>;
 		readonly Stage: (
 			input: WorkspaceSnapshotStageInput,
@@ -662,6 +669,74 @@ export const WorkspaceSnapshotStoreLive = Layer.effect(
 				.pipe(Effect.mapError((error) => conceal_error(error, "consume", change_id)));
 		};
 
+		const ReadAvailableSnapshot = (
+			transaction: typeof database.client,
+			input: WorkspaceSnapshotReadInput,
+			operation: "read" | "resume",
+		) =>
+			Effect.gen(function* () {
+				const [metadata_row] = yield* transaction
+					.select({
+						byte_count: WorkspaceChangeSnapshots.byte_count,
+						content_hash: WorkspaceChangeSnapshots.content_hash,
+						content_length: sql<
+							number | null
+						>`length(${WorkspaceChangeSnapshots.content})`,
+						state: WorkspaceChangeSnapshots.state,
+						thread_id: WorkspaceChangeSnapshots.thread_id,
+					})
+					.from(WorkspaceChangeSnapshots)
+					.where(eq(WorkspaceChangeSnapshots.change_id, input.change_id))
+					.limit(1);
+
+				if (
+					!metadata_row ||
+					metadata_row.state !== "available" ||
+					typeof metadata_row.byte_count !== "number" ||
+					typeof metadata_row.content_length !== "number" ||
+					typeof metadata_row.content_hash !== "string" ||
+					metadata_row.byte_count < 0 ||
+					metadata_row.byte_count > workspace_text_maximum_bytes ||
+					metadata_row.content_length !== metadata_row.byte_count ||
+					!ContentHash.test(metadata_row.content_hash) ||
+					!identities_match(
+						{
+							algorithm: "sha256",
+							byte_count: metadata_row.byte_count,
+							content_hash: metadata_row.content_hash,
+						},
+						input.expected_identity,
+					) ||
+					metadata_row.thread_id !== input.thread_id
+				) {
+					return yield* Effect.fail(make_unavailable(operation, input.change_id));
+				}
+
+				const [content_row] = yield* transaction
+					.select({ content: WorkspaceChangeSnapshots.content })
+					.from(WorkspaceChangeSnapshots)
+					.where(eq(WorkspaceChangeSnapshots.change_id, input.change_id))
+					.limit(1);
+
+				if (!content_row?.content) {
+					return yield* Effect.fail(make_unavailable(operation, input.change_id));
+				}
+
+				const content = new Uint8Array(content_row.content);
+				const actual_identity = yield* SnapshotIdentity(crypto, content).pipe(
+					Effect.mapError(() => make_unavailable(operation, input.change_id)),
+				);
+
+				if (
+					content.byteLength !== metadata_row.byte_count ||
+					!identities_match(actual_identity, input.expected_identity)
+				) {
+					return yield* Effect.fail(make_unavailable(operation, input.change_id));
+				}
+
+				return content;
+			});
+
 		const Read = (
 			input: WorkspaceSnapshotReadInput,
 		): Effect.Effect<Uint8Array, WorkspaceSnapshotStoreError> => {
@@ -689,91 +764,47 @@ export const WorkspaceSnapshotStoreLive = Layer.effect(
 									);
 								}
 
-								const [metadata_row] = yield* transaction
-									.select({
-										byte_count: WorkspaceChangeSnapshots.byte_count,
-										content_hash: WorkspaceChangeSnapshots.content_hash,
-										content_length: sql<
-											number | null
-										>`length(${WorkspaceChangeSnapshots.content})`,
-										state: WorkspaceChangeSnapshots.state,
-										thread_id: WorkspaceChangeSnapshots.thread_id,
-									})
-									.from(WorkspaceChangeSnapshots)
-									.where(
-										eq(WorkspaceChangeSnapshots.change_id, decoded.change_id),
-									)
-									.limit(1);
-
-								if (
-									!metadata_row ||
-									metadata_row.state !== "available" ||
-									typeof metadata_row.byte_count !== "number" ||
-									typeof metadata_row.content_length !== "number" ||
-									typeof metadata_row.content_hash !== "string" ||
-									metadata_row.byte_count < 0 ||
-									metadata_row.byte_count > workspace_text_maximum_bytes ||
-									metadata_row.content_length !== metadata_row.byte_count ||
-									!ContentHash.test(metadata_row.content_hash) ||
-									!identities_match(
-										{
-											algorithm: "sha256",
-											byte_count: metadata_row.byte_count,
-											content_hash: metadata_row.content_hash,
-										},
-										decoded.expected_identity,
-									)
-								) {
-									return yield* Effect.fail(
-										make_unavailable("read", decoded.change_id),
-									);
-								}
-
-								if (metadata_row.thread_id !== decoded.thread_id) {
-									return yield* Effect.fail(
-										make_unavailable("read", decoded.change_id),
-									);
-								}
-
-								const [content_row] = yield* transaction
-									.select({ content: WorkspaceChangeSnapshots.content })
-									.from(WorkspaceChangeSnapshots)
-									.where(
-										eq(WorkspaceChangeSnapshots.change_id, decoded.change_id),
-									)
-									.limit(1);
-
-								if (!content_row?.content) {
-									return yield* Effect.fail(
-										make_unavailable("read", decoded.change_id),
-									);
-								}
-
-								const content = new Uint8Array(content_row.content);
-								const actual_identity = yield* SnapshotIdentity(
-									crypto,
-									content,
-								).pipe(
-									Effect.mapError(() =>
-										make_unavailable("read", decoded.change_id),
-									),
-								);
-
-								if (
-									content.byteLength !== metadata_row.byte_count ||
-									!identities_match(actual_identity, decoded.expected_identity)
-								) {
-									return yield* Effect.fail(
-										make_unavailable("read", decoded.change_id),
-									);
-								}
-
-								return content;
+								return yield* ReadAvailableSnapshot(transaction, decoded, "read");
 							}),
 						),
 					),
 				)
 				.pipe(Effect.mapError((error) => conceal_error(error, "read", change_id)));
+		};
+
+		const Resume = (
+			input: WorkspaceSnapshotResumeInput,
+		): Effect.Effect<Uint8Array, WorkspaceSnapshotStoreError> => {
+			const change_id = change_id_from_unknown(input);
+
+			return Decode(ResumeInput, input, "resume")
+				.pipe(
+					Effect.flatMap((decoded) =>
+						database.client.transaction((transaction) =>
+							Effect.gen(function* () {
+								const canonical = yield* EnsureCanonicalReplace(
+									transaction,
+									decoded.thread_id,
+									decoded.change_id,
+									"resume",
+									decoded.expected_identity,
+								);
+
+								if (
+									canonical.lifecycle === "committed" ||
+									canonical.projection !== undefined
+								) {
+									return yield* Effect.fail(
+										make_unavailable("resume", decoded.change_id),
+									);
+								}
+
+								return yield* ReadAvailableSnapshot(transaction, decoded, "resume");
+							}),
+						),
+					),
+				)
+				.pipe(Effect.mapError((error) => conceal_error(error, "resume", change_id)));
 		};
 
 		const Exists = (
@@ -835,6 +866,6 @@ export const WorkspaceSnapshotStoreLive = Layer.effect(
 				.pipe(Effect.mapError((error) => conceal_error(error, "exists", change_id)));
 		};
 
-		return { Consume, Exists, Read, Stage };
+		return { Consume, Exists, Read, Resume, Stage };
 	}),
 );

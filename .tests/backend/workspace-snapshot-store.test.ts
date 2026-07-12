@@ -313,6 +313,10 @@ function stage_input(change_id: string, thread_id: string, content: Uint8Array) 
 	return { change_id, content, expected_identity: identity(content), thread_id };
 }
 
+function read_input(change_id: string, thread_id: string, content: Uint8Array) {
+	return { change_id, expected_identity: identity(content), thread_id };
+}
+
 function consume_input(change_id: string, thread_id: string, variant = "canonical") {
 	return {
 		change_id,
@@ -468,6 +472,92 @@ describe("WorkspaceSnapshotStore", () => {
 		}
 	});
 
+	it("resumes staged snapshots only while the canonical replace is uncommitted", async () => {
+		const runtime = make_runtime(await make_database_path());
+		const thread_id = "thread_snapshot_resume";
+		const other_thread_id = "thread_snapshot_resume_other";
+		const claimed_change_id = "change_snapshot_resume_claimed";
+		const applied_change_id = "change_snapshot_resume_applied";
+		const claimed_content = new TextEncoder().encode("claimed recovery bytes");
+		const applied_content = new TextEncoder().encode("applied recovery bytes");
+		const unrelated_identity = identity(new TextEncoder().encode("unrelated bytes"));
+
+		try {
+			await runtime.runPromise(SeedThread(thread_id));
+			await runtime.runPromise(SeedThread(other_thread_id));
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const snapshots = yield* WorkspaceSnapshotStore;
+					const claimed_stage = stage_input(
+						claimed_change_id,
+						thread_id,
+						claimed_content,
+					);
+					const claimed_read = read_input(claimed_change_id, thread_id, claimed_content);
+					const applied_stage = stage_input(
+						applied_change_id,
+						thread_id,
+						applied_content,
+					);
+					const applied_read = read_input(applied_change_id, thread_id, applied_content);
+
+					yield* SeedReplaceClaim(claimed_change_id, thread_id, claimed_content);
+					const absent = yield* Effect.exit(snapshots.Resume(claimed_read));
+					yield* snapshots.Stage(claimed_stage);
+
+					const claimed = yield* snapshots.Resume(claimed_read);
+					const read_before_commit = yield* Effect.exit(snapshots.Read(claimed_read));
+					const wrong_identity = yield* Effect.exit(
+						snapshots.Resume({
+							...claimed_read,
+							expected_identity: unrelated_identity,
+						}),
+					);
+					const wrong_thread = yield* Effect.exit(
+						snapshots.Resume({ ...claimed_read, thread_id: other_thread_id }),
+					);
+
+					yield* SeedReplaceClaim(
+						applied_change_id,
+						thread_id,
+						applied_content,
+						"applied",
+					);
+					yield* snapshots.Stage(applied_stage);
+					const applied = yield* snapshots.Resume(applied_read);
+
+					yield* CommitReplace(claimed_change_id, thread_id, claimed_content);
+
+					return {
+						absent,
+						applied,
+						claimed,
+						committed_read: yield* snapshots.Read(claimed_read),
+						committed_resume: yield* Effect.exit(snapshots.Resume(claimed_read)),
+						read_before_commit,
+						wrong_identity,
+						wrong_thread,
+					};
+				}),
+			);
+
+			expect(result.claimed).toEqual(claimed_content);
+			expect(result.applied).toEqual(applied_content);
+			expect(result.committed_read).toEqual(claimed_content);
+			for (const failure of [
+				result.absent,
+				result.committed_resume,
+				result.read_before_commit,
+				result.wrong_identity,
+				result.wrong_thread,
+			]) {
+				expect(JSON.stringify(failure)).toContain("WorkspaceSnapshotStoreUnavailable");
+			}
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("writes consumed tombstones that block all future stages", async () => {
 		const runtime = make_runtime(await make_database_path());
 		const thread_id = "thread_snapshot_consumed";
@@ -498,6 +588,13 @@ describe("WorkspaceSnapshotStore", () => {
 								thread_id,
 							}),
 						),
+						resume: yield* Effect.exit(
+							snapshots.Resume({
+								change_id,
+								expected_identity: identity(content),
+								thread_id,
+							}),
+						),
 						stage: yield* Effect.exit(
 							snapshots.Stage(stage_input(change_id, thread_id, content)),
 						),
@@ -508,6 +605,7 @@ describe("WorkspaceSnapshotStore", () => {
 
 			expect(result.exists).toBe(false);
 			expect(JSON.stringify(result.read)).toContain("WorkspaceSnapshotStoreUnavailable");
+			expect(JSON.stringify(result.resume)).toContain("WorkspaceSnapshotStoreUnavailable");
 			expect(JSON.stringify(result.stage)).toContain("WorkspaceSnapshotStoreUnavailable");
 			expect(result.stored).toMatchObject([
 				{
@@ -1069,6 +1167,13 @@ describe("WorkspaceSnapshotStore", () => {
 					const snapshots = yield* WorkspaceSnapshotStore;
 
 					yield* snapshots.Stage(stage_input(change_id, thread_id, content));
+					const resume = yield* Effect.exit(
+						snapshots.Resume({
+							change_id,
+							expected_identity: identity(content),
+							thread_id: other_thread_id,
+						}),
+					);
 					yield* CommitReplace(change_id, thread_id, content);
 					yield* SeedRollbackOperation(change_id, thread_id, "applied");
 
@@ -1095,6 +1200,7 @@ describe("WorkspaceSnapshotStore", () => {
 								thread_id: other_thread_id,
 							}),
 						),
+						resume,
 						stage: yield* Effect.exit(
 							snapshots.Stage({
 								...stage_input(change_id, thread_id, content),
@@ -1105,7 +1211,13 @@ describe("WorkspaceSnapshotStore", () => {
 				}),
 			);
 
-			for (const failure of [result.consume, result.exists, result.read, result.stage]) {
+			for (const failure of [
+				result.consume,
+				result.exists,
+				result.read,
+				result.resume,
+				result.stage,
+			]) {
 				expect(JSON.stringify(failure)).toContain("WorkspaceSnapshotStoreUnavailable");
 			}
 			expect(result.owner_exists).toBe(true);
@@ -1194,6 +1306,7 @@ describe("WorkspaceSnapshotStore", () => {
 						consume: yield* Effect.exit(snapshots.Consume(null as never)),
 						exists: yield* Effect.exit(snapshots.Exists(null as never)),
 						read: yield* Effect.exit(snapshots.Read(null as never)),
+						resume: yield* Effect.exit(snapshots.Resume(null as never)),
 						stage: yield* Effect.exit(snapshots.Stage(null as never)),
 					};
 				}),
@@ -1212,18 +1325,22 @@ describe("WorkspaceSnapshotStore", () => {
 		const runtime = make_runtime(await make_database_path());
 		const thread_id = "thread_snapshot_erasing";
 		const change_id = "change_snapshot_erasing";
+		const resume_change_id = "change_snapshot_erasing_resume";
 		const content = new TextEncoder().encode("private erasure bytes");
 
 		try {
 			await runtime.runPromise(SeedThread(thread_id));
 			await runtime.runPromise(SeedReplaceClaim(change_id, thread_id, content));
+			await runtime.runPromise(SeedReplaceClaim(resume_change_id, thread_id, content));
 			const result = await runtime.runPromise(
 				Effect.gen(function* () {
 					const database = yield* Database;
 					const snapshots = yield* WorkspaceSnapshotStore;
 					const input = stage_input(change_id, thread_id, content);
+					const resume_input = read_input(resume_change_id, thread_id, content);
 
 					yield* snapshots.Stage(input);
+					yield* snapshots.Stage(stage_input(resume_change_id, thread_id, content));
 					yield* CommitReplace(change_id, thread_id, content);
 					yield* SeedRollbackOperation(change_id, thread_id, "applied");
 					yield* database.client.insert(ThreadErasureClaims).values({
@@ -1243,6 +1360,7 @@ describe("WorkspaceSnapshotStore", () => {
 								thread_id,
 							}),
 						),
+						resume: yield* Effect.exit(snapshots.Resume(resume_input)),
 						stage: yield* Effect.exit(snapshots.Stage(input)),
 					};
 
@@ -1267,6 +1385,7 @@ describe("WorkspaceSnapshotStore", () => {
 									thread_id,
 								}),
 							),
+							resume: yield* Effect.exit(snapshots.Resume(resume_input)),
 							stage: yield* Effect.exit(snapshots.Stage(input)),
 						},
 					};
@@ -1339,35 +1458,58 @@ describe("WorkspaceSnapshotStore", () => {
 				Effect.gen(function* () {
 					const database = yield* Database;
 					const snapshots = yield* WorkspaceSnapshotStore;
+					const canonical_identity = identity(secret);
+					const altered_content = Buffer.from(new Uint8Array(secret.byteLength).fill(1));
 
 					yield* snapshots.Stage(stage_input(change_id, thread_id, secret));
-					yield* CommitReplace(change_id, thread_id, secret);
 					yield* database.client
 						.update(WorkspaceChangeSnapshots)
 						.set({ content_hash: "0".repeat(64) });
-					const metadata_failure = yield* Effect.exit(
-						snapshots.Read({
+					const resume_metadata_failure = yield* Effect.exit(
+						snapshots.Resume({
 							change_id,
-							expected_identity: identity(secret),
+							expected_identity: canonical_identity,
+							thread_id,
+						}),
+					);
+					yield* database.client.update(WorkspaceChangeSnapshots).set({
+						content: altered_content,
+						content_hash: canonical_identity.content_hash,
+					});
+					const resume_content_failure = yield* Effect.exit(
+						snapshots.Resume({
+							change_id,
+							expected_identity: canonical_identity,
 							thread_id,
 						}),
 					);
 					yield* database.client
 						.update(WorkspaceChangeSnapshots)
-						.set({ content: Buffer.from(new Uint8Array(secret.byteLength).fill(1)) });
+						.set({ content: Buffer.from(secret), content_hash: "0".repeat(64) });
+					yield* CommitReplace(change_id, thread_id, secret);
+					const metadata_failure = yield* Effect.exit(
+						snapshots.Read({
+							change_id,
+							expected_identity: canonical_identity,
+							thread_id,
+						}),
+					);
+					yield* database.client.update(WorkspaceChangeSnapshots).set({
+						content: altered_content,
+						content_hash: canonical_identity.content_hash,
+					});
 
 					return {
 						content_failure: yield* Effect.exit(
 							snapshots.Read({
 								change_id,
-								expected_identity: {
-									...identity(secret),
-									content_hash: "0".repeat(64),
-								},
+								expected_identity: canonical_identity,
 								thread_id,
 							}),
 						),
 						metadata_failure,
+						resume_content_failure,
+						resume_metadata_failure,
 					};
 				}),
 			);

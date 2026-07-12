@@ -203,6 +203,7 @@ export {
 	type WorkspaceSnapshotConsumeInput,
 	type WorkspaceSnapshotExistsInput,
 	type WorkspaceSnapshotReadInput,
+	type WorkspaceSnapshotResumeInput,
 	type WorkspaceSnapshotStageInput,
 	type WorkspaceSnapshotStoreError,
 } from "./workspace/workspace-snapshot-store";
