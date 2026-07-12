@@ -14,8 +14,8 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Branch: `codex/backend-services`
 - [x] Package manager: pnpm 11.7.0
 - [x] Stack: TypeScript 7, Effect 4 beta, Drizzle 1 RC, SQLite
-- [x] Latest code checkpoint: `b81fa19 feat: resume uncommitted workspace snapshots`
-- [x] Latest remote checkpoint: `0424f38 docs: record snapshot recovery checkpoint`
+- [x] Latest code checkpoint: `720cfaa test: prove conditional file replacement recovery`
+- [x] Latest remote checkpoint: `720cfaa test: prove conditional file replacement recovery`
 - [x] Model Behaviour is committed as focused protocol, persistence, provider, service, composition, transport, and security changes.
 - [x] Local GitHub account: `sandersonstabo`; `origin` -> `https://github.com/sandersonstabo/artisan-editor.git`; GitHub visibility was verified as `PRIVATE` on 2026-07-12.
 - [x] Commit every coherent, verified checkpoint as a small, focused, independently understandable change. Never bundle unrelated dirty work into the same commit and never push `main` or `master` without explicit approval.
@@ -28,8 +28,8 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Transactional SQLite rollback snapshots are committed and pushed at `3eba329`.
 - [x] Transactional run/agent/workspace authority is committed and pushed at `7cbe507`.
 - [x] Recovery-only access to staged rollback bytes is committed and pushed at `b81fa19`.
-- [ ] Finish and review the uncommitted conditional regular-file primitive in `filesystem.ts`, `node-filesystem.ts`, and `filesystem-conditional-replace.test.ts`. The revised worktree uses a two-phase filesystem receipt: `ReplaceRegularFile` leaves the exact stage and original backup until SQLite durably records `applied`, then `FinalizeRegularFileReplacement` removes them idempotently. Focused crash, finalization, mode, artifact, and concurrency tests are green, including 50 synchronized exact-ID and 50 competing-ID repeats.
-- [ ] Resolve the production confinement blocker before accepting the conditional primitive: Effect 4 beta 97 and Node 24 expose path-based `rename`, `link`, and `remove`, so ancestor validation alone cannot prevent a hostile same-user process from swapping a parent directory between validation and mutation. The safe production adapter needs handle-relative native operations; Koffi native syscalls and a Rust `cap-std` helper are under comparison. Do not describe the current path adapter as race-proof confinement.
+- [x] The narrow `BoundedRegularFileStore` seam and explicitly non-adversarial Node adapter are committed and pushed at `98ef0b3`, `011dff5`, and `720cfaa`. Two-phase receipts retain the exact stage and original backup until SQLite durably records `applied`, then finalization removes them idempotently. Crash, corruption, mode, artifact, and concurrency coverage is green, including 50 synchronized exact-ID and 50 competing-ID stress runs. Independent final P0-P2 review is clean.
+- [ ] Build the production bounded regular-file adapter with handle-relative native operations through a focused Rust N-API addon. Effect 4 beta 97 and Node 24 expose path-based `rename`, `link`, and `remove`, so the reviewed Node adapter cannot prevent a hostile same-user process from swapping an ancestor or leaf between validation and mutation. Koffi is rejected for this security-critical adapter because maintaining Windows NT ABI structures and syscalls in TypeScript is too fragile. Do not compose or describe the Node adapter as production race-proof confinement.
 - [ ] Build the controlled read/replace/review/rollback service around the filesystem registry, workspace-change repository, snapshot store, evidence recorder, and public protocol.
 - [ ] Prove filesystem mutation crash windows, exact retries, authorization races, and restart recovery through the real production composition.
 
@@ -48,6 +48,20 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Live thread metadata refinement with bounded context, latest-wins scheduling, locks, source idempotency, and restart replay.
 - [x] Project affinity scoring/rehome core with Git-root discovery, recency windows, locks, suggestions, linked projects, and journal coordination.
 - [x] Curated Model Behaviour registry with Codex config reconciliation, capability probing, drift handling, private backups, and typed MessagePort control.
+
+## Completed Non-Adversarial Conditional Replacement Checkpoint
+
+Implemented, independently reviewed, committed, and verified:
+
+- [x] `BoundedRegularFileStore` is a narrow Effect Service for bounded reads, recoverable conditional replacement, and receipt finalization; ordinary `Filesystem` and `WorkspaceFilesystemRegistry` expose none of its methods.
+- [x] The Node adapter creates and syncs a private same-directory stage, preserves the original mode, moves the exact expected target to a unique backup, and publishes with no-overwrite hard-link semantics.
+- [x] Successful publication retains stage and backup receipts until explicit finalization; exact retries recover staged, moved, and published crash windows without overwriting external targets.
+- [x] Finalization is idempotent only for valid receipt states, fails closed for missing, external, ambiguous, corrupt, or impossible receipts, and preserves the sole backup when proof is incomplete.
+- [x] Owned artifacts are reserved from direct reads and hidden from ordinary list/watch surfaces; unrelated similarly named files remain visible.
+- [x] Focused conditional and registry suites pass 31 tests, plus 50 synchronized exact-ID stress runs and 50 synchronized competing-ID stress runs. Full validation passes 78 test files, 567 tests, and 3 intentional skips.
+- [x] Independent final P0-P2 review is clean after fixing stage-missing/backup-present finalization.
+- [x] Focused commits: `98ef0b3 feat: define bounded regular file store`, `011dff5 feat: add recoverable node file replacement`, and `720cfaa test: prove conditional file replacement recovery`.
+- [ ] Production composition remains blocked on the Rust N-API handle-relative adapter and its platform matrix; the current Node adapter is deliberately named `non_adversarial` and is referenced only by its focused harness.
 
 ## Completed Rollback Snapshot Foundation
 
@@ -185,6 +199,7 @@ Implemented, independently reviewed, committed, and verified:
 - [x] Frontend is UI-only. Backend owns provider processes, terminals, filesystem/Git, persistence, policy, and reconciliation.
 - [x] Control uses typed MessagePort request/result plus durable events; streams use separate bounded MessagePorts.
 - [x] SQLite is the journal/projection store. Full provider configs, credentials, and secrets never enter journal payloads.
+- [x] Production conditional file mutation uses a focused Rust N-API adapter with handle-relative platform operations. The path-based Node implementation remains a non-adversarial development and deterministic-test adapter only.
 - [x] Provider CLIs remain the optimized native harnesses. Artisan adapts their I/O rather than replacing them with a generic API-key harness.
 - [x] Canonical Artisan surfaces and registries map to provider-native capabilities with truthful unsupported/runtime-only states.
 - [x] Model picker, behavior controls, Git state, and other lower-frequency controls belong in the right pane.

@@ -2003,6 +2003,16 @@ Right pane relationship:
 - The raw filesystem service should own safe reads, atomic writes, renames,
   metadata, watch events, and a trash adapter. It should not infer agent
   authorship from timestamps or watcher order.
+- Recoverable conditional publication should live behind a separate deep
+  `BoundedRegularFileStore` Effect Service rather than broadening the ordinary
+  filesystem interface. Replacement should retain an exact same-directory
+  stage and original backup as a two-phase receipt until SQLite durably records
+  the operation as `applied`; only then may explicit finalization remove them.
+- The production bounded regular-file adapter should use a focused Rust N-API
+  addon for handle-relative, no-follow platform operations. Node and Effect
+  path-based mutation cannot close hostile same-user ancestor and leaf swap
+  races. The path-based Node adapter is a non-adversarial development and test
+  implementation and must not be wired into production controlled mutation.
 - A separate change-tracking service should record controlled writes with
   thread, run, agent, command, before/after identity, and review state. Watcher
   events represent external or unattributed changes until they can be matched
