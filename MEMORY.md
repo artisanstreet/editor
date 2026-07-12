@@ -1,6 +1,6 @@
 # Artisan Editor Memory
 
-Last updated: 2026-07-11
+Last updated: 2026-07-12
 
 ## Mission
 
@@ -14,18 +14,19 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Branch: `codex/backend-services`
 - [x] Package manager: pnpm 11.7.0
 - [x] Stack: TypeScript 7, Effect 4 beta, Drizzle 1 RC, SQLite
-- [x] Latest code checkpoint: `e7048cb feat: persist workspace change projections`
+- [x] Latest code checkpoint: `3eba329 feat: store rollback snapshots transactionally`
 - [x] Model Behaviour is committed as focused protocol, persistence, provider, service, composition, transport, and security changes.
 - [x] Private remote: `origin` -> `https://github.com/sandersonstabo/artisan-editor.git`; GitHub visibility was verified as `PRIVATE` on 2026-07-11.
 - [x] Active work is committed in small, focused, independently understandable checkpoints and pushed to the current feature branch immediately after verification; never push `main` or `master` without explicit approval.
 - [x] Local and remote state are checked at session start, after each push, and before handoff. Confirm the current branch tracks `origin` and that local `HEAD` matches its upstream after pushing.
 
-## Active Uncommitted Work
+## Active Work
 
 - [x] Durable workspace change command/projection persistence is committed and pushed at `e7048cb`.
-- [ ] Finish the SQLite-backed rollback snapshot store currently present in the worktree.
-- [ ] Add bounded retry and deterministic coverage for transient SQLite writer contention before committing the snapshot milestone.
-- [ ] Re-run focused snapshot/erasure tests, migration checks, and the full validation suite before the next code commit.
+- [x] Transactional SQLite rollback snapshots are committed and pushed at `3eba329`.
+- [ ] Build one transactional run/agent/workspace authority boundary that atomically proves authority and claims a controlled mutation.
+- [ ] Build the controlled read/replace/review/rollback service around the filesystem registry, workspace-change repository, snapshot store, evidence recorder, and public protocol.
+- [ ] Prove filesystem mutation crash windows, exact retries, authorization races, and restart recovery through the real production composition.
 
 ## Completed Checkpoints
 
@@ -42,6 +43,22 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Live thread metadata refinement with bounded context, latest-wins scheduling, locks, source idempotency, and restart replay.
 - [x] Project affinity scoring/rehome core with Git-root discovery, recency windows, locks, suggestions, linked projects, and journal coordination.
 - [x] Curated Model Behaviour registry with Codex config reconciliation, capability probing, drift handling, private backups, and typed MessagePort control.
+
+## Completed Rollback Snapshot Foundation
+
+Implemented, independently reviewed, committed, and verified:
+
+- [x] SQLite-backed private rollback bytes with strict size, state, content-length, and lowercase SHA-256 constraints.
+- [x] Snapshots bind transactionally to the canonical replace claim, thread, and recorded before identity; committed claims are cross-checked against their projection.
+- [x] Read and Exists require a committed replace with rollback still available; Consume requires a matching applied or committed rollback operation.
+- [x] Stage is allowed before replace commit and cannot recreate a missing or consumed snapshot afterward.
+- [x] Consumed snapshots erase bytes and identity metadata, remain non-resurrectable through the service, and are deleted atomically during thread erasure.
+- [x] Effect-classified SQLite lock contention uses a bounded exponential retry around the complete write transaction, rechecking thread erasure and authority on every attempt.
+- [x] Deterministic transaction-attempt barriers prove real Stage and Consume retries; cross-runtime races and erasure-during-retry passed 20 repeated runs.
+- [x] The production backend runtime exposes both `WorkspaceChangeRepository` and `WorkspaceSnapshotStore`; a real composition test claims and stages through that runtime.
+- [x] Independent final P0-P2 review is clean.
+- [x] Last full validation: 76 test files, 533 passed, 3 intentionally skipped; format, lint, typecheck, migration generation, and Drizzle integrity checks passed.
+- [x] Focused commit: `3eba329 feat: store rollback snapshots transactionally`.
 
 ## Completed Model Behaviour Milestone
 
@@ -104,7 +121,8 @@ Implemented, independently reviewed, committed, and verified:
 
 ### Files, Git, Surfaces, And Orchestration
 
-- [ ] Add attributed controlled-write history, changed-file/diff projections, approval/review state, rollback, and public protocol commands.
+- [x] Add attributed controlled-write operation history, changed-file/diff projections, review/rollback state, and private rollback snapshot persistence.
+- [ ] Add atomic run/agent/workspace authorization plus controlled filesystem read/replace/review/rollback execution and public protocol commands.
 - [ ] Add Git worktree inventory, durable change/session projections, approved mutations, and public protocol commands.
 - [ ] Complete the canonical surface taxonomy: Work, Time, Guidance, Routines, Capabilities, Processes, Changes, Permissions, and native actions.
 - [ ] Add explicit intake risk classification, assumptions, usage aggregation, and workspace conflict/review handling.
