@@ -14,7 +14,7 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Branch: `codex/backend-services`
 - [x] Package manager: pnpm 11.7.0
 - [x] Stack: TypeScript 7, Effect 4 beta, Drizzle 1 RC, SQLite
-- [x] Latest code checkpoint: `3eba329 feat: store rollback snapshots transactionally`
+- [x] Latest code checkpoint: `7cbe507 feat: authorize workspace mutation claims`
 - [x] Model Behaviour is committed as focused protocol, persistence, provider, service, composition, transport, and security changes.
 - [x] Private remote: `origin` -> `https://github.com/sandersonstabo/artisan-editor.git`; GitHub visibility was verified as `PRIVATE` on 2026-07-11.
 - [x] Active work is committed in small, focused, independently understandable checkpoints and pushed to the current feature branch immediately after verification; never push `main` or `master` without explicit approval.
@@ -24,7 +24,7 @@ This project is not complete until the final audit in `backend-completion-matrix
 
 - [x] Durable workspace change command/projection persistence is committed and pushed at `e7048cb`.
 - [x] Transactional SQLite rollback snapshots are committed and pushed at `3eba329`.
-- [ ] Build one transactional run/agent/workspace authority boundary that atomically proves authority and claims a controlled mutation.
+- [x] Transactional run/agent/workspace authority is committed and pushed at `7cbe507`.
 - [ ] Build the controlled read/replace/review/rollback service around the filesystem registry, workspace-change repository, snapshot store, evidence recorder, and public protocol.
 - [ ] Prove filesystem mutation crash windows, exact retries, authorization races, and restart recovery through the real production composition.
 
@@ -59,6 +59,24 @@ Implemented, independently reviewed, committed, and verified:
 - [x] Independent final P0-P2 review is clean.
 - [x] Last full validation: 76 test files, 533 passed, 3 intentionally skipped; format, lint, typecheck, migration generation, and Drizzle integrity checks passed.
 - [x] Focused commit: `3eba329 feat: store rollback snapshots transactionally`.
+
+## Completed Workspace Mutation Authority Foundation
+
+Implemented, independently reviewed, committed, and verified:
+
+- [x] One deep `WorkspaceMutationAuthority.ClaimReplace` interface hides base-run, graph-run, registry, repository, and SQLite transaction details from callers.
+- [x] Base authority requires the live coordinator, active run, thread, agent, running/waiting state, and a registered canonical workspace root.
+- [x] Graph authority derives assignment/group identity from the database and requires a running group, active dispatch, live run/assignment, matching agent/thread/workspace, write policy, and `repo` or `files` scope.
+- [x] Effect `FileSystem.realPath` proves canonical workspace roots while returned capabilities omit absolute-path resolution; repo aliases are accepted only when they resolve to the registered root.
+- [x] The workspace operation and immutable authority pin commit in one outer SQLite transaction; the existing repository transaction nests as an Effect SQL savepoint.
+- [x] Exact retries use the authority pin after a run becomes terminal, reject changed authority/intent and unpinned legacy claims, revalidate pinned scope, and acquire a same-row write fence before liveness admission.
+- [x] Bounded SQLite contention retry re-runs the complete proof. Deterministic stale-run, new-claim erasure, exact-retry erasure, and two-runtime convergence scenarios passed 10 consecutive final runs.
+- [x] Malformed assignment and pinned-authority state fails closed; denial/conflict/failure errors do not expose workspace roots or requested paths.
+- [x] Thread erasure deletes authority pins before their parent operations, and the production backend runtime exposes the registry and authority service.
+- [x] The reviewer-discovered exact-retry/erasure stale-snapshot P1 was fixed with the write fence; independent final P0-P2 re-review is clean.
+- [x] Last full validation: 77 test files, 542 passed, 3 intentionally skipped; format, lint, typecheck, migration generation, and Drizzle integrity checks passed.
+- [x] Focused prerequisite commits: `4ff58ec refactor: share sqlite write retries` and `2615311 feat: authorize registered workspace roots`.
+- [x] Focused authority commit: `7cbe507 feat: authorize workspace mutation claims`.
 
 ## Completed Model Behaviour Milestone
 
@@ -122,7 +140,8 @@ Implemented, independently reviewed, committed, and verified:
 ### Files, Git, Surfaces, And Orchestration
 
 - [x] Add attributed controlled-write operation history, changed-file/diff projections, review/rollback state, and private rollback snapshot persistence.
-- [ ] Add atomic run/agent/workspace authorization plus controlled filesystem read/replace/review/rollback execution and public protocol commands.
+- [x] Add atomic run/agent/workspace authorization and durable mutation-claim pinning.
+- [ ] Add controlled filesystem read/replace/review/rollback execution and public protocol commands.
 - [ ] Add Git worktree inventory, durable change/session projections, approved mutations, and public protocol commands.
 - [ ] Complete the canonical surface taxonomy: Work, Time, Guidance, Routines, Capabilities, Processes, Changes, Permissions, and native actions.
 - [ ] Add explicit intake risk classification, assumptions, usage aggregation, and workspace conflict/review handling.
