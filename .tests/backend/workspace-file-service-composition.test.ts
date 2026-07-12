@@ -11,12 +11,13 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { ContentIdentity } from "@artisan/protocol";
 import {
 	make_backend_runtime,
+	type NativeBoundedRegularFileStoreOptions,
 	ProtocolRouter,
+	ThreadRetentionScheduler,
 	WorkspaceChangeRepository,
 	WorkspaceFileService,
 	WorkspaceMutationPayloadStore,
 	WorkspaceSnapshotStore,
-	ThreadRetentionScheduler,
 } from "@artisan/backend";
 
 import { make_workspace_bounded_regular_file_store_registry_layer } from "../../modules/backend/src/filesystem/workspace-bounded-regular-file-store-registry";
@@ -36,11 +37,22 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 type NativeController = {
+	readonly close_attempts: { value: number };
 	readonly finalization_attempts: { value: number };
 	readonly load_attempts: { value: number };
 	readonly replace_attempts: { value: number };
 	readonly fail_next_finalization: () => void;
-	readonly load_native_module: () => unknown;
+	readonly load_native_module: NonNullable<
+		NativeBoundedRegularFileStoreOptions["load_native_module"]
+	>;
+};
+
+type NativeReplacementOptions = {
+	readonly expected: Uint8Array;
+	readonly maximumBytes: number;
+	readonly operationId: string;
+	readonly path: string;
+	readonly replacement: Uint8Array;
 };
 
 function content_identity(bytes: Uint8Array): ContentIdentity {
@@ -95,11 +107,31 @@ function create_thread_command() {
 	};
 }
 
+function bytes_match(left: Uint8Array, right: Uint8Array) {
+	return (
+		left.byteLength === right.byteLength && left.every((value, index) => value === right[index])
+	);
+}
+
+function replacement_options_match(
+	left: NativeReplacementOptions,
+	right: NativeReplacementOptions,
+) {
+	return (
+		left.maximumBytes === right.maximumBytes &&
+		left.operationId === right.operationId &&
+		left.path === right.path &&
+		bytes_match(left.expected, right.expected) &&
+		bytes_match(left.replacement, right.replacement)
+	);
+}
+
 function make_native_controller(): NativeController {
+	const close_attempts = { value: 0 };
 	const finalization_attempts = { value: 0 };
 	const load_attempts = { value: 0 };
 	const replace_attempts = { value: 0 };
-	const receipts = new Set<string>();
+	const receipts = new Map<string, NativeReplacementOptions>();
 	let remaining_finalization_failures = 0;
 
 	class FakeNativeBoundedRegularFileStore {
@@ -112,15 +144,23 @@ function make_native_controller(): NativeController {
 			return Promise.resolve(candidate_root === this.root);
 		}
 
-		close() {}
+		close() {
+			close_attempts.value += 1;
+		}
 
-		async finalizeRegularFileReplacement(options: { readonly operationId: string }) {
+		async finalizeRegularFileReplacement(options: NativeReplacementOptions) {
 			finalization_attempts.value += 1;
 
 			if (remaining_finalization_failures > 0) {
 				remaining_finalization_failures -= 1;
 
 				throw new Error("deterministic finalization failure");
+			}
+
+			const receipt = receipts.get(options.operationId);
+
+			if (receipt === undefined || !replacement_options_match(receipt, options)) {
+				throw new Error("replacement receipt intent changed");
 			}
 
 			receipts.delete(options.operationId);
@@ -134,16 +174,17 @@ function make_native_controller(): NativeController {
 			return bytes;
 		}
 
-		async replaceRegularFile(options: {
-			readonly expected: Uint8Array;
-			readonly maximumBytes: number;
-			readonly operationId: string;
-			readonly path: string;
-			readonly replacement: Uint8Array;
-		}) {
+		async replaceRegularFile(options: NativeReplacementOptions) {
 			replace_attempts.value += 1;
+			const receipt = receipts.get(options.operationId);
 
-			if (receipts.has(options.operationId)) return "AlreadyReplaced";
+			if (receipt !== undefined) {
+				if (!replacement_options_match(receipt, options)) {
+					throw new Error("replacement operation intent changed");
+				}
+
+				return "AlreadyReplaced";
+			}
 
 			const target = join(this.root, options.path);
 			const current = new Uint8Array(await readFile(target));
@@ -154,13 +195,18 @@ function make_native_controller(): NativeController {
 			if (!matches || options.replacement.byteLength > options.maximumBytes) return "Changed";
 
 			await writeFile(target, options.replacement);
-			receipts.add(options.operationId);
+			receipts.set(options.operationId, {
+				...options,
+				expected: new Uint8Array(options.expected),
+				replacement: new Uint8Array(options.replacement),
+			});
 
 			return "Replaced";
 		}
 	}
 
 	return {
+		close_attempts,
 		finalization_attempts,
 		load_attempts,
 		replace_attempts,
@@ -364,20 +410,30 @@ describe("WorkspaceFileService production composition", () => {
 			expect(persisted.payload_available).toMatchObject({ _tag: "Failure" });
 			expect(controller.replace_attempts.value).toBe(1);
 			expect(controller.finalization_attempts.value).toBe(1);
+			expect(controller.load_attempts.value).toBe(1);
 		} finally {
 			await runtime.dispose();
 		}
+
+		expect(controller.close_attempts.value).toBe(1);
 	});
 
 	it("settles an exact committed retry after restart without reopening the terminal run", async () => {
 		const { database_path, root } = await make_workspace();
 		const controller = make_native_controller();
 		const first_runtime = make_runtime(database_path, root, controller, "workspace_file_first");
+		let accepted_event: unknown;
 
-		await first_runtime.runPromise(SeedBaseRun(root));
-		const accepted = await first_runtime.runPromise(Replace());
-		await first_runtime.runPromise(TerminalizeBaseRun());
-		await first_runtime.dispose();
+		try {
+			await first_runtime.runPromise(SeedBaseRun(root));
+			accepted_event = (await first_runtime.runPromise(Replace())).event;
+			await first_runtime.runPromise(TerminalizeBaseRun());
+		} finally {
+			await first_runtime.dispose();
+		}
+
+		expect(controller.close_attempts.value).toBe(1);
+		expect(controller.load_attempts.value).toBe(1);
 
 		const second_runtime = make_runtime(
 			database_path,
@@ -390,15 +446,18 @@ describe("WorkspaceFileService production composition", () => {
 			const duplicate = await second_runtime.runPromise(Replace());
 			const persisted = await second_runtime.runPromise(InspectCommittedReplacement("after"));
 
-			expect(duplicate).toEqual({ event: accepted.event, status: "duplicate" });
+			expect(duplicate).toEqual({ event: accepted_event, status: "duplicate" });
 			expect(controller.replace_attempts.value).toBe(1);
 			expect(controller.finalization_attempts.value).toBe(1);
+			expect(controller.load_attempts.value).toBe(2);
 			expect(persisted.evidence).toHaveLength(1);
 			expect(persisted.payload_record_exists).toBe(true);
 			expect(persisted.payload_available).toMatchObject({ _tag: "Failure" });
 		} finally {
 			await second_runtime.dispose();
 		}
+
+		expect(controller.close_attempts.value).toBe(2);
 	});
 
 	it("resumes finalization after native publication without issuing another replacement", async () => {
@@ -411,13 +470,20 @@ describe("WorkspaceFileService production composition", () => {
 			"workspace_file_finalize_first",
 		);
 
-		controller.fail_next_finalization();
-		await first_runtime.runPromise(SeedBaseRun(root));
-		await expect(first_runtime.runPromise(Replace())).rejects.toMatchObject({
-			operation: "replace",
-			reason: "failed",
-		});
-		await first_runtime.dispose();
+		try {
+			controller.fail_next_finalization();
+			await first_runtime.runPromise(SeedBaseRun(root));
+			await expect(first_runtime.runPromise(Replace())).rejects.toMatchObject({
+				operation: "replace",
+				reason: "failed",
+			});
+			await first_runtime.runPromise(TerminalizeBaseRun());
+		} finally {
+			await first_runtime.dispose();
+		}
+
+		expect(controller.close_attempts.value).toBe(1);
+		expect(controller.load_attempts.value).toBe(1);
 
 		const second_runtime = make_runtime(
 			database_path,
@@ -427,14 +493,28 @@ describe("WorkspaceFileService production composition", () => {
 		);
 
 		try {
-			await second_runtime.runPromise(Replace());
+			const result = await second_runtime.runPromise(Replace());
+			const persisted = await second_runtime.runPromise(InspectCommittedReplacement("after"));
 
+			expect(result.status).toBe("accepted");
 			expect(controller.replace_attempts.value).toBe(1);
 			expect(controller.finalization_attempts.value).toBe(2);
+			expect(controller.load_attempts.value).toBe(2);
 			expect(decoder.decode(await readFile(join(root, "src", "example.ts")))).toBe("after");
+			expect(persisted.operation).toMatchObject({
+				_tag: "Some",
+				value: { lifecycle: "committed" },
+			});
+			expect(persisted.change_list.changes).toHaveLength(1);
+			expect(persisted.evidence).toHaveLength(1);
+			expect(persisted.payload_record_exists).toBe(true);
+			expect(persisted.payload_available).toMatchObject({ _tag: "Failure" });
+			expect(decoder.decode(persisted.snapshot)).toBe("before");
 		} finally {
 			await second_runtime.dispose();
 		}
+
+		expect(controller.close_attempts.value).toBe(2);
 	});
 
 	it("persists changed as terminal and keeps its exact retry side-effect free after restart", async () => {
@@ -447,13 +527,20 @@ describe("WorkspaceFileService production composition", () => {
 			"workspace_file_changed_first",
 		);
 
-		await first_runtime.runPromise(SeedBaseRun(root));
-		await writeFile(join(root, "src", "example.ts"), "external");
-		await expect(first_runtime.runPromise(Replace())).rejects.toMatchObject({
-			operation: "replace",
-			reason: "changed",
-		});
-		await first_runtime.dispose();
+		try {
+			await first_runtime.runPromise(SeedBaseRun(root));
+			await writeFile(join(root, "src", "example.ts"), "external");
+			await expect(first_runtime.runPromise(Replace())).rejects.toMatchObject({
+				operation: "replace",
+				reason: "changed",
+			});
+			await first_runtime.runPromise(TerminalizeBaseRun());
+		} finally {
+			await first_runtime.dispose();
+		}
+
+		expect(controller.close_attempts.value).toBe(1);
+		expect(controller.load_attempts.value).toBe(1);
 
 		const second_runtime = make_runtime(
 			database_path,
@@ -471,25 +558,39 @@ describe("WorkspaceFileService production composition", () => {
 				Effect.gen(function* () {
 					const changes = yield* WorkspaceChangeRepository;
 					const journal = yield* JournalStore;
+					const snapshots = yield* WorkspaceSnapshotStore;
 
 					return {
+						change_list: yield* changes.List("thread_workspace_file", "workspace_file"),
 						evidence: yield* journal.ReadCorrelatedEvents(
 							"workspace_evidence:replace_message:correlation",
 						),
 						operation: yield* changes.ReadOperation("replace_message"),
+						snapshot_state: yield* snapshots
+							.Exists({
+								change_id: "change_workspace_file",
+								thread_id: "thread_workspace_file",
+							})
+							.pipe(Effect.exit),
 					};
 				}),
 			);
 
 			expect(controller.replace_attempts.value).toBe(0);
+			expect(controller.finalization_attempts.value).toBe(0);
+			expect(controller.load_attempts.value).toBe(2);
 			expect(result.operation).toMatchObject({
 				_tag: "Some",
 				value: { lifecycle: "rejected" },
 			});
+			expect(result.change_list.changes).toEqual([]);
 			expect(result.evidence).toEqual([]);
+			expect(result.snapshot_state).toMatchObject({ _tag: "Failure" });
 		} finally {
 			await second_runtime.dispose();
 		}
+
+		expect(controller.close_attempts.value).toBe(2);
 	});
 
 	it("rejects mutation through the default empty bounded registry", async () => {
@@ -498,6 +599,10 @@ describe("WorkspaceFileService production composition", () => {
 
 		try {
 			await runtime.runPromise(SeedBaseRun(root));
+			await expect(runtime.runPromise(Read())).rejects.toMatchObject({
+				operation: "read",
+				reason: "failed",
+			});
 			await expect(runtime.runPromise(Replace())).rejects.toMatchObject({
 				operation: "replace",
 				reason: "failed",
