@@ -1,6 +1,4 @@
-import { Cause, Context, Crypto, Data, Effect, Encoding, Layer, Schedule, Schema } from "effect";
-import { EffectDrizzleQueryError } from "drizzle-orm/effect-core";
-import { isSqlError } from "effect/unstable/sql/SqlError";
+import { Context, Crypto, Data, Effect, Encoding, Layer, Schema } from "effect";
 import { and, eq, sql } from "drizzle-orm";
 
 import {
@@ -11,6 +9,7 @@ import {
 } from "@artisan/protocol";
 
 import { Database } from "../persistence/database";
+import { RetrySqliteWrite } from "../persistence/sqlite-write-retry";
 import {
 	ThreadErasureClaims,
 	Threads,
@@ -53,9 +52,6 @@ const ExistsInput = Schema.Struct({
 	thread_id: Identifier,
 });
 const ContentHash = /^[0-9a-f]{64}$/;
-const WriteContentionSchedule = Schedule.exponential("5 millis").pipe(
-	Schedule.upTo({ duration: "1 second", times: 8 }),
-);
 
 type ReplaceLifecycle = "applied" | "claimed" | "committed";
 
@@ -171,29 +167,6 @@ function change_id_from_unknown(input: unknown): string | undefined {
 		typeof input.change_id === "string"
 		? input.change_id
 		: undefined;
-}
-
-function is_retryable_database_error(error: unknown): boolean {
-	if (isSqlError(error)) {
-		return error.isRetryable;
-	}
-
-	if (!(error instanceof EffectDrizzleQueryError) || !Cause.isCause(error.cause)) {
-		return false;
-	}
-
-	return error.cause.reasons.some(
-		(reason) => Cause.isFailReason(reason) && is_retryable_database_error(reason.error),
-	);
-}
-
-function RetryWriteContention<A, E, R>(operation: Effect.Effect<A, E, R>) {
-	return operation.pipe(
-		Effect.retry({
-			schedule: WriteContentionSchedule,
-			while: is_retryable_database_error,
-		}),
-	);
 }
 
 function Decode<A>(
@@ -467,7 +440,7 @@ export const WorkspaceSnapshotStoreLive = Layer.effect(
 
 				const now = yield* metadata.Now;
 
-				return yield* RetryWriteContention(
+				return yield* RetrySqliteWrite(
 					database.client.transaction((transaction) =>
 						Effect.gen(function* () {
 							const canonical = yield* EnsureCanonicalReplace(
@@ -601,7 +574,7 @@ export const WorkspaceSnapshotStoreLive = Layer.effect(
 					Effect.flatMap((decoded) =>
 						metadata.Now.pipe(
 							Effect.flatMap((now) =>
-								RetryWriteContention(
+								RetrySqliteWrite(
 									database.client.transaction((transaction) =>
 										Effect.gen(function* () {
 											yield* EnsureAppliedRollback(
