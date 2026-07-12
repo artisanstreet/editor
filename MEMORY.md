@@ -15,10 +15,12 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Package manager: pnpm 11.7.0
 - [x] Stack: TypeScript 7, Effect 4 beta, Drizzle 1 RC, SQLite
 - [x] Latest code checkpoint: `b81fa19 feat: resume uncommitted workspace snapshots`
+- [x] Latest remote checkpoint: `0424f38 docs: record snapshot recovery checkpoint`
 - [x] Model Behaviour is committed as focused protocol, persistence, provider, service, composition, transport, and security changes.
-- [x] Private remote: `origin` -> `https://github.com/sandersonstabo/artisan-editor.git`; GitHub visibility was verified as `PRIVATE` on 2026-07-11.
-- [x] Active work is committed in small, focused, independently understandable checkpoints and pushed to the current feature branch immediately after verification; never push `main` or `master` without explicit approval.
-- [x] Local and remote state are checked at session start, after each push, and before handoff. Confirm the current branch tracks `origin` and that local `HEAD` matches its upstream after pushing.
+- [x] Local GitHub account: `sandersonstabo`; `origin` -> `https://github.com/sandersonstabo/artisan-editor.git`; GitHub visibility was verified as `PRIVATE` on 2026-07-12.
+- [x] Commit every coherent, verified checkpoint as a small, focused, independently understandable change. Never bundle unrelated dirty work into the same commit and never push `main` or `master` without explicit approval.
+- [x] Push the current feature branch to `origin` after every coherent commit and at natural checkpoints. Local worktrees are temporary working state, not durable project storage.
+- [x] Check local and remote state at session start, after each push, and before handoff. Confirm the branch tracks `origin` and that local `HEAD` equals its upstream after every push.
 
 ## Active Work
 
@@ -26,7 +28,8 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Transactional SQLite rollback snapshots are committed and pushed at `3eba329`.
 - [x] Transactional run/agent/workspace authority is committed and pushed at `7cbe507`.
 - [x] Recovery-only access to staged rollback bytes is committed and pushed at `b81fa19`.
-- [ ] Finish and review the uncommitted conditional regular-file primitive in `filesystem.ts`, `node-filesystem.ts`, and `filesystem-conditional-replace.test.ts`. Its first worker pass has a known post-publication recovery hole: retries after cleanup can misclassify an already-applied exact replacement, and stage/backup cleanup crash windows are not all recoverable yet.
+- [ ] Finish and review the uncommitted conditional regular-file primitive in `filesystem.ts`, `node-filesystem.ts`, and `filesystem-conditional-replace.test.ts`. The revised worktree uses a two-phase filesystem receipt: `ReplaceRegularFile` leaves the exact stage and original backup until SQLite durably records `applied`, then `FinalizeRegularFileReplacement` removes them idempotently. Focused crash, finalization, mode, artifact, and concurrency tests are green, including 50 synchronized exact-ID and 50 competing-ID repeats.
+- [ ] Resolve the production confinement blocker before accepting the conditional primitive: Effect 4 beta 97 and Node 24 expose path-based `rename`, `link`, and `remove`, so ancestor validation alone cannot prevent a hostile same-user process from swapping a parent directory between validation and mutation. The safe production adapter needs handle-relative native operations; Koffi native syscalls and a Rust `cap-std` helper are under comparison. Do not describe the current path adapter as race-proof confinement.
 - [ ] Build the controlled read/replace/review/rollback service around the filesystem registry, workspace-change repository, snapshot store, evidence recorder, and public protocol.
 - [ ] Prove filesystem mutation crash windows, exact retries, authorization races, and restart recovery through the real production composition.
 
