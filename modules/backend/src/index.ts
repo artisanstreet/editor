@@ -208,6 +208,18 @@ export {
 	type WorkspaceSnapshotStoreError,
 } from "./workspace/workspace-snapshot-store";
 export {
+	WorkspaceMutationPayloadStore,
+	WorkspaceMutationPayloadStoreConflict,
+	WorkspaceMutationPayloadStoreInvalid,
+	WorkspaceMutationPayloadStoreLive,
+	WorkspaceMutationPayloadStoreUnavailable,
+	type WorkspaceMutationPayload,
+	type WorkspaceMutationPayloadConsumeInput,
+	type WorkspaceMutationPayloadResumeInput,
+	type WorkspaceMutationPayloadStageInput,
+	type WorkspaceMutationPayloadStoreError,
+} from "./workspace/workspace-mutation-payload-store";
+export {
 	make_node_workspace_filesystem_registry_layer,
 	WorkspaceFilesystemAuthorizationError,
 	WorkspaceFilesystemNotFoundError,

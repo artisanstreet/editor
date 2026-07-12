@@ -88,6 +88,7 @@ import { WorkspaceChangeRepositoryLive } from "../workspace/workspace-change-rep
 import { WorkspaceEvidenceRecorderLive } from "../workspace/workspace-evidence-recorder";
 import { WorkspaceMutationAuthorityLive } from "../workspace/workspace-mutation-authority";
 import { WorkspaceSnapshotStoreLive } from "../workspace/workspace-snapshot-store";
+import { WorkspaceMutationPayloadStoreLive } from "../workspace/workspace-mutation-payload-store";
 
 export interface BackendOptions {
 	readonly database_path: string;
@@ -155,6 +156,10 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(infrastructure),
 	);
 	const workspace_snapshots = WorkspaceSnapshotStoreLive.pipe(
+		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(infrastructure),
+	);
+	const workspace_mutation_payloads = WorkspaceMutationPayloadStoreLive.pipe(
 		Layer.provideMerge(NodeCrypto.layer),
 		Layer.provideMerge(infrastructure),
 	);
@@ -287,6 +292,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(workspace_authority),
 		Layer.provideMerge(workspace_filesystems),
 		Layer.provideMerge(workspace_snapshots),
+		Layer.provideMerge(workspace_mutation_payloads),
 	);
 }
 

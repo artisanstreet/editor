@@ -344,6 +344,64 @@ export const WorkspaceChangeSnapshots = sqliteTable(
 	],
 );
 
+/** Stores transient exact mutation bytes outside journal and change projections. */
+export const WorkspaceMutationPayloads = sqliteTable(
+	"workspace_mutation_payloads",
+	{
+		message_id: text("message_id")
+			.primaryKey()
+			.references(() => WorkspaceChangeOperations.message_id, { onDelete: "cascade" }),
+		thread_id: text("thread_id").notNull(),
+		state: text("state").notNull(),
+		expected: blob("expected", { mode: "buffer" }),
+		expected_byte_count: integer("expected_byte_count"),
+		expected_hash: text("expected_hash"),
+		replacement: blob("replacement", { mode: "buffer" }),
+		replacement_byte_count: integer("replacement_byte_count"),
+		replacement_hash: text("replacement_hash"),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		index("workspace_mutation_payloads_thread_id_index").on(table.thread_id),
+		check(
+			"workspace_mutation_payloads_state_check",
+			sql`${table.state} IN ('available', 'consumed')`,
+		),
+		check(
+			"workspace_mutation_payloads_content_check",
+			sql`
+				(
+					${table.state} = 'available'
+					AND ${table.expected} IS NOT NULL
+					AND ${table.expected_byte_count} IS NOT NULL
+					AND ${table.expected_hash} IS NOT NULL
+					AND length(${table.expected}) = ${table.expected_byte_count}
+					AND ${table.expected_byte_count} BETWEEN 0 AND ${sql.raw(String(workspace_text_maximum_bytes))}
+					AND length(${table.expected_hash}) = 64
+					AND ${table.expected_hash} NOT GLOB '*[^0-9a-f]*'
+					AND ${table.replacement} IS NOT NULL
+					AND ${table.replacement_byte_count} IS NOT NULL
+					AND ${table.replacement_hash} IS NOT NULL
+					AND length(${table.replacement}) = ${table.replacement_byte_count}
+					AND ${table.replacement_byte_count} BETWEEN 0 AND ${sql.raw(String(workspace_text_maximum_bytes))}
+					AND length(${table.replacement_hash}) = 64
+					AND ${table.replacement_hash} NOT GLOB '*[^0-9a-f]*'
+				)
+				OR (
+					${table.state} = 'consumed'
+					AND ${table.expected} IS NULL
+					AND ${table.expected_byte_count} IS NULL
+					AND ${table.expected_hash} IS NULL
+					AND ${table.replacement} IS NULL
+					AND ${table.replacement_byte_count} IS NULL
+					AND ${table.replacement_hash} IS NULL
+				)
+			`,
+		),
+	],
+);
+
 export const ThreadErasureClaims = sqliteTable("thread_erasure_claims", {
 	thread_id: text("thread_id").primaryKey(),
 	claimed_at: text("claimed_at").notNull(),
