@@ -14,8 +14,8 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Branch: `codex/backend-services`
 - [x] Package manager: pnpm 11.7.0
 - [x] Stack: TypeScript 7, Effect 4 beta, Drizzle 1 RC, SQLite
-- [x] Latest verified implementation checkpoint: `a3c9bbd test: harden workspace file recovery harness`
-- [x] Local `HEAD`, upstream, and `origin/codex/backend-services` were equal at `a3c9bbd` before this documentation update.
+- [x] Latest verified implementation checkpoint: `f8ea18c test: prove workspace rollback recovery`
+- [x] Local `HEAD`, upstream, and `origin/codex/backend-services` were equal at `f8ea18c` before this documentation update.
 - [x] `ARTISAN_RUN_NATIVE_ADDON_SMOKE=1 pnpm --filter @artisan/bounded-file-store-native verify:local` is the canonical native gate and passes locally for production reads/replacement, test-hook races, and process-crash recovery.
 - [x] Routine development verification is local-first. Do not recreate temporary GitHub Actions, remote runners, or similar testing detours; future CI is a real clean-checkout/release gate and never a substitute for local validation.
 - [x] Model Behaviour is committed as focused protocol, persistence, provider, service, composition, transport, and security changes.
@@ -54,8 +54,9 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Rejected mutations now discard exact payload and rollback-snapshot bytes into non-resurrectable tombstones at `54feea9`, after validating canonical operation/projection identity and private-row integrity. Exact retries and concurrent two-runtime cleanup converge without exposing content.
 - [x] Controlled UTF-8 reads and recoverable attributed replacements are composed into the production backend runtime at `566ceb2`, with real SQLite/repository/authority/payload/snapshot/evidence coverage at `47c28e8` and `a3c9bbd`.
 - [x] The real composition harness proves accepted replacement, exact committed retry after a terminal run, applied/finalization recovery after restart without a second replacement, terminal changed replay without a projection/evidence/snapshot, portable empty-registry denial, full fake-native option forwarding, and scoped acquisition/release counts.
-- [ ] Add review and guarded rollback execution, including a user/control-plane mutation authority that does not borrow an expired agent run grant.
-- [ ] Expose read/replace/list/review/rollback through the typed public protocol and client after rollback execution exists.
+- [x] Review and guarded rollback execution are committed at `e68c484`, `72cd1af`, and `f8ea18c`. Rollback reuses the original replace's pinned authority after its run terminates, binds all I/O to event-validated source data, and never issues a store for duplicate or rejected outcomes.
+- [x] Real SQLite composition proves review/rollback success, applied restart recovery, committed cleanup recovery, native rejection after payload staging, byte-free tombstones, snapshot preservation on rejection, and exact duplicates without a second native replacement.
+- [ ] Expose read/replace/list/review/rollback through the typed public protocol and client.
 - [ ] Extend the real service harness with synchronized two-runtime replacement convergence and deterministic SQLite contention/erasure overlap.
 
 ## Completed Controlled Workspace Read And Replace Composition
@@ -67,6 +68,18 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Local verification passed TypeScript, scoped Oxfmt/Oxlint, 24 focused service/authority/composition tests, and the full suite with 90 test files, 726 passing tests, and 3 intentional skips.
 - [x] Fresh independent P0-P2 re-review is clean after strengthening durable settlement assertions, native interface fidelity, runtime disposal, portable read denial, and acquisition/release checks.
 - [x] Focused commits: `566ceb2 feat: compose controlled workspace files`, `47c28e8 test: compose workspace file service`, and `a3c9bbd test: harden workspace file recovery harness`.
+
+## Completed Controlled Review And Rollback Execution
+
+- [x] `WorkspaceFileService` now owns idempotent review and complete rollback recovery behind the same small Effect Service interface as controlled reads and replacements.
+- [x] Rollback authority strictly decodes the source operation/projection, exact-replays the original committed replace against its journal event, revalidates graph file scope, fences thread erasure, and returns event-validated source path/identities with no store on duplicate or rejected outcomes.
+- [x] Rollback claims authority before reading content and uses only admission-bound source data for snapshot reads, bounded file reads, payload identity, native replacement/finalization, and anonymous frontend evidence.
+- [x] The durable order is payload Stage, conditional native Replace, MarkApplied, native Finalize, CommitRolledBack, snapshot Consume, anonymous filesystem evidence, MarkEvidenceRecorded, then payload Consume. Every boundary resumes idempotently after restart.
+- [x] Rejected rollback preserves the original snapshot. A native `Changed` after payload staging produces a consumed private row whose byte, count, and hash columns are all null; exact retry receives no store and performs no second replacement.
+- [x] A deterministic SQLite trigger proves recovery when CommitRolledBack succeeds but snapshot consumption aborts: restart duplicate cleanup consumes snapshot/payload, records evidence, and never reruns native mutation.
+- [x] Local `pnpm run validate` passes formatting, lint, TypeScript, the frontend production build, and 92 test files with 755 passing tests plus 3 intentional skips. The explicit local native addon gate also passes and no remote test workflow is retained.
+- [x] Fresh independent P0-P2 review is clean after closing jointly forged source-state and pre-claim projection TOCTOU findings.
+- [x] Focused commits: `e68c484 feat: authorize pinned workspace rollbacks`, `72cd1af feat: review and rollback workspace changes`, and `f8ea18c test: prove workspace rollback recovery`.
 
 ## Completed Checkpoints
 
@@ -278,7 +291,8 @@ Implemented, independently reviewed, committed, and verified:
 - [x] Add attributed controlled-write operation history, changed-file/diff projections, review/rollback state, and private rollback snapshot persistence.
 - [x] Add atomic run/agent/workspace authorization and durable mutation-claim pinning.
 - [x] Add controlled filesystem read/replace execution and real restart/recovery composition through the production Layer graph.
-- [ ] Add review/rollback execution and public read/replace/list/review/rollback protocol commands. Rollback still needs a user/control-plane authority and complete recovery loop.
+- [x] Add review/rollback execution with pinned source authority, full recovery, anonymous evidence, and private-byte settlement.
+- [ ] Add public read/replace/list/review/rollback protocol commands and typed client methods.
 - [ ] Add Git worktree inventory, durable change/session projections, approved mutations, and public protocol commands.
 - [ ] Complete the canonical surface taxonomy: Work, Time, Guidance, Routines, Capabilities, Processes, Changes, Permissions, and native actions.
 - [ ] Add explicit intake risk classification, assumptions, usage aggregation, and workspace conflict/review handling.
