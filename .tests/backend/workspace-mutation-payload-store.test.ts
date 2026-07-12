@@ -269,6 +269,45 @@ afterEach(async () => {
 });
 
 describe("WorkspaceMutationPayloadStore", () => {
+	it("settles a rejected replace that crashed before private bytes were staged", async () => {
+		const runtime = make_runtime(await make_database_path());
+		const expected = bytes("unstaged rejected before");
+		const replacement = bytes("unstaged rejected after");
+		const input = stage_input(
+			"replace",
+			"replace_rejected_without_payload",
+			"thread_rejected_without_payload",
+			expected,
+			replacement,
+		);
+
+		try {
+			const rows = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const store = yield* WorkspaceMutationPayloadStore;
+
+					yield* SeedThread(input.thread_id);
+					yield* SeedOperation({
+						action: "replace",
+						expected,
+						message_id: input.message_id,
+						replacement,
+						thread_id: input.thread_id,
+					});
+					yield* UpdateLifecycle(input.message_id, "rejected");
+					yield* store.Consume(resume_input(input));
+
+					return yield* database.client.select().from(WorkspaceMutationPayloads);
+				}),
+			);
+
+			expect(rows).toEqual([]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("consumes rejected replace bytes into a tombstone that Stage and Resume cannot resurrect", async () => {
 		const runtime = make_runtime(await make_database_path());
 		const expected = bytes("rejected replace before");

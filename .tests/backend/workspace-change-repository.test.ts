@@ -371,7 +371,7 @@ describe("workspace change repository", () => {
 		}
 	});
 
-	it("rolls back once, keeps evidence recording idempotent and rejects malformed stored JSON", async () => {
+	it("rolls back once, marks mutation evidence idempotently and rejects malformed stored JSON", async () => {
 		const database_path = await make_database_path();
 		const runtime = make_runtime(database_path);
 
@@ -416,19 +416,21 @@ describe("workspace change repository", () => {
 					});
 					yield* repository.MarkApplied({ _tag: "rollback", message_id: "rollback_1" });
 					const rolled_back = yield* repository.CommitRolledBack("rollback_1");
-					const replace_only = yield* repository
-						.MarkEvidenceRecorded("rollback_1")
-						.pipe(Effect.exit);
+					const first_rollback_evidence =
+						yield* repository.MarkEvidenceRecorded("rollback_1");
+					const second_rollback_evidence =
+						yield* repository.MarkEvidenceRecorded("rollback_1");
 					yield* database.client
 						.update(WorkspaceChanges)
 						.set({ after_identity_json: "{" });
 
 					return {
 						first_evidence,
+						first_rollback_evidence,
 						malformed: yield* repository.ReadChange("change_1").pipe(Effect.exit),
-						replace_only,
 						rolled_back,
 						second_evidence,
+						second_rollback_evidence,
 						wrong_identity,
 					};
 				}),
@@ -436,13 +438,14 @@ describe("workspace change repository", () => {
 
 			expect(result.first_evidence.evidence_recorded).toBe(true);
 			expect(result.second_evidence.evidence_recorded).toBe(true);
+			expect(result.first_rollback_evidence.evidence_recorded).toBe(true);
+			expect(result.second_rollback_evidence.evidence_recorded).toBe(true);
 			expect(result.rolled_back.event.payload.change).toMatchObject({
 				review_state: "rolled_back",
 				rollback_state: "consumed",
 				version: 2,
 			});
 			expect(JSON.stringify(result.malformed)).toContain("JournalInvariantError");
-			expect(JSON.stringify(result.replace_only)).toContain("WorkspaceChangeTransitionError");
 			expect(JSON.stringify(result.wrong_identity)).toContain(
 				"WorkspaceChangeTransitionError",
 			);

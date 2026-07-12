@@ -626,6 +626,10 @@ export const WorkspaceMutationPayloadStoreLive = Layer.effect(
 												)
 												.limit(1);
 
+											if (!stored && canonical.lifecycle === "rejected") {
+												return;
+											}
+
 											if (!stored || stored.thread_id !== decoded.thread_id)
 												return yield* Effect.fail(
 													make_unavailable("consume", decoded.message_id),

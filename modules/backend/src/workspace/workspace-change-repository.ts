@@ -297,7 +297,7 @@ function operation_state_is_valid(operation: WorkspaceChangeOperation) {
 		is_committed === has_journal_sequence &&
 		!(operation.action === "review" && operation.lifecycle === "applied") &&
 		(!operation.evidence_recorded ||
-			(operation.action === "replace" && operation.lifecycle === "committed"))
+			(operation.action !== "review" && operation.lifecycle === "committed"))
 	);
 }
 
@@ -1484,10 +1484,16 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 
 						yield* EnsureLiveThread(transaction, operation.thread_id);
 
-						if (operation.action !== "replace" || operation.lifecycle !== "committed")
+						if (
+							(operation.action !== "replace" && operation.action !== "rollback") ||
+							operation.lifecycle !== "committed"
+						)
 							return yield* new WorkspaceChangeTransitionError({
 								message: `Workspace operation ${message_id} cannot record evidence`,
 							});
+
+						yield* ReadDuplicate(transaction, operation);
+
 						if (operation.evidence_recorded) return operation;
 						const updated_at = yield* metadata.Now;
 						const [updated] = yield* transaction
