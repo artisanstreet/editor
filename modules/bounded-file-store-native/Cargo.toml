@@ -12,6 +12,15 @@ crate-type = ["cdylib"]
 [dependencies]
 napi = { version = "=3.10.3", features = ["napi9"] }
 napi-derive = "=3.5.9"
+windows-sys = { version = "=0.61.2", features = [
+	"Wdk_Foundation",
+	"Wdk_Storage_FileSystem",
+	"Win32_Foundation",
+	"Win32_Security",
+	"Win32_Storage_FileSystem",
+	"Win32_System_IO",
+	"Win32_System_WindowsProgramming",
+] }
 
 [build-dependencies]
 napi-build = "=2.3.2"

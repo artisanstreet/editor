@@ -1,8 +1,17 @@
 # Bounded File Store Native
 
 This private N-API package owns the production native adapter for Artisan's
-`BoundedRegularFileStore`. The scaffold exports build metadata only; it does not
-yet expose filesystem operations or participate in backend composition.
+`BoundedRegularFileStore`. It currently exposes a Windows-only pinned-root
+bounded read capability; conditional replacement, finalization, and backend
+composition remain separate future slices.
+
+`NativeBoundedRegularFileStore` accepts an absolute path on a fixed local NTFS
+volume, pins that exact root directory handle, and opens every child component
+relative to the preceding directory handle. Reads reject reparse points,
+reserved Artisan artifacts (including normalized 8.3 aliases), multiply linked
+files, concurrent writers, and concurrent path deletion or replacement. The
+single-link rule keeps future conditional replacement semantics unambiguous and
+prevents a private stage or backup from being read through a hard-link alias.
 
 The production build targets `x86_64-pc-windows-msvc`. Build output belongs in
 `.dist/bounded-file-store-native`, outside the source package and, later, outside
