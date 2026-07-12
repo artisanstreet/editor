@@ -14,8 +14,8 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Branch: `codex/backend-services`
 - [x] Package manager: pnpm 11.7.0
 - [x] Stack: TypeScript 7, Effect 4 beta, Drizzle 1 RC, SQLite
-- [x] Latest verified implementation checkpoint: `78164fd feat: adapt native workspace file stores`
-- [x] Local `HEAD`, upstream, and `origin/codex/backend-services` were equal at `78164fd` before this documentation update.
+- [x] Latest verified implementation checkpoint: `dade5c0 test: prove mutation payload recovery`
+- [x] Local `HEAD`, upstream, and `origin/codex/backend-services` were equal at `dade5c0` before this documentation update.
 - [x] `ARTISAN_RUN_NATIVE_ADDON_SMOKE=1 pnpm --filter @artisan/bounded-file-store-native verify:local` is the canonical native gate and passes locally for production reads/replacement, test-hook races, and process-crash recovery.
 - [x] Model Behaviour is committed as focused protocol, persistence, provider, service, composition, transport, and security changes.
 - [x] Local GitHub account: `sandersonstabo`; `origin` -> `https://github.com/sandersonstabo/artisan-editor.git`; GitHub visibility was verified as `PRIVATE` on 2026-07-12.
@@ -47,6 +47,8 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Native Windows pinned-root bounded reads are committed and pushed at `e915763` and `d5ec0bc`. The N-API class accepts only absolute fixed-drive local NTFS roots, resolves children through open directory handles, rejects reparse/private/alias/multiply-linked paths, denies concurrent writers/deletion, and gives in-flight async reads an exact root lease across `close()`.
 - [x] Native exact-handle conditional replacement and finalization on Windows local NTFS is complete and accepted with authenticated receipts, process-crash recovery, metadata preservation, deterministic race coverage, and best-effort flush hardening. The contract does not claim power-loss atomicity or universal filesystem support. Koffi remains rejected for this security-critical adapter because maintaining Windows NT ABI structures and syscalls in TypeScript is too fragile.
 - [x] The scoped Effect adapter and opaque workspace bounded-store registry are committed and pushed at `78164fd`. The production addon loads only during Layer acquisition, validates the exact Windows x64 MSVC non-test descriptor, adapts native results through the existing `BoundedRegularFileStore` Service, closes pinned roots through `Effect.acquireRelease`, accepts only a caller-owned stable redacted 32-byte key, and canonicalizes every workspace root before native acquisition.
+- [x] Terminal optimistic-concurrency rejection is committed and pushed at `247e7b5`. `Changed` transitions remain source-free, replay exactly after restart, reject forged journal/projection state, and never return a filesystem capability through mutation authority.
+- [x] Transient expected/replacement byte-pair persistence is committed and pushed at `c143986` with its deep recovery harness at `dade5c0`. The private payload table is hash/length constrained, consumed into non-resurrectable tombstones, deleted during thread erasure, and never copied into commands, events, operations, or public projections.
 - [ ] Build the controlled read/replace/review/rollback service around the filesystem registry, workspace-change repository, snapshot store, evidence recorder, and public protocol.
 - [ ] Prove filesystem mutation crash windows, exact retries, authorization races, and restart recovery through the real production composition.
 
@@ -135,6 +137,18 @@ Implemented, independently reviewed, committed, and verified:
 - [x] A clean-checkout simulation removed `.dist/bounded-file-store-native` while typecheck and the public adapter suite passed, then restored the output in `finally`. The focused suites pass 14 tests without loading the real addon.
 - [x] Full validation passes 80 test files, 581 tests, and 3 intentional skips. Fresh independent P0-P2 review is clean.
 - [x] Focused commit: `78164fd feat: adapt native workspace file stores`.
+
+## Completed Durable Mutation Recovery Prerequisites
+
+Implemented, independently reviewed, committed, and verified:
+
+- [x] `WorkspaceChangeRepository` now has a terminal `rejected` lifecycle for native `Changed`. Exact replace/rollback retries return the durable rejection without creating a command, event, or change projection.
+- [x] Rejected rows fail closed if forged command, event, replace projection, consumed rollback projection, journal sequence, evidence, or review state is present. `WorkspaceMutationAuthority` maps the terminal retry to typed `operation_rejected` and returns no capability-bearing admission.
+- [x] `WorkspaceMutationPayloadStore` privately stages the exact expected/replacement byte pair for replace and rollback recovery, binds both identities to the canonical operation/projection, recomputes SHA-256 on read, and returns fresh byte copies.
+- [x] The generated SQLite table constrains available/consumed shape, byte lengths, four-MiB bounds, and lowercase hashes. Committed consumption nulls every sensitive field while retaining a tombstone that prevents resurrection.
+- [x] Focused recovery coverage includes malformed and corrupt rows, restart, erasure claims/tombstones, real thread erasure, source-free public persistence, exact two-runtime staging, and ten synchronized two-runtime consumption races each for replace and rollback.
+- [x] Full validation passes 81 test files, 635 tests, and 3 intentional skips. Drizzle generation is idempotent, migration integrity passes, and fresh independent P0-P2 reviews are clean.
+- [x] Focused commits: `247e7b5 feat: persist rejected workspace changes`, `c143986 feat: store workspace mutation payloads`, and `dade5c0 test: prove mutation payload recovery`.
 
 ## Completed Rollback Snapshot Foundation
 
@@ -245,7 +259,7 @@ Implemented, independently reviewed, committed, and verified:
 
 - [x] Add attributed controlled-write operation history, changed-file/diff projections, review/rollback state, and private rollback snapshot persistence.
 - [x] Add atomic run/agent/workspace authorization and durable mutation-claim pinning.
-- [ ] Add controlled filesystem read/replace/review/rollback execution and public protocol commands. The production bounded-store Layer and workspace registry now exist; execution/recovery composition remains.
+- [ ] Add controlled filesystem read/replace/review/rollback execution and public protocol commands. Native Layers, terminal rejection, and exact recovery payload persistence now exist; execution/recovery composition remains.
 - [ ] Add Git worktree inventory, durable change/session projections, approved mutations, and public protocol commands.
 - [ ] Complete the canonical surface taxonomy: Work, Time, Guidance, Routines, Capabilities, Processes, Changes, Permissions, and native actions.
 - [ ] Add explicit intake risk classification, assumptions, usage aggregation, and workspace conflict/review handling.
