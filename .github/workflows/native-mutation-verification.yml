@@ -63,13 +63,18 @@ jobs:
                   ARTISAN_RUN_NATIVE_READ_SMOKE: "1"
               run: node .tests/bounded-file-store-native/native-read-smoke.cjs ./.dist/bounded-file-store-native/index.cjs
 
+            - name: Build native test-hook binding
+              run: pnpm --filter @artisan/bounded-file-store-native build:test-hooks
+
+            - name: Trace basic native replacement
+              env:
+                  ARTISAN_RUN_NATIVE_DIAGNOSTIC_SMOKE: "1"
+              run: node .tests/bounded-file-store-native/native-replace-diagnostic-smoke.cjs ./.dist/bounded-file-store-native-test/index.cjs
+
             - name: Verify authenticated replacement and recovery
               env:
                   ARTISAN_RUN_NATIVE_REPLACE_SMOKE: "1"
               run: node .tests/bounded-file-store-native/native-replace-smoke.cjs ./.dist/bounded-file-store-native/index.cjs
-
-            - name: Build native test-hook binding
-              run: pnpm --filter @artisan/bounded-file-store-native build:test-hooks
 
             - name: Verify deterministic replacement races
               env:
