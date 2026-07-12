@@ -223,6 +223,55 @@ export const WorkspaceChangeOperations = sqliteTable(
 	],
 );
 
+/** Pins the authority snapshot that admitted one controlled replacement claim. */
+export const WorkspaceMutationAuthorities = sqliteTable(
+	"workspace_mutation_authorities",
+	{
+		message_id: text("message_id")
+			.primaryKey()
+			.references(() => WorkspaceChangeOperations.message_id, { onDelete: "cascade" }),
+		change_id: text("change_id").notNull(),
+		thread_id: text("thread_id").notNull(),
+		run_id: text("run_id").notNull(),
+		agent_id: text("agent_id").notNull(),
+		workspace_id: text("workspace_id").notNull(),
+		authority_kind: text("authority_kind").notNull(),
+		working_directory: text("working_directory").notNull(),
+		group_id: text("group_id"),
+		assignment_id: text("assignment_id"),
+		scope_kind: text("scope_kind"),
+		scope_value: text("scope_value"),
+		approval: text("approval"),
+		created_at: text("created_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("workspace_mutation_authorities_change_id_unique").on(table.change_id),
+		index("workspace_mutation_authorities_thread_id_index").on(table.thread_id),
+		index("workspace_mutation_authorities_run_id_index").on(table.run_id),
+		check(
+			"workspace_mutation_authorities_shape_check",
+			sql`
+				(
+					${table.authority_kind} = 'base_run'
+					AND ${table.group_id} IS NULL
+					AND ${table.assignment_id} IS NULL
+					AND ${table.scope_kind} IS NULL
+					AND ${table.scope_value} IS NULL
+					AND ${table.approval} IS NULL
+				)
+				OR (
+					${table.authority_kind} = 'graph_run'
+					AND ${table.group_id} IS NOT NULL
+					AND ${table.assignment_id} IS NOT NULL
+					AND ${table.scope_kind} IN ('repo', 'files')
+					AND ${table.scope_value} IS NOT NULL
+					AND ${table.approval} IN ('never', 'on_request', 'always')
+				)
+			`,
+		),
+	],
+);
+
 /** Stores durable, source-free workspace change projections. */
 export const WorkspaceChanges = sqliteTable(
 	"workspace_changes",

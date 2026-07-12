@@ -10,6 +10,11 @@ import type { GlobalGuidanceProvider } from "@artisan/protocol";
 import { AgentGraphOrchestratorLive } from "../orchestration/agent-graph-orchestrator";
 import { AgentGraphRepositoryLive } from "../orchestration/agent-graph-repository";
 import { AgentOrchestratorLive } from "../orchestration/agent-orchestrator";
+import {
+	make_node_workspace_filesystem_registry_layer,
+	WorkspaceFilesystemRegistrationError,
+	WorkspaceFilesystemRegistry,
+} from "../filesystem/workspace-filesystem-registry";
 import { NodeProcessRunnerLive } from "../git/node-process-runner";
 import { make_database_layer } from "../persistence/database";
 import { JournalNotifierLive } from "../persistence/journal-notifier";
@@ -81,6 +86,7 @@ import { ModelBehaviourRegistryError } from "../model-behaviour/model-behaviour-
 import { ModelBehaviourServiceLive } from "../model-behaviour/model-behaviour-service";
 import { WorkspaceChangeRepositoryLive } from "../workspace/workspace-change-repository";
 import { WorkspaceEvidenceRecorderLive } from "../workspace/workspace-evidence-recorder";
+import { WorkspaceMutationAuthorityLive } from "../workspace/workspace-mutation-authority";
 import { WorkspaceSnapshotStoreLive } from "../workspace/workspace-snapshot-store";
 
 export interface BackendOptions {
@@ -101,6 +107,10 @@ export interface BackendOptions {
 	readonly terminal_driver?: Layer.Layer<TerminalDriver>;
 	readonly thread_metadata_refiner?: Layer.Layer<ThreadMetadataRefiner>;
 	readonly thread_resource_quiescer?: Layer.Layer<ThreadResourceQuiescer>;
+	readonly workspace_filesystem_registry?: Layer.Layer<
+		WorkspaceFilesystemRegistry,
+		WorkspaceFilesystemRegistrationError
+	>;
 }
 
 /** Configures platform-native provider discovery for the production desktop composition. */
@@ -146,6 +156,13 @@ export function make_backend_layer(options: BackendOptions) {
 	);
 	const workspace_snapshots = WorkspaceSnapshotStoreLive.pipe(
 		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(infrastructure),
+	);
+	const workspace_filesystems =
+		options.workspace_filesystem_registry ?? make_node_workspace_filesystem_registry_layer([]);
+	const workspace_authority = WorkspaceMutationAuthorityLive.pipe(
+		Layer.provideMerge(workspace_filesystems),
+		Layer.provideMerge(workspace_changes),
 		Layer.provideMerge(infrastructure),
 	);
 	const engine_registry = make_engine_registry_layer(options.engines ?? []);
@@ -267,6 +284,8 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(model_behaviour),
 		Layer.provideMerge(workspace_changes),
 		Layer.provideMerge(workspace_evidence),
+		Layer.provideMerge(workspace_authority),
+		Layer.provideMerge(workspace_filesystems),
 		Layer.provideMerge(workspace_snapshots),
 	);
 }

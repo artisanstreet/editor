@@ -29,6 +29,7 @@ import {
 	WorkspaceChangeOperations,
 	WorkspaceChanges,
 	WorkspaceChangeSnapshots,
+	WorkspaceMutationAuthorities,
 } from "../../modules/backend/src/persistence/schema";
 import { ThreadReadModel } from "../../modules/backend/src/persistence/thread-read-model";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
@@ -255,6 +256,22 @@ describe("thread erasure replay", () => {
 							updated_at: now.value,
 							workspace_id: "secret_workspace",
 						});
+						yield* database.client.insert(WorkspaceMutationAuthorities).values({
+							agent_id: "secret_workspace_agent",
+							approval: null,
+							assignment_id: null,
+							authority_kind: "base_run",
+							change_id: "secret_workspace_change",
+							created_at: now.value,
+							group_id: null,
+							message_id: "secret_workspace_command",
+							run_id: "secret_workspace_run",
+							scope_kind: null,
+							scope_value: null,
+							thread_id: "thread_erased",
+							working_directory: "C:/workspace/erased",
+							workspace_id: "secret_workspace",
+						});
 						yield* database.client.insert(WorkspaceChanges).values({
 							after_identity_json: content_identity,
 							agent_id: "secret_workspace_agent",
@@ -351,6 +368,9 @@ describe("thread erasure replay", () => {
 							workspace_change_snapshots: yield* database.client
 								.select()
 								.from(WorkspaceChangeSnapshots),
+							workspace_mutation_authorities: yield* database.client
+								.select()
+								.from(WorkspaceMutationAuthorities),
 						};
 					}),
 				),
@@ -493,6 +513,7 @@ describe("thread erasure replay", () => {
 			expect(result.workspace_change_operations).toEqual([]);
 			expect(result.workspace_changes).toEqual([]);
 			expect(result.workspace_change_snapshots).toEqual([]);
+			expect(result.workspace_mutation_authorities).toEqual([]);
 		} finally {
 			await runtime.dispose();
 		}

@@ -206,6 +206,29 @@ export {
 	type WorkspaceSnapshotStageInput,
 	type WorkspaceSnapshotStoreError,
 } from "./workspace/workspace-snapshot-store";
+export {
+	make_node_workspace_filesystem_registry_layer,
+	WorkspaceFilesystemAuthorizationError,
+	WorkspaceFilesystemNotFoundError,
+	WorkspaceFilesystemRegistrationError,
+	WorkspaceFilesystemRegistry,
+	type WorkspaceFilesystem,
+	type WorkspaceFilesystemAuthorization,
+	type WorkspaceFilesystemRegistration,
+} from "./filesystem/workspace-filesystem-registry";
+export {
+	WorkspaceMutationAuthority,
+	WorkspaceMutationAuthorityConflict,
+	WorkspaceMutationAuthorityDenied,
+	WorkspaceMutationAuthorityFailure,
+	WorkspaceMutationAuthorityInvalid,
+	WorkspaceMutationAuthorityLive,
+	type WorkspaceMutationAdmission,
+	type WorkspaceMutationAuthorityDenialReason,
+	type WorkspaceMutationAuthorityError,
+	type WorkspaceMutationAuthorityGrant,
+	type WorkspaceMutationClaimReplace,
+} from "./workspace/workspace-mutation-authority";
 export { AgentOrchestrator } from "./orchestration/agent-orchestrator";
 export {
 	AgentGraphOrchestrator,
