@@ -14,13 +14,26 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Branch: `codex/backend-services`
 - [x] Package manager: pnpm 11.7.0
 - [x] Stack: TypeScript 7, Effect 4 beta, Drizzle 1 RC, SQLite
-- [x] Latest implementation checkpoint: `d5ec0bc test: prove native root confinement`
-- [x] Latest verified remote implementation checkpoint: `d5ec0bc test: prove native root confinement`
+- [x] Latest repository checkpoint: `dd6c99c docs: define shared workspace coordination`
+- [x] Latest verified remote checkpoint: `dd6c99c docs: define shared workspace coordination`
 - [x] Model Behaviour is committed as focused protocol, persistence, provider, service, composition, transport, and security changes.
 - [x] Local GitHub account: `sandersonstabo`; `origin` -> `https://github.com/sandersonstabo/artisan-editor.git`; GitHub visibility was verified as `PRIVATE` on 2026-07-12.
 - [x] Commit every coherent, verified checkpoint as a small, focused, independently understandable change. Never bundle unrelated dirty work into the same commit and never push `main` or `master` without explicit approval.
 - [x] Push the current feature branch to `origin` after every coherent commit and at natural checkpoints. Local worktrees are temporary working state, not durable project storage.
 - [x] Check local and remote state at session start, after each push, and before handoff. Confirm the branch tracks `origin` and that local `HEAD` equals its upstream after every push.
+- [x] The PRD now makes one visible shared checkout and selected branch a product guarantee. Artisan must coordinate writers through durable mutation claims and must never create hidden worktrees, per-agent branches, or temporary commits.
+
+## Native Mutation Safety Hold
+
+- [ ] Do not load or execute the native addon on this AMD RAID host. This explicitly forbids `pnpm --filter @artisan/bounded-file-store-native build:debug:gnu`, which unconditionally loads the binding and runs native read smoke even without mutation flags, plus either native smoke script. Compilation, formatting, linting, static review, and non-native repository tests remain allowed; runtime verification must use an isolated Windows environment on a different storage stack until the host driver is remediated and a separate safety decision is recorded.
+- [x] Windows bugchecked at 08:45:50 with `0xD1 DRIVER_IRQL_NOT_LESS_OR_EQUAL`: `0x000000d1 (0x0, 0x2, 0x1, 0xfffff8052abb750f)`. WinDbg analysis of the preserved copy at `C:\Users\Sander\Desktop\071226-17781-01.dmp` attributes the null write directly to `rcbottom.sys+0x750f`, AMD-RAID Bottom Service version `9.3.3-00218`; the captured stack contains no Node, N-API, NTFS, or Artisan frame.
+- [x] The dump's failure bucket is `AV_rcbottom!unknown_function`. `rcbottom.sys` is the boot storage driver used by this machine's actual RAID-backed disks, so it must not be disabled or removed as a workaround. Driver or BIOS changes require an explicit human decision, a current backup, and the motherboard/AMD recovery procedure.
+- [x] Correlation with the native harness remains strong: generated addon files were written at 08:45:41, the first concurrent replacement root was created at 08:45:43, and that unfinished root retained a valid 1 MiB stage/backup/published-target receipt after reboot. Preserve `C:\Users\Sander\AppData\Local\Temp\artisan-native-replace-5hTN29` and the copied dump as incident evidence.
+- [x] Independent static ABI review found no Rust memory corruption, dangling handle, double close, or malformed EA record. It found four-byte-short `FILE_RENAME_INFORMATION` and `FILE_LINK_INFORMATION` allocations plus an incorrect secondary read of `IO_STATUS_BLOCK.Status` after synchronous `NtFlushBuffersFile`; all three are fixed in the dirty native implementation.
+- [x] The corrected native crate passes `cargo fmt`, GNU `cargo check`, and GNU Clippy with warnings denied without loading or executing the addon.
+- [x] A fresh independent review of the complete corrected native diff reports no remaining P0-P2 finding. Residual acceptance risk is runtime NTFS, EA, ACL, share-mode, crash-window, and cross-process race behavior in the isolated Windows harness.
+- [x] Standard `build:debug:gnu` no longer enables mutation smoke implicitly. Mutation smoke now requires `ARTISAN_RUN_NATIVE_REPLACE_SMOKE=1`, and the concurrent race phase separately requires `ARTISAN_RUN_NATIVE_RACE_SMOKE=1`.
+- [ ] Treat the authenticated native mutation implementation and rewritten harness as unaccepted dirty work until the complete corrected diff passes fresh independent static review and the mutation, recovery, and race harnesses pass in a disposable Windows environment outside this RAID storage stack.
 
 ## Active Work
 
