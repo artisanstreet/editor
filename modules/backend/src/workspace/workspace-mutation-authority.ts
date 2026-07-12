@@ -1,4 +1,4 @@
-import { eq, or } from "drizzle-orm";
+import { and, eq, or } from "drizzle-orm";
 import { Context, Data, Effect, Layer, Schema } from "effect";
 
 import {
@@ -27,6 +27,7 @@ import {
 	OrchestrationCoordinators,
 	OrchestrationGroups,
 	OrchestrationRuns,
+	WorkspaceChanges,
 	WorkspaceChangeOperations,
 	WorkspaceMutationAuthorities,
 } from "../persistence/schema";
@@ -35,6 +36,7 @@ import {
 	WorkspaceChangeIdConflict,
 	WorkspaceChangeRepository,
 	WorkspaceChangeTransitionError,
+	type ClaimRollback,
 	type ClaimReplace,
 	type WorkspaceChangeClaim,
 } from "./workspace-change-repository";
@@ -55,6 +57,16 @@ const WorkspaceMutationClaimReplace = Schema.Struct({
 	sent_at: IsoDateTime,
 	thread_id: Identifier,
 	workspace_id: Identifier,
+});
+
+const WorkspaceMutationClaimRollback = Schema.Struct({
+	_tag: Schema.Literal("rollback"),
+	change_id: Identifier,
+	expected_after: ContentIdentity,
+	message_id: Identifier,
+	request_fingerprint: RequestFingerprint,
+	sent_at: IsoDateTime,
+	thread_id: Identifier,
 });
 
 const StoredAuthorityBase = {
@@ -89,8 +101,11 @@ const StoredWorkspaceMutationAuthority = Schema.Union([
 	}),
 ]);
 
-/** Identifies the single supported controlled-mutation claim. */
+/** Identifies a controlled replacement claim. */
 export type WorkspaceMutationClaimReplace = typeof WorkspaceMutationClaimReplace.Type;
+
+/** Identifies a user-initiated rollback against one committed controlled replacement. */
+export type WorkspaceMutationClaimRollback = typeof WorkspaceMutationClaimRollback.Type;
 
 /** Describes the durable authority that admitted a controlled mutation. */
 export type WorkspaceMutationAuthorityGrant =
@@ -120,6 +135,39 @@ export interface WorkspaceMutationAdmission {
 	readonly store: typeof BoundedRegularFileStore.Service;
 }
 
+/** Carries the immutable source data validated before rollback admission. */
+export interface WorkspaceMutationRollbackSource {
+	readonly after_identity: typeof ContentIdentity.Type;
+	readonly before_identity: typeof ContentIdentity.Type;
+	readonly path: string;
+	readonly workspace_id: string;
+}
+
+/** Returns a rollback claim bound to its validated immutable source data. */
+export type WorkspaceMutationRollbackAdmission =
+	| {
+			readonly _tag: "authorized";
+			readonly authority: WorkspaceMutationAuthorityGrant;
+			readonly claim: Extract<
+				WorkspaceChangeClaim,
+				{ readonly _tag: "claimed" | "incomplete_retry" }
+			>;
+			readonly source: WorkspaceMutationRollbackSource;
+			readonly store: typeof BoundedRegularFileStore.Service;
+	  }
+	| {
+			readonly _tag: "duplicate";
+			readonly authority: WorkspaceMutationAuthorityGrant;
+			readonly claim: Extract<WorkspaceChangeClaim, { readonly _tag: "duplicate" }>;
+			readonly source: WorkspaceMutationRollbackSource;
+	  }
+	| {
+			readonly _tag: "rejected";
+			readonly authority: WorkspaceMutationAuthorityGrant;
+			readonly claim: Extract<WorkspaceChangeClaim, { readonly _tag: "rejected" }>;
+			readonly source: WorkspaceMutationRollbackSource;
+	  };
+
 export type WorkspaceMutationAuthorityDenialReason =
 	| "identity_mismatch"
 	| "path_outside_scope"
@@ -133,7 +181,7 @@ export type WorkspaceMutationAuthorityDenialReason =
 /** Reports a malformed controlled-mutation request without echoing its content. */
 export class WorkspaceMutationAuthorityInvalid extends Data.TaggedError(
 	"WorkspaceMutationAuthorityInvalid",
-)<{ readonly operation: "claim_replace" }> {}
+)<{ readonly operation: "claim_replace" | "claim_rollback" }> {}
 
 /** Reports a live authority proof that does not permit the requested mutation. */
 export class WorkspaceMutationAuthorityDenied extends Data.TaggedError(
@@ -169,6 +217,9 @@ export class WorkspaceMutationAuthority extends Context.Service<
 		readonly ClaimReplace: (
 			input: WorkspaceMutationClaimReplace,
 		) => Effect.Effect<WorkspaceMutationAdmission, WorkspaceMutationAuthorityError>;
+		readonly ClaimRollback: (
+			input: WorkspaceMutationClaimRollback,
+		) => Effect.Effect<WorkspaceMutationRollbackAdmission, WorkspaceMutationAuthorityError>;
 	}
 >()("Artisan/WorkspaceMutationAuthority") {}
 
@@ -188,7 +239,7 @@ function denied(reason: WorkspaceMutationAuthorityDenialReason) {
 	return new WorkspaceMutationAuthorityDenied({ reason });
 }
 
-function DecodeClaim(input: unknown) {
+function DecodeReplaceClaim(input: unknown) {
 	return Schema.decodeUnknownEffect(WorkspaceMutationClaimReplace, {
 		onExcessProperty: "error",
 	})(input).pipe(
@@ -198,9 +249,37 @@ function DecodeClaim(input: unknown) {
 	);
 }
 
+function DecodeRollbackClaim(input: unknown) {
+	return Schema.decodeUnknownEffect(WorkspaceMutationClaimRollback, {
+		onExcessProperty: "error",
+	})(input).pipe(
+		Effect.mapError(
+			() => new WorkspaceMutationAuthorityInvalid({ operation: "claim_rollback" }),
+		),
+	);
+}
+
 function DecodeStoredJson<A>(schema: Schema.Codec<A, A>, value: string) {
 	return Schema.decodeUnknownEffect(Schema.UnknownFromJsonString)(value).pipe(
 		Effect.flatMap(Schema.decodeUnknownEffect(schema, { onExcessProperty: "error" })),
+		Effect.mapError(invalid_state),
+	);
+}
+
+function DecodeRequiredStoredJson<A>(schema: Schema.Codec<A, A>, value: string | null) {
+	if (value === null) {
+		return Effect.fail(invalid_state());
+	}
+
+	return DecodeStoredJson(schema, value);
+}
+
+function DecodeOptionalStoredJson<A>(schema: Schema.Codec<A, A>, value: string | null) {
+	return value === null ? Effect.succeed(undefined) : DecodeStoredJson(schema, value);
+}
+
+function DecodeRequiredStoredValue<A>(schema: Schema.Codec<A, A>, value: unknown) {
+	return Schema.decodeUnknownEffect(schema, { onExcessProperty: "error" })(value).pipe(
 		Effect.mapError(invalid_state),
 	);
 }
@@ -246,6 +325,95 @@ function authority_matches_claim(authority: StoredAuthority, claim: WorkspaceMut
 	);
 }
 
+function identities_match(left: typeof ContentIdentity.Type, right: typeof ContentIdentity.Type) {
+	return (
+		left.algorithm === right.algorithm &&
+		left.byte_count === right.byte_count &&
+		left.content_hash === right.content_hash
+	);
+}
+
+function raw_origins_match(
+	left: typeof RawOrigin.Type | undefined,
+	right: typeof RawOrigin.Type | undefined,
+) {
+	return (
+		(left === undefined && right === undefined) ||
+		(left !== undefined &&
+			right !== undefined &&
+			left.provider === right.provider &&
+			left.reference === right.reference)
+	);
+}
+
+function ValidateSourceAuthority(
+	authority: StoredAuthority,
+	operation: typeof WorkspaceChangeOperations.$inferSelect,
+	change: typeof WorkspaceChanges.$inferSelect,
+) {
+	return Effect.gen(function* () {
+		const decoded = yield* Effect.all({
+			change_after: DecodeStoredJson(ContentIdentity, change.after_identity_json),
+			change_before: DecodeStoredJson(ContentIdentity, change.before_identity_json),
+			change_path: DecodeRequiredStoredValue(WorkspacePath, change.path),
+			change_raw_origin: DecodeOptionalStoredJson(RawOrigin, change.raw_origin_json),
+			operation_after: DecodeRequiredStoredJson(
+				ContentIdentity,
+				operation.result_identity_json,
+			),
+			operation_before: DecodeRequiredStoredJson(
+				ContentIdentity,
+				operation.expected_identity_json,
+			),
+			operation_path: DecodeRequiredStoredValue(WorkspacePath, operation.path),
+			operation_raw_origin: DecodeOptionalStoredJson(RawOrigin, operation.raw_origin_json),
+		});
+
+		if (
+			operation.action !== "replace" ||
+			operation.agent_id !== authority.agent_id ||
+			operation.change_id !== authority.change_id ||
+			operation.lifecycle !== "committed" ||
+			operation.message_id !== authority.message_id ||
+			decoded.operation_path !== decoded.change_path ||
+			operation.run_id !== authority.run_id ||
+			operation.thread_id !== authority.thread_id ||
+			operation.workspace_id !== authority.workspace_id ||
+			change.agent_id !== authority.agent_id ||
+			change.change_id !== authority.change_id ||
+			change.run_id !== authority.run_id ||
+			change.source_command_id !== authority.message_id ||
+			change.thread_id !== authority.thread_id ||
+			change.workspace_id !== authority.workspace_id ||
+			!identities_match(decoded.operation_before, decoded.change_before) ||
+			!identities_match(decoded.operation_after, decoded.change_after) ||
+			!raw_origins_match(decoded.operation_raw_origin, decoded.change_raw_origin)
+		) {
+			return yield* Effect.fail(invalid_state());
+		}
+
+		return yield* Schema.decodeUnknownEffect(WorkspaceMutationClaimReplace, {
+			onExcessProperty: "error",
+		})({
+			_tag: "replace",
+			agent_id: authority.agent_id,
+			change_id: authority.change_id,
+			expected_before: decoded.operation_before,
+			intended_after: decoded.operation_after,
+			message_id: authority.message_id,
+			path: decoded.operation_path,
+			...(decoded.operation_raw_origin === undefined
+				? {}
+				: { raw_origin: decoded.operation_raw_origin }),
+			request_fingerprint: operation.request_fingerprint,
+			run_id: authority.run_id,
+			sent_at: operation.sent_at,
+			thread_id: authority.thread_id,
+			workspace_id: authority.workspace_id,
+		}).pipe(Effect.mapError(invalid_state));
+	});
+}
+
 function file_scope_contains(scope: string, path: string) {
 	return path === scope || path.startsWith(`${scope}/`);
 }
@@ -264,6 +432,29 @@ function repository_claim_from(claim: WorkspaceMutationClaimReplace): ClaimRepla
 		run_id: claim.run_id,
 		sent_at: claim.sent_at,
 		thread_id: claim.thread_id,
+		workspace_id: claim.workspace_id,
+	};
+}
+
+function rollback_repository_claim_from(claim: WorkspaceMutationClaimRollback): ClaimRollback {
+	return {
+		_tag: "rollback",
+		change_id: claim.change_id,
+		expected_after: claim.expected_after,
+		message_id: claim.message_id,
+		request_fingerprint: claim.request_fingerprint,
+		sent_at: claim.sent_at,
+		thread_id: claim.thread_id,
+	};
+}
+
+function rollback_source_from(
+	claim: WorkspaceMutationClaimReplace,
+): WorkspaceMutationRollbackSource {
+	return {
+		after_identity: claim.intended_after,
+		before_identity: claim.expected_before,
+		path: claim.path,
 		workspace_id: claim.workspace_id,
 	};
 }
@@ -329,12 +520,47 @@ export const WorkspaceMutationAuthorityLive = Layer.effect(
 					return yield* Effect.fail(denied("path_outside_scope"));
 				}
 			});
+		const ValidatePinnedSourcePath = (authority: StoredAuthority, path: string) =>
+			Effect.gen(function* () {
+				if (authority.authority_kind !== "graph_run" || authority.scope_kind !== "files") {
+					return;
+				}
+
+				const controlled_scope = yield* Schema.decodeUnknownEffect(WorkspacePath)(
+					authority.scope_value,
+				).pipe(Effect.mapError(invalid_state));
+
+				if (!file_scope_contains(controlled_scope, path)) {
+					return yield* Effect.fail(denied("path_outside_scope"));
+				}
+			});
 		/** A same-value update makes exact retries serialize against thread erasure. */
 		const FenceExactRetry = (transaction: typeof database.client, authority: StoredAuthority) =>
 			transaction
 				.update(WorkspaceMutationAuthorities)
 				.set({ created_at: authority.created_at })
 				.where(eq(WorkspaceMutationAuthorities.message_id, authority.message_id))
+				.returning({ message_id: WorkspaceMutationAuthorities.message_id })
+				.pipe(
+					Effect.flatMap(([fenced]) =>
+						fenced ? Effect.void : Effect.fail(invalid_state()),
+					),
+				);
+		/** A source-authority write prevents rollback admission from racing thread erasure. */
+		const FenceRollbackSource = (
+			transaction: typeof database.client,
+			authority: StoredAuthority,
+		) =>
+			transaction
+				.update(WorkspaceMutationAuthorities)
+				.set({ created_at: authority.created_at })
+				.where(
+					and(
+						eq(WorkspaceMutationAuthorities.change_id, authority.change_id),
+						eq(WorkspaceMutationAuthorities.message_id, authority.message_id),
+						eq(WorkspaceMutationAuthorities.thread_id, authority.thread_id),
+					),
+				)
 				.returning({ message_id: WorkspaceMutationAuthorities.message_id })
 				.pipe(
 					Effect.flatMap(([fenced]) =>
@@ -542,6 +768,23 @@ export const WorkspaceMutationAuthorityLive = Layer.effect(
 						error instanceof JournalStoreFailure ? error.cause : error,
 					),
 				);
+		const ClaimRepositoryRollback = (claim: WorkspaceMutationClaimRollback) =>
+			repository
+				.ClaimRollback(rollback_repository_claim_from(claim))
+				.pipe(
+					Effect.mapError((error) =>
+						error instanceof JournalStoreFailure ? error.cause : error,
+					),
+				);
+		const ReplaySourceReplace = (claim: WorkspaceMutationClaimReplace) =>
+			ClaimRepositoryReplace(claim).pipe(
+				Effect.mapError((error) =>
+					error instanceof WorkspaceChangeTransitionError ? error : invalid_state(),
+				),
+				Effect.flatMap((replay) =>
+					replay._tag === "duplicate" ? Effect.void : Effect.fail(invalid_state()),
+				),
+			);
 		const InferAuthority = (
 			transaction: typeof database.client,
 			claim: WorkspaceMutationClaimReplace,
@@ -567,7 +810,7 @@ export const WorkspaceMutationAuthorityLive = Layer.effect(
 			});
 
 		const ClaimReplace = (input: WorkspaceMutationClaimReplace) =>
-			DecodeClaim(input).pipe(
+			DecodeReplaceClaim(input).pipe(
 				Effect.flatMap((claim) =>
 					RetrySqliteWrite(
 						database.client.transaction((transaction) =>
@@ -682,6 +925,107 @@ export const WorkspaceMutationAuthorityLive = Layer.effect(
 				Effect.mapError(conceal_error),
 			);
 
-		return { ClaimReplace };
+		const ClaimRollback = (input: WorkspaceMutationClaimRollback) =>
+			DecodeRollbackClaim(input).pipe(
+				Effect.flatMap((claim) =>
+					RetrySqliteWrite(
+						database.client.transaction((transaction) =>
+							Effect.gen(function* () {
+								const authorities = yield* transaction
+									.select()
+									.from(WorkspaceMutationAuthorities)
+									.where(
+										eq(WorkspaceMutationAuthorities.change_id, claim.change_id),
+									)
+									.limit(2);
+
+								if (authorities.length !== 1) {
+									return yield* Effect.fail(invalid_state());
+								}
+
+								const authority = yield* DecodeStoredAuthority(authorities[0]);
+
+								if (authority.thread_id !== claim.thread_id) {
+									return yield* Effect.fail(
+										new WorkspaceMutationAuthorityConflict({
+											reason: "authority_conflict",
+										}),
+									);
+								}
+
+								const [source_operation] = yield* transaction
+									.select()
+									.from(WorkspaceChangeOperations)
+									.where(
+										eq(
+											WorkspaceChangeOperations.message_id,
+											authority.message_id,
+										),
+									)
+									.limit(1);
+								const [source_change] = yield* transaction
+									.select()
+									.from(WorkspaceChanges)
+									.where(eq(WorkspaceChanges.change_id, authority.change_id))
+									.limit(1);
+
+								if (!source_operation || !source_change) {
+									return yield* Effect.fail(invalid_state());
+								}
+
+								const source_claim = yield* ValidateSourceAuthority(
+									authority,
+									source_operation,
+									source_change,
+								);
+
+								yield* ValidatePinnedSourcePath(authority, source_claim.path);
+
+								yield* FenceRollbackSource(transaction, authority);
+								yield* ReplaySourceReplace(source_claim);
+
+								const source = rollback_source_from(source_claim);
+
+								const accepted = yield* ClaimRepositoryRollback(claim);
+								const source_authority = grant_from_stored(authority);
+
+								if (accepted._tag === "rejected") {
+									return {
+										_tag: "rejected" as const,
+										authority: source_authority,
+										claim: accepted,
+										source,
+									};
+								}
+
+								if (accepted._tag === "duplicate") {
+									return {
+										_tag: "duplicate" as const,
+										authority: source_authority,
+										claim: accepted,
+										source,
+									};
+								}
+
+								const authorized = yield* AuthorizeWorkspace(
+									authority.workspace_id,
+									authority.working_directory,
+								);
+
+								return {
+									_tag: "authorized" as const,
+									authority: source_authority,
+									claim: accepted,
+									source,
+									store: authorized.store,
+								};
+							}),
+						),
+					),
+				),
+				Effect.mapError(conceal_error),
+			);
+
+		return { ClaimReplace, ClaimRollback };
 	}),
 );

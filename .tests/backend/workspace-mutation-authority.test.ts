@@ -23,6 +23,7 @@ import {
 	OrchestrationRuns,
 	ThreadErasureClaims,
 	Threads,
+	WorkspaceChanges,
 	WorkspaceChangeOperations,
 	WorkspaceMutationAuthorities,
 } from "../../modules/backend/src/persistence/schema";
@@ -170,6 +171,34 @@ function claim(
 		thread_id: "thread_1",
 		workspace_id: "workspace_1",
 		...overrides,
+	};
+}
+
+function rollback_claim(
+	overrides: Partial<Parameters<WorkspaceMutationAuthority["Service"]["ClaimRollback"]>[0]> = {},
+) {
+	return {
+		_tag: "rollback" as const,
+		change_id: "change_1",
+		expected_after: {
+			algorithm: "sha256" as const,
+			byte_count: 3,
+			content_hash: "b".repeat(64),
+		},
+		message_id: "message_rollback_1",
+		request_fingerprint: "d".repeat(64),
+		sent_at: now,
+		thread_id: "thread_1",
+		...overrides,
+	};
+}
+
+function expected_rollback_source() {
+	return {
+		after_identity: claim().intended_after,
+		before_identity: claim().expected_before,
+		path: "src/example.ts",
+		workspace_id: "workspace_1",
 	};
 }
 
@@ -329,6 +358,26 @@ function Admit(input = claim()) {
 	return Effect.service(WorkspaceMutationAuthority).pipe(
 		Effect.flatMap((authority) => authority.ClaimReplace(input)),
 	);
+}
+
+function AdmitRollback(input = rollback_claim()) {
+	return Effect.service(WorkspaceMutationAuthority).pipe(
+		Effect.flatMap((authority) => authority.ClaimRollback(input)),
+	);
+}
+
+function CommitReplace() {
+	return Effect.gen(function* () {
+		const repository = yield* WorkspaceChangeRepository;
+
+		yield* repository.MarkApplied({
+			_tag: "replace",
+			message_id: "message_1",
+			result_identity: claim().intended_after,
+		});
+
+		return yield* repository.CommitRecorded("message_1");
+	});
 }
 
 function ReadAtomicRows() {
@@ -505,6 +554,429 @@ describe("WorkspaceMutationAuthority", () => {
 			expect(JSON.stringify(result)).not.toContain("filesystem");
 			expect(JSON.stringify(result)).not.toContain(workspace.root);
 			expect(JSON.stringify(result)).not.toContain("src/example.ts");
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("admits a rollback from one committed source authority after its run terminates", async () => {
+		const workspace = await make_workspace();
+
+		await mkdir(workspace.root);
+
+		const runtime = make_runtime(workspace.database_path, workspace.root);
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					yield* SeedBase(workspace.root);
+					yield* Admit();
+					yield* CommitReplace();
+					const database = yield* Database;
+
+					yield* database.client.update(OrchestrationRuns).set({ status: "complete" });
+
+					const admitted = yield* AdmitRollback();
+					const repository = yield* WorkspaceChangeRepository;
+
+					yield* repository.MarkApplied({
+						_tag: "rollback",
+						message_id: "message_rollback_1",
+					});
+					yield* repository.CommitRolledBack("message_rollback_1");
+
+					return {
+						admitted,
+						duplicate: yield* AdmitRollback(),
+						rows: yield* ReadAtomicRows(),
+					};
+				}),
+			);
+
+			expect(result.admitted).toMatchObject({
+				_tag: "authorized",
+				authority: { _tag: "base_run", run_id: "run_1" },
+				claim: { _tag: "claimed" },
+				source: expected_rollback_source(),
+			});
+			expect(result.admitted.source).toEqual(expected_rollback_source());
+			expect(result.duplicate).toMatchObject({
+				_tag: "duplicate",
+				authority: { _tag: "base_run", run_id: "run_1" },
+				claim: { _tag: "duplicate" },
+				source: expected_rollback_source(),
+			});
+			expect(result.duplicate.source).toEqual(expected_rollback_source());
+			expect(Object.keys(result.duplicate).toSorted()).toEqual([
+				"_tag",
+				"authority",
+				"claim",
+				"source",
+			]);
+			expect("store" in result.duplicate).toBe(false);
+			expect(result.rows.authorities).toHaveLength(1);
+			expect(result.rows.operations).toHaveLength(2);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("preserves rollback identity conflicts and transition validation", async () => {
+		const workspace = await make_workspace();
+
+		await mkdir(workspace.root);
+
+		const runtime = make_runtime(workspace.database_path, workspace.root);
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					yield* SeedBase(workspace.root);
+					yield* Admit();
+					yield* CommitReplace();
+					const database = yield* Database;
+
+					yield* database.client.update(OrchestrationRuns).set({ status: "complete" });
+
+					return {
+						wrong_expected: yield* Effect.exit(
+							AdmitRollback(
+								rollback_claim({
+									expected_after: {
+										algorithm: "sha256",
+										byte_count: 3,
+										content_hash: "e".repeat(64),
+									},
+									message_id: "message_rollback_expected",
+								}),
+							),
+						),
+						wrong_thread: yield* Effect.exit(
+							AdmitRollback(rollback_claim({ thread_id: "thread_other" })),
+						),
+						accepted: yield* AdmitRollback(),
+						command_reuse: yield* Effect.exit(
+							AdmitRollback(rollback_claim({ request_fingerprint: "f".repeat(64) })),
+						),
+					};
+				}),
+			);
+
+			expect(JSON.stringify(result.wrong_expected)).toContain("thread_unavailable");
+			expect(JSON.stringify(result.wrong_thread)).toContain("authority_conflict");
+			expect(result.accepted).toMatchObject({
+				_tag: "authorized",
+				claim: { _tag: "claimed" },
+			});
+			expect(JSON.stringify(result.command_reuse)).toContain("operation_conflict");
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("fails closed for missing or forged rollback source proof", async () => {
+		const corruptions = [
+			"missing_authority",
+			"forged_authority",
+			"forged_source_command",
+			"forged_path",
+			"malformed_operation_before",
+			"mismatched_projection_before",
+			"malformed_projection_after",
+			"mismatched_operation_after",
+			"malformed_operation_raw_origin",
+			"malformed_projection_raw_origin",
+			"mismatched_raw_origin",
+			"null_operation_before",
+			"null_operation_after",
+			"null_operation_path",
+			"non_replace_source_action",
+			"jointly_forged_identities",
+			"jointly_forged_raw_origin",
+		] as const;
+
+		for (const corruption of corruptions) {
+			const workspace = await make_workspace();
+
+			await mkdir(workspace.root);
+
+			const runtime = make_runtime(workspace.database_path, workspace.root);
+
+			try {
+				const result = await runtime.runPromise(
+					Effect.gen(function* () {
+						yield* SeedBase(workspace.root);
+						yield* Admit();
+						yield* CommitReplace();
+						const database = yield* Database;
+
+						if (corruption === "missing_authority") {
+							yield* database.client.delete(WorkspaceMutationAuthorities);
+						} else if (corruption === "forged_authority") {
+							yield* database.client
+								.update(WorkspaceMutationAuthorities)
+								.set({ agent_id: "agent_other" });
+						} else if (corruption === "forged_source_command") {
+							yield* database.client
+								.update(WorkspaceChanges)
+								.set({ source_command_id: "message_forged" });
+						} else if (corruption === "forged_path") {
+							yield* database.client
+								.update(WorkspaceChanges)
+								.set({ path: "outside/forged.ts" });
+						} else if (corruption === "malformed_operation_before") {
+							yield* database.client
+								.update(WorkspaceChangeOperations)
+								.set({ expected_identity_json: "{malformed" });
+						} else if (corruption === "mismatched_projection_before") {
+							yield* database.client.update(WorkspaceChanges).set({
+								before_identity_json: JSON.stringify({
+									algorithm: "sha256",
+									byte_count: 2,
+									content_hash: "e".repeat(64),
+								}),
+							});
+						} else if (corruption === "malformed_projection_after") {
+							yield* database.client
+								.update(WorkspaceChanges)
+								.set({ after_identity_json: "{malformed" });
+						} else if (corruption === "mismatched_operation_after") {
+							yield* database.client.update(WorkspaceChangeOperations).set({
+								result_identity_json: JSON.stringify({
+									algorithm: "sha256",
+									byte_count: 3,
+									content_hash: "f".repeat(64),
+								}),
+							});
+						} else if (corruption === "malformed_operation_raw_origin") {
+							yield* database.client
+								.update(WorkspaceChangeOperations)
+								.set({ raw_origin_json: "{malformed" });
+						} else if (corruption === "malformed_projection_raw_origin") {
+							yield* database.client
+								.update(WorkspaceChanges)
+								.set({ raw_origin_json: "{malformed" });
+						} else if (corruption === "mismatched_raw_origin") {
+							yield* database.client.update(WorkspaceChangeOperations).set({
+								raw_origin_json: JSON.stringify({
+									provider: "provider_one",
+									reference: "origin_one",
+								}),
+							});
+							yield* database.client.update(WorkspaceChanges).set({
+								raw_origin_json: JSON.stringify({
+									provider: "provider_two",
+									reference: "origin_one",
+								}),
+							});
+						} else if (corruption === "null_operation_before") {
+							yield* database.client
+								.update(WorkspaceChangeOperations)
+								.set({ expected_identity_json: null });
+						} else if (corruption === "null_operation_after") {
+							yield* database.client
+								.update(WorkspaceChangeOperations)
+								.set({ result_identity_json: null });
+						} else if (corruption === "null_operation_path") {
+							yield* database.client
+								.update(WorkspaceChangeOperations)
+								.set({ path: null });
+						} else if (corruption === "non_replace_source_action") {
+							yield* database.client
+								.update(WorkspaceChangeOperations)
+								.set({ action: "review" });
+						} else if (corruption === "jointly_forged_identities") {
+							const alternate_before = JSON.stringify({
+								algorithm: "sha256",
+								byte_count: 4,
+								content_hash: "1".repeat(64),
+							});
+							const alternate_after = JSON.stringify({
+								algorithm: "sha256",
+								byte_count: 5,
+								content_hash: "2".repeat(64),
+							});
+
+							yield* database.client.update(WorkspaceChangeOperations).set({
+								expected_identity_json: alternate_before,
+								result_identity_json: alternate_after,
+							});
+							yield* database.client.update(WorkspaceChanges).set({
+								after_identity_json: alternate_after,
+								before_identity_json: alternate_before,
+							});
+						} else {
+							const alternate_origin = JSON.stringify({
+								provider: "provider_alternate",
+								reference: "origin_alternate",
+							});
+
+							yield* database.client
+								.update(WorkspaceChangeOperations)
+								.set({ raw_origin_json: alternate_origin });
+							yield* database.client
+								.update(WorkspaceChanges)
+								.set({ raw_origin_json: alternate_origin });
+						}
+
+						return yield* Effect.exit(AdmitRollback());
+					}),
+				);
+
+				expect(JSON.stringify(result)).toContain("invalid_persisted_state");
+				expect(JSON.stringify(result)).not.toContain(workspace.root);
+			} finally {
+				await runtime.dispose();
+			}
+		}
+	});
+
+	it("keeps terminal graph rollback inside its pinned files scope", async () => {
+		const workspace = await make_workspace();
+
+		await mkdir(workspace.root);
+
+		const runtime = make_runtime(workspace.database_path, workspace.root);
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					yield* SeedGraph(workspace.root);
+					yield* Admit(
+						claim({
+							raw_origin: {
+								provider: "provider_one",
+								reference: "origin_one",
+							},
+						}),
+					);
+					yield* CommitReplace();
+					const database = yield* Database;
+
+					yield* database.client
+						.update(AgentRuns)
+						.set({ dispatch_status: "terminal", state: "complete" });
+					yield* database.client.update(Assignments).set({ state: "complete" });
+
+					const admitted = yield* AdmitRollback();
+
+					yield* database.client
+						.update(WorkspaceChanges)
+						.set({ path: "src/alternate.ts" });
+
+					const forged_projection = yield* Effect.exit(AdmitRollback());
+
+					yield* database.client
+						.update(WorkspaceChangeOperations)
+						.set({ path: "src/alternate.ts" });
+
+					const jointly_forged_in_scope = yield* Effect.exit(AdmitRollback());
+
+					yield* database.client
+						.update(WorkspaceChanges)
+						.set({ path: "outside/forged.ts" });
+					yield* database.client
+						.update(WorkspaceChangeOperations)
+						.set({ path: "outside/forged.ts" });
+
+					return {
+						admitted,
+						forged_projection,
+						jointly_forged_in_scope,
+						jointly_forged_outside: yield* Effect.exit(AdmitRollback()),
+					};
+				}),
+			);
+
+			expect(result.admitted).toMatchObject({
+				_tag: "authorized",
+				authority: { _tag: "graph_run", scope: "files" },
+				claim: { _tag: "claimed" },
+				source: expected_rollback_source(),
+			});
+			expect(JSON.stringify(result.forged_projection)).toContain("invalid_persisted_state");
+			expect(JSON.stringify(result.jointly_forged_in_scope)).toContain(
+				"invalid_persisted_state",
+			);
+			expect(JSON.stringify(result.jointly_forged_outside)).toContain("path_outside_scope");
+			expect(JSON.stringify(result.jointly_forged_outside)).not.toContain(workspace.root);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("returns an exact rejected rollback with its source and no mutation store", async () => {
+		const workspace = await make_workspace();
+
+		await mkdir(workspace.root);
+
+		const runtime = make_runtime(workspace.database_path, workspace.root);
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					yield* SeedBase(workspace.root);
+					yield* Admit();
+					yield* CommitReplace();
+					const repository = yield* WorkspaceChangeRepository;
+
+					yield* repository.ClaimRollback(rollback_claim());
+					yield* repository.RejectChanged("message_rollback_1");
+
+					return yield* AdmitRollback();
+				}),
+			);
+
+			expect(result).toMatchObject({
+				_tag: "rejected",
+				authority: { _tag: "base_run", run_id: "run_1" },
+				claim: { _tag: "rejected" },
+				source: expected_rollback_source(),
+			});
+			expect(result.source).toEqual(expected_rollback_source());
+			expect(Object.keys(result).toSorted()).toEqual([
+				"_tag",
+				"authority",
+				"claim",
+				"source",
+			]);
+			expect("store" in result).toBe(false);
+			expect(JSON.stringify(result)).not.toContain(workspace.root);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("does not admit rollback once thread erasure has fenced its source authority", async () => {
+		const workspace = await make_workspace();
+
+		await mkdir(workspace.root);
+
+		const runtime = make_runtime(workspace.database_path, workspace.root);
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					yield* SeedBase(workspace.root);
+					yield* Admit();
+					yield* CommitReplace();
+					const database = yield* Database;
+
+					yield* database.client.insert(ThreadErasureClaims).values({
+						claimed_at: now,
+						thread_id: "thread_1",
+					});
+
+					return {
+						failure: yield* Effect.exit(AdmitRollback()),
+						rows: yield* ReadAtomicRows(),
+					};
+				}),
+			);
+
+			expect(JSON.stringify(result.failure)).toContain("thread_unavailable");
+			expect(result.rows.authorities).toHaveLength(1);
+			expect(result.rows.operations).toHaveLength(1);
 		} finally {
 			await runtime.dispose();
 		}
