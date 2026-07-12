@@ -44,6 +44,7 @@ const ResumeInput = Schema.Struct({
 	replacement_identity: ContentIdentity,
 	thread_id: Identifier,
 });
+const HasRecordInput = ResumeInput;
 const ConsumeInput = ResumeInput;
 const ContentHash = /^[0-9a-f]{64}$/;
 
@@ -51,6 +52,8 @@ const ContentHash = /^[0-9a-f]{64}$/;
 export type WorkspaceMutationPayloadStageInput = typeof StageInput.Type;
 /** Selects an exact transient payload for restart recovery. */
 export type WorkspaceMutationPayloadResumeInput = typeof ResumeInput.Type;
+/** Selects the canonical operation whose private payload-record presence should be checked. */
+export type WorkspaceMutationPayloadHasRecordInput = typeof HasRecordInput.Type;
 /** Selects the exact settled payload whose private bytes should be consumed. */
 export type WorkspaceMutationPayloadConsumeInput = typeof ConsumeInput.Type;
 /** Represents one recovered exact expected and replacement byte pair. */
@@ -62,7 +65,10 @@ export type WorkspaceMutationPayload = {
 /** Reports malformed private mutation-payload input before it reaches SQLite. */
 export class WorkspaceMutationPayloadStoreInvalid extends Data.TaggedError(
 	"WorkspaceMutationPayloadStoreInvalid",
-)<{ readonly message_id?: string; readonly operation: "consume" | "resume" | "stage" }> {}
+)<{
+	readonly message_id?: string;
+	readonly operation: "consume" | "has_record" | "resume" | "stage";
+}> {}
 /** Reports a message ID already bound to a different available byte pair. */
 export class WorkspaceMutationPayloadStoreConflict extends Data.TaggedError(
 	"WorkspaceMutationPayloadStoreConflict",
@@ -70,7 +76,10 @@ export class WorkspaceMutationPayloadStoreConflict extends Data.TaggedError(
 /** Reports a missing, consumed, corrupt, erased, or otherwise unavailable payload. */
 export class WorkspaceMutationPayloadStoreUnavailable extends Data.TaggedError(
 	"WorkspaceMutationPayloadStoreUnavailable",
-)<{ readonly message_id?: string; readonly operation: "consume" | "resume" | "stage" }> {}
+)<{
+	readonly message_id?: string;
+	readonly operation: "consume" | "has_record" | "resume" | "stage";
+}> {}
 /** Represents failures returned by private workspace mutation-payload operations. */
 export type WorkspaceMutationPayloadStoreError =
 	| WorkspaceMutationPayloadStoreConflict
@@ -84,6 +93,9 @@ export class WorkspaceMutationPayloadStore extends Context.Service<
 		readonly Consume: (
 			input: WorkspaceMutationPayloadConsumeInput,
 		) => Effect.Effect<void, WorkspaceMutationPayloadStoreError>;
+		readonly HasRecord: (
+			input: WorkspaceMutationPayloadHasRecordInput,
+		) => Effect.Effect<boolean, WorkspaceMutationPayloadStoreError>;
 		readonly Resume: (
 			input: WorkspaceMutationPayloadResumeInput,
 		) => Effect.Effect<WorkspaceMutationPayload, WorkspaceMutationPayloadStoreError>;
@@ -575,6 +587,49 @@ export const WorkspaceMutationPayloadStoreLive = Layer.effect(
 			);
 		};
 
+		const HasRecord = (
+			input: WorkspaceMutationPayloadHasRecordInput,
+		): Effect.Effect<boolean, WorkspaceMutationPayloadStoreError> => {
+			const message_id = message_id_from_unknown(input);
+
+			return Decode(HasRecordInput, input, "has_record").pipe(
+				Effect.flatMap((decoded) =>
+					database.client.transaction((transaction) =>
+						Effect.gen(function* () {
+							yield* EnsureCanonical(transaction, decoded, "has_record");
+
+							const [stored] = yield* transaction
+								.select({
+									message_id: WorkspaceMutationPayloads.message_id,
+									thread_id: WorkspaceMutationPayloads.thread_id,
+								})
+								.from(WorkspaceMutationPayloads)
+								.where(eq(WorkspaceMutationPayloads.message_id, decoded.message_id))
+								.limit(1);
+
+							if (!stored) {
+								return false;
+							}
+
+							if (stored.thread_id !== decoded.thread_id) {
+								return yield* Effect.fail(
+									make_unavailable("has_record", decoded.message_id),
+								);
+							}
+
+							return true;
+						}),
+					),
+				),
+				Effect.mapError((error) =>
+					error instanceof WorkspaceMutationPayloadStoreInvalid ||
+					error instanceof WorkspaceMutationPayloadStoreUnavailable
+						? error
+						: make_unavailable("has_record", message_id),
+				),
+			);
+		};
+
 		const Consume = (
 			input: WorkspaceMutationPayloadConsumeInput,
 		): Effect.Effect<void, WorkspaceMutationPayloadStoreError> => {
@@ -709,6 +764,6 @@ export const WorkspaceMutationPayloadStoreLive = Layer.effect(
 				);
 		};
 
-		return { Consume, Resume, Stage };
+		return { Consume, HasRecord, Resume, Stage };
 	}),
 );

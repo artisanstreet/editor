@@ -269,6 +269,58 @@ afterEach(async () => {
 });
 
 describe("WorkspaceMutationPayloadStore", () => {
+	it("distinguishes an absent payload from an existing corrupt record without reading bytes", async () => {
+		const runtime = make_runtime(await make_database_path());
+		const expected = bytes("presence before private source");
+		const replacement = bytes("presence after private source");
+		const input = stage_input(
+			"replace",
+			"replace_payload_presence",
+			"thread_payload_presence",
+			expected,
+			replacement,
+		);
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const store = yield* WorkspaceMutationPayloadStore;
+
+					yield* SeedThread(input.thread_id);
+					yield* SeedOperation({
+						action: "replace",
+						expected,
+						message_id: input.message_id,
+						replacement,
+						thread_id: input.thread_id,
+					});
+					const absent = yield* store.HasRecord(resume_input(input));
+
+					yield* store.Stage(input);
+					yield* database.client
+						.update(WorkspaceMutationPayloads)
+						.set({ expected_hash: "f".repeat(64) });
+
+					return {
+						absent,
+						present: yield* store.HasRecord(resume_input(input)),
+						resume: yield* store.Resume(resume_input(input)).pipe(Effect.exit),
+					};
+				}),
+			);
+			const serialized = JSON.stringify(result);
+
+			expect(result.absent).toBe(false);
+			expect(result.present).toBe(true);
+			expect_failure_tag(result.resume, "WorkspaceMutationPayloadStoreUnavailable");
+			expect(serialized).not.toContain("presence before private source");
+			expect(serialized).not.toContain("presence after private source");
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("settles a rejected replace that crashed before private bytes were staged", async () => {
 		const runtime = make_runtime(await make_database_path());
 		const expected = bytes("unstaged rejected before");

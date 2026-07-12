@@ -181,6 +181,12 @@ export {
 	type WorkspaceEvidenceTrace,
 } from "./workspace/workspace-evidence-recorder";
 export {
+	WorkspaceFileService,
+	WorkspaceFileServiceError,
+	WorkspaceFileServiceLive,
+	type WorkspaceFileReplaceInput,
+} from "./workspace/workspace-file-service";
+export {
 	WorkspaceChangeIdConflict,
 	WorkspaceChangeRepository,
 	WorkspaceChangeRepositoryLive,
@@ -216,6 +222,7 @@ export {
 	WorkspaceMutationPayloadStoreUnavailable,
 	type WorkspaceMutationPayload,
 	type WorkspaceMutationPayloadConsumeInput,
+	type WorkspaceMutationPayloadHasRecordInput,
 	type WorkspaceMutationPayloadResumeInput,
 	type WorkspaceMutationPayloadStageInput,
 	type WorkspaceMutationPayloadStoreError,
