@@ -14,8 +14,8 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Branch: `codex/backend-services`
 - [x] Package manager: pnpm 11.7.0
 - [x] Stack: TypeScript 7, Effect 4 beta, Drizzle 1 RC, SQLite
-- [x] Latest verified implementation checkpoint: `dade5c0 test: prove mutation payload recovery`
-- [x] Local `HEAD`, upstream, and `origin/codex/backend-services` were equal at `dade5c0` before this documentation update.
+- [x] Latest verified implementation checkpoint: `54feea9 feat: discard rejected mutation bytes`
+- [x] Local `HEAD`, upstream, and `origin/codex/backend-services` were equal at `54feea9` before this documentation update.
 - [x] `ARTISAN_RUN_NATIVE_ADDON_SMOKE=1 pnpm --filter @artisan/bounded-file-store-native verify:local` is the canonical native gate and passes locally for production reads/replacement, test-hook races, and process-crash recovery.
 - [x] Model Behaviour is committed as focused protocol, persistence, provider, service, composition, transport, and security changes.
 - [x] Local GitHub account: `sandersonstabo`; `origin` -> `https://github.com/sandersonstabo/artisan-editor.git`; GitHub visibility was verified as `PRIVATE` on 2026-07-12.
@@ -49,6 +49,8 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] The scoped Effect adapter and opaque workspace bounded-store registry are committed and pushed at `78164fd`. The production addon loads only during Layer acquisition, validates the exact Windows x64 MSVC non-test descriptor, adapts native results through the existing `BoundedRegularFileStore` Service, closes pinned roots through `Effect.acquireRelease`, accepts only a caller-owned stable redacted 32-byte key, and canonicalizes every workspace root before native acquisition.
 - [x] Terminal optimistic-concurrency rejection is committed and pushed at `247e7b5`. `Changed` transitions remain source-free, replay exactly after restart, reject forged journal/projection state, and never return a filesystem capability through mutation authority.
 - [x] Transient expected/replacement byte-pair persistence is committed and pushed at `c143986` with its deep recovery harness at `dade5c0`. The private payload table is hash/length constrained, consumed into non-resurrectable tombstones, deleted during thread erasure, and never copied into commands, events, operations, or public projections.
+- [x] Thread erasure now treats every unsettled or still-available workspace mutation as a durable retention fence at `bc37306`. Complete claim and erasure transactions retry bounded SQLite contention, stale post-quiescence claims release without erasing live work, and deterministic two-runtime barriers cover Stage and MarkApplied overlap.
+- [x] Rejected mutations now discard exact payload and rollback-snapshot bytes into non-resurrectable tombstones at `54feea9`, after validating canonical operation/projection identity and private-row integrity. Exact retries and concurrent two-runtime cleanup converge without exposing content.
 - [ ] Build the controlled read/replace/review/rollback service around the filesystem registry, workspace-change repository, snapshot store, evidence recorder, and public protocol.
 - [ ] Prove filesystem mutation crash windows, exact retries, authorization races, and restart recovery through the real production composition.
 
@@ -146,9 +148,11 @@ Implemented, independently reviewed, committed, and verified:
 - [x] Rejected rows fail closed if forged command, event, replace projection, consumed rollback projection, journal sequence, evidence, or review state is present. `WorkspaceMutationAuthority` maps the terminal retry to typed `operation_rejected` and returns no capability-bearing admission.
 - [x] `WorkspaceMutationPayloadStore` privately stages the exact expected/replacement byte pair for replace and rollback recovery, binds both identities to the canonical operation/projection, recomputes SHA-256 on read, and returns fresh byte copies.
 - [x] The generated SQLite table constrains available/consumed shape, byte lengths, four-MiB bounds, and lowercase hashes. Committed consumption nulls every sensitive field while retaining a tombstone that prevents resurrection.
-- [x] Focused recovery coverage includes malformed and corrupt rows, restart, erasure claims/tombstones, real thread erasure, source-free public persistence, exact two-runtime staging, and ten synchronized two-runtime consumption races each for replace and rollback.
-- [x] Full validation passes 81 test files, 635 tests, and 3 intentional skips. Drizzle generation is idempotent, migration integrity passes, and fresh independent P0-P2 reviews are clean.
-- [x] Focused commits: `247e7b5 feat: persist rejected workspace changes`, `c143986 feat: store workspace mutation payloads`, and `dade5c0 test: prove mutation payload recovery`.
+- [x] Thread erasure preserves pending, applied, corrupt, or byte-bearing workspace mutations, releases stale claims after quiescence, and erases only fully settled terminal rows whose private bytes are gone.
+- [x] Rejected replace and rollback cleanup consumes payloads and replace snapshots only after exact lifecycle, action, thread, identity, and projection checks; absence and tombstones are idempotent without permitting resurrection.
+- [x] Focused recovery coverage includes malformed and corrupt rows, restart, erasure claims/tombstones, real thread erasure, source-free public persistence, exact two-runtime staging, deterministic Stage/MarkApplied erasure overlap, and synchronized two-runtime consumption races.
+- [x] Full validation passes 82 test files, 674 tests, and 3 intentional skips. Drizzle generation is idempotent, migration integrity passes, and fresh independent P0-P2 reviews are clean.
+- [x] Focused commits: `247e7b5 feat: persist rejected workspace changes`, `c143986 feat: store workspace mutation payloads`, `dade5c0 test: prove mutation payload recovery`, `bc37306 fix: preserve pending workspace mutations`, and `54feea9 feat: discard rejected mutation bytes`.
 
 ## Completed Rollback Snapshot Foundation
 
