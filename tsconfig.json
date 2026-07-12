@@ -19,5 +19,6 @@
 		"types": ["node", "vitest/globals"],
 		"verbatimModuleSyntax": true
 	},
-	"include": ["modules/**/*.ts", ".tests/**/*.ts", "drizzle.config.ts", "vitest.config.ts"]
+	"include": ["modules/**/*.ts", ".tests/**/*.ts", "drizzle.config.ts", "vitest.config.ts"],
+	"exclude": ["modules/frontend/**"]
 }

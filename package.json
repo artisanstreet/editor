@@ -4,13 +4,14 @@
 	"type": "module",
 	"scripts": {
 		"check": "tsc --noEmit",
+		"check:frontend": "pnpm --filter @artisan/frontend run build",
 		"db:generate": "drizzle-kit generate --config drizzle.config.ts",
 		"format": "oxfmt --ignore-path .oxfmtignore .",
 		"format:check": "oxfmt --check --ignore-path .oxfmtignore .",
 		"lint": "oxlint .",
 		"test": "vitest run",
 		"test:watch": "vitest",
-		"validate": "pnpm run format:check && pnpm run lint && pnpm run check && pnpm run test"
+		"validate": "pnpm run format:check && pnpm run lint && pnpm run check && pnpm run check:frontend && pnpm run test"
 	},
 	"devDependencies": {
 		"@artisan/backend": "workspace:*",

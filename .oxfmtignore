@@ -1,4 +1,5 @@
 agent-engine-io-research.md
 artisan-editor-prd.md
 modules/backend/drizzle/
+modules/frontend/.svelte-kit/
 pnpm-lock.yaml

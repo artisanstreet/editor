@@ -314,3 +314,34 @@ Implemented, independently reviewed, committed, and verified:
 - [ ] Keep commits small, focused, coherent, and independently understandable. Commit each verified checkpoint instead of accumulating an entire milestone or mixing unrelated changes.
 - [ ] Push the current feature branch to `origin` immediately after every verified coherent commit and at every natural checkpoint. Do not leave completed commits only on the local machine.
 - [ ] After every push, verify that local `HEAD` equals the upstream branch head and record the new checkpoint in this file.
+
+## Frontend Design Planning
+
+- [x] Added and independently reviewed `frontend-checkpoints.md`, a dependency-ordered frontend build plan that marks slices as ready, fixture-ready, blocked, or moving with the backend. It keeps `ArtisanClient` as the only production renderer gateway and does not claim integration where only protocol envelopes or fixtures exist.
+- [x] Added and independently reviewed `barekey-design-language.md`, a source-backed inspection of `usebarekey/barekey` at commit `2811067`. Barekey is treated as visual research only because the public repository has no detected license; Artisan must not copy its code, bundled fonts, logos, or other assets without permission.
+- [x] Completed the contract map and initial `modules/frontend` scaffold. Live workspace-change integration remains gated on the backend loop recording the controlled file/change service, typed client, production composition, and verification as complete.
+
+## Frontend Scaffold Milestone
+
+- [x] Added a SvelteKit/Vite+ renderer module with Svelte Effect Runtime 4, Effect 4, Tailwind CSS, shadcn-svelte conventions, mode-watcher, the repository's composer stack, and static production output under `.dist/frontend`.
+- [x] Added a source-tested frontend contract registry that classifies every initial interaction as live, fixture, backend-moving, or blocked and keeps command identity, correlation, retries, and subscriptions owned by `ArtisanClient`.
+- [x] Added Artisan-owned dark/light semantic tokens, density and reduced-motion tokens, the canonical OFL Artisan Neo variable WOFF2, Cal Sans for the `-0.05em` wordmark, and JetBrains Mono for code.
+- [x] Added the fixture-first three-pane editor shell with the `272px minmax(720px, 1fr) 340px` desktop grid, independent pane scrolling, separate editor/chat/orchestrator modes and file tabs, a dense session pane, right-first responsive collapse, a left rail, and keyboard-dismissable edge overlays.
+- [x] All new interactive behavior is SER-owned and composed with `Effect.gen`; the frontend source contains no direct Effect runner.
+- [x] Verification: `pnpm --filter @artisan/frontend run build` passed; three frontend architecture files passed 15 tests; the full `pnpm run validate` passed 87 files with 711 tests and 3 intentional skips.
+- [x] Independent frontend review findings were resolved before the milestone: responsive controls no longer cover mode buttons, duplicated responsive pane instances share shell-owned state and use unique ARIA IDs, file tabs no longer advertise a fake close action, and the button groups use honest keyboard semantics.
+- [x] Root `pnpm run validate` now includes the production frontend build, so future SER/Svelte compiler regressions fail the monorepo gate.
+- [ ] `better-svelte-check` is not available as a portable published package, so its checkpoint remains open; production build, TypeScript, import-boundary, and source-layout gates are green in the meantime.
+- [ ] The test-only typed `ArtisanClient` fixture Layer, the complete visual-fixture route, persisted pane preferences, and browser-level layout/accessibility coverage remain the next frontend foundation slices.
+
+## Frontend Typeface Prototype
+
+- [x] Built `Artisan Neo` v0.1 as an OFL-licensed derivative of the verified Inter 4.1 release. This is the usable application and visual prototype; it is not yet an original proprietary typeface.
+- [x] The primary variable font preserves Inter's `wght` 100–900 and `opsz` 14–32 axes, 2,937 glyphs, 2,852 mapped codepoints, OpenType features, and language coverage. The build also emits WOFF2 and eight correctly named static instances.
+- [x] The primary build is deterministic. After the packaging audit fixes, two clean builds of `ArtisanNeo-Variable.ttf` produced SHA-256 `028839C365C896CD7202FD100157A293B231B21AAA049E28A6D81EC497C7678D`; every glyph has a variation record, WOFF2 reopens successfully, all variable/static PostScript names are Artisan-owned, and static weight/style metadata was checked.
+- [x] The primary builder verifies both the cached official Inter 4.1 archive and extracted variable-font digests before using upstream data, so a changed cached source cannot silently alter the derivative.
+- [x] Kept `modules/artisan-font/src/build-font.py` only as a rejected from-scratch construction experiment. Its stencil-like texture did not meet the neo-grotesk visual brief and must not be presented as the product font.
+- [ ] The next type-design pass should preserve the stable text texture while redrawing `a`, `e`, `g`, `r`, `s`, `R`, `Q`, `&`, and `@`, then improve `I`/`l`/`1` differentiation. Until that pass, describe the family as Artisan's modified Inter prototype.
+- [x] Added five reproducible comparison variants—Edge, Soft, Round, Grotesk, and Wink—as topology-preserving coordinate experiments built directly from the verified Inter source plus the Artisan base treatment. Every variant retains the two axes, glyph order, cmap, variation coverage, features, and OFL metadata; corner/default instances reopen successfully and consecutive amplified TTF/WOFF2 builds are byte-identical.
+- [x] The variant pipeline materializes IUP-implied deltas, transforms every point through a fixed affine plan, re-optimizes tuples, constrains expanded outlines inside deliberate sidebearings, recomputes `hmtx`/`hhea`, and distinguishes derivative producer metadata from upstream attribution. An independent corner-coordinate oracle reports at most two units of ordinary rounding drift at `opsz=32`/weight endpoints, with no remaining P0-P2 finding.
+- [x] Added the hosted Barekey `/artisan-neo` variant lab with one shared specimen, synchronized `wght`/`opsz`/size/tracking controls, honest same-setting rows, focused UI/display proofs, and individual WOFF2 downloads. The variants were visually amplified after the first comparison proved too subtle; base Neo remains unchanged.
