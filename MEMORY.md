@@ -14,7 +14,7 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Branch: `codex/backend-services`
 - [x] Package manager: pnpm 11.7.0
 - [x] Stack: TypeScript 7, Effect 4 beta, Drizzle 1 RC, SQLite
-- [x] Latest code checkpoint: `7cbe507 feat: authorize workspace mutation claims`
+- [x] Latest code checkpoint: `b81fa19 feat: resume uncommitted workspace snapshots`
 - [x] Model Behaviour is committed as focused protocol, persistence, provider, service, composition, transport, and security changes.
 - [x] Private remote: `origin` -> `https://github.com/sandersonstabo/artisan-editor.git`; GitHub visibility was verified as `PRIVATE` on 2026-07-11.
 - [x] Active work is committed in small, focused, independently understandable checkpoints and pushed to the current feature branch immediately after verification; never push `main` or `master` without explicit approval.
@@ -25,6 +25,8 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Durable workspace change command/projection persistence is committed and pushed at `e7048cb`.
 - [x] Transactional SQLite rollback snapshots are committed and pushed at `3eba329`.
 - [x] Transactional run/agent/workspace authority is committed and pushed at `7cbe507`.
+- [x] Recovery-only access to staged rollback bytes is committed and pushed at `b81fa19`.
+- [ ] Finish and review the uncommitted conditional regular-file primitive in `filesystem.ts`, `node-filesystem.ts`, and `filesystem-conditional-replace.test.ts`. Its first worker pass has a known post-publication recovery hole: retries after cleanup can misclassify an already-applied exact replacement, and stage/backup cleanup crash windows are not all recoverable yet.
 - [ ] Build the controlled read/replace/review/rollback service around the filesystem registry, workspace-change repository, snapshot store, evidence recorder, and public protocol.
 - [ ] Prove filesystem mutation crash windows, exact retries, authorization races, and restart recovery through the real production composition.
 
@@ -59,6 +61,18 @@ Implemented, independently reviewed, committed, and verified:
 - [x] Independent final P0-P2 review is clean.
 - [x] Last full validation: 76 test files, 533 passed, 3 intentionally skipped; format, lint, typecheck, migration generation, and Drizzle integrity checks passed.
 - [x] Focused commit: `3eba329 feat: store rollback snapshots transactionally`.
+
+## Completed Snapshot Recovery Read Checkpoint
+
+Implemented, independently reviewed, committed, and verified:
+
+- [x] `WorkspaceSnapshotStore.Resume` exposes staged private bytes only to the exact live canonical replace while its lifecycle is `claimed` or `applied` and no committed projection exists.
+- [x] The recovery read binds thread, change, canonical before identity, snapshot metadata, content length, and a fresh SHA-256 digest; missing, consumed, corrupt, cross-thread, committed, erased, or malformed state fails closed without leaking content.
+- [x] Ordinary `Read` remains committed-only, so recovery access does not broaden the public rollback read contract.
+- [x] Focused lifecycle, absent-snapshot, wrong-identity, wrong-thread, consumed, erasure, corruption, and null-input coverage passes 19 tests.
+- [x] Independent P0-P2 review is clean. Residual harness work is to add deterministic two-runtime `Resume` races against replace commit and thread-erasure admission, plus direct lifecycle/projection-corruption cases.
+- [x] Full worktree validation passed with 78 test files, 553 passing tests, and 3 intentionally skipped tests; format, lint, and typecheck passed. The run also included the still-uncommitted conditional-filesystem worker files, which remain under review rather than accepted by this checkpoint.
+- [x] Focused commit: `b81fa19 feat: resume uncommitted workspace snapshots`.
 
 ## Completed Workspace Mutation Authority Foundation
 
