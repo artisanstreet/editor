@@ -13,11 +13,10 @@ import {
 } from "@artisan/protocol";
 
 import {
-	WorkspaceFilesystemAuthorizationError,
-	WorkspaceFilesystemNotFoundError,
-	WorkspaceFilesystemRegistry,
-	type WorkspaceFilesystem,
-} from "../filesystem/workspace-filesystem-registry";
+	WorkspaceBoundedRegularFileStoreAuthorizationError,
+	WorkspaceBoundedRegularFileStoreRegistry,
+} from "../filesystem/workspace-bounded-regular-file-store-registry";
+import { type BoundedRegularFileStore } from "../filesystem/bounded-regular-file-store";
 import { Database } from "../persistence/database";
 import { JournalStoreFailure, CommandIdConflict } from "../persistence/journal-store";
 import { RetrySqliteWrite } from "../persistence/sqlite-write-retry";
@@ -41,12 +40,10 @@ import {
 } from "./workspace-change-repository";
 
 const RequestFingerprint = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/));
-const WorkspaceMutationAuthorityKind = Schema.Literals(["base_run", "graph_run"]);
 
 const WorkspaceMutationClaimReplace = Schema.Struct({
 	_tag: Schema.Literal("replace"),
 	agent_id: Identifier,
-	authority: WorkspaceMutationAuthorityKind,
 	change_id: Identifier,
 	expected_before: ContentIdentity,
 	intended_after: ContentIdentity,
@@ -116,11 +113,11 @@ export type WorkspaceMutationAuthorityGrant =
 			readonly workspace_id: string;
 	  };
 
-/** Returns an atomic mutation claim with its confined filesystem capability. */
+/** Returns an atomic mutation claim with its authorized bounded file capability. */
 export interface WorkspaceMutationAdmission {
 	readonly authority: WorkspaceMutationAuthorityGrant;
 	readonly claim: WorkspaceChangeClaim;
-	readonly filesystem: WorkspaceFilesystem;
+	readonly store: typeof BoundedRegularFileStore.Service;
 }
 
 export type WorkspaceMutationAuthorityDenialReason =
@@ -179,7 +176,7 @@ type StoredAuthority = typeof StoredWorkspaceMutationAuthority.Type;
 
 interface AuthorityProof {
 	readonly authority: WorkspaceMutationAuthorityGrant;
-	readonly filesystem: WorkspaceFilesystem;
+	readonly store: typeof BoundedRegularFileStore.Service;
 	readonly stored: Omit<typeof WorkspaceMutationAuthorities.$inferInsert, "created_at">;
 }
 
@@ -241,7 +238,6 @@ function grant_from_stored(authority: StoredAuthority): WorkspaceMutationAuthori
 function authority_matches_claim(authority: StoredAuthority, claim: WorkspaceMutationClaimReplace) {
 	return (
 		authority.agent_id === claim.agent_id &&
-		authority.authority_kind === claim.authority &&
 		authority.change_id === claim.change_id &&
 		authority.message_id === claim.message_id &&
 		authority.run_id === claim.run_id &&
@@ -282,10 +278,7 @@ function conceal_error(error: unknown): WorkspaceMutationAuthorityError {
 		return error;
 	}
 
-	if (
-		error instanceof WorkspaceFilesystemAuthorizationError ||
-		error instanceof WorkspaceFilesystemNotFoundError
-	) {
+	if (error instanceof WorkspaceBoundedRegularFileStoreAuthorizationError) {
 		return denied("workspace_unavailable");
 	}
 
@@ -306,7 +299,7 @@ export const WorkspaceMutationAuthorityLive = Layer.effect(
 	Effect.gen(function* () {
 		const database = yield* Database;
 		const metadata = yield* RuntimeMetadata;
-		const registry = yield* WorkspaceFilesystemRegistry;
+		const registry = yield* WorkspaceBoundedRegularFileStoreRegistry;
 		const repository = yield* WorkspaceChangeRepository;
 
 		const AuthorizeWorkspace = (workspace_id: string, working_directory: string) =>
@@ -395,7 +388,7 @@ export const WorkspaceMutationAuthorityLive = Layer.effect(
 						thread_id: claim.thread_id,
 						workspace_id: claim.workspace_id,
 					},
-					filesystem: authorized.filesystem,
+					store: authorized.store,
 					stored: {
 						agent_id: claim.agent_id,
 						approval: null,
@@ -522,7 +515,7 @@ export const WorkspaceMutationAuthorityLive = Layer.effect(
 						thread_id: claim.thread_id,
 						workspace_id: claim.workspace_id,
 					},
-					filesystem: authorized.filesystem,
+					store: authorized.store,
 					stored: {
 						agent_id: claim.agent_id,
 						approval: permission_policy.approval,
@@ -549,6 +542,29 @@ export const WorkspaceMutationAuthorityLive = Layer.effect(
 						error instanceof JournalStoreFailure ? error.cause : error,
 					),
 				);
+		const InferAuthority = (
+			transaction: typeof database.client,
+			claim: WorkspaceMutationClaimReplace,
+		) =>
+			Effect.gen(function* () {
+				const [base_run] = yield* transaction
+					.select({ run_id: OrchestrationRuns.run_id })
+					.from(OrchestrationRuns)
+					.where(eq(OrchestrationRuns.run_id, claim.run_id))
+					.limit(1);
+				const [graph_run] = yield* transaction
+					.select({ run_id: AgentRuns.run_id })
+					.from(AgentRuns)
+					.where(eq(AgentRuns.run_id, claim.run_id))
+					.limit(1);
+
+				if (base_run && graph_run) return yield* Effect.fail(invalid_state());
+				if (!base_run && !graph_run) return yield* Effect.fail(denied("run_not_active"));
+
+				return yield* base_run
+					? ProveBaseRun(transaction, claim)
+					: ProveGraphRun(transaction, claim);
+			});
 
 		const ClaimReplace = (input: WorkspaceMutationClaimReplace) =>
 			DecodeClaim(input).pipe(
@@ -630,7 +646,7 @@ export const WorkspaceMutationAuthorityLive = Layer.effect(
 									return {
 										authority: grant_from_stored(existing_authority),
 										claim: accepted,
-										filesystem: authorized.filesystem,
+										store: authorized.store,
 									};
 								}
 
@@ -642,9 +658,7 @@ export const WorkspaceMutationAuthorityLive = Layer.effect(
 									);
 								}
 
-								const proof = yield* claim.authority === "base_run"
-									? ProveBaseRun(transaction, claim)
-									: ProveGraphRun(transaction, claim);
+								const proof = yield* InferAuthority(transaction, claim);
 								const created_at = yield* metadata.Now;
 								const accepted = yield* ClaimRepositoryReplace(claim);
 
@@ -659,7 +673,7 @@ export const WorkspaceMutationAuthorityLive = Layer.effect(
 								return {
 									authority: proof.authority,
 									claim: accepted,
-									filesystem: proof.filesystem,
+									store: proof.store,
 								};
 							}),
 						),

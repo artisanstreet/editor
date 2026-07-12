@@ -124,6 +124,16 @@ impl NativeBoundedRegularFileStore {
         }))
     }
 
+    #[napi(ts_return_type = "Promise<boolean>")]
+    pub fn authorize_root(&self, candidate_root: String) -> Result<AsyncTask<AuthorizeRootTask>> {
+        let root_handle = self.lease_root()?;
+
+        Ok(AsyncTask::new(AuthorizeRootTask {
+            candidate_root,
+            root_handle,
+        }))
+    }
+
     #[napi]
     pub fn close(&self) {
         if let Ok(mut root_handle) = self.root.handle.lock() {
@@ -175,6 +185,11 @@ pub struct FinalizeRegularFileReplacementTask {
     options: ReplaceRegularFileOptions,
 }
 
+pub struct AuthorizeRootTask {
+    candidate_root: String,
+    root_handle: Arc<windows::RootHandle>,
+}
+
 impl Task for FinalizeRegularFileReplacementTask {
     type Output = ();
     type JsValue = ();
@@ -185,6 +200,19 @@ impl Task for FinalizeRegularFileReplacementTask {
 
     fn resolve(&mut self, _: napi::Env, _: Self::Output) -> Result<Self::JsValue> {
         Ok(())
+    }
+}
+
+impl Task for AuthorizeRootTask {
+    type Output = bool;
+    type JsValue = bool;
+
+    fn compute(&mut self) -> Result<Self::Output> {
+        windows::authorize_root(&self.root_handle, &self.candidate_root)
+    }
+
+    fn resolve(&mut self, _: napi::Env, output: Self::Output) -> Result<Self::JsValue> {
+        Ok(output)
     }
 }
 

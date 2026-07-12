@@ -263,6 +263,7 @@ export {
 export {
 	BoundedRegularFileStore,
 	BoundedRegularFileStoreError,
+	type BoundedRegularFileReader,
 	type BoundedRegularFileStoreOperation,
 	type ReplaceRegularFileOptions,
 	type ReplaceRegularFileResult,
@@ -274,10 +275,13 @@ export {
 	type NativeBoundedRegularFileStoreOptions,
 } from "./filesystem/native-bounded-regular-file-store";
 export {
+	EmptyWorkspaceBoundedRegularFileStoreRegistryLive,
 	make_workspace_bounded_regular_file_store_registry_layer,
+	WorkspaceBoundedRegularFileStoreAuthorizationError,
 	WorkspaceBoundedRegularFileStoreNotFoundError,
 	WorkspaceBoundedRegularFileStoreRegistrationError,
 	WorkspaceBoundedRegularFileStoreRegistry,
+	type WorkspaceBoundedRegularFileStoreAuthorization,
 	type WorkspaceBoundedRegularFileStoreRegistration,
 	type WorkspaceBoundedRegularFileStoreRegistryOptions,
 } from "./filesystem/workspace-bounded-regular-file-store-registry";

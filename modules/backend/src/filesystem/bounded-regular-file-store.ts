@@ -42,3 +42,9 @@ export class BoundedRegularFileStore extends Context.Service<
 		) => Effect.Effect<ReplaceRegularFileResult, BoundedRegularFileStoreError>;
 	}
 >()("Artisan/BoundedRegularFileStore") {}
+
+/** Exposes bounded regular-file reads without granting mutation or receipt cleanup. */
+export type BoundedRegularFileReader = Pick<
+	typeof BoundedRegularFileStore.Service,
+	"ReadRegularFile"
+>;

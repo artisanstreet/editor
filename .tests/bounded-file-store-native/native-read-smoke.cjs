@@ -13,6 +13,8 @@ const { NativeBoundedRegularFileStore } = require(module_root);
 const receipt_key = new Uint8Array(32).fill(0x41);
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "artisan-native-read-"));
 const outside = fs.mkdtempSync(path.join(os.tmpdir(), "artisan-native-outside-"));
+const root_alias = `${root}-alias`;
+const moved_root = `${root}-moved`;
 
 function assert_opaque(error, forbidden = []) {
 	for (const value of [root, outside, ...forbidden]) {
@@ -57,8 +59,17 @@ async function main() {
 		fs.writeFileSync(artifact_path, "artifact");
 		fs.writeFileSync(path.join(outside, "outside.bin"), "outside");
 		fs.symlinkSync(outside, path.join(root, "junction"), "junction");
+		fs.symlinkSync(root, root_alias, "junction");
 
 		const store = new NativeBoundedRegularFileStore(root, receipt_key);
+		assert.equal(await store.authorizeRoot(root), true);
+		assert.equal(await store.authorizeRoot(root_alias), true);
+		fs.renameSync(root, moved_root);
+		fs.mkdirSync(root);
+		assert.equal(await store.authorizeRoot(root), false);
+		assert.equal(await store.authorizeRoot(moved_root), true);
+		fs.rmdirSync(root);
+		fs.renameSync(moved_root, root);
 		assert.deepEqual(await store.readRegularFile("bytes.bin", 3), Buffer.from([0xff, 0, 1]));
 		assert.deepEqual(await store.readRegularFile("empty.bin", 1), Buffer.alloc(0));
 		assert.deepEqual(await store.readRegularFile("nested/bytes.bin", 2), Buffer.from([2, 3]));
@@ -124,6 +135,7 @@ async function main() {
 		store.close();
 		assert.equal((await in_flight).length, 1024 * 1024 * 16);
 		await rejects_opaque(() => store.readRegularFile("bytes.bin", 3));
+		await rejects_opaque(() => store.authorizeRoot(root));
 
 		for (const key of [new Uint8Array(0), new Uint8Array(31), new Uint8Array(33)]) {
 			throws_opaque(() => new NativeBoundedRegularFileStore(root, key));
@@ -147,6 +159,8 @@ async function main() {
 			["junction"],
 		);
 	} finally {
+		fs.rmSync(root_alias, { force: true });
+		fs.rmSync(moved_root, { recursive: true, force: true });
 		fs.rmSync(root, { recursive: true, force: true });
 		fs.rmSync(outside, { recursive: true, force: true });
 	}

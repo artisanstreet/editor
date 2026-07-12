@@ -27,6 +27,7 @@ interface NativeReplaceRegularFileOptions {
 }
 
 interface NativeBoundedRegularFileStore {
+	authorizeRoot(candidateRoot: string): Promise<unknown>;
 	close(): unknown;
 	finalizeRegularFileReplacement(options: NativeReplaceRegularFileOptions): Promise<unknown>;
 	readRegularFile(path: string, maximumBytes: number): Promise<unknown>;
@@ -83,6 +84,7 @@ function is_native_module(value: unknown): value is NativeBoundedRegularFileStor
 function is_native_store(value: unknown): value is NativeBoundedRegularFileStore {
 	return (
 		is_record(value) &&
+		typeof value.authorizeRoot === "function" &&
 		typeof value.close === "function" &&
 		typeof value.finalizeRegularFileReplacement === "function" &&
 		typeof value.readRegularFile === "function" &&
@@ -183,6 +185,17 @@ function make_store_service(store: NativeBoundedRegularFileStore) {
 	} satisfies typeof BoundedRegularFileStore.Service;
 }
 
+function make_root_authorizer(store: NativeBoundedRegularFileStore) {
+	return (candidate_root: string) =>
+		Effect.tryPromise({
+			catch: () => new Error("Native root authorization failed"),
+			try: () => store.authorizeRoot(candidate_root),
+		}).pipe(
+			Effect.orElseSucceed(() => false),
+			Effect.map((authorized) => authorized === true),
+		);
+}
+
 function AcquireNativeBoundedRegularFileStore(options: NativeBoundedRegularFileStoreOptions) {
 	return Effect.try({
 		catch: () => initialization_error("Native bounded file store initialization failed"),
@@ -232,9 +245,23 @@ function AcquireNativeBoundedRegularFileStore(options: NativeBoundedRegularFileS
 
 /** Acquires one scoped native store and adapts it to the bounded regular-file service. */
 export function BuildNativeBoundedRegularFileStore(options: NativeBoundedRegularFileStoreOptions) {
+	return BuildNativeBoundedRegularFileStoreWithRootAuthorization(options).pipe(
+		Effect.map(({ store }) => store),
+	);
+}
+
+/** Acquires one scoped native store with its opaque exact-root authorization operation. */
+export function BuildNativeBoundedRegularFileStoreWithRootAuthorization(
+	options: NativeBoundedRegularFileStoreOptions,
+) {
 	return Effect.acquireRelease(AcquireNativeBoundedRegularFileStore(options), (store) =>
 		Effect.sync(() => void store.close()),
-	).pipe(Effect.map(make_store_service));
+	).pipe(
+		Effect.map((native_store) => ({
+			AuthorizeRoot: make_root_authorizer(native_store),
+			store: make_store_service(native_store),
+		})),
+	);
 }
 
 /** Builds the scoped production layer for one native bounded regular-file root. */

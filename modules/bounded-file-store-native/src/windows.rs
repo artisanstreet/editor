@@ -71,8 +71,10 @@ const ORDINARY_ATTRIBUTES_MASK: u32 = !(FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUT
 
 pub(crate) struct RootHandle {
     handle: HANDLE,
+    id: [u8; 16],
     receipt_key: [u8; 32],
     mutation: Mutex<()>,
+    volume: u64,
 }
 
 /** The owned root handle may move with its Arc lease between N-API task threads. */
@@ -269,6 +271,7 @@ pub(crate) fn open_root(
     let opened = open_nt_file(
         &nt_path,
         std::ptr::null_mut(),
+        true,
         FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         FILE_OPEN,
@@ -282,8 +285,10 @@ pub(crate) fn open_root(
     let handle = opened.map_err(|_| native_error("native file store root is unavailable"))?;
     let mut root = RootHandle {
         handle,
+        id: [0; 16],
         receipt_key: [0; 32],
         mutation: Mutex::new(()),
+        volume: 0,
     };
     let metadata = file_metadata(root.handle)?;
 
@@ -293,8 +298,68 @@ pub(crate) fn open_root(
 
     root.receipt_key =
         receipt::derive_root_key(&receipt_authentication_key, metadata.volume, metadata.id);
+    root.id = metadata.id;
+    root.volume = metadata.volume;
 
     Ok(root)
+}
+
+pub(crate) fn authorize_root(root: &RootHandle, candidate_root: &str) -> Result<bool> {
+    let candidate = open_authorization_root(candidate_root)?;
+    let metadata = file_metadata(candidate.0)?;
+
+    Ok(metadata.directory
+        && !metadata.reparse
+        && is_ntfs(candidate.0)
+        && metadata.volume == root.volume
+        && metadata.id == root.id)
+}
+
+fn open_authorization_root(candidate_root: &str) -> Result<Handle> {
+    if !is_absolute_drive_path(candidate_root)
+        || candidate_root.contains('\0')
+        || candidate_root.encode_utf16().count() > MAXIMUM_NT_PATH_UNITS
+    {
+        return Err(native_error("native file store root is invalid"));
+    }
+
+    let mut root_path: Vec<u16> = candidate_root.encode_utf16().chain(Some(0)).collect();
+
+    if !is_fixed_volume(&root_path) {
+        return Err(native_error("native file store root is unsupported"));
+    }
+
+    let mut nt_path = UNICODE_STRING::default();
+    let status = unsafe {
+        RtlDosPathNameToNtPathName_U_WithStatus(
+            root_path.as_mut_ptr(),
+            &mut nt_path,
+            std::ptr::null_mut(),
+            std::ptr::null(),
+        )
+    };
+
+    if !nt_success(status) {
+        return Err(native_error("native file store root is invalid"));
+    }
+
+    let opened = open_nt_file(
+        &nt_path,
+        std::ptr::null_mut(),
+        false,
+        FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        FILE_OPEN,
+        FILE_GENERIC_READ | FILE_GENERIC_WRITE,
+        None,
+        std::ptr::null(),
+    );
+
+    unsafe { RtlFreeUnicodeString(&mut nt_path) };
+
+    opened
+        .map(Handle)
+        .map_err(|_| native_error("native file store root is unavailable"))
 }
 
 pub(crate) fn read_regular_file(
@@ -1463,6 +1528,7 @@ fn create_stage(
     let opened = open_nt_file(
         &stage_string,
         parent,
+        true,
         FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
         FILE_SHARE_READ,
         FILE_CREATE,
@@ -1622,6 +1688,7 @@ fn open_relative_file(
     let file = open_nt_file(
         &leaf_string,
         parent,
+        true,
         FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
         sharing,
         FILE_OPEN,
@@ -1658,6 +1725,7 @@ fn open_parent<'a>(
         let directory = open_nt_file(
             &segment_string,
             current,
+            true,
             FILE_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
             FILE_SHARE_READ | FILE_SHARE_WRITE,
             FILE_OPEN,
@@ -2018,6 +2086,7 @@ fn file_metadata(handle: HANDLE) -> Result<Metadata> {
 fn open_nt_file(
     name: &UNICODE_STRING,
     root_directory: HANDLE,
+    dont_reparse: bool,
     create_options: u32,
     share_access: u32,
     disposition: u32,
@@ -2031,7 +2100,7 @@ fn open_nt_file(
         Length: size_of::<OBJECT_ATTRIBUTES>() as u32,
         RootDirectory: root_directory,
         ObjectName: name as *const _ as _,
-        Attributes: OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE,
+        Attributes: OBJ_CASE_INSENSITIVE | if dont_reparse { OBJ_DONT_REPARSE } else { 0 },
         SecurityDescriptor: security_descriptor,
         SecurityQualityOfService: std::ptr::null(),
     };

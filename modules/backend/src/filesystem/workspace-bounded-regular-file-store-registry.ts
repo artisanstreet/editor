@@ -2,9 +2,12 @@ import { Context, Data, Effect, FileSystem, Layer, Redacted, Schema } from "effe
 
 import { Identifier } from "@artisan/protocol";
 
-import { BoundedRegularFileStore } from "./bounded-regular-file-store";
 import {
-	BuildNativeBoundedRegularFileStore,
+	BoundedRegularFileStore,
+	type BoundedRegularFileReader,
+} from "./bounded-regular-file-store";
+import {
+	BuildNativeBoundedRegularFileStoreWithRootAuthorization,
 	type NativeBoundedRegularFileStoreOptions,
 } from "./native-bounded-regular-file-store";
 
@@ -12,10 +15,18 @@ const WorkspaceBoundedRegularFileStoreRegistration = Schema.Struct({
 	root: Schema.NonEmptyString,
 	workspace_id: Identifier,
 });
+const WorkspaceBoundedRegularFileStoreAuthorization = Schema.Struct({
+	working_directory: Schema.NonEmptyString,
+	workspace_id: Identifier,
+});
 
 /** Supplies one native bounded regular-file root while retaining an opaque workspace identity. */
 export type WorkspaceBoundedRegularFileStoreRegistration =
 	typeof WorkspaceBoundedRegularFileStoreRegistration.Type;
+
+/** Supplies the workspace and directory that must prove the same bounded-store root. */
+export type WorkspaceBoundedRegularFileStoreAuthorization =
+	typeof WorkspaceBoundedRegularFileStoreAuthorization.Type;
 
 /** Reports malformed, missing, non-directory, duplicate, or aliased native store registration. */
 export class WorkspaceBoundedRegularFileStoreRegistrationError extends Data.TaggedError(
@@ -32,13 +43,27 @@ export class WorkspaceBoundedRegularFileStoreNotFoundError extends Data.TaggedEr
 	readonly workspace_id: string;
 }> {}
 
+/** Reports a directory that cannot prove authority over its bounded regular-file store. */
+export class WorkspaceBoundedRegularFileStoreAuthorizationError extends Data.TaggedError(
+	"WorkspaceBoundedRegularFileStoreAuthorizationError",
+)<{
+	readonly workspace_id: string;
+}> {}
+
 /** Owns the opaque native bounded regular-file capabilities registered for known workspaces. */
 export class WorkspaceBoundedRegularFileStoreRegistry extends Context.Service<
 	WorkspaceBoundedRegularFileStoreRegistry,
 	{
-		readonly Get: (workspace_id: string) => Effect.Effect<
+		readonly Authorize: (input: WorkspaceBoundedRegularFileStoreAuthorization) => Effect.Effect<
 			{
 				readonly store: typeof BoundedRegularFileStore.Service;
+				readonly workspace_id: string;
+			},
+			WorkspaceBoundedRegularFileStoreAuthorizationError
+		>;
+		readonly Get: (workspace_id: string) => Effect.Effect<
+			{
+				readonly reader: BoundedRegularFileReader;
 				readonly workspace_id: string;
 			},
 			WorkspaceBoundedRegularFileStoreNotFoundError
@@ -52,6 +77,18 @@ export interface WorkspaceBoundedRegularFileStoreRegistryOptions {
 	readonly load_native_module?: NativeBoundedRegularFileStoreOptions["load_native_module"];
 	readonly receipt_authentication_key: Redacted.Redacted<Uint8Array>;
 }
+
+/** Supplies an inert registry when a portable backend has no native workspace roots. */
+export const EmptyWorkspaceBoundedRegularFileStoreRegistryLive = Layer.succeed(
+	WorkspaceBoundedRegularFileStoreRegistry,
+	{
+		Authorize: ({ workspace_id }) =>
+			Effect.fail(new WorkspaceBoundedRegularFileStoreAuthorizationError({ workspace_id })),
+		Get: (workspace_id) =>
+			Effect.fail(new WorkspaceBoundedRegularFileStoreNotFoundError({ workspace_id })),
+		ListWorkspaceIds: Effect.succeed([]),
+	},
+);
 
 function registration_error(message: string, workspace_id?: string) {
 	return new WorkspaceBoundedRegularFileStoreRegistrationError({
@@ -132,27 +169,75 @@ function BuildWorkspaceBoundedRegularFileStoreRegistry(
 		}
 
 		const stores = yield* Effect.forEach(canonical, ({ root, workspace_id }) =>
-			BuildNativeBoundedRegularFileStore({
+			BuildNativeBoundedRegularFileStoreWithRootAuthorization({
 				...(options.load_native_module === undefined
 					? {}
 					: { load_native_module: options.load_native_module }),
 				receipt_authentication_key: options.receipt_authentication_key,
 				root,
-			}).pipe(Effect.map((store) => ({ store, workspace_id }))),
+			}).pipe(
+				Effect.map(({ AuthorizeRoot, store }) => ({ AuthorizeRoot, store, workspace_id })),
+			),
 		);
 		const by_workspace_id = new Map(
 			stores.map(({ store, workspace_id }) => [workspace_id, store] as const),
 		);
+		const readers_by_workspace_id = new Map(
+			stores.map(
+				({ store, workspace_id }) =>
+					[
+						workspace_id,
+						{
+							ReadRegularFile: store.ReadRegularFile,
+						} satisfies BoundedRegularFileReader,
+					] as const,
+			),
+		);
+		const authorizers_by_workspace_id = new Map(
+			stores.map(({ AuthorizeRoot, workspace_id }) => [workspace_id, AuthorizeRoot] as const),
+		);
 		const ListWorkspaceIds = Effect.succeed([...by_workspace_id.keys()].toSorted());
 		const Get = (workspace_id: string) => {
-			const store = by_workspace_id.get(workspace_id);
+			const reader = readers_by_workspace_id.get(workspace_id);
 
-			return store === undefined
+			return reader === undefined
 				? Effect.fail(new WorkspaceBoundedRegularFileStoreNotFoundError({ workspace_id }))
-				: Effect.succeed({ store, workspace_id });
+				: Effect.succeed({ reader, workspace_id });
 		};
+		const authorization_error = (workspace_id: string) =>
+			new WorkspaceBoundedRegularFileStoreAuthorizationError({ workspace_id });
+		const Authorize = (input: WorkspaceBoundedRegularFileStoreAuthorization) =>
+			Schema.decodeUnknownEffect(WorkspaceBoundedRegularFileStoreAuthorization, {
+				onExcessProperty: "error",
+			})(input).pipe(
+				Effect.mapError(() => authorization_error(input.workspace_id)),
+				Effect.flatMap((authorization) =>
+					Effect.gen(function* () {
+						const AuthorizeRoot = authorizers_by_workspace_id.get(
+							authorization.workspace_id,
+						);
+						const store = by_workspace_id.get(authorization.workspace_id);
 
-		return { Get, ListWorkspaceIds };
+						if (AuthorizeRoot === undefined || store === undefined) {
+							return yield* Effect.fail(
+								authorization_error(authorization.workspace_id),
+							);
+						}
+
+						const authorized = yield* AuthorizeRoot(authorization.working_directory);
+
+						if (!authorized) {
+							return yield* Effect.fail(
+								authorization_error(authorization.workspace_id),
+							);
+						}
+
+						return { store, workspace_id: authorization.workspace_id };
+					}),
+				),
+			);
+
+		return { Authorize, Get, ListWorkspaceIds };
 	});
 }
 

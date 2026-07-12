@@ -3,15 +3,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Deferred, Effect, Layer, ManagedRuntime } from "effect";
+import { NodeFileSystem } from "@effect/platform-node-shared";
+import { Deferred, Effect, Layer, ManagedRuntime, Redacted } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { make_backend_runtime } from "@artisan/backend";
-
 import {
-	make_node_workspace_filesystem_registry_layer,
-	WorkspaceFilesystemRegistry,
-} from "../../modules/backend/src/filesystem/workspace-filesystem-registry";
+	make_workspace_bounded_regular_file_store_registry_layer,
+	WorkspaceBoundedRegularFileStoreRegistry,
+} from "../../modules/backend/src/filesystem/workspace-bounded-regular-file-store-registry";
 import { Database, make_database_layer } from "../../modules/backend/src/persistence/database";
 import { JournalNotifierLive } from "../../modules/backend/src/persistence/journal-notifier";
 import { JournalStoreLive } from "../../modules/backend/src/persistence/journal-store";
@@ -40,6 +39,7 @@ import {
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];
 const now = "2026-07-12T08:00:00.000Z";
+const receipt_authentication_key = Redacted.make(new Uint8Array(32).fill(4));
 
 type RaceProbe = {
 	readonly authorize_attempts: { value: number };
@@ -78,15 +78,42 @@ function make_runtime(
 	const changes = Layer.mergeAll(WorkspaceChangeRepositoryLive, JournalStoreLive).pipe(
 		Layer.provideMerge(infrastructure),
 	);
-	const registry = make_node_workspace_filesystem_registry_layer([
-		{ root, workspace_id: "workspace_1" },
-	]);
+	const registry = make_workspace_bounded_regular_file_store_registry_layer(
+		[{ root, workspace_id: "workspace_1" }],
+		{
+			load_native_module: () => ({
+				NativeBoundedRegularFileStore: class {
+					authorizeRoot(candidate_root: string) {
+						return Promise.resolve(candidate_root === root);
+					}
+
+					close() {}
+					finalizeRegularFileReplacement() {
+						return Promise.resolve();
+					}
+					readRegularFile() {
+						return Promise.resolve(new Uint8Array());
+					}
+					replaceRegularFile() {
+						return Promise.resolve("Replaced");
+					}
+				},
+				getNativeBuildDescriptor: () => ({
+					architecture: "x86_64",
+					operatingSystem: "windows",
+					target: "x86_64-pc-windows-msvc",
+					testHooksEnabled: false,
+				}),
+			}),
+			receipt_authentication_key,
+		},
+	).pipe(Layer.provide(NodeFileSystem.layer));
 	const race_probe = options.race_probe;
 	const gated_registry = race_probe
 		? Layer.effect(
-				WorkspaceFilesystemRegistry,
+				WorkspaceBoundedRegularFileStoreRegistry,
 				Effect.gen(function* () {
-					const live = yield* WorkspaceFilesystemRegistry;
+					const live = yield* WorkspaceBoundedRegularFileStoreRegistry;
 					let paused = false;
 
 					return {
@@ -124,7 +151,6 @@ function claim(
 	return {
 		_tag: "replace" as const,
 		agent_id: "agent_1",
-		authority: "base_run" as const,
 		change_id: "change_1",
 		expected_before: {
 			algorithm: "sha256" as const,
@@ -194,6 +220,7 @@ function SeedBase(
 function SeedGraph(
 	root: string,
 	options: {
+		readonly skip_thread?: boolean;
 		readonly assignment_active_run_id?: string;
 		readonly assignment_state?: string;
 		readonly dispatch_status?: string;
@@ -213,13 +240,15 @@ function SeedGraph(
 		const group_id = options.group_id ?? "group_1";
 		const agent_id = options.run_agent_id ?? "agent_1";
 
-		yield* database.client.insert(Threads).values({
-			created_at: now,
-			thread_id: "thread_1",
-			title: "thread_1",
-			title_source: "initial",
-			updated_at: now,
-		});
+		if (!options.skip_thread) {
+			yield* database.client.insert(Threads).values({
+				created_at: now,
+				thread_id: "thread_1",
+				title: "thread_1",
+				title_source: "initial",
+				updated_at: now,
+			});
+		}
 		yield* database.client.insert(OrchestrationGroups).values({
 			coordinator_agent_id: "coordinator_1",
 			created_at: now,
@@ -322,19 +351,12 @@ afterEach(async () => {
 });
 
 describe("WorkspaceMutationAuthority", () => {
-	it("is exposed by the production backend composition", async () => {
+	it("returns only the bounded store capability for an inferred base-run claim", async () => {
 		const workspace = await make_workspace();
 
 		await mkdir(workspace.root);
 
-		const runtime = make_backend_runtime({
-			database_path: workspace.database_path,
-			migrations_path,
-			runtime_metadata: make_metadata_layer("authority_composition"),
-			workspace_filesystem_registry: make_node_workspace_filesystem_registry_layer([
-				{ root: workspace.root, workspace_id: "workspace_1" },
-			]),
-		});
+		const runtime = make_runtime(workspace.database_path, workspace.root);
 
 		try {
 			const result = await runtime.runPromise(
@@ -349,7 +371,11 @@ describe("WorkspaceMutationAuthority", () => {
 			);
 
 			expect(result.accepted.claim._tag).toBe("claimed");
-			expect("Resolve" in result.accepted.filesystem).toBe(false);
+			expect(Object.keys(result.accepted).toSorted()).toEqual([
+				"authority",
+				"claim",
+				"store",
+			]);
 			expect(result.rows.authorities).toHaveLength(1);
 			expect(result.rows.operations).toHaveLength(1);
 		} finally {
@@ -397,7 +423,7 @@ describe("WorkspaceMutationAuthority", () => {
 				Effect.gen(function* () {
 					yield* SeedGraph(graph_workspace.root);
 					return {
-						accepted: yield* Admit(claim({ authority: "graph_run" })),
+						accepted: yield* Admit(claim()),
 						rows: yield* ReadAtomicRows(),
 					};
 				}),
@@ -412,7 +438,7 @@ describe("WorkspaceMutationAuthority", () => {
 					yield* database.client.update(Assignments).set({ state: "complete" });
 				}),
 			);
-			const retry = await graph_runtime.runPromise(Admit(claim({ authority: "graph_run" })));
+			const retry = await graph_runtime.runPromise(Admit(claim()));
 
 			expect(result.accepted).toMatchObject({
 				authority: { _tag: "graph_run", scope: "files" },
@@ -423,6 +449,33 @@ describe("WorkspaceMutationAuthority", () => {
 			expect(retry.claim._tag).toBe("incomplete_retry");
 		} finally {
 			await graph_runtime.dispose();
+		}
+	});
+
+	it("fails closed when one run ID exists in both authority domains", async () => {
+		const workspace = await make_workspace();
+
+		await mkdir(workspace.root);
+
+		const runtime = make_runtime(workspace.database_path, workspace.root);
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					yield* SeedBase(workspace.root);
+					yield* SeedGraph(workspace.root, { skip_thread: true });
+
+					return {
+						failure: yield* Effect.exit(Admit()),
+						rows: yield* ReadAtomicRows(),
+					};
+				}),
+			);
+
+			expect(JSON.stringify(result.failure)).toContain("invalid_persisted_state");
+			expect(result.rows).toEqual({ authorities: [], operations: [] });
+		} finally {
+			await runtime.dispose();
 		}
 	});
 
@@ -554,7 +607,7 @@ describe("WorkspaceMutationAuthority", () => {
 					Effect.gen(function* () {
 						yield* SeedGraph(workspace.root, scenario.options);
 						return {
-							failure: yield* Effect.exit(Admit(claim({ authority: "graph_run" }))),
+							failure: yield* Effect.exit(Admit(claim())),
 							rows: yield* ReadAtomicRows(),
 						};
 					}),
@@ -576,10 +629,9 @@ describe("WorkspaceMutationAuthority", () => {
 			const result = await runtime.runPromise(
 				Effect.gen(function* () {
 					yield* SeedGraph(workspace.root);
-					const exact = yield* Admit(claim({ authority: "graph_run", path: "src" }));
+					const exact = yield* Admit(claim({ path: "src" }));
 					const prefix = yield* Admit(
 						claim({
-							authority: "graph_run",
 							change_id: "change_prefix",
 							message_id: "message_prefix",
 							path: "src/child.ts",
@@ -588,7 +640,6 @@ describe("WorkspaceMutationAuthority", () => {
 					const outside = yield* Effect.exit(
 						Admit(
 							claim({
-								authority: "graph_run",
 								change_id: "change_outside",
 								message_id: "message_outside",
 								path: "src-other/file.ts",
@@ -601,9 +652,7 @@ describe("WorkspaceMutationAuthority", () => {
 						.update(WorkspaceChangeOperations)
 						.set({ path: "outside/file.ts" });
 
-					const tampered = yield* Effect.exit(
-						Admit(claim({ authority: "graph_run", path: "outside/file.ts" })),
-					);
+					const tampered = yield* Effect.exit(Admit(claim({ path: "outside/file.ts" })));
 
 					return { exact, outside, prefix, rows: yield* ReadAtomicRows(), tampered };
 				}),
@@ -633,7 +682,7 @@ describe("WorkspaceMutationAuthority", () => {
 							write_access: true,
 						}),
 					});
-					const accepted = yield* Admit(claim({ authority: "graph_run" }));
+					const accepted = yield* Admit(claim());
 					const database = yield* Database;
 					yield* database.client.update(Assignments).set({
 						scope_json: JSON.stringify({
@@ -645,7 +694,6 @@ describe("WorkspaceMutationAuthority", () => {
 					const denied = yield* Effect.exit(
 						Admit(
 							claim({
-								authority: "graph_run",
 								change_id: "change_bad_root",
 								message_id: "message_bad_root",
 							}),
@@ -677,7 +725,7 @@ describe("WorkspaceMutationAuthority", () => {
 						const database = yield* Database;
 						yield* database.client.update(Assignments).set({ [field]: "{not-json" });
 						return {
-							failure: yield* Effect.exit(Admit(claim({ authority: "graph_run" }))),
+							failure: yield* Effect.exit(Admit(claim())),
 							rows: yield* ReadAtomicRows(),
 						};
 					}),
@@ -699,7 +747,7 @@ describe("WorkspaceMutationAuthority", () => {
 				Effect.gen(function* () {
 					yield* SeedBase(workspace.root);
 					const repository = yield* WorkspaceChangeRepository;
-					const { authority: _, raw_origin: _raw_origin, ...generic_claim } = claim();
+					const { raw_origin: _raw_origin, ...generic_claim } = claim();
 
 					yield* repository.ClaimReplace(generic_claim);
 					const unpinned = yield* Effect.exit(Admit());
@@ -708,7 +756,7 @@ describe("WorkspaceMutationAuthority", () => {
 					const accepted = yield* Admit();
 					const changed = yield* Effect.exit(Admit(claim({ agent_id: "other_agent" })));
 					const changed_authority = yield* Effect.exit(
-						Admit(claim({ authority: "graph_run" })),
+						Admit({ ...claim(), authority: "graph_run" } as never),
 					);
 					const changed_intent = yield* Effect.exit(
 						Admit(claim({ request_fingerprint: "d".repeat(64) })),
@@ -733,7 +781,9 @@ describe("WorkspaceMutationAuthority", () => {
 
 			expect(JSON.stringify(result.unpinned)).toContain("unpinned_operation");
 			expect(JSON.stringify(result.changed)).toContain("authority_conflict");
-			expect(JSON.stringify(result.changed_authority)).toContain("authority_conflict");
+			expect(JSON.stringify(result.changed_authority)).toContain(
+				"WorkspaceMutationAuthorityInvalid",
+			);
 			expect(JSON.stringify(result.changed_intent)).toContain("operation_conflict");
 			expect(JSON.stringify(result.malformed_authority)).toContain("invalid_persisted_state");
 			expect(JSON.stringify(result.unpinned)).not.toContain("src/example.ts");

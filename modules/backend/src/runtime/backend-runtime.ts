@@ -15,6 +15,12 @@ import {
 	WorkspaceFilesystemRegistrationError,
 	WorkspaceFilesystemRegistry,
 } from "../filesystem/workspace-filesystem-registry";
+import {
+	EmptyWorkspaceBoundedRegularFileStoreRegistryLive,
+	WorkspaceBoundedRegularFileStoreRegistrationError,
+	WorkspaceBoundedRegularFileStoreRegistry,
+} from "../filesystem/workspace-bounded-regular-file-store-registry";
+import { NativeBoundedRegularFileStoreInitializationError } from "../filesystem/native-bounded-regular-file-store";
 import { NodeProcessRunnerLive } from "../git/node-process-runner";
 import { make_database_layer } from "../persistence/database";
 import { JournalNotifierLive } from "../persistence/journal-notifier";
@@ -112,6 +118,11 @@ export interface BackendOptions {
 		WorkspaceFilesystemRegistry,
 		WorkspaceFilesystemRegistrationError
 	>;
+	readonly workspace_bounded_regular_file_store_registry?: Layer.Layer<
+		WorkspaceBoundedRegularFileStoreRegistry,
+		| NativeBoundedRegularFileStoreInitializationError
+		| WorkspaceBoundedRegularFileStoreRegistrationError
+	>;
 }
 
 /** Configures platform-native provider discovery for the production desktop composition. */
@@ -165,8 +176,11 @@ export function make_backend_layer(options: BackendOptions) {
 	);
 	const workspace_filesystems =
 		options.workspace_filesystem_registry ?? make_node_workspace_filesystem_registry_layer([]);
+	const workspace_bounded_filesystems =
+		options.workspace_bounded_regular_file_store_registry ??
+		EmptyWorkspaceBoundedRegularFileStoreRegistryLive;
 	const workspace_authority = WorkspaceMutationAuthorityLive.pipe(
-		Layer.provideMerge(workspace_filesystems),
+		Layer.provideMerge(workspace_bounded_filesystems),
 		Layer.provideMerge(workspace_changes),
 		Layer.provideMerge(infrastructure),
 	);
@@ -290,6 +304,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(workspace_changes),
 		Layer.provideMerge(workspace_evidence),
 		Layer.provideMerge(workspace_authority),
+		Layer.provideMerge(workspace_bounded_filesystems),
 		Layer.provideMerge(workspace_filesystems),
 		Layer.provideMerge(workspace_snapshots),
 		Layer.provideMerge(workspace_mutation_payloads),

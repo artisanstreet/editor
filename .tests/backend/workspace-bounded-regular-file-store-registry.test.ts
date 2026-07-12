@@ -24,18 +24,24 @@ async function make_root(prefix = "artisan native registry ") {
 
 function make_module(throw_on_root?: string) {
 	const constructed_roots: Array<string> = [];
+	const authorized_roots = new Set<string>();
 	let close_count = 0;
 	let load_count = 0;
 
 	class FakeNativeBoundedRegularFileStore {
 		constructor(root: string, _key: Uint8Array) {
 			constructed_roots.push(root);
+			authorized_roots.add(root);
 
 			if (root === throw_on_root) throw new Error("open failed");
 		}
 
 		close() {
 			close_count += 1;
+		}
+
+		authorizeRoot(candidate_root: string) {
+			return Promise.resolve(authorized_roots.has(candidate_root));
 		}
 
 		finalizeRegularFileReplacement() {
@@ -52,6 +58,7 @@ function make_module(throw_on_root?: string) {
 	}
 
 	return {
+		authorized_roots,
 		constructed_roots,
 		get close_count() {
 			return close_count;
@@ -115,9 +122,65 @@ describe("WorkspaceBoundedRegularFileStoreRegistry", () => {
 			"workspace-a",
 			"workspace-b",
 		]);
-		expect(Object.keys(first).toSorted()).toEqual(["store", "workspace_id"]);
+		expect(Object.keys(first).toSorted()).toEqual(["reader", "workspace_id"]);
+		expect(Object.keys(first.reader)).toEqual(["ReadRegularFile"]);
+		expect("ReplaceRegularFile" in first.reader).toBe(false);
+		expect("FinalizeRegularFileReplacement" in first.reader).toBe(false);
 		expect(JSON.stringify(first)).not.toContain(first_root);
 		expect(module.constructed_roots).toEqual([second_root, first_root]);
+	});
+
+	it("authorizes only the canonical registered root without exposing it", async () => {
+		const root = await make_root();
+		const alias = join(tmpdir(), `artisan native registry authorize ${Date.now()}`);
+
+		roots.push(alias);
+		await fs.symlink(root, alias, "junction");
+		const module = make_module();
+
+		module.authorized_roots.add(alias);
+
+		const registry = await Effect.runPromise(
+			registry_effect([{ root, workspace_id: "workspace-a" }], module).effect,
+		);
+		const authorized = await Effect.runPromise(
+			registry.Authorize({ working_directory: alias, workspace_id: "workspace-a" }),
+		);
+		const wrong_root = await make_root();
+		const denied = await Effect.runPromise(
+			registry
+				.Authorize({ working_directory: wrong_root, workspace_id: "workspace-a" })
+				.pipe(Effect.flip),
+		);
+
+		expect(Object.keys(authorized).toSorted()).toEqual(["store", "workspace_id"]);
+		expect(JSON.stringify(authorized)).not.toContain(root);
+		expect(denied).toMatchObject({
+			_tag: "WorkspaceBoundedRegularFileStoreAuthorizationError",
+			workspace_id: "workspace-a",
+		});
+		expect(JSON.stringify(denied)).not.toContain(wrong_root);
+	});
+
+	it("fails closed when a registered root is replaced at the same path", async () => {
+		const root = await make_root();
+		const module = make_module();
+		const registry = await Effect.runPromise(
+			registry_effect([{ root, workspace_id: "workspace-a" }], module).effect,
+		);
+
+		module.authorized_roots.delete(root);
+
+		const denied = await Effect.runPromise(
+			registry
+				.Authorize({ working_directory: root, workspace_id: "workspace-a" })
+				.pipe(Effect.flip),
+		);
+
+		expect(denied).toMatchObject({
+			_tag: "WorkspaceBoundedRegularFileStoreAuthorizationError",
+			workspace_id: "workspace-a",
+		});
 	});
 
 	it("rejects duplicate IDs and canonical roots before native acquisition", async () => {

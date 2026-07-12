@@ -50,6 +50,10 @@ function make_module(
 			close_count += 1;
 		}
 
+		authorizeRoot(_candidate_root: string) {
+			return Promise.resolve(true);
+		}
+
 		finalizeRegularFileReplacement(input: Record<string, unknown>) {
 			finalize_options.push(input);
 
