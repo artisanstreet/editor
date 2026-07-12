@@ -88,26 +88,6 @@ pub(super) fn wait_for_replace_race() -> Result<(), ()> {
 }
 
 #[cfg(feature = "native-test-hooks")]
-pub(super) fn trace(point: &str) {
-    let Some(trace_path) = std::env::var_os("ARTISAN_NATIVE_TEST_TRACE") else {
-        return;
-    };
-    let Ok(mut trace) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(trace_path)
-    else {
-        return;
-    };
-
-    let _ = writeln!(trace, "{point}");
-    let _ = trace.flush();
-}
-
-#[cfg(not(feature = "native-test-hooks"))]
-pub(super) fn trace(_: &str) {}
-
-#[cfg(feature = "native-test-hooks")]
 pub(super) fn crash_at(point: &str) {
     if !std::env::var("ARTISAN_NATIVE_TEST_CRASH_POINT").is_ok_and(|value| value == point) {
         return;

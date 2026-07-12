@@ -338,8 +338,6 @@ pub(crate) fn replace_regular_file(
 ) -> Result<ReplaceOutcome> {
     test_hook::wait_for_replace_race()
         .map_err(|_| native_error("native test rendezvous failed"))?;
-    test_hook::trace("start:replace");
-
     let _mutation = root
         .mutation
         .lock()
@@ -364,8 +362,6 @@ pub(crate) fn finalize_regular_file_replacement(
     root: &RootHandle,
     options: &ReplaceRegularFileOptions,
 ) -> Result<()> {
-    test_hook::trace("start:finalize");
-
     let _mutation = root
         .mutation
         .lock()
@@ -375,8 +371,6 @@ pub(crate) fn finalize_regular_file_replacement(
     for attempt in 0..20 {
         match finalize_once(root, options, &names) {
             Ok(()) => {
-                test_hook::trace("done:finalize");
-
                 return Ok(());
             }
             Err(Transient) if attempt < 19 => thread::sleep(Duration::from_millis(5)),
@@ -411,22 +405,10 @@ fn replace_once(
     )?;
 
     match (stage, backup) {
-        (None, None) => {
-            test_hook::trace("state:receipt-none");
-            replace_without_receipt(root, options, names)
-        }
-        (Some(stage), None) => {
-            test_hook::trace("state:receipt-stage-only");
-            replace_stage_only(root, options, names, stage)
-        }
-        (None, Some(backup)) => {
-            test_hook::trace("state:receipt-backup-only");
-            recover_backup_only(root, options, backup)
-        }
-        (Some(stage), Some(backup)) => {
-            test_hook::trace("state:receipt-complete");
-            replace_complete_receipt(root, options, stage, backup)
-        }
+        (None, None) => replace_without_receipt(root, options, names),
+        (Some(stage), None) => replace_stage_only(root, options, names, stage),
+        (None, Some(backup)) => recover_backup_only(root, options, backup),
+        (Some(stage), Some(backup)) => replace_complete_receipt(root, options, stage, backup),
     }
 }
 
@@ -445,8 +427,6 @@ fn replace_without_receipt(
     let Some(mut target) = target else {
         return Ok(ReplaceOutcome::Changed);
     };
-    test_hook::trace("done:target-opened");
-
     if let Some(marker) = read_valid_marker(root, &target, options)? {
         match marker.role {
             ReceiptRole::Finalizing
@@ -478,10 +458,7 @@ fn replace_without_receipt(
     if target.data.metadata.links != 1 {
         return Ok(ReplaceOutcome::Changed);
     }
-    test_hook::trace("done:target-verified");
-
     let original = target.data.clone();
-    test_hook::trace("start:create-stage");
     let stage = create_stage(
         root,
         &options.path,
@@ -490,10 +467,7 @@ fn replace_without_receipt(
         &target,
         options,
     )?;
-    test_hook::trace("done:create-stage");
-
     refresh_snapshot(&mut target, options.maximum_bytes, false)?;
-    test_hook::trace("done:target-refreshed");
 
     if target.data != original {
         let stage_marker = read_valid_marker(root, &stage, options)?.ok_or(Failed)?;
@@ -517,8 +491,6 @@ fn replace_without_receipt(
         NameMutation::Applied => {}
         NameMutation::Collision => return Err(Transient),
     }
-    test_hook::trace("done:target-renamed");
-
     test_hook::crash_at("backup-renamed");
 
     write_marker(
@@ -529,11 +501,8 @@ fn replace_without_receipt(
         stage.data.metadata.id,
         options,
     )?;
-    test_hook::trace("done:backup-marker-written");
-
     flush_parent(parent_handle(&target.opened, root));
     refresh_snapshot(&mut target, options.maximum_bytes, true)?;
-    test_hook::trace("done:backup-refreshed");
     test_hook::crash_at("backup-marked");
 
     if target.data.bytes != options.expected
@@ -849,7 +818,6 @@ fn publish(
     mut stage: Snapshot,
     mut backup: Snapshot,
 ) -> std::result::Result<ReplaceOutcome, AttemptError> {
-    test_hook::trace("start:publish");
     let stage_marker = read_valid_marker(root, &stage, options)?.ok_or(Failed)?;
     let backup_marker = read_valid_marker(root, &backup, options)?.ok_or(Failed)?;
 
@@ -864,10 +832,8 @@ fn publish(
     )? {
         NameMutation::Applied => {
             flush_parent(parent_handle(&stage.opened, root));
-            test_hook::trace("done:target-linked");
             test_hook::crash_at("target-published");
             verify_published(root, options, &mut stage, &mut backup)?;
-            test_hook::trace("done:publish-verified");
 
             Ok(ReplaceOutcome::Replaced)
         }
@@ -1484,74 +1450,27 @@ fn create_stage(
         file: Handle(opened),
         parents,
     };
-    test_hook::trace("done:stage-created");
-
     test_hook::crash_at("creating-stage");
 
     write_exact(opened.file.0, &options.replacement)?;
-    test_hook::trace("done:stage-written");
-
     if unsafe { FlushFileBuffers(opened.file.0) } == 0 {
         return Err(Failed);
     }
-    test_hook::trace("done:stage-content-flushed");
-
     set_attributes(
         opened.file.0,
         ordinary_attributes(target.data.metadata.attributes),
     )?;
-    test_hook::trace("done:stage-attributes-set");
-
     let created_security = security_descriptor(opened.file.0)?;
 
-    if created_security == target.data.security {
-        test_hook::trace("state:stage-security-created-match");
-    } else {
-        test_hook::trace("state:stage-security-created-mismatch");
-
-        if !apply_dacl(opened.file.0, &target.data.security) {
-            return Err(Failed);
-        }
-
-        test_hook::trace("done:stage-dacl-set");
+    if created_security != target.data.security && !apply_dacl(opened.file.0, &target.data.security)
+    {
+        return Err(Failed);
     }
 
     if unsafe { FlushFileBuffers(opened.file.0) } == 0 {
         return Err(Failed);
     }
-    test_hook::trace("done:stage-metadata-flushed");
-
     let mut stage = snapshot_from_opened(opened, options.maximum_bytes, true)?;
-    test_hook::trace("done:stage-snapshot-read");
-    test_hook::trace(if stage.data.bytes == options.replacement {
-        "check:stage-bytes-match"
-    } else {
-        "check:stage-bytes-mismatch"
-    });
-    test_hook::trace(if stage.data.metadata.links == 1 {
-        "check:stage-link-count-match"
-    } else {
-        "check:stage-link-count-mismatch"
-    });
-    test_hook::trace(
-        if !same_identity(&stage.data.metadata, &target.data.metadata) {
-            "check:stage-identity-distinct"
-        } else {
-            "check:stage-identity-reused"
-        },
-    );
-    test_hook::trace(
-        if stage.data.metadata.attributes == target.data.metadata.attributes {
-            "check:stage-attributes-match"
-        } else {
-            "check:stage-attributes-mismatch"
-        },
-    );
-    test_hook::trace(if stage.data.security == target.data.security {
-        "check:stage-security-match"
-    } else {
-        "check:stage-security-mismatch"
-    });
 
     if stage.data.bytes != options.replacement
         || stage.data.metadata.links != 1
@@ -1560,8 +1479,6 @@ fn create_stage(
     {
         return Err(Failed);
     }
-    test_hook::trace("done:stage-snapshot-verified");
-
     write_marker(
         root,
         &stage,
@@ -1570,9 +1487,7 @@ fn create_stage(
         target.data.metadata.id,
         options,
     )?;
-    test_hook::trace("done:stage-marker-written");
     refresh_snapshot(&mut stage, options.maximum_bytes, true)?;
-    test_hook::trace("done:stage-marker-refreshed");
     test_hook::crash_at("stage-ready");
 
     let proof = stage.data.clone();
@@ -1586,13 +1501,9 @@ fn create_stage(
         true,
     )?
     .ok_or(Transient)?;
-    test_hook::trace("done:stage-reopened");
-
     if stage.data != proof {
         return Err(Failed);
     }
-    test_hook::trace("done:stage-reopen-verified");
-
     Ok(stage)
 }
 
