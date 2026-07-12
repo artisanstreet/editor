@@ -5,6 +5,8 @@ import {
 	Identifier,
 	IsoDateTime,
 	RawOrigin,
+	WorkspaceChangeReviewRequest,
+	WorkspaceChangeRollbackRequest,
 	WorkspaceFileReadQuery,
 	WorkspaceFileReplaceRequest,
 	workspace_text_maximum_bytes,
@@ -43,12 +45,32 @@ const WorkspaceFileReplaceInput = Schema.Struct({
 	thread_id: Identifier,
 });
 
+const WorkspaceFileReviewInput = Schema.Struct({
+	...WorkspaceChangeReviewRequest.fields,
+	message_id: Identifier,
+	sent_at: IsoDateTime,
+	thread_id: Identifier,
+});
+
+const WorkspaceFileRollbackInput = Schema.Struct({
+	...WorkspaceChangeRollbackRequest.fields,
+	message_id: Identifier,
+	sent_at: IsoDateTime,
+	thread_id: Identifier,
+});
+
 /** Carries the envelope attribution and replacement request accepted by the controlled workspace service. */
 export type WorkspaceFileReplaceInput = typeof WorkspaceFileReplaceInput.Type;
 
+/** Carries the envelope metadata and review request accepted by the controlled workspace service. */
+export type WorkspaceFileReviewInput = typeof WorkspaceFileReviewInput.Type;
+
+/** Carries the envelope metadata and rollback request accepted by the controlled workspace service. */
+export type WorkspaceFileRollbackInput = typeof WorkspaceFileRollbackInput.Type;
+
 /** Reports a source-free controlled workspace file failure. */
 export class WorkspaceFileServiceError extends Data.TaggedError("WorkspaceFileServiceError")<{
-	readonly operation: "read" | "replace";
+	readonly operation: "read" | "replace" | "review" | "rollback";
 	readonly reason: "changed" | "failed";
 }> {}
 
@@ -62,6 +84,12 @@ export class WorkspaceFileService extends Context.Service<
 		readonly Replace: (
 			input: WorkspaceFileReplaceInput,
 		) => Effect.Effect<WorkspaceChangeCommit, WorkspaceFileServiceError>;
+		readonly Review: (
+			input: WorkspaceFileReviewInput,
+		) => Effect.Effect<WorkspaceChangeCommit, WorkspaceFileServiceError>;
+		readonly Rollback: (
+			input: WorkspaceFileRollbackInput,
+		) => Effect.Effect<WorkspaceChangeCommit, WorkspaceFileServiceError>;
 	}
 >()("Artisan/WorkspaceFileService") {}
 
@@ -69,8 +97,8 @@ function failed(operation: WorkspaceFileServiceError["operation"]) {
 	return new WorkspaceFileServiceError({ operation, reason: "failed" });
 }
 
-function changed() {
-	return new WorkspaceFileServiceError({ operation: "replace", reason: "changed" });
+function changed(operation: "replace" | "rollback") {
+	return new WorkspaceFileServiceError({ operation, reason: "changed" });
 }
 
 function identities_match(left: typeof ContentIdentity.Type, right: typeof ContentIdentity.Type) {
@@ -100,6 +128,27 @@ function claim_fingerprint(
 	});
 }
 
+function review_fingerprint(input: WorkspaceFileReviewInput) {
+	return JSON.stringify({
+		_tag: "review",
+		change_id: input.change_id,
+		message_id: input.message_id,
+		sent_at: input.sent_at,
+		thread_id: input.thread_id,
+	});
+}
+
+function rollback_fingerprint(input: WorkspaceFileRollbackInput) {
+	return JSON.stringify({
+		_tag: "rollback",
+		change_id: input.change_id,
+		expected_after: input.expected_after,
+		message_id: input.message_id,
+		sent_at: input.sent_at,
+		thread_id: input.thread_id,
+	});
+}
+
 /** Builds the controlled workspace file service from its durable and filesystem capabilities. */
 export const WorkspaceFileServiceLive = Layer.effect(
 	WorkspaceFileService,
@@ -119,6 +168,13 @@ export const WorkspaceFileServiceLive = Layer.effect(
 		) =>
 			Effect.gen(function* () {
 				const bytes = new TextEncoder().encode(claim_fingerprint(input, intended_after));
+				const digest = yield* crypto.digest("SHA-256", bytes);
+
+				return Encoding.encodeHex(digest);
+			});
+		const ComputeMetadataFingerprint = (metadata: string) =>
+			Effect.gen(function* () {
+				const bytes = new TextEncoder().encode(metadata);
 				const digest = yield* crypto.digest("SHA-256", bytes);
 
 				return Encoding.encodeHex(digest);
@@ -210,7 +266,7 @@ export const WorkspaceFileServiceLive = Layer.effect(
 							) {
 								yield* SettleRejected(decoded, intended_after);
 
-								return yield* Effect.fail(changed());
+								return yield* Effect.fail(changed("replace"));
 							}
 
 							return yield* Effect.fail(error);
@@ -247,7 +303,7 @@ export const WorkspaceFileServiceLive = Layer.effect(
 									yield* repository.RejectChanged(decoded.message_id);
 									yield* SettleRejected(decoded, intended_after);
 
-									return yield* Effect.fail(changed());
+									return yield* Effect.fail(changed("replace"));
 								}
 
 								yield* Stage(current);
@@ -361,7 +417,7 @@ export const WorkspaceFileServiceLive = Layer.effect(
 							yield* repository.RejectChanged(decoded.message_id);
 							yield* SettleRejected(decoded, intended_after);
 
-							return yield* Effect.fail(changed());
+							return yield* Effect.fail(changed("replace"));
 						}
 
 						yield* repository.MarkApplied({
@@ -378,6 +434,222 @@ export const WorkspaceFileServiceLive = Layer.effect(
 				),
 			);
 
-		return { Read, Replace };
+		const Review = (input: WorkspaceFileReviewInput) =>
+			Schema.decodeUnknownEffect(WorkspaceFileReviewInput, { onExcessProperty: "error" })(
+				input,
+			).pipe(
+				Effect.flatMap((decoded) =>
+					Effect.gen(function* () {
+						const request_fingerprint = yield* ComputeMetadataFingerprint(
+							review_fingerprint(decoded),
+						);
+						const claim = yield* repository.ClaimReview({
+							_tag: "review",
+							change_id: decoded.change_id,
+							message_id: decoded.message_id,
+							request_fingerprint,
+							sent_at: decoded.sent_at,
+							thread_id: decoded.thread_id,
+						});
+
+						if (claim._tag === "duplicate") {
+							return { event: claim.event, status: "duplicate" as const };
+						}
+
+						return yield* repository.CommitReviewed(decoded.message_id);
+					}),
+				),
+				Effect.mapError((error) =>
+					error instanceof WorkspaceFileServiceError ? error : failed("review"),
+				),
+			);
+
+		const Rollback = (input: WorkspaceFileRollbackInput) =>
+			Schema.decodeUnknownEffect(WorkspaceFileRollbackInput, { onExcessProperty: "error" })(
+				input,
+			).pipe(
+				Effect.flatMap((decoded) =>
+					Effect.gen(function* () {
+						const request_fingerprint = yield* ComputeMetadataFingerprint(
+							rollback_fingerprint(decoded),
+						);
+						const admission_result = yield* authority
+							.ClaimRollback({
+								_tag: "rollback",
+								change_id: decoded.change_id,
+								expected_after: decoded.expected_after,
+								message_id: decoded.message_id,
+								request_fingerprint,
+								sent_at: decoded.sent_at,
+								thread_id: decoded.thread_id,
+							})
+							.pipe(Effect.result);
+
+						if (Result.isFailure(admission_result)) {
+							return yield* Effect.fail(admission_result.failure);
+						}
+
+						const admission = admission_result.success;
+						const source = admission.source;
+						const payload_input = {
+							action: "rollback" as const,
+							expected_identity: source.after_identity,
+							message_id: decoded.message_id,
+							replacement_identity: source.before_identity,
+							thread_id: decoded.thread_id,
+						};
+						const SettleRejected = () => payloads.Consume(payload_input);
+						const RecordEvidence = () =>
+							evidence.RecordFilesystemMutation({
+								operation: "write",
+								operation_id: decoded.message_id,
+								path: source.path,
+								thread_id: decoded.thread_id,
+							});
+
+						if (admission._tag === "rejected") {
+							yield* SettleRejected();
+
+							return yield* Effect.fail(changed("rollback"));
+						}
+
+						if (admission._tag === "duplicate") {
+							yield* snapshots.Consume({
+								change_id: decoded.change_id,
+								rollback_message_id: decoded.message_id,
+								thread_id: decoded.thread_id,
+							});
+							yield* RecordEvidence();
+							yield* repository.MarkEvidenceRecorded(decoded.message_id);
+							yield* payloads.Consume(payload_input);
+
+							return { event: admission.claim.event, status: "duplicate" as const };
+						}
+
+						const FinalizeCommit = (payload: {
+							readonly expected: Uint8Array;
+							readonly replacement: Uint8Array;
+						}) =>
+							Effect.gen(function* () {
+								yield* admission.store.FinalizeRegularFileReplacement({
+									expected: payload.expected,
+									maximum_bytes: workspace_text_maximum_bytes,
+									operation_id: decoded.message_id,
+									path: source.path,
+									replacement: payload.replacement,
+								});
+								const commit = yield* repository.CommitRolledBack(
+									decoded.message_id,
+								);
+
+								yield* snapshots.Consume({
+									change_id: decoded.change_id,
+									rollback_message_id: decoded.message_id,
+									thread_id: decoded.thread_id,
+								});
+								yield* RecordEvidence();
+								yield* repository.MarkEvidenceRecorded(decoded.message_id);
+								yield* payloads.Consume(payload_input);
+
+								return commit;
+							});
+
+						const ReadAndStage = () =>
+							Effect.gen(function* () {
+								const original = yield* snapshots.Read({
+									change_id: decoded.change_id,
+									expected_identity: source.before_identity,
+									thread_id: decoded.thread_id,
+								});
+								const current = yield* admission.store.ReadRegularFile(
+									source.path,
+									workspace_text_maximum_bytes,
+								);
+								yield* DecodeWorkspaceText(original);
+								yield* DecodeWorkspaceText(current);
+								const current_identity = yield* ComputeIdentity(current);
+								const original_identity = yield* ComputeIdentity(original);
+
+								if (
+									!identities_match(current_identity, source.after_identity) ||
+									!identities_match(original_identity, source.before_identity)
+								) {
+									yield* repository.RejectChanged(decoded.message_id);
+									yield* SettleRejected();
+
+									return yield* Effect.fail(changed("rollback"));
+								}
+
+								yield* payloads.Stage({
+									...payload_input,
+									expected: current,
+									replacement: original,
+								});
+							});
+						const ResumeOrStage = () =>
+							payloads.Resume(payload_input).pipe(
+								Effect.catchIf(
+									(error) =>
+										error instanceof WorkspaceMutationPayloadStoreUnavailable,
+									(error) =>
+										Effect.gen(function* () {
+											const has_record =
+												yield* payloads.HasRecord(payload_input);
+
+											if (has_record) {
+												return yield* Effect.fail(error);
+											}
+
+											yield* ReadAndStage();
+
+											return yield* payloads.Resume(payload_input);
+										}),
+								),
+							);
+
+						if (admission.claim.operation.lifecycle === "applied") {
+							const payload = yield* payloads.Resume(payload_input);
+
+							return yield* FinalizeCommit(payload);
+						}
+
+						let payload;
+
+						if (admission.claim._tag === "claimed") {
+							yield* ReadAndStage();
+							payload = yield* payloads.Resume(payload_input);
+						} else {
+							payload = yield* ResumeOrStage();
+						}
+
+						const replace = yield* admission.store.ReplaceRegularFile({
+							expected: payload.expected,
+							maximum_bytes: workspace_text_maximum_bytes,
+							operation_id: decoded.message_id,
+							path: source.path,
+							replacement: payload.replacement,
+						});
+
+						if (replace._tag === "Changed") {
+							yield* repository.RejectChanged(decoded.message_id);
+							yield* SettleRejected();
+
+							return yield* Effect.fail(changed("rollback"));
+						}
+
+						yield* repository.MarkApplied({
+							_tag: "rollback",
+							message_id: decoded.message_id,
+						});
+
+						return yield* FinalizeCommit(payload);
+					}),
+				),
+				Effect.mapError((error) =>
+					error instanceof WorkspaceFileServiceError ? error : failed("rollback"),
+				),
+			);
+
+		return { Read, Replace, Review, Rollback };
 	}),
 );

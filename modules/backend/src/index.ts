@@ -184,6 +184,8 @@ export {
 	WorkspaceFileService,
 	WorkspaceFileServiceError,
 	WorkspaceFileServiceLive,
+	type WorkspaceFileReviewInput,
+	type WorkspaceFileRollbackInput,
 	type WorkspaceFileReplaceInput,
 } from "./workspace/workspace-file-service";
 export {
@@ -249,6 +251,9 @@ export {
 	type WorkspaceMutationAuthorityError,
 	type WorkspaceMutationAuthorityGrant,
 	type WorkspaceMutationClaimReplace,
+	type WorkspaceMutationClaimRollback,
+	type WorkspaceMutationRollbackAdmission,
+	type WorkspaceMutationRollbackSource,
 } from "./workspace/workspace-mutation-authority";
 export { AgentOrchestrator } from "./orchestration/agent-orchestrator";
 export {
