@@ -1502,10 +1502,19 @@ fn create_stage(
     )?;
     test_hook::trace("done:stage-attributes-set");
 
-    if !apply_dacl(opened.file.0, &target.data.security) {
-        return Err(Failed);
+    let created_security = security_descriptor(opened.file.0)?;
+
+    if created_security == target.data.security {
+        test_hook::trace("state:stage-security-created-match");
+    } else {
+        test_hook::trace("state:stage-security-created-mismatch");
+
+        if !apply_dacl(opened.file.0, &target.data.security) {
+            return Err(Failed);
+        }
+
+        test_hook::trace("done:stage-dacl-set");
     }
-    test_hook::trace("done:stage-dacl-set");
 
     if unsafe { FlushFileBuffers(opened.file.0) } == 0 {
         return Err(Failed);
