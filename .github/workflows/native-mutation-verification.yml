@@ -61,12 +61,12 @@ jobs:
             - name: Verify pinned-root reads
               env:
                   ARTISAN_RUN_NATIVE_READ_SMOKE: "1"
-              run: node .tests/bounded-file-store-native/native-read-smoke.cjs ./.dist/bounded-file-store-native
+              run: node .tests/bounded-file-store-native/native-read-smoke.cjs ./.dist/bounded-file-store-native/index.cjs
 
             - name: Verify authenticated replacement and recovery
               env:
                   ARTISAN_RUN_NATIVE_REPLACE_SMOKE: "1"
-              run: node .tests/bounded-file-store-native/native-replace-smoke.cjs ./.dist/bounded-file-store-native
+              run: node .tests/bounded-file-store-native/native-replace-smoke.cjs ./.dist/bounded-file-store-native/index.cjs
 
             - name: Build native test-hook binding
               run: pnpm --filter @artisan/bounded-file-store-native build:test-hooks
@@ -76,9 +76,9 @@ jobs:
                   ARTISAN_RUN_NATIVE_REPLACE_SMOKE: "1"
                   ARTISAN_RUN_NATIVE_RACE_SMOKE: "1"
                   UV_THREADPOOL_SIZE: "4"
-              run: node .tests/bounded-file-store-native/native-replace-smoke.cjs ./.dist/bounded-file-store-native-test
+              run: node .tests/bounded-file-store-native/native-replace-smoke.cjs ./.dist/bounded-file-store-native-test/index.cjs
 
             - name: Verify process-crash recovery windows
               env:
                   ARTISAN_RUN_NATIVE_CRASH_SMOKE: "1"
-              run: node .tests/bounded-file-store-native/native-replace-crash-smoke.cjs ./.dist/bounded-file-store-native-test
+              run: node .tests/bounded-file-store-native/native-replace-crash-smoke.cjs ./.dist/bounded-file-store-native-test/index.cjs
