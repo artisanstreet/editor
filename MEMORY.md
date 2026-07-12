@@ -14,8 +14,8 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Branch: `codex/backend-services`
 - [x] Package manager: pnpm 11.7.0
 - [x] Stack: TypeScript 7, Effect 4 beta, Drizzle 1 RC, SQLite
-- [x] Latest verified implementation checkpoint: `fc3e818 test: verify native mutation locally`
-- [x] Local `HEAD`, upstream, and `origin/codex/backend-services` were equal at `fc3e818` before this documentation update.
+- [x] Latest verified implementation checkpoint: `78164fd feat: adapt native workspace file stores`
+- [x] Local `HEAD`, upstream, and `origin/codex/backend-services` were equal at `78164fd` before this documentation update.
 - [x] `ARTISAN_RUN_NATIVE_ADDON_SMOKE=1 pnpm --filter @artisan/bounded-file-store-native verify:local` is the canonical native gate and passes locally for production reads/replacement, test-hook races, and process-crash recovery.
 - [x] Model Behaviour is committed as focused protocol, persistence, provider, service, composition, transport, and security changes.
 - [x] Local GitHub account: `sandersonstabo`; `origin` -> `https://github.com/sandersonstabo/artisan-editor.git`; GitHub visibility was verified as `PRIVATE` on 2026-07-12.
@@ -46,6 +46,7 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] The private `@artisan/bounded-file-store-native` N-API package scaffold is committed and pushed at `dfc08bb`. Rust/NAPI versions are pinned, production output targets Windows x64 MSVC under `.dist`, and the pinned GNU development build proves direct binding load, generated CommonJS loader load, and generated declaration consumption without exposing any filesystem method. Independent P0-P2 review is clean.
 - [x] Native Windows pinned-root bounded reads are committed and pushed at `e915763` and `d5ec0bc`. The N-API class accepts only absolute fixed-drive local NTFS roots, resolves children through open directory handles, rejects reparse/private/alias/multiply-linked paths, denies concurrent writers/deletion, and gives in-flight async reads an exact root lease across `close()`.
 - [x] Native exact-handle conditional replacement and finalization on Windows local NTFS is complete and accepted with authenticated receipts, process-crash recovery, metadata preservation, deterministic race coverage, and best-effort flush hardening. The contract does not claim power-loss atomicity or universal filesystem support. Koffi remains rejected for this security-critical adapter because maintaining Windows NT ABI structures and syscalls in TypeScript is too fragile.
+- [x] The scoped Effect adapter and opaque workspace bounded-store registry are committed and pushed at `78164fd`. The production addon loads only during Layer acquisition, validates the exact Windows x64 MSVC non-test descriptor, adapts native results through the existing `BoundedRegularFileStore` Service, closes pinned roots through `Effect.acquireRelease`, accepts only a caller-owned stable redacted 32-byte key, and canonicalizes every workspace root before native acquisition.
 - [ ] Build the controlled read/replace/review/rollback service around the filesystem registry, workspace-change repository, snapshot store, evidence recorder, and public protocol.
 - [ ] Prove filesystem mutation crash windows, exact retries, authorization races, and restart recovery through the real production composition.
 
@@ -122,6 +123,18 @@ Implemented, independently reviewed, committed, and verified:
 - [x] GNU default/test-hook checks and Clippy pass with warnings denied. The local verifier restores its caller environment, rejects reparse output children, never clobbers MSVC output, and removes temporary loader aliases on success or failure.
 - [x] Focused commits: `68fb9ed fix: recognize competing native receipts` and `fc3e818 test: verify native mutation locally`.
 - [x] The temporary GitHub Actions workflow was removed at the user's request. Local execution completed repeatedly without another bugcheck; the original `rcbottom.sys` incident evidence remains preserved as history.
+
+## Completed Scoped Native Effect Adapter
+
+Implemented, independently reviewed, committed, and verified:
+
+- [x] `BuildNativeBoundedRegularFileStore` dynamically loads the addon only when its scoped Layer is acquired; ordinary backend imports and validation never evaluate the native package.
+- [x] The adapter rejects GNU, test-hook, wrong-platform, malformed module, malformed instance, malformed read/replace/finalize result, and invalid key states before exposing a bounded store.
+- [x] Every opened native root is released exactly once through `Effect.acquireRelease`, including partial multi-root registry construction failures. Temporary JavaScript key copies are zeroed without mutating the caller-owned redacted key.
+- [x] `WorkspaceBoundedRegularFileStoreRegistry` uses Effect `FileSystem.realPath` and `stat`, rejects malformed registrations, duplicate IDs, duplicate canonical roots, and non-directory roots before native acquisition, and exposes only opaque workspace IDs plus bounded store capabilities.
+- [x] A clean-checkout simulation removed `.dist/bounded-file-store-native` while typecheck and the public adapter suite passed, then restored the output in `finally`. The focused suites pass 14 tests without loading the real addon.
+- [x] Full validation passes 80 test files, 581 tests, and 3 intentional skips. Fresh independent P0-P2 review is clean.
+- [x] Focused commit: `78164fd feat: adapt native workspace file stores`.
 
 ## Completed Rollback Snapshot Foundation
 
@@ -232,7 +245,7 @@ Implemented, independently reviewed, committed, and verified:
 
 - [x] Add attributed controlled-write operation history, changed-file/diff projections, review/rollback state, and private rollback snapshot persistence.
 - [x] Add atomic run/agent/workspace authorization and durable mutation-claim pinning.
-- [ ] Add controlled filesystem read/replace/review/rollback execution and public protocol commands.
+- [ ] Add controlled filesystem read/replace/review/rollback execution and public protocol commands. The production bounded-store Layer and workspace registry now exist; execution/recovery composition remains.
 - [ ] Add Git worktree inventory, durable change/session projections, approved mutations, and public protocol commands.
 - [ ] Complete the canonical surface taxonomy: Work, Time, Guidance, Routines, Capabilities, Processes, Changes, Permissions, and native actions.
 - [ ] Add explicit intake risk classification, assumptions, usage aggregation, and workspace conflict/review handling.
