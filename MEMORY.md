@@ -14,8 +14,8 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Branch: `codex/backend-services`
 - [x] Package manager: pnpm 11.7.0
 - [x] Stack: TypeScript 7, Effect 4 beta, Drizzle 1 RC, SQLite
-- [x] Latest code checkpoint: `dfc08bb build: scaffold native file store package`
-- [x] Latest remote checkpoint: `dfc08bb build: scaffold native file store package`
+- [x] Latest implementation checkpoint: `d5ec0bc test: prove native root confinement`
+- [x] Latest verified remote implementation checkpoint: `d5ec0bc test: prove native root confinement`
 - [x] Model Behaviour is committed as focused protocol, persistence, provider, service, composition, transport, and security changes.
 - [x] Local GitHub account: `sandersonstabo`; `origin` -> `https://github.com/sandersonstabo/artisan-editor.git`; GitHub visibility was verified as `PRIVATE` on 2026-07-12.
 - [x] Commit every coherent, verified checkpoint as a small, focused, independently understandable change. Never bundle unrelated dirty work into the same commit and never push `main` or `master` without explicit approval.
@@ -30,7 +30,8 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Recovery-only access to staged rollback bytes is committed and pushed at `b81fa19`.
 - [x] The narrow `BoundedRegularFileStore` seam and explicitly non-adversarial Node adapter are committed and pushed at `98ef0b3`, `011dff5`, and `720cfaa`. Two-phase receipts retain the exact stage and original backup until SQLite durably records `applied`, then finalization removes them idempotently. Crash, corruption, mode, artifact, and concurrency coverage is green, including 50 synchronized exact-ID and 50 competing-ID stress runs. Independent final P0-P2 review is clean.
 - [x] The private `@artisan/bounded-file-store-native` N-API package scaffold is committed and pushed at `dfc08bb`. Rust/NAPI versions are pinned, production output targets Windows x64 MSVC under `.dist`, and the pinned GNU development build proves direct binding load, generated CommonJS loader load, and generated declaration consumption without exposing any filesystem method. Independent P0-P2 review is clean.
-- [ ] Build the first production bounded regular-file adapter for Windows 10 1809+/Windows 11 x64 on local NTFS. Pin the root, reject reparse traversal, and use exact open-handle rename, hard-link publication, and deletion through Rust `windows-sys`/NT APIs. Promise process-crash recovery and best-effort flush hardening, not power-loss atomicity or universal filesystem support. Koffi remains rejected for this security-critical adapter because maintaining Windows NT ABI structures and syscalls in TypeScript is too fragile.
+- [x] Native Windows pinned-root bounded reads are committed and pushed at `e915763` and `d5ec0bc`. The N-API class accepts only absolute fixed-drive local NTFS roots, resolves children through open directory handles, rejects reparse/private/alias/multiply-linked paths, denies concurrent writers/deletion, and gives in-flight async reads an exact root lease across `close()`.
+- [ ] Complete native exact-handle conditional replacement and finalization on Windows local NTFS with process-crash recovery and best-effort flush hardening. Do not claim power-loss atomicity or universal filesystem support. Koffi remains rejected for this security-critical adapter because maintaining Windows NT ABI structures and syscalls in TypeScript is too fragile.
 - [ ] Build the controlled read/replace/review/rollback service around the filesystem registry, workspace-change repository, snapshot store, evidence recorder, and public protocol.
 - [ ] Prove filesystem mutation crash windows, exact retries, authorization races, and restart recovery through the real production composition.
 
@@ -62,7 +63,7 @@ Implemented, independently reviewed, committed, and verified:
 - [x] Focused conditional and registry suites pass 31 tests, plus 50 synchronized exact-ID stress runs and 50 synchronized competing-ID stress runs. Full validation passes 78 test files, 567 tests, and 3 intentional skips.
 - [x] Independent final P0-P2 review is clean after fixing stage-missing/backup-present finalization.
 - [x] Focused commits: `98ef0b3 feat: define bounded regular file store`, `011dff5 feat: add recoverable node file replacement`, and `720cfaa test: prove conditional file replacement recovery`.
-- [ ] Production composition remains blocked on the Rust N-API handle-relative adapter and its platform matrix; the current Node adapter is deliberately named `non_adversarial` and is referenced only by its focused harness.
+- [ ] Production composition remains blocked on native exact-handle replace/finalize operations and the Effect adapter around the N-API class; the current Node adapter is deliberately named `non_adversarial` and is referenced only by its focused harness.
 
 ## Completed Native Package Scaffold
 
@@ -71,10 +72,25 @@ Implemented, independently reviewed, committed, and verified:
 - [x] Private workspace package `@artisan/bounded-file-store-native` uses NAPI-RS v3 and a pinned Rust 1.97.0 toolchain; Rust source, Cargo state, and package metadata remain isolated under `modules/bounded-file-store-native`.
 - [x] Production build metadata targets `x86_64-pc-windows-msvc`; generated loader, declarations, native artifacts, and Cargo intermediates are written only beneath `.dist/bounded-file-store-native`.
 - [x] A user-scoped GNU verification path uses WinLibs UCRT without treating its binary as production. It smoke-loads the direct binding and generated `index.cjs` package loader, then typechecks a consumer against the generated declarations.
-- [x] The scaffold exports only `getNativeBuildDescriptor`; no filesystem capability or backend composition exists yet.
+- [x] The scaffold checkpoint exported only `getNativeBuildDescriptor`; filesystem capability was added later as a separately reviewed slice.
 - [x] `cargo fmt --check`, GNU Clippy with warnings denied, frozen pnpm install, full repository validation, and independent P0-P2 review pass.
 - [x] Local machine state: rustup 1.29.0, Rust 1.97.0 GNU/MSVC toolchains, and portable WinLibs UCRT 16.1 are installed. Visual Studio Build Tools did not install because its elevated bootstrapper could not proceed; production MSVC load remains an explicit CI/platform gate.
 - [x] Focused commit: `dfc08bb build: scaffold native file store package`.
+
+## Completed Native Pinned-Root Read Slice
+
+Implemented, independently reviewed, committed, and verified:
+
+- [x] `NativeBoundedRegularFileStore` pins one exact Windows root through `NtCreateFile`, permits only absolute fixed-drive roots on exact local NTFS, and owns its handle through an `Arc` lease.
+- [x] Every child component is validated before normalization and opened relative to the preceding directory handle with `OBJ_DONT_REPARSE` and `FILE_OPEN_REPARSE_POINT`; traversal, absolute/device/UNC paths, ADS, invalid segments, trailing dot/space, and private artifact names fail closed.
+- [x] Normalized handle names reject 8.3 aliases for `.artisan-trash` and `.artisan-conditional-*`. Multiply-linked leaves are rejected so private artifacts cannot be read through a hard-link alias and later replacement semantics remain unambiguous.
+- [x] Leaf reads require a single-link non-directory, non-reparse file; keep every parent handle alive, deny write/delete sharing on the leaf, bound allocation and `ReadFile`, and compare same-handle identity and metadata before and after every read, including empty files.
+- [x] N-API validates JavaScript numeric bounds before narrowing, runs disk I/O through `AsyncTask`, generates `Promise<Uint8Array>`, rejects new reads after deterministic `close()`, and lets an already-created read finish through its cloned root lease.
+- [x] The opt-in GNU harness covers raw bytes, exact/invalid/oversize bounds, nested and empty files, missing/directory paths, traversal/device/ADS syntax, junction roots and parents, real 8.3 aliases, hard-link aliases, existing writers, opaque errors, repeated close, and an in-flight read surviving close.
+- [x] Ten consecutive native build/loader/type/runtime smoke runs pass. Rust format, GNU Clippy with warnings denied, and full repository validation pass with 78 Vitest files, 567 passing tests, and 3 intentional skips.
+- [x] Independent review found and closed initial P1 gaps for 8.3/hard-link aliases and explicit local-volume admission; final P0-P2 re-review is clean.
+- [x] Focused commits: `e915763 feat: read files through pinned native roots` and `d5ec0bc test: prove native root confinement`.
+- [ ] Production MSVC compilation/loading remains an explicit CI/platform gate because this machine has no usable MSVC linker.
 
 ## Completed Rollback Snapshot Foundation
 

@@ -2018,6 +2018,17 @@ Right pane relationship:
   traversal, and mutate exact open file handles for no-overwrite rename,
   hard-link publication, and receipt deletion. Unsupported OS, filesystem, or
   primitive combinations should fail closed before mutation.
+- Native bounded reads should accept only absolute roots on fixed local NTFS
+  volumes, keep every traversed directory handle alive for the operation, and
+  open each raw child segment relative to its parent handle. JavaScript numeric
+  bounds must be validated before narrowing, disk I/O must run off the renderer
+  thread, and closing a store must reject new work without invalidating an
+  already-created read lease.
+- Private artifact exclusion should operate on the opened file, not only the
+  requested spelling. Normalized handle names must reject 8.3 aliases for
+  Artisan-private paths, and the production bounded store should reject
+  multiply-linked leaves so stages/backups cannot be reached through hard-link
+  aliases and replacement identity remains unambiguous.
 - Windows receipt recovery should promise convergence after process crashes.
   File and metadata flushes are best-effort durability hardening; Artisan must
   not claim that a multi-step replacement is atomic across power loss, storage
@@ -2622,3 +2633,10 @@ Right pane relationship:
   effects, exact retries are independent of later canonical/provider changes,
   and runtime-only guidance reaches Codex/Claude through a separate Engine field
   without changing user or assignment text.
+- 2026-07-12: The first native filesystem slice is a Windows x64 pinned-root
+  bounded reader. It requires an absolute fixed-drive root on exact local NTFS,
+  opens every child through parent handles with reparse traversal disabled,
+  rejects normalized 8.3/private and multiply-linked aliases, denies concurrent
+  writer/delete sharing, and keeps in-flight reads alive across deterministic
+  store closure. Exact-handle replacement/finalization and production MSVC
+  loading remain later gates.
