@@ -99,16 +99,30 @@ try {
 	if ($loader_descriptor.operatingSystem -ne "windows" -or $loader_descriptor.architecture -ne "x86_64" -or $loader_descriptor.target -ne "x86_64-pc-windows-gnu") {
 		throw "The generated-loader GNU smoke descriptor was unexpected: $($loader_descriptor | ConvertTo-Json -Compress)"
 	}
+
+	& node (Join-Path $repository_root ".tests\bounded-file-store-native\native-read-smoke.cjs") $module_root
+
+	if ($LASTEXITCODE -ne 0) {
+		throw "The native bounded file store read smoke test failed"
+	}
 } finally {
 	Remove-Item -LiteralPath $loader_binding -Force
 }
 
 $type_smoke_source = @'
-import { getNativeBuildDescriptor, type NativeBuildDescriptor } from "../../modules/bounded-file-store-native";
+import {
+	getNativeBuildDescriptor,
+	NativeBoundedRegularFileStore,
+	type NativeBuildDescriptor,
+} from "../../modules/bounded-file-store-native";
 
 const descriptor: NativeBuildDescriptor = getNativeBuildDescriptor();
+const store = new NativeBoundedRegularFileStore("C:\\");
+const bytes: Promise<Uint8Array> = store.readRegularFile("file.txt", 1024);
 
 void descriptor;
+void bytes;
+store.close();
 '@
 
 [System.IO.File]::WriteAllText($type_smoke, $type_smoke_source, [System.Text.UTF8Encoding]::new($false))
