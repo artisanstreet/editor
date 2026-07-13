@@ -1,6 +1,6 @@
 # Artisan Editor Memory
 
-Last updated: 2026-07-13
+Last updated: 2026-07-14
 
 ## Mission
 
@@ -18,7 +18,7 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Local `HEAD`, upstream, and `origin/codex/workspace-replace-approval` were equal at `c7f1329` before this documentation update.
 - [x] `ARTISAN_RUN_NATIVE_ADDON_SMOKE=1 pnpm --filter @artisan/bounded-file-store-native verify:local` is the canonical native gate and passes locally for production reads/replacement, test-hook races, and process-crash recovery.
 - [x] Routine development verification is local-first. Do not recreate temporary GitHub Actions, remote runners, or similar testing detours; future CI is a real clean-checkout/release gate and never a substitute for local validation.
-- [x] Reconfirmed on 2026-07-13: the leftover empty `.github/workflows` directory was removed and the canonical native gate passed locally. The earlier BSOD remains classified as a one-off storage-driver incident, not a reason to move routine testing off-machine.
+- [x] Reconfirmed on 2026-07-14: no `.github` workflow or other remote-testing detour remains, and the canonical native gate passes locally. The earlier BSOD remains classified as a one-off storage-driver incident, not a reason to move routine testing off-machine.
 - [x] Model Behaviour is committed as focused protocol, persistence, provider, service, composition, transport, and security changes.
 - [x] Local GitHub account: `sandersonstabo`; `origin` -> `https://github.com/sandersonstabo/artisan-editor.git`; GitHub visibility was verified as `PRIVATE` on 2026-07-12.
 - [x] Commit every coherent, verified checkpoint as a small, focused, independently understandable change. Never bundle unrelated dirty work into the same commit and never push `main` or `master` without explicit approval.
