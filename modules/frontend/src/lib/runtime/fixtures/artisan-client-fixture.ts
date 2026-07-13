@@ -10,6 +10,7 @@ import type {
 	ThreadRetentionPolicy,
 	ThreadWorkItem,
 	WorkspaceChange,
+	WorkspaceChangeDiffQueryResult,
 	WorkspaceFileReadQueryResult,
 } from "@artisan/protocol";
 import {
@@ -35,6 +36,7 @@ export interface FixtureArtisanClientData {
 	readonly thread_work: ThreadWorkItem;
 	readonly threads: ReadonlyArray<ThreadListItem>;
 	readonly workspace_changes: ReadonlyArray<WorkspaceChange>;
+	readonly workspace_change_diffs: Readonly<Record<string, WorkspaceChangeDiffQueryResult>>;
 	readonly workspace_files: Readonly<Record<string, WorkspaceFileReadQueryResult>>;
 }
 
@@ -242,6 +244,35 @@ export const fixture_artisan_client_data = {
 			workspace_id: "workspace-artisan-editor",
 		},
 	],
+	workspace_change_diffs: {
+		"thread-editor-shell:change-fixture-runtime": {
+			added_line_count: 1,
+			after_identity: {
+				algorithm: "sha256",
+				byte_count: 29,
+				content_hash: "ddf066ee341c060cca67ed6faa462602690b490d98c6fecdf607c447754e14bb",
+			},
+			before_identity: {
+				algorithm: "sha256",
+				byte_count: 30,
+				content_hash: "7bc245364a34f5905e223f7cd0230d6ce53a1b74c389c593d725aa2ff856e918",
+			},
+			change_id: "change-fixture-runtime",
+			context_lines: 3,
+			format: "unified",
+			patch: "@@ -1,1 +1,1 @@\n-export const fixture = false;\n+export const fixture = true;\n",
+			patch_identity: {
+				algorithm: "sha256",
+				byte_count: 77,
+				content_hash: "affe3831c76191994dd0ac4489d962430bc74e5392b910bfdc6487a5dd3e79c3",
+			},
+			path: "modules/frontend/src/lib/fixture.ts",
+			removed_line_count: 1,
+			thread_id: "thread-editor-shell",
+			truncated: false,
+			workspace_id: "workspace-artisan-editor",
+		},
+	},
 	workspace_files: {
 		"workspace-artisan-editor:modules/frontend/src/lib/fixture.ts": {
 			content: "export const fixture = true;\n",
@@ -318,6 +349,19 @@ export const FixtureArtisanClientService = {
 					? Option.some(fixture_artisan_client_data.thread_work)
 					: Option.none(),
 			);
+		}),
+	GetWorkspaceChangeDiff: (input) =>
+		Effect.gen(function* () {
+			const key = `${input.thread_id}:${input.change_id}`;
+			const workspace_change_diffs: FixtureArtisanClientData["workspace_change_diffs"] =
+				fixture_artisan_client_data.workspace_change_diffs;
+			const diff = workspace_change_diffs[key];
+
+			if (diff === undefined) {
+				return yield* FixtureFailure(`Unknown fixture workspace change diff: ${key}`);
+			}
+
+			return diff;
 		}),
 	ListTerminals: (thread_id, workspace_id) =>
 		Effect.gen(function* () {

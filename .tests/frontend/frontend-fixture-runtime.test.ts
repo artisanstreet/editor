@@ -76,6 +76,7 @@ describe("frontend ArtisanClient fixture runtime", () => {
 						"GetOrchestrationGraph",
 						"GetThreadRetentionPolicy",
 						"GetThreadWork",
+						"GetWorkspaceChangeDiff",
 						"ListTerminals",
 						"ListThreads",
 						"ListWorkspaceChanges",

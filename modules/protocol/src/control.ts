@@ -3,6 +3,8 @@ import { Schema } from "effect";
 import {
 	WorkspaceChangeListQuery,
 	WorkspaceChangeListQueryResult,
+	WorkspaceChangeDiffQuery,
+	WorkspaceChangeDiffQueryResult,
 	WorkspaceChangeReviewRequest,
 	WorkspaceChangeRollbackRequest,
 	WorkspaceChangeUpdatedEvent,
@@ -1140,6 +1142,26 @@ export const WorkspaceChangeListQueryResultEnvelope = Schema.Struct({
 export type WorkspaceChangeListQueryResultEnvelope =
 	typeof WorkspaceChangeListQueryResultEnvelope.Type;
 
+/** Requests the unified diff for one recorded workspace change. */
+export const WorkspaceChangeDiffQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("workspace.change.diff.query"),
+	payload: WorkspaceChangeDiffQuery,
+});
+
+export type WorkspaceChangeDiffQueryEnvelope = typeof WorkspaceChangeDiffQueryEnvelope.Type;
+
+/** Returns one correlated unified workspace-change diff. */
+export const WorkspaceChangeDiffQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("workspace.change.diff.query.result"),
+	payload: WorkspaceChangeDiffQueryResult,
+});
+
+export type WorkspaceChangeDiffQueryResultEnvelope =
+	typeof WorkspaceChangeDiffQueryResultEnvelope.Type;
+
 /** Requests the curated Model Behaviour registry and current reconciliation state. */
 export const ModelBehaviourQueryEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
@@ -1453,6 +1475,7 @@ export const InboundControlEnvelope = Schema.Union([
 	WorkspaceChangeReviewEnvelope,
 	WorkspaceChangeRollbackEnvelope,
 	WorkspaceChangeListQueryEnvelope,
+	WorkspaceChangeDiffQueryEnvelope,
 	GlobalGuidanceQueryEnvelope,
 	GlobalGuidanceUpdateEnvelope,
 	GlobalGuidanceSelectionEnvelope,
@@ -1485,6 +1508,7 @@ export const OutboundControlEnvelope = Schema.Union([
 	ThreadRetentionQueryResultEnvelope,
 	WorkspaceFileReadQueryResultEnvelope,
 	WorkspaceChangeListQueryResultEnvelope,
+	WorkspaceChangeDiffQueryResultEnvelope,
 	GlobalGuidanceQueryResultEnvelope,
 	ModelBehaviourQueryResultEnvelope,
 	ThreadWorkQueryResultEnvelope,

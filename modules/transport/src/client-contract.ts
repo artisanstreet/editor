@@ -23,6 +23,8 @@ import type {
 	WorkspaceFileReadQueryResult,
 	WorkspaceFileReplaceRequest,
 	WorkspaceChangeListQueryResult,
+	WorkspaceChangeDiffQuery,
+	WorkspaceChangeDiffQueryResult,
 } from "@artisan/protocol";
 
 /** Identifies a typed frontend client failure. */
@@ -83,6 +85,9 @@ export interface ArtisanWorkspaceChangeListInput {
 	readonly thread_id: string;
 	readonly workspace_id?: string;
 }
+
+/** Supplies the thread and change identity for one workspace diff query. */
+export interface ArtisanWorkspaceChangeDiffInput extends WorkspaceChangeDiffQuery {}
 
 /** Supplies the durable identity and attribution for a review transition. */
 export interface ArtisanWorkspaceChangeReviewInput {
@@ -222,6 +227,9 @@ export class ArtisanClient extends Context.Service<
 		readonly ListWorkspaceChanges: (
 			input: ArtisanWorkspaceChangeListInput,
 		) => Effect.Effect<WorkspaceChangeListQueryResult, ArtisanClientError>;
+		readonly GetWorkspaceChangeDiff: (
+			input: ArtisanWorkspaceChangeDiffInput,
+		) => Effect.Effect<WorkspaceChangeDiffQueryResult, ArtisanClientError>;
 		readonly OpenAsset: (
 			asset_id: string,
 		) => Effect.Effect<

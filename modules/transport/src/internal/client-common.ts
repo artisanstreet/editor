@@ -64,6 +64,7 @@ export type PendingRequestEnvelope = Extract<
 			| "workspace.file.read.query"
 			| "workspace.file.replace"
 			| "workspace.change.list.query"
+			| "workspace.change.diff.query"
 			| "workspace.change.review"
 			| "workspace.change.rollback";
 	}
@@ -83,7 +84,8 @@ export type PendingResultEnvelope = Extract<
 			| "thread.retention.query.result"
 			| "thread.work.query.result"
 			| "workspace.file.read.query.result"
-			| "workspace.change.list.query.result";
+			| "workspace.change.list.query.result"
+			| "workspace.change.diff.query.result";
 	}
 >;
 

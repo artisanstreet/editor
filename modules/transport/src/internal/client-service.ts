@@ -3,6 +3,7 @@ import { Cause, Effect, Layer, Option, Queue, Ref, Stream } from "effect";
 import {
 	type CommandEnvelope,
 	type WorkspaceChangeListQueryEnvelope,
+	type WorkspaceChangeDiffQueryEnvelope,
 	type WorkspaceChangeReviewEnvelope,
 	type WorkspaceChangeRollbackEnvelope,
 	type WorkspaceFileReadQueryEnvelope,
@@ -38,6 +39,7 @@ import {
 	type ArtisanCommandInput,
 	type ArtisanCommandReceipt,
 	type ArtisanWorkspaceChangeListInput,
+	type ArtisanWorkspaceChangeDiffInput,
 	type ArtisanWorkspaceChangeReviewInput,
 	type ArtisanWorkspaceChangeRollbackInput,
 	type ArtisanWorkspaceFileReadInput,
@@ -231,6 +233,23 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					return result.kind === "workspace.change.list.query.result"
 						? result.payload
 						: yield* Effect.die("workspace change list response narrowed incorrectly");
+				});
+			const get_workspace_change_diff = (input: ArtisanWorkspaceChangeDiffInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: WorkspaceChangeDiffQueryEnvelope = {
+						...trace,
+						kind: "workspace.change.diff.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"workspace.change.diff.query.result",
+					);
+
+					return result.kind === "workspace.change.diff.query.result"
+						? result.payload
+						: yield* Effect.die("workspace change diff response narrowed incorrectly");
 				});
 
 			type WorkspaceMutationEnvelope =
@@ -619,6 +638,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				GetModelBehaviour: get_model_behaviour,
 				GetThreadRetentionPolicy: get_thread_retention_policy,
 				GetThreadWork: get_thread_work,
+				GetWorkspaceChangeDiff: get_workspace_change_diff,
 				ListWorkspaceChanges: list_workspace_changes,
 				ListTerminals: list_terminals,
 				ListThreads: list_threads,

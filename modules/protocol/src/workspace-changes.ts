@@ -7,6 +7,18 @@ const text_encoder = new TextEncoder();
 /** Defines the V1 control-frame ceiling for workspace source text at four MiB of UTF-8 data. */
 export const workspace_text_maximum_bytes = 4 * 1024 * 1024;
 
+/** Defines the maximum UTF-8 size of one workspace diff patch. */
+export const workspace_diff_maximum_bytes = 16 * 1024 * 1024;
+
+/** Defines the maximum number of added or removed lines in one workspace diff. */
+export const workspace_diff_maximum_lines_per_side = 100_000;
+
+/** Defines the maximum rendered line count for one workspace diff. */
+export const workspace_diff_maximum_rendered_lines = 250_000;
+
+/** Defines the number of context lines emitted around workspace diff changes. */
+export const workspace_diff_context_lines = 3;
+
 /** Validates a canonical slash-separated relative path that identifies one workspace file. */
 export const WorkspacePath = Schema.String.check(
 	Schema.makeFilter<string>((path) => {
@@ -56,6 +68,31 @@ export const ContentIdentity = Schema.Struct({
 });
 
 export type ContentIdentity = typeof ContentIdentity.Type;
+
+/** Validates a UTF-8 unified workspace diff patch within the V1 byte bound. */
+export const WorkspaceDiffPatch = Schema.String.check(
+	Schema.makeFilter<string>((patch) =>
+		text_encoder.encode(patch).byteLength <= workspace_diff_maximum_bytes
+			? undefined
+			: `Expected at most ${workspace_diff_maximum_bytes} UTF-8 bytes`,
+	),
+);
+
+export type WorkspaceDiffPatch = typeof WorkspaceDiffPatch.Type;
+
+/** Identifies one bounded UTF-8 workspace diff patch. */
+export const WorkspaceDiffIdentity = Schema.Struct({
+	algorithm: Schema.Literal("sha256"),
+	byte_count: Schema.Int.check(
+		Schema.isGreaterThanOrEqualTo(0),
+		Schema.isLessThanOrEqualTo(workspace_diff_maximum_bytes),
+	),
+	content_hash: Schema.String.check(
+		Schema.isPattern(/^[a-f0-9]{64}$/, { message: "Expected a lowercase SHA-256 hash" }),
+	),
+});
+
+export type WorkspaceDiffIdentity = typeof WorkspaceDiffIdentity.Type;
 
 /** Represents the human review lifecycle for one recorded workspace change. */
 export const WorkspaceChangeReviewState = Schema.Literals([
@@ -162,3 +199,44 @@ export const WorkspaceChangeListQueryResult = Schema.Struct({
 });
 
 export type WorkspaceChangeListQueryResult = typeof WorkspaceChangeListQueryResult.Type;
+
+/** Requests the unified diff for one recorded workspace change. */
+export const WorkspaceChangeDiffQuery = Schema.Struct({
+	change_id: Identifier,
+	thread_id: Identifier,
+});
+
+export type WorkspaceChangeDiffQuery = typeof WorkspaceChangeDiffQuery.Type;
+
+const WorkspaceChangeDiffQueryResultBase = Schema.Struct({
+	added_line_count: Schema.Int.check(
+		Schema.isGreaterThanOrEqualTo(0),
+		Schema.isLessThanOrEqualTo(workspace_diff_maximum_lines_per_side),
+	),
+	after_identity: ContentIdentity,
+	before_identity: ContentIdentity,
+	change_id: Identifier,
+	context_lines: Schema.Literal(workspace_diff_context_lines),
+	format: Schema.Literal("unified"),
+	patch: WorkspaceDiffPatch,
+	patch_identity: WorkspaceDiffIdentity,
+	path: WorkspacePath,
+	removed_line_count: Schema.Int.check(
+		Schema.isGreaterThanOrEqualTo(0),
+		Schema.isLessThanOrEqualTo(workspace_diff_maximum_lines_per_side),
+	),
+	thread_id: Identifier,
+	truncated: Schema.Literal(false),
+	workspace_id: Identifier,
+});
+
+/** Returns one bounded, content-addressed unified diff for a workspace change. */
+export const WorkspaceChangeDiffQueryResult = WorkspaceChangeDiffQueryResultBase.check(
+	Schema.makeFilter<typeof WorkspaceChangeDiffQueryResultBase.Type>((result) =>
+		text_encoder.encode(result.patch).byteLength === result.patch_identity.byte_count
+			? undefined
+			: "Expected patch_identity.byte_count to equal the patch UTF-8 byte count",
+	),
+);
+
+export type WorkspaceChangeDiffQueryResult = typeof WorkspaceChangeDiffQueryResult.Type;

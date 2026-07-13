@@ -52,6 +52,30 @@ function workspace_change(overrides: Partial<WorkspaceChange> = {}): WorkspaceCh
 	};
 }
 
+function workspace_change_diff() {
+	const patch = "@@ -1,1 +1,1 @@\n-old\n+new\n";
+
+	return {
+		added_line_count: 1,
+		after_identity: identity(4),
+		before_identity: identity(4),
+		change_id: "change_1",
+		context_lines: 3,
+		format: "unified",
+		patch,
+		patch_identity: {
+			algorithm: "sha256" as const,
+			byte_count: new TextEncoder().encode(patch).byteLength,
+			content_hash,
+		},
+		path: "src/main.ts",
+		removed_line_count: 1,
+		thread_id: "thread_1",
+		truncated: false,
+		workspace_id: "workspace_1",
+	};
+}
+
 describe("workspace changes protocol codec", () => {
 	it("roundtrips every workspace-change envelope through the public codecs", async () => {
 		const inbound_envelopes = [
@@ -87,6 +111,10 @@ describe("workspace changes protocol codec", () => {
 				thread_id: "thread_1",
 				workspace_id: "workspace_1",
 			}),
+			frontend_envelope("workspace.change.diff.query", {
+				change_id: "change_1",
+				thread_id: "thread_1",
+			}),
 		];
 		const outbound_envelopes = [
 			{
@@ -110,6 +138,16 @@ describe("workspace changes protocol codec", () => {
 				message_id: "list_result_1",
 				origin: "backend",
 				payload: { changes: [workspace_change()], journal_sequence: 1 },
+				protocol_version: 1,
+				schema_version: 1,
+				sent_at: timestamp,
+			},
+			{
+				correlation_id: "diff_1",
+				kind: "workspace.change.diff.query.result",
+				message_id: "diff_result_1",
+				origin: "backend",
+				payload: workspace_change_diff(),
 				protocol_version: 1,
 				schema_version: 1,
 				sent_at: timestamp,
@@ -249,6 +287,73 @@ describe("workspace changes protocol codec", () => {
 		).rejects.toBeDefined();
 		await expect(
 			Effect.runPromise(DecodeCommandEnvelope(command_envelope)),
+		).rejects.toBeDefined();
+	});
+
+	it.each([
+		{
+			...frontend_envelope("workspace.change.diff.query", {
+				change_id: "change_1",
+				thread_id: "thread with whitespace",
+			}),
+		},
+		{
+			...frontend_envelope("workspace.change.diff.query", {
+				change_id: "change_1",
+				thread_id: "thread_1",
+			}),
+			unexpected: true,
+		},
+	])("rejects malformed diff query envelopes", async (envelope) => {
+		await expect(
+			Effect.runPromise(DecodeInboundControlEnvelope(envelope)),
+		).rejects.toBeDefined();
+	});
+
+	it("rejects a diff result whose patch byte count is inconsistent", async () => {
+		const payload = workspace_change_diff();
+		payload.patch_identity.byte_count += 1;
+
+		await expect(
+			Effect.runPromise(
+				DecodeOutboundControlEnvelope({
+					correlation_id: "diff_1",
+					kind: "workspace.change.diff.query.result",
+					message_id: "diff_result_1",
+					origin: "backend",
+					payload,
+					protocol_version: 1,
+					schema_version: 1,
+					sent_at: timestamp,
+				}),
+			),
+		).rejects.toBeDefined();
+	});
+
+	it("rejects an oversized diff patch without expanding the assertion output", async () => {
+		const patch = "x".repeat(16 * 1024 * 1024 + 1);
+		const payload = {
+			...workspace_change_diff(),
+			patch,
+			patch_identity: {
+				...workspace_change_diff().patch_identity,
+				byte_count: patch.length,
+			},
+		};
+
+		await expect(
+			Effect.runPromise(
+				DecodeOutboundControlEnvelope({
+					correlation_id: "diff_1",
+					kind: "workspace.change.diff.query.result",
+					message_id: "diff_result_1",
+					origin: "backend",
+					payload,
+					protocol_version: 1,
+					schema_version: 1,
+					sent_at: timestamp,
+				}),
+			),
 		).rejects.toBeDefined();
 	});
 });
