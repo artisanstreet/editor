@@ -1,98 +1,386 @@
 [
-	"Abigail",
-	"Ada",
-	"Agatha",
-	"Agnes",
-	"Alice",
-	"Alison",
-	"Amelia",
-	"Amy",
-	"Anne",
-	"Arabella",
-	"Audrey",
-	"Beatrice",
-	"Beth",
-	"Bridget",
-	"Caroline",
-	"Catherine",
-	"Charlotte",
-	"Chloe",
-	"Claire",
-	"Daisy",
-	"Daphne",
-	"Dorothy",
-	"Edith",
-	"Eleanor",
-	"Eliza",
-	"Elizabeth",
-	"Ella",
-	"Elsie",
-	"Emily",
-	"Emma",
-	"Enid",
-	"Esmebeth",
-	"Evelyn",
-	"Felicity",
-	"Fiona",
-	"Florence",
-	"Frances",
-	"Freya",
-	"Gemma",
-	"Georgina",
-	"Grace",
-	"Hannah",
-	"Harriet",
-	"Hazel",
-	"Heather",
-	"Helen",
-	"Holly",
-	"Imogen",
-	"Iris",
-	"Isabel",
-	"Isla",
-	"Ivy",
-	"Jane",
-	"Jean",
-	"Jemima",
-	"Jennifer",
-	"Jessica",
-	"Joanna",
-	"Josephine",
-	"Judith",
-	"Julia",
-	"Juliet",
-	"Kathleen",
-	"Lily",
-	"Louisa",
-	"Louise",
-	"Lucy",
-	"Mabel",
-	"Maisie",
-	"Margaret",
-	"Margot",
-	"Martha",
-	"Mary",
-	"Matilda",
-	"Megan",
-	"Molly",
-	"Nora",
-	"Olive",
-	"Olivia",
-	"Penelope",
-	"Philippa",
-	"Phoebe",
-	"Poppy",
-	"Rachel",
-	"Rebecca",
-	"Rose",
-	"Rosemary",
-	"Ruby",
-	"Sarah",
-	"Sophie",
-	"Tamsin",
-	"Victoria",
-	"Violet",
-	"Wendy",
-	"Winifred",
-	"Zoe"
+	{
+		"value": "Abigail",
+		"weight": 4
+	},
+	{
+		"value": "Ada",
+		"weight": 4
+	},
+	{
+		"value": "Agatha",
+		"weight": 2
+	},
+	{
+		"value": "Agnes",
+		"weight": 4
+	},
+	{
+		"value": "Alice",
+		"weight": 6
+	},
+	{
+		"value": "Alison",
+		"weight": 4
+	},
+	{
+		"value": "Amelia",
+		"weight": 6
+	},
+	{
+		"value": "Amy",
+		"weight": 6
+	},
+	{
+		"value": "Anne",
+		"weight": 6
+	},
+	{
+		"value": "Arabella",
+		"weight": 2
+	},
+	{
+		"value": "Audrey",
+		"weight": 4
+	},
+	{
+		"value": "Beatrice",
+		"weight": 4
+	},
+	{
+		"value": "Beth",
+		"weight": 4
+	},
+	{
+		"value": "Bridget",
+		"weight": 4
+	},
+	{
+		"value": "Caroline",
+		"weight": 4
+	},
+	{
+		"value": "Catherine",
+		"weight": 4
+	},
+	{
+		"value": "Charlotte",
+		"weight": 6
+	},
+	{
+		"value": "Chloe",
+		"weight": 6
+	},
+	{
+		"value": "Claire",
+		"weight": 4
+	},
+	{
+		"value": "Daisy",
+		"weight": 6
+	},
+	{
+		"value": "Daphne",
+		"weight": 2
+	},
+	{
+		"value": "Dorothy",
+		"weight": 2
+	},
+	{
+		"value": "Edith",
+		"weight": 2
+	},
+	{
+		"value": "Eleanor",
+		"weight": 6
+	},
+	{
+		"value": "Eliza",
+		"weight": 4
+	},
+	{
+		"value": "Elizabeth",
+		"weight": 6
+	},
+	{
+		"value": "Ella",
+		"weight": 6
+	},
+	{
+		"value": "Elsie",
+		"weight": 6
+	},
+	{
+		"value": "Emily",
+		"weight": 6
+	},
+	{
+		"value": "Emma",
+		"weight": 6
+	},
+	{
+		"value": "Enid",
+		"weight": 2
+	},
+	{
+		"value": "Esmebeth",
+		"weight": 8
+	},
+	{
+		"value": "Evelyn",
+		"weight": 4
+	},
+	{
+		"value": "Felicity",
+		"weight": 4
+	},
+	{
+		"value": "Fiona",
+		"weight": 4
+	},
+	{
+		"value": "Florence",
+		"weight": 4
+	},
+	{
+		"value": "Frances",
+		"weight": 4
+	},
+	{
+		"value": "Freya",
+		"weight": 4
+	},
+	{
+		"value": "Gemma",
+		"weight": 4
+	},
+	{
+		"value": "Georgina",
+		"weight": 4
+	},
+	{
+		"value": "Grace",
+		"weight": 6
+	},
+	{
+		"value": "Hannah",
+		"weight": 6
+	},
+	{
+		"value": "Harriet",
+		"weight": 4
+	},
+	{
+		"value": "Hazel",
+		"weight": 4
+	},
+	{
+		"value": "Heather",
+		"weight": 4
+	},
+	{
+		"value": "Helen",
+		"weight": 4
+	},
+	{
+		"value": "Holly",
+		"weight": 6
+	},
+	{
+		"value": "Imogen",
+		"weight": 4
+	},
+	{
+		"value": "Iris",
+		"weight": 4
+	},
+	{
+		"value": "Isabel",
+		"weight": 4
+	},
+	{
+		"value": "Isla",
+		"weight": 6
+	},
+	{
+		"value": "Ivy",
+		"weight": 6
+	},
+	{
+		"value": "Jane",
+		"weight": 4
+	},
+	{
+		"value": "Jean",
+		"weight": 4
+	},
+	{
+		"value": "Jemima",
+		"weight": 2
+	},
+	{
+		"value": "Jennifer",
+		"weight": 4
+	},
+	{
+		"value": "Jessica",
+		"weight": 6
+	},
+	{
+		"value": "Joanna",
+		"weight": 4
+	},
+	{
+		"value": "Josephine",
+		"weight": 4
+	},
+	{
+		"value": "Judith",
+		"weight": 4
+	},
+	{
+		"value": "Julia",
+		"weight": 4
+	},
+	{
+		"value": "Juliet",
+		"weight": 4
+	},
+	{
+		"value": "Kathleen",
+		"weight": 4
+	},
+	{
+		"value": "Lily",
+		"weight": 6
+	},
+	{
+		"value": "Louisa",
+		"weight": 4
+	},
+	{
+		"value": "Louise",
+		"weight": 4
+	},
+	{
+		"value": "Lucy",
+		"weight": 6
+	},
+	{
+		"value": "Mabel",
+		"weight": 4
+	},
+	{
+		"value": "Maisie",
+		"weight": 6
+	},
+	{
+		"value": "Margaret",
+		"weight": 4
+	},
+	{
+		"value": "Margot",
+		"weight": 4
+	},
+	{
+		"value": "Martha",
+		"weight": 4
+	},
+	{
+		"value": "Mary",
+		"weight": 4
+	},
+	{
+		"value": "Matilda",
+		"weight": 6
+	},
+	{
+		"value": "Megan",
+		"weight": 4
+	},
+	{
+		"value": "Molly",
+		"weight": 6
+	},
+	{
+		"value": "Nora",
+		"weight": 6
+	},
+	{
+		"value": "Olive",
+		"weight": 4
+	},
+	{
+		"value": "Olivia",
+		"weight": 6
+	},
+	{
+		"value": "Penelope",
+		"weight": 4
+	},
+	{
+		"value": "Philippa",
+		"weight": 4
+	},
+	{
+		"value": "Phoebe",
+		"weight": 4
+	},
+	{
+		"value": "Poppy",
+		"weight": 6
+	},
+	{
+		"value": "Rachel",
+		"weight": 4
+	},
+	{
+		"value": "Rebecca",
+		"weight": 4
+	},
+	{
+		"value": "Rose",
+		"weight": 4
+	},
+	{
+		"value": "Rosemary",
+		"weight": 4
+	},
+	{
+		"value": "Ruby",
+		"weight": 6
+	},
+	{
+		"value": "Sarah",
+		"weight": 6
+	},
+	{
+		"value": "Sophie",
+		"weight": 6
+	},
+	{
+		"value": "Tamsin",
+		"weight": 2
+	},
+	{
+		"value": "Victoria",
+		"weight": 4
+	},
+	{
+		"value": "Violet",
+		"weight": 6
+	},
+	{
+		"value": "Wendy",
+		"weight": 4
+	},
+	{
+		"value": "Winifred",
+		"weight": 2
+	},
+	{
+		"value": "Zoe",
+		"weight": 6
+	}
 ]

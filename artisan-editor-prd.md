@@ -765,6 +765,9 @@ Curated product data:
 - Shipped JSON catalogs should contain roughly 100 entries and must never exceed
   100 entries per dataset. Prefer a smaller, deliberate selection over an
   exhaustive or raw source dump.
+- Each catalog entry should carry a small positive integer weight. Higher weights
+  make an entry more likely during automatic selection; these are deliberate
+  product-rarity controls, not claims about real-world demographic frequency.
 
 Agent name bank:
 

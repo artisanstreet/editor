@@ -1,72 +1,282 @@
 [
-	"Architecting",
-	"Assembling",
-	"Baking",
-	"Blueprinting",
-	"Brewing",
-	"Burnishing",
-	"Calculating",
-	"Carving",
-	"Chiseling",
-	"Cogitating",
-	"Combobulating",
-	"Composing",
-	"Concocting",
-	"Considering",
-	"Contemplating",
-	"Cooking",
-	"Crafting",
-	"Deciphering",
-	"Deliberating",
-	"Doodling",
-	"Drafting",
-	"Fermenting",
-	"Finagling",
-	"Finessing",
-	"Folding",
-	"Forging",
-	"Formulating",
-	"Hammering",
-	"Hatching",
-	"Ideating",
-	"Imagining",
-	"Incubating",
-	"Inferring",
-	"Joining",
-	"Kneading",
-	"Lathing",
-	"Marinating",
-	"Meandering",
-	"Mulling",
-	"Musing",
-	"Muhammading",
-	"Noodling",
-	"Orchestrating",
-	"Percolating",
-	"Perusing",
-	"Pondering",
-	"Polishing",
-	"Puttering",
-	"Puzzling",
-	"Recombobulating",
-	"Riveting",
-	"Ruminating",
-	"Sanding",
-	"Shaping",
-	"Sharpening",
-	"Simmering",
-	"Sketching",
-	"Stewing",
-	"Stitching",
-	"Synthesizing",
-	"Tempering",
-	"Thinking",
-	"Tinkering",
-	"Tooling",
-	"Unravelling",
-	"Whirring",
-	"Whisking",
-	"Working",
-	"Wrangling",
-	"Zesting"
+	{
+		"value": "Architecting",
+		"weight": 8
+	},
+	{
+		"value": "Assembling",
+		"weight": 8
+	},
+	{
+		"value": "Baking",
+		"weight": 6
+	},
+	{
+		"value": "Blueprinting",
+		"weight": 6
+	},
+	{
+		"value": "Brewing",
+		"weight": 6
+	},
+	{
+		"value": "Burnishing",
+		"weight": 6
+	},
+	{
+		"value": "Calculating",
+		"weight": 8
+	},
+	{
+		"value": "Carving",
+		"weight": 6
+	},
+	{
+		"value": "Chiseling",
+		"weight": 6
+	},
+	{
+		"value": "Cogitating",
+		"weight": 6
+	},
+	{
+		"value": "Combobulating",
+		"weight": 4
+	},
+	{
+		"value": "Composing",
+		"weight": 8
+	},
+	{
+		"value": "Concocting",
+		"weight": 4
+	},
+	{
+		"value": "Considering",
+		"weight": 8
+	},
+	{
+		"value": "Contemplating",
+		"weight": 8
+	},
+	{
+		"value": "Cooking",
+		"weight": 8
+	},
+	{
+		"value": "Crafting",
+		"weight": 8
+	},
+	{
+		"value": "Deciphering",
+		"weight": 6
+	},
+	{
+		"value": "Deliberating",
+		"weight": 6
+	},
+	{
+		"value": "Doodling",
+		"weight": 4
+	},
+	{
+		"value": "Drafting",
+		"weight": 8
+	},
+	{
+		"value": "Fermenting",
+		"weight": 4
+	},
+	{
+		"value": "Finagling",
+		"weight": 4
+	},
+	{
+		"value": "Finessing",
+		"weight": 4
+	},
+	{
+		"value": "Folding",
+		"weight": 6
+	},
+	{
+		"value": "Forging",
+		"weight": 6
+	},
+	{
+		"value": "Formulating",
+		"weight": 8
+	},
+	{
+		"value": "Hammering",
+		"weight": 6
+	},
+	{
+		"value": "Hatching",
+		"weight": 6
+	},
+	{
+		"value": "Ideating",
+		"weight": 8
+	},
+	{
+		"value": "Imagining",
+		"weight": 8
+	},
+	{
+		"value": "Incubating",
+		"weight": 6
+	},
+	{
+		"value": "Inferring",
+		"weight": 8
+	},
+	{
+		"value": "Joining",
+		"weight": 6
+	},
+	{
+		"value": "Kneading",
+		"weight": 6
+	},
+	{
+		"value": "Lathing",
+		"weight": 6
+	},
+	{
+		"value": "Marinating",
+		"weight": 4
+	},
+	{
+		"value": "Meandering",
+		"weight": 4
+	},
+	{
+		"value": "Mulling",
+		"weight": 6
+	},
+	{
+		"value": "Musing",
+		"weight": 6
+	},
+	{
+		"value": "Muhammading",
+		"weight": 1
+	},
+	{
+		"value": "Noodling",
+		"weight": 4
+	},
+	{
+		"value": "Orchestrating",
+		"weight": 8
+	},
+	{
+		"value": "Percolating",
+		"weight": 4
+	},
+	{
+		"value": "Perusing",
+		"weight": 6
+	},
+	{
+		"value": "Pondering",
+		"weight": 8
+	},
+	{
+		"value": "Polishing",
+		"weight": 8
+	},
+	{
+		"value": "Puttering",
+		"weight": 4
+	},
+	{
+		"value": "Puzzling",
+		"weight": 6
+	},
+	{
+		"value": "Recombobulating",
+		"weight": 4
+	},
+	{
+		"value": "Riveting",
+		"weight": 6
+	},
+	{
+		"value": "Ruminating",
+		"weight": 4
+	},
+	{
+		"value": "Sanding",
+		"weight": 6
+	},
+	{
+		"value": "Shaping",
+		"weight": 6
+	},
+	{
+		"value": "Sharpening",
+		"weight": 6
+	},
+	{
+		"value": "Simmering",
+		"weight": 6
+	},
+	{
+		"value": "Sketching",
+		"weight": 6
+	},
+	{
+		"value": "Stewing",
+		"weight": 4
+	},
+	{
+		"value": "Stitching",
+		"weight": 6
+	},
+	{
+		"value": "Synthesizing",
+		"weight": 8
+	},
+	{
+		"value": "Tempering",
+		"weight": 6
+	},
+	{
+		"value": "Thinking",
+		"weight": 8
+	},
+	{
+		"value": "Tinkering",
+		"weight": 8
+	},
+	{
+		"value": "Tooling",
+		"weight": 6
+	},
+	{
+		"value": "Unravelling",
+		"weight": 4
+	},
+	{
+		"value": "Whirring",
+		"weight": 4
+	},
+	{
+		"value": "Whisking",
+		"weight": 4
+	},
+	{
+		"value": "Working",
+		"weight": 8
+	},
+	{
+		"value": "Wrangling",
+		"weight": 4
+	},
+	{
+		"value": "Zesting",
+		"weight": 4
+	}
 ]

@@ -1,102 +1,402 @@
 [
-	"Ada",
-	"Agnes",
-	"Aina",
-	"Alma",
-	"Amalie",
-	"Ane",
-	"Anja",
-	"Anna",
-	"Anne",
-	"Anniken",
-	"Arnhild",
-	"Aslaug",
-	"Astrid",
-	"Aud",
-	"Beate",
-	"Bente",
-	"Bergljot",
-	"Berit",
-	"Birgit",
-	"Birgitte",
-	"Bjørg",
-	"Bodil",
-	"Borghild",
-	"Cecilie",
-	"Dagny",
-	"Eirin",
-	"Eivor",
-	"Eli",
-	"Elin",
-	"Elisabeth",
-	"Elise",
-	"Ellen",
-	"Else",
-	"Emma",
-	"Eva",
-	"Frida",
-	"Grete",
-	"Gro",
-	"Gry",
-	"Gudrun",
-	"Gunn",
-	"Guri",
-	"Guro",
-	"Hanna",
-	"Hanne",
-	"Hedda",
-	"Hege",
-	"Heidi",
-	"Helene",
-	"Hilde",
-	"Ida",
-	"Ingeborg",
-	"Inger",
-	"Ingrid",
-	"Ingunn",
-	"Ingvild",
-	"Iselin",
-	"Johanne",
-	"Jorunn",
-	"Julie",
-	"Kaja",
-	"Karen",
-	"Kari",
-	"Karoline",
-	"Kjersti",
-	"Kristin",
-	"Kristine",
-	"Lene",
-	"Line",
-	"Linn",
-	"Linnea",
-	"Liv",
-	"Maja",
-	"Malin",
-	"Maren",
-	"Mari",
-	"Maria",
-	"Marianne",
-	"Marie",
-	"Marit",
-	"Martha",
-	"Marte",
-	"Mette",
-	"Nora",
-	"Oda",
-	"Ragnhild",
-	"Selma",
-	"Sigrid",
-	"Silje",
-	"Siri",
-	"Solveig",
-	"Sunniva",
-	"Synnøve",
-	"Tone",
-	"Tove",
-	"Turid",
-	"Tuva",
-	"Vigdis",
-	"Wenche",
-	"Åse"
+	{
+		"value": "Ada",
+		"weight": 6
+	},
+	{
+		"value": "Agnes",
+		"weight": 4
+	},
+	{
+		"value": "Aina",
+		"weight": 4
+	},
+	{
+		"value": "Alma",
+		"weight": 6
+	},
+	{
+		"value": "Amalie",
+		"weight": 6
+	},
+	{
+		"value": "Ane",
+		"weight": 6
+	},
+	{
+		"value": "Anja",
+		"weight": 6
+	},
+	{
+		"value": "Anna",
+		"weight": 6
+	},
+	{
+		"value": "Anne",
+		"weight": 6
+	},
+	{
+		"value": "Anniken",
+		"weight": 4
+	},
+	{
+		"value": "Arnhild",
+		"weight": 2
+	},
+	{
+		"value": "Aslaug",
+		"weight": 2
+	},
+	{
+		"value": "Astrid",
+		"weight": 6
+	},
+	{
+		"value": "Aud",
+		"weight": 2
+	},
+	{
+		"value": "Beate",
+		"weight": 4
+	},
+	{
+		"value": "Bente",
+		"weight": 4
+	},
+	{
+		"value": "Bergljot",
+		"weight": 2
+	},
+	{
+		"value": "Berit",
+		"weight": 4
+	},
+	{
+		"value": "Birgit",
+		"weight": 4
+	},
+	{
+		"value": "Birgitte",
+		"weight": 4
+	},
+	{
+		"value": "Bjørg",
+		"weight": 4
+	},
+	{
+		"value": "Bodil",
+		"weight": 4
+	},
+	{
+		"value": "Borghild",
+		"weight": 2
+	},
+	{
+		"value": "Cecilie",
+		"weight": 4
+	},
+	{
+		"value": "Dagny",
+		"weight": 2
+	},
+	{
+		"value": "Eirin",
+		"weight": 4
+	},
+	{
+		"value": "Eivor",
+		"weight": 2
+	},
+	{
+		"value": "Eli",
+		"weight": 4
+	},
+	{
+		"value": "Elin",
+		"weight": 4
+	},
+	{
+		"value": "Elisabeth",
+		"weight": 4
+	},
+	{
+		"value": "Elise",
+		"weight": 6
+	},
+	{
+		"value": "Ellen",
+		"weight": 4
+	},
+	{
+		"value": "Else",
+		"weight": 4
+	},
+	{
+		"value": "Emma",
+		"weight": 6
+	},
+	{
+		"value": "Eva",
+		"weight": 6
+	},
+	{
+		"value": "Frida",
+		"weight": 6
+	},
+	{
+		"value": "Grete",
+		"weight": 4
+	},
+	{
+		"value": "Gro",
+		"weight": 4
+	},
+	{
+		"value": "Gry",
+		"weight": 4
+	},
+	{
+		"value": "Gudrun",
+		"weight": 2
+	},
+	{
+		"value": "Gunn",
+		"weight": 2
+	},
+	{
+		"value": "Guri",
+		"weight": 4
+	},
+	{
+		"value": "Guro",
+		"weight": 4
+	},
+	{
+		"value": "Hanna",
+		"weight": 6
+	},
+	{
+		"value": "Hanne",
+		"weight": 4
+	},
+	{
+		"value": "Hedda",
+		"weight": 6
+	},
+	{
+		"value": "Hege",
+		"weight": 4
+	},
+	{
+		"value": "Heidi",
+		"weight": 4
+	},
+	{
+		"value": "Helene",
+		"weight": 4
+	},
+	{
+		"value": "Hilde",
+		"weight": 4
+	},
+	{
+		"value": "Ida",
+		"weight": 6
+	},
+	{
+		"value": "Ingeborg",
+		"weight": 4
+	},
+	{
+		"value": "Inger",
+		"weight": 4
+	},
+	{
+		"value": "Ingrid",
+		"weight": 6
+	},
+	{
+		"value": "Ingunn",
+		"weight": 4
+	},
+	{
+		"value": "Ingvild",
+		"weight": 4
+	},
+	{
+		"value": "Iselin",
+		"weight": 4
+	},
+	{
+		"value": "Johanne",
+		"weight": 4
+	},
+	{
+		"value": "Jorunn",
+		"weight": 2
+	},
+	{
+		"value": "Julie",
+		"weight": 6
+	},
+	{
+		"value": "Kaja",
+		"weight": 6
+	},
+	{
+		"value": "Karen",
+		"weight": 4
+	},
+	{
+		"value": "Kari",
+		"weight": 6
+	},
+	{
+		"value": "Karoline",
+		"weight": 4
+	},
+	{
+		"value": "Kjersti",
+		"weight": 4
+	},
+	{
+		"value": "Kristin",
+		"weight": 4
+	},
+	{
+		"value": "Kristine",
+		"weight": 4
+	},
+	{
+		"value": "Lene",
+		"weight": 4
+	},
+	{
+		"value": "Line",
+		"weight": 4
+	},
+	{
+		"value": "Linnea",
+		"weight": 6
+	},
+	{
+		"value": "Liv",
+		"weight": 6
+	},
+	{
+		"value": "Maja",
+		"weight": 6
+	},
+	{
+		"value": "Malin",
+		"weight": 4
+	},
+	{
+		"value": "Maren",
+		"weight": 6
+	},
+	{
+		"value": "Mari",
+		"weight": 6
+	},
+	{
+		"value": "Maria",
+		"weight": 6
+	},
+	{
+		"value": "Marianne",
+		"weight": 4
+	},
+	{
+		"value": "Marie",
+		"weight": 6
+	},
+	{
+		"value": "Marit",
+		"weight": 4
+	},
+	{
+		"value": "Martha",
+		"weight": 4
+	},
+	{
+		"value": "Marte",
+		"weight": 4
+	},
+	{
+		"value": "Mette",
+		"weight": 4
+	},
+	{
+		"value": "Mina",
+		"weight": 8
+	},
+	{
+		"value": "Nora",
+		"weight": 6
+	},
+	{
+		"value": "Oda",
+		"weight": 6
+	},
+	{
+		"value": "Ragnhild",
+		"weight": 2
+	},
+	{
+		"value": "Selma",
+		"weight": 6
+	},
+	{
+		"value": "Sigrid",
+		"weight": 6
+	},
+	{
+		"value": "Silje",
+		"weight": 6
+	},
+	{
+		"value": "Siri",
+		"weight": 6
+	},
+	{
+		"value": "Solveig",
+		"weight": 4
+	},
+	{
+		"value": "Sunniva",
+		"weight": 6
+	},
+	{
+		"value": "Synnøve",
+		"weight": 2
+	},
+	{
+		"value": "Tone",
+		"weight": 2
+	},
+	{
+		"value": "Tove",
+		"weight": 2
+	},
+	{
+		"value": "Turid",
+		"weight": 2
+	},
+	{
+		"value": "Tuva",
+		"weight": 6
+	},
+	{
+		"value": "Vigdis",
+		"weight": 2
+	},
+	{
+		"value": "Wenche",
+		"weight": 2
+	},
+	{
+		"value": "Åse",
+		"weight": 2
+	}
 ]
