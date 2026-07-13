@@ -14,8 +14,8 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Branch: `codex/workspace-replace-approval`
 - [x] Package manager: pnpm 11.7.0
 - [x] Stack: TypeScript 7, Effect 4 beta, Drizzle 1 RC, SQLite
-- [x] Latest verified implementation checkpoint: `13aa893 feat: enforce workspace replacement approvals`
-- [x] Local `HEAD`, upstream, and `origin/codex/workspace-replace-approval` were equal at `13aa89366f8f455993717ef028703c5ba0e5c6de` before this documentation update.
+- [x] Latest verified implementation checkpoint: `c7f1329 feat: coordinate approved git checkouts`
+- [x] Local `HEAD`, upstream, and `origin/codex/workspace-replace-approval` were equal at `c7f1329` before this documentation update.
 - [x] `ARTISAN_RUN_NATIVE_ADDON_SMOKE=1 pnpm --filter @artisan/bounded-file-store-native verify:local` is the canonical native gate and passes locally for production reads/replacement, test-hook races, and process-crash recovery.
 - [x] Routine development verification is local-first. Do not recreate temporary GitHub Actions, remote runners, or similar testing detours; future CI is a real clean-checkout/release gate and never a substitute for local validation.
 - [x] Reconfirmed on 2026-07-13: the leftover empty `.github/workflows` directory was removed and the canonical native gate passed locally. The earlier BSOD remains classified as a one-off storage-driver incident, not a reason to move routine testing off-machine.
@@ -39,6 +39,8 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] The authenticated native mutation implementation is accepted for fixed local NTFS and process-crash recovery through the local gate. This does not claim power-loss atomicity or universal filesystem support.
 
 ## Active Work
+
+- [x] Durable local Git sessions and approval-bearing checkout are committed and pushed at `22ab8b6` and `c7f1329`. Effect Services and Layers discover the one visible worktree, record bounded status/diff/branch/head projections in SQLite, expose typed query/request/decision/replay client routes, fence controlled file mutations while checkout is unsettled, revalidate immediately before `git switch`, settle stale or interrupted operations after restart, and erase terminal thread-owned state without deleting another thread's current workspace projection. The real temporary-Git/SQLite/MessagePort harness passes alongside checkout concurrency, restart, mutation-fence, migration, and erasure coverage. Full local `pnpm run validate` passes 113 test files with 945 passing tests and 3 intentional skips; independent review found no P0-P2 issue. Remaining Git mutations and hosted-provider behavior are separate milestones.
 
 - [x] Updated the personal `sanders-skill` with a dedicated risk-based testing reference: every test must protect an observable promise against a plausible consequential regression, use the smallest stable behavioral boundary, and avoid arbitrary content snapshots, compiler duplication, source-string UI claims, and private implementation choreography. A read-only audit covered all 127 files under `.tests`. The strongest coverage is in persistence, concurrency, recovery, process lifecycle, protocol boundaries, and native filesystem behavior. The exact curated-content assertions in `.tests/data/catalogs.test.ts` were removed; remaining cleanup targets include the frontend `*-source.test.ts` suites, type-impossible `as never` input tests, serialized error-tag matching, exact private call/key snapshots, duplicated engine capability fixtures, and a wall-clock transcript timing assertion.
 
@@ -324,7 +326,8 @@ Implemented, independently reviewed, committed, and verified:
 - [x] Add controlled filesystem read/replace execution and real restart/recovery composition through the production Layer graph.
 - [x] Add review/rollback execution with pinned source authority, full recovery, anonymous evidence, and private-byte settlement.
 - [x] Add public read/replace/list/review/rollback and approval query/respond protocol commands with typed client methods.
-- [ ] Add Git worktree inventory, durable change/session projections, approved mutations, and public protocol commands.
+- [x] Add one-visible-worktree inventory, durable Git session/change projections, an approval-bearing checkout command, and public query/request/decision/replay protocol commands.
+- [ ] Add the remaining explicit approval-bearing local Git mutations: branch creation, reset, clean, commit, merge, rebase, pull, and push.
 - [ ] Complete the canonical surface taxonomy: Work, Time, Guidance, Routines, Capabilities, Processes, Changes, Permissions, and native actions.
 - [ ] Add explicit intake risk classification, assumptions, usage aggregation, and workspace conflict/review handling.
 
@@ -339,7 +342,8 @@ Implemented, independently reviewed, committed, and verified:
 
 - [ ] Add deterministic projection rebuild from the event ledger and equivalence tests.
 - [ ] Add generated property/state-machine scenarios spanning retries, exits, reconnects, rebuilds, and concurrent agents.
-- [ ] Add one deep public-protocol workspace/Git/SQLite/fake-engine integration scenario.
+- [x] Add one deep public-protocol workspace/Git/SQLite integration scenario with a real temporary repository, restart recovery, reconnect replay, and complete handle cleanup.
+- [ ] Extend the deep workspace/Git/SQLite scenario through a fake Engine and deterministic projection rebuild.
 - [ ] Add complete architecture-boundary and surface-normalization suites.
 - [ ] Add CI/release workflows; live CLI probes remain explicit opt-in and never run silently in ordinary CI.
 
