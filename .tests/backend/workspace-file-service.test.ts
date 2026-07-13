@@ -9,6 +9,10 @@ import type { ContentIdentity } from "@artisan/protocol";
 import { BoundedRegularFileStore } from "../../modules/backend/src/filesystem/bounded-regular-file-store";
 import { WorkspaceBoundedRegularFileStoreRegistry } from "../../modules/backend/src/filesystem/workspace-bounded-regular-file-store-registry";
 import { WorkspaceChangeRepository } from "../../modules/backend/src/workspace/workspace-change-repository";
+import {
+	WorkspaceChangeDiffLimit,
+	WorkspaceChangeDiffService,
+} from "../../modules/backend/src/workspace/workspace-change-diff-service";
 import { WorkspaceEvidenceRecorder } from "../../modules/backend/src/workspace/workspace-evidence-recorder";
 import {
 	WorkspaceFileService,
@@ -58,6 +62,7 @@ function make_runtime(
 	options: {
 		readonly bytes?: Uint8Array;
 		readonly changed_reconciliations?: ReadonlyArray<"applied" | "committed" | "rejected">;
+		readonly diff_limit?: boolean;
 		readonly finalize_failures?: number;
 		readonly replace_result?: "AlreadyReplaced" | "Changed" | "Replaced";
 		readonly unavailable_payload_record?: boolean;
@@ -72,11 +77,14 @@ function make_runtime(
 	let reconciliation_calls = 0;
 	let replace_calls = 0;
 	const claims: Array<unknown> = [];
+	const calls: Array<string> = [];
 	const evidence: Array<unknown> = [];
 	const events: Array<unknown> = [];
 
 	const store = {
 		FinalizeRegularFileReplacement: () => {
+			calls.push("finalize");
+
 			if (finalize_failures > 0) {
 				finalize_failures -= 1;
 
@@ -87,6 +95,7 @@ function make_runtime(
 		},
 		ReadRegularFile: () => Effect.succeed(new Uint8Array(bytes)),
 		ReplaceRegularFile: (input: { readonly replacement: Uint8Array }) => {
+			calls.push("replace");
 			replace_calls += 1;
 
 			if (options.replace_result === "Changed")
@@ -148,6 +157,37 @@ function make_runtime(
 		Layer.succeed(WorkspaceMutationAuthority, {
 			ClaimReplace: claim,
 		} as unknown as typeof WorkspaceMutationAuthority.Service),
+		Layer.succeed(WorkspaceChangeDiffService, {
+			Prepare: (input) => {
+				calls.push("prepare");
+
+				if (options.diff_limit) {
+					return Effect.fail(new WorkspaceChangeDiffLimit({ limit: "edit_length" }));
+				}
+
+				const patch = encoder.encode(
+					`--- a/${input.path}\n+++ b/${input.path}\n@@ -1,1 +1,1 @@\n-before\n+after\n`,
+				);
+
+				return Effect.succeed({
+					added_line_count: 1,
+					after_identity: input.after_identity,
+					before_identity: input.before_identity,
+					change_id: input.change_id,
+					context_lines: 3,
+					format: "unified" as const,
+					format_version: 1,
+					message_id: input.message_id,
+					patch,
+					patch_identity: identity(patch),
+					path: input.path,
+					removed_line_count: 1,
+					thread_id: input.thread_id,
+					workspace_id: input.workspace_id,
+				});
+			},
+			Read: () => Effect.die("unused"),
+		} as typeof WorkspaceChangeDiffService.Service),
 		Layer.succeed(WorkspaceMutationPayloadStore, {
 			Consume: () => {
 				payload = undefined;
@@ -195,6 +235,7 @@ function make_runtime(
 			Read: () => Effect.succeed(new Uint8Array(snapshot ?? [])),
 			Resume: () => Effect.succeed(new Uint8Array(snapshot ?? [])),
 			Stage: (input: { readonly content: Uint8Array }) => {
+				calls.push("snapshot");
 				snapshot ??= new Uint8Array(input.content);
 
 				return Effect.succeed({ status: "staged" as const });
@@ -205,6 +246,7 @@ function make_runtime(
 			ClaimReview: () => Effect.die("unused"),
 			ClaimRollback: () => Effect.die("unused"),
 			CommitRecorded: () => {
+				calls.push("commit");
 				lifecycle = "committed";
 				events.push({ type: "workspace.change.updated" });
 
@@ -217,6 +259,7 @@ function make_runtime(
 			CommitRolledBack: () => Effect.die("unused"),
 			List: () => Effect.die("unused"),
 			MarkApplied: () => {
+				calls.push("mark_applied");
 				lifecycle = "applied";
 
 				return Effect.succeed({ lifecycle });
@@ -288,6 +331,7 @@ function make_runtime(
 	return {
 		state: {
 			bytes: () => new TextDecoder().decode(bytes),
+			calls,
 			evidence,
 			claims,
 			events,
@@ -364,6 +408,38 @@ describe("WorkspaceFileService", () => {
 			expect(harness.state.snapshot()).toBe("before");
 			expect(harness.state.events).toHaveLength(1);
 			expect(harness.state.evidence).toMatchObject([{ operation: "write", run_id: "run_1" }]);
+			expect(harness.state.calls).toEqual([
+				"prepare",
+				"snapshot",
+				"replace",
+				"mark_applied",
+				"finalize",
+				"commit",
+			]);
+		} finally {
+			await harness.runtime.dispose();
+		}
+	});
+
+	it("rejects a diff over the V1 budget before snapshotting or replacing", async () => {
+		const harness = make_runtime({ diff_limit: true });
+
+		try {
+			await expect(
+				harness.runtime.runPromise(
+					Effect.flatMap(WorkspaceFileService, (service) =>
+						service.Replace(replacement_input()),
+					),
+				),
+			).rejects.toEqual(
+				new WorkspaceFileServiceError({ operation: "replace", reason: "diff_limit" }),
+			);
+			expect(harness.state.calls).toEqual(["prepare"]);
+			expect(harness.state.lifecycle()).toBe("rejected");
+			expect(harness.state.bytes()).toBe("before");
+			expect(harness.state.snapshot()).toBeUndefined();
+			expect(harness.state.replace_calls()).toBe(0);
+			expect(harness.state.events).toHaveLength(0);
 		} finally {
 			await harness.runtime.dispose();
 		}

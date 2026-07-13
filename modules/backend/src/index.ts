@@ -1,4 +1,13 @@
 export {
+	PreparedWorkspaceChangeDiff,
+	WorkspaceChangeDiffInvalid,
+	WorkspaceChangeDiffLimit,
+	WorkspaceChangeDiffService,
+	WorkspaceChangeDiffServiceLive,
+	WorkspaceChangeDiffUnavailable,
+	type WorkspaceChangeDiffServiceError,
+} from "./workspace/workspace-change-diff-service";
+export {
 	DecodeProtocolConnectionOptions,
 	DefaultProtocolConnectionOptions,
 	type ProtocolConnection,

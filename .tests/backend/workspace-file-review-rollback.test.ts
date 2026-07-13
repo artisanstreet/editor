@@ -9,6 +9,7 @@ import type { ContentIdentity } from "@artisan/protocol";
 import { BoundedRegularFileStore } from "../../modules/backend/src/filesystem/bounded-regular-file-store";
 import { WorkspaceBoundedRegularFileStoreRegistry } from "../../modules/backend/src/filesystem/workspace-bounded-regular-file-store-registry";
 import { WorkspaceChangeRepository } from "../../modules/backend/src/workspace/workspace-change-repository";
+import { WorkspaceChangeDiffService } from "../../modules/backend/src/workspace/workspace-change-diff-service";
 import { WorkspaceEvidenceRecorder } from "../../modules/backend/src/workspace/workspace-evidence-recorder";
 import {
 	WorkspaceFileService,
@@ -203,6 +204,10 @@ function make_harness(
 				return rollback_admission();
 			},
 		} as unknown as typeof WorkspaceMutationAuthority.Service),
+		Layer.succeed(WorkspaceChangeDiffService, {
+			Prepare: () => Effect.die("unused"),
+			Read: () => Effect.die("unused"),
+		} as typeof WorkspaceChangeDiffService.Service),
 		Layer.succeed(WorkspaceMutationPayloadStore, {
 			Consume: (input: unknown) => {
 				calls.push("payload_consume");

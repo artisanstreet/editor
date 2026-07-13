@@ -19,6 +19,9 @@ export const workspace_diff_maximum_rendered_lines = 250_000;
 /** Defines the number of context lines emitted around workspace diff changes. */
 export const workspace_diff_context_lines = 3;
 
+/** Identifies the immutable unified workspace-diff representation emitted by V1. */
+export const workspace_diff_format_version = 1;
+
 /** Validates a canonical slash-separated relative path that identifies one workspace file. */
 export const WorkspacePath = Schema.String.check(
 	Schema.makeFilter<string>((path) => {
@@ -218,6 +221,7 @@ const WorkspaceChangeDiffQueryResultBase = Schema.Struct({
 	change_id: Identifier,
 	context_lines: Schema.Literal(workspace_diff_context_lines),
 	format: Schema.Literal("unified"),
+	format_version: Schema.Literal(workspace_diff_format_version),
 	patch: WorkspaceDiffPatch,
 	patch_identity: WorkspaceDiffIdentity,
 	path: WorkspacePath,

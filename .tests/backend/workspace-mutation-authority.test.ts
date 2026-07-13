@@ -1,9 +1,10 @@
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { NodeFileSystem } from "@effect/platform-node-shared";
+import { NodeCrypto, NodeFileSystem } from "@effect/platform-node-shared";
 import { Deferred, Effect, Layer, ManagedRuntime, Redacted } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -36,6 +37,7 @@ import {
 	WorkspaceMutationAuthority,
 	WorkspaceMutationAuthorityLive,
 } from "../../modules/backend/src/workspace/workspace-mutation-authority";
+import type { PreparedWorkspaceChangeDiff } from "../../modules/backend/src/workspace/workspace-change-diff-service";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];
@@ -77,6 +79,7 @@ function make_runtime(
 		JournalNotifierLive,
 	);
 	const changes = Layer.mergeAll(WorkspaceChangeRepositoryLive, JournalStoreLive).pipe(
+		Layer.provideMerge(NodeCrypto.layer),
 		Layer.provideMerge(infrastructure),
 	);
 	const registry = make_workspace_bounded_regular_file_store_registry_layer(
@@ -366,6 +369,37 @@ function AdmitRollback(input = rollback_claim()) {
 	);
 }
 
+function prepared_diff(
+	overrides: Partial<PreparedWorkspaceChangeDiff> = {},
+): PreparedWorkspaceChangeDiff {
+	const path = overrides.path ?? "src/example.ts";
+	const patch = new TextEncoder().encode(
+		`--- a/${path}\n+++ b/${path}\n@@ -1,1 +1,1 @@\n-old\n+new\n`,
+	);
+
+	return {
+		added_line_count: 1,
+		after_identity: claim().intended_after,
+		before_identity: claim().expected_before,
+		change_id: "change_1",
+		context_lines: 3,
+		format: "unified",
+		format_version: 1,
+		message_id: "message_1",
+		patch,
+		patch_identity: {
+			algorithm: "sha256",
+			byte_count: patch.byteLength,
+			content_hash: createHash("sha256").update(patch).digest("hex"),
+		},
+		path,
+		removed_line_count: 1,
+		thread_id: "thread_1",
+		workspace_id: "workspace_1",
+		...overrides,
+	};
+}
+
 function CommitReplace() {
 	return Effect.gen(function* () {
 		const repository = yield* WorkspaceChangeRepository;
@@ -376,7 +410,7 @@ function CommitReplace() {
 			result_identity: claim().intended_after,
 		});
 
-		return yield* repository.CommitRecorded("message_1");
+		return yield* repository.CommitRecorded("message_1", prepared_diff());
 	});
 }
 

@@ -1,8 +1,10 @@
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 
+import { NodeCrypto } from "@effect/platform-node-shared";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
@@ -28,6 +30,7 @@ import {
 	WorkspaceChangeRepository,
 	WorkspaceChangeRepositoryLive,
 } from "../../modules/backend/src/workspace/workspace-change-repository";
+import type { PreparedWorkspaceChangeDiff } from "../../modules/backend/src/workspace/workspace-change-diff-service";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];
@@ -69,6 +72,7 @@ function make_runtime(database_path: string, now?: () => string) {
 
 	return ManagedRuntime.make(
 		Layer.mergeAll(WorkspaceChangeRepositoryLive, JournalStoreLive).pipe(
+			Layer.provideMerge(NodeCrypto.layer),
 			Layer.provideMerge(infrastructure),
 		),
 	);
@@ -119,6 +123,37 @@ function rollback_claim(message_id = "message_rollback", change_id = "change_1")
 		request_fingerprint: "f".repeat(64),
 		sent_at: "2026-07-11T19:00:00.000Z",
 		thread_id: "thread_1",
+	};
+}
+
+function prepared_diff(
+	overrides: Partial<PreparedWorkspaceChangeDiff> = {},
+): PreparedWorkspaceChangeDiff {
+	const path = overrides.path ?? "src/example.ts";
+	const patch = new TextEncoder().encode(
+		`--- a/${path}\n+++ b/${path}\n@@ -1,1 +1,1 @@\n-old\n+new\n`,
+	);
+
+	return {
+		added_line_count: 1,
+		after_identity,
+		before_identity,
+		change_id: "change_1",
+		context_lines: 3,
+		format: "unified",
+		format_version: 1,
+		message_id: "message_replace",
+		patch,
+		patch_identity: {
+			algorithm: "sha256",
+			byte_count: patch.byteLength,
+			content_hash: createHash("sha256").update(patch).digest("hex"),
+		},
+		path,
+		removed_line_count: 1,
+		thread_id: "thread_1",
+		workspace_id: "workspace_1",
+		...overrides,
 	};
 }
 
@@ -174,7 +209,10 @@ describe("workspace change repository", () => {
 						message_id: "message_replace",
 						result_identity: after_identity,
 					});
-					const committed = yield* repository.CommitRecorded("message_replace");
+					const committed = yield* repository.CommitRecorded(
+						"message_replace",
+						prepared_diff(),
+					);
 					const stored = yield* repository.ReadChange("change_1");
 					const listed = yield* repository.List("thread_1", "workspace_1");
 					const replay = yield* journal.ReadReplay({ after_journal_sequence: 0 });
@@ -274,7 +312,7 @@ describe("workspace change repository", () => {
 						message_id: "message_replace",
 						result_identity: after_identity,
 					});
-					yield* repository.CommitRecorded("message_replace");
+					yield* repository.CommitRecorded("message_replace", prepared_diff());
 
 					return {
 						committed_retry: yield* repository.ClaimReplace(replace_claim()),
@@ -326,7 +364,7 @@ describe("workspace change repository", () => {
 						message_id: "message_replace",
 						result_identity: after_identity,
 					});
-					yield* repository.CommitRecorded("message_replace");
+					yield* repository.CommitRecorded("message_replace", prepared_diff());
 					const wrong_thread = yield* repository
 						.ClaimReview({
 							_tag: "review",
@@ -390,7 +428,7 @@ describe("workspace change repository", () => {
 						message_id: "message_replace",
 						result_identity: after_identity,
 					});
-					yield* repository.CommitRecorded("message_replace");
+					yield* repository.CommitRecorded("message_replace", prepared_diff());
 					const first_evidence =
 						yield* repository.MarkEvidenceRecorded("message_replace");
 					const second_evidence =
@@ -475,8 +513,8 @@ describe("workspace change repository", () => {
 					});
 					const commits = yield* Effect.all(
 						[
-							repository.CommitRecorded("message_replace"),
-							repository.CommitRecorded("message_replace"),
+							repository.CommitRecorded("message_replace", prepared_diff()),
+							repository.CommitRecorded("message_replace", prepared_diff()),
 						],
 						{ concurrency: "unbounded" },
 					);
@@ -661,7 +699,7 @@ describe("workspace change repository", () => {
 						message_id: "message_replace",
 						result_identity: after_identity,
 					});
-					yield* repository.CommitRecorded("message_replace");
+					yield* repository.CommitRecorded("message_replace", prepared_diff());
 					yield* repository.ClaimRollback(rollback_claim());
 					yield* repository.RejectChanged("message_rollback");
 
@@ -712,7 +750,7 @@ describe("workspace change repository", () => {
 						})
 						.pipe(Effect.exit);
 					const committed = yield* repository
-						.CommitRecorded("message_replace")
+						.CommitRecorded("message_replace", prepared_diff())
 						.pipe(Effect.exit);
 
 					yield* repository.ClaimReplace(replace_claim("message_committed", "change_2"));
@@ -721,7 +759,10 @@ describe("workspace change repository", () => {
 						message_id: "message_committed",
 						result_identity: after_identity,
 					});
-					yield* repository.CommitRecorded("message_committed");
+					yield* repository.CommitRecorded(
+						"message_committed",
+						prepared_diff({ change_id: "change_2", message_id: "message_committed" }),
+					);
 					yield* repository.ClaimReplace(replace_claim("message_applied", "change_3"));
 					yield* repository.MarkApplied({
 						_tag: "replace",
@@ -838,7 +879,13 @@ describe("workspace change repository", () => {
 						message_id: "message_committed",
 						result_identity: after_identity,
 					});
-					const committed_event = yield* repository.CommitRecorded("message_committed");
+					const committed_event = yield* repository.CommitRecorded(
+						"message_committed",
+						prepared_diff({
+							change_id: "change_committed",
+							message_id: "message_committed",
+						}),
+					);
 					const committed = yield* repository.ReconcileChanged({
 						message_id: "message_committed",
 						observation: "native_changed",
@@ -1077,7 +1124,7 @@ describe("workspace change repository", () => {
 						message_id: "message_replace",
 						result_identity: after_identity,
 					});
-					yield* repository.CommitRecorded("message_replace");
+					yield* repository.CommitRecorded("message_replace", prepared_diff());
 					yield* repository.ClaimRollback(rollback_claim());
 					yield* repository.RejectChanged("message_rollback");
 					yield* database.client.update(WorkspaceChanges).set({
@@ -1126,7 +1173,7 @@ describe("workspace change repository", () => {
 						message_id: "message_replace",
 						result_identity: after_identity,
 					});
-					yield* repository.CommitRecorded("message_replace");
+					yield* repository.CommitRecorded("message_replace", prepared_diff());
 					yield* repository.ClaimReview({
 						_tag: "review",
 						change_id: "change_1",
@@ -1174,7 +1221,14 @@ describe("workspace change repository", () => {
 						message_id: "message_thread_2",
 						result_identity: after_identity,
 					});
-					yield* repository.CommitRecorded("message_thread_2");
+					yield* repository.CommitRecorded(
+						"message_thread_2",
+						prepared_diff({
+							change_id: "change_2",
+							message_id: "message_thread_2",
+							thread_id: "thread_2",
+						}),
+					);
 
 					return {
 						replay: yield* journal.ReadReplay({ after_journal_sequence: 0 }),
@@ -1259,7 +1313,10 @@ describe("workspace change repository", () => {
 						message_id: "message_replace",
 						result_identity: after_identity,
 					});
-					const committed = yield* repository.CommitRecorded("message_replace");
+					const committed = yield* repository.CommitRecorded(
+						"message_replace",
+						prepared_diff(),
+					);
 
 					return {
 						committed,
@@ -1302,7 +1359,10 @@ describe("workspace change repository", () => {
 						message_id: "message_replace",
 						result_identity: after_identity,
 					});
-					const committed = yield* repository.CommitRecorded("message_replace");
+					const committed = yield* repository.CommitRecorded(
+						"message_replace",
+						prepared_diff(),
+					);
 
 					return {
 						committed,
@@ -1363,7 +1423,7 @@ describe("workspace change repository", () => {
 					});
 
 					const commit_fenced = yield* repository
-						.CommitRecorded("message_replace")
+						.CommitRecorded("message_replace", prepared_diff())
 						.pipe(Effect.exit);
 					const retry_fenced = yield* repository
 						.ClaimReplace(replace_claim())
@@ -1472,7 +1532,7 @@ describe("workspace change repository", () => {
 						message_id: "message_replace",
 						result_identity: after_identity,
 					});
-					yield* repository.CommitRecorded("message_replace");
+					yield* repository.CommitRecorded("message_replace", prepared_diff());
 					yield* database.client
 						.update(WorkspaceChangeOperations)
 						.set({ lifecycle: "claimed" });
@@ -1538,7 +1598,10 @@ describe("workspace change repository", () => {
 						message_id: "message_committed",
 						result_identity: after_identity,
 					});
-					yield* repository.CommitRecorded("message_committed");
+					yield* repository.CommitRecorded(
+						"message_committed",
+						prepared_diff({ change_id: "change_2", message_id: "message_committed" }),
+					);
 					yield* repository.ClaimReview({
 						_tag: "review",
 						change_id: "change_2",
@@ -1653,7 +1716,10 @@ describe("workspace change repository", () => {
 						message_id: "message_replace",
 						result_identity: after_identity,
 					});
-					const committed = yield* repository.CommitRecorded("message_replace");
+					const committed = yield* repository.CommitRecorded(
+						"message_replace",
+						prepared_diff(),
+					);
 					yield* database.client.update(JournalCommands).set({
 						payload_json: '{"type":"workspace.change.command","action":"review"}',
 					});

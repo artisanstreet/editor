@@ -28,6 +28,7 @@ import {
 	Threads,
 	ThreadTombstones,
 	WorkspaceChangeOperations,
+	WorkspaceChangeDiffs,
 	WorkspaceChanges,
 	WorkspaceChangeSnapshots,
 	WorkspaceMutationAuthorities,
@@ -270,6 +271,9 @@ export const ThreadErasureLive = Layer.effect(
 						yield* transaction
 							.delete(OrchestrationRuns)
 							.where(eq(OrchestrationRuns.thread_id, thread_id));
+						yield* transaction
+							.delete(WorkspaceChangeDiffs)
+							.where(eq(WorkspaceChangeDiffs.thread_id, thread_id));
 						yield* transaction
 							.delete(WorkspaceChanges)
 							.where(eq(WorkspaceChanges.thread_id, thread_id));

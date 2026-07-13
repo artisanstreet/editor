@@ -46,6 +46,11 @@ import {
 } from "./workspace-mutation-payload-store";
 import { WorkspaceSnapshotStore } from "./workspace-snapshot-store";
 import { WorkspaceEvidenceRecorder } from "./workspace-evidence-recorder";
+import {
+	WorkspaceChangeDiffLimit,
+	WorkspaceChangeDiffService,
+	type PreparedWorkspaceChangeDiff,
+} from "./workspace-change-diff-service";
 
 const WorkspaceFileReplaceInput = Schema.Struct({
 	...WorkspaceFileReplaceRequest.fields,
@@ -83,7 +88,7 @@ export type WorkspaceFileRollbackInput = typeof WorkspaceFileRollbackInput.Type;
 /** Reports a source-free controlled workspace file failure. */
 export class WorkspaceFileServiceError extends Data.TaggedError("WorkspaceFileServiceError")<{
 	readonly operation: "read" | "replace" | "review" | "rollback";
-	readonly reason: "changed" | "failed";
+	readonly reason: "changed" | "diff_limit" | "failed";
 }> {}
 
 /** Owns controlled UTF-8 workspace reads and recoverable attributed replacements. */
@@ -167,6 +172,7 @@ export const WorkspaceFileServiceLive = Layer.effect(
 	Effect.gen(function* () {
 		const authority = yield* WorkspaceMutationAuthority;
 		const crypto = yield* Crypto.Crypto;
+		const diffs = yield* WorkspaceChangeDiffService;
 		const evidence = yield* WorkspaceEvidenceRecorder;
 		const payloads = yield* WorkspaceMutationPayloadStore;
 		const registry = yield* WorkspaceBoundedRegularFileStoreRegistry;
@@ -290,10 +296,42 @@ export const WorkspaceFileServiceLive = Layer.effect(
 							replacement_identity: intended_after,
 							thread_id: decoded.thread_id,
 						};
-						const FinalizeCommit = (payload: {
+						const Prepare = (payload: {
 							readonly expected: Uint8Array;
 							readonly replacement: Uint8Array;
 						}) =>
+							diffs.Prepare({
+								after: payload.replacement,
+								after_identity: intended_after,
+								before: payload.expected,
+								before_identity: decoded.expected_before,
+								change_id: decoded.change_id,
+								message_id: decoded.message_id,
+								path: decoded.path,
+								thread_id: decoded.thread_id,
+								workspace_id: decoded.workspace_id,
+							});
+						const PrepareBeforeMutation = (payload: {
+							readonly expected: Uint8Array;
+							readonly replacement: Uint8Array;
+						}) =>
+							Prepare(payload).pipe(
+								Effect.catch((error) =>
+									Effect.gen(function* () {
+										yield* repository.RejectChanged(decoded.message_id);
+										yield* SettleRejected(decoded, intended_after);
+
+										return yield* Effect.fail(error);
+									}),
+								),
+							);
+						const FinalizeCommit = (
+							payload: {
+								readonly expected: Uint8Array;
+								readonly replacement: Uint8Array;
+							},
+							prepared_diff: PreparedWorkspaceChangeDiff,
+						) =>
 							Effect.gen(function* () {
 								yield* admission.store.FinalizeRegularFileReplacement({
 									expected: payload.expected,
@@ -302,7 +340,10 @@ export const WorkspaceFileServiceLive = Layer.effect(
 									path: decoded.path,
 									replacement: payload.replacement,
 								});
-								const commit = yield* repository.CommitRecorded(decoded.message_id);
+								const commit = yield* repository.CommitRecorded(
+									decoded.message_id,
+									prepared_diff,
+								);
 
 								yield* evidence.RecordFilesystemMutation({
 									agent_id: decoded.agent_id,
@@ -384,12 +425,21 @@ export const WorkspaceFileServiceLive = Layer.effect(
 														? RecoverUnavailablePayload(error)
 														: Effect.fail(error),
 												onSuccess: (payload) =>
-													FinalizeCommit(payload).pipe(
-														Effect.map((commit) => ({
-															_tag: "completed" as const,
-															commit,
-														})),
-													),
+													Prepare(payload)
+														.pipe(
+															Effect.flatMap((prepared_diff) =>
+																FinalizeCommit(
+																	payload,
+																	prepared_diff,
+																),
+															),
+														)
+														.pipe(
+															Effect.map((commit) => ({
+																_tag: "completed" as const,
+																commit,
+															})),
+														),
 											}),
 										),
 									committed: ({ event }) =>
@@ -472,7 +522,11 @@ export const WorkspaceFileServiceLive = Layer.effect(
 						if (admission.claim.operation.lifecycle === "applied") {
 							const payload = yield* payloads.Resume(payload_input);
 
-							return yield* FinalizeCommit(payload);
+							return yield* Prepare(payload).pipe(
+								Effect.flatMap((prepared_diff) =>
+									FinalizeCommit(payload, prepared_diff),
+								),
+							);
 						}
 
 						const preparation = yield* admission.claim._tag === "claimed"
@@ -484,6 +538,7 @@ export const WorkspaceFileServiceLive = Layer.effect(
 						}
 
 						const payload = preparation.payload;
+						const prepared_diff = yield* PrepareBeforeMutation(payload);
 
 						yield* snapshots.Stage({
 							change_id: decoded.change_id,
@@ -509,7 +564,7 @@ export const WorkspaceFileServiceLive = Layer.effect(
 							return yield* pipe(
 								Match.value(reconciliation),
 								Match.tagsExhaustive({
-									applied: () => FinalizeCommit(payload),
+									applied: () => FinalizeCommit(payload, prepared_diff),
 									committed: ({ event }) => CompleteDuplicate(event),
 									rejected: RejectObservedChange,
 									staged: () => Effect.fail(failed("replace")),
@@ -523,11 +578,18 @@ export const WorkspaceFileServiceLive = Layer.effect(
 							result_identity: intended_after,
 						});
 
-						return yield* FinalizeCommit(payload);
+						return yield* FinalizeCommit(payload, prepared_diff);
 					}),
 				),
 				Effect.mapError((error) =>
-					error instanceof WorkspaceFileServiceError ? error : failed("replace"),
+					error instanceof WorkspaceFileServiceError
+						? error
+						: error instanceof WorkspaceChangeDiffLimit
+							? new WorkspaceFileServiceError({
+									operation: "replace",
+									reason: "diff_limit",
+								})
+							: failed("replace"),
 				),
 			);
 

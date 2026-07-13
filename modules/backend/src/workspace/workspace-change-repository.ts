@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, or } from "drizzle-orm";
-import { Context, Data, Effect, Layer, Option, Schema } from "effect";
+import { Context, Crypto, Data, Effect, Encoding, Layer, Option, Schema } from "effect";
 
 import {
 	ContentIdentity,
@@ -9,6 +9,11 @@ import {
 	WorkspaceChange,
 	WorkspaceChangeUpdatedEvent,
 	WorkspacePath,
+	workspace_diff_context_lines,
+	workspace_diff_format_version,
+	workspace_diff_maximum_bytes,
+	workspace_diff_maximum_lines_per_side,
+	workspace_diff_maximum_rendered_lines,
 	type ContentIdentity as ContentIdentityValue,
 	type RawOrigin as RawOriginValue,
 	type WorkspaceChange as WorkspaceChangeValue,
@@ -26,6 +31,7 @@ import {
 	Threads,
 	ThreadTombstones,
 	WorkspaceChangeOperations,
+	WorkspaceChangeDiffs,
 	WorkspaceChanges,
 	WorkspaceMutationPayloads,
 } from "../persistence/schema";
@@ -35,6 +41,11 @@ import {
 	JournalStoreFailure,
 } from "../persistence/journal-store";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import {
+	PreparedWorkspaceChangeDiff as PreparedWorkspaceChangeDiffSchema,
+	type PreparedWorkspaceChangeDiff,
+} from "./workspace-change-diff-service";
+import { workspace_diff_patch_matches_path } from "./workspace-change-diff-format";
 
 const WorkspaceChangeLifecycle = Schema.Literals(["claimed", "applied", "committed", "rejected"]);
 const RequestFingerprint = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/));
@@ -42,6 +53,7 @@ const JournalSequence = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));
 
 const WorkspaceChangeOperationBase = {
 	change_id: Identifier,
+	diff_format_version: Schema.Literal(workspace_diff_format_version),
 	evidence_recorded: Schema.Boolean,
 	journal_sequence: Schema.optional(JournalSequence),
 	lifecycle: WorkspaceChangeLifecycle,
@@ -226,6 +238,7 @@ export class WorkspaceChangeRepository extends Context.Service<
 		) => Effect.Effect<WorkspaceChangeReconciliation, WorkspaceChangeRepositoryError>;
 		readonly CommitRecorded: (
 			message_id: string,
+			prepared_diff: PreparedWorkspaceChangeDiff,
 		) => Effect.Effect<WorkspaceChangeCommit, WorkspaceChangeRepositoryError>;
 		readonly CommitReviewed: (
 			message_id: string,
@@ -280,6 +293,27 @@ function normalize_error(error: unknown): WorkspaceChangeRepositoryError {
 	}
 
 	return new JournalStoreFailure({ cause: error });
+}
+
+function normalize_commit_error(error: unknown): WorkspaceChangeRepositoryError {
+	if (
+		error instanceof CommandIdConflict ||
+		error instanceof JournalInvariantError ||
+		error instanceof WorkspaceChangeIdConflict ||
+		error instanceof WorkspaceChangeTransitionError
+	) {
+		return error;
+	}
+
+	return new JournalStoreFailure({
+		cause: new Error("Workspace change commit persistence failed"),
+	});
+}
+
+function bytes_match(left: Uint8Array, right: Uint8Array) {
+	return (
+		left.byteLength === right.byteLength && left.every((byte, index) => byte === right[index])
+	);
 }
 
 function optional_fields<T extends Readonly<Record<string, unknown>>>(input: T) {
@@ -429,6 +463,7 @@ function operation_from_claim(
 ): WorkspaceChangeOperation {
 	const base = {
 		change_id: input.change_id,
+		diff_format_version: workspace_diff_format_version as 1,
 		evidence_recorded: false,
 		lifecycle: "claimed" as const,
 		message_id: input.message_id,
@@ -523,6 +558,7 @@ function DecodeOperation(row: typeof WorkspaceChangeOperations.$inferSelect) {
 					action: row.action,
 					agent_id: row.agent_id,
 					change_id: row.change_id,
+					diff_format_version: row.diff_format_version,
 					evidence_recorded: row.evidence_recorded,
 					expected_identity: identities.expected_identity,
 					journal_sequence: row.journal_sequence,
@@ -636,9 +672,47 @@ function DecodeEvent(row: typeof JournalEvents.$inferSelect) {
 export const WorkspaceChangeRepositoryLive = Layer.effect(
 	WorkspaceChangeRepository,
 	Effect.gen(function* () {
+		const crypto = yield* Crypto.Crypto;
 		const database = yield* Database;
 		const metadata = yield* RuntimeMetadata;
 		const notifier = yield* JournalNotifier;
+		const ValidatePreparedDiff = (prepared_diff: PreparedWorkspaceChangeDiff | undefined) =>
+			Effect.gen(function* () {
+				if (prepared_diff === undefined) {
+					return yield* new WorkspaceChangeTransitionError({
+						message: "Workspace replace requires a prepared diff",
+					});
+				}
+
+				const decoded = yield* Schema.decodeUnknownEffect(
+					PreparedWorkspaceChangeDiffSchema,
+					{
+						onExcessProperty: "error",
+					},
+				)(prepared_diff);
+				const patch = Uint8Array.from(decoded.patch);
+				const digest = yield* crypto.digest("SHA-256", patch);
+				const validated = { ...decoded, patch };
+
+				if (
+					patch.byteLength !== decoded.patch_identity.byte_count ||
+					Encoding.encodeHex(digest) !== decoded.patch_identity.content_hash
+				) {
+					return yield* new WorkspaceChangeTransitionError({
+						message: "Workspace prepared diff identity is invalid",
+					});
+				}
+
+				return validated;
+			}).pipe(
+				Effect.mapError((error) =>
+					error instanceof WorkspaceChangeTransitionError
+						? error
+						: new WorkspaceChangeTransitionError({
+								message: "Workspace prepared diff is invalid",
+							}),
+				),
+			);
 
 		const EnsureLiveThread = (transaction: typeof database.client, thread_id: string) =>
 			Effect.gen(function* () {
@@ -688,6 +762,136 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 				}
 
 				return { change: yield* DecodeChange(stored), row: stored };
+			});
+		const DecodeStoredIdentity = (value: string, message: string) =>
+			DecodeJson(value).pipe(
+				Effect.flatMap(Schema.decodeUnknownEffect(ContentIdentity)),
+				Effect.mapError(() => new JournalInvariantError({ message })),
+			);
+		const ValidateStoredReplaceDiff = (
+			transaction: typeof database.client,
+			operation: Extract<WorkspaceChangeOperation, { readonly action: "replace" }>,
+			projection: typeof WorkspaceChanges.$inferSelect,
+			prepared_diff?: PreparedWorkspaceChangeDiff,
+		) =>
+			Effect.gen(function* () {
+				const rows = yield* transaction
+					.select()
+					.from(WorkspaceChangeDiffs)
+					.where(
+						or(
+							eq(WorkspaceChangeDiffs.change_id, operation.change_id),
+							eq(WorkspaceChangeDiffs.source_command_id, operation.message_id),
+						),
+					);
+
+				if (projection.diff_state === "legacy_unavailable") {
+					if (rows.length !== 0) {
+						return yield* new JournalInvariantError({
+							message: `Legacy workspace change ${operation.change_id} owns diff state`,
+						});
+					}
+
+					return;
+				}
+
+				if (projection.diff_state !== "available" || rows.length !== 1) {
+					return yield* new JournalInvariantError({
+						message: `Workspace change ${operation.change_id} has invalid diff state`,
+					});
+				}
+
+				const row = rows[0]!;
+				const [projection_before, projection_after, row_before, row_after] =
+					yield* Effect.all([
+						DecodeStoredIdentity(
+							projection.before_identity_json,
+							`Workspace change ${operation.change_id} has invalid before identity`,
+						),
+						DecodeStoredIdentity(
+							projection.after_identity_json,
+							`Workspace change ${operation.change_id} has invalid after identity`,
+						),
+						DecodeStoredIdentity(
+							row.before_identity_json,
+							`Workspace diff ${operation.change_id} has invalid before identity`,
+						),
+						DecodeStoredIdentity(
+							row.after_identity_json,
+							`Workspace diff ${operation.change_id} has invalid after identity`,
+						),
+					]);
+				const patch = Uint8Array.from(row.patch);
+				const digest = yield* crypto.digest("SHA-256", patch).pipe(
+					Effect.mapError(
+						() =>
+							new JournalInvariantError({
+								message: `Workspace diff ${operation.change_id} could not be verified`,
+							}),
+					),
+				);
+				const patch_hash = Encoding.encodeHex(digest);
+				const patch_text = yield* Effect.try({
+					catch: () =>
+						new JournalInvariantError({
+							message: `Workspace diff ${operation.change_id} is not UTF-8`,
+						}),
+					try: () => new TextDecoder("utf-8", { fatal: true }).decode(patch),
+				});
+				const rendered_line_count =
+					patch_text.length === 0
+						? 0
+						: patch_text.split("\n").length - (patch_text.endsWith("\n") ? 1 : 0);
+
+				if (
+					row.change_id !== operation.change_id ||
+					row.source_command_id !== operation.message_id ||
+					row.thread_id !== operation.thread_id ||
+					row.workspace_id !== operation.workspace_id ||
+					row.path !== operation.path ||
+					row.format !== "unified" ||
+					row.format_version !== operation.diff_format_version ||
+					row.format_version !== workspace_diff_format_version ||
+					row.context_lines !== workspace_diff_context_lines ||
+					row.patch_byte_count !== patch.byteLength ||
+					row.patch_byte_count > workspace_diff_maximum_bytes ||
+					row.patch_hash !== patch_hash ||
+					row.added_line_count < 0 ||
+					row.added_line_count > workspace_diff_maximum_lines_per_side ||
+					row.removed_line_count < 0 ||
+					row.removed_line_count > workspace_diff_maximum_lines_per_side ||
+					rendered_line_count > workspace_diff_maximum_rendered_lines ||
+					!workspace_diff_patch_matches_path(patch_text, operation.path) ||
+					!identities_match(projection_before, operation.expected_identity) ||
+					!identities_match(projection_before, row_before) ||
+					!identities_match(projection_after, operation.result_identity) ||
+					!identities_match(projection_after, row_after)
+				) {
+					return yield* new JournalInvariantError({
+						message: `Workspace diff ${operation.change_id} is corrupt`,
+					});
+				}
+
+				if (
+					prepared_diff !== undefined &&
+					(prepared_diff.change_id !== row.change_id ||
+						prepared_diff.message_id !== row.source_command_id ||
+						prepared_diff.thread_id !== row.thread_id ||
+						prepared_diff.workspace_id !== row.workspace_id ||
+						prepared_diff.path !== row.path ||
+						prepared_diff.format !== row.format ||
+						prepared_diff.format_version !== row.format_version ||
+						prepared_diff.context_lines !== row.context_lines ||
+						prepared_diff.added_line_count !== row.added_line_count ||
+						prepared_diff.removed_line_count !== row.removed_line_count ||
+						prepared_diff.patch_identity.byte_count !== row.patch_byte_count ||
+						prepared_diff.patch_identity.content_hash !== row.patch_hash ||
+						!bytes_match(prepared_diff.patch, patch))
+				) {
+					return yield* new WorkspaceChangeTransitionError({
+						message: "Workspace prepared diff does not match the committed artifact",
+					});
+				}
 			});
 
 		const ValidateTransition = (
@@ -895,6 +1099,7 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 		const ReadDuplicate = (
 			transaction: typeof database.client,
 			operation: WorkspaceChangeOperation,
+			prepared_diff?: PreparedWorkspaceChangeDiff,
 		) =>
 			Effect.gen(function* () {
 				const [command] = yield* transaction
@@ -1015,6 +1220,15 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 					return yield* new JournalInvariantError({
 						message: `Workspace event ${row.event_id} does not match its projection`,
 					});
+				}
+
+				if (operation.action === "replace") {
+					yield* ValidateStoredReplaceDiff(
+						transaction,
+						operation,
+						projection.row,
+						prepared_diff,
+					);
 				}
 
 				return event;
@@ -1138,6 +1352,7 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 								decoded_claim.action === "replace" ? decoded_claim.agent_id : null,
 							change_id: decoded_claim.change_id,
 							created_at: now,
+							diff_format_version: workspace_diff_format_version,
 							evidence_recorded: false,
 							expected_identity_json:
 								decoded_claim.action === "review"
@@ -1466,8 +1681,14 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 				return yield* DecodeEvent(row);
 			});
 
-		const Commit = (message_id: string, action: "recorded" | "reviewed" | "rolled_back") =>
+		const Commit = (
+			message_id: string,
+			action: "recorded" | "reviewed" | "rolled_back",
+			prepared_diff?: PreparedWorkspaceChangeDiff,
+		) =>
 			Effect.gen(function* () {
+				const validated_diff =
+					action === "recorded" ? yield* ValidatePreparedDiff(prepared_diff) : undefined;
 				const result = yield* database.client.transaction((transaction) =>
 					Effect.gen(function* () {
 						const [row] = yield* transaction
@@ -1496,11 +1717,38 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 								message: `Workspace operation ${message_id} has the wrong action`,
 							});
 
-						if (operation.lifecycle === "committed")
+						if (action === "recorded") {
+							if (
+								operation.action !== "replace" ||
+								validated_diff === undefined ||
+								validated_diff.message_id !== operation.message_id ||
+								validated_diff.change_id !== operation.change_id ||
+								validated_diff.thread_id !== operation.thread_id ||
+								validated_diff.workspace_id !== operation.workspace_id ||
+								validated_diff.path !== operation.path ||
+								validated_diff.format_version !== operation.diff_format_version ||
+								!identities_match(
+									validated_diff.before_identity,
+									operation.expected_identity,
+								) ||
+								!identities_match(
+									validated_diff.after_identity,
+									operation.result_identity,
+								)
+							) {
+								return yield* new WorkspaceChangeTransitionError({
+									message:
+										"Workspace prepared diff is not bound to the operation",
+								});
+							}
+						}
+
+						if (operation.lifecycle === "committed") {
 							return {
-								event: yield* ReadDuplicate(transaction, operation),
+								event: yield* ReadDuplicate(transaction, operation, validated_diff),
 								status: "duplicate" as const,
 							};
+						}
 
 						if (
 							(action === "recorded" || action === "rolled_back") &&
@@ -1530,6 +1778,12 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 									change_id: operation.change_id,
 								});
 
+							if (validated_diff === undefined) {
+								return yield* new WorkspaceChangeTransitionError({
+									message: "Workspace replace requires a prepared diff",
+								});
+							}
+
 							const inserted = {
 								after_identity_json: JSON.stringify(operation.result_identity),
 								agent_id: operation.agent_id,
@@ -1551,8 +1805,29 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 								updated_at: now,
 								version: 1,
 								workspace_id: operation.workspace_id,
+								diff_state: "available" as const,
 							};
 							yield* transaction.insert(WorkspaceChanges).values(inserted);
+							yield* transaction.insert(WorkspaceChangeDiffs).values({
+								added_line_count: validated_diff.added_line_count,
+								after_identity_json: JSON.stringify(validated_diff.after_identity),
+								before_identity_json: JSON.stringify(
+									validated_diff.before_identity,
+								),
+								change_id: validated_diff.change_id,
+								context_lines: validated_diff.context_lines,
+								created_at: now,
+								format: validated_diff.format,
+								format_version: validated_diff.format_version,
+								patch: Buffer.from(validated_diff.patch),
+								patch_byte_count: validated_diff.patch_identity.byte_count,
+								patch_hash: validated_diff.patch_identity.content_hash,
+								path: validated_diff.path,
+								removed_line_count: validated_diff.removed_line_count,
+								source_command_id: validated_diff.message_id,
+								thread_id: validated_diff.thread_id,
+								workspace_id: validated_diff.workspace_id,
+							});
 							change = yield* DecodeChange(inserted);
 						} else {
 							const transition = yield* ValidateTransition(transaction, operation);
@@ -1658,7 +1933,7 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 					yield* notifier.Publish(result.event.journal_sequence);
 
 				return result;
-			}).pipe(Effect.mapError(normalize_error));
+			}).pipe(Effect.mapError(normalize_commit_error));
 
 		const MarkEvidenceRecorded = (message_id: string) =>
 			database.client
@@ -1758,7 +2033,8 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 			ClaimReplace: Claim,
 			ClaimReview: Claim,
 			ClaimRollback: Claim,
-			CommitRecorded: (message_id) => Commit(message_id, "recorded"),
+			CommitRecorded: (message_id, prepared_diff) =>
+				Commit(message_id, "recorded", prepared_diff),
 			CommitReviewed: (message_id) => Commit(message_id, "reviewed"),
 			CommitRolledBack: (message_id) => Commit(message_id, "rolled_back"),
 			List,

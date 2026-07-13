@@ -10,7 +10,13 @@ import {
 	uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
-import { workspace_text_maximum_bytes } from "@artisan/protocol";
+import {
+	workspace_diff_context_lines,
+	workspace_diff_format_version,
+	workspace_diff_maximum_bytes,
+	workspace_diff_maximum_lines_per_side,
+	workspace_text_maximum_bytes,
+} from "@artisan/protocol";
 
 export const JournalCommands = sqliteTable(
 	"journal_commands",
@@ -207,6 +213,9 @@ export const WorkspaceChangeOperations = sqliteTable(
 		path: text("path"),
 		expected_identity_json: text("expected_identity_json"),
 		result_identity_json: text("result_identity_json"),
+		diff_format_version: integer("diff_format_version")
+			.notNull()
+			.default(workspace_diff_format_version),
 		lifecycle: text("lifecycle").notNull(),
 		evidence_recorded: integer("evidence_recorded", { mode: "boolean" })
 			.notNull()
@@ -222,6 +231,10 @@ export const WorkspaceChangeOperations = sqliteTable(
 			table.action,
 		),
 		index("workspace_change_operations_change_id_index").on(table.change_id),
+		check(
+			"workspace_change_operations_diff_format_version_check",
+			sql`${table.diff_format_version} = ${sql.raw(String(workspace_diff_format_version))}`,
+		),
 	],
 );
 
@@ -295,11 +308,72 @@ export const WorkspaceChanges = sqliteTable(
 		version: integer("version").notNull(),
 		created_at: text("created_at").notNull(),
 		updated_at: text("updated_at").notNull(),
+		diff_state: text("diff_state").notNull().default("legacy_unavailable"),
 	},
 	(table) => [
 		uniqueIndex("workspace_changes_source_command_unique").on(table.source_command_id),
 		index("workspace_changes_thread_id_index").on(table.thread_id),
 		index("workspace_changes_thread_workspace_index").on(table.thread_id, table.workspace_id),
+		check(
+			"workspace_changes_diff_state_check",
+			sql`${table.diff_state} IN ('available', 'legacy_unavailable')`,
+		),
+	],
+);
+
+/** Stores immutable private unified patches independently from projections and journal records. */
+export const WorkspaceChangeDiffs = sqliteTable(
+	"workspace_change_diffs",
+	{
+		change_id: text("change_id")
+			.primaryKey()
+			.references(() => WorkspaceChanges.change_id, { onDelete: "cascade" }),
+		source_command_id: text("source_command_id")
+			.notNull()
+			.references(() => WorkspaceChangeOperations.message_id, { onDelete: "cascade" }),
+		thread_id: text("thread_id").notNull(),
+		workspace_id: text("workspace_id").notNull(),
+		path: text("path").notNull(),
+		before_identity_json: text("before_identity_json").notNull(),
+		after_identity_json: text("after_identity_json").notNull(),
+		format: text("format").notNull(),
+		format_version: integer("format_version").notNull(),
+		context_lines: integer("context_lines").notNull(),
+		patch: blob("patch", { mode: "buffer" }).notNull(),
+		patch_byte_count: integer("patch_byte_count").notNull(),
+		patch_hash: text("patch_hash").notNull(),
+		added_line_count: integer("added_line_count").notNull(),
+		removed_line_count: integer("removed_line_count").notNull(),
+		created_at: text("created_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("workspace_change_diffs_source_command_unique").on(table.source_command_id),
+		index("workspace_change_diffs_thread_id_index").on(table.thread_id),
+		check("workspace_change_diffs_format_check", sql`${table.format} = 'unified'`),
+		check(
+			"workspace_change_diffs_format_version_check",
+			sql`${table.format_version} = ${sql.raw(String(workspace_diff_format_version))}`,
+		),
+		check(
+			"workspace_change_diffs_context_check",
+			sql`${table.context_lines} = ${sql.raw(String(workspace_diff_context_lines))}`,
+		),
+		check(
+			"workspace_change_diffs_patch_check",
+			sql`
+				length(${table.patch}) = ${table.patch_byte_count}
+				AND ${table.patch_byte_count} BETWEEN 0 AND ${sql.raw(String(workspace_diff_maximum_bytes))}
+				AND length(${table.patch_hash}) = 64
+				AND ${table.patch_hash} NOT GLOB '*[^0-9a-f]*'
+			`,
+		),
+		check(
+			"workspace_change_diffs_line_count_check",
+			sql`
+				${table.added_line_count} BETWEEN 0 AND ${sql.raw(String(workspace_diff_maximum_lines_per_side))}
+				AND ${table.removed_line_count} BETWEEN 0 AND ${sql.raw(String(workspace_diff_maximum_lines_per_side))}
+			`,
+		),
 	],
 );
 

@@ -96,6 +96,7 @@ import { WorkspaceFileServiceLive } from "../workspace/workspace-file-service";
 import { WorkspaceMutationAuthorityLive } from "../workspace/workspace-mutation-authority";
 import { WorkspaceSnapshotStoreLive } from "../workspace/workspace-snapshot-store";
 import { WorkspaceMutationPayloadStoreLive } from "../workspace/workspace-mutation-payload-store";
+import { WorkspaceChangeDiffServiceLive } from "../workspace/workspace-change-diff-service";
 
 export interface BackendOptions {
 	readonly database_path: string;
@@ -165,6 +166,7 @@ export function make_backend_layer(options: BackendOptions) {
 	).pipe(Layer.provideMerge(infrastructure));
 	const workspace_evidence = WorkspaceEvidenceRecorderLive.pipe(Layer.provideMerge(persistence));
 	const workspace_changes = WorkspaceChangeRepositoryLive.pipe(
+		Layer.provideMerge(NodeCrypto.layer),
 		Layer.provideMerge(infrastructure),
 	);
 	const workspace_snapshots = WorkspaceSnapshotStoreLive.pipe(
@@ -172,6 +174,10 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(infrastructure),
 	);
 	const workspace_mutation_payloads = WorkspaceMutationPayloadStoreLive.pipe(
+		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(infrastructure),
+	);
+	const workspace_diffs = WorkspaceChangeDiffServiceLive.pipe(
 		Layer.provideMerge(NodeCrypto.layer),
 		Layer.provideMerge(infrastructure),
 	);
@@ -193,6 +199,7 @@ export function make_backend_layer(options: BackendOptions) {
 				workspace_bounded_filesystems,
 				workspace_changes,
 				workspace_evidence,
+				workspace_diffs,
 				workspace_mutation_payloads,
 				workspace_snapshots,
 			),
@@ -317,6 +324,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(model_behaviour),
 		Layer.provideMerge(workspace_files),
 		Layer.provideMerge(workspace_changes),
+		Layer.provideMerge(workspace_diffs),
 		Layer.provideMerge(workspace_evidence),
 		Layer.provideMerge(workspace_authority),
 		Layer.provideMerge(workspace_bounded_filesystems),

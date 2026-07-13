@@ -62,6 +62,7 @@ function workspace_change_diff() {
 		change_id: "change_1",
 		context_lines: 3,
 		format: "unified",
+		format_version: 1,
 		patch,
 		patch_identity: {
 			algorithm: "sha256" as const,

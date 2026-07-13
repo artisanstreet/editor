@@ -71,6 +71,9 @@ importers:
       '@effect/sql-sqlite-node':
         specifier: 4.0.0-beta.97
         version: 4.0.0-beta.97(effect@4.0.0-beta.97)
+      diff:
+        specifier: 9.0.0
+        version: 9.0.0
       drizzle-orm:
         specifier: 1.0.0-rc.4
         version: 1.0.0-rc.4(@effect/sql-sqlite-node@4.0.0-beta.97(effect@4.0.0-beta.97))(effect@4.0.0-beta.97)
@@ -1856,6 +1859,10 @@ packages:
 
   devalue@5.8.1:
     resolution: {integrity: sha512-4CXDYRBGqN+57wVJkuXBYmpAVUSg3L6JAQa/DFqm238G73E1wuyc/JhGQJzN7vUf/CMphYau2zXbfWzDR5aTEw==}
+
+  diff@9.0.0:
+    resolution: {integrity: sha512-svtcdpS8CgJyqAjEQIXdb3OjhFVVYjzGAPO8WGCmRbrml64SPw/jJD4GoE98aR7r25A0XcgrK3F02yw9R/vhQw==}
+    engines: {node: '>=0.3.1'}
 
   drizzle-kit@1.0.0-rc.4:
     resolution: {integrity: sha512-KZCpjRyu+oYHLj/UJogfFlOkWhHVkaEI2EOT1U3NDVXUzLoTyPjqwFxwOrlQxsY6jzRyxcz4EacqboGfhEeYrA==}
@@ -3805,6 +3812,8 @@ snapshots:
   detect-libc@2.1.2: {}
 
   devalue@5.8.1: {}
+
+  diff@9.0.0: {}
 
   drizzle-kit@1.0.0-rc.4:
     dependencies:

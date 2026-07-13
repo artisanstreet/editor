@@ -203,7 +203,10 @@ function make_workspace_change_runtime(database_path: string, probe?: Transactio
 	);
 
 	return ManagedRuntime.make(
-		WorkspaceChangeRepositoryLive.pipe(Layer.provideMerge(infrastructure)),
+		WorkspaceChangeRepositoryLive.pipe(
+			Layer.provideMerge(NodeCrypto.layer),
+			Layer.provideMerge(infrastructure),
+		),
 	);
 }
 
