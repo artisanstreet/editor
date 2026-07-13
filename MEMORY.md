@@ -1,6 +1,6 @@
 # Artisan Editor Memory
 
-Last updated: 2026-07-12
+Last updated: 2026-07-13
 
 ## Mission
 
@@ -14,8 +14,8 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Branch: `codex/backend-services`
 - [x] Package manager: pnpm 11.7.0
 - [x] Stack: TypeScript 7, Effect 4 beta, Drizzle 1 RC, SQLite
-- [x] Latest verified implementation checkpoint: `f8ea18c test: prove workspace rollback recovery`
-- [x] Local `HEAD`, upstream, and `origin/codex/backend-services` were equal at `f8ea18c` before this documentation update.
+- [x] Latest verified implementation checkpoint: `f5ba7e1 fix: reconcile concurrent workspace replacements`
+- [x] Local `HEAD`, upstream, and `origin/codex/backend-services` were equal at `f5ba7e145375b2eb54bb7321c8eccc31c607fc21` before this documentation update.
 - [x] `ARTISAN_RUN_NATIVE_ADDON_SMOKE=1 pnpm --filter @artisan/bounded-file-store-native verify:local` is the canonical native gate and passes locally for production reads/replacement, test-hook races, and process-crash recovery.
 - [x] Routine development verification is local-first. Do not recreate temporary GitHub Actions, remote runners, or similar testing detours; future CI is a real clean-checkout/release gate and never a substitute for local validation.
 - [x] Model Behaviour is committed as focused protocol, persistence, provider, service, composition, transport, and security changes.
@@ -56,8 +56,21 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] The real composition harness proves accepted replacement, exact committed retry after a terminal run, applied/finalization recovery after restart without a second replacement, terminal changed replay without a projection/evidence/snapshot, portable empty-registry denial, full fake-native option forwarding, and scoped acquisition/release counts.
 - [x] Review and guarded rollback execution are committed at `e68c484`, `72cd1af`, and `f8ea18c`. Rollback reuses the original replace's pinned authority after its run terminates, binds all I/O to event-validated source data, and never issues a store for duplicate or rejected outcomes.
 - [x] Real SQLite composition proves review/rollback success, applied restart recovery, committed cleanup recovery, native rejection after payload staging, byte-free tombstones, snapshot preservation on rejection, and exact duplicates without a second native replacement.
-- [ ] Expose read/replace/list/review/rollback through the typed public protocol and client.
-- [ ] Extend the real service harness with synchronized two-runtime replacement convergence and deterministic SQLite contention/erasure overlap.
+- [x] Typed public workspace list/read/replace/review/rollback protocol routes and the renderer-safe `ArtisanClient` surface are committed at `c072a82` and `a333d78`.
+- [x] Durable cross-process workspace-evidence idempotency is committed at `3e6302e`. New events use a nullable journal idempotency key with a SQLite unique index, legacy exact duplicates remain immutable and resolve to their earliest event, conflicting legacy intent fails closed, and a prior-schema migration fixture proves upgrade safety.
+- [x] Synchronized two-runtime replacement convergence, preflight publication races, native `Changed` reconciliation, committed cleanup, and thread-erasure overlap are committed at `f5ba7e1`.
+
+## Completed Concurrent Workspace Mutation Convergence
+
+- [x] `WorkspaceChangeRepository.ReconcileChanged` resolves preflight and native changed observations transactionally against claimed, applied, committed, rejected, and exactly staged durable state.
+- [x] Replace and rollback callers resume the exact private payload after another runtime publishes, finalize an applied operation, replay a committed event, or settle a terminal rejection without issuing a second native write.
+- [x] Evidence publication is process-safe through one generic nullable journal idempotency key; SQLite arbitrates stale-read races while bounded Effect retry re-reads the canonical event.
+- [x] The upgrade migration preserves legacy journal rows and stream continuity. Multiple exact legacy evidence rows resolve logically to the earliest event, while any conflicting row remains a hard `WorkspaceEvidenceConflict`.
+- [x] Deterministic gates prove both runtimes read stale state before publication, exact replacements converge through preflight and native changed races, committed cleanup emits one evidence event, and erasure cannot bypass unsettled mutation fences.
+- [x] Both synchronized replacement scenarios and both evidence/cleanup scenarios passed ten consecutive stress iterations.
+- [x] Fresh independent P0-P2 review is clean after replacing the unsafe legacy partial-index migration with the nullable idempotency-key policy and upgrade fixture.
+- [x] An isolated staged snapshot passed `pnpm run validate`: formatting, lint, TypeScript, production frontend build, and 95 test files with 799 passing tests plus 3 intentional skips.
+- [x] Focused commits: `3e6302e fix: make workspace evidence idempotent` and `f5ba7e1 fix: reconcile concurrent workspace replacements`.
 
 ## Completed Controlled Workspace Read And Replace Composition
 
