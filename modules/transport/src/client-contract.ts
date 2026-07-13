@@ -25,6 +25,8 @@ import type {
 	WorkspaceChangeListQueryResult,
 	WorkspaceChangeDiffQuery,
 	WorkspaceChangeDiffQueryResult,
+	WorkspaceReplaceApprovalQuery,
+	WorkspaceReplaceApprovalQueryResult,
 } from "@artisan/protocol";
 
 /** Identifies a typed frontend client failure. */
@@ -88,6 +90,17 @@ export interface ArtisanWorkspaceChangeListInput {
 
 /** Supplies the thread and change identity for one workspace diff query. */
 export interface ArtisanWorkspaceChangeDiffInput extends WorkspaceChangeDiffQuery {}
+
+/** Supplies the thread and approval identity for one pending replacement query. */
+export interface ArtisanWorkspaceReplaceApprovalInput extends WorkspaceReplaceApprovalQuery {}
+
+/** Supplies one explicit decision and optional durable retry identity. */
+export interface ArtisanWorkspaceReplaceApprovalResponseInput {
+	readonly approval_id: string;
+	readonly approved: boolean;
+	readonly command_id?: string;
+	readonly thread_id: string;
+}
 
 /** Supplies the durable identity and attribution for a review transition. */
 export interface ArtisanWorkspaceChangeReviewInput {
@@ -230,6 +243,9 @@ export class ArtisanClient extends Context.Service<
 		readonly GetWorkspaceChangeDiff: (
 			input: ArtisanWorkspaceChangeDiffInput,
 		) => Effect.Effect<WorkspaceChangeDiffQueryResult, ArtisanClientError>;
+		readonly GetWorkspaceReplaceApproval: (
+			input: ArtisanWorkspaceReplaceApprovalInput,
+		) => Effect.Effect<WorkspaceReplaceApprovalQueryResult, ArtisanClientError>;
 		readonly OpenAsset: (
 			asset_id: string,
 		) => Effect.Effect<
@@ -291,6 +307,9 @@ export class ArtisanClient extends Context.Service<
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly RollbackWorkspaceChange: (
 			input: ArtisanWorkspaceChangeRollbackInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RespondWorkspaceReplaceApproval: (
+			input: ArtisanWorkspaceReplaceApprovalResponseInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 	}
 >()("Artisan/ArtisanClient") {}

@@ -364,6 +364,12 @@ export const FixtureArtisanClientService = {
 
 			return diff;
 		}),
+	GetWorkspaceReplaceApproval: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureFailure(
+				`Unknown fixture workspace replacement approval: ${input.approval_id}`,
+			);
+		}),
 	ListTerminals: (thread_id, workspace_id) =>
 		Effect.gen(function* () {
 			const terminals: Array<TerminalSession> = [];
@@ -459,6 +465,10 @@ export const FixtureArtisanClientService = {
 	RollbackWorkspaceChange: (input) =>
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-workspace-rollback");
+		}),
+	RespondWorkspaceReplaceApproval: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-workspace-replace-approval");
 		}),
 	SelectGlobalGuidance: (input) =>
 		Effect.gen(function* () {
