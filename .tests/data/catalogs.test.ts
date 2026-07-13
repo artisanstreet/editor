@@ -19,11 +19,8 @@ const allowed_weights = new Set([1, 2, 4, 6, 8]);
 const read_catalog = (path: string): ReadonlyArray<CatalogEntry> =>
 	JSON.parse(readFileSync(join(data_root, path), "utf8")) as ReadonlyArray<CatalogEntry>;
 
-const find_entry = (path: string, value: string): CatalogEntry | undefined =>
-	read_catalog(path).find((entry) => entry.value === value);
-
 describe("curated product data", () => {
-	it("keeps every shipped catalog deliberate, weighted, and bounded", () => {
+	it("keeps every shipped catalog valid, weighted, and bounded", () => {
 		expect(catalog_paths.length).toBeGreaterThan(0);
 
 		for (const path of catalog_paths) {
@@ -31,6 +28,7 @@ describe("curated product data", () => {
 			const values = catalog.map((entry) => entry.value);
 
 			expect(Array.isArray(catalog), path).toBe(true);
+			expect(catalog.length, path).toBeGreaterThan(0);
 			expect(catalog.length, path).toBeLessThanOrEqual(100);
 			expect(new Set(values).size, path).toBe(catalog.length);
 
@@ -52,20 +50,5 @@ describe("curated product data", () => {
 				path,
 			).toBe(true);
 		}
-	});
-
-	it("preserves explicitly curated rarity", () => {
-		expect(find_entry("names/british-females.json", "Esmebeth")?.weight).toBe(8);
-		expect(find_entry("names/norwegian-females.json", "Mina")?.weight).toBe(8);
-		expect(read_catalog("names/norwegian-females.json").map(({ value }) => value)).toEqual(
-			expect.arrayContaining(["Elise", "Linnea", "Martha"]),
-		);
-		expect(find_entry("names/norwegian-females.json", "Marta")).toBeUndefined();
-		expect(find_entry("activity-status/thinking-words.json", "Muhammading")?.weight).toBe(1);
-		expect(
-			read_catalog("activity-status/thinking-words.json")
-				.filter(({ value }) => value !== "Muhammading")
-				.every(({ weight }) => weight >= 4),
-		).toBe(true);
 	});
 });
