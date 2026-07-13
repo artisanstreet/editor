@@ -1,7 +1,7 @@
 import { Context, Data, Effect } from "effect";
 
-/** Identifies why process execution could not be started. */
-export type ProcessRunnerOperation = "configuration" | "spawn";
+/** Identifies which process execution phase failed. */
+export type ProcessRunnerOperation = "configuration" | "spawn" | "stdin";
 
 /** Reports a process-level failure independently from any Git operation. */
 export class ProcessRunnerError extends Data.TaggedError("ProcessRunnerError")<{
@@ -18,6 +18,7 @@ export interface ProcessRunnerInput {
 	readonly environment?: Readonly<Record<string, string | undefined>>;
 	readonly max_stderr_bytes?: number;
 	readonly max_stdout_bytes?: number;
+	readonly stdin?: Uint8Array;
 }
 
 /** Contains bounded process output and total observed byte counts. */
