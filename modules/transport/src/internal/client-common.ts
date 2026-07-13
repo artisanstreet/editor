@@ -68,7 +68,12 @@ export type PendingRequestEnvelope = Extract<
 			| "workspace.replace.approval.query"
 			| "workspace.replace.approval.respond"
 			| "workspace.change.review"
-			| "workspace.change.rollback";
+			| "workspace.change.rollback"
+			| "workspace.git.session.query"
+			| "workspace.git.session.refresh"
+			| "workspace.git.checkout.request"
+			| "workspace.git.checkout.approval.query"
+			| "workspace.git.checkout.approval.respond";
 	}
 >;
 
@@ -88,7 +93,9 @@ export type PendingResultEnvelope = Extract<
 			| "workspace.file.read.query.result"
 			| "workspace.change.list.query.result"
 			| "workspace.change.diff.query.result"
-			| "workspace.replace.approval.query.result";
+			| "workspace.replace.approval.query.result"
+			| "workspace.git.session.query.result"
+			| "workspace.git.checkout.approval.query.result";
 	}
 >;
 

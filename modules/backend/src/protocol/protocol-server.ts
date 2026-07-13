@@ -56,6 +56,11 @@ import {
 	type WorkspaceFileReplaceEnvelope,
 	type WorkspaceReplaceApprovalQueryEnvelope,
 	type WorkspaceReplaceApprovalRespondEnvelope,
+	type WorkspaceGitCheckoutApprovalQueryEnvelope,
+	type WorkspaceGitCheckoutApprovalRespondEnvelope,
+	type WorkspaceGitCheckoutRequestEnvelope,
+	type WorkspaceGitSessionQueryEnvelope,
+	type WorkspaceGitSessionRefreshEnvelope,
 } from "@artisan/protocol";
 
 import { AgentGraphOrchestrator } from "../orchestration/agent-graph-orchestrator";
@@ -82,6 +87,23 @@ import {
 import { OrchestrationRepository } from "../persistence/orchestration-repository";
 import { ThreadReadModel } from "../persistence/thread-read-model";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import {
+	WorkspaceGitCheckoutCoordinator,
+	WorkspaceGitCheckoutFailure,
+} from "../git/workspace-git-checkout-coordinator";
+import {
+	WorkspaceGitCheckoutConflict,
+	WorkspaceGitCheckoutInvariant,
+	WorkspaceGitCheckoutRepository,
+	WorkspaceGitCheckoutUnavailable,
+} from "../git/workspace-git-checkout-repository";
+import { WorkspaceGitObservationError } from "../git/workspace-git-observer";
+import {
+	WorkspaceGitSessionConflict,
+	WorkspaceGitSessionInvariant,
+	WorkspaceGitSessionUnavailable,
+} from "../git/workspace-git-session-repository";
+import { WorkspaceGitSessionService } from "../git/workspace-git-session-service";
 import { TerminalSessionService } from "../terminal/terminal-sessions";
 import { thread_activity_kind_from_event } from "../threads/internal/thread-activity";
 import {
@@ -370,6 +392,95 @@ function workspace_approval_error_detail(error: unknown): ProtocolErrorDetail {
 	};
 }
 
+function workspace_git_session_error_detail(error: unknown): ProtocolErrorDetail {
+	if (error instanceof WorkspaceGitSessionConflict) {
+		return {
+			code: "workspace.git.session_conflict",
+			message: "This Git session command conflicts with its durable intent.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof WorkspaceGitSessionUnavailable) {
+		return {
+			code: "workspace.git.session_unavailable",
+			message: "The Git session is no longer available.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof WorkspaceGitSessionInvariant) {
+		return {
+			code: "workspace.git.invariant_failed",
+			message: "The durable Git session failed validation.",
+			retryable: false,
+		};
+	}
+
+	if (
+		error instanceof WorkspaceGitObservationError &&
+		(error.reason === "invalid_state" || error.reason === "workspace_unavailable")
+	) {
+		return {
+			code: "workspace.git.session_unavailable",
+			message: "The workspace does not expose a usable Git session.",
+			retryable: false,
+		};
+	}
+
+	return {
+		code: "workspace.git.observation_failed",
+		message: "The Git session could not be observed durably.",
+		retryable: true,
+	};
+}
+
+function workspace_git_checkout_error_detail(error: unknown): ProtocolErrorDetail {
+	if (error instanceof WorkspaceGitCheckoutFailure) {
+		const retryable = error.reason === "git_failed";
+
+		return {
+			code: `workspace.git.checkout_${error.reason}`,
+			message:
+				error.reason === "target_missing"
+					? "The requested local branch does not exist."
+					: error.reason === "no_change"
+						? "The requested branch is already checked out."
+						: error.reason === "invalid_request"
+							? "The checkout request is invalid."
+							: "Git could not validate the requested checkout.",
+			retryable,
+		};
+	}
+
+	if (error instanceof WorkspaceGitCheckoutConflict) {
+		return {
+			code: `workspace.git.checkout_${error.reason}`,
+			message: "The checkout no longer matches the approved workspace state.",
+			retryable:
+				error.reason === "claim_conflict" || error.reason === "workspace_mutation_active",
+		};
+	}
+
+	if (error instanceof WorkspaceGitCheckoutUnavailable) {
+		return {
+			code: "workspace.git.checkout_unavailable",
+			message: "The checkout approval is no longer available.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof WorkspaceGitCheckoutInvariant) {
+		return {
+			code: "workspace.git.invariant_failed",
+			message: "The durable checkout approval failed validation.",
+			retryable: false,
+		};
+	}
+
+	return workspace_git_session_error_detail(error);
+}
+
 function thread_item_from_event(event: EventEnvelope): ThreadListItem | undefined {
 	if (event.payload.type === "thread.metadata.updated") {
 		return event.payload.thread;
@@ -457,6 +568,9 @@ export function make_protocol_server_layer(
 			const workspace_files = yield* WorkspaceFileService;
 			const workspace_approval_coordinator = yield* WorkspaceReplaceApprovalCoordinator;
 			const workspace_approvals = yield* WorkspaceReplaceApprovalRepository;
+			const workspace_git_checkouts = yield* WorkspaceGitCheckoutCoordinator;
+			const workspace_git_checkout_repository = yield* WorkspaceGitCheckoutRepository;
+			const workspace_git_sessions = yield* WorkspaceGitSessionService;
 
 			const Open = Effect.gen(function* () {
 				const connection_scope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
@@ -1192,6 +1306,76 @@ export function make_protocol_server_layer(
 						}),
 					);
 
+				const HandleWorkspaceGitSessionQuery = (
+					query: WorkspaceGitSessionQueryEnvelope,
+					current: ReadyState,
+				) =>
+					workspace_git_sessions.Query(query.payload).pipe(
+						Effect.flatMap((result) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "workspace.git.session.query.result",
+									message_id,
+									origin: "backend",
+									payload: result,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch((error) => {
+							const detail = workspace_git_session_error_detail(error);
+
+							return EnqueueError(
+								current,
+								detail.code,
+								detail.message,
+								detail.retryable,
+								query.message_id,
+							);
+						}),
+					);
+
+				const HandleWorkspaceGitCheckoutApprovalQuery = (
+					query: WorkspaceGitCheckoutApprovalQueryEnvelope,
+					current: ReadyState,
+				) =>
+					workspace_git_checkout_repository.Query(query.payload).pipe(
+						Effect.flatMap((result) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "workspace.git.checkout.approval.query.result",
+									message_id,
+									origin: "backend",
+									payload: result,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch((error) => {
+							const detail = workspace_git_checkout_error_detail(error);
+
+							return EnqueueError(
+								current,
+								detail.code,
+								detail.message,
+								detail.retryable,
+								query.message_id,
+							);
+						}),
+					);
+
 				const HandleSubscribe = (subscribe: SubscribeEnvelope, current: ReadyState) =>
 					Effect.gen(function* () {
 						if (current.subscriptions[subscribe.subscription_id]) {
@@ -1823,6 +2007,90 @@ export function make_protocol_server_layer(
 							}),
 						);
 
+				type WorkspaceGitMutationEnvelope =
+					| WorkspaceGitCheckoutApprovalRespondEnvelope
+					| WorkspaceGitCheckoutRequestEnvelope
+					| WorkspaceGitSessionRefreshEnvelope;
+				const HandleWorkspaceGitMutation = (envelope: WorkspaceGitMutationEnvelope) => {
+					const operation: Effect.Effect<
+						{
+							readonly event: EventEnvelope;
+							readonly status: "accepted" | "duplicate";
+						},
+						unknown
+					> =
+						envelope.kind === "workspace.git.session.refresh"
+							? workspace_git_sessions.Refresh({
+									...envelope.payload,
+									message_id: envelope.message_id,
+									sent_at: envelope.sent_at,
+									thread_id: envelope.thread_id,
+								})
+							: envelope.kind === "workspace.git.checkout.request"
+								? workspace_git_checkouts.Request({
+										...envelope.payload,
+										message_id: envelope.message_id,
+										sent_at: envelope.sent_at,
+										thread_id: envelope.thread_id,
+									})
+								: workspace_git_checkouts.Respond({
+										...envelope.payload,
+										message_id: envelope.message_id,
+										sent_at: envelope.sent_at,
+										thread_id: envelope.thread_id,
+									});
+
+					return operation.pipe(
+						Effect.matchEffect({
+							onFailure: (error) => {
+								const detail =
+									envelope.kind === "workspace.git.session.refresh"
+										? workspace_git_session_error_detail(error)
+										: workspace_git_checkout_error_detail(error);
+
+								return Effect.gen(function* () {
+									const message_id = yield* metadata.MakeId("message");
+									const sent_at = yield* metadata.Now;
+
+									yield* Enqueue({
+										causation_id: envelope.message_id,
+										correlation_id: envelope.message_id,
+										kind: "command.receipt",
+										message_id,
+										origin: "backend",
+										payload: { error: detail, status: "rejected" },
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at,
+										thread_id: envelope.thread_id,
+									});
+								});
+							},
+							onSuccess: (acceptance) =>
+								Effect.gen(function* () {
+									const message_id = yield* metadata.MakeId("message");
+									const sent_at = yield* metadata.Now;
+
+									yield* Enqueue({
+										causation_id: envelope.message_id,
+										correlation_id: envelope.message_id,
+										kind: "command.receipt",
+										message_id,
+										origin: "backend",
+										payload: {
+											journal_sequence: acceptance.event.journal_sequence,
+											status: acceptance.status,
+										},
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at,
+										thread_id: envelope.thread_id,
+									});
+								}),
+						}),
+					);
+				};
+
 				const HandleReadyEnvelope = (
 					envelope: Exclude<InboundControlEnvelope, HelloEnvelope>,
 					current: ReadyState,
@@ -1846,6 +2114,14 @@ export function make_protocol_server_layer(
 							return HandleWorkspaceReplaceApprovalQuery(envelope, current);
 						case "workspace.replace.approval.respond":
 							return HandleWorkspaceReplaceApprovalResponse(envelope);
+						case "workspace.git.session.query":
+							return HandleWorkspaceGitSessionQuery(envelope, current);
+						case "workspace.git.checkout.approval.query":
+							return HandleWorkspaceGitCheckoutApprovalQuery(envelope, current);
+						case "workspace.git.session.refresh":
+						case "workspace.git.checkout.request":
+						case "workspace.git.checkout.approval.respond":
+							return HandleWorkspaceGitMutation(envelope);
 						case "workspace.file.replace":
 						case "workspace.change.review":
 						case "workspace.change.rollback":

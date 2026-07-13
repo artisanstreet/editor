@@ -370,6 +370,16 @@ export const FixtureArtisanClientService = {
 				`Unknown fixture workspace replacement approval: ${input.approval_id}`,
 			);
 		}),
+	GetWorkspaceGitSession: (_input) =>
+		Effect.succeed({
+			journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+		}),
+	GetWorkspaceGitCheckoutApproval: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureFailure(
+				`Unknown fixture workspace Git checkout approval: ${input.approval_id}`,
+			);
+		}),
 	ListTerminals: (thread_id, workspace_id) =>
 		Effect.gen(function* () {
 			const terminals: Array<TerminalSession> = [];
@@ -469,6 +479,20 @@ export const FixtureArtisanClientService = {
 	RespondWorkspaceReplaceApproval: (input) =>
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-workspace-replace-approval");
+		}),
+	RefreshWorkspaceGitSession: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-workspace-git-refresh");
+		}),
+	RequestWorkspaceGitCheckout: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-workspace-git-checkout");
+		}),
+	RespondWorkspaceGitCheckoutApproval: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(
+				input.command_id ?? "fixture-workspace-git-checkout-approval",
+			);
 		}),
 	SelectGlobalGuidance: (input) =>
 		Effect.gen(function* () {

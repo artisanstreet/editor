@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { NodeCrypto } from "@effect/platform-node-shared";
+import { NodeCrypto, NodeFileSystem } from "@effect/platform-node-shared";
 import { Layer, ManagedRuntime } from "effect";
 
 import { type Engine, make_engine_registry_layer } from "@artisan/engines";
@@ -22,6 +22,16 @@ import {
 } from "../filesystem/workspace-bounded-regular-file-store-registry";
 import { NativeBoundedRegularFileStoreInitializationError } from "../filesystem/native-bounded-regular-file-store";
 import { NodeProcessRunnerLive } from "../git/node-process-runner";
+import {
+	EmptyWorkspaceGitRegistryLive,
+	WorkspaceGitRegistrationError,
+	WorkspaceGitRegistry,
+} from "../git/workspace-git-registry";
+import { WorkspaceGitObserverLive } from "../git/workspace-git-observer";
+import { WorkspaceGitSessionRepositoryLive } from "../git/workspace-git-session-repository";
+import { WorkspaceGitSessionServiceLive } from "../git/workspace-git-session-service";
+import { WorkspaceGitCheckoutRepositoryLive } from "../git/workspace-git-checkout-repository";
+import { WorkspaceGitCheckoutCoordinatorLive } from "../git/workspace-git-checkout-coordinator";
 import { make_database_layer } from "../persistence/database";
 import { JournalNotifierLive } from "../persistence/journal-notifier";
 import { JournalStoreLive } from "../persistence/journal-store";
@@ -122,6 +132,10 @@ export interface BackendOptions {
 		WorkspaceFilesystemRegistry,
 		WorkspaceFilesystemRegistrationError
 	>;
+	readonly workspace_git_registry?: Layer.Layer<
+		WorkspaceGitRegistry,
+		WorkspaceGitRegistrationError
+	>;
 	readonly workspace_bounded_regular_file_store_registry?: Layer.Layer<
 		WorkspaceBoundedRegularFileStoreRegistry,
 		| NativeBoundedRegularFileStoreInitializationError
@@ -192,6 +206,32 @@ export function make_backend_layer(options: BackendOptions) {
 	const workspace_bounded_filesystems =
 		options.workspace_bounded_regular_file_store_registry ??
 		EmptyWorkspaceBoundedRegularFileStoreRegistryLive;
+	const workspace_git_registry = options.workspace_git_registry ?? EmptyWorkspaceGitRegistryLive;
+	const workspace_git_observer = WorkspaceGitObserverLive.pipe(
+		Layer.provideMerge(NodeFileSystem.layer),
+		Layer.provideMerge(workspace_git_registry),
+		Layer.provideMerge(infrastructure),
+	);
+	const workspace_git_sessions_repository = WorkspaceGitSessionRepositoryLive.pipe(
+		Layer.provideMerge(infrastructure),
+	);
+	const workspace_git_sessions = WorkspaceGitSessionServiceLive.pipe(
+		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(workspace_evidence),
+		Layer.provideMerge(workspace_git_observer),
+		Layer.provideMerge(workspace_git_sessions_repository),
+	);
+	const workspace_git_checkouts_repository = WorkspaceGitCheckoutRepositoryLive.pipe(
+		Layer.provideMerge(infrastructure),
+	);
+	const workspace_git_checkouts = WorkspaceGitCheckoutCoordinatorLive.pipe(
+		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(workspace_git_observer),
+		Layer.provideMerge(workspace_git_registry),
+		Layer.provideMerge(workspace_git_sessions),
+		Layer.provideMerge(workspace_git_checkouts_repository),
+		Layer.provideMerge(infrastructure),
+	);
 	const workspace_authority = WorkspaceMutationAuthorityLive.pipe(
 		Layer.provideMerge(workspace_bounded_filesystems),
 		Layer.provideMerge(workspace_changes),
@@ -306,6 +346,7 @@ export function make_backend_layer(options: BackendOptions) {
 			Layer.provideMerge(graph),
 			Layer.provideMerge(terminals),
 			Layer.provideMerge(workspace_approval_coordination),
+			Layer.provideMerge(workspace_git_checkouts),
 		);
 	const erasure = ThreadErasureLive.pipe(
 		Layer.provideMerge(resource_quiescer),
@@ -333,6 +374,12 @@ export function make_backend_layer(options: BackendOptions) {
 		workspace_filesystems,
 		workspace_snapshots,
 		workspace_mutation_payloads,
+		workspace_git_checkouts,
+		workspace_git_checkouts_repository,
+		workspace_git_observer,
+		workspace_git_registry,
+		workspace_git_sessions,
+		workspace_git_sessions_repository,
 	);
 
 	return make_protocol_server_layer(protocol_options).pipe(

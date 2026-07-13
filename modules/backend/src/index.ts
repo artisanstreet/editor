@@ -345,8 +345,70 @@ export {
 	type GitFileSummary,
 	type GitOperation,
 	type GitRepository,
+	type GitWorktree,
 } from "./git/git";
 export { make_git_layer, make_node_git_layer, type NodeGitOptions } from "./git/node-git";
+export { GitMutation, GitMutationError } from "./git/git-mutation";
+export {
+	make_git_mutation_layer,
+	make_node_git_mutation_layer,
+	type NodeGitMutationOptions,
+} from "./git/node-git-mutation";
+export {
+	EmptyWorkspaceGitRegistryLive,
+	make_node_workspace_git_registry_layer,
+	WorkspaceGitNotFoundError,
+	WorkspaceGitRegistrationError,
+	WorkspaceGitRegistry,
+	type WorkspaceGitCapability,
+	type WorkspaceGitRegistration,
+} from "./git/workspace-git-registry";
+export {
+	WorkspaceGitObservationError,
+	WorkspaceGitObserver,
+	WorkspaceGitObserverLive,
+	type WorkspaceGitObservation,
+	type WorkspaceGitObservedWorktree,
+} from "./git/workspace-git-observer";
+export {
+	WorkspaceGitSessionConflict,
+	WorkspaceGitSessionInvariant,
+	WorkspaceGitSessionRepository,
+	WorkspaceGitSessionRepositoryLive,
+	WorkspaceGitSessionUnavailable,
+	type PendingWorkspaceGitEvidence,
+	type ProjectObservation,
+	type WorkspaceGitEvidenceSettlement,
+	type WorkspaceGitSessionAcceptance,
+	type WorkspaceGitSessionRepositoryError,
+} from "./git/workspace-git-session-repository";
+export {
+	WorkspaceGitSessionService,
+	WorkspaceGitSessionServiceLive,
+	type WorkspaceGitProjection,
+	type WorkspaceGitSessionRefresh,
+	type WorkspaceGitSessionServiceError,
+} from "./git/workspace-git-session-service";
+export {
+	WorkspaceGitCheckoutConflict,
+	WorkspaceGitCheckoutInvariant,
+	WorkspaceGitCheckoutRepository,
+	WorkspaceGitCheckoutRepositoryLive,
+	WorkspaceGitCheckoutUnavailable,
+	type RequestWorkspaceGitCheckout,
+	type WorkspaceGitCheckoutAcceptance,
+	type WorkspaceGitCheckoutDecision,
+	type WorkspaceGitCheckoutExecution,
+	type WorkspaceGitCheckoutRepositoryError,
+} from "./git/workspace-git-checkout-repository";
+export {
+	WorkspaceGitCheckoutCoordinator,
+	WorkspaceGitCheckoutCoordinatorLive,
+	WorkspaceGitCheckoutFailure,
+	type WorkspaceGitCheckoutCoordinatorError,
+	type WorkspaceGitCheckoutDecisionInput,
+	type WorkspaceGitCheckoutRequestInput,
+} from "./git/workspace-git-checkout-coordinator";
 export {
 	make_node_process_runner_layer,
 	NodeProcessRunnerLive,

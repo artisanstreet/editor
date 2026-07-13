@@ -11,6 +11,12 @@ import {
 	type WorkspaceReplaceApprovalRespondEnvelope,
 	type WorkspaceFileReadQueryEnvelope,
 	type WorkspaceFileReplaceEnvelope,
+	type WorkspaceGitCheckoutApprovalQuery,
+	type WorkspaceGitCheckoutApprovalQueryEnvelope,
+	type WorkspaceGitCheckoutApprovalRespondEnvelope,
+	type WorkspaceGitCheckoutRequestEnvelope,
+	type WorkspaceGitSessionQueryEnvelope,
+	type WorkspaceGitSessionRefreshEnvelope,
 	type GlobalGuidanceDriftResolutionEnvelope,
 	type GlobalGuidanceQueryEnvelope,
 	type GlobalGuidanceRetryEnvelope,
@@ -47,6 +53,10 @@ import {
 	type ArtisanWorkspaceChangeRollbackInput,
 	type ArtisanWorkspaceFileReadInput,
 	type ArtisanWorkspaceFileReplaceInput,
+	type ArtisanWorkspaceGitCheckoutApprovalResponseInput,
+	type ArtisanWorkspaceGitCheckoutInput,
+	type ArtisanWorkspaceGitSessionInput,
+	type ArtisanWorkspaceGitSessionRefreshInput,
 	type ArtisanThreadRetentionUpdateInput,
 } from "../client-contract";
 import { TransportRuntime } from "../transport-runtime";
@@ -273,11 +283,52 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 								"workspace replacement approval response narrowed incorrectly",
 							);
 				});
+			const get_workspace_git_session = (input: ArtisanWorkspaceGitSessionInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: WorkspaceGitSessionQueryEnvelope = {
+						...trace,
+						kind: "workspace.git.session.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"workspace.git.session.query.result",
+					);
+
+					return result.kind === "workspace.git.session.query.result"
+						? result.payload
+						: yield* Effect.die("workspace Git session response narrowed incorrectly");
+				});
+			const get_workspace_git_checkout_approval = (
+				input: WorkspaceGitCheckoutApprovalQuery,
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: WorkspaceGitCheckoutApprovalQueryEnvelope = {
+						...trace,
+						kind: "workspace.git.checkout.approval.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"workspace.git.checkout.approval.query.result",
+					);
+
+					return result.kind === "workspace.git.checkout.approval.query.result"
+						? result.payload
+						: yield* Effect.die(
+								"workspace Git checkout approval response narrowed incorrectly",
+							);
+				});
 
 			type WorkspaceMutationEnvelope =
 				| WorkspaceChangeReviewEnvelope
 				| WorkspaceChangeRollbackEnvelope
 				| WorkspaceReplaceApprovalRespondEnvelope
+				| WorkspaceGitCheckoutApprovalRespondEnvelope
+				| WorkspaceGitCheckoutRequestEnvelope
+				| WorkspaceGitSessionRefreshEnvelope
 				| WorkspaceFileReplaceEnvelope;
 			const send_workspace_mutation = (envelope: WorkspaceMutationEnvelope) =>
 				Effect.gen(function* () {
@@ -346,6 +397,51 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 							approval_id: input.approval_id,
 							approved: input.approved,
 						},
+						thread_id: input.thread_id,
+					};
+
+					return yield* send_workspace_mutation(envelope);
+				});
+			const refresh_workspace_git_session = (input: ArtisanWorkspaceGitSessionRefreshInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: WorkspaceGitSessionRefreshEnvelope = {
+						...trace,
+						kind: "workspace.git.session.refresh",
+						message_id: input.command_id ?? trace.message_id,
+						payload: { workspace_id: input.workspace_id },
+						thread_id: input.thread_id,
+					};
+
+					return yield* send_workspace_mutation(envelope);
+				});
+			const request_workspace_git_checkout = (input: ArtisanWorkspaceGitCheckoutInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: WorkspaceGitCheckoutRequestEnvelope = {
+						...trace,
+						kind: "workspace.git.checkout.request",
+						message_id: input.command_id ?? trace.message_id,
+						payload: {
+							expected_session_version: input.expected_session_version,
+							target_branch: input.target_branch,
+							workspace_id: input.workspace_id,
+						},
+						thread_id: input.thread_id,
+					};
+
+					return yield* send_workspace_mutation(envelope);
+				});
+			const respond_workspace_git_checkout_approval = (
+				input: ArtisanWorkspaceGitCheckoutApprovalResponseInput,
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: WorkspaceGitCheckoutApprovalRespondEnvelope = {
+						...trace,
+						kind: "workspace.git.checkout.approval.respond",
+						message_id: input.command_id ?? trace.message_id,
+						payload: { approval_id: input.approval_id, approved: input.approved },
 						thread_id: input.thread_id,
 					};
 
@@ -687,6 +783,8 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				GetThreadWork: get_thread_work,
 				GetWorkspaceChangeDiff: get_workspace_change_diff,
 				GetWorkspaceReplaceApproval: get_workspace_replace_approval,
+				GetWorkspaceGitSession: get_workspace_git_session,
+				GetWorkspaceGitCheckoutApproval: get_workspace_git_checkout_approval,
 				ListWorkspaceChanges: list_workspace_changes,
 				ListTerminals: list_terminals,
 				ListThreads: list_threads,
@@ -699,6 +797,9 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				RetryModelBehaviourSync: retry_model_behaviour_sync,
 				ReplaceWorkspaceFile: replace_workspace_file,
 				RespondWorkspaceReplaceApproval: respond_workspace_replace_approval,
+				RefreshWorkspaceGitSession: refresh_workspace_git_session,
+				RequestWorkspaceGitCheckout: request_workspace_git_checkout,
+				RespondWorkspaceGitCheckoutApproval: respond_workspace_git_checkout_approval,
 				ReviewWorkspaceChange: review_workspace_change,
 				RollbackWorkspaceChange: rollback_workspace_change,
 				SelectGlobalGuidance: select_global_guidance,

@@ -3,6 +3,7 @@ import { Context, Data, Effect, Layer } from "effect";
 import { AgentGraphOrchestrator } from "../orchestration/agent-graph-orchestrator";
 import { AgentOrchestrator } from "../orchestration/agent-orchestrator";
 import { TerminalSessionService } from "../terminal/terminal-sessions";
+import { WorkspaceGitCheckoutCoordinator } from "../git/workspace-git-checkout-coordinator";
 import { WorkspaceReplaceApprovalCoordinator } from "../workspace/workspace-replace-approval-coordinator";
 
 /** Wraps a failure to stop live resources before durable thread erasure. */
@@ -28,6 +29,7 @@ export const ThreadResourceQuiescerLive = Layer.effect(
 		const graph = yield* AgentGraphOrchestrator;
 		const orchestration = yield* AgentOrchestrator;
 		const terminals = yield* TerminalSessionService;
+		const workspace_git_checkouts = yield* WorkspaceGitCheckoutCoordinator;
 		const workspace_approvals = yield* WorkspaceReplaceApprovalCoordinator;
 		const Quiesce = (thread_id: string) =>
 			Effect.all(
@@ -35,6 +37,7 @@ export const ThreadResourceQuiescerLive = Layer.effect(
 					graph.QuiesceThread(thread_id),
 					orchestration.QuiesceThread(thread_id),
 					terminals.QuiesceThread(thread_id),
+					workspace_git_checkouts.QuiesceThread(thread_id),
 					workspace_approvals.QuiesceThread(thread_id),
 				],
 				{ concurrency: "unbounded", discard: true },

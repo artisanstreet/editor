@@ -370,6 +370,8 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 					case "workspace.change.list.query.result":
 					case "workspace.change.diff.query.result":
 					case "workspace.replace.approval.query.result":
+					case "workspace.git.session.query.result":
+					case "workspace.git.checkout.approval.query.result":
 						return handlers.requests.Resolve(envelope);
 					case "event":
 						return handlers.subscriptions.ApplyEvent(envelope).pipe(
