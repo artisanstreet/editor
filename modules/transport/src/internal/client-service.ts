@@ -6,6 +6,9 @@ import {
 	type WorkspaceChangeDiffQueryEnvelope,
 	type WorkspaceChangeReviewEnvelope,
 	type WorkspaceChangeRollbackEnvelope,
+	type WorkspaceReplaceApprovalQuery,
+	type WorkspaceReplaceApprovalQueryEnvelope,
+	type WorkspaceReplaceApprovalRespondEnvelope,
 	type WorkspaceFileReadQueryEnvelope,
 	type WorkspaceFileReplaceEnvelope,
 	type GlobalGuidanceDriftResolutionEnvelope,
@@ -251,10 +254,30 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						? result.payload
 						: yield* Effect.die("workspace change diff response narrowed incorrectly");
 				});
+			const get_workspace_replace_approval = (input: WorkspaceReplaceApprovalQuery) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: WorkspaceReplaceApprovalQueryEnvelope = {
+						...trace,
+						kind: "workspace.replace.approval.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"workspace.replace.approval.query.result",
+					);
+
+					return result.kind === "workspace.replace.approval.query.result"
+						? result.payload
+						: yield* Effect.die(
+								"workspace replacement approval response narrowed incorrectly",
+							);
+				});
 
 			type WorkspaceMutationEnvelope =
 				| WorkspaceChangeReviewEnvelope
 				| WorkspaceChangeRollbackEnvelope
+				| WorkspaceReplaceApprovalRespondEnvelope
 				| WorkspaceFileReplaceEnvelope;
 			const send_workspace_mutation = (envelope: WorkspaceMutationEnvelope) =>
 				Effect.gen(function* () {
@@ -291,6 +314,9 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "workspace.file.replace",
 						message_id: input.command_id ?? trace.message_id,
 						payload: {
+							...(input.approval_request === undefined
+								? {}
+								: { approval_request: input.approval_request }),
 							change_id: input.change_id,
 							content: input.content,
 							expected_before: input.expected_before,
@@ -300,6 +326,27 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						run_id: input.run_id,
 						thread_id: input.thread_id,
 						...(input.raw_origin === undefined ? {} : { raw_origin: input.raw_origin }),
+					};
+
+					return yield* send_workspace_mutation(envelope);
+				});
+			const respond_workspace_replace_approval = (input: {
+				readonly approval_id: string;
+				readonly approved: boolean;
+				readonly command_id?: string;
+				readonly thread_id: string;
+			}) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: WorkspaceReplaceApprovalRespondEnvelope = {
+						...trace,
+						kind: "workspace.replace.approval.respond",
+						message_id: input.command_id ?? trace.message_id,
+						payload: {
+							approval_id: input.approval_id,
+							approved: input.approved,
+						},
+						thread_id: input.thread_id,
 					};
 
 					return yield* send_workspace_mutation(envelope);
@@ -639,6 +686,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				GetThreadRetentionPolicy: get_thread_retention_policy,
 				GetThreadWork: get_thread_work,
 				GetWorkspaceChangeDiff: get_workspace_change_diff,
+				GetWorkspaceReplaceApproval: get_workspace_replace_approval,
 				ListWorkspaceChanges: list_workspace_changes,
 				ListTerminals: list_terminals,
 				ListThreads: list_threads,
@@ -650,6 +698,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				RetryGlobalGuidanceSync: retry_global_guidance_sync,
 				RetryModelBehaviourSync: retry_model_behaviour_sync,
 				ReplaceWorkspaceFile: replace_workspace_file,
+				RespondWorkspaceReplaceApproval: respond_workspace_replace_approval,
 				ReviewWorkspaceChange: review_workspace_change,
 				RollbackWorkspaceChange: rollback_workspace_change,
 				SelectGlobalGuidance: select_global_guidance,

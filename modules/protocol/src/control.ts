@@ -8,6 +8,10 @@ import {
 	WorkspaceChangeReviewRequest,
 	WorkspaceChangeRollbackRequest,
 	WorkspaceChangeUpdatedEvent,
+	WorkspaceReplaceApprovalQuery,
+	WorkspaceReplaceApprovalQueryResult,
+	WorkspaceReplaceApprovalResponseRequest,
+	WorkspaceReplaceApprovalUpdatedEvent,
 	WorkspaceFileReadQuery,
 	WorkspaceFileReadQueryResult,
 	WorkspaceFileReplaceRequest,
@@ -904,6 +908,7 @@ export const EventPayload = Schema.Union([
 	ModelBehaviourSettingUpdatedEvent,
 	ModelBehaviourProviderReconciledEvent,
 	WorkspaceChangeUpdatedEvent,
+	WorkspaceReplaceApprovalUpdatedEvent,
 	ThreadMessageQueuedEvent,
 	ThreadMessageSteeringEvent,
 	RunLifecycleEvent,
@@ -1161,6 +1166,38 @@ export const WorkspaceChangeDiffQueryResultEnvelope = Schema.Struct({
 
 export type WorkspaceChangeDiffQueryResultEnvelope =
 	typeof WorkspaceChangeDiffQueryResultEnvelope.Type;
+
+/** Requests one workspace replacement approval and its bounded private unified diff. */
+export const WorkspaceReplaceApprovalQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("workspace.replace.approval.query"),
+	payload: WorkspaceReplaceApprovalQuery,
+});
+
+export type WorkspaceReplaceApprovalQueryEnvelope =
+	typeof WorkspaceReplaceApprovalQueryEnvelope.Type;
+
+/** Returns one correlated workspace replacement approval and its private unified diff. */
+export const WorkspaceReplaceApprovalQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("workspace.replace.approval.query.result"),
+	payload: WorkspaceReplaceApprovalQueryResult,
+});
+
+export type WorkspaceReplaceApprovalQueryResultEnvelope =
+	typeof WorkspaceReplaceApprovalQueryResultEnvelope.Type;
+
+/** Records an explicit frontend approval or denial decision for one workspace replacement. */
+export const WorkspaceReplaceApprovalRespondEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("workspace.replace.approval.respond"),
+	payload: WorkspaceReplaceApprovalResponseRequest,
+	thread_id: Identifier,
+});
+
+export type WorkspaceReplaceApprovalRespondEnvelope =
+	typeof WorkspaceReplaceApprovalRespondEnvelope.Type;
 
 /** Requests the curated Model Behaviour registry and current reconciliation state. */
 export const ModelBehaviourQueryEnvelope = Schema.Struct({
@@ -1476,6 +1513,8 @@ export const InboundControlEnvelope = Schema.Union([
 	WorkspaceChangeRollbackEnvelope,
 	WorkspaceChangeListQueryEnvelope,
 	WorkspaceChangeDiffQueryEnvelope,
+	WorkspaceReplaceApprovalQueryEnvelope,
+	WorkspaceReplaceApprovalRespondEnvelope,
 	GlobalGuidanceQueryEnvelope,
 	GlobalGuidanceUpdateEnvelope,
 	GlobalGuidanceSelectionEnvelope,
@@ -1509,6 +1548,7 @@ export const OutboundControlEnvelope = Schema.Union([
 	WorkspaceFileReadQueryResultEnvelope,
 	WorkspaceChangeListQueryResultEnvelope,
 	WorkspaceChangeDiffQueryResultEnvelope,
+	WorkspaceReplaceApprovalQueryResultEnvelope,
 	GlobalGuidanceQueryResultEnvelope,
 	ModelBehaviourQueryResultEnvelope,
 	ThreadWorkQueryResultEnvelope,

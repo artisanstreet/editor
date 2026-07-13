@@ -15,6 +15,8 @@ import {
 	ProtocolServer,
 	ThreadRetentionScheduler,
 } from "@artisan/backend";
+import type { WorkspaceReplaceApprovalQueryResult } from "@artisan/protocol";
+import type { ArtisanCommandReceipt } from "@artisan/transport";
 
 import { Database } from "../../modules/backend/src/persistence/database";
 import {
@@ -22,7 +24,10 @@ import {
 	OrchestrationRuns,
 } from "../../modules/backend/src/persistence/schema";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
-import { make_transport_test_harness_with_protocol_server } from "./message-channel-harness";
+import {
+	make_transport_test_harness,
+	make_transport_test_harness_with_protocol_server,
+} from "./message-channel-harness";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const receipt_authentication_key = Redacted.make(new Uint8Array(32).fill(13));
@@ -43,6 +48,19 @@ interface NativeController {
 		NativeBoundedRegularFileStoreOptions["load_native_module"]
 	>;
 	readonly replace_attempts: { value: number };
+}
+
+interface WorkspaceReplaceApprovalClient {
+	readonly GetWorkspaceReplaceApproval: (input: {
+		readonly approval_id: string;
+		readonly thread_id: string;
+	}) => Effect.Effect<WorkspaceReplaceApprovalQueryResult>;
+	readonly RespondWorkspaceReplaceApproval: (input: {
+		readonly approval_id: string;
+		readonly approved: boolean;
+		readonly command_id?: string;
+		readonly thread_id: string;
+	}) => Effect.Effect<ArtisanCommandReceipt>;
 }
 
 function bytes_match(left: Uint8Array, right: Uint8Array) {
@@ -286,6 +304,9 @@ describe("ArtisanClient workspace operations with the backend ProtocolServer", (
 							"replace",
 							harness.client.ReplaceWorkspaceFile({
 								agent_id: "agent_workspace_public",
+								approval_request: {
+									reason: "Replace the workspace example with generated output.",
+								},
 								change_id: "change_workspace_public",
 								command_id: "replace_workspace_public",
 								content: "after",
@@ -397,6 +418,61 @@ describe("ArtisanClient workspace operations with the backend ProtocolServer", (
 		} finally {
 			await harness.dispose();
 			await runtime.dispose();
+		}
+	});
+});
+
+describe("ArtisanClient workspace replacement approval routes", () => {
+	it("queries a private approval diff and submits an approval response through MessagePorts", async () => {
+		const harness = await make_transport_test_harness();
+		const client = harness.client as typeof harness.client & WorkspaceReplaceApprovalClient;
+
+		try {
+			const result = await Effect.runPromise(
+				client.GetWorkspaceReplaceApproval({
+					approval_id: "approval_fixture",
+					thread_id: "thread_fixture",
+				}),
+			);
+			const receipt = await Effect.runPromise(
+				client.RespondWorkspaceReplaceApproval({
+					approval_id: "approval_fixture",
+					approved: true,
+					command_id: "approve_fixture",
+					thread_id: "thread_fixture",
+				}),
+			);
+			const snapshot = harness.protocol_snapshot();
+
+			expect(result).toMatchObject({
+				approval: {
+					approval_id: "approval_fixture",
+					state: "requested",
+				},
+				diff: {
+					patch: "@@ -1,1 +1,1 @@\n-before\n+after\n",
+				},
+			});
+			expect(receipt).toMatchObject({
+				command_id: "approve_fixture",
+				status: "accepted",
+			});
+			expect(snapshot.workspace_replace_approval_query_attempts).toMatchObject([
+				{
+					kind: "workspace.replace.approval.query",
+					payload: { approval_id: "approval_fixture", thread_id: "thread_fixture" },
+				},
+			]);
+			expect(snapshot.workspace_replace_approval_response_attempts).toMatchObject([
+				{
+					kind: "workspace.replace.approval.respond",
+					message_id: "approve_fixture",
+					payload: { approval_id: "approval_fixture", approved: true },
+					thread_id: "thread_fixture",
+				},
+			]);
+		} finally {
+			await harness.dispose();
 		}
 	});
 });

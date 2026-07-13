@@ -7,6 +7,7 @@ import {
 	DecodeOutboundControlEnvelope,
 	type ContentIdentity,
 	type WorkspaceChange,
+	type WorkspaceReplaceApproval,
 } from "@artisan/protocol";
 
 const timestamp = "2026-07-11T08:00:00.000Z";
@@ -77,6 +78,48 @@ function workspace_change_diff() {
 	};
 }
 
+function workspace_replace_approval(
+	state: WorkspaceReplaceApproval["state"] = "requested",
+): WorkspaceReplaceApproval {
+	const approval = {
+		after_identity: identity(4),
+		agent_id: "agent_1",
+		approval_id: "approval_1",
+		before_identity: identity(4),
+		change_id: "change_1",
+		created_at: timestamp,
+		path: "src/main.ts",
+		policy: "on_request" as const,
+		reason: "The replacement updates the workspace fixture.",
+		run_id: "run_1",
+		thread_id: "thread_1",
+		updated_at: timestamp,
+		workspace_id: "workspace_1",
+	};
+
+	if (state === "requested") {
+		return { ...approval, state };
+	}
+
+	if (state === "denied") {
+		return {
+			...approval,
+			decided_at: timestamp,
+			decision: "denied",
+			decision_message_id: "decision_1",
+			state,
+		};
+	}
+
+	return {
+		...approval,
+		decided_at: timestamp,
+		decision: "approved",
+		decision_message_id: "decision_1",
+		state,
+	};
+}
+
 describe("workspace changes protocol codec", () => {
 	it("roundtrips every workspace-change envelope through the public codecs", async () => {
 		const inbound_envelopes = [
@@ -86,6 +129,7 @@ describe("workspace changes protocol codec", () => {
 			}),
 			{
 				...frontend_envelope("workspace.file.replace", {
+					approval_request: { reason: "Replace the generated workspace fixture." },
 					change_id: "change_1",
 					content: "export {};\n",
 					expected_before: identity(10),
@@ -116,6 +160,17 @@ describe("workspace changes protocol codec", () => {
 				change_id: "change_1",
 				thread_id: "thread_1",
 			}),
+			frontend_envelope("workspace.replace.approval.query", {
+				approval_id: "approval_1",
+				thread_id: "thread_1",
+			}),
+			{
+				...frontend_envelope("workspace.replace.approval.respond", {
+					approval_id: "approval_1",
+					approved: true,
+				}),
+				thread_id: "thread_1",
+			},
 		];
 		const outbound_envelopes = [
 			{
@@ -152,6 +207,37 @@ describe("workspace changes protocol codec", () => {
 				protocol_version: 1,
 				schema_version: 1,
 				sent_at: timestamp,
+			},
+			{
+				correlation_id: "approval_query_1",
+				kind: "workspace.replace.approval.query.result",
+				message_id: "approval_query_result_1",
+				origin: "backend",
+				payload: {
+					approval: workspace_replace_approval(),
+					diff: workspace_change_diff(),
+				},
+				protocol_version: 1,
+				schema_version: 1,
+				sent_at: timestamp,
+			},
+			{
+				causation_id: "approval_1",
+				correlation_id: "approval_1",
+				journal_sequence: 2,
+				kind: "event",
+				message_id: "workspace_replace_approval_event_1",
+				origin: "backend",
+				payload: {
+					approval: workspace_replace_approval(),
+					type: "workspace.replace.approval.updated",
+				},
+				protocol_version: 1,
+				schema_version: 1,
+				sequence: 1,
+				sent_at: timestamp,
+				stream_id: "thread_1",
+				thread_id: "thread_1",
 			},
 			{
 				causation_id: "command_1",
@@ -223,6 +309,109 @@ describe("workspace changes protocol codec", () => {
 		await expect(
 			Effect.runPromise(DecodeInboundControlEnvelope(envelope)),
 		).rejects.toBeDefined();
+	});
+
+	it.each(["", "  \n\t ", "reason\u0000", "x".repeat(4097)])(
+		"rejects an invalid replacement approval reason %j",
+		async (reason) => {
+			const envelope = {
+				...frontend_envelope("workspace.file.replace", {
+					approval_request: { reason },
+					change_id: "change_1",
+					content: "",
+					expected_before: identity(),
+					path: "src/main.ts",
+					workspace_id: "workspace_1",
+				}),
+				agent_id: "agent_1",
+				run_id: "run_1",
+				thread_id: "thread_1",
+			};
+
+			await expect(
+				Effect.runPromise(DecodeInboundControlEnvelope(envelope)),
+			).rejects.toBeDefined();
+		},
+	);
+
+	it.each(["requested", "approved", "executing", "denied", "applied", "rejected"] as const)(
+		"roundtrips the %s workspace replacement approval state",
+		async (state) => {
+			const approval = workspace_replace_approval(state);
+			const envelope = {
+				causation_id: "approval_1",
+				correlation_id: "approval_1",
+				journal_sequence: 2,
+				kind: "event",
+				message_id: `workspace_replace_approval_${state}`,
+				origin: "backend",
+				payload: {
+					approval,
+					type: "workspace.replace.approval.updated",
+				},
+				protocol_version: 1,
+				schema_version: 1,
+				sequence: 1,
+				sent_at: timestamp,
+				stream_id: "thread_1",
+				thread_id: "thread_1",
+			};
+
+			await expect(
+				Effect.runPromise(DecodeOutboundControlEnvelope(envelope)),
+			).resolves.toEqual(envelope);
+		},
+	);
+
+	it("rejects impossible approval lifecycle metadata and source bytes in approval events", async () => {
+		const missing_decision = {
+			...workspace_replace_approval("applied"),
+			decided_at: undefined,
+		};
+		const requested_with_decision = {
+			...workspace_replace_approval("requested"),
+			decided_at: timestamp,
+			decision: "approved",
+			decision_message_id: "decision_1",
+		};
+		const denied_as_approved = {
+			...workspace_replace_approval("denied"),
+			decision: "approved",
+		};
+		const approval_with_patch = {
+			...workspace_replace_approval(),
+			patch: workspace_change_diff().patch,
+		};
+
+		for (const approval of [
+			missing_decision,
+			requested_with_decision,
+			denied_as_approved,
+			approval_with_patch,
+		]) {
+			await expect(
+				Effect.runPromise(
+					DecodeOutboundControlEnvelope({
+						causation_id: "approval_1",
+						correlation_id: "approval_1",
+						journal_sequence: 2,
+						kind: "event",
+						message_id: "workspace_replace_approval_invalid",
+						origin: "backend",
+						payload: {
+							approval,
+							type: "workspace.replace.approval.updated",
+						},
+						protocol_version: 1,
+						schema_version: 1,
+						sequence: 1,
+						sent_at: timestamp,
+						stream_id: "thread_1",
+						thread_id: "thread_1",
+					}),
+				),
+			).rejects.toBeDefined();
+		}
 	});
 
 	it("rejects malformed content hashes", async () => {

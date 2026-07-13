@@ -36,6 +36,9 @@ import {
 	type WorkspaceFileReadQueryEnvelope,
 	type WorkspaceFileReadQueryResult,
 	type WorkspaceFileReplaceEnvelope,
+	type WorkspaceReplaceApproval,
+	type WorkspaceReplaceApprovalQueryEnvelope,
+	type WorkspaceReplaceApprovalRespondEnvelope,
 } from "@artisan/protocol";
 
 interface StoredCommand {
@@ -117,6 +120,8 @@ export interface FakeProtocolSnapshot {
 	readonly workspace_change_rollback_attempts: ReadonlyArray<WorkspaceChangeRollbackEnvelope>;
 	readonly workspace_file_read_attempts: ReadonlyArray<WorkspaceFileReadQueryEnvelope>;
 	readonly workspace_file_replace_attempts: ReadonlyArray<WorkspaceFileReplaceEnvelope>;
+	readonly workspace_replace_approval_query_attempts: ReadonlyArray<WorkspaceReplaceApprovalQueryEnvelope>;
+	readonly workspace_replace_approval_response_attempts: ReadonlyArray<WorkspaceReplaceApprovalRespondEnvelope>;
 	readonly subscriptions: ReadonlyArray<SubscribeEnvelope>;
 }
 
@@ -177,6 +182,10 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 	const workspace_change_rollback_attempts: Array<WorkspaceChangeRollbackEnvelope> = [];
 	const workspace_file_read_attempts: Array<WorkspaceFileReadQueryEnvelope> = [];
 	const workspace_file_replace_attempts: Array<WorkspaceFileReplaceEnvelope> = [];
+	const workspace_replace_approval_query_attempts: Array<WorkspaceReplaceApprovalQueryEnvelope> =
+		[];
+	const workspace_replace_approval_response_attempts: Array<WorkspaceReplaceApprovalRespondEnvelope> =
+		[];
 	const subscription_attempts: Array<SubscribeEnvelope> = [];
 	const threads = new Map<string, ThreadListItem>();
 	let retention_policy: ThreadRetentionPolicy = { enabled: true, inactivity_days: 7 };
@@ -288,6 +297,45 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 		identity: workspace_file_identity,
 		path: "src/main.ts",
 		workspace_id: "workspace_fixture",
+	};
+	const workspace_replace_approval: WorkspaceReplaceApproval = {
+		after_identity: workspace_file_identity,
+		agent_id: "agent_fixture",
+		approval_id: "approval_fixture",
+		before_identity: {
+			...workspace_file_identity,
+			content_hash: "3333333333333333333333333333333333333333333333333333333333333333",
+		},
+		change_id: "change_fixture",
+		created_at: "2026-07-10T08:00:00.000Z",
+		path: "src/main.ts",
+		policy: "on_request",
+		reason: "Replace the generated workspace fixture.",
+		run_id: "run_fixture",
+		state: "requested",
+		thread_id: "thread_fixture",
+		updated_at: "2026-07-10T08:00:00.000Z",
+		workspace_id: "workspace_fixture",
+	};
+	const workspace_replace_approval_diff = {
+		added_line_count: 1,
+		after_identity: workspace_replace_approval.after_identity,
+		before_identity: workspace_replace_approval.before_identity,
+		change_id: workspace_replace_approval.change_id,
+		context_lines: 3 as const,
+		format: "unified" as const,
+		format_version: 1 as const,
+		patch: "@@ -1,1 +1,1 @@\n-before\n+after\n",
+		patch_identity: {
+			algorithm: "sha256" as const,
+			byte_count: 31,
+			content_hash: "4444444444444444444444444444444444444444444444444444444444444444",
+		},
+		path: workspace_replace_approval.path,
+		removed_line_count: 1,
+		thread_id: workspace_replace_approval.thread_id,
+		truncated: false as const,
+		workspace_id: workspace_replace_approval.workspace_id,
 	};
 	let workspace_change: WorkspaceChange = {
 		after_identity: workspace_file_identity,
@@ -1077,6 +1125,35 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 					},
 				});
 			});
+		const handle_workspace_replace_approval_query = (
+			query: WorkspaceReplaceApprovalQueryEnvelope,
+		) =>
+			Effect.gen(function* () {
+				workspace_replace_approval_query_attempts.push(query);
+				yield* enqueue({
+					...backend_trace(),
+					correlation_id: query.message_id,
+					kind: "workspace.replace.approval.query.result",
+					payload: {
+						approval: workspace_replace_approval,
+						diff: workspace_replace_approval_diff,
+					},
+				});
+			});
+		const handle_workspace_replace_approval_response = (
+			response: WorkspaceReplaceApprovalRespondEnvelope,
+		) =>
+			Effect.gen(function* () {
+				workspace_replace_approval_response_attempts.push(response);
+				yield* enqueue({
+					...backend_trace(),
+					causation_id: response.message_id,
+					correlation_id: response.message_id,
+					kind: "command.receipt",
+					payload: { journal_sequence: events.length + 1, status: "accepted" },
+					thread_id: response.thread_id,
+				});
+			});
 
 		type WorkspaceMutationEnvelope =
 			| WorkspaceChangeReviewEnvelope
@@ -1390,6 +1467,14 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 						yield* handle_workspace_change_list(input);
 
 						return;
+					case "workspace.replace.approval.query":
+						yield* handle_workspace_replace_approval_query(input);
+
+						return;
+					case "workspace.replace.approval.respond":
+						yield* handle_workspace_replace_approval_response(input);
+
+						return;
 					case "workspace.file.replace":
 					case "workspace.change.review":
 					case "workspace.change.rollback":
@@ -1540,6 +1625,10 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 		workspace_change_rollback_attempts: [...workspace_change_rollback_attempts],
 		workspace_file_read_attempts: [...workspace_file_read_attempts],
 		workspace_file_replace_attempts: [...workspace_file_replace_attempts],
+		workspace_replace_approval_query_attempts: [...workspace_replace_approval_query_attempts],
+		workspace_replace_approval_response_attempts: [
+			...workspace_replace_approval_response_attempts,
+		],
 		subscriptions: [...subscription_attempts],
 	});
 

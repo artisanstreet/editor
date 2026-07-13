@@ -19,8 +19,30 @@ export const workspace_diff_maximum_rendered_lines = 250_000;
 /** Defines the number of context lines emitted around workspace diff changes. */
 export const workspace_diff_context_lines = 3;
 
+/** Defines the maximum visible character count for one workspace approval reason. */
+export const workspace_replace_approval_reason_maximum_characters = 4096;
+
 /** Identifies the immutable unified workspace-diff representation emitted by V1. */
 export const workspace_diff_format_version = 1;
+
+const has_control_character = (value: string) => /[\p{Cc}]/u.test(value);
+
+/** Validates one bounded, visible reason supplied with a requested replacement approval. */
+export const WorkspaceReplaceApprovalReason = Schema.String.check(
+	Schema.makeFilter<string>((reason) => {
+		const normalized = reason.trim().replace(/\s+/g, " ");
+
+		return reason.length > workspace_replace_approval_reason_maximum_characters
+			? `Expected at most ${workspace_replace_approval_reason_maximum_characters} input characters`
+			: has_control_character(reason)
+				? "Expected visible text without control characters"
+				: normalized.length === 0
+					? "Expected a non-empty visible approval reason"
+					: undefined;
+	}),
+);
+
+export type WorkspaceReplaceApprovalReason = typeof WorkspaceReplaceApprovalReason.Type;
 
 /** Validates a canonical slash-separated relative path that identifies one workspace file. */
 export const WorkspacePath = Schema.String.check(
@@ -143,6 +165,110 @@ export const WorkspaceChangeUpdatedEvent = Schema.Struct({
 
 export type WorkspaceChangeUpdatedEvent = typeof WorkspaceChangeUpdatedEvent.Type;
 
+/** Describes the assignment policy that made a workspace replacement require approval. */
+export const WorkspaceReplaceApprovalPolicy = Schema.Literals(["on_request", "always"]);
+
+export type WorkspaceReplaceApprovalPolicy = typeof WorkspaceReplaceApprovalPolicy.Type;
+
+const WorkspaceReplaceApprovalBase = {
+	after_identity: ContentIdentity,
+	agent_id: Identifier,
+	approval_id: Identifier,
+	before_identity: ContentIdentity,
+	change_id: Identifier,
+	created_at: IsoDateTime,
+	path: WorkspacePath,
+	policy: WorkspaceReplaceApprovalPolicy,
+	reason: WorkspaceReplaceApprovalReason,
+	run_id: Identifier,
+	thread_id: Identifier,
+	updated_at: IsoDateTime,
+	workspace_id: Identifier,
+};
+
+const WorkspaceReplaceApprovalDecision = {
+	decided_at: IsoDateTime,
+	decision_message_id: Identifier,
+};
+
+/** Projects a pending workspace replacement approval without source or patch bytes. */
+export const WorkspaceReplaceApprovalRequested = Schema.Struct({
+	...WorkspaceReplaceApprovalBase,
+	state: Schema.Literal("requested"),
+});
+
+export type WorkspaceReplaceApprovalRequested = typeof WorkspaceReplaceApprovalRequested.Type;
+
+/** Projects an approved workspace replacement awaiting execution. */
+export const WorkspaceReplaceApprovalApproved = Schema.Struct({
+	...WorkspaceReplaceApprovalBase,
+	...WorkspaceReplaceApprovalDecision,
+	decision: Schema.Literal("approved"),
+	state: Schema.Literal("approved"),
+});
+
+export type WorkspaceReplaceApprovalApproved = typeof WorkspaceReplaceApprovalApproved.Type;
+
+/** Projects an approved workspace replacement while the replacement is executing. */
+export const WorkspaceReplaceApprovalExecuting = Schema.Struct({
+	...WorkspaceReplaceApprovalBase,
+	...WorkspaceReplaceApprovalDecision,
+	decision: Schema.Literal("approved"),
+	state: Schema.Literal("executing"),
+});
+
+export type WorkspaceReplaceApprovalExecuting = typeof WorkspaceReplaceApprovalExecuting.Type;
+
+/** Projects a workspace replacement that was denied by an approver. */
+export const WorkspaceReplaceApprovalDenied = Schema.Struct({
+	...WorkspaceReplaceApprovalBase,
+	...WorkspaceReplaceApprovalDecision,
+	decision: Schema.Literal("denied"),
+	state: Schema.Literal("denied"),
+});
+
+export type WorkspaceReplaceApprovalDenied = typeof WorkspaceReplaceApprovalDenied.Type;
+
+/** Projects an approved workspace replacement that was applied successfully. */
+export const WorkspaceReplaceApprovalApplied = Schema.Struct({
+	...WorkspaceReplaceApprovalBase,
+	...WorkspaceReplaceApprovalDecision,
+	decision: Schema.Literal("approved"),
+	state: Schema.Literal("applied"),
+});
+
+export type WorkspaceReplaceApprovalApplied = typeof WorkspaceReplaceApprovalApplied.Type;
+
+/** Projects an approved workspace replacement that could not be completed. */
+export const WorkspaceReplaceApprovalRejected = Schema.Struct({
+	...WorkspaceReplaceApprovalBase,
+	...WorkspaceReplaceApprovalDecision,
+	decision: Schema.Literal("approved"),
+	state: Schema.Literal("rejected"),
+});
+
+export type WorkspaceReplaceApprovalRejected = typeof WorkspaceReplaceApprovalRejected.Type;
+
+/** Represents every source-free lifecycle state for one workspace replacement approval. */
+export const WorkspaceReplaceApproval = Schema.Union([
+	WorkspaceReplaceApprovalRequested,
+	WorkspaceReplaceApprovalApproved,
+	WorkspaceReplaceApprovalExecuting,
+	WorkspaceReplaceApprovalDenied,
+	WorkspaceReplaceApprovalApplied,
+	WorkspaceReplaceApprovalRejected,
+]);
+
+export type WorkspaceReplaceApproval = typeof WorkspaceReplaceApproval.Type;
+
+/** Announces one source-free workspace replacement approval lifecycle update. */
+export const WorkspaceReplaceApprovalUpdatedEvent = Schema.Struct({
+	approval: WorkspaceReplaceApproval,
+	type: Schema.Literal("workspace.replace.approval.updated"),
+});
+
+export type WorkspaceReplaceApprovalUpdatedEvent = typeof WorkspaceReplaceApprovalUpdatedEvent.Type;
+
 /** Requests the current UTF-8 content and identity for one canonical workspace file. */
 export const WorkspaceFileReadQuery = Schema.Struct({
 	path: WorkspacePath,
@@ -163,6 +289,11 @@ export type WorkspaceFileReadQueryResult = typeof WorkspaceFileReadQueryResult.T
 
 /** Requests an attributed replacement of one existing UTF-8 regular workspace file. */
 export const WorkspaceFileReplaceRequest = Schema.Struct({
+	approval_request: Schema.optional(
+		Schema.Struct({
+			reason: WorkspaceReplaceApprovalReason,
+		}),
+	),
 	change_id: Identifier,
 	content: WorkspaceTextContent,
 	expected_before: ContentIdentity,
@@ -244,3 +375,28 @@ export const WorkspaceChangeDiffQueryResult = WorkspaceChangeDiffQueryResultBase
 );
 
 export type WorkspaceChangeDiffQueryResult = typeof WorkspaceChangeDiffQueryResult.Type;
+
+/** Requests one source-free workspace replacement approval and its private unified diff. */
+export const WorkspaceReplaceApprovalQuery = Schema.Struct({
+	approval_id: Identifier,
+	thread_id: Identifier,
+});
+
+export type WorkspaceReplaceApprovalQuery = typeof WorkspaceReplaceApprovalQuery.Type;
+
+/** Returns one approval projection together with its bounded private unified diff. */
+export const WorkspaceReplaceApprovalQueryResult = Schema.Struct({
+	approval: WorkspaceReplaceApproval,
+	diff: WorkspaceChangeDiffQueryResult,
+});
+
+export type WorkspaceReplaceApprovalQueryResult = typeof WorkspaceReplaceApprovalQueryResult.Type;
+
+/** Records an explicit frontend approval or denial decision for one workspace replacement. */
+export const WorkspaceReplaceApprovalResponseRequest = Schema.Struct({
+	approval_id: Identifier,
+	approved: Schema.Boolean,
+});
+
+export type WorkspaceReplaceApprovalResponseRequest =
+	typeof WorkspaceReplaceApprovalResponseRequest.Type;
