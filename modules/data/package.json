@@ -1,0 +1,9 @@
+{
+	"name": "@artisan/data",
+	"private": true,
+	"type": "module",
+	"exports": {
+		"./activity-status/thinking-words.json": "./activity-status/thinking-words.json",
+		"./names/norwegian-females.json": "./names/norwegian-females.json"
+	}
+}
