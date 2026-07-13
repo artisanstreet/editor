@@ -588,6 +588,276 @@ export const WorkspaceMutationPayloads = sqliteTable(
 	],
 );
 
+/** Stores the latest source-free Git projection for one registered workspace. */
+export const WorkspaceGitSessions = sqliteTable(
+	"workspace_git_sessions",
+	{
+		workspace_id: text("workspace_id").primaryKey(),
+		repository_root: text("repository_root"),
+		selected_worktree_path: text("selected_worktree_path"),
+		state: text("state").notNull(),
+		blockers_json: text("blockers_json").notNull(),
+		branch: text("branch"),
+		head: text("head"),
+		additions: integer("additions").notNull(),
+		deletions: integer("deletions").notNull(),
+		files: integer("files").notNull(),
+		has_diff: integer("has_diff", { mode: "boolean" }).notNull(),
+		version: integer("version").notNull(),
+		journal_sequence: integer("journal_sequence").notNull(),
+		observed_at: text("observed_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		check(
+			"workspace_git_sessions_state_check",
+			sql`${table.state} IN ('ready', 'blocked', 'unavailable')`,
+		),
+		check(
+			"workspace_git_sessions_counts_check",
+			sql`
+				${table.additions} >= 0
+				AND ${table.deletions} >= 0
+				AND ${table.files} >= 0
+				AND ${table.version} >= 1
+				AND ${table.journal_sequence} >= 1
+			`,
+		),
+		check(
+			"workspace_git_sessions_repository_shape_check",
+			sql`
+				(
+					${table.state} = 'unavailable'
+					AND ${table.repository_root} IS NULL
+					AND ${table.selected_worktree_path} IS NULL
+				)
+				OR (
+					${table.state} IN ('ready', 'blocked')
+					AND ${table.repository_root} IS NOT NULL
+					AND ${table.selected_worktree_path} IS NOT NULL
+				)
+			`,
+		),
+	],
+);
+
+/** Stores the private worktree inventory behind one public Git-session projection. */
+export const WorkspaceGitWorktrees = sqliteTable(
+	"workspace_git_worktrees",
+	{
+		workspace_id: text("workspace_id")
+			.notNull()
+			.references(() => WorkspaceGitSessions.workspace_id, { onDelete: "cascade" }),
+		ordinal: integer("ordinal").notNull(),
+		adapter_path: text("adapter_path").notNull(),
+		location: text("location").notNull(),
+		branch: text("branch"),
+		head: text("head"),
+		bare: integer("bare", { mode: "boolean" }).notNull(),
+		detached: integer("detached", { mode: "boolean" }).notNull(),
+		locked: integer("locked", { mode: "boolean" }).notNull(),
+		prunable: integer("prunable", { mode: "boolean" }).notNull(),
+		version: integer("version").notNull(),
+	},
+	(table) => [
+		primaryKey({ columns: [table.workspace_id, table.ordinal] }),
+		index("workspace_git_worktrees_workspace_index").on(table.workspace_id),
+		check(
+			"workspace_git_worktrees_location_check",
+			sql`${table.location} IN ('selected', 'external')`,
+		),
+		check(
+			"workspace_git_worktrees_ordinal_version_check",
+			sql`${table.ordinal} >= 0 AND ${table.version} >= 1`,
+		),
+	],
+);
+
+/** Stores changed-file facts for the latest Git-session version without patch bytes. */
+export const WorkspaceGitChangedFiles = sqliteTable(
+	"workspace_git_changed_files",
+	{
+		workspace_id: text("workspace_id")
+			.notNull()
+			.references(() => WorkspaceGitSessions.workspace_id, { onDelete: "cascade" }),
+		path: text("path").notNull(),
+		original_path: text("original_path"),
+		status: text("status").notNull(),
+		staged: integer("staged", { mode: "boolean" }).notNull(),
+		unstaged: integer("unstaged", { mode: "boolean" }).notNull(),
+		untracked: integer("untracked", { mode: "boolean" }).notNull(),
+		conflicted: integer("conflicted", { mode: "boolean" }).notNull(),
+		version: integer("version").notNull(),
+	},
+	(table) => [
+		primaryKey({ columns: [table.workspace_id, table.path] }),
+		index("workspace_git_changed_files_workspace_index").on(table.workspace_id),
+		check("workspace_git_changed_files_version_check", sql`${table.version} >= 1`),
+	],
+);
+
+/** Stores idempotent Git observations and exact evidence needed after a restart. */
+export const WorkspaceGitOperations = sqliteTable(
+	"workspace_git_operations",
+	{
+		operation_id: text("operation_id").primaryKey(),
+		source_command_id: text("source_command_id"),
+		request_fingerprint: text("request_fingerprint").notNull(),
+		kind: text("kind").notNull(),
+		thread_id: text("thread_id").notNull(),
+		workspace_id: text("workspace_id").notNull(),
+		session_version: integer("session_version").notNull(),
+		journal_sequence: integer("journal_sequence").notNull(),
+		evidence_recorded: integer("evidence_recorded", { mode: "boolean" })
+			.notNull()
+			.default(false),
+		evidence_root_path: text("evidence_root_path"),
+		evidence_worktree_path: text("evidence_worktree_path"),
+		evidence_branch: text("evidence_branch"),
+		evidence_changed_file_count: integer("evidence_changed_file_count"),
+		evidence_has_diff: integer("evidence_has_diff", { mode: "boolean" }),
+		sent_at: text("sent_at").notNull(),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("workspace_git_operations_source_command_unique").on(table.source_command_id),
+		index("workspace_git_operations_workspace_index").on(table.workspace_id),
+		index("workspace_git_operations_pending_evidence_index").on(table.evidence_recorded),
+		check(
+			"workspace_git_operations_kind_check",
+			sql`${table.kind} IN ('refresh', 'checkout', 'recovery')`,
+		),
+		check(
+			"workspace_git_operations_fingerprint_check",
+			sql`
+				length(${table.request_fingerprint}) = 64
+				AND ${table.request_fingerprint} NOT GLOB '*[^0-9a-f]*'
+			`,
+		),
+		check(
+			"workspace_git_operations_version_sequence_check",
+			sql`${table.session_version} >= 1 AND ${table.journal_sequence} >= 1`,
+		),
+		check(
+			"workspace_git_operations_evidence_check",
+			sql`
+				(
+					${table.evidence_recorded} = 1
+				)
+				OR (
+					${table.evidence_root_path} IS NOT NULL
+					AND ${table.evidence_worktree_path} IS NOT NULL
+					AND ${table.evidence_changed_file_count} IS NOT NULL
+					AND ${table.evidence_changed_file_count} >= 0
+					AND ${table.evidence_has_diff} IS NOT NULL
+				)
+			`,
+		),
+	],
+);
+
+/** Stores source-free approval state for one explicit local-branch checkout request. */
+export const WorkspaceGitCheckoutApprovals = sqliteTable(
+	"workspace_git_checkout_approvals",
+	{
+		approval_id: text("approval_id").primaryKey(),
+		source_command_id: text("source_command_id").notNull(),
+		request_fingerprint: text("request_fingerprint").notNull(),
+		thread_id: text("thread_id").notNull(),
+		workspace_id: text("workspace_id").notNull(),
+		expected_session_version: integer("expected_session_version").notNull(),
+		source_branch: text("source_branch").notNull(),
+		source_head: text("source_head").notNull(),
+		target_branch: text("target_branch").notNull(),
+		target_head: text("target_head").notNull(),
+		state: text("state").notNull(),
+		decision_message_id: text("decision_message_id"),
+		approved: integer("approved", { mode: "boolean" }),
+		decided_at: text("decided_at"),
+		execution_started_at: text("execution_started_at"),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("workspace_git_checkout_approvals_source_command_unique").on(
+			table.source_command_id,
+		),
+		uniqueIndex("workspace_git_checkout_approvals_decision_message_unique").on(
+			table.decision_message_id,
+		),
+		index("workspace_git_checkout_approvals_thread_index").on(table.thread_id),
+		index("workspace_git_checkout_approvals_state_index").on(table.state),
+		check(
+			"workspace_git_checkout_approvals_fingerprint_check",
+			sql`
+				length(${table.request_fingerprint}) = 64
+				AND ${table.request_fingerprint} NOT GLOB '*[^0-9a-f]*'
+			`,
+		),
+		check(
+			"workspace_git_checkout_approvals_state_check",
+			sql`${table.state} IN ('requested', 'approved', 'executing', 'applied', 'denied', 'rejected', 'unknown')`,
+		),
+		check(
+			"workspace_git_checkout_approvals_decision_check",
+			sql`
+				(
+					${table.state} = 'requested'
+					AND ${table.decision_message_id} IS NULL
+					AND ${table.approved} IS NULL
+					AND ${table.decided_at} IS NULL
+					AND ${table.execution_started_at} IS NULL
+				)
+				OR (
+					${table.state} = 'denied'
+					AND ${table.decision_message_id} IS NOT NULL
+					AND ${table.approved} = 0
+					AND ${table.decided_at} IS NOT NULL
+					AND ${table.execution_started_at} IS NULL
+				)
+				OR (
+					${table.state} = 'approved'
+					AND ${table.decision_message_id} IS NOT NULL
+					AND ${table.approved} = 1
+					AND ${table.decided_at} IS NOT NULL
+					AND ${table.execution_started_at} IS NULL
+				)
+				OR (
+					${table.state} IN ('executing', 'applied', 'rejected', 'unknown')
+					AND ${table.decision_message_id} IS NOT NULL
+					AND ${table.approved} = 1
+					AND ${table.decided_at} IS NOT NULL
+					AND ${table.execution_started_at} IS NOT NULL
+				)
+			`,
+		),
+		check(
+			"workspace_git_checkout_approvals_version_check",
+			sql`${table.expected_session_version} >= 1`,
+		),
+	],
+);
+
+/** Serializes branch checkout with every controlled writer in the visible workspace. */
+export const WorkspaceGitCheckoutClaims = sqliteTable(
+	"workspace_git_checkout_claims",
+	{
+		workspace_id: text("workspace_id").primaryKey(),
+		approval_id: text("approval_id")
+			.notNull()
+			.references(() => WorkspaceGitCheckoutApprovals.approval_id, {
+				onDelete: "cascade",
+			}),
+		thread_id: text("thread_id").notNull(),
+		claimed_at: text("claimed_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("workspace_git_checkout_claims_approval_unique").on(table.approval_id),
+		index("workspace_git_checkout_claims_thread_index").on(table.thread_id),
+	],
+);
+
 export const ThreadErasureClaims = sqliteTable("thread_erasure_claims", {
 	thread_id: text("thread_id").primaryKey(),
 	claimed_at: text("claimed_at").notNull(),

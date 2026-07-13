@@ -1,7 +1,14 @@
 import { Context, Data, Effect, Option } from "effect";
 
 /** Describes a Git operation that failed. */
-export type GitOperation = "configuration" | "diff" | "discover" | "status";
+export type GitOperation =
+	| "configuration"
+	| "diff"
+	| "discover"
+	| "probe"
+	| "resolve_branch"
+	| "status"
+	| "worktrees";
 
 /** Reports a Git failure without exposing process implementation details. */
 export class GitError extends Data.TaggedError("GitError")<{
@@ -14,6 +21,17 @@ export interface GitRepository {
 	readonly branch: string;
 	readonly head: Option.Option<string>;
 	readonly root: string;
+}
+
+/** Describes one Git worktree reported by the configured adapter. */
+export interface GitWorktree {
+	readonly adapter_path: string;
+	readonly bare: boolean;
+	readonly branch: Option.Option<string>;
+	readonly detached: boolean;
+	readonly head: Option.Option<string>;
+	readonly locked: boolean;
+	readonly prunable: boolean;
 }
 
 /** Summarizes one changed path in the working tree. */
@@ -48,6 +66,11 @@ export class Git extends Context.Service<
 		readonly DiffPatch: (max_bytes?: number) => Effect.Effect<GitDiffPatch, GitError>;
 		readonly DiffStats: Effect.Effect<GitDiffStats, GitError>;
 		readonly Discover: Effect.Effect<GitRepository, GitError>;
+		readonly ProbeRepository: Effect.Effect<Option.Option<GitRepository>, GitError>;
+		readonly ResolveLocalBranch: (
+			branch: string,
+		) => Effect.Effect<Option.Option<string>, GitError>;
 		readonly Status: Effect.Effect<ReadonlyArray<GitFileSummary>, GitError>;
+		readonly Worktrees: Effect.Effect<ReadonlyArray<GitWorktree>, GitError>;
 	}
 >()("Artisan/Git") {}

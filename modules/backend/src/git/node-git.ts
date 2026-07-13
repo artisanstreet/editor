@@ -1,6 +1,14 @@
 import { Effect, Layer, Option } from "effect";
 
-import { Git, GitError, type GitDiffStats, type GitFileSummary, type GitOperation } from "./git";
+import {
+	Git,
+	GitError,
+	type GitDiffStats,
+	type GitFileSummary,
+	type GitOperation,
+	type GitRepository,
+	type GitWorktree,
+} from "./git";
 import {
 	ProcessRunner,
 	type ProcessRunnerInput,
@@ -17,6 +25,7 @@ export interface NodeGitOptions {
 	readonly cwd: string;
 	readonly max_patch_bytes?: number;
 	readonly max_status_bytes?: number;
+	readonly max_worktree_bytes?: number;
 	readonly process?: NodeProcessRunnerOptions;
 }
 
@@ -233,15 +242,252 @@ function parse_stats(output: string): GitDiffStats {
 	};
 }
 
+function parse_worktrees(output: string) {
+	return Effect.try({
+		try: () => {
+			const records: Array<Array<string>> = [];
+			let fields: Array<string> = [];
+
+			for (const field of output.split("\0")) {
+				if (field.length === 0) {
+					if (fields.length > 0) {
+						records.push(fields);
+						fields = [];
+					}
+
+					continue;
+				}
+
+				fields.push(field);
+			}
+
+			if (fields.length > 0) {
+				throw new Error("truncated Git worktree porcelain record");
+			}
+
+			return records.map((record) => {
+				const first = record[0];
+
+				if (first === undefined || !first.startsWith("worktree ")) {
+					throw new Error("malformed Git worktree porcelain record");
+				}
+
+				const adapter_path = first.slice("worktree ".length);
+				let bare = false;
+				let detached = false;
+				let locked = false;
+				let prunable = false;
+				let branch: Option.Option<string> = Option.none();
+				let head: Option.Option<string> = Option.none();
+				const seen = new Set<string>();
+
+				if (adapter_path.length === 0) {
+					throw new Error("Git worktree porcelain record has no path");
+				}
+
+				for (const field of record.slice(1)) {
+					const separator = field.indexOf(" ");
+					const key = separator === -1 ? field : field.slice(0, separator);
+					const value = separator === -1 ? "" : field.slice(separator + 1);
+
+					if (seen.has(key)) {
+						throw new Error(`duplicate Git worktree porcelain field: ${key}`);
+					}
+
+					seen.add(key);
+
+					if (key === "HEAD") {
+						if (value.length === 0) {
+							throw new Error("Git worktree porcelain HEAD is empty");
+						}
+
+						head = Option.some(value);
+						continue;
+					}
+
+					if (key === "branch") {
+						if (value.length === 0) {
+							throw new Error("Git worktree porcelain branch is empty");
+						}
+
+						branch = Option.some(value);
+						continue;
+					}
+
+					if (key === "bare" || key === "detached") {
+						if (value.length > 0) {
+							throw new Error(`Git worktree porcelain ${key} field has a value`);
+						}
+
+						if (key === "bare") {
+							bare = true;
+						} else {
+							detached = true;
+						}
+
+						continue;
+					}
+
+					if (key === "locked" || key === "prunable") {
+						if (key === "locked") {
+							locked = true;
+						} else {
+							prunable = true;
+						}
+
+						continue;
+					}
+
+					throw new Error(`unknown Git worktree porcelain field: ${key}`);
+				}
+
+				if (!bare && !detached && Option.isNone(branch)) {
+					throw new Error(
+						"Git worktree porcelain record has no branch or detached state",
+					);
+				}
+
+				return {
+					adapter_path,
+					bare,
+					branch,
+					detached,
+					head,
+					locked,
+					prunable,
+				} satisfies GitWorktree;
+			});
+		},
+		catch: (cause) => git_error("worktrees", cause),
+	});
+}
+
+function ProbeRepository(
+	runner: ProcessRunnerShape,
+	cwd: string,
+	discover: Effect.Effect<GitRepository, GitError>,
+	max_output_bytes: number,
+) {
+	return run_git_process(runner, cwd, ["rev-parse", "--is-inside-work-tree"], "probe", {
+		max_stderr_bytes: max_output_bytes,
+		max_stdout_bytes: max_output_bytes,
+	}).pipe(
+		Effect.flatMap((result) => {
+			if (result.exit_code === 128) {
+				return Effect.succeed(Option.none<GitRepository>());
+			}
+
+			if (result.exit_code !== 0) {
+				return Effect.fail(
+					git_error(
+						"probe",
+						new Error(`Git repository probe exited with code ${result.exit_code}`),
+					),
+				);
+			}
+
+			if (result.stdout_truncated || decode_output(result.stdout).trim() !== "true") {
+				return Effect.fail(
+					git_error(
+						"probe",
+						new Error("Git repository probe returned an invalid result"),
+					),
+				);
+			}
+
+			return discover.pipe(Effect.map(Option.some));
+		}),
+	);
+}
+
+function ResolveLocalBranch(
+	runner: ProcessRunnerShape,
+	cwd: string,
+	branch: string,
+	max_output_bytes: number,
+) {
+	return Effect.gen(function* () {
+		if (branch.trim().length === 0 || branch.includes("\0")) {
+			return yield* Effect.fail(
+				git_error(
+					"resolve_branch",
+					new Error("branch must be non-empty and must not contain NUL"),
+				),
+			);
+		}
+
+		const reference = `refs/heads/${branch}`;
+		const limits = {
+			max_stderr_bytes: max_output_bytes,
+			max_stdout_bytes: max_output_bytes,
+		};
+		const exists = yield* run_git_process(
+			runner,
+			cwd,
+			["show-ref", "--exists", "--", reference],
+			"resolve_branch",
+			limits,
+		);
+
+		if (exists.exit_code === 2) {
+			return Option.none<string>();
+		}
+
+		if (exists.exit_code !== 0) {
+			return yield* Effect.fail(
+				git_error(
+					"resolve_branch",
+					new Error(`Git local branch probe exited with code ${exists.exit_code}`),
+				),
+			);
+		}
+
+		const resolved = yield* run_git_process(
+			runner,
+			cwd,
+			["show-ref", "--verify", "--hash", "--", reference],
+			"resolve_branch",
+			limits,
+		);
+
+		if (resolved.exit_code !== 0) {
+			return yield* Effect.fail(
+				git_error(
+					"resolve_branch",
+					new Error(`Git local branch resolution exited with code ${resolved.exit_code}`),
+				),
+			);
+		}
+
+		const object_id = decode_output(resolved.stdout).trim();
+
+		if (resolved.stdout_truncated || !/^([0-9a-f]{40}|[0-9a-f]{64})$/.test(object_id)) {
+			return yield* Effect.fail(
+				git_error(
+					"resolve_branch",
+					new Error("Git returned an invalid local branch object ID"),
+				),
+			);
+		}
+
+		return Option.some(object_id);
+	});
+}
+
 /** Builds an injectable Git layer that requires a ProcessRunner. */
 export function make_git_layer(options: NodeGitOptions) {
 	const max_patch_bytes = options.max_patch_bytes ?? 1_000_000;
 	const max_status_bytes = options.max_status_bytes ?? 8_000_000;
+	const max_worktree_bytes = options.max_worktree_bytes ?? 1_000_000;
 
 	return Layer.effect(
 		Git,
 		Effect.gen(function* () {
-			if (!is_valid_limit(max_patch_bytes) || !is_valid_limit(max_status_bytes)) {
+			if (
+				!is_valid_limit(max_patch_bytes) ||
+				!is_valid_limit(max_status_bytes) ||
+				!is_valid_limit(max_worktree_bytes)
+			) {
 				return yield* Effect.fail(
 					git_error(
 						"configuration",
@@ -332,12 +578,28 @@ export function make_git_layer(options: NodeGitOptions) {
 							result.stdout_bytes > bounded.bytes,
 					};
 				});
+			const worktrees = git_text(
+				["worktree", "list", "--porcelain", "-z"],
+				"worktrees",
+				max_worktree_bytes,
+			).pipe(Effect.flatMap(parse_worktrees));
+			const ProbeRepositoryEffect = ProbeRepository(
+				runner,
+				options.cwd,
+				discover,
+				max_status_bytes,
+			);
+			const ResolveLocalBranchEffect = (branch: string) =>
+				ResolveLocalBranch(runner, options.cwd, branch, max_status_bytes);
 
 			return {
 				DiffPatch: diff_patch,
 				DiffStats: diff_stats,
 				Discover: discover,
+				ProbeRepository: ProbeRepositoryEffect,
+				ResolveLocalBranch: ResolveLocalBranchEffect,
 				Status: status,
+				Worktrees: worktrees,
 			};
 		}),
 	);

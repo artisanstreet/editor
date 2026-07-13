@@ -17,6 +17,17 @@ import {
 	WorkspaceFileReplaceRequest,
 } from "./workspace-changes";
 import {
+	WorkspaceGitCheckoutApprovalQuery,
+	WorkspaceGitCheckoutApprovalQueryResult,
+	WorkspaceGitCheckoutApprovalResponseRequest,
+	WorkspaceGitCheckoutApprovalUpdatedEvent,
+	WorkspaceGitCheckoutRequest,
+	WorkspaceGitSessionQuery,
+	WorkspaceGitSessionQueryResult,
+	WorkspaceGitSessionRefreshRequest,
+	WorkspaceGitSessionUpdatedEvent,
+} from "./git-session";
+import {
 	Identifier,
 	IsoDateTime,
 	JournalSequence,
@@ -75,6 +86,7 @@ export * from "./thread";
 export * from "./guidance";
 export * from "./model-behaviour";
 export * from "./workspace-changes";
+export * from "./git-session";
 
 const FrontendTraceMetadata = {
 	message_id: Identifier,
@@ -909,6 +921,8 @@ export const EventPayload = Schema.Union([
 	ModelBehaviourProviderReconciledEvent,
 	WorkspaceChangeUpdatedEvent,
 	WorkspaceReplaceApprovalUpdatedEvent,
+	WorkspaceGitSessionUpdatedEvent,
+	WorkspaceGitCheckoutApprovalUpdatedEvent,
 	ThreadMessageQueuedEvent,
 	ThreadMessageSteeringEvent,
 	RunLifecycleEvent,
@@ -1198,6 +1212,78 @@ export const WorkspaceReplaceApprovalRespondEnvelope = Schema.Struct({
 
 export type WorkspaceReplaceApprovalRespondEnvelope =
 	typeof WorkspaceReplaceApprovalRespondEnvelope.Type;
+
+/** Requests the current Git session projection for one workspace. */
+export const WorkspaceGitSessionQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("workspace.git.session.query"),
+	payload: WorkspaceGitSessionQuery,
+});
+
+export type WorkspaceGitSessionQueryEnvelope = typeof WorkspaceGitSessionQueryEnvelope.Type;
+
+/** Returns a correlated optional Git session projection. */
+export const WorkspaceGitSessionQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("workspace.git.session.query.result"),
+	payload: WorkspaceGitSessionQueryResult,
+});
+
+export type WorkspaceGitSessionQueryResultEnvelope =
+	typeof WorkspaceGitSessionQueryResultEnvelope.Type;
+
+/** Requests a fresh Git session observation for one workspace. */
+export const WorkspaceGitSessionRefreshEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("workspace.git.session.refresh"),
+	payload: WorkspaceGitSessionRefreshRequest,
+	thread_id: Identifier,
+});
+
+export type WorkspaceGitSessionRefreshEnvelope = typeof WorkspaceGitSessionRefreshEnvelope.Type;
+
+/** Requests a guarded checkout of a workspace branch. */
+export const WorkspaceGitCheckoutRequestEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("workspace.git.checkout.request"),
+	payload: WorkspaceGitCheckoutRequest,
+	thread_id: Identifier,
+});
+
+export type WorkspaceGitCheckoutRequestEnvelope = typeof WorkspaceGitCheckoutRequestEnvelope.Type;
+
+/** Requests one source-free checkout approval by durable identity. */
+export const WorkspaceGitCheckoutApprovalQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("workspace.git.checkout.approval.query"),
+	payload: WorkspaceGitCheckoutApprovalQuery,
+});
+
+export type WorkspaceGitCheckoutApprovalQueryEnvelope =
+	typeof WorkspaceGitCheckoutApprovalQueryEnvelope.Type;
+
+/** Returns a correlated source-free checkout approval projection. */
+export const WorkspaceGitCheckoutApprovalQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("workspace.git.checkout.approval.query.result"),
+	payload: WorkspaceGitCheckoutApprovalQueryResult,
+});
+
+export type WorkspaceGitCheckoutApprovalQueryResultEnvelope =
+	typeof WorkspaceGitCheckoutApprovalQueryResultEnvelope.Type;
+
+/** Records an explicit approval or denial for one checkout request. */
+export const WorkspaceGitCheckoutApprovalRespondEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("workspace.git.checkout.approval.respond"),
+	payload: WorkspaceGitCheckoutApprovalResponseRequest,
+	thread_id: Identifier,
+});
+
+export type WorkspaceGitCheckoutApprovalRespondEnvelope =
+	typeof WorkspaceGitCheckoutApprovalRespondEnvelope.Type;
 
 /** Requests the curated Model Behaviour registry and current reconciliation state. */
 export const ModelBehaviourQueryEnvelope = Schema.Struct({
@@ -1515,6 +1601,11 @@ export const InboundControlEnvelope = Schema.Union([
 	WorkspaceChangeDiffQueryEnvelope,
 	WorkspaceReplaceApprovalQueryEnvelope,
 	WorkspaceReplaceApprovalRespondEnvelope,
+	WorkspaceGitSessionQueryEnvelope,
+	WorkspaceGitSessionRefreshEnvelope,
+	WorkspaceGitCheckoutRequestEnvelope,
+	WorkspaceGitCheckoutApprovalQueryEnvelope,
+	WorkspaceGitCheckoutApprovalRespondEnvelope,
 	GlobalGuidanceQueryEnvelope,
 	GlobalGuidanceUpdateEnvelope,
 	GlobalGuidanceSelectionEnvelope,
@@ -1549,6 +1640,8 @@ export const OutboundControlEnvelope = Schema.Union([
 	WorkspaceChangeListQueryResultEnvelope,
 	WorkspaceChangeDiffQueryResultEnvelope,
 	WorkspaceReplaceApprovalQueryResultEnvelope,
+	WorkspaceGitSessionQueryResultEnvelope,
+	WorkspaceGitCheckoutApprovalQueryResultEnvelope,
 	GlobalGuidanceQueryResultEnvelope,
 	ModelBehaviourQueryResultEnvelope,
 	ThreadWorkQueryResultEnvelope,
