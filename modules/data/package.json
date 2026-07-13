@@ -4,6 +4,7 @@
 	"type": "module",
 	"exports": {
 		"./activity-status/thinking-words.json": "./activity-status/thinking-words.json",
+		"./names/british-females.json": "./names/british-females.json",
 		"./names/norwegian-females.json": "./names/norwegian-females.json"
 	}
 }

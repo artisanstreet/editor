@@ -760,6 +760,12 @@ models, advanced settings, or orchestration policies may override. If an engine
 cannot perform a write-capable assignment without creating a worktree, Artisan
 should report that capability as unsupported and use another execution path.
 
+Curated product data:
+
+- Shipped JSON catalogs should contain roughly 100 entries and must never exceed
+  100 entries per dataset. Prefer a smaller, deliberate selection over an
+  exhaustive or raw source dump.
+
 Agent name bank:
 
 - Artisan should let the user provide a custom list of playful agent display
