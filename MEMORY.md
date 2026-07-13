@@ -40,7 +40,7 @@ This project is not complete until the final audit in `backend-completion-matrix
 
 ## Active Work
 
-- [x] Added the private `@artisan/data` workspace module with 268 curated one-word Norwegian female agent names and 69 independently curated Artisan thinking words. The names include `Linnea` and `Elise`, use `Martha` instead of `Marta`, and pass JSON, uniqueness, NFC, single-word, package-discovery, formatting, and diff checks. Claude spinner references remain taste/provenance only because the published compilations are unlicensed or non-commercial and the PRD forbids blindly shipping them. Full `pnpm run validate` passes formatting, lint, TypeScript, the production frontend build, and 98 test files with 837 passing tests plus 3 intentional skips.
+- [x] Added the private `@artisan/data` workspace module with 268 curated one-word Norwegian female agent names and 70 independently curated Artisan thinking words, including the exact semi-viral `Muhammading` reference spelling. The names include `Linnea` and `Elise`, use `Martha` instead of `Marta`, and pass JSON, uniqueness, NFC, single-word, package-discovery, formatting, and diff checks. Claude spinner references remain taste/provenance only because the published compilations are unlicensed or non-commercial and the PRD forbids blindly shipping them. Full `pnpm run validate` passes formatting, lint, TypeScript, the production frontend build, and 98 test files with 837 passing tests plus 3 intentional skips.
 
 - [x] Immutable workspace diff generation, persistence, recovery, validation, and migration safety are committed and pushed at `07033aa`; the public query route and truthful unavailable/corrupt errors are committed and pushed at `3dadcaa`.
 
