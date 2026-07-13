@@ -27,6 +27,7 @@ import {
 	ThreadTombstones,
 	WorkspaceChangeOperations,
 	WorkspaceChanges,
+	WorkspaceMutationPayloads,
 } from "../persistence/schema";
 import {
 	CommandIdConflict,
@@ -151,6 +152,32 @@ export interface WorkspaceChangeCommit {
 	readonly status: "accepted" | "duplicate";
 }
 
+/** Resolves a native changed observation against one exact durable operation. */
+export type WorkspaceChangeReconciliation =
+	| {
+			readonly _tag: "applied";
+			readonly operation: WorkspaceChangeOperation;
+	  }
+	| {
+			readonly _tag: "committed";
+			readonly event: WorkspaceChangeEvent;
+			readonly operation: WorkspaceChangeOperation;
+	  }
+	| {
+			readonly _tag: "rejected";
+			readonly operation: WorkspaceChangeOperation;
+	  }
+	| {
+			readonly _tag: "staged";
+			readonly operation: WorkspaceChangeOperation;
+	  };
+
+/** Identifies where a changed file observation occurred in mutation execution. */
+export interface ReconcileWorkspaceChange {
+	readonly message_id: string;
+	readonly observation: "native_changed" | "preflight_changed";
+}
+
 /** Reports an immutable collision between distinct replacement operations. */
 export class WorkspaceChangeIdConflict extends Data.TaggedError("WorkspaceChangeIdConflict")<{
 	readonly change_id: string;
@@ -194,6 +221,9 @@ export class WorkspaceChangeRepository extends Context.Service<
 		readonly RejectChanged: (
 			message_id: string,
 		) => Effect.Effect<WorkspaceChangeOperation, WorkspaceChangeRepositoryError>;
+		readonly ReconcileChanged: (
+			input: ReconcileWorkspaceChange,
+		) => Effect.Effect<WorkspaceChangeReconciliation, WorkspaceChangeRepositoryError>;
 		readonly CommitRecorded: (
 			message_id: string,
 		) => Effect.Effect<WorkspaceChangeCommit, WorkspaceChangeRepositoryError>;
@@ -753,6 +783,85 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 				});
 			});
 
+		const HasAvailablePayload = (
+			transaction: typeof database.client,
+			operation: WorkspaceChangeOperation,
+		) =>
+			Effect.gen(function* () {
+				const [payload] = yield* transaction
+					.select({
+						expected_byte_count: WorkspaceMutationPayloads.expected_byte_count,
+						expected_hash: WorkspaceMutationPayloads.expected_hash,
+						replacement_byte_count: WorkspaceMutationPayloads.replacement_byte_count,
+						replacement_hash: WorkspaceMutationPayloads.replacement_hash,
+						state: WorkspaceMutationPayloads.state,
+						thread_id: WorkspaceMutationPayloads.thread_id,
+					})
+					.from(WorkspaceMutationPayloads)
+					.where(eq(WorkspaceMutationPayloads.message_id, operation.message_id))
+					.limit(1);
+
+				if (!payload) {
+					return false;
+				}
+
+				if (
+					payload.state !== "available" ||
+					payload.thread_id !== operation.thread_id ||
+					typeof payload.expected_byte_count !== "number" ||
+					typeof payload.expected_hash !== "string" ||
+					typeof payload.replacement_byte_count !== "number" ||
+					typeof payload.replacement_hash !== "string"
+				) {
+					return yield* new JournalInvariantError({
+						message: `Workspace operation ${operation.message_id} has invalid staged payload state`,
+					});
+				}
+
+				if (operation.action === "review") {
+					return yield* new JournalInvariantError({
+						message: `Workspace review ${operation.message_id} owns mutation payload state`,
+					});
+				}
+
+				const expected_identity = {
+					algorithm: "sha256" as const,
+					byte_count: payload.expected_byte_count,
+					content_hash: payload.expected_hash,
+				};
+				const replacement_identity = {
+					algorithm: "sha256" as const,
+					byte_count: payload.replacement_byte_count,
+					content_hash: payload.replacement_hash,
+				};
+				let intended_replacement: ContentIdentityValue;
+
+				if (operation.action === "replace") {
+					intended_replacement = operation.result_identity;
+				} else {
+					const transition = yield* ValidateTransition(transaction, operation);
+
+					if (!transition) {
+						return yield* new JournalInvariantError({
+							message: `Workspace rollback ${operation.message_id} has no source transition`,
+						});
+					}
+
+					intended_replacement = transition.change.before_identity;
+				}
+
+				if (
+					!identities_match(expected_identity, operation.expected_identity) ||
+					!identities_match(replacement_identity, intended_replacement)
+				) {
+					return yield* new JournalInvariantError({
+						message: `Workspace operation ${operation.message_id} has mismatched staged payload state`,
+					});
+				}
+
+				return true;
+			});
+
 		const ReadOperation = (message_id: string) =>
 			database.client
 				.select()
@@ -1205,6 +1314,90 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 				)
 				.pipe(Effect.mapError(normalize_error));
 
+		const ReconcileChanged = (input: ReconcileWorkspaceChange) =>
+			database.client
+				.transaction((transaction) =>
+					Effect.gen(function* () {
+						const message_id = input.message_id;
+						const [row] = yield* transaction
+							.select()
+							.from(WorkspaceChangeOperations)
+							.where(eq(WorkspaceChangeOperations.message_id, message_id))
+							.limit(1);
+
+						if (!row) {
+							return yield* new WorkspaceChangeTransitionError({
+								message: `Workspace operation ${message_id} is missing`,
+							});
+						}
+
+						const operation = yield* DecodeOperation(row);
+
+						yield* EnsureLiveThread(transaction, operation.thread_id);
+
+						if (operation.action === "review") {
+							return yield* new WorkspaceChangeTransitionError({
+								message: `Workspace operation ${message_id} cannot reconcile a file change`,
+							});
+						}
+
+						if (operation.lifecycle === "committed") {
+							return {
+								_tag: "committed" as const,
+								event: yield* ReadDuplicate(transaction, operation),
+								operation,
+							};
+						}
+
+						if (operation.lifecycle === "applied") {
+							return { _tag: "applied" as const, operation };
+						}
+
+						if (operation.lifecycle === "rejected") {
+							yield* ValidateRejectedState(transaction, operation);
+
+							return { _tag: "rejected" as const, operation };
+						}
+
+						if (
+							input.observation === "preflight_changed" &&
+							(yield* HasAvailablePayload(transaction, operation))
+						) {
+							return { _tag: "staged" as const, operation };
+						}
+
+						yield* ValidateRejectedState(transaction, operation);
+
+						const updated_at = yield* metadata.Now;
+						const [updated] = yield* transaction
+							.update(WorkspaceChangeOperations)
+							.set({ lifecycle: "rejected", updated_at })
+							.where(
+								and(
+									eq(WorkspaceChangeOperations.message_id, message_id),
+									eq(WorkspaceChangeOperations.lifecycle, "claimed"),
+								),
+							)
+							.returning({ message_id: WorkspaceChangeOperations.message_id });
+
+						if (!updated) {
+							return yield* new WorkspaceChangeTransitionError({
+								message: `Workspace operation ${message_id} changed before reconciliation`,
+							});
+						}
+
+						return {
+							_tag: "rejected" as const,
+							operation: yield* DecodeOperation({
+								...row,
+								lifecycle: "rejected",
+								updated_at,
+							}),
+						};
+					}),
+				)
+				.pipe(RetrySqliteWrite, Effect.mapError(normalize_error));
+
 		const AppendEvent = (
 			transaction: typeof database.client,
 			operation: WorkspaceChangeOperation,
@@ -1571,6 +1764,7 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 			List,
 			MarkApplied,
 			MarkEvidenceRecorded,
+			ReconcileChanged,
 			RejectChanged,
 			ReadChange,
 			ReadOperation,

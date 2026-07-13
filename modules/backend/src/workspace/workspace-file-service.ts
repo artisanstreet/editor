@@ -1,4 +1,15 @@
-import { Context, Crypto, Data, Effect, Encoding, Layer, Result, Schema } from "effect";
+import {
+	Context,
+	Crypto,
+	Data,
+	Effect,
+	Encoding,
+	Layer,
+	Match,
+	Result,
+	Schema,
+	pipe,
+} from "effect";
 
 import {
 	ContentIdentity,
@@ -17,6 +28,7 @@ import {
 import { WorkspaceBoundedRegularFileStoreRegistry } from "../filesystem/workspace-bounded-regular-file-store-registry";
 import {
 	type WorkspaceChangeCommit,
+	type WorkspaceChangeReconciliation,
 	WorkspaceChangeRepository,
 } from "./workspace-change-repository";
 import {
@@ -179,7 +191,6 @@ export const WorkspaceFileServiceLive = Layer.effect(
 
 				return Encoding.encodeHex(digest);
 			});
-
 		const Read = (query: WorkspaceFileReadQueryValue) =>
 			Schema.decodeUnknownEffect(WorkspaceFileReadQuery, { onExcessProperty: "error" })(
 				query,
@@ -256,7 +267,6 @@ export const WorkspaceFileServiceLive = Layer.effect(
 								workspace_id: decoded.workspace_id,
 							})
 							.pipe(Effect.result);
-
 						if (Result.isFailure(admission_result)) {
 							const error = admission_result.failure;
 
@@ -280,62 +290,6 @@ export const WorkspaceFileServiceLive = Layer.effect(
 							replacement_identity: intended_after,
 							thread_id: decoded.thread_id,
 						};
-						const Stage = (expected: Uint8Array) =>
-							Effect.gen(function* () {
-								yield* payloads.Stage({ ...payload_input, expected, replacement });
-								yield* snapshots.Stage({
-									change_id: decoded.change_id,
-									content: expected,
-									expected_identity: decoded.expected_before,
-									thread_id: decoded.thread_id,
-								});
-							});
-						const ValidateAndStage = () =>
-							Effect.gen(function* () {
-								const current = yield* admission.store.ReadRegularFile(
-									decoded.path,
-									workspace_text_maximum_bytes,
-								);
-								yield* DecodeWorkspaceText(current);
-								const current_identity = yield* ComputeIdentity(current);
-
-								if (!identities_match(current_identity, decoded.expected_before)) {
-									yield* repository.RejectChanged(decoded.message_id);
-									yield* SettleRejected(decoded, intended_after);
-
-									return yield* Effect.fail(changed("replace"));
-								}
-
-								yield* Stage(current);
-							});
-						const ResumeOrStage = () =>
-							Effect.gen(function* () {
-								return yield* payloads.Resume(payload_input).pipe(
-									Effect.matchEffect({
-										onFailure: (error) =>
-											error instanceof
-											WorkspaceMutationPayloadStoreUnavailable
-												? Effect.gen(function* () {
-														const has_record =
-															yield* payloads.HasRecord(
-																payload_input,
-															);
-
-														if (has_record) {
-															return yield* Effect.fail(error);
-														}
-
-														yield* ValidateAndStage();
-
-														return yield* payloads.Resume(
-															payload_input,
-														);
-													})
-												: Effect.fail(error),
-										onSuccess: (payload) => Effect.succeed(payload),
-									}),
-								);
-							});
 						const FinalizeCommit = (payload: {
 							readonly expected: Uint8Array;
 							readonly replacement: Uint8Array;
@@ -366,23 +320,153 @@ export const WorkspaceFileServiceLive = Layer.effect(
 
 								return commit;
 							});
+						const CompleteDuplicate = (event: WorkspaceChangeCommit["event"]) =>
+							Effect.gen(function* () {
+								yield* evidence.RecordFilesystemMutation({
+									agent_id: decoded.agent_id,
+									operation: "write",
+									operation_id: decoded.message_id,
+									path: decoded.path,
+									...(decoded.raw_origin === undefined
+										? {}
+										: { raw_origin: decoded.raw_origin }),
+									run_id: decoded.run_id,
+									thread_id: decoded.thread_id,
+								});
+								yield* repository.MarkEvidenceRecorded(decoded.message_id);
+								yield* payloads.Consume(payload_input);
+
+								return { event, status: "duplicate" as const };
+							});
+						const RejectObservedChange = () =>
+							Effect.gen(function* () {
+								yield* SettleRejected(decoded, intended_after);
+
+								return yield* Effect.fail(changed("replace"));
+							});
+						const RecoverUnavailablePayload = (
+							error: WorkspaceMutationPayloadStoreUnavailable,
+						) =>
+							repository
+								.ReconcileChanged({
+									message_id: decoded.message_id,
+									observation: "preflight_changed",
+								})
+								.pipe(
+									Effect.flatMap((reconciliation) =>
+										pipe(
+											Match.value(reconciliation),
+											Match.tagsExhaustive({
+												applied: () => Effect.fail(error),
+												committed: ({ event }) =>
+													CompleteDuplicate(event).pipe(
+														Effect.map((commit) => ({
+															_tag: "completed" as const,
+															commit,
+														})),
+													),
+												rejected: RejectObservedChange,
+												staged: () => Effect.fail(error),
+											}),
+										),
+									),
+								);
+						const ResolvePreflight = (reconciliation: WorkspaceChangeReconciliation) =>
+							pipe(
+								Match.value(reconciliation),
+								Match.tagsExhaustive({
+									applied: () =>
+										payloads.Resume(payload_input).pipe(
+											Effect.matchEffect({
+												onFailure: (error) =>
+													error instanceof
+													WorkspaceMutationPayloadStoreUnavailable
+														? RecoverUnavailablePayload(error)
+														: Effect.fail(error),
+												onSuccess: (payload) =>
+													FinalizeCommit(payload).pipe(
+														Effect.map((commit) => ({
+															_tag: "completed" as const,
+															commit,
+														})),
+													),
+											}),
+										),
+									committed: ({ event }) =>
+										CompleteDuplicate(event).pipe(
+											Effect.map((commit) => ({
+												_tag: "completed" as const,
+												commit,
+											})),
+										),
+									rejected: RejectObservedChange,
+									staged: () =>
+										payloads.Resume(payload_input).pipe(
+											Effect.matchEffect({
+												onFailure: (error) =>
+													error instanceof
+													WorkspaceMutationPayloadStoreUnavailable
+														? RecoverUnavailablePayload(error)
+														: Effect.fail(error),
+												onSuccess: (payload) =>
+													Effect.succeed({
+														_tag: "ready" as const,
+														payload,
+													}),
+											}),
+										),
+								}),
+							);
+						const Stage = (expected: Uint8Array) =>
+							payloads.Stage({ ...payload_input, expected, replacement });
+						const ValidateAndStage = () =>
+							Effect.gen(function* () {
+								const current = yield* admission.store.ReadRegularFile(
+									decoded.path,
+									workspace_text_maximum_bytes,
+								);
+								yield* DecodeWorkspaceText(current);
+								const current_identity = yield* ComputeIdentity(current);
+
+								if (!identities_match(current_identity, decoded.expected_before)) {
+									const reconciliation = yield* repository.ReconcileChanged({
+										message_id: decoded.message_id,
+										observation: "preflight_changed",
+									});
+
+									return yield* ResolvePreflight(reconciliation);
+								}
+
+								yield* Stage(current);
+
+								return {
+									_tag: "ready" as const,
+									payload: yield* payloads.Resume(payload_input),
+								};
+							});
+						const ResumeOrStage = () =>
+							payloads.Resume(payload_input).pipe(
+								Effect.matchEffect({
+									onFailure: (error) =>
+										error instanceof WorkspaceMutationPayloadStoreUnavailable
+											? Effect.gen(function* () {
+													const has_record =
+														yield* payloads.HasRecord(payload_input);
+
+													if (has_record) {
+														return yield* Effect.fail(error);
+													}
+
+													return yield* ValidateAndStage();
+												})
+											: Effect.fail(error),
+									onSuccess: (payload) =>
+										Effect.succeed({ _tag: "ready" as const, payload }),
+								}),
+							);
 
 						if (admission.claim._tag === "duplicate") {
-							yield* evidence.RecordFilesystemMutation({
-								agent_id: decoded.agent_id,
-								operation: "write",
-								operation_id: decoded.message_id,
-								path: decoded.path,
-								...(decoded.raw_origin === undefined
-									? {}
-									: { raw_origin: decoded.raw_origin }),
-								run_id: decoded.run_id,
-								thread_id: decoded.thread_id,
-							});
-							yield* repository.MarkEvidenceRecorded(decoded.message_id);
-							yield* payloads.Consume(payload_input);
-
-							return { event: admission.claim.event, status: "duplicate" as const };
+							return yield* CompleteDuplicate(admission.claim.event);
 						}
 
 						if (admission.claim.operation.lifecycle === "applied") {
@@ -391,20 +475,23 @@ export const WorkspaceFileServiceLive = Layer.effect(
 							return yield* FinalizeCommit(payload);
 						}
 
-						let payload;
+						const preparation = yield* admission.claim._tag === "claimed"
+							? ValidateAndStage()
+							: ResumeOrStage();
 
-						if (admission.claim._tag === "claimed") {
-							yield* ValidateAndStage();
-							payload = yield* payloads.Resume(payload_input);
-						} else {
-							payload = yield* ResumeOrStage();
-							yield* snapshots.Stage({
-								change_id: decoded.change_id,
-								content: payload.expected,
-								expected_identity: decoded.expected_before,
-								thread_id: decoded.thread_id,
-							});
+						if (preparation._tag === "completed") {
+							return preparation.commit;
 						}
+
+						const payload = preparation.payload;
+
+						yield* snapshots.Stage({
+							change_id: decoded.change_id,
+							content: payload.expected,
+							expected_identity: decoded.expected_before,
+							thread_id: decoded.thread_id,
+						});
+
 						const replace = yield* admission.store.ReplaceRegularFile({
 							expected: payload.expected,
 							maximum_bytes: workspace_text_maximum_bytes,
@@ -414,10 +501,20 @@ export const WorkspaceFileServiceLive = Layer.effect(
 						});
 
 						if (replace._tag === "Changed") {
-							yield* repository.RejectChanged(decoded.message_id);
-							yield* SettleRejected(decoded, intended_after);
+							const reconciliation = yield* repository.ReconcileChanged({
+								message_id: decoded.message_id,
+								observation: "native_changed",
+							});
 
-							return yield* Effect.fail(changed("replace"));
+							return yield* pipe(
+								Match.value(reconciliation),
+								Match.tagsExhaustive({
+									applied: () => FinalizeCommit(payload),
+									committed: ({ event }) => CompleteDuplicate(event),
+									rejected: RejectObservedChange,
+									staged: () => Effect.fail(failed("replace")),
+								}),
+							);
 						}
 
 						yield* repository.MarkApplied({
@@ -506,6 +603,19 @@ export const WorkspaceFileServiceLive = Layer.effect(
 								path: source.path,
 								thread_id: decoded.thread_id,
 							});
+						const CompleteDuplicate = (event: WorkspaceChangeCommit["event"]) =>
+							Effect.gen(function* () {
+								yield* snapshots.Consume({
+									change_id: decoded.change_id,
+									rollback_message_id: decoded.message_id,
+									thread_id: decoded.thread_id,
+								});
+								yield* RecordEvidence();
+								yield* repository.MarkEvidenceRecorded(decoded.message_id);
+								yield* payloads.Consume(payload_input);
+
+								return { event, status: "duplicate" as const };
+							});
 
 						if (admission._tag === "rejected") {
 							yield* SettleRejected();
@@ -514,16 +624,7 @@ export const WorkspaceFileServiceLive = Layer.effect(
 						}
 
 						if (admission._tag === "duplicate") {
-							yield* snapshots.Consume({
-								change_id: decoded.change_id,
-								rollback_message_id: decoded.message_id,
-								thread_id: decoded.thread_id,
-							});
-							yield* RecordEvidence();
-							yield* repository.MarkEvidenceRecorded(decoded.message_id);
-							yield* payloads.Consume(payload_input);
-
-							return { event: admission.claim.event, status: "duplicate" as const };
+							return yield* CompleteDuplicate(admission.claim.event);
 						}
 
 						const FinalizeCommit = (payload: {
@@ -553,6 +654,85 @@ export const WorkspaceFileServiceLive = Layer.effect(
 
 								return commit;
 							});
+						const RejectObservedChange = () =>
+							Effect.gen(function* () {
+								yield* SettleRejected();
+
+								return yield* Effect.fail(changed("rollback"));
+							});
+						const RecoverUnavailablePayload = (
+							error: WorkspaceMutationPayloadStoreUnavailable,
+						) =>
+							repository
+								.ReconcileChanged({
+									message_id: decoded.message_id,
+									observation: "preflight_changed",
+								})
+								.pipe(
+									Effect.flatMap((reconciliation) =>
+										pipe(
+											Match.value(reconciliation),
+											Match.tagsExhaustive({
+												applied: () => Effect.fail(error),
+												committed: ({ event }) =>
+													CompleteDuplicate(event).pipe(
+														Effect.map((commit) => ({
+															_tag: "completed" as const,
+															commit,
+														})),
+													),
+												rejected: RejectObservedChange,
+												staged: () => Effect.fail(error),
+											}),
+										),
+									),
+								);
+						const ResolvePreflight = (reconciliation: WorkspaceChangeReconciliation) =>
+							pipe(
+								Match.value(reconciliation),
+								Match.tagsExhaustive({
+									applied: () =>
+										payloads.Resume(payload_input).pipe(
+											Effect.matchEffect({
+												onFailure: (error) =>
+													error instanceof
+													WorkspaceMutationPayloadStoreUnavailable
+														? RecoverUnavailablePayload(error)
+														: Effect.fail(error),
+												onSuccess: (payload) =>
+													FinalizeCommit(payload).pipe(
+														Effect.map((commit) => ({
+															_tag: "completed" as const,
+															commit,
+														})),
+													),
+											}),
+										),
+									committed: ({ event }) =>
+										CompleteDuplicate(event).pipe(
+											Effect.map((commit) => ({
+												_tag: "completed" as const,
+												commit,
+											})),
+										),
+									rejected: RejectObservedChange,
+									staged: () =>
+										payloads.Resume(payload_input).pipe(
+											Effect.matchEffect({
+												onFailure: (error) =>
+													error instanceof
+													WorkspaceMutationPayloadStoreUnavailable
+														? RecoverUnavailablePayload(error)
+														: Effect.fail(error),
+												onSuccess: (payload) =>
+													Effect.succeed({
+														_tag: "ready" as const,
+														payload,
+													}),
+											}),
+										),
+								}),
+							);
 
 						const ReadAndStage = () =>
 							Effect.gen(function* () {
@@ -574,10 +754,12 @@ export const WorkspaceFileServiceLive = Layer.effect(
 									!identities_match(current_identity, source.after_identity) ||
 									!identities_match(original_identity, source.before_identity)
 								) {
-									yield* repository.RejectChanged(decoded.message_id);
-									yield* SettleRejected();
+									const reconciliation = yield* repository.ReconcileChanged({
+										message_id: decoded.message_id,
+										observation: "preflight_changed",
+									});
 
-									return yield* Effect.fail(changed("rollback"));
+									return yield* ResolvePreflight(reconciliation);
 								}
 
 								yield* payloads.Stage({
@@ -585,26 +767,31 @@ export const WorkspaceFileServiceLive = Layer.effect(
 									expected: current,
 									replacement: original,
 								});
+
+								return {
+									_tag: "ready" as const,
+									payload: yield* payloads.Resume(payload_input),
+								};
 							});
 						const ResumeOrStage = () =>
 							payloads.Resume(payload_input).pipe(
-								Effect.catchIf(
-									(error) =>
-										error instanceof WorkspaceMutationPayloadStoreUnavailable,
-									(error) =>
-										Effect.gen(function* () {
-											const has_record =
-												yield* payloads.HasRecord(payload_input);
+								Effect.matchEffect({
+									onFailure: (error) =>
+										error instanceof WorkspaceMutationPayloadStoreUnavailable
+											? Effect.gen(function* () {
+													const has_record =
+														yield* payloads.HasRecord(payload_input);
 
-											if (has_record) {
-												return yield* Effect.fail(error);
-											}
+													if (has_record) {
+														return yield* Effect.fail(error);
+													}
 
-											yield* ReadAndStage();
-
-											return yield* payloads.Resume(payload_input);
-										}),
-								),
+													return yield* ReadAndStage();
+												})
+											: Effect.fail(error),
+									onSuccess: (payload) =>
+										Effect.succeed({ _tag: "ready" as const, payload }),
+								}),
 							);
 
 						if (admission.claim.operation.lifecycle === "applied") {
@@ -613,14 +800,15 @@ export const WorkspaceFileServiceLive = Layer.effect(
 							return yield* FinalizeCommit(payload);
 						}
 
-						let payload;
+						const preparation = yield* admission.claim._tag === "claimed"
+							? ReadAndStage()
+							: ResumeOrStage();
 
-						if (admission.claim._tag === "claimed") {
-							yield* ReadAndStage();
-							payload = yield* payloads.Resume(payload_input);
-						} else {
-							payload = yield* ResumeOrStage();
+						if (preparation._tag === "completed") {
+							return preparation.commit;
 						}
+
+						const payload = preparation.payload;
 
 						const replace = yield* admission.store.ReplaceRegularFile({
 							expected: payload.expected,
@@ -631,10 +819,20 @@ export const WorkspaceFileServiceLive = Layer.effect(
 						});
 
 						if (replace._tag === "Changed") {
-							yield* repository.RejectChanged(decoded.message_id);
-							yield* SettleRejected();
+							const reconciliation = yield* repository.ReconcileChanged({
+								message_id: decoded.message_id,
+								observation: "native_changed",
+							});
 
-							return yield* Effect.fail(changed("rollback"));
+							return yield* pipe(
+								Match.value(reconciliation),
+								Match.tagsExhaustive({
+									applied: () => FinalizeCommit(payload),
+									committed: ({ event }) => CompleteDuplicate(event),
+									rejected: RejectObservedChange,
+									staged: () => Effect.fail(failed("rollback")),
+								}),
+							);
 						}
 
 						yield* repository.MarkApplied({

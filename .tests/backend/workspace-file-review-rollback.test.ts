@@ -67,6 +67,10 @@ function rollback_source() {
 
 function make_harness(
 	options: {
+		readonly changed_reconciliation?: "applied" | "committed" | "rejected" | "staged";
+		readonly changed_reconciliations?: ReadonlyArray<
+			"applied" | "committed" | "rejected" | "staged"
+		>;
 		readonly current?: string;
 		readonly finalize_failures?: number;
 		readonly payload_record_exists?: boolean;
@@ -90,6 +94,8 @@ function make_harness(
 		| undefined;
 	let payload_record_exists = options.payload_record_exists ?? false;
 	let rollback_lifecycle = options.rollback_lifecycle ?? "claimed";
+	const changed_reconciliation = options.changed_reconciliation ?? "rejected";
+	let changed_reconciliation_index = 0;
 	let snapshot_available = true;
 	let review_claim = options.review_claim ?? "claimed";
 	const calls: string[] = [];
@@ -315,6 +321,40 @@ function make_harness(
 			},
 			ReadChange: () => Effect.die("rollback source must come from authority"),
 			ReadOperation: () => Effect.die("unused"),
+			ReconcileChanged: () => {
+				calls.push("reconcile_changed");
+				const reconciliation =
+					options.changed_reconciliations?.[changed_reconciliation_index++] ??
+					changed_reconciliation;
+
+				if (reconciliation === "staged") {
+					payload = {
+						expected: encoder.encode("after"),
+						replacement: encoder.encode("before"),
+					};
+					payload_record_exists = true;
+
+					return Effect.succeed({
+						_tag: "staged" as const,
+						operation: { lifecycle: rollback_lifecycle },
+					});
+				}
+
+				rollback_lifecycle = reconciliation;
+
+				return Effect.succeed(
+					reconciliation === "committed"
+						? {
+								_tag: "committed" as const,
+								event: { event_id: "event_1" },
+								operation: { lifecycle: "committed" },
+							}
+						: {
+								_tag: reconciliation,
+								operation: { lifecycle: reconciliation },
+							},
+				);
+			},
 			RejectChanged: () => {
 				calls.push("reject_changed");
 				rollback_lifecycle = "rejected";
@@ -448,7 +488,56 @@ describe("WorkspaceFileService review and rollback", () => {
 			expect(harness.state.file_read_calls()).toBe(1);
 			expect(harness.state.snapshot_read_calls()).toBe(1);
 			expect(harness.state.stage_calls()).toBe(0);
-			expect(harness.state.calls).toEqual(["reject_changed", "payload_consume"]);
+			expect(harness.state.calls).toEqual(["reconcile_changed", "payload_consume"]);
+		} finally {
+			await harness.runtime.dispose();
+		}
+	});
+
+	it("continues rollback when a concurrent caller staged the published preflight", async () => {
+		const harness = make_harness({
+			changed_reconciliation: "staged",
+			current: "before",
+		});
+
+		try {
+			await expect(run_rollback(harness)).resolves.toMatchObject({ status: "accepted" });
+			expect(harness.state.snapshot_available()).toBe(false);
+			expect(harness.state.stage_calls()).toBe(0);
+			expect(harness.state.calls).toEqual([
+				"reconcile_changed",
+				"replace",
+				"mark_applied",
+				"finalize",
+				"rollback_commit",
+				"snapshot_consume",
+				"evidence",
+				"mark_evidence",
+				"payload_consume",
+			]);
+		} finally {
+			await harness.runtime.dispose();
+		}
+	});
+
+	it("finishes duplicate rollback cleanup when payload consumption wins after preflight", async () => {
+		const harness = make_harness({
+			changed_reconciliations: ["applied", "committed"],
+			current: "before",
+		});
+
+		try {
+			await expect(run_rollback(harness)).resolves.toMatchObject({ status: "duplicate" });
+			expect(harness.state.snapshot_available()).toBe(false);
+			expect(harness.state.replace_calls()).toBe(0);
+			expect(harness.state.calls).toEqual([
+				"reconcile_changed",
+				"reconcile_changed",
+				"snapshot_consume",
+				"evidence",
+				"mark_evidence",
+				"payload_consume",
+			]);
 		} finally {
 			await harness.runtime.dispose();
 		}
@@ -468,6 +557,60 @@ describe("WorkspaceFileService review and rollback", () => {
 			expect(harness.state.snapshot_read_calls()).toBe(1);
 			expect(harness.state.stage_calls()).toBe(1);
 			expect(harness.state.payload_exists()).toBe(true);
+			expect(harness.state.calls).toEqual([
+				"payload_stage",
+				"replace",
+				"reconcile_changed",
+				"payload_consume",
+			]);
+		} finally {
+			await harness.runtime.dispose();
+		}
+	});
+
+	it("finishes applied rollback recovery after native changed", async () => {
+		const harness = make_harness({
+			changed_reconciliation: "applied",
+			replace_result: "Changed",
+		});
+
+		try {
+			await expect(run_rollback(harness)).resolves.toMatchObject({ status: "accepted" });
+			expect(harness.state.snapshot_available()).toBe(false);
+			expect(harness.state.calls).toEqual([
+				"payload_stage",
+				"replace",
+				"reconcile_changed",
+				"finalize",
+				"rollback_commit",
+				"snapshot_consume",
+				"evidence",
+				"mark_evidence",
+				"payload_consume",
+			]);
+		} finally {
+			await harness.runtime.dispose();
+		}
+	});
+
+	it("finishes committed rollback cleanup after native changed", async () => {
+		const harness = make_harness({
+			changed_reconciliation: "committed",
+			replace_result: "Changed",
+		});
+
+		try {
+			await expect(run_rollback(harness)).resolves.toMatchObject({ status: "duplicate" });
+			expect(harness.state.snapshot_available()).toBe(false);
+			expect(harness.state.calls).toEqual([
+				"payload_stage",
+				"replace",
+				"reconcile_changed",
+				"snapshot_consume",
+				"evidence",
+				"mark_evidence",
+				"payload_consume",
+			]);
 		} finally {
 			await harness.runtime.dispose();
 		}

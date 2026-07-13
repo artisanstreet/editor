@@ -57,6 +57,7 @@ function replacement_input(content = "after"): WorkspaceFileReplaceInput {
 function make_runtime(
 	options: {
 		readonly bytes?: Uint8Array;
+		readonly changed_reconciliations?: ReadonlyArray<"applied" | "committed" | "rejected">;
 		readonly finalize_failures?: number;
 		readonly replace_result?: "AlreadyReplaced" | "Changed" | "Replaced";
 		readonly unavailable_payload_record?: boolean;
@@ -68,6 +69,7 @@ function make_runtime(
 	let payload_record_exists = options.unavailable_payload_record ?? false;
 	let snapshot: Uint8Array | undefined;
 	let finalize_failures = options.finalize_failures ?? 0;
+	let reconciliation_calls = 0;
 	let replace_calls = 0;
 	const claims: Array<unknown> = [];
 	const evidence: Array<unknown> = [];
@@ -222,6 +224,46 @@ function make_runtime(
 			MarkEvidenceRecorded: () => Effect.succeed({ lifecycle }),
 			ReadChange: () => Effect.die("unused"),
 			ReadOperation: () => Effect.die("unused"),
+			ReconcileChanged: () => {
+				reconciliation_calls += 1;
+				const reconciliation = options.changed_reconciliations?.[reconciliation_calls - 1];
+
+				if (reconciliation) {
+					lifecycle = reconciliation;
+
+					return Effect.succeed(
+						reconciliation === "committed"
+							? {
+									_tag: "committed" as const,
+									event: { event_id: "event_1" },
+									operation: { lifecycle },
+								}
+							: { _tag: reconciliation, operation: { lifecycle } },
+					);
+				}
+
+				if (lifecycle === "committed") {
+					return Effect.succeed({
+						_tag: "committed" as const,
+						event: { event_id: "event_1" },
+						operation: { lifecycle },
+					});
+				}
+
+				if (lifecycle === "applied") {
+					return Effect.succeed({
+						_tag: "applied" as const,
+						operation: { lifecycle },
+					});
+				}
+
+				lifecycle = "rejected";
+
+				return Effect.succeed({
+					_tag: "rejected" as const,
+					operation: { lifecycle },
+				});
+			},
 			RejectChanged: () => {
 				lifecycle = "rejected";
 
@@ -250,6 +292,7 @@ function make_runtime(
 			claims,
 			events,
 			lifecycle: () => lifecycle,
+			reconciliation_calls: () => reconciliation_calls,
 			replace_calls: () => replace_calls,
 			reader,
 			snapshot: () => snapshot && new TextDecoder().decode(snapshot),
@@ -341,6 +384,28 @@ describe("WorkspaceFileService", () => {
 			expect(harness.state.snapshot()).toBeUndefined();
 			expect(harness.state.events).toHaveLength(0);
 			expect(harness.state.evidence).toHaveLength(0);
+		} finally {
+			await harness.runtime.dispose();
+		}
+	});
+
+	it("finishes duplicate replacement cleanup when payload consumption wins after preflight", async () => {
+		const harness = make_runtime({
+			bytes: encoder.encode("after"),
+			changed_reconciliations: ["applied", "committed"],
+		});
+
+		try {
+			await expect(
+				harness.runtime.runPromise(
+					Effect.flatMap(WorkspaceFileService, (service) =>
+						service.Replace(replacement_input()),
+					),
+				),
+			).resolves.toMatchObject({ status: "duplicate" });
+			expect(harness.state.reconciliation_calls()).toBe(2);
+			expect(harness.state.replace_calls()).toBe(0);
+			expect(harness.state.evidence).toHaveLength(1);
 		} finally {
 			await harness.runtime.dispose();
 		}

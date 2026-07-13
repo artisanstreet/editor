@@ -200,7 +200,9 @@ export {
 	type WorkspaceChangeCommit,
 	type WorkspaceChangeEvent,
 	type WorkspaceChangeOperation,
+	type WorkspaceChangeReconciliation,
 	type WorkspaceChangeRepositoryError,
+	type ReconcileWorkspaceChange,
 } from "./workspace/workspace-change-repository";
 export {
 	WorkspaceSnapshotStore,

@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { NodeFileSystem } from "@effect/platform-node-shared";
-import { Effect, Layer, Redacted } from "effect";
+import { Deferred, Effect, Exit, Layer, Redacted, Semaphore } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { ContentIdentity } from "@artisan/protocol";
@@ -20,12 +20,19 @@ import {
 	WorkspaceSnapshotStore,
 } from "@artisan/backend";
 
-import { make_workspace_bounded_regular_file_store_registry_layer } from "../../modules/backend/src/filesystem/workspace-bounded-regular-file-store-registry";
+import {
+	make_workspace_bounded_regular_file_store_registry_layer,
+	WorkspaceBoundedRegularFileStoreRegistry,
+} from "../../modules/backend/src/filesystem/workspace-bounded-regular-file-store-registry";
 import { JournalStore } from "../../modules/backend/src/persistence/journal-store";
 import {
 	OrchestrationCoordinators,
 	OrchestrationRuns,
+	ThreadErasureClaims,
+	WorkspaceChangeOperations,
 	WorkspaceChangeSnapshots,
+	WorkspaceChanges,
+	WorkspaceMutationAuthorities,
 	WorkspaceMutationPayloads,
 } from "../../modules/backend/src/persistence/schema";
 import { Database } from "../../modules/backend/src/persistence/database";
@@ -39,15 +46,39 @@ const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
 type NativeController = {
+	readonly arm_preflight_race: (gate: PreflightRaceGate) => void;
 	readonly change_next_replacement: () => void;
+	readonly changed_results: { value: number };
 	readonly close_attempts: { value: number };
 	readonly finalization_attempts: { value: number };
 	readonly load_attempts: { value: number };
 	readonly replace_attempts: { value: number };
+	readonly write_attempts: { value: number };
 	readonly fail_next_finalization: () => void;
 	readonly load_native_module: NonNullable<
 		NativeBoundedRegularFileStoreOptions["load_native_module"]
 	>;
+};
+
+type NativeReplacementGate = {
+	readonly continue_first: Deferred.Deferred<void>;
+	readonly continue_second: Deferred.Deferred<void>;
+	readonly first_started: Deferred.Deferred<void>;
+	readonly second_started: Deferred.Deferred<void>;
+};
+
+type PreflightRaceGate = {
+	readonly continue_first_read: Deferred.Deferred<void>;
+	readonly continue_publisher: Deferred.Deferred<void>;
+	readonly continue_second_read: Deferred.Deferred<void>;
+	readonly first_read_started: Deferred.Deferred<void>;
+	readonly published: Deferred.Deferred<void>;
+	readonly second_read_started: Deferred.Deferred<void>;
+};
+
+type AuthorityProofGate = {
+	readonly continue_proof: Deferred.Deferred<void>;
+	readonly proof_started: Deferred.Deferred<void>;
 };
 
 type NativeReplacementOptions = {
@@ -158,12 +189,17 @@ function replacement_options_match(
 	);
 }
 
-function make_native_controller(): NativeController {
+function make_native_controller(replacement_gate?: NativeReplacementGate): NativeController {
+	const changed_results = { value: 0 };
 	const close_attempts = { value: 0 };
 	const finalization_attempts = { value: 0 };
 	const load_attempts = { value: 0 };
 	const replace_attempts = { value: 0 };
+	const write_attempts = { value: 0 };
 	const receipts = new Map<string, NativeReplacementOptions>();
+	const replacement_lock = Semaphore.makeUnsafe(1);
+	let preflight_race_gate: PreflightRaceGate | undefined;
+	let preflight_read_attempts = 0;
 	let remaining_changed_results = 0;
 	let remaining_finalization_failures = 0;
 
@@ -192,7 +228,17 @@ function make_native_controller(): NativeController {
 
 			const receipt = receipts.get(options.operationId);
 
-			if (receipt === undefined || !replacement_options_match(receipt, options)) {
+			if (receipt === undefined) {
+				const target = new Uint8Array(await readFile(join(this.root, options.path)));
+
+				if (!bytes_match(target, options.replacement)) {
+					throw new Error("replacement receipt is missing before publication");
+				}
+
+				return;
+			}
+
+			if (!replacement_options_match(receipt, options)) {
 				throw new Error("replacement receipt intent changed");
 			}
 
@@ -200,6 +246,29 @@ function make_native_controller(): NativeController {
 		}
 
 		async readRegularFile(path: string, maximum_bytes: number) {
+			if (preflight_race_gate) {
+				preflight_read_attempts += 1;
+				const attempt = preflight_read_attempts;
+
+				if (attempt === 1) {
+					await Effect.runPromise(
+						Deferred.succeed(preflight_race_gate.first_read_started, undefined),
+					);
+					await Effect.runPromise(
+						Deferred.await(preflight_race_gate.continue_first_read),
+					);
+				}
+
+				if (attempt === 2) {
+					await Effect.runPromise(
+						Deferred.succeed(preflight_race_gate.second_read_started, undefined),
+					);
+					await Effect.runPromise(
+						Deferred.await(preflight_race_gate.continue_second_read),
+					);
+				}
+			}
+
 			const bytes = new Uint8Array(await readFile(join(this.root, path)));
 
 			if (bytes.byteLength > maximum_bytes) throw new Error("file exceeds maximum");
@@ -209,49 +278,90 @@ function make_native_controller(): NativeController {
 
 		async replaceRegularFile(options: NativeReplacementOptions) {
 			replace_attempts.value += 1;
-			const receipt = receipts.get(options.operationId);
+			const attempt = replace_attempts.value;
 
-			if (receipt !== undefined) {
-				if (!replacement_options_match(receipt, options)) {
-					throw new Error("replacement operation intent changed");
-				}
-
-				return "AlreadyReplaced";
+			if (replacement_gate && attempt === 1) {
+				await Effect.runPromise(
+					Deferred.succeed(replacement_gate.first_started, undefined),
+				);
+				await Effect.runPromise(Deferred.await(replacement_gate.continue_first));
 			}
 
-			if (remaining_changed_results > 0) {
-				remaining_changed_results -= 1;
-
-				return "Changed";
+			if (replacement_gate && attempt === 2) {
+				await Effect.runPromise(
+					Deferred.succeed(replacement_gate.second_started, undefined),
+				);
+				await Effect.runPromise(Deferred.await(replacement_gate.continue_second));
 			}
 
-			const target = join(this.root, options.path);
-			const current = new Uint8Array(await readFile(target));
-			const matches =
-				current.byteLength === options.expected.byteLength &&
-				current.every((value, index) => value === options.expected[index]);
+			const result = await Effect.runPromise(
+				replacement_lock.withPermit(
+					Effect.promise(async () => {
+						const receipt = receipts.get(options.operationId);
 
-			if (!matches || options.replacement.byteLength > options.maximumBytes) return "Changed";
+						if (receipt !== undefined) {
+							if (!replacement_options_match(receipt, options)) {
+								throw new Error("replacement operation intent changed");
+							}
 
-			await writeFile(target, options.replacement);
-			receipts.set(options.operationId, {
-				...options,
-				expected: new Uint8Array(options.expected),
-				replacement: new Uint8Array(options.replacement),
-			});
+							return "AlreadyReplaced" as const;
+						}
 
-			return "Replaced";
+						if (remaining_changed_results > 0) {
+							remaining_changed_results -= 1;
+
+							return "Changed" as const;
+						}
+
+						const target = join(this.root, options.path);
+						const current = new Uint8Array(await readFile(target));
+						const matches =
+							current.byteLength === options.expected.byteLength &&
+							current.every((value, index) => value === options.expected[index]);
+
+						if (!matches || options.replacement.byteLength > options.maximumBytes) {
+							return "Changed" as const;
+						}
+
+						write_attempts.value += 1;
+						await writeFile(target, options.replacement);
+						receipts.set(options.operationId, {
+							...options,
+							expected: new Uint8Array(options.expected),
+							replacement: new Uint8Array(options.replacement),
+						});
+
+						return "Replaced" as const;
+					}),
+				),
+			);
+			if (result === "Changed") {
+				changed_results.value += 1;
+			}
+
+			if (result === "Replaced" && preflight_race_gate) {
+				await Effect.runPromise(Deferred.succeed(preflight_race_gate.published, undefined));
+				await Effect.runPromise(Deferred.await(preflight_race_gate.continue_publisher));
+			}
+
+			return result;
 		}
 	}
 
 	return {
+		arm_preflight_race: (gate) => {
+			preflight_race_gate = gate;
+			preflight_read_attempts = 0;
+		},
 		change_next_replacement: () => {
 			remaining_changed_results += 1;
 		},
+		changed_results,
 		close_attempts,
 		finalization_attempts,
 		load_attempts,
 		replace_attempts,
+		write_attempts,
 		fail_next_finalization: () => {
 			remaining_finalization_failures += 1;
 		},
@@ -304,23 +414,59 @@ function make_runtime(
 	root: string,
 	controller?: NativeController,
 	instance_id = "workspace_file_service_composition",
+	authority_proof_gate?: AuthorityProofGate,
 ) {
+	const registry =
+		controller === undefined
+			? undefined
+			: make_workspace_bounded_regular_file_store_registry_layer(
+					[{ root, workspace_id: "workspace_file" }],
+					{
+						load_native_module: controller.load_native_module,
+						receipt_authentication_key,
+					},
+				).pipe(Layer.provide(NodeFileSystem.layer));
+	const workspace_bounded_regular_file_store_registry =
+		registry === undefined || authority_proof_gate === undefined
+			? registry
+			: Layer.effect(
+					WorkspaceBoundedRegularFileStoreRegistry,
+					Effect.gen(function* () {
+						const live = yield* WorkspaceBoundedRegularFileStoreRegistry;
+						let paused = false;
+
+						return {
+							...live,
+							Authorize: (input: Parameters<typeof live.Authorize>[0]) => {
+								if (paused) {
+									return live.Authorize(input);
+								}
+
+								paused = true;
+
+								return Deferred.succeed(
+									authority_proof_gate.proof_started,
+									undefined,
+								).pipe(
+									Effect.andThen(
+										Deferred.await(authority_proof_gate.continue_proof),
+									),
+									Effect.andThen(live.Authorize(input)),
+								);
+							},
+						};
+					}),
+				).pipe(Layer.provide(registry));
+
 	return make_backend_runtime({
 		database_path,
 		migrations_path,
 		retention_scheduler: make_inert_scheduler_layer(),
 		runtime_metadata: make_metadata_layer(instance_id),
-		...(controller === undefined
+		...(workspace_bounded_regular_file_store_registry === undefined
 			? {}
 			: {
-					workspace_bounded_regular_file_store_registry:
-						make_workspace_bounded_regular_file_store_registry_layer(
-							[{ root, workspace_id: "workspace_file" }],
-							{
-								load_native_module: controller.load_native_module,
-								receipt_authentication_key,
-							},
-						).pipe(Layer.provide(NodeFileSystem.layer)),
+					workspace_bounded_regular_file_store_registry,
 				}),
 	});
 }
@@ -387,12 +533,42 @@ function RemoveSnapshotConsumeFailure() {
 	});
 }
 
+function InstallEvidenceFailure() {
+	return Effect.gen(function* () {
+		const database = yield* Database;
+
+		yield* database.client.run(`
+			CREATE TRIGGER fail_workspace_evidence
+			BEFORE INSERT ON journal_events
+			WHEN NEW.correlation_id = 'workspace_evidence:replace_message:correlation'
+			BEGIN
+				SELECT RAISE(ABORT, 'deterministic evidence failure');
+			END
+		`);
+	});
+}
+
+function RemoveEvidenceFailure() {
+	return Effect.gen(function* () {
+		const database = yield* Database;
+
+		yield* database.client.run("DROP TRIGGER IF EXISTS fail_workspace_evidence");
+	});
+}
+
 function Replace(input = replacement_input()) {
 	return Effect.gen(function* () {
 		const service = yield* WorkspaceFileService;
 
 		return yield* service.Replace(input);
 	});
+}
+
+function ReplaceAfterBarrier(ready: Deferred.Deferred<void>, start: Deferred.Deferred<void>) {
+	return Deferred.succeed(ready, undefined).pipe(
+		Effect.andThen(Deferred.await(start)),
+		Effect.andThen(Replace()),
+	);
 }
 
 function Review() {
@@ -425,6 +601,7 @@ function InspectCommittedReplacement(content: string) {
 
 	return Effect.gen(function* () {
 		const changes = yield* WorkspaceChangeRepository;
+		const database = yield* Database;
 		const journal = yield* JournalStore;
 		const payloads = yield* WorkspaceMutationPayloadStore;
 		const snapshots = yield* WorkspaceSnapshotStore;
@@ -437,12 +614,42 @@ function InspectCommittedReplacement(content: string) {
 			operation: yield* changes.ReadOperation(input.message_id),
 			payload_available: yield* payloads.Resume(payload).pipe(Effect.exit),
 			payload_record_exists: yield* payloads.HasRecord(payload),
+			payload_rows: yield* database.client.select().from(WorkspaceMutationPayloads),
 			snapshot: yield* snapshots.Read({
 				change_id: input.change_id,
 				expected_identity: input.expected_before,
 				thread_id: input.thread_id,
 			}),
 		};
+	});
+}
+
+function InspectReplacementRows() {
+	return Effect.gen(function* () {
+		const database = yield* Database;
+		const journal = yield* JournalStore;
+
+		return {
+			authorities: yield* database.client.select().from(WorkspaceMutationAuthorities),
+			changes: yield* database.client.select().from(WorkspaceChanges),
+			evidence: yield* journal.ReadCorrelatedEvents(
+				"workspace_evidence:replace_message:correlation",
+			),
+			operations: yield* database.client.select().from(WorkspaceChangeOperations),
+			payloads: yield* database.client.select().from(WorkspaceMutationPayloads),
+			snapshots: yield* database.client.select().from(WorkspaceChangeSnapshots),
+		};
+	});
+}
+
+function ClaimThreadErasure() {
+	return Effect.gen(function* () {
+		const database = yield* Database;
+
+		yield* database.client.insert(ThreadErasureClaims).values({
+			claimed_at: now,
+			thread_id: "thread_workspace_file",
+		});
 	});
 }
 
@@ -534,6 +741,308 @@ describe("WorkspaceFileService production composition", () => {
 		}
 
 		expect(controller.close_attempts.value).toBe(1);
+	});
+
+	it("converges concurrent exact replacements across runtimes without publishing twice", async () => {
+		const { database_path, root } = await make_workspace();
+		const replacement_gate: NativeReplacementGate = {
+			continue_first: await Effect.runPromise(Deferred.make<void>()),
+			continue_second: await Effect.runPromise(Deferred.make<void>()),
+			first_started: await Effect.runPromise(Deferred.make<void>()),
+			second_started: await Effect.runPromise(Deferred.make<void>()),
+		};
+		const controller = make_native_controller(replacement_gate);
+		const first_runtime = make_runtime(
+			database_path,
+			root,
+			controller,
+			"workspace_file_concurrent_first",
+		);
+		const second_runtime = make_runtime(
+			database_path,
+			root,
+			controller,
+			"workspace_file_concurrent_second",
+		);
+		try {
+			await first_runtime.runPromise(Read());
+			await second_runtime.runPromise(Read());
+			await first_runtime.runPromise(SeedBaseRun(root));
+
+			const first_pending = first_runtime.runPromise(Effect.exit(Replace()));
+
+			await Effect.runPromise(Deferred.await(replacement_gate.first_started));
+
+			const second_pending = second_runtime.runPromise(Effect.exit(Replace()));
+
+			await Effect.runPromise(Deferred.await(replacement_gate.second_started));
+			await Effect.runPromise(Deferred.succeed(replacement_gate.continue_first, undefined));
+
+			const first_result = await first_pending;
+
+			await Effect.runPromise(Deferred.succeed(replacement_gate.continue_second, undefined));
+
+			const results = [first_result, await second_pending];
+			const persisted = await first_runtime.runPromise(InspectCommittedReplacement("after"));
+			const successes = results.filter(Exit.isSuccess);
+
+			expect(successes).toHaveLength(2);
+			expect(successes.map((result) => result.value.status).toSorted()).toEqual([
+				"accepted",
+				"duplicate",
+			]);
+			expect(successes[0]!.value.event).toEqual(successes[1]!.value.event);
+			expect(successes[0]!.value.event.payload).toMatchObject({
+				type: "workspace.change.updated",
+			});
+			expect(persisted.change_list.changes).toHaveLength(1);
+			expect(persisted.evidence).toMatchObject([
+				{ payload: { type: "filesystem.mutation" } },
+			]);
+			expect(decoder.decode(persisted.snapshot)).toBe("before");
+			expect(persisted.payload_record_exists).toBe(true);
+			expect(persisted.payload_available).toMatchObject({ _tag: "Failure" });
+			expect(persisted.payload_rows).toContainEqual(
+				expect.objectContaining({
+					expected: null,
+					replacement: null,
+					state: "consumed",
+				}),
+			);
+			expect(decoder.decode(await readFile(join(root, "src", "example.ts")))).toBe("after");
+			expect(controller.changed_results.value).toBe(1);
+			expect(controller.replace_attempts.value).toBe(2);
+			expect(controller.write_attempts.value).toBe(1);
+			expect(controller.load_attempts.value).toBe(2);
+		} finally {
+			await Effect.runPromise(Deferred.succeed(replacement_gate.continue_first, undefined));
+			await Effect.runPromise(Deferred.succeed(replacement_gate.continue_second, undefined));
+			await Promise.all([first_runtime.dispose(), second_runtime.dispose()]);
+		}
+
+		expect(controller.close_attempts.value).toBe(2);
+	});
+
+	it("preserves an exact replacement published during a retry preflight", async () => {
+		const { database_path, root } = await make_workspace();
+		const preflight_gate: PreflightRaceGate = {
+			continue_first_read: await Effect.runPromise(Deferred.make<void>()),
+			continue_publisher: await Effect.runPromise(Deferred.make<void>()),
+			continue_second_read: await Effect.runPromise(Deferred.make<void>()),
+			first_read_started: await Effect.runPromise(Deferred.make<void>()),
+			published: await Effect.runPromise(Deferred.make<void>()),
+			second_read_started: await Effect.runPromise(Deferred.make<void>()),
+		};
+		const controller = make_native_controller();
+		const first_runtime = make_runtime(
+			database_path,
+			root,
+			controller,
+			"workspace_file_preflight_first",
+		);
+		const second_runtime = make_runtime(
+			database_path,
+			root,
+			controller,
+			"workspace_file_preflight_second",
+		);
+
+		try {
+			await first_runtime.runPromise(Read());
+			await second_runtime.runPromise(Read());
+			await first_runtime.runPromise(SeedBaseRun(root));
+			controller.arm_preflight_race(preflight_gate);
+
+			const first_pending = first_runtime.runPromise(Effect.exit(Replace()));
+
+			await Effect.runPromise(Deferred.await(preflight_gate.first_read_started));
+
+			const second_pending = second_runtime.runPromise(Effect.exit(Replace()));
+
+			await Effect.runPromise(Deferred.await(preflight_gate.second_read_started));
+			await Effect.runPromise(
+				Deferred.succeed(preflight_gate.continue_first_read, undefined),
+			);
+			await Effect.runPromise(Deferred.await(preflight_gate.published));
+			await Effect.runPromise(
+				Deferred.succeed(preflight_gate.continue_second_read, undefined),
+			);
+
+			const second_result = await second_pending;
+
+			await Effect.runPromise(Deferred.succeed(preflight_gate.continue_publisher, undefined));
+
+			const results = [await first_pending, second_result];
+			const successes = results.filter(Exit.isSuccess);
+			const persisted = await first_runtime.runPromise(InspectCommittedReplacement("after"));
+
+			expect(successes).toHaveLength(2);
+			expect(successes.map((result) => result.value.status).toSorted()).toEqual([
+				"accepted",
+				"duplicate",
+			]);
+			expect(successes[0]!.value.event).toEqual(successes[1]!.value.event);
+			expect(persisted.change_list.changes).toHaveLength(1);
+			expect(persisted.evidence).toHaveLength(1);
+			expect(decoder.decode(persisted.snapshot)).toBe("before");
+			expect(persisted.payload_rows).toContainEqual(
+				expect.objectContaining({
+					expected: null,
+					replacement: null,
+					state: "consumed",
+				}),
+			);
+			expect(decoder.decode(await readFile(join(root, "src", "example.ts")))).toBe("after");
+			expect(controller.changed_results.value).toBe(0);
+			expect(controller.finalization_attempts.value).toBe(2);
+			expect(controller.replace_attempts.value).toBe(2);
+			expect(controller.write_attempts.value).toBe(1);
+		} finally {
+			await Effect.runPromise(
+				Deferred.succeed(preflight_gate.continue_first_read, undefined),
+			);
+			await Effect.runPromise(
+				Deferred.succeed(preflight_gate.continue_second_read, undefined),
+			);
+			await Effect.runPromise(Deferred.succeed(preflight_gate.continue_publisher, undefined));
+			await Promise.all([first_runtime.dispose(), second_runtime.dispose()]);
+		}
+
+		expect(controller.close_attempts.value).toBe(2);
+	});
+
+	it("converges synchronized committed cleanup across runtime instances", async () => {
+		const { database_path, root } = await make_workspace();
+		const controller = make_native_controller();
+		const first_runtime = make_runtime(
+			database_path,
+			root,
+			controller,
+			"workspace_file_cleanup_first",
+		);
+		const second_runtime = make_runtime(
+			database_path,
+			root,
+			controller,
+			"workspace_file_cleanup_second",
+		);
+		const first_ready = await Effect.runPromise(Deferred.make<void>());
+		const second_ready = await Effect.runPromise(Deferred.make<void>());
+		const start = await Effect.runPromise(Deferred.make<void>());
+
+		try {
+			await first_runtime.runPromise(Read());
+			await second_runtime.runPromise(Read());
+			await first_runtime.runPromise(SeedBaseRun(root));
+			await first_runtime.runPromise(InstallEvidenceFailure());
+
+			const interrupted = await first_runtime.runPromise(Effect.exit(Replace()));
+
+			await first_runtime.runPromise(RemoveEvidenceFailure());
+
+			const first_pending = first_runtime.runPromise(
+				Effect.exit(ReplaceAfterBarrier(first_ready, start)),
+			);
+			const second_pending = second_runtime.runPromise(
+				Effect.exit(ReplaceAfterBarrier(second_ready, start)),
+			);
+
+			await Effect.runPromise(
+				Effect.all([Deferred.await(first_ready), Deferred.await(second_ready)], {
+					concurrency: "unbounded",
+				}),
+			);
+			await Effect.runPromise(Deferred.succeed(start, undefined));
+
+			const retries = await Promise.all([first_pending, second_pending]);
+			const successes = retries.filter(Exit.isSuccess);
+			const persisted = await first_runtime.runPromise(InspectCommittedReplacement("after"));
+
+			expect(Exit.isFailure(interrupted)).toBe(true);
+			expect(successes).toHaveLength(2);
+			expect(successes.map((result) => result.value.status)).toEqual([
+				"duplicate",
+				"duplicate",
+			]);
+			expect(successes[0]!.value.event).toEqual(successes[1]!.value.event);
+			expect(persisted.evidence).toHaveLength(1);
+			expect(persisted.payload_rows).toContainEqual(
+				expect.objectContaining({
+					expected: null,
+					replacement: null,
+					state: "consumed",
+				}),
+			);
+			expect(decoder.decode(await readFile(join(root, "src", "example.ts")))).toBe("after");
+			expect(controller.finalization_attempts.value).toBe(1);
+			expect(controller.replace_attempts.value).toBe(1);
+			expect(controller.write_attempts.value).toBe(1);
+		} finally {
+			await Effect.runPromise(Deferred.succeed(start, undefined));
+			await first_runtime.runPromise(RemoveEvidenceFailure()).catch(() => undefined);
+			await Promise.all([first_runtime.dispose(), second_runtime.dispose()]);
+		}
+
+		expect(controller.close_attempts.value).toBe(2);
+	});
+
+	it("fails closed when thread erasure wins during the authority root proof", async () => {
+		const { database_path, root } = await make_workspace();
+		const authority_proof_gate: AuthorityProofGate = {
+			continue_proof: await Effect.runPromise(Deferred.make<void>()),
+			proof_started: await Effect.runPromise(Deferred.make<void>()),
+		};
+		const controller = make_native_controller();
+		const replacing_runtime = make_runtime(
+			database_path,
+			root,
+			controller,
+			"workspace_file_erasure_replacing",
+			authority_proof_gate,
+		);
+		const erasing_runtime = make_runtime(
+			database_path,
+			root,
+			controller,
+			"workspace_file_erasure_claiming",
+		);
+
+		try {
+			await replacing_runtime.runPromise(SeedBaseRun(root));
+
+			const pending = replacing_runtime.runPromise(Effect.exit(Replace()));
+
+			await Effect.runPromise(Deferred.await(authority_proof_gate.proof_started));
+			await erasing_runtime.runPromise(ClaimThreadErasure());
+			await Effect.runPromise(
+				Deferred.succeed(authority_proof_gate.continue_proof, undefined),
+			);
+
+			const result = await pending;
+			const rows = await replacing_runtime.runPromise(InspectReplacementRows());
+
+			expect(JSON.stringify(result)).toContain('"operation":"replace"');
+			expect(JSON.stringify(result)).toContain('"reason":"failed"');
+			expect(rows).toEqual({
+				authorities: [],
+				changes: [],
+				evidence: [],
+				operations: [],
+				payloads: [],
+				snapshots: [],
+			});
+			expect(decoder.decode(await readFile(join(root, "src", "example.ts")))).toBe("before");
+			expect(controller.replace_attempts.value).toBe(0);
+			expect(controller.write_attempts.value).toBe(0);
+			expect(controller.finalization_attempts.value).toBe(0);
+		} finally {
+			await Effect.runPromise(
+				Deferred.succeed(authority_proof_gate.continue_proof, undefined),
+			);
+			await Promise.all([replacing_runtime.dispose(), erasing_runtime.dispose()]);
+		}
+
+		expect(controller.close_attempts.value).toBe(2);
 	});
 
 	it("settles an exact committed retry after restart without reopening the terminal run", async () => {

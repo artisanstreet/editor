@@ -21,6 +21,7 @@ import {
 	ThreadTombstones,
 	WorkspaceChangeOperations,
 	WorkspaceChanges,
+	WorkspaceMutationPayloads,
 } from "../../modules/backend/src/persistence/schema";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
 import {
@@ -764,6 +765,146 @@ describe("workspace change repository", () => {
 			]) {
 				expect(JSON.stringify(failure)).toContain("WorkspaceChangeTransitionError");
 			}
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("reconciles native changed observations against the durable lifecycle", async () => {
+		const runtime = make_runtime(await make_database_path());
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* WorkspaceChangeRepository;
+
+					yield* SeedThreads(database);
+					yield* repository.ClaimReplace(
+						replace_claim("message_staged", "change_staged"),
+					);
+					yield* database.client.insert(WorkspaceMutationPayloads).values({
+						created_at: "2026-07-11T19:00:00.000Z",
+						expected: Buffer.alloc(before_identity.byte_count),
+						expected_byte_count: before_identity.byte_count,
+						expected_hash: before_identity.content_hash,
+						message_id: "message_staged",
+						replacement: Buffer.alloc(after_identity.byte_count),
+						replacement_byte_count: after_identity.byte_count,
+						replacement_hash: after_identity.content_hash,
+						state: "available",
+						thread_id: "thread_1",
+						updated_at: "2026-07-11T19:00:00.000Z",
+					});
+					const staged = yield* repository.ReconcileChanged({
+						message_id: "message_staged",
+						observation: "preflight_changed",
+					});
+					const staged_native = yield* repository.ReconcileChanged({
+						message_id: "message_staged",
+						observation: "native_changed",
+					});
+
+					yield* repository.ClaimReplace(
+						replace_claim("message_rejected", "change_rejected"),
+					);
+					const rejected = yield* repository.ReconcileChanged({
+						message_id: "message_rejected",
+						observation: "native_changed",
+					});
+					const rejected_retry = yield* repository.ReconcileChanged({
+						message_id: "message_rejected",
+						observation: "native_changed",
+					});
+
+					yield* repository.ClaimReplace(
+						replace_claim("message_applied", "change_applied"),
+					);
+					yield* repository.MarkApplied({
+						_tag: "replace",
+						message_id: "message_applied",
+						result_identity: after_identity,
+					});
+					const applied = yield* repository.ReconcileChanged({
+						message_id: "message_applied",
+						observation: "native_changed",
+					});
+
+					yield* repository.ClaimReplace(
+						replace_claim("message_committed", "change_committed"),
+					);
+					yield* repository.MarkApplied({
+						_tag: "replace",
+						message_id: "message_committed",
+						result_identity: after_identity,
+					});
+					const committed_event = yield* repository.CommitRecorded("message_committed");
+					const committed = yield* repository.ReconcileChanged({
+						message_id: "message_committed",
+						observation: "native_changed",
+					});
+					yield* repository.ClaimReview({
+						_tag: "review",
+						change_id: "change_committed",
+						message_id: "message_review",
+						request_fingerprint: "d".repeat(64),
+						sent_at: "2026-07-11T19:00:00.000Z",
+						thread_id: "thread_1",
+					});
+
+					return {
+						applied,
+						committed,
+						committed_event,
+						missing: yield* repository
+							.ReconcileChanged({
+								message_id: "message_missing",
+								observation: "native_changed",
+							})
+							.pipe(Effect.exit),
+						rejected,
+						rejected_retry,
+						staged,
+						staged_native,
+						review: yield* repository
+							.ReconcileChanged({
+								message_id: "message_review",
+								observation: "native_changed",
+							})
+							.pipe(Effect.exit),
+					};
+				}),
+			);
+
+			expect(result.rejected).toEqual(result.rejected_retry);
+			expect(result.staged).toMatchObject({
+				_tag: "staged",
+				operation: { lifecycle: "claimed" },
+			});
+			expect(result.staged_native).toMatchObject({
+				_tag: "rejected",
+				operation: { lifecycle: "rejected" },
+			});
+			expect(result.rejected).toMatchObject({
+				_tag: "rejected",
+				operation: { lifecycle: "rejected" },
+			});
+			expect(result.applied).toMatchObject({
+				_tag: "applied",
+				operation: { lifecycle: "applied" },
+			});
+			expect(result.committed).toMatchObject({
+				_tag: "committed",
+				operation: { lifecycle: "committed" },
+			});
+			expect(result.committed._tag).toBe("committed");
+
+			if (result.committed._tag === "committed") {
+				expect(result.committed.event).toEqual(result.committed_event.event);
+			}
+
+			expect(JSON.stringify(result.missing)).toContain("WorkspaceChangeTransitionError");
+			expect(JSON.stringify(result.review)).toContain("WorkspaceChangeTransitionError");
 		} finally {
 			await runtime.dispose();
 		}
