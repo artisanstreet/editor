@@ -112,6 +112,7 @@ export type WorkspaceMutationAuthorityGrant =
 	| {
 			readonly _tag: "base_run";
 			readonly agent_id: string;
+			readonly approval: "on_request";
 			readonly run_id: string;
 			readonly thread_id: string;
 			readonly workspace_id: string;
@@ -295,6 +296,7 @@ function grant_from_stored(authority: StoredAuthority): WorkspaceMutationAuthori
 		return {
 			_tag: "base_run",
 			agent_id: authority.agent_id,
+			approval: "on_request",
 			run_id: authority.run_id,
 			thread_id: authority.thread_id,
 			workspace_id: authority.workspace_id,
@@ -610,6 +612,7 @@ export const WorkspaceMutationAuthorityLive = Layer.effect(
 					authority: {
 						_tag: "base_run",
 						agent_id: claim.agent_id,
+						approval: "on_request",
 						run_id: claim.run_id,
 						thread_id: claim.thread_id,
 						workspace_id: claim.workspace_id,

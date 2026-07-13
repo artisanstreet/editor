@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { NodeFileSystem } from "@effect/platform-node-shared";
-import { Effect, Fiber, Layer, Redacted, Stream } from "effect";
+import { Effect, Exit, Fiber, Layer, Redacted, Stream } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type {
@@ -22,21 +22,32 @@ import type {
 	WorkspaceChangeRollbackEnvelope,
 	WorkspaceFileReadQueryEnvelope,
 	WorkspaceFileReplaceEnvelope,
+	WorkspaceReplaceApprovalQueryEnvelope,
+	WorkspaceReplaceApprovalRespondEnvelope,
 } from "@artisan/protocol";
 import {
 	DecodeProtocolConnectionOptions,
 	make_backend_runtime,
 	make_workspace_bounded_regular_file_store_registry_layer,
 	ProtocolServer,
+	WorkspaceChangeRepository,
+	WorkspaceFileService,
+	WorkspaceReplaceApprovalCoordinator,
+	WorkspaceReplaceApprovalRepository,
 	type ProtocolConnection,
 } from "@artisan/backend";
 
 import { ProtocolRouter } from "../../modules/backend/src/protocol/protocol-router";
 import { Database } from "../../modules/backend/src/persistence/database";
 import {
+	JournalEvents,
 	OrchestrationCoordinators,
 	OrchestrationRuns,
+	WorkspaceChangeOperations,
+	WorkspaceChangeSnapshots,
 	WorkspaceChanges,
+	WorkspaceMutationPayloads,
+	WorkspaceReplaceApprovals,
 } from "../../modules/backend/src/persistence/schema";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
@@ -173,7 +184,6 @@ async function make_workspace_runtime() {
 	const directory = await mkdtemp(join(tmpdir(), "artisan-editor-workspace-protocol-"));
 	const root = join(directory, "workspace");
 	const database_path = join(directory, "artisan.db");
-	const load_native_module = make_workspace_native_module(root);
 
 	temporary_directories.push(directory);
 	await mkdir(join(root, "src"), { recursive: true });
@@ -182,19 +192,93 @@ async function make_workspace_runtime() {
 	return {
 		database_path,
 		root,
-		runtime: make_backend_runtime({
-			database_path,
-			migrations_path,
-			workspace_bounded_regular_file_store_registry:
-				make_workspace_bounded_regular_file_store_registry_layer(
-					[{ root, workspace_id: "workspace_protocol" }],
-					{
-						load_native_module,
-						receipt_authentication_key: workspace_receipt_key,
-					},
-				).pipe(Layer.provide(NodeFileSystem.layer)),
-		}),
+		runtime: make_workspace_backend_runtime(database_path, root),
 	};
+}
+
+function make_workspace_backend_runtime(database_path: string, root: string) {
+	return make_backend_runtime({
+		database_path,
+		migrations_path,
+		workspace_bounded_regular_file_store_registry:
+			make_workspace_bounded_regular_file_store_registry_layer(
+				[{ root, workspace_id: "workspace_protocol" }],
+				{
+					load_native_module: make_workspace_native_module(root),
+					receipt_authentication_key: workspace_receipt_key,
+				},
+			).pipe(Layer.provide(NodeFileSystem.layer)),
+	});
+}
+
+function requested_approval_id(envelopes: ReadonlyArray<OutboundControlEnvelope>) {
+	const event = envelopes.find(
+		(envelope) =>
+			envelope.kind === "event" &&
+			envelope.payload.type === "workspace.replace.approval.updated",
+	);
+
+	if (event?.kind !== "event" || event.payload.type !== "workspace.replace.approval.updated") {
+		throw new Error("Approval request event was not delivered");
+	}
+
+	return event.payload.approval.approval_id;
+}
+
+function command_receipt_sequence(envelopes: ReadonlyArray<OutboundControlEnvelope>) {
+	const receipt = envelopes.find((envelope) => envelope.kind === "command.receipt");
+
+	if (
+		receipt?.kind !== "command.receipt" ||
+		receipt.payload.status === "rejected" ||
+		receipt.payload.journal_sequence === undefined
+	) {
+		throw new Error("Durable command receipt was not delivered");
+	}
+
+	return receipt.payload.journal_sequence;
+}
+
+function WaitForApprovalState(
+	approval_id: string,
+	state: "applied" | "approved" | "denied" | "rejected",
+) {
+	return Effect.gen(function* () {
+		const approvals = yield* WorkspaceReplaceApprovalRepository;
+
+		for (let attempt = 0; attempt < 200; attempt += 1) {
+			const result = yield* approvals.Query({
+				approval_id,
+				thread_id: "thread_workspace_protocol",
+			});
+
+			if (result.approval.state === state) {
+				return result;
+			}
+
+			yield* Effect.sleep("10 millis");
+		}
+
+		return yield* Effect.die(`Approval ${approval_id} did not reach ${state}`);
+	});
+}
+
+function WaitForDeniedSettlement(approval_id: string) {
+	return Effect.gen(function* () {
+		const approvals = yield* WorkspaceReplaceApprovalRepository;
+
+		for (let attempt = 0; attempt < 200; attempt += 1) {
+			const unsettled = yield* approvals.ListDeniedUnsettled;
+
+			if (!unsettled.includes(approval_id)) {
+				return;
+			}
+
+			yield* Effect.sleep("10 millis");
+		}
+
+		return yield* Effect.die(`Denied approval ${approval_id} did not settle`);
+	});
 }
 
 function workspace_replace(
@@ -202,6 +286,7 @@ function workspace_replace(
 	change_id: string,
 	content: string,
 	expected_before: ContentIdentity = content_identity("before"),
+	approval_reason?: string,
 ): WorkspaceFileReplaceEnvelope {
 	return {
 		agent_id: "agent_workspace_protocol",
@@ -209,6 +294,9 @@ function workspace_replace(
 		message_id,
 		origin: "frontend",
 		payload: {
+			...(approval_reason === undefined
+				? {}
+				: { approval_request: { reason: approval_reason } }),
 			change_id,
 			content,
 			expected_before,
@@ -218,6 +306,38 @@ function workspace_replace(
 		protocol_version: 1,
 		raw_origin: { provider: "codex", reference: "native_workspace_protocol" },
 		run_id: "run_workspace_protocol",
+		schema_version: 1,
+		sent_at: workspace_time,
+		thread_id: "thread_workspace_protocol",
+	};
+}
+
+function workspace_approval_query(
+	message_id: string,
+	approval_id: string,
+): WorkspaceReplaceApprovalQueryEnvelope {
+	return {
+		kind: "workspace.replace.approval.query",
+		message_id,
+		origin: "frontend",
+		payload: { approval_id, thread_id: "thread_workspace_protocol" },
+		protocol_version: 1,
+		schema_version: 1,
+		sent_at: workspace_time,
+	};
+}
+
+function workspace_approval_response(
+	message_id: string,
+	approval_id: string,
+	approved: boolean,
+): WorkspaceReplaceApprovalRespondEnvelope {
+	return {
+		kind: "workspace.replace.approval.respond",
+		message_id,
+		origin: "frontend",
+		payload: { approval_id, approved },
+		protocol_version: 1,
 		schema_version: 1,
 		sent_at: workspace_time,
 		thread_id: "thread_workspace_protocol",
@@ -463,6 +583,59 @@ afterEach(async () => {
 });
 
 describe("protocol server", () => {
+	it("arbitrates concurrent same-id replacements with different approval intent", async () => {
+		const { root, runtime } = await make_workspace_runtime();
+
+		try {
+			await runtime.runPromise(seed_workspace_run(root));
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const workspace_files = yield* WorkspaceFileService;
+					const common = {
+						agent_id: "agent_workspace_protocol",
+						change_id: "change_workspace_mixed_intent",
+						content: "mixed intent content",
+						expected_before: content_identity("before"),
+						message_id: "workspace_replace_mixed_intent",
+						path: "src/example.ts",
+						run_id: "run_workspace_protocol",
+						sent_at: workspace_time,
+						thread_id: "thread_workspace_protocol",
+						workspace_id: "workspace_protocol",
+					};
+					const outcomes = yield* Effect.all(
+						[
+							workspace_files
+								.Replace({
+									...common,
+									approval_request: { reason: "Require explicit approval." },
+								})
+								.pipe(Effect.exit),
+							workspace_files.Replace(common).pipe(Effect.exit),
+						],
+						{ concurrency: "unbounded" },
+					);
+					const database = yield* Database;
+					const approvals = yield* database.client
+						.select()
+						.from(WorkspaceReplaceApprovals);
+					const content = yield* Effect.promise(() =>
+						readFile(join(root, "src", "example.ts"), "utf8"),
+					);
+
+					return { approvals, content, outcomes };
+				}),
+			);
+
+			expect(result.outcomes.filter(Exit.isSuccess)).toHaveLength(1);
+			expect(result.outcomes.filter(Exit.isFailure)).toHaveLength(1);
+			expect(result.approvals).toHaveLength(result.content === "before" ? 1 : 0);
+			expect(result.content).toMatch(/^(before|mixed intent content)$/);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("routes controlled workspace queries and mutations through correlated receipts", async () => {
 		const { root, runtime } = await make_workspace_runtime();
 
@@ -764,6 +937,624 @@ describe("protocol server", () => {
 			]);
 		} finally {
 			await runtime.dispose();
+		}
+	});
+
+	it("durably queries, approves, and executes a controlled workspace replacement", async () => {
+		const { root, runtime } = await make_workspace_runtime();
+
+		try {
+			await runtime.runPromise(seed_workspace_run(root));
+			const output = await runtime.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const connection = yield* open_connection;
+
+						yield* negotiate(connection);
+						yield* connection.Receive(
+							workspace_replace(
+								"workspace_replace_approval",
+								"change_workspace_approval",
+								"approved content",
+								content_identity("before"),
+								"Apply the prepared file replacement.",
+							),
+						);
+						const requested = yield* take_outbound(connection, 2);
+						const approval_id = requested_approval_id(requested);
+						const request_sequence = command_receipt_sequence(requested);
+
+						yield* connection.Receive(
+							workspace_approval_query("workspace_approval_query", approval_id),
+						);
+						const query = yield* take_outbound(connection, 1);
+						yield* connection.Receive(
+							workspace_replace(
+								"workspace_replace_approval",
+								"change_workspace_approval",
+								"approved content",
+							),
+						);
+						const omitted_request = yield* take_outbound(connection, 1);
+						yield* connection.Receive(
+							workspace_replace(
+								"workspace_replace_approval",
+								"change_workspace_approval",
+								"approved content",
+								content_identity("before"),
+								"A conflicting approval reason.",
+							),
+						);
+						const changed_request = yield* take_outbound(connection, 1);
+
+						yield* connection.Receive(
+							workspace_approval_response(
+								"workspace_approval_response",
+								approval_id,
+								true,
+							),
+						);
+						const approved = yield* take_until_outbound(
+							connection,
+							(envelope) =>
+								envelope.kind === "event" &&
+								envelope.payload.type === "workspace.replace.approval.updated" &&
+								envelope.payload.approval.state === "applied",
+						);
+
+						yield* connection.Receive(
+							workspace_approval_query("workspace_approval_applied", approval_id),
+						);
+						const applied = yield* take_outbound(connection, 1);
+						yield* connection.Receive(
+							workspace_replace(
+								"workspace_replace_approval",
+								"change_workspace_approval",
+								"approved content",
+								content_identity("before"),
+								"Apply the prepared file replacement.",
+							),
+						);
+						const replace_replay = yield* take_outbound(connection, 1);
+
+						yield* connection.Receive(
+							workspace_approval_response(
+								"workspace_approval_response",
+								approval_id,
+								true,
+							),
+						);
+						const duplicate = yield* take_outbound(connection, 1);
+						const content = yield* Effect.promise(() =>
+							readFile(join(root, "src", "example.ts"), "utf8"),
+						);
+
+						return {
+							applied,
+							approved,
+							changed_request,
+							content,
+							duplicate,
+							omitted_request,
+							query,
+							replace_replay,
+							request_sequence,
+							requested,
+						};
+					}),
+				),
+			);
+
+			expect(output.requested).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						kind: "command.receipt",
+						payload: expect.objectContaining({ status: "accepted" }),
+					}),
+					expect.objectContaining({
+						kind: "event",
+						payload: expect.objectContaining({
+							approval: expect.objectContaining({
+								reason: "Apply the prepared file replacement.",
+								state: "requested",
+							}),
+							type: "workspace.replace.approval.updated",
+						}),
+					}),
+				]),
+			);
+			expect(output.query).toMatchObject([
+				{
+					correlation_id: "workspace_approval_query",
+					kind: "workspace.replace.approval.query.result",
+					payload: {
+						approval: { state: "requested" },
+						diff: {
+							change_id: "change_workspace_approval",
+							patch: expect.stringContaining("+approved content"),
+						},
+					},
+				},
+			]);
+			expect(output.omitted_request).toMatchObject([
+				{
+					kind: "command.receipt",
+					payload: {
+						error: { code: "workspace.approval_conflict", retryable: false },
+						status: "rejected",
+					},
+				},
+			]);
+			expect(output.changed_request).toMatchObject([
+				{
+					kind: "command.receipt",
+					payload: {
+						error: { code: "workspace.approval_conflict", retryable: false },
+						status: "rejected",
+					},
+				},
+			]);
+			expect(output.approved).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						correlation_id: "workspace_approval_response",
+						kind: "command.receipt",
+						payload: expect.objectContaining({ status: "accepted" }),
+					}),
+					expect.objectContaining({
+						kind: "event",
+						payload: expect.objectContaining({
+							approval: expect.objectContaining({ state: "applied" }),
+							type: "workspace.replace.approval.updated",
+						}),
+					}),
+				]),
+			);
+			expect(output.applied).toMatchObject([
+				{
+					correlation_id: "workspace_approval_applied",
+					kind: "workspace.replace.approval.query.result",
+					payload: { approval: { state: "applied" } },
+				},
+			]);
+			expect(output.replace_replay).toMatchObject([
+				{
+					kind: "command.receipt",
+					payload: {
+						journal_sequence: output.request_sequence,
+						status: "duplicate",
+					},
+				},
+			]);
+			expect(output.duplicate).toMatchObject([
+				{
+					correlation_id: "workspace_approval_response",
+					kind: "command.receipt",
+					payload: { status: "duplicate" },
+				},
+			]);
+			expect(output.content).toBe("approved content");
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("reports corrupt immutable approval replay as a non-retryable invariant", async () => {
+		const { root, runtime } = await make_workspace_runtime();
+
+		try {
+			await runtime.runPromise(seed_workspace_run(root));
+			const output = await runtime.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const connection = yield* open_connection;
+
+						yield* negotiate(connection);
+						yield* connection.Receive(
+							workspace_replace(
+								"workspace_corrupt_approval_replace",
+								"change_workspace_corrupt_approval",
+								"corrupt approval content",
+								content_identity("before"),
+								"Approve before corruption.",
+							),
+						);
+						const requested = yield* take_outbound(connection, 2);
+						const approval_id = requested_approval_id(requested);
+						const database = yield* Database;
+
+						yield* database.client.run(
+							`UPDATE journal_events SET payload_json = '{}' WHERE idempotency_key = 'workspace_replace_approval:${approval_id}:requested'`,
+						);
+						yield* connection.Receive(
+							workspace_replace(
+								"workspace_corrupt_approval_replace",
+								"change_workspace_corrupt_approval",
+								"corrupt approval content",
+								content_identity("before"),
+								"Approve before corruption.",
+							),
+						);
+
+						return yield* take_outbound(connection, 1);
+					}),
+				),
+			);
+
+			expect(output).toMatchObject([
+				{
+					kind: "command.receipt",
+					payload: {
+						error: { code: "workspace.invariant_failed", retryable: false },
+						status: "rejected",
+					},
+				},
+			]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("finishes committed approval evidence and private-payload cleanup before terminal state", async () => {
+		const { database_path, root, runtime } = await make_workspace_runtime();
+		const message_id = "workspace_committed_approval_cleanup";
+		const change_id = "change_workspace_committed_approval_cleanup";
+		let approval_id = "";
+
+		try {
+			await runtime.runPromise(seed_workspace_run(root));
+			const setup = await runtime.runPromise(
+				Effect.gen(function* () {
+					const files = yield* WorkspaceFileService;
+					const approvals = yield* WorkspaceReplaceApprovalRepository;
+					const changes = yield* WorkspaceChangeRepository;
+					const requested = yield* files.Replace({
+						agent_id: "agent_workspace_protocol",
+						approval_request: { reason: "Recover committed cleanup." },
+						change_id,
+						content: "committed cleanup content",
+						expected_before: content_identity("before"),
+						message_id,
+						path: "src/example.ts",
+						raw_origin: { provider: "codex", reference: "native_workspace_protocol" },
+						run_id: "run_workspace_protocol",
+						sent_at: workspace_time,
+						thread_id: "thread_workspace_protocol",
+						workspace_id: "workspace_protocol",
+					});
+
+					if (!("approval" in requested)) {
+						return yield* Effect.die("Expected a workspace approval request");
+					}
+
+					yield* approvals.Decide({
+						approval_id: requested.approval.approval_id,
+						approved: true,
+						message_id: "workspace_committed_approval_decision",
+						sent_at: workspace_time,
+						thread_id: "thread_workspace_protocol",
+					});
+					const execution = yield* approvals.ReadExecution(
+						requested.approval.approval_id,
+					);
+
+					yield* changes.MarkApplied({
+						_tag: "replace",
+						message_id,
+						result_identity: execution.approval.after_identity,
+					});
+					yield* changes.CommitRecorded(message_id, execution.prepared_diff);
+					const database = yield* Database;
+					const operations = yield* database.client
+						.select()
+						.from(WorkspaceChangeOperations);
+					const operation = operations.find((row) => row.message_id === message_id);
+
+					if (!operation) {
+						return yield* Effect.die("Expected a committed workspace operation");
+					}
+
+					yield* database.client.run(
+						`UPDATE workspace_change_operations SET request_fingerprint = '${"f".repeat(64)}' WHERE message_id = '${message_id}'`,
+					);
+					const corrupted_execution = yield* files
+						.ExecuteApproved(requested.approval.approval_id)
+						.pipe(Effect.exit);
+					const evidence_events = (yield* database.client
+						.select()
+						.from(JournalEvents)).filter(
+						(row) =>
+							row.correlation_id === `workspace_evidence:${message_id}:correlation`,
+					);
+
+					yield* database.client.run(
+						`UPDATE workspace_change_operations SET request_fingerprint = '${operation.request_fingerprint}' WHERE message_id = '${message_id}'`,
+					);
+
+					return {
+						approval_id: requested.approval.approval_id,
+						corrupted_execution,
+						evidence_events,
+					};
+				}),
+			);
+
+			approval_id = setup.approval_id;
+			expect(Exit.isFailure(setup.corrupted_execution)).toBe(true);
+			expect(setup.evidence_events).toHaveLength(0);
+		} finally {
+			await runtime.dispose();
+		}
+
+		const recovered_runtime = make_workspace_backend_runtime(database_path, root);
+
+		try {
+			const recovered = await recovered_runtime.runPromise(
+				Effect.gen(function* () {
+					const approval = yield* WaitForApprovalState(approval_id, "applied");
+					const database = yield* Database;
+					const operations = yield* database.client
+						.select()
+						.from(WorkspaceChangeOperations);
+					const payloads = yield* database.client
+						.select()
+						.from(WorkspaceMutationPayloads);
+					const events = yield* database.client.select().from(JournalEvents);
+					const operation = operations.find((row) => row.message_id === message_id);
+					const payload = payloads.find((row) => row.message_id === message_id);
+					const evidence_event = events.find(
+						(row) =>
+							row.correlation_id === `workspace_evidence:${message_id}:correlation`,
+					);
+
+					return { approval, evidence_event, operation, payload };
+				}),
+			);
+
+			expect(recovered.approval.approval.state).toBe("applied");
+			expect(recovered.operation?.evidence_recorded).toBe(true);
+			expect(recovered.evidence_event).toMatchObject({
+				agent_id: "agent_workspace_protocol",
+				payload_json: JSON.stringify({
+					operation: "write",
+					path: "src/example.ts",
+					type: "filesystem.mutation",
+				}),
+				raw_origin_json: JSON.stringify({
+					provider: "codex",
+					reference: "native_workspace_protocol",
+				}),
+				run_id: "run_workspace_protocol",
+				thread_id: "thread_workspace_protocol",
+			});
+			expect(recovered.payload).toMatchObject({
+				expected: null,
+				replacement: null,
+				state: "consumed",
+			});
+		} finally {
+			await recovered_runtime.dispose();
+		}
+	});
+
+	it("finishes rejected approval private-state cleanup before terminal state", async () => {
+		const { database_path, root, runtime } = await make_workspace_runtime();
+		const message_id = "workspace_rejected_approval_cleanup";
+		const change_id = "change_workspace_rejected_approval_cleanup";
+		let approval_id = "";
+
+		try {
+			await runtime.runPromise(seed_workspace_run(root));
+			approval_id = await runtime.runPromise(
+				Effect.gen(function* () {
+					const files = yield* WorkspaceFileService;
+					const approvals = yield* WorkspaceReplaceApprovalRepository;
+					const changes = yield* WorkspaceChangeRepository;
+					const requested = yield* files.Replace({
+						agent_id: "agent_workspace_protocol",
+						approval_request: { reason: "Recover rejected cleanup." },
+						change_id,
+						content: "rejected cleanup content",
+						expected_before: content_identity("before"),
+						message_id,
+						path: "src/example.ts",
+						raw_origin: { provider: "codex", reference: "native_workspace_protocol" },
+						run_id: "run_workspace_protocol",
+						sent_at: workspace_time,
+						thread_id: "thread_workspace_protocol",
+						workspace_id: "workspace_protocol",
+					});
+
+					if (!("approval" in requested)) {
+						return yield* Effect.die("Expected a workspace approval request");
+					}
+
+					yield* approvals.Decide({
+						approval_id: requested.approval.approval_id,
+						approved: true,
+						message_id: "workspace_rejected_approval_decision",
+						sent_at: workspace_time,
+						thread_id: "thread_workspace_protocol",
+					});
+					yield* changes.RejectChanged(message_id);
+
+					return requested.approval.approval_id;
+				}),
+			);
+		} finally {
+			await runtime.dispose();
+		}
+
+		const recovered_runtime = make_workspace_backend_runtime(database_path, root);
+
+		try {
+			const recovered = await recovered_runtime.runPromise(
+				Effect.gen(function* () {
+					const approval = yield* WaitForApprovalState(approval_id, "rejected");
+					const database = yield* Database;
+					const payloads = yield* database.client
+						.select()
+						.from(WorkspaceMutationPayloads);
+					const snapshots = yield* database.client
+						.select()
+						.from(WorkspaceChangeSnapshots);
+					const payload = payloads.find((row) => row.message_id === message_id);
+					const snapshot = snapshots.find((row) => row.change_id === change_id);
+
+					return { approval, payload, snapshot };
+				}),
+			);
+
+			expect(recovered.approval.approval.state).toBe("rejected");
+			expect(recovered.payload).toMatchObject({
+				expected: null,
+				replacement: null,
+				state: "consumed",
+			});
+			expect(recovered.snapshot).toMatchObject({ content: null, state: "consumed" });
+		} finally {
+			await recovered_runtime.dispose();
+		}
+	});
+
+	it("recovers approved execution and denied cleanup after a coordinator restart", async () => {
+		const { database_path, root, runtime } = await make_workspace_runtime();
+		let approved_id = "";
+		let approved_request_sequence = 0;
+		let denied_id = "";
+		let denied_request_sequence = 0;
+
+		try {
+			await runtime.runPromise(seed_workspace_run(root));
+			await runtime.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const connection = yield* open_connection;
+
+						yield* negotiate(connection);
+						yield* connection.Receive(
+							workspace_replace(
+								"workspace_restart_approved_replace",
+								"change_workspace_restart_approved",
+								"recovered content",
+								content_identity("before"),
+								"Approve after restart.",
+							),
+						);
+						const approved_request = yield* take_outbound(connection, 2);
+
+						approved_id = requested_approval_id(approved_request);
+						approved_request_sequence = command_receipt_sequence(approved_request);
+
+						yield* connection.Receive(
+							workspace_replace(
+								"workspace_restart_denied_replace",
+								"change_workspace_restart_denied",
+								"denied content",
+								content_identity("before"),
+								"Deny after restart.",
+							),
+						);
+						const denied_request = yield* take_outbound(connection, 2);
+
+						denied_id = requested_approval_id(denied_request);
+						denied_request_sequence = command_receipt_sequence(denied_request);
+
+						const coordinator = yield* WorkspaceReplaceApprovalCoordinator;
+
+						yield* coordinator.QuiesceThread("thread_workspace_protocol");
+						yield* connection.Receive(
+							workspace_approval_response(
+								"workspace_restart_approved_response",
+								approved_id,
+								true,
+							),
+						);
+						yield* take_outbound(connection, 2);
+						yield* connection.Receive(
+							workspace_approval_response(
+								"workspace_restart_denied_response",
+								denied_id,
+								false,
+							),
+						);
+						yield* take_outbound(connection, 2);
+						yield* WaitForApprovalState(approved_id, "approved");
+						yield* WaitForApprovalState(denied_id, "denied");
+					}),
+				),
+			);
+		} finally {
+			await runtime.dispose();
+		}
+
+		const recovered_runtime = make_workspace_backend_runtime(database_path, root);
+
+		try {
+			const recovered = await recovered_runtime.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const approval = yield* WaitForApprovalState(approved_id, "applied");
+
+						yield* WaitForDeniedSettlement(denied_id);
+
+						const denial = yield* WaitForApprovalState(denied_id, "denied");
+						const content = yield* Effect.promise(() =>
+							readFile(join(root, "src", "example.ts"), "utf8"),
+						);
+						const connection = yield* open_connection;
+
+						yield* negotiate(connection);
+						yield* connection.Receive(
+							workspace_replace(
+								"workspace_restart_approved_replace",
+								"change_workspace_restart_approved",
+								"recovered content",
+								content_identity("before"),
+								"Approve after restart.",
+							),
+						);
+						const approved_replay = yield* take_outbound(connection, 1);
+
+						yield* connection.Receive(
+							workspace_replace(
+								"workspace_restart_denied_replace",
+								"change_workspace_restart_denied",
+								"denied content",
+								content_identity("before"),
+								"Deny after restart.",
+							),
+						);
+						const denied_replay = yield* take_outbound(connection, 1);
+
+						return { approval, approved_replay, content, denial, denied_replay };
+					}),
+				),
+			);
+
+			expect(recovered.approval.approval.state).toBe("applied");
+			expect(recovered.denial.approval.state).toBe("denied");
+			expect(recovered.content).toBe("recovered content");
+			expect(recovered.approved_replay).toMatchObject([
+				{
+					kind: "command.receipt",
+					payload: {
+						journal_sequence: approved_request_sequence,
+						status: "duplicate",
+					},
+				},
+			]);
+			expect(recovered.denied_replay).toMatchObject([
+				{
+					kind: "command.receipt",
+					payload: {
+						journal_sequence: denied_request_sequence,
+						status: "duplicate",
+					},
+				},
+			]);
+		} finally {
+			await recovered_runtime.dispose();
 		}
 	});
 

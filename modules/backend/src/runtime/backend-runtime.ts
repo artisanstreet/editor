@@ -97,6 +97,8 @@ import { WorkspaceMutationAuthorityLive } from "../workspace/workspace-mutation-
 import { WorkspaceSnapshotStoreLive } from "../workspace/workspace-snapshot-store";
 import { WorkspaceMutationPayloadStoreLive } from "../workspace/workspace-mutation-payload-store";
 import { WorkspaceChangeDiffServiceLive } from "../workspace/workspace-change-diff-service";
+import { WorkspaceReplaceApprovalRepositoryLive } from "../workspace/workspace-replace-approval-repository";
+import { WorkspaceReplaceApprovalCoordinatorLive } from "../workspace/workspace-replace-approval-coordinator";
 
 export interface BackendOptions {
 	readonly database_path: string;
@@ -181,6 +183,10 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(NodeCrypto.layer),
 		Layer.provideMerge(infrastructure),
 	);
+	const workspace_approvals = WorkspaceReplaceApprovalRepositoryLive.pipe(
+		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(infrastructure),
+	);
 	const workspace_filesystems =
 		options.workspace_filesystem_registry ?? make_node_workspace_filesystem_registry_layer([]);
 	const workspace_bounded_filesystems =
@@ -196,6 +202,7 @@ export function make_backend_layer(options: BackendOptions) {
 			Layer.mergeAll(
 				NodeCrypto.layer,
 				workspace_authority,
+				workspace_approvals,
 				workspace_bounded_filesystems,
 				workspace_changes,
 				workspace_evidence,
@@ -204,6 +211,10 @@ export function make_backend_layer(options: BackendOptions) {
 				workspace_snapshots,
 			),
 		),
+	);
+	const workspace_approval_coordination = WorkspaceReplaceApprovalCoordinatorLive.pipe(
+		Layer.provideMerge(workspace_approvals),
+		Layer.provideMerge(workspace_files),
 	);
 	const engine_registry = make_engine_registry_layer(options.engines ?? []);
 	const guidance_repository = GlobalGuidanceRepositoryLive.pipe(Layer.provideMerge(persistence));
@@ -294,6 +305,7 @@ export function make_backend_layer(options: BackendOptions) {
 			Layer.provideMerge(orchestration),
 			Layer.provideMerge(graph),
 			Layer.provideMerge(terminals),
+			Layer.provideMerge(workspace_approval_coordination),
 		);
 	const erasure = ThreadErasureLive.pipe(
 		Layer.provideMerge(resource_quiescer),
@@ -309,6 +321,19 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(commands),
 		Layer.provideMerge(terminals),
 	);
+	const workspace = Layer.mergeAll(
+		workspace_files,
+		workspace_approval_coordination,
+		workspace_approvals,
+		workspace_changes,
+		workspace_diffs,
+		workspace_evidence,
+		workspace_authority,
+		workspace_bounded_filesystems,
+		workspace_filesystems,
+		workspace_snapshots,
+		workspace_mutation_payloads,
+	);
 
 	return make_protocol_server_layer(protocol_options).pipe(
 		Layer.provideMerge(routing),
@@ -322,15 +347,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(project_affinity_coordination),
 		Layer.provideMerge(guidance),
 		Layer.provideMerge(model_behaviour),
-		Layer.provideMerge(workspace_files),
-		Layer.provideMerge(workspace_changes),
-		Layer.provideMerge(workspace_diffs),
-		Layer.provideMerge(workspace_evidence),
-		Layer.provideMerge(workspace_authority),
-		Layer.provideMerge(workspace_bounded_filesystems),
-		Layer.provideMerge(workspace_filesystems),
-		Layer.provideMerge(workspace_snapshots),
-		Layer.provideMerge(workspace_mutation_payloads),
+		Layer.provideMerge(workspace),
 	);
 }
 

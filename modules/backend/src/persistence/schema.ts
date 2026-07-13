@@ -287,6 +287,116 @@ export const WorkspaceMutationAuthorities = sqliteTable(
 	],
 );
 
+/** Stores durable approval decisions and private pending diffs for controlled replacements. */
+export const WorkspaceReplaceApprovals = sqliteTable(
+	"workspace_replace_approvals",
+	{
+		approval_id: text("approval_id").primaryKey(),
+		message_id: text("message_id")
+			.notNull()
+			.references(() => WorkspaceChangeOperations.message_id, { onDelete: "cascade" }),
+		request_fingerprint: text("request_fingerprint").notNull(),
+		operation_sent_at: text("operation_sent_at").notNull(),
+		change_id: text("change_id").notNull(),
+		thread_id: text("thread_id").notNull(),
+		run_id: text("run_id").notNull(),
+		agent_id: text("agent_id").notNull(),
+		workspace_id: text("workspace_id").notNull(),
+		path: text("path").notNull(),
+		before_identity_json: text("before_identity_json").notNull(),
+		after_identity_json: text("after_identity_json").notNull(),
+		policy: text("policy").notNull(),
+		reason: text("reason").notNull(),
+		state: text("state").notNull(),
+		decision_message_id: text("decision_message_id"),
+		approved: integer("approved", { mode: "boolean" }),
+		decided_at: text("decided_at"),
+		raw_origin_json: text("raw_origin_json"),
+		format: text("format").notNull(),
+		format_version: integer("format_version").notNull(),
+		context_lines: integer("context_lines").notNull(),
+		patch: blob("patch", { mode: "buffer" }).notNull(),
+		patch_byte_count: integer("patch_byte_count").notNull(),
+		patch_hash: text("patch_hash").notNull(),
+		added_line_count: integer("added_line_count").notNull(),
+		removed_line_count: integer("removed_line_count").notNull(),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("workspace_replace_approvals_message_id_unique").on(table.message_id),
+		uniqueIndex("workspace_replace_approvals_change_id_unique").on(table.change_id),
+		uniqueIndex("workspace_replace_approvals_decision_message_unique").on(
+			table.decision_message_id,
+		),
+		index("workspace_replace_approvals_thread_id_index").on(table.thread_id),
+		index("workspace_replace_approvals_state_index").on(table.state),
+		check(
+			"workspace_replace_approvals_policy_check",
+			sql`${table.policy} IN ('on_request', 'always')`,
+		),
+		check(
+			"workspace_replace_approvals_request_fingerprint_check",
+			sql`
+				length(${table.request_fingerprint}) = 64
+				AND ${table.request_fingerprint} NOT GLOB '*[^0-9a-f]*'
+			`,
+		),
+		check(
+			"workspace_replace_approvals_state_check",
+			sql`${table.state} IN ('requested', 'approved', 'executing', 'denied', 'applied', 'rejected')`,
+		),
+		check(
+			"workspace_replace_approvals_decision_check",
+			sql`
+				(
+					${table.state} = 'requested'
+					AND ${table.decision_message_id} IS NULL
+					AND ${table.approved} IS NULL
+					AND ${table.decided_at} IS NULL
+				)
+				OR (
+					${table.state} = 'denied'
+					AND ${table.decision_message_id} IS NOT NULL
+					AND ${table.approved} = 0
+					AND ${table.decided_at} IS NOT NULL
+				)
+				OR (
+					${table.state} IN ('approved', 'executing', 'applied', 'rejected')
+					AND ${table.decision_message_id} IS NOT NULL
+					AND ${table.approved} = 1
+					AND ${table.decided_at} IS NOT NULL
+				)
+			`,
+		),
+		check("workspace_replace_approvals_format_check", sql`${table.format} = 'unified'`),
+		check(
+			"workspace_replace_approvals_format_version_check",
+			sql`${table.format_version} = ${sql.raw(String(workspace_diff_format_version))}`,
+		),
+		check(
+			"workspace_replace_approvals_context_check",
+			sql`${table.context_lines} = ${sql.raw(String(workspace_diff_context_lines))}`,
+		),
+		check(
+			"workspace_replace_approvals_patch_check",
+			sql`
+				length(${table.patch}) = ${table.patch_byte_count}
+				AND ${table.patch_byte_count} BETWEEN 0 AND ${sql.raw(String(workspace_diff_maximum_bytes))}
+				AND length(${table.patch_hash}) = 64
+				AND ${table.patch_hash} NOT GLOB '*[^0-9a-f]*'
+			`,
+		),
+		check(
+			"workspace_replace_approvals_line_count_check",
+			sql`
+				${table.added_line_count} BETWEEN 0 AND ${sql.raw(String(workspace_diff_maximum_lines_per_side))}
+				AND ${table.removed_line_count} BETWEEN 0 AND ${sql.raw(String(workspace_diff_maximum_lines_per_side))}
+			`,
+		),
+	],
+);
+
 /** Stores durable, source-free workspace change projections. */
 export const WorkspaceChanges = sqliteTable(
 	"workspace_changes",

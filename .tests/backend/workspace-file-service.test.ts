@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { NodeCrypto } from "@effect/platform-node-shared";
-import { Effect, Layer, ManagedRuntime } from "effect";
+import { Effect, Layer, ManagedRuntime, Option } from "effect";
 import { describe, expect, it } from "vitest";
 
 import type { ContentIdentity } from "@artisan/protocol";
@@ -29,6 +29,7 @@ import {
 	WorkspaceMutationPayloadStoreUnavailable,
 } from "../../modules/backend/src/workspace/workspace-mutation-payload-store";
 import { WorkspaceSnapshotStore } from "../../modules/backend/src/workspace/workspace-snapshot-store";
+import { WorkspaceReplaceApprovalRepository } from "../../modules/backend/src/workspace/workspace-replace-approval-repository";
 
 const encoder = new TextEncoder();
 const now = "2026-07-12T12:00:00.000Z";
@@ -112,11 +113,11 @@ function make_runtime(
 
 		if (lifecycle === "committed") {
 			return Effect.succeed({
-				authority: { _tag: "base_run" },
+				authority: { _tag: "base_run", approval: "on_request" },
 				claim: {
 					_tag: "duplicate",
 					event: { event_id: "event_1" },
-					operation: { lifecycle },
+					operation: { action: "replace", lifecycle },
 				},
 				store,
 			});
@@ -129,13 +130,13 @@ function make_runtime(
 		}
 
 		return Effect.succeed({
-			authority: { _tag: "base_run" },
+			authority: { _tag: "base_run", approval: "on_request" },
 			claim: {
 				_tag:
 					lifecycle === "claimed" && !payload_record_exists
 						? "claimed"
 						: "incomplete_retry",
-				operation: { lifecycle },
+				operation: { action: "replace", lifecycle },
 			},
 			store,
 		});
@@ -157,6 +158,19 @@ function make_runtime(
 		Layer.succeed(WorkspaceMutationAuthority, {
 			ClaimReplace: claim,
 		} as unknown as typeof WorkspaceMutationAuthority.Service),
+		Layer.succeed(WorkspaceReplaceApprovalRepository, {
+			Decide: () => Effect.die("unused"),
+			ListDeniedUnsettled: Effect.succeed([]),
+			ListExecutable: Effect.succeed([]),
+			MarkApplied: () => Effect.die("unused"),
+			MarkExecuting: () => Effect.die("unused"),
+			MarkRejected: () => Effect.die("unused"),
+			Query: () => Effect.die("unused"),
+			ReadByMessage: () => Effect.succeed(Option.none()),
+			ReadDenied: () => Effect.die("unused"),
+			ReadExecution: () => Effect.die("unused"),
+			Request: () => Effect.die("unused"),
+		} as typeof WorkspaceReplaceApprovalRepository.Service),
 		Layer.succeed(WorkspaceChangeDiffService, {
 			Prepare: (input) => {
 				calls.push("prepare");

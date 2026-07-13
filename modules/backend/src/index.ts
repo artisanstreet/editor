@@ -195,8 +195,26 @@ export {
 	WorkspaceFileServiceLive,
 	type WorkspaceFileReviewInput,
 	type WorkspaceFileRollbackInput,
+	type WorkspaceFileReplaceAcceptance,
 	type WorkspaceFileReplaceInput,
 } from "./workspace/workspace-file-service";
+export {
+	WorkspaceReplaceApprovalCoordinator,
+	WorkspaceReplaceApprovalCoordinatorLive,
+} from "./workspace/workspace-replace-approval-coordinator";
+export {
+	WorkspaceReplaceApprovalConflict,
+	WorkspaceReplaceApprovalInvariant,
+	WorkspaceReplaceApprovalRepository,
+	WorkspaceReplaceApprovalRepositoryLive,
+	WorkspaceReplaceApprovalUnavailable,
+	type RequestWorkspaceReplaceApproval,
+	type WorkspaceReplaceApprovalAcceptance,
+	type WorkspaceReplaceApprovalDecision,
+	type WorkspaceReplaceApprovalDenial,
+	type WorkspaceReplaceApprovalExecution,
+	type WorkspaceReplaceApprovalRepositoryError,
+} from "./workspace/workspace-replace-approval-repository";
 export {
 	WorkspaceChangeIdConflict,
 	WorkspaceChangeRepository,

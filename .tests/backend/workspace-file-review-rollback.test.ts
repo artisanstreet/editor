@@ -24,6 +24,7 @@ import {
 	WorkspaceMutationPayloadStoreUnavailable,
 } from "../../modules/backend/src/workspace/workspace-mutation-payload-store";
 import { WorkspaceSnapshotStore } from "../../modules/backend/src/workspace/workspace-snapshot-store";
+import { WorkspaceReplaceApprovalRepository } from "../../modules/backend/src/workspace/workspace-replace-approval-repository";
 
 const encoder = new TextEncoder();
 const now = "2026-07-12T12:00:00.000Z";
@@ -204,6 +205,19 @@ function make_harness(
 				return rollback_admission();
 			},
 		} as unknown as typeof WorkspaceMutationAuthority.Service),
+		Layer.succeed(WorkspaceReplaceApprovalRepository, {
+			Decide: () => Effect.die("unused"),
+			ListDeniedUnsettled: Effect.succeed([]),
+			ListExecutable: Effect.succeed([]),
+			MarkApplied: () => Effect.die("unused"),
+			MarkExecuting: () => Effect.die("unused"),
+			MarkRejected: () => Effect.die("unused"),
+			Query: () => Effect.die("unused"),
+			ReadByMessage: () => Effect.die("unused"),
+			ReadDenied: () => Effect.die("unused"),
+			ReadExecution: () => Effect.die("unused"),
+			Request: () => Effect.die("unused"),
+		} as typeof WorkspaceReplaceApprovalRepository.Service),
 		Layer.succeed(WorkspaceChangeDiffService, {
 			Prepare: () => Effect.die("unused"),
 			Read: () => Effect.die("unused"),

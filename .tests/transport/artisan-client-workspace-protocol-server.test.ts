@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { NodeFileSystem } from "@effect/platform-node-shared";
-import { Effect, Fiber, Layer, Redacted, Stream } from "effect";
+import { Deferred, Effect, Layer, Redacted, Ref, Stream } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -15,7 +15,7 @@ import {
 	ProtocolServer,
 	ThreadRetentionScheduler,
 } from "@artisan/backend";
-import type { WorkspaceReplaceApprovalQueryResult } from "@artisan/protocol";
+import type { EventEnvelope, WorkspaceReplaceApprovalQueryResult } from "@artisan/protocol";
 import type { ArtisanCommandReceipt } from "@artisan/transport";
 
 import { Database } from "../../modules/backend/src/persistence/database";
@@ -282,17 +282,51 @@ describe("ArtisanClient workspace operations with the backend ProtocolServer", (
 			client: { reconnect_delay_ms: 5 },
 			drop_first_command_receipt: true,
 		});
+		const approval_client = harness.client as typeof harness.client &
+			WorkspaceReplaceApprovalClient;
 
 		try {
 			const result = await Effect.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
-						const events_fiber = yield* harness.client.Events.pipe(
-							Stream.filter(
-								(event) => event.payload.type === "workspace.change.updated",
-							),
-							Stream.take(3),
-							Stream.runCollect,
+						const requested_approval = yield* Deferred.make<string>();
+						const applied_approval = yield* Deferred.make<EventEnvelope>();
+						const workspace_events_done = yield* Deferred.make<void>();
+						const workspace_events = yield* Ref.make<ReadonlyArray<EventEnvelope>>([]);
+						const CollectEvent = (event: EventEnvelope) =>
+							Effect.gen(function* () {
+								if (
+									event.payload.type === "workspace.replace.approval.updated" &&
+									event.payload.approval.state === "requested"
+								) {
+									yield* Deferred.succeed(
+										requested_approval,
+										event.payload.approval.approval_id,
+									);
+								}
+
+								if (
+									event.payload.type === "workspace.replace.approval.updated" &&
+									event.payload.approval.state === "applied"
+								) {
+									yield* Deferred.succeed(applied_approval, event);
+								}
+
+								if (event.payload.type === "workspace.change.updated") {
+									const count = yield* Ref.modify(workspace_events, (current) => {
+										const next = [...current, event];
+
+										return [next.length, next] as const;
+									});
+
+									if (count === 3) {
+										yield* Deferred.succeed(workspace_events_done, undefined);
+									}
+								}
+							});
+
+						yield* harness.client.Events.pipe(
+							Stream.runForEach(CollectEvent),
 							Effect.forkScoped,
 						);
 
@@ -317,6 +351,25 @@ describe("ArtisanClient workspace operations with the backend ProtocolServer", (
 								workspace_id: "workspace_public",
 							}),
 						);
+						const approval_id = yield* Deferred.await(requested_approval);
+
+						const approval = yield* AtStep(
+							"approval query",
+							approval_client.GetWorkspaceReplaceApproval({
+								approval_id,
+								thread_id: "thread_workspace_public",
+							}),
+						);
+						const approval_response = yield* AtStep(
+							"approval response",
+							approval_client.RespondWorkspaceReplaceApproval({
+								approval_id,
+								approved: true,
+								command_id: "approve_workspace_public",
+								thread_id: "thread_workspace_public",
+							}),
+						);
+						const applied_approval_event = yield* Deferred.await(applied_approval);
 						const replaced = yield* harness.client.ReadWorkspaceFile({
 							path: "src/example.ts",
 							workspace_id: "workspace_public",
@@ -355,10 +408,15 @@ describe("ArtisanClient workspace operations with the backend ProtocolServer", (
 							thread_id: "thread_workspace_public",
 							workspace_id: "workspace_public",
 						});
-						const events = yield* Fiber.join(events_fiber);
+						yield* Deferred.await(workspace_events_done);
+
+						const events = yield* Ref.get(workspace_events);
 
 						return {
 							after_rollback,
+							applied_approval_events: [applied_approval_event],
+							approval,
+							approval_response,
 							before_review,
 							events: [...events],
 							initial,
@@ -374,6 +432,19 @@ describe("ArtisanClient workspace operations with the backend ProtocolServer", (
 
 			expect(result.initial.content).toBe("before");
 			expect(result.replacement.status).toBe("duplicate");
+			expect(result.approval).toMatchObject({
+				approval: { state: "requested" },
+				diff: { patch: expect.stringContaining("+after") },
+			});
+			expect(result.approval_response.status).toBe("accepted");
+			expect(result.applied_approval_events).toMatchObject([
+				{
+					payload: {
+						approval: { state: "applied" },
+						type: "workspace.replace.approval.updated",
+					},
+				},
+			]);
 			expect(result.replaced.content).toBe("after");
 			expect(result.before_review.changes).toMatchObject([
 				{

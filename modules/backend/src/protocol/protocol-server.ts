@@ -54,6 +54,8 @@ import {
 	type WorkspaceChangeRollbackEnvelope,
 	type WorkspaceFileReadQueryEnvelope,
 	type WorkspaceFileReplaceEnvelope,
+	type WorkspaceReplaceApprovalQueryEnvelope,
+	type WorkspaceReplaceApprovalRespondEnvelope,
 } from "@artisan/protocol";
 
 import { AgentGraphOrchestrator } from "../orchestration/agent-graph-orchestrator";
@@ -95,6 +97,13 @@ import {
 	WorkspaceFileService,
 	WorkspaceFileServiceError,
 } from "../workspace/workspace-file-service";
+import { WorkspaceReplaceApprovalCoordinator } from "../workspace/workspace-replace-approval-coordinator";
+import {
+	WorkspaceReplaceApprovalConflict,
+	WorkspaceReplaceApprovalInvariant,
+	WorkspaceReplaceApprovalRepository,
+	WorkspaceReplaceApprovalUnavailable,
+} from "../workspace/workspace-replace-approval-repository";
 import {
 	DecodeProtocolConnectionOptions,
 	DefaultProtocolConnectionOptions,
@@ -263,10 +272,26 @@ function model_behaviour_error_detail(error: unknown): ProtocolErrorDetail {
 }
 
 function workspace_error_detail(error: unknown): ProtocolErrorDetail {
+	if (error instanceof WorkspaceFileServiceError && error.reason === "approval_conflict") {
+		return {
+			code: "workspace.approval_conflict",
+			message: "This workspace approval request conflicts with its durable intent.",
+			retryable: false,
+		};
+	}
+
 	if (error instanceof WorkspaceFileServiceError && error.reason === "changed") {
 		return {
 			code: "workspace.conflict",
 			message: "The workspace file changed before the requested mutation could apply.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof WorkspaceFileServiceError && error.reason === "invariant") {
+		return {
+			code: "workspace.invariant_failed",
+			message: "The durable workspace operation failed validation.",
 			retryable: false,
 		};
 	}
@@ -302,6 +327,46 @@ function workspace_diff_error_detail(error: unknown): ProtocolErrorDetail {
 		code: "workspace.invariant_failed",
 		message: "The immutable workspace diff failed validation.",
 		retryable: false,
+	};
+}
+
+function workspace_approval_error_detail(error: unknown): ProtocolErrorDetail {
+	if (error instanceof CommandIdConflict) {
+		return {
+			code: "command.id_conflict",
+			message: "This command id has already been used for different intent.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof WorkspaceReplaceApprovalConflict) {
+		return {
+			code: "workspace.approval_conflict",
+			message: "This workspace approval no longer accepts that decision.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof WorkspaceReplaceApprovalUnavailable) {
+		return {
+			code: "workspace.unavailable",
+			message: "The workspace approval is no longer available.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof WorkspaceReplaceApprovalInvariant) {
+		return {
+			code: "workspace.invariant_failed",
+			message: "The workspace approval failed validation.",
+			retryable: false,
+		};
+	}
+
+	return {
+		code: "workspace.unavailable",
+		message: "The workspace approval could not be durably reconciled.",
+		retryable: true,
 	};
 }
 
@@ -390,6 +455,8 @@ export function make_protocol_server_layer(
 			const workspace_changes = yield* WorkspaceChangeRepository;
 			const workspace_diffs = yield* WorkspaceChangeDiffService;
 			const workspace_files = yield* WorkspaceFileService;
+			const workspace_approval_coordinator = yield* WorkspaceReplaceApprovalCoordinator;
+			const workspace_approvals = yield* WorkspaceReplaceApprovalRepository;
 
 			const Open = Effect.gen(function* () {
 				const connection_scope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
@@ -1090,6 +1157,41 @@ export function make_protocol_server_layer(
 						}),
 					);
 
+				const HandleWorkspaceReplaceApprovalQuery = (
+					query: WorkspaceReplaceApprovalQueryEnvelope,
+					current: ReadyState,
+				) =>
+					workspace_approvals.Query(query.payload).pipe(
+						Effect.flatMap((result) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "workspace.replace.approval.query.result",
+									message_id,
+									origin: "backend",
+									payload: result,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch((error) => {
+							const detail = workspace_approval_error_detail(error);
+
+							return EnqueueError(
+								current,
+								detail.code,
+								detail.message,
+								detail.retryable,
+								query.message_id,
+							);
+						}),
+					);
+
 				const HandleSubscribe = (subscribe: SubscribeEnvelope, current: ReadyState) =>
 					Effect.gen(function* () {
 						if (current.subscriptions[subscribe.subscription_id]) {
@@ -1664,6 +1766,62 @@ export function make_protocol_server_layer(
 						}),
 					);
 				};
+				const HandleWorkspaceReplaceApprovalResponse = (
+					envelope: WorkspaceReplaceApprovalRespondEnvelope,
+				) =>
+					workspace_approval_coordinator
+						.Respond({
+							...envelope.payload,
+							message_id: envelope.message_id,
+							sent_at: envelope.sent_at,
+							thread_id: envelope.thread_id,
+						})
+						.pipe(
+							Effect.matchEffect({
+								onFailure: (error) => {
+									const detail = workspace_approval_error_detail(error);
+
+									return Effect.gen(function* () {
+										const message_id = yield* metadata.MakeId("message");
+										const sent_at = yield* metadata.Now;
+
+										yield* Enqueue({
+											causation_id: envelope.message_id,
+											correlation_id: envelope.message_id,
+											kind: "command.receipt",
+											message_id,
+											origin: "backend",
+											payload: { error: detail, status: "rejected" },
+											protocol_version: 1,
+											schema_version: 1,
+											sent_at,
+											thread_id: envelope.thread_id,
+										});
+									});
+								},
+								onSuccess: (acceptance) =>
+									Effect.gen(function* () {
+										const message_id = yield* metadata.MakeId("message");
+										const sent_at = yield* metadata.Now;
+
+										yield* Enqueue({
+											causation_id: envelope.message_id,
+											correlation_id: envelope.message_id,
+											kind: "command.receipt",
+											message_id,
+											origin: "backend",
+											payload: {
+												journal_sequence: acceptance.event.journal_sequence,
+												status: acceptance.status,
+											},
+											protocol_version: 1,
+											schema_version: 1,
+											sent_at,
+											thread_id: envelope.thread_id,
+										});
+									}),
+							}),
+						);
 
 				const HandleReadyEnvelope = (
 					envelope: Exclude<InboundControlEnvelope, HelloEnvelope>,
@@ -1684,6 +1842,10 @@ export function make_protocol_server_layer(
 							return HandleWorkspaceChangeListQuery(envelope, current);
 						case "workspace.change.diff.query":
 							return HandleWorkspaceChangeDiffQuery(envelope, current);
+						case "workspace.replace.approval.query":
+							return HandleWorkspaceReplaceApprovalQuery(envelope, current);
+						case "workspace.replace.approval.respond":
+							return HandleWorkspaceReplaceApprovalResponse(envelope);
 						case "workspace.file.replace":
 						case "workspace.change.review":
 						case "workspace.change.rollback":

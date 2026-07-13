@@ -6,6 +6,7 @@ import {
 	Encoding,
 	Layer,
 	Match,
+	Option,
 	Result,
 	Schema,
 	pipe,
@@ -51,6 +52,15 @@ import {
 	WorkspaceChangeDiffService,
 	type PreparedWorkspaceChangeDiff,
 } from "./workspace-change-diff-service";
+import {
+	WorkspaceReplaceApprovalConflict,
+	WorkspaceReplaceApprovalInvariant,
+	WorkspaceReplaceApprovalRepository,
+	type WorkspaceReplaceApprovalAcceptance,
+} from "./workspace-replace-approval-repository";
+
+const default_workspace_replace_approval_reason =
+	"Approve this controlled workspace file replacement.";
 
 const WorkspaceFileReplaceInput = Schema.Struct({
 	...WorkspaceFileReplaceRequest.fields,
@@ -85,10 +95,15 @@ export type WorkspaceFileReviewInput = typeof WorkspaceFileReviewInput.Type;
 /** Carries the envelope metadata and rollback request accepted by the controlled workspace service. */
 export type WorkspaceFileRollbackInput = typeof WorkspaceFileRollbackInput.Type;
 
+/** Returns either a committed workspace change or a durable pending approval request. */
+export type WorkspaceFileReplaceAcceptance =
+	| WorkspaceChangeCommit
+	| WorkspaceReplaceApprovalAcceptance;
+
 /** Reports a source-free controlled workspace file failure. */
 export class WorkspaceFileServiceError extends Data.TaggedError("WorkspaceFileServiceError")<{
 	readonly operation: "read" | "replace" | "review" | "rollback";
-	readonly reason: "changed" | "diff_limit" | "failed";
+	readonly reason: "approval_conflict" | "changed" | "diff_limit" | "failed" | "invariant";
 }> {}
 
 /** Owns controlled UTF-8 workspace reads and recoverable attributed replacements. */
@@ -100,7 +115,13 @@ export class WorkspaceFileService extends Context.Service<
 		) => Effect.Effect<WorkspaceFileReadQueryResult, WorkspaceFileServiceError>;
 		readonly Replace: (
 			input: WorkspaceFileReplaceInput,
-		) => Effect.Effect<WorkspaceChangeCommit, WorkspaceFileServiceError>;
+		) => Effect.Effect<WorkspaceFileReplaceAcceptance, WorkspaceFileServiceError>;
+		readonly ExecuteApproved: (
+			approval_id: string,
+		) => Effect.Effect<void, WorkspaceFileServiceError>;
+		readonly SettleDeniedApproval: (
+			approval_id: string,
+		) => Effect.Effect<void, WorkspaceFileServiceError>;
 		readonly Review: (
 			input: WorkspaceFileReviewInput,
 		) => Effect.Effect<WorkspaceChangeCommit, WorkspaceFileServiceError>;
@@ -118,6 +139,10 @@ function changed(operation: "replace" | "rollback") {
 	return new WorkspaceFileServiceError({ operation, reason: "changed" });
 }
 
+function approval_conflict() {
+	return new WorkspaceFileServiceError({ operation: "replace", reason: "approval_conflict" });
+}
+
 function identities_match(left: typeof ContentIdentity.Type, right: typeof ContentIdentity.Type) {
 	return (
 		left.algorithm === right.algorithm &&
@@ -132,6 +157,7 @@ function claim_fingerprint(
 ) {
 	return JSON.stringify({
 		agent_id: input.agent_id,
+		approval_request: input.approval_request,
 		change_id: input.change_id,
 		expected_before: input.expected_before,
 		intended_after,
@@ -166,6 +192,15 @@ function rollback_fingerprint(input: WorkspaceFileRollbackInput) {
 	});
 }
 
+type WorkspaceReplaceExecutionMode =
+	| { readonly _tag: "request" }
+	| {
+			readonly _tag: "approved";
+			readonly approval_id: string;
+			readonly prepared_diff: PreparedWorkspaceChangeDiff;
+			readonly request_fingerprint: string;
+	  };
+
 /** Builds the controlled workspace file service from its durable and filesystem capabilities. */
 export const WorkspaceFileServiceLive = Layer.effect(
 	WorkspaceFileService,
@@ -177,6 +212,7 @@ export const WorkspaceFileServiceLive = Layer.effect(
 		const payloads = yield* WorkspaceMutationPayloadStore;
 		const registry = yield* WorkspaceBoundedRegularFileStoreRegistry;
 		const repository = yield* WorkspaceChangeRepository;
+		const approvals = yield* WorkspaceReplaceApprovalRepository;
 		const snapshots = yield* WorkspaceSnapshotStore;
 		const ComputeIdentity = (bytes: Uint8Array) =>
 			ComputeContentIdentity(bytes).pipe(Effect.provideService(Crypto.Crypto, crypto));
@@ -223,7 +259,10 @@ export const WorkspaceFileServiceLive = Layer.effect(
 			);
 
 		const SettleRejected = (
-			input: WorkspaceFileReplaceInput,
+			input: Pick<
+				WorkspaceFileReplaceInput,
+				"change_id" | "expected_before" | "message_id" | "thread_id"
+			>,
 			intended_after: typeof ContentIdentity.Type,
 		) =>
 			Effect.gen(function* () {
@@ -242,7 +281,10 @@ export const WorkspaceFileServiceLive = Layer.effect(
 				});
 			});
 
-		const Replace = (input: WorkspaceFileReplaceInput) =>
+		const RunReplace = (
+			input: WorkspaceFileReplaceInput,
+			mode: WorkspaceReplaceExecutionMode,
+		) =>
 			Schema.decodeUnknownEffect(WorkspaceFileReplaceInput, { onExcessProperty: "error" })(
 				input,
 			).pipe(
@@ -250,10 +292,10 @@ export const WorkspaceFileServiceLive = Layer.effect(
 					Effect.gen(function* () {
 						const replacement = yield* EncodeWorkspaceText(decoded.content);
 						const intended_after = yield* ComputeIdentity(replacement);
-						const request_fingerprint = yield* ComputeFingerprint(
-							decoded,
-							intended_after,
-						);
+						const request_fingerprint =
+							mode._tag === "approved"
+								? mode.request_fingerprint
+								: yield* ComputeFingerprint(decoded, intended_after);
 						const admission_result = yield* authority
 							.ClaimReplace({
 								_tag: "replace",
@@ -275,6 +317,25 @@ export const WorkspaceFileServiceLive = Layer.effect(
 							.pipe(Effect.result);
 						if (Result.isFailure(admission_result)) {
 							const error = admission_result.failure;
+
+							if (
+								mode._tag === "request" &&
+								error instanceof WorkspaceMutationAuthorityConflict &&
+								(error.reason === "operation_conflict" ||
+									error.reason === "operation_rejected")
+							) {
+								const existing_approval = yield* approvals.ReadByMessage(
+									decoded.message_id,
+								);
+
+								if (Option.isSome(existing_approval)) {
+									if (error.reason === "operation_conflict") {
+										return yield* Effect.fail(approval_conflict());
+									}
+
+									return existing_approval.value;
+								}
+							}
 
 							if (
 								error instanceof WorkspaceMutationAuthorityConflict &&
@@ -359,6 +420,10 @@ export const WorkspaceFileServiceLive = Layer.effect(
 								yield* repository.MarkEvidenceRecorded(decoded.message_id);
 								yield* payloads.Consume(payload_input);
 
+								if (mode._tag === "approved") {
+									yield* approvals.MarkApplied(mode.approval_id);
+								}
+
 								return commit;
 							});
 						const CompleteDuplicate = (event: WorkspaceChangeCommit["event"]) =>
@@ -376,6 +441,10 @@ export const WorkspaceFileServiceLive = Layer.effect(
 								});
 								yield* repository.MarkEvidenceRecorded(decoded.message_id);
 								yield* payloads.Consume(payload_input);
+
+								if (mode._tag === "approved") {
+									yield* approvals.MarkApplied(mode.approval_id);
+								}
 
 								return { event, status: "duplicate" as const };
 							});
@@ -515,18 +584,32 @@ export const WorkspaceFileServiceLive = Layer.effect(
 								}),
 							);
 
+						if (admission.claim.operation.action !== "replace") {
+							return yield* Effect.fail(failed("replace"));
+						}
+
+						if (mode._tag === "request") {
+							const existing_approval = yield* approvals.ReadByMessage(
+								decoded.message_id,
+							);
+
+							if (Option.isSome(existing_approval)) {
+								return existing_approval.value;
+							}
+						}
+
 						if (admission.claim._tag === "duplicate") {
 							return yield* CompleteDuplicate(admission.claim.event);
 						}
 
 						if (admission.claim.operation.lifecycle === "applied") {
 							const payload = yield* payloads.Resume(payload_input);
+							const prepared_diff =
+								mode._tag === "approved"
+									? mode.prepared_diff
+									: yield* Prepare(payload);
 
-							return yield* Prepare(payload).pipe(
-								Effect.flatMap((prepared_diff) =>
-									FinalizeCommit(payload, prepared_diff),
-								),
-							);
+							return yield* FinalizeCommit(payload, prepared_diff);
 						}
 
 						const preparation = yield* admission.claim._tag === "claimed"
@@ -538,7 +621,10 @@ export const WorkspaceFileServiceLive = Layer.effect(
 						}
 
 						const payload = preparation.payload;
-						const prepared_diff = yield* PrepareBeforeMutation(payload);
+						const prepared_diff =
+							mode._tag === "approved"
+								? mode.prepared_diff
+								: yield* PrepareBeforeMutation(payload);
 
 						yield* snapshots.Stage({
 							change_id: decoded.change_id,
@@ -546,6 +632,26 @@ export const WorkspaceFileServiceLive = Layer.effect(
 							expected_identity: decoded.expected_before,
 							thread_id: decoded.thread_id,
 						});
+
+						if (mode._tag === "request") {
+							const requires_approval =
+								admission.authority.approval === "always" ||
+								(admission.authority.approval === "on_request" &&
+									decoded.approval_request !== undefined);
+
+							if (requires_approval) {
+								return yield* approvals.Request({
+									operation: admission.claim.operation,
+									policy: admission.authority.approval,
+									prepared_diff,
+									reason:
+										decoded.approval_request?.reason ??
+										default_workspace_replace_approval_reason,
+								});
+							}
+						} else {
+							yield* approvals.MarkExecuting(mode.approval_id);
+						}
 
 						const replace = yield* admission.store.ReplaceRegularFile({
 							expected: payload.expected,
@@ -589,9 +695,192 @@ export const WorkspaceFileServiceLive = Layer.effect(
 									operation: "replace",
 									reason: "diff_limit",
 								})
-							: failed("replace"),
+							: error instanceof WorkspaceReplaceApprovalConflict
+								? approval_conflict()
+								: error instanceof WorkspaceReplaceApprovalInvariant
+									? new WorkspaceFileServiceError({
+											operation: "replace",
+											reason: "invariant",
+										})
+									: failed("replace"),
 				),
 			);
+
+		const Replace = (input: WorkspaceFileReplaceInput) =>
+			RunReplace(input, { _tag: "request" });
+
+		const ExecuteApproved = (approval_id: string) =>
+			Effect.gen(function* () {
+				const execution = yield* approvals.ReadExecution(approval_id);
+				const operation_option = yield* repository.ReadOperation(execution.message_id);
+
+				if (
+					Option.isNone(operation_option) ||
+					operation_option.value.action !== "replace"
+				) {
+					return yield* Effect.fail(failed("replace"));
+				}
+
+				const operation = operation_option.value;
+				const payload_input = {
+					action: "replace" as const,
+					expected_identity: execution.approval.before_identity,
+					message_id: execution.message_id,
+					replacement_identity: execution.approval.after_identity,
+					thread_id: execution.approval.thread_id,
+				};
+				const ValidateTerminalReadmission = () =>
+					authority
+						.ClaimReplace({
+							_tag: "replace",
+							agent_id: execution.approval.agent_id,
+							change_id: execution.approval.change_id,
+							expected_before: execution.approval.before_identity,
+							intended_after: execution.approval.after_identity,
+							message_id: execution.message_id,
+							path: execution.approval.path,
+							...(execution.raw_origin === undefined
+								? {}
+								: { raw_origin: execution.raw_origin }),
+							request_fingerprint: execution.request_fingerprint,
+							run_id: execution.approval.run_id,
+							sent_at: execution.sent_at,
+							thread_id: execution.approval.thread_id,
+							workspace_id: execution.approval.workspace_id,
+						})
+						.pipe(Effect.result);
+
+				if (operation.lifecycle === "committed") {
+					const readmission = yield* ValidateTerminalReadmission();
+
+					if (
+						Result.isFailure(readmission) ||
+						readmission.success.claim._tag !== "duplicate" ||
+						readmission.success.claim.operation.lifecycle !== "committed"
+					) {
+						return yield* Effect.fail(failed("replace"));
+					}
+
+					yield* evidence.RecordFilesystemMutation({
+						agent_id: execution.approval.agent_id,
+						operation: "write",
+						operation_id: execution.message_id,
+						path: execution.approval.path,
+						...(execution.raw_origin === undefined
+							? {}
+							: { raw_origin: execution.raw_origin }),
+						run_id: execution.approval.run_id,
+						thread_id: execution.approval.thread_id,
+					});
+					yield* repository.MarkEvidenceRecorded(execution.message_id);
+					yield* payloads.Consume(payload_input);
+					yield* approvals.MarkApplied(approval_id);
+
+					return;
+				}
+
+				if (operation.lifecycle === "rejected") {
+					const readmission = yield* ValidateTerminalReadmission();
+
+					if (
+						Result.isSuccess(readmission) ||
+						!(readmission.failure instanceof WorkspaceMutationAuthorityConflict) ||
+						readmission.failure.reason !== "operation_rejected"
+					) {
+						return yield* Effect.fail(failed("replace"));
+					}
+
+					yield* SettleRejected(
+						{
+							change_id: execution.approval.change_id,
+							expected_before: execution.approval.before_identity,
+							message_id: execution.message_id,
+							thread_id: execution.approval.thread_id,
+						},
+						execution.approval.after_identity,
+					);
+					yield* approvals.MarkRejected(approval_id);
+
+					return;
+				}
+
+				const payload = yield* payloads.Resume(payload_input);
+				const content = yield* DecodeWorkspaceText(payload.replacement);
+				const input: WorkspaceFileReplaceInput = {
+					agent_id: execution.approval.agent_id,
+					change_id: execution.approval.change_id,
+					content,
+					expected_before: execution.approval.before_identity,
+					message_id: execution.message_id,
+					path: execution.approval.path,
+					...(execution.raw_origin === undefined
+						? {}
+						: { raw_origin: execution.raw_origin }),
+					run_id: execution.approval.run_id,
+					sent_at: execution.sent_at,
+					thread_id: execution.approval.thread_id,
+					workspace_id: execution.approval.workspace_id,
+				};
+
+				const result = yield* RunReplace(input, {
+					_tag: "approved",
+					approval_id,
+					prepared_diff: execution.prepared_diff,
+					request_fingerprint: execution.request_fingerprint,
+				}).pipe(Effect.result);
+
+				if (Result.isFailure(result)) {
+					if (
+						result.failure instanceof WorkspaceFileServiceError &&
+						result.failure.reason === "changed"
+					) {
+						yield* approvals.MarkRejected(approval_id);
+
+						return;
+					}
+
+					return yield* Effect.fail(result.failure);
+				}
+			}).pipe(
+				Effect.mapError((error) =>
+					error instanceof WorkspaceFileServiceError ? error : failed("replace"),
+				),
+			);
+
+		const SettleDeniedApproval = (approval_id: string) =>
+			Effect.gen(function* () {
+				const denial = yield* approvals.ReadDenied(approval_id);
+				const operation_option = yield* repository.ReadOperation(denial.message_id);
+
+				if (
+					Option.isNone(operation_option) ||
+					operation_option.value.action !== "replace"
+				) {
+					return yield* Effect.fail(failed("replace"));
+				}
+
+				const operation = operation_option.value;
+
+				if (operation.lifecycle === "claimed") {
+					yield* repository.RejectChanged(denial.message_id);
+				} else if (operation.lifecycle !== "rejected") {
+					return yield* Effect.fail(failed("replace"));
+				}
+
+				yield* snapshots.DiscardRejectedReplace({
+					change_id: denial.approval.change_id,
+					expected_identity: denial.approval.before_identity,
+					replace_message_id: denial.message_id,
+					thread_id: denial.approval.thread_id,
+				});
+				yield* payloads.Consume({
+					action: "replace",
+					expected_identity: denial.approval.before_identity,
+					message_id: denial.message_id,
+					replacement_identity: denial.approval.after_identity,
+					thread_id: denial.approval.thread_id,
+				});
+			}).pipe(Effect.mapError(() => failed("replace")));
 
 		const Review = (input: WorkspaceFileReviewInput) =>
 			Schema.decodeUnknownEffect(WorkspaceFileReviewInput, { onExcessProperty: "error" })(
@@ -910,6 +1199,6 @@ export const WorkspaceFileServiceLive = Layer.effect(
 				),
 			);
 
-		return { Read, Replace, Review, Rollback };
+		return { ExecuteApproved, Read, Replace, Review, Rollback, SettleDeniedApproval };
 	}),
 );

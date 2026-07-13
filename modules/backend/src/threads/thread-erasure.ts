@@ -33,6 +33,7 @@ import {
 	WorkspaceChangeSnapshots,
 	WorkspaceMutationAuthorities,
 	WorkspaceMutationPayloads,
+	WorkspaceReplaceApprovals,
 } from "../persistence/schema";
 import { ThreadResourceQuiescer } from "./thread-resource-quiescer";
 
@@ -280,6 +281,9 @@ export const ThreadErasureLive = Layer.effect(
 						yield* transaction
 							.delete(WorkspaceChangeSnapshots)
 							.where(eq(WorkspaceChangeSnapshots.thread_id, thread_id));
+						yield* transaction
+							.delete(WorkspaceReplaceApprovals)
+							.where(eq(WorkspaceReplaceApprovals.thread_id, thread_id));
 						yield* transaction
 							.delete(WorkspaceMutationPayloads)
 							.where(eq(WorkspaceMutationPayloads.thread_id, thread_id));

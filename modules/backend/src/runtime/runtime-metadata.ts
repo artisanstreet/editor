@@ -4,6 +4,7 @@ import { Context, Effect, Layer } from "effect";
 
 export type RuntimeIdPrefix =
 	| "agent"
+	| "approval"
 	| "backend"
 	| "connection"
 	| "event"
