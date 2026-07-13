@@ -14,8 +14,8 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Branch: `codex/backend-services`
 - [x] Package manager: pnpm 11.7.0
 - [x] Stack: TypeScript 7, Effect 4 beta, Drizzle 1 RC, SQLite
-- [x] Latest verified implementation checkpoint: `f5ba7e1 fix: reconcile concurrent workspace replacements`
-- [x] Local `HEAD`, upstream, and `origin/codex/backend-services` were equal at `f5ba7e145375b2eb54bb7321c8eccc31c607fc21` before this documentation update.
+- [x] Latest verified implementation checkpoint: `3dadcaa feat: serve immutable workspace diffs`
+- [x] Local `HEAD`, upstream, and `origin/codex/backend-services` were equal at `3dadcaa80c9d1b9c3cbbc32dc198a53e1a5badaa` before this documentation update.
 - [x] `ARTISAN_RUN_NATIVE_ADDON_SMOKE=1 pnpm --filter @artisan/bounded-file-store-native verify:local` is the canonical native gate and passes locally for production reads/replacement, test-hook races, and process-crash recovery.
 - [x] Routine development verification is local-first. Do not recreate temporary GitHub Actions, remote runners, or similar testing detours; future CI is a real clean-checkout/release gate and never a substitute for local validation.
 - [x] Reconfirmed on 2026-07-13: the leftover empty `.github/workflows` directory was removed and the canonical native gate passed locally. The earlier BSOD remains classified as a one-off storage-driver incident, not a reason to move routine testing off-machine.
@@ -40,6 +40,8 @@ This project is not complete until the final audit in `backend-completion-matrix
 
 ## Active Work
 
+- [x] Immutable workspace diff generation, persistence, recovery, validation, and migration safety are committed and pushed at `07033aa`; the public query route and truthful unavailable/corrupt errors are committed and pushed at `3dadcaa`.
+
 - [x] Durable workspace change command/projection persistence is committed and pushed at `e7048cb`.
 - [x] Transactional SQLite rollback snapshots are committed and pushed at `3eba329`.
 - [x] Transactional run/agent/workspace authority is committed and pushed at `7cbe507`.
@@ -60,6 +62,15 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Typed public workspace list/read/replace/review/rollback protocol routes and the renderer-safe `ArtisanClient` surface are committed at `c072a82` and `a333d78`.
 - [x] Durable cross-process workspace-evidence idempotency is committed at `3e6302e`. New events use a nullable journal idempotency key with a SQLite unique index, legacy exact duplicates remain immutable and resolve to their earliest event, conflicting legacy intent fails closed, and a prior-schema migration fixture proves upgrade safety.
 - [x] Synchronized two-runtime replacement convergence, preflight publication races, native `Changed` reconciliation, committed cleanup, and thread-erasure overlap are committed at `f5ba7e1`.
+
+## Completed Immutable Workspace Diffs
+
+- [x] `WorkspaceChangeDiffService` prepares strict UTF-8 unified patches before any snapshot or native replacement, verifies both source identities, copies caller bytes, and applies V1 source, line, patch-byte, rendered-line, and deterministic edit-distance limits. The synchronous jsdiff path is bounded by `min(16_384, floor(4_000_000 / max(1, before_lines + after_lines)))`; the worst accepted 1,000-by-1,000-line full rewrite has a 750 ms local regression guard.
+- [x] Replacement preparation failure durably rejects and settles the operation before filesystem mutation. Applied/finalization recovery reconstructs the exact artifact from retained private payload bytes, while projection, immutable patch, journal command/event, and committed lifecycle transition are inserted atomically.
+- [x] Stored patches are SHA-256 and byte-count bound to operation/projection identities, path, thread, workspace, command, format version, and context. jsdiff parse-and-canonical-format validation handles quoted Unicode paths and fails malformed, missing, duplicate, or corrupt state closed without exposing source or patch bytes in errors.
+- [x] Prior committed projections upgrade to explicit `legacy_unavailable`. The migration uses inline checked `ADD COLUMN` statements instead of Drizzle's generated parent-table rebuild, preserving existing authority/payload children while migrations execute transactionally; fresh foreign keys, legacy preservation, and invalid-state checks are covered.
+- [x] Thread erasure explicitly removes private diff artifacts. Public diff queries return a V1 immutable result, `workspace.diff_unavailable` for missing/legacy state, `workspace.unavailable` for erased state, and `workspace.invariant_failed` for corruption.
+- [x] Focused verification passed 8 files with 115 tests. Full local `pnpm run validate` passed formatting, Oxlint, TypeScript, the production Svelte build, and 98 test files with 837 passing tests plus 3 intentional skips. Independent P0-P2 review and re-review are clean after fixing quoted-path validation and reducing/proving the synchronous work ceiling.
 
 ## Completed Concurrent Workspace Mutation Convergence
 
