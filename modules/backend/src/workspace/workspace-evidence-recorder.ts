@@ -1,4 +1,4 @@
-import { Context, Data, Effect, Layer, Schema, Semaphore } from "effect";
+import { Context, Data, Effect, Layer, Schedule, Schema, Semaphore } from "effect";
 
 import {
 	Identifier,
@@ -9,7 +9,15 @@ import {
 	ProcessOwnershipEvent,
 } from "@artisan/protocol";
 
-import { JournalStore, type JournalStoreError } from "../persistence/journal-store";
+import {
+	JournalStore,
+	JournalStoreFailure,
+	type JournalStoreError,
+} from "../persistence/journal-store";
+
+const EvidenceWriteContentionSchedule = Schedule.exponential("5 millis").pipe(
+	Schedule.upTo({ duration: "1 second", times: 8 }),
+);
 
 const WorkspaceEvidenceTrace = Schema.Struct({
 	agent_id: Schema.optional(Identifier),
@@ -167,7 +175,8 @@ export const WorkspaceEvidenceRecorderLive = Layer.effect(
 				if (existing.length > 0) {
 					const [event] = existing;
 
-					if (existing.length !== 1 || !has_same_intent(event!, input)) {
+					/** Legacy runtimes could append the same exact evidence more than once. */
+					if (existing.some((candidate) => !has_same_intent(candidate, input))) {
 						return yield* Effect.fail(
 							new WorkspaceEvidenceConflict({ operation_id: input.operation_id }),
 						);
@@ -180,6 +189,7 @@ export const WorkspaceEvidenceRecorderLive = Layer.effect(
 					...(input.agent_id === undefined ? {} : { agent_id: input.agent_id }),
 					causation_id: causation_id(input.operation_id),
 					correlation_id: correlation,
+					idempotency_key: correlation,
 					payload: payload_from_input(input),
 					...(input.raw_origin === undefined ? {} : { raw_origin: input.raw_origin }),
 					...(input.run_id === undefined ? {} : { run_id: input.run_id }),
@@ -190,7 +200,14 @@ export const WorkspaceEvidenceRecorderLive = Layer.effect(
 			});
 
 		const Record = (input: WorkspaceEvidenceInput) =>
-			Semaphore.withPermit(lock)(RecordUnlocked(input));
+			Semaphore.withPermit(lock)(
+				RecordUnlocked(input).pipe(
+					Effect.retry({
+						schedule: EvidenceWriteContentionSchedule,
+						while: (error) => error instanceof JournalStoreFailure,
+					}),
+				),
+			);
 		const Decode = <A>(schema: Schema.Codec<A, A>, input: unknown) =>
 			Schema.decodeUnknownEffect(schema, { onExcessProperty: "error" })(input).pipe(
 				Effect.mapError(

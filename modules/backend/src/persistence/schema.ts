@@ -52,6 +52,7 @@ export const JournalEvents = sqliteTable(
 		stream_sequence: integer("stream_sequence").notNull(),
 		schema_version: integer("schema_version").notNull(),
 		event_id: text("event_id").notNull(),
+		idempotency_key: text("idempotency_key"),
 		correlation_id: text("correlation_id").notNull(),
 		causation_id: text("causation_id").notNull(),
 		origin: text("origin").notNull(),
@@ -65,6 +66,7 @@ export const JournalEvents = sqliteTable(
 	},
 	(table) => [
 		uniqueIndex("journal_events_event_id_unique").on(table.event_id),
+		uniqueIndex("journal_events_idempotency_key_unique").on(table.idempotency_key),
 		uniqueIndex("journal_events_stream_sequence_unique").on(
 			table.stream_id,
 			table.stream_sequence,

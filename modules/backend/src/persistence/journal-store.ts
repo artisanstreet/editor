@@ -41,6 +41,7 @@ export interface JournalEventInput {
 	readonly agent_id?: string;
 	readonly causation_id: string;
 	readonly correlation_id: string;
+	readonly idempotency_key?: string;
 	readonly payload: EventPayload;
 	readonly raw_origin?: RawOrigin;
 	readonly run_id?: string;
@@ -433,6 +434,9 @@ export const JournalStoreLive = Layer.effect(
 								correlation_id: input.correlation_id,
 								event_id,
 								event_type: input.payload.type,
+								...(input.idempotency_key === undefined
+									? {}
+									: { idempotency_key: input.idempotency_key }),
 								occurred_at,
 								origin: "backend",
 								payload_json: JSON.stringify(input.payload),
