@@ -49,6 +49,7 @@ import {
 	type TerminalListQueryEnvelope,
 	type UnsubscribeEnvelope,
 	type WorkspaceChangeListQueryEnvelope,
+	type WorkspaceChangeDiffQueryEnvelope,
 	type WorkspaceChangeReviewEnvelope,
 	type WorkspaceChangeRollbackEnvelope,
 	type WorkspaceFileReadQueryEnvelope,
@@ -86,6 +87,10 @@ import {
 	ThreadRetentionPolicyService,
 } from "../threads/thread-retention-policy";
 import { WorkspaceChangeRepository } from "../workspace/workspace-change-repository";
+import {
+	WorkspaceChangeDiffService,
+	WorkspaceChangeDiffUnavailable,
+} from "../workspace/workspace-change-diff-service";
 import {
 	WorkspaceFileService,
 	WorkspaceFileServiceError,
@@ -273,6 +278,33 @@ function workspace_error_detail(error: unknown): ProtocolErrorDetail {
 	};
 }
 
+function workspace_diff_error_detail(error: unknown): ProtocolErrorDetail {
+	if (
+		error instanceof WorkspaceChangeDiffUnavailable &&
+		(error.reason === "legacy_unavailable" || error.reason === "missing")
+	) {
+		return {
+			code: "workspace.diff_unavailable",
+			message: "No immutable diff is available for this workspace change.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof WorkspaceChangeDiffUnavailable && error.reason === "erased") {
+		return {
+			code: "workspace.unavailable",
+			message: "The workspace change is no longer available.",
+			retryable: false,
+		};
+	}
+
+	return {
+		code: "workspace.invariant_failed",
+		message: "The immutable workspace diff failed validation.",
+		retryable: false,
+	};
+}
+
 function thread_item_from_event(event: EventEnvelope): ThreadListItem | undefined {
 	if (event.payload.type === "thread.metadata.updated") {
 		return event.payload.thread;
@@ -356,6 +388,7 @@ export function make_protocol_server_layer(
 			const thread_read_model = yield* ThreadReadModel;
 			const retention_policy = yield* ThreadRetentionPolicyService;
 			const workspace_changes = yield* WorkspaceChangeRepository;
+			const workspace_diffs = yield* WorkspaceChangeDiffService;
 			const workspace_files = yield* WorkspaceFileService;
 
 			const Open = Effect.gen(function* () {
@@ -1022,6 +1055,41 @@ export function make_protocol_server_layer(
 							),
 						);
 
+				const HandleWorkspaceChangeDiffQuery = (
+					query: WorkspaceChangeDiffQueryEnvelope,
+					current: ReadyState,
+				) =>
+					workspace_diffs.Read(query.payload).pipe(
+						Effect.flatMap((result) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "workspace.change.diff.query.result",
+									message_id,
+									origin: "backend",
+									payload: result,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch((error) => {
+							const detail = workspace_diff_error_detail(error);
+
+							return EnqueueError(
+								current,
+								detail.code,
+								detail.message,
+								detail.retryable,
+								query.message_id,
+							);
+						}),
+					);
+
 				const HandleSubscribe = (subscribe: SubscribeEnvelope, current: ReadyState) =>
 					Effect.gen(function* () {
 						if (current.subscriptions[subscribe.subscription_id]) {
@@ -1614,6 +1682,8 @@ export function make_protocol_server_layer(
 							return HandleWorkspaceFileReadQuery(envelope, current);
 						case "workspace.change.list.query":
 							return HandleWorkspaceChangeListQuery(envelope, current);
+						case "workspace.change.diff.query":
+							return HandleWorkspaceChangeDiffQuery(envelope, current);
 						case "workspace.file.replace":
 						case "workspace.change.review":
 						case "workspace.change.rollback":

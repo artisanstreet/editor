@@ -16,6 +16,7 @@ import type {
 	OutboundControlEnvelope,
 	SubscribeEnvelope,
 	ThreadListQueryEnvelope,
+	WorkspaceChangeDiffQueryEnvelope,
 	WorkspaceChangeListQueryEnvelope,
 	WorkspaceChangeReviewEnvelope,
 	WorkspaceChangeRollbackEnvelope,
@@ -247,6 +248,21 @@ function workspace_list(message_id: string): WorkspaceChangeListQueryEnvelope {
 	};
 }
 
+function workspace_diff(
+	message_id: string,
+	change_id = "change_workspace_protocol",
+): WorkspaceChangeDiffQueryEnvelope {
+	return {
+		kind: "workspace.change.diff.query",
+		message_id,
+		origin: "frontend",
+		payload: { change_id, thread_id: "thread_workspace_protocol" },
+		protocol_version: 1,
+		schema_version: 1,
+		sent_at: workspace_time,
+	};
+}
+
 function workspace_review(
 	message_id: string,
 	change_id = "change_workspace_protocol",
@@ -463,6 +479,10 @@ describe("protocol server", () => {
 
 						yield* connection.Receive(workspace_list("workspace_list_empty"));
 						const empty_list = yield* take_outbound(connection, 1);
+						yield* connection.Receive(
+							workspace_diff("workspace_diff_missing", "change_workspace_missing"),
+						);
+						const diff_missing = yield* take_outbound(connection, 1);
 
 						yield* Effect.promise(() =>
 							writeFile(join(root, "src", "example.ts"), "external"),
@@ -506,6 +526,8 @@ describe("protocol server", () => {
 
 						yield* connection.Receive(workspace_list("workspace_list_recorded"));
 						const recorded_list = yield* take_outbound(connection, 1);
+						yield* connection.Receive(workspace_diff("workspace_diff_recorded"));
+						const recorded_diff = yield* take_outbound(connection, 1);
 
 						yield* terminalize_workspace_run();
 						yield* connection.Receive(workspace_review("workspace_review"));
@@ -551,10 +573,12 @@ describe("protocol server", () => {
 
 						return {
 							conflict,
+							diff_missing,
 							empty_list,
 							list_unavailable,
 							read,
 							read_unavailable,
+							recorded_diff,
 							recorded_list,
 							replace,
 							replace_duplicate,
@@ -580,6 +604,13 @@ describe("protocol server", () => {
 					correlation_id: "workspace_list_empty",
 					kind: "workspace.change.list.query.result",
 					payload: { changes: [] },
+				},
+			]);
+			expect(output.diff_missing).toMatchObject([
+				{
+					correlation_id: "workspace_diff_missing",
+					kind: "protocol.error",
+					payload: { code: "workspace.diff_unavailable", retryable: false },
 				},
 			]);
 			expect(output.conflict).toMatchObject([
@@ -638,6 +669,32 @@ describe("protocol server", () => {
 								review_state: "needs_review",
 							},
 						],
+					},
+				},
+			]);
+			expect(output.recorded_diff).toMatchObject([
+				{
+					correlation_id: "workspace_diff_recorded",
+					kind: "workspace.change.diff.query.result",
+					payload: {
+						added_line_count: 1,
+						after_identity: content_identity("after"),
+						before_identity: content_identity("before"),
+						change_id: "change_workspace_protocol",
+						context_lines: 3,
+						format: "unified",
+						format_version: 1,
+						patch: expect.stringContaining(
+							"--- a/src/example.ts\n+++ b/src/example.ts\n",
+						),
+						patch_identity: {
+							algorithm: "sha256",
+							byte_count: expect.any(Number),
+							content_hash: expect.stringMatching(/^[a-f0-9]{64}$/),
+						},
+						removed_line_count: 1,
+						truncated: false,
+						workspace_id: "workspace_protocol",
 					},
 				},
 			]);
