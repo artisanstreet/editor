@@ -1394,3 +1394,56 @@ export const TerminalCommands = sqliteTable("terminal_commands", {
 	created_at: text("created_at").notNull(),
 	updated_at: text("updated_at").notNull(),
 });
+
+/** Stores one canonical checkout root for each durable hosted project. */
+export const Projects = sqliteTable(
+	"projects",
+	{
+		project_id: text("project_id").primaryKey(),
+		workspace_id: text("workspace_id").notNull(),
+		canonical_root: text("canonical_root").notNull(),
+		display_name: text("display_name").notNull(),
+		registered_at: text("registered_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("projects_workspace_id_unique").on(table.workspace_id),
+		uniqueIndex("projects_canonical_root_unique").on(table.canonical_root),
+		index("projects_registered_at_index").on(table.registered_at),
+	],
+);
+
+/** Binds exactly one canonical hosted origin to each registered project. */
+export const ProjectHostedOrigins = sqliteTable(
+	"project_hosted_origins",
+	{
+		project_id: text("project_id")
+			.primaryKey()
+			.references(() => Projects.project_id, { onDelete: "cascade" }),
+		provider_id: text("provider_id").notNull(),
+		canonical_host: text("canonical_host").notNull(),
+		owner: text("owner").notNull(),
+		name: text("name").notNull(),
+		native_id: text("native_id").notNull(),
+		selected_account_login: text("selected_account_login").notNull(),
+		clone_url: text("clone_url").notNull(),
+		web_url: text("web_url").notNull(),
+		remote_name: text("remote_name").notNull(),
+		fetch_url: text("fetch_url").notNull(),
+		push_url: text("push_url").notNull(),
+	},
+	(table) => [
+		uniqueIndex("project_hosted_origins_native_identity_unique").on(
+			table.provider_id,
+			table.canonical_host,
+			table.native_id,
+		),
+		uniqueIndex("project_hosted_origins_coordinate_unique").on(
+			table.provider_id,
+			table.canonical_host,
+			table.owner,
+			table.name,
+		),
+		index("project_hosted_origins_project_id_index").on(table.project_id),
+	],
+);

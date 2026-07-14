@@ -18,6 +18,35 @@ export {
 export { ProtocolRouter } from "./protocol/protocol-router";
 export { ProtocolServer } from "./protocol/protocol-server";
 export {
+	HostedProjectIdentity,
+	HostedProjectId,
+	HostedWorkspaceId,
+	ProjectHostedOrigin,
+	ProjectId,
+	ProjectRoot,
+	ProjectWorkspaceId,
+	RegisteredProject,
+	RegisterHostedProject,
+	type ProjectHostedOrigin as ProjectHostedOriginValue,
+	type HostedProjectId as HostedProjectIdValue,
+	type HostedWorkspaceId as HostedWorkspaceIdValue,
+	type ProjectId as ProjectIdValue,
+	type ProjectRoot as ProjectRootValue,
+	type ProjectWorkspaceId as ProjectWorkspaceIdValue,
+	type RegisteredProject as RegisteredProjectValue,
+	type RegisterHostedProject as RegisterHostedProjectValue,
+} from "./projects/project";
+export {
+	ProjectRepository,
+	ProjectRepositoryConflict,
+	ProjectRepositoryFailure,
+	ProjectRepositoryInvalid,
+	ProjectRepositoryInvariant,
+	ProjectRepositoryLive,
+	type ProjectRegistrationResult,
+	type ProjectRepositoryError,
+} from "./projects/project-repository";
+export {
 	GlobalGuidanceConflict,
 	GlobalGuidanceInvariantError,
 	GlobalGuidanceService,

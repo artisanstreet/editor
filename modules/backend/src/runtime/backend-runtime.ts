@@ -50,6 +50,7 @@ import { JournalNotifierLive } from "../persistence/journal-notifier";
 import { JournalStoreLive } from "../persistence/journal-store";
 import { OrchestrationRepositoryLive } from "../persistence/orchestration-repository";
 import { ThreadReadModelLive } from "../persistence/thread-read-model";
+import { ProjectRepositoryLive } from "../projects/project-repository";
 import { CommandRouterLive } from "../protocol/command-router";
 import {
 	DefaultProtocolConnectionOptions,
@@ -203,6 +204,10 @@ export function make_backend_layer(options: BackendOptions) {
 		OrchestrationRepositoryLive,
 		ThreadReadModelLive,
 	).pipe(Layer.provideMerge(infrastructure));
+	const project_catalog = ProjectRepositoryLive.pipe(
+		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(infrastructure),
+	);
 	const workspace_evidence = WorkspaceEvidenceRecorderLive.pipe(Layer.provideMerge(persistence));
 	const workspace_changes = WorkspaceChangeRepositoryLive.pipe(
 		Layer.provideMerge(NodeCrypto.layer),
@@ -344,6 +349,7 @@ export function make_backend_layer(options: BackendOptions) {
 					Layer.provideMerge(infrastructure),
 				);
 	const project_affinity = ThreadProjectAffinityRepositoryLive.pipe(
+		Layer.provideMerge(project_catalog),
 		Layer.provideMerge(infrastructure),
 	);
 	const project_affinity_coordination =
@@ -431,6 +437,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(erasure),
 		Layer.provideMerge(retention),
 		Layer.provideMerge(metadata_refinement),
+		Layer.provideMerge(project_catalog),
 		Layer.provideMerge(project_affinity_coordination),
 		Layer.provideMerge(guidance),
 		Layer.provideMerge(model_behaviour),
