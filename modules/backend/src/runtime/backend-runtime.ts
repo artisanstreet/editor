@@ -293,17 +293,18 @@ export function make_backend_layer(options: BackendOptions) {
 	const workspace_git_checkouts_repository = WorkspaceGitCheckoutRepositoryLive.pipe(
 		Layer.provideMerge(infrastructure),
 	);
+	const workspace_git_execution_gate = make_workspace_git_execution_gate_layer({
+		database_path: options.database_path,
+	});
 	const workspace_git_checkouts = WorkspaceGitCheckoutCoordinatorLive.pipe(
 		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(workspace_git_execution_gate),
 		Layer.provideMerge(workspace_git_observer),
 		Layer.provideMerge(workspace_git_registry),
 		Layer.provideMerge(workspace_git_sessions),
 		Layer.provideMerge(workspace_git_checkouts_repository),
 		Layer.provideMerge(infrastructure),
 	);
-	const workspace_git_execution_gate = make_workspace_git_execution_gate_layer({
-		database_path: options.database_path,
-	});
 	const workspace_git_mutations_repository = WorkspaceGitMutationRepositoryLive.pipe(
 		Layer.provideMerge(workspace_git_execution_gate),
 		Layer.provideMerge(infrastructure),
