@@ -1,73 +1,68 @@
-import { Context, Data, Effect, Option, Scope, Stream } from "effect";
+import { Context, Data, Effect, Layer, Option, Scope, Stream } from "effect";
 
-/** Identifies one preview target lifecycle state. */
-export type PreviewTargetState = "healthy" | "registered" | "stopped" | "unhealthy";
+import {
+	PreviewTargetHealth as PreviewTargetHealthSchema,
+	type CommandEnvelope,
+	type EventEnvelope,
+	type PreviewTargetRecord,
+	type PreviewTargetRemovedRecord,
+} from "@artisan/protocol";
 
-/** Identifies the local process-like source that owns a preview target. */
-export type PreviewTargetSource =
-	| { readonly kind: "process"; readonly process_id: string }
-	| { readonly kind: "terminal"; readonly terminal_id: string };
+export type {
+	PreviewTargetHealth,
+	PreviewTargetRecord,
+	PreviewTargetSource,
+} from "@artisan/protocol";
 
-/** Records one bounded health observation for a preview target. */
-export interface PreviewTargetHealth {
-	readonly checked_at_ms: number;
-	readonly latency_ms: number;
-	readonly message: Option.Option<string>;
-	readonly status: "healthy" | "unhealthy";
-	readonly status_code: Option.Option<number>;
-}
+/** Identifies one stored preview lifecycle state. */
+export type PreviewTargetState = PreviewTargetRecord["state"];
 
-/** Defines one explicitly registered local preview target. */
-export interface PreviewTargetRecord {
-	readonly created_at_ms: number;
-	readonly health: Option.Option<PreviewTargetHealth>;
-	readonly id: string;
-	readonly project_id: string;
-	readonly source: Option.Option<PreviewTargetSource>;
-	readonly state: PreviewTargetState;
-	readonly updated_at_ms: number;
-	readonly url: string;
-	readonly workspace_id: string;
-}
+/** Preserves the public error-code alias used by the package entrypoint. */
+export type PreviewTargetErrorCode =
+	| "conflict"
+	| "health_probe"
+	| "invalid_target"
+	| "invariant"
+	| "not_found"
+	| "unavailable";
 
-/** Supplies the immutable fields needed to register a preview target. */
-export interface PreviewTargetRegistration {
-	readonly id: string;
-	readonly project_id: string;
-	readonly source?: PreviewTargetSource;
-	readonly url: string;
-	readonly workspace_id: string;
-}
+/** Preserves the event alias while events now use canonical journal envelopes. */
+export type PreviewTargetEvent = EventEnvelope;
 
-/** Reports one registry change through the bounded sliding status stream. */
-export interface PreviewTargetEvent {
-	readonly kind: "health" | "registered" | "removed" | "state";
-	readonly target: PreviewTargetRecord;
-}
+/** Preserves the registration alias while commands carry the durable identity. */
+export type PreviewTargetRegistration = CommandEnvelope;
 
-/** Identifies a preview registry or health-probe failure. */
-export type PreviewTargetErrorCode = "duplicate" | "health_probe" | "invalid_target" | "not_found";
+/** Represents a target snapshot carried by an accepted lifecycle event. */
+export type PreviewTargetSnapshot = PreviewTargetRecord | PreviewTargetRemovedRecord;
 
-/** Reports a provider-neutral preview target failure. */
-export class PreviewTargetError extends Data.TaggedError("PreviewTargetError")<{
-	readonly cause: unknown;
-	readonly code: PreviewTargetErrorCode;
-	readonly target_id: string;
-}> {}
+/** Carries a protocol command whose message identity anchors durable replay. */
+export type PreviewTargetCommandEnvelope = CommandEnvelope;
 
-/** Reports a failure from a replaceable local health probe. */
-export class PreviewHealthProbeError extends Data.TaggedError("PreviewHealthProbeError")<{
-	readonly cause: unknown;
-	readonly target_id: string;
-}> {}
-
-/** Contains adapter output before the registry adds timestamps and state. */
+/** Captures a health observation before it is committed to a target. */
 export interface PreviewHealthProbeResult {
 	readonly latency_ms: number;
 	readonly message: Option.Option<string>;
 	readonly status: "healthy" | "unhealthy";
 	readonly status_code: Option.Option<number>;
 }
+
+/** Returns the canonical committed event and whether this invocation created it. */
+export interface PreviewTargetAcceptance {
+	readonly event: EventEnvelope;
+	readonly status: "accepted" | "duplicate";
+}
+
+/** Reports a source-safe preview registry or health-probe failure. */
+export class PreviewTargetError extends Data.TaggedError("PreviewTargetError")<{
+	readonly code: PreviewTargetErrorCode;
+	readonly target_id: string;
+}> {}
+
+/** Reports bounded local-health adapter failure without exposing implementation errors. */
+export class PreviewHealthProbeError extends Data.TaggedError("PreviewHealthProbeError")<{
+	readonly reason: "unavailable" | "failed";
+	readonly target_id: string;
+}> {}
 
 /** Runs one scope-owned health observation without launching a server. */
 export class PreviewHealthProbe extends Context.Service<
@@ -79,6 +74,14 @@ export class PreviewHealthProbe extends Context.Service<
 	}
 >()("Artisan/PreviewHealthProbe") {}
 
+/** Provides the explicit default when no local preview health adapter is installed. */
+export const UnavailablePreviewHealthProbeLive = Layer.succeed(PreviewHealthProbe, {
+	Probe: (target) =>
+		Effect.fail(
+			new PreviewHealthProbeError({ reason: "unavailable", target_id: target.target_id }),
+		),
+});
+
 /** Supplies epoch milliseconds for preview target timestamps. */
 export class PreviewTargetClock extends Context.Service<
 	PreviewTargetClock,
@@ -87,23 +90,31 @@ export class PreviewTargetClock extends Context.Service<
 	}
 >()("Artisan/PreviewTargetClock") {}
 
-/** Stores explicit local targets and exposes a stream that drops oldest unread events. */
+/** Owns durable preview targets and a bounded feed of newly committed events. */
 export class PreviewTarget extends Context.Service<
 	PreviewTarget,
 	{
-		readonly SlidingEvents: Stream.Stream<PreviewTargetEvent>;
-		readonly Get: (id: string) => Effect.Effect<Option.Option<PreviewTargetRecord>>;
-		readonly List: (workspace_id?: string) => Effect.Effect<ReadonlyArray<PreviewTargetRecord>>;
+		readonly SlidingEvents: Stream.Stream<EventEnvelope>;
+		readonly Get: (input: {
+			readonly project_id: string;
+			readonly target_id: string;
+			readonly workspace_id: string;
+		}) => Effect.Effect<Option.Option<PreviewTargetRecord>, PreviewTargetError>;
+		readonly List: (input: {
+			readonly project_id: string;
+			readonly workspace_id: string;
+		}) => Effect.Effect<ReadonlyArray<PreviewTargetRecord>, PreviewTargetError>;
 		readonly Probe: (
-			id: string,
-		) => Effect.Effect<PreviewTargetRecord, PreviewTargetError, Scope.Scope>;
+			command: PreviewTargetCommandEnvelope,
+		) => Effect.Effect<PreviewTargetAcceptance, PreviewTargetError, Scope.Scope>;
 		readonly Register: (
-			input: PreviewTargetRegistration,
-		) => Effect.Effect<PreviewTargetRecord, PreviewTargetError>;
-		readonly Remove: (id: string) => Effect.Effect<void, PreviewTargetError>;
-		readonly SetState: (
-			id: string,
-			state: PreviewTargetState,
-		) => Effect.Effect<PreviewTargetRecord, PreviewTargetError>;
+			command: PreviewTargetCommandEnvelope,
+		) => Effect.Effect<PreviewTargetAcceptance, PreviewTargetError>;
+		readonly Remove: (
+			command: PreviewTargetCommandEnvelope,
+		) => Effect.Effect<PreviewTargetAcceptance, PreviewTargetError>;
 	}
 >()("Artisan/PreviewTarget") {}
+
+/** Validates a probe result before it crosses the durable persistence boundary. */
+export const PreviewHealthProbeResultSchema = PreviewTargetHealthSchema;

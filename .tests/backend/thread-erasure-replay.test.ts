@@ -3,11 +3,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Effect, Layer, Stream } from "effect";
+import { Effect, Layer, Schema, Stream } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
-import type {
-	CommandEnvelope,
+import {
+	CommandEnvelope as CommandEnvelopeSchema,
+	type CommandEnvelope,
 	HelloEnvelope,
 	OutboundControlEnvelope,
 	SubscribeEnvelope,
@@ -25,6 +26,7 @@ import {
 	EventStreams,
 	JournalCommands,
 	JournalEvents,
+	PreviewTargetProbeClaims,
 	ThreadErasureClaims,
 	WorkspaceChangeOperations,
 	WorkspaceChanges,
@@ -35,6 +37,9 @@ import { ThreadReadModel } from "../../modules/backend/src/persistence/thread-re
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
+const EncodeCommandJson = Schema.encodeEffect(Schema.fromJsonString(CommandEnvelopeSchema), {
+	onExcessProperty: "error",
+});
 
 const temporary_directories: Array<string> = [];
 
@@ -298,6 +303,38 @@ describe("thread erasure replay", () => {
 							thread_id: "thread_erased",
 							updated_at: now.value,
 						});
+						const preview_probe_command = {
+							kind: "command",
+							message_id: "secret_preview_probe",
+							origin: "frontend",
+							payload: {
+								project_id: "secret_project",
+								target_id: "secret_preview",
+								type: "preview.target.probe",
+								workspace_id: "secret_workspace",
+							},
+							protocol_version: 1,
+							schema_version: 1,
+							sent_at: now.value,
+							thread_id: "thread_erased",
+						} satisfies CommandEnvelope;
+						const preview_probe_command_json =
+							yield* EncodeCommandJson(preview_probe_command);
+
+						yield* database.client.insert(PreviewTargetProbeClaims).values({
+							claim_token: "claim_secret_preview_probe",
+							command_json: preview_probe_command_json,
+							created_at: now.value,
+							lease_expires_at: "2026-07-10T18:10:00.000Z",
+							message_id: preview_probe_command.message_id,
+							owner_instance_id: "backend_secret_preview_owner",
+							project_id: preview_probe_command.payload.project_id,
+							target_id: preview_probe_command.payload.target_id,
+							target_generation_id: "preview_target_secret",
+							thread_id: preview_probe_command.thread_id,
+							updated_at: now.value,
+							workspace_id: preview_probe_command.payload.workspace_id,
+						});
 
 						yield* database.client.insert(ThreadErasureClaims).values({
 							claimed_at: "2026-07-10T18:04:00.000Z",
@@ -355,6 +392,9 @@ describe("thread erasure replay", () => {
 							journal_events: yield* database.client.select().from(JournalEvents),
 							kept_later,
 							kept_run,
+							preview_probe_claims: yield* database.client
+								.select()
+								.from(PreviewTargetProbeClaims),
 							reconnect_replay,
 							repeated,
 							streams: yield* database.client.select().from(EventStreams),
@@ -514,6 +554,7 @@ describe("thread erasure replay", () => {
 			expect(result.workspace_changes).toEqual([]);
 			expect(result.workspace_change_snapshots).toEqual([]);
 			expect(result.workspace_mutation_authorities).toEqual([]);
+			expect(result.preview_probe_claims).toEqual([]);
 		} finally {
 			await runtime.dispose();
 		}

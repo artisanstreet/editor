@@ -29,6 +29,7 @@ import {
 	OrchestrationOutbox,
 	OrchestrationRawObservations,
 	OrchestrationRuns,
+	PreviewTargetProbeClaims,
 	TerminalCommands,
 	TerminalSessions,
 	ThreadErasureClaims,
@@ -611,6 +612,9 @@ export const ThreadErasureLive = Layer.effect(
 							.delete(WorkspaceChangeOperations)
 							.where(eq(WorkspaceChangeOperations.thread_id, thread_id));
 						yield* transaction
+							.delete(PreviewTargetProbeClaims)
+							.where(eq(PreviewTargetProbeClaims.thread_id, thread_id));
+						yield* transaction
 							.delete(JournalCommands)
 							.where(eq(JournalCommands.thread_id, thread_id));
 
@@ -665,7 +669,15 @@ export const ThreadErasureLive = Layer.effect(
 							.delete(ThreadErasureClaims)
 							.where(eq(ThreadErasureClaims.thread_id, thread_id));
 
-						return erasure_event!.journal_sequence;
+						if (!erasure_event) {
+							return yield* new ThreadErasureFailure({
+								cause: new Error(
+									`Thread ${thread_id} erasure event was not persisted`,
+								),
+							});
+						}
+
+						return erasure_event.journal_sequence;
 					}),
 				);
 				const journal_sequence = yield* RetrySqliteWrite(ErasureTransaction);

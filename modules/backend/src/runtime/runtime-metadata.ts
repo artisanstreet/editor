@@ -12,6 +12,7 @@ export type RuntimeIdPrefix =
 	| "fetch"
 	| "heartbeat"
 	| "message"
+	| "preview_target"
 	| "run"
 	| "stream_ticket";
 

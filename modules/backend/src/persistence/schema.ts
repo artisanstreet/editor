@@ -1669,6 +1669,67 @@ export const TerminalCommands = sqliteTable("terminal_commands", {
 	updated_at: text("updated_at").notNull(),
 });
 
+/** Stores compact, thread-independent local preview target projections. */
+export const PreviewTargets = sqliteTable(
+	"preview_targets",
+	{
+		target_id: text("target_id").notNull(),
+		project_id: text("project_id").notNull(),
+		workspace_id: text("workspace_id").notNull(),
+		generation_id: text("generation_id").notNull(),
+		url: text("url").notNull(),
+		source_kind: text("source_kind"),
+		source_id: text("source_id"),
+		state: text("state").notNull(),
+		health_status: text("health_status"),
+		health_checked_at_ms: integer("health_checked_at_ms"),
+		health_latency_ms: integer("health_latency_ms"),
+		health_message: text("health_message"),
+		health_status_code: integer("health_status_code"),
+		created_at_ms: integer("created_at_ms").notNull(),
+		updated_at_ms: integer("updated_at_ms").notNull(),
+	},
+	(table) => [
+		primaryKey({ columns: [table.project_id, table.workspace_id, table.target_id] }),
+		check(
+			"preview_targets_source_check",
+			sql`COALESCE((${table.source_kind} IS NULL AND ${table.source_id} IS NULL) OR (${table.source_kind} IS NOT NULL AND ${table.source_kind} IN ('process', 'terminal') AND ${table.source_id} IS NOT NULL), 0)`,
+		),
+		check(
+			"preview_targets_state_check",
+			sql`${table.state} IN ('healthy', 'registered', 'stopped', 'unhealthy')`,
+		),
+		check(
+			"preview_targets_health_check",
+			sql`COALESCE((${table.health_status} IS NULL AND ${table.health_checked_at_ms} IS NULL AND ${table.health_latency_ms} IS NULL AND ${table.health_message} IS NULL AND ${table.health_status_code} IS NULL) OR (${table.health_status} IS NOT NULL AND ${table.health_status} IN ('healthy', 'unhealthy') AND ${table.health_checked_at_ms} IS NOT NULL AND ${table.health_latency_ms} IS NOT NULL AND ${table.health_latency_ms} >= 0), 0)`,
+		),
+	],
+);
+
+/** Fences one externally executing preview probe by durable command identity. */
+export const PreviewTargetProbeClaims = sqliteTable(
+	"preview_target_probe_claims",
+	{
+		message_id: text("message_id").primaryKey(),
+		command_json: text("command_json").notNull(),
+		thread_id: text("thread_id").notNull(),
+		project_id: text("project_id").notNull(),
+		workspace_id: text("workspace_id").notNull(),
+		target_id: text("target_id").notNull(),
+		target_generation_id: text("target_generation_id").notNull(),
+		claim_token: text("claim_token").notNull(),
+		owner_instance_id: text("owner_instance_id").notNull(),
+		lease_expires_at: text("lease_expires_at").notNull(),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("preview_target_probe_claims_token_unique").on(table.claim_token),
+		index("preview_target_probe_claims_thread_index").on(table.thread_id),
+		index("preview_target_probe_claims_lease_index").on(table.lease_expires_at),
+	],
+);
+
 /** Stores one canonical checkout root for each durable hosted project. */
 export const Projects = sqliteTable(
 	"projects",
