@@ -6,7 +6,10 @@ import { Effect, Layer, Option } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { Git, GitError } from "../../modules/backend/src/git/git";
-import { GitMutation } from "../../modules/backend/src/git/git-mutation";
+import {
+	git_mutation_plan_matches_operation,
+	GitMutation,
+} from "../../modules/backend/src/git/git-mutation";
 import { make_node_git_mutation_layer } from "../../modules/backend/src/git/node-git-mutation";
 import { make_git_layer, make_node_git_layer } from "../../modules/backend/src/git/node-git";
 import {
@@ -452,5 +455,37 @@ describe("GitMutation plans", () => {
 		expect(outcome.type).toBe("applied");
 		expect(status.some((entry) => entry.path === "unstaged.txt")).toBe(true);
 		expect(await read_git(root, ["log", "-1", "--format=%B"])).toBe("approved message\n\n");
+	});
+
+	it("binds a prepared plan to the exact operation intent", async () => {
+		const root = await make_root();
+
+		await initialize_repository(root);
+		await fs.writeFile(join(root, "approved.txt"), "approved\n");
+		await run_git(root, ["add", "approved.txt"]);
+
+		const mutation = await make_mutation(root);
+		const plan = await run_mutation(
+			mutation.Prepare({ message: "approved message", type: "commit" }),
+		);
+
+		expect(
+			git_mutation_plan_matches_operation(plan, {
+				message: "approved message",
+				type: "commit",
+			}),
+		).toBe(true);
+		expect(
+			git_mutation_plan_matches_operation(plan, {
+				message: "changed message",
+				type: "commit",
+			}),
+		).toBe(false);
+		expect(
+			git_mutation_plan_matches_operation(plan, {
+				branch: "feature",
+				type: "branch_create",
+			}),
+		).toBe(false);
 	});
 });

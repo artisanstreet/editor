@@ -444,7 +444,10 @@ describe("GitMutation approved operations", () => {
 		expect("expected_remote_head" in plan).toBe(false);
 		expect(outcome).toMatchObject({
 			head: source_head,
+			remote: "origin",
+			remote_endpoint: remote,
 			remote_head: source_head,
+			target_branch: "published",
 			type: "applied",
 		});
 		expect(await read_git(remote, ["rev-parse", "refs/heads/published"])).toBe(source_head);

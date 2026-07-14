@@ -61,14 +61,66 @@ export const GitResetMode = Schema.Literals(["soft", "mixed", "hard"]);
 
 export type GitResetMode = typeof GitResetMode.Type;
 
+const WorkspaceGitMergeStartOperation = Schema.Struct({
+	action: Schema.Literal("start"),
+	target_branch: GitLocalBranchName,
+	type: Schema.Literal("merge"),
+});
+
+const WorkspaceGitMergeContinuationOperation = Schema.Union([
+	Schema.Struct({ action: Schema.Literal("continue"), type: Schema.Literal("merge") }),
+	Schema.Struct({ action: Schema.Literal("abort"), type: Schema.Literal("merge") }),
+]);
+
+const WorkspaceGitRebaseStartOperation = Schema.Struct({
+	action: Schema.Literal("start"),
+	target_branch: GitLocalBranchName,
+	type: Schema.Literal("rebase"),
+});
+
+const WorkspaceGitRebaseContinuationOperation = Schema.Union([
+	Schema.Struct({ action: Schema.Literal("continue"), type: Schema.Literal("rebase") }),
+	Schema.Struct({ action: Schema.Literal("abort"), type: Schema.Literal("rebase") }),
+	Schema.Struct({ action: Schema.Literal("skip"), type: Schema.Literal("rebase") }),
+]);
+
+/** Describes a Git conflict action that must name its exact prior approval. */
+export const WorkspaceGitMutationContinuationOperation = Schema.Union([
+	WorkspaceGitMergeContinuationOperation,
+	WorkspaceGitRebaseContinuationOperation,
+]);
+
+export type WorkspaceGitMutationContinuationOperation =
+	typeof WorkspaceGitMutationContinuationOperation.Type;
+
+/** Describes a Git mutation that does not consume a prior conflict approval. */
+export const WorkspaceGitMutationStandaloneOperation = Schema.Union([
+	Schema.Struct({ branch: GitLocalBranchName, type: Schema.Literal("branch_create") }),
+	Schema.Struct({ target_branch: GitLocalBranchName, type: Schema.Literal("checkout") }),
+	Schema.Struct({ mode: GitResetMode, target: GitObjectId, type: Schema.Literal("reset") }),
+	Schema.Struct({ type: Schema.Literal("clean") }),
+	Schema.Struct({ message: GitCommitMessage, type: Schema.Literal("commit") }),
+	WorkspaceGitMergeStartOperation,
+	WorkspaceGitRebaseStartOperation,
+	Schema.Struct({ type: Schema.Literal("pull_ff_only") }),
+	Schema.Struct({
+		remote: GitRemoteName,
+		set_upstream: Schema.Boolean,
+		target_branch: GitLocalBranchName,
+		type: Schema.Literal("push"),
+	}),
+]);
+
+export type WorkspaceGitMutationStandaloneOperation =
+	typeof WorkspaceGitMutationStandaloneOperation.Type;
+
 const WorkspaceGitMergeOperation = Schema.Union([
 	Schema.Struct({
 		action: Schema.Literal("start"),
 		target_branch: GitLocalBranchName,
 		type: Schema.Literal("merge"),
 	}),
-	Schema.Struct({ action: Schema.Literal("continue"), type: Schema.Literal("merge") }),
-	Schema.Struct({ action: Schema.Literal("abort"), type: Schema.Literal("merge") }),
+	WorkspaceGitMergeContinuationOperation,
 ]);
 
 const WorkspaceGitRebaseOperation = Schema.Union([
@@ -77,9 +129,7 @@ const WorkspaceGitRebaseOperation = Schema.Union([
 		target_branch: GitLocalBranchName,
 		type: Schema.Literal("rebase"),
 	}),
-	Schema.Struct({ action: Schema.Literal("continue"), type: Schema.Literal("rebase") }),
-	Schema.Struct({ action: Schema.Literal("abort"), type: Schema.Literal("rebase") }),
-	Schema.Struct({ action: Schema.Literal("skip"), type: Schema.Literal("rebase") }),
+	WorkspaceGitRebaseContinuationOperation,
 ]);
 
 /** Describes the complete local Git intent that requires an explicit approval. */
@@ -134,22 +184,36 @@ export function summarize_workspace_git_mutation(
 }
 
 /** Requests approval for one guarded local Git mutation against an observed session version. */
-export const WorkspaceGitMutationRequest = Schema.Struct({
+const WorkspaceGitMutationRequestBase = {
 	expected_session_version: PositiveInt,
-	operation: WorkspaceGitMutationOperation,
 	workspace_id: Identifier,
-});
+};
+
+/** Binds standalone intent or an exact prior conflict approval to one guarded request. */
+export const WorkspaceGitMutationRequest = Schema.Union([
+	Schema.Struct({
+		...WorkspaceGitMutationRequestBase,
+		operation: WorkspaceGitMutationStandaloneOperation,
+	}),
+	Schema.Struct({
+		...WorkspaceGitMutationRequestBase,
+		action_approval_id: Identifier,
+		operation: WorkspaceGitMutationContinuationOperation,
+	}),
+]);
 
 export type WorkspaceGitMutationRequest = typeof WorkspaceGitMutationRequest.Type;
 
 const WorkspaceGitMutationApprovalBase = {
+	action_approval_id: Schema.optional(Identifier),
 	approval_id: Identifier,
 	created_at: IsoDateTime,
 	expected_session_version: PositiveInt,
 	operation: WorkspaceGitMutationSummary,
+	/** Branch and head mirror public session facts; private proof identities remain backend-only. */
 	source_branch: Schema.optional(GitBranchName),
 	source_command_id: Identifier,
-	source_head: Schema.optional(GitObjectId),
+	source_head: GitObjectId,
 	thread_id: Identifier,
 	updated_at: IsoDateTime,
 	workspace_id: Identifier,
@@ -209,12 +273,12 @@ export const WorkspaceGitMutationApprovalExecuting = Schema.Struct({
 	state: Schema.Literal("executing"),
 });
 
-/** Projects an applied Git mutation with optional resulting repository facts. */
+/** Projects an applied Git mutation with its resulting repository facts. */
 export const WorkspaceGitMutationApprovalApplied = Schema.Struct({
 	...WorkspaceGitMutationApprovalBase,
 	...WorkspaceGitMutationApprovalDecision,
 	resulting_branch: Schema.optional(GitBranchName),
-	resulting_head: Schema.optional(GitObjectId),
+	resulting_head: GitObjectId,
 	remote_head: Schema.optional(GitObjectId),
 	state: Schema.Literal("applied"),
 });
@@ -252,7 +316,7 @@ export const WorkspaceGitMutationApprovalDenied = Schema.Struct({
 	state: Schema.Literal("denied"),
 });
 
-/** Represents every source-free public lifecycle state for one Git mutation approval. */
+/** Represents public lifecycle state without private plans, proofs, anchors, or output. */
 export const WorkspaceGitMutationApproval = Schema.Union([
 	WorkspaceGitMutationApprovalRequested,
 	WorkspaceGitMutationApprovalApproved,
@@ -266,7 +330,7 @@ export const WorkspaceGitMutationApproval = Schema.Union([
 
 export type WorkspaceGitMutationApproval = typeof WorkspaceGitMutationApproval.Type;
 
-/** Requests a source-free Git mutation approval projection by durable identity. */
+/** Requests a public Git mutation approval projection by durable identity. */
 export const WorkspaceGitMutationApprovalQuery = Schema.Struct({
 	approval_id: Identifier,
 	thread_id: Identifier,
@@ -274,7 +338,7 @@ export const WorkspaceGitMutationApprovalQuery = Schema.Struct({
 
 export type WorkspaceGitMutationApprovalQuery = typeof WorkspaceGitMutationApprovalQuery.Type;
 
-/** Returns one source-free Git mutation approval projection. */
+/** Returns one public Git mutation approval projection. */
 export const WorkspaceGitMutationApprovalQueryResult = Schema.Struct({
 	approval: WorkspaceGitMutationApproval,
 });
@@ -291,7 +355,7 @@ export const WorkspaceGitMutationApprovalResponseRequest = Schema.Struct({
 export type WorkspaceGitMutationApprovalResponseRequest =
 	typeof WorkspaceGitMutationApprovalResponseRequest.Type;
 
-/** Announces one source-free Git mutation approval lifecycle update. */
+/** Announces one public Git mutation approval lifecycle update. */
 export const WorkspaceGitMutationApprovalUpdatedEvent = Schema.Struct({
 	approval: WorkspaceGitMutationApproval,
 	type: Schema.Literal("workspace.git.mutation.approval.updated"),

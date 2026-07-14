@@ -23,7 +23,14 @@ const decode_event = Schema.decodeUnknownSync(WorkspaceGitMutationApprovalUpdate
 const encode_event = Schema.encodeUnknownSync(WorkspaceGitMutationApprovalUpdatedEvent);
 
 function request(operation: unknown) {
+	const continuation =
+		typeof operation === "object" &&
+		operation !== null &&
+		"action" in operation &&
+		operation.action !== "start";
+
 	return {
+		...(continuation ? { action_approval_id: "approval_conflict" } : {}),
 		expected_session_version: 2,
 		operation,
 		workspace_id: "workspace_1",
@@ -54,6 +61,17 @@ function approval(state: string, operation: unknown = { type: "commit" }) {
 			decided_at: timestamp,
 			decision: "denied",
 			decision_message_id: "decision_1",
+			state,
+		};
+	}
+
+	if (state === "applied") {
+		return {
+			...base,
+			decided_at: timestamp,
+			decision: "approved",
+			decision_message_id: "decision_1",
+			resulting_head: head,
 			state,
 		};
 	}
@@ -109,6 +127,28 @@ describe("Git mutation protocol codec", () => {
 				}),
 			}),
 		).toThrow();
+	});
+
+	it("binds every continuation to one exact action-required approval", () => {
+		expect(() =>
+			decode_request({
+				expected_session_version: 2,
+				operation: { action: "continue", type: "rebase" },
+				workspace_id: "workspace_1",
+			}),
+		).toThrow();
+		expect(() =>
+			decode_request({
+				action_approval_id: "approval_conflict",
+				expected_session_version: 2,
+				operation: { target_branch: "feature", type: "checkout" },
+				workspace_id: "workspace_1",
+			}),
+		).toThrow();
+
+		expect(decode_request(request({ action: "abort", type: "merge" }))).toMatchObject({
+			action_approval_id: "approval_conflict",
+		});
 	});
 
 	it.each([

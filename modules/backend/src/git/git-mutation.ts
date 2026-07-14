@@ -205,6 +205,50 @@ export const GitMutationPlan = Schema.Union([
 ]);
 export type GitMutationPlan = typeof GitMutationPlan.Type;
 
+/** Verifies that one private prepared plan still represents the exact approved intent. */
+export function git_mutation_plan_matches_operation(
+	plan: GitMutationPlan,
+	operation: WorkspaceGitMutationOperation,
+) {
+	if (plan.type !== operation.type) {
+		return false;
+	}
+
+	switch (operation.type) {
+		case "branch_create":
+			return plan.type === operation.type && plan.branch === operation.branch;
+		case "checkout":
+			return plan.type === operation.type && plan.target_branch === operation.target_branch;
+		case "reset":
+			return (
+				plan.type === operation.type &&
+				plan.mode === operation.mode &&
+				plan.target === operation.target
+			);
+		case "clean":
+		case "pull_ff_only":
+			return true;
+		case "commit":
+			return plan.type === operation.type && plan.message === operation.message;
+		case "merge":
+		case "rebase":
+			return (
+				plan.type === operation.type &&
+				plan.action === operation.action &&
+				(operation.action === "start"
+					? plan.action === "start" && plan.target_branch === operation.target_branch
+					: plan.action !== "start")
+			);
+		case "push":
+			return (
+				plan.type === operation.type &&
+				plan.remote === operation.remote &&
+				plan.set_upstream === operation.set_upstream &&
+				plan.target_branch === operation.target_branch
+			);
+	}
+}
+
 /** Records an execution phase without exposing command output or the workspace root. */
 export const GitMutationAttempt = Schema.Struct({
 	binding: Digest,
@@ -226,7 +270,10 @@ export const GitMutationReconciliation = Schema.Union([
 	Schema.Struct({
 		branch: Schema.optional(GitLocalBranchName),
 		head: GitObjectId,
+		remote: Schema.optional(GitRemoteName),
+		remote_endpoint: Schema.optional(GitRemoteEndpoint),
 		remote_head: Schema.optional(GitObjectId),
+		target_branch: Schema.optional(GitLocalBranchName),
 		type: Schema.Literal("applied"),
 	}),
 	Schema.Struct({

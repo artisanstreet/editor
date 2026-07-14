@@ -2569,6 +2569,13 @@ function make_adapter(
 					return {
 						...(current.branch === undefined ? {} : { branch: current.branch }),
 						head: current.head,
+						...(plan.type === "push"
+							? {
+									remote: plan.remote,
+									remote_endpoint: plan.remote_endpoint,
+									target_branch: plan.target_branch,
+								}
+							: {}),
 						...(remote_head === undefined ? {} : { remote_head }),
 						type: "applied",
 					} as const;

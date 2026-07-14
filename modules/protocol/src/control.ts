@@ -27,6 +27,7 @@ import {
 	WorkspaceGitSessionRefreshRequest,
 	WorkspaceGitSessionUpdatedEvent,
 } from "./git-session";
+import { WorkspaceGitMutationApprovalUpdatedEvent } from "./git-mutation";
 import {
 	Identifier,
 	IsoDateTime,
@@ -923,6 +924,7 @@ export const EventPayload = Schema.Union([
 	WorkspaceReplaceApprovalUpdatedEvent,
 	WorkspaceGitSessionUpdatedEvent,
 	WorkspaceGitCheckoutApprovalUpdatedEvent,
+	WorkspaceGitMutationApprovalUpdatedEvent,
 	ThreadMessageQueuedEvent,
 	ThreadMessageSteeringEvent,
 	RunLifecycleEvent,

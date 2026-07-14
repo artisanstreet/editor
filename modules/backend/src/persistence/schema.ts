@@ -726,7 +726,7 @@ export const WorkspaceGitOperations = sqliteTable(
 		index("workspace_git_operations_pending_evidence_index").on(table.evidence_recorded),
 		check(
 			"workspace_git_operations_kind_check",
-			sql`${table.kind} IN ('refresh', 'checkout', 'recovery')`,
+			sql`${table.kind} IN ('refresh', 'checkout', 'recovery', 'mutation')`,
 		),
 		check(
 			"workspace_git_operations_fingerprint_check",
@@ -855,6 +855,220 @@ export const WorkspaceGitCheckoutClaims = sqliteTable(
 	(table) => [
 		uniqueIndex("workspace_git_checkout_claims_approval_unique").on(table.approval_id),
 		index("workspace_git_checkout_claims_thread_index").on(table.thread_id),
+	],
+);
+
+/** Stores public approval state with session branch/head but no private plan or proof. */
+export const WorkspaceGitMutationApprovals = sqliteTable(
+	"workspace_git_mutation_approvals",
+	{
+		approval_id: text("approval_id").primaryKey(),
+		source_command_id: text("source_command_id").notNull(),
+		request_fingerprint: text("request_fingerprint").notNull(),
+		thread_id: text("thread_id").notNull(),
+		workspace_id: text("workspace_id").notNull(),
+		expected_session_version: integer("expected_session_version").notNull(),
+		action_approval_id: text("action_approval_id"),
+		operation_summary_json: text("operation_summary_json").notNull(),
+		source_branch: text("source_branch"),
+		source_head: text("source_head").notNull(),
+		state: text("state").notNull(),
+		decision_message_id: text("decision_message_id"),
+		approved: integer("approved", { mode: "boolean" }),
+		decided_at: text("decided_at"),
+		execution_started_at: text("execution_started_at"),
+		resulting_branch: text("resulting_branch"),
+		resulting_head: text("resulting_head"),
+		remote_head: text("remote_head"),
+		required_action: text("required_action"),
+		rejection_reason: text("rejection_reason"),
+		unknown_reason: text("unknown_reason"),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("workspace_git_mutation_approvals_source_command_unique").on(
+			table.source_command_id,
+		),
+		uniqueIndex("workspace_git_mutation_approvals_decision_message_unique").on(
+			table.decision_message_id,
+		),
+		index("workspace_git_mutation_approvals_thread_index").on(table.thread_id),
+		index("workspace_git_mutation_approvals_state_index").on(table.state),
+		index("workspace_git_mutation_approvals_action_parent_index").on(table.action_approval_id),
+		check(
+			"workspace_git_mutation_approvals_fingerprint_check",
+			sql`
+				length(${table.request_fingerprint}) = 64
+				AND ${table.request_fingerprint} NOT GLOB '*[^0-9a-f]*'
+			`,
+		),
+		check(
+			"workspace_git_mutation_approvals_version_check",
+			sql`${table.expected_session_version} >= 1`,
+		),
+		check(
+			"workspace_git_mutation_approvals_state_check",
+			sql`
+				${table.state} IN (
+					'requested', 'approved', 'executing', 'applied',
+					'action_required', 'rejected', 'outcome_unknown', 'denied'
+				)
+			`,
+		),
+		check(
+			"workspace_git_mutation_approvals_decision_check",
+			sql`
+				(
+					${table.state} = 'requested'
+					AND ${table.decision_message_id} IS NULL
+					AND ${table.approved} IS NULL
+					AND ${table.decided_at} IS NULL
+					AND ${table.execution_started_at} IS NULL
+				)
+				OR (
+					${table.state} = 'denied'
+					AND ${table.decision_message_id} IS NOT NULL
+					AND ${table.approved} = 0
+					AND ${table.decided_at} IS NOT NULL
+					AND ${table.execution_started_at} IS NULL
+				)
+				OR (
+					${table.state} = 'approved'
+					AND ${table.decision_message_id} IS NOT NULL
+					AND ${table.approved} = 1
+					AND ${table.decided_at} IS NOT NULL
+					AND ${table.execution_started_at} IS NULL
+				)
+				OR (
+					${table.state} IN (
+						'executing', 'applied', 'action_required', 'rejected', 'outcome_unknown'
+					)
+					AND ${table.decision_message_id} IS NOT NULL
+					AND ${table.approved} = 1
+					AND ${table.decided_at} IS NOT NULL
+					AND ${table.execution_started_at} IS NOT NULL
+				)
+			`,
+		),
+		check(
+			"workspace_git_mutation_approvals_outcome_check",
+			sql`
+				(
+					${table.state} IN ('requested', 'approved', 'executing', 'denied')
+					AND ${table.resulting_branch} IS NULL
+					AND ${table.resulting_head} IS NULL
+					AND ${table.remote_head} IS NULL
+					AND ${table.required_action} IS NULL
+					AND ${table.rejection_reason} IS NULL
+					AND ${table.unknown_reason} IS NULL
+				)
+				OR (
+					${table.state} = 'applied'
+					AND ${table.resulting_head} IS NOT NULL
+					AND ${table.required_action} IS NULL
+					AND ${table.rejection_reason} IS NULL
+					AND ${table.unknown_reason} IS NULL
+				)
+				OR (
+					${table.state} = 'action_required'
+					AND ${table.required_action} IS NOT NULL
+					AND ${table.resulting_branch} IS NULL
+					AND ${table.resulting_head} IS NULL
+					AND ${table.remote_head} IS NULL
+					AND ${table.rejection_reason} IS NULL
+					AND ${table.unknown_reason} IS NULL
+				)
+				OR (
+					${table.state} = 'rejected'
+					AND ${table.rejection_reason} IS NOT NULL
+					AND ${table.resulting_branch} IS NULL
+					AND ${table.resulting_head} IS NULL
+					AND ${table.remote_head} IS NULL
+					AND ${table.required_action} IS NULL
+					AND ${table.unknown_reason} IS NULL
+				)
+				OR (
+					${table.state} = 'outcome_unknown'
+					AND ${table.unknown_reason} IS NOT NULL
+					AND ${table.resulting_branch} IS NULL
+					AND ${table.resulting_head} IS NULL
+					AND ${table.remote_head} IS NULL
+					AND ${table.required_action} IS NULL
+					AND ${table.rejection_reason} IS NULL
+				)
+			`,
+		),
+	],
+);
+
+/** Stores private plan, attempt, and reconciliation evidence for one approval. */
+export const WorkspaceGitMutationArtifacts = sqliteTable(
+	"workspace_git_mutation_artifacts",
+	{
+		approval_id: text("approval_id")
+			.primaryKey()
+			.references(() => WorkspaceGitMutationApprovals.approval_id, {
+				onDelete: "cascade",
+			}),
+		operation_json: text("operation_json").notNull(),
+		plan_json: text("plan_json").notNull(),
+		plan_binding: text("plan_binding").notNull(),
+		attempt_json: text("attempt_json"),
+		attempt_binding: text("attempt_binding"),
+		reconciliation_json: text("reconciliation_json"),
+		reconciled_at: text("reconciled_at"),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		check(
+			"workspace_git_mutation_artifacts_plan_binding_check",
+			sql`
+				length(${table.plan_binding}) = 64
+				AND ${table.plan_binding} NOT GLOB '*[^0-9a-f]*'
+			`,
+		),
+		check(
+			"workspace_git_mutation_artifacts_attempt_binding_check",
+			sql`
+				(
+					${table.attempt_json} IS NULL
+					AND ${table.attempt_binding} IS NULL
+				)
+				OR (
+					${table.attempt_json} IS NOT NULL
+					AND length(${table.attempt_binding}) = 64
+					AND ${table.attempt_binding} NOT GLOB '*[^0-9a-f]*'
+				)
+			`,
+		),
+		check(
+			"workspace_git_mutation_artifacts_reconciliation_pair_check",
+			sql`
+				(${table.reconciliation_json} IS NULL) = (${table.reconciled_at} IS NULL)
+			`,
+		),
+	],
+);
+
+/** Serializes generic Git mutations with every controlled writer in the visible workspace. */
+export const WorkspaceGitMutationClaims = sqliteTable(
+	"workspace_git_mutation_claims",
+	{
+		workspace_id: text("workspace_id").primaryKey(),
+		approval_id: text("approval_id")
+			.notNull()
+			.references(() => WorkspaceGitMutationApprovals.approval_id, {
+				onDelete: "cascade",
+			}),
+		thread_id: text("thread_id").notNull(),
+		claim_token: text("claim_token").notNull(),
+		claimed_at: text("claimed_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("workspace_git_mutation_claims_approval_unique").on(table.approval_id),
+		uniqueIndex("workspace_git_mutation_claims_claim_token_unique").on(table.claim_token),
+		index("workspace_git_mutation_claims_thread_index").on(table.thread_id),
 	],
 );
 
