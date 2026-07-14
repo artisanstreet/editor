@@ -18,8 +18,12 @@ import {
 	ExternalWaitOperations,
 	ExternalWaits,
 	ExternalWaitWakeOutbox,
+	JournalCommands,
 	JournalEvents,
+	OrchestrationCoordinators,
 	OrchestrationGroups,
+	OrchestrationMessages,
+	OrchestrationOutbox,
 	OrchestrationRuns,
 	ProjectHostedOrigins,
 	Projects,
@@ -109,23 +113,19 @@ const Seed = Effect.gen(function* () {
 		updated_at: now,
 		working_directory: "C:/artisan",
 	});
-});
-
-const SeedRun = (run_id: string) =>
-	Effect.gen(function* () {
-		const database = yield* Database;
-
-		yield* database.client.insert(OrchestrationRuns).values({
-			agent_id: "agent_1",
-			created_at: now,
-			engine_id: "codex",
-			run_id,
-			status: "running",
-			thread_id: "thread_1",
-			updated_at: now,
-			working_directory: "C:/artisan",
-		});
+	yield* database.client.insert(OrchestrationCoordinators).values({
+		active_run_id: "run_1",
+		agent_id: "agent_1",
+		created_at: now,
+		display_name: "Primary coordinator",
+		engine_id: "codex",
+		native_resume_json: null,
+		native_thread_id: null,
+		role: "primary",
+		thread_id: "thread_1",
+		updated_at: now,
 	});
+});
 
 const SeedGraphRun = Effect.gen(function* () {
 	const database = yield* Database;
@@ -693,25 +693,22 @@ describe("ExternalWaitRepository", () => {
 						now: "2026-07-14T15:01:11.000Z",
 						outbox_id: wake.outbox_id,
 					});
-					const settled = yield* repository.SettleWake({
-						follow_up_run_id: wake.follow_up_run_id,
+					const settled = yield* repository.MaterializeWake({
 						lease_owner: "dispatcher_2",
-						mode: "native_resume",
+						native_resume_supported: true,
 						now: "2026-07-14T15:01:12.000Z",
 						outbox_id: wake.outbox_id,
 					});
-					const replay = yield* repository.SettleWake({
-						follow_up_run_id: wake.follow_up_run_id,
+					const replay = yield* repository.MaterializeWake({
 						lease_owner: "different_after_settlement",
-						mode: "native_resume",
+						native_resume_supported: true,
 						now: "2026-07-14T16:00:00.000Z",
 						outbox_id: wake.outbox_id,
 					});
 					const changed = yield* Effect.exit(
-						repository.SettleWake({
-							follow_up_run_id: wake.follow_up_run_id,
+						repository.MaterializeWake({
 							lease_owner: "dispatcher_2",
-							mode: "linked_run",
+							native_resume_supported: false,
 							now: "2026-07-14T16:00:00.000Z",
 							outbox_id: wake.outbox_id,
 						}),
@@ -747,15 +744,365 @@ describe("ExternalWaitRepository", () => {
 			expect(Option.isSome(result.first_claim)).toBe(true);
 			expect(Option.isNone(result.blocked_claim)).toBe(true);
 			expect(Option.isSome(result.second_claim)).toBe(true);
-			expect(result.replay).toEqual(result.settled);
-			expect(Option.getOrThrow(result.settled).state).toMatchObject({
-				_tag: "woken",
+			expect(result.replay).toEqual({ ...result.settled, status: "duplicate" });
+			expect(result.settled).toMatchObject({
 				follow_up_run_id: result.wake.follow_up_run_id,
-				mode: "native_resume",
+				mode: "linked_run",
+				status: "created",
 			});
-			expect(result.changed._tag).toBe("Failure");
+			expect(result.changed._tag).toBe("Success");
 		} finally {
 			await instance.dispose();
+		}
+	});
+
+	it("materializes a native ordinary continuation with its durable resume state", async () => {
+		const instance = runtime(await Effect.runPromise(MakeDatabasePath));
+
+		try {
+			const result = await instance.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* ExternalWaitRepository;
+					const token = JSON.stringify({
+						native_thread_id: "thread_01J9FMEQPF4R9V4T26Z2C3R4B5",
+					});
+
+					yield* Seed;
+					yield* database.client.update(OrchestrationRuns).set({
+						native_resume_json: token,
+						native_thread_id: "thread_01J9FMEQPF4R9V4T26Z2C3R4B5",
+					});
+					yield* database.client.update(OrchestrationCoordinators).set({
+						native_resume_json: token,
+						native_thread_id: "thread_01J9FMEQPF4R9V4T26Z2C3R4B5",
+					});
+					yield* repository.Register(registration_for());
+					yield* repository.ClaimObservation({
+						lease_owner: "observer_1",
+						now: "2026-07-14T15:01:00.000Z",
+						wait_id: "wait_1",
+					});
+					const wake = yield* repository.CreateWake({
+						lease_owner: "observer_1",
+						now: "2026-07-14T15:01:00.000Z",
+						trigger: { _tag: "manual_resume" },
+						wait_id: "wait_1",
+					});
+					yield* repository.MarkSourceClosed({
+						now: "2026-07-14T15:01:01.000Z",
+						wait_id: "wait_1",
+					});
+					yield* repository.ClaimWake({
+						lease_owner: "dispatcher_1",
+						now: "2026-07-14T15:01:02.000Z",
+						outbox_id: wake.outbox_id,
+					});
+					const materialized = yield* repository.MaterializeWake({
+						lease_owner: "dispatcher_1",
+						native_resume_supported: true,
+						now: "2026-07-14T15:01:03.000Z",
+						outbox_id: wake.outbox_id,
+					});
+
+					return {
+						commands: yield* database.client.select().from(JournalCommands),
+						materialized,
+						messages: yield* database.client.select().from(OrchestrationMessages),
+						outbox: yield* database.client.select().from(OrchestrationOutbox),
+						runs: yield* database.client.select().from(OrchestrationRuns),
+					};
+				}),
+			);
+
+			expect(result.materialized).toMatchObject({ mode: "native_resume", status: "created" });
+			expect(
+				result.runs.find((run) => run.run_id === result.materialized.follow_up_run_id),
+			).toMatchObject({
+				native_resume_json: JSON.stringify({
+					native_thread_id: "thread_01J9FMEQPF4R9V4T26Z2C3R4B5",
+				}),
+				native_thread_id: "thread_01J9FMEQPF4R9V4T26Z2C3R4B5",
+				open_mode: "resume",
+				status: "queued",
+			});
+			expect(result.outbox[0]).toMatchObject({
+				kind: "resume",
+				run_id: result.materialized.follow_up_run_id,
+				status: "pending",
+			});
+			expect(
+				JSON.parse(
+					result.commands.find(
+						(command) =>
+							command.assigned_run_id === result.materialized.follow_up_run_id,
+					)?.payload_json ?? "{}",
+				),
+			).toEqual({
+				engine_id: "codex",
+				text: "Continue the task.",
+				type: "thread.send_message",
+				working_directory: "C:/artisan",
+			});
+			expect(result.messages[0]?.text).toBe("Continue the task.");
+		} finally {
+			await instance.dispose();
+		}
+	});
+
+	it("replays immutable wake evidence after the coordinator advances", async () => {
+		const instance = runtime(await Effect.runPromise(MakeDatabasePath));
+
+		try {
+			const result = await instance.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* ExternalWaitRepository;
+					const token = JSON.stringify({
+						native_thread_id: "thread_01J9FMEQPF4R9V4T26Z2C3R4B5",
+					});
+
+					yield* Seed;
+					yield* database.client.update(OrchestrationRuns).set({
+						native_resume_json: token,
+						native_thread_id: "thread_01J9FMEQPF4R9V4T26Z2C3R4B5",
+					});
+					yield* database.client.update(OrchestrationCoordinators).set({
+						native_resume_json: token,
+						native_thread_id: "thread_01J9FMEQPF4R9V4T26Z2C3R4B5",
+					});
+					yield* repository.Register(registration_for());
+					yield* repository.ClaimObservation({
+						lease_owner: "observer_1",
+						now: "2026-07-14T15:01:00.000Z",
+						wait_id: "wait_1",
+					});
+					const wake = yield* repository.CreateWake({
+						lease_owner: "observer_1",
+						now: "2026-07-14T15:01:00.000Z",
+						trigger: { _tag: "manual_resume" },
+						wait_id: "wait_1",
+					});
+					yield* repository.MarkSourceClosed({
+						now: "2026-07-14T15:01:01.000Z",
+						wait_id: "wait_1",
+					});
+					yield* repository.ClaimWake({
+						lease_owner: "dispatcher_1",
+						now: "2026-07-14T15:01:02.000Z",
+						outbox_id: wake.outbox_id,
+					});
+					const materialized = yield* repository.MaterializeWake({
+						lease_owner: "dispatcher_1",
+						native_resume_supported: true,
+						now: "2026-07-14T15:01:03.000Z",
+						outbox_id: wake.outbox_id,
+					});
+
+					yield* database.client.insert(OrchestrationRuns).values({
+						agent_id: "agent_1",
+						created_at: "2026-07-14T15:02:00.000Z",
+						engine_id: "codex",
+						run_id: "later_run",
+						status: "queued",
+						thread_id: "thread_1",
+						updated_at: "2026-07-14T15:02:00.000Z",
+						working_directory: "C:/artisan",
+					});
+					yield* database.client
+						.update(OrchestrationCoordinators)
+						.set({ active_run_id: "later_run" });
+
+					const replay = yield* repository.MaterializeWake({
+						lease_owner: "different_after_settlement",
+						native_resume_supported: false,
+						now: "2026-07-14T15:03:00.000Z",
+						outbox_id: wake.outbox_id,
+					});
+
+					yield* database.client.update(JournalCommands).set({ payload_json: "{}" });
+					const corrupt_replay = yield* repository
+						.MaterializeWake({
+							lease_owner: "different_after_settlement",
+							native_resume_supported: false,
+							now: "2026-07-14T15:04:00.000Z",
+							outbox_id: wake.outbox_id,
+						})
+						.pipe(Effect.exit);
+
+					return { corrupt_replay, materialized, replay };
+				}),
+			);
+
+			expect(result.replay).toEqual({ ...result.materialized, status: "duplicate" });
+			expect(result.corrupt_replay._tag).toBe("Failure");
+		} finally {
+			await instance.dispose();
+		}
+	});
+
+	it("continues assignment runs without consuming an attempt", async () => {
+		const instance = runtime(await Effect.runPromise(MakeDatabasePath));
+
+		try {
+			const result = await instance.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* ExternalWaitRepository;
+
+					yield* Seed;
+					yield* SeedGraphRun;
+					yield* repository.Register(graph_registration_for());
+					yield* repository.ClaimObservation({
+						lease_owner: "observer_1",
+						now: "2026-07-14T15:01:00.000Z",
+						wait_id: "graph_wait_1",
+					});
+					const wake = yield* repository.CreateWake({
+						lease_owner: "observer_1",
+						now: "2026-07-14T15:01:00.000Z",
+						trigger: {
+							_tag: "review_changed",
+							change_kind: "decision_changed",
+							decision: "approved",
+							total_reviews: 1,
+							unresolved_thread_count: 0,
+						},
+						wait_id: "graph_wait_1",
+					});
+					yield* repository.MarkSourceClosed({
+						now: "2026-07-14T15:01:01.000Z",
+						wait_id: "graph_wait_1",
+					});
+					yield* repository.ClaimWake({
+						lease_owner: "dispatcher_1",
+						now: "2026-07-14T15:01:02.000Z",
+						outbox_id: wake.outbox_id,
+					});
+					const materialized = yield* repository.MaterializeWake({
+						lease_owner: "dispatcher_1",
+						native_resume_supported: false,
+						now: "2026-07-14T15:01:03.000Z",
+						outbox_id: wake.outbox_id,
+					});
+
+					return {
+						assignments: yield* database.client.select().from(Assignments),
+						materialized,
+						runs: yield* database.client.select().from(AgentRuns),
+					};
+				}),
+			);
+
+			expect(result.materialized).toMatchObject({ mode: "linked_run", status: "created" });
+			expect(result.assignments[0]).toMatchObject({
+				active_run_id: result.materialized.follow_up_run_id,
+				current_attempt: 1,
+				state: "queued",
+			});
+			expect(
+				result.runs.find((run) => run.run_id === result.materialized.follow_up_run_id),
+			).toMatchObject({
+				attempt: 1,
+				continuation_index: 1,
+				continuation_text: "External review state changed. Continue the task.",
+				dispatch_status: "queued",
+				open_mode: "start",
+				state: "queued",
+			});
+			expect(result.runs.find((run) => run.run_id === "graph_run_1")).toMatchObject({
+				dispatch_status: "terminal",
+				state: "stopped",
+			});
+		} finally {
+			await instance.dispose();
+		}
+	});
+
+	it("rolls back corrupt tokens and continuation collisions without settling the wake", async () => {
+		for (const failure of ["corrupt_token", "partial_token", "collision"] as const) {
+			const instance = runtime(await Effect.runPromise(MakeDatabasePath));
+
+			try {
+				const result = await instance.runPromise(
+					Effect.gen(function* () {
+						const database = yield* Database;
+						const repository = yield* ExternalWaitRepository;
+
+						yield* Seed;
+						yield* repository.Register(registration_for());
+						yield* repository.ClaimObservation({
+							lease_owner: "observer_1",
+							now: "2026-07-14T15:01:00.000Z",
+							wait_id: "wait_1",
+						});
+						const wake = yield* repository.CreateWake({
+							lease_owner: "observer_1",
+							now: "2026-07-14T15:01:00.000Z",
+							trigger: { _tag: "manual_resume" },
+							wait_id: "wait_1",
+						});
+						yield* repository.MarkSourceClosed({
+							now: "2026-07-14T15:01:01.000Z",
+							wait_id: "wait_1",
+						});
+						yield* repository.ClaimWake({
+							lease_owner: "dispatcher_1",
+							now: "2026-07-14T15:01:02.000Z",
+							outbox_id: wake.outbox_id,
+						});
+
+						if (failure === "corrupt_token") {
+							yield* database.client.update(OrchestrationRuns).set({
+								native_resume_json: JSON.stringify({
+									native_thread_id: "thread_01J9FMEQPF4R9V4T26Z2C3R4B5",
+									unexpected: true,
+								}),
+								native_thread_id: "thread_01J9FMEQPF4R9V4T26Z2C3R4B5",
+							});
+						} else if (failure === "partial_token") {
+							yield* database.client.update(OrchestrationRuns).set({
+								native_resume_json: null,
+								native_thread_id: "thread_01J9FMEQPF4R9V4T26Z2C3R4B5",
+							});
+						} else {
+							yield* database.client.insert(OrchestrationRuns).values({
+								agent_id: "agent_1",
+								created_at: now,
+								engine_id: "codex",
+								run_id: wake.follow_up_run_id,
+								status: "queued",
+								thread_id: "thread_1",
+								updated_at: now,
+								working_directory: "C:/artisan",
+							});
+						}
+
+						return {
+							materialized: yield* Effect.exit(
+								repository.MaterializeWake({
+									lease_owner: "dispatcher_1",
+									native_resume_supported: true,
+									now: "2026-07-14T15:01:03.000Z",
+									outbox_id: wake.outbox_id,
+								}),
+							),
+							outbox: yield* database.client.select().from(ExternalWaitWakeOutbox),
+							runs: yield* database.client.select().from(OrchestrationRuns),
+							waits: yield* database.client.select().from(ExternalWaits),
+						};
+					}),
+				);
+
+				expect(result.materialized._tag).toBe("Failure");
+				expect(result.outbox[0]).toMatchObject({ state: "claimed" });
+				expect(result.waits[0]?.state).toBe("wake_pending");
+				expect(result.runs.find((run) => run.run_id === "run_1")?.status).toBe(
+					"waiting_external",
+				);
+			} finally {
+				await instance.dispose();
+			}
 		}
 	});
 
@@ -1112,10 +1459,9 @@ describe("ExternalWaitRepository", () => {
 						repository.Cancel({ ...cancel_input, reason: "superseded" }),
 					);
 					const settle = yield* Effect.exit(
-						repository.SettleWake({
-							follow_up_run_id: wake.follow_up_run_id,
+						repository.MaterializeWake({
 							lease_owner: "dispatcher_1",
-							mode: "native_resume",
+							native_resume_supported: true,
 							now: "2026-07-14T15:01:04.000Z",
 							outbox_id: wake.outbox_id,
 						}),
@@ -1229,15 +1575,13 @@ describe("ExternalWaitRepository", () => {
 						now: "2026-07-14T15:01:02.000Z",
 						outbox_id: wake.outbox_id,
 					});
-					yield* repository.SettleWake({
-						follow_up_run_id: wake.follow_up_run_id,
+					yield* repository.MaterializeWake({
 						lease_owner: "dispatcher_1",
-						mode: "linked_run",
+						native_resume_supported: false,
 						now: "2026-07-14T15:01:03.000Z",
 						outbox_id: wake.outbox_id,
 					});
-					yield* SeedRun(wake.follow_up_run_id);
-
+					yield* database.client.update(OrchestrationRuns).set({ status: "running" });
 					const exhausted = yield* repository.Register(
 						registration_for({
 							command_id: "command_2",

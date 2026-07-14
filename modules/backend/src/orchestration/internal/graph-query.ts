@@ -7,6 +7,7 @@ import {
 	AssignmentWorkspace,
 	type OrchestrationGraph,
 } from "@artisan/protocol";
+import { EngineResumeToken } from "@artisan/engines";
 
 import {
 	AgentRuns,
@@ -15,6 +16,7 @@ import {
 	ThreadErasureClaims,
 } from "../../persistence/schema";
 import {
+	AgentGraphInvalid,
 	AgentGraphNotFound,
 	normalize_graph_error,
 	type AgentGraphError,
@@ -112,11 +114,15 @@ export function make_graph_query(context: GraphContext, codecs: PersistedGraphCo
 				agent_id: AgentRuns.agent_id,
 				assignment_id: AgentRuns.assignment_id,
 				attempt: AgentRuns.attempt,
+				continuation_text: AgentRuns.continuation_text,
 				engine_id: AgentRuns.engine_id,
 				expected_result: Assignments.expected_result,
 				group_id: AgentRuns.group_id,
 				instructions: Assignments.instructions,
 				max_concurrency: OrchestrationGroups.max_concurrency,
+				native_resume_json: AgentRuns.native_resume_json,
+				native_thread_id: AgentRuns.native_thread_id,
+				open_mode: AgentRuns.open_mode,
 				permission_policy_json: Assignments.permission_policy_json,
 				profile: AgentRuns.profile,
 				run_id: AgentRuns.run_id,
@@ -162,17 +168,67 @@ export function make_graph_query(context: GraphContext, codecs: PersistedGraphCo
 								`Assignment ${row.assignment_id} permission policy`,
 							);
 
+							if (row.open_mode !== "resume" && row.open_mode !== "start") {
+								return yield* new AgentGraphInvalid({
+									message: `Agent run ${row.run_id} has an invalid open mode`,
+								});
+							}
+
+							const open_mode = row.open_mode;
+
+							if (
+								open_mode === "start" &&
+								(row.native_resume_json !== null || row.native_thread_id !== null)
+							) {
+								return yield* new AgentGraphInvalid({
+									message: `Agent run ${row.run_id} has unexpected resume state`,
+								});
+							}
+
+							const resume_token =
+								open_mode === "resume"
+									? yield* Effect.gen(function* () {
+											if (
+												row.native_resume_json === null ||
+												row.continuation_text === null
+											) {
+												return yield* new AgentGraphInvalid({
+													message: `Agent run ${row.run_id} has incomplete resume intent`,
+												});
+											}
+
+											const token = yield* codecs.decode_json(
+												EngineResumeToken,
+												row.native_resume_json,
+												`Agent run ${row.run_id} resume token`,
+											);
+
+											if (token.native_thread_id !== row.native_thread_id) {
+												return yield* new AgentGraphInvalid({
+													message: `Agent run ${row.run_id} resume token does not match its native thread`,
+												});
+											}
+
+											return token;
+										})
+									: undefined;
+
 							return {
 								agent_id: row.agent_id,
 								assignment_id: row.assignment_id,
 								attempt: row.attempt,
+								...(row.continuation_text === null
+									? {}
+									: { continuation_text: row.continuation_text }),
 								engine_id: row.engine_id,
 								expected_result: row.expected_result,
 								group_id: row.group_id,
 								instructions: row.instructions,
 								max_concurrency: row.max_concurrency,
+								open_mode,
 								permission_policy,
 								profile: row.profile,
+								...(resume_token === undefined ? {} : { resume_token }),
 								run_id: row.run_id,
 								scope,
 								summary_contract: row.summary_contract,

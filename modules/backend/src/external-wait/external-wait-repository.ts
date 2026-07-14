@@ -26,8 +26,10 @@ import {
 	Identifier,
 	IsoDateTime,
 	ProjectRef,
+	CommandPayload,
 	type ExternalWaitSnapshot as ExternalWaitSnapshotValue,
 } from "@artisan/protocol";
+import { EngineResumeToken } from "@artisan/engines";
 
 import { ExternalWaitBaseline, serialize_external_wait_baseline } from "./external-wait-policy";
 import { Database } from "../persistence/database";
@@ -43,7 +45,10 @@ import {
 	ExternalWaitWakeOutbox,
 	JournalCommands,
 	JournalEvents,
+	OrchestrationCoordinators,
 	OrchestrationGroups,
+	OrchestrationMessages,
+	OrchestrationOutbox,
 	OrchestrationRuns,
 	ProjectHostedOrigins,
 	Projects,
@@ -112,10 +117,9 @@ const WakeClaim = Schema.Struct({
 	outbox_id: Identifier,
 });
 
-const WakeSettle = Schema.Struct({
-	follow_up_run_id: Identifier,
+const WakeMaterialization = Schema.Struct({
 	lease_owner: Identifier,
-	mode: Schema.Literals(["native_resume", "linked_run"]),
+	native_resume_supported: Schema.Boolean,
 	now: IsoDateTime,
 	outbox_id: Identifier,
 });
@@ -197,6 +201,14 @@ export interface ExternalWaitWakeClaim extends ExternalWaitWake {
 	readonly trigger: typeof ExternalWaitTrigger.Type;
 }
 
+export interface ExternalWaitMaterialization {
+	readonly follow_up_run_id: string;
+	readonly mode: "native_resume" | "linked_run";
+	readonly owner: typeof ExternalWaitOwner.Type;
+	readonly snapshot: ExternalWaitSnapshotValue;
+	readonly status: "created" | "duplicate";
+}
+
 /** Owns private external-review evidence, public projections, and durable wake delivery. */
 export class ExternalWaitRepository extends Context.Service<
 	ExternalWaitRepository,
@@ -250,9 +262,9 @@ export class ExternalWaitRepository extends Context.Service<
 		readonly ReleaseWake: (
 			input: typeof WakeClaim.Type,
 		) => Effect.Effect<Option.Option<ExternalWaitWake>, ExternalWaitRepositoryError>;
-		readonly SettleWake: (
-			input: typeof WakeSettle.Type,
-		) => Effect.Effect<Option.Option<ExternalWaitSnapshotValue>, ExternalWaitRepositoryError>;
+		readonly MaterializeWake: (
+			input: typeof WakeMaterialization.Type,
+		) => Effect.Effect<ExternalWaitMaterialization, ExternalWaitRepositoryError>;
 		readonly Cancel: (
 			input: typeof CancelInput.Type,
 		) => Effect.Effect<Option.Option<ExternalWaitSnapshotValue>, ExternalWaitRepositoryError>;
@@ -1992,8 +2004,49 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 				Effect.mapError(normalize_error),
 			);
 
-		const SettleWake = (input: typeof WakeSettle.Type) =>
-			Schema.decodeUnknownEffect(WakeSettle, { onExcessProperty: "error" })(input).pipe(
+		const ContinuationText = (trigger: typeof ExternalWaitTrigger.Type) =>
+			trigger._tag === "checks_terminal"
+				? "External checks reached a terminal state. Continue the task."
+				: trigger._tag === "review_changed"
+					? "External review state changed. Continue the task."
+					: "Continue the task.";
+
+		const DecodeResumeToken = (native_thread_id: string | null, value: string | null) => {
+			if (value === null) {
+				return native_thread_id === null
+					? Effect.succeed(Option.none<typeof EngineResumeToken.Type>())
+					: Effect.fail(
+							invariant("Stored native thread is missing its engine resume token"),
+						);
+			}
+
+			return DecodeJson(EngineResumeToken, value, "engine resume token").pipe(
+				Effect.flatMap((token) =>
+					native_thread_id === token.native_thread_id
+						? Effect.succeed(Option.some(token))
+						: Effect.fail(
+								invariant(
+									"Stored engine resume token does not match its native thread",
+								),
+							),
+				),
+			);
+		};
+
+		const resume_tokens_match = (
+			left: Option.Option<typeof EngineResumeToken.Type>,
+			right: Option.Option<typeof EngineResumeToken.Type>,
+		) =>
+			Option.isNone(left)
+				? Option.isNone(right)
+				: Option.isSome(right) &&
+					left.value.native_thread_id === right.value.native_thread_id &&
+					left.value.opaque_checkpoint === right.value.opaque_checkpoint;
+
+		const MaterializeWake = (input: typeof WakeMaterialization.Type) =>
+			Schema.decodeUnknownEffect(WakeMaterialization, { onExcessProperty: "error" })(
+				input,
+			).pipe(
 				Effect.flatMap((decoded) =>
 					RetrySqliteWrite(
 						database.client.transaction((transaction) =>
@@ -2005,10 +2058,9 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 									.limit(1);
 
 								if (!outbox) {
-									return {
-										published: false,
-										snapshot: Option.none<ExternalWaitSnapshotValue>(),
-									};
+									return yield* new ExternalWaitUnavailable({
+										reason: "missing",
+									});
 								}
 
 								const [wait] = yield* transaction
@@ -2024,38 +2076,263 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 								}
 
 								const stored = yield* DecodeWake(outbox);
+								const owner = yield* DecodeJson(
+									ExternalWaitOwner,
+									wait.owner_json,
+									"external wait owner",
+								);
 
 								if (outbox.state === "settled") {
-									if (
-										outbox.follow_up_run_id !== decoded.follow_up_run_id ||
-										outbox.mode !== decoded.mode
-									) {
-										return yield* new ExternalWaitConflict({
-											reason: "changed_intent",
-										});
-									}
-
 									const snapshot = yield* DecodeSnapshot(wait);
 
 									if (
 										snapshot.state._tag !== "woken" ||
 										snapshot.state.follow_up_run_id !==
-											decoded.follow_up_run_id ||
-										snapshot.state.mode !== decoded.mode
+											outbox.follow_up_run_id ||
+										snapshot.state.mode !== outbox.mode ||
+										json(snapshot.state.trigger) !== json(stored.trigger) ||
+										outbox.mode === null
 									) {
 										return yield* invariant(
 											"Stored settled wake projection is corrupt",
 										);
 									}
 
-									return { published: false, snapshot: Option.some(snapshot) };
+									const continuation_matches =
+										owner._tag === "thread_run"
+											? yield* Effect.gen(function* () {
+													const [
+														[continuation],
+														[source],
+														[command],
+														[message],
+														[run_outbox],
+													] = yield* Effect.all([
+														transaction
+															.select()
+															.from(OrchestrationRuns)
+															.where(
+																eq(
+																	OrchestrationRuns.run_id,
+																	outbox.follow_up_run_id,
+																),
+															)
+															.limit(1),
+														transaction
+															.select()
+															.from(OrchestrationRuns)
+															.where(
+																eq(
+																	OrchestrationRuns.run_id,
+																	owner.run_id,
+																),
+															)
+															.limit(1),
+														transaction
+															.select()
+															.from(JournalCommands)
+															.where(
+																eq(
+																	JournalCommands.message_id,
+																	outbox.follow_up_command_id,
+																),
+															)
+															.limit(1),
+														transaction
+															.select()
+															.from(OrchestrationMessages)
+															.where(
+																eq(
+																	OrchestrationMessages.command_id,
+																	outbox.follow_up_command_id,
+																),
+															)
+															.limit(1),
+														transaction
+															.select()
+															.from(OrchestrationOutbox)
+															.where(
+																eq(
+																	OrchestrationOutbox.command_id,
+																	outbox.follow_up_command_id,
+																),
+															)
+															.limit(1),
+													]);
+
+													if (
+														!continuation ||
+														!source ||
+														!command ||
+														!message ||
+														!run_outbox
+													) {
+														return false;
+													}
+
+													const source_token = yield* DecodeResumeToken(
+														source.native_thread_id,
+														source.native_resume_json,
+													);
+													const continuation_token =
+														yield* DecodeResumeToken(
+															continuation.native_thread_id,
+															continuation.native_resume_json,
+														);
+													const expected_payload = json({
+														type: "thread.send_message",
+														engine_id: source.engine_id,
+														text: ContinuationText(stored.trigger),
+														working_directory: source.working_directory,
+													});
+													const token_matches =
+														outbox.mode === "native_resume"
+															? Option.isSome(source_token) &&
+																resume_tokens_match(
+																	source_token,
+																	continuation_token,
+																)
+															: Option.isNone(continuation_token);
+
+													return (
+														source.status === "closed" &&
+														source.thread_id === wait.thread_id &&
+														source.agent_id === owner.agent_id &&
+														source.engine_id === owner.engine_id &&
+														continuation.thread_id === wait.thread_id &&
+														continuation.agent_id === owner.agent_id &&
+														continuation.engine_id ===
+															owner.engine_id &&
+														continuation.working_directory ===
+															source.working_directory &&
+														continuation.open_mode ===
+															(outbox.mode === "native_resume"
+																? "resume"
+																: "start") &&
+														token_matches &&
+														command.agent_id === owner.agent_id &&
+														command.assigned_run_id ===
+															continuation.run_id &&
+														command.causation_id === outbox.outbox_id &&
+														command.origin === "backend" &&
+														command.payload_json === expected_payload &&
+														command.payload_type ===
+															"thread.send_message" &&
+														command.run_id === source.run_id &&
+														command.schema_version === 1 &&
+														command.thread_id === wait.thread_id &&
+														message.agent_id === owner.agent_id &&
+														message.message_id ===
+															outbox.follow_up_command_id &&
+														message.run_id === continuation.run_id &&
+														message.text ===
+															ContinuationText(stored.trigger) &&
+														message.thread_id === wait.thread_id &&
+														run_outbox.agent_id === owner.agent_id &&
+														run_outbox.kind ===
+															(outbox.mode === "native_resume"
+																? "resume"
+																: "start") &&
+														run_outbox.payload_json ===
+															expected_payload &&
+														run_outbox.run_id === continuation.run_id &&
+														run_outbox.thread_id === wait.thread_id
+													);
+												})
+											: yield* Effect.gen(function* () {
+													const [[continuation], [source]] =
+														yield* Effect.all([
+															transaction
+																.select()
+																.from(AgentRuns)
+																.where(
+																	eq(
+																		AgentRuns.run_id,
+																		outbox.follow_up_run_id,
+																	),
+																)
+																.limit(1),
+															transaction
+																.select()
+																.from(AgentRuns)
+																.where(
+																	eq(
+																		AgentRuns.run_id,
+																		owner.run_id,
+																	),
+																)
+																.limit(1),
+														]);
+
+													if (!continuation || !source) {
+														return false;
+													}
+
+													const source_token = yield* DecodeResumeToken(
+														source.native_thread_id,
+														source.native_resume_json,
+													);
+													const continuation_token =
+														yield* DecodeResumeToken(
+															continuation.native_thread_id,
+															continuation.native_resume_json,
+														);
+													const token_matches =
+														outbox.mode === "native_resume"
+															? Option.isSome(source_token) &&
+																resume_tokens_match(
+																	source_token,
+																	continuation_token,
+																)
+															: Option.isNone(continuation_token);
+
+													return (
+														source.state === "stopped" &&
+														source.dispatch_status === "terminal" &&
+														source.assignment_id ===
+															owner.assignment_id &&
+														source.group_id === owner.group_id &&
+														source.agent_id === owner.agent_id &&
+														source.engine_id === owner.engine_id &&
+														continuation.assignment_id ===
+															owner.assignment_id &&
+														continuation.group_id === owner.group_id &&
+														continuation.agent_id === owner.agent_id &&
+														continuation.engine_id ===
+															owner.engine_id &&
+														continuation.attempt === source.attempt &&
+														continuation.continuation_index ===
+															source.continuation_index + 1 &&
+														continuation.continuation_text ===
+															ContinuationText(stored.trigger) &&
+														continuation.open_mode ===
+															(outbox.mode === "native_resume"
+																? "resume"
+																: "start") &&
+														continuation.profile === source.profile &&
+														token_matches
+													);
+												});
+
+									if (!continuation_matches) {
+										return yield* invariant(
+											"Stored settled wake continuation is missing",
+										);
+									}
+
+									return {
+										follow_up_run_id: outbox.follow_up_run_id,
+										mode: outbox.mode,
+										owner,
+										snapshot,
+										status: "duplicate" as const,
+									};
 								}
 
 								if (
 									outbox.state !== "claimed" ||
 									outbox.lease_owner !== decoded.lease_owner ||
 									outbox.lease_expires_at === null ||
-									outbox.follow_up_run_id !== decoded.follow_up_run_id ||
 									(yield* HasExpired(
 										outbox.lease_expires_at,
 										decoded.now,
@@ -2075,12 +2352,382 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 									});
 								}
 
+								const [[erasure], [tombstone]] = yield* Effect.all([
+									transaction
+										.select({ thread_id: ThreadErasureClaims.thread_id })
+										.from(ThreadErasureClaims)
+										.where(eq(ThreadErasureClaims.thread_id, wait.thread_id))
+										.limit(1),
+									transaction
+										.select({ thread_id: ThreadTombstones.thread_id })
+										.from(ThreadTombstones)
+										.where(eq(ThreadTombstones.thread_id, wait.thread_id))
+										.limit(1),
+								]);
+
+								if (erasure || tombstone) {
+									return yield* new ExternalWaitUnavailable({ reason: "erased" });
+								}
+
+								const text = ContinuationText(stored.trigger);
+								const materialization =
+									owner._tag === "thread_run"
+										? yield* Effect.gen(function* () {
+												const [[source], [coordinator]] = yield* Effect.all(
+													[
+														transaction
+															.select()
+															.from(OrchestrationRuns)
+															.where(
+																eq(
+																	OrchestrationRuns.run_id,
+																	owner.run_id,
+																),
+															)
+															.limit(1),
+														transaction
+															.select()
+															.from(OrchestrationCoordinators)
+															.where(
+																eq(
+																	OrchestrationCoordinators.thread_id,
+																	wait.thread_id,
+																),
+															)
+															.limit(1),
+													],
+												);
+
+												if (
+													!source ||
+													!coordinator ||
+													source.status !== "waiting_external" ||
+													source.thread_id !== wait.thread_id ||
+													source.agent_id !== owner.agent_id ||
+													source.engine_id !== owner.engine_id ||
+													coordinator.active_run_id !== source.run_id ||
+													coordinator.agent_id !== owner.agent_id ||
+													coordinator.engine_id !== owner.engine_id
+												) {
+													return yield* new ExternalWaitUnavailable({
+														reason: "ownership",
+													});
+												}
+
+												const source_token = yield* DecodeResumeToken(
+													source.native_thread_id,
+													source.native_resume_json,
+												);
+												const coordinator_token = yield* DecodeResumeToken(
+													coordinator.native_thread_id,
+													coordinator.native_resume_json,
+												);
+
+												if (
+													!resume_tokens_match(
+														source_token,
+														coordinator_token,
+													)
+												) {
+													return yield* invariant(
+														"Stored coordinator resume token does not match its source run",
+													);
+												}
+												const mode =
+													decoded.native_resume_supported &&
+													Option.isSome(source_token)
+														? ("native_resume" as const)
+														: ("linked_run" as const);
+												const payload = yield* Schema.decodeUnknownEffect(
+													CommandPayload,
+													{ onExcessProperty: "error" },
+												)({
+													engine_id: source.engine_id,
+													text,
+													type: "thread.send_message",
+													working_directory: source.working_directory,
+												}).pipe(
+													Effect.mapError(() =>
+														invariant(
+															"External wake continuation payload is invalid",
+														),
+													),
+												);
+
+												yield* transaction
+													.insert(OrchestrationRuns)
+													.values({
+														agent_id: source.agent_id,
+														created_at: decoded.now,
+														engine_id: source.engine_id,
+														native_resume_json:
+															mode === "native_resume"
+																? source.native_resume_json
+																: null,
+														native_thread_id:
+															mode === "native_resume"
+																? source.native_thread_id
+																: null,
+														open_mode:
+															mode === "native_resume"
+																? "resume"
+																: "start",
+														run_id: outbox.follow_up_run_id,
+														status: "queued",
+														thread_id: source.thread_id,
+														updated_at: decoded.now,
+														working_directory: source.working_directory,
+													});
+												yield* transaction.insert(JournalCommands).values({
+													accepted_at: decoded.now,
+													agent_id: source.agent_id,
+													assigned_run_id: outbox.follow_up_run_id,
+													causation_id: outbox.outbox_id,
+													message_id: outbox.follow_up_command_id,
+													origin: "backend",
+													payload_json: json(payload),
+													payload_type: payload.type,
+													raw_origin_json: null,
+													run_id: source.run_id,
+													schema_version: 1,
+													sent_at: decoded.now,
+													status: "accepted",
+													thread_id: source.thread_id,
+												});
+												yield* transaction
+													.insert(OrchestrationMessages)
+													.values({
+														agent_id: source.agent_id,
+														command_id: outbox.follow_up_command_id,
+														created_at: decoded.now,
+														delivery: "queued",
+														message_id: outbox.follow_up_command_id,
+														run_id: outbox.follow_up_run_id,
+														text,
+														thread_id: source.thread_id,
+													});
+												yield* transaction
+													.insert(OrchestrationOutbox)
+													.values({
+														agent_id: source.agent_id,
+														command_id: outbox.follow_up_command_id,
+														created_at: decoded.now,
+														kind:
+															mode === "native_resume"
+																? "resume"
+																: "start",
+														payload_json: json(payload),
+														run_id: outbox.follow_up_run_id,
+														status: "pending",
+														thread_id: source.thread_id,
+														updated_at: decoded.now,
+													});
+												yield* transaction
+													.update(OrchestrationCoordinators)
+													.set({
+														active_run_id: outbox.follow_up_run_id,
+														native_resume_json:
+															mode === "native_resume"
+																? source.native_resume_json
+																: null,
+														native_thread_id:
+															mode === "native_resume"
+																? source.native_thread_id
+																: null,
+														updated_at: decoded.now,
+													})
+													.where(
+														and(
+															eq(
+																OrchestrationCoordinators.thread_id,
+																source.thread_id,
+															),
+															eq(
+																OrchestrationCoordinators.active_run_id,
+																source.run_id,
+															),
+														),
+													);
+												yield* transaction
+													.update(OrchestrationRuns)
+													.set({
+														status: "closed",
+														updated_at: decoded.now,
+													})
+													.where(
+														and(
+															eq(
+																OrchestrationRuns.run_id,
+																source.run_id,
+															),
+															eq(
+																OrchestrationRuns.status,
+																"waiting_external",
+															),
+														),
+													);
+
+												return mode;
+											})
+										: yield* Effect.gen(function* () {
+												const [[source], [assignment], [group], [agent]] =
+													yield* Effect.all([
+														transaction
+															.select()
+															.from(AgentRuns)
+															.where(
+																eq(AgentRuns.run_id, owner.run_id),
+															)
+															.limit(1),
+														transaction
+															.select()
+															.from(Assignments)
+															.where(
+																eq(
+																	Assignments.assignment_id,
+																	owner.assignment_id,
+																),
+															)
+															.limit(1),
+														transaction
+															.select()
+															.from(OrchestrationGroups)
+															.where(
+																eq(
+																	OrchestrationGroups.group_id,
+																	owner.group_id,
+																),
+															)
+															.limit(1),
+														transaction
+															.select()
+															.from(AgentInstances)
+															.where(
+																eq(
+																	AgentInstances.agent_id,
+																	owner.agent_id,
+																),
+															)
+															.limit(1),
+													]);
+
+												if (
+													!source ||
+													!assignment ||
+													!group ||
+													!agent ||
+													source.state !== "waiting_external" ||
+													source.dispatch_status !== "waiting_external" ||
+													source.assignment_id !==
+														assignment.assignment_id ||
+													source.group_id !== group.group_id ||
+													source.agent_id !== owner.agent_id ||
+													source.engine_id !== owner.engine_id ||
+													assignment.active_run_id !== source.run_id ||
+													assignment.state !== "waiting_external" ||
+													group.state !== "running" ||
+													group.thread_id !== wait.thread_id ||
+													agent.group_id !== group.group_id
+												) {
+													return yield* new ExternalWaitUnavailable({
+														reason: "ownership",
+													});
+												}
+
+												const source_token = yield* DecodeResumeToken(
+													source.native_thread_id,
+													source.native_resume_json,
+												);
+												const mode =
+													decoded.native_resume_supported &&
+													Option.isSome(source_token)
+														? ("native_resume" as const)
+														: ("linked_run" as const);
+
+												yield* transaction.insert(AgentRuns).values({
+													agent_id: source.agent_id,
+													assignment_id: source.assignment_id,
+													attempt: source.attempt,
+													completed_at: null,
+													continuation_index:
+														source.continuation_index + 1,
+													continuation_text: text,
+													created_at: decoded.now,
+													dispatch_status: "queued",
+													engine_id: source.engine_id,
+													group_id: source.group_id,
+													last_observation_sequence: 0,
+													native_identity_json: null,
+													native_resume_json:
+														mode === "native_resume"
+															? source.native_resume_json
+															: null,
+													native_thread_id:
+														mode === "native_resume"
+															? source.native_thread_id
+															: null,
+													open_mode:
+														mode === "native_resume"
+															? "resume"
+															: "start",
+													owner_instance_id: null,
+													profile: source.profile,
+													raw_origin_json: null,
+													run_id: outbox.follow_up_run_id,
+													state: "queued",
+													updated_at: decoded.now,
+												});
+												yield* transaction
+													.update(Assignments)
+													.set({
+														active_run_id: outbox.follow_up_run_id,
+														state: "queued",
+														updated_at: decoded.now,
+													})
+													.where(
+														and(
+															eq(
+																Assignments.assignment_id,
+																assignment.assignment_id,
+															),
+															eq(
+																Assignments.active_run_id,
+																source.run_id,
+															),
+															eq(
+																Assignments.state,
+																"waiting_external",
+															),
+														),
+													);
+												yield* transaction
+													.update(AgentRuns)
+													.set({
+														completed_at: decoded.now,
+														dispatch_status: "terminal",
+														state: "stopped",
+														updated_at: decoded.now,
+													})
+													.where(
+														and(
+															eq(AgentRuns.run_id, source.run_id),
+															eq(
+																AgentRuns.dispatch_status,
+																"waiting_external",
+															),
+															eq(AgentRuns.state, "waiting_external"),
+														),
+													);
+
+												return mode;
+											});
+
 								const changed = yield* transaction
 									.update(ExternalWaitWakeOutbox)
 									.set({
 										lease_expires_at: null,
 										lease_owner: null,
-										mode: decoded.mode,
+										mode: materialization,
 										state: "settled",
 										updated_at: decoded.now,
 									})
@@ -2111,8 +2758,8 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 									wait,
 									{
 										_tag: "woken",
-										follow_up_run_id: decoded.follow_up_run_id,
-										mode: decoded.mode,
+										follow_up_run_id: outbox.follow_up_run_id,
+										mode: materialization,
 										trigger: stored.trigger,
 									},
 									decoded.now,
@@ -2121,18 +2768,23 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 									eq(ExternalWaits.state, "wake_pending"),
 								);
 
-								return { published: true, snapshot: Option.some(snapshot) };
+								return {
+									follow_up_run_id: outbox.follow_up_run_id,
+									mode: materialization,
+									owner,
+									snapshot,
+									status: "created" as const,
+								};
 							}),
 						),
 					),
 				),
 				Effect.mapError(normalize_error),
 				Effect.tap((result) =>
-					result.published && Option.isSome(result.snapshot)
-						? notifier.Publish(result.snapshot.value.journal_sequence)
+					result.status === "created"
+						? notifier.Publish(result.snapshot.journal_sequence)
 						: Effect.void,
 				),
-				Effect.map((result) => result.snapshot),
 			);
 
 		const CommandFingerprint = (kind: CommandKind, wait_id: string, detail: unknown) =>
@@ -2446,7 +3098,7 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 			ReleaseObservation,
 			ReleaseWake,
 			Replay,
-			SettleWake,
+			MaterializeWake,
 		};
 	}),
 );

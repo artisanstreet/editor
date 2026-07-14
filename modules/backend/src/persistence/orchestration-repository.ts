@@ -30,7 +30,14 @@ import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { RecordThreadActivity } from "../threads/internal/thread-activity";
 
 type WorkStatus = ThreadWorkItem["status"];
-type OutboxKind = "start" | "steer" | "cancel" | "close" | "respond_approval" | "respond_question";
+type OutboxKind =
+	| "start"
+	| "resume"
+	| "steer"
+	| "cancel"
+	| "close"
+	| "respond_approval"
+	| "respond_question";
 
 export class OrchestrationCommandConflict extends Data.TaggedError("OrchestrationCommandConflict")<{
 	readonly message_id: string;
@@ -62,7 +69,9 @@ export interface PendingWork {
 	readonly command_id: string;
 	readonly engine_id: string;
 	readonly kind: OutboxKind;
+	readonly open_mode: "resume" | "start";
 	readonly payload: CommandEnvelope["payload"];
+	readonly resume_token?: typeof EngineResumeToken.Type;
 	readonly run_id: string;
 	readonly thread_id: string;
 	readonly working_directory: string;
@@ -695,6 +704,9 @@ export const OrchestrationRepositoryLive = Layer.effect(
 					command_id: OrchestrationOutbox.command_id,
 					engine_id: OrchestrationRuns.engine_id,
 					kind: OrchestrationOutbox.kind,
+					native_resume_json: OrchestrationRuns.native_resume_json,
+					native_thread_id: OrchestrationRuns.native_thread_id,
+					open_mode: OrchestrationRuns.open_mode,
 					payload_json: OrchestrationOutbox.payload_json,
 					run_id: OrchestrationOutbox.run_id,
 					status: OrchestrationRuns.status,
@@ -726,30 +738,107 @@ export const OrchestrationRepositoryLive = Layer.effect(
 				.pipe(
 					Effect.flatMap((rows) =>
 						Effect.forEach(
-							rows.filter((row) => row.kind !== "start" || row.status === "queued"),
+							rows.filter(
+								(row) =>
+									!["resume", "start"].includes(row.kind) ||
+									row.status === "queued",
+							),
 							(row) =>
-								ParsePersistedJson(row.payload_json).pipe(
-									Effect.flatMap((value) =>
-										Schema.decodeUnknownEffect(CommandPayload)(value).pipe(
-											Effect.mapError(
-												(cause) => new OrchestrationFailure({ cause }),
-											),
+								Effect.gen(function* () {
+									const value = yield* ParsePersistedJson(row.payload_json);
+									const payload = yield* Schema.decodeUnknownEffect(
+										CommandPayload,
+									)(value).pipe(
+										Effect.mapError(
+											(cause) => new OrchestrationFailure({ cause }),
 										),
-									),
-									Effect.map(
-										(payload) =>
-											({
-												agent_id: row.agent_id,
-												command_id: row.command_id,
-												engine_id: row.engine_id,
-												kind: row.kind as OutboxKind,
-												payload,
-												run_id: row.run_id,
-												thread_id: row.thread_id,
-												working_directory: row.working_directory,
-											}) satisfies PendingWork,
-									),
-								),
+									);
+
+									if (row.open_mode !== "resume" && row.open_mode !== "start") {
+										return yield* new OrchestrationFailure({
+											cause: new Error("Stored run has an invalid open mode"),
+										});
+									}
+
+									const open_mode = row.open_mode;
+									const opening = row.kind === "resume" || row.kind === "start";
+
+									if (
+										opening &&
+										row.kind !== (open_mode === "resume" ? "resume" : "start")
+									) {
+										return yield* new OrchestrationFailure({
+											cause: new Error(
+												"Stored run open mode does not match its outbox",
+											),
+										});
+									}
+
+									if (
+										opening &&
+										open_mode === "start" &&
+										(row.native_resume_json !== null ||
+											row.native_thread_id !== null)
+									) {
+										return yield* new OrchestrationFailure({
+											cause: new Error(
+												"Stored start run has unexpected resume state",
+											),
+										});
+									}
+
+									const resume_token =
+										opening && open_mode === "resume"
+											? yield* Effect.gen(function* () {
+													if (row.native_resume_json === null) {
+														return yield* new OrchestrationFailure({
+															cause: new Error(
+																"Stored resume run has no token",
+															),
+														});
+													}
+
+													const stored = yield* ParsePersistedJson(
+														row.native_resume_json,
+													);
+													const token = yield* Schema.decodeUnknownEffect(
+														EngineResumeToken,
+														{ onExcessProperty: "error" },
+													)(stored).pipe(
+														Effect.mapError(
+															(cause) =>
+																new OrchestrationFailure({ cause }),
+														),
+													);
+
+													if (
+														token.native_thread_id !==
+														row.native_thread_id
+													) {
+														return yield* new OrchestrationFailure({
+															cause: new Error(
+																"Stored resume token does not match its native thread",
+															),
+														});
+													}
+
+													return token;
+												})
+											: undefined;
+
+									return {
+										agent_id: row.agent_id,
+										command_id: row.command_id,
+										engine_id: row.engine_id,
+										kind: row.kind as OutboxKind,
+										open_mode,
+										payload,
+										...(resume_token === undefined ? {} : { resume_token }),
+										run_id: row.run_id,
+										thread_id: row.thread_id,
+										working_directory: row.working_directory,
+									} satisfies PendingWork;
+								}),
 						),
 					),
 					Effect.mapError(normalize_error),

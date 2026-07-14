@@ -39,6 +39,7 @@ export class AgentGraphOrchestrator extends Context.Service<
 			command: CommandEnvelope,
 		) => Effect.Effect<AcceptedAgentGraphCommand, AgentGraphError>;
 		readonly GetGraph: (group_id: string) => Effect.Effect<OrchestrationGraph, AgentGraphError>;
+		readonly NotifyWorkAvailable: Effect.Effect<void>;
 		readonly Recover: Effect.Effect<void, AgentGraphError>;
 		readonly QuiesceThread: (thread_id: string) => Effect.Effect<void>;
 	}
@@ -167,6 +168,17 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 					return;
 				}
 
+				if (
+					work.open_mode === "resume" &&
+					(engine.value.Descriptor.capabilities.resume.state !== "supported" ||
+						work.resume_token === undefined ||
+						work.continuation_text === undefined)
+				) {
+					yield* fail_start(work, "The engine can no longer resume this assignment.");
+
+					return;
+				}
+
 				const resolved_guidance = yield* guidance
 					.ResolveForEngine(work.engine_id)
 					.pipe(Effect.exit);
@@ -189,30 +201,45 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 				let transferred = false;
 
 				return yield* Effect.gen(function* () {
-					const opened = yield* engine.value
-						.Open({
-							_tag: "start",
-							artisan_run_id: work.run_id,
-							...(Option.isSome(resolved_guidance.value)
-								? { global_guidance: resolved_guidance.value.value }
-								: {}),
-							...(resolved_harness_context._tag === "available"
-								? { harness_context: resolved_harness_context.context }
-								: {}),
-							initial_text: [
-								work.instructions,
-								`Expected result: ${work.expected_result}`,
-								`Summary contract: ${work.summary_contract}`,
-							].join("\n\n"),
-							model: work.profile,
-							permission_policy: {
-								approval: work.permission_policy.approval,
-								network_access: work.permission_policy.network_access,
-								write_access: work.permission_policy.write_access,
-							},
-							working_directory: work.workspace.working_directory,
-						})
-						.pipe(Scope.provide(run_scope), Effect.exit);
+					const common_input = {
+						artisan_run_id: work.run_id,
+						...(Option.isSome(resolved_guidance.value)
+							? { global_guidance: resolved_guidance.value.value }
+							: {}),
+						...(resolved_harness_context._tag === "available"
+							? { harness_context: resolved_harness_context.context }
+							: {}),
+						model: work.profile,
+						permission_policy: {
+							approval: work.permission_policy.approval,
+							network_access: work.permission_policy.network_access,
+							write_access: work.permission_policy.write_access,
+						},
+						working_directory: work.workspace.working_directory,
+					};
+					const OpenRun =
+						work.open_mode === "resume" &&
+						work.resume_token !== undefined &&
+						work.continuation_text !== undefined
+							? engine.value.Open({
+									...common_input,
+									_tag: "resume",
+									next_text: work.continuation_text,
+									resume_token: work.resume_token,
+								})
+							: engine.value.Open({
+									...common_input,
+									_tag: "start",
+									initial_text: [
+										work.instructions,
+										`Expected result: ${work.expected_result}`,
+										`Summary contract: ${work.summary_contract}`,
+										...(work.continuation_text === undefined
+											? []
+											: [work.continuation_text]),
+									].join("\n\n"),
+								});
+					const opened = yield* OpenRun.pipe(Scope.provide(run_scope), Effect.exit);
 
 					if (Exit.isFailure(opened)) {
 						yield* fail_start(work, "The engine could not start this assignment.");
@@ -507,6 +534,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 		return {
 			GetGraph: repository.GetGraph,
 			Handle: handle,
+			NotifyWorkAvailable: wake_dispatcher(),
 			QuiesceThread,
 			Recover: recover,
 		};

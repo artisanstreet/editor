@@ -33,6 +33,7 @@ export class AgentOrchestrator extends Context.Service<
 			command: CommandEnvelope,
 		) => Effect.Effect<AcceptedOrchestrationCommand, OrchestrationError>;
 		readonly Recover: Effect.Effect<void, OrchestrationError>;
+		readonly NotifyWorkAvailable: Effect.Effect<void>;
 		readonly QuiesceThread: (thread_id: string) => Effect.Effect<void>;
 	}
 >()("Artisan/AgentOrchestrator") {}
@@ -148,6 +149,16 @@ export const AgentOrchestratorLive = Layer.effect(
 					return;
 				}
 
+				if (
+					work.open_mode === "resume" &&
+					(engine.Descriptor.capabilities.resume.state !== "supported" ||
+						work.resume_token === undefined)
+				) {
+					yield* MarkStartFailure(work);
+
+					return;
+				}
+
 				const resolved_guidance = yield* guidance
 					.ResolveForEngine(work.engine_id)
 					.pipe(Effect.exit);
@@ -166,23 +177,33 @@ export const AgentOrchestratorLive = Layer.effect(
 				}
 
 				const run_scope = yield* Scope.make();
-				const run = yield* engine
-					.Open({
-						_tag: "start",
-						artisan_run_id: work.run_id,
-						...(Option.isSome(resolved_guidance.value)
-							? { global_guidance: resolved_guidance.value.value }
-							: {}),
-						...(resolved_harness_context._tag === "available"
-							? { harness_context: resolved_harness_context.context }
-							: {}),
-						initial_text: work.payload.text,
-						working_directory: work.working_directory,
-					})
-					.pipe(
-						Scope.provide(run_scope),
-						Effect.catch(() => Effect.succeed(undefined)),
-					);
+				const common_input = {
+					artisan_run_id: work.run_id,
+					...(Option.isSome(resolved_guidance.value)
+						? { global_guidance: resolved_guidance.value.value }
+						: {}),
+					...(resolved_harness_context._tag === "available"
+						? { harness_context: resolved_harness_context.context }
+						: {}),
+					working_directory: work.working_directory,
+				};
+				const OpenRun =
+					work.open_mode === "resume" && work.resume_token !== undefined
+						? engine.Open({
+								...common_input,
+								_tag: "resume",
+								next_text: work.payload.text,
+								resume_token: work.resume_token,
+							})
+						: engine.Open({
+								...common_input,
+								_tag: "start",
+								initial_text: work.payload.text,
+							});
+				const run = yield* OpenRun.pipe(
+					Scope.provide(run_scope),
+					Effect.catch(() => Effect.succeed(undefined)),
+				);
 
 				if (!run) {
 					yield* Scope.close(run_scope, Exit.succeed(undefined));
@@ -299,7 +320,7 @@ export const AgentOrchestratorLive = Layer.effect(
 			const pending = yield* repository.GetPending();
 
 			for (const work of pending) {
-				if (work.kind === "start") {
+				if (work.kind === "start" || work.kind === "resume") {
 					yield* StartRun(work);
 				} else {
 					yield* SendToLiveRun(work);
@@ -394,6 +415,6 @@ export const AgentOrchestratorLive = Layer.effect(
 
 		yield* Recover;
 
-		return { Handle, QuiesceThread, Recover };
+		return { Handle, NotifyWorkAvailable: WakeDispatcher, QuiesceThread, Recover };
 	}),
 );

@@ -1,6 +1,10 @@
 import { Data, Effect } from "effect";
 
-import type { EngineObservation, EngineRunTerminalState } from "@artisan/engines";
+import type {
+	EngineObservation,
+	EngineResumeToken,
+	EngineRunTerminalState,
+} from "@artisan/engines";
 import type {
 	AgentRun,
 	AssignmentControlEvent,
@@ -77,13 +81,16 @@ export interface PendingAgentRun {
 	readonly agent_id: string;
 	readonly assignment_id: string;
 	readonly attempt: number;
+	readonly continuation_text?: string;
 	readonly engine_id: string;
 	readonly expected_result: string;
 	readonly group_id: string;
 	readonly instructions: string;
 	readonly max_concurrency: number;
+	readonly open_mode: "resume" | "start";
 	readonly permission_policy: AssignmentPermissionPolicy;
 	readonly profile: string;
+	readonly resume_token?: EngineResumeToken;
 	readonly run_id: string;
 	readonly scope: AssignmentScope;
 	readonly summary_contract: string;

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Effect, Stream } from "effect";
+import { Effect, Latch, Stream } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { CommandEnvelope, HelloEnvelope } from "@artisan/protocol";
@@ -14,7 +14,20 @@ import type {
 	EngineOpenInput,
 	EngineRun,
 } from "@artisan/engines";
-import { make_backend_runtime, ProtocolServer, type ProtocolConnection } from "@artisan/backend";
+import {
+	AgentOrchestrator,
+	make_backend_runtime,
+	ProtocolServer,
+	type ProtocolConnection,
+} from "@artisan/backend";
+
+import { Database } from "../../modules/backend/src/persistence/database";
+import {
+	OrchestrationCoordinators,
+	OrchestrationOutbox,
+	OrchestrationRuns,
+	Threads,
+} from "../../modules/backend/src/persistence/schema";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];
@@ -29,6 +42,9 @@ async function make_database_path() {
 
 function make_engine() {
 	const commands: EngineCommand[] = [];
+	const inputs: EngineOpenInput[] = [];
+	const commands_latch = Latch.makeUnsafe();
+	const opened_latch = Latch.makeUnsafe();
 	let events_consumed = 0;
 	let opened = 0;
 	const capabilities = Object.fromEntries(
@@ -53,8 +69,10 @@ function make_engine() {
 	) as Engine["Descriptor"]["capabilities"];
 
 	const Open = (input: EngineOpenInput) =>
-		Effect.sync(() => {
+		Effect.gen(function* () {
 			opened += 1;
+			inputs.push(input);
+			yield* opened_latch.open;
 
 			const observations: ReadonlyArray<EngineObservation> = [
 				{
@@ -91,8 +109,12 @@ function make_engine() {
 				native_thread_id: `native:${input.artisan_run_id}`,
 				resume_token: { native_thread_id: `native:${input.artisan_run_id}` },
 				Send: (command) =>
-					Effect.sync(() => {
+					Effect.gen(function* () {
 						commands.push(command);
+
+						if (commands.length === 2) {
+							yield* commands_latch.open;
+						}
 					}),
 			};
 
@@ -101,6 +123,7 @@ function make_engine() {
 
 	return {
 		commands,
+		commands_latch,
 		engine: {
 			Descriptor: {
 				capabilities,
@@ -112,7 +135,9 @@ function make_engine() {
 			Probe: () => Effect.die("Probe is not used by orchestration tests"),
 		} satisfies Engine,
 		events_consumed: () => events_consumed,
+		inputs,
 		opened: () => opened,
+		opened_latch,
 	};
 }
 
@@ -235,7 +260,8 @@ describe("single coordinator orchestration", () => {
 				{ kind: "event", payload: { state: "queued", type: "run.lifecycle" } },
 			]);
 
-			await new Promise((resolve) => setTimeout(resolve, 30));
+			await runtime.runPromise(deterministic.opened_latch.await);
+			await runtime.runPromise(deterministic.commands_latch.await);
 
 			expect(deterministic.opened()).toBe(1);
 			expect(deterministic.events_consumed()).toBe(1);
@@ -244,6 +270,89 @@ describe("single coordinator orchestration", () => {
 			expect(deterministic.commands.map((command) => command._tag)).toEqual([
 				"respond_approval",
 				"respond_question",
+			]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("opens durable resume work with its exact stored provider token", async () => {
+		const deterministic = make_engine();
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			engines: [deterministic.engine],
+			migrations_path,
+		});
+
+		try {
+			await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const orchestrator = yield* AgentOrchestrator;
+					const created_at = "2026-07-10T08:00:00.000Z";
+					const payload = {
+						engine_id: "deterministic",
+						text: "Continue after the external review changed.",
+						type: "thread.send_message" as const,
+						working_directory: "C:/work",
+					};
+
+					yield* database.client.insert(Threads).values({
+						created_at,
+						thread_id: "thread_1",
+						title: "Resume orchestration",
+						updated_at: created_at,
+					});
+					yield* database.client.insert(OrchestrationCoordinators).values({
+						active_run_id: "resume_run",
+						agent_id: "agent_1",
+						created_at,
+						display_name: "Primary coordinator",
+						engine_id: "deterministic",
+						native_resume_json: '{"native_thread_id":"native:resume_run"}',
+						native_thread_id: "native:resume_run",
+						role: "primary",
+						thread_id: "thread_1",
+						updated_at: created_at,
+					});
+					yield* database.client.insert(OrchestrationRuns).values({
+						agent_id: "agent_1",
+						created_at,
+						engine_id: "deterministic",
+						native_resume_json: '{"native_thread_id":"native:resume_run"}',
+						native_thread_id: "native:resume_run",
+						open_mode: "resume",
+						run_id: "resume_run",
+						status: "queued",
+						thread_id: "thread_1",
+						updated_at: created_at,
+						working_directory: "C:/work",
+					});
+					yield* database.client.insert(OrchestrationOutbox).values({
+						agent_id: "agent_1",
+						command_id: "resume_command",
+						created_at,
+						kind: "resume",
+						payload_json: JSON.stringify(payload),
+						run_id: "resume_run",
+						status: "pending",
+						thread_id: "thread_1",
+						updated_at: created_at,
+					});
+
+					yield* orchestrator.NotifyWorkAvailable;
+					yield* deterministic.opened_latch.await;
+				}),
+			);
+
+			expect(deterministic.inputs).toEqual([
+				expect.objectContaining({
+					_tag: "resume",
+					artisan_run_id: "resume_run",
+					next_text: "Continue after the external review changed.",
+					resume_token: { native_thread_id: "native:resume_run" },
+					working_directory: "C:/work",
+				}),
 			]);
 		} finally {
 			await runtime.dispose();

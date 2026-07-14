@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Cause, Deferred, Effect, Exit, Queue, Stream } from "effect";
+import { Cause, Deferred, Effect, Exit, Latch, Queue, Stream } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type {
@@ -54,6 +54,7 @@ interface ControlledRun {
 
 function make_controlled_engine() {
 	const runs: Array<ControlledRun> = [];
+	const opened_latch = Latch.makeUnsafe();
 	let scopes_closed = 0;
 	const capability_names = [
 		"approval",
@@ -84,6 +85,7 @@ function make_controlled_engine() {
 			const controlled = { closed, input, queue, sequence: 0 } satisfies ControlledRun;
 
 			runs.push(controlled);
+			yield* opened_latch.open;
 			yield* Effect.addFinalizer(() =>
 				Effect.gen(function* () {
 					scopes_closed += 1;
@@ -160,6 +162,7 @@ function make_controlled_engine() {
 			Open,
 			Probe: () => Effect.die("Probe is not used by graph tests"),
 		} satisfies Engine,
+		opened_latch,
 		runs,
 		scopes_closed: () => scopes_closed,
 	};
@@ -408,6 +411,70 @@ describe("multi-agent graph lifecycle", () => {
 				native_thread_id: "native_thread_1",
 				state: "running",
 			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("opens a durable graph continuation with its exact stored provider token", async () => {
+		const controlled = make_controlled_engine();
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			engines: [controlled.engine],
+			migrations_path,
+		});
+
+		try {
+			await create_thread(runtime);
+			await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const orchestrator = yield* AgentGraphOrchestrator;
+					const repository = yield* AgentGraphRepository;
+					const continuation_text = "Continue after the external review changed.";
+					const resume_token = {
+						native_thread_id: "native:graph_resume",
+						opaque_checkpoint: "provider-owned",
+					};
+
+					yield* repository.StartGroup(
+						command("start_graph_resume", {
+							assignments: [assignment("assignment_resume")],
+							group_id: "group_graph",
+							type: "orchestration.group.start",
+						}),
+					);
+
+					const [run] = yield* database.client.select().from(AgentRuns).limit(1);
+
+					if (!run) {
+						return yield* Effect.die("Expected the graph run to exist");
+					}
+
+					yield* database.client.update(AgentRuns).set({
+						continuation_text,
+						native_resume_json: JSON.stringify(resume_token),
+						native_thread_id: resume_token.native_thread_id,
+						open_mode: "resume",
+						updated_at: "2026-07-10T08:01:00.000Z",
+					});
+
+					yield* orchestrator.NotifyWorkAvailable;
+					yield* controlled.opened_latch.await;
+				}),
+			);
+
+			expect(controlled.runs).toHaveLength(1);
+			expect(controlled.runs[0]?.input).toEqual(
+				expect.objectContaining({
+					_tag: "resume",
+					next_text: "Continue after the external review changed.",
+					resume_token: {
+						native_thread_id: "native:graph_resume",
+						opaque_checkpoint: "provider-owned",
+					},
+				}),
+			);
 		} finally {
 			await runtime.dispose();
 		}
