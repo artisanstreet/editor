@@ -1,7 +1,7 @@
 import { fileURLToPath } from "node:url";
 
 import { NodeFileSystem } from "@effect/platform-node-shared";
-import { Cause, Effect, Exit, FileSystem, Layer, ManagedRuntime } from "effect";
+import { Cause, Effect, Exit, FileSystem, Layer, ManagedRuntime, Option } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { Database, make_database_layer } from "../../modules/backend/src/persistence/database";
@@ -28,6 +28,7 @@ import {
 	WorkspaceGitMutationRepository,
 	WorkspaceGitMutationRepositoryLive,
 	WorkspaceGitMutationUnavailable,
+	type ReplayWorkspaceGitMutationRequest,
 	type RequestWorkspaceGitMutation,
 	type WorkspaceGitMutationDecision,
 } from "../../modules/backend/src/git/workspace-git-mutation-repository";
@@ -201,6 +202,26 @@ function mutation_request(
 	};
 }
 
+function replay_mutation_request(
+	overrides: Partial<ReplayWorkspaceGitMutationRequest> = {},
+): ReplayWorkspaceGitMutationRequest {
+	const request = mutation_request();
+
+	return {
+		...(request.action_approval_id === undefined
+			? {}
+			: { action_approval_id: request.action_approval_id }),
+		approval_id: request.approval_id,
+		expected_session_version: request.expected_session_version,
+		operation: request.operation,
+		request_fingerprint: request.request_fingerprint,
+		source_command: request.source_command,
+		thread_id: request.thread_id,
+		workspace_id: request.workspace_id,
+		...overrides,
+	};
+}
+
 function mutation_decision(
 	overrides: Partial<WorkspaceGitMutationDecision> = {},
 ): WorkspaceGitMutationDecision {
@@ -292,7 +313,34 @@ describe("WorkspaceGitMutationRepository", () => {
 
 					yield* SeedThreads;
 					yield* sessions.Project(session_observation("session_request"));
+					const absent = yield* repository.ReplayRequest(replay_mutation_request());
 					const requested = yield* repository.Request(mutation_request());
+					const exact_replay = yield* repository.ReplayRequest(replay_mutation_request());
+					yield* database.client.insert(JournalCommands).values({
+						accepted_at: now,
+						message_id: "foreign_command_1",
+						origin: "frontend",
+						payload_json: "{}",
+						payload_type: "thread.create",
+						schema_version: 1,
+						sent_at: now,
+						status: "accepted",
+						thread_id: "thread_1",
+					});
+					const command_collision = yield* repository
+						.ReplayRequest(
+							replay_mutation_request({
+								source_command: { message_id: "foreign_command_1", sent_at: now },
+							}),
+						)
+						.pipe(Effect.exit);
+					const changed_replay = yield* repository
+						.ReplayRequest(
+							replay_mutation_request({
+								operation: { message: "CHANGED_PRIVATE_INTENT", type: "commit" },
+							}),
+						)
+						.pipe(Effect.exit);
 					const replay = yield* repository.Request(
 						mutation_request({
 							plan: { ...mutation_request().plan, binding: "d".repeat(64) },
@@ -313,11 +361,15 @@ describe("WorkspaceGitMutationRepository", () => {
 						.pipe(Effect.exit);
 
 					return {
+						absent,
 						artifacts: yield* database.client
 							.select()
 							.from(WorkspaceGitMutationArtifacts),
 						changed,
+						changed_replay,
+						command_collision,
 						commands: yield* database.client.select().from(JournalCommands),
+						exact_replay,
 						events: yield* database.client.select().from(JournalEvents),
 						requested,
 						replay,
@@ -326,7 +378,14 @@ describe("WorkspaceGitMutationRepository", () => {
 			);
 
 			expect(result.replay).toEqual({ ...result.requested, status: "duplicate" });
+			expect(Option.isNone(result.absent)).toBe(true);
+			expect(Option.getOrUndefined(result.exact_replay)).toEqual({
+				...result.requested,
+				status: "duplicate",
+			});
 			expect_conflict(result.changed, "request_conflict");
+			expect_conflict(result.changed_replay, "request_conflict");
+			expect_conflict(result.command_collision, "command_conflict");
 			expect(result.requested.approval.operation).toEqual({ type: "commit" });
 			expect(JSON.stringify(result.commands)).not.toContain("PRIVATE_COMMIT_MESSAGE");
 			expect(JSON.stringify(result.events)).not.toContain("PRIVATE_COMMIT_MESSAGE");

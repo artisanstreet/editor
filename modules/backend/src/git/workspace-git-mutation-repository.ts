@@ -78,6 +78,17 @@ const RequestMutation = Schema.Struct({
 	workspace_id: Identifier,
 });
 
+const ReplayMutationRequest = Schema.Struct({
+	action_approval_id: Schema.optional(Identifier),
+	approval_id: Identifier,
+	expected_session_version: Schema.Int.check(Schema.isGreaterThan(0)),
+	operation: WorkspaceGitMutationOperation,
+	request_fingerprint: RequestFingerprint,
+	source_command: CommandMetadata,
+	thread_id: Identifier,
+	workspace_id: Identifier,
+});
+
 const MutationDecision = Schema.Struct({
 	approval_id: Identifier,
 	approved: Schema.Boolean,
@@ -151,6 +162,7 @@ const StoredMutationDecisionPayload = Schema.Struct({
 });
 
 export type RequestWorkspaceGitMutation = typeof RequestMutation.Type;
+export type ReplayWorkspaceGitMutationRequest = typeof ReplayMutationRequest.Type;
 export type WorkspaceGitMutationDecision = typeof MutationDecision.Type;
 export type WorkspaceGitMutationSettlement = typeof MutationSettlement.Type;
 
@@ -232,6 +244,12 @@ export class WorkspaceGitMutationRepository extends Context.Service<
 		readonly ReadExecution: (
 			approval_id: string,
 		) => Effect.Effect<WorkspaceGitMutationExecution, WorkspaceGitMutationRepositoryError>;
+		readonly ReplayRequest: (
+			input: ReplayWorkspaceGitMutationRequest,
+		) => Effect.Effect<
+			Option.Option<WorkspaceGitMutationAcceptance>,
+			WorkspaceGitMutationRepositoryError
+		>;
 		readonly RecordAttempt: (
 			identity: typeof ClaimIdentity.Type,
 			attempt: unknown,
@@ -293,7 +311,7 @@ function approval_event_key(
 	return `workspace_git_mutation:${approval_id}:${state}`;
 }
 
-function request_payload(input: RequestWorkspaceGitMutation) {
+function request_payload(input: ReplayWorkspaceGitMutationRequest) {
 	return JSON.stringify({
 		...(input.action_approval_id === undefined
 			? {}
@@ -399,6 +417,30 @@ function command_matches(
 		row.payload_type === payload_type &&
 		row.payload_json === payload_json &&
 		row.status === "accepted"
+	);
+}
+
+function request_matches_stored_binding(
+	input: ReplayWorkspaceGitMutationRequest,
+	binding: StoredRequestBinding,
+) {
+	const row = binding.row;
+
+	return (
+		row.approval_id === input.approval_id &&
+		row.request_fingerprint === input.request_fingerprint &&
+		row.thread_id === input.thread_id &&
+		row.workspace_id === input.workspace_id &&
+		row.expected_session_version === input.expected_session_version &&
+		row.action_approval_id === (input.action_approval_id ?? null) &&
+		json_equals(binding.artifact.operation, input.operation) &&
+		command_matches(
+			binding.command_row,
+			input.source_command,
+			input.thread_id,
+			"workspace.git.mutation.request",
+			request_payload(input),
+		)
 	);
 }
 
@@ -1285,6 +1327,69 @@ export const WorkspaceGitMutationRepositoryLive = Layer.effect(
 					() => new WorkspaceGitMutationConflict({ reason: "request_conflict" }),
 				),
 			);
+		const DecodeReplayRequest = (input: ReplayWorkspaceGitMutationRequest) =>
+			Schema.decodeUnknownEffect(ReplayMutationRequest, { onExcessProperty: "error" })(
+				input,
+			).pipe(
+				Effect.flatMap((decoded) =>
+					Schema.decodeUnknownEffect(WorkspaceGitMutationRequest, {
+						onExcessProperty: "error",
+					})({
+						...(decoded.action_approval_id === undefined
+							? {}
+							: { action_approval_id: decoded.action_approval_id }),
+						expected_session_version: decoded.expected_session_version,
+						operation: decoded.operation,
+						workspace_id: decoded.workspace_id,
+					}).pipe(Effect.as(decoded)),
+				),
+				Effect.mapError(
+					() => new WorkspaceGitMutationConflict({ reason: "request_conflict" }),
+				),
+			);
+		const ReplayRequest = (input: ReplayWorkspaceGitMutationRequest) =>
+			DecodeReplayRequest(input).pipe(
+				Effect.flatMap((decoded) =>
+					database.client.transaction((transaction) =>
+						Effect.gen(function* () {
+							const stored = yield* ReadStoredRequestBinding(
+								transaction,
+								decoded.source_command.message_id,
+							);
+
+							if (Option.isSome(stored)) {
+								if (!request_matches_stored_binding(decoded, stored.value)) {
+									return yield* new WorkspaceGitMutationConflict({
+										reason: "request_conflict",
+									});
+								}
+
+								return Option.some(stored.value.acceptance);
+							}
+
+							const [command_collision] = yield* transaction
+								.select({ message_id: JournalCommands.message_id })
+								.from(JournalCommands)
+								.where(
+									eq(
+										JournalCommands.message_id,
+										decoded.source_command.message_id,
+									),
+								)
+								.limit(1);
+
+							if (command_collision) {
+								return yield* new WorkspaceGitMutationConflict({
+									reason: "command_conflict",
+								});
+							}
+
+							return Option.none<WorkspaceGitMutationAcceptance>();
+						}),
+					),
+				),
+				Effect.mapError(normalize_error),
+			);
 
 		const Request = (input: RequestWorkspaceGitMutation) =>
 			DecodeRequest(input).pipe(
@@ -1300,30 +1405,8 @@ export const WorkspaceGitMutationRepositoryLive = Layer.effect(
 
 									if (Option.isSome(stored)) {
 										const binding = stored.value;
-										const row = binding.row;
 
-										if (
-											row.approval_id !== decoded.approval_id ||
-											row.request_fingerprint !==
-												decoded.request_fingerprint ||
-											row.thread_id !== decoded.thread_id ||
-											row.workspace_id !== decoded.workspace_id ||
-											row.expected_session_version !==
-												decoded.expected_session_version ||
-											row.action_approval_id !==
-												(decoded.action_approval_id ?? null) ||
-											!json_equals(
-												binding.artifact.operation,
-												decoded.operation,
-											) ||
-											!command_matches(
-												binding.command_row,
-												decoded.source_command,
-												decoded.thread_id,
-												"workspace.git.mutation.request",
-												request_payload(decoded),
-											)
-										) {
+										if (!request_matches_stored_binding(decoded, binding)) {
 											return yield* new WorkspaceGitMutationConflict({
 												reason: "request_conflict",
 											});
@@ -2529,6 +2612,7 @@ export const WorkspaceGitMutationRepositoryLive = Layer.effect(
 			ReadActionAnchor,
 			ReadBySourceCommand,
 			ReadExecution,
+			ReplayRequest,
 			RecordAttempt,
 			RecordReconciliation,
 			RejectApproved,
