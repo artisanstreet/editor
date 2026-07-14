@@ -18,6 +18,14 @@ export {
 export { ProtocolRouter } from "./protocol/protocol-router";
 export { ProtocolServer } from "./protocol/protocol-server";
 export {
+	HostedProjectCloneCoordinator,
+	HostedProjectCloneCoordinatorFailure,
+	HostedProjectCloneCoordinatorLive,
+	type HostedProjectCloneCoordinatorError,
+	type HostedProjectCloneDecisionInput,
+	type HostedProjectCloneRequestInput,
+} from "./projects/hosted-project-clone-coordinator";
+export {
 	HostedProjectCloneDestination,
 	HostedProjectCloneDestinationError,
 	HostedProjectCloneDestinationPlan,

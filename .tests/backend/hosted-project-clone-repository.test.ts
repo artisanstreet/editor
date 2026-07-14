@@ -18,6 +18,8 @@ import {
 	HostedProjectCloneClaims,
 	JournalCommands,
 	JournalEvents,
+	ProjectHostedOrigins,
+	Projects,
 	ThreadErasureClaims,
 	Threads,
 } from "../../modules/backend/src/persistence/schema";
@@ -292,6 +294,60 @@ describe("HostedProjectCloneRepository", () => {
 			expect(result.accepted.approval).toMatchObject({ state: "reused" });
 			expect(result.replay).toEqual({ ...result.accepted, status: "duplicate" });
 			expect(result.artifacts).toEqual([]);
+			expect(result.claims).toEqual([]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("refuses a clone claim when the hosted identity registered during request planning", async () => {
+		const database_path = await Effect.runPromise(MakeDatabasePath);
+		const runtime = make_runtime(database_path, "registration-race", {
+			value: "2026-07-14T12:00:00.000Z",
+		});
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const clones = yield* HostedProjectCloneRepository;
+
+					yield* SeedThread;
+					yield* database.client.insert(Projects).values({
+						canonical_root: "C:/projects/registered-editor",
+						display_name: "Artisan Editor",
+						project_id: `project_${"d".repeat(64)}`,
+						registered_at: "2026-07-14T12:00:00.000Z",
+						updated_at: "2026-07-14T12:00:00.000Z",
+						workspace_id: `workspace_${"e".repeat(64)}`,
+					});
+					yield* database.client.insert(ProjectHostedOrigins).values({
+						canonical_host: "github.com",
+						clone_url: "https://github.com/artisan/editor.git",
+						fetch_url: "https://github.com/artisan/editor.git",
+						name: "editor",
+						native_id: "repository_1",
+						owner: "artisan",
+						project_id: `project_${"d".repeat(64)}`,
+						provider_id: "github",
+						push_url: "https://github.com/artisan/editor.git",
+						remote_name: "origin",
+						selected_account_login: "artisan",
+						web_url: "https://github.com/artisan/editor",
+					});
+
+					const conflict = yield* clones.Request(clone_request()).pipe(Effect.exit);
+
+					return {
+						approvals: yield* clones.ReadBySourceCommand("clone_request_1"),
+						claims: yield* database.client.select().from(HostedProjectCloneClaims),
+						conflict,
+					};
+				}),
+			);
+
+			expect_conflict(result.conflict, "claim_conflict");
+			expect(Option.isNone(result.approvals)).toBe(true);
 			expect(result.claims).toEqual([]);
 		} finally {
 			await runtime.dispose();

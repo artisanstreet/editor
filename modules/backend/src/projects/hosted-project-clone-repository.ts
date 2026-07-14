@@ -39,6 +39,7 @@ import {
 	HostedProjectCloneClaims,
 	JournalCommands,
 	JournalEvents,
+	ProjectHostedOrigins,
 	ThreadErasureClaims,
 	Threads,
 	ThreadTombstones,
@@ -61,6 +62,13 @@ const CloneRequest = Schema.Struct({
 	approval_id: Identifier,
 	destination: GitProviderCloneDestinationProof,
 	preparation: GitProviderClonePreparation,
+	request: GitProviderCloneRequest,
+	request_fingerprint: RequestFingerprint,
+	source_command: CommandMetadata,
+	thread_id: Identifier,
+});
+
+const CloneRequestReplay = Schema.Struct({
 	request: GitProviderCloneRequest,
 	request_fingerprint: RequestFingerprint,
 	source_command: CommandMetadata,
@@ -143,6 +151,7 @@ const StoredDecisionPayload = Schema.Struct({
 });
 
 export type RequestHostedProjectClone = typeof CloneRequest.Type;
+export type ReplayHostedProjectClone = typeof CloneRequestReplay.Type;
 export type ReuseHostedProjectClone = typeof ReusedCloneRequest.Type;
 export type HostedProjectCloneDecision = typeof CloneDecision.Type;
 export type HostedProjectCloneSettlement = typeof Settlement.Type;
@@ -239,6 +248,12 @@ export class HostedProjectCloneRepository extends Context.Service<
 		) => Effect.Effect<HostedProjectCloneAcceptance, HostedProjectCloneRepositoryError>;
 		readonly ReadBySourceCommand: (
 			source_command_id: string,
+		) => Effect.Effect<
+			Option.Option<HostedProjectCloneAcceptance>,
+			HostedProjectCloneRepositoryError
+		>;
+		readonly ReplayRequest: (
+			input: unknown,
 		) => Effect.Effect<
 			Option.Option<HostedProjectCloneAcceptance>,
 			HostedProjectCloneRepositoryError
@@ -1367,6 +1382,26 @@ export const HostedProjectCloneRepositoryLive = Layer.effect(
 											),
 										)
 										.limit(1);
+									const [registered_identity_collision] = yield* transaction
+										.select({ project_id: ProjectHostedOrigins.project_id })
+										.from(ProjectHostedOrigins)
+										.where(
+											and(
+												eq(
+													ProjectHostedOrigins.provider_id,
+													decoded.request.repository.identity.provider_id,
+												),
+												eq(
+													ProjectHostedOrigins.canonical_host,
+													decoded.request.repository.identity.host,
+												),
+												eq(
+													ProjectHostedOrigins.native_id,
+													decoded.request.repository.origin.native_id,
+												),
+											),
+										)
+										.limit(1);
 
 									if (command) {
 										return yield* conflict("command_conflict");
@@ -1374,7 +1409,7 @@ export const HostedProjectCloneRepositoryLive = Layer.effect(
 									if (approval_collision) {
 										return yield* conflict("request_conflict");
 									}
-									if (claim_collision) {
+									if (claim_collision || registered_identity_collision) {
 										return yield* conflict("claim_conflict");
 									}
 
@@ -2715,6 +2750,81 @@ export const HostedProjectCloneRepositoryLive = Layer.effect(
 				Effect.mapError(normalize_error),
 			);
 
+		const ReplayRequest = (input: unknown) =>
+			Schema.decodeUnknownEffect(CloneRequestReplay, { onExcessProperty: "error" })(
+				input,
+			).pipe(
+				Effect.mapError(() => conflict("request_conflict")),
+				Effect.flatMap((decoded) =>
+					database.client.transaction((transaction) =>
+						FindBySourceCommand(transaction, decoded.source_command.message_id).pipe(
+							Effect.flatMap(
+								Option.match({
+									onNone: () =>
+										Effect.succeed(Option.none<HostedProjectCloneAcceptance>()),
+									onSome: (row) =>
+										Effect.gen(function* () {
+											const approval = yield* DecodeApproval(row);
+											const command = yield* ReadCommand(
+												transaction,
+												row.source_command_id,
+											);
+											const request_matches =
+												row.thread_id === decoded.thread_id &&
+												row.request_fingerprint ===
+													decoded.request_fingerprint &&
+												json_equals(
+													approval.repository,
+													public_repository(decoded.request),
+												) &&
+												command_matches(
+													command,
+													decoded.source_command,
+													decoded.thread_id,
+													"hosted.project.clone.request",
+													request_payload({
+														approval_id: row.approval_id,
+														destination_path: row.destination_path,
+														request_fingerprint:
+															decoded.request_fingerprint,
+													}),
+												);
+
+											if (!request_matches) {
+												return yield* conflict("request_conflict");
+											}
+
+											if (approval.state !== "reused") {
+												const artifact = yield* ReadArtifact(
+													transaction,
+													row,
+													approval,
+												);
+
+												if (
+													!json_equals(artifact.request, decoded.request)
+												) {
+													return yield* conflict("request_conflict");
+												}
+											}
+
+											const acceptance = yield* ValidateStoredBinding(
+												transaction,
+												row,
+											);
+
+											return Option.some({
+												...acceptance,
+												status: "duplicate" as const,
+											});
+										}),
+								}),
+							),
+						),
+					),
+				),
+				Effect.mapError(normalize_error),
+			);
 		const ReadBySourceCommand = (source_command_id: string) =>
 			Schema.decodeUnknownEffect(Identifier)(source_command_id).pipe(
 				Effect.mapError(() => invariant("Hosted clone request command id is invalid")),
@@ -2853,6 +2963,7 @@ export const HostedProjectCloneRepositoryLive = Layer.effect(
 			Query,
 			QuarantineInterrupted,
 			ReadBySourceCommand,
+			ReplayRequest,
 			ReadExecution,
 			RecordCloneResult,
 			RecordRegisteredProject,

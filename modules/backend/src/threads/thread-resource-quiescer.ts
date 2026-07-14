@@ -2,6 +2,7 @@ import { Context, Data, Effect, Layer } from "effect";
 
 import { AgentGraphOrchestrator } from "../orchestration/agent-graph-orchestrator";
 import { AgentOrchestrator } from "../orchestration/agent-orchestrator";
+import { HostedProjectCloneCoordinator } from "../projects/hosted-project-clone-coordinator";
 import { TerminalSessionService } from "../terminal/terminal-sessions";
 import { WorkspaceGitCheckoutCoordinator } from "../git/workspace-git-checkout-coordinator";
 import { WorkspaceGitMutationCoordinator } from "../git/workspace-git-mutation-coordinator";
@@ -28,6 +29,7 @@ export const ThreadResourceQuiescerLive = Layer.effect(
 	ThreadResourceQuiescer,
 	Effect.gen(function* () {
 		const graph = yield* AgentGraphOrchestrator;
+		const hosted_project_clones = yield* HostedProjectCloneCoordinator;
 		const orchestration = yield* AgentOrchestrator;
 		const terminals = yield* TerminalSessionService;
 		const workspace_git_checkouts = yield* WorkspaceGitCheckoutCoordinator;
@@ -37,6 +39,7 @@ export const ThreadResourceQuiescerLive = Layer.effect(
 			Effect.all(
 				[
 					graph.QuiesceThread(thread_id),
+					hosted_project_clones.QuiesceThread(thread_id),
 					orchestration.QuiesceThread(thread_id),
 					terminals.QuiesceThread(thread_id),
 					workspace_git_checkouts.QuiesceThread(thread_id),

@@ -53,6 +53,12 @@ import { JournalNotifierLive } from "../persistence/journal-notifier";
 import { JournalStoreLive } from "../persistence/journal-store";
 import { OrchestrationRepositoryLive } from "../persistence/orchestration-repository";
 import { ThreadReadModelLive } from "../persistence/thread-read-model";
+import { HostedProjectCloneCoordinatorLive } from "../projects/hosted-project-clone-coordinator";
+import {
+	HostedProjectCloneDestination,
+	make_hosted_project_clone_destination_layer,
+} from "../projects/hosted-project-clone-destination";
+import { HostedProjectCloneRepositoryLive } from "../projects/hosted-project-clone-repository";
 import { ProjectRepositoryLive } from "../projects/project-repository";
 import { CommandRouterLive } from "../protocol/command-router";
 import {
@@ -133,6 +139,7 @@ export interface BackendOptions {
 	readonly git_provider_registry?: Layer.Layer<GitProviderRegistry, GitProviderRegistryError>;
 	readonly guidance?: Partial<GlobalGuidanceServiceOptions>;
 	readonly guidance_provider_registry?: Layer.Layer<GuidanceProviderRegistry>;
+	readonly hosted_project_clone_destination?: Layer.Layer<HostedProjectCloneDestination>;
 	readonly migrations_path: string;
 	readonly model_behaviour_provider_registry?: Layer.Layer<
 		ModelBehaviourProviderRegistry,
@@ -267,12 +274,23 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(workspace_git_checkouts_repository),
 		Layer.provideMerge(infrastructure),
 	);
+	const workspace_git_execution_gate = make_workspace_git_execution_gate_layer({
+		database_path: options.database_path,
+	});
 	const workspace_git_mutations_repository = WorkspaceGitMutationRepositoryLive.pipe(
-		Layer.provideMerge(
-			make_workspace_git_execution_gate_layer({ database_path: options.database_path }),
-		),
+		Layer.provideMerge(workspace_git_execution_gate),
 		Layer.provideMerge(infrastructure),
 	);
+	const hosted_project_clone_repository = HostedProjectCloneRepositoryLive.pipe(
+		Layer.provideMerge(workspace_git_execution_gate),
+		Layer.provideMerge(infrastructure),
+	);
+	const hosted_project_clone_destination =
+		options.hosted_project_clone_destination ??
+		make_hosted_project_clone_destination_layer({}).pipe(
+			Layer.provideMerge(NodeFileSystem.layer),
+			Layer.provideMerge(NodePath.layer),
+		);
 	const workspace_git_mutations = WorkspaceGitMutationCoordinatorLive.pipe(
 		Layer.provideMerge(NodeCrypto.layer),
 		Layer.provideMerge(workspace_git_registry),
@@ -358,6 +376,14 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(project_catalog),
 		Layer.provideMerge(infrastructure),
 	);
+	const hosted_project_clones = HostedProjectCloneCoordinatorLive.pipe(
+		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(git_provider_registry),
+		Layer.provideMerge(hosted_project_clone_destination),
+		Layer.provideMerge(hosted_project_clone_repository),
+		Layer.provideMerge(project_catalog),
+		Layer.provideMerge(project_affinity),
+	);
 	const project_affinity_coordination =
 		options.project_locator === undefined
 			? ThreadProjectAffinityCoordinatorDisabled
@@ -393,6 +419,7 @@ export function make_backend_layer(options: BackendOptions) {
 		ThreadResourceQuiescerLive.pipe(
 			Layer.provideMerge(orchestration),
 			Layer.provideMerge(graph),
+			Layer.provideMerge(hosted_project_clones),
 			Layer.provideMerge(terminals),
 			Layer.provideMerge(workspace_approval_coordination),
 			Layer.provideMerge(workspace_git_checkouts),
@@ -445,6 +472,8 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(metadata_refinement),
 		Layer.provideMerge(project_catalog),
 		Layer.provideMerge(project_affinity_coordination),
+		Layer.provideMerge(hosted_project_clone_repository),
+		Layer.provideMerge(hosted_project_clones),
 		Layer.provideMerge(guidance),
 		Layer.provideMerge(model_behaviour),
 		Layer.provideMerge(git_provider_registry),
@@ -561,12 +590,23 @@ function make_desktop_git_provider_registry(options: DesktopBackendOptions) {
 	return Layer.effect(GitProviderRegistry, BuildRegistry);
 }
 
+function make_desktop_hosted_project_clone_destination(options: DesktopBackendOptions) {
+	const projects_root = options.git_provider_platform?.projects_root;
+
+	return make_hosted_project_clone_destination_layer(
+		projects_root === undefined ? {} : { projects_root },
+	).pipe(Layer.provideMerge(NodeFileSystem.layer), Layer.provideMerge(NodePath.layer));
+}
+
 /** Builds the production desktop layer with opinionated platform guidance discovery. */
 export function make_desktop_backend_layer(options: DesktopBackendOptions) {
 	return make_backend_layer({
 		...options,
 		git_provider_registry:
 			options.git_provider_registry ?? make_desktop_git_provider_registry(options),
+		hosted_project_clone_destination:
+			options.hosted_project_clone_destination ??
+			make_desktop_hosted_project_clone_destination(options),
 		guidance_provider_registry:
 			options.guidance_provider_registry ?? make_desktop_guidance_registry(options),
 		model_behaviour_provider_registry:
