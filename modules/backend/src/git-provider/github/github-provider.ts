@@ -1,7 +1,11 @@
 import { Buffer } from "node:buffer";
 
 import { Cause, Data, Effect, Layer, Schema } from "effect";
-import { HostedGitPullRequestLookup, type HostedGitRequestedReviewer } from "@artisan/protocol";
+import {
+	HostedGitCheckFailureDetail,
+	HostedGitPullRequestLookup,
+	type HostedGitRequestedReviewer,
+} from "@artisan/protocol";
 
 import {
 	GitProvider,
@@ -9,6 +13,7 @@ import {
 	GitProviderClonePreparation,
 	GitProviderCloneRequest,
 	GitProviderCloneResult,
+	GitProviderCheckFailureDetailRead,
 	GitProviderDiscovery,
 	GitProviderDiscoveryScope,
 	GitProviderError,
@@ -19,6 +24,7 @@ import {
 	normalize_git_provider_host,
 	type GitProviderAccountAuthentication,
 	type GitProviderCloneExecution as GitProviderCloneExecutionInput,
+	type GitProviderCheckFailureDetailRead as GitProviderCheckFailureDetailReadInput,
 	type GitProviderClonePreparation as GitProviderClonePreparationResult,
 	type GitProviderCloneRequest as GitProviderCloneRequestInput,
 	type GitProviderDiscovery as GitProviderDiscoveryInput,
@@ -34,6 +40,7 @@ import {
 	GitHubCliError,
 	github_https_clone_url,
 	type GitHubCliAccount,
+	type GitHubCliCheckFailureDetail,
 	type GitHubCliInspection,
 	type GitHubCliPullRequestReadResult,
 	type GitHubCliRepository,
@@ -427,6 +434,39 @@ function ValidatePullRequest(
 	})(value).pipe(
 		Effect.mapError(() => provider_operation_error(operation, "invalid_response", false, host)),
 	);
+}
+
+function ValidateCheckFailureDetail(value: unknown, host: string) {
+	return Schema.decodeUnknownEffect(HostedGitCheckFailureDetail, {
+		onExcessProperty: "error",
+	})(value).pipe(
+		Effect.mapError(() =>
+			provider_operation_error("read_check_failure_detail", "invalid_response", false, host),
+		),
+	);
+}
+
+function MapCheckFailureDetail(
+	input: GitProviderCheckFailureDetailReadInput,
+	detail: GitHubCliCheckFailureDetail,
+) {
+	return {
+		...(detail.attempt === undefined ? {} : { attempt: detail.attempt }),
+		check_origin: input.check_origin,
+		head_commit: detail.head_commit,
+		log: detail.log,
+		name: detail.name,
+		output: detail.output,
+		...(detail.workflow_native_id === undefined
+			? {}
+			: {
+					workflow_origin: {
+						native_id: detail.workflow_native_id,
+						provider_id: github_provider_id,
+						resource_kind: "workflow_run" as const,
+					},
+				}),
+	};
 }
 
 function pull_request_state(state: string, merged: boolean) {
@@ -1292,6 +1332,90 @@ export function make_github_provider_layer(options: GitHubProviderOptions = {}) 
 						"read_pull_request_target",
 					);
 				});
+			const ReadCheckFailureDetail = (
+				unknown_input: GitProviderCheckFailureDetailReadInput,
+			) =>
+				Effect.gen(function* () {
+					const input = yield* Schema.decodeUnknownEffect(
+						GitProviderCheckFailureDetailRead,
+						{ onExcessProperty: "error" },
+					)(unknown_input).pipe(
+						Effect.mapError(() =>
+							provider_operation_error(
+								"read_check_failure_detail",
+								"invalid_input",
+								false,
+							),
+						),
+					);
+
+					if (
+						input.selection.provider_id !== github_provider_id ||
+						input.repository.provider_id !== github_provider_id ||
+						input.pull_request_origin.provider_id !== github_provider_id ||
+						input.pull_request_origin.resource_kind !== "pull_request" ||
+						input.check_origin.provider_id !== github_provider_id ||
+						input.check_origin.resource_kind !== "check_run" ||
+						input.repository.host !== input.selection.host
+					) {
+						return yield* Effect.fail(
+							provider_operation_error(
+								"read_check_failure_detail",
+								"invalid_input",
+								false,
+								input.selection.host,
+							),
+						);
+					}
+
+					yield* EnsureSelection(input.selection, "read_check_failure_detail");
+					const detail = yield* cli
+						.ReadCheckFailureDetail({
+							check_native_id: input.check_origin.native_id,
+							expected_head: input.expected_head,
+							host: input.selection.host,
+							name: input.repository.name,
+							owner: input.repository.owner,
+							pull_request_native_id: input.pull_request_origin.native_id,
+							pull_request_number: input.pull_request_number,
+							selected_branch: input.selected_branch,
+						})
+						.pipe(
+							Effect.mapError((cause) =>
+								cli_error(cause, input.selection.host, "read_check_failure_detail"),
+							),
+						);
+
+					if (!github_logins_match(detail.viewer_login, input.selection.account_login)) {
+						return yield* Effect.fail(
+							provider_operation_error(
+								"read_check_failure_detail",
+								"account_not_active",
+								false,
+								input.selection.host,
+							),
+						);
+					}
+
+					if (
+						detail.check_native_id !== input.check_origin.native_id ||
+						detail.head_commit !== input.expected_head
+					) {
+						return yield* Effect.fail(
+							provider_operation_error(
+								"read_check_failure_detail",
+								"invalid_response",
+								false,
+								input.selection.host,
+							),
+						);
+					}
+
+					return yield* ValidateCheckFailureDetail(
+						MapCheckFailureDetail(input, detail),
+						input.selection.host,
+					);
+				});
 
 			return {
 				Descriptor: {
@@ -1314,6 +1438,7 @@ export function make_github_provider_layer(options: GitHubProviderOptions = {}) 
 				DiscoverRepositories,
 				Inspect,
 				PrepareClone,
+				ReadCheckFailureDetail,
 				ReadPullRequest,
 				ReadPullRequestTarget,
 			};

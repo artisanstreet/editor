@@ -381,6 +381,59 @@ const GitHubPullRequestDetailData = Schema.Struct({
 	viewer: Schema.Struct({ login: Schema.NonEmptyString }),
 });
 
+const GitHubCheckFailureDetailData = Schema.Struct({
+	repository: Schema.NullOr(
+		Schema.Struct({
+			id: GitHubNativeId,
+			nameWithOwner: GitHubName,
+			pullRequest: Schema.NullOr(
+				Schema.Struct({
+					headRefName: GitHubName,
+					headRefOid: GitHubNativeId,
+					headRepository: Schema.NullOr(
+						Schema.Struct({
+							name: GitHubName,
+							owner: Schema.Struct({ login: GitHubName }),
+						}),
+					),
+					id: GitHubNativeId,
+					number: GitHubPositiveInt,
+				}),
+			),
+		}),
+	),
+	viewer: Schema.Struct({ login: Schema.NonEmptyString }),
+	checkRun: Schema.NullOr(
+		Schema.Struct({
+			__typename: Schema.Literal("CheckRun"),
+			completedAt: Schema.NullOr(GitHubDateTime),
+			databaseId: Schema.NullOr(GitHubPositiveInt),
+			id: GitHubNativeId,
+			name: GitHubName,
+			summary: Schema.NullOr(GitHubBoundedText(256 * 1024)),
+			text: Schema.NullOr(GitHubBoundedText(256 * 1024)),
+			title: Schema.NullOr(GitHubBoundedText(16 * 1024)),
+			checkSuite: Schema.Struct({
+				commit: Schema.Struct({
+					oid: GitHubNativeId,
+					repository: Schema.NullOr(
+						Schema.Struct({ id: GitHubNativeId, nameWithOwner: GitHubName }),
+					),
+				}),
+				id: GitHubNativeId,
+				workflowRun: Schema.NullOr(
+					Schema.Struct({
+						databaseId: Schema.NullOr(GitHubPositiveInt),
+						id: GitHubNativeId,
+						runAttempt: GitHubPositiveInt,
+					}),
+				),
+			}),
+			status: GitHubName,
+		}),
+	),
+});
+
 const repository_fields = `
 id
 name
@@ -535,6 +588,28 @@ query ArtisanPullRequestDetail($owner: String!, $name: String!, $number: Int!) {
 }
 `;
 
+const check_failure_detail_query = `
+query ArtisanCheckFailureDetail($owner: String!, $name: String!, $number: Int!, $check: ID!) {
+  viewer { login }
+  repository(owner: $owner, name: $name) {
+    id nameWithOwner
+    pullRequest(number: $number) { id number headRefName headRefOid headRepository { name owner { login } } }
+  }
+  checkRun: node(id: $check) {
+    __typename
+    ... on CheckRun {
+      id databaseId name status completedAt
+      title summary text
+      checkSuite {
+        id
+        commit { oid repository { id nameWithOwner } }
+        workflowRun { id databaseId runAttempt }
+      }
+    }
+  }
+}
+`;
+
 /** Reports one account discovered from GitHub CLI without exposing its token source or token. */
 export type GitHubCliAccount =
 	| {
@@ -673,6 +748,50 @@ export interface GitHubCliPullRequestTargetRead extends GitHubCliPullRequestRead
 	readonly pull_request_native_id: string;
 }
 
+/** Binds one failed-check read to an exact pull request, branch, head, and check node. */
+export interface GitHubCliCheckFailureDetailRead extends GitHubCliPullRequestTargetRead {
+	readonly check_native_id: string;
+	readonly expected_head: string;
+}
+
+/** Carries bounded, sanitized check output without preserving the provider payload. */
+export interface GitHubCliCheckFailureDetail {
+	readonly attempt?: number;
+	readonly check_native_id: string;
+	readonly head_commit: string;
+	readonly log:
+		| {
+				readonly _tag: "available";
+				readonly observed_bytes: number;
+				readonly truncated: boolean;
+				readonly untrusted_excerpt: string;
+		  }
+		| {
+				readonly _tag: "unavailable";
+				readonly reason: "check_not_completed" | "not_actions_job" | "not_available";
+		  };
+	readonly name: string;
+	readonly output: {
+		readonly summary:
+			| {
+					readonly _tag: "available";
+					readonly truncated: boolean;
+					readonly untrusted_text: string;
+			  }
+			| { readonly _tag: "unavailable" };
+		readonly text:
+			| {
+					readonly _tag: "available";
+					readonly truncated: boolean;
+					readonly untrusted_text: string;
+			  }
+			| { readonly _tag: "unavailable" };
+		readonly title?: string;
+	};
+	readonly viewer_login: string;
+	readonly workflow_native_id?: string;
+}
+
 /** Supplies the approved paths and exact repository for one GitHub CLI clone. */
 export interface GitHubCliCloneInput {
 	readonly account_login: string;
@@ -695,6 +814,7 @@ export class GitHubCliError extends Data.TaggedError("GitHubCliError")<{
 		| "clone_repository"
 		| "inspect_repository"
 		| "query_repositories"
+		| "read_check_failure_detail"
 		| "read_pull_request"
 		| "read_pull_request_target";
 	readonly reason:
@@ -743,6 +863,9 @@ export class GitHubCli extends Context.Service<
 			Extract<GitHubCliPullRequestReadResult, { readonly type: "matched_pull_request" }>,
 			GitHubCliError
 		>;
+		readonly ReadCheckFailureDetail: (
+			input: GitHubCliCheckFailureDetailRead,
+		) => Effect.Effect<GitHubCliCheckFailureDetail, GitHubCliError>;
 	}
 >()("Artisan/GitHubCli") {}
 
@@ -1094,6 +1217,94 @@ function pull_request_detail_arguments(input: GitHubCliPullRequestTargetRead) {
 		"--field",
 		`number=${input.pull_request_number}`,
 	];
+}
+
+function check_failure_detail_arguments(input: GitHubCliCheckFailureDetailRead) {
+	return [
+		"api",
+		"graphql",
+		"--hostname",
+		input.host,
+		"--method",
+		"POST",
+		"--raw-field",
+		`query=${check_failure_detail_query}`,
+		"--raw-field",
+		`owner=${input.owner}`,
+		"--raw-field",
+		`name=${input.name}`,
+		"--field",
+		`number=${input.pull_request_number}`,
+		"--raw-field",
+		`check=${input.check_native_id}`,
+	];
+}
+
+function failed_job_log_arguments(input: {
+	readonly attempt: number;
+	readonly check_database_id: number;
+	readonly host: string;
+	readonly name: string;
+	readonly owner: string;
+	readonly workflow_database_id: number;
+}) {
+	return [
+		"run",
+		"view",
+		`${input.workflow_database_id}`,
+		"--repo",
+		`${input.host}/${input.owner}/${input.name}`,
+		"--attempt",
+		`${input.attempt}`,
+		"--job",
+		`${input.check_database_id}`,
+		"--log-failed",
+	];
+}
+
+function strip_disallowed_text(value: string) {
+	return value.replace(/[\p{Cc}\p{Cf}]/gu, (character) =>
+		["\t", "\n", "\r"].includes(character) ? character : "",
+	);
+}
+
+function truncate_utf8(value: string, maximum_bytes: number) {
+	const encoded = Buffer.from(value, "utf8");
+
+	if (encoded.byteLength <= maximum_bytes) {
+		return { truncated: false, value };
+	}
+
+	let end = maximum_bytes;
+
+	while (end > 0 && ((encoded[end] ?? 0) & 0xc0) === 0x80) {
+		end -= 1;
+	}
+
+	return {
+		truncated: true,
+		value: new TextDecoder("utf-8", { fatal: true }).decode(encoded.subarray(0, end)),
+	};
+}
+
+function canonical_text(value: string | null) {
+	if (value === null) {
+		return { _tag: "unavailable" } as const;
+	}
+
+	const normalized = strip_disallowed_text(value);
+
+	if (normalized.trim().length === 0) {
+		return { _tag: "unavailable" } as const;
+	}
+
+	const bounded = truncate_utf8(normalized, 4 * 1024);
+
+	return {
+		_tag: "available",
+		truncated: bounded.truncated,
+		untrusted_text: bounded.value,
+	} as const;
 }
 
 interface GitHubCloneDestinationPin {
@@ -2094,6 +2305,205 @@ export function make_github_cli_layer(options: GitHubCliOptions) {
 				});
 			const ReadPullRequestTarget = (input: GitHubCliPullRequestTargetRead) =>
 				ReadPullRequestDetail(input, "read_pull_request_target");
+			const ReadCheckFailureDetail = (input: GitHubCliCheckFailureDetailRead) =>
+				Effect.gen(function* () {
+					const location = yield* executable.Locate;
+					const operation = "read_check_failure_detail" as const;
+
+					if (Option.isNone(location)) {
+						return yield* Effect.fail(
+							api_error("dependency_missing", false, operation),
+						);
+					}
+
+					const process_option = yield* Run(
+						location.value.path,
+						check_failure_detail_arguments(input),
+						2 * 1024 * 1024,
+						request_timeout_ms,
+						{ GH_HOST: input.host },
+					).pipe(Effect.mapError(() => api_error("process_failed", true, operation)));
+
+					if (Option.isNone(process_option)) {
+						return yield* Effect.fail(api_error("timed_out", true, operation));
+					}
+
+					const result = process_option.value;
+
+					if (result.stdout_truncated || result.stderr_truncated) {
+						return yield* Effect.fail(api_error("invalid_response", false, operation));
+					}
+
+					const envelope = yield* ParseEnvelope(result.stdout);
+
+					if (
+						result.exit_code !== 0 ||
+						(Option.isSome(envelope) && (envelope.value.errors?.length ?? 0) > 0)
+					) {
+						return yield* Effect.fail(
+							classify_api_failure(result, envelope, operation),
+						);
+					}
+
+					if (
+						Option.isNone(envelope) ||
+						envelope.value.data === undefined ||
+						envelope.value.data === null
+					) {
+						return yield* Effect.fail(api_error("invalid_response", false, operation));
+					}
+
+					const detail = yield* ParseStrictSchema(
+						GitHubCheckFailureDetailData,
+						envelope.value.data,
+					).pipe(Effect.mapError(() => api_error("invalid_response", false, operation)));
+					const repository = detail.repository;
+					const pull_request = repository?.pullRequest;
+					const check = detail.checkRun;
+
+					if (
+						repository === null ||
+						repository === undefined ||
+						pull_request === null ||
+						pull_request === undefined ||
+						check === null ||
+						repository.nameWithOwner.toLowerCase() !==
+							`${input.owner}/${input.name}`.toLowerCase() ||
+						pull_request.id !== input.pull_request_native_id ||
+						pull_request.number !== input.pull_request_number ||
+						pull_request.headRefName !== input.selected_branch ||
+						pull_request.headRefOid !== input.expected_head ||
+						pull_request.headRepository === null ||
+						pull_request.headRepository.name.toLowerCase() !==
+							input.name.toLowerCase() ||
+						pull_request.headRepository.owner.login.toLowerCase() !==
+							input.owner.toLowerCase() ||
+						check.id !== input.check_native_id ||
+						check.checkSuite.commit.oid !== input.expected_head ||
+						check.checkSuite.commit.repository === null ||
+						check.checkSuite.commit.repository.id !== repository.id ||
+						check.checkSuite.commit.repository.nameWithOwner.toLowerCase() !==
+							repository.nameWithOwner.toLowerCase()
+					) {
+						return yield* Effect.fail(api_error("invalid_response", false, operation));
+					}
+
+					const sanitized_title =
+						check.title === null
+							? undefined
+							: truncate_utf8(strip_disallowed_text(check.title), 1024).value;
+					const output = {
+						summary: canonical_text(check.summary),
+						text: canonical_text(check.text),
+						...(sanitized_title === undefined || sanitized_title.trim().length === 0
+							? {}
+							: { title: sanitized_title }),
+					};
+					const workflow_run = check.checkSuite.workflowRun;
+
+					if (check.completedAt === null || check.status !== "COMPLETED") {
+						return {
+							check_native_id: check.id,
+							head_commit: check.checkSuite.commit.oid,
+							log: { _tag: "unavailable", reason: "check_not_completed" },
+							name: check.name,
+							output,
+							viewer_login: detail.viewer.login,
+						} satisfies GitHubCliCheckFailureDetail;
+					}
+
+					if (
+						workflow_run === null ||
+						workflow_run.databaseId === null ||
+						check.databaseId === null
+					) {
+						return {
+							check_native_id: check.id,
+							head_commit: check.checkSuite.commit.oid,
+							log: {
+								_tag: "unavailable",
+								reason: workflow_run === null ? "not_actions_job" : "not_available",
+							},
+							name: check.name,
+							output,
+							viewer_login: detail.viewer.login,
+							...(workflow_run === null
+								? {}
+								: {
+										attempt: workflow_run.runAttempt,
+										workflow_native_id: workflow_run.id,
+									}),
+						} satisfies GitHubCliCheckFailureDetail;
+					}
+
+					const log_process = yield* Run(
+						location.value.path,
+						failed_job_log_arguments({
+							attempt: workflow_run.runAttempt,
+							check_database_id: check.databaseId,
+							host: input.host,
+							name: input.name,
+							owner: input.owner,
+							workflow_database_id: workflow_run.databaseId,
+						}),
+						64 * 1024,
+						request_timeout_ms,
+						{ GH_HOST: input.host },
+					).pipe(Effect.mapError(() => api_error("process_failed", true, operation)));
+
+					if (Option.isNone(log_process)) {
+						return yield* Effect.fail(api_error("timed_out", true, operation));
+					}
+
+					const log_result = log_process.value;
+
+					if (log_result.exit_code !== 0) {
+						const failure = classify_api_failure(log_result, Option.none(), operation);
+
+						if (
+							failure.reason !== "remote_not_found" &&
+							(failure.reason !== "remote_rejected" || failure.retryable)
+						) {
+							return yield* Effect.fail(failure);
+						}
+
+						return {
+							attempt: workflow_run.runAttempt,
+							check_native_id: check.id,
+							head_commit: check.checkSuite.commit.oid,
+							log: { _tag: "unavailable", reason: "not_available" },
+							name: check.name,
+							output,
+							viewer_login: detail.viewer.login,
+							workflow_native_id: workflow_run.id,
+						} satisfies GitHubCliCheckFailureDetail;
+					}
+
+					const excerpt = truncate_utf8(
+						strip_disallowed_text(decode_text(log_result.stdout)),
+						64 * 1024,
+					);
+					const log =
+						excerpt.value.trim().length === 0
+							? ({ _tag: "unavailable", reason: "not_available" } as const)
+							: ({
+									_tag: "available" as const,
+									observed_bytes: log_result.stdout_bytes,
+									truncated: log_result.stdout_truncated || excerpt.truncated,
+									untrusted_excerpt: excerpt.value,
+								} as const);
+
+					return {
+						attempt: workflow_run.runAttempt,
+						check_native_id: check.id,
+						head_commit: check.checkSuite.commit.oid,
+						log,
+						name: check.name,
+						output,
+						viewer_login: detail.viewer.login,
+						workflow_native_id: workflow_run.id,
+					} satisfies GitHubCliCheckFailureDetail;
+				});
 			const CloneRepository = (input: GitHubCliCloneInput) =>
 				Effect.gen(function* () {
 					const location = yield* executable.Locate;
@@ -2301,6 +2711,7 @@ export function make_github_cli_layer(options: GitHubCliOptions) {
 				Inspect,
 				InspectRepository,
 				QueryRepositories,
+				ReadCheckFailureDetail,
 				ReadPullRequest,
 				ReadPullRequestTarget,
 			};

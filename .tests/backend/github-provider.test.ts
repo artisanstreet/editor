@@ -257,6 +257,9 @@ async function make_provider(options: {
 	readonly read_pull_request_target?: (
 		input: Parameters<(typeof GitHubCli.Service)["ReadPullRequestTarget"]>[0],
 	) => ReturnType<(typeof GitHubCli.Service)["ReadPullRequestTarget"]>;
+	readonly read_check_failure_detail?: (
+		input: Parameters<(typeof GitHubCli.Service)["ReadCheckFailureDetail"]>[0],
+	) => ReturnType<(typeof GitHubCli.Service)["ReadCheckFailureDetail"]>;
 	readonly hosts?: ReadonlyArray<string>;
 }) {
 	const query = options.query ?? (() => Effect.die("Unexpected repository query"));
@@ -268,11 +271,14 @@ async function make_provider(options: {
 	const read_pull_request_target =
 		options.read_pull_request_target ??
 		(() => Effect.die("Unexpected pull request target read"));
+	const read_check_failure_detail =
+		options.read_check_failure_detail ?? (() => Effect.die("Unexpected check failure read"));
 	const cli_layer = Layer.succeed(GitHubCli, {
 		CloneRepository: clone,
 		Inspect: Effect.succeed(options.inspection),
 		InspectRepository: inspect_repository,
 		QueryRepositories: query,
+		ReadCheckFailureDetail: read_check_failure_detail,
 		ReadPullRequest: read_pull_request,
 		ReadPullRequestTarget: read_pull_request_target,
 	});
@@ -1614,6 +1620,102 @@ describe("GitHubProvider", () => {
 			operation: "clone_repository",
 			reason: "outcome_unknown",
 			retryable: false,
+		});
+	});
+});
+
+describe("GitHubProvider check failure detail", () => {
+	it("publishes only an exact selected-account check detail and rejects changed identity", async () => {
+		const input = {
+			check_origin: {
+				native_id: "check-1",
+				provider_id: "github",
+				resource_kind: "check_run" as const,
+			},
+			expected_head: "a".repeat(40),
+			pull_request_number: 7,
+			pull_request_origin: {
+				native_id: "pull-request-7",
+				provider_id: "github",
+				resource_kind: "pull_request" as const,
+			},
+			repository: projected_repository("editor", "main").identity,
+			selected_branch: "feature/read",
+			selection,
+		};
+		const inspection = available_inspection([
+			{
+				accounts: [
+					{
+						active: true,
+						git_protocol: "https",
+						host: "github.com",
+						login: "alice",
+						scopes: [],
+						type: "authenticated",
+					},
+				],
+				host: "github.com",
+			},
+		]);
+		const detail = {
+			attempt: 2,
+			check_native_id: "check-1",
+			head_commit: "a".repeat(40),
+			log: {
+				_tag: "available" as const,
+				observed_bytes: 12,
+				truncated: false,
+				untrusted_excerpt: "failed test",
+			},
+			name: "build",
+			output: {
+				summary: {
+					_tag: "available" as const,
+					truncated: false,
+					untrusted_text: "summary",
+				},
+				text: { _tag: "unavailable" as const },
+				title: "failure",
+			},
+			viewer_login: "Alice",
+			workflow_native_id: "run-1",
+		};
+		const provider = await make_provider({
+			inspection,
+			read_check_failure_detail: () => Effect.succeed(detail),
+		});
+
+		await expect(
+			Effect.runPromise(provider.ReadCheckFailureDetail!(input)),
+		).resolves.toMatchObject({
+			attempt: 2,
+			check_origin: input.check_origin,
+			head_commit: input.expected_head,
+			workflow_origin: { native_id: "run-1", resource_kind: "workflow_run" },
+		});
+
+		const changed = await make_provider({
+			inspection,
+			read_check_failure_detail: () =>
+				Effect.succeed({ ...detail, check_native_id: "replaced-check" }),
+		});
+		await expect(
+			Effect.runPromise(changed.ReadCheckFailureDetail!(input)),
+		).rejects.toMatchObject({
+			operation: "read_check_failure_detail",
+			reason: "invalid_response",
+		});
+
+		const mismatched_viewer = await make_provider({
+			inspection,
+			read_check_failure_detail: () => Effect.succeed({ ...detail, viewer_login: "bob" }),
+		});
+		await expect(
+			Effect.runPromise(mismatched_viewer.ReadCheckFailureDetail!(input)),
+		).rejects.toMatchObject({
+			operation: "read_check_failure_detail",
+			reason: "account_not_active",
 		});
 	});
 });

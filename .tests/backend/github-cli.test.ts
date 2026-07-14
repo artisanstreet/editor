@@ -1626,3 +1626,249 @@ function pull_request_detail(head_ref_oid = "a".repeat(40), host = "github.com")
 		url: `https://${host}/artisan/editor/pull/7`,
 	};
 }
+
+function check_failure_detail(overrides: Record<string, unknown> = {}) {
+	return {
+		checkRun: {
+			__typename: "CheckRun",
+			checkSuite: {
+				commit: {
+					oid: "a".repeat(40),
+					repository: { id: "repository-1", nameWithOwner: "artisan/editor" },
+				},
+				id: "suite-1",
+				workflowRun: { databaseId: 101, id: "run-1", runAttempt: 2 },
+			},
+			completedAt: "2026-07-14T10:05:00Z",
+			databaseId: 202,
+			id: "check-1",
+			name: "build",
+			summary: "summary",
+			status: "COMPLETED",
+			text: "text",
+			title: "failure",
+		},
+		repository: {
+			id: "repository-1",
+			nameWithOwner: "artisan/editor",
+			pullRequest: {
+				headRefName: "feature/read",
+				headRefOid: "a".repeat(40),
+				headRepository: { name: "editor", owner: { login: "artisan" } },
+				id: "pull-request-7",
+				number: 7,
+			},
+		},
+		viewer: { login: "alice" },
+		...overrides,
+	};
+}
+
+describe("GitHubCli check failure detail", () => {
+	it("binds the check to the exact repository, PR, branch, head, and Actions job log", async () => {
+		const calls: Array<ProcessRunnerInput> = [];
+		const cli = await make_cli((input) => {
+			calls.push(input);
+
+			return Effect.succeed(
+				input.args[0] === "api"
+					? process_result(JSON.stringify({ data: check_failure_detail() }))
+					: process_result("failed\u0000 job\nnext line", {
+							stdout_bytes: 70_000,
+							stdout_truncated: true,
+						}),
+			);
+		});
+		const result = await Effect.runPromise(
+			cli.ReadCheckFailureDetail({
+				check_native_id: "check-1",
+				expected_head: "a".repeat(40),
+				host: "ghe.example",
+				name: "editor",
+				owner: "artisan",
+				pull_request_native_id: "pull-request-7",
+				pull_request_number: 7,
+				selected_branch: "feature/read",
+			}),
+		);
+
+		expect(result).toMatchObject({
+			attempt: 2,
+			check_native_id: "check-1",
+			log: {
+				observed_bytes: 70_000,
+				truncated: true,
+				untrusted_excerpt: "failed job\nnext line",
+			},
+			workflow_native_id: "run-1",
+		});
+		expect(calls[0]?.args.find((argument) => argument.startsWith("query="))).toContain(
+			"databaseId",
+		);
+		expect(calls[1]?.args).toEqual(
+			expect.arrayContaining([
+				"--repo",
+				"ghe.example/artisan/editor",
+				"--attempt",
+				"2",
+				"--job",
+				"202",
+				"--log-failed",
+			]),
+		);
+		expect(calls[1]?.max_stdout_bytes).toBe(64 * 1024);
+	});
+
+	it("truncates canonical text and skips logs without one complete Actions job identity", async () => {
+		for (const fixture of [
+			{
+				check: {
+					...check_failure_detail().checkRun,
+					completedAt: null,
+					status: "IN_PROGRESS",
+				},
+				reason: "check_not_completed",
+			},
+			{
+				check: {
+					...check_failure_detail().checkRun,
+					checkSuite: {
+						...check_failure_detail().checkRun.checkSuite,
+						workflowRun: null,
+					},
+				},
+				reason: "not_actions_job",
+			},
+			{
+				check: {
+					...check_failure_detail().checkRun,
+					checkSuite: {
+						...check_failure_detail().checkRun.checkSuite,
+						workflowRun: {
+							...check_failure_detail().checkRun.checkSuite.workflowRun,
+							databaseId: null,
+						},
+					},
+				},
+				reason: "not_available",
+			},
+		] as const) {
+			const check = fixture.check;
+			let calls = 0;
+			const cli = await make_cli(() => {
+				calls += 1;
+				return Effect.succeed(
+					process_result(
+						JSON.stringify({
+							data: check_failure_detail({
+								checkRun: {
+									...check,
+									summary: "\u0001" + "🙂".repeat(2_000),
+									text: null,
+									title: "\u0002title",
+								},
+							}),
+						}),
+					),
+				);
+			});
+			const result = await Effect.runPromise(
+				cli.ReadCheckFailureDetail({
+					check_native_id: "check-1",
+					expected_head: "a".repeat(40),
+					host: "github.com",
+					name: "editor",
+					owner: "artisan",
+					pull_request_native_id: "pull-request-7",
+					pull_request_number: 7,
+					selected_branch: "feature/read",
+				}),
+			);
+
+			expect(result.output.summary).toMatchObject({ truncated: true });
+			expect(result.log).toEqual({ _tag: "unavailable", reason: fixture.reason });
+			expect(JSON.stringify(result)).not.toMatch(/[\p{Cc}\p{Cf}]/u);
+			expect(calls).toBe(1);
+		}
+	});
+
+	it("keeps bounded check output when the failed-job log artifact is absent", async () => {
+		let calls = 0;
+		const cli = await make_cli(() => {
+			calls += 1;
+
+			return Effect.succeed(
+				calls === 1
+					? process_result(JSON.stringify({ data: check_failure_detail() }))
+					: process_result("", {
+							exit_code: 1,
+							stderr: Buffer.from("HTTP 404: log not found"),
+						}),
+			);
+		});
+		const result = await Effect.runPromise(
+			cli.ReadCheckFailureDetail({
+				check_native_id: "check-1",
+				expected_head: "a".repeat(40),
+				host: "github.com",
+				name: "editor",
+				owner: "artisan",
+				pull_request_native_id: "pull-request-7",
+				pull_request_number: 7,
+				selected_branch: "feature/read",
+			}),
+		);
+
+		expect(result.log).toEqual({ _tag: "unavailable", reason: "not_available" });
+		expect(result.output.summary).toMatchObject({ untrusted_text: "summary" });
+		expect(calls).toBe(2);
+	});
+
+	it("rejects malformed or changed check identity before publishing output", async () => {
+		for (const data of [
+			check_failure_detail({
+				checkRun: { ...check_failure_detail().checkRun, id: "other-check" },
+			}),
+			check_failure_detail({
+				repository: {
+					...check_failure_detail().repository,
+					nameWithOwner: "other/editor",
+					pullRequest: {
+						...check_failure_detail().repository.pullRequest,
+						headRefOid: "b".repeat(40),
+						id: "recreated-pull-request",
+					},
+				},
+			}),
+			check_failure_detail({
+				checkRun: {
+					...check_failure_detail().checkRun,
+					summary: "x".repeat(256 * 1024 + 1),
+				},
+			}),
+			check_failure_detail({ unexpected: true }),
+		] as const) {
+			const cli = await make_cli(() =>
+				Effect.succeed(process_result(JSON.stringify({ data }))),
+			);
+
+			await expect(
+				Effect.runPromise(
+					cli.ReadCheckFailureDetail({
+						check_native_id: "check-1",
+						expected_head: "a".repeat(40),
+						host: "github.com",
+						name: "editor",
+						owner: "artisan",
+						pull_request_native_id: "pull-request-7",
+						pull_request_number: 7,
+						selected_branch: "feature/read",
+					}),
+				),
+			).rejects.toMatchObject({
+				operation: "read_check_failure_detail",
+				reason: "invalid_response",
+			});
+		}
+	});
+});
