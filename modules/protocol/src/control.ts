@@ -58,10 +58,13 @@ import {
 	ExternalWaitUpdatedEvent,
 } from "./external-wait";
 import {
+	WorkspaceGitFetchCompletedEvent,
 	WorkspaceGitFetchPolicyUpdate,
+	WorkspaceGitFetchPolicyUpdatedEvent,
 	WorkspaceGitFetchQuery,
 	WorkspaceGitFetchQueryResult,
 	WorkspaceGitFetchRequest,
+	WorkspaceGitFetchRequestedEvent,
 } from "./local-git-fetch";
 import {
 	Identifier,
@@ -961,6 +964,9 @@ export const EventPayload = Schema.Union([
 	WorkspaceGitSessionUpdatedEvent,
 	WorkspaceGitCheckoutApprovalUpdatedEvent,
 	WorkspaceGitMutationApprovalUpdatedEvent,
+	WorkspaceGitFetchPolicyUpdatedEvent,
+	WorkspaceGitFetchRequestedEvent,
+	WorkspaceGitFetchCompletedEvent,
 	HostedProjectCloneApprovalUpdatedEvent,
 	HostedGitSnapshotUpdatedEvent,
 	ExternalWaitUpdatedEvent,

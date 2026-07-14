@@ -71,6 +71,40 @@ describe("local Git fetch protocol codec", () => {
 		);
 	});
 
+	it("roundtrips source-safe policy, request, and manual completion events", async () => {
+		const payloads = [
+			{ enabled: true, type: "workspace.git.fetch.policy.updated" },
+			{ type: "workspace.git.fetch.requested", workspace_id: "workspace_1" },
+			{
+				attempt: { attempted_at: timestamp, result: "failed" },
+				type: "workspace.git.fetch.completed",
+				workspace_id: "workspace_1",
+			},
+		];
+
+		for (const [index, payload] of payloads.entries()) {
+			const event = {
+				causation_id: `cause_${index}`,
+				correlation_id: `correlation_${index}`,
+				journal_sequence: index + 1,
+				kind: "event",
+				message_id: `event_${index}`,
+				origin: "backend",
+				payload,
+				protocol_version: 1,
+				schema_version: 1,
+				sequence: index + 1,
+				sent_at: timestamp,
+				stream_id: "stream_git_fetch",
+				thread_id: "thread_1",
+			};
+
+			await expect(Effect.runPromise(DecodeOutboundControlEnvelope(event))).resolves.toEqual(
+				event,
+			);
+		}
+	});
+
 	it("rejects cadence, native paths, endpoints, credentials, raw output, and provider fields", async () => {
 		const result = {
 			correlation_id: "query_1",

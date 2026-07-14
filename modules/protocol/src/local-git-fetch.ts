@@ -50,3 +50,28 @@ export type WorkspaceGitFetchQueryResult = typeof WorkspaceGitFetchQueryResult.T
 export const WorkspaceGitFetchRequest = Schema.Struct({ workspace_id: Identifier });
 
 export type WorkspaceGitFetchRequest = typeof WorkspaceGitFetchRequest.Type;
+
+/** Records one durable global automatic-fetch policy change. */
+export const WorkspaceGitFetchPolicyUpdatedEvent = Schema.Struct({
+	enabled: Schema.Boolean,
+	type: Schema.Literal("workspace.git.fetch.policy.updated"),
+});
+
+export type WorkspaceGitFetchPolicyUpdatedEvent = typeof WorkspaceGitFetchPolicyUpdatedEvent.Type;
+
+/** Records durable acceptance of one thread-owned manual fetch request. */
+export const WorkspaceGitFetchRequestedEvent = Schema.Struct({
+	type: Schema.Literal("workspace.git.fetch.requested"),
+	workspace_id: Identifier,
+});
+
+export type WorkspaceGitFetchRequestedEvent = typeof WorkspaceGitFetchRequestedEvent.Type;
+
+/** Records the bounded terminal result of one manual fetch request. */
+export const WorkspaceGitFetchCompletedEvent = Schema.Struct({
+	attempt: WorkspaceGitFetchAttempt,
+	type: Schema.Literal("workspace.git.fetch.completed"),
+	workspace_id: Identifier,
+});
+
+export type WorkspaceGitFetchCompletedEvent = typeof WorkspaceGitFetchCompletedEvent.Type;
