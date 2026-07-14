@@ -41,6 +41,7 @@ import {
 	WorkspaceChangeSnapshots,
 	WorkspaceGitCheckoutApprovals,
 	WorkspaceGitCheckoutClaims,
+	WorkspaceGitFetchOperations,
 	WorkspaceGitMutationApprovals,
 	WorkspaceGitMutationClaims,
 	WorkspaceGitOperations,
@@ -114,6 +115,10 @@ export const ThreadErasureLive = Layer.effect(
 			"executing",
 			"action_required",
 		]);
+		const IsPendingGitFetch = and(
+			eq(WorkspaceGitFetchOperations.kind, "manual"),
+			eq(WorkspaceGitFetchOperations.status, "pending"),
+		);
 		const IsPendingHostedProjectClone = inArray(HostedProjectCloneApprovals.state, [
 			"requested",
 			"approved",
@@ -161,6 +166,25 @@ export const ThreadErasureLive = Layer.effect(
 															Threads.thread_id,
 														),
 														IsPendingWorkspaceMutation,
+													),
+												),
+										),
+									),
+									not(
+										exists(
+											database.client
+												.select({
+													message_id:
+														WorkspaceGitFetchOperations.message_id,
+												})
+												.from(WorkspaceGitFetchOperations)
+												.where(
+													and(
+														eq(
+															WorkspaceGitFetchOperations.thread_id,
+															Threads.thread_id,
+														),
+														IsPendingGitFetch,
 													),
 												),
 										),
@@ -322,6 +346,25 @@ export const ThreadErasureLive = Layer.effect(
 							.limit(1);
 
 						if (pending_git_mutation) {
+							yield* transaction
+								.delete(ThreadErasureClaims)
+								.where(eq(ThreadErasureClaims.thread_id, thread_id));
+
+							return undefined;
+						}
+
+						const [pending_git_fetch] = yield* transaction
+							.select({ message_id: WorkspaceGitFetchOperations.message_id })
+							.from(WorkspaceGitFetchOperations)
+							.where(
+								and(
+									eq(WorkspaceGitFetchOperations.thread_id, thread_id),
+									IsPendingGitFetch,
+								),
+							)
+							.limit(1);
+
+						if (pending_git_fetch) {
 							yield* transaction
 								.delete(ThreadErasureClaims)
 								.where(eq(ThreadErasureClaims.thread_id, thread_id));
@@ -530,6 +573,9 @@ export const ThreadErasureLive = Layer.effect(
 						yield* transaction
 							.delete(WorkspaceGitOperations)
 							.where(eq(WorkspaceGitOperations.thread_id, thread_id));
+						yield* transaction
+							.delete(WorkspaceGitFetchOperations)
+							.where(eq(WorkspaceGitFetchOperations.thread_id, thread_id));
 						yield* transaction
 							.delete(HostedGitSnapshotOperations)
 							.where(eq(HostedGitSnapshotOperations.thread_id, thread_id));

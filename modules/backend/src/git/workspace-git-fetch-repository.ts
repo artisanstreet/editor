@@ -40,6 +40,9 @@ import { settings_scope_id, settings_stream_id } from "../settings/internal-scop
 
 const RequestFingerprint = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/u));
 
+/** Identifies the private settings stream used for global fetch-policy receipts. */
+export const workspace_git_fetch_thread_id = settings_scope_id("git-fetch");
+
 const PolicyUpdate = Schema.Struct({
 	enabled: Schema.Boolean,
 	message_id: Identifier,
@@ -638,7 +641,7 @@ export const WorkspaceGitFetchRepositoryLive = Layer.effect(
 					RetrySqliteWrite(
 						database.client.transaction((transaction) =>
 							Effect.gen(function* () {
-								const thread_id = settings_scope_id("git-fetch");
+								const thread_id = workspace_git_fetch_thread_id;
 								const stream_id = settings_stream_id("git-fetch");
 								const command_payload = {
 									enabled: decoded.enabled,

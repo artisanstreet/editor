@@ -462,6 +462,31 @@ export {
 	type GitWorktree,
 } from "./git/git";
 export { GitFetch, GitFetchError, GitFetchRequest, GitFetchResult } from "./git/git-fetch";
+export {
+	WorkspaceGitFetchConflict,
+	WorkspaceGitFetchInvariant,
+	WorkspaceGitFetchRepository,
+	WorkspaceGitFetchRepositoryLive,
+	WorkspaceGitFetchStorage,
+	WorkspaceGitFetchUnavailable,
+	workspace_git_fetch_thread_id,
+	type WorkspaceGitFetchClaim,
+	type WorkspaceGitFetchManualAcceptance,
+	type WorkspaceGitFetchManualOperation,
+	type WorkspaceGitFetchPolicyAcceptance,
+	type WorkspaceGitFetchRepositoryError,
+} from "./git/workspace-git-fetch-repository";
+export {
+	WorkspaceGitFetchScheduler,
+	WorkspaceGitFetchSchedulerLive,
+	WorkspaceGitFetchService,
+	WorkspaceGitFetchServiceFailure,
+	WorkspaceGitFetchServiceLive,
+	type WorkspaceGitFetchCycleResult,
+	type WorkspaceGitFetchPolicyUpdateInput,
+	type WorkspaceGitFetchRequestInput,
+	type WorkspaceGitFetchServiceError,
+} from "./git/workspace-git-fetch-service";
 export { make_git_layer, make_node_git_layer, type NodeGitOptions } from "./git/node-git";
 export { GitMutation, GitMutationError } from "./git/git-mutation";
 export {
@@ -584,6 +609,13 @@ export {
 	normalize_git_provider_host,
 } from "./git-provider/git-provider";
 export {
+	GitTransportAuthentication,
+	GitTransportAuthenticationError,
+	UnavailableGitTransportAuthenticationLive,
+	type GitTransportAuthenticationRequest,
+	type GitTransportAuthorization,
+} from "./git-provider/git-transport-authentication";
+export {
 	HostedGitSnapshotConflict,
 	HostedGitSnapshotInvariant,
 	HostedGitSnapshotRepository,
@@ -614,6 +646,10 @@ export {
 	make_github_provider_layer,
 	type GitHubProviderOptions,
 } from "./git-provider/github/github-provider";
+export {
+	make_github_git_transport_authentication_layer,
+	type GitHubGitTransportAuthenticationOptions,
+} from "./git-provider/github/github-transport-authentication";
 export {
 	make_node_process_runner_layer,
 	NodeProcessRunnerLive,
