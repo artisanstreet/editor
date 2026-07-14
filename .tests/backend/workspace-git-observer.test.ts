@@ -235,7 +235,9 @@ describe("WorkspaceGitObserver", () => {
 			]),
 		};
 		const mutation = {
-			CheckoutLocalBranch: () => Effect.die("observer invoked GitMutation"),
+			Execute: () => Effect.die("observer invoked GitMutation"),
+			Prepare: () => Effect.die("observer invoked GitMutation"),
+			Reconcile: () => Effect.die("observer invoked GitMutation"),
 		};
 		const registry = Layer.succeed(WorkspaceGitRegistry, {
 			Get: () =>
@@ -293,7 +295,11 @@ describe("WorkspaceGitObserver", () => {
 			Get: () =>
 				Effect.succeed({
 					canonical_root: root,
-					mutation: { CheckoutLocalBranch: () => Effect.die("unexpected mutation") },
+					mutation: {
+						Execute: () => Effect.die("unexpected mutation"),
+						Prepare: () => Effect.die("unexpected mutation"),
+						Reconcile: () => Effect.die("unexpected mutation"),
+					},
 					read,
 					workspace_id: "workspace-a",
 				}),

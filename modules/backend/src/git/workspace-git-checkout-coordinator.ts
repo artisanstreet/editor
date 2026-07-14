@@ -270,9 +270,27 @@ export const WorkspaceGitCheckoutCoordinatorLive = Layer.effect(
 					return;
 				}
 
-				const mutation = yield* capability.mutation
-					.CheckoutLocalBranch(execution.approval.target_branch)
+				const prepared = yield* capability.mutation
+					.Prepare({
+						target_branch: execution.approval.target_branch,
+						type: "checkout",
+					})
 					.pipe(Effect.result);
+
+				if (
+					Result.isFailure(prepared) ||
+					prepared.success.type !== "checkout" ||
+					prepared.success.source.branch !== execution.approval.source_branch ||
+					prepared.success.source.head !== execution.approval.source_head ||
+					prepared.success.target_head !== execution.target_head
+				) {
+					yield* SettleObservedFailure(execution, "preflight", "rejected", before);
+
+					return;
+				}
+
+				const plan = prepared.success;
+				const attempted = yield* capability.mutation.Execute(plan).pipe(Effect.result);
 				const after = yield* observer.Observe(execution.approval.workspace_id).pipe(
 					Effect.catch(() =>
 						Effect.gen(function* () {
@@ -285,11 +303,36 @@ export const WorkspaceGitCheckoutCoordinatorLive = Layer.effect(
 					),
 				);
 
-				if (Result.isFailure(mutation)) {
+				if (Result.isFailure(attempted)) {
 					yield* SettleObservedFailure(
 						execution,
 						"failure",
 						observation_matches_source(after, execution) ? "rejected" : "unknown",
+						after,
+					);
+
+					return;
+				}
+
+				const reconciled = yield* capability.mutation
+					.Reconcile(plan, attempted.success)
+					.pipe(Effect.result);
+
+				if (
+					Result.isFailure(reconciled) ||
+					reconciled.success.type !== "applied" ||
+					reconciled.success.branch !== execution.approval.target_branch ||
+					reconciled.success.head !== execution.target_head
+				) {
+					yield* SettleObservedFailure(
+						execution,
+						"failure",
+						!Result.isFailure(reconciled) &&
+							(reconciled.success.type === "rejected" ||
+								reconciled.success.type === "source") &&
+							observation_matches_source(after, execution)
+							? "rejected"
+							: "unknown",
 						after,
 					);
 

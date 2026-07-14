@@ -150,7 +150,27 @@ function make_git_layers(state: FakeGitState, dirty = { value: false }) {
 		Worktrees: Effect.succeed([]),
 	};
 	const mutation: typeof GitMutation.Service = {
-		CheckoutLocalBranch: (branch) =>
+		Prepare: () =>
+			Effect.succeed({
+				binding: "1".repeat(64),
+				source: {
+					branch: state.branch,
+					configuration_identity: "2".repeat(64),
+					head: source_head,
+					index_identity: "3".repeat(64),
+					repository_identity: "4".repeat(64),
+					state: "none" as const,
+					state_identity: "5".repeat(64),
+					status_identity: "6".repeat(64),
+					tracked_identity: "7".repeat(64),
+					untracked_identity: "8".repeat(64),
+					worktree_identity: "9".repeat(64),
+				},
+				target_branch: "release",
+				target_head,
+				type: "checkout" as const,
+			}),
+		Execute: (plan) =>
 			Effect.gen(function* () {
 				state.checkout_calls += 1;
 
@@ -163,7 +183,37 @@ function make_git_layers(state: FakeGitState, dirty = { value: false }) {
 					);
 				}
 
-				state.branch = branch;
+				state.branch = "release";
+
+				return {
+					binding: "a".repeat(64),
+					exit_code: 0,
+					operation_head: target_head,
+					output_complete: true,
+					output_identity: "b".repeat(64),
+					phase: "settlement" as const,
+					plan_binding: (plan as { readonly binding: string }).binding,
+					result: {
+						branch: "release",
+						configuration_identity: "2".repeat(64),
+						head: target_head,
+						index_identity: "3".repeat(64),
+						repository_identity: "4".repeat(64),
+						state: "none" as const,
+						state_identity: "5".repeat(64),
+						status_identity: "6".repeat(64),
+						tracked_identity: "7".repeat(64),
+						untracked_identity: "8".repeat(64),
+						worktree_identity: "9".repeat(64),
+					},
+					type: "attempt" as const,
+				};
+			}),
+		Reconcile: () =>
+			Effect.succeed({
+				branch: "release",
+				head: target_head,
+				type: "applied" as const,
 			}),
 	};
 	const capability: WorkspaceGitCapability = {

@@ -7,10 +7,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { Git, GitError } from "../../modules/backend/src/git/git";
 import { GitMutation } from "../../modules/backend/src/git/git-mutation";
-import {
-	make_git_mutation_layer,
-	make_node_git_mutation_layer,
-} from "../../modules/backend/src/git/node-git-mutation";
+import { make_node_git_mutation_layer } from "../../modules/backend/src/git/node-git-mutation";
 import { make_git_layer, make_node_git_layer } from "../../modules/backend/src/git/node-git";
 import {
 	ProcessRunner,
@@ -65,6 +62,27 @@ async function run_git(cwd: string, args: ReadonlyArray<string>) {
 	});
 }
 
+async function read_git(cwd: string, args: ReadonlyArray<string>) {
+	const { spawn } = await import("node:child_process");
+
+	return new Promise<string>((resolve, reject) => {
+		const child = spawn("git", [...args], {
+			cwd,
+			shell: false,
+			stdio: ["ignore", "pipe", "ignore"],
+		});
+		const chunks: Array<Buffer> = [];
+
+		child.stdout.on("data", (chunk: Buffer) => chunks.push(chunk));
+		child.on("error", reject);
+		child.on("close", (code) =>
+			code === 0
+				? resolve(Buffer.concat(chunks).toString("utf8"))
+				: reject(new Error(`git exited ${code}`)),
+		);
+	});
+}
+
 async function initialize_repository(root: string, object_format?: "sha1" | "sha256") {
 	await run_git(
 		root,
@@ -91,6 +109,10 @@ async function make_mutation(root: string) {
 			Effect.provide(make_node_git_mutation_layer({ cwd: root })),
 		),
 	);
+}
+
+function run_mutation<A, E>(effect: Effect.Effect<A, E>) {
+	return Effect.runPromise(effect);
 }
 
 async function make_injected_git(Run: ProcessRunnerShape["Run"]) {
@@ -284,64 +306,151 @@ describe("Git coordinator reads", () => {
 	});
 });
 
-describe("GitMutation", () => {
-	it("checks out an existing local branch", async () => {
+describe("GitMutation plans", () => {
+	it("ignores ambient Git repository and index redirection", async () => {
+		const selected_root = await make_root();
+		const redirected_root = await make_root();
+		const keys = ["GIT_DIR", "GIT_INDEX_FILE", "GIT_WORK_TREE"] as const;
+		const previous = new Map(keys.map((key) => [key, process.env[key]]));
+
+		await initialize_repository(selected_root);
+		await initialize_repository(redirected_root);
+
+		process.env.GIT_DIR = join(redirected_root, ".git");
+		process.env.GIT_INDEX_FILE = join(redirected_root, ".git", "index");
+		process.env.GIT_WORK_TREE = redirected_root;
+
+		try {
+			const mutation = await make_mutation(selected_root);
+			const plan = await run_mutation(
+				mutation.Prepare({ branch: "feature", type: "branch_create" }),
+			);
+			const attempt = await run_mutation(mutation.Execute(plan));
+			const outcome = await run_mutation(mutation.Reconcile(plan, attempt));
+
+			expect(outcome.type).toBe("applied");
+		} finally {
+			for (const key of keys) {
+				const value = previous.get(key);
+
+				if (value === undefined) {
+					delete process.env[key];
+				} else {
+					process.env[key] = value;
+				}
+			}
+		}
+
+		expect(await read_git(selected_root, ["symbolic-ref", "--short", "HEAD"])).toBe(
+			"feature\n",
+		);
+		expect(await read_git(redirected_root, ["symbolic-ref", "--short", "HEAD"])).toBe(
+			"master\n",
+		);
+		expect(await read_git(redirected_root, ["branch", "--list", "feature"])).toBe("");
+	});
+
+	it("rejects option-like upstream configuration before network execution", async () => {
+		const root = await make_root();
+
+		await initialize_repository(root);
+		await run_git(root, [
+			"config",
+			"--local",
+			"branch.master.remote",
+			"--upload-pack=unapproved",
+		]);
+		await run_git(root, ["config", "--local", "branch.master.merge", "refs/heads/master"]);
+
+		const mutation = await make_mutation(root);
+		const failure = await run_mutation(
+			mutation.Prepare({ type: "pull_ff_only" }).pipe(Effect.flip),
+		);
+
+		expect(failure.operation).toBe("prepare");
+		expect(await read_git(root, ["symbolic-ref", "--short", "HEAD"])).toBe("master\n");
+	});
+
+	it("does not mutate when an approved source proof becomes stale", async () => {
 		const root = await make_root();
 
 		await initialize_repository(root);
 		await run_git(root, ["branch", "feature"]);
 
 		const mutation = await make_mutation(root);
-		await Effect.runPromise(mutation.CheckoutLocalBranch("feature"));
+		const plan = await run_mutation(
+			mutation.Prepare({ target_branch: "feature", type: "checkout" }),
+		);
+		await fs.writeFile(join(root, "tracked.txt"), "changed after approval\n");
 
+		const failure = await run_mutation(mutation.Execute(plan).pipe(Effect.flip));
 		const branch = await make_git(root).then((git) => Effect.runPromise(git.Discover));
-		expect(branch.branch).toBe("feature");
+
+		expect(failure.operation).toBe("precondition");
+		expect(branch.branch).toBe("master");
 	});
 
-	it("maps nonexistent branches and rejects invalid input", async () => {
+	it("creates a branch transactionally from the approved head without another worktree", async () => {
 		const root = await make_root();
 
 		await initialize_repository(root);
 
 		const mutation = await make_mutation(root);
-		const missing = await Effect.runPromise(
-			mutation.CheckoutLocalBranch("missing").pipe(Effect.flip),
+		const plan = await run_mutation(
+			mutation.Prepare({ branch: "feature", type: "branch_create" }),
 		);
-		const empty = await Effect.runPromise(
-			mutation.CheckoutLocalBranch("   ").pipe(Effect.flip),
-		);
-		const nul = await Effect.runPromise(
-			mutation.CheckoutLocalBranch("feature\0x").pipe(Effect.flip),
-		);
+		if (plan.type !== "branch_create") throw new Error("expected branch plan");
+		const attempt = await run_mutation(mutation.Execute(plan));
+		const git = await make_git(root);
+		const discovered = await Effect.runPromise(git.Discover);
+		const worktrees = await Effect.runPromise(git.Worktrees);
 
-		expect(missing._tag).toBe("GitMutationError");
-		expect(missing.operation).toBe("checkout");
-		expect(empty._tag).toBe("GitMutationError");
-		expect(nul._tag).toBe("GitMutationError");
+		expect(attempt.exit_code).toBe(0);
+		expect(discovered).toMatchObject({
+			branch: "feature",
+			head: Option.some(plan.source_head),
+		});
+		expect(worktrees).toHaveLength(1);
 	});
 
-	it("passes option-looking branches after the argv option terminator", async () => {
-		const calls: Array<ProcessRunnerInput> = [];
-		const runner = Layer.succeed(ProcessRunner, {
-			Run: (input) => {
-				calls.push(input);
+	it("cleans only inventoried untracked files and preserves ignored files", async () => {
+		const root = await make_root();
 
-				return Effect.succeed(process_result("", input));
-			},
-		});
-		const layer = make_git_mutation_layer({ cwd: "injected repository" }).pipe(
-			Layer.provide(runner),
+		await initialize_repository(root);
+		await fs.writeFile(join(root, ".gitignore"), "ignored.txt\n");
+		await fs.writeFile(join(root, "untracked.txt"), "delete me\n");
+		await fs.writeFile(join(root, "ignored.txt"), "keep me\n");
+
+		const mutation = await make_mutation(root);
+		const plan = await run_mutation(mutation.Prepare({ type: "clean" }));
+		if (plan.type !== "clean") throw new Error("expected clean plan");
+		const attempt = await run_mutation(mutation.Execute(plan));
+
+		expect(plan.candidates).toEqual([".gitignore", "untracked.txt"]);
+		expect(attempt.exit_code).toBe(0);
+		expect(await fs.stat(join(root, "ignored.txt"))).toBeDefined();
+		await expect(fs.stat(join(root, "untracked.txt"))).rejects.toThrow();
+	});
+
+	it("commits only staged content and reconciles an interrupted attempt without retrying", async () => {
+		const root = await make_root();
+
+		await initialize_repository(root);
+		await fs.writeFile(join(root, "staged.txt"), "staged\n");
+		await fs.writeFile(join(root, "unstaged.txt"), "unstaged\n");
+		await run_git(root, ["add", "staged.txt"]);
+
+		const mutation = await make_mutation(root);
+		const plan = await run_mutation(
+			mutation.Prepare({ message: "approved message", type: "commit" }),
 		);
-		const mutation = await Effect.runPromise(
-			Effect.service(GitMutation).pipe(Effect.provide(layer)),
-		);
+		const attempt = await run_mutation(mutation.Execute(plan));
+		const outcome = await run_mutation(mutation.Reconcile(plan, attempt));
+		const git = await make_git(root);
+		const status = await Effect.runPromise(git.Status);
 
-		await Effect.runPromise(mutation.CheckoutLocalBranch("--looks-like-an-option"));
-
-		expect(calls).toHaveLength(1);
-		expect(calls[0]!.args).toEqual(["switch", "--no-guess", "--", "--looks-like-an-option"]);
-		expect(calls[0]!.max_stdout_bytes).toBeGreaterThan(0);
-		expect(calls[0]!.max_stderr_bytes).toBeGreaterThan(0);
-		expect(calls.some((call) => call.args.includes("worktree"))).toBe(false);
+		expect(outcome.type).toBe("applied");
+		expect(status.some((entry) => entry.path === "unstaged.txt")).toBe(true);
+		expect(await read_git(root, ["log", "-1", "--format=%B"])).toBe("approved message\n\n");
 	});
 });
