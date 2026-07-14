@@ -431,6 +431,48 @@ export {
 	type WorkspaceGitMutationRequestInput,
 } from "./git/workspace-git-mutation-coordinator";
 export {
+	GitProvider,
+	GitProviderAccountAuthentication,
+	GitProviderActiveAccount,
+	GitProviderCapability,
+	GitProviderCapabilityKind,
+	GitProviderContinuation,
+	GitProviderCursorPosition,
+	GitProviderDefaultBranch,
+	GitProviderDescriptor,
+	GitProviderDiscovery,
+	GitProviderDiscoveryScope,
+	GitProviderError,
+	GitProviderErrorOperation,
+	GitProviderErrorReason,
+	GitProviderHost,
+	GitProviderHostAuthentication,
+	GitProviderId,
+	GitProviderInspection,
+	GitProviderInstallation,
+	GitProviderPage,
+	GitProviderRepository,
+	GitProviderRepositoryIdentity,
+	GitProviderRepositoryOrigin,
+	GitProviderSelection,
+	GitProviderUrl,
+	GitProviderWebUrl,
+	normalize_git_provider_host,
+} from "./git-provider/git-provider";
+export {
+	EmptyGitProviderRegistryLive,
+	GitProviderHostResolution,
+	GitProviderRegistry,
+	GitProviderRegistryError,
+	make_git_provider_registry_layer,
+	type GitProviderRegistration,
+} from "./git-provider/git-provider-registry";
+export {
+	GitHubProviderConfigurationError,
+	make_github_provider_layer,
+	type GitHubProviderOptions,
+} from "./git-provider/github/github-provider";
+export {
 	make_node_process_runner_layer,
 	NodeProcessRunnerLive,
 	type NodeProcessRunnerOptions,
@@ -537,6 +579,7 @@ export {
 	make_desktop_backend_runtime,
 	type BackendOptions,
 	type DesktopBackendOptions,
+	type DesktopGitProviderOptions,
 	type DesktopGuidanceOptions,
 	type DesktopModelBehaviourOptions,
 } from "./runtime/backend-runtime";

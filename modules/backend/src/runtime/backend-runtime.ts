@@ -2,7 +2,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { NodeCrypto, NodeFileSystem } from "@effect/platform-node-shared";
-import { Layer, ManagedRuntime } from "effect";
+import { Effect, Layer, ManagedRuntime } from "effect";
 
 import { type Engine, make_engine_registry_layer } from "@artisan/engines";
 import type { GlobalGuidanceProvider } from "@artisan/protocol";
@@ -35,6 +35,16 @@ import { WorkspaceGitCheckoutCoordinatorLive } from "../git/workspace-git-checko
 import { make_workspace_git_execution_gate_layer } from "../git/workspace-git-execution-gate";
 import { WorkspaceGitMutationRepositoryLive } from "../git/workspace-git-mutation-repository";
 import { WorkspaceGitMutationCoordinatorLive } from "../git/workspace-git-mutation-coordinator";
+import { GitProvider } from "../git-provider/git-provider";
+import {
+	EmptyGitProviderRegistryLive,
+	GitProviderRegistry,
+	GitProviderRegistryError,
+	make_git_provider_registry_layer,
+} from "../git-provider/git-provider-registry";
+import { make_github_cli_layer } from "../git-provider/github/github-cli";
+import { make_node_github_cli_executable_layer } from "../git-provider/github/github-cli-executable";
+import { make_github_provider_layer } from "../git-provider/github/github-provider";
 import { make_database_layer } from "../persistence/database";
 import { JournalNotifierLive } from "../persistence/journal-notifier";
 import { JournalStoreLive } from "../persistence/journal-store";
@@ -116,6 +126,7 @@ import { WorkspaceReplaceApprovalCoordinatorLive } from "../workspace/workspace-
 export interface BackendOptions {
 	readonly database_path: string;
 	readonly engines?: ReadonlyArray<Engine>;
+	readonly git_provider_registry?: Layer.Layer<GitProviderRegistry, GitProviderRegistryError>;
 	readonly guidance?: Partial<GlobalGuidanceServiceOptions>;
 	readonly guidance_provider_registry?: Layer.Layer<GuidanceProviderRegistry>;
 	readonly migrations_path: string;
@@ -162,8 +173,17 @@ export interface DesktopModelBehaviourOptions {
 	readonly home_directory?: string;
 }
 
+/** Configures optional GitHub CLI discovery for the production desktop composition. */
+export interface DesktopGitProviderOptions {
+	readonly command?: string;
+	readonly hosts?: ReadonlyArray<string>;
+	readonly probe_timeout_ms?: number;
+	readonly request_timeout_ms?: number;
+}
+
 /** Extends the portable backend options with desktop provider-path discovery. */
 export interface DesktopBackendOptions extends BackendOptions {
+	readonly git_provider_platform?: DesktopGitProviderOptions;
 	readonly guidance_platform?: DesktopGuidanceOptions;
 	readonly model_behaviour_platform?: DesktopModelBehaviourOptions;
 }
@@ -210,6 +230,7 @@ export function make_backend_layer(options: BackendOptions) {
 		options.workspace_bounded_regular_file_store_registry ??
 		EmptyWorkspaceBoundedRegularFileStoreRegistryLive;
 	const workspace_git_registry = options.workspace_git_registry ?? EmptyWorkspaceGitRegistryLive;
+	const git_provider_registry = options.git_provider_registry ?? EmptyGitProviderRegistryLive;
 	const workspace_git_observer = WorkspaceGitObserverLive.pipe(
 		Layer.provideMerge(NodeFileSystem.layer),
 		Layer.provideMerge(workspace_git_registry),
@@ -413,6 +434,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(project_affinity_coordination),
 		Layer.provideMerge(guidance),
 		Layer.provideMerge(model_behaviour),
+		Layer.provideMerge(git_provider_registry),
 		Layer.provideMerge(workspace),
 	);
 }
@@ -472,10 +494,51 @@ function make_desktop_model_behaviour_registry(options: DesktopBackendOptions) {
 	}).pipe(Layer.provideMerge(ModelBehaviourConfigFilesLive), Layer.provideMerge(probe));
 }
 
+function make_desktop_git_provider_registry(options: DesktopBackendOptions) {
+	const platform = options.git_provider_platform ?? {};
+	const cwd = dirname(options.database_path);
+	const static_hosts = ["github.com", ...(platform.hosts ?? [])];
+	const executable = make_node_github_cli_executable_layer({
+		...(platform.command === undefined ? {} : { command: platform.command }),
+		cwd,
+	});
+	const cli = make_github_cli_layer({
+		...(platform.command === undefined ? {} : { command: platform.command }),
+		cwd,
+		...(platform.probe_timeout_ms === undefined
+			? {}
+			: { probe_timeout_ms: platform.probe_timeout_ms }),
+		...(platform.request_timeout_ms === undefined
+			? {}
+			: { request_timeout_ms: platform.request_timeout_ms }),
+	}).pipe(Layer.provideMerge(NodeProcessRunnerLive), Layer.provideMerge(executable));
+	const github = make_github_provider_layer(
+		platform.hosts === undefined ? {} : { hosts: platform.hosts },
+	).pipe(Layer.provide(cli));
+	const BuildRegistry = Effect.gen(function* () {
+		const provider = yield* GitProvider;
+
+		return yield* GitProviderRegistry.pipe(
+			Effect.provide(make_git_provider_registry_layer([{ hosts: static_hosts, provider }])),
+		);
+	}).pipe(
+		Effect.provide(github),
+		Effect.mapError((cause) =>
+			cause instanceof GitProviderRegistryError
+				? cause
+				: new GitProviderRegistryError({ reason: "invalid_provider" }),
+		),
+	);
+
+	return Layer.effect(GitProviderRegistry, BuildRegistry);
+}
+
 /** Builds the production desktop layer with opinionated platform guidance discovery. */
 export function make_desktop_backend_layer(options: DesktopBackendOptions) {
 	return make_backend_layer({
 		...options,
+		git_provider_registry:
+			options.git_provider_registry ?? make_desktop_git_provider_registry(options),
 		guidance_provider_registry:
 			options.guidance_provider_registry ?? make_desktop_guidance_registry(options),
 		model_behaviour_provider_registry:
