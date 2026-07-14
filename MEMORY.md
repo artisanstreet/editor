@@ -14,7 +14,7 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Branch: `codex/workspace-replace-approval`
 - [x] Package manager: pnpm 11.7.0
 - [x] Stack: TypeScript 7, Effect 4 beta, Drizzle 1 RC, SQLite
-- [x] Latest verified implementation checkpoint: `8ac37bb test: exercise git mutation process crashes`
+- [x] Latest verified implementation checkpoint: `5c455d2 feat: discover GitHub repositories with gh`
 - [x] Local `HEAD`, its upstream, and `origin/codex/workspace-replace-approval` must be equal after every checkpoint push and before handoff; this was last verified on 2026-07-14 after the full local validation and memory checkpoint.
 - [x] `ARTISAN_RUN_NATIVE_ADDON_SMOKE=1 pnpm --filter @artisan/bounded-file-store-native verify:local` is the canonical native gate and passes locally for production reads/replacement, test-hook races, and process-crash recovery.
 - [x] Routine development verification is local-first. Do not recreate temporary GitHub Actions, remote runners, or similar testing detours; future CI is a real clean-checkout/release gate and never a substitute for local validation.
@@ -146,6 +146,14 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Live thread metadata refinement with bounded context, latest-wins scheduling, locks, source idempotency, and restart replay.
 - [x] Project affinity scoring/rehome core with Git-root discovery, recency windows, locks, suggestions, linked projects, and journal coordination.
 - [x] Curated Model Behaviour registry with Codex config reconciliation, capability probing, drift handling, private backups, and typed MessagePort control.
+
+## Hosted Git Provider Discovery
+
+- [x] Provider-neutral hosted Git begins with the canonical `GitProvider` Effect Service, bounded Schema ADTs, safe errors, truthful capabilities, and an explicit `GitProviderRegistry`. Static hosts win exactly, authenticated enterprise hosts resolve dynamically, unknown hosts remain unsupported, and ambiguous or malformed registrations fail closed. Checkpoint `9c08989` is pushed.
+- [x] `GitHubProvider` is the sole live V1 adapter. It discovers a pinned shell-free `gh` executable, inspects version and multi-host/multi-account authentication without requesting or retaining tokens, and reads bounded account, organization, and search pages through GraphQL. Canonical continuations are bound to provider, host, active account, scope, and page size; the serving account is rechecked after each query.
+- [x] Repository projections retain only canonical identity, visibility, archive/default-branch/permission state, safe URLs, and minimal native attribution. Responses exceeding the requested page bound, changing accounts, escaping the selected clone or web host, returning malformed data, or leaking provider output fail with safe canonical errors. Missing, incompatible, signed-out, timeout, permission, rate-limit, network, and server states remain distinct.
+- [x] Portable runtimes use an empty registry while desktop composition owns the optional live GitHub Layer. Focused provider tests pass 21 tests with the ordinary live test skipped; the explicit authenticated `ARTISAN_RUN_GITHUB_PROVIDER_LIVE=1` smoke passes locally. Full `pnpm run validate` passes formatting, Oxlint, TypeScript, the production frontend build, and 127 test files with 1,080 passing tests plus 4 intentional skips. Independent review found one cross-host URL P2, the remedy and hostile-response tests are committed at `5c455d2`, and focused re-review is clean.
+- [ ] This matrix slice remains partial. Next add durable one-checkout project registration and approved clone into the projects root, safe fetch and thread attachment, then stale-head-safe review/CI projections, external waits, public protocol/UI routes, replay, and approval-bearing provider mutations. `GitLabProvider` remains deferred and unsupported.
 
 ## Completed Non-Adversarial Conditional Replacement Checkpoint
 
