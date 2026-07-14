@@ -273,6 +273,27 @@ function registration_for(
 	};
 }
 
+function graph_registration_for(): ExternalWaitRegistration {
+	const registration = registration_for({
+		command_id: "graph_command_1",
+		request_fingerprint: "d".repeat(64),
+		run_id: "graph_run_1",
+		wait_id: "graph_wait_1",
+	});
+
+	return {
+		...registration,
+		owner: {
+			_tag: "assignment_run",
+			agent_id: "graph_agent_1",
+			assignment_id: "assignment_1",
+			engine_id: "codex",
+			group_id: "group_1",
+			run_id: "graph_run_1",
+		},
+	};
+}
+
 afterEach(async () => {
 	await Effect.runPromise(
 		Effect.forEach(
@@ -587,29 +608,66 @@ describe("ExternalWaitRepository", () => {
 
 					yield* Seed;
 					yield* repository.Register(registration_for());
+					yield* repository.ClaimObservation({
+						lease_owner: "observer_1",
+						now: "2026-07-14T15:01:00.000Z",
+						wait_id: "wait_1",
+					});
+					const foreign = yield* Effect.exit(
+						repository.CreateWake({
+							lease_owner: "observer_2",
+							now: "2026-07-14T15:01:00.000Z",
+							trigger: { _tag: "manual_resume" },
+							wait_id: "wait_1",
+						}),
+					);
+					const expired = yield* Effect.exit(
+						repository.CreateWake({
+							lease_owner: "observer_1",
+							now: "2026-07-14T15:01:30.000Z",
+							trigger: { _tag: "manual_resume" },
+							wait_id: "wait_1",
+						}),
+					);
 					const wake = yield* repository.CreateWake({
+						lease_owner: "observer_1",
 						now: "2026-07-14T15:01:00.000Z",
 						trigger: { _tag: "manual_resume" },
 						wait_id: "wait_1",
 					});
-					const duplicate = yield* repository.CreateWake({
+					const exact_duplicate = yield* repository.CreateWake({
+						lease_owner: "observer_1",
 						now: "2026-07-14T15:01:01.000Z",
-						trigger: {
-							_tag: "review_changed",
-							change_kind: "decision_changed",
-							decision: "approved",
-							total_reviews: 1,
-							unresolved_thread_count: 0,
-						},
+						trigger: { _tag: "manual_resume" },
 						wait_id: "wait_1",
 					});
+					const duplicate = yield* Effect.exit(
+						repository.CreateWake({
+							lease_owner: "observer_1",
+							now: "2026-07-14T15:01:01.000Z",
+							trigger: {
+								_tag: "review_changed",
+								change_kind: "decision_changed",
+								decision: "approved",
+								total_reviews: 1,
+								unresolved_thread_count: 0,
+							},
+							wait_id: "wait_1",
+						}),
+					);
 					const before_close = yield* repository.DiscoverWakes({
 						now: "2026-07-14T15:01:02.000Z",
 					});
 
-					yield* repository.MarkSourceClosed({
+					const source_closed = yield* repository.MarkSourceClosedForRun({
 						now: "2026-07-14T15:01:02.000Z",
-						wait_id: "wait_1",
+						owner_tag: "thread_run",
+						source_run_id: "run_1",
+					});
+					const repeated_source_close = yield* repository.MarkSourceClosedForRun({
+						now: "2026-07-14T15:01:03.000Z",
+						owner_tag: "thread_run",
+						source_run_id: "run_1",
 					});
 					const discovered = yield* repository.DiscoverWakes({
 						now: "2026-07-14T15:01:03.000Z",
@@ -665,17 +723,26 @@ describe("ExternalWaitRepository", () => {
 						changed,
 						discovered,
 						duplicate,
+						exact_duplicate,
+						expired,
 						first_claim,
+						foreign,
 						replay,
+						repeated_source_close,
 						second_claim,
 						settled,
+						source_closed,
 						wake,
 					};
 				}),
 			);
 
-			expect(result.duplicate).toEqual(result.wake);
+			expect(result.duplicate._tag).toBe("Failure");
+			expect(result.exact_duplicate).toEqual(result.wake);
+			expect(result.foreign._tag).toBe("Failure");
+			expect(result.expired._tag).toBe("Failure");
 			expect(result.before_close).toEqual([]);
+			expect(result.repeated_source_close).toEqual(result.source_closed);
 			expect(result.discovered).toEqual([result.wake.outbox_id]);
 			expect(Option.isSome(result.first_claim)).toBe(true);
 			expect(Option.isNone(result.blocked_claim)).toBe(true);
@@ -692,6 +759,312 @@ describe("ExternalWaitRepository", () => {
 		}
 	});
 
+	it("recovers an unclosed wait from a terminal ordinary source run", async () => {
+		const instance = runtime(await Effect.runPromise(MakeDatabasePath));
+
+		try {
+			const result = await instance.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* ExternalWaitRepository;
+
+					yield* Seed;
+					yield* repository.Register(registration_for());
+					yield* database.client.update(OrchestrationRuns).set({ status: "completed" });
+
+					const recovered = yield* repository.ReconcileSourceClosures({
+						now: "2026-07-14T15:01:00.000Z",
+					});
+					const [wait] = yield* database.client.select().from(ExternalWaits).limit(1);
+
+					return { recovered, source_closed_at: wait?.source_closed_at };
+				}),
+			);
+
+			expect(result.recovered).toEqual(["wait_1"]);
+			expect(result.source_closed_at).toBe("2026-07-14T15:01:00.000Z");
+		} finally {
+			await instance.dispose();
+		}
+	});
+
+	it("recovers an unclosed wait from a terminal graph source run", async () => {
+		const instance = runtime(await Effect.runPromise(MakeDatabasePath));
+
+		try {
+			const result = await instance.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* ExternalWaitRepository;
+
+					yield* Seed;
+					yield* SeedGraphRun;
+					yield* repository.Register(graph_registration_for());
+					yield* database.client
+						.update(AgentRuns)
+						.set({ dispatch_status: "terminal", state: "complete" });
+
+					const recovered = yield* repository.ReconcileSourceClosures({
+						now: "2026-07-14T15:01:00.000Z",
+					});
+					const [wait] = yield* database.client.select().from(ExternalWaits).limit(1);
+
+					return { recovered, source_closed_at: wait?.source_closed_at };
+				}),
+			);
+
+			expect(result.recovered).toEqual(["graph_wait_1"]);
+			expect(result.source_closed_at).toBe("2026-07-14T15:01:00.000Z");
+		} finally {
+			await instance.dispose();
+		}
+	});
+
+	it("leaves waits open for live ordinary statuses and graph source runs", async () => {
+		for (const status of ["queued", "running", "waiting"] as const) {
+			const instance = runtime(await Effect.runPromise(MakeDatabasePath));
+
+			try {
+				const result = await instance.runPromise(
+					Effect.gen(function* () {
+						const database = yield* Database;
+						const repository = yield* ExternalWaitRepository;
+
+						yield* Seed;
+						yield* repository.Register(registration_for());
+						yield* database.client.update(OrchestrationRuns).set({ status });
+
+						const recovered = yield* repository.ReconcileSourceClosures({
+							now: "2026-07-14T15:01:00.000Z",
+						});
+						const [wait] = yield* database.client.select().from(ExternalWaits).limit(1);
+
+						return { recovered, source_closed_at: wait?.source_closed_at };
+					}),
+				);
+
+				expect(result.recovered).toEqual([]);
+				expect(result.source_closed_at).toBeNull();
+			} finally {
+				await instance.dispose();
+			}
+		}
+
+		const instance = runtime(await Effect.runPromise(MakeDatabasePath));
+
+		try {
+			const result = await instance.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* ExternalWaitRepository;
+
+					yield* Seed;
+					yield* SeedGraphRun;
+					yield* repository.Register(graph_registration_for());
+
+					const recovered = yield* repository.ReconcileSourceClosures({
+						now: "2026-07-14T15:01:00.000Z",
+					});
+					const [wait] = yield* database.client.select().from(ExternalWaits).limit(1);
+
+					return { recovered, source_closed_at: wait?.source_closed_at };
+				}),
+			);
+
+			expect(result.recovered).toEqual([]);
+			expect(result.source_closed_at).toBeNull();
+		} finally {
+			await instance.dispose();
+		}
+	});
+
+	it("reconciles terminal sources only in the owner's run table", async () => {
+		const ordinary_instance = runtime(await Effect.runPromise(MakeDatabasePath));
+
+		try {
+			const ordinary = await ordinary_instance.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* ExternalWaitRepository;
+
+					yield* Seed;
+					yield* repository.Register(registration_for());
+					yield* database.client.insert(AgentRuns).values({
+						agent_id: "collision_agent",
+						assignment_id: "collision_assignment",
+						attempt: 1,
+						created_at: now,
+						dispatch_status: "terminal",
+						engine_id: "codex",
+						group_id: "collision_group",
+						last_observation_sequence: 0,
+						profile: "default",
+						run_id: "run_1",
+						state: "complete",
+						updated_at: now,
+					});
+
+					const recovered = yield* repository.ReconcileSourceClosures({
+						now: "2026-07-14T15:01:00.000Z",
+					});
+					const [wait] = yield* database.client.select().from(ExternalWaits).limit(1);
+
+					return { recovered, source_closed_at: wait?.source_closed_at };
+				}),
+			);
+
+			expect(ordinary).toEqual({ recovered: [], source_closed_at: null });
+		} finally {
+			await ordinary_instance.dispose();
+		}
+
+		const graph_instance = runtime(await Effect.runPromise(MakeDatabasePath));
+
+		try {
+			const graph = await graph_instance.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* ExternalWaitRepository;
+
+					yield* Seed;
+					yield* SeedGraphRun;
+					yield* repository.Register(graph_registration_for());
+					yield* database.client.insert(OrchestrationRuns).values({
+						agent_id: "collision_agent",
+						created_at: now,
+						engine_id: "codex",
+						run_id: "graph_run_1",
+						status: "completed",
+						thread_id: "thread_1",
+						updated_at: now,
+						working_directory: "C:/artisan",
+					});
+
+					const recovered = yield* repository.ReconcileSourceClosures({
+						now: "2026-07-14T15:01:00.000Z",
+					});
+					const [wait] = yield* database.client.select().from(ExternalWaits).limit(1);
+
+					return { recovered, source_closed_at: wait?.source_closed_at };
+				}),
+			);
+
+			expect(graph).toEqual({ recovered: [], source_closed_at: null });
+		} finally {
+			await graph_instance.dispose();
+		}
+	});
+
+	it("closes live source runs only for the matching owner tag", async () => {
+		const ordinary_instance = runtime(await Effect.runPromise(MakeDatabasePath));
+
+		try {
+			const ordinary = await ordinary_instance.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* ExternalWaitRepository;
+
+					yield* Seed;
+					yield* repository.Register(registration_for());
+					const wrong_owner = yield* repository.MarkSourceClosedForRun({
+						now: "2026-07-14T15:01:00.000Z",
+						owner_tag: "assignment_run",
+						source_run_id: "run_1",
+					});
+					const [before] = yield* database.client.select().from(ExternalWaits).limit(1);
+					const correct_owner = yield* repository.MarkSourceClosedForRun({
+						now: "2026-07-14T15:01:01.000Z",
+						owner_tag: "thread_run",
+						source_run_id: "run_1",
+					});
+
+					return {
+						before: before?.source_closed_at,
+						correct_owner,
+						wrong_owner,
+					};
+				}),
+			);
+
+			expect(Option.isNone(ordinary.wrong_owner)).toBe(true);
+			expect(ordinary.before).toBeNull();
+			expect(Option.isSome(ordinary.correct_owner)).toBe(true);
+		} finally {
+			await ordinary_instance.dispose();
+		}
+
+		const graph_instance = runtime(await Effect.runPromise(MakeDatabasePath));
+
+		try {
+			const graph = await graph_instance.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* ExternalWaitRepository;
+
+					yield* Seed;
+					yield* SeedGraphRun;
+					yield* repository.Register(graph_registration_for());
+					const wrong_owner = yield* repository.MarkSourceClosedForRun({
+						now: "2026-07-14T15:01:00.000Z",
+						owner_tag: "thread_run",
+						source_run_id: "graph_run_1",
+					});
+					const [before] = yield* database.client.select().from(ExternalWaits).limit(1);
+					const correct_owner = yield* repository.MarkSourceClosedForRun({
+						now: "2026-07-14T15:01:01.000Z",
+						owner_tag: "assignment_run",
+						source_run_id: "graph_run_1",
+					});
+
+					return {
+						before: before?.source_closed_at,
+						correct_owner,
+						wrong_owner,
+					};
+				}),
+			);
+
+			expect(Option.isNone(graph.wrong_owner)).toBe(true);
+			expect(graph.before).toBeNull();
+			expect(Option.isSome(graph.correct_owner)).toBe(true);
+		} finally {
+			await graph_instance.dispose();
+		}
+	});
+
+	it("repeats terminal-source recovery without changing an existing closure", async () => {
+		const instance = runtime(await Effect.runPromise(MakeDatabasePath));
+
+		try {
+			const result = await instance.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* ExternalWaitRepository;
+
+					yield* Seed;
+					yield* repository.Register(registration_for());
+					yield* database.client.update(OrchestrationRuns).set({ status: "completed" });
+
+					const first = yield* repository.ReconcileSourceClosures({
+						now: "2026-07-14T15:01:00.000Z",
+					});
+					const second = yield* repository.ReconcileSourceClosures({
+						now: "2026-07-14T15:02:00.000Z",
+					});
+					const [wait] = yield* database.client.select().from(ExternalWaits).limit(1);
+
+					return { first, second, source_closed_at: wait?.source_closed_at };
+				}),
+			);
+
+			expect(result.first).toEqual(["wait_1"]);
+			expect(result.second).toEqual([]);
+			expect(result.source_closed_at).toBe("2026-07-14T15:01:00.000Z");
+		} finally {
+			await instance.dispose();
+		}
+	});
+
 	it("cancellation atomically fences a claimed wake and replays its original snapshot", async () => {
 		const instance = runtime(await Effect.runPromise(MakeDatabasePath));
 
@@ -703,7 +1076,13 @@ describe("ExternalWaitRepository", () => {
 
 					yield* Seed;
 					yield* repository.Register(registration_for());
+					yield* repository.ClaimObservation({
+						lease_owner: "observer_1",
+						now: "2026-07-14T15:01:00.000Z",
+						wait_id: "wait_1",
+					});
 					const wake = yield* repository.CreateWake({
+						lease_owner: "observer_1",
 						now: "2026-07-14T15:01:00.000Z",
 						trigger: { _tag: "manual_resume" },
 						wait_id: "wait_1",
@@ -830,7 +1209,13 @@ describe("ExternalWaitRepository", () => {
 
 					yield* Seed;
 					yield* repository.Register(registration_for({ maximum_generation: 1 }));
+					yield* repository.ClaimObservation({
+						lease_owner: "observer_1",
+						now: "2026-07-14T15:01:00.000Z",
+						wait_id: "wait_1",
+					});
 					const wake = yield* repository.CreateWake({
+						lease_owner: "observer_1",
 						now: "2026-07-14T15:01:00.000Z",
 						trigger: { _tag: "manual_resume" },
 						wait_id: "wait_1",
@@ -996,7 +1381,13 @@ describe("ExternalWaitRepository", () => {
 
 					yield* Seed;
 					yield* repository.Register(registration_for());
+					yield* repository.ClaimObservation({
+						lease_owner: "observer_1",
+						now: "2026-07-14T15:01:00.000Z",
+						wait_id: "wait_1",
+					});
 					const wake = yield* repository.CreateWake({
+						lease_owner: "observer_1",
 						now: "2026-07-14T15:01:00.000Z",
 						trigger: { _tag: "manual_resume" },
 						wait_id: "wait_1",

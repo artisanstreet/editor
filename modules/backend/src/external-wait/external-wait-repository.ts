@@ -1,4 +1,17 @@
-import { and, asc, eq, inArray, isNotNull, isNull, lte, or, type SQL } from "drizzle-orm";
+import {
+	and,
+	asc,
+	eq,
+	exists,
+	gt,
+	inArray,
+	isNotNull,
+	isNull,
+	lte,
+	or,
+	sql,
+	type SQL,
+} from "drizzle-orm";
 import { Context, Crypto, Data, DateTime, Effect, Encoding, Layer, Option, Schema } from "effect";
 
 import {
@@ -80,7 +93,14 @@ const ObservationRecord = Schema.Struct({
 	wait_id: Identifier,
 });
 
+const WakeMutationInput = Schema.Struct({
+	now: IsoDateTime,
+	trigger: ExternalWaitTrigger,
+	wait_id: Identifier,
+});
+
 const WakeInput = Schema.Struct({
+	lease_owner: Identifier,
 	now: IsoDateTime,
 	trigger: ExternalWaitTrigger,
 	wait_id: Identifier,
@@ -104,6 +124,14 @@ const SourceClosure = Schema.Struct({
 	now: IsoDateTime,
 	wait_id: Identifier,
 });
+
+const SourceRunClosure = Schema.Struct({
+	now: IsoDateTime,
+	owner_tag: Schema.Literals(["thread_run", "assignment_run"]),
+	source_run_id: Identifier,
+});
+
+const TerminalSourceClosureRecovery = Schema.Struct({ now: IsoDateTime });
 
 const CancelInput = Schema.Struct({
 	now: IsoDateTime,
@@ -204,6 +232,12 @@ export class ExternalWaitRepository extends Context.Service<
 		readonly MarkSourceClosed: (
 			input: typeof SourceClosure.Type,
 		) => Effect.Effect<Option.Option<ExternalWaitSnapshotValue>, ExternalWaitRepositoryError>;
+		readonly MarkSourceClosedForRun: (
+			input: typeof SourceRunClosure.Type,
+		) => Effect.Effect<Option.Option<ExternalWaitSnapshotValue>, ExternalWaitRepositoryError>;
+		readonly ReconcileSourceClosures: (
+			input: typeof TerminalSourceClosureRecovery.Type,
+		) => Effect.Effect<ReadonlyArray<string>, ExternalWaitRepositoryError>;
 		readonly CreateWake: (
 			input: typeof WakeInput.Type,
 		) => Effect.Effect<ExternalWaitWake, ExternalWaitRepositoryError>;
@@ -1453,38 +1487,109 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 				return snapshot;
 			}).pipe(Effect.mapError(normalize_error));
 
+		const MarkSourceClosedWhere = (predicate: SQL, now: string) =>
+			RetrySqliteWrite(
+				database.client.transaction((transaction) =>
+					Effect.gen(function* () {
+						const [changed] = yield* transaction
+							.update(ExternalWaits)
+							.set({ source_closed_at: now })
+							.where(and(predicate, isNull(ExternalWaits.source_closed_at)))
+							.returning();
+
+						if (changed) {
+							return Option.some(yield* DecodeSnapshot(changed));
+						}
+
+						const [existing] = yield* transaction
+							.select()
+							.from(ExternalWaits)
+							.where(predicate)
+							.limit(1);
+
+						return existing
+							? Option.some(yield* DecodeSnapshot(existing))
+							: Option.none<ExternalWaitSnapshotValue>();
+					}),
+				),
+			).pipe(Effect.mapError(normalize_error));
+
 		const MarkSourceClosed = (input: typeof SourceClosure.Type) =>
 			Schema.decodeUnknownEffect(SourceClosure, { onExcessProperty: "error" })(input).pipe(
 				Effect.flatMap((decoded) =>
+					MarkSourceClosedWhere(eq(ExternalWaits.wait_id, decoded.wait_id), decoded.now),
+				),
+				Effect.mapError(normalize_error),
+			);
+
+		const MarkSourceClosedForRun = (input: typeof SourceRunClosure.Type) =>
+			Schema.decodeUnknownEffect(SourceRunClosure, { onExcessProperty: "error" })(input).pipe(
+				Effect.flatMap((decoded) =>
+					MarkSourceClosedWhere(
+						sql`
+							${ExternalWaits.source_run_id} = ${decoded.source_run_id}
+							AND json_extract(${ExternalWaits.owner_json}, '$._tag') = ${decoded.owner_tag}
+						`,
+						decoded.now,
+					),
+				),
+				Effect.mapError(normalize_error),
+			);
+
+		const ReconcileSourceClosures = (input: typeof TerminalSourceClosureRecovery.Type) =>
+			Schema.decodeUnknownEffect(TerminalSourceClosureRecovery, {
+				onExcessProperty: "error",
+			})(input).pipe(
+				Effect.flatMap((decoded) =>
 					RetrySqliteWrite(
-						database.client.transaction((transaction) =>
-							Effect.gen(function* () {
-								const [changed] = yield* transaction
-									.update(ExternalWaits)
-									.set({ source_closed_at: decoded.now })
-									.where(
-										and(
-											eq(ExternalWaits.wait_id, decoded.wait_id),
-											isNull(ExternalWaits.source_closed_at),
-										),
-									)
-									.returning();
+						database.client.transaction((transaction) => {
+							const TerminalOrdinarySource = transaction
+								.select({ run_id: OrchestrationRuns.run_id })
+								.from(OrchestrationRuns)
+								.where(
+									and(
+										eq(OrchestrationRuns.run_id, ExternalWaits.source_run_id),
+										inArray(OrchestrationRuns.status, [
+											"interrupted",
+											"completed",
+											"cancelled",
+											"failed",
+											"closed",
+										]),
+									),
+								);
+							const TerminalGraphSource = transaction
+								.select({ run_id: AgentRuns.run_id })
+								.from(AgentRuns)
+								.where(
+									and(
+										eq(AgentRuns.run_id, ExternalWaits.source_run_id),
+										inArray(AgentRuns.state, ["complete", "failed", "stopped"]),
+									),
+								);
+							const HasTerminalSourceRun = or(
+								and(
+									sql`json_extract(${ExternalWaits.owner_json}, '$._tag') = 'thread_run'`,
+									exists(TerminalOrdinarySource),
+								),
+								and(
+									sql`json_extract(${ExternalWaits.owner_json}, '$._tag') = 'assignment_run'`,
+									exists(TerminalGraphSource),
+								),
+							);
 
-								if (changed) {
-									return Option.some(yield* DecodeSnapshot(changed));
-								}
-
-								const [existing] = yield* transaction
-									.select()
-									.from(ExternalWaits)
-									.where(eq(ExternalWaits.wait_id, decoded.wait_id))
-									.limit(1);
-
-								return existing
-									? Option.some(yield* DecodeSnapshot(existing))
-									: Option.none<ExternalWaitSnapshotValue>();
-							}),
-						),
+							return transaction
+								.update(ExternalWaits)
+								.set({ source_closed_at: decoded.now })
+								.where(
+									and(
+										isNull(ExternalWaits.source_closed_at),
+										HasTerminalSourceRun,
+									),
+								)
+								.returning({ wait_id: ExternalWaits.wait_id })
+								.pipe(Effect.map((rows) => rows.map((row) => row.wait_id).sort()));
+						}),
 					),
 				),
 				Effect.mapError(normalize_error),
@@ -1521,10 +1626,11 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 
 		const MakeWake = (
 			transaction: typeof database.client,
-			decoded: typeof WakeInput.Type,
+			decoded: typeof WakeMutationInput.Type,
 			options: {
 				readonly allow_suspended: boolean;
 				readonly allow_woken_existing: boolean;
+				readonly observer_lease_owner?: string;
 			},
 		) =>
 			Effect.gen(function* () {
@@ -1554,12 +1660,28 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 					}
 
 					const stored = yield* DecodeWake(existing);
+					const requested_fingerprint = yield* HashText(
+						json({ trigger: decoded.trigger, wait_id: decoded.wait_id }),
+					);
+
+					if (stored.wake.trigger_fingerprint !== requested_fingerprint) {
+						return yield* new ExternalWaitUnavailable({ reason: "ownership" });
+					}
 
 					return {
 						published_snapshot: Option.none<ExternalWaitSnapshotValue>(),
 						result_snapshot: yield* DecodeSnapshot(row),
 						wake: stored.wake,
 					};
+				}
+
+				if (
+					options.observer_lease_owner !== undefined &&
+					(row.observer_lease_owner !== options.observer_lease_owner ||
+						row.observer_lease_expires_at === null ||
+						row.observer_lease_expires_at <= decoded.now)
+				) {
+					return yield* new ExternalWaitUnavailable({ reason: "lease_lost" });
 				}
 
 				if (
@@ -1578,6 +1700,21 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 					outbox_id: `external_wait_outbox_${trigger_fingerprint}`,
 					trigger_fingerprint,
 				};
+				const source_state =
+					options.observer_lease_owner === undefined
+						? eq(ExternalWaits.state, row.state)
+						: and(
+								eq(ExternalWaits.state, row.state),
+								eq(
+									ExternalWaits.observer_lease_owner,
+									options.observer_lease_owner,
+								),
+								eq(
+									ExternalWaits.observer_lease_expires_at,
+									row.observer_lease_expires_at!,
+								),
+								gt(ExternalWaits.observer_lease_expires_at, decoded.now),
+							);
 				const snapshot = yield* PersistVisibleUpdate(
 					transaction,
 					row,
@@ -1585,7 +1722,7 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 					decoded.now,
 					row.next_observation_at,
 					decoded.wait_id,
-					eq(ExternalWaits.state, row.state),
+					source_state,
 				);
 
 				yield* transaction.insert(ExternalWaitWakeOutbox).values({
@@ -1615,6 +1752,7 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 							MakeWake(transaction, decoded, {
 								allow_suspended: false,
 								allow_woken_existing: true,
+								observer_lease_owner: decoded.lease_owner,
 							}),
 						),
 					),
@@ -2300,7 +2438,9 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 			DiscoverWakes,
 			ManualResume,
 			MarkSourceClosed,
+			MarkSourceClosedForRun,
 			Query,
+			ReconcileSourceClosures,
 			RecordObservation,
 			Register,
 			ReleaseObservation,
