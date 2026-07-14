@@ -940,7 +940,7 @@ function git_shell_path(path: string) {
 }
 
 function clone_environment(
-	input: GitHubCliCloneInput,
+	input: Pick<GitHubCliCloneInput, "account_login" | "host">,
 	gh_path: string,
 	git_path: string,
 	path_service: Path.Path,
@@ -971,6 +971,38 @@ function clone_environment(
 		USERPROFILE: private_home,
 		XDG_CONFIG_HOME: path_service.join(private_home, "xdg"),
 	};
+}
+
+/** Builds a credential-isolated Git environment bound to one GitHub account and host. */
+export function make_github_git_transport_environment(
+	input: Pick<GitHubCliCloneInput, "account_login" | "host">,
+	options: {
+		readonly cwd: string;
+		readonly gh_executable_path: string;
+		readonly git_executable_path: string;
+		readonly path_service: Path.Path;
+		readonly private_home: string;
+	},
+) {
+	const gh_config_directory = github_cli_config_directory(
+		selected_environment(),
+		options.path_service,
+		options.cwd,
+	);
+
+	return gh_config_directory === undefined
+		? undefined
+		: {
+				...selected_environment(),
+				...clone_environment(
+					input,
+					options.gh_executable_path,
+					options.git_executable_path,
+					options.path_service,
+					options.private_home,
+					gh_config_directory,
+				),
+			};
 }
 
 function decode_text(value: Uint8Array) {
