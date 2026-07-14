@@ -48,6 +48,14 @@ import {
 	HostedGitSnapshotUpdatedEvent,
 } from "./hosted-git";
 import {
+	ExternalWaitCancelRequest,
+	ExternalWaitManualResumeRequest,
+	ExternalWaitQuery,
+	ExternalWaitQueryResult,
+	ExternalWaitRequest,
+	ExternalWaitUpdatedEvent,
+} from "./external-wait";
+import {
 	Identifier,
 	IsoDateTime,
 	JournalSequence,
@@ -947,6 +955,7 @@ export const EventPayload = Schema.Union([
 	WorkspaceGitMutationApprovalUpdatedEvent,
 	HostedProjectCloneApprovalUpdatedEvent,
 	HostedGitSnapshotUpdatedEvent,
+	ExternalWaitUpdatedEvent,
 	ThreadMessageQueuedEvent,
 	ThreadMessageSteeringEvent,
 	RunLifecycleEvent,
@@ -1295,6 +1304,55 @@ export const HostedGitSnapshotRefreshEnvelope = Schema.Struct({
 });
 
 export type HostedGitSnapshotRefreshEnvelope = typeof HostedGitSnapshotRefreshEnvelope.Type;
+
+/** Requests registration of one durable provider-neutral external wait. */
+export const ExternalWaitRequestEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("external_wait.request"),
+	payload: ExternalWaitRequest,
+	thread_id: Identifier,
+});
+
+export type ExternalWaitRequestEnvelope = typeof ExternalWaitRequestEnvelope.Type;
+
+/** Requests cancellation of one durable external wait. */
+export const ExternalWaitCancelEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("external_wait.cancel"),
+	payload: ExternalWaitCancelRequest,
+	thread_id: Identifier,
+});
+
+export type ExternalWaitCancelEnvelope = typeof ExternalWaitCancelEnvelope.Type;
+
+/** Requests a user-triggered resume of one durable external wait. */
+export const ExternalWaitManualResumeEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("external_wait.manual_resume"),
+	payload: ExternalWaitManualResumeRequest,
+	thread_id: Identifier,
+});
+
+export type ExternalWaitManualResumeEnvelope = typeof ExternalWaitManualResumeEnvelope.Type;
+
+/** Queries the durable external wait for one thread. */
+export const ExternalWaitQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("external_wait.query"),
+	payload: ExternalWaitQuery,
+});
+
+export type ExternalWaitQueryEnvelope = typeof ExternalWaitQueryEnvelope.Type;
+
+/** Returns the optional durable external wait for one correlated thread query. */
+export const ExternalWaitQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("external_wait.query.result"),
+	payload: ExternalWaitQueryResult,
+});
+
+export type ExternalWaitQueryResultEnvelope = typeof ExternalWaitQueryResultEnvelope.Type;
 
 /** Requests a guarded checkout of a workspace branch. */
 export const WorkspaceGitCheckoutRequestEnvelope = Schema.Struct({
@@ -1742,6 +1800,10 @@ export const InboundControlEnvelope = Schema.Union([
 	WorkspaceGitSessionRefreshEnvelope,
 	HostedGitSnapshotQueryEnvelope,
 	HostedGitSnapshotRefreshEnvelope,
+	ExternalWaitRequestEnvelope,
+	ExternalWaitCancelEnvelope,
+	ExternalWaitManualResumeEnvelope,
+	ExternalWaitQueryEnvelope,
 	WorkspaceGitCheckoutRequestEnvelope,
 	WorkspaceGitCheckoutApprovalQueryEnvelope,
 	WorkspaceGitCheckoutApprovalRespondEnvelope,
@@ -1787,6 +1849,7 @@ export const OutboundControlEnvelope = Schema.Union([
 	WorkspaceReplaceApprovalQueryResultEnvelope,
 	WorkspaceGitSessionQueryResultEnvelope,
 	HostedGitSnapshotQueryResultEnvelope,
+	ExternalWaitQueryResultEnvelope,
 	WorkspaceGitCheckoutApprovalQueryResultEnvelope,
 	WorkspaceGitMutationApprovalQueryResultEnvelope,
 	HostedProjectCloneApprovalQueryResultEnvelope,
