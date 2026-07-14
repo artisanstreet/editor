@@ -15,6 +15,7 @@ import type {
 	WorkspaceChange,
 	WorkspaceChangeDiffQueryResult,
 	WorkspaceFileReadQueryResult,
+	WorkspaceGitFetchQueryResult,
 	WorkspaceGitMutationApproval,
 } from "@artisan/protocol";
 import {
@@ -432,6 +433,10 @@ export const FixtureArtisanClientService = {
 		Effect.succeed({
 			journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
 		}),
+	GetWorkspaceGitFetch: Effect.succeed({
+		enabled: false,
+		workspaces: [],
+	} satisfies WorkspaceGitFetchQueryResult),
 	GetWorkspaceGitCheckoutApproval: (input) =>
 		Effect.gen(function* () {
 			return yield* FixtureFailure(
@@ -557,6 +562,10 @@ export const FixtureArtisanClientService = {
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-workspace-git-refresh");
 		}),
+	RequestWorkspaceGitFetch: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-workspace-git-fetch");
+		}),
 	RefreshHostedGitSnapshot: (input) =>
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-hosted-git-refresh");
@@ -643,6 +652,10 @@ export const FixtureArtisanClientService = {
 	UpdateThreadRetentionPolicy: (input) =>
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-retention-update");
+		}),
+	UpdateWorkspaceGitFetchPolicy: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-workspace-git-fetch-policy");
 		}),
 } satisfies typeof ArtisanClient.Service;
 

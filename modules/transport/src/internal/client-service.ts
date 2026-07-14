@@ -26,6 +26,9 @@ import {
 	type WorkspaceGitCheckoutApprovalQueryEnvelope,
 	type WorkspaceGitCheckoutApprovalRespondEnvelope,
 	type WorkspaceGitCheckoutRequestEnvelope,
+	type WorkspaceGitFetchPolicyUpdateEnvelope,
+	type WorkspaceGitFetchQueryEnvelope,
+	type WorkspaceGitFetchRequestEnvelope,
 	type WorkspaceGitMutationApprovalQuery,
 	type WorkspaceGitMutationApprovalQueryEnvelope,
 	type WorkspaceGitMutationApprovalRespondEnvelope,
@@ -81,6 +84,8 @@ import {
 	type ArtisanWorkspaceFileReplaceInput,
 	type ArtisanWorkspaceGitCheckoutApprovalResponseInput,
 	type ArtisanWorkspaceGitCheckoutInput,
+	type ArtisanWorkspaceGitFetchPolicyUpdateInput,
+	type ArtisanWorkspaceGitFetchRequestInput,
 	type ArtisanWorkspaceGitSessionInput,
 	type ArtisanWorkspaceGitSessionRefreshInput,
 	type ArtisanWorkspaceGitMutationApprovalResponseInput,
@@ -328,6 +333,22 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						? result.payload
 						: yield* Effect.die("workspace Git session response narrowed incorrectly");
 				});
+			const get_workspace_git_fetch = Effect.gen(function* () {
+				const trace = yield* connection.MakeTrace;
+				const envelope: WorkspaceGitFetchQueryEnvelope = {
+					...trace,
+					kind: "workspace.git.fetch.query",
+					payload: {},
+				};
+				const result = yield* requests.Request(
+					envelope,
+					"workspace.git.fetch.query.result",
+				);
+
+				return result.kind === "workspace.git.fetch.query.result"
+					? result.payload
+					: yield* Effect.die("workspace Git fetch response narrowed incorrectly");
+			});
 			const get_hosted_git_snapshot = (input: ArtisanHostedGitSnapshotInput) =>
 				Effect.gen(function* () {
 					const trace = yield* connection.MakeTrace;
@@ -454,6 +475,8 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				| WorkspaceGitCheckoutRequestEnvelope
 				| WorkspaceGitMutationApprovalRespondEnvelope
 				| WorkspaceGitMutationRequestEnvelope
+				| WorkspaceGitFetchPolicyUpdateEnvelope
+				| WorkspaceGitFetchRequestEnvelope
 				| WorkspaceGitSessionRefreshEnvelope
 				| HostedGitSnapshotRefreshEnvelope
 				| ExternalWaitCancelEnvelope
@@ -583,6 +606,33 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					const envelope: WorkspaceGitSessionRefreshEnvelope = {
 						...trace,
 						kind: "workspace.git.session.refresh",
+						message_id: input.command_id ?? trace.message_id,
+						payload: { workspace_id: input.workspace_id },
+						thread_id: input.thread_id,
+					};
+
+					return yield* send_workspace_mutation(envelope);
+				});
+			const update_workspace_git_fetch_policy = (
+				input: ArtisanWorkspaceGitFetchPolicyUpdateInput,
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: WorkspaceGitFetchPolicyUpdateEnvelope = {
+						...trace,
+						kind: "workspace.git.fetch.policy.update",
+						message_id: input.command_id ?? trace.message_id,
+						payload: { enabled: input.enabled },
+					};
+
+					return yield* send_workspace_mutation(envelope);
+				});
+			const request_workspace_git_fetch = (input: ArtisanWorkspaceGitFetchRequestInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: WorkspaceGitFetchRequestEnvelope = {
+						...trace,
+						kind: "workspace.git.fetch.request",
 						message_id: input.command_id ?? trace.message_id,
 						payload: { workspace_id: input.workspace_id },
 						thread_id: input.thread_id,
@@ -1065,6 +1115,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				GetWorkspaceChangeDiff: get_workspace_change_diff,
 				GetWorkspaceReplaceApproval: get_workspace_replace_approval,
 				GetWorkspaceGitSession: get_workspace_git_session,
+				GetWorkspaceGitFetch: get_workspace_git_fetch,
 				GetWorkspaceGitCheckoutApproval: get_workspace_git_checkout_approval,
 				GetWorkspaceGitMutationApproval: get_workspace_git_mutation_approval,
 				ListWorkspaceChanges: list_workspace_changes,
@@ -1080,6 +1131,8 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				ReplaceWorkspaceFile: replace_workspace_file,
 				RespondWorkspaceReplaceApproval: respond_workspace_replace_approval,
 				RefreshWorkspaceGitSession: refresh_workspace_git_session,
+				UpdateWorkspaceGitFetchPolicy: update_workspace_git_fetch_policy,
+				RequestWorkspaceGitFetch: request_workspace_git_fetch,
 				RefreshHostedGitSnapshot: refresh_hosted_git_snapshot,
 				RequestWorkspaceGitCheckout: request_workspace_git_checkout,
 				RequestWorkspaceGitMutation: request_workspace_git_mutation,

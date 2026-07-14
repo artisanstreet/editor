@@ -43,6 +43,7 @@ import type {
 	WorkspaceGitCheckoutApprovalQuery,
 	WorkspaceGitCheckoutApprovalQueryResult,
 	WorkspaceGitCheckoutRequest,
+	WorkspaceGitFetchQueryResult,
 	WorkspaceGitMutationApprovalQuery,
 	WorkspaceGitMutationApprovalQueryResult,
 	WorkspaceGitMutationContinuationOperation,
@@ -130,6 +131,19 @@ export interface ArtisanWorkspaceGitSessionInput extends WorkspaceGitSessionQuer
 
 /** Supplies a refresh command and optional durable retry identity. */
 export interface ArtisanWorkspaceGitSessionRefreshInput {
+	readonly command_id?: string;
+	readonly thread_id: string;
+	readonly workspace_id: string;
+}
+
+/** Supplies the global automatic-fetch policy and optional durable retry identity. */
+export interface ArtisanWorkspaceGitFetchPolicyUpdateInput {
+	readonly command_id?: string;
+	readonly enabled: boolean;
+}
+
+/** Supplies one thread-owned manual Git fetch and optional durable retry identity. */
+export interface ArtisanWorkspaceGitFetchRequestInput {
 	readonly command_id?: string;
 	readonly thread_id: string;
 	readonly workspace_id: string;
@@ -379,6 +393,10 @@ export class ArtisanClient extends Context.Service<
 		readonly GetWorkspaceGitSession: (
 			input: ArtisanWorkspaceGitSessionInput,
 		) => Effect.Effect<WorkspaceGitSessionQueryResult, ArtisanClientError>;
+		readonly GetWorkspaceGitFetch: Effect.Effect<
+			WorkspaceGitFetchQueryResult,
+			ArtisanClientError
+		>;
 		readonly GetHostedGitSnapshot: (
 			input: ArtisanHostedGitSnapshotInput,
 		) => Effect.Effect<HostedGitSnapshotQueryResult, ArtisanClientError>;
@@ -464,6 +482,12 @@ export class ArtisanClient extends Context.Service<
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly RefreshWorkspaceGitSession: (
 			input: ArtisanWorkspaceGitSessionRefreshInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly UpdateWorkspaceGitFetchPolicy: (
+			input: ArtisanWorkspaceGitFetchPolicyUpdateInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RequestWorkspaceGitFetch: (
+			input: ArtisanWorkspaceGitFetchRequestInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly RefreshHostedGitSnapshot: (
 			input: ArtisanHostedGitSnapshotRefreshInput,

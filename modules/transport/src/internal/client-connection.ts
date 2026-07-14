@@ -373,6 +373,7 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 					case "workspace.change.diff.query.result":
 					case "workspace.replace.approval.query.result":
 					case "workspace.git.session.query.result":
+					case "workspace.git.fetch.query.result":
 					case "hosted.git.snapshot.query.result":
 					case "hosted.git.check_failure_detail.query.result":
 					case "workspace.git.checkout.approval.query.result":

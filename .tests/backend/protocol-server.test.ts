@@ -22,6 +22,9 @@ import type {
 	WorkspaceChangeRollbackEnvelope,
 	WorkspaceFileReadQueryEnvelope,
 	WorkspaceFileReplaceEnvelope,
+	WorkspaceGitFetchPolicyUpdateEnvelope,
+	WorkspaceGitFetchQueryEnvelope,
+	WorkspaceGitFetchRequestEnvelope,
 	WorkspaceReplaceApprovalQueryEnvelope,
 	WorkspaceReplaceApprovalRespondEnvelope,
 } from "@artisan/protocol";
@@ -1699,6 +1702,121 @@ describe("protocol server", () => {
 					payload: { code: "protocol.invalid_ack", retryable: false },
 				})),
 			);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("routes global policy replay and source-safe manual Git fetch errors", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const fetch_query = (message_id: string): WorkspaceGitFetchQueryEnvelope => ({
+			kind: "workspace.git.fetch.query",
+			message_id,
+			origin: "frontend",
+			payload: {},
+			protocol_version: 1,
+			schema_version: 1,
+			sent_at: "2026-07-10T08:00:00.000Z",
+		});
+		const enable_fetch: WorkspaceGitFetchPolicyUpdateEnvelope = {
+			kind: "workspace.git.fetch.policy.update",
+			message_id: "fetch_policy_1",
+			origin: "frontend",
+			payload: { enabled: true },
+			protocol_version: 1,
+			schema_version: 1,
+			sent_at: "2026-07-10T08:00:00.000Z",
+		};
+		const missing_manual_fetch: WorkspaceGitFetchRequestEnvelope = {
+			kind: "workspace.git.fetch.request",
+			message_id: "fetch_manual_missing",
+			origin: "frontend",
+			payload: { workspace_id: "workspace_missing" },
+			protocol_version: 1,
+			schema_version: 1,
+			sent_at: "2026-07-10T08:00:00.000Z",
+			thread_id: "thread_missing",
+		};
+
+		try {
+			const output = await runtime.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const connection = yield* open_connection;
+
+						yield* negotiate(connection);
+						yield* connection.Receive(fetch_query("fetch_query_before"));
+						const before = yield* take_outbound(connection, 1);
+
+						yield* connection.Receive(enable_fetch);
+						const accepted = yield* take_outbound(connection, 2);
+
+						yield* connection.Receive(enable_fetch);
+						const duplicate = yield* take_outbound(connection, 1);
+
+						yield* connection.Receive(fetch_query("fetch_query_after"));
+						const after = yield* take_outbound(connection, 1);
+
+						yield* connection.Receive(missing_manual_fetch);
+						const rejected = yield* take_outbound(connection, 1);
+
+						return { accepted, after, before, duplicate, rejected };
+					}),
+				),
+			);
+
+			expect(output.before).toMatchObject([
+				{
+					correlation_id: "fetch_query_before",
+					kind: "workspace.git.fetch.query.result",
+					payload: { enabled: false, workspaces: [] },
+				},
+			]);
+			expect(output.accepted).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						correlation_id: "fetch_policy_1",
+						kind: "command.receipt",
+						payload: expect.objectContaining({ status: "accepted" }),
+						thread_id: "settings/git-fetch",
+					}),
+					expect.objectContaining({
+						correlation_id: "fetch_policy_1",
+						kind: "event",
+						payload: { enabled: true, type: "workspace.git.fetch.policy.updated" },
+					}),
+				]),
+			);
+			expect(output.duplicate).toMatchObject([
+				{
+					correlation_id: "fetch_policy_1",
+					kind: "command.receipt",
+					payload: { status: "duplicate" },
+					thread_id: "settings/git-fetch",
+				},
+			]);
+			expect(output.after).toMatchObject([
+				{
+					correlation_id: "fetch_query_after",
+					kind: "workspace.git.fetch.query.result",
+					payload: { enabled: true, workspaces: [] },
+				},
+			]);
+			expect(output.rejected).toMatchObject([
+				{
+					correlation_id: "fetch_manual_missing",
+					kind: "command.receipt",
+					payload: {
+						error: {
+							code: "workspace.git.fetch.unavailable",
+							retryable: false,
+						},
+						status: "rejected",
+					},
+					thread_id: "thread_missing",
+				},
+			]);
 		} finally {
 			await runtime.dispose();
 		}

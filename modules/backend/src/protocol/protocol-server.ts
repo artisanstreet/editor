@@ -69,6 +69,9 @@ import {
 	type WorkspaceGitCheckoutApprovalQueryEnvelope,
 	type WorkspaceGitCheckoutApprovalRespondEnvelope,
 	type WorkspaceGitCheckoutRequestEnvelope,
+	type WorkspaceGitFetchPolicyUpdateEnvelope,
+	type WorkspaceGitFetchQueryEnvelope,
+	type WorkspaceGitFetchRequestEnvelope,
 	type WorkspaceGitMutationApprovalQueryEnvelope,
 	type WorkspaceGitMutationApprovalRespondEnvelope,
 	type WorkspaceGitMutationRequestEnvelope,
@@ -130,6 +133,16 @@ import {
 	WorkspaceGitCheckoutRepository,
 	WorkspaceGitCheckoutUnavailable,
 } from "../git/workspace-git-checkout-repository";
+import {
+	WorkspaceGitFetchConflict,
+	WorkspaceGitFetchInvariant,
+	WorkspaceGitFetchUnavailable,
+	workspace_git_fetch_thread_id,
+} from "../git/workspace-git-fetch-repository";
+import {
+	WorkspaceGitFetchService,
+	WorkspaceGitFetchServiceFailure,
+} from "../git/workspace-git-fetch-service";
 import {
 	WorkspaceGitMutationCoordinator,
 	WorkspaceGitMutationCoordinatorFailure,
@@ -532,6 +545,46 @@ function workspace_git_checkout_error_detail(error: unknown): ProtocolErrorDetai
 	}
 
 	return workspace_git_session_error_detail(error);
+}
+
+function workspace_git_fetch_error_detail(error: unknown): ProtocolErrorDetail {
+	if (error instanceof WorkspaceGitFetchServiceFailure) {
+		return {
+			code: "workspace.git.fetch.invalid_request",
+			message: "The Git fetch request is invalid.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof WorkspaceGitFetchConflict) {
+		return {
+			code: `workspace.git.fetch.${error.reason}`,
+			message: "The Git fetch request conflicts with its durable intent.",
+			retryable: error.reason === "claim_conflict",
+		};
+	}
+
+	if (error instanceof WorkspaceGitFetchUnavailable) {
+		return {
+			code: "workspace.git.fetch.unavailable",
+			message: "The Git fetch workspace is no longer available.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof WorkspaceGitFetchInvariant) {
+		return {
+			code: "workspace.git.fetch.invariant_failed",
+			message: "The durable Git fetch state failed validation.",
+			retryable: false,
+		};
+	}
+
+	return {
+		code: "workspace.git.fetch.unavailable",
+		message: "The Git fetch request could not be durably reconciled.",
+		retryable: true,
+	};
 }
 
 function workspace_git_mutation_error_detail(error: unknown): ProtocolErrorDetail {
@@ -988,6 +1041,7 @@ export function make_protocol_server_layer(
 			const workspace_git_mutations = yield* WorkspaceGitMutationCoordinator;
 			const workspace_git_mutation_repository = yield* WorkspaceGitMutationRepository;
 			const workspace_git_sessions = yield* WorkspaceGitSessionService;
+			const workspace_git_fetches = yield* WorkspaceGitFetchService;
 
 			const Open = Effect.gen(function* () {
 				const connection_scope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
@@ -1747,6 +1801,41 @@ export function make_protocol_server_layer(
 						),
 						Effect.catch((error) => {
 							const detail = workspace_git_session_error_detail(error);
+
+							return EnqueueError(
+								current,
+								detail.code,
+								detail.message,
+								detail.retryable,
+								query.message_id,
+							);
+						}),
+					);
+
+				const HandleWorkspaceGitFetchQuery = (
+					query: WorkspaceGitFetchQueryEnvelope,
+					current: ReadyState,
+				) =>
+					workspace_git_fetches.Query.pipe(
+						Effect.flatMap((result) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "workspace.git.fetch.query.result",
+									message_id,
+									origin: "backend",
+									payload: result,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch((error) => {
+							const detail = workspace_git_fetch_error_detail(error);
 
 							return EnqueueError(
 								current,
@@ -2683,6 +2772,83 @@ export function make_protocol_server_layer(
 					| WorkspaceGitMutationRequestEnvelope
 					| HostedGitSnapshotRefreshEnvelope
 					| WorkspaceGitSessionRefreshEnvelope;
+				type WorkspaceGitFetchEnvelope =
+					| WorkspaceGitFetchPolicyUpdateEnvelope
+					| WorkspaceGitFetchRequestEnvelope;
+				const HandleWorkspaceGitFetchMutation = (envelope: WorkspaceGitFetchEnvelope) => {
+					const operation: Effect.Effect<
+						{
+							readonly event: EventEnvelope;
+							readonly status: "accepted" | "duplicate";
+						},
+						unknown
+					> =
+						envelope.kind === "workspace.git.fetch.policy.update"
+							? workspace_git_fetches.UpdatePolicy({
+									enabled: envelope.payload.enabled,
+									message_id: envelope.message_id,
+									sent_at: envelope.sent_at,
+								})
+							: workspace_git_fetches.Request({
+									message_id: envelope.message_id,
+									sent_at: envelope.sent_at,
+									thread_id: envelope.thread_id,
+									workspace_id: envelope.payload.workspace_id,
+								});
+
+					return operation.pipe(
+						Effect.matchEffect({
+							onFailure: (error) => {
+								const detail = workspace_git_fetch_error_detail(error);
+
+								return Effect.gen(function* () {
+									const message_id = yield* metadata.MakeId("message");
+									const sent_at = yield* metadata.Now;
+
+									yield* Enqueue({
+										causation_id: envelope.message_id,
+										correlation_id: envelope.message_id,
+										kind: "command.receipt",
+										message_id,
+										origin: "backend",
+										payload: { error: detail, status: "rejected" },
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at,
+										thread_id:
+											envelope.kind === "workspace.git.fetch.policy.update"
+												? workspace_git_fetch_thread_id
+												: envelope.thread_id,
+									});
+								});
+							},
+							onSuccess: (acceptance) =>
+								Effect.gen(function* () {
+									const message_id = yield* metadata.MakeId("message");
+									const sent_at = yield* metadata.Now;
+
+									yield* Enqueue({
+										causation_id: envelope.message_id,
+										correlation_id: envelope.message_id,
+										kind: "command.receipt",
+										message_id,
+										origin: "backend",
+										payload: {
+											journal_sequence: acceptance.event.journal_sequence,
+											status: acceptance.status,
+										},
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at,
+										thread_id:
+											envelope.kind === "workspace.git.fetch.policy.update"
+												? workspace_git_fetch_thread_id
+												: envelope.thread_id,
+									});
+								}),
+						}),
+					);
+				};
 				const HandleWorkspaceGitMutation = (envelope: WorkspaceGitMutationEnvelope) => {
 					const operation: Effect.Effect<
 						{
@@ -2834,6 +3000,8 @@ export function make_protocol_server_layer(
 							return HandleWorkspaceReplaceApprovalResponse(envelope);
 						case "workspace.git.session.query":
 							return HandleWorkspaceGitSessionQuery(envelope, current);
+						case "workspace.git.fetch.query":
+							return HandleWorkspaceGitFetchQuery(envelope, current);
 						case "hosted.git.snapshot.query":
 							return HandleHostedGitSnapshotQuery(envelope, current);
 						case "hosted.git.check_failure_detail.query":
@@ -2850,11 +3018,16 @@ export function make_protocol_server_layer(
 						case "hosted.project.clone.approval.respond":
 						case "hosted.git.snapshot.refresh":
 						case "workspace.git.session.refresh":
+						case "workspace.git.fetch.policy.update":
+						case "workspace.git.fetch.request":
 						case "workspace.git.checkout.request":
 						case "workspace.git.checkout.approval.respond":
 						case "workspace.git.mutation.request":
 						case "workspace.git.mutation.approval.respond":
-							return HandleWorkspaceGitMutation(envelope);
+							return envelope.kind === "workspace.git.fetch.policy.update" ||
+								envelope.kind === "workspace.git.fetch.request"
+								? HandleWorkspaceGitFetchMutation(envelope)
+								: HandleWorkspaceGitMutation(envelope);
 						case "external_wait.request":
 						case "external_wait.cancel":
 						case "external_wait.manual_resume":

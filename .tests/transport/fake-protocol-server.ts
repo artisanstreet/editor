@@ -47,6 +47,9 @@ import {
 	type WorkspaceGitCheckoutApprovalQueryEnvelope,
 	type WorkspaceGitCheckoutApprovalRespondEnvelope,
 	type WorkspaceGitCheckoutRequestEnvelope,
+	type WorkspaceGitFetchPolicyUpdateEnvelope,
+	type WorkspaceGitFetchQueryEnvelope,
+	type WorkspaceGitFetchRequestEnvelope,
 	type WorkspaceGitMutationApproval,
 	type WorkspaceGitMutationApprovalQueryEnvelope,
 	type WorkspaceGitMutationApprovalRespondEnvelope,
@@ -108,6 +111,7 @@ interface LiveConnection {
 export interface FakeProtocolOptions {
 	readonly duplicate_query_result?: boolean;
 	readonly drop_first_hosted_git_check_failure_detail_result?: boolean;
+	readonly drop_first_workspace_git_fetch_result?: boolean;
 	readonly heartbeat_after_welcome?: boolean;
 	readonly query_delay_ms?: number;
 }
@@ -149,6 +153,9 @@ export interface FakeProtocolSnapshot {
 	readonly workspace_replace_approval_query_attempts: ReadonlyArray<WorkspaceReplaceApprovalQueryEnvelope>;
 	readonly workspace_replace_approval_response_attempts: ReadonlyArray<WorkspaceReplaceApprovalRespondEnvelope>;
 	readonly workspace_git_session_query_attempts: ReadonlyArray<WorkspaceGitSessionQueryEnvelope>;
+	readonly workspace_git_fetch_query_attempts: ReadonlyArray<WorkspaceGitFetchQueryEnvelope>;
+	readonly workspace_git_fetch_policy_update_attempts: ReadonlyArray<WorkspaceGitFetchPolicyUpdateEnvelope>;
+	readonly workspace_git_fetch_request_attempts: ReadonlyArray<WorkspaceGitFetchRequestEnvelope>;
 	readonly workspace_git_checkout_approval_query_attempts: ReadonlyArray<WorkspaceGitCheckoutApprovalQueryEnvelope>;
 	readonly workspace_git_mutation_approval_query_attempts: ReadonlyArray<WorkspaceGitMutationApprovalQueryEnvelope>;
 	readonly workspace_git_mutation_attempts: ReadonlyArray<
@@ -232,6 +239,12 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 	const workspace_replace_approval_response_attempts: Array<WorkspaceReplaceApprovalRespondEnvelope> =
 		[];
 	const workspace_git_session_query_attempts: Array<WorkspaceGitSessionQueryEnvelope> = [];
+	const workspace_git_fetch_query_attempts: Array<WorkspaceGitFetchQueryEnvelope> = [];
+	const workspace_git_fetch_policy_update_attempts: Array<WorkspaceGitFetchPolicyUpdateEnvelope> =
+		[];
+	const workspace_git_fetch_policy_updates = new Map<string, number>();
+	const workspace_git_fetch_request_attempts: Array<WorkspaceGitFetchRequestEnvelope> = [];
+	const workspace_git_fetch_requests = new Map<string, number>();
 	const workspace_git_checkout_approval_query_attempts: Array<WorkspaceGitCheckoutApprovalQueryEnvelope> =
 		[];
 	const workspace_git_mutation_approval_query_attempts: Array<WorkspaceGitMutationApprovalQueryEnvelope> =
@@ -1302,6 +1315,71 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 					},
 				});
 			});
+		const handle_workspace_git_fetch_query = (query: WorkspaceGitFetchQueryEnvelope) =>
+			Effect.gen(function* () {
+				workspace_git_fetch_query_attempts.push(query);
+
+				if (
+					options.drop_first_workspace_git_fetch_result &&
+					workspace_git_fetch_query_attempts.length === 1
+				) {
+					yield* close;
+
+					return;
+				}
+
+				yield* enqueue({
+					...backend_trace(),
+					correlation_id: query.message_id,
+					kind: "workspace.git.fetch.query.result",
+					payload: {
+						enabled: false,
+						workspaces: [{ workspace_id: "workspace_git_fixture" }],
+					},
+				});
+			});
+		const handle_workspace_git_fetch_policy_update = (
+			update: WorkspaceGitFetchPolicyUpdateEnvelope,
+		) =>
+			Effect.gen(function* () {
+				workspace_git_fetch_policy_update_attempts.push(update);
+				const journal_sequence =
+					workspace_git_fetch_policy_updates.get(update.message_id) ?? events.length + 1;
+				const status = workspace_git_fetch_policy_updates.has(update.message_id)
+					? ("duplicate" as const)
+					: ("accepted" as const);
+
+				workspace_git_fetch_policy_updates.set(update.message_id, journal_sequence);
+
+				yield* enqueue({
+					...backend_trace(),
+					causation_id: update.message_id,
+					correlation_id: update.message_id,
+					kind: "command.receipt",
+					payload: { journal_sequence, status },
+					thread_id: "settings/git-fetch",
+				});
+			});
+		const handle_workspace_git_fetch_request = (request: WorkspaceGitFetchRequestEnvelope) =>
+			Effect.gen(function* () {
+				workspace_git_fetch_request_attempts.push(request);
+				const journal_sequence =
+					workspace_git_fetch_requests.get(request.message_id) ?? events.length + 1;
+				const status = workspace_git_fetch_requests.has(request.message_id)
+					? ("duplicate" as const)
+					: ("accepted" as const);
+
+				workspace_git_fetch_requests.set(request.message_id, journal_sequence);
+
+				yield* enqueue({
+					...backend_trace(),
+					causation_id: request.message_id,
+					correlation_id: request.message_id,
+					kind: "command.receipt",
+					payload: { journal_sequence, status },
+					thread_id: request.thread_id,
+				});
+			});
 		const handle_hosted_git_snapshot_query = (query: HostedGitSnapshotQueryEnvelope) =>
 			Effect.gen(function* () {
 				hosted_git_snapshot_query_attempts.push(query);
@@ -1804,6 +1882,18 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 						yield* handle_workspace_git_session_query(input);
 
 						return;
+					case "workspace.git.fetch.query":
+						yield* handle_workspace_git_fetch_query(input);
+
+						return;
+					case "workspace.git.fetch.policy.update":
+						yield* handle_workspace_git_fetch_policy_update(input);
+
+						return;
+					case "workspace.git.fetch.request":
+						yield* handle_workspace_git_fetch_request(input);
+
+						return;
 					case "hosted.git.snapshot.query":
 						yield* handle_hosted_git_snapshot_query(input);
 
@@ -2018,6 +2108,9 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 			...workspace_replace_approval_response_attempts,
 		],
 		workspace_git_session_query_attempts: [...workspace_git_session_query_attempts],
+		workspace_git_fetch_query_attempts: [...workspace_git_fetch_query_attempts],
+		workspace_git_fetch_policy_update_attempts: [...workspace_git_fetch_policy_update_attempts],
+		workspace_git_fetch_request_attempts: [...workspace_git_fetch_request_attempts],
 		workspace_git_checkout_approval_query_attempts: [
 			...workspace_git_checkout_approval_query_attempts,
 		],
