@@ -9,6 +9,9 @@ import {
 	AgentRuns,
 	Assignments,
 	EventStreams,
+	ExternalWaitOperations,
+	ExternalWaits,
+	ExternalWaitWakeOutbox,
 	HostedProjectCloneApprovals,
 	HostedProjectCloneArtifacts,
 	HostedProjectCloneClaims,
@@ -117,6 +120,20 @@ export const ThreadErasureLive = Layer.effect(
 			"executing",
 			"outcome_unknown",
 		]);
+		const IsPendingExternalWait = or(
+			inArray(ExternalWaits.state, ["waiting", "wake_pending", "suspended"]),
+			exists(
+				database.client
+					.select({ outbox_id: ExternalWaitWakeOutbox.outbox_id })
+					.from(ExternalWaitWakeOutbox)
+					.where(
+						and(
+							eq(ExternalWaitWakeOutbox.wait_id, ExternalWaits.wait_id),
+							inArray(ExternalWaitWakeOutbox.state, ["pending", "claimed"]),
+						),
+					),
+			),
+		);
 
 		const ClaimExpired = (cutoff: string, claimed_at: string) =>
 			database.client
@@ -201,6 +218,22 @@ export const ThreadErasureLive = Layer.effect(
 															Threads.thread_id,
 														),
 														IsPendingHostedProjectClone,
+													),
+												),
+										),
+									),
+									not(
+										exists(
+											database.client
+												.select({ wait_id: ExternalWaits.wait_id })
+												.from(ExternalWaits)
+												.where(
+													and(
+														eq(
+															ExternalWaits.thread_id,
+															Threads.thread_id,
+														),
+														IsPendingExternalWait,
 													),
 												),
 										),
@@ -308,6 +341,22 @@ export const ThreadErasureLive = Layer.effect(
 							.limit(1);
 
 						if (pending_hosted_project_clone) {
+							yield* transaction
+								.delete(ThreadErasureClaims)
+								.where(eq(ThreadErasureClaims.thread_id, thread_id));
+
+							return undefined;
+						}
+
+						const [pending_external_wait] = yield* transaction
+							.select({ wait_id: ExternalWaits.wait_id })
+							.from(ExternalWaits)
+							.where(
+								and(eq(ExternalWaits.thread_id, thread_id), IsPendingExternalWait),
+							)
+							.limit(1);
+
+						if (pending_external_wait) {
 							yield* transaction
 								.delete(ThreadErasureClaims)
 								.where(eq(ThreadErasureClaims.thread_id, thread_id));
@@ -484,6 +533,28 @@ export const ThreadErasureLive = Layer.effect(
 						yield* transaction
 							.delete(HostedGitSnapshotOperations)
 							.where(eq(HostedGitSnapshotOperations.thread_id, thread_id));
+						yield* transaction.delete(ExternalWaitWakeOutbox).where(
+							exists(
+								transaction
+									.select({ wait_id: ExternalWaits.wait_id })
+									.from(ExternalWaits)
+									.where(
+										and(
+											eq(ExternalWaits.thread_id, thread_id),
+											eq(
+												ExternalWaits.wait_id,
+												ExternalWaitWakeOutbox.wait_id,
+											),
+										),
+									),
+							),
+						);
+						yield* transaction
+							.delete(ExternalWaitOperations)
+							.where(eq(ExternalWaitOperations.thread_id, thread_id));
+						yield* transaction
+							.delete(ExternalWaits)
+							.where(eq(ExternalWaits.thread_id, thread_id));
 						yield* transaction
 							.delete(WorkspaceMutationPayloads)
 							.where(eq(WorkspaceMutationPayloads.thread_id, thread_id));

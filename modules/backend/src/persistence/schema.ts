@@ -1629,3 +1629,177 @@ export const HostedGitSnapshotOperations = sqliteTable(
 		),
 	],
 );
+
+/** Stores private baselines alongside the source-free projection of one external wait. */
+export const ExternalWaits = sqliteTable(
+	"external_waits",
+	{
+		wait_id: text("wait_id").primaryKey(),
+		thread_id: text("thread_id").notNull(),
+		project_id: text("project_id")
+			.notNull()
+			.references(() => Projects.project_id, { onDelete: "restrict" }),
+		workspace_id: text("workspace_id").notNull(),
+		source_run_id: text("source_run_id").notNull(),
+		owner_json: text("owner_json").notNull(),
+		target_json: text("target_json").notNull(),
+		gates_json: text("gates_json").notNull(),
+		baseline_json: text("baseline_json").notNull(),
+		baseline_fingerprint: text("baseline_fingerprint").notNull(),
+		request_fingerprint: text("request_fingerprint").notNull(),
+		state: text("state").notNull(),
+		state_json: text("state_json").notNull(),
+		generation: integer("generation").notNull().default(1),
+		maximum_generation: integer("maximum_generation").notNull().default(3),
+		next_observation_at: text("next_observation_at").notNull(),
+		timeout_at: text("timeout_at").notNull(),
+		observer_lease_owner: text("observer_lease_owner"),
+		observer_lease_expires_at: text("observer_lease_expires_at"),
+		source_closed_at: text("source_closed_at"),
+		version: integer("version").notNull(),
+		journal_sequence: integer("journal_sequence").notNull(),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("external_waits_source_run_unique").on(table.source_run_id),
+		index("external_waits_thread_index").on(table.thread_id, table.updated_at, table.wait_id),
+		index("external_waits_observation_index").on(
+			table.state,
+			table.next_observation_at,
+			table.observer_lease_expires_at,
+		),
+		check(
+			"external_waits_fingerprint_check",
+			sql`
+			length(${table.baseline_fingerprint}) = 64
+			AND ${table.baseline_fingerprint} NOT GLOB '*[^0-9a-f]*'
+			AND length(${table.request_fingerprint}) = 64
+			AND ${table.request_fingerprint} NOT GLOB '*[^0-9a-f]*'
+		`,
+		),
+		check(
+			"external_waits_generation_check",
+			sql`
+			${table.generation} >= 1
+			AND ${table.maximum_generation} >= ${table.generation}
+			AND ${table.maximum_generation} <= 10
+		`,
+		),
+		check(
+			"external_waits_version_sequence_check",
+			sql`${table.version} >= 1 AND ${table.journal_sequence} >= 1`,
+		),
+		check(
+			"external_waits_state_check",
+			sql`${table.state} IN ('waiting', 'wake_pending', 'woken', 'suspended', 'cancelled', 'exhausted')`,
+		),
+		check(
+			"external_waits_observer_lease_check",
+			sql`
+			(
+				${table.observer_lease_owner} IS NULL
+				AND ${table.observer_lease_expires_at} IS NULL
+			)
+			OR (
+				${table.observer_lease_owner} IS NOT NULL
+				AND ${table.observer_lease_expires_at} IS NOT NULL
+			)
+		`,
+		),
+	],
+);
+
+/** Binds exact external-wait source commands to their durable public result. */
+export const ExternalWaitOperations = sqliteTable(
+	"external_wait_operations",
+	{
+		operation_id: text("operation_id").primaryKey(),
+		source_command_id: text("source_command_id").notNull(),
+		kind: text("kind").notNull(),
+		wait_id: text("wait_id")
+			.notNull()
+			.references(() => ExternalWaits.wait_id, { onDelete: "cascade" }),
+		thread_id: text("thread_id").notNull(),
+		request_fingerprint: text("request_fingerprint").notNull(),
+		sent_at: text("sent_at").notNull(),
+		result_snapshot_json: text("result_snapshot_json").notNull(),
+		journal_sequence: integer("journal_sequence").notNull(),
+	},
+	(table) => [
+		uniqueIndex("external_wait_operations_source_command_unique").on(table.source_command_id),
+		index("external_wait_operations_wait_index").on(table.wait_id),
+		check(
+			"external_wait_operations_fingerprint_check",
+			sql`length(${table.request_fingerprint}) = 64 AND ${table.request_fingerprint} NOT GLOB '*[^0-9a-f]*'`,
+		),
+		check(
+			"external_wait_operations_kind_check",
+			sql`${table.kind} IN ('request', 'cancel', 'manual_resume')`,
+		),
+	],
+);
+
+/** Queues exactly one deterministic follow-up command for each wake trigger. */
+export const ExternalWaitWakeOutbox = sqliteTable(
+	"external_wait_wake_outbox",
+	{
+		outbox_id: text("outbox_id").primaryKey(),
+		wait_id: text("wait_id")
+			.notNull()
+			.references(() => ExternalWaits.wait_id, { onDelete: "cascade" }),
+		trigger_fingerprint: text("trigger_fingerprint").notNull(),
+		follow_up_command_id: text("follow_up_command_id").notNull(),
+		follow_up_run_id: text("follow_up_run_id").notNull(),
+		mode: text("mode"),
+		state: text("state").notNull(),
+		lease_owner: text("lease_owner"),
+		lease_expires_at: text("lease_expires_at"),
+		trigger_json: text("trigger_json").notNull(),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("external_wait_wake_outbox_wait_unique").on(table.wait_id),
+		uniqueIndex("external_wait_wake_outbox_command_unique").on(table.follow_up_command_id),
+		uniqueIndex("external_wait_wake_outbox_run_unique").on(table.follow_up_run_id),
+		index("external_wait_wake_outbox_state_index").on(table.state, table.lease_expires_at),
+		check(
+			"external_wait_wake_outbox_fingerprint_check",
+			sql`length(${table.trigger_fingerprint}) = 64 AND ${table.trigger_fingerprint} NOT GLOB '*[^0-9a-f]*'`,
+		),
+		check(
+			"external_wait_wake_outbox_state_check",
+			sql`${table.state} IN ('pending', 'claimed', 'settled', 'cancelled')`,
+		),
+		check(
+			"external_wait_wake_outbox_mode_check",
+			sql`
+			(
+				${table.state} = 'pending'
+				AND ${table.mode} IS NULL
+				AND ${table.lease_owner} IS NULL
+				AND ${table.lease_expires_at} IS NULL
+			)
+			OR (
+				${table.state} = 'claimed'
+				AND ${table.mode} IS NULL
+				AND ${table.lease_owner} IS NOT NULL
+				AND ${table.lease_expires_at} IS NOT NULL
+			)
+			OR (
+				${table.state} = 'settled'
+				AND ${table.mode} IN ('native_resume', 'linked_run')
+				AND ${table.lease_owner} IS NULL
+				AND ${table.lease_expires_at} IS NULL
+			)
+			OR (
+				${table.state} = 'cancelled'
+				AND ${table.mode} IS NULL
+				AND ${table.lease_owner} IS NULL
+				AND ${table.lease_expires_at} IS NULL
+			)
+		`,
+		),
+	],
+);
