@@ -1,4 +1,4 @@
-import { Context, Data, Effect } from "effect";
+import { Context, Data, Effect, Layer } from "effect";
 
 /** Identifies the exact provider account permitted to authenticate one child Git invocation. */
 export interface GitTransportAuthenticationRequest {
@@ -41,3 +41,9 @@ export class GitTransportAuthentication extends Context.Service<
 		>;
 	}
 >()("Artisan/GitTransportAuthentication") {}
+
+/** Keeps provider-authenticated Git transport explicitly unavailable in portable runtimes. */
+export const UnavailableGitTransportAuthenticationLive = Layer.succeed(GitTransportAuthentication, {
+	WithAuthorization: () =>
+		Effect.fail(new GitTransportAuthenticationError({ reason: "unsupported_provider" })),
+} satisfies typeof GitTransportAuthentication.Service);

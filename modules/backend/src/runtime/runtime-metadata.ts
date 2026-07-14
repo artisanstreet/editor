@@ -9,6 +9,7 @@ export type RuntimeIdPrefix =
 	| "claim"
 	| "connection"
 	| "event"
+	| "fetch"
 	| "heartbeat"
 	| "message"
 	| "run"

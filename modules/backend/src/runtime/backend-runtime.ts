@@ -37,6 +37,10 @@ import { WorkspaceGitMutationRepositoryLive } from "../git/workspace-git-mutatio
 import { WorkspaceGitMutationCoordinatorLive } from "../git/workspace-git-mutation-coordinator";
 import { GitProvider } from "../git-provider/git-provider";
 import {
+	GitTransportAuthentication,
+	UnavailableGitTransportAuthenticationLive,
+} from "../git-provider/git-transport-authentication";
+import {
 	ExternalWaitCoordinatorLive,
 	ExternalWaitScheduler,
 	ExternalWaitSchedulerLive,
@@ -63,6 +67,7 @@ import {
 	make_node_github_cli_git_executable_layer,
 } from "../git-provider/github/github-cli-executable";
 import { make_github_provider_layer } from "../git-provider/github/github-provider";
+import { make_github_git_transport_authentication_layer } from "../git-provider/github/github-transport-authentication";
 import { make_database_layer } from "../persistence/database";
 import { JournalNotifierLive } from "../persistence/journal-notifier";
 import { JournalStoreLive } from "../persistence/journal-store";
@@ -154,6 +159,7 @@ export interface BackendOptions {
 	readonly external_wait_dispatch_scheduler?: Layer.Layer<ExternalWaitDispatchScheduler>;
 	readonly external_wait_scheduler?: Layer.Layer<ExternalWaitScheduler>;
 	readonly git_provider_registry?: Layer.Layer<GitProviderRegistry, GitProviderRegistryError>;
+	readonly git_transport_authentication?: Layer.Layer<GitTransportAuthentication>;
 	readonly guidance?: Partial<GlobalGuidanceServiceOptions>;
 	readonly guidance_provider_registry?: Layer.Layer<GuidanceProviderRegistry>;
 	readonly hosted_project_clone_destination?: Layer.Layer<HostedProjectCloneDestination>;
@@ -266,6 +272,8 @@ export function make_backend_layer(options: BackendOptions) {
 		EmptyWorkspaceBoundedRegularFileStoreRegistryLive;
 	const workspace_git_registry = options.workspace_git_registry ?? EmptyWorkspaceGitRegistryLive;
 	const git_provider_registry = options.git_provider_registry ?? EmptyGitProviderRegistryLive;
+	const git_transport_authentication =
+		options.git_transport_authentication ?? UnavailableGitTransportAuthenticationLive;
 	const workspace_git_observer = WorkspaceGitObserverLive.pipe(
 		Layer.provideMerge(NodeFileSystem.layer),
 		Layer.provideMerge(workspace_git_registry),
@@ -520,6 +528,7 @@ export function make_backend_layer(options: BackendOptions) {
 		workspace_git_mutations_repository,
 		workspace_git_observer,
 		workspace_git_registry,
+		git_transport_authentication,
 		workspace_git_sessions,
 		workspace_git_sessions_repository,
 		hosted_git_snapshots,
@@ -659,6 +668,26 @@ function make_desktop_git_provider_registry(options: DesktopBackendOptions) {
 	return Layer.effect(GitProviderRegistry, BuildRegistry);
 }
 
+function make_desktop_git_transport_authentication(options: DesktopBackendOptions) {
+	const platform = options.git_provider_platform ?? {};
+	const cwd = dirname(options.database_path);
+	const executable = make_node_github_cli_executable_layer({
+		...(platform.command === undefined ? {} : { command: platform.command }),
+		cwd,
+	});
+	const git_executable = make_node_github_cli_git_executable_layer({
+		...(platform.git_command === undefined ? {} : { command: platform.git_command }),
+		cwd,
+	});
+
+	return make_github_git_transport_authentication_layer({ cwd }).pipe(
+		Layer.provideMerge(NodeFileSystem.layer),
+		Layer.provideMerge(NodePath.layer),
+		Layer.provideMerge(executable),
+		Layer.provideMerge(git_executable),
+	);
+}
+
 function make_desktop_hosted_project_clone_destination(options: DesktopBackendOptions) {
 	const projects_root = options.git_provider_platform?.projects_root;
 
@@ -673,6 +702,9 @@ export function make_desktop_backend_layer(options: DesktopBackendOptions) {
 		...options,
 		git_provider_registry:
 			options.git_provider_registry ?? make_desktop_git_provider_registry(options),
+		git_transport_authentication:
+			options.git_transport_authentication ??
+			make_desktop_git_transport_authentication(options),
 		hosted_project_clone_destination:
 			options.hosted_project_clone_destination ??
 			make_desktop_hosted_project_clone_destination(options),
