@@ -1,5 +1,5 @@
 import { asc, desc, eq, or } from "drizzle-orm";
-import { Context, Data, Effect, Layer, Schema } from "effect";
+import { Context, Data, Effect, Layer, Option, Schema } from "effect";
 
 import {
 	EventEnvelope,
@@ -73,7 +73,7 @@ const PrivateWorktree = Schema.Struct({
 });
 
 const ProjectObservation = Schema.Struct({
-	kind: Schema.Literals(["refresh", "checkout", "recovery"]),
+	kind: Schema.Literals(["refresh", "checkout", "recovery", "mutation"]),
 	observed_at: IsoDateTime,
 	operation_id: Identifier,
 	repository_root: Schema.optional(PrivatePath),
@@ -84,6 +84,14 @@ const ProjectObservation = Schema.Struct({
 	thread_id: Identifier,
 	workspace_id: Identifier,
 	worktrees: Schema.Array(PrivateWorktree),
+});
+
+const ReplayProjection = Schema.Struct({
+	kind: Schema.Literals(["checkout", "recovery", "mutation"]),
+	operation_id: Identifier,
+	request_fingerprint: RequestFingerprint,
+	thread_id: Identifier,
+	workspace_id: Identifier,
 });
 
 /** Supplies one complete private observation and its source-free public projection. */
@@ -156,6 +164,12 @@ export class WorkspaceGitSessionRepository extends Context.Service<
 		readonly Query: (
 			query: typeof WorkspaceGitSessionQuery.Type,
 		) => Effect.Effect<WorkspaceGitSessionQueryResultValue, WorkspaceGitSessionRepositoryError>;
+		readonly Replay: (
+			input: typeof ReplayProjection.Type,
+		) => Effect.Effect<
+			Option.Option<WorkspaceGitSessionAcceptance>,
+			WorkspaceGitSessionRepositoryError
+		>;
 	}
 >()("Artisan/WorkspaceGitSessionRepository") {}
 
@@ -1011,6 +1025,123 @@ export const WorkspaceGitSessionRepositoryLive = Layer.effect(
 					Effect.mapError(() => invariant("Pending Git evidence checkpoint is corrupt")),
 				);
 			});
+		const Replay = (input: typeof ReplayProjection.Type) =>
+			Schema.decodeUnknownEffect(ReplayProjection, { onExcessProperty: "error" })(input).pipe(
+				Effect.mapError(
+					() => new WorkspaceGitSessionConflict({ reason: "operation_conflict" }),
+				),
+				Effect.flatMap((decoded) =>
+					database.client.transaction((transaction) =>
+						Effect.gen(function* () {
+							const [operation] = yield* transaction
+								.select()
+								.from(WorkspaceGitOperations)
+								.where(
+									eq(WorkspaceGitOperations.operation_id, decoded.operation_id),
+								)
+								.limit(1);
+
+							if (!operation) {
+								const [orphaned_event] = yield* transaction
+									.select({ sequence: JournalEvents.sequence })
+									.from(JournalEvents)
+									.where(
+										eq(
+											JournalEvents.idempotency_key,
+											session_event_key(decoded.operation_id),
+										),
+									)
+									.limit(1);
+
+								if (orphaned_event) {
+									return yield* invariant(
+										"Git-session event has no projection operation",
+									);
+								}
+
+								return Option.none<WorkspaceGitSessionAcceptance>();
+							}
+
+							yield* EnsureLiveThread(transaction, operation.thread_id);
+
+							if (
+								operation.kind !== decoded.kind ||
+								operation.request_fingerprint !== decoded.request_fingerprint ||
+								operation.thread_id !== decoded.thread_id ||
+								operation.workspace_id !== decoded.workspace_id
+							) {
+								return yield* new WorkspaceGitSessionConflict({
+									reason: "operation_conflict",
+								});
+							}
+
+							if (operation.source_command_id !== null) {
+								return yield* invariant(
+									"Backend Git-session projection has a source command",
+								);
+							}
+
+							yield* ValidateEvidenceCheckpoint(operation);
+
+							const event = yield* ReadEvent(transaction, operation.operation_id);
+
+							if (event.payload.type !== "workspace.git.session.updated") {
+								return yield* invariant(
+									"Git-session operation event has the wrong payload",
+								);
+							}
+
+							const session = event.payload.session;
+							const current = yield* ReadSessionByWorkspace(
+								transaction,
+								operation.workspace_id,
+							);
+							const evidence_is_cleared =
+								operation.evidence_root_path === null &&
+								operation.evidence_worktree_path === null &&
+								operation.evidence_branch === null &&
+								operation.evidence_changed_file_count === null &&
+								operation.evidence_has_diff === null;
+							const evidence_matches_session =
+								operation.evidence_branch === (session.branch ?? null) &&
+								operation.evidence_changed_file_count ===
+									session.changed_files.length &&
+								operation.evidence_has_diff === session.has_diff;
+
+							if (
+								current === undefined ||
+								current.session.version < operation.session_version ||
+								(current.session.version === operation.session_version &&
+									JSON.stringify(current.session) !== JSON.stringify(session)) ||
+								operation.session_version !== session.version ||
+								operation.journal_sequence !== session.journal_sequence ||
+								operation.sent_at !== session.observed_at ||
+								operation.created_at !== session.observed_at ||
+								operation.updated_at !== session.observed_at ||
+								(!evidence_is_cleared && !evidence_matches_session) ||
+								event.agent_id !== undefined ||
+								event.causation_id !== operation.operation_id ||
+								event.correlation_id !== operation.operation_id ||
+								event.journal_sequence !== session.journal_sequence ||
+								event.origin !== "backend" ||
+								event.raw_origin !== undefined ||
+								event.run_id !== undefined ||
+								event.sent_at !== session.observed_at ||
+								event.stream_id !== `thread:${operation.thread_id}` ||
+								event.thread_id !== operation.thread_id ||
+								session.workspace_id !== operation.workspace_id
+							) {
+								return yield* invariant(
+									"Stored Git-session projection binding is corrupt",
+								);
+							}
+
+							return Option.some({ event, session, status: "duplicate" as const });
+						}),
+					),
+				),
+				Effect.mapError(normalize_error),
+			);
 
 		const MarkEvidenceRecorded = (operation_id: string) =>
 			Schema.decodeUnknownEffect(Identifier)(operation_id).pipe(
@@ -1062,6 +1193,7 @@ export const WorkspaceGitSessionRepositoryLive = Layer.effect(
 			MarkEvidenceRecorded,
 			Project,
 			Query,
+			Replay,
 		};
 	}),
 );

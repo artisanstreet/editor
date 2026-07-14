@@ -1,4 +1,4 @@
-import { Context, Crypto, Effect, Encoding, Layer, Schema } from "effect";
+import { Context, Crypto, Effect, Encoding, Layer, Option, Schema } from "effect";
 
 import {
 	Identifier,
@@ -30,7 +30,7 @@ const WorkspaceGitSessionRefresh = Schema.Struct({
 });
 
 const WorkspaceGitProjection = Schema.Struct({
-	kind: Schema.Literals(["checkout", "recovery"]),
+	kind: Schema.Literals(["checkout", "recovery", "mutation"]),
 	operation_id: Identifier,
 	sent_at: IsoDateTime,
 	thread_id: Identifier,
@@ -71,7 +71,7 @@ export class WorkspaceGitSessionService extends Context.Service<
 >()("Artisan/WorkspaceGitSessionService") {}
 
 function projection_fingerprint(input: {
-	readonly kind: "checkout" | "recovery" | "refresh";
+	readonly kind: "checkout" | "mutation" | "recovery" | "refresh";
 	readonly operation_id: string;
 	readonly sent_at: string;
 	readonly thread_id: string;
@@ -133,16 +133,27 @@ export const WorkspaceGitSessionServiceLive = Layer.effect(
 				);
 			});
 		type ProjectionInput = {
-			readonly kind: "checkout" | "recovery" | "refresh";
+			readonly kind: "checkout" | "mutation" | "recovery" | "refresh";
 			readonly operation_id: string;
 			readonly sent_at: string;
 			readonly source_command: boolean;
 			readonly thread_id: string;
 			readonly workspace_id: string;
 		};
-		const CommitObservation = (input: ProjectionInput, observation: WorkspaceGitObservation) =>
+		type BackendProjectionInput = Omit<ProjectionInput, "kind" | "source_command"> & {
+			readonly kind: "checkout" | "mutation" | "recovery";
+			readonly source_command: false;
+		};
+		const CommitObservation = (
+			input: ProjectionInput,
+			observation: WorkspaceGitObservation,
+			prepared_fingerprint?: string,
+		) =>
 			Effect.gen(function* () {
-				const request_fingerprint = yield* Fingerprint(input);
+				const request_fingerprint =
+					prepared_fingerprint === undefined
+						? yield* Fingerprint(input)
+						: prepared_fingerprint;
 				const acceptance = yield* repository.Project({
 					kind: input.kind,
 					observed_at: observation.observed_at,
@@ -183,6 +194,40 @@ export const WorkspaceGitSessionServiceLive = Layer.effect(
 
 				return yield* CommitObservation(input, observation);
 			});
+		const ReplayOrObserveAndProject = (input: BackendProjectionInput) =>
+			Effect.gen(function* () {
+				const request_fingerprint = yield* Fingerprint(input);
+				const replay_input = {
+					kind: input.kind,
+					operation_id: input.operation_id,
+					request_fingerprint,
+					thread_id: input.thread_id,
+					workspace_id: input.workspace_id,
+				};
+				const CompleteReplay = (acceptance: WorkspaceGitSessionAcceptance) =>
+					RecordPendingEvidence(input.operation_id).pipe(Effect.as(acceptance));
+				const replay = yield* repository.Replay(replay_input);
+
+				if (Option.isSome(replay)) {
+					return yield* CompleteReplay(replay.value);
+				}
+
+				const observation = yield* observer.Observe(input.workspace_id);
+
+				return yield* CommitObservation(input, observation, request_fingerprint).pipe(
+					Effect.catch((failure) =>
+						repository
+							.Replay(replay_input)
+							.pipe(
+								Effect.flatMap((committed) =>
+									Option.isSome(committed)
+										? CompleteReplay(committed.value)
+										: Effect.fail(failure),
+								),
+							),
+					),
+				);
+			});
 		const Refresh = (input: WorkspaceGitSessionRefresh) =>
 			Schema.decodeUnknownEffect(WorkspaceGitSessionRefresh, {
 				onExcessProperty: "error",
@@ -209,7 +254,7 @@ export const WorkspaceGitSessionServiceLive = Layer.effect(
 					() => new WorkspaceGitObservationError({ reason: "invalid_state" }),
 				),
 				Effect.flatMap((decoded) =>
-					ObserveAndProject({
+					ReplayOrObserveAndProject({
 						...decoded,
 						source_command: false,
 					}),
