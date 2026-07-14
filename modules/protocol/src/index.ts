@@ -11,3 +11,4 @@ export * from "./external-wait";
 export * from "./model-behaviour";
 export * from "./stream";
 export * from "./workspace-changes";
+export * from "./preview";

@@ -120,6 +120,12 @@ import {
 	ModelBehaviourSnapshot,
 	ModelBehaviourUpdateRequest,
 } from "./model-behaviour";
+import {
+	PreviewTargetCommand,
+	PreviewTargetUpdatedEvent,
+	PreviewTargetsQuery,
+	PreviewTargetsQueryResult,
+} from "./preview";
 
 export * from "./thread";
 export * from "./guidance";
@@ -127,6 +133,7 @@ export * from "./model-behaviour";
 export * from "./workspace-changes";
 export * from "./git-session";
 export * from "./hosted-git";
+export * from "./preview";
 
 const FrontendTraceMetadata = {
 	message_id: Identifier,
@@ -499,6 +506,7 @@ export const CommandPayload = Schema.Union([
 	RunCloseCommand,
 	RunRespondApprovalCommand,
 	RunRespondQuestionCommand,
+	PreviewTargetCommand,
 ]);
 
 export type CommandPayload = typeof CommandPayload.Type;
@@ -985,6 +993,7 @@ export const EventPayload = Schema.Union([
 	AgentInstanceRenamedEvent,
 	AssignmentControlEvent,
 	ArtifactRecordedEvent,
+	PreviewTargetUpdatedEvent,
 ]);
 
 export type EventPayload = typeof EventPayload.Type;
@@ -1427,6 +1436,25 @@ export const ExternalWaitQueryResultEnvelope = Schema.Struct({
 });
 
 export type ExternalWaitQueryResultEnvelope = typeof ExternalWaitQueryResultEnvelope.Type;
+
+/** Queries the current local preview targets in one workspace and project. */
+export const PreviewTargetsQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("preview.targets.query"),
+	payload: PreviewTargetsQuery,
+});
+
+export type PreviewTargetsQueryEnvelope = typeof PreviewTargetsQueryEnvelope.Type;
+
+/** Returns the current preview targets for a correlated query. */
+export const PreviewTargetsQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("preview.targets.query.result"),
+	payload: PreviewTargetsQueryResult,
+});
+
+export type PreviewTargetsQueryResultEnvelope = typeof PreviewTargetsQueryResultEnvelope.Type;
 
 /** Requests a guarded checkout of a workspace branch. */
 export const WorkspaceGitCheckoutRequestEnvelope = Schema.Struct({
@@ -1882,6 +1910,7 @@ export const InboundControlEnvelope = Schema.Union([
 	ExternalWaitCancelEnvelope,
 	ExternalWaitManualResumeEnvelope,
 	ExternalWaitQueryEnvelope,
+	PreviewTargetsQueryEnvelope,
 	WorkspaceGitCheckoutRequestEnvelope,
 	WorkspaceGitCheckoutApprovalQueryEnvelope,
 	WorkspaceGitCheckoutApprovalRespondEnvelope,
@@ -1930,6 +1959,7 @@ export const OutboundControlEnvelope = Schema.Union([
 	HostedGitSnapshotQueryResultEnvelope,
 	HostedGitCheckFailureDetailQueryResultEnvelope,
 	ExternalWaitQueryResultEnvelope,
+	PreviewTargetsQueryResultEnvelope,
 	WorkspaceGitCheckoutApprovalQueryResultEnvelope,
 	WorkspaceGitMutationApprovalQueryResultEnvelope,
 	HostedProjectCloneApprovalQueryResultEnvelope,
