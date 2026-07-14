@@ -16,6 +16,8 @@ export interface ProcessRunnerInput {
 	readonly command: string;
 	readonly cwd: string;
 	readonly environment?: Readonly<Record<string, string | undefined>>;
+	/** Replaces the inherited process environment instead of applying an overlay. */
+	readonly environment_mode?: "inherit" | "replace";
 	readonly max_stderr_bytes?: number;
 	readonly max_stdout_bytes?: number;
 	readonly stdin?: Uint8Array;

@@ -114,6 +114,38 @@ describe("ProcessRunner", () => {
 		expect(Buffer.from(result.stdout).toString("utf8")).toBe("present with spaces");
 	});
 
+	it("can replace the inherited environment for capability-confined processes", async () => {
+		const root = await make_root();
+		const runner = await make_runner();
+		const inherited_key = "ARTISAN_INHERITED_ONLY";
+		const previous = process.env[inherited_key];
+
+		process.env[inherited_key] = "parent";
+
+		try {
+			const result = await Effect.runPromise(
+				runner.Run({
+					args: [
+						"-e",
+						'process.stdout.write(`${process.env.ARTISAN_PROBE ?? "missing"}|${process.env.ARTISAN_INHERITED_ONLY ?? "missing"}`)',
+					],
+					command: process.execPath,
+					cwd: root,
+					environment: { ARTISAN_PROBE: "isolated" },
+					environment_mode: "replace",
+				}),
+			);
+
+			expect(Buffer.from(result.stdout).toString("utf8")).toBe("isolated|missing");
+		} finally {
+			if (previous === undefined) {
+				delete process.env[inherited_key];
+			} else {
+				process.env[inherited_key] = previous;
+			}
+		}
+	});
+
 	it("delivers an owned binary stdin copy and ends the child stream", async () => {
 		const root = await make_root();
 		const runner = await make_runner();

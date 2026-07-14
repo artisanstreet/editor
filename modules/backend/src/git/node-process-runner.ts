@@ -115,15 +115,18 @@ export function make_node_process_runner_layer(options: NodeProcessRunnerOptions
 				}
 
 				const stdin = input.stdin === undefined ? undefined : Buffer.from(input.stdin);
+				const environment =
+					input.environment_mode === "replace"
+						? (input.environment ?? {})
+						: input.environment === undefined
+							? process.env
+							: { ...process.env, ...input.environment };
 
 				const child = yield* Effect.try({
 					try: () =>
 						spawn(input.command, [...input.args], {
 							cwd: input.cwd,
-							env:
-								input.environment === undefined
-									? process.env
-									: { ...process.env, ...input.environment },
+							env: environment,
 							shell: false,
 							windowsHide: true,
 						}),
