@@ -197,8 +197,13 @@ export {
 	ThreadProjectAffinityNotFound,
 	ThreadProjectAffinityRepository,
 	ThreadProjectAffinityRepositoryLive,
+	ThreadProjectInitialAttachmentConflict,
+	ThreadProjectInitialAttachmentInput,
+	ThreadProjectInitialAttachmentProjectNotFound,
 	type ThreadProjectAffinityAcceptance,
 	type ThreadProjectAffinityError,
+	type ThreadProjectInitialAttachmentAcceptance,
+	type ThreadProjectInitialAttachmentError,
 } from "./threads/thread-project-affinity-repository";
 export {
 	ThreadProjectAffinityCoordinator,

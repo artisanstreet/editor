@@ -1,5 +1,5 @@
 import { and, asc, eq, or } from "drizzle-orm";
-import { Context, Data, Effect, Layer, Schema } from "effect";
+import { Context, Data, Effect, Layer, Option, Schema } from "effect";
 
 import {
 	EventEnvelope,
@@ -33,6 +33,16 @@ import {
 	Threads,
 	ThreadTombstones,
 } from "../persistence/schema";
+import { RetrySqliteWrite } from "../persistence/sqlite-write-retry";
+import { HostedProjectId } from "../projects/project";
+import {
+	ProjectRepository,
+	ProjectRepositoryConflict,
+	ProjectRepositoryFailure,
+	ProjectRepositoryInvalid,
+	ProjectRepositoryInvariant,
+	type ProjectRepositoryError,
+} from "../projects/project-repository";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { DecodeThreadProjection } from "./internal/thread-projection";
 import {
@@ -45,6 +55,7 @@ type ThreadDatabase = Context.Service.Shape<typeof Database>;
 type ThreadTransaction = ThreadDatabase["client"];
 type ThreadRow = typeof Threads.$inferSelect;
 type EvidenceRow = typeof ThreadProjectAffinityEvidence.$inferSelect;
+type EventRow = typeof JournalEvents.$inferSelect;
 type AffinityUpdatedPayload = Extract<
 	EventPayload,
 	{ readonly type: "thread.project_affinity.updated" }
@@ -73,6 +84,7 @@ interface AppendEventInput {
 	readonly agent_id?: string;
 	readonly causation_id: string;
 	readonly correlation_id: string;
+	readonly idempotency_key?: string;
 	readonly occurred_at: string;
 	readonly payload: EventPayload;
 	readonly raw_origin?: CommandEnvelope["raw_origin"];
@@ -94,10 +106,32 @@ export const ThreadProjectAffinityEvidenceInput = Schema.Struct({
 
 export type ThreadProjectAffinityEvidenceInput = typeof ThreadProjectAffinityEvidenceInput.Type;
 
+/** Binds one initial registered-project attachment to its durable source event. */
+export const ThreadProjectInitialAttachmentInput = Schema.Struct({
+	attachment_id: Identifier,
+	project_id: HostedProjectId,
+	source_event_id: Identifier,
+	thread_id: Identifier,
+});
+
+export type ThreadProjectInitialAttachmentInput = typeof ThreadProjectInitialAttachmentInput.Type;
+
 export class ThreadProjectAffinityNotFound extends Data.TaggedError(
 	"ThreadProjectAffinityNotFound",
 )<{
 	readonly thread_id: string;
+}> {}
+
+export class ThreadProjectInitialAttachmentConflict extends Data.TaggedError(
+	"ThreadProjectInitialAttachmentConflict",
+)<{
+	readonly thread_id: string;
+}> {}
+
+export class ThreadProjectInitialAttachmentProjectNotFound extends Data.TaggedError(
+	"ThreadProjectInitialAttachmentProjectNotFound",
+)<{
+	readonly project_id: string;
 }> {}
 
 export type ThreadProjectAffinityError =
@@ -106,11 +140,26 @@ export type ThreadProjectAffinityError =
 	| JournalStoreFailure
 	| ThreadProjectAffinityNotFound;
 
+export type ThreadProjectInitialAttachmentError =
+	| ThreadProjectAffinityError
+	| ThreadProjectInitialAttachmentConflict
+	| ThreadProjectInitialAttachmentProjectNotFound
+	| ProjectRepositoryError;
+
 /** Returns the canonical result of one affinity mutation or observed evidence row. */
 export interface ThreadProjectAffinityAcceptance {
 	readonly event: Event;
 	readonly status: "accepted" | "duplicate";
 }
+
+export type ThreadProjectInitialAttachmentAcceptance =
+	| {
+			readonly event: Event;
+			readonly status: "accepted" | "duplicate";
+	  }
+	| {
+			readonly status: "already_attached";
+	  };
 
 /** Owns atomic affinity commands and idempotent source-evidence observation. */
 export class ThreadProjectAffinityRepository extends Context.Service<
@@ -122,8 +171,18 @@ export class ThreadProjectAffinityRepository extends Context.Service<
 		readonly ObserveEvidence: (
 			input: ThreadProjectAffinityEvidenceInput,
 		) => Effect.Effect<ThreadProjectAffinityAcceptance, ThreadProjectAffinityError>;
+		readonly AttachInitialProject: (
+			input: ThreadProjectInitialAttachmentInput,
+		) => Effect.Effect<
+			ThreadProjectInitialAttachmentAcceptance,
+			ThreadProjectInitialAttachmentError
+		>;
 	}
 >()("Artisan/ThreadProjectAffinityRepository") {}
+
+function initial_attachment_event_key(attachment_id: string) {
+	return `thread_project_initial_attachment:${attachment_id}`;
+}
 
 function serialize_project(project: Project) {
 	return JSON.stringify({
@@ -166,6 +225,28 @@ function evidence_matches(input: ThreadProjectAffinityEvidenceInput, existing: E
 	);
 }
 
+function initial_attachment_matches(
+	input: ThreadProjectInitialAttachmentInput,
+	event: Event,
+	project: Project,
+) {
+	const payload = event.payload;
+
+	return (
+		event.causation_id === input.source_event_id &&
+		event.correlation_id === input.attachment_id &&
+		event.stream_id === `thread:${input.thread_id}` &&
+		event.thread_id === input.thread_id &&
+		payload.type === "thread.project_affinity.updated" &&
+		payload.change === "attached" &&
+		payload.thread.thread_id === input.thread_id &&
+		payload.thread.project_locked === false &&
+		payload.thread.primary_project !== undefined &&
+		payload.thread.primary_project.project_id === input.project_id &&
+		serialize_project(payload.thread.primary_project) === serialize_project(project)
+	);
+}
+
 function unique_projects(projects: ReadonlyArray<Project>, primary_project: Project | undefined) {
 	const unique = new Map<string, Project>();
 
@@ -178,7 +259,7 @@ function unique_projects(projects: ReadonlyArray<Project>, primary_project: Proj
 	return [...unique.values()].slice(0, 3);
 }
 
-function normalize_error(error: unknown): ThreadProjectAffinityError {
+function normalize_affinity_error(error: unknown): ThreadProjectAffinityError {
 	if (
 		error instanceof CommandIdConflict ||
 		error instanceof JournalInvariantError ||
@@ -188,6 +269,21 @@ function normalize_error(error: unknown): ThreadProjectAffinityError {
 	}
 
 	return new JournalStoreFailure({ cause: error });
+}
+
+function normalize_initial_attachment_error(error: unknown): ThreadProjectInitialAttachmentError {
+	if (
+		error instanceof ThreadProjectInitialAttachmentConflict ||
+		error instanceof ThreadProjectInitialAttachmentProjectNotFound ||
+		error instanceof ProjectRepositoryConflict ||
+		error instanceof ProjectRepositoryFailure ||
+		error instanceof ProjectRepositoryInvalid ||
+		error instanceof ProjectRepositoryInvariant
+	) {
+		return error;
+	}
+
+	return normalize_affinity_error(error);
 }
 
 const DecodeJson = <A>(
@@ -343,6 +439,7 @@ export const ThreadProjectAffinityRepositoryLive = Layer.effect(
 		const database = yield* Database;
 		const metadata = yield* RuntimeMetadata;
 		const notifier = yield* JournalNotifier;
+		const projects = yield* ProjectRepository;
 
 		const ReadThread = (transaction: ThreadTransaction, thread_id: string) =>
 			Effect.gen(function* () {
@@ -437,6 +534,9 @@ export const ThreadProjectAffinityRepositoryLive = Layer.effect(
 						correlation_id: input.correlation_id,
 						event_id,
 						event_type: input.payload.type,
+						...(input.idempotency_key === undefined
+							? {}
+							: { idempotency_key: input.idempotency_key }),
 						occurred_at: input.occurred_at,
 						origin: "backend",
 						payload_json: JSON.stringify(input.payload),
@@ -469,6 +569,53 @@ export const ThreadProjectAffinityRepositoryLive = Layer.effect(
 				} satisfies Event;
 			});
 
+		const DecodeEvent = (row: EventRow) =>
+			Effect.all({
+				payload: DecodeJson(
+					row.payload_json,
+					EventEnvelope.fields.payload,
+					`Affinity event ${row.event_id} payload`,
+				),
+				raw_origin:
+					row.raw_origin_json === null
+						? Effect.succeed(undefined)
+						: DecodeJson(
+								row.raw_origin_json,
+								EventEnvelope.fields.raw_origin,
+								`Affinity event ${row.event_id} raw origin`,
+							),
+			}).pipe(
+				Effect.flatMap(({ payload, raw_origin }) =>
+					Schema.decodeUnknownEffect(EventEnvelope, {
+						onExcessProperty: "error",
+					})({
+						...(row.agent_id === null ? {} : { agent_id: row.agent_id }),
+						causation_id: row.causation_id,
+						correlation_id: row.correlation_id,
+						journal_sequence: row.sequence,
+						kind: "event",
+						message_id: row.event_id,
+						origin: row.origin,
+						payload,
+						protocol_version: 1,
+						...(raw_origin === undefined ? {} : { raw_origin }),
+						...(row.run_id === null ? {} : { run_id: row.run_id }),
+						schema_version: row.schema_version,
+						sent_at: row.occurred_at,
+						sequence: row.stream_sequence,
+						stream_id: row.stream_id,
+						thread_id: row.thread_id,
+					}),
+				),
+				Effect.mapError((error) =>
+					error instanceof JournalInvariantError
+						? error
+						: new JournalInvariantError({
+								message: `Affinity event ${row.event_id} is invalid`,
+							}),
+				),
+			);
+
 		const ReadEvent = (correlation_id: string) =>
 			database.client
 				.select()
@@ -485,61 +632,30 @@ export const ThreadProjectAffinityRepositoryLive = Layer.effect(
 				.orderBy(asc(JournalEvents.sequence))
 				.limit(1)
 				.pipe(
-					Effect.flatMap(([row]) => {
-						if (!row) {
-							return Effect.fail(
-								new JournalInvariantError({
-									message: `Affinity acceptance ${correlation_id} has no event`,
-								}),
-							);
-						}
+					Effect.flatMap(([row]) =>
+						row
+							? DecodeEvent(row)
+							: Effect.fail(
+									new JournalInvariantError({
+										message: `Affinity acceptance ${correlation_id} has no event`,
+									}),
+								),
+					),
+				);
 
-						return Effect.all({
-							payload: DecodeJson(
-								row.payload_json,
-								EventEnvelope.fields.payload,
-								`Affinity event ${row.event_id} payload`,
-							),
-							raw_origin:
-								row.raw_origin_json === null
-									? Effect.succeed(undefined)
-									: DecodeJson(
-											row.raw_origin_json,
-											EventEnvelope.fields.raw_origin,
-											`Affinity event ${row.event_id} raw origin`,
-										),
-						}).pipe(
-							Effect.flatMap(({ payload, raw_origin }) =>
-								Schema.decodeUnknownEffect(EventEnvelope, {
-									onExcessProperty: "error",
-								})({
-									...(row.agent_id === null ? {} : { agent_id: row.agent_id }),
-									causation_id: row.causation_id,
-									correlation_id: row.correlation_id,
-									journal_sequence: row.sequence,
-									kind: "event",
-									message_id: row.event_id,
-									origin: row.origin,
-									payload,
-									protocol_version: 1,
-									...(raw_origin === undefined ? {} : { raw_origin }),
-									...(row.run_id === null ? {} : { run_id: row.run_id }),
-									schema_version: row.schema_version,
-									sent_at: row.occurred_at,
-									sequence: row.stream_sequence,
-									stream_id: row.stream_id,
-									thread_id: row.thread_id,
-								}),
-							),
-							Effect.mapError((error) =>
-								error instanceof JournalInvariantError
-									? error
-									: new JournalInvariantError({
-											message: `Affinity event ${row.event_id} is invalid`,
-										}),
-							),
-						);
-					}),
+		const ReadInitialAttachmentEvent = (
+			transaction: ThreadTransaction,
+			attachment_id: string,
+		) =>
+			transaction
+				.select()
+				.from(JournalEvents)
+				.where(
+					eq(JournalEvents.idempotency_key, initial_attachment_event_key(attachment_id)),
+				)
+				.limit(1)
+				.pipe(
+					Effect.flatMap(([row]) => (row ? DecodeEvent(row) : Effect.succeed(undefined))),
 				);
 
 		const RecordCommand = (
@@ -678,7 +794,7 @@ export const ThreadProjectAffinityRepositoryLive = Layer.effect(
 				yield* notifier.Publish(accepted.event.journal_sequence);
 
 				return { event: accepted.event, status: "accepted" as const };
-			}).pipe(Effect.mapError(normalize_error));
+			}).pipe(Effect.mapError(normalize_affinity_error));
 
 		const ObserveEvidence = (input: ThreadProjectAffinityEvidenceInput) =>
 			Effect.gen(function* () {
@@ -803,8 +919,137 @@ export const ThreadProjectAffinityRepositoryLive = Layer.effect(
 				yield* notifier.Publish(accepted.event.journal_sequence);
 
 				return { event: accepted.event, status: "accepted" as const };
-			}).pipe(Effect.mapError(normalize_error));
+			}).pipe(Effect.mapError(normalize_affinity_error));
 
-		return { Accept, ObserveEvidence };
+		const AttachInitialProject = (input: ThreadProjectInitialAttachmentInput) =>
+			Effect.gen(function* () {
+				const replay = yield* ReadInitialAttachmentEvent(
+					database.client,
+					input.attachment_id,
+				);
+
+				const registered = yield* projects.FindByProjectId({
+					project_id: input.project_id,
+				});
+
+				if (Option.isNone(registered)) {
+					return yield* new ThreadProjectInitialAttachmentProjectNotFound({
+						project_id: input.project_id,
+					});
+				}
+
+				const project = registered.value.project;
+
+				if (replay) {
+					if (!initial_attachment_matches(input, replay, project)) {
+						return yield* new CommandIdConflict({ message_id: input.attachment_id });
+					}
+
+					return { event: replay, status: "duplicate" as const };
+				}
+
+				const WriteAttachment = RetrySqliteWrite(
+					database.client.transaction((transaction) =>
+						Effect.gen(function* () {
+							const existing = yield* ReadInitialAttachmentEvent(
+								transaction,
+								input.attachment_id,
+							);
+
+							if (existing) {
+								if (!initial_attachment_matches(input, existing, project)) {
+									return yield* new CommandIdConflict({
+										message_id: input.attachment_id,
+									});
+								}
+
+								return { _tag: "Duplicate" as const, event: existing };
+							}
+
+							const thread = yield* ReadThread(transaction, input.thread_id);
+							const current = yield* DecodeThreadProjection(thread);
+
+							if (
+								current.primary_project !== undefined &&
+								serialize_project(current.primary_project) ===
+									serialize_project(project) &&
+								!current.project_locked
+							) {
+								return { _tag: "AlreadyAttached" as const };
+							}
+
+							if (current.primary_project !== undefined || current.project_locked) {
+								return yield* new ThreadProjectInitialAttachmentConflict({
+									thread_id: input.thread_id,
+								});
+							}
+
+							const occurred_at = yield* metadata.Now;
+							const projection = yield* MakeProjection(
+								current,
+								{
+									linked_projects: unique_projects(
+										current.linked_projects,
+										project,
+									),
+									primary_project: project,
+									project_affinity_scores: current.project_affinity_scores,
+									project_locked: false,
+								},
+								occurred_at,
+							);
+							const event = yield* AppendEvent(transaction, {
+								causation_id: input.source_event_id,
+								correlation_id: input.attachment_id,
+								idempotency_key: initial_attachment_event_key(input.attachment_id),
+								occurred_at,
+								payload: {
+									change: "attached",
+									thread: projection,
+									type: "thread.project_affinity.updated",
+								},
+								thread_id: input.thread_id,
+							});
+
+							yield* WriteProjection(transaction, thread, projection);
+
+							return { _tag: "Accepted" as const, event };
+						}),
+					),
+				);
+				const accepted = yield* WriteAttachment.pipe(
+					Effect.catch((cause) =>
+						ReadInitialAttachmentEvent(database.client, input.attachment_id).pipe(
+							Effect.flatMap((existing) => {
+								if (existing === undefined) return Effect.fail(cause);
+								if (!initial_attachment_matches(input, existing, project)) {
+									return Effect.fail(
+										new CommandIdConflict({ message_id: input.attachment_id }),
+									);
+								}
+
+								return Effect.succeed({
+									_tag: "Duplicate" as const,
+									event: existing,
+								});
+							}),
+						),
+					),
+				);
+
+				if (accepted._tag === "AlreadyAttached") {
+					return { status: "already_attached" as const };
+				}
+
+				if (accepted._tag === "Duplicate") {
+					return { event: accepted.event, status: "duplicate" as const };
+				}
+
+				yield* notifier.Publish(accepted.event.journal_sequence);
+
+				return { event: accepted.event, status: "accepted" as const };
+			}).pipe(Effect.mapError(normalize_initial_attachment_error));
+
+		return { Accept, AttachInitialProject, ObserveEvidence };
 	}),
 );

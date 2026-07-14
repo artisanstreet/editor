@@ -230,7 +230,14 @@ export type ThreadRefinementIgnoredEvent = typeof ThreadRefinementIgnoredEvent.T
 
 /** Records a durable replacement of a thread's project-affinity projection. */
 export const ThreadProjectAffinityUpdatedEvent = Schema.Struct({
-	change: Schema.Literals(["assigned", "observed", "rehomed", "suggested", "unlocked"]),
+	change: Schema.Literals([
+		"assigned",
+		"attached",
+		"observed",
+		"rehomed",
+		"suggested",
+		"unlocked",
+	]),
 	thread: ThreadListItem,
 	type: Schema.Literal("thread.project_affinity.updated"),
 });
