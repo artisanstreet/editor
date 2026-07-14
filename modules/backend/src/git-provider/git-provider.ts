@@ -1,5 +1,10 @@
 import { Context, Data, Effect, Schema } from "effect";
-import { GitBranchName, GitObjectId, HostedGitPullRequestLookup } from "@artisan/protocol";
+import {
+	GitBranchName,
+	GitObjectId,
+	HostedGitOrigin,
+	HostedGitPullRequestLookup,
+} from "@artisan/protocol";
 
 const text_encoder = new TextEncoder();
 
@@ -441,6 +446,25 @@ export const GitProviderPullRequestRead = Schema.Struct({
 
 export type GitProviderPullRequestRead = typeof GitProviderPullRequestRead.Type;
 
+/** Binds an exact hosted pull-request read to its durable identity and expected hosted head. */
+export const GitProviderPullRequestTargetRead = Schema.Struct({
+	expected_head: GitObjectId,
+	pull_request_number: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+	pull_request_origin: HostedGitOrigin,
+	repository: GitProviderRepositoryIdentity,
+	selected_branch: GitBranchName,
+	selection: GitProviderSelection,
+}).check(
+	Schema.makeFilter((input) =>
+		input.pull_request_origin.resource_kind === "pull_request" &&
+		input.pull_request_origin.provider_id === input.repository.provider_id
+			? undefined
+			: "Expected a pull request origin from the selected repository provider",
+	),
+);
+
+export type GitProviderPullRequestTargetRead = typeof GitProviderPullRequestTargetRead.Type;
+
 /** Describes the provider installation and exact hosts known by inspection. */
 export const GitProviderInspection = Schema.Struct({
 	authentication: Schema.Array(GitProviderHostAuthentication),
@@ -456,6 +480,7 @@ export const GitProviderErrorOperation = Schema.Literals([
 	"inspect",
 	"prepare_clone",
 	"read_pull_request",
+	"read_pull_request_target",
 ]);
 
 export type GitProviderErrorOperation = typeof GitProviderErrorOperation.Type;
@@ -511,6 +536,9 @@ export class GitProvider extends Context.Service<
 		) => Effect.Effect<GitProviderClonePreparation, GitProviderError>;
 		readonly ReadPullRequest?: (
 			input: GitProviderPullRequestRead,
+		) => Effect.Effect<typeof HostedGitPullRequestLookup.Type, GitProviderError>;
+		readonly ReadPullRequestTarget?: (
+			input: GitProviderPullRequestTargetRead,
 		) => Effect.Effect<typeof HostedGitPullRequestLookup.Type, GitProviderError>;
 	}
 >()("Artisan/GitProvider") {}

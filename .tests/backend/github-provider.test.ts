@@ -254,6 +254,9 @@ async function make_provider(options: {
 	readonly read_pull_request?: (
 		input: Parameters<(typeof GitHubCli.Service)["ReadPullRequest"]>[0],
 	) => ReturnType<(typeof GitHubCli.Service)["ReadPullRequest"]>;
+	readonly read_pull_request_target?: (
+		input: Parameters<(typeof GitHubCli.Service)["ReadPullRequestTarget"]>[0],
+	) => ReturnType<(typeof GitHubCli.Service)["ReadPullRequestTarget"]>;
 	readonly hosts?: ReadonlyArray<string>;
 }) {
 	const query = options.query ?? (() => Effect.die("Unexpected repository query"));
@@ -262,12 +265,16 @@ async function make_provider(options: {
 		options.inspect_repository ?? (() => Effect.die("Unexpected repository inspection"));
 	const read_pull_request =
 		options.read_pull_request ?? (() => Effect.die("Unexpected pull request read"));
+	const read_pull_request_target =
+		options.read_pull_request_target ??
+		(() => Effect.die("Unexpected pull request target read"));
 	const cli_layer = Layer.succeed(GitHubCli, {
 		CloneRepository: clone,
 		Inspect: Effect.succeed(options.inspection),
 		InspectRepository: inspect_repository,
 		QueryRepositories: query,
 		ReadPullRequest: read_pull_request,
+		ReadPullRequestTarget: read_pull_request_target,
 	});
 	const provider_layer = make_github_provider_layer(
 		options.hosts === undefined ? {} : { hosts: options.hosts },
@@ -675,6 +682,183 @@ describe("GitHubProvider", () => {
 		);
 
 		expect(stale).toMatchObject({ association: { _tag: "matched", freshness: "stale_head" } });
+	});
+
+	it("reads an exact pull-request target directly and preserves current or stale-head freshness", async () => {
+		const calls: Array<Parameters<(typeof GitHubCli.Service)["ReadPullRequestTarget"]>[0]> = [];
+		const provider = await make_provider({
+			inspection: available_inspection([
+				{
+					accounts: [
+						{
+							active: true,
+							git_protocol: "https",
+							host: "github.com",
+							login: "alice",
+							scopes: [],
+							type: "authenticated",
+						},
+					],
+					host: "github.com",
+				},
+			]),
+			read_pull_request_target: (input) => {
+				calls.push(input);
+				return Effect.succeed({
+					pull_request: matched_pull_request(),
+					type: "matched_pull_request",
+					viewer_login: "alice",
+				});
+			},
+		});
+		const input = {
+			expected_head: "a".repeat(40),
+			pull_request_number: 7,
+			pull_request_origin: {
+				native_id: "pull-request-7",
+				provider_id: "github",
+				resource_kind: "pull_request" as const,
+			},
+			repository: projected_repository("editor", "main").identity,
+			selected_branch: "feature/read",
+			selection,
+		};
+		const current = await Effect.runPromise(provider.ReadPullRequestTarget!(input));
+		const stale = await Effect.runPromise(
+			provider.ReadPullRequestTarget!({ ...input, expected_head: "f".repeat(40) }),
+		);
+
+		expect(current).toMatchObject({ association: { _tag: "matched", freshness: "current" } });
+		expect(stale).toMatchObject({ association: { _tag: "matched", freshness: "stale_head" } });
+		expect(calls).toEqual([
+			{
+				host: "github.com",
+				name: "editor",
+				owner: "artisan",
+				pull_request_number: 7,
+				pull_request_native_id: "pull-request-7",
+				selected_branch: "feature/read",
+			},
+			{
+				host: "github.com",
+				name: "editor",
+				owner: "artisan",
+				pull_request_number: 7,
+				pull_request_native_id: "pull-request-7",
+				selected_branch: "feature/read",
+			},
+		]);
+	});
+
+	it("rejects malformed target input and mismatched target responses before publishing", async () => {
+		const input = {
+			expected_head: "a".repeat(40),
+			pull_request_number: 7,
+			pull_request_origin: {
+				native_id: "pull-request-7",
+				provider_id: "github",
+				resource_kind: "pull_request" as const,
+			},
+			repository: projected_repository("editor", "main").identity,
+			selected_branch: "feature/read",
+			selection,
+		};
+		const inspection = available_inspection([
+			{
+				accounts: [
+					{
+						active: true,
+						git_protocol: "https",
+						host: "github.com",
+						login: "alice",
+						scopes: [],
+						type: "authenticated",
+					},
+				],
+				host: "github.com",
+			},
+		]);
+		const malformed = await make_provider({ inspection });
+
+		await expect(
+			Effect.runPromise(
+				malformed.ReadPullRequestTarget!({ ...input, pull_request_number: 0 } as never),
+			),
+		).rejects.toMatchObject({ operation: "read_pull_request_target", reason: "invalid_input" });
+		await expect(
+			Effect.runPromise(
+				malformed.ReadPullRequestTarget!({ ...input, unexpected: true } as never),
+			),
+		).rejects.toMatchObject({ operation: "read_pull_request_target", reason: "invalid_input" });
+
+		const inactive = await make_provider({
+			inspection: available_inspection([
+				{
+					accounts: [
+						{
+							active: true,
+							git_protocol: "https",
+							host: "github.com",
+							login: "bob",
+							scopes: [],
+							type: "authenticated",
+						},
+					],
+					host: "github.com",
+				},
+			]),
+		});
+
+		await expect(
+			Effect.runPromise(inactive.ReadPullRequestTarget!(input)),
+		).rejects.toMatchObject({
+			operation: "read_pull_request_target",
+			reason: "account_not_active",
+		});
+
+		for (const pull_request of [
+			{ ...matched_pull_request(), number: 8 },
+			{ ...matched_pull_request(), id: "recreated-pull-request-7" },
+			{ ...matched_pull_request(), headRefName: "other-branch" },
+			{
+				...matched_pull_request(),
+				headRepository: { name: "other-repository", owner: { login: "artisan" } },
+			},
+		] as const) {
+			const provider = await make_provider({
+				inspection,
+				read_pull_request_target: () =>
+					Effect.succeed({
+						pull_request,
+						type: "matched_pull_request",
+						viewer_login: "alice",
+					}),
+			});
+
+			await expect(
+				Effect.runPromise(provider.ReadPullRequestTarget!(input)),
+			).rejects.toMatchObject({
+				operation: "read_pull_request_target",
+				reason: "invalid_response",
+			});
+		}
+
+		const mismatched_viewer = await make_provider({
+			inspection,
+			read_pull_request_target: () =>
+				Effect.succeed({
+					pull_request: matched_pull_request(),
+					type: "matched_pull_request",
+					viewer_login: "bob",
+				}),
+		});
+
+		await expect(
+			Effect.runPromise(mismatched_viewer.ReadPullRequestTarget!(input)),
+		).rejects.toMatchObject({
+			operation: "read_pull_request_target",
+			reason: "account_not_active",
+		});
 	});
 
 	it("rejects inactive or mismatched accounts before publishing a pull-request read", async () => {

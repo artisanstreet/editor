@@ -725,6 +725,123 @@ describe("GitHubCli", () => {
 		).rejects.toMatchObject({ operation: "read_pull_request", reason: "invalid_response" });
 	});
 
+	it("reads one exact pull-request target without a branch association query", async () => {
+		const calls: Array<ProcessRunnerInput> = [];
+		const cli = await make_cli((input) => {
+			calls.push(input);
+
+			return Effect.succeed(
+				process_result(
+					JSON.stringify({
+						data: {
+							repository: {
+								pullRequest: pull_request_detail("a".repeat(40), "ghe.example"),
+							},
+							viewer: { login: "alice" },
+						},
+					}),
+				),
+			);
+		});
+		const result = await Effect.runPromise(
+			cli.ReadPullRequestTarget({
+				host: "ghe.example",
+				name: "editor",
+				owner: "artisan",
+				pull_request_number: 7,
+				pull_request_native_id: "pull-request-7",
+				selected_branch: "feature/read",
+			}),
+		);
+
+		expect(result).toMatchObject({
+			pull_request: { headRefOid: "a".repeat(40), number: 7 },
+			type: "matched_pull_request",
+			viewer_login: "alice",
+		});
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.args).toContain("owner=artisan");
+		expect(calls[0]?.args).toContain("name=editor");
+		expect(calls[0]?.args).toContain("number=7");
+		expect(calls[0]?.args).not.toContain("branch=feature/read");
+		expect(calls[0]?.args.find((argument) => argument.startsWith("query="))).not.toContain(
+			"PullRequestAssociation",
+		);
+		expect(calls[0]?.environment).toMatchObject({ GH_HOST: "ghe.example" });
+	});
+
+	it("fails closed when an exact pull-request target is malformed or inconsistent", async () => {
+		for (const pull_request of [
+			{ ...pull_request_detail(), number: 8 },
+			{ ...pull_request_detail(), id: "recreated-pull-request-7" },
+			{ ...pull_request_detail(), headRefName: "other-branch" },
+			{
+				...pull_request_detail(),
+				headRepository: { name: "other-repository", owner: { login: "artisan" } },
+			},
+			{ ...pull_request_detail(), unexpected: "field" },
+		] as const) {
+			const cli = await make_cli(() =>
+				Effect.succeed(
+					process_result(
+						JSON.stringify({
+							data: {
+								repository: { pullRequest: pull_request },
+								viewer: { login: "alice" },
+							},
+						}),
+					),
+				),
+			);
+
+			await expect(
+				Effect.runPromise(
+					cli.ReadPullRequestTarget({
+						host: "github.com",
+						name: "editor",
+						owner: "artisan",
+						pull_request_number: 7,
+						pull_request_native_id: "pull-request-7",
+						selected_branch: "feature/read",
+					}),
+				),
+			).rejects.toMatchObject({
+				operation: "read_pull_request_target",
+				reason: "invalid_response",
+			});
+		}
+
+		const truncated = await make_cli(() =>
+			Effect.succeed(
+				process_result(
+					JSON.stringify({
+						data: {
+							repository: { pullRequest: pull_request_detail() },
+							viewer: { login: "alice" },
+						},
+					}),
+					{ stdout_truncated: true },
+				),
+			),
+		);
+
+		await expect(
+			Effect.runPromise(
+				truncated.ReadPullRequestTarget({
+					host: "github.com",
+					name: "editor",
+					owner: "artisan",
+					pull_request_number: 7,
+					pull_request_native_id: "pull-request-7",
+					selected_branch: "feature/read",
+				}),
+			),
+		).rejects.toMatchObject({
+			operation: "read_pull_request_target",
+			reason: "invalid_response",
+		});
+	});
+
 	it("fails closed on malformed or truncated pull-request detail output", async () => {
 		for (const mode of ["malformed", "truncated"] as const) {
 			let call_count = 0;

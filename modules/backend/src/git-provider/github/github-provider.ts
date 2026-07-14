@@ -15,6 +15,7 @@ import {
 	GitProviderInspection,
 	GitProviderPage,
 	GitProviderPullRequestRead,
+	GitProviderPullRequestTargetRead,
 	normalize_git_provider_host,
 	type GitProviderAccountAuthentication,
 	type GitProviderCloneExecution as GitProviderCloneExecutionInput,
@@ -26,6 +27,7 @@ import {
 	type GitProviderInspection as GitProviderInspectionResult,
 	type GitProviderPage as GitProviderPageResult,
 	type GitProviderPullRequestRead as GitProviderPullRequestReadInput,
+	type GitProviderPullRequestTargetRead as GitProviderPullRequestTargetReadInput,
 } from "../git-provider";
 import {
 	GitHubCli,
@@ -415,13 +417,15 @@ function ValidatePage(value: GitProviderPageResult, host: string) {
 	})(value).pipe(Effect.mapError(() => provider_error("invalid_response", false, host)));
 }
 
-function ValidatePullRequest(value: unknown, host: string) {
+function ValidatePullRequest(
+	value: unknown,
+	host: string,
+	operation: GitProviderError["operation"] = "read_pull_request",
+) {
 	return Schema.decodeUnknownEffect(HostedGitPullRequestLookup, {
 		onExcessProperty: "error",
 	})(value).pipe(
-		Effect.mapError(() =>
-			provider_operation_error("read_pull_request", "invalid_response", false, host),
-		),
+		Effect.mapError(() => provider_operation_error(operation, "invalid_response", false, host)),
 	);
 }
 
@@ -1201,6 +1205,93 @@ export function make_github_provider_layer(options: GitHubProviderOptions = {}) 
 						input.selection.host,
 					);
 				});
+			const ReadPullRequestTarget = (unknown_input: GitProviderPullRequestTargetReadInput) =>
+				Effect.gen(function* () {
+					const input = yield* Schema.decodeUnknownEffect(
+						GitProviderPullRequestTargetRead,
+						{
+							onExcessProperty: "error",
+						},
+					)(unknown_input).pipe(
+						Effect.mapError(() =>
+							provider_operation_error(
+								"read_pull_request_target",
+								"invalid_input",
+								false,
+							),
+						),
+					);
+
+					if (
+						input.selection.provider_id !== github_provider_id ||
+						input.repository.provider_id !== github_provider_id ||
+						input.pull_request_origin.provider_id !== github_provider_id ||
+						input.pull_request_origin.resource_kind !== "pull_request" ||
+						input.repository.host !== input.selection.host
+					) {
+						return yield* Effect.fail(
+							provider_operation_error(
+								"read_pull_request_target",
+								"invalid_input",
+								false,
+								input.selection.host,
+							),
+						);
+					}
+
+					yield* EnsureSelection(input.selection, "read_pull_request_target");
+					const result = yield* cli
+						.ReadPullRequestTarget({
+							host: input.selection.host,
+							name: input.repository.name,
+							owner: input.repository.owner,
+							pull_request_number: input.pull_request_number,
+							pull_request_native_id: input.pull_request_origin.native_id,
+							selected_branch: input.selected_branch,
+						})
+						.pipe(
+							Effect.mapError((cause) =>
+								cli_error(cause, input.selection.host, "read_pull_request_target"),
+							),
+						);
+
+					if (!github_logins_match(result.viewer_login, input.selection.account_login)) {
+						return yield* Effect.fail(
+							provider_operation_error(
+								"read_pull_request_target",
+								"account_not_active",
+								false,
+								input.selection.host,
+							),
+						);
+					}
+
+					if (
+						result.pull_request.number !== input.pull_request_number ||
+						result.pull_request.id !== input.pull_request_origin.native_id ||
+						result.pull_request.headRefName !== input.selected_branch ||
+						result.pull_request.headRepository === null ||
+						result.pull_request.headRepository.name.toLowerCase() !==
+							input.repository.name.toLowerCase() ||
+						result.pull_request.headRepository.owner.login.toLowerCase() !==
+							input.repository.owner.toLowerCase()
+					) {
+						return yield* Effect.fail(
+							provider_operation_error(
+								"read_pull_request_target",
+								"invalid_response",
+								false,
+								input.selection.host,
+							),
+						);
+					}
+
+					return yield* ValidatePullRequest(
+						MapMatchedPullRequest(input, result.pull_request),
+						input.selection.host,
+						"read_pull_request_target",
+					);
+				});
 
 			return {
 				Descriptor: {
@@ -1224,6 +1315,7 @@ export function make_github_provider_layer(options: GitHubProviderOptions = {}) 
 				Inspect,
 				PrepareClone,
 				ReadPullRequest,
+				ReadPullRequestTarget,
 			};
 		}),
 	);

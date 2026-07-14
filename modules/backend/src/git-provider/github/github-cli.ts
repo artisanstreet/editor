@@ -667,6 +667,12 @@ export interface GitHubCliPullRequestRead {
 	readonly selected_branch: string;
 }
 
+/** Selects one exact GitHub pull request for a direct detailed read. */
+export interface GitHubCliPullRequestTargetRead extends GitHubCliPullRequestRead {
+	readonly pull_request_number: number;
+	readonly pull_request_native_id: string;
+}
+
 /** Supplies the approved paths and exact repository for one GitHub CLI clone. */
 export interface GitHubCliCloneInput {
 	readonly account_login: string;
@@ -689,7 +695,8 @@ export class GitHubCliError extends Data.TaggedError("GitHubCliError")<{
 		| "clone_repository"
 		| "inspect_repository"
 		| "query_repositories"
-		| "read_pull_request";
+		| "read_pull_request"
+		| "read_pull_request_target";
 	readonly reason:
 		| "authentication_required"
 		| "dependency_incompatible"
@@ -730,6 +737,12 @@ export class GitHubCli extends Context.Service<
 		readonly ReadPullRequest: (
 			input: GitHubCliPullRequestRead,
 		) => Effect.Effect<GitHubCliPullRequestReadResult, GitHubCliError>;
+		readonly ReadPullRequestTarget: (
+			input: GitHubCliPullRequestTargetRead,
+		) => Effect.Effect<
+			Extract<GitHubCliPullRequestReadResult, { readonly type: "matched_pull_request" }>,
+			GitHubCliError
+		>;
 	}
 >()("Artisan/GitHubCli") {}
 
@@ -1064,7 +1077,7 @@ function pull_request_association_arguments(input: GitHubCliPullRequestRead) {
 	];
 }
 
-function pull_request_detail_arguments(input: GitHubCliPullRequestRead, number: number) {
+function pull_request_detail_arguments(input: GitHubCliPullRequestTargetRead) {
 	return [
 		"api",
 		"graphql",
@@ -1079,7 +1092,7 @@ function pull_request_detail_arguments(input: GitHubCliPullRequestRead, number: 
 		"--raw-field",
 		`name=${input.name}`,
 		"--field",
-		`number=${number}`,
+		`number=${input.pull_request_number}`,
 	];
 }
 
@@ -1824,6 +1837,116 @@ export function make_github_cli_layer(options: GitHubCliOptions) {
 						viewer_login: decoded.viewer.login,
 					} satisfies GitHubCliRepositoryInspectionResult;
 				});
+			const ReadPullRequestDetail = (
+				input: GitHubCliPullRequestTargetRead,
+				operation: Extract<
+					GitHubCliError["operation"],
+					"read_pull_request" | "read_pull_request_target"
+				>,
+			) =>
+				Effect.gen(function* () {
+					const location = yield* executable.Locate;
+
+					if (Option.isNone(location)) {
+						return yield* Effect.fail(
+							api_error("dependency_missing", false, operation),
+						);
+					}
+
+					const process_option = yield* Run(
+						location.value.path,
+						pull_request_detail_arguments(input),
+						2 * 1024 * 1024,
+						request_timeout_ms,
+						{ GH_HOST: input.host },
+					).pipe(Effect.mapError(() => api_error("process_failed", true, operation)));
+
+					if (Option.isNone(process_option)) {
+						return yield* Effect.fail(api_error("timed_out", true, operation));
+					}
+
+					const result = process_option.value;
+
+					if (result.stdout_truncated || result.stderr_truncated) {
+						return yield* Effect.fail(api_error("invalid_response", false, operation));
+					}
+
+					const envelope = yield* ParseEnvelope(result.stdout);
+
+					if (
+						result.exit_code !== 0 ||
+						(Option.isSome(envelope) && (envelope.value.errors?.length ?? 0) > 0)
+					) {
+						return yield* Effect.fail(
+							classify_api_failure(result, envelope, operation),
+						);
+					}
+
+					if (
+						Option.isNone(envelope) ||
+						envelope.value.data === undefined ||
+						envelope.value.data === null
+					) {
+						return yield* Effect.fail(api_error("invalid_response", false, operation));
+					}
+
+					const detail = yield* ParseStrictSchema(
+						GitHubPullRequestDetailData,
+						envelope.value.data,
+					).pipe(Effect.mapError(() => api_error("invalid_response", false, operation)));
+
+					if (detail.repository === null || detail.repository.pullRequest === null) {
+						return yield* Effect.fail(api_error("remote_not_found", false, operation));
+					}
+
+					const pull_request = detail.repository.pullRequest;
+
+					if (
+						pull_request.number !== input.pull_request_number ||
+						pull_request.id !== input.pull_request_native_id ||
+						pull_request.headRefName !== input.selected_branch ||
+						pull_request.headRepository === null ||
+						pull_request.headRepository.name.toLowerCase() !==
+							input.name.toLowerCase() ||
+						pull_request.headRepository.owner.login.toLowerCase() !==
+							input.owner.toLowerCase() ||
+						pull_request.isMerged !== (pull_request.state === "MERGED") ||
+						!pull_request_url_matches_host(pull_request.url, input.host)
+					) {
+						return yield* Effect.fail(api_error("invalid_response", false, operation));
+					}
+
+					const rollup = pull_request.commits.nodes[0]!.commit.statusCheckRollup;
+					const invalid_comments = pull_request.reviewThreads.nodes.some(
+						(thread) =>
+							thread.comments.nodes.length !==
+							Math.min(thread.comments.totalCount, 1),
+					);
+					const invalid_annotations =
+						rollup?.contexts.nodes.some(
+							(check) =>
+								check.__typename === "CheckRun" &&
+								check.annotations !== null &&
+								!connection_is_consistent(check.annotations),
+						) ?? false;
+
+					if (
+						!connection_is_consistent(pull_request.reviews) ||
+						!connection_is_consistent(pull_request.reviewThreads) ||
+						!connection_is_consistent(pull_request.requestedReviewers) ||
+						(rollup !== null && !connection_is_consistent(rollup.contexts)) ||
+						invalid_comments ||
+						invalid_annotations
+					) {
+						return yield* Effect.fail(api_error("invalid_response", false, operation));
+					}
+
+					return {
+						pull_request,
+						type: "matched_pull_request",
+						viewer_login: detail.viewer.login,
+					} as const;
+				});
 			const ReadPullRequest = (input: GitHubCliPullRequestRead) =>
 				Effect.gen(function* () {
 					const location = yield* executable.Locate;
@@ -1939,109 +2062,38 @@ export function make_github_cli_layer(options: GitHubCliOptions) {
 						} as const;
 					}
 
-					const detail_process = yield* Execute(
-						pull_request_detail_arguments(input, candidates[0]!.number),
+					const detail = yield* ReadPullRequestDetail(
+						{
+							...input,
+							pull_request_native_id: candidates[0]!.id,
+							pull_request_number: candidates[0]!.number,
+						},
+						operation,
 					);
 
-					if (Option.isNone(detail_process)) {
-						return yield* Effect.fail(api_error("timed_out", true, operation));
-					}
-
-					const detail_result = detail_process.value;
-
-					if (detail_result.stdout_truncated || detail_result.stderr_truncated) {
-						return yield* Effect.fail(api_error("invalid_response", false, operation));
-					}
-
-					const detail_envelope = yield* ParseEnvelope(detail_result.stdout);
-
 					if (
-						detail_result.exit_code !== 0 ||
-						(Option.isSome(detail_envelope) &&
-							(detail_envelope.value.errors?.length ?? 0) > 0)
-					) {
-						return yield* Effect.fail(
-							classify_api_failure(detail_result, detail_envelope, operation),
-						);
-					}
-
-					if (
-						Option.isNone(detail_envelope) ||
-						detail_envelope.value.data === undefined ||
-						detail_envelope.value.data === null
-					) {
-						return yield* Effect.fail(api_error("invalid_response", false, operation));
-					}
-
-					const detail = yield* ParseStrictSchema(
-						GitHubPullRequestDetailData,
-						detail_envelope.value.data,
-					).pipe(Effect.mapError(() => api_error("invalid_response", false, operation)));
-
-					if (detail.repository === null || detail.repository.pullRequest === null) {
-						return yield* Effect.fail(api_error("remote_not_found", false, operation));
-					}
-
-					if (
-						detail.repository.pullRequest.number !== candidates[0]!.number ||
-						detail.repository.pullRequest.id !== candidates[0]!.id ||
-						detail.repository.pullRequest.headRefOid !== candidates[0]!.headRefOid ||
-						detail.repository.pullRequest.headRefName !== input.selected_branch ||
-						detail.repository.pullRequest.headRepository === null ||
-						detail.repository.pullRequest.headRepository.name.toLowerCase() !==
-							input.name.toLowerCase() ||
-						detail.repository.pullRequest.headRepository.owner.login.toLowerCase() !==
-							input.owner.toLowerCase() ||
-						detail.repository.pullRequest.isMerged !==
-							(detail.repository.pullRequest.state === "MERGED") ||
-						!pull_request_url_matches_host(
-							detail.repository.pullRequest.url,
-							input.host,
-						)
+						detail.pull_request.id !== candidates[0]!.id ||
+						detail.pull_request.headRefOid !== candidates[0]!.headRefOid
 					) {
 						return yield* Effect.fail(api_error("invalid_response", false, operation));
 					}
 
 					if (
-						detail.viewer.login.toLowerCase() !== association.viewer.login.toLowerCase()
+						detail.viewer_login.toLowerCase() !== association.viewer.login.toLowerCase()
 					) {
 						return yield* Effect.fail(
 							api_error("authentication_required", false, operation),
 						);
 					}
 
-					const pull_request = detail.repository.pullRequest;
-					const rollup = pull_request.commits.nodes[0]!.commit.statusCheckRollup;
-					const invalid_comments = pull_request.reviewThreads.nodes.some(
-						(thread) =>
-							thread.comments.nodes.length !==
-							Math.min(thread.comments.totalCount, 1),
-					);
-					const invalid_annotations =
-						rollup?.contexts.nodes.some(
-							(check) =>
-								check.__typename === "CheckRun" &&
-								check.annotations !== null &&
-								!connection_is_consistent(check.annotations),
-						) ?? false;
-
-					if (
-						!connection_is_consistent(pull_request.reviews) ||
-						!connection_is_consistent(pull_request.reviewThreads) ||
-						!connection_is_consistent(pull_request.requestedReviewers) ||
-						(rollup !== null && !connection_is_consistent(rollup.contexts)) ||
-						invalid_comments ||
-						invalid_annotations
-					) {
-						return yield* Effect.fail(api_error("invalid_response", false, operation));
-					}
-
 					return {
-						pull_request,
+						pull_request: detail.pull_request,
 						type: "matched_pull_request",
-						viewer_login: detail.viewer.login,
+						viewer_login: detail.viewer_login,
 					} as const;
 				});
+			const ReadPullRequestTarget = (input: GitHubCliPullRequestTargetRead) =>
+				ReadPullRequestDetail(input, "read_pull_request_target");
 			const CloneRepository = (input: GitHubCliCloneInput) =>
 				Effect.gen(function* () {
 					const location = yield* executable.Locate;
@@ -2250,6 +2302,7 @@ export function make_github_cli_layer(options: GitHubCliOptions) {
 				InspectRepository,
 				QueryRepositories,
 				ReadPullRequest,
+				ReadPullRequestTarget,
 			};
 		}),
 	);
