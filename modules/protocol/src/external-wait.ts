@@ -151,10 +151,24 @@ export const ExternalWaitQuery = Schema.Struct({ thread_id: BoundedExternalIdent
 
 export type ExternalWaitQuery = typeof ExternalWaitQuery.Type;
 
-/** Returns the optional durable external wait attached to one thread. */
-export const ExternalWaitQueryResult = Schema.Struct({
-	snapshot: Schema.optional(Schema.suspend(() => ExternalWaitSnapshot)),
+const ExternalWaitQueryResultBase = Schema.Struct({
+	snapshots: Schema.Array(Schema.suspend(() => ExternalWaitSnapshot)).check(
+		Schema.isMaxLength(64),
+	),
+	truncated: Schema.Boolean,
 });
+
+/** Returns every bounded durable external wait attached to one thread. */
+export const ExternalWaitQueryResult = ExternalWaitQueryResultBase.check(
+	Schema.makeFilter<typeof ExternalWaitQueryResultBase.Type>((result) => {
+		const wait_ids = result.snapshots.map((snapshot) => snapshot.wait_id);
+		const thread_ids = new Set(result.snapshots.map((snapshot) => snapshot.thread_id));
+
+		return new Set(wait_ids).size === wait_ids.length && thread_ids.size <= 1
+			? undefined
+			: "Expected unique external waits from one thread";
+	}),
+);
 
 export type ExternalWaitQueryResult = typeof ExternalWaitQueryResult.Type;
 

@@ -99,7 +99,7 @@ describe("External wait protocol codec", () => {
 				kind: "external_wait.query.result",
 				message_id: "query_result_1",
 				origin: "backend",
-				payload: { snapshot: snapshot() },
+				payload: { snapshots: [snapshot()], truncated: false },
 				protocol_version: 1,
 				schema_version: 1,
 				sent_at: timestamp,
@@ -195,7 +195,7 @@ describe("External wait protocol codec", () => {
 						kind: "external_wait.query.result",
 						message_id: "query_result_1",
 						origin: "backend",
-						payload: { snapshot: invalid_snapshot },
+						payload: { snapshots: [invalid_snapshot], truncated: false },
 						protocol_version: 1,
 						schema_version: 1,
 						sent_at: timestamp,
@@ -233,7 +233,7 @@ describe("External wait protocol codec", () => {
 					kind: "external_wait.query.result",
 					message_id: "query_result_1",
 					origin: "backend",
-					payload: { snapshot: invalid_snapshot },
+					payload: { snapshots: [invalid_snapshot], truncated: false },
 					protocol_version: 1,
 					schema_version: 1,
 					sent_at: timestamp,
@@ -286,12 +286,34 @@ describe("External wait protocol codec", () => {
 					kind: "external_wait.query.result",
 					message_id: "query_result_1",
 					origin: "backend",
-					payload: { snapshot: invalid_snapshot },
+					payload: { snapshots: [invalid_snapshot], truncated: false },
 					protocol_version: 1,
 					schema_version: 1,
 					sent_at: timestamp,
 				}),
 			),
 		).rejects.toBeDefined();
+	});
+
+	it("rejects duplicate waits or snapshots from different threads in one query result", async () => {
+		for (const snapshots of [
+			[snapshot(), { ...snapshot(), version: 2 }],
+			[snapshot(), { ...snapshot(), thread_id: "thread_2", wait_id: "wait_2" }],
+		]) {
+			await expect(
+				Effect.runPromise(
+					DecodeOutboundControlEnvelope({
+						correlation_id: "query_1",
+						kind: "external_wait.query.result",
+						message_id: "query_result_1",
+						origin: "backend",
+						payload: { snapshots, truncated: false },
+						protocol_version: 1,
+						schema_version: 1,
+						sent_at: timestamp,
+					}),
+				),
+			).rejects.toBeDefined();
+		}
 	});
 });
