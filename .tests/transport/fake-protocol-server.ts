@@ -14,6 +14,8 @@ import {
 	type GlobalGuidanceSelectionEnvelope,
 	type GlobalGuidanceSnapshot,
 	type GlobalGuidanceUpdateEnvelope,
+	type HostedGitCheckFailureDetailQueryEnvelope,
+	type HostedGitCheckFailureDetailQueryResult,
 	type HostedGitSnapshotQueryEnvelope,
 	type HostedGitSnapshotRefreshEnvelope,
 	type HeartbeatPongEnvelope,
@@ -105,6 +107,7 @@ interface LiveConnection {
 /** Configures deterministic protocol behavior used by transport integration tests. */
 export interface FakeProtocolOptions {
 	readonly duplicate_query_result?: boolean;
+	readonly drop_first_hosted_git_check_failure_detail_result?: boolean;
 	readonly heartbeat_after_welcome?: boolean;
 	readonly query_delay_ms?: number;
 }
@@ -135,6 +138,7 @@ export interface FakeProtocolSnapshot {
 	readonly hosted_project_clone_approval_response_attempts: ReadonlyArray<HostedProjectCloneApprovalRespondEnvelope>;
 	readonly hosted_project_clone_request_attempts: ReadonlyArray<HostedProjectCloneRequestEnvelope>;
 	readonly hosted_git_snapshot_query_attempts: ReadonlyArray<HostedGitSnapshotQueryEnvelope>;
+	readonly hosted_git_check_failure_detail_query_attempts: ReadonlyArray<HostedGitCheckFailureDetailQueryEnvelope>;
 	readonly hosted_git_snapshot_refresh_attempts: ReadonlyArray<HostedGitSnapshotRefreshEnvelope>;
 	readonly workspace_change_events: ReadonlyArray<EventEnvelope>;
 	readonly workspace_change_list_attempts: ReadonlyArray<WorkspaceChangeListQueryEnvelope>;
@@ -214,6 +218,8 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 		[];
 	const hosted_project_clone_request_attempts: Array<HostedProjectCloneRequestEnvelope> = [];
 	const hosted_git_snapshot_query_attempts: Array<HostedGitSnapshotQueryEnvelope> = [];
+	const hosted_git_check_failure_detail_query_attempts: Array<HostedGitCheckFailureDetailQueryEnvelope> =
+		[];
 	const hosted_git_snapshot_refresh_attempts: Array<HostedGitSnapshotRefreshEnvelope> = [];
 	const workspace_changes = new Map<string, StoredWorkspaceMutation>();
 	const workspace_change_list_attempts: Array<WorkspaceChangeListQueryEnvelope> = [];
@@ -348,6 +354,26 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 		content: workspace_file_content,
 		identity: workspace_file_identity,
 		path: "src/main.ts",
+		workspace_id: "workspace_fixture",
+	};
+	const hosted_git_check_failure_detail: HostedGitCheckFailureDetailQueryResult = {
+		detail: {
+			check_origin: {
+				native_id: "check_fixture",
+				provider_id: "github",
+				resource_kind: "check_run",
+			},
+			head_commit: "a".repeat(40),
+			log: { _tag: "unavailable", reason: "not_available" },
+			name: "Fixture checks",
+			output: {
+				summary: { _tag: "available", truncated: false, untrusted_text: "Checks failed" },
+				text: { _tag: "unavailable" },
+			},
+		},
+		journal_sequence: 4,
+		observed_at: "2026-07-10T08:00:00.000Z",
+		snapshot_version: 1,
 		workspace_id: "workspace_fixture",
 	};
 	const workspace_replace_approval: WorkspaceReplaceApproval = {
@@ -1286,6 +1312,28 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 					payload: { journal_sequence: events.length + 1 },
 				});
 			});
+		const handle_hosted_git_check_failure_detail_query = (
+			query: HostedGitCheckFailureDetailQueryEnvelope,
+		) =>
+			Effect.gen(function* () {
+				hosted_git_check_failure_detail_query_attempts.push(query);
+
+				if (
+					options.drop_first_hosted_git_check_failure_detail_result &&
+					hosted_git_check_failure_detail_query_attempts.length === 1
+				) {
+					yield* close;
+
+					return;
+				}
+
+				yield* enqueue({
+					...backend_trace(),
+					correlation_id: query.message_id,
+					kind: "hosted.git.check_failure_detail.query.result",
+					payload: hosted_git_check_failure_detail,
+				});
+			});
 		const handle_hosted_git_snapshot_refresh = (refresh: HostedGitSnapshotRefreshEnvelope) =>
 			Effect.gen(function* () {
 				hosted_git_snapshot_refresh_attempts.push(refresh);
@@ -1760,6 +1808,10 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 						yield* handle_hosted_git_snapshot_query(input);
 
 						return;
+					case "hosted.git.check_failure_detail.query":
+						yield* handle_hosted_git_check_failure_detail_query(input);
+
+						return;
 					case "workspace.git.checkout.approval.query":
 						yield* handle_workspace_git_checkout_approval_query(input);
 
@@ -1949,6 +2001,9 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 		],
 		hosted_project_clone_request_attempts: [...hosted_project_clone_request_attempts],
 		hosted_git_snapshot_query_attempts: [...hosted_git_snapshot_query_attempts],
+		hosted_git_check_failure_detail_query_attempts: [
+			...hosted_git_check_failure_detail_query_attempts,
+		],
 		hosted_git_snapshot_refresh_attempts: [...hosted_git_snapshot_refresh_attempts],
 		workspace_change_events: events.filter(
 			(event) => event.payload.type === "workspace.change.updated",

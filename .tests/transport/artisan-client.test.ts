@@ -95,6 +95,80 @@ describe("ArtisanClient over MessagePorts", () => {
 		}
 	});
 
+	it("queries transient hosted check failure detail through the correlated path", async () => {
+		const harness = await make_transport_test_harness();
+
+		try {
+			const result = await Effect.runPromise(
+				harness.client.GetHostedGitCheckFailureDetail({
+					check_origin: {
+						native_id: "check_fixture",
+						provider_id: "github",
+						resource_kind: "check_run",
+					},
+					expected_head_commit: "a".repeat(40),
+					snapshot_version: 1,
+					workspace_id: "workspace_fixture",
+				}),
+			);
+
+			expect(result).toMatchObject({
+				detail: { check_origin: { native_id: "check_fixture" } },
+				snapshot_version: 1,
+				workspace_id: "workspace_fixture",
+			});
+			expect(
+				harness.protocol_snapshot().hosted_git_check_failure_detail_query_attempts,
+			).toMatchObject([
+				{
+					kind: "hosted.git.check_failure_detail.query",
+					payload: {
+						expected_head_commit: "a".repeat(40),
+						workspace_id: "workspace_fixture",
+					},
+				},
+			]);
+		} finally {
+			await harness.dispose();
+		}
+	});
+
+	it("retries the exact hosted check failure detail query after its result is dropped", async () => {
+		const harness = await make_transport_test_harness({
+			client: { reconnect_delay_ms: 5 },
+			protocol: { drop_first_hosted_git_check_failure_detail_result: true },
+		});
+
+		try {
+			const result = await Effect.runPromise(
+				harness.client.GetHostedGitCheckFailureDetail({
+					check_origin: {
+						native_id: "check_fixture",
+						provider_id: "github",
+						resource_kind: "check_run",
+					},
+					expected_head_commit: "a".repeat(40),
+					snapshot_version: 1,
+					workspace_id: "workspace_fixture",
+				}),
+			);
+
+			await wait_for(() => harness.connector_snapshot().connections >= 2);
+
+			const attempts =
+				harness.protocol_snapshot().hosted_git_check_failure_detail_query_attempts;
+
+			expect(result).toMatchObject({
+				detail: { check_origin: { native_id: "check_fixture" } },
+				snapshot_version: 1,
+			});
+			expect(attempts).toHaveLength(2);
+			expect(attempts[1]).toEqual(attempts[0]);
+		} finally {
+			await harness.dispose();
+		}
+	});
+
 	it("exposes typed workspace queries and mutations with attributed envelopes", async () => {
 		const harness = await make_transport_test_harness();
 

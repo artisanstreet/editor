@@ -79,6 +79,7 @@ export type PendingRequestEnvelope = Extract<
 			| "workspace.git.session.query"
 			| "workspace.git.session.refresh"
 			| "hosted.git.snapshot.query"
+			| "hosted.git.check_failure_detail.query"
 			| "hosted.git.snapshot.refresh"
 			| "workspace.git.checkout.request"
 			| "workspace.git.checkout.approval.query"
@@ -110,6 +111,7 @@ export type PendingResultEnvelope = Extract<
 			| "workspace.replace.approval.query.result"
 			| "workspace.git.session.query.result"
 			| "hosted.git.snapshot.query.result"
+			| "hosted.git.check_failure_detail.query.result"
 			| "workspace.git.checkout.approval.query.result"
 			| "workspace.git.mutation.approval.query.result";
 	}

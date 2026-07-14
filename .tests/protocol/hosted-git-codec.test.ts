@@ -182,9 +182,19 @@ describe("Hosted Git protocol codec", () => {
 		).rejects.toBeDefined();
 	});
 
-	it("roundtrips query, refresh, result, and durable snapshot event envelopes", async () => {
+	it("roundtrips query, refresh, failure detail, result, and durable snapshot event envelopes", async () => {
 		const inbound = [
 			frontend_envelope("hosted.git.snapshot.query", { workspace_id: "workspace_1" }),
+			frontend_envelope("hosted.git.check_failure_detail.query", {
+				check_origin: {
+					native_id: "CR_1",
+					provider_id: "github",
+					resource_kind: "check_run",
+				},
+				expected_head_commit: head,
+				snapshot_version: 1,
+				workspace_id: "workspace_1",
+			}),
 			{
 				...frontend_envelope("hosted.git.snapshot.refresh", {
 					workspace_id: "workspace_1",
@@ -193,6 +203,39 @@ describe("Hosted Git protocol codec", () => {
 			},
 		];
 		const outbound = [
+			{
+				correlation_id: "detail_query_1",
+				kind: "hosted.git.check_failure_detail.query.result",
+				message_id: "detail_result_1",
+				origin: "backend",
+				payload: {
+					detail: {
+						check_origin: {
+							native_id: "CR_1",
+							provider_id: "github",
+							resource_kind: "check_run",
+						},
+						head_commit: head,
+						log: { _tag: "unavailable", reason: "not_available" },
+						name: "test",
+						output: {
+							summary: {
+								_tag: "available",
+								truncated: false,
+								untrusted_text: "Failed",
+							},
+							text: { _tag: "unavailable" },
+						},
+					},
+					journal_sequence: 4,
+					observed_at: timestamp,
+					snapshot_version: 1,
+					workspace_id: "workspace_1",
+				},
+				protocol_version: 1,
+				schema_version: 1,
+				sent_at: timestamp,
+			},
 			{
 				correlation_id: "query_1",
 				kind: "hosted.git.snapshot.query.result",

@@ -374,6 +374,7 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 					case "workspace.replace.approval.query.result":
 					case "workspace.git.session.query.result":
 					case "hosted.git.snapshot.query.result":
+					case "hosted.git.check_failure_detail.query.result":
 					case "workspace.git.checkout.approval.query.result":
 					case "workspace.git.mutation.approval.query.result":
 						return handlers.requests.Resolve(envelope);

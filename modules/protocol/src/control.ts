@@ -42,6 +42,8 @@ import {
 	HostedProjectCloneRequest,
 } from "./hosted-project";
 import {
+	HostedGitCheckFailureDetailQuery,
+	HostedGitCheckFailureDetailQueryResult,
 	HostedGitSnapshotQuery,
 	HostedGitSnapshotQueryResult,
 	HostedGitSnapshotRefreshRequest,
@@ -1285,6 +1287,27 @@ export const HostedGitSnapshotQueryEnvelope = Schema.Struct({
 
 export type HostedGitSnapshotQueryEnvelope = typeof HostedGitSnapshotQueryEnvelope.Type;
 
+/** Requests fresh bounded detail for one failed hosted check. */
+export const HostedGitCheckFailureDetailQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("hosted.git.check_failure_detail.query"),
+	payload: HostedGitCheckFailureDetailQuery,
+});
+
+export type HostedGitCheckFailureDetailQueryEnvelope =
+	typeof HostedGitCheckFailureDetailQueryEnvelope.Type;
+
+/** Returns one correlated bounded hosted check failure detail. */
+export const HostedGitCheckFailureDetailQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("hosted.git.check_failure_detail.query.result"),
+	payload: HostedGitCheckFailureDetailQueryResult,
+});
+
+export type HostedGitCheckFailureDetailQueryResultEnvelope =
+	typeof HostedGitCheckFailureDetailQueryResultEnvelope.Type;
+
 /** Returns one correlated optional hosted review and CI projection. */
 export const HostedGitSnapshotQueryResultEnvelope = Schema.Struct({
 	...NegotiatedBackendTraceMetadata,
@@ -1799,6 +1822,7 @@ export const InboundControlEnvelope = Schema.Union([
 	WorkspaceGitSessionQueryEnvelope,
 	WorkspaceGitSessionRefreshEnvelope,
 	HostedGitSnapshotQueryEnvelope,
+	HostedGitCheckFailureDetailQueryEnvelope,
 	HostedGitSnapshotRefreshEnvelope,
 	ExternalWaitRequestEnvelope,
 	ExternalWaitCancelEnvelope,
@@ -1849,6 +1873,7 @@ export const OutboundControlEnvelope = Schema.Union([
 	WorkspaceReplaceApprovalQueryResultEnvelope,
 	WorkspaceGitSessionQueryResultEnvelope,
 	HostedGitSnapshotQueryResultEnvelope,
+	HostedGitCheckFailureDetailQueryResultEnvelope,
 	ExternalWaitQueryResultEnvelope,
 	WorkspaceGitCheckoutApprovalQueryResultEnvelope,
 	WorkspaceGitMutationApprovalQueryResultEnvelope,

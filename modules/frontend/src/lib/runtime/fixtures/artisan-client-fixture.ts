@@ -5,6 +5,7 @@ import type {
 	ExternalWaitQueryResult,
 	GlobalGuidanceSnapshot,
 	HostedGitSnapshotQueryResult,
+	HostedGitCheckFailureDetailQueryResult,
 	ModelBehaviourSnapshot,
 	OrchestrationGraph,
 	TerminalSession,
@@ -350,6 +351,31 @@ export const FixtureArtisanClientService = {
 		Effect.succeed({
 			journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
 		} satisfies HostedGitSnapshotQueryResult),
+	GetHostedGitCheckFailureDetail: (_input) =>
+		Effect.succeed({
+			detail: {
+				check_origin: {
+					native_id: "fixture-check-run",
+					provider_id: "github",
+					resource_kind: "check_run",
+				},
+				head_commit: "a".repeat(40),
+				log: { _tag: "unavailable", reason: "not_available" },
+				name: "Fixture checks",
+				output: {
+					summary: {
+						_tag: "available",
+						truncated: false,
+						untrusted_text: "Checks failed",
+					},
+					text: { _tag: "unavailable" },
+				},
+			},
+			journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+			observed_at: fixture_timestamp,
+			snapshot_version: 1,
+			workspace_id: "workspace_fixture",
+		} satisfies HostedGitCheckFailureDetailQueryResult),
 	GetModelBehaviour: Effect.gen(function* () {
 		return yield* Effect.succeed(fixture_artisan_client_data.model_behaviour);
 	}),

@@ -19,6 +19,7 @@ import {
 } from "@artisan/backend";
 import type {
 	HelloEnvelope,
+	HostedGitCheckFailureDetailQueryEnvelope,
 	HostedGitSnapshotQueryEnvelope,
 	HostedGitSnapshotRefreshEnvelope,
 	OutboundControlEnvelope,
@@ -48,8 +49,26 @@ const project_native_id = "repository_1";
 
 interface ProviderState {
 	calls: number;
+	detail_calls: number;
+	detail_failure?: GitProviderError;
 	failure?: GitProviderError;
 }
+
+const pull_request_origin = {
+	native_id: "pull-request-42",
+	provider_id: "github",
+	resource_kind: "pull_request" as const,
+};
+const check_origin = {
+	native_id: "check-run-7",
+	provider_id: "github",
+	resource_kind: "check_run" as const,
+};
+const workflow_origin = {
+	native_id: "workflow-run-9",
+	provider_id: "github",
+	resource_kind: "workflow_run" as const,
+};
 
 const open_connection = Effect.gen(function* () {
 	const protocol_server = yield* ProtocolServer;
@@ -121,6 +140,28 @@ function snapshot_refresh(
 	};
 }
 
+function check_failure_detail_query(
+	message_id: string,
+	workspace_id: string,
+	expected_head_commit: string,
+	snapshot_version: number,
+): HostedGitCheckFailureDetailQueryEnvelope {
+	return {
+		kind: "hosted.git.check_failure_detail.query",
+		message_id,
+		origin: "frontend",
+		payload: {
+			check_origin,
+			expected_head_commit,
+			snapshot_version,
+			workspace_id,
+		},
+		protocol_version: 1,
+		schema_version: 1,
+		sent_at: protocol_time,
+	};
+}
+
 function derive_workspace_id() {
 	const parts = ["github", "github.com", project_native_id].map((part) =>
 		Buffer.from(part, "utf8"),
@@ -174,6 +215,35 @@ function make_provider(state: ProviderState): typeof GitProvider.Service {
 		DiscoverRepositories: () => Effect.die("unused"),
 		Inspect: Effect.die("unused"),
 		PrepareClone: () => Effect.die("unused"),
+		ReadCheckFailureDetail: (input) => {
+			state.detail_calls += 1;
+
+			if (state.detail_failure !== undefined) {
+				return Effect.fail(state.detail_failure);
+			}
+
+			return Effect.succeed({
+				attempt: 2,
+				check_origin: input.check_origin,
+				head_commit: input.expected_head,
+				log: {
+					_tag: "available",
+					observed_bytes: 36,
+					truncated: false,
+					untrusted_excerpt: "transient protocol failure excerpt",
+				},
+				name: "test",
+				output: {
+					summary: {
+						_tag: "available",
+						truncated: false,
+						untrusted_text: "One test failed",
+					},
+					text: { _tag: "unavailable" },
+				},
+				workflow_origin,
+			});
+		},
 		ReadPullRequest: (input) => {
 			state.calls += 1;
 
@@ -182,7 +252,48 @@ function make_provider(state: ProviderState): typeof GitProvider.Service {
 			}
 
 			return Effect.succeed({
-				association: { _tag: "none" },
+				association: {
+					_tag: "matched",
+					freshness: "current",
+					pull_request: {
+						base_branch: "main",
+						base_commit: "b".repeat(40),
+						checks: [
+							{
+								annotations: [],
+								annotations_truncated: false,
+								app_name: "GitHub Actions",
+								attempt: 2,
+								name: "test",
+								origin: check_origin,
+								required: true,
+								state: "failed",
+								workflow_name: "CI",
+								workflow_origin,
+							},
+						],
+						checks_total: 1,
+						checks_truncated: false,
+						draft: false,
+						head_branch: input.selected_branch,
+						head_commit: input.expected_head,
+						mergeability: "mergeable",
+						number: 42,
+						origin: pull_request_origin,
+						requested_reviewers: [],
+						requested_reviewers_truncated: false,
+						review_decision: "none",
+						review_threads: [],
+						review_threads_total: 0,
+						review_threads_truncated: false,
+						reviews: [],
+						reviews_total: 0,
+						reviews_truncated: false,
+						state: "open",
+						title: "Read hosted check detail",
+						web_url: "https://github.com/artisan/editor/pull/42",
+					},
+				},
 				branch: input.selected_branch,
 				expected_head_commit: input.expected_head,
 				repository: input.repository,
@@ -290,6 +401,18 @@ function find_query_result(envelopes: ReadonlyArray<OutboundControlEnvelope>) {
 	return result;
 }
 
+function find_check_failure_detail_result(envelopes: ReadonlyArray<OutboundControlEnvelope>) {
+	const result = envelopes.find(
+		(envelope) => envelope.kind === "hosted.git.check_failure_detail.query.result",
+	);
+
+	if (result?.kind !== "hosted.git.check_failure_detail.query.result") {
+		throw new Error("Expected hosted Git check failure detail result");
+	}
+
+	return result;
+}
+
 afterEach(async () => {
 	await Promise.all(
 		temporary_directories
@@ -301,7 +424,7 @@ afterEach(async () => {
 describe("hosted Git protocol", () => {
 	it("replays a refresh across restart and marks the cached projection stale after a local commit", async () => {
 		const fixture = await make_repository();
-		const provider_state: ProviderState = { calls: 0 };
+		const provider_state: ProviderState = { calls: 0, detail_calls: 0 };
 		const first_runtime = make_runtime(
 			fixture.database_path,
 			fixture.root,
@@ -336,6 +459,34 @@ describe("hosted Git protocol", () => {
 						payload: {
 							snapshot: { workspace_freshness: "unverified" },
 							type: "hosted.git.snapshot.updated",
+						},
+					});
+
+					if (
+						snapshot_event?.kind !== "event" ||
+						snapshot_event.payload.type !== "hosted.git.snapshot.updated"
+					) {
+						throw new Error("Expected hosted Git snapshot event");
+					}
+
+					yield* connection.Receive(
+						check_failure_detail_query(
+							"detail_before_restart",
+							fixture.workspace_id,
+							snapshot_event.payload.snapshot.lookup.expected_head_commit,
+							snapshot_event.payload.snapshot.version,
+						),
+					);
+					const detail = yield* take_outbound(connection, 1);
+
+					expect(find_check_failure_detail_result(detail)).toMatchObject({
+						correlation_id: "detail_before_restart",
+						payload: {
+							detail: {
+								check_origin,
+								log: { untrusted_excerpt: "transient protocol failure excerpt" },
+							},
+							snapshot_version: 1,
 						},
 					});
 				}),
@@ -375,6 +526,55 @@ describe("hosted Git protocol", () => {
 						expect(
 							find_query_result(current).payload.snapshot?.workspace_freshness,
 						).toBe("current");
+
+						const current_snapshot = find_query_result(current).payload.snapshot;
+
+						if (current_snapshot === undefined) {
+							throw new Error("Expected current hosted Git snapshot");
+						}
+
+						yield* connection.Receive(
+							check_failure_detail_query(
+								"detail_after_restart",
+								fixture.workspace_id,
+								current_snapshot.lookup.expected_head_commit,
+								current_snapshot.version,
+							),
+						);
+						const detail = yield* take_outbound(connection, 1);
+
+						expect(find_check_failure_detail_result(detail)).toMatchObject({
+							correlation_id: "detail_after_restart",
+						});
+
+						provider_state.detail_failure = new GitProviderError({
+							host: "github.com",
+							operation: "read_check_failure_detail",
+							provider_id: "github",
+							reason: "rate_limited",
+							retryable: true,
+						});
+						yield* connection.Receive(
+							check_failure_detail_query(
+								"detail_rate_limited",
+								fixture.workspace_id,
+								current_snapshot.lookup.expected_head_commit,
+								current_snapshot.version,
+							),
+						);
+						const rejected = yield* take_outbound(connection, 1);
+
+						expect(rejected).toContainEqual(
+							expect.objectContaining({
+								correlation_id: "detail_rate_limited",
+								kind: "protocol.error",
+								payload: expect.objectContaining({
+									code: "hosted.git.check_failure_detail_rate_limited",
+									retryable: true,
+								}),
+							}),
+						);
+						delete provider_state.detail_failure;
 					}),
 				),
 			);
@@ -462,6 +662,7 @@ describe("hosted Git protocol", () => {
 			);
 
 			expect(provider_state.calls).toBe(3);
+			expect(provider_state.detail_calls).toBe(3);
 		} finally {
 			await second_runtime.dispose();
 		}

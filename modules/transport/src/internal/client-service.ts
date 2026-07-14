@@ -10,6 +10,7 @@ import {
 	type HostedProjectCloneApprovalRespondEnvelope,
 	HostedProjectCloneRequest,
 	type HostedProjectCloneRequestEnvelope,
+	type HostedGitCheckFailureDetailQueryEnvelope,
 	type HostedGitSnapshotQueryEnvelope,
 	type HostedGitSnapshotRefreshEnvelope,
 	type WorkspaceChangeListQueryEnvelope,
@@ -59,6 +60,7 @@ import {
 	type ArtisanHostedProjectCloneApprovalResponseInput,
 	type ArtisanHostedProjectCloneInput,
 	type ArtisanHostedGitSnapshotInput,
+	type ArtisanHostedGitCheckFailureDetailInput,
 	type ArtisanHostedGitSnapshotRefreshInput,
 	type ArtisanGlobalGuidanceDriftInput,
 	type ArtisanGlobalGuidanceRetryInput,
@@ -342,6 +344,27 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					return result.kind === "hosted.git.snapshot.query.result"
 						? result.payload
 						: yield* Effect.die("hosted Git snapshot response narrowed incorrectly");
+				});
+			const get_hosted_git_check_failure_detail = (
+				input: ArtisanHostedGitCheckFailureDetailInput,
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: HostedGitCheckFailureDetailQueryEnvelope = {
+						...trace,
+						kind: "hosted.git.check_failure_detail.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"hosted.git.check_failure_detail.query.result",
+					);
+
+					return result.kind === "hosted.git.check_failure_detail.query.result"
+						? result.payload
+						: yield* Effect.die(
+								"hosted Git check failure detail response narrowed incorrectly",
+							);
 				});
 			const get_workspace_git_checkout_approval = (
 				input: WorkspaceGitCheckoutApprovalQuery,
@@ -1034,6 +1057,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				GetHostedProjectCloneApproval: get_hosted_project_clone_approval,
 				GetExternalWaits: get_external_waits,
 				GetHostedGitSnapshot: get_hosted_git_snapshot,
+				GetHostedGitCheckFailureDetail: get_hosted_git_check_failure_detail,
 				GetGlobalGuidance: get_global_guidance,
 				GetModelBehaviour: get_model_behaviour,
 				GetThreadRetentionPolicy: get_thread_retention_policy,

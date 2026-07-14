@@ -7,6 +7,8 @@ import type {
 	ExternalWaitManualResumeRequest,
 	ExternalWaitQuery,
 	ExternalWaitQueryResult,
+	HostedGitCheckFailureDetailQuery,
+	HostedGitCheckFailureDetailQueryResult,
 	ExternalWaitRequest,
 	GlobalGuidanceDriftResolutionRequest,
 	GlobalGuidanceProvider,
@@ -135,6 +137,9 @@ export interface ArtisanWorkspaceGitSessionRefreshInput {
 
 /** Supplies the workspace identity for one hosted review and CI snapshot query. */
 export interface ArtisanHostedGitSnapshotInput extends HostedGitSnapshotQuery {}
+
+/** Supplies the exact snapshot identity needed for one transient check detail read. */
+export interface ArtisanHostedGitCheckFailureDetailInput extends HostedGitCheckFailureDetailQuery {}
 
 /** Supplies a hosted review and CI refresh command and optional durable retry identity. */
 export interface ArtisanHostedGitSnapshotRefreshInput extends HostedGitSnapshotRefreshRequest {
@@ -377,6 +382,9 @@ export class ArtisanClient extends Context.Service<
 		readonly GetHostedGitSnapshot: (
 			input: ArtisanHostedGitSnapshotInput,
 		) => Effect.Effect<HostedGitSnapshotQueryResult, ArtisanClientError>;
+		readonly GetHostedGitCheckFailureDetail: (
+			input: ArtisanHostedGitCheckFailureDetailInput,
+		) => Effect.Effect<HostedGitCheckFailureDetailQueryResult, ArtisanClientError>;
 		readonly GetWorkspaceGitCheckoutApproval: (
 			input: ArtisanWorkspaceGitCheckoutApprovalInput,
 		) => Effect.Effect<WorkspaceGitCheckoutApprovalQueryResult, ArtisanClientError>;

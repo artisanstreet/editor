@@ -32,6 +32,7 @@ import {
 	type GlobalGuidanceUpdateEnvelope,
 	type HeartbeatPongEnvelope,
 	type HelloEnvelope,
+	type HostedGitCheckFailureDetailQueryEnvelope,
 	type HostedGitSnapshotQueryEnvelope,
 	type HostedGitSnapshotRefreshEnvelope,
 	type HostedProjectCloneApprovalQueryEnvelope,
@@ -720,6 +721,90 @@ function hosted_git_snapshot_error_detail(error: unknown): ProtocolErrorDetail {
 	return {
 		code: "hosted.git.snapshot_unavailable",
 		message: "The hosted review and CI projection could not be reconciled.",
+		retryable: true,
+	};
+}
+
+function hosted_git_check_failure_detail_error_detail(error: unknown): ProtocolErrorDetail {
+	if (error instanceof GitProviderError) {
+		const code =
+			error.reason === "account_not_active" || error.reason === "auth_required"
+				? "hosted.git.check_failure_detail_authentication_required"
+				: error.reason === "permission_denied"
+					? "hosted.git.check_failure_detail_permission_denied"
+					: error.reason === "rate_limited"
+						? "hosted.git.check_failure_detail_rate_limited"
+						: error.reason === "invalid_input" || error.reason === "invalid_response"
+							? "hosted.git.check_failure_detail_invalid_provider_response"
+							: error.reason === "not_found" || error.reason === "stale_repository"
+								? "hosted.git.check_failure_detail_check_unavailable"
+								: error.reason === "unsupported_host"
+									? "hosted.git.check_failure_detail_unsupported_host"
+									: "hosted.git.check_failure_detail_provider_unavailable";
+		const message =
+			error.reason === "account_not_active" || error.reason === "auth_required"
+				? "Sign in to the selected hosted Git account before reading check failure detail."
+				: error.reason === "permission_denied"
+					? "The selected hosted Git account cannot read this check's failure detail."
+					: error.reason === "rate_limited"
+						? "The hosted Git provider rate limit currently prevents this detail read."
+						: error.reason === "invalid_input" || error.reason === "invalid_response"
+							? "The hosted Git provider returned invalid check failure detail."
+							: error.reason === "not_found" || error.reason === "stale_repository"
+								? "The selected check is no longer available for this pull request head."
+								: error.reason === "unsupported_host"
+									? "No hosted Git adapter supports this repository host."
+									: "The hosted Git provider is unavailable.";
+
+		return { code, message, retryable: error.retryable };
+	}
+
+	if (error instanceof HostedGitSnapshotServiceFailure) {
+		return {
+			code: `hosted.git.check_failure_detail_${error.reason}`,
+			message:
+				error.reason === "invalid_request"
+					? "The check failure detail request is invalid."
+					: error.reason === "project_unavailable"
+						? "The hosted project is no longer available."
+						: error.reason === "workspace_unavailable"
+							? "The visible Git workspace is not ready for a check detail read."
+							: error.reason === "branch_changed"
+								? "The visible branch changed while check failure detail was being read."
+								: error.reason === "snapshot_stale"
+									? "Refresh review and CI state before opening this check detail."
+									: error.reason === "check_unavailable"
+										? "The selected check is not available in the current hosted snapshot."
+										: error.reason === "provider_unavailable"
+											? "The hosted Git provider is unavailable."
+											: "The hosted Git provider returned invalid check detail.",
+			retryable:
+				error.reason === "branch_changed" ||
+				error.reason === "provider_unavailable" ||
+				error.reason === "snapshot_stale" ||
+				error.reason === "workspace_unavailable",
+		};
+	}
+
+	if (error instanceof HostedGitSnapshotUnavailable) {
+		return {
+			code: `hosted.git.check_failure_detail_${error.reason}`,
+			message: "The hosted review and CI projection is no longer available.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof HostedGitSnapshotInvariant) {
+		return {
+			code: "hosted.git.check_failure_detail_invariant_failed",
+			message: "The durable hosted review and CI projection failed validation.",
+			retryable: false,
+		};
+	}
+
+	return {
+		code: "hosted.git.check_failure_detail_unavailable",
+		message: "The check failure detail could not be read.",
 		retryable: true,
 	};
 }
@@ -1697,6 +1782,41 @@ export function make_protocol_server_layer(
 						),
 						Effect.catch((error) => {
 							const detail = hosted_git_snapshot_error_detail(error);
+
+							return EnqueueError(
+								current,
+								detail.code,
+								detail.message,
+								detail.retryable,
+								query.message_id,
+							);
+						}),
+					);
+
+				const HandleHostedGitCheckFailureDetailQuery = (
+					query: HostedGitCheckFailureDetailQueryEnvelope,
+					current: ReadyState,
+				) =>
+					hosted_git_snapshots.ReadCheckFailureDetail(query.payload).pipe(
+						Effect.flatMap((result) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "hosted.git.check_failure_detail.query.result",
+									message_id,
+									origin: "backend",
+									payload: result,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch((error) => {
+							const detail = hosted_git_check_failure_detail_error_detail(error);
 
 							return EnqueueError(
 								current,
@@ -2716,6 +2836,8 @@ export function make_protocol_server_layer(
 							return HandleWorkspaceGitSessionQuery(envelope, current);
 						case "hosted.git.snapshot.query":
 							return HandleHostedGitSnapshotQuery(envelope, current);
+						case "hosted.git.check_failure_detail.query":
+							return HandleHostedGitCheckFailureDetailQuery(envelope, current);
 						case "external_wait.query":
 							return HandleExternalWaitQuery(envelope, current);
 						case "workspace.git.checkout.approval.query":
