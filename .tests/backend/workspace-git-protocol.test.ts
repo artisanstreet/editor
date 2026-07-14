@@ -11,6 +11,9 @@ import type {
 	WorkspaceGitCheckoutApprovalQueryEnvelope,
 	WorkspaceGitCheckoutApprovalRespondEnvelope,
 	WorkspaceGitCheckoutRequestEnvelope,
+	WorkspaceGitMutationApprovalQueryEnvelope,
+	WorkspaceGitMutationApprovalRespondEnvelope,
+	WorkspaceGitMutationRequestEnvelope,
 	WorkspaceGitSessionQueryEnvelope,
 	WorkspaceGitSessionRefreshEnvelope,
 } from "@artisan/protocol";
@@ -34,6 +37,7 @@ const temporary_directories: Array<string> = [];
 const protocol_time = "2026-07-13T12:00:00.000Z";
 const workspace_id = "workspace_git_protocol";
 const thread_id = "thread_git_protocol";
+const other_thread_id = "thread_git_protocol_other";
 
 const open_connection = Effect.gen(function* () {
 	const protocol_server = yield* ProtocolServer;
@@ -158,6 +162,60 @@ function approval_response(
 	};
 }
 
+function mutation_request(
+	message_id: string,
+	expected_session_version: number,
+	message: string,
+): WorkspaceGitMutationRequestEnvelope {
+	return {
+		kind: "workspace.git.mutation.request",
+		message_id,
+		origin: "frontend",
+		payload: {
+			expected_session_version,
+			operation: { message, type: "commit" },
+			workspace_id,
+		},
+		protocol_version: 1,
+		schema_version: 1,
+		sent_at: protocol_time,
+		thread_id,
+	};
+}
+
+function mutation_approval_query(
+	message_id: string,
+	approval_id: string,
+	target_thread_id = thread_id,
+): WorkspaceGitMutationApprovalQueryEnvelope {
+	return {
+		kind: "workspace.git.mutation.approval.query",
+		message_id,
+		origin: "frontend",
+		payload: { approval_id, thread_id: target_thread_id },
+		protocol_version: 1,
+		schema_version: 1,
+		sent_at: protocol_time,
+	};
+}
+
+function mutation_approval_response(
+	message_id: string,
+	approval_id: string,
+	approved: boolean,
+): WorkspaceGitMutationApprovalRespondEnvelope {
+	return {
+		kind: "workspace.git.mutation.approval.respond",
+		message_id,
+		origin: "frontend",
+		payload: { approval_id, approved },
+		protocol_version: 1,
+		schema_version: 1,
+		sent_at: protocol_time,
+		thread_id,
+	};
+}
+
 async function make_repository() {
 	const directory = await mkdtemp(join(tmpdir(), "artisan-workspace-git-protocol-"));
 	const root = join(directory, "repository");
@@ -199,6 +257,21 @@ const SeedThread = Effect.gen(function* () {
 		schema_version: 1,
 		sent_at: protocol_time,
 		thread_id,
+	});
+});
+
+const SeedOtherThread = Effect.gen(function* () {
+	const router = yield* ProtocolRouter;
+
+	yield* router.Route({
+		kind: "command",
+		message_id: "create_other_git_protocol_thread",
+		origin: "frontend",
+		payload: { title: "Other Git protocol", type: "thread.create" },
+		protocol_version: 1,
+		schema_version: 1,
+		sent_at: protocol_time,
+		thread_id: other_thread_id,
 	});
 });
 
@@ -426,6 +499,163 @@ describe("workspace Git protocol", () => {
 					}),
 				),
 			);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("routes generic mutation approvals as durable source-free lifecycle events", async () => {
+		const { database_path, root } = await make_repository();
+		const private_commit_message = "private commit text must not cross the protocol";
+		const private_path = "private-protocol-path.txt";
+		const runtime = make_runtime(database_path, root);
+
+		await writeFile(join(root, private_path), "private staged content\n");
+		await git(root, "add", private_path);
+
+		try {
+			await runtime.runPromise(SeedThread);
+			await runtime.runPromise(SeedOtherThread);
+			await runtime.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const connection = yield* open_connection;
+						yield* negotiate(connection);
+						yield* connection.Receive(session_refresh("refresh_generic_mutation"));
+						yield* take_outbound(connection, 2);
+
+						yield* connection.Receive(
+							mutation_request("request_generic_mutation", 1, private_commit_message),
+						);
+						const requested = yield* take_outbound(connection, 2);
+						const request_sequence = receipt_journal_sequence(requested);
+						const request_event = find_event(
+							requested,
+							"workspace.git.mutation.approval.updated",
+						);
+						const approval_id =
+							request_event.payload.type === "workspace.git.mutation.approval.updated"
+								? request_event.payload.approval.approval_id
+								: "";
+
+						yield* connection.Receive(
+							mutation_approval_query("query_generic_mutation", approval_id),
+						);
+						const queried = yield* take_outbound(connection, 1);
+						expect(queried).toMatchObject([
+							{
+								correlation_id: "query_generic_mutation",
+								kind: "workspace.git.mutation.approval.query.result",
+								payload: {
+									approval: {
+										approval_id,
+										operation: { type: "commit" },
+										state: "requested",
+									},
+								},
+							},
+						]);
+
+						yield* connection.Receive(
+							mutation_approval_query(
+								"query_generic_mutation_from_other_thread",
+								approval_id,
+								other_thread_id,
+							),
+						);
+						expect(yield* take_outbound(connection, 1)).toMatchObject([
+							{
+								correlation_id: "query_generic_mutation_from_other_thread",
+								kind: "protocol.error",
+								payload: {
+									code: "workspace.git.mutation_unavailable",
+									retryable: false,
+								},
+							},
+						]);
+
+						yield* connection.Receive(
+							mutation_approval_response("deny_generic_mutation", approval_id, false),
+						);
+						const denied = yield* take_outbound(connection, 2);
+						const denial_sequence = receipt_journal_sequence(denied);
+						expect(
+							find_event(denied, "workspace.git.mutation.approval.updated"),
+						).toMatchObject({
+							payload: { approval: { approval_id, state: "denied" } },
+						});
+
+						yield* connection.Receive(
+							mutation_approval_response("deny_generic_mutation", approval_id, false),
+						);
+						const duplicate = yield* take_outbound(connection, 1);
+						expect(find_receipt(duplicate).payload).toMatchObject({
+							status: "duplicate",
+						});
+						expect(receipt_journal_sequence(duplicate)).toBe(denial_sequence);
+
+						yield* connection.Receive(
+							mutation_request("stale_generic_mutation", 99, private_commit_message),
+						);
+						expect(yield* take_outbound(connection, 1)).toMatchObject([
+							{
+								kind: "command.receipt",
+								payload: {
+									error: {
+										code: "workspace.git.mutation_session_stale",
+										retryable: false,
+									},
+									status: "rejected",
+								},
+							},
+						]);
+
+						yield* connection.Close;
+						const replay_connection = yield* open_connection;
+						const replay = yield* negotiate(
+							replay_connection,
+							make_hello("hello_generic_mutation_replay"),
+						);
+						yield* replay_connection.Close;
+						const replayed_mutations = replay.filter(
+							(envelope) =>
+								envelope.kind === "event" &&
+								envelope.payload.type === "workspace.git.mutation.approval.updated",
+						);
+						const public_protocol = JSON.stringify([
+							requested,
+							queried,
+							denied,
+							duplicate,
+							replayed_mutations,
+						]);
+
+						expect(replay).toEqual(
+							expect.arrayContaining([
+								expect.objectContaining({
+									journal_sequence: request_sequence,
+									kind: "event",
+									payload: expect.objectContaining({
+										type: "workspace.git.mutation.approval.updated",
+									}),
+								}),
+								expect.objectContaining({
+									journal_sequence: denial_sequence,
+									kind: "event",
+									payload: expect.objectContaining({
+										type: "workspace.git.mutation.approval.updated",
+									}),
+								}),
+							]),
+						);
+						expect(public_protocol).not.toContain(private_commit_message);
+						expect(public_protocol).not.toContain(private_path);
+						expect(public_protocol).not.toContain(root);
+					}),
+				),
+			);
+
+			expect(await git(root, "log", "-1", "--format=%B")).toBe("initial");
 		} finally {
 			await runtime.dispose();
 		}

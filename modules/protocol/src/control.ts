@@ -27,7 +27,13 @@ import {
 	WorkspaceGitSessionRefreshRequest,
 	WorkspaceGitSessionUpdatedEvent,
 } from "./git-session";
-import { WorkspaceGitMutationApprovalUpdatedEvent } from "./git-mutation";
+import {
+	WorkspaceGitMutationApprovalQuery,
+	WorkspaceGitMutationApprovalQueryResult,
+	WorkspaceGitMutationApprovalResponseRequest,
+	WorkspaceGitMutationApprovalUpdatedEvent,
+	WorkspaceGitMutationRequest,
+} from "./git-mutation";
 import {
 	Identifier,
 	IsoDateTime,
@@ -1287,6 +1293,48 @@ export const WorkspaceGitCheckoutApprovalRespondEnvelope = Schema.Struct({
 export type WorkspaceGitCheckoutApprovalRespondEnvelope =
 	typeof WorkspaceGitCheckoutApprovalRespondEnvelope.Type;
 
+/** Requests one guarded Git mutation against an observed session version. */
+export const WorkspaceGitMutationRequestEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("workspace.git.mutation.request"),
+	payload: WorkspaceGitMutationRequest,
+	thread_id: Identifier,
+});
+
+export type WorkspaceGitMutationRequestEnvelope = typeof WorkspaceGitMutationRequestEnvelope.Type;
+
+/** Requests one source-free Git mutation approval by durable identity. */
+export const WorkspaceGitMutationApprovalQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("workspace.git.mutation.approval.query"),
+	payload: WorkspaceGitMutationApprovalQuery,
+});
+
+export type WorkspaceGitMutationApprovalQueryEnvelope =
+	typeof WorkspaceGitMutationApprovalQueryEnvelope.Type;
+
+/** Returns a correlated public Git mutation approval projection. */
+export const WorkspaceGitMutationApprovalQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("workspace.git.mutation.approval.query.result"),
+	payload: WorkspaceGitMutationApprovalQueryResult,
+});
+
+export type WorkspaceGitMutationApprovalQueryResultEnvelope =
+	typeof WorkspaceGitMutationApprovalQueryResultEnvelope.Type;
+
+/** Records an explicit approval or denial for one Git mutation request. */
+export const WorkspaceGitMutationApprovalRespondEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("workspace.git.mutation.approval.respond"),
+	payload: WorkspaceGitMutationApprovalResponseRequest,
+	thread_id: Identifier,
+});
+
+export type WorkspaceGitMutationApprovalRespondEnvelope =
+	typeof WorkspaceGitMutationApprovalRespondEnvelope.Type;
+
 /** Requests the curated Model Behaviour registry and current reconciliation state. */
 export const ModelBehaviourQueryEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
@@ -1608,6 +1656,9 @@ export const InboundControlEnvelope = Schema.Union([
 	WorkspaceGitCheckoutRequestEnvelope,
 	WorkspaceGitCheckoutApprovalQueryEnvelope,
 	WorkspaceGitCheckoutApprovalRespondEnvelope,
+	WorkspaceGitMutationRequestEnvelope,
+	WorkspaceGitMutationApprovalQueryEnvelope,
+	WorkspaceGitMutationApprovalRespondEnvelope,
 	GlobalGuidanceQueryEnvelope,
 	GlobalGuidanceUpdateEnvelope,
 	GlobalGuidanceSelectionEnvelope,
@@ -1644,6 +1695,7 @@ export const OutboundControlEnvelope = Schema.Union([
 	WorkspaceReplaceApprovalQueryResultEnvelope,
 	WorkspaceGitSessionQueryResultEnvelope,
 	WorkspaceGitCheckoutApprovalQueryResultEnvelope,
+	WorkspaceGitMutationApprovalQueryResultEnvelope,
 	GlobalGuidanceQueryResultEnvelope,
 	ModelBehaviourQueryResultEnvelope,
 	ThreadWorkQueryResultEnvelope,

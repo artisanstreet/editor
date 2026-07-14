@@ -1,7 +1,9 @@
-import { Schema } from "effect";
+import { Effect, Schema } from "effect";
 import { describe, expect, it } from "vitest";
 
 import {
+	DecodeInboundControlEnvelope,
+	DecodeOutboundControlEnvelope,
 	summarize_workspace_git_mutation,
 	WorkspaceGitMutationApproval,
 	WorkspaceGitMutationApprovalUpdatedEvent,
@@ -10,6 +12,18 @@ import {
 
 const timestamp = "2026-07-13T08:00:00.000Z";
 const head = "a".repeat(40);
+
+function frontend_envelope(kind: string, payload: unknown) {
+	return {
+		kind,
+		message_id: `message_${kind}`,
+		origin: "frontend",
+		payload,
+		protocol_version: 1,
+		schema_version: 1,
+		sent_at: timestamp,
+	};
+}
 
 const decode_request = Schema.decodeUnknownSync(WorkspaceGitMutationRequest, {
 	onExcessProperty: "error",
@@ -86,6 +100,91 @@ function approval(state: string, operation: unknown = { type: "commit" }) {
 }
 
 describe("Git mutation protocol codec", () => {
+	it("roundtrips mutation request, approval, and public query envelopes", async () => {
+		const request_envelope = {
+			...frontend_envelope(
+				"workspace.git.mutation.request",
+				request({
+					message: "Ship the guarded mutation protocol",
+					type: "commit",
+				}),
+			),
+			thread_id: "thread_1",
+		};
+		const query_envelope = frontend_envelope("workspace.git.mutation.approval.query", {
+			approval_id: "approval_1",
+			thread_id: "thread_1",
+		});
+		const respond_envelope = {
+			...frontend_envelope("workspace.git.mutation.approval.respond", {
+				approval_id: "approval_1",
+				approved: true,
+			}),
+			thread_id: "thread_1",
+		};
+		const result_envelope = {
+			correlation_id: "query_1",
+			kind: "workspace.git.mutation.approval.query.result",
+			message_id: "query_result_1",
+			origin: "backend",
+			payload: { approval: approval("requested", { type: "commit" }) },
+			protocol_version: 1,
+			schema_version: 1,
+			sent_at: timestamp,
+		};
+
+		for (const envelope of [request_envelope, query_envelope, respond_envelope]) {
+			await expect(
+				Effect.runPromise(DecodeInboundControlEnvelope(envelope)),
+			).resolves.toEqual(envelope);
+		}
+
+		await expect(
+			Effect.runPromise(DecodeOutboundControlEnvelope(result_envelope)),
+		).resolves.toEqual(result_envelope);
+	});
+
+	it("rejects private commit text and excess diagnostics in public query results", async () => {
+		const result_envelope = {
+			correlation_id: "query_1",
+			kind: "workspace.git.mutation.approval.query.result",
+			message_id: "query_result_1",
+			origin: "backend",
+			payload: { approval: approval("requested", { type: "commit" }) },
+			protocol_version: 1,
+			schema_version: 1,
+			sent_at: timestamp,
+		};
+
+		await expect(
+			Effect.runPromise(
+				DecodeOutboundControlEnvelope({
+					...result_envelope,
+					payload: {
+						approval: approval("requested", {
+							message: "private commit text",
+							type: "commit",
+						}),
+					},
+				}),
+			),
+		).rejects.toBeDefined();
+
+		await expect(
+			Effect.runPromise(
+				DecodeOutboundControlEnvelope({
+					...result_envelope,
+					payload: {
+						approval: {
+							...approval("requested", { type: "commit" }),
+							stderr: "private diagnostics",
+						},
+					},
+				}),
+			),
+		).rejects.toBeDefined();
+	});
+
 	it.each([
 		{ branch: "feature", type: "branch_create" },
 		{ target_branch: "feature", type: "checkout" },
