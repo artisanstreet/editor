@@ -96,6 +96,14 @@ export {
 	type ExternalWaitCycleResult,
 } from "./external-wait/external-wait-coordinator";
 export {
+	ExternalWaitDispatcher,
+	ExternalWaitDispatcherFailure,
+	ExternalWaitDispatcherLive,
+	ExternalWaitDispatchScheduler,
+	ExternalWaitDispatchSchedulerLive,
+	type ExternalWaitDispatchCycleResult,
+} from "./external-wait/external-wait-dispatcher";
+export {
 	ExternalWaitConflict,
 	ExternalWaitInvariant,
 	ExternalWaitRepository,
@@ -103,6 +111,7 @@ export {
 	ExternalWaitUnavailable,
 	type ExternalWaitAcceptance,
 	type ExternalWaitObservationClaim,
+	type ExternalWaitMaterialization,
 	type ExternalWaitRegistration,
 	type ExternalWaitRepositoryError,
 	type ExternalWaitWake,

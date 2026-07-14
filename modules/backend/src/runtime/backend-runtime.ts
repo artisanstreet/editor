@@ -41,6 +41,11 @@ import {
 	ExternalWaitScheduler,
 	ExternalWaitSchedulerLive,
 } from "../external-wait/external-wait-coordinator";
+import {
+	ExternalWaitDispatcherLive,
+	ExternalWaitDispatchScheduler,
+	ExternalWaitDispatchSchedulerLive,
+} from "../external-wait/external-wait-dispatcher";
 import { ExternalWaitRepositoryLive } from "../external-wait/external-wait-repository";
 import { HostedGitSnapshotRepositoryLive } from "../git-provider/hosted-git-snapshot-repository";
 import { HostedGitSnapshotServiceLive } from "../git-provider/hosted-git-snapshot-service";
@@ -145,6 +150,7 @@ import { WorkspaceReplaceApprovalCoordinatorLive } from "../workspace/workspace-
 export interface BackendOptions {
 	readonly database_path: string;
 	readonly engines?: ReadonlyArray<Engine>;
+	readonly external_wait_dispatch_scheduler?: Layer.Layer<ExternalWaitDispatchScheduler>;
 	readonly external_wait_scheduler?: Layer.Layer<ExternalWaitScheduler>;
 	readonly git_provider_registry?: Layer.Layer<GitProviderRegistry, GitProviderRegistryError>;
 	readonly guidance?: Partial<GlobalGuidanceServiceOptions>;
@@ -394,6 +400,16 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(guidance),
 		Layer.provideMerge(harness_context),
 	);
+	const external_wait_dispatch = ExternalWaitDispatcherLive.pipe(
+		Layer.provideMerge(external_waits),
+		Layer.provideMerge(engine_registry),
+		Layer.provideMerge(orchestration),
+		Layer.provideMerge(graph),
+		Layer.provideMerge(
+			options.external_wait_dispatch_scheduler ?? ExternalWaitDispatchSchedulerLive,
+		),
+		Layer.provideMerge(infrastructure),
+	);
 	const thread_metadata = ThreadMetadataRepositoryLive.pipe(Layer.provideMerge(infrastructure));
 	const metadata_refinement =
 		options.thread_metadata_refiner === undefined
@@ -516,6 +532,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(hosted_git_snapshots),
 		Layer.provideMerge(external_waits),
 		Layer.provideMerge(external_wait_coordination),
+		Layer.provideMerge(external_wait_dispatch),
 		Layer.provideMerge(guidance),
 		Layer.provideMerge(model_behaviour),
 		Layer.provideMerge(git_provider_registry),

@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Effect, Latch, Stream } from "effect";
+import { Effect, Latch, Layer, PubSub, Stream } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { CommandEnvelope, HelloEnvelope } from "@artisan/protocol";
@@ -16,12 +16,14 @@ import type {
 } from "@artisan/engines";
 import {
 	AgentOrchestrator,
+	ExternalWaitDispatchScheduler,
 	make_backend_runtime,
 	ProtocolServer,
 	type ProtocolConnection,
 } from "@artisan/backend";
 
 import { Database } from "../../modules/backend/src/persistence/database";
+import { JournalNotifier } from "../../modules/backend/src/persistence/journal-notifier";
 import {
 	OrchestrationCoordinators,
 	OrchestrationOutbox,
@@ -31,6 +33,9 @@ import {
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];
+const ExternalWaitDispatchSchedulerDisabled = Layer.succeed(ExternalWaitDispatchScheduler, {
+	Schedule: () => Effect.never,
+});
 
 async function make_database_path() {
 	const directory = await mkdtemp(join(tmpdir(), "artisan-orchestration-"));
@@ -47,26 +52,31 @@ function make_engine() {
 	const opened_latch = Latch.makeUnsafe();
 	let events_consumed = 0;
 	let opened = 0;
-	const capabilities = Object.fromEntries(
-		[
-			"approval",
-			"auth",
-			"cancel",
-			"close",
-			"events",
-			"global_guidance",
-			"harness_context",
-			"model_selection",
-			"native_tools",
-			"probe",
-			"question",
-			"raw_frames",
-			"resume",
-			"start",
-			"steer",
-			"subagents",
-		].map((name) => [name, { state: "supported" as const }]),
-	) as Engine["Descriptor"]["capabilities"];
+	let resume_state: "supported" | "unsupported" = "supported";
+	const capabilities = {
+		...Object.fromEntries(
+			[
+				"approval",
+				"auth",
+				"cancel",
+				"close",
+				"events",
+				"global_guidance",
+				"harness_context",
+				"model_selection",
+				"native_tools",
+				"probe",
+				"question",
+				"raw_frames",
+				"start",
+				"steer",
+				"subagents",
+			].map((name) => [name, { state: "supported" as const }]),
+		),
+		get resume() {
+			return { state: resume_state };
+		},
+	} as Engine["Descriptor"]["capabilities"];
 
 	const Open = (input: EngineOpenInput) =>
 		Effect.gen(function* () {
@@ -138,8 +148,65 @@ function make_engine() {
 		inputs,
 		opened: () => opened,
 		opened_latch,
+		set_resume_state: (state: "supported" | "unsupported") => {
+			resume_state = state;
+		},
 	};
 }
+
+const SeedResumeWork = Effect.gen(function* () {
+	const database = yield* Database;
+	const created_at = "2026-07-10T08:00:00.000Z";
+	const payload = {
+		engine_id: "deterministic",
+		text: "Continue after the external review changed.",
+		type: "thread.send_message" as const,
+		working_directory: "C:/work",
+	};
+
+	yield* database.client.insert(Threads).values({
+		created_at,
+		thread_id: "thread_1",
+		title: "Resume orchestration",
+		updated_at: created_at,
+	});
+	yield* database.client.insert(OrchestrationCoordinators).values({
+		active_run_id: "resume_run",
+		agent_id: "agent_1",
+		created_at,
+		display_name: "Primary coordinator",
+		engine_id: "deterministic",
+		native_resume_json: '{"native_thread_id":"native:resume_run"}',
+		native_thread_id: "native:resume_run",
+		role: "primary",
+		thread_id: "thread_1",
+		updated_at: created_at,
+	});
+	yield* database.client.insert(OrchestrationRuns).values({
+		agent_id: "agent_1",
+		created_at,
+		engine_id: "deterministic",
+		native_resume_json: '{"native_thread_id":"native:resume_run"}',
+		native_thread_id: "native:resume_run",
+		open_mode: "resume",
+		run_id: "resume_run",
+		status: "queued",
+		thread_id: "thread_1",
+		updated_at: created_at,
+		working_directory: "C:/work",
+	});
+	yield* database.client.insert(OrchestrationOutbox).values({
+		agent_id: "agent_1",
+		command_id: "resume_command",
+		created_at,
+		kind: "resume",
+		payload_json: JSON.stringify(payload),
+		run_id: "resume_run",
+		status: "pending",
+		thread_id: "thread_1",
+		updated_at: created_at,
+	});
+});
 
 function make_hello(): HelloEnvelope {
 	return {
@@ -184,6 +251,7 @@ describe("single coordinator orchestration", () => {
 		const runtime = make_backend_runtime({
 			database_path,
 			engines: [deterministic.engine],
+			external_wait_dispatch_scheduler: ExternalWaitDispatchSchedulerDisabled,
 			migrations_path,
 		});
 
@@ -281,65 +349,15 @@ describe("single coordinator orchestration", () => {
 		const runtime = make_backend_runtime({
 			database_path: await make_database_path(),
 			engines: [deterministic.engine],
+			external_wait_dispatch_scheduler: ExternalWaitDispatchSchedulerDisabled,
 			migrations_path,
 		});
 
 		try {
 			await runtime.runPromise(
 				Effect.gen(function* () {
-					const database = yield* Database;
 					const orchestrator = yield* AgentOrchestrator;
-					const created_at = "2026-07-10T08:00:00.000Z";
-					const payload = {
-						engine_id: "deterministic",
-						text: "Continue after the external review changed.",
-						type: "thread.send_message" as const,
-						working_directory: "C:/work",
-					};
-
-					yield* database.client.insert(Threads).values({
-						created_at,
-						thread_id: "thread_1",
-						title: "Resume orchestration",
-						updated_at: created_at,
-					});
-					yield* database.client.insert(OrchestrationCoordinators).values({
-						active_run_id: "resume_run",
-						agent_id: "agent_1",
-						created_at,
-						display_name: "Primary coordinator",
-						engine_id: "deterministic",
-						native_resume_json: '{"native_thread_id":"native:resume_run"}',
-						native_thread_id: "native:resume_run",
-						role: "primary",
-						thread_id: "thread_1",
-						updated_at: created_at,
-					});
-					yield* database.client.insert(OrchestrationRuns).values({
-						agent_id: "agent_1",
-						created_at,
-						engine_id: "deterministic",
-						native_resume_json: '{"native_thread_id":"native:resume_run"}',
-						native_thread_id: "native:resume_run",
-						open_mode: "resume",
-						run_id: "resume_run",
-						status: "queued",
-						thread_id: "thread_1",
-						updated_at: created_at,
-						working_directory: "C:/work",
-					});
-					yield* database.client.insert(OrchestrationOutbox).values({
-						agent_id: "agent_1",
-						command_id: "resume_command",
-						created_at,
-						kind: "resume",
-						payload_json: JSON.stringify(payload),
-						run_id: "resume_run",
-						status: "pending",
-						thread_id: "thread_1",
-						updated_at: created_at,
-					});
-
+					yield* SeedResumeWork;
 					yield* orchestrator.NotifyWorkAvailable;
 					yield* deterministic.opened_latch.await;
 				}),
@@ -354,6 +372,49 @@ describe("single coordinator orchestration", () => {
 					working_directory: "C:/work",
 				}),
 			]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("fails a durable native resume when engine capability changes before open", async () => {
+		const deterministic = make_engine();
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			engines: [deterministic.engine],
+			external_wait_dispatch_scheduler: ExternalWaitDispatchSchedulerDisabled,
+			migrations_path,
+		});
+
+		try {
+			await runtime.runPromise(SeedResumeWork);
+			deterministic.set_resume_state("unsupported");
+
+			const failed_run = await runtime.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const database = yield* Database;
+						const notifier = yield* JournalNotifier;
+						const orchestrator = yield* AgentOrchestrator;
+						const subscription = yield* notifier.Subscribe;
+
+						yield* orchestrator.NotifyWorkAvailable;
+						yield* PubSub.take(subscription);
+						yield* PubSub.take(subscription);
+
+						const [run] = yield* database.client
+							.select()
+							.from(OrchestrationRuns)
+							.limit(1);
+
+						return run;
+					}),
+				),
+			);
+
+			expect(deterministic.opened()).toBe(0);
+			expect(deterministic.inputs).toEqual([]);
+			expect(failed_run?.status).toBe("failed");
 		} finally {
 			await runtime.dispose();
 		}
