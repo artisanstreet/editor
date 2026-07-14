@@ -402,6 +402,19 @@ export {
 	type WorkspaceGitCheckoutRepositoryError,
 } from "./git/workspace-git-checkout-repository";
 export {
+	WorkspaceGitMutationConflict,
+	WorkspaceGitMutationInvariant,
+	WorkspaceGitMutationRepository,
+	WorkspaceGitMutationRepositoryLive,
+	WorkspaceGitMutationUnavailable,
+	type RequestWorkspaceGitMutation,
+	type WorkspaceGitMutationAcceptance,
+	type WorkspaceGitMutationDecision,
+	type WorkspaceGitMutationExecution,
+	type WorkspaceGitMutationRepositoryError,
+	type WorkspaceGitMutationSettlement,
+} from "./git/workspace-git-mutation-repository";
+export {
 	WorkspaceGitCheckoutCoordinator,
 	WorkspaceGitCheckoutCoordinatorLive,
 	WorkspaceGitCheckoutFailure,

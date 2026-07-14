@@ -6,6 +6,7 @@ export type RuntimeIdPrefix =
 	| "agent"
 	| "approval"
 	| "backend"
+	| "claim"
 	| "connection"
 	| "event"
 	| "heartbeat"
