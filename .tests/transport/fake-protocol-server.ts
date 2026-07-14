@@ -39,6 +39,10 @@ import {
 	type WorkspaceGitCheckoutApprovalQueryEnvelope,
 	type WorkspaceGitCheckoutApprovalRespondEnvelope,
 	type WorkspaceGitCheckoutRequestEnvelope,
+	type WorkspaceGitMutationApproval,
+	type WorkspaceGitMutationApprovalQueryEnvelope,
+	type WorkspaceGitMutationApprovalRespondEnvelope,
+	type WorkspaceGitMutationRequestEnvelope,
 	type WorkspaceGitSessionQueryEnvelope,
 	type WorkspaceGitSessionRefreshEnvelope,
 	type WorkspaceGitSession,
@@ -131,11 +135,14 @@ export interface FakeProtocolSnapshot {
 	readonly workspace_replace_approval_response_attempts: ReadonlyArray<WorkspaceReplaceApprovalRespondEnvelope>;
 	readonly workspace_git_session_query_attempts: ReadonlyArray<WorkspaceGitSessionQueryEnvelope>;
 	readonly workspace_git_checkout_approval_query_attempts: ReadonlyArray<WorkspaceGitCheckoutApprovalQueryEnvelope>;
+	readonly workspace_git_mutation_approval_query_attempts: ReadonlyArray<WorkspaceGitMutationApprovalQueryEnvelope>;
 	readonly workspace_git_mutation_attempts: ReadonlyArray<
 		| WorkspaceGitSessionRefreshEnvelope
 		| WorkspaceGitCheckoutRequestEnvelope
 		| WorkspaceGitCheckoutApprovalRespondEnvelope
 	>;
+	readonly workspace_git_mutation_request_attempts: ReadonlyArray<WorkspaceGitMutationRequestEnvelope>;
+	readonly workspace_git_mutation_approval_response_attempts: ReadonlyArray<WorkspaceGitMutationApprovalRespondEnvelope>;
 	readonly subscriptions: ReadonlyArray<SubscribeEnvelope>;
 }
 
@@ -203,11 +210,16 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 	const workspace_git_session_query_attempts: Array<WorkspaceGitSessionQueryEnvelope> = [];
 	const workspace_git_checkout_approval_query_attempts: Array<WorkspaceGitCheckoutApprovalQueryEnvelope> =
 		[];
+	const workspace_git_mutation_approval_query_attempts: Array<WorkspaceGitMutationApprovalQueryEnvelope> =
+		[];
 	const workspace_git_mutation_attempts: Array<
 		| WorkspaceGitSessionRefreshEnvelope
 		| WorkspaceGitCheckoutRequestEnvelope
 		| WorkspaceGitCheckoutApprovalRespondEnvelope
 	> = [];
+	const workspace_git_mutation_request_attempts: Array<WorkspaceGitMutationRequestEnvelope> = [];
+	const workspace_git_mutation_approval_response_attempts: Array<WorkspaceGitMutationApprovalRespondEnvelope> =
+		[];
 	const subscription_attempts: Array<SubscribeEnvelope> = [];
 	const threads = new Map<string, ThreadListItem>();
 	let retention_policy: ThreadRetentionPolicy = { enabled: true, inactivity_days: 7 };
@@ -385,6 +397,19 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 		updated_at: "2026-07-13T08:00:00.000Z",
 		workspace_id: "workspace_git_fixture",
 		state: "requested",
+	};
+	const workspace_git_mutation_approval: WorkspaceGitMutationApproval = {
+		approval_id: "git_mutation_approval_fixture",
+		created_at: "2026-07-13T08:00:00.000Z",
+		expected_session_version: 2,
+		operation: { type: "commit" },
+		source_branch: "main",
+		source_command_id: "git_mutation_fixture",
+		source_head: "a".repeat(40),
+		state: "requested",
+		thread_id: "thread_git_fixture",
+		updated_at: "2026-07-13T08:00:00.000Z",
+		workspace_id: "workspace_git_fixture",
 	};
 	let workspace_change: WorkspaceChange = {
 		after_identity: workspace_file_identity,
@@ -1228,6 +1253,59 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 					payload: { approval: workspace_git_checkout_approval },
 				});
 			});
+		const handle_workspace_git_mutation_approval_query = (
+			query: WorkspaceGitMutationApprovalQueryEnvelope,
+		) =>
+			Effect.gen(function* () {
+				workspace_git_mutation_approval_query_attempts.push(query);
+				yield* enqueue({
+					...backend_trace(),
+					correlation_id: query.message_id,
+					kind: "workspace.git.mutation.approval.query.result",
+					payload: { approval: workspace_git_mutation_approval },
+				});
+			});
+		const handle_workspace_git_mutation_request = (
+			mutation: WorkspaceGitMutationRequestEnvelope,
+		) =>
+			Effect.gen(function* () {
+				workspace_git_mutation_request_attempts.push(mutation);
+				const rejected =
+					mutation.payload.operation.type === "branch_create" &&
+					mutation.payload.operation.branch === "reject";
+
+				yield* enqueue({
+					...backend_trace(),
+					causation_id: mutation.message_id,
+					correlation_id: mutation.message_id,
+					kind: "command.receipt",
+					payload: rejected
+						? {
+								error: {
+									code: "workspace.git.mutation.blocked",
+									message: "The Git mutation is blocked by the workspace state.",
+									retryable: true,
+								},
+								status: "rejected",
+							}
+						: { journal_sequence: events.length + 1, status: "accepted" },
+					thread_id: mutation.thread_id,
+				});
+			});
+		const handle_workspace_git_mutation_approval_response = (
+			response: WorkspaceGitMutationApprovalRespondEnvelope,
+		) =>
+			Effect.gen(function* () {
+				workspace_git_mutation_approval_response_attempts.push(response);
+				yield* enqueue({
+					...backend_trace(),
+					causation_id: response.message_id,
+					correlation_id: response.message_id,
+					kind: "command.receipt",
+					payload: { journal_sequence: events.length + 1, status: "accepted" },
+					thread_id: response.thread_id,
+				});
+			});
 		const handle_workspace_git_mutation = (
 			mutation:
 				| WorkspaceGitSessionRefreshEnvelope
@@ -1587,10 +1665,22 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 						yield* handle_workspace_git_checkout_approval_query(input);
 
 						return;
+					case "workspace.git.mutation.approval.query":
+						yield* handle_workspace_git_mutation_approval_query(input);
+
+						return;
 					case "workspace.git.session.refresh":
 					case "workspace.git.checkout.request":
 					case "workspace.git.checkout.approval.respond":
 						yield* handle_workspace_git_mutation(input);
+
+						return;
+					case "workspace.git.mutation.request":
+						yield* handle_workspace_git_mutation_request(input);
+
+						return;
+					case "workspace.git.mutation.approval.respond":
+						yield* handle_workspace_git_mutation_approval_response(input);
 
 						return;
 					case "workspace.file.replace":
@@ -1752,6 +1842,13 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 			...workspace_git_checkout_approval_query_attempts,
 		],
 		workspace_git_mutation_attempts: [...workspace_git_mutation_attempts],
+		workspace_git_mutation_approval_query_attempts: [
+			...workspace_git_mutation_approval_query_attempts,
+		],
+		workspace_git_mutation_request_attempts: [...workspace_git_mutation_request_attempts],
+		workspace_git_mutation_approval_response_attempts: [
+			...workspace_git_mutation_approval_response_attempts,
+		],
 		subscriptions: [...subscription_attempts],
 	});
 

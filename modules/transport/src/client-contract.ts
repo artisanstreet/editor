@@ -30,6 +30,11 @@ import type {
 	WorkspaceGitCheckoutApprovalQuery,
 	WorkspaceGitCheckoutApprovalQueryResult,
 	WorkspaceGitCheckoutRequest,
+	WorkspaceGitMutationApprovalQuery,
+	WorkspaceGitMutationApprovalQueryResult,
+	WorkspaceGitMutationContinuationOperation,
+	WorkspaceGitMutationRequest,
+	WorkspaceGitMutationStandaloneOperation,
 	WorkspaceGitSessionQuery,
 	WorkspaceGitSessionQueryResult,
 } from "@artisan/protocol";
@@ -128,6 +133,36 @@ export interface ArtisanWorkspaceGitCheckoutApprovalInput extends WorkspaceGitCh
 
 /** Supplies one checkout approval decision and optional durable retry identity. */
 export interface ArtisanWorkspaceGitCheckoutApprovalResponseInput {
+	readonly approval_id: string;
+	readonly approved: boolean;
+	readonly command_id?: string;
+	readonly thread_id: string;
+}
+
+/** Supplies one generic Git mutation approval query identity. */
+export interface ArtisanWorkspaceGitMutationApprovalInput extends WorkspaceGitMutationApprovalQuery {}
+
+/** Supplies standalone Git intent or a continuation bound to its exact action approval. */
+export type ArtisanWorkspaceGitMutationInput =
+	| {
+			readonly action_approval_id?: never;
+			readonly command_id?: string;
+			readonly expected_session_version: WorkspaceGitMutationRequest["expected_session_version"];
+			readonly operation: WorkspaceGitMutationStandaloneOperation;
+			readonly thread_id: string;
+			readonly workspace_id: string;
+	  }
+	| {
+			readonly action_approval_id: string;
+			readonly command_id?: string;
+			readonly expected_session_version: WorkspaceGitMutationRequest["expected_session_version"];
+			readonly operation: WorkspaceGitMutationContinuationOperation;
+			readonly thread_id: string;
+			readonly workspace_id: string;
+	  };
+
+/** Supplies one generic Git mutation approval decision and optional durable retry identity. */
+export interface ArtisanWorkspaceGitMutationApprovalResponseInput {
 	readonly approval_id: string;
 	readonly approved: boolean;
 	readonly command_id?: string;
@@ -284,6 +319,9 @@ export class ArtisanClient extends Context.Service<
 		readonly GetWorkspaceGitCheckoutApproval: (
 			input: ArtisanWorkspaceGitCheckoutApprovalInput,
 		) => Effect.Effect<WorkspaceGitCheckoutApprovalQueryResult, ArtisanClientError>;
+		readonly GetWorkspaceGitMutationApproval: (
+			input: ArtisanWorkspaceGitMutationApprovalInput,
+		) => Effect.Effect<WorkspaceGitMutationApprovalQueryResult, ArtisanClientError>;
 		readonly OpenAsset: (
 			asset_id: string,
 		) => Effect.Effect<
@@ -357,6 +395,12 @@ export class ArtisanClient extends Context.Service<
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly RespondWorkspaceGitCheckoutApproval: (
 			input: ArtisanWorkspaceGitCheckoutApprovalResponseInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RequestWorkspaceGitMutation: (
+			input: ArtisanWorkspaceGitMutationInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RespondWorkspaceGitMutationApproval: (
+			input: ArtisanWorkspaceGitMutationApprovalResponseInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 	}
 >()("Artisan/ArtisanClient") {}

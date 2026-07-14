@@ -12,6 +12,7 @@ import type {
 	WorkspaceChange,
 	WorkspaceChangeDiffQueryResult,
 	WorkspaceFileReadQueryResult,
+	WorkspaceGitMutationApproval,
 } from "@artisan/protocol";
 import {
 	ArtisanClient,
@@ -38,6 +39,7 @@ export interface FixtureArtisanClientData {
 	readonly workspace_changes: ReadonlyArray<WorkspaceChange>;
 	readonly workspace_change_diffs: Readonly<Record<string, WorkspaceChangeDiffQueryResult>>;
 	readonly workspace_files: Readonly<Record<string, WorkspaceFileReadQueryResult>>;
+	readonly workspace_git_mutation_approval: WorkspaceGitMutationApproval;
 }
 
 const fixture_timestamp = "2026-07-12T10:00:00.000Z";
@@ -286,6 +288,19 @@ export const fixture_artisan_client_data = {
 			workspace_id: "workspace-artisan-editor",
 		},
 	},
+	workspace_git_mutation_approval: {
+		approval_id: "git-mutation-approval-editor-shell",
+		created_at: fixture_timestamp,
+		expected_session_version: 3,
+		operation: { type: "commit" },
+		source_branch: "main",
+		source_command_id: "command-fixture-git-mutation",
+		source_head: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		state: "requested",
+		thread_id: "thread-editor-shell",
+		updated_at: fixture_timestamp,
+		workspace_id: "workspace-artisan-editor",
+	},
 } satisfies FixtureArtisanClientData;
 
 const FixtureFailure = (message: string) =>
@@ -379,6 +394,21 @@ export const FixtureArtisanClientService = {
 			return yield* FixtureFailure(
 				`Unknown fixture workspace Git checkout approval: ${input.approval_id}`,
 			);
+		}),
+	GetWorkspaceGitMutationApproval: (input) =>
+		Effect.gen(function* () {
+			const approval = fixture_artisan_client_data.workspace_git_mutation_approval;
+
+			if (
+				input.approval_id !== approval.approval_id ||
+				input.thread_id !== approval.thread_id
+			) {
+				return yield* FixtureFailure(
+					`Unknown fixture workspace Git mutation approval: ${input.approval_id}`,
+				);
+			}
+
+			return { approval };
 		}),
 	ListTerminals: (thread_id, workspace_id) =>
 		Effect.gen(function* () {
@@ -488,10 +518,20 @@ export const FixtureArtisanClientService = {
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-workspace-git-checkout");
 		}),
+	RequestWorkspaceGitMutation: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-workspace-git-mutation");
+		}),
 	RespondWorkspaceGitCheckoutApproval: (input) =>
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(
 				input.command_id ?? "fixture-workspace-git-checkout-approval",
+			);
+		}),
+	RespondWorkspaceGitMutationApproval: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(
+				input.command_id ?? "fixture-workspace-git-mutation-approval",
 			);
 		}),
 	SelectGlobalGuidance: (input) =>

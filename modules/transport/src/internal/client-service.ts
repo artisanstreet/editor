@@ -1,4 +1,4 @@
-import { Cause, Effect, Layer, Option, Queue, Ref, Stream } from "effect";
+import { Cause, Effect, Layer, Option, Queue, Ref, Schema, Stream } from "effect";
 
 import {
 	type CommandEnvelope,
@@ -15,6 +15,11 @@ import {
 	type WorkspaceGitCheckoutApprovalQueryEnvelope,
 	type WorkspaceGitCheckoutApprovalRespondEnvelope,
 	type WorkspaceGitCheckoutRequestEnvelope,
+	type WorkspaceGitMutationApprovalQuery,
+	type WorkspaceGitMutationApprovalQueryEnvelope,
+	type WorkspaceGitMutationApprovalRespondEnvelope,
+	WorkspaceGitMutationRequest,
+	type WorkspaceGitMutationRequestEnvelope,
 	type WorkspaceGitSessionQueryEnvelope,
 	type WorkspaceGitSessionRefreshEnvelope,
 	type GlobalGuidanceDriftResolutionEnvelope,
@@ -57,6 +62,8 @@ import {
 	type ArtisanWorkspaceGitCheckoutInput,
 	type ArtisanWorkspaceGitSessionInput,
 	type ArtisanWorkspaceGitSessionRefreshInput,
+	type ArtisanWorkspaceGitMutationApprovalResponseInput,
+	type ArtisanWorkspaceGitMutationInput,
 	type ArtisanThreadRetentionUpdateInput,
 } from "../client-contract";
 import { TransportRuntime } from "../transport-runtime";
@@ -321,6 +328,27 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 								"workspace Git checkout approval response narrowed incorrectly",
 							);
 				});
+			const get_workspace_git_mutation_approval = (
+				input: WorkspaceGitMutationApprovalQuery,
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: WorkspaceGitMutationApprovalQueryEnvelope = {
+						...trace,
+						kind: "workspace.git.mutation.approval.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"workspace.git.mutation.approval.query.result",
+					);
+
+					return result.kind === "workspace.git.mutation.approval.query.result"
+						? result.payload
+						: yield* Effect.die(
+								"workspace Git mutation approval response narrowed incorrectly",
+							);
+				});
 
 			type WorkspaceMutationEnvelope =
 				| WorkspaceChangeReviewEnvelope
@@ -328,6 +356,8 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				| WorkspaceReplaceApprovalRespondEnvelope
 				| WorkspaceGitCheckoutApprovalRespondEnvelope
 				| WorkspaceGitCheckoutRequestEnvelope
+				| WorkspaceGitMutationApprovalRespondEnvelope
+				| WorkspaceGitMutationRequestEnvelope
 				| WorkspaceGitSessionRefreshEnvelope
 				| WorkspaceFileReplaceEnvelope;
 			const send_workspace_mutation = (envelope: WorkspaceMutationEnvelope) =>
@@ -440,6 +470,52 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					const envelope: WorkspaceGitCheckoutApprovalRespondEnvelope = {
 						...trace,
 						kind: "workspace.git.checkout.approval.respond",
+						message_id: input.command_id ?? trace.message_id,
+						payload: { approval_id: input.approval_id, approved: input.approved },
+						thread_id: input.thread_id,
+					};
+
+					return yield* send_workspace_mutation(envelope);
+				});
+			const request_workspace_git_mutation = (input: ArtisanWorkspaceGitMutationInput) =>
+				Effect.gen(function* () {
+					const payload = yield* Schema.decodeUnknownEffect(WorkspaceGitMutationRequest, {
+						onExcessProperty: "error",
+					})({
+						...(input.action_approval_id === undefined
+							? {}
+							: { action_approval_id: input.action_approval_id }),
+						expected_session_version: input.expected_session_version,
+						operation: input.operation,
+						workspace_id: input.workspace_id,
+					}).pipe(
+						Effect.mapError((cause) =>
+							client_error(
+								"malformed",
+								"The Git mutation request is invalid.",
+								cause,
+							),
+						),
+					);
+					const trace = yield* connection.MakeTrace;
+					const envelope: WorkspaceGitMutationRequestEnvelope = {
+						...trace,
+						kind: "workspace.git.mutation.request",
+						message_id: input.command_id ?? trace.message_id,
+						payload,
+						thread_id: input.thread_id,
+					};
+
+					return yield* send_workspace_mutation(envelope);
+				});
+			const respond_workspace_git_mutation_approval = (
+				input: ArtisanWorkspaceGitMutationApprovalResponseInput,
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: WorkspaceGitMutationApprovalRespondEnvelope = {
+						...trace,
+						kind: "workspace.git.mutation.approval.respond",
 						message_id: input.command_id ?? trace.message_id,
 						payload: { approval_id: input.approval_id, approved: input.approved },
 						thread_id: input.thread_id,
@@ -785,6 +861,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				GetWorkspaceReplaceApproval: get_workspace_replace_approval,
 				GetWorkspaceGitSession: get_workspace_git_session,
 				GetWorkspaceGitCheckoutApproval: get_workspace_git_checkout_approval,
+				GetWorkspaceGitMutationApproval: get_workspace_git_mutation_approval,
 				ListWorkspaceChanges: list_workspace_changes,
 				ListTerminals: list_terminals,
 				ListThreads: list_threads,
@@ -799,7 +876,9 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				RespondWorkspaceReplaceApproval: respond_workspace_replace_approval,
 				RefreshWorkspaceGitSession: refresh_workspace_git_session,
 				RequestWorkspaceGitCheckout: request_workspace_git_checkout,
+				RequestWorkspaceGitMutation: request_workspace_git_mutation,
 				RespondWorkspaceGitCheckoutApproval: respond_workspace_git_checkout_approval,
+				RespondWorkspaceGitMutationApproval: respond_workspace_git_mutation_approval,
 				ReviewWorkspaceChange: review_workspace_change,
 				RollbackWorkspaceChange: rollback_workspace_change,
 				SelectGlobalGuidance: select_global_guidance,

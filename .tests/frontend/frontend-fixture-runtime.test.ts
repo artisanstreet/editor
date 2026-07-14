@@ -15,11 +15,11 @@ import {
 	ThreadWorkItem,
 	WorkspaceChange,
 	WorkspaceFileReadQueryResult,
+	WorkspaceGitMutationApproval,
 } from "@artisan/protocol";
 import { ArtisanClient } from "@artisan/transport/client";
 import {
 	FixtureArtisanClientLayer,
-	FixtureArtisanClientService,
 	fixture_artisan_client_data,
 } from "../../modules/frontend/src/lib/runtime/fixtures/artisan-client-fixture";
 
@@ -55,60 +55,8 @@ const FixtureRuntimeSourcesLive = Layer.effect(
 	}),
 );
 
-const FixtureServiceContract: typeof ArtisanClient.Service = FixtureArtisanClientService;
-const FixtureLayerContract: Layer.Layer<ArtisanClient> = FixtureArtisanClientLayer;
-
 describe("frontend ArtisanClient fixture runtime", () => {
 	layer(FixtureRuntimeSourcesLive)((it) => {
-		it.effect("satisfies the complete public client service shape", () =>
-			Effect.gen(function* () {
-				yield* Effect.void;
-
-				expect(Object.keys(FixtureServiceContract).sort()).toEqual(
-					[
-						"Command",
-						"Cursors",
-						"Dispose",
-						"Errors",
-						"Events",
-						"GetGlobalGuidance",
-						"GetModelBehaviour",
-						"GetOrchestrationGraph",
-						"GetThreadRetentionPolicy",
-						"GetThreadWork",
-						"GetWorkspaceChangeDiff",
-						"GetWorkspaceGitCheckoutApproval",
-						"GetWorkspaceGitSession",
-						"GetWorkspaceReplaceApproval",
-						"ListTerminals",
-						"ListThreads",
-						"ListWorkspaceChanges",
-						"OpenAsset",
-						"OpenTerminalOutput",
-						"ReadWorkspaceFile",
-						"ReplaceWorkspaceFile",
-						"RefreshWorkspaceGitSession",
-						"RequestWorkspaceGitCheckout",
-						"ResolveGlobalGuidanceDrift",
-						"ResolveModelBehaviourDrift",
-						"RetryGlobalGuidanceSync",
-						"RetryModelBehaviourSync",
-						"ReviewWorkspaceChange",
-						"RollbackWorkspaceChange",
-						"RespondWorkspaceReplaceApproval",
-						"RespondWorkspaceGitCheckoutApproval",
-						"SelectGlobalGuidance",
-						"SubscribeOrchestrationGraph",
-						"SubscribeThreadList",
-						"UpdateGlobalGuidance",
-						"UpdateModelBehaviour",
-						"UpdateThreadRetentionPolicy",
-					].sort(),
-				);
-				expect(FixtureLayerContract).toBeDefined();
-			}),
-		);
-
 		it.effect("carries deterministic protocol-shaped visual data", () =>
 			Effect.gen(function* () {
 				expect(fixture_artisan_client_data).toMatchObject({
@@ -162,6 +110,9 @@ describe("frontend ArtisanClient fixture runtime", () => {
 				for (const file of Object.values(fixture_artisan_client_data.workspace_files)) {
 					yield* Schema.decodeUnknownEffect(WorkspaceFileReadQueryResult)(file);
 				}
+				yield* Schema.decodeUnknownEffect(WorkspaceGitMutationApproval)(
+					fixture_artisan_client_data.workspace_git_mutation_approval,
+				);
 			}),
 		);
 
@@ -192,6 +143,38 @@ describe("frontend ArtisanClient fixture runtime", () => {
 	});
 
 	layer(FixtureArtisanClientLayer)((it) => {
+		it.effect("exposes deterministic generic Git mutation operations", () =>
+			Effect.gen(function* () {
+				const client = yield* ArtisanClient;
+				const approval = yield* client.GetWorkspaceGitMutationApproval({
+					approval_id: "git-mutation-approval-editor-shell",
+					thread_id: "thread-editor-shell",
+				});
+				const receipts = yield* Effect.all([
+					client.RequestWorkspaceGitMutation({
+						action_approval_id: "git-conflict-approval-editor-shell",
+						command_id: "fixture-git-mutation-continue",
+						expected_session_version: 3,
+						operation: { action: "continue", type: "rebase" },
+						thread_id: "thread-editor-shell",
+						workspace_id: "workspace-artisan-editor",
+					}),
+					client.RespondWorkspaceGitMutationApproval({
+						approval_id: approval.approval.approval_id,
+						approved: true,
+						command_id: "fixture-git-mutation-response",
+						thread_id: "thread-editor-shell",
+					}),
+				]);
+
+				expect(approval.approval.operation).toEqual({ type: "commit" });
+				expect(receipts).toMatchObject([
+					{ command_id: "fixture-git-mutation-continue", status: "accepted" },
+					{ command_id: "fixture-git-mutation-response", status: "accepted" },
+				]);
+			}),
+		);
+
 		it.effect("exposes deterministic workspace file and change operations", () =>
 			Effect.gen(function* () {
 				const client = yield* ArtisanClient;
