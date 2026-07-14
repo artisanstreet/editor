@@ -8,10 +8,11 @@ import {
 	Layer,
 	Match,
 	Option,
-	Ref,
 	Result,
 	Schema,
 	Scope,
+	Stream,
+	SubscriptionRef,
 } from "effect";
 
 import {
@@ -78,6 +79,7 @@ export type WorkspaceGitMutationCoordinatorError =
 export class WorkspaceGitMutationCoordinator extends Context.Service<
 	WorkspaceGitMutationCoordinator,
 	{
+		readonly AwaitIdle: Effect.Effect<void>;
 		readonly QuiesceThread: (thread_id: string) => Effect.Effect<void>;
 		readonly Recover: Effect.Effect<void, WorkspaceGitMutationCoordinatorError>;
 		readonly Request: (
@@ -165,7 +167,7 @@ export const WorkspaceGitMutationCoordinatorLive = Layer.effect(
 		const repository = yield* WorkspaceGitMutationRepository;
 		const sessions = yield* WorkspaceGitSessionService;
 		const dispatch_fence = yield* MakeThreadDispatchFence;
-		const dispatch_state = yield* Ref.make<DispatchState>("idle");
+		const dispatch_state = yield* SubscriptionRef.make<DispatchState>("idle");
 		const service_scope = yield* Scope.make();
 
 		yield* Effect.addFinalizer(() =>
@@ -367,7 +369,7 @@ export const WorkspaceGitMutationCoordinatorLive = Layer.effect(
 			while (true) {
 				const result = yield* DispatchWork.pipe(Effect.exit);
 				const retry = Exit.isFailure(result) || result.value;
-				const continue_dispatch = yield* Ref.modify(dispatch_state, (state) => {
+				const continue_dispatch = yield* SubscriptionRef.modify(dispatch_state, (state) => {
 					const requested = state === "pending";
 					const continue_running = retry || requested;
 
@@ -384,7 +386,7 @@ export const WorkspaceGitMutationCoordinatorLive = Layer.effect(
 			}
 		});
 		const WakeDispatcher = Effect.gen(function* () {
-			const start = yield* Ref.modify(dispatch_state, (state) =>
+			const start = yield* SubscriptionRef.modify(dispatch_state, (state) =>
 				state === "idle" ? ([true, "running"] as const) : ([false, "pending"] as const),
 			);
 
@@ -392,6 +394,11 @@ export const WorkspaceGitMutationCoordinatorLive = Layer.effect(
 				yield* Effect.forkIn(DispatchLoop, service_scope);
 			}
 		});
+		const AwaitIdle = SubscriptionRef.changes(dispatch_state).pipe(
+			Stream.filter((state) => state === "idle"),
+			Stream.runHead,
+			Effect.asVoid,
+		);
 		const DecodeRequest = (input: WorkspaceGitMutationRequestInput) =>
 			Schema.decodeUnknownEffect(MutationRequestInput, { onExcessProperty: "error" })(
 				input,
@@ -521,6 +528,6 @@ export const WorkspaceGitMutationCoordinatorLive = Layer.effect(
 
 		yield* Recover;
 
-		return { QuiesceThread, Recover, Request, Respond };
+		return { AwaitIdle, QuiesceThread, Recover, Request, Respond };
 	}),
 );

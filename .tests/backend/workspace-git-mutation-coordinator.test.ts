@@ -6,6 +6,7 @@ import {
 	Deferred,
 	Effect,
 	Exit,
+	Fiber,
 	FileSystem,
 	Layer,
 	ManagedRuntime,
@@ -736,6 +737,64 @@ describe("WorkspaceGitMutationCoordinator", () => {
 			expect(JSON.stringify(rows.commands)).not.toContain("request_fingerprint");
 			expect(JSON.stringify(rows.events)).not.toContain("PRIVATE COMMIT MESSAGE");
 		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("waits until an active mutation dispatcher becomes idle", async () => {
+		const execute_release = await Effect.runPromise(Deferred.make<void>());
+		const state = fake_state({ execute_release });
+		const runtime = make_runtime(await make_database_path(), state);
+
+		try {
+			await runtime.runPromise(SeedThreadAndSession);
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const coordinator = yield* WorkspaceGitMutationCoordinator;
+					const requested = yield* coordinator.Request(request_input());
+
+					yield* coordinator.Respond({
+						approval_id: requested.approval.approval_id,
+						approved: true,
+						message_id: "mutation_decision_1",
+						sent_at: "2026-07-14T12:02:00.000Z",
+						thread_id,
+					});
+
+					for (let attempt = 0; attempt < 500; attempt += 1) {
+						if (state.execute_calls === 1) {
+							break;
+						}
+
+						yield* Effect.yieldNow;
+					}
+
+					if (state.execute_calls !== 1) {
+						return yield* Effect.die("Git mutation dispatch did not start");
+					}
+
+					const idle_waiter = yield* coordinator.AwaitIdle.pipe(
+						Effect.forkChild({ startImmediately: true }),
+					);
+
+					yield* Effect.yieldNow;
+					const before_release = idle_waiter.pollUnsafe();
+
+					yield* Deferred.succeed(execute_release, undefined);
+					yield* Fiber.join(idle_waiter);
+
+					return {
+						approval_id: requested.approval.approval_id,
+						before_release,
+					};
+				}),
+			);
+			const terminal = await wait_for_terminal(runtime, result.approval_id);
+
+			expect(result.before_release).toBeUndefined();
+			expect(terminal).toMatchObject({ resulting_head: result_head, state: "applied" });
+		} finally {
+			await Effect.runPromise(Deferred.succeed(execute_release, undefined));
 			await runtime.dispose();
 		}
 	});
