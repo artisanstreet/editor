@@ -9,6 +9,9 @@ import {
 	AgentRuns,
 	Assignments,
 	EventStreams,
+	HostedProjectCloneApprovals,
+	HostedProjectCloneArtifacts,
+	HostedProjectCloneClaims,
 	JournalCommands,
 	JournalEvents,
 	OrchestrationArtifacts,
@@ -25,6 +28,7 @@ import {
 	TerminalCommands,
 	TerminalSessions,
 	ThreadErasureClaims,
+	ThreadProjectAffinityEvidence,
 	Threads,
 	ThreadTombstones,
 	WorkspaceChangeOperations,
@@ -106,6 +110,12 @@ export const ThreadErasureLive = Layer.effect(
 			"executing",
 			"action_required",
 		]);
+		const IsPendingHostedProjectClone = inArray(HostedProjectCloneApprovals.state, [
+			"requested",
+			"approved",
+			"executing",
+			"outcome_unknown",
+		]);
 
 		const ClaimExpired = (cutoff: string, claimed_at: string) =>
 			database.client
@@ -171,6 +181,25 @@ export const ThreadErasureLive = Layer.effect(
 															Threads.thread_id,
 														),
 														IsPendingGitMutation,
+													),
+												),
+										),
+									),
+									not(
+										exists(
+											database.client
+												.select({
+													approval_id:
+														HostedProjectCloneApprovals.approval_id,
+												})
+												.from(HostedProjectCloneApprovals)
+												.where(
+													and(
+														eq(
+															HostedProjectCloneApprovals.thread_id,
+															Threads.thread_id,
+														),
+														IsPendingHostedProjectClone,
 													),
 												),
 										),
@@ -259,6 +288,25 @@ export const ThreadErasureLive = Layer.effect(
 							.limit(1);
 
 						if (pending_git_mutation) {
+							yield* transaction
+								.delete(ThreadErasureClaims)
+								.where(eq(ThreadErasureClaims.thread_id, thread_id));
+
+							return undefined;
+						}
+
+						const [pending_hosted_project_clone] = yield* transaction
+							.select({ approval_id: HostedProjectCloneApprovals.approval_id })
+							.from(HostedProjectCloneApprovals)
+							.where(
+								and(
+									eq(HostedProjectCloneApprovals.thread_id, thread_id),
+									IsPendingHostedProjectClone,
+								),
+							)
+							.limit(1);
+
+						if (pending_hosted_project_clone) {
 							yield* transaction
 								.delete(ThreadErasureClaims)
 								.where(eq(ThreadErasureClaims.thread_id, thread_id));
@@ -366,6 +414,9 @@ export const ThreadErasureLive = Layer.effect(
 							.delete(OrchestrationRuns)
 							.where(eq(OrchestrationRuns.thread_id, thread_id));
 						yield* transaction
+							.delete(ThreadProjectAffinityEvidence)
+							.where(eq(ThreadProjectAffinityEvidence.thread_id, thread_id));
+						yield* transaction
 							.delete(WorkspaceChangeDiffs)
 							.where(eq(WorkspaceChangeDiffs.thread_id, thread_id));
 						yield* transaction
@@ -377,6 +428,23 @@ export const ThreadErasureLive = Layer.effect(
 						yield* transaction
 							.delete(WorkspaceReplaceApprovals)
 							.where(eq(WorkspaceReplaceApprovals.thread_id, thread_id));
+						yield* transaction
+							.delete(HostedProjectCloneClaims)
+							.where(eq(HostedProjectCloneClaims.thread_id, thread_id));
+						yield* transaction.delete(HostedProjectCloneArtifacts).where(
+							inArray(
+								HostedProjectCloneArtifacts.approval_id,
+								transaction
+									.select({
+										approval_id: HostedProjectCloneApprovals.approval_id,
+									})
+									.from(HostedProjectCloneApprovals)
+									.where(eq(HostedProjectCloneApprovals.thread_id, thread_id)),
+							),
+						);
+						yield* transaction
+							.delete(HostedProjectCloneApprovals)
+							.where(eq(HostedProjectCloneApprovals.thread_id, thread_id));
 						yield* transaction
 							.delete(WorkspaceGitCheckoutClaims)
 							.where(eq(WorkspaceGitCheckoutClaims.thread_id, thread_id));
