@@ -5,10 +5,12 @@ import type { CommandEnvelope, OrchestrationGraph } from "@artisan/protocol";
 
 import { GlobalGuidanceService } from "../guidance/guidance-service";
 import { ArtisanHarnessContext } from "../harness/harness-context";
+import { ExternalWaitRepository } from "../external-wait/external-wait-repository";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { MakeThreadDispatchFence } from "../threads/internal/thread-dispatch-fence";
 import {
 	AgentGraphRepository,
+	AgentGraphFailure,
 	type AcceptedAgentGraphCommand,
 	type AgentGraphCommand,
 	type AgentGraphControlClaim,
@@ -50,6 +52,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 	AgentGraphOrchestrator,
 	Effect.gen(function* () {
 		const engines = yield* EngineRegistry;
+		const external_waits = yield* ExternalWaitRepository;
 		const guidance = yield* GlobalGuidanceService;
 		const harness_context = yield* ArtisanHarnessContext;
 		const metadata = yield* RuntimeMetadata;
@@ -98,7 +101,20 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 			).pipe(
 				Effect.catch(() => Effect.void),
 				Effect.andThen(live.run.Closed),
-				Effect.flatMap((state) => repository.RecordClosed(work.run_id, state)),
+				Effect.flatMap((state) =>
+					repository
+						.RecordClosed(work.run_id, state)
+						.pipe(Effect.catch(() => Effect.void)),
+				),
+				Effect.andThen(
+					Effect.flatMap(metadata.Now, (now) =>
+						external_waits.MarkSourceClosedForRun({
+							now,
+							owner_tag: "assignment_run",
+							source_run_id: work.run_id,
+						}),
+					),
+				),
 				Effect.andThen(wake_dispatcher()),
 				Effect.catch(() => Effect.void),
 				Effect.ensuring(
@@ -438,9 +454,13 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 			return handle_control(command);
 		};
 
-		const recover = repository
-			.Recover(metadata.instance_id)
-			.pipe(Effect.andThen(wake_dispatcher()));
+		const recover = Effect.gen(function* () {
+			yield* repository.Recover(metadata.instance_id);
+			yield* external_waits
+				.ReconcileSourceClosures({ now: yield* metadata.Now })
+				.pipe(Effect.mapError((cause) => new AgentGraphFailure({ cause })));
+			yield* wake_dispatcher();
+		});
 		const QuiesceLiveRuns = (thread_id: string) =>
 			Effect.gen(function* () {
 				const runs = yield* Ref.modify(live_runs, (current) => {

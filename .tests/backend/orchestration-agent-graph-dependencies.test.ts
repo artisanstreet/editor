@@ -35,6 +35,8 @@ function make_dependency_engine() {
 		"cancel",
 		"close",
 		"events",
+		"global_guidance",
+		"harness_context",
 		"model_selection",
 		"native_tools",
 		"probe",

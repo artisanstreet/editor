@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Effect, Exit, Scope, Stream } from "effect";
+import { Deferred, Effect, Exit, Scope, Stream } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { CommandEnvelope, HelloEnvelope } from "@artisan/protocol";
@@ -13,8 +13,22 @@ import type {
 	EngineObservation,
 	EngineOpenInput,
 	EngineRun,
+	EngineRunTerminalState,
 } from "@artisan/engines";
-import { make_backend_runtime, ProtocolServer, type ProtocolConnection } from "@artisan/backend";
+import {
+	ExternalWaitRepository,
+	make_backend_runtime,
+	ProjectRepository,
+	ProtocolServer,
+	type ProtocolConnection,
+} from "@artisan/backend";
+
+import { Database } from "../../modules/backend/src/persistence/database";
+import {
+	ExternalWaits,
+	OrchestrationRuns,
+	Threads,
+} from "../../modules/backend/src/persistence/schema";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];
@@ -28,6 +42,7 @@ interface Instrumentation {
 }
 
 interface EngineOptions {
+	readonly closed?: Deferred.Deferred<EngineRunTerminalState>;
 	readonly fail_open?: boolean;
 	readonly fail_send?: boolean;
 	readonly open_delay?: number;
@@ -48,6 +63,8 @@ function make_engine(options: EngineOptions = {}): {
 			"cancel",
 			"close",
 			"events",
+			"global_guidance",
+			"harness_context",
 			"model_selection",
 			"native_tools",
 			"probe",
@@ -74,15 +91,34 @@ function make_engine(options: EngineOptions = {}): {
 
 			yield* Effect.addFinalizer(() => Effect.sync(() => void (scopes_closed += 1)));
 
-			const observations: ReadonlyArray<EngineObservation> = [];
+			const observations =
+				options.closed === undefined
+					? Stream.never
+					: Stream.fromEffect(Deferred.await(options.closed)).pipe(
+							Stream.map(
+								(state): EngineObservation => ({
+									_tag: "run_terminal",
+									artisan_run_id: input.artisan_run_id,
+									observation_id: `terminal:${input.artisan_run_id}`,
+									raw: {
+										engine_id: "instrumented",
+										frame: null,
+										transport: "test",
+									},
+									sequence: 1,
+									state,
+								}),
+							),
+						);
 			const run: EngineRun = {
 				artisan_run_id: input.artisan_run_id,
-				Closed: Effect.never,
+				Closed:
+					options.closed === undefined ? Effect.never : Deferred.await(options.closed),
 				Events: Stream.unwrap(
 					Effect.sync(() => {
 						events_consumed += 1;
 
-						return Stream.concat(Stream.fromIterable(observations), Stream.never);
+						return observations;
 					}),
 				),
 				native_thread_id: `native:${input.artisan_run_id}`,
@@ -256,6 +292,164 @@ describe("agent orchestrator lifecycle supervision", () => {
 			await new Promise((resolve) => setTimeout(resolve, 50));
 
 			expect(instrumented.instrumentation.opened()).toBe(1);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("closes a thread-owned external wait only after the native run closes", async () => {
+		const closed = await Effect.runPromise(Deferred.make<EngineRunTerminalState>());
+		const database_path = await make_database_path();
+		const instrumented = make_engine({ closed });
+		const runtime = make_backend_runtime({
+			database_path,
+			engines: [instrumented.engine],
+			migrations_path,
+		});
+
+		try {
+			const connection = await open_connection(runtime);
+			const project = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const projects = yield* ProjectRepository;
+					const registration = yield* projects.RegisterHosted({
+						canonical_root: "C:/artisan",
+						display_name: "Artisan",
+						hosted_origin: {
+							canonical_host: "github.com",
+							clone_url: "https://github.com/artisan/editor.git",
+							fetch_url: "https://github.com/artisan/editor.git",
+							name: "editor",
+							native_id: "repository_1",
+							owner: "artisan",
+							provider_id: "github",
+							push_url: "https://github.com/artisan/editor.git",
+							remote_name: "origin",
+							selected_account_login: "sander",
+							web_url: "https://github.com/artisan/editor",
+						},
+					});
+
+					yield* database.client.update(Threads).set({
+						primary_project_id: registration.project.project.project_id,
+						primary_project_json: JSON.stringify(registration.project.project),
+					});
+
+					return registration.project;
+				}),
+			);
+
+			await runtime.runPromise(
+				connection.Receive(
+					make_command("external_wait_source", {
+						engine_id: "instrumented",
+						text: "wait for checks",
+						type: "thread.send_message",
+						working_directory: "C:/artisan",
+					}),
+				),
+			);
+			await expect
+				.poll(() => instrumented.instrumentation.events_consumed(), { timeout: 2_000 })
+				.toBe(1);
+
+			await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const external_waits = yield* ExternalWaitRepository;
+					const [run] = yield* database.client.select().from(OrchestrationRuns).limit(1);
+
+					if (!run) {
+						return yield* Effect.die("Expected an ordinary source run");
+					}
+
+					yield* external_waits.Register({
+						baseline: {
+							branch: "main",
+							checks: [],
+							expected_head_commit: "b".repeat(40),
+							gates: [{ _tag: "review_decision_changed" }],
+							pull_request_native_id: "pr_7",
+							pull_request_number: 7,
+							pull_request_origin: {
+								native_id: "pr_7",
+								provider_id: "github",
+								resource_kind: "pull_request",
+							},
+							repository: {
+								host: "github.com",
+								name: "editor",
+								owner: "artisan",
+								provider_id: "github",
+							},
+							review_decision: "none",
+							reviews: [],
+							review_threads: [],
+						},
+						owner: {
+							_tag: "thread_run",
+							agent_id: run.agent_id,
+							engine_id: run.engine_id,
+							run_id: run.run_id,
+						},
+						project_id: project.project.project_id,
+						request: {
+							expected_head_commit: "b".repeat(40),
+							gates: [{ _tag: "review_decision_changed" }],
+							pull_request_number: 7,
+							source_run_id: run.run_id,
+							workspace_id: project.workspace_id,
+						},
+						request_fingerprint: "b".repeat(64),
+						source_command: {
+							message_id: "external_wait_registration",
+							sent_at: "2026-07-10T08:00:01.000Z",
+						},
+						target: {
+							branch: "main",
+							expected_head_commit: "b".repeat(40),
+							pull_request_number: 7,
+							pull_request_origin: {
+								native_id: "pr_7",
+								provider_id: "github",
+								resource_kind: "pull_request",
+							},
+							repository: {
+								host: "github.com",
+								name: "editor",
+								owner: "artisan",
+								provider_id: "github",
+							},
+						},
+						thread_id: "thread_1",
+						wait_id: "ordinary_wait_1",
+					});
+				}),
+			);
+
+			const before_close = await runtime.runPromise(
+				Effect.flatMap(Database, (database) =>
+					database.client.select().from(ExternalWaits).limit(1),
+				),
+			);
+
+			expect(before_close[0]?.source_closed_at).toBeNull();
+
+			await runtime.runPromise(Deferred.succeed(closed, "completed"));
+			await expect
+				.poll(
+					async () =>
+						(
+							await runtime.runPromise(
+								Effect.flatMap(Database, (database) =>
+									database.client.select().from(ExternalWaits).limit(1),
+								),
+							)
+						)[0]?.source_closed_at ?? null,
+					{ timeout: 2_000 },
+				)
+				.not.toBeNull();
 		} finally {
 			await runtime.dispose();
 		}

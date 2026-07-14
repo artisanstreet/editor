@@ -36,6 +36,12 @@ import { make_workspace_git_execution_gate_layer } from "../git/workspace-git-ex
 import { WorkspaceGitMutationRepositoryLive } from "../git/workspace-git-mutation-repository";
 import { WorkspaceGitMutationCoordinatorLive } from "../git/workspace-git-mutation-coordinator";
 import { GitProvider } from "../git-provider/git-provider";
+import {
+	ExternalWaitCoordinatorLive,
+	ExternalWaitScheduler,
+	ExternalWaitSchedulerLive,
+} from "../external-wait/external-wait-coordinator";
+import { ExternalWaitRepositoryLive } from "../external-wait/external-wait-repository";
 import { HostedGitSnapshotRepositoryLive } from "../git-provider/hosted-git-snapshot-repository";
 import { HostedGitSnapshotServiceLive } from "../git-provider/hosted-git-snapshot-service";
 import { ArtisanHarnessContextLive } from "../harness/harness-context";
@@ -139,6 +145,7 @@ import { WorkspaceReplaceApprovalCoordinatorLive } from "../workspace/workspace-
 export interface BackendOptions {
 	readonly database_path: string;
 	readonly engines?: ReadonlyArray<Engine>;
+	readonly external_wait_scheduler?: Layer.Layer<ExternalWaitScheduler>;
 	readonly git_provider_registry?: Layer.Layer<GitProviderRegistry, GitProviderRegistryError>;
 	readonly guidance?: Partial<GlobalGuidanceServiceOptions>;
 	readonly guidance_provider_registry?: Layer.Layer<GuidanceProviderRegistry>;
@@ -358,17 +365,31 @@ export function make_backend_layer(options: BackendOptions) {
 		),
 		Layer.provideMerge(infrastructure),
 	);
+	const external_waits = ExternalWaitRepositoryLive.pipe(
+		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(infrastructure),
+	);
+	const external_wait_coordination = ExternalWaitCoordinatorLive.pipe(
+		Layer.provideMerge(external_waits),
+		Layer.provideMerge(project_catalog),
+		Layer.provideMerge(git_provider_registry),
+		Layer.provideMerge(options.external_wait_scheduler ?? ExternalWaitSchedulerLive),
+		Layer.provideMerge(infrastructure),
+	);
 	const harness_context = ArtisanHarnessContextLive;
 	const orchestration = AgentOrchestratorLive.pipe(
 		Layer.provideMerge(persistence),
 		Layer.provideMerge(engine_registry),
+		Layer.provideMerge(external_waits),
 		Layer.provideMerge(guidance),
 		Layer.provideMerge(harness_context),
+		Layer.provideMerge(infrastructure),
 	);
 	const graph_persistence = AgentGraphRepositoryLive.pipe(Layer.provideMerge(infrastructure));
 	const graph = AgentGraphOrchestratorLive.pipe(
 		Layer.provideMerge(graph_persistence),
 		Layer.provideMerge(engine_registry),
+		Layer.provideMerge(external_waits),
 		Layer.provideMerge(infrastructure),
 		Layer.provideMerge(guidance),
 		Layer.provideMerge(harness_context),
@@ -493,6 +514,8 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(hosted_project_clone_repository),
 		Layer.provideMerge(hosted_project_clones),
 		Layer.provideMerge(hosted_git_snapshots),
+		Layer.provideMerge(external_waits),
+		Layer.provideMerge(external_wait_coordination),
 		Layer.provideMerge(guidance),
 		Layer.provideMerge(model_behaviour),
 		Layer.provideMerge(git_provider_registry),

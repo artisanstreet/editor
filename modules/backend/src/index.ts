@@ -88,6 +88,36 @@ export {
 	type GlobalGuidanceServiceOptions,
 } from "./guidance/guidance-service";
 export {
+	ExternalWaitCoordinator,
+	ExternalWaitCoordinatorFailure,
+	ExternalWaitCoordinatorLive,
+	ExternalWaitScheduler,
+	ExternalWaitSchedulerLive,
+	type ExternalWaitCycleResult,
+} from "./external-wait/external-wait-coordinator";
+export {
+	ExternalWaitConflict,
+	ExternalWaitInvariant,
+	ExternalWaitRepository,
+	ExternalWaitRepositoryLive,
+	ExternalWaitUnavailable,
+	type ExternalWaitAcceptance,
+	type ExternalWaitObservationClaim,
+	type ExternalWaitRegistration,
+	type ExternalWaitRepositoryError,
+	type ExternalWaitWake,
+	type ExternalWaitWakeClaim,
+} from "./external-wait/external-wait-repository";
+export {
+	BuildExternalWaitBaseline,
+	EvaluateExternalWait,
+	ExternalWaitBaseline,
+	ExternalWaitPolicyError,
+	serialize_external_wait_baseline,
+	type ExternalWaitEvaluationResult,
+	type ExternalWaitRegistrationResult,
+} from "./external-wait/external-wait-policy";
+export {
 	EmptyGuidanceProviderRegistryLive,
 	GuidanceProviderRegistry,
 	make_claude_guidance_adapter,

@@ -30,6 +30,8 @@ function make_start_engine(id: string, behavior: StartBehavior) {
 		"cancel",
 		"close",
 		"events",
+		"global_guidance",
+		"harness_context",
 		"model_selection",
 		"native_tools",
 		"probe",

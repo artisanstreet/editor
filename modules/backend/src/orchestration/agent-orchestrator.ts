@@ -4,6 +4,7 @@ import { EngineRegistry, type EngineCommand, type EngineRun } from "@artisan/eng
 import type { CommandEnvelope } from "@artisan/protocol";
 
 import {
+	OrchestrationFailure,
 	OrchestrationRepository,
 	type AcceptedOrchestrationCommand,
 	type OrchestrationError,
@@ -11,6 +12,8 @@ import {
 } from "../persistence/orchestration-repository";
 import { GlobalGuidanceService } from "../guidance/guidance-service";
 import { ArtisanHarnessContext } from "../harness/harness-context";
+import { ExternalWaitRepository } from "../external-wait/external-wait-repository";
+import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { MakeThreadDispatchFence } from "../threads/internal/thread-dispatch-fence";
 
 interface LiveRun {
@@ -38,8 +41,10 @@ export const AgentOrchestratorLive = Layer.effect(
 	AgentOrchestrator,
 	Effect.gen(function* () {
 		const engines = yield* EngineRegistry;
+		const external_waits = yield* ExternalWaitRepository;
 		const guidance = yield* GlobalGuidanceService;
 		const harness_context = yield* ArtisanHarnessContext;
+		const metadata = yield* RuntimeMetadata;
 		const repository = yield* OrchestrationRepository;
 		const service_scope = yield* Scope.make();
 		const live_runs = yield* Ref.make(new Map<string, LiveRun>());
@@ -92,7 +97,17 @@ export const AgentOrchestratorLive = Layer.effect(
 
 		const ObserveRun = (work: PendingWork, live: LiveRun) =>
 			Stream.runForEach(live.run.Events, repository.RecordObservation).pipe(
+				Effect.catch(() => Effect.void),
 				Effect.andThen(live.run.Closed),
+				Effect.andThen(
+					Effect.flatMap(metadata.Now, (now) =>
+						external_waits.MarkSourceClosedForRun({
+							now,
+							owner_tag: "thread_run",
+							source_run_id: work.run_id,
+						}),
+					),
+				),
 				Effect.asVoid,
 				Effect.catch(() => Effect.void),
 				Effect.ensuring(
@@ -344,6 +359,9 @@ export const AgentOrchestratorLive = Layer.effect(
 
 		const Recover = Effect.gen(function* () {
 			yield* repository.MarkInterrupted();
+			yield* external_waits
+				.ReconcileSourceClosures({ now: yield* metadata.Now })
+				.pipe(Effect.mapError((cause) => new OrchestrationFailure({ cause })));
 			yield* WakeDispatcher;
 		});
 		const QuiesceLiveRuns = (thread_id: string) =>
@@ -374,8 +392,7 @@ export const AgentOrchestratorLive = Layer.effect(
 		const QuiesceThread = (thread_id: string) =>
 			dispatch_fence.Quiesce(thread_id, QuiesceLiveRuns(thread_id));
 
-		yield* repository.MarkInterrupted();
-		yield* WakeDispatcher;
+		yield* Recover;
 
 		return { Handle, QuiesceThread, Recover };
 	}),

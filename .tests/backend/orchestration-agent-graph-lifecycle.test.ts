@@ -24,6 +24,7 @@ import type {
 import {
 	AgentGraphOrchestrator,
 	AgentGraphRepository,
+	ExternalWaitRepository,
 	make_backend_runtime,
 	ProtocolRouter,
 	ProtocolServer,
@@ -31,7 +32,15 @@ import {
 } from "@artisan/backend";
 
 import { Database } from "../../modules/backend/src/persistence/database";
-import { OrchestrationRawObservations } from "../../modules/backend/src/persistence/schema";
+import {
+	AgentRuns,
+	Assignments,
+	ExternalWaits,
+	OrchestrationRawObservations,
+	ProjectHostedOrigins,
+	Projects,
+	Threads,
+} from "../../modules/backend/src/persistence/schema";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];
@@ -52,6 +61,8 @@ function make_controlled_engine() {
 		"cancel",
 		"close",
 		"events",
+		"global_guidance",
+		"harness_context",
 		"model_selection",
 		"native_tools",
 		"probe",
@@ -315,6 +326,181 @@ afterEach(async () => {
 });
 
 describe("multi-agent graph lifecycle", () => {
+	it("marks an external wait source closed only after the native run closes", async () => {
+		const database_path = await make_database_path();
+		const controlled = make_controlled_engine();
+		const runtime = make_backend_runtime({
+			database_path,
+			engines: [controlled.engine],
+			migrations_path,
+		});
+
+		try {
+			const external_assignment = assignment("assignment_external");
+			const companion_assignment = assignment("assignment_companion");
+
+			await create_thread(runtime);
+			await route(
+				runtime,
+				command("start_external_wait", {
+					assignments: [external_assignment, companion_assignment],
+					group_id: "group_graph",
+					type: "orchestration.group.start",
+				}),
+			);
+			await wait_for_graph(runtime, (graph) => graph.assignments[0]?.state === "running");
+			const run = controlled.FindRun("assignment_external");
+
+			if (!run) {
+				throw new Error("Expected one controlled engine run");
+			}
+
+			const before_close = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const external_waits = yield* ExternalWaitRepository;
+					const agent_run = (yield* database.client.select().from(AgentRuns)).find(
+						(candidate) => candidate.run_id === run.input.artisan_run_id,
+					);
+					const assignment_row = (yield* database.client.select().from(Assignments)).find(
+						(candidate) => candidate.assignment_id === "assignment_external",
+					);
+
+					if (!agent_run || !assignment_row) {
+						return yield* Effect.die(new Error("Expected one active graph run"));
+					}
+
+					const workspace = external_assignment.workspace;
+					const target = {
+						branch: "main",
+						expected_head_commit: "b".repeat(40),
+						pull_request_number: 7,
+						pull_request_origin: {
+							native_id: "pr_7",
+							provider_id: "github",
+							resource_kind: "pull_request" as const,
+						},
+						repository: {
+							host: "github.com",
+							name: "editor",
+							owner: "artisan",
+							provider_id: "github",
+						},
+					};
+
+					yield* database.client.insert(Projects).values({
+						canonical_root: workspace.working_directory,
+						display_name: "Artisan",
+						project_id: "project_external",
+						registered_at: "2026-07-10T08:00:00.000Z",
+						updated_at: "2026-07-10T08:00:00.000Z",
+						workspace_id: workspace.workspace_id,
+					});
+					yield* database.client.insert(ProjectHostedOrigins).values({
+						canonical_host: "github.com",
+						clone_url: "https://github.com/artisan/editor.git",
+						fetch_url: "https://github.com/artisan/editor.git",
+						name: "editor",
+						native_id: "repository_1",
+						owner: "artisan",
+						project_id: "project_external",
+						provider_id: "github",
+						push_url: "https://github.com/artisan/editor.git",
+						remote_name: "origin",
+						selected_account_login: "sander",
+						web_url: "https://github.com/artisan/editor",
+					});
+					yield* database.client.update(Threads).set({
+						primary_project_id: "project_external",
+						primary_project_json: JSON.stringify({
+							display_name: "Artisan",
+							project_id: "project_external",
+							root_path: workspace.working_directory,
+						}),
+					});
+					yield* external_waits.Register({
+						baseline: {
+							branch: target.branch,
+							checks: [],
+							expected_head_commit: target.expected_head_commit,
+							gates: [{ _tag: "required_checks_terminal" }],
+							pull_request_native_id: target.pull_request_origin.native_id,
+							pull_request_number: target.pull_request_number,
+							pull_request_origin: target.pull_request_origin,
+							repository: target.repository,
+							review_decision: "review_required",
+							reviews: [],
+							review_threads: [],
+						},
+						owner: {
+							_tag: "assignment_run",
+							agent_id: agent_run.agent_id,
+							assignment_id: agent_run.assignment_id,
+							engine_id: agent_run.engine_id,
+							group_id: agent_run.group_id,
+							run_id: agent_run.run_id,
+						},
+						project_id: "project_external",
+						request: {
+							expected_head_commit: target.expected_head_commit,
+							gates: [{ _tag: "required_checks_terminal" }],
+							pull_request_number: target.pull_request_number,
+							source_run_id: agent_run.run_id,
+							workspace_id: workspace.workspace_id,
+						},
+						request_fingerprint: "c".repeat(64),
+						source_command: {
+							message_id: "external_wait_request_1",
+							sent_at: "2026-07-10T08:01:00.000Z",
+						},
+						target,
+						thread_id: "thread_graph",
+						wait_id: "wait_source_closure",
+					});
+
+					return yield* database.client.select().from(ExternalWaits).limit(1);
+				}),
+			);
+
+			expect(before_close[0]?.source_closed_at).toBeNull();
+			await runtime.runPromise(controlled.Finish(run, "closed"));
+
+			let closed_at: string | null = null;
+
+			for (let attempt = 0; attempt < 100 && closed_at === null; attempt += 1) {
+				closed_at = await runtime.runPromise(
+					Effect.gen(function* () {
+						const database = yield* Database;
+						const [wait] = yield* database.client.select().from(ExternalWaits).limit(1);
+
+						return wait?.source_closed_at ?? null;
+					}),
+				);
+
+				if (closed_at === null) {
+					await new Promise<void>((resolve) => setTimeout(resolve, 10));
+				}
+			}
+
+			expect(closed_at).not.toBeNull();
+			const assignment_state = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const [assignment_row] = yield* database.client
+						.select()
+						.from(Assignments)
+						.limit(1);
+
+					return assignment_row?.state;
+				}),
+			);
+
+			expect(assignment_state).toBe("waiting_external");
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("resolves require_all and first_success joins with mixed terminal outcomes", async () => {
 		for (const strategy of ["require_all", "first_success"] as const) {
 			const database_path = await make_database_path();
