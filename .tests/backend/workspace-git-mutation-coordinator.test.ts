@@ -374,6 +374,7 @@ function make_git_layers(state: FakeMutationState) {
 	};
 	const capability: WorkspaceGitCapability = {
 		canonical_root: "C:/workspace",
+		fetch: { Fetch: () => Effect.die("mutation coordinator invoked GitFetch") },
 		mutation,
 		read,
 		workspace_id,

@@ -243,6 +243,7 @@ describe("WorkspaceGitObserver", () => {
 			Get: () =>
 				Effect.succeed({
 					canonical_root: registered_root,
+					fetch: { Fetch: () => Effect.die("observer invoked GitFetch") },
 					mutation,
 					read,
 					workspace_id: "workspace-a",
@@ -295,6 +296,7 @@ describe("WorkspaceGitObserver", () => {
 			Get: () =>
 				Effect.succeed({
 					canonical_root: root,
+					fetch: { Fetch: () => Effect.die("observer invoked GitFetch") },
 					mutation: {
 						Execute: () => Effect.die("unexpected mutation"),
 						Prepare: () => Effect.die("unexpected mutation"),

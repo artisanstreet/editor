@@ -268,6 +268,7 @@ function make_registry_service(process_runner: typeof ProcessRunner.Service) {
 			requested_workspace_id === workspace_id
 				? Effect.succeed({
 						canonical_root: repository_root,
+						fetch: { Fetch: () => Effect.die("fixture invoked GitFetch") },
 						mutation,
 						read,
 						workspace_id,

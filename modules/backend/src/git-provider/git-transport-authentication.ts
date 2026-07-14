@@ -13,6 +13,7 @@ export interface GitTransportAuthorization {
 	readonly environment: Readonly<Record<string, string | undefined>>;
 	readonly git_executable_path: string;
 	readonly remote_endpoint: string;
+	readonly transport_protocol: "file" | "https" | "ssh";
 }
 
 /** Reports an authorization setup failure without retaining provider credentials or process output. */

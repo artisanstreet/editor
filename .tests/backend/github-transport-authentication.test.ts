@@ -80,6 +80,7 @@ describe("GitHubGitTransportAuthentication", () => {
 		expect(authorization.environment).not.toHaveProperty("GH_ENTERPRISE_TOKEN");
 		expect(authorization.git_executable_path).toBe("C:\\Program Files\\Git\\cmd\\git.exe");
 		expect(authorization.remote_endpoint).toBe("https://github.com/artisan/editor.git");
+		expect(authorization.transport_protocol).toBe("https");
 	});
 
 	it("binds GitHub Enterprise to its exact selected host", async () => {
@@ -101,6 +102,7 @@ describe("GitHubGitTransportAuthentication", () => {
 		expect(authorization.remote_endpoint).toBe(
 			"https://github.artisan.test:8443/artisan/editor.git",
 		);
+		expect(authorization.transport_protocol).toBe("https");
 	});
 
 	it("rejects an unsupported provider before creating authorization", async () => {

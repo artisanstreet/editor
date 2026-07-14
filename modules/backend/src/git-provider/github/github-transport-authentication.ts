@@ -126,6 +126,7 @@ export function make_github_git_transport_authentication_layer(
 								environment,
 								git_executable_path: git_location.value.path,
 								remote_endpoint: request.remote_endpoint,
+								transport_protocol: "https",
 							});
 						}),
 					);

@@ -675,6 +675,7 @@ function make_recovery_registry(
 			requested_workspace_id === workspace_id
 				? Effect.succeed({
 						canonical_root: root,
+						fetch: { Fetch: () => Effect.die("recovery invoked GitFetch") },
 						mutation,
 						read,
 						workspace_id,

@@ -3,9 +3,10 @@ import { Context, Data, Effect, FileSystem, Layer, Schema } from "effect";
 
 import { Identifier } from "@artisan/protocol";
 
+import { GitFetch } from "./git-fetch";
 import { Git } from "./git";
 import { GitMutation } from "./git-mutation";
-import { make_node_git_mutation_layer } from "./node-git-mutation";
+import { make_node_git_fetch_layer, make_node_git_mutation_layer } from "./node-git-mutation";
 import { make_node_git_layer } from "./node-git";
 
 const WorkspaceGitRegistration = Schema.Struct({
@@ -19,6 +20,7 @@ export type WorkspaceGitRegistration = typeof WorkspaceGitRegistration.Type;
 /** Keeps native paths and process-backed services on the backend side of the boundary. */
 export interface WorkspaceGitCapability {
 	readonly canonical_root: string;
+	readonly fetch: typeof GitFetch.Service;
 	readonly mutation: typeof GitMutation.Service;
 	readonly read: typeof Git.Service;
 	readonly workspace_id: string;
@@ -117,6 +119,9 @@ function BuildWorkspaceGitRegistry(registrations: ReadonlyArray<unknown>) {
 
 		const capabilities = yield* Effect.forEach(canonical, (registration) =>
 			Effect.gen(function* () {
+				const fetch = yield* GitFetch.pipe(
+					Effect.provide(make_node_git_fetch_layer({ cwd: registration.canonical_root })),
+				);
 				const read = yield* Git.pipe(
 					Effect.provide(make_node_git_layer({ cwd: registration.canonical_root })),
 				);
@@ -128,6 +133,7 @@ function BuildWorkspaceGitRegistry(registrations: ReadonlyArray<unknown>) {
 
 				return {
 					canonical_root: registration.canonical_root,
+					fetch,
 					mutation,
 					read,
 					workspace_id: registration.workspace_id,

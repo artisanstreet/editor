@@ -461,10 +461,13 @@ export {
 	type GitRepository,
 	type GitWorktree,
 } from "./git/git";
+export { GitFetch, GitFetchError, GitFetchRequest, GitFetchResult } from "./git/git-fetch";
 export { make_git_layer, make_node_git_layer, type NodeGitOptions } from "./git/node-git";
 export { GitMutation, GitMutationError } from "./git/git-mutation";
 export {
+	make_git_fetch_layer,
 	make_git_mutation_layer,
+	make_node_git_fetch_layer,
 	make_node_git_mutation_layer,
 	type NodeGitMutationOptions,
 } from "./git/node-git-mutation";

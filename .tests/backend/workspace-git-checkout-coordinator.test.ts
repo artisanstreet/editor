@@ -219,6 +219,7 @@ function make_git_layers(state: FakeGitState, dirty = { value: false }) {
 	};
 	const capability: WorkspaceGitCapability = {
 		canonical_root: "C:/workspace",
+		fetch: { Fetch: () => Effect.die("checkout coordinator invoked GitFetch") },
 		mutation,
 		read,
 		workspace_id,

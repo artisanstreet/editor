@@ -8,6 +8,14 @@ import {
 	type WorkspaceGitMutationRejectionReason,
 } from "@artisan/protocol";
 
+import type { GitTransportAuthorization } from "../git-provider/git-transport-authentication";
+import {
+	GitFetch,
+	GitFetchError,
+	GitFetchRequest,
+	GitFetchResult,
+	type GitFetchResult as GitFetchResultType,
+} from "./git-fetch";
 import {
 	GitMutation,
 	GitMutationAttempt,
@@ -29,6 +37,7 @@ import { ProcessRunner, type ProcessRunnerResult, type ProcessRunnerShape } from
 /** Configures bounded local Git mutation capability for one already-selected workspace. */
 export interface NodeGitMutationOptions {
 	readonly cwd: string;
+	readonly fetch_timeout_ms?: number;
 	readonly git_executable?: string;
 	readonly max_stderr_bytes?: number;
 	readonly max_stdout_bytes?: number;
@@ -37,6 +46,10 @@ export interface NodeGitMutationOptions {
 
 interface RepositoryPin {
 	readonly environment: Readonly<Record<string, string>>;
+	readonly fetch_head_path: string;
+	readonly git_common_directory: string;
+	readonly git_common_directory_device: number;
+	readonly git_common_directory_inode?: number;
 	readonly git_executable: string;
 	readonly git_executable_device: number;
 	readonly git_executable_inode?: number;
@@ -63,6 +76,7 @@ interface GitStateObservation {
 
 type RefTransactionCommand =
 	| { readonly oid: string; readonly ref: string; readonly type: "create" }
+	| { readonly old_oid: string; readonly ref: string; readonly type: "delete" }
 	| {
 			readonly new_oid: string;
 			readonly old_oid: string;
@@ -112,8 +126,16 @@ function mutation_error(operation: GitMutationError["operation"], cause?: unknow
 	return new GitMutationError({ ...(cause === undefined ? {} : { cause }), operation });
 }
 
+function fetch_error(operation: GitFetchError["operation"], cause?: unknown) {
+	return new GitFetchError({ ...(cause === undefined ? {} : { cause }), operation });
+}
+
 function is_valid_limit(value: number) {
 	return Number.isSafeInteger(value) && value > 0;
+}
+
+function is_valid_fetch_timeout(value: number) {
+	return Number.isSafeInteger(value) && value > 0 && value <= 5 * 60_000;
 }
 
 function is_platform_reason(cause: unknown, reason: PlatformError.SystemErrorTag) {
@@ -122,6 +144,30 @@ function is_platform_reason(cause: unknown, reason: PlatformError.SystemErrorTag
 
 function is_object_id(value: string) {
 	return /^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u.test(value);
+}
+
+function endpoint_transport_protocol(value: string): "file" | "https" | "ssh" | undefined {
+	if (/^(?:[A-Za-z]:[\\/]|\\\\|\/)/u.test(value)) {
+		return "file";
+	}
+
+	if (/^[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:[A-Za-z0-9._~/-]+$/u.test(value)) {
+		return "ssh";
+	}
+
+	try {
+		const endpoint = new URL(value);
+
+		return endpoint.protocol === "file:"
+			? "file"
+			: endpoint.protocol === "https:"
+				? "https"
+				: endpoint.protocol === "ssh:"
+					? "ssh"
+					: undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 function same_path(left: string, right: string) {
@@ -369,6 +415,11 @@ function transaction_bytes(commands: ReadonlyArray<RefTransactionCommand>) {
 			continue;
 		}
 
+		if (command.type === "delete") {
+			fields.push(`delete ${command.ref}`, command.old_oid);
+			continue;
+		}
+
 		if (command.type === "verify") {
 			fields.push(`verify ${command.ref}`, command.oid);
 			continue;
@@ -532,8 +583,30 @@ function BuildRepositoryPin(
 		const reported_git_directory = yield* RunDiscovery(["rev-parse", "--absolute-git-dir"]);
 		const git_directory = yield* file_system.realPath(reported_git_directory);
 		const git_directory_info = yield* file_system.stat(git_directory);
+		const reported_git_common_directory = yield* RunDiscovery([
+			"rev-parse",
+			"--path-format=absolute",
+			"--git-common-dir",
+		]);
+		const git_common_directory = yield* file_system.realPath(reported_git_common_directory);
+		const git_common_directory_info = yield* file_system.stat(git_common_directory);
+		const reported_fetch_head_path = yield* RunDiscovery([
+			"rev-parse",
+			"--path-format=absolute",
+			"--git-path",
+			"FETCH_HEAD",
+		]);
+		const fetch_head_path = path_service.normalize(
+			path_service.isAbsolute(reported_fetch_head_path)
+				? reported_fetch_head_path
+				: path_service.resolve(root, reported_fetch_head_path),
+		);
 
-		if (git_directory_info.type !== "Directory") {
+		if (
+			git_directory_info.type !== "Directory" ||
+			git_common_directory_info.type !== "Directory" ||
+			!same_path(path_service.dirname(fetch_head_path), git_common_directory)
+		) {
 			return yield* Effect.fail(mutation_error("configuration"));
 		}
 
@@ -566,6 +639,12 @@ function BuildRepositoryPin(
 		}
 
 		const identity = yield* HashJson(crypto, {
+			fetch_head_path,
+			git_common_directory,
+			git_common_directory_device: git_common_directory_info.dev,
+			...(Option.isSome(git_common_directory_info.ino)
+				? { git_common_directory_inode: git_common_directory_info.ino.value }
+				: {}),
 			git_executable: executable.canonical,
 			git_executable_device: executable.info.dev,
 			...(Option.isSome(executable.info.ino)
@@ -595,6 +674,12 @@ function BuildRepositoryPin(
 				GIT_INDEX_FILE: index_path,
 				GIT_WORK_TREE: root,
 			},
+			fetch_head_path,
+			git_common_directory,
+			git_common_directory_device: git_common_directory_info.dev,
+			...(Option.isSome(git_common_directory_info.ino)
+				? { git_common_directory_inode: git_common_directory_info.ino.value }
+				: {}),
 			git_executable: executable.canonical,
 			git_executable_device: executable.info.dev,
 			...(Option.isSome(executable.info.ino)
@@ -635,15 +720,13 @@ function make_adapter(
 	const max_stdout_bytes = options.max_stdout_bytes ?? 2 * 1024 * 1024;
 	const max_stderr_bytes = options.max_stderr_bytes ?? 256 * 1024;
 	const limits = { max_stderr_bytes, max_stdout_bytes };
-	const safe_config_arguments = [
+	const base_safe_config_arguments = [
 		"-c",
 		`core.hooksPath=${null_device_path}`,
 		"-c",
 		"commit.gpgSign=false",
 		"-c",
 		"core.fsmonitor=false",
-		"-c",
-		"credential.helper=",
 		"-c",
 		"gc.auto=0",
 		"-c",
@@ -664,6 +747,11 @@ function make_adapter(
 		"rerere.enabled=false",
 		"-c",
 		"submodule.recurse=false",
+	] as const;
+	const safe_config_arguments = [
+		...base_safe_config_arguments,
+		"-c",
+		"credential.helper=",
 	] as const;
 	const remote_config_arguments = [
 		"-c",
@@ -963,16 +1051,21 @@ function make_adapter(
 		const canonical_root = yield* file_system.realPath(pin.root);
 		const canonical_git_executable = yield* file_system.realPath(pin.git_executable);
 		const canonical_git_directory = yield* file_system.realPath(pin.git_directory);
+		const canonical_git_common_directory = yield* file_system.realPath(
+			pin.git_common_directory,
+		);
 		const canonical_object_directory = yield* file_system.realPath(pin.object_directory);
 		const root_info = yield* file_system.stat(canonical_root);
 		const git_executable_info = yield* file_system.stat(canonical_git_executable);
 		const git_directory_info = yield* file_system.stat(canonical_git_directory);
+		const git_common_directory_info = yield* file_system.stat(canonical_git_common_directory);
 		const object_directory_info = yield* file_system.stat(canonical_object_directory);
 
 		if (
 			!same_path(canonical_root, pin.root) ||
 			!same_path(canonical_git_executable, pin.git_executable) ||
 			!same_path(canonical_git_directory, pin.git_directory) ||
+			!same_path(canonical_git_common_directory, pin.git_common_directory) ||
 			!same_path(canonical_object_directory, pin.object_directory) ||
 			!same_pinned_file(pin.root_device, pin.root_inode, root_info) ||
 			git_executable_info.type !== "File" ||
@@ -983,6 +1076,11 @@ function make_adapter(
 				pin.git_directory_device,
 				pin.git_directory_inode,
 				git_directory_info,
+			) ||
+			!same_pinned_file(
+				pin.git_common_directory_device,
+				pin.git_common_directory_inode,
+				git_common_directory_info,
 			) ||
 			!same_pinned_file(
 				pin.object_directory_device,
@@ -1256,13 +1354,352 @@ function make_adapter(
 		);
 	const Transaction = (commands: ReadonlyArray<RefTransactionCommand>) =>
 		Effect.try({
-			try: () => transaction_bytes(commands),
+			try: () => {
+				const bytes = transaction_bytes(commands);
+
+				if (bytes.byteLength > 4 * 1024 * 1024) {
+					throw new TypeError("Git reference transaction exceeds 4 MiB");
+				}
+
+				return bytes;
+			},
 			catch: (cause) => mutation_error("invalid_plan", cause),
 		}).pipe(
 			Effect.flatMap((stdin) =>
 				MutationRun(["update-ref", "--no-deref", "--stdin", "-z"], { stdin }),
 			),
 		);
+	const ObserveFetchHead = Effect.scoped(
+		Effect.gen(function* () {
+			const file = yield* file_system.open(pin.fetch_head_path, { flag: "r" });
+			const before = yield* file.stat;
+
+			if (before.type !== "File" || before.size > 2n * 1024n * 1024n) {
+				return yield* Effect.fail(fetch_error("precondition"));
+			}
+
+			const bytes =
+				before.size === 0n
+					? new Uint8Array()
+					: Option.getOrElse(yield* file.readAlloc(before.size), () => new Uint8Array());
+			const after = yield* file.stat;
+
+			if (
+				after.type !== "File" ||
+				after.size !== before.size ||
+				BigInt(bytes.byteLength) !== before.size
+			) {
+				return yield* Effect.fail(fetch_error("precondition"));
+			}
+
+			return {
+				identity: yield* HashRaw([bytes]).pipe(
+					Effect.mapError((cause) => fetch_error("integrity", cause)),
+				),
+				type: "present" as const,
+			};
+		}),
+	).pipe(
+		Effect.catch((cause) =>
+			is_platform_reason(cause, "NotFound")
+				? Effect.succeed({ type: "missing" as const })
+				: Effect.fail(
+						cause instanceof GitFetchError ? cause : fetch_error("precondition", cause),
+					),
+		),
+	);
+	const ParseRemoteReferences = (
+		result: ProcessRunnerResult,
+		remote: string,
+		operation: GitFetchError["operation"],
+	) =>
+		Effect.try({
+			try: () => {
+				if (result.exit_code !== 0 || result.stdout_truncated || result.stderr_truncated) {
+					throw new TypeError("Git reference query failed");
+				}
+
+				const decoded = decode_utf8(result.stdout);
+
+				if (decoded === undefined || (decoded.length > 0 && !decoded.endsWith("\n"))) {
+					throw new TypeError("Git reference query returned malformed UTF-8");
+				}
+
+				const prefix = `refs/remotes/${remote}/`;
+				const lines = decoded.length === 0 ? [] : decoded.slice(0, -1).split("\n");
+				const references = new Map<string, string>();
+
+				if (lines.length > 10_000) {
+					throw new TypeError("Git reference query exceeded 10000 references");
+				}
+
+				for (const raw_line of lines) {
+					const line = raw_line.endsWith("\r") ? raw_line.slice(0, -1) : raw_line;
+					const [ref, oid, symref, extra] = line.split("\0");
+
+					if (
+						ref === undefined ||
+						oid === undefined ||
+						symref === undefined ||
+						extra !== undefined ||
+						!ref.startsWith(prefix) ||
+						!is_object_id(oid)
+					) {
+						throw new TypeError("Git reference query returned an invalid reference");
+					}
+
+					const suffix = ref.slice(prefix.length);
+
+					if (suffix === "HEAD") {
+						continue;
+					}
+
+					if (suffix.length === 0 || symref.length > 0 || references.has(ref)) {
+						throw new TypeError("Git reference query returned an unsafe reference");
+					}
+
+					references.set(ref, oid);
+				}
+
+				return new Map(
+					[...references].toSorted(([left], [right]) => left.localeCompare(right)),
+				);
+			},
+			catch: (cause) => fetch_error(operation, cause),
+		});
+	const ListRemoteReferences = (remote: string, operation: GitFetchError["operation"]) =>
+		Run([
+			"for-each-ref",
+			"--format=%(refname)%00%(objectname)%00%(symref)",
+			`refs/remotes/${remote}/`,
+		]).pipe(
+			Effect.mapError((cause) => fetch_error("process", cause)),
+			Effect.flatMap((result) => ParseRemoteReferences(result, remote, operation)),
+		);
+	const FetchRemoteReferences = (
+		request: typeof GitFetchRequest.Type,
+		authorization: GitTransportAuthorization,
+	) =>
+		Effect.scoped(
+			Effect.gen(function* () {
+				if (
+					!same_path(authorization.git_executable_path, pin.git_executable) ||
+					authorization.remote_endpoint !== request.remote_endpoint ||
+					authorization.transport_protocol !==
+						endpoint_transport_protocol(request.remote_endpoint)
+				) {
+					return yield* Effect.fail(fetch_error("invalid_authorization"));
+				}
+
+				const transport_directory = yield* file_system.makeTempDirectoryScoped({
+					prefix: "artisan-git-fetch-",
+				});
+				const initialized = yield* runner.Run({
+					args: [
+						"init",
+						"--bare",
+						"--quiet",
+						`--object-format=${pin.object_format}`,
+						".",
+					],
+					command: pin.git_executable,
+					cwd: transport_directory,
+					environment: transport_base_environment,
+					environment_mode: "replace",
+					...limits,
+				});
+
+				if (
+					initialized.exit_code !== 0 ||
+					initialized.stdout_truncated ||
+					initialized.stderr_truncated
+				) {
+					return yield* Effect.fail(fetch_error("configuration"));
+				}
+
+				const transport_environment = {
+					...transport_base_environment,
+					...authorization.environment,
+					GIT_ALLOW_PROTOCOL: authorization.transport_protocol,
+					GIT_COMMON_DIR: undefined,
+					GIT_DIR: transport_directory,
+					GIT_INDEX_FILE: undefined,
+					GIT_NAMESPACE: undefined,
+					GIT_OBJECT_DIRECTORY: pin.object_directory,
+					GIT_PROTOCOL_FROM_USER: "0",
+					GIT_REPLACE_REF_BASE: undefined,
+					GIT_WORK_TREE: undefined,
+				};
+				const fetched = yield* runner
+					.Run({
+						args: [
+							...base_safe_config_arguments,
+							...remote_config_arguments,
+							"fetch",
+							"--force",
+							"--no-recurse-submodules",
+							"--no-tags",
+							"--no-write-fetch-head",
+							"--prune",
+							"--quiet",
+							"--",
+							request.remote_endpoint,
+							`+refs/heads/*:refs/remotes/${request.remote}/*`,
+						],
+						command: pin.git_executable,
+						cwd: transport_directory,
+						environment: transport_environment,
+						environment_mode: "replace",
+						...limits,
+					})
+					.pipe(Effect.timeoutOption(options.fetch_timeout_ms ?? 2 * 60_000));
+
+				if (
+					Option.isNone(fetched) ||
+					fetched.value.exit_code !== 0 ||
+					fetched.value.stdout_truncated ||
+					fetched.value.stderr_truncated
+				) {
+					return yield* Effect.fail(fetch_error("fetch"));
+				}
+
+				const references = yield* runner.Run({
+					args: [
+						...safe_config_arguments,
+						"for-each-ref",
+						"--format=%(refname)%00%(objectname)%00%(symref)",
+						`refs/remotes/${request.remote}/`,
+					],
+					command: pin.git_executable,
+					cwd: transport_directory,
+					environment: {
+						...transport_base_environment,
+						GIT_DIR: transport_directory,
+						GIT_OBJECT_DIRECTORY: pin.object_directory,
+					},
+					environment_mode: "replace",
+					...limits,
+				});
+
+				return yield* ParseRemoteReferences(references, request.remote, "integrity");
+			}),
+		).pipe(
+			Effect.mapError((cause) =>
+				cause instanceof GitFetchError ? cause : fetch_error("process", cause),
+			),
+		);
+	const Fetch = (input: unknown, authorization: GitTransportAuthorization) =>
+		Schema.decodeUnknownEffect(GitFetchRequest, { onExcessProperty: "error" })(input).pipe(
+			Effect.mapError((cause) => fetch_error("invalid_request", cause)),
+			Effect.flatMap((request) =>
+				Effect.gen(function* () {
+					yield* EnsurePinned.pipe(
+						Effect.mapError((cause) => fetch_error("precondition", cause)),
+					);
+
+					const endpoints = yield* RemoteEndpoints(request.remote, "precondition").pipe(
+						Effect.mapError((cause) => fetch_error("precondition", cause)),
+					);
+
+					if (endpoints.fetch !== request.remote_endpoint) {
+						return yield* Effect.fail(fetch_error("precondition"));
+					}
+
+					const source = yield* Source.pipe(
+						Effect.mapError((cause) => fetch_error("precondition", cause)),
+					);
+					const fetch_head = yield* ObserveFetchHead;
+					const fetched = yield* FetchRemoteReferences(request, authorization);
+					const source_after_fetch = yield* Source.pipe(
+						Effect.mapError((cause) => fetch_error("precondition", cause)),
+					);
+					const fetch_head_after_fetch = yield* ObserveFetchHead;
+					const endpoints_after_fetch = yield* RemoteEndpoints(
+						request.remote,
+						"precondition",
+					).pipe(Effect.mapError((cause) => fetch_error("precondition", cause)));
+
+					if (
+						!same_source(source, source_after_fetch) ||
+						canonical(fetch_head) !== canonical(fetch_head_after_fetch) ||
+						endpoints_after_fetch.fetch !== request.remote_endpoint
+					) {
+						return yield* Effect.fail(fetch_error("precondition"));
+					}
+
+					const current = yield* ListRemoteReferences(request.remote, "precondition");
+					const reference_names = new Set([...current.keys(), ...fetched.keys()]);
+
+					if (reference_names.size > 10_000) {
+						return yield* Effect.fail(fetch_error("integrity"));
+					}
+
+					const commands: Array<RefTransactionCommand> = [];
+					let created_refs = 0;
+					let deleted_refs = 0;
+					let updated_refs = 0;
+
+					for (const [ref, oid] of fetched) {
+						const previous = current.get(ref);
+
+						if (previous === undefined) {
+							commands.push({ oid, ref, type: "create" });
+							created_refs += 1;
+						} else if (previous !== oid) {
+							commands.push({ new_oid: oid, old_oid: previous, ref, type: "update" });
+							updated_refs += 1;
+						}
+					}
+
+					for (const [ref, old_oid] of current) {
+						if (!fetched.has(ref)) {
+							commands.push({ old_oid, ref, type: "delete" });
+							deleted_refs += 1;
+						}
+					}
+
+					if (commands.length > 0) {
+						const transaction = yield* Transaction(commands).pipe(
+							Effect.mapError((cause) => fetch_error("settlement", cause)),
+						);
+
+						if (
+							transaction.exit_code !== 0 ||
+							transaction.stdout_truncated ||
+							transaction.stderr_truncated
+						) {
+							return yield* Effect.fail(fetch_error("settlement"));
+						}
+					}
+
+					const settled = yield* ListRemoteReferences(request.remote, "settlement");
+					const settled_source = yield* Source.pipe(
+						Effect.mapError((cause) => fetch_error("settlement", cause)),
+					);
+					const settled_fetch_head = yield* ObserveFetchHead.pipe(
+						Effect.mapError((cause) => fetch_error("settlement", cause)),
+					);
+
+					if (
+						canonical([...settled]) !== canonical([...fetched]) ||
+						!same_source(source, settled_source) ||
+						canonical(fetch_head) !== canonical(settled_fetch_head)
+					) {
+						return yield* Effect.fail(fetch_error("settlement"));
+					}
+
+					return yield* Schema.decodeUnknownEffect(GitFetchResult, {
+						onExcessProperty: "error",
+					})({
+						created_refs,
+						deleted_refs,
+						remote: request.remote,
+						remote_refs: fetched.size,
+						updated_refs,
+					}).pipe(Effect.mapError((cause) => fetch_error("integrity", cause)));
+				}),
+			),
+		) as Effect.Effect<GitFetchResultType, GitFetchError>;
 	const DecodePlan = (input: unknown, operation: GitMutationError["operation"]) =>
 		Schema.decodeUnknownEffect(GitMutationPlan, { onExcessProperty: "error" })(input).pipe(
 			Effect.mapError((cause) => mutation_error(operation, cause)),
@@ -2582,7 +3019,48 @@ function make_adapter(
 				}),
 			),
 		) as Effect.Effect<GitMutationReconciliation, GitMutationError>;
-	return { Execute, Prepare, Reconcile };
+	return { Execute, Fetch, Prepare, Reconcile };
+}
+
+/** Builds an injectable metadata-only Git fetch layer from Effect platform capabilities. */
+export function make_git_fetch_layer(options: NodeGitMutationOptions) {
+	const max_stdout_bytes = options.max_stdout_bytes ?? 2 * 1024 * 1024;
+	const max_stderr_bytes = options.max_stderr_bytes ?? 256 * 1024;
+	const fetch_timeout_ms = options.fetch_timeout_ms ?? 2 * 60_000;
+
+	return Layer.effect(
+		GitFetch,
+		Effect.gen(function* () {
+			if (
+				!is_valid_limit(max_stdout_bytes) ||
+				!is_valid_limit(max_stderr_bytes) ||
+				!is_valid_fetch_timeout(fetch_timeout_ms)
+			) {
+				return yield* Effect.fail(fetch_error("configuration"));
+			}
+
+			const file_system = yield* FileSystem.FileSystem;
+			const path_service = yield* Path.Path;
+			const runner = yield* ProcessRunner;
+			const crypto = yield* Crypto.Crypto;
+			const GetPin = yield* Effect.cached(
+				BuildRepositoryPin(runner, crypto, file_system, path_service, options),
+			);
+			const GetAdapter = GetPin.pipe(
+				Effect.map((pin) =>
+					make_adapter(runner, crypto, file_system, path_service, pin, options),
+				),
+				Effect.mapError((cause) => fetch_error("configuration", cause)),
+			);
+
+			return {
+				Fetch: (request: unknown, authorization: GitTransportAuthorization) =>
+					GetAdapter.pipe(
+						Effect.flatMap((adapter) => adapter.Fetch(request, authorization)),
+					),
+			};
+		}),
+	);
 }
 
 /** Builds an injectable Git mutation layer from Effect platform capabilities. */
@@ -2625,6 +3103,16 @@ export function make_git_mutation_layer(options: NodeGitMutationOptions) {
 /** Builds the production Git mutation layer with bounded Node and Effect platform services. */
 export function make_node_git_mutation_layer(options: NodeGitMutationOptions) {
 	return make_git_mutation_layer(options).pipe(
+		Layer.provide(make_node_process_runner_layer(options.process)),
+		Layer.provide(NodeCrypto.layer),
+		Layer.provide(NodeFileSystem.layer),
+		Layer.provide(NodePath.layer),
+	);
+}
+
+/** Builds the production metadata-only Git fetch layer with bounded Node services. */
+export function make_node_git_fetch_layer(options: NodeGitMutationOptions) {
+	return make_git_fetch_layer(options).pipe(
 		Layer.provide(make_node_process_runner_layer(options.process)),
 		Layer.provide(NodeCrypto.layer),
 		Layer.provide(NodeFileSystem.layer),
