@@ -51,6 +51,7 @@ describe("Codex engine probe", () => {
 		expect(probe.authentication).toMatchObject({ reason: "chatgpt", state: "authenticated" });
 		expect(probe.ready).toBe(true);
 		expect(CodexEngineDescriptor.capabilities.start.state).toBe("supported");
+		expect(CodexEngineDescriptor.capabilities.harness_context.state).toBe("experimental");
 	});
 
 	it("treats a configured Amazon Bedrock account as authenticated", async () => {

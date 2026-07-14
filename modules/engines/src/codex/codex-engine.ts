@@ -47,6 +47,10 @@ export const CodexEngineDescriptor: EngineDescriptor = {
 		close: { state: "supported" },
 		events: { state: "supported" },
 		global_guidance: { state: "supported" },
+		harness_context: {
+			state: "experimental",
+			reason: "Codex app-server shares one developer-instruction channel, so Artisan appends its backend policy after editable guidance without claiming immutable role isolation.",
+		},
 		model_selection: { state: "supported" },
 		native_tools: {
 			state: "experimental",

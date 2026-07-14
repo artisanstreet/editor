@@ -1,4 +1,4 @@
-import { Data, Effect, Scope, Stream } from "effect";
+import { Data, Effect, Option, Schema, Scope, Stream } from "effect";
 
 /** Describes the maturity of one provider capability. @since 0.2.0 */
 export type EngineCapabilityState = "supported" | "experimental" | "unsupported";
@@ -11,6 +11,7 @@ export type EngineCapabilityName =
 	| "close"
 	| "events"
 	| "global_guidance"
+	| "harness_context"
 	| "model_selection"
 	| "native_tools"
 	| "probe"
@@ -73,10 +74,48 @@ export interface EngineGlobalGuidance {
 	readonly source_file: string;
 }
 
+/** The maximum UTF-8 byte length accepted for backend-owned harness policy. @since 0.6.0 */
+export const engine_harness_context_maximum_bytes = 4_096;
+
+const engine_harness_context_version_maximum_bytes = 64;
+const text_encoder = new TextEncoder();
+const has_hidden_instruction_characters = (value: string) =>
+	/[\p{Cc}\p{Cf}]/u.test(value.replaceAll("\t", "").replaceAll("\n", "").replaceAll("\r", ""));
+const EngineHarnessContextShape = Schema.Struct({
+	content: Schema.Unknown,
+	version: Schema.Unknown,
+});
+const EngineHarnessContextContent = Schema.String.check(
+	Schema.makeFilter<string>((value) =>
+		value.trim().length === 0 ||
+		text_encoder.encode(value).byteLength > engine_harness_context_maximum_bytes ||
+		has_hidden_instruction_characters(value)
+			? "Expected bounded harness content without hidden control characters"
+			: undefined,
+	),
+);
+const EngineHarnessContextVersion = Schema.String.check(
+	Schema.makeFilter<string>((value) =>
+		value.trim().length === 0 ||
+		value !== value.trim() ||
+		text_encoder.encode(value).byteLength > engine_harness_context_version_maximum_bytes ||
+		/[\p{Cc}\p{Cf}]/u.test(value)
+			? "Expected a canonical bounded harness version"
+			: undefined,
+	),
+);
+
+/** Carries the stable, backend-owned policy applied through an engine instruction channel. @since 0.6.0 */
+export interface EngineHarnessContext {
+	readonly content: string;
+	readonly version: string;
+}
+
 /** Supplies the caller-owned context shared by started and resumed runs. @since 0.2.0 */
 export interface EngineRunContext extends EngineRunMetadata {
 	readonly artisan_run_id: string;
 	readonly global_guidance?: EngineGlobalGuidance;
+	readonly harness_context?: EngineHarnessContext;
 	readonly working_directory: string;
 }
 
@@ -108,6 +147,57 @@ export function ValidateEngineGlobalGuidance(
 					value: global_guidance.source_file,
 				}),
 			);
+}
+
+/**
+ * Validates backend-owned harness policy before an adapter contacts its provider.
+ *
+ * @since 0.6.0
+ * @param engine_id - Stable adapter identifier included in a configuration failure.
+ * @param harness_context - Optional versioned policy selected for this run.
+ * @returns An effect that completes when the policy version and bounded content are valid.
+ */
+export function ValidateEngineHarnessContext(
+	engine_id: string,
+	harness_context: unknown,
+): Effect.Effect<void, EngineConfigurationError> {
+	if (harness_context === undefined) {
+		return Effect.void;
+	}
+
+	const decoded = Schema.decodeUnknownOption(EngineHarnessContextShape, {
+		onExcessProperty: "error",
+	})(harness_context);
+
+	if (Option.isNone(decoded)) {
+		return Effect.fail(
+			new EngineConfigurationError({
+				engine_id,
+				option: "harness_context",
+				value: harness_context,
+			}),
+		);
+	}
+
+	if (!Schema.is(EngineHarnessContextVersion)(decoded.value.version)) {
+		return Effect.fail(
+			new EngineConfigurationError({
+				engine_id,
+				option: "harness_context.version",
+				value: decoded.value.version,
+			}),
+		);
+	}
+
+	return !Schema.is(EngineHarnessContextContent)(decoded.value.content)
+		? Effect.fail(
+				new EngineConfigurationError({
+					engine_id,
+					option: "harness_context.content",
+					value: decoded.value.content,
+				}),
+			)
+		: Effect.void;
 }
 
 /** Carries provider-owned state that can reopen a run without inventing a checkpoint. @since 0.2.0 */

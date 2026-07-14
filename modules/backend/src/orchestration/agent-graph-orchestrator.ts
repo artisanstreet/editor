@@ -4,6 +4,7 @@ import { EngineRegistry, type EngineCommand, type EngineRun } from "@artisan/eng
 import type { CommandEnvelope, OrchestrationGraph } from "@artisan/protocol";
 
 import { GlobalGuidanceService } from "../guidance/guidance-service";
+import { ArtisanHarnessContext } from "../harness/harness-context";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { MakeThreadDispatchFence } from "../threads/internal/thread-dispatch-fence";
 import {
@@ -50,6 +51,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 	Effect.gen(function* () {
 		const engines = yield* EngineRegistry;
 		const guidance = yield* GlobalGuidanceService;
+		const harness_context = yield* ArtisanHarnessContext;
 		const metadata = yield* RuntimeMetadata;
 		const repository = yield* AgentGraphRepository;
 		const service_scope = yield* Scope.make();
@@ -152,6 +154,9 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 				const resolved_guidance = yield* guidance
 					.ResolveForEngine(work.engine_id)
 					.pipe(Effect.exit);
+				const resolved_harness_context = yield* harness_context.ResolveForEngine(
+					engine.value.Descriptor,
+				);
 
 				if (
 					Exit.isFailure(resolved_guidance) ||
@@ -174,6 +179,9 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 							artisan_run_id: work.run_id,
 							...(Option.isSome(resolved_guidance.value)
 								? { global_guidance: resolved_guidance.value.value }
+								: {}),
+							...(resolved_harness_context._tag === "available"
+								? { harness_context: resolved_harness_context.context }
 								: {}),
 							initial_text: [
 								work.instructions,

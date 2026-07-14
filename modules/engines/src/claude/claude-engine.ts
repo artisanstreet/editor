@@ -32,6 +32,7 @@ import {
 	EngineUnsupportedCommandError,
 	EngineUnavailableError,
 	EngineProbeTimeoutError,
+	ValidateEngineHarnessContext,
 	ValidateEngineGlobalGuidance,
 } from "../engine";
 import { EngineProcessFactory, type EngineProcessSpawnInput } from "../process/process";
@@ -64,6 +65,10 @@ export const ClaudeEngineDescriptor: EngineDescriptor = {
 		close: { state: "supported" },
 		events: { state: "supported" },
 		global_guidance: { state: "supported" },
+		harness_context: {
+			state: "experimental",
+			reason: "Claude Code shares appended system-prompt material, so Artisan places its backend policy after editable guidance without claiming immutable role isolation.",
+		},
 		model_selection: { state: "supported" },
 		native_tools: {
 			state: "experimental",
@@ -189,6 +194,7 @@ function validate_provider_options(input: EngineOpenInput) {
 	}
 
 	return ValidateEngineGlobalGuidance("claude", input.global_guidance).pipe(
+		Effect.andThen(ValidateEngineHarnessContext("claude", input.harness_context)),
 		Effect.flatMap(() => {
 			const guidance_prompt_file = input.global_guidance?.source_file;
 
@@ -204,6 +210,7 @@ function validate_provider_options(input: EngineOpenInput) {
 			}
 
 			return Effect.succeed({
+				harness_prompt: input.harness_context?.content,
 				permission_mode,
 				prompt_file: guidance_prompt_file ?? configured_prompt_file,
 			});
@@ -216,7 +223,8 @@ function make_spawn_input(
 	options: Required<Pick<ClaudeEngineOptions, "executable" | "executable_args">>,
 ) {
 	return Effect.gen(function* () {
-		const { permission_mode, prompt_file } = yield* validate_provider_options(input);
+		const { harness_prompt, permission_mode, prompt_file } =
+			yield* validate_provider_options(input);
 		const session_id =
 			input._tag === "resume" ? input.resume_token.native_thread_id : randomUUID();
 		const args = [
@@ -233,6 +241,7 @@ function make_spawn_input(
 			...(input.model === undefined ? [] : ["--model", input.model]),
 			...(permission_mode === undefined ? [] : ["--permission-mode", permission_mode]),
 			...(prompt_file === undefined ? [] : ["--append-system-prompt-file", prompt_file]),
+			...(harness_prompt === undefined ? [] : ["--append-system-prompt", harness_prompt]),
 		];
 
 		return {

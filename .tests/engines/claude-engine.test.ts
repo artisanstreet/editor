@@ -11,6 +11,7 @@ import {
 	ClaudeEngineDescriptor,
 	EngineProcessFactory,
 	EngineProcessFactoryLive,
+	ValidateEngineHarnessContext,
 	make_engine_registry_layer,
 	make_claude_engine_layer,
 } from "@artisan/engines";
@@ -63,8 +64,20 @@ describe("Claude Code engine", () => {
 		expect(ClaudeEngineDescriptor.capabilities.steer.state).toBe("unsupported");
 		expect(ClaudeEngineDescriptor.capabilities.approval.state).toBe("unsupported");
 		expect(ClaudeEngineDescriptor.capabilities.global_guidance.state).toBe("supported");
+		expect(ClaudeEngineDescriptor.capabilities.harness_context.state).toBe("experimental");
 		expect(ClaudeEngineDescriptor.capabilities.resume.state).toBe("supported");
 	});
+
+	it.each([null, 42, "v1", {}, { content: "Hidden\u0000policy", version: "v1" }])(
+		"rejects malformed harness input without throwing",
+		async (harness_context) => {
+			const result = await Effect.runPromise(
+				Effect.exit(ValidateEngineHarnessContext("claude", harness_context)),
+			);
+
+			expect(Exit.isFailure(result)).toBe(true);
+		},
+	);
 
 	it("is explicitly registrable by its provider id", async () => {
 		const engine = await get_engine();
@@ -150,6 +163,7 @@ describe("Claude Code engine", () => {
 			content: "Use project guidance.",
 			source_file: "C:\\workspace\\AGENTS.md",
 		};
+		const harness_context = { content: "Never poll hosted CI.", version: "v1" };
 
 		process.env.FAKE_CLAUDE_INVOCATION_FILE = invocation;
 
@@ -162,11 +176,13 @@ describe("Claude Code engine", () => {
 						const started = yield* engine.Open({
 							...open_input(),
 							global_guidance: guidance,
+							harness_context,
 						});
 						yield* started.Events.pipe(Stream.runDrain);
 						const resumed = yield* engine.Open({
 							...open_input("resume"),
 							global_guidance: guidance,
+							harness_context,
 							provider_options: {
 								"claude.append_system_prompt_file": guidance.source_file,
 							},
@@ -187,19 +203,33 @@ describe("Claude Code engine", () => {
 			expect(run_stdin).toHaveLength(2);
 			expect(run_args.map((record) => record.args)).toEqual(
 				expect.arrayContaining([
+					expect.arrayContaining(["--append-system-prompt", harness_context.content]),
 					expect.arrayContaining(["--append-system-prompt-file", guidance.source_file]),
 					expect.arrayContaining(["--append-system-prompt-file", guidance.source_file]),
 				]),
 			);
 			for (const record of run_args) {
+				const guidance_index = (record.args as string[]).indexOf(
+					"--append-system-prompt-file",
+				);
+				const harness_index = (record.args as string[]).indexOf("--append-system-prompt");
+
 				expect(
 					(record.args as string[]).filter(
 						(arg) => arg === "--append-system-prompt-file",
 					),
 				).toHaveLength(1);
+				expect(
+					(record.args as string[]).filter((arg) => arg === "--append-system-prompt"),
+				).toHaveLength(1);
+				expect(guidance_index).toBeGreaterThanOrEqual(0);
+				expect(harness_index).toBeGreaterThan(guidance_index);
 			}
 			expect(JSON.parse(run_stdin[0].stdin).message.content).toBe("hello");
 			expect(JSON.parse(run_stdin[1].stdin).message.content).toBe("continue");
+			expect(run_stdin.map((record) => record.stdin).join("\n")).not.toContain(
+				harness_context.content,
+			);
 		} finally {
 			await rm(directory, { recursive: true, force: true });
 		}
@@ -305,6 +335,42 @@ describe("Claude Code engine", () => {
 				),
 			),
 		);
+		expect(Exit.isFailure(result)).toBe(true);
+		expect(spawn_count).toBe(0);
+	});
+
+	it.each([
+		{ content: "Harness policy.", version: "" },
+		{ content: "Harness policy.", version: "v1\u0000hidden" },
+		{ content: "Harness policy.", version: "v".repeat(65) },
+		{ content: " ", version: "v1" },
+		{ content: "x".repeat(4_097), version: "v1" },
+	])("rejects invalid harness context before spawning", async (harness_context) => {
+		let spawn_count = 0;
+		const factory = Layer.succeed(EngineProcessFactory, {
+			Spawn: () => {
+				spawn_count += 1;
+				return Effect.die("spawned");
+			},
+		});
+		const engine = await Effect.runPromise(
+			ClaudeEngine.pipe(
+				Effect.provide(
+					make_claude_engine_layer({ executable }).pipe(Layer.provide(factory)),
+				),
+			),
+		);
+		const result = await Effect.runPromise(
+			Effect.scoped(
+				Effect.exit(
+					engine.Open({
+						...open_input(),
+						harness_context,
+					}),
+				),
+			),
+		);
+
 		expect(Exit.isFailure(result)).toBe(true);
 		expect(spawn_count).toBe(0);
 	});

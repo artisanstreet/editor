@@ -28,6 +28,7 @@ function make_capabilities(global_guidance: "supported" | "unsupported") {
 		close: { state: "supported" as const },
 		events: { state: "supported" as const },
 		global_guidance: { state: global_guidance },
+		harness_context: { state: "experimental" as const },
 		model_selection: { state: "supported" as const },
 		native_tools: { state: "supported" as const },
 		probe: { state: "supported" as const },
@@ -259,12 +260,16 @@ describe("global guidance engine handoff", () => {
 			expect(ordinary).toMatchObject({
 				_tag: "start",
 				global_guidance: expected_guidance,
+				harness_context: { version: "v1" },
 				initial_text: "Byte-exact ordinary request",
 			});
 			expect(graph).toMatchObject({
 				_tag: "start",
 				global_guidance: expected_guidance,
+				harness_context: { version: "v1" },
 			});
+			expect(ordinary.harness_context?.content).toContain("await_git_provider once");
+			expect(graph.harness_context?.content).toBe(ordinary.harness_context?.content);
 			expect("initial_text" in graph ? graph.initial_text : undefined).toBeOneOf([
 				[
 					"Perform the graph assignment",
@@ -324,6 +329,7 @@ describe("global guidance engine handoff", () => {
 
 			expect(opened).toMatchObject({
 				_tag: "start",
+				harness_context: { version: "v1" },
 				initial_text: "Native user request",
 			});
 			expect(opened).not.toHaveProperty("global_guidance");

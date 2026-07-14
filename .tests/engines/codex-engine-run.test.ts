@@ -14,6 +14,7 @@ import {
 	type EngineObservation,
 } from "@artisan/engines";
 import { MakeCodexAppServerEventBuffer } from "../../modules/engines/src/codex/internal/codex-app-server-event-buffer";
+import { MakeCodexAppServerThreadOptions } from "../../modules/engines/src/codex/internal/codex-permissions";
 
 const fixture_path = fileURLToPath(new URL("./fixtures/fake-app-server.mjs", import.meta.url));
 const original_pid_file = process.env.FAKE_APP_SERVER_PID_FILE;
@@ -149,6 +150,10 @@ describe("Codex engine run", () => {
 								content: "Use project guidance.",
 								source_file: "C:\\workspace\\AGENTS.md",
 							},
+							harness_context: {
+								content: "End the run after durable acceptance.",
+								version: "v1",
+							},
 							initial_text: "Start",
 							model: "gpt-5",
 							permission_policy: {
@@ -167,6 +172,10 @@ describe("Codex engine run", () => {
 							global_guidance: {
 								content: "Use project guidance.",
 								source_file: "C:\\workspace\\AGENTS.md",
+							},
+							harness_context: {
+								content: "End the run after durable acceptance.",
+								version: "v1",
 							},
 							next_text: "Resume",
 							permission_policy: {
@@ -199,7 +208,10 @@ describe("Codex engine run", () => {
 						approvalPolicy: "never",
 						config: { sandbox_workspace_write: { network_access: true } },
 						cwd: "C:\\workspace",
-						developerInstructions: "Use project guidance.",
+						developerInstructions: [
+							"Global guidance:\nUse project guidance.",
+							"Artisan harness policy (v1):\nEnd the run after durable acceptance.",
+						].join("\n\n"),
 						model: "gpt-5",
 						sandbox: "workspaceWrite",
 					},
@@ -216,7 +228,10 @@ describe("Codex engine run", () => {
 					params: {
 						approvalPolicy: "on-request",
 						cwd: "C:\\workspace",
-						developerInstructions: "Use project guidance.",
+						developerInstructions: [
+							"Global guidance:\nUse project guidance.",
+							"Artisan harness policy (v1):\nEnd the run after durable acceptance.",
+						].join("\n\n"),
 						sandbox: "readOnly",
 						threadId: "thread-resumed",
 					},
@@ -232,6 +247,60 @@ describe("Codex engine run", () => {
 		} finally {
 			await rm(directory, { force: true, recursive: true });
 		}
+	});
+
+	it("composes harness policy after editable guidance without changing user turns", async () => {
+		const base = {
+			_tag: "start" as const,
+			artisan_run_id: "composition",
+			initial_text: "Only this text belongs to the user turn.",
+			working_directory: "C:\\workspace",
+		};
+		const harness_context = { content: "Harness policy.", version: "v1" };
+		const global_guidance = {
+			content: "Editable guidance.",
+			source_file: "C:\\workspace\\AGENTS.md",
+		};
+
+		const [harness_only, guidance_only, both] = await Effect.runPromise(
+			Effect.all([
+				MakeCodexAppServerThreadOptions({ ...base, harness_context }),
+				MakeCodexAppServerThreadOptions({ ...base, global_guidance }),
+				MakeCodexAppServerThreadOptions({ ...base, global_guidance, harness_context }),
+			]),
+		);
+
+		expect(harness_only.developerInstructions).toBe(
+			"Artisan harness policy (v1):\nHarness policy.",
+		);
+		expect(guidance_only.developerInstructions).toBe("Global guidance:\nEditable guidance.");
+		expect(both.developerInstructions).toBe(
+			[
+				"Global guidance:\nEditable guidance.",
+				"Artisan harness policy (v1):\nHarness policy.",
+			].join("\n\n"),
+		);
+		expect(both.developerInstructions).not.toContain(global_guidance.source_file);
+		expect(base.initial_text).not.toContain(harness_context.content);
+	});
+
+	it("rejects malformed harness input before composing app-server instructions", async () => {
+		const effect = Reflect.apply(MakeCodexAppServerThreadOptions, undefined, [
+			{
+				_tag: "start",
+				artisan_run_id: "malformed-harness",
+				harness_context: null,
+				initial_text: "Must remain a user turn.",
+				working_directory: "C:\\workspace",
+			},
+		]);
+		const result = await Effect.runPromise(Effect.exit(effect));
+		const failure = Exit.isFailure(result) ? Cause.squash(result.cause) : undefined;
+
+		expect(failure).toMatchObject({
+			_tag: "EngineConfigurationError",
+			option: "harness_context",
+		});
 	});
 
 	it.each([
@@ -277,6 +346,13 @@ describe("Codex engine run", () => {
 				global_guidance: { content: "Guidance", source_file: "" },
 			},
 			option: "global_guidance.source_file",
+		},
+		{
+			label: "an empty harness context",
+			metadata: {
+				harness_context: { content: "", version: "v1" },
+			},
+			option: "harness_context.content",
 		},
 	] as const)("rejects $label before spawning or requesting", async ({ metadata, option }) => {
 		const directory = await mkdtemp(join(tmpdir(), "artisan-codex-policy-reject-"));

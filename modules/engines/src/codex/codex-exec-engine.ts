@@ -4,6 +4,7 @@ import {
 	type Engine,
 	type EngineCapabilities,
 	EngineUnsupportedOperationError,
+	ValidateEngineHarnessContext,
 	ValidateEngineGlobalGuidance,
 } from "../engine";
 import type { CodexProcessFactory } from "./codex-process";
@@ -27,6 +28,10 @@ export const codex_exec_capabilities: EngineCapabilities = {
 	global_guidance: {
 		state: "unsupported",
 		reason: "V1 exec has no proven per-run native instruction channel; synced guidance files are managed outside this input.",
+	},
+	harness_context: {
+		state: "unsupported",
+		reason: "V1 exec has no proven per-run developer or system instruction channel.",
 	},
 	model_selection: { state: "supported" },
 	native_tools: {
@@ -103,7 +108,8 @@ export function make_codex_exec_engine(options: CodexExecEngineOptions): Engine 
 			})),
 		);
 	const Open: Engine["Open"] = (input) =>
-		ValidateEngineGlobalGuidance("codex", input.global_guidance).pipe(
+		ValidateEngineHarnessContext("codex", input.harness_context).pipe(
+			Effect.andThen(ValidateEngineGlobalGuidance("codex", input.global_guidance)),
 			Effect.andThen(() =>
 				input.global_guidance === undefined
 					? Effect.void
@@ -111,6 +117,16 @@ export function make_codex_exec_engine(options: CodexExecEngineOptions): Engine 
 							new EngineUnsupportedOperationError({
 								engine_id: "codex",
 								operation: "global_guidance",
+							}),
+						),
+			),
+			Effect.andThen(() =>
+				input.harness_context === undefined
+					? Effect.void
+					: Effect.fail(
+							new EngineUnsupportedOperationError({
+								engine_id: "codex",
+								operation: "harness_context",
 							}),
 						),
 			),

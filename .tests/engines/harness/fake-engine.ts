@@ -93,6 +93,7 @@ function make_capabilities(
 		close: command_capability_state("close"),
 		events: capability("supported"),
 		global_guidance: capability("supported"),
+		harness_context: capability("unsupported", "Scenarios do not enforce harness policy"),
 		model_selection: capability("supported"),
 		native_tools: capability("unsupported", "The fake has no provider-native tools"),
 		probe: capability("supported"),

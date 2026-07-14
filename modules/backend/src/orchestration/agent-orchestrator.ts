@@ -10,6 +10,7 @@ import {
 	type PendingWork,
 } from "../persistence/orchestration-repository";
 import { GlobalGuidanceService } from "../guidance/guidance-service";
+import { ArtisanHarnessContext } from "../harness/harness-context";
 import { MakeThreadDispatchFence } from "../threads/internal/thread-dispatch-fence";
 
 interface LiveRun {
@@ -38,6 +39,7 @@ export const AgentOrchestratorLive = Layer.effect(
 	Effect.gen(function* () {
 		const engines = yield* EngineRegistry;
 		const guidance = yield* GlobalGuidanceService;
+		const harness_context = yield* ArtisanHarnessContext;
 		const repository = yield* OrchestrationRepository;
 		const service_scope = yield* Scope.make();
 		const live_runs = yield* Ref.make(new Map<string, LiveRun>());
@@ -134,6 +136,9 @@ export const AgentOrchestratorLive = Layer.effect(
 				const resolved_guidance = yield* guidance
 					.ResolveForEngine(work.engine_id)
 					.pipe(Effect.exit);
+				const resolved_harness_context = yield* harness_context.ResolveForEngine(
+					engine.Descriptor,
+				);
 
 				if (
 					Exit.isFailure(resolved_guidance) ||
@@ -152,6 +157,9 @@ export const AgentOrchestratorLive = Layer.effect(
 						artisan_run_id: work.run_id,
 						...(Option.isSome(resolved_guidance.value)
 							? { global_guidance: resolved_guidance.value.value }
+							: {}),
+						...(resolved_harness_context._tag === "available"
+							? { harness_context: resolved_harness_context.context }
 							: {}),
 						initial_text: work.payload.text,
 						working_directory: work.working_directory,

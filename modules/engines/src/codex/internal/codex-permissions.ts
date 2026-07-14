@@ -3,6 +3,7 @@ import { Effect } from "effect";
 import {
 	type EngineOpenInput,
 	EngineConfigurationError,
+	ValidateEngineHarnessContext,
 	ValidateEngineGlobalGuidance,
 } from "../../engine";
 
@@ -123,34 +124,48 @@ function ResolveCodexPermissions(input: EngineOpenInput, transport: CodexTranspo
 /** Builds exact legacy app-server thread fields from canonical permission policy. */
 export function MakeCodexAppServerThreadOptions(input: EngineOpenInput) {
 	return ValidateEngineGlobalGuidance("codex", input.global_guidance).pipe(
+		Effect.andThen(ValidateEngineHarnessContext("codex", input.harness_context)),
 		Effect.andThen(ResolveCodexPermissions(input, "app-server")),
-		Effect.map((permissions) => ({
-			...(permissions.approval_policy === undefined
-				? {}
-				: { approvalPolicy: permissions.approval_policy }),
-			cwd: input.working_directory,
-			...(input.global_guidance === undefined
-				? {}
-				: { developerInstructions: input.global_guidance.content }),
-			...(input.model === undefined ? {} : { model: input.model }),
-			...(permissions.network_access === undefined
-				? {}
-				: {
-						config: {
-							sandbox_workspace_write: {
-								network_access: permissions.network_access,
+		Effect.map((permissions) => {
+			const developer_instructions = [
+				input.global_guidance === undefined
+					? undefined
+					: `Global guidance:\n${input.global_guidance.content}`,
+				input.harness_context === undefined
+					? undefined
+					: `Artisan harness policy (${input.harness_context.version}):\n${input.harness_context.content}`,
+			]
+				.filter((value): value is string => value !== undefined)
+				.join("\n\n");
+
+			return {
+				...(permissions.approval_policy === undefined
+					? {}
+					: { approvalPolicy: permissions.approval_policy }),
+				cwd: input.working_directory,
+				...(developer_instructions.length === 0
+					? {}
+					: { developerInstructions: developer_instructions }),
+				...(input.model === undefined ? {} : { model: input.model }),
+				...(permissions.network_access === undefined
+					? {}
+					: {
+							config: {
+								sandbox_workspace_write: {
+									network_access: permissions.network_access,
+								},
 							},
-						},
-					}),
-			...(permissions.sandbox === undefined
-				? {}
-				: {
-						sandbox:
-							permissions.sandbox === "workspace-write"
-								? "workspaceWrite"
-								: "readOnly",
-					}),
-		})),
+						}),
+				...(permissions.sandbox === undefined
+					? {}
+					: {
+							sandbox:
+								permissions.sandbox === "workspace-write"
+									? "workspaceWrite"
+									: "readOnly",
+						}),
+			};
+		}),
 	);
 }
 

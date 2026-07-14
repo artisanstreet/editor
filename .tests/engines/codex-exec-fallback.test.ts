@@ -784,4 +784,45 @@ describe("Codex exec fallback", () => {
 		});
 		expect(spawn_count).toBe(0);
 	});
+
+	it("rejects harness context before any exec provider side effect", async () => {
+		let spawn_count = 0;
+		const engine = make_codex_exec_engine({
+			event_capacity: 16,
+			executable: "codex",
+			executable_args: [],
+			fallback_reason: "test fallback",
+			factory: {
+				Spawn: () => {
+					spawn_count += 1;
+					return Effect.die("spawned");
+				},
+			},
+			max_frame_bytes: 1_024,
+			max_stderr_bytes: 1_024,
+			max_stdout_bytes: 1_024,
+			timeout_ms: 1_000,
+			version_timeout_ms: 1_000,
+		});
+		const result = await Effect.runPromise(
+			Effect.scoped(
+				Effect.exit(
+					engine.Open({
+						_tag: "start",
+						artisan_run_id: "exec-harness-reject",
+						harness_context: { content: "Never poll.", version: "v1" },
+						initial_text: "User text stays separate.",
+						working_directory: "C:\\workspace",
+					}),
+				),
+			),
+		);
+
+		expect(Exit.isFailure(result)).toBe(true);
+		expect(failure_from(result)).toMatchObject({
+			_tag: "EngineUnsupportedOperationError",
+			operation: "harness_context",
+		});
+		expect(spawn_count).toBe(0);
+	});
 });

@@ -38,6 +38,7 @@ import { WorkspaceGitMutationCoordinatorLive } from "../git/workspace-git-mutati
 import { GitProvider } from "../git-provider/git-provider";
 import { HostedGitSnapshotRepositoryLive } from "../git-provider/hosted-git-snapshot-repository";
 import { HostedGitSnapshotServiceLive } from "../git-provider/hosted-git-snapshot-service";
+import { ArtisanHarnessContextLive } from "../harness/harness-context";
 import {
 	EmptyGitProviderRegistryLive,
 	GitProviderRegistry,
@@ -357,10 +358,12 @@ export function make_backend_layer(options: BackendOptions) {
 		),
 		Layer.provideMerge(infrastructure),
 	);
+	const harness_context = ArtisanHarnessContextLive;
 	const orchestration = AgentOrchestratorLive.pipe(
 		Layer.provideMerge(persistence),
 		Layer.provideMerge(engine_registry),
 		Layer.provideMerge(guidance),
+		Layer.provideMerge(harness_context),
 	);
 	const graph_persistence = AgentGraphRepositoryLive.pipe(Layer.provideMerge(infrastructure));
 	const graph = AgentGraphOrchestratorLive.pipe(
@@ -368,6 +371,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(engine_registry),
 		Layer.provideMerge(infrastructure),
 		Layer.provideMerge(guidance),
+		Layer.provideMerge(harness_context),
 	);
 	const thread_metadata = ThreadMetadataRepositoryLive.pipe(Layer.provideMerge(infrastructure));
 	const metadata_refinement =
