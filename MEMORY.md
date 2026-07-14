@@ -15,7 +15,7 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Package manager: pnpm 11.7.0
 - [x] Stack: TypeScript 7, Effect 4 beta, Drizzle 1 RC, SQLite
 - [x] Latest verified implementation checkpoint: `8ac37bb test: exercise git mutation process crashes`
-- [x] Local `HEAD`, upstream, and `origin/codex/workspace-replace-approval` were equal at `8ac37bb` after the local full-repository validation passed on 2026-07-14.
+- [x] Local `HEAD`, its upstream, and `origin/codex/workspace-replace-approval` must be equal after every checkpoint push and before handoff; this was last verified on 2026-07-14 after the full local validation and memory checkpoint.
 - [x] `ARTISAN_RUN_NATIVE_ADDON_SMOKE=1 pnpm --filter @artisan/bounded-file-store-native verify:local` is the canonical native gate and passes locally for production reads/replacement, test-hook races, and process-crash recovery.
 - [x] Routine development verification is local-first. Do not recreate temporary GitHub Actions, remote runners, or similar testing detours; future CI is a real clean-checkout/release gate and never a substitute for local validation.
 - [x] Reconfirmed on 2026-07-14: no `.github` workflow or other remote-testing detour remains, and the canonical native gate passes locally. The earlier BSOD remains classified as a one-off storage-driver incident, not a reason to move routine testing off-machine.
