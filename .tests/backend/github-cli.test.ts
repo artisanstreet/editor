@@ -22,6 +22,7 @@ import {
 	type ProcessRunnerResult,
 } from "../../modules/backend/src/git/process-runner";
 import { NodeProcessRunnerLive } from "../../modules/backend/src/git/node-process-runner";
+import { ReadFileIdentity } from "../../modules/backend/src/filesystem/file-identity";
 
 const executable_path = "C:\\Program Files\\GitHub CLI\\gh.exe";
 const git_executable_path =
@@ -131,14 +132,58 @@ async function with_process_environment<A>(
 	}
 }
 
-async function with_clone_destination<A>(use: (destination_path: string) => Promise<A>) {
+function unverified_clone_destination(canonical_root: string, projects_root: string) {
+	return {
+		canonical_root,
+		projects_root,
+		projects_root_device: "0",
+		projects_root_inode: "0",
+		root_device: "0",
+		root_inode: "0",
+	};
+}
+
+async function clone_destination_proof(destination_path: string) {
+	const { file_system, path_service } = await test_platform();
+
+	return Effect.runPromise(
+		Effect.scoped(
+			Effect.gen(function* () {
+				const canonical_root = yield* file_system.realPath(destination_path);
+				const projects_root = yield* file_system.realPath(
+					path_service.dirname(canonical_root),
+				);
+				const root_file = yield* file_system.open(canonical_root, { flag: "r" });
+				const projects_root_file = yield* file_system.open(projects_root, { flag: "r" });
+				const root_identity = yield* ReadFileIdentity(root_file.fd);
+				const projects_root_identity = yield* ReadFileIdentity(projects_root_file.fd);
+
+				return {
+					canonical_root,
+					projects_root,
+					projects_root_device: projects_root_identity.device.toString(),
+					projects_root_inode: projects_root_identity.inode.toString(),
+					root_device: root_identity.device.toString(),
+					root_inode: root_identity.inode.toString(),
+				};
+			}),
+		),
+	);
+}
+
+async function with_clone_destination<A>(
+	use: (
+		destination_path: string,
+		destination: Awaited<ReturnType<typeof clone_destination_proof>>,
+	) => Promise<A>,
+) {
 	return with_temporary_directory(async (root) => {
 		const { file_system, path_service } = await test_platform();
 		const destination_path = path_service.join(root, "editor");
 
 		await Effect.runPromise(file_system.makeDirectory(destination_path));
 
-		return use(destination_path);
+		return use(destination_path, await clone_destination_proof(destination_path));
 	});
 }
 
@@ -558,7 +603,10 @@ describe("GitHubCli", () => {
 			cli
 				.CloneRepository({
 					account_login: "alice",
-					destination_path: "C:\\Projects\\editor",
+					destination: unverified_clone_destination(
+						"C:\\Projects\\editor",
+						"C:\\Projects",
+					),
 					host: "github.com",
 					name: "editor",
 					owner: "artisan",
@@ -599,6 +647,7 @@ describe("GitHubCli", () => {
 					file_system.makeDirectory(destination_path),
 				]),
 			);
+			const destination = await clone_destination_proof(destination_path);
 			await Effect.runPromise(
 				Effect.all([
 					file_system.writeFileString(
@@ -724,7 +773,7 @@ describe("GitHubCli", () => {
 				Effect.gen(function* () {
 					const execution = yield* cli.CloneRepository({
 						account_login: "alice",
-						destination_path,
+						destination,
 						host: "github.com",
 						name: "editor",
 						owner: "artisan",
@@ -899,7 +948,10 @@ describe("GitHubCli", () => {
 				cli
 					.CloneRepository({
 						account_login: "alice",
-						destination_path: path_service.join(root, "missing"),
+						destination: unverified_clone_destination(
+							path_service.join(root, "missing"),
+							root,
+						),
 						host: "github.com",
 						name: "editor",
 						owner: "artisan",
@@ -934,11 +986,85 @@ describe("GitHubCli", () => {
 				},
 				{ cwd: root, projects_root },
 			);
+			const destination = await clone_destination_proof(destination_path);
 			const error = await Effect.runPromise(
 				cli
 					.CloneRepository({
 						account_login: "alice",
-						destination_path,
+						destination,
+						host: "github.com",
+						name: "editor",
+						owner: "artisan",
+					})
+					.pipe(Effect.scoped, Effect.flip),
+			);
+
+			expect(error).toMatchObject({
+				operation: "clone_repository",
+				reason: "invalid_destination",
+				retryable: false,
+			});
+			expect(spawn_count).toBe(0);
+		});
+	});
+
+	it("rejects a destination replaced after approval before spawning Git", async () => {
+		await with_clone_destination(async (destination_path, destination) => {
+			const { file_system } = await test_platform();
+			let spawn_count = 0;
+
+			await Effect.runPromise(file_system.remove(destination_path, { recursive: true }));
+			await Effect.runPromise(file_system.makeDirectory(destination_path));
+
+			const cli = await make_cli(
+				() => {
+					spawn_count += 1;
+
+					return Effect.succeed(process_result(""));
+				},
+				{ cwd: dirname(destination_path) },
+			);
+			const error = await Effect.runPromise(
+				cli
+					.CloneRepository({
+						account_login: "alice",
+						destination,
+						host: "github.com",
+						name: "editor",
+						owner: "artisan",
+					})
+					.pipe(Effect.scoped, Effect.flip),
+			);
+
+			expect(error).toMatchObject({
+				operation: "clone_repository",
+				reason: "invalid_destination",
+				retryable: false,
+			});
+			expect(spawn_count).toBe(0);
+		});
+	});
+
+	it("rejects a mismatched approved projects-root identity before spawning Git", async () => {
+		await with_clone_destination(async (destination_path, destination) => {
+			let spawn_count = 0;
+			const cli = await make_cli(
+				() => {
+					spawn_count += 1;
+
+					return Effect.succeed(process_result(""));
+				},
+				{ cwd: dirname(destination_path) },
+			);
+			const error = await Effect.runPromise(
+				cli
+					.CloneRepository({
+						account_login: "alice",
+						destination: {
+							...destination,
+							projects_root_inode:
+								destination.projects_root_inode === "0" ? "1" : "0",
+						},
 						host: "github.com",
 						name: "editor",
 						owner: "artisan",
@@ -956,7 +1082,7 @@ describe("GitHubCli", () => {
 	});
 
 	it("quarantines a destination replacement after Git reports success", async () => {
-		await with_clone_destination(async (destination_path) => {
+		await with_clone_destination(async (destination_path, destination) => {
 			const { file_system } = await test_platform();
 			let spawn_count = 0;
 			const cli = await make_cli(
@@ -977,7 +1103,7 @@ describe("GitHubCli", () => {
 				cli
 					.CloneRepository({
 						account_login: "alice",
-						destination_path,
+						destination,
 						host: "github.com",
 						name: "editor",
 						owner: "artisan",
@@ -995,7 +1121,7 @@ describe("GitHubCli", () => {
 	});
 
 	it("quarantines every nonzero clone exit without retaining provider output", async () => {
-		await with_clone_destination(async (destination_path) => {
+		await with_clone_destination(async (destination_path, destination) => {
 			const raw_output = "fatal: authentication failed secret-provider-output";
 			const cli = await make_cli(
 				() =>
@@ -1011,7 +1137,7 @@ describe("GitHubCli", () => {
 				cli
 					.CloneRepository({
 						account_login: "alice",
-						destination_path,
+						destination,
 						host: "github.com",
 						name: "editor",
 						owner: "artisan",
@@ -1029,7 +1155,7 @@ describe("GitHubCli", () => {
 	});
 
 	it("quarantines a clone timeout as an unknown outcome", async () => {
-		await with_clone_destination(async (destination_path) => {
+		await with_clone_destination(async (destination_path, destination) => {
 			const cli = await make_cli(() => Effect.never, {
 				clone_timeout_ms: 1,
 				cwd: dirname(destination_path),
@@ -1038,7 +1164,7 @@ describe("GitHubCli", () => {
 				cli
 					.CloneRepository({
 						account_login: "alice",
-						destination_path,
+						destination,
 						host: "github.com",
 						name: "editor",
 						owner: "artisan",
@@ -1055,7 +1181,7 @@ describe("GitHubCli", () => {
 	});
 
 	it("converts external clone cancellation into an unknown outcome", async () => {
-		await with_clone_destination(async (destination_path) => {
+		await with_clone_destination(async (destination_path, destination) => {
 			const started = await Effect.runPromise(Deferred.make<void>());
 			const cli = await make_cli(
 				() => Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
@@ -1066,7 +1192,7 @@ describe("GitHubCli", () => {
 					const fiber = yield* Effect.forkChild(
 						cli.CloneRepository({
 							account_login: "alice",
-							destination_path,
+							destination,
 							host: "github.com",
 							name: "editor",
 							owner: "artisan",

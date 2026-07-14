@@ -23,6 +23,17 @@ const selection = {
 	provider_id: "github",
 } as const;
 
+function clone_destination() {
+	return {
+		canonical_root: "C:\\Projects\\editor",
+		projects_root: "C:\\Projects",
+		projects_root_device: "1",
+		projects_root_inode: "2",
+		root_device: "1",
+		root_inode: "3",
+	};
+}
+
 function available_inspection(hosts: Extract<GitHubCliInspection, { type: "available" }>["hosts"]) {
 	return {
 		executable_path,
@@ -711,7 +722,7 @@ describe("GitHubProvider", () => {
 		const error = await Effect.runPromise(
 			provider
 				.Clone({
-					destination_path: "C:\\Projects\\editor",
+					destination: clone_destination(),
 					preparation: {
 						repository: projected_repository("editor", "main"),
 						selection,
@@ -733,7 +744,7 @@ describe("GitHubProvider", () => {
 				Schema.decodeUnknownEffect(GitProviderCloneExecution, {
 					onExcessProperty: "error",
 				})({
-					destination_path: "C:\\Projects\\editor",
+					destination: clone_destination(),
 					preparation: {
 						repository: projected_repository("editor", "main"),
 						selection,
@@ -757,7 +768,7 @@ describe("GitHubProvider", () => {
 					VerifyCheckout: Effect.sync(() => {
 						verification_count += 1;
 					}),
-					canonical_root: input.destination_path,
+					canonical_root: input.destination.canonical_root,
 					output_complete: true,
 				});
 			},
@@ -787,7 +798,7 @@ describe("GitHubProvider", () => {
 		});
 		const result = await Effect.runPromise(
 			provider.Clone({
-				destination_path: "C:\\Projects\\editor",
+				destination: clone_destination(),
 				preparation: {
 					repository: projected_repository("editor", "main"),
 					selection,
@@ -806,7 +817,7 @@ describe("GitHubProvider", () => {
 		expect(clone_inputs).toEqual([
 			{
 				account_login: "alice",
-				destination_path: "C:\\Projects\\editor",
+				destination: clone_destination(),
 				host: "github.com",
 				name: "editor",
 				owner: "artisan",
@@ -873,7 +884,7 @@ describe("GitHubProvider", () => {
 			Effect.gen(function* () {
 				const fiber = yield* Effect.forkChild(
 					provider.Clone({
-						destination_path: "C:\\Projects\\editor",
+						destination: clone_destination(),
 						preparation: {
 							repository: projected_repository("editor", "main"),
 							selection,
@@ -945,7 +956,7 @@ describe("GitHubProvider", () => {
 		const error = await Effect.runPromise(
 			provider
 				.Clone({
-					destination_path: "C:\\Projects\\editor",
+					destination: clone_destination(),
 					preparation: {
 						repository: projected_repository("editor", "main"),
 						selection,
@@ -1004,7 +1015,7 @@ describe("GitHubProvider", () => {
 			Effect.gen(function* () {
 				const fiber = yield* Effect.forkChild(
 					provider.Clone({
-						destination_path: "C:\\Projects\\editor",
+						destination: clone_destination(),
 						preparation: {
 							repository: projected_repository("editor", "main"),
 							selection,

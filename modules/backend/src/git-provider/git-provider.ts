@@ -40,7 +40,7 @@ const GitProviderExecutablePath = Schema.String.check(
 	),
 );
 
-const GitProviderNativePath = Schema.String.check(
+export const GitProviderNativePath = Schema.String.check(
 	Schema.makeFilter<string>((value) =>
 		value.length === 0 ||
 		text_encoder.encode(value).byteLength > 4_096 ||
@@ -51,6 +51,26 @@ const GitProviderNativePath = Schema.String.check(
 			: undefined,
 	),
 );
+
+export type GitProviderNativePath = typeof GitProviderNativePath.Type;
+
+const GitProviderFileIdentityPart = Schema.String.check(
+	Schema.isPattern(/^(?:0|[1-9][0-9]*)$/u, {
+		message: "Expected an unsigned file identity component",
+	}),
+);
+
+/** Binds one visible empty clone destination to its approved filesystem identity. */
+export const GitProviderCloneDestinationProof = Schema.Struct({
+	canonical_root: GitProviderNativePath,
+	projects_root: GitProviderNativePath,
+	projects_root_device: GitProviderFileIdentityPart,
+	projects_root_inode: GitProviderFileIdentityPart,
+	root_device: GitProviderFileIdentityPart,
+	root_inode: GitProviderFileIdentityPart,
+});
+
+export type GitProviderCloneDestinationProof = typeof GitProviderCloneDestinationProof.Type;
 
 function is_git_provider_url(value: string, protocols: ReadonlyArray<string>) {
 	if (text_encoder.encode(value).byteLength > 2_048 || /[\p{Cc}\p{Cf}]/u.test(value)) {
@@ -394,7 +414,7 @@ export type GitProviderClonePreparation = typeof GitProviderClonePreparation.Typ
 
 /** Supplies the approved destination and pinned provider identity for one clone execution. */
 export const GitProviderCloneExecution = Schema.Struct({
-	destination_path: GitProviderNativePath,
+	destination: GitProviderCloneDestinationProof,
 	preparation: GitProviderClonePreparation,
 });
 

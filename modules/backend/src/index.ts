@@ -18,6 +18,14 @@ export {
 export { ProtocolRouter } from "./protocol/protocol-router";
 export { ProtocolServer } from "./protocol/protocol-server";
 export {
+	HostedProjectCloneDestination,
+	HostedProjectCloneDestinationError,
+	HostedProjectCloneDestinationPlan,
+	make_hosted_project_clone_destination_layer,
+	type HostedProjectCloneDestinationOptions,
+	type HostedProjectCloneDestinationPlan as HostedProjectCloneDestinationPlanValue,
+} from "./projects/hosted-project-clone-destination";
+export {
 	HostedProjectIdentity,
 	HostedProjectId,
 	HostedWorkspaceId,
@@ -470,6 +478,7 @@ export {
 	GitProviderActiveAccount,
 	GitProviderCapability,
 	GitProviderCapabilityKind,
+	GitProviderCloneDestinationProof,
 	GitProviderCloneExecution,
 	GitProviderClonePreparation,
 	GitProviderCloneRequest,
@@ -488,6 +497,7 @@ export {
 	GitProviderId,
 	GitProviderInspection,
 	GitProviderInstallation,
+	GitProviderNativePath,
 	GitProviderPage,
 	GitProviderRepository,
 	GitProviderRepositoryIdentity,

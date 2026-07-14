@@ -20,7 +20,11 @@ import {
 	type FileIdentity,
 } from "../../filesystem/file-identity";
 import { ProcessRunner, type ProcessRunnerResult } from "../../git/process-runner";
-import type { GitProviderDiscoveryScope } from "../git-provider";
+import {
+	GitProviderCloneDestinationProof,
+	type GitProviderCloneDestinationProof as GitProviderCloneDestinationProofValue,
+	type GitProviderDiscoveryScope,
+} from "../git-provider";
 import { GitHubCliExecutable, GitHubCliGitExecutable } from "./github-cli-executable";
 
 const VersionPattern = /^gh version (\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:\s|$)/mu;
@@ -341,7 +345,7 @@ export interface GitHubCliRepositoryInspectionResult {
 /** Supplies the approved paths and exact repository for one GitHub CLI clone. */
 export interface GitHubCliCloneInput {
 	readonly account_login: string;
-	readonly destination_path: string;
+	readonly destination: GitProviderCloneDestinationProofValue;
 	readonly host: string;
 	readonly name: string;
 	readonly owner: string;
@@ -724,6 +728,21 @@ function canonical_path_key(path_service: Path.Path, value: string) {
 
 function same_canonical_path(path_service: Path.Path, left: string, right: string) {
 	return canonical_path_key(path_service, left) === canonical_path_key(path_service, right);
+}
+
+function clone_destination_matches_proof(
+	path_service: Path.Path,
+	pin: GitHubCloneDestinationPin,
+	proof: GitProviderCloneDestinationProofValue,
+) {
+	return (
+		same_canonical_path(path_service, pin.canonical_parent, proof.projects_root) &&
+		same_canonical_path(path_service, pin.canonical_root, proof.canonical_root) &&
+		pin.parent_identity.device.toString() === proof.projects_root_device &&
+		pin.parent_identity.inode.toString() === proof.projects_root_inode &&
+		pin.root_identity.device.toString() === proof.root_device &&
+		pin.root_identity.inode.toString() === proof.root_inode
+	);
 }
 
 function ReadCloneDestination(
@@ -1411,6 +1430,12 @@ export function make_github_cli_layer(options: GitHubCliOptions) {
 					const location = yield* executable.Locate;
 					const git_location = yield* git_executable.Locate;
 					const operation = "clone_repository" as const;
+					const destination = yield* Schema.decodeUnknownEffect(
+						GitProviderCloneDestinationProof,
+						{ onExcessProperty: "error" },
+					)(input.destination).pipe(
+						Effect.mapError(() => api_error("invalid_destination", false, operation)),
+					);
 
 					if (Option.isNone(location)) {
 						return yield* Effect.fail(
@@ -1445,10 +1470,17 @@ export function make_github_cli_layer(options: GitHubCliOptions) {
 							file_system,
 							path_service,
 							projects_root,
-							input.destination_path,
+							destination.canonical_root,
 							true,
 							"invalid_destination",
 						);
+
+						if (!clone_destination_matches_proof(path_service, pin, destination)) {
+							return yield* Effect.fail(
+								api_error("invalid_destination", false, operation),
+							);
+						}
+
 						const template_path = yield* file_system.makeTempDirectoryScoped({
 							prefix: "artisan-github-clone-template-",
 						});

@@ -696,7 +696,7 @@ export function make_github_provider_layer(options: GitHubProviderOptions = {}) 
 										.CloneRepository({
 											account_login:
 												input.preparation.selection.account_login,
-											destination_path: input.destination_path,
+											destination: input.destination,
 											host: input.preparation.selection.host,
 											name: input.preparation.repository.identity.name,
 											owner: input.preparation.repository.identity.owner,
