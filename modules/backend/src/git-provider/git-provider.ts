@@ -1,4 +1,5 @@
 import { Context, Data, Effect, Schema } from "effect";
+import { GitBranchName, GitObjectId, HostedGitPullRequestLookup } from "@artisan/protocol";
 
 const text_encoder = new TextEncoder();
 
@@ -430,6 +431,16 @@ export const GitProviderCloneResult = Schema.Struct({
 
 export type GitProviderCloneResult = typeof GitProviderCloneResult.Type;
 
+/** Binds a hosted read to one selected repository branch and observed local Git head. */
+export const GitProviderPullRequestRead = Schema.Struct({
+	expected_head: GitObjectId,
+	repository: GitProviderRepositoryIdentity,
+	selected_branch: GitBranchName,
+	selection: GitProviderSelection,
+});
+
+export type GitProviderPullRequestRead = typeof GitProviderPullRequestRead.Type;
+
 /** Describes the provider installation and exact hosts known by inspection. */
 export const GitProviderInspection = Schema.Struct({
 	authentication: Schema.Array(GitProviderHostAuthentication),
@@ -444,6 +455,7 @@ export const GitProviderErrorOperation = Schema.Literals([
 	"discover_repositories",
 	"inspect",
 	"prepare_clone",
+	"read_pull_request",
 ]);
 
 export type GitProviderErrorOperation = typeof GitProviderErrorOperation.Type;
@@ -497,5 +509,8 @@ export class GitProvider extends Context.Service<
 		readonly PrepareClone: (
 			input: GitProviderCloneRequest,
 		) => Effect.Effect<GitProviderClonePreparation, GitProviderError>;
+		readonly ReadPullRequest?: (
+			input: GitProviderPullRequestRead,
+		) => Effect.Effect<typeof HostedGitPullRequestLookup.Type, GitProviderError>;
 	}
 >()("Artisan/GitProvider") {}

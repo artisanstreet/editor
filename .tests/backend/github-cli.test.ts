@@ -588,6 +588,219 @@ describe("GitHubCli", () => {
 		expect(calls[0]?.environment).not.toHaveProperty("GH_ENTERPRISE_TOKEN");
 	});
 
+	it("uses bounded argv-only GraphQL reads for a branch association without token extraction", async () => {
+		const calls: Array<ProcessRunnerInput> = [];
+		const cli = await make_cli((input) => {
+			calls.push(input);
+			const association = pull_request_association("ghe.example");
+			const candidate = association.repository.pullRequests.nodes[0]!;
+
+			return Effect.succeed(
+				process_result(
+					JSON.stringify({
+						data: {
+							repository: {
+								pullRequests: {
+									nodes: [
+										{
+											...candidate,
+											headRepository: {
+												name: "forked-editor",
+												owner: { login: "someone-else" },
+											},
+										},
+									],
+									pageInfo: { hasNextPage: false, endCursor: null },
+								},
+							},
+							viewer: { login: "alice" },
+						},
+					}),
+				),
+			);
+		});
+
+		await expect(
+			Effect.runPromise(
+				cli.ReadPullRequest({
+					host: "ghe.example",
+					name: "editor",
+					owner: "artisan",
+					selected_branch: "feature/read",
+				}),
+			),
+		).resolves.toEqual({ type: "no_pull_request", viewer_login: "alice" });
+		expect(calls[0]?.args.slice(0, 6)).toEqual([
+			"api",
+			"graphql",
+			"--hostname",
+			"ghe.example",
+			"--method",
+			"POST",
+		]);
+		expect(calls[0]?.args).toContain("owner=artisan");
+		expect(calls[0]?.args).toContain("name=editor");
+		expect(calls[0]?.args).toContain("branch=feature/read");
+		expect(calls[0]?.args.find((argument) => argument.startsWith("query="))).toContain(
+			"headRepository",
+		);
+		expect(calls[0]?.environment).toMatchObject({ GH_HOST: "ghe.example" });
+		expect(JSON.stringify(calls[0])).not.toMatch(/GH_TOKEN|GH_ENTERPRISE_TOKEN|token=/i);
+	});
+
+	it("reads one exact PR number on the selected host and rejects association/detail races", async () => {
+		const calls: Array<ProcessRunnerInput> = [];
+		const cli = await make_cli((input) => {
+			calls.push(input);
+			const data =
+				calls.length === 1
+					? pull_request_association("ghe.example")
+					: {
+							repository: {
+								pullRequest: pull_request_detail("a".repeat(40), "ghe.example"),
+							},
+							viewer: { login: "alice" },
+						};
+
+			return Effect.succeed(process_result(JSON.stringify({ data })));
+		});
+		const result = await Effect.runPromise(
+			cli.ReadPullRequest({
+				host: "ghe.example",
+				name: "editor",
+				owner: "artisan",
+				selected_branch: "feature/read",
+			}),
+		);
+
+		expect(result).toMatchObject({
+			pull_request: { headRefOid: "a".repeat(40), number: 7 },
+			type: "matched_pull_request",
+			viewer_login: "alice",
+		});
+		expect(calls).toHaveLength(2);
+		expect(calls[1]?.args.slice(0, 6)).toEqual([
+			"api",
+			"graphql",
+			"--hostname",
+			"ghe.example",
+			"--method",
+			"POST",
+		]);
+		expect(calls[1]?.args).toContain("number=7");
+		const detail_query = calls[1]?.args.find((argument) => argument.startsWith("query="));
+
+		expect(detail_query).toContain("isRequired(pullRequestNumber: $number)");
+		expect(detail_query).toContain("annotations(first: 50)");
+		expect(detail_query).toContain("reviewRequests(first: 100)");
+		expect(detail_query).not.toMatch(/\b(?:body|logs|summary|text)\b/u);
+		expect(calls.every((call) => call.environment?.GH_HOST === "ghe.example")).toBe(true);
+		expect(JSON.stringify(calls)).not.toMatch(/GH_TOKEN|GH_ENTERPRISE_TOKEN|token=/i);
+
+		const raced = await make_cli((input) =>
+			Effect.succeed(
+				process_result(
+					JSON.stringify({
+						data: input.args.some((argument) => argument === "number=7")
+							? {
+									repository: {
+										pullRequest: pull_request_detail("f".repeat(40)),
+									},
+									viewer: { login: "alice" },
+								}
+							: pull_request_association(),
+					}),
+				),
+			),
+		);
+		await expect(
+			Effect.runPromise(
+				raced.ReadPullRequest({
+					host: "github.com",
+					name: "editor",
+					owner: "artisan",
+					selected_branch: "feature/read",
+				}),
+			),
+		).rejects.toMatchObject({ operation: "read_pull_request", reason: "invalid_response" });
+	});
+
+	it("fails closed on malformed or truncated pull-request detail output", async () => {
+		for (const mode of ["malformed", "truncated"] as const) {
+			let call_count = 0;
+			const cli = await make_cli(() => {
+				call_count += 1;
+				const data =
+					call_count === 1
+						? pull_request_association()
+						: {
+								repository: {
+									pullRequest: { ...pull_request_detail(), unexpected: "field" },
+								},
+								viewer: { login: "alice" },
+							};
+
+				return Effect.succeed(
+					process_result(JSON.stringify({ data }), {
+						stdout_truncated: mode === "truncated" && call_count === 2,
+					}),
+				);
+			});
+
+			await expect(
+				Effect.runPromise(
+					cli.ReadPullRequest({
+						host: "github.com",
+						name: "editor",
+						owner: "artisan",
+						selected_branch: "feature/read",
+					}),
+				),
+				mode,
+			).rejects.toMatchObject({ operation: "read_pull_request", reason: "invalid_response" });
+		}
+	});
+
+	it("classifies pull-request rate limits and network failures without retaining output", async () => {
+		const cases = [
+			{
+				result: process_result(
+					JSON.stringify({ errors: [{ message: "API rate limit exceeded secret" }] }),
+					{ exit_code: 1 },
+				),
+				reason: "rate_limited",
+			},
+			{
+				result: process_result("", {
+					exit_code: 1,
+					stderr: Buffer.from("failed to connect private-host-detail"),
+				}),
+				reason: "network_unavailable",
+			},
+		] as const;
+
+		for (const test_case of cases) {
+			const cli = await make_cli(() => Effect.succeed(test_case.result));
+			const error = await Effect.runPromise(
+				cli
+					.ReadPullRequest({
+						host: "github.com",
+						name: "editor",
+						owner: "artisan",
+						selected_branch: "feature/read",
+					})
+					.pipe(Effect.flip),
+			);
+
+			expect(error).toMatchObject({
+				operation: "read_pull_request",
+				reason: test_case.reason,
+				retryable: true,
+			});
+			expect(JSON.stringify(error)).not.toMatch(/secret|private-host-detail/);
+		}
+	});
+
 	it("distinguishes a missing pinned Git executable without spawning", async () => {
 		let spawn_count = 0;
 		const cli = await make_cli(
@@ -1237,5 +1450,62 @@ function repository(
 		url: `https://github.com/${name_with_owner}`,
 		viewerPermission: viewer_permission,
 		visibility: "PRIVATE",
+	};
+}
+
+function pull_request_association(host = "github.com") {
+	return {
+		repository: {
+			pullRequests: {
+				nodes: [
+					{
+						baseRefName: "main",
+						headRefName: "feature/read",
+						headRefOid: "a".repeat(40),
+						headRepository: { name: "editor", owner: { login: "artisan" } },
+						id: "pull-request-7",
+						isDraft: false,
+						isMerged: false,
+						number: 7,
+						state: "OPEN",
+						title: "Add hosted reads",
+						url: `https://${host}/artisan/editor/pull/7`,
+					},
+				],
+				pageInfo: { endCursor: null, hasNextPage: false },
+			},
+		},
+		viewer: { login: "alice" },
+	};
+}
+
+function pull_request_detail(head_ref_oid = "a".repeat(40), host = "github.com") {
+	return {
+		baseRefName: "main",
+		baseRefOid: "b".repeat(40),
+		commits: { nodes: [{ commit: { statusCheckRollup: null } }] },
+		headRefName: "feature/read",
+		headRefOid: head_ref_oid,
+		headRepository: { name: "editor", owner: { login: "artisan" } },
+		id: "pull-request-7",
+		isDraft: false,
+		isMerged: false,
+		mergeable: "MERGEABLE",
+		number: 7,
+		requestedReviewers: {
+			nodes: [],
+			pageInfo: { endCursor: null, hasNextPage: false },
+			totalCount: 0,
+		},
+		reviewDecision: null,
+		reviewThreads: {
+			nodes: [],
+			pageInfo: { endCursor: null, hasNextPage: false },
+			totalCount: 0,
+		},
+		reviews: { nodes: [], pageInfo: { endCursor: null, hasNextPage: false }, totalCount: 0 },
+		state: "OPEN",
+		title: "Add hosted reads",
+		url: `https://${host}/artisan/editor/pull/7`,
 	};
 }

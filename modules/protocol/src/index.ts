@@ -5,6 +5,7 @@ export * from "./guidance";
 export * from "./git-session";
 export * from "./git-mutation";
 export * from "./hosted-project";
+export * from "./hosted-git";
 export * from "./model-behaviour";
 export * from "./stream";
 export * from "./workspace-changes";

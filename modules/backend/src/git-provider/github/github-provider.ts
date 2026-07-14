@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 
 import { Cause, Data, Effect, Layer, Schema } from "effect";
+import { HostedGitPullRequestLookup, type HostedGitRequestedReviewer } from "@artisan/protocol";
 
 import {
 	GitProvider,
@@ -13,6 +14,7 @@ import {
 	GitProviderError,
 	GitProviderInspection,
 	GitProviderPage,
+	GitProviderPullRequestRead,
 	normalize_git_provider_host,
 	type GitProviderAccountAuthentication,
 	type GitProviderCloneExecution as GitProviderCloneExecutionInput,
@@ -23,6 +25,7 @@ import {
 	type GitProviderHostAuthentication,
 	type GitProviderInspection as GitProviderInspectionResult,
 	type GitProviderPage as GitProviderPageResult,
+	type GitProviderPullRequestRead as GitProviderPullRequestReadInput,
 } from "../git-provider";
 import {
 	GitHubCli,
@@ -30,6 +33,7 @@ import {
 	github_https_clone_url,
 	type GitHubCliAccount,
 	type GitHubCliInspection,
+	type GitHubCliPullRequestReadResult,
 	type GitHubCliRepository,
 } from "./github-cli";
 
@@ -411,6 +415,316 @@ function ValidatePage(value: GitProviderPageResult, host: string) {
 	})(value).pipe(Effect.mapError(() => provider_error("invalid_response", false, host)));
 }
 
+function ValidatePullRequest(value: unknown, host: string) {
+	return Schema.decodeUnknownEffect(HostedGitPullRequestLookup, {
+		onExcessProperty: "error",
+	})(value).pipe(
+		Effect.mapError(() =>
+			provider_operation_error("read_pull_request", "invalid_response", false, host),
+		),
+	);
+}
+
+function pull_request_state(state: string, merged: boolean) {
+	if (merged) {
+		return "merged" as const;
+	}
+
+	return state === "OPEN" ? ("open" as const) : ("closed" as const);
+}
+
+type GitHubMatchedPullRequest = Extract<
+	GitHubCliPullRequestReadResult,
+	{ readonly type: "matched_pull_request" }
+>["pull_request"];
+
+function review_state(state: GitHubMatchedPullRequest["reviews"]["nodes"][number]["state"]) {
+	const states = {
+		APPROVED: "approved",
+		CHANGES_REQUESTED: "changes_requested",
+		COMMENTED: "commented",
+		DISMISSED: "dismissed",
+	} as const;
+
+	return states[state];
+}
+
+function mergeability(value: GitHubMatchedPullRequest["mergeable"]) {
+	const values = {
+		CONFLICTING: "conflicting",
+		MERGEABLE: "mergeable",
+		UNKNOWN: "unknown",
+	} as const;
+
+	return values[value];
+}
+
+function review_decision(value: GitHubMatchedPullRequest["reviewDecision"]) {
+	const values = {
+		APPROVED: "approved",
+		CHANGES_REQUESTED: "changes_requested",
+		REVIEW_REQUIRED: "review_required",
+	} as const;
+
+	return value === null ? ("none" as const) : values[value];
+}
+
+function annotation_level(value: "NOTICE" | "WARNING" | "FAILURE") {
+	const levels = {
+		FAILURE: "failure",
+		NOTICE: "notice",
+		WARNING: "warning",
+	} as const;
+
+	return levels[value];
+}
+
+function map_requested_reviewer(
+	request: GitHubMatchedPullRequest["requestedReviewers"]["nodes"][number],
+): ReadonlyArray<HostedGitRequestedReviewer> {
+	const reviewer = request.requestedReviewer;
+
+	if (reviewer === null) {
+		return [];
+	}
+
+	if (reviewer.__typename === "User") {
+		return [{ _tag: "user", login: reviewer.login }];
+	}
+
+	if (reviewer.__typename === "Team") {
+		return [{ _tag: "team", organization: reviewer.organization.login, slug: reviewer.slug }];
+	}
+
+	return [];
+}
+
+function check_run_state(
+	check: Extract<
+		GitHubMatchedPullRequest["commits"]["nodes"][number]["commit"]["statusCheckRollup"],
+		object
+	>["contexts"]["nodes"][number],
+) {
+	if (check.__typename === "StatusContext") {
+		const states: Readonly<
+			Record<string, "queued" | "running" | "passed" | "failed" | "unknown">
+		> = {
+			ERROR: "failed",
+			EXPECTED: "queued",
+			FAILURE: "failed",
+			PENDING: "running",
+			SUCCESS: "passed",
+		};
+
+		return states[check.state] ?? "unknown";
+	}
+
+	if (check.conclusion !== null) {
+		const conclusions: Readonly<
+			Record<
+				string,
+				| "action_required"
+				| "cancelled"
+				| "failed"
+				| "neutral"
+				| "passed"
+				| "skipped"
+				| "stale"
+				| "timed_out"
+				| "unknown"
+			>
+		> = {
+			ACTION_REQUIRED: "action_required",
+			CANCELLED: "cancelled",
+			FAILURE: "failed",
+			NEUTRAL: "neutral",
+			SKIPPED: "skipped",
+			STALE: "stale",
+			STARTUP_FAILURE: "failed",
+			SUCCESS: "passed",
+			TIMED_OUT: "timed_out",
+		};
+
+		return conclusions[check.conclusion] ?? "unknown";
+	}
+
+	const statuses: Readonly<Record<string, "queued" | "running" | "unknown">> = {
+		IN_PROGRESS: "running",
+		PENDING: "queued",
+		QUEUED: "queued",
+		REQUESTED: "queued",
+		WAITING: "queued",
+	};
+
+	return statuses[check.status] ?? "unknown";
+}
+
+function MapCheck(
+	check: Extract<
+		GitHubMatchedPullRequest["commits"]["nodes"][number]["commit"]["statusCheckRollup"],
+		object
+	>["contexts"]["nodes"][number],
+) {
+	if (check.__typename === "StatusContext") {
+		return {
+			annotations: [],
+			annotations_truncated: false,
+			...(check.targetUrl === null ? {} : { details_url: check.targetUrl }),
+			name: check.context,
+			origin: {
+				native_id: check.id,
+				provider_id: github_provider_id,
+				resource_kind: "status_context" as const,
+			},
+			required: check.isRequired,
+			state: check_run_state(check),
+		};
+	}
+
+	const workflow_run = check.checkSuite.workflowRun;
+	const annotations = check.annotations;
+
+	return {
+		annotations: (annotations?.nodes ?? []).flatMap((annotation) =>
+			annotation.annotationLevel === null
+				? []
+				: [
+						{
+							end_line: annotation.location.end.line,
+							level: annotation_level(annotation.annotationLevel),
+							path: annotation.path,
+							start_line: annotation.location.start.line,
+							...(annotation.title === null ? {} : { title: annotation.title }),
+							untrusted_message: annotation.message,
+						},
+					],
+		),
+		annotations_truncated:
+			annotations === null ||
+			annotations.pageInfo.hasNextPage ||
+			annotations.nodes.some((annotation) => annotation.annotationLevel === null),
+		...(check.checkSuite.app === null ? {} : { app_name: check.checkSuite.app.name }),
+		...(check.completedAt === null ? {} : { completed_at: check.completedAt }),
+		...(check.detailsUrl === null ? {} : { details_url: check.detailsUrl }),
+		name: check.name,
+		origin: {
+			native_id: check.id,
+			provider_id: github_provider_id,
+			resource_kind: "check_run" as const,
+		},
+		required: check.isRequired,
+		...(check.startedAt === null ? {} : { started_at: check.startedAt }),
+		state: check_run_state(check),
+		suite_origin: {
+			native_id: check.checkSuite.id,
+			provider_id: github_provider_id,
+			resource_kind: "check_suite" as const,
+		},
+		...(workflow_run === null
+			? {}
+			: {
+					attempt: workflow_run.runAttempt,
+					workflow_name: workflow_run.workflow.name,
+					workflow_origin: {
+						native_id: workflow_run.id,
+						provider_id: github_provider_id,
+						resource_kind: "workflow_run" as const,
+					},
+					workflow_url: workflow_run.url,
+				}),
+	};
+}
+
+function MapMatchedPullRequest(
+	input: GitProviderPullRequestReadInput,
+	pull_request: GitHubMatchedPullRequest,
+) {
+	const rollup = pull_request.commits.nodes[0]?.commit.statusCheckRollup;
+	const checks = rollup?.contexts.nodes ?? [];
+
+	return {
+		association: {
+			_tag: "matched" as const,
+			freshness:
+				pull_request.headRefOid === input.expected_head
+					? ("current" as const)
+					: ("stale_head" as const),
+			pull_request: {
+				base_branch: pull_request.baseRefName,
+				base_commit: pull_request.baseRefOid,
+				checks: checks.map(MapCheck),
+				checks_total: rollup?.contexts.totalCount ?? 0,
+				checks_truncated: rollup?.contexts.pageInfo.hasNextPage ?? false,
+				draft: pull_request.isDraft,
+				head_branch: pull_request.headRefName,
+				head_commit: pull_request.headRefOid,
+				mergeability: mergeability(pull_request.mergeable),
+				number: pull_request.number,
+				origin: {
+					native_id: pull_request.id,
+					provider_id: github_provider_id,
+					resource_kind: "pull_request" as const,
+				},
+				requested_reviewers:
+					pull_request.requestedReviewers.nodes.flatMap(map_requested_reviewer),
+				requested_reviewers_truncated:
+					pull_request.requestedReviewers.pageInfo.hasNextPage ||
+					pull_request.requestedReviewers.nodes.some(
+						(request) =>
+							request.requestedReviewer?.__typename !== "User" &&
+							request.requestedReviewer?.__typename !== "Team",
+					),
+				review_decision: review_decision(pull_request.reviewDecision),
+				review_threads: pull_request.reviewThreads.nodes.map((thread) => {
+					const last_comment = thread.comments.nodes[0];
+
+					return {
+						comment_count: thread.comments.totalCount,
+						...(last_comment === undefined
+							? {}
+							: {
+									last_comment_native_id: last_comment.id,
+									last_updated_at: last_comment.updatedAt,
+								}),
+						...(thread.line === null ? {} : { line: thread.line }),
+						origin: {
+							native_id: thread.id,
+							provider_id: github_provider_id,
+							resource_kind: "review_thread" as const,
+						},
+						outdated: thread.isOutdated,
+						path: thread.path,
+						resolved: thread.isResolved,
+						subject:
+							thread.subjectType === "FILE" ? ("file" as const) : ("line" as const),
+					};
+				}),
+				review_threads_total: pull_request.reviewThreads.totalCount,
+				review_threads_truncated: pull_request.reviewThreads.pageInfo.hasNextPage,
+				reviews: pull_request.reviews.nodes.map((review) => ({
+					...(review.author === null ? {} : { author: review.author.login }),
+					...(review.commit === null ? {} : { commit: review.commit.oid }),
+					origin: {
+						native_id: review.id,
+						provider_id: github_provider_id,
+						resource_kind: "review" as const,
+					},
+					state: review_state(review.state),
+					submitted_at: review.submittedAt,
+				})),
+				reviews_total: pull_request.reviews.totalCount,
+				reviews_truncated: pull_request.reviews.pageInfo.hasNextPage,
+				state: pull_request_state(pull_request.state, pull_request.isMerged),
+				title: pull_request.title,
+				web_url: pull_request.url,
+			},
+		},
+		branch: input.selected_branch,
+		expected_head_commit: input.expected_head,
+		repository: input.repository,
+	};
+}
+
 function repositories_match(
 	left: GitProviderClonePreparationResult["repository"],
 	right: GitProviderClonePreparationResult["repository"],
@@ -776,6 +1090,117 @@ export function make_github_provider_layer(options: GitHubProviderOptions = {}) 
 						),
 					);
 				});
+			const ReadPullRequest = (unknown_input: GitProviderPullRequestReadInput) =>
+				Effect.gen(function* () {
+					const input = yield* Schema.decodeUnknownEffect(GitProviderPullRequestRead, {
+						onExcessProperty: "error",
+					})(unknown_input).pipe(
+						Effect.mapError(() =>
+							provider_operation_error("read_pull_request", "invalid_input", false),
+						),
+					);
+
+					if (
+						input.selection.provider_id !== github_provider_id ||
+						input.repository.provider_id !== github_provider_id ||
+						input.repository.host !== input.selection.host
+					) {
+						return yield* Effect.fail(
+							provider_operation_error(
+								"read_pull_request",
+								"invalid_input",
+								false,
+								input.selection.host,
+							),
+						);
+					}
+
+					yield* EnsureSelection(input.selection, "read_pull_request");
+					const result = yield* cli
+						.ReadPullRequest({
+							host: input.selection.host,
+							name: input.repository.name,
+							owner: input.repository.owner,
+							selected_branch: input.selected_branch,
+						})
+						.pipe(
+							Effect.mapError((cause) =>
+								cli_error(cause, input.selection.host, "read_pull_request"),
+							),
+						);
+
+					if (!github_logins_match(result.viewer_login, input.selection.account_login)) {
+						return yield* Effect.fail(
+							provider_operation_error(
+								"read_pull_request",
+								"account_not_active",
+								false,
+								input.selection.host,
+							),
+						);
+					}
+
+					if (result.type === "no_pull_request") {
+						return yield* ValidatePullRequest(
+							{
+								association: { _tag: "none" },
+								branch: input.selected_branch,
+								expected_head_commit: input.expected_head,
+								repository: input.repository,
+							},
+							input.selection.host,
+						);
+					}
+
+					if (result.type === "ambiguous_pull_requests") {
+						return yield* ValidatePullRequest(
+							{
+								association: {
+									_tag: "ambiguous",
+									candidates: result.candidates.map((candidate) => ({
+										base_branch: candidate.baseRefName,
+										draft: candidate.isDraft,
+										head_branch: candidate.headRefName,
+										head_commit: candidate.headRefOid,
+										number: candidate.number,
+										origin: {
+											native_id: candidate.id,
+											provider_id: github_provider_id,
+											resource_kind: "pull_request",
+										},
+										state: pull_request_state(
+											candidate.state,
+											candidate.isMerged,
+										),
+										title: candidate.title,
+										web_url: candidate.url,
+									})),
+									candidates_truncated: !result.complete,
+								},
+								branch: input.selected_branch,
+								expected_head_commit: input.expected_head,
+								repository: input.repository,
+							},
+							input.selection.host,
+						);
+					}
+
+					if (result.pull_request.headRefName !== input.selected_branch) {
+						return yield* Effect.fail(
+							provider_operation_error(
+								"read_pull_request",
+								"invalid_response",
+								false,
+								input.selection.host,
+							),
+						);
+					}
+
+					return yield* ValidatePullRequest(
+						MapMatchedPullRequest(input, result.pull_request),
+						input.selection.host,
+					);
+				});
 
 			return {
 				Descriptor: {
@@ -783,16 +1208,8 @@ export function make_github_provider_layer(options: GitHubProviderOptions = {}) 
 						{ _tag: "available", capability: "inspect_authentication" },
 						{ _tag: "available", capability: "discover_repositories" },
 						{ _tag: "available", capability: "clone_repository" },
-						{
-							_tag: "unavailable",
-							capability: "read_reviews",
-							reason: "Review projection is a later durable milestone",
-						},
-						{
-							_tag: "unavailable",
-							capability: "read_ci",
-							reason: "CI projection is a later durable milestone",
-						},
+						{ _tag: "available", capability: "read_reviews" },
+						{ _tag: "available", capability: "read_ci" },
 						{
 							_tag: "unavailable",
 							capability: "write_provider_mutations",
@@ -806,6 +1223,7 @@ export function make_github_provider_layer(options: GitHubProviderOptions = {}) 
 				DiscoverRepositories,
 				Inspect,
 				PrepareClone,
+				ReadPullRequest,
 			};
 		}),
 	);

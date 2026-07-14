@@ -11,6 +11,7 @@ import {
 	GitHubCliError,
 	type GitHubCliCloneResult,
 	type GitHubCliInspection,
+	type GitHubCliPullRequestReadResult,
 	type GitHubCliRepositoryInspectionResult,
 	type GitHubCliRepositoryPage,
 } from "../../modules/backend/src/git-provider/github/github-cli";
@@ -92,6 +93,153 @@ function page(
 	return { continuation, repositories, viewer_login };
 }
 
+function matched_pull_request(head_ref_oid = "a".repeat(40)) {
+	return {
+		baseRefName: "main",
+		baseRefOid: "b".repeat(40),
+		commits: {
+			nodes: [
+				{
+					commit: {
+						statusCheckRollup: {
+							contexts: {
+								nodes: [
+									{
+										__typename: "CheckRun",
+										annotations: {
+											nodes: [
+												{
+													annotationLevel: "FAILURE",
+													location: {
+														end: { line: 8 },
+														start: { line: 7 },
+													},
+													message: "untrusted failure",
+													path: "src/editor.ts",
+													title: "Compile failed",
+												},
+											],
+											pageInfo: {
+												endCursor: "annotation-cursor",
+												hasNextPage: true,
+											},
+											totalCount: 51,
+										},
+										checkSuite: {
+											app: { name: "GitHub Actions" },
+											id: "suite-1",
+											workflowRun: {
+												id: "run-1",
+												runAttempt: 2,
+												url: "https://github.com/artisan/editor/actions/runs/1",
+												workflow: { name: "CI" },
+											},
+										},
+										completedAt: "2026-07-14T10:05:00Z",
+										conclusion: "FAILURE",
+										detailsUrl:
+											"https://github.com/artisan/editor/actions/runs/1/job/1",
+										id: "check-1",
+										isRequired: true,
+										name: "build",
+										startedAt: "2026-07-14T10:00:00Z",
+										status: "COMPLETED",
+									},
+									{
+										__typename: "StatusContext",
+										context: "deploy",
+										id: "status-1",
+										isRequired: false,
+										state: "PENDING",
+										targetUrl: null,
+									},
+									{
+										__typename: "StatusContext",
+										context: "lint",
+										id: "status-2",
+										isRequired: true,
+										state: "SUCCESS",
+										targetUrl: "https://ci.example/lint",
+									},
+								],
+								pageInfo: { endCursor: null, hasNextPage: false },
+								totalCount: 3,
+							},
+						},
+					},
+				},
+			],
+		},
+		headRefName: "feature/read",
+		headRefOid: head_ref_oid,
+		headRepository: { name: "editor", owner: { login: "artisan" } },
+		id: "pull-request-7",
+		isDraft: false,
+		isMerged: false,
+		mergeable: "MERGEABLE",
+		number: 7,
+		requestedReviewers: {
+			nodes: [
+				{ requestedReviewer: { __typename: "User", login: "bob" } },
+				{
+					requestedReviewer: {
+						__typename: "Team",
+						organization: { login: "artisan" },
+						slug: "maintainers",
+					},
+				},
+			],
+			pageInfo: { endCursor: null, hasNextPage: false },
+			totalCount: 2,
+		},
+		reviewDecision: "CHANGES_REQUESTED",
+		reviewThreads: {
+			nodes: [
+				{
+					comments: {
+						nodes: [{ id: "comment-2", updatedAt: "2026-07-14T09:30:00Z" }],
+						totalCount: 2,
+					},
+					id: "thread-1",
+					isOutdated: true,
+					isResolved: false,
+					line: 17,
+					path: "src/editor.ts",
+					subjectType: "LINE",
+				},
+			],
+			pageInfo: { endCursor: "thread-cursor", hasNextPage: true },
+			totalCount: 101,
+		},
+		reviews: {
+			nodes: [
+				{
+					author: { login: "carol" },
+					commit: { oid: head_ref_oid },
+					id: "review-1",
+					state: "CHANGES_REQUESTED",
+					submittedAt: "2026-07-14T09:00:00Z",
+				},
+				{
+					author: null,
+					commit: null,
+					id: "review-2",
+					state: "DISMISSED",
+					submittedAt: "2026-07-14T09:10:00Z",
+				},
+			],
+			pageInfo: { endCursor: null, hasNextPage: false },
+			totalCount: 2,
+		},
+		state: "OPEN",
+		title: "Add hosted reads",
+		url: "https://github.com/artisan/editor/pull/7",
+	} satisfies Extract<
+		GitHubCliPullRequestReadResult,
+		{ readonly type: "matched_pull_request" }
+	>["pull_request"];
+}
+
 async function make_provider(options: {
 	readonly inspection: GitHubCliInspection;
 	readonly query?: (
@@ -103,17 +251,23 @@ async function make_provider(options: {
 	readonly inspect_repository?: (
 		input: Parameters<(typeof GitHubCli.Service)["InspectRepository"]>[0],
 	) => Effect.Effect<GitHubCliRepositoryInspectionResult, GitHubCliError>;
+	readonly read_pull_request?: (
+		input: Parameters<(typeof GitHubCli.Service)["ReadPullRequest"]>[0],
+	) => ReturnType<(typeof GitHubCli.Service)["ReadPullRequest"]>;
 	readonly hosts?: ReadonlyArray<string>;
 }) {
 	const query = options.query ?? (() => Effect.die("Unexpected repository query"));
 	const clone = options.clone ?? (() => Effect.die("Unexpected repository clone"));
 	const inspect_repository =
 		options.inspect_repository ?? (() => Effect.die("Unexpected repository inspection"));
+	const read_pull_request =
+		options.read_pull_request ?? (() => Effect.die("Unexpected pull request read"));
 	const cli_layer = Layer.succeed(GitHubCli, {
 		CloneRepository: clone,
 		Inspect: Effect.succeed(options.inspection),
 		InspectRepository: inspect_repository,
 		QueryRepositories: query,
+		ReadPullRequest: read_pull_request,
 	});
 	const provider_layer = make_github_provider_layer(
 		options.hosts === undefined ? {} : { hosts: options.hosts },
@@ -339,6 +493,245 @@ describe("GitHubProvider", () => {
 		);
 
 		expect(result.repositories).toHaveLength(1);
+	});
+
+	it("returns canonical no-match and ambiguous branch associations without guessing", async () => {
+		const inspection = available_inspection([
+			{
+				accounts: [
+					{
+						active: true,
+						git_protocol: "https",
+						host: "github.com",
+						login: "alice",
+						scopes: [],
+						type: "authenticated",
+					},
+				],
+				host: "github.com",
+			},
+		]);
+		const read_input = {
+			expected_head: "a".repeat(40),
+			repository: projected_repository("editor", "main").identity,
+			selected_branch: "feature/read",
+			selection,
+		};
+		const no_match_provider = await make_provider({
+			inspection,
+			read_pull_request: () =>
+				Effect.succeed({ type: "no_pull_request", viewer_login: "alice" }),
+		});
+		const no_match = await Effect.runPromise(no_match_provider.ReadPullRequest!(read_input));
+
+		expect(no_match).toEqual({
+			association: { _tag: "none" },
+			branch: "feature/read",
+			expected_head_commit: "a".repeat(40),
+			repository: read_input.repository,
+		});
+
+		const ambiguous_provider = await make_provider({
+			inspection,
+			read_pull_request: () =>
+				Effect.succeed({
+					candidates: [
+						{
+							baseRefName: "main",
+							headRefName: "feature/read",
+							headRefOid: "b".repeat(40),
+							headRepository: { name: "editor", owner: { login: "artisan" } },
+							id: "PR_node_1",
+							isDraft: false,
+							isMerged: false,
+							number: 1,
+							state: "OPEN",
+							title: "Read safely",
+							url: "https://github.com/artisan/editor/pull/1",
+						},
+						{
+							baseRefName: "main",
+							headRefName: "feature/read",
+							headRefOid: "c".repeat(40),
+							headRepository: { name: "editor", owner: { login: "artisan" } },
+							id: "PR_node_2",
+							isDraft: true,
+							isMerged: true,
+							number: 2,
+							state: "MERGED",
+							title: "Old read",
+							url: "https://github.com/artisan/editor/pull/2",
+						},
+					],
+					complete: true,
+					type: "ambiguous_pull_requests",
+					viewer_login: "alice",
+				}),
+		});
+		const ambiguous = await Effect.runPromise(ambiguous_provider.ReadPullRequest!(read_input));
+
+		expect(ambiguous).toMatchObject({
+			association: { _tag: "ambiguous", candidates_truncated: false },
+		});
+		expect(
+			ambiguous.association._tag === "ambiguous" &&
+				ambiguous.association.candidates.map((candidate) => candidate.state),
+		).toEqual(["open", "merged"]);
+	});
+
+	it("maps an exact matched pull request with reviews, threads, checks, and stale-head facts", async () => {
+		const inspection = available_inspection([
+			{
+				accounts: [
+					{
+						active: true,
+						git_protocol: "https",
+						host: "github.com",
+						login: "alice",
+						scopes: [],
+						type: "authenticated",
+					},
+				],
+				host: "github.com",
+			},
+		]);
+		const provider = await make_provider({
+			inspection,
+			read_pull_request: () =>
+				Effect.succeed({
+					pull_request: matched_pull_request(),
+					type: "matched_pull_request",
+					viewer_login: "alice",
+				}),
+		});
+		const input = {
+			expected_head: "a".repeat(40),
+			repository: projected_repository("editor", "main").identity,
+			selected_branch: "feature/read",
+			selection,
+		};
+		const current = await Effect.runPromise(provider.ReadPullRequest!(input));
+
+		expect(current).toMatchObject({
+			association: {
+				_tag: "matched",
+				freshness: "current",
+				pull_request: {
+					checks_total: 3,
+					checks_truncated: false,
+					mergeability: "mergeable",
+					requested_reviewers: [
+						{ _tag: "user", login: "bob" },
+						{ _tag: "team", organization: "artisan", slug: "maintainers" },
+					],
+					review_decision: "changes_requested",
+					review_threads_total: 101,
+					review_threads_truncated: true,
+					reviews_total: 2,
+					reviews_truncated: false,
+				},
+			},
+		});
+
+		if (current.association._tag !== "matched") {
+			throw new Error("Expected a matched pull request");
+		}
+
+		expect(current.association.pull_request.reviews).toMatchObject([
+			{ author: "carol", state: "changes_requested" },
+			{ state: "dismissed" },
+		]);
+		expect(current.association.pull_request.review_threads[0]).toMatchObject({
+			comment_count: 2,
+			last_comment_native_id: "comment-2",
+			last_updated_at: "2026-07-14T09:30:00Z",
+			line: 17,
+			outdated: true,
+			resolved: false,
+			subject: "line",
+		});
+		expect(current.association.pull_request.checks).toMatchObject([
+			{
+				annotations: [{ untrusted_message: "untrusted failure" }],
+				annotations_truncated: true,
+				attempt: 2,
+				name: "build",
+				required: true,
+				state: "failed",
+				workflow_name: "CI",
+			},
+			{ name: "deploy", required: false, state: "running" },
+			{ name: "lint", required: true, state: "passed" },
+		]);
+		expect(provider.Descriptor.capabilities).toEqual(
+			expect.arrayContaining([
+				{ _tag: "available", capability: "read_reviews" },
+				{ _tag: "available", capability: "read_ci" },
+			]),
+		);
+
+		const stale = await Effect.runPromise(
+			provider.ReadPullRequest!({ ...input, expected_head: "f".repeat(40) }),
+		);
+
+		expect(stale).toMatchObject({ association: { _tag: "matched", freshness: "stale_head" } });
+	});
+
+	it("rejects inactive or mismatched accounts before publishing a pull-request read", async () => {
+		const read_input = {
+			expected_head: "a".repeat(40),
+			repository: projected_repository("editor", "main").identity,
+			selected_branch: "feature/read",
+			selection,
+		};
+		const inactive = await make_provider({
+			inspection: available_inspection([
+				{
+					accounts: [
+						{
+							active: true,
+							git_protocol: "https",
+							host: "github.com",
+							login: "bob",
+							scopes: [],
+							type: "authenticated",
+						},
+					],
+					host: "github.com",
+				},
+			]),
+		});
+
+		await expect(
+			Effect.runPromise(inactive.ReadPullRequest!(read_input)),
+		).rejects.toMatchObject({
+			operation: "read_pull_request",
+			reason: "account_not_active",
+		});
+
+		const mismatched = await make_provider({
+			inspection: available_inspection([
+				{
+					accounts: [
+						{
+							active: true,
+							git_protocol: "https",
+							host: "github.com",
+							login: "alice",
+							scopes: [],
+							type: "authenticated",
+						},
+					],
+					host: "github.com",
+				},
+			]),
+			read_pull_request: () =>
+				Effect.succeed({ type: "no_pull_request", viewer_login: "bob" }),
+		});
+
+		await expect(
+			Effect.runPromise(mismatched.ReadPullRequest!(read_input)),
+		).rejects.toMatchObject({ operation: "read_pull_request", reason: "account_not_active" });
 	});
 
 	it("projects canonical repository identity, safe URLs, and native attribution", async () => {

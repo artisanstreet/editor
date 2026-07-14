@@ -171,6 +171,216 @@ const GitHubSingleRepositoryData = Schema.Struct({
 	}),
 });
 
+const GitHubBoundedText = (maximum_bytes: number) =>
+	Schema.String.check(
+		Schema.makeFilter<string>((value) =>
+			value.length === 0 ||
+			Buffer.byteLength(value, "utf8") > maximum_bytes ||
+			value.includes("\0")
+				? `Expected non-empty text bounded to ${maximum_bytes} bytes`
+				: undefined,
+		),
+	);
+const GitHubNativeId = GitHubBoundedText(512);
+const GitHubName = GitHubBoundedText(512);
+const GitHubTitle = GitHubBoundedText(1_024);
+const GitHubPath = GitHubBoundedText(4_096);
+const GitHubMessage = GitHubBoundedText(4_096);
+const GitHubUrl = GitHubBoundedText(2_048);
+const GitHubDateTime = GitHubBoundedText(128);
+const GitHubNonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
+const GitHubPositiveInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));
+
+const GitHubBoundedArray = <S extends Schema.Top>(schema: S, maximum: number) =>
+	Schema.Array(schema).check(Schema.isMaxLength(maximum));
+
+const GitHubPullRequestCandidateData = Schema.Struct({
+	baseRefName: GitHubName,
+	headRefOid: GitHubNativeId,
+	headRefName: GitHubName,
+	headRepository: Schema.NullOr(
+		Schema.Struct({ name: GitHubName, owner: Schema.Struct({ login: GitHubName }) }),
+	),
+	id: GitHubNativeId,
+	isDraft: Schema.Boolean,
+	isMerged: Schema.Boolean,
+	number: GitHubPositiveInt,
+	state: Schema.Literals(["OPEN", "CLOSED", "MERGED"]),
+	title: GitHubTitle,
+	url: GitHubUrl,
+});
+
+const GitHubPullRequestAssociationData = Schema.Struct({
+	repository: Schema.NullOr(
+		Schema.Struct({
+			pullRequests: Schema.Struct({
+				nodes: GitHubBoundedArray(GitHubPullRequestCandidateData, 10),
+				pageInfo: GitHubPageInfo,
+			}),
+		}),
+	),
+	viewer: Schema.Struct({ login: Schema.NonEmptyString }),
+});
+
+const GitHubRequestedReviewer = Schema.Union([
+	Schema.Struct({ __typename: Schema.Literal("User"), login: GitHubName }),
+	Schema.Struct({
+		__typename: Schema.Literal("Team"),
+		organization: Schema.Struct({ login: GitHubName }),
+		slug: GitHubName,
+	}),
+	Schema.Struct({ __typename: Schema.Literals(["Bot", "EnterpriseTeam", "Mannequin"]) }),
+]);
+
+const GitHubReviewRequest = Schema.Struct({
+	requestedReviewer: Schema.NullOr(GitHubRequestedReviewer),
+});
+
+const GitHubReview = Schema.Struct({
+	author: Schema.NullOr(Schema.Struct({ login: GitHubName })),
+	commit: Schema.NullOr(Schema.Struct({ oid: GitHubNativeId })),
+	id: GitHubNativeId,
+	state: Schema.Literals(["APPROVED", "CHANGES_REQUESTED", "COMMENTED", "DISMISSED"]),
+	submittedAt: GitHubDateTime,
+});
+
+const GitHubReviewThread = Schema.Struct({
+	comments: Schema.Struct({
+		nodes: GitHubBoundedArray(
+			Schema.Struct({ id: GitHubNativeId, updatedAt: GitHubDateTime }),
+			1,
+		),
+		totalCount: GitHubNonNegativeInt,
+	}),
+	id: GitHubNativeId,
+	isOutdated: Schema.Boolean,
+	isResolved: Schema.Boolean,
+	line: Schema.NullOr(GitHubPositiveInt),
+	path: GitHubPath,
+	subjectType: Schema.Literals(["FILE", "LINE"]),
+});
+
+const GitHubCheckAnnotation = Schema.Struct({
+	annotationLevel: Schema.NullOr(Schema.Literals(["NOTICE", "WARNING", "FAILURE"])),
+	location: Schema.Struct({
+		end: Schema.Struct({ line: GitHubPositiveInt }),
+		start: Schema.Struct({ line: GitHubPositiveInt }),
+	}),
+	message: GitHubMessage,
+	path: GitHubPath,
+	title: Schema.NullOr(GitHubName),
+});
+
+const GitHubCheckRun = Schema.Struct({
+	__typename: Schema.Literal("CheckRun"),
+	annotations: Schema.NullOr(
+		Schema.Struct({
+			nodes: GitHubBoundedArray(GitHubCheckAnnotation, 50),
+			pageInfo: GitHubPageInfo,
+			totalCount: GitHubNonNegativeInt,
+		}),
+	),
+	checkSuite: Schema.Struct({
+		app: Schema.NullOr(Schema.Struct({ name: GitHubName })),
+		id: GitHubNativeId,
+		workflowRun: Schema.NullOr(
+			Schema.Struct({
+				id: GitHubNativeId,
+				runAttempt: GitHubPositiveInt,
+				url: GitHubUrl,
+				workflow: Schema.Struct({ name: GitHubName }),
+			}),
+		),
+	}),
+	completedAt: Schema.NullOr(GitHubDateTime),
+	conclusion: Schema.NullOr(GitHubName),
+	detailsUrl: Schema.NullOr(GitHubUrl),
+	id: GitHubNativeId,
+	isRequired: Schema.Boolean,
+	name: GitHubName,
+	startedAt: Schema.NullOr(GitHubDateTime),
+	status: GitHubName,
+});
+
+const GitHubStatusContext = Schema.Struct({
+	__typename: Schema.Literal("StatusContext"),
+	context: GitHubName,
+	id: GitHubNativeId,
+	isRequired: Schema.Boolean,
+	state: GitHubName,
+	targetUrl: Schema.NullOr(GitHubUrl),
+});
+
+const GitHubPullRequestDetail = Schema.Struct({
+	baseRefName: GitHubName,
+	baseRefOid: GitHubNativeId,
+	commits: Schema.Struct({
+		nodes: GitHubBoundedArray(
+			Schema.Struct({
+				commit: Schema.Struct({
+					statusCheckRollup: Schema.NullOr(
+						Schema.Struct({
+							contexts: Schema.Struct({
+								nodes: GitHubBoundedArray(
+									Schema.Union([GitHubCheckRun, GitHubStatusContext]),
+									100,
+								),
+								pageInfo: GitHubPageInfo,
+								totalCount: GitHubNonNegativeInt,
+							}),
+						}),
+					),
+				}),
+			}),
+			1,
+		),
+	}).check(
+		Schema.makeFilter((value) =>
+			value.nodes.length === 1 ? undefined : "Expected one pull request commit",
+		),
+	),
+	headRefName: GitHubName,
+	headRefOid: GitHubNativeId,
+	headRepository: Schema.NullOr(
+		Schema.Struct({ name: GitHubName, owner: Schema.Struct({ login: GitHubName }) }),
+	),
+	id: GitHubNativeId,
+	isDraft: Schema.Boolean,
+	isMerged: Schema.Boolean,
+	mergeable: Schema.Literals(["MERGEABLE", "CONFLICTING", "UNKNOWN"]),
+	number: GitHubPositiveInt,
+	requestedReviewers: Schema.Struct({
+		nodes: GitHubBoundedArray(GitHubReviewRequest, 100),
+		pageInfo: GitHubPageInfo,
+		totalCount: GitHubNonNegativeInt,
+	}),
+	reviewDecision: Schema.NullOr(
+		Schema.Literals(["APPROVED", "CHANGES_REQUESTED", "REVIEW_REQUIRED"]),
+	),
+	reviewThreads: Schema.Struct({
+		nodes: GitHubBoundedArray(GitHubReviewThread, 100),
+		pageInfo: GitHubPageInfo,
+		totalCount: GitHubNonNegativeInt,
+	}),
+	reviews: Schema.Struct({
+		nodes: GitHubBoundedArray(GitHubReview, 100),
+		pageInfo: GitHubPageInfo,
+		totalCount: GitHubNonNegativeInt,
+	}),
+	state: Schema.Literals(["OPEN", "CLOSED", "MERGED"]),
+	title: GitHubTitle,
+	url: GitHubUrl,
+});
+
+const GitHubPullRequestDetailData = Schema.Struct({
+	repository: Schema.NullOr(
+		Schema.Struct({
+			pullRequest: Schema.NullOr(GitHubPullRequestDetail),
+		}),
+	),
+	viewer: Schema.Struct({ login: Schema.NonEmptyString }),
+});
+
 const repository_fields = `
 id
 name
@@ -236,6 +446,92 @@ const repository_query = `
 query ArtisanRepository($owner: String!, $name: String!) {
   viewer { login }
   repository(owner: $owner, name: $name) { ${repository_fields} }
+}
+`;
+
+const pull_request_association_query = `
+query ArtisanPullRequestAssociation($owner: String!, $name: String!, $branch: String!) {
+  viewer { login }
+  repository(owner: $owner, name: $name) {
+    pullRequests(headRefName: $branch, first: 10, orderBy: { field: UPDATED_AT, direction: DESC }) {
+      nodes { id number title url state isDraft isMerged: merged baseRefName headRefName headRefOid headRepository { name owner { login } } }
+      pageInfo { hasNextPage endCursor }
+    }
+  }
+}
+`;
+
+const pull_request_detail_query = `
+query ArtisanPullRequestDetail($owner: String!, $name: String!, $number: Int!) {
+  viewer { login }
+  repository(owner: $owner, name: $name) {
+    pullRequest(number: $number) {
+      id number title url state isDraft isMerged: merged mergeable reviewDecision
+      baseRefName baseRefOid headRefName headRefOid headRepository { name owner { login } }
+      requestedReviewers: reviewRequests(first: 100) {
+        totalCount
+        nodes {
+          requestedReviewer {
+            __typename
+            ... on User { login }
+            ... on Team { slug organization { login } }
+          }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+      reviews(first: 100, states: [APPROVED, CHANGES_REQUESTED, COMMENTED, DISMISSED]) {
+        totalCount
+        nodes { id author { login } commit { oid } state submittedAt }
+        pageInfo { hasNextPage endCursor }
+      }
+      reviewThreads(first: 100) {
+        totalCount
+        nodes {
+          id isResolved isOutdated path line subjectType
+          comments(last: 1) { totalCount nodes { id updatedAt } }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+      commits(last: 1) {
+        nodes {
+          commit {
+            statusCheckRollup {
+              contexts(first: 100) {
+                totalCount
+                nodes {
+                  __typename
+                  ... on CheckRun {
+                    id name status conclusion detailsUrl
+                    isRequired(pullRequestNumber: $number)
+                    startedAt completedAt
+                    checkSuite {
+                      id
+                      app { name }
+                      workflowRun { id url runAttempt workflow { name } }
+                    }
+                    annotations(first: 50) {
+                      totalCount
+                      nodes {
+                        annotationLevel
+                        location { start { line } end { line } }
+                        path title message
+                      }
+                      pageInfo { hasNextPage endCursor }
+                    }
+                  }
+                  ... on StatusContext {
+                    id context state targetUrl
+                    isRequired(pullRequestNumber: $number)
+                  }
+                }
+                pageInfo { hasNextPage endCursor }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
 }
 `;
 
@@ -342,6 +638,35 @@ export interface GitHubCliRepositoryInspectionResult {
 	readonly viewer_login: string;
 }
 
+/** Carries a bounded branch association or detailed GitHub pull request projection. */
+export type GitHubCliPullRequestReadResult =
+	| { readonly type: "no_pull_request"; readonly viewer_login: string }
+	| {
+			readonly candidates: ReadonlyArray<typeof GitHubPullRequestCandidateData.Type>;
+			readonly complete: boolean;
+			readonly type: "ambiguous_pull_requests";
+			readonly viewer_login: string;
+	  }
+	| {
+			readonly pull_request: Exclude<
+				Exclude<
+					(typeof GitHubPullRequestDetailData.Type)["repository"],
+					null
+				>["pullRequest"],
+				null
+			>;
+			readonly type: "matched_pull_request";
+			readonly viewer_login: string;
+	  };
+
+/** Selects one repository and branch for a two-step, exact-number GitHub PR read. */
+export interface GitHubCliPullRequestRead {
+	readonly host: string;
+	readonly name: string;
+	readonly owner: string;
+	readonly selected_branch: string;
+}
+
 /** Supplies the approved paths and exact repository for one GitHub CLI clone. */
 export interface GitHubCliCloneInput {
 	readonly account_login: string;
@@ -360,7 +685,11 @@ export interface GitHubCliCloneResult {
 
 /** Classifies GitHub CLI failures without retaining provider output in the error. */
 export class GitHubCliError extends Data.TaggedError("GitHubCliError")<{
-	readonly operation: "clone_repository" | "inspect_repository" | "query_repositories";
+	readonly operation:
+		| "clone_repository"
+		| "inspect_repository"
+		| "query_repositories"
+		| "read_pull_request";
 	readonly reason:
 		| "authentication_required"
 		| "dependency_incompatible"
@@ -398,6 +727,9 @@ export class GitHubCli extends Context.Service<
 		readonly QueryRepositories: (
 			input: GitHubCliRepositoryQuery,
 		) => Effect.Effect<GitHubCliRepositoryPage, GitHubCliError>;
+		readonly ReadPullRequest: (
+			input: GitHubCliPullRequestRead,
+		) => Effect.Effect<GitHubCliPullRequestReadResult, GitHubCliError>;
 	}
 >()("Artisan/GitHubCli") {}
 
@@ -515,6 +847,10 @@ function parse_json(value: Uint8Array) {
 
 function ParseSchema<S extends Schema.Top>(schema: S, value: unknown) {
 	return Schema.decodeUnknownEffect(schema, { onExcessProperty: "ignore" })(value);
+}
+
+function ParseStrictSchema<S extends Schema.Top>(schema: S, value: unknown) {
+	return Schema.decodeUnknownEffect(schema, { onExcessProperty: "error" })(value);
 }
 
 function ParseAuthStatus(stdout: Uint8Array) {
@@ -706,6 +1042,44 @@ function repository_arguments(input: GitHubCliRepositoryInspection) {
 		`owner=${input.owner}`,
 		"--raw-field",
 		`name=${input.name}`,
+	];
+}
+
+function pull_request_association_arguments(input: GitHubCliPullRequestRead) {
+	return [
+		"api",
+		"graphql",
+		"--hostname",
+		input.host,
+		"--method",
+		"POST",
+		"--raw-field",
+		`query=${pull_request_association_query}`,
+		"--raw-field",
+		`owner=${input.owner}`,
+		"--raw-field",
+		`name=${input.name}`,
+		"--raw-field",
+		`branch=${input.selected_branch}`,
+	];
+}
+
+function pull_request_detail_arguments(input: GitHubCliPullRequestRead, number: number) {
+	return [
+		"api",
+		"graphql",
+		"--hostname",
+		input.host,
+		"--method",
+		"POST",
+		"--raw-field",
+		`query=${pull_request_detail_query}`,
+		"--raw-field",
+		`owner=${input.owner}`,
+		"--raw-field",
+		`name=${input.name}`,
+		"--field",
+		`number=${number}`,
 	];
 }
 
@@ -1099,6 +1473,31 @@ function DecodeRepositoryPage(scope: GitProviderDiscoveryScope, data: unknown) {
 	);
 }
 
+function connection_is_consistent(connection: {
+	readonly nodes: ReadonlyArray<unknown>;
+	readonly pageInfo: typeof GitHubPageInfo.Type;
+	readonly totalCount: number;
+}) {
+	return (
+		connection.totalCount >= connection.nodes.length &&
+		connection.pageInfo.hasNextPage === connection.totalCount > connection.nodes.length &&
+		(!connection.pageInfo.hasNextPage ||
+			(connection.pageInfo.endCursor !== null && connection.pageInfo.endCursor.length > 0))
+	);
+}
+
+function pull_request_url_matches_host(value: string, host: string) {
+	const parsed = URL.parse(value);
+
+	return (
+		parsed !== null &&
+		(parsed.protocol === "https:" || parsed.protocol === "http:") &&
+		parsed.host === host &&
+		parsed.username === "" &&
+		parsed.password === ""
+	);
+}
+
 function valid_timeout(value: number) {
 	return Number.isSafeInteger(value) && value > 0 && value <= 5 * 60_000;
 }
@@ -1425,6 +1824,224 @@ export function make_github_cli_layer(options: GitHubCliOptions) {
 						viewer_login: decoded.viewer.login,
 					} satisfies GitHubCliRepositoryInspectionResult;
 				});
+			const ReadPullRequest = (input: GitHubCliPullRequestRead) =>
+				Effect.gen(function* () {
+					const location = yield* executable.Locate;
+					const operation = "read_pull_request" as const;
+
+					if (Option.isNone(location)) {
+						return yield* Effect.fail(
+							api_error("dependency_missing", false, operation),
+						);
+					}
+
+					const Execute = (args: ReadonlyArray<string>) =>
+						Run(location.value.path, args, 2 * 1024 * 1024, request_timeout_ms, {
+							GH_HOST: input.host,
+						}).pipe(
+							Effect.mapError(() => api_error("process_failed", true, operation)),
+						);
+					const association_process = yield* Execute(
+						pull_request_association_arguments(input),
+					);
+
+					if (Option.isNone(association_process)) {
+						return yield* Effect.fail(api_error("timed_out", true, operation));
+					}
+
+					const association_result = association_process.value;
+
+					if (
+						association_result.stdout_truncated ||
+						association_result.stderr_truncated
+					) {
+						return yield* Effect.fail(api_error("invalid_response", false, operation));
+					}
+
+					const association_envelope = yield* ParseEnvelope(association_result.stdout);
+
+					if (
+						association_result.exit_code !== 0 ||
+						(Option.isSome(association_envelope) &&
+							(association_envelope.value.errors?.length ?? 0) > 0)
+					) {
+						return yield* Effect.fail(
+							classify_api_failure(
+								association_result,
+								association_envelope,
+								operation,
+							),
+						);
+					}
+
+					if (
+						Option.isNone(association_envelope) ||
+						association_envelope.value.data === undefined ||
+						association_envelope.value.data === null
+					) {
+						return yield* Effect.fail(api_error("invalid_response", false, operation));
+					}
+
+					const association = yield* ParseStrictSchema(
+						GitHubPullRequestAssociationData,
+						association_envelope.value.data,
+					).pipe(Effect.mapError(() => api_error("invalid_response", false, operation)));
+
+					if (association.repository === null) {
+						return yield* Effect.fail(api_error("remote_not_found", false, operation));
+					}
+
+					const observed_candidates = association.repository.pullRequests.nodes;
+					const candidates = observed_candidates.filter(
+						(candidate) =>
+							candidate.headRepository !== null &&
+							candidate.headRepository.name.toLowerCase() ===
+								input.name.toLowerCase() &&
+							candidate.headRepository.owner.login.toLowerCase() ===
+								input.owner.toLowerCase(),
+					);
+					const candidate_numbers = candidates.map((candidate) => candidate.number);
+					const association_page = association.repository.pullRequests.pageInfo;
+
+					if (
+						observed_candidates.some(
+							(candidate) =>
+								candidate.headRefName !== input.selected_branch ||
+								candidate.isMerged !== (candidate.state === "MERGED") ||
+								!pull_request_url_matches_host(candidate.url, input.host),
+						) ||
+						new Set(candidate_numbers).size !== candidate_numbers.length ||
+						(association_page.hasNextPage &&
+							(observed_candidates.length !== 10 ||
+								association_page.endCursor === null ||
+								association_page.endCursor.length === 0)) ||
+						(association_page.hasNextPage && candidates.length < 2)
+					) {
+						return yield* Effect.fail(api_error("invalid_response", false, operation));
+					}
+
+					if (candidates.length === 0) {
+						return {
+							type: "no_pull_request",
+							viewer_login: association.viewer.login,
+						} as const;
+					}
+
+					if (
+						candidates.length > 1 ||
+						association.repository.pullRequests.pageInfo.hasNextPage
+					) {
+						return {
+							candidates,
+							complete: !association.repository.pullRequests.pageInfo.hasNextPage,
+							type: "ambiguous_pull_requests",
+							viewer_login: association.viewer.login,
+						} as const;
+					}
+
+					const detail_process = yield* Execute(
+						pull_request_detail_arguments(input, candidates[0]!.number),
+					);
+
+					if (Option.isNone(detail_process)) {
+						return yield* Effect.fail(api_error("timed_out", true, operation));
+					}
+
+					const detail_result = detail_process.value;
+
+					if (detail_result.stdout_truncated || detail_result.stderr_truncated) {
+						return yield* Effect.fail(api_error("invalid_response", false, operation));
+					}
+
+					const detail_envelope = yield* ParseEnvelope(detail_result.stdout);
+
+					if (
+						detail_result.exit_code !== 0 ||
+						(Option.isSome(detail_envelope) &&
+							(detail_envelope.value.errors?.length ?? 0) > 0)
+					) {
+						return yield* Effect.fail(
+							classify_api_failure(detail_result, detail_envelope, operation),
+						);
+					}
+
+					if (
+						Option.isNone(detail_envelope) ||
+						detail_envelope.value.data === undefined ||
+						detail_envelope.value.data === null
+					) {
+						return yield* Effect.fail(api_error("invalid_response", false, operation));
+					}
+
+					const detail = yield* ParseStrictSchema(
+						GitHubPullRequestDetailData,
+						detail_envelope.value.data,
+					).pipe(Effect.mapError(() => api_error("invalid_response", false, operation)));
+
+					if (detail.repository === null || detail.repository.pullRequest === null) {
+						return yield* Effect.fail(api_error("remote_not_found", false, operation));
+					}
+
+					if (
+						detail.repository.pullRequest.number !== candidates[0]!.number ||
+						detail.repository.pullRequest.id !== candidates[0]!.id ||
+						detail.repository.pullRequest.headRefOid !== candidates[0]!.headRefOid ||
+						detail.repository.pullRequest.headRefName !== input.selected_branch ||
+						detail.repository.pullRequest.headRepository === null ||
+						detail.repository.pullRequest.headRepository.name.toLowerCase() !==
+							input.name.toLowerCase() ||
+						detail.repository.pullRequest.headRepository.owner.login.toLowerCase() !==
+							input.owner.toLowerCase() ||
+						detail.repository.pullRequest.isMerged !==
+							(detail.repository.pullRequest.state === "MERGED") ||
+						!pull_request_url_matches_host(
+							detail.repository.pullRequest.url,
+							input.host,
+						)
+					) {
+						return yield* Effect.fail(api_error("invalid_response", false, operation));
+					}
+
+					if (
+						detail.viewer.login.toLowerCase() !== association.viewer.login.toLowerCase()
+					) {
+						return yield* Effect.fail(
+							api_error("authentication_required", false, operation),
+						);
+					}
+
+					const pull_request = detail.repository.pullRequest;
+					const rollup = pull_request.commits.nodes[0]!.commit.statusCheckRollup;
+					const invalid_comments = pull_request.reviewThreads.nodes.some(
+						(thread) =>
+							thread.comments.nodes.length !==
+							Math.min(thread.comments.totalCount, 1),
+					);
+					const invalid_annotations =
+						rollup?.contexts.nodes.some(
+							(check) =>
+								check.__typename === "CheckRun" &&
+								check.annotations !== null &&
+								!connection_is_consistent(check.annotations),
+						) ?? false;
+
+					if (
+						!connection_is_consistent(pull_request.reviews) ||
+						!connection_is_consistent(pull_request.reviewThreads) ||
+						!connection_is_consistent(pull_request.requestedReviewers) ||
+						(rollup !== null && !connection_is_consistent(rollup.contexts)) ||
+						invalid_comments ||
+						invalid_annotations
+					) {
+						return yield* Effect.fail(api_error("invalid_response", false, operation));
+					}
+
+					return {
+						pull_request,
+						type: "matched_pull_request",
+						viewer_login: detail.viewer.login,
+					} as const;
+				});
 			const CloneRepository = (input: GitHubCliCloneInput) =>
 				Effect.gen(function* () {
 					const location = yield* executable.Locate;
@@ -1627,7 +2244,13 @@ export function make_github_cli_layer(options: GitHubCliOptions) {
 					);
 				});
 
-			return { CloneRepository, Inspect, InspectRepository, QueryRepositories };
+			return {
+				CloneRepository,
+				Inspect,
+				InspectRepository,
+				QueryRepositories,
+				ReadPullRequest,
+			};
 		}),
 	);
 }
