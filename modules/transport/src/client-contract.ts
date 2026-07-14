@@ -7,6 +7,9 @@ import type {
 	GlobalGuidanceProvider,
 	GlobalGuidanceSelectionRequest,
 	GlobalGuidanceSnapshot,
+	HostedProjectCloneApprovalQuery,
+	HostedProjectCloneApprovalQueryResult,
+	HostedProjectCloneRequest,
 	ContentIdentity,
 	ModelBehaviourDriftResolutionRequest,
 	ModelBehaviourRetryRequest,
@@ -169,6 +172,23 @@ export interface ArtisanWorkspaceGitMutationApprovalResponseInput {
 	readonly thread_id: string;
 }
 
+/** Supplies one hosted clone approval query identity. */
+export interface ArtisanHostedProjectCloneApprovalInput extends HostedProjectCloneApprovalQuery {}
+
+/** Supplies a hosted clone request and optional durable retry identity. */
+export interface ArtisanHostedProjectCloneInput extends HostedProjectCloneRequest {
+	readonly command_id?: string;
+	readonly thread_id: string;
+}
+
+/** Supplies one hosted clone approval decision and optional durable retry identity. */
+export interface ArtisanHostedProjectCloneApprovalResponseInput {
+	readonly approval_id: string;
+	readonly approved: boolean;
+	readonly command_id?: string;
+	readonly thread_id: string;
+}
+
 /** Supplies the durable identity and attribution for a review transition. */
 export interface ArtisanWorkspaceChangeReviewInput {
 	readonly change_id: string;
@@ -322,6 +342,9 @@ export class ArtisanClient extends Context.Service<
 		readonly GetWorkspaceGitMutationApproval: (
 			input: ArtisanWorkspaceGitMutationApprovalInput,
 		) => Effect.Effect<WorkspaceGitMutationApprovalQueryResult, ArtisanClientError>;
+		readonly GetHostedProjectCloneApproval: (
+			input: ArtisanHostedProjectCloneApprovalInput,
+		) => Effect.Effect<HostedProjectCloneApprovalQueryResult, ArtisanClientError>;
 		readonly OpenAsset: (
 			asset_id: string,
 		) => Effect.Effect<
@@ -399,8 +422,14 @@ export class ArtisanClient extends Context.Service<
 		readonly RequestWorkspaceGitMutation: (
 			input: ArtisanWorkspaceGitMutationInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RequestHostedProjectClone: (
+			input: ArtisanHostedProjectCloneInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly RespondWorkspaceGitMutationApproval: (
 			input: ArtisanWorkspaceGitMutationApprovalResponseInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RespondHostedProjectCloneApproval: (
+			input: ArtisanHostedProjectCloneApprovalResponseInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 	}
 >()("Artisan/ArtisanClient") {}

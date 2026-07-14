@@ -2,6 +2,10 @@ import { Cause, Effect, Layer, Option, Queue, Ref, Schema, Stream } from "effect
 
 import {
 	type CommandEnvelope,
+	type HostedProjectCloneApprovalQueryEnvelope,
+	type HostedProjectCloneApprovalRespondEnvelope,
+	HostedProjectCloneRequest,
+	type HostedProjectCloneRequestEnvelope,
 	type WorkspaceChangeListQueryEnvelope,
 	type WorkspaceChangeDiffQueryEnvelope,
 	type WorkspaceChangeReviewEnvelope,
@@ -41,6 +45,9 @@ import {
 
 import {
 	ArtisanClient,
+	type ArtisanHostedProjectCloneApprovalInput,
+	type ArtisanHostedProjectCloneApprovalResponseInput,
+	type ArtisanHostedProjectCloneInput,
 	type ArtisanGlobalGuidanceDriftInput,
 	type ArtisanGlobalGuidanceRetryInput,
 	type ArtisanGlobalGuidanceSelectionInput,
@@ -349,8 +356,31 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 								"workspace Git mutation approval response narrowed incorrectly",
 							);
 				});
+			const get_hosted_project_clone_approval = (
+				input: ArtisanHostedProjectCloneApprovalInput,
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: HostedProjectCloneApprovalQueryEnvelope = {
+						...trace,
+						kind: "hosted.project.clone.approval.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"hosted.project.clone.approval.query.result",
+					);
+
+					return result.kind === "hosted.project.clone.approval.query.result"
+						? result.payload
+						: yield* Effect.die(
+								"hosted project clone approval response narrowed incorrectly",
+							);
+				});
 
 			type WorkspaceMutationEnvelope =
+				| HostedProjectCloneApprovalRespondEnvelope
+				| HostedProjectCloneRequestEnvelope
 				| WorkspaceChangeReviewEnvelope
 				| WorkspaceChangeRollbackEnvelope
 				| WorkspaceReplaceApprovalRespondEnvelope
@@ -516,6 +546,49 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					const envelope: WorkspaceGitMutationApprovalRespondEnvelope = {
 						...trace,
 						kind: "workspace.git.mutation.approval.respond",
+						message_id: input.command_id ?? trace.message_id,
+						payload: { approval_id: input.approval_id, approved: input.approved },
+						thread_id: input.thread_id,
+					};
+
+					return yield* send_workspace_mutation(envelope);
+				});
+			const request_hosted_project_clone = (input: ArtisanHostedProjectCloneInput) =>
+				Effect.gen(function* () {
+					const payload = yield* Schema.decodeUnknownEffect(HostedProjectCloneRequest, {
+						onExcessProperty: "error",
+					})({
+						destination_path: input.destination_path,
+						repository: input.repository,
+						selection: input.selection,
+					}).pipe(
+						Effect.mapError((cause) =>
+							client_error(
+								"malformed",
+								"The hosted project clone request is invalid.",
+								cause,
+							),
+						),
+					);
+					const trace = yield* connection.MakeTrace;
+					const envelope: HostedProjectCloneRequestEnvelope = {
+						...trace,
+						kind: "hosted.project.clone.request",
+						message_id: input.command_id ?? trace.message_id,
+						payload,
+						thread_id: input.thread_id,
+					};
+
+					return yield* send_workspace_mutation(envelope);
+				});
+			const respond_hosted_project_clone_approval = (
+				input: ArtisanHostedProjectCloneApprovalResponseInput,
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: HostedProjectCloneApprovalRespondEnvelope = {
+						...trace,
+						kind: "hosted.project.clone.approval.respond",
 						message_id: input.command_id ?? trace.message_id,
 						payload: { approval_id: input.approval_id, approved: input.approved },
 						thread_id: input.thread_id,
@@ -853,6 +926,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				Errors: Stream.fromQueue(errors),
 				Events: subscriptions.Events,
 				GetOrchestrationGraph: get_orchestration_graph,
+				GetHostedProjectCloneApproval: get_hosted_project_clone_approval,
 				GetGlobalGuidance: get_global_guidance,
 				GetModelBehaviour: get_model_behaviour,
 				GetThreadRetentionPolicy: get_thread_retention_policy,
@@ -877,8 +951,10 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				RefreshWorkspaceGitSession: refresh_workspace_git_session,
 				RequestWorkspaceGitCheckout: request_workspace_git_checkout,
 				RequestWorkspaceGitMutation: request_workspace_git_mutation,
+				RequestHostedProjectClone: request_hosted_project_clone,
 				RespondWorkspaceGitCheckoutApproval: respond_workspace_git_checkout_approval,
 				RespondWorkspaceGitMutationApproval: respond_workspace_git_mutation_approval,
+				RespondHostedProjectCloneApproval: respond_hosted_project_clone_approval,
 				ReviewWorkspaceChange: review_workspace_change,
 				RollbackWorkspaceChange: rollback_workspace_change,
 				SelectGlobalGuidance: select_global_guidance,

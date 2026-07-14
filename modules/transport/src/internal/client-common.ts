@@ -46,6 +46,9 @@ export type PendingRequestEnvelope = Extract<
 	{
 		readonly kind:
 			| "command"
+			| "hosted.project.clone.request"
+			| "hosted.project.clone.approval.query"
+			| "hosted.project.clone.approval.respond"
 			| "guidance.drift.resolve"
 			| "guidance.query"
 			| "guidance.selection"
@@ -86,6 +89,7 @@ export type PendingResultEnvelope = Extract<
 	{
 		readonly kind:
 			| "command.receipt"
+			| "hosted.project.clone.approval.query.result"
 			| "guidance.query.result"
 			| "model_behaviour.query.result"
 			| "orchestration.graph.query.result"

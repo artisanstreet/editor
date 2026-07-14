@@ -16,6 +16,10 @@ import {
 	type GlobalGuidanceUpdateEnvelope,
 	type HeartbeatPongEnvelope,
 	type HelloEnvelope,
+	type HostedProjectCloneApproval,
+	type HostedProjectCloneApprovalQueryEnvelope,
+	type HostedProjectCloneApprovalRespondEnvelope,
+	type HostedProjectCloneRequestEnvelope,
 	type InboundControlEnvelope,
 	type ModelBehaviourDriftResolutionEnvelope,
 	type ModelBehaviourQueryEnvelope,
@@ -125,6 +129,9 @@ export interface FakeProtocolSnapshot {
 	readonly model_behaviour_retry_attempts: ReadonlyArray<ModelBehaviourRetryEnvelope>;
 	readonly model_behaviour_snapshot: ModelBehaviourSnapshot;
 	readonly model_behaviour_update_attempts: ReadonlyArray<ModelBehaviourUpdateEnvelope>;
+	readonly hosted_project_clone_approval_query_attempts: ReadonlyArray<HostedProjectCloneApprovalQueryEnvelope>;
+	readonly hosted_project_clone_approval_response_attempts: ReadonlyArray<HostedProjectCloneApprovalRespondEnvelope>;
+	readonly hosted_project_clone_request_attempts: ReadonlyArray<HostedProjectCloneRequestEnvelope>;
 	readonly workspace_change_events: ReadonlyArray<EventEnvelope>;
 	readonly workspace_change_list_attempts: ReadonlyArray<WorkspaceChangeListQueryEnvelope>;
 	readonly workspace_change_review_attempts: ReadonlyArray<WorkspaceChangeReviewEnvelope>;
@@ -197,6 +204,11 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 	const model_behaviour_query_attempts: Array<ModelBehaviourQueryEnvelope> = [];
 	const model_behaviour_retry_attempts: Array<ModelBehaviourRetryEnvelope> = [];
 	const model_behaviour_update_attempts: Array<ModelBehaviourUpdateEnvelope> = [];
+	const hosted_project_clone_approval_query_attempts: Array<HostedProjectCloneApprovalQueryEnvelope> =
+		[];
+	const hosted_project_clone_approval_response_attempts: Array<HostedProjectCloneApprovalRespondEnvelope> =
+		[];
+	const hosted_project_clone_request_attempts: Array<HostedProjectCloneRequestEnvelope> = [];
 	const workspace_changes = new Map<string, StoredWorkspaceMutation>();
 	const workspace_change_list_attempts: Array<WorkspaceChangeListQueryEnvelope> = [];
 	const workspace_change_review_attempts: Array<WorkspaceChangeReviewEnvelope> = [];
@@ -410,6 +422,23 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 		thread_id: "thread_git_fixture",
 		updated_at: "2026-07-13T08:00:00.000Z",
 		workspace_id: "workspace_git_fixture",
+	};
+	const hosted_project_clone_approval: HostedProjectCloneApproval = {
+		approval_id: "hosted_clone_approval_fixture",
+		created_at: "2026-07-13T08:00:00.000Z",
+		destination_path: "C:\\Projects\\artisan-editor",
+		repository: {
+			host: "github.com",
+			name: "artisan-editor",
+			owner: "artisan",
+			provider_id: "github",
+			selected_account_login: "sander",
+			web_url: "https://github.com/artisan/artisan-editor",
+		},
+		source_command_id: "hosted_clone_fixture",
+		state: "requested",
+		thread_id: "thread_git_fixture",
+		updated_at: "2026-07-13T08:00:00.000Z",
 	};
 	let workspace_change: WorkspaceChange = {
 		after_identity: workspace_file_identity,
@@ -1336,6 +1365,44 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 					thread_id: mutation.thread_id,
 				});
 			});
+		const handle_hosted_project_clone_approval_query = (
+			query: HostedProjectCloneApprovalQueryEnvelope,
+		) =>
+			Effect.gen(function* () {
+				hosted_project_clone_approval_query_attempts.push(query);
+				yield* enqueue({
+					...backend_trace(),
+					correlation_id: query.message_id,
+					kind: "hosted.project.clone.approval.query.result",
+					payload: { approval: hosted_project_clone_approval },
+				});
+			});
+		const handle_hosted_project_clone_request = (request: HostedProjectCloneRequestEnvelope) =>
+			Effect.gen(function* () {
+				hosted_project_clone_request_attempts.push(request);
+				yield* enqueue({
+					...backend_trace(),
+					causation_id: request.message_id,
+					correlation_id: request.message_id,
+					kind: "command.receipt",
+					payload: { journal_sequence: events.length + 1, status: "accepted" },
+					thread_id: request.thread_id,
+				});
+			});
+		const handle_hosted_project_clone_approval_response = (
+			response: HostedProjectCloneApprovalRespondEnvelope,
+		) =>
+			Effect.gen(function* () {
+				hosted_project_clone_approval_response_attempts.push(response);
+				yield* enqueue({
+					...backend_trace(),
+					causation_id: response.message_id,
+					correlation_id: response.message_id,
+					kind: "command.receipt",
+					payload: { journal_sequence: events.length + 1, status: "accepted" },
+					thread_id: response.thread_id,
+				});
+			});
 
 		type WorkspaceMutationEnvelope =
 			| WorkspaceChangeReviewEnvelope
@@ -1683,6 +1750,18 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 						yield* handle_workspace_git_mutation_approval_response(input);
 
 						return;
+					case "hosted.project.clone.approval.query":
+						yield* handle_hosted_project_clone_approval_query(input);
+
+						return;
+					case "hosted.project.clone.request":
+						yield* handle_hosted_project_clone_request(input);
+
+						return;
+					case "hosted.project.clone.approval.respond":
+						yield* handle_hosted_project_clone_approval_response(input);
+
+						return;
 					case "workspace.file.replace":
 					case "workspace.change.review":
 					case "workspace.change.rollback":
@@ -1825,6 +1904,13 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 			settings: [...model_behaviour_snapshot.settings],
 		},
 		model_behaviour_update_attempts: [...model_behaviour_update_attempts],
+		hosted_project_clone_approval_query_attempts: [
+			...hosted_project_clone_approval_query_attempts,
+		],
+		hosted_project_clone_approval_response_attempts: [
+			...hosted_project_clone_approval_response_attempts,
+		],
+		hosted_project_clone_request_attempts: [...hosted_project_clone_request_attempts],
 		workspace_change_events: events.filter(
 			(event) => event.payload.type === "workspace.change.updated",
 		),

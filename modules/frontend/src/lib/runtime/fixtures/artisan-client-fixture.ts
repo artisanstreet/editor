@@ -355,6 +355,12 @@ export const FixtureArtisanClientService = {
 
 			return fixture_artisan_client_data.orchestration_graph;
 		}),
+	GetHostedProjectCloneApproval: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureFailure(
+				`Unknown fixture hosted project clone approval: ${input.approval_id}`,
+			);
+		}),
 	GetThreadRetentionPolicy: Effect.gen(function* () {
 		return yield* Effect.succeed(fixture_artisan_client_data.thread_retention_policy);
 	}),
@@ -522,6 +528,10 @@ export const FixtureArtisanClientService = {
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-workspace-git-mutation");
 		}),
+	RequestHostedProjectClone: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-hosted-project-clone");
+		}),
 	RespondWorkspaceGitCheckoutApproval: (input) =>
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(
@@ -532,6 +542,12 @@ export const FixtureArtisanClientService = {
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(
 				input.command_id ?? "fixture-workspace-git-mutation-approval",
+			);
+		}),
+	RespondHostedProjectCloneApproval: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(
+				input.command_id ?? "fixture-hosted-project-clone-approval",
 			);
 		}),
 	SelectGlobalGuidance: (input) =>
