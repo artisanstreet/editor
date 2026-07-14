@@ -1077,6 +1077,135 @@ export const WorkspaceGitMutationClaims = sqliteTable(
 	],
 );
 
+/** Stores public, source-safe hosted clone approval lifecycles. */
+export const HostedProjectCloneApprovals = sqliteTable(
+	"hosted_project_clone_approvals",
+	{
+		approval_id: text("approval_id").primaryKey(),
+		source_command_id: text("source_command_id").notNull(),
+		request_fingerprint: text("request_fingerprint").notNull(),
+		thread_id: text("thread_id").notNull(),
+		destination_path: text("destination_path").notNull(),
+		repository_json: text("repository_json").notNull(),
+		state: text("state").notNull(),
+		decision_message_id: text("decision_message_id"),
+		approved: integer("approved", { mode: "boolean" }),
+		decided_at: text("decided_at"),
+		execution_started_at: text("execution_started_at"),
+		project_json: text("project_json"),
+		attachment: text("attachment"),
+		rejection_reason: text("rejection_reason"),
+		unknown_reason: text("unknown_reason"),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("hosted_project_clone_approvals_source_command_unique").on(
+			table.source_command_id,
+		),
+		uniqueIndex("hosted_project_clone_approvals_decision_message_unique").on(
+			table.decision_message_id,
+		),
+		index("hosted_project_clone_approvals_thread_index").on(table.thread_id),
+		index("hosted_project_clone_approvals_state_index").on(table.state),
+		check(
+			"hosted_project_clone_approvals_fingerprint_check",
+			sql`length(${table.request_fingerprint}) = 64 AND ${table.request_fingerprint} NOT GLOB '*[^0-9a-f]*'`,
+		),
+		check(
+			"hosted_project_clone_approvals_state_check",
+			sql`${table.state} IN ('requested', 'reused', 'approved', 'executing', 'applied', 'attachment_conflict', 'rejected', 'outcome_unknown', 'denied')`,
+		),
+		check(
+			"hosted_project_clone_approvals_decision_check",
+			sql`
+			(${table.state} IN ('requested', 'reused') AND ${table.decision_message_id} IS NULL AND ${table.approved} IS NULL AND ${table.decided_at} IS NULL AND ${table.execution_started_at} IS NULL)
+			OR (${table.state} = 'denied' AND ${table.decision_message_id} IS NOT NULL AND ${table.approved} = 0 AND ${table.decided_at} IS NOT NULL AND ${table.execution_started_at} IS NULL)
+			OR (${table.state} = 'approved' AND ${table.decision_message_id} IS NOT NULL AND ${table.approved} = 1 AND ${table.decided_at} IS NOT NULL AND ${table.execution_started_at} IS NULL)
+			OR (${table.state} IN ('executing', 'applied', 'attachment_conflict', 'rejected', 'outcome_unknown') AND ${table.decision_message_id} IS NOT NULL AND ${table.approved} = 1 AND ${table.decided_at} IS NOT NULL AND ${table.execution_started_at} IS NOT NULL)
+		`,
+		),
+		check(
+			"hosted_project_clone_approvals_outcome_check",
+			sql`
+			(${table.state} IN ('requested', 'approved', 'executing', 'denied') AND ${table.project_json} IS NULL AND ${table.attachment} IS NULL AND ${table.rejection_reason} IS NULL AND ${table.unknown_reason} IS NULL)
+			OR (${table.state} = 'reused' AND ${table.project_json} IS NOT NULL AND ${table.attachment} IN ('attached', 'already_attached') AND ${table.rejection_reason} IS NULL AND ${table.unknown_reason} IS NULL)
+			OR (${table.state} = 'applied' AND ${table.project_json} IS NOT NULL AND ${table.attachment} IN ('attached', 'already_attached') AND ${table.rejection_reason} IS NULL AND ${table.unknown_reason} IS NULL)
+			OR (${table.state} = 'attachment_conflict' AND ${table.project_json} IS NOT NULL AND ${table.attachment} IS NULL AND ${table.rejection_reason} IS NULL AND ${table.unknown_reason} IS NULL)
+			OR (${table.state} = 'rejected' AND ${table.project_json} IS NULL AND ${table.attachment} IS NULL AND ${table.rejection_reason} IN ('destination_unavailable', 'provider_unavailable', 'repository_unavailable', 'thread_unavailable') AND ${table.unknown_reason} IS NULL)
+			OR (${table.state} = 'outcome_unknown' AND ${table.project_json} IS NULL AND ${table.attachment} IS NULL AND ${table.rejection_reason} IS NULL AND ${table.unknown_reason} IN ('interrupted', 'verification_failed'))
+			`,
+		),
+		check(
+			"hosted_project_clone_approvals_update_time_check",
+			sql`
+				(${table.state} IN ('requested', 'reused') AND ${table.updated_at} = ${table.created_at})
+				OR (${table.state} IN ('approved', 'denied') AND ${table.updated_at} = ${table.decided_at})
+				OR (${table.state} = 'executing' AND ${table.updated_at} = ${table.execution_started_at})
+				OR (${table.state} IN ('applied', 'attachment_conflict', 'rejected', 'outcome_unknown'))
+			`,
+		),
+	],
+);
+
+/** Stores exact provider preparation, destination proof, execution result, and registration outside journal payloads. */
+export const HostedProjectCloneArtifacts = sqliteTable(
+	"hosted_project_clone_artifacts",
+	{
+		approval_id: text("approval_id")
+			.primaryKey()
+			.references(() => HostedProjectCloneApprovals.approval_id, { onDelete: "cascade" }),
+		request_json: text("request_json").notNull(),
+		preparation_json: text("preparation_json").notNull(),
+		destination_proof_json: text("destination_proof_json").notNull(),
+		clone_result_json: text("clone_result_json"),
+		registered_project_json: text("registered_project_json"),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		check(
+			"hosted_project_clone_artifacts_registration_pair_check",
+			sql`(${table.registered_project_json} IS NULL) OR (${table.clone_result_json} IS NOT NULL)`,
+		),
+	],
+);
+
+/** Exclusively reserves both an empty destination and provider-native hosted identity until settlement. */
+export const HostedProjectCloneClaims = sqliteTable(
+	"hosted_project_clone_claims",
+	{
+		approval_id: text("approval_id")
+			.primaryKey()
+			.references(() => HostedProjectCloneApprovals.approval_id, { onDelete: "cascade" }),
+		thread_id: text("thread_id").notNull(),
+		canonical_root: text("canonical_root").notNull(),
+		provider_id: text("provider_id").notNull(),
+		canonical_host: text("canonical_host").notNull(),
+		native_id: text("native_id").notNull(),
+		claim_token: text("claim_token").notNull(),
+		owner_instance_id: text("owner_instance_id").notNull().default("unowned"),
+		claimed_at: text("claimed_at").notNull(),
+		lease_expires_at: text("lease_expires_at").notNull(),
+		execution_started_at: text("execution_started_at"),
+		execution_completed_at: text("execution_completed_at"),
+	},
+	(table) => [
+		uniqueIndex("hosted_project_clone_claims_destination_unique").on(table.canonical_root),
+		uniqueIndex("hosted_project_clone_claims_hosted_identity_unique").on(
+			table.provider_id,
+			table.canonical_host,
+			table.native_id,
+		),
+		uniqueIndex("hosted_project_clone_claims_token_unique").on(table.claim_token),
+		index("hosted_project_clone_claims_thread_index").on(table.thread_id),
+		index("hosted_project_clone_claims_lease_index").on(table.lease_expires_at),
+		check(
+			"hosted_project_clone_claims_execution_pair_check",
+			sql`${table.execution_completed_at} IS NULL OR ${table.execution_started_at} IS NOT NULL`,
+		),
+	],
+);
+
 export const ThreadErasureClaims = sqliteTable("thread_erasure_claims", {
 	thread_id: text("thread_id").primaryKey(),
 	claimed_at: text("claimed_at").notNull(),

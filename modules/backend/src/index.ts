@@ -55,6 +55,21 @@ export {
 	type ProjectRepositoryError,
 } from "./projects/project-repository";
 export {
+	HostedProjectCloneConflict,
+	HostedProjectCloneInvariant,
+	HostedProjectCloneRepository,
+	HostedProjectCloneRepositoryLive,
+	HostedProjectCloneUnavailable,
+	type HostedProjectCloneAcceptance,
+	type HostedProjectCloneDecision,
+	type HostedProjectCloneDispatch,
+	type HostedProjectCloneExecution,
+	type HostedProjectCloneRepositoryError,
+	type HostedProjectCloneSettlement,
+	type RequestHostedProjectClone,
+	type ReuseHostedProjectClone,
+} from "./projects/hosted-project-clone-repository";
+export {
 	GlobalGuidanceConflict,
 	GlobalGuidanceInvariantError,
 	GlobalGuidanceService,
