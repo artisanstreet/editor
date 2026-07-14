@@ -52,7 +52,12 @@ describe("GitHubGitTransportAuthentication", () => {
 	it("binds one github.com account while isolating ambient credential sources", async () => {
 		const authorization = await Effect.runPromise(
 			with_authorization(
-				{ account_login: "alice", host: "github.com", provider_id: "github" },
+				{
+					account_login: "alice",
+					host: "github.com",
+					provider_id: "github",
+					remote_endpoint: "https://github.com/artisan/editor.git",
+				},
 				Effect.succeed,
 			).pipe(Effect.provide(make_layer())),
 		);
@@ -74,6 +79,7 @@ describe("GitHubGitTransportAuthentication", () => {
 		expect(authorization.environment).not.toHaveProperty("GH_TOKEN");
 		expect(authorization.environment).not.toHaveProperty("GH_ENTERPRISE_TOKEN");
 		expect(authorization.git_executable_path).toBe("C:\\Program Files\\Git\\cmd\\git.exe");
+		expect(authorization.remote_endpoint).toBe("https://github.com/artisan/editor.git");
 	});
 
 	it("binds GitHub Enterprise to its exact selected host", async () => {
@@ -83,6 +89,7 @@ describe("GitHubGitTransportAuthentication", () => {
 					account_login: "enterprise-alice",
 					host: "github.artisan.test:8443",
 					provider_id: "github",
+					remote_endpoint: "https://github.artisan.test:8443/artisan/editor.git",
 				},
 				Effect.succeed,
 			).pipe(Effect.provide(make_layer())),
@@ -91,12 +98,20 @@ describe("GitHubGitTransportAuthentication", () => {
 		expect(authorization.environment.ARTISAN_GH_ACCOUNT).toBe("enterprise-alice");
 		expect(authorization.environment.ARTISAN_GH_HOST).toBe("github.artisan.test:8443");
 		expect(authorization.git_executable_path).toBe("C:\\Program Files\\Git\\cmd\\git.exe");
+		expect(authorization.remote_endpoint).toBe(
+			"https://github.artisan.test:8443/artisan/editor.git",
+		);
 	});
 
 	it("rejects an unsupported provider before creating authorization", async () => {
 		const error = await Effect.runPromise(
 			with_authorization(
-				{ account_login: "alice", host: "github.com", provider_id: "gitlab" },
+				{
+					account_login: "alice",
+					host: "github.com",
+					provider_id: "gitlab",
+					remote_endpoint: "https://github.com/artisan/editor.git",
+				},
 				Effect.succeed,
 			).pipe(Effect.provide(make_layer()), Effect.flip),
 		);
@@ -108,8 +123,24 @@ describe("GitHubGitTransportAuthentication", () => {
 
 	it("rejects a noncanonical host or invalid account before creating authorization", async () => {
 		const cases = [
-			{ account_login: "alice", host: "GitHub.com", provider_id: "github" },
-			{ account_login: "alice token", host: "github.com", provider_id: "github" },
+			{
+				account_login: "alice",
+				host: "GitHub.com",
+				provider_id: "github",
+				remote_endpoint: "https://github.com/artisan/editor.git",
+			},
+			{
+				account_login: "alice token",
+				host: "github.com",
+				provider_id: "github",
+				remote_endpoint: "https://github.com/artisan/editor.git",
+			},
+			{
+				account_login: "alice",
+				host: "github.com",
+				provider_id: "github",
+				remote_endpoint: "https://example.com/artisan/editor.git",
+			},
 		];
 
 		for (const input of cases) {
@@ -130,7 +161,12 @@ describe("GitHubGitTransportAuthentication", () => {
 		for (const options of [{ gh: "" }, { git: "" }]) {
 			const error = await Effect.runPromise(
 				with_authorization(
-					{ account_login: "alice", host: "github.com", provider_id: "github" },
+					{
+						account_login: "alice",
+						host: "github.com",
+						provider_id: "github",
+						remote_endpoint: "https://github.com/artisan/editor.git",
+					},
 					Effect.succeed,
 				).pipe(Effect.provide(make_layer(options)), Effect.flip),
 			);
@@ -144,7 +180,12 @@ describe("GitHubGitTransportAuthentication", () => {
 	it("keeps the scoped private home unavailable after authorization returns", async () => {
 		const private_home = await Effect.runPromise(
 			with_authorization(
-				{ account_login: "alice", host: "github.com", provider_id: "github" },
+				{
+					account_login: "alice",
+					host: "github.com",
+					provider_id: "github",
+					remote_endpoint: "https://github.com/artisan/editor.git",
+				},
 				(authorization) => Effect.succeed(authorization.environment.HOME),
 			).pipe(Effect.provide(make_layer())),
 		);

@@ -5,12 +5,14 @@ export interface GitTransportAuthenticationRequest {
 	readonly account_login: string;
 	readonly host: string;
 	readonly provider_id: string;
+	readonly remote_endpoint: string;
 }
 
 /** Carries backend-private environment overrides for one scoped child Git invocation. */
 export interface GitTransportAuthorization {
 	readonly environment: Readonly<Record<string, string | undefined>>;
 	readonly git_executable_path: string;
+	readonly remote_endpoint: string;
 }
 
 /** Reports an authorization setup failure without retaining provider credentials or process output. */

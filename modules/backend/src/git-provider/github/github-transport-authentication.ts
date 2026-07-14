@@ -27,6 +27,27 @@ function valid_account_login(value: string) {
 	return value.trim().length > 0 && bytes.byteLength <= 128 && !/[\p{Cc}\p{Cf}\s]/u.test(value);
 }
 
+function valid_remote_endpoint(value: string, host: string) {
+	const bytes = new TextEncoder().encode(value);
+
+	try {
+		const endpoint = new URL(value);
+
+		return (
+			bytes.byteLength <= 4_096 &&
+			endpoint.protocol === "https:" &&
+			endpoint.host === host &&
+			endpoint.username.length === 0 &&
+			endpoint.password.length === 0 &&
+			endpoint.pathname !== "/" &&
+			endpoint.search.length === 0 &&
+			endpoint.hash.length === 0
+		);
+	} catch {
+		return false;
+	}
+}
+
 function ValidateGitHubAuthenticationRequest(input: GitTransportAuthenticationRequest) {
 	const host = normalize_git_provider_host(input.host);
 
@@ -34,13 +55,19 @@ function ValidateGitHubAuthenticationRequest(input: GitTransportAuthenticationRe
 		return Effect.fail(authentication_error("unsupported_provider"));
 	}
 
-	if (host === undefined || host !== input.host || !valid_account_login(input.account_login)) {
+	if (
+		host === undefined ||
+		host !== input.host ||
+		!valid_account_login(input.account_login) ||
+		!valid_remote_endpoint(input.remote_endpoint, host)
+	) {
 		return Effect.fail(authentication_error("invalid_request"));
 	}
 
 	return Effect.succeed({
 		account_login: input.account_login,
 		host,
+		remote_endpoint: input.remote_endpoint,
 	});
 }
 
@@ -98,6 +125,7 @@ export function make_github_git_transport_authentication_layer(
 							return yield* use({
 								environment,
 								git_executable_path: git_location.value.path,
+								remote_endpoint: request.remote_endpoint,
 							});
 						}),
 					);
