@@ -12,6 +12,7 @@ import {
 	Scope,
 	Schema,
 } from "effect";
+import { isSqlError } from "effect/unstable/sql/SqlError";
 
 import {
 	Identifier,
@@ -27,6 +28,7 @@ import {
 	type WorkspaceGitCheckoutExecution,
 	type WorkspaceGitCheckoutRepositoryError,
 } from "./workspace-git-checkout-repository";
+import { WorkspaceGitExecutionGate } from "./workspace-git-execution-gate";
 import {
 	WorkspaceGitSessionService,
 	type WorkspaceGitSessionServiceError,
@@ -151,6 +153,7 @@ export const WorkspaceGitCheckoutCoordinatorLive = Layer.effect(
 		const registry = yield* WorkspaceGitRegistry;
 		const repository = yield* WorkspaceGitCheckoutRepository;
 		const sessions = yield* WorkspaceGitSessionService;
+		const execution_gate = yield* WorkspaceGitExecutionGate;
 		const dispatch_fence = yield* MakeThreadDispatchFence;
 		const dispatch_state = yield* Ref.make<DispatchState>("idle");
 		const service_scope = yield* Scope.make();
@@ -232,124 +235,166 @@ export const WorkspaceGitCheckoutCoordinatorLive = Layer.effect(
 							() => new WorkspaceGitCheckoutFailure({ reason: "git_failed" }),
 						),
 					);
-				const before = yield* observer.Observe(execution.approval.workspace_id).pipe(
-					Effect.catch(() =>
+
+				return yield* execution_gate
+					.Run(
+						execution.approval.workspace_id,
+						execution.approval.approval_id,
 						Effect.gen(function* () {
-							yield* repository.MarkUnknown(approval_id);
+							const before = yield* observer
+								.Observe(execution.approval.workspace_id)
+								.pipe(
+									Effect.catch(() =>
+										Effect.gen(function* () {
+											yield* repository.MarkUnknown(approval_id);
 
-							return yield* Effect.fail(
-								new WorkspaceGitObservationError({ reason: "git_failed" }),
-							);
-						}),
-					),
-				);
+											return yield* Effect.fail(
+												new WorkspaceGitObservationError({
+													reason: "git_failed",
+												}),
+											);
+										}),
+									),
+								);
 
-				if (!observation_matches_source(before, execution)) {
-					yield* SettleObservedFailure(execution, "preflight", "rejected", before);
+							if (!observation_matches_source(before, execution)) {
+								yield* SettleObservedFailure(
+									execution,
+									"preflight",
+									"rejected",
+									before,
+								);
 
-					return;
-				}
+								return;
+							}
 
-				const target_head = yield* capability.read
-					.ResolveLocalBranch(execution.approval.target_branch)
-					.pipe(
-						Effect.catch(() =>
-							Effect.gen(function* () {
+							const target_head = yield* capability.read
+								.ResolveLocalBranch(execution.approval.target_branch)
+								.pipe(
+									Effect.catch(() =>
+										Effect.gen(function* () {
+											yield* repository.MarkRejected(approval_id);
+
+											return yield* Effect.fail(
+												new WorkspaceGitCheckoutFailure({
+													reason: "git_failed",
+												}),
+											);
+										}),
+									),
+								);
+
+							if (Option.getOrUndefined(target_head) !== execution.target_head) {
 								yield* repository.MarkRejected(approval_id);
 
-								return yield* Effect.fail(
-									new WorkspaceGitCheckoutFailure({ reason: "git_failed" }),
+								return;
+							}
+
+							const prepared = yield* capability.mutation
+								.Prepare({
+									target_branch: execution.approval.target_branch,
+									type: "checkout",
+								})
+								.pipe(Effect.result);
+
+							if (
+								Result.isFailure(prepared) ||
+								prepared.success.type !== "checkout" ||
+								prepared.success.source.branch !==
+									execution.approval.source_branch ||
+								prepared.success.source.head !== execution.approval.source_head ||
+								prepared.success.target_head !== execution.target_head
+							) {
+								yield* SettleObservedFailure(
+									execution,
+									"preflight",
+									"rejected",
+									before,
 								);
-							}),
+
+								return;
+							}
+
+							const plan = prepared.success;
+							const attempted = yield* capability.mutation
+								.Execute(plan)
+								.pipe(Effect.result);
+							const after = yield* observer
+								.Observe(execution.approval.workspace_id)
+								.pipe(
+									Effect.catch(() =>
+										Effect.gen(function* () {
+											yield* repository.MarkUnknown(approval_id);
+
+											return yield* Effect.fail(
+												new WorkspaceGitObservationError({
+													reason: "git_failed",
+												}),
+											);
+										}),
+									),
+								);
+
+							if (Result.isFailure(attempted)) {
+								yield* SettleObservedFailure(
+									execution,
+									"failure",
+									observation_matches_source(after, execution)
+										? "rejected"
+										: "unknown",
+									after,
+								);
+
+								return;
+							}
+
+							const reconciled = yield* capability.mutation
+								.Reconcile(plan, attempted.success)
+								.pipe(Effect.result);
+
+							if (
+								Result.isFailure(reconciled) ||
+								reconciled.success.type !== "applied" ||
+								reconciled.success.branch !== execution.approval.target_branch ||
+								reconciled.success.head !== execution.target_head
+							) {
+								yield* SettleObservedFailure(
+									execution,
+									"failure",
+									!Result.isFailure(reconciled) &&
+										(reconciled.success.type === "rejected" ||
+											reconciled.success.type === "source") &&
+										observation_matches_source(after, execution)
+										? "rejected"
+										: "unknown",
+									after,
+								);
+
+								return;
+							}
+
+							const projected = yield* Project(execution, "post", after).pipe(
+								Effect.result,
+							);
+
+							if (Result.isFailure(projected)) {
+								yield* repository.MarkUnknown(approval_id);
+
+								return yield* Effect.fail(projected.failure);
+							}
+
+							yield* observation_matches_target(after, execution)
+								? repository.MarkApplied(approval_id)
+								: repository.MarkUnknown(approval_id);
+						}),
+					)
+					.pipe(
+						Effect.mapError((error) =>
+							isSqlError(error)
+								? new WorkspaceGitCheckoutFailure({ reason: "git_failed" })
+								: error,
 						),
 					);
-
-				if (Option.getOrUndefined(target_head) !== execution.target_head) {
-					yield* repository.MarkRejected(approval_id);
-
-					return;
-				}
-
-				const prepared = yield* capability.mutation
-					.Prepare({
-						target_branch: execution.approval.target_branch,
-						type: "checkout",
-					})
-					.pipe(Effect.result);
-
-				if (
-					Result.isFailure(prepared) ||
-					prepared.success.type !== "checkout" ||
-					prepared.success.source.branch !== execution.approval.source_branch ||
-					prepared.success.source.head !== execution.approval.source_head ||
-					prepared.success.target_head !== execution.target_head
-				) {
-					yield* SettleObservedFailure(execution, "preflight", "rejected", before);
-
-					return;
-				}
-
-				const plan = prepared.success;
-				const attempted = yield* capability.mutation.Execute(plan).pipe(Effect.result);
-				const after = yield* observer.Observe(execution.approval.workspace_id).pipe(
-					Effect.catch(() =>
-						Effect.gen(function* () {
-							yield* repository.MarkUnknown(approval_id);
-
-							return yield* Effect.fail(
-								new WorkspaceGitObservationError({ reason: "git_failed" }),
-							);
-						}),
-					),
-				);
-
-				if (Result.isFailure(attempted)) {
-					yield* SettleObservedFailure(
-						execution,
-						"failure",
-						observation_matches_source(after, execution) ? "rejected" : "unknown",
-						after,
-					);
-
-					return;
-				}
-
-				const reconciled = yield* capability.mutation
-					.Reconcile(plan, attempted.success)
-					.pipe(Effect.result);
-
-				if (
-					Result.isFailure(reconciled) ||
-					reconciled.success.type !== "applied" ||
-					reconciled.success.branch !== execution.approval.target_branch ||
-					reconciled.success.head !== execution.target_head
-				) {
-					yield* SettleObservedFailure(
-						execution,
-						"failure",
-						!Result.isFailure(reconciled) &&
-							(reconciled.success.type === "rejected" ||
-								reconciled.success.type === "source") &&
-							observation_matches_source(after, execution)
-							? "rejected"
-							: "unknown",
-						after,
-					);
-
-					return;
-				}
-
-				const projected = yield* Project(execution, "post", after).pipe(Effect.result);
-
-				if (Result.isFailure(projected)) {
-					yield* repository.MarkUnknown(approval_id);
-
-					return yield* Effect.fail(projected.failure);
-				}
-
-				yield* observation_matches_target(after, execution)
-					? repository.MarkApplied(approval_id)
-					: repository.MarkUnknown(approval_id);
 			}).pipe(Effect.tapError(() => repository.MarkUnknown(approval_id).pipe(Effect.ignore)));
 		const RecoverExecuting = Effect.gen(function* () {
 			const executing = yield* repository.ListExecuting;

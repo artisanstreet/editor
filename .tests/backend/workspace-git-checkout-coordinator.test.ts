@@ -14,6 +14,7 @@ import {
 	WorkspaceGitCheckoutRepository,
 	WorkspaceGitCheckoutRepositoryLive,
 } from "../../modules/backend/src/git/workspace-git-checkout-repository";
+import { make_workspace_git_execution_gate_layer } from "../../modules/backend/src/git/workspace-git-execution-gate";
 import {
 	WorkspaceGitObserver,
 	type WorkspaceGitObservation,
@@ -258,7 +259,14 @@ function make_runtime(
 		WorkspaceGitSessionRepositoryLive,
 	).pipe(Layer.provideMerge(infrastructure));
 	const { observer, registry } = make_git_layers(state, dirty);
-	const support = Layer.mergeAll(NodeCrypto.layer, make_evidence_layer(), observer, registry);
+	const execution_gate = make_workspace_git_execution_gate_layer({ database_path });
+	const support = Layer.mergeAll(
+		NodeCrypto.layer,
+		execution_gate,
+		make_evidence_layer(),
+		observer,
+		registry,
+	);
 	const session = WorkspaceGitSessionServiceLive.pipe(
 		Layer.provideMerge(repositories),
 		Layer.provideMerge(support),
