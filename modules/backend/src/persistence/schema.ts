@@ -1077,6 +1077,140 @@ export const WorkspaceGitMutationClaims = sqliteTable(
 	],
 );
 
+/** Stores the one user-controlled policy for automatic local Git fetch. */
+export const WorkspaceGitFetchPolicies = sqliteTable(
+	"workspace_git_fetch_policies",
+	{
+		policy_id: integer("policy_id").primaryKey(),
+		enabled: integer("enabled", { mode: "boolean" }).notNull().default(false),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [check("workspace_git_fetch_policies_singleton_check", sql`${table.policy_id} = 1`)],
+);
+
+/** Stores the latest terminal fetch result and, at most, one leased active attempt. */
+export const WorkspaceGitFetchStates = sqliteTable(
+	"workspace_git_fetch_states",
+	{
+		workspace_id: text("workspace_id").primaryKey(),
+		last_attempted_at: text("last_attempted_at"),
+		last_result: text("last_result"),
+		version: integer("version").notNull().default(0),
+		active_attempt_id: text("active_attempt_id"),
+		active_kind: text("active_kind"),
+		active_message_id: text("active_message_id"),
+		started_at: text("started_at"),
+		lease_owner: text("lease_owner"),
+		lease_expires_at: text("lease_expires_at"),
+	},
+	(table) => [
+		check(
+			"workspace_git_fetch_states_result_check",
+			sql`
+				(${table.last_attempted_at} IS NULL) = (${table.last_result} IS NULL)
+				AND (
+					${table.last_result} IS NULL
+					OR ${table.last_result} IN ('succeeded', 'failed', 'unavailable')
+				)
+			`,
+		),
+		check("workspace_git_fetch_states_version_check", sql`${table.version} >= 0`),
+		check(
+			"workspace_git_fetch_states_active_check",
+			sql`
+				(
+					${table.active_attempt_id} IS NULL
+					AND ${table.active_kind} IS NULL
+					AND ${table.active_message_id} IS NULL
+					AND ${table.started_at} IS NULL
+					AND ${table.lease_owner} IS NULL
+					AND ${table.lease_expires_at} IS NULL
+				)
+				OR (
+					${table.active_attempt_id} IS NOT NULL
+					AND ${table.active_kind} = 'automatic'
+					AND ${table.active_message_id} IS NULL
+					AND ${table.started_at} IS NOT NULL
+					AND ${table.lease_owner} IS NOT NULL
+					AND ${table.lease_expires_at} IS NOT NULL
+				)
+				OR (
+					${table.active_attempt_id} IS NOT NULL
+					AND ${table.active_kind} = 'manual'
+					AND ${table.active_message_id} IS NOT NULL
+					AND ${table.started_at} IS NOT NULL
+					AND ${table.lease_owner} IS NOT NULL
+					AND ${table.lease_expires_at} IS NOT NULL
+				)
+			`,
+		),
+	],
+);
+
+/** Stores exact replay state for sparse policy updates and manual fetch requests. */
+export const WorkspaceGitFetchOperations = sqliteTable(
+	"workspace_git_fetch_operations",
+	{
+		message_id: text("message_id").primaryKey(),
+		kind: text("kind").notNull(),
+		request_fingerprint: text("request_fingerprint").notNull(),
+		sent_at: text("sent_at").notNull(),
+		enabled: integer("enabled", { mode: "boolean" }),
+		thread_id: text("thread_id"),
+		workspace_id: text("workspace_id"),
+		attempt_id: text("attempt_id"),
+		status: text("status").notNull(),
+		result: text("result"),
+		attempted_at: text("attempted_at"),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		index("workspace_git_fetch_operations_pending_index").on(
+			table.workspace_id,
+			table.status,
+			table.created_at,
+		),
+		check(
+			"workspace_git_fetch_operations_fingerprint_check",
+			sql`
+				length(${table.request_fingerprint}) = 64
+				AND ${table.request_fingerprint} NOT GLOB '*[^0-9a-f]*'
+			`,
+		),
+		check(
+			"workspace_git_fetch_operations_shape_check",
+			sql`
+				(
+					${table.kind} = 'policy'
+					AND ${table.enabled} IS NOT NULL
+					AND ${table.thread_id} IS NULL
+					AND ${table.workspace_id} IS NULL
+					AND ${table.attempt_id} IS NULL
+					AND ${table.status} = 'terminal'
+					AND ${table.result} IS NULL
+					AND ${table.attempted_at} IS NULL
+				)
+				OR (
+					${table.kind} = 'manual'
+					AND ${table.enabled} IS NULL
+					AND ${table.thread_id} IS NOT NULL
+					AND ${table.workspace_id} IS NOT NULL
+					AND ${table.attempt_id} IS NOT NULL
+					AND (
+						(${table.status} = 'pending' AND ${table.result} IS NULL AND ${table.attempted_at} IS NULL)
+						OR (
+							${table.status} = 'terminal'
+							AND ${table.result} IN ('succeeded', 'failed', 'unavailable')
+							AND ${table.attempted_at} IS NOT NULL
+						)
+					)
+				)
+			`,
+		),
+	],
+);
+
 /** Stores public, source-safe hosted clone approval lifecycles. */
 export const HostedProjectCloneApprovals = sqliteTable(
 	"hosted_project_clone_approvals",
