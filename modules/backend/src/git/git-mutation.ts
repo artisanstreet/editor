@@ -313,7 +313,7 @@ export class GitMutationError extends Data.TaggedError("GitMutationError")<{
 		| "reconcile";
 }> {}
 
-/** Provides guarded local Git planning, execution, and receipt-bound recovery. */
+/** Provides side-effect-free local planning, guarded execution, and receipt-bound recovery. */
 export class GitMutation extends Context.Service<
 	GitMutation,
 	{

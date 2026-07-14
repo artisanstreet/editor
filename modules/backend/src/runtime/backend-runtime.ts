@@ -32,6 +32,9 @@ import { WorkspaceGitSessionRepositoryLive } from "../git/workspace-git-session-
 import { WorkspaceGitSessionServiceLive } from "../git/workspace-git-session-service";
 import { WorkspaceGitCheckoutRepositoryLive } from "../git/workspace-git-checkout-repository";
 import { WorkspaceGitCheckoutCoordinatorLive } from "../git/workspace-git-checkout-coordinator";
+import { make_workspace_git_execution_gate_layer } from "../git/workspace-git-execution-gate";
+import { WorkspaceGitMutationRepositoryLive } from "../git/workspace-git-mutation-repository";
+import { WorkspaceGitMutationCoordinatorLive } from "../git/workspace-git-mutation-coordinator";
 import { make_database_layer } from "../persistence/database";
 import { JournalNotifierLive } from "../persistence/journal-notifier";
 import { JournalStoreLive } from "../persistence/journal-store";
@@ -232,6 +235,19 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(workspace_git_checkouts_repository),
 		Layer.provideMerge(infrastructure),
 	);
+	const workspace_git_mutations_repository = WorkspaceGitMutationRepositoryLive.pipe(
+		Layer.provideMerge(
+			make_workspace_git_execution_gate_layer({ database_path: options.database_path }),
+		),
+		Layer.provideMerge(infrastructure),
+	);
+	const workspace_git_mutations = WorkspaceGitMutationCoordinatorLive.pipe(
+		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(workspace_git_registry),
+		Layer.provideMerge(workspace_git_sessions),
+		Layer.provideMerge(workspace_git_mutations_repository),
+		Layer.provideMerge(infrastructure),
+	);
 	const workspace_authority = WorkspaceMutationAuthorityLive.pipe(
 		Layer.provideMerge(workspace_bounded_filesystems),
 		Layer.provideMerge(workspace_changes),
@@ -347,6 +363,7 @@ export function make_backend_layer(options: BackendOptions) {
 			Layer.provideMerge(terminals),
 			Layer.provideMerge(workspace_approval_coordination),
 			Layer.provideMerge(workspace_git_checkouts),
+			Layer.provideMerge(workspace_git_mutations),
 		);
 	const erasure = ThreadErasureLive.pipe(
 		Layer.provideMerge(resource_quiescer),
@@ -376,6 +393,8 @@ export function make_backend_layer(options: BackendOptions) {
 		workspace_mutation_payloads,
 		workspace_git_checkouts,
 		workspace_git_checkouts_repository,
+		workspace_git_mutations,
+		workspace_git_mutations_repository,
 		workspace_git_observer,
 		workspace_git_registry,
 		workspace_git_sessions,

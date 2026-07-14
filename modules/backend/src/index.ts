@@ -423,6 +423,14 @@ export {
 	type WorkspaceGitCheckoutRequestInput,
 } from "./git/workspace-git-checkout-coordinator";
 export {
+	WorkspaceGitMutationCoordinator,
+	WorkspaceGitMutationCoordinatorFailure,
+	WorkspaceGitMutationCoordinatorLive,
+	type WorkspaceGitMutationCoordinatorError,
+	type WorkspaceGitMutationDecisionInput,
+	type WorkspaceGitMutationRequestInput,
+} from "./git/workspace-git-mutation-coordinator";
+export {
 	make_node_process_runner_layer,
 	NodeProcessRunnerLive,
 	type NodeProcessRunnerOptions,
