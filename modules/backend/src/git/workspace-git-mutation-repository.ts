@@ -1,5 +1,5 @@
 import { and, asc, eq, isNull, notInArray, or } from "drizzle-orm";
-import { Context, Data, Effect, Layer, Option, Schema } from "effect";
+import { Context, Data, DateTime, Effect, Layer, Option, Schema } from "effect";
 
 import {
 	EventEnvelope,
@@ -34,6 +34,7 @@ import {
 	type GitMutationPlan as GitMutationPlanValue,
 	type GitMutationReconciliation as GitMutationReconciliationValue,
 } from "./git-mutation";
+import { WorkspaceGitExecutionGate } from "./workspace-git-execution-gate";
 import { Database } from "../persistence/database";
 import { JournalNotifier } from "../persistence/journal-notifier";
 import { JournalStoreFailure } from "../persistence/journal-store";
@@ -150,7 +151,7 @@ const StoredMutationRequestPayload = Schema.Struct({
 	action_approval_id: Schema.optional(Identifier),
 	expected_session_version: Schema.Int.check(Schema.isGreaterThan(0)),
 	operation: WorkspaceGitMutationSummary,
-	request_fingerprint: RequestFingerprint,
+	request_fingerprint: Schema.optional(RequestFingerprint),
 	type: Schema.Literal("workspace.git.mutation.request"),
 	workspace_id: Identifier,
 });
@@ -179,6 +180,12 @@ export interface WorkspaceGitMutationExecution {
 	readonly operation: WorkspaceGitMutationOperationValue;
 	readonly plan: GitMutationPlanValue;
 	readonly reconciliation?: GitMutationReconciliationValue;
+}
+
+export interface WorkspaceGitMutationDispatch {
+	readonly approval_id: string;
+	readonly recovery: "owned" | "quarantine" | "recoverable" | "waiting";
+	readonly thread_id: string;
 }
 
 export class WorkspaceGitMutationConflict extends Data.TaggedError("WorkspaceGitMutationConflict")<{
@@ -212,15 +219,26 @@ export type WorkspaceGitMutationRepositoryError =
 export class WorkspaceGitMutationRepository extends Context.Service<
 	WorkspaceGitMutationRepository,
 	{
+		readonly AbandonOwnedExecutions: Effect.Effect<void, WorkspaceGitMutationRepositoryError>;
+		readonly ClaimRecovery: (
+			approval_id: string,
+		) => Effect.Effect<
+			Option.Option<WorkspaceGitMutationExecution>,
+			WorkspaceGitMutationRepositoryError
+		>;
 		readonly Decide: (
 			input: WorkspaceGitMutationDecision,
 		) => Effect.Effect<WorkspaceGitMutationAcceptance, WorkspaceGitMutationRepositoryError>;
+		readonly ExecuteClaimed: <A, R>(
+			identity: typeof ClaimIdentity.Type,
+			execution: Effect.Effect<A, never, R>,
+		) => Effect.Effect<A, WorkspaceGitMutationRepositoryError, R>;
 		readonly ListApproved: Effect.Effect<
-			ReadonlyArray<string>,
+			ReadonlyArray<{ readonly approval_id: string; readonly thread_id: string }>,
 			WorkspaceGitMutationRepositoryError
 		>;
 		readonly ListExecuting: Effect.Effect<
-			ReadonlyArray<string>,
+			ReadonlyArray<WorkspaceGitMutationDispatch>,
 			WorkspaceGitMutationRepositoryError
 		>;
 		readonly MarkExecuting: (
@@ -232,6 +250,9 @@ export class WorkspaceGitMutationRepository extends Context.Service<
 			WorkspaceGitMutationApprovalQueryResultValue,
 			WorkspaceGitMutationRepositoryError
 		>;
+		readonly QuarantineInterrupted: (
+			approval_id: string,
+		) => Effect.Effect<WorkspaceGitMutationAcceptance, WorkspaceGitMutationRepositoryError>;
 		readonly ReadActionAnchor: (
 			input: typeof ActionAnchorQuery.Type,
 		) => Effect.Effect<GitMutationActionAnchorValue, WorkspaceGitMutationRepositoryError>;
@@ -264,6 +285,9 @@ export class WorkspaceGitMutationRepository extends Context.Service<
 		readonly Request: (
 			input: RequestWorkspaceGitMutation,
 		) => Effect.Effect<WorkspaceGitMutationAcceptance, WorkspaceGitMutationRepositoryError>;
+		readonly RenewLease: (
+			identity: typeof ClaimIdentity.Type,
+		) => Effect.Effect<void, WorkspaceGitMutationRepositoryError>;
 		readonly Settle: (
 			input: WorkspaceGitMutationSettlement,
 		) => Effect.Effect<WorkspaceGitMutationAcceptance, WorkspaceGitMutationRepositoryError>;
@@ -272,7 +296,10 @@ export class WorkspaceGitMutationRepository extends Context.Service<
 
 type ApprovalRow = typeof WorkspaceGitMutationApprovals.$inferSelect;
 type ArtifactRow = typeof WorkspaceGitMutationArtifacts.$inferSelect;
+type ClaimRow = typeof WorkspaceGitMutationClaims.$inferSelect;
 type CommandRow = typeof JournalCommands.$inferSelect;
+
+const execution_lease_seconds = 30;
 
 interface DecodedArtifact {
 	readonly attempt?: GitMutationAttemptValue;
@@ -290,6 +317,38 @@ interface StoredRequestBinding {
 
 function invariant(message: string) {
 	return new WorkspaceGitMutationInvariant({ message });
+}
+
+function DecodeDateTime(value: unknown, label: string) {
+	return Schema.decodeUnknownEffect(IsoDateTime)(value).pipe(
+		Effect.mapError(() => invariant(`${label} is not a valid timestamp`)),
+		Effect.flatMap((decoded) =>
+			Option.match(DateTime.make(decoded), {
+				onNone: () => Effect.fail(invariant(`${label} is not a valid timestamp`)),
+				onSome: Effect.succeed,
+			}),
+		),
+	);
+}
+
+function LeaseExpiry(now: string) {
+	return DecodeDateTime(now, "Git mutation lease clock").pipe(
+		Effect.map((date_time) =>
+			DateTime.formatIso(DateTime.add(date_time, { seconds: execution_lease_seconds })),
+		),
+	);
+}
+
+function LeaseExpired(expires_at: string, now: string) {
+	return Effect.all([
+		DecodeDateTime(expires_at, "Git mutation lease expiry"),
+		DecodeDateTime(now, "Git mutation lease clock"),
+	]).pipe(
+		Effect.map(
+			([expiry, current]) =>
+				DateTime.toEpochMillis(expiry) <= DateTime.toEpochMillis(current),
+		),
+	);
 }
 
 function normalize_error(error: unknown): WorkspaceGitMutationRepositoryError {
@@ -312,6 +371,18 @@ function approval_event_key(
 }
 
 function request_payload(input: ReplayWorkspaceGitMutationRequest) {
+	return JSON.stringify({
+		...(input.action_approval_id === undefined
+			? {}
+			: { action_approval_id: input.action_approval_id }),
+		expected_session_version: input.expected_session_version,
+		operation: summarize_workspace_git_mutation(input.operation),
+		type: "workspace.git.mutation.request",
+		workspace_id: input.workspace_id,
+	});
+}
+
+function legacy_request_payload(input: ReplayWorkspaceGitMutationRequest) {
 	return JSON.stringify({
 		...(input.action_approval_id === undefined
 			? {}
@@ -434,13 +505,20 @@ function request_matches_stored_binding(
 		row.expected_session_version === input.expected_session_version &&
 		row.action_approval_id === (input.action_approval_id ?? null) &&
 		json_equals(binding.artifact.operation, input.operation) &&
-		command_matches(
+		(command_matches(
 			binding.command_row,
 			input.source_command,
 			input.thread_id,
 			"workspace.git.mutation.request",
 			request_payload(input),
-		)
+		) ||
+			command_matches(
+				binding.command_row,
+				input.source_command,
+				input.thread_id,
+				"workspace.git.mutation.request",
+				legacy_request_payload(input),
+			))
 	);
 }
 
@@ -448,6 +526,7 @@ export const WorkspaceGitMutationRepositoryLive = Layer.effect(
 	WorkspaceGitMutationRepository,
 	Effect.gen(function* () {
 		const database = yield* Database;
+		const execution_gate = yield* WorkspaceGitExecutionGate;
 		const metadata = yield* RuntimeMetadata;
 		const notifier = yield* JournalNotifier;
 
@@ -1179,7 +1258,8 @@ export const WorkspaceGitMutationRepositoryLive = Layer.effect(
 				if (
 					command_row.thread_id !== row.thread_id ||
 					stored.command.sent_at !== row.created_at ||
-					stored.payload.request_fingerprint !== row.request_fingerprint ||
+					(stored.payload.request_fingerprint !== undefined &&
+						stored.payload.request_fingerprint !== row.request_fingerprint) ||
 					stored.payload.workspace_id !== row.workspace_id ||
 					stored.payload.expected_session_version !== row.expected_session_version ||
 					stored.payload.action_approval_id !== (row.action_approval_id ?? undefined) ||
@@ -1738,6 +1818,7 @@ export const WorkspaceGitMutationRepositoryLive = Layer.effect(
 			transaction: typeof database.client,
 			row: ApprovalRow,
 			claim_token?: string,
+			owner_instance_id?: string,
 		) =>
 			Effect.gen(function* () {
 				const [claim] = yield* transaction
@@ -1746,13 +1827,44 @@ export const WorkspaceGitMutationRepositoryLive = Layer.effect(
 					.where(eq(WorkspaceGitMutationClaims.approval_id, row.approval_id))
 					.limit(1);
 
-				if (!claim || (claim_token !== undefined && claim.claim_token !== claim_token)) {
+				if (
+					!claim ||
+					(claim_token !== undefined && claim.claim_token !== claim_token) ||
+					(owner_instance_id !== undefined &&
+						claim.owner_instance_id !== owner_instance_id)
+				) {
 					return yield* new WorkspaceGitMutationConflict({ reason: "lease_conflict" });
+				}
+
+				yield* Schema.decodeUnknownEffect(Identifier)(claim.owner_instance_id).pipe(
+					Effect.mapError(() =>
+						invariant(`Git mutation ${row.approval_id} has an invalid lease owner`),
+					),
+				);
+				yield* DecodeDateTime(
+					claim.lease_expires_at,
+					`Git mutation ${row.approval_id} lease expiry`,
+				);
+
+				if (claim.execution_started_at !== null) {
+					yield* DecodeDateTime(
+						claim.execution_started_at,
+						`Git mutation ${row.approval_id} execution start`,
+					);
+				}
+
+				if (claim.execution_completed_at !== null) {
+					yield* DecodeDateTime(
+						claim.execution_completed_at,
+						`Git mutation ${row.approval_id} execution completion`,
+					);
 				}
 
 				if (
 					row.state !== "executing" ||
 					row.execution_started_at === null ||
+					(claim.execution_completed_at !== null &&
+						claim.execution_started_at === null) ||
 					claim.workspace_id !== row.workspace_id ||
 					claim.thread_id !== row.thread_id ||
 					claim.claimed_at !== row.execution_started_at
@@ -1761,6 +1873,25 @@ export const WorkspaceGitMutationRepositoryLive = Layer.effect(
 				}
 
 				return claim;
+			});
+		const BuildExecution = (
+			transaction: typeof database.client,
+			row: ApprovalRow,
+			claim: ClaimRow,
+		) =>
+			Effect.gen(function* () {
+				const artifact = yield* ReadArtifact(transaction, row.approval_id);
+
+				return {
+					approval: yield* DecodeApproval(row),
+					...(artifact.attempt === undefined ? {} : { attempt: artifact.attempt }),
+					claim_token: claim.claim_token,
+					operation: artifact.operation,
+					plan: artifact.plan,
+					...(artifact.reconciliation === undefined
+						? {}
+						: { reconciliation: artifact.reconciliation }),
+				};
 			});
 
 		const MarkExecuting = (approval_id: string) =>
@@ -1881,6 +2012,7 @@ export const WorkspaceGitMutationRepositoryLive = Layer.effect(
 									}
 
 									const started_at = yield* metadata.Now;
+									const lease_expires_at = yield* LeaseExpiry(started_at);
 									const claim_token = yield* metadata.MakeId("claim");
 									const [claim] = yield* transaction
 										.insert(WorkspaceGitMutationClaims)
@@ -1888,6 +2020,8 @@ export const WorkspaceGitMutationRepositoryLive = Layer.effect(
 											approval_id: row.approval_id,
 											claimed_at: started_at,
 											claim_token,
+											lease_expires_at,
+											owner_instance_id: metadata.instance_id,
 											thread_id: row.thread_id,
 											workspace_id: row.workspace_id,
 										})
@@ -1962,26 +2096,481 @@ export const WorkspaceGitMutationRepositoryLive = Layer.effect(
 								});
 							}
 
-							const claim = yield* ReadClaim(transaction, row);
-							const artifact = yield* ReadArtifact(transaction, row.approval_id);
+							const claim = yield* ReadClaim(
+								transaction,
+								row,
+								undefined,
+								metadata.instance_id,
+							);
 
-							return {
-								approval: yield* DecodeApproval(row),
-								...(artifact.attempt === undefined
-									? {}
-									: { attempt: artifact.attempt }),
-								claim_token: claim.claim_token,
-								operation: artifact.operation,
-								plan: artifact.plan,
-								...(artifact.reconciliation === undefined
-									? {}
-									: { reconciliation: artifact.reconciliation }),
-							};
+							return yield* BuildExecution(transaction, row, claim);
 						}),
 					),
 				),
 				Effect.mapError(normalize_error),
 			);
+		const RenewLease = (identity: typeof ClaimIdentity.Type) =>
+			Schema.decodeUnknownEffect(ClaimIdentity, { onExcessProperty: "error" })(identity).pipe(
+				Effect.mapError(
+					() => new WorkspaceGitMutationConflict({ reason: "lease_conflict" }),
+				),
+				Effect.flatMap((decoded) =>
+					Effect.gen(function* () {
+						const now = yield* metadata.Now;
+						const lease_expires_at = yield* LeaseExpiry(now);
+
+						yield* RetrySqliteWrite(
+							database.client.transaction((transaction) =>
+								Effect.gen(function* () {
+									const row = yield* ReadRow(transaction, decoded.approval_id);
+
+									yield* EnsureLiveThread(transaction, row.thread_id);
+
+									const claim = yield* ReadClaim(
+										transaction,
+										row,
+										decoded.claim_token,
+										metadata.instance_id,
+									);
+									const [renewed] = yield* transaction
+										.update(WorkspaceGitMutationClaims)
+										.set({ lease_expires_at })
+										.where(
+											and(
+												eq(
+													WorkspaceGitMutationClaims.approval_id,
+													decoded.approval_id,
+												),
+												eq(
+													WorkspaceGitMutationClaims.claim_token,
+													decoded.claim_token,
+												),
+												eq(
+													WorkspaceGitMutationClaims.owner_instance_id,
+													metadata.instance_id,
+												),
+												eq(
+													WorkspaceGitMutationClaims.lease_expires_at,
+													claim.lease_expires_at,
+												),
+											),
+										)
+										.returning({
+											claim_token: WorkspaceGitMutationClaims.claim_token,
+										});
+
+									if (!renewed) {
+										return yield* new WorkspaceGitMutationConflict({
+											reason: "lease_conflict",
+										});
+									}
+								}),
+							),
+						);
+					}),
+				),
+				Effect.mapError(normalize_error),
+			);
+		const MarkExecutionStarted = (identity: typeof ClaimIdentity.Type) =>
+			RetrySqliteWrite(
+				database.client.transaction((transaction) =>
+					Effect.gen(function* () {
+						const row = yield* ReadRow(transaction, identity.approval_id);
+
+						yield* EnsureLiveThread(transaction, row.thread_id);
+
+						const claim = yield* ReadClaim(
+							transaction,
+							row,
+							identity.claim_token,
+							metadata.instance_id,
+						);
+
+						if (
+							claim.execution_started_at !== null ||
+							claim.execution_completed_at !== null
+						) {
+							return yield* new WorkspaceGitMutationConflict({
+								reason: "lease_conflict",
+							});
+						}
+
+						const execution_started_at = yield* metadata.Now;
+						const [updated] = yield* transaction
+							.update(WorkspaceGitMutationClaims)
+							.set({ execution_started_at })
+							.where(
+								and(
+									eq(
+										WorkspaceGitMutationClaims.approval_id,
+										identity.approval_id,
+									),
+									eq(
+										WorkspaceGitMutationClaims.claim_token,
+										identity.claim_token,
+									),
+									eq(
+										WorkspaceGitMutationClaims.owner_instance_id,
+										metadata.instance_id,
+									),
+									isNull(WorkspaceGitMutationClaims.execution_started_at),
+									isNull(WorkspaceGitMutationClaims.execution_completed_at),
+								),
+							)
+							.returning({
+								approval_id: WorkspaceGitMutationClaims.approval_id,
+							});
+
+						if (!updated) {
+							return yield* new WorkspaceGitMutationConflict({
+								reason: "lease_conflict",
+							});
+						}
+					}),
+				),
+			).pipe(Effect.mapError(normalize_error));
+		const MarkExecutionCompleted = (identity: typeof ClaimIdentity.Type) =>
+			RetrySqliteWrite(
+				database.client.transaction((transaction) =>
+					Effect.gen(function* () {
+						const row = yield* ReadRow(transaction, identity.approval_id);
+
+						yield* EnsureLiveThread(transaction, row.thread_id);
+
+						const claim = yield* ReadClaim(
+							transaction,
+							row,
+							identity.claim_token,
+							metadata.instance_id,
+						);
+
+						if (
+							claim.execution_started_at === null ||
+							claim.execution_completed_at !== null
+						) {
+							return yield* new WorkspaceGitMutationConflict({
+								reason: "lease_conflict",
+							});
+						}
+
+						const execution_completed_at = yield* metadata.Now;
+						const [updated] = yield* transaction
+							.update(WorkspaceGitMutationClaims)
+							.set({ execution_completed_at })
+							.where(
+								and(
+									eq(
+										WorkspaceGitMutationClaims.approval_id,
+										identity.approval_id,
+									),
+									eq(
+										WorkspaceGitMutationClaims.claim_token,
+										identity.claim_token,
+									),
+									eq(
+										WorkspaceGitMutationClaims.owner_instance_id,
+										metadata.instance_id,
+									),
+									eq(
+										WorkspaceGitMutationClaims.execution_started_at,
+										claim.execution_started_at,
+									),
+									isNull(WorkspaceGitMutationClaims.execution_completed_at),
+								),
+							)
+							.returning({
+								approval_id: WorkspaceGitMutationClaims.approval_id,
+							});
+
+						if (!updated) {
+							return yield* new WorkspaceGitMutationConflict({
+								reason: "lease_conflict",
+							});
+						}
+					}),
+				),
+			).pipe(Effect.mapError(normalize_error));
+		const ExecuteClaimed = <A, R>(
+			identity: typeof ClaimIdentity.Type,
+			execution: Effect.Effect<A, never, R>,
+		) =>
+			Schema.decodeUnknownEffect(ClaimIdentity, { onExcessProperty: "error" })(identity).pipe(
+				Effect.mapError(
+					() => new WorkspaceGitMutationConflict({ reason: "lease_conflict" }),
+				),
+				Effect.flatMap((decoded) =>
+					execution_gate.Run(
+						decoded.approval_id,
+						decoded.claim_token,
+						Effect.gen(function* () {
+							yield* RenewLease(decoded);
+							yield* MarkExecutionStarted(decoded);
+
+							const result = yield* execution.pipe(
+								Effect.onExit(() => MarkExecutionCompleted(decoded)),
+							);
+
+							yield* RenewLease(decoded);
+
+							return result;
+						}),
+					),
+				),
+				Effect.mapError(normalize_error),
+			);
+		const ClaimRecovery = (approval_id: string) =>
+			Schema.decodeUnknownEffect(Identifier)(approval_id).pipe(
+				Effect.mapError(() => new WorkspaceGitMutationUnavailable({ reason: "missing" })),
+				Effect.flatMap((decoded) =>
+					Effect.gen(function* () {
+						const now = yield* metadata.Now;
+						const lease_expires_at = yield* LeaseExpiry(now);
+
+						return yield* execution_gate.Run(
+							decoded,
+							metadata.instance_id,
+							RetrySqliteWrite(
+								database.client.transaction((transaction) =>
+									Effect.gen(function* () {
+										const [row] = yield* transaction
+											.select()
+											.from(WorkspaceGitMutationApprovals)
+											.where(
+												eq(
+													WorkspaceGitMutationApprovals.approval_id,
+													decoded,
+												),
+											)
+											.limit(1);
+
+										if (!row || row.state !== "executing") {
+											return Option.none<WorkspaceGitMutationExecution>();
+										}
+
+										yield* EnsureLiveThread(transaction, row.thread_id);
+
+										const claim = yield* ReadClaim(transaction, row);
+										const expired = yield* LeaseExpired(
+											claim.lease_expires_at,
+											now,
+										);
+
+										if (!expired) {
+											return Option.none<WorkspaceGitMutationExecution>();
+										}
+
+										if (
+											claim.execution_started_at !== null &&
+											claim.execution_completed_at === null
+										) {
+											return Option.none<WorkspaceGitMutationExecution>();
+										}
+
+										const claim_token = yield* metadata.MakeId("claim");
+										const [recovered] = yield* transaction
+											.update(WorkspaceGitMutationClaims)
+											.set({
+												claim_token,
+												lease_expires_at,
+												owner_instance_id: metadata.instance_id,
+											})
+											.where(
+												and(
+													eq(
+														WorkspaceGitMutationClaims.approval_id,
+														decoded,
+													),
+													eq(
+														WorkspaceGitMutationClaims.claim_token,
+														claim.claim_token,
+													),
+													eq(
+														WorkspaceGitMutationClaims.owner_instance_id,
+														claim.owner_instance_id,
+													),
+													eq(
+														WorkspaceGitMutationClaims.lease_expires_at,
+														claim.lease_expires_at,
+													),
+												),
+											)
+											.returning();
+
+										if (!recovered) {
+											return Option.none<WorkspaceGitMutationExecution>();
+										}
+
+										return Option.some(
+											yield* BuildExecution(transaction, row, recovered),
+										);
+									}),
+								),
+							),
+						);
+					}),
+				),
+				Effect.mapError(normalize_error),
+			);
+		const QuarantineInterrupted = (approval_id: string) =>
+			Schema.decodeUnknownEffect(Identifier)(approval_id).pipe(
+				Effect.mapError(() => new WorkspaceGitMutationUnavailable({ reason: "missing" })),
+				Effect.flatMap((decoded) =>
+					Effect.gen(function* () {
+						const result = yield* execution_gate.Run(
+							decoded,
+							metadata.instance_id,
+							RetrySqliteWrite(
+								database.client.transaction((transaction) =>
+									Effect.gen(function* () {
+										const row = yield* ReadRow(transaction, decoded);
+
+										yield* EnsureLiveThread(transaction, row.thread_id);
+
+										if (
+											row.state === "outcome_unknown" &&
+											row.unknown_reason === "interrupted"
+										) {
+											const acceptance = yield* ReadAcceptance(
+												transaction,
+												row,
+												"outcome_unknown",
+											);
+
+											return { ...acceptance, status: "duplicate" as const };
+										}
+
+										if (row.state !== "executing") {
+											return yield* new WorkspaceGitMutationConflict({
+												reason: "invalid_transition",
+											});
+										}
+
+										const claim = yield* ReadClaim(transaction, row);
+										const now = yield* metadata.Now;
+										const expired = yield* LeaseExpired(
+											claim.lease_expires_at,
+											now,
+										);
+
+										if (
+											!expired ||
+											claim.execution_started_at === null ||
+											claim.execution_completed_at !== null
+										) {
+											return yield* new WorkspaceGitMutationConflict({
+												reason: "lease_conflict",
+											});
+										}
+
+										const artifact_row = yield* ReadArtifactRow(
+											transaction,
+											row.approval_id,
+										);
+										const artifact = yield* DecodeArtifact(artifact_row);
+
+										if (
+											artifact.reconciliation !== undefined &&
+											artifact.reconciliation.type !== "outcome_unknown"
+										) {
+											return yield* new WorkspaceGitMutationConflict({
+												reason: "artifact_conflict",
+											});
+										}
+
+										if (artifact.reconciliation === undefined) {
+											const [updated_artifact] = yield* transaction
+												.update(WorkspaceGitMutationArtifacts)
+												.set({
+													reconciled_at: now,
+													reconciliation_json: JSON.stringify({
+														type: "outcome_unknown",
+													}),
+													updated_at: now,
+												})
+												.where(
+													and(
+														eq(
+															WorkspaceGitMutationArtifacts.approval_id,
+															row.approval_id,
+														),
+														isNull(
+															WorkspaceGitMutationArtifacts.reconciliation_json,
+														),
+													),
+												)
+												.returning({
+													approval_id:
+														WorkspaceGitMutationArtifacts.approval_id,
+												});
+
+											if (!updated_artifact) {
+												return yield* new WorkspaceGitMutationConflict({
+													reason: "artifact_conflict",
+												});
+											}
+										}
+
+										const [updated] = yield* transaction
+											.update(WorkspaceGitMutationApprovals)
+											.set({
+												state: "outcome_unknown",
+												unknown_reason: "interrupted",
+												updated_at: now,
+											})
+											.where(
+												and(
+													eq(
+														WorkspaceGitMutationApprovals.approval_id,
+														row.approval_id,
+													),
+													eq(
+														WorkspaceGitMutationApprovals.state,
+														"executing",
+													),
+												),
+											)
+											.returning();
+
+										if (!updated || updated.decision_message_id === null) {
+											return yield* invariant(
+												"Git mutation quarantine transition did not persist",
+											);
+										}
+
+										const approval = yield* DecodeApproval(updated);
+										const event = yield* AppendEvent(
+											transaction,
+											approval,
+											updated.decision_message_id,
+											updated.approval_id,
+										);
+
+										return { approval, event, status: "accepted" as const };
+									}),
+								),
+							),
+						);
+
+						if (result.status === "accepted") {
+							yield* notifier.Publish(result.event.journal_sequence);
+						}
+
+						return result;
+					}),
+				),
+				Effect.mapError(normalize_error),
+			);
+		const AbandonOwnedExecutions = Effect.gen(function* () {
+			const now = yield* metadata.Now;
+
+			yield* DecodeDateTime(now, "Git mutation lease clock");
+			yield* RetrySqliteWrite(
+				database.client
+					.update(WorkspaceGitMutationClaims)
+					.set({ lease_expires_at: now })
+					.where(eq(WorkspaceGitMutationClaims.owner_instance_id, metadata.instance_id)),
+			);
+		}).pipe(Effect.mapError(normalize_error));
 
 		const RecordAttempt = (identity: typeof ClaimIdentity.Type, attempt: unknown) =>
 			Effect.gen(function* () {
@@ -2006,7 +2595,12 @@ export const WorkspaceGitMutationRepositoryLive = Layer.effect(
 							const row = yield* ReadRow(transaction, decoded_identity.approval_id);
 
 							yield* EnsureLiveThread(transaction, row.thread_id);
-							yield* ReadClaim(transaction, row, decoded_identity.claim_token);
+							yield* ReadClaim(
+								transaction,
+								row,
+								decoded_identity.claim_token,
+								metadata.instance_id,
+							);
 
 							const artifact_row = yield* ReadArtifactRow(
 								transaction,
@@ -2094,7 +2688,12 @@ export const WorkspaceGitMutationRepositoryLive = Layer.effect(
 							const row = yield* ReadRow(transaction, decoded_identity.approval_id);
 
 							yield* EnsureLiveThread(transaction, row.thread_id);
-							yield* ReadClaim(transaction, row, decoded_identity.claim_token);
+							yield* ReadClaim(
+								transaction,
+								row,
+								decoded_identity.claim_token,
+								metadata.instance_id,
+							);
 
 							const artifact_row = yield* ReadArtifactRow(
 								transaction,
@@ -2274,7 +2873,12 @@ export const WorkspaceGitMutationRepositoryLive = Layer.effect(
 										});
 									}
 
-									yield* ReadClaim(transaction, row, decoded.claim_token);
+									yield* ReadClaim(
+										transaction,
+										row,
+										decoded.claim_token,
+										metadata.instance_id,
+									);
 
 									const artifact = yield* ReadArtifact(
 										transaction,
@@ -2570,45 +3174,93 @@ export const WorkspaceGitMutationRepositoryLive = Layer.effect(
 				),
 				Effect.flatMap((decoded) =>
 					database.client.transaction((transaction) =>
-						ReadActionAnchorInternal(transaction, decoded),
+						EnsureActionParentAvailable(transaction, decoded),
 					),
 				),
 				Effect.mapError(normalize_error),
 			);
 
-		const ListState = (state: "approved" | "executing") =>
-			database.client
-				.transaction((transaction) =>
-					Effect.gen(function* () {
-						const rows = yield* transaction
-							.select({
-								approval_id: WorkspaceGitMutationApprovals.approval_id,
-								thread_id: WorkspaceGitMutationApprovals.thread_id,
-							})
-							.from(WorkspaceGitMutationApprovals)
-							.where(eq(WorkspaceGitMutationApprovals.state, state))
-							.orderBy(
-								asc(WorkspaceGitMutationApprovals.created_at),
-								asc(WorkspaceGitMutationApprovals.approval_id),
-							);
-
-						yield* Effect.forEach(
-							rows,
-							(row) => EnsureLiveThread(transaction, row.thread_id),
-							{ discard: true },
+		const ListApproved = database.client
+			.transaction((transaction) =>
+				Effect.gen(function* () {
+					const rows = yield* transaction
+						.select({
+							approval_id: WorkspaceGitMutationApprovals.approval_id,
+							thread_id: WorkspaceGitMutationApprovals.thread_id,
+						})
+						.from(WorkspaceGitMutationApprovals)
+						.where(eq(WorkspaceGitMutationApprovals.state, "approved"))
+						.orderBy(
+							asc(WorkspaceGitMutationApprovals.created_at),
+							asc(WorkspaceGitMutationApprovals.approval_id),
 						);
 
-						return rows.map((row) => row.approval_id);
-					}),
-				)
-				.pipe(Effect.mapError(normalize_error));
+					yield* Effect.forEach(
+						rows,
+						(row) => EnsureLiveThread(transaction, row.thread_id),
+						{ discard: true },
+					);
+
+					return rows;
+				}),
+			)
+			.pipe(Effect.mapError(normalize_error));
+		const ListExecuting = Effect.gen(function* () {
+			const now = yield* metadata.Now;
+
+			return yield* database.client.transaction((transaction) =>
+				Effect.gen(function* () {
+					const rows = yield* transaction
+						.select()
+						.from(WorkspaceGitMutationApprovals)
+						.where(eq(WorkspaceGitMutationApprovals.state, "executing"))
+						.orderBy(
+							asc(WorkspaceGitMutationApprovals.created_at),
+							asc(WorkspaceGitMutationApprovals.approval_id),
+						);
+
+					return yield* Effect.forEach(rows, (row) =>
+						Effect.gen(function* () {
+							yield* EnsureLiveThread(transaction, row.thread_id);
+
+							const claim = yield* ReadClaim(transaction, row);
+							const expired = yield* LeaseExpired(claim.lease_expires_at, now);
+							const execution_safe =
+								claim.execution_started_at === null ||
+								claim.execution_completed_at !== null;
+							const owned = claim.owner_instance_id === metadata.instance_id;
+							const recovery: WorkspaceGitMutationDispatch["recovery"] =
+								execution_safe
+									? owned
+										? "owned"
+										: expired
+											? "recoverable"
+											: "waiting"
+									: expired
+										? "quarantine"
+										: "waiting";
+
+							return {
+								approval_id: row.approval_id,
+								recovery,
+								thread_id: row.thread_id,
+							};
+						}),
+					);
+				}),
+			);
+		}).pipe(Effect.mapError(normalize_error));
 
 		return {
+			AbandonOwnedExecutions,
+			ClaimRecovery,
 			Decide,
-			ListApproved: ListState("approved"),
-			ListExecuting: ListState("executing"),
+			ExecuteClaimed,
+			ListApproved,
+			ListExecuting,
 			MarkExecuting,
 			Query,
+			QuarantineInterrupted,
 			ReadActionAnchor,
 			ReadBySourceCommand,
 			ReadExecution,
@@ -2617,6 +3269,7 @@ export const WorkspaceGitMutationRepositoryLive = Layer.effect(
 			RecordReconciliation,
 			RejectApproved,
 			Request,
+			RenewLease,
 			Settle,
 		};
 	}),

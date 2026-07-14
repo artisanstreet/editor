@@ -17,6 +17,7 @@ import {
 } from "../../modules/backend/src/persistence/schema";
 import { JournalNotifierLive } from "../../modules/backend/src/persistence/journal-notifier";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+import { make_workspace_git_execution_gate_layer } from "../../modules/backend/src/git/workspace-git-execution-gate";
 import {
 	WorkspaceGitCheckoutRepository,
 	WorkspaceGitCheckoutRepositoryLive,
@@ -64,18 +65,19 @@ async function make_database_path() {
 	return Effect.runPromise(MakeDatabasePath);
 }
 
-function make_metadata_layer() {
+function make_metadata_layer(instance_id: string) {
 	return Layer.succeed(RuntimeMetadata, {
-		instance_id: "workspace_git_mutation_test",
+		instance_id,
 		MakeId: (prefix) => Effect.sync(() => `${prefix}_git_mutation_${++next_id}`),
 		Now: Effect.sync(() => new Date(next_time++).toISOString()),
 	});
 }
 
-function make_runtime(database_path: string) {
+function make_runtime(database_path: string, instance_id = "workspace_git_mutation_test") {
 	const infrastructure = Layer.mergeAll(
 		make_database_layer({ database_path, migrations_path }),
-		make_metadata_layer(),
+		make_workspace_git_execution_gate_layer({ database_path }),
+		make_metadata_layer(instance_id),
 		JournalNotifierLive,
 	);
 	const repositories = Layer.mergeAll(
@@ -494,6 +496,116 @@ describe("WorkspaceGitMutationRepository", () => {
 			expect(result.artifacts[0]?.reconciliation_json).toContain('"type":"applied"');
 		} finally {
 			await restarted.dispose();
+		}
+	});
+
+	it("renews a live owner and atomically fences an expired lease takeover", async () => {
+		const database_path = await make_database_path();
+		const owner_runtime = make_runtime(database_path, "git_mutation_owner_a");
+		const recovery_runtime = make_runtime(database_path, "git_mutation_owner_b");
+		let owner_claim_token = "";
+
+		try {
+			const initial = await owner_runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* WorkspaceGitMutationRepository;
+					const sessions = yield* WorkspaceGitSessionRepository;
+
+					yield* SeedThreads;
+					yield* sessions.Project(session_observation("session_lease_owner"));
+					yield* repository.Request(mutation_request());
+					yield* repository.Decide(mutation_decision());
+					yield* repository.MarkExecuting("mutation_approval_1");
+
+					const execution = yield* repository.ReadExecution("mutation_approval_1");
+
+					return {
+						claims: yield* database.client.select().from(WorkspaceGitMutationClaims),
+						dispatches: yield* repository.ListExecuting,
+						execution,
+					};
+				}),
+			);
+
+			owner_claim_token = initial.execution.claim_token;
+
+			expect(initial.dispatches).toMatchObject([
+				{ approval_id: "mutation_approval_1", recovery: "owned", thread_id: "thread_1" },
+			]);
+			expect(initial.claims).toMatchObject([
+				{
+					claim_token: owner_claim_token,
+					owner_instance_id: "git_mutation_owner_a",
+				},
+			]);
+
+			const fresh = await recovery_runtime.runPromise(
+				Effect.gen(function* () {
+					const repository = yield* WorkspaceGitMutationRepository;
+
+					return {
+						claim: yield* repository.ClaimRecovery("mutation_approval_1"),
+						read: yield* repository
+							.ReadExecution("mutation_approval_1")
+							.pipe(Effect.exit),
+					};
+				}),
+			);
+
+			expect(Option.isNone(fresh.claim)).toBe(true);
+			expect_conflict(fresh.read, "lease_conflict");
+
+			await owner_runtime.runPromise(
+				Effect.flatMap(Database, (database) =>
+					database.client
+						.update(WorkspaceGitMutationClaims)
+						.set({ lease_expires_at: "1970-01-01T00:00:00.000Z" }),
+				),
+			);
+
+			const recovered = await recovery_runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* WorkspaceGitMutationRepository;
+					const dispatches = yield* repository.ListExecuting;
+					const claimed = yield* repository.ClaimRecovery("mutation_approval_1");
+					const execution = Option.getOrThrow(claimed);
+					const before = (yield* database.client
+						.select()
+						.from(WorkspaceGitMutationClaims))[0]!;
+
+					yield* repository.RenewLease({
+						approval_id: "mutation_approval_1",
+						claim_token: execution.claim_token,
+					});
+
+					const after = (yield* database.client
+						.select()
+						.from(WorkspaceGitMutationClaims))[0]!;
+
+					return { after, before, dispatches, execution };
+				}),
+			);
+			const stale_owner = await owner_runtime.runPromiseExit(
+				Effect.flatMap(WorkspaceGitMutationRepository, (repository) =>
+					repository.RecordAttempt(
+						{
+							approval_id: "mutation_approval_1",
+							claim_token: owner_claim_token,
+						},
+						attempt(),
+					),
+				),
+			);
+
+			expect(recovered.dispatches[0]?.recovery).toBe("recoverable");
+			expect(recovered.execution.claim_token).not.toBe(owner_claim_token);
+			expect(recovered.after.owner_instance_id).toBe("git_mutation_owner_b");
+			expect(recovered.after.lease_expires_at).not.toBe(recovered.before.lease_expires_at);
+			expect_conflict(stale_owner, "lease_conflict");
+		} finally {
+			await Promise.all([owner_runtime.dispose(), recovery_runtime.dispose()]);
 		}
 	});
 

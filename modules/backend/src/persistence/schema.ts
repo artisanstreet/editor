@@ -1064,11 +1064,16 @@ export const WorkspaceGitMutationClaims = sqliteTable(
 		thread_id: text("thread_id").notNull(),
 		claim_token: text("claim_token").notNull(),
 		claimed_at: text("claimed_at").notNull(),
+		owner_instance_id: text("owner_instance_id").notNull().default("legacy_expired"),
+		lease_expires_at: text("lease_expires_at").notNull().default("1970-01-01T00:00:00.000Z"),
+		execution_started_at: text("execution_started_at"),
+		execution_completed_at: text("execution_completed_at"),
 	},
 	(table) => [
 		uniqueIndex("workspace_git_mutation_claims_approval_unique").on(table.approval_id),
 		uniqueIndex("workspace_git_mutation_claims_claim_token_unique").on(table.claim_token),
 		index("workspace_git_mutation_claims_thread_index").on(table.thread_id),
+		index("workspace_git_mutation_claims_lease_index").on(table.lease_expires_at),
 	],
 );
 

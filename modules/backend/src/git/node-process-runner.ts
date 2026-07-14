@@ -141,13 +141,10 @@ export function make_node_process_runner_layer(options: NodeProcessRunnerOptions
 					let child_exit_code = -1;
 					let completed = false;
 					let process_failure: ProcessRunnerError | undefined;
-					let stdin_escape_timeout: ReturnType<typeof setTimeout> | undefined;
 					let stdin_failure: ProcessRunnerError | undefined;
 					let stdin_force_kill_timeout: ReturnType<typeof setTimeout> | undefined;
 					let stdin_settled = false;
 					let cleanup_stdin_listeners = () => {};
-					/** Retained when a failed child cannot finish closing its inherited pipes. */
-					const ignore_abandoned_error = () => {};
 
 					const complete = (
 						result: Effect.Effect<ProcessRunnerResult, ProcessRunnerError>,
@@ -164,31 +161,10 @@ export function make_node_process_runner_layer(options: NodeProcessRunnerOptions
 						if (stdin_force_kill_timeout !== undefined) {
 							clearTimeout(stdin_force_kill_timeout);
 						}
-						if (stdin_escape_timeout !== undefined) {
-							clearTimeout(stdin_escape_timeout);
-						}
-
 						resume(result);
-					};
-					const abandon_after_stdin_failure = () => {
-						if (completed || stdin_failure === undefined) {
-							return;
-						}
-
-						child.on("error", ignore_abandoned_error);
-						child.stdin.on("error", ignore_abandoned_error);
-						child.stderr.destroy();
-						child.stdin.destroy();
-						child.stdout.destroy();
-						complete(Effect.fail(stdin_failure));
 					};
 					const terminate_after_stdin_failure = () => {
 						if (child.exitCode !== null || child.signalCode !== null) {
-							stdin_escape_timeout ??= setTimeout(
-								abandon_after_stdin_failure,
-								kill_timeout_ms * 2,
-							);
-
 							return;
 						}
 
@@ -198,10 +174,6 @@ export function make_node_process_runner_layer(options: NodeProcessRunnerOptions
 								child.kill("SIGKILL");
 							}
 						}, kill_timeout_ms);
-						stdin_escape_timeout ??= setTimeout(
-							abandon_after_stdin_failure,
-							kill_timeout_ms * 2,
-						);
 					};
 					const record_stdin_failure = (cause: Error) => {
 						if (!requires_stdin_delivery || stdin_failure !== undefined) {
@@ -283,37 +255,24 @@ export function make_node_process_runner_layer(options: NodeProcessRunnerOptions
 						remove_process_listeners(child, on_close, on_error, on_stderr, on_stdout);
 
 						let cleanup_completed = false;
-						let escape_timeout: ReturnType<typeof setTimeout> | undefined;
 						let force_kill_timeout: ReturnType<typeof setTimeout> | undefined;
-						/** Retained after escape so abandoned child and stdin errors remain handled. */
 						const ignore_cleanup_error = () => {};
-						const complete_cleanup = (child_is_closed: boolean) => {
+						const complete_cleanup = () => {
 							if (cleanup_completed) {
 								return;
 							}
 
 							cleanup_completed = true;
 							child.removeListener("close", on_cleanup_close);
-
-							if (child_is_closed) {
-								child.removeListener("error", ignore_cleanup_error);
-							} else {
-								child.stderr.destroy();
-								child.stdin.destroy();
-								child.stdout.destroy();
-							}
+							child.removeListener("error", ignore_cleanup_error);
 
 							if (force_kill_timeout !== undefined) {
 								clearTimeout(force_kill_timeout);
 							}
 
-							if (escape_timeout !== undefined) {
-								clearTimeout(escape_timeout);
-							}
-
 							cleanup_resume(Effect.void);
 						};
-						const on_cleanup_close = () => complete_cleanup(true);
+						const on_cleanup_close = () => complete_cleanup();
 
 						child.on("error", ignore_cleanup_error);
 						child.stdin.on("error", ignore_cleanup_error);
@@ -335,13 +294,8 @@ export function make_node_process_runner_layer(options: NodeProcessRunnerOptions
 							}, kill_timeout_ms);
 						}
 
-						escape_timeout = setTimeout(
-							() => complete_cleanup(false),
-							kill_timeout_ms * 2,
-						);
-
 						if (child_closed) {
-							complete_cleanup(true);
+							complete_cleanup();
 						} else {
 							child.once("close", on_cleanup_close);
 						}

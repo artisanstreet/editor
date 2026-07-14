@@ -17,6 +17,7 @@ import {
 } from "../../modules/backend/src/persistence/schema";
 import { JournalNotifierLive } from "../../modules/backend/src/persistence/journal-notifier";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+import { make_workspace_git_execution_gate_layer } from "../../modules/backend/src/git/workspace-git-execution-gate";
 import {
 	WorkspaceGitMutationRepository,
 	WorkspaceGitMutationRepositoryLive,
@@ -60,6 +61,7 @@ function make_metadata_layer() {
 function make_runtime(database_path: string) {
 	const infrastructure = Layer.mergeAll(
 		make_database_layer({ database_path, migrations_path }),
+		make_workspace_git_execution_gate_layer({ database_path }),
 		make_metadata_layer(),
 		JournalNotifierLive,
 		Layer.succeed(ThreadResourceQuiescer, { Quiesce: () => Effect.void }),
