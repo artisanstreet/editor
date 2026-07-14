@@ -13,6 +13,7 @@ import { make_backend_runtime } from "@artisan/backend";
 import { OrchestrationRepository } from "../../modules/backend/src/persistence/orchestration-repository";
 import {
 	JournalCommands,
+	OrchestrationCoordinators,
 	OrchestrationOutbox,
 	OrchestrationRawObservations,
 	OrchestrationRuns,
@@ -285,6 +286,91 @@ describe("orchestration repository hardening", () => {
 			expect(runs.find((entry) => entry.run_id === accepted.run_id)).toMatchObject({
 				status: "completed",
 			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("rejects malformed provider resume state before persistence", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			migrations_path,
+		});
+
+		try {
+			await runtime.runPromise(SetupThread("thread_1"));
+			const accepted = await runtime.runPromise(
+				Accept(
+					make_command("send_1", "thread_1", {
+						engine_id: "engine_1",
+						text: "Start",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			const malformed = await runtime.runPromiseExit(
+				Effect.gen(function* () {
+					const repository = yield* OrchestrationRepository;
+
+					yield* repository.PersistNativeRun(accepted.run_id, "native_thread_1", {
+						native_thread_id: "native_thread_1",
+						provider_state: "invented",
+					});
+				}),
+			);
+			const mismatched = await runtime.runPromiseExit(
+				Effect.gen(function* () {
+					const repository = yield* OrchestrationRepository;
+
+					yield* repository.PersistNativeRun(accepted.run_id, "native_thread_1", {
+						native_thread_id: "native_thread_2",
+					});
+				}),
+			);
+			const rejected_state = await runtime.runPromise(
+				Read((database) =>
+					Effect.all({
+						coordinators: database.select().from(OrchestrationCoordinators),
+						runs: database.select().from(OrchestrationRuns),
+					}),
+				),
+			);
+
+			expect(malformed._tag).toBe("Failure");
+			expect(mismatched._tag).toBe("Failure");
+			expect(rejected_state.coordinators[0]).toMatchObject({
+				native_resume_json: null,
+				native_thread_id: null,
+			});
+			expect(rejected_state.runs[0]).toMatchObject({
+				native_resume_json: null,
+				native_thread_id: null,
+			});
+
+			await runtime.runPromise(
+				Effect.gen(function* () {
+					const repository = yield* OrchestrationRepository;
+
+					yield* repository.PersistNativeRun(accepted.run_id, "native_thread_1", {
+						native_thread_id: "native_thread_1",
+						opaque_checkpoint: "provider-owned",
+					});
+				}),
+			);
+			const persisted = await runtime.runPromise(
+				Read((database) =>
+					Effect.all({
+						coordinators: database.select().from(OrchestrationCoordinators),
+						runs: database.select().from(OrchestrationRuns),
+					}),
+				),
+			);
+			const expected_json =
+				'{"native_thread_id":"native_thread_1","opaque_checkpoint":"provider-owned"}';
+
+			expect(persisted.coordinators[0]?.native_resume_json).toBe(expected_json);
+			expect(persisted.runs[0]?.native_resume_json).toBe(expected_json);
 		} finally {
 			await runtime.dispose();
 		}

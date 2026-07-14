@@ -1238,6 +1238,7 @@ export const OrchestrationRuns = sqliteTable(
 		engine_id: text("engine_id").notNull(),
 		working_directory: text("working_directory").notNull(),
 		status: text("status").notNull(),
+		open_mode: text("open_mode").notNull().default("start"),
 		native_thread_id: text("native_thread_id"),
 		native_resume_json: text("native_resume_json"),
 		created_at: text("created_at").notNull(),
@@ -1246,6 +1247,7 @@ export const OrchestrationRuns = sqliteTable(
 	(table) => [
 		index("orchestration_runs_thread_id_index").on(table.thread_id),
 		index("orchestration_runs_status_index").on(table.status),
+		check("orchestration_runs_open_mode_check", sql`${table.open_mode} IN ('start', 'resume')`),
 	],
 );
 
@@ -1389,7 +1391,10 @@ export const AgentRuns = sqliteTable(
 		assignment_id: text("assignment_id").notNull(),
 		agent_id: text("agent_id").notNull(),
 		attempt: integer("attempt").notNull(),
+		continuation_index: integer("continuation_index").notNull().default(0),
+		continuation_text: text("continuation_text"),
 		engine_id: text("engine_id").notNull(),
+		open_mode: text("open_mode").notNull().default("start"),
 		profile: text("profile").notNull(),
 		state: text("state").notNull(),
 		dispatch_status: text("dispatch_status").notNull(),
@@ -1404,10 +1409,16 @@ export const AgentRuns = sqliteTable(
 		completed_at: text("completed_at"),
 	},
 	(table) => [
-		uniqueIndex("agent_runs_assignment_attempt_unique").on(table.assignment_id, table.attempt),
+		uniqueIndex("agent_runs_assignment_attempt_continuation_unique").on(
+			table.assignment_id,
+			table.attempt,
+			table.continuation_index,
+		),
 		index("agent_runs_group_id_index").on(table.group_id),
 		index("agent_runs_dispatch_status_index").on(table.dispatch_status),
 		index("agent_runs_assignment_id_index").on(table.assignment_id),
+		check("agent_runs_continuation_index_check", sql`${table.continuation_index} >= 0`),
+		check("agent_runs_open_mode_check", sql`${table.open_mode} IN ('start', 'resume')`),
 	],
 );
 

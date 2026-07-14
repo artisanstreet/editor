@@ -200,11 +200,34 @@ export function ValidateEngineHarnessContext(
 		: Effect.void;
 }
 
-/** Carries provider-owned state that can reopen a run without inventing a checkpoint. @since 0.2.0 */
-export interface EngineResumeToken {
-	readonly native_thread_id: string;
-	readonly opaque_checkpoint?: string;
-}
+const engine_resume_token_native_thread_id_maximum_bytes = 512;
+const engine_resume_token_opaque_checkpoint_maximum_bytes = 16_384;
+const EngineNativeThreadId = Schema.String.check(
+	Schema.makeFilter<string>((value) =>
+		value.trim().length === 0 ||
+		value !== value.trim() ||
+		text_encoder.encode(value).byteLength >
+			engine_resume_token_native_thread_id_maximum_bytes ||
+		/[\p{Cc}\p{Cf}]/u.test(value)
+			? "Expected a non-empty bounded native thread identifier without control characters"
+			: undefined,
+	),
+);
+const EngineOpaqueCheckpoint = Schema.String.check(
+	Schema.makeFilter<string>((value) =>
+		text_encoder.encode(value).byteLength > engine_resume_token_opaque_checkpoint_maximum_bytes
+			? "Expected a bounded opaque checkpoint"
+			: undefined,
+	),
+);
+
+/** Carries bounded provider-owned state that can reopen a run without interpreting its checkpoint. @since 0.2.0 */
+export const EngineResumeToken = Schema.Struct({
+	native_thread_id: EngineNativeThreadId,
+	opaque_checkpoint: Schema.optional(EngineOpaqueCheckpoint),
+});
+
+export type EngineResumeToken = typeof EngineResumeToken.Type;
 
 /** Opens a new native thread from initial user text. @since 0.2.0 */
 export interface EngineStartInput extends EngineRunContext {

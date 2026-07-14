@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Cause, Deferred, Effect, Queue, Stream } from "effect";
+import { Cause, Deferred, Effect, Exit, Queue, Stream } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type {
@@ -326,6 +326,93 @@ afterEach(async () => {
 });
 
 describe("multi-agent graph lifecycle", () => {
+	it("rejects malformed provider resume state before graph activation", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			migrations_path,
+		});
+
+		try {
+			await create_thread(runtime);
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* AgentGraphRepository;
+
+					yield* repository.StartGroup(
+						command("start_resume_boundary", {
+							assignments: [assignment("assignment_resume")],
+							group_id: "group_graph",
+							type: "orchestration.group.start",
+						}),
+					);
+
+					const [run] = yield* database.client.select().from(AgentRuns).limit(1);
+
+					if (!run) {
+						return yield* Effect.die("Expected the graph run to exist");
+					}
+
+					const claimed = yield* repository.ClaimRun(run.run_id, "instance_resume_test");
+					const malformed = yield* repository
+						.ActivateRun(run.run_id, "instance_resume_test", "native_thread_1", {
+							native_thread_id: "native_thread_1",
+							provider_state: "invented",
+						})
+						.pipe(Effect.exit);
+					const mismatched = yield* repository
+						.ActivateRun(run.run_id, "instance_resume_test", "native_thread_1", {
+							native_thread_id: "native_thread_2",
+						})
+						.pipe(Effect.exit);
+					const [rejected_run] = yield* database.client.select().from(AgentRuns).limit(1);
+					const activated = yield* repository.ActivateRun(
+						run.run_id,
+						"instance_resume_test",
+						"native_thread_1",
+						{
+							native_thread_id: "native_thread_1",
+							opaque_checkpoint: "provider-owned",
+						},
+					);
+					const [persisted_run] = yield* database.client
+						.select()
+						.from(AgentRuns)
+						.limit(1);
+
+					return {
+						activated,
+						claimed,
+						malformed,
+						mismatched,
+						persisted_run,
+						rejected_run,
+					};
+				}),
+			);
+
+			expect(result.claimed).toBe(true);
+			expect(Exit.isFailure(result.malformed)).toBe(true);
+			expect(Exit.isFailure(result.mismatched)).toBe(true);
+			expect(result.rejected_run).toMatchObject({
+				dispatch_status: "dispatching",
+				native_resume_json: null,
+				native_thread_id: null,
+				state: "queued",
+			});
+			expect(result.activated.run.native_thread_id).toBe("native_thread_1");
+			expect(result.persisted_run).toMatchObject({
+				dispatch_status: "active",
+				native_resume_json:
+					'{"native_thread_id":"native_thread_1","opaque_checkpoint":"provider-owned"}',
+				native_thread_id: "native_thread_1",
+				state: "running",
+			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("marks an external wait source closed only after the native run closes", async () => {
 		const database_path = await make_database_path();
 		const controlled = make_controlled_engine();

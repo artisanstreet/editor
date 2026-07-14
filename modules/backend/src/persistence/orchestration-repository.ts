@@ -9,7 +9,7 @@ import {
 	type EventEnvelope,
 	type ThreadWorkItem,
 } from "@artisan/protocol";
-import type { EngineObservation } from "@artisan/engines";
+import { EngineResumeToken, type EngineObservation } from "@artisan/engines";
 
 import { Database } from "./database";
 import { JournalNotifier } from "./journal-notifier";
@@ -810,6 +810,20 @@ export const OrchestrationRepositoryLive = Layer.effect(
 		) =>
 			Effect.gen(function* () {
 				const updated_at = yield* metadata.Now;
+				const validated_resume_token = yield* Schema.decodeUnknownEffect(
+					EngineResumeToken,
+					{ onExcessProperty: "error" },
+				)(resume_token).pipe(
+					Effect.mapError((cause) => new OrchestrationFailure({ cause })),
+				);
+
+				if (validated_resume_token.native_thread_id !== native_thread_id) {
+					return yield* new OrchestrationFailure({
+						cause: new Error("Engine resume token does not match its native thread"),
+					});
+				}
+
+				const native_resume_json = JSON.stringify(validated_resume_token);
 				const [run] = yield* database.client
 					.select()
 					.from(OrchestrationRuns)
@@ -823,7 +837,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 				yield* database.client
 					.update(OrchestrationRuns)
 					.set({
-						native_resume_json: JSON.stringify(resume_token),
+						native_resume_json,
 						native_thread_id,
 						updated_at,
 					})
@@ -831,7 +845,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 				yield* database.client
 					.update(OrchestrationCoordinators)
 					.set({
-						native_resume_json: JSON.stringify(resume_token),
+						native_resume_json,
 						native_thread_id,
 						updated_at,
 					})

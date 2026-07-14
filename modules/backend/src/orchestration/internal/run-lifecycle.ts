@@ -1,7 +1,11 @@
 import { and, asc, eq, inArray, ne, notExists } from "drizzle-orm";
 import { Effect, Schema } from "effect";
 
-import type { EngineObservation, EngineRunTerminalState } from "@artisan/engines";
+import {
+	EngineResumeToken,
+	type EngineObservation,
+	type EngineRunTerminalState,
+} from "@artisan/engines";
 import {
 	AgentRun,
 	type EventEnvelope,
@@ -98,6 +102,23 @@ export function make_run_lifecycle(
 		resume_token: unknown,
 	) =>
 		Effect.gen(function* () {
+			const validated_resume_token = yield* Schema.decodeUnknownEffect(EngineResumeToken, {
+				onExcessProperty: "error",
+			})(resume_token).pipe(
+				Effect.mapError(
+					() =>
+						new AgentGraphInvalid({
+							message: `Agent run ${run_id} returned invalid resume state`,
+						}),
+				),
+			);
+
+			if (validated_resume_token.native_thread_id !== native_thread_id) {
+				return yield* new AgentGraphInvalid({
+					message: `Agent run ${run_id} returned mismatched resume state`,
+				});
+			}
+
 			const result = yield* database.client.transaction((transaction) =>
 				Effect.gen(function* () {
 					const [run] = yield* transaction
@@ -144,7 +165,7 @@ export function make_run_lifecycle(
 						.set({
 							dispatch_status: "active",
 							native_identity_json: JSON.stringify(native_identity),
-							native_resume_json: JSON.stringify(resume_token),
+							native_resume_json: JSON.stringify(validated_resume_token),
 							native_thread_id,
 							raw_origin_json: JSON.stringify(raw_origin),
 							state: "running",
