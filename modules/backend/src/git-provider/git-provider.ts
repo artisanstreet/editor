@@ -40,6 +40,18 @@ const GitProviderExecutablePath = Schema.String.check(
 	),
 );
 
+const GitProviderNativePath = Schema.String.check(
+	Schema.makeFilter<string>((value) =>
+		value.length === 0 ||
+		text_encoder.encode(value).byteLength > 4_096 ||
+		value.includes("\0") ||
+		/[\r\n]/u.test(value) ||
+		!(/^[A-Za-z]:[\\/]/u.test(value) || value.startsWith("/") || value.startsWith("\\\\"))
+			? "Expected a bounded absolute native path without NUL or line breaks"
+			: undefined,
+	),
+);
+
 function is_git_provider_url(value: string, protocols: ReadonlyArray<string>) {
 	if (text_encoder.encode(value).byteLength > 2_048 || /[\p{Cc}\p{Cf}]/u.test(value)) {
 		return false;
@@ -364,6 +376,40 @@ export const GitProviderPage = Schema.Struct({
 
 export type GitProviderPage = typeof GitProviderPage.Type;
 
+/** Selects one previously discovered repository for fresh clone preparation. */
+export const GitProviderCloneRequest = Schema.Struct({
+	repository: GitProviderRepository,
+	selection: GitProviderSelection,
+});
+
+export type GitProviderCloneRequest = typeof GitProviderCloneRequest.Type;
+
+/** Pins the fresh provider identity that may later cross the clone approval boundary. */
+export const GitProviderClonePreparation = Schema.Struct({
+	repository: GitProviderRepository,
+	selection: GitProviderSelection,
+});
+
+export type GitProviderClonePreparation = typeof GitProviderClonePreparation.Type;
+
+/** Supplies the approved destination and pinned provider identity for one clone execution. */
+export const GitProviderCloneExecution = Schema.Struct({
+	destination_path: GitProviderNativePath,
+	preparation: GitProviderClonePreparation,
+});
+
+export type GitProviderCloneExecution = typeof GitProviderCloneExecution.Type;
+
+/** Confirms provider execution and the identity observed again after the clone completed. */
+export const GitProviderCloneResult = Schema.Struct({
+	canonical_root: GitProviderNativePath,
+	output_complete: Schema.Boolean,
+	repository: GitProviderRepository,
+	type: Schema.Literal("cloned"),
+});
+
+export type GitProviderCloneResult = typeof GitProviderCloneResult.Type;
+
 /** Describes the provider installation and exact hosts known by inspection. */
 export const GitProviderInspection = Schema.Struct({
 	authentication: Schema.Array(GitProviderHostAuthentication),
@@ -373,7 +419,12 @@ export const GitProviderInspection = Schema.Struct({
 export type GitProviderInspection = typeof GitProviderInspection.Type;
 
 /** Names the safe operation boundary where a provider adapter failed. */
-export const GitProviderErrorOperation = Schema.Literals(["discover_repositories", "inspect"]);
+export const GitProviderErrorOperation = Schema.Literals([
+	"clone_repository",
+	"discover_repositories",
+	"inspect",
+	"prepare_clone",
+]);
 
 export type GitProviderErrorOperation = typeof GitProviderErrorOperation.Type;
 
@@ -381,17 +432,22 @@ export type GitProviderErrorOperation = typeof GitProviderErrorOperation.Type;
 export const GitProviderErrorReason = Schema.Literals([
 	"account_not_active",
 	"auth_required",
+	"clone_failed",
 	"cli_incompatible",
 	"cli_missing",
 	"cli_unavailable",
+	"git_missing",
 	"invalid_cursor",
 	"invalid_input",
 	"invalid_response",
 	"network",
 	"not_found",
+	"outcome_unknown",
 	"permission_denied",
 	"rate_limited",
 	"remote_rejected",
+	"stale_repository",
+	"timed_out",
 	"unsupported_host",
 ]);
 
@@ -415,5 +471,11 @@ export class GitProvider extends Context.Service<
 			input: GitProviderDiscovery,
 		) => Effect.Effect<GitProviderPage, GitProviderError>;
 		readonly Inspect: Effect.Effect<GitProviderInspection, GitProviderError>;
+		readonly Clone: (
+			input: GitProviderCloneExecution,
+		) => Effect.Effect<GitProviderCloneResult, GitProviderError>;
+		readonly PrepareClone: (
+			input: GitProviderCloneRequest,
+		) => Effect.Effect<GitProviderClonePreparation, GitProviderError>;
 	}
 >()("Artisan/GitProvider") {}

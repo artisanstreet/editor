@@ -1,14 +1,17 @@
-import { Effect, Layer } from "effect";
+import { Cause, Deferred, Effect, Exit, Fiber, Layer, Ref, Schema } from "effect";
 import { describe, expect, it } from "vitest";
 
 import {
 	GitProvider,
+	GitProviderCloneExecution,
 	type GitProviderDiscovery,
 } from "../../modules/backend/src/git-provider/git-provider";
 import {
 	GitHubCli,
 	GitHubCliError,
+	type GitHubCliCloneResult,
 	type GitHubCliInspection,
+	type GitHubCliRepositoryInspectionResult,
 	type GitHubCliRepositoryPage,
 } from "../../modules/backend/src/git-provider/github/github-cli";
 import { make_github_provider_layer } from "../../modules/backend/src/git-provider/github/github-provider";
@@ -45,6 +48,31 @@ function repository(name: string, default_branch?: string) {
 	};
 }
 
+function projected_repository(name: string, default_branch?: string) {
+	return {
+		archived: true,
+		clone_url: `https://github.com/artisan/${name}.git`,
+		default_branch:
+			default_branch === undefined
+				? ({ _tag: "unavailable" } as const)
+				: ({ _tag: "known", name: default_branch } as const),
+		identity: {
+			host: "github.com",
+			name,
+			owner: "artisan",
+			provider_id: "github",
+		},
+		origin: {
+			native_id: `node-${name}`,
+			provider_id: "github",
+			resource_kind: "repository" as const,
+		},
+		viewer_permission: "maintain" as const,
+		visibility: "internal" as const,
+		web_url: `https://github.com/artisan/${name}`,
+	};
+}
+
 function page(
 	viewer_login: string,
 	repositories: GitHubCliRepositoryPage["repositories"],
@@ -58,11 +86,22 @@ async function make_provider(options: {
 	readonly query?: (
 		input: Parameters<(typeof GitHubCli.Service)["QueryRepositories"]>[0],
 	) => Effect.Effect<GitHubCliRepositoryPage, GitHubCliError>;
+	readonly clone?: (
+		input: Parameters<(typeof GitHubCli.Service)["CloneRepository"]>[0],
+	) => Effect.Effect<GitHubCliCloneResult, GitHubCliError>;
+	readonly inspect_repository?: (
+		input: Parameters<(typeof GitHubCli.Service)["InspectRepository"]>[0],
+	) => Effect.Effect<GitHubCliRepositoryInspectionResult, GitHubCliError>;
 	readonly hosts?: ReadonlyArray<string>;
 }) {
 	const query = options.query ?? (() => Effect.die("Unexpected repository query"));
+	const clone = options.clone ?? (() => Effect.die("Unexpected repository clone"));
+	const inspect_repository =
+		options.inspect_repository ?? (() => Effect.die("Unexpected repository inspection"));
 	const cli_layer = Layer.succeed(GitHubCli, {
+		CloneRepository: clone,
 		Inspect: Effect.succeed(options.inspection),
+		InspectRepository: inspect_repository,
 		QueryRepositories: query,
 	});
 	const provider_layer = make_github_provider_layer(
@@ -263,6 +302,34 @@ describe("GitHubProvider", () => {
 		}
 	});
 
+	it("matches GitHub account identity case-insensitively", async () => {
+		const provider = await make_provider({
+			inspection: available_inspection([
+				{
+					accounts: [
+						{
+							active: true,
+							git_protocol: "https",
+							host: "github.com",
+							login: "alice",
+							scopes: [],
+							type: "authenticated",
+						},
+					],
+					host: "github.com",
+				},
+			]),
+			query: () => Effect.succeed(page("ALICE", [repository("editor")])),
+		});
+		const result = await Effect.runPromise(
+			provider.DiscoverRepositories(
+				discovery({ selection: { ...selection, account_login: "Alice" } }),
+			),
+		);
+
+		expect(result.repositories).toHaveLength(1);
+	});
+
 	it("projects canonical repository identity, safe URLs, and native attribution", async () => {
 		const provider = await make_provider({
 			inspection: available_inspection([
@@ -288,7 +355,7 @@ describe("GitHubProvider", () => {
 		expect(result.repositories).toEqual([
 			{
 				archived: true,
-				clone_url: "git@github.com:artisan/private-repo.git",
+				clone_url: "https://github.com/artisan/private-repo.git",
 				default_branch: { _tag: "unavailable" },
 				identity: {
 					host: "github.com",
@@ -508,5 +575,457 @@ describe("GitHubProvider", () => {
 			});
 			expect(JSON.stringify(error)).not.toContain("raw-cli-output-secret");
 		}
+	});
+
+	it("prepares a clone from a fresh repository observation under the selected account", async () => {
+		const provider = await make_provider({
+			inspection: available_inspection([
+				{
+					accounts: [
+						{
+							active: true,
+							git_protocol: "https",
+							host: "github.com",
+							login: "alice",
+							scopes: [],
+							type: "authenticated",
+						},
+					],
+					host: "github.com",
+				},
+			]),
+			inspect_repository: () =>
+				Effect.succeed({ repository: repository("editor", "main"), viewer_login: "alice" }),
+		});
+		const preparation = await Effect.runPromise(
+			provider.PrepareClone({ repository: projected_repository("editor"), selection }),
+		);
+
+		expect(preparation).toEqual({
+			repository: projected_repository("editor", "main"),
+			selection,
+		});
+		expect(
+			provider.Descriptor.capabilities.find(
+				(capability) => capability.capability === "clone_repository",
+			),
+		).toEqual({ _tag: "available", capability: "clone_repository" });
+	});
+
+	it("attributes malformed preparation responses to clone preparation", async () => {
+		const malformed = {
+			...repository("editor", "main"),
+			name_with_owner: "another/editor",
+		};
+		const provider = await make_provider({
+			inspection: available_inspection([
+				{
+					accounts: [
+						{
+							active: true,
+							git_protocol: "https",
+							host: "github.com",
+							login: "alice",
+							scopes: [],
+							type: "authenticated",
+						},
+					],
+					host: "github.com",
+				},
+			]),
+			inspect_repository: () =>
+				Effect.succeed({ repository: malformed, viewer_login: "alice" }),
+		});
+
+		await expect(
+			Effect.runPromise(
+				provider.PrepareClone({ repository: projected_repository("editor"), selection }),
+			),
+		).rejects.toMatchObject({ operation: "prepare_clone", reason: "invalid_response" });
+	});
+
+	it("rejects a stale provider-native repository identity before cloning", async () => {
+		const provider = await make_provider({
+			inspection: available_inspection([
+				{
+					accounts: [
+						{
+							active: true,
+							git_protocol: "https",
+							host: "github.com",
+							login: "alice",
+							scopes: [],
+							type: "authenticated",
+						},
+					],
+					host: "github.com",
+				},
+			]),
+			inspect_repository: () =>
+				Effect.succeed({ repository: repository("editor"), viewer_login: "alice" }),
+		});
+		const stale = {
+			...projected_repository("editor"),
+			origin: {
+				...projected_repository("editor").origin,
+				native_id: "replaced-native-id",
+			},
+		};
+
+		await expect(
+			Effect.runPromise(provider.PrepareClone({ repository: stale, selection })),
+		).rejects.toMatchObject({ operation: "prepare_clone", reason: "stale_repository" });
+	});
+
+	it("reports a missing pinned Git executable separately from a missing GitHub CLI", async () => {
+		const provider = await make_provider({
+			clone: () =>
+				Effect.fail(
+					new GitHubCliError({
+						operation: "clone_repository",
+						reason: "git_dependency_missing",
+						retryable: false,
+					}),
+				),
+			inspection: available_inspection([
+				{
+					accounts: [
+						{
+							active: true,
+							git_protocol: "https",
+							host: "github.com",
+							login: "alice",
+							scopes: [],
+							type: "authenticated",
+						},
+					],
+					host: "github.com",
+				},
+			]),
+			inspect_repository: () =>
+				Effect.succeed({
+					repository: repository("editor", "main"),
+					viewer_login: "alice",
+				}),
+		});
+		const error = await Effect.runPromise(
+			provider
+				.Clone({
+					destination_path: "C:\\Projects\\editor",
+					preparation: {
+						repository: projected_repository("editor", "main"),
+						selection,
+					},
+				})
+				.pipe(Effect.flip),
+		);
+
+		expect(error).toMatchObject({
+			operation: "clone_repository",
+			reason: "git_missing",
+			retryable: false,
+		});
+	});
+
+	it("rejects caller-supplied clone templates at the public execution boundary", async () => {
+		await expect(
+			Effect.runPromise(
+				Schema.decodeUnknownEffect(GitProviderCloneExecution, {
+					onExcessProperty: "error",
+				})({
+					destination_path: "C:\\Projects\\editor",
+					preparation: {
+						repository: projected_repository("editor", "main"),
+						selection,
+					},
+					template_path: "C:\\Artisan\\attacker-template",
+				}),
+			),
+		).rejects.toBeDefined();
+	});
+
+	it("clones once and rechecks repository ownership after execution", async () => {
+		const clone_inputs: Array<Parameters<(typeof GitHubCli.Service)["CloneRepository"]>[0]> =
+			[];
+		let inspection_count = 0;
+		let verification_count = 0;
+		const provider = await make_provider({
+			clone: (input) => {
+				clone_inputs.push(input);
+
+				return Effect.succeed({
+					VerifyCheckout: Effect.sync(() => {
+						verification_count += 1;
+					}),
+					canonical_root: input.destination_path,
+					output_complete: true,
+				});
+			},
+			inspection: available_inspection([
+				{
+					accounts: [
+						{
+							active: true,
+							git_protocol: "https",
+							host: "github.com",
+							login: "alice",
+							scopes: [],
+							type: "authenticated",
+						},
+					],
+					host: "github.com",
+				},
+			]),
+			inspect_repository: () => {
+				inspection_count += 1;
+
+				return Effect.succeed({
+					repository: repository("editor", "main"),
+					viewer_login: "alice",
+				});
+			},
+		});
+		const result = await Effect.runPromise(
+			provider.Clone({
+				destination_path: "C:\\Projects\\editor",
+				preparation: {
+					repository: projected_repository("editor", "main"),
+					selection,
+				},
+			}),
+		);
+
+		expect(result).toEqual({
+			canonical_root: "C:\\Projects\\editor",
+			output_complete: true,
+			repository: projected_repository("editor", "main"),
+			type: "cloned",
+		});
+		expect(inspection_count).toBe(2);
+		expect(verification_count).toBe(1);
+		expect(clone_inputs).toEqual([
+			{
+				account_login: "alice",
+				destination_path: "C:\\Projects\\editor",
+				host: "github.com",
+				name: "editor",
+				owner: "artisan",
+			},
+		]);
+	});
+
+	it("revalidates the checkout after the remote postcheck", async () => {
+		const postcheck_started = await Effect.runPromise(Deferred.make<void>());
+		const release_postcheck = await Effect.runPromise(Deferred.make<void>());
+		const checkout_replaced = await Effect.runPromise(Ref.make(false));
+		let inspection_count = 0;
+		const provider = await make_provider({
+			clone: () =>
+				Effect.succeed({
+					VerifyCheckout: Ref.get(checkout_replaced).pipe(
+						Effect.flatMap((replaced) =>
+							replaced
+								? Effect.fail(
+										new GitHubCliError({
+											operation: "clone_repository",
+											reason: "outcome_unknown",
+											retryable: false,
+										}),
+									)
+								: Effect.void,
+						),
+					),
+					canonical_root: "C:\\Projects\\editor",
+					output_complete: true,
+				}),
+			inspection: available_inspection([
+				{
+					accounts: [
+						{
+							active: true,
+							git_protocol: "https",
+							host: "github.com",
+							login: "alice",
+							scopes: [],
+							type: "authenticated",
+						},
+					],
+					host: "github.com",
+				},
+			]),
+			inspect_repository: () => {
+				inspection_count += 1;
+
+				const result = {
+					repository: repository("editor", "main"),
+					viewer_login: "alice",
+				};
+
+				return inspection_count === 1
+					? Effect.succeed(result)
+					: Deferred.succeed(postcheck_started, undefined).pipe(
+							Effect.andThen(Deferred.await(release_postcheck)),
+							Effect.as(result),
+						);
+			},
+		});
+		const exit = await Effect.runPromise(
+			Effect.gen(function* () {
+				const fiber = yield* Effect.forkChild(
+					provider.Clone({
+						destination_path: "C:\\Projects\\editor",
+						preparation: {
+							repository: projected_repository("editor", "main"),
+							selection,
+						},
+					}),
+				);
+
+				yield* Deferred.await(postcheck_started);
+				yield* Ref.set(checkout_replaced, true);
+				yield* Deferred.succeed(release_postcheck, undefined);
+
+				return yield* Fiber.await(fiber);
+			}),
+		);
+
+		expect(Exit.isFailure(exit) ? Cause.squash(exit.cause) : undefined).toMatchObject({
+			operation: "clone_repository",
+			reason: "outcome_unknown",
+			retryable: false,
+		});
+		expect(inspection_count).toBe(2);
+	});
+
+	it("quarantines a completed clone when post-execution identity cannot be proven", async () => {
+		let clone_count = 0;
+		let inspection_count = 0;
+		const provider = await make_provider({
+			clone: () => {
+				clone_count += 1;
+
+				return Effect.succeed({
+					VerifyCheckout: Effect.void,
+					canonical_root: "C:\\Projects\\editor",
+					output_complete: true,
+				});
+			},
+			inspection: available_inspection([
+				{
+					accounts: [
+						{
+							active: true,
+							git_protocol: "https",
+							host: "github.com",
+							login: "alice",
+							scopes: [],
+							type: "authenticated",
+						},
+					],
+					host: "github.com",
+				},
+			]),
+			inspect_repository: () => {
+				inspection_count += 1;
+
+				return inspection_count === 1
+					? Effect.succeed({
+							repository: repository("editor", "main"),
+							viewer_login: "alice",
+						})
+					: Effect.fail(
+							new GitHubCliError({
+								operation: "inspect_repository",
+								reason: "network_unavailable",
+								retryable: true,
+							}),
+						);
+			},
+		});
+		const error = await Effect.runPromise(
+			provider
+				.Clone({
+					destination_path: "C:\\Projects\\editor",
+					preparation: {
+						repository: projected_repository("editor", "main"),
+						selection,
+					},
+				})
+				.pipe(Effect.flip),
+		);
+
+		expect(error).toMatchObject({
+			operation: "clone_repository",
+			reason: "outcome_unknown",
+			retryable: false,
+		});
+		expect(clone_count).toBe(1);
+	});
+
+	it("converts cancellation during post-clone verification into an unknown outcome", async () => {
+		const postcheck_started = await Effect.runPromise(Deferred.make<void>());
+		let inspection_count = 0;
+		const provider = await make_provider({
+			clone: () =>
+				Effect.succeed({
+					VerifyCheckout: Effect.void,
+					canonical_root: "C:\\Projects\\editor",
+					output_complete: true,
+				}),
+			inspection: available_inspection([
+				{
+					accounts: [
+						{
+							active: true,
+							git_protocol: "https",
+							host: "github.com",
+							login: "alice",
+							scopes: [],
+							type: "authenticated",
+						},
+					],
+					host: "github.com",
+				},
+			]),
+			inspect_repository: () => {
+				inspection_count += 1;
+
+				return inspection_count === 1
+					? Effect.succeed({
+							repository: repository("editor", "main"),
+							viewer_login: "alice",
+						})
+					: Deferred.succeed(postcheck_started, undefined).pipe(
+							Effect.andThen(Effect.never),
+						);
+			},
+		});
+		const error = await Effect.runPromise(
+			Effect.gen(function* () {
+				const fiber = yield* Effect.forkChild(
+					provider.Clone({
+						destination_path: "C:\\Projects\\editor",
+						preparation: {
+							repository: projected_repository("editor", "main"),
+							selection,
+						},
+					}),
+				);
+
+				yield* Deferred.await(postcheck_started);
+				yield* Fiber.interrupt(fiber);
+				const exit = yield* Fiber.await(fiber);
+
+				return Exit.isFailure(exit)
+					? Cause.squash(exit.cause)
+					: yield* Effect.die("Cancellation must fail provider verification");
+			}),
+		);
+
+		expect(error).toMatchObject({
+			operation: "clone_repository",
+			reason: "outcome_unknown",
+			retryable: false,
+		});
 	});
 });

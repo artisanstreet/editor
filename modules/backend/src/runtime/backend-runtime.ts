@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { NodeCrypto, NodeFileSystem } from "@effect/platform-node-shared";
+import { NodeCrypto, NodeFileSystem, NodePath } from "@effect/platform-node-shared";
 import { Effect, Layer, ManagedRuntime } from "effect";
 
 import { type Engine, make_engine_registry_layer } from "@artisan/engines";
@@ -43,7 +43,10 @@ import {
 	make_git_provider_registry_layer,
 } from "../git-provider/git-provider-registry";
 import { make_github_cli_layer } from "../git-provider/github/github-cli";
-import { make_node_github_cli_executable_layer } from "../git-provider/github/github-cli-executable";
+import {
+	make_node_github_cli_executable_layer,
+	make_node_github_cli_git_executable_layer,
+} from "../git-provider/github/github-cli-executable";
 import { make_github_provider_layer } from "../git-provider/github/github-provider";
 import { make_database_layer } from "../persistence/database";
 import { JournalNotifierLive } from "../persistence/journal-notifier";
@@ -176,9 +179,12 @@ export interface DesktopModelBehaviourOptions {
 
 /** Configures optional GitHub CLI discovery for the production desktop composition. */
 export interface DesktopGitProviderOptions {
+	readonly clone_timeout_ms?: number;
 	readonly command?: string;
+	readonly git_command?: string;
 	readonly hosts?: ReadonlyArray<string>;
 	readonly probe_timeout_ms?: number;
+	readonly projects_root?: string;
 	readonly request_timeout_ms?: number;
 }
 
@@ -509,16 +515,31 @@ function make_desktop_git_provider_registry(options: DesktopBackendOptions) {
 		...(platform.command === undefined ? {} : { command: platform.command }),
 		cwd,
 	});
+	const git_executable = make_node_github_cli_git_executable_layer({
+		...(platform.git_command === undefined ? {} : { command: platform.git_command }),
+		cwd,
+	});
 	const cli = make_github_cli_layer({
+		...(platform.clone_timeout_ms === undefined
+			? {}
+			: { clone_timeout_ms: platform.clone_timeout_ms }),
 		...(platform.command === undefined ? {} : { command: platform.command }),
 		cwd,
 		...(platform.probe_timeout_ms === undefined
 			? {}
 			: { probe_timeout_ms: platform.probe_timeout_ms }),
+		...(platform.projects_root === undefined ? {} : { projects_root: platform.projects_root }),
 		...(platform.request_timeout_ms === undefined
 			? {}
 			: { request_timeout_ms: platform.request_timeout_ms }),
-	}).pipe(Layer.provideMerge(NodeProcessRunnerLive), Layer.provideMerge(executable));
+	}).pipe(
+		Layer.provideMerge(NodeProcessRunnerLive),
+		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(NodeFileSystem.layer),
+		Layer.provideMerge(NodePath.layer),
+		Layer.provideMerge(executable),
+		Layer.provideMerge(git_executable),
+	);
 	const github = make_github_provider_layer(
 		platform.hosts === undefined ? {} : { hosts: platform.hosts },
 	).pipe(Layer.provide(cli));

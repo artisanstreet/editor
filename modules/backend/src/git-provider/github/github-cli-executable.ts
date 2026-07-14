@@ -14,8 +14,24 @@ export class GitHubCliExecutable extends Context.Service<
 	}
 >()("Artisan/GitHubCliExecutable") {}
 
+/** Resolves and pins the Git executable that GitHub CLI may delegate cloning to. */
+export class GitHubCliGitExecutable extends Context.Service<
+	GitHubCliGitExecutable,
+	{
+		readonly Locate: Effect.Effect<Option.Option<GitHubCliExecutableLocation>>;
+	}
+>()("Artisan/GitHubCliGitExecutable") {}
+
 /** Configures Node-backed GitHub CLI resolution. */
 export interface NodeGitHubCliExecutableOptions {
+	readonly command?: string;
+	readonly cwd: string;
+	readonly environment?: Readonly<Record<string, string | undefined>>;
+	readonly platform?: NodeJS.Platform;
+}
+
+/** Configures Node-backed Git resolution for GitHub CLI clone execution. */
+export interface NodeGitHubCliGitExecutableOptions {
 	readonly command?: string;
 	readonly cwd: string;
 	readonly environment?: Readonly<Record<string, string | undefined>>;
@@ -118,11 +134,12 @@ function LocateExecutable(
 	options: NodeGitHubCliExecutableOptions,
 	file_system: FileSystem.FileSystem,
 	path_service: Path.Path,
+	default_command: string,
 ) {
 	return Effect.gen(function* () {
 		const environment = options.environment ?? process.env;
 		const platform = options.platform ?? process.platform;
-		const command = options.command ?? "gh";
+		const command = options.command ?? default_command;
 		const candidates = candidate_names(
 			command,
 			options.cwd,
@@ -163,7 +180,30 @@ export function make_node_github_cli_executable_layer(options: NodeGitHubCliExec
 			const Locate = SynchronizedRef.modifyEffect(pinned, (current) =>
 				Option.isSome(current)
 					? Effect.succeed([current, current] as const)
-					: LocateExecutable(options, file_system, path_service).pipe(
+					: LocateExecutable(options, file_system, path_service, "gh").pipe(
+							Effect.map((located) => [located, located] as const),
+						),
+			);
+
+			return { Locate };
+		}),
+	).pipe(Layer.provideMerge(NodeFileSystem.layer), Layer.provideMerge(NodePath.layer));
+}
+
+/** Builds a process-lifetime Git executable pin for GitHub CLI clone execution. */
+export function make_node_github_cli_git_executable_layer(
+	options: NodeGitHubCliGitExecutableOptions,
+) {
+	return Layer.effect(
+		GitHubCliGitExecutable,
+		Effect.gen(function* () {
+			const file_system = yield* FileSystem.FileSystem;
+			const path_service = yield* Path.Path;
+			const pinned = yield* SynchronizedRef.make(Option.none<GitHubCliExecutableLocation>());
+			const Locate = SynchronizedRef.modifyEffect(pinned, (current) =>
+				Option.isSome(current)
+					? Effect.succeed([current, current] as const)
+					: LocateExecutable(options, file_system, path_service, "git").pipe(
 							Effect.map((located) => [located, located] as const),
 						),
 			);

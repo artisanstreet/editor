@@ -17,6 +17,7 @@ function make_provider(
 	authentication: GitProviderInspection["authentication"] = [],
 ) {
 	return {
+		Clone: () => Effect.die("Clone is outside registry resolution tests"),
 		Descriptor: {
 			capabilities: [
 				{ _tag: "available" as const, capability: "discover_repositories" as const },
@@ -33,6 +34,7 @@ function make_provider(
 				version: "1.0.0",
 			},
 		}),
+		PrepareClone: () => Effect.die("Clone is outside registry resolution tests"),
 	} satisfies typeof GitProvider.Service;
 }
 

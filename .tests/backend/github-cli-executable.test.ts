@@ -7,7 +7,9 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
 	GitHubCliExecutable,
+	GitHubCliGitExecutable,
 	make_node_github_cli_executable_layer,
+	make_node_github_cli_git_executable_layer,
 } from "../../modules/backend/src/git-provider/github/github-cli-executable";
 
 const roots: Array<string> = [];
@@ -116,5 +118,32 @@ describe("GitHubCliExecutable", () => {
 		await fs.writeFile(second_executable, "second");
 
 		expect(await Effect.runPromise(service.Locate)).toEqual(first_location);
+	});
+
+	it("pins Git independently from the GitHub CLI executable", async () => {
+		const root = await make_root();
+		const directory = join(root, "tools");
+		const git_path = join(directory, "git.exe");
+
+		await fs.mkdir(directory);
+		await fs.writeFile(join(directory, "gh.exe"), "github cli");
+		await fs.writeFile(git_path, "git");
+
+		const service = await Effect.runPromise(
+			Effect.service(GitHubCliGitExecutable).pipe(
+				Effect.provide(
+					make_node_github_cli_git_executable_layer({
+						cwd: root,
+						environment: { PATH: directory, PATHEXT: ".EXE" },
+						platform: "win32",
+					}),
+				),
+			),
+		);
+		const location = await Effect.runPromise(service.Locate);
+
+		expect(Option.getOrThrow(location).path.toLowerCase()).toBe(
+			(await fs.realpath(git_path)).toLowerCase(),
+		);
 	});
 });

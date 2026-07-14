@@ -1,22 +1,31 @@
 import { Buffer } from "node:buffer";
+import { dirname } from "node:path";
 
-import { Effect, Layer, Option } from "effect";
+import { NodeCrypto, NodeFileSystem, NodePath } from "@effect/platform-node-shared";
+import { Cause, Deferred, Effect, Exit, Fiber, FileSystem, Layer, Option, Path } from "effect";
 import { describe, expect, it } from "vitest";
 
 import {
 	GitHubCli,
 	GitHubCliError,
 	make_github_cli_layer,
+	type GitHubCliOptions,
 } from "../../modules/backend/src/git-provider/github/github-cli";
-import { GitHubCliExecutable } from "../../modules/backend/src/git-provider/github/github-cli-executable";
+import {
+	GitHubCliExecutable,
+	GitHubCliGitExecutable,
+} from "../../modules/backend/src/git-provider/github/github-cli-executable";
 import {
 	ProcessRunner,
 	ProcessRunnerError,
 	type ProcessRunnerInput,
 	type ProcessRunnerResult,
 } from "../../modules/backend/src/git/process-runner";
+import { NodeProcessRunnerLive } from "../../modules/backend/src/git/node-process-runner";
 
 const executable_path = "C:\\Program Files\\GitHub CLI\\gh.exe";
+const git_executable_path =
+	process.platform === "win32" ? "C:\\Program Files\\Git\\cmd\\git.exe" : "/usr/bin/git";
 
 function process_result(
 	stdout: string,
@@ -36,25 +45,101 @@ function process_result(
 	};
 }
 
-function executable_layer() {
-	return Layer.succeed(GitHubCliExecutable, {
-		Locate: Effect.succeed(Option.some({ path: executable_path })),
-	});
+const platform_layer = Layer.mergeAll(NodeCrypto.layer, NodeFileSystem.layer, NodePath.layer);
+
+function executable_layer(
+	gh_path = executable_path,
+	git_path: string | null = git_executable_path,
+) {
+	return Layer.mergeAll(
+		Layer.succeed(GitHubCliExecutable, {
+			Locate: Effect.succeed(Option.some({ path: gh_path })),
+		}),
+		Layer.succeed(GitHubCliGitExecutable, {
+			Locate: Effect.succeed(
+				git_path === null ? Option.none() : Option.some({ path: git_path }),
+			),
+		}),
+	);
 }
 
 async function make_cli(
 	run: (input: ProcessRunnerInput) => Effect.Effect<ProcessRunnerResult, ProcessRunnerError>,
+	options: Partial<GitHubCliOptions> = {},
+	locations: { readonly gh_path?: string; readonly git_path?: string | null } = {},
 ) {
+	const cwd = options.cwd ?? "C:\\artisan\\project";
+	const projects_root = options.projects_root ?? cwd;
+
 	return Effect.runPromise(
 		Effect.service(GitHubCli).pipe(
 			Effect.provide(
-				make_github_cli_layer({ cwd: "C:\\artisan\\project" }).pipe(
+				make_github_cli_layer({ ...options, cwd, projects_root }).pipe(
 					Layer.provide(Layer.succeed(ProcessRunner, { Run: run })),
-					Layer.provide(executable_layer()),
+					Layer.provide(executable_layer(locations.gh_path, locations.git_path)),
+					Layer.provide(platform_layer),
 				),
 			),
 		),
 	);
+}
+
+async function test_platform() {
+	return Effect.runPromise(
+		Effect.all({
+			file_system: Effect.service(FileSystem.FileSystem),
+			path_service: Effect.service(Path.Path),
+		}).pipe(Effect.provide(platform_layer)),
+	);
+}
+
+async function with_temporary_directory<A>(use: (root: string) => Promise<A>) {
+	const { file_system } = await test_platform();
+	const root = await Effect.runPromise(
+		file_system.makeTempDirectory({ prefix: "artisan-github-cli-test-" }),
+	);
+
+	try {
+		return await use(root);
+	} finally {
+		await Effect.runPromise(file_system.remove(root, { recursive: true }));
+	}
+}
+
+async function with_process_environment<A>(
+	environment: Readonly<Record<string, string>>,
+	use: () => Promise<A>,
+) {
+	const previous = Object.fromEntries(
+		Object.keys(environment).map((key) => [key, process.env[key]]),
+	);
+
+	for (const [key, value] of Object.entries(environment)) {
+		process.env[key] = value;
+	}
+
+	try {
+		return await use();
+	} finally {
+		for (const [key, value] of Object.entries(previous)) {
+			if (value === undefined) {
+				delete process.env[key];
+			} else {
+				process.env[key] = value;
+			}
+		}
+	}
+}
+
+async function with_clone_destination<A>(use: (destination_path: string) => Promise<A>) {
+	return with_temporary_directory(async (root) => {
+		const { file_system, path_service } = await test_platform();
+		const destination_path = path_service.join(root, "editor");
+
+		await Effect.runPromise(file_system.makeDirectory(destination_path));
+
+		return use(destination_path);
+	});
 }
 
 function auth_status() {
@@ -106,9 +191,16 @@ describe("GitHubCli", () => {
 				Effect.provide(
 					make_github_cli_layer({ cwd: "C:\\artisan\\project" }).pipe(
 						Layer.provide(
-							Layer.succeed(GitHubCliExecutable, {
-								Locate: Effect.succeed(Option.none()),
-							}),
+							Layer.mergeAll(
+								Layer.succeed(GitHubCliExecutable, {
+									Locate: Effect.succeed(Option.none()),
+								}),
+								Layer.succeed(GitHubCliGitExecutable, {
+									Locate: Effect.succeed(
+										Option.some({ path: git_executable_path }),
+									),
+								}),
+							),
 						),
 						Layer.provide(
 							Layer.succeed(ProcessRunner, {
@@ -118,6 +210,7 @@ describe("GitHubCli", () => {
 								},
 							}),
 						),
+						Layer.provide(platform_layer),
 					),
 				),
 			),
@@ -178,20 +271,21 @@ describe("GitHubCli", () => {
 		expect(calls).toHaveLength(2);
 		expect(calls.every((input) => input.command === executable_path)).toBe(true);
 		expect(calls.every((input) => input.cwd === "C:\\artisan\\project")).toBe(true);
-		expect(calls.map((input) => input.environment)).toEqual([
-			{
+		expect(calls.every((input) => input.environment_mode === "replace")).toBe(true);
+
+		for (const call of calls) {
+			expect(call.environment).toMatchObject({
 				GH_NO_UPDATE_NOTIFIER: "1",
 				GH_PAGER: "cat",
 				GH_PROMPT_DISABLED: "1",
+				GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null",
+				GIT_CONFIG_NOSYSTEM: "1",
 				NO_COLOR: "1",
-			},
-			{
-				GH_NO_UPDATE_NOTIFIER: "1",
-				GH_PAGER: "cat",
-				GH_PROMPT_DISABLED: "1",
-				NO_COLOR: "1",
-			},
-		]);
+			});
+			expect(call.environment).not.toHaveProperty("GH_TOKEN");
+			expect(call.environment).not.toHaveProperty("GH_ENTERPRISE_TOKEN");
+		}
+
 		expect(calls[1]?.args).toEqual(["auth", "status", "--json", "hosts"]);
 		expect(calls.some((input) => input.args.includes("--show-token"))).toBe(false);
 	});
@@ -401,6 +495,600 @@ describe("GitHubCli", () => {
 			});
 			expect(JSON.stringify(error)).not.toContain(test_case.output);
 		}
+	});
+
+	it("inspects one exact repository without extracting an account token", async () => {
+		const calls: Array<ProcessRunnerInput> = [];
+		const cli = await make_cli((input) => {
+			calls.push(input);
+
+			return Effect.succeed(
+				process_result(
+					JSON.stringify({
+						data: {
+							repository: repository("artisan/editor", "main", "WRITE"),
+							viewer: { login: "alice" },
+						},
+					}),
+				),
+			);
+		});
+
+		await expect(
+			Effect.runPromise(
+				cli.InspectRepository({
+					account_login: "alice",
+					host: "ghe.example",
+					name: "editor",
+					owner: "artisan",
+				}),
+			),
+		).resolves.toMatchObject({
+			repository: { name: "editor", native_id: "id-editor" },
+			viewer_login: "alice",
+		});
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.args.slice(0, 6)).toEqual([
+			"api",
+			"graphql",
+			"--hostname",
+			"ghe.example",
+			"--method",
+			"POST",
+		]);
+		expect(calls[0]?.args).toContain("owner=artisan");
+		expect(calls[0]?.args).toContain("name=editor");
+		expect(calls[0]?.environment).toMatchObject({ GH_HOST: "ghe.example" });
+		expect(calls[0]?.environment).not.toHaveProperty("GH_TOKEN");
+		expect(calls[0]?.environment).not.toHaveProperty("GH_ENTERPRISE_TOKEN");
+	});
+
+	it("distinguishes a missing pinned Git executable without spawning", async () => {
+		let spawn_count = 0;
+		const cli = await make_cli(
+			() => {
+				spawn_count += 1;
+
+				return Effect.succeed(process_result(""));
+			},
+			{},
+			{ git_path: null },
+		);
+		const error = await Effect.runPromise(
+			cli
+				.CloneRepository({
+					account_login: "alice",
+					destination_path: "C:\\Projects\\editor",
+					host: "github.com",
+					name: "editor",
+					owner: "artisan",
+				})
+				.pipe(Effect.scoped, Effect.flip),
+		);
+
+		expect(error).toMatchObject({
+			operation: "clone_repository",
+			reason: "git_dependency_missing",
+			retryable: false,
+		});
+		expect(spawn_count).toBe(0);
+	});
+
+	it("proves a real checkout and brokers selected-account credentials child to child", async () =>
+		with_temporary_directory(async (root) => {
+			const { file_system, path_service } = await test_platform();
+			const real_runner = await Effect.runPromise(
+				Effect.service(ProcessRunner).pipe(Effect.provide(NodeProcessRunnerLive)),
+			);
+			const source_path = path_service.join(root, "source.git");
+			const destination_path = path_service.join(root, "editor");
+			const credential_log_path = path_service.join(root, "credential-log.jsonl");
+			const auth_script_path = path_service.join(root, "auth");
+			const ambient_home = path_service.join(root, "ambient-home");
+			const ambient_gh_config = path_service.join(root, "ambient-gh-config");
+			const ambient_netrc = path_service.join(ambient_home, ".netrc");
+			const expected_url = "https://github.com/artisan/editor.git";
+			const calls: Array<ProcessRunnerInput> = [];
+			let clone_call: ProcessRunnerInput | undefined;
+			let template_path: string | undefined;
+
+			await Effect.runPromise(
+				Effect.all([
+					file_system.makeDirectory(ambient_home),
+					file_system.makeDirectory(ambient_gh_config),
+					file_system.makeDirectory(destination_path),
+				]),
+			);
+			await Effect.runPromise(
+				Effect.all([
+					file_system.writeFileString(
+						ambient_netrc,
+						"machine github.com login ambient password ambient-netrc-token\n",
+					),
+					file_system.writeFileString(
+						path_service.join(ambient_home, ".gitconfig"),
+						"[credential]\n\thelper = store\n",
+					),
+					file_system.writeFileString(
+						path_service.join(ambient_home, ".git-credentials"),
+						"https://ambient:ambient-store-token@github.com\n",
+					),
+				]),
+			);
+			await Effect.runPromise(
+				file_system.writeFileString(
+					auth_script_path,
+					[
+						'const { appendFileSync } = require("node:fs");',
+						`appendFileSync(${JSON.stringify(credential_log_path)}, JSON.stringify({ args: process.argv.slice(2), gh_config_dir: process.env.GH_CONFIG_DIR }) + "\\n");`,
+						'process.stdout.write("selected-account-token\\n");',
+					].join("\n"),
+					{ mode: 0o700 },
+				),
+			);
+
+			const initialized = await Effect.runPromise(
+				real_runner.Run({
+					args: ["init", "--bare", "--quiet", source_path],
+					command: git_executable_path,
+					cwd: root,
+					max_stderr_bytes: 64 * 1024,
+					max_stdout_bytes: 64 * 1024,
+				}),
+			);
+
+			expect(initialized.exit_code).toBe(0);
+
+			const cli = await with_process_environment(
+				{
+					APPDATA: path_service.join(ambient_home, "appdata"),
+					CURL_HOME: ambient_home,
+					GH_CONFIG_DIR: ambient_gh_config,
+					HOME: ambient_home,
+					NETRC: ambient_netrc,
+					USERPROFILE: ambient_home,
+					XDG_CONFIG_HOME: path_service.join(ambient_home, "xdg"),
+				},
+				() =>
+					make_cli(
+						(input) => {
+							calls.push(input);
+
+							if (
+								input.command !== git_executable_path ||
+								input.args[0] !== "clone"
+							) {
+								return real_runner.Run(input);
+							}
+
+							clone_call = input;
+							template_path = input.args
+								.find((argument) => argument.startsWith("--template="))
+								?.slice("--template=".length);
+
+							const separator = input.args.indexOf("--");
+
+							if (
+								separator < 0 ||
+								input.args[separator + 2] !== destination_path ||
+								input.environment === undefined
+							) {
+								return Effect.die(
+									"Clone command did not retain its exact destination",
+								);
+							}
+
+							const clone_environment = input.environment;
+							const local_arguments = input.args.map((argument, index) =>
+								index === separator + 1 ? source_path : argument,
+							);
+
+							return real_runner.Run({ ...input, args: local_arguments }).pipe(
+								Effect.flatMap((result) =>
+									result.exit_code !== 0
+										? Effect.succeed(result)
+										: real_runner
+												.Run({
+													args: [
+														"-C",
+														destination_path,
+														"config",
+														"--local",
+														"remote.origin.url",
+														expected_url,
+													],
+													command: git_executable_path,
+													cwd: root,
+													environment: clone_environment,
+													environment_mode: "replace",
+													max_stderr_bytes: 64 * 1024,
+													max_stdout_bytes: 64 * 1024,
+												})
+												.pipe(
+													Effect.flatMap((configured) =>
+														configured.exit_code === 0
+															? Effect.succeed(result)
+															: Effect.die(
+																	"Fixture could not restore the approved origin",
+																),
+													),
+												),
+								),
+							);
+						},
+						{ cwd: root },
+						{ gh_path: process.execPath },
+					),
+			);
+			const result = await Effect.runPromise(
+				Effect.gen(function* () {
+					const execution = yield* cli.CloneRepository({
+						account_login: "alice",
+						destination_path,
+						host: "github.com",
+						name: "editor",
+						owner: "artisan",
+					});
+
+					yield* execution.VerifyCheckout;
+
+					return {
+						canonical_root: execution.canonical_root,
+						output_complete: execution.output_complete,
+					};
+				}).pipe(Effect.scoped),
+			);
+			const canonical_root = await Effect.runPromise(file_system.realPath(destination_path));
+
+			if (
+				clone_call === undefined ||
+				template_path === undefined ||
+				clone_call.environment === undefined
+			) {
+				throw new Error("Clone execution was not captured");
+			}
+
+			const clone_environment = clone_call.environment;
+
+			expect(result).toEqual({ canonical_root, output_complete: true });
+			expect(clone_call.args).toEqual([
+				"clone",
+				`--template=${template_path}`,
+				"--no-recurse-submodules",
+				"--origin=origin",
+				"--",
+				expected_url,
+				canonical_root,
+			]);
+			expect(clone_call.command).toBe(git_executable_path);
+			expect(clone_call.cwd).toBe(root);
+			expect(clone_environment).toMatchObject({
+				ARTISAN_GH_ACCOUNT: "alice",
+				ARTISAN_GH_CONFIG_DIR: ambient_gh_config,
+				ARTISAN_GH_EXECUTABLE:
+					process.platform === "win32"
+						? process.execPath.replaceAll("\\", "/")
+						: process.execPath,
+				ARTISAN_GH_HOST: "github.com",
+				APPDATA: path_service.join(template_path, "appdata"),
+				GH_CONFIG_DIR: undefined,
+				GIT_CONFIG_COUNT: "4",
+				GIT_CONFIG_KEY_0: "core.hooksPath",
+				GIT_CONFIG_KEY_1: "credential.helper",
+				GIT_CONFIG_KEY_2: "credential.helper",
+				GIT_CONFIG_KEY_3: "http.followRedirects",
+				GIT_CONFIG_VALUE_0: process.platform === "win32" ? "NUL" : "/dev/null",
+				GIT_CONFIG_VALUE_1: "",
+				GIT_CONFIG_VALUE_3: "false",
+				GIT_TERMINAL_PROMPT: "0",
+				HOME: template_path,
+				HOMEDRIVE: undefined,
+				HOMEPATH: undefined,
+				NETRC: path_service.join(template_path, ".netrc"),
+				PATH: dirname(git_executable_path),
+				USERPROFILE: template_path,
+				XDG_CONFIG_HOME: path_service.join(template_path, "xdg"),
+			});
+			expect(clone_environment).not.toHaveProperty("CURL_HOME");
+			expect(clone_environment.NETRC).not.toBe(ambient_netrc);
+			expect(clone_environment.GIT_CONFIG_VALUE_2).toContain(
+				'"$ARTISAN_GH_EXECUTABLE" auth token',
+			);
+			expect(clone_environment).not.toHaveProperty("GH_TOKEN");
+			expect(clone_environment).not.toHaveProperty("GH_ENTERPRISE_TOKEN");
+			expect(clone_call.args.join(" ")).not.toMatch(/token|credential|password/iu);
+			expect(await Effect.runPromise(file_system.exists(template_path))).toBe(false);
+			expect(
+				await Effect.runPromise(
+					file_system.readFileString(
+						path_service.join(destination_path, ".git", "artisan-clone-receipt"),
+					),
+				),
+			).toMatch(/^[0-9a-f-]{36}\n$/u);
+
+			const credential = await Effect.runPromise(
+				real_runner.Run({
+					args: ["credential", "fill"],
+					command: git_executable_path,
+					cwd: root,
+					environment: clone_environment,
+					environment_mode: "replace",
+					max_stderr_bytes: 64 * 1024,
+					max_stdout_bytes: 64 * 1024,
+					stdin: Buffer.from("protocol=https\nhost=github.com\n\n"),
+				}),
+			);
+
+			expect(credential.exit_code).toBe(0);
+			expect(Buffer.from(credential.stdout).toString("utf8")).toContain(
+				"username=x-access-token\npassword=selected-account-token\n",
+			);
+			expect(Buffer.from(credential.stdout).toString("utf8")).not.toMatch(
+				/ambient-(?:netrc|store)-token/u,
+			);
+			expect(await Effect.runPromise(file_system.readFileString(credential_log_path))).toBe(
+				`${JSON.stringify({
+					args: ["token", "--hostname", "github.com", "--user", "alice"],
+					gh_config_dir: clone_environment.ARTISAN_GH_CONFIG_DIR,
+				})}\n`,
+			);
+
+			const ignored = await Effect.runPromise(
+				real_runner.Run({
+					args: ["credential", "approve"],
+					command: git_executable_path,
+					cwd: root,
+					environment: clone_environment,
+					environment_mode: "replace",
+					max_stderr_bytes: 64 * 1024,
+					max_stdout_bytes: 64 * 1024,
+					stdin: Buffer.from(
+						"protocol=https\nhost=github.com\nusername=x-access-token\npassword=ignored\n\n",
+					),
+				}),
+			);
+			const wrong_host = await Effect.runPromise(
+				real_runner.Run({
+					args: ["credential", "fill"],
+					command: git_executable_path,
+					cwd: root,
+					environment: clone_environment,
+					environment_mode: "replace",
+					max_stderr_bytes: 64 * 1024,
+					max_stdout_bytes: 64 * 1024,
+					stdin: Buffer.from("protocol=https\nhost=elsewhere.example\n\n"),
+				}),
+			);
+			const wrong_protocol = await Effect.runPromise(
+				real_runner.Run({
+					args: ["credential", "fill"],
+					command: git_executable_path,
+					cwd: root,
+					environment: clone_environment,
+					environment_mode: "replace",
+					max_stderr_bytes: 64 * 1024,
+					max_stdout_bytes: 64 * 1024,
+					stdin: Buffer.from("protocol=http\nhost=github.com\n\n"),
+				}),
+			);
+
+			expect(ignored.exit_code).toBe(0);
+			expect(wrong_host.exit_code).not.toBe(0);
+			expect(wrong_protocol.exit_code).not.toBe(0);
+			expect(await Effect.runPromise(file_system.readFileString(credential_log_path))).toBe(
+				`${JSON.stringify({
+					args: ["token", "--hostname", "github.com", "--user", "alice"],
+					gh_config_dir: clone_environment.ARTISAN_GH_CONFIG_DIR,
+				})}\n`,
+			);
+		}));
+
+	it("rejects a missing destination before spawning Git", async () => {
+		await with_temporary_directory(async (root) => {
+			const { path_service } = await test_platform();
+			let spawn_count = 0;
+			const cli = await make_cli(
+				() => {
+					spawn_count += 1;
+
+					return Effect.succeed(process_result(""));
+				},
+				{ cwd: root },
+			);
+			const error = await Effect.runPromise(
+				cli
+					.CloneRepository({
+						account_login: "alice",
+						destination_path: path_service.join(root, "missing"),
+						host: "github.com",
+						name: "editor",
+						owner: "artisan",
+					})
+					.pipe(Effect.scoped, Effect.flip),
+			);
+
+			expect(error).toMatchObject({
+				operation: "clone_repository",
+				reason: "invalid_destination",
+				retryable: false,
+			});
+			expect(spawn_count).toBe(0);
+		});
+	});
+
+	it("rejects an empty destination outside the configured projects root", async () => {
+		await with_temporary_directory(async (root) => {
+			const { file_system, path_service } = await test_platform();
+			const projects_root = path_service.join(root, "projects");
+			const destination_path = path_service.join(root, "outside");
+			let spawn_count = 0;
+
+			await Effect.runPromise(file_system.makeDirectory(projects_root));
+			await Effect.runPromise(file_system.makeDirectory(destination_path));
+
+			const cli = await make_cli(
+				() => {
+					spawn_count += 1;
+
+					return Effect.succeed(process_result(""));
+				},
+				{ cwd: root, projects_root },
+			);
+			const error = await Effect.runPromise(
+				cli
+					.CloneRepository({
+						account_login: "alice",
+						destination_path,
+						host: "github.com",
+						name: "editor",
+						owner: "artisan",
+					})
+					.pipe(Effect.scoped, Effect.flip),
+			);
+
+			expect(error).toMatchObject({
+				operation: "clone_repository",
+				reason: "invalid_destination",
+				retryable: false,
+			});
+			expect(spawn_count).toBe(0);
+		});
+	});
+
+	it("quarantines a destination replacement after Git reports success", async () => {
+		await with_clone_destination(async (destination_path) => {
+			const { file_system } = await test_platform();
+			let spawn_count = 0;
+			const cli = await make_cli(
+				() => {
+					spawn_count += 1;
+
+					return file_system
+						.remove(destination_path, { recursive: true })
+						.pipe(
+							Effect.andThen(file_system.makeDirectory(destination_path)),
+							Effect.as(process_result("")),
+							Effect.orDie,
+						);
+				},
+				{ cwd: dirname(destination_path) },
+			);
+			const error = await Effect.runPromise(
+				cli
+					.CloneRepository({
+						account_login: "alice",
+						destination_path,
+						host: "github.com",
+						name: "editor",
+						owner: "artisan",
+					})
+					.pipe(Effect.scoped, Effect.flip),
+			);
+
+			expect(error).toMatchObject({
+				operation: "clone_repository",
+				reason: "outcome_unknown",
+				retryable: false,
+			});
+			expect(spawn_count).toBe(1);
+		});
+	});
+
+	it("quarantines every nonzero clone exit without retaining provider output", async () => {
+		await with_clone_destination(async (destination_path) => {
+			const raw_output = "fatal: authentication failed secret-provider-output";
+			const cli = await make_cli(
+				() =>
+					Effect.succeed(
+						process_result("", {
+							exit_code: 1,
+							stderr: Buffer.from(raw_output),
+						}),
+					),
+				{ cwd: dirname(destination_path) },
+			);
+			const error = await Effect.runPromise(
+				cli
+					.CloneRepository({
+						account_login: "alice",
+						destination_path,
+						host: "github.com",
+						name: "editor",
+						owner: "artisan",
+					})
+					.pipe(Effect.scoped, Effect.flip),
+			);
+
+			expect(error).toMatchObject({
+				operation: "clone_repository",
+				reason: "outcome_unknown",
+				retryable: false,
+			});
+			expect(JSON.stringify(error)).not.toContain(raw_output);
+		});
+	});
+
+	it("quarantines a clone timeout as an unknown outcome", async () => {
+		await with_clone_destination(async (destination_path) => {
+			const cli = await make_cli(() => Effect.never, {
+				clone_timeout_ms: 1,
+				cwd: dirname(destination_path),
+			});
+			const error = await Effect.runPromise(
+				cli
+					.CloneRepository({
+						account_login: "alice",
+						destination_path,
+						host: "github.com",
+						name: "editor",
+						owner: "artisan",
+					})
+					.pipe(Effect.scoped, Effect.flip),
+			);
+
+			expect(error).toMatchObject({
+				operation: "clone_repository",
+				reason: "outcome_unknown",
+				retryable: false,
+			});
+		});
+	});
+
+	it("converts external clone cancellation into an unknown outcome", async () => {
+		await with_clone_destination(async (destination_path) => {
+			const started = await Effect.runPromise(Deferred.make<void>());
+			const cli = await make_cli(
+				() => Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
+				{ cwd: dirname(destination_path) },
+			);
+			const error = await Effect.runPromise(
+				Effect.gen(function* () {
+					const fiber = yield* Effect.forkChild(
+						cli.CloneRepository({
+							account_login: "alice",
+							destination_path,
+							host: "github.com",
+							name: "editor",
+							owner: "artisan",
+						}),
+					);
+
+					yield* Deferred.await(started);
+					yield* Fiber.interrupt(fiber);
+					const exit = yield* Fiber.await(fiber);
+
+					return Exit.isFailure(exit)
+						? Cause.squash(exit.cause)
+						: yield* Effect.die("Cancellation must fail the clone");
+				}).pipe(Effect.scoped),
+			);
+
+			expect(error).toMatchObject({
+				operation: "clone_repository",
+				reason: "outcome_unknown",
+				retryable: false,
+			});
+		});
 	});
 });
 
