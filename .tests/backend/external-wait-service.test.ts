@@ -182,6 +182,7 @@ function runtime(
 		Refresh: () => Effect.die("unused"),
 	});
 	const dispatcher = Layer.succeed(ExternalWaitDispatcher, {
+		QuiesceThread: () => Effect.void,
 		RunOnce: Effect.suspend(() => {
 			dispatcher_state.calls += 1;
 

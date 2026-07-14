@@ -740,7 +740,9 @@ describe("ExternalWaitRepository", () => {
 			expect(result.expired._tag).toBe("Failure");
 			expect(result.before_close).toEqual([]);
 			expect(result.repeated_source_close).toEqual(result.source_closed);
-			expect(result.discovered).toEqual([result.wake.outbox_id]);
+			expect(result.discovered).toEqual([
+				{ outbox_id: result.wake.outbox_id, thread_id: "thread_1" },
+			]);
 			expect(Option.isSome(result.first_claim)).toBe(true);
 			expect(Option.isNone(result.blocked_claim)).toBe(true);
 			expect(Option.isSome(result.second_claim)).toBe(true);
@@ -1774,7 +1776,7 @@ describe("ExternalWaitRepository", () => {
 				}),
 			);
 
-			expect(result.discovered).toEqual([outbox_id]);
+			expect(result.discovered).toEqual([{ outbox_id, thread_id: "thread_1" }]);
 			expect(Option.isSome(result.claim)).toBe(true);
 		} finally {
 			await restarted.dispose();

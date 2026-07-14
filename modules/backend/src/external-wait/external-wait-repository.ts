@@ -201,6 +201,11 @@ export interface ExternalWaitWake {
 	readonly trigger_fingerprint: string;
 }
 
+export interface ExternalWaitWakeDiscovery {
+	readonly outbox_id: string;
+	readonly thread_id: string;
+}
+
 export interface ExternalWaitManualResumeAcceptance extends ExternalWaitAcceptance {
 	readonly wake: ExternalWaitWake;
 }
@@ -269,7 +274,7 @@ export class ExternalWaitRepository extends Context.Service<
 		) => Effect.Effect<ExternalWaitWake, ExternalWaitRepositoryError>;
 		readonly DiscoverWakes: (
 			input: typeof DiscoverInput.Type,
-		) => Effect.Effect<ReadonlyArray<string>, ExternalWaitRepositoryError>;
+		) => Effect.Effect<ReadonlyArray<ExternalWaitWakeDiscovery>, ExternalWaitRepositoryError>;
 		readonly ClaimWake: (
 			input: typeof WakeClaim.Type,
 		) => Effect.Effect<Option.Option<ExternalWaitWakeClaim>, ExternalWaitRepositoryError>;
@@ -1821,7 +1826,10 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 			Schema.decodeUnknownEffect(DiscoverInput, { onExcessProperty: "error" })(input).pipe(
 				Effect.flatMap((decoded) =>
 					database.client
-						.select({ outbox_id: ExternalWaitWakeOutbox.outbox_id })
+						.select({
+							outbox_id: ExternalWaitWakeOutbox.outbox_id,
+							thread_id: ExternalWaits.thread_id,
+						})
 						.from(ExternalWaitWakeOutbox)
 						.innerJoin(
 							ExternalWaits,
@@ -1847,7 +1855,6 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 						)
 						.limit(64),
 				),
-				Effect.map((rows) => rows.map((row) => row.outbox_id)),
 				Effect.mapError(normalize_error),
 			);
 

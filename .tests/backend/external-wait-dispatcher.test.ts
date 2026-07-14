@@ -1,4 +1,4 @@
-import { Deferred, Effect, Layer, ManagedRuntime, Option } from "effect";
+import { Deferred, Effect, Fiber, Layer, ManagedRuntime, Option } from "effect";
 import { TestClock } from "effect/testing";
 import { describe, expect, it } from "vitest";
 
@@ -24,7 +24,8 @@ import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metad
 interface DispatcherState {
 	active_schedules: number;
 	claims: Map<string, ExternalWaitWakeClaim>;
-	discovered_outbox_ids: ReadonlyArray<string>;
+	claim_inputs: Array<string>;
+	discovered_wakes: ReadonlyArray<{ outbox_id: string; thread_id: string }>;
 	graph_notifications: number;
 	materialize?: (
 		input: Parameters<(typeof ExternalWaitRepository.Service)["MaterializeWake"]>[0],
@@ -49,6 +50,10 @@ function make_claim(engine_id: string, outbox_id: string): ExternalWaitWakeClaim
 	} as ExternalWaitWakeClaim;
 }
 
+function make_discovery(outbox_id: string, thread_id: string) {
+	return { outbox_id, thread_id };
+}
+
 function make_engine(engine_id: string, resume_supported: boolean): Engine {
 	return {
 		Descriptor: {
@@ -64,12 +69,13 @@ function make_runtime(state: DispatcherState, engines: ReadonlyArray<Engine> = [
 	const repository = {
 		ClaimWake: (input) =>
 			Effect.sync(() => {
+				state.claim_inputs.push(input.outbox_id);
 				const claim = state.claims.get(input.outbox_id);
 				state.claims.delete(input.outbox_id);
 
 				return claim === undefined ? Option.none() : Option.some(claim);
 			}),
-		DiscoverWakes: () => Effect.succeed(state.discovered_outbox_ids),
+		DiscoverWakes: () => Effect.succeed(state.discovered_wakes),
 		MaterializeWake: (input) => {
 			state.materialize_inputs.push(input);
 
@@ -154,7 +160,8 @@ function make_state(): DispatcherState {
 	return {
 		active_schedules: 0,
 		claims: new Map(),
-		discovered_outbox_ids: [],
+		claim_inputs: [],
+		discovered_wakes: [],
 		graph_notifications: 0,
 		materialize_inputs: [],
 		notifications: 0,
@@ -164,6 +171,8 @@ function make_state(): DispatcherState {
 }
 
 const RunOnce = Effect.flatMap(ExternalWaitDispatcher, (dispatcher) => dispatcher.RunOnce);
+const QuiesceThread = (thread_id: string) =>
+	Effect.flatMap(ExternalWaitDispatcher, (dispatcher) => dispatcher.QuiesceThread(thread_id));
 const StartDispatcher = Effect.flatMap(ExternalWaitDispatcher, () => Effect.void);
 
 describe("ExternalWaitDispatcher", () => {
@@ -204,7 +213,7 @@ describe("ExternalWaitDispatcher", () => {
 		try {
 			await runtime.runPromise(StartDispatcher);
 			state.claims.set("outbox_1", make_claim("engine_1", "outbox_1"));
-			state.discovered_outbox_ids = ["outbox_1"];
+			state.discovered_wakes = [make_discovery("outbox_1", "thread_1")];
 
 			const result = await runtime.runPromise(RunOnce);
 
@@ -232,7 +241,7 @@ describe("ExternalWaitDispatcher", () => {
 		try {
 			await runtime.runPromise(StartDispatcher);
 			state.claims.set("outbox_1", make_claim("removed_engine", "outbox_1"));
-			state.discovered_outbox_ids = ["outbox_1"];
+			state.discovered_wakes = [make_discovery("outbox_1", "thread_1")];
 
 			const result = await runtime.runPromise(RunOnce);
 
@@ -255,7 +264,10 @@ describe("ExternalWaitDispatcher", () => {
 
 			state.claims.set("outbox_1", make_claim("engine_1", "outbox_1"));
 			state.claims.set("outbox_2", make_claim("engine_1", "outbox_2"));
-			state.discovered_outbox_ids = ["outbox_1", "outbox_2"];
+			state.discovered_wakes = [
+				make_discovery("outbox_1", "thread_1"),
+				make_discovery("outbox_2", "thread_1"),
+			];
 			state.materialize = (input) =>
 				input.outbox_id === "outbox_1"
 					? Effect.fail(new ExternalWaitInvariant({ message: "materialization failed" }))
@@ -279,7 +291,7 @@ describe("ExternalWaitDispatcher", () => {
 	it("starts through a corrupt wake and dispatches later valid work", async () => {
 		const state = make_state();
 		state.claims.set("corrupt_outbox", make_claim("engine_1", "corrupt_outbox"));
-		state.discovered_outbox_ids = ["corrupt_outbox"];
+		state.discovered_wakes = [make_discovery("corrupt_outbox", "thread_1")];
 		state.materialize = () =>
 			Effect.fail(new ExternalWaitInvariant({ message: "materialization failed" }));
 		const runtime = make_runtime(state, [make_engine("engine_1", true)]);
@@ -292,7 +304,7 @@ describe("ExternalWaitDispatcher", () => {
 			expect(state.graph_notifications).toBe(1);
 
 			state.claims.set("valid_outbox", make_claim("engine_1", "valid_outbox"));
-			state.discovered_outbox_ids = ["valid_outbox"];
+			state.discovered_wakes = [make_discovery("valid_outbox", "thread_1")];
 			state.materialize = () =>
 				Effect.succeed({ status: "created" } as ExternalWaitMaterialization);
 
@@ -319,7 +331,7 @@ describe("ExternalWaitDispatcher", () => {
 		try {
 			await runtime.runPromise(StartDispatcher);
 			state.claims.set("outbox_1", make_claim("engine_1", "outbox_1"));
-			state.discovered_outbox_ids = ["outbox_1"];
+			state.discovered_wakes = [make_discovery("outbox_1", "thread_1")];
 			state.materialize = () =>
 				Effect.sync(() => {
 					active_materializations += 1;
@@ -350,6 +362,110 @@ describe("ExternalWaitDispatcher", () => {
 
 			expect(state.materialize_inputs).toHaveLength(2);
 			expect(maximum_materializations).toBe(1);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("waits for an admitted materialization before quiescing its thread", async () => {
+		const started = await Effect.runPromise(Deferred.make<void>());
+		const release = await Effect.runPromise(Deferred.make<void>());
+		const state = make_state();
+		const events: Array<string> = [];
+		const runtime = make_runtime(state, [make_engine("engine_1", true)]);
+
+		try {
+			await runtime.runPromise(StartDispatcher);
+			state.claims.set("outbox_1", make_claim("engine_1", "outbox_1"));
+			state.discovered_wakes = [make_discovery("outbox_1", "thread_1")];
+			state.materialize = () =>
+				Effect.sync(() => {
+					events.push("materialization_started");
+				}).pipe(
+					Effect.andThen(Deferred.succeed(started, undefined)),
+					Effect.andThen(Deferred.await(release)),
+					Effect.andThen(
+						Effect.sync(() => {
+							events.push("materialization_finished");
+						}),
+					),
+					Effect.as({ status: "created" } as ExternalWaitMaterialization),
+				);
+
+			await runtime.runPromise(
+				Effect.gen(function* () {
+					const dispatch = yield* Effect.forkChild(RunOnce, { startImmediately: true });
+					yield* Deferred.await(started);
+
+					const quiesce = yield* Effect.forkChild(
+						QuiesceThread("thread_1").pipe(
+							Effect.andThen(
+								Effect.sync(() => {
+									events.push("quiesced");
+								}),
+							),
+						),
+						{ startImmediately: true },
+					);
+					yield* Effect.yieldNow;
+
+					yield* Deferred.succeed(release, undefined);
+					yield* Fiber.join(dispatch);
+					yield* Fiber.join(quiesce);
+				}),
+			);
+
+			expect(state.materialize_inputs).toHaveLength(1);
+			expect(events).toEqual([
+				"materialization_started",
+				"materialization_finished",
+				"quiesced",
+			]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("skips a later discovered wake after its thread is quiesced", async () => {
+		const state = make_state();
+		const runtime = make_runtime(state, [make_engine("engine_1", true)]);
+
+		try {
+			await runtime.runPromise(StartDispatcher);
+			await runtime.runPromise(QuiesceThread("thread_1"));
+
+			state.claims.set("outbox_1", make_claim("engine_1", "outbox_1"));
+			state.discovered_wakes = [make_discovery("outbox_1", "thread_1")];
+
+			const result = await runtime.runPromise(RunOnce);
+
+			expect(result).toEqual({
+				materialized_outbox_ids: [],
+				released_or_skipped_outbox_ids: ["outbox_1"],
+			});
+			expect(state.claim_inputs).toEqual([]);
+			expect(state.materialize_inputs).toEqual([]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("dispatches a different thread while one thread is quiesced", async () => {
+		const state = make_state();
+		const runtime = make_runtime(state, [make_engine("engine_1", true)]);
+
+		try {
+			await runtime.runPromise(StartDispatcher);
+			await runtime.runPromise(QuiesceThread("thread_1"));
+
+			state.claims.set("outbox_2", make_claim("engine_1", "outbox_2"));
+			state.discovered_wakes = [make_discovery("outbox_2", "thread_2")];
+
+			const result = await runtime.runPromise(RunOnce);
+
+			expect(result.materialized_outbox_ids).toEqual(["outbox_2"]);
+			expect(state.claim_inputs).toEqual(["outbox_2"]);
+			expect(state.materialize_inputs.map((input) => input.outbox_id)).toEqual(["outbox_2"]);
 		} finally {
 			await runtime.dispose();
 		}

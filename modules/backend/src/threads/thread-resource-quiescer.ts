@@ -1,5 +1,6 @@
 import { Context, Data, Effect, Layer } from "effect";
 
+import { ExternalWaitDispatcher } from "../external-wait/external-wait-dispatcher";
 import { AgentGraphOrchestrator } from "../orchestration/agent-graph-orchestrator";
 import { AgentOrchestrator } from "../orchestration/agent-orchestrator";
 import { HostedProjectCloneCoordinator } from "../projects/hosted-project-clone-coordinator";
@@ -28,6 +29,7 @@ export class ThreadResourceQuiescer extends Context.Service<
 export const ThreadResourceQuiescerLive = Layer.effect(
 	ThreadResourceQuiescer,
 	Effect.gen(function* () {
+		const external_waits = yield* ExternalWaitDispatcher;
 		const graph = yield* AgentGraphOrchestrator;
 		const hosted_project_clones = yield* HostedProjectCloneCoordinator;
 		const orchestration = yield* AgentOrchestrator;
@@ -38,6 +40,7 @@ export const ThreadResourceQuiescerLive = Layer.effect(
 		const Quiesce = (thread_id: string) =>
 			Effect.all(
 				[
+					external_waits.QuiesceThread(thread_id),
 					graph.QuiesceThread(thread_id),
 					hosted_project_clones.QuiesceThread(thread_id),
 					orchestration.QuiesceThread(thread_id),

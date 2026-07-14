@@ -478,6 +478,7 @@ export function make_backend_layer(options: BackendOptions) {
 	const resource_quiescer =
 		options.thread_resource_quiescer ??
 		ThreadResourceQuiescerLive.pipe(
+			Layer.provideMerge(external_wait_dispatch),
 			Layer.provideMerge(orchestration),
 			Layer.provideMerge(graph),
 			Layer.provideMerge(hosted_project_clones),
