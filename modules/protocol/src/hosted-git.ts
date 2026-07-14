@@ -212,11 +212,23 @@ export const HostedGitCheck = Schema.Struct({
 
 export type HostedGitCheck = typeof HostedGitCheck.Type;
 
+/** Distinguishes bounded provider-owned text from a check that supplied no value. */
+export const HostedGitCheckFailureText = Schema.Union([
+	Schema.Struct({ _tag: Schema.Literal("unavailable") }),
+	Schema.Struct({
+		_tag: Schema.Literal("available"),
+		truncated: Schema.Boolean,
+		untrusted_text: HostedGitUntrustedText,
+	}),
+]);
+
+export type HostedGitCheckFailureText = typeof HostedGitCheckFailureText.Type;
+
 /** Projects bounded provider-owned output for one failed check without treating it as instructions. */
 export const HostedGitCheckFailureOutput = Schema.Struct({
+	summary: HostedGitCheckFailureText,
+	text: HostedGitCheckFailureText,
 	title: Schema.optional(HostedGitTitle),
-	untrusted_summary: Schema.optional(HostedGitUntrustedText),
-	untrusted_text: Schema.optional(HostedGitUntrustedText),
 });
 
 export type HostedGitCheckFailureOutput = typeof HostedGitCheckFailureOutput.Type;

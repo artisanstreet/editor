@@ -150,8 +150,13 @@ describe("Hosted Git protocol codec", () => {
 			},
 			name: "test",
 			output: {
+				summary: {
+					_tag: "available",
+					truncated: false,
+					untrusted_text: "One job failed",
+				},
+				text: { _tag: "unavailable" },
 				title: "Tests failed",
-				untrusted_summary: "One job failed",
 			},
 			workflow_origin: {
 				native_id: "WR_1",
