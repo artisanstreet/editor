@@ -6,6 +6,8 @@ import {
 	type HostedProjectCloneApprovalRespondEnvelope,
 	HostedProjectCloneRequest,
 	type HostedProjectCloneRequestEnvelope,
+	type HostedGitSnapshotQueryEnvelope,
+	type HostedGitSnapshotRefreshEnvelope,
 	type WorkspaceChangeListQueryEnvelope,
 	type WorkspaceChangeDiffQueryEnvelope,
 	type WorkspaceChangeReviewEnvelope,
@@ -48,6 +50,8 @@ import {
 	type ArtisanHostedProjectCloneApprovalInput,
 	type ArtisanHostedProjectCloneApprovalResponseInput,
 	type ArtisanHostedProjectCloneInput,
+	type ArtisanHostedGitSnapshotInput,
+	type ArtisanHostedGitSnapshotRefreshInput,
 	type ArtisanGlobalGuidanceDriftInput,
 	type ArtisanGlobalGuidanceRetryInput,
 	type ArtisanGlobalGuidanceSelectionInput,
@@ -314,6 +318,23 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						? result.payload
 						: yield* Effect.die("workspace Git session response narrowed incorrectly");
 				});
+			const get_hosted_git_snapshot = (input: ArtisanHostedGitSnapshotInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: HostedGitSnapshotQueryEnvelope = {
+						...trace,
+						kind: "hosted.git.snapshot.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"hosted.git.snapshot.query.result",
+					);
+
+					return result.kind === "hosted.git.snapshot.query.result"
+						? result.payload
+						: yield* Effect.die("hosted Git snapshot response narrowed incorrectly");
+				});
 			const get_workspace_git_checkout_approval = (
 				input: WorkspaceGitCheckoutApprovalQuery,
 			) =>
@@ -389,6 +410,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				| WorkspaceGitMutationApprovalRespondEnvelope
 				| WorkspaceGitMutationRequestEnvelope
 				| WorkspaceGitSessionRefreshEnvelope
+				| HostedGitSnapshotRefreshEnvelope
 				| WorkspaceFileReplaceEnvelope;
 			const send_workspace_mutation = (envelope: WorkspaceMutationEnvelope) =>
 				Effect.gen(function* () {
@@ -468,6 +490,19 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					const envelope: WorkspaceGitSessionRefreshEnvelope = {
 						...trace,
 						kind: "workspace.git.session.refresh",
+						message_id: input.command_id ?? trace.message_id,
+						payload: { workspace_id: input.workspace_id },
+						thread_id: input.thread_id,
+					};
+
+					return yield* send_workspace_mutation(envelope);
+				});
+			const refresh_hosted_git_snapshot = (input: ArtisanHostedGitSnapshotRefreshInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: HostedGitSnapshotRefreshEnvelope = {
+						...trace,
+						kind: "hosted.git.snapshot.refresh",
 						message_id: input.command_id ?? trace.message_id,
 						payload: { workspace_id: input.workspace_id },
 						thread_id: input.thread_id,
@@ -927,6 +962,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				Events: subscriptions.Events,
 				GetOrchestrationGraph: get_orchestration_graph,
 				GetHostedProjectCloneApproval: get_hosted_project_clone_approval,
+				GetHostedGitSnapshot: get_hosted_git_snapshot,
 				GetGlobalGuidance: get_global_guidance,
 				GetModelBehaviour: get_model_behaviour,
 				GetThreadRetentionPolicy: get_thread_retention_policy,
@@ -949,6 +985,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				ReplaceWorkspaceFile: replace_workspace_file,
 				RespondWorkspaceReplaceApproval: respond_workspace_replace_approval,
 				RefreshWorkspaceGitSession: refresh_workspace_git_session,
+				RefreshHostedGitSnapshot: refresh_hosted_git_snapshot,
 				RequestWorkspaceGitCheckout: request_workspace_git_checkout,
 				RequestWorkspaceGitMutation: request_workspace_git_mutation,
 				RequestHostedProjectClone: request_hosted_project_clone,

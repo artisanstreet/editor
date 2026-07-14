@@ -42,6 +42,12 @@ import {
 	HostedProjectCloneRequest,
 } from "./hosted-project";
 import {
+	HostedGitSnapshotQuery,
+	HostedGitSnapshotQueryResult,
+	HostedGitSnapshotRefreshRequest,
+	HostedGitSnapshotUpdatedEvent,
+} from "./hosted-git";
+import {
 	Identifier,
 	IsoDateTime,
 	JournalSequence,
@@ -101,6 +107,7 @@ export * from "./guidance";
 export * from "./model-behaviour";
 export * from "./workspace-changes";
 export * from "./git-session";
+export * from "./hosted-git";
 
 const FrontendTraceMetadata = {
 	message_id: Identifier,
@@ -939,6 +946,7 @@ export const EventPayload = Schema.Union([
 	WorkspaceGitCheckoutApprovalUpdatedEvent,
 	WorkspaceGitMutationApprovalUpdatedEvent,
 	HostedProjectCloneApprovalUpdatedEvent,
+	HostedGitSnapshotUpdatedEvent,
 	ThreadMessageQueuedEvent,
 	ThreadMessageSteeringEvent,
 	RunLifecycleEvent,
@@ -1258,6 +1266,35 @@ export const WorkspaceGitSessionRefreshEnvelope = Schema.Struct({
 });
 
 export type WorkspaceGitSessionRefreshEnvelope = typeof WorkspaceGitSessionRefreshEnvelope.Type;
+
+/** Requests the latest durable hosted review and CI projection for one workspace. */
+export const HostedGitSnapshotQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("hosted.git.snapshot.query"),
+	payload: HostedGitSnapshotQuery,
+});
+
+export type HostedGitSnapshotQueryEnvelope = typeof HostedGitSnapshotQueryEnvelope.Type;
+
+/** Returns one correlated optional hosted review and CI projection. */
+export const HostedGitSnapshotQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("hosted.git.snapshot.query.result"),
+	payload: HostedGitSnapshotQueryResult,
+});
+
+export type HostedGitSnapshotQueryResultEnvelope = typeof HostedGitSnapshotQueryResultEnvelope.Type;
+
+/** Requests a fresh exact-head hosted review and CI observation. */
+export const HostedGitSnapshotRefreshEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("hosted.git.snapshot.refresh"),
+	payload: HostedGitSnapshotRefreshRequest,
+	thread_id: Identifier,
+});
+
+export type HostedGitSnapshotRefreshEnvelope = typeof HostedGitSnapshotRefreshEnvelope.Type;
 
 /** Requests a guarded checkout of a workspace branch. */
 export const WorkspaceGitCheckoutRequestEnvelope = Schema.Struct({
@@ -1703,6 +1740,8 @@ export const InboundControlEnvelope = Schema.Union([
 	WorkspaceReplaceApprovalRespondEnvelope,
 	WorkspaceGitSessionQueryEnvelope,
 	WorkspaceGitSessionRefreshEnvelope,
+	HostedGitSnapshotQueryEnvelope,
+	HostedGitSnapshotRefreshEnvelope,
 	WorkspaceGitCheckoutRequestEnvelope,
 	WorkspaceGitCheckoutApprovalQueryEnvelope,
 	WorkspaceGitCheckoutApprovalRespondEnvelope,
@@ -1747,6 +1786,7 @@ export const OutboundControlEnvelope = Schema.Union([
 	WorkspaceChangeDiffQueryResultEnvelope,
 	WorkspaceReplaceApprovalQueryResultEnvelope,
 	WorkspaceGitSessionQueryResultEnvelope,
+	HostedGitSnapshotQueryResultEnvelope,
 	WorkspaceGitCheckoutApprovalQueryResultEnvelope,
 	WorkspaceGitMutationApprovalQueryResultEnvelope,
 	HostedProjectCloneApprovalQueryResultEnvelope,

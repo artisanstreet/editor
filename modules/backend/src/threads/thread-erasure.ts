@@ -12,6 +12,7 @@ import {
 	HostedProjectCloneApprovals,
 	HostedProjectCloneArtifacts,
 	HostedProjectCloneClaims,
+	HostedGitSnapshotOperations,
 	JournalCommands,
 	JournalEvents,
 	OrchestrationArtifacts,
@@ -480,6 +481,9 @@ export const ThreadErasureLive = Layer.effect(
 						yield* transaction
 							.delete(WorkspaceGitOperations)
 							.where(eq(WorkspaceGitOperations.thread_id, thread_id));
+						yield* transaction
+							.delete(HostedGitSnapshotOperations)
+							.where(eq(HostedGitSnapshotOperations.thread_id, thread_id));
 						yield* transaction
 							.delete(WorkspaceMutationPayloads)
 							.where(eq(WorkspaceMutationPayloads.thread_id, thread_id));

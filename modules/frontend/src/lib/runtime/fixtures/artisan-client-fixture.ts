@@ -3,6 +3,7 @@ import { Effect, Layer, Option, Stream } from "effect";
 import type {
 	EventEnvelope,
 	GlobalGuidanceSnapshot,
+	HostedGitSnapshotQueryResult,
 	ModelBehaviourSnapshot,
 	OrchestrationGraph,
 	TerminalSession,
@@ -344,6 +345,10 @@ export const FixtureArtisanClientService = {
 	GetGlobalGuidance: Effect.gen(function* () {
 		return yield* Effect.succeed(fixture_artisan_client_data.global_guidance);
 	}),
+	GetHostedGitSnapshot: (_input) =>
+		Effect.succeed({
+			journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+		} satisfies HostedGitSnapshotQueryResult),
 	GetModelBehaviour: Effect.gen(function* () {
 		return yield* Effect.succeed(fixture_artisan_client_data.model_behaviour);
 	}),
@@ -519,6 +524,10 @@ export const FixtureArtisanClientService = {
 	RefreshWorkspaceGitSession: (input) =>
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-workspace-git-refresh");
+		}),
+	RefreshHostedGitSnapshot: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-hosted-git-refresh");
 		}),
 	RequestWorkspaceGitCheckout: (input) =>
 		Effect.gen(function* () {

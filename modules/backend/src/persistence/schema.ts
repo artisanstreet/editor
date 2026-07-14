@@ -1576,3 +1576,56 @@ export const ProjectHostedOrigins = sqliteTable(
 		index("project_hosted_origins_project_id_index").on(table.project_id),
 	],
 );
+
+/** Stores the latest canonical hosted review and CI projection for one project. */
+export const HostedGitSnapshots = sqliteTable(
+	"hosted_git_snapshots",
+	{
+		project_id: text("project_id")
+			.primaryKey()
+			.references(() => Projects.project_id, { onDelete: "cascade" }),
+		lookup_json: text("lookup_json").notNull(),
+		observed_at: text("observed_at").notNull(),
+		version: integer("version").notNull(),
+		journal_sequence: integer("journal_sequence").notNull(),
+	},
+	(table) => [
+		index("hosted_git_snapshots_journal_sequence_index").on(table.journal_sequence),
+		check("hosted_git_snapshots_version_check", sql`${table.version} >= 1`),
+		check("hosted_git_snapshots_journal_sequence_check", sql`${table.journal_sequence} >= 1`),
+	],
+);
+
+/** Binds one exact refresh command to the hosted snapshot version and event it produced. */
+export const HostedGitSnapshotOperations = sqliteTable(
+	"hosted_git_snapshot_operations",
+	{
+		operation_id: text("operation_id").primaryKey(),
+		source_command_id: text("source_command_id").notNull(),
+		request_fingerprint: text("request_fingerprint").notNull(),
+		thread_id: text("thread_id").notNull(),
+		project_id: text("project_id")
+			.notNull()
+			.references(() => Projects.project_id, { onDelete: "cascade" }),
+		workspace_id: text("workspace_id").notNull(),
+		snapshot_version: integer("snapshot_version").notNull(),
+		journal_sequence: integer("journal_sequence").notNull(),
+		sent_at: text("sent_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("hosted_git_snapshot_operations_source_command_unique").on(
+			table.source_command_id,
+		),
+		index("hosted_git_snapshot_operations_thread_index").on(table.thread_id),
+		index("hosted_git_snapshot_operations_project_index").on(table.project_id),
+		check(
+			"hosted_git_snapshot_operations_fingerprint_check",
+			sql`length(${table.request_fingerprint}) = 64 AND ${table.request_fingerprint} NOT GLOB '*[^0-9a-f]*'`,
+		),
+		check("hosted_git_snapshot_operations_version_check", sql`${table.snapshot_version} >= 1`),
+		check(
+			"hosted_git_snapshot_operations_journal_sequence_check",
+			sql`${table.journal_sequence} >= 1`,
+		),
+	],
+);

@@ -13,6 +13,9 @@ describe("ArtisanClient Git session routes", () => {
 			const session = await Effect.runPromise(
 				harness.client.GetWorkspaceGitSession({ workspace_id: "workspace_git_fixture" }),
 			);
+			const hosted_snapshot = await Effect.runPromise(
+				harness.client.GetHostedGitSnapshot({ workspace_id: "workspace_git_fixture" }),
+			);
 			const approval = await Effect.runPromise(
 				harness.client.GetWorkspaceGitCheckoutApproval({
 					approval_id: "git_approval_fixture",
@@ -30,6 +33,11 @@ describe("ArtisanClient Git session routes", () => {
 					[
 						harness.client.RefreshWorkspaceGitSession({
 							command_id: "git_refresh_fixture",
+							thread_id: "thread_git_fixture",
+							workspace_id: "workspace_git_fixture",
+						}),
+						harness.client.RefreshHostedGitSnapshot({
+							command_id: "hosted_git_refresh_fixture",
 							thread_id: "thread_git_fixture",
 							workspace_id: "workspace_git_fixture",
 						}),
@@ -76,6 +84,7 @@ describe("ArtisanClient Git session routes", () => {
 				branch: "main",
 				workspace_id: "workspace_git_fixture",
 			});
+			expect(hosted_snapshot).toEqual({ journal_sequence: expect.any(Number) });
 			expect(approval.approval).toMatchObject({
 				approval_id: "git_approval_fixture",
 				state: "requested",
@@ -88,6 +97,7 @@ describe("ArtisanClient Git session routes", () => {
 			expect(mutation_approval.approval.operation).not.toHaveProperty("message");
 			expect(receipts.map(({ command_id, status }) => ({ command_id, status }))).toEqual([
 				{ command_id: "git_refresh_fixture", status: "accepted" },
+				{ command_id: "hosted_git_refresh_fixture", status: "accepted" },
 				{ command_id: "git_checkout_fixture", status: "accepted" },
 				{ command_id: "git_approval_response_fixture", status: "accepted" },
 				{ command_id: "git_mutation_commit_fixture", status: "accepted" },

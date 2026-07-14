@@ -14,6 +14,8 @@ import {
 	type GlobalGuidanceSelectionEnvelope,
 	type GlobalGuidanceSnapshot,
 	type GlobalGuidanceUpdateEnvelope,
+	type HostedGitSnapshotQueryEnvelope,
+	type HostedGitSnapshotRefreshEnvelope,
 	type HeartbeatPongEnvelope,
 	type HelloEnvelope,
 	type HostedProjectCloneApproval,
@@ -132,6 +134,8 @@ export interface FakeProtocolSnapshot {
 	readonly hosted_project_clone_approval_query_attempts: ReadonlyArray<HostedProjectCloneApprovalQueryEnvelope>;
 	readonly hosted_project_clone_approval_response_attempts: ReadonlyArray<HostedProjectCloneApprovalRespondEnvelope>;
 	readonly hosted_project_clone_request_attempts: ReadonlyArray<HostedProjectCloneRequestEnvelope>;
+	readonly hosted_git_snapshot_query_attempts: ReadonlyArray<HostedGitSnapshotQueryEnvelope>;
+	readonly hosted_git_snapshot_refresh_attempts: ReadonlyArray<HostedGitSnapshotRefreshEnvelope>;
 	readonly workspace_change_events: ReadonlyArray<EventEnvelope>;
 	readonly workspace_change_list_attempts: ReadonlyArray<WorkspaceChangeListQueryEnvelope>;
 	readonly workspace_change_review_attempts: ReadonlyArray<WorkspaceChangeReviewEnvelope>;
@@ -209,6 +213,8 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 	const hosted_project_clone_approval_response_attempts: Array<HostedProjectCloneApprovalRespondEnvelope> =
 		[];
 	const hosted_project_clone_request_attempts: Array<HostedProjectCloneRequestEnvelope> = [];
+	const hosted_git_snapshot_query_attempts: Array<HostedGitSnapshotQueryEnvelope> = [];
+	const hosted_git_snapshot_refresh_attempts: Array<HostedGitSnapshotRefreshEnvelope> = [];
 	const workspace_changes = new Map<string, StoredWorkspaceMutation>();
 	const workspace_change_list_attempts: Array<WorkspaceChangeListQueryEnvelope> = [];
 	const workspace_change_review_attempts: Array<WorkspaceChangeReviewEnvelope> = [];
@@ -1270,6 +1276,28 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 					},
 				});
 			});
+		const handle_hosted_git_snapshot_query = (query: HostedGitSnapshotQueryEnvelope) =>
+			Effect.gen(function* () {
+				hosted_git_snapshot_query_attempts.push(query);
+				yield* enqueue({
+					...backend_trace(),
+					correlation_id: query.message_id,
+					kind: "hosted.git.snapshot.query.result",
+					payload: { journal_sequence: events.length + 1 },
+				});
+			});
+		const handle_hosted_git_snapshot_refresh = (refresh: HostedGitSnapshotRefreshEnvelope) =>
+			Effect.gen(function* () {
+				hosted_git_snapshot_refresh_attempts.push(refresh);
+				yield* enqueue({
+					...backend_trace(),
+					causation_id: refresh.message_id,
+					correlation_id: refresh.message_id,
+					kind: "command.receipt",
+					payload: { journal_sequence: events.length + 1, status: "accepted" },
+					thread_id: refresh.thread_id,
+				});
+			});
 		const handle_workspace_git_checkout_approval_query = (
 			query: WorkspaceGitCheckoutApprovalQueryEnvelope,
 		) =>
@@ -1728,6 +1756,10 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 						yield* handle_workspace_git_session_query(input);
 
 						return;
+					case "hosted.git.snapshot.query":
+						yield* handle_hosted_git_snapshot_query(input);
+
+						return;
 					case "workspace.git.checkout.approval.query":
 						yield* handle_workspace_git_checkout_approval_query(input);
 
@@ -1737,9 +1769,14 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 
 						return;
 					case "workspace.git.session.refresh":
+					case "hosted.git.snapshot.refresh":
 					case "workspace.git.checkout.request":
 					case "workspace.git.checkout.approval.respond":
-						yield* handle_workspace_git_mutation(input);
+						if (input.kind === "hosted.git.snapshot.refresh") {
+							yield* handle_hosted_git_snapshot_refresh(input);
+						} else {
+							yield* handle_workspace_git_mutation(input);
+						}
 
 						return;
 					case "workspace.git.mutation.request":
@@ -1911,6 +1948,8 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 			...hosted_project_clone_approval_response_attempts,
 		],
 		hosted_project_clone_request_attempts: [...hosted_project_clone_request_attempts],
+		hosted_git_snapshot_query_attempts: [...hosted_git_snapshot_query_attempts],
+		hosted_git_snapshot_refresh_attempts: [...hosted_git_snapshot_refresh_attempts],
 		workspace_change_events: events.filter(
 			(event) => event.payload.type === "workspace.change.updated",
 		),

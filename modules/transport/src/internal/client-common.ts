@@ -74,6 +74,8 @@ export type PendingRequestEnvelope = Extract<
 			| "workspace.change.rollback"
 			| "workspace.git.session.query"
 			| "workspace.git.session.refresh"
+			| "hosted.git.snapshot.query"
+			| "hosted.git.snapshot.refresh"
 			| "workspace.git.checkout.request"
 			| "workspace.git.checkout.approval.query"
 			| "workspace.git.checkout.approval.respond"
@@ -102,6 +104,7 @@ export type PendingResultEnvelope = Extract<
 			| "workspace.change.diff.query.result"
 			| "workspace.replace.approval.query.result"
 			| "workspace.git.session.query.result"
+			| "hosted.git.snapshot.query.result"
 			| "workspace.git.checkout.approval.query.result"
 			| "workspace.git.mutation.approval.query.result";
 	}

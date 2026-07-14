@@ -36,6 +36,8 @@ import { make_workspace_git_execution_gate_layer } from "../git/workspace-git-ex
 import { WorkspaceGitMutationRepositoryLive } from "../git/workspace-git-mutation-repository";
 import { WorkspaceGitMutationCoordinatorLive } from "../git/workspace-git-mutation-coordinator";
 import { GitProvider } from "../git-provider/git-provider";
+import { HostedGitSnapshotRepositoryLive } from "../git-provider/hosted-git-snapshot-repository";
+import { HostedGitSnapshotServiceLive } from "../git-provider/hosted-git-snapshot-service";
 import {
 	EmptyGitProviderRegistryLive,
 	GitProviderRegistry,
@@ -263,6 +265,16 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(workspace_git_observer),
 		Layer.provideMerge(workspace_git_sessions_repository),
 	);
+	const hosted_git_snapshots_repository = HostedGitSnapshotRepositoryLive.pipe(
+		Layer.provideMerge(infrastructure),
+	);
+	const hosted_git_snapshots = HostedGitSnapshotServiceLive.pipe(
+		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(git_provider_registry),
+		Layer.provideMerge(project_catalog),
+		Layer.provideMerge(workspace_git_observer),
+		Layer.provideMerge(hosted_git_snapshots_repository),
+	);
 	const workspace_git_checkouts_repository = WorkspaceGitCheckoutRepositoryLive.pipe(
 		Layer.provideMerge(infrastructure),
 	);
@@ -459,6 +471,8 @@ export function make_backend_layer(options: BackendOptions) {
 		workspace_git_registry,
 		workspace_git_sessions,
 		workspace_git_sessions_repository,
+		hosted_git_snapshots,
+		hosted_git_snapshots_repository,
 	);
 
 	return make_protocol_server_layer(protocol_options).pipe(
@@ -474,6 +488,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(project_affinity_coordination),
 		Layer.provideMerge(hosted_project_clone_repository),
 		Layer.provideMerge(hosted_project_clones),
+		Layer.provideMerge(hosted_git_snapshots),
 		Layer.provideMerge(guidance),
 		Layer.provideMerge(model_behaviour),
 		Layer.provideMerge(git_provider_registry),

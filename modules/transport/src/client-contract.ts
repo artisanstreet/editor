@@ -7,6 +7,9 @@ import type {
 	GlobalGuidanceProvider,
 	GlobalGuidanceSelectionRequest,
 	GlobalGuidanceSnapshot,
+	HostedGitSnapshotQuery,
+	HostedGitSnapshotQueryResult,
+	HostedGitSnapshotRefreshRequest,
 	HostedProjectCloneApprovalQuery,
 	HostedProjectCloneApprovalQueryResult,
 	HostedProjectCloneRequest,
@@ -123,6 +126,15 @@ export interface ArtisanWorkspaceGitSessionRefreshInput {
 	readonly command_id?: string;
 	readonly thread_id: string;
 	readonly workspace_id: string;
+}
+
+/** Supplies the workspace identity for one hosted review and CI snapshot query. */
+export interface ArtisanHostedGitSnapshotInput extends HostedGitSnapshotQuery {}
+
+/** Supplies a hosted review and CI refresh command and optional durable retry identity. */
+export interface ArtisanHostedGitSnapshotRefreshInput extends HostedGitSnapshotRefreshRequest {
+	readonly command_id?: string;
+	readonly thread_id: string;
 }
 
 /** Supplies a guarded checkout request and optional durable retry identity. */
@@ -336,6 +348,9 @@ export class ArtisanClient extends Context.Service<
 		readonly GetWorkspaceGitSession: (
 			input: ArtisanWorkspaceGitSessionInput,
 		) => Effect.Effect<WorkspaceGitSessionQueryResult, ArtisanClientError>;
+		readonly GetHostedGitSnapshot: (
+			input: ArtisanHostedGitSnapshotInput,
+		) => Effect.Effect<HostedGitSnapshotQueryResult, ArtisanClientError>;
 		readonly GetWorkspaceGitCheckoutApproval: (
 			input: ArtisanWorkspaceGitCheckoutApprovalInput,
 		) => Effect.Effect<WorkspaceGitCheckoutApprovalQueryResult, ArtisanClientError>;
@@ -412,6 +427,9 @@ export class ArtisanClient extends Context.Service<
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly RefreshWorkspaceGitSession: (
 			input: ArtisanWorkspaceGitSessionRefreshInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RefreshHostedGitSnapshot: (
+			input: ArtisanHostedGitSnapshotRefreshInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly RequestWorkspaceGitCheckout: (
 			input: ArtisanWorkspaceGitCheckoutInput,

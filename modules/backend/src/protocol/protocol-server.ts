@@ -28,6 +28,8 @@ import {
 	type GlobalGuidanceUpdateEnvelope,
 	type HeartbeatPongEnvelope,
 	type HelloEnvelope,
+	type HostedGitSnapshotQueryEnvelope,
+	type HostedGitSnapshotRefreshEnvelope,
 	type HostedProjectCloneApprovalQueryEnvelope,
 	type HostedProjectCloneApprovalRespondEnvelope,
 	type HostedProjectCloneRequestEnvelope,
@@ -130,6 +132,16 @@ import {
 	WorkspaceGitSessionUnavailable,
 } from "../git/workspace-git-session-repository";
 import { WorkspaceGitSessionService } from "../git/workspace-git-session-service";
+import {
+	HostedGitSnapshotConflict,
+	HostedGitSnapshotInvariant,
+	HostedGitSnapshotUnavailable,
+} from "../git-provider/hosted-git-snapshot-repository";
+import {
+	HostedGitSnapshotService,
+	HostedGitSnapshotServiceFailure,
+} from "../git-provider/hosted-git-snapshot-service";
+import { GitProviderError } from "../git-provider/git-provider";
 import { TerminalSessionService } from "../terminal/terminal-sessions";
 import { thread_activity_kind_from_event } from "../threads/internal/thread-activity";
 import {
@@ -611,6 +623,93 @@ function hosted_project_clone_error_detail(error: unknown): ProtocolErrorDetail 
 	};
 }
 
+function hosted_git_snapshot_error_detail(error: unknown): ProtocolErrorDetail {
+	if (error instanceof GitProviderError) {
+		const code =
+			error.reason === "account_not_active" || error.reason === "auth_required"
+				? "hosted.git.snapshot_authentication_required"
+				: error.reason === "permission_denied"
+					? "hosted.git.snapshot_permission_denied"
+					: error.reason === "rate_limited"
+						? "hosted.git.snapshot_rate_limited"
+						: error.reason === "invalid_input" || error.reason === "invalid_response"
+							? "hosted.git.snapshot_invalid_provider_response"
+							: error.reason === "not_found" || error.reason === "stale_repository"
+								? "hosted.git.snapshot_repository_unavailable"
+								: error.reason === "unsupported_host"
+									? "hosted.git.snapshot_unsupported_host"
+									: "hosted.git.snapshot_provider_unavailable";
+		const message =
+			error.reason === "account_not_active" || error.reason === "auth_required"
+				? "Sign in to the selected hosted Git account before refreshing review and CI state."
+				: error.reason === "permission_denied"
+					? "The selected hosted Git account cannot read this repository's review and CI state."
+					: error.reason === "rate_limited"
+						? "The hosted Git provider rate limit currently prevents this refresh."
+						: error.reason === "invalid_input" || error.reason === "invalid_response"
+							? "The hosted Git provider returned invalid review or CI state."
+							: error.reason === "not_found" || error.reason === "stale_repository"
+								? "The hosted repository is no longer available under its registered identity."
+								: error.reason === "unsupported_host"
+									? "No hosted Git adapter supports this repository host."
+									: "The hosted Git provider is unavailable.";
+
+		return { code, message, retryable: error.retryable };
+	}
+
+	if (error instanceof HostedGitSnapshotServiceFailure) {
+		return {
+			code: `hosted.git.snapshot_${error.reason}`,
+			message:
+				error.reason === "invalid_request"
+					? "The hosted review and CI request is invalid."
+					: error.reason === "project_unavailable"
+						? "The hosted project is no longer available."
+						: error.reason === "workspace_unavailable"
+							? "The visible Git workspace is not ready for a hosted-state read."
+							: error.reason === "branch_changed"
+								? "The visible branch changed while hosted state was being read."
+								: error.reason === "provider_unavailable"
+									? "The hosted Git provider is unavailable."
+									: "The hosted Git provider returned invalid state.",
+			retryable:
+				error.reason === "branch_changed" ||
+				error.reason === "provider_unavailable" ||
+				error.reason === "workspace_unavailable",
+		};
+	}
+
+	if (error instanceof HostedGitSnapshotConflict) {
+		return {
+			code: `hosted.git.snapshot_${error.reason}`,
+			message: "The hosted review and CI request no longer matches its durable state.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof HostedGitSnapshotUnavailable) {
+		return {
+			code: `hosted.git.snapshot_${error.reason}`,
+			message: "The hosted review and CI projection is no longer available.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof HostedGitSnapshotInvariant) {
+		return {
+			code: "hosted.git.snapshot_invariant_failed",
+			message: "The durable hosted review and CI projection failed validation.",
+			retryable: false,
+		};
+	}
+
+	return {
+		code: "hosted.git.snapshot_unavailable",
+		message: "The hosted review and CI projection could not be reconciled.",
+		retryable: true,
+	};
+}
+
 function thread_item_from_event(event: EventEnvelope): ThreadListItem | undefined {
 	if (event.payload.type === "thread.metadata.updated") {
 		return event.payload.thread;
@@ -684,6 +783,7 @@ export function make_protocol_server_layer(
 			const options = yield* DecodeProtocolConnectionOptions(input_options);
 			const graph = yield* AgentGraphOrchestrator;
 			const guidance = yield* GlobalGuidanceService;
+			const hosted_git_snapshots = yield* HostedGitSnapshotService;
 			const hosted_project_clones = yield* HostedProjectCloneCoordinator;
 			const hosted_project_clone_repository = yield* HostedProjectCloneRepository;
 			const model_behaviour = yield* ModelBehaviourService;
@@ -1475,6 +1575,41 @@ export function make_protocol_server_layer(
 						}),
 					);
 
+				const HandleHostedGitSnapshotQuery = (
+					query: HostedGitSnapshotQueryEnvelope,
+					current: ReadyState,
+				) =>
+					hosted_git_snapshots.Query(query.payload).pipe(
+						Effect.flatMap((result) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "hosted.git.snapshot.query.result",
+									message_id,
+									origin: "backend",
+									payload: result,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch((error) => {
+							const detail = hosted_git_snapshot_error_detail(error);
+
+							return EnqueueError(
+								current,
+								detail.code,
+								detail.message,
+								detail.retryable,
+								query.message_id,
+							);
+						}),
+					);
+
 				const HandleWorkspaceGitCheckoutApprovalQuery = (
 					query: WorkspaceGitCheckoutApprovalQueryEnvelope,
 					current: ReadyState,
@@ -2218,6 +2353,7 @@ export function make_protocol_server_layer(
 					| WorkspaceGitCheckoutRequestEnvelope
 					| WorkspaceGitMutationApprovalRespondEnvelope
 					| WorkspaceGitMutationRequestEnvelope
+					| HostedGitSnapshotRefreshEnvelope
 					| WorkspaceGitSessionRefreshEnvelope;
 				const HandleWorkspaceGitMutation = (envelope: WorkspaceGitMutationEnvelope) => {
 					const operation: Effect.Effect<
@@ -2241,41 +2377,48 @@ export function make_protocol_server_layer(
 										sent_at: envelope.sent_at,
 										thread_id: envelope.thread_id,
 									})
-								: envelope.kind === "workspace.git.session.refresh"
-									? workspace_git_sessions.Refresh({
+								: envelope.kind === "hosted.git.snapshot.refresh"
+									? hosted_git_snapshots.Refresh({
 											...envelope.payload,
 											message_id: envelope.message_id,
 											sent_at: envelope.sent_at,
 											thread_id: envelope.thread_id,
 										})
-									: envelope.kind === "workspace.git.checkout.request"
-										? workspace_git_checkouts.Request({
+									: envelope.kind === "workspace.git.session.refresh"
+										? workspace_git_sessions.Refresh({
 												...envelope.payload,
 												message_id: envelope.message_id,
 												sent_at: envelope.sent_at,
 												thread_id: envelope.thread_id,
 											})
-										: envelope.kind ===
-											  "workspace.git.checkout.approval.respond"
-											? workspace_git_checkouts.Respond({
+										: envelope.kind === "workspace.git.checkout.request"
+											? workspace_git_checkouts.Request({
 													...envelope.payload,
 													message_id: envelope.message_id,
 													sent_at: envelope.sent_at,
 													thread_id: envelope.thread_id,
 												})
-											: envelope.kind === "workspace.git.mutation.request"
-												? workspace_git_mutations.Request({
+											: envelope.kind ===
+												  "workspace.git.checkout.approval.respond"
+												? workspace_git_checkouts.Respond({
 														...envelope.payload,
 														message_id: envelope.message_id,
 														sent_at: envelope.sent_at,
 														thread_id: envelope.thread_id,
 													})
-												: workspace_git_mutations.Respond({
-														...envelope.payload,
-														message_id: envelope.message_id,
-														sent_at: envelope.sent_at,
-														thread_id: envelope.thread_id,
-													});
+												: envelope.kind === "workspace.git.mutation.request"
+													? workspace_git_mutations.Request({
+															...envelope.payload,
+															message_id: envelope.message_id,
+															sent_at: envelope.sent_at,
+															thread_id: envelope.thread_id,
+														})
+													: workspace_git_mutations.Respond({
+															...envelope.payload,
+															message_id: envelope.message_id,
+															sent_at: envelope.sent_at,
+															thread_id: envelope.thread_id,
+														});
 
 					return operation.pipe(
 						Effect.matchEffect({
@@ -2284,13 +2427,16 @@ export function make_protocol_server_layer(
 									envelope.kind === "hosted.project.clone.request" ||
 									envelope.kind === "hosted.project.clone.approval.respond"
 										? hosted_project_clone_error_detail(error)
-										: envelope.kind === "workspace.git.session.refresh"
-											? workspace_git_session_error_detail(error)
-											: envelope.kind === "workspace.git.checkout.request" ||
-												  envelope.kind ===
-														"workspace.git.checkout.approval.respond"
-												? workspace_git_checkout_error_detail(error)
-												: workspace_git_mutation_error_detail(error);
+										: envelope.kind === "hosted.git.snapshot.refresh"
+											? hosted_git_snapshot_error_detail(error)
+											: envelope.kind === "workspace.git.session.refresh"
+												? workspace_git_session_error_detail(error)
+												: envelope.kind ===
+															"workspace.git.checkout.request" ||
+													  envelope.kind ===
+															"workspace.git.checkout.approval.respond"
+													? workspace_git_checkout_error_detail(error)
+													: workspace_git_mutation_error_detail(error);
 
 								return Effect.gen(function* () {
 									const message_id = yield* metadata.MakeId("message");
@@ -2360,6 +2506,8 @@ export function make_protocol_server_layer(
 							return HandleWorkspaceReplaceApprovalResponse(envelope);
 						case "workspace.git.session.query":
 							return HandleWorkspaceGitSessionQuery(envelope, current);
+						case "hosted.git.snapshot.query":
+							return HandleHostedGitSnapshotQuery(envelope, current);
 						case "workspace.git.checkout.approval.query":
 							return HandleWorkspaceGitCheckoutApprovalQuery(envelope, current);
 						case "workspace.git.mutation.approval.query":
@@ -2368,6 +2516,7 @@ export function make_protocol_server_layer(
 							return HandleHostedProjectCloneApprovalQuery(envelope, current);
 						case "hosted.project.clone.request":
 						case "hosted.project.clone.approval.respond":
+						case "hosted.git.snapshot.refresh":
 						case "workspace.git.session.refresh":
 						case "workspace.git.checkout.request":
 						case "workspace.git.checkout.approval.respond":

@@ -522,6 +522,7 @@ export {
 	GitProviderInstallation,
 	GitProviderNativePath,
 	GitProviderPage,
+	GitProviderPullRequestRead,
 	GitProviderRepository,
 	GitProviderRepositoryIdentity,
 	GitProviderRepositoryOrigin,
@@ -530,6 +531,23 @@ export {
 	GitProviderWebUrl,
 	normalize_git_provider_host,
 } from "./git-provider/git-provider";
+export {
+	HostedGitSnapshotConflict,
+	HostedGitSnapshotInvariant,
+	HostedGitSnapshotRepository,
+	HostedGitSnapshotRepositoryLive,
+	HostedGitSnapshotUnavailable,
+	type HostedGitSnapshotAcceptance,
+	type HostedGitSnapshotRepositoryError,
+	type ProjectHostedGitSnapshot,
+} from "./git-provider/hosted-git-snapshot-repository";
+export {
+	HostedGitSnapshotService,
+	HostedGitSnapshotServiceFailure,
+	HostedGitSnapshotServiceLive,
+	type HostedGitSnapshotRefresh,
+	type HostedGitSnapshotServiceError,
+} from "./git-provider/hosted-git-snapshot-service";
 export {
 	EmptyGitProviderRegistryLive,
 	GitProviderHostResolution,
