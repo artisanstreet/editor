@@ -1830,6 +1830,21 @@ describe("GitHubCli check failure detail", () => {
 				checkRun: { ...check_failure_detail().checkRun, id: "other-check" },
 			}),
 			check_failure_detail({
+				checkRun: {
+					...check_failure_detail().checkRun,
+					checkSuite: {
+						...check_failure_detail().checkRun.checkSuite,
+						commit: {
+							...check_failure_detail().checkRun.checkSuite.commit,
+							repository: {
+								...check_failure_detail().checkRun.checkSuite.commit.repository,
+								id: "other-repository",
+							},
+						},
+					},
+				},
+			}),
+			check_failure_detail({
 				repository: {
 					...check_failure_detail().repository,
 					nameWithOwner: "other/editor",
@@ -1837,6 +1852,18 @@ describe("GitHubCli check failure detail", () => {
 						...check_failure_detail().repository.pullRequest,
 						headRefOid: "b".repeat(40),
 						id: "recreated-pull-request",
+					},
+				},
+			}),
+			check_failure_detail({
+				repository: {
+					...check_failure_detail().repository,
+					pullRequest: {
+						...check_failure_detail().repository.pullRequest,
+						headRepository: {
+							name: "forked-editor",
+							owner: { login: "someone-else" },
+						},
 					},
 				},
 			}),
