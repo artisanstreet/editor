@@ -58,6 +58,12 @@ import {
 	ExternalWaitUpdatedEvent,
 } from "./external-wait";
 import {
+	WorkspaceGitFetchPolicyUpdate,
+	WorkspaceGitFetchQuery,
+	WorkspaceGitFetchQueryResult,
+	WorkspaceGitFetchRequest,
+} from "./local-git-fetch";
+import {
 	Identifier,
 	IsoDateTime,
 	JournalSequence,
@@ -1278,6 +1284,45 @@ export const WorkspaceGitSessionRefreshEnvelope = Schema.Struct({
 
 export type WorkspaceGitSessionRefreshEnvelope = typeof WorkspaceGitSessionRefreshEnvelope.Type;
 
+/** Requests the global local Git fetch policy and workspace attempt states. */
+export const WorkspaceGitFetchQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("workspace.git.fetch.query"),
+	payload: WorkspaceGitFetchQuery,
+});
+
+export type WorkspaceGitFetchQueryEnvelope = typeof WorkspaceGitFetchQueryEnvelope.Type;
+
+/** Returns a correlated global fetch policy and bounded workspace states. */
+export const WorkspaceGitFetchQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("workspace.git.fetch.query.result"),
+	payload: WorkspaceGitFetchQueryResult,
+});
+
+export type WorkspaceGitFetchQueryResultEnvelope = typeof WorkspaceGitFetchQueryResultEnvelope.Type;
+
+/** Updates the global automatic local Git fetch policy. */
+export const WorkspaceGitFetchPolicyUpdateEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("workspace.git.fetch.policy.update"),
+	payload: WorkspaceGitFetchPolicyUpdate,
+});
+
+export type WorkspaceGitFetchPolicyUpdateEnvelope =
+	typeof WorkspaceGitFetchPolicyUpdateEnvelope.Type;
+
+/** Requests a manual local Git fetch for one thread-owned workspace. */
+export const WorkspaceGitFetchRequestEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("workspace.git.fetch.request"),
+	payload: WorkspaceGitFetchRequest,
+	thread_id: Identifier,
+});
+
+export type WorkspaceGitFetchRequestEnvelope = typeof WorkspaceGitFetchRequestEnvelope.Type;
+
 /** Requests the latest durable hosted review and CI projection for one workspace. */
 export const HostedGitSnapshotQueryEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
@@ -1821,6 +1866,9 @@ export const InboundControlEnvelope = Schema.Union([
 	WorkspaceReplaceApprovalRespondEnvelope,
 	WorkspaceGitSessionQueryEnvelope,
 	WorkspaceGitSessionRefreshEnvelope,
+	WorkspaceGitFetchQueryEnvelope,
+	WorkspaceGitFetchPolicyUpdateEnvelope,
+	WorkspaceGitFetchRequestEnvelope,
 	HostedGitSnapshotQueryEnvelope,
 	HostedGitCheckFailureDetailQueryEnvelope,
 	HostedGitSnapshotRefreshEnvelope,
@@ -1872,6 +1920,7 @@ export const OutboundControlEnvelope = Schema.Union([
 	WorkspaceChangeDiffQueryResultEnvelope,
 	WorkspaceReplaceApprovalQueryResultEnvelope,
 	WorkspaceGitSessionQueryResultEnvelope,
+	WorkspaceGitFetchQueryResultEnvelope,
 	HostedGitSnapshotQueryResultEnvelope,
 	HostedGitCheckFailureDetailQueryResultEnvelope,
 	ExternalWaitQueryResultEnvelope,

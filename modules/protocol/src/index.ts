@@ -4,6 +4,7 @@ export * from "./control";
 export * from "./guidance";
 export * from "./git-session";
 export * from "./git-mutation";
+export * from "./local-git-fetch";
 export * from "./hosted-project";
 export * from "./hosted-git";
 export * from "./external-wait";
