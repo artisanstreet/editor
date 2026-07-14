@@ -272,6 +272,34 @@ export const HostedGitCheckFailureDetail = Schema.Struct({
 
 export type HostedGitCheckFailureDetail = typeof HostedGitCheckFailureDetail.Type;
 
+/** Selects failure detail from the exact durable snapshot currently displayed by the renderer. */
+export const HostedGitCheckFailureDetailQuery = Schema.Struct({
+	check_origin: HostedGitOrigin,
+	expected_head_commit: GitObjectId,
+	snapshot_version: PositiveInt,
+	workspace_id: Identifier,
+}).check(
+	Schema.makeFilter((query) =>
+		query.check_origin.resource_kind === "check_run"
+			? undefined
+			: "Expected a check-run origin for failure detail",
+	),
+);
+
+export type HostedGitCheckFailureDetailQuery = typeof HostedGitCheckFailureDetailQuery.Type;
+
+/** Returns a fresh transient detail read bound to one durable snapshot and live checkout. */
+export const HostedGitCheckFailureDetailQueryResult = Schema.Struct({
+	detail: HostedGitCheckFailureDetail,
+	journal_sequence: JournalSequence,
+	observed_at: IsoDateTime,
+	snapshot_version: PositiveInt,
+	workspace_id: Identifier,
+});
+
+export type HostedGitCheckFailureDetailQueryResult =
+	typeof HostedGitCheckFailureDetailQueryResult.Type;
+
 const HostedGitPullRequestSummaryFields = {
 	base_branch: GitBranchName,
 	draft: Schema.Boolean,

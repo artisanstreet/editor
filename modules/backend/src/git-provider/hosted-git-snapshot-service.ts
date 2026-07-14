@@ -1,11 +1,16 @@
 import { Context, Crypto, Data, Effect, Encoding, Layer, Option, Schema } from "effect";
 
 import {
+	HostedGitCheckFailureDetail,
+	HostedGitCheckFailureDetailQuery,
+	HostedGitCheckFailureDetailQueryResult,
 	HostedGitPullRequestLookup,
 	HostedGitSnapshotQuery,
 	HostedGitSnapshotQueryResult,
 	Identifier,
 	IsoDateTime,
+	type HostedGitCheckFailureDetailQuery as HostedGitCheckFailureDetailQueryValue,
+	type HostedGitCheckFailureDetailQueryResult as HostedGitCheckFailureDetailQueryResultValue,
 	type HostedGitPullRequestLookup as HostedGitPullRequestLookupValue,
 	type HostedGitSnapshotQueryResult as HostedGitSnapshotQueryResultValue,
 } from "@artisan/protocol";
@@ -45,10 +50,12 @@ export class HostedGitSnapshotServiceFailure extends Data.TaggedError(
 )<{
 	readonly reason:
 		| "branch_changed"
+		| "check_unavailable"
 		| "invalid_provider_response"
 		| "invalid_request"
 		| "project_unavailable"
 		| "provider_unavailable"
+		| "snapshot_stale"
 		| "workspace_unavailable";
 }> {}
 
@@ -68,6 +75,12 @@ export class HostedGitSnapshotService extends Context.Service<
 		readonly ReadCurrent: (
 			query: typeof HostedGitSnapshotQuery.Type,
 		) => Effect.Effect<CurrentHostedGitSnapshot, HostedGitSnapshotServiceError>;
+		readonly ReadCheckFailureDetail: (
+			query: HostedGitCheckFailureDetailQueryValue,
+		) => Effect.Effect<
+			HostedGitCheckFailureDetailQueryResultValue,
+			HostedGitSnapshotServiceError
+		>;
 		readonly Refresh: (
 			input: HostedGitSnapshotRefresh,
 		) => Effect.Effect<HostedGitSnapshotAcceptance, HostedGitSnapshotServiceError>;
@@ -243,6 +256,140 @@ export const HostedGitSnapshotServiceLive = Layer.effect(
 				),
 			);
 
+		const ReadCheckFailureDetail = (query: HostedGitCheckFailureDetailQueryValue) =>
+			Schema.decodeUnknownEffect(HostedGitCheckFailureDetailQuery, {
+				onExcessProperty: "error",
+			})(query).pipe(
+				Effect.mapError(() => service_failure("invalid_request")),
+				Effect.flatMap((decoded) =>
+					Effect.gen(function* () {
+						const project = yield* FindProject(decoded.workspace_id);
+						const stored = yield* repository.Query({
+							workspace_id: decoded.workspace_id,
+						});
+						const snapshot = stored.snapshot;
+
+						if (
+							snapshot === undefined ||
+							snapshot.version !== decoded.snapshot_version ||
+							snapshot.lookup.expected_head_commit !== decoded.expected_head_commit ||
+							snapshot.lookup.association._tag !== "matched" ||
+							snapshot.lookup.association.freshness !== "current"
+						) {
+							return yield* service_failure("snapshot_stale");
+						}
+
+						const pull_request = snapshot.lookup.association.pull_request;
+						const matching_checks = pull_request.checks.filter(
+							(check) =>
+								check.origin.native_id === decoded.check_origin.native_id &&
+								check.origin.provider_id === decoded.check_origin.provider_id &&
+								check.origin.resource_kind === decoded.check_origin.resource_kind,
+						);
+
+						if (matching_checks.length !== 1) {
+							return yield* service_failure("check_unavailable");
+						}
+
+						const selected_check = matching_checks[0]!;
+						const before = yield* ObserveReady(
+							decoded.workspace_id,
+							project.project.root_path,
+						);
+
+						if (
+							before.identity.branch !== snapshot.lookup.branch ||
+							before.identity.head !== decoded.expected_head_commit
+						) {
+							return yield* service_failure("snapshot_stale");
+						}
+
+						const provider = yield* providers
+							.Get(project.hosted_origin.provider_id)
+							.pipe(Effect.mapError(() => service_failure("provider_unavailable")));
+						const ReadFailureDetail = provider.ReadCheckFailureDetail;
+
+						if (ReadFailureDetail === undefined) {
+							return yield* service_failure("provider_unavailable");
+						}
+
+						const detail = yield* ReadFailureDetail({
+							check_origin: selected_check.origin,
+							expected_head: decoded.expected_head_commit,
+							pull_request_number: pull_request.number,
+							pull_request_origin: pull_request.origin,
+							repository: snapshot.lookup.repository,
+							selected_branch: snapshot.lookup.branch,
+							selection: {
+								account_login: project.hosted_origin.selected_account_login,
+								host: project.hosted_origin.canonical_host,
+								provider_id: project.hosted_origin.provider_id,
+							},
+						});
+						const canonical_detail = yield* Schema.decodeUnknownEffect(
+							HostedGitCheckFailureDetail,
+							{ onExcessProperty: "error" },
+						)(detail).pipe(
+							Effect.mapError(() => service_failure("invalid_provider_response")),
+						);
+
+						if (
+							canonical_detail.check_origin.native_id !==
+								selected_check.origin.native_id ||
+							canonical_detail.check_origin.provider_id !==
+								selected_check.origin.provider_id ||
+							canonical_detail.head_commit !== decoded.expected_head_commit ||
+							canonical_detail.name !== selected_check.name ||
+							canonical_detail.attempt !== selected_check.attempt ||
+							canonical_detail.workflow_origin?.native_id !==
+								selected_check.workflow_origin?.native_id ||
+							canonical_detail.workflow_origin?.provider_id !==
+								selected_check.workflow_origin?.provider_id
+						) {
+							return yield* service_failure("invalid_provider_response");
+						}
+
+						const after = yield* ObserveReady(
+							decoded.workspace_id,
+							project.project.root_path,
+						);
+
+						if (
+							after.identity.branch !== before.identity.branch ||
+							after.identity.head !== before.identity.head ||
+							after.identity.repository_root !== before.identity.repository_root
+						) {
+							return yield* service_failure("branch_changed");
+						}
+
+						const latest = yield* repository.Query({
+							workspace_id: decoded.workspace_id,
+						});
+
+						if (
+							latest.snapshot === undefined ||
+							latest.snapshot.version !== snapshot.version ||
+							latest.snapshot.journal_sequence !== snapshot.journal_sequence
+						) {
+							return yield* service_failure("snapshot_stale");
+						}
+
+						return yield* Schema.decodeUnknownEffect(
+							HostedGitCheckFailureDetailQueryResult,
+							{ onExcessProperty: "error" },
+						)({
+							detail: canonical_detail,
+							journal_sequence: snapshot.journal_sequence,
+							observed_at: after.observation.observed_at,
+							snapshot_version: snapshot.version,
+							workspace_id: decoded.workspace_id,
+						}).pipe(
+							Effect.mapError(() => service_failure("invalid_provider_response")),
+						);
+					}),
+				),
+			);
+
 		const Refresh = (input: HostedGitSnapshotRefresh) =>
 			Schema.decodeUnknownEffect(HostedGitSnapshotRefresh, {
 				onExcessProperty: "error",
@@ -355,6 +502,6 @@ export const HostedGitSnapshotServiceLive = Layer.effect(
 				),
 			);
 
-		return { Query, ReadCurrent, Refresh };
+		return { Query, ReadCheckFailureDetail, ReadCurrent, Refresh };
 	}),
 );

@@ -161,6 +161,7 @@ function runtime(
 			hosted_state.failure === undefined
 				? Effect.succeed(hosted_state.result)
 				: Effect.fail(hosted_state.failure),
+		ReadCheckFailureDetail: () => Effect.die("unused"),
 		ReadCurrent: () => {
 			if (hosted_state.failure !== undefined) {
 				return Effect.fail(hosted_state.failure);
