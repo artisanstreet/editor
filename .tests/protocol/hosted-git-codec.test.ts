@@ -1,7 +1,11 @@
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
 import { describe, expect, it } from "vitest";
 
-import { DecodeInboundControlEnvelope, DecodeOutboundControlEnvelope } from "@artisan/protocol";
+import {
+	DecodeInboundControlEnvelope,
+	DecodeOutboundControlEnvelope,
+	HostedGitCheckFailureDetail,
+} from "@artisan/protocol";
 
 const timestamp = "2026-07-14T15:00:00.000Z";
 const head = "a".repeat(40);
@@ -129,6 +133,50 @@ function snapshot(workspace_freshness: "current" | "unverified" = "current") {
 }
 
 describe("Hosted Git protocol codec", () => {
+	it("accepts bounded attributed failure detail and rejects executable control output", async () => {
+		const detail = {
+			attempt: 2,
+			check_origin: {
+				native_id: "CR_1",
+				provider_id: "github",
+				resource_kind: "check_run",
+			},
+			head_commit: head,
+			log: {
+				_tag: "available",
+				observed_bytes: 80_000,
+				truncated: true,
+				untrusted_excerpt: "FAIL src/main.ts\nExpected a string",
+			},
+			name: "test",
+			output: {
+				title: "Tests failed",
+				untrusted_summary: "One job failed",
+			},
+			workflow_origin: {
+				native_id: "WR_1",
+				provider_id: "github",
+				resource_kind: "workflow_run",
+			},
+		};
+
+		await expect(
+			Effect.runPromise(Schema.decodeUnknownEffect(HostedGitCheckFailureDetail)(detail)),
+		).resolves.toEqual(detail);
+
+		await expect(
+			Effect.runPromise(
+				Schema.decodeUnknownEffect(HostedGitCheckFailureDetail)({
+					...detail,
+					log: {
+						...detail.log,
+						untrusted_excerpt: "safe\u001b[2Jforged",
+					},
+				}),
+			),
+		).rejects.toBeDefined();
+	});
+
 	it("roundtrips query, refresh, result, and durable snapshot event envelopes", async () => {
 		const inbound = [
 			frontend_envelope("hosted.git.snapshot.query", { workspace_id: "workspace_1" }),

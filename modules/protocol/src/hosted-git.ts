@@ -63,6 +63,7 @@ const HostedGitName = bounded_text(512);
 const HostedGitTitle = bounded_text(1_024);
 const HostedGitPath = bounded_text(4_096);
 const HostedGitUntrustedText = bounded_text(4_096, true);
+const HostedGitUntrustedLogExcerpt = bounded_text(64 * 1_024, true);
 
 const HostedGitWebUrl = Schema.String.check(
 	Schema.makeFilter<string>((value) => {
@@ -210,6 +211,54 @@ export const HostedGitCheck = Schema.Struct({
 });
 
 export type HostedGitCheck = typeof HostedGitCheck.Type;
+
+/** Projects bounded provider-owned output for one failed check without treating it as instructions. */
+export const HostedGitCheckFailureOutput = Schema.Struct({
+	title: Schema.optional(HostedGitTitle),
+	untrusted_summary: Schema.optional(HostedGitUntrustedText),
+	untrusted_text: Schema.optional(HostedGitUntrustedText),
+});
+
+export type HostedGitCheckFailureOutput = typeof HostedGitCheckFailureOutput.Type;
+
+/** Distinguishes a bounded failed-job excerpt from a truthful unavailable state. */
+export const HostedGitCheckFailureLog = Schema.Union([
+	Schema.Struct({
+		_tag: Schema.Literal("available"),
+		observed_bytes: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+		truncated: Schema.Boolean,
+		untrusted_excerpt: HostedGitUntrustedLogExcerpt,
+	}),
+	Schema.Struct({
+		_tag: Schema.Literal("unavailable"),
+		reason: Schema.Literals(["check_not_completed", "not_actions_job", "not_available"]),
+	}),
+]);
+
+export type HostedGitCheckFailureLog = typeof HostedGitCheckFailureLog.Type;
+
+/** Returns fresh, bounded failure detail for one exact check run and hosted head. */
+export const HostedGitCheckFailureDetail = Schema.Struct({
+	attempt: Schema.optional(PositiveInt),
+	check_origin: HostedGitOrigin,
+	head_commit: GitObjectId,
+	log: HostedGitCheckFailureLog,
+	name: HostedGitName,
+	output: HostedGitCheckFailureOutput,
+	workflow_origin: Schema.optional(HostedGitOrigin),
+}).check(
+	Schema.makeFilter((detail) =>
+		detail.check_origin.resource_kind !== "check_run" ||
+		(detail.workflow_origin !== undefined &&
+			detail.workflow_origin.resource_kind !== "workflow_run") ||
+		(detail.workflow_origin !== undefined &&
+			detail.workflow_origin.provider_id !== detail.check_origin.provider_id)
+			? "Expected check-run detail with an optional workflow from the same provider"
+			: undefined,
+	),
+);
+
+export type HostedGitCheckFailureDetail = typeof HostedGitCheckFailureDetail.Type;
 
 const HostedGitPullRequestSummaryFields = {
 	base_branch: GitBranchName,

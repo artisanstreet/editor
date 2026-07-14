@@ -2,6 +2,7 @@ import { Context, Data, Effect, Schema } from "effect";
 import {
 	GitBranchName,
 	GitObjectId,
+	HostedGitCheckFailureDetail,
 	HostedGitOrigin,
 	HostedGitPullRequestLookup,
 } from "@artisan/protocol";
@@ -465,6 +466,28 @@ export const GitProviderPullRequestTargetRead = Schema.Struct({
 
 export type GitProviderPullRequestTargetRead = typeof GitProviderPullRequestTargetRead.Type;
 
+/** Binds one check failure read to its pull request, selected branch, and exact hosted head. */
+export const GitProviderCheckFailureDetailRead = Schema.Struct({
+	check_origin: HostedGitOrigin,
+	expected_head: GitObjectId,
+	pull_request_number: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+	pull_request_origin: HostedGitOrigin,
+	repository: GitProviderRepositoryIdentity,
+	selected_branch: GitBranchName,
+	selection: GitProviderSelection,
+}).check(
+	Schema.makeFilter((input) =>
+		input.check_origin.resource_kind !== "check_run" ||
+		input.pull_request_origin.resource_kind !== "pull_request" ||
+		input.check_origin.provider_id !== input.repository.provider_id ||
+		input.pull_request_origin.provider_id !== input.repository.provider_id
+			? "Expected check and pull request origins from the selected repository provider"
+			: undefined,
+	),
+);
+
+export type GitProviderCheckFailureDetailRead = typeof GitProviderCheckFailureDetailRead.Type;
+
 /** Describes the provider installation and exact hosts known by inspection. */
 export const GitProviderInspection = Schema.Struct({
 	authentication: Schema.Array(GitProviderHostAuthentication),
@@ -479,6 +502,7 @@ export const GitProviderErrorOperation = Schema.Literals([
 	"discover_repositories",
 	"inspect",
 	"prepare_clone",
+	"read_check_failure_detail",
 	"read_pull_request",
 	"read_pull_request_target",
 ]);
@@ -534,6 +558,9 @@ export class GitProvider extends Context.Service<
 		readonly PrepareClone: (
 			input: GitProviderCloneRequest,
 		) => Effect.Effect<GitProviderClonePreparation, GitProviderError>;
+		readonly ReadCheckFailureDetail?: (
+			input: GitProviderCheckFailureDetailRead,
+		) => Effect.Effect<typeof HostedGitCheckFailureDetail.Type, GitProviderError>;
 		readonly ReadPullRequest?: (
 			input: GitProviderPullRequestRead,
 		) => Effect.Effect<typeof HostedGitPullRequestLookup.Type, GitProviderError>;
