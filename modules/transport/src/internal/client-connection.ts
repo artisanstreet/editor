@@ -359,6 +359,7 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 			) => {
 				switch (envelope.kind) {
 					case "command.receipt":
+					case "external_wait.query.result":
 					case "hosted.project.clone.approval.query.result":
 					case "guidance.query.result":
 					case "model_behaviour.query.result":

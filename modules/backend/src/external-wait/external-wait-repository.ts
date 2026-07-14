@@ -84,6 +84,13 @@ const RegisterInput = Schema.Struct({
 	wait_id: Identifier,
 });
 
+const RequestReplayInput = Schema.Struct({
+	request_fingerprint: Fingerprint,
+	source_command: SourceCommand,
+	thread_id: Identifier,
+	wait_id: Identifier,
+});
+
 const ObservationClaim = Schema.Struct({
 	lease_owner: Identifier,
 	now: IsoDateTime,
@@ -194,6 +201,10 @@ export interface ExternalWaitWake {
 	readonly trigger_fingerprint: string;
 }
 
+export interface ExternalWaitManualResumeAcceptance extends ExternalWaitAcceptance {
+	readonly wake: ExternalWaitWake;
+}
+
 export interface ExternalWaitWakeClaim extends ExternalWaitWake {
 	readonly lease_expires_at: string;
 	readonly owner: typeof ExternalWaitOwner.Type;
@@ -218,6 +229,9 @@ export class ExternalWaitRepository extends Context.Service<
 		) => Effect.Effect<ExternalWaitAcceptance, ExternalWaitRepositoryError>;
 		readonly Replay: (
 			input: ExternalWaitRegistration,
+		) => Effect.Effect<Option.Option<ExternalWaitAcceptance>, ExternalWaitRepositoryError>;
+		readonly ReplayRequest: (
+			input: typeof RequestReplayInput.Type,
 		) => Effect.Effect<Option.Option<ExternalWaitAcceptance>, ExternalWaitRepositoryError>;
 		readonly Query: (input: typeof QueryInput.Type) => Effect.Effect<
 			{
@@ -267,10 +281,10 @@ export class ExternalWaitRepository extends Context.Service<
 		) => Effect.Effect<ExternalWaitMaterialization, ExternalWaitRepositoryError>;
 		readonly Cancel: (
 			input: typeof CancelInput.Type,
-		) => Effect.Effect<Option.Option<ExternalWaitSnapshotValue>, ExternalWaitRepositoryError>;
+		) => Effect.Effect<Option.Option<ExternalWaitAcceptance>, ExternalWaitRepositoryError>;
 		readonly ManualResume: (
 			input: typeof ManualResumeInput.Type,
-		) => Effect.Effect<ExternalWaitWake, ExternalWaitRepositoryError>;
+		) => Effect.Effect<ExternalWaitManualResumeAcceptance, ExternalWaitRepositoryError>;
 	}
 >()("Artisan/ExternalWaitRepository") {}
 
@@ -1212,6 +1226,30 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 				Effect.flatMap((decoded) =>
 					database.client.transaction((transaction) =>
 						ReplayRegistration(transaction, decoded).pipe(
+							Effect.map((result) =>
+								Option.map(result, (snapshot) => ({
+									snapshot,
+									status: "duplicate" as const,
+								})),
+							),
+						),
+					),
+				),
+				Effect.mapError(normalize_error),
+			);
+
+		const ReplayRequest = (input: typeof RequestReplayInput.Type) =>
+			Schema.decodeUnknownEffect(RequestReplayInput, { onExcessProperty: "error" })(
+				input,
+			).pipe(
+				Effect.flatMap((decoded) =>
+					database.client.transaction((transaction) =>
+						ReplayOperation(transaction, decoded.source_command, {
+							fingerprint: decoded.request_fingerprint,
+							kind: "request",
+							thread_id: decoded.thread_id,
+							wait_id: decoded.wait_id,
+						}).pipe(
 							Effect.map((result) =>
 								Option.map(result, (snapshot) => ({
 									snapshot,
@@ -2836,7 +2874,13 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 										);
 
 										if (Option.isSome(replay)) {
-											return { published: false, snapshot: replay };
+											return {
+												acceptance: Option.some({
+													snapshot: replay.value,
+													status: "duplicate" as const,
+												}),
+												published: false,
+											};
 										}
 
 										const [row] = yield* transaction
@@ -2852,8 +2896,8 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 
 										if (!row) {
 											return {
+												acceptance: Option.none<ExternalWaitAcceptance>(),
 												published: false,
-												snapshot: Option.none<ExternalWaitSnapshotValue>(),
 											};
 										}
 
@@ -2955,7 +2999,13 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 											wait_id: decoded.wait_id,
 										});
 
-										return { published, snapshot: Option.some(snapshot) };
+										return {
+											acceptance: Option.some({
+												snapshot,
+												status: "accepted" as const,
+											}),
+											published,
+										};
 									}),
 								),
 							),
@@ -2964,11 +3014,11 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 				),
 				Effect.mapError(normalize_error),
 				Effect.tap((result) =>
-					result.published && Option.isSome(result.snapshot)
-						? notifier.Publish(result.snapshot.value.journal_sequence)
+					result.published && Option.isSome(result.acceptance)
+						? notifier.Publish(result.acceptance.value.snapshot.journal_sequence)
 						: Effect.void,
 				),
-				Effect.map((result) => result.snapshot),
+				Effect.map((result) => result.acceptance),
 			);
 
 		const ManualResume = (input: typeof ManualResumeInput.Type) =>
@@ -3011,10 +3061,13 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 											}
 
 											return {
+												acceptance: {
+													snapshot: replay.value,
+													status: "duplicate" as const,
+													wake: (yield* DecodeWake(outbox)).wake,
+												},
 												published_snapshot:
 													Option.none<ExternalWaitSnapshotValue>(),
-												result_snapshot: replay.value,
-												wake: (yield* DecodeWake(outbox)).wake,
 											};
 										}
 
@@ -3064,7 +3117,14 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 											wait_id: decoded.wait_id,
 										});
 
-										return mutation;
+										return {
+											acceptance: {
+												snapshot: mutation.result_snapshot,
+												status: "accepted" as const,
+												wake: mutation.wake,
+											},
+											published_snapshot: mutation.published_snapshot,
+										};
 									}),
 								),
 							),
@@ -3078,7 +3138,7 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 						onSome: (snapshot) => notifier.Publish(snapshot.journal_sequence),
 					}),
 				),
-				Effect.map((result) => result.wake),
+				Effect.map((result) => result.acceptance),
 			);
 
 		return {
@@ -3098,6 +3158,7 @@ export const ExternalWaitRepositoryLive = Layer.effect(
 			ReleaseObservation,
 			ReleaseWake,
 			Replay,
+			ReplayRequest,
 			MaterializeWake,
 		};
 	}),

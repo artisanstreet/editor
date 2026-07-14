@@ -3,6 +3,11 @@ import { Context, Data, Effect, Option, Scope, Stream } from "effect";
 import type {
 	CommandPayload,
 	EventEnvelope,
+	ExternalWaitCancelRequest,
+	ExternalWaitManualResumeRequest,
+	ExternalWaitQuery,
+	ExternalWaitQueryResult,
+	ExternalWaitRequest,
 	GlobalGuidanceDriftResolutionRequest,
 	GlobalGuidanceProvider,
 	GlobalGuidanceSelectionRequest,
@@ -201,6 +206,27 @@ export interface ArtisanHostedProjectCloneApprovalResponseInput {
 	readonly thread_id: string;
 }
 
+/** Supplies an external wait request and optional durable retry identity. */
+export interface ArtisanExternalWaitRequestInput extends ExternalWaitRequest {
+	readonly command_id?: string;
+	readonly thread_id: string;
+}
+
+/** Supplies an external wait cancellation and optional durable retry identity. */
+export interface ArtisanExternalWaitCancelInput extends ExternalWaitCancelRequest {
+	readonly command_id?: string;
+	readonly thread_id: string;
+}
+
+/** Supplies an external wait manual resume and optional durable retry identity. */
+export interface ArtisanExternalWaitManualResumeInput extends ExternalWaitManualResumeRequest {
+	readonly command_id?: string;
+	readonly thread_id: string;
+}
+
+/** Supplies the thread identity for an external wait query. */
+export interface ArtisanExternalWaitQueryInput extends ExternalWaitQuery {}
+
 /** Supplies the durable identity and attribution for a review transition. */
 export interface ArtisanWorkspaceChangeReviewInput {
 	readonly change_id: string;
@@ -360,6 +386,9 @@ export class ArtisanClient extends Context.Service<
 		readonly GetHostedProjectCloneApproval: (
 			input: ArtisanHostedProjectCloneApprovalInput,
 		) => Effect.Effect<HostedProjectCloneApprovalQueryResult, ArtisanClientError>;
+		readonly GetExternalWaits: (
+			input: ArtisanExternalWaitQueryInput,
+		) => Effect.Effect<ExternalWaitQueryResult, ArtisanClientError>;
 		readonly OpenAsset: (
 			asset_id: string,
 		) => Effect.Effect<
@@ -448,6 +477,15 @@ export class ArtisanClient extends Context.Service<
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly RespondHostedProjectCloneApproval: (
 			input: ArtisanHostedProjectCloneApprovalResponseInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RequestExternalWait: (
+			input: ArtisanExternalWaitRequestInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly CancelExternalWait: (
+			input: ArtisanExternalWaitCancelInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly ManuallyResumeExternalWait: (
+			input: ArtisanExternalWaitManualResumeInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 	}
 >()("Artisan/ArtisanClient") {}

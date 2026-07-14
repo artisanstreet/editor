@@ -2,6 +2,10 @@ import { Cause, Effect, Layer, Option, Queue, Ref, Schema, Stream } from "effect
 
 import {
 	type CommandEnvelope,
+	type ExternalWaitCancelEnvelope,
+	type ExternalWaitManualResumeEnvelope,
+	type ExternalWaitQueryEnvelope,
+	type ExternalWaitRequestEnvelope,
 	type HostedProjectCloneApprovalQueryEnvelope,
 	type HostedProjectCloneApprovalRespondEnvelope,
 	HostedProjectCloneRequest,
@@ -47,6 +51,10 @@ import {
 
 import {
 	ArtisanClient,
+	type ArtisanExternalWaitCancelInput,
+	type ArtisanExternalWaitManualResumeInput,
+	type ArtisanExternalWaitQueryInput,
+	type ArtisanExternalWaitRequestInput,
 	type ArtisanHostedProjectCloneApprovalInput,
 	type ArtisanHostedProjectCloneApprovalResponseInput,
 	type ArtisanHostedProjectCloneInput,
@@ -398,6 +406,20 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 								"hosted project clone approval response narrowed incorrectly",
 							);
 				});
+			const get_external_waits = (input: ArtisanExternalWaitQueryInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ExternalWaitQueryEnvelope = {
+						...trace,
+						kind: "external_wait.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(envelope, "external_wait.query.result");
+
+					return result.kind === "external_wait.query.result"
+						? result.payload
+						: yield* Effect.die("external wait query response narrowed incorrectly");
+				});
 
 			type WorkspaceMutationEnvelope =
 				| HostedProjectCloneApprovalRespondEnvelope
@@ -411,6 +433,9 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				| WorkspaceGitMutationRequestEnvelope
 				| WorkspaceGitSessionRefreshEnvelope
 				| HostedGitSnapshotRefreshEnvelope
+				| ExternalWaitCancelEnvelope
+				| ExternalWaitManualResumeEnvelope
+				| ExternalWaitRequestEnvelope
 				| WorkspaceFileReplaceEnvelope;
 			const send_workspace_mutation = (envelope: WorkspaceMutationEnvelope) =>
 				Effect.gen(function* () {
@@ -437,6 +462,51 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						journal_sequence: result.payload.journal_sequence,
 						status: result.payload.status,
 					} satisfies ArtisanCommandReceipt;
+				});
+			const request_external_wait = (input: ArtisanExternalWaitRequestInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ExternalWaitRequestEnvelope = {
+						...trace,
+						kind: "external_wait.request",
+						message_id: input.command_id ?? trace.message_id,
+						payload: {
+							expected_head_commit: input.expected_head_commit,
+							gates: input.gates,
+							pull_request_number: input.pull_request_number,
+							source_run_id: input.source_run_id,
+							workspace_id: input.workspace_id,
+						},
+						thread_id: input.thread_id,
+					};
+
+					return yield* send_workspace_mutation(envelope);
+				});
+			const cancel_external_wait = (input: ArtisanExternalWaitCancelInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ExternalWaitCancelEnvelope = {
+						...trace,
+						kind: "external_wait.cancel",
+						message_id: input.command_id ?? trace.message_id,
+						payload: { wait_id: input.wait_id },
+						thread_id: input.thread_id,
+					};
+
+					return yield* send_workspace_mutation(envelope);
+				});
+			const manually_resume_external_wait = (input: ArtisanExternalWaitManualResumeInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ExternalWaitManualResumeEnvelope = {
+						...trace,
+						kind: "external_wait.manual_resume",
+						message_id: input.command_id ?? trace.message_id,
+						payload: { wait_id: input.wait_id },
+						thread_id: input.thread_id,
+					};
+
+					return yield* send_workspace_mutation(envelope);
 				});
 			const replace_workspace_file = (input: ArtisanWorkspaceFileReplaceInput) =>
 				Effect.gen(function* () {
@@ -962,6 +1032,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				Events: subscriptions.Events,
 				GetOrchestrationGraph: get_orchestration_graph,
 				GetHostedProjectCloneApproval: get_hosted_project_clone_approval,
+				GetExternalWaits: get_external_waits,
 				GetHostedGitSnapshot: get_hosted_git_snapshot,
 				GetGlobalGuidance: get_global_guidance,
 				GetModelBehaviour: get_model_behaviour,
@@ -992,6 +1063,9 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				RespondWorkspaceGitCheckoutApproval: respond_workspace_git_checkout_approval,
 				RespondWorkspaceGitMutationApproval: respond_workspace_git_mutation_approval,
 				RespondHostedProjectCloneApproval: respond_hosted_project_clone_approval,
+				RequestExternalWait: request_external_wait,
+				CancelExternalWait: cancel_external_wait,
+				ManuallyResumeExternalWait: manually_resume_external_wait,
 				ReviewWorkspaceChange: review_workspace_change,
 				RollbackWorkspaceChange: rollback_workspace_change,
 				SelectGlobalGuidance: select_global_guidance,

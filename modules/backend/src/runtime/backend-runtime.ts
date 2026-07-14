@@ -47,6 +47,7 @@ import {
 	ExternalWaitDispatchSchedulerLive,
 } from "../external-wait/external-wait-dispatcher";
 import { ExternalWaitRepositoryLive } from "../external-wait/external-wait-repository";
+import { ExternalWaitServiceLive } from "../external-wait/external-wait-service";
 import { HostedGitSnapshotRepositoryLive } from "../git-provider/hosted-git-snapshot-repository";
 import { HostedGitSnapshotServiceLive } from "../git-provider/hosted-git-snapshot-service";
 import { ArtisanHarnessContextLive } from "../harness/harness-context";
@@ -410,6 +411,13 @@ export function make_backend_layer(options: BackendOptions) {
 		),
 		Layer.provideMerge(infrastructure),
 	);
+	const external_wait_service = ExternalWaitServiceLive.pipe(
+		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(external_wait_dispatch),
+		Layer.provideMerge(external_waits),
+		Layer.provideMerge(hosted_git_snapshots),
+		Layer.provideMerge(infrastructure),
+	);
 	const thread_metadata = ThreadMetadataRepositoryLive.pipe(Layer.provideMerge(infrastructure));
 	const metadata_refinement =
 		options.thread_metadata_refiner === undefined
@@ -532,7 +540,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(hosted_git_snapshots),
 		Layer.provideMerge(external_waits),
 		Layer.provideMerge(external_wait_coordination),
-		Layer.provideMerge(external_wait_dispatch),
+		Layer.provideMerge(external_wait_service),
 		Layer.provideMerge(guidance),
 		Layer.provideMerge(model_behaviour),
 		Layer.provideMerge(git_provider_registry),

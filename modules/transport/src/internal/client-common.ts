@@ -46,6 +46,10 @@ export type PendingRequestEnvelope = Extract<
 	{
 		readonly kind:
 			| "command"
+			| "external_wait.request"
+			| "external_wait.cancel"
+			| "external_wait.manual_resume"
+			| "external_wait.query"
 			| "hosted.project.clone.request"
 			| "hosted.project.clone.approval.query"
 			| "hosted.project.clone.approval.respond"
@@ -91,6 +95,7 @@ export type PendingResultEnvelope = Extract<
 	{
 		readonly kind:
 			| "command.receipt"
+			| "external_wait.query.result"
 			| "hosted.project.clone.approval.query.result"
 			| "guidance.query.result"
 			| "model_behaviour.query.result"

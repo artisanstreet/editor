@@ -21,6 +21,10 @@ import {
 	type AckEnvelope,
 	type CommandEnvelope,
 	type EventEnvelope,
+	type ExternalWaitCancelEnvelope,
+	type ExternalWaitManualResumeEnvelope,
+	type ExternalWaitQueryEnvelope,
+	type ExternalWaitRequestEnvelope,
 	type GlobalGuidanceDriftResolutionEnvelope,
 	type GlobalGuidanceQueryEnvelope,
 	type GlobalGuidanceRetryEnvelope,
@@ -72,6 +76,16 @@ import {
 } from "@artisan/protocol";
 
 import { AgentGraphOrchestrator } from "../orchestration/agent-graph-orchestrator";
+import { ExternalWaitPolicyError } from "../external-wait/external-wait-policy";
+import {
+	ExternalWaitConflict,
+	ExternalWaitInvariant,
+	ExternalWaitUnavailable,
+} from "../external-wait/external-wait-repository";
+import {
+	ExternalWaitService,
+	ExternalWaitServiceFailure,
+} from "../external-wait/external-wait-service";
 import { GuidanceFileStoreFailure } from "../guidance/file-store";
 import { global_guidance_thread_id } from "../guidance/guidance-repository";
 import {
@@ -710,6 +724,89 @@ function hosted_git_snapshot_error_detail(error: unknown): ProtocolErrorDetail {
 	};
 }
 
+function external_wait_error_detail(error: unknown): ProtocolErrorDetail {
+	if (error instanceof ExternalWaitServiceFailure) {
+		return {
+			code: `external_wait.${error.reason}`,
+			message:
+				error.reason === "already_satisfied"
+					? "The selected review or CI condition is already satisfied."
+					: error.reason === "invalid_request"
+						? "The external wait request is invalid."
+						: error.reason === "snapshot_stale"
+							? "Refresh the hosted review and CI state before creating this wait."
+							: error.reason === "snapshot_unavailable"
+								? "No current hosted review or CI state is available for this workspace."
+								: error.reason === "source_run_unavailable"
+									? "The source run no longer owns this thread."
+									: error.reason === "wait_unavailable"
+										? "The external wait is no longer available."
+										: "External-wait persistence is temporarily unavailable.",
+			retryable:
+				error.reason === "persistence_unavailable" ||
+				error.reason === "snapshot_unavailable",
+		};
+	}
+
+	if (error instanceof ExternalWaitPolicyError) {
+		return {
+			code: `external_wait.${error.reason}`,
+			message:
+				error.reason === "incomplete_evidence"
+					? "The hosted projection is incomplete for the selected wait conditions."
+					: error.reason === "evidence_bound_exceeded"
+						? "The selected wait requires more hosted evidence than Artisan can retain safely."
+						: "The hosted review and CI state does not match this external wait.",
+			retryable: error.reason === "incomplete_evidence",
+		};
+	}
+
+	if (error instanceof ExternalWaitConflict) {
+		return {
+			code: `external_wait.${error.reason}`,
+			message: "The external wait command no longer matches its durable intent.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof ExternalWaitUnavailable) {
+		return {
+			code: `external_wait.${error.reason}`,
+			message: "The external wait is no longer available for this operation.",
+			retryable: error.reason === "lease_lost",
+		};
+	}
+
+	if (error instanceof ExternalWaitInvariant) {
+		return {
+			code: "external_wait.invariant_failed",
+			message: "The durable external wait failed validation.",
+			retryable: false,
+		};
+	}
+
+	if (
+		error instanceof GitProviderError ||
+		error instanceof HostedGitSnapshotServiceFailure ||
+		error instanceof HostedGitSnapshotConflict ||
+		error instanceof HostedGitSnapshotUnavailable ||
+		error instanceof HostedGitSnapshotInvariant
+	) {
+		const detail = hosted_git_snapshot_error_detail(error);
+
+		return {
+			...detail,
+			code: detail.code.replace("hosted.git.snapshot_", "external_wait."),
+		};
+	}
+
+	return {
+		code: "external_wait.unavailable",
+		message: "The external wait could not be durably reconciled.",
+		retryable: true,
+	};
+}
+
 function thread_item_from_event(event: EventEnvelope): ThreadListItem | undefined {
 	if (event.payload.type === "thread.metadata.updated") {
 		return event.payload.thread;
@@ -781,6 +878,7 @@ export function make_protocol_server_layer(
 		ProtocolServer,
 		Effect.gen(function* () {
 			const options = yield* DecodeProtocolConnectionOptions(input_options);
+			const external_waits = yield* ExternalWaitService;
 			const graph = yield* AgentGraphOrchestrator;
 			const guidance = yield* GlobalGuidanceService;
 			const hosted_git_snapshots = yield* HostedGitSnapshotService;
@@ -1610,6 +1708,41 @@ export function make_protocol_server_layer(
 						}),
 					);
 
+				const HandleExternalWaitQuery = (
+					query: ExternalWaitQueryEnvelope,
+					current: ReadyState,
+				) =>
+					external_waits.Query(query.payload).pipe(
+						Effect.flatMap((result) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "external_wait.query.result",
+									message_id,
+									origin: "backend",
+									payload: result,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch((error) => {
+							const detail = external_wait_error_detail(error);
+
+							return EnqueueError(
+								current,
+								detail.code,
+								detail.message,
+								detail.retryable,
+								query.message_id,
+							);
+						}),
+					);
+
 				const HandleWorkspaceGitCheckoutApprovalQuery = (
 					query: WorkspaceGitCheckoutApprovalQueryEnvelope,
 					current: ReadyState,
@@ -2346,6 +2479,81 @@ export function make_protocol_server_layer(
 							}),
 						);
 
+				type ExternalWaitMutationEnvelope =
+					| ExternalWaitCancelEnvelope
+					| ExternalWaitManualResumeEnvelope
+					| ExternalWaitRequestEnvelope;
+				const HandleExternalWaitMutation = (envelope: ExternalWaitMutationEnvelope) => {
+					const operation =
+						envelope.kind === "external_wait.request"
+							? external_waits.Request({
+									...envelope.payload,
+									message_id: envelope.message_id,
+									sent_at: envelope.sent_at,
+									thread_id: envelope.thread_id,
+								})
+							: envelope.kind === "external_wait.cancel"
+								? external_waits.Cancel({
+										...envelope.payload,
+										message_id: envelope.message_id,
+										sent_at: envelope.sent_at,
+										thread_id: envelope.thread_id,
+									})
+								: external_waits.ManualResume({
+										...envelope.payload,
+										message_id: envelope.message_id,
+										sent_at: envelope.sent_at,
+										thread_id: envelope.thread_id,
+									});
+
+					return operation.pipe(
+						Effect.matchEffect({
+							onFailure: (error) => {
+								const detail = external_wait_error_detail(error);
+
+								return Effect.gen(function* () {
+									const message_id = yield* metadata.MakeId("message");
+									const sent_at = yield* metadata.Now;
+
+									yield* Enqueue({
+										causation_id: envelope.message_id,
+										correlation_id: envelope.message_id,
+										kind: "command.receipt",
+										message_id,
+										origin: "backend",
+										payload: { error: detail, status: "rejected" },
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at,
+										thread_id: envelope.thread_id,
+									});
+								});
+							},
+							onSuccess: (acceptance) =>
+								Effect.gen(function* () {
+									const message_id = yield* metadata.MakeId("message");
+									const sent_at = yield* metadata.Now;
+
+									yield* Enqueue({
+										causation_id: envelope.message_id,
+										correlation_id: envelope.message_id,
+										kind: "command.receipt",
+										message_id,
+										origin: "backend",
+										payload: {
+											journal_sequence: acceptance.snapshot.journal_sequence,
+											status: acceptance.status,
+										},
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at,
+										thread_id: envelope.thread_id,
+									});
+								}),
+						}),
+					);
+				};
+
 				type WorkspaceGitMutationEnvelope =
 					| HostedProjectCloneApprovalRespondEnvelope
 					| HostedProjectCloneRequestEnvelope
@@ -2508,6 +2716,8 @@ export function make_protocol_server_layer(
 							return HandleWorkspaceGitSessionQuery(envelope, current);
 						case "hosted.git.snapshot.query":
 							return HandleHostedGitSnapshotQuery(envelope, current);
+						case "external_wait.query":
+							return HandleExternalWaitQuery(envelope, current);
 						case "workspace.git.checkout.approval.query":
 							return HandleWorkspaceGitCheckoutApprovalQuery(envelope, current);
 						case "workspace.git.mutation.approval.query":
@@ -2523,6 +2733,10 @@ export function make_protocol_server_layer(
 						case "workspace.git.mutation.request":
 						case "workspace.git.mutation.approval.respond":
 							return HandleWorkspaceGitMutation(envelope);
+						case "external_wait.request":
+						case "external_wait.cancel":
+						case "external_wait.manual_resume":
+							return HandleExternalWaitMutation(envelope);
 						case "workspace.file.replace":
 						case "workspace.change.review":
 						case "workspace.change.rollback":

@@ -2,6 +2,7 @@ import { Effect, Layer, Option, Stream } from "effect";
 
 import type {
 	EventEnvelope,
+	ExternalWaitQueryResult,
 	GlobalGuidanceSnapshot,
 	HostedGitSnapshotQueryResult,
 	ModelBehaviourSnapshot,
@@ -366,6 +367,11 @@ export const FixtureArtisanClientService = {
 				`Unknown fixture hosted project clone approval: ${input.approval_id}`,
 			);
 		}),
+	GetExternalWaits: (_input) =>
+		Effect.succeed({
+			snapshots: [],
+			truncated: false,
+		} satisfies ExternalWaitQueryResult),
 	GetThreadRetentionPolicy: Effect.gen(function* () {
 		return yield* Effect.succeed(fixture_artisan_client_data.thread_retention_policy);
 	}),
@@ -540,6 +546,18 @@ export const FixtureArtisanClientService = {
 	RequestHostedProjectClone: (input) =>
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-hosted-project-clone");
+		}),
+	RequestExternalWait: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-external-wait-request");
+		}),
+	CancelExternalWait: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-external-wait-cancel");
+		}),
+	ManuallyResumeExternalWait: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-external-wait-manual-resume");
 		}),
 	RespondWorkspaceGitCheckoutApproval: (input) =>
 		Effect.gen(function* () {

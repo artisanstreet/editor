@@ -6,6 +6,7 @@ import {
 	HostedGitSnapshotQueryResult,
 	Identifier,
 	IsoDateTime,
+	type HostedGitPullRequestLookup as HostedGitPullRequestLookupValue,
 	type HostedGitSnapshotQueryResult as HostedGitSnapshotQueryResultValue,
 } from "@artisan/protocol";
 
@@ -17,6 +18,7 @@ import {
 import { GitProviderError } from "./git-provider";
 import { GitProviderRegistry } from "./git-provider-registry";
 import { ProjectRepository } from "../projects/project-repository";
+import type { RegisteredProject } from "../projects/project";
 import { WorkspaceGitObserver, type WorkspaceGitObservation } from "../git/workspace-git-observer";
 
 const HostedGitSnapshotRefresh = Schema.Struct({
@@ -28,6 +30,14 @@ const HostedGitSnapshotRefresh = Schema.Struct({
 
 /** Supplies one frontend refresh command for a registered hosted workspace. */
 export type HostedGitSnapshotRefresh = typeof HostedGitSnapshotRefresh.Type;
+
+/** Carries one fresh exact-head hosted read before durable projection metadata is assigned. */
+export interface CurrentHostedGitSnapshot {
+	readonly lookup: HostedGitPullRequestLookupValue;
+	readonly observed_at: string;
+	readonly project_id: string;
+	readonly workspace_id: string;
+}
 
 /** Conceals project, provider, and live-workspace failures behind a stable service boundary. */
 export class HostedGitSnapshotServiceFailure extends Data.TaggedError(
@@ -55,6 +65,9 @@ export class HostedGitSnapshotService extends Context.Service<
 		readonly Query: (
 			query: typeof HostedGitSnapshotQuery.Type,
 		) => Effect.Effect<HostedGitSnapshotQueryResultValue, HostedGitSnapshotServiceError>;
+		readonly ReadCurrent: (
+			query: typeof HostedGitSnapshotQuery.Type,
+		) => Effect.Effect<CurrentHostedGitSnapshot, HostedGitSnapshotServiceError>;
 		readonly Refresh: (
 			input: HostedGitSnapshotRefresh,
 		) => Effect.Effect<HostedGitSnapshotAcceptance, HostedGitSnapshotServiceError>;
@@ -166,6 +179,70 @@ export const HostedGitSnapshotServiceLive = Layer.effect(
 				),
 			);
 
+		const ReadCurrentProject = (workspace_id: string, project: RegisteredProject) =>
+			Effect.gen(function* () {
+				const before = yield* ObserveReady(workspace_id, project.project.root_path);
+				const provider = yield* providers
+					.Get(project.hosted_origin.provider_id)
+					.pipe(Effect.mapError(() => service_failure("provider_unavailable")));
+				const ReadPullRequest = provider.ReadPullRequest;
+
+				if (ReadPullRequest === undefined) {
+					return yield* service_failure("provider_unavailable");
+				}
+
+				const lookup = yield* ReadPullRequest({
+					expected_head: before.identity.head,
+					repository: {
+						host: project.hosted_origin.canonical_host,
+						name: project.hosted_origin.name,
+						owner: project.hosted_origin.owner,
+						provider_id: project.hosted_origin.provider_id,
+					},
+					selected_branch: before.identity.branch,
+					selection: {
+						account_login: project.hosted_origin.selected_account_login,
+						host: project.hosted_origin.canonical_host,
+						provider_id: project.hosted_origin.provider_id,
+					},
+				});
+				const canonical_lookup = yield* ValidateLookup(lookup, {
+					...before.identity,
+					host: project.hosted_origin.canonical_host,
+					name: project.hosted_origin.name,
+					owner: project.hosted_origin.owner,
+					provider_id: project.hosted_origin.provider_id,
+				});
+				const after = yield* ObserveReady(workspace_id, project.project.root_path);
+
+				if (
+					after.identity.branch !== before.identity.branch ||
+					after.identity.head !== before.identity.head ||
+					after.identity.repository_root !== before.identity.repository_root
+				) {
+					return yield* service_failure("branch_changed");
+				}
+
+				return {
+					lookup: canonical_lookup,
+					observed_at: after.observation.observed_at,
+					project_id: project.project.project_id,
+					workspace_id,
+				} satisfies CurrentHostedGitSnapshot;
+			});
+
+		const ReadCurrent = (query: typeof HostedGitSnapshotQuery.Type) =>
+			Schema.decodeUnknownEffect(HostedGitSnapshotQuery, {
+				onExcessProperty: "error",
+			})(query).pipe(
+				Effect.mapError(() => service_failure("invalid_request")),
+				Effect.flatMap((decoded) =>
+					Effect.flatMap(FindProject(decoded.workspace_id), (project) =>
+						ReadCurrentProject(decoded.workspace_id, project),
+					),
+				),
+			);
+
 		const Refresh = (input: HostedGitSnapshotRefresh) =>
 			Schema.decodeUnknownEffect(HostedGitSnapshotRefresh, {
 				onExcessProperty: "error",
@@ -195,58 +272,12 @@ export const HostedGitSnapshotServiceLive = Layer.effect(
 							return replay.value;
 						}
 
-						const before = yield* ObserveReady(
-							decoded.workspace_id,
-							project.project.root_path,
-						);
-						const provider = yield* providers
-							.Get(project.hosted_origin.provider_id)
-							.pipe(Effect.mapError(() => service_failure("provider_unavailable")));
-						const ReadPullRequest = provider.ReadPullRequest;
-
-						if (ReadPullRequest === undefined) {
-							return yield* service_failure("provider_unavailable");
-						}
-
-						const lookup = yield* ReadPullRequest({
-							expected_head: before.identity.head,
-							repository: {
-								host: project.hosted_origin.canonical_host,
-								name: project.hosted_origin.name,
-								owner: project.hosted_origin.owner,
-								provider_id: project.hosted_origin.provider_id,
-							},
-							selected_branch: before.identity.branch,
-							selection: {
-								account_login: project.hosted_origin.selected_account_login,
-								host: project.hosted_origin.canonical_host,
-								provider_id: project.hosted_origin.provider_id,
-							},
-						});
-						const canonical_lookup = yield* ValidateLookup(lookup, {
-							...before.identity,
-							host: project.hosted_origin.canonical_host,
-							name: project.hosted_origin.name,
-							owner: project.hosted_origin.owner,
-							provider_id: project.hosted_origin.provider_id,
-						});
-						const after = yield* ObserveReady(
-							decoded.workspace_id,
-							project.project.root_path,
-						);
-
-						if (
-							after.identity.branch !== before.identity.branch ||
-							after.identity.head !== before.identity.head ||
-							after.identity.repository_root !== before.identity.repository_root
-						) {
-							return yield* service_failure("branch_changed");
-						}
+						const current = yield* ReadCurrentProject(decoded.workspace_id, project);
 
 						return yield* repository
 							.Project({
-								lookup: canonical_lookup,
-								observed_at: after.observation.observed_at,
+								lookup: current.lookup,
+								observed_at: current.observed_at,
 								operation_id: decoded.message_id,
 								project_id: project.project.project_id,
 								request_fingerprint,
@@ -324,6 +355,6 @@ export const HostedGitSnapshotServiceLive = Layer.effect(
 				),
 			);
 
-		return { Query, Refresh };
+		return { Query, ReadCurrent, Refresh };
 	}),
 );

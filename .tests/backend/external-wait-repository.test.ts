@@ -381,7 +381,7 @@ describe("ExternalWaitRepository", () => {
 			);
 
 			expect(result.fenced._tag).toBe("Failure");
-			expect(Option.getOrThrow(result.cancelled).state).toEqual({
+			expect(Option.getOrThrow(result.cancelled).snapshot.state).toEqual({
 				_tag: "cancelled",
 				reason: "project_removed",
 			});
@@ -1482,8 +1482,12 @@ describe("ExternalWaitRepository", () => {
 				}),
 			);
 
-			expect(result.replay).toEqual(result.cancelled);
-			expect(Option.getOrThrow(result.cancelled).state).toEqual({
+			expect(Option.getOrThrow(result.cancelled).status).toBe("accepted");
+			expect(Option.getOrThrow(result.replay)).toEqual({
+				...Option.getOrThrow(result.cancelled),
+				status: "duplicate",
+			});
+			expect(Option.getOrThrow(result.cancelled).snapshot.state).toEqual({
 				_tag: "cancelled",
 				reason: "user",
 			});
@@ -1538,7 +1542,8 @@ describe("ExternalWaitRepository", () => {
 			);
 
 			expect(result.crossed._tag).toBe("Failure");
-			expect(result.replay).toEqual(result.wake);
+			expect(result.wake.status).toBe("accepted");
+			expect(result.replay).toEqual({ ...result.wake, status: "duplicate" });
 		} finally {
 			await instance.dispose();
 		}

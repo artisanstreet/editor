@@ -110,6 +110,7 @@ export {
 	ExternalWaitRepositoryLive,
 	ExternalWaitUnavailable,
 	type ExternalWaitAcceptance,
+	type ExternalWaitManualResumeAcceptance,
 	type ExternalWaitObservationClaim,
 	type ExternalWaitMaterialization,
 	type ExternalWaitRegistration,
@@ -117,6 +118,15 @@ export {
 	type ExternalWaitWake,
 	type ExternalWaitWakeClaim,
 } from "./external-wait/external-wait-repository";
+export {
+	ExternalWaitService,
+	ExternalWaitServiceFailure,
+	ExternalWaitServiceLive,
+	type ExternalWaitCancelCommand,
+	type ExternalWaitManualResumeCommand,
+	type ExternalWaitRequestCommand,
+	type ExternalWaitServiceError,
+} from "./external-wait/external-wait-service";
 export {
 	BuildExternalWaitBaseline,
 	EvaluateExternalWait,
@@ -584,6 +594,7 @@ export {
 	HostedGitSnapshotService,
 	HostedGitSnapshotServiceFailure,
 	HostedGitSnapshotServiceLive,
+	type CurrentHostedGitSnapshot,
 	type HostedGitSnapshotRefresh,
 	type HostedGitSnapshotServiceError,
 } from "./git-provider/hosted-git-snapshot-service";
