@@ -35,6 +35,13 @@ import {
 	WorkspaceGitMutationRequest,
 } from "./git-mutation";
 import {
+	HostedProjectCloneApprovalQuery,
+	HostedProjectCloneApprovalQueryResult,
+	HostedProjectCloneApprovalResponseRequest,
+	HostedProjectCloneApprovalUpdatedEvent,
+	HostedProjectCloneRequest,
+} from "./hosted-project";
+import {
 	Identifier,
 	IsoDateTime,
 	JournalSequence,
@@ -931,6 +938,7 @@ export const EventPayload = Schema.Union([
 	WorkspaceGitSessionUpdatedEvent,
 	WorkspaceGitCheckoutApprovalUpdatedEvent,
 	WorkspaceGitMutationApprovalUpdatedEvent,
+	HostedProjectCloneApprovalUpdatedEvent,
 	ThreadMessageQueuedEvent,
 	ThreadMessageSteeringEvent,
 	RunLifecycleEvent,
@@ -1335,6 +1343,48 @@ export const WorkspaceGitMutationApprovalRespondEnvelope = Schema.Struct({
 export type WorkspaceGitMutationApprovalRespondEnvelope =
 	typeof WorkspaceGitMutationApprovalRespondEnvelope.Type;
 
+/** Requests preparation of one hosted repository clone. */
+export const HostedProjectCloneRequestEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("hosted.project.clone.request"),
+	payload: HostedProjectCloneRequest,
+	thread_id: Identifier,
+});
+
+export type HostedProjectCloneRequestEnvelope = typeof HostedProjectCloneRequestEnvelope.Type;
+
+/** Requests one source-free hosted clone approval by durable identity. */
+export const HostedProjectCloneApprovalQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("hosted.project.clone.approval.query"),
+	payload: HostedProjectCloneApprovalQuery,
+});
+
+export type HostedProjectCloneApprovalQueryEnvelope =
+	typeof HostedProjectCloneApprovalQueryEnvelope.Type;
+
+/** Returns a correlated source-free hosted clone approval projection. */
+export const HostedProjectCloneApprovalQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("hosted.project.clone.approval.query.result"),
+	payload: HostedProjectCloneApprovalQueryResult,
+});
+
+export type HostedProjectCloneApprovalQueryResultEnvelope =
+	typeof HostedProjectCloneApprovalQueryResultEnvelope.Type;
+
+/** Records an explicit approval or denial for one hosted clone request. */
+export const HostedProjectCloneApprovalRespondEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("hosted.project.clone.approval.respond"),
+	payload: HostedProjectCloneApprovalResponseRequest,
+	thread_id: Identifier,
+});
+
+export type HostedProjectCloneApprovalRespondEnvelope =
+	typeof HostedProjectCloneApprovalRespondEnvelope.Type;
+
 /** Requests the curated Model Behaviour registry and current reconciliation state. */
 export const ModelBehaviourQueryEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
@@ -1659,6 +1709,9 @@ export const InboundControlEnvelope = Schema.Union([
 	WorkspaceGitMutationRequestEnvelope,
 	WorkspaceGitMutationApprovalQueryEnvelope,
 	WorkspaceGitMutationApprovalRespondEnvelope,
+	HostedProjectCloneRequestEnvelope,
+	HostedProjectCloneApprovalQueryEnvelope,
+	HostedProjectCloneApprovalRespondEnvelope,
 	GlobalGuidanceQueryEnvelope,
 	GlobalGuidanceUpdateEnvelope,
 	GlobalGuidanceSelectionEnvelope,
@@ -1696,6 +1749,7 @@ export const OutboundControlEnvelope = Schema.Union([
 	WorkspaceGitSessionQueryResultEnvelope,
 	WorkspaceGitCheckoutApprovalQueryResultEnvelope,
 	WorkspaceGitMutationApprovalQueryResultEnvelope,
+	HostedProjectCloneApprovalQueryResultEnvelope,
 	GlobalGuidanceQueryResultEnvelope,
 	ModelBehaviourQueryResultEnvelope,
 	ThreadWorkQueryResultEnvelope,
