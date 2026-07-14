@@ -30,6 +30,7 @@ import {
 	WorkspaceChanges,
 	WorkspaceChangeOperations,
 	WorkspaceGitCheckoutClaims,
+	WorkspaceGitMutationClaims,
 	WorkspaceMutationAuthorities,
 } from "../persistence/schema";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
@@ -177,6 +178,7 @@ export type WorkspaceMutationAuthorityDenialReason =
 	| "thread_unavailable"
 	| "unsupported_scope"
 	| "workspace_git_checkout_active"
+	| "workspace_git_mutation_active"
 	| "workspace_mismatch"
 	| "workspace_unavailable"
 	| "write_not_allowed";
@@ -550,16 +552,26 @@ export const WorkspaceMutationAuthorityLive = Layer.effect(
 						fenced ? Effect.void : Effect.fail(invalid_state()),
 					),
 				);
-		const FenceGitCheckout = (transaction: typeof database.client, workspace_id: string) =>
+		const FenceGitClaims = (transaction: typeof database.client, workspace_id: string) =>
 			Effect.gen(function* () {
-				const [claim] = yield* transaction
+				const [checkout_claim] = yield* transaction
 					.select({ workspace_id: WorkspaceGitCheckoutClaims.workspace_id })
 					.from(WorkspaceGitCheckoutClaims)
 					.where(eq(WorkspaceGitCheckoutClaims.workspace_id, workspace_id))
 					.limit(1);
 
-				if (claim) {
+				if (checkout_claim) {
 					return yield* Effect.fail(denied("workspace_git_checkout_active"));
+				}
+
+				const [mutation_claim] = yield* transaction
+					.select({ workspace_id: WorkspaceGitMutationClaims.workspace_id })
+					.from(WorkspaceGitMutationClaims)
+					.where(eq(WorkspaceGitMutationClaims.workspace_id, workspace_id))
+					.limit(1);
+
+				if (mutation_claim) {
+					return yield* Effect.fail(denied("workspace_git_mutation_active"));
 				}
 			});
 		/** A source-authority write prevents rollback admission from racing thread erasure. */
@@ -897,7 +909,7 @@ export const WorkspaceMutationAuthorityLive = Layer.effect(
 										existing_operation.lifecycle === "claimed" ||
 										existing_operation.lifecycle === "applied"
 									) {
-										yield* FenceGitCheckout(
+										yield* FenceGitClaims(
 											transaction,
 											existing_authority.workspace_id,
 										);
@@ -931,7 +943,7 @@ export const WorkspaceMutationAuthorityLive = Layer.effect(
 								const proof = yield* InferAuthority(transaction, claim);
 								const created_at = yield* metadata.Now;
 
-								yield* FenceGitCheckout(transaction, claim.workspace_id);
+								yield* FenceGitClaims(transaction, claim.workspace_id);
 
 								const accepted = yield* ClaimRepositoryReplace(claim);
 
@@ -1037,7 +1049,7 @@ export const WorkspaceMutationAuthorityLive = Layer.effect(
 									};
 								}
 
-								yield* FenceGitCheckout(transaction, authority.workspace_id);
+								yield* FenceGitClaims(transaction, authority.workspace_id);
 
 								const authorized = yield* AuthorizeWorkspace(
 									authority.workspace_id,

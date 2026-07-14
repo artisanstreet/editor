@@ -19,6 +19,8 @@ import {
 	WorkspaceChangeOperations,
 	WorkspaceGitCheckoutApprovals,
 	WorkspaceGitCheckoutClaims,
+	WorkspaceGitMutationApprovals,
+	WorkspaceGitMutationClaims,
 	WorkspaceMutationAuthorities,
 } from "../../modules/backend/src/persistence/schema";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
@@ -248,12 +250,42 @@ const CreateCheckoutClaim = Effect.gen(function* () {
 	});
 });
 
+const CreateGitMutationClaim = Effect.gen(function* () {
+	const database = yield* Database;
+
+	yield* database.client.insert(WorkspaceGitMutationApprovals).values({
+		approval_id: "mutation_approval_1",
+		approved: true,
+		created_at: now,
+		decided_at: now,
+		decision_message_id: "mutation_decision_1",
+		execution_started_at: now,
+		expected_session_version: 1,
+		operation_summary_json: "{}",
+		request_fingerprint: "e".repeat(64),
+		source_command_id: "mutation_request_1",
+		source_head: "f".repeat(40),
+		state: "executing",
+		thread_id: "thread_1",
+		updated_at: now,
+		workspace_id: "workspace_1",
+	});
+	yield* database.client.insert(WorkspaceGitMutationClaims).values({
+		approval_id: "mutation_approval_1",
+		claimed_at: now,
+		claim_token: "mutation_claim_token_1",
+		thread_id: "thread_1",
+		workspace_id: "workspace_1",
+	});
+});
+
 const ReadRows = Effect.gen(function* () {
 	const database = yield* Database;
 
 	return {
 		authorities: yield* database.client.select().from(WorkspaceMutationAuthorities),
 		checkout_claims: yield* database.client.select().from(WorkspaceGitCheckoutClaims),
+		mutation_claims: yield* database.client.select().from(WorkspaceGitMutationClaims),
 		operations: yield* database.client.select().from(WorkspaceChangeOperations),
 	};
 });
@@ -278,7 +310,54 @@ afterEach(async () => {
 	);
 });
 
-describe("WorkspaceGitCheckoutClaims mutation fence", () => {
+describe("Workspace Git mutation fences", () => {
+	it("blocks new replace and rollback claims while preserving exact replacement replay", async () => {
+		const workspace = await make_workspace();
+
+		await mkdir(workspace.root);
+
+		const runtime = make_runtime(workspace.database_path, workspace.root);
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					yield* SeedBaseRun(workspace.root);
+					yield* AdmitReplace();
+					yield* CommitReplace;
+					yield* CreateGitMutationClaim;
+
+					return {
+						new_replace: yield* DenialReason(
+							AdmitReplace(
+								replace_claim({
+									change_id: "change_2",
+									message_id: "replace_2",
+									request_fingerprint: "1".repeat(64),
+								}),
+							),
+						),
+						replay: yield* AdmitReplace(),
+						new_rollback: yield* DenialReason(
+							AdmitRollback(rollback_claim("rollback_2")),
+						),
+						rows: yield* ReadRows,
+					};
+				}),
+			);
+
+			expect(result.new_replace).toBe("workspace_git_mutation_active");
+			expect(result.replay.claim._tag).toBe("duplicate");
+			expect(result.new_rollback).toBe("workspace_git_mutation_active");
+			expect(result.rows.mutation_claims).toHaveLength(1);
+			expect(result.rows.authorities).toHaveLength(1);
+			expect(result.rows.operations).toMatchObject([
+				{ lifecycle: "committed", message_id: "replace_1" },
+			]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("blocks new replace and rollback claims while preserving committed replacement replay", async () => {
 		const workspace = await make_workspace();
 

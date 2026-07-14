@@ -31,6 +31,7 @@ import {
 	WorkspaceGitChangedFiles,
 	WorkspaceGitCheckoutApprovals,
 	WorkspaceGitCheckoutClaims,
+	WorkspaceGitMutationClaims,
 	WorkspaceGitSessions,
 	WorkspaceMutationAuthorities,
 } from "../persistence/schema";
@@ -1254,6 +1255,25 @@ export const WorkspaceGitCheckoutRepositoryLive = Layer.effect(
 									if (mutation) {
 										return yield* new WorkspaceGitCheckoutConflict({
 											reason: "workspace_mutation_active",
+										});
+									}
+
+									const [git_mutation_claim] = yield* transaction
+										.select({
+											approval_id: WorkspaceGitMutationClaims.approval_id,
+										})
+										.from(WorkspaceGitMutationClaims)
+										.where(
+											eq(
+												WorkspaceGitMutationClaims.workspace_id,
+												row.workspace_id,
+											),
+										)
+										.limit(1);
+
+									if (git_mutation_claim) {
+										return yield* new WorkspaceGitCheckoutConflict({
+											reason: "claim_conflict",
 										});
 									}
 
