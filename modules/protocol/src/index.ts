@@ -12,3 +12,4 @@ export * from "./model-behaviour";
 export * from "./stream";
 export * from "./workspace-changes";
 export * from "./preview";
+export * from "./rich-link";

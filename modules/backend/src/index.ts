@@ -715,6 +715,7 @@ export {
 	type RichLinkCacheEntry,
 	type RichLinkCacheMetadata,
 	type RichLinkFavicon,
+	type RichLinkFaviconContentType,
 	type RichLinkHttpRequest,
 	type RichLinkHttpResponse,
 	type RichLinkMetadataDocument,

@@ -405,6 +405,15 @@ export const FixtureArtisanClientService = {
 			targets: [],
 			workspace_id: input.workspace_id,
 		}),
+	GetRichLinkMetadata: (input) =>
+		Effect.succeed({
+			cache: { expires_at_ms: 1_752_580_800_000, status: "miss" as const },
+			fetched_at_ms: 1_752_580_500_000,
+			final_url: input.url,
+			page_name: "Artisan",
+			requested_url: input.url,
+			site_name: "Artisan",
+		}),
 	GetThreadRetentionPolicy: Effect.gen(function* () {
 		return yield* Effect.succeed(fixture_artisan_client_data.thread_retention_policy);
 	}),

@@ -56,6 +56,8 @@ import type {
 	PreviewTargetRemoveCommand,
 	PreviewTargetsQuery,
 	PreviewTargetsQueryResult,
+	RichLinkMetadataQuery,
+	RichLinkMetadataQueryResult,
 } from "@artisan/protocol";
 
 /** Identifies a typed frontend client failure. */
@@ -124,6 +126,9 @@ export interface ArtisanPreviewTargetRemoveInput extends Omit<PreviewTargetRemov
 
 /** Supplies the project and workspace scope for preview target queries. */
 export interface ArtisanPreviewTargetsInput extends PreviewTargetsQuery {}
+
+/** Supplies one external URL for a rich-link metadata query. */
+export interface ArtisanRichLinkMetadataInput extends RichLinkMetadataQuery {}
 
 /** Records the durable command outcome returned after acceptance or deduplication. */
 export interface ArtisanCommandReceipt {
@@ -456,6 +461,9 @@ export class ArtisanClient extends Context.Service<
 		readonly GetPreviewTargets: (
 			input: ArtisanPreviewTargetsInput,
 		) => Effect.Effect<PreviewTargetsQueryResult, ArtisanClientError>;
+		readonly GetRichLinkMetadata: (
+			input: ArtisanRichLinkMetadataInput,
+		) => Effect.Effect<RichLinkMetadataQueryResult, ArtisanClientError>;
 		readonly OpenAsset: (
 			asset_id: string,
 		) => Effect.Effect<

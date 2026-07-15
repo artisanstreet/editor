@@ -360,6 +360,40 @@ describe("RichLinkMetadata", () => {
 		expect(harness.requests).toHaveLength(0);
 	});
 
+	it("rejects canonical URL expansion before DNS or transport", async () => {
+		const harness = await make_harness({ routes: new Map() });
+		const url = `https://unicode.example/${"\u{1f600}".repeat(200)}`;
+
+		const error = await resolve_error(harness, url);
+
+		expect(url.length).toBeLessThan(2_048);
+		expect(new URL(url).href.length).toBeGreaterThan(2_048);
+		expect(error).toMatchObject({ code: "invalid_url" });
+		expect(harness.dns_calls).toEqual([]);
+		expect(harness.requests).toHaveLength(0);
+	});
+
+	it("normalizes remote control characters before returning metadata", async () => {
+		const routes = new Map<string, RichLinkHttpResponse>([
+			[
+				"https://controls.example/",
+				response(
+					200,
+					'<title>Alpha\u007fBeta\u0085Gamma</title><meta property="og:site_name" content="Site\u007fName">',
+					{ "content-type": "text/html" },
+				),
+			],
+		]);
+		const harness = await make_harness({ routes });
+
+		const result = await harness.resolve("https://controls.example/");
+
+		expect(Option.getOrThrow(result.title)).toBe("Alpha Beta Gamma");
+		expect(result.page_name).toBe("Alpha Beta Gamma");
+		expect(result.site_name).toBe("Site Name");
+		expect(harness.active_requests()).toBe(0);
+	});
+
 	it("rejects mixed public and private DNS answers before transport", async () => {
 		const harness = await make_harness({
 			addresses: {

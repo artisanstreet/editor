@@ -41,6 +41,8 @@ import {
 	PreviewTargetRemoveCommand,
 	PreviewTargetsQuery,
 	type PreviewTargetsQueryEnvelope,
+	RichLinkMetadataQuery,
+	type RichLinkMetadataQueryEnvelope,
 	type GlobalGuidanceDriftResolutionEnvelope,
 	type GlobalGuidanceQueryEnvelope,
 	type GlobalGuidanceRetryEnvelope,
@@ -100,6 +102,7 @@ import {
 	type ArtisanPreviewTargetRegisterInput,
 	type ArtisanPreviewTargetRemoveInput,
 	type ArtisanPreviewTargetsInput,
+	type ArtisanRichLinkMetadataInput,
 } from "../client-contract";
 import { TransportRuntime } from "../transport-runtime";
 import { client_error, validate_client_options } from "./client-common";
@@ -500,6 +503,34 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					return result.kind === "preview.targets.query.result"
 						? result.payload
 						: yield* Effect.die("preview targets response narrowed incorrectly");
+				});
+			const get_rich_link_metadata = (input: ArtisanRichLinkMetadataInput) =>
+				Effect.gen(function* () {
+					const payload = yield* Schema.decodeUnknownEffect(RichLinkMetadataQuery, {
+						onExcessProperty: "error",
+					})(input).pipe(
+						Effect.mapError((cause) =>
+							client_error(
+								"malformed",
+								"The rich-link metadata query is invalid.",
+								cause,
+							),
+						),
+					);
+					const trace = yield* connection.MakeTrace;
+					const envelope: RichLinkMetadataQueryEnvelope = {
+						...trace,
+						kind: "rich-link.metadata.query",
+						payload,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"rich-link.metadata.query.result",
+					);
+
+					return result.kind === "rich-link.metadata.query.result"
+						? result.payload
+						: yield* Effect.die("rich-link metadata response narrowed incorrectly");
 				});
 
 			type WorkspaceMutationEnvelope =
@@ -1198,6 +1229,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				GetHostedProjectCloneApproval: get_hosted_project_clone_approval,
 				GetExternalWaits: get_external_waits,
 				GetPreviewTargets: get_preview_targets,
+				GetRichLinkMetadata: get_rich_link_metadata,
 				GetHostedGitSnapshot: get_hosted_git_snapshot,
 				GetHostedGitCheckFailureDetail: get_hosted_git_check_failure_detail,
 				GetGlobalGuidance: get_global_guidance,

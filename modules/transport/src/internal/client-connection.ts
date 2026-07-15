@@ -379,6 +379,7 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 					case "workspace.git.checkout.approval.query.result":
 					case "workspace.git.mutation.approval.query.result":
 					case "preview.targets.query.result":
+					case "rich-link.metadata.query.result":
 						return handlers.requests.Resolve(envelope);
 					case "event":
 						return handlers.subscriptions.ApplyEvent(envelope).pipe(

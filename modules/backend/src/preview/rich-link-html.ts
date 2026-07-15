@@ -17,7 +17,14 @@ export interface ParsedRichLinkHtml {
 }
 
 function normalize_text(value: string | undefined) {
-	const normalized = value?.replace(/\s+/g, " ").trim();
+	const without_controls = [...(value ?? "")]
+		.map((character) => {
+			const code = character.codePointAt(0)!;
+
+			return code <= 31 || (code >= 127 && code <= 159) ? " " : character;
+		})
+		.join("");
+	const normalized = without_controls.replace(/\s+/g, " ").trim();
 
 	return normalized && normalized.length > 0
 		? [...normalized].slice(0, max_metadata_characters).join("")

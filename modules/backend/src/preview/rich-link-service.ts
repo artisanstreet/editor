@@ -13,6 +13,7 @@ import {
 	RichLinkMetadataCache,
 	RichLinkMetadataError,
 	type RichLinkFavicon,
+	type RichLinkFaviconContentType,
 	type RichLinkHttpResponse,
 	type RichLinkMetadataDocument,
 	type RichLinkMetadataErrorCode,
@@ -57,17 +58,9 @@ interface ResolvedFaviconCandidate {
 	readonly url: URL;
 }
 
-type RichLinkFaviconContentType =
-	| "image/gif"
-	| "image/ico"
-	| "image/jpeg"
-	| "image/png"
-	| "image/vnd.microsoft.icon"
-	| "image/webp"
-	| "image/x-icon";
-
 const redirect_statuses = new Set([301, 302, 303, 307, 308]);
 const html_content_types = new Set(["application/xhtml+xml", "text/html"]);
+const max_protocol_url_characters = 2048;
 const favicon_content_types = new Set([
 	"image/gif",
 	"image/ico",
@@ -174,6 +167,18 @@ function parse_http_url(input: string, base?: URL) {
 			);
 		}
 
+		parsed.hash = "";
+
+		if (parsed.href.length > max_protocol_url_characters) {
+			return yield* Effect.fail(
+				metadata_error(
+					parsed.href,
+					"invalid_url",
+					new Error("canonical URL exceeds the protocol bound"),
+				),
+			);
+		}
+
 		const hostname = canonical_hostname(parsed.hostname);
 
 		if (!hostname || is_localhost_name(hostname)) {
@@ -191,8 +196,6 @@ function parse_http_url(input: string, base?: URL) {
 				),
 			);
 		}
-
-		parsed.hash = "";
 
 		return parsed;
 	});
@@ -438,7 +441,9 @@ export function make_rich_link_metadata_layer(options: RichLinkMetadataOptions =
 							);
 
 						return Option.some<RichLinkFavicon>({
-							...stored,
+							asset_id: stored.asset_id,
+							bytes: stored.bytes,
+							content_type: fetched.value.content_type,
 							source: candidate.source,
 							source_url: fetched.value.url.href,
 						});

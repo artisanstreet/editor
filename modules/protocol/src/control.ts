@@ -126,6 +126,7 @@ import {
 	PreviewTargetsQuery,
 	PreviewTargetsQueryResult,
 } from "./preview";
+import { RichLinkMetadataQuery, RichLinkMetadataQueryResult } from "./rich-link";
 
 export * from "./thread";
 export * from "./guidance";
@@ -134,6 +135,7 @@ export * from "./workspace-changes";
 export * from "./git-session";
 export * from "./hosted-git";
 export * from "./preview";
+export * from "./rich-link";
 
 const FrontendTraceMetadata = {
 	message_id: Identifier,
@@ -1456,6 +1458,25 @@ export const PreviewTargetsQueryResultEnvelope = Schema.Struct({
 
 export type PreviewTargetsQueryResultEnvelope = typeof PreviewTargetsQueryResultEnvelope.Type;
 
+/** Queries bounded metadata for one external HTTP(S) URL. */
+export const RichLinkMetadataQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("rich-link.metadata.query"),
+	payload: RichLinkMetadataQuery,
+});
+
+export type RichLinkMetadataQueryEnvelope = typeof RichLinkMetadataQueryEnvelope.Type;
+
+/** Returns normalized rich-link metadata for a correlated query. */
+export const RichLinkMetadataQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("rich-link.metadata.query.result"),
+	payload: RichLinkMetadataQueryResult,
+});
+
+export type RichLinkMetadataQueryResultEnvelope = typeof RichLinkMetadataQueryResultEnvelope.Type;
+
 /** Requests a guarded checkout of a workspace branch. */
 export const WorkspaceGitCheckoutRequestEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
@@ -1911,6 +1932,7 @@ export const InboundControlEnvelope = Schema.Union([
 	ExternalWaitManualResumeEnvelope,
 	ExternalWaitQueryEnvelope,
 	PreviewTargetsQueryEnvelope,
+	RichLinkMetadataQueryEnvelope,
 	WorkspaceGitCheckoutRequestEnvelope,
 	WorkspaceGitCheckoutApprovalQueryEnvelope,
 	WorkspaceGitCheckoutApprovalRespondEnvelope,
@@ -1960,6 +1982,7 @@ export const OutboundControlEnvelope = Schema.Union([
 	HostedGitCheckFailureDetailQueryResultEnvelope,
 	ExternalWaitQueryResultEnvelope,
 	PreviewTargetsQueryResultEnvelope,
+	RichLinkMetadataQueryResultEnvelope,
 	WorkspaceGitCheckoutApprovalQueryResultEnvelope,
 	WorkspaceGitMutationApprovalQueryResultEnvelope,
 	HostedProjectCloneApprovalQueryResultEnvelope,

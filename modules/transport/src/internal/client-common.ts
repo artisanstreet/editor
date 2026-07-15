@@ -90,7 +90,8 @@ export type PendingRequestEnvelope = Extract<
 			| "workspace.git.mutation.request"
 			| "workspace.git.mutation.approval.query"
 			| "workspace.git.mutation.approval.respond"
-			| "preview.targets.query";
+			| "preview.targets.query"
+			| "rich-link.metadata.query";
 	}
 >;
 
@@ -119,7 +120,8 @@ export type PendingResultEnvelope = Extract<
 			| "hosted.git.check_failure_detail.query.result"
 			| "workspace.git.checkout.approval.query.result"
 			| "workspace.git.mutation.approval.query.result"
-			| "preview.targets.query.result";
+			| "preview.targets.query.result"
+			| "rich-link.metadata.query.result";
 	}
 >;
 

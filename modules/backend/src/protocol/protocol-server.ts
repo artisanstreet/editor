@@ -10,6 +10,7 @@ import {
 	PubSub,
 	Queue,
 	Ref,
+	Schema,
 	Scope,
 	Semaphore,
 	Stream,
@@ -17,6 +18,7 @@ import {
 
 import {
 	DecodeInboundControlEnvelope,
+	RichLinkMetadataQueryResult,
 	SupportedProtocolVersions,
 	type AckEnvelope,
 	type CommandEnvelope,
@@ -50,6 +52,7 @@ import {
 	type ProtocolErrorDetail,
 	type ProtocolErrorEnvelope,
 	type ReplayEnvelope,
+	type RichLinkMetadataQueryEnvelope,
 	type StreamCursor,
 	type SubscribeEnvelope,
 	type ThreadListItem,
@@ -114,6 +117,11 @@ import {
 import { OrchestrationRepository } from "../persistence/orchestration-repository";
 import { ThreadReadModel } from "../persistence/thread-read-model";
 import { PreviewTarget, PreviewTargetError } from "../preview/preview-target";
+import {
+	RichLinkMetadata,
+	RichLinkMetadataError,
+	type RichLinkMetadataResult,
+} from "../preview/rich-link-metadata";
 import {
 	HostedProjectCloneCoordinator,
 	HostedProjectCloneCoordinatorFailure,
@@ -371,6 +379,76 @@ function preview_target_error_detail(error: unknown): ProtocolErrorDetail {
 	}
 
 	return describe_preview_target_error(error);
+}
+
+function rich_link_error_detail(error: unknown): ProtocolErrorDetail {
+	if (!(error instanceof RichLinkMetadataError)) {
+		return {
+			code: "rich_link.unavailable",
+			message: "The link metadata could not be resolved.",
+			retryable: true,
+		};
+	}
+
+	if (error.code === "invalid_url") {
+		return {
+			code: "rich_link.invalid_url",
+			message: "The link URL is invalid.",
+			retryable: false,
+		};
+	}
+
+	if (error.code === "blocked_address") {
+		return {
+			code: "rich_link.blocked_address",
+			message: "The link target is blocked by the external metadata policy.",
+			retryable: false,
+		};
+	}
+
+	if (
+		error.code === "configuration" ||
+		error.code === "content_type" ||
+		error.code === "parse" ||
+		error.code === "redirect" ||
+		error.code === "response_size"
+	) {
+		return {
+			code: `rich_link.${error.code}`,
+			message: "The link did not provide supported bounded metadata.",
+			retryable: false,
+		};
+	}
+
+	return {
+		code: `rich_link.${error.code}`,
+		message: "The link metadata is temporarily unavailable.",
+		retryable: true,
+	};
+}
+
+function decode_rich_link_protocol_result(result: RichLinkMetadataResult) {
+	return Schema.decodeUnknownEffect(RichLinkMetadataQueryResult, {
+		onExcessProperty: "error",
+	})({
+		cache: result.cache,
+		...(Option.isSome(result.favicon) ? { favicon: result.favicon.value } : {}),
+		fetched_at_ms: result.fetched_at_ms,
+		final_url: result.final_url,
+		page_name: result.page_name,
+		requested_url: result.requested_url,
+		site_name: result.site_name,
+		...(Option.isSome(result.title) ? { title: result.title.value } : {}),
+	}).pipe(
+		Effect.mapError(
+			(cause) =>
+				new RichLinkMetadataError({
+					cause,
+					code: "parse",
+					url: result.requested_url,
+				}),
+		),
+	);
 }
 
 function workspace_error_detail(error: unknown): ProtocolErrorDetail {
@@ -1033,6 +1111,7 @@ export function make_protocol_server_layer(
 			const external_waits = yield* ExternalWaitService;
 			const graph = yield* AgentGraphOrchestrator;
 			const preview_targets = yield* PreviewTarget;
+			const rich_link_metadata = yield* RichLinkMetadata;
 			const guidance = yield* GlobalGuidanceService;
 			const hosted_git_snapshots = yield* HostedGitSnapshotService;
 			const hosted_project_clones = yield* HostedProjectCloneCoordinator;
@@ -1676,6 +1755,42 @@ export function make_protocol_server_layer(
 						),
 						Effect.catch((error) => {
 							const detail = preview_target_error_detail(error);
+
+							return EnqueueError(
+								current,
+								detail.code,
+								detail.message,
+								detail.retryable,
+								query.message_id,
+							);
+						}),
+					);
+
+				const HandleRichLinkMetadataQuery = (
+					query: RichLinkMetadataQueryEnvelope,
+					current: ReadyState,
+				) =>
+					rich_link_metadata.Resolve(query.payload.url).pipe(
+						Effect.flatMap((result) =>
+							Effect.gen(function* () {
+								const payload = yield* decode_rich_link_protocol_result(result);
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "rich-link.metadata.query.result",
+									message_id,
+									origin: "backend",
+									payload,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch((error) => {
+							const detail = rich_link_error_detail(error);
 
 							return EnqueueError(
 								current,
@@ -3040,6 +3155,8 @@ export function make_protocol_server_layer(
 							return HandleRetentionUpdate(envelope);
 						case "preview.targets.query":
 							return HandlePreviewTargetsQuery(envelope, current);
+						case "rich-link.metadata.query":
+							return HandleRichLinkMetadataQuery(envelope, current);
 						case "workspace.file.read.query":
 							return HandleWorkspaceFileReadQuery(envelope, current);
 						case "workspace.change.list.query":

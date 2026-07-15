@@ -101,11 +101,21 @@ export class RichLinkClock extends Context.Service<
 	}
 >()("Artisan/RichLinkClock") {}
 
+/** Identifies the verified favicon media types exposed across the backend boundary. */
+export type RichLinkFaviconContentType =
+	| "image/gif"
+	| "image/ico"
+	| "image/jpeg"
+	| "image/png"
+	| "image/vnd.microsoft.icon"
+	| "image/webp"
+	| "image/x-icon";
+
 /** Describes a fetched favicon without exposing its untrusted bytes. */
 export interface RichLinkFavicon {
 	readonly asset_id: string;
 	readonly bytes: number;
-	readonly content_type: string;
+	readonly content_type: RichLinkFaviconContentType;
 	readonly source: "apple_touch" | "document_icon" | "fallback";
 	readonly source_url: string;
 }

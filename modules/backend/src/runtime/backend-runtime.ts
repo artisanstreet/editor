@@ -156,6 +156,9 @@ import {
 	PreviewTargetClockLive,
 } from "../preview/preview-target-service";
 import { PreviewTargetRepositoryLive } from "../preview/preview-target-repository";
+import { RichLinkAssetStore, RichLinkAssetStoreError } from "../preview/rich-link-asset-store";
+import { RichLinkMetadata, RichLinkMetadataError } from "../preview/rich-link-metadata";
+import { make_node_rich_link_metadata_layer } from "../preview/rich-link-service";
 import { WorkspaceChangeRepositoryLive } from "../workspace/workspace-change-repository";
 import { WorkspaceEvidenceRecorderLive } from "../workspace/workspace-evidence-recorder";
 import { WorkspaceFileServiceLive } from "../workspace/workspace-file-service";
@@ -186,6 +189,10 @@ export interface BackendOptions {
 	readonly project_locator?: Layer.Layer<ProjectLocator>;
 	readonly retention_clock?: Layer.Layer<ThreadRetentionClock>;
 	readonly retention_scheduler?: Layer.Layer<ThreadRetentionScheduler>;
+	readonly rich_links?: Layer.Layer<
+		RichLinkAssetStore | RichLinkMetadata,
+		RichLinkAssetStoreError | RichLinkMetadataError
+	>;
 	readonly runtime_metadata?: Layer.Layer<RuntimeMetadata>;
 	readonly terminal_driver?: Layer.Layer<TerminalDriver>;
 	readonly thread_metadata_refiner?: Layer.Layer<ThreadMetadataRefiner>;
@@ -421,7 +428,12 @@ export function make_backend_layer(options: BackendOptions) {
 			),
 		),
 	);
-	const model_behaviour_and_preview_targets = Layer.mergeAll(model_behaviour, preview_targets);
+	const rich_links = options.rich_links ?? make_node_rich_link_metadata_layer();
+	const model_behaviour_preview_and_links = Layer.mergeAll(
+		model_behaviour,
+		preview_targets,
+		rich_links,
+	);
 	const external_waits = ExternalWaitRepositoryLive.pipe(
 		Layer.provideMerge(NodeCrypto.layer),
 		Layer.provideMerge(infrastructure),
@@ -597,7 +609,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(external_wait_coordination),
 		Layer.provideMerge(external_wait_service),
 		Layer.provideMerge(guidance),
-		Layer.provideMerge(model_behaviour_and_preview_targets),
+		Layer.provideMerge(model_behaviour_preview_and_links),
 		Layer.provideMerge(git_provider_registry),
 		Layer.provideMerge(workspace),
 	);
