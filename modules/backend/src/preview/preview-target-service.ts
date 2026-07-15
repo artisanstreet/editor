@@ -10,6 +10,7 @@ import {
 	PreviewTargetError,
 	type PreviewTargetAcceptance,
 } from "./preview-target";
+import type { PreviewTargetRemovalClaim } from "./preview-browser";
 import {
 	PreviewTargetRepository,
 	PreviewTargetRepositoryConflict,
@@ -30,6 +31,9 @@ export interface PreviewTargetOptions {
 
 type PreviewCommand = Extract<Command["payload"], { readonly type: `preview.target.${string}` }>;
 type ReadyProbeClaim = Exclude<PreviewTargetProbeClaimResult, { readonly _tag: "Pending" }>;
+type RemoveCommand = Command & {
+	readonly payload: Extract<PreviewCommand, { readonly type: "preview.target.remove" }>;
+};
 
 function is_register_command(command: Command): command is Command & {
 	readonly payload: Extract<PreviewCommand, { readonly type: "preview.target.register" }>;
@@ -149,6 +153,30 @@ export function make_preview_target_layer(options: PreviewTargetOptions = {}) {
 				acceptance.status === "accepted"
 					? PubSub.publish(events, acceptance.event).pipe(Effect.asVoid)
 					: Effect.void;
+			const DecodeRemovalCommand = (
+				command: Command,
+			): Effect.Effect<RemoveCommand, PreviewTargetError> =>
+				Effect.gen(function* () {
+					const decoded = yield* Schema.decodeUnknownEffect(CommandEnvelope)(
+						command,
+					).pipe(Effect.mapError(() => target_error("", "invalid_target")));
+
+					if (!is_remove_command(decoded)) {
+						return yield* Effect.fail(target_error("", "invalid_target"));
+					}
+
+					return decoded;
+				});
+			const ReplayDecodedRemoval = (command: RemoveCommand) =>
+				repository
+					.ReplayTargetRemoval(command)
+					.pipe(
+						Effect.mapError((error) =>
+							map_repository_error(command.payload.target_id, error),
+						),
+					);
+			const ReplayRemoval = (command: Command) =>
+				DecodeRemovalCommand(command).pipe(Effect.flatMap(ReplayDecodedRemoval));
 			const AwaitProbeClaim = (
 				command: Command & {
 					readonly payload: Extract<
@@ -205,23 +233,10 @@ export function make_preview_target_layer(options: PreviewTargetOptions = {}) {
 
 					return acceptance;
 				});
-			const Remove = (command: Command) =>
+			const RemoveClaimed = (command: Command, claim: PreviewTargetRemovalClaim) =>
 				Effect.gen(function* () {
-					const decoded = yield* Schema.decodeUnknownEffect(CommandEnvelope)(
-						command,
-					).pipe(Effect.mapError(() => target_error("", "invalid_target")));
-
-					if (!is_remove_command(decoded)) {
-						return yield* Effect.fail(target_error("", "invalid_target"));
-					}
-
-					const replayed = yield* repository
-						.Replay(decoded)
-						.pipe(
-							Effect.mapError((error) =>
-								map_repository_error(decoded.payload.target_id, error),
-							),
-						);
+					const decoded = yield* DecodeRemovalCommand(command);
+					const replayed = yield* ReplayDecodedRemoval(decoded);
 
 					if (Option.isSome(replayed)) {
 						return replayed.value;
@@ -229,7 +244,7 @@ export function make_preview_target_layer(options: PreviewTargetOptions = {}) {
 
 					const now_ms = yield* clock.Now;
 					const acceptance = yield* repository
-						.Remove(decoded, now_ms)
+						.RemoveClaimed(decoded, claim, now_ms)
 						.pipe(
 							Effect.mapError((error) =>
 								map_repository_error(decoded.payload.target_id, error),
@@ -295,7 +310,8 @@ export function make_preview_target_layer(options: PreviewTargetOptions = {}) {
 						.pipe(Effect.mapError((error) => map_repository_error("", error))),
 				Probe,
 				Register,
-				Remove,
+				ReplayRemoval,
+				RemoveClaimed,
 				SlidingEvents: Stream.fromPubSub(events),
 			};
 		}),

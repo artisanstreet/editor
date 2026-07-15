@@ -12,6 +12,7 @@ import {
 import { type AgentGraphError } from "../orchestration/agent-graph-repository";
 import { type JournalStoreError } from "../persistence/journal-store";
 import { type OrchestrationError } from "../persistence/orchestration-repository";
+import type { PreviewBrowserLifecycleError } from "../preview/preview-browser";
 import { type PreviewTargetError, type PreviewTargetErrorCode } from "../preview/preview-target";
 import type { TerminalSessionError } from "../terminal/terminal-sessions";
 import type { ThreadMetadataError } from "../threads/thread-metadata-repository";
@@ -66,11 +67,55 @@ export function describe_preview_target_error(error: PreviewTargetError): Protoc
 	return PreviewTargetErrorDetails[error.code];
 }
 
+/** Maps browser lifecycle failures to stable source-safe protocol errors. */
+export function describe_preview_browser_error(
+	error: PreviewBrowserLifecycleError,
+): ProtocolErrorDetail {
+	if (error.code === "conflict") {
+		return {
+			code: "command.id_conflict",
+			message: "This command id or inspection id has already been used for different intent.",
+			retryable: false,
+		};
+	}
+
+	if (error.code === "invalid_request") {
+		return {
+			code: "preview.browser.invalid",
+			message: "The external-browser lifecycle request is invalid.",
+			retryable: false,
+		};
+	}
+
+	if (error.code === "not_found") {
+		return {
+			code: "preview.browser.not_found",
+			message: "The requested preview target or inspection session does not exist.",
+			retryable: false,
+		};
+	}
+
+	if (error.code === "invariant") {
+		return {
+			code: "preview.browser.invariant_failed",
+			message: "The stored external-browser lifecycle state is invalid.",
+			retryable: false,
+		};
+	}
+
+	return {
+		code: "preview.browser.unavailable",
+		message: "The external-browser lifecycle command could not be durably completed.",
+		retryable: true,
+	};
+}
+
 const describe_journal_error = pipe(
 	Match.type<
 		| AgentGraphError
 		| JournalStoreError
 		| OrchestrationError
+		| PreviewBrowserLifecycleError
 		| PreviewTargetError
 		| TerminalSessionError
 		| ThreadMetadataError
@@ -112,6 +157,7 @@ const describe_journal_error = pipe(
 			message: "The command could not be durably orchestrated.",
 			retryable: true,
 		}),
+		PreviewBrowserLifecycleError: describe_preview_browser_error,
 		PreviewTargetError: describe_preview_target_error,
 		TerminalCommandConflict: (): ProtocolErrorDetail => ({
 			code: "command.id_conflict",
@@ -195,6 +241,7 @@ export const ProtocolRouterLive = Layer.effect(
 				| AgentGraphError
 				| JournalStoreError
 				| OrchestrationError
+				| PreviewBrowserLifecycleError
 				| PreviewTargetError
 				| TerminalSessionError
 				| ThreadMetadataError

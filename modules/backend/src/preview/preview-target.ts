@@ -8,6 +8,8 @@ import {
 	type PreviewTargetRemovedRecord,
 } from "@artisan/protocol";
 
+import type { PreviewTargetRemovalClaim } from "./preview-browser";
+
 export type {
 	PreviewTargetHealth,
 	PreviewTargetRecord,
@@ -52,6 +54,11 @@ export interface PreviewHealthProbeResult {
 export interface PreviewTargetAcceptance {
 	readonly event: EventEnvelope;
 	readonly status: "accepted" | "duplicate";
+}
+
+/** Preserves exact target-removal replay while exposing whether inspection fencing remains owed. */
+export interface PreviewTargetRemovalReplay extends PreviewTargetAcceptance {
+	readonly fence_status: "complete" | "pending";
 }
 
 /** Reports a source-safe preview registry or health-probe failure. */
@@ -112,9 +119,13 @@ export class PreviewTarget extends Context.Service<
 		readonly Register: (
 			command: PreviewTargetCommandEnvelope,
 		) => Effect.Effect<PreviewTargetAcceptance, PreviewTargetError>;
-		readonly Remove: (
+		readonly ReplayRemoval: (
 			command: PreviewTargetCommandEnvelope,
-		) => Effect.Effect<PreviewTargetAcceptance, PreviewTargetError>;
+		) => Effect.Effect<Option.Option<PreviewTargetRemovalReplay>, PreviewTargetError>;
+		readonly RemoveClaimed: (
+			command: PreviewTargetCommandEnvelope,
+			claim: PreviewTargetRemovalClaim,
+		) => Effect.Effect<PreviewTargetRemovalReplay, PreviewTargetError>;
 	}
 >()("Artisan/PreviewTarget") {}
 

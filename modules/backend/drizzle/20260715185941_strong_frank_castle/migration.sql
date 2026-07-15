@@ -1,0 +1,1 @@
+ALTER TABLE `preview_target_removal_claims` ADD `target_generation_id` text;

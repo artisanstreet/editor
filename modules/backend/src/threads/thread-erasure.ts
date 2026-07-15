@@ -29,7 +29,10 @@ import {
 	OrchestrationOutbox,
 	OrchestrationRawObservations,
 	OrchestrationRuns,
+	PreviewBrowserLaunches,
+	PreviewInspectionSessions,
 	PreviewTargetProbeClaims,
+	PreviewTargetRemovalFences,
 	TerminalCommands,
 	TerminalSessions,
 	ThreadErasureClaims,
@@ -140,6 +143,14 @@ export const ThreadErasureLive = Layer.effect(
 					),
 			),
 		);
+		const IsPendingPreviewBrowserLaunch = inArray(PreviewBrowserLaunches.state, [
+			"accepted",
+			"dispatching",
+		]);
+		const IsPendingPreviewInspection = inArray(PreviewInspectionSessions.state, [
+			"attached",
+			"attaching",
+		]);
 
 		const ClaimExpired = (cutoff: string, claimed_at: string) =>
 			database.client
@@ -259,6 +270,40 @@ export const ThreadErasureLive = Layer.effect(
 															Threads.thread_id,
 														),
 														IsPendingExternalWait,
+													),
+												),
+										),
+									),
+									not(
+										exists(
+											database.client
+												.select({
+													message_id: PreviewBrowserLaunches.message_id,
+												})
+												.from(PreviewBrowserLaunches)
+												.where(
+													and(
+														eq(
+															PreviewBrowserLaunches.thread_id,
+															Threads.thread_id,
+														),
+														IsPendingPreviewBrowserLaunch,
+													),
+												),
+										),
+									),
+									not(
+										exists(
+											database.client
+												.select({
+													message_id:
+														PreviewTargetRemovalFences.message_id,
+												})
+												.from(PreviewTargetRemovalFences)
+												.where(
+													eq(
+														PreviewTargetRemovalFences.thread_id,
+														Threads.thread_id,
 													),
 												),
 										),
@@ -401,6 +446,44 @@ export const ThreadErasureLive = Layer.effect(
 							.limit(1);
 
 						if (pending_external_wait) {
+							yield* transaction
+								.delete(ThreadErasureClaims)
+								.where(eq(ThreadErasureClaims.thread_id, thread_id));
+
+							return undefined;
+						}
+
+						const [pending_preview_launch] = yield* transaction
+							.select({ message_id: PreviewBrowserLaunches.message_id })
+							.from(PreviewBrowserLaunches)
+							.where(
+								and(
+									eq(PreviewBrowserLaunches.thread_id, thread_id),
+									IsPendingPreviewBrowserLaunch,
+								),
+							)
+							.limit(1);
+						const [pending_preview_inspection] = yield* transaction
+							.select({ inspection_id: PreviewInspectionSessions.inspection_id })
+							.from(PreviewInspectionSessions)
+							.where(
+								and(
+									eq(PreviewInspectionSessions.thread_id, thread_id),
+									IsPendingPreviewInspection,
+								),
+							)
+							.limit(1);
+						const [pending_preview_target_removal] = yield* transaction
+							.select({ message_id: PreviewTargetRemovalFences.message_id })
+							.from(PreviewTargetRemovalFences)
+							.where(eq(PreviewTargetRemovalFences.thread_id, thread_id))
+							.limit(1);
+
+						if (
+							pending_preview_launch ||
+							pending_preview_inspection ||
+							pending_preview_target_removal
+						) {
 							yield* transaction
 								.delete(ThreadErasureClaims)
 								.where(eq(ThreadErasureClaims.thread_id, thread_id));
@@ -614,6 +697,12 @@ export const ThreadErasureLive = Layer.effect(
 						yield* transaction
 							.delete(PreviewTargetProbeClaims)
 							.where(eq(PreviewTargetProbeClaims.thread_id, thread_id));
+						yield* transaction
+							.delete(PreviewInspectionSessions)
+							.where(eq(PreviewInspectionSessions.thread_id, thread_id));
+						yield* transaction
+							.delete(PreviewBrowserLaunches)
+							.where(eq(PreviewBrowserLaunches.thread_id, thread_id));
 						yield* transaction
 							.delete(JournalCommands)
 							.where(eq(JournalCommands.thread_id, thread_id));

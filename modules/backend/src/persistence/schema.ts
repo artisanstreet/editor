@@ -1730,6 +1730,175 @@ export const PreviewTargetProbeClaims = sqliteTable(
 	],
 );
 
+/** Serializes one target removal against browser handoffs across backend processes. */
+export const PreviewTargetRemovalClaims = sqliteTable(
+	"preview_target_removal_claims",
+	{
+		project_id: text("project_id").notNull(),
+		workspace_id: text("workspace_id").notNull(),
+		target_id: text("target_id").notNull(),
+		target_generation_id: text("target_generation_id"),
+		claim_token: text("claim_token").notNull(),
+		owner_instance_id: text("owner_instance_id").notNull(),
+		lease_expires_at_ms: integer("lease_expires_at_ms").notNull(),
+		created_at_ms: integer("created_at_ms").notNull(),
+		updated_at_ms: integer("updated_at_ms").notNull(),
+	},
+	(table) => [
+		primaryKey({ columns: [table.project_id, table.workspace_id, table.target_id] }),
+		uniqueIndex("preview_target_removal_claims_token_unique").on(table.claim_token),
+		index("preview_target_removal_claims_lease_index").on(table.lease_expires_at_ms),
+		check(
+			"preview_target_removal_claims_timestamp_check",
+			sql`${table.created_at_ms} >= 0 AND ${table.updated_at_ms} >= ${table.created_at_ms} AND ${table.lease_expires_at_ms} >= ${table.updated_at_ms}`,
+		),
+	],
+);
+
+/** Records one committed removal whose exact-generation inspection fence remains owed. */
+export const PreviewTargetRemovalFences = sqliteTable(
+	"preview_target_removal_fences",
+	{
+		message_id: text("message_id").primaryKey(),
+		thread_id: text("thread_id").notNull(),
+		project_id: text("project_id").notNull(),
+		workspace_id: text("workspace_id").notNull(),
+		target_id: text("target_id").notNull(),
+		target_generation_id: text("target_generation_id").notNull(),
+		committed_at_ms: integer("committed_at_ms").notNull(),
+	},
+	(table) => [
+		uniqueIndex("preview_target_removal_fences_scope_unique").on(
+			table.project_id,
+			table.workspace_id,
+			table.target_id,
+		),
+		index("preview_target_removal_fences_thread_index").on(table.thread_id),
+		index("preview_target_removal_fences_generation_scope_index").on(
+			table.project_id,
+			table.workspace_id,
+			table.target_id,
+			table.target_generation_id,
+		),
+		check("preview_target_removal_fences_timestamp_check", sql`${table.committed_at_ms} >= 0`),
+	],
+);
+
+/** Fences one non-idempotent external-browser handoff by durable command identity. */
+export const PreviewBrowserLaunches = sqliteTable(
+	"preview_browser_launches",
+	{
+		message_id: text("message_id").primaryKey(),
+		command_json: text("command_json").notNull(),
+		thread_id: text("thread_id").notNull(),
+		project_id: text("project_id").notNull(),
+		workspace_id: text("workspace_id").notNull(),
+		target_id: text("target_id").notNull(),
+		target_generation_id: text("target_generation_id").notNull(),
+		url: text("url").notNull(),
+		initiator_kind: text("initiator_kind").notNull(),
+		initiator_agent_id: text("initiator_agent_id"),
+		claim_token: text("claim_token").notNull(),
+		owner_instance_id: text("owner_instance_id").notNull(),
+		lease_expires_at_ms: integer("lease_expires_at_ms").notNull(),
+		state: text("state").notNull(),
+		reason: text("reason"),
+		requested_at_ms: integer("requested_at_ms").notNull(),
+		updated_at_ms: integer("updated_at_ms").notNull(),
+	},
+	(table) => [
+		uniqueIndex("preview_browser_launches_claim_token_unique").on(table.claim_token),
+		index("preview_browser_launches_lease_index").on(table.lease_expires_at_ms),
+		index("preview_browser_launches_scope_index").on(
+			table.project_id,
+			table.workspace_id,
+			table.updated_at_ms,
+		),
+		index("preview_browser_launches_thread_index").on(table.thread_id),
+		index("preview_browser_launches_target_index").on(
+			table.project_id,
+			table.workspace_id,
+			table.target_id,
+		),
+		check(
+			"preview_browser_launches_initiator_check",
+			sql`COALESCE((${table.initiator_kind} = 'user' AND ${table.initiator_agent_id} IS NULL) OR (${table.initiator_kind} = 'agent' AND ${table.initiator_agent_id} IS NOT NULL), 0)`,
+		),
+		check(
+			"preview_browser_launches_state_check",
+			sql`${table.state} IN ('accepted', 'dispatching', 'dispatched', 'outcome_unknown', 'rejected')`,
+		),
+		check(
+			"preview_browser_launches_reason_check",
+			sql`COALESCE((${table.state} IN ('accepted', 'dispatching', 'dispatched') AND ${table.reason} IS NULL) OR (${table.state} = 'outcome_unknown' AND ${table.reason} IN ('interrupted', 'launcher_failed')) OR (${table.state} = 'rejected' AND ${table.reason} IN ('launcher_rejected', 'launcher_unavailable', 'target_changed')), 0)`,
+		),
+		check(
+			"preview_browser_launches_timestamp_check",
+			sql`${table.requested_at_ms} >= 0 AND ${table.updated_at_ms} >= ${table.requested_at_ms}`,
+		),
+	],
+);
+
+/** Stores source-safe state for one explicit external-browser inspection attachment. */
+export const PreviewInspectionSessions = sqliteTable(
+	"preview_inspection_sessions",
+	{
+		inspection_id: text("inspection_id").primaryKey(),
+		attach_message_id: text("attach_message_id").notNull(),
+		attach_command_json: text("attach_command_json").notNull(),
+		thread_id: text("thread_id").notNull(),
+		project_id: text("project_id").notNull(),
+		workspace_id: text("workspace_id").notNull(),
+		target_id: text("target_id").notNull(),
+		target_generation_id: text("target_generation_id").notNull(),
+		url: text("url").notNull(),
+		connector_id: text("connector_id").notNull(),
+		initiator_kind: text("initiator_kind").notNull(),
+		initiator_agent_id: text("initiator_agent_id"),
+		claim_token: text("claim_token").notNull(),
+		owner_instance_id: text("owner_instance_id").notNull(),
+		lease_expires_at_ms: integer("lease_expires_at_ms").notNull(),
+		state: text("state").notNull(),
+		reason: text("reason"),
+		requested_at_ms: integer("requested_at_ms").notNull(),
+		updated_at_ms: integer("updated_at_ms").notNull(),
+	},
+	(table) => [
+		uniqueIndex("preview_inspection_sessions_attach_message_unique").on(
+			table.attach_message_id,
+		),
+		uniqueIndex("preview_inspection_sessions_claim_token_unique").on(table.claim_token),
+		index("preview_inspection_sessions_lease_index").on(table.lease_expires_at_ms),
+		index("preview_inspection_sessions_scope_index").on(
+			table.project_id,
+			table.workspace_id,
+			table.updated_at_ms,
+		),
+		index("preview_inspection_sessions_thread_index").on(table.thread_id),
+		index("preview_inspection_sessions_target_index").on(
+			table.project_id,
+			table.workspace_id,
+			table.target_id,
+		),
+		check(
+			"preview_inspection_sessions_initiator_check",
+			sql`COALESCE((${table.initiator_kind} = 'user' AND ${table.initiator_agent_id} IS NULL) OR (${table.initiator_kind} = 'agent' AND ${table.initiator_agent_id} IS NOT NULL), 0)`,
+		),
+		check(
+			"preview_inspection_sessions_state_check",
+			sql`${table.state} IN ('attached', 'attaching', 'disconnected', 'failed')`,
+		),
+		check(
+			"preview_inspection_sessions_reason_check",
+			sql`COALESCE((${table.state} IN ('attached', 'attaching') AND ${table.reason} IS NULL) OR (${table.state} = 'failed' AND ${table.reason} IN ('connector_rejected', 'connector_unavailable', 'target_changed')) OR (${table.state} = 'disconnected' AND ${table.reason} IN ('connection_lost', 'detached', 'interrupted', 'target_changed', 'thread_erased')), 0)`,
+		),
+		check(
+			"preview_inspection_sessions_timestamp_check",
+			sql`${table.requested_at_ms} >= 0 AND ${table.updated_at_ms} >= ${table.requested_at_ms}`,
+		),
+	],
+);
+
 /** Stores one canonical checkout root for each durable hosted project. */
 export const Projects = sqliteTable(
 	"projects",

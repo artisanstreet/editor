@@ -150,6 +150,17 @@ import { ModelBehaviourRepositoryLive } from "../model-behaviour/model-behaviour
 import { ModelBehaviourRegistryError } from "../model-behaviour/model-behaviour-registry";
 import { ModelBehaviourServiceLive } from "../model-behaviour/model-behaviour-service";
 import { NodePreviewHealthProbeLive } from "../preview/node-preview-health-probe";
+import {
+	BrowserInspectionConnector,
+	ExternalUrlLauncher,
+	UnavailableBrowserInspectionConnectorLive,
+	UnavailableExternalUrlLauncherLive,
+} from "../preview/preview-browser";
+import { PreviewBrowserRepositoryLive } from "../preview/preview-browser-repository";
+import {
+	make_preview_browser_lifecycle_layer,
+	type PreviewBrowserLifecycleOptions,
+} from "../preview/preview-browser-service";
 import { PreviewHealthProbe } from "../preview/preview-target";
 import {
 	make_preview_target_layer,
@@ -170,10 +181,12 @@ import { WorkspaceReplaceApprovalRepositoryLive } from "../workspace/workspace-r
 import { WorkspaceReplaceApprovalCoordinatorLive } from "../workspace/workspace-replace-approval-coordinator";
 
 export interface BackendOptions {
+	readonly browser_inspection_connector?: Layer.Layer<BrowserInspectionConnector>;
 	readonly database_path: string;
 	readonly engines?: ReadonlyArray<Engine>;
 	readonly external_wait_dispatch_scheduler?: Layer.Layer<ExternalWaitDispatchScheduler>;
 	readonly external_wait_scheduler?: Layer.Layer<ExternalWaitScheduler>;
+	readonly external_url_launcher?: Layer.Layer<ExternalUrlLauncher>;
 	readonly git_provider_registry?: Layer.Layer<GitProviderRegistry, GitProviderRegistryError>;
 	readonly git_transport_authentication?: Layer.Layer<GitTransportAuthentication>;
 	readonly guidance?: Partial<GlobalGuidanceServiceOptions>;
@@ -185,6 +198,7 @@ export interface BackendOptions {
 		ModelBehaviourRegistryError
 	>;
 	readonly protocol?: Partial<ProtocolConnectionOptions>;
+	readonly preview_browser?: PreviewBrowserLifecycleOptions;
 	readonly preview_health_probe?: Layer.Layer<PreviewHealthProbe>;
 	readonly project_locator?: Layer.Layer<ProjectLocator>;
 	readonly retention_clock?: Layer.Layer<ThreadRetentionClock>;
@@ -428,9 +442,23 @@ export function make_backend_layer(options: BackendOptions) {
 			),
 		),
 	);
+	const preview_browser_repository = PreviewBrowserRepositoryLive.pipe(
+		Layer.provideMerge(infrastructure),
+	);
+	const preview_browser = make_preview_browser_lifecycle_layer(options.preview_browser).pipe(
+		Layer.provide(
+			Layer.mergeAll(
+				options.browser_inspection_connector ?? UnavailableBrowserInspectionConnectorLive,
+				options.external_url_launcher ?? UnavailableExternalUrlLauncherLive,
+				PreviewTargetClockLive,
+				preview_browser_repository,
+			),
+		),
+	);
 	const rich_links = options.rich_links ?? make_node_rich_link_metadata_layer();
 	const model_behaviour_preview_and_links = Layer.mergeAll(
 		model_behaviour,
+		preview_browser,
 		preview_targets,
 		rich_links,
 	);
@@ -544,6 +572,7 @@ export function make_backend_layer(options: BackendOptions) {
 			Layer.provideMerge(orchestration),
 			Layer.provideMerge(graph),
 			Layer.provideMerge(hosted_project_clones),
+			Layer.provideMerge(preview_browser),
 			Layer.provideMerge(terminals),
 			Layer.provideMerge(workspace_approval_coordination),
 			Layer.provideMerge(workspace_git_checkouts),

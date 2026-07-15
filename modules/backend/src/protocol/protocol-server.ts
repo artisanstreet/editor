@@ -47,6 +47,7 @@ import {
 	type ModelBehaviourUpdateEnvelope,
 	type OrchestrationGraphQueryEnvelope,
 	type OutboundControlEnvelope,
+	type PreviewBrowserLifecycleQueryEnvelope,
 	type PreviewTargetsQueryEnvelope,
 	type PreNegotiationProtocolErrorEnvelope,
 	type ProtocolErrorDetail,
@@ -116,6 +117,7 @@ import {
 } from "../persistence/journal-store";
 import { OrchestrationRepository } from "../persistence/orchestration-repository";
 import { ThreadReadModel } from "../persistence/thread-read-model";
+import { PreviewBrowserLifecycle, PreviewBrowserLifecycleError } from "../preview/preview-browser";
 import { PreviewTarget, PreviewTargetError } from "../preview/preview-target";
 import {
 	RichLinkMetadata,
@@ -208,7 +210,11 @@ import {
 	type ProtocolConnection,
 	type ProtocolConnectionOptions,
 } from "./protocol-connection";
-import { describe_preview_target_error, ProtocolRouter } from "./protocol-router";
+import {
+	describe_preview_browser_error,
+	describe_preview_target_error,
+	ProtocolRouter,
+} from "./protocol-router";
 
 interface PendingHeartbeat {
 	readonly deadline_ms: number;
@@ -379,6 +385,18 @@ function preview_target_error_detail(error: unknown): ProtocolErrorDetail {
 	}
 
 	return describe_preview_target_error(error);
+}
+
+function preview_browser_error_detail(error: unknown): ProtocolErrorDetail {
+	if (!(error instanceof PreviewBrowserLifecycleError)) {
+		return {
+			code: "preview.browser.unavailable",
+			message: "The external-browser lifecycle projection could not be read.",
+			retryable: true,
+		};
+	}
+
+	return describe_preview_browser_error(error);
 }
 
 function rich_link_error_detail(error: unknown): ProtocolErrorDetail {
@@ -1110,6 +1128,7 @@ export function make_protocol_server_layer(
 			const options = yield* DecodeProtocolConnectionOptions(input_options);
 			const external_waits = yield* ExternalWaitService;
 			const graph = yield* AgentGraphOrchestrator;
+			const preview_browser = yield* PreviewBrowserLifecycle;
 			const preview_targets = yield* PreviewTarget;
 			const rich_link_metadata = yield* RichLinkMetadata;
 			const guidance = yield* GlobalGuidanceService;
@@ -1755,6 +1774,41 @@ export function make_protocol_server_layer(
 						),
 						Effect.catch((error) => {
 							const detail = preview_target_error_detail(error);
+
+							return EnqueueError(
+								current,
+								detail.code,
+								detail.message,
+								detail.retryable,
+								query.message_id,
+							);
+						}),
+					);
+
+				const HandlePreviewBrowserLifecycleQuery = (
+					query: PreviewBrowserLifecycleQueryEnvelope,
+					current: ReadyState,
+				) =>
+					preview_browser.Query(query.payload).pipe(
+						Effect.flatMap((payload) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "preview.browser.lifecycle.query.result",
+									message_id,
+									origin: "backend",
+									payload,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch((error) => {
+							const detail = preview_browser_error_detail(error);
 
 							return EnqueueError(
 								current,
@@ -3155,6 +3209,8 @@ export function make_protocol_server_layer(
 							return HandleRetentionUpdate(envelope);
 						case "preview.targets.query":
 							return HandlePreviewTargetsQuery(envelope, current);
+						case "preview.browser.lifecycle.query":
+							return HandlePreviewBrowserLifecycleQuery(envelope, current);
 						case "rich-link.metadata.query":
 							return HandleRichLinkMetadataQuery(envelope, current);
 						case "workspace.file.read.query":

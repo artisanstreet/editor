@@ -685,6 +685,39 @@ export {
 	type PreviewTargetOptions,
 } from "./preview/preview-target-service";
 export {
+	BrowserInspectionConnector,
+	BrowserInspectionConnectorError,
+	ExternalUrlLauncher,
+	ExternalUrlLauncherError,
+	PreviewBrowserLifecycle,
+	PreviewBrowserLifecycleError,
+	UnavailableBrowserInspectionConnectorLive,
+	UnavailableExternalUrlLauncherLive,
+	type BrowserInspectionSession,
+	type PreparedPreviewBrowserLaunch,
+	type PreparedPreviewInspection,
+	type PreviewBrowserAcceptance,
+	type PreviewInspectionRevocation,
+} from "./preview/preview-browser";
+export {
+	PreviewBrowserRepository,
+	PreviewBrowserRepositoryConflict,
+	PreviewBrowserRepositoryInvariant,
+	PreviewBrowserRepositoryLive,
+	PreviewBrowserRepositoryMissing,
+	PreviewBrowserRepositoryStorage,
+	type PreviewBrowserLaunchPreparation,
+	type PreviewBrowserLaunchSettlement,
+	type PreviewBrowserRepositoryError,
+	type PreviewInspectionAttachSettlement,
+	type PreviewInspectionDetachPreparation,
+	type PreviewInspectionPreparation,
+} from "./preview/preview-browser-repository";
+export {
+	make_preview_browser_lifecycle_layer,
+	type PreviewBrowserLifecycleOptions,
+} from "./preview/preview-browser-service";
+export {
 	make_node_preview_health_probe_layer,
 	NodePreviewHealthDnsResolverLive,
 	NodePreviewHealthProbeLive,

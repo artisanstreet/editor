@@ -4,6 +4,7 @@ import { ExternalWaitDispatcher } from "../external-wait/external-wait-dispatche
 import { AgentGraphOrchestrator } from "../orchestration/agent-graph-orchestrator";
 import { AgentOrchestrator } from "../orchestration/agent-orchestrator";
 import { HostedProjectCloneCoordinator } from "../projects/hosted-project-clone-coordinator";
+import { PreviewBrowserLifecycle } from "../preview/preview-browser";
 import { TerminalSessionService } from "../terminal/terminal-sessions";
 import { WorkspaceGitCheckoutCoordinator } from "../git/workspace-git-checkout-coordinator";
 import { WorkspaceGitFetchService } from "../git/workspace-git-fetch-service";
@@ -34,6 +35,7 @@ export const ThreadResourceQuiescerLive = Layer.effect(
 		const graph = yield* AgentGraphOrchestrator;
 		const hosted_project_clones = yield* HostedProjectCloneCoordinator;
 		const orchestration = yield* AgentOrchestrator;
+		const preview_browser = yield* PreviewBrowserLifecycle;
 		const terminals = yield* TerminalSessionService;
 		const workspace_git_checkouts = yield* WorkspaceGitCheckoutCoordinator;
 		const workspace_git_fetches = yield* WorkspaceGitFetchService;
@@ -46,6 +48,7 @@ export const ThreadResourceQuiescerLive = Layer.effect(
 					graph.QuiesceThread(thread_id),
 					hosted_project_clones.QuiesceThread(thread_id),
 					orchestration.QuiesceThread(thread_id),
+					preview_browser.QuiesceThread(thread_id),
 					terminals.QuiesceThread(thread_id),
 					workspace_git_checkouts.QuiesceThread(thread_id),
 					workspace_git_fetches.QuiesceThread(thread_id),

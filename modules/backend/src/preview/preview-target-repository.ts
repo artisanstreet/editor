@@ -1,4 +1,4 @@
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, gt } from "drizzle-orm";
 import { Context, Data, DateTime, Effect, Layer, Option, Schema } from "effect";
 
 import {
@@ -23,16 +23,24 @@ import {
 	JournalCommands,
 	JournalEvents,
 	PreviewTargetProbeClaims,
+	PreviewTargetRemovalClaims,
+	PreviewTargetRemovalFences,
 	PreviewTargets,
 	ThreadErasureClaims,
 	Threads,
 	ThreadTombstones,
 } from "../persistence/schema";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
-import type { PreviewHealthProbeResult, PreviewTargetAcceptance } from "./preview-target";
+import type { PreviewTargetRemovalClaim } from "./preview-browser";
+import type {
+	PreviewHealthProbeResult,
+	PreviewTargetAcceptance,
+	PreviewTargetRemovalReplay,
+} from "./preview-target";
 
 type TargetRow = typeof PreviewTargets.$inferSelect;
 type ProbeClaimRow = typeof PreviewTargetProbeClaims.$inferSelect;
+type TargetRemovalFenceRow = typeof PreviewTargetRemovalFences.$inferSelect;
 type PreviewCommand = Extract<
 	Command["payload"],
 	{ readonly type: "preview.target.probe" | "preview.target.register" | "preview.target.remove" }
@@ -93,7 +101,7 @@ export class PreviewTargetRepositoryStorage extends Data.TaggedError(
 export class PreviewTargetRepositoryUnavailable extends Data.TaggedError(
 	"PreviewTargetRepositoryUnavailable",
 )<{
-	readonly reason: "probe_claim_lost";
+	readonly reason: "probe_claim_lost" | "target_removing";
 }> {}
 
 export type PreviewTargetRepositoryError =
@@ -131,13 +139,17 @@ export class PreviewTargetRepository extends Context.Service<
 			url: string,
 			now_ms: number,
 		) => Effect.Effect<PreviewTargetAcceptance, PreviewTargetRepositoryError>;
-		readonly Remove: (
+		readonly RemoveClaimed: (
 			command: Command,
+			claim: PreviewTargetRemovalClaim,
 			now_ms: number,
-		) => Effect.Effect<PreviewTargetAcceptance, PreviewTargetRepositoryError>;
+		) => Effect.Effect<PreviewTargetRemovalReplay, PreviewTargetRepositoryError>;
 		readonly Replay: (
 			command: Command,
 		) => Effect.Effect<Option.Option<PreviewTargetAcceptance>, PreviewTargetRepositoryError>;
+		readonly ReplayTargetRemoval: (
+			command: Command,
+		) => Effect.Effect<Option.Option<PreviewTargetRemovalReplay>, PreviewTargetRepositoryError>;
 		readonly ReleaseProbe: (
 			claim: PreviewTargetProbeClaim,
 		) => Effect.Effect<void, PreviewTargetRepositoryError>;
@@ -428,6 +440,72 @@ export const PreviewTargetRepositoryLive = Layer.effect(
 				};
 			});
 
+		const EnsureTargetNotRemoving = (
+			transaction: typeof database.client,
+			input: {
+				readonly project_id: string;
+				readonly target_id: string;
+				readonly workspace_id: string;
+			},
+			now_ms: number,
+		) =>
+			Effect.gen(function* () {
+				const [claim] = yield* transaction
+					.select({ claim_token: PreviewTargetRemovalClaims.claim_token })
+					.from(PreviewTargetRemovalClaims)
+					.where(
+						and(
+							eq(PreviewTargetRemovalClaims.project_id, input.project_id),
+							eq(PreviewTargetRemovalClaims.workspace_id, input.workspace_id),
+							eq(PreviewTargetRemovalClaims.target_id, input.target_id),
+							gt(PreviewTargetRemovalClaims.lease_expires_at_ms, now_ms),
+						),
+					)
+					.limit(1);
+
+				if (claim) {
+					return yield* new PreviewTargetRepositoryUnavailable({
+						reason: "target_removing",
+					});
+				}
+			});
+		const EnsureLiveTargetRemovalClaim = (
+			transaction: typeof database.client,
+			claim: PreviewTargetRemovalClaim,
+			now_ms: number,
+		) =>
+			Effect.gen(function* () {
+				const [stored] = yield* transaction
+					.select({
+						claim_token: PreviewTargetRemovalClaims.claim_token,
+						target_generation_id: PreviewTargetRemovalClaims.target_generation_id,
+					})
+					.from(PreviewTargetRemovalClaims)
+					.where(
+						and(
+							eq(PreviewTargetRemovalClaims.project_id, claim.project_id),
+							eq(PreviewTargetRemovalClaims.workspace_id, claim.workspace_id),
+							eq(PreviewTargetRemovalClaims.target_id, claim.target_id),
+							eq(PreviewTargetRemovalClaims.claim_token, claim.claim_token),
+							eq(
+								PreviewTargetRemovalClaims.owner_instance_id,
+								claim.owner_instance_id,
+							),
+							gt(PreviewTargetRemovalClaims.lease_expires_at_ms, now_ms),
+						),
+					)
+					.limit(1);
+
+				const claimed_generation_id =
+					claim.subject._tag === "Current" ? claim.subject.target_generation_id : null;
+
+				if (!stored || stored.target_generation_id !== claimed_generation_id) {
+					return yield* new PreviewTargetRepositoryUnavailable({
+						reason: "target_removing",
+					});
+				}
+			});
+
 		const ReadDuplicate = (transaction: typeof database.client, message_id: string) =>
 			ReadEvent(transaction, message_id).pipe(
 				Effect.map((event) => ({
@@ -435,6 +513,56 @@ export const PreviewTargetRepositoryLive = Layer.effect(
 					status: "duplicate" as const,
 				})),
 			);
+
+		const ReadTargetRemovalFence = (transaction: typeof database.client, message_id: string) =>
+			transaction
+				.select()
+				.from(PreviewTargetRemovalFences)
+				.where(eq(PreviewTargetRemovalFences.message_id, message_id))
+				.limit(1)
+				.pipe(
+					Effect.map(([fence]) =>
+						fence ? Option.some(fence) : Option.none<TargetRemovalFenceRow>(),
+					),
+				);
+
+		const ValidateTargetRemovalFenceReplay = (
+			fence: TargetRemovalFenceRow,
+			command: Command & {
+				readonly payload: Extract<
+					PreviewCommand,
+					{ readonly type: "preview.target.remove" }
+				>;
+			},
+			acceptance: PreviewTargetAcceptance,
+		) =>
+			Effect.gen(function* () {
+				const payload = acceptance.event.payload;
+				const generation_id =
+					payload.type === "preview.target.updated" &&
+					payload.action === "removed" &&
+					"generation_id" in payload.target
+						? payload.target.generation_id
+						: undefined;
+
+				if (
+					fence.message_id !== command.message_id ||
+					fence.thread_id !== command.thread_id ||
+					fence.project_id !== command.payload.project_id ||
+					fence.workspace_id !== command.payload.workspace_id ||
+					fence.target_id !== command.payload.target_id ||
+					!Number.isSafeInteger(fence.committed_at_ms) ||
+					fence.committed_at_ms < 0 ||
+					payload.type !== "preview.target.updated" ||
+					payload.action !== "removed" ||
+					payload.target.project_id !== fence.project_id ||
+					payload.target.workspace_id !== fence.workspace_id ||
+					payload.target.target_id !== fence.target_id ||
+					generation_id !== fence.target_generation_id
+				) {
+					return yield* invariant("Stored target-removal fence is corrupt");
+				}
+			});
 
 		const ReplayTransaction = (
 			transaction: typeof database.client,
@@ -585,6 +713,49 @@ export const PreviewTargetRepositoryLive = Layer.effect(
 						}
 
 						return yield* ReplayTransaction(transaction, command, encoded);
+					}),
+				);
+			}).pipe(Effect.mapError(normalize_error));
+
+		const ReplayTargetRemoval = (command: Command) =>
+			Effect.gen(function* () {
+				if (!is_remove_command(command)) {
+					return yield* invariant("Target-removal replay requires a remove command");
+				}
+
+				const encoded = yield* EncodeCommand(command);
+
+				return yield* database.client.transaction((transaction) =>
+					Effect.gen(function* () {
+						yield* EnsureLiveThreadStream(transaction, command);
+						const replayed = yield* ReplayTransaction(transaction, command, encoded);
+
+						if (Option.isNone(replayed)) {
+							return Option.none<PreviewTargetRemovalReplay>();
+						}
+
+						const fence = yield* ReadTargetRemovalFence(
+							transaction,
+							command.message_id,
+						);
+
+						if (Option.isNone(fence)) {
+							return Option.some({
+								...replayed.value,
+								fence_status: "complete" as const,
+							});
+						}
+
+						yield* ValidateTargetRemovalFenceReplay(
+							fence.value,
+							command,
+							replayed.value,
+						);
+
+						return Option.some({
+							...replayed.value,
+							fence_status: "pending" as const,
+						});
 					}),
 				);
 			}).pipe(Effect.mapError(normalize_error));
@@ -879,6 +1050,14 @@ export const PreviewTargetRepositoryLive = Layer.effect(
 							}
 
 							const now = yield* metadata.Now;
+							const now_ms = Date.parse(now);
+
+							if (!Number.isSafeInteger(now_ms) || now_ms < 0) {
+								return yield* invariant("Preview probe clock is invalid");
+							}
+
+							yield* EnsureTargetNotRemoving(transaction, command.payload, now_ms);
+
 							const existing = yield* ReadProbeClaim(transaction, command.message_id);
 
 							if (Option.isSome(existing)) {
@@ -1038,6 +1217,8 @@ export const PreviewTargetRepositoryLive = Layer.effect(
 
 			return Accept(command, "registered", (transaction) =>
 				Effect.gen(function* () {
+					yield* EnsureTargetNotRemoving(transaction, payload, now_ms);
+
 					const [existing] = yield* transaction
 						.select({ target_id: PreviewTargets.target_id })
 						.from(PreviewTargets)
@@ -1115,6 +1296,8 @@ export const PreviewTargetRepositoryLive = Layer.effect(
 				"probed",
 				(transaction) =>
 					Effect.gen(function* () {
+						yield* EnsureTargetNotRemoving(transaction, payload, now_ms);
+
 						const health: Health = yield* Schema.decodeUnknownEffect(
 							PreviewTargetHealth,
 							{
@@ -1176,35 +1359,100 @@ export const PreviewTargetRepositoryLive = Layer.effect(
 			);
 		};
 
-		const Remove = (command: Command, now_ms: number) => {
+		const RemoveClaimed = (
+			command: Command,
+			claim: PreviewTargetRemovalClaim,
+			now_ms: number,
+		) => {
 			if (!is_remove_command(command)) {
-				return Effect.fail(invariant("Preview removal requires a remove command"));
+				return Effect.fail(invariant("Claimed preview removal requires a remove command"));
 			}
 
 			const { payload } = command;
 
-			return Accept(command, "removed", (transaction) =>
-				Effect.gen(function* () {
-					const { target } = yield* ReadTarget(transaction, payload);
-					const removed = {
-						...target,
-						state: "removed" as const,
-						updated_at_ms: now_ms,
-					};
+			if (
+				claim.project_id !== payload.project_id ||
+				claim.target_id !== payload.target_id ||
+				claim.workspace_id !== payload.workspace_id
+			) {
+				return Effect.fail(invariant("Claimed preview removal has the wrong target"));
+			}
 
-					yield* transaction
-						.delete(PreviewTargets)
-						.where(
-							and(
-								eq(PreviewTargets.project_id, payload.project_id),
-								eq(PreviewTargets.workspace_id, payload.workspace_id),
-								eq(PreviewTargets.target_id, payload.target_id),
-							),
-						);
+			return Effect.gen(function* () {
+				const acceptance = yield* Accept(command, "removed", (transaction) =>
+					Effect.gen(function* () {
+						yield* EnsureLiveTargetRemovalClaim(transaction, claim, now_ms);
 
-					return removed;
-				}),
-			);
+						if (claim.subject._tag === "Missing") {
+							return yield* new PreviewTargetRepositoryMissing({
+								reason: "target",
+								target_id: payload.target_id,
+							});
+						}
+
+						const { target } = yield* ReadTarget(transaction, payload);
+						const removed = {
+							...target,
+							generation_id: claim.subject.target_generation_id,
+							state: "removed" as const,
+							updated_at_ms: now_ms,
+						};
+						const [deleted] = yield* transaction
+							.delete(PreviewTargets)
+							.where(
+								and(
+									eq(PreviewTargets.project_id, payload.project_id),
+									eq(PreviewTargets.workspace_id, payload.workspace_id),
+									eq(PreviewTargets.target_id, payload.target_id),
+									eq(
+										PreviewTargets.generation_id,
+										claim.subject.target_generation_id,
+									),
+								),
+							)
+							.returning({ target_id: PreviewTargets.target_id });
+
+						if (!deleted) {
+							return yield* new PreviewTargetRepositoryUnavailable({
+								reason: "target_removing",
+							});
+						}
+
+						const [fence] = yield* transaction
+							.insert(PreviewTargetRemovalFences)
+							.values({
+								committed_at_ms: now_ms,
+								message_id: command.message_id,
+								project_id: payload.project_id,
+								target_generation_id: claim.subject.target_generation_id,
+								target_id: payload.target_id,
+								thread_id: command.thread_id,
+								workspace_id: payload.workspace_id,
+							})
+							.onConflictDoNothing()
+							.returning({ message_id: PreviewTargetRemovalFences.message_id });
+
+						if (!fence) {
+							return yield* new PreviewTargetRepositoryUnavailable({
+								reason: "target_removing",
+							});
+						}
+
+						return removed;
+					}),
+				);
+				const replayed = yield* ReplayTargetRemoval(command);
+
+				if (Option.isNone(replayed)) {
+					return yield* invariant("Committed target removal cannot be replayed");
+				}
+
+				if (replayed.value.event.message_id !== acceptance.event.message_id) {
+					return yield* invariant("Target-removal replay event changed after commit");
+				}
+
+				return { ...replayed.value, status: acceptance.status };
+			});
 		};
 
 		return {
@@ -1214,8 +1462,9 @@ export const PreviewTargetRepositoryLive = Layer.effect(
 			List,
 			Register,
 			ReleaseProbe,
-			Remove,
+			RemoveClaimed,
 			Replay,
+			ReplayTargetRemoval,
 		};
 	}),
 );
