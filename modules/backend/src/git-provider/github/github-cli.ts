@@ -22,6 +22,7 @@ import {
 import { ProcessRunner, type ProcessRunnerResult } from "../../git/process-runner";
 import {
 	GitProviderCloneDestinationProof,
+	type GitProviderMutationExecution,
 	type GitProviderCloneDestinationProof as GitProviderCloneDestinationProofValue,
 	type GitProviderDiscoveryScope,
 } from "../git-provider";
@@ -30,6 +31,14 @@ import { GitHubCliExecutable, GitHubCliGitExecutable } from "./github-cli-execut
 const VersionPattern = /^gh version (\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)(?:\s|$)/mu;
 const clone_receipt_name = "artisan-clone-receipt";
 const null_device_path = process.platform === "win32" ? "NUL" : "/dev/null";
+const mutation_launch_marker = "ARTISAN_GH_MUTATION_API_EXEC_V1";
+const mutation_account_broker = [
+	"set -eu",
+	'token=$(GH_CONFIG_DIR="$ARTISAN_GH_CONFIG_DIR" "$ARTISAN_GH_EXECUTABLE" auth token --hostname "$ARTISAN_GH_HOST" --user "$ARTISAN_GH_ACCOUNT" </dev/null 2>/dev/null)',
+	'test -n "$token"',
+	`printf '%s\\n' '${mutation_launch_marker}' >&2`,
+	'GH_CONFIG_DIR="$ARTISAN_GH_CONFIG_DIR" GH_HOST="$ARTISAN_GH_HOST" GH_TOKEN="$token" GH_ENTERPRISE_TOKEN="$token" exec "$ARTISAN_GH_EXECUTABLE" "$@"',
+].join("\n");
 /** Streams the selected account credential between child processes without exposing it to Artisan. */
 const account_credential_helper = [
 	"!f() {",
@@ -610,6 +619,42 @@ query ArtisanCheckFailureDetail($owner: String!, $name: String!, $number: Int!, 
 }
 `;
 
+const workflow_run_query = `query ArtisanWorkflowRun($id: ID!) { node(id: $id) { __typename ... on WorkflowRun { id databaseId } } }`;
+const reply_thread_mutation = `mutation ArtisanReplyReviewThread($thread: ID!, $body: String!, $clientMutationId: String!) { addPullRequestReviewThreadReply(input: { pullRequestReviewThreadId: $thread, body: $body, clientMutationId: $clientMutationId }) { clientMutationId comment { id } } }`;
+const resolve_thread_mutation = `mutation ArtisanResolveReviewThread($thread: ID!, $clientMutationId: String!) { resolveReviewThread(input: { threadId: $thread, clientMutationId: $clientMutationId }) { clientMutationId thread { id isResolved } } }`;
+const merge_pull_request_mutation = `mutation ArtisanMergePullRequest($pullRequest: ID!, $expectedHeadOid: GitObjectID!, $mergeMethod: PullRequestMergeMethod!, $clientMutationId: String!) { mergePullRequest(input: { pullRequestId: $pullRequest, expectedHeadOid: $expectedHeadOid, mergeMethod: $mergeMethod, clientMutationId: $clientMutationId }) { clientMutationId pullRequest { id merged } } }`;
+
+const GitHubWorkflowRunData = Schema.Struct({
+	node: Schema.NullOr(
+		Schema.Union([
+			Schema.Struct({
+				__typename: Schema.Literal("WorkflowRun"),
+				databaseId: Schema.NullOr(GitHubPositiveInt),
+				id: GitHubNativeId,
+			}),
+			Schema.Struct({ __typename: Schema.String }),
+		]),
+	),
+});
+const GitHubReplyMutationData = Schema.Struct({
+	addPullRequestReviewThreadReply: Schema.Struct({
+		clientMutationId: GitHubNativeId,
+		comment: Schema.Struct({ id: GitHubNativeId }),
+	}),
+});
+const GitHubResolveMutationData = Schema.Struct({
+	resolveReviewThread: Schema.Struct({
+		clientMutationId: GitHubNativeId,
+		thread: Schema.Struct({ id: GitHubNativeId, isResolved: Schema.Literal(true) }),
+	}),
+});
+const GitHubMergeMutationData = Schema.Struct({
+	mergePullRequest: Schema.Struct({
+		clientMutationId: GitHubNativeId,
+		pullRequest: Schema.Struct({ id: GitHubNativeId, merged: Schema.Literal(true) }),
+	}),
+});
+
 /** Reports one account discovered from GitHub CLI without exposing its token source or token. */
 export type GitHubCliAccount =
 	| {
@@ -792,6 +837,35 @@ export interface GitHubCliCheckFailureDetail {
 	readonly workflow_native_id?: string;
 }
 
+/** Carries a provider write after the adapter has revalidated its exact pull-request target. */
+export interface GitHubCliMutationExecution {
+	readonly account_login: string;
+	readonly client_mutation_id: string;
+	readonly host: string;
+	readonly mutation: GitProviderMutationExecution["mutation"];
+	readonly name: string;
+	readonly owner: string;
+}
+
+/** Returns only the account and native identity that may safely cross the adapter boundary. */
+export interface GitHubCliMutationResult {
+	readonly operation:
+		| "reply_review_thread"
+		| "resolve_review_thread"
+		| "request_reviewers"
+		| "rerun_workflow"
+		| "cancel_workflow"
+		| "merge_pull_request";
+	readonly origin: {
+		readonly native_id: string;
+		readonly resource_kind:
+			| "pull_request"
+			| "review_thread"
+			| "review_comment"
+			| "workflow_run";
+	};
+}
+
 /** Supplies the approved paths and exact repository for one GitHub CLI clone. */
 export interface GitHubCliCloneInput {
 	readonly account_login: string;
@@ -812,6 +886,7 @@ export interface GitHubCliCloneResult {
 export class GitHubCliError extends Data.TaggedError("GitHubCliError")<{
 	readonly operation:
 		| "clone_repository"
+		| "execute_mutation"
 		| "inspect_repository"
 		| "query_repositories"
 		| "read_check_failure_detail"
@@ -866,6 +941,9 @@ export class GitHubCli extends Context.Service<
 		readonly ReadCheckFailureDetail: (
 			input: GitHubCliCheckFailureDetailRead,
 		) => Effect.Effect<GitHubCliCheckFailureDetail, GitHubCliError>;
+		readonly ExecuteMutation: (
+			input: GitHubCliMutationExecution,
+		) => Effect.Effect<GitHubCliMutationResult, GitHubCliError>;
 	}
 >()("Artisan/GitHubCli") {}
 
@@ -937,6 +1015,24 @@ function github_cli_config_directory(
 
 function git_shell_path(path: string) {
 	return process.platform === "win32" ? path.replaceAll("\\", "/") : path;
+}
+
+function mutation_shell_path(path_service: Path.Path, git_path: string) {
+	if (process.platform !== "win32") {
+		return "/bin/sh";
+	}
+
+	const git_directory = path_service.dirname(git_path);
+	const bin_directory =
+		path_service.basename(git_directory).toLowerCase() === "bin"
+			? git_directory
+			: path_service.join(path_service.dirname(git_directory), "bin");
+
+	return path_service.join(bin_directory, "sh.exe");
+}
+
+function mutation_was_launched(result: ProcessRunnerResult) {
+	return decode_text(result.stderr).split(/\r?\n/u).includes(mutation_launch_marker);
 }
 
 function clone_environment(
@@ -1802,6 +1898,26 @@ export function make_github_cli_layer(options: GitHubCliOptions) {
 				path_service,
 				options.cwd,
 			);
+			const RunWith = (
+				run: typeof runner.Run,
+				executable_path: string,
+				args: ReadonlyArray<string>,
+				max_stdout_bytes: number,
+				timeout_ms: number,
+				environment_override: Readonly<Record<string, string | undefined>> = {},
+				cwd = options.cwd,
+				stdin?: Uint8Array,
+			) =>
+				run({
+					args,
+					command: executable_path,
+					cwd,
+					environment: { ...environment, ...environment_override },
+					environment_mode: "replace",
+					max_stderr_bytes: 256 * 1024,
+					max_stdout_bytes,
+					...(stdin === undefined ? {} : { stdin }),
+				}).pipe(Effect.timeoutOption(timeout_ms));
 			const Run = (
 				executable_path: string,
 				args: ReadonlyArray<string>,
@@ -1809,18 +1925,37 @@ export function make_github_cli_layer(options: GitHubCliOptions) {
 				timeout_ms: number,
 				environment_override: Readonly<Record<string, string | undefined>> = {},
 				cwd = options.cwd,
+				stdin?: Uint8Array,
 			) =>
-				runner
-					.Run({
-						args,
-						command: executable_path,
-						cwd,
-						environment: { ...environment, ...environment_override },
-						environment_mode: "replace",
-						max_stderr_bytes: 256 * 1024,
-						max_stdout_bytes,
-					})
-					.pipe(Effect.timeoutOption(timeout_ms));
+				RunWith(
+					runner.Run,
+					executable_path,
+					args,
+					max_stdout_bytes,
+					timeout_ms,
+					environment_override,
+					cwd,
+					stdin,
+				);
+			const RunProcessTree = (
+				executable_path: string,
+				args: ReadonlyArray<string>,
+				max_stdout_bytes: number,
+				timeout_ms: number,
+				environment_override: Readonly<Record<string, string | undefined>> = {},
+				cwd = options.cwd,
+				stdin?: Uint8Array,
+			) =>
+				RunWith(
+					runner.RunProcessTree,
+					executable_path,
+					args,
+					max_stdout_bytes,
+					timeout_ms,
+					environment_override,
+					cwd,
+					stdin,
+				);
 			const Inspect = Effect.gen(function* () {
 				const location = yield* executable.Locate;
 
@@ -2536,6 +2671,462 @@ export function make_github_cli_layer(options: GitHubCliOptions) {
 						workflow_native_id: workflow_run.id,
 					} satisfies GitHubCliCheckFailureDetail;
 				});
+			const ExecuteMutation = (input: GitHubCliMutationExecution) =>
+				Effect.gen(function* () {
+					const location = yield* executable.Locate;
+					const git_location = yield* git_executable.Locate;
+					const operation = "execute_mutation" as const;
+
+					if (Option.isNone(location)) {
+						return yield* Effect.fail(
+							api_error("dependency_missing", false, operation),
+						);
+					}
+
+					if (Option.isNone(git_location)) {
+						return yield* Effect.fail(
+							api_error("git_dependency_missing", false, operation),
+						);
+					}
+
+					if (selected_gh_config_directory === undefined) {
+						return yield* Effect.fail(
+							api_error("authentication_required", false, operation),
+						);
+					}
+
+					const executable_path = location.value.path;
+					const shell_path = mutation_shell_path(path_service, git_location.value.path);
+					const shell_info = yield* file_system
+						.stat(shell_path)
+						.pipe(
+							Effect.mapError(() =>
+								api_error("git_dependency_missing", false, operation),
+							),
+						);
+
+					if (
+						shell_info.type !== "File" ||
+						(process.platform !== "win32" && (shell_info.mode & 0o111) === 0)
+					) {
+						return yield* Effect.fail(
+							api_error("git_dependency_missing", false, operation),
+						);
+					}
+
+					yield* file_system
+						.access(shell_path, { ok: true, readable: true })
+						.pipe(
+							Effect.mapError(() =>
+								api_error("git_dependency_missing", false, operation),
+							),
+						);
+
+					const broker_environment = {
+						...environment,
+						ARTISAN_GH_ACCOUNT: input.account_login,
+						ARTISAN_GH_CONFIG_DIR: selected_gh_config_directory,
+						ARTISAN_GH_EXECUTABLE: git_shell_path(executable_path),
+						ARTISAN_GH_HOST: input.host,
+						GH_CONFIG_DIR: undefined,
+					};
+					const repository_endpoint = [
+						"repos",
+						encodeURIComponent(input.owner),
+						encodeURIComponent(input.name),
+					].join("/");
+					const ResolveWorkflowDatabaseId = (workflow_native_id: string) =>
+						Effect.gen(function* () {
+							const process_option = yield* Run(
+								executable_path,
+								[
+									"api",
+									"graphql",
+									"--hostname",
+									input.host,
+									"--method",
+									"POST",
+									"--raw-field",
+									`query=${workflow_run_query}`,
+									"--raw-field",
+									`id=${workflow_native_id}`,
+								],
+								64 * 1024,
+								request_timeout_ms,
+								{ GH_HOST: input.host },
+							).pipe(
+								Effect.mapError(() => api_error("process_failed", true, operation)),
+							);
+
+							if (Option.isNone(process_option)) {
+								return yield* Effect.fail(api_error("timed_out", true, operation));
+							}
+
+							const process = process_option.value;
+							const envelope = yield* ParseEnvelope(process.stdout);
+
+							if (process.stdout_truncated || process.stderr_truncated) {
+								return yield* Effect.fail(
+									api_error("invalid_response", false, operation),
+								);
+							}
+
+							if (
+								process.exit_code !== 0 ||
+								(Option.isSome(envelope) &&
+									(envelope.value.errors?.length ?? 0) > 0)
+							) {
+								return yield* Effect.fail(
+									classify_api_failure(process, envelope, operation),
+								);
+							}
+
+							if (
+								Option.isNone(envelope) ||
+								envelope.value.data === undefined ||
+								envelope.value.data === null
+							) {
+								return yield* Effect.fail(
+									api_error("invalid_response", false, operation),
+								);
+							}
+
+							const data = yield* ParseStrictSchema(
+								GitHubWorkflowRunData,
+								envelope.value.data,
+							).pipe(
+								Effect.mapError(() =>
+									api_error("invalid_response", false, operation),
+								),
+							);
+							const workflow = data.node;
+
+							if (
+								workflow === null ||
+								workflow.__typename !== "WorkflowRun" ||
+								!("id" in workflow) ||
+								workflow.id !== workflow_native_id ||
+								workflow.databaseId === null
+							) {
+								return yield* Effect.fail(
+									api_error("invalid_response", false, operation),
+								);
+							}
+
+							return workflow.databaseId;
+						});
+					const workflow_database_id =
+						input.mutation.operation === "rerun_workflow" ||
+						input.mutation.operation === "cancel_workflow"
+							? yield* ResolveWorkflowDatabaseId(
+									input.mutation.workflow_origin.native_id,
+								)
+							: undefined;
+
+					return yield* Effect.uninterruptibleMask((restore) =>
+						restore(
+							Effect.gen(function* () {
+								const Launch = (
+									args: ReadonlyArray<string>,
+									stdin: Uint8Array,
+									max_stdout_bytes: number,
+								) =>
+									RunProcessTree(
+										shell_path,
+										[
+											"-c",
+											mutation_account_broker,
+											"artisan-gh-mutation-broker",
+											...args,
+										],
+										max_stdout_bytes,
+										request_timeout_ms,
+										broker_environment,
+										options.cwd,
+										stdin,
+									).pipe(
+										Effect.mapError(() =>
+											api_error("outcome_unknown", false, operation),
+										),
+										Effect.flatMap(
+											Option.match({
+												onNone: () =>
+													Effect.fail(
+														api_error(
+															"outcome_unknown",
+															false,
+															operation,
+														),
+													),
+												onSome: (process) =>
+													mutation_was_launched(process)
+														? Effect.succeed(process)
+														: Effect.fail(
+																api_error(
+																	process.exit_code === 0
+																		? "invalid_response"
+																		: "authentication_required",
+																	false,
+																	operation,
+																),
+															),
+											}),
+										),
+									);
+								const ClassifyLaunchedFailure = (
+									process: ProcessRunnerResult,
+									envelope: Option.Option<typeof GitHubGraphqlEnvelope.Type>,
+								) => {
+									const failure = classify_api_failure(
+										process,
+										envelope,
+										operation,
+									);
+
+									return failure.reason === "network_unavailable" ||
+										(failure.reason === "remote_rejected" && failure.retryable)
+										? api_error("outcome_unknown", false, operation)
+										: failure;
+								};
+								const Rest = (endpoint: string, body: unknown) =>
+									Effect.gen(function* () {
+										const process = yield* Launch(
+											[
+												"api",
+												"--method",
+												"POST",
+												"--silent",
+												"--input",
+												"-",
+												endpoint,
+											],
+											Buffer.from(JSON.stringify(body)),
+											0,
+										);
+
+										if (process.exit_code !== 0) {
+											return yield* Effect.fail(
+												ClassifyLaunchedFailure(process, Option.none()),
+											);
+										}
+									});
+								const Graphql = (
+									query: string,
+									variables: Readonly<Record<string, unknown>>,
+								) =>
+									Effect.gen(function* () {
+										const process = yield* Launch(
+											["api", "graphql", "--method", "POST", "--input", "-"],
+											Buffer.from(JSON.stringify({ query, variables })),
+											64 * 1024,
+										);
+										const envelope = yield* ParseEnvelope(process.stdout);
+
+										if (
+											process.exit_code !== 0 ||
+											(Option.isSome(envelope) &&
+												(envelope.value.errors?.length ?? 0) > 0)
+										) {
+											return yield* Effect.fail(
+												ClassifyLaunchedFailure(process, envelope),
+											);
+										}
+
+										if (
+											process.stdout_truncated ||
+											process.stderr_truncated ||
+											Option.isNone(envelope) ||
+											envelope.value.data === undefined ||
+											envelope.value.data === null
+										) {
+											return yield* Effect.fail(
+												api_error("outcome_unknown", false, operation),
+											);
+										}
+
+										return envelope.value.data;
+									});
+								const mutation = input.mutation;
+
+								if (mutation.operation === "request_reviewers") {
+									const reviewers = mutation.reviewers
+										.filter((reviewer) => reviewer._tag === "user")
+										.map((reviewer) => reviewer.login);
+									const teams = mutation.reviewers
+										.filter((reviewer) => reviewer._tag === "team")
+										.map((reviewer) => reviewer.slug);
+
+									yield* Rest(
+										`${repository_endpoint}/pulls/${mutation.pull_request_number}/requested_reviewers`,
+										{ reviewers, team_reviewers: teams },
+									);
+
+									return {
+										operation: mutation.operation,
+										origin: {
+											native_id: mutation.pull_request_origin.native_id,
+											resource_kind: "pull_request",
+										},
+									} satisfies GitHubCliMutationResult;
+								}
+
+								if (
+									mutation.operation === "rerun_workflow" ||
+									mutation.operation === "cancel_workflow"
+								) {
+									if (workflow_database_id === undefined) {
+										return yield* Effect.die(
+											"Workflow database ID was not resolved",
+										);
+									}
+
+									const action =
+										mutation.operation === "cancel_workflow"
+											? "cancel"
+											: mutation.mode === "failed_only"
+												? "rerun-failed-jobs"
+												: "rerun";
+
+									yield* Rest(
+										`${repository_endpoint}/actions/runs/${workflow_database_id}/${action}`,
+										{},
+									);
+
+									return {
+										operation: mutation.operation,
+										origin: {
+											native_id: mutation.workflow_origin.native_id,
+											resource_kind: "workflow_run",
+										},
+									} satisfies GitHubCliMutationResult;
+								}
+
+								const query =
+									mutation.operation === "reply_review_thread"
+										? reply_thread_mutation
+										: mutation.operation === "resolve_review_thread"
+											? resolve_thread_mutation
+											: merge_pull_request_mutation;
+								const variables =
+									mutation.operation === "reply_review_thread"
+										? {
+												body: mutation.body,
+												clientMutationId: input.client_mutation_id,
+												thread: mutation.thread_origin.native_id,
+											}
+										: mutation.operation === "resolve_review_thread"
+											? {
+													clientMutationId: input.client_mutation_id,
+													thread: mutation.thread_origin.native_id,
+												}
+											: {
+													clientMutationId: input.client_mutation_id,
+													expectedHeadOid: mutation.expected_head_commit,
+													mergeMethod: mutation.method.toUpperCase(),
+													pullRequest:
+														mutation.pull_request_origin.native_id,
+												};
+								const data = yield* Graphql(query, variables);
+
+								if (mutation.operation === "reply_review_thread") {
+									const reply = yield* ParseStrictSchema(
+										GitHubReplyMutationData,
+										data,
+									).pipe(
+										Effect.mapError(() =>
+											api_error("outcome_unknown", false, operation),
+										),
+									);
+
+									if (
+										reply.addPullRequestReviewThreadReply.clientMutationId !==
+										input.client_mutation_id
+									) {
+										return yield* Effect.fail(
+											api_error("outcome_unknown", false, operation),
+										);
+									}
+
+									return {
+										operation: mutation.operation,
+										origin: {
+											native_id:
+												reply.addPullRequestReviewThreadReply.comment.id,
+											resource_kind: "review_comment",
+										},
+									} satisfies GitHubCliMutationResult;
+								}
+
+								if (mutation.operation === "resolve_review_thread") {
+									const resolved = yield* ParseStrictSchema(
+										GitHubResolveMutationData,
+										data,
+									).pipe(
+										Effect.mapError(() =>
+											api_error("outcome_unknown", false, operation),
+										),
+									);
+									const payload = resolved.resolveReviewThread;
+
+									if (
+										payload.clientMutationId !== input.client_mutation_id ||
+										payload.thread.id !== mutation.thread_origin.native_id
+									) {
+										return yield* Effect.fail(
+											api_error("outcome_unknown", false, operation),
+										);
+									}
+
+									return {
+										operation: mutation.operation,
+										origin: {
+											native_id: payload.thread.id,
+											resource_kind: "review_thread",
+										},
+									} satisfies GitHubCliMutationResult;
+								}
+
+								const merged = yield* ParseStrictSchema(
+									GitHubMergeMutationData,
+									data,
+								).pipe(
+									Effect.mapError(() =>
+										api_error("outcome_unknown", false, operation),
+									),
+								);
+								const payload = merged.mergePullRequest;
+
+								if (
+									payload.clientMutationId !== input.client_mutation_id ||
+									payload.pullRequest.id !==
+										mutation.pull_request_origin.native_id
+								) {
+									return yield* Effect.fail(
+										api_error("outcome_unknown", false, operation),
+									);
+								}
+
+								return {
+									operation: mutation.operation,
+									origin: {
+										native_id: payload.pullRequest.id,
+										resource_kind: "pull_request",
+									},
+								} satisfies GitHubCliMutationResult;
+							}),
+						).pipe(
+							Effect.matchCauseEffect({
+								onFailure: (cause) =>
+									Cause.hasInterrupts(cause)
+										? Effect.fail(
+												api_error("outcome_unknown", false, operation),
+											)
+										: Effect.failCause(cause),
+								onSuccess: Effect.succeed,
+							}),
+						),
+					);
+				});
 			const CloneRepository = (input: GitHubCliCloneInput) =>
 				Effect.gen(function* () {
 					const location = yield* executable.Locate;
@@ -2740,6 +3331,7 @@ export function make_github_cli_layer(options: GitHubCliOptions) {
 
 			return {
 				CloneRepository,
+				ExecuteMutation,
 				Inspect,
 				InspectRepository,
 				QueryRepositories,

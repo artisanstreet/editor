@@ -260,6 +260,9 @@ async function make_provider(options: {
 	readonly read_check_failure_detail?: (
 		input: Parameters<(typeof GitHubCli.Service)["ReadCheckFailureDetail"]>[0],
 	) => ReturnType<(typeof GitHubCli.Service)["ReadCheckFailureDetail"]>;
+	readonly execute_mutation?: (
+		input: Parameters<(typeof GitHubCli.Service)["ExecuteMutation"]>[0],
+	) => ReturnType<(typeof GitHubCli.Service)["ExecuteMutation"]>;
 	readonly hosts?: ReadonlyArray<string>;
 }) {
 	const query = options.query ?? (() => Effect.die("Unexpected repository query"));
@@ -273,8 +276,11 @@ async function make_provider(options: {
 		(() => Effect.die("Unexpected pull request target read"));
 	const read_check_failure_detail =
 		options.read_check_failure_detail ?? (() => Effect.die("Unexpected check failure read"));
+	const execute_mutation =
+		options.execute_mutation ?? (() => Effect.die("Unexpected provider mutation"));
 	const cli_layer = Layer.succeed(GitHubCli, {
 		CloneRepository: clone,
+		ExecuteMutation: execute_mutation,
 		Inspect: Effect.succeed(options.inspection),
 		InspectRepository: inspect_repository,
 		QueryRepositories: query,
@@ -300,6 +306,280 @@ function discovery(overrides: Partial<GitProviderDiscovery> = {}) {
 }
 
 describe("GitHubProvider", () => {
+	it("re-reads and normalizes each exact hosted write while rejecting stale and foreign targets", async () => {
+		const mutations: Array<Parameters<(typeof GitHubCli.Service)["ExecuteMutation"]>[0]> = [];
+		const provider = await make_provider({
+			inspection: available_inspection([
+				{
+					accounts: [
+						{
+							active: true,
+							git_protocol: "https",
+							host: "github.com",
+							login: "alice",
+							scopes: [],
+							type: "authenticated",
+						},
+					],
+					host: "github.com",
+				},
+			]),
+			read_pull_request_target: () =>
+				Effect.succeed({
+					pull_request: matched_pull_request(),
+					type: "matched_pull_request",
+					viewer_login: "alice",
+				}),
+			execute_mutation: (input) => {
+				mutations.push(input);
+
+				if (input.mutation.operation === "reply_review_thread") {
+					return Effect.succeed({
+						operation: input.mutation.operation,
+						origin: { native_id: "comment-2", resource_kind: "review_comment" },
+					});
+				}
+
+				if (input.mutation.operation === "resolve_review_thread") {
+					return Effect.succeed({
+						operation: input.mutation.operation,
+						origin: {
+							native_id: input.mutation.thread_origin.native_id,
+							resource_kind: "review_thread",
+						},
+					});
+				}
+
+				if (
+					input.mutation.operation === "rerun_workflow" ||
+					input.mutation.operation === "cancel_workflow"
+				) {
+					return Effect.succeed({
+						operation: input.mutation.operation,
+						origin: {
+							native_id: input.mutation.workflow_origin.native_id,
+							resource_kind: "workflow_run",
+						},
+					});
+				}
+
+				return Effect.succeed({
+					operation: input.mutation.operation,
+					origin: {
+						native_id: input.mutation.pull_request_origin.native_id,
+						resource_kind: "pull_request",
+					},
+				});
+			},
+		});
+		const target = {
+			expected_head_commit: "a".repeat(40),
+			pull_request_number: 7,
+			pull_request_origin: {
+				native_id: "pull-request-7",
+				provider_id: "github",
+				resource_kind: "pull_request" as const,
+			},
+			repository: projected_repository("editor").identity,
+			selected_branch: "feature/read",
+			snapshot_version: 1,
+			workspace_id: "workspace_1",
+		};
+		const requests = [
+			{
+				...target,
+				operation: "reply_review_thread" as const,
+				body: "secret",
+				thread_origin: {
+					native_id: "thread-1",
+					provider_id: "github",
+					resource_kind: "review_thread" as const,
+				},
+			},
+			{
+				...target,
+				operation: "resolve_review_thread" as const,
+				thread_origin: {
+					native_id: "thread-1",
+					provider_id: "github",
+					resource_kind: "review_thread" as const,
+				},
+			},
+			{
+				...target,
+				operation: "request_reviewers" as const,
+				reviewers: [
+					{ _tag: "user" as const, login: "bob" },
+					{
+						_tag: "team" as const,
+						organization: "ARTISAN",
+						slug: "maintainers",
+					},
+				],
+			},
+			{
+				...target,
+				operation: "rerun_workflow" as const,
+				mode: "whole" as const,
+				workflow_origin: {
+					native_id: "run-1",
+					provider_id: "github",
+					resource_kind: "workflow_run" as const,
+				},
+			},
+			{
+				...target,
+				operation: "cancel_workflow" as const,
+				workflow_origin: {
+					native_id: "run-1",
+					provider_id: "github",
+					resource_kind: "workflow_run" as const,
+				},
+			},
+			{ ...target, operation: "merge_pull_request" as const, method: "squash" as const },
+		];
+
+		for (const [index, mutation] of requests.entries()) {
+			await expect(
+				Effect.runPromise(
+					provider.ExecuteMutation!({
+						client_mutation_id: `mutation_${index + 1}`,
+						mutation,
+						selection,
+					}),
+				),
+			).resolves.toMatchObject({
+				operation: mutation.operation,
+				origin: { provider_id: "github" },
+				status: "applied",
+			});
+		}
+
+		expect(mutations).toHaveLength(6);
+		expect(mutations.map((input) => input.client_mutation_id)).toEqual([
+			"mutation_1",
+			"mutation_2",
+			"mutation_3",
+			"mutation_4",
+			"mutation_5",
+			"mutation_6",
+		]);
+		expect(mutations.every((input) => input.account_login === selection.account_login)).toBe(
+			true,
+		);
+		expect(mutations.every((input) => !("client_mutation_id" in input.mutation))).toBe(true);
+		const stale = await make_provider({
+			inspection: available_inspection([
+				{
+					accounts: [
+						{
+							active: true,
+							git_protocol: "https",
+							host: "github.com",
+							login: "alice",
+							scopes: [],
+							type: "authenticated",
+						},
+					],
+					host: "github.com",
+				},
+			]),
+			read_pull_request_target: () =>
+				Effect.succeed({
+					pull_request: matched_pull_request("f".repeat(40)),
+					type: "matched_pull_request",
+					viewer_login: "alice",
+				}),
+		});
+		await expect(
+			Effect.runPromise(
+				stale.ExecuteMutation!({
+					client_mutation_id: "stale_1",
+					mutation: requests[5]!,
+					selection,
+				}),
+			),
+		).rejects.toMatchObject({ operation: "execute_mutation", reason: "stale_repository" });
+		await expect(
+			Effect.runPromise(
+				provider.ExecuteMutation!({
+					client_mutation_id: "foreign_thread_1",
+					mutation: {
+						...target,
+						operation: "resolve_review_thread",
+						thread_origin: {
+							native_id: "foreign",
+							provider_id: "github",
+							resource_kind: "review_thread",
+						},
+					},
+					selection,
+				}),
+			),
+		).rejects.toMatchObject({ operation: "execute_mutation", reason: "invalid_input" });
+		await expect(
+			Effect.runPromise(
+				provider.ExecuteMutation!({
+					client_mutation_id: "foreign_team_1",
+					mutation: {
+						...target,
+						operation: "request_reviewers",
+						reviewers: [
+							{
+								_tag: "team",
+								organization: "another-organization",
+								slug: "maintainers",
+							},
+						],
+					},
+					selection,
+				}),
+			),
+		).rejects.toMatchObject({ operation: "execute_mutation", reason: "invalid_input" });
+		expect(mutations).toHaveLength(6);
+		const uncertain = await make_provider({
+			inspection: available_inspection([
+				{
+					accounts: [
+						{
+							active: true,
+							git_protocol: "https",
+							host: "github.com",
+							login: "alice",
+							scopes: [],
+							type: "authenticated",
+						},
+					],
+					host: "github.com",
+				},
+			]),
+			read_pull_request_target: () =>
+				Effect.succeed({
+					pull_request: matched_pull_request(),
+					type: "matched_pull_request",
+					viewer_login: "alice",
+				}),
+			execute_mutation: () =>
+				Effect.succeed({
+					operation: "cancel_workflow",
+					origin: { native_id: "run-1", resource_kind: "workflow_run" },
+				}),
+		});
+
+		await expect(
+			Effect.runPromise(
+				uncertain.ExecuteMutation!({
+					client_mutation_id: "malformed_result_1",
+					mutation: requests[5]!,
+					selection,
+				}),
+			),
+		).rejects.toMatchObject({
+			operation: "execute_mutation",
+			reason: "outcome_unknown",
+			retryable: false,
+		});
+	});
 	it("projects CLI installation and multi-host authentication without native credential fields", async () => {
 		const available = available_inspection([
 			{

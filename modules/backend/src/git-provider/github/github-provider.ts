@@ -3,6 +3,7 @@ import { Buffer } from "node:buffer";
 import { Cause, Data, Effect, Layer, Schema } from "effect";
 import {
 	HostedGitCheckFailureDetail,
+	HostedGitMutationResult,
 	HostedGitPullRequestLookup,
 	type HostedGitRequestedReviewer,
 } from "@artisan/protocol";
@@ -18,6 +19,7 @@ import {
 	GitProviderDiscoveryScope,
 	GitProviderError,
 	GitProviderInspection,
+	GitProviderMutationExecution,
 	GitProviderPage,
 	GitProviderPullRequestRead,
 	GitProviderPullRequestTargetRead,
@@ -31,6 +33,7 @@ import {
 	type GitProviderDiscoveryScope as GitProviderDiscoveryScopeInput,
 	type GitProviderHostAuthentication,
 	type GitProviderInspection as GitProviderInspectionResult,
+	type GitProviderMutationExecution as GitProviderMutationExecutionInput,
 	type GitProviderPage as GitProviderPageResult,
 	type GitProviderPullRequestRead as GitProviderPullRequestReadInput,
 	type GitProviderPullRequestTargetRead as GitProviderPullRequestTargetReadInput,
@@ -1416,6 +1419,152 @@ export function make_github_provider_layer(options: GitHubProviderOptions = {}) 
 						input.selection.host,
 					);
 				});
+			const ExecuteMutation = (unknown_input: GitProviderMutationExecutionInput) =>
+				Effect.gen(function* () {
+					const input = yield* Schema.decodeUnknownEffect(GitProviderMutationExecution, {
+						onExcessProperty: "error",
+					})(unknown_input).pipe(
+						Effect.mapError(() =>
+							provider_operation_error("execute_mutation", "invalid_input", false),
+						),
+					);
+					const mutation = input.mutation;
+
+					if (
+						mutation.repository.provider_id !== github_provider_id ||
+						mutation.repository.host !== input.selection.host ||
+						input.selection.provider_id !== github_provider_id
+					) {
+						return yield* Effect.fail(
+							provider_operation_error(
+								"execute_mutation",
+								"invalid_input",
+								false,
+								input.selection.host,
+							),
+						);
+					}
+
+					/** Re-read the immutable PR target immediately before launching an external write. */
+					const target = yield* ReadPullRequestTarget({
+						expected_head: mutation.expected_head_commit,
+						pull_request_number: mutation.pull_request_number,
+						pull_request_origin: mutation.pull_request_origin,
+						repository: mutation.repository,
+						selected_branch: mutation.selected_branch,
+						selection: input.selection,
+					}).pipe(
+						Effect.mapError((error) =>
+							error.operation === "read_pull_request_target"
+								? provider_operation_error(
+										"execute_mutation",
+										error.reason === "remote_rejected"
+											? "stale_repository"
+											: error.reason,
+										error.retryable,
+										input.selection.host,
+									)
+								: error,
+						),
+					);
+
+					if (
+						target.association._tag !== "matched" ||
+						target.association.freshness !== "current" ||
+						target.association.pull_request.state !== "open"
+					) {
+						return yield* Effect.fail(
+							provider_operation_error(
+								"execute_mutation",
+								"stale_repository",
+								false,
+								input.selection.host,
+							),
+						);
+					}
+
+					const pull_request = target.association.pull_request;
+					const has_foreign_team =
+						mutation.operation === "request_reviewers" &&
+						mutation.reviewers.some(
+							(reviewer) =>
+								reviewer._tag === "team" &&
+								!github_logins_match(
+									reviewer.organization,
+									mutation.repository.owner,
+								),
+						);
+					const native_target_exists =
+						mutation.operation === "reply_review_thread" ||
+						mutation.operation === "resolve_review_thread"
+							? pull_request.review_threads.some(
+									(thread) =>
+										thread.origin.native_id ===
+										mutation.thread_origin.native_id,
+								)
+							: mutation.operation === "rerun_workflow" ||
+								  mutation.operation === "cancel_workflow"
+								? pull_request.checks.some(
+										(check) =>
+											check.workflow_origin?.native_id ===
+											mutation.workflow_origin.native_id,
+									)
+								: true;
+
+					if (!native_target_exists || has_foreign_team) {
+						return yield* Effect.fail(
+							provider_operation_error(
+								"execute_mutation",
+								"invalid_input",
+								false,
+								input.selection.host,
+							),
+						);
+					}
+
+					const result = yield* cli
+						.ExecuteMutation({
+							account_login: input.selection.account_login,
+							client_mutation_id: input.client_mutation_id,
+							host: input.selection.host,
+							mutation,
+							name: mutation.repository.name,
+							owner: mutation.repository.owner,
+						})
+						.pipe(
+							Effect.mapError((cause) =>
+								cli_error(cause, input.selection.host, "execute_mutation"),
+							),
+						);
+
+					if (result.operation !== mutation.operation) {
+						return yield* Effect.fail(
+							provider_operation_error(
+								"execute_mutation",
+								"outcome_unknown",
+								false,
+								input.selection.host,
+							),
+						);
+					}
+
+					return yield* Schema.decodeUnknownEffect(HostedGitMutationResult, {
+						onExcessProperty: "error",
+					})({
+						operation: result.operation,
+						origin: { ...result.origin, provider_id: github_provider_id },
+						status: "applied",
+					}).pipe(
+						Effect.mapError(() =>
+							provider_operation_error(
+								"execute_mutation",
+								"outcome_unknown",
+								false,
+								input.selection.host,
+							),
+						),
+					);
+				});
 
 			return {
 				Descriptor: {
@@ -1425,17 +1574,14 @@ export function make_github_provider_layer(options: GitHubProviderOptions = {}) 
 						{ _tag: "available", capability: "clone_repository" },
 						{ _tag: "available", capability: "read_reviews" },
 						{ _tag: "available", capability: "read_ci" },
-						{
-							_tag: "unavailable",
-							capability: "write_provider_mutations",
-							reason: "Provider writes require a separate approval boundary",
-						},
+						{ _tag: "available", capability: "write_provider_mutations" },
 					],
 					display_name: "GitHub",
 					provider_id: github_provider_id,
 				},
 				Clone,
 				DiscoverRepositories,
+				ExecuteMutation,
 				Inspect,
 				PrepareClone,
 				ReadCheckFailureDetail,

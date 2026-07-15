@@ -3,6 +3,8 @@ import {
 	GitBranchName,
 	GitObjectId,
 	HostedGitCheckFailureDetail,
+	HostedGitMutationRequest,
+	HostedGitMutationResult,
 	HostedGitOrigin,
 	HostedGitPullRequestLookup,
 } from "@artisan/protocol";
@@ -488,6 +490,28 @@ export const GitProviderCheckFailureDetailRead = Schema.Struct({
 
 export type GitProviderCheckFailureDetailRead = typeof GitProviderCheckFailureDetailRead.Type;
 
+const GitProviderClientMutationId = Schema.String.check(
+	Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u, {
+		message: "Expected a bounded deterministic client mutation ID",
+	}),
+);
+
+/** Binds one hosted write to the selected account as well as its exact snapshot target. */
+export const GitProviderMutationExecution = Schema.Struct({
+	client_mutation_id: GitProviderClientMutationId,
+	mutation: HostedGitMutationRequest,
+	selection: GitProviderSelection,
+}).check(
+	Schema.makeFilter((input) =>
+		input.selection.provider_id === input.mutation.repository.provider_id &&
+		input.selection.host === input.mutation.repository.host
+			? undefined
+			: "Expected mutation repository and selected account from one provider host",
+	),
+);
+
+export type GitProviderMutationExecution = typeof GitProviderMutationExecution.Type;
+
 /** Describes the provider installation and exact hosts known by inspection. */
 export const GitProviderInspection = Schema.Struct({
 	authentication: Schema.Array(GitProviderHostAuthentication),
@@ -505,6 +529,7 @@ export const GitProviderErrorOperation = Schema.Literals([
 	"read_check_failure_detail",
 	"read_pull_request",
 	"read_pull_request_target",
+	"execute_mutation",
 ]);
 
 export type GitProviderErrorOperation = typeof GitProviderErrorOperation.Type;
@@ -567,5 +592,8 @@ export class GitProvider extends Context.Service<
 		readonly ReadPullRequestTarget?: (
 			input: GitProviderPullRequestTargetRead,
 		) => Effect.Effect<typeof HostedGitPullRequestLookup.Type, GitProviderError>;
+		readonly ExecuteMutation?: (
+			input: GitProviderMutationExecution,
+		) => Effect.Effect<typeof HostedGitMutationResult.Type, GitProviderError>;
 	}
 >()("Artisan/GitProvider") {}

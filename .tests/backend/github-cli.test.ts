@@ -27,6 +27,9 @@ import { ReadFileIdentity } from "../../modules/backend/src/filesystem/file-iden
 const executable_path = "C:\\Program Files\\GitHub CLI\\gh.exe";
 const git_executable_path =
 	process.platform === "win32" ? "C:\\Program Files\\Git\\cmd\\git.exe" : "/usr/bin/git";
+const mutation_launch_marker = "ARTISAN_GH_MUTATION_API_EXEC_V1";
+const mutation_shell_executable =
+	process.platform === "win32" ? "C:\\Program Files\\Git\\bin\\sh.exe" : "/bin/sh";
 
 function process_result(
 	stdout: string,
@@ -44,6 +47,14 @@ function process_result(
 		stdout_bytes: options.stdout_bytes ?? stdout_bytes.byteLength,
 		stdout_truncated: options.stdout_truncated ?? false,
 	};
+}
+
+function launched_process_result(stdout: string, options: Partial<ProcessRunnerResult> = {}) {
+	const stderr = [mutation_launch_marker, Buffer.from(options.stderr ?? "").toString()]
+		.filter(Boolean)
+		.join("\n");
+
+	return process_result(stdout, { ...options, stderr: Buffer.from(stderr) });
 }
 
 const platform_layer = Layer.mergeAll(NodeCrypto.layer, NodeFileSystem.layer, NodePath.layer);
@@ -68,6 +79,9 @@ async function make_cli(
 	run: (input: ProcessRunnerInput) => Effect.Effect<ProcessRunnerResult, ProcessRunnerError>,
 	options: Partial<GitHubCliOptions> = {},
 	locations: { readonly gh_path?: string; readonly git_path?: string | null } = {},
+	run_process_tree: (
+		input: ProcessRunnerInput,
+	) => Effect.Effect<ProcessRunnerResult, ProcessRunnerError> = run,
 ) {
 	const cwd = options.cwd ?? "C:\\artisan\\project";
 	const projects_root = options.projects_root ?? cwd;
@@ -79,7 +93,7 @@ async function make_cli(
 					Layer.provide(
 						Layer.succeed(ProcessRunner, {
 							Run: run,
-							RunProcessTree: run,
+							RunProcessTree: run_process_tree,
 						}),
 					),
 					Layer.provide(executable_layer(locations.gh_path, locations.git_path)),
@@ -233,7 +247,678 @@ function auth_status() {
 	});
 }
 
+type GitHubMutation = Parameters<(typeof GitHubCli.Service)["ExecuteMutation"]>[0]["mutation"];
+
+function hosted_mutation_target(owner = "artisan", name = "editor") {
+	return {
+		expected_head_commit: "a".repeat(40),
+		pull_request_number: 7,
+		pull_request_origin: {
+			native_id: "pull-request-7",
+			provider_id: "github",
+			resource_kind: "pull_request" as const,
+		},
+		repository: { host: "github.com", name, owner, provider_id: "github" },
+		selected_branch: "feature/read",
+		snapshot_version: 1,
+		workspace_id: "workspace_1",
+	};
+}
+
+function mutation_execution(mutation: GitHubMutation) {
+	return {
+		account_login: "alice",
+		client_mutation_id: "mutation_1",
+		host: mutation.repository.host,
+		mutation,
+		name: mutation.repository.name,
+		owner: mutation.repository.owner,
+	};
+}
+
+function workflow_origin() {
+	return {
+		native_id: "workflow-1",
+		provider_id: "github",
+		resource_kind: "workflow_run" as const,
+	};
+}
+
+function mutation_api_args(input: ProcessRunnerInput) {
+	return input.args.slice(3);
+}
+
+function expect_account_broker_call(input: ProcessRunnerInput) {
+	const environment = input.environment ?? {};
+	const script = input.args[1] ?? "";
+	const selected_config = environment.ARTISAN_GH_CONFIG_DIR;
+	const shell_gh_path =
+		process.platform === "win32" ? executable_path.replaceAll("\\", "/") : executable_path;
+	const observable = JSON.stringify({
+		args: input.args,
+		command: input.command,
+		environment,
+		stderr: mutation_launch_marker,
+		stdin: input.stdin,
+	});
+
+	expect(input.command).toBe(mutation_shell_executable);
+	expect(input.args[0]).toBe("-c");
+	expect(input.args[2]).toBe("artisan-gh-mutation-broker");
+	expect(script).toContain(
+		'auth token --hostname "$ARTISAN_GH_HOST" --user "$ARTISAN_GH_ACCOUNT"',
+	);
+	expect(script).toContain("</dev/null 2>/dev/null");
+	expect(script).toContain('exec "$ARTISAN_GH_EXECUTABLE" "$@"');
+	expect(script).toContain(mutation_launch_marker);
+	expect(environment.ARTISAN_GH_ACCOUNT).toBe("alice");
+	expect(environment.ARTISAN_GH_HOST).toBe("github.com");
+	expect(environment.ARTISAN_GH_EXECUTABLE).toBe(shell_gh_path);
+	expect(typeof selected_config).toBe("string");
+	expect(selected_config).not.toBe("");
+	expect(environment.GH_CONFIG_DIR).toBeUndefined();
+	expect(environment).not.toHaveProperty("GH_TOKEN");
+	expect(environment).not.toHaveProperty("GH_ENTERPRISE_TOKEN");
+	expect(script).not.toContain("alice");
+	expect(script).not.toContain("github.com");
+	expect(script).not.toContain(shell_gh_path);
+	expect(script).not.toContain(selected_config);
+	expect(observable).not.toContain("secret-token-never-visible");
+}
+
 describe("GitHubCli", () => {
+	it("keeps review replies on stdin and validates the returned native comment", async () => {
+		const calls: Array<ProcessRunnerInput> = [];
+		const mutation = {
+			...hosted_mutation_target(),
+			body: "reply body must remain private",
+			operation: "reply_review_thread" as const,
+			thread_origin: {
+				native_id: "thread-1",
+				provider_id: "github",
+				resource_kind: "review_thread" as const,
+			},
+		};
+		const cli = await make_cli((input) => {
+			calls.push(input);
+
+			return Effect.succeed(
+				launched_process_result(
+					JSON.stringify({
+						data: {
+							addPullRequestReviewThreadReply: {
+								clientMutationId: "mutation_1",
+								comment: { id: "comment-2" },
+							},
+						},
+					}),
+				),
+			);
+		});
+
+		await expect(
+			Effect.runPromise(cli.ExecuteMutation(mutation_execution(mutation))),
+		).resolves.toEqual({
+			operation: "reply_review_thread",
+			origin: { native_id: "comment-2", resource_kind: "review_comment" },
+		});
+		expect(calls).toHaveLength(1);
+		expect_account_broker_call(calls[0]!);
+		expect(mutation_api_args(calls[0]!)).toEqual([
+			"api",
+			"graphql",
+			"--method",
+			"POST",
+			"--input",
+			"-",
+		]);
+		expect(Buffer.from(calls[0]?.stdin ?? []).toString()).toContain(mutation.body);
+		expect(
+			JSON.stringify({ args: calls[0]?.args, environment: calls[0]?.environment }),
+		).not.toContain(mutation.body);
+		expect(calls[0]?.max_stdout_bytes).toBe(64 * 1024);
+
+		for (const data of [
+			{},
+			{
+				addPullRequestReviewThreadReply: {
+					clientMutationId: "wrong_mutation",
+					comment: { id: "comment-2" },
+				},
+			},
+		]) {
+			const malformed = await make_cli(() =>
+				Effect.succeed(launched_process_result(JSON.stringify({ data }))),
+			);
+
+			await expect(
+				Effect.runPromise(malformed.ExecuteMutation(mutation_execution(mutation))),
+			).rejects.toMatchObject({
+				operation: "execute_mutation",
+				reason: "outcome_unknown",
+				retryable: false,
+			});
+		}
+	});
+
+	it("strictly validates resolve and merge mutation payloads", async () => {
+		const cases = [
+			{
+				mutation: {
+					...hosted_mutation_target(),
+					operation: "resolve_review_thread" as const,
+					thread_origin: {
+						native_id: "thread-1",
+						provider_id: "github",
+						resource_kind: "review_thread" as const,
+					},
+				},
+				response: {
+					resolveReviewThread: {
+						clientMutationId: "mutation_1",
+						thread: { id: "thread-1", isResolved: true },
+					},
+				},
+				result: {
+					operation: "resolve_review_thread",
+					origin: {
+						native_id: "thread-1",
+						resource_kind: "review_thread",
+					},
+				},
+				wrong_response: {
+					resolveReviewThread: {
+						clientMutationId: "mutation_1",
+						thread: { id: "other-thread", isResolved: true },
+					},
+				},
+			},
+			{
+				mutation: {
+					...hosted_mutation_target(),
+					method: "rebase" as const,
+					operation: "merge_pull_request" as const,
+				},
+				response: {
+					mergePullRequest: {
+						clientMutationId: "mutation_1",
+						pullRequest: { id: "pull-request-7", merged: true },
+					},
+				},
+				result: {
+					operation: "merge_pull_request",
+					origin: {
+						native_id: "pull-request-7",
+						resource_kind: "pull_request",
+					},
+				},
+				wrong_response: {
+					mergePullRequest: {
+						clientMutationId: "mutation_1",
+						pullRequest: { id: "pull-request-7", merged: false },
+					},
+				},
+			},
+		] as const;
+
+		for (const test_case of cases) {
+			const calls: Array<ProcessRunnerInput> = [];
+			const cli = await make_cli((input) => {
+				calls.push(input);
+
+				return Effect.succeed(
+					launched_process_result(JSON.stringify({ data: test_case.response })),
+				);
+			});
+
+			await expect(
+				Effect.runPromise(cli.ExecuteMutation(mutation_execution(test_case.mutation))),
+			).resolves.toEqual(test_case.result);
+			expect_account_broker_call(calls[0]!);
+			expect(mutation_api_args(calls[0]!)).toEqual([
+				"api",
+				"graphql",
+				"--method",
+				"POST",
+				"--input",
+				"-",
+			]);
+			const stdin = JSON.parse(Buffer.from(calls[0]?.stdin ?? []).toString()) as {
+				readonly variables: Readonly<Record<string, unknown>>;
+			};
+
+			expect(stdin.variables.clientMutationId).toBe("mutation_1");
+
+			const malformed = await make_cli(() =>
+				Effect.succeed(
+					launched_process_result(JSON.stringify({ data: test_case.wrong_response })),
+				),
+			);
+
+			await expect(
+				Effect.runPromise(
+					malformed.ExecuteMutation(mutation_execution(test_case.mutation)),
+				),
+			).rejects.toMatchObject({
+				operation: "execute_mutation",
+				reason: "outcome_unknown",
+				retryable: false,
+			});
+		}
+	});
+
+	it("requests reviewers with an encoded REST path, silent bounded output, and exact body", async () => {
+		const calls: Array<ProcessRunnerInput> = [];
+		const mutation = {
+			...hosted_mutation_target("artisan/team", "editor docs"),
+			operation: "request_reviewers" as const,
+			reviewers: [
+				{ _tag: "user" as const, login: "alice" },
+				{
+					_tag: "team" as const,
+					organization: "artisan/team",
+					slug: "maintainers",
+				},
+			],
+		};
+		const cli = await make_cli((input) => {
+			calls.push(input);
+
+			return Effect.succeed(
+				launched_process_result("ignored response body", {
+					stdout_truncated: true,
+				}),
+			);
+		});
+
+		await expect(
+			Effect.runPromise(cli.ExecuteMutation(mutation_execution(mutation))),
+		).resolves.toEqual({
+			operation: "request_reviewers",
+			origin: {
+				native_id: "pull-request-7",
+				resource_kind: "pull_request",
+			},
+		});
+		expect_account_broker_call(calls[0]!);
+		expect(mutation_api_args(calls[0]!)).toEqual([
+			"api",
+			"--method",
+			"POST",
+			"--silent",
+			"--input",
+			"-",
+			"repos/artisan%2Fteam/editor%20docs/pulls/7/requested_reviewers",
+		]);
+		expect(calls[0]?.max_stdout_bytes).toBe(0);
+		expect(JSON.parse(Buffer.from(calls[0]?.stdin ?? []).toString())).toEqual({
+			reviewers: ["alice"],
+			team_reviewers: ["maintainers"],
+		});
+	});
+
+	it("resolves a positive workflow database ID before whole, failed-only, and cancel writes", async () => {
+		const cases = [
+			{
+				action: "rerun",
+				mutation: {
+					...hosted_mutation_target("artisan/team", "editor docs"),
+					mode: "whole" as const,
+					operation: "rerun_workflow" as const,
+					workflow_origin: workflow_origin(),
+				},
+			},
+			{
+				action: "rerun-failed-jobs",
+				mutation: {
+					...hosted_mutation_target(),
+					mode: "failed_only" as const,
+					operation: "rerun_workflow" as const,
+					workflow_origin: workflow_origin(),
+				},
+			},
+			{
+				action: "cancel",
+				mutation: {
+					...hosted_mutation_target(),
+					operation: "cancel_workflow" as const,
+					workflow_origin: workflow_origin(),
+				},
+			},
+		] as const;
+
+		for (const test_case of cases) {
+			const calls: Array<ProcessRunnerInput> = [];
+			const cli = await make_cli((input) => {
+				calls.push(input);
+
+				return Effect.succeed(
+					input.command === executable_path
+						? process_result(
+								JSON.stringify({
+									data: {
+										node: {
+											__typename: "WorkflowRun",
+											databaseId: 42,
+											id: "workflow-1",
+										},
+									},
+								}),
+							)
+						: launched_process_result(""),
+				);
+			});
+
+			await expect(
+				Effect.runPromise(cli.ExecuteMutation(mutation_execution(test_case.mutation))),
+			).resolves.toEqual({
+				operation: test_case.mutation.operation,
+				origin: {
+					native_id: "workflow-1",
+					resource_kind: "workflow_run",
+				},
+			});
+			expect(calls).toHaveLength(2);
+			expect(calls[0]?.command).toBe(executable_path);
+			expect(calls[0]?.stdin).toBeUndefined();
+			expect(calls[0]?.args).toContain("id=workflow-1");
+			expect_account_broker_call(calls[1]!);
+			expect(mutation_api_args(calls[1]!)).toContain(
+				`repos/${encodeURIComponent(test_case.mutation.repository.owner)}/${encodeURIComponent(test_case.mutation.repository.name)}/actions/runs/42/${test_case.action}`,
+			);
+			expect(mutation_api_args(calls[1]!)).toContain("--silent");
+			expect(Buffer.from(calls[1]?.stdin ?? []).toString()).toBe("{}");
+		}
+	});
+
+	it("uses Run for workflow resolution and RunProcessTree for the account broker write", async () => {
+		const run_calls: Array<ProcessRunnerInput> = [];
+		const process_tree_calls: Array<ProcessRunnerInput> = [];
+		const mutation = {
+			...hosted_mutation_target(),
+			operation: "cancel_workflow" as const,
+			workflow_origin: workflow_origin(),
+		};
+		const cli = await make_cli(
+			(input) => {
+				run_calls.push(input);
+
+				return Effect.succeed(
+					process_result(
+						JSON.stringify({
+							data: {
+								node: {
+									__typename: "WorkflowRun",
+									databaseId: 42,
+									id: "workflow-1",
+								},
+							},
+						}),
+					),
+				);
+			},
+			{},
+			{},
+			(input) => {
+				process_tree_calls.push(input);
+
+				return Effect.succeed(launched_process_result(""));
+			},
+		);
+
+		await expect(
+			Effect.runPromise(cli.ExecuteMutation(mutation_execution(mutation))),
+		).resolves.toEqual({
+			operation: "cancel_workflow",
+			origin: { native_id: "workflow-1", resource_kind: "workflow_run" },
+		});
+		expect(run_calls).toHaveLength(1);
+		expect(run_calls[0]?.command).toBe(executable_path);
+		expect(run_calls[0]?.args).toContain("id=workflow-1");
+		expect(process_tree_calls).toHaveLength(1);
+		expect_account_broker_call(process_tree_calls[0]!);
+	});
+
+	it("keeps workflow resolution failures safe and only marks launched write uncertainty unknown", async () => {
+		const mutation = {
+			...hosted_mutation_target(),
+			mode: "whole" as const,
+			operation: "rerun_workflow" as const,
+			workflow_origin: workflow_origin(),
+		};
+		let write_count = 0;
+		const invalid_id = await make_cli((input) => {
+			if (!input.args.includes("graphql")) {
+				write_count += 1;
+			}
+
+			return Effect.succeed(
+				process_result(
+					JSON.stringify({
+						data: {
+							node: {
+								__typename: "WorkflowRun",
+								databaseId: 0,
+								id: "workflow-1",
+							},
+						},
+					}),
+				),
+			);
+		});
+
+		await expect(
+			Effect.runPromise(invalid_id.ExecuteMutation(mutation_execution(mutation))),
+		).rejects.toMatchObject({
+			operation: "execute_mutation",
+			reason: "invalid_response",
+		});
+		expect(write_count).toBe(0);
+
+		const read_failure = await make_cli(() =>
+			Effect.fail(
+				new ProcessRunnerError({
+					cause: new Error("read process failed"),
+					command: executable_path,
+					operation: "spawn",
+				}),
+			),
+		);
+		await expect(
+			Effect.runPromise(read_failure.ExecuteMutation(mutation_execution(mutation))),
+		).rejects.toMatchObject({
+			operation: "execute_mutation",
+			reason: "process_failed",
+			retryable: true,
+		});
+
+		const read_timeout = await make_cli(() => Effect.never, {
+			request_timeout_ms: 1,
+		});
+		await expect(
+			Effect.runPromise(read_timeout.ExecuteMutation(mutation_execution(mutation))),
+		).rejects.toMatchObject({
+			operation: "execute_mutation",
+			reason: "timed_out",
+			retryable: true,
+		});
+
+		const reply = {
+			...hosted_mutation_target(),
+			body: "private",
+			operation: "reply_review_thread" as const,
+			thread_origin: {
+				native_id: "thread-1",
+				provider_id: "github",
+				resource_kind: "review_thread" as const,
+			},
+		};
+		const write_failure = await make_cli(() =>
+			Effect.fail(
+				new ProcessRunnerError({
+					cause: new Error("write process uncertain"),
+					command: executable_path,
+					operation: "spawn",
+				}),
+			),
+		);
+		await expect(
+			Effect.runPromise(write_failure.ExecuteMutation(mutation_execution(reply))),
+		).rejects.toMatchObject({
+			operation: "execute_mutation",
+			reason: "outcome_unknown",
+			retryable: false,
+		});
+
+		const write_timeout = await make_cli(() => Effect.never, {
+			request_timeout_ms: 1,
+		});
+		await expect(
+			Effect.runPromise(write_timeout.ExecuteMutation(mutation_execution(reply))),
+		).rejects.toMatchObject({
+			operation: "execute_mutation",
+			reason: "outcome_unknown",
+			retryable: false,
+		});
+	});
+
+	it("keeps prelaunch account failures definite and launched uncertainty unknown", async () => {
+		const mutation = {
+			...hosted_mutation_target(),
+			body: "private",
+			operation: "reply_review_thread" as const,
+			thread_origin: {
+				native_id: "thread-1",
+				provider_id: "github",
+				resource_kind: "review_thread" as const,
+			},
+		};
+		const prelaunch_failure = await make_cli(() =>
+			Effect.succeed(
+				process_result("", {
+					exit_code: 1,
+					stderr: Buffer.from("selected account credential unavailable"),
+				}),
+			),
+		);
+
+		await expect(
+			Effect.runPromise(prelaunch_failure.ExecuteMutation(mutation_execution(mutation))),
+		).rejects.toMatchObject({
+			operation: "execute_mutation",
+			reason: "authentication_required",
+			retryable: false,
+		});
+
+		const cases = [
+			{
+				error: {
+					errors: [{ message: "Bad credentials" }],
+				},
+				reason: "authentication_required",
+				retryable: false,
+			},
+			{
+				error: {
+					errors: [{ message: "API rate limit exceeded" }],
+				},
+				reason: "rate_limited",
+				retryable: true,
+			},
+			{
+				error: { errors: [{ message: "Validation failed" }] },
+				reason: "remote_rejected",
+				retryable: false,
+			},
+			{
+				error: undefined,
+				output: "HTTP 503: Service Unavailable",
+				reason: "outcome_unknown",
+				retryable: false,
+			},
+			{
+				error: undefined,
+				output: "failed to connect",
+				reason: "outcome_unknown",
+				retryable: false,
+			},
+		] as const;
+
+		for (const test_case of cases) {
+			const cli = await make_cli(() =>
+				Effect.succeed(
+					launched_process_result(
+						"error" in test_case && test_case.error !== undefined
+							? JSON.stringify(test_case.error)
+							: test_case.output,
+						{ exit_code: 1 },
+					),
+				),
+			);
+
+			await expect(
+				Effect.runPromise(cli.ExecuteMutation(mutation_execution(mutation))),
+			).rejects.toMatchObject({
+				operation: "execute_mutation",
+				reason: test_case.reason,
+				retryable: test_case.retryable,
+			});
+		}
+	});
+
+	it("rejects missing mutation broker dependencies before spawning", async () => {
+		const mutation = {
+			...hosted_mutation_target(),
+			body: "private",
+			operation: "reply_review_thread" as const,
+			thread_origin: {
+				native_id: "thread-1",
+				provider_id: "github",
+				resource_kind: "review_thread" as const,
+			},
+		};
+		let spawn_count = 0;
+		const run = () => {
+			spawn_count += 1;
+
+			return Effect.succeed(process_result(""));
+		};
+		const missing_git = await make_cli(run, {}, { git_path: null });
+
+		await expect(
+			Effect.runPromise(missing_git.ExecuteMutation(mutation_execution(mutation))),
+		).rejects.toMatchObject({
+			operation: "execute_mutation",
+			reason: "git_dependency_missing",
+			retryable: false,
+		});
+		expect(spawn_count).toBe(0);
+
+		if (process.platform !== "win32") {
+			return;
+		}
+
+		await with_temporary_directory(async (root) => {
+			const { path_service } = await test_platform();
+			const missing_shell = await make_cli(
+				run,
+				{},
+				{
+					git_path: path_service.join(root, "cmd", "git.exe"),
+				},
+			);
+
+			await expect(
+				Effect.runPromise(missing_shell.ExecuteMutation(mutation_execution(mutation))),
+			).rejects.toMatchObject({
+				operation: "execute_mutation",
+				reason: "git_dependency_missing",
+				retryable: false,
+			});
+		});
+		expect(spawn_count).toBe(0);
+	});
+
 	it("returns missing without spawning and projects safe multi-host authentication", async () => {
 		let spawn_count = 0;
 		const cli = await Effect.runPromise(

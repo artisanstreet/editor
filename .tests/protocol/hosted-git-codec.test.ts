@@ -5,6 +5,10 @@ import {
 	DecodeInboundControlEnvelope,
 	DecodeOutboundControlEnvelope,
 	HostedGitCheckFailureDetail,
+	HostedGitMutationRequest,
+	HostedGitMutationResult,
+	HostedGitMutationSummary,
+	summarize_hosted_git_mutation,
 } from "@artisan/protocol";
 
 const timestamp = "2026-07-14T15:00:00.000Z";
@@ -133,6 +137,191 @@ function snapshot(workspace_freshness: "current" | "unverified" = "current") {
 }
 
 describe("Hosted Git protocol codec", () => {
+	it("accepts exact canonical writes while keeping a reply body out of the safe summary", async () => {
+		const target = {
+			expected_head_commit: head,
+			pull_request_number: 42,
+			pull_request_origin: {
+				native_id: "PR_42",
+				provider_id: "github",
+				resource_kind: "pull_request",
+			},
+			repository: {
+				host: "github.com",
+				name: "editor",
+				owner: "artisan",
+				provider_id: "github",
+			},
+			selected_branch: "feature/hosted-state",
+			snapshot_version: 1,
+			workspace_id: "workspace_1",
+		};
+		const reply = {
+			...target,
+			body: "private reply text",
+			operation: "reply_review_thread" as const,
+			thread_origin: {
+				native_id: "thread_2",
+				provider_id: "github",
+				resource_kind: "review_thread" as const,
+			},
+		};
+		const requests = [
+			reply,
+			{
+				...target,
+				operation: "resolve_review_thread" as const,
+				thread_origin: {
+					native_id: "thread_2",
+					provider_id: "github",
+					resource_kind: "review_thread" as const,
+				},
+			},
+			{
+				...target,
+				operation: "request_reviewers" as const,
+				reviewers: [
+					{ _tag: "user" as const, login: "alice" },
+					{
+						_tag: "team" as const,
+						organization: "artisan",
+						slug: "maintainers",
+					},
+				],
+			},
+			{
+				...target,
+				mode: "failed_only" as const,
+				operation: "rerun_workflow" as const,
+				workflow_origin: {
+					native_id: "workflow_1",
+					provider_id: "github",
+					resource_kind: "workflow_run" as const,
+				},
+			},
+			{
+				...target,
+				operation: "cancel_workflow" as const,
+				workflow_origin: {
+					native_id: "workflow_1",
+					provider_id: "github",
+					resource_kind: "workflow_run" as const,
+				},
+			},
+			{ ...target, method: "rebase" as const, operation: "merge_pull_request" as const },
+		];
+
+		for (const request of requests) {
+			const decoded = await Effect.runPromise(
+				Schema.decodeUnknownEffect(HostedGitMutationRequest, {
+					onExcessProperty: "error",
+				})(request),
+			);
+			const summary = summarize_hosted_git_mutation(decoded);
+
+			await expect(
+				Effect.runPromise(Schema.decodeUnknownEffect(HostedGitMutationSummary)(summary)),
+			).resolves.toEqual(summary);
+			expect(summary).toMatchObject({
+				expected_head_commit: target.expected_head_commit,
+				operation: request.operation,
+				pull_request_origin: target.pull_request_origin,
+				repository: target.repository,
+				snapshot_version: target.snapshot_version,
+				workspace_id: target.workspace_id,
+			});
+		}
+
+		const reply_summary = summarize_hosted_git_mutation(
+			await Effect.runPromise(Schema.decodeUnknownEffect(HostedGitMutationRequest)(reply)),
+		);
+
+		expect(reply_summary).toEqual({
+			...target,
+			operation: "reply_review_thread",
+			thread_origin: reply.thread_origin,
+		});
+		expect(JSON.stringify(reply_summary)).not.toContain(reply.body);
+		await expect(
+			Effect.runPromise(
+				Schema.decodeUnknownEffect(HostedGitMutationRequest)({
+					...reply,
+					thread_origin: { ...reply.thread_origin, provider_id: "gitlab" },
+				}),
+			),
+		).rejects.toBeDefined();
+		await expect(
+			Effect.runPromise(
+				Schema.decodeUnknownEffect(HostedGitMutationRequest, {
+					onExcessProperty: "error",
+				})({ ...reply, client_mutation_id: "renderer_owned_id" }),
+			),
+		).rejects.toBeDefined();
+		await expect(
+			Effect.runPromise(
+				Schema.decodeUnknownEffect(HostedGitMutationRequest)({
+					...target,
+					operation: "request_reviewers",
+					reviewers: [
+						{ _tag: "user", login: "Alice" },
+						{ _tag: "user", login: "alice" },
+					],
+				}),
+			),
+		).rejects.toBeDefined();
+
+		await expect(
+			Effect.runPromise(
+				Schema.decodeUnknownEffect(HostedGitMutationSummary, { onExcessProperty: "error" })(
+					{ ...reply_summary, body: reply.body },
+				),
+			),
+		).rejects.toBeDefined();
+	});
+
+	it("requires the exact native origin kind for every successful hosted write", async () => {
+		const cases = [
+			{ operation: "reply_review_thread", resource_kind: "review_comment" },
+			{ operation: "resolve_review_thread", resource_kind: "review_thread" },
+			{ operation: "request_reviewers", resource_kind: "pull_request" },
+			{ operation: "rerun_workflow", resource_kind: "workflow_run" },
+			{ operation: "cancel_workflow", resource_kind: "workflow_run" },
+			{ operation: "merge_pull_request", resource_kind: "pull_request" },
+		] as const;
+
+		for (const test_case of cases) {
+			const result = {
+				operation: test_case.operation,
+				origin: {
+					native_id: `${test_case.operation}_native`,
+					provider_id: "github",
+					resource_kind: test_case.resource_kind,
+				},
+				status: "applied",
+			};
+
+			await expect(
+				Effect.runPromise(Schema.decodeUnknownEffect(HostedGitMutationResult)(result)),
+			).resolves.toEqual(result);
+			await expect(
+				Effect.runPromise(
+					Schema.decodeUnknownEffect(HostedGitMutationResult)({
+						...result,
+						origin: { ...result.origin, resource_kind: "check_run" },
+					}),
+				),
+			).rejects.toBeDefined();
+		}
+
+		await expect(
+			Effect.runPromise(
+				Schema.decodeUnknownEffect(HostedGitMutationResult)({
+					operation: "merge_pull_request",
+					status: "applied",
+				}),
+			),
+		).rejects.toBeDefined();
+	});
 	it("accepts bounded attributed failure detail and rejects executable control output", async () => {
 		const detail = {
 			attempt: 2,

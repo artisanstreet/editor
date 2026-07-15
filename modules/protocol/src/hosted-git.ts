@@ -106,6 +106,7 @@ export const HostedGitOrigin = Schema.Struct({
 		"pull_request",
 		"review",
 		"review_thread",
+		"review_comment",
 		"check_run",
 		"status_context",
 		"check_suite",
@@ -393,6 +394,261 @@ export const HostedGitSnapshotQueryResult = Schema.Struct({
 });
 
 export type HostedGitSnapshotQueryResult = typeof HostedGitSnapshotQueryResult.Type;
+
+export const HostedGitMutationOperation = Schema.Literals([
+	"reply_review_thread",
+	"resolve_review_thread",
+	"request_reviewers",
+	"rerun_workflow",
+	"cancel_workflow",
+	"merge_pull_request",
+]);
+
+export type HostedGitMutationOperation = typeof HostedGitMutationOperation.Type;
+
+const HostedGitReplyBody = bounded_text(64 * 1_024, true);
+const HostedGitReviewerSet = Schema.Array(HostedGitRequestedReviewer).check(
+	Schema.isMinLength(1),
+	Schema.isMaxLength(100),
+	Schema.makeFilter((reviewers) => {
+		const keys = reviewers.map((reviewer) =>
+			reviewer._tag === "user"
+				? `user:${reviewer.login.toLowerCase()}`
+				: `team:${reviewer.organization.toLowerCase()}/${reviewer.slug.toLowerCase()}`,
+		);
+
+		return new Set(keys).size === keys.length
+			? undefined
+			: "Expected unique requested reviewers";
+	}),
+);
+
+const HostedGitMutationTargetFields = {
+	expected_head_commit: GitObjectId,
+	pull_request_number: PositiveInt,
+	pull_request_origin: HostedGitOrigin,
+	repository: HostedGitRepositoryIdentity,
+	selected_branch: GitBranchName,
+	snapshot_version: PositiveInt,
+	workspace_id: Identifier,
+};
+
+const HostedGitReviewCommentOrigin = Schema.Struct({
+	native_id: HostedGitNativeId,
+	provider_id: HostedGitProviderId,
+	resource_kind: Schema.Literal("review_comment"),
+});
+const HostedGitReviewThreadOrigin = Schema.Struct({
+	native_id: HostedGitNativeId,
+	provider_id: HostedGitProviderId,
+	resource_kind: Schema.Literal("review_thread"),
+});
+const HostedGitPullRequestOrigin = Schema.Struct({
+	native_id: HostedGitNativeId,
+	provider_id: HostedGitProviderId,
+	resource_kind: Schema.Literal("pull_request"),
+});
+const HostedGitWorkflowRunOrigin = Schema.Struct({
+	native_id: HostedGitNativeId,
+	provider_id: HostedGitProviderId,
+	resource_kind: Schema.Literal("workflow_run"),
+});
+
+interface HostedGitMutationTarget {
+	readonly operation: HostedGitMutationOperation;
+	readonly pull_request_origin: HostedGitOrigin;
+	readonly repository: HostedGitRepositoryIdentity;
+	readonly thread_origin?: HostedGitOrigin;
+	readonly workflow_origin?: HostedGitOrigin;
+}
+
+function hosted_git_mutation_target_error(request: HostedGitMutationTarget) {
+	const target_origin =
+		request.operation === "reply_review_thread" || request.operation === "resolve_review_thread"
+			? request.thread_origin
+			: request.operation === "rerun_workflow" || request.operation === "cancel_workflow"
+				? request.workflow_origin
+				: undefined;
+	const target_kind =
+		request.operation === "reply_review_thread" || request.operation === "resolve_review_thread"
+			? "review_thread"
+			: request.operation === "rerun_workflow" || request.operation === "cancel_workflow"
+				? "workflow_run"
+				: undefined;
+
+	return request.pull_request_origin.resource_kind !== "pull_request" ||
+		request.pull_request_origin.provider_id !== request.repository.provider_id ||
+		(target_kind !== undefined &&
+			(target_origin?.resource_kind !== target_kind ||
+				target_origin.provider_id !== request.repository.provider_id))
+		? "Expected one provider identity and canonical mutation target origins"
+		: undefined;
+}
+
+/** Requests one canonical hosted-provider write against an exact displayed pull request. */
+export const HostedGitMutationRequest = Schema.Union([
+	Schema.Struct({
+		...HostedGitMutationTargetFields,
+		body: HostedGitReplyBody,
+		operation: Schema.Literal("reply_review_thread"),
+		thread_origin: HostedGitOrigin,
+	}),
+	Schema.Struct({
+		...HostedGitMutationTargetFields,
+		operation: Schema.Literal("resolve_review_thread"),
+		thread_origin: HostedGitOrigin,
+	}),
+	Schema.Struct({
+		...HostedGitMutationTargetFields,
+		operation: Schema.Literal("request_reviewers"),
+		reviewers: HostedGitReviewerSet,
+	}),
+	Schema.Struct({
+		...HostedGitMutationTargetFields,
+		mode: Schema.Literals(["whole", "failed_only"]),
+		operation: Schema.Literal("rerun_workflow"),
+		workflow_origin: HostedGitOrigin,
+	}),
+	Schema.Struct({
+		...HostedGitMutationTargetFields,
+		operation: Schema.Literal("cancel_workflow"),
+		workflow_origin: HostedGitOrigin,
+	}),
+	Schema.Struct({
+		...HostedGitMutationTargetFields,
+		method: Schema.Literals(["merge", "squash", "rebase"]),
+		operation: Schema.Literal("merge_pull_request"),
+	}),
+]).check(Schema.makeFilter(hosted_git_mutation_target_error));
+
+export type HostedGitMutationRequest = typeof HostedGitMutationRequest.Type;
+
+/** Summarizes a hosted write without retaining a reply body or provider output. */
+export const HostedGitMutationSummary = Schema.Union([
+	Schema.Struct({
+		...HostedGitMutationTargetFields,
+		operation: Schema.Literal("reply_review_thread"),
+		thread_origin: HostedGitOrigin,
+	}),
+	Schema.Struct({
+		...HostedGitMutationTargetFields,
+		operation: Schema.Literal("resolve_review_thread"),
+		thread_origin: HostedGitOrigin,
+	}),
+	Schema.Struct({
+		...HostedGitMutationTargetFields,
+		operation: Schema.Literal("request_reviewers"),
+		reviewers: HostedGitReviewerSet,
+	}),
+	Schema.Struct({
+		...HostedGitMutationTargetFields,
+		mode: Schema.Literals(["whole", "failed_only"]),
+		operation: Schema.Literal("rerun_workflow"),
+		workflow_origin: HostedGitOrigin,
+	}),
+	Schema.Struct({
+		...HostedGitMutationTargetFields,
+		operation: Schema.Literal("cancel_workflow"),
+		workflow_origin: HostedGitOrigin,
+	}),
+	Schema.Struct({
+		...HostedGitMutationTargetFields,
+		method: Schema.Literals(["merge", "squash", "rebase"]),
+		operation: Schema.Literal("merge_pull_request"),
+	}),
+]).check(Schema.makeFilter(hosted_git_mutation_target_error));
+
+export type HostedGitMutationSummary = typeof HostedGitMutationSummary.Type;
+
+/** Produces approval-safe hosted write intent while omitting only a review reply body. */
+export function summarize_hosted_git_mutation(
+	request: HostedGitMutationRequest,
+): HostedGitMutationSummary {
+	const target = {
+		expected_head_commit: request.expected_head_commit,
+		pull_request_number: request.pull_request_number,
+		pull_request_origin: request.pull_request_origin,
+		repository: request.repository,
+		selected_branch: request.selected_branch,
+		snapshot_version: request.snapshot_version,
+		workspace_id: request.workspace_id,
+	};
+
+	if (request.operation === "reply_review_thread") {
+		return {
+			...target,
+			operation: request.operation,
+			thread_origin: request.thread_origin,
+		};
+	}
+
+	if (request.operation === "resolve_review_thread") {
+		return {
+			...target,
+			operation: request.operation,
+			thread_origin: request.thread_origin,
+		};
+	}
+
+	if (request.operation === "request_reviewers") {
+		return { ...target, operation: request.operation, reviewers: request.reviewers };
+	}
+
+	if (request.operation === "rerun_workflow") {
+		return {
+			...target,
+			mode: request.mode,
+			operation: request.operation,
+			workflow_origin: request.workflow_origin,
+		};
+	}
+
+	if (request.operation === "cancel_workflow") {
+		return {
+			...target,
+			operation: request.operation,
+			workflow_origin: request.workflow_origin,
+		};
+	}
+
+	return { ...target, method: request.method, operation: request.operation };
+}
+
+/** Returns only normalized, attributable metadata after a hosted write succeeds. */
+export const HostedGitMutationResult = Schema.Union([
+	Schema.Struct({
+		operation: Schema.Literal("reply_review_thread"),
+		origin: HostedGitReviewCommentOrigin,
+		status: Schema.Literal("applied"),
+	}),
+	Schema.Struct({
+		operation: Schema.Literal("resolve_review_thread"),
+		origin: HostedGitReviewThreadOrigin,
+		status: Schema.Literal("applied"),
+	}),
+	Schema.Struct({
+		operation: Schema.Literal("request_reviewers"),
+		origin: HostedGitPullRequestOrigin,
+		status: Schema.Literal("applied"),
+	}),
+	Schema.Struct({
+		operation: Schema.Literal("rerun_workflow"),
+		origin: HostedGitWorkflowRunOrigin,
+		status: Schema.Literal("applied"),
+	}),
+	Schema.Struct({
+		operation: Schema.Literal("cancel_workflow"),
+		origin: HostedGitWorkflowRunOrigin,
+		status: Schema.Literal("applied"),
+	}),
+	Schema.Struct({
+		operation: Schema.Literal("merge_pull_request"),
+		origin: HostedGitPullRequestOrigin,
+		status: Schema.Literal("applied"),
+	}),
+]);
+
+export type HostedGitMutationResult = typeof HostedGitMutationResult.Type;
 
 /** Requests a fresh exact-head hosted review and CI observation. */
 export const HostedGitSnapshotRefreshRequest = Schema.Struct({ workspace_id: Identifier });
