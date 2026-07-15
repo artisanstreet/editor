@@ -17,10 +17,16 @@ import {
 	EventStreams,
 	JournalCommands,
 	JournalEvents,
+	PreviewTargetRemovalFences,
 	PreviewTargets,
 	Threads,
 } from "../../modules/backend/src/persistence/schema";
 import { RuntimeMetadataLive } from "../../modules/backend/src/runtime/runtime-metadata";
+import {
+	PreviewBrowserRepository,
+	PreviewBrowserRepositoryLive,
+} from "../../modules/backend/src/preview/preview-browser-repository";
+import type { PreviewTargetRemovalClaim } from "../../modules/backend/src/preview/preview-browser";
 import {
 	PreviewTargetRepository,
 	PreviewTargetRepositoryLive,
@@ -32,6 +38,8 @@ const paths: Array<string> = [];
 const now = "2026-07-14T22:00:00.000Z";
 type RegisterPayload = Extract<Command["payload"], { readonly type: "preview.target.register" }>;
 type RegisterCommand = Omit<Command, "payload"> & { readonly payload: RegisterPayload };
+type RemovePayload = Extract<Command["payload"], { readonly type: "preview.target.remove" }>;
+type RemoveCommand = Omit<Command, "payload"> & { readonly payload: RemovePayload };
 
 const DecodeCommandPayloadJson = Schema.decodeUnknownEffect(
 	Schema.fromJsonString(CommandEnvelope.fields.payload),
@@ -82,7 +90,7 @@ function register_command(options: RegisterOptions = {}): RegisterCommand {
 	};
 }
 
-function remove_command(options: Omit<RegisterOptions, "url"> = {}): Command {
+function remove_command(options: Omit<RegisterOptions, "url"> = {}): RemoveCommand {
 	return {
 		kind: "command",
 		message_id: options.message_id ?? "remove_1",
@@ -127,12 +135,38 @@ function make_runtime(database_path: string) {
 		RuntimeMetadataLive,
 	);
 	const repository = PreviewTargetRepositoryLive.pipe(Layer.provide(infrastructure));
-	const runtime = ManagedRuntime.make(Layer.merge(repository, infrastructure));
+	const browser_repository = PreviewBrowserRepositoryLive.pipe(Layer.provide(infrastructure));
+	const runtime = ManagedRuntime.make(
+		Layer.mergeAll(repository, browser_repository, infrastructure),
+	);
 
 	runtimes.push(runtime);
 
 	return runtime;
 }
+
+const RemoveClaimed = (command: RemoveCommand, now_ms: number) =>
+	Effect.gen(function* () {
+		const browser_repository = yield* PreviewBrowserRepository;
+		const repository = yield* PreviewTargetRepository;
+		const claim = yield* browser_repository
+			.ClaimTargetRemoval(
+				{
+					project_id: command.payload.project_id,
+					target_id: command.payload.target_id,
+					workspace_id: command.payload.workspace_id,
+				},
+				now_ms,
+				10_000,
+			)
+			.pipe(Effect.orDie);
+
+		return yield* repository
+			.RemoveClaimed(command, claim, now_ms)
+			.pipe(
+				Effect.ensuring(browser_repository.ReleaseTargetRemoval(claim).pipe(Effect.orDie)),
+			);
+	});
 
 async function dispose_runtime(runtime: { readonly dispose: () => Promise<void> }) {
 	const index = runtimes.indexOf(runtime);
@@ -320,17 +354,15 @@ describe("PreviewTargetRepository", () => {
 
 				yield* repository.Register(first, first.payload.url, 1);
 				yield* repository.Register(second, second.payload.url, 2);
-				const cross_scope_remove = yield* repository
-					.Remove(
-						remove_command({
-							message_id: "remove_cross_scope",
-							workspace_id: "workspace_2",
-						}),
-						3,
-					)
-					.pipe(Effect.flip);
+				const cross_scope_remove = yield* RemoveClaimed(
+					remove_command({
+						message_id: "remove_cross_scope",
+						workspace_id: "workspace_2",
+					}),
+					3,
+				).pipe(Effect.flip);
 
-				const removed = yield* repository.Remove(
+				const removed = yield* RemoveClaimed(
 					remove_command({ message_id: "remove_scope_1" }),
 					4,
 				);
@@ -369,6 +401,71 @@ describe("PreviewTargetRepository", () => {
 			{ project_id: "project_2", target_id: "preview_1", workspace_id: "workspace_2" },
 		]);
 		expect(Option.isNone(result.cross_scope)).toBe(true);
+	});
+
+	it("binds a target-removal claim to its exact target generation", async () => {
+		const database_path = await Effect.runPromise(
+			MakeDatabasePath.pipe(Effect.provide(NodeFileSystem.layer)),
+		);
+		const runtime = make_runtime(database_path);
+		const result = await runtime.runPromise(
+			Effect.gen(function* () {
+				const database = yield* Database;
+				const browser_repository = yield* PreviewBrowserRepository;
+				const repository = yield* PreviewTargetRepository;
+
+				yield* database.client.insert(Threads).values({
+					created_at: now,
+					thread_id: "thread_1",
+					title: "Preview thread",
+					title_source: "initial",
+					updated_at: now,
+				});
+				yield* database.client.insert(EventStreams).values({
+					last_sequence: 0,
+					stream_id: "thread:thread_1",
+				});
+
+				const registration = register_command();
+				const command = remove_command();
+
+				yield* repository.Register(registration, registration.payload.url, 1);
+				const claim = yield* browser_repository.ClaimTargetRemoval(
+					{
+						project_id: command.payload.project_id,
+						target_id: command.payload.target_id,
+						workspace_id: command.payload.workspace_id,
+					},
+					2,
+					10_000,
+				);
+				const forged_claim = {
+					...claim,
+					subject: {
+						_tag: "Current",
+						target_generation_id: "forged_generation",
+					},
+				} satisfies PreviewTargetRemovalClaim;
+
+				const removal_error = yield* repository
+					.RemoveClaimed(command, forged_claim, 3)
+					.pipe(Effect.flip);
+				const browser_error = yield* browser_repository
+					.ActiveInspectionIdsForTargetRemoval(forged_claim, 3)
+					.pipe(Effect.flip);
+				const targets = yield* database.client.select().from(PreviewTargets);
+				const fences = yield* database.client.select().from(PreviewTargetRemovalFences);
+
+				yield* browser_repository.ReleaseTargetRemoval(claim);
+
+				return { browser_error, fences, removal_error, targets };
+			}),
+		);
+
+		expect(result.removal_error).toMatchObject({ reason: "target_removing" });
+		expect(result.browser_error).toMatchObject({ reason: "ownership_lost" });
+		expect(result.targets).toHaveLength(1);
+		expect(result.fences).toEqual([]);
 	});
 
 	it("rejects changed intent and attribution for one command identity", async () => {

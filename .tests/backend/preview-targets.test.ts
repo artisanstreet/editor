@@ -41,6 +41,10 @@ import {
 	UnavailablePreviewHealthProbeLive,
 } from "../../modules/backend/src/preview/preview-target";
 import {
+	PreviewBrowserRepository,
+	PreviewBrowserRepositoryLive,
+} from "../../modules/backend/src/preview/preview-browser-repository";
+import {
 	PreviewTargetRepository,
 	PreviewTargetRepositoryLive,
 } from "../../modules/backend/src/preview/preview-target-repository";
@@ -58,6 +62,8 @@ type RegisterPayload = Extract<Command["payload"], { readonly type: "preview.tar
 type RegisterCommand = Omit<Command, "payload"> & { readonly payload: RegisterPayload };
 type ProbePayload = Extract<Command["payload"], { readonly type: "preview.target.probe" }>;
 type ProbeCommand = Omit<Command, "payload"> & { readonly payload: ProbePayload };
+type RemovePayload = Extract<Command["payload"], { readonly type: "preview.target.remove" }>;
+type RemoveCommand = Omit<Command, "payload"> & { readonly payload: RemovePayload };
 
 interface TestRuntimeOptions {
 	readonly metadata?: Layer.Layer<RuntimeMetadata>;
@@ -108,7 +114,7 @@ function probe_command(
 	};
 }
 
-function remove_command(message_id = "remove_1"): Command {
+function remove_command(message_id = "remove_1"): RemoveCommand {
 	return {
 		kind: "command",
 		message_id,
@@ -156,11 +162,14 @@ function make_runtime(
 		probe,
 	);
 	const repository = PreviewTargetRepositoryLive.pipe(Layer.provide(infrastructure));
+	const browser_repository = PreviewBrowserRepositoryLive.pipe(Layer.provide(infrastructure));
 	const preview = make_preview_target_layer({
 		sliding_event_capacity: 8,
 		...options.preview,
 	}).pipe(Layer.provide(repository), Layer.provide(infrastructure));
-	const runtime = ManagedRuntime.make(Layer.mergeAll(preview, repository, infrastructure));
+	const runtime = ManagedRuntime.make(
+		Layer.mergeAll(preview, repository, browser_repository, infrastructure),
+	);
 
 	runtimes.push(runtime);
 
@@ -192,6 +201,29 @@ const SeedThread = Effect.gen(function* () {
 		stream_id: "thread:thread_1",
 	});
 });
+
+const RemoveClaimed = (command: RemoveCommand, claim_now_ms = 10_000) =>
+	Effect.gen(function* () {
+		const browser_repository = yield* PreviewBrowserRepository;
+		const preview = yield* PreviewTarget;
+		const claim = yield* browser_repository
+			.ClaimTargetRemoval(
+				{
+					project_id: command.payload.project_id,
+					target_id: command.payload.target_id,
+					workspace_id: command.payload.workspace_id,
+				},
+				claim_now_ms,
+				10_000,
+			)
+			.pipe(Effect.orDie);
+
+		return yield* preview
+			.RemoveClaimed(command, claim)
+			.pipe(
+				Effect.ensuring(browser_repository.ReleaseTargetRemoval(claim).pipe(Effect.orDie)),
+			);
+	});
 
 afterEach(async () => {
 	await Promise.all(runtimes.splice(0).map((runtime) => runtime.dispose()));
@@ -379,7 +411,7 @@ describe("PreviewTarget", () => {
 					yield* preview.Register(register_command());
 					const accepted = yield* preview.Probe(probe_command());
 
-					yield* preview.Remove(remove_command());
+					yield* RemoveClaimed(remove_command());
 
 					return accepted;
 				}),
@@ -719,6 +751,13 @@ describe("PreviewTarget", () => {
 				),
 			),
 		);
+		expect(conflict.code).toBe("conflict");
+		expect(probe_calls).toBe(1);
+
+		await Effect.runPromise(Deferred.succeed(release, undefined));
+
+		expect((await owner).status).toBe("accepted");
+
 		const competing_commands = await second.runPromise(
 			Effect.gen(function* () {
 				const preview = yield* PreviewTarget;
@@ -726,20 +765,14 @@ describe("PreviewTarget", () => {
 				const register = yield* preview
 					.Register(register_command("probe_1"))
 					.pipe(Effect.flip);
-				const remove = yield* preview.Remove(remove_command("probe_1")).pipe(Effect.flip);
+				const remove = yield* RemoveClaimed(remove_command("probe_1")).pipe(Effect.flip);
 
 				return { register, remove };
 			}),
 		);
 
-		expect(conflict.code).toBe("conflict");
 		expect(competing_commands.register.code).toBe("conflict");
 		expect(competing_commands.remove.code).toBe("conflict");
-		expect(probe_calls).toBe(1);
-
-		await Effect.runPromise(Deferred.succeed(release, undefined));
-
-		expect((await owner).status).toBe("accepted");
 	});
 
 	it("prevents an in-flight probe from committing after erasure starts", async () => {
@@ -835,6 +868,7 @@ describe("PreviewTarget", () => {
 		const database_path = await Effect.runPromise(
 			MakeDatabasePath.pipe(Effect.provide(NodeFileSystem.layer)),
 		);
+		const metadata_now = { value: "2026-07-14T22:00:00.000Z" };
 		const started = await Effect.runPromise(Deferred.make<void>());
 		const release = await Effect.runPromise(Deferred.make<void>());
 		const probe = Layer.succeed(PreviewHealthProbe, {
@@ -854,7 +888,10 @@ describe("PreviewTarget", () => {
 			probe_poll_interval_ms: 5,
 			probe_timeout_ms: 500,
 		} satisfies PreviewTargetOptions;
-		const first = make_runtime(database_path, probe, { preview: preview_options });
+		const first = make_runtime(database_path, probe, {
+			metadata: make_metadata_layer("backend_probe_owner_1", metadata_now),
+			preview: preview_options,
+		});
 
 		await first.runPromise(
 			Effect.gen(function* () {
@@ -865,7 +902,6 @@ describe("PreviewTarget", () => {
 			}),
 		);
 
-		const second = make_runtime(database_path, probe, { preview: preview_options });
 		const outcome = first.runPromise(
 			Effect.scoped(
 				Effect.flatMap(PreviewTarget, (preview) =>
@@ -878,11 +914,21 @@ describe("PreviewTarget", () => {
 
 		await Effect.runPromise(Deferred.await(started));
 
+		metadata_now.value = "2026-07-14T22:00:02.000Z";
+
+		const second = make_runtime(database_path, probe, {
+			metadata: make_metadata_layer("backend_probe_owner_2", metadata_now),
+			preview: preview_options,
+		});
+
 		await second.runPromise(
 			Effect.gen(function* () {
 				const preview = yield* PreviewTarget;
 
-				yield* preview.Remove(remove_command("remove_before_replace"));
+				yield* RemoveClaimed(
+					remove_command("remove_before_replace"),
+					Date.parse(metadata_now.value),
+				);
 				yield* preview.Register(
 					register_command("register_replacement", "http://localhost:4173/app"),
 				);

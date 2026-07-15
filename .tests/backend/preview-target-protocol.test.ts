@@ -13,6 +13,7 @@ import type {
 	PreviewTargetsQueryEnvelope,
 } from "@artisan/protocol";
 import {
+	BrowserInspectionConnector,
 	make_backend_runtime,
 	PreviewHealthProbe,
 	ProtocolRouter,
@@ -20,6 +21,13 @@ import {
 	UnavailablePreviewHealthProbeLive,
 	type ProtocolConnection,
 } from "@artisan/backend";
+
+import { Database, make_database_layer } from "../../modules/backend/src/persistence/database";
+import {
+	PreviewInspectionSessions,
+	PreviewTargetRemovalClaims,
+	PreviewTargetRemovalFences,
+} from "../../modules/backend/src/persistence/schema";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];
@@ -136,6 +144,226 @@ afterEach(async () => {
 });
 
 describe("preview target protocol", () => {
+	it("repairs a durable removal fence after post-commit claim loss", async () => {
+		const database_path = await make_database_path();
+		const detach_calls: Array<string> = [];
+
+		let lose_next_claim = true;
+
+		const connector = Layer.effect(
+			BrowserInspectionConnector,
+			Effect.gen(function* () {
+				const database = yield* Database;
+
+				return {
+					Attach: ({ inspection_id }) =>
+						Effect.succeed({
+							Detach: Effect.gen(function* () {
+								detach_calls.push(inspection_id);
+
+								if (!lose_next_claim) {
+									return;
+								}
+
+								lose_next_claim = false;
+								yield* database.client
+									.delete(PreviewTargetRemovalClaims)
+									.pipe(Effect.orDie);
+							}),
+							Disconnected: Effect.never,
+						}),
+					Revoke: () => Effect.void,
+				};
+			}),
+		).pipe(
+			Layer.provide(
+				make_database_layer({
+					database_path,
+					migrations_path,
+				}),
+			),
+			Layer.orDie,
+		);
+		const runtime = make_backend_runtime({
+			browser_inspection_connector: connector,
+			database_path,
+			migrations_path,
+		});
+		const remove = preview_command("remove_after_claim_loss", {
+			project_id: "project_preview",
+			target_id: "target_preview",
+			type: "preview.target.remove",
+			workspace_id: "workspace_preview",
+		});
+
+		try {
+			await route(runtime, thread_create());
+			await route(
+				runtime,
+				preview_command("register_before_claim_loss", {
+					project_id: "project_preview",
+					target_id: "target_preview",
+					type: "preview.target.register",
+					url: "http://localhost:4173/claim-loss",
+					workspace_id: "workspace_preview",
+				}),
+			);
+			await route(
+				runtime,
+				preview_command("attach_before_claim_loss", {
+					connector_id: "connector_claim_loss",
+					inspection_id: "inspection_claim_loss",
+					project_id: "project_preview",
+					target_id: "target_preview",
+					type: "preview.inspection.attach",
+					workspace_id: "workspace_preview",
+				}),
+			);
+
+			const removed = await route(runtime, remove);
+			const durable = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+
+					return {
+						claims: yield* database.client.select().from(PreviewTargetRemovalClaims),
+						fences: yield* database.client.select().from(PreviewTargetRemovalFences),
+						inspections: yield* database.client
+							.select()
+							.from(PreviewInspectionSessions),
+					};
+				}),
+			);
+			const replayed = await route(runtime, remove);
+
+			expect(removed).toMatchObject([
+				{ kind: "command.receipt", payload: { status: "duplicate" } },
+				{
+					kind: "event",
+					payload: { action: "removed", type: "preview.target.updated" },
+				},
+			]);
+			expect(replayed).toEqual([
+				expect.objectContaining({
+					kind: "command.receipt",
+					payload: expect.objectContaining({ status: "duplicate" }),
+				}),
+				removed[1],
+			]);
+			expect(detach_calls).toEqual(["inspection_claim_loss"]);
+			expect(durable.claims).toEqual([]);
+			expect(durable.fences).toEqual([]);
+			expect(durable.inspections).toMatchObject([
+				{ reason: "target_changed", state: "disconnected" },
+			]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("replays a removed generation while another runtime inspects its replacement", async () => {
+		const database_path = await make_database_path();
+		const detach_calls: Array<string> = [];
+		const connector = Layer.succeed(BrowserInspectionConnector, {
+			Attach: ({ inspection_id }) =>
+				Effect.succeed({
+					Detach: Effect.sync(() => detach_calls.push(inspection_id)),
+					Disconnected: Effect.never,
+				}),
+			Revoke: () => Effect.void,
+		});
+		const first_runtime = make_backend_runtime({ database_path, migrations_path });
+		const register_generation_1 = preview_command("register_generation_1", {
+			project_id: "project_preview",
+			target_id: "target_preview",
+			type: "preview.target.register",
+			url: "http://localhost:4173/generation-1",
+			workspace_id: "workspace_preview",
+		});
+		const remove_generation_1 = preview_command("remove_generation_1", {
+			project_id: "project_preview",
+			target_id: "target_preview",
+			type: "preview.target.remove",
+			workspace_id: "workspace_preview",
+		});
+
+		let second_runtime: ReturnType<typeof make_backend_runtime> | undefined;
+
+		try {
+			await route(first_runtime, thread_create());
+			await route(first_runtime, register_generation_1);
+
+			const removed = await route(first_runtime, remove_generation_1);
+
+			await route(
+				first_runtime,
+				preview_command("register_generation_2", {
+					project_id: "project_preview",
+					target_id: "target_preview",
+					type: "preview.target.register",
+					url: "http://localhost:4173/generation-2",
+					workspace_id: "workspace_preview",
+				}),
+			);
+
+			second_runtime = make_backend_runtime({
+				browser_inspection_connector: connector,
+				database_path,
+				migrations_path,
+			});
+
+			const attached = await route(
+				second_runtime,
+				preview_command("attach_generation_2", {
+					connector_id: "connector_2",
+					inspection_id: "inspection_generation_2",
+					project_id: "project_preview",
+					target_id: "target_preview",
+					type: "preview.inspection.attach",
+					workspace_id: "workspace_preview",
+				}),
+			);
+			const replayed = await route(first_runtime, remove_generation_1);
+			const changed_intent = await route(
+				first_runtime,
+				preview_command("remove_generation_1", {
+					project_id: "project_preview",
+					target_id: "different_target",
+					type: "preview.target.remove",
+					workspace_id: "workspace_preview",
+				}),
+			);
+
+			expect(attached).toMatchObject([
+				{ kind: "command.receipt", payload: { status: "accepted" } },
+				{
+					kind: "event",
+					payload: { action: "attached", type: "preview.inspection.updated" },
+				},
+			]);
+			expect(replayed).toEqual([
+				expect.objectContaining({
+					kind: "command.receipt",
+					payload: expect.objectContaining({ status: "duplicate" }),
+				}),
+				removed[1],
+			]);
+			expect(detach_calls).toEqual([]);
+			expect(changed_intent).toMatchObject([
+				{
+					kind: "command.receipt",
+					payload: { error: { code: "command.id_conflict" }, status: "rejected" },
+				},
+			]);
+		} finally {
+			if (second_runtime !== undefined) {
+				await second_runtime.dispose();
+			}
+
+			await first_runtime.dispose();
+		}
+	});
+
 	it("replays commands across restart and returns the exact scoped projection", async () => {
 		const database_path = await make_database_path();
 		const register = preview_command("preview_register", {
