@@ -2005,6 +2005,209 @@ export const HostedGitSnapshotOperations = sqliteTable(
 	],
 );
 
+/** Stores public, source-safe approval state for hosted Git provider writes. */
+export const HostedGitMutationApprovals = sqliteTable(
+	"hosted_git_mutation_approvals",
+	{
+		approval_id: text("approval_id").primaryKey(),
+		source_command_id: text("source_command_id").notNull(),
+		request_fingerprint: text("request_fingerprint").notNull(),
+		thread_id: text("thread_id").notNull(),
+		workspace_id: text("workspace_id").notNull(),
+		snapshot_version: integer("snapshot_version").notNull(),
+		expected_head_commit: text("expected_head_commit").notNull(),
+		pull_request_number: integer("pull_request_number").notNull(),
+		pull_request_origin_json: text("pull_request_origin_json").notNull(),
+		repository_json: text("repository_json").notNull(),
+		selection_json: text("selection_json").notNull(),
+		operation_summary_json: text("operation_summary_json").notNull(),
+		state: text("state").notNull(),
+		decision_message_id: text("decision_message_id"),
+		approved: integer("approved", { mode: "boolean" }),
+		decided_at: text("decided_at"),
+		execution_started_at: text("execution_started_at"),
+		result_json: text("result_json"),
+		rejection_reason: text("rejection_reason"),
+		unknown_reason: text("unknown_reason"),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("hosted_git_mutation_approvals_source_command_unique").on(
+			table.source_command_id,
+		),
+		uniqueIndex("hosted_git_mutation_approvals_decision_message_unique").on(
+			table.decision_message_id,
+		),
+		index("hosted_git_mutation_approvals_thread_index").on(table.thread_id),
+		index("hosted_git_mutation_approvals_workspace_index").on(table.workspace_id),
+		index("hosted_git_mutation_approvals_state_index").on(table.state),
+		check(
+			"hosted_git_mutation_approvals_fingerprint_check",
+			sql`
+				length(${table.request_fingerprint}) = 64
+				AND ${table.request_fingerprint} NOT GLOB '*[^0-9a-f]*'
+			`,
+		),
+		check(
+			"hosted_git_mutation_approvals_target_check",
+			sql`${table.snapshot_version} >= 1 AND ${table.pull_request_number} >= 1`,
+		),
+		check(
+			"hosted_git_mutation_approvals_state_check",
+			sql`
+				${table.state} IN (
+					'requested', 'approved', 'executing', 'applied',
+					'rejected', 'outcome_unknown', 'denied'
+				)
+			`,
+		),
+		check(
+			"hosted_git_mutation_approvals_decision_check",
+			sql`
+				(
+					${table.state} = 'requested'
+					AND ${table.decision_message_id} IS NULL
+					AND ${table.approved} IS NULL
+					AND ${table.decided_at} IS NULL
+					AND ${table.execution_started_at} IS NULL
+				)
+				OR (
+					${table.state} = 'denied'
+					AND ${table.decision_message_id} IS NOT NULL
+					AND ${table.approved} = 0
+					AND ${table.decided_at} IS NOT NULL
+					AND ${table.execution_started_at} IS NULL
+				)
+				OR (
+					${table.state} = 'approved'
+					AND ${table.decision_message_id} IS NOT NULL
+					AND ${table.approved} = 1
+					AND ${table.decided_at} IS NOT NULL
+					AND ${table.execution_started_at} IS NULL
+				)
+				OR (
+					${table.state} = 'executing'
+					AND ${table.decision_message_id} IS NOT NULL
+					AND ${table.approved} = 1
+					AND ${table.decided_at} IS NOT NULL
+				)
+				OR (
+					${table.state} = 'rejected'
+					AND ${table.decision_message_id} IS NOT NULL
+					AND ${table.approved} = 1
+					AND ${table.decided_at} IS NOT NULL
+				)
+				OR (
+					${table.state} IN ('applied', 'outcome_unknown')
+					AND ${table.decision_message_id} IS NOT NULL
+					AND ${table.approved} = 1
+					AND ${table.decided_at} IS NOT NULL
+					AND ${table.execution_started_at} IS NOT NULL
+				)
+			`,
+		),
+		check(
+			"hosted_git_mutation_approvals_outcome_check",
+			sql`
+				(
+					${table.state} IN ('requested', 'approved', 'executing', 'denied')
+					AND ${table.result_json} IS NULL
+					AND ${table.rejection_reason} IS NULL
+					AND ${table.unknown_reason} IS NULL
+				)
+				OR (
+					${table.state} = 'applied'
+					AND ${table.result_json} IS NOT NULL
+					AND ${table.rejection_reason} IS NULL
+					AND ${table.unknown_reason} IS NULL
+				)
+				OR (
+					${table.state} = 'rejected'
+					AND ${table.result_json} IS NULL
+					AND ${table.rejection_reason} IS NOT NULL
+					AND ${table.unknown_reason} IS NULL
+				)
+				OR (
+					${table.state} = 'outcome_unknown'
+					AND ${table.result_json} IS NULL
+					AND ${table.rejection_reason} IS NULL
+					AND ${table.unknown_reason} IS NOT NULL
+				)
+			`,
+		),
+	],
+);
+
+/** Stores the exact private provider operation until terminal settlement scrubs it. */
+export const HostedGitMutationArtifacts = sqliteTable(
+	"hosted_git_mutation_artifacts",
+	{
+		approval_id: text("approval_id")
+			.primaryKey()
+			.references(() => HostedGitMutationApprovals.approval_id, {
+				onDelete: "cascade",
+			}),
+		operation_json: text("operation_json"),
+		operation_binding: text("operation_binding").notNull(),
+		provider_result_json: text("provider_result_json"),
+		selection_json: text("selection_json"),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		check(
+			"hosted_git_mutation_artifacts_binding_check",
+			sql`
+				length(${table.operation_binding}) = 64
+				AND ${table.operation_binding} NOT GLOB '*[^0-9a-f]*'
+			`,
+		),
+		check(
+			"hosted_git_mutation_artifacts_private_pair_check",
+			sql`
+				(
+					${table.operation_json} IS NULL
+					AND ${table.selection_json} IS NULL
+				)
+				OR (
+					${table.operation_json} IS NOT NULL
+					AND ${table.selection_json} IS NOT NULL
+				)
+			`,
+		),
+	],
+);
+
+/** Serializes one hosted provider write per visible workspace across runtimes. */
+export const HostedGitMutationClaims = sqliteTable(
+	"hosted_git_mutation_claims",
+	{
+		workspace_id: text("workspace_id").primaryKey(),
+		approval_id: text("approval_id")
+			.notNull()
+			.references(() => HostedGitMutationApprovals.approval_id, {
+				onDelete: "cascade",
+			}),
+		thread_id: text("thread_id").notNull(),
+		claim_token: text("claim_token").notNull(),
+		owner_instance_id: text("owner_instance_id").notNull().default("unowned"),
+		claimed_at: text("claimed_at").notNull(),
+		lease_expires_at: text("lease_expires_at").notNull(),
+		execution_started_at: text("execution_started_at"),
+		execution_completed_at: text("execution_completed_at"),
+	},
+	(table) => [
+		uniqueIndex("hosted_git_mutation_claims_approval_unique").on(table.approval_id),
+		uniqueIndex("hosted_git_mutation_claims_token_unique").on(table.claim_token),
+		index("hosted_git_mutation_claims_thread_index").on(table.thread_id),
+		index("hosted_git_mutation_claims_lease_index").on(table.lease_expires_at),
+		check(
+			"hosted_git_mutation_claims_execution_pair_check",
+			sql`${table.execution_completed_at} IS NULL OR ${table.execution_started_at} IS NOT NULL`,
+		),
+	],
+);
+
 /** Stores private baselines alongside the source-free projection of one external wait. */
 export const ExternalWaits = sqliteTable(
 	"external_waits",

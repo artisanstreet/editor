@@ -5,6 +5,9 @@ import {
 	DecodeInboundControlEnvelope,
 	DecodeOutboundControlEnvelope,
 	HostedGitCheckFailureDetail,
+	HostedGitMutationApproval,
+	HostedGitMutationApprovalUpdatedEvent,
+	HostedGitMutationCommandRequest,
 	HostedGitMutationRequest,
 	HostedGitMutationResult,
 	HostedGitMutationSummary,
@@ -235,6 +238,22 @@ describe("Hosted Git protocol codec", () => {
 		const reply_summary = summarize_hosted_git_mutation(
 			await Effect.runPromise(Schema.decodeUnknownEffect(HostedGitMutationRequest)(reply)),
 		);
+		const command = {
+			mutation: reply,
+			selection: { account_login: "artisan", host: "github.com", provider_id: "github" },
+		};
+
+		await expect(
+			Effect.runPromise(Schema.decodeUnknownEffect(HostedGitMutationCommandRequest)(command)),
+		).resolves.toEqual(command);
+		await expect(
+			Effect.runPromise(
+				Schema.decodeUnknownEffect(HostedGitMutationCommandRequest)({
+					...command,
+					selection: { ...command.selection, host: "gitlab.com" },
+				}),
+			),
+		).rejects.toBeDefined();
 
 		expect(reply_summary).toEqual({
 			...target,
@@ -318,6 +337,131 @@ describe("Hosted Git protocol codec", () => {
 				Schema.decodeUnknownEffect(HostedGitMutationResult)({
 					operation: "merge_pull_request",
 					status: "applied",
+				}),
+			),
+		).rejects.toBeDefined();
+	});
+
+	it("keeps every approval projection source-safe across its lifecycle", async () => {
+		const operation = {
+			expected_head_commit: head,
+			operation: "reply_review_thread" as const,
+			pull_request_number: 42,
+			pull_request_origin: {
+				native_id: "PR_42",
+				provider_id: "github",
+				resource_kind: "pull_request" as const,
+			},
+			repository: {
+				host: "github.com",
+				name: "editor",
+				owner: "artisan",
+				provider_id: "github",
+			},
+			selected_branch: "feature/hosted-state",
+			snapshot_version: 1,
+			thread_origin: {
+				native_id: "thread_2",
+				provider_id: "github",
+				resource_kind: "review_thread" as const,
+			},
+			workspace_id: "workspace_1",
+		};
+		const base = {
+			approval_id: "approval_1",
+			created_at: timestamp,
+			expected_head_commit: head,
+			operation,
+			pull_request_number: 42,
+			pull_request_origin: operation.pull_request_origin,
+			repository: operation.repository,
+			selection: { account_login: "artisan", host: "github.com", provider_id: "github" },
+			snapshot_version: 1,
+			source_command_id: "message_1",
+			thread_id: "thread_1",
+			updated_at: timestamp,
+			workspace_id: "workspace_1",
+		};
+		const approvals = [
+			{ ...base, state: "requested" as const },
+			{
+				...base,
+				decided_at: timestamp,
+				decision: "approved" as const,
+				decision_message_id: "decision_1",
+				state: "approved" as const,
+			},
+			{
+				...base,
+				decided_at: timestamp,
+				decision: "approved" as const,
+				decision_message_id: "decision_1",
+				state: "executing" as const,
+			},
+			{
+				...base,
+				decided_at: timestamp,
+				decision: "approved" as const,
+				decision_message_id: "decision_1",
+				result: {
+					operation: "reply_review_thread" as const,
+					origin: {
+						native_id: "comment_1",
+						provider_id: "github",
+						resource_kind: "review_comment" as const,
+					},
+					status: "applied" as const,
+				},
+				state: "applied" as const,
+			},
+			{
+				...base,
+				decided_at: timestamp,
+				decision: "approved" as const,
+				decision_message_id: "decision_1",
+				reason: "permission_denied" as const,
+				state: "rejected" as const,
+			},
+			{
+				...base,
+				decided_at: timestamp,
+				decision: "approved" as const,
+				decision_message_id: "decision_1",
+				reason: "provider_outcome_unknown" as const,
+				state: "outcome_unknown" as const,
+			},
+			{
+				...base,
+				decided_at: timestamp,
+				decision: "denied" as const,
+				decision_message_id: "decision_1",
+				state: "denied" as const,
+			},
+		];
+
+		for (const approval of approvals) {
+			await expect(
+				Effect.runPromise(Schema.decodeUnknownEffect(HostedGitMutationApproval)(approval)),
+			).resolves.toEqual(approval);
+			expect(JSON.stringify(approval)).not.toContain("private reply text");
+		}
+
+		const event = {
+			approval: approvals[0],
+			type: "hosted.git.mutation.approval.updated" as const,
+		};
+		await expect(
+			Effect.runPromise(
+				Schema.decodeUnknownEffect(HostedGitMutationApprovalUpdatedEvent)(event),
+			),
+		).resolves.toEqual(event);
+
+		await expect(
+			Effect.runPromise(
+				Schema.decodeUnknownEffect(HostedGitMutationApproval)({
+					...base,
+					expected_head_commit: "b".repeat(40),
+					state: "requested",
 				}),
 			),
 		).rejects.toBeDefined();

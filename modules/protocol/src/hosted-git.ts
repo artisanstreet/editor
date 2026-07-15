@@ -1,5 +1,6 @@
 import { Schema } from "effect";
 
+import { HostedProjectSelection } from "./hosted-project";
 import { GitBranchName, GitObjectId } from "./git-session";
 import { Identifier, IsoDateTime, JournalSequence, PositiveInt } from "./common";
 
@@ -523,6 +524,21 @@ export const HostedGitMutationRequest = Schema.Union([
 
 export type HostedGitMutationRequest = typeof HostedGitMutationRequest.Type;
 
+/** Carries one exact hosted write and the account explicitly selected by the renderer. */
+export const HostedGitMutationCommandRequest = Schema.Struct({
+	mutation: HostedGitMutationRequest,
+	selection: HostedProjectSelection,
+}).check(
+	Schema.makeFilter((request) =>
+		request.selection.provider_id !== request.mutation.repository.provider_id ||
+		request.selection.host !== request.mutation.repository.host
+			? "Expected the selected provider and host to match the hosted mutation repository"
+			: undefined,
+	),
+);
+
+export type HostedGitMutationCommandRequest = typeof HostedGitMutationCommandRequest.Type;
+
 /** Summarizes a hosted write without retaining a reply body or provider output. */
 export const HostedGitMutationSummary = Schema.Union([
 	Schema.Struct({
@@ -649,6 +665,184 @@ export const HostedGitMutationResult = Schema.Union([
 ]);
 
 export type HostedGitMutationResult = typeof HostedGitMutationResult.Type;
+
+const HostedGitMutationApprovalBase = {
+	approval_id: Identifier,
+	created_at: IsoDateTime,
+	expected_head_commit: GitObjectId,
+	operation: HostedGitMutationSummary,
+	pull_request_number: PositiveInt,
+	pull_request_origin: HostedGitOrigin,
+	repository: HostedGitRepositoryIdentity,
+	selection: HostedProjectSelection,
+	snapshot_version: PositiveInt,
+	source_command_id: Identifier,
+	thread_id: Identifier,
+	updated_at: IsoDateTime,
+	workspace_id: Identifier,
+};
+
+const HostedGitMutationApprovalDecision = {
+	decided_at: IsoDateTime,
+	decision_message_id: Identifier,
+	decision: Schema.Literal("approved"),
+};
+
+/** Enumerates stable public reasons why an approved hosted write was not applied. */
+export const HostedGitMutationRejectionReason = Schema.Literals([
+	"authentication_required",
+	"invalid_provider_response",
+	"permission_denied",
+	"provider_unavailable",
+	"rate_limited",
+	"remote_rejected",
+	"snapshot_stale",
+	"unsupported_operation",
+]);
+
+export type HostedGitMutationRejectionReason = typeof HostedGitMutationRejectionReason.Type;
+
+/** Enumerates stable public reasons why a launched hosted write cannot be reconciled. */
+export const HostedGitMutationUnknownReason = Schema.Literals([
+	"execution_interrupted",
+	"provider_outcome_unknown",
+]);
+
+export type HostedGitMutationUnknownReason = typeof HostedGitMutationUnknownReason.Type;
+
+/** Projects a hosted-provider mutation that still awaits an explicit decision. */
+export const HostedGitMutationApprovalRequested = Schema.Struct({
+	...HostedGitMutationApprovalBase,
+	state: Schema.Literal("requested"),
+});
+
+/** Projects an approved hosted-provider mutation before its external execution starts. */
+export const HostedGitMutationApprovalApproved = Schema.Struct({
+	...HostedGitMutationApprovalBase,
+	...HostedGitMutationApprovalDecision,
+	state: Schema.Literal("approved"),
+});
+
+/** Projects an approved hosted-provider mutation while its provider call is in progress. */
+export const HostedGitMutationApprovalExecuting = Schema.Struct({
+	...HostedGitMutationApprovalBase,
+	...HostedGitMutationApprovalDecision,
+	state: Schema.Literal("executing"),
+});
+
+/** Projects a hosted-provider mutation that completed with normalized provider attribution. */
+export const HostedGitMutationApprovalApplied = Schema.Struct({
+	...HostedGitMutationApprovalBase,
+	...HostedGitMutationApprovalDecision,
+	result: HostedGitMutationResult,
+	state: Schema.Literal("applied"),
+});
+
+/** Projects an approved hosted-provider mutation rejected without retaining provider output. */
+export const HostedGitMutationApprovalRejected = Schema.Struct({
+	...HostedGitMutationApprovalBase,
+	...HostedGitMutationApprovalDecision,
+	reason: HostedGitMutationRejectionReason,
+	state: Schema.Literal("rejected"),
+});
+
+/** Projects an externally started mutation whose provider outcome cannot be recovered safely. */
+export const HostedGitMutationApprovalOutcomeUnknown = Schema.Struct({
+	...HostedGitMutationApprovalBase,
+	...HostedGitMutationApprovalDecision,
+	reason: HostedGitMutationUnknownReason,
+	state: Schema.Literal("outcome_unknown"),
+});
+
+/** Projects an explicit denial without exposing the private provider mutation. */
+export const HostedGitMutationApprovalDenied = Schema.Struct({
+	...HostedGitMutationApprovalBase,
+	decided_at: IsoDateTime,
+	decision: Schema.Literal("denied"),
+	decision_message_id: Identifier,
+	state: Schema.Literal("denied"),
+});
+
+interface HostedGitMutationApprovalTarget {
+	readonly expected_head_commit: string;
+	readonly operation: HostedGitMutationSummary;
+	readonly pull_request_number: number;
+	readonly pull_request_origin: HostedGitOrigin;
+	readonly repository: HostedGitRepositoryIdentity;
+	readonly selection: HostedProjectSelection;
+	readonly snapshot_version: number;
+	readonly workspace_id: string;
+}
+
+function hosted_git_mutation_approval_target_error(approval: HostedGitMutationApprovalTarget) {
+	const operation = approval.operation;
+	const pull_request_origin = approval.pull_request_origin;
+	const operation_pull_request_origin = operation.pull_request_origin;
+	const repository = approval.repository;
+	const operation_repository = operation.repository;
+
+	return approval.expected_head_commit !== operation.expected_head_commit ||
+		approval.pull_request_number !== operation.pull_request_number ||
+		approval.snapshot_version !== operation.snapshot_version ||
+		approval.workspace_id !== operation.workspace_id ||
+		pull_request_origin.native_id !== operation_pull_request_origin.native_id ||
+		pull_request_origin.provider_id !== operation_pull_request_origin.provider_id ||
+		pull_request_origin.resource_kind !== operation_pull_request_origin.resource_kind ||
+		repository.host !== operation_repository.host ||
+		repository.name !== operation_repository.name ||
+		repository.owner !== operation_repository.owner ||
+		repository.provider_id !== operation_repository.provider_id ||
+		approval.selection.provider_id !== repository.provider_id ||
+		approval.selection.host !== repository.host
+		? "Expected approval target fields to match the hosted mutation summary"
+		: undefined;
+}
+
+/** Represents every source-safe hosted-provider mutation approval lifecycle state. */
+export const HostedGitMutationApproval = Schema.Union([
+	HostedGitMutationApprovalRequested,
+	HostedGitMutationApprovalApproved,
+	HostedGitMutationApprovalExecuting,
+	HostedGitMutationApprovalApplied,
+	HostedGitMutationApprovalRejected,
+	HostedGitMutationApprovalOutcomeUnknown,
+	HostedGitMutationApprovalDenied,
+]).check(Schema.makeFilter(hosted_git_mutation_approval_target_error));
+
+export type HostedGitMutationApproval = typeof HostedGitMutationApproval.Type;
+
+/** Selects one public hosted-provider mutation approval within its owning thread. */
+export const HostedGitMutationApprovalQuery = Schema.Struct({
+	approval_id: Identifier,
+	thread_id: Identifier,
+});
+
+export type HostedGitMutationApprovalQuery = typeof HostedGitMutationApprovalQuery.Type;
+
+/** Returns one public hosted-provider mutation approval projection. */
+export const HostedGitMutationApprovalQueryResult = Schema.Struct({
+	approval: HostedGitMutationApproval,
+});
+
+export type HostedGitMutationApprovalQueryResult = typeof HostedGitMutationApprovalQueryResult.Type;
+
+/** Records an explicit approval or denial for one hosted-provider mutation. */
+export const HostedGitMutationApprovalResponseRequest = Schema.Struct({
+	approval_id: Identifier,
+	approved: Schema.Boolean,
+});
+
+export type HostedGitMutationApprovalResponseRequest =
+	typeof HostedGitMutationApprovalResponseRequest.Type;
+
+/** Announces one public hosted-provider mutation approval lifecycle update. */
+export const HostedGitMutationApprovalUpdatedEvent = Schema.Struct({
+	approval: HostedGitMutationApproval,
+	type: Schema.Literal("hosted.git.mutation.approval.updated"),
+});
+
+export type HostedGitMutationApprovalUpdatedEvent =
+	typeof HostedGitMutationApprovalUpdatedEvent.Type;
 
 /** Requests a fresh exact-head hosted review and CI observation. */
 export const HostedGitSnapshotRefreshRequest = Schema.Struct({ workspace_id: Identifier });
