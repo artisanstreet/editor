@@ -399,6 +399,12 @@ export const FixtureArtisanClientService = {
 			snapshots: [],
 			truncated: false,
 		} satisfies ExternalWaitQueryResult),
+	GetPreviewTargets: (input) =>
+		Effect.succeed({
+			project_id: input.project_id,
+			targets: [],
+			workspace_id: input.workspace_id,
+		}),
 	GetThreadRetentionPolicy: Effect.gen(function* () {
 		return yield* Effect.succeed(fixture_artisan_client_data.thread_retention_policy);
 	}),
@@ -593,6 +599,18 @@ export const FixtureArtisanClientService = {
 	ManuallyResumeExternalWait: (input) =>
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-external-wait-manual-resume");
+		}),
+	RegisterPreviewTarget: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-preview-register");
+		}),
+	ProbePreviewTarget: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-preview-probe");
+		}),
+	RemovePreviewTarget: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-preview-remove");
 		}),
 	RespondWorkspaceGitCheckoutApproval: (input) =>
 		Effect.gen(function* () {

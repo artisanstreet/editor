@@ -32,6 +32,9 @@ import {
 	type ModelBehaviourUpdateEnvelope,
 	type OrchestrationGraph,
 	type OutboundControlEnvelope,
+	type PreviewTargetCommand,
+	type PreviewTargetRecord,
+	type PreviewTargetRemovedRecord,
 	type StreamCursor,
 	type SubscribeEnvelope,
 	type ThreadListItem,
@@ -61,6 +64,7 @@ import {
 	type WorkspaceReplaceApproval,
 	type WorkspaceReplaceApprovalQueryEnvelope,
 	type WorkspaceReplaceApprovalRespondEnvelope,
+	type PreviewTargetsQueryEnvelope,
 } from "@artisan/protocol";
 
 interface StoredCommand {
@@ -112,6 +116,7 @@ export interface FakeProtocolOptions {
 	readonly duplicate_query_result?: boolean;
 	readonly drop_first_hosted_git_check_failure_detail_result?: boolean;
 	readonly drop_first_workspace_git_fetch_result?: boolean;
+	readonly drop_first_preview_targets_result?: boolean;
 	readonly heartbeat_after_welcome?: boolean;
 	readonly query_delay_ms?: number;
 }
@@ -154,6 +159,7 @@ export interface FakeProtocolSnapshot {
 	readonly workspace_replace_approval_response_attempts: ReadonlyArray<WorkspaceReplaceApprovalRespondEnvelope>;
 	readonly workspace_git_session_query_attempts: ReadonlyArray<WorkspaceGitSessionQueryEnvelope>;
 	readonly workspace_git_fetch_query_attempts: ReadonlyArray<WorkspaceGitFetchQueryEnvelope>;
+	readonly preview_targets_query_attempts: ReadonlyArray<PreviewTargetsQueryEnvelope>;
 	readonly workspace_git_fetch_policy_update_attempts: ReadonlyArray<WorkspaceGitFetchPolicyUpdateEnvelope>;
 	readonly workspace_git_fetch_request_attempts: ReadonlyArray<WorkspaceGitFetchRequestEnvelope>;
 	readonly workspace_git_checkout_approval_query_attempts: ReadonlyArray<WorkspaceGitCheckoutApprovalQueryEnvelope>;
@@ -189,6 +195,16 @@ function ordered_cursors(events: ReadonlyArray<EventEnvelope>): ReadonlyArray<St
 
 function command_fingerprint(command: CommandEnvelope) {
 	return JSON.stringify(command);
+}
+
+function is_preview_command(
+	command: CommandEnvelope,
+): command is CommandEnvelope & { readonly payload: PreviewTargetCommand } {
+	return (
+		command.payload.type === "preview.target.register" ||
+		command.payload.type === "preview.target.probe" ||
+		command.payload.type === "preview.target.remove"
+	);
 }
 
 function guidance_hash(content: string) {
@@ -240,6 +256,8 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 		[];
 	const workspace_git_session_query_attempts: Array<WorkspaceGitSessionQueryEnvelope> = [];
 	const workspace_git_fetch_query_attempts: Array<WorkspaceGitFetchQueryEnvelope> = [];
+	const preview_targets_query_attempts: Array<PreviewTargetsQueryEnvelope> = [];
+	const preview_targets = new Map<string, PreviewTargetRecord>();
 	const workspace_git_fetch_policy_update_attempts: Array<WorkspaceGitFetchPolicyUpdateEnvelope> =
 		[];
 	const workspace_git_fetch_policy_updates = new Map<string, number>();
@@ -792,7 +810,137 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 				const journal_sequence = events.length + 1;
 				let event: EventEnvelope;
 
-				if (command.payload.type === "agent_instance.rename") {
+				if (is_preview_command(command)) {
+					const payload = command.payload;
+					const target_key = JSON.stringify([
+						payload.project_id,
+						payload.workspace_id,
+						payload.target_id,
+					]);
+					const existing = preview_targets.get(target_key);
+
+					if (payload.type === "preview.target.register" && existing) {
+						yield* enqueue({
+							...backend_trace(),
+							causation_id: command.message_id,
+							correlation_id: command.message_id,
+							kind: "command.receipt",
+							payload: {
+								error: {
+									code: "preview.target.already_exists",
+									message: "A preview target with this id already exists.",
+									retryable: false,
+								},
+								status: "rejected",
+							},
+							thread_id: command.thread_id,
+						});
+
+						return;
+					}
+
+					if (payload.type !== "preview.target.register" && !existing) {
+						yield* enqueue({
+							...backend_trace(),
+							causation_id: command.message_id,
+							correlation_id: command.message_id,
+							kind: "command.receipt",
+							payload: {
+								error: {
+									code: "preview.target.not_found",
+									message: "The requested preview target does not exist.",
+									retryable: false,
+								},
+								status: "rejected",
+							},
+							thread_id: command.thread_id,
+						});
+
+						return;
+					}
+
+					const trace = backend_trace();
+					const timestamp_ms = Date.parse(trace.sent_at);
+					const stream_id = `thread:${command.thread_id}`;
+					const sequence =
+						events.filter((candidate) => candidate.stream_id === stream_id).length + 1;
+
+					if (payload.type === "preview.target.register") {
+						const target: PreviewTargetRecord = {
+							created_at_ms: timestamp_ms,
+							project_id: payload.project_id,
+							...(payload.source === undefined ? {} : { source: payload.source }),
+							state: "registered",
+							target_id: payload.target_id,
+							updated_at_ms: timestamp_ms,
+							url: payload.url,
+							workspace_id: payload.workspace_id,
+						};
+
+						preview_targets.set(target_key, target);
+						event = {
+							...trace,
+							causation_id: command.message_id,
+							correlation_id: command.message_id,
+							journal_sequence,
+							kind: "event",
+							payload: {
+								action: "registered",
+								target,
+								type: "preview.target.updated",
+							},
+							sequence,
+							stream_id,
+							thread_id: command.thread_id,
+						};
+					} else if (payload.type === "preview.target.probe" && existing) {
+						const target: PreviewTargetRecord = {
+							...existing,
+							health: {
+								checked_at_ms: timestamp_ms,
+								latency_ms: 1,
+								status: "healthy",
+								status_code: 200,
+							},
+							state: "healthy",
+							updated_at_ms: timestamp_ms,
+						};
+
+						preview_targets.set(target_key, target);
+						event = {
+							...trace,
+							causation_id: command.message_id,
+							correlation_id: command.message_id,
+							journal_sequence,
+							kind: "event",
+							payload: { action: "probed", target, type: "preview.target.updated" },
+							sequence,
+							stream_id,
+							thread_id: command.thread_id,
+						};
+					} else if (payload.type === "preview.target.remove" && existing) {
+						const target: PreviewTargetRemovedRecord = {
+							...existing,
+							state: "removed",
+							updated_at_ms: timestamp_ms,
+						};
+
+						preview_targets.delete(target_key);
+						event = {
+							...trace,
+							causation_id: command.message_id,
+							correlation_id: command.message_id,
+							journal_sequence,
+							kind: "event",
+							payload: { action: "removed", target, type: "preview.target.updated" },
+							sequence,
+							stream_id,
+							thread_id: command.thread_id,
+						};
+					} else {
+						return yield* Effect.die("preview target fake narrowed incorrectly");
+					}
+				} else if (command.payload.type === "agent_instance.rename") {
 					const stream_id = `orchestration:${command.payload.group_id}`;
 					const sequence =
 						events.filter((candidate) => candidate.stream_id === stream_id).length + 1;
@@ -1335,6 +1483,36 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 					payload: {
 						enabled: false,
 						workspaces: [{ workspace_id: "workspace_git_fixture" }],
+					},
+				});
+			});
+		const handle_preview_targets_query = (query: PreviewTargetsQueryEnvelope) =>
+			Effect.gen(function* () {
+				preview_targets_query_attempts.push(query);
+
+				if (
+					options.drop_first_preview_targets_result &&
+					preview_targets_query_attempts.length === 1
+				) {
+					yield* close;
+
+					return;
+				}
+
+				yield* enqueue({
+					...backend_trace(),
+					correlation_id: query.message_id,
+					kind: "preview.targets.query.result",
+					payload: {
+						project_id: query.payload.project_id,
+						targets: [...preview_targets.values()]
+							.filter(
+								(target) =>
+									target.project_id === query.payload.project_id &&
+									target.workspace_id === query.payload.workspace_id,
+							)
+							.sort((left, right) => left.target_id.localeCompare(right.target_id)),
+						workspace_id: query.payload.workspace_id,
 					},
 				});
 			});
@@ -1886,6 +2064,10 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 						yield* handle_workspace_git_fetch_query(input);
 
 						return;
+					case "preview.targets.query":
+						yield* handle_preview_targets_query(input);
+
+						return;
 					case "workspace.git.fetch.policy.update":
 						yield* handle_workspace_git_fetch_policy_update(input);
 
@@ -2109,6 +2291,7 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 		],
 		workspace_git_session_query_attempts: [...workspace_git_session_query_attempts],
 		workspace_git_fetch_query_attempts: [...workspace_git_fetch_query_attempts],
+		preview_targets_query_attempts: [...preview_targets_query_attempts],
 		workspace_git_fetch_policy_update_attempts: [...workspace_git_fetch_policy_update_attempts],
 		workspace_git_fetch_request_attempts: [...workspace_git_fetch_request_attempts],
 		workspace_git_checkout_approval_query_attempts: [

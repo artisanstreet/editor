@@ -12,17 +12,66 @@ import {
 import { type AgentGraphError } from "../orchestration/agent-graph-repository";
 import { type JournalStoreError } from "../persistence/journal-store";
 import { type OrchestrationError } from "../persistence/orchestration-repository";
+import { type PreviewTargetError, type PreviewTargetErrorCode } from "../preview/preview-target";
 import type { TerminalSessionError } from "../terminal/terminal-sessions";
 import type { ThreadMetadataError } from "../threads/thread-metadata-repository";
 import type { ThreadProjectAffinityError } from "../threads/thread-project-affinity-repository";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { CommandRouter } from "./command-router";
 
+const PreviewTargetErrorDetails = {
+	already_exists: {
+		code: "preview.target.already_exists",
+		message: "A preview target with this id already exists.",
+		retryable: false,
+	},
+	conflict: {
+		code: "command.id_conflict",
+		message: "This command id has already been used for different intent.",
+		retryable: false,
+	},
+	health_probe: {
+		code: "preview.target.health_probe_unavailable",
+		message: "The preview target health probe is unavailable.",
+		retryable: true,
+	},
+	invalid_target: {
+		code: "preview.target.invalid",
+		message: "The preview target command is invalid.",
+		retryable: false,
+	},
+	invariant: {
+		code: "preview.target.invariant_failed",
+		message: "The stored preview target state is invalid.",
+		retryable: false,
+	},
+	limit_reached: {
+		code: "preview.target.limit_reached",
+		message: "This project and workspace already has the maximum number of preview targets.",
+		retryable: false,
+	},
+	not_found: {
+		code: "preview.target.not_found",
+		message: "The requested preview target does not exist.",
+		retryable: false,
+	},
+	unavailable: {
+		code: "preview.target.unavailable",
+		message: "The preview target command could not be durably completed.",
+		retryable: true,
+	},
+} satisfies Record<PreviewTargetErrorCode, ProtocolErrorDetail>;
+
+export function describe_preview_target_error(error: PreviewTargetError): ProtocolErrorDetail {
+	return PreviewTargetErrorDetails[error.code];
+}
+
 const describe_journal_error = pipe(
 	Match.type<
 		| AgentGraphError
 		| JournalStoreError
 		| OrchestrationError
+		| PreviewTargetError
 		| TerminalSessionError
 		| ThreadMetadataError
 		| ThreadProjectAffinityError
@@ -63,6 +112,7 @@ const describe_journal_error = pipe(
 			message: "The command could not be durably orchestrated.",
 			retryable: true,
 		}),
+		PreviewTargetError: describe_preview_target_error,
 		TerminalCommandConflict: (): ProtocolErrorDetail => ({
 			code: "command.id_conflict",
 			message: "This command id has already been used for different intent.",
@@ -145,6 +195,7 @@ export const ProtocolRouterLive = Layer.effect(
 				| AgentGraphError
 				| JournalStoreError
 				| OrchestrationError
+				| PreviewTargetError
 				| TerminalSessionError
 				| ThreadMetadataError
 				| ThreadProjectAffinityError,

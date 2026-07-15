@@ -19,10 +19,12 @@ export type PreviewTargetState = PreviewTargetRecord["state"];
 
 /** Preserves the public error-code alias used by the package entrypoint. */
 export type PreviewTargetErrorCode =
+	| "already_exists"
 	| "conflict"
 	| "health_probe"
 	| "invalid_target"
 	| "invariant"
+	| "limit_reached"
 	| "not_found"
 	| "unavailable";
 

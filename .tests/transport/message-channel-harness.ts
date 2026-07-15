@@ -8,6 +8,7 @@ import {
 	ArtisanClient,
 	MessagePortConnector,
 	MessagePortConnectorError,
+	TransportRuntime,
 	TransportRuntimeLive,
 	DecodeTransportFrame,
 	make_artisan_client_layer,
@@ -44,6 +45,7 @@ export interface TransportHarnessOptions {
 	readonly drop_first_command_receipt?: boolean;
 	readonly protocol?: FakeProtocolOptions;
 	readonly server?: MessagePortTransportServerOptions;
+	readonly transport_runtime?: Layer.Layer<TransportRuntime>;
 }
 
 /** Reports connector ownership and injected-fault observations. */
@@ -219,10 +221,11 @@ async function make_transport_stack(
 	const binary_streams = options.binary_streams ?? {
 		"asset:asset_1": [Uint8Array.of(1, 2), Uint8Array.of(3, 4, 5)],
 	};
+	const transport_runtime = options.transport_runtime ?? TransportRuntimeLive;
 	const server_layer = make_message_port_transport_server_layer(options.server).pipe(
 		Layer.provide(protocol_layer),
 		Layer.provide(make_binary_source_layer(binary_streams)),
-		Layer.provide(TransportRuntimeLive),
+		Layer.provide(transport_runtime),
 	);
 	const server_runtime = ManagedRuntime.make(server_layer);
 	const server = await server_runtime.runPromise(MessagePortTransportServer);
@@ -232,7 +235,7 @@ async function make_transport_stack(
 	);
 	const client_layer = make_artisan_client_layer(options.client).pipe(
 		Layer.provide(connector.layer),
-		Layer.provide(TransportRuntimeLive),
+		Layer.provide(transport_runtime),
 	);
 	const client_runtime = ManagedRuntime.make(client_layer);
 	const client = await client_runtime.runPromise(ArtisanClient);

@@ -87,7 +87,14 @@ function map_repository_error(target_id: string, error: unknown): PreviewTargetE
 	}
 
 	if (error instanceof PreviewTargetRepositoryConflict) {
-		return target_error(target_id, "conflict");
+		return target_error(
+			target_id,
+			error.reason === "command_conflict"
+				? "conflict"
+				: error.reason === "duplicate_target"
+					? "already_exists"
+					: "limit_reached",
+		);
 	}
 
 	if (error instanceof PreviewTargetRepositoryInvariant) {

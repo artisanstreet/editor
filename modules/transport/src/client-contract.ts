@@ -51,6 +51,11 @@ import type {
 	WorkspaceGitMutationStandaloneOperation,
 	WorkspaceGitSessionQuery,
 	WorkspaceGitSessionQueryResult,
+	PreviewTargetProbeCommand,
+	PreviewTargetRegisterCommand,
+	PreviewTargetRemoveCommand,
+	PreviewTargetsQuery,
+	PreviewTargetsQueryResult,
 } from "@artisan/protocol";
 
 /** Identifies a typed frontend client failure. */
@@ -86,6 +91,39 @@ export interface ArtisanCommandInput {
 	readonly run_id?: string;
 	readonly thread_id: string;
 }
+
+/** Supplies one preview target registration and durable command metadata. */
+export interface ArtisanPreviewTargetRegisterInput extends Omit<
+	PreviewTargetRegisterCommand,
+	"type"
+> {
+	readonly agent_id?: string;
+	readonly causation_id?: string;
+	readonly command_id?: string;
+	readonly run_id?: string;
+	readonly thread_id: string;
+}
+
+/** Supplies one preview target probe and durable command metadata. */
+export interface ArtisanPreviewTargetProbeInput extends Omit<PreviewTargetProbeCommand, "type"> {
+	readonly agent_id?: string;
+	readonly causation_id?: string;
+	readonly command_id?: string;
+	readonly run_id?: string;
+	readonly thread_id: string;
+}
+
+/** Supplies one preview target removal and durable command metadata. */
+export interface ArtisanPreviewTargetRemoveInput extends Omit<PreviewTargetRemoveCommand, "type"> {
+	readonly agent_id?: string;
+	readonly causation_id?: string;
+	readonly command_id?: string;
+	readonly run_id?: string;
+	readonly thread_id: string;
+}
+
+/** Supplies the project and workspace scope for preview target queries. */
+export interface ArtisanPreviewTargetsInput extends PreviewTargetsQuery {}
 
 /** Records the durable command outcome returned after acceptance or deduplication. */
 export interface ArtisanCommandReceipt {
@@ -415,6 +453,9 @@ export class ArtisanClient extends Context.Service<
 		readonly GetExternalWaits: (
 			input: ArtisanExternalWaitQueryInput,
 		) => Effect.Effect<ExternalWaitQueryResult, ArtisanClientError>;
+		readonly GetPreviewTargets: (
+			input: ArtisanPreviewTargetsInput,
+		) => Effect.Effect<PreviewTargetsQueryResult, ArtisanClientError>;
 		readonly OpenAsset: (
 			asset_id: string,
 		) => Effect.Effect<
@@ -518,6 +559,15 @@ export class ArtisanClient extends Context.Service<
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly ManuallyResumeExternalWait: (
 			input: ArtisanExternalWaitManualResumeInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RegisterPreviewTarget: (
+			input: ArtisanPreviewTargetRegisterInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly ProbePreviewTarget: (
+			input: ArtisanPreviewTargetProbeInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RemovePreviewTarget: (
+			input: ArtisanPreviewTargetRemoveInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 	}
 >()("Artisan/ArtisanClient") {}

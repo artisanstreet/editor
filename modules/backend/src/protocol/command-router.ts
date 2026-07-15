@@ -7,6 +7,7 @@ import type { AgentGraphError } from "../orchestration/agent-graph-repository";
 import { AgentOrchestrator } from "../orchestration/agent-orchestrator";
 import type { OrchestrationError } from "../persistence/orchestration-repository";
 import type { JournalStoreError } from "../persistence/journal-store";
+import { PreviewTarget, type PreviewTargetError } from "../preview/preview-target";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { ThreadCommands } from "../threads/thread-commands";
 import type { ThreadMetadataError } from "../threads/thread-metadata-repository";
@@ -23,6 +24,7 @@ export class CommandRouter extends Context.Service<
 			| AgentGraphError
 			| JournalStoreError
 			| OrchestrationError
+			| PreviewTargetError
 			| TerminalSessionError
 			| ThreadMetadataError
 			| ThreadProjectAffinityError
@@ -36,6 +38,7 @@ export const CommandRouterLive = Layer.effect(
 		const graph = yield* AgentGraphOrchestrator;
 		const orchestrator = yield* AgentOrchestrator;
 		const metadata = yield* RuntimeMetadata;
+		const preview_targets = yield* PreviewTarget;
 		const thread_commands = yield* ThreadCommands;
 		const terminals = yield* TerminalSessionService;
 		const Dispatch = (command: CommandEnvelope) =>
@@ -83,15 +86,19 @@ export const CommandRouterLive = Layer.effect(
 											}),
 										),
 									)
-								: command.payload.type === "orchestration.group.start" ||
-									  command.payload.type === "agent_instance.rename" ||
-									  command.payload.type.startsWith("assignment.")
-									? graph.Handle(command).pipe(
+								: command.payload.type.startsWith("preview.target.")
+									? (command.payload.type === "preview.target.register"
+											? preview_targets.Register(command)
+											: command.payload.type === "preview.target.probe"
+												? Effect.scoped(preview_targets.Probe(command))
+												: preview_targets.Remove(command)
+										).pipe(
 											Effect.flatMap((accepted) =>
 												Effect.gen(function* () {
 													const message_id =
 														yield* metadata.MakeId("message");
 													const sent_at = yield* metadata.Now;
+
 													const receipt: CommandReceiptEnvelope = {
 														causation_id: command.message_id,
 														correlation_id: command.message_id,
@@ -100,53 +107,89 @@ export const CommandRouterLive = Layer.effect(
 														origin: "backend",
 														payload: {
 															journal_sequence:
-																accepted.journal_sequence,
+																accepted.event.journal_sequence,
 															status: accepted.status,
 														},
 														protocol_version: 1,
 														...(command.agent_id
 															? { agent_id: command.agent_id }
 															: {}),
+														...(command.run_id
+															? { run_id: command.run_id }
+															: {}),
 														schema_version: 1,
 														sent_at,
 														thread_id: command.thread_id,
 													};
 
-													return [receipt, ...accepted.events];
+													return [receipt, accepted.event];
 												}),
 											),
 										)
-									: orchestrator.Handle(command).pipe(
-											Effect.flatMap((accepted) =>
-												Effect.gen(function* () {
-													const message_id =
-														yield* metadata.MakeId("message");
-													const sent_at = yield* metadata.Now;
-													const receipt: CommandReceiptEnvelope = {
-														causation_id: command.message_id,
-														correlation_id: command.message_id,
-														kind: "command.receipt",
-														message_id,
-														origin: "backend",
-														payload: {
-															journal_sequence:
-																accepted.journal_sequence,
-															status: accepted.status,
-														},
-														protocol_version: 1,
-														...(command.agent_id
-															? { agent_id: command.agent_id }
-															: {}),
-														run_id: accepted.run_id,
-														schema_version: 1,
-														sent_at,
-														thread_id: command.thread_id,
-													};
+									: command.payload.type === "orchestration.group.start" ||
+										  command.payload.type === "agent_instance.rename" ||
+										  command.payload.type.startsWith("assignment.")
+										? graph.Handle(command).pipe(
+												Effect.flatMap((accepted) =>
+													Effect.gen(function* () {
+														const message_id =
+															yield* metadata.MakeId("message");
+														const sent_at = yield* metadata.Now;
+														const receipt: CommandReceiptEnvelope = {
+															causation_id: command.message_id,
+															correlation_id: command.message_id,
+															kind: "command.receipt",
+															message_id,
+															origin: "backend",
+															payload: {
+																journal_sequence:
+																	accepted.journal_sequence,
+																status: accepted.status,
+															},
+															protocol_version: 1,
+															...(command.agent_id
+																? { agent_id: command.agent_id }
+																: {}),
+															schema_version: 1,
+															sent_at,
+															thread_id: command.thread_id,
+														};
 
-													return [receipt, ...accepted.events];
-												}),
-											),
-										);
+														return [receipt, ...accepted.events];
+													}),
+												),
+											)
+										: orchestrator.Handle(command).pipe(
+												Effect.flatMap((accepted) =>
+													Effect.gen(function* () {
+														const message_id =
+															yield* metadata.MakeId("message");
+														const sent_at = yield* metadata.Now;
+														const receipt: CommandReceiptEnvelope = {
+															causation_id: command.message_id,
+															correlation_id: command.message_id,
+															kind: "command.receipt",
+															message_id,
+															origin: "backend",
+															payload: {
+																journal_sequence:
+																	accepted.journal_sequence,
+																status: accepted.status,
+															},
+															protocol_version: 1,
+															...(command.agent_id
+																? { agent_id: command.agent_id }
+																: {}),
+															run_id: accepted.run_id,
+															schema_version: 1,
+															sent_at,
+															thread_id: command.thread_id,
+														};
+
+														return [receipt, ...accepted.events];
+													}),
+												),
+											);
 
 		return {
 			Dispatch,

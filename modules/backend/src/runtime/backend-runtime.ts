@@ -149,6 +149,12 @@ import {
 import { ModelBehaviourRepositoryLive } from "../model-behaviour/model-behaviour-repository";
 import { ModelBehaviourRegistryError } from "../model-behaviour/model-behaviour-registry";
 import { ModelBehaviourServiceLive } from "../model-behaviour/model-behaviour-service";
+import { PreviewHealthProbe, UnavailablePreviewHealthProbeLive } from "../preview/preview-target";
+import {
+	make_preview_target_layer,
+	PreviewTargetClockLive,
+} from "../preview/preview-target-service";
+import { PreviewTargetRepositoryLive } from "../preview/preview-target-repository";
 import { WorkspaceChangeRepositoryLive } from "../workspace/workspace-change-repository";
 import { WorkspaceEvidenceRecorderLive } from "../workspace/workspace-evidence-recorder";
 import { WorkspaceFileServiceLive } from "../workspace/workspace-file-service";
@@ -175,6 +181,7 @@ export interface BackendOptions {
 		ModelBehaviourRegistryError
 	>;
 	readonly protocol?: Partial<ProtocolConnectionOptions>;
+	readonly preview_health_probe?: Layer.Layer<PreviewHealthProbe>;
 	readonly project_locator?: Layer.Layer<ProjectLocator>;
 	readonly retention_clock?: Layer.Layer<ThreadRetentionClock>;
 	readonly retention_scheduler?: Layer.Layer<ThreadRetentionScheduler>;
@@ -401,6 +408,15 @@ export function make_backend_layer(options: BackendOptions) {
 		),
 		Layer.provideMerge(infrastructure),
 	);
+	const preview_targets_repository = PreviewTargetRepositoryLive.pipe(
+		Layer.provideMerge(infrastructure),
+	);
+	const preview_targets = make_preview_target_layer().pipe(
+		Layer.provideMerge(options.preview_health_probe ?? UnavailablePreviewHealthProbeLive),
+		Layer.provideMerge(PreviewTargetClockLive),
+		Layer.provideMerge(preview_targets_repository),
+	);
+	const model_behaviour_and_preview_targets = Layer.mergeAll(model_behaviour, preview_targets);
 	const external_waits = ExternalWaitRepositoryLive.pipe(
 		Layer.provideMerge(NodeCrypto.layer),
 		Layer.provideMerge(infrastructure),
@@ -576,7 +592,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(external_wait_coordination),
 		Layer.provideMerge(external_wait_service),
 		Layer.provideMerge(guidance),
-		Layer.provideMerge(model_behaviour),
+		Layer.provideMerge(model_behaviour_and_preview_targets),
 		Layer.provideMerge(git_provider_registry),
 		Layer.provideMerge(workspace),
 	);

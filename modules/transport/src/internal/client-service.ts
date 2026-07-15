@@ -36,6 +36,11 @@ import {
 	type WorkspaceGitMutationRequestEnvelope,
 	type WorkspaceGitSessionQueryEnvelope,
 	type WorkspaceGitSessionRefreshEnvelope,
+	PreviewTargetProbeCommand,
+	PreviewTargetRegisterCommand,
+	PreviewTargetRemoveCommand,
+	PreviewTargetsQuery,
+	type PreviewTargetsQueryEnvelope,
 	type GlobalGuidanceDriftResolutionEnvelope,
 	type GlobalGuidanceQueryEnvelope,
 	type GlobalGuidanceRetryEnvelope,
@@ -91,6 +96,10 @@ import {
 	type ArtisanWorkspaceGitMutationApprovalResponseInput,
 	type ArtisanWorkspaceGitMutationInput,
 	type ArtisanThreadRetentionUpdateInput,
+	type ArtisanPreviewTargetProbeInput,
+	type ArtisanPreviewTargetRegisterInput,
+	type ArtisanPreviewTargetRemoveInput,
+	type ArtisanPreviewTargetsInput,
 } from "../client-contract";
 import { TransportRuntime } from "../transport-runtime";
 import { client_error, validate_client_options } from "./client-common";
@@ -464,6 +473,34 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						? result.payload
 						: yield* Effect.die("external wait query response narrowed incorrectly");
 				});
+			const get_preview_targets = (input: ArtisanPreviewTargetsInput) =>
+				Effect.gen(function* () {
+					const payload = yield* Schema.decodeUnknownEffect(PreviewTargetsQuery, {
+						onExcessProperty: "error",
+					})(input).pipe(
+						Effect.mapError((cause) =>
+							client_error(
+								"malformed",
+								"The preview target query is invalid.",
+								cause,
+							),
+						),
+					);
+					const trace = yield* connection.MakeTrace;
+					const envelope: PreviewTargetsQueryEnvelope = {
+						...trace,
+						kind: "preview.targets.query",
+						payload,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"preview.targets.query.result",
+					);
+
+					return result.kind === "preview.targets.query.result"
+						? result.payload
+						: yield* Effect.die("preview targets response narrowed incorrectly");
+				});
 
 			type WorkspaceMutationEnvelope =
 				| HostedProjectCloneApprovalRespondEnvelope
@@ -509,6 +546,60 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						status: result.payload.status,
 					} satisfies ArtisanCommandReceipt;
 				});
+			const send_preview_command = (
+				input:
+					| ArtisanPreviewTargetProbeInput
+					| ArtisanPreviewTargetRegisterInput
+					| ArtisanPreviewTargetRemoveInput,
+				command_schema:
+					| typeof PreviewTargetProbeCommand
+					| typeof PreviewTargetRegisterCommand
+					| typeof PreviewTargetRemoveCommand,
+				command_type:
+					| "preview.target.probe"
+					| "preview.target.register"
+					| "preview.target.remove",
+			) =>
+				Effect.gen(function* () {
+					const {
+						agent_id,
+						causation_id,
+						command_id,
+						run_id,
+						thread_id,
+						...command_input
+					} = input;
+					const payload = yield* Schema.decodeUnknownEffect(command_schema, {
+						onExcessProperty: "error",
+					})({ ...command_input, type: command_type }).pipe(
+						Effect.mapError((cause) =>
+							client_error(
+								"malformed",
+								"The preview target command is invalid.",
+								cause,
+							),
+						),
+					);
+
+					return yield* command({
+						payload,
+						thread_id,
+						...(agent_id === undefined ? {} : { agent_id }),
+						...(causation_id === undefined ? {} : { causation_id }),
+						...(command_id === undefined ? {} : { command_id }),
+						...(run_id === undefined ? {} : { run_id }),
+					});
+				});
+			const register_preview_target = (input: ArtisanPreviewTargetRegisterInput) =>
+				send_preview_command(
+					input,
+					PreviewTargetRegisterCommand,
+					"preview.target.register",
+				);
+			const probe_preview_target = (input: ArtisanPreviewTargetProbeInput) =>
+				send_preview_command(input, PreviewTargetProbeCommand, "preview.target.probe");
+			const remove_preview_target = (input: ArtisanPreviewTargetRemoveInput) =>
+				send_preview_command(input, PreviewTargetRemoveCommand, "preview.target.remove");
 			const request_external_wait = (input: ArtisanExternalWaitRequestInput) =>
 				Effect.gen(function* () {
 					const trace = yield* connection.MakeTrace;
@@ -1106,6 +1197,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				GetOrchestrationGraph: get_orchestration_graph,
 				GetHostedProjectCloneApproval: get_hosted_project_clone_approval,
 				GetExternalWaits: get_external_waits,
+				GetPreviewTargets: get_preview_targets,
 				GetHostedGitSnapshot: get_hosted_git_snapshot,
 				GetHostedGitCheckFailureDetail: get_hosted_git_check_failure_detail,
 				GetGlobalGuidance: get_global_guidance,
@@ -1143,6 +1235,9 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				RequestExternalWait: request_external_wait,
 				CancelExternalWait: cancel_external_wait,
 				ManuallyResumeExternalWait: manually_resume_external_wait,
+				RegisterPreviewTarget: register_preview_target,
+				ProbePreviewTarget: probe_preview_target,
+				RemovePreviewTarget: remove_preview_target,
 				ReviewWorkspaceChange: review_workspace_change,
 				RollbackWorkspaceChange: rollback_workspace_change,
 				SelectGlobalGuidance: select_global_guidance,
