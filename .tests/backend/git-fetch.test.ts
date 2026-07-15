@@ -206,6 +206,7 @@ async function make_hooked_fetch(
 
 				return result;
 			}),
+		RunProcessTree: (input) => base.Run(input),
 	});
 	const layer = make_git_fetch_layer({
 		cwd: workspace,

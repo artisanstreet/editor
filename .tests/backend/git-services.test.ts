@@ -50,6 +50,7 @@ function process_result(stdout: string, input: ProcessRunnerInput): ProcessRunne
 async function make_injected_git(stdout: string, max_patch_bytes = 1_000_000) {
 	const process_runner_test = Layer.succeed(ProcessRunner, {
 		Run: (input) => Effect.succeed(process_result(stdout, input)),
+		RunProcessTree: (input) => Effect.succeed(process_result(stdout, input)),
 	});
 	const git_test = make_git_layer({ cwd: "injected repository", max_patch_bytes }).pipe(
 		Layer.provide(process_runner_test),
@@ -179,6 +180,7 @@ describe("Git", () => {
 		});
 		const process_runner_test = Layer.succeed(ProcessRunner, {
 			Run: () => Effect.fail(process_error),
+			RunProcessTree: () => Effect.fail(process_error),
 		});
 		const git_test = make_git_layer({ cwd: "injected repository" }).pipe(
 			Layer.provide(process_runner_test),

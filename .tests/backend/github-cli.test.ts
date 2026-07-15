@@ -76,7 +76,12 @@ async function make_cli(
 		Effect.service(GitHubCli).pipe(
 			Effect.provide(
 				make_github_cli_layer({ ...options, cwd, projects_root }).pipe(
-					Layer.provide(Layer.succeed(ProcessRunner, { Run: run })),
+					Layer.provide(
+						Layer.succeed(ProcessRunner, {
+							Run: run,
+							RunProcessTree: run,
+						}),
+					),
 					Layer.provide(executable_layer(locations.gh_path, locations.git_path)),
 					Layer.provide(platform_layer),
 				),
@@ -250,6 +255,10 @@ describe("GitHubCli", () => {
 						Layer.provide(
 							Layer.succeed(ProcessRunner, {
 								Run: () => {
+									spawn_count += 1;
+									return Effect.succeed(process_result(""));
+								},
+								RunProcessTree: () => {
 									spawn_count += 1;
 									return Effect.succeed(process_result(""));
 								},

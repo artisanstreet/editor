@@ -57,7 +57,7 @@ function make_probe(
 				command: "codex-test",
 				cwd: root,
 				temporary_directory: root,
-			}).pipe(Layer.provide(Layer.succeed(ProcessRunner, { Run: run }))),
+			}).pipe(Layer.provide(Layer.succeed(ProcessRunner, { Run: run, RunProcessTree: run }))),
 		),
 	);
 }

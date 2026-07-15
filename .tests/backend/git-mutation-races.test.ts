@@ -102,6 +102,7 @@ async function make_hooked_mutation(
 
 				return hooks.transform?.(input, result) ?? result;
 			}),
+		RunProcessTree: (input) => base_runner.Run(input),
 	});
 	const layer = make_git_mutation_layer({ cwd: root, ...options }).pipe(
 		Layer.provide(runner),

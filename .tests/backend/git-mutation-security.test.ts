@@ -124,6 +124,7 @@ async function make_hooked_mutation(
 
 				return yield* base_runner.Run(input);
 			}),
+		RunProcessTree: (input) => base_runner.Run(input),
 	});
 	const layer = make_git_mutation_layer({ cwd: root }).pipe(
 		Layer.provide(runner),

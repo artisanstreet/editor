@@ -57,7 +57,7 @@ function process_result(
 function make_locator(
 	run: (input: ProcessRunnerInput) => Effect.Effect<ProcessRunnerResult, ProcessRunnerError>,
 ) {
-	const process_runner_layer = Layer.succeed(ProcessRunner, { Run: run });
+	const process_runner_layer = Layer.succeed(ProcessRunner, { Run: run, RunProcessTree: run });
 	const project_locator_layer = make_node_project_locator_layer().pipe(
 		Layer.provide(process_runner_layer),
 	);

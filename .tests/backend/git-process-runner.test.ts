@@ -1,6 +1,7 @@
 import { Buffer } from "node:buffer";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
+import { fileURLToPath } from "node:url";
 
 import { Effect, Fiber } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,6 +10,9 @@ import { make_node_process_runner_layer } from "../../modules/backend/src/git/no
 import { ProcessRunner } from "../../modules/backend/src/git/process-runner";
 
 const roots: Array<string> = [];
+const spawning_children_fixture_path = fileURLToPath(
+	new URL("../engines/fixtures/fake-spawning-children.mjs", import.meta.url),
+);
 
 async function make_root() {
 	const root = await fs.mkdtemp(`${tmpdir()}/artisan process runner `);
@@ -84,6 +88,31 @@ describe("ProcessRunner", () => {
 		expect(Buffer.from(result.stderr).toString("utf8")).toBe("e".repeat(16));
 		expect(result.stderr_bytes).toBe(2048);
 		expect(result.stderr_truncated).toBe(true);
+	});
+
+	it("retains the launch marker and bounded output from an owned process tree", async () => {
+		const root = await make_root();
+		const runner = await make_runner();
+		const marker = "ARTISAN_PROCESS_TREE_LAUNCHED";
+		const result = await Effect.runPromise(
+			runner.RunProcessTree({
+				args: [
+					"-e",
+					`process.stderr.write(${JSON.stringify(`${marker}\n`)} + "e".repeat(2048)); process.stdout.write("x".repeat(4096))`,
+				],
+				command: process.execPath,
+				cwd: root,
+				max_stderr_bytes: Buffer.byteLength(`${marker}\n`),
+				max_stdout_bytes: 32,
+			}),
+		);
+
+		expect(Buffer.from(result.stderr).toString("utf8")).toBe(`${marker}\n`);
+		expect(result.stderr_bytes).toBe(Buffer.byteLength(`${marker}\n`) + 2048);
+		expect(result.stderr_truncated).toBe(true);
+		expect(Buffer.from(result.stdout).toString("utf8")).toBe("x".repeat(32));
+		expect(result.stdout_bytes).toBe(4096);
+		expect(result.stdout_truncated).toBe(true);
 	});
 
 	it("reports spawn failures as process errors", async () => {
@@ -249,7 +278,7 @@ describe("ProcessRunner", () => {
 							cwd: root,
 							stdin: new Uint8Array(1024 * 1024),
 						})
-						.pipe(Effect.forkScoped);
+						.pipe(Effect.forkScoped({ uninterruptible: false }));
 
 					yield* Effect.promise(() => wait_for_path(marker_path));
 					const process_id = yield* Effect.promise(() =>
@@ -265,5 +294,43 @@ describe("ProcessRunner", () => {
 
 		expect(process_id).toBeGreaterThan(0);
 		await wait_for_process_exit(process_id);
+	});
+
+	it("interrupts an owned process tree and terminates its spawned grandchildren", async () => {
+		const root = await make_root();
+		const grandchild_pid_path = `${root}/grandchild-process-ids`;
+		const runner = await make_runner();
+		const grandchild_pid = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const process_fiber = yield* runner
+						.RunProcessTree({
+							args: [spawning_children_fixture_path],
+							command: process.execPath,
+							cwd: root,
+							environment: {
+								...process.env,
+								FAKE_CHILD_PID_FILE: grandchild_pid_path,
+							},
+							environment_mode: "replace",
+						})
+						.pipe(Effect.forkScoped);
+
+					yield* Effect.promise(() => wait_for_path(grandchild_pid_path));
+					const grandchild_pid = yield* Effect.promise(() =>
+						fs
+							.readFile(grandchild_pid_path, "utf8")
+							.then((contents) => Number(contents.trim().split("\n")[0])),
+					);
+
+					yield* Fiber.interrupt(process_fiber);
+
+					return grandchild_pid;
+				}),
+			),
+		);
+
+		expect(grandchild_pid).toBeGreaterThan(0);
+		await wait_for_process_exit(grandchild_pid);
 	});
 });

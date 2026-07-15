@@ -39,6 +39,9 @@ export interface ProcessRunnerShape {
 	readonly Run: (
 		input: ProcessRunnerInput,
 	) => Effect.Effect<ProcessRunnerResult, ProcessRunnerError>;
+	readonly RunProcessTree: (
+		input: ProcessRunnerInput,
+	) => Effect.Effect<ProcessRunnerResult, ProcessRunnerError>;
 }
 
 /** Abstracts process execution from repository-specific behavior. */

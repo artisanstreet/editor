@@ -119,7 +119,7 @@ function run_mutation<A, E>(effect: Effect.Effect<A, E>) {
 }
 
 async function make_injected_git(Run: ProcessRunnerShape["Run"]) {
-	const runner = Layer.succeed(ProcessRunner, { Run });
+	const runner = Layer.succeed(ProcessRunner, { Run, RunProcessTree: Run });
 	const layer = make_git_layer({ cwd: "injected repository" }).pipe(Layer.provide(runner));
 
 	return Effect.runPromise(Effect.service(Git).pipe(Effect.provide(layer)));
@@ -183,6 +183,7 @@ describe("Git worktree inventory", () => {
 		]) {
 			const runner = Layer.succeed(ProcessRunner, {
 				Run: (input) => Effect.succeed(process_result(stdout, input)),
+				RunProcessTree: (input) => Effect.succeed(process_result(stdout, input)),
 			});
 			const layer = make_git_layer({ cwd: "injected repository" }).pipe(
 				Layer.provide(runner),
