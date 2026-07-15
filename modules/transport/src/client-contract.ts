@@ -51,6 +51,11 @@ import type {
 	WorkspaceGitMutationStandaloneOperation,
 	WorkspaceGitSessionQuery,
 	WorkspaceGitSessionQueryResult,
+	PreviewBrowserLaunchCommand,
+	PreviewBrowserLifecycleQuery,
+	PreviewBrowserLifecycleQueryResult,
+	PreviewInspectionAttachCommand,
+	PreviewInspectionDetachCommand,
 	PreviewTargetProbeCommand,
 	PreviewTargetRegisterCommand,
 	PreviewTargetRemoveCommand,
@@ -124,8 +129,44 @@ export interface ArtisanPreviewTargetRemoveInput extends Omit<PreviewTargetRemov
 	readonly thread_id: string;
 }
 
+/** Supplies one explicit external-browser handoff and durable command metadata. */
+export interface ArtisanPreviewBrowserOpenInput extends Omit<PreviewBrowserLaunchCommand, "type"> {
+	readonly agent_id?: string;
+	readonly causation_id?: string;
+	readonly command_id?: string;
+	readonly run_id?: string;
+	readonly thread_id: string;
+}
+
+/** Supplies one explicit inspection attachment and durable command metadata. */
+export interface ArtisanPreviewInspectionAttachInput extends Omit<
+	PreviewInspectionAttachCommand,
+	"type"
+> {
+	readonly agent_id?: string;
+	readonly causation_id?: string;
+	readonly command_id?: string;
+	readonly run_id?: string;
+	readonly thread_id: string;
+}
+
+/** Supplies one explicit inspection detachment and durable command metadata. */
+export interface ArtisanPreviewInspectionDetachInput extends Omit<
+	PreviewInspectionDetachCommand,
+	"type"
+> {
+	readonly agent_id?: string;
+	readonly causation_id?: string;
+	readonly command_id?: string;
+	readonly run_id?: string;
+	readonly thread_id: string;
+}
+
 /** Supplies the project and workspace scope for preview target queries. */
 export interface ArtisanPreviewTargetsInput extends PreviewTargetsQuery {}
+
+/** Supplies the project and workspace scope for external-browser lifecycle queries. */
+export interface ArtisanPreviewBrowserLifecycleInput extends PreviewBrowserLifecycleQuery {}
 
 /** Supplies one external URL for a rich-link metadata query. */
 export interface ArtisanRichLinkMetadataInput extends RichLinkMetadataQuery {}
@@ -461,6 +502,9 @@ export class ArtisanClient extends Context.Service<
 		readonly GetPreviewTargets: (
 			input: ArtisanPreviewTargetsInput,
 		) => Effect.Effect<PreviewTargetsQueryResult, ArtisanClientError>;
+		readonly GetPreviewBrowserLifecycle: (
+			input: ArtisanPreviewBrowserLifecycleInput,
+		) => Effect.Effect<PreviewBrowserLifecycleQueryResult, ArtisanClientError>;
 		readonly GetRichLinkMetadata: (
 			input: ArtisanRichLinkMetadataInput,
 		) => Effect.Effect<RichLinkMetadataQueryResult, ArtisanClientError>;
@@ -576,6 +620,15 @@ export class ArtisanClient extends Context.Service<
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly RemovePreviewTarget: (
 			input: ArtisanPreviewTargetRemoveInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly OpenPreviewInExternalBrowser: (
+			input: ArtisanPreviewBrowserOpenInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly AttachPreviewInspection: (
+			input: ArtisanPreviewInspectionAttachInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly DetachPreviewInspection: (
+			input: ArtisanPreviewInspectionDetachInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 	}
 >()("Artisan/ArtisanClient") {}

@@ -7,6 +7,7 @@ import {
 	DecodeInboundControlEnvelope,
 	DecodeOutboundControlEnvelope,
 	type OutboundEnvelope,
+	type PreviewBrowserLifecycleQueryEnvelope,
 	type RichLinkMetadataQueryEnvelope,
 } from "@artisan/protocol";
 import {
@@ -49,6 +50,7 @@ export interface TransportHarnessOptions {
 	readonly binary_streams?: Readonly<Record<string, ReadonlyArray<Uint8Array>>>;
 	readonly client?: ArtisanClientOptions;
 	readonly drop_first_command_receipt?: boolean;
+	readonly drop_first_preview_browser_lifecycle_result?: boolean;
 	readonly drop_first_rich_link_metadata_result?: boolean;
 	readonly protocol?: FakeProtocolOptions;
 	readonly server?: MessagePortTransportServerOptions;
@@ -60,7 +62,9 @@ export interface MessageChannelConnectorSnapshot {
 	readonly active_sessions: number;
 	readonly connections: number;
 	readonly dropped_command_receipts: number;
+	readonly dropped_preview_browser_lifecycle_results: number;
 	readonly dropped_rich_link_metadata_results: number;
+	readonly preview_browser_lifecycle_query_attempts: ReadonlyArray<PreviewBrowserLifecycleQueryEnvelope>;
 	readonly rich_link_metadata_query_attempts: ReadonlyArray<RichLinkMetadataQueryEnvelope>;
 	readonly server_failures: number;
 }
@@ -115,6 +119,22 @@ const get_rich_link_metadata_query = (message: unknown) =>
 		Effect.catch(() => Effect.succeed(undefined)),
 	);
 
+const get_preview_browser_lifecycle_query = (message: unknown) =>
+	DecodeTransportFrame(message).pipe(
+		Effect.flatMap((frame) =>
+			frame.kind === "transport.control"
+				? DecodeInboundControlEnvelope(frame.payload).pipe(
+						Effect.map((envelope) =>
+							envelope.kind === "preview.browser.lifecycle.query"
+								? envelope
+								: undefined,
+						),
+					)
+				: Effect.succeed(undefined),
+		),
+		Effect.catch(() => Effect.succeed(undefined)),
+	);
+
 function make_binary_source_layer(
 	binary_streams: Readonly<Record<string, ReadonlyArray<Uint8Array>>>,
 ) {
@@ -140,12 +160,16 @@ function make_binary_source_layer(
 function make_message_channel_connector(
 	server: typeof MessagePortTransportServer.Service,
 	drop_first_command_receipt: boolean,
+	drop_first_preview_browser_lifecycle_result: boolean,
 	drop_first_rich_link_metadata_result: boolean,
 ) {
 	const active_sessions = new Set<NativeSession>();
+	const preview_browser_lifecycle_query_attempts: Array<PreviewBrowserLifecycleQueryEnvelope> =
+		[];
 	const rich_link_metadata_query_attempts: Array<RichLinkMetadataQueryEnvelope> = [];
 	let connections = 0;
 	let dropped_command_receipts = 0;
+	let dropped_preview_browser_lifecycle_results = 0;
 	let dropped_rich_link_metadata_results = 0;
 	let server_failures = 0;
 
@@ -174,7 +198,12 @@ function make_message_channel_connector(
 			...raw_client_control,
 			Send: (message, transfer) =>
 				Effect.gen(function* () {
+					const browser_attempt = yield* get_preview_browser_lifecycle_query(message);
 					const attempt = yield* get_rich_link_metadata_query(message);
+
+					if (browser_attempt) {
+						preview_browser_lifecycle_query_attempts.push(browser_attempt);
+					}
 
 					if (attempt) {
 						rich_link_metadata_query_attempts.push(attempt);
@@ -191,6 +220,14 @@ function make_message_channel_connector(
 						drop_first_command_receipt && dropped_command_receipts === 0
 							? yield* has_outbound_kind(message, "command.receipt")
 							: false;
+					const should_drop_preview_browser_lifecycle_result =
+						drop_first_preview_browser_lifecycle_result &&
+						dropped_preview_browser_lifecycle_results === 0
+							? yield* has_outbound_kind(
+									message,
+									"preview.browser.lifecycle.query.result",
+								)
+							: false;
 					const should_drop_rich_link_metadata_result =
 						drop_first_rich_link_metadata_result &&
 						dropped_rich_link_metadata_results === 0
@@ -199,6 +236,13 @@ function make_message_channel_connector(
 
 					if (should_drop_command_receipt) {
 						dropped_command_receipts += 1;
+						close_native_session(native_session);
+
+						return;
+					}
+
+					if (should_drop_preview_browser_lifecycle_result) {
+						dropped_preview_browser_lifecycle_results += 1;
 						close_native_session(native_session);
 
 						return;
@@ -259,7 +303,9 @@ function make_message_channel_connector(
 		active_sessions: active_sessions.size,
 		connections,
 		dropped_command_receipts,
+		dropped_preview_browser_lifecycle_results,
 		dropped_rich_link_metadata_results,
+		preview_browser_lifecycle_query_attempts: [...preview_browser_lifecycle_query_attempts],
 		rich_link_metadata_query_attempts: [...rich_link_metadata_query_attempts],
 		server_failures,
 	});
@@ -288,6 +334,7 @@ async function make_transport_stack(
 	const connector = make_message_channel_connector(
 		server,
 		options.drop_first_command_receipt ?? false,
+		options.drop_first_preview_browser_lifecycle_result ?? false,
 		options.drop_first_rich_link_metadata_result ?? false,
 	);
 	const client_layer = make_artisan_client_layer(options.client).pipe(

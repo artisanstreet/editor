@@ -36,6 +36,11 @@ import {
 	type WorkspaceGitMutationRequestEnvelope,
 	type WorkspaceGitSessionQueryEnvelope,
 	type WorkspaceGitSessionRefreshEnvelope,
+	PreviewBrowserLaunchCommand,
+	PreviewBrowserLifecycleQuery,
+	type PreviewBrowserLifecycleQueryEnvelope,
+	PreviewInspectionAttachCommand,
+	PreviewInspectionDetachCommand,
 	PreviewTargetProbeCommand,
 	PreviewTargetRegisterCommand,
 	PreviewTargetRemoveCommand,
@@ -98,6 +103,10 @@ import {
 	type ArtisanWorkspaceGitMutationApprovalResponseInput,
 	type ArtisanWorkspaceGitMutationInput,
 	type ArtisanThreadRetentionUpdateInput,
+	type ArtisanPreviewBrowserLifecycleInput,
+	type ArtisanPreviewBrowserOpenInput,
+	type ArtisanPreviewInspectionAttachInput,
+	type ArtisanPreviewInspectionDetachInput,
 	type ArtisanPreviewTargetProbeInput,
 	type ArtisanPreviewTargetRegisterInput,
 	type ArtisanPreviewTargetRemoveInput,
@@ -504,6 +513,39 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						? result.payload
 						: yield* Effect.die("preview targets response narrowed incorrectly");
 				});
+			const get_preview_browser_lifecycle = (input: ArtisanPreviewBrowserLifecycleInput) =>
+				Effect.gen(function* () {
+					const payload = yield* Schema.decodeUnknownEffect(
+						PreviewBrowserLifecycleQuery,
+						{
+							onExcessProperty: "error",
+						},
+					)(input).pipe(
+						Effect.mapError((cause) =>
+							client_error(
+								"malformed",
+								"The external-browser lifecycle query is invalid.",
+								cause,
+							),
+						),
+					);
+					const trace = yield* connection.MakeTrace;
+					const envelope: PreviewBrowserLifecycleQueryEnvelope = {
+						...trace,
+						kind: "preview.browser.lifecycle.query",
+						payload,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"preview.browser.lifecycle.query.result",
+					);
+
+					return result.kind === "preview.browser.lifecycle.query.result"
+						? result.payload
+						: yield* Effect.die(
+								"external-browser lifecycle response narrowed incorrectly",
+							);
+				});
 			const get_rich_link_metadata = (input: ArtisanRichLinkMetadataInput) =>
 				Effect.gen(function* () {
 					const payload = yield* Schema.decodeUnknownEffect(RichLinkMetadataQuery, {
@@ -579,14 +621,23 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				});
 			const send_preview_command = (
 				input:
+					| ArtisanPreviewBrowserOpenInput
+					| ArtisanPreviewInspectionAttachInput
+					| ArtisanPreviewInspectionDetachInput
 					| ArtisanPreviewTargetProbeInput
 					| ArtisanPreviewTargetRegisterInput
 					| ArtisanPreviewTargetRemoveInput,
 				command_schema:
+					| typeof PreviewBrowserLaunchCommand
+					| typeof PreviewInspectionAttachCommand
+					| typeof PreviewInspectionDetachCommand
 					| typeof PreviewTargetProbeCommand
 					| typeof PreviewTargetRegisterCommand
 					| typeof PreviewTargetRemoveCommand,
 				command_type:
+					| "preview.browser.open"
+					| "preview.inspection.attach"
+					| "preview.inspection.detach"
 					| "preview.target.probe"
 					| "preview.target.register"
 					| "preview.target.remove",
@@ -631,6 +682,20 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				send_preview_command(input, PreviewTargetProbeCommand, "preview.target.probe");
 			const remove_preview_target = (input: ArtisanPreviewTargetRemoveInput) =>
 				send_preview_command(input, PreviewTargetRemoveCommand, "preview.target.remove");
+			const open_preview_in_external_browser = (input: ArtisanPreviewBrowserOpenInput) =>
+				send_preview_command(input, PreviewBrowserLaunchCommand, "preview.browser.open");
+			const attach_preview_inspection = (input: ArtisanPreviewInspectionAttachInput) =>
+				send_preview_command(
+					input,
+					PreviewInspectionAttachCommand,
+					"preview.inspection.attach",
+				);
+			const detach_preview_inspection = (input: ArtisanPreviewInspectionDetachInput) =>
+				send_preview_command(
+					input,
+					PreviewInspectionDetachCommand,
+					"preview.inspection.detach",
+				);
 			const request_external_wait = (input: ArtisanExternalWaitRequestInput) =>
 				Effect.gen(function* () {
 					const trace = yield* connection.MakeTrace;
@@ -1228,6 +1293,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				GetOrchestrationGraph: get_orchestration_graph,
 				GetHostedProjectCloneApproval: get_hosted_project_clone_approval,
 				GetExternalWaits: get_external_waits,
+				GetPreviewBrowserLifecycle: get_preview_browser_lifecycle,
 				GetPreviewTargets: get_preview_targets,
 				GetRichLinkMetadata: get_rich_link_metadata,
 				GetHostedGitSnapshot: get_hosted_git_snapshot,
@@ -1267,9 +1333,12 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				RequestExternalWait: request_external_wait,
 				CancelExternalWait: cancel_external_wait,
 				ManuallyResumeExternalWait: manually_resume_external_wait,
+				OpenPreviewInExternalBrowser: open_preview_in_external_browser,
 				RegisterPreviewTarget: register_preview_target,
 				ProbePreviewTarget: probe_preview_target,
 				RemovePreviewTarget: remove_preview_target,
+				AttachPreviewInspection: attach_preview_inspection,
+				DetachPreviewInspection: detach_preview_inspection,
 				ReviewWorkspaceChange: review_workspace_change,
 				RollbackWorkspaceChange: rollback_workspace_change,
 				SelectGlobalGuidance: select_global_guidance,

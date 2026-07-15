@@ -121,6 +121,10 @@ import {
 	ModelBehaviourUpdateRequest,
 } from "./model-behaviour";
 import {
+	PreviewBrowserCommand,
+	PreviewBrowserLifecycleEvent,
+	PreviewBrowserLifecycleQuery,
+	PreviewBrowserLifecycleQueryResult,
 	PreviewTargetCommand,
 	PreviewTargetUpdatedEvent,
 	PreviewTargetsQuery,
@@ -509,6 +513,7 @@ export const CommandPayload = Schema.Union([
 	RunRespondApprovalCommand,
 	RunRespondQuestionCommand,
 	PreviewTargetCommand,
+	PreviewBrowserCommand,
 ]);
 
 export type CommandPayload = typeof CommandPayload.Type;
@@ -996,6 +1001,7 @@ export const EventPayload = Schema.Union([
 	AssignmentControlEvent,
 	ArtifactRecordedEvent,
 	PreviewTargetUpdatedEvent,
+	PreviewBrowserLifecycleEvent,
 ]);
 
 export type EventPayload = typeof EventPayload.Type;
@@ -1457,6 +1463,26 @@ export const PreviewTargetsQueryResultEnvelope = Schema.Struct({
 });
 
 export type PreviewTargetsQueryResultEnvelope = typeof PreviewTargetsQueryResultEnvelope.Type;
+
+/** Queries external-browser launches and inspection sessions in one exact scope. */
+export const PreviewBrowserLifecycleQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("preview.browser.lifecycle.query"),
+	payload: PreviewBrowserLifecycleQuery,
+});
+
+export type PreviewBrowserLifecycleQueryEnvelope = typeof PreviewBrowserLifecycleQueryEnvelope.Type;
+
+/** Returns external-browser launches and inspection sessions for a correlated query. */
+export const PreviewBrowserLifecycleQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("preview.browser.lifecycle.query.result"),
+	payload: PreviewBrowserLifecycleQueryResult,
+});
+
+export type PreviewBrowserLifecycleQueryResultEnvelope =
+	typeof PreviewBrowserLifecycleQueryResultEnvelope.Type;
 
 /** Queries bounded metadata for one external HTTP(S) URL. */
 export const RichLinkMetadataQueryEnvelope = Schema.Struct({
@@ -1932,6 +1958,7 @@ export const InboundControlEnvelope = Schema.Union([
 	ExternalWaitManualResumeEnvelope,
 	ExternalWaitQueryEnvelope,
 	PreviewTargetsQueryEnvelope,
+	PreviewBrowserLifecycleQueryEnvelope,
 	RichLinkMetadataQueryEnvelope,
 	WorkspaceGitCheckoutRequestEnvelope,
 	WorkspaceGitCheckoutApprovalQueryEnvelope,
@@ -1982,6 +2009,7 @@ export const OutboundControlEnvelope = Schema.Union([
 	HostedGitCheckFailureDetailQueryResultEnvelope,
 	ExternalWaitQueryResultEnvelope,
 	PreviewTargetsQueryResultEnvelope,
+	PreviewBrowserLifecycleQueryResultEnvelope,
 	RichLinkMetadataQueryResultEnvelope,
 	WorkspaceGitCheckoutApprovalQueryResultEnvelope,
 	WorkspaceGitMutationApprovalQueryResultEnvelope,

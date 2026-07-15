@@ -921,6 +921,7 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 					} else if (payload.type === "preview.target.remove" && existing) {
 						const target: PreviewTargetRemovedRecord = {
 							...existing,
+							generation_id: `${payload.target_id}:fixture`,
 							state: "removed",
 							updated_at_ms: timestamp_ms,
 						};

@@ -405,6 +405,13 @@ export const FixtureArtisanClientService = {
 			targets: [],
 			workspace_id: input.workspace_id,
 		}),
+	GetPreviewBrowserLifecycle: (input) =>
+		Effect.succeed({
+			inspections: [],
+			launches: [],
+			project_id: input.project_id,
+			workspace_id: input.workspace_id,
+		}),
 	GetRichLinkMetadata: (input) =>
 		Effect.succeed({
 			cache: { expires_at_ms: 1_752_580_800_000, status: "miss" as const },
@@ -620,6 +627,18 @@ export const FixtureArtisanClientService = {
 	RemovePreviewTarget: (input) =>
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-preview-remove");
+		}),
+	OpenPreviewInExternalBrowser: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-preview-browser-open");
+		}),
+	AttachPreviewInspection: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-preview-inspection-attach");
+		}),
+	DetachPreviewInspection: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-preview-inspection-detach");
 		}),
 	RespondWorkspaceGitCheckoutApproval: (input) =>
 		Effect.gen(function* () {

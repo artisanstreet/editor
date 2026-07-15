@@ -124,7 +124,7 @@ describe("preview protocol codec", () => {
 					journal_sequence: 1,
 					payload: {
 						action: "removed",
-						target: { ...record, state: "removed" },
+						target: { ...record, generation_id: "generation_1", state: "removed" },
 						type: "preview.target.updated",
 					},
 					sequence: 1,

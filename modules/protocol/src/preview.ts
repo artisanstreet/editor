@@ -91,6 +91,14 @@ const PreviewTargetRecordFields = {
 	workspace_id: PreviewIdentifier,
 };
 
+/** Attributes an external-browser action without exposing provider-private metadata. */
+export const PreviewBrowserInitiator = Schema.Union([
+	Schema.Struct({ kind: Schema.Literal("user") }),
+	Schema.Struct({ agent_id: PreviewIdentifier, kind: Schema.Literal("agent") }),
+]);
+
+export type PreviewBrowserInitiator = typeof PreviewBrowserInitiator.Type;
+
 /** Projects one source-safe current local preview target. */
 export const PreviewTargetRecord = Schema.Struct({
 	...PreviewTargetRecordFields,
@@ -102,10 +110,17 @@ export type PreviewTargetRecord = typeof PreviewTargetRecord.Type;
 /** Retains the final source-safe target only in its removal event. */
 export const PreviewTargetRemovedRecord = Schema.Struct({
 	...PreviewTargetRecordFields,
+	generation_id: PreviewIdentifier,
 	state: Schema.Literal("removed"),
 });
 
 export type PreviewTargetRemovedRecord = typeof PreviewTargetRemovedRecord.Type;
+
+/** Decodes removal events persisted before exact target generations were published. */
+const LegacyPreviewTargetRemovedRecord = Schema.Struct({
+	...PreviewTargetRecordFields,
+	state: Schema.Literal("removed"),
+});
 
 /** Registers one explicitly identified local preview target. */
 export const PreviewTargetRegisterCommand = Schema.Struct({
@@ -139,6 +154,38 @@ export const PreviewTargetRemoveCommand = Schema.Struct({
 
 export type PreviewTargetRemoveCommand = typeof PreviewTargetRemoveCommand.Type;
 
+/** Requests one explicit handoff of a registered target to the user's external browser. */
+export const PreviewBrowserLaunchCommand = Schema.Struct({
+	project_id: PreviewIdentifier,
+	target_id: PreviewIdentifier,
+	type: Schema.Literal("preview.browser.open"),
+	workspace_id: PreviewIdentifier,
+});
+
+export type PreviewBrowserLaunchCommand = typeof PreviewBrowserLaunchCommand.Type;
+
+/** Attaches an explicit configured connector to one registered external-browser target. */
+export const PreviewInspectionAttachCommand = Schema.Struct({
+	connector_id: PreviewIdentifier,
+	inspection_id: PreviewIdentifier,
+	project_id: PreviewIdentifier,
+	target_id: PreviewIdentifier,
+	type: Schema.Literal("preview.inspection.attach"),
+	workspace_id: PreviewIdentifier,
+});
+
+export type PreviewInspectionAttachCommand = typeof PreviewInspectionAttachCommand.Type;
+
+/** Detaches one explicitly identified external-browser inspection session. */
+export const PreviewInspectionDetachCommand = Schema.Struct({
+	inspection_id: PreviewIdentifier,
+	project_id: PreviewIdentifier,
+	type: Schema.Literal("preview.inspection.detach"),
+	workspace_id: PreviewIdentifier,
+});
+
+export type PreviewInspectionDetachCommand = typeof PreviewInspectionDetachCommand.Type;
+
 /** Queries preview targets within one explicit workspace and project scope. */
 export const PreviewTargetsQuery = Schema.Struct({
 	project_id: PreviewIdentifier,
@@ -171,6 +218,153 @@ export const PreviewTargetsQueryResult = Schema.Struct({
 
 export type PreviewTargetsQueryResult = typeof PreviewTargetsQueryResult.Type;
 
+/** Projects one durable external-browser launch attempt without claiming page navigation. */
+export const PreviewBrowserLaunchRecord = Schema.Struct({
+	initiator: PreviewBrowserInitiator,
+	launch_id: PreviewIdentifier,
+	project_id: PreviewIdentifier,
+	reason: Schema.optional(
+		Schema.Literals([
+			"interrupted",
+			"launcher_failed",
+			"launcher_rejected",
+			"launcher_unavailable",
+			"target_changed",
+		]),
+	),
+	requested_at_ms: PreviewTimestampMs,
+	state: Schema.Literals([
+		"accepted",
+		"dispatching",
+		"dispatched",
+		"outcome_unknown",
+		"rejected",
+	]),
+	target_generation_id: PreviewIdentifier,
+	target_id: PreviewIdentifier,
+	updated_at_ms: PreviewTimestampMs,
+	url: PreviewUrl,
+	workspace_id: PreviewIdentifier,
+}).check(
+	Schema.makeFilter((record) => {
+		const has_reason = record.reason !== undefined;
+		const reason_matches =
+			(record.state === "rejected" &&
+				(record.reason === "launcher_rejected" ||
+					record.reason === "launcher_unavailable" ||
+					record.reason === "target_changed")) ||
+			(record.state === "outcome_unknown" &&
+				(record.reason === "interrupted" || record.reason === "launcher_failed")) ||
+			((record.state === "accepted" ||
+				record.state === "dispatching" ||
+				record.state === "dispatched") &&
+				!has_reason);
+
+		return reason_matches && record.updated_at_ms >= record.requested_at_ms
+			? undefined
+			: "Expected a coherent external-browser launch lifecycle";
+	}),
+);
+
+export type PreviewBrowserLaunchRecord = typeof PreviewBrowserLaunchRecord.Type;
+
+/** Projects one attributable, explicit external-browser inspection attachment. */
+export const PreviewInspectionSessionRecord = Schema.Struct({
+	connector_id: PreviewIdentifier,
+	initiator: PreviewBrowserInitiator,
+	inspection_id: PreviewIdentifier,
+	project_id: PreviewIdentifier,
+	reason: Schema.optional(
+		Schema.Literals([
+			"connection_lost",
+			"connector_rejected",
+			"connector_unavailable",
+			"detached",
+			"interrupted",
+			"target_changed",
+			"thread_erased",
+		]),
+	),
+	requested_at_ms: PreviewTimestampMs,
+	state: Schema.Literals(["attached", "attaching", "disconnected", "failed"]),
+	target_generation_id: PreviewIdentifier,
+	target_id: PreviewIdentifier,
+	updated_at_ms: PreviewTimestampMs,
+	url: PreviewUrl,
+	workspace_id: PreviewIdentifier,
+}).check(
+	Schema.makeFilter((record) => {
+		const has_reason = record.reason !== undefined;
+		const reason_matches =
+			((record.state === "attached" || record.state === "attaching") && !has_reason) ||
+			(record.state === "failed" &&
+				(record.reason === "connector_rejected" ||
+					record.reason === "connector_unavailable" ||
+					record.reason === "target_changed")) ||
+			(record.state === "disconnected" &&
+				(record.reason === "connection_lost" ||
+					record.reason === "detached" ||
+					record.reason === "interrupted" ||
+					record.reason === "target_changed" ||
+					record.reason === "thread_erased"));
+
+		return reason_matches && record.updated_at_ms >= record.requested_at_ms
+			? undefined
+			: "Expected a coherent external-browser inspection lifecycle";
+	}),
+);
+
+export type PreviewInspectionSessionRecord = typeof PreviewInspectionSessionRecord.Type;
+
+/** Queries external-browser launches and inspection sessions in one exact scope. */
+export const PreviewBrowserLifecycleQuery = Schema.Struct({
+	project_id: PreviewIdentifier,
+	workspace_id: PreviewIdentifier,
+});
+
+export type PreviewBrowserLifecycleQuery = typeof PreviewBrowserLifecycleQuery.Type;
+
+const PreviewBrowserLaunchRecords = Schema.Array(PreviewBrowserLaunchRecord).check(
+	Schema.isMaxLength(256),
+);
+const PreviewInspectionSessionRecords = Schema.Array(PreviewInspectionSessionRecord).check(
+	Schema.isMaxLength(256),
+);
+
+/** Returns bounded external-browser lifecycle projections from one exact scope. */
+export const PreviewBrowserLifecycleQueryResult = Schema.Struct({
+	inspections: PreviewInspectionSessionRecords,
+	launches: PreviewBrowserLaunchRecords,
+	project_id: PreviewIdentifier,
+	workspace_id: PreviewIdentifier,
+}).check(
+	Schema.makeFilter((result) => {
+		const launch_ids = new Set(result.launches.map((launch) => launch.launch_id));
+		const inspection_ids = new Set(
+			result.inspections.map((inspection) => inspection.inspection_id),
+		);
+		const has_foreign_scope =
+			result.launches.some(
+				(launch) =>
+					launch.project_id !== result.project_id ||
+					launch.workspace_id !== result.workspace_id,
+			) ||
+			result.inspections.some(
+				(inspection) =>
+					inspection.project_id !== result.project_id ||
+					inspection.workspace_id !== result.workspace_id,
+			);
+
+		return launch_ids.size === result.launches.length &&
+			inspection_ids.size === result.inspections.length &&
+			!has_foreign_scope
+			? undefined
+			: "Expected unique external-browser lifecycle records from the result scope";
+	}),
+);
+
+export type PreviewBrowserLifecycleQueryResult = typeof PreviewBrowserLifecycleQueryResult.Type;
+
 /** Records a projection update while keeping removed targets out of current queries. */
 export const PreviewTargetUpdatedEvent = Schema.Union([
 	Schema.Struct({
@@ -183,9 +377,42 @@ export const PreviewTargetUpdatedEvent = Schema.Union([
 		target: PreviewTargetRemovedRecord,
 		type: Schema.Literal("preview.target.updated"),
 	}),
+	Schema.Struct({
+		action: Schema.Literal("removed"),
+		target: LegacyPreviewTargetRemovedRecord,
+		type: Schema.Literal("preview.target.updated"),
+	}),
 ]);
 
 export type PreviewTargetUpdatedEvent = typeof PreviewTargetUpdatedEvent.Type;
+
+/** Records a source-safe external-browser launch or inspection lifecycle transition. */
+export const PreviewBrowserLifecycleEvent = Schema.Union([
+	Schema.Struct({
+		action: Schema.Literals(["dispatched", "outcome_unknown", "rejected"]),
+		launch: PreviewBrowserLaunchRecord,
+		type: Schema.Literal("preview.browser.launch.updated"),
+	}).check(
+		Schema.makeFilter((event) =>
+			event.action === event.launch.state
+				? undefined
+				: "Expected the browser launch action to match its lifecycle state",
+		),
+	),
+	Schema.Struct({
+		action: Schema.Literals(["attached", "disconnected", "failed"]),
+		inspection: PreviewInspectionSessionRecord,
+		type: Schema.Literal("preview.inspection.updated"),
+	}).check(
+		Schema.makeFilter((event) =>
+			event.action === event.inspection.state
+				? undefined
+				: "Expected the inspection action to match its lifecycle state",
+		),
+	),
+]);
+
+export type PreviewBrowserLifecycleEvent = typeof PreviewBrowserLifecycleEvent.Type;
 
 /** Unions the preview command payloads accepted by the control router. */
 export const PreviewTargetCommand = Schema.Union([
@@ -195,3 +422,12 @@ export const PreviewTargetCommand = Schema.Union([
 ]);
 
 export type PreviewTargetCommand = typeof PreviewTargetCommand.Type;
+
+/** Unions explicit external-browser and inspection commands accepted by the control router. */
+export const PreviewBrowserCommand = Schema.Union([
+	PreviewBrowserLaunchCommand,
+	PreviewInspectionAttachCommand,
+	PreviewInspectionDetachCommand,
+]);
+
+export type PreviewBrowserCommand = typeof PreviewBrowserCommand.Type;
