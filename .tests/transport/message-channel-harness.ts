@@ -3,7 +3,12 @@ import { MessageChannel, type MessagePort } from "node:worker_threads";
 import { Effect, Exit, Layer, ManagedRuntime, Stream } from "effect";
 
 import { ProtocolServer } from "@artisan/backend";
-import { DecodeOutboundControlEnvelope } from "@artisan/protocol";
+import {
+	DecodeInboundControlEnvelope,
+	DecodeOutboundControlEnvelope,
+	type OutboundEnvelope,
+	type RichLinkMetadataQueryEnvelope,
+} from "@artisan/protocol";
 import {
 	ArtisanClient,
 	MessagePortConnector,
@@ -40,9 +45,11 @@ interface NativeSession {
 
 /** Configures one real-MessageChannel integration harness. */
 export interface TransportHarnessOptions {
+	readonly binary_stream_source?: typeof BinaryStreamSource.Service;
 	readonly binary_streams?: Readonly<Record<string, ReadonlyArray<Uint8Array>>>;
 	readonly client?: ArtisanClientOptions;
 	readonly drop_first_command_receipt?: boolean;
+	readonly drop_first_rich_link_metadata_result?: boolean;
 	readonly protocol?: FakeProtocolOptions;
 	readonly server?: MessagePortTransportServerOptions;
 	readonly transport_runtime?: Layer.Layer<TransportRuntime>;
@@ -53,6 +60,8 @@ export interface MessageChannelConnectorSnapshot {
 	readonly active_sessions: number;
 	readonly connections: number;
 	readonly dropped_command_receipts: number;
+	readonly dropped_rich_link_metadata_results: number;
+	readonly rich_link_metadata_query_attempts: ReadonlyArray<RichLinkMetadataQueryEnvelope>;
 	readonly server_failures: number;
 }
 
@@ -80,16 +89,30 @@ function close_native_session(session: NativeSession) {
 	session.stream_server.close();
 }
 
-const is_command_receipt = (message: unknown) =>
+const has_outbound_kind = (message: unknown, kind: OutboundEnvelope["kind"]) =>
 	DecodeTransportFrame(message).pipe(
 		Effect.flatMap((frame) =>
 			frame.kind === "transport.control"
 				? DecodeOutboundControlEnvelope(frame.payload).pipe(
-						Effect.map((envelope) => envelope.kind === "command.receipt"),
+						Effect.map((envelope) => envelope.kind === kind),
 					)
 				: Effect.succeed(false),
 		),
 		Effect.catch(() => Effect.succeed(false)),
+	);
+
+const get_rich_link_metadata_query = (message: unknown) =>
+	DecodeTransportFrame(message).pipe(
+		Effect.flatMap((frame) =>
+			frame.kind === "transport.control"
+				? DecodeInboundControlEnvelope(frame.payload).pipe(
+						Effect.map((envelope) =>
+							envelope.kind === "rich-link.metadata.query" ? envelope : undefined,
+						),
+					)
+				: Effect.succeed(undefined),
+		),
+		Effect.catch(() => Effect.succeed(undefined)),
 	);
 
 function make_binary_source_layer(
@@ -117,10 +140,13 @@ function make_binary_source_layer(
 function make_message_channel_connector(
 	server: typeof MessagePortTransportServer.Service,
 	drop_first_command_receipt: boolean,
+	drop_first_rich_link_metadata_result: boolean,
 ) {
 	const active_sessions = new Set<NativeSession>();
+	const rich_link_metadata_query_attempts: Array<RichLinkMetadataQueryEnvelope> = [];
 	let connections = 0;
 	let dropped_command_receipts = 0;
+	let dropped_rich_link_metadata_results = 0;
 	let server_failures = 0;
 
 	const Connect = Effect.gen(function* () {
@@ -140,21 +166,46 @@ function make_message_channel_connector(
 			adapt_node_message_port(port).pipe(
 				Effect.mapError((cause) => new MessagePortConnectorError({ cause })),
 			);
-		const client_control = yield* adapt(control.port1);
+		const raw_client_control = yield* adapt(control.port1);
 		const client_stream = yield* adapt(stream.port1);
 		const raw_server_control = yield* adapt(control.port2);
 		const server_stream = yield* adapt(stream.port2);
+		const client_control: MessagePortLike = {
+			...raw_client_control,
+			Send: (message, transfer) =>
+				Effect.gen(function* () {
+					const attempt = yield* get_rich_link_metadata_query(message);
+
+					if (attempt) {
+						rich_link_metadata_query_attempts.push(attempt);
+					}
+
+					yield* raw_client_control.Send(message, transfer);
+				}),
+		};
 		const server_control: MessagePortLike = {
 			...raw_server_control,
 			Send: (message, transfer) =>
 				Effect.gen(function* () {
-					const should_drop =
+					const should_drop_command_receipt =
 						drop_first_command_receipt && dropped_command_receipts === 0
-							? yield* is_command_receipt(message)
+							? yield* has_outbound_kind(message, "command.receipt")
+							: false;
+					const should_drop_rich_link_metadata_result =
+						drop_first_rich_link_metadata_result &&
+						dropped_rich_link_metadata_results === 0
+							? yield* has_outbound_kind(message, "rich-link.metadata.query.result")
 							: false;
 
-					if (should_drop) {
+					if (should_drop_command_receipt) {
 						dropped_command_receipts += 1;
+						close_native_session(native_session);
+
+						return;
+					}
+
+					if (should_drop_rich_link_metadata_result) {
+						dropped_rich_link_metadata_results += 1;
 						close_native_session(native_session);
 
 						return;
@@ -208,6 +259,8 @@ function make_message_channel_connector(
 		active_sessions: active_sessions.size,
 		connections,
 		dropped_command_receipts,
+		dropped_rich_link_metadata_results,
+		rich_link_metadata_query_attempts: [...rich_link_metadata_query_attempts],
 		server_failures,
 	});
 
@@ -221,10 +274,13 @@ async function make_transport_stack(
 	const binary_streams = options.binary_streams ?? {
 		"asset:asset_1": [Uint8Array.of(1, 2), Uint8Array.of(3, 4, 5)],
 	};
+	const binary_stream_source = options.binary_stream_source
+		? Layer.succeed(BinaryStreamSource, options.binary_stream_source)
+		: make_binary_source_layer(binary_streams);
 	const transport_runtime = options.transport_runtime ?? TransportRuntimeLive;
 	const server_layer = make_message_port_transport_server_layer(options.server).pipe(
 		Layer.provide(protocol_layer),
-		Layer.provide(make_binary_source_layer(binary_streams)),
+		Layer.provide(binary_stream_source),
 		Layer.provide(transport_runtime),
 	);
 	const server_runtime = ManagedRuntime.make(server_layer);
@@ -232,6 +288,7 @@ async function make_transport_stack(
 	const connector = make_message_channel_connector(
 		server,
 		options.drop_first_command_receipt ?? false,
+		options.drop_first_rich_link_metadata_result ?? false,
 	);
 	const client_layer = make_artisan_client_layer(options.client).pipe(
 		Layer.provide(connector.layer),
