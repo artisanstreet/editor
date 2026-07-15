@@ -149,7 +149,8 @@ import {
 import { ModelBehaviourRepositoryLive } from "../model-behaviour/model-behaviour-repository";
 import { ModelBehaviourRegistryError } from "../model-behaviour/model-behaviour-registry";
 import { ModelBehaviourServiceLive } from "../model-behaviour/model-behaviour-service";
-import { PreviewHealthProbe, UnavailablePreviewHealthProbeLive } from "../preview/preview-target";
+import { NodePreviewHealthProbeLive } from "../preview/node-preview-health-probe";
+import { PreviewHealthProbe } from "../preview/preview-target";
 import {
 	make_preview_target_layer,
 	PreviewTargetClockLive,
@@ -412,9 +413,13 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(infrastructure),
 	);
 	const preview_targets = make_preview_target_layer().pipe(
-		Layer.provideMerge(options.preview_health_probe ?? UnavailablePreviewHealthProbeLive),
-		Layer.provideMerge(PreviewTargetClockLive),
-		Layer.provideMerge(preview_targets_repository),
+		Layer.provide(
+			Layer.mergeAll(
+				options.preview_health_probe ?? NodePreviewHealthProbeLive,
+				PreviewTargetClockLive,
+				preview_targets_repository,
+			),
+		),
 	);
 	const model_behaviour_and_preview_targets = Layer.mergeAll(model_behaviour, preview_targets);
 	const external_waits = ExternalWaitRepositoryLive.pipe(

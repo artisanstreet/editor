@@ -17,6 +17,7 @@ import {
 	PreviewHealthProbe,
 	ProtocolRouter,
 	ProtocolServer,
+	UnavailablePreviewHealthProbeLive,
 	type ProtocolConnection,
 } from "@artisan/backend";
 
@@ -244,7 +245,11 @@ describe("preview target protocol", () => {
 
 	it("rejects changed command identity and unavailable health probes with source-safe errors", async () => {
 		const database_path = await make_database_path();
-		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			preview_health_probe: UnavailablePreviewHealthProbeLive,
+		});
 		const register = preview_command("preview_register_conflict", {
 			project_id: "project_preview",
 			target_id: "target_preview",

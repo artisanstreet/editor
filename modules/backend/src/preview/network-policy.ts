@@ -64,6 +64,13 @@ export function is_local_preview_hostname(hostname: string) {
 		return true;
 	}
 
+	return is_loopback_address(normalized);
+}
+
+/** Reports whether an IP address is loopback, including IPv4-mapped loopback. */
+export function is_loopback_address(address: string) {
+	const normalized = normalize_hostname(address);
+
 	if (!ipaddr.isValid(normalized)) {
 		return false;
 	}

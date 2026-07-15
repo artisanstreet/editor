@@ -669,6 +669,7 @@ export {
 	PreviewTarget,
 	PreviewTargetClock,
 	PreviewTargetError,
+	UnavailablePreviewHealthProbeLive,
 	type PreviewHealthProbeResult,
 	type PreviewTargetErrorCode,
 	type PreviewTargetEvent,
@@ -683,6 +684,13 @@ export {
 	PreviewTargetClockLive,
 	type PreviewTargetOptions,
 } from "./preview/preview-target-service";
+export {
+	make_node_preview_health_probe_layer,
+	NodePreviewHealthDnsResolverLive,
+	NodePreviewHealthProbeLive,
+	PreviewHealthDnsResolver,
+	type NodePreviewHealthProbeOptions,
+} from "./preview/node-preview-health-probe";
 export {
 	RichLinkAssetStore,
 	RichLinkAssetStoreError,
