@@ -17,7 +17,16 @@ import {
 	WorkspaceFileReplaceRequest,
 } from "./workspace-changes";
 import { CapabilityInvocationUpdatedEvent, EngineNativeActionObservedEvent } from "./capability";
-import { ToolApprovalUpdatedEvent, ToolInvocationUpdatedEvent } from "./tool-control";
+import {
+	DecideApprovalRequest,
+	DecideApprovalResult,
+	ToolApprovalQuery,
+	ToolApprovalQueryResult,
+	ToolApprovalUpdatedEvent,
+	ToolInvocationQuery,
+	ToolInvocationQueryResult,
+	ToolInvocationUpdatedEvent,
+} from "./tool-control";
 import {
 	WorkspaceGitCheckoutApprovalQuery,
 	WorkspaceGitCheckoutApprovalQueryResult,
@@ -1730,6 +1739,63 @@ export const ModelBehaviourRetryEnvelope = Schema.Struct({
 
 export type ModelBehaviourRetryEnvelope = typeof ModelBehaviourRetryEnvelope.Type;
 
+/** Requests one source-safe tool invocation projection within its owning thread. */
+export const ToolInvocationQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("tool.invocation.query"),
+	payload: ToolInvocationQuery,
+});
+
+export type ToolInvocationQueryEnvelope = typeof ToolInvocationQueryEnvelope.Type;
+
+/** Returns one correlated source-safe tool invocation projection. */
+export const ToolInvocationQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("tool.invocation.query.result"),
+	payload: ToolInvocationQueryResult,
+});
+
+export type ToolInvocationQueryResultEnvelope = typeof ToolInvocationQueryResultEnvelope.Type;
+
+/** Requests one source-safe tool approval projection within its owning thread. */
+export const ToolApprovalQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("tool.approval.query"),
+	payload: ToolApprovalQuery,
+});
+
+export type ToolApprovalQueryEnvelope = typeof ToolApprovalQueryEnvelope.Type;
+
+/** Returns one correlated source-safe tool approval projection. */
+export const ToolApprovalQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("tool.approval.query.result"),
+	payload: ToolApprovalQueryResult,
+});
+
+export type ToolApprovalQueryResultEnvelope = typeof ToolApprovalQueryResultEnvelope.Type;
+
+/** Records one exact-replay decision for a pending tool approval. */
+export const ToolApprovalDecideEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("tool.approval.decide"),
+	payload: DecideApprovalRequest,
+});
+
+export type ToolApprovalDecideEnvelope = typeof ToolApprovalDecideEnvelope.Type;
+
+/** Returns the correlated source-safe approval projection after an exact-replay decision. */
+export const ToolApprovalDecideResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("tool.approval.decide.result"),
+	payload: DecideApprovalResult,
+});
+
+export type ToolApprovalDecideResultEnvelope = typeof ToolApprovalDecideResultEnvelope.Type;
+
 /** Describes the durable work state coordinated for one thread. */
 export const ThreadWorkItem = Schema.Struct({
 	agent_id: Identifier,
@@ -2035,6 +2101,9 @@ export const InboundControlEnvelope = Schema.Union([
 	ModelBehaviourUpdateEnvelope,
 	ModelBehaviourDriftResolutionEnvelope,
 	ModelBehaviourRetryEnvelope,
+	ToolInvocationQueryEnvelope,
+	ToolApprovalQueryEnvelope,
+	ToolApprovalDecideEnvelope,
 	ThreadWorkQueryEnvelope,
 	TerminalListQueryEnvelope,
 	OrchestrationGraphQueryEnvelope,
@@ -2074,6 +2143,9 @@ export const OutboundControlEnvelope = Schema.Union([
 	HostedGitMutationApprovalQueryResultEnvelope,
 	GlobalGuidanceQueryResultEnvelope,
 	ModelBehaviourQueryResultEnvelope,
+	ToolInvocationQueryResultEnvelope,
+	ToolApprovalQueryResultEnvelope,
+	ToolApprovalDecideResultEnvelope,
 	ThreadWorkQueryResultEnvelope,
 	TerminalListQueryResultEnvelope,
 	OrchestrationGraphQueryResultEnvelope,
