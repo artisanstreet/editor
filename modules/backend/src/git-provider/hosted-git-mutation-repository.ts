@@ -141,6 +141,7 @@ export interface HostedGitMutationExecution {
 	readonly approval: HostedGitMutationApprovalValue;
 	readonly claim_token: string;
 	readonly command: typeof HostedGitMutationCommandRequest.Type;
+	readonly provider_execution_started: boolean;
 	readonly provider_result?: HostedGitMutationResultValue;
 }
 
@@ -1204,6 +1205,7 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 							approval,
 							claim_token: claim.claim_token,
 							command: artifact.command,
+							provider_execution_started: claim.execution_started_at !== null,
 							...(artifact.provider_result === undefined
 								? {}
 								: { provider_result: artifact.provider_result }),
