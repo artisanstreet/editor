@@ -318,6 +318,15 @@ describe("Hosted Git protocol codec", () => {
 					resource_kind: test_case.resource_kind,
 				},
 				status: "applied",
+				...(test_case.operation === "reply_review_thread"
+					? {
+							thread_origin: {
+								native_id: "review_thread_native",
+								provider_id: "github",
+								resource_kind: "review_thread" as const,
+							},
+						}
+					: {}),
 			};
 
 			await expect(
@@ -332,6 +341,38 @@ describe("Hosted Git protocol codec", () => {
 				),
 			).rejects.toBeDefined();
 		}
+
+		const reply_result = {
+			operation: "reply_review_thread",
+			origin: {
+				native_id: "reply_review_thread_native",
+				provider_id: "github",
+				resource_kind: "review_comment",
+			},
+			status: "applied",
+			thread_origin: {
+				native_id: "review_thread_native",
+				provider_id: "github",
+				resource_kind: "review_thread",
+			},
+		};
+		await expect(
+			Effect.runPromise(
+				Schema.decodeUnknownEffect(HostedGitMutationResult)({
+					operation: reply_result.operation,
+					origin: reply_result.origin,
+					status: reply_result.status,
+				}),
+			),
+		).rejects.toBeDefined();
+		await expect(
+			Effect.runPromise(
+				Schema.decodeUnknownEffect(HostedGitMutationResult)({
+					...reply_result,
+					thread_origin: { ...reply_result.thread_origin, provider_id: "gitlab" },
+				}),
+			),
+		).rejects.toBeDefined();
 
 		await expect(
 			Effect.runPromise(
@@ -412,6 +453,7 @@ describe("Hosted Git protocol codec", () => {
 						resource_kind: "review_comment" as const,
 					},
 					status: "applied" as const,
+					thread_origin: operation.thread_origin,
 				},
 				state: "applied" as const,
 			},

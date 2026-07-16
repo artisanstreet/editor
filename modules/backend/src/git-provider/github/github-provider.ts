@@ -1554,6 +1554,9 @@ export function make_github_provider_layer(options: GitHubProviderOptions = {}) 
 						operation: result.operation,
 						origin: { ...result.origin, provider_id: github_provider_id },
 						status: "applied",
+						...(mutation.operation === "reply_review_thread"
+							? { thread_origin: mutation.thread_origin }
+							: {}),
 					}).pipe(
 						Effect.mapError(() =>
 							provider_operation_error(

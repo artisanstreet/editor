@@ -452,6 +452,9 @@ describe("GitHubProvider", () => {
 				operation: mutation.operation,
 				origin: { provider_id: "github" },
 				status: "applied",
+				...(mutation.operation === "reply_review_thread"
+					? { thread_origin: mutation.thread_origin }
+					: {}),
 			});
 		}
 

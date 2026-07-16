@@ -636,6 +636,7 @@ export const HostedGitMutationResult = Schema.Union([
 		operation: Schema.Literal("reply_review_thread"),
 		origin: HostedGitReviewCommentOrigin,
 		status: Schema.Literal("applied"),
+		thread_origin: HostedGitReviewThreadOrigin,
 	}),
 	Schema.Struct({
 		operation: Schema.Literal("resolve_review_thread"),
@@ -662,7 +663,14 @@ export const HostedGitMutationResult = Schema.Union([
 		origin: HostedGitPullRequestOrigin,
 		status: Schema.Literal("applied"),
 	}),
-]);
+]).check(
+	Schema.makeFilter((result) =>
+		result.operation === "reply_review_thread" &&
+		result.thread_origin.provider_id !== result.origin.provider_id
+			? "Expected the review comment and parent thread to share one provider identity"
+			: undefined,
+	),
+);
 
 export type HostedGitMutationResult = typeof HostedGitMutationResult.Type;
 

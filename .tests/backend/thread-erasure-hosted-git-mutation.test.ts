@@ -170,6 +170,7 @@ const SeedHostedMutation = (
 							operation: "reply_review_thread",
 							origin: review_comment_origin,
 							status: "applied",
+							thread_origin: review_thread_origin,
 						})
 					: null,
 			selection_json: JSON.stringify(selection),
