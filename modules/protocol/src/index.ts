@@ -11,6 +11,7 @@ export * from "./hosted-git";
 export * from "./external-wait";
 export * from "./model-behaviour";
 export * from "./stream";
+export * from "./tool-control";
 export * from "./workspace-changes";
 export * from "./preview";
 export * from "./rich-link";
