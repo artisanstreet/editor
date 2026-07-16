@@ -174,6 +174,8 @@ export const ToolReasonCode = CapabilityIdentifier.check(
 	),
 );
 
+export type ToolReasonCode = typeof ToolReasonCode.Type;
+
 /** Validates one bounded strict JSON value retained only within the tool control plane. */
 export const ToolJsonValue = Schema.declare<Schema.Json>(is_bounded_tool_json, {
 	expected: `strict JSON within ${tool_json_maximum_bytes} UTF-8 bytes, ${tool_json_maximum_depth} levels, and ${tool_json_maximum_nodes} values`,
@@ -434,6 +436,16 @@ export const ToolInvocationApprovalRequired = Schema.Struct({
 	),
 );
 
+/** Projects an invocation admitted for execution but not yet claimed by a worker. */
+export const ToolInvocationPending = Schema.Struct({
+	...ToolInvocationProjectionBase,
+	approval: Schema.optional(ToolApprovalDecisionReference),
+	state: Schema.Literal("pending"),
+}).check(
+	lifecycle_check,
+	Schema.makeFilter((value) => approval_binding_error(value, "approved")),
+);
+
 /** Projects an invocation currently executing without private arguments or outcomes. */
 export const ToolInvocationRunning = Schema.Struct({
 	...ToolInvocationProjectionBase,
@@ -507,6 +519,7 @@ export const ToolInvocationSuspended = Schema.Struct({
 /** Projects the source-safe lifecycle state of one tool invocation. */
 export const ToolInvocationProjection = Schema.Union([
 	ToolInvocationApprovalRequired,
+	ToolInvocationPending,
 	ToolInvocationRunning,
 	ToolInvocationCompleted,
 	ToolInvocationFailed,
@@ -521,6 +534,18 @@ export type ToolInvocationProjection = typeof ToolInvocationProjection.Type;
 export const InvokeApprovalRequiredResult = Schema.Struct({
 	invocation: ToolInvocationApprovalRequired,
 	outcome: Schema.Literal("approval_required"),
+});
+
+/** Returns an invocation durably admitted for execution but not yet claimed. */
+export const InvokePendingResult = Schema.Struct({
+	invocation: ToolInvocationPending,
+	outcome: Schema.Literal("pending"),
+});
+
+/** Returns an invocation currently executing without exposing private intermediate data. */
+export const InvokeRunningResult = Schema.Struct({
+	invocation: ToolInvocationRunning,
+	outcome: Schema.Literal("running"),
 });
 
 /** Returns completed invocation metadata with its bounded private JSON result. */
@@ -548,13 +573,22 @@ export const InvokeOutcomeUnknownResult = Schema.Struct({
 	outcome: Schema.Literal("outcome_unknown"),
 });
 
+/** Returns an invocation suspended on a durable external condition. */
+export const InvokeSuspendedResult = Schema.Struct({
+	invocation: ToolInvocationSuspended,
+	outcome: Schema.Literal("suspended"),
+});
+
 /** Returns a source-safe invocation outcome; only completed outcomes carry a private result. */
 export const InvokeResult = Schema.Union([
 	InvokeApprovalRequiredResult,
+	InvokePendingResult,
+	InvokeRunningResult,
 	InvokeCompletedResult,
 	InvokeFailedResult,
 	InvokeDeniedResult,
 	InvokeOutcomeUnknownResult,
+	InvokeSuspendedResult,
 ]);
 
 export type InvokeResult = typeof InvokeResult.Type;
@@ -634,6 +668,7 @@ export const DecideApprovalRequest = Schema.Struct({
 	approval_id: Identifier,
 	decision: Schema.Literals(["approved", "denied"]),
 	decision_id: Identifier,
+	thread_id: Identifier,
 });
 
 export type DecideApprovalRequest = typeof DecideApprovalRequest.Type;
@@ -644,3 +679,49 @@ export const DecideApprovalResult = Schema.Struct({
 });
 
 export type DecideApprovalResult = typeof DecideApprovalResult.Type;
+
+/** Requests one source-safe invocation projection within its owning thread. */
+export const ToolInvocationQuery = Schema.Struct({
+	invocation_id: Identifier,
+	thread_id: Identifier,
+});
+
+export type ToolInvocationQuery = typeof ToolInvocationQuery.Type;
+
+/** Returns an optional source-safe invocation projection. */
+export const ToolInvocationQueryResult = Schema.Struct({
+	invocation: Schema.optional(ToolInvocationProjection),
+});
+
+export type ToolInvocationQueryResult = typeof ToolInvocationQueryResult.Type;
+
+/** Requests one source-safe approval projection within its owning thread. */
+export const ToolApprovalQuery = Schema.Struct({
+	approval_id: Identifier,
+	thread_id: Identifier,
+});
+
+export type ToolApprovalQuery = typeof ToolApprovalQuery.Type;
+
+/** Returns an optional source-safe approval projection. */
+export const ToolApprovalQueryResult = Schema.Struct({
+	approval: Schema.optional(ToolApprovalProjection),
+});
+
+export type ToolApprovalQueryResult = typeof ToolApprovalQueryResult.Type;
+
+/** Publishes a complete source-safe invocation projection for replay and rebuild. */
+export const ToolInvocationUpdatedEvent = Schema.Struct({
+	invocation: ToolInvocationProjection,
+	type: Schema.Literal("tool.invocation.updated"),
+});
+
+export type ToolInvocationUpdatedEvent = typeof ToolInvocationUpdatedEvent.Type;
+
+/** Publishes a complete source-safe approval projection for replay and rebuild. */
+export const ToolApprovalUpdatedEvent = Schema.Struct({
+	approval: ToolApprovalProjection,
+	type: Schema.Literal("tool.approval.updated"),
+});
+
+export type ToolApprovalUpdatedEvent = typeof ToolApprovalUpdatedEvent.Type;

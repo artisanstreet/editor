@@ -17,6 +17,7 @@ import {
 	WorkspaceFileReplaceRequest,
 } from "./workspace-changes";
 import { CapabilityInvocationUpdatedEvent, EngineNativeActionObservedEvent } from "./capability";
+import { ToolApprovalUpdatedEvent, ToolInvocationUpdatedEvent } from "./tool-control";
 import {
 	WorkspaceGitCheckoutApprovalQuery,
 	WorkspaceGitCheckoutApprovalQueryResult,
@@ -1011,6 +1012,8 @@ export const EventPayload = Schema.Union([
 	PreviewBrowserLifecycleEvent,
 	CapabilityInvocationUpdatedEvent,
 	EngineNativeActionObservedEvent,
+	ToolInvocationUpdatedEvent,
+	ToolApprovalUpdatedEvent,
 ]);
 
 export type EventPayload = typeof EventPayload.Type;

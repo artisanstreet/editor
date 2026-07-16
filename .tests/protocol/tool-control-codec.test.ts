@@ -9,6 +9,8 @@ import {
 	ListEligibleRequest,
 	ListEligibleResult,
 	ToolInvocationProjection,
+	ToolApprovalUpdatedEvent,
+	ToolInvocationUpdatedEvent,
 } from "@artisan/protocol";
 
 const timestamp = "2026-07-16T08:00:00.000Z";
@@ -35,6 +37,12 @@ const decode_list_eligible_result = Schema.decodeUnknownSync(ListEligibleResult,
 	onExcessProperty: "error",
 });
 const decode_invocation_projection = Schema.decodeUnknownSync(ToolInvocationProjection, {
+	onExcessProperty: "error",
+});
+const decode_invocation_event = Schema.decodeUnknownSync(ToolInvocationUpdatedEvent, {
+	onExcessProperty: "error",
+});
+const decode_approval_event = Schema.decodeUnknownSync(ToolApprovalUpdatedEvent, {
 	onExcessProperty: "error",
 });
 
@@ -99,6 +107,37 @@ const completed_invocation = {
 	updated_at: timestamp,
 } as const;
 
+const automatic_descriptor = {
+	...public_descriptor,
+	approval_policy: "automatic",
+	effect: "read",
+	label: "Read Git session",
+	summary: "Reads the current source-safe Git session projection.",
+	tool_id: "workspace.git.session.read",
+} as const;
+
+const pending_invocation = {
+	context,
+	created_at: timestamp,
+	invocation_id: "invocation_pending",
+	request_id: "request_pending",
+	state: "pending",
+	tool: automatic_descriptor,
+	updated_at: timestamp,
+} as const;
+
+const running_invocation = {
+	...pending_invocation,
+	started_at: timestamp,
+	state: "running",
+} as const;
+
+const suspended_invocation = {
+	...running_invocation,
+	state: "suspended",
+	suspended_at: timestamp,
+} as const;
+
 describe("tool control protocol codec", () => {
 	it("roundtrips representative list, invoke, and approval contracts", () => {
 		const list_request = { context };
@@ -142,13 +181,50 @@ describe("tool control protocol codec", () => {
 				approval_id: "approval_1",
 				decision: "approved",
 				decision_id: "decision_1",
+				thread_id: "thread_1",
 			}),
 		).toEqual({
 			approval_id: "approval_1",
 			decision: "approved",
 			decision_id: "decision_1",
+			thread_id: "thread_1",
 		});
+
+		for (const result of [
+			{ invocation: pending_invocation, outcome: "pending" },
+			{ invocation: running_invocation, outcome: "running" },
+			{ invocation: suspended_invocation, outcome: "suspended" },
+		] as const) {
+			expect(decode_invoke_result(result)).toEqual(result);
+			expect(
+				decode_invocation_event({
+					invocation: result.invocation,
+					type: "tool.invocation.updated",
+				}),
+			).toEqual({
+				invocation: result.invocation,
+				type: "tool.invocation.updated",
+			});
+		}
 		expect(decode_decide_approval_result(approval_result)).toEqual(approval_result);
+		expect(
+			decode_invocation_event({
+				invocation: completed_invocation,
+				type: "tool.invocation.updated",
+			}),
+		).toEqual({
+			invocation: completed_invocation,
+			type: "tool.invocation.updated",
+		});
+		expect(
+			decode_approval_event({
+				approval: approval_result.approval,
+				type: "tool.approval.updated",
+			}),
+		).toEqual({
+			approval: approval_result.approval,
+			type: "tool.approval.updated",
+		});
 	});
 
 	it("rejects excess properties and invalid canonical tool identifiers or revisions", () => {
@@ -296,6 +372,15 @@ describe("tool control protocol codec", () => {
 			},
 		]) {
 			expect(() => decode_invocation_projection(projection)).toThrow();
+		}
+
+		for (const invocation of [pending_invocation, running_invocation, suspended_invocation]) {
+			expect(() =>
+				decode_invocation_event({
+					invocation: { ...invocation, arguments: { private: true } },
+					type: "tool.invocation.updated",
+				}),
+			).toThrow();
 		}
 
 		expect(() =>
