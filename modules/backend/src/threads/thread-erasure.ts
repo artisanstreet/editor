@@ -15,6 +15,9 @@ import {
 	HostedProjectCloneApprovals,
 	HostedProjectCloneArtifacts,
 	HostedProjectCloneClaims,
+	HostedGitMutationApprovals,
+	HostedGitMutationArtifacts,
+	HostedGitMutationClaims,
 	HostedGitSnapshotOperations,
 	JournalCommands,
 	JournalEvents,
@@ -129,6 +132,11 @@ export const ThreadErasureLive = Layer.effect(
 			"executing",
 			"outcome_unknown",
 		]);
+		const IsPendingHostedGitMutation = inArray(HostedGitMutationApprovals.state, [
+			"requested",
+			"approved",
+			"executing",
+		]);
 		const IsPendingExternalWait = or(
 			inArray(ExternalWaits.state, ["waiting", "wake_pending", "suspended"]),
 			exists(
@@ -178,6 +186,25 @@ export const ThreadErasureLive = Layer.effect(
 															Threads.thread_id,
 														),
 														IsPendingWorkspaceMutation,
+													),
+												),
+										),
+									),
+									not(
+										exists(
+											database.client
+												.select({
+													approval_id:
+														HostedGitMutationApprovals.approval_id,
+												})
+												.from(HostedGitMutationApprovals)
+												.where(
+													and(
+														eq(
+															HostedGitMutationApprovals.thread_id,
+															Threads.thread_id,
+														),
+														IsPendingHostedGitMutation,
 													),
 												),
 										),
@@ -437,6 +464,59 @@ export const ThreadErasureLive = Layer.effect(
 							return undefined;
 						}
 
+						const [misbound_hosted_git_mutation_claim] = yield* transaction
+							.select({ approval_id: HostedGitMutationClaims.approval_id })
+							.from(HostedGitMutationClaims)
+							.innerJoin(
+								HostedGitMutationApprovals,
+								eq(
+									HostedGitMutationApprovals.approval_id,
+									HostedGitMutationClaims.approval_id,
+								),
+							)
+							.where(
+								and(
+									or(
+										eq(HostedGitMutationClaims.thread_id, thread_id),
+										eq(HostedGitMutationApprovals.thread_id, thread_id),
+									),
+									not(
+										eq(
+											HostedGitMutationClaims.thread_id,
+											HostedGitMutationApprovals.thread_id,
+										),
+									),
+								),
+							)
+							.limit(1);
+
+						if (misbound_hosted_git_mutation_claim) {
+							return yield* new ThreadErasureFailure({
+								cause: new Error(
+									`Hosted Git mutation ${misbound_hosted_git_mutation_claim.approval_id} has inconsistent thread ownership`,
+								),
+							});
+						}
+
+						const [pending_hosted_git_mutation] = yield* transaction
+							.select({ approval_id: HostedGitMutationApprovals.approval_id })
+							.from(HostedGitMutationApprovals)
+							.where(
+								and(
+									eq(HostedGitMutationApprovals.thread_id, thread_id),
+									IsPendingHostedGitMutation,
+								),
+							)
+							.limit(1);
+
+						if (pending_hosted_git_mutation) {
+							yield* transaction
+								.delete(ThreadErasureClaims)
+								.where(eq(ThreadErasureClaims.thread_id, thread_id));
+
+							return undefined;
+						}
+
 						const [pending_external_wait] = yield* transaction
 							.select({ wait_id: ExternalWaits.wait_id })
 							.from(ExternalWaits)
@@ -622,6 +702,31 @@ export const ThreadErasureLive = Layer.effect(
 						yield* transaction
 							.delete(HostedProjectCloneApprovals)
 							.where(eq(HostedProjectCloneApprovals.thread_id, thread_id));
+						yield* transaction.delete(HostedGitMutationClaims).where(
+							inArray(
+								HostedGitMutationClaims.approval_id,
+								transaction
+									.select({
+										approval_id: HostedGitMutationApprovals.approval_id,
+									})
+									.from(HostedGitMutationApprovals)
+									.where(eq(HostedGitMutationApprovals.thread_id, thread_id)),
+							),
+						);
+						yield* transaction.delete(HostedGitMutationArtifacts).where(
+							inArray(
+								HostedGitMutationArtifacts.approval_id,
+								transaction
+									.select({
+										approval_id: HostedGitMutationApprovals.approval_id,
+									})
+									.from(HostedGitMutationApprovals)
+									.where(eq(HostedGitMutationApprovals.thread_id, thread_id)),
+							),
+						);
+						yield* transaction
+							.delete(HostedGitMutationApprovals)
+							.where(eq(HostedGitMutationApprovals.thread_id, thread_id));
 						yield* transaction
 							.delete(WorkspaceGitCheckoutClaims)
 							.where(eq(WorkspaceGitCheckoutClaims.thread_id, thread_id));
