@@ -1,7 +1,17 @@
 import { fileURLToPath } from "node:url";
 
 import { NodeCrypto, NodeFileSystem } from "@effect/platform-node-shared";
-import { Cause, Deferred, Effect, Exit, Fiber, FileSystem, Layer, ManagedRuntime } from "effect";
+import {
+	Cause,
+	Deferred,
+	Effect,
+	Exit,
+	Fiber,
+	FileSystem,
+	Layer,
+	ManagedRuntime,
+	Option,
+} from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
@@ -75,6 +85,16 @@ const workflow_origin = {
 	provider_id: "github",
 	resource_kind: "workflow_run" as const,
 };
+const provider_result = {
+	operation: "reply_review_thread" as const,
+	origin: {
+		native_id: "RC_1",
+		provider_id: "github",
+		resource_kind: "review_comment" as const,
+	},
+	status: "applied" as const,
+	thread_origin: review_thread_origin,
+};
 
 const MakeDatabasePath = Effect.gen(function* () {
 	const file_system = yield* FileSystem.FileSystem;
@@ -111,6 +131,75 @@ function make_runtime(
 	).pipe(Layer.provideMerge(infrastructure));
 
 	return ManagedRuntime.make(repositories);
+}
+
+async function list_executing_for(
+	state: "owned" | "waiting" | "prelaunch" | "quarantine" | "result_recorded",
+) {
+	const database_path = await Effect.runPromise(MakeDatabasePath);
+	const owner = make_runtime(database_path, "dispatch_owner");
+	const observer = make_runtime(database_path, "dispatch_observer", {
+		queued_values: [],
+		value:
+			state === "prelaunch" || state === "quarantine" || state === "result_recorded"
+				? later
+				: now,
+	});
+
+	try {
+		await owner.runPromise(
+			Effect.gen(function* () {
+				const mutations = yield* HostedGitMutationRepository;
+
+				yield* Seed;
+				yield* mutations.Request(request());
+				yield* mutations.Decide({
+					approval_id: "approval_1",
+					approved: true,
+					decision_command: { message_id: "decision_approval_1", sent_at: later },
+					thread_id: "thread_1",
+				});
+				yield* mutations.MarkExecuting("approval_1");
+				const execution = yield* mutations.ReadExecution("approval_1");
+
+				if (state === "quarantine" || state === "result_recorded") {
+					yield* mutations.ExecuteClaimed(
+						{ approval_id: "approval_1", claim_token: execution.claim_token },
+						Effect.void,
+					);
+				}
+				if (state === "result_recorded") {
+					yield* mutations.RecordProviderResult({
+						approval_id: "approval_1",
+						claim_token: execution.claim_token,
+						result: provider_result,
+					});
+				}
+			}),
+		);
+
+		if (state === "prelaunch" || state === "result_recorded") {
+			return await observer.runPromise(
+				Effect.flatMap(HostedGitMutationRepository, (mutations) => mutations.ListExecuting),
+			);
+		}
+		if (state === "quarantine") {
+			return await observer.runPromise(
+				Effect.flatMap(HostedGitMutationRepository, (mutations) => mutations.ListExecuting),
+			);
+		}
+		if (state === "waiting") {
+			return await observer.runPromise(
+				Effect.flatMap(HostedGitMutationRepository, (mutations) => mutations.ListExecuting),
+			);
+		}
+
+		return await owner.runPromise(
+			Effect.flatMap(HostedGitMutationRepository, (mutations) => mutations.ListExecuting),
+		);
+	} finally {
+		await Promise.all([owner.dispose(), observer.dispose()]);
+	}
 }
 
 function failure_from(exit: Exit.Exit<unknown, unknown>) {
@@ -1719,6 +1808,747 @@ describe("HostedGitMutationRepository", () => {
 			);
 		} finally {
 			await runtime.dispose();
+		}
+	});
+
+	it("records one normalized provider result exactly and rejects mismatched operation or origin", async () => {
+		const runtime = make_runtime(await Effect.runPromise(MakeDatabasePath));
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const mutations = yield* HostedGitMutationRepository;
+
+					yield* Seed;
+					yield* mutations.Request(request());
+					yield* mutations.Decide({
+						approval_id: "approval_1",
+						approved: true,
+						decision_command: { message_id: "decision_approval_1", sent_at: later },
+						thread_id: "thread_1",
+					});
+					yield* mutations.MarkExecuting("approval_1");
+					const execution = yield* mutations.ReadExecution("approval_1");
+					const identity = {
+						approval_id: "approval_1",
+						claim_token: execution.claim_token,
+					};
+
+					yield* mutations.ExecuteClaimed(identity, Effect.void);
+					const wrong_operation = yield* mutations
+						.RecordProviderResult({
+							...identity,
+							result: {
+								operation: "resolve_review_thread",
+								origin: review_thread_origin,
+								status: "applied",
+							},
+						})
+						.pipe(Effect.exit);
+					const wrong_origin = yield* mutations
+						.RecordProviderResult({
+							...identity,
+							result: {
+								...provider_result,
+								thread_origin: {
+									...review_thread_origin,
+									native_id: "RT_other",
+								},
+							},
+						})
+						.pipe(Effect.exit);
+					yield* database.client.update(JournalEvents).set({ origin: "frontend" });
+					const corrupt_journal = yield* mutations
+						.RecordProviderResult({ ...identity, result: provider_result })
+						.pipe(Effect.exit);
+					const [before_valid_result] = yield* database.client
+						.select()
+						.from(HostedGitMutationArtifacts);
+					yield* database.client.update(JournalEvents).set({ origin: "backend" });
+					yield* mutations.RecordProviderResult({ ...identity, result: provider_result });
+					yield* mutations.RecordProviderResult({ ...identity, result: provider_result });
+					const competing = yield* mutations
+						.RecordProviderResult({
+							...identity,
+							result: {
+								...provider_result,
+								origin: { ...provider_result.origin, native_id: "RC_2" },
+							},
+						})
+						.pipe(Effect.exit);
+
+					return {
+						artifact: (yield* database.client
+							.select()
+							.from(HostedGitMutationArtifacts))[0],
+						before_valid_result,
+						competing,
+						corrupt_journal,
+						wrong_operation,
+						wrong_origin,
+					};
+				}),
+			);
+
+			expect(failure_from(result.wrong_operation)).toEqual(
+				new HostedGitMutationConflict({ reason: "artifact_conflict" }),
+			);
+			expect(failure_from(result.wrong_origin)).toEqual(
+				new HostedGitMutationConflict({ reason: "artifact_conflict" }),
+			);
+			expect(failure_from(result.competing)).toEqual(
+				new HostedGitMutationConflict({ reason: "artifact_conflict" }),
+			);
+			expect(failure_from(result.corrupt_journal)).toEqual(
+				new HostedGitMutationInvariant({
+					message: "Stored hosted Git mutation state is invalid",
+				}),
+			);
+			expect(result.before_valid_result?.provider_result_json).toBeNull();
+			expect(result.artifact?.provider_result_json).toBe(JSON.stringify(provider_result));
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("settles every terminal outcome once, publishes its public projection, and scrubs private state", async () => {
+		const runtime = make_runtime(await Effect.runPromise(MakeDatabasePath));
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const mutations = yield* HostedGitMutationRepository;
+					const terminal = (
+						identifier: string,
+						settlement:
+							| { readonly type: "applied" }
+							| { readonly reason: "remote_rejected"; readonly type: "rejected" }
+							| {
+									readonly reason: "execution_interrupted";
+									readonly type: "outcome_unknown";
+							  },
+					) =>
+						Effect.gen(function* () {
+							const approval_id = `approval_${identifier}`;
+
+							yield* mutations.Request(identified_request(identifier));
+							yield* mutations.Decide({
+								approval_id,
+								approved: true,
+								decision_command: {
+									message_id: `decision_${identifier}`,
+									sent_at: later,
+								},
+								thread_id: "thread_1",
+							});
+							yield* mutations.MarkExecuting(approval_id);
+							const execution = yield* mutations.ReadExecution(approval_id);
+							const identity = { approval_id, claim_token: execution.claim_token };
+
+							yield* mutations.ExecuteClaimed(identity, Effect.void);
+							if (settlement.type === "applied") {
+								yield* mutations.RecordProviderResult({
+									...identity,
+									result: provider_result,
+								});
+							}
+							const settled = yield* mutations.Settle({ ...identity, ...settlement });
+							const duplicate = yield* mutations.Settle({
+								...identity,
+								...settlement,
+								claim_token: "stale_claim",
+							});
+
+							return { duplicate, settled };
+						});
+
+					yield* Seed;
+					const applied = yield* terminal("applied", { type: "applied" });
+					const rejected = yield* terminal("rejected", {
+						reason: "remote_rejected",
+						type: "rejected",
+					});
+					const unknown = yield* terminal("unknown", {
+						reason: "execution_interrupted",
+						type: "outcome_unknown",
+					});
+
+					return {
+						applied,
+						artifacts: yield* database.client.select().from(HostedGitMutationArtifacts),
+						claims: yield* database.client.select().from(HostedGitMutationClaims),
+						rejected,
+						unknown,
+					};
+				}),
+			);
+
+			expect(result.applied.settled.approval).toMatchObject({
+				result: provider_result,
+				state: "applied",
+			});
+			expect(result.rejected.settled.approval).toMatchObject({
+				reason: "remote_rejected",
+				state: "rejected",
+			});
+			expect(result.unknown.settled.approval).toMatchObject({
+				reason: "execution_interrupted",
+				state: "outcome_unknown",
+			});
+			for (const outcome of [result.applied, result.rejected, result.unknown]) {
+				expect(outcome.duplicate).toEqual({ ...outcome.settled, status: "duplicate" });
+				expect(outcome.settled.event.payload).toMatchObject({
+					approval: outcome.settled.approval,
+					type: "hosted.git.mutation.approval.updated",
+				});
+			}
+			expect(result.artifacts).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						operation_json: null,
+						provider_result_json: null,
+						selection_json: null,
+					}),
+				]),
+			);
+			expect(result.claims).toEqual([]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("requires durable launch and result evidence for terminal settlement", async () => {
+		const runtime = make_runtime(await Effect.runPromise(MakeDatabasePath));
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const mutations = yield* HostedGitMutationRepository;
+					const launched = yield* Deferred.make<void>();
+
+					yield* Seed;
+					yield* mutations.Request(identified_request("prelaunch"));
+					yield* mutations.Decide({
+						approval_id: "approval_prelaunch",
+						approved: true,
+						decision_command: { message_id: "decision_prelaunch", sent_at: later },
+						thread_id: "thread_1",
+					});
+					yield* mutations.MarkExecuting("approval_prelaunch");
+					const prelaunch = yield* mutations.ReadExecution("approval_prelaunch");
+					const applied_without_result = yield* mutations
+						.Settle({
+							approval_id: "approval_prelaunch",
+							claim_token: prelaunch.claim_token,
+							type: "applied",
+						})
+						.pipe(Effect.exit);
+					const unknown_without_launch = yield* mutations
+						.Settle({
+							approval_id: "approval_prelaunch",
+							claim_token: prelaunch.claim_token,
+							reason: "provider_outcome_unknown",
+							type: "outcome_unknown",
+						})
+						.pipe(Effect.exit);
+					const rejected_prelaunch = yield* mutations.Settle({
+						approval_id: "approval_prelaunch",
+						claim_token: prelaunch.claim_token,
+						reason: "provider_unavailable",
+						type: "rejected",
+					});
+
+					yield* mutations.Request(identified_request("interrupted"));
+					yield* mutations.Decide({
+						approval_id: "approval_interrupted",
+						approved: true,
+						decision_command: { message_id: "decision_interrupted", sent_at: later },
+						thread_id: "thread_1",
+					});
+					yield* mutations.MarkExecuting("approval_interrupted");
+					const interrupted = yield* mutations.ReadExecution("approval_interrupted");
+					const provider = yield* mutations
+						.ExecuteClaimed(
+							{
+								approval_id: "approval_interrupted",
+								claim_token: interrupted.claim_token,
+							},
+							Deferred.succeed(launched, undefined).pipe(
+								Effect.andThen(Effect.never),
+							),
+						)
+						.pipe(Effect.forkChild({ startImmediately: true }));
+
+					yield* Deferred.await(launched);
+					yield* Fiber.interrupt(provider);
+					const rejected_after_interruption = yield* mutations
+						.Settle({
+							approval_id: "approval_interrupted",
+							claim_token: interrupted.claim_token,
+							reason: "provider_unavailable",
+							type: "rejected",
+						})
+						.pipe(Effect.exit);
+					const unknown_after_interruption = yield* mutations.Settle({
+						approval_id: "approval_interrupted",
+						claim_token: interrupted.claim_token,
+						reason: "execution_interrupted",
+						type: "outcome_unknown",
+					});
+
+					return {
+						applied_without_result,
+						rejected_after_interruption,
+						rejected_prelaunch,
+						unknown_after_interruption,
+						unknown_without_launch,
+					};
+				}),
+			);
+
+			expect(failure_from(result.applied_without_result)).toEqual(
+				new HostedGitMutationConflict({ reason: "artifact_conflict" }),
+			);
+			expect(failure_from(result.unknown_without_launch)).toEqual(
+				new HostedGitMutationConflict({ reason: "artifact_conflict" }),
+			);
+			expect(failure_from(result.rejected_after_interruption)).toEqual(
+				new HostedGitMutationConflict({ reason: "artifact_conflict" }),
+			);
+			expect(result.rejected_prelaunch.approval).toMatchObject({
+				reason: "provider_unavailable",
+				state: "rejected",
+			});
+			expect(result.unknown_after_interruption.approval).toMatchObject({
+				reason: "execution_interrupted",
+				state: "outcome_unknown",
+			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("classifies owned, waiting, recoverable, and quarantined executions from durable lease state", async () => {
+		const [owned, waiting, prelaunch, quarantine, result_recorded] = await Promise.all([
+			list_executing_for("owned"),
+			list_executing_for("waiting"),
+			list_executing_for("prelaunch"),
+			list_executing_for("quarantine"),
+			list_executing_for("result_recorded"),
+		]);
+
+		expect(owned).toEqual([
+			{ approval_id: "approval_1", recovery: "owned", thread_id: "thread_1" },
+		]);
+		expect(waiting).toEqual([
+			{ approval_id: "approval_1", recovery: "waiting", thread_id: "thread_1" },
+		]);
+		expect(prelaunch).toEqual([
+			{ approval_id: "approval_1", recovery: "recoverable", thread_id: "thread_1" },
+		]);
+		expect(quarantine).toEqual([
+			{ approval_id: "approval_1", recovery: "quarantine", thread_id: "thread_1" },
+		]);
+		expect(result_recorded).toEqual([
+			{ approval_id: "approval_1", recovery: "recoverable", thread_id: "thread_1" },
+		]);
+	});
+
+	it.each(["prelaunch", "result_recorded"] as const)(
+		"claims %s recovery with one cross-runtime compare-and-swap winner",
+		async (state) => {
+			const database_path = await Effect.runPromise(MakeDatabasePath);
+			const owner = make_runtime(database_path, `cas_owner_${state}`);
+			const left = make_runtime(database_path, `cas_left_${state}`, {
+				queued_values: [],
+				value: later,
+			});
+			const right = make_runtime(database_path, `cas_right_${state}`, {
+				queued_values: [],
+				value: later,
+			});
+
+			try {
+				await owner.runPromise(
+					Effect.gen(function* () {
+						const mutations = yield* HostedGitMutationRepository;
+
+						yield* Seed;
+						yield* mutations.Request(request());
+						yield* mutations.Decide({
+							approval_id: "approval_1",
+							approved: true,
+							decision_command: { message_id: "decision_approval_1", sent_at: later },
+							thread_id: "thread_1",
+						});
+						yield* mutations.MarkExecuting("approval_1");
+						const execution = yield* mutations.ReadExecution("approval_1");
+
+						if (state === "result_recorded") {
+							yield* mutations.ExecuteClaimed(
+								{ approval_id: "approval_1", claim_token: execution.claim_token },
+								Effect.void,
+							);
+							yield* mutations.RecordProviderResult({
+								approval_id: "approval_1",
+								claim_token: execution.claim_token,
+								result: provider_result,
+							});
+						}
+					}),
+				);
+
+				const recovered = await Promise.all([
+					left.runPromise(
+						Effect.flatMap(HostedGitMutationRepository, (mutations) =>
+							mutations.ClaimRecovery("approval_1"),
+						),
+					),
+					right.runPromise(
+						Effect.flatMap(HostedGitMutationRepository, (mutations) =>
+							mutations.ClaimRecovery("approval_1"),
+						),
+					),
+				]);
+
+				expect(recovered.filter(Option.isSome)).toHaveLength(1);
+				const execution = Option.getOrThrow(recovered.find(Option.isSome)!);
+
+				if (state === "result_recorded") {
+					expect(execution.provider_result).toEqual(provider_result);
+				} else {
+					expect("provider_result" in execution).toBe(false);
+				}
+			} finally {
+				await Promise.all([owner.dispose(), left.dispose(), right.dispose()]);
+			}
+		},
+	);
+
+	it("never reclaims a launched execution without a recorded result", async () => {
+		const database_path = await Effect.runPromise(MakeDatabasePath);
+		const owner = make_runtime(database_path, "launched_owner");
+		const recovery = make_runtime(database_path, "launched_recovery", {
+			queued_values: [],
+			value: later,
+		});
+
+		try {
+			await owner.runPromise(
+				Effect.gen(function* () {
+					const mutations = yield* HostedGitMutationRepository;
+
+					yield* Seed;
+					yield* mutations.Request(request());
+					yield* mutations.Decide({
+						approval_id: "approval_1",
+						approved: true,
+						decision_command: { message_id: "decision_approval_1", sent_at: later },
+						thread_id: "thread_1",
+					});
+					yield* mutations.MarkExecuting("approval_1");
+					const execution = yield* mutations.ReadExecution("approval_1");
+
+					yield* mutations.ExecuteClaimed(
+						{ approval_id: "approval_1", claim_token: execution.claim_token },
+						Effect.void,
+					);
+				}),
+			);
+
+			const claimed = await recovery.runPromise(
+				Effect.flatMap(HostedGitMutationRepository, (mutations) =>
+					mutations.ClaimRecovery("approval_1"),
+				),
+			);
+
+			expect(Option.isNone(claimed)).toBe(true);
+		} finally {
+			await Promise.all([owner.dispose(), recovery.dispose()]);
+		}
+	});
+
+	it("quarantines only an expired launched execution without a provider result", async () => {
+		const clock: TestClock = { queued_values: [], value: now };
+		const runtime = make_runtime(
+			await Effect.runPromise(MakeDatabasePath),
+			"quarantine",
+			clock,
+		);
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const mutations = yield* HostedGitMutationRepository;
+
+					yield* Seed;
+					yield* mutations.Request(request());
+					yield* mutations.Decide({
+						approval_id: "approval_1",
+						approved: true,
+						decision_command: { message_id: "decision_approval_1", sent_at: later },
+						thread_id: "thread_1",
+					});
+					yield* mutations.MarkExecuting("approval_1");
+					const execution = yield* mutations.ReadExecution("approval_1");
+					const prelaunch = yield* mutations
+						.QuarantineInterrupted("approval_1")
+						.pipe(Effect.exit);
+
+					yield* mutations.ExecuteClaimed(
+						{ approval_id: "approval_1", claim_token: execution.claim_token },
+						Effect.void,
+					);
+					const waiting = yield* mutations
+						.QuarantineInterrupted("approval_1")
+						.pipe(Effect.exit);
+					clock.value = later;
+					const quarantined = yield* mutations.QuarantineInterrupted("approval_1");
+
+					return {
+						artifacts: yield* database.client.select().from(HostedGitMutationArtifacts),
+						claims: yield* database.client.select().from(HostedGitMutationClaims),
+						prelaunch,
+						quarantined,
+						waiting,
+					};
+				}),
+			);
+
+			expect(failure_from(result.waiting)).toEqual(
+				new HostedGitMutationConflict({ reason: "invalid_transition" }),
+			);
+			expect(Exit.isFailure(result.prelaunch)).toBe(true);
+			expect(result.quarantined.approval).toMatchObject({
+				reason: "execution_interrupted",
+				state: "outcome_unknown",
+			});
+			expect(result.artifacts[0]).toMatchObject({
+				operation_json: null,
+				provider_result_json: null,
+				selection_json: null,
+			});
+			expect(result.claims).toEqual([]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("holds terminal settlement and recovery behind the live provider workspace gate", async () => {
+		const database_path = await Effect.runPromise(MakeDatabasePath);
+		const provider_started = await Effect.runPromise(Deferred.make<void>());
+		const provider_release = await Effect.runPromise(Deferred.make<void>());
+		const owner = make_runtime(database_path, "gate_owner");
+		const settlement = make_runtime(database_path, "gate_owner");
+		const recovery = make_runtime(database_path, "gate_recovery", {
+			queued_values: [],
+			value: later,
+		});
+		let provider_execution: Promise<void> | undefined;
+
+		try {
+			const identity = await owner.runPromise(
+				Effect.gen(function* () {
+					const mutations = yield* HostedGitMutationRepository;
+
+					yield* Seed;
+					yield* mutations.Request(request());
+					yield* mutations.Decide({
+						approval_id: "approval_1",
+						approved: true,
+						decision_command: { message_id: "decision_approval_1", sent_at: later },
+						thread_id: "thread_1",
+					});
+					yield* mutations.MarkExecuting("approval_1");
+					const execution = yield* mutations.ReadExecution("approval_1");
+
+					return {
+						approval_id: "approval_1",
+						claim_token: execution.claim_token,
+					};
+				}),
+			);
+
+			provider_execution = owner.runPromise(
+				Effect.flatMap(HostedGitMutationRepository, (mutations) =>
+					mutations.ExecuteClaimed(
+						identity,
+						Deferred.succeed(provider_started, undefined).pipe(
+							Effect.andThen(Deferred.await(provider_release)),
+						),
+					),
+				),
+			);
+			await Effect.runPromise(Deferred.await(provider_started));
+
+			const blocked_settlement = await settlement.runPromise(
+				Effect.flatMap(HostedGitMutationRepository, (mutations) =>
+					mutations.Settle({
+						...identity,
+						reason: "execution_interrupted",
+						type: "outcome_unknown",
+					}),
+				).pipe(Effect.timeoutOption("100 millis")),
+			);
+			const blocked_quarantine = await recovery.runPromise(
+				Effect.flatMap(HostedGitMutationRepository, (mutations) =>
+					mutations.QuarantineInterrupted("approval_1"),
+				).pipe(Effect.timeoutOption("100 millis")),
+			);
+			const during_provider = await recovery.runPromise(
+				Effect.flatMap(HostedGitMutationRepository, (mutations) =>
+					mutations.Query({ approval_id: "approval_1", thread_id: "thread_1" }),
+				),
+			);
+
+			expect(Option.isNone(blocked_settlement)).toBe(true);
+			expect(Option.isNone(blocked_quarantine)).toBe(true);
+			expect(during_provider.approval.state).toBe("executing");
+
+			await Effect.runPromise(Deferred.succeed(provider_release, undefined));
+			await provider_execution;
+			provider_execution = undefined;
+
+			const quarantined = await recovery.runPromise(
+				Effect.flatMap(HostedGitMutationRepository, (mutations) =>
+					mutations.QuarantineInterrupted("approval_1"),
+				),
+			);
+
+			expect(quarantined.approval).toMatchObject({
+				reason: "execution_interrupted",
+				state: "outcome_unknown",
+			});
+		} finally {
+			await Effect.runPromise(Deferred.succeed(provider_release, undefined));
+			await provider_execution?.catch(() => undefined);
+			await Promise.all([owner.dispose(), recovery.dispose(), settlement.dispose()]);
+		}
+	});
+
+	it("abandons only leases owned by the current runtime", async () => {
+		const database_path = await Effect.runPromise(MakeDatabasePath);
+		const clock: TestClock = { queued_values: [], value: now };
+		const owner = make_runtime(database_path, "abandon_owner", clock);
+		const foreign = make_runtime(database_path, "abandon_foreign");
+
+		try {
+			const result = await owner.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const mutations = yield* HostedGitMutationRepository;
+
+					yield* Seed;
+					yield* mutations.Request(request());
+					yield* mutations.Decide({
+						approval_id: "approval_1",
+						approved: true,
+						decision_command: { message_id: "decision_approval_1", sent_at: later },
+						thread_id: "thread_1",
+					});
+					yield* mutations.MarkExecuting("approval_1");
+					yield* mutations.AbandonOwnedExecutions;
+					const [abandoned] = yield* database.client
+						.select()
+						.from(HostedGitMutationClaims);
+					yield* database.client
+						.update(HostedGitMutationClaims)
+						.set({ owner_instance_id: "abandon_foreign", lease_expires_at: later });
+					yield* mutations.AbandonOwnedExecutions;
+
+					return {
+						abandoned,
+						foreign: (yield* database.client.select().from(HostedGitMutationClaims))[0],
+					};
+				}),
+			);
+
+			expect(result.abandoned).toMatchObject({
+				owner_instance_id: "abandon_owner",
+				lease_expires_at: "2026-07-16T12:00:00.001Z",
+			});
+			expect(result.foreign).toMatchObject({
+				owner_instance_id: "abandon_foreign",
+				lease_expires_at: later,
+			});
+		} finally {
+			await Promise.all([owner.dispose(), foreign.dispose()]);
+		}
+	});
+
+	it("does not invoke the provider after restart when a result is already recorded", async () => {
+		const database_path = await Effect.runPromise(MakeDatabasePath);
+		const clock: TestClock = { queued_values: [], value: now };
+		const initial = make_runtime(database_path, "recording_owner", clock);
+		let provider_invocations = 0;
+
+		try {
+			await initial.runPromise(
+				Effect.gen(function* () {
+					const mutations = yield* HostedGitMutationRepository;
+
+					yield* Seed;
+					yield* mutations.Request(request());
+					yield* mutations.Decide({
+						approval_id: "approval_1",
+						approved: true,
+						decision_command: { message_id: "decision_approval_1", sent_at: later },
+						thread_id: "thread_1",
+					});
+					yield* mutations.MarkExecuting("approval_1");
+					const execution = yield* mutations.ReadExecution("approval_1");
+					const identity = {
+						approval_id: "approval_1",
+						claim_token: execution.claim_token,
+					};
+
+					yield* mutations.ExecuteClaimed(identity, Effect.void);
+					yield* mutations.RecordProviderResult({ ...identity, result: provider_result });
+				}),
+			);
+		} finally {
+			await initial.dispose();
+		}
+
+		clock.value = later;
+		const restarted = make_runtime(database_path, "recording_recovery", clock);
+		try {
+			const result = await restarted.runPromise(
+				Effect.gen(function* () {
+					const mutations = yield* HostedGitMutationRepository;
+					const execution = Option.getOrThrow(
+						yield* mutations.ClaimRecovery("approval_1"),
+					);
+					const replay = yield* mutations
+						.ExecuteClaimed(
+							{ approval_id: "approval_1", claim_token: execution.claim_token },
+							Effect.sync(() => ++provider_invocations),
+						)
+						.pipe(Effect.exit);
+					const settled = yield* mutations.Settle({
+						approval_id: "approval_1",
+						claim_token: execution.claim_token,
+						type: "applied",
+					});
+
+					return { execution, replay, settled };
+				}),
+			);
+
+			expect(result.execution.provider_result).toEqual(provider_result);
+			expect(failure_from(result.replay)).toEqual(
+				new HostedGitMutationConflict({ reason: "lease_conflict" }),
+			);
+			expect(result.settled.approval).toMatchObject({
+				result: provider_result,
+				state: "applied",
+			});
+			expect(provider_invocations).toBe(0);
+		} finally {
+			await restarted.dispose();
 		}
 	});
 });

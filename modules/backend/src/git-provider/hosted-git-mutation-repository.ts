@@ -21,7 +21,10 @@ import {
 	HostedGitMutationApprovalQueryResult,
 	HostedGitMutationApprovalUpdatedEvent,
 	HostedGitMutationCommandRequest,
+	HostedGitMutationRejectionReason,
+	HostedGitMutationResult,
 	HostedGitMutationSummary,
+	HostedGitMutationUnknownReason,
 	HostedGitOrigin,
 	HostedGitPullRequestLookup,
 	HostedGitRepositoryIdentity,
@@ -34,6 +37,7 @@ import {
 	type EventEnvelope as EventEnvelopeValue,
 	type HostedGitMutationApproval as HostedGitMutationApprovalValue,
 	type HostedGitMutationApprovalQueryResult as HostedGitMutationApprovalQueryResultValue,
+	type HostedGitMutationResult as HostedGitMutationResultValue,
 } from "@artisan/protocol";
 
 import { Database } from "../persistence/database";
@@ -87,6 +91,28 @@ export const ClaimIdentity = Schema.Struct({
 	claim_token: Identifier,
 });
 
+const ProviderResultInput = Schema.Struct({
+	...ClaimIdentity.fields,
+	result: HostedGitMutationResult,
+});
+
+const Settlement = Schema.Union([
+	Schema.Struct({
+		...ClaimIdentity.fields,
+		type: Schema.Literal("applied"),
+	}),
+	Schema.Struct({
+		...ClaimIdentity.fields,
+		reason: HostedGitMutationRejectionReason,
+		type: Schema.Literal("rejected"),
+	}),
+	Schema.Struct({
+		...ClaimIdentity.fields,
+		reason: HostedGitMutationUnknownReason,
+		type: Schema.Literal("outcome_unknown"),
+	}),
+]);
+
 const StoredRequestPayload = Schema.Struct({
 	approval_id: Identifier,
 	request_fingerprint: RequestFingerprint,
@@ -103,6 +129,7 @@ const StoredDecisionPayload = Schema.Struct({
 
 export type RequestHostedGitMutation = typeof MutationRequest.Type;
 export type HostedGitMutationDecision = typeof MutationDecision.Type;
+export type HostedGitMutationSettlement = typeof Settlement.Type;
 
 export interface HostedGitMutationAcceptance {
 	readonly approval: HostedGitMutationApprovalValue;
@@ -114,6 +141,13 @@ export interface HostedGitMutationExecution {
 	readonly approval: HostedGitMutationApprovalValue;
 	readonly claim_token: string;
 	readonly command: typeof HostedGitMutationCommandRequest.Type;
+	readonly provider_result?: HostedGitMutationResultValue;
+}
+
+export interface HostedGitMutationDispatch {
+	readonly approval_id: string;
+	readonly recovery: "owned" | "quarantine" | "recoverable" | "waiting";
+	readonly thread_id: string;
 }
 
 export class HostedGitMutationConflict extends Data.TaggedError("HostedGitMutationConflict")<{
@@ -144,9 +178,16 @@ export type HostedGitMutationRepositoryError =
 export class HostedGitMutationRepository extends Context.Service<
 	HostedGitMutationRepository,
 	{
+		readonly AbandonOwnedExecutions: Effect.Effect<void, HostedGitMutationRepositoryError>;
 		readonly ActiveClaimsForThread: (
 			thread_id: string,
 		) => Effect.Effect<boolean, HostedGitMutationRepositoryError>;
+		readonly ClaimRecovery: (
+			approval_id: string,
+		) => Effect.Effect<
+			Option.Option<HostedGitMutationExecution>,
+			HostedGitMutationRepositoryError
+		>;
 		readonly Decide: (
 			input: unknown,
 		) => Effect.Effect<HostedGitMutationAcceptance, HostedGitMutationRepositoryError>;
@@ -158,6 +199,10 @@ export class HostedGitMutationRepository extends Context.Service<
 			ReadonlyArray<{ readonly approval_id: string; readonly thread_id: string }>,
 			HostedGitMutationRepositoryError
 		>;
+		readonly ListExecuting: Effect.Effect<
+			ReadonlyArray<HostedGitMutationDispatch>,
+			HostedGitMutationRepositoryError
+		>;
 		readonly MarkExecuting: (
 			approval_id: string,
 		) => Effect.Effect<HostedGitMutationAcceptance, HostedGitMutationRepositoryError>;
@@ -167,6 +212,9 @@ export class HostedGitMutationRepository extends Context.Service<
 			HostedGitMutationApprovalQueryResultValue,
 			HostedGitMutationRepositoryError
 		>;
+		readonly QuarantineInterrupted: (
+			approval_id: string,
+		) => Effect.Effect<HostedGitMutationAcceptance, HostedGitMutationRepositoryError>;
 		readonly ReadBySourceCommand: (
 			message_id: string,
 		) => Effect.Effect<
@@ -182,10 +230,16 @@ export class HostedGitMutationRepository extends Context.Service<
 		readonly ReadExecution: (
 			approval_id: string,
 		) => Effect.Effect<HostedGitMutationExecution, HostedGitMutationRepositoryError>;
+		readonly RecordProviderResult: (
+			input: unknown,
+		) => Effect.Effect<void, HostedGitMutationRepositoryError>;
 		readonly RenewLease: (
 			identity: typeof ClaimIdentity.Type,
 		) => Effect.Effect<void, HostedGitMutationRepositoryError>;
 		readonly Request: (
+			input: unknown,
+		) => Effect.Effect<HostedGitMutationAcceptance, HostedGitMutationRepositoryError>;
+		readonly Settle: (
 			input: unknown,
 		) => Effect.Effect<HostedGitMutationAcceptance, HostedGitMutationRepositoryError>;
 	}
@@ -200,6 +254,7 @@ type StoredArtifact =
 			readonly _tag: "private";
 			readonly command: typeof HostedGitMutationCommandRequest.Type;
 			readonly operation_binding: string;
+			readonly provider_result?: HostedGitMutationResultValue;
 	  }
 	| {
 			readonly _tag: "scrubbed";
@@ -252,6 +307,46 @@ function normalize_execution_error<E>(
 
 function json_equals(left: unknown, right: unknown) {
 	return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function provider_result_matches_mutation(
+	mutation: typeof HostedGitMutationSummary.Type,
+	result: HostedGitMutationResultValue,
+) {
+	if (result.operation !== mutation.operation) {
+		return false;
+	}
+
+	if (result.operation === "reply_review_thread") {
+		return (
+			mutation.operation === "reply_review_thread" &&
+			result.origin.provider_id === mutation.repository.provider_id &&
+			json_equals(result.thread_origin, mutation.thread_origin)
+		);
+	}
+
+	if (result.operation === "resolve_review_thread") {
+		return (
+			mutation.operation === "resolve_review_thread" &&
+			json_equals(result.origin, mutation.thread_origin)
+		);
+	}
+
+	if (result.operation === "rerun_workflow") {
+		return (
+			mutation.operation === "rerun_workflow" &&
+			json_equals(result.origin, mutation.workflow_origin)
+		);
+	}
+
+	if (result.operation === "cancel_workflow") {
+		return (
+			mutation.operation === "cancel_workflow" &&
+			json_equals(result.origin, mutation.workflow_origin)
+		);
+	}
+
+	return json_equals(result.origin, mutation.pull_request_origin);
 }
 
 function DecodeDateTime(value: unknown) {
@@ -336,31 +431,70 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 
 		const DecodeApproval = (row: ApprovalRow) =>
 			Effect.gen(function* () {
-				const requested =
-					row.state === "requested" &&
+				const undecided =
 					row.decision_message_id === null &&
 					row.approved === null &&
-					row.decided_at === null &&
-					row.execution_started_at === null &&
+					row.decided_at === null;
+				const approved_decision =
+					row.decision_message_id !== null &&
+					row.approved === true &&
+					row.decided_at !== null;
+				const denied_decision =
+					row.decision_message_id !== null &&
+					row.approved === false &&
+					row.decided_at !== null;
+				const no_outcome =
 					row.result_json === null &&
 					row.rejection_reason === null &&
-					row.unknown_reason === null &&
+					row.unknown_reason === null;
+				const requested =
+					row.state === "requested" &&
+					undecided &&
+					row.execution_started_at === null &&
+					no_outcome &&
 					row.updated_at === row.created_at;
 				const approved =
-					(row.state === "approved" || row.state === "executing") &&
-					row.approved === true;
-				const denied = row.state === "denied" && row.approved === false;
+					row.state === "approved" &&
+					approved_decision &&
+					row.execution_started_at === null &&
+					no_outcome &&
+					row.updated_at === row.decided_at;
+				const executing = row.state === "executing" && approved_decision && no_outcome;
+				const applied =
+					row.state === "applied" &&
+					approved_decision &&
+					row.execution_started_at !== null &&
+					row.result_json !== null &&
+					row.rejection_reason === null &&
+					row.unknown_reason === null;
+				const rejected =
+					row.state === "rejected" &&
+					approved_decision &&
+					row.result_json === null &&
+					row.rejection_reason !== null &&
+					row.unknown_reason === null;
+				const outcome_unknown =
+					row.state === "outcome_unknown" &&
+					approved_decision &&
+					row.execution_started_at !== null &&
+					row.result_json === null &&
+					row.rejection_reason === null &&
+					row.unknown_reason !== null;
+				const denied =
+					row.state === "denied" &&
+					denied_decision &&
+					row.execution_started_at === null &&
+					no_outcome &&
+					row.updated_at === row.decided_at;
 
 				if (
 					!requested &&
-					((!approved && !denied) ||
-						row.decision_message_id === null ||
-						row.decided_at === null ||
-						(row.state !== "executing" && row.execution_started_at !== null) ||
-						row.result_json !== null ||
-						row.rejection_reason !== null ||
-						row.unknown_reason !== null ||
-						(row.state !== "executing" && row.updated_at !== row.decided_at))
+					!approved &&
+					!executing &&
+					!applied &&
+					!rejected &&
+					!outcome_unknown &&
+					!denied
 				) {
 					return yield* invariant();
 				}
@@ -381,6 +515,27 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 					row.repository_json,
 				);
 				const selection = yield* DecodeJson(HostedProjectSelection, row.selection_json);
+				const result =
+					row.result_json === null
+						? undefined
+						: yield* DecodeJson(HostedGitMutationResult, row.result_json);
+				const rejection_reason =
+					row.rejection_reason === null
+						? undefined
+						: yield* Schema.decodeUnknownEffect(HostedGitMutationRejectionReason)(
+								row.rejection_reason,
+							).pipe(Effect.mapError(invariant));
+				const unknown_reason =
+					row.unknown_reason === null
+						? undefined
+						: yield* Schema.decodeUnknownEffect(HostedGitMutationUnknownReason)(
+								row.unknown_reason,
+							).pipe(Effect.mapError(invariant));
+
+				if (result !== undefined && !provider_result_matches_mutation(summary, result)) {
+					return yield* invariant();
+				}
+
 				const operation = yield* Schema.decodeUnknownEffect(HostedGitMutationApproval, {
 					onExcessProperty: "error",
 				})({
@@ -405,6 +560,9 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 						? {}
 						: { decision: row.approved ? "approved" : "denied" }),
 					...(row.decided_at === null ? {} : { decided_at: row.decided_at }),
+					...(result === undefined ? {} : { result }),
+					...(rejection_reason === undefined ? {} : { reason: rejection_reason }),
+					...(unknown_reason === undefined ? {} : { reason: unknown_reason }),
 				}).pipe(Effect.mapError(invariant));
 
 				return operation;
@@ -451,7 +609,13 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 								return yield* invariant();
 							}
 
-							if (approval.state === "denied") {
+							const terminal =
+								approval.state === "denied" ||
+								approval.state === "applied" ||
+								approval.state === "rejected" ||
+								approval.state === "outcome_unknown";
+
+							if (terminal) {
 								if (
 									!private_fields_scrubbed ||
 									artifact.provider_result_json !== null
@@ -472,7 +636,8 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 								private_fields_scrubbed ||
 								artifact.operation_json === null ||
 								artifact.selection_json === null ||
-								artifact.provider_result_json !== null
+								(approval.state !== "executing" &&
+									artifact.provider_result_json !== null)
 							) {
 								return yield* invariant();
 							}
@@ -485,6 +650,13 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 								HostedProjectSelection,
 								artifact.selection_json,
 							);
+							const provider_result =
+								artifact.provider_result_json === null
+									? undefined
+									: yield* DecodeJson(
+											HostedGitMutationResult,
+											artifact.provider_result_json,
+										);
 							const summary = summarize_hosted_git_mutation(mutation.mutation);
 							const binding = yield* OperationBinding({
 								approval_id: row.approval_id,
@@ -497,6 +669,11 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 								!json_equals(selection, mutation.selection) ||
 								!json_equals(selection, approval.selection) ||
 								!json_equals(summary, approval.operation) ||
+								(provider_result !== undefined &&
+									!provider_result_matches_mutation(
+										mutation.mutation,
+										provider_result,
+									)) ||
 								operation_binding !== binding
 							) {
 								return yield* invariant();
@@ -506,6 +683,7 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 								_tag: "private",
 								command: mutation,
 								operation_binding,
+								...(provider_result === undefined ? {} : { provider_result }),
 							} satisfies StoredArtifact;
 						}),
 					),
@@ -1026,10 +1204,25 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 							approval,
 							claim_token: claim.claim_token,
 							command: artifact.command,
+							...(artifact.provider_result === undefined
+								? {}
+								: { provider_result: artifact.provider_result }),
 						}) satisfies HostedGitMutationExecution,
 				),
 			);
 		};
+
+		const WithExecutionGate = <A, E, R>(approval_id: string, effect: Effect.Effect<A, E, R>) =>
+			ReadRow(database.client, approval_id).pipe(
+				Effect.flatMap((row) =>
+					execution_gate.Run(
+						`hosted_git_mutation:${row.workspace_id}`,
+						metadata.instance_id,
+						effect,
+					),
+				),
+				Effect.mapError(normalize_error),
+			);
 
 		const MarkExecuting = (approval_id: string) =>
 			Schema.decodeUnknownEffect(Identifier)(approval_id).pipe(
@@ -1465,6 +1658,461 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 				Effect.mapError(normalize_execution_error<E>),
 			);
 
+		const RecordProviderResult = (input: unknown) =>
+			Schema.decodeUnknownEffect(ProviderResultInput, { onExcessProperty: "error" })(
+				input,
+			).pipe(
+				Effect.mapError(() => conflict("artifact_conflict")),
+				Effect.flatMap((decoded) =>
+					RetrySqliteWrite(
+						database.client.transaction((transaction) =>
+							Effect.gen(function* () {
+								const row = yield* ReadRow(transaction, decoded.approval_id);
+								const acceptance = yield* ValidateStored(transaction, row);
+								const current = acceptance.approval;
+
+								if (current.state === "applied") {
+									if (!json_equals(current.result, decoded.result)) {
+										return yield* conflict("artifact_conflict");
+									}
+
+									return;
+								}
+
+								yield* EnsureLiveThread(transaction, row.thread_id);
+
+								if (row.state !== "executing") {
+									return yield* conflict("invalid_transition");
+								}
+
+								const artifact = yield* ReadArtifact(transaction, row, current);
+								const claim = yield* ReadClaim(
+									transaction,
+									row,
+									decoded.claim_token,
+									metadata.instance_id,
+								);
+
+								if (
+									artifact._tag !== "private" ||
+									claim.execution_started_at === null ||
+									!provider_result_matches_mutation(
+										artifact.command.mutation,
+										decoded.result,
+									)
+								) {
+									return yield* conflict("artifact_conflict");
+								}
+
+								if (artifact.provider_result !== undefined) {
+									if (!json_equals(artifact.provider_result, decoded.result)) {
+										return yield* conflict("artifact_conflict");
+									}
+
+									return;
+								}
+
+								const [updated] = yield* transaction
+									.update(HostedGitMutationArtifacts)
+									.set({ provider_result_json: JSON.stringify(decoded.result) })
+									.where(
+										and(
+											eq(
+												HostedGitMutationArtifacts.approval_id,
+												decoded.approval_id,
+											),
+											isNull(HostedGitMutationArtifacts.provider_result_json),
+										),
+									)
+									.returning({
+										approval_id: HostedGitMutationArtifacts.approval_id,
+									});
+
+								if (!updated) {
+									return yield* conflict("artifact_conflict");
+								}
+
+								yield* ValidateStored(transaction, row);
+							}),
+						),
+					),
+				),
+				Effect.mapError(normalize_error),
+			);
+
+		const SettlementMatches = (
+			approval: HostedGitMutationApprovalValue,
+			settlement: HostedGitMutationSettlement,
+		) => {
+			if (settlement.type === "applied") {
+				return approval.state === "applied";
+			}
+
+			return approval.state === settlement.type && approval.reason === settlement.reason;
+		};
+
+		const Settle = (input: unknown) =>
+			Schema.decodeUnknownEffect(Settlement, { onExcessProperty: "error" })(input).pipe(
+				Effect.mapError(() => conflict("artifact_conflict")),
+				Effect.flatMap((decoded) =>
+					WithExecutionGate(
+						decoded.approval_id,
+						Effect.gen(function* () {
+							const result = yield* RetrySqliteWrite(
+								database.client.transaction((transaction) =>
+									Effect.gen(function* () {
+										const row = yield* ReadRow(
+											transaction,
+											decoded.approval_id,
+										);
+										const current = yield* DecodeApproval(row);
+
+										if (SettlementMatches(current, decoded)) {
+											const acceptance = yield* ValidateStored(
+												transaction,
+												row,
+											);
+
+											return { ...acceptance, status: "duplicate" as const };
+										}
+
+										yield* EnsureLiveThread(transaction, row.thread_id);
+
+										if (row.state !== "executing") {
+											return yield* conflict("invalid_transition");
+										}
+
+										const artifact = yield* ReadArtifact(
+											transaction,
+											row,
+											current,
+										);
+										const claim = yield* ReadClaim(
+											transaction,
+											row,
+											decoded.claim_token,
+											metadata.instance_id,
+										);
+
+										if (artifact._tag !== "private") {
+											return yield* conflict("artifact_conflict");
+										}
+
+										const applied_valid =
+											decoded.type === "applied" &&
+											artifact.provider_result !== undefined &&
+											claim.execution_started_at !== null;
+										const rejected_valid =
+											decoded.type === "rejected" &&
+											artifact.provider_result === undefined &&
+											(claim.execution_started_at === null ||
+												claim.execution_completed_at !== null);
+										const unknown_valid =
+											decoded.type === "outcome_unknown" &&
+											artifact.provider_result === undefined &&
+											claim.execution_started_at !== null;
+
+										if (!applied_valid && !rejected_valid && !unknown_valid) {
+											return yield* conflict("artifact_conflict");
+										}
+
+										const updated_at = yield* metadata.Now;
+										const patch =
+											decoded.type === "applied"
+												? {
+														result_json: JSON.stringify(
+															artifact.provider_result,
+														),
+														state: decoded.type,
+													}
+												: decoded.type === "rejected"
+													? {
+															rejection_reason: decoded.reason,
+															state: decoded.type,
+														}
+													: {
+															state: decoded.type,
+															unknown_reason: decoded.reason,
+														};
+										const [updated] = yield* transaction
+											.update(HostedGitMutationApprovals)
+											.set({ ...patch, updated_at })
+											.where(
+												and(
+													eq(
+														HostedGitMutationApprovals.approval_id,
+														decoded.approval_id,
+													),
+													eq(
+														HostedGitMutationApprovals.state,
+														"executing",
+													),
+												),
+											)
+											.returning();
+
+										if (!updated || updated.decision_message_id === null) {
+											return yield* conflict("invalid_transition");
+										}
+
+										yield* transaction
+											.update(HostedGitMutationArtifacts)
+											.set({
+												operation_json: null,
+												provider_result_json: null,
+												selection_json: null,
+												updated_at,
+											})
+											.where(
+												eq(
+													HostedGitMutationArtifacts.approval_id,
+													decoded.approval_id,
+												),
+											);
+										yield* transaction
+											.delete(HostedGitMutationClaims)
+											.where(
+												eq(
+													HostedGitMutationClaims.approval_id,
+													decoded.approval_id,
+												),
+											);
+
+										const approval = yield* DecodeApproval(updated);
+										yield* AppendEvent(
+											transaction,
+											approval,
+											updated.decision_message_id,
+										);
+										const acceptance = yield* ValidateStored(
+											transaction,
+											updated,
+										);
+
+										return { ...acceptance, status: "accepted" as const };
+									}),
+								),
+							).pipe(Effect.mapError(normalize_error));
+
+							if (result.status === "accepted") {
+								yield* notifier.Publish(result.event.journal_sequence);
+							}
+
+							return result;
+						}),
+					),
+				),
+				Effect.mapError(normalize_error),
+			);
+
+		const ClaimRecovery = (approval_id: string) =>
+			Schema.decodeUnknownEffect(Identifier)(approval_id).pipe(
+				Effect.mapError(() => new HostedGitMutationUnavailable({ reason: "missing" })),
+				Effect.flatMap((decoded) =>
+					WithExecutionGate(
+						decoded,
+						RetrySqliteWrite(
+							database.client.transaction((transaction) =>
+								Effect.gen(function* () {
+									const [row] = yield* transaction
+										.select()
+										.from(HostedGitMutationApprovals)
+										.where(eq(HostedGitMutationApprovals.approval_id, decoded))
+										.limit(1);
+
+									if (!row || row.state !== "executing") {
+										return Option.none<HostedGitMutationExecution>();
+									}
+
+									yield* EnsureLiveThread(transaction, row.thread_id);
+									const acceptance = yield* ValidateStored(transaction, row);
+									const artifact = yield* ReadArtifact(
+										transaction,
+										row,
+										acceptance.approval,
+									);
+									const claim = yield* ReadClaim(transaction, row);
+									const now = yield* metadata.Now;
+									const expired = yield* LeaseExpired(
+										claim.lease_expires_at,
+										now,
+									);
+									const safe =
+										claim.execution_started_at === null ||
+										(artifact._tag === "private" &&
+											artifact.provider_result !== undefined);
+
+									if (!expired || !safe || artifact._tag !== "private") {
+										return Option.none<HostedGitMutationExecution>();
+									}
+
+									const claim_token = yield* metadata.MakeId("claim");
+									const lease_expires_at = yield* LeaseExpiry(now);
+									const [recovered] = yield* transaction
+										.update(HostedGitMutationClaims)
+										.set({
+											claim_token,
+											lease_expires_at,
+											owner_instance_id: metadata.instance_id,
+										})
+										.where(
+											and(
+												eq(HostedGitMutationClaims.approval_id, decoded),
+												eq(
+													HostedGitMutationClaims.claim_token,
+													claim.claim_token,
+												),
+												eq(
+													HostedGitMutationClaims.owner_instance_id,
+													claim.owner_instance_id,
+												),
+												eq(
+													HostedGitMutationClaims.lease_expires_at,
+													claim.lease_expires_at,
+												),
+											),
+										)
+										.returning();
+
+									if (!recovered) {
+										return Option.none<HostedGitMutationExecution>();
+									}
+
+									return Option.some(
+										yield* BuildExecution(row, recovered, artifact),
+									);
+								}),
+							),
+						),
+					),
+				),
+				Effect.mapError(normalize_error),
+			);
+
+		const QuarantineInterrupted = (approval_id: string) =>
+			Schema.decodeUnknownEffect(Identifier)(approval_id).pipe(
+				Effect.mapError(() => new HostedGitMutationUnavailable({ reason: "missing" })),
+				Effect.flatMap((decoded) =>
+					Effect.gen(function* () {
+						const result = yield* WithExecutionGate(
+							decoded,
+							RetrySqliteWrite(
+								database.client.transaction((transaction) =>
+									Effect.gen(function* () {
+										const row = yield* ReadRow(transaction, decoded);
+										const current = yield* DecodeApproval(row);
+
+										if (
+											current.state === "outcome_unknown" &&
+											current.reason === "execution_interrupted"
+										) {
+											const acceptance = yield* ValidateStored(
+												transaction,
+												row,
+											);
+
+											return { ...acceptance, status: "duplicate" as const };
+										}
+
+										yield* EnsureLiveThread(transaction, row.thread_id);
+
+										if (
+											row.state !== "executing" ||
+											row.decision_message_id === null
+										) {
+											return yield* conflict("invalid_transition");
+										}
+
+										const artifact = yield* ReadArtifact(
+											transaction,
+											row,
+											current,
+										);
+										const claim = yield* ReadClaim(transaction, row);
+										const updated_at = yield* metadata.Now;
+										const expired = yield* LeaseExpired(
+											claim.lease_expires_at,
+											updated_at,
+										);
+
+										if (
+											!expired ||
+											claim.execution_started_at === null ||
+											artifact._tag !== "private" ||
+											artifact.provider_result !== undefined
+										) {
+											return yield* conflict("invalid_transition");
+										}
+
+										const [updated] = yield* transaction
+											.update(HostedGitMutationApprovals)
+											.set({
+												state: "outcome_unknown",
+												unknown_reason: "execution_interrupted",
+												updated_at,
+											})
+											.where(
+												and(
+													eq(
+														HostedGitMutationApprovals.approval_id,
+														decoded,
+													),
+													eq(
+														HostedGitMutationApprovals.state,
+														"executing",
+													),
+												),
+											)
+											.returning();
+
+										if (!updated) {
+											return yield* conflict("invalid_transition");
+										}
+
+										yield* transaction
+											.update(HostedGitMutationArtifacts)
+											.set({
+												operation_json: null,
+												provider_result_json: null,
+												selection_json: null,
+												updated_at,
+											})
+											.where(
+												eq(HostedGitMutationArtifacts.approval_id, decoded),
+											);
+										yield* transaction
+											.delete(HostedGitMutationClaims)
+											.where(
+												eq(HostedGitMutationClaims.approval_id, decoded),
+											);
+
+										const approval = yield* DecodeApproval(updated);
+										yield* AppendEvent(
+											transaction,
+											approval,
+											row.decision_message_id,
+										);
+										const acceptance = yield* ValidateStored(
+											transaction,
+											updated,
+										);
+
+										return { ...acceptance, status: "accepted" as const };
+									}),
+								),
+							),
+						);
+
+						if (result.status === "accepted") {
+							yield* notifier.Publish(result.event.journal_sequence);
+						}
+
+						return result;
+					}),
+				),
+				Effect.mapError(normalize_error),
+			);
+
 		const ListApproved = database.client
 			.transaction((transaction) =>
 				Effect.gen(function* () {
@@ -1487,6 +2135,114 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 				}),
 			)
 			.pipe(Effect.mapError(normalize_error));
+
+		const ListExecuting = Effect.gen(function* () {
+			const now = yield* metadata.Now;
+
+			return yield* database.client.transaction((transaction) =>
+				Effect.gen(function* () {
+					const rows = yield* transaction
+						.select()
+						.from(HostedGitMutationApprovals)
+						.where(eq(HostedGitMutationApprovals.state, "executing"))
+						.orderBy(
+							asc(HostedGitMutationApprovals.created_at),
+							asc(HostedGitMutationApprovals.approval_id),
+						);
+
+					return yield* Effect.forEach(rows, (row) =>
+						Effect.gen(function* () {
+							yield* EnsureLiveThread(transaction, row.thread_id);
+							const acceptance = yield* ValidateStored(transaction, row);
+							const artifact = yield* ReadArtifact(
+								transaction,
+								row,
+								acceptance.approval,
+							);
+							const claim = yield* ReadClaim(transaction, row);
+							const expired = yield* LeaseExpired(claim.lease_expires_at, now);
+							const safe =
+								claim.execution_started_at === null ||
+								(artifact._tag === "private" &&
+									artifact.provider_result !== undefined);
+							const owned = claim.owner_instance_id === metadata.instance_id;
+							const recovery: HostedGitMutationDispatch["recovery"] = expired
+								? safe
+									? "recoverable"
+									: "quarantine"
+								: owned
+									? "owned"
+									: "waiting";
+
+							return {
+								approval_id: row.approval_id,
+								recovery,
+								thread_id: row.thread_id,
+							};
+						}),
+					);
+				}),
+			);
+		}).pipe(Effect.mapError(normalize_error));
+
+		const AbandonOwnedExecutions = Effect.gen(function* () {
+			const now = yield* metadata.Now;
+			const current_time = yield* DecodeDateTime(now);
+
+			yield* RetrySqliteWrite(
+				database.client.transaction((transaction) =>
+					Effect.gen(function* () {
+						const claims = yield* transaction
+							.select()
+							.from(HostedGitMutationClaims)
+							.where(
+								eq(HostedGitMutationClaims.owner_instance_id, metadata.instance_id),
+							);
+
+						for (const claim of claims) {
+							const row = yield* ReadRow(transaction, claim.approval_id);
+
+							yield* ValidateStored(transaction, row);
+							const claimed_at = yield* DecodeDateTime(claim.claimed_at);
+							const latest_owned_time =
+								claim.execution_started_at === null
+									? claimed_at
+									: yield* DecodeDateTime(claim.execution_started_at);
+							const minimum_expiry = DateTime.add(latest_owned_time, {
+								milliseconds: 1,
+							});
+							const lease_expires_at =
+								DateTime.toEpochMillis(current_time) >=
+								DateTime.toEpochMillis(minimum_expiry)
+									? now
+									: DateTime.formatIso(minimum_expiry);
+							const [abandoned] = yield* transaction
+								.update(HostedGitMutationClaims)
+								.set({ lease_expires_at })
+								.where(
+									and(
+										eq(HostedGitMutationClaims.approval_id, claim.approval_id),
+										eq(HostedGitMutationClaims.claim_token, claim.claim_token),
+										eq(
+											HostedGitMutationClaims.owner_instance_id,
+											metadata.instance_id,
+										),
+										eq(
+											HostedGitMutationClaims.lease_expires_at,
+											claim.lease_expires_at,
+										),
+									),
+								)
+								.returning({ approval_id: HostedGitMutationClaims.approval_id });
+
+							if (!abandoned) {
+								return yield* conflict("lease_conflict");
+							}
+						}
+					}),
+				),
+			);
+		}).pipe(Effect.mapError(normalize_error));
 
 		const ActiveClaimsForThread = (thread_id: string) =>
 			Schema.decodeUnknownEffect(Identifier)(thread_id).pipe(
@@ -1898,17 +2654,23 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 			);
 
 		return {
+			AbandonOwnedExecutions,
 			ActiveClaimsForThread,
+			ClaimRecovery,
 			Decide,
 			ExecuteClaimed,
 			ListApproved,
+			ListExecuting,
 			MarkExecuting,
 			Query,
+			QuarantineInterrupted,
 			ReadBySourceCommand,
 			ReadExecution,
+			RecordProviderResult,
 			RenewLease,
 			ReplayRequest,
 			Request,
+			Settle,
 		};
 	}),
 );
