@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
 	DecodeInboundControlEnvelope,
 	DecodeOutboundControlEnvelope,
+	EventEnvelope,
 	HostedGitCheckFailureDetail,
 	HostedGitMutationApproval,
 	HostedGitMutationApprovalUpdatedEvent,
@@ -455,6 +456,24 @@ describe("Hosted Git protocol codec", () => {
 				Schema.decodeUnknownEffect(HostedGitMutationApprovalUpdatedEvent)(event),
 			),
 		).resolves.toEqual(event);
+		const envelope = {
+			causation_id: "message_1",
+			correlation_id: "approval_1",
+			journal_sequence: 1,
+			kind: "event" as const,
+			message_id: "event_1",
+			origin: "backend" as const,
+			payload: event,
+			protocol_version: 1 as const,
+			schema_version: 1,
+			sent_at: timestamp,
+			sequence: 1,
+			stream_id: "thread:thread_1",
+			thread_id: "thread_1",
+		};
+		await expect(
+			Effect.runPromise(Schema.decodeUnknownEffect(EventEnvelope)(envelope)),
+		).resolves.toEqual(envelope);
 
 		await expect(
 			Effect.runPromise(

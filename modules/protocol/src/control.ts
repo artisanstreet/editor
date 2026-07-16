@@ -44,6 +44,7 @@ import {
 import {
 	HostedGitCheckFailureDetailQuery,
 	HostedGitCheckFailureDetailQueryResult,
+	HostedGitMutationApprovalUpdatedEvent,
 	HostedGitSnapshotQuery,
 	HostedGitSnapshotQueryResult,
 	HostedGitSnapshotRefreshRequest,
@@ -983,6 +984,7 @@ export const EventPayload = Schema.Union([
 	WorkspaceGitFetchRequestedEvent,
 	WorkspaceGitFetchCompletedEvent,
 	HostedProjectCloneApprovalUpdatedEvent,
+	HostedGitMutationApprovalUpdatedEvent,
 	HostedGitSnapshotUpdatedEvent,
 	ExternalWaitUpdatedEvent,
 	ThreadMessageQueuedEvent,
