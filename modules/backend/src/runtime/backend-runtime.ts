@@ -547,6 +547,16 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(git_provider_registry),
 		Layer.provideMerge(hosted_git_mutation_repository),
 	);
+	const hosted_git_mutation_protocol = Layer.merge(
+		hosted_git_mutation_repository,
+		hosted_git_mutations,
+	);
+	const protocol_hosted_services = Layer.mergeAll(
+		hosted_project_clone_repository,
+		hosted_project_clones,
+		hosted_git_mutation_protocol,
+		hosted_git_snapshots,
+	);
 	const project_affinity_coordination =
 		options.project_locator === undefined
 			? ThreadProjectAffinityCoordinatorDisabled
@@ -644,9 +654,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(metadata_refinement),
 		Layer.provideMerge(project_catalog),
 		Layer.provideMerge(project_affinity_coordination),
-		Layer.provideMerge(hosted_project_clone_repository),
-		Layer.provideMerge(hosted_project_clones),
-		Layer.provideMerge(hosted_git_snapshots),
+		Layer.provideMerge(protocol_hosted_services),
 		Layer.provideMerge(external_waits),
 		Layer.provideMerge(external_wait_coordination),
 		Layer.provideMerge(external_wait_service),
@@ -656,10 +664,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(workspace),
 	);
 
-	return Layer.merge(
-		protocol_server,
-		Layer.merge(hosted_git_mutation_repository, hosted_git_mutations),
-	);
+	return Layer.merge(protocol_server, hosted_git_mutation_protocol);
 }
 
 function is_guidance_provider(value: string): value is GlobalGuidanceProvider {

@@ -35,6 +35,9 @@ import {
 	type HeartbeatPongEnvelope,
 	type HelloEnvelope,
 	type HostedGitCheckFailureDetailQueryEnvelope,
+	type HostedGitMutationApprovalQueryEnvelope,
+	type HostedGitMutationApprovalRespondEnvelope,
+	type HostedGitMutationRequestEnvelope,
 	type HostedGitSnapshotQueryEnvelope,
 	type HostedGitSnapshotRefreshEnvelope,
 	type HostedProjectCloneApprovalQueryEnvelope,
@@ -124,6 +127,16 @@ import {
 	RichLinkMetadataError,
 	type RichLinkMetadataResult,
 } from "../preview/rich-link-metadata";
+import {
+	HostedGitMutationCoordinator,
+	HostedGitMutationCoordinatorFailure,
+} from "../git-provider/hosted-git-mutation-coordinator";
+import {
+	HostedGitMutationConflict,
+	HostedGitMutationInvariant,
+	HostedGitMutationRepository,
+	HostedGitMutationUnavailable,
+} from "../git-provider/hosted-git-mutation-repository";
 import {
 	HostedProjectCloneCoordinator,
 	HostedProjectCloneCoordinatorFailure,
@@ -801,6 +814,46 @@ function hosted_project_clone_error_detail(error: unknown): ProtocolErrorDetail 
 	};
 }
 
+function hosted_git_mutation_error_detail(error: unknown): ProtocolErrorDetail {
+	if (error instanceof HostedGitMutationCoordinatorFailure) {
+		return {
+			code: "hosted.git.mutation_invalid_request",
+			message: "The hosted Git mutation request is invalid.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof HostedGitMutationConflict) {
+		return {
+			code: `hosted.git.mutation_${error.reason}`,
+			message: "The hosted Git mutation no longer matches its durable approval.",
+			retryable: error.reason === "claim_conflict" || error.reason === "lease_conflict",
+		};
+	}
+
+	if (error instanceof HostedGitMutationUnavailable) {
+		return {
+			code: "hosted.git.mutation_unavailable",
+			message: "The hosted Git mutation approval is no longer available.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof HostedGitMutationInvariant) {
+		return {
+			code: "hosted.git.mutation_invariant_failed",
+			message: "The durable hosted Git mutation failed validation.",
+			retryable: false,
+		};
+	}
+
+	return {
+		code: "hosted.git.mutation_unavailable",
+		message: "The hosted Git mutation could not be durably reconciled.",
+		retryable: true,
+	};
+}
+
 function hosted_git_snapshot_error_detail(error: unknown): ProtocolErrorDetail {
 	if (error instanceof GitProviderError) {
 		const code =
@@ -1133,6 +1186,8 @@ export function make_protocol_server_layer(
 			const rich_link_metadata = yield* RichLinkMetadata;
 			const guidance = yield* GlobalGuidanceService;
 			const hosted_git_snapshots = yield* HostedGitSnapshotService;
+			const hosted_git_mutations = yield* HostedGitMutationCoordinator;
+			const hosted_git_mutation_repository = yield* HostedGitMutationRepository;
 			const hosted_project_clones = yield* HostedProjectCloneCoordinator;
 			const hosted_project_clone_repository = yield* HostedProjectCloneRepository;
 			const model_behaviour = yield* ModelBehaviourService;
@@ -2276,6 +2331,41 @@ export function make_protocol_server_layer(
 						}),
 					);
 
+				const HandleHostedGitMutationApprovalQuery = (
+					query: HostedGitMutationApprovalQueryEnvelope,
+					current: ReadyState,
+				) =>
+					hosted_git_mutation_repository.Query(query.payload).pipe(
+						Effect.flatMap((result) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "hosted.git.mutation.approval.query.result",
+									message_id,
+									origin: "backend",
+									payload: result,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch((error) => {
+							const detail = hosted_git_mutation_error_detail(error);
+
+							return EnqueueError(
+								current,
+								detail.code,
+								detail.message,
+								detail.retryable,
+								query.message_id,
+							);
+						}),
+					);
+
 				const HandleSubscribe = (subscribe: SubscribeEnvelope, current: ReadyState) =>
 					Effect.gen(function* () {
 						if (current.subscriptions[subscribe.subscription_id]) {
@@ -2983,6 +3073,8 @@ export function make_protocol_server_layer(
 				};
 
 				type WorkspaceGitMutationEnvelope =
+					| HostedGitMutationApprovalRespondEnvelope
+					| HostedGitMutationRequestEnvelope
 					| HostedProjectCloneApprovalRespondEnvelope
 					| HostedProjectCloneRequestEnvelope
 					| WorkspaceGitCheckoutApprovalRespondEnvelope
@@ -3090,48 +3182,63 @@ export function make_protocol_server_layer(
 										sent_at: envelope.sent_at,
 										thread_id: envelope.thread_id,
 									})
-								: envelope.kind === "hosted.git.snapshot.refresh"
-									? hosted_git_snapshots.Refresh({
+								: envelope.kind === "hosted.git.mutation.request"
+									? hosted_git_mutations.Request({
 											...envelope.payload,
 											message_id: envelope.message_id,
 											sent_at: envelope.sent_at,
 											thread_id: envelope.thread_id,
 										})
-									: envelope.kind === "workspace.git.session.refresh"
-										? workspace_git_sessions.Refresh({
+									: envelope.kind === "hosted.git.mutation.approval.respond"
+										? hosted_git_mutations.Respond({
 												...envelope.payload,
 												message_id: envelope.message_id,
 												sent_at: envelope.sent_at,
 												thread_id: envelope.thread_id,
 											})
-										: envelope.kind === "workspace.git.checkout.request"
-											? workspace_git_checkouts.Request({
+										: envelope.kind === "hosted.git.snapshot.refresh"
+											? hosted_git_snapshots.Refresh({
 													...envelope.payload,
 													message_id: envelope.message_id,
 													sent_at: envelope.sent_at,
 													thread_id: envelope.thread_id,
 												})
-											: envelope.kind ===
-												  "workspace.git.checkout.approval.respond"
-												? workspace_git_checkouts.Respond({
+											: envelope.kind === "workspace.git.session.refresh"
+												? workspace_git_sessions.Refresh({
 														...envelope.payload,
 														message_id: envelope.message_id,
 														sent_at: envelope.sent_at,
 														thread_id: envelope.thread_id,
 													})
-												: envelope.kind === "workspace.git.mutation.request"
-													? workspace_git_mutations.Request({
+												: envelope.kind === "workspace.git.checkout.request"
+													? workspace_git_checkouts.Request({
 															...envelope.payload,
 															message_id: envelope.message_id,
 															sent_at: envelope.sent_at,
 															thread_id: envelope.thread_id,
 														})
-													: workspace_git_mutations.Respond({
-															...envelope.payload,
-															message_id: envelope.message_id,
-															sent_at: envelope.sent_at,
-															thread_id: envelope.thread_id,
-														});
+													: envelope.kind ===
+														  "workspace.git.checkout.approval.respond"
+														? workspace_git_checkouts.Respond({
+																...envelope.payload,
+																message_id: envelope.message_id,
+																sent_at: envelope.sent_at,
+																thread_id: envelope.thread_id,
+															})
+														: envelope.kind ===
+															  "workspace.git.mutation.request"
+															? workspace_git_mutations.Request({
+																	...envelope.payload,
+																	message_id: envelope.message_id,
+																	sent_at: envelope.sent_at,
+																	thread_id: envelope.thread_id,
+																})
+															: workspace_git_mutations.Respond({
+																	...envelope.payload,
+																	message_id: envelope.message_id,
+																	sent_at: envelope.sent_at,
+																	thread_id: envelope.thread_id,
+																});
 
 					return operation.pipe(
 						Effect.matchEffect({
@@ -3140,16 +3247,22 @@ export function make_protocol_server_layer(
 									envelope.kind === "hosted.project.clone.request" ||
 									envelope.kind === "hosted.project.clone.approval.respond"
 										? hosted_project_clone_error_detail(error)
-										: envelope.kind === "hosted.git.snapshot.refresh"
-											? hosted_git_snapshot_error_detail(error)
-											: envelope.kind === "workspace.git.session.refresh"
-												? workspace_git_session_error_detail(error)
-												: envelope.kind ===
-															"workspace.git.checkout.request" ||
-													  envelope.kind ===
-															"workspace.git.checkout.approval.respond"
-													? workspace_git_checkout_error_detail(error)
-													: workspace_git_mutation_error_detail(error);
+										: envelope.kind === "hosted.git.mutation.request" ||
+											  envelope.kind ===
+													"hosted.git.mutation.approval.respond"
+											? hosted_git_mutation_error_detail(error)
+											: envelope.kind === "hosted.git.snapshot.refresh"
+												? hosted_git_snapshot_error_detail(error)
+												: envelope.kind === "workspace.git.session.refresh"
+													? workspace_git_session_error_detail(error)
+													: envelope.kind ===
+																"workspace.git.checkout.request" ||
+														  envelope.kind ===
+																"workspace.git.checkout.approval.respond"
+														? workspace_git_checkout_error_detail(error)
+														: workspace_git_mutation_error_detail(
+																error,
+															);
 
 								return Effect.gen(function* () {
 									const message_id = yield* metadata.MakeId("message");
@@ -3237,10 +3350,14 @@ export function make_protocol_server_layer(
 							return HandleWorkspaceGitCheckoutApprovalQuery(envelope, current);
 						case "workspace.git.mutation.approval.query":
 							return HandleWorkspaceGitMutationApprovalQuery(envelope, current);
+						case "hosted.git.mutation.approval.query":
+							return HandleHostedGitMutationApprovalQuery(envelope, current);
 						case "hosted.project.clone.approval.query":
 							return HandleHostedProjectCloneApprovalQuery(envelope, current);
 						case "hosted.project.clone.request":
 						case "hosted.project.clone.approval.respond":
+						case "hosted.git.mutation.request":
+						case "hosted.git.mutation.approval.respond":
 						case "hosted.git.snapshot.refresh":
 						case "workspace.git.session.refresh":
 						case "workspace.git.fetch.policy.update":

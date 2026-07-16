@@ -44,7 +44,11 @@ import {
 import {
 	HostedGitCheckFailureDetailQuery,
 	HostedGitCheckFailureDetailQueryResult,
+	HostedGitMutationApprovalQuery,
+	HostedGitMutationApprovalQueryResult,
+	HostedGitMutationApprovalResponseRequest,
 	HostedGitMutationApprovalUpdatedEvent,
+	HostedGitMutationCommandRequest,
 	HostedGitSnapshotQuery,
 	HostedGitSnapshotQueryResult,
 	HostedGitSnapshotRefreshRequest,
@@ -1631,6 +1635,48 @@ export const HostedProjectCloneApprovalRespondEnvelope = Schema.Struct({
 export type HostedProjectCloneApprovalRespondEnvelope =
 	typeof HostedProjectCloneApprovalRespondEnvelope.Type;
 
+/** Requests preparation of one hosted Git mutation approval. */
+export const HostedGitMutationRequestEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("hosted.git.mutation.request"),
+	payload: HostedGitMutationCommandRequest,
+	thread_id: Identifier,
+});
+
+export type HostedGitMutationRequestEnvelope = typeof HostedGitMutationRequestEnvelope.Type;
+
+/** Requests one source-free hosted Git mutation approval by durable identity. */
+export const HostedGitMutationApprovalQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("hosted.git.mutation.approval.query"),
+	payload: HostedGitMutationApprovalQuery,
+});
+
+export type HostedGitMutationApprovalQueryEnvelope =
+	typeof HostedGitMutationApprovalQueryEnvelope.Type;
+
+/** Returns a correlated source-free hosted Git mutation approval projection. */
+export const HostedGitMutationApprovalQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("hosted.git.mutation.approval.query.result"),
+	payload: HostedGitMutationApprovalQueryResult,
+});
+
+export type HostedGitMutationApprovalQueryResultEnvelope =
+	typeof HostedGitMutationApprovalQueryResultEnvelope.Type;
+
+/** Records an explicit approval or denial for one hosted Git mutation request. */
+export const HostedGitMutationApprovalRespondEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("hosted.git.mutation.approval.respond"),
+	payload: HostedGitMutationApprovalResponseRequest,
+	thread_id: Identifier,
+});
+
+export type HostedGitMutationApprovalRespondEnvelope =
+	typeof HostedGitMutationApprovalRespondEnvelope.Type;
+
 /** Requests the curated Model Behaviour registry and current reconciliation state. */
 export const ModelBehaviourQueryEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
@@ -1971,6 +2017,9 @@ export const InboundControlEnvelope = Schema.Union([
 	HostedProjectCloneRequestEnvelope,
 	HostedProjectCloneApprovalQueryEnvelope,
 	HostedProjectCloneApprovalRespondEnvelope,
+	HostedGitMutationRequestEnvelope,
+	HostedGitMutationApprovalQueryEnvelope,
+	HostedGitMutationApprovalRespondEnvelope,
 	GlobalGuidanceQueryEnvelope,
 	GlobalGuidanceUpdateEnvelope,
 	GlobalGuidanceSelectionEnvelope,
@@ -2016,6 +2065,7 @@ export const OutboundControlEnvelope = Schema.Union([
 	WorkspaceGitCheckoutApprovalQueryResultEnvelope,
 	WorkspaceGitMutationApprovalQueryResultEnvelope,
 	HostedProjectCloneApprovalQueryResultEnvelope,
+	HostedGitMutationApprovalQueryResultEnvelope,
 	GlobalGuidanceQueryResultEnvelope,
 	ModelBehaviourQueryResultEnvelope,
 	ThreadWorkQueryResultEnvelope,

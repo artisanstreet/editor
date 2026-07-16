@@ -670,6 +670,109 @@ describe("Hosted Git protocol codec", () => {
 		}
 	});
 
+	it("strictly roundtrips hosted mutation request and approval control envelopes", async () => {
+		const mutation = {
+			expected_head_commit: head,
+			operation: "resolve_review_thread" as const,
+			pull_request_number: 42,
+			pull_request_origin: {
+				native_id: "PR_42",
+				provider_id: "github",
+				resource_kind: "pull_request" as const,
+			},
+			repository: {
+				host: "github.com",
+				name: "editor",
+				owner: "artisan",
+				provider_id: "github",
+			},
+			selected_branch: "feature/hosted-state",
+			snapshot_version: 1,
+			thread_origin: {
+				native_id: "thread_2",
+				provider_id: "github",
+				resource_kind: "review_thread" as const,
+			},
+			workspace_id: "workspace_1",
+		};
+		const approval = {
+			approval_id: "approval_1",
+			created_at: timestamp,
+			expected_head_commit: head,
+			operation: mutation,
+			pull_request_number: 42,
+			pull_request_origin: mutation.pull_request_origin,
+			repository: mutation.repository,
+			selection: { account_login: "artisan", host: "github.com", provider_id: "github" },
+			snapshot_version: 1,
+			source_command_id: "request_1",
+			state: "requested" as const,
+			thread_id: "thread_1",
+			updated_at: timestamp,
+			workspace_id: "workspace_1",
+		};
+		const inbound = [
+			{
+				...frontend_envelope("hosted.git.mutation.request", {
+					mutation,
+					selection: {
+						account_login: "artisan",
+						host: "github.com",
+						provider_id: "github",
+					},
+				}),
+				thread_id: "thread_1",
+			},
+			frontend_envelope("hosted.git.mutation.approval.query", {
+				approval_id: "approval_1",
+				thread_id: "thread_1",
+			}),
+			{
+				...frontend_envelope("hosted.git.mutation.approval.respond", {
+					approval_id: "approval_1",
+					approved: true,
+				}),
+				thread_id: "thread_1",
+			},
+		];
+		const outbound = {
+			correlation_id: "query_1",
+			kind: "hosted.git.mutation.approval.query.result",
+			message_id: "result_1",
+			origin: "backend",
+			payload: { approval },
+			protocol_version: 1,
+			schema_version: 1,
+			sent_at: timestamp,
+		};
+
+		for (const envelope of inbound) {
+			await expect(
+				Effect.runPromise(DecodeInboundControlEnvelope(envelope)),
+			).resolves.toEqual(envelope);
+		}
+
+		await expect(Effect.runPromise(DecodeOutboundControlEnvelope(outbound))).resolves.toEqual(
+			outbound,
+		);
+		await expect(
+			Effect.runPromise(
+				DecodeInboundControlEnvelope({
+					...frontend_envelope("hosted.git.mutation.request", {
+						extra: true,
+						mutation,
+						selection: {
+							account_login: "artisan",
+							host: "github.com",
+							provider_id: "github",
+						},
+					}),
+					thread_id: "thread_1",
+				}),
+			),
+		).rejects.toBeDefined();
+	});
+
 	it("rejects provider review bodies that are not part of the canonical surface", async () => {
 		const invalid = snapshot();
 
