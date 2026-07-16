@@ -17,6 +17,9 @@ import type {
 	HostedGitSnapshotQuery,
 	HostedGitSnapshotQueryResult,
 	HostedGitSnapshotRefreshRequest,
+	HostedGitMutationApprovalQuery,
+	HostedGitMutationApprovalQueryResult,
+	HostedGitMutationCommandRequest,
 	HostedProjectCloneApprovalQuery,
 	HostedProjectCloneApprovalQueryResult,
 	HostedProjectCloneRequest,
@@ -309,6 +312,23 @@ export interface ArtisanHostedProjectCloneApprovalResponseInput {
 	readonly thread_id: string;
 }
 
+/** Supplies one hosted Git mutation approval query identity. */
+export interface ArtisanHostedGitMutationApprovalInput extends HostedGitMutationApprovalQuery {}
+
+/** Supplies one hosted Git mutation request and optional durable retry identity. */
+export interface ArtisanHostedGitMutationInput extends HostedGitMutationCommandRequest {
+	readonly command_id?: string;
+	readonly thread_id: string;
+}
+
+/** Supplies one hosted Git mutation approval decision and optional durable retry identity. */
+export interface ArtisanHostedGitMutationApprovalResponseInput {
+	readonly approval_id: string;
+	readonly approved: boolean;
+	readonly command_id?: string;
+	readonly thread_id: string;
+}
+
 /** Supplies an external wait request and optional durable retry identity. */
 export interface ArtisanExternalWaitRequestInput extends ExternalWaitRequest {
 	readonly command_id?: string;
@@ -496,6 +516,9 @@ export class ArtisanClient extends Context.Service<
 		readonly GetHostedProjectCloneApproval: (
 			input: ArtisanHostedProjectCloneApprovalInput,
 		) => Effect.Effect<HostedProjectCloneApprovalQueryResult, ArtisanClientError>;
+		readonly GetHostedGitMutationApproval: (
+			input: ArtisanHostedGitMutationApprovalInput,
+		) => Effect.Effect<HostedGitMutationApprovalQueryResult, ArtisanClientError>;
 		readonly GetExternalWaits: (
 			input: ArtisanExternalWaitQueryInput,
 		) => Effect.Effect<ExternalWaitQueryResult, ArtisanClientError>;
@@ -597,11 +620,17 @@ export class ArtisanClient extends Context.Service<
 		readonly RequestHostedProjectClone: (
 			input: ArtisanHostedProjectCloneInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RequestHostedGitMutation: (
+			input: ArtisanHostedGitMutationInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly RespondWorkspaceGitMutationApproval: (
 			input: ArtisanWorkspaceGitMutationApprovalResponseInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly RespondHostedProjectCloneApproval: (
 			input: ArtisanHostedProjectCloneApprovalResponseInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RespondHostedGitMutationApproval: (
+			input: ArtisanHostedGitMutationApprovalResponseInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly RequestExternalWait: (
 			input: ArtisanExternalWaitRequestInput,

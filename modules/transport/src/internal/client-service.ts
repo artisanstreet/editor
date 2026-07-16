@@ -10,6 +10,10 @@ import {
 	type HostedProjectCloneApprovalRespondEnvelope,
 	HostedProjectCloneRequest,
 	type HostedProjectCloneRequestEnvelope,
+	type HostedGitMutationApprovalQueryEnvelope,
+	type HostedGitMutationApprovalRespondEnvelope,
+	HostedGitMutationCommandRequest,
+	type HostedGitMutationRequestEnvelope,
 	type HostedGitCheckFailureDetailQueryEnvelope,
 	type HostedGitSnapshotQueryEnvelope,
 	type HostedGitSnapshotRefreshEnvelope,
@@ -74,6 +78,9 @@ import {
 	type ArtisanHostedProjectCloneApprovalInput,
 	type ArtisanHostedProjectCloneApprovalResponseInput,
 	type ArtisanHostedProjectCloneInput,
+	type ArtisanHostedGitMutationApprovalInput,
+	type ArtisanHostedGitMutationApprovalResponseInput,
+	type ArtisanHostedGitMutationInput,
 	type ArtisanHostedGitSnapshotInput,
 	type ArtisanHostedGitCheckFailureDetailInput,
 	type ArtisanHostedGitSnapshotRefreshInput,
@@ -471,6 +478,27 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 								"hosted project clone approval response narrowed incorrectly",
 							);
 				});
+			const get_hosted_git_mutation_approval = (
+				input: ArtisanHostedGitMutationApprovalInput,
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: HostedGitMutationApprovalQueryEnvelope = {
+						...trace,
+						kind: "hosted.git.mutation.approval.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"hosted.git.mutation.approval.query.result",
+					);
+
+					return result.kind === "hosted.git.mutation.approval.query.result"
+						? result.payload
+						: yield* Effect.die(
+								"hosted Git mutation approval response narrowed incorrectly",
+							);
+				});
 			const get_external_waits = (input: ArtisanExternalWaitQueryInput) =>
 				Effect.gen(function* () {
 					const trace = yield* connection.MakeTrace;
@@ -576,6 +604,8 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				});
 
 			type WorkspaceMutationEnvelope =
+				| HostedGitMutationApprovalRespondEnvelope
+				| HostedGitMutationRequestEnvelope
 				| HostedProjectCloneApprovalRespondEnvelope
 				| HostedProjectCloneRequestEnvelope
 				| WorkspaceChangeReviewEnvelope
@@ -946,6 +976,36 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 
 					return yield* send_workspace_mutation(envelope);
 				});
+			const request_hosted_git_mutation = (input: ArtisanHostedGitMutationInput) =>
+				Effect.gen(function* () {
+					const payload = yield* Schema.decodeUnknownEffect(
+						HostedGitMutationCommandRequest,
+						{
+							onExcessProperty: "error",
+						},
+					)({
+						mutation: input.mutation,
+						selection: input.selection,
+					}).pipe(
+						Effect.mapError((cause) =>
+							client_error(
+								"malformed",
+								"The hosted Git mutation request is invalid.",
+								cause,
+							),
+						),
+					);
+					const trace = yield* connection.MakeTrace;
+					const envelope: HostedGitMutationRequestEnvelope = {
+						...trace,
+						kind: "hosted.git.mutation.request",
+						message_id: input.command_id ?? trace.message_id,
+						payload,
+						thread_id: input.thread_id,
+					};
+
+					return yield* send_workspace_mutation(envelope);
+				});
 			const respond_hosted_project_clone_approval = (
 				input: ArtisanHostedProjectCloneApprovalResponseInput,
 			) =>
@@ -954,6 +1014,21 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					const envelope: HostedProjectCloneApprovalRespondEnvelope = {
 						...trace,
 						kind: "hosted.project.clone.approval.respond",
+						message_id: input.command_id ?? trace.message_id,
+						payload: { approval_id: input.approval_id, approved: input.approved },
+						thread_id: input.thread_id,
+					};
+
+					return yield* send_workspace_mutation(envelope);
+				});
+			const respond_hosted_git_mutation_approval = (
+				input: ArtisanHostedGitMutationApprovalResponseInput,
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: HostedGitMutationApprovalRespondEnvelope = {
+						...trace,
+						kind: "hosted.git.mutation.approval.respond",
 						message_id: input.command_id ?? trace.message_id,
 						payload: { approval_id: input.approval_id, approved: input.approved },
 						thread_id: input.thread_id,
@@ -1292,6 +1367,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				Events: subscriptions.Events,
 				GetOrchestrationGraph: get_orchestration_graph,
 				GetHostedProjectCloneApproval: get_hosted_project_clone_approval,
+				GetHostedGitMutationApproval: get_hosted_git_mutation_approval,
 				GetExternalWaits: get_external_waits,
 				GetPreviewBrowserLifecycle: get_preview_browser_lifecycle,
 				GetPreviewTargets: get_preview_targets,
@@ -1327,9 +1403,11 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				RequestWorkspaceGitCheckout: request_workspace_git_checkout,
 				RequestWorkspaceGitMutation: request_workspace_git_mutation,
 				RequestHostedProjectClone: request_hosted_project_clone,
+				RequestHostedGitMutation: request_hosted_git_mutation,
 				RespondWorkspaceGitCheckoutApproval: respond_workspace_git_checkout_approval,
 				RespondWorkspaceGitMutationApproval: respond_workspace_git_mutation_approval,
 				RespondHostedProjectCloneApproval: respond_hosted_project_clone_approval,
+				RespondHostedGitMutationApproval: respond_hosted_git_mutation_approval,
 				RequestExternalWait: request_external_wait,
 				CancelExternalWait: cancel_external_wait,
 				ManuallyResumeExternalWait: manually_resume_external_wait,

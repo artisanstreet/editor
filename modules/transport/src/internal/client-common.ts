@@ -90,6 +90,9 @@ export type PendingRequestEnvelope = Extract<
 			| "workspace.git.mutation.request"
 			| "workspace.git.mutation.approval.query"
 			| "workspace.git.mutation.approval.respond"
+			| "hosted.git.mutation.request"
+			| "hosted.git.mutation.approval.query"
+			| "hosted.git.mutation.approval.respond"
 			| "preview.browser.lifecycle.query"
 			| "preview.targets.query"
 			| "rich-link.metadata.query";
@@ -121,6 +124,7 @@ export type PendingResultEnvelope = Extract<
 			| "hosted.git.check_failure_detail.query.result"
 			| "workspace.git.checkout.approval.query.result"
 			| "workspace.git.mutation.approval.query.result"
+			| "hosted.git.mutation.approval.query.result"
 			| "preview.browser.lifecycle.query.result"
 			| "preview.targets.query.result"
 			| "rich-link.metadata.query.result";

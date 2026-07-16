@@ -17,6 +17,7 @@ import type {
 	WorkspaceFileReadQueryResult,
 	WorkspaceGitFetchQueryResult,
 	WorkspaceGitMutationApproval,
+	HostedGitMutationApproval,
 } from "@artisan/protocol";
 import {
 	ArtisanClient,
@@ -44,6 +45,7 @@ export interface FixtureArtisanClientData {
 	readonly workspace_change_diffs: Readonly<Record<string, WorkspaceChangeDiffQueryResult>>;
 	readonly workspace_files: Readonly<Record<string, WorkspaceFileReadQueryResult>>;
 	readonly workspace_git_mutation_approval: WorkspaceGitMutationApproval;
+	readonly hosted_git_mutation_approval: HostedGitMutationApproval;
 }
 
 const fixture_timestamp = "2026-07-12T10:00:00.000Z";
@@ -305,6 +307,54 @@ export const fixture_artisan_client_data = {
 		updated_at: fixture_timestamp,
 		workspace_id: "workspace-artisan-editor",
 	},
+	hosted_git_mutation_approval: {
+		approval_id: "hosted-git-mutation-approval-editor-shell",
+		created_at: fixture_timestamp,
+		expected_head_commit: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+		operation: {
+			expected_head_commit: "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+			operation: "request_reviewers",
+			pull_request_number: 42,
+			pull_request_origin: {
+				native_id: "PR_42",
+				provider_id: "github",
+				resource_kind: "pull_request",
+			},
+			repository: {
+				host: "github.com",
+				name: "artisan-editor",
+				owner: "artisan",
+				provider_id: "github",
+			},
+			reviewers: [{ _tag: "user", login: "sander" }],
+			selected_branch: "main",
+			snapshot_version: 1,
+			workspace_id: "workspace-artisan-editor",
+		},
+		pull_request_number: 42,
+		pull_request_origin: {
+			native_id: "PR_42",
+			provider_id: "github",
+			resource_kind: "pull_request",
+		},
+		repository: {
+			host: "github.com",
+			name: "artisan-editor",
+			owner: "artisan",
+			provider_id: "github",
+		},
+		selection: {
+			account_login: "sander",
+			host: "github.com",
+			provider_id: "github",
+		},
+		snapshot_version: 1,
+		source_command_id: "command-fixture-hosted-git-mutation",
+		state: "requested",
+		thread_id: "thread-editor-shell",
+		updated_at: fixture_timestamp,
+		workspace_id: "workspace-artisan-editor",
+	},
 } satisfies FixtureArtisanClientData;
 
 const FixtureFailure = (message: string) =>
@@ -480,6 +530,21 @@ export const FixtureArtisanClientService = {
 
 			return { approval };
 		}),
+	GetHostedGitMutationApproval: (input) =>
+		Effect.gen(function* () {
+			const approval = fixture_artisan_client_data.hosted_git_mutation_approval;
+
+			if (
+				input.approval_id !== approval.approval_id ||
+				input.thread_id !== approval.thread_id
+			) {
+				return yield* FixtureFailure(
+					`Unknown fixture hosted Git mutation approval: ${input.approval_id}`,
+				);
+			}
+
+			return { approval };
+		}),
 	ListTerminals: (thread_id, workspace_id) =>
 		Effect.gen(function* () {
 			const terminals: Array<TerminalSession> = [];
@@ -604,6 +669,10 @@ export const FixtureArtisanClientService = {
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-hosted-project-clone");
 		}),
+	RequestHostedGitMutation: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-hosted-git-mutation");
+		}),
 	RequestExternalWait: (input) =>
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-external-wait-request");
@@ -656,6 +725,12 @@ export const FixtureArtisanClientService = {
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(
 				input.command_id ?? "fixture-hosted-project-clone-approval",
+			);
+		}),
+	RespondHostedGitMutationApproval: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(
+				input.command_id ?? "fixture-hosted-git-mutation-approval",
 			);
 		}),
 	SelectGlobalGuidance: (input) =>
