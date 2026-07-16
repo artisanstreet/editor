@@ -29,6 +29,10 @@ import {
 	ToolInvocations,
 } from "../../modules/backend/src/persistence/schema";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+import {
+	type ToolRegistration,
+	make_tool_registry_layer,
+} from "../../modules/backend/src/tool-control/tool-registry";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const directories: Array<string> = [];
@@ -53,11 +57,16 @@ function metadata_layer() {
 	});
 }
 
-function runtime(database_path: string, notifier = JournalNotifierLive) {
+function runtime(
+	database_path: string,
+	notifier = JournalNotifierLive,
+	registry = registry_layer(),
+) {
 	const infrastructure = Layer.mergeAll(
 		make_database_layer({ database_path, migrations_path }),
 		metadata_layer(),
 		notifier,
+		registry,
 		NodeCrypto.layer,
 	);
 
@@ -84,6 +93,28 @@ const required_descriptor = {
 	approval_policy: "required" as const,
 	tool_id: "workspace.replace",
 };
+
+function registration(
+	descriptor: typeof automatic_descriptor | typeof required_descriptor,
+	recovery_policy: ToolRegistration["recovery_policy"],
+): ToolRegistration {
+	return {
+		adapter: {
+			input_schema: descriptor.input_schema,
+			Invoke: () => Effect.succeed({ ok: true }),
+		},
+		descriptor,
+		IsEligible: () => Effect.void,
+		recovery_policy,
+	};
+}
+
+function registry_layer() {
+	return make_tool_registry_layer([
+		registration(automatic_descriptor, "retry"),
+		registration(required_descriptor, "outcome_unknown"),
+	]);
+}
 
 function request(
 	overrides: Partial<{
@@ -225,16 +256,8 @@ describe("ToolControlRepository", () => {
 				Effect.gen(function* () {
 					yield* SeedOrdinary;
 					const repository = yield* ToolControlRepository;
-					const accepted = yield* repository.Prepare({
-						descriptor: automatic_descriptor,
-						recovery_policy: "retry",
-						request: request(),
-					});
-					const replay = yield* repository.Prepare({
-						descriptor: automatic_descriptor,
-						recovery_policy: "retry",
-						request: request(),
-					});
+					const accepted = yield* repository.Prepare(request());
+					const replay = yield* repository.Prepare(request());
 					const database = yield* Database;
 					const events = yield* database.client.select().from(JournalEvents);
 					const private_rows = yield* database.client
@@ -264,6 +287,37 @@ describe("ToolControlRepository", () => {
 		}
 	});
 
+	it("rejects unregistered tools before durable admission", async () => {
+		const current_runtime = runtime(
+			await ManagedRuntime.make(NodeFileSystem.layer).runPromise(MakeDatabasePath),
+			JournalNotifierLive,
+			make_tool_registry_layer([]),
+		);
+
+		try {
+			const result = await current_runtime.runPromise(
+				Effect.gen(function* () {
+					yield* SeedOrdinary;
+					const repository = yield* ToolControlRepository;
+					const rejected = yield* repository.Prepare(request()).pipe(Effect.exit);
+					const database = yield* Database;
+
+					return {
+						events: yield* database.client.select().from(JournalEvents),
+						invocations: yield* database.client.select().from(ToolInvocations),
+						rejected,
+					};
+				}),
+			);
+
+			expect(result.rejected._tag).toBe("Failure");
+			expect(result.invocations).toEqual([]);
+			expect(result.events).toEqual([]);
+		} finally {
+			await current_runtime.dispose();
+		}
+	});
+
 	it("authorizes graph ownership and makes required approval decisions durable", async () => {
 		const current_runtime = runtime(
 			await ManagedRuntime.make(NodeFileSystem.layer).runPromise(MakeDatabasePath),
@@ -283,11 +337,7 @@ describe("ToolControlRepository", () => {
 						}),
 						tool: { revision: 1, tool_id: "workspace.replace" },
 					};
-					const prepared = yield* repository.Prepare({
-						descriptor: required_descriptor,
-						recovery_policy: "outcome_unknown",
-						request: graph_request,
-					});
+					const prepared = yield* repository.Prepare(graph_request);
 					const decided = yield* repository.Decide({
 						approval_id: prepared.approval!.approval_id,
 						decision: "approved",
@@ -329,32 +379,20 @@ describe("ToolControlRepository", () => {
 				Effect.gen(function* () {
 					yield* SeedOrdinary;
 					const repository = yield* ToolControlRepository;
-					const prepared = yield* repository.Prepare({
-						descriptor: automatic_descriptor,
-						recovery_policy: "retry",
-						request: request(),
-					});
+					const prepared = yield* repository.Prepare(request());
 					const hidden = yield* repository.QueryInvocation({
 						invocation_id: prepared.invocation.invocation_id,
 						thread_id: "thread_other",
 					});
 					const changed = yield* Effect.exit(
-						repository.Prepare({
-							descriptor: automatic_descriptor,
-							recovery_policy: "retry",
-							request: { ...request(), arguments: { query: "changed" } },
-						}),
+						repository.Prepare({ ...request(), arguments: { query: "changed" } }),
 					);
 					const database = yield* Database;
 					yield* database.client
 						.insert(ThreadErasureClaims)
 						.values({ claimed_at: now, thread_id: "thread_1" });
 					const erased = yield* Effect.exit(
-						repository.Prepare({
-							descriptor: automatic_descriptor,
-							recovery_policy: "retry",
-							request: request({ request_id: "request_erased" }),
-						}),
+						repository.Prepare(request({ request_id: "request_erased" })),
 					);
 
 					return { changed, erased, hidden };
@@ -383,11 +421,7 @@ describe("ToolControlRepository", () => {
 						...request({ request_id: "request_erasure_replay" }),
 						tool: { revision: 1, tool_id: "workspace.replace" },
 					};
-					const prepared = yield* repository.Prepare({
-						descriptor: required_descriptor,
-						recovery_policy: "outcome_unknown",
-						request: approval_request,
-					});
+					const prepared = yield* repository.Prepare(approval_request);
 					const decision = {
 						approval_id: prepared.approval!.approval_id,
 						decision: "approved" as const,
@@ -417,13 +451,7 @@ describe("ToolControlRepository", () => {
 								thread_id: "thread_1",
 							}),
 						),
-						prepare_replay: yield* Effect.exit(
-							repository.Prepare({
-								descriptor: required_descriptor,
-								recovery_policy: "outcome_unknown",
-								request: approval_request,
-							}),
-						),
+						prepare_replay: yield* Effect.exit(repository.Prepare(approval_request)),
 					};
 				}),
 			);
@@ -458,13 +486,7 @@ describe("ToolControlRepository", () => {
 					yield* database.client.run(
 						"UPDATE orchestration_groups SET state = 'stopped' WHERE group_id = 'group_1'",
 					);
-					const stopped_group = yield* Effect.exit(
-						repository.Prepare({
-							descriptor: automatic_descriptor,
-							recovery_policy: "retry",
-							request: graph_request,
-						}),
-					);
+					const stopped_group = yield* Effect.exit(repository.Prepare(graph_request));
 
 					yield* database.client.run(
 						"UPDATE orchestration_groups SET state = 'running' WHERE group_id = 'group_1'",
@@ -474,9 +496,8 @@ describe("ToolControlRepository", () => {
 					);
 					const stopped_assignment = yield* Effect.exit(
 						repository.Prepare({
-							descriptor: automatic_descriptor,
-							recovery_policy: "retry",
-							request: { ...graph_request, request_id: "request_stale_assignment" },
+							...graph_request,
+							request_id: "request_stale_assignment",
 						}),
 					);
 
@@ -512,22 +533,14 @@ describe("ToolControlRepository", () => {
 						...request({ request_id: "request_stale_approval" }),
 						tool: { revision: 1, tool_id: "workspace.replace" },
 					};
-					const prepared = yield* repository.Prepare({
-						descriptor: required_descriptor,
-						recovery_policy: "outcome_unknown",
-						request: approval_request,
-					});
+					const prepared = yield* repository.Prepare(approval_request);
 					const database = yield* Database;
 
 					yield* database.client.run(
 						"UPDATE orchestration_runs SET status = 'completed' WHERE run_id = 'run_1'",
 					);
 
-					const replay = yield* repository.Prepare({
-						descriptor: required_descriptor,
-						recovery_policy: "outcome_unknown",
-						request: approval_request,
-					});
+					const replay = yield* repository.Prepare(approval_request);
 					const decision = yield* Effect.exit(
 						repository.Decide({
 							approval_id: prepared.approval!.approval_id,
@@ -567,22 +580,18 @@ describe("ToolControlRepository", () => {
 				first_runtime.runPromise(
 					ToolControlRepository.pipe(
 						Effect.flatMap((repository) =>
-							repository.Prepare({
-								descriptor: automatic_descriptor,
-								recovery_policy: "retry",
-								request: request({ request_id: "request_concurrent_prepare" }),
-							}),
+							repository.Prepare(
+								request({ request_id: "request_concurrent_prepare" }),
+							),
 						),
 					),
 				),
 				second_runtime.runPromise(
 					ToolControlRepository.pipe(
 						Effect.flatMap((repository) =>
-							repository.Prepare({
-								descriptor: automatic_descriptor,
-								recovery_policy: "retry",
-								request: request({ request_id: "request_concurrent_prepare" }),
-							}),
+							repository.Prepare(
+								request({ request_id: "request_concurrent_prepare" }),
+							),
 						),
 					),
 				),
@@ -628,12 +637,8 @@ describe("ToolControlRepository", () => {
 					yield* SeedOrdinary;
 					const repository = yield* ToolControlRepository;
 					const prepared = yield* repository.Prepare({
-						descriptor: required_descriptor,
-						recovery_policy: "outcome_unknown",
-						request: {
-							...request({ request_id: "request_concurrent_decision" }),
-							tool: { revision: 1, tool_id: "workspace.replace" },
-						},
+						...request({ request_id: "request_concurrent_decision" }),
+						tool: { revision: 1, tool_id: "workspace.replace" },
 					});
 
 					return prepared.approval!.approval_id;
@@ -720,11 +725,9 @@ describe("ToolControlRepository", () => {
 					Effect.gen(function* () {
 						yield* SeedOrdinary;
 						const repository = yield* ToolControlRepository;
-						const prepared = yield* repository.Prepare({
-							descriptor: automatic_descriptor,
-							recovery_policy: "retry",
-							request: request({ request_id: `request_tampered_${column}` }),
-						});
+						const prepared = yield* repository.Prepare(
+							request({ request_id: `request_tampered_${column}` }),
+						);
 						const database = yield* Database;
 
 						yield* database.client.run(
@@ -732,11 +735,7 @@ describe("ToolControlRepository", () => {
 						);
 
 						return yield* repository
-							.Prepare({
-								descriptor: automatic_descriptor,
-								recovery_policy: "retry",
-								request: request({ request_id: `request_tampered_${column}` }),
-							})
+							.Prepare(request({ request_id: `request_tampered_${column}` }))
 							.pipe(Effect.exit);
 					}),
 				);
@@ -784,11 +783,7 @@ describe("ToolControlRepository", () => {
 					};
 					const repository = yield* ToolControlRepository;
 					const failed = yield* repository
-						.Prepare({
-							descriptor: automatic_descriptor,
-							recovery_policy: "retry",
-							request: request({ request_id: "request_journal_collision" }),
-						})
+						.Prepare(request({ request_id: "request_journal_collision" }))
 						.pipe(Effect.exit);
 
 					return {
@@ -839,16 +834,12 @@ describe("ToolControlRepository", () => {
 					const repository = yield* ToolControlRepository;
 
 					return yield* repository
-						.Prepare({
-							descriptor: automatic_descriptor,
-							recovery_policy: "retry",
-							request: request({ request_id: "request_notifier_restart" }),
-						})
+						.Prepare(request({ request_id: "request_notifier_restart" }))
 						.pipe(Effect.exit);
 				}),
 			);
 
-			expect(defect._tag).toBe("Failure");
+			expect(defect._tag).toBe("Success");
 		} finally {
 			await defecting_runtime.dispose();
 		}
@@ -863,11 +854,9 @@ describe("ToolControlRepository", () => {
 						invocation_id: "invocation_test_1",
 						thread_id: "thread_1",
 					});
-					const replay = yield* repository.Prepare({
-						descriptor: automatic_descriptor,
-						recovery_policy: "retry",
-						request: request({ request_id: "request_notifier_restart" }),
-					});
+					const replay = yield* repository.Prepare(
+						request({ request_id: "request_notifier_restart" }),
+					);
 
 					return { invocation, replay };
 				}),

@@ -7,7 +7,6 @@ import {
 	type ToolApprovalProjection,
 	type ToolApprovalQuery,
 	type ToolApprovalQueryResult,
-	type ToolDescriptor,
 	type ToolInvocationProjection,
 	type ToolInvocationQuery,
 	type ToolInvocationQueryResult,
@@ -44,15 +43,20 @@ import {
 } from "../persistence/schema";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { RecordThreadActivity } from "../threads/internal/thread-activity";
-
-const RecoveryPolicy = Schema.Literals(["retry", "outcome_unknown"]);
+import { ToolRegistry } from "./tool-registry";
 
 export class ToolControlConflict extends Data.TaggedError("ToolControlConflict")<{
 	readonly reason: "changed_intent";
 }> {}
 
 export class ToolControlUnavailable extends Data.TaggedError("ToolControlUnavailable")<{
-	readonly reason: "erased" | "missing" | "ownership" | "run_inactive" | "workspace_mismatch";
+	readonly reason:
+		| "erased"
+		| "missing"
+		| "ownership"
+		| "run_inactive"
+		| "tool_unavailable"
+		| "workspace_mismatch";
 }> {}
 
 export class ToolControlInvariant extends Data.TaggedError("ToolControlInvariant")<{
@@ -71,12 +75,6 @@ export type ToolControlRepositoryError =
 	| ToolControlInvariant
 	| ToolControlPersistenceFailure;
 
-export interface PrepareToolInvocation {
-	readonly descriptor: ToolDescriptor;
-	readonly recovery_policy: "retry" | "outcome_unknown";
-	readonly request: InvokeRequest;
-}
-
 export interface PrepareToolInvocationResult {
 	readonly approval?: ToolApprovalProjection;
 	readonly invocation: ToolInvocationProjection;
@@ -93,7 +91,7 @@ export class ToolControlRepository extends Context.Service<
 	ToolControlRepository,
 	{
 		readonly Prepare: (
-			input: PrepareToolInvocation,
+			request: InvokeRequest,
 		) => Effect.Effect<PrepareToolInvocationResult, ToolControlRepositoryError>;
 		readonly Decide: (
 			input: DecideApprovalRequest,
@@ -166,6 +164,7 @@ export const ToolControlRepositoryLive = Layer.effect(
 		const database = yield* Database;
 		const metadata = yield* RuntimeMetadata;
 		const notifier = yield* JournalNotifier;
+		const registry = yield* ToolRegistry;
 
 		const Hash = (value: string) =>
 			crypto.digest("SHA-256", text_encoder.encode(value)).pipe(
@@ -544,30 +543,32 @@ export const ToolControlRepositoryLive = Layer.effect(
 				return event.journal_sequence;
 			});
 
-		const Prepare = (input: PrepareToolInvocation) =>
+		const Prepare = (input: InvokeRequest) =>
 			Effect.gen(function* () {
 				const request = yield* Decode(
 					InvokeRequestSchema,
-					input.request,
+					input,
 					"Tool invocation request is invalid",
 				);
-				const descriptor = yield* Decode(
-					ToolDescriptorSchema,
-					input.descriptor,
-					"Tool descriptor is invalid",
-				);
-				const recovery_policy = yield* Decode(
-					RecoveryPolicy,
-					input.recovery_policy,
-					"Tool recovery policy is invalid",
-				);
-				if (
-					request.tool.tool_id !== descriptor.tool_id ||
-					request.tool.revision !== descriptor.revision
-				)
-					return yield* new ToolControlConflict({ reason: "changed_intent" });
+				const [known_command] = yield* database.client
+					.select({ command_id: ToolControlCommands.command_id })
+					.from(ToolControlCommands)
+					.where(eq(ToolControlCommands.command_id, request.request_id))
+					.limit(1)
+					.pipe(Effect.mapError(normalize_error));
+
+				const authorization = known_command
+					? undefined
+					: yield* registry
+							.Authorize(request.tool, request.context)
+							.pipe(
+								Effect.mapError(
+									() =>
+										new ToolControlUnavailable({ reason: "tool_unavailable" }),
+								),
+							);
+
 				const canonical_arguments = canonical_json(request.arguments);
-				const canonical_descriptor = canonical_json(descriptor);
 				const canonical_request = canonical_json({
 					arguments: request.arguments,
 					context: request.context,
@@ -575,8 +576,17 @@ export const ToolControlRepositoryLive = Layer.effect(
 					tool: request.tool,
 				});
 				const arguments_digest = yield* Hash(canonical_arguments);
-				const descriptor_fingerprint = yield* Hash(canonical_descriptor);
 				const request_fingerprint = yield* Hash(canonical_request);
+				const admission =
+					authorization === undefined
+						? undefined
+						: {
+								descriptor: authorization.descriptor,
+								descriptor_fingerprint: yield* Hash(
+									canonical_json(authorization.descriptor),
+								),
+								recovery_policy: authorization.recovery_policy,
+							};
 				const result = yield* RetrySqliteWrite(
 					database.client.transaction((transaction) =>
 						Effect.gen(function* () {
@@ -650,10 +660,8 @@ export const ToolControlRepositoryLive = Layer.effect(
 									row.agent_id !== request.context.agent_id ||
 									row.thread_id !== request.context.thread_id ||
 									row.workspace_id !== (request.context.workspace_id ?? null) ||
-									row.tool_id !== descriptor.tool_id ||
-									row.revision !== descriptor.revision ||
-									row.descriptor_fingerprint !== descriptor_fingerprint ||
-									row.recovery_policy !== recovery_policy ||
+									row.tool_id !== request.tool.tool_id ||
+									row.revision !== request.tool.revision ||
 									private_row.request_fingerprint !== request_fingerprint ||
 									private_row.arguments_digest !== arguments_digest ||
 									private_row.arguments_json !== canonical_arguments
@@ -675,6 +683,13 @@ export const ToolControlRepositoryLive = Layer.effect(
 							}
 
 							yield* EnsureLiveThread(transaction, request.context.thread_id);
+
+							if (admission === undefined) {
+								return yield* invariant("Tool registry admission is missing");
+							}
+
+							const { descriptor, descriptor_fingerprint, recovery_policy } =
+								admission;
 							const owner_kind = yield* Authorize(transaction, request.context);
 							const invocation_id = yield* metadata.MakeId("invocation");
 							const approval_id =
@@ -812,7 +827,8 @@ export const ToolControlRepositoryLive = Layer.effect(
 					),
 				).pipe(Effect.mapError(normalize_error));
 
-				if (result.status === "accepted") yield* notifier.Publish(result.journal_sequence!);
+				if (result.status === "accepted")
+					yield* notifier.Publish(result.journal_sequence!).pipe(Effect.ignoreCause);
 
 				return {
 					...(result.approval === undefined ? {} : { approval: result.approval }),
@@ -975,7 +991,8 @@ export const ToolControlRepositoryLive = Layer.effect(
 					),
 				).pipe(Effect.mapError(normalize_error));
 
-				if (result.status === "accepted") yield* notifier.Publish(result.journal_sequence!);
+				if (result.status === "accepted")
+					yield* notifier.Publish(result.journal_sequence!).pipe(Effect.ignoreCause);
 
 				return result;
 			});

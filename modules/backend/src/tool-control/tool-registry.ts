@@ -49,6 +49,7 @@ export interface ToolRegistration {
 	readonly adapter: EffectToolAdapter;
 	readonly descriptor: ToolDescriptor;
 	readonly IsEligible: (context: ToolInvocationContext) => Effect.Effect<void, ToolIneligible>;
+	/** Certifies crash behavior; `retry` is reserved for pure reads safe to execute more than once. */
 	readonly recovery_policy: "outcome_unknown" | "retry";
 }
 
