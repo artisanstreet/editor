@@ -1413,7 +1413,7 @@ export const OrchestrationInteractions = sqliteTable(
 export const OrchestrationRawObservations = sqliteTable(
 	"orchestration_raw_observations",
 	{
-		observation_id: text("observation_id").primaryKey(),
+		observation_id: text("observation_id").notNull(),
 		run_id: text("run_id").notNull(),
 		engine_id: text("engine_id").notNull(),
 		sequence: integer("sequence").notNull(),
@@ -1425,6 +1425,7 @@ export const OrchestrationRawObservations = sqliteTable(
 		raw_frame_base64: text("raw_frame_base64"),
 	},
 	(table) => [
+		primaryKey({ columns: [table.run_id, table.observation_id] }),
 		index("orchestration_raw_observations_run_sequence_index").on(table.run_id, table.sequence),
 	],
 );

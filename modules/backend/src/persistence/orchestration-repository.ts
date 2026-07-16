@@ -1,13 +1,13 @@
 import { and, asc, desc, eq, inArray, notExists, or } from "drizzle-orm";
-import { Context, Data, Effect, Layer, Schema } from "effect";
+import { Context, Crypto, Data, Effect, Encoding, Layer, Schema } from "effect";
 
 import {
-	EventPayload,
 	RawOrigin,
+	EventPayload,
 	CommandPayload,
-	type CommandEnvelope,
 	type EventEnvelope,
 	type ThreadWorkItem,
+	type CommandEnvelope,
 } from "@artisan/protocol";
 import { EngineResumeToken, type EngineObservation } from "@artisan/engines";
 
@@ -130,9 +130,15 @@ function is_projectable_status(status: string): status is "queued" | "running" |
 export const OrchestrationRepositoryLive = Layer.effect(
 	OrchestrationRepository,
 	Effect.gen(function* () {
+		const crypto = yield* Crypto.Crypto;
 		const database = yield* Database;
 		const metadata = yield* RuntimeMetadata;
 		const notifier = yield* JournalNotifier;
+		const text_encoder = new TextEncoder();
+		const OpaqueIdentity = (kind: string, parts: ReadonlyArray<string>) =>
+			crypto
+				.digest("SHA-256", text_encoder.encode(JSON.stringify([kind, ...parts])))
+				.pipe(Effect.map((digest) => `${kind}:${Encoding.encodeHex(digest)}`));
 
 		const ParsePersistedJson = (json: string) =>
 			Effect.try({
@@ -1127,6 +1133,14 @@ export const OrchestrationRepositoryLive = Layer.effect(
 							return [];
 						}
 
+						const observation_id = yield* OpaqueIdentity("engine_observation", [
+							observation.artisan_run_id,
+							observation.observation_id,
+						]);
+						const raw_origin_provider = yield* OpaqueIdentity("engine", [
+							run.engine_id,
+						]);
+
 						const payload =
 							observation._tag === "agent_message_completed"
 								? ({
@@ -1176,7 +1190,32 @@ export const OrchestrationRepositoryLive = Layer.effect(
 														type: "run.lifecycle",
 														working_directory: run.working_directory,
 													} satisfies EventPayload)
-												: undefined;
+												: observation._tag === "tool"
+													? ({
+															effect: "unknown",
+															invocation_id: yield* OpaqueIdentity(
+																"engine_tool",
+																[
+																	run.run_id,
+																	run.engine_id,
+																	observation.tool_id,
+																],
+															),
+															label: "Engine tool",
+															source: "engine",
+															state: observation.action,
+															type: "capability.invocation.updated",
+														} satisfies EventPayload)
+													: observation._tag === "native_action"
+														? ({
+																action_id: observation_id,
+																effect: "unknown",
+																label: "Engine native action",
+																source: "engine",
+																state: "observed",
+																type: "engine.native_action.observed",
+															} satisfies EventPayload)
+														: undefined;
 
 						if (!payload) {
 							return [];
@@ -1271,14 +1310,12 @@ export const OrchestrationRepositoryLive = Layer.effect(
 						return [
 							yield* AppendEvent(transaction, {
 								agent_id: run.agent_id,
-								causation_id: observation.observation_id,
+								causation_id: observation_id,
 								correlation_id: run.run_id,
 								payload,
 								raw_origin: {
-									provider: observation.raw.engine_id,
-									reference: String(
-										observation.raw.native_id ?? observation.observation_id,
-									),
+									provider: raw_origin_provider,
+									reference: observation_id,
 								},
 								run_id: run.run_id,
 								thread_id: run.thread_id,

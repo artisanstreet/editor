@@ -1,4 +1,5 @@
 export * from "./codec";
+export * from "./capability";
 export * from "./common";
 export * from "./control";
 export * from "./guidance";

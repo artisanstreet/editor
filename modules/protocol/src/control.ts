@@ -16,6 +16,7 @@ import {
 	WorkspaceFileReadQueryResult,
 	WorkspaceFileReplaceRequest,
 } from "./workspace-changes";
+import { CapabilityInvocationUpdatedEvent, EngineNativeActionObservedEvent } from "./capability";
 import {
 	WorkspaceGitCheckoutApprovalQuery,
 	WorkspaceGitCheckoutApprovalQueryResult,
@@ -1008,6 +1009,8 @@ export const EventPayload = Schema.Union([
 	ArtifactRecordedEvent,
 	PreviewTargetUpdatedEvent,
 	PreviewBrowserLifecycleEvent,
+	CapabilityInvocationUpdatedEvent,
+	EngineNativeActionObservedEvent,
 ]);
 
 export type EventPayload = typeof EventPayload.Type;

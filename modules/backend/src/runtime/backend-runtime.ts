@@ -277,7 +277,7 @@ export function make_backend_layer(options: BackendOptions) {
 		JournalStoreLive,
 		OrchestrationRepositoryLive,
 		ThreadReadModelLive,
-	).pipe(Layer.provideMerge(infrastructure));
+	).pipe(Layer.provideMerge(NodeCrypto.layer), Layer.provideMerge(infrastructure));
 	const project_catalog = ProjectRepositoryLive.pipe(
 		Layer.provideMerge(NodeCrypto.layer),
 		Layer.provideMerge(infrastructure),
