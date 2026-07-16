@@ -31,6 +31,7 @@ import {
 	WorkspaceGitChangedFiles,
 	WorkspaceGitCheckoutApprovals,
 	WorkspaceGitCheckoutClaims,
+	HostedGitMutationClaims,
 	WorkspaceGitMutationClaims,
 	WorkspaceGitSessions,
 	WorkspaceMutationAuthorities,
@@ -1272,6 +1273,25 @@ export const WorkspaceGitCheckoutRepositoryLive = Layer.effect(
 										.limit(1);
 
 									if (git_mutation_claim) {
+										return yield* new WorkspaceGitCheckoutConflict({
+											reason: "claim_conflict",
+										});
+									}
+
+									const [hosted_git_mutation_claim] = yield* transaction
+										.select({
+											approval_id: HostedGitMutationClaims.approval_id,
+										})
+										.from(HostedGitMutationClaims)
+										.where(
+											eq(
+												HostedGitMutationClaims.workspace_id,
+												row.workspace_id,
+											),
+										)
+										.limit(1);
+
+									if (hosted_git_mutation_claim) {
 										return yield* new WorkspaceGitCheckoutConflict({
 											reason: "claim_conflict",
 										});

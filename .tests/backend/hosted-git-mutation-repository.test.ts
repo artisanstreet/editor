@@ -11,7 +11,21 @@ import {
 	HostedGitMutationRepositoryLive,
 	HostedGitMutationUnavailable,
 } from "../../modules/backend/src/git-provider/hosted-git-mutation-repository";
+import {
+	WorkspaceGitCheckoutConflict,
+	WorkspaceGitCheckoutRepository,
+	WorkspaceGitCheckoutRepositoryLive,
+	type RequestWorkspaceGitCheckout,
+	type WorkspaceGitCheckoutDecision,
+} from "../../modules/backend/src/git/workspace-git-checkout-repository";
 import { make_workspace_git_execution_gate_layer } from "../../modules/backend/src/git/workspace-git-execution-gate";
+import {
+	WorkspaceGitMutationConflict,
+	WorkspaceGitMutationRepository,
+	WorkspaceGitMutationRepositoryLive,
+	type RequestWorkspaceGitMutation,
+	type WorkspaceGitMutationDecision,
+} from "../../modules/backend/src/git/workspace-git-mutation-repository";
 import { Database, make_database_layer } from "../../modules/backend/src/persistence/database";
 import { JournalNotifierLive } from "../../modules/backend/src/persistence/journal-notifier";
 import {
@@ -90,10 +104,13 @@ function make_runtime(
 		}),
 		JournalNotifierLive,
 	);
+	const repositories = Layer.mergeAll(
+		HostedGitMutationRepositoryLive,
+		WorkspaceGitCheckoutRepositoryLive,
+		WorkspaceGitMutationRepositoryLive,
+	).pipe(Layer.provideMerge(infrastructure));
 
-	return ManagedRuntime.make(
-		HostedGitMutationRepositoryLive.pipe(Layer.provideMerge(infrastructure)),
-	);
+	return ManagedRuntime.make(repositories);
 }
 
 function failure_from(exit: Exit.Exit<unknown, unknown>) {
@@ -267,6 +284,125 @@ function identified_request(identifier: string, overrides: Record<string, unknow
 		source_command: { message_id: `request_${identifier}`, sent_at: now },
 		...overrides,
 	});
+}
+
+function workspace_checkout_request(): RequestWorkspaceGitCheckout {
+	return {
+		approval_id: "checkout_approval_1",
+		expected_session_version: 1,
+		request_fingerprint: "c".repeat(64),
+		source_command: { message_id: "checkout_request_1", sent_at: now },
+		target_branch: "release",
+		target_head: "c".repeat(40),
+		thread_id: "thread_1",
+		workspace_id: "workspace_1",
+	};
+}
+
+function workspace_checkout_decision(): WorkspaceGitCheckoutDecision {
+	return {
+		approval_id: "checkout_approval_1",
+		approved: true,
+		decision_command: { message_id: "checkout_decision_1", sent_at: later },
+		thread_id: "thread_1",
+	};
+}
+
+function workspace_git_source_proof() {
+	const identity = "d".repeat(64);
+
+	return {
+		branch: "feature",
+		configuration_identity: identity,
+		head: "a".repeat(40),
+		index_identity: identity,
+		repository_identity: identity,
+		state: "none" as const,
+		state_identity: identity,
+		status_identity: identity,
+		tracked_identity: identity,
+		untracked_identity: identity,
+		worktree_identity: identity,
+	};
+}
+
+function workspace_mutation_request(): RequestWorkspaceGitMutation {
+	const source = workspace_git_source_proof();
+	const operation = { message: "Private commit message", type: "commit" as const };
+
+	return {
+		approval_id: "mutation_approval_1",
+		expected_session_version: 1,
+		operation,
+		plan: {
+			binding: "d".repeat(64),
+			message: operation.message,
+			source,
+			type: "commit",
+		},
+		request_fingerprint: "d".repeat(64),
+		source_command: { message_id: "mutation_request_1", sent_at: now },
+		thread_id: "thread_1",
+		workspace_id: "workspace_1",
+	};
+}
+
+function workspace_mutation_decision(): WorkspaceGitMutationDecision {
+	return {
+		approval_id: "mutation_approval_1",
+		approved: true,
+		decision_command: { message_id: "mutation_decision_1", sent_at: later },
+		thread_id: "thread_1",
+	};
+}
+
+type TestRuntime = ReturnType<typeof make_runtime>;
+
+type RunLocalClaim = (
+	runtime: TestRuntime,
+	start: Deferred.Deferred<void>,
+	ready: Deferred.Deferred<void>,
+) => Promise<Exit.Exit<unknown, unknown>>;
+
+async function race_workspace_claims(
+	hosted_runtime: TestRuntime,
+	local_runtime: TestRuntime,
+	RunLocalClaim: RunLocalClaim,
+) {
+	const [start, hosted_ready, local_ready] = await Effect.runPromise(
+		Effect.all([Deferred.make<void>(), Deferred.make<void>(), Deferred.make<void>()]),
+	);
+	const hosted_claim = hosted_runtime.runPromise(
+		Effect.gen(function* () {
+			const hosted = yield* HostedGitMutationRepository;
+
+			yield* Deferred.succeed(hosted_ready, undefined);
+			yield* Deferred.await(start);
+
+			return yield* Effect.exit(hosted.MarkExecuting("approval_1"));
+		}),
+	);
+	const local_claim = RunLocalClaim(local_runtime, start, local_ready);
+
+	await Effect.runPromise(
+		Effect.all([Deferred.await(hosted_ready), Deferred.await(local_ready)], {
+			discard: true,
+		}).pipe(Effect.andThen(Deferred.succeed(start, undefined))),
+	);
+
+	const [hosted_exit, local_exit] = await Promise.all([hosted_claim, local_claim]);
+	const claim_count = await hosted_runtime.runPromise(
+		Effect.gen(function* () {
+			const database = yield* Database;
+			const hosted = yield* database.client.select().from(HostedGitMutationClaims);
+			const checkout = yield* database.client.select().from(WorkspaceGitCheckoutClaims);
+			const mutation = yield* database.client.select().from(WorkspaceGitMutationClaims);
+
+			return hosted.length + checkout.length + mutation.length;
+		}),
+	);
+
+	return { claim_count, hosted_exit, local_exit };
 }
 
 afterEach(async () => {
@@ -1342,6 +1478,132 @@ describe("HostedGitMutationRepository", () => {
 			);
 		} finally {
 			await runtime.dispose();
+		}
+	});
+
+	it("arbitrates simultaneous hosted mutation and checkout claims across two runtimes", async () => {
+		const database_path = await Effect.runPromise(MakeDatabasePath);
+		const hosted_runtime = make_runtime(database_path, "hosted_checkout_race");
+		const checkout_runtime = make_runtime(database_path, "checkout_hosted_race");
+
+		try {
+			await hosted_runtime.runPromise(
+				Effect.gen(function* () {
+					const hosted = yield* HostedGitMutationRepository;
+					const checkout = yield* WorkspaceGitCheckoutRepository;
+
+					yield* Seed;
+					yield* hosted.Request(request());
+					yield* hosted.Decide({
+						approval_id: "approval_1",
+						approved: true,
+						decision_command: { message_id: "decision_approval_1", sent_at: later },
+						thread_id: "thread_1",
+					});
+					yield* checkout.Request(workspace_checkout_request());
+					yield* checkout.Decide(workspace_checkout_decision());
+				}),
+			);
+
+			const result = await race_workspace_claims(
+				hosted_runtime,
+				checkout_runtime,
+				(runtime, start, ready) =>
+					runtime.runPromise(
+						Effect.gen(function* () {
+							const checkout = yield* WorkspaceGitCheckoutRepository;
+
+							yield* Deferred.succeed(ready, undefined);
+							yield* Deferred.await(start);
+
+							return yield* Effect.exit(
+								checkout.MarkExecuting("checkout_approval_1"),
+							);
+						}),
+					),
+			);
+
+			expect(
+				Number(Exit.isSuccess(result.hosted_exit)) +
+					Number(Exit.isSuccess(result.local_exit)),
+			).toBe(1);
+			if (Exit.isFailure(result.hosted_exit)) {
+				expect(failure_from(result.hosted_exit)).toEqual(
+					new HostedGitMutationConflict({ reason: "claim_conflict" }),
+				);
+			}
+			if (Exit.isFailure(result.local_exit)) {
+				expect(failure_from(result.local_exit)).toEqual(
+					new WorkspaceGitCheckoutConflict({ reason: "claim_conflict" }),
+				);
+			}
+			expect(result.claim_count).toBe(1);
+		} finally {
+			await hosted_runtime.dispose();
+			await checkout_runtime.dispose();
+		}
+	});
+
+	it("arbitrates simultaneous hosted and local mutation claims across two runtimes", async () => {
+		const database_path = await Effect.runPromise(MakeDatabasePath);
+		const hosted_runtime = make_runtime(database_path, "hosted_mutation_race");
+		const mutation_runtime = make_runtime(database_path, "mutation_hosted_race");
+
+		try {
+			await hosted_runtime.runPromise(
+				Effect.gen(function* () {
+					const hosted = yield* HostedGitMutationRepository;
+					const mutation = yield* WorkspaceGitMutationRepository;
+
+					yield* Seed;
+					yield* hosted.Request(request());
+					yield* hosted.Decide({
+						approval_id: "approval_1",
+						approved: true,
+						decision_command: { message_id: "decision_approval_1", sent_at: later },
+						thread_id: "thread_1",
+					});
+					yield* mutation.Request(workspace_mutation_request());
+					yield* mutation.Decide(workspace_mutation_decision());
+				}),
+			);
+
+			const result = await race_workspace_claims(
+				hosted_runtime,
+				mutation_runtime,
+				(runtime, start, ready) =>
+					runtime.runPromise(
+						Effect.gen(function* () {
+							const mutation = yield* WorkspaceGitMutationRepository;
+
+							yield* Deferred.succeed(ready, undefined);
+							yield* Deferred.await(start);
+
+							return yield* Effect.exit(
+								mutation.MarkExecuting("mutation_approval_1"),
+							);
+						}),
+					),
+			);
+
+			expect(
+				Number(Exit.isSuccess(result.hosted_exit)) +
+					Number(Exit.isSuccess(result.local_exit)),
+			).toBe(1);
+			if (Exit.isFailure(result.hosted_exit)) {
+				expect(failure_from(result.hosted_exit)).toEqual(
+					new HostedGitMutationConflict({ reason: "claim_conflict" }),
+				);
+			}
+			if (Exit.isFailure(result.local_exit)) {
+				expect(failure_from(result.local_exit)).toEqual(
+					new WorkspaceGitMutationConflict({ reason: "claim_conflict" }),
+				);
+			}
+			expect(result.claim_count).toBe(1);
+		} finally {
+			await hosted_runtime.dispose();
+			await mutation_runtime.dispose();
 		}
 	});
 

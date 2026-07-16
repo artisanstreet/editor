@@ -8,6 +8,8 @@ import { Database, make_database_layer } from "../../modules/backend/src/persist
 import {
 	JournalCommands,
 	JournalEvents,
+	HostedGitMutationApprovals,
+	HostedGitMutationClaims,
 	ThreadErasureClaims,
 	Threads,
 	ThreadTombstones,
@@ -38,6 +40,48 @@ const now = "2026-07-13T15:00:00.000Z";
 const later = "2026-07-13T15:01:00.000Z";
 let next_id = 0;
 let next_time = Date.parse("2026-07-13T16:00:00.000Z");
+
+function hosted_mutation_projection(workspace_id: string) {
+	const repository = {
+		host: "github.com",
+		name: "editor",
+		owner: "artisan",
+		provider_id: "github",
+	};
+	const pull_request_origin = {
+		native_id: "PR_1",
+		provider_id: "github",
+		resource_kind: "pull_request",
+	};
+	const thread_origin = {
+		native_id: "RT_1",
+		provider_id: "github",
+		resource_kind: "review_thread",
+	};
+
+	return {
+		expected_head_commit: "a".repeat(40),
+		operation_summary_json: JSON.stringify({
+			expected_head_commit: "a".repeat(40),
+			operation: "resolve_review_thread",
+			pull_request_number: 42,
+			pull_request_origin,
+			repository,
+			selected_branch: "feature",
+			snapshot_version: 1,
+			thread_origin,
+			workspace_id,
+		}),
+		pull_request_number: 42,
+		pull_request_origin_json: JSON.stringify(pull_request_origin),
+		repository_json: JSON.stringify(repository),
+		selection_json: JSON.stringify({
+			account_login: "alice",
+			host: "github.com",
+			provider_id: "github",
+		}),
+	};
+}
 
 const MakeDatabasePath = Effect.gen(function* () {
 	const file_system = yield* FileSystem.FileSystem;
@@ -641,6 +685,92 @@ describe("WorkspaceGitCheckoutRepository", () => {
 				expect(failure).toBeInstanceOf(WorkspaceGitCheckoutUnavailable);
 				expect(failure).toMatchObject({ reason: "erased" });
 			}
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("fences hosted Git mutation claims without rejecting unrelated hosted work", async () => {
+		const runtime = make_runtime(await make_database_path());
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const sessions = yield* WorkspaceGitSessionRepository;
+					const repository = yield* WorkspaceGitCheckoutRepository;
+					const approval_id = "hosted_checkout_claim";
+					const projection = hosted_mutation_projection("workspace_1");
+
+					yield* SeedThreads;
+					yield* sessions.Project(session_observation("hosted_checkout_session"));
+					yield* repository.Request(checkout_request());
+					yield* repository.Decide(checkout_decision());
+					yield* database.client.insert(HostedGitMutationApprovals).values({
+						approval_id,
+						...projection,
+						approved: true,
+						created_at: now,
+						decided_at: now,
+						decision_message_id: `${approval_id}_decision`,
+						execution_started_at: null,
+						request_fingerprint: "a".repeat(64),
+						snapshot_version: 1,
+						source_command_id: `${approval_id}_request`,
+						state: "executing",
+						thread_id: "thread_2",
+						unknown_reason: null,
+						updated_at: now,
+						workspace_id: "workspace_1",
+					});
+					yield* database.client.insert(HostedGitMutationClaims).values({
+						approval_id,
+						claim_token: "hosted_checkout_claim_token",
+						claimed_at: now,
+						lease_expires_at: later,
+						owner_instance_id: "hosted_runtime",
+						thread_id: "thread_2",
+						workspace_id: "workspace_1",
+					});
+					const blocked = yield* repository
+						.MarkExecuting("checkout_approval_1")
+						.pipe(Effect.exit);
+					yield* database.client.delete(HostedGitMutationClaims);
+					yield* database.client.delete(HostedGitMutationApprovals);
+					yield* database.client.insert(HostedGitMutationApprovals).values({
+						approval_id: "hosted_unrelated_checkout_claim",
+						...hosted_mutation_projection("workspace_2"),
+						approved: true,
+						created_at: now,
+						decided_at: now,
+						decision_message_id: "hosted_unrelated_checkout_claim_decision",
+						execution_started_at: null,
+						request_fingerprint: "b".repeat(64),
+						snapshot_version: 1,
+						source_command_id: "hosted_unrelated_checkout_claim_request",
+						state: "executing",
+						thread_id: "thread_2",
+						unknown_reason: null,
+						updated_at: now,
+						workspace_id: "workspace_2",
+					});
+					yield* database.client.insert(HostedGitMutationClaims).values({
+						approval_id: "hosted_unrelated_checkout_claim",
+						claim_token: "hosted_unrelated_checkout_claim_token",
+						claimed_at: now,
+						lease_expires_at: later,
+						owner_instance_id: "hosted_runtime",
+						thread_id: "thread_2",
+						workspace_id: "workspace_2",
+					});
+					const allowed = yield* repository.MarkExecuting("checkout_approval_1");
+
+					return { allowed, blocked };
+				}),
+			);
+
+			expect_conflict(result.blocked, "claim_conflict");
+			expect(result.allowed.approval.state).toBe("executing");
 		} finally {
 			await runtime.dispose();
 		}
