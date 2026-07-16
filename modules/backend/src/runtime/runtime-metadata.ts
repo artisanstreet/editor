@@ -11,6 +11,7 @@ export type RuntimeIdPrefix =
 	| "event"
 	| "fetch"
 	| "heartbeat"
+	| "invocation"
 	| "message"
 	| "preview_target"
 	| "run"

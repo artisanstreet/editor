@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import {
 	blob,
 	check,
+	foreignKey,
 	index,
 	integer,
 	primaryKey,
@@ -11,6 +12,7 @@ import {
 } from "drizzle-orm/sqlite-core";
 
 import {
+	tool_json_maximum_bytes,
 	workspace_diff_context_lines,
 	workspace_diff_format_version,
 	workspace_diff_maximum_bytes,
@@ -2379,6 +2381,247 @@ export const ExternalWaitWakeOutbox = sqliteTable(
 				AND ${table.lease_expires_at} IS NULL
 			)
 		`,
+		),
+	],
+);
+
+/** Stores source-safe lifecycle state and immutable descriptor snapshots for one tool invocation. */
+export const ToolInvocations = sqliteTable(
+	"tool_invocations",
+	{
+		invocation_id: text("invocation_id").primaryKey(),
+		request_id: text("request_id").notNull(),
+		thread_id: text("thread_id").notNull(),
+		run_id: text("run_id").notNull(),
+		agent_id: text("agent_id").notNull(),
+		workspace_id: text("workspace_id"),
+		owner_kind: text("owner_kind").notNull(),
+		tool_id: text("tool_id").notNull(),
+		revision: integer("revision").notNull(),
+		source: text("source").notNull(),
+		effect: text("effect").notNull(),
+		approval_policy: text("approval_policy").notNull(),
+		label: text("label").notNull(),
+		summary: text("summary").notNull(),
+		input_schema_json: text("input_schema_json").notNull(),
+		descriptor_fingerprint: text("descriptor_fingerprint").notNull(),
+		recovery_policy: text("recovery_policy").notNull(),
+		approval_id: text("approval_id"),
+		decision_id: text("decision_id"),
+		decision: text("decision"),
+		state: text("state").notNull(),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+		decided_at: text("decided_at"),
+		started_at: text("started_at"),
+		suspended_at: text("suspended_at"),
+		settled_at: text("settled_at"),
+		current_journal_sequence: integer("current_journal_sequence").notNull(),
+	},
+	(table) => [
+		uniqueIndex("tool_invocations_request_unique").on(table.request_id),
+		uniqueIndex("tool_invocations_approval_unique").on(table.approval_id),
+		uniqueIndex("tool_invocations_decision_unique").on(table.decision_id),
+		uniqueIndex("tool_invocations_invocation_approval_unique").on(
+			table.invocation_id,
+			table.approval_id,
+		),
+		index("tool_invocations_thread_index").on(table.thread_id),
+		check(
+			"tool_invocations_owner_kind_check",
+			sql`${table.owner_kind} IN ('ordinary_run', 'graph_run')`,
+		),
+		check("tool_invocations_revision_check", sql`${table.revision} > 0`),
+		check("tool_invocations_source_check", sql`${table.source} IN ('artisan', 'marketplace')`),
+		check(
+			"tool_invocations_effect_check",
+			sql`${table.effect} IN ('read', 'durable_state', 'workspace_mutation', 'unknown')`,
+		),
+		check(
+			"tool_invocations_descriptor_fingerprint_check",
+			sql`length(${table.descriptor_fingerprint}) = 64 AND ${table.descriptor_fingerprint} NOT GLOB '*[^0-9a-f]*'`,
+		),
+		check(
+			"tool_invocations_input_schema_size_check",
+			sql`json_valid(${table.input_schema_json}) = 1 AND length(CAST(${table.input_schema_json} AS BLOB)) <= ${sql.raw(String(tool_json_maximum_bytes))}`,
+		),
+		check(
+			"tool_invocations_recovery_policy_check",
+			sql`${table.recovery_policy} IN ('retry', 'outcome_unknown')`,
+		),
+		check(
+			"tool_invocations_lifecycle_check",
+			sql`
+				(
+					${table.approval_policy} = 'automatic'
+					AND ${table.approval_id} IS NULL
+					AND ${table.decision_id} IS NULL
+					AND ${table.decision} IS NULL
+					AND ${table.decided_at} IS NULL
+					AND (
+						(${table.state} = 'pending' AND ${table.started_at} IS NULL AND ${table.suspended_at} IS NULL AND ${table.settled_at} IS NULL)
+						OR (${table.state} = 'running' AND ${table.started_at} IS NOT NULL AND ${table.suspended_at} IS NULL AND ${table.settled_at} IS NULL)
+						OR (${table.state} IN ('completed', 'failed', 'outcome_unknown') AND ${table.started_at} IS NOT NULL AND ${table.suspended_at} IS NULL AND ${table.settled_at} IS NOT NULL)
+						OR (${table.state} = 'suspended' AND ${table.started_at} IS NOT NULL AND ${table.suspended_at} IS NOT NULL AND ${table.settled_at} IS NULL)
+					)
+				)
+				OR (
+					${table.approval_policy} = 'required'
+					AND ${table.approval_id} IS NOT NULL
+					AND (
+						(${table.state} = 'approval_required' AND ${table.decision_id} IS NULL AND ${table.decision} IS NULL AND ${table.decided_at} IS NULL AND ${table.started_at} IS NULL AND ${table.suspended_at} IS NULL AND ${table.settled_at} IS NULL)
+						OR (${table.state} = 'denied' AND ${table.decision_id} IS NOT NULL AND ${table.decision} = 'denied' AND ${table.decided_at} IS NOT NULL AND ${table.started_at} IS NULL AND ${table.suspended_at} IS NULL AND ${table.settled_at} IS NOT NULL)
+						OR (${table.state} = 'pending' AND ${table.decision_id} IS NOT NULL AND ${table.decision} = 'approved' AND ${table.decided_at} IS NOT NULL AND ${table.started_at} IS NULL AND ${table.suspended_at} IS NULL AND ${table.settled_at} IS NULL)
+						OR (${table.state} = 'running' AND ${table.decision_id} IS NOT NULL AND ${table.decision} = 'approved' AND ${table.decided_at} IS NOT NULL AND ${table.started_at} IS NOT NULL AND ${table.suspended_at} IS NULL AND ${table.settled_at} IS NULL)
+						OR (${table.state} IN ('completed', 'failed', 'outcome_unknown') AND ${table.decision_id} IS NOT NULL AND ${table.decision} = 'approved' AND ${table.decided_at} IS NOT NULL AND ${table.started_at} IS NOT NULL AND ${table.suspended_at} IS NULL AND ${table.settled_at} IS NOT NULL)
+						OR (${table.state} = 'suspended' AND ${table.decision_id} IS NOT NULL AND ${table.decision} = 'approved' AND ${table.decided_at} IS NOT NULL AND ${table.started_at} IS NOT NULL AND ${table.suspended_at} IS NOT NULL AND ${table.settled_at} IS NULL)
+					)
+				)
+			`,
+		),
+		check(
+			"tool_invocations_timestamp_format_check",
+			sql`
+				strftime('%Y-%m-%dT%H:%M:%fZ', ${table.created_at}) IS ${table.created_at}
+				AND substr(${table.created_at}, 12, 2) BETWEEN '00' AND '23'
+				AND strftime('%Y-%m-%dT%H:%M:%fZ', ${table.updated_at}) IS ${table.updated_at}
+				AND substr(${table.updated_at}, 12, 2) BETWEEN '00' AND '23'
+				AND (${table.decided_at} IS NULL OR (strftime('%Y-%m-%dT%H:%M:%fZ', ${table.decided_at}) IS ${table.decided_at} AND substr(${table.decided_at}, 12, 2) BETWEEN '00' AND '23'))
+				AND (${table.started_at} IS NULL OR (strftime('%Y-%m-%dT%H:%M:%fZ', ${table.started_at}) IS ${table.started_at} AND substr(${table.started_at}, 12, 2) BETWEEN '00' AND '23'))
+				AND (${table.suspended_at} IS NULL OR (strftime('%Y-%m-%dT%H:%M:%fZ', ${table.suspended_at}) IS ${table.suspended_at} AND substr(${table.suspended_at}, 12, 2) BETWEEN '00' AND '23'))
+				AND (${table.settled_at} IS NULL OR (strftime('%Y-%m-%dT%H:%M:%fZ', ${table.settled_at}) IS ${table.settled_at} AND substr(${table.settled_at}, 12, 2) BETWEEN '00' AND '23'))
+			`,
+		),
+		check(
+			"tool_invocations_timestamp_order_check",
+			sql`
+				${table.created_at} <= ${table.updated_at}
+				AND (${table.decided_at} IS NULL OR (${table.decided_at} >= ${table.created_at} AND ${table.decided_at} <= ${table.updated_at}))
+				AND (${table.started_at} IS NULL OR (${table.started_at} >= ${table.created_at} AND ${table.started_at} <= ${table.updated_at}))
+				AND (${table.suspended_at} IS NULL OR (${table.suspended_at} >= ${table.created_at} AND ${table.suspended_at} <= ${table.updated_at}))
+				AND (${table.settled_at} IS NULL OR (${table.settled_at} >= ${table.created_at} AND ${table.settled_at} <= ${table.updated_at}))
+				AND (${table.decided_at} IS NULL OR ${table.started_at} IS NULL OR ${table.decided_at} <= ${table.started_at})
+				AND (${table.started_at} IS NULL OR ${table.suspended_at} IS NULL OR ${table.started_at} <= ${table.suspended_at})
+				AND (${table.started_at} IS NULL OR ${table.settled_at} IS NULL OR ${table.started_at} <= ${table.settled_at})
+				AND (${table.decided_at} IS NULL OR ${table.settled_at} IS NULL OR ${table.decided_at} <= ${table.settled_at})
+			`,
+		),
+		check(
+			"tool_invocations_journal_sequence_check",
+			sql`${table.current_journal_sequence} > 0`,
+		),
+	],
+);
+
+/** Records exact-replay tool invocation and approval commands without private payloads. */
+export const ToolControlCommands = sqliteTable(
+	"tool_control_commands",
+	{
+		command_id: text("command_id").primaryKey(),
+		kind: text("kind").notNull(),
+		invocation_id: text("invocation_id")
+			.notNull()
+			.references(() => ToolInvocations.invocation_id, { onDelete: "cascade" }),
+		approval_id: text("approval_id"),
+		decision: text("decision"),
+		request_fingerprint: text("request_fingerprint").notNull(),
+		accepted_at: text("accepted_at").notNull(),
+	},
+	(table) => [
+		index("tool_control_commands_invocation_index").on(table.invocation_id),
+		foreignKey({
+			name: "tool_control_commands_invocation_approval_fk",
+			columns: [table.invocation_id, table.approval_id],
+			foreignColumns: [ToolInvocations.invocation_id, ToolInvocations.approval_id],
+		}).onDelete("cascade"),
+		check(
+			"tool_control_commands_kind_check",
+			sql`
+				(${table.kind} = 'invoke' AND ${table.approval_id} IS NULL AND ${table.decision} IS NULL)
+				OR (${table.kind} = 'decision' AND ${table.approval_id} IS NOT NULL AND ${table.decision} IN ('approved', 'denied'))
+			`,
+		),
+		check(
+			"tool_control_commands_fingerprint_check",
+			sql`length(${table.request_fingerprint}) = 64 AND ${table.request_fingerprint} NOT GLOB '*[^0-9a-f]*'`,
+		),
+		check(
+			"tool_control_commands_accepted_at_check",
+			sql`strftime('%Y-%m-%dT%H:%M:%fZ', ${table.accepted_at}) IS ${table.accepted_at} AND substr(${table.accepted_at}, 12, 2) BETWEEN '00' AND '23'`,
+		),
+	],
+);
+
+/** Stores private invocation arguments and, after completion, the paired private result. */
+export const ToolInvocationPrivate = sqliteTable(
+	"tool_invocation_private",
+	{
+		invocation_id: text("invocation_id")
+			.primaryKey()
+			.references(() => ToolInvocations.invocation_id, { onDelete: "cascade" }),
+		request_fingerprint: text("request_fingerprint").notNull(),
+		arguments_json: text("arguments_json").notNull(),
+		arguments_digest: text("arguments_digest").notNull(),
+		result_json: text("result_json"),
+		result_digest: text("result_digest"),
+	},
+	(table) => [
+		check(
+			"tool_invocation_private_request_fingerprint_check",
+			sql`length(${table.request_fingerprint}) = 64 AND ${table.request_fingerprint} NOT GLOB '*[^0-9a-f]*'`,
+		),
+		check(
+			"tool_invocation_private_arguments_digest_check",
+			sql`length(${table.arguments_digest}) = 64 AND ${table.arguments_digest} NOT GLOB '*[^0-9a-f]*'`,
+		),
+		check(
+			"tool_invocation_private_arguments_size_check",
+			sql`json_valid(${table.arguments_json}) = 1 AND length(CAST(${table.arguments_json} AS BLOB)) <= ${sql.raw(String(tool_json_maximum_bytes))}`,
+		),
+		check(
+			"tool_invocation_private_result_size_check",
+			sql`${table.result_json} IS NULL OR (json_valid(${table.result_json}) = 1 AND length(CAST(${table.result_json} AS BLOB)) <= ${sql.raw(String(tool_json_maximum_bytes))})`,
+		),
+		check(
+			"tool_invocation_private_result_pair_check",
+			sql`(${table.result_json} IS NULL AND ${table.result_digest} IS NULL) OR (${table.result_json} IS NOT NULL AND ${table.result_digest} IS NOT NULL AND length(${table.result_digest}) = 64 AND ${table.result_digest} NOT GLOB '*[^0-9a-f]*')`,
+		),
+	],
+);
+
+/** Leases one tool invocation to an executing backend instance. */
+export const ToolExecutionClaims = sqliteTable(
+	"tool_execution_claims",
+	{
+		invocation_id: text("invocation_id")
+			.primaryKey()
+			.references(() => ToolInvocations.invocation_id, { onDelete: "cascade" }),
+		claim_token: text("claim_token").notNull(),
+		owner_instance_id: text("owner_instance_id").notNull(),
+		claimed_at: text("claimed_at").notNull(),
+		lease_expires_at: text("lease_expires_at").notNull(),
+		launch_started_at: text("launch_started_at"),
+	},
+	(table) => [
+		uniqueIndex("tool_execution_claims_token_unique").on(table.claim_token),
+		index("tool_execution_claims_lease_index").on(table.lease_expires_at),
+		check(
+			"tool_execution_claims_lease_time_check",
+			sql`${table.lease_expires_at} >= ${table.claimed_at}`,
+		),
+		check(
+			"tool_execution_claims_launch_time_check",
+			sql`${table.launch_started_at} IS NULL OR (${table.launch_started_at} >= ${table.claimed_at} AND ${table.launch_started_at} <= ${table.lease_expires_at})`,
+		),
+		check(
+			"tool_execution_claims_timestamp_format_check",
+			sql`
+				strftime('%Y-%m-%dT%H:%M:%fZ', ${table.claimed_at}) IS ${table.claimed_at}
+				AND substr(${table.claimed_at}, 12, 2) BETWEEN '00' AND '23'
+				AND strftime('%Y-%m-%dT%H:%M:%fZ', ${table.lease_expires_at}) IS ${table.lease_expires_at}
+				AND substr(${table.lease_expires_at}, 12, 2) BETWEEN '00' AND '23'
+				AND (${table.launch_started_at} IS NULL OR (strftime('%Y-%m-%dT%H:%M:%fZ', ${table.launch_started_at}) IS ${table.launch_started_at} AND substr(${table.launch_started_at}, 12, 2) BETWEEN '00' AND '23'))
+			`,
 		),
 	],
 );
