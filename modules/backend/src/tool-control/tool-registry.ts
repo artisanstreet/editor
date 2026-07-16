@@ -52,10 +52,20 @@ export interface ToolRegistration {
 	readonly recovery_policy: "outcome_unknown" | "retry";
 }
 
+/** Binds one eligible immutable descriptor to its certified crash-recovery policy. */
+export interface ToolAuthorization {
+	readonly descriptor: ToolDescriptor;
+	readonly recovery_policy: ToolRegistration["recovery_policy"];
+}
+
 /** Owns the immutable canonical Tool Control Plane registrations. */
 export class ToolRegistry extends Context.Service<
 	ToolRegistry,
 	{
+		readonly Authorize: (
+			tool: ToolDescriptorReference,
+			context: ToolInvocationContext,
+		) => Effect.Effect<ToolAuthorization, ToolRegistryError>;
 		readonly Invoke: (
 			tool: ToolDescriptorReference,
 			context: ToolInvocationContext,
@@ -199,6 +209,12 @@ function BuildToolRegistry(registrations: ReadonlyArray<unknown>) {
 					);
 				}
 
+				if (candidate.recovery_policy === "retry" && descriptor.effect !== "read") {
+					return yield* Effect.fail(
+						new ToolRegistryError({ reason_code: "invalid_registration" }),
+					);
+				}
+
 				const frozen_input_schema = freeze_json(input_schema);
 				const frozen_descriptor = Object.freeze({
 					...descriptor,
@@ -293,6 +309,36 @@ function BuildToolRegistry(registrations: ReadonlyArray<unknown>) {
 						: Effect.succeed(registration.recovery_policy);
 				}),
 			);
+		const Authorize = (reference: ToolDescriptorReference, context: ToolInvocationContext) =>
+			Effect.gen(function* () {
+				const decoded_context = yield* Schema.decodeUnknownEffect(
+					ToolInvocationContextSchema,
+					{ onExcessProperty: "error" },
+				)(context).pipe(
+					Effect.mapError(
+						() => new ToolRegistryError({ reason_code: "context_ineligible" }),
+					),
+				);
+				const descriptor = yield* Resolve(reference);
+				const registration = by_tool_id.get(descriptor.tool_id);
+
+				if (registration === undefined) {
+					return yield* Effect.fail(
+						new ToolRegistryError({ reason_code: "tool_unavailable" }),
+					);
+				}
+
+				yield* CheckEligibility(registration, decoded_context).pipe(
+					Effect.mapError(
+						() => new ToolRegistryError({ reason_code: "context_ineligible" }),
+					),
+				);
+
+				return {
+					descriptor,
+					recovery_policy: registration.recovery_policy,
+				} satisfies ToolAuthorization;
+			});
 		const Invoke = (
 			reference: ToolDescriptorReference,
 			context: ToolInvocationContext,
@@ -334,7 +380,7 @@ function BuildToolRegistry(registrations: ReadonlyArray<unknown>) {
 					.pipe(Effect.mapError(adapter_error));
 			});
 
-		return { Invoke, List, RecoveryPolicy, Resolve };
+		return { Authorize, Invoke, List, RecoveryPolicy, Resolve };
 	});
 }
 

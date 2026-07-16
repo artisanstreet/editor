@@ -8,6 +8,7 @@ import { make_effect_tool_adapter } from "../../modules/backend/src/tool-control
 import {
 	ToolRegistry,
 	ToolRegistryError,
+	ToolIneligible,
 	type ToolRegistration,
 	make_tool_registry_layer,
 } from "../../modules/backend/src/tool-control/tool-registry";
@@ -16,7 +17,10 @@ const context = { agent_id: "agent", run_id: "run", thread_id: "thread" };
 
 function registration(input: {
 	readonly approval_policy?: "automatic" | "required";
+	readonly effect?: ToolRegistration["descriptor"]["effect"];
 	readonly handler?: () => Effect.Effect<unknown, unknown>;
+	readonly IsEligible?: ToolRegistration["IsEligible"];
+	readonly recovery_policy?: ToolRegistration["recovery_policy"];
 	readonly revision?: number;
 	readonly tool_id: string;
 }): ToolRegistration {
@@ -27,7 +31,7 @@ function registration(input: {
 	});
 	const descriptor = {
 		approval_policy: input.approval_policy ?? "automatic",
-		effect: "read",
+		effect: input.effect ?? "read",
 		input_schema: Schema.decodeUnknownSync(ToolInputSchema)(adapter.input_schema),
 		label: `Label ${input.tool_id}`,
 		revision: input.revision ?? 1,
@@ -39,8 +43,8 @@ function registration(input: {
 	return {
 		adapter,
 		descriptor,
-		IsEligible: () => Effect.void,
-		recovery_policy: "retry",
+		IsEligible: input.IsEligible ?? (() => Effect.void),
+		recovery_policy: input.recovery_policy ?? "retry",
 	};
 }
 
@@ -133,6 +137,39 @@ describe("ToolRegistry", () => {
 		expect(resolved_again.revision).toBe(1);
 		expect(resolved_again.input_schema).toMatchObject({ type: "object" });
 		expect(invoked).toEqual({ journal_sequence: 1 });
+	});
+
+	it("authorizes only eligible exact revisions and certifies retries only for reads", async () => {
+		const ineligible = registration({
+			IsEligible: () =>
+				Effect.fail(new ToolIneligible({ reason_code: "workspace.unavailable" })),
+			tool_id: "ineligible",
+		});
+		const invalid_retry = registration({
+			effect: "workspace_mutation",
+			recovery_policy: "retry",
+			tool_id: "invalid.retry",
+		});
+		const mutation = registration({
+			effect: "workspace_mutation",
+			recovery_policy: "outcome_unknown",
+			tool_id: "mutation",
+		});
+		const invalid = await Effect.runPromise(registry([invalid_retry]).pipe(Effect.flip));
+		const service = await Effect.runPromise(registry([ineligible, mutation]));
+		const denied = await Effect.runPromise(
+			service.Authorize({ revision: 1, tool_id: "ineligible" }, context).pipe(Effect.flip),
+		);
+		const authorized = await Effect.runPromise(
+			service.Authorize({ revision: 1, tool_id: "mutation" }, context),
+		);
+
+		expect(invalid.reason_code).toBe("invalid_registration");
+		expect(denied.reason_code).toBe("context_ineligible");
+		expect(authorized).toMatchObject({
+			descriptor: { effect: "workspace_mutation", tool_id: "mutation" },
+			recovery_policy: "outcome_unknown",
+		});
 	});
 
 	it("compares input schemas structurally and encodes transformed success values", async () => {
