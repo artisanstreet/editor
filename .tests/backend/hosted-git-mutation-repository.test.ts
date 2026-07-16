@@ -39,6 +39,11 @@ const now = "2026-07-16T12:00:00.000Z";
 const later = "2026-07-16T12:01:00.000Z";
 const body = "This must remain private.";
 
+interface TestClock {
+	queued_values: Array<string>;
+	value: string;
+}
+
 const repository = { host: "github.com", name: "editor", owner: "artisan", provider_id: "github" };
 const selection = { account_login: "alice", host: "github.com", provider_id: "github" };
 const pull_request_origin = {
@@ -68,7 +73,11 @@ const MakeDatabasePath = Effect.gen(function* () {
 	return `${directory}/artisan.db`;
 }).pipe(Effect.provide(NodeFileSystem.layer));
 
-function make_runtime(database_path: string, instance_id = "hosted_git_mutation_test") {
+function make_runtime(
+	database_path: string,
+	instance_id = "hosted_git_mutation_test",
+	clock: TestClock = { queued_values: [], value: now },
+) {
 	let next_id = 0;
 	const infrastructure = Layer.mergeAll(
 		NodeCrypto.layer,
@@ -77,7 +86,7 @@ function make_runtime(database_path: string, instance_id = "hosted_git_mutation_
 		Layer.succeed(RuntimeMetadata, {
 			instance_id,
 			MakeId: (prefix) => Effect.sync(() => `${prefix}_${instance_id}_${++next_id}`),
-			Now: Effect.succeed(now),
+			Now: Effect.sync(() => clock.queued_values.shift() ?? clock.value),
 		}),
 		JournalNotifierLive,
 	);
@@ -1054,13 +1063,13 @@ describe("HostedGitMutationRepository", () => {
 
 	it("rejects foreign, expired, and competing workspace claims before provider launch", async () => {
 		const database_path = await Effect.runPromise(MakeDatabasePath);
-		const owner_runtime = make_runtime(database_path, "owner");
+		const owner_clock: TestClock = { queued_values: [], value: now };
+		const owner_runtime = make_runtime(database_path, "owner", owner_clock);
 		const foreign_runtime = make_runtime(database_path, "foreign");
 
 		try {
 			const result = await owner_runtime.runPromise(
 				Effect.gen(function* () {
-					const database = yield* Database;
 					const mutations = yield* HostedGitMutationRepository;
 
 					yield* Seed;
@@ -1079,9 +1088,7 @@ describe("HostedGitMutationRepository", () => {
 							claim_token: "claim_wrong",
 						}),
 					);
-					yield* database.client
-						.update(HostedGitMutationClaims)
-						.set({ lease_expires_at: now });
+					owner_clock.value = later;
 					const expired = yield* Effect.exit(
 						mutations.RenewLease({
 							approval_id: "approval_1",
@@ -1123,6 +1130,138 @@ describe("HostedGitMutationRepository", () => {
 			expect(foreign_launches).toBe(0);
 		} finally {
 			await Promise.all([owner_runtime.dispose(), foreign_runtime.dispose()]);
+		}
+	});
+
+	it("revalidates dispatcher and journal authority immediately before provider launch", async () => {
+		const runtime = make_runtime(await Effect.runPromise(MakeDatabasePath));
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const mutations = yield* HostedGitMutationRepository;
+					let launches = 0;
+
+					yield* Seed;
+					yield* mutations.Request(request());
+					yield* mutations.Decide({
+						approval_id: "approval_1",
+						approved: true,
+						decision_command: { message_id: "decision_approval_1", sent_at: later },
+						thread_id: "thread_1",
+					});
+					yield* database.client.run(`
+						UPDATE journal_events
+						SET origin = 'frontend'
+						WHERE idempotency_key = 'hosted_git_mutation:approval_1:approved'
+					`);
+					const corrupt_dispatch = yield* Effect.exit(mutations.ListApproved);
+					yield* database.client.run(`
+						UPDATE journal_events
+						SET origin = 'backend'
+						WHERE idempotency_key = 'hosted_git_mutation:approval_1:approved'
+					`);
+					yield* mutations.MarkExecuting("approval_1");
+					const execution = yield* mutations.ReadExecution("approval_1");
+					yield* database.client.run(`
+						CREATE TRIGGER corrupt_hosted_mutation_launch_authority
+						AFTER UPDATE OF lease_expires_at ON hosted_git_mutation_claims
+						WHEN NEW.approval_id = 'approval_1'
+						BEGIN
+							UPDATE journal_events
+							SET payload_json = '{}'
+							WHERE idempotency_key = 'hosted_git_mutation:approval_1:executing';
+						END
+					`);
+					const launch = yield* Effect.exit(
+						mutations.ExecuteClaimed(
+							{ approval_id: "approval_1", claim_token: execution.claim_token },
+							Effect.sync(() => {
+								launches += 1;
+							}),
+						),
+					);
+					const [claim] = yield* database.client.select().from(HostedGitMutationClaims);
+
+					return { claim, corrupt_dispatch, launch, launches };
+				}),
+			);
+			const expected = new HostedGitMutationInvariant({
+				message: "Stored hosted Git mutation state is invalid",
+			});
+
+			expect(failure_from(result.corrupt_dispatch)).toEqual(expected);
+			expect(failure_from(result.launch)).toEqual(expected);
+			expect(result.claim?.execution_started_at).toBeNull();
+			expect(result.launches).toBe(0);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("refuses launch when a renewed lease expires before the start transaction", async () => {
+		const clock: TestClock = { queued_values: [], value: now };
+		const runtime = make_runtime(
+			await Effect.runPromise(MakeDatabasePath),
+			"lease_boundary",
+			clock,
+		);
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const mutations = yield* HostedGitMutationRepository;
+					let launches = 0;
+
+					yield* Seed;
+					yield* mutations.Request(request());
+					yield* mutations.Decide({
+						approval_id: "approval_1",
+						approved: true,
+						decision_command: { message_id: "decision_approval_1", sent_at: later },
+						thread_id: "thread_1",
+					});
+					yield* mutations.MarkExecuting("approval_1");
+					const execution = yield* mutations.ReadExecution("approval_1");
+					clock.queued_values.push(
+						"2026-07-16T12:00:29.000Z",
+						"2026-07-16T12:01:00.000Z",
+					);
+					const launch = yield* Effect.exit(
+						mutations.ExecuteClaimed(
+							{ approval_id: "approval_1", claim_token: execution.claim_token },
+							Effect.sync(() => {
+								launches += 1;
+							}),
+						),
+					);
+					const [claim] = yield* database.client.select().from(HostedGitMutationClaims);
+					yield* database.client.delete(HostedGitMutationClaims);
+					const orphaned = yield* Effect.exit(
+						mutations.Query({ approval_id: "approval_1", thread_id: "thread_1" }),
+					);
+
+					return { claim, launch, launches, orphaned };
+				}),
+			);
+
+			expect(failure_from(result.launch)).toEqual(
+				new HostedGitMutationConflict({ reason: "lease_conflict" }),
+			);
+			expect(failure_from(result.orphaned)).toEqual(
+				new HostedGitMutationInvariant({
+					message: "Stored hosted Git mutation state is invalid",
+				}),
+			);
+			expect(result.claim).toMatchObject({
+				execution_started_at: null,
+				lease_expires_at: "2026-07-16T12:00:59.000Z",
+			});
+			expect(result.launches).toBe(0);
+		} finally {
+			await runtime.dispose();
 		}
 	});
 
@@ -1254,9 +1393,12 @@ describe("HostedGitMutationRepository", () => {
 					yield* database.client
 						.update(HostedGitMutationClaims)
 						.set({ thread_id: "thread_2" });
+					const original_corrupt = yield* Effect.exit(
+						mutations.ActiveClaimsForThread("thread_1"),
+					);
 					const corrupt = yield* Effect.exit(mutations.ActiveClaimsForThread("thread_2"));
 
-					return { active, claim, corrupt, launches, replay };
+					return { active, claim, corrupt, launches, original_corrupt, replay };
 				}),
 			);
 
@@ -1270,6 +1412,11 @@ describe("HostedGitMutationRepository", () => {
 			);
 			expect(result.launches).toBe(1);
 			expect(failure_from(result.corrupt)).toEqual(
+				new HostedGitMutationInvariant({
+					message: "Stored hosted Git mutation state is invalid",
+				}),
+			);
+			expect(failure_from(result.original_corrupt)).toEqual(
 				new HostedGitMutationInvariant({
 					message: "Stored hosted Git mutation state is invalid",
 				}),

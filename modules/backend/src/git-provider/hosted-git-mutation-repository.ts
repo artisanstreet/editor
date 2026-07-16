@@ -114,7 +114,6 @@ export interface HostedGitMutationExecution {
 	readonly approval: HostedGitMutationApprovalValue;
 	readonly claim_token: string;
 	readonly command: typeof HostedGitMutationCommandRequest.Type;
-	readonly provider_result?: unknown;
 }
 
 export class HostedGitMutationConflict extends Data.TaggedError("HostedGitMutationConflict")<{
@@ -900,12 +899,69 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 					return yield* invariant();
 			});
 
-		const ValidateStored = (transaction: typeof database.client, row: ApprovalRow) =>
+		const ValidateStoredBase = (transaction: typeof database.client, row: ApprovalRow) =>
 			Effect.gen(function* () {
 				const approval = yield* DecodeApproval(row);
 				yield* ValidateRequestCommand(transaction, row, approval);
 				yield* ValidateDecisionCommand(transaction, row);
 				return yield* ReadAcceptance(transaction, row);
+			});
+
+		const ReadStoredClaim = (transaction: typeof database.client, row: ApprovalRow) =>
+			Effect.gen(function* () {
+				const [claim] = yield* transaction
+					.select()
+					.from(HostedGitMutationClaims)
+					.where(eq(HostedGitMutationClaims.approval_id, row.approval_id))
+					.limit(1);
+
+				if (!claim) return yield* invariant();
+
+				yield* Schema.decodeUnknownEffect(Identifier)(claim.claim_token).pipe(
+					Effect.mapError(invariant),
+				);
+				yield* Schema.decodeUnknownEffect(Identifier)(claim.owner_instance_id).pipe(
+					Effect.mapError(invariant),
+				);
+				const claimed_at = yield* DecodeDateTime(claim.claimed_at);
+				const lease_expires_at = yield* DecodeDateTime(claim.lease_expires_at);
+				const execution_started_at =
+					claim.execution_started_at === null
+						? undefined
+						: yield* DecodeDateTime(claim.execution_started_at);
+				const execution_completed_at =
+					claim.execution_completed_at === null
+						? undefined
+						: yield* DecodeDateTime(claim.execution_completed_at);
+				const claimed_at_millis = DateTime.toEpochMillis(claimed_at);
+				const lease_expires_at_millis = DateTime.toEpochMillis(lease_expires_at);
+				const execution_started_at_millis =
+					execution_started_at === undefined
+						? undefined
+						: DateTime.toEpochMillis(execution_started_at);
+				const execution_completed_at_millis =
+					execution_completed_at === undefined
+						? undefined
+						: DateTime.toEpochMillis(execution_completed_at);
+
+				if (
+					row.state !== "executing" ||
+					claim.workspace_id !== row.workspace_id ||
+					claim.thread_id !== row.thread_id ||
+					claim.claimed_at !== row.updated_at ||
+					claim.execution_started_at !== row.execution_started_at ||
+					lease_expires_at_millis <= claimed_at_millis ||
+					(execution_started_at_millis !== undefined &&
+						(execution_started_at_millis < claimed_at_millis ||
+							execution_started_at_millis >= lease_expires_at_millis)) ||
+					(execution_completed_at_millis !== undefined &&
+						(execution_started_at_millis === undefined ||
+							execution_completed_at_millis < execution_started_at_millis))
+				) {
+					return yield* invariant();
+				}
+
+				return claim;
 			});
 
 		const ReadClaim = (
@@ -914,50 +970,32 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 			claim_token?: string,
 			owner_instance_id?: string,
 		) =>
+			ReadStoredClaim(transaction, row).pipe(
+				Effect.flatMap((claim) =>
+					(claim_token !== undefined && claim.claim_token !== claim_token) ||
+					(owner_instance_id !== undefined &&
+						claim.owner_instance_id !== owner_instance_id)
+						? Effect.fail(conflict("lease_conflict"))
+						: Effect.succeed(claim),
+				),
+			);
+
+		const ValidateStored = (transaction: typeof database.client, row: ApprovalRow) =>
 			Effect.gen(function* () {
+				const acceptance = yield* ValidateStoredBase(transaction, row);
 				const [claim] = yield* transaction
-					.select()
+					.select({ approval_id: HostedGitMutationClaims.approval_id })
 					.from(HostedGitMutationClaims)
 					.where(eq(HostedGitMutationClaims.approval_id, row.approval_id))
 					.limit(1);
 
-				if (
-					!claim ||
-					(claim_token !== undefined && claim.claim_token !== claim_token) ||
-					(owner_instance_id !== undefined &&
-						claim.owner_instance_id !== owner_instance_id)
-				) {
-					return yield* conflict("lease_conflict");
-				}
-
-				yield* Schema.decodeUnknownEffect(Identifier)(claim.claim_token).pipe(
-					Effect.mapError(invariant),
-				);
-				yield* Schema.decodeUnknownEffect(Identifier)(claim.owner_instance_id).pipe(
-					Effect.mapError(invariant),
-				);
-				yield* DecodeDateTime(claim.claimed_at);
-				yield* DecodeDateTime(claim.lease_expires_at);
-
-				if (claim.execution_started_at !== null) {
-					yield* DecodeDateTime(claim.execution_started_at);
-				}
-
-				if (claim.execution_completed_at !== null) {
-					yield* DecodeDateTime(claim.execution_completed_at);
-				}
-
-				if (
-					row.state !== "executing" ||
-					claim.workspace_id !== row.workspace_id ||
-					claim.thread_id !== row.thread_id ||
-					claim.execution_started_at !== row.execution_started_at ||
-					(claim.execution_completed_at !== null && claim.execution_started_at === null)
-				) {
+				if (row.state === "executing") {
+					yield* ReadStoredClaim(transaction, row);
+				} else if (claim) {
 					return yield* invariant();
 				}
 
-				return claim;
+				return acceptance;
 			});
 
 		const LeaseExpired = (expires_at: string, now: string) =>
@@ -965,6 +1003,14 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 				Effect.map(
 					([expiry, current]) =>
 						DateTime.toEpochMillis(expiry) <= DateTime.toEpochMillis(current),
+				),
+			);
+
+		const TimestampBefore = (left: string, right: string) =>
+			Effect.all([DecodeDateTime(left), DecodeDateTime(right)]).pipe(
+				Effect.map(
+					([left_time, right_time]) =>
+						DateTime.toEpochMillis(left_time) < DateTime.toEpochMillis(right_time),
 				),
 			);
 
@@ -1008,8 +1054,7 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 										return yield* conflict("invalid_transition");
 									}
 
-									const approval = yield* DecodeApproval(row);
-									yield* ReadArtifact(transaction, row, approval);
+									yield* ValidateStored(transaction, row);
 									const [checkout_claim, mutation_claim, hosted_claim] =
 										yield* Effect.all([
 											transaction
@@ -1113,15 +1158,15 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 										);
 
 									const updated_approval = yield* DecodeApproval(updated);
-									const event = yield* AppendEvent(
+									yield* AppendEvent(
 										transaction,
 										updated_approval,
 										updated.decision_message_id,
 									);
+									const acceptance = yield* ValidateStored(transaction, updated);
 
 									return {
-										approval: updated_approval,
-										event,
+										...acceptance,
 										status: "accepted" as const,
 									};
 								}),
@@ -1151,8 +1196,12 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 								return yield* conflict("invalid_transition");
 							}
 
-							const approval = yield* DecodeApproval(row);
-							const artifact = yield* ReadArtifact(transaction, row, approval);
+							const acceptance = yield* ValidateStored(transaction, row);
+							const artifact = yield* ReadArtifact(
+								transaction,
+								row,
+								acceptance.approval,
+							);
 							const claim = yield* ReadClaim(
 								transaction,
 								row,
@@ -1171,70 +1220,70 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 			Schema.decodeUnknownEffect(ClaimIdentity, { onExcessProperty: "error" })(identity).pipe(
 				Effect.mapError(() => conflict("lease_conflict")),
 				Effect.flatMap((decoded) =>
-					Effect.gen(function* () {
-						const now = yield* metadata.Now;
-						const lease_expires_at = yield* LeaseExpiry(now);
+					RetrySqliteWrite(
+						database.client.transaction((transaction) =>
+							Effect.gen(function* () {
+								const row = yield* ReadRow(transaction, decoded.approval_id);
 
-						yield* RetrySqliteWrite(
-							database.client.transaction((transaction) =>
-								Effect.gen(function* () {
-									const row = yield* ReadRow(transaction, decoded.approval_id);
+								yield* EnsureLiveThread(transaction, row.thread_id);
 
-									yield* EnsureLiveThread(transaction, row.thread_id);
+								if (row.state !== "executing") {
+									return yield* conflict("invalid_transition");
+								}
 
-									if (row.state !== "executing") {
-										return yield* conflict("invalid_transition");
-									}
+								yield* ValidateStored(transaction, row);
+								const claim = yield* ReadClaim(
+									transaction,
+									row,
+									decoded.claim_token,
+									metadata.instance_id,
+								);
+								const now = yield* metadata.Now;
+								const expired = yield* LeaseExpired(claim.lease_expires_at, now);
+								const before_claim = yield* TimestampBefore(now, claim.claimed_at);
+								const before_start =
+									claim.execution_started_at === null
+										? false
+										: yield* TimestampBefore(now, claim.execution_started_at);
 
-									const claim = yield* ReadClaim(
-										transaction,
-										row,
-										decoded.claim_token,
-										metadata.instance_id,
-									);
-									const expired = yield* LeaseExpired(
-										claim.lease_expires_at,
-										now,
-									);
+								if (expired || before_claim || before_start) {
+									return yield* conflict("lease_conflict");
+								}
+								const lease_expires_at = yield* LeaseExpiry(now);
 
-									if (expired) {
-										return yield* conflict("lease_conflict");
-									}
-
-									const [renewed] = yield* transaction
-										.update(HostedGitMutationClaims)
-										.set({ lease_expires_at })
-										.where(
-											and(
-												eq(
-													HostedGitMutationClaims.approval_id,
-													decoded.approval_id,
-												),
-												eq(
-													HostedGitMutationClaims.claim_token,
-													decoded.claim_token,
-												),
-												eq(
-													HostedGitMutationClaims.owner_instance_id,
-													metadata.instance_id,
-												),
-												eq(
-													HostedGitMutationClaims.lease_expires_at,
-													claim.lease_expires_at,
-												),
+								const [renewed] = yield* transaction
+									.update(HostedGitMutationClaims)
+									.set({ lease_expires_at })
+									.where(
+										and(
+											eq(
+												HostedGitMutationClaims.approval_id,
+												decoded.approval_id,
 											),
-										)
-										.returning({
-											approval_id: HostedGitMutationClaims.approval_id,
-										});
+											eq(
+												HostedGitMutationClaims.claim_token,
+												decoded.claim_token,
+											),
+											eq(
+												HostedGitMutationClaims.owner_instance_id,
+												metadata.instance_id,
+											),
+											eq(
+												HostedGitMutationClaims.lease_expires_at,
+												claim.lease_expires_at,
+											),
+										),
+									)
+									.returning({
+										approval_id: HostedGitMutationClaims.approval_id,
+									});
 
-									if (!renewed) {
-										return yield* conflict("lease_conflict");
-									}
-								}),
-							),
-						);
-					}),
+								if (!renewed) {
+									return yield* conflict("lease_conflict");
+								}
+							}),
+						),
+					),
 				),
 				Effect.mapError(normalize_error),
 			);
@@ -1251,8 +1300,7 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 							return yield* conflict("invalid_transition");
 						}
 
-						const approval = yield* DecodeApproval(row);
-						yield* ReadArtifact(transaction, row, approval);
+						yield* ValidateStored(transaction, row);
 						const claim = yield* ReadClaim(
 							transaction,
 							row,
@@ -1260,18 +1308,30 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 							metadata.instance_id,
 						);
 
+						const execution_started_at = yield* metadata.Now;
+						const lease_expires_at = yield* LeaseExpiry(execution_started_at);
+						const expired = yield* LeaseExpired(
+							claim.lease_expires_at,
+							execution_started_at,
+						);
+						const before_claim = yield* TimestampBefore(
+							execution_started_at,
+							claim.claimed_at,
+						);
+
 						if (
 							row.execution_started_at !== null ||
 							claim.execution_started_at !== null ||
-							claim.execution_completed_at !== null
+							claim.execution_completed_at !== null ||
+							expired ||
+							before_claim
 						) {
 							return yield* conflict("lease_conflict");
 						}
 
-						const execution_started_at = yield* metadata.Now;
 						const [started_claim] = yield* transaction
 							.update(HostedGitMutationClaims)
-							.set({ execution_started_at })
+							.set({ execution_started_at, lease_expires_at })
 							.where(
 								and(
 									eq(HostedGitMutationClaims.approval_id, identity.approval_id),
@@ -1321,8 +1381,7 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 				database.client.transaction((transaction) =>
 					Effect.gen(function* () {
 						const row = yield* ReadRow(transaction, identity.approval_id);
-						const approval = yield* DecodeApproval(row);
-						yield* ReadArtifact(transaction, row, approval);
+						yield* ValidateStored(transaction, row);
 						const claim = yield* ReadClaim(
 							transaction,
 							row,
@@ -1330,14 +1389,23 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 							metadata.instance_id,
 						);
 
+						const execution_completed_at = yield* metadata.Now;
+						const before_start =
+							claim.execution_started_at === null
+								? true
+								: yield* TimestampBefore(
+										execution_completed_at,
+										claim.execution_started_at,
+									);
+
 						if (
 							claim.execution_started_at === null ||
-							claim.execution_completed_at !== null
+							claim.execution_completed_at !== null ||
+							before_start
 						) {
 							return yield* conflict("lease_conflict");
 						}
 
-						const execution_completed_at = yield* metadata.Now;
 						const [completed] = yield* transaction
 							.update(HostedGitMutationClaims)
 							.set({ execution_completed_at })
@@ -1401,10 +1469,7 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 			.transaction((transaction) =>
 				Effect.gen(function* () {
 					const rows = yield* transaction
-						.select({
-							approval_id: HostedGitMutationApprovals.approval_id,
-							thread_id: HostedGitMutationApprovals.thread_id,
-						})
+						.select()
 						.from(HostedGitMutationApprovals)
 						.where(eq(HostedGitMutationApprovals.state, "approved"))
 						.orderBy(
@@ -1412,15 +1477,13 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 							asc(HostedGitMutationApprovals.approval_id),
 						);
 
-					yield* Effect.forEach(
-						rows,
-						(row) => EnsureLiveThread(transaction, row.thread_id),
-						{
-							discard: true,
-						},
+					yield* Effect.forEach(rows, (row) =>
+						EnsureLiveThread(transaction, row.thread_id).pipe(
+							Effect.andThen(ValidateStored(transaction, row)),
+						),
 					);
 
-					return rows;
+					return rows.map(({ approval_id, thread_id }) => ({ approval_id, thread_id }));
 				}),
 			)
 			.pipe(Effect.mapError(normalize_error));
@@ -1431,21 +1494,34 @@ export const HostedGitMutationRepositoryLive = Layer.effect(
 				Effect.flatMap((decoded) =>
 					database.client.transaction((transaction) =>
 						Effect.gen(function* () {
-							const claims = yield* transaction
-								.select()
-								.from(HostedGitMutationClaims)
-								.where(eq(HostedGitMutationClaims.thread_id, decoded));
+							const [claims, approvals] = yield* Effect.all([
+								transaction
+									.select()
+									.from(HostedGitMutationClaims)
+									.where(eq(HostedGitMutationClaims.thread_id, decoded)),
+								transaction
+									.select()
+									.from(HostedGitMutationApprovals)
+									.where(
+										and(
+											eq(HostedGitMutationApprovals.thread_id, decoded),
+											eq(HostedGitMutationApprovals.state, "executing"),
+										),
+									),
+							]);
+							const rows = new Map(approvals.map((row) => [row.approval_id, row]));
 
 							for (const claim of claims) {
 								const row = yield* ReadRow(transaction, claim.approval_id);
-								const approval = yield* DecodeApproval(row);
-
-								yield* EnsureLiveThread(transaction, row.thread_id);
-								yield* ReadArtifact(transaction, row, approval);
-								yield* ReadClaim(transaction, row);
+								rows.set(row.approval_id, row);
 							}
 
-							return claims.length > 0;
+							for (const row of rows.values()) {
+								yield* EnsureLiveThread(transaction, row.thread_id);
+								yield* ValidateStored(transaction, row);
+							}
+
+							return rows.size > 0;
 						}),
 					),
 				),
