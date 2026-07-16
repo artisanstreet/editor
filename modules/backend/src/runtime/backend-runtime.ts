@@ -58,6 +58,8 @@ import {
 } from "../external-wait/external-wait-dispatcher";
 import { ExternalWaitRepositoryLive } from "../external-wait/external-wait-repository";
 import { ExternalWaitServiceLive } from "../external-wait/external-wait-service";
+import { HostedGitMutationCoordinatorLive } from "../git-provider/hosted-git-mutation-coordinator";
+import { HostedGitMutationRepositoryLive } from "../git-provider/hosted-git-mutation-repository";
 import { HostedGitSnapshotRepositoryLive } from "../git-provider/hosted-git-snapshot-repository";
 import { HostedGitSnapshotServiceLive } from "../git-provider/hosted-git-snapshot-service";
 import { ArtisanHarnessContextLive } from "../harness/harness-context";
@@ -370,6 +372,11 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(workspace_git_execution_gate),
 		Layer.provideMerge(infrastructure),
 	);
+	const hosted_git_mutation_repository = HostedGitMutationRepositoryLive.pipe(
+		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(workspace_git_execution_gate),
+		Layer.provideMerge(infrastructure),
+	);
 	const hosted_project_clone_destination =
 		options.hosted_project_clone_destination ??
 		make_hosted_project_clone_destination_layer({}).pipe(
@@ -535,6 +542,11 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(project_catalog),
 		Layer.provideMerge(project_affinity),
 	);
+	const hosted_git_mutations = HostedGitMutationCoordinatorLive.pipe(
+		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(git_provider_registry),
+		Layer.provideMerge(hosted_git_mutation_repository),
+	);
 	const project_affinity_coordination =
 		options.project_locator === undefined
 			? ThreadProjectAffinityCoordinatorDisabled
@@ -572,6 +584,7 @@ export function make_backend_layer(options: BackendOptions) {
 			Layer.provideMerge(orchestration),
 			Layer.provideMerge(graph),
 			Layer.provideMerge(hosted_project_clones),
+			Layer.provideMerge(hosted_git_mutations),
 			Layer.provideMerge(preview_browser),
 			Layer.provideMerge(terminals),
 			Layer.provideMerge(workspace_approval_coordination),
@@ -620,7 +633,7 @@ export function make_backend_layer(options: BackendOptions) {
 		hosted_git_snapshots_repository,
 	);
 
-	return make_protocol_server_layer(protocol_options).pipe(
+	const protocol_server = make_protocol_server_layer(protocol_options).pipe(
 		Layer.provideMerge(routing),
 		Layer.provideMerge(retention_policy),
 		Layer.provideMerge(graph),
@@ -641,6 +654,11 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(model_behaviour_preview_and_links),
 		Layer.provideMerge(git_provider_registry),
 		Layer.provideMerge(workspace),
+	);
+
+	return Layer.merge(
+		protocol_server,
+		Layer.merge(hosted_git_mutation_repository, hosted_git_mutations),
 	);
 }
 

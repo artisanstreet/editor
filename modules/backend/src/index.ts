@@ -616,6 +616,24 @@ export {
 	type GitTransportAuthorization,
 } from "./git-provider/git-transport-authentication";
 export {
+	HostedGitMutationCoordinator,
+	HostedGitMutationCoordinatorFailure,
+	HostedGitMutationCoordinatorLive,
+	type HostedGitMutationCoordinatorError,
+	type HostedGitMutationDecisionInput,
+	type HostedGitMutationRequestInput,
+} from "./git-provider/hosted-git-mutation-coordinator";
+export {
+	HostedGitMutationConflict,
+	HostedGitMutationInvariant,
+	HostedGitMutationRepository,
+	HostedGitMutationRepositoryLive,
+	HostedGitMutationUnavailable,
+	type HostedGitMutationAcceptance,
+	type HostedGitMutationExecution,
+	type HostedGitMutationRepositoryError,
+} from "./git-provider/hosted-git-mutation-repository";
+export {
 	HostedGitSnapshotConflict,
 	HostedGitSnapshotInvariant,
 	HostedGitSnapshotRepository,

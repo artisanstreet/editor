@@ -1,6 +1,7 @@
 import { Context, Data, Effect, Layer } from "effect";
 
 import { ExternalWaitDispatcher } from "../external-wait/external-wait-dispatcher";
+import { HostedGitMutationCoordinator } from "../git-provider/hosted-git-mutation-coordinator";
 import { AgentGraphOrchestrator } from "../orchestration/agent-graph-orchestrator";
 import { AgentOrchestrator } from "../orchestration/agent-orchestrator";
 import { HostedProjectCloneCoordinator } from "../projects/hosted-project-clone-coordinator";
@@ -33,6 +34,7 @@ export const ThreadResourceQuiescerLive = Layer.effect(
 	Effect.gen(function* () {
 		const external_waits = yield* ExternalWaitDispatcher;
 		const graph = yield* AgentGraphOrchestrator;
+		const hosted_git_mutations = yield* HostedGitMutationCoordinator;
 		const hosted_project_clones = yield* HostedProjectCloneCoordinator;
 		const orchestration = yield* AgentOrchestrator;
 		const preview_browser = yield* PreviewBrowserLifecycle;
@@ -46,6 +48,7 @@ export const ThreadResourceQuiescerLive = Layer.effect(
 				[
 					external_waits.QuiesceThread(thread_id),
 					graph.QuiesceThread(thread_id),
+					hosted_git_mutations.QuiesceThread(thread_id),
 					hosted_project_clones.QuiesceThread(thread_id),
 					orchestration.QuiesceThread(thread_id),
 					preview_browser.QuiesceThread(thread_id),
