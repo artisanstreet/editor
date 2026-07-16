@@ -44,5 +44,5 @@ export const WorkspaceGitSessionReadTool = Effect.gen(function* () {
 		);
 	};
 
-	return { adapter, descriptor, IsEligible } satisfies ToolRegistration;
+	return { adapter, descriptor, IsEligible, recovery_policy: "retry" } satisfies ToolRegistration;
 });

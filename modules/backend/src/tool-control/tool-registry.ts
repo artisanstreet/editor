@@ -49,6 +49,7 @@ export interface ToolRegistration {
 	readonly adapter: EffectToolAdapter;
 	readonly descriptor: ToolDescriptor;
 	readonly IsEligible: (context: ToolInvocationContext) => Effect.Effect<void, ToolIneligible>;
+	readonly recovery_policy: "outcome_unknown" | "retry";
 }
 
 /** Owns the immutable canonical Tool Control Plane registrations. */
@@ -61,6 +62,9 @@ export class ToolRegistry extends Context.Service<
 			arguments_: ToolArgumentsValue,
 		) => Effect.Effect<ToolResultValue, ToolRegistryError>;
 		readonly List: (context: unknown) => Effect.Effect<ListEligibleResult, ToolRegistryError>;
+		readonly RecoveryPolicy: (
+			tool: ToolDescriptorReference,
+		) => Effect.Effect<ToolRegistration["recovery_policy"], ToolRegistryError>;
 		readonly Resolve: (
 			tool: ToolDescriptorReference,
 		) => Effect.Effect<ToolDescriptor, ToolRegistryError>;
@@ -132,15 +136,18 @@ interface ToolRegistrationCandidate {
 	readonly adapter: EffectToolAdapter;
 	readonly descriptor: unknown;
 	readonly IsEligible: ToolRegistration["IsEligible"];
+	readonly recovery_policy: ToolRegistration["recovery_policy"];
 }
 
 function is_tool_registration_candidate(value: {
 	readonly adapter: unknown;
 	readonly descriptor: unknown;
 	readonly IsEligible: unknown;
+	readonly recovery_policy: unknown;
 }): value is ToolRegistrationCandidate {
 	return (
 		typeof value.IsEligible === "function" &&
+		(value.recovery_policy === "outcome_unknown" || value.recovery_policy === "retry") &&
 		typeof value.adapter === "object" &&
 		value.adapter !== null &&
 		"input_schema" in value.adapter &&
@@ -158,6 +165,7 @@ function BuildToolRegistry(registrations: ReadonlyArray<unknown>) {
 						adapter: Schema.Unknown,
 						descriptor: Schema.Unknown,
 						IsEligible: Schema.Unknown,
+						recovery_policy: Schema.Unknown,
 					}),
 					{ onExcessProperty: "error" },
 				)(registration).pipe(
@@ -205,6 +213,7 @@ function BuildToolRegistry(registrations: ReadonlyArray<unknown>) {
 					adapter: frozen_adapter,
 					descriptor: frozen_descriptor,
 					IsEligible: candidate.IsEligible,
+					recovery_policy: candidate.recovery_policy,
 				}) satisfies ToolRegistration;
 			}),
 		);
@@ -274,6 +283,16 @@ function BuildToolRegistry(registrations: ReadonlyArray<unknown>) {
 					),
 				),
 			);
+		const RecoveryPolicy = (reference: ToolDescriptorReference) =>
+			Resolve(reference).pipe(
+				Effect.flatMap((descriptor) => {
+					const registration = by_tool_id.get(descriptor.tool_id);
+
+					return registration === undefined
+						? Effect.fail(new ToolRegistryError({ reason_code: "tool_unavailable" }))
+						: Effect.succeed(registration.recovery_policy);
+				}),
+			);
 		const Invoke = (
 			reference: ToolDescriptorReference,
 			context: ToolInvocationContext,
@@ -315,7 +334,7 @@ function BuildToolRegistry(registrations: ReadonlyArray<unknown>) {
 					.pipe(Effect.mapError(adapter_error));
 			});
 
-		return { Invoke, List, Resolve };
+		return { Invoke, List, RecoveryPolicy, Resolve };
 	});
 }
 

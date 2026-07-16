@@ -40,6 +40,7 @@ function registration(input: {
 		adapter,
 		descriptor,
 		IsEligible: () => Effect.void,
+		recovery_policy: "retry",
 	};
 }
 
@@ -70,12 +71,21 @@ describe("ToolRegistry", () => {
 		const missing_eligibility = {
 			adapter: original.adapter,
 			descriptor: original.descriptor,
+			recovery_policy: original.recovery_policy,
+		};
+		const missing_recovery = {
+			adapter: original.adapter,
+			descriptor: original.descriptor,
+			IsEligible: original.IsEligible,
 		};
 		const invalid_adapter = await Effect.runPromise(
 			registry([missing_invoke]).pipe(Effect.flip),
 		);
 		const invalid_eligibility = await Effect.runPromise(
 			registry([missing_eligibility]).pipe(Effect.flip),
+		);
+		const invalid_recovery = await Effect.runPromise(
+			registry([missing_recovery]).pipe(Effect.flip),
 		);
 
 		expect(duplicate).toBeInstanceOf(ToolRegistryError);
@@ -84,6 +94,7 @@ describe("ToolRegistry", () => {
 		expect(invalid.reason_code).toBe("invalid_registration");
 		expect(invalid_adapter.reason_code).toBe("invalid_registration");
 		expect(invalid_eligibility.reason_code).toBe("invalid_registration");
+		expect(invalid_recovery.reason_code).toBe("invalid_registration");
 	});
 
 	it("lists deterministic eligibility, preserves approval metadata, and resolves exact revisions", async () => {
@@ -95,6 +106,9 @@ describe("ToolRegistry", () => {
 		const resolved = await Effect.runPromise(
 			service.Resolve({ revision: 1, tool_id: "alpha" }),
 		);
+		const recovery_policy = await Effect.runPromise(
+			service.RecoveryPolicy({ revision: 1, tool_id: "alpha" }),
+		);
 		const stale = await Effect.runPromise(
 			service.Resolve({ revision: 2, tool_id: "alpha" }).pipe(Effect.flip),
 		);
@@ -102,6 +116,7 @@ describe("ToolRegistry", () => {
 		expect(listed.tools.map(({ descriptor }) => descriptor.tool_id)).toEqual(["alpha", "zeta"]);
 		expect(listed.tools[1]?.descriptor.approval_policy).toBe("required");
 		expect(resolved.tool_id).toBe("alpha");
+		expect(recovery_policy).toBe("retry");
 		expect(stale.reason_code).toBe("revision_mismatch");
 
 		Reflect.set(resolved, "revision", 99);
@@ -142,6 +157,7 @@ describe("ToolRegistry", () => {
 				tool_id: "transformed.result",
 			},
 			IsEligible: () => Effect.void,
+			recovery_policy: "retry" as const,
 		};
 		const service = await Effect.runPromise(registry([transformed]));
 		const result = await Effect.runPromise(
