@@ -7,6 +7,16 @@ import { Effect, Layer, ManagedRuntime } from "effect";
 import { type Engine, make_engine_registry_layer } from "@artisan/engines";
 import type { GlobalGuidanceProvider } from "@artisan/protocol";
 
+import {
+	ExportControlPolicySource,
+	ExportControlPolicySourceFailure,
+	ExportControlGateLive,
+	ExportControlIntentCommitment,
+	ExportControlIntentCommitmentFailure,
+	FailClosedExportControlPolicySourceLive,
+	UnavailableExportControlIntentCommitmentLive,
+} from "../compliance/export-control";
+import { SQLiteExportControlAuditStoreLive } from "../compliance/sqlite-export-control-audit-store";
 import { AgentGraphOrchestratorLive } from "../orchestration/agent-graph-orchestrator";
 import { AgentGraphRepositoryLive } from "../orchestration/agent-graph-repository";
 import { AgentOrchestratorLive } from "../orchestration/agent-orchestrator";
@@ -129,6 +139,15 @@ import { NodePtyTerminalDriverLive } from "../terminal/node-pty-terminal-driver"
 import { TerminalDriver } from "../terminal/terminal-driver";
 import { TerminalRepositoryLive } from "../terminal/terminal-repository";
 import { TerminalSessionServiceLive } from "../terminal/terminal-sessions";
+import { ToolControlCoordinatorLive } from "../tool-control/tool-control-coordinator";
+import { ToolControlRepositoryLive } from "../tool-control/tool-control-repository";
+import { ToolExecutionRepositoryLive } from "../tool-control/tool-execution-repository";
+import {
+	ToolRegistry,
+	ToolRegistryError,
+	make_tool_registry_layer,
+} from "../tool-control/tool-registry";
+import { WorkspaceGitSessionReadTool } from "../tool-control/workspace-git-session-read-tool";
 import { RuntimeMetadata, RuntimeMetadataLive } from "./runtime-metadata";
 import { GlobalGuidanceRepositoryLive } from "../guidance/guidance-repository";
 import {
@@ -181,6 +200,9 @@ import { WorkspaceMutationPayloadStoreLive } from "../workspace/workspace-mutati
 import { WorkspaceChangeDiffServiceLive } from "../workspace/workspace-change-diff-service";
 import { WorkspaceReplaceApprovalRepositoryLive } from "../workspace/workspace-replace-approval-repository";
 import { WorkspaceReplaceApprovalCoordinatorLive } from "../workspace/workspace-replace-approval-coordinator";
+import { SQLiteSurfaceProjectionStoreLive } from "../surface/sqlite-surface-projection-store";
+import { SurfaceProjectionRebuilderLive } from "../surface/surface-projection-rebuilder";
+import { SurfaceProjectorLive } from "../surface/surface-projector";
 
 export interface BackendOptions {
 	readonly browser_inspection_connector?: Layer.Layer<BrowserInspectionConnector>;
@@ -189,6 +211,14 @@ export interface BackendOptions {
 	readonly external_wait_dispatch_scheduler?: Layer.Layer<ExternalWaitDispatchScheduler>;
 	readonly external_wait_scheduler?: Layer.Layer<ExternalWaitScheduler>;
 	readonly external_url_launcher?: Layer.Layer<ExternalUrlLauncher>;
+	readonly export_control_intent_commitment?: Layer.Layer<
+		ExportControlIntentCommitment,
+		ExportControlIntentCommitmentFailure
+	>;
+	readonly export_control_policy_source?: Layer.Layer<
+		ExportControlPolicySource,
+		ExportControlPolicySourceFailure
+	>;
 	readonly git_provider_registry?: Layer.Layer<GitProviderRegistry, GitProviderRegistryError>;
 	readonly git_transport_authentication?: Layer.Layer<GitTransportAuthentication>;
 	readonly guidance?: Partial<GlobalGuidanceServiceOptions>;
@@ -213,6 +243,7 @@ export interface BackendOptions {
 	readonly terminal_driver?: Layer.Layer<TerminalDriver>;
 	readonly thread_metadata_refiner?: Layer.Layer<ThreadMetadataRefiner>;
 	readonly thread_resource_quiescer?: Layer.Layer<ThreadResourceQuiescer>;
+	readonly tool_registry?: Layer.Layer<ToolRegistry, ToolRegistryError>;
 	readonly workspace_filesystem_registry?: Layer.Layer<
 		WorkspaceFilesystemRegistry,
 		WorkspaceFilesystemRegistrationError
@@ -278,6 +309,33 @@ export function make_backend_layer(options: BackendOptions) {
 		OrchestrationRepositoryLive,
 		ThreadReadModelLive,
 	).pipe(Layer.provideMerge(NodeCrypto.layer), Layer.provideMerge(infrastructure));
+	const surface_projection_store = SQLiteSurfaceProjectionStoreLive.pipe(
+		Layer.provideMerge(infrastructure),
+	);
+	const surface_projection = SurfaceProjectionRebuilderLive.pipe(
+		Layer.provideMerge(persistence),
+		Layer.provideMerge(SurfaceProjectorLive),
+		Layer.provideMerge(surface_projection_store),
+	);
+	const surfaces = Layer.mergeAll(
+		SurfaceProjectorLive,
+		surface_projection_store,
+		surface_projection,
+	);
+	const export_control_audit = SQLiteExportControlAuditStoreLive.pipe(
+		Layer.provideMerge(infrastructure),
+	);
+	const export_control = ExportControlGateLive.pipe(
+		Layer.provideMerge(
+			options.export_control_intent_commitment ??
+				UnavailableExportControlIntentCommitmentLive,
+		),
+		Layer.provideMerge(
+			options.export_control_policy_source ?? FailClosedExportControlPolicySourceLive,
+		),
+		Layer.provideMerge(export_control_audit),
+	);
+	const compliance = Layer.merge(export_control_audit, export_control);
 	const project_catalog = ProjectRepositoryLive.pipe(
 		Layer.provideMerge(NodeCrypto.layer),
 		Layer.provideMerge(infrastructure),
@@ -325,6 +383,30 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(workspace_evidence),
 		Layer.provideMerge(workspace_git_observer),
 		Layer.provideMerge(workspace_git_sessions_repository),
+	);
+	const tool_registry =
+		options.tool_registry ??
+		Layer.unwrap(
+			WorkspaceGitSessionReadTool.pipe(
+				Effect.map((registration) => make_tool_registry_layer([registration])),
+			),
+		).pipe(
+			Layer.provideMerge(workspace_git_registry),
+			Layer.provideMerge(workspace_git_sessions),
+		);
+	const tool_control_repository = ToolControlRepositoryLive.pipe(
+		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(tool_registry),
+		Layer.provideMerge(infrastructure),
+	);
+	const tool_execution_repository = ToolExecutionRepositoryLive.pipe(
+		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(infrastructure),
+	);
+	const tool_control = ToolControlCoordinatorLive.pipe(
+		Layer.provideMerge(tool_registry),
+		Layer.provideMerge(tool_control_repository),
+		Layer.provideMerge(tool_execution_repository),
 	);
 	const hosted_git_snapshots_repository = HostedGitSnapshotRepositoryLive.pipe(
 		Layer.provideMerge(infrastructure),
@@ -597,6 +679,7 @@ export function make_backend_layer(options: BackendOptions) {
 			Layer.provideMerge(hosted_git_mutations),
 			Layer.provideMerge(preview_browser),
 			Layer.provideMerge(terminals),
+			Layer.provideMerge(tool_control),
 			Layer.provideMerge(workspace_approval_coordination),
 			Layer.provideMerge(workspace_git_checkouts),
 			Layer.provideMerge(workspace_git_fetches),
@@ -662,9 +745,10 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(model_behaviour_preview_and_links),
 		Layer.provideMerge(git_provider_registry),
 		Layer.provideMerge(workspace),
+		Layer.provideMerge(tool_control),
 	);
 
-	return Layer.merge(protocol_server, hosted_git_mutation_protocol);
+	return Layer.mergeAll(protocol_server, hosted_git_mutation_protocol, surfaces, compliance);
 }
 
 function is_guidance_provider(value: string): value is GlobalGuidanceProvider {
