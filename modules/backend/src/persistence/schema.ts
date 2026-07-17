@@ -20,6 +20,12 @@ import {
 	workspace_text_maximum_bytes,
 } from "@artisan/protocol";
 
+/** Accommodates every protocol-valid source-safe Routine projection at four-byte Unicode bounds. */
+export const routine_install_json_maximum_bytes = 8 * 1_024 * 1_024;
+
+/** Accommodates the largest protocol-valid Marketplace identity after UTF-8 JSON encoding. */
+export const routine_install_identity_json_maximum_bytes = 16 * 1_024;
+
 export const JournalCommands = sqliteTable(
 	"journal_commands",
 	{
@@ -2764,6 +2770,116 @@ export const ExportControlAuditDecisions = sqliteTable(
 		check(
 			"export_control_audit_created_at_check",
 			sql`strftime('%Y-%m-%dT%H:%M:%fZ', ${table.created_at}) IS ${table.created_at} AND substr(${table.created_at}, 12, 2) BETWEEN '00' AND '23'`,
+		),
+	],
+);
+
+/** Stores one immutable source-safe Routine preview and its durable approval state. */
+export const RoutineInstallApprovals = sqliteTable(
+	"routine_install_approvals",
+	{
+		approval_id: text("approval_id").primaryKey(),
+		preview_operation_id: text("preview_operation_id").notNull(),
+		preview_json: text("preview_json").notNull(),
+		preview_fingerprint: text("preview_fingerprint").notNull(),
+		decision: text("decision").notNull().default("pending"),
+		decision_id: text("decision_id"),
+		decision_operation_id: text("decision_operation_id"),
+		decision_request_json: text("decision_request_json"),
+		decision_snapshot_json: text("decision_snapshot_json"),
+		decided_at: text("decided_at"),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("routine_install_approvals_preview_operation_unique").on(
+			table.preview_operation_id,
+		),
+		uniqueIndex("routine_install_approvals_decision_unique")
+			.on(table.decision_id)
+			.where(sql`${table.decision_id} IS NOT NULL`),
+		uniqueIndex("routine_install_approvals_decision_operation_unique")
+			.on(table.decision_operation_id)
+			.where(sql`${table.decision_operation_id} IS NOT NULL`),
+		check(
+			"routine_install_approvals_decision_check",
+			sql`${table.decision} IN ('pending', 'approved', 'denied', 'applied')`,
+		),
+		check(
+			"routine_install_approvals_decision_pair_check",
+			sql`(${table.decision} = 'pending' AND ${table.decision_id} IS NULL AND ${table.decision_operation_id} IS NULL AND ${table.decision_request_json} IS NULL AND ${table.decision_snapshot_json} IS NULL AND ${table.decided_at} IS NULL) OR (${table.decision} IN ('approved', 'denied', 'applied') AND ${table.decision_id} IS NOT NULL AND ${table.decision_operation_id} IS NOT NULL AND ${table.decision_request_json} IS NOT NULL AND ${table.decision_snapshot_json} IS NOT NULL AND ${table.decided_at} IS NOT NULL)`,
+		),
+		check(
+			"routine_install_approvals_preview_fingerprint_check",
+			sql`length(${table.preview_fingerprint}) = 64 AND ${table.preview_fingerprint} NOT GLOB '*[^0-9a-f]*'`,
+		),
+		check(
+			"routine_install_approvals_preview_json_check",
+			sql`json_valid(${table.preview_json}) = 1 AND json_type(${table.preview_json}) = 'object' AND length(CAST(${table.preview_json} AS BLOB)) <= ${sql.raw(String(routine_install_json_maximum_bytes))}`,
+		),
+		check(
+			"routine_install_approvals_decision_json_check",
+			sql`(${table.decision_request_json} IS NULL AND ${table.decision_snapshot_json} IS NULL) OR (json_valid(${table.decision_request_json}) = 1 AND json_type(${table.decision_request_json}) = 'object' AND length(CAST(${table.decision_request_json} AS BLOB)) <= ${sql.raw(String(routine_install_json_maximum_bytes))} AND json_valid(${table.decision_snapshot_json}) = 1 AND json_type(${table.decision_snapshot_json}) = 'object' AND length(CAST(${table.decision_snapshot_json} AS BLOB)) <= ${sql.raw(String(routine_install_json_maximum_bytes))})`,
+		),
+		check(
+			"routine_install_approvals_timestamp_check",
+			sql`strftime('%Y-%m-%dT%H:%M:%fZ', ${table.created_at}) IS ${table.created_at} AND substr(${table.created_at}, 12, 2) BETWEEN '00' AND '23' AND strftime('%Y-%m-%dT%H:%M:%fZ', ${table.updated_at}) IS ${table.updated_at} AND substr(${table.updated_at}, 12, 2) BETWEEN '00' AND '23' AND (${table.decided_at} IS NULL OR (strftime('%Y-%m-%dT%H:%M:%fZ', ${table.decided_at}) IS ${table.decided_at} AND substr(${table.decided_at}, 12, 2) BETWEEN '00' AND '23'))`,
+		),
+		check(
+			"routine_install_approvals_timestamp_order_check",
+			sql`${table.created_at} <= ${table.updated_at} AND (${table.decided_at} IS NULL OR (${table.decided_at} >= ${table.created_at} AND ${table.decided_at} <= ${table.updated_at})) AND (${table.decision} IN ('pending', 'applied') OR ${table.decided_at} = ${table.updated_at})`,
+		),
+	],
+);
+
+/** Preserves immutable installed Routine history while allowing a later removal to free its slot. */
+export const RoutineInstallationHistory = sqliteTable(
+	"routine_installation_history",
+	{
+		installation_id: text("installation_id").primaryKey(),
+		approval_id: text("approval_id")
+			.notNull()
+			.references(() => RoutineInstallApprovals.approval_id, { onDelete: "restrict" }),
+		install_operation_id: text("install_operation_id").notNull(),
+		routine_id: text("routine_id").notNull(),
+		scope_slot: text("scope_slot").notNull(),
+		install_version: integer("install_version").notNull(),
+		routine_json: text("routine_json").notNull(),
+		rollback_identity_json: text("rollback_identity_json").notNull(),
+		rollback_id: text("rollback_id").notNull(),
+		rollback_plan_fingerprint: text("rollback_plan_fingerprint").notNull(),
+		rollback_plan_version: integer("rollback_plan_version").notNull(),
+		is_active: integer("is_active", { mode: "boolean" }).notNull().default(true),
+		installed_at: text("installed_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("routine_installation_history_approval_unique").on(table.approval_id),
+		uniqueIndex("routine_installation_history_operation_unique").on(table.install_operation_id),
+		uniqueIndex("routine_installation_history_slot_version_unique").on(
+			table.routine_id,
+			table.scope_slot,
+			table.install_version,
+		),
+		uniqueIndex("routine_installation_history_active_slot_unique")
+			.on(table.routine_id, table.scope_slot)
+			.where(sql`${table.is_active} = 1`),
+		check("routine_installation_history_version_check", sql`${table.install_version} > 0`),
+		check("routine_installation_history_active_check", sql`${table.is_active} IN (0, 1)`),
+		check(
+			"routine_installation_history_routine_json_check",
+			sql`json_valid(${table.routine_json}) = 1 AND json_type(${table.routine_json}) = 'object' AND length(CAST(${table.routine_json} AS BLOB)) <= ${sql.raw(String(routine_install_json_maximum_bytes))}`,
+		),
+		check(
+			"routine_installation_history_rollback_identity_json_check",
+			sql`json_valid(${table.rollback_identity_json}) = 1 AND json_type(${table.rollback_identity_json}) = 'object' AND length(CAST(${table.rollback_identity_json} AS BLOB)) <= ${sql.raw(String(routine_install_identity_json_maximum_bytes))}`,
+		),
+		check(
+			"routine_installation_history_rollback_fingerprint_check",
+			sql`length(${table.rollback_plan_fingerprint}) = 64 AND ${table.rollback_plan_fingerprint} NOT GLOB '*[^0-9a-f]*'`,
+		),
+		check(
+			"routine_installation_history_timestamp_check",
+			sql`strftime('%Y-%m-%dT%H:%M:%fZ', ${table.installed_at}) IS ${table.installed_at} AND substr(${table.installed_at}, 12, 2) BETWEEN '00' AND '23'`,
 		),
 	],
 );

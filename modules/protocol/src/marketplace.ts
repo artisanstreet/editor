@@ -120,6 +120,7 @@ const is_same_artifact_identity = (
 ) =>
 	left.version === right.version &&
 	left.source.kind === right.source.kind &&
+	left.source.display_name === right.source.display_name &&
 	left.source.locator === right.source.locator &&
 	left.source.revision === right.source.revision;
 

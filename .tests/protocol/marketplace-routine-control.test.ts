@@ -210,14 +210,22 @@ describe("Marketplace Routine control", () => {
 			).rejects.toBeDefined();
 		}
 
-		await expect(
-			Effect.runPromise(
-				DecodeRoutineInstallPreview({
-					...preview,
-					rollback: { ...rollback, identity: other_identity },
-				}),
-			),
-		).rejects.toBeDefined();
+		for (const rollback_identity of [
+			other_identity,
+			{
+				...identity,
+				source: { ...identity.source, display_name: "Renamed Artisan catalog" },
+			},
+		]) {
+			await expect(
+				Effect.runPromise(
+					DecodeRoutineInstallPreview({
+						...preview,
+						rollback: { ...rollback, identity: rollback_identity },
+					}),
+				),
+			).rejects.toBeDefined();
+		}
 		await expect(
 			Effect.runPromise(
 				DecodeRoutineInstallApproval({
