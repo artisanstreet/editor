@@ -2,7 +2,7 @@ import { Schema } from "effect";
 
 import ipaddr from "ipaddr.js";
 
-import { Identifier, IsoDateTime } from "./common";
+import { Identifier, IsoDateTime, PositiveInt } from "./common";
 
 const text_encoder = new TextEncoder();
 
@@ -122,6 +122,16 @@ const is_same_artifact_identity = (
 	left.source.kind === right.source.kind &&
 	left.source.locator === right.source.locator &&
 	left.source.revision === right.source.revision;
+
+const is_same_scope = (left: MarketplaceScope, right: MarketplaceScope) =>
+	left.kind === right.kind &&
+	(left.kind === "global" ||
+		(right.kind !== "global" &&
+			(left.kind === "workspace"
+				? right.kind === "workspace" && left.workspace_id === right.workspace_id
+				: right.kind === "project" && left.project_id === right.project_id)));
+
+const has_unique_values = (values: ReadonlyArray<string>) => new Set(values).size === values.length;
 
 const has_unique_names = (items: ReadonlyArray<{ readonly name: string }>) =>
 	new Set(items.map((item) => item.name)).size === items.length;
@@ -310,28 +320,73 @@ export const RoutineSummary = Schema.Struct({
 
 export type RoutineSummary = typeof RoutineSummary.Type;
 
+/** Binds progressive-disclosure instructions without exposing their content. */
+export const RoutineInstructionsReference = Schema.Struct({
+	content_hash: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+});
+
+export type RoutineInstructionsReference = typeof RoutineInstructionsReference.Type;
+
 /** Supplies full routine instructions only after a user or agent selects the routine. */
 export const RoutineInstructions = Schema.Struct({
 	content: bounded_byte_text(
 		marketplace_instructions_maximum_bytes,
 		"routine instructions",
 	).check(Schema.isMinLength(1)),
-	content_hash: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+	...RoutineInstructionsReference.fields,
 });
 
 export type RoutineInstructions = typeof RoutineInstructions.Type;
 
-/** Records the canonical Routine registry entry and its Marketplace lifecycle. */
-const RoutineFields = {
+const RoutineInstallCandidateFields = {
 	commands: BoundedCollection(RoutineCommand),
 	compatibility: BoundedCollection(MarketplaceEngine),
 	display_name: VisibleName,
 	files: BoundedCollection(RoutineFile),
+	instructions: RoutineInstructionsReference,
 	permissions: BoundedCollection(MarketplacePermission),
 	scope: MarketplaceScope,
 	summary: RoutineSummary,
-	sync: BoundedCollection(MarketplaceEngineSync),
 	trust: MarketplaceTrust,
+};
+
+const RoutineInstallCandidateUnchecked = Schema.Struct(RoutineInstallCandidateFields);
+
+type RoutineInstallCandidateUnchecked = typeof RoutineInstallCandidateUnchecked.Type;
+
+const routine_candidate_error = (candidate: RoutineInstallCandidateUnchecked) => {
+	if (candidate.display_name !== candidate.summary.display_name) {
+		return "Expected the Routine display name to match its summary";
+	}
+
+	if (!has_unique_values(candidate.commands.map((command) => command.command_id))) {
+		return "Expected unique Routine command identifiers";
+	}
+
+	if (!has_unique_values(candidate.files.map((file) => file.path))) {
+		return "Expected unique Routine file paths";
+	}
+
+	if (!has_unique_values(candidate.permissions.map((permission) => permission.kind))) {
+		return "Expected unique Routine permission kinds";
+	}
+
+	return has_unique_values(candidate.compatibility)
+		? undefined
+		: "Expected unique Routine compatibility engines";
+};
+
+/** Carries the complete hash-bound Routine snapshot disclosed before installation. */
+export const RoutineInstallCandidate = RoutineInstallCandidateUnchecked.check(
+	Schema.makeFilter(routine_candidate_error),
+);
+
+export type RoutineInstallCandidate = typeof RoutineInstallCandidate.Type;
+
+/** Records the canonical Routine registry entry and its Marketplace lifecycle. */
+const RoutineFields = {
+	...RoutineInstallCandidateFields,
+	sync: BoundedCollection(MarketplaceEngineSync),
 	updated_at: IsoDateTime,
 };
 
@@ -349,12 +404,18 @@ type RoutineLifecycle = typeof RoutineLifecycle.Type;
 
 export const Routine = RoutineLifecycle.check(
 	Schema.makeFilter<RoutineLifecycle>((routine) => {
-		if (new Set(routine.compatibility).size !== routine.compatibility.length) {
-			return "Expected unique Routine compatibility engines";
+		const candidate_error = routine_candidate_error(routine);
+
+		if (candidate_error !== undefined) {
+			return candidate_error;
 		}
 
 		if (new Set(routine.sync.map((sync) => sync.engine)).size !== routine.sync.length) {
 			return "Expected one Routine sync row per engine";
+		}
+
+		if (routine.sync.some((sync) => !routine.compatibility.includes(sync.engine))) {
+			return "Expected every Routine sync engine to be compatible";
 		}
 
 		return routine.sync.every((sync) =>
@@ -368,42 +429,51 @@ export const Routine = RoutineLifecycle.check(
 export type Routine = typeof Routine.Type;
 
 /** Describes a reversible plan to restore Marketplace-managed local state. */
-export const MarketplaceRollbackPlan = Schema.Struct({
+const MarketplaceRollbackPlanUnchecked = Schema.Struct({
 	actions: BoundedCollection(VisibleSummary),
 	available: Schema.Boolean,
 	identity: MarketplaceArtifactIdentity,
-	rollback_id: Schema.optional(BoundedIdentifier),
+	installation_id: BoundedIdentifier,
+	plan_fingerprint: Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/)),
+	plan_version: PositiveInt,
+	rollback_id: BoundedIdentifier,
+	scope: MarketplaceScope,
 });
+
+type MarketplaceRollbackPlanUnchecked = typeof MarketplaceRollbackPlanUnchecked.Type;
+
+export const MarketplaceRollbackPlan = MarketplaceRollbackPlanUnchecked.check(
+	Schema.makeFilter<MarketplaceRollbackPlanUnchecked>((plan) =>
+		has_unique_values(plan.actions)
+			? undefined
+			: "Expected unique Marketplace rollback actions",
+	),
+);
 
 export type MarketplaceRollbackPlan = typeof MarketplaceRollbackPlan.Type;
 
-/** Shows the exact Routine source, writes, permissions, and compatibility before installation. */
-const RoutineInstallPreviewFields = {
-	compatibility: BoundedCollection(MarketplaceEngine),
-	files: BoundedCollection(RoutineFile),
-	identity: MarketplaceArtifactIdentity,
-	permissions: BoundedCollection(MarketplacePermission),
+/** Shows the complete hash-bound Routine candidate and rollback plan before installation. */
+const RoutineInstallPreviewUnchecked = Schema.Struct({
+	candidate: RoutineInstallCandidate,
+	preview_operation_id: BoundedIdentifier,
 	rollback: MarketplaceRollbackPlan,
-	scope: MarketplaceScope,
-	trust: MarketplaceTrust,
-};
-
-const RoutineInstallPreviewUnchecked = Schema.Struct(RoutineInstallPreviewFields);
+});
 
 type RoutineInstallPreviewUnchecked = typeof RoutineInstallPreviewUnchecked.Type;
 
 export const RoutineInstallPreview = RoutineInstallPreviewUnchecked.check(
 	Schema.makeFilter<RoutineInstallPreviewUnchecked>((preview) =>
-		is_same_artifact_identity(preview.identity, preview.rollback.identity)
+		is_same_artifact_identity(preview.candidate.summary.identity, preview.rollback.identity) &&
+		is_same_scope(preview.candidate.scope, preview.rollback.scope)
 			? undefined
-			: "Expected the rollback plan to reference the approved Routine source and version",
+			: "Expected the rollback plan to reference the candidate source, version, and scope",
 	),
 );
 
 export type RoutineInstallPreview = typeof RoutineInstallPreview.Type;
 
-/** Represents a Routine installation approval lifecycle without execution details. */
-export const RoutineInstallApproval = Schema.Struct({
+/** Represents approval for one exact Routine preview operation and candidate snapshot. */
+const RoutineInstallApprovalUnchecked = Schema.Struct({
 	approval_id: BoundedIdentifier,
 	decision: Schema.Literals([
 		"pending",
@@ -414,9 +484,19 @@ export const RoutineInstallApproval = Schema.Struct({
 		"rolled_back",
 	]),
 	preview: RoutineInstallPreview,
-	routine_id: BoundedIdentifier,
+	preview_operation_id: BoundedIdentifier,
 	updated_at: IsoDateTime,
 });
+
+type RoutineInstallApprovalUnchecked = typeof RoutineInstallApprovalUnchecked.Type;
+
+export const RoutineInstallApproval = RoutineInstallApprovalUnchecked.check(
+	Schema.makeFilter<RoutineInstallApprovalUnchecked>((approval) =>
+		approval.preview_operation_id === approval.preview.preview_operation_id
+			? undefined
+			: "Expected the Routine approval to reference its exact preview operation",
+	),
+);
 
 export type RoutineInstallApproval = typeof RoutineInstallApproval.Type;
 
@@ -906,6 +986,12 @@ export const DecodeMarketplaceEngineSync = strict_decoder(MarketplaceEngineSync)
 
 /** Strictly decodes progressive-disclosure Routine instructions. */
 export const DecodeRoutineInstructions = strict_decoder(RoutineInstructions);
+
+/** Strictly decodes one hash-only Routine instructions reference. */
+export const DecodeRoutineInstructionsReference = strict_decoder(RoutineInstructionsReference);
+
+/** Strictly decodes one complete hash-bound Routine install candidate. */
+export const DecodeRoutineInstallCandidate = strict_decoder(RoutineInstallCandidate);
 
 /** Strictly decodes one canonical Routine projection. */
 export const DecodeRoutine = strict_decoder(Routine);

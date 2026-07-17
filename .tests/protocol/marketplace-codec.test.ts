@@ -10,6 +10,7 @@ import {
 	DecodeMcpTransport,
 	DecodeRoutine,
 	DecodeRoutineInstallApproval,
+	DecodeRoutineInstallCandidate,
 	McpCapability,
 	Routine,
 } from "../../modules/protocol/src/marketplace";
@@ -55,6 +56,7 @@ const routine = {
 			write_mode: "create",
 		},
 	],
+	instructions: { content_hash: "b".repeat(64) },
 	lifecycle: "enabled",
 	permissions: [permission],
 	scope,
@@ -75,6 +77,17 @@ const routine = {
 	],
 	trust,
 	updated_at: timestamp,
+} as const;
+const install_candidate = {
+	commands: routine.commands,
+	compatibility: routine.compatibility,
+	display_name: routine.display_name,
+	files: routine.files,
+	instructions: routine.instructions,
+	permissions: routine.permissions,
+	scope: routine.scope,
+	summary: routine.summary,
+	trust: routine.trust,
 } as const;
 const stdio_transport = {
 	arguments: [
@@ -129,20 +142,20 @@ const install_approval = {
 	approval_id: "approval.routine.release_notes",
 	decision: "pending",
 	preview: {
-		compatibility: routine.compatibility,
-		files: routine.files,
-		identity: routine_identity,
-		permissions: routine.permissions,
+		candidate: install_candidate,
+		preview_operation_id: "preview_1",
 		rollback: {
 			actions: ["Remove created routine files."],
 			available: true,
 			identity: routine_identity,
+			installation_id: "installation_1",
+			plan_fingerprint: "c".repeat(64),
+			plan_version: 1,
 			rollback_id: "rollback_1",
+			scope,
 		},
-		scope,
-		trust,
 	},
-	routine_id: routine.summary.routine_id,
+	preview_operation_id: "preview_1",
 	updated_at: timestamp,
 } as const;
 
@@ -153,6 +166,9 @@ describe("Marketplace codec", () => {
 
 		expect(Schema.encodeSync(Routine)(decoded_routine)).toEqual(routine);
 		expect(Schema.encodeSync(McpCapability)(decoded_mcp)).toEqual(mcp);
+		await expect(
+			Effect.runPromise(DecodeRoutineInstallCandidate(install_candidate)),
+		).resolves.toEqual(install_candidate);
 		await expect(
 			Effect.runPromise(DecodeRoutineInstallApproval(install_approval)),
 		).resolves.toEqual(install_approval);
@@ -552,6 +568,7 @@ describe("Marketplace codec", () => {
 		for (const value of [
 			{ ...routine, compatibility: ["codex", "codex"] },
 			{ ...routine, sync: [...routine.sync, routine.sync[0]] },
+			{ ...routine, compatibility: ["claude"] },
 			{
 				...routine,
 				sync: [
@@ -605,6 +622,14 @@ describe("Marketplace codec", () => {
 							identity: { ...routine_identity, version: "1.1.0" },
 						},
 					},
+				}),
+			),
+		).rejects.toBeDefined();
+		await expect(
+			Effect.runPromise(
+				DecodeRoutineInstallApproval({
+					...install_approval,
+					preview_operation_id: "preview_changed",
 				}),
 			),
 		).rejects.toBeDefined();

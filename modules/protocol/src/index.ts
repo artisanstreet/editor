@@ -11,6 +11,7 @@ export * from "./hosted-git";
 export * from "./external-wait";
 export * from "./export-control";
 export * from "./marketplace";
+export * from "./marketplace-routine-control";
 export * from "./model-behaviour";
 export * from "./stream";
 export * from "./surface";
