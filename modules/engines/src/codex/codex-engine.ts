@@ -34,6 +34,13 @@ import { CodexProcessFactory, type CodexProcessSpawnInput } from "./codex-proces
 import { CodexTransportMetadata } from "./codex-protocol";
 import { MakeCodexAppServerEventBuffer } from "./internal/codex-app-server-event-buffer";
 import { MakeCodexAppServerThreadOptions } from "./internal/codex-permissions";
+import {
+	accept_codex_turn_start,
+	is_codex_resume_usage_baseline,
+	make_codex_resumed_usage_state,
+	observe_codex_turn_started,
+	type CodexResumedUsageState,
+} from "./internal/codex-resumed-usage";
 
 /** Identifies the Codex adapter and its currently available capabilities. @since 0.3.0 */
 export const CodexEngineDescriptor: EngineDescriptor = {
@@ -99,6 +106,7 @@ interface CodexRunState {
 	readonly approvals: ReadonlyMap<string, PendingApproval>;
 	readonly command_intents: ReadonlyMap<string, string>;
 	readonly questions: ReadonlyMap<string, PendingQuestion>;
+	readonly resumed_usage: CodexResumedUsageState;
 }
 
 interface PendingApproval {
@@ -491,6 +499,7 @@ function make_codex_app_server_engine(
 				approvals: new Map(),
 				command_intents: new Map(),
 				questions: new Map(),
+				resumed_usage: make_codex_resumed_usage_state(input._tag === "resume"),
 			});
 			const event_buffer = yield* MakeCodexAppServerEventBuffer({
 				artisan_run_id: input.artisan_run_id,
@@ -538,6 +547,13 @@ function make_codex_app_server_engine(
 									: current.active_turn_id === observation.turn_id
 										? undefined
 										: current.active_turn_id,
+							resumed_usage:
+								observation.state === "started"
+									? observe_codex_turn_started(
+											current.resumed_usage,
+											observation.turn_id,
+										)
+									: current.resumed_usage,
 						};
 					}
 
@@ -561,15 +577,27 @@ function make_codex_app_server_engine(
 			const PumpNotifications = session.Notifications.pipe(
 				Stream.runForEach((notification) =>
 					Semaphore.withPermit(command_lock)(
-						normalise_codex_notification({
-							artisan_run_id: input.artisan_run_id,
-							frame_sequence: notification.frame_sequence,
-							...(notification.id === undefined ? {} : { id: notification.id }),
-							method: notification.method,
-							payload: notification.params,
-							protocol_version: CodexTransportMetadata.protocol_version,
-							raw_frame_base64: notification.raw_frame_base64,
-							transport: CodexTransportMetadata.transport,
+						Effect.gen(function* () {
+							const current = yield* Ref.get(state);
+							const expected_usage_turn_id = current.resumed_usage.expected_turn_id;
+							const usage_is_resume_baseline =
+								notification.method === "thread/tokenUsage/updated" &&
+								is_codex_resume_usage_baseline(current.resumed_usage);
+
+							return yield* normalise_codex_notification({
+								artisan_run_id: input.artisan_run_id,
+								...(expected_usage_turn_id === undefined
+									? {}
+									: { expected_usage_turn_id }),
+								frame_sequence: notification.frame_sequence,
+								...(notification.id === undefined ? {} : { id: notification.id }),
+								method: notification.method,
+								payload: notification.params,
+								protocol_version: CodexTransportMetadata.protocol_version,
+								raw_frame_base64: notification.raw_frame_base64,
+								transport: CodexTransportMetadata.transport,
+								...(usage_is_resume_baseline ? { usage_is_resume_baseline } : {}),
+							});
 						}).pipe(
 							Effect.flatMap((observations) =>
 								Effect.forEach(observations, ProcessObservation).pipe(
@@ -677,6 +705,7 @@ function make_codex_app_server_engine(
 				yield* Ref.update(state, (current) => ({
 					...current,
 					active_turn_id: turn.turn.id,
+					resumed_usage: accept_codex_turn_start(current.resumed_usage, turn.turn.id),
 				}));
 			}
 

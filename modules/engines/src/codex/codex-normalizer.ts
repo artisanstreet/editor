@@ -24,6 +24,7 @@ import type {
 /** Supplies immutable context used to annotate one decoded Codex frame. @since 0.3.0 */
 export interface CodexNormalizationInput {
 	readonly artisan_run_id: string;
+	readonly expected_usage_turn_id?: string;
 	readonly frame_sequence: number;
 	readonly id?: string | number;
 	readonly method: string;
@@ -31,6 +32,7 @@ export interface CodexNormalizationInput {
 	readonly protocol_version: string;
 	readonly raw_frame_base64: string;
 	readonly transport: string;
+	readonly usage_is_resume_baseline?: boolean;
 }
 
 const ThreadStatusSchema = Schema.Union([
@@ -200,14 +202,23 @@ const PrivateReasoningDeltaSchema = Schema.Struct({
 	threadId: Schema.String,
 	turnId: Schema.String,
 });
+const SafeTokenCount = Schema.Int.pipe(
+	Schema.check(Schema.isGreaterThanOrEqualTo(0)),
+	Schema.check(Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+);
+const TokenUsageBreakdownSchema = Schema.Struct({
+	cachedInputTokens: SafeTokenCount,
+	inputTokens: SafeTokenCount,
+	outputTokens: SafeTokenCount,
+	reasoningOutputTokens: SafeTokenCount,
+	totalTokens: SafeTokenCount,
+});
 const UsageSchema = Schema.Struct({
 	threadId: Schema.String,
 	tokenUsage: Schema.Struct({
-		total: Schema.Struct({
-			cachedInputTokens: Schema.optional(Schema.Number),
-			inputTokens: Schema.optional(Schema.Number),
-			outputTokens: Schema.optional(Schema.Number),
-		}),
+		last: TokenUsageBreakdownSchema,
+		modelContextWindow: Schema.optional(Schema.NullOr(SafeTokenCount)),
+		total: TokenUsageBreakdownSchema,
 	}),
 	turnId: Schema.String,
 });
@@ -423,20 +434,23 @@ export function normalise_codex_notification(
 				} satisfies EngineToolObservation,
 			]);
 		case "thread/tokenUsage/updated":
-			return decode_known(input, UsageSchema, (value) => [
-				{
-					...base,
-					_tag: "usage",
-					...(value.tokenUsage.total.inputTokens === undefined
-						? {}
-						: { input_tokens: value.tokenUsage.total.inputTokens }),
-					...(value.tokenUsage.total.outputTokens === undefined
-						? {}
-						: { output_tokens: value.tokenUsage.total.outputTokens }),
-					sequence: 0,
-					turn_id: value.turnId,
-				} satisfies EngineUsageObservation,
-			]);
+			return decode_known(input, UsageSchema, (value) =>
+				input.usage_is_resume_baseline ||
+				(input.expected_usage_turn_id !== undefined &&
+					value.turnId !== input.expected_usage_turn_id)
+					? [native_action(input, "Resumed-thread usage retained only in raw provenance")]
+					: [
+							{
+								...base,
+								_tag: "usage",
+								input_tokens: value.tokenUsage.last.inputTokens,
+								output_tokens: value.tokenUsage.last.outputTokens,
+								sample_scope: "turn_total",
+								sequence: 0,
+								turn_id: value.turnId,
+							} satisfies EngineUsageObservation,
+						],
+			);
 		case "thread/compacted":
 			return decode_known(input, CompactionSchema, () => [
 				{

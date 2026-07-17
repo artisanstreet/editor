@@ -656,6 +656,26 @@ export const RunLifecycleEvent = Schema.Struct({
 	]),
 });
 
+/** Projects provider-neutral token totals without provider pricing metadata. */
+export const RunUsage = Schema.Struct({
+	input_tokens: Schema.Int.pipe(
+		Schema.check(Schema.isGreaterThanOrEqualTo(0)),
+		Schema.check(Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+	),
+	output_tokens: Schema.Int.pipe(
+		Schema.check(Schema.isGreaterThanOrEqualTo(0)),
+		Schema.check(Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+	),
+});
+
+export type RunUsage = typeof RunUsage.Type;
+
+/** Records a durable provider-neutral usage projection for one run. */
+export const RunUsageUpdatedEvent = Schema.Struct({
+	type: Schema.Literal("run.usage.updated"),
+	usage: RunUsage,
+});
+
 /** Persists the complete assistant response while omitting transient deltas. */
 export const AssistantMessageCompletedEvent = Schema.Struct({
 	type: Schema.Literal("assistant.message_completed"),
@@ -838,6 +858,7 @@ export const AgentRun = Schema.Struct({
 	native_identity: Schema.optional(ProviderNativeIdentity),
 	raw_origin: Schema.optional(RawOrigin),
 	last_observation_sequence: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+	usage: Schema.optional(RunUsage),
 	created_at: IsoDateTime,
 	updated_at: IsoDateTime,
 	completed_at: Schema.optional(IsoDateTime),
@@ -1005,6 +1026,7 @@ export const EventPayload = Schema.Union([
 	ThreadMessageQueuedEvent,
 	ThreadMessageSteeringEvent,
 	RunLifecycleEvent,
+	RunUsageUpdatedEvent,
 	AssistantMessageCompletedEvent,
 	ApprovalInteractionEvent,
 	QuestionInteractionEvent,
@@ -1804,6 +1826,7 @@ export const ThreadWorkItem = Schema.Struct({
 	native_thread_id: Schema.optional(Identifier),
 	role: Schema.NonEmptyString,
 	run_id: Identifier,
+	usage: Schema.optional(RunUsage),
 	status: Schema.Literals([
 		"queued",
 		"running",

@@ -39,10 +39,30 @@ const turn_completed_schema = Schema.Struct({
 	type: Schema.Literal("turn.completed"),
 	usage: Schema.optional(
 		Schema.Struct({
-			cached_input_tokens: Schema.optional(Schema.Number),
-			input_tokens: Schema.optional(Schema.Number),
-			output_tokens: Schema.optional(Schema.Number),
-			reasoning_output_tokens: Schema.optional(Schema.Number),
+			cached_input_tokens: Schema.optional(
+				Schema.Int.pipe(
+					Schema.check(Schema.isGreaterThanOrEqualTo(0)),
+					Schema.check(Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+				),
+			),
+			input_tokens: Schema.optional(
+				Schema.Int.pipe(
+					Schema.check(Schema.isGreaterThanOrEqualTo(0)),
+					Schema.check(Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+				),
+			),
+			output_tokens: Schema.optional(
+				Schema.Int.pipe(
+					Schema.check(Schema.isGreaterThanOrEqualTo(0)),
+					Schema.check(Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+				),
+			),
+			reasoning_output_tokens: Schema.optional(
+				Schema.Int.pipe(
+					Schema.check(Schema.isGreaterThanOrEqualTo(0)),
+					Schema.check(Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+				),
+			),
 		}),
 	),
 });
@@ -349,6 +369,7 @@ export function NormaliseCodexExecEvent(
 										...(value.usage.output_tokens === undefined
 											? {}
 											: { output_tokens: value.usage.output_tokens }),
+										sample_scope: "turn_total",
 										turn_id: input.turn_id,
 									} satisfies EngineUsageObservation,
 								]),

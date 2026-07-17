@@ -2,6 +2,12 @@ import { describe, expect, it } from "vitest";
 import { Effect } from "effect";
 
 import { normalise_codex_notification } from "@artisan/engines";
+import {
+	accept_codex_turn_start,
+	is_codex_resume_usage_baseline,
+	make_codex_resumed_usage_state,
+	observe_codex_turn_started,
+} from "../../modules/engines/src/codex/internal/codex-resumed-usage";
 
 function make_turn(id: string, status = "inProgress") {
 	return {
@@ -16,13 +22,31 @@ function make_turn(id: string, status = "inProgress") {
 	};
 }
 
+function token_usage(input_tokens: number, output_tokens: number) {
+	return {
+		cachedInputTokens: 0,
+		inputTokens: input_tokens,
+		outputTokens: output_tokens,
+		reasoningOutputTokens: 0,
+		totalTokens: input_tokens + output_tokens,
+	};
+}
+
 function normalise(
 	method: string,
 	payload: unknown,
-	options: { readonly frame_sequence?: number; readonly id?: string | number } = {},
+	options: {
+		readonly expected_usage_turn_id?: string;
+		readonly frame_sequence?: number;
+		readonly id?: string | number;
+		readonly usage_is_resume_baseline?: boolean;
+	} = {},
 ) {
 	return normalise_codex_notification({
 		artisan_run_id: "normalizer-run",
+		...(options.expected_usage_turn_id === undefined
+			? {}
+			: { expected_usage_turn_id: options.expected_usage_turn_id }),
 		frame_sequence: options.frame_sequence ?? 1,
 		...(options.id === undefined ? {} : { id: options.id }),
 		method,
@@ -30,6 +54,7 @@ function normalise(
 		protocol_version: "v1",
 		raw_frame_base64: "e30=",
 		transport: "stdio-jsonl",
+		...(options.usage_is_resume_baseline ? { usage_is_resume_baseline: true } : {}),
 	});
 }
 
@@ -84,6 +109,155 @@ describe("Codex normalizer", () => {
 		expect(flattened[1]).toMatchObject({
 			entries: [{ id: "turn-1:plan:0", status: "in_progress", text: "Inspect" }],
 		});
+		expect(flattened[2]).toMatchObject({
+			input_tokens: 4,
+			output_tokens: 2,
+			sample_scope: "turn_total",
+			turn_id: "turn-1",
+		});
+	});
+
+	it("uses current-turn counters when a resumed thread includes earlier usage", async () => {
+		const observations = await Effect.runPromise(
+			normalise("thread/tokenUsage/updated", {
+				threadId: "resumed-native-thread",
+				tokenUsage: {
+					last: token_usage(7, 3),
+					modelContextWindow: 200_000,
+					total: token_usage(10_007, 5_003),
+				},
+				turnId: "new-artisan-turn",
+			}),
+		);
+
+		expect(observations).toEqual([
+			expect.objectContaining({
+				_tag: "usage",
+				input_tokens: 7,
+				output_tokens: 3,
+				sample_scope: "turn_total",
+				turn_id: "new-artisan-turn",
+			}),
+		]);
+	});
+
+	it("does not open resumed usage until a requested turn is observed started", () => {
+		const resumed = make_codex_resumed_usage_state(true);
+		const before_turn_start = observe_codex_turn_started(resumed, "historical-turn");
+		const requested_turn = accept_codex_turn_start(before_turn_start, "current-turn");
+		const historical_turn = observe_codex_turn_started(requested_turn, "historical-turn");
+		const current_turn = observe_codex_turn_started(historical_turn, "current-turn");
+
+		expect(is_codex_resume_usage_baseline(resumed)).toBe(true);
+		expect(is_codex_resume_usage_baseline(before_turn_start)).toBe(true);
+		expect(is_codex_resume_usage_baseline(requested_turn)).toBe(true);
+		expect(is_codex_resume_usage_baseline(historical_turn)).toBe(true);
+		expect(is_codex_resume_usage_baseline(current_turn)).toBe(false);
+	});
+
+	it("keeps resumed baseline usage raw until an observed new turn starts", async () => {
+		const baseline = await Effect.runPromise(
+			normalise(
+				"thread/tokenUsage/updated",
+				{
+					threadId: "resumed-native-thread",
+					tokenUsage: {
+						last: token_usage(10_007, 5_003),
+						modelContextWindow: 200_000,
+						total: token_usage(10_007, 5_003),
+					},
+					turnId: "prior-native-turn",
+				},
+				{ frame_sequence: 1, usage_is_resume_baseline: true },
+			),
+		);
+		const started = await Effect.runPromise(
+			normalise(
+				"turn/started",
+				{ threadId: "resumed-native-thread", turn: make_turn("new-artisan-turn") },
+				{ frame_sequence: 2 },
+			),
+		);
+		const delayed_historical_usage = await Effect.runPromise(
+			normalise(
+				"thread/tokenUsage/updated",
+				{
+					threadId: "resumed-native-thread",
+					tokenUsage: {
+						last: token_usage(10_007, 5_003),
+						modelContextWindow: 200_000,
+						total: token_usage(10_007, 5_003),
+					},
+					turnId: "prior-native-turn",
+				},
+				{ expected_usage_turn_id: "new-artisan-turn", frame_sequence: 3 },
+			),
+		);
+		const usage = await Effect.runPromise(
+			normalise(
+				"thread/tokenUsage/updated",
+				{
+					threadId: "resumed-native-thread",
+					tokenUsage: {
+						last: token_usage(7, 3),
+						modelContextWindow: 200_000,
+						total: token_usage(10_014, 5_006),
+					},
+					turnId: "new-artisan-turn",
+				},
+				{ expected_usage_turn_id: "new-artisan-turn", frame_sequence: 4 },
+			),
+		);
+
+		expect(baseline).toEqual([
+			expect.objectContaining({
+				_tag: "native_action",
+				raw: expect.objectContaining({
+					frame_sequence: 1,
+					native_method: "thread/tokenUsage/updated",
+				}),
+			}),
+		]);
+		expect(
+			[...baseline, ...started, ...delayed_historical_usage].some(
+				(observation) => observation._tag === "usage",
+			),
+		).toBe(false);
+		expect(delayed_historical_usage).toEqual([
+			expect.objectContaining({
+				_tag: "native_action",
+				raw: expect.objectContaining({ frame_sequence: 3 }),
+			}),
+		]);
+		expect(usage).toEqual([
+			expect.objectContaining({
+				_tag: "usage",
+				input_tokens: 7,
+				output_tokens: 3,
+				sample_scope: "turn_total",
+				turn_id: "new-artisan-turn",
+			}),
+		]);
+	});
+
+	it("rejects fractional usage counters instead of producing a durable sample", async () => {
+		const observations = await Effect.runPromise(
+			normalise("thread/tokenUsage/updated", {
+				threadId: "thread-1",
+				tokenUsage: {
+					last: token_usage(1.5, 2),
+					total: token_usage(1.5, 2),
+				},
+				turnId: "turn-1",
+			}),
+		);
+
+		expect(observations).toEqual([
+			expect.objectContaining({
+				_tag: "native_action",
+				detail: "Malformed known Codex payload",
+			}),
+		]);
 	});
 
 	it("expands multi-question and multi-file frames into uniquely identified observations", async () => {

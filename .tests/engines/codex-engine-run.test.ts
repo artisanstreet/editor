@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -15,6 +16,7 @@ import {
 } from "@artisan/engines";
 import { MakeCodexAppServerEventBuffer } from "../../modules/engines/src/codex/internal/codex-app-server-event-buffer";
 import { MakeCodexAppServerThreadOptions } from "../../modules/engines/src/codex/internal/codex-permissions";
+import { make_transcript_sequence_replay } from "./harness/transcript-process";
 
 const fixture_path = fileURLToPath(new URL("./fixtures/fake-app-server.mjs", import.meta.url));
 const original_pid_file = process.env.FAKE_APP_SERVER_PID_FILE;
@@ -89,6 +91,14 @@ async function wait_for_process_exit(pid: number) {
 
 		await new Promise<void>((resolve) => setTimeout(resolve, 50));
 	}
+}
+
+function jsonl_chunk(at_ms: number, stream: "stdin" | "stdout", payload: unknown) {
+	return {
+		at_ms,
+		chunk_base64: Buffer.from(`${JSON.stringify(payload)}\n`).toString("base64"),
+		stream,
+	};
 }
 
 describe("Codex engine run", () => {
@@ -591,6 +601,221 @@ describe("Codex engine run", () => {
 		);
 
 		expect(Exit.isSuccess(steer)).toBe(true);
+	});
+
+	it("keeps resumed usage suppressed through a queued historical turn start", async () => {
+		const initialized = {
+			codexHome: "C:\\fake-codex",
+			platformFamily: "windows",
+			platformOs: "win32",
+			userAgent: "fake-codex",
+		};
+		const thread = {
+			id: "thread-resumed",
+			status: { activeFlags: [], type: "active" },
+		};
+		const token_usage = (input_tokens: number, output_tokens: number) => ({
+			cachedInputTokens: 0,
+			inputTokens: input_tokens,
+			outputTokens: output_tokens,
+			reasoningOutputTokens: 0,
+			totalTokens: input_tokens + output_tokens,
+		});
+		const replay = await Effect.runPromise(
+			make_transcript_sequence_replay([
+				{
+					args: [fixture_path, "--version"],
+					chunks: [
+						{
+							at_ms: 1,
+							chunk_base64: Buffer.from("codex-cli 0.142.5\n").toString("base64"),
+							stream: "stdout",
+						},
+					],
+					command: process.execPath,
+					exit_code: 0,
+					exit_signal: null,
+				},
+				{
+					args: [fixture_path, "app-server", "--stdio"],
+					chunks: [
+						jsonl_chunk(5, "stdin", {
+							id: 1,
+							method: "initialize",
+							params: {
+								capabilities: {
+									experimentalApi: false,
+									requestAttestation: false,
+								},
+								clientInfo: { name: "artisan-editor", version: "0.3.0" },
+							},
+						}),
+						jsonl_chunk(10, "stdout", { id: 1, result: initialized }),
+						jsonl_chunk(15, "stdin", { method: "initialized" }),
+						jsonl_chunk(16, "stdin", { id: 2, method: "account/read", params: {} }),
+						jsonl_chunk(20, "stdout", {
+							id: 2,
+							result: {
+								account: {
+									email: "fake@example.com",
+									planType: "plus",
+									type: "chatgpt",
+								},
+								requiresOpenaiAuth: false,
+							},
+						}),
+						jsonl_chunk(25, "stdin", {
+							id: 3,
+							method: "thread/resume",
+							params: { cwd: "C:\\workspace", threadId: "thread-resumed" },
+						}),
+						jsonl_chunk(30, "stdout", {
+							method: "thread/started",
+							params: { thread },
+						}),
+						jsonl_chunk(31, "stdout", {
+							method: "turn/started",
+							params: {
+								threadId: "thread-resumed",
+								turn: { id: "turn-historical", status: "inProgress" },
+							},
+						}),
+						jsonl_chunk(32, "stdout", {
+							method: "thread/tokenUsage/updated",
+							params: {
+								threadId: "thread-resumed",
+								tokenUsage: {
+									last: token_usage(10_007, 5_003),
+									modelContextWindow: 200_000,
+									total: token_usage(10_007, 5_003),
+								},
+								turnId: "turn-historical",
+							},
+						}),
+						jsonl_chunk(35, "stdout", {
+							id: 3,
+							result: { thread: { ...thread, turns: [] } },
+						}),
+						jsonl_chunk(40, "stdin", {
+							id: 4,
+							method: "turn/start",
+							params: {
+								input: [
+									{
+										text: "Continue",
+										text_elements: [],
+										type: "text",
+									},
+								],
+								threadId: "thread-resumed",
+							},
+						}),
+						jsonl_chunk(45, "stdout", {
+							method: "turn/started",
+							params: {
+								threadId: "thread-resumed",
+								turn: { id: "turn-current", status: "inProgress" },
+							},
+						}),
+						jsonl_chunk(46, "stdout", {
+							id: 4,
+							result: { turn: { id: "turn-current" } },
+						}),
+						jsonl_chunk(48, "stdout", {
+							method: "thread/tokenUsage/updated",
+							params: {
+								threadId: "thread-resumed",
+								tokenUsage: {
+									last: token_usage(10_007, 5_003),
+									modelContextWindow: 200_000,
+									total: token_usage(10_007, 5_003),
+								},
+								turnId: "turn-historical",
+							},
+						}),
+						jsonl_chunk(50, "stdout", {
+							method: "thread/tokenUsage/updated",
+							params: {
+								threadId: "thread-resumed",
+								tokenUsage: {
+									last: token_usage(7, 3),
+									modelContextWindow: 200_000,
+									total: token_usage(10_014, 5_006),
+								},
+								turnId: "turn-current",
+							},
+						}),
+						jsonl_chunk(55, "stdout", {
+							method: "turn/completed",
+							params: {
+								threadId: "thread-resumed",
+								turn: { id: "turn-current", status: "completed" },
+							},
+						}),
+					],
+					command: process.execPath,
+					exit_at_ms: 1_000,
+					exit_code: null,
+					exit_signal: "SIGTERM",
+				},
+			]),
+		);
+		const events = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const engine = yield* CodexEngine;
+					const run = yield* engine.Open({
+						_tag: "resume",
+						artisan_run_id: "run-resume-usage-baseline",
+						next_text: "Continue",
+						resume_token: { native_thread_id: "thread-resumed" },
+						working_directory: "C:\\workspace",
+					});
+
+					return yield* run.Events.pipe(Stream.runCollect);
+				}),
+			).pipe(
+				Effect.provide(
+					make_codex_engine_layer({
+						executable: process.execPath,
+						executable_args: [fixture_path],
+						transport_selection: "app_server_only",
+					}).pipe(Layer.provide(replay.Layer)),
+				),
+			),
+		);
+		const usage = [...events].filter((event) => event._tag === "usage");
+		const raw_usage = [...events].filter(
+			(event) => event.raw.native_method === "thread/tokenUsage/updated",
+		);
+
+		await Effect.runPromise(replay.Assert);
+		await Effect.runPromise(replay.AssertClosed);
+
+		expect(raw_usage).toMatchObject([
+			{
+				_tag: "native_action",
+				detail: "Resumed-thread usage retained only in raw provenance",
+				raw: { frame: { turnId: "turn-historical" } },
+			},
+			{
+				_tag: "native_action",
+				detail: "Resumed-thread usage retained only in raw provenance",
+				raw: { frame: { turnId: "turn-historical" } },
+			},
+			{
+				_tag: "usage",
+				raw: { frame: { turnId: "turn-current" } },
+				turn_id: "turn-current",
+			},
+		]);
+		expect(usage).toEqual([
+			expect.objectContaining({
+				input_tokens: 7,
+				output_tokens: 3,
+				turn_id: "turn-current",
+			}),
+		]);
 	});
 
 	it("ignores stale turn completion when a newer native turn is active", async () => {

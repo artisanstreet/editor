@@ -1,5 +1,5 @@
-import { and, asc, eq, inArray, ne, notExists } from "drizzle-orm";
-import { Effect, Schema } from "effect";
+import { and, asc, eq, inArray, ne, notExists, sql } from "drizzle-orm";
+import { Effect, Encoding, Schema } from "effect";
 
 import {
 	EngineResumeToken,
@@ -18,9 +18,12 @@ import {
 	Assignments,
 	OrchestrationArtifacts,
 	OrchestrationGroups,
+	RunUsageSamples,
 	ThreadErasureClaims,
 } from "../../persistence/schema";
+import { RetrySqliteWrite } from "../../persistence/sqlite-write-retry";
 import {
+	AgentGraphFailure,
 	AgentGraphInvalid,
 	AgentGraphNotFound,
 	normalize_graph_error,
@@ -67,7 +70,13 @@ export function make_run_lifecycle(
 	raw_observations: RawObservationLedger,
 	transitions: RunTransitions,
 ): RunLifecycle {
-	const { database, metadata } = context;
+	const { crypto, database, metadata } = context;
+	const text_encoder = new TextEncoder();
+	const OpaqueIdentity = (kind: string, parts: ReadonlyArray<string>) =>
+		crypto.digest("SHA-256", text_encoder.encode(JSON.stringify([kind, ...parts]))).pipe(
+			Effect.map((digest) => `${kind}:${Encoding.encodeHex(digest)}`),
+			Effect.mapError((cause) => new AgentGraphFailure({ cause })),
+		);
 
 	const claim_run = (run_id: string, instance_id: string) =>
 		database.client
@@ -313,7 +322,7 @@ export function make_run_lifecycle(
 
 	const record_observation = (observation: EngineObservation) =>
 		Effect.gen(function* () {
-			const events = yield* database.client.transaction((transaction) =>
+			const write = database.client.transaction((transaction) =>
 				Effect.gen(function* () {
 					const inserted = yield* raw_observations.append_raw_observation(
 						transaction,
@@ -332,9 +341,10 @@ export function make_run_lifecycle(
 
 					if (
 						!run ||
-						observation.sequence <= run.last_observation_sequence ||
-						is_terminal_state(run.state) ||
-						run.dispatch_status !== "active"
+						(observation._tag !== "usage" &&
+							(observation.sequence <= run.last_observation_sequence ||
+								is_terminal_state(run.state) ||
+								run.dispatch_status !== "active"))
 					) {
 						return [];
 					}
@@ -347,6 +357,146 @@ export function make_run_lifecycle(
 
 					if (!group) {
 						return [];
+					}
+
+					if (observation._tag === "usage") {
+						const { input_tokens, output_tokens } = observation;
+						const scope_key =
+							observation.sample_scope === "run_total"
+								? "run"
+								: observation.turn_id
+									? `turn:${observation.turn_id}`
+									: undefined;
+
+						if (
+							!scope_key ||
+							input_tokens === undefined ||
+							output_tokens === undefined ||
+							!Number.isSafeInteger(input_tokens) ||
+							!Number.isSafeInteger(output_tokens) ||
+							input_tokens < 0 ||
+							output_tokens < 0
+						) {
+							return [];
+						}
+
+						const samples = yield* transaction
+							.select()
+							.from(RunUsageSamples)
+							.where(eq(RunUsageSamples.run_id, run.run_id));
+						const existing = samples.find((sample) => sample.scope_key === scope_key);
+
+						if (
+							existing &&
+							input_tokens <= existing.input_tokens &&
+							output_tokens <= existing.output_tokens
+						) {
+							return [];
+						}
+						const candidate_samples = existing
+							? samples.map((sample) =>
+									sample.scope_key === scope_key
+										? {
+												...sample,
+												input_tokens: Math.max(
+													sample.input_tokens,
+													input_tokens,
+												),
+												output_tokens: Math.max(
+													sample.output_tokens,
+													output_tokens,
+												),
+											}
+										: sample,
+								)
+							: [
+									...samples,
+									{
+										input_tokens,
+										output_tokens,
+										run_id: run.run_id,
+										sample_scope: observation.sample_scope,
+										scope_key,
+										updated_at: "",
+									},
+								];
+						const candidate_turn_totals = candidate_samples
+							.filter((sample) => sample.sample_scope === "turn_total")
+							.reduce(
+								(total, sample) => ({
+									input_tokens: total.input_tokens + sample.input_tokens,
+									output_tokens: total.output_tokens + sample.output_tokens,
+								}),
+								{ input_tokens: 0, output_tokens: 0 },
+							);
+
+						if (
+							!Number.isSafeInteger(candidate_turn_totals.input_tokens) ||
+							!Number.isSafeInteger(candidate_turn_totals.output_tokens)
+						) {
+							return [];
+						}
+
+						const updated_at = yield* metadata.Now;
+
+						yield* transaction
+							.insert(RunUsageSamples)
+							.values({
+								input_tokens,
+								output_tokens,
+								run_id: run.run_id,
+								sample_scope: observation.sample_scope,
+								scope_key,
+								updated_at,
+							})
+							.onConflictDoUpdate({
+								target: [RunUsageSamples.run_id, RunUsageSamples.scope_key],
+								set: {
+									input_tokens: sql`MAX(${RunUsageSamples.input_tokens}, excluded.input_tokens)`,
+									output_tokens: sql`MAX(${RunUsageSamples.output_tokens}, excluded.output_tokens)`,
+									updated_at,
+								},
+							});
+						const run_total = candidate_samples.find(
+							(sample) => sample.sample_scope === "run_total",
+						);
+						const usage = run_total
+							? run_total
+							: candidate_samples.reduce(
+									(total, sample) => ({
+										input_tokens: total.input_tokens + sample.input_tokens,
+										output_tokens: total.output_tokens + sample.output_tokens,
+									}),
+									{ input_tokens: 0, output_tokens: 0 },
+								);
+
+						if (
+							!Number.isSafeInteger(usage.input_tokens) ||
+							!Number.isSafeInteger(usage.output_tokens)
+						) {
+							return [];
+						}
+
+						const raw_origin = {
+							provider: yield* OpaqueIdentity("engine", [run.engine_id]),
+							reference: yield* OpaqueIdentity("engine_observation", [
+								run.run_id,
+								observation.observation_id,
+							]),
+						} satisfies RawOrigin;
+
+						return [
+							yield* ledger.append_event(transaction, {
+								agent_id: run.agent_id,
+								causation_id: observation.observation_id,
+								correlation_id: run.run_id,
+								group_id: run.group_id,
+								payload: { type: "run.usage.updated", usage },
+								raw_origin,
+								run_id: run.run_id,
+								thread_id: group.thread_id,
+							}),
+						];
 					}
 
 					const updated_at = yield* metadata.Now;
@@ -505,6 +655,7 @@ export function make_run_lifecycle(
 					];
 				}),
 			);
+			const events = yield* observation._tag === "usage" ? RetrySqliteWrite(write) : write;
 
 			yield* ledger.publish_events(events);
 

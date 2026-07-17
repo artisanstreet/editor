@@ -1,4 +1,4 @@
-import { asc, eq } from "drizzle-orm";
+import { asc, eq, inArray } from "drizzle-orm";
 import { Effect, Schema } from "effect";
 
 import {
@@ -30,6 +30,7 @@ import {
 	OrchestrationGraphEdges,
 	OrchestrationGroups,
 	OrchestrationJoins,
+	RunUsageSamples,
 } from "../../persistence/schema";
 import { AgentGraphInvalid, AgentGraphNotFound } from "../agent-graph-model";
 import type { GraphContext, GraphTransaction } from "./graph-context";
@@ -142,6 +143,41 @@ export function make_persisted_graph_codecs(_context: GraphContext): PersistedGr
 				.from(AgentRuns)
 				.where(eq(AgentRuns.group_id, group_id))
 				.orderBy(asc(AgentRuns.created_at), asc(AgentRuns.attempt), asc(AgentRuns.run_id));
+			const usage_rows =
+				run_rows.length === 0
+					? []
+					: yield* transaction
+							.select()
+							.from(RunUsageSamples)
+							.where(
+								inArray(
+									RunUsageSamples.run_id,
+									run_rows.map((row) => row.run_id),
+								),
+							);
+			const usage_by_run = new Map<string, { input_tokens: number; output_tokens: number }>();
+
+			for (const row of run_rows) {
+				const samples = usage_rows.filter((sample) => sample.run_id === row.run_id);
+				const run_total = samples.find((sample) => sample.sample_scope === "run_total");
+				const totals = run_total
+					? run_total
+					: samples.reduce(
+							(total, sample) => ({
+								input_tokens: total.input_tokens + sample.input_tokens,
+								output_tokens: total.output_tokens + sample.output_tokens,
+							}),
+							{ input_tokens: 0, output_tokens: 0 },
+						);
+
+				if (
+					samples.length > 0 &&
+					Number.isSafeInteger(totals.input_tokens) &&
+					Number.isSafeInteger(totals.output_tokens)
+				) {
+					usage_by_run.set(row.run_id, totals);
+				}
+			}
 			const join_rows = yield* transaction
 				.select()
 				.from(OrchestrationJoins)
@@ -251,6 +287,9 @@ export function make_persisted_graph_codecs(_context: GraphContext): PersistedGr
 						engine_id: row.engine_id,
 						group_id: row.group_id,
 						last_observation_sequence: row.last_observation_sequence,
+						...(usage_by_run.has(row.run_id)
+							? { usage: usage_by_run.get(row.run_id)! }
+							: {}),
 						...(native_identity ? { native_identity } : {}),
 						...(row.native_thread_id ? { native_thread_id: row.native_thread_id } : {}),
 						profile: row.profile,

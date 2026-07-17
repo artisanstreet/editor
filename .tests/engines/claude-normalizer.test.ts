@@ -89,4 +89,36 @@ describe("Claude normalization", () => {
 			false,
 		);
 	});
+
+	it("emits only integral run-total usage samples", () => {
+		const valid = normalize_claude_event(
+			input({
+				subtype: "success",
+				type: "result",
+				usage: { input_tokens: 4, output_tokens: 2 },
+			}),
+		);
+		const fractional = normalize_claude_event(
+			input({
+				subtype: "success",
+				type: "result",
+				usage: { input_tokens: 1.5, output_tokens: 2 },
+			}),
+		);
+
+		expect(valid).toEqual([
+			expect.objectContaining({
+				_tag: "usage",
+				input_tokens: 4,
+				output_tokens: 2,
+				sample_scope: "run_total",
+			}),
+		]);
+		expect(fractional).toEqual([
+			expect.objectContaining({
+				_tag: "native_action",
+				detail: "Unknown Claude event type: result",
+			}),
+		]);
+	});
 });

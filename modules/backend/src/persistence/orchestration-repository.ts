@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, notExists, or } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, notExists, or, sql } from "drizzle-orm";
 import { Context, Crypto, Data, Effect, Encoding, Layer, Schema } from "effect";
 
 import {
@@ -13,6 +13,7 @@ import { EngineResumeToken, type EngineObservation } from "@artisan/engines";
 
 import { Database } from "./database";
 import { JournalNotifier } from "./journal-notifier";
+import { RetrySqliteWrite } from "./sqlite-write-retry";
 import {
 	EventStreams,
 	JournalCommands,
@@ -23,6 +24,7 @@ import {
 	OrchestrationOutbox,
 	OrchestrationRawObservations,
 	OrchestrationRuns,
+	RunUsageSamples,
 	ThreadErasureClaims,
 	Threads,
 } from "./schema";
@@ -146,6 +148,53 @@ export const OrchestrationRepositoryLive = Layer.effect(
 				catch: (cause) => new OrchestrationFailure({ cause }),
 			});
 
+		const ReadUsage = (transaction: typeof database.client, run_id: string) =>
+			Effect.gen(function* () {
+				const samples = yield* transaction
+					.select()
+					.from(RunUsageSamples)
+					.where(eq(RunUsageSamples.run_id, run_id));
+				const run_total = samples.find((sample) => sample.sample_scope === "run_total");
+				const totals = run_total
+					? run_total
+					: samples.reduce(
+							(total, sample) => ({
+								input_tokens: total.input_tokens + sample.input_tokens,
+								output_tokens: total.output_tokens + sample.output_tokens,
+							}),
+							{ input_tokens: 0, output_tokens: 0 },
+						);
+
+				return samples.length === 0 ||
+					!Number.isSafeInteger(totals.input_tokens) ||
+					!Number.isSafeInteger(totals.output_tokens)
+					? undefined
+					: { input_tokens: totals.input_tokens, output_tokens: totals.output_tokens };
+			});
+
+		const HasSafeTurnAggregate = (
+			samples: ReadonlyArray<{
+				readonly input_tokens: number;
+				readonly output_tokens: number;
+				readonly sample_scope: string;
+			}>,
+		) => {
+			const totals = samples
+				.filter((sample) => sample.sample_scope === "turn_total")
+				.reduce(
+					(total, sample) => ({
+						input_tokens: total.input_tokens + sample.input_tokens,
+						output_tokens: total.output_tokens + sample.output_tokens,
+					}),
+					{ input_tokens: 0, output_tokens: 0 },
+				);
+
+			return (
+				Number.isSafeInteger(totals.input_tokens) &&
+				Number.isSafeInteger(totals.output_tokens)
+			);
+		};
+
 		const GetJournalSequence = (transaction: typeof database.client) =>
 			transaction
 				.select({ journal_sequence: JournalEvents.sequence })
@@ -237,39 +286,39 @@ export const OrchestrationRepositoryLive = Layer.effect(
 			});
 
 		const GetWork = (thread_id: string) =>
-			database.client
-				.select({
-					agent_id: OrchestrationCoordinators.agent_id,
-					display_name: OrchestrationCoordinators.display_name,
-					engine_id: OrchestrationCoordinators.engine_id,
-					native_thread_id: OrchestrationRuns.native_thread_id,
-					role: OrchestrationCoordinators.role,
-					run_id: OrchestrationRuns.run_id,
-					status: OrchestrationRuns.status,
-				})
-				.from(OrchestrationCoordinators)
-				.innerJoin(
-					OrchestrationRuns,
-					eq(OrchestrationCoordinators.active_run_id, OrchestrationRuns.run_id),
-				)
-				.where(eq(OrchestrationCoordinators.thread_id, thread_id))
-				.limit(1)
-				.pipe(
-					Effect.map(([work]) => {
-						if (!work) {
-							return undefined;
-						}
+			Effect.gen(function* () {
+				const [work] = yield* database.client
+					.select({
+						agent_id: OrchestrationCoordinators.agent_id,
+						display_name: OrchestrationCoordinators.display_name,
+						engine_id: OrchestrationCoordinators.engine_id,
+						native_thread_id: OrchestrationRuns.native_thread_id,
+						role: OrchestrationCoordinators.role,
+						run_id: OrchestrationRuns.run_id,
+						status: OrchestrationRuns.status,
+					})
+					.from(OrchestrationCoordinators)
+					.innerJoin(
+						OrchestrationRuns,
+						eq(OrchestrationCoordinators.active_run_id, OrchestrationRuns.run_id),
+					)
+					.where(eq(OrchestrationCoordinators.thread_id, thread_id))
+					.limit(1);
 
-						const { native_thread_id, ...without_native_thread } = work;
+				if (!work) {
+					return undefined;
+				}
 
-						return {
-							...without_native_thread,
-							...(native_thread_id ? { native_thread_id } : {}),
-							status: work.status as WorkStatus,
-						} satisfies ThreadWorkItem;
-					}),
-					Effect.mapError(normalize_error),
-				);
+				const usage = yield* ReadUsage(database.client, work.run_id);
+				const { native_thread_id, ...without_native_thread } = work;
+
+				return {
+					...without_native_thread,
+					...(native_thread_id ? { native_thread_id } : {}),
+					...(usage ? { usage } : {}),
+					status: work.status as WorkStatus,
+				} satisfies ThreadWorkItem;
+			}).pipe(Effect.mapError(normalize_error));
 
 		const Accept = (command: CommandEnvelope, can_steer: boolean) =>
 			Effect.gen(function* () {
@@ -1091,7 +1140,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 
 		const RecordObservation = (observation: EngineObservation) =>
 			Effect.gen(function* () {
-				const result = yield* database.client.transaction((transaction) =>
+				const write = database.client.transaction((transaction) =>
 					Effect.gen(function* () {
 						const inserted_observation = yield* transaction
 							.insert(OrchestrationRawObservations)
@@ -1124,6 +1173,126 @@ export const OrchestrationRepositoryLive = Layer.effect(
 							.from(OrchestrationRuns)
 							.where(eq(OrchestrationRuns.run_id, observation.artisan_run_id))
 							.limit(1);
+
+						if (observation._tag === "usage") {
+							const { input_tokens, output_tokens } = observation;
+							const scope_key =
+								observation.sample_scope === "run_total"
+									? "run"
+									: observation.turn_id
+										? `turn:${observation.turn_id}`
+										: undefined;
+
+							if (
+								!run ||
+								!scope_key ||
+								input_tokens === undefined ||
+								output_tokens === undefined ||
+								!Number.isSafeInteger(input_tokens) ||
+								!Number.isSafeInteger(output_tokens) ||
+								input_tokens < 0 ||
+								output_tokens < 0
+							) {
+								return [];
+							}
+
+							const samples = yield* transaction
+								.select()
+								.from(RunUsageSamples)
+								.where(eq(RunUsageSamples.run_id, run.run_id));
+							const existing = samples.find(
+								(sample) => sample.scope_key === scope_key,
+							);
+							const changed =
+								!existing ||
+								input_tokens > existing.input_tokens ||
+								output_tokens > existing.output_tokens;
+
+							if (!changed) {
+								return [];
+							}
+							const candidate_samples = existing
+								? samples.map((sample) =>
+										sample.scope_key === scope_key
+											? {
+													...sample,
+													input_tokens: Math.max(
+														sample.input_tokens,
+														input_tokens,
+													),
+													output_tokens: Math.max(
+														sample.output_tokens,
+														output_tokens,
+													),
+												}
+											: sample,
+									)
+								: [
+										...samples,
+										{
+											input_tokens,
+											output_tokens,
+											run_id: run.run_id,
+											sample_scope: observation.sample_scope,
+											scope_key,
+											updated_at: "",
+										},
+									];
+
+							if (!HasSafeTurnAggregate(candidate_samples)) {
+								return [];
+							}
+
+							const updated_at = yield* metadata.Now;
+
+							yield* transaction
+								.insert(RunUsageSamples)
+								.values({
+									input_tokens,
+									output_tokens,
+									run_id: run.run_id,
+									sample_scope: observation.sample_scope,
+									scope_key,
+									updated_at,
+								})
+								.onConflictDoUpdate({
+									target: [RunUsageSamples.run_id, RunUsageSamples.scope_key],
+									set: {
+										input_tokens: sql`MAX(${RunUsageSamples.input_tokens}, excluded.input_tokens)`,
+										output_tokens: sql`MAX(${RunUsageSamples.output_tokens}, excluded.output_tokens)`,
+										updated_at,
+									},
+								});
+
+							const usage = yield* ReadUsage(transaction, run.run_id);
+
+							if (!usage) {
+								return [];
+							}
+
+							const observation_id = yield* OpaqueIdentity("engine_observation", [
+								run.run_id,
+								observation.observation_id,
+							]);
+							const raw_origin_provider = yield* OpaqueIdentity("engine", [
+								run.engine_id,
+							]);
+
+							return [
+								yield* AppendEvent(transaction, {
+									agent_id: run.agent_id,
+									causation_id: observation_id,
+									correlation_id: run.run_id,
+									payload: { type: "run.usage.updated", usage },
+									raw_origin: {
+										provider: raw_origin_provider,
+										reference: observation_id,
+									},
+									run_id: run.run_id,
+									thread_id: run.thread_id,
+								}),
+							];
+						}
 
 						if (
 							!run ||
@@ -1323,6 +1492,9 @@ export const OrchestrationRepositoryLive = Layer.effect(
 						];
 					}),
 				);
+				const result = yield* observation._tag === "usage"
+					? RetrySqliteWrite(write)
+					: write;
 
 				if (result.length > 0) {
 					yield* notifier.Publish(result.at(-1)!.journal_sequence);

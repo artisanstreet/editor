@@ -1,4 +1,4 @@
-import { Context, Effect } from "effect";
+import { Context, Crypto, Effect } from "effect";
 
 import type { EngineRunTerminalState } from "@artisan/engines";
 import type { CommandEnvelope } from "@artisan/protocol";
@@ -13,11 +13,13 @@ import {
 } from "../agent-graph-model";
 
 export type GraphDatabase = Context.Service.Shape<typeof Database>;
+export type GraphCrypto = Context.Service.Shape<typeof Crypto.Crypto>;
 export type GraphTransaction = GraphDatabase["client"];
 export type GraphMetadata = Context.Service.Shape<typeof RuntimeMetadata>;
 export type GraphNotifier = Context.Service.Shape<typeof JournalNotifier>;
 
 export interface GraphContext {
+	readonly crypto: GraphCrypto;
 	readonly database: GraphDatabase;
 	readonly metadata: GraphMetadata;
 	readonly notifier: GraphNotifier;

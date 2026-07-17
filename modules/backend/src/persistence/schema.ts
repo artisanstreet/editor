@@ -1432,6 +1432,34 @@ export const OrchestrationRawObservations = sqliteTable(
 	],
 );
 
+export const RunUsageSamples = sqliteTable(
+	"run_usage_samples",
+	{
+		run_id: text("run_id").notNull(),
+		scope_key: text("scope_key").notNull(),
+		sample_scope: text("sample_scope").notNull(),
+		input_tokens: integer("input_tokens").notNull(),
+		output_tokens: integer("output_tokens").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		primaryKey({ columns: [table.run_id, table.scope_key] }),
+		index("run_usage_samples_run_scope_index").on(table.run_id, table.sample_scope),
+		check(
+			"run_usage_samples_scope_check",
+			sql`${table.sample_scope} IN ('turn_total', 'run_total')`,
+		),
+		check(
+			"run_usage_samples_input_tokens_check",
+			sql`${table.input_tokens} BETWEEN 0 AND ${sql.raw(String(Number.MAX_SAFE_INTEGER))}`,
+		),
+		check(
+			"run_usage_samples_output_tokens_check",
+			sql`${table.output_tokens} BETWEEN 0 AND ${sql.raw(String(Number.MAX_SAFE_INTEGER))}`,
+		),
+	],
+);
+
 export const OrchestrationOutbox = sqliteTable(
 	"orchestration_outbox",
 	{

@@ -69,8 +69,18 @@ const UserSchema = Schema.Struct({
 	message: Schema.Struct({ content: Schema.Array(Schema.Unknown) }),
 });
 const UsageSchema = Schema.Struct({
-	input_tokens: Schema.optional(Schema.Number),
-	output_tokens: Schema.optional(Schema.Number),
+	input_tokens: Schema.optional(
+		Schema.Int.pipe(
+			Schema.check(Schema.isGreaterThanOrEqualTo(0)),
+			Schema.check(Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+		),
+	),
+	output_tokens: Schema.optional(
+		Schema.Int.pipe(
+			Schema.check(Schema.isGreaterThanOrEqualTo(0)),
+			Schema.check(Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+		),
+	),
 });
 const ResultSchema = Schema.Struct({
 	type: Schema.Literal("result"),
@@ -156,7 +166,7 @@ function usage_observation(
 		_tag: "usage",
 		...(usage.input_tokens === undefined ? {} : { input_tokens: usage.input_tokens }),
 		...(usage.output_tokens === undefined ? {} : { output_tokens: usage.output_tokens }),
-		turn_id: input.turn_id,
+		sample_scope: "run_total",
 	};
 }
 

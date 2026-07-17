@@ -1,4 +1,4 @@
-import { Context, Effect, Layer } from "effect";
+import { Context, Crypto, Effect, Layer } from "effect";
 
 import { Database } from "../persistence/database";
 import { JournalNotifier } from "../persistence/journal-notifier";
@@ -43,10 +43,11 @@ export class AgentGraphRepository extends Context.Service<
 export const AgentGraphRepositoryLive = Layer.effect(
 	AgentGraphRepository,
 	Effect.gen(function* () {
+		const crypto = yield* Crypto.Crypto;
 		const database = yield* Database;
 		const metadata = yield* RuntimeMetadata;
 		const notifier = yield* JournalNotifier;
-		const context = { database, metadata, notifier };
+		const context = { crypto, database, metadata, notifier };
 		const codecs = make_persisted_graph_codecs(context);
 		const ledger = make_graph_ledger(context, codecs);
 		const query = make_graph_query(context, codecs);

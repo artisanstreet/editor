@@ -415,6 +415,7 @@ export interface EngineUsageObservation extends EngineObservationBase {
 	readonly _tag: "usage";
 	readonly input_tokens?: number;
 	readonly output_tokens?: number;
+	readonly sample_scope: "turn_total" | "run_total";
 	readonly turn_id?: string;
 }
 
