@@ -1026,6 +1026,14 @@ export const TerminalRepositoryLive = Layer.effect(
 					and(
 						eq(TerminalSessions.thread_id, thread_id),
 						eq(TerminalSessions.workspace_id, workspace_id),
+						notExists(
+							database.client
+								.select({ thread_id: ThreadErasureClaims.thread_id })
+								.from(ThreadErasureClaims)
+								.where(
+									eq(ThreadErasureClaims.thread_id, TerminalSessions.thread_id),
+								),
+						),
 					),
 				)
 				.orderBy(asc(TerminalSessions.created_at), asc(TerminalSessions.terminal_id))

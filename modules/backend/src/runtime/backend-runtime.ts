@@ -149,6 +149,7 @@ import {
 } from "../tool-control/tool-registry";
 import { WorkspaceFileReadTool } from "../tool-control/workspace-file-read-tool";
 import { WorkspaceGitSessionReadTool } from "../tool-control/workspace-git-session-read-tool";
+import { TerminalTools } from "../tool-control/terminal-tools";
 import { RuntimeMetadata, RuntimeMetadataLive } from "./runtime-metadata";
 import { GlobalGuidanceRepositoryLive } from "../guidance/guidance-repository";
 import {
@@ -469,32 +470,6 @@ export function make_backend_layer(options: BackendOptions) {
 			),
 		),
 	);
-	const tool_registry =
-		options.tool_registry ??
-		Layer.unwrap(
-			Effect.all([WorkspaceFileReadTool, WorkspaceGitSessionReadTool]).pipe(
-				Effect.map((registrations) => make_tool_registry_layer(registrations)),
-			),
-		).pipe(
-			Layer.provideMerge(workspace_bounded_filesystems),
-			Layer.provideMerge(workspace_files),
-			Layer.provideMerge(workspace_git_registry),
-			Layer.provideMerge(workspace_git_sessions),
-		);
-	const tool_control_repository = ToolControlRepositoryLive.pipe(
-		Layer.provideMerge(NodeCrypto.layer),
-		Layer.provideMerge(tool_registry),
-		Layer.provideMerge(infrastructure),
-	);
-	const tool_execution_repository = ToolExecutionRepositoryLive.pipe(
-		Layer.provideMerge(NodeCrypto.layer),
-		Layer.provideMerge(infrastructure),
-	);
-	const tool_control = ToolControlCoordinatorLive.pipe(
-		Layer.provideMerge(tool_registry),
-		Layer.provideMerge(tool_control_repository),
-		Layer.provideMerge(tool_execution_repository),
-	);
 	const workspace_approval_coordination = WorkspaceReplaceApprovalCoordinatorLive.pipe(
 		Layer.provideMerge(workspace_approvals),
 		Layer.provideMerge(workspace_files),
@@ -665,6 +640,36 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(terminal_persistence),
 		Layer.provideMerge(terminal_driver),
 		Layer.provideMerge(infrastructure),
+	);
+	const tool_registry =
+		options.tool_registry ??
+		Layer.unwrap(
+			Effect.all([WorkspaceFileReadTool, WorkspaceGitSessionReadTool, TerminalTools]).pipe(
+				Effect.map((registrations) => make_tool_registry_layer(registrations.flat())),
+			),
+		).pipe(
+			Layer.provideMerge(workspace_bounded_filesystems),
+			Layer.provideMerge(workspace_files),
+			Layer.provideMerge(workspace_git_registry),
+			Layer.provideMerge(workspace_git_sessions),
+			Layer.provideMerge(project_catalog),
+			Layer.provideMerge(terminals),
+			Layer.provideMerge(NodeFileSystem.layer),
+			Layer.provideMerge(NodePath.layer),
+		);
+	const tool_control_repository = ToolControlRepositoryLive.pipe(
+		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(tool_registry),
+		Layer.provideMerge(infrastructure),
+	);
+	const tool_execution_repository = ToolExecutionRepositoryLive.pipe(
+		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(infrastructure),
+	);
+	const tool_control = ToolControlCoordinatorLive.pipe(
+		Layer.provideMerge(tool_registry),
+		Layer.provideMerge(tool_control_repository),
+		Layer.provideMerge(tool_execution_repository),
 	);
 	const commands = CommandRouterLive.pipe(
 		Layer.provideMerge(threads),

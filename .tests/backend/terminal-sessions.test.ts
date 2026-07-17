@@ -966,8 +966,19 @@ describe("terminal session orchestration", () => {
 					const wrong_workspace = yield* terminals
 						.Output("terminal_owned", "thread_terminal", "workspace_other")
 						.pipe(Effect.flip);
+					const recent_wrong_thread = yield* terminals
+						.RecentOutput("terminal_owned", "thread_other", "workspace_1", 1024)
+						.pipe(Effect.flip);
+					const recent_wrong_workspace = yield* terminals
+						.RecentOutput("terminal_owned", "thread_terminal", "workspace_other", 1024)
+						.pipe(Effect.flip);
 
-					return { wrong_thread, wrong_workspace };
+					return {
+						recent_wrong_thread,
+						recent_wrong_workspace,
+						wrong_thread,
+						wrong_workspace,
+					};
 				}),
 			);
 			const denied_write = await canonical(
@@ -1032,6 +1043,8 @@ describe("terminal session orchestration", () => {
 			expect(ownership_errors.wrong_workspace).toBeInstanceOf(TerminalNotFound);
 			expect(output_errors.wrong_thread).toBeInstanceOf(TerminalNotFound);
 			expect(output_errors.wrong_workspace).toBeInstanceOf(TerminalNotFound);
+			expect(output_errors.recent_wrong_thread).toBeInstanceOf(TerminalNotFound);
+			expect(output_errors.recent_wrong_workspace).toBeInstanceOf(TerminalNotFound);
 			expect(denied_write).toBeInstanceOf(TerminalNotFound);
 			expect(denied_open).toBeInstanceOf(TerminalNotFound);
 			expect(canonical_open.terminal).toMatchObject({ state: "active" });
