@@ -37,6 +37,12 @@ export interface ReplayRequest {
 	readonly stream_cursors?: ReadonlyArray<StreamCursor>;
 }
 
+export interface JournalSnapshot {
+	readonly events: ReadonlyArray<EventEnvelope>;
+	readonly stream_cursors: ReadonlyArray<StreamCursor>;
+	readonly watermark: number;
+}
+
 export interface JournalEventInput {
 	readonly agent_id?: string;
 	readonly causation_id: string;
@@ -94,6 +100,7 @@ export class JournalStore extends Context.Service<
 		readonly ReadReplay: (
 			request: ReplayRequest,
 		) => Effect.Effect<ReadonlyArray<EventEnvelope>, JournalStoreError>;
+		readonly ReadSnapshot: () => Effect.Effect<JournalSnapshot, JournalStoreError>;
 		readonly ReadWatermark: () => Effect.Effect<number, JournalStoreError>;
 		readonly ValidateReplayPoint: (
 			request: Required<ReplayRequest>,
@@ -612,6 +619,65 @@ export const JournalStoreLive = Layer.effect(
 				)
 				.pipe(Effect.mapError(normalize_journal_error));
 
+		const ReadSnapshot = () =>
+			database.client
+				.transaction((transaction) =>
+					Effect.gen(function* () {
+						const event_rows = yield* transaction
+							.select({
+								agent_id: JournalEvents.agent_id,
+								causation_id: JournalEvents.causation_id,
+								correlation_id: JournalEvents.correlation_id,
+								event_id: JournalEvents.event_id,
+								event_type: JournalEvents.event_type,
+								journal_sequence: JournalEvents.sequence,
+								occurred_at: JournalEvents.occurred_at,
+								origin: JournalEvents.origin,
+								payload_json: JournalEvents.payload_json,
+								raw_origin_json: JournalEvents.raw_origin_json,
+								run_id: JournalEvents.run_id,
+								schema_version: JournalEvents.schema_version,
+								sequence: JournalEvents.stream_sequence,
+								stream_id: JournalEvents.stream_id,
+								thread_id: JournalEvents.thread_id,
+							})
+							.from(JournalEvents)
+							.orderBy(asc(JournalEvents.sequence));
+						const cursor_rows = yield* transaction
+							.select({
+								sequence: EventStreams.last_sequence,
+								stream_id: EventStreams.stream_id,
+							})
+							.from(EventStreams)
+							.orderBy(asc(EventStreams.stream_id));
+						const expected_cursor_rows = [...event_rows]
+							.sort(
+								(left, right) =>
+									left.stream_id.localeCompare(right.stream_id) ||
+									left.sequence - right.sequence,
+							)
+							.map(({ sequence, stream_id }) => ({ sequence, stream_id }));
+						const events = yield* Effect.forEach(event_rows, ReconstructEventEnvelope);
+						const stream_cursors = yield* Effect.forEach(cursor_rows, (row) =>
+							DecodeStreamCursor(row, "Current stream cursor"),
+						);
+						const expected_cursors = yield* DeriveStreamCursors(expected_cursor_rows);
+
+						yield* AssertMatchingCursors(
+							stream_cursors,
+							expected_cursors,
+							"Current stream cursors",
+						);
+
+						return {
+							events,
+							stream_cursors,
+							watermark: events.at(-1)?.journal_sequence ?? 0,
+						};
+					}),
+				)
+				.pipe(Effect.mapError(normalize_journal_error));
+
 		const AcceptThreadCreate = (command: CommandEnvelope) =>
 			Effect.gen(function* () {
 				if (command.payload.type !== "thread.create") {
@@ -815,6 +881,7 @@ export const JournalStoreLive = Layer.effect(
 			ReadCurrentCursors,
 			ReadCorrelatedEvents,
 			ReadReplay,
+			ReadSnapshot,
 			ReadWatermark,
 			ValidateReplayPoint,
 		};

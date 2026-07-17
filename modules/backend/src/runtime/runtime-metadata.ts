@@ -14,6 +14,7 @@ export type RuntimeIdPrefix =
 	| "invocation"
 	| "message"
 	| "preview_target"
+	| "projection"
 	| "run"
 	| "stream_ticket";
 

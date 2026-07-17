@@ -821,3 +821,39 @@ export {
 	type DesktopGuidanceOptions,
 	type DesktopModelBehaviourOptions,
 } from "./runtime/backend-runtime";
+export {
+	ExportControlAuditConflict,
+	ExportControlAuditFailure,
+	ExportControlAuditStore,
+	ExportControlGate,
+	ExportControlGateLive,
+	ExportControlInputInvalid,
+	ExportControlIntentCommitment,
+	ExportControlIntentCommitmentFailure,
+	ExportControlPolicySource,
+	ExportControlPolicySourceFailure,
+	ExportControlRestricted,
+	ExportControlUnavailable,
+	FailClosedExportControlPolicySourceLive,
+	make_export_control_policy_source_layer,
+	UnavailableExportControlIntentCommitmentLive,
+	type ExportControlAuditCommit,
+	type ExportControlGateError,
+} from "./compliance/export-control";
+export { make_node_export_control_intent_commitment_layer } from "./compliance/node-export-control-intent-commitment";
+export { SQLiteExportControlAuditStoreLive } from "./compliance/sqlite-export-control-audit-store";
+export { SQLiteSurfaceProjectionStoreLive } from "./surface/sqlite-surface-projection-store";
+export {
+	SurfaceProjectionRebuilder,
+	SurfaceProjectionRebuilderLive,
+	SurfaceProjectionRebuildFailure,
+	type SurfaceProjectionDifference,
+} from "./surface/surface-projection-rebuilder";
+export {
+	SurfaceProjectionStore,
+	SurfaceProjectionStoreConflict,
+	SurfaceProjectionStoreFailure,
+	type SurfaceProjectionSnapshot,
+	type SurfaceProjectionStoreError,
+} from "./surface/surface-projection-store";
+export { SurfaceProjector, SurfaceProjectorLive } from "./surface/surface-projector";

@@ -2653,3 +2653,95 @@ export const ToolExecutionClaims = sqliteTable(
 		),
 	],
 );
+
+/** Stores immutable canonical surface generations built from one fixed journal snapshot. */
+export const SurfaceProjectionGenerations = sqliteTable(
+	"surface_projection_generations",
+	{
+		generation_id: text("generation_id").primaryKey(),
+		watermark: integer("watermark").notNull(),
+		stream_cursors_json: text("stream_cursors_json").notNull(),
+		item_count: integer("item_count").notNull(),
+		created_at: text("created_at").notNull(),
+	},
+	(table) => [
+		check("surface_projection_generations_watermark_check", sql`${table.watermark} >= 0`),
+		check("surface_projection_generations_item_count_check", sql`${table.item_count} >= 0`),
+		check(
+			"surface_projection_generations_cursors_check",
+			sql`json_valid(${table.stream_cursors_json}) = 1 AND json_type(${table.stream_cursors_json}) = 'array'`,
+		),
+		check(
+			"surface_projection_generations_created_at_check",
+			sql`strftime('%Y-%m-%dT%H:%M:%fZ', ${table.created_at}) IS ${table.created_at} AND substr(${table.created_at}, 12, 2) BETWEEN '00' AND '23'`,
+		),
+	],
+);
+
+/** Stores source-safe surface items within one immutable projection generation. */
+export const SurfaceProjectionItems = sqliteTable(
+	"surface_projection_items",
+	{
+		generation_id: text("generation_id")
+			.notNull()
+			.references(() => SurfaceProjectionGenerations.generation_id, { onDelete: "cascade" }),
+		surface_id: text("surface_id").notNull(),
+		item_json: text("item_json").notNull(),
+	},
+	(table) => [
+		primaryKey({ columns: [table.generation_id, table.surface_id] }),
+		check(
+			"surface_projection_items_json_check",
+			sql`json_valid(${table.item_json}) = 1 AND json_type(${table.item_json}) = 'object' AND length(CAST(${table.item_json} AS BLOB)) <= 32768`,
+		),
+	],
+);
+
+/** Points readers at one complete surface generation through an atomic singleton swap. */
+export const SurfaceProjectionState = sqliteTable(
+	"surface_projection_state",
+	{
+		state_id: integer("state_id").primaryKey(),
+		generation_id: text("generation_id")
+			.notNull()
+			.references(() => SurfaceProjectionGenerations.generation_id, {
+				onDelete: "restrict",
+			}),
+	},
+	(table) => [check("surface_projection_state_singleton_check", sql`${table.state_id} = 1`)],
+);
+
+/** Stores privacy-bounded exact-replay export-control decisions without country values. */
+export const ExportControlAuditDecisions = sqliteTable(
+	"export_control_audit_decisions",
+	{
+		decision_id: text("decision_id").primaryKey(),
+		action: text("action").notNull(),
+		intent_fingerprint: text("intent_fingerprint").notNull(),
+		decision_json: text("decision_json").notNull(),
+		record_json: text("record_json").notNull(),
+		created_at: text("created_at").notNull(),
+	},
+	(table) => [
+		check(
+			"export_control_audit_action_check",
+			sql`${table.action} IN ('account', 'billing', 'distribution', 'hosted_sync', 'marketplace_delivery', 'release', 'update')`,
+		),
+		check(
+			"export_control_audit_fingerprint_check",
+			sql`length(${table.intent_fingerprint}) = 64 AND ${table.intent_fingerprint} NOT GLOB '*[^0-9a-f]*'`,
+		),
+		check(
+			"export_control_audit_decision_json_check",
+			sql`json_valid(${table.decision_json}) = 1 AND json_type(${table.decision_json}) = 'object' AND length(CAST(${table.decision_json} AS BLOB)) <= 8192`,
+		),
+		check(
+			"export_control_audit_record_json_check",
+			sql`json_valid(${table.record_json}) = 1 AND json_type(${table.record_json}) = 'object' AND length(CAST(${table.record_json} AS BLOB)) <= 8192`,
+		),
+		check(
+			"export_control_audit_created_at_check",
+			sql`strftime('%Y-%m-%dT%H:%M:%fZ', ${table.created_at}) IS ${table.created_at} AND substr(${table.created_at}, 12, 2) BETWEEN '00' AND '23'`,
+		),
+	],
+);
