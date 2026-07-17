@@ -2,7 +2,11 @@ import { Effect, Schema } from "effect";
 import { Tool } from "effect/unstable/ai";
 import { describe, expect, it } from "vitest";
 
-import { ToolInputSchema, WorkspaceGitSessionQueryResult } from "@artisan/protocol";
+import {
+	type ToolDescriptorReference,
+	ToolInputSchema,
+	WorkspaceGitSessionQueryResult,
+} from "@artisan/protocol";
 
 import { make_effect_tool_adapter } from "../../modules/backend/src/tool-control/internal/effect-tool-adapter";
 import {
@@ -14,6 +18,10 @@ import {
 } from "../../modules/backend/src/tool-control/tool-registry";
 
 const context = { agent_id: "agent", run_id: "run", thread_id: "thread" };
+
+function tool_invocation(tool: ToolDescriptorReference) {
+	return { context, invocation_id: "invocation", tool };
+}
 
 function registration(input: {
 	readonly approval_policy?: "automatic" | "required";
@@ -131,7 +139,7 @@ describe("ToolRegistry", () => {
 			service.Resolve({ revision: 1, tool_id: "alpha" }),
 		);
 		const invoked = await Effect.runPromise(
-			service.Invoke({ revision: 1, tool_id: "alpha" }, context, {}),
+			service.Invoke(tool_invocation({ revision: 1, tool_id: "alpha" }), {}),
 		);
 
 		expect(resolved_again.revision).toBe(1);
@@ -198,7 +206,7 @@ describe("ToolRegistry", () => {
 		};
 		const service = await Effect.runPromise(registry([transformed]));
 		const result = await Effect.runPromise(
-			service.Invoke({ revision: 1, tool_id: "transformed.result" }, context, {}),
+			service.Invoke(tool_invocation({ revision: 1, tool_id: "transformed.result" }), {}),
 		);
 
 		expect(result).toBe("42");
@@ -223,14 +231,14 @@ describe("ToolRegistry", () => {
 		const before = await Effect.runPromise(service.List(context));
 		const invalid_arguments = await Effect.runPromise(
 			service
-				.Invoke({ revision: 1, tool_id: "hostile.arguments" }, context, {
+				.Invoke(tool_invocation({ revision: 1, tool_id: "hostile.arguments" }), {
 					workspace_id: hostile,
 				})
 				.pipe(Effect.flip),
 		);
 		const invalid_output = await Effect.runPromise(
 			service
-				.Invoke({ revision: 1, tool_id: "hostile.result" }, context, {})
+				.Invoke(tool_invocation({ revision: 1, tool_id: "hostile.result" }), {})
 				.pipe(Effect.flip),
 		);
 		const after = await Effect.runPromise(service.List(context));
@@ -304,7 +312,7 @@ describe("ToolRegistry", () => {
 		const service = await Effect.runPromise(registry([throwing, defect]));
 		const failures = await Effect.runPromise(
 			Effect.forEach(["throwing.handler", "defect.handler"], (tool_id) =>
-				service.Invoke({ revision: 1, tool_id }, context, {}).pipe(Effect.flip),
+				service.Invoke(tool_invocation({ revision: 1, tool_id }), {}).pipe(Effect.flip),
 			),
 		);
 

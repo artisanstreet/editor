@@ -164,10 +164,13 @@ export const ToolControlCoordinatorLive = Layer.effect(
 				const outcome = yield* registry
 					.Invoke(
 						{
-							revision: execution.invocation.tool.revision,
-							tool_id: execution.invocation.tool.tool_id,
+							context: execution.invocation.context,
+							invocation_id: execution.invocation.invocation_id,
+							tool: {
+								revision: execution.invocation.tool.revision,
+								tool_id: execution.invocation.tool.tool_id,
+							},
 						},
-						execution.invocation.context,
 						execution.arguments,
 					)
 					.pipe(Effect.result);

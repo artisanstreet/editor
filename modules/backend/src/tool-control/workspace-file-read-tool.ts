@@ -16,7 +16,9 @@ export const WorkspaceFileReadTool = Effect.gen(function* () {
 	const registry = yield* WorkspaceBoundedRegularFileStoreRegistry;
 	const files = yield* WorkspaceFileService;
 	const adapter = make_effect_tool_adapter({
-		handler: (context, arguments_) => {
+		handler: (invocation, arguments_) => {
+			const { context } = invocation;
+
 			if (context.workspace_id === undefined) {
 				return Effect.fail(new ToolIneligible({ reason_code: "workspace.required" }));
 			}

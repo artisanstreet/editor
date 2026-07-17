@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { Effect, Layer } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
+import type { ToolDescriptorReference } from "@artisan/protocol";
+
 import {
 	EmptyWorkspaceGitRegistryLive,
 	make_node_workspace_git_registry_layer,
@@ -24,6 +26,10 @@ const context = {
 	thread_id: "thread",
 	workspace_id: "workspace",
 };
+
+function tool_invocation(tool: ToolDescriptorReference) {
+	return { context, invocation_id: "invocation", tool };
+}
 
 async function make_root() {
 	const root = await fs.mkdtemp(join(tmpdir(), "artisan-tool-workspace-"));
@@ -97,7 +103,10 @@ describe("WorkspaceGitSessionReadTool", () => {
 		const service = await Effect.runPromise(registry(root));
 		const listed = await Effect.runPromise(service.List(context));
 		const result = await Effect.runPromise(
-			service.Invoke({ revision: 1, tool_id: "workspace.git.session.read" }, context, {}),
+			service.Invoke(
+				tool_invocation({ revision: 1, tool_id: "workspace.git.session.read" }),
+				{},
+			),
 		);
 
 		expect(listed.tools[0]).toMatchObject({ state: "eligible" });
@@ -124,14 +133,14 @@ describe("WorkspaceGitSessionReadTool", () => {
 		const service = await Effect.runPromise(registry(root, sessions));
 		const invalid_arguments = await Effect.runPromise(
 			service
-				.Invoke({ revision: 1, tool_id: "workspace.git.session.read" }, context, {
+				.Invoke(tool_invocation({ revision: 1, tool_id: "workspace.git.session.read" }), {
 					workspace_id: "other-workspace",
 				})
 				.pipe(Effect.flip),
 		);
 		const failed = await Effect.runPromise(
 			service
-				.Invoke({ revision: 1, tool_id: "workspace.git.session.read" }, context, {})
+				.Invoke(tool_invocation({ revision: 1, tool_id: "workspace.git.session.read" }), {})
 				.pipe(Effect.flip),
 		);
 

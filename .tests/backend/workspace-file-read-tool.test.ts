@@ -1,7 +1,11 @@
 import { Effect, Layer } from "effect";
 import { describe, expect, it } from "vitest";
 
-import type { WorkspaceFileReadQuery, WorkspaceFileReadQueryResult } from "@artisan/protocol";
+import type {
+	ToolDescriptorReference,
+	WorkspaceFileReadQuery,
+	WorkspaceFileReadQueryResult,
+} from "@artisan/protocol";
 
 import { WorkspaceBoundedRegularFileStoreRegistry } from "../../modules/backend/src/filesystem/workspace-bounded-regular-file-store-registry";
 import {
@@ -20,6 +24,10 @@ const context = {
 	thread_id: "thread",
 	workspace_id: "workspace-a",
 };
+
+function tool_invocation(tool: ToolDescriptorReference) {
+	return { context, invocation_id: "invocation", tool };
+}
 
 const result: WorkspaceFileReadQueryResult = {
 	content: "export const answer = 42;",
@@ -118,7 +126,7 @@ describe("WorkspaceFileReadTool", () => {
 			registry(["workspace-a", "workspace-b"], result, read_queries),
 		);
 		const value = await Effect.runPromise(
-			service.Invoke({ revision: 1, tool_id: "workspace.file.read" }, context, {
+			service.Invoke(tool_invocation({ revision: 1, tool_id: "workspace.file.read" }), {
 				path: "src/answer.ts",
 			}),
 		);
@@ -139,8 +147,7 @@ describe("WorkspaceFileReadTool", () => {
 				(arguments_) =>
 					service
 						.Invoke(
-							{ revision: 1, tool_id: "workspace.file.read" },
-							context,
+							tool_invocation({ revision: 1, tool_id: "workspace.file.read" }),
 							arguments_,
 						)
 						.pipe(Effect.flip),
@@ -183,7 +190,7 @@ describe("WorkspaceFileReadTool", () => {
 
 		const failed = await Effect.runPromise(
 			service
-				.Invoke({ revision: 1, tool_id: "workspace.file.read" }, context, {
+				.Invoke(tool_invocation({ revision: 1, tool_id: "workspace.file.read" }), {
 					path: "src/answer.ts",
 				})
 				.pipe(Effect.flip),

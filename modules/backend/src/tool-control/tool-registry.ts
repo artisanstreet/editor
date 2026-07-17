@@ -15,7 +15,11 @@ import {
 	ToolInvocationContext as ToolInvocationContextSchema,
 } from "@artisan/protocol";
 
-import { type EffectToolAdapter, EffectToolAdapterError } from "./internal/effect-tool-adapter";
+import {
+	type EffectToolAdapter,
+	type EffectToolAdapterInvocation,
+	EffectToolAdapterError,
+} from "./internal/effect-tool-adapter";
 
 type ToolArgumentsValue = typeof ToolArguments.Type;
 type ToolResultValue = typeof import("@artisan/protocol").ToolResult.Type;
@@ -68,8 +72,7 @@ export class ToolRegistry extends Context.Service<
 			context: ToolInvocationContext,
 		) => Effect.Effect<ToolAuthorization, ToolRegistryError>;
 		readonly Invoke: (
-			tool: ToolDescriptorReference,
-			context: ToolInvocationContext,
+			invocation: EffectToolAdapterInvocation,
 			arguments_: ToolArgumentsValue,
 		) => Effect.Effect<ToolResultValue, ToolRegistryError>;
 		readonly List: (context: unknown) => Effect.Effect<ListEligibleResult, ToolRegistryError>;
@@ -340,16 +343,12 @@ function BuildToolRegistry(registrations: ReadonlyArray<unknown>) {
 					recovery_policy: registration.recovery_policy,
 				} satisfies ToolAuthorization;
 			});
-		const Invoke = (
-			reference: ToolDescriptorReference,
-			context: ToolInvocationContext,
-			arguments_: ToolArgumentsValue,
-		) =>
+		const Invoke = (invocation: EffectToolAdapterInvocation, arguments_: ToolArgumentsValue) =>
 			Effect.gen(function* () {
 				const decoded_context = yield* Schema.decodeUnknownEffect(
 					ToolInvocationContextSchema,
 					{ onExcessProperty: "error" },
-				)(context).pipe(
+				)(invocation.context).pipe(
 					Effect.mapError(
 						() => new ToolRegistryError({ reason_code: "context_ineligible" }),
 					),
@@ -361,7 +360,7 @@ function BuildToolRegistry(registrations: ReadonlyArray<unknown>) {
 						() => new ToolRegistryError({ reason_code: "invalid_arguments" }),
 					),
 				);
-				const descriptor = yield* Resolve(reference);
+				const descriptor = yield* Resolve(invocation.tool);
 				const registration = by_tool_id.get(descriptor.tool_id);
 
 				if (registration === undefined) {
@@ -376,8 +375,17 @@ function BuildToolRegistry(registrations: ReadonlyArray<unknown>) {
 					),
 				);
 
+				const adapter_invocation = {
+					context: decoded_context,
+					invocation_id: invocation.invocation_id,
+					tool: {
+						revision: descriptor.revision,
+						tool_id: descriptor.tool_id,
+					},
+				} satisfies EffectToolAdapterInvocation;
+
 				return yield* registration.adapter
-					.Invoke(decoded_context, decoded_arguments)
+					.Invoke(adapter_invocation, decoded_arguments)
 					.pipe(Effect.mapError(adapter_error));
 			});
 

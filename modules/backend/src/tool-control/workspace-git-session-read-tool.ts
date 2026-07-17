@@ -13,7 +13,9 @@ export const WorkspaceGitSessionReadTool = Effect.gen(function* () {
 	const registry = yield* WorkspaceGitRegistry;
 	const sessions = yield* WorkspaceGitSessionService;
 	const adapter = make_effect_tool_adapter({
-		handler: (context) => {
+		handler: (invocation) => {
+			const { context } = invocation;
+
 			if (context.workspace_id === undefined) {
 				return Effect.fail(new ToolIneligible({ reason_code: "workspace.required" }));
 			}

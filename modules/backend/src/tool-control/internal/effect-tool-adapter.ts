@@ -2,6 +2,7 @@ import { Cause, Data, Effect, Option, Schema, Stream } from "effect";
 import { AiError, Tool, Toolkit } from "effect/unstable/ai";
 
 import {
+	type ToolDescriptorReference,
 	type ToolInvocationContext,
 	ToolArguments,
 	ToolInputSchema,
@@ -38,11 +39,18 @@ export class EffectToolAdapterError extends Data.TaggedError("EffectToolAdapterE
 	readonly reason_code: "execution_failed" | "invalid_arguments" | "invalid_result";
 }> {}
 
+/** Carries the durable invocation identity and canonical descriptor into an adapter. */
+export interface EffectToolAdapterInvocation {
+	readonly context: ToolInvocationContext;
+	readonly invocation_id: string;
+	readonly tool: ToolDescriptorReference;
+}
+
 /** Erases Effect AI implementation types after validating tool arguments and results. */
 export interface EffectToolAdapter {
 	readonly input_schema: typeof ToolInputSchema.Type;
 	readonly Invoke: (
-		context: ToolInvocationContext,
+		invocation: EffectToolAdapterInvocation,
 		arguments_: ToolArgumentsValue,
 	) => Effect.Effect<ToolResultValue, EffectToolAdapterError>;
 }
@@ -55,7 +63,7 @@ export function make_effect_tool_adapter<
 	SuccessEncoded,
 >(input: {
 	readonly handler: (
-		context: ToolInvocationContext,
+		invocation: EffectToolAdapterInvocation,
 		parameters: Parameters,
 	) => Effect.Effect<unknown, unknown>;
 	readonly parameters: Schema.Codec<Parameters, ParametersEncoded>;
@@ -70,7 +78,10 @@ export function make_effect_tool_adapter<
 		Tool.getJsonSchemaFromSchema(input.parameters),
 	);
 
-	const InvokeProgram = (context: ToolInvocationContext, arguments_: ToolArgumentsValue) =>
+	const InvokeProgram = (
+		invocation: EffectToolAdapterInvocation,
+		arguments_: ToolArgumentsValue,
+	) =>
 		Effect.gen(function* () {
 			const parameters = yield* Schema.decodeUnknownEffect(input.parameters, {
 				onExcessProperty: "error",
@@ -84,7 +95,7 @@ export function make_effect_tool_adapter<
 					ToolkitDefinition.toLayer(
 						ToolkitDefinition.of({
 							tool: () =>
-								input.handler(context, parameters).pipe(
+								input.handler(invocation, parameters).pipe(
 									Effect.mapError(
 										() =>
 											new AiError.UnknownError({
@@ -148,8 +159,8 @@ export function make_effect_tool_adapter<
 				),
 			);
 		});
-	const Invoke = (context: ToolInvocationContext, arguments_: ToolArgumentsValue) =>
-		InvokeProgram(context, arguments_).pipe(Effect.catchCause(adapter_cause));
+	const Invoke = (invocation: EffectToolAdapterInvocation, arguments_: ToolArgumentsValue) =>
+		InvokeProgram(invocation, arguments_).pipe(Effect.catchCause(adapter_cause));
 
 	return {
 		input_schema,

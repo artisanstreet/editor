@@ -20,7 +20,10 @@ import {
 } from "../../modules/backend/src/tool-control/tool-control-coordinator";
 import { ToolControlRepositoryLive } from "../../modules/backend/src/tool-control/tool-control-repository";
 import { ToolExecutionRepositoryLive } from "../../modules/backend/src/tool-control/tool-execution-repository";
-import { type EffectToolAdapterError } from "../../modules/backend/src/tool-control/internal/effect-tool-adapter";
+import {
+	type EffectToolAdapterError,
+	type EffectToolAdapterInvocation,
+} from "../../modules/backend/src/tool-control/internal/effect-tool-adapter";
 import {
 	type ToolRegistration,
 	make_tool_registry_layer,
@@ -54,6 +57,7 @@ interface ToolState {
 	eligibility_calls?: number;
 	fail: boolean;
 	gates?: ReadonlyMap<string, Deferred.Deferred<void>>;
+	invocations?: Array<EffectToolAdapterInvocation>;
 	query_entered?: ReadonlyMap<string, Deferred.Deferred<void>>;
 	query_gates?: ReadonlyMap<string, Deferred.Deferred<void>>;
 }
@@ -149,9 +153,12 @@ function registration(
 	return {
 		adapter: {
 			input_schema: current_descriptor.input_schema,
-			Invoke: (context, arguments_) =>
+			Invoke: (invocation, arguments_) =>
 				Effect.gen(function* () {
+					const { context } = invocation;
+
 					state.calls += 1;
+					state.invocations?.push(invocation);
 					const entered = state.entered?.get(context.thread_id);
 					const gate = state.gates?.get(context.thread_id);
 					const query =
@@ -524,6 +531,83 @@ describe("ToolControlCoordinator", () => {
 		}
 	});
 
+	it("passes persisted identities and canonical tool references to automatic and approved adapters", async () => {
+		const state: ToolState = { calls: 0, fail: false, invocations: [] };
+		const runtime = make_runtime(await Effect.runPromise(MakeDatabasePath), "identity", state);
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					yield* SeedThread;
+					const coordinator = yield* ToolControlCoordinator;
+					const automatic = yield* coordinator.Invoke(request("identity_automatic"));
+
+					yield* coordinator.AwaitIdle;
+					const automatic_replay = yield* coordinator.Invoke(
+						request("identity_automatic"),
+					);
+					const approved = yield* coordinator.Invoke(
+						request("identity_approved", "tool.approval"),
+					);
+					const approval_id =
+						approved.invocation.state === "approval_required"
+							? approved.invocation.approval_id
+							: "";
+					const approved_replay = yield* coordinator.Invoke(
+						request("identity_approved", "tool.approval"),
+					);
+					const decision = yield* coordinator.Decide({
+						approval_id,
+						decision: "approved",
+						decision_id: "identity_decision",
+						thread_id: "thread_1",
+					});
+					const decision_replay = yield* coordinator.Decide({
+						approval_id,
+						decision: "approved",
+						decision_id: "identity_decision",
+						thread_id: "thread_1",
+					});
+
+					yield* coordinator.AwaitIdle;
+
+					return {
+						automatic,
+						automatic_replay,
+						approved,
+						approved_replay,
+						decision,
+						decision_replay,
+					};
+				}),
+			);
+
+			expect(result.automatic_replay.invocation.invocation_id).toBe(
+				result.automatic.invocation.invocation_id,
+			);
+			expect(result.approved_replay.invocation.invocation_id).toBe(
+				result.approved.invocation.invocation_id,
+			);
+			expect(result.decision_replay.approval.invocation_id).toBe(
+				result.approved.invocation.invocation_id,
+			);
+			expect(state.invocations).toEqual([
+				{
+					context: result.automatic.invocation.context,
+					invocation_id: result.automatic.invocation.invocation_id,
+					tool: { revision: 1, tool_id: "tool.read" },
+				},
+				{
+					context: result.approved.invocation.context,
+					invocation_id: result.approved.invocation.invocation_id,
+					tool: { revision: 1, tool_id: "tool.approval" },
+				},
+			]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("waits for the initial durable dispatch scan before reporting idle", async () => {
 		const scan_entered = await Effect.runPromise(Deferred.make<void>());
 		const scan_release = await Effect.runPromise(Deferred.make<void>());
@@ -664,13 +748,13 @@ describe("ToolControlCoordinator", () => {
 
 	it("allows two runtimes to admit and execute one exact request once", async () => {
 		const database_path = await Effect.runPromise(MakeDatabasePath);
-		const state = { calls: 0, fail: false };
+		const state: ToolState = { calls: 0, fail: false, invocations: [] };
 		const first = make_runtime(database_path, "race_first", state);
 		const second = make_runtime(database_path, "race_second", state);
 
 		try {
 			await first.runPromise(SeedThread);
-			await Promise.all([
+			const [first_result, second_result] = await Promise.all([
 				first.runPromise(
 					ToolControlCoordinator.pipe(
 						Effect.flatMap((coordinator) => coordinator.Invoke(request("race"))),
@@ -686,6 +770,15 @@ describe("ToolControlCoordinator", () => {
 			await second.runPromise(await_idle);
 
 			expect(state.calls).toBe(1);
+			expect(first_result.invocation.invocation_id).toBe(
+				second_result.invocation.invocation_id,
+			);
+			expect(state.invocations).toEqual([
+				expect.objectContaining({
+					invocation_id: first_result.invocation.invocation_id,
+					tool: { revision: 1, tool_id: "tool.read" },
+				}),
+			]);
 		} finally {
 			await first.dispose();
 			await second.dispose();
@@ -849,12 +942,14 @@ describe("ToolControlCoordinator", () => {
 	it("recovers pre-launch and pure-read launched claims once across runtimes", async () => {
 		const database_path = await Effect.runPromise(MakeDatabasePath);
 		const gate = await Effect.runPromise(Deferred.make<void>());
-		const first_state = {
+		const first_state: ToolState = {
 			calls: 0,
 			fail: false,
 			gates: new Map([["thread_1", gate]]),
+			invocations: [],
 		};
 		const first = make_runtime(database_path, "first", first_state);
+		let invocation_id = "";
 
 		try {
 			await first.runPromise(SeedThread);
@@ -881,12 +976,14 @@ describe("ToolControlCoordinator", () => {
 			);
 
 			expect(invoked.outcome).toBe("pending");
+			invocation_id = invoked.invocation.invocation_id;
+			expect(first_state.invocations).toEqual([expect.objectContaining({ invocation_id })]);
 		} finally {
 			await first.dispose();
 		}
 
 		clock.value = "2026-07-16T12:00:31.000Z";
-		const second_state = { calls: 0, fail: false };
+		const second_state: ToolState = { calls: 0, fail: false, invocations: [] };
 		const second = make_runtime(database_path, "second", second_state);
 
 		try {
@@ -900,6 +997,13 @@ describe("ToolControlCoordinator", () => {
 			expect(replay.outcome).toBe("completed");
 			expect(first_state.calls).toBe(1);
 			expect(second_state.calls).toBe(1);
+			expect(replay.invocation.invocation_id).toBe(invocation_id);
+			expect(second_state.invocations).toEqual([
+				expect.objectContaining({
+					invocation_id,
+					tool: { revision: 1, tool_id: "tool.read" },
+				}),
+			]);
 		} finally {
 			await Effect.runPromise(Deferred.succeed(gate, undefined));
 			await second.dispose();

@@ -8,13 +8,20 @@ import { Effect, Layer } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { make_backend_runtime } from "@artisan/backend";
-import { workspace_text_maximum_bytes } from "@artisan/protocol";
+import { type ToolDescriptorReference, workspace_text_maximum_bytes } from "@artisan/protocol";
 
 import { WorkspaceBoundedRegularFileStoreRegistry } from "../../modules/backend/src/filesystem/workspace-bounded-regular-file-store-registry";
 import { ToolRegistry } from "../../modules/backend/src/tool-control/tool-registry";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];
+
+function tool_invocation(
+	context: { agent_id: string; run_id: string; thread_id: string; workspace_id: string },
+	tool: ToolDescriptorReference,
+) {
+	return { context, invocation_id: "invocation", tool };
+}
 
 afterEach(async () => {
 	await Promise.all(
@@ -69,9 +76,12 @@ describe("WorkspaceFileReadTool production composition", () => {
 			};
 			const listed = await runtime.runPromise(registry.List(context));
 			const result = await runtime.runPromise(
-				registry.Invoke({ revision: 1, tool_id: "workspace.file.read" }, context, {
-					path: "src/example.ts",
-				}),
+				registry.Invoke(
+					tool_invocation(context, { revision: 1, tool_id: "workspace.file.read" }),
+					{
+						path: "src/example.ts",
+					},
+				),
 			);
 
 			expect(listed.tools).toEqual(
