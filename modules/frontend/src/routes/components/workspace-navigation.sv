@@ -71,6 +71,19 @@
 
 			return `${tab.file.name} · ${states.join(" · ")}`;
 		});
+
+	const TabOptions = (tabs: ReadonlyArray<WorkspaceTab>) =>
+		Effect.gen(function* () {
+			const options: Array<{ id: string; label: string }> = [];
+
+			for (const tab of tabs) {
+				options.push({ id: tab.id, label: yield* TabOptionLabel(tab) });
+			}
+
+			return options;
+		});
+
+	let overflow_tab_options = $derived(yield* TabOptions(overflow_tabs));
 </script>
 
 <nav class="workspace-navigation" aria-label="Workspace file navigation">
@@ -101,7 +114,7 @@
 				<span class="sr-only">Overflow tabs</span>
 				<select aria-label="Overflow tabs" bind:value={overflow_selection} onchange={yield* SelectOverflow(event.currentTarget.value)}>
 					<option value="">More tabs ({overflow_tabs.length})</option>
-					{#each overflow_tabs as tab}<option value={tab.id}>{yield* TabOptionLabel(tab)}</option>{/each}
+					{#each overflow_tab_options as option}<option value={option.id}>{option.label}</option>{/each}
 				</select>
 			</label>
 		{/if}
