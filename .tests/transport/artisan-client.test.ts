@@ -1,7 +1,11 @@
 import { Cause, Effect, Fiber, Option, Schedule, Stream } from "effect";
 import { describe, expect, it } from "vitest";
 
-import { ArtisanClientError } from "@artisan/transport";
+import { ArtisanClientError, DecodeMessagePortStreamFrame } from "@artisan/transport";
+import {
+	BinaryStreamSourceError,
+	type BinaryStreamSourceOpenInput,
+} from "@artisan/transport/server";
 
 import { make_transport_test_harness, wait_for } from "./message-channel-harness";
 
@@ -1155,6 +1159,154 @@ describe("ArtisanClient over MessagePorts", () => {
 		}
 	});
 
+	it("strictly decodes terminal ownership bindings while leaving asset bindings unchanged", async () => {
+		const asset_bind = {
+			channel_id: "channel_asset",
+			channel_sequence: 0,
+			kind: "stream.bind",
+			stream_id: "asset:asset_1",
+			stream_ticket: "ticket_1",
+		} as const;
+		const terminal_bind = {
+			channel_id: "channel_terminal",
+			channel_sequence: 0,
+			kind: "stream.bind",
+			stream_id: "terminal:terminal_1",
+			stream_ticket: "ticket_1",
+			terminal_context: {
+				terminal_id: "terminal_1",
+				thread_id: "thread_1",
+				workspace_id: "workspace_1",
+			},
+		} as const;
+		const malformed = [
+			{ ...terminal_bind, terminal_context: undefined },
+			{
+				...terminal_bind,
+				terminal_context: {
+					...terminal_bind.terminal_context,
+					terminal_id: "terminal_other",
+				},
+			},
+			{ ...asset_bind, terminal_context: terminal_bind.terminal_context },
+			{
+				...terminal_bind,
+				terminal_context: {
+					...terminal_bind.terminal_context,
+					workspace_id: "bad workspace",
+				},
+			},
+		];
+
+		await expect(Effect.runPromise(DecodeMessagePortStreamFrame(asset_bind))).resolves.toEqual(
+			asset_bind,
+		);
+		await expect(
+			Effect.runPromise(DecodeMessagePortStreamFrame(terminal_bind)),
+		).resolves.toEqual(terminal_bind);
+
+		for (const frame of malformed) {
+			await expect(
+				Effect.runPromise(DecodeMessagePortStreamFrame(frame).pipe(Effect.exit)),
+			).resolves.toMatchObject({ _tag: "Failure" });
+		}
+	});
+
+	it("strictly decodes terminal viewer gap ranges only on gap end frames", async () => {
+		const gap_end = {
+			channel_id: "channel_terminal",
+			channel_sequence: 8,
+			kind: "stream.end",
+			reason: "gap",
+			stream_id: "terminal:terminal_1",
+			terminal_output_gap: {
+				from_sequence: 3,
+				reason: "viewer_overflow",
+				to_sequence: 7,
+			},
+		} as const;
+		const malformed = [
+			{
+				...gap_end,
+				terminal_output_gap: { ...gap_end.terminal_output_gap, from_sequence: 0 },
+			},
+			{
+				...gap_end,
+				terminal_output_gap: {
+					...gap_end.terminal_output_gap,
+					from_sequence: 9,
+					to_sequence: 7,
+				},
+			},
+			{ ...gap_end, reason: "completed" },
+			{ ...gap_end, stream_id: "asset:asset_1" },
+			{
+				...gap_end,
+				terminal_output_gap: {
+					...gap_end.terminal_output_gap,
+					reason: "transport_gap",
+				},
+			},
+		];
+
+		await expect(Effect.runPromise(DecodeMessagePortStreamFrame(gap_end))).resolves.toEqual(
+			gap_end,
+		);
+
+		for (const frame of malformed) {
+			await expect(
+				Effect.runPromise(DecodeMessagePortStreamFrame(frame).pipe(Effect.exit)),
+			).resolves.toMatchObject({ _tag: "Failure" });
+		}
+	});
+
+	it("carries exact terminal ownership context while asset stream bindings remain context-free", async () => {
+		const opened: Array<BinaryStreamSourceOpenInput> = [];
+		const harness = await make_transport_test_harness({
+			binary_stream_source: {
+				Open: (input) => {
+					opened.push(input);
+
+					return Effect.succeed(Stream.empty);
+				},
+			},
+		});
+
+		try {
+			await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const asset = yield* harness.client.OpenAsset("asset_context");
+
+						yield* asset.pipe(Stream.runDrain);
+
+						const terminal = yield* harness.client.OpenTerminalOutput({
+							terminal_id: "terminal_context",
+							thread_id: "thread_context",
+							workspace_id: "workspace_context",
+						});
+
+						yield* terminal.pipe(Stream.runDrain);
+					}),
+				),
+			);
+
+			expect(opened).toEqual([
+				{ stream_id: "asset:asset_context" },
+				{
+					stream_id: "terminal:terminal_context",
+					terminal_context: {
+						terminal_id: "terminal_context",
+						thread_id: "thread_context",
+						workspace_id: "workspace_context",
+					},
+				},
+			]);
+		} finally {
+			await harness.dispose();
+		}
+	});
+
 	it("keeps control responsive while the isolated binary stream channel saturates", async () => {
 		const flood = Array.from({ length: 128 }, (_, index) => Uint8Array.of(index % 256));
 		const harness = await make_transport_test_harness({
@@ -1200,10 +1352,12 @@ describe("ArtisanClient over MessagePorts", () => {
 
 			if (output.stream_exit._tag === "Failure") {
 				const failure = Cause.findErrorOption(output.stream_exit.cause);
+				const error = Option.isSome(failure) ? failure.value : undefined;
 
-				expect(Option.isSome(failure) ? failure.value : undefined).toMatchObject({
+				expect(error).toMatchObject({
 					code: expect.stringMatching(/^stream_(?:gap|overflow)$/),
 				});
+				expect(error).not.toHaveProperty("terminal_output_gap");
 			}
 
 			await new Promise((resolve) => setTimeout(resolve, 20));
@@ -1211,6 +1365,112 @@ describe("ArtisanClient over MessagePorts", () => {
 			expect(harness.connector_snapshot().connections).toBe(1);
 		} finally {
 			await harness.dispose();
+		}
+	});
+
+	it("preserves an explicit backend viewer gap as a typed client stream gap", async () => {
+		const harness = await make_transport_test_harness({
+			binary_stream_source: {
+				Open: (input) =>
+					Effect.succeed(
+						Stream.fail(
+							new BinaryStreamSourceError({
+								cause: new Error("terminal viewer queue slid"),
+								code: "gap",
+								stream_id: input.stream_id,
+								terminal_output_gap: {
+									from_sequence: 90,
+									reason: "viewer_overflow",
+									to_sequence: 143,
+								},
+							}),
+						),
+					),
+			},
+		});
+
+		try {
+			const exit = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const stream = yield* harness.client.OpenTerminalOutput({
+							terminal_id: "terminal_gap",
+							thread_id: "thread_gap",
+							workspace_id: "workspace_gap",
+						});
+
+						return yield* stream.pipe(Stream.runCollect, Effect.exit);
+					}),
+				),
+			);
+
+			expect(exit._tag).toBe("Failure");
+
+			if (exit._tag === "Failure") {
+				const failure = Cause.findErrorOption(exit.cause);
+
+				expect(Option.isSome(failure) ? failure.value : undefined).toMatchObject({
+					code: "stream_gap",
+					terminal_output_gap: {
+						from_sequence: 90,
+						reason: "viewer_overflow",
+						to_sequence: 143,
+					},
+				});
+			}
+		} finally {
+			await harness.dispose();
+		}
+	});
+
+	it("drops terminal gap metadata from asset source failures before publishing frames", async () => {
+		const asset_gap = new BinaryStreamSourceError({
+			cause: new Error("forged asset terminal gap"),
+			code: "gap",
+			stream_id: "asset:asset_gap",
+			terminal_output_gap: {
+				from_sequence: 4,
+				reason: "viewer_overflow",
+				to_sequence: 8,
+			},
+		});
+		const opening_harness = await make_transport_test_harness({
+			binary_stream_source: { Open: () => Effect.fail(asset_gap) },
+		});
+		const running_harness = await make_transport_test_harness({
+			binary_stream_source: { Open: () => Effect.succeed(Stream.fail(asset_gap)) },
+		});
+
+		try {
+			const opening_exit = await Effect.runPromise(
+				Effect.scoped(opening_harness.client.OpenAsset("asset_gap")).pipe(Effect.exit),
+			);
+			const running_exit = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const stream = yield* running_harness.client.OpenAsset("asset_gap");
+
+						return yield* stream.pipe(Stream.runDrain, Effect.exit);
+					}),
+				),
+			);
+
+			for (const exit of [opening_exit, running_exit]) {
+				expect(exit._tag).toBe("Failure");
+
+				if (exit._tag === "Failure") {
+					const failure = Cause.findErrorOption(exit.cause);
+					const error = Option.isSome(failure) ? failure.value : undefined;
+
+					expect(error).toMatchObject({
+						code: expect.stringMatching(/^stream_(?:closed|gap)$/),
+					});
+					expect(error).not.toHaveProperty("terminal_output_gap");
+				}
+			}
+		} finally {
+			await opening_harness.dispose();
+			await running_harness.dispose();
 		}
 	});
 

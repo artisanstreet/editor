@@ -71,7 +71,8 @@ function make_handle(
 ): Effect.Effect<TerminalDriverHandle, never, Scope.Scope> {
 	return Effect.gen(function* () {
 		const output = yield* Queue.dropping<Uint8Array, Cause.Done<void>>(output_capacity);
-		const exit = yield* Deferred.make<TerminalDriverExit>();
+		const native_exit = yield* Deferred.make<TerminalDriverExit>();
+		const output_ended = yield* Deferred.make<void>();
 		const state = yield* Ref.make<TerminalState>({});
 		let data_listener: IDisposable | undefined;
 		let exit_listener: IDisposable | undefined;
@@ -91,7 +92,7 @@ function make_handle(
 				data_listener?.dispose();
 				exit_listener?.dispose();
 				yield* Queue.end(output);
-				yield* Deferred.succeed(exit, terminal_exit);
+				yield* Deferred.succeed(native_exit, terminal_exit);
 			});
 		const EnsureOpen = (operation: TerminalDriverOperation) =>
 			Ref.get(state).pipe(
@@ -167,7 +168,7 @@ function make_handle(
 
 				return KillNative("closed").pipe(
 					Effect.andThen(
-						Deferred.await(exit).pipe(
+						Deferred.await(native_exit).pipe(
 							Effect.timeoutOrElse({
 								duration: close_timeout_ms,
 								orElse: () => Finish(fallback).pipe(Effect.as(fallback)),
@@ -179,6 +180,16 @@ function make_handle(
 			}),
 		);
 		const Kill = (signal?: string) => KillNative("killed", signal);
+		const Exit = Effect.gen(function* () {
+			const terminal_exit = yield* Deferred.await(native_exit);
+
+			yield* Deferred.await(output_ended);
+
+			return terminal_exit;
+		});
+		const Output = Stream.fromQueue(output).pipe(
+			Stream.ensuring(Deferred.succeed(output_ended, undefined)),
+		);
 		const Resize = (cols: number, rows: number) =>
 			Effect.gen(function* () {
 				yield* validate_positive("cols", cols);
@@ -196,9 +207,9 @@ function make_handle(
 		return {
 			Clear,
 			Close,
-			Exit: Deferred.await(exit),
+			Exit,
 			Kill,
-			Output: Stream.fromQueue(output),
+			Output,
 			Resize,
 			Write,
 			pid: pty.pid,

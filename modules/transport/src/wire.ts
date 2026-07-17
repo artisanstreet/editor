@@ -65,14 +65,45 @@ export const TransportCloseFrame = Schema.Struct({
 
 export type TransportCloseFrame = typeof TransportCloseFrame.Type;
 
-/** Requests one terminal or asset byte stream after protocol negotiation. */
-export const MessagePortStreamBindFrame = Schema.Struct({
+/** Binds one terminal stream request to its asserted durable ownership context. */
+export const MessagePortTerminalStreamContext = Schema.Struct({
+	terminal_id: Identifier,
+	thread_id: Identifier,
+	workspace_id: Identifier,
+});
+
+export type MessagePortTerminalStreamContext = typeof MessagePortTerminalStreamContext.Type;
+
+const MessagePortStreamBindFrameBase = Schema.Struct({
 	channel_id: Identifier,
 	channel_sequence: Schema.Literal(0),
 	kind: Schema.Literal("stream.bind"),
 	stream_id: Identifier,
 	stream_ticket: Identifier,
+	terminal_context: Schema.optional(MessagePortTerminalStreamContext),
 });
+
+/** Requests one terminal or asset byte stream after protocol negotiation. */
+export const MessagePortStreamBindFrame = MessagePortStreamBindFrameBase.check(
+	Schema.makeFilter<typeof MessagePortStreamBindFrameBase.Type>((frame) => {
+		const terminal_prefix = "terminal:";
+		const is_terminal = frame.stream_id.startsWith(terminal_prefix);
+
+		if (!is_terminal) {
+			return frame.terminal_context === undefined
+				? undefined
+				: "Terminal stream context is only valid for terminal streams";
+		}
+
+		if (frame.terminal_context === undefined) {
+			return "Terminal streams require an ownership context";
+		}
+
+		return frame.terminal_context.terminal_id === frame.stream_id.slice(terminal_prefix.length)
+			? undefined
+			: "Terminal stream context must match the requested terminal id";
+	}),
+);
 
 export type MessagePortStreamBindFrame = typeof MessagePortStreamBindFrame.Type;
 
@@ -97,8 +128,24 @@ export const MessagePortStreamChunkFrame = Schema.Struct({
 
 export type MessagePortStreamChunkFrame = typeof MessagePortStreamChunkFrame.Type;
 
-/** Closes one logical stream explicitly after completion, cancellation, or a gap. */
-export const MessagePortStreamEndFrame = Schema.Struct({
+const TerminalOutputGapDetailBase = Schema.Struct({
+	from_sequence: StreamSequence.check(Schema.isGreaterThan(0)),
+	reason: Schema.Literal("viewer_overflow"),
+	to_sequence: StreamSequence.check(Schema.isGreaterThan(0)),
+});
+
+/** Preserves the exact backend output range evicted for one terminal viewer. */
+export const TerminalOutputGapDetail = TerminalOutputGapDetailBase.check(
+	Schema.makeFilter<typeof TerminalOutputGapDetailBase.Type>((detail) =>
+		detail.from_sequence <= detail.to_sequence
+			? undefined
+			: "Terminal output gap range must be ordered",
+	),
+);
+
+export type TerminalOutputGapDetail = typeof TerminalOutputGapDetail.Type;
+
+const MessagePortStreamEndFrameBase = Schema.Struct({
 	channel_id: Identifier,
 	channel_sequence: StreamSequence,
 	kind: Schema.Literal("stream.end"),
@@ -112,7 +159,25 @@ export const MessagePortStreamEndFrame = Schema.Struct({
 		"source_error",
 	]),
 	stream_id: Identifier,
+	terminal_output_gap: Schema.optional(TerminalOutputGapDetail),
 });
+
+/** Closes one logical stream explicitly after completion, cancellation, or a gap. */
+export const MessagePortStreamEndFrame = MessagePortStreamEndFrameBase.check(
+	Schema.makeFilter<typeof MessagePortStreamEndFrameBase.Type>((frame) => {
+		if (frame.terminal_output_gap === undefined) {
+			return undefined;
+		}
+
+		if (frame.reason !== "gap") {
+			return "Terminal output gap detail requires a gap stream end reason";
+		}
+
+		return frame.stream_id.startsWith("terminal:")
+			? undefined
+			: "Terminal output gap detail is only valid for terminal streams";
+	}),
+);
 
 export type MessagePortStreamEndFrame = typeof MessagePortStreamEndFrame.Type;
 
@@ -157,3 +222,9 @@ export const DecodeTransportFrame = Schema.decodeUnknownEffect(TransportFrame, {
 export const DecodeMessagePortStreamFrame = Schema.decodeUnknownEffect(MessagePortStreamFrame, {
 	onExcessProperty: "error",
 });
+
+/** Strictly decodes one terminal or asset stream binding request. */
+export const DecodeMessagePortStreamBindFrame = Schema.decodeUnknownEffect(
+	MessagePortStreamBindFrame,
+	{ onExcessProperty: "error" },
+);

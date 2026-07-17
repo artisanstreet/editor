@@ -604,12 +604,18 @@ export const FixtureArtisanClientService = {
 
 			return Stream.fromIterable([output]);
 		}),
-	OpenTerminalOutput: (terminal_id) =>
+	OpenTerminalOutput: (input) =>
 		Effect.gen(function* () {
-			const output = fixture_artisan_client_data.terminal_output[terminal_id];
+			const terminal = fixture_artisan_client_data.terminals.find(
+				(candidate) =>
+					candidate.terminal_id === input.terminal_id &&
+					candidate.thread_id === input.thread_id &&
+					candidate.workspace_id === input.workspace_id,
+			);
+			const output = fixture_artisan_client_data.terminal_output[input.terminal_id];
 
-			if (output === undefined) {
-				return yield* FixtureFailure(`Unknown fixture terminal: ${terminal_id}`);
+			if (terminal === undefined || output === undefined) {
+				return yield* FixtureFailure(`Unknown fixture terminal: ${input.terminal_id}`);
 			}
 
 			return Stream.fromIterable([output]);

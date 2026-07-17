@@ -38,6 +38,7 @@ export interface TerminalDriverExit {
 export interface TerminalDriverHandle {
 	readonly Clear: Effect.Effect<void, TerminalDriverError>;
 	readonly Close: Effect.Effect<void, TerminalDriverError>;
+	/** Completes only after `Output` has ended and released its buffered chunks. */
 	readonly Exit: Effect.Effect<TerminalDriverExit>;
 	readonly Kill: (signal?: string) => Effect.Effect<void, TerminalDriverError>;
 	readonly Output: Stream.Stream<Uint8Array>;

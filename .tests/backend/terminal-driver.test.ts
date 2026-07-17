@@ -64,12 +64,13 @@ describe("TerminalDriver node-pty adapter", () => {
 					yield* terminal.Write(new TextEncoder().encode("ping\r"));
 
 					const exit = yield* terminal.Exit;
+					const output_completed_before_exit = output_fiber.pollUnsafe() !== undefined;
 					const chunks = yield* Fiber.join(output_fiber);
 					const output = new TextDecoder().decode(
 						Uint8Array.from([...chunks].flatMap((chunk) => [...chunk])),
 					);
 
-					return { exit, output, pid: terminal.pid };
+					return { exit, output, output_completed_before_exit, pid: terminal.pid };
 				}),
 			).pipe(Effect.provide(NodePtyTerminalDriverLive)),
 		);
@@ -77,6 +78,7 @@ describe("TerminalDriver node-pty adapter", () => {
 		expect(result.pid).toBeGreaterThan(0);
 		expect(result.output).toContain("READY");
 		expect(result.output).toContain("ECHO:ping");
+		expect(result.output_completed_before_exit).toBe(true);
 		expect(result.exit).toMatchObject({ exit_code: 7, reason: "exited" });
 	});
 
@@ -85,13 +87,21 @@ describe("TerminalDriver node-pty adapter", () => {
 			Effect.scoped(
 				Effect.gen(function* () {
 					const terminal = yield* open_node_terminal(`setInterval(() => {}, 1000);`);
+					const output_fiber = yield* terminal.Output.pipe(
+						Stream.runDrain,
+						Effect.forkChild,
+					);
 					const invalid = yield* terminal.Resize(0, 24).pipe(Effect.exit);
 
 					yield* terminal.Close;
 					yield* terminal.Close;
 
+					const exit = yield* terminal.Exit;
+
+					yield* Fiber.join(output_fiber);
+
 					return {
-						exit: yield* terminal.Exit,
+						exit,
 						invalid,
 					};
 				}),
@@ -105,20 +115,28 @@ describe("TerminalDriver node-pty adapter", () => {
 		expect(result.exit.reason).toBe("closed");
 	});
 
-	it("fails closed when an unconsumed output buffer overflows", async () => {
+	it("fails closed when a slow output consumer lets the driver buffer overflow", async () => {
 		const exit = await Effect.runPromise(
 			Effect.scoped(
 				Effect.gen(function* () {
 					const terminal = yield* open_node_terminal(
 						`process.stdout.write("x".repeat(65_536)); setInterval(() => {}, 1_000);`,
 					);
-
-					return yield* terminal.Exit.pipe(
+					const output_fiber = yield* terminal.Output.pipe(
+						Stream.tap(() => Effect.sleep(25)),
+						Stream.runDrain,
+						Effect.forkChild,
+					);
+					const exit = yield* terminal.Exit.pipe(
 						Effect.timeoutOrElse({
 							duration: 5_000,
 							orElse: () => Effect.die("terminal overflow did not stop the PTY"),
 						}),
 					);
+
+					yield* Fiber.join(output_fiber);
+
+					return exit;
 				}),
 			).pipe(
 				Effect.provide(

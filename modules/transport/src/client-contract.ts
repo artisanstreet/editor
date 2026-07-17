@@ -78,6 +78,8 @@ import type {
 	ToolInvocationQueryResult,
 } from "@artisan/protocol";
 
+import type { TerminalOutputGapDetail } from "./wire";
+
 /** Identifies a typed frontend client failure. */
 export type ArtisanClientErrorCode =
 	| "configuration"
@@ -100,6 +102,7 @@ export class ArtisanClientError extends Data.TaggedError("ArtisanClientError")<{
 	readonly message: string;
 	readonly protocol_code: string;
 	readonly retryable: boolean;
+	readonly terminal_output_gap?: TerminalOutputGapDetail;
 }> {}
 
 /** Supplies command intent while the client owns envelope ids and trace metadata. */
@@ -110,6 +113,13 @@ export interface ArtisanCommandInput {
 	readonly payload: CommandPayload;
 	readonly run_id?: string;
 	readonly thread_id: string;
+}
+
+/** Supplies one exact terminal ownership context for live output streaming. */
+export interface ArtisanTerminalOutputInput {
+	readonly terminal_id: string;
+	readonly thread_id: string;
+	readonly workspace_id: string;
 }
 
 /** Supplies one preview target registration and durable command metadata. */
@@ -581,7 +591,7 @@ export class ArtisanClient extends Context.Service<
 			Scope.Scope
 		>;
 		readonly OpenTerminalOutput: (
-			terminal_id: string,
+			input: ArtisanTerminalOutputInput,
 		) => Effect.Effect<
 			Stream.Stream<Uint8Array, ArtisanClientError>,
 			ArtisanClientError,

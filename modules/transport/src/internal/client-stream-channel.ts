@@ -1,7 +1,12 @@
 import { Cause, Deferred, Effect, Option, Queue, Ref, Scope, Stream } from "effect";
 
 import type { ArtisanClientError } from "../client-contract";
-import type { MessagePortStreamFrame, TransportStreamFrame } from "../wire";
+import {
+	DecodeMessagePortStreamBindFrame,
+	type MessagePortStreamFrame,
+	type MessagePortTerminalStreamContext,
+	type TransportStreamFrame,
+} from "../wire";
 import {
 	client_error,
 	map_port_error,
@@ -23,6 +28,11 @@ interface BinaryChannelState {
 	readonly ignored_channels: ReadonlySet<string>;
 }
 
+interface ClientStreamOpenInput {
+	readonly stream_id: string;
+	readonly terminal_context?: MessagePortTerminalStreamContext;
+}
+
 /** Owns logical stream continuity independently from the control connection. */
 export interface ClientStreamChannel {
 	readonly Disconnect: (connection_id: string) => Effect.Effect<void>;
@@ -32,7 +42,7 @@ export interface ClientStreamChannel {
 		frame: Exclude<MessagePortStreamFrame, { kind: "stream.bind" }>,
 	) => Effect.Effect<void, ArtisanClientError>;
 	readonly Open: (
-		stream_id: string,
+		input: ClientStreamOpenInput,
 	) => Effect.Effect<
 		Stream.Stream<Uint8Array, ArtisanClientError>,
 		ArtisanClientError,
@@ -239,9 +249,11 @@ export const make_client_stream_channel = (
 				const code =
 					frame.reason === "overflow"
 						? "stream_overflow"
-						: exact_end
-							? "stream_closed"
-							: "stream_gap";
+						: frame.reason === "gap"
+							? "stream_gap"
+							: exact_end
+								? "stream_closed"
+								: "stream_gap";
 
 				yield* fail_channel(
 					frame.channel_id,
@@ -249,8 +261,13 @@ export const make_client_stream_channel = (
 						code,
 						frame.reason === "overflow"
 							? "The backend stream queue overflowed."
-							: "The binary stream closed before clean completion.",
+							: frame.terminal_output_gap === undefined
+								? "The binary stream closed before clean completion."
+								: "The terminal output viewer lost a sequence range.",
 						new Error(`binary stream ended with ${frame.reason}`),
+						false,
+						"",
+						frame.terminal_output_gap,
 					),
 				);
 			});
@@ -280,10 +297,28 @@ export const make_client_stream_channel = (
 				}
 			});
 
-		const open = (stream_id: string) =>
+		const open = (input: ClientStreamOpenInput) =>
 			Effect.gen(function* () {
 				const active = yield* await_active;
 				const channel_id = yield* make_id("binary_stream");
+				const bind_frame = yield* DecodeMessagePortStreamBindFrame({
+					channel_id,
+					channel_sequence: 0,
+					kind: "stream.bind",
+					stream_id: input.stream_id,
+					stream_ticket: active.stream_ticket,
+					...(input.terminal_context === undefined
+						? {}
+						: { terminal_context: input.terminal_context }),
+				}).pipe(
+					Effect.mapError((cause) =>
+						client_error(
+							"malformed",
+							"The binary stream request context is invalid.",
+							cause,
+						),
+					),
+				);
 				const queue = yield* Effect.acquireRelease(
 					Queue.dropping<Uint8Array, ArtisanClientError | Cause.Done<void>>(
 						stream_capacity,
@@ -296,7 +331,7 @@ export const make_client_stream_channel = (
 					expected_sequence: -1,
 					queue,
 					ready,
-					stream_id,
+					stream_id: input.stream_id,
 				};
 				const inserted = yield* Ref.modify(
 					state,
@@ -326,13 +361,7 @@ export const make_client_stream_channel = (
 				}
 
 				yield* Effect.addFinalizer(() => remove(channel_id));
-				yield* send_stream(active, {
-					channel_id,
-					channel_sequence: 0,
-					kind: "stream.bind",
-					stream_id,
-					stream_ticket: active.stream_ticket,
-				});
+				yield* send_stream(active, bind_frame);
 				yield* Deferred.await(ready).pipe(Effect.onInterrupt(() => remove(channel_id)));
 
 				return Stream.fromQueue(queue);

@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, ne } from "drizzle-orm";
+import { and, asc, eq, inArray, ne, notExists } from "drizzle-orm";
 import { Context, Data, Effect, Layer, Schema } from "effect";
 
 import {
@@ -132,6 +132,7 @@ export class TerminalRepository extends Context.Service<
 		readonly ReadOwned: (
 			terminal_id: string,
 			thread_id: string,
+			workspace_id: string,
 		) => Effect.Effect<StoredTerminalSession, TerminalRepositoryError>;
 		readonly ReadStale: (
 			instance_id: string,
@@ -465,7 +466,7 @@ export const TerminalRepositoryLive = Layer.effect(
 			terminal,
 		});
 
-		const ReadOwned = (terminal_id: string, thread_id: string) =>
+		const ReadOwned = (terminal_id: string, thread_id: string, workspace_id: string) =>
 			database.client
 				.select()
 				.from(TerminalSessions)
@@ -473,6 +474,15 @@ export const TerminalRepositoryLive = Layer.effect(
 					and(
 						eq(TerminalSessions.terminal_id, terminal_id),
 						eq(TerminalSessions.thread_id, thread_id),
+						eq(TerminalSessions.workspace_id, workspace_id),
+						notExists(
+							database.client
+								.select({ thread_id: ThreadErasureClaims.thread_id })
+								.from(ThreadErasureClaims)
+								.where(
+									eq(ThreadErasureClaims.thread_id, TerminalSessions.thread_id),
+								),
+						),
 					),
 				)
 				.limit(1)

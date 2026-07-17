@@ -1482,8 +1482,12 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				ListWorkspaceChanges: list_workspace_changes,
 				ListTerminals: list_terminals,
 				ListThreads: list_threads,
-				OpenAsset: (asset_id) => streams.Open(`asset:${asset_id}`),
-				OpenTerminalOutput: (terminal_id) => streams.Open(`terminal:${terminal_id}`),
+				OpenAsset: (asset_id) => streams.Open({ stream_id: `asset:${asset_id}` }),
+				OpenTerminalOutput: (input) =>
+					streams.Open({
+						stream_id: `terminal:${input.terminal_id}`,
+						terminal_context: input,
+					}),
 				ReadWorkspaceFile: read_workspace_file,
 				ResolveGlobalGuidanceDrift: resolve_global_guidance_drift,
 				ResolveModelBehaviourDrift: resolve_model_behaviour_drift,

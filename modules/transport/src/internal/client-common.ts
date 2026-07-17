@@ -151,8 +151,16 @@ export function client_error(
 	cause: unknown,
 	retryable = false,
 	protocol_code = "",
+	terminal_output_gap?: ArtisanClientError["terminal_output_gap"],
 ) {
-	return new ArtisanClientError({ cause, code, message, protocol_code, retryable });
+	return new ArtisanClientError({
+		cause,
+		code,
+		message,
+		protocol_code,
+		retryable,
+		...(terminal_output_gap === undefined ? {} : { terminal_output_gap }),
+	});
 }
 
 /** Converts a provider-neutral protocol error into the client error channel. */

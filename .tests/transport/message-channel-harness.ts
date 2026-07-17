@@ -175,8 +175,8 @@ function make_binary_source_layer(
 	binary_streams: Readonly<Record<string, ReadonlyArray<Uint8Array>>>,
 ) {
 	return Layer.succeed(BinaryStreamSource, {
-		Open: (stream_id) => {
-			const chunks = binary_streams[stream_id];
+		Open: (input) => {
+			const chunks = binary_streams[input.stream_id];
 
 			return chunks
 				? Effect.succeed(
@@ -186,7 +186,7 @@ function make_binary_source_layer(
 						new BinaryStreamSourceError({
 							cause: new Error("test stream not found"),
 							code: "not_found",
-							stream_id,
+							stream_id: input.stream_id,
 						}),
 					);
 		},

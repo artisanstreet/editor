@@ -1,12 +1,25 @@
-import { Cause, Deferred, Effect, Exit, Fiber, Option, Queue, Ref, Scope, Stream } from "effect";
+import {
+	Cause,
+	Deferred,
+	Effect,
+	Exit,
+	Fiber,
+	Option,
+	Queue,
+	Ref,
+	Schema,
+	Scope,
+	Stream,
+} from "effect";
 
 import type { MessagePortLike } from "../message-port";
 import type { MessagePortTransportServerError } from "../server-contract";
 import type { BinaryStreamSourceError, BinaryStreamSourceShape } from "../stream-source";
-import type {
-	MessagePortStreamEndFrame,
-	MessagePortStreamFrame,
-	TransportStreamFrame,
+import {
+	TerminalOutputGapDetail,
+	type MessagePortStreamEndFrame,
+	type MessagePortStreamFrame,
+	type TransportStreamFrame,
 } from "../wire";
 import { map_server_port_error, server_error } from "./server-common";
 
@@ -27,18 +40,28 @@ function stream_end(
 	channel_sequence: number,
 	stream_id: string,
 	reason: MessagePortStreamEndFrame["reason"],
+	terminal_output_gap?: TerminalOutputGapDetail,
 ): MessagePortStreamEndFrame {
+	const decoded_gap = Schema.decodeUnknownOption(TerminalOutputGapDetail)(terminal_output_gap);
+	const safe_terminal_output_gap =
+		reason === "gap" && stream_id.startsWith("terminal:") && Option.isSome(decoded_gap)
+			? decoded_gap.value
+			: undefined;
+
 	return {
 		channel_id,
 		channel_sequence,
 		kind: "stream.end",
 		reason,
 		stream_id,
+		...(safe_terminal_output_gap === undefined
+			? {}
+			: { terminal_output_gap: safe_terminal_output_gap }),
 	};
 }
 
 function source_end_reason(error: BinaryStreamSourceError) {
-	return error.code === "not_found" ? "not_found" : "source_error";
+	return error.code === "gap" ? "gap" : error.code === "not_found" ? "not_found" : "source_error";
 }
 
 /** Builds one session-scoped binary stream channel. */
@@ -104,12 +127,21 @@ export const make_server_stream_channel = (
 					});
 					yield* Deferred.await(ready_sent);
 
-					const enqueue_end = (reason: MessagePortStreamEndFrame["reason"]) =>
+					const enqueue_end = (
+						reason: MessagePortStreamEndFrame["reason"],
+						terminal_output_gap?: TerminalOutputGapDetail,
+					) =>
 						Effect.gen(function* () {
 							sequence += 1;
 							const offered = yield* Queue.offer(
 								queue,
-								stream_end(channel_id, sequence, stream_id, reason),
+								stream_end(
+									channel_id,
+									sequence,
+									stream_id,
+									reason,
+									terminal_output_gap,
+								),
 							);
 
 							if (offered) {
@@ -165,11 +197,17 @@ export const make_server_stream_channel = (
 							failure.value.code === "stream_overflow";
 
 						if (!overflowed) {
-							yield* enqueue_end(
+							const source_failure =
 								Option.isSome(failure) &&
-									failure.value._tag === "BinaryStreamSourceError"
-									? source_end_reason(failure.value)
-									: "source_error",
+								failure.value._tag === "BinaryStreamSourceError"
+									? failure.value
+									: undefined;
+
+							yield* enqueue_end(
+								source_failure === undefined
+									? "source_error"
+									: source_end_reason(source_failure),
+								source_failure?.terminal_output_gap,
 							);
 						}
 					}
@@ -218,16 +256,30 @@ export const make_server_stream_channel = (
 					return;
 				}
 
-				const opened = yield* Effect.exit(stream_source.Open(frame.stream_id));
+				const opened = yield* Effect.exit(
+					stream_source.Open({
+						stream_id: frame.stream_id,
+						...(frame.terminal_context === undefined
+							? {}
+							: { terminal_context: frame.terminal_context }),
+					}),
+				);
 
 				if (Exit.isFailure(opened)) {
 					const failure = Cause.findErrorOption(opened.cause);
-					const reason =
-						Option.isSome(failure) && failure.value.code === "not_found"
-							? "not_found"
-							: "source_error";
+					const reason = Option.isSome(failure)
+						? source_end_reason(failure.value)
+						: "source_error";
 
-					yield* send(stream_end(frame.channel_id, 0, frame.stream_id, reason));
+					yield* send(
+						stream_end(
+							frame.channel_id,
+							0,
+							frame.stream_id,
+							reason,
+							Option.isSome(failure) ? failure.value.terminal_output_gap : undefined,
+						),
+					);
 
 					return;
 				}

@@ -222,6 +222,7 @@ export const TerminalOpenCommand = Schema.Struct({
 export const TerminalWriteCommand = Schema.Struct({
 	type: Schema.Literal("terminal.write"),
 	terminal_id: Identifier,
+	workspace_id: Identifier,
 	data: Schema.String,
 });
 
@@ -229,6 +230,7 @@ export const TerminalWriteCommand = Schema.Struct({
 export const TerminalResizeCommand = Schema.Struct({
 	type: Schema.Literal("terminal.resize"),
 	terminal_id: Identifier,
+	workspace_id: Identifier,
 	cols: PositiveInt,
 	rows: PositiveInt,
 });
@@ -237,12 +239,14 @@ export const TerminalResizeCommand = Schema.Struct({
 export const TerminalClearCommand = Schema.Struct({
 	type: Schema.Literal("terminal.clear"),
 	terminal_id: Identifier,
+	workspace_id: Identifier,
 });
 
 /** Sends a termination signal to one active terminal. */
 export const TerminalKillCommand = Schema.Struct({
 	type: Schema.Literal("terminal.kill"),
 	terminal_id: Identifier,
+	workspace_id: Identifier,
 	signal: Schema.optional(Schema.String),
 });
 
@@ -250,12 +254,14 @@ export const TerminalKillCommand = Schema.Struct({
 export const TerminalCloseCommand = Schema.Struct({
 	type: Schema.Literal("terminal.close"),
 	terminal_id: Identifier,
+	workspace_id: Identifier,
 });
 
 /** Starts a new PTY generation from a closed or failed terminal's saved configuration. */
 export const TerminalRestartCommand = Schema.Struct({
 	type: Schema.Literal("terminal.restart"),
 	terminal_id: Identifier,
+	workspace_id: Identifier,
 });
 
 /** Describes the bounded resource surface delegated to one assignment. */
