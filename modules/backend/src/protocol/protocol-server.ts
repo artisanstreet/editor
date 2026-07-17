@@ -65,6 +65,11 @@ import {
 	type ThreadRetentionUpdateEnvelope,
 	type ThreadWorkQueryEnvelope,
 	type TerminalListQueryEnvelope,
+	type ToolApprovalDecideEnvelope,
+	type ToolApprovalQueryEnvelope,
+	type ToolInvocationQueryEnvelope,
+	type ToolInvokeEnvelope,
+	type ToolListEligibleEnvelope,
 	type UnsubscribeEnvelope,
 	type WorkspaceChangeListQueryEnvelope,
 	type WorkspaceChangeDiffQueryEnvelope,
@@ -196,6 +201,23 @@ import {
 } from "../git-provider/hosted-git-snapshot-service";
 import { GitProviderError } from "../git-provider/git-provider";
 import { TerminalSessionService } from "../terminal/terminal-sessions";
+import {
+	ToolControlCoordinator,
+	ToolControlCoordinatorFailure,
+} from "../tool-control/tool-control-coordinator";
+import {
+	ToolControlConflict,
+	ToolControlInvariant,
+	ToolControlPersistenceFailure,
+	ToolControlUnavailable,
+} from "../tool-control/tool-control-repository";
+import {
+	ToolExecutionConflict,
+	ToolExecutionInvariant,
+	ToolExecutionPersistenceFailure,
+	ToolExecutionUnavailable,
+} from "../tool-control/tool-execution-repository";
+import { ToolRegistryError } from "../tool-control/tool-registry";
 import { thread_activity_kind_from_event } from "../threads/internal/thread-activity";
 import {
 	thread_retention_policy_thread_id,
@@ -454,6 +476,69 @@ function rich_link_error_detail(error: unknown): ProtocolErrorDetail {
 	return {
 		code: `rich_link.${error.code}`,
 		message: "The link metadata is temporarily unavailable.",
+		retryable: true,
+	};
+}
+
+function tool_control_error_detail(error: unknown): ProtocolErrorDetail {
+	if (error instanceof ToolControlConflict) {
+		return {
+			code: "tool.intent_conflict",
+			message: "This tool request id has already been used for different intent.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof ToolControlUnavailable || error instanceof ToolExecutionUnavailable) {
+		return {
+			code: "tool.unavailable",
+			message: "The requested tool operation is unavailable for this thread or run.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof ToolRegistryError) {
+		return {
+			code: `tool.${error.reason_code}`,
+			message: "The requested tool cannot be used with this run.",
+			retryable: false,
+		};
+	}
+
+	if (
+		error instanceof ToolControlInvariant ||
+		error instanceof ToolExecutionInvariant ||
+		error instanceof ToolControlCoordinatorFailure
+	) {
+		return {
+			code: "tool.invariant_failed",
+			message: "The durable tool operation failed validation.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof ToolExecutionConflict) {
+		return {
+			code: "tool.execution_conflict",
+			message: "The tool execution could not be advanced.",
+			retryable: true,
+		};
+	}
+
+	if (
+		error instanceof ToolControlPersistenceFailure ||
+		error instanceof ToolExecutionPersistenceFailure
+	) {
+		return {
+			code: "tool.unavailable",
+			message: "The durable tool operation is temporarily unavailable.",
+			retryable: true,
+		};
+	}
+
+	return {
+		code: "tool.unavailable",
+		message: "The durable tool operation is temporarily unavailable.",
 		retryable: true,
 	};
 }
@@ -1197,6 +1282,7 @@ export function make_protocol_server_layer(
 			const router = yield* ProtocolRouter;
 			const orchestration = yield* OrchestrationRepository;
 			const terminals = yield* TerminalSessionService;
+			const tool_control = yield* ToolControlCoordinator;
 			const thread_read_model = yield* ThreadReadModel;
 			const retention_policy = yield* ThreadRetentionPolicyService;
 			const workspace_changes = yield* WorkspaceChangeRepository;
@@ -2225,6 +2311,212 @@ export function make_protocol_server_layer(
 							);
 						}),
 					);
+
+				const RejectToolThreadMismatch = (current: ReadyState, message_id: string) =>
+					EnqueueError(
+						current,
+						"tool.thread_mismatch",
+						"The tool operation does not belong to the envelope thread.",
+						false,
+						message_id,
+					);
+
+				const HandleToolListEligible = (
+					envelope: ToolListEligibleEnvelope,
+					current: ReadyState,
+				) => {
+					if (envelope.thread_id !== envelope.payload.context.thread_id) {
+						return RejectToolThreadMismatch(current, envelope.message_id);
+					}
+
+					return tool_control.ListEligible(envelope.payload).pipe(
+						Effect.flatMap((payload) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: envelope.message_id,
+									kind: "tool.list_eligible.result",
+									message_id,
+									origin: "backend",
+									payload,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch((error) => {
+							const detail = tool_control_error_detail(error);
+
+							return EnqueueError(
+								current,
+								detail.code,
+								detail.message,
+								detail.retryable,
+								envelope.message_id,
+							);
+						}),
+					);
+				};
+
+				const HandleToolInvoke = (envelope: ToolInvokeEnvelope, current: ReadyState) => {
+					if (envelope.thread_id !== envelope.payload.context.thread_id) {
+						return RejectToolThreadMismatch(current, envelope.message_id);
+					}
+
+					return tool_control.Invoke(envelope.payload).pipe(
+						Effect.flatMap((payload) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: envelope.message_id,
+									kind: "tool.invoke.result",
+									message_id,
+									origin: "backend",
+									payload,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch((error) => {
+							const detail = tool_control_error_detail(error);
+
+							return EnqueueError(
+								current,
+								detail.code,
+								detail.message,
+								detail.retryable,
+								envelope.message_id,
+							);
+						}),
+					);
+				};
+
+				const HandleToolInvocationQuery = (
+					query: ToolInvocationQueryEnvelope,
+					current: ReadyState,
+				) => {
+					if (query.thread_id !== query.payload.thread_id) {
+						return RejectToolThreadMismatch(current, query.message_id);
+					}
+
+					return tool_control.QueryInvocation(query.payload).pipe(
+						Effect.flatMap((payload) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "tool.invocation.query.result",
+									message_id,
+									origin: "backend",
+									payload,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch((error) => {
+							const detail = tool_control_error_detail(error);
+
+							return EnqueueError(
+								current,
+								detail.code,
+								detail.message,
+								detail.retryable,
+								query.message_id,
+							);
+						}),
+					);
+				};
+
+				const HandleToolApprovalQuery = (
+					query: ToolApprovalQueryEnvelope,
+					current: ReadyState,
+				) => {
+					if (query.thread_id !== query.payload.thread_id) {
+						return RejectToolThreadMismatch(current, query.message_id);
+					}
+
+					return tool_control.QueryApproval(query.payload).pipe(
+						Effect.flatMap((payload) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "tool.approval.query.result",
+									message_id,
+									origin: "backend",
+									payload,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch((error) => {
+							const detail = tool_control_error_detail(error);
+
+							return EnqueueError(
+								current,
+								detail.code,
+								detail.message,
+								detail.retryable,
+								query.message_id,
+							);
+						}),
+					);
+				};
+
+				const HandleToolApprovalDecide = (
+					envelope: ToolApprovalDecideEnvelope,
+					current: ReadyState,
+				) => {
+					if (envelope.thread_id !== envelope.payload.thread_id) {
+						return RejectToolThreadMismatch(current, envelope.message_id);
+					}
+
+					return tool_control.Decide(envelope.payload).pipe(
+						Effect.flatMap((payload) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: envelope.message_id,
+									kind: "tool.approval.decide.result",
+									message_id,
+									origin: "backend",
+									payload,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch((error) => {
+							const detail = tool_control_error_detail(error);
+
+							return EnqueueError(
+								current,
+								detail.code,
+								detail.message,
+								detail.retryable,
+								envelope.message_id,
+							);
+						}),
+					);
+				};
 
 				const HandleWorkspaceGitCheckoutApprovalQuery = (
 					query: WorkspaceGitCheckoutApprovalQueryEnvelope,
@@ -3346,6 +3638,16 @@ export function make_protocol_server_layer(
 							return HandleHostedGitCheckFailureDetailQuery(envelope, current);
 						case "external_wait.query":
 							return HandleExternalWaitQuery(envelope, current);
+						case "tool.list_eligible":
+							return HandleToolListEligible(envelope, current);
+						case "tool.invoke":
+							return HandleToolInvoke(envelope, current);
+						case "tool.invocation.query":
+							return HandleToolInvocationQuery(envelope, current);
+						case "tool.approval.query":
+							return HandleToolApprovalQuery(envelope, current);
+						case "tool.approval.decide":
+							return HandleToolApprovalDecide(envelope, current);
 						case "workspace.git.checkout.approval.query":
 							return HandleWorkspaceGitCheckoutApprovalQuery(envelope, current);
 						case "workspace.git.mutation.approval.query":

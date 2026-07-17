@@ -9,6 +9,8 @@ import {
 	type OutboundEnvelope,
 	type PreviewBrowserLifecycleQueryEnvelope,
 	type RichLinkMetadataQueryEnvelope,
+	type ToolApprovalDecideEnvelope,
+	type ToolInvokeEnvelope,
 } from "@artisan/protocol";
 import {
 	ArtisanClient,
@@ -52,6 +54,8 @@ export interface TransportHarnessOptions {
 	readonly drop_first_command_receipt?: boolean;
 	readonly drop_first_preview_browser_lifecycle_result?: boolean;
 	readonly drop_first_rich_link_metadata_result?: boolean;
+	readonly drop_first_tool_approval_decide_result?: boolean;
+	readonly drop_first_tool_invoke_result?: boolean;
 	readonly protocol?: FakeProtocolOptions;
 	readonly server?: MessagePortTransportServerOptions;
 	readonly transport_runtime?: Layer.Layer<TransportRuntime>;
@@ -64,8 +68,12 @@ export interface MessageChannelConnectorSnapshot {
 	readonly dropped_command_receipts: number;
 	readonly dropped_preview_browser_lifecycle_results: number;
 	readonly dropped_rich_link_metadata_results: number;
+	readonly dropped_tool_approval_decide_results: number;
+	readonly dropped_tool_invoke_results: number;
 	readonly preview_browser_lifecycle_query_attempts: ReadonlyArray<PreviewBrowserLifecycleQueryEnvelope>;
 	readonly rich_link_metadata_query_attempts: ReadonlyArray<RichLinkMetadataQueryEnvelope>;
+	readonly tool_approval_decide_attempts: ReadonlyArray<ToolApprovalDecideEnvelope>;
+	readonly tool_invoke_attempts: ReadonlyArray<ToolInvokeEnvelope>;
 	readonly server_failures: number;
 }
 
@@ -135,6 +143,34 @@ const get_preview_browser_lifecycle_query = (message: unknown) =>
 		Effect.catch(() => Effect.succeed(undefined)),
 	);
 
+const get_tool_invoke = (message: unknown) =>
+	DecodeTransportFrame(message).pipe(
+		Effect.flatMap((frame) =>
+			frame.kind === "transport.control"
+				? DecodeInboundControlEnvelope(frame.payload).pipe(
+						Effect.map((envelope) =>
+							envelope.kind === "tool.invoke" ? envelope : undefined,
+						),
+					)
+				: Effect.succeed(undefined),
+		),
+		Effect.catch(() => Effect.succeed(undefined)),
+	);
+
+const get_tool_approval_decide = (message: unknown) =>
+	DecodeTransportFrame(message).pipe(
+		Effect.flatMap((frame) =>
+			frame.kind === "transport.control"
+				? DecodeInboundControlEnvelope(frame.payload).pipe(
+						Effect.map((envelope) =>
+							envelope.kind === "tool.approval.decide" ? envelope : undefined,
+						),
+					)
+				: Effect.succeed(undefined),
+		),
+		Effect.catch(() => Effect.succeed(undefined)),
+	);
+
 function make_binary_source_layer(
 	binary_streams: Readonly<Record<string, ReadonlyArray<Uint8Array>>>,
 ) {
@@ -162,15 +198,21 @@ function make_message_channel_connector(
 	drop_first_command_receipt: boolean,
 	drop_first_preview_browser_lifecycle_result: boolean,
 	drop_first_rich_link_metadata_result: boolean,
+	drop_first_tool_approval_decide_result: boolean,
+	drop_first_tool_invoke_result: boolean,
 ) {
 	const active_sessions = new Set<NativeSession>();
 	const preview_browser_lifecycle_query_attempts: Array<PreviewBrowserLifecycleQueryEnvelope> =
 		[];
 	const rich_link_metadata_query_attempts: Array<RichLinkMetadataQueryEnvelope> = [];
+	const tool_approval_decide_attempts: Array<ToolApprovalDecideEnvelope> = [];
+	const tool_invoke_attempts: Array<ToolInvokeEnvelope> = [];
 	let connections = 0;
 	let dropped_command_receipts = 0;
 	let dropped_preview_browser_lifecycle_results = 0;
 	let dropped_rich_link_metadata_results = 0;
+	let dropped_tool_approval_decide_results = 0;
+	let dropped_tool_invoke_results = 0;
 	let server_failures = 0;
 
 	const Connect = Effect.gen(function* () {
@@ -200,6 +242,8 @@ function make_message_channel_connector(
 				Effect.gen(function* () {
 					const browser_attempt = yield* get_preview_browser_lifecycle_query(message);
 					const attempt = yield* get_rich_link_metadata_query(message);
+					const tool_approval_decide_attempt = yield* get_tool_approval_decide(message);
+					const tool_invoke_attempt = yield* get_tool_invoke(message);
 
 					if (browser_attempt) {
 						preview_browser_lifecycle_query_attempts.push(browser_attempt);
@@ -207,6 +251,14 @@ function make_message_channel_connector(
 
 					if (attempt) {
 						rich_link_metadata_query_attempts.push(attempt);
+					}
+
+					if (tool_approval_decide_attempt) {
+						tool_approval_decide_attempts.push(tool_approval_decide_attempt);
+					}
+
+					if (tool_invoke_attempt) {
+						tool_invoke_attempts.push(tool_invoke_attempt);
 					}
 
 					yield* raw_client_control.Send(message, transfer);
@@ -233,6 +285,15 @@ function make_message_channel_connector(
 						dropped_rich_link_metadata_results === 0
 							? yield* has_outbound_kind(message, "rich-link.metadata.query.result")
 							: false;
+					const should_drop_tool_approval_decide_result =
+						drop_first_tool_approval_decide_result &&
+						dropped_tool_approval_decide_results === 0
+							? yield* has_outbound_kind(message, "tool.approval.decide.result")
+							: false;
+					const should_drop_tool_invoke_result =
+						drop_first_tool_invoke_result && dropped_tool_invoke_results === 0
+							? yield* has_outbound_kind(message, "tool.invoke.result")
+							: false;
 
 					if (should_drop_command_receipt) {
 						dropped_command_receipts += 1;
@@ -250,6 +311,20 @@ function make_message_channel_connector(
 
 					if (should_drop_rich_link_metadata_result) {
 						dropped_rich_link_metadata_results += 1;
+						close_native_session(native_session);
+
+						return;
+					}
+
+					if (should_drop_tool_approval_decide_result) {
+						dropped_tool_approval_decide_results += 1;
+						close_native_session(native_session);
+
+						return;
+					}
+
+					if (should_drop_tool_invoke_result) {
+						dropped_tool_invoke_results += 1;
 						close_native_session(native_session);
 
 						return;
@@ -305,8 +380,12 @@ function make_message_channel_connector(
 		dropped_command_receipts,
 		dropped_preview_browser_lifecycle_results,
 		dropped_rich_link_metadata_results,
+		dropped_tool_approval_decide_results,
+		dropped_tool_invoke_results,
 		preview_browser_lifecycle_query_attempts: [...preview_browser_lifecycle_query_attempts],
 		rich_link_metadata_query_attempts: [...rich_link_metadata_query_attempts],
+		tool_approval_decide_attempts: [...tool_approval_decide_attempts],
+		tool_invoke_attempts: [...tool_invoke_attempts],
 		server_failures,
 	});
 
@@ -336,6 +415,8 @@ async function make_transport_stack(
 		options.drop_first_command_receipt ?? false,
 		options.drop_first_preview_browser_lifecycle_result ?? false,
 		options.drop_first_rich_link_metadata_result ?? false,
+		options.drop_first_tool_approval_decide_result ?? false,
+		options.drop_first_tool_invoke_result ?? false,
 	);
 	const client_layer = make_artisan_client_layer(options.client).pipe(
 		Layer.provide(connector.layer),

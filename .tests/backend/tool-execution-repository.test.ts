@@ -106,24 +106,65 @@ function runtime(
 	return ManagedRuntime.make(services.pipe(Layer.provideMerge(infrastructure)));
 }
 
-const SeedThread = Effect.gen(function* () {
+const InstallToolThreadDispatchState = Effect.gen(function* () {
 	const database = yield* Database;
 
-	yield* database.client.insert(Threads).values({
-		created_at: clock.value,
-		thread_id: "thread_1",
-		title: "Tool execution",
-		title_source: "initial",
-		updated_at: clock.value,
-	});
 	yield* database.client.run(`
-		INSERT INTO orchestration_runs
-		(run_id, thread_id, agent_id, engine_id, status, working_directory, created_at, updated_at)
-		VALUES ('run_1', 'thread_1', 'agent_1', 'codex', 'running', 'C:/artisan', '${clock.value}', '${clock.value}')
+		CREATE TABLE IF NOT EXISTS tool_thread_dispatch_state (
+			thread_id text PRIMARY KEY REFERENCES threads(thread_id) ON DELETE CASCADE,
+			admission_version integer NOT NULL DEFAULT 0,
+			quiesced_at text,
+			CONSTRAINT tool_thread_dispatch_state_admission_version_check
+				CHECK (admission_version >= 0),
+			CONSTRAINT tool_thread_dispatch_state_quiesced_at_check
+				CHECK (
+					quiesced_at IS NULL OR (
+						strftime('%Y-%m-%dT%H:%M:%fZ', quiesced_at) IS quiesced_at
+						AND substr(quiesced_at, 12, 2) BETWEEN '00' AND '23'
+					)
+				)
+		)
 	`);
 });
 
-function request(request_id: string, approval_policy: "automatic" | "required" = "automatic") {
+interface ToolOwnership {
+	readonly agent_id: string;
+	readonly run_id: string;
+	readonly thread_id: string;
+}
+
+const primary_ownership = {
+	agent_id: "agent_1",
+	run_id: "run_1",
+	thread_id: "thread_1",
+} satisfies ToolOwnership;
+
+const SeedThreadWithOwnership = (ownership: ToolOwnership) =>
+	Effect.gen(function* () {
+		const database = yield* Database;
+
+		yield* InstallToolThreadDispatchState;
+		yield* database.client.insert(Threads).values({
+			created_at: clock.value,
+			thread_id: ownership.thread_id,
+			title: "Tool execution",
+			title_source: "initial",
+			updated_at: clock.value,
+		});
+		yield* database.client.run(`
+			INSERT INTO orchestration_runs
+			(run_id, thread_id, agent_id, engine_id, status, working_directory, created_at, updated_at)
+			VALUES ('${ownership.run_id}', '${ownership.thread_id}', '${ownership.agent_id}', 'codex', 'running', 'C:/artisan', '${clock.value}', '${clock.value}')
+		`);
+	});
+
+const SeedThread = SeedThreadWithOwnership(primary_ownership);
+
+function request(
+	request_id: string,
+	approval_policy: "automatic" | "required" = "automatic",
+	ownership: ToolOwnership = primary_ownership,
+) {
 	return {
 		descriptor: {
 			...descriptor,
@@ -134,7 +175,7 @@ function request(request_id: string, approval_policy: "automatic" | "required" =
 			approval_policy === "required" ? ("outcome_unknown" as const) : ("retry" as const),
 		request: {
 			arguments: { query: "private-token" },
-			context: { agent_id: "agent_1", run_id: "run_1", thread_id: "thread_1" },
+			context: ownership,
 			request_id,
 			tool: {
 				revision: 1,
@@ -144,17 +185,23 @@ function request(request_id: string, approval_policy: "automatic" | "required" =
 	};
 }
 
-const Prepare = (request_id: string, approval_policy: "automatic" | "required" = "automatic") =>
+const Prepare = (
+	request_id: string,
+	approval_policy: "automatic" | "required" = "automatic",
+	ownership: ToolOwnership = primary_ownership,
+) =>
 	Effect.gen(function* () {
 		const controls = yield* ToolControlRepository;
-		const prepared = yield* controls.Prepare(request(request_id, approval_policy).request);
+		const prepared = yield* controls.Prepare(
+			request(request_id, approval_policy, ownership).request,
+		);
 
 		if (approval_policy === "required") {
 			yield* controls.Decide({
 				approval_id: prepared.approval!.approval_id,
 				decision: "approved",
 				decision_id: `decision_${request_id}`,
-				thread_id: "thread_1",
+				thread_id: ownership.thread_id,
 			});
 		}
 
@@ -418,18 +465,50 @@ describe("ToolExecutionRepository", () => {
 		const database_path = await ManagedRuntime.make(NodeFileSystem.layer).runPromise(
 			MakeDatabasePath,
 		);
+		const ownership = {
+			no_launch: {
+				agent_id: "agent_no_launch",
+				run_id: "run_no_launch",
+				thread_id: "thread_no_launch",
+			},
+			retry_launch: {
+				agent_id: "agent_retry_launch",
+				run_id: "run_retry_launch",
+				thread_id: "thread_retry_launch",
+			},
+			unknown_launch: {
+				agent_id: "agent_unknown_launch",
+				run_id: "run_unknown_launch",
+				thread_id: "thread_unknown_launch",
+			},
+			waiting: {
+				agent_id: "agent_waiting",
+				run_id: "run_waiting",
+				thread_id: "thread_waiting",
+			},
+		} satisfies Readonly<Record<string, ToolOwnership>>;
 		const first_runtime = runtime(database_path, "execution_one");
 		const second_runtime = runtime(database_path, "execution_two");
 
 		try {
 			const ids = await first_runtime.runPromise(
 				Effect.gen(function* () {
-					yield* SeedThread;
+					yield* Effect.forEach(Object.values(ownership), SeedThreadWithOwnership, {
+						discard: true,
+					});
 					const executions = yield* ToolExecutionRepository;
-					const no_launch = yield* Prepare("no_launch");
-					const retry_launch = yield* Prepare("retry_launch");
-					const unknown_launch = yield* Prepare("unknown_launch", "required");
-					const waiting = yield* Prepare("waiting");
+					const no_launch = yield* Prepare("no_launch", "automatic", ownership.no_launch);
+					const retry_launch = yield* Prepare(
+						"retry_launch",
+						"automatic",
+						ownership.retry_launch,
+					);
+					const unknown_launch = yield* Prepare(
+						"unknown_launch",
+						"required",
+						ownership.unknown_launch,
+					);
+					const waiting = yield* Prepare("waiting", "automatic", ownership.waiting);
 					const retry_claim = Option.getOrThrow(
 						yield* executions.ClaimPending(retry_launch),
 					);

@@ -68,6 +68,7 @@ function frontend_envelope(kind: string, payload: unknown) {
 		protocol_version: 1,
 		schema_version: 1,
 		sent_at: timestamp,
+		thread_id: "thread_1",
 	};
 }
 
@@ -87,6 +88,13 @@ function backend_envelope(kind: string, correlation_id: string, payload: unknown
 describe("tool control renderer envelopes", () => {
 	it("roundtrips source-safe queries, exact-replay decisions, and correlated results", async () => {
 		const inbound = [
+			frontend_envelope("tool.list_eligible", { context }),
+			frontend_envelope("tool.invoke", {
+				arguments: { query: "private-input" },
+				context,
+				request_id: "request_1",
+				tool: { revision: public_tool.revision, tool_id: public_tool.tool_id },
+			}),
 			frontend_envelope("tool.invocation.query", {
 				invocation_id: "invocation_1",
 				thread_id: "thread_1",
@@ -103,6 +111,19 @@ describe("tool control renderer envelopes", () => {
 			}),
 		];
 		const outbound = [
+			backend_envelope("tool.list_eligible.result", "message_tool.list_eligible", {
+				tools: [
+					{
+						descriptor: { ...public_tool, input_schema: { type: "object" } },
+						state: "eligible",
+					},
+				],
+			}),
+			backend_envelope("tool.invoke.result", "message_tool.invoke", {
+				invocation: completed_invocation,
+				outcome: "completed",
+				result: { private_result: "secret" },
+			}),
 			backend_envelope("tool.invocation.query.result", "message_tool.invocation.query", {
 				invocation: completed_invocation,
 			}),
@@ -141,7 +162,7 @@ describe("tool control renderer envelopes", () => {
 				decision_id: "decision_1",
 				thread_id: "thread_1",
 			}),
-			thread_id: "thread_1",
+			private_reason: "secret",
 		};
 		const excess_result = backend_envelope(
 			"tool.approval.query.result",

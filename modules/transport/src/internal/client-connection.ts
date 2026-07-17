@@ -382,6 +382,11 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 					case "preview.browser.lifecycle.query.result":
 					case "preview.targets.query.result":
 					case "rich-link.metadata.query.result":
+					case "tool.list_eligible.result":
+					case "tool.invoke.result":
+					case "tool.invocation.query.result":
+					case "tool.approval.query.result":
+					case "tool.approval.decide.result":
 						return handlers.requests.Resolve(envelope);
 					case "event":
 						return handlers.subscriptions.ApplyEvent(envelope).pipe(

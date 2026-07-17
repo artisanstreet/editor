@@ -8,6 +8,7 @@ import {
 	type ToolApprovalQuery,
 	type ToolApprovalQueryResult,
 	type ToolInvocationProjection,
+	type ToolInvocationContext,
 	type ToolInvocationQuery,
 	type ToolInvocationQueryResult,
 	type InvokeRequest,
@@ -16,6 +17,7 @@ import {
 	ToolApprovalQuery as ToolApprovalQuerySchema,
 	ToolDescriptor as ToolDescriptorSchema,
 	ToolInvocationProjection as ToolInvocationProjectionSchema,
+	ToolInvocationContext as ToolInvocationContextSchema,
 	ToolInvocationQuery as ToolInvocationQuerySchema,
 	ToolInvocationQueryResult as ToolInvocationQueryResultSchema,
 	ToolApprovalQueryResult as ToolApprovalQueryResultSchema,
@@ -40,6 +42,7 @@ import {
 	ToolControlCommands,
 	ToolInvocationPrivate,
 	ToolInvocations,
+	ToolThreadDispatchState,
 } from "../persistence/schema";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { RecordThreadActivity } from "../threads/internal/thread-activity";
@@ -90,6 +93,9 @@ export interface DecideToolApprovalResult {
 export class ToolControlRepository extends Context.Service<
 	ToolControlRepository,
 	{
+		readonly AuthorizeContext: (
+			context: ToolInvocationContext,
+		) => Effect.Effect<void, ToolControlRepositoryError>;
 		readonly Prepare: (
 			request: InvokeRequest,
 		) => Effect.Effect<PrepareToolInvocationResult, ToolControlRepositoryError>;
@@ -371,10 +377,20 @@ export const ToolControlRepositoryLive = Layer.effect(
 				if (!thread) return yield* new ToolControlUnavailable({ reason: "missing" });
 			});
 
-		const Authorize = (
-			transaction: typeof database.client,
-			context: InvokeRequest["context"],
-		) =>
+		const EnsureAdmissionOpen = (transaction: typeof database.client, thread_id: string) =>
+			Effect.gen(function* () {
+				const [dispatch_state] = yield* transaction
+					.select({ quiesced_at: ToolThreadDispatchState.quiesced_at })
+					.from(ToolThreadDispatchState)
+					.where(eq(ToolThreadDispatchState.thread_id, thread_id))
+					.limit(1);
+
+				if (dispatch_state !== undefined && dispatch_state.quiesced_at !== null) {
+					return yield* new ToolControlUnavailable({ reason: "erased" });
+				}
+			});
+
+		const Authorize = (transaction: typeof database.client, context: ToolInvocationContext) =>
 			Effect.gen(function* () {
 				const [ordinary] = yield* transaction
 					.select()
@@ -475,6 +491,24 @@ export const ToolControlRepositoryLive = Layer.effect(
 					return yield* new ToolControlUnavailable({ reason: "workspace_mismatch" });
 
 				return "graph_run" as const;
+			});
+
+		const AuthorizeContext = (input: ToolInvocationContext) =>
+			Effect.gen(function* () {
+				const context = yield* Decode(
+					ToolInvocationContextSchema,
+					input,
+					"Tool invocation context is invalid",
+				);
+
+				yield* database.client
+					.transaction((transaction) =>
+						Effect.gen(function* () {
+							yield* EnsureLiveThread(transaction, context.thread_id);
+							yield* Authorize(transaction, context);
+						}),
+					)
+					.pipe(Effect.mapError(normalize_error));
 			});
 
 		const Append = (
@@ -683,6 +717,7 @@ export const ToolControlRepositoryLive = Layer.effect(
 							}
 
 							yield* EnsureLiveThread(transaction, request.context.thread_id);
+							yield* EnsureAdmissionOpen(transaction, request.context.thread_id);
 
 							if (admission === undefined) {
 								return yield* invariant("Tool registry admission is missing");
@@ -904,6 +939,7 @@ export const ToolControlRepositoryLive = Layer.effect(
 							if (!row)
 								return yield* new ToolControlUnavailable({ reason: "missing" });
 							yield* EnsureLiveThread(transaction, decision.thread_id);
+							yield* EnsureAdmissionOpen(transaction, decision.thread_id);
 							if (row.state !== "approval_required")
 								return yield* new ToolControlConflict({ reason: "changed_intent" });
 							const owner_kind = yield* Authorize(transaction, {
@@ -1099,6 +1135,6 @@ export const ToolControlRepositoryLive = Layer.effect(
 				});
 			});
 
-		return { Decide, Prepare, QueryApproval, QueryInvocation };
+		return { AuthorizeContext, Decide, Prepare, QueryApproval, QueryInvocation };
 	}),
 );

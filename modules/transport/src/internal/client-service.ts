@@ -67,6 +67,11 @@ import {
 	type ThreadRetentionQueryEnvelope,
 	type ThreadRetentionUpdateEnvelope,
 	type ThreadWorkQueryEnvelope,
+	type ToolApprovalDecideEnvelope,
+	type ToolApprovalQueryEnvelope,
+	type ToolInvocationQueryEnvelope,
+	type ToolInvokeEnvelope,
+	type ToolListEligibleEnvelope,
 } from "@artisan/protocol";
 
 import {
@@ -119,6 +124,11 @@ import {
 	type ArtisanPreviewTargetRemoveInput,
 	type ArtisanPreviewTargetsInput,
 	type ArtisanRichLinkMetadataInput,
+	type ArtisanListEligibleToolsInput,
+	type ArtisanInvokeToolInput,
+	type ArtisanToolApprovalDecisionInput,
+	type ArtisanToolApprovalInput,
+	type ArtisanToolInvocationInput,
 } from "../client-contract";
 import { TransportRuntime } from "../transport-runtime";
 import { client_error, validate_client_options } from "./client-common";
@@ -601,6 +611,86 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					return result.kind === "rich-link.metadata.query.result"
 						? result.payload
 						: yield* Effect.die("rich-link metadata response narrowed incorrectly");
+				});
+			const list_eligible_tools = (input: ArtisanListEligibleToolsInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ToolListEligibleEnvelope = {
+						...trace,
+						kind: "tool.list_eligible",
+						payload: input,
+						thread_id: input.context.thread_id,
+					};
+					const result = yield* requests.Request(envelope, "tool.list_eligible.result");
+
+					return result.kind === "tool.list_eligible.result"
+						? result.payload
+						: yield* Effect.die("tool eligibility response narrowed incorrectly");
+				});
+			const invoke_tool = (input: ArtisanInvokeToolInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const request_id = input.request_id ?? trace.message_id;
+					const envelope: ToolInvokeEnvelope = {
+						...trace,
+						kind: "tool.invoke",
+						message_id: request_id,
+						payload: { ...input, request_id },
+						thread_id: input.context.thread_id,
+					};
+					const result = yield* requests.Request(envelope, "tool.invoke.result");
+
+					return result.kind === "tool.invoke.result"
+						? result.payload
+						: yield* Effect.die("tool invoke response narrowed incorrectly");
+				});
+			const get_tool_invocation = (input: ArtisanToolInvocationInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ToolInvocationQueryEnvelope = {
+						...trace,
+						kind: "tool.invocation.query",
+						payload: input,
+						thread_id: input.thread_id,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"tool.invocation.query.result",
+					);
+
+					return result.kind === "tool.invocation.query.result"
+						? result.payload
+						: yield* Effect.die("tool invocation response narrowed incorrectly");
+				});
+			const get_tool_approval = (input: ArtisanToolApprovalInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ToolApprovalQueryEnvelope = {
+						...trace,
+						kind: "tool.approval.query",
+						payload: input,
+						thread_id: input.thread_id,
+					};
+					const result = yield* requests.Request(envelope, "tool.approval.query.result");
+
+					return result.kind === "tool.approval.query.result"
+						? result.payload
+						: yield* Effect.die("tool approval response narrowed incorrectly");
+				});
+			const decide_tool_approval = (input: ArtisanToolApprovalDecisionInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ToolApprovalDecideEnvelope = {
+						...trace,
+						kind: "tool.approval.decide",
+						payload: input,
+						thread_id: input.thread_id,
+					};
+					const result = yield* requests.Request(envelope, "tool.approval.decide.result");
+
+					return result.kind === "tool.approval.decide.result"
+						? result.payload
+						: yield* Effect.die("tool approval decision response narrowed incorrectly");
 				});
 
 			type WorkspaceMutationEnvelope =
@@ -1372,6 +1462,11 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				GetPreviewBrowserLifecycle: get_preview_browser_lifecycle,
 				GetPreviewTargets: get_preview_targets,
 				GetRichLinkMetadata: get_rich_link_metadata,
+				ListEligibleTools: list_eligible_tools,
+				InvokeTool: invoke_tool,
+				GetToolInvocation: get_tool_invocation,
+				GetToolApproval: get_tool_approval,
+				DecideToolApproval: decide_tool_approval,
 				GetHostedGitSnapshot: get_hosted_git_snapshot,
 				GetHostedGitCheckFailureDetail: get_hosted_git_check_failure_detail,
 				GetGlobalGuidance: get_global_guidance,

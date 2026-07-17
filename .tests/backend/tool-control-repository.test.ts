@@ -138,9 +138,31 @@ function request(
 	};
 }
 
+const InstallToolThreadDispatchState = Effect.gen(function* () {
+	const database = yield* Database;
+
+	yield* database.client.run(`
+		CREATE TABLE IF NOT EXISTS tool_thread_dispatch_state (
+			thread_id text PRIMARY KEY REFERENCES threads(thread_id) ON DELETE CASCADE,
+			admission_version integer NOT NULL DEFAULT 0,
+			quiesced_at text,
+			CONSTRAINT tool_thread_dispatch_state_admission_version_check
+				CHECK (admission_version >= 0),
+			CONSTRAINT tool_thread_dispatch_state_quiesced_at_check
+				CHECK (
+					quiesced_at IS NULL OR (
+						strftime('%Y-%m-%dT%H:%M:%fZ', quiesced_at) IS quiesced_at
+						AND substr(quiesced_at, 12, 2) BETWEEN '00' AND '23'
+					)
+				)
+		)
+	`);
+});
+
 const SeedOrdinary = Effect.gen(function* () {
 	const database = yield* Database;
 
+	yield* InstallToolThreadDispatchState;
 	yield* database.client.insert(Threads).values({
 		created_at: now,
 		thread_id: "thread_1",

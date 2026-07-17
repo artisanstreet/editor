@@ -18,6 +18,9 @@ import type {
 	WorkspaceGitFetchQueryResult,
 	WorkspaceGitMutationApproval,
 	HostedGitMutationApproval,
+	ListEligibleResult,
+	ToolApprovalQueryResult,
+	ToolInvocationQueryResult,
 } from "@artisan/protocol";
 import {
 	ArtisanClient,
@@ -544,6 +547,17 @@ export const FixtureArtisanClientService = {
 			}
 
 			return { approval };
+		}),
+	ListEligibleTools: (_input) => Effect.succeed({ tools: [] } satisfies ListEligibleResult),
+	InvokeTool: (_input) =>
+		Effect.gen(function* () {
+			return yield* FixtureFailure("Tool invocation is unavailable in renderer fixtures.");
+		}),
+	GetToolInvocation: (_input) => Effect.succeed({} satisfies ToolInvocationQueryResult),
+	GetToolApproval: (_input) => Effect.succeed({} satisfies ToolApprovalQueryResult),
+	DecideToolApproval: (_input) =>
+		Effect.gen(function* () {
+			return yield* FixtureFailure("Tool approval is unavailable in renderer fixtures.");
 		}),
 	ListTerminals: (thread_id, workspace_id) =>
 		Effect.gen(function* () {

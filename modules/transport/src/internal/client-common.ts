@@ -95,7 +95,12 @@ export type PendingRequestEnvelope = Extract<
 			| "hosted.git.mutation.approval.respond"
 			| "preview.browser.lifecycle.query"
 			| "preview.targets.query"
-			| "rich-link.metadata.query";
+			| "rich-link.metadata.query"
+			| "tool.list_eligible"
+			| "tool.invoke"
+			| "tool.invocation.query"
+			| "tool.approval.query"
+			| "tool.approval.decide";
 	}
 >;
 
@@ -127,7 +132,12 @@ export type PendingResultEnvelope = Extract<
 			| "hosted.git.mutation.approval.query.result"
 			| "preview.browser.lifecycle.query.result"
 			| "preview.targets.query.result"
-			| "rich-link.metadata.query.result";
+			| "rich-link.metadata.query.result"
+			| "tool.list_eligible.result"
+			| "tool.invoke.result"
+			| "tool.invocation.query.result"
+			| "tool.approval.query.result"
+			| "tool.approval.decide.result";
 	}
 >;
 

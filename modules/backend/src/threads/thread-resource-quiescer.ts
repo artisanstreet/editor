@@ -7,6 +7,7 @@ import { AgentOrchestrator } from "../orchestration/agent-orchestrator";
 import { HostedProjectCloneCoordinator } from "../projects/hosted-project-clone-coordinator";
 import { PreviewBrowserLifecycle } from "../preview/preview-browser";
 import { TerminalSessionService } from "../terminal/terminal-sessions";
+import { ToolControlCoordinator } from "../tool-control/tool-control-coordinator";
 import { WorkspaceGitCheckoutCoordinator } from "../git/workspace-git-checkout-coordinator";
 import { WorkspaceGitFetchService } from "../git/workspace-git-fetch-service";
 import { WorkspaceGitMutationCoordinator } from "../git/workspace-git-mutation-coordinator";
@@ -39,6 +40,7 @@ export const ThreadResourceQuiescerLive = Layer.effect(
 		const orchestration = yield* AgentOrchestrator;
 		const preview_browser = yield* PreviewBrowserLifecycle;
 		const terminals = yield* TerminalSessionService;
+		const tool_control = yield* ToolControlCoordinator;
 		const workspace_git_checkouts = yield* WorkspaceGitCheckoutCoordinator;
 		const workspace_git_fetches = yield* WorkspaceGitFetchService;
 		const workspace_git_mutations = yield* WorkspaceGitMutationCoordinator;
@@ -53,6 +55,7 @@ export const ThreadResourceQuiescerLive = Layer.effect(
 					orchestration.QuiesceThread(thread_id),
 					preview_browser.QuiesceThread(thread_id),
 					terminals.QuiesceThread(thread_id),
+					tool_control.QuiesceThread(thread_id),
 					workspace_git_checkouts.QuiesceThread(thread_id),
 					workspace_git_fetches.QuiesceThread(thread_id),
 					workspace_git_mutations.QuiesceThread(thread_id),

@@ -23,6 +23,8 @@ import type {
 	HostedProjectCloneApprovalQuery,
 	HostedProjectCloneApprovalQueryResult,
 	HostedProjectCloneRequest,
+	DecideApprovalRequest,
+	DecideApprovalResult,
 	ContentIdentity,
 	ModelBehaviourDriftResolutionRequest,
 	ModelBehaviourRetryRequest,
@@ -66,6 +68,14 @@ import type {
 	PreviewTargetsQueryResult,
 	RichLinkMetadataQuery,
 	RichLinkMetadataQueryResult,
+	InvokeRequest,
+	InvokeResult,
+	ListEligibleRequest,
+	ListEligibleResult,
+	ToolApprovalQuery,
+	ToolApprovalQueryResult,
+	ToolInvocationQuery,
+	ToolInvocationQueryResult,
 } from "@artisan/protocol";
 
 /** Identifies a typed frontend client failure. */
@@ -173,6 +183,23 @@ export interface ArtisanPreviewBrowserLifecycleInput extends PreviewBrowserLifec
 
 /** Supplies one external URL for a rich-link metadata query. */
 export interface ArtisanRichLinkMetadataInput extends RichLinkMetadataQuery {}
+
+/** Supplies an engine-run context for listing its eligible canonical tools. */
+export interface ArtisanListEligibleToolsInput extends ListEligibleRequest {}
+
+/** Supplies one invocation while allowing a caller to preserve a stable retry identity. */
+export interface ArtisanInvokeToolInput extends Omit<InvokeRequest, "request_id"> {
+	readonly request_id?: string;
+}
+
+/** Supplies one exact thread-owned tool invocation projection query. */
+export interface ArtisanToolInvocationInput extends ToolInvocationQuery {}
+
+/** Supplies one exact thread-owned tool approval projection query. */
+export interface ArtisanToolApprovalInput extends ToolApprovalQuery {}
+
+/** Supplies one exact-replay decision for a required tool approval. */
+export interface ArtisanToolApprovalDecisionInput extends DecideApprovalRequest {}
 
 /** Records the durable command outcome returned after acceptance or deduplication. */
 export interface ArtisanCommandReceipt {
@@ -531,6 +558,21 @@ export class ArtisanClient extends Context.Service<
 		readonly GetRichLinkMetadata: (
 			input: ArtisanRichLinkMetadataInput,
 		) => Effect.Effect<RichLinkMetadataQueryResult, ArtisanClientError>;
+		readonly ListEligibleTools: (
+			input: ArtisanListEligibleToolsInput,
+		) => Effect.Effect<ListEligibleResult, ArtisanClientError>;
+		readonly InvokeTool: (
+			input: ArtisanInvokeToolInput,
+		) => Effect.Effect<InvokeResult, ArtisanClientError>;
+		readonly GetToolInvocation: (
+			input: ArtisanToolInvocationInput,
+		) => Effect.Effect<ToolInvocationQueryResult, ArtisanClientError>;
+		readonly GetToolApproval: (
+			input: ArtisanToolApprovalInput,
+		) => Effect.Effect<ToolApprovalQueryResult, ArtisanClientError>;
+		readonly DecideToolApproval: (
+			input: ArtisanToolApprovalDecisionInput,
+		) => Effect.Effect<DecideApprovalResult, ArtisanClientError>;
 		readonly OpenAsset: (
 			asset_id: string,
 		) => Effect.Effect<

@@ -42,6 +42,7 @@ import {
 	ThreadProjectAffinityEvidence,
 	Threads,
 	ThreadTombstones,
+	ToolInvocations,
 	WorkspaceChangeOperations,
 	WorkspaceChangeDiffs,
 	WorkspaceChanges,
@@ -159,6 +160,12 @@ export const ThreadErasureLive = Layer.effect(
 			"attached",
 			"attaching",
 		]);
+		const IsPendingToolInvocation = inArray(ToolInvocations.state, [
+			"approval_required",
+			"pending",
+			"running",
+			"suspended",
+		]);
 
 		const ClaimExpired = (cutoff: string, claimed_at: string) =>
 			database.client
@@ -186,6 +193,24 @@ export const ThreadErasureLive = Layer.effect(
 															Threads.thread_id,
 														),
 														IsPendingWorkspaceMutation,
+													),
+												),
+										),
+									),
+									not(
+										exists(
+											database.client
+												.select({
+													invocation_id: ToolInvocations.invocation_id,
+												})
+												.from(ToolInvocations)
+												.where(
+													and(
+														eq(
+															ToolInvocations.thread_id,
+															Threads.thread_id,
+														),
+														IsPendingToolInvocation,
 													),
 												),
 										),
@@ -366,6 +391,133 @@ export const ThreadErasureLive = Layer.effect(
 							.limit(1);
 
 						if (!claim) {
+							return undefined;
+						}
+
+						const [tool_invocation_with_misbound_owner] = yield* transaction
+							.select({ invocation_id: ToolInvocations.invocation_id })
+							.from(ToolInvocations)
+							.where(
+								and(
+									eq(ToolInvocations.thread_id, thread_id),
+									or(
+										and(
+											eq(ToolInvocations.owner_kind, "ordinary_run"),
+											not(
+												exists(
+													transaction
+														.select({
+															run_id: OrchestrationRuns.run_id,
+														})
+														.from(OrchestrationRuns)
+														.where(
+															and(
+																eq(
+																	OrchestrationRuns.run_id,
+																	ToolInvocations.run_id,
+																),
+																eq(
+																	OrchestrationRuns.thread_id,
+																	thread_id,
+																),
+															),
+														),
+												),
+											),
+										),
+										and(
+											eq(ToolInvocations.owner_kind, "graph_run"),
+											not(
+												exists(
+													transaction
+														.select({ run_id: AgentRuns.run_id })
+														.from(AgentRuns)
+														.innerJoin(
+															OrchestrationGroups,
+															eq(
+																OrchestrationGroups.group_id,
+																AgentRuns.group_id,
+															),
+														)
+														.where(
+															and(
+																eq(
+																	AgentRuns.run_id,
+																	ToolInvocations.run_id,
+																),
+																eq(
+																	OrchestrationGroups.thread_id,
+																	thread_id,
+																),
+															),
+														),
+												),
+											),
+										),
+									),
+								),
+							)
+							.limit(1);
+						const [misbound_ordinary_tool_invocation] = yield* transaction
+							.select({ invocation_id: ToolInvocations.invocation_id })
+							.from(ToolInvocations)
+							.innerJoin(
+								OrchestrationRuns,
+								eq(OrchestrationRuns.run_id, ToolInvocations.run_id),
+							)
+							.where(
+								and(
+									eq(ToolInvocations.owner_kind, "ordinary_run"),
+									eq(OrchestrationRuns.thread_id, thread_id),
+									not(eq(ToolInvocations.thread_id, thread_id)),
+								),
+							)
+							.limit(1);
+						const [misbound_graph_tool_invocation] = yield* transaction
+							.select({ invocation_id: ToolInvocations.invocation_id })
+							.from(ToolInvocations)
+							.innerJoin(AgentRuns, eq(AgentRuns.run_id, ToolInvocations.run_id))
+							.innerJoin(
+								OrchestrationGroups,
+								eq(OrchestrationGroups.group_id, AgentRuns.group_id),
+							)
+							.where(
+								and(
+									eq(ToolInvocations.owner_kind, "graph_run"),
+									eq(OrchestrationGroups.thread_id, thread_id),
+									not(eq(ToolInvocations.thread_id, thread_id)),
+								),
+							)
+							.limit(1);
+						const misbound_tool_invocation =
+							tool_invocation_with_misbound_owner ??
+							misbound_ordinary_tool_invocation ??
+							misbound_graph_tool_invocation;
+
+						if (misbound_tool_invocation) {
+							return yield* new ThreadErasureFailure({
+								cause: new Error(
+									`Tool invocation ${misbound_tool_invocation.invocation_id} has inconsistent thread ownership`,
+								),
+							});
+						}
+
+						const [pending_tool_invocation] = yield* transaction
+							.select({ invocation_id: ToolInvocations.invocation_id })
+							.from(ToolInvocations)
+							.where(
+								and(
+									eq(ToolInvocations.thread_id, thread_id),
+									IsPendingToolInvocation,
+								),
+							)
+							.limit(1);
+
+						if (pending_tool_invocation) {
+							yield* transaction
+								.delete(ThreadErasureClaims)
+								.where(eq(ThreadErasureClaims.thread_id, thread_id));
+
 							return undefined;
 						}
 
@@ -654,6 +806,10 @@ export const ThreadErasureLive = Layer.effect(
 								.delete(TerminalCommands)
 								.where(inArray(TerminalCommands.terminal_id, terminal_ids));
 						}
+
+						yield* transaction
+							.delete(ToolInvocations)
+							.where(eq(ToolInvocations.thread_id, thread_id));
 
 						yield* transaction
 							.delete(TerminalSessions)

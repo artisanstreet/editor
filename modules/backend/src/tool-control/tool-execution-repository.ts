@@ -1,4 +1,4 @@
-import { and, asc, eq, isNull } from "drizzle-orm";
+import { and, asc, eq, isNull, ne, sql } from "drizzle-orm";
 import { Context, Crypto, Data, DateTime, Effect, Encoding, Layer, Option, Schema } from "effect";
 
 import {
@@ -26,6 +26,7 @@ import {
 	ToolExecutionClaims,
 	ToolInvocationPrivate,
 	ToolInvocations,
+	ToolThreadDispatchState,
 } from "../persistence/schema";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { RecordThreadActivity } from "../threads/internal/thread-activity";
@@ -86,10 +87,16 @@ export interface ToolExecutionDispatch {
 export class ToolExecutionRepository extends Context.Service<
 	ToolExecutionRepository,
 	{
+		readonly AbandonExecution: (
+			identity: typeof ToolExecutionIdentity.Type,
+		) => Effect.Effect<void, ToolExecutionRepositoryError>;
 		readonly AbandonOwnedExecutions: Effect.Effect<void, ToolExecutionRepositoryError>;
 		readonly ActiveClaimsForThread: (
 			thread_id: string,
 		) => Effect.Effect<boolean, ToolExecutionRepositoryError>;
+		readonly BeginThreadQuiescence: (
+			thread_id: string,
+		) => Effect.Effect<void, ToolExecutionRepositoryError>;
 		readonly ClaimPending: (
 			invocation_id: string,
 		) => Effect.Effect<Option.Option<ToolExecution>, ToolExecutionRepositoryError>;
@@ -126,6 +133,9 @@ export class ToolExecutionRepository extends Context.Service<
 		readonly SettleFailed: (
 			identity: typeof ToolExecutionIdentity.Type,
 		) => Effect.Effect<ToolInvocationProjectionValue, ToolExecutionRepositoryError>;
+		readonly ThreadQuiescencePending: (
+			thread_id: string,
+		) => Effect.Effect<boolean, ToolExecutionRepositoryError>;
 	}
 >()("Artisan/ToolExecutionRepository") {}
 
@@ -254,6 +264,67 @@ export const ToolExecutionRepositoryLive = Layer.effect(
 				if (erasure || tombstone)
 					return yield* new ToolExecutionUnavailable({ reason: "erased" });
 				if (!thread) return yield* new ToolExecutionUnavailable({ reason: "missing" });
+			});
+
+		const DispatchAvailable = (transaction: typeof database.client, thread_id: string) =>
+			Effect.gen(function* () {
+				const [[thread], [erasure], [tombstone], [dispatch_state]] = yield* Effect.all([
+					transaction
+						.select({ thread_id: Threads.thread_id })
+						.from(Threads)
+						.where(eq(Threads.thread_id, thread_id))
+						.limit(1),
+					transaction
+						.select({ thread_id: ThreadErasureClaims.thread_id })
+						.from(ThreadErasureClaims)
+						.where(eq(ThreadErasureClaims.thread_id, thread_id))
+						.limit(1),
+					transaction
+						.select({ thread_id: ThreadTombstones.thread_id })
+						.from(ThreadTombstones)
+						.where(eq(ThreadTombstones.thread_id, thread_id))
+						.limit(1),
+					transaction
+						.select({ quiesced_at: ToolThreadDispatchState.quiesced_at })
+						.from(ToolThreadDispatchState)
+						.where(eq(ToolThreadDispatchState.thread_id, thread_id))
+						.limit(1),
+				]);
+
+				if (erasure || tombstone) {
+					return false;
+				}
+
+				if (!thread) {
+					return yield* new ToolExecutionUnavailable({ reason: "missing" });
+				}
+
+				return dispatch_state === undefined || dispatch_state.quiesced_at === null;
+			});
+
+		const SerializeDispatchAdmission = (
+			transaction: typeof database.client,
+			thread_id: string,
+		) =>
+			Effect.gen(function* () {
+				yield* transaction
+					.insert(ToolThreadDispatchState)
+					.values({ admission_version: 0, quiesced_at: null, thread_id })
+					.onConflictDoNothing();
+				const [admitted] = yield* transaction
+					.update(ToolThreadDispatchState)
+					.set({
+						admission_version: sql`${ToolThreadDispatchState.admission_version} + 1`,
+					})
+					.where(
+						and(
+							eq(ToolThreadDispatchState.thread_id, thread_id),
+							isNull(ToolThreadDispatchState.quiesced_at),
+						),
+					)
+					.returning({ thread_id: ToolThreadDispatchState.thread_id });
+
+				return admitted !== undefined;
 			});
 
 		const DecodeInvocation = (row: InvocationRow) =>
@@ -712,6 +783,39 @@ export const ToolExecutionRepositoryLive = Layer.effect(
 											readonly sequence: number;
 										}>();
 									yield* EnsureLiveThread(transaction, row.thread_id);
+									const dispatch_available = yield* DispatchAvailable(
+										transaction,
+										row.thread_id,
+									);
+
+									if (!dispatch_available) {
+										return Option.none();
+									}
+
+									const admitted = yield* SerializeDispatchAdmission(
+										transaction,
+										row.thread_id,
+									);
+
+									if (!admitted) {
+										return Option.none();
+									}
+
+									const [active] = yield* transaction
+										.select({ invocation_id: ToolInvocations.invocation_id })
+										.from(ToolInvocations)
+										.where(
+											and(
+												eq(ToolInvocations.thread_id, row.thread_id),
+												eq(ToolInvocations.state, "running"),
+											),
+										)
+										.limit(1);
+
+									if (active) {
+										return Option.none();
+									}
+
 									yield* ReadPrivate(transaction, row);
 									const now = yield* metadata.Now;
 									const claim_token = yield* metadata.MakeId("claim");
@@ -1059,12 +1163,26 @@ export const ToolExecutionRepositoryLive = Layer.effect(
 							asc(ToolInvocations.created_at),
 							asc(ToolInvocations.invocation_id),
 						);
-					for (const row of rows) yield* EnsureLiveThread(transaction, row.thread_id);
+					const pending: Array<{
+						readonly invocation_id: string;
+						readonly thread_id: string;
+					}> = [];
 
-					return rows.map(({ invocation_id, thread_id }) => ({
-						invocation_id,
-						thread_id,
-					}));
+					for (const row of rows) {
+						const dispatch_available = yield* DispatchAvailable(
+							transaction,
+							row.thread_id,
+						);
+
+						if (dispatch_available) {
+							pending.push({
+								invocation_id: row.invocation_id,
+								thread_id: row.thread_id,
+							});
+						}
+					}
+
+					return pending;
 				}),
 			)
 			.pipe(Effect.mapError(normalize_error));
@@ -1093,7 +1211,15 @@ export const ToolExecutionRepositoryLive = Layer.effect(
 						const dispatches: Array<ToolExecutionDispatch> = [];
 
 						for (const { claim, invocation } of rows) {
-							yield* EnsureLiveThread(transaction, invocation.thread_id);
+							const dispatch_available = yield* DispatchAvailable(
+								transaction,
+								invocation.thread_id,
+							);
+
+							if (!dispatch_available) {
+								continue;
+							}
+
 							yield* ReadPrivate(transaction, invocation);
 							const expired = yield* IsExpired(claim.lease_expires_at, now);
 							const recovery = !expired
@@ -1135,6 +1261,40 @@ export const ToolExecutionRepositoryLive = Layer.effect(
 								const row = yield* ReadRow(transaction, decoded);
 								if (row.state !== "running") return Option.none<ToolExecution>();
 								yield* EnsureLiveThread(transaction, row.thread_id);
+								const dispatch_available = yield* DispatchAvailable(
+									transaction,
+									row.thread_id,
+								);
+
+								if (!dispatch_available) {
+									return Option.none<ToolExecution>();
+								}
+
+								const admitted = yield* SerializeDispatchAdmission(
+									transaction,
+									row.thread_id,
+								);
+
+								if (!admitted) {
+									return Option.none<ToolExecution>();
+								}
+
+								const [other_active] = yield* transaction
+									.select({ invocation_id: ToolInvocations.invocation_id })
+									.from(ToolInvocations)
+									.where(
+										and(
+											eq(ToolInvocations.thread_id, row.thread_id),
+											eq(ToolInvocations.state, "running"),
+											ne(ToolInvocations.invocation_id, row.invocation_id),
+										),
+									)
+									.limit(1);
+
+								if (other_active) {
+									return Option.none<ToolExecution>();
+								}
+
 								yield* DecodeInvocation(row);
 								yield* ReadPrivate(transaction, row);
 								const claim = yield* ReadClaim(transaction, decoded);
@@ -1230,6 +1390,97 @@ export const ToolExecutionRepositoryLive = Layer.effect(
 				Effect.mapError(normalize_error),
 			);
 
+		const BeginThreadQuiescence = (thread_id: string) =>
+			Decode(Identifier, thread_id, "Tool execution thread identifier is invalid").pipe(
+				Effect.flatMap((decoded) =>
+					RetrySqliteWrite(
+						database.client.transaction((transaction) =>
+							Effect.gen(function* () {
+								const [[thread], [tombstone]] = yield* Effect.all([
+									transaction
+										.select({ thread_id: Threads.thread_id })
+										.from(Threads)
+										.where(eq(Threads.thread_id, decoded))
+										.limit(1),
+									transaction
+										.select({ thread_id: ThreadTombstones.thread_id })
+										.from(ThreadTombstones)
+										.where(eq(ThreadTombstones.thread_id, decoded))
+										.limit(1),
+								]);
+
+								if (tombstone) {
+									return;
+								}
+
+								if (!thread) {
+									return yield* new ToolExecutionUnavailable({
+										reason: "missing",
+									});
+								}
+
+								const now = yield* metadata.Now;
+
+								yield* transaction
+									.insert(ToolThreadDispatchState)
+									.values({
+										admission_version: 0,
+										quiesced_at: now,
+										thread_id: decoded,
+									})
+									.onConflictDoNothing();
+								yield* transaction
+									.update(ToolThreadDispatchState)
+									.set({ quiesced_at: now })
+									.where(
+										and(
+											eq(ToolThreadDispatchState.thread_id, decoded),
+											isNull(ToolThreadDispatchState.quiesced_at),
+										),
+									);
+							}),
+						),
+					),
+				),
+				Effect.mapError(normalize_error),
+			);
+
+		const ThreadQuiescencePending = (thread_id: string) =>
+			Decode(Identifier, thread_id, "Tool execution thread identifier is invalid").pipe(
+				Effect.flatMap((decoded) =>
+					Effect.gen(function* () {
+						const now = yield* metadata.Now;
+						const claims = yield* database.client
+							.select({ lease_expires_at: ToolExecutionClaims.lease_expires_at })
+							.from(ToolExecutionClaims)
+							.innerJoin(
+								ToolInvocations,
+								eq(
+									ToolExecutionClaims.invocation_id,
+									ToolInvocations.invocation_id,
+								),
+							)
+							.where(
+								and(
+									eq(ToolInvocations.thread_id, decoded),
+									eq(ToolInvocations.state, "running"),
+								),
+							);
+
+						for (const claim of claims) {
+							const expired = yield* IsExpired(claim.lease_expires_at, now);
+
+							if (!expired) {
+								return true;
+							}
+						}
+
+						return false;
+					}),
+				),
+				Effect.mapError(normalize_error),
+			);
+
 		const ActiveClaimsForThread = (thread_id: string) =>
 			Decode(Identifier, thread_id, "Tool execution thread identifier is invalid").pipe(
 				Effect.flatMap((decoded) =>
@@ -1260,9 +1511,74 @@ export const ToolExecutionRepositoryLive = Layer.effect(
 				Effect.mapError(normalize_error),
 			);
 
+		const AbandonClaim = (transaction: typeof database.client, claim: ClaimRow, now: string) =>
+			Effect.gen(function* () {
+				const current = yield* DecodeDateTime(now, "Tool execution clock is invalid");
+				const minimum = yield* DecodeDateTime(
+					claim.launch_started_at ?? claim.claimed_at,
+					"Tool execution lease is invalid",
+				);
+				const expires_at = DateTime.formatIso(
+					DateTime.toEpochMillis(current) > DateTime.toEpochMillis(minimum)
+						? current
+						: minimum,
+				);
+
+				yield* transaction
+					.update(ToolExecutionClaims)
+					.set({ lease_expires_at: expires_at })
+					.where(
+						and(
+							eq(ToolExecutionClaims.invocation_id, claim.invocation_id),
+							eq(ToolExecutionClaims.claim_token, claim.claim_token),
+							eq(ToolExecutionClaims.owner_instance_id, metadata.instance_id),
+						),
+					);
+			});
+
+		const AbandonExecution = (identity: typeof ToolExecutionIdentity.Type) =>
+			Decode(ToolExecutionIdentity, identity, "Tool execution identity is invalid").pipe(
+				Effect.flatMap((decoded) =>
+					Effect.gen(function* () {
+						const now = yield* metadata.Now;
+
+						yield* RetrySqliteWrite(
+							database.client.transaction((transaction) =>
+								Effect.gen(function* () {
+									const [claim] = yield* transaction
+										.select()
+										.from(ToolExecutionClaims)
+										.where(
+											and(
+												eq(
+													ToolExecutionClaims.invocation_id,
+													decoded.invocation_id,
+												),
+												eq(
+													ToolExecutionClaims.claim_token,
+													decoded.claim_token,
+												),
+												eq(
+													ToolExecutionClaims.owner_instance_id,
+													metadata.instance_id,
+												),
+											),
+										)
+										.limit(1);
+
+									if (claim) {
+										yield* AbandonClaim(transaction, claim, now);
+									}
+								}),
+							),
+						);
+					}),
+				),
+				Effect.mapError(normalize_error),
+			);
+
 		const AbandonOwnedExecutions = Effect.gen(function* () {
 			const now = yield* metadata.Now;
-			const current = yield* DecodeDateTime(now, "Tool execution clock is invalid");
 
 			yield* RetrySqliteWrite(
 				database.client.transaction((transaction) =>
@@ -1272,40 +1588,7 @@ export const ToolExecutionRepositoryLive = Layer.effect(
 							.from(ToolExecutionClaims)
 							.where(eq(ToolExecutionClaims.owner_instance_id, metadata.instance_id));
 						for (const claim of claims) {
-							const row = yield* ReadRow(transaction, claim.invocation_id);
-
-							if (row.state !== "running") {
-								continue;
-							}
-
-							yield* EnsureLiveThread(transaction, row.thread_id);
-
-							const minimum = yield* DecodeDateTime(
-								claim.launch_started_at ?? claim.claimed_at,
-								"Tool execution lease is invalid",
-							);
-							const expires_at = DateTime.formatIso(
-								DateTime.add(
-									DateTime.toEpochMillis(current) >
-										DateTime.toEpochMillis(minimum)
-										? current
-										: minimum,
-									{ milliseconds: 1 },
-								),
-							);
-							yield* transaction
-								.update(ToolExecutionClaims)
-								.set({ lease_expires_at: expires_at })
-								.where(
-									and(
-										eq(ToolExecutionClaims.invocation_id, claim.invocation_id),
-										eq(ToolExecutionClaims.claim_token, claim.claim_token),
-										eq(
-											ToolExecutionClaims.owner_instance_id,
-											metadata.instance_id,
-										),
-									),
-								);
+							yield* AbandonClaim(transaction, claim, now);
 						}
 					}),
 				),
@@ -1313,8 +1596,10 @@ export const ToolExecutionRepositoryLive = Layer.effect(
 		}).pipe(Effect.mapError(normalize_error));
 
 		return {
+			AbandonExecution,
 			AbandonOwnedExecutions,
 			ActiveClaimsForThread,
+			BeginThreadQuiescence,
 			ClaimPending,
 			ClaimRecovery,
 			ListPending,
@@ -1326,6 +1611,7 @@ export const ToolExecutionRepositoryLive = Layer.effect(
 			RenewLease,
 			SettleCompleted,
 			SettleFailed,
+			ThreadQuiescencePending,
 		};
 	}),
 );

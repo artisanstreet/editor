@@ -20,6 +20,10 @@ import { CapabilityInvocationUpdatedEvent, EngineNativeActionObservedEvent } fro
 import {
 	DecideApprovalRequest,
 	DecideApprovalResult,
+	InvokeRequest,
+	InvokeResult,
+	ListEligibleRequest,
+	ListEligibleResult,
 	ToolApprovalQuery,
 	ToolApprovalQueryResult,
 	ToolApprovalUpdatedEvent,
@@ -1764,11 +1768,52 @@ export const ModelBehaviourRetryEnvelope = Schema.Struct({
 
 export type ModelBehaviourRetryEnvelope = typeof ModelBehaviourRetryEnvelope.Type;
 
+/** Requests the canonical tools eligible for one exact thread-owned engine run. */
+export const ToolListEligibleEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("tool.list_eligible"),
+	payload: ListEligibleRequest,
+	thread_id: Identifier,
+});
+
+export type ToolListEligibleEnvelope = typeof ToolListEligibleEnvelope.Type;
+
+/** Returns the source-safe canonical eligibility set for one engine run. */
+export const ToolListEligibleResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("tool.list_eligible.result"),
+	payload: ListEligibleResult,
+});
+
+export type ToolListEligibleResultEnvelope = typeof ToolListEligibleResultEnvelope.Type;
+
+/** Requests one exact-replay tool invocation within its owning thread. */
+export const ToolInvokeEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("tool.invoke"),
+	payload: InvokeRequest,
+	thread_id: Identifier,
+});
+
+export type ToolInvokeEnvelope = typeof ToolInvokeEnvelope.Type;
+
+/** Returns the source-safe invocation result, including a private result only for exact completed replay. */
+export const ToolInvokeResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("tool.invoke.result"),
+	payload: InvokeResult,
+});
+
+export type ToolInvokeResultEnvelope = typeof ToolInvokeResultEnvelope.Type;
+
 /** Requests one source-safe tool invocation projection within its owning thread. */
 export const ToolInvocationQueryEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
 	kind: Schema.Literal("tool.invocation.query"),
 	payload: ToolInvocationQuery,
+	thread_id: Identifier,
 });
 
 export type ToolInvocationQueryEnvelope = typeof ToolInvocationQueryEnvelope.Type;
@@ -1788,6 +1833,7 @@ export const ToolApprovalQueryEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
 	kind: Schema.Literal("tool.approval.query"),
 	payload: ToolApprovalQuery,
+	thread_id: Identifier,
 });
 
 export type ToolApprovalQueryEnvelope = typeof ToolApprovalQueryEnvelope.Type;
@@ -1807,6 +1853,7 @@ export const ToolApprovalDecideEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
 	kind: Schema.Literal("tool.approval.decide"),
 	payload: DecideApprovalRequest,
+	thread_id: Identifier,
 });
 
 export type ToolApprovalDecideEnvelope = typeof ToolApprovalDecideEnvelope.Type;
@@ -2127,6 +2174,8 @@ export const InboundControlEnvelope = Schema.Union([
 	ModelBehaviourUpdateEnvelope,
 	ModelBehaviourDriftResolutionEnvelope,
 	ModelBehaviourRetryEnvelope,
+	ToolListEligibleEnvelope,
+	ToolInvokeEnvelope,
 	ToolInvocationQueryEnvelope,
 	ToolApprovalQueryEnvelope,
 	ToolApprovalDecideEnvelope,
@@ -2169,6 +2218,8 @@ export const OutboundControlEnvelope = Schema.Union([
 	HostedGitMutationApprovalQueryResultEnvelope,
 	GlobalGuidanceQueryResultEnvelope,
 	ModelBehaviourQueryResultEnvelope,
+	ToolListEligibleResultEnvelope,
+	ToolInvokeResultEnvelope,
 	ToolInvocationQueryResultEnvelope,
 	ToolApprovalQueryResultEnvelope,
 	ToolApprovalDecideResultEnvelope,

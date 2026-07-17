@@ -2617,6 +2617,28 @@ export const ToolInvocationPrivate = sqliteTable(
 	],
 );
 
+/** Serializes per-thread execution admission and permanently fences quiesced Tool Control work. */
+export const ToolThreadDispatchState = sqliteTable(
+	"tool_thread_dispatch_state",
+	{
+		thread_id: text("thread_id")
+			.primaryKey()
+			.references(() => Threads.thread_id, { onDelete: "cascade" }),
+		admission_version: integer("admission_version").notNull().default(0),
+		quiesced_at: text("quiesced_at"),
+	},
+	(table) => [
+		check(
+			"tool_thread_dispatch_state_admission_version_check",
+			sql`${table.admission_version} >= 0`,
+		),
+		check(
+			"tool_thread_dispatch_state_quiesced_at_check",
+			sql`${table.quiesced_at} IS NULL OR (strftime('%Y-%m-%dT%H:%M:%fZ', ${table.quiesced_at}) IS ${table.quiesced_at} AND substr(${table.quiesced_at}, 12, 2) BETWEEN '00' AND '23')`,
+		),
+	],
+);
+
 /** Leases one tool invocation to an executing backend instance. */
 export const ToolExecutionClaims = sqliteTable(
 	"tool_execution_claims",
