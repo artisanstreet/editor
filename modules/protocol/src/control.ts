@@ -52,6 +52,7 @@ import {
 	HostedProjectCloneApprovalUpdatedEvent,
 	HostedProjectCloneRequest,
 } from "./hosted-project";
+import { MarketplaceInvocationEvent, MarketplaceLifecycleEvent } from "./marketplace";
 import {
 	HostedGitCheckFailureDetailQuery,
 	HostedGitCheckFailureDetailQueryResult,
@@ -1045,6 +1046,8 @@ export const EventPayload = Schema.Union([
 	EngineNativeActionObservedEvent,
 	ToolInvocationUpdatedEvent,
 	ToolApprovalUpdatedEvent,
+	MarketplaceLifecycleEvent,
+	MarketplaceInvocationEvent,
 ]);
 
 export type EventPayload = typeof EventPayload.Type;

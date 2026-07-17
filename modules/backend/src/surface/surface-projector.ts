@@ -544,6 +544,37 @@ function project_event(envelope: EventEnvelopeValue): ReadonlyArray<SurfaceItemV
 					? {}
 					: { workspace_id: payload.approval.context.workspace_id }),
 			});
+		case "marketplace.lifecycle.updated":
+			return item({
+				group: payload.entry_kind === "routine" ? "Routines" : "Capabilities",
+				kind: payload.entry_kind === "routine" ? "routine" : "capability",
+				label: payload.entry_kind === "routine" ? "Routine" : "MCP capability",
+				source: "marketplace",
+				state: payload.lifecycle,
+				summary:
+					payload.summary ??
+					(payload.entry_kind === "routine"
+						? "Routine updated."
+						: "MCP capability updated."),
+				surface_id:
+					payload.entry_kind === "routine"
+						? `surface:routine:${payload.entry_id}`
+						: `surface:marketplace-capability:${payload.entry_id}`,
+			});
+		case "marketplace.invocation.updated":
+			return item({
+				group: payload.entry_kind === "routine" ? "Routines" : "Capabilities",
+				kind: payload.entry_kind === "routine" ? "routine" : "capability",
+				label: payload.entry_kind === "routine" ? "Routine invocation" : "MCP invocation",
+				source: "marketplace",
+				state: payload.state,
+				summary:
+					payload.summary ??
+					(payload.entry_kind === "routine"
+						? "Routine invocation updated."
+						: "MCP invocation updated."),
+				surface_id: `surface:marketplace-invocation:${payload.invocation_id}`,
+			});
 		default: {
 			const exhaustive: never = payload;
 

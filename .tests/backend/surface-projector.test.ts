@@ -432,6 +432,24 @@ const tool_approval = {
 	updated_at: timestamp,
 };
 
+const marketplace_lifecycle = {
+	entry_id: "routine.release_notes",
+	entry_kind: "routine" as const,
+	lifecycle: "enabled" as const,
+	summary: "Release notes routine enabled.",
+	type: "marketplace.lifecycle.updated" as const,
+	updated_at: timestamp,
+};
+
+const marketplace_invocation = {
+	approval_required: true,
+	entry_id: "mcp.github",
+	entry_kind: "mcp" as const,
+	invocation_id: "marketplace_invoke_1",
+	state: "approval_required" as const,
+	type: "marketplace.invocation.updated" as const,
+};
+
 const event_fixtures = {
 	"agent_instance.renamed": {
 		expected: expected_surface({
@@ -717,6 +735,30 @@ const event_fixtures = {
 			text: "Which project should own this thread?",
 			type: "interaction.question",
 		},
+	},
+	"marketplace.invocation.updated": {
+		expected: expected_surface({
+			group: "Capabilities",
+			kind: "capability",
+			label: "MCP invocation",
+			source: "marketplace",
+			state: "approval_required",
+			summary: "MCP invocation updated.",
+			surface_id: "surface:marketplace-invocation:marketplace_invoke_1",
+		}),
+		payload: marketplace_invocation,
+	},
+	"marketplace.lifecycle.updated": {
+		expected: expected_surface({
+			group: "Routines",
+			kind: "routine",
+			label: "Routine",
+			source: "marketplace",
+			state: "enabled",
+			summary: "Release notes routine enabled.",
+			surface_id: "surface:routine:routine.release_notes",
+		}),
+		payload: marketplace_lifecycle,
 	},
 	"model_behaviour.provider.reconciled": {
 		expected: expected_surface({
