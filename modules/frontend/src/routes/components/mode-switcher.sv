@@ -1,6 +1,7 @@
 <script lang="ts" effect>
 	import { Effect } from "effect";
 	import { IconCode as CodeIcon, IconGitBranch as GitBranch, IconMessageCircle as MessageCircle } from "@tabler/icons-svelte";
+	import { Button } from "$lib/components/ui/button";
 
 	import type { EditorMode } from "./editor-fixtures";
 
@@ -14,15 +15,15 @@
 
 <div class="workspace-mode-switcher t-tabs" data-mode={mode} role="group" aria-label="Workspace mode">
 	<span class="t-tabs-pill" aria-hidden="true"></span>
-	<button class="t-tab" type="button" aria-label="Editor" aria-pressed={mode === "editor"} title="Editor" onclick={yield* SelectMode("editor")}>
+	<Button variant="ghost" size="icon-sm" class="t-tab" aria-label="Editor" aria-pressed={mode === "editor"} title="Editor" onclick={yield* SelectMode("editor")}>
 		<CodeIcon size={16} stroke={1.7} aria-hidden="true" />
-	</button>
-	<button class="t-tab" type="button" aria-label="Chat" aria-pressed={mode === "chat"} title="Chat" onclick={yield* SelectMode("chat")}>
+	</Button>
+	<Button variant="ghost" size="icon-sm" class="t-tab" aria-label="Chat" aria-pressed={mode === "chat"} title="Chat" onclick={yield* SelectMode("chat")}>
 		<MessageCircle size={16} stroke={1.7} aria-hidden="true" />
-	</button>
-	<button class="t-tab" type="button" aria-label="Orchestrator" aria-pressed={mode === "orchestrator"} title="Orchestrator" onclick={yield* SelectMode("orchestrator")}>
+	</Button>
+	<Button variant="ghost" size="icon-sm" class="t-tab" aria-label="Orchestrator" aria-pressed={mode === "orchestrator"} title="Orchestrator" onclick={yield* SelectMode("orchestrator")}>
 		<GitBranch size={16} stroke={1.7} aria-hidden="true" />
-	</button>
+	</Button>
 </div>
 
 <style>

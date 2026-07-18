@@ -5,6 +5,7 @@
 		DefaultShellPresentationState,
 		ShellPresentationPreferences,
 	} from "$lib/runtime/shell-presentation-preferences";
+	import { Button } from "$lib/components/ui/button";
 
 	import LeftPane from "./left-pane.sv";
 	import MainPane from "./main-pane.sv";
@@ -99,18 +100,18 @@
 
 	<main class="main-slot">
 		<div class="compact-pane-actions" aria-label="Open workspace panes">
-			<button class="pane-toggle desktop-left-toggle" type="button" aria-label="Expand thread navigation" onclick={yield* ExpandLeft}>
+			<Button variant="outline" size="icon-sm" class="pane-toggle desktop-left-toggle" aria-label="Expand thread navigation" onclick={yield* ExpandLeft}>
 				<PanelLeft size={18} stroke={1.7} aria-hidden="true" />
-			</button>
-			<button class="pane-toggle desktop-right-toggle" type="button" aria-label="Expand session pane" onclick={yield* ExpandRight}>
+			</Button>
+			<Button variant="outline" size="icon-sm" class="pane-toggle desktop-right-toggle" aria-label="Expand session pane" onclick={yield* ExpandRight}>
 				<PanelRight size={18} stroke={1.7} aria-hidden="true" />
-			</button>
-			<button class="pane-toggle responsive-left-toggle" type="button" aria-label="Open thread navigation" onclick={yield* OpenPane("left")}>
+			</Button>
+			<Button variant="outline" size="icon-sm" class="pane-toggle responsive-left-toggle" aria-label="Open thread navigation" onclick={yield* OpenPane("left")}>
 				<PanelLeft size={18} stroke={1.7} aria-hidden="true" />
-			</button>
-			<button class="pane-toggle responsive-right-toggle" type="button" aria-label="Open session pane" onclick={yield* OpenPane("right")}>
+			</Button>
+			<Button variant="outline" size="icon-sm" class="pane-toggle responsive-right-toggle" aria-label="Open session pane" onclick={yield* OpenPane("right")}>
 				<PanelRight size={18} stroke={1.7} aria-hidden="true" />
-			</button>
+			</Button>
 		</div>
 		<MainPane />
 	</main>
@@ -128,7 +129,7 @@
 	</div>
 
 	{#if left_open || right_open}
-		<button class="pane-backdrop" type="button" aria-label="Close open pane" onclick={yield* ClosePanes}></button>
+		<Button variant="ghost" class="pane-backdrop" aria-label="Close open pane" onclick={yield* ClosePanes}></Button>
 	{/if}
 </div>
 
