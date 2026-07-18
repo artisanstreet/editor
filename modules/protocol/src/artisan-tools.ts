@@ -1,7 +1,6 @@
 import { Schema } from "effect";
 
 import {
-	EnvironmentVariableName,
 	Identifier,
 	IsoDateTime,
 	JournalSequence,
@@ -21,6 +20,14 @@ import {
 } from "./workspace-changes";
 
 const text_encoder = new TextEncoder();
+
+const EnvironmentVariableName = Schema.String.check(
+	Schema.makeFilter<string>((name) =>
+		name.length === 0 || name.includes("=") || name.includes(String.fromCharCode(0))
+			? "Expected a non-empty environment variable name without equals or null"
+			: undefined,
+	),
+);
 
 const BoundedText = (maximum_bytes: number, label: string) =>
 	Schema.String.check(
