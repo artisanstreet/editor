@@ -10,6 +10,8 @@ import type {
 	CommandEnvelope,
 	EventEnvelope,
 	OrchestrationGraph,
+	OrchestrationGroupListSnapshot,
+	OrchestrationGroupSummary,
 } from "@artisan/protocol";
 
 export type AgentGraphCommand = Extract<
@@ -126,6 +128,14 @@ export interface AgentGraphRepositoryShape {
 		event: EventEnvelope,
 	) => Effect.Effect<void, AgentGraphError>;
 	readonly GetGraph: (group_id: string) => Effect.Effect<OrchestrationGraph, AgentGraphError>;
+	readonly ListGroups: (
+		thread_id: string,
+		include_terminal: boolean,
+	) => Effect.Effect<ReadonlyArray<OrchestrationGroupSummary>, AgentGraphError>;
+	readonly ListGroupsSnapshot: (
+		thread_id: string,
+		include_terminal: boolean,
+	) => Effect.Effect<OrchestrationGroupListSnapshot, AgentGraphError>;
 	readonly GetPendingRuns: () => Effect.Effect<ReadonlyArray<PendingAgentRun>, AgentGraphError>;
 	readonly ClaimRun: (
 		run_id: string,

@@ -145,11 +145,12 @@ export const FrontendContractRegistry: ReadonlyArray<FrontendContractEntry> = [
 	},
 	{
 		id: "main.transcript",
-		state: "fixture",
-		owner: "fixture",
+		state: "live",
+		owner: "artisan_client",
 		surface: "main",
 		pane: "chat",
-		reason: "Completed events exist, but no authoritative transcript or reload-safe history projection exists.",
+		reason: "The typed client exposes a bounded, safe transcript projection with explicit erased and unavailable states.",
+		contract_names: ["ArtisanClient.GetThreadTranscript", "ThreadTranscriptSnapshot"],
 	},
 	{
 		id: "main.chat-send",
@@ -231,11 +232,12 @@ export const FrontendContractRegistry: ReadonlyArray<FrontendContractEntry> = [
 	},
 	{
 		id: "main.orchestration-discovery",
-		state: "fixture",
-		owner: "fixture",
+		state: "live",
+		owner: "artisan_client",
 		surface: "main",
 		pane: "orchestrator",
-		reason: "A fresh renderer cannot discover a thread's existing graph IDs from a public projection.",
+		reason: "A fresh renderer can list a thread's active or historic orchestration groups without a known group id.",
+		contract_names: ["ArtisanClient.ListOrchestrationGroups"],
 	},
 	{
 		id: "main.file-discovery",

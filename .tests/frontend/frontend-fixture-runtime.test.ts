@@ -3,7 +3,7 @@ import { globSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { describe, expect, layer } from "@effect/vitest";
-import { Context, Effect, Layer, Schema } from "effect";
+import { Context, Effect, Layer, Schema, Stream } from "effect";
 
 import {
 	GlobalGuidanceSnapshot,
@@ -77,10 +77,12 @@ describe("frontend ArtisanClient fixture runtime", () => {
 						"GetGitWorkspace",
 						"GetModelBehaviour",
 						"GetOrchestrationGraph",
+						"GetThreadTranscript",
 						"GetThreadRetentionPolicy",
 						"GetThreadWork",
 						"GetWorkspaceChangeDiff",
 						"ListTerminals",
+						"ListOrchestrationGroups",
 						"ListThreads",
 						"ListWorkspaceChanges",
 						"OpenAsset",
@@ -97,7 +99,9 @@ describe("frontend ArtisanClient fixture runtime", () => {
 						"RollbackWorkspaceChange",
 						"SelectGlobalGuidance",
 						"SubscribeOrchestrationGraph",
+						"SubscribeOrchestrationGroups",
 						"SubscribeThreadList",
+						"SubscribeThreadTranscript",
 						"UpdateGlobalGuidance",
 						"UpdateModelBehaviour",
 						"UpdateThreadRetentionPolicy",
@@ -193,6 +197,44 @@ describe("frontend ArtisanClient fixture runtime", () => {
 	});
 
 	layer(FixtureArtisanClientLayer)((it) => {
+		it.effect("honors transcript pagination and orchestration terminal filters", () =>
+			Effect.gen(function* () {
+				const client = yield* ArtisanClient;
+				const before = yield* client.GetThreadTranscript({
+					before_journal_sequence: 47,
+					limit: 1,
+					thread_id: "thread-editor-shell",
+				});
+				const after = yield* client.GetThreadTranscript({
+					after_journal_sequence: 46,
+					limit: 1,
+					thread_id: "thread-editor-shell",
+				});
+				const active = yield* client.ListOrchestrationGroups(
+					"thread-editor-shell",
+					false,
+				);
+				const all = yield* client.ListOrchestrationGroups("thread-editor-shell", true);
+				const subscribed = yield* client.SubscribeOrchestrationGroups(
+					"thread-editor-shell",
+					false,
+				);
+				const updates = [...(yield* Stream.runCollect(subscribed))];
+
+				expect(before).toMatchObject({ status: "available", entries: [] });
+				expect(after).toMatchObject({
+					status: "available",
+					entries: [{ journal_sequence: 47 }],
+				});
+				expect(active.groups.map((group) => group.state)).toEqual(["running"]);
+				expect(all.groups.map((group) => group.state)).toEqual(["running", "complete"]);
+				expect(updates[0]).toMatchObject({
+					type: "snapshot",
+					snapshot: { groups: [{ state: "running" }] },
+				});
+			}),
+		);
+
 		it.effect("exposes deterministic workspace file and change operations", () =>
 			Effect.gen(function* () {
 				const client = yield* ArtisanClient;

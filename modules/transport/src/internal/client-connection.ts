@@ -364,8 +364,10 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 					case "git.workspace.query.result":
 					case "model_behaviour.query.result":
 					case "orchestration.graph.query.result":
+					case "orchestration.group.list.query.result":
 					case "terminal.list.query.result":
 					case "thread.list.query.result":
+					case "thread.transcript.query.result":
 					case "thread.retention.query.result":
 					case "thread.work.query.result":
 					case "workspace.file.read.query.result":
@@ -407,6 +409,10 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 					case "thread.list.remove":
 					case "orchestration.graph.snapshot":
 					case "orchestration.graph.patch":
+					case "thread.transcript.snapshot":
+					case "thread.transcript.append":
+					case "orchestration.group.list.snapshot":
+					case "orchestration.group.list.patch":
 						return handlers.subscriptions.HandleUpdate(envelope);
 					case "replay.complete":
 					case "subscription.stopped":

@@ -21,12 +21,16 @@ import type {
 	ModelBehaviourSnapshot,
 	ModelBehaviourUpdateRequest,
 	OrchestrationGraph,
+	OrchestrationGroupListSnapshot,
 	StreamCursor,
 	TerminalSession,
 	ThreadListItem,
 	ThreadRetentionPolicy,
 	ThreadWorkItem,
 	RawOrigin,
+	ThreadTranscriptQuery,
+	ThreadTranscriptSnapshot,
+	TranscriptEntry,
 	WorkspaceFileReadQuery,
 	WorkspaceFileReadQueryResult,
 	WorkspaceFileReplaceRequest,
@@ -224,6 +228,21 @@ export type ThreadListUpdate =
 			readonly type: "remove";
 	  };
 
+export type ThreadTranscriptUpdate =
+	| {
+			readonly type: "snapshot";
+			readonly journal_sequence: number;
+			readonly transcript: ThreadTranscriptSnapshot;
+	  }
+	| {
+			readonly type: "append";
+			readonly journal_sequence: number;
+			readonly entries: ReadonlyArray<TranscriptEntry>;
+	  };
+export type OrchestrationGroupListUpdate =
+	| { readonly type: "snapshot"; readonly snapshot: OrchestrationGroupListSnapshot }
+	| { readonly type: "patch"; readonly snapshot: OrchestrationGroupListSnapshot };
+
 /** Configures bounded client queues, reconnect timing, and request concurrency. */
 export interface ArtisanClientOptions {
 	readonly error_capacity?: number;
@@ -252,6 +271,13 @@ export class ArtisanClient extends Context.Service<
 		readonly GetOrchestrationGraph: (
 			group_id: string,
 		) => Effect.Effect<OrchestrationGraph, ArtisanClientError>;
+		readonly GetThreadTranscript: (
+			input: ThreadTranscriptQuery,
+		) => Effect.Effect<ThreadTranscriptSnapshot, ArtisanClientError>;
+		readonly ListOrchestrationGroups: (
+			thread_id: string,
+			include_terminal: boolean,
+		) => Effect.Effect<OrchestrationGroupListSnapshot, ArtisanClientError>;
 		readonly GetGlobalGuidance: Effect.Effect<GlobalGuidanceSnapshot, ArtisanClientError>;
 		readonly GetGitDiff: (
 			input: ArtisanGitDiffInput,
@@ -301,6 +327,21 @@ export class ArtisanClient extends Context.Service<
 			group_id: string,
 		) => Effect.Effect<
 			Stream.Stream<OrchestrationGraphUpdate, ArtisanClientError>,
+			ArtisanClientError,
+			Scope.Scope
+		>;
+		readonly SubscribeThreadTranscript: (
+			thread_id: string,
+		) => Effect.Effect<
+			Stream.Stream<ThreadTranscriptUpdate, ArtisanClientError>,
+			ArtisanClientError,
+			Scope.Scope
+		>;
+		readonly SubscribeOrchestrationGroups: (
+			thread_id: string,
+			include_terminal: boolean,
+		) => Effect.Effect<
+			Stream.Stream<OrchestrationGroupListUpdate, ArtisanClientError>,
 			ArtisanClientError,
 			Scope.Scope
 		>;

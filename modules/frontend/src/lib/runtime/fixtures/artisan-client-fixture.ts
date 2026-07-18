@@ -6,10 +6,12 @@ import type {
 	GitWorkspaceQueryResult,
 	ModelBehaviourSnapshot,
 	OrchestrationGraph,
+	OrchestrationGroupListSnapshot,
 	TerminalSession,
 	ThreadListItem,
 	ThreadRetentionPolicy,
 	ThreadWorkItem,
+	ThreadTranscriptSnapshot,
 	WorkspaceChange,
 	WorkspaceChangeDiffQueryResult,
 	WorkspaceFileReadQueryResult,
@@ -32,6 +34,8 @@ export interface FixtureArtisanClientData {
 	readonly git_workspace: GitWorkspaceQueryResult;
 	readonly model_behaviour: ModelBehaviourSnapshot;
 	readonly orchestration_graph: OrchestrationGraph;
+	readonly orchestration_groups: OrchestrationGroupListSnapshot;
+	readonly transcript: ThreadTranscriptSnapshot;
 	readonly terminal_output: Readonly<Record<string, Uint8Array>>;
 	readonly terminals: ReadonlyArray<TerminalSession>;
 	readonly thread_retention_policy: ThreadRetentionPolicy;
@@ -215,6 +219,47 @@ export const fixture_artisan_client_data = {
 		},
 		joins: [],
 		journal_sequence: 48,
+	},
+	orchestration_groups: {
+		groups: [
+			{
+				coordinator_agent_id: "agent-sol",
+				created_at: fixture_timestamp,
+				group_id: "group-editor-shell",
+				max_concurrency: 4,
+				state: "running",
+				thread_id: "thread-editor-shell",
+				updated_at: fixture_timestamp,
+				version: 2,
+			},
+			{
+				coordinator_agent_id: "agent-sol",
+				created_at: fixture_timestamp,
+				group_id: "group-editor-shell-complete",
+				max_concurrency: 2,
+				state: "complete",
+				thread_id: "thread-editor-shell",
+				updated_at: fixture_timestamp,
+				version: 1,
+			},
+		],
+		journal_sequence: 48,
+	},
+	transcript: {
+		status: "available",
+		journal_sequence: 48,
+		entries: [
+			{
+				event_id: "event-fixture-message",
+				journal_sequence: 47,
+				occurred_at: fixture_timestamp,
+				payload: {
+					type: "assistant.message_completed",
+					message_id: "message-fixture",
+					text: "The editor shell fixture is ready.",
+				},
+			},
+		],
 	},
 	terminal_output: {
 		"terminal-editor-shell": new Uint8Array([
@@ -436,6 +481,48 @@ export const FixtureArtisanClientService = {
 
 			return fixture_artisan_client_data.orchestration_graph;
 		}),
+	GetThreadTranscript: (input) =>
+		Effect.gen(function* () {
+			if (input.thread_id !== "thread-editor-shell")
+				return yield* FixtureFailure(`Unknown fixture thread: ${input.thread_id}`);
+			const transcript = fixture_artisan_client_data.transcript;
+			if (transcript.status !== "available") return transcript;
+			const limit = input.limit ?? 100;
+			const matching = transcript.entries.filter(
+				(entry) =>
+					(input.after_journal_sequence === undefined ||
+						entry.journal_sequence > input.after_journal_sequence) &&
+					(input.before_journal_sequence === undefined ||
+						entry.journal_sequence < input.before_journal_sequence),
+			);
+			const entries =
+				input.after_journal_sequence === undefined
+					? matching.slice(-limit)
+					: matching.slice(0, limit);
+			return {
+				...transcript,
+				entries,
+				...(entries.length === limit && entries[0] !== undefined
+					? { next_before_journal_sequence: entries[0].journal_sequence }
+					: {}),
+			};
+		}),
+	ListOrchestrationGroups: (thread_id, include_terminal) =>
+		Effect.gen(function* () {
+			if (thread_id !== "thread-editor-shell")
+				return {
+					groups: [],
+					journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+				};
+			return {
+				...fixture_artisan_client_data.orchestration_groups,
+				groups: fixture_artisan_client_data.orchestration_groups.groups.filter(
+					(group) =>
+						include_terminal ||
+						!["summarized", "stopped", "failed", "complete"].includes(group.state),
+				),
+			};
+		}),
 	GetThreadRetentionPolicy: Effect.gen(function* () {
 		return yield* Effect.succeed(fixture_artisan_client_data.thread_retention_policy);
 	}),
@@ -582,6 +669,32 @@ export const FixtureArtisanClientService = {
 				},
 			]);
 		}),
+	SubscribeOrchestrationGroups: (thread_id, include_terminal) =>
+		Effect.succeed(
+			Stream.fromIterable([
+				{
+					type: "snapshot" as const,
+					snapshot:
+						thread_id === "thread-editor-shell"
+							? {
+									...fixture_artisan_client_data.orchestration_groups,
+									groups:
+										fixture_artisan_client_data.orchestration_groups.groups.filter(
+											(group) =>
+												include_terminal ||
+												!["summarized", "stopped", "failed", "complete"].includes(
+													group.state,
+												),
+										),
+								}
+							: {
+									groups: [],
+									journal_sequence:
+										fixture_artisan_client_data.cursors.last_journal_sequence,
+								},
+				},
+			]),
+		),
 	SubscribeThreadList: Effect.gen(function* () {
 		return yield* Effect.succeed(
 			Stream.fromIterable([
@@ -593,6 +706,24 @@ export const FixtureArtisanClientService = {
 			]),
 		);
 	}),
+	SubscribeThreadTranscript: (thread_id) =>
+		Effect.succeed(
+			Stream.fromIterable([
+				{
+					type: "snapshot" as const,
+					journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+					transcript:
+						thread_id === "thread-editor-shell"
+							? fixture_artisan_client_data.transcript
+							: {
+									status: "unavailable" as const,
+									journal_sequence:
+										fixture_artisan_client_data.cursors.last_journal_sequence,
+									entries: [],
+								},
+				},
+			]),
+		),
 	UpdateGlobalGuidance: (input) =>
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-guidance-update");

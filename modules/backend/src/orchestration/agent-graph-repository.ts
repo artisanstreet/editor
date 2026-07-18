@@ -75,6 +75,8 @@ export const AgentGraphRepositoryLive = Layer.effect(
 			FailRunStart: run_lifecycle.fail_run_start,
 			FinalizeControl: control_commands.finalize_control,
 			GetGraph: query.get_graph,
+			ListGroups: query.list_groups,
+			ListGroupsSnapshot: query.list_groups_snapshot,
 			GetPendingRuns: query.get_pending_runs,
 			ReadCommandEvents: control_commands.read_command_events,
 			RecordClosed: run_lifecycle.record_closed,

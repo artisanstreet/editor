@@ -18,6 +18,7 @@ import {
 	OrchestrationIntake,
 	OrchestrationRawObservations,
 	OrchestrationRuns,
+	SurfaceItems,
 	Threads,
 } from "../../modules/backend/src/persistence/schema";
 import { Database } from "../../modules/backend/src/persistence/database";
@@ -90,6 +91,65 @@ afterEach(async () => {
 });
 
 describe("orchestration repository hardening", () => {
+	it("projects an agent message delta while retaining its raw observation", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			migrations_path,
+		});
+		try {
+			await runtime.runPromise(SetupThread("thread_1"));
+			const accepted = await runtime.runPromise(
+				Accept(
+					make_command("send_1", "thread_1", {
+						engine_id: "engine_1",
+						text: "Start",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const repository = yield* OrchestrationRepository;
+
+					return yield* repository.RecordObservation({
+						_tag: "agent_message_delta",
+						artisan_run_id: accepted.run_id,
+						delta: "Partial response",
+						observation_id: "delta_1",
+						raw: {
+							engine_id: "engine_1",
+							frame: { text: "Partial response" },
+							transport: "fixture",
+						},
+						sequence: 1,
+						turn_id: "turn_1",
+					});
+				}),
+			);
+			const [raw, surfaces] = await runtime.runPromise(
+				Effect.all([
+					Read((database) => database.select().from(OrchestrationRawObservations)),
+					Read((database) => database.select().from(SurfaceItems)),
+				]),
+			);
+
+			expect(result).toEqual([]);
+			expect(raw).toEqual([expect.objectContaining({ observation_id: "delta_1" })]);
+			expect(surfaces).toEqual([
+				expect.objectContaining({
+					category: "work",
+					kind: "message",
+					observation_id: "delta_1",
+					run_id: accepted.run_id,
+					thread_id: "thread_1",
+				}),
+			]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("persists a pre-execution intake question without opening a run outbox", async () => {
 		const runtime = make_backend_runtime({
 			database_path: await make_database_path(),
