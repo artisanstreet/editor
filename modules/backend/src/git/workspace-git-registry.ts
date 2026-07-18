@@ -1,5 +1,5 @@
 import { NodeFileSystem } from "@effect/platform-node-shared";
-import { Context, Data, Effect, FileSystem, Layer, Schema } from "effect";
+import { Context, Data, Effect, FileSystem, Layer, Option, Schema } from "effect";
 
 import {
 	GitCommandExecutor,
@@ -111,6 +111,8 @@ function root_changed(workspace_id: string, cause?: unknown) {
 interface CanonicalRegistration {
 	readonly canonical_root: string;
 	readonly configured_root: string;
+	readonly root_device: number;
+	readonly root_inode: number | undefined;
 	readonly workspace_id: string;
 }
 
@@ -148,6 +150,8 @@ export function make_workspace_git_registry_layer(registrations: ReadonlyArray<u
 					return {
 						canonical_root,
 						configured_root: registration.root,
+						root_device: metadata.dev,
+						root_inode: Option.getOrUndefined(metadata.ino),
 						workspace_id: registration.workspace_id,
 					} satisfies CanonicalRegistration;
 				}).pipe(
@@ -157,10 +161,18 @@ export function make_workspace_git_registry_layer(registrations: ReadonlyArray<u
 				),
 			);
 
-			if (
-				new Set(canonical.map((registration) => registration.canonical_root)).size !==
-				canonical.length
-			) {
+			const has_aliased_root = canonical.some((registration, index) =>
+				canonical
+					.slice(index + 1)
+					.some((candidate) =>
+						registration.root_inode === undefined || candidate.root_inode === undefined
+							? registration.canonical_root === candidate.canonical_root
+							: registration.root_device === candidate.root_device &&
+								registration.root_inode === candidate.root_inode,
+					),
+			);
+
+			if (has_aliased_root) {
 				return yield* Effect.fail(registration_error("aliased_root"));
 			}
 
@@ -171,10 +183,14 @@ export function make_workspace_git_registry_layer(registrations: ReadonlyArray<u
 				Effect.gen(function* () {
 					const current_root = yield* file_system.realPath(registration.configured_root);
 					const metadata = yield* file_system.stat(current_root);
+					const inode = Option.getOrUndefined(metadata.ino);
 
 					if (
 						metadata.type !== "Directory" ||
-						current_root !== registration.canonical_root
+						metadata.dev !== registration.root_device ||
+						(inode === undefined || registration.root_inode === undefined
+							? current_root !== registration.canonical_root
+							: inode !== registration.root_inode)
 					) {
 						return yield* Effect.fail(root_changed(registration.workspace_id));
 					}
@@ -196,10 +212,19 @@ export function make_workspace_git_registry_layer(registrations: ReadonlyArray<u
 
 				const git: WorkspaceGit = {
 					IsCurrentRoot: (path) =>
-						file_system.realPath(path).pipe(
-							Effect.map(
-								(canonical_path) => canonical_path === registration.canonical_root,
-							),
+						Effect.gen(function* () {
+							const canonical_path = yield* file_system.realPath(path);
+							const metadata = yield* file_system.stat(canonical_path);
+							const inode = Option.getOrUndefined(metadata.ino);
+
+							return (
+								metadata.type === "Directory" &&
+								metadata.dev === registration.root_device &&
+								(inode === undefined || registration.root_inode === undefined
+									? canonical_path === registration.canonical_root
+									: inode === registration.root_inode)
+							);
+						}).pipe(
 							/** A missing or inaccessible non-current inventory path is not root authority. */
 							Effect.catch(() => Effect.succeed(false)),
 						),
