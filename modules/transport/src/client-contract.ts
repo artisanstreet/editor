@@ -2,6 +2,22 @@ import { Context, Data, Effect, Option, Scope, Stream } from "effect";
 
 import type {
 	CommandPayload,
+	CapabilityConnectPreview,
+	CapabilityConnectPreviewRequest,
+	CapabilityDetail,
+	CapabilityDriftResolutionRequest,
+	CapabilityDriftOverwriteDecision,
+	CapabilityDriftOverwriteRequest,
+	CapabilityInvocationApprovalDecision,
+	CapabilityInvocationApprovalRequest,
+	CapabilityInvocationMetadata,
+	CapabilityInvocationRequest,
+	CapabilityOAuthCompleteRequest,
+	CapabilityOAuthBeginResult,
+	CapabilityOAuthRequest,
+	CapabilityOAuthTokenStatus,
+	CapabilityRegistrySnapshot,
+	CapabilityHealthRequest,
 	EventEnvelope,
 	GlobalGuidanceDriftResolutionRequest,
 	GlobalGuidanceProvider,
@@ -20,6 +36,12 @@ import type {
 	ModelBehaviourRetryRequest,
 	ModelBehaviourSnapshot,
 	ModelBehaviourUpdateRequest,
+	MarketplaceApprovalDecision,
+	MarketplaceBrowseQuery,
+	MarketplaceSyncRequest,
+	NpxSkillsDiscoveryRequest,
+	NpxSkillsDiscoveryResult,
+	NpxSkillsImportRequest,
 	OrchestrationGraph,
 	OrchestrationGroupListSnapshot,
 	PreviewAssetId,
@@ -51,6 +73,17 @@ import type {
 	ThreadTranscriptSnapshot,
 	ThreadSessionSnapshot,
 	TranscriptEntry,
+	RoutineDetail,
+	RoutineDriftResolutionRequest,
+	RoutineDriftOverwriteDecision,
+	RoutineDriftOverwriteRequest,
+	RoutineInstallPreview,
+	RoutineInstallPreviewRequest,
+	RoutineInstallRequest,
+	RoutineInvocationMetadata,
+	RoutineInvocationRequest,
+	RoutineRegistrySnapshot,
+	RoutineRollbackRequest,
 	WorkspaceFileReadQuery,
 	WorkspaceFileReadQueryResult,
 	WorkspaceFileReplaceRequest,
@@ -305,6 +338,136 @@ export interface ArtisanModelBehaviourRetryInput extends ModelBehaviourRetryRequ
 	readonly command_id?: string;
 }
 
+/** Supplies one progressive Marketplace category browse or search filter. */
+export interface ArtisanMarketplaceBrowseInput extends MarketplaceBrowseQuery {}
+
+/** Selects one scope-bound routine without leaking registry internals. */
+export interface ArtisanRoutineDetailInput {
+	readonly routine_id: string;
+	readonly scope: RoutineDetail["scope"];
+}
+
+/** Binds a routine installation request to its inspected source and scope. */
+export interface ArtisanRoutineInstallInput extends RoutineInstallRequest {
+	readonly command_id?: string;
+}
+
+/** Resolves the exact inspected routine installation approval. */
+export interface ArtisanRoutineApprovalInput extends MarketplaceApprovalDecision {
+	readonly command_id?: string;
+}
+
+/** Carries one routine lifecycle id and an optional durable retry id. */
+export interface ArtisanRoutineIdInput {
+	readonly command_id?: string;
+	readonly routine_id: string;
+	readonly scope: RoutineDetail["scope"];
+}
+
+/** Syncs one routine mirror through an explicit canonical engine target. */
+export interface ArtisanRoutineSyncInput extends MarketplaceSyncRequest {
+	readonly command_id?: string;
+}
+
+/** Resolves one observed routine provider drift. */
+export interface ArtisanRoutineDriftInput extends RoutineDriftResolutionRequest {
+	readonly command_id?: string;
+}
+
+export interface ArtisanRoutineDriftOverwriteRequestInput extends RoutineDriftOverwriteRequest {
+	readonly command_id?: string;
+}
+
+export interface ArtisanRoutineDriftOverwriteDecisionInput extends RoutineDriftOverwriteDecision {
+	readonly command_id?: string;
+}
+
+/** Invokes one eligible routine and returns only ledger-safe metadata. */
+export interface ArtisanRoutineInvokeInput extends RoutineInvocationRequest {}
+
+/** Rolls back one routine installation snapshot. */
+export interface ArtisanRoutineRollbackInput extends RoutineRollbackRequest {
+	readonly command_id?: string;
+}
+
+/** Inspects npx-skills candidates without treating their format as canonical. */
+export interface ArtisanNpxSkillsDiscoverInput extends NpxSkillsDiscoveryRequest {}
+
+/** Requests canonical import of one previously inspected npx-skills candidate. */
+export interface ArtisanNpxSkillsImportInput extends NpxSkillsImportRequest {
+	readonly command_id?: string;
+}
+
+/** Selects one scope-bound MCP capability without exposing connection handles. */
+export interface ArtisanCapabilityDetailInput {
+	readonly capability_id: string;
+	readonly scope: CapabilityDetail["scope"];
+}
+
+/** Binds a capability connection request to an inspected source and transport. */
+export interface ArtisanCapabilityConnectInput extends CapabilityConnectPreviewRequest {
+	readonly approval_id: string;
+	readonly command_id?: string;
+	readonly preview_fingerprint: string;
+	readonly requested_by: "agent" | "user";
+}
+
+/** Resolves the exact inspected MCP connection approval. */
+export interface ArtisanCapabilityApprovalInput extends MarketplaceApprovalDecision {
+	readonly command_id?: string;
+}
+
+/** Carries one capability lifecycle id and an optional durable retry id. */
+export interface ArtisanCapabilityIdInput {
+	readonly capability_id: string;
+	readonly command_id?: string;
+	readonly scope: CapabilityDetail["scope"];
+}
+
+/** Runs one explicit health check without exposing a socket or process. */
+export interface ArtisanCapabilityHealthInput extends CapabilityHealthRequest {
+	readonly command_id?: string;
+}
+
+/** Syncs one capability mirror through an explicit canonical engine target. */
+export interface ArtisanCapabilitySyncInput extends MarketplaceSyncRequest {
+	readonly command_id?: string;
+}
+
+/** Resolves one observed capability provider drift. */
+export interface ArtisanCapabilityDriftInput extends CapabilityDriftResolutionRequest {
+	readonly command_id?: string;
+}
+
+export interface ArtisanCapabilityDriftOverwriteRequestInput extends CapabilityDriftOverwriteRequest {
+	readonly command_id?: string;
+}
+
+export interface ArtisanCapabilityDriftOverwriteDecisionInput extends CapabilityDriftOverwriteDecision {
+	readonly command_id?: string;
+}
+
+/** Invokes one declared MCP tool and returns only ledger-safe metadata. */
+export interface ArtisanCapabilityInvokeInput extends CapabilityInvocationRequest {}
+
+export interface ArtisanCapabilityInvocationRequestInput extends CapabilityInvocationApprovalRequest {
+	readonly command_id?: string;
+}
+
+export interface ArtisanCapabilityInvocationDecisionInput extends CapabilityInvocationApprovalDecision {
+	readonly command_id?: string;
+}
+
+/** Completes OAuth only through an opaque callback reference. */
+export interface ArtisanCapabilityOAuthCompleteInput extends CapabilityOAuthCompleteRequest {
+	readonly command_id?: string;
+}
+
+/** Starts an OAuth lifecycle action for one capability without exposing token material. */
+export interface ArtisanCapabilityOAuthInput extends CapabilityOAuthRequest {
+	readonly command_id?: string;
+}
+
 /** Exposes the last event positions applied before an ACK or reconnect hello. */
 export interface ArtisanClientCursors {
 	readonly event_cursors: ReadonlyArray<StreamCursor>;
@@ -437,6 +600,15 @@ export class ArtisanClient extends Context.Service<
 		readonly GetPreviewTarget: (
 			input: ArtisanPreviewTargetInput,
 		) => Effect.Effect<PreviewTarget, ArtisanClientError>;
+		readonly GetRoutineDetail: (
+			input: ArtisanRoutineDetailInput,
+		) => Effect.Effect<RoutineDetail, ArtisanClientError>;
+		readonly GetCapabilityDetail: (
+			input: ArtisanCapabilityDetailInput,
+		) => Effect.Effect<CapabilityDetail, ArtisanClientError>;
+		readonly GetCapabilityOAuthStatus: (
+			input: ArtisanCapabilityOAuthInput,
+		) => Effect.Effect<CapabilityOAuthTokenStatus, ArtisanClientError>;
 		readonly GetThreadRetentionPolicy: Effect.Effect<ThreadRetentionPolicy, ArtisanClientError>;
 		readonly GetThreadWork: (
 			thread_id: string,
@@ -449,6 +621,12 @@ export class ArtisanClient extends Context.Service<
 		readonly ListPreviewTargets: (
 			input?: PreviewTargetListQuery,
 		) => Effect.Effect<ReadonlyArray<PreviewTarget>, ArtisanClientError>;
+		readonly ListRoutines: (
+			input: ArtisanMarketplaceBrowseInput,
+		) => Effect.Effect<RoutineRegistrySnapshot, ArtisanClientError>;
+		readonly ListCapabilities: (
+			input: ArtisanMarketplaceBrowseInput,
+		) => Effect.Effect<CapabilityRegistrySnapshot, ArtisanClientError>;
 		readonly ListWorkspaceChanges: (
 			input: ArtisanWorkspaceChangeListInput,
 		) => Effect.Effect<WorkspaceChangeListQueryResult, ArtisanClientError>;
@@ -578,6 +756,117 @@ export class ArtisanClient extends Context.Service<
 		readonly SetPreviewTargetState: (
 			input: ArtisanPreviewTargetStateInput,
 		) => Effect.Effect<PreviewTarget, ArtisanClientError>;
+		readonly PreviewRoutineInstall: (
+			input: RoutineInstallPreviewRequest,
+		) => Effect.Effect<RoutineInstallPreview, ArtisanClientError>;
+		readonly RequestRoutineInstall: (
+			input: ArtisanRoutineInstallInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly DecideRoutineInstall: (
+			input: ArtisanRoutineApprovalInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly EnableRoutine: (
+			input: ArtisanRoutineIdInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly DisableRoutine: (
+			input: ArtisanRoutineIdInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RemoveRoutine: (
+			input: ArtisanRoutineIdInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RollbackRoutine: (
+			input: ArtisanRoutineRollbackInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly SyncRoutine: (
+			input: ArtisanRoutineSyncInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly ResolveRoutineDrift: (
+			input: ArtisanRoutineDriftInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RequestRoutineDriftOverwrite: (
+			input: ArtisanRoutineDriftOverwriteRequestInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly DecideRoutineDriftOverwrite: (
+			input: ArtisanRoutineDriftOverwriteDecisionInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly InvokeRoutine: (
+			input: ArtisanRoutineInvokeInput,
+		) => Effect.Effect<RoutineInvocationMetadata, ArtisanClientError>;
+		readonly DiscoverNpxSkills: (
+			input: ArtisanNpxSkillsDiscoverInput,
+		) => Effect.Effect<NpxSkillsDiscoveryResult, ArtisanClientError>;
+		readonly ImportNpxSkills: (
+			input: ArtisanNpxSkillsImportInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly PreviewCapabilityConnect: (
+			input: CapabilityConnectPreviewRequest,
+		) => Effect.Effect<CapabilityConnectPreview, ArtisanClientError>;
+		readonly RequestCapabilityConnect: (
+			input: ArtisanCapabilityConnectInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly DecideCapabilityConnect: (
+			input: ArtisanCapabilityApprovalInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly StartCapability: (
+			input: ArtisanCapabilityIdInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly ReconnectCapability: (
+			input: ArtisanCapabilityIdInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly CheckCapabilityHealth: (
+			input: ArtisanCapabilityHealthInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly DisconnectCapability: (
+			input: ArtisanCapabilityIdInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RestartCapability: (
+			input: ArtisanCapabilityIdInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly UninstallCapability: (
+			input: ArtisanCapabilityIdInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly EnableCapability: (
+			input: ArtisanCapabilityIdInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly DisableCapability: (
+			input: ArtisanCapabilityIdInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RemoveCapability: (
+			input: ArtisanCapabilityIdInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly SyncCapability: (
+			input: ArtisanCapabilitySyncInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly ResolveCapabilityDrift: (
+			input: ArtisanCapabilityDriftInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RequestCapabilityDriftOverwrite: (
+			input: ArtisanCapabilityDriftOverwriteRequestInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly DecideCapabilityDriftOverwrite: (
+			input: ArtisanCapabilityDriftOverwriteDecisionInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RequestCapabilityInvocation: (
+			input: ArtisanCapabilityInvocationRequestInput,
+		) => Effect.Effect<CapabilityInvocationMetadata, ArtisanClientError>;
+		readonly DecideCapabilityInvocation: (
+			input: ArtisanCapabilityInvocationDecisionInput,
+		) => Effect.Effect<CapabilityInvocationMetadata, ArtisanClientError>;
+		readonly InvokeCapability: (
+			input: ArtisanCapabilityInvokeInput,
+		) => Effect.Effect<CapabilityInvocationMetadata, ArtisanClientError>;
+		readonly BeginCapabilityOAuth: (
+			input: ArtisanCapabilityOAuthInput,
+		) => Effect.Effect<CapabilityOAuthBeginResult, ArtisanClientError>;
+		readonly CompleteCapabilityOAuth: (
+			input: ArtisanCapabilityOAuthCompleteInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RefreshCapabilityOAuth: (
+			input: ArtisanCapabilityOAuthInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RevokeCapabilityOAuth: (
+			input: ArtisanCapabilityOAuthInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly RetryGlobalGuidanceSync: (
 			input: ArtisanGlobalGuidanceRetryInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;

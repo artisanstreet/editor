@@ -554,9 +554,14 @@ export {
 	type OAuthTokenStatus,
 } from "./marketplace/capabilities/oauth";
 export {
+	CapabilityTransportRegistry,
+	CapabilityTransportRegistryLive,
 	EmptyMcpTransportLive,
+	EmptyCapabilityTransportRegistryLive,
+	make_capability_transport_registry_layer,
 	McpTransport,
 	McpTransportError,
+	type CapabilityTransportConnector,
 	type McpClientSession,
 	type McpHealth,
 	type McpInitialize,
@@ -575,7 +580,58 @@ export {
 	HttpMcpDriver,
 	make_http_mcp_transport_layer,
 	type HttpMcpEndpoint,
+	type HttpMcpEndpointPolicy,
+	inspect_http_mcp_endpoint,
 } from "./marketplace/capabilities/http-transport";
+export {
+	CapabilityRepository,
+	CapabilityRepositoryError,
+	CapabilityRepositoryLive,
+} from "./marketplace/capabilities/capability-repository";
+export {
+	CapabilityOAuthLifecycle,
+	CapabilityOAuthLifecycleLive,
+	CapabilityService,
+	CapabilityServiceError,
+	CapabilityServiceLive,
+} from "./marketplace/capabilities/capability-service";
+export {
+	CapabilityMirrorService,
+	CapabilityMirrorServiceLive,
+	CapabilityProviderMirror,
+	CapabilityProviderMirrorError,
+	EmptyCapabilityProviderMirrorLive,
+} from "./marketplace/capabilities/provider-mirrors";
+export {
+	EmptyRoutineMirrorRegistryLive,
+	NpxSkillsAdapter,
+	RoutineInstaller,
+	RoutineInstallerError,
+	RoutineInspectorError,
+	RoutineMirrorRegistry,
+	RoutineSourceInspector,
+	type RoutineInspection,
+	type RoutineInstallReceipt,
+	type RoutineMirrorAdapter,
+} from "./marketplace/routines/routine-adapters";
+export {
+	RoutineRepository,
+	RoutineRepositoryError,
+	RoutineRepositoryLive,
+} from "./marketplace/routines/routine-repository";
+export {
+	RoutineService,
+	RoutineServiceError,
+	RoutineServiceLive,
+} from "./marketplace/routines/routine-service";
+export {
+	DeterministicRoutineInstallerTestLive,
+	make_local_routine_installer_layer,
+	make_local_routine_source_inspector_layer,
+	make_npx_skills_process_adapter_layer,
+	type LocalRoutineInspectorOptions,
+	type NpxSkillsProcessOptions,
+} from "./marketplace/routines/production-routine-adapters";
 export {
 	make_backend_layer,
 	make_backend_runtime,

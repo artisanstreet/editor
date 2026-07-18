@@ -7,6 +7,32 @@ import {
 	type ArtisanToolExecuteEnvelope,
 	type ArtisanToolInvocationListQueryEnvelope,
 	type ArtisanToolRegistryListQueryEnvelope,
+	type CapabilityApprovalDecisionEnvelope,
+	type CapabilityConnectPreviewEnvelope,
+	type CapabilityConnectRequestEnvelope,
+	type CapabilityDetailQueryEnvelope,
+	type CapabilityDisableEnvelope,
+	type CapabilityDisconnectEnvelope,
+	type CapabilityDriftResolutionEnvelope,
+	type CapabilityDriftOverwriteDecisionEnvelope,
+	type CapabilityDriftOverwriteRequestEnvelope,
+	type CapabilityEnableEnvelope,
+	type CapabilityHealthEnvelope,
+	type CapabilityInvokeEnvelope,
+	type CapabilityInvocationApprovalDecisionEnvelope,
+	type CapabilityInvocationApprovalRequestEnvelope,
+	type CapabilityOAuthBeginEnvelope,
+	type CapabilityOAuthCompleteEnvelope,
+	type CapabilityOAuthRefreshEnvelope,
+	type CapabilityOAuthRevokeEnvelope,
+	type CapabilityOAuthTokenStatusEnvelope,
+	type CapabilityReconnectEnvelope,
+	type CapabilityRegistryQueryEnvelope,
+	type CapabilityRemoveEnvelope,
+	type CapabilityRestartEnvelope,
+	type CapabilityStartEnvelope,
+	type CapabilitySyncEnvelope,
+	type CapabilityUninstallEnvelope,
 	type GitDiffQueryEnvelope,
 	type GitIndexStageRequestEnvelope,
 	type GitIndexUnstageRequestEnvelope,
@@ -53,6 +79,24 @@ import {
 	type ThreadWorkQueryEnvelope,
 	type ThreadTranscriptQueryEnvelope,
 	type ThreadSessionQueryEnvelope,
+	type NpxSkillsDiscoverEnvelope,
+	type NpxSkillsImportEnvelope,
+	type RoutineApprovalDecisionEnvelope,
+	type RoutineDetailQueryEnvelope,
+	type RoutineDisableEnvelope,
+	type RoutineDriftResolutionEnvelope,
+	type RoutineDriftOverwriteDecisionEnvelope,
+	type RoutineDriftOverwriteRequestEnvelope,
+	type RoutineEnableEnvelope,
+	type RoutineInstallPreviewEnvelope,
+	type RoutineInstallRequestEnvelope,
+	type RoutineInvokeEnvelope,
+	type RoutineRegistryQueryEnvelope,
+	type RoutineRemoveEnvelope,
+	type RoutineRollbackEnvelope,
+	type RoutineSyncEnvelope,
+	type RoutineInstallPreviewRequest,
+	type CapabilityConnectPreviewRequest,
 } from "@artisan/protocol";
 
 import {
@@ -93,6 +137,33 @@ import {
 	type ArtisanWorkspaceLanguageCapabilitiesInput,
 	type ArtisanWorkspaceFileReplaceInput,
 	type ArtisanThreadRetentionUpdateInput,
+	type ArtisanMarketplaceBrowseInput,
+	type ArtisanRoutineDetailInput,
+	type ArtisanRoutineInstallInput,
+	type ArtisanRoutineApprovalInput,
+	type ArtisanRoutineIdInput,
+	type ArtisanRoutineSyncInput,
+	type ArtisanRoutineDriftInput,
+	type ArtisanRoutineDriftOverwriteDecisionInput,
+	type ArtisanRoutineDriftOverwriteRequestInput,
+	type ArtisanRoutineInvokeInput,
+	type ArtisanRoutineRollbackInput,
+	type ArtisanNpxSkillsDiscoverInput,
+	type ArtisanNpxSkillsImportInput,
+	type ArtisanCapabilityDetailInput,
+	type ArtisanCapabilityConnectInput,
+	type ArtisanCapabilityApprovalInput,
+	type ArtisanCapabilityIdInput,
+	type ArtisanCapabilityHealthInput,
+	type ArtisanCapabilitySyncInput,
+	type ArtisanCapabilityDriftInput,
+	type ArtisanCapabilityDriftOverwriteDecisionInput,
+	type ArtisanCapabilityDriftOverwriteRequestInput,
+	type ArtisanCapabilityInvokeInput,
+	type ArtisanCapabilityInvocationDecisionInput,
+	type ArtisanCapabilityInvocationRequestInput,
+	type ArtisanCapabilityOAuthInput,
+	type ArtisanCapabilityOAuthCompleteInput,
 } from "../client-contract";
 import { TransportRuntime } from "../transport-runtime";
 import { client_error, validate_client_options } from "./client-common";
@@ -1106,6 +1177,630 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					return yield* send_model_behaviour_mutation(envelope);
 				});
 
+			type MarketplaceReceiptEnvelope =
+				| RoutineInstallRequestEnvelope
+				| RoutineApprovalDecisionEnvelope
+				| RoutineEnableEnvelope
+				| RoutineDisableEnvelope
+				| RoutineRemoveEnvelope
+				| RoutineSyncEnvelope
+				| RoutineDriftResolutionEnvelope
+				| RoutineDriftOverwriteRequestEnvelope
+				| RoutineDriftOverwriteDecisionEnvelope
+				| RoutineRollbackEnvelope
+				| NpxSkillsImportEnvelope
+				| CapabilityConnectRequestEnvelope
+				| CapabilityApprovalDecisionEnvelope
+				| CapabilityStartEnvelope
+				| CapabilityReconnectEnvelope
+				| CapabilityHealthEnvelope
+				| CapabilityDisconnectEnvelope
+				| CapabilityRestartEnvelope
+				| CapabilityUninstallEnvelope
+				| CapabilityEnableEnvelope
+				| CapabilityDisableEnvelope
+				| CapabilityRemoveEnvelope
+				| CapabilitySyncEnvelope
+				| CapabilityDriftResolutionEnvelope
+				| CapabilityDriftOverwriteRequestEnvelope
+				| CapabilityDriftOverwriteDecisionEnvelope
+				| CapabilityInvocationApprovalRequestEnvelope
+				| CapabilityInvocationApprovalDecisionEnvelope
+				| CapabilityOAuthBeginEnvelope
+				| CapabilityOAuthCompleteEnvelope
+				| CapabilityOAuthRefreshEnvelope
+				| CapabilityOAuthRevokeEnvelope;
+			const send_marketplace_mutation = (envelope: MarketplaceReceiptEnvelope) =>
+				Effect.gen(function* () {
+					const result = yield* requests.Request(envelope, "command.receipt");
+
+					if (result.kind !== "command.receipt") {
+						return yield* Effect.die("Marketplace receipt narrowed incorrectly");
+					}
+
+					if (result.payload.status === "rejected") {
+						return yield* Effect.fail(
+							client_error(
+								"protocol",
+								result.payload.error.message,
+								result.payload.error,
+								result.payload.error.retryable,
+								result.payload.error.code,
+							),
+						);
+					}
+
+					return {
+						command_id: envelope.message_id,
+						journal_sequence: result.payload.journal_sequence,
+						status: result.payload.status,
+					} satisfies ArtisanCommandReceipt;
+				});
+			const list_routines = (input: ArtisanMarketplaceBrowseInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: RoutineRegistryQueryEnvelope = {
+						...trace,
+						kind: "marketplace.routine.list.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"marketplace.routine.list.query.result",
+					);
+					return result.kind === "marketplace.routine.list.query.result"
+						? result.payload
+						: yield* Effect.die("routine registry response narrowed incorrectly");
+				});
+			const get_routine_detail = (input: ArtisanRoutineDetailInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: RoutineDetailQueryEnvelope = {
+						...trace,
+						kind: "marketplace.routine.detail.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"marketplace.routine.detail.query.result",
+					);
+					return result.kind === "marketplace.routine.detail.query.result"
+						? result.payload
+						: yield* Effect.die("routine detail response narrowed incorrectly");
+				});
+			const preview_routine_install = (input: RoutineInstallPreviewRequest) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: RoutineInstallPreviewEnvelope = {
+						...trace,
+						kind: "marketplace.routine.install.preview",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"marketplace.routine.install.preview.result",
+					);
+					return result.kind === "marketplace.routine.install.preview.result"
+						? result.payload
+						: yield* Effect.die(
+								"routine install preview response narrowed incorrectly",
+							);
+				});
+			const discover_npx_skills = (input: ArtisanNpxSkillsDiscoverInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: NpxSkillsDiscoverEnvelope = {
+						...trace,
+						kind: "marketplace.npx_skills.discover",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"marketplace.npx_skills.discover.result",
+					);
+					return result.kind === "marketplace.npx_skills.discover.result"
+						? result.payload
+						: yield* Effect.die("npx skills discovery response narrowed incorrectly");
+				});
+			const routine_lifecycle = (
+				input: ArtisanRoutineIdInput,
+				kind:
+					| "marketplace.routine.enable"
+					| "marketplace.routine.disable"
+					| "marketplace.routine.remove",
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope:
+						| RoutineEnableEnvelope
+						| RoutineDisableEnvelope
+						| RoutineRemoveEnvelope = {
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind,
+						payload: { id: input.routine_id, scope: input.scope },
+					};
+					return yield* send_marketplace_mutation(envelope);
+				});
+			const request_routine_install = (input: ArtisanRoutineInstallInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					return yield* send_marketplace_mutation({
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "marketplace.routine.install.request",
+						payload: {
+							approval_id: input.approval_id,
+							preview_fingerprint: input.preview_fingerprint,
+							requested_by: input.requested_by,
+							scope: input.scope,
+							source: input.source,
+						},
+					});
+				});
+			const decide_routine_install = (input: ArtisanRoutineApprovalInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					return yield* send_marketplace_mutation({
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "marketplace.routine.install.decision",
+						payload: {
+							approval_id: input.approval_id,
+							approved: input.approved,
+							preview_fingerprint: input.preview_fingerprint,
+						},
+					});
+				});
+			const sync_routine = (input: ArtisanRoutineSyncInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					return yield* send_marketplace_mutation({
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "marketplace.routine.sync",
+						payload: { engine_id: input.engine_id, id: input.id, scope: input.scope },
+					});
+				});
+			const resolve_routine_drift = (input: ArtisanRoutineDriftInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					return yield* send_marketplace_mutation({
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "marketplace.routine.drift.resolve",
+						payload: {
+							action: input.action,
+							engine_id: input.engine_id,
+							observed_revision: input.observed_revision,
+							routine_id: input.routine_id,
+							scope: input.scope,
+						},
+					});
+				});
+			const request_routine_drift_overwrite = (
+				input: ArtisanRoutineDriftOverwriteRequestInput,
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					return yield* send_marketplace_mutation({
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "marketplace.routine.drift.overwrite.request",
+						payload: {
+							approval_id: input.approval_id,
+							engine_id: input.engine_id,
+							intent_fingerprint: input.intent_fingerprint,
+							observed_revision: input.observed_revision,
+							requested_by: input.requested_by,
+							routine_id: input.routine_id,
+							scope: input.scope,
+						},
+					});
+				});
+			const decide_routine_drift_overwrite = (
+				input: ArtisanRoutineDriftOverwriteDecisionInput,
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					return yield* send_marketplace_mutation({
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "marketplace.routine.drift.overwrite.decision",
+						payload: {
+							approval_id: input.approval_id,
+							approved: input.approved,
+							engine_id: input.engine_id,
+							intent_fingerprint: input.intent_fingerprint,
+							observed_revision: input.observed_revision,
+							routine_id: input.routine_id,
+							scope: input.scope,
+						},
+					});
+				});
+			const rollback_routine = (input: ArtisanRoutineRollbackInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					return yield* send_marketplace_mutation({
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "marketplace.routine.rollback",
+						payload: {
+							rollback_id: input.rollback_id,
+							routine_id: input.routine_id,
+							scope: input.scope,
+						},
+					});
+				});
+			const import_npx_skills = (input: ArtisanNpxSkillsImportInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					return yield* send_marketplace_mutation({
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "marketplace.npx_skills.import.request",
+						payload: {
+							candidate_name: input.candidate_name,
+							package_spec: input.package_spec,
+							preview_fingerprint: input.preview_fingerprint,
+							scope: input.scope,
+						},
+					});
+				});
+			const invoke_routine = (input: ArtisanRoutineInvokeInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: RoutineInvokeEnvelope = {
+						...trace,
+						kind: "marketplace.routine.invoke",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"marketplace.routine.invoke.result",
+					);
+					return result.kind === "marketplace.routine.invoke.result"
+						? result.payload
+						: yield* Effect.die("routine invocation response narrowed incorrectly");
+				});
+
+			const list_capabilities = (input: ArtisanMarketplaceBrowseInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: CapabilityRegistryQueryEnvelope = {
+						...trace,
+						kind: "marketplace.capability.list.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"marketplace.capability.list.query.result",
+					);
+					return result.kind === "marketplace.capability.list.query.result"
+						? result.payload
+						: yield* Effect.die("capability registry response narrowed incorrectly");
+				});
+			const get_capability_detail = (input: ArtisanCapabilityDetailInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: CapabilityDetailQueryEnvelope = {
+						...trace,
+						kind: "marketplace.capability.detail.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"marketplace.capability.detail.query.result",
+					);
+					return result.kind === "marketplace.capability.detail.query.result"
+						? result.payload
+						: yield* Effect.die("capability detail response narrowed incorrectly");
+				});
+			const preview_capability_connect = (input: CapabilityConnectPreviewRequest) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: CapabilityConnectPreviewEnvelope = {
+						...trace,
+						kind: "marketplace.capability.connect.preview",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"marketplace.capability.connect.preview.result",
+					);
+					return result.kind === "marketplace.capability.connect.preview.result"
+						? result.payload
+						: yield* Effect.die(
+								"capability connect preview response narrowed incorrectly",
+							);
+				});
+			const capability_lifecycle = (
+				input: ArtisanCapabilityIdInput,
+				kind:
+					| "marketplace.capability.start"
+					| "marketplace.capability.reconnect"
+					| "marketplace.capability.disconnect"
+					| "marketplace.capability.restart"
+					| "marketplace.capability.uninstall",
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope:
+						| CapabilityStartEnvelope
+						| CapabilityReconnectEnvelope
+						| CapabilityDisconnectEnvelope
+						| CapabilityRestartEnvelope
+						| CapabilityUninstallEnvelope = {
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind,
+						payload: { capability_id: input.capability_id, scope: input.scope },
+					};
+					return yield* send_marketplace_mutation(envelope);
+				});
+			const capability_enablement = (
+				input: ArtisanCapabilityIdInput,
+				kind:
+					| "marketplace.capability.enable"
+					| "marketplace.capability.disable"
+					| "marketplace.capability.remove",
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope:
+						| CapabilityEnableEnvelope
+						| CapabilityDisableEnvelope
+						| CapabilityRemoveEnvelope = {
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind,
+						payload: { id: input.capability_id, scope: input.scope },
+					};
+					return yield* send_marketplace_mutation(envelope);
+				});
+			const request_capability_connect = (input: ArtisanCapabilityConnectInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					return yield* send_marketplace_mutation({
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "marketplace.capability.connect.request",
+						payload: {
+							approval_id: input.approval_id,
+							auth: input.auth,
+							preview_fingerprint: input.preview_fingerprint,
+							requested_by: input.requested_by,
+							scope: input.scope,
+							source: input.source,
+							transport: input.transport,
+						},
+					});
+				});
+			const decide_capability_connect = (input: ArtisanCapabilityApprovalInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					return yield* send_marketplace_mutation({
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "marketplace.capability.connect.decision",
+						payload: {
+							approval_id: input.approval_id,
+							approved: input.approved,
+							preview_fingerprint: input.preview_fingerprint,
+						},
+					});
+				});
+			const check_capability_health = (input: ArtisanCapabilityHealthInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					return yield* send_marketplace_mutation({
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "marketplace.capability.health",
+						payload: { capability_id: input.capability_id, scope: input.scope },
+					});
+				});
+			const sync_capability = (input: ArtisanCapabilitySyncInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					return yield* send_marketplace_mutation({
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "marketplace.capability.sync",
+						payload: { engine_id: input.engine_id, id: input.id, scope: input.scope },
+					});
+				});
+			const resolve_capability_drift = (input: ArtisanCapabilityDriftInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					return yield* send_marketplace_mutation({
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "marketplace.capability.drift.resolve",
+						payload: {
+							action: input.action,
+							capability_id: input.capability_id,
+							engine_id: input.engine_id,
+							observed_revision: input.observed_revision,
+							scope: input.scope,
+						},
+					});
+				});
+			const request_capability_drift_overwrite = (
+				input: ArtisanCapabilityDriftOverwriteRequestInput,
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					return yield* send_marketplace_mutation({
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "marketplace.capability.drift.overwrite.request",
+						payload: {
+							approval_id: input.approval_id,
+							capability_id: input.capability_id,
+							engine_id: input.engine_id,
+							intent_fingerprint: input.intent_fingerprint,
+							observed_revision: input.observed_revision,
+							requested_by: input.requested_by,
+							scope: input.scope,
+						},
+					});
+				});
+			const decide_capability_drift_overwrite = (
+				input: ArtisanCapabilityDriftOverwriteDecisionInput,
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					return yield* send_marketplace_mutation({
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "marketplace.capability.drift.overwrite.decision",
+						payload: {
+							approval_id: input.approval_id,
+							approved: input.approved,
+							capability_id: input.capability_id,
+							engine_id: input.engine_id,
+							intent_fingerprint: input.intent_fingerprint,
+							observed_revision: input.observed_revision,
+							scope: input.scope,
+						},
+					});
+				});
+			const request_capability_invocation = (
+				input: ArtisanCapabilityInvocationRequestInput,
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const result = yield* requests.Request(
+						{
+							...trace,
+							message_id: input.command_id ?? trace.message_id,
+							kind: "marketplace.capability.invoke.request",
+							payload: {
+								approval_id: input.approval_id,
+								arguments_json: input.arguments_json,
+								capability_id: input.capability_id,
+								intent_fingerprint: input.intent_fingerprint,
+								requested_by: input.requested_by,
+								scope: input.scope,
+								tool_name: input.tool_name,
+							},
+						},
+						"marketplace.capability.invoke.result",
+					);
+					return result.kind === "marketplace.capability.invoke.result"
+						? result.payload
+						: yield* Effect.die("capability invocation request narrowed incorrectly");
+				});
+			const decide_capability_invocation = (
+				input: ArtisanCapabilityInvocationDecisionInput,
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const result = yield* requests.Request(
+						{
+							...trace,
+							message_id: input.command_id ?? trace.message_id,
+							kind: "marketplace.capability.invoke.decision",
+							payload: {
+								approval_id: input.approval_id,
+								approved: input.approved,
+								arguments_json: input.arguments_json,
+								capability_id: input.capability_id,
+								intent_fingerprint: input.intent_fingerprint,
+								scope: input.scope,
+								tool_name: input.tool_name,
+							},
+						},
+						"marketplace.capability.invoke.result",
+					);
+					return result.kind === "marketplace.capability.invoke.result"
+						? result.payload
+						: yield* Effect.die("capability invocation decision narrowed incorrectly");
+				});
+			const invoke_capability = (input: ArtisanCapabilityInvokeInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: CapabilityInvokeEnvelope = {
+						...trace,
+						kind: "marketplace.capability.invoke",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"marketplace.capability.invoke.result",
+					);
+					return result.kind === "marketplace.capability.invoke.result"
+						? result.payload
+						: yield* Effect.die("capability invocation response narrowed incorrectly");
+				});
+			const capability_oauth_mutation = (
+				input: ArtisanCapabilityOAuthInput,
+				kind:
+					| "marketplace.capability.oauth.refresh"
+					| "marketplace.capability.oauth.revoke",
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: CapabilityOAuthRefreshEnvelope | CapabilityOAuthRevokeEnvelope =
+						{
+							...trace,
+							message_id: input.command_id ?? trace.message_id,
+							kind,
+							payload: { capability_id: input.capability_id, scope: input.scope },
+						};
+					return yield* send_marketplace_mutation(envelope);
+				});
+			const begin_capability_oauth = (input: ArtisanCapabilityOAuthInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: CapabilityOAuthBeginEnvelope = {
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "marketplace.capability.oauth.begin",
+						payload: { capability_id: input.capability_id, scope: input.scope },
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"marketplace.capability.oauth.begin.result",
+					);
+					return result.kind === "marketplace.capability.oauth.begin.result"
+						? result.payload
+						: yield* Effect.die("capability OAuth begin response narrowed incorrectly");
+				});
+			const complete_capability_oauth = (input: ArtisanCapabilityOAuthCompleteInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					return yield* send_marketplace_mutation({
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "marketplace.capability.oauth.complete",
+						payload: {
+							callback_reference: input.callback_reference,
+							capability_id: input.capability_id,
+							scope: input.scope,
+						},
+					});
+				});
+			const get_capability_oauth_status = (input: ArtisanCapabilityOAuthInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: CapabilityOAuthTokenStatusEnvelope = {
+						...trace,
+						kind: "marketplace.capability.oauth.status.query",
+						payload: { capability_id: input.capability_id, scope: input.scope },
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"marketplace.capability.oauth.status.query.result",
+					);
+					return result.kind === "marketplace.capability.oauth.status.query.result"
+						? result.payload
+						: yield* Effect.die(
+								"capability OAuth status response narrowed incorrectly",
+							);
+				});
+
 			const update_thread_retention_policy = (input: ArtisanThreadRetentionUpdateInput) =>
 				Effect.gen(function* () {
 					const trace = yield* connection.MakeTrace;
@@ -1298,6 +1993,9 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				ListArtisanTools: list_artisan_tools,
 				GetPreviewAssetMetadata: get_preview_asset_metadata,
 				GetPreviewTarget: get_preview_target,
+				GetRoutineDetail: get_routine_detail,
+				GetCapabilityDetail: get_capability_detail,
+				GetCapabilityOAuthStatus: get_capability_oauth_status,
 				GetThreadRetentionPolicy: get_thread_retention_policy,
 				GetThreadWork: get_thread_work,
 				GetWorkspaceChangeDiff: get_workspace_change_diff,
@@ -1308,6 +2006,8 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				ListTerminals: list_terminals,
 				ListThreads: list_threads,
 				ListPreviewTargets: list_preview_targets,
+				ListRoutines: list_routines,
+				ListCapabilities: list_capabilities,
 				OpenAsset: (asset_id) => streams.Open(`asset:${asset_id}`),
 				LaunchPreviewInExternalBrowser: launch_preview_in_external_browser,
 				OpenPreviewInspectionSession: open_preview_inspection_session,
@@ -1321,6 +2021,54 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				ResolveArtisanApproval: resolve_artisan_approval,
 				ResolveModelBehaviourDrift: resolve_model_behaviour_drift,
 				ResolveRichLink: resolve_rich_link,
+
+				PreviewRoutineInstall: preview_routine_install,
+				RequestRoutineInstall: request_routine_install,
+				DecideRoutineInstall: decide_routine_install,
+				EnableRoutine: (input) => routine_lifecycle(input, "marketplace.routine.enable"),
+				DisableRoutine: (input) => routine_lifecycle(input, "marketplace.routine.disable"),
+				RemoveRoutine: (input) => routine_lifecycle(input, "marketplace.routine.remove"),
+				RollbackRoutine: rollback_routine,
+				SyncRoutine: sync_routine,
+				ResolveRoutineDrift: resolve_routine_drift,
+				RequestRoutineDriftOverwrite: request_routine_drift_overwrite,
+				DecideRoutineDriftOverwrite: decide_routine_drift_overwrite,
+				InvokeRoutine: invoke_routine,
+				DiscoverNpxSkills: discover_npx_skills,
+				ImportNpxSkills: import_npx_skills,
+				PreviewCapabilityConnect: preview_capability_connect,
+				RequestCapabilityConnect: request_capability_connect,
+				DecideCapabilityConnect: decide_capability_connect,
+				StartCapability: (input) =>
+					capability_lifecycle(input, "marketplace.capability.start"),
+				ReconnectCapability: (input) =>
+					capability_lifecycle(input, "marketplace.capability.reconnect"),
+				CheckCapabilityHealth: check_capability_health,
+				DisconnectCapability: (input) =>
+					capability_lifecycle(input, "marketplace.capability.disconnect"),
+				RestartCapability: (input) =>
+					capability_lifecycle(input, "marketplace.capability.restart"),
+				UninstallCapability: (input) =>
+					capability_lifecycle(input, "marketplace.capability.uninstall"),
+				EnableCapability: (input) =>
+					capability_enablement(input, "marketplace.capability.enable"),
+				DisableCapability: (input) =>
+					capability_enablement(input, "marketplace.capability.disable"),
+				RemoveCapability: (input) =>
+					capability_enablement(input, "marketplace.capability.remove"),
+				SyncCapability: sync_capability,
+				ResolveCapabilityDrift: resolve_capability_drift,
+				RequestCapabilityDriftOverwrite: request_capability_drift_overwrite,
+				DecideCapabilityDriftOverwrite: decide_capability_drift_overwrite,
+				RequestCapabilityInvocation: request_capability_invocation,
+				DecideCapabilityInvocation: decide_capability_invocation,
+				InvokeCapability: invoke_capability,
+				BeginCapabilityOAuth: begin_capability_oauth,
+				CompleteCapabilityOAuth: complete_capability_oauth,
+				RefreshCapabilityOAuth: (input) =>
+					capability_oauth_mutation(input, "marketplace.capability.oauth.refresh"),
+				RevokeCapabilityOAuth: (input) =>
+					capability_oauth_mutation(input, "marketplace.capability.oauth.revoke"),
 				RetryGlobalGuidanceSync: retry_global_guidance_sync,
 				RetryModelBehaviourSync: retry_model_behaviour_sync,
 				ProbePreviewTarget: probe_preview_target,

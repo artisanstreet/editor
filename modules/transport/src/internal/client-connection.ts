@@ -27,6 +27,7 @@ import {
 	type ActiveClientSession,
 	type AwaitActive,
 	type FrontendTrace,
+	type PendingResultEnvelope,
 	type SendCurrent,
 } from "./client-common";
 import type { ClientRequestCoordinator } from "./client-request-coordinator";
@@ -38,6 +39,32 @@ interface ConnectionState {
 	readonly connection_signal: Deferred.Deferred<void>;
 	readonly disposed: boolean;
 }
+
+type MarketplacePendingResultKind = Extract<PendingResultEnvelope["kind"], `marketplace.${string}`>;
+
+const marketplace_pending_result_kinds = <
+	const Kinds extends ReadonlyArray<MarketplacePendingResultKind>,
+>(
+	...kinds: Kinds &
+		(Exclude<MarketplacePendingResultKind, Kinds[number]> extends never
+			? unknown
+			: readonly ["Missing Marketplace pending result kind"])
+) => kinds;
+
+/** Marketplace responses that complete a correlated renderer request. */
+export const MarketplacePendingResultKinds = marketplace_pending_result_kinds(
+	"marketplace.routine.list.query.result",
+	"marketplace.routine.detail.query.result",
+	"marketplace.routine.install.preview.result",
+	"marketplace.routine.invoke.result",
+	"marketplace.npx_skills.discover.result",
+	"marketplace.capability.list.query.result",
+	"marketplace.capability.detail.query.result",
+	"marketplace.capability.connect.preview.result",
+	"marketplace.capability.invoke.result",
+	"marketplace.capability.oauth.begin.result",
+	"marketplace.capability.oauth.status.query.result",
+);
 
 /** Supplies the coordinators invoked by one negotiated connection. */
 export interface ClientConnectionHandlers {
@@ -391,6 +418,17 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 					case "workspace.change.list.query.result":
 					case "workspace.conflict.list.query.result":
 					case "workspace.change.diff.query.result":
+					case "marketplace.routine.list.query.result":
+					case "marketplace.routine.detail.query.result":
+					case "marketplace.routine.install.preview.result":
+					case "marketplace.routine.invoke.result":
+					case "marketplace.npx_skills.discover.result":
+					case "marketplace.capability.list.query.result":
+					case "marketplace.capability.detail.query.result":
+					case "marketplace.capability.connect.preview.result":
+					case "marketplace.capability.invoke.result":
+					case "marketplace.capability.oauth.begin.result":
+					case "marketplace.capability.oauth.status.query.result":
 						return handlers.requests.Resolve(envelope);
 					case "event":
 						return handlers.subscriptions.ApplyEvent(envelope).pipe(

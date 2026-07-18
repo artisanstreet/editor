@@ -138,11 +138,16 @@ import {
 	CapabilityConnectRequest,
 	CapabilityDetail,
 	CapabilityDriftResolutionRequest,
+	CapabilityDriftOverwriteDecision,
+	CapabilityDriftOverwriteRequest,
 	CapabilityHealthRequest,
 	CapabilityOAuthCompleteRequest,
+	CapabilityOAuthBeginResult,
 	CapabilityOAuthRequest,
 	CapabilityOAuthTokenStatus,
 	CapabilityInvocationMetadata,
+	CapabilityInvocationApprovalDecision,
+	CapabilityInvocationApprovalRequest,
 	CapabilityInvocationRequest,
 	CapabilityLifecycleRequest,
 	CapabilityRegistrySnapshot,
@@ -158,6 +163,8 @@ import {
 	NpxSkillsImportRequest,
 	RoutineDetail,
 	RoutineDriftResolutionRequest,
+	RoutineDriftOverwriteDecision,
+	RoutineDriftOverwriteRequest,
 	RoutineInstallPreview,
 	RoutineInstallPreviewRequest,
 	RoutineInstallRequest,
@@ -1591,6 +1598,19 @@ export const RoutineDriftResolutionEnvelope = Schema.Struct({
 	payload: RoutineDriftResolutionRequest,
 });
 export type RoutineDriftResolutionEnvelope = typeof RoutineDriftResolutionEnvelope.Type;
+export const RoutineDriftOverwriteRequestEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("marketplace.routine.drift.overwrite.request"),
+	payload: RoutineDriftOverwriteRequest,
+});
+export type RoutineDriftOverwriteRequestEnvelope = typeof RoutineDriftOverwriteRequestEnvelope.Type;
+export const RoutineDriftOverwriteDecisionEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("marketplace.routine.drift.overwrite.decision"),
+	payload: RoutineDriftOverwriteDecision,
+});
+export type RoutineDriftOverwriteDecisionEnvelope =
+	typeof RoutineDriftOverwriteDecisionEnvelope.Type;
 export const RoutineInvokeEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
 	kind: Schema.Literal("marketplace.routine.invoke"),
@@ -1748,6 +1768,34 @@ export type CapabilityDisableEnvelope = typeof CapabilityDisableEnvelope.Type;
 export type CapabilityRemoveEnvelope = typeof CapabilityRemoveEnvelope.Type;
 export type CapabilitySyncEnvelope = typeof CapabilitySyncEnvelope.Type;
 export type CapabilityDriftResolutionEnvelope = typeof CapabilityDriftResolutionEnvelope.Type;
+export const CapabilityDriftOverwriteRequestEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("marketplace.capability.drift.overwrite.request"),
+	payload: CapabilityDriftOverwriteRequest,
+});
+export type CapabilityDriftOverwriteRequestEnvelope =
+	typeof CapabilityDriftOverwriteRequestEnvelope.Type;
+export const CapabilityDriftOverwriteDecisionEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("marketplace.capability.drift.overwrite.decision"),
+	payload: CapabilityDriftOverwriteDecision,
+});
+export type CapabilityDriftOverwriteDecisionEnvelope =
+	typeof CapabilityDriftOverwriteDecisionEnvelope.Type;
+export const CapabilityInvocationApprovalRequestEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("marketplace.capability.invoke.request"),
+	payload: CapabilityInvocationApprovalRequest,
+});
+export type CapabilityInvocationApprovalRequestEnvelope =
+	typeof CapabilityInvocationApprovalRequestEnvelope.Type;
+export const CapabilityInvocationApprovalDecisionEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("marketplace.capability.invoke.decision"),
+	payload: CapabilityInvocationApprovalDecision,
+});
+export type CapabilityInvocationApprovalDecisionEnvelope =
+	typeof CapabilityInvocationApprovalDecisionEnvelope.Type;
 export type CapabilityInvokeEnvelope = typeof CapabilityInvokeEnvelope.Type;
 export const CapabilityInvokeResultEnvelope = Schema.Struct({
 	...NegotiatedBackendTraceMetadata,
@@ -1760,6 +1808,12 @@ export const CapabilityOAuthBeginEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
 	kind: Schema.Literal("marketplace.capability.oauth.begin"),
 	payload: CapabilityOAuthRequest,
+});
+export const CapabilityOAuthBeginResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("marketplace.capability.oauth.begin.result"),
+	payload: CapabilityOAuthBeginResult,
 });
 export const CapabilityOAuthCompleteEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
@@ -1788,6 +1842,7 @@ export const CapabilityOAuthTokenStatusResultEnvelope = Schema.Struct({
 	payload: CapabilityOAuthTokenStatus,
 });
 export type CapabilityOAuthBeginEnvelope = typeof CapabilityOAuthBeginEnvelope.Type;
+export type CapabilityOAuthBeginResultEnvelope = typeof CapabilityOAuthBeginResultEnvelope.Type;
 export type CapabilityOAuthCompleteEnvelope = typeof CapabilityOAuthCompleteEnvelope.Type;
 export type CapabilityOAuthRefreshEnvelope = typeof CapabilityOAuthRefreshEnvelope.Type;
 export type CapabilityOAuthRevokeEnvelope = typeof CapabilityOAuthRevokeEnvelope.Type;
@@ -2554,6 +2609,8 @@ export const InboundControlEnvelope = Schema.Union([
 	RoutineRemoveEnvelope,
 	RoutineSyncEnvelope,
 	RoutineDriftResolutionEnvelope,
+	RoutineDriftOverwriteRequestEnvelope,
+	RoutineDriftOverwriteDecisionEnvelope,
 	RoutineInvokeEnvelope,
 	RoutineRollbackEnvelope,
 	NpxSkillsDiscoverEnvelope,
@@ -2574,6 +2631,10 @@ export const InboundControlEnvelope = Schema.Union([
 	CapabilityRemoveEnvelope,
 	CapabilitySyncEnvelope,
 	CapabilityDriftResolutionEnvelope,
+	CapabilityDriftOverwriteRequestEnvelope,
+	CapabilityDriftOverwriteDecisionEnvelope,
+	CapabilityInvocationApprovalRequestEnvelope,
+	CapabilityInvocationApprovalDecisionEnvelope,
 	CapabilityInvokeEnvelope,
 	CapabilityOAuthBeginEnvelope,
 	CapabilityOAuthCompleteEnvelope,
@@ -2643,6 +2704,7 @@ export const OutboundControlEnvelope = Schema.Union([
 	CapabilityConnectPreviewResultEnvelope,
 	CapabilityInvokeResultEnvelope,
 	CapabilityOAuthTokenStatusResultEnvelope,
+	CapabilityOAuthBeginResultEnvelope,
 	ThreadWorkQueryResultEnvelope,
 	TerminalListQueryResultEnvelope,
 	OrchestrationGraphQueryResultEnvelope,
