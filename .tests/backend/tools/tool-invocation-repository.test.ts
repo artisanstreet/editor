@@ -125,10 +125,18 @@ describe("ToolInvocationRepository", () => {
 			const recovered = await second.runPromise(
 				Effect.gen(function* () {
 					const repository = yield* ToolInvocationRepository;
-					return yield* repository.ReadExecutionInput("invocation_1");
+					const execution_input = yield* repository.ReadExecutionInput("invocation_1");
+					const projection = yield* repository.ReadInvocation("invocation_1");
+
+					return { execution_input, projection };
 				}),
 			);
-			expect(recovered).toEqual(execution_input());
+			expect(recovered.execution_input).toEqual(execution_input());
+			expect(recovered.projection).toMatchObject({
+				invocation_id: "invocation_1",
+				thread_id: "thread_1",
+			});
+			expect(JSON.stringify(recovered.projection)).not.toContain("private-input.ts");
 		} finally {
 			await second.dispose();
 		}
