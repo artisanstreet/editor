@@ -48,7 +48,9 @@ export const ArtisanToolId = Schema.Literals([
 	"terminal.restart",
 	"terminal.stop",
 	"workspace.file.read",
+	"workspace.file.list",
 	"workspace.file.write",
+	"workspace.language.status",
 	"git.status.read",
 	"git.diff.read",
 	"git.index.stage",
@@ -93,6 +95,7 @@ export type PermissionRequirement = typeof PermissionRequirement.Type;
 
 /** Describes one stable built-in tool offered to an engine-facing registry. */
 const ArtisanToolDescriptorBase = Schema.Struct({
+	approval_behavior: Schema.Literals(["never", "on_request"]),
 	description: BoundedText(4_096, "tool description"),
 	id: ArtisanToolId,
 	kind: ArtisanToolKind,
@@ -119,7 +122,9 @@ const tool_kind_for_id: Record<ArtisanToolId, ArtisanToolKind> = {
 	"terminal.stop": "terminal",
 	"terminal.write": "terminal",
 	"workspace.file.read": "workspace_file",
+	"workspace.file.list": "workspace_file",
 	"workspace.file.write": "workspace_file",
+	"workspace.language.status": "workspace_file",
 };
 
 export const ArtisanToolDescriptor = ArtisanToolDescriptorBase.check(
@@ -366,6 +371,66 @@ export const ArtisanToolWorkspaceFileTarget = Schema.Struct({
 
 export type ArtisanToolWorkspaceFileTarget = typeof ArtisanToolWorkspaceFileTarget.Type;
 
+/** Requests a bounded, content-free recursive workspace path projection for editor discovery. */
+export const WorkspaceFileDiscoveryQuery = Schema.Struct({
+	after_path: Schema.optional(WorkspacePath),
+	limit: Schema.optional(
+		PositiveInt.check(
+			Schema.isLessThanOrEqualTo(1_000, { message: "Expected at most 1,000 paths" }),
+		),
+	),
+	prefix: Schema.optional(WorkspacePath),
+	workspace_id: Identifier,
+});
+
+export type WorkspaceFileDiscoveryQuery = typeof WorkspaceFileDiscoveryQuery.Type;
+
+/** Describes bounded path metadata without exposing filesystem content or absolute paths. */
+export const WorkspaceFileDiscoveryEntry = Schema.Struct({
+	kind: Schema.Literals(["directory", "file"]),
+	modified_at: IsoDateTime,
+	path: WorkspacePath,
+	size: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+});
+
+export type WorkspaceFileDiscoveryEntry = typeof WorkspaceFileDiscoveryEntry.Type;
+
+/** Returns one deterministic discovery page from a root-confined backend filesystem. */
+export const WorkspaceFileDiscoveryQueryResult = Schema.Struct({
+	entries: Schema.Array(WorkspaceFileDiscoveryEntry).check(Schema.isMaxLength(1_000)),
+	next_path: Schema.optional(WorkspacePath),
+	truncated: Schema.Boolean,
+	workspace_id: Identifier,
+});
+
+export type WorkspaceFileDiscoveryQueryResult = typeof WorkspaceFileDiscoveryQueryResult.Type;
+
+/** Requests the truthful editor-language and diagnostics support state for one workspace. */
+export const WorkspaceLanguageCapabilitiesQuery = Schema.Struct({
+	workspace_id: Identifier,
+});
+
+export type WorkspaceLanguageCapabilitiesQuery = typeof WorkspaceLanguageCapabilitiesQuery.Type;
+
+/** Projects one backend-owned language feature without implying unavailable infrastructure exists. */
+export const WorkspaceLanguageCapability = Schema.Struct({
+	feature: Schema.Literals(["diagnostics", "language_detection", "symbols"]),
+	reason: Schema.optional(BoundedText(2_048, "language capability reason")),
+	source: Schema.Literals(["artisan", "engine", "language_server", "unavailable"]),
+	state: Schema.Literals(["available", "unavailable"]),
+});
+
+export type WorkspaceLanguageCapability = typeof WorkspaceLanguageCapability.Type;
+
+/** Returns truthful language support states consumed by Monaco without direct host access. */
+export const WorkspaceLanguageCapabilitiesQueryResult = Schema.Struct({
+	capabilities: Schema.Array(WorkspaceLanguageCapability).check(Schema.isMaxLength(16)),
+	workspace_id: Identifier,
+});
+
+export type WorkspaceLanguageCapabilitiesQueryResult =
+	typeof WorkspaceLanguageCapabilitiesQueryResult.Type;
+
 /** Declares whether a built-in tool is available under the current workspace and policy. */
 export const ArtisanToolAvailability = Schema.Struct({
 	state: Schema.Literals(["available", "approval_required", "unavailable"]),
@@ -461,8 +526,16 @@ export const ArtisanToolExecutionInput = Schema.Union([
 		tool_id: Schema.Literal("workspace.file.read"),
 	}),
 	Schema.Struct({
+		...WorkspaceFileDiscoveryQuery.fields,
+		tool_id: Schema.Literal("workspace.file.list"),
+	}),
+	Schema.Struct({
 		...WorkspaceFileReplaceRequest.fields,
 		tool_id: Schema.Literal("workspace.file.write"),
+	}),
+	Schema.Struct({
+		...WorkspaceLanguageCapabilitiesQuery.fields,
+		tool_id: Schema.Literal("workspace.language.status"),
 	}),
 	Schema.Struct({ ...GitWorkspaceQuery.fields, tool_id: Schema.Literal("git.status.read") }),
 	Schema.Struct({ ...GitDiffQuery.fields, tool_id: Schema.Literal("git.diff.read") }),
