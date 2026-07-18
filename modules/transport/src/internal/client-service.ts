@@ -2,6 +2,11 @@ import { Cause, Effect, Layer, Option, Queue, Ref, Stream } from "effect";
 
 import {
 	type CommandEnvelope,
+	type GitDiffQueryEnvelope,
+	type GitIndexStageRequestEnvelope,
+	type GitIndexUnstageRequestEnvelope,
+	type GitMutationResolveEnvelope,
+	type GitWorkspaceQueryEnvelope,
 	type WorkspaceChangeListQueryEnvelope,
 	type WorkspaceChangeDiffQueryEnvelope,
 	type WorkspaceChangeReviewEnvelope,
@@ -27,6 +32,10 @@ import {
 
 import {
 	ArtisanClient,
+	type ArtisanGitDiffInput,
+	type ArtisanGitIndexMutationInput,
+	type ArtisanGitMutationResolveInput,
+	type ArtisanGitWorkspaceInput,
 	type ArtisanGlobalGuidanceDriftInput,
 	type ArtisanGlobalGuidanceRetryInput,
 	type ArtisanGlobalGuidanceSelectionInput,
@@ -250,6 +259,120 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					return result.kind === "workspace.change.diff.query.result"
 						? result.payload
 						: yield* Effect.die("workspace change diff response narrowed incorrectly");
+				});
+			const get_git_workspace = (input: ArtisanGitWorkspaceInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: GitWorkspaceQueryEnvelope = {
+						...trace,
+						kind: "git.workspace.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(envelope, "git.workspace.query.result");
+
+					return result.kind === "git.workspace.query.result"
+						? result.payload
+						: yield* Effect.die("Git workspace response narrowed incorrectly");
+				});
+			const get_git_diff = (input: ArtisanGitDiffInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: GitDiffQueryEnvelope = {
+						...trace,
+						kind: "git.diff.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(envelope, "git.diff.query.result");
+
+					return result.kind === "git.diff.query.result"
+						? result.payload
+						: yield* Effect.die("Git diff response narrowed incorrectly");
+				});
+
+			type GitMutationEnvelope =
+				| GitIndexStageRequestEnvelope
+				| GitIndexUnstageRequestEnvelope
+				| GitMutationResolveEnvelope;
+			const send_git_mutation = (envelope: GitMutationEnvelope) =>
+				Effect.gen(function* () {
+					const result = yield* requests.Request(envelope, "command.receipt");
+
+					if (result.kind !== "command.receipt") {
+						return yield* Effect.die("Git mutation receipt narrowed incorrectly");
+					}
+
+					if (result.payload.status === "rejected") {
+						return yield* Effect.fail(
+							client_error(
+								"protocol",
+								result.payload.error.message,
+								result.payload.error,
+								result.payload.error.retryable,
+								result.payload.error.code,
+							),
+						);
+					}
+
+					return {
+						command_id: envelope.message_id,
+						journal_sequence: result.payload.journal_sequence,
+						status: result.payload.status,
+					} satisfies ArtisanCommandReceipt;
+				});
+			const request_git_index_mutation = (input: ArtisanGitIndexMutationInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const message_id = input.command_id ?? trace.message_id;
+					const mutation_id =
+						input.mutation_id === undefined
+							? yield* runtime.MakeId("git_mutation")
+							: input.mutation_id;
+					const approval_id =
+						input.approval_id === undefined
+							? yield* runtime.MakeId("git_approval")
+							: input.approval_id;
+					const payload = {
+						approval_id,
+						expected_snapshot_id: input.expected_snapshot_id,
+						expected_workspace_version: input.expected_workspace_version,
+						mutation_id,
+						paths: input.paths,
+						workspace_id: input.workspace_id,
+					};
+					const attribution = {
+						...trace,
+						message_id,
+						thread_id: input.thread_id,
+						...(input.agent_id === undefined ? {} : { agent_id: input.agent_id }),
+						...(input.raw_origin === undefined ? {} : { raw_origin: input.raw_origin }),
+						...(input.run_id === undefined ? {} : { run_id: input.run_id }),
+					};
+					const envelope: GitIndexStageRequestEnvelope | GitIndexUnstageRequestEnvelope =
+						input.kind === "stage"
+							? { ...attribution, kind: "git.index.stage.request", payload }
+							: { ...attribution, kind: "git.index.unstage.request", payload };
+
+					return yield* send_git_mutation(envelope);
+				});
+			const resolve_git_mutation = (input: ArtisanGitMutationResolveInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: GitMutationResolveEnvelope = {
+						...trace,
+						kind: "git.mutation.resolve",
+						message_id: input.command_id ?? trace.message_id,
+						payload: {
+							approval_id: input.approval_id,
+							approved: input.approved,
+							mutation_id: input.mutation_id,
+						},
+						thread_id: input.thread_id,
+						...(input.agent_id === undefined ? {} : { agent_id: input.agent_id }),
+						...(input.raw_origin === undefined ? {} : { raw_origin: input.raw_origin }),
+						...(input.run_id === undefined ? {} : { run_id: input.run_id }),
+					};
+
+					return yield* send_git_mutation(envelope);
 				});
 
 			type WorkspaceMutationEnvelope =
@@ -635,6 +758,8 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				Events: subscriptions.Events,
 				GetOrchestrationGraph: get_orchestration_graph,
 				GetGlobalGuidance: get_global_guidance,
+				GetGitDiff: get_git_diff,
+				GetGitWorkspace: get_git_workspace,
 				GetModelBehaviour: get_model_behaviour,
 				GetThreadRetentionPolicy: get_thread_retention_policy,
 				GetThreadWork: get_thread_work,
@@ -646,6 +771,8 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				OpenTerminalOutput: (terminal_id) => streams.Open(`terminal:${terminal_id}`),
 				ReadWorkspaceFile: read_workspace_file,
 				ResolveGlobalGuidanceDrift: resolve_global_guidance_drift,
+				RequestGitIndexMutation: request_git_index_mutation,
+				ResolveGitMutation: resolve_git_mutation,
 				ResolveModelBehaviourDrift: resolve_model_behaviour_drift,
 				RetryGlobalGuidanceSync: retry_global_guidance_sync,
 				RetryModelBehaviourSync: retry_model_behaviour_sync,

@@ -3,6 +3,7 @@ import { Effect, Layer, Option, Stream } from "effect";
 import type {
 	EventEnvelope,
 	GlobalGuidanceSnapshot,
+	GitWorkspaceQueryResult,
 	ModelBehaviourSnapshot,
 	OrchestrationGraph,
 	TerminalSession,
@@ -28,6 +29,7 @@ export interface FixtureArtisanClientData {
 	readonly cursors: ArtisanClientCursors;
 	readonly events: ReadonlyArray<EventEnvelope>;
 	readonly global_guidance: GlobalGuidanceSnapshot;
+	readonly git_workspace: GitWorkspaceQueryResult;
 	readonly model_behaviour: ModelBehaviourSnapshot;
 	readonly orchestration_graph: OrchestrationGraph;
 	readonly terminal_output: Readonly<Record<string, Uint8Array>>;
@@ -57,6 +59,63 @@ export const fixture_artisan_client_data = {
 		last_journal_sequence: 48,
 	},
 	events: [],
+	git_workspace: {
+		journal_sequence: 48,
+		pending_mutations: [],
+		workspace: {
+			aggregate: {
+				binary_file_count: 0,
+				lines_added: 1,
+				lines_deleted: 1,
+				tracked_file_count: 1,
+			},
+			branch: { name: "main", type: "attached" },
+			clean: false,
+			files: [
+				{
+					flags: {
+						conflicted: false,
+						staged: false,
+						unstaged: true,
+						untracked: false,
+					},
+					path: "modules/frontend/src/lib/fixture.ts",
+					porcelain_status: ".M",
+				},
+			],
+			head: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+			journal_sequence: 48,
+			observed_at: fixture_timestamp,
+			repository_state: "repository",
+			snapshot_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			staged: {
+				binary_file_count: 0,
+				lines_added: 0,
+				lines_deleted: 0,
+				tracked_file_count: 0,
+			},
+			unstaged: {
+				binary_file_count: 0,
+				lines_added: 1,
+				lines_deleted: 1,
+				tracked_file_count: 1,
+			},
+			version: 1,
+			workspace_id: "workspace-artisan-editor",
+			worktrees: [
+				{
+					bare: false,
+					branch: { name: "main", type: "attached" },
+					head: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+					is_current: true,
+					locked: false,
+					path: "C:/Users/Sander/Desktop/artisan-editor",
+					prunable: false,
+					worktree_id: "worktree-artisan-editor",
+				},
+			],
+		},
+	},
 	global_guidance: {
 		candidates: [],
 		content: "Build calm, legible tools with explicit ownership.\n",
@@ -329,6 +388,43 @@ export const FixtureArtisanClientService = {
 	GetGlobalGuidance: Effect.gen(function* () {
 		return yield* Effect.succeed(fixture_artisan_client_data.global_guidance);
 	}),
+	GetGitDiff: (input) =>
+		Effect.gen(function* () {
+			const workspace = fixture_artisan_client_data.git_workspace.workspace;
+
+			if (
+				input.workspace_id !== workspace.workspace_id ||
+				input.expected_snapshot_id !== workspace.snapshot_id ||
+				input.expected_workspace_version !== workspace.version
+			) {
+				return yield* FixtureFailure(`Unknown fixture Git snapshot: ${input.workspace_id}`);
+			}
+
+			return {
+				byte_count: 0,
+				format: "unified" as const,
+				format_version: 1 as const,
+				patch: "",
+				scope: input.scope,
+				snapshot_id: workspace.snapshot_id,
+				truncated: false,
+				workspace_id: workspace.workspace_id,
+				workspace_version: workspace.version,
+			};
+		}),
+	GetGitWorkspace: (input) =>
+		Effect.gen(function* () {
+			if (
+				input.workspace_id !==
+				fixture_artisan_client_data.git_workspace.workspace.workspace_id
+			) {
+				return yield* FixtureFailure(
+					`Unknown fixture Git workspace: ${input.workspace_id}`,
+				);
+			}
+
+			return fixture_artisan_client_data.git_workspace;
+		}),
 	GetModelBehaviour: Effect.gen(function* () {
 		return yield* Effect.succeed(fixture_artisan_client_data.model_behaviour);
 	}),
@@ -435,6 +531,14 @@ export const FixtureArtisanClientService = {
 	ReplaceWorkspaceFile: (input) =>
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-workspace-replace");
+		}),
+	RequestGitIndexMutation: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-git-index-mutation");
+		}),
+	ResolveGitMutation: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-git-mutation-resolve");
 		}),
 	ResolveGlobalGuidanceDrift: (input) =>
 		Effect.gen(function* () {

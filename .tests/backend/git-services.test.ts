@@ -7,13 +7,13 @@ import { Effect, Layer, Option } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { Git } from "../../modules/backend/src/git/git";
-import { make_git_layer, make_node_git_layer } from "../../modules/backend/src/git/node-git";
 import {
-	ProcessRunner,
-	ProcessRunnerError,
-	type ProcessRunnerInput,
-	type ProcessRunnerResult,
-} from "../../modules/backend/src/git/process-runner";
+	GitCommandExecutor,
+	GitCommandExecutorError,
+	type GitCommandInput,
+	type GitCommandResult,
+} from "../../modules/backend/src/git/git-command-executor";
+import { make_git_layer, make_node_git_layer } from "../../modules/backend/src/git/node-git";
 
 const roots: Array<string> = [];
 
@@ -31,28 +31,48 @@ async function make_git(root: string) {
 	);
 }
 
-function process_result(stdout: string, input: ProcessRunnerInput): ProcessRunnerResult {
+function process_result(stdout: string, input: GitCommandInput): GitCommandResult {
 	const all_stdout = new TextEncoder().encode(stdout);
-	const limit = input.max_stdout_bytes ?? all_stdout.byteLength;
+	const limit = input.max_stdout_bytes;
 	const retained_stdout = all_stdout.slice(0, limit);
 
 	return {
 		exit_code: 0,
-		stderr: new Uint8Array(),
-		stderr_bytes: 0,
-		stderr_truncated: false,
-		stdout: retained_stdout,
-		stdout_bytes: all_stdout.byteLength,
-		stdout_truncated: retained_stdout.byteLength < all_stdout.byteLength,
+		stderr: { bytes: new Uint8Array(), total_bytes: 0, truncated: false },
+		stdout: {
+			bytes: retained_stdout,
+			total_bytes: all_stdout.byteLength,
+			truncated: retained_stdout.byteLength < all_stdout.byteLength,
+		},
 	};
 }
 
-async function make_injected_git(stdout: string, max_patch_bytes = 1_000_000) {
-	const process_runner_test = Layer.succeed(ProcessRunner, {
-		Run: (input) => Effect.succeed(process_result(stdout, input)),
+async function make_injected_git(
+	status_output: string,
+	patch_output = "",
+	max_patch_bytes = 1_000_000,
+) {
+	const root = await make_root();
+	const worktree_path = root.replaceAll("\\", "/");
+	const executor_test = Layer.succeed(GitCommandExecutor, {
+		Run: (input) => {
+			const stdout = input.args.includes("--is-inside-work-tree")
+				? "true\n"
+				: input.args.includes("status")
+					? status_output
+					: input.args.includes("worktree")
+						? `worktree ${worktree_path}\0HEAD ${"1".repeat(40)}\0branch refs/heads/main\0\0`
+						: input.args.includes("--numstat")
+							? ""
+							: input.args.includes("--binary")
+								? patch_output
+								: "";
+
+			return Effect.succeed(process_result(stdout, input));
+		},
 	});
-	const git_test = make_git_layer({ cwd: "injected repository", max_patch_bytes }).pipe(
-		Layer.provide(process_runner_test),
+	const git_test = make_git_layer({ cwd: root, max_patch_bytes }).pipe(
+		Layer.provide(executor_test),
 	);
 
 	return Effect.runPromise(Effect.service(Git).pipe(Effect.provide(git_test)));
@@ -113,8 +133,17 @@ describe("Git", () => {
 	});
 
 	it("consumes copy paths and marks conflicts without inventing staged state", async () => {
+		const oid = "1".repeat(40);
 		const git = await make_injected_git(
-			"C  copied name.txt\0source name.txt\0UU conflict.txt\0?? loose file.txt\0",
+			[
+				`# branch.oid ${oid}`,
+				"# branch.head main",
+				`2 C. N... 100644 100644 100644 ${oid} ${oid} C100 copied name.txt`,
+				"source name.txt",
+				`u UU N... 100644 100644 100644 100644 ${oid} ${oid} ${oid} conflict.txt`,
+				"? loose file.txt",
+				"",
+			].join("\0"),
 		);
 		const status = await Effect.runPromise(git.Status);
 
@@ -148,7 +177,8 @@ describe("Git", () => {
 	});
 
 	it("bounds patches by complete UTF-8 bytes and reports truncation", async () => {
-		const git = await make_injected_git("åb", 8);
+		const oid = "1".repeat(40);
+		const git = await make_injected_git(`# branch.oid ${oid}\0# branch.head main\0`, "åb", 8);
 
 		const two_bytes = await Effect.runPromise(git.DiffPatch(2));
 		const one_byte = await Effect.runPromise(git.DiffPatch(1));
@@ -172,23 +202,21 @@ describe("Git", () => {
 	});
 
 	it("returns the requested Git operation when an injected process fails", async () => {
-		const process_error = new ProcessRunnerError({
+		const root = await make_root();
+		const process_error = new GitCommandExecutorError({
 			cause: new Error("spawn failed"),
-			command: "git",
-			operation: "spawn",
+			operation: "process",
 		});
-		const process_runner_test = Layer.succeed(ProcessRunner, {
+		const executor_test = Layer.succeed(GitCommandExecutor, {
 			Run: () => Effect.fail(process_error),
 		});
-		const git_test = make_git_layer({ cwd: "injected repository" }).pipe(
-			Layer.provide(process_runner_test),
-		);
+		const git_test = make_git_layer({ cwd: root }).pipe(Layer.provide(executor_test));
 		const git = await Effect.runPromise(Effect.service(Git).pipe(Effect.provide(git_test)));
 
 		const error = await Effect.runPromise(git.Status.pipe(Effect.flip));
 
 		expect(error.operation).toBe("status");
-		expect(error.cause).toBe(process_error);
+		expect(JSON.stringify(error.cause)).toContain("GitReadError");
 	});
 
 	it("returns a typed discover failure outside a repository", async () => {

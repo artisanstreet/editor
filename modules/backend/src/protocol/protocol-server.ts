@@ -26,6 +26,11 @@ import {
 	type GlobalGuidanceRetryEnvelope,
 	type GlobalGuidanceSelectionEnvelope,
 	type GlobalGuidanceUpdateEnvelope,
+	type GitDiffQueryEnvelope,
+	type GitIndexStageRequestEnvelope,
+	type GitIndexUnstageRequestEnvelope,
+	type GitMutationResolveEnvelope,
+	type GitWorkspaceQueryEnvelope,
 	type HeartbeatPongEnvelope,
 	type HelloEnvelope,
 	type InboundControlEnvelope,
@@ -56,6 +61,7 @@ import {
 	type WorkspaceFileReplaceEnvelope,
 } from "@artisan/protocol";
 
+import { GitService, GitServiceError } from "../git/git-service";
 import { AgentGraphOrchestrator } from "../orchestration/agent-graph-orchestrator";
 import { GuidanceFileStoreFailure } from "../guidance/file-store";
 import { global_guidance_thread_id } from "../guidance/guidance-repository";
@@ -305,6 +311,144 @@ function workspace_diff_error_detail(error: unknown): ProtocolErrorDetail {
 	};
 }
 
+function git_error_detail(error: unknown): ProtocolErrorDetail {
+	if (error instanceof CommandIdConflict) {
+		return {
+			code: "command.id_conflict",
+			message: "This command id has already been used for different intent.",
+			retryable: false,
+		};
+	}
+
+	if (error instanceof GitServiceError) {
+		switch (error.reason) {
+			case "busy":
+				return {
+					code: "git.busy",
+					message: "Another Git mutation is already active for this workspace.",
+					retryable: true,
+				};
+			case "changed":
+				return {
+					code: "git.changed",
+					message: "The Git workspace changed; refresh before retrying.",
+					retryable: false,
+				};
+			case "id_conflict":
+				return {
+					code: "command.id_conflict",
+					message: "This command id has already been used for different Git intent.",
+					retryable: false,
+				};
+			case "invalid_path":
+				return {
+					code: "git.invalid_path",
+					message: "One or more paths are not eligible for this Git mutation.",
+					retryable: false,
+				};
+			case "invariant":
+				return {
+					code: "git.invariant_failed",
+					message: "The durable Git state failed validation.",
+					retryable: false,
+				};
+			case "not_repository":
+				return {
+					code: "git.not_repository",
+					message: "The workspace is not a Git repository.",
+					retryable: false,
+				};
+			case "unsupported_state":
+				return {
+					code: "git.unsupported_state",
+					message: "This Git mutation is not supported in the current repository state.",
+					retryable: false,
+				};
+			case "unavailable":
+				return {
+					code: "git.unavailable",
+					message: "The Git operation could not be completed.",
+					retryable: error.retryable,
+				};
+		}
+	}
+
+	const tagged =
+		typeof error === "object" && error !== null
+			? (error as { readonly _tag?: unknown; readonly reason?: unknown })
+			: undefined;
+	const tag = typeof tagged?._tag === "string" ? tagged._tag : "";
+	const reason = typeof tagged?.reason === "string" ? tagged.reason : "";
+
+	if (reason === "changed" || reason === "snapshot_changed" || reason === "workspace_changed") {
+		return {
+			code: "git.changed",
+			message: "The Git workspace changed; refresh before retrying.",
+			retryable: false,
+		};
+	}
+
+	if (
+		reason === "decision_conflict" ||
+		reason === "id_conflict" ||
+		reason === "mutation_conflict"
+	) {
+		return {
+			code: "command.id_conflict",
+			message: "This command id has already been used for different Git intent.",
+			retryable: false,
+		};
+	}
+
+	if (reason === "busy" || reason === "workspace_busy") {
+		return {
+			code: "git.busy",
+			message: "Another Git mutation is already active for this workspace.",
+			retryable: true,
+		};
+	}
+
+	if (reason === "not_repository") {
+		return {
+			code: "git.not_repository",
+			message: "The workspace is not a Git repository.",
+			retryable: false,
+		};
+	}
+
+	if (
+		reason === "not_found" ||
+		reason === "thread_unavailable" ||
+		reason === "unauthorized" ||
+		reason === "workspace_unavailable"
+	) {
+		return {
+			code: "git.unavailable",
+			message: "The Git workspace is not available.",
+			retryable: false,
+		};
+	}
+
+	if (
+		tag.includes("Invariant") ||
+		tag.includes("Invalid") ||
+		reason === "corrupt" ||
+		reason === "invariant"
+	) {
+		return {
+			code: "git.invariant_failed",
+			message: "The durable Git state failed validation.",
+			retryable: false,
+		};
+	}
+
+	return {
+		code: "git.unavailable",
+		message: "The Git operation could not be completed.",
+		retryable: true,
+	};
+}
+
 function thread_item_from_event(event: EventEnvelope): ThreadListItem | undefined {
 	if (event.payload.type === "thread.metadata.updated") {
 		return event.payload.thread;
@@ -376,6 +520,7 @@ export function make_protocol_server_layer(
 		ProtocolServer,
 		Effect.gen(function* () {
 			const options = yield* DecodeProtocolConnectionOptions(input_options);
+			const git = yield* GitService;
 			const graph = yield* AgentGraphOrchestrator;
 			const guidance = yield* GlobalGuidanceService;
 			const model_behaviour = yield* ModelBehaviourService;
@@ -1090,6 +1235,73 @@ export function make_protocol_server_layer(
 						}),
 					);
 
+				const HandleGitWorkspaceQuery = (
+					query: GitWorkspaceQueryEnvelope,
+					current: ReadyState,
+				) =>
+					git.Query(query).pipe(
+						Effect.flatMap((result) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "git.workspace.query.result",
+									message_id,
+									origin: "backend",
+									payload: result,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch((error) => {
+							const detail = git_error_detail(error);
+
+							return EnqueueError(
+								current,
+								detail.code,
+								detail.message,
+								detail.retryable,
+								query.message_id,
+							);
+						}),
+					);
+
+				const HandleGitDiffQuery = (query: GitDiffQueryEnvelope, current: ReadyState) =>
+					git.Diff(query).pipe(
+						Effect.flatMap((result) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "git.diff.query.result",
+									message_id,
+									origin: "backend",
+									payload: result,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch((error) => {
+							const detail = git_error_detail(error);
+
+							return EnqueueError(
+								current,
+								detail.code,
+								detail.message,
+								detail.retryable,
+								query.message_id,
+							);
+						}),
+					);
+
 				const HandleSubscribe = (subscribe: SubscribeEnvelope, current: ReadyState) =>
 					Effect.gen(function* () {
 						if (current.subscriptions[subscribe.subscription_id]) {
@@ -1664,6 +1876,97 @@ export function make_protocol_server_layer(
 						}),
 					);
 				};
+				type GitMutationEnvelope =
+					| GitIndexStageRequestEnvelope
+					| GitIndexUnstageRequestEnvelope
+					| GitMutationResolveEnvelope;
+				const HandleGitMutation = (envelope: GitMutationEnvelope) => {
+					const operation =
+						envelope.kind === "git.mutation.resolve"
+							? git.Resolve(envelope)
+							: git.Request(envelope);
+
+					return operation.pipe(
+						Effect.matchEffect({
+							onFailure: (error) => {
+								const detail = git_error_detail(error);
+
+								return Effect.gen(function* () {
+									const message_id = yield* metadata.MakeId("message");
+									const sent_at = yield* metadata.Now;
+
+									yield* Enqueue({
+										causation_id: envelope.message_id,
+										correlation_id: envelope.message_id,
+										kind: "command.receipt",
+										message_id,
+										origin: "backend",
+										payload: { error: detail, status: "rejected" },
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at,
+										thread_id: envelope.thread_id,
+										...(envelope.agent_id === undefined
+											? {}
+											: { agent_id: envelope.agent_id }),
+										...(envelope.run_id === undefined
+											? {}
+											: { run_id: envelope.run_id }),
+									});
+								});
+							},
+							onSuccess: (acceptance) =>
+								Effect.gen(function* () {
+									const message_id = yield* metadata.MakeId("message");
+									const sent_at = yield* metadata.Now;
+
+									yield* Enqueue({
+										causation_id: envelope.message_id,
+										correlation_id: envelope.message_id,
+										kind: "command.receipt",
+										message_id,
+										origin: "backend",
+										payload: {
+											journal_sequence: acceptance.event.journal_sequence,
+											status: acceptance.status,
+										},
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at,
+										thread_id: envelope.thread_id,
+										...(envelope.agent_id === undefined
+											? {}
+											: { agent_id: envelope.agent_id }),
+										...(envelope.run_id === undefined
+											? {}
+											: { run_id: envelope.run_id }),
+									});
+
+									const latest = yield* Ref.get(state);
+
+									if (latest._tag === "Ready") {
+										yield* journal
+											.ReadReplay({
+												after_journal_sequence:
+													latest.delivered_journal_sequence,
+											})
+											.pipe(
+												Effect.flatMap(DeliverLiveEvents),
+												Effect.catch(() =>
+													EnqueueError(
+														latest,
+														"journal.replay_failed",
+														"Live journal delivery could not be resumed.",
+														true,
+														envelope.message_id,
+													),
+												),
+											);
+									}
+								}),
+						}),
+					);
+				};
 
 				const HandleReadyEnvelope = (
 					envelope: Exclude<InboundControlEnvelope, HelloEnvelope>,
@@ -1684,6 +1987,14 @@ export function make_protocol_server_layer(
 							return HandleWorkspaceChangeListQuery(envelope, current);
 						case "workspace.change.diff.query":
 							return HandleWorkspaceChangeDiffQuery(envelope, current);
+						case "git.workspace.query":
+							return HandleGitWorkspaceQuery(envelope, current);
+						case "git.diff.query":
+							return HandleGitDiffQuery(envelope, current);
+						case "git.index.stage.request":
+						case "git.index.unstage.request":
+						case "git.mutation.resolve":
+							return HandleGitMutation(envelope);
 						case "workspace.file.replace":
 						case "workspace.change.review":
 						case "workspace.change.rollback":

@@ -13,6 +13,17 @@ import {
 	WorkspaceFileReplaceRequest,
 } from "./workspace-changes";
 import {
+	GitDiffQuery,
+	GitDiffQueryResult,
+	GitIndexStageRequest,
+	GitIndexUnstageRequest,
+	GitMutationResolveRequest,
+	GitMutationUpdatedEvent,
+	GitWorkspaceQuery,
+	GitWorkspaceQueryResult,
+	GitWorkspaceUpdatedEvent,
+} from "./git";
+import {
 	Identifier,
 	IsoDateTime,
 	JournalSequence,
@@ -71,6 +82,7 @@ export * from "./thread";
 export * from "./guidance";
 export * from "./model-behaviour";
 export * from "./workspace-changes";
+export * from "./git";
 
 const FrontendTraceMetadata = {
 	message_id: Identifier,
@@ -913,6 +925,8 @@ export const EventPayload = Schema.Union([
 	FilesystemMutationEvent,
 	ProcessOwnershipEvent,
 	GitWorkspaceObservedEvent,
+	GitWorkspaceUpdatedEvent,
+	GitMutationUpdatedEvent,
 	TerminalLifecycleEvent,
 	OrchestrationGraphLifecycleEvent,
 	AssignmentHeartbeatEvent,
@@ -1161,6 +1175,83 @@ export const WorkspaceChangeDiffQueryResultEnvelope = Schema.Struct({
 
 export type WorkspaceChangeDiffQueryResultEnvelope =
 	typeof WorkspaceChangeDiffQueryResultEnvelope.Type;
+
+/** Requests the durable Git projection and unresolved mutations for one workspace. */
+export const GitWorkspaceQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("git.workspace.query"),
+	payload: GitWorkspaceQuery,
+});
+
+export type GitWorkspaceQueryEnvelope = typeof GitWorkspaceQueryEnvelope.Type;
+
+/** Returns one correlated durable Git workspace projection. */
+export const GitWorkspaceQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("git.workspace.query.result"),
+	payload: GitWorkspaceQueryResult,
+});
+
+export type GitWorkspaceQueryResultEnvelope = typeof GitWorkspaceQueryResultEnvelope.Type;
+
+/** Requests one bounded Git diff for an exact observed workspace snapshot. */
+export const GitDiffQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("git.diff.query"),
+	payload: GitDiffQuery,
+});
+
+export type GitDiffQueryEnvelope = typeof GitDiffQueryEnvelope.Type;
+
+/** Returns one correlated ephemeral Git diff. */
+export const GitDiffQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("git.diff.query.result"),
+	payload: GitDiffQueryResult,
+});
+
+export type GitDiffQueryResultEnvelope = typeof GitDiffQueryResultEnvelope.Type;
+
+/** Requests approval for staging exact paths with complete trace attribution. */
+export const GitIndexStageRequestEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	agent_id: Schema.optional(Identifier),
+	kind: Schema.Literal("git.index.stage.request"),
+	payload: GitIndexStageRequest,
+	raw_origin: Schema.optional(RawOrigin),
+	run_id: Schema.optional(Identifier),
+	thread_id: Identifier,
+});
+
+export type GitIndexStageRequestEnvelope = typeof GitIndexStageRequestEnvelope.Type;
+
+/** Requests approval for unstaging exact paths with complete trace attribution. */
+export const GitIndexUnstageRequestEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	agent_id: Schema.optional(Identifier),
+	kind: Schema.Literal("git.index.unstage.request"),
+	payload: GitIndexUnstageRequest,
+	raw_origin: Schema.optional(RawOrigin),
+	run_id: Schema.optional(Identifier),
+	thread_id: Identifier,
+});
+
+export type GitIndexUnstageRequestEnvelope = typeof GitIndexUnstageRequestEnvelope.Type;
+
+/** Resolves the approval bound to one exact Git mutation. */
+export const GitMutationResolveEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	agent_id: Schema.optional(Identifier),
+	kind: Schema.Literal("git.mutation.resolve"),
+	payload: GitMutationResolveRequest,
+	raw_origin: Schema.optional(RawOrigin),
+	run_id: Schema.optional(Identifier),
+	thread_id: Identifier,
+});
+
+export type GitMutationResolveEnvelope = typeof GitMutationResolveEnvelope.Type;
 
 /** Requests the curated Model Behaviour registry and current reconciliation state. */
 export const ModelBehaviourQueryEnvelope = Schema.Struct({
@@ -1476,6 +1567,11 @@ export const InboundControlEnvelope = Schema.Union([
 	WorkspaceChangeRollbackEnvelope,
 	WorkspaceChangeListQueryEnvelope,
 	WorkspaceChangeDiffQueryEnvelope,
+	GitWorkspaceQueryEnvelope,
+	GitDiffQueryEnvelope,
+	GitIndexStageRequestEnvelope,
+	GitIndexUnstageRequestEnvelope,
+	GitMutationResolveEnvelope,
 	GlobalGuidanceQueryEnvelope,
 	GlobalGuidanceUpdateEnvelope,
 	GlobalGuidanceSelectionEnvelope,
@@ -1509,6 +1605,8 @@ export const OutboundControlEnvelope = Schema.Union([
 	WorkspaceFileReadQueryResultEnvelope,
 	WorkspaceChangeListQueryResultEnvelope,
 	WorkspaceChangeDiffQueryResultEnvelope,
+	GitWorkspaceQueryResultEnvelope,
+	GitDiffQueryResultEnvelope,
 	GlobalGuidanceQueryResultEnvelope,
 	ModelBehaviourQueryResultEnvelope,
 	ThreadWorkQueryResultEnvelope,

@@ -22,6 +22,15 @@ import {
 } from "../filesystem/workspace-bounded-regular-file-store-registry";
 import { NativeBoundedRegularFileStoreInitializationError } from "../filesystem/native-bounded-regular-file-store";
 import { NodeProcessRunnerLive } from "../git/node-process-runner";
+import { GitMutationDriverLive } from "../git/git-mutation-driver";
+import { GitReadServiceLive } from "../git/git-read-service";
+import { GitRepositoryLive } from "../git/git-repository";
+import { GitService, GitServiceLive } from "../git/git-service";
+import {
+	make_node_workspace_git_registry_layer,
+	WorkspaceGitRegistrationError,
+	WorkspaceGitRegistry,
+} from "../git/workspace-git-registry";
 import { make_database_layer } from "../persistence/database";
 import { JournalNotifierLive } from "../persistence/journal-notifier";
 import { JournalStoreLive } from "../persistence/journal-store";
@@ -103,6 +112,7 @@ export interface BackendOptions {
 	readonly engines?: ReadonlyArray<Engine>;
 	readonly guidance?: Partial<GlobalGuidanceServiceOptions>;
 	readonly guidance_provider_registry?: Layer.Layer<GuidanceProviderRegistry>;
+	readonly git_service?: Layer.Layer<GitService>;
 	readonly migrations_path: string;
 	readonly model_behaviour_provider_registry?: Layer.Layer<
 		ModelBehaviourProviderRegistry,
@@ -119,6 +129,10 @@ export interface BackendOptions {
 	readonly workspace_filesystem_registry?: Layer.Layer<
 		WorkspaceFilesystemRegistry,
 		WorkspaceFilesystemRegistrationError
+	>;
+	readonly workspace_git_registry?: Layer.Layer<
+		WorkspaceGitRegistry,
+		WorkspaceGitRegistrationError
 	>;
 	readonly workspace_bounded_regular_file_store_registry?: Layer.Layer<
 		WorkspaceBoundedRegularFileStoreRegistry,
@@ -183,6 +197,8 @@ export function make_backend_layer(options: BackendOptions) {
 	);
 	const workspace_filesystems =
 		options.workspace_filesystem_registry ?? make_node_workspace_filesystem_registry_layer([]);
+	const workspace_git_registry =
+		options.workspace_git_registry ?? make_node_workspace_git_registry_layer([]);
 	const workspace_bounded_filesystems =
 		options.workspace_bounded_regular_file_store_registry ??
 		EmptyWorkspaceBoundedRegularFileStoreRegistryLive;
@@ -205,6 +221,29 @@ export function make_backend_layer(options: BackendOptions) {
 			),
 		),
 	);
+	const git_reads = GitReadServiceLive.pipe(
+		Layer.provideMerge(workspace_git_registry),
+		Layer.provideMerge(NodeCrypto.layer),
+	);
+	const git_mutations = GitMutationDriverLive.pipe(Layer.provideMerge(workspace_git_registry));
+	const git_repository = GitRepositoryLive.pipe(
+		Layer.provideMerge(infrastructure),
+		Layer.provideMerge(NodeCrypto.layer),
+	);
+	const git =
+		options.git_service ??
+		GitServiceLive.pipe(
+			Layer.provide(
+				Layer.mergeAll(
+					NodeCrypto.layer,
+					git_mutations,
+					git_reads,
+					git_repository,
+					workspace_evidence,
+					infrastructure,
+				),
+			),
+		);
 	const engine_registry = make_engine_registry_layer(options.engines ?? []);
 	const guidance_repository = GlobalGuidanceRepositoryLive.pipe(Layer.provideMerge(persistence));
 	const guidance_directory = join(dirname(options.database_path), "guidance");
@@ -310,7 +349,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(terminals),
 	);
 
-	return make_protocol_server_layer(protocol_options).pipe(
+	const protocol = make_protocol_server_layer(protocol_options).pipe(
 		Layer.provideMerge(routing),
 		Layer.provideMerge(retention_policy),
 		Layer.provideMerge(graph),
@@ -321,10 +360,14 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(metadata_refinement),
 		Layer.provideMerge(project_affinity_coordination),
 		Layer.provideMerge(guidance),
+		Layer.provideMerge(git),
 		Layer.provideMerge(model_behaviour),
 		Layer.provideMerge(workspace_files),
 		Layer.provideMerge(workspace_changes),
 		Layer.provideMerge(workspace_diffs),
+	);
+
+	return protocol.pipe(
 		Layer.provideMerge(workspace_evidence),
 		Layer.provideMerge(workspace_authority),
 		Layer.provideMerge(workspace_bounded_filesystems),

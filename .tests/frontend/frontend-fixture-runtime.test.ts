@@ -7,6 +7,7 @@ import { Context, Effect, Layer, Schema } from "effect";
 
 import {
 	GlobalGuidanceSnapshot,
+	GitWorkspaceQueryResult,
 	ModelBehaviourSnapshot,
 	OrchestrationGraph,
 	TerminalSession,
@@ -72,6 +73,8 @@ describe("frontend ArtisanClient fixture runtime", () => {
 						"Errors",
 						"Events",
 						"GetGlobalGuidance",
+						"GetGitDiff",
+						"GetGitWorkspace",
 						"GetModelBehaviour",
 						"GetOrchestrationGraph",
 						"GetThreadRetentionPolicy",
@@ -84,6 +87,8 @@ describe("frontend ArtisanClient fixture runtime", () => {
 						"OpenTerminalOutput",
 						"ReadWorkspaceFile",
 						"ReplaceWorkspaceFile",
+						"RequestGitIndexMutation",
+						"ResolveGitMutation",
 						"ResolveGlobalGuidanceDrift",
 						"ResolveModelBehaviourDrift",
 						"RetryGlobalGuidanceSync",
@@ -129,6 +134,9 @@ describe("frontend ArtisanClient fixture runtime", () => {
 
 				yield* Schema.decodeUnknownEffect(GlobalGuidanceSnapshot)(
 					fixture_artisan_client_data.global_guidance,
+				);
+				yield* Schema.decodeUnknownEffect(GitWorkspaceQueryResult)(
+					fixture_artisan_client_data.git_workspace,
 				);
 				yield* Schema.decodeUnknownEffect(ModelBehaviourSnapshot)(
 					fixture_artisan_client_data.model_behaviour,

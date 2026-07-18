@@ -46,6 +46,11 @@ export type PendingRequestEnvelope = Extract<
 	{
 		readonly kind:
 			| "command"
+			| "git.diff.query"
+			| "git.index.stage.request"
+			| "git.index.unstage.request"
+			| "git.mutation.resolve"
+			| "git.workspace.query"
 			| "guidance.drift.resolve"
 			| "guidance.query"
 			| "guidance.selection"
@@ -76,6 +81,8 @@ export type PendingResultEnvelope = Extract<
 	{
 		readonly kind:
 			| "command.receipt"
+			| "git.diff.query.result"
+			| "git.workspace.query.result"
 			| "guidance.query.result"
 			| "model_behaviour.query.result"
 			| "orchestration.graph.query.result"

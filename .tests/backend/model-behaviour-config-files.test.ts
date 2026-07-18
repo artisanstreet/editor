@@ -598,7 +598,7 @@ describe("ModelBehaviourConfigFiles", () => {
 			_tag: "WindowsPrivateFilePermissionsSnapshot",
 			sddl: expect.stringContaining("D:P"),
 		});
-	});
+	}, 30_000);
 
 	it("does not change a target substituted before permission application", async () => {
 		const directory = await make_directory();

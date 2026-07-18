@@ -326,8 +326,72 @@ export {
 	type GitDiffStats,
 	type GitFileSummary,
 	type GitOperation,
-	type GitRepository,
+	type GitRepository as LegacyGitRepository,
 } from "./git/git";
+export {
+	GitCommandExecutor,
+	GitCommandExecutorError,
+	make_git_command_executor_layer,
+	make_node_git_command_executor_layer,
+	type GitCommandInput,
+	type GitCommandExecutorOperation,
+	type GitCommandExecutorOptions,
+	type GitCommandOutput,
+	type GitCommandResult,
+	NodeGitCommandExecutorLive,
+} from "./git/git-command-executor";
+export {
+	GitMutationDriver,
+	GitMutationDriverError,
+	GitMutationDriverLive,
+	type GitMutationDriverOperation,
+	type GitMutationRequest,
+} from "./git/git-mutation-driver";
+export {
+	GitReadError,
+	GitReadService,
+	GitReadServiceLive,
+	make_git_read_service_layer,
+	type GitReadOperation,
+	type GitReadServiceOptions,
+} from "./git/git-read-service";
+export {
+	GitRepository,
+	GitRepositoryConflict,
+	GitRepositoryInvalid,
+	GitRepositoryInvariantError,
+	GitRepositoryLive,
+	GitRepositoryNotFound,
+	GitRepositoryPersistenceFailure,
+	GitWorkspaceObservation,
+	type GitMutationAcceptance,
+	type GitMutationRequestEnvelope,
+	type GitMutationSuccessCommit,
+	type GitRepositoryConflictReason,
+	type GitRepositoryError,
+	type GitRepositoryRecovery,
+	type GitWorkspaceCommit,
+} from "./git/git-repository";
+export {
+	GitService,
+	GitServiceError,
+	GitServiceLive,
+	type GitServiceOperation,
+} from "./git/git-service";
+export {
+	make_node_workspace_git_registry_layer,
+	make_workspace_git_registry_layer,
+	WorkspaceGitAuthorizationError,
+	WorkspaceGitNotFoundError,
+	WorkspaceGitRegistrationError,
+	WorkspaceGitRegistry,
+	WorkspaceGitRootChangedError,
+	type WorkspaceGit,
+	type WorkspaceGitAuthorization,
+	type WorkspaceGitCapability,
+	type WorkspaceGitCommandInput,
+	type WorkspaceGitRegistration,
+} from "./git/workspace-git-registry";
 export { make_git_layer, make_node_git_layer, type NodeGitOptions } from "./git/node-git";
 export {
 	make_node_process_runner_layer,

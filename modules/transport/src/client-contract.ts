@@ -7,6 +7,14 @@ import type {
 	GlobalGuidanceProvider,
 	GlobalGuidanceSelectionRequest,
 	GlobalGuidanceSnapshot,
+	GitDiffQuery,
+	GitDiffQueryResult,
+	GitMutationKind,
+	GitMutationPaths,
+	GitMutationResolveRequest,
+	GitSnapshotId,
+	GitWorkspaceQuery,
+	GitWorkspaceQueryResult,
 	ContentIdentity,
 	ModelBehaviourDriftResolutionRequest,
 	ModelBehaviourRetryRequest,
@@ -101,6 +109,37 @@ export interface ArtisanWorkspaceChangeRollbackInput {
 	readonly change_id: string;
 	readonly command_id?: string;
 	readonly expected_after: ContentIdentity;
+	readonly thread_id: string;
+}
+
+/** Supplies the thread and workspace identity for one durable Git projection query. */
+export interface ArtisanGitWorkspaceInput extends GitWorkspaceQuery {}
+
+/** Supplies the exact snapshot and scope for one bounded Git diff query. */
+export interface ArtisanGitDiffInput extends GitDiffQuery {}
+
+/** Supplies one approval-bearing stage or unstage request with trace attribution. */
+export interface ArtisanGitIndexMutationInput {
+	readonly agent_id?: string;
+	readonly approval_id?: string;
+	readonly command_id?: string;
+	readonly expected_snapshot_id: GitSnapshotId;
+	readonly expected_workspace_version: number;
+	readonly kind: GitMutationKind;
+	readonly mutation_id?: string;
+	readonly paths: GitMutationPaths;
+	readonly raw_origin?: RawOrigin;
+	readonly run_id?: string;
+	readonly thread_id: string;
+	readonly workspace_id: string;
+}
+
+/** Resolves the approval bound to one exact Git mutation with trace attribution. */
+export interface ArtisanGitMutationResolveInput extends GitMutationResolveRequest {
+	readonly agent_id?: string;
+	readonly command_id?: string;
+	readonly raw_origin?: RawOrigin;
+	readonly run_id?: string;
 	readonly thread_id: string;
 }
 
@@ -214,6 +253,12 @@ export class ArtisanClient extends Context.Service<
 			group_id: string,
 		) => Effect.Effect<OrchestrationGraph, ArtisanClientError>;
 		readonly GetGlobalGuidance: Effect.Effect<GlobalGuidanceSnapshot, ArtisanClientError>;
+		readonly GetGitDiff: (
+			input: ArtisanGitDiffInput,
+		) => Effect.Effect<GitDiffQueryResult, ArtisanClientError>;
+		readonly GetGitWorkspace: (
+			input: ArtisanGitWorkspaceInput,
+		) => Effect.Effect<GitWorkspaceQueryResult, ArtisanClientError>;
 		readonly GetModelBehaviour: Effect.Effect<ModelBehaviourSnapshot, ArtisanClientError>;
 		readonly GetThreadRetentionPolicy: Effect.Effect<ThreadRetentionPolicy, ArtisanClientError>;
 		readonly GetThreadWork: (
@@ -261,6 +306,12 @@ export class ArtisanClient extends Context.Service<
 		>;
 		readonly ResolveGlobalGuidanceDrift: (
 			input: ArtisanGlobalGuidanceDriftInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly RequestGitIndexMutation: (
+			input: ArtisanGitIndexMutationInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly ResolveGitMutation: (
+			input: ArtisanGitMutationResolveInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly ResolveModelBehaviourDrift: (
 			input: ArtisanModelBehaviourDriftInput,

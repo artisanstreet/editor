@@ -360,6 +360,8 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 				switch (envelope.kind) {
 					case "command.receipt":
 					case "guidance.query.result":
+					case "git.diff.query.result":
+					case "git.workspace.query.result":
 					case "model_behaviour.query.result":
 					case "orchestration.graph.query.result":
 					case "terminal.list.query.result":
@@ -368,6 +370,7 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 					case "thread.work.query.result":
 					case "workspace.file.read.query.result":
 					case "workspace.change.list.query.result":
+					case "workspace.change.diff.query.result":
 						return handlers.requests.Resolve(envelope);
 					case "event":
 						return handlers.subscriptions.ApplyEvent(envelope).pipe(

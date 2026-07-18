@@ -9,6 +9,7 @@ import {
 	AgentRuns,
 	Assignments,
 	EventStreams,
+	GitMutationOperations,
 	JournalCommands,
 	JournalEvents,
 	OrchestrationArtifacts,
@@ -88,6 +89,22 @@ export const ThreadErasureLive = Layer.effect(
 					),
 			),
 		);
+		const HasPendingGitMutation = (thread_id: typeof Threads.thread_id) =>
+			exists(
+				database.client
+					.select({ mutation_id: GitMutationOperations.mutation_id })
+					.from(GitMutationOperations)
+					.where(
+						and(
+							eq(GitMutationOperations.thread_id, thread_id),
+							inArray(GitMutationOperations.lifecycle, [
+								"awaiting_approval",
+								"approved",
+								"dispatching",
+							]),
+						),
+					),
+			);
 
 		const ClaimExpired = (cutoff: string, claimed_at: string) =>
 			database.client
@@ -119,6 +136,7 @@ export const ThreadErasureLive = Layer.effect(
 												),
 										),
 									),
+									not(HasPendingGitMutation(Threads.thread_id)),
 								),
 							)
 							.orderBy(Threads.last_activity_at, Threads.thread_id);
@@ -163,8 +181,22 @@ export const ThreadErasureLive = Layer.effect(
 								),
 							)
 							.limit(1);
+						const [pending_git_mutation] = yield* transaction
+							.select({ mutation_id: GitMutationOperations.mutation_id })
+							.from(GitMutationOperations)
+							.where(
+								and(
+									eq(GitMutationOperations.thread_id, thread_id),
+									inArray(GitMutationOperations.lifecycle, [
+										"awaiting_approval",
+										"approved",
+										"dispatching",
+									]),
+								),
+							)
+							.limit(1);
 
-						if (pending_mutation) {
+						if (pending_mutation || pending_git_mutation) {
 							yield* transaction
 								.delete(ThreadErasureClaims)
 								.where(eq(ThreadErasureClaims.thread_id, thread_id));
@@ -289,6 +321,9 @@ export const ThreadErasureLive = Layer.effect(
 						yield* transaction
 							.delete(WorkspaceChangeOperations)
 							.where(eq(WorkspaceChangeOperations.thread_id, thread_id));
+						yield* transaction
+							.delete(GitMutationOperations)
+							.where(eq(GitMutationOperations.thread_id, thread_id));
 						yield* transaction
 							.delete(JournalCommands)
 							.where(eq(JournalCommands.thread_id, thread_id));
