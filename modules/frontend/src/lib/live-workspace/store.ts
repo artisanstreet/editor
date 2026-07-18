@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Option, PubSub, Ref, Stream } from "effect";
+import { Context, Effect, Layer, Option, Stream, SubscriptionRef } from "effect";
 
 import type {
 	GlobalGuidanceSnapshot,
@@ -31,6 +31,13 @@ export interface LiveWorkspaceSnapshot {
 	readonly threads: ReadonlyArray<ThreadListItem>;
 }
 
+interface LiveWorkspaceState {
+	readonly list_generation: number;
+	readonly refresh_generation: number;
+	readonly selection_generation: number;
+	readonly snapshot: LiveWorkspaceSnapshot;
+}
+
 const EmptySnapshot: LiveWorkspaceSnapshot = {
 	error: Option.none(),
 	global_guidance: Option.none(),
@@ -41,6 +48,13 @@ const EmptySnapshot: LiveWorkspaceSnapshot = {
 	threads: [],
 };
 
+const EmptyState: LiveWorkspaceState = {
+	list_generation: 0,
+	refresh_generation: 0,
+	selection_generation: 0,
+	snapshot: EmptySnapshot,
+};
+
 export const ToLiveWorkspacePhase = (phase: FrontendConnectionPhase): LiveWorkspacePhase => {
 	if (phase === "ready") return "ready";
 	if (phase === "reconnecting") return "reconnecting";
@@ -49,6 +63,29 @@ export const ToLiveWorkspacePhase = (phase: FrontendConnectionPhase): LiveWorksp
 	return "connecting";
 };
 
+/** A new ready generation is the only lifecycle state that may reload projections. */
+export const ShouldRefreshForConnection = (phase: FrontendConnectionPhase) => phase === "ready";
+
+const selected_thread_exists = (
+	selected_thread_id: Option.Option<string>,
+	threads: ReadonlyArray<ThreadListItem>,
+) =>
+	Option.isNone(selected_thread_id) ||
+	threads.some((thread) => thread.thread_id === selected_thread_id.value);
+
+const reconcile_selection = (
+	snapshot: LiveWorkspaceSnapshot,
+	threads: ReadonlyArray<ThreadListItem>,
+): LiveWorkspaceSnapshot =>
+	selected_thread_exists(snapshot.selected_thread_id, threads)
+		? { ...snapshot, threads }
+		: {
+				...snapshot,
+				selected_thread_id: Option.none(),
+				thread_work: Option.none(),
+				threads,
+			};
+
 export const ApplyThreadListUpdate = (
 	snapshot: LiveWorkspaceSnapshot,
 	update:
@@ -56,29 +93,43 @@ export const ApplyThreadListUpdate = (
 		| { readonly type: "upsert"; readonly thread: ThreadListItem }
 		| { readonly type: "remove"; readonly thread_id: string },
 ): LiveWorkspaceSnapshot => {
-	if (update.type === "snapshot") return { ...snapshot, threads: update.threads };
+	if (update.type === "snapshot") return reconcile_selection(snapshot, update.threads);
 	if (update.type === "remove") {
-		return {
-			...snapshot,
-			selected_thread_id:
-				Option.getOrUndefined(snapshot.selected_thread_id) === update.thread_id
-					? Option.none()
-					: snapshot.selected_thread_id,
-			threads: snapshot.threads.filter((thread) => thread.thread_id !== update.thread_id),
-		};
+		return reconcile_selection(
+			snapshot,
+			snapshot.threads.filter((thread) => thread.thread_id !== update.thread_id),
+		);
 	}
 
 	const threads = snapshot.threads.filter(
 		(thread) => thread.thread_id !== update.thread.thread_id,
 	);
-	return { ...snapshot, threads: [update.thread, ...threads] };
+	return reconcile_selection(snapshot, [update.thread, ...threads]);
 };
+
+const SelectThreadSnapshot = (snapshot: LiveWorkspaceSnapshot, thread_id: string) => ({
+	...snapshot,
+	error: Option.none(),
+	selected_thread_id: Option.some(thread_id),
+	thread_work: Option.none(),
+});
+
+/** Rejects a late work query when the renderer has selected another thread. */
+export const IsCurrentThreadSelection = (
+	snapshot: LiveWorkspaceSnapshot,
+	selection_generation: number,
+	expected_thread_id: string,
+	expected_selection_generation: number,
+) =>
+	selection_generation === expected_selection_generation &&
+	Option.getOrUndefined(snapshot.selected_thread_id) === expected_thread_id;
 
 /** Owns renderer-only live projection state; durable records remain backend projections. */
 export class LiveWorkspaceStore extends Context.Service<
 	LiveWorkspaceStore,
 	{
 		readonly Changes: Stream.Stream<LiveWorkspaceSnapshot>;
+		readonly CreateThread: (title: string) => Effect.Effect<void>;
 		readonly Refresh: Effect.Effect<void>;
 		readonly SendMessage: (text: string) => Effect.Effect<void>;
 		readonly SelectThread: (thread_id: string) => Effect.Effect<void>;
@@ -91,72 +142,151 @@ export const LiveWorkspaceStoreLive = Layer.effect(
 	Effect.gen(function* () {
 		const client = yield* ArtisanClient;
 		const lifecycle = yield* FrontendConnectionLifecycle;
-		const state = yield* Ref.make<LiveWorkspaceSnapshot>(EmptySnapshot);
-		const changes = yield* PubSub.sliding<LiveWorkspaceSnapshot>(16);
+		const state = yield* SubscriptionRef.make(EmptyState);
 
-		const Update = (update: (snapshot: LiveWorkspaceSnapshot) => LiveWorkspaceSnapshot) =>
-			Ref.modify(state, (snapshot) => {
-				const next = update(snapshot);
+		const Update = (update: (current: LiveWorkspaceState) => LiveWorkspaceState) =>
+			SubscriptionRef.update(state, update);
+
+		const UpdateAndGet = (update: (current: LiveWorkspaceState) => LiveWorkspaceState) =>
+			SubscriptionRef.modify(state, (current) => {
+				const next = update(current);
 				return [next, next] as const;
-			}).pipe(
-				Effect.tap((snapshot) => PubSub.publish(changes, snapshot)),
-				Effect.asVoid,
-			);
+			});
 
-		const LoadSelectedThread = (thread_id: string) =>
+		const LoadSelectedThread = (thread_id: string, selection_generation: number) =>
 			client.GetThreadWork(thread_id).pipe(
 				Effect.matchEffect({
 					onFailure: (error) =>
-						Update((snapshot) => ({ ...snapshot, error: Option.some(error.message) })),
+						Update((current) =>
+							IsCurrentThreadSelection(
+								current.snapshot,
+								current.selection_generation,
+								thread_id,
+								selection_generation,
+							)
+								? {
+										...current,
+										snapshot: {
+											...current.snapshot,
+											error: Option.some(error.message),
+										},
+									}
+								: current,
+						),
 					onSuccess: (thread_work) =>
-						Update((snapshot) => ({ ...snapshot, thread_work })),
+						Update((current) =>
+							IsCurrentThreadSelection(
+								current.snapshot,
+								current.selection_generation,
+								thread_id,
+								selection_generation,
+							)
+								? {
+										...current,
+										snapshot: { ...current.snapshot, thread_work },
+									}
+								: current,
+						),
 				}),
 			);
 
 		const Refresh = Effect.gen(function* () {
+			const started = yield* UpdateAndGet((current) => ({
+				...current,
+				refresh_generation: current.refresh_generation + 1,
+			}));
+			const refresh_generation = started.refresh_generation;
+			const list_generation = started.list_generation;
+
 			yield* client.ListThreads.pipe(
 				Effect.matchEffect({
 					onFailure: (error) =>
-						Update((snapshot) => ({
-							...snapshot,
-							error: Option.some(error.message),
-							phase: "error",
-						})),
+						Update((current) =>
+							current.refresh_generation === refresh_generation
+								? {
+										...current,
+										snapshot: {
+											...current.snapshot,
+											error: Option.some(error.message),
+											phase: "error",
+										},
+									}
+								: current,
+						),
 					onSuccess: (threads) =>
-						Update((snapshot) => {
-							const selected_thread_id = Option.isSome(snapshot.selected_thread_id)
-								? snapshot.selected_thread_id
+						Update((current) => {
+							if (
+								current.refresh_generation !== refresh_generation ||
+								current.list_generation !== list_generation
+							) {
+								return current;
+							}
+
+							const reconciled = reconcile_selection(current.snapshot, threads);
+							const selected_thread_id = Option.isSome(reconciled.selected_thread_id)
+								? reconciled.selected_thread_id
 								: threads[0] === undefined
 									? Option.none<string>()
 									: Option.some(threads[0].thread_id);
+							const selection_changed =
+								Option.getOrUndefined(reconciled.selected_thread_id) !==
+								Option.getOrUndefined(selected_thread_id);
+
 							return {
-								...snapshot,
-								phase: threads.length === 0 ? "empty" : "ready",
-								selected_thread_id,
-								threads,
+								...current,
+								selection_generation: selection_changed
+									? current.selection_generation + 1
+									: current.selection_generation,
+								snapshot: {
+									...reconciled,
+									phase: threads.length === 0 ? "empty" : "ready",
+									selected_thread_id,
+									thread_work: selection_changed
+										? Option.none()
+										: reconciled.thread_work,
+								},
 							};
 						}),
 				}),
 			);
-			const selected_thread_id = Option.getOrUndefined(
-				(yield* Ref.get(state)).selected_thread_id,
-			);
-			if (selected_thread_id !== undefined) yield* LoadSelectedThread(selected_thread_id);
+
+			const current = yield* SubscriptionRef.get(state);
+			const selected_thread_id = Option.getOrUndefined(current.snapshot.selected_thread_id);
+			if (
+				selected_thread_id !== undefined &&
+				current.refresh_generation === refresh_generation
+			) {
+				yield* LoadSelectedThread(selected_thread_id, current.selection_generation);
+			}
 			yield* client.GetGlobalGuidance.pipe(
 				Effect.tap((global_guidance) =>
-					Update((snapshot) => ({
-						...snapshot,
-						global_guidance: Option.some(global_guidance),
-					})),
+					Update((current) =>
+						current.refresh_generation === refresh_generation
+							? {
+									...current,
+									snapshot: {
+										...current.snapshot,
+										global_guidance: Option.some(global_guidance),
+									},
+								}
+							: current,
+					),
 				),
 				Effect.ignore,
 			);
 			yield* client.GetModelBehaviour.pipe(
 				Effect.tap((model_behaviour) =>
-					Update((snapshot) => ({
-						...snapshot,
-						model_behaviour: Option.some(model_behaviour),
-					})),
+					Update((current) =>
+						current.refresh_generation === refresh_generation
+							? {
+									...current,
+									snapshot: {
+										...current.snapshot,
+										model_behaviour: Option.some(model_behaviour),
+									},
+								}
+							: current,
+					),
 				),
 				Effect.ignore,
 			);
@@ -164,19 +294,18 @@ export const LiveWorkspaceStoreLive = Layer.effect(
 
 		const SelectThread = (thread_id: string) =>
 			Effect.gen(function* () {
-				yield* Update((snapshot) => ({
-					...snapshot,
-					error: Option.none(),
-					selected_thread_id: Option.some(thread_id),
-					thread_work: Option.none(),
+				const selected = yield* UpdateAndGet((current) => ({
+					...current,
+					selection_generation: current.selection_generation + 1,
+					snapshot: SelectThreadSnapshot(current.snapshot, thread_id),
 				}));
-				yield* LoadSelectedThread(thread_id);
+				yield* LoadSelectedThread(thread_id, selected.selection_generation);
 			});
 
 		const SendMessage = (text: string) =>
 			Effect.gen(function* () {
+				const snapshot = (yield* SubscriptionRef.get(state)).snapshot;
 				const trimmed = text.trim();
-				const snapshot = yield* Ref.get(state);
 				const thread_id = Option.getOrUndefined(snapshot.selected_thread_id);
 				const thread_work = Option.getOrUndefined(snapshot.thread_work);
 				const thread = snapshot.threads.find(
@@ -192,9 +321,12 @@ export const LiveWorkspaceStoreLive = Layer.effect(
 				) {
 					yield* Update((current) => ({
 						...current,
-						error: Option.some(
-							"A selected thread with active work and a project is required to send a message.",
-						),
+						snapshot: {
+							...current.snapshot,
+							error: Option.some(
+								"A selected thread with active work and a project is required to send a message.",
+							),
+						},
 					}));
 					return;
 				}
@@ -217,28 +349,92 @@ export const LiveWorkspaceStoreLive = Layer.effect(
 							onFailure: (error) =>
 								Update((current) => ({
 									...current,
-									error: Option.some(error.message),
+									snapshot: {
+										...current.snapshot,
+										error: Option.some(error.message),
+									},
 								})),
 							onSuccess: () =>
-								Update((current) => ({ ...current, error: Option.none() })),
+								Update((current) => ({
+									...current,
+									snapshot: { ...current.snapshot, error: Option.none() },
+								})),
+						}),
+					);
+			});
+
+		const CreateThread = (title: string) =>
+			Effect.gen(function* () {
+				const trimmed = title.trim();
+				const thread_id = globalThis.crypto?.randomUUID?.();
+
+				if (trimmed.length === 0 || thread_id === undefined) {
+					yield* Update((current) => ({
+						...current,
+						snapshot: {
+							...current.snapshot,
+							error: Option.some(
+								"A secure thread identifier and non-empty title are required.",
+							),
+						},
+					}));
+					return;
+				}
+
+				yield* client
+					.Command({
+						payload: { title: trimmed, type: "thread.create" },
+						thread_id: `thread_${thread_id}`,
+					})
+					.pipe(
+						Effect.matchEffect({
+							onFailure: (error) =>
+								Update((current) => ({
+									...current,
+									snapshot: {
+										...current.snapshot,
+										error: Option.some(error.message),
+									},
+								})),
+							onSuccess: () =>
+								Update((current) => ({
+									...current,
+									snapshot: { ...current.snapshot, error: Option.none() },
+								})),
 						}),
 					);
 			});
 
 		yield* Stream.runForEach(lifecycle.Changes, (connection) =>
-			Update((snapshot) => ({
-				...snapshot,
-				error:
-					connection.message === undefined
-						? snapshot.error
-						: Option.some(connection.message),
-				phase: ToLiveWorkspacePhase(connection.phase),
-			})),
+			Effect.gen(function* () {
+				yield* Update((current) => ({
+					...current,
+					snapshot: {
+						...current.snapshot,
+						error:
+							connection.message === undefined
+								? current.snapshot.error
+								: Option.some(connection.message),
+						phase: ToLiveWorkspacePhase(connection.phase),
+					},
+				}));
+				if (ShouldRefreshForConnection(connection.phase)) yield* Refresh;
+			}),
 		).pipe(Effect.forkScoped);
 		yield* client.SubscribeThreadList.pipe(
 			Effect.flatMap((updates) =>
 				Stream.runForEach(updates, (update) =>
-					Update((snapshot) => ApplyThreadListUpdate(snapshot, update)),
+					Update((current) => ({
+						...current,
+						list_generation: current.list_generation + 1,
+						selection_generation:
+							Option.getOrUndefined(
+								ApplyThreadListUpdate(current.snapshot, update).selected_thread_id,
+							) !== Option.getOrUndefined(current.snapshot.selected_thread_id)
+								? current.selection_generation + 1
+								: current.selection_generation,
+						snapshot: ApplyThreadListUpdate(current.snapshot, update),
+					})),
 				),
 			),
 			Effect.ignore,
@@ -247,11 +443,12 @@ export const LiveWorkspaceStoreLive = Layer.effect(
 		yield* Refresh;
 
 		return LiveWorkspaceStore.of({
-			Changes: Stream.fromPubSub(changes),
+			Changes: SubscriptionRef.changes(state).pipe(Stream.map((current) => current.snapshot)),
+			CreateThread,
 			Refresh,
 			SendMessage,
 			SelectThread,
-			Snapshot: Ref.get(state),
+			Snapshot: SubscriptionRef.get(state).pipe(Effect.map((current) => current.snapshot)),
 		});
 	}),
 );

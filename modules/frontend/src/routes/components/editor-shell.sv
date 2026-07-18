@@ -1,5 +1,5 @@
 <script lang="ts" effect>
-	import { Effect } from "effect";
+	import { Effect, Stream } from "effect";
 	import { IconLayoutSidebar as PanelLeft, IconLayoutSidebarRight as PanelRight } from "@tabler/icons-svelte";
 	import {
 		DefaultShellPresentationState,
@@ -7,20 +7,27 @@
 	} from "$lib/runtime/shell-presentation-preferences";
 	import { Button } from "$lib/components/ui/button";
 	import { Sheet, SheetContent, SheetTrigger } from "$lib/components/ui/sheet";
+	import { LiveWorkspaceStore, type LiveWorkspaceSnapshot } from "$lib/live-workspace/store";
 
 	import LeftPane from "./left-pane.sv";
 	import MainPane from "./main-pane.sv";
 	import RightPane from "./right-pane.sv";
 
 	const shell_presentation_preferences = yield* ShellPresentationPreferences;
+	const live_workspace = yield* LiveWorkspaceStore;
 	const initial_presentation = yield* shell_presentation_preferences.Load;
+	let live_snapshot = $state.raw<LiveWorkspaceSnapshot>(yield* live_workspace.Snapshot);
+	yield* Stream.runForEach(live_workspace.Changes, (next_snapshot) =>
+		Effect.sync(() => {
+			live_snapshot = next_snapshot;
+		}),
+	).pipe(Effect.forkScoped);
 
 	let left_open = $state(false);
 	let right_open = $state(false);
 	let left_collapsed = $state(initial_presentation.left_collapsed);
 	let right_collapsed = $state(initial_presentation.right_collapsed);
 	let selected_thread = $state("thread-editor");
-	let draft_threads = $state(0);
 
 	const SavePresentation = Effect.gen(function* () {
 		yield* shell_presentation_preferences.Save({
@@ -60,10 +67,11 @@
 	const SelectThread = (thread_id: string) =>
 		Effect.gen(function* () {
 			selected_thread = thread_id;
+			yield* live_workspace.SelectThread(thread_id);
 		});
 
 	const NewChat = Effect.gen(function* () {
-		draft_threads += 1;
+		yield* live_workspace.CreateThread("New chat");
 	});
 
 	const HandleKeydown = (pressed_key: string) =>
@@ -84,11 +92,11 @@
 	data-right-open={right_open}
 >
 	<div class="pane-slot desktop-left-slot">
-		<LeftPane compact={false} instance_id="desktop-left" {selected_thread} {draft_threads} on_select_thread={SelectThread} on_new_chat={NewChat} on_collapse={CollapseLeft} />
+		<LeftPane compact={false} instance_id="desktop-left" {selected_thread} live_snapshot={live_snapshot} on_select_thread={SelectThread} on_new_chat={NewChat} on_collapse={CollapseLeft} />
 	</div>
 
 	<div class="left-rail-slot">
-		<LeftPane compact={true} instance_id="rail-left" {selected_thread} {draft_threads} on_select_thread={SelectThread} on_new_chat={NewChat} />
+		<LeftPane compact={true} instance_id="rail-left" {selected_thread} live_snapshot={live_snapshot} on_select_thread={SelectThread} on_new_chat={NewChat} />
 	</div>
 
 	<main class="main-slot">
@@ -108,7 +116,7 @@
 					{/snippet}
 				</SheetTrigger>
 				<SheetContent side="left" class="w-[min(18rem,calc(100vw-1.5rem))] p-0" aria-label="Thread navigation">
-					<LeftPane compact={false} instance_id="sheet-left" {selected_thread} {draft_threads} on_select_thread={SelectThread} on_new_chat={NewChat} />
+					<LeftPane compact={false} instance_id="sheet-left" {selected_thread} live_snapshot={live_snapshot} on_select_thread={SelectThread} on_new_chat={NewChat} />
 				</SheetContent>
 			</Sheet>
 			<Sheet bind:open={right_open}>
@@ -120,15 +128,15 @@
 					{/snippet}
 				</SheetTrigger>
 				<SheetContent side="right" class="w-[min(21.25rem,calc(100vw-1.5rem))] p-0" aria-label="Session">
-					<RightPane instance_id="sheet-right" />
+					<RightPane instance_id="sheet-right" live_snapshot={live_snapshot} />
 				</SheetContent>
 			</Sheet>
 		</div>
-		<MainPane />
+		<MainPane live_snapshot={live_snapshot} on_send_live_message={live_workspace.SendMessage} />
 	</main>
 
 	<div class="pane-slot desktop-right-slot">
-		<RightPane instance_id="desktop-right" on_collapse={CollapseRight} />
+		<RightPane instance_id="desktop-right" live_snapshot={live_snapshot} on_collapse={CollapseRight} />
 	</div>
 
 </div>

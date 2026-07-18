@@ -81,13 +81,13 @@
 	<DialogContent class="max-w-xl gap-3 p-3" showCloseButton={false}>
 		<DialogHeader class="sr-only">
 			<DialogTitle>Quick open</DialogTitle>
-			<DialogDescription>Search fixture files and open the selected file.</DialogDescription>
+			<DialogDescription>Search workspace files and open the selected file.</DialogDescription>
 		</DialogHeader>
 		<Command class="rounded-md" shouldFilter={false} loop>
-			<CommandInput bind:ref={search_input} bind:value={query} placeholder="Search files by name or path" aria-label="Search fixture files" />
+			<CommandInput bind:ref={search_input} bind:value={query} placeholder="Search files by name or path" aria-label="Search workspace files" />
 			<CommandList>
-				<CommandEmpty>No fixture files match “{query}”.</CommandEmpty>
-				<CommandGroup heading={`Fixture files (${results.length})`}>
+				<CommandEmpty>No workspace files match the current search.</CommandEmpty>
+				<CommandGroup heading={`Workspace files (${results.length})`}>
 					{#each results as file}
 						<CommandItem
 							value={file.path}

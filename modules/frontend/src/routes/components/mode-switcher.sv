@@ -3,7 +3,7 @@
 	import { IconCode as CodeIcon, IconGitBranch as GitBranch, IconMessageCircle as MessageCircle } from "@tabler/icons-svelte";
 	import { Button } from "$lib/components/ui/button";
 
-	import type { EditorMode } from "./editor-fixtures";
+	type EditorMode = "editor" | "chat" | "orchestrator";
 
 	let { mode, on_select }: { mode: EditorMode; on_select: (mode: EditorMode) => Effect.Effect<void> } = $props();
 

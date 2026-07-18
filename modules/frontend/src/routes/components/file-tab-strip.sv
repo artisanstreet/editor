@@ -132,9 +132,9 @@
 <AlertDialog open={pending_confirmation !== undefined} onOpenChange={HandleDialogOpenChange}>
 	<AlertDialogContent>
 		<AlertDialogHeader>
-			<AlertDialogTitle>Discard unsaved fixture edits?</AlertDialogTitle>
+			<AlertDialogTitle>Discard unsaved edits?</AlertDialogTitle>
 			<AlertDialogDescription>
-				<strong>{pending_file_name}</strong> has unsaved fixture edits. This fixture-only change will be discarded.
+				<strong>{pending_file_name}</strong> has unsaved edits. This local change will be discarded.
 			</AlertDialogDescription>
 		</AlertDialogHeader>
 		<AlertDialogFooter>

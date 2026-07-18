@@ -10,7 +10,7 @@
 		IconPin as Pin,
 	} from "@tabler/icons-svelte";
 
-	import { thread_fixtures } from "./editor-fixtures";
+	import type { LiveWorkspaceSnapshot } from "$lib/live-workspace/store";
 	import { Button } from "$lib/components/ui/button";
 	import {
 		DropdownMenu,
@@ -23,7 +23,7 @@
 		compact = false,
 		instance_id,
 		selected_thread,
-		draft_threads,
+		live_snapshot,
 		on_select_thread,
 		on_new_chat,
 		on_collapse,
@@ -31,7 +31,7 @@
 		compact?: boolean;
 		instance_id: string;
 		selected_thread: string;
-		draft_threads: number;
+		live_snapshot: LiveWorkspaceSnapshot;
 		on_select_thread: (thread_id: string) => Effect.Effect<void>;
 		on_new_chat: Effect.Effect<void>;
 		on_collapse?: Effect.Effect<void>;
@@ -57,7 +57,7 @@
 <aside class:compact class="left-pane" aria-label="Thread navigation">
 	<header class="brand-row">
 		<span class="brand-mark"><BrandDatabricks size={19} stroke={1.7} aria-hidden="true" /></span>
-		{#if !compact}<span class="brand-name">Artisan</span><span class="fixture-tag">Fixture</span>{/if}
+		{#if !compact}<span class="brand-name">Artisan</span><span class="live-badge">Live</span>{/if}
 		{#if on_collapse}
 			<Button variant="ghost" size="icon-sm" class="ml-auto text-muted-foreground" aria-label="Collapse thread navigation" title="Collapse thread navigation" onclick={yield* CollapsePane}>
 				<CollapseLeft size={17} stroke={1.7} aria-hidden="true" />
@@ -68,7 +68,7 @@
 	<nav class="primary-actions" aria-label="Workspace actions">
 		<Button variant="outline" class="w-full justify-start gap-2" aria-label="New chat" onclick={yield* NewChat}>
 			<MessagePlus size={17} stroke={1.7} aria-hidden="true" />
-			{#if !compact}<span>New chat{draft_threads > 0 ? ` (${draft_threads})` : ""}</span>{/if}
+			{#if !compact}<span>New chat</span>{/if}
 		</Button>
 		<Button variant="ghost" class="w-full justify-start gap-2" aria-label="Marketplace unavailable" title="Marketplace contracts are not available yet" disabled>
 			<LayoutGrid size={17} stroke={1.7} aria-hidden="true" />
@@ -83,17 +83,21 @@
 				<Archive size={14} stroke={1.7} aria-hidden="true" />
 			</div>
 			<div class="thread-list">
-				{#each thread_fixtures as thread}
+				{#if live_snapshot.threads.length === 0}
+					<p class="empty-live-state">{live_snapshot.phase === "error" ? "Desktop session unavailable." : "No backend threads yet."}</p>
+				{:else}
+				{#each live_snapshot.threads as thread}
 					<Button
 						variant="ghost"
-						class={`h-auto w-full justify-start rounded-md px-2 py-2 text-left ${selected_thread === thread.id ? "bg-muted text-foreground" : "text-muted-foreground"}`}
+						class={`h-auto w-full justify-start rounded-md px-2 py-2 text-left ${live_snapshot.selected_thread_id._tag === "Some" && live_snapshot.selected_thread_id.value === thread.thread_id ? "bg-muted text-foreground" : "text-muted-foreground"}`}
 						type="button"
-						onclick={yield* SelectThread(thread.id)}
+						onclick={yield* SelectThread(thread.thread_id)}
 					>
 						<span class="w-full truncate text-left text-sm">{thread.title}</span>
-						<span class="text-xs text-muted-foreground">{thread.meta}</span>
+						<span class="text-xs text-muted-foreground">{thread.live_status}</span>
 					</Button>
 				{/each}
+				{/if}
 			</div>
 		</section>
 	{/if}
@@ -112,7 +116,7 @@
 				</DropdownMenuTrigger>
 				<DropdownMenuContent align="end">
 					<DropdownMenuItem disabled><Pin size={14} stroke={1.7} />Local workspace pinned</DropdownMenuItem>
-					<DropdownMenuItem disabled>Settings unavailable in fixtures</DropdownMenuItem>
+					<DropdownMenuItem disabled>Settings are not available in this surface yet</DropdownMenuItem>
 				</DropdownMenuContent>
 			</DropdownMenu>
 		{/if}
@@ -155,7 +159,7 @@
 		letter-spacing: -0.035em;
 	}
 
-	.fixture-tag {
+	.live-badge {
 		margin-left: auto;
 		color: var(--text-muted);
 		font-size: 10px;
@@ -194,6 +198,13 @@
 		gap: 2px;
 		overflow-y: auto;
 		overscroll-behavior: contain;
+	}
+
+	.empty-live-state {
+		margin: 8px;
+		color: var(--text-muted);
+		font-size: 11px;
+		line-height: 1.45;
 	}
 
 	.user-card {
