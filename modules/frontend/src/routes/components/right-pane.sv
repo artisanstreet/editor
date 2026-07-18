@@ -13,6 +13,8 @@
 
 	import { agent_fixtures, change_fixtures, permission_fixtures, session_fixture } from "./editor-fixtures";
 	import { Button } from "$lib/components/ui/button";
+	import { Card, CardContent } from "$lib/components/ui/card";
+	import { ScrollArea } from "$lib/components/ui/scroll-area";
 
 	let { instance_id, on_collapse }: { instance_id: string; on_collapse?: Effect.Effect<void> } = $props();
 
@@ -28,14 +30,16 @@
 		<div><strong>Session</strong><span>Preview data</span></div>
 		<span class="fixture-badge">Fixture</span>
 		{#if on_collapse}
-			<Button variant="ghost" size="icon-sm" class="collapse-pane" aria-label="Collapse session pane" title="Collapse session pane" onclick={yield* CollapsePane}>
+			<Button variant="ghost" size="icon-sm" class="text-muted-foreground" aria-label="Collapse session pane" title="Collapse session pane" onclick={yield* CollapsePane}>
 				<CollapseRight size={17} stroke={1.7} aria-hidden="true" />
 			</Button>
 		{/if}
 	</header>
 
+	<ScrollArea class="min-h-0 flex-1">
 	<div class="session-scroll">
-		<section class="session-card identity-card" aria-labelledby={`${instance_id}-session-title`}>
+		<Card class="session-card identity-card" aria-labelledby={`${instance_id}-session-title`}>
+		<CardContent class="p-0">
 			<div class="section-title"><Activity size={14} stroke={1.7} aria-hidden="true" /><h2 id={`${instance_id}-session-title`}>Current session</h2><span class="status waiting">Waiting</span></div>
 			<dl class="dense-list">
 				<div><dt>Engine</dt><dd>{session_fixture.engine}</dd></div>
@@ -43,18 +47,22 @@
 				<div><dt>Context</dt><dd>{session_fixture.context}</dd></div>
 				<div><dt>Session ID</dt><dd class="mono">{session_fixture.id}</dd></div>
 			</dl>
-		</section>
+		</CardContent>
+		</Card>
 
-		<section class="session-card" aria-labelledby={`${instance_id}-permissions-title`}>
+		<Card class="session-card" aria-labelledby={`${instance_id}-permissions-title`}>
+		<CardContent class="p-0">
 			<div class="section-title"><Lock size={14} stroke={1.7} aria-hidden="true" /><h2 id={`${instance_id}-permissions-title`}>Permissions</h2></div>
 			<ul class="row-list">
 				{#each permission_fixtures as permission}
 					<li><span>{permission.label}</span><strong class:permission={permission.tone === "permission"}>{permission.value}</strong></li>
 				{/each}
 			</ul>
-		</section>
+		</CardContent>
+		</Card>
 
-		<section class="session-card" aria-labelledby={`${instance_id}-changes-title`}>
+		<Card class="session-card" aria-labelledby={`${instance_id}-changes-title`}>
+		<CardContent class="p-0">
 			<div class="section-title"><GitBranch size={14} stroke={1.7} aria-hidden="true" /><h2 id={`${instance_id}-changes-title`}>Branch & changes</h2><span class="count">2</span></div>
 			<div class="branch-row"><span>codex/backend-services</span><span>dirty</span></div>
 			<ul class="change-list">
@@ -62,26 +70,32 @@
 					<li><span class="change-path" title={change.path}>{change.path}</span><span class="diff-added">+{change.added}</span><span class="diff-removed">−{change.removed}</span></li>
 				{/each}
 			</ul>
-		</section>
+		</CardContent>
+		</Card>
 
-		<section class="session-card" aria-labelledby={`${instance_id}-terminal-title`}>
+		<Card class="session-card" aria-labelledby={`${instance_id}-terminal-title`}>
+		<CardContent class="p-0">
 			<div class="section-title"><Terminal2 size={14} stroke={1.7} aria-hidden="true" /><h2 id={`${instance_id}-terminal-title`}>Terminals & ports</h2></div>
 			<div class="terminal-preview">
 				<div><BrandWindows size={13} stroke={1.7} aria-hidden="true" /><span>PowerShell</span><span class="status active">Running</span></div>
 				<code>PS C:\artisan-editor&gt;</code>
 			</div>
 			<div class="empty-row"><Network size={13} stroke={1.7} aria-hidden="true" /><span>No preview ports in fixture</span></div>
-		</section>
+		</CardContent>
+		</Card>
 
-		<section class="session-card" aria-labelledby={`${instance_id}-agents-title`}>
+		<Card class="session-card" aria-labelledby={`${instance_id}-agents-title`}>
+		<CardContent class="p-0">
 			<div class="section-title"><Robot size={14} stroke={1.7} aria-hidden="true" /><h2 id={`${instance_id}-agents-title`}>Agents</h2><span class="count">{agent_fixtures.length}</span></div>
 			<ul class="agent-list">
 				{#each agent_fixtures as agent}
 					<li><span class="agent-avatar">{agent.name.slice(0, 1)}</span><span><strong>{agent.name}</strong><small>{agent.role}</small></span><span class:active={agent.state === "Working"} class="agent-state">{agent.state}</span></li>
 				{/each}
 			</ul>
-		</section>
+		</CardContent>
+		</Card>
 	</div>
+	</ScrollArea>
 </aside>
 
 <style>
@@ -131,40 +145,15 @@
 		letter-spacing: 0.07em;
 	}
 
-	.collapse-pane {
-		display: grid;
-		width: 28px;
-		height: 28px;
-		flex: 0 0 auto;
-		place-items: center;
-		border: 1px solid transparent;
-		border-radius: var(--radius-sm);
-		background: transparent;
-		color: var(--text-muted);
-		cursor: pointer;
-	}
-
-	.collapse-pane:hover {
-		border-color: var(--line);
-		background: var(--raised);
-		color: var(--text-primary);
-	}
-
-	.collapse-pane:focus-visible {
-		outline: 2px solid var(--focus);
-		outline-offset: -2px;
-	}
-
 	.session-scroll {
 		display: grid;
 		align-content: start;
 		gap: 0;
 		padding: 6px 10px;
-		overflow-y: auto;
-		overscroll-behavior: contain;
+		min-height: 100%;
 	}
 
-	.session-card {
+	:global(.session-card) {
 		border: 0;
 		border-bottom: 1px solid var(--line);
 		border-radius: 0;
@@ -172,7 +161,7 @@
 		overflow: hidden;
 	}
 
-	.session-card:last-child {
+	:global(.session-card:last-child) {
 		border-bottom: 0;
 	}
 

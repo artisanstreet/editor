@@ -325,7 +325,7 @@
 			</div>
 			<div class="stage-list" aria-label="Fixture orchestration nodes">
 				{#each orchestrator_nodes as node, index}
-				<Button variant="outline" class:active={selected_node_id === node.id} onclick={yield* SelectNode(node.id)}>
+				<Button variant="outline" class={selected_node_id === node.id ? "border-primary bg-primary/10 text-foreground" : ""} onclick={yield* SelectNode(node.id)}>
 						<span class="stage-index">0{index + 1}</span><span>{node.label}</span><span>{node.status}</span>{#if node.status === "Complete"}<CircleCheck size={15} stroke={1.7} aria-label="Complete" />{/if}
 				</Button>
 				{/each}
@@ -628,7 +628,7 @@
 		font-size: 10px;
 	}
 
-	.chat-composer textarea {
+	:global(.chat-composer textarea) {
 		min-height: 92px;
 		resize: vertical;
 		padding: 13px 44px 13px 13px;
@@ -640,7 +640,7 @@
 		font-size: 12px;
 	}
 
-	.chat-composer button {
+	:global(.chat-composer button) {
 		position: absolute;
 		right: 9px;
 		bottom: 9px;
@@ -654,8 +654,8 @@
 		color: var(--canvas);
 	}
 
-	.chat-composer textarea:focus-visible,
-	.stage-list button:focus-visible {
+	:global(.chat-composer textarea:focus-visible),
+	:global(.stage-list button:focus-visible) {
 		outline: 2px solid var(--focus);
 		outline-offset: 2px;
 	}
@@ -666,7 +666,7 @@
 		gap: 6px;
 	}
 
-	.stage-list button {
+	:global(.stage-list button) {
 		display: grid;
 		grid-template-columns: 28px minmax(0, 1fr) auto auto;
 		align-items: center;
@@ -680,12 +680,6 @@
 		font-size: 11px;
 		text-align: left;
 		cursor: pointer;
-	}
-
-	.stage-list button.active {
-		border-color: var(--line-strong);
-		background: var(--selection);
-		color: var(--text-primary);
 	}
 
 	.stage-index {

@@ -12,6 +12,12 @@
 
 	import { thread_fixtures } from "./editor-fixtures";
 	import { Button } from "$lib/components/ui/button";
+	import {
+		DropdownMenu,
+		DropdownMenuContent,
+		DropdownMenuItem,
+		DropdownMenuTrigger,
+	} from "$lib/components/ui/dropdown-menu";
 
 	let {
 		compact = false,
@@ -53,18 +59,18 @@
 		<span class="brand-mark"><BrandDatabricks size={19} stroke={1.7} aria-hidden="true" /></span>
 		{#if !compact}<span class="brand-name">Artisan</span><span class="fixture-tag">Fixture</span>{/if}
 		{#if on_collapse}
-			<Button variant="ghost" size="icon-sm" class="collapse-pane" aria-label="Collapse thread navigation" title="Collapse thread navigation" onclick={yield* CollapsePane}>
+			<Button variant="ghost" size="icon-sm" class="ml-auto text-muted-foreground" aria-label="Collapse thread navigation" title="Collapse thread navigation" onclick={yield* CollapsePane}>
 				<CollapseLeft size={17} stroke={1.7} aria-hidden="true" />
 			</Button>
 		{/if}
 	</header>
 
 	<nav class="primary-actions" aria-label="Workspace actions">
-		<Button variant="outline" class="action primary" aria-label="New chat" onclick={yield* NewChat}>
+		<Button variant="outline" class="w-full justify-start gap-2" aria-label="New chat" onclick={yield* NewChat}>
 			<MessagePlus size={17} stroke={1.7} aria-hidden="true" />
 			{#if !compact}<span>New chat{draft_threads > 0 ? ` (${draft_threads})` : ""}</span>{/if}
 		</Button>
-		<Button variant="ghost" class="action" aria-label="Marketplace unavailable" title="Marketplace contracts are not available yet" disabled>
+		<Button variant="ghost" class="w-full justify-start gap-2" aria-label="Marketplace unavailable" title="Marketplace contracts are not available yet" disabled>
 			<LayoutGrid size={17} stroke={1.7} aria-hidden="true" />
 			{#if !compact}<span>Marketplace</span>{/if}
 		</Button>
@@ -80,13 +86,12 @@
 				{#each thread_fixtures as thread}
 					<Button
 						variant="ghost"
-						class:active={selected_thread === thread.id}
-						class="thread-row"
+						class={`h-auto w-full justify-start rounded-md px-2 py-2 text-left ${selected_thread === thread.id ? "bg-muted text-foreground" : "text-muted-foreground"}`}
 						type="button"
 						onclick={yield* SelectThread(thread.id)}
 					>
-						<span class="thread-title">{thread.title}</span>
-						<span class="thread-meta">{thread.meta}</span>
+						<span class="w-full truncate text-left text-sm">{thread.title}</span>
+						<span class="text-xs text-muted-foreground">{thread.meta}</span>
 					</Button>
 				{/each}
 			</div>
@@ -97,8 +102,19 @@
 		<div class="avatar" aria-hidden="true">SS</div>
 		{#if !compact}
 			<div class="user-copy"><strong>Sander</strong><span>Local workspace</span></div>
-			<Pin size={14} stroke={1.7} aria-label="Pinned user" />
-			<ChevronDown size={14} stroke={1.7} aria-hidden="true" />
+			<DropdownMenu>
+				<DropdownMenuTrigger>
+					{#snippet child({ props })}
+						<Button variant="ghost" size="icon-xs" aria-label="Open user actions" {...props}>
+							<ChevronDown size={14} stroke={1.7} aria-hidden="true" />
+						</Button>
+					{/snippet}
+				</DropdownMenuTrigger>
+				<DropdownMenuContent align="end">
+					<DropdownMenuItem disabled><Pin size={14} stroke={1.7} />Local workspace pinned</DropdownMenuItem>
+					<DropdownMenuItem disabled>Settings unavailable in fixtures</DropdownMenuItem>
+				</DropdownMenuContent>
+			</DropdownMenu>
 		{/if}
 	</footer>
 </aside>
@@ -147,61 +163,10 @@
 		letter-spacing: 0.08em;
 	}
 
-	.collapse-pane {
-		display: grid;
-		width: 28px;
-		height: 28px;
-		flex: 0 0 auto;
-		place-items: center;
-		border: 1px solid transparent;
-		border-radius: var(--radius-sm);
-		background: transparent;
-		color: var(--text-muted);
-		cursor: pointer;
-	}
-
-	.collapse-pane:hover {
-		border-color: var(--line);
-		background: var(--raised);
-		color: var(--text-primary);
-	}
-
 	.primary-actions {
 		display: grid;
 		gap: 4px;
 		padding: 10px;
-	}
-
-	.action {
-		display: flex;
-		align-items: center;
-		gap: 9px;
-		min-height: 34px;
-		padding: 0 9px;
-		border: 1px solid transparent;
-		border-radius: var(--radius-sm);
-		background: transparent;
-		color: var(--text-secondary);
-		font: inherit;
-		font-size: 13px;
-		text-decoration: none;
-		cursor: pointer;
-	}
-
-	.action:hover {
-		background: var(--pane-inset);
-		color: var(--text-primary);
-	}
-
-	.action.primary {
-		border-color: var(--line);
-		background: var(--raised);
-		color: var(--text-primary);
-	}
-
-	.action:disabled {
-		cursor: not-allowed;
-		opacity: 0.48;
 	}
 
 	.thread-region {
@@ -229,38 +194,6 @@
 		gap: 2px;
 		overflow-y: auto;
 		overscroll-behavior: contain;
-	}
-
-	.thread-row {
-		display: grid;
-		gap: 3px;
-		width: 100%;
-		padding: 8px;
-		border: 0;
-		border-radius: var(--radius-sm);
-		background: transparent;
-		color: var(--text-secondary);
-		font: inherit;
-		text-align: left;
-		cursor: pointer;
-	}
-
-	.thread-row:hover,
-	.thread-row.active {
-		background: var(--selection);
-		color: var(--text-primary);
-	}
-
-	.thread-title {
-		overflow: hidden;
-		font-size: 12px;
-		text-overflow: ellipsis;
-		white-space: nowrap;
-	}
-
-	.thread-meta {
-		color: var(--text-muted);
-		font-size: 10px;
 	}
 
 	.user-card {
@@ -309,22 +242,5 @@
 		flex-direction: column;
 	}
 
-	.compact .action {
-		justify-content: center;
-		width: 36px;
-		padding: 0;
-	}
 
-	.action:focus-visible,
-	.thread-row:focus-visible,
-	.collapse-pane:focus-visible {
-		outline: 2px solid var(--focus);
-		outline-offset: -2px;
-	}
-
-	@media (max-width: 1279px) {
-		.collapse-pane {
-			display: none;
-		}
-	}
 </style>

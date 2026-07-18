@@ -6,12 +6,11 @@
 		ShellPresentationPreferences,
 	} from "$lib/runtime/shell-presentation-preferences";
 	import { Button } from "$lib/components/ui/button";
+	import { Sheet, SheetContent, SheetTrigger } from "$lib/components/ui/sheet";
 
 	import LeftPane from "./left-pane.sv";
 	import MainPane from "./main-pane.sv";
 	import RightPane from "./right-pane.sv";
-
-	type EdgePane = "left" | "right";
 
 	const shell_presentation_preferences = yield* ShellPresentationPreferences;
 	const initial_presentation = yield* shell_presentation_preferences.Load;
@@ -30,12 +29,6 @@
 			right_collapsed,
 		});
 	});
-
-	const OpenPane = (pane: EdgePane) =>
-		Effect.gen(function* () {
-			left_open = pane === "left";
-			right_open = pane === "right";
-		});
 
 	const ExpandLeft = Effect.gen(function* () {
 		left_collapsed = false;
@@ -100,18 +93,36 @@
 
 	<main class="main-slot">
 		<div class="compact-pane-actions" aria-label="Open workspace panes">
-			<Button variant="outline" size="icon-sm" class="pane-toggle desktop-left-toggle" aria-label="Expand thread navigation" onclick={yield* ExpandLeft}>
+			<Button variant="outline" size="icon-sm" class="desktop-left-toggle size-8" aria-label="Expand thread navigation" onclick={yield* ExpandLeft}>
 				<PanelLeft size={18} stroke={1.7} aria-hidden="true" />
 			</Button>
-			<Button variant="outline" size="icon-sm" class="pane-toggle desktop-right-toggle" aria-label="Expand session pane" onclick={yield* ExpandRight}>
+			<Button variant="outline" size="icon-sm" class="desktop-right-toggle size-8" aria-label="Expand session pane" onclick={yield* ExpandRight}>
 				<PanelRight size={18} stroke={1.7} aria-hidden="true" />
 			</Button>
-			<Button variant="outline" size="icon-sm" class="pane-toggle responsive-left-toggle" aria-label="Open thread navigation" onclick={yield* OpenPane("left")}>
-				<PanelLeft size={18} stroke={1.7} aria-hidden="true" />
-			</Button>
-			<Button variant="outline" size="icon-sm" class="pane-toggle responsive-right-toggle" aria-label="Open session pane" onclick={yield* OpenPane("right")}>
-				<PanelRight size={18} stroke={1.7} aria-hidden="true" />
-			</Button>
+			<Sheet bind:open={left_open}>
+				<SheetTrigger>
+					{#snippet child({ props })}
+						<Button variant="outline" size="icon-sm" class="responsive-left-toggle size-8" aria-label="Open thread navigation" {...props}>
+							<PanelLeft size={18} stroke={1.7} aria-hidden="true" />
+						</Button>
+					{/snippet}
+				</SheetTrigger>
+				<SheetContent side="left" class="w-[min(18rem,calc(100vw-1.5rem))] p-0" aria-label="Thread navigation">
+					<LeftPane compact={false} instance_id="sheet-left" {selected_thread} {draft_threads} on_select_thread={SelectThread} on_new_chat={NewChat} />
+				</SheetContent>
+			</Sheet>
+			<Sheet bind:open={right_open}>
+				<SheetTrigger>
+					{#snippet child({ props })}
+						<Button variant="outline" size="icon-sm" class="responsive-right-toggle size-8" aria-label="Open session pane" {...props}>
+							<PanelRight size={18} stroke={1.7} aria-hidden="true" />
+						</Button>
+					{/snippet}
+				</SheetTrigger>
+				<SheetContent side="right" class="w-[min(21.25rem,calc(100vw-1.5rem))] p-0" aria-label="Session">
+					<RightPane instance_id="sheet-right" />
+				</SheetContent>
+			</Sheet>
 		</div>
 		<MainPane />
 	</main>
@@ -120,17 +131,6 @@
 		<RightPane instance_id="desktop-right" on_collapse={CollapseRight} />
 	</div>
 
-	<div class="pane-slot left-overlay t-panel-slide" data-open={left_open} aria-hidden={!left_open} inert={!left_open}>
-		<LeftPane compact={false} instance_id="overlay-left" {selected_thread} {draft_threads} on_select_thread={SelectThread} on_new_chat={NewChat} />
-	</div>
-
-	<div class="pane-slot right-overlay t-panel-slide" data-open={right_open} aria-hidden={!right_open} inert={!right_open}>
-		<RightPane instance_id="overlay-right" />
-	</div>
-
-	{#if left_open || right_open}
-		<Button variant="ghost" class="pane-backdrop" aria-label="Close open pane" onclick={yield* ClosePanes}></Button>
-	{/if}
 </div>
 
 <style>
@@ -167,24 +167,11 @@
 
 	.left-rail-slot,
 	.compact-pane-actions,
-	.desktop-left-toggle,
-	.desktop-right-toggle,
-	.responsive-left-toggle,
-	.responsive-right-toggle,
-	.pane-backdrop {
+	:global(.desktop-left-toggle),
+	:global(.desktop-right-toggle),
+	:global(.responsive-left-toggle),
+	:global(.responsive-right-toggle) {
 		display: none;
-	}
-
-	.pane-toggle {
-		display: grid;
-		width: 32px;
-		height: 32px;
-		place-items: center;
-		border: 1px solid var(--line);
-		border-radius: var(--radius-sm);
-		background: var(--raised);
-		color: var(--text-secondary);
-		cursor: pointer;
 	}
 
 	.editor-shell[data-left-collapsed="true"] {
@@ -209,9 +196,9 @@
 
 	.editor-shell[data-left-collapsed="true"] .left-rail-slot,
 	.editor-shell[data-left-collapsed="true"] .compact-pane-actions,
-	.editor-shell[data-left-collapsed="true"] .desktop-left-toggle,
+	.editor-shell[data-left-collapsed="true"] :global(.desktop-left-toggle),
 	.editor-shell[data-right-collapsed="true"] .compact-pane-actions,
-	.editor-shell[data-right-collapsed="true"] .desktop-right-toggle {
+	.editor-shell[data-right-collapsed="true"] :global(.desktop-right-toggle) {
 		display: grid;
 	}
 
@@ -223,17 +210,6 @@
 		z-index: 10;
 		display: flex;
 		gap: 6px;
-	}
-
-	.pane-toggle:hover {
-		color: var(--text-primary);
-		border-color: var(--line-strong);
-	}
-
-	.pane-toggle:focus-visible,
-	.pane-backdrop:focus-visible {
-		outline: 2px solid var(--focus);
-		outline-offset: 2px;
 	}
 
 	@media (min-width: 1280px) and (max-width: 1367px) {
@@ -276,27 +252,12 @@
 		}
 
 		.editor-shell[data-left-collapsed="true"] .left-rail-slot,
-		.editor-shell[data-left-collapsed="true"] .desktop-left-toggle,
-		.editor-shell[data-right-collapsed="true"] .desktop-right-toggle {
+		.editor-shell[data-left-collapsed="true"] :global(.desktop-left-toggle),
+		.editor-shell[data-right-collapsed="true"] :global(.desktop-right-toggle) {
 			display: none;
 		}
 
-		.right-overlay {
-			position: fixed;
-			top: 8px;
-			right: 8px;
-			bottom: 8px;
-			z-index: 30;
-			width: min(340px, calc(100vw - 24px));
-			transform: translateX(calc(100% + 12px));
-		}
-
-		.right-overlay.t-panel-slide[data-open="true"] {
-			transform: translateX(0);
-		}
-
-		.responsive-right-toggle,
-		.pane-backdrop {
+		:global(.responsive-right-toggle) {
 			display: grid;
 		}
 
@@ -308,14 +269,6 @@
 			display: flex;
 		}
 
-		.pane-backdrop {
-			position: fixed;
-			inset: 0;
-			z-index: 20;
-			border: 0;
-			background: color-mix(in srgb, var(--canvas) 68%, transparent);
-			cursor: default;
-		}
 	}
 
 	@media (min-width: 800px) and (max-width: 999px) {
@@ -356,23 +309,8 @@
 			display: none;
 		}
 
-		.left-overlay {
-			position: fixed;
-			top: 6px;
-			bottom: 6px;
-			left: 6px;
-			z-index: 30;
-			width: min(288px, calc(100vw - 24px));
-			transform: translateX(calc(-100% - 12px));
-		}
-
-		.left-overlay.t-panel-slide[data-open="true"] {
-			transform: translateX(0);
-		}
-
-		.responsive-left-toggle,
-		.responsive-right-toggle,
-		.pane-backdrop {
+		:global(.responsive-left-toggle),
+		:global(.responsive-right-toggle) {
 			display: grid;
 		}
 
@@ -386,48 +324,4 @@
 		}
 	}
 
-	.t-panel-slide {
-		display: none;
-		opacity: 1;
-		filter: blur(0);
-		transition:
-			transform var(--panel-close-dur) var(--panel-ease),
-			opacity var(--panel-close-dur) var(--panel-ease),
-			filter var(--panel-close-dur) var(--panel-ease);
-		will-change: transform, opacity, filter;
-	}
-
-	@media (max-width: 1279px) {
-		.right-overlay {
-			display: block;
-		}
-
-		.t-panel-slide {
-			opacity: 0;
-			filter: blur(var(--panel-blur));
-			pointer-events: none;
-		}
-
-		.t-panel-slide[data-open="true"] {
-			opacity: 1;
-			filter: blur(0);
-			pointer-events: auto;
-			transition:
-				transform var(--panel-open-dur) var(--panel-ease),
-				opacity var(--panel-open-dur) var(--panel-ease),
-				filter var(--panel-open-dur) var(--panel-ease);
-		}
-	}
-
-	@media (max-width: 799px) {
-		.left-overlay {
-			display: block;
-		}
-	}
-
-	@media (prefers-reduced-motion: reduce) {
-		.t-panel-slide {
-			transition: none !important;
-		}
-	}
 </style>

@@ -658,7 +658,7 @@
 		color: var(--text-secondary);
 	}
 
-	.button {
+	:global(.button) {
 		display: inline-flex;
 		min-height: 31px;
 		align-items: center;
@@ -673,27 +673,27 @@
 		transition: background var(--duration-fast), border-color var(--duration-fast), transform var(--duration-fast);
 	}
 
-	.button:active:not(:disabled) {
+	:global(.button:active:not(:disabled)) {
 		transform: translateY(1px);
 	}
 
-	.button.primary {
+	:global(.button.primary) {
 		background: var(--text-primary);
 		color: var(--canvas);
 	}
 
-	.button.secondary {
+	:global(.button.secondary) {
 		border-color: var(--line);
 		background: var(--raised);
 		color: var(--text-primary);
 	}
 
-	.button.quiet {
+	:global(.button.quiet) {
 		background: transparent;
 		color: var(--text-secondary);
 	}
 
-	.button.danger {
+	:global(.button.danger) {
 		border-color: color-mix(in oklch, var(--run-failed) 50%, var(--line));
 		background: color-mix(in oklch, var(--run-failed) 14%, var(--raised));
 		color: var(--run-failed);

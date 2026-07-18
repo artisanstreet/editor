@@ -39,7 +39,7 @@
 		background: var(--tabs-bar-bg);
 	}
 
-	.t-tab {
+	:global(.t-tab) {
 		position: relative;
 		z-index: 1;
 		display: grid;
@@ -55,12 +55,12 @@
 		transition: color var(--tabs-dur) var(--tabs-ease);
 	}
 
-	.t-tab:hover,
-	.t-tab[aria-pressed="true"] {
+	:global(.t-tab:hover),
+	:global(.t-tab[aria-pressed="true"]) {
 		color: var(--tabs-text-active);
 	}
 
-	.t-tab:focus-visible {
+	:global(.t-tab:focus-visible) {
 		outline: 2px solid var(--focus);
 		outline-offset: -2px;
 	}
@@ -92,7 +92,7 @@
 
 	@media (prefers-reduced-motion: reduce) {
 		.t-tabs-pill,
-		.t-tab {
+		:global(.t-tab) {
 			transition: none !important;
 		}
 	}

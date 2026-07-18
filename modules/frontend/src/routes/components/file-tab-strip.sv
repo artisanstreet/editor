@@ -14,6 +14,16 @@
 		WorkspaceTab,
 	} from "$lib/workspace/workspace-tab-model";
 	import { Button } from "$lib/components/ui/button";
+	import {
+		AlertDialog,
+		AlertDialogAction,
+		AlertDialogCancel,
+		AlertDialogContent,
+		AlertDialogDescription,
+		AlertDialogFooter,
+		AlertDialogHeader,
+		AlertDialogTitle,
+	} from "$lib/components/ui/alert-dialog";
 
 	let {
 		visible_tabs,
@@ -75,10 +85,20 @@
 		yield* HandleCloseOutcome(outcome);
 	});
 
-	const CancelClose = Effect.gen(function* () {
+	const DismissClose = () => {
 		pending_confirmation = undefined;
 		pending_file_name = "";
+	};
+
+	const CancelClose = Effect.gen(function* () {
+		DismissClose();
 	});
+
+	const HandleDialogOpenChange = (open: boolean) => {
+		if (!open) {
+			DismissClose();
+		}
+	};
 </script>
 
 <div class="file-tab-strip" role="group" aria-label="Open files">
@@ -109,15 +129,20 @@
 	{#if overflow_tabs.length > 0}<span class="overflow-count" aria-label={`${overflow_tabs.length} tabs in overflow`}>+{overflow_tabs.length}</span>{/if}
 </div>
 
-{#if pending_confirmation !== undefined}
-	<div class="dirty-confirmation" role="alert">
-		<span><strong>{pending_file_name}</strong> has unsaved fixture edits.</span>
-		<div>
-			<Button variant="outline" size="xs" onclick={yield* CancelClose}>Keep open</Button>
-			<Button variant="destructive" size="xs" class="discard" onclick={yield* ConfirmClose}>Discard and close</Button>
-		</div>
-	</div>
-{/if}
+<AlertDialog open={pending_confirmation !== undefined} onOpenChange={HandleDialogOpenChange}>
+	<AlertDialogContent>
+		<AlertDialogHeader>
+			<AlertDialogTitle>Discard unsaved fixture edits?</AlertDialogTitle>
+			<AlertDialogDescription>
+				<strong>{pending_file_name}</strong> has unsaved fixture edits. This fixture-only change will be discarded.
+			</AlertDialogDescription>
+		</AlertDialogHeader>
+		<AlertDialogFooter>
+			<AlertDialogCancel onclick={yield* CancelClose}>Keep open</AlertDialogCancel>
+			<AlertDialogAction onclick={yield* ConfirmClose}>Discard and close</AlertDialogAction>
+		</AlertDialogFooter>
+	</AlertDialogContent>
+</AlertDialog>
 
 <style>
 	.file-tab-strip {
@@ -177,8 +202,8 @@
 		box-shadow: inset 0 -2px var(--focus);
 	}
 
-	.tab-activate,
-	.tab-action {
+	:global(.tab-activate),
+	:global(.tab-action) {
 		min-width: 0;
 		padding: 0;
 		border: 0;
@@ -187,7 +212,7 @@
 		cursor: pointer;
 	}
 
-	.tab-activate {
+	:global(.tab-activate) {
 		display: grid;
 		align-content: center;
 		gap: 3px;
@@ -244,65 +269,30 @@
 		color: var(--permission);
 	}
 
-	.tab-action {
+	:global(.tab-action) {
 		display: grid;
 		place-items: center;
 		align-self: stretch;
 		opacity: 0.42;
 	}
 
-	.tab-action:hover,
-	.tab-action:focus-visible {
+	:global(.tab-action:hover),
+	:global(.tab-action:focus-visible) {
 		background: var(--raised-hover);
 		opacity: 1;
 	}
 
-	.tab-action:disabled {
+	:global(.tab-action:disabled) {
 		cursor: default;
 		opacity: 0.18;
 	}
 
-	.tab-action.close:hover {
+	:global(.tab-action.close:hover) {
 		color: var(--run-failed);
 	}
 
-	.dirty-confirmation {
-		display: flex;
-		min-height: 38px;
-		align-items: center;
-		justify-content: space-between;
-		gap: 12px;
-		padding: 0 10px 0 12px;
-		border-bottom: 1px solid var(--permission);
-		background: var(--permission-surface);
-		color: var(--text-secondary);
-		font-size: 10px;
-	}
-
-	.dirty-confirmation div {
-		display: flex;
-		gap: 5px;
-	}
-
-	.dirty-confirmation button {
-		height: 25px;
-		padding: 0 8px;
-		border: 1px solid var(--line-strong);
-		border-radius: var(--radius-sm);
-		background: var(--pane);
-		color: var(--text-secondary);
-		font-size: 9px;
-		cursor: pointer;
-	}
-
-	.dirty-confirmation button.discard {
-		border-color: var(--run-failed);
-		color: var(--run-failed);
-	}
-
-	.tab-activate:focus-visible,
-	.tab-action:focus-visible,
-	.dirty-confirmation button:focus-visible {
+	:global(.tab-activate:focus-visible),
+	:global(.tab-action:focus-visible) {
 		outline: 2px solid var(--focus);
 		outline-offset: -2px;
 	}
