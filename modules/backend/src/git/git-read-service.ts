@@ -326,15 +326,6 @@ function content_diff_args(head: GitHead, scope: GitDiffScope) {
 	];
 }
 
-function normalized_worktree_identity(path: string) {
-	const windows_path = /^[a-z]:[\\/]/iu.test(path) || path.startsWith("\\\\");
-	const slash_path = (windows_path ? path.replaceAll("\\", "/") : path).replace(/\/$/u, "");
-
-	return /^[a-z]:/iu.test(slash_path)
-		? `${slash_path[0]!.toLowerCase()}${slash_path.slice(1)}`
-		: slash_path;
-}
-
 function length_prefixed(chunks: ReadonlyArray<Uint8Array>) {
 	const byte_count = chunks.reduce((total, chunk) => total + 8 + chunk.byteLength, 0);
 	const output = new Uint8Array(byte_count);
@@ -608,11 +599,11 @@ export function make_git_read_service_layer(options: GitReadServiceOptions = {})
 					}
 
 					const parsed_worktrees = yield* ParseGitWorktrees(initial_worktree_bytes);
-					const root_identity = normalized_worktree_identity(git.root);
-					const worktrees = parsed_worktrees.map((worktree) => ({
-						...worktree,
-						current: normalized_worktree_identity(worktree.path) === root_identity,
-					}));
+					const worktrees = yield* Effect.forEach(parsed_worktrees, (worktree) =>
+						git
+							.IsCurrentRoot(worktree.path)
+							.pipe(Effect.map((current) => ({ ...worktree, current }))),
+					);
 
 					if (worktrees.filter((worktree) => worktree.current).length !== 1) {
 						return yield* Effect.fail(
