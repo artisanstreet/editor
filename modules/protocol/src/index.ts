@@ -5,6 +5,8 @@ export * from "./control";
 export * from "./guidance";
 export * from "./git";
 export * from "./model-behaviour";
+
+export * from "./marketplace";
 export * from "./orchestration-groups";
 export * from "./preview";
 export * from "./stream";
