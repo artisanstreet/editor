@@ -1,18 +1,24 @@
 import { fileURLToPath } from "node:url";
+import { dirname, join, delimiter } from "node:path";
+import Module from "node:module";
 
 import { Effect, Layer, ManagedRuntime } from "effect";
 
 import { make_desktop_backend_layer, RichLinkAssetStoreLive } from "@artisan/backend";
-import {
-	CodexEngine,
-	CodexProcessFactoryLive,
-	make_codex_engine_layer,
-} from "@artisan/engines";
+import { CodexEngine, CodexProcessFactoryLive, make_codex_engine_layer } from "@artisan/engines";
 import {
 	make_backend_message_port_transport_server_layer,
 	MessagePortTransportServer,
 } from "@artisan/transport/server";
 import { adapt_electron_message_port_main } from "@artisan/transport/electron-shapes";
+
+const native_runtime_path = join(dirname(fileURLToPath(import.meta.url)), "native-runtime");
+
+/** Makes the staged optional N-API package available to the backend's dynamic loader. */
+process.env.NODE_PATH = [native_runtime_path, process.env.NODE_PATH]
+	.filter(Boolean)
+	.join(delimiter);
+Module._initPaths();
 
 interface ParentPortMessage {
 	readonly data: unknown;
@@ -24,7 +30,9 @@ interface UtilityEnvironment {
 	readonly migrations_path: string;
 }
 
-function parent_message(value: unknown): { readonly generation: number; readonly kind: string } | undefined {
+function parent_message(
+	value: unknown,
+): { readonly generation: number; readonly kind: string } | undefined {
 	if (typeof value !== "object" || value === null) {
 		return undefined;
 	}
@@ -137,8 +145,12 @@ export const StartUtility = async () => {
 					.runPromise(
 						Effect.scoped(
 							Effect.gen(function* () {
-								const control_port = yield* adapt_electron_message_port_main(raw_ports[0] as never);
-								const stream_port = yield* adapt_electron_message_port_main(raw_ports[1] as never);
+								const control_port = yield* adapt_electron_message_port_main(
+									raw_ports[0] as never,
+								);
+								const stream_port = yield* adapt_electron_message_port_main(
+									raw_ports[1] as never,
+								);
 
 								yield* server.Serve({ control_port, stream_port });
 							}),
@@ -152,7 +164,6 @@ export const StartUtility = async () => {
 			}),
 		).catch(() => undefined);
 	});
-
 };
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {

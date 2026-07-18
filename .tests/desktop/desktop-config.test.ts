@@ -22,30 +22,41 @@ describe("desktop packaging configuration", () => {
 	});
 
 	it("confines custom-protocol assets below the packaged root", () => {
-		expect(resolve_frontend_request("C:/resources/.dist/frontend", "artisan://app/index.html")).toBe(
-			"C:\\resources\\.dist\\frontend\\index.html",
-		);
-		expect(resolve_frontend_request("C:/resources/.dist/frontend", "artisan://app/%2e%2e/secret")).toBeUndefined();
-		expect(resolve_frontend_request("C:/resources/.dist/frontend", "artisan://other/index.html")).toBeUndefined();
+		expect(
+			resolve_frontend_request("C:/resources/.dist/frontend", "artisan://app/index.html"),
+		).toBe("C:\\resources\\.dist\\frontend\\index.html");
+		expect(
+			resolve_frontend_request("C:/resources/.dist/frontend", "artisan://app/%2e%2e/secret"),
+		).toBeUndefined();
+		expect(
+			resolve_frontend_request("C:/resources/.dist/frontend", "artisan://other/index.html"),
+		).toBeUndefined();
 	});
 
 	it("keeps native modules unpacked and exposes only the narrow preload bridge", () => {
 		const config = readFileSync(new URL("desktop-builder.yml", root), "utf8");
 		const main = readFileSync(new URL("modules/desktop/src/main.ts", root), "utf8");
 		const preload = readFileSync(new URL("modules/desktop/src/preload.ts", root), "utf8");
+		const vite_config = readFileSync(new URL("desktop.vite.config.ts", root), "utf8");
+		const utility = readFileSync(new URL("modules/desktop/src/utility.ts", root), "utf8");
 
 		expect(config).toContain("**/*.node");
-		expect(config).toContain("**/node-pty/**");
+		expect(config).toContain("**/native-runtime/**");
 		expect(config).toContain("output: .dist/electron-release");
 		expect(config).toContain("from: .dist/desktop");
 		expect(config).toContain("from: .dist/frontend");
 		expect(config).not.toContain("from: .dist\n");
+		expect(vite_config).toContain("Missing .dist/bounded-file-store-native/index.cjs");
+		expect(vite_config).toContain(
+			'"node-pty": resolve(import.meta.dirname, "modules/desktop/src/node-pty-shim.ts")',
+		);
+		expect(utility).toContain('"native-runtime"');
 		expect(main).toContain("requestSingleInstanceLock");
 		expect(main).toContain("contextIsolation: true");
 		expect(main).toContain("nodeIntegration: false");
 		expect(main).toContain("sandbox: true");
 		expect(main).toContain("protocol.handle");
-		expect(main).toContain("app.on(\"activate\"");
+		expect(main).toContain('app.on("activate"');
 		expect(main).toContain("before-quit");
 		expect(preload).toContain("requestConnection");
 		expect(preload).not.toContain("ipcRenderer.send");

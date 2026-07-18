@@ -78,28 +78,47 @@ export class DesktopSessionSupervisor {
 			throw new Error("Artisan renderer was destroyed before a connection could be created");
 		}
 
-		const control = this.#options.create_channel();
-		const stream = this.#options.create_channel();
-		const generation = ++this.#generation;
 		const previous = this.#active_by_web_contents.get(event.sender.id);
 
 		if (previous) {
-			utility.postMessage({ kind: "artisan:close-generation", generation: previous.generation });
+			utility.postMessage({
+				kind: "artisan:close-generation",
+				generation: previous.generation,
+			});
 		}
 
-		this.#active_by_web_contents.set(event.sender.id, {
-			generation,
-		});
-		utility.postMessage(
-			{ generation, kind: "artisan:connect" },
-			[control.port1, stream.port1],
-		);
+		const control = this.#options.create_channel();
+		const stream = this.#options.create_channel();
+		const generation = ++this.#generation;
 
-		event.sender.postMessage(
-			"artisan:connection",
-			{ generation, kind: "artisan:connection" },
-			[control.port2, stream.port2],
-		);
+		try {
+			utility.postMessage({ generation, kind: "artisan:connect" }, [
+				control.port1,
+				stream.port1,
+			]);
+		} catch (cause) {
+			this.#close_ports([control.port1, control.port2, stream.port1, stream.port2]);
+			throw cause;
+		}
+
+		this.#active_by_web_contents.set(event.sender.id, { generation });
+
+		try {
+			event.sender.postMessage(
+				"artisan:connection",
+				{ generation, kind: "artisan:connection" },
+				[control.port2, stream.port2],
+			);
+		} catch (cause) {
+			this.#active_by_web_contents.delete(event.sender.id);
+			this.#close_ports([control.port2, stream.port2]);
+			try {
+				utility.postMessage({ kind: "artisan:close-generation", generation });
+			} catch {
+				/** The utility exit handler will fence any remaining owned generation. */
+			}
+			throw cause;
+		}
 
 		return { generation };
 	}
@@ -145,6 +164,16 @@ export class DesktopSessionSupervisor {
 
 	#close_active_generations() {
 		this.#active_by_web_contents.clear();
+	}
+
+	#close_ports(ports: ReadonlyArray<{ readonly close: () => void }>) {
+		for (const port of ports) {
+			try {
+				port.close();
+			} catch {
+				/** Best-effort cleanup after a failed ownership transfer. */
+			}
+		}
 	}
 
 	#restart() {

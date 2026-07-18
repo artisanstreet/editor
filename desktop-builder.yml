@@ -10,12 +10,11 @@ files:
     - from: modules/backend/drizzle
       to: modules/backend/drizzle
     - package.json
-    - node_modules/**/*
 asar: true
+disableDefaultIgnoredFiles: true
 asarUnpack:
     - "**/*.node"
-    - "**/node-pty/**"
-    - "**/@artisan/bounded-file-store-native/**"
+    - "**/native-runtime/**"
 extraMetadata:
     main: .dist/desktop/main.js
 win:
