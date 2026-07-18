@@ -39,6 +39,8 @@
 		file_fixtures,
 		type FileFixture,
 	} from "./editor-fixtures";
+	import { Button } from "$lib/components/ui/button";
+	import { Textarea } from "$lib/components/ui/textarea";
 
 	const orchestrator_nodes = [
 		{ id: "node-sol", label: "Coordinate workspace UI", status: "Waiting" },
@@ -309,8 +311,8 @@
 			</div>
 			<label class="chat-composer">
 				<span>Message fixture</span>
-				<textarea value={chat_draft} oninput={yield* UpdateChatDraft(event.currentTarget.value)}></textarea>
-				<button type="button" aria-label="Send fixture message" disabled><ArrowUp size={16} stroke={1.8} aria-hidden="true" /></button>
+				<Textarea value={chat_draft} oninput={yield* UpdateChatDraft(event.currentTarget.value)} />
+				<Button size="icon-xs" type="button" aria-label="Send fixture message" disabled><ArrowUp size={16} stroke={1.8} aria-hidden="true" /></Button>
 			</label>
 		</div>
 	{:else}
@@ -323,9 +325,9 @@
 			</div>
 			<div class="stage-list" aria-label="Fixture orchestration nodes">
 				{#each orchestrator_nodes as node, index}
-					<button class:active={selected_node_id === node.id} type="button" onclick={yield* SelectNode(node.id)}>
+				<Button variant="outline" class:active={selected_node_id === node.id} onclick={yield* SelectNode(node.id)}>
 						<span class="stage-index">0{index + 1}</span><span>{node.label}</span><span>{node.status}</span>{#if node.status === "Complete"}<CircleCheck size={15} stroke={1.7} aria-label="Complete" />{/if}
-					</button>
+				</Button>
 				{/each}
 			</div>
 		</div>

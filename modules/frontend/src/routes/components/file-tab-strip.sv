@@ -13,6 +13,7 @@
 		DirtyCloseConfirmation,
 		WorkspaceTab,
 	} from "$lib/workspace/workspace-tab-model";
+	import { Button } from "$lib/components/ui/button";
 
 	let {
 		visible_tabs,
@@ -86,7 +87,7 @@
 		{#each visible_tabs as tab}
 			{const agent_change = Option.getOrUndefined(tab.agent_change)}
 			<div id={`workspace-tab-${tab.generation}`} class:active={active_tab_id === tab.id} class="file-tab" data-ownership={tab.ownership._tag} data-content={tab.content._tag} data-edit={tab.edit_state._tag}>
-				<button class="tab-activate" type="button" aria-pressed={active_tab_id === tab.id} ondblclick={yield* on_promote(tab.id)} onclick={yield* on_activate(tab.id)}>
+				<Button variant="ghost" class="tab-activate" aria-pressed={active_tab_id === tab.id} ondblclick={yield* on_promote(tab.id)} onclick={yield* on_activate(tab.id)}>
 					<span class="tab-name">{tab.file.name}</span>
 					<span class="tab-states" aria-label={`States for ${tab.file.name}`}>
 						{#if tab.content._tag === "DiffPreview"}<span class="state-chip diff"><GitCompare size={11} stroke={1.8} aria-hidden="true" />Diff preview</span>{/if}
@@ -95,13 +96,13 @@
 						{#if tab.edit_state._tag === "Dirty"}<span class="state-chip dirty">Dirty</span>{/if}
 						{#if agent_change !== undefined}<span class="state-chip agent"><Robot size={10} stroke={1.8} aria-hidden="true" />Agent change +{agent_change.added} −{agent_change.removed}</span>{/if}
 					</span>
-				</button>
-				<button class="tab-action" type="button" disabled={tab.ownership._tag === "Pinned"} aria-label={tab.ownership._tag === "Pinned" ? `${tab.file.name} is pinned` : `Pin ${tab.file.name}`} onclick={yield* on_pin(tab.id)}>
+				</Button>
+				<Button variant="ghost" size="icon-xs" class="tab-action" disabled={tab.ownership._tag === "Pinned"} aria-label={tab.ownership._tag === "Pinned" ? `${tab.file.name} is pinned` : `Pin ${tab.file.name}`} onclick={yield* on_pin(tab.id)}>
 					<Pin size={12} stroke={1.8} aria-hidden="true" />
-				</button>
-				<button class="tab-action close" type="button" aria-label={`Close ${tab.file.name}`} onclick={yield* RequestClose(tab.id)}>
+				</Button>
+				<Button variant="ghost" size="icon-xs" class="tab-action close" aria-label={`Close ${tab.file.name}`} onclick={yield* RequestClose(tab.id)}>
 					<X size={13} stroke={1.8} aria-hidden="true" />
-				</button>
+				</Button>
 			</div>
 		{/each}
 	</div>
@@ -112,8 +113,8 @@
 	<div class="dirty-confirmation" role="alert">
 		<span><strong>{pending_file_name}</strong> has unsaved fixture edits.</span>
 		<div>
-			<button type="button" onclick={yield* CancelClose}>Keep open</button>
-			<button class="discard" type="button" onclick={yield* ConfirmClose}>Discard and close</button>
+			<Button variant="outline" size="xs" onclick={yield* CancelClose}>Keep open</Button>
+			<Button variant="destructive" size="xs" class="discard" onclick={yield* ConfirmClose}>Discard and close</Button>
 		</div>
 	</div>
 {/if}

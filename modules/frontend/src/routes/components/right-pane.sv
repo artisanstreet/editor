@@ -12,6 +12,7 @@
 	} from "@tabler/icons-svelte";
 
 	import { agent_fixtures, change_fixtures, permission_fixtures, session_fixture } from "./editor-fixtures";
+	import { Button } from "$lib/components/ui/button";
 
 	let { instance_id, on_collapse }: { instance_id: string; on_collapse?: Effect.Effect<void> } = $props();
 
@@ -27,9 +28,9 @@
 		<div><strong>Session</strong><span>Preview data</span></div>
 		<span class="fixture-badge">Fixture</span>
 		{#if on_collapse}
-			<button class="collapse-pane" type="button" aria-label="Collapse session pane" title="Collapse session pane" onclick={yield* CollapsePane}>
+			<Button variant="ghost" size="icon-sm" class="collapse-pane" aria-label="Collapse session pane" title="Collapse session pane" onclick={yield* CollapsePane}>
 				<CollapseRight size={17} stroke={1.7} aria-hidden="true" />
-			</button>
+			</Button>
 		{/if}
 	</header>
 

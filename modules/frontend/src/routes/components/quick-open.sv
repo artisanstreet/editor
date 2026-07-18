@@ -3,6 +3,8 @@
 	import { IconFileSearch as FileSearch, IconSearch as Search } from "@tabler/icons-svelte";
 
 	import type { WorkspaceFileReference } from "$lib/workspace/workspace-tab-model";
+	import { Button } from "$lib/components/ui/button";
+	import { Input } from "$lib/components/ui/input";
 
 	let {
 		files,
@@ -209,18 +211,18 @@
 
 <svelte:window onkeydown={yield* HandleGlobalKeydown(event)} />
 
-<button class="quick-open-trigger" type="button" bind:this={trigger} onclick={yield* OpenQuickOpen} aria-haspopup="dialog" aria-expanded={is_open}>
+	<Button variant="outline" size="xs" class="quick-open-trigger" bind:ref={trigger} onclick={yield* OpenQuickOpen} aria-haspopup="dialog" aria-expanded={is_open}>
 	<FileSearch size={14} stroke={1.7} aria-hidden="true" />
 	<span>Quick open</span>
 	<kbd>Ctrl P</kbd>
-</button>
+	</Button>
 
 {#if is_open || is_closing}
 	<div class:closing={is_closing} class="quick-open-backdrop" role="presentation" onpointerdown={yield* CloseFromBackdrop(event)}>
 		<div bind:this={dialog} class:is-open={is_open} class:is-closing={is_closing} class="quick-open-dialog t-modal" role="dialog" aria-modal="true" aria-labelledby="quick-open-title" tabindex="-1">
 			<header>
 				<Search size={16} stroke={1.7} aria-hidden="true" />
-				<input bind:this={search_input} value={query} oninput={yield* UpdateQuery(event.currentTarget.value)} aria-label="Search fixture files" placeholder="Search files by name or path" autocomplete="off" />
+				<Input bind:ref={search_input} value={query} oninput={yield* UpdateQuery(event.currentTarget.value)} aria-label="Search fixture files" placeholder="Search files by name or path" autocomplete="off" />
 				<kbd>Esc</kbd>
 			</header>
 			<div class="quick-open-heading">
@@ -229,9 +231,9 @@
 			</div>
 			<div class="quick-open-results" id="quick-open-results">
 				{#each results as file, index}
-					<button id={`quick-open-result-${index}`} type="button" aria-current={selected_index === index ? "true" : undefined} onclick={yield* ChooseFile(file.id)}>
+					<Button variant="ghost" id={`quick-open-result-${index}`} aria-current={selected_index === index ? "true" : undefined} onclick={yield* ChooseFile(file.id)}>
 						<span>{file.name}</span><small>{file.path}</small>
-					</button>
+					</Button>
 				{:else}
 					<p>No fixture files match “{query}”.</p>
 				{/each}

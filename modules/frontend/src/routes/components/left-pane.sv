@@ -11,6 +11,7 @@
 	} from "@tabler/icons-svelte";
 
 	import { thread_fixtures } from "./editor-fixtures";
+	import { Button } from "$lib/components/ui/button";
 
 	let {
 		compact = false,
@@ -52,21 +53,21 @@
 		<span class="brand-mark"><BrandDatabricks size={19} stroke={1.7} aria-hidden="true" /></span>
 		{#if !compact}<span class="brand-name">Artisan</span><span class="fixture-tag">Fixture</span>{/if}
 		{#if on_collapse}
-			<button class="collapse-pane" type="button" aria-label="Collapse thread navigation" title="Collapse thread navigation" onclick={yield* CollapsePane}>
+			<Button variant="ghost" size="icon-sm" class="collapse-pane" aria-label="Collapse thread navigation" title="Collapse thread navigation" onclick={yield* CollapsePane}>
 				<CollapseLeft size={17} stroke={1.7} aria-hidden="true" />
-			</button>
+			</Button>
 		{/if}
 	</header>
 
 	<nav class="primary-actions" aria-label="Workspace actions">
-		<button class="action primary" type="button" aria-label="New chat" onclick={yield* NewChat}>
+		<Button variant="outline" class="action primary" aria-label="New chat" onclick={yield* NewChat}>
 			<MessagePlus size={17} stroke={1.7} aria-hidden="true" />
 			{#if !compact}<span>New chat{draft_threads > 0 ? ` (${draft_threads})` : ""}</span>{/if}
-		</button>
-		<button class="action" type="button" aria-label="Marketplace unavailable" title="Marketplace contracts are not available yet" disabled>
+		</Button>
+		<Button variant="ghost" class="action" aria-label="Marketplace unavailable" title="Marketplace contracts are not available yet" disabled>
 			<LayoutGrid size={17} stroke={1.7} aria-hidden="true" />
 			{#if !compact}<span>Marketplace</span>{/if}
-		</button>
+		</Button>
 	</nav>
 
 	{#if !compact}
@@ -77,7 +78,8 @@
 			</div>
 			<div class="thread-list">
 				{#each thread_fixtures as thread}
-					<button
+					<Button
+						variant="ghost"
 						class:active={selected_thread === thread.id}
 						class="thread-row"
 						type="button"
@@ -85,7 +87,7 @@
 					>
 						<span class="thread-title">{thread.title}</span>
 						<span class="thread-meta">{thread.meta}</span>
-					</button>
+					</Button>
 				{/each}
 			</div>
 		</section>
