@@ -593,6 +593,7 @@ export const ArtisanToolInvocations = sqliteTable(
 		agent_id: text("agent_id"),
 		tool_id: text("tool_id").notNull(),
 		input_summary: text("input_summary").notNull(),
+		execution_input_json: text("execution_input_json").notNull(),
 		permission_json: text("permission_json").notNull(),
 		raw_origin_json: text("raw_origin_json"),
 		approval_id: text("approval_id"),

@@ -7,6 +7,7 @@ import {
 	ArtisanApprovalResolution,
 	ArtisanApprovalUpdatedEvent,
 	ArtisanToolInvocation,
+	ArtisanToolExecutionInput,
 	ArtisanToolInvocationEvent,
 	ArtisanToolInvocationOutcome,
 	ArtisanToolUsage,
@@ -41,6 +42,7 @@ const lease_milliseconds = 60_000;
 
 const BeginInput = Schema.Struct({
 	approval: Schema.optional(ArtisanApprovalRequest),
+	execution_input: ArtisanToolExecutionInput,
 	invocation: ArtisanToolInvocation,
 	request_fingerprint,
 });
@@ -51,6 +53,7 @@ const StoredInvocation = Schema.Struct({
 	claim_lease_expires_at: Schema.NullOr(IsoDateTime),
 	claim_owner_id: Schema.NullOr(Identifier),
 	completed_at: Schema.NullOr(IsoDateTime),
+	execution_input_json: Schema.String,
 	invocation_id: Identifier,
 	input_summary: ArtisanToolInvocation.fields.input_summary,
 	journal_sequence: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))),
@@ -121,6 +124,9 @@ export class ToolInvocationRepository extends Context.Service<
 		readonly Begin: (
 			input: typeof BeginInput.Type,
 		) => Effect.Effect<ArtisanToolInvocationValue, ToolInvocationRepositoryError>;
+		readonly ReadExecutionInput: (
+			invocation_id: string,
+		) => Effect.Effect<typeof ArtisanToolExecutionInput.Type, ToolInvocationRepositoryError>;
 		readonly Claim: (
 			invocation_id: string,
 		) => Effect.Effect<ToolInvocationClaim, ToolInvocationRepositoryError>;
@@ -310,22 +316,23 @@ export const ToolInvocationRepositoryLive = Layer.effect(
 		const ValidateBegin = (input: typeof BeginInput.Type) =>
 			Schema.decodeUnknownEffect(BeginInput, { onExcessProperty: "error" })(input).pipe(
 				Effect.flatMap((decoded) =>
-					(decoded.invocation.lifecycle === "requested" &&
+					decoded.execution_input.tool_id === decoded.invocation.tool_id &&
+					((decoded.invocation.lifecycle === "requested" &&
 						decoded.invocation.outcome === undefined &&
 						decoded.approval === undefined &&
 						decoded.invocation.approval_id === undefined) ||
-					(decoded.invocation.lifecycle === "awaiting_approval" &&
-						decoded.invocation.outcome === undefined &&
-						decoded.approval !== undefined &&
-						decoded.approval.approval_id === decoded.invocation.approval_id &&
-						decoded.approval.invocation_id === decoded.invocation.invocation_id) ||
-					(["denied", "failed", "cancelled", "unsupported"].includes(
-						decoded.invocation.lifecycle,
-					) &&
-						decoded.invocation.outcome !== undefined &&
-						decoded.invocation.completed_at !== undefined &&
-						decoded.approval === undefined &&
-						decoded.invocation.approval_id === undefined)
+						(decoded.invocation.lifecycle === "awaiting_approval" &&
+							decoded.invocation.outcome === undefined &&
+							decoded.approval !== undefined &&
+							decoded.approval.approval_id === decoded.invocation.approval_id &&
+							decoded.approval.invocation_id === decoded.invocation.invocation_id) ||
+						(["denied", "failed", "cancelled", "unsupported"].includes(
+							decoded.invocation.lifecycle,
+						) &&
+							decoded.invocation.outcome !== undefined &&
+							decoded.invocation.completed_at !== undefined &&
+							decoded.approval === undefined &&
+							decoded.invocation.approval_id === undefined))
 						? Effect.succeed(decoded)
 						: Effect.fail(
 								new ToolInvocationRepositoryFailure({
@@ -390,6 +397,7 @@ export const ToolInvocationRepositoryLive = Layer.effect(
 								claim_owner_id: null,
 								completed_at: decoded.invocation.completed_at ?? null,
 								invocation_id: decoded.invocation.invocation_id,
+								execution_input_json: JSON.stringify(decoded.execution_input),
 								input_summary: decoded.invocation.input_summary,
 								journal_sequence: null,
 								lifecycle: decoded.invocation.lifecycle,
@@ -850,6 +858,31 @@ export const ToolInvocationRepositoryLive = Layer.effect(
 							: new ToolInvocationRepositoryFailure({ cause }),
 					),
 				);
+		const ReadExecutionInput = (
+			invocation_id: string,
+		): Effect.Effect<typeof ArtisanToolExecutionInput.Type, ToolInvocationRepositoryError> =>
+			Effect.gen(function* () {
+				const [row] = yield* database.client
+					.select({ execution_input_json: ArtisanToolInvocations.execution_input_json })
+					.from(ArtisanToolInvocations)
+					.where(eq(ArtisanToolInvocations.invocation_id, invocation_id))
+					.limit(1)
+					.pipe(
+						Effect.mapError((cause) => new ToolInvocationRepositoryFailure({ cause })),
+					);
+				if (!row) {
+					return yield* new ToolInvocationLifecycleConflict({
+						invocation_id,
+						lifecycle: "missing",
+					});
+				}
+
+				return yield* ParseJson(
+					row.execution_input_json,
+					ArtisanToolExecutionInput,
+					"Invocation execution input",
+				).pipe(Effect.map((value) => value as typeof ArtisanToolExecutionInput.Type));
+			});
 		const Usage = (thread_id: string) =>
 			database.client
 				.select({
@@ -888,6 +921,15 @@ export const ToolInvocationRepositoryLive = Layer.effect(
 					),
 				);
 
-		return { Begin, Claim, Finalize, ListApprovals, ListInvocations, ResolveApproval, Usage };
+		return {
+			Begin,
+			Claim,
+			Finalize,
+			ListApprovals,
+			ListInvocations,
+			ReadExecutionInput,
+			ResolveApproval,
+			Usage,
+		};
 	}),
 );
