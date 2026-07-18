@@ -8,7 +8,6 @@ import TsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker"
 import type {
 	MonacoAdapter,
 	MonacoDiagnostic,
-	MonacoEditor,
 	MonacoModel,
 	MonacoViewState,
 } from "./monaco-editor-service";

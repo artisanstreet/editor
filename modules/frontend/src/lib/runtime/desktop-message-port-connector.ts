@@ -338,7 +338,7 @@ export const make_frontend_message_port_connector_layer = (
 
 /** Production connector: fixtures must opt into their own explicit client Layer. */
 export const FrontendMessagePortConnectorLive = Layer.unwrap(
-	Effect.gen(function* () {
+	Effect.sync(() => {
 		const host = window_desktop_connection_host();
 
 		if (Option.isNone(host)) {

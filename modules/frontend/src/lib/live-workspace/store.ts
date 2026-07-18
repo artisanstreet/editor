@@ -18,11 +18,12 @@ import type {
 	ThreadListItem,
 	ThreadWorkItem,
 } from "@artisan/protocol";
-import { ArtisanClient } from "@artisan/transport/client";
+import { ArtisanClient, type ThreadListUpdate } from "@artisan/transport/client";
 
 import {
 	FrontendConnectionLifecycle,
 	type FrontendConnectionPhase,
+	type FrontendConnectionState,
 } from "../runtime/desktop-message-port-connector";
 
 export type LiveWorkspacePhase =
@@ -164,8 +165,15 @@ export const ApplyThreadListSubscriptionFailure = (
 });
 
 /** Retries a dropped authoritative stream with a bounded backoff before reporting its final loss. */
-export const RunThreadListSubscription = <E extends { readonly message: string }>(
-	subscribe: Effect.Effect<Stream.Stream<ThreadListUpdate>, E, Scope.Scope>,
+export const RunThreadListSubscription = <
+	SubscribeError extends { readonly message: string },
+	StreamError extends { readonly message: string },
+>(
+	subscribe: Effect.Effect<
+		Stream.Stream<ThreadListUpdate, StreamError>,
+		SubscribeError,
+		Scope.Scope
+	>,
 	on_update: (update: ThreadListUpdate) => Effect.Effect<void>,
 	on_failure: (message: string) => Effect.Effect<void>,
 ) =>
@@ -222,7 +230,7 @@ export const LiveWorkspaceStoreLive = Layer.effect(
 		const client = yield* ArtisanClient;
 		const lifecycle = yield* FrontendConnectionLifecycle;
 		const state = yield* SubscriptionRef.make(EmptyState);
-		const subscription_fiber = yield* Ref.make<Option.Option<Fiber.RuntimeFiber<void, never>>>(
+		const subscription_fiber = yield* Ref.make<Option.Option<Fiber.Fiber<void, never>>>(
 			Option.none(),
 		);
 
@@ -534,7 +542,7 @@ export const LiveWorkspaceStoreLive = Layer.effect(
 			}));
 		});
 
-		yield* Stream.runForEach(lifecycle.Changes, (connection) =>
+		const HandleConnection = (connection: FrontendConnectionState) =>
 			Effect.gen(function* () {
 				yield* Update((current) => ({
 					...current,
@@ -549,14 +557,15 @@ export const LiveWorkspaceStoreLive = Layer.effect(
 				}));
 				if (ShouldRefreshForConnection(connection.phase)) {
 					yield* StartThreadListSubscription;
-					yield* Refresh;
+					yield* Refresh.pipe(Effect.forkScoped);
 				} else {
 					yield* StopThreadListSubscription;
 				}
-			}),
-		).pipe(Effect.forkScoped);
-		yield* StartThreadListSubscription;
-		yield* Refresh;
+			});
+
+		const initial_connection = yield* lifecycle.Current;
+		yield* HandleConnection(initial_connection);
+		yield* Stream.runForEach(lifecycle.Changes, HandleConnection).pipe(Effect.forkScoped);
 
 		return LiveWorkspaceStore.of({
 			Changes: SubscriptionRef.changes(state).pipe(Stream.map((current) => current.snapshot)),
