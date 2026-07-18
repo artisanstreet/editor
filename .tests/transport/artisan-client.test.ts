@@ -1081,12 +1081,12 @@ describe("ArtisanClient over MessagePorts", () => {
 		}
 	});
 
-	it("keeps control responsive while the isolated binary stream channel saturates", async () => {
+	it("keeps control responsive while the isolated server logical stream queue saturates", async () => {
 		const flood = Array.from({ length: 128 }, (_, index) => Uint8Array.of(index % 256));
 		const harness = await make_transport_test_harness({
 			binary_streams: { "asset:flood": flood },
 			client: { stream_capacity: 1 },
-			server: { stream_outbound_capacity: 256 },
+			server: { stream_outbound_capacity: 1 },
 		});
 
 		try {
@@ -1095,8 +1095,6 @@ describe("ArtisanClient over MessagePorts", () => {
 					Effect.gen(function* () {
 						const stream_exit = yield* Effect.gen(function* () {
 							const stream = yield* harness.client.OpenAsset("flood");
-
-							yield* Effect.sleep("25 millis");
 
 							return yield* stream.pipe(Stream.runCollect);
 						}).pipe(Effect.timeout("1 second"), Effect.exit, Effect.forkScoped);

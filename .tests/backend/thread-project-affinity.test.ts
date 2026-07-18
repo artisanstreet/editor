@@ -7,7 +7,7 @@ import { Effect, Layer } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { CommandEnvelope, ProjectAffinityEvidenceKind, ProjectRef } from "@artisan/protocol";
-import { make_backend_runtime, ProtocolRouter } from "@artisan/backend";
+import { make_backend_runtime, ProtocolRouter, ThreadRetentionClock } from "@artisan/backend";
 
 import { Database } from "../../modules/backend/src/persistence/database";
 import {
@@ -51,6 +51,12 @@ function make_metadata_layer() {
 	return Layer.succeed(RuntimeMetadata, {
 		instance_id: "project_affinity_test",
 		MakeId: (prefix) => Effect.sync(() => `${prefix}_${++next_id}`),
+		Now: Effect.succeed("2026-07-11T12:00:00.000Z"),
+	});
+}
+
+function make_retention_clock() {
+	return Layer.succeed(ThreadRetentionClock, {
 		Now: Effect.succeed("2026-07-11T12:00:00.000Z"),
 	});
 }
@@ -522,7 +528,11 @@ describe("thread project affinity repository", () => {
 			await first_runtime.dispose();
 		}
 
-		const second_runtime = make_backend_runtime({ database_path, migrations_path });
+		const second_runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			retention_clock: make_retention_clock(),
+		});
 
 		try {
 			const thread = await second_runtime.runPromise(
