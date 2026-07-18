@@ -2,6 +2,11 @@ import { Cause, Effect, Layer, Option, Queue, Ref, Stream } from "effect";
 
 import {
 	type CommandEnvelope,
+	type ArtisanApprovalListQueryEnvelope,
+	type ArtisanApprovalResolveEnvelope,
+	type ArtisanToolExecuteEnvelope,
+	type ArtisanToolInvocationListQueryEnvelope,
+	type ArtisanToolRegistryListQueryEnvelope,
 	type GitDiffQueryEnvelope,
 	type GitIndexStageRequestEnvelope,
 	type GitIndexUnstageRequestEnvelope,
@@ -12,6 +17,8 @@ import {
 	type WorkspaceChangeReviewEnvelope,
 	type WorkspaceChangeRollbackEnvelope,
 	type WorkspaceFileReadQueryEnvelope,
+	type WorkspaceFileDiscoveryQueryEnvelope,
+	type WorkspaceLanguageCapabilitiesQueryEnvelope,
 	type WorkspaceFileReplaceEnvelope,
 	type GlobalGuidanceDriftResolutionEnvelope,
 	type GlobalGuidanceQueryEnvelope,
@@ -38,6 +45,11 @@ import {
 	type ArtisanGitIndexMutationInput,
 	type ArtisanGitMutationResolveInput,
 	type ArtisanGitWorkspaceInput,
+	type ArtisanApprovalListInput,
+	type ArtisanApprovalResolveInput,
+	type ArtisanToolExecuteInput,
+	type ArtisanToolInvocationListInput,
+	type ArtisanToolRegistryListInput,
 	type ArtisanGlobalGuidanceDriftInput,
 	type ArtisanGlobalGuidanceRetryInput,
 	type ArtisanGlobalGuidanceSelectionInput,
@@ -54,6 +66,8 @@ import {
 	type ArtisanWorkspaceChangeReviewInput,
 	type ArtisanWorkspaceChangeRollbackInput,
 	type ArtisanWorkspaceFileReadInput,
+	type ArtisanWorkspaceFileDiscoveryInput,
+	type ArtisanWorkspaceLanguageCapabilitiesInput,
 	type ArtisanWorkspaceFileReplaceInput,
 	type ArtisanThreadRetentionUpdateInput,
 } from "../client-contract";
@@ -210,6 +224,59 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					? result.payload.threads
 					: yield* Effect.die("thread list response narrowed incorrectly");
 			});
+			const list_artisan_tools = (input: ArtisanToolRegistryListInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ArtisanToolRegistryListQueryEnvelope = {
+						...trace,
+						kind: "artisan.tool.registry.list.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"artisan.tool.registry.list.query.result",
+					);
+
+					return result.kind === "artisan.tool.registry.list.query.result"
+						? result.payload
+						: yield* Effect.die("Artisan tool registry response narrowed incorrectly");
+				});
+			const list_artisan_tool_invocations = (input: ArtisanToolInvocationListInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ArtisanToolInvocationListQueryEnvelope = {
+						...trace,
+						kind: "artisan.tool.invocation.list.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"artisan.tool.invocation.list.query.result",
+					);
+
+					return result.kind === "artisan.tool.invocation.list.query.result"
+						? result.payload
+						: yield* Effect.die(
+								"Artisan tool invocation response narrowed incorrectly",
+							);
+				});
+			const list_artisan_approvals = (input: ArtisanApprovalListInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ArtisanApprovalListQueryEnvelope = {
+						...trace,
+						kind: "artisan.approval.list.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"artisan.approval.list.query.result",
+					);
+
+					return result.kind === "artisan.approval.list.query.result"
+						? result.payload
+						: yield* Effect.die("Artisan approval response narrowed incorrectly");
+				});
 
 			const read_workspace_file = (input: ArtisanWorkspaceFileReadInput) =>
 				Effect.gen(function* () {
@@ -227,6 +294,46 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					return result.kind === "workspace.file.read.query.result"
 						? result.payload
 						: yield* Effect.die("workspace file read response narrowed incorrectly");
+				});
+			const list_workspace_files = (input: ArtisanWorkspaceFileDiscoveryInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: WorkspaceFileDiscoveryQueryEnvelope = {
+						...trace,
+						kind: "workspace.file.discovery.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"workspace.file.discovery.query.result",
+					);
+
+					return result.kind === "workspace.file.discovery.query.result"
+						? result.payload
+						: yield* Effect.die(
+								"workspace file discovery response narrowed incorrectly",
+							);
+				});
+			const get_workspace_language_capabilities = (
+				input: ArtisanWorkspaceLanguageCapabilitiesInput,
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: WorkspaceLanguageCapabilitiesQueryEnvelope = {
+						...trace,
+						kind: "workspace.language.capabilities.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"workspace.language.capabilities.query.result",
+					);
+
+					return result.kind === "workspace.language.capabilities.query.result"
+						? result.payload
+						: yield* Effect.die(
+								"workspace language capabilities response narrowed incorrectly",
+							);
 				});
 			const list_workspace_changes = (input: ArtisanWorkspaceChangeListInput) =>
 				Effect.gen(function* () {
@@ -375,6 +482,81 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					};
 
 					return yield* send_git_mutation(envelope);
+				});
+
+			type ArtisanToolMutationEnvelope =
+				| ArtisanApprovalResolveEnvelope
+				| ArtisanToolExecuteEnvelope;
+			const send_artisan_tool_mutation = (envelope: ArtisanToolMutationEnvelope) =>
+				Effect.gen(function* () {
+					const result = yield* requests.Request(envelope, "command.receipt");
+
+					if (result.kind !== "command.receipt") {
+						return yield* Effect.die(
+							"Artisan tool mutation receipt narrowed incorrectly",
+						);
+					}
+
+					if (result.payload.status === "rejected") {
+						return yield* Effect.fail(
+							client_error(
+								"protocol",
+								result.payload.error.message,
+								result.payload.error,
+								result.payload.error.retryable,
+								result.payload.error.code,
+							),
+						);
+					}
+
+					return {
+						command_id: envelope.message_id,
+						journal_sequence: result.payload.journal_sequence,
+						status: result.payload.status,
+					} satisfies ArtisanCommandReceipt;
+				});
+			const execute_artisan_tool = (input: ArtisanToolExecuteInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ArtisanToolExecuteEnvelope = {
+						...trace,
+						kind: "artisan.tool.execute",
+						message_id: input.command_id ?? trace.message_id,
+						payload: {
+							input: input.input,
+							invocation_id: input.invocation_id,
+							...(input.raw_origin === undefined
+								? {}
+								: { raw_origin: input.raw_origin }),
+						},
+						thread_id: input.thread_id,
+						...(input.agent_id === undefined ? {} : { agent_id: input.agent_id }),
+						...(input.raw_origin === undefined ? {} : { raw_origin: input.raw_origin }),
+						...(input.run_id === undefined ? {} : { run_id: input.run_id }),
+					};
+
+					return yield* send_artisan_tool_mutation(envelope);
+				});
+			const resolve_artisan_approval = (input: ArtisanApprovalResolveInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ArtisanApprovalResolveEnvelope = {
+						...trace,
+						kind: "artisan.approval.resolve",
+						message_id: input.command_id ?? trace.message_id,
+						payload: {
+							approval_id: input.approval_id,
+							approved: input.approved,
+							invocation_id: input.invocation_id,
+							resolution_id: input.resolution_id,
+						},
+						thread_id: input.thread_id,
+						...(input.agent_id === undefined ? {} : { agent_id: input.agent_id }),
+						...(input.raw_origin === undefined ? {} : { raw_origin: input.raw_origin }),
+						...(input.run_id === undefined ? {} : { run_id: input.run_id }),
+					};
+
+					return yield* send_artisan_tool_mutation(envelope);
 				});
 
 			type WorkspaceMutationEnvelope =
@@ -803,10 +985,15 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				GetGitDiff: get_git_diff,
 				GetGitWorkspace: get_git_workspace,
 				GetModelBehaviour: get_model_behaviour,
+				ListArtisanApprovals: list_artisan_approvals,
+				ListArtisanToolInvocations: list_artisan_tool_invocations,
+				ListArtisanTools: list_artisan_tools,
 				GetThreadRetentionPolicy: get_thread_retention_policy,
 				GetThreadWork: get_thread_work,
 				GetWorkspaceChangeDiff: get_workspace_change_diff,
+				GetWorkspaceLanguageCapabilities: get_workspace_language_capabilities,
 				ListWorkspaceChanges: list_workspace_changes,
+				ListWorkspaceFiles: list_workspace_files,
 				ListTerminals: list_terminals,
 				ListThreads: list_threads,
 				OpenAsset: (asset_id) => streams.Open(`asset:${asset_id}`),
@@ -815,10 +1002,12 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				ResolveGlobalGuidanceDrift: resolve_global_guidance_drift,
 				RequestGitIndexMutation: request_git_index_mutation,
 				ResolveGitMutation: resolve_git_mutation,
+				ResolveArtisanApproval: resolve_artisan_approval,
 				ResolveModelBehaviourDrift: resolve_model_behaviour_drift,
 				RetryGlobalGuidanceSync: retry_global_guidance_sync,
 				RetryModelBehaviourSync: retry_model_behaviour_sync,
 				ReplaceWorkspaceFile: replace_workspace_file,
+				ExecuteArtisanTool: execute_artisan_tool,
 				ReviewWorkspaceChange: review_workspace_change,
 				RollbackWorkspaceChange: rollback_workspace_change,
 				SelectGlobalGuidance: select_global_guidance,

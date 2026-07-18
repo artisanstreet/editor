@@ -37,6 +37,18 @@ import type {
 	WorkspaceChangeListQueryResult,
 	WorkspaceChangeDiffQuery,
 	WorkspaceChangeDiffQueryResult,
+	ArtisanApprovalListQuery,
+	ArtisanApprovalListQueryResult,
+	ArtisanApprovalResolveRequest,
+	ArtisanToolExecutionRequest,
+	ArtisanToolInvocationListQuery,
+	ArtisanToolInvocationListQueryResult,
+	ArtisanToolRegistryListQuery,
+	ArtisanToolRegistryListQueryResult,
+	WorkspaceFileDiscoveryQuery,
+	WorkspaceFileDiscoveryQueryResult,
+	WorkspaceLanguageCapabilitiesQuery,
+	WorkspaceLanguageCapabilitiesQueryResult,
 } from "@artisan/protocol";
 
 /** Identifies a typed frontend client failure. */
@@ -146,6 +158,38 @@ export interface ArtisanGitMutationResolveInput extends GitMutationResolveReques
 	readonly run_id?: string;
 	readonly thread_id: string;
 }
+
+/** Supplies policy and optional workspace context for the built-in tool registry. */
+export interface ArtisanToolRegistryListInput extends ArtisanToolRegistryListQuery {}
+
+/** Supplies invocation data plus durable trace attribution for one tool execution. */
+export interface ArtisanToolExecuteInput extends ArtisanToolExecutionRequest {
+	readonly agent_id?: string;
+	readonly command_id?: string;
+	readonly run_id?: string;
+	readonly thread_id: string;
+}
+
+/** Resolves one pending built-in tool approval with durable trace attribution. */
+export interface ArtisanApprovalResolveInput extends ArtisanApprovalResolveRequest {
+	readonly agent_id?: string;
+	readonly command_id?: string;
+	readonly raw_origin?: RawOrigin;
+	readonly run_id?: string;
+	readonly thread_id: string;
+}
+
+/** Supplies cursor, filters, and thread scope for a renderer invocation timeline. */
+export interface ArtisanToolInvocationListInput extends ArtisanToolInvocationListQuery {}
+
+/** Supplies the thread and optional state filter for a renderer approval list. */
+export interface ArtisanApprovalListInput extends ArtisanApprovalListQuery {}
+
+/** Supplies the root-confined page cursor and optional prefix for workspace discovery. */
+export interface ArtisanWorkspaceFileDiscoveryInput extends WorkspaceFileDiscoveryQuery {}
+
+/** Supplies the workspace whose truthful language capability state is requested. */
+export interface ArtisanWorkspaceLanguageCapabilitiesInput extends WorkspaceLanguageCapabilitiesQuery {}
 
 /** Supplies the public retention setting and optional durable retry identity. */
 export interface ArtisanThreadRetentionUpdateInput {
@@ -286,6 +330,15 @@ export class ArtisanClient extends Context.Service<
 			input: ArtisanGitWorkspaceInput,
 		) => Effect.Effect<GitWorkspaceQueryResult, ArtisanClientError>;
 		readonly GetModelBehaviour: Effect.Effect<ModelBehaviourSnapshot, ArtisanClientError>;
+		readonly ListArtisanApprovals: (
+			input: ArtisanApprovalListInput,
+		) => Effect.Effect<ArtisanApprovalListQueryResult, ArtisanClientError>;
+		readonly ListArtisanToolInvocations: (
+			input: ArtisanToolInvocationListInput,
+		) => Effect.Effect<ArtisanToolInvocationListQueryResult, ArtisanClientError>;
+		readonly ListArtisanTools: (
+			input: ArtisanToolRegistryListInput,
+		) => Effect.Effect<ArtisanToolRegistryListQueryResult, ArtisanClientError>;
 		readonly GetThreadRetentionPolicy: Effect.Effect<ThreadRetentionPolicy, ArtisanClientError>;
 		readonly GetThreadWork: (
 			thread_id: string,
@@ -298,9 +351,15 @@ export class ArtisanClient extends Context.Service<
 		readonly ListWorkspaceChanges: (
 			input: ArtisanWorkspaceChangeListInput,
 		) => Effect.Effect<WorkspaceChangeListQueryResult, ArtisanClientError>;
+		readonly ListWorkspaceFiles: (
+			input: ArtisanWorkspaceFileDiscoveryInput,
+		) => Effect.Effect<WorkspaceFileDiscoveryQueryResult, ArtisanClientError>;
 		readonly GetWorkspaceChangeDiff: (
 			input: ArtisanWorkspaceChangeDiffInput,
 		) => Effect.Effect<WorkspaceChangeDiffQueryResult, ArtisanClientError>;
+		readonly GetWorkspaceLanguageCapabilities: (
+			input: ArtisanWorkspaceLanguageCapabilitiesInput,
+		) => Effect.Effect<WorkspaceLanguageCapabilitiesQueryResult, ArtisanClientError>;
 		readonly OpenAsset: (
 			asset_id: string,
 		) => Effect.Effect<
@@ -354,6 +413,9 @@ export class ArtisanClient extends Context.Service<
 		readonly ResolveGitMutation: (
 			input: ArtisanGitMutationResolveInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly ResolveArtisanApproval: (
+			input: ArtisanApprovalResolveInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly ResolveModelBehaviourDrift: (
 			input: ArtisanModelBehaviourDriftInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
@@ -377,6 +439,9 @@ export class ArtisanClient extends Context.Service<
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly ReplaceWorkspaceFile: (
 			input: ArtisanWorkspaceFileReplaceInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly ExecuteArtisanTool: (
+			input: ArtisanToolExecuteInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly ReviewWorkspaceChange: (
 			input: ArtisanWorkspaceChangeReviewInput,
