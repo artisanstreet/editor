@@ -1,5 +1,7 @@
 import { Effect, Schema } from "effect";
 
+import { TokenCount } from "../engine";
+
 import type {
 	EngineAgentMessageCompletedObservation,
 	EngineAgentMessageDeltaObservation,
@@ -204,9 +206,9 @@ const UsageSchema = Schema.Struct({
 	threadId: Schema.String,
 	tokenUsage: Schema.Struct({
 		total: Schema.Struct({
-			cachedInputTokens: Schema.optional(Schema.Number),
-			inputTokens: Schema.optional(Schema.Number),
-			outputTokens: Schema.optional(Schema.Number),
+			cachedInputTokens: Schema.optional(TokenCount),
+			inputTokens: Schema.optional(TokenCount),
+			outputTokens: Schema.optional(TokenCount),
 		}),
 	}),
 	turnId: Schema.String,
@@ -427,6 +429,7 @@ export function normalise_codex_notification(
 				{
 					...base,
 					_tag: "usage",
+					basis: "cumulative",
 					...(value.tokenUsage.total.inputTokens === undefined
 						? {}
 						: { input_tokens: value.tokenUsage.total.inputTokens }),
