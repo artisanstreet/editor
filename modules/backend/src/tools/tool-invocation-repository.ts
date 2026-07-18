@@ -127,6 +127,9 @@ export class ToolInvocationRepository extends Context.Service<
 		readonly ReadExecutionInput: (
 			invocation_id: string,
 		) => Effect.Effect<typeof ArtisanToolExecutionInput.Type, ToolInvocationRepositoryError>;
+		readonly ReadInvocation: (
+			invocation_id: string,
+		) => Effect.Effect<ArtisanToolInvocationValue, ToolInvocationRepositoryError>;
 		readonly Claim: (
 			invocation_id: string,
 		) => Effect.Effect<ToolInvocationClaim, ToolInvocationRepositoryError>;
@@ -883,6 +886,27 @@ export const ToolInvocationRepositoryLive = Layer.effect(
 					"Invocation execution input",
 				).pipe(Effect.map((value) => value as typeof ArtisanToolExecutionInput.Type));
 			});
+		const ReadInvocation = (
+			invocation_id: string,
+		): Effect.Effect<ArtisanToolInvocationValue, ToolInvocationRepositoryError> =>
+			Effect.gen(function* () {
+				const [row] = yield* database.client
+					.select()
+					.from(ArtisanToolInvocations)
+					.where(eq(ArtisanToolInvocations.invocation_id, invocation_id))
+					.limit(1)
+					.pipe(
+						Effect.mapError((cause) => new ToolInvocationRepositoryFailure({ cause })),
+					);
+				if (!row) {
+					return yield* new ToolInvocationLifecycleConflict({
+						invocation_id,
+						lifecycle: "missing",
+					});
+				}
+
+				return yield* DecodeInvocation(row);
+			});
 		const Usage = (thread_id: string) =>
 			database.client
 				.select({
@@ -928,6 +952,7 @@ export const ToolInvocationRepositoryLive = Layer.effect(
 			ListApprovals,
 			ListInvocations,
 			ReadExecutionInput,
+			ReadInvocation,
 			ResolveApproval,
 			Usage,
 		};
