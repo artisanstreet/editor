@@ -131,6 +131,31 @@ describe("WorkspaceGitRegistry", () => {
 		expect(error._tag).toBe("WorkspaceGitRootChangedError");
 	});
 
+	it("recognizes filesystem aliases as the current canonical root", async () => {
+		const root = await make_root();
+		const workspace = join(root, "workspace");
+		const alias = join(root, "workspace-alias");
+
+		await fs.mkdir(workspace);
+		await fs.symlink(workspace, alias, process.platform === "win32" ? "junction" : "dir");
+
+		const capability = await Effect.runPromise(
+			Effect.gen(function* () {
+				const registry = yield* WorkspaceGitRegistry;
+
+				return yield* registry.Get("workspace_one");
+			}).pipe(
+				Effect.provide(make_layer([{ root: workspace, workspace_id: "workspace_one" }])),
+			),
+		);
+
+		expect(await Effect.runPromise(capability.git.IsCurrentRoot(alias))).toBe(true);
+		expect(await Effect.runPromise(capability.git.IsCurrentRoot(root))).toBe(false);
+		expect(await Effect.runPromise(capability.git.IsCurrentRoot(join(root, "missing")))).toBe(
+			false,
+		);
+	});
+
 	it("rejects canonical root aliases during construction", async () => {
 		const root = await make_root();
 		const alias = join(root, "alias");

@@ -29,6 +29,11 @@ export type WorkspaceGitCommandInput = Omit<GitCommandInput, "cwd">;
 
 /** Provides Git execution only after the registered root is revalidated. */
 export interface WorkspaceGit {
+	/**
+	 * Resolves an inventory path through the registered filesystem authority and
+	 * compares its canonical identity with this workspace root.
+	 */
+	readonly IsCurrentRoot: (path: string) => Effect.Effect<boolean>;
 	readonly root: string;
 	readonly Run: (
 		input: WorkspaceGitCommandInput,
@@ -190,6 +195,14 @@ export function make_workspace_git_registry_layer(registrations: ReadonlyArray<u
 				}
 
 				const git: WorkspaceGit = {
+					IsCurrentRoot: (path) =>
+						file_system.realPath(path).pipe(
+							Effect.map(
+								(canonical_path) => canonical_path === registration.canonical_root,
+							),
+							/** A missing or inaccessible non-current inventory path is not root authority. */
+							Effect.catch(() => Effect.succeed(false)),
+						),
 					root: registration.canonical_root,
 					Run: (input) =>
 						ValidateRoot(registration).pipe(

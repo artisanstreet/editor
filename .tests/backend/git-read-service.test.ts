@@ -183,7 +183,10 @@ describe("GitReadService", () => {
 
 			return Effect.succeed(command_result(stdout));
 		};
-		const capability = { git: { root, Run }, workspace_id: "workspace_one" };
+		const capability = {
+			git: { IsCurrentRoot: (path: string) => Effect.succeed(path === root), root, Run },
+			workspace_id: "workspace_one",
+		};
 		const registry = Layer.succeed(WorkspaceGitRegistry, {
 			Authorize: () => Effect.succeed(capability),
 			Get: () => Effect.succeed(capability),
@@ -204,6 +207,65 @@ describe("GitReadService", () => {
 		expect(projection.root).toBe(root);
 		expect(projection.worktrees).toEqual([
 			expect.objectContaining({ current: true, path: root }),
+		]);
+	});
+
+	it("identifies the canonical root when the Git inventory reports an alias", async () => {
+		const container = await make_container();
+		const root = join(container, "repository");
+		const alias = join(container, "repository-alias");
+		const oid = "1".repeat(40);
+		const status = `# branch.oid ${oid}\0# branch.head main\0`;
+		const worktrees = `worktree ${alias}\0HEAD ${oid}\0branch refs/heads/main\0\0`;
+
+		await fs.mkdir(root);
+		await fs.symlink(root, alias, process.platform === "win32" ? "junction" : "dir");
+
+		const Run = (input: WorkspaceGitCommandInput) =>
+			Effect.succeed(
+				command_result(
+					input.args.includes("--is-inside-work-tree")
+						? "true\n"
+						: input.args.includes("status")
+							? status
+							: input.args.includes("worktree")
+								? worktrees
+								: "",
+				),
+			);
+		const capability = {
+			git: {
+				IsCurrentRoot: (path: string) =>
+					Effect.promise(() =>
+						Promise.all([fs.realpath(path), fs.realpath(root)]).then(
+							([candidate, expected]) => candidate === expected,
+						),
+					),
+				root,
+				Run,
+			},
+			workspace_id: "workspace_one",
+		};
+		const registry = Layer.succeed(WorkspaceGitRegistry, {
+			Authorize: () => Effect.succeed(capability),
+			Get: () => Effect.succeed(capability),
+			ListWorkspaceIds: Effect.succeed(["workspace_one"]),
+		});
+		const read = await Effect.runPromise(
+			Effect.service(GitReadService).pipe(
+				Effect.provide(
+					make_git_read_service_layer().pipe(
+						Layer.provideMerge(registry),
+						Layer.provideMerge(NodeCrypto.layer),
+					),
+				),
+			),
+		);
+
+		const projection = await Effect.runPromise(read.Refresh("workspace_one"));
+
+		expect(projection.worktrees).toEqual([
+			expect.objectContaining({ current: true, path: alias }),
 		]);
 	});
 
@@ -259,7 +321,11 @@ describe("GitReadService", () => {
 			return Effect.succeed(command_result(stdout));
 		};
 		const capability = {
-			git: { root: "C:/repository", Run },
+			git: {
+				IsCurrentRoot: (path: string) => Effect.succeed(path === "C:/repository"),
+				root: "C:/repository",
+				Run,
+			},
 			workspace_id: "workspace_one",
 		};
 		const registry = Layer.succeed(WorkspaceGitRegistry, {
@@ -306,7 +372,11 @@ describe("GitReadService", () => {
 			return Effect.succeed(command_result(stdout));
 		};
 		const capability = {
-			git: { root: "C:/repository", Run },
+			git: {
+				IsCurrentRoot: (path: string) => Effect.succeed(path === "C:/repository"),
+				root: "C:/repository",
+				Run,
+			},
 			workspace_id: "workspace_one",
 		};
 		const registry = Layer.succeed(WorkspaceGitRegistry, {

@@ -26,7 +26,11 @@ function result(stdout = ""): GitCommandResult {
 
 function make_driver(run: (input: WorkspaceGitCommandInput) => Effect.Effect<GitCommandResult>) {
 	const capability = {
-		git: { root: "C:/repository", Run: run },
+		git: {
+			IsCurrentRoot: (path: string) => Effect.succeed(path === "C:/repository"),
+			root: "C:/repository",
+			Run: run,
+		},
 		workspace_id: "workspace_one",
 	};
 	const registry = Layer.succeed(WorkspaceGitRegistry, {
