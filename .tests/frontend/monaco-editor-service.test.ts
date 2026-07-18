@@ -4,6 +4,7 @@ import { Effect, Layer, Option } from "effect";
 import {
 	MakeMonacoEditorLayer,
 	MonacoEditorService,
+	MonacoFileKeyForFile,
 	MonacoUriForFile,
 	type MonacoAdapter,
 	type MonacoDiagnostic,
@@ -53,15 +54,27 @@ class FakeEditor implements MonacoEditor {
 }
 
 class FakeMonacoAdapter {
-	readonly editor = new FakeEditor();
+	readonly editors: Array<FakeEditor> = [];
 	readonly markers = new Map<string, ReadonlyArray<MonacoDiagnostic>>();
 	readonly models: Array<FakeModel> = [];
+	readonly models_by_uri = new Map<string, FakeModel>();
+	fail_next_editor = false;
 
 	readonly adapter: MonacoAdapter = {
-		create_editor: () => this.editor,
+		create_editor: () => {
+			if (this.fail_next_editor) {
+				this.fail_next_editor = false;
+				throw new Error("editor creation failed");
+			}
+			const editor = new FakeEditor();
+			this.editors.push(editor);
+			return editor;
+		},
 		create_model: ({ uri, value }) => {
+			if (this.models_by_uri.has(uri)) throw new Error(`duplicate URI: ${uri}`);
 			const model = new FakeModel(uri, value);
 			this.models.push(model);
+			this.models_by_uri.set(uri, model);
 			return model;
 		},
 		set_markers: (model, _owner, diagnostics) => {
@@ -76,6 +89,7 @@ const FileA: MonacoWorkspaceFile = {
 	language: "typescript",
 	path: "src/a.ts",
 	revision: "v1",
+	workspace_id: "workspace-one",
 };
 
 const FileB: MonacoWorkspaceFile = {
@@ -84,94 +98,191 @@ const FileB: MonacoWorkspaceFile = {
 	language: "typescript",
 	path: "src/b.ts",
 	revision: "v1",
+	workspace_id: "workspace-one",
 };
 
+const Scoped = <A>(
+	fake: FakeMonacoAdapter,
+	program: Effect.Effect<A, never, MonacoEditorService>,
+) =>
+	Effect.runPromise(
+		Effect.scoped(program).pipe(Effect.provide(MakeMonacoEditorLayer(fake.adapter))),
+	);
+
 describe("Monaco editor service", () => {
-	it("keeps unique workspace-file model identities even for matching basenames", async () => {
-		expect(MonacoUriForFile(FileA)).not.toBe(
-			MonacoUriForFile({ ...FileA, id: "elsewhere", path: "elsewhere/a.ts" }),
+	it("keeps global Monaco URI and model identities distinct across workspaces", async () => {
+		const second_workspace_file = {
+			...FileA,
+			path: "src/a.ts",
+			workspace_id: "workspace-two",
+		};
+		expect(MonacoUriForFile(FileA)).not.toBe(MonacoUriForFile(second_workspace_file));
+		expect(MonacoFileKeyForFile(FileA)).not.toBe(MonacoFileKeyForFile(second_workspace_file));
+
+		const fake = new FakeMonacoAdapter();
+		await Scoped(
+			fake,
+			Effect.gen(function* () {
+				const service = yield* MonacoEditorService;
+				yield* service.Activate(FileA);
+				yield* service.Activate(second_workspace_file);
+			}),
 		);
+		expect(fake.models).toHaveLength(2);
 	});
 
-	it("preserves a tab view state when switching models", async () => {
+	it("preserves a tab view state when switching models and re-attaching", async () => {
 		const fake = new FakeMonacoAdapter();
-		const state = await Effect.runPromise(
-			Effect.scoped(
-				Effect.gen(function* () {
-					const service = yield* MonacoEditorService;
-					yield* service.Attach({} as HTMLElement);
-					yield* service.Activate(FileA);
-					fake.editor.saved = { opaque: { top: 128 } };
-					yield* service.Activate(FileB);
-					yield* service.Activate(FileA);
-					return yield* service.Current;
-				}),
-			).pipe(Effect.provide(MakeMonacoEditorLayer(fake.adapter))),
+		await Scoped(
+			fake,
+			Effect.gen(function* () {
+				const service = yield* MonacoEditorService;
+				yield* service.Attach({});
+				yield* service.Activate(FileA);
+				fake.editors[0]!.saved = { opaque: { top: 128 } };
+				yield* service.Activate(FileB);
+				yield* service.Activate(FileA);
+				yield* service.Attach({});
+			}),
 		);
 
 		expect(fake.models).toHaveLength(2);
-		expect(fake.editor.restored).toEqual({ opaque: { top: 128 } });
-		expect(Option.getOrUndefined(state.active_file_id)).toBe(FileA.id);
+		expect(fake.editors[1]!.model?.uri).toBe(MonacoUriForFile(FileA));
+		expect(fake.editors[1]!.restored).toEqual({ opaque: { top: 128 } });
+		expect(fake.editors[0]!.disposed).toBe(true);
 	});
 
-	it("reports conflicts without invoking persistence and saves current model text", async () => {
+	it("leaves a recoverable detached state when a replacement editor cannot be created", async () => {
+		const fake = new FakeMonacoAdapter();
+		await Scoped(
+			fake,
+			Effect.gen(function* () {
+				const service = yield* MonacoEditorService;
+				yield* service.Attach({});
+				yield* service.Activate(FileA);
+				fake.fail_next_editor = true;
+				yield* service.Attach({}).pipe(
+					Effect.matchCause({
+						onFailure: () => undefined,
+						onSuccess: () => undefined,
+					}),
+				);
+				yield* service.Attach({});
+			}),
+		);
+
+		expect(fake.editors).toHaveLength(2);
+		expect(fake.editors[1]!.model?.uri).toBe(MonacoUriForFile(FileA));
+	});
+
+	it("reloads clean remote revisions, clears stale diagnostics, and refuses to overwrite a dirty revision", async () => {
 		const fake = new FakeMonacoAdapter();
 		const persisted: Array<MonacoWorkspaceFile> = [];
-		const outcome = await Effect.runPromise(
-			Effect.scoped(
-				Effect.gen(function* () {
-					const service = yield* MonacoEditorService;
-					yield* service.Activate(FileA);
-					yield* service.Update(FileA.id, "export const a = 3;");
-					const conflict = yield* service.Save(FileA.id, "stale", (file) =>
-						Effect.sync(() => {
-							persisted.push(file);
-							return { _tag: "Saved" as const, file };
-						}),
-					);
-					const saved = yield* service.Save(FileA.id, "v1", (file) =>
-						Effect.sync(() => {
-							persisted.push(file);
-							return { _tag: "Saved" as const, file };
-						}),
-					);
-					return { conflict, saved };
-				}),
-			).pipe(Effect.provide(MakeMonacoEditorLayer(fake.adapter))),
+		const outcome = await Scoped(
+			fake,
+			Effect.gen(function* () {
+				const service = yield* MonacoEditorService;
+				yield* service.Activate(FileA);
+				yield* service.Mark(FileA, [
+					{
+						end_column: 3,
+						end_line: 1,
+						message: "old diagnostic",
+						severity: "error",
+						start_column: 1,
+						start_line: 1,
+					},
+				]);
+				const reloaded = yield* service.Activate({
+					...FileA,
+					content: "export const a = 2;",
+					revision: "v2",
+				});
+				const content_after_reload = fake.models[0]!.value;
+				yield* service.Update(FileA, "export const a = 3;");
+				const conflict = yield* service.Activate({
+					...FileA,
+					content: "export const a = 4;",
+					revision: "v3",
+				});
+				const save = yield* service.Save(FileA, "v3", (file) =>
+					Effect.sync(() => {
+						persisted.push(file);
+						return { _tag: "Saved" as const, file };
+					}),
+				);
+				return {
+					conflict,
+					content_after_reload,
+					reloaded,
+					save,
+					state: yield* service.Current,
+				};
+			}),
 		);
 
-		expect(outcome.conflict._tag).toBe("Conflict");
-		expect(outcome.saved).toMatchObject({
-			_tag: "Saved",
-			file: { content: "export const a = 3;" },
+		expect(outcome.reloaded._tag).toBe("Activated");
+		expect(outcome.content_after_reload).toBe("export const a = 2;");
+		expect(fake.models[0]!.value).toBe("export const a = 3;");
+		expect(fake.markers.get(MonacoUriForFile(FileA))).toEqual([]);
+		expect(outcome.conflict).toMatchObject({
+			_tag: "Conflict",
+			current_file: { revision: "v2" },
 		});
-		expect(persisted).toHaveLength(1);
+		expect(outcome.save).toMatchObject({ _tag: "Conflict", current_revision: "v2" });
+		expect(persisted).toHaveLength(0);
+		expect(outcome.state.dirty_file_keys).toContain(MonacoFileKeyForFile(FileA));
 	});
 
-	it("applies diagnostics and deterministically disposes every editor resource", async () => {
+	it("advances the save baseline only after a matching Saved or Unchanged outcome", async () => {
 		const fake = new FakeMonacoAdapter();
-		await Effect.runPromise(
-			Effect.scoped(
-				Effect.gen(function* () {
-					const service = yield* MonacoEditorService;
-					yield* service.Attach({} as HTMLElement);
-					yield* service.Activate(FileA);
-					yield* service.Mark(FileA.id, [
-						{
-							end_column: 3,
-							end_line: 1,
-							message: "bad",
-							severity: "error",
-							start_column: 1,
-							start_line: 1,
-						},
-					]);
-				}),
-			).pipe(Effect.provide(MakeMonacoEditorLayer(fake.adapter))),
+		const outcome = await Scoped(
+			fake,
+			Effect.gen(function* () {
+				const service = yield* MonacoEditorService;
+				yield* service.Activate(FileA);
+				yield* service.Update(FileA, "export const a = 3;");
+				const saved = yield* service.Save(FileA, "v1", (file) =>
+					Effect.succeed({
+						_tag: "Saved" as const,
+						file: { ...file, revision: "v2" },
+					}),
+				);
+				const after_saved = yield* service.Current;
+				const unchanged = yield* service.Save(FileA, "v2", (file) =>
+					Effect.succeed({ _tag: "Unchanged" as const, file }),
+				);
+				return { after_saved, saved, unchanged };
+			}),
 		);
 
-		expect(fake.markers.get(MonacoUriForFile(FileA))).toHaveLength(1);
-		expect(fake.editor.disposed).toBe(true);
-		expect(fake.models.every((model) => model.disposed)).toBe(true);
+		expect(outcome.saved._tag).toBe("Saved");
+		expect(outcome.unchanged._tag).toBe("Unchanged");
+		expect(outcome.after_saved.dirty_file_keys).not.toContain(MonacoFileKeyForFile(FileA));
+	});
+
+	it("clears markers and disposes each closed model without tearing down the editor", async () => {
+		const fake = new FakeMonacoAdapter();
+		const outcome = await Scoped(
+			fake,
+			Effect.gen(function* () {
+				const service = yield* MonacoEditorService;
+				yield* service.Attach({});
+				yield* service.Activate(FileA);
+				yield* service.Mark(FileA, []);
+				yield* service.Close(FileA);
+				return {
+					editor_disposed_before_scope_close: fake.editors[0]!.disposed,
+					state: yield* service.Current,
+				};
+			}),
+		);
+
+		expect(fake.markers.get(MonacoUriForFile(FileA))).toEqual([]);
+		expect(fake.models[0]!.disposed).toBe(true);
+		expect(outcome.editor_disposed_before_scope_close).toBe(false);
+		expect(fake.editors[0]!.disposed).toBe(true);
+		expect(Option.isNone(outcome.state.active_file_key)).toBe(true);
+		expect(outcome.state.open_file_keys).toHaveLength(0);
 	});
 });

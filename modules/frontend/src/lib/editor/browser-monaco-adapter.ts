@@ -75,7 +75,7 @@ const ToDiagnostic = (diagnostic: MonacoDiagnostic): monaco.editor.IMarkerData =
 export const BrowserMonacoAdapter: MonacoAdapter = {
 	create_editor: (host) => {
 		ConfigureMonacoWorkers();
-		const editor = monaco.editor.create(host, {
+		const editor = monaco.editor.create(host as never, {
 			automaticLayout: true,
 			fontFamily: "var(--font-mono)",
 			fontSize: 12,
