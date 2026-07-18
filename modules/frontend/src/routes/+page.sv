@@ -1,5 +1,5 @@
 <script lang="ts">
-	import EditorWorkspace from "./components/editor-workspace.sv";
+	import LiveWorkspace from "$lib/live-workspace/live-workspace.sv";
 </script>
 
-<EditorWorkspace />
+<LiveWorkspace />

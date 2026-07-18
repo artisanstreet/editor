@@ -6,6 +6,7 @@ import { make_artisan_client_layer, TransportRuntimeLive } from "@artisan/transp
 
 import { FrontendMessagePortConnectorLive } from "./desktop-message-port-connector";
 import { ShellPresentationPreferencesLive } from "./shell-presentation-preferences";
+import { LiveWorkspaceStoreLive } from "../live-workspace/store";
 
 export const RecoverKeyValueStore = Layer.catchCause(() => KeyValueStore.layerMemory);
 
@@ -22,8 +23,12 @@ const ArtisanClientRuntimeLive = make_artisan_client_layer().pipe(
 	Layer.provide(TransportRuntimeLive),
 );
 
+const LiveWorkspaceRuntimeLive = LiveWorkspaceStoreLive.pipe(
+	Layer.provideMerge(ArtisanClientRuntimeLive),
+);
+
 /** Production runtime composition. Fixture clients are never included here. */
 export const FrontendRuntimeLive = Layer.merge(
 	ShellPresentationPreferencesRuntimeLive,
-	ArtisanClientRuntimeLive,
+	LiveWorkspaceRuntimeLive,
 );
