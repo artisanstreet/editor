@@ -537,6 +537,46 @@ export {
 	type TerminalRepositoryError,
 } from "./terminal/terminal-repository";
 export {
+	EmptySecretStoreLive,
+	SecretStore,
+	SecretStoreError,
+	secret_reference,
+	type SecretReference,
+} from "./marketplace/capabilities/secret-store";
+export {
+	EmptyOAuthAdapterLive,
+	make_oauth_layer,
+	OAuth,
+	OAuthAdapter,
+	OAuthError,
+	type OAuthBeginInput,
+	type OAuthCompletionInput,
+	type OAuthTokenStatus,
+} from "./marketplace/capabilities/oauth";
+export {
+	EmptyMcpTransportLive,
+	McpTransport,
+	McpTransportError,
+	type McpClientSession,
+	type McpHealth,
+	type McpInitialize,
+	type McpResource,
+	type McpTool,
+	type McpToolCall,
+} from "./marketplace/capabilities/mcp-transport";
+export {
+	EngineProcessStdioMcpDriverLive,
+	make_stdio_mcp_transport_layer,
+	StdioMcpDriver,
+	type StdioLaunch,
+} from "./marketplace/capabilities/stdio-transport";
+export {
+	EffectHttpMcpDriverLive,
+	HttpMcpDriver,
+	make_http_mcp_transport_layer,
+	type HttpMcpEndpoint,
+} from "./marketplace/capabilities/http-transport";
+export {
 	make_backend_layer,
 	make_backend_runtime,
 	make_desktop_backend_layer,
