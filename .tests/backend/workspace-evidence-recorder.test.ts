@@ -26,6 +26,7 @@ import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metad
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const evidence_idempotency_migration = "20260713083812_workspace-evidence-idempotency";
+const evidence_recorded_at = "2026-07-11T19:00:00.000Z";
 const temporary_directories: Array<string> = [];
 
 async function make_database_path() {
@@ -63,12 +64,12 @@ function make_metadata_layer(instance_id = "workspace_evidence_recorder_test") {
 	return Layer.succeed(RuntimeMetadata, {
 		instance_id,
 		MakeId: (prefix) => Effect.sync(() => `${instance_id}_${prefix}_${++next_id}`),
-		Now: Effect.succeed("2026-07-11T19:00:00.000Z"),
+		Now: Effect.succeed(evidence_recorded_at),
 	});
 }
 
-const FixedRetentionClock = Layer.succeed(ThreadRetentionClock, {
-	Now: Effect.succeed("2026-07-12T19:00:00.000Z"),
+const retention_clock = Layer.succeed(ThreadRetentionClock, {
+	Now: Effect.succeed(evidence_recorded_at),
 });
 
 interface EvidenceReadGate {
@@ -187,6 +188,7 @@ describe("WorkspaceEvidenceRecorder", () => {
 		const runtime = make_backend_runtime({
 			database_path,
 			migrations_path,
+			retention_clock,
 			runtime_metadata: make_metadata_layer(),
 		});
 
@@ -240,7 +242,7 @@ describe("WorkspaceEvidenceRecorder", () => {
 		const first_runtime = make_backend_runtime({
 			database_path,
 			migrations_path,
-			retention_clock: FixedRetentionClock,
+			retention_clock,
 			runtime_metadata: make_metadata_layer(),
 		});
 
@@ -256,8 +258,7 @@ describe("WorkspaceEvidenceRecorder", () => {
 
 		const second_runtime = make_backend_runtime({
 			database_path,
-			migrations_path,
-			retention_clock: FixedRetentionClock,
+			retention_clock,
 			runtime_metadata: make_metadata_layer("workspace_evidence_recorder_restart_test"),
 		});
 
@@ -271,6 +272,18 @@ describe("WorkspaceEvidenceRecorder", () => {
 			);
 
 			expect(duplicate).toEqual({ event: accepted.event, status: "duplicate" });
+			await expect(
+				second_runtime.runPromise(
+					Effect.flatMap(WorkspaceEvidenceRecorder, (recorder) =>
+						recorder.RecordFilesystemMutation(
+							filesystem_input({ path: "C:/work/alpha/src/changed.ts" }),
+						),
+					),
+				),
+			).rejects.toMatchObject({
+				_tag: "WorkspaceEvidenceConflict",
+				operation_id: "filesystem_evidence",
+			});
 		} finally {
 			await second_runtime.dispose();
 		}
@@ -403,6 +416,7 @@ describe("WorkspaceEvidenceRecorder", () => {
 		const runtime = make_backend_runtime({
 			database_path,
 			migrations_path,
+			retention_clock,
 			runtime_metadata: make_metadata_layer(),
 		});
 
@@ -456,6 +470,7 @@ describe("WorkspaceEvidenceRecorder", () => {
 		const runtime = make_backend_runtime({
 			database_path,
 			migrations_path,
+			retention_clock,
 			runtime_metadata: make_metadata_layer(),
 		});
 
@@ -496,6 +511,7 @@ describe("WorkspaceEvidenceRecorder", () => {
 		const setup_runtime = make_backend_runtime({
 			database_path,
 			migrations_path,
+			retention_clock,
 			runtime_metadata: make_metadata_layer("workspace_evidence_setup"),
 		});
 
@@ -570,6 +586,7 @@ describe("WorkspaceEvidenceRecorder", () => {
 		const runtime = make_backend_runtime({
 			database_path: await make_database_path(),
 			migrations_path,
+			retention_clock,
 			runtime_metadata: make_metadata_layer(),
 		});
 
