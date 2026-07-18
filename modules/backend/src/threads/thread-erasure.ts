@@ -7,6 +7,8 @@ import { RetrySqliteWrite } from "../persistence/sqlite-write-retry";
 import {
 	AgentInstances,
 	AgentRuns,
+	ArtisanToolApprovals,
+	ArtisanToolInvocations,
 	Assignments,
 	EventStreams,
 	GitMutationOperations,
@@ -105,6 +107,24 @@ export const ThreadErasureLive = Layer.effect(
 						),
 					),
 			);
+		const HasPendingToolInvocation = (thread_id: typeof Threads.thread_id) =>
+			exists(
+				database.client
+					.select({ invocation_id: ArtisanToolInvocations.invocation_id })
+					.from(ArtisanToolInvocations)
+					.where(
+						and(
+							eq(ArtisanToolInvocations.thread_id, thread_id),
+							notInArray(ArtisanToolInvocations.lifecycle, [
+								"succeeded",
+								"denied",
+								"failed",
+								"cancelled",
+								"unsupported",
+							]),
+						),
+					),
+			);
 
 		const ClaimExpired = (cutoff: string, claimed_at: string) =>
 			database.client
@@ -137,6 +157,7 @@ export const ThreadErasureLive = Layer.effect(
 										),
 									),
 									not(HasPendingGitMutation(Threads.thread_id)),
+									not(HasPendingToolInvocation(Threads.thread_id)),
 								),
 							)
 							.orderBy(Threads.last_activity_at, Threads.thread_id);
@@ -195,8 +216,24 @@ export const ThreadErasureLive = Layer.effect(
 								),
 							)
 							.limit(1);
+						const [pending_tool_invocation] = yield* transaction
+							.select({ invocation_id: ArtisanToolInvocations.invocation_id })
+							.from(ArtisanToolInvocations)
+							.where(
+								and(
+									eq(ArtisanToolInvocations.thread_id, thread_id),
+									notInArray(ArtisanToolInvocations.lifecycle, [
+										"succeeded",
+										"denied",
+										"failed",
+										"cancelled",
+										"unsupported",
+									]),
+								),
+							)
+							.limit(1);
 
-						if (pending_mutation || pending_git_mutation) {
+						if (pending_mutation || pending_git_mutation || pending_tool_invocation) {
 							yield* transaction
 								.delete(ThreadErasureClaims)
 								.where(eq(ThreadErasureClaims.thread_id, thread_id));
@@ -245,6 +282,13 @@ export const ThreadErasureLive = Layer.effect(
 							.from(TerminalSessions)
 							.where(eq(TerminalSessions.thread_id, thread_id));
 						const terminal_ids = terminal_rows.map((terminal) => terminal.terminal_id);
+						const tool_invocation_rows = yield* transaction
+							.select({ invocation_id: ArtisanToolInvocations.invocation_id })
+							.from(ArtisanToolInvocations)
+							.where(eq(ArtisanToolInvocations.thread_id, thread_id));
+						const tool_invocation_ids = tool_invocation_rows.map(
+							(invocation) => invocation.invocation_id,
+						);
 
 						if (run_ids.length > 0) {
 							yield* transaction
@@ -324,6 +368,19 @@ export const ThreadErasureLive = Layer.effect(
 						yield* transaction
 							.delete(GitMutationOperations)
 							.where(eq(GitMutationOperations.thread_id, thread_id));
+						if (tool_invocation_ids.length > 0) {
+							yield* transaction
+								.delete(ArtisanToolApprovals)
+								.where(
+									inArray(
+										ArtisanToolApprovals.invocation_id,
+										tool_invocation_ids,
+									),
+								);
+						}
+						yield* transaction
+							.delete(ArtisanToolInvocations)
+							.where(eq(ArtisanToolInvocations.thread_id, thread_id));
 						yield* transaction
 							.delete(JournalCommands)
 							.where(eq(JournalCommands.thread_id, thread_id));
