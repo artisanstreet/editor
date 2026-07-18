@@ -127,7 +127,7 @@ export class PrivateFilePermissions extends Context.Service<
 
 const powershell_capture_acl_script = [
 	'$ErrorActionPreference = "Stop"',
-	"$acl = Get-Acl -LiteralPath $env:ARTISAN_PRIVATE_FILE_PATH",
+	"$acl = [System.IO.File]::GetAccessControl($env:ARTISAN_PRIVATE_FILE_PATH)",
 	"[Console]::Out.Write($acl.Sddl)",
 ].join("; ");
 

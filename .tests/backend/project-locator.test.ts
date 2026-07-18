@@ -25,7 +25,7 @@ async function make_root() {
 
 	roots.push(root);
 
-	return root;
+	return fs.realpath(root);
 }
 
 function normalize_path(path: string) {

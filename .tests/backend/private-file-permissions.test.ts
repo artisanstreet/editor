@@ -53,7 +53,7 @@ async function read_identity(path: string) {
 
 function ReadWindowsAcl(path: string) {
 	const script = [
-		"$acl = Get-Acl -LiteralPath $env:ARTISAN_PRIVATE_FILE_PATH",
+		"$acl = if ([System.IO.Directory]::Exists($env:ARTISAN_PRIVATE_FILE_PATH)) { [System.IO.Directory]::GetAccessControl($env:ARTISAN_PRIVATE_FILE_PATH) } else { [System.IO.File]::GetAccessControl($env:ARTISAN_PRIVATE_FILE_PATH) }",
 		"$current_user = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Translate([System.Security.Principal.NTAccount])",
 		"$full_control = [System.Security.AccessControl.FileSystemRights]::FullControl",
 		'$has_current_user_full_control = [bool]($acl.Access | Where-Object { $_.IdentityReference -eq $current_user -and $_.AccessControlType -eq "Allow" -and ($_.FileSystemRights -band $full_control) -eq $full_control })',
