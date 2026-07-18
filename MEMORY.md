@@ -40,7 +40,7 @@ This project is not complete until the final audit in `backend-completion-matrix
 
 ## Active Work
 
-- [ ] M2 Artisan-owned tool control plane is active on branch `m2-artisan-tool-control-plane`. Verified gap audit after Git checkpoint `079157d`: terminal, controlled-file, and narrow Git services exist, and file/Git already bind `WorkspaceEvidenceRecorder`, but there is no canonical policy-aware tool registry, unified execution router, durable generic invocation lifecycle, assumption event, or canonical engine-native action seam. Preview remains an adapter boundary and must not be reimplemented here. Architecture decision: continue Effect `Context.Service`/`Layer`/`Schema` orchestration over the existing SQLite journal/repository model; do not adopt Effect 4 beta's unstable workflow/event-log persistence because it would create a second durability model and cannot preserve current journal/projection/erasure invariants. Git mutations remain stage/unstage only.
+- [x] M2 Artisan-owned tool control-plane slice is complete on branch `m2-artisan-tool-control-plane`. The canonical 20-tool registry, policy/permission routing, durable invocation and approval recovery, observable lifecycle/usage/evidence projections, controlled files, terminal/process controls, narrow Git stage/unstage, questions, assumptions, native-action normalization, and truthful unavailable preview/language seams are composed through Effect Services and Layers. Public protocol routes and the renderer-safe `ArtisanClient` expose registry, execute, approval resolution, invocation/approval lists, bounded root-confined workspace discovery, and language capabilities; MessagePort and import-boundary tests prove the renderer never enumerates the filesystem. Preview implementation internals and Marketplace/MCP registries remain separate owned slices. Verification on 2026-07-18: focused control-plane/evidence/protocol/transport coverage passed 8 files and 31 tests; full `pnpm run validate` passed formatting, lint, TypeScript, the production frontend build, 115 test files, and 922 tests with 2 intentional skips. Independent P0-P2 review and post-fix re-review are clean.
 
 - [x] Restored a deterministic green Windows validation gate without raising the 15-second test timeout or weakening coverage. The affinity restart fixture now injects its fixed retention clock, timing-free binary-stream tests deterministically prove both server logical-queue and client consumer-queue overflow, and Windows runs Vitest files through one worker so PowerShell ACL operations and Codex process hosts cannot starve each other. The formerly failing eight-file regression batch passes 78 tests with two intentional skips, and full `pnpm run validate` passes formatting, lint, TypeScript, the production frontend build, 93 test files, and 788 passing tests plus two intentional skips.
 
@@ -307,7 +307,7 @@ Implemented, independently reviewed, committed, and verified:
 
 ### Project Affinity Follow-Through
 
-- [ ] Bind future controlled filesystem, Git, and process tool adapters to `WorkspaceEvidenceRecorder`; raw watcher activity remains deliberately non-authoritative. This is tracked with the M2 Files/Git work below.
+- [x] Built-in controlled filesystem, narrow Git stage/unstage, and terminal/process tool adapters bind to `WorkspaceEvidenceRecorder`; raw watcher activity remains deliberately non-authoritative. Preview stays truthfully unavailable until its separately owned production adapter exists.
 
 ### Marketplace: Skills And MCP
 

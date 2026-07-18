@@ -1,12 +1,6 @@
 import { Schema } from "effect";
 
-import {
-	Identifier,
-	IsoDateTime,
-	JournalSequence,
-	PositiveInt,
-	RawOrigin,
-} from "./common";
+import { Identifier, IsoDateTime, JournalSequence, PositiveInt, RawOrigin } from "./common";
 import {
 	GitDiffQuery,
 	GitIndexStageRequest,
@@ -358,6 +352,7 @@ export type ArtisanToolDeclaration = typeof ArtisanToolDeclaration.Type;
 /** Requests the built-in declarations available to one policy-aware backend registry. */
 export const ArtisanToolRegistryListQuery = Schema.Struct({
 	policy: ArtisanToolPermissionPolicy,
+	thread_id: Schema.optional(Identifier),
 	workspace_id: Schema.optional(Identifier),
 });
 
@@ -570,6 +565,7 @@ export type ArtisanToolExecutionInput = typeof ArtisanToolExecutionInput.Type;
 export const ArtisanToolExecutionRequest = Schema.Struct({
 	input: ArtisanToolExecutionInput,
 	invocation_id: Identifier,
+	policy: ArtisanToolPermissionPolicy,
 	raw_origin: Schema.optional(RawOrigin),
 });
 

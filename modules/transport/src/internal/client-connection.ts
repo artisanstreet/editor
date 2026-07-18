@@ -359,6 +359,9 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 			) => {
 				switch (envelope.kind) {
 					case "command.receipt":
+					case "artisan.approval.list.query.result":
+					case "artisan.tool.invocation.list.query.result":
+					case "artisan.tool.registry.list.query.result":
 					case "guidance.query.result":
 					case "git.diff.query.result":
 					case "git.workspace.query.result":
@@ -369,6 +372,8 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 					case "thread.retention.query.result":
 					case "thread.work.query.result":
 					case "workspace.file.read.query.result":
+					case "workspace.file.discovery.query.result":
+					case "workspace.language.capabilities.query.result":
 					case "workspace.change.list.query.result":
 					case "workspace.change.diff.query.result":
 						return handlers.requests.Resolve(envelope);

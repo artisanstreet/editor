@@ -19,6 +19,11 @@ import {
 	DecodeInboundControlEnvelope,
 	SupportedProtocolVersions,
 	type AckEnvelope,
+	type ArtisanApprovalListQueryEnvelope,
+	type ArtisanApprovalResolveEnvelope,
+	type ArtisanToolExecuteEnvelope,
+	type ArtisanToolInvocationListQueryEnvelope,
+	type ArtisanToolRegistryListQueryEnvelope,
 	type CommandEnvelope,
 	type EventEnvelope,
 	type GlobalGuidanceDriftResolutionEnvelope,
@@ -59,6 +64,8 @@ import {
 	type WorkspaceChangeRollbackEnvelope,
 	type WorkspaceFileReadQueryEnvelope,
 	type WorkspaceFileReplaceEnvelope,
+	type WorkspaceFileDiscoveryQueryEnvelope,
+	type WorkspaceLanguageCapabilitiesQueryEnvelope,
 } from "@artisan/protocol";
 
 import { GitService, GitServiceError } from "../git/git-service";
@@ -101,6 +108,7 @@ import {
 	WorkspaceFileService,
 	WorkspaceFileServiceError,
 } from "../workspace/workspace-file-service";
+import { ToolControlPlane } from "../tools/tool-control-plane";
 import {
 	DecodeProtocolConnectionOptions,
 	DefaultProtocolConnectionOptions,
@@ -530,6 +538,7 @@ export function make_protocol_server_layer(
 			const router = yield* ProtocolRouter;
 			const orchestration = yield* OrchestrationRepository;
 			const terminals = yield* TerminalSessionService;
+			const tools = yield* ToolControlPlane;
 			const thread_read_model = yield* ThreadReadModel;
 			const retention_policy = yield* ThreadRetentionPolicyService;
 			const workspace_changes = yield* WorkspaceChangeRepository;
@@ -1302,6 +1311,229 @@ export function make_protocol_server_layer(
 						}),
 					);
 
+				const HandleToolRegistryQuery = (
+					query: ArtisanToolRegistryListQueryEnvelope,
+					current: ReadyState,
+				) =>
+					tools.Registry(query.payload).pipe(
+						Effect.flatMap((payload) =>
+							Effect.gen(function* () {
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "artisan.tool.registry.list.query.result",
+									message_id: yield* metadata.MakeId("message"),
+									origin: "backend",
+									payload,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at: yield* metadata.Now,
+								});
+							}),
+						),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"artisan.tool.unavailable",
+								"The built-in tool registry is unavailable.",
+								true,
+								query.message_id,
+							),
+						),
+					);
+				const HandleToolInvocationQuery = (
+					query: ArtisanToolInvocationListQueryEnvelope,
+					current: ReadyState,
+				) =>
+					tools.Invocations(query.payload).pipe(
+						Effect.flatMap((payload) =>
+							Effect.gen(function* () {
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "artisan.tool.invocation.list.query.result",
+									message_id: yield* metadata.MakeId("message"),
+									origin: "backend",
+									payload,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at: yield* metadata.Now,
+								});
+							}),
+						),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"artisan.tool.unavailable",
+								"Tool invocation history is unavailable.",
+								true,
+								query.message_id,
+							),
+						),
+					);
+				const HandleToolApprovalQuery = (
+					query: ArtisanApprovalListQueryEnvelope,
+					current: ReadyState,
+				) =>
+					tools.Approvals(query.payload).pipe(
+						Effect.flatMap((payload) =>
+							Effect.gen(function* () {
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "artisan.approval.list.query.result",
+									message_id: yield* metadata.MakeId("message"),
+									origin: "backend",
+									payload,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at: yield* metadata.Now,
+								});
+							}),
+						),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"artisan.tool.unavailable",
+								"Tool approvals are unavailable.",
+								true,
+								query.message_id,
+							),
+						),
+					);
+				const HandleWorkspaceDiscoveryQuery = (
+					query: WorkspaceFileDiscoveryQueryEnvelope,
+					current: ReadyState,
+				) =>
+					tools.Discover(query.payload).pipe(
+						Effect.flatMap((payload) =>
+							Effect.gen(function* () {
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "workspace.file.discovery.query.result",
+									message_id: yield* metadata.MakeId("message"),
+									origin: "backend",
+									payload,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at: yield* metadata.Now,
+								});
+							}),
+						),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"workspace.discovery.unavailable",
+								"Workspace file discovery is unavailable.",
+								true,
+								query.message_id,
+							),
+						),
+					);
+				const HandleLanguageCapabilitiesQuery = (
+					query: WorkspaceLanguageCapabilitiesQueryEnvelope,
+					current: ReadyState,
+				) =>
+					tools.LanguageCapabilities(query.payload).pipe(
+						Effect.flatMap((payload) =>
+							Effect.gen(function* () {
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "workspace.language.capabilities.query.result",
+									message_id: yield* metadata.MakeId("message"),
+									origin: "backend",
+									payload,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at: yield* metadata.Now,
+								});
+							}),
+						),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"workspace.language.unavailable",
+								"Language capabilities are unavailable.",
+								true,
+								query.message_id,
+							),
+						),
+					);
+				const HandleToolExecute = (
+					query: ArtisanToolExecuteEnvelope,
+					current: ReadyState,
+				) =>
+					tools
+						.Execute({
+							...(query.agent_id === undefined ? {} : { agent_id: query.agent_id }),
+							request: query.payload,
+							...(query.run_id === undefined ? {} : { run_id: query.run_id }),
+							thread_id: query.thread_id,
+						})
+						.pipe(
+							Effect.flatMap(() =>
+								Effect.gen(function* () {
+									yield* Enqueue({
+										causation_id: query.message_id,
+										correlation_id: query.message_id,
+										kind: "command.receipt",
+										message_id: yield* metadata.MakeId("message"),
+										origin: "backend",
+										payload: {
+											journal_sequence: yield* journal.ReadWatermark(),
+											status: "accepted",
+										},
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at: yield* metadata.Now,
+										thread_id: query.thread_id,
+									});
+								}),
+							),
+							Effect.catch(() =>
+								EnqueueError(
+									current,
+									"artisan.tool.execution_failed",
+									"The tool invocation could not be routed.",
+									true,
+									query.message_id,
+								),
+							),
+						);
+				const HandleToolApprovalResolve = (
+					query: ArtisanApprovalResolveEnvelope,
+					current: ReadyState,
+				) =>
+					tools
+						.ResolveApproval({ request: query.payload, thread_id: query.thread_id })
+						.pipe(
+							Effect.flatMap(() =>
+								Effect.gen(function* () {
+									yield* Enqueue({
+										causation_id: query.message_id,
+										correlation_id: query.message_id,
+										kind: "command.receipt",
+										message_id: yield* metadata.MakeId("message"),
+										origin: "backend",
+										payload: {
+											journal_sequence: yield* journal.ReadWatermark(),
+											status: "accepted",
+										},
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at: yield* metadata.Now,
+										thread_id: query.thread_id,
+									});
+								}),
+							),
+							Effect.catch(() =>
+								EnqueueError(
+									current,
+									"artisan.approval.resolve_failed",
+									"The approval could not be resolved.",
+									true,
+									query.message_id,
+								),
+							),
+						);
+
 				const HandleSubscribe = (subscribe: SubscribeEnvelope, current: ReadyState) =>
 					Effect.gen(function* () {
 						if (current.subscriptions[subscribe.subscription_id]) {
@@ -2018,6 +2250,20 @@ export function make_protocol_server_layer(
 							return HandleTerminalListQuery(envelope, current);
 						case "orchestration.graph.query":
 							return HandleGraphQuery(envelope, current);
+						case "artisan.tool.registry.list.query":
+							return HandleToolRegistryQuery(envelope, current);
+						case "artisan.tool.invocation.list.query":
+							return HandleToolInvocationQuery(envelope, current);
+						case "artisan.approval.list.query":
+							return HandleToolApprovalQuery(envelope, current);
+						case "workspace.file.discovery.query":
+							return HandleWorkspaceDiscoveryQuery(envelope, current);
+						case "workspace.language.capabilities.query":
+							return HandleLanguageCapabilitiesQuery(envelope, current);
+						case "artisan.tool.execute":
+							return HandleToolExecute(envelope, current);
+						case "artisan.approval.resolve":
+							return HandleToolApprovalResolve(envelope, current);
 						case "subscribe":
 							return HandleSubscribe(envelope, current);
 						case "unsubscribe":

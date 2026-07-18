@@ -523,6 +523,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						payload: {
 							input: input.input,
 							invocation_id: input.invocation_id,
+							policy: input.policy,
 							...(input.raw_origin === undefined
 								? {}
 								: { raw_origin: input.raw_origin }),

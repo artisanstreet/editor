@@ -16,7 +16,6 @@ import {
 	RawOrigin,
 	WorkspaceEvidenceBinding,
 	type ArtisanApprovalProjection as ArtisanApprovalProjectionValue,
-	type ArtisanApprovalRequest as ArtisanApprovalRequestValue,
 	type ArtisanApprovalResolution as ArtisanApprovalResolutionValue,
 	type ArtisanToolInvocation as ArtisanToolInvocationValue,
 	type ArtisanToolInvocationOutcome as ArtisanToolInvocationOutcomeValue,
