@@ -1,7 +1,6 @@
 import { Context, Data, Effect, Layer, Schema } from "effect";
 
 import {
-	ArtisanToolAvailability,
 	ArtisanToolDeclaration,
 	ArtisanToolDescriptor,
 	ArtisanToolId,

@@ -39,6 +39,7 @@ describe("tool control-plane protocol codec", () => {
 					allow_workspace_write: false,
 					approval: "on_request",
 				},
+				thread_id: "thread_1",
 				workspace_id: "workspace_1",
 			}),
 			{
@@ -49,6 +50,15 @@ describe("tool control-plane protocol codec", () => {
 						tool_id: "assumption.record",
 					},
 					invocation_id: "invocation_1",
+					policy: {
+						allow_engine_observation: true,
+						allow_git_index_write: false,
+						allow_preview_control: false,
+						allow_process_control: true,
+						allow_workspace_read: true,
+						allow_workspace_write: false,
+						approval: "on_request",
+					},
 				}),
 				thread_id: "thread_1",
 			},

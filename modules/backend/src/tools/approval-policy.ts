@@ -2,7 +2,6 @@ import { Context, Data, Effect, Layer, Schema } from "effect";
 
 import {
 	ArtisanToolDescriptor,
-	ArtisanToolPermissionDecision,
 	ArtisanToolPermissionPolicy,
 	type ArtisanToolDescriptor as ArtisanToolDescriptorValue,
 	type ArtisanToolPermissionDecision as ArtisanToolPermissionDecisionValue,

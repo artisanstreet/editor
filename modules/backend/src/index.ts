@@ -18,6 +18,18 @@ export {
 export { ProtocolRouter } from "./protocol/protocol-router";
 export { SurfaceService, SurfaceServiceLive } from "./surfaces/surface-service";
 export { ProtocolServer } from "./protocol/protocol-server";
+export { ExecuteTool, ExecuteToolLive } from "./tools/tool-handlers";
+export {
+	ToolControlPlane,
+	ToolControlPlaneError,
+	ToolControlPlaneLive,
+} from "./tools/tool-control-plane";
+export { ArtisanBuiltInToolCapabilityStateLive } from "./tools/builtin-tool-capabilities";
+export {
+	WorkspaceFileDiscovery,
+	WorkspaceFileDiscoveryError,
+	WorkspaceFileDiscoveryLive,
+} from "./workspace/workspace-file-discovery";
 export {
 	ProjectionRebuildBusy,
 	ProjectionRebuildFailure,

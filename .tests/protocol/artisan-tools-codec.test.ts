@@ -104,9 +104,9 @@ describe("Artisan built-in tool protocol schemas", () => {
 			],
 			declarations: [
 				{
-						descriptor: {
-							approval_behavior: "never",
-							description: "Reads an exact controlled workspace file.",
+					descriptor: {
+						approval_behavior: "never",
+						description: "Reads an exact controlled workspace file.",
 						id: "workspace.file.read",
 						kind: "workspace_file",
 						permission_requirements: ["workspace_read"],
@@ -139,6 +139,15 @@ describe("Artisan built-in tool protocol schemas", () => {
 					workspace_id: "workspace_1",
 				},
 				invocation_id: "invocation_2",
+				policy: {
+					allow_engine_observation: true,
+					allow_git_index_write: false,
+					allow_preview_control: false,
+					allow_process_control: false,
+					allow_workspace_read: true,
+					allow_workspace_write: false,
+					approval: "on_request",
+				},
 			}),
 		).resolves.toMatchObject({ input: { tool_id: "workspace.file.read" } });
 		await expect(

@@ -113,6 +113,13 @@ import { WorkspaceMutationAuthorityLive } from "../workspace/workspace-mutation-
 import { WorkspaceSnapshotStoreLive } from "../workspace/workspace-snapshot-store";
 import { WorkspaceMutationPayloadStoreLive } from "../workspace/workspace-mutation-payload-store";
 import { WorkspaceChangeDiffServiceLive } from "../workspace/workspace-change-diff-service";
+import { ArtisanToolApprovalPolicyLive } from "../tools/approval-policy";
+import { make_artisan_tool_registry_layer } from "../tools/artisan-tool-registry";
+import { ArtisanBuiltInToolCapabilityStateLive } from "../tools/builtin-tool-capabilities";
+import { ToolInvocationRepositoryLive } from "../tools/tool-invocation-repository";
+import { ExecuteToolLive } from "../tools/tool-handlers";
+import { ToolControlPlaneLive } from "../tools/tool-control-plane";
+import { WorkspaceFileDiscoveryLive } from "../workspace/workspace-file-discovery";
 
 export interface BackendOptions {
 	readonly database_path: string;
@@ -334,6 +341,42 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(terminal_driver),
 		Layer.provideMerge(infrastructure),
 	);
+	const workspace_discovery = WorkspaceFileDiscoveryLive.pipe(
+		Layer.provideMerge(workspace_filesystems),
+	);
+	const tool_capabilities = ArtisanBuiltInToolCapabilityStateLive.pipe(
+		Layer.provideMerge(workspace_bounded_filesystems),
+		Layer.provideMerge(workspace_filesystems),
+		Layer.provideMerge(workspace_git_registry),
+	);
+	const tool_registry = make_artisan_tool_registry_layer().pipe(
+		Layer.provideMerge(ArtisanToolApprovalPolicyLive),
+		Layer.provideMerge(tool_capabilities),
+	);
+	const tool_repository = ToolInvocationRepositoryLive.pipe(
+		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(infrastructure),
+	);
+	const tool_handlers = ExecuteToolLive.pipe(
+		Layer.provideMerge(workspace_discovery),
+		Layer.provideMerge(workspace_filesystems),
+		Layer.provideMerge(workspace_files),
+		Layer.provideMerge(workspace_evidence),
+		Layer.provideMerge(git),
+		Layer.provideMerge(terminals),
+		Layer.provideMerge(persistence),
+		Layer.provideMerge(infrastructure),
+	);
+	const tools = ToolControlPlaneLive.pipe(
+		Layer.provideMerge(ArtisanToolApprovalPolicyLive),
+		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(workspace_discovery),
+		Layer.provideMerge(tool_handlers),
+		Layer.provideMerge(persistence),
+		Layer.provideMerge(infrastructure),
+		Layer.provideMerge(tool_registry),
+		Layer.provideMerge(tool_repository),
+	);
 	const commands = CommandRouterLive.pipe(
 		Layer.provideMerge(threads),
 		Layer.provideMerge(orchestration),
@@ -380,6 +423,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(workspace_changes),
 		Layer.provideMerge(workspace_diffs),
 		Layer.provideMerge(surfaces),
+		Layer.provideMerge(tools),
 	);
 
 	return Layer.merge(protocol, projection_rebuild).pipe(

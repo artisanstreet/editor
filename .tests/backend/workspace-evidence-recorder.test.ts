@@ -259,7 +259,7 @@ describe("WorkspaceEvidenceRecorder", () => {
 			database_path,
 			migrations_path,
 			retention_clock: FixedRetentionClock,
-			runtime_metadata: make_metadata_layer(),
+			runtime_metadata: make_metadata_layer("workspace_evidence_recorder_restart_test"),
 		});
 
 		try {
