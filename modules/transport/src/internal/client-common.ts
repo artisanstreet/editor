@@ -46,6 +46,11 @@ export type PendingRequestEnvelope = Extract<
 	{
 		readonly kind:
 			| "command"
+			| "artisan.tool.registry.list.query"
+			| "artisan.tool.execute"
+			| "artisan.approval.resolve"
+			| "artisan.tool.invocation.list.query"
+			| "artisan.approval.list.query"
 			| "git.diff.query"
 			| "git.index.stage.request"
 			| "git.index.unstage.request"
@@ -67,6 +72,8 @@ export type PendingRequestEnvelope = Extract<
 			| "thread.retention.update"
 			| "thread.work.query"
 			| "workspace.file.read.query"
+			| "workspace.file.discovery.query"
+			| "workspace.language.capabilities.query"
 			| "workspace.file.replace"
 			| "workspace.change.list.query"
 			| "workspace.change.diff.query"
@@ -81,6 +88,9 @@ export type PendingResultEnvelope = Extract<
 	{
 		readonly kind:
 			| "command.receipt"
+			| "artisan.tool.registry.list.query.result"
+			| "artisan.tool.invocation.list.query.result"
+			| "artisan.approval.list.query.result"
 			| "git.diff.query.result"
 			| "git.workspace.query.result"
 			| "guidance.query.result"
@@ -91,6 +101,8 @@ export type PendingResultEnvelope = Extract<
 			| "thread.retention.query.result"
 			| "thread.work.query.result"
 			| "workspace.file.read.query.result"
+			| "workspace.file.discovery.query.result"
+			| "workspace.language.capabilities.query.result"
 			| "workspace.change.list.query.result"
 			| "workspace.change.diff.query.result";
 	}

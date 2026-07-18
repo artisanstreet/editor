@@ -460,6 +460,8 @@ export const FixtureArtisanClientService = {
 
 			return diff;
 		}),
+	GetWorkspaceLanguageCapabilities: () =>
+		FixtureFailure("Workspace language capabilities are unavailable in the frontend fixture."),
 	ListTerminals: (thread_id, workspace_id) =>
 		Effect.gen(function* () {
 			const terminals: Array<TerminalSession> = [];
@@ -475,6 +477,12 @@ export const FixtureArtisanClientService = {
 	ListThreads: Effect.gen(function* () {
 		return yield* Effect.succeed(fixture_artisan_client_data.threads);
 	}),
+	ListArtisanApprovals: () =>
+		FixtureFailure("Artisan approvals are unavailable in the frontend fixture."),
+	ListArtisanToolInvocations: () =>
+		FixtureFailure("Artisan tool invocations are unavailable in the frontend fixture."),
+	ListArtisanTools: () =>
+		FixtureFailure("Artisan tool registry is unavailable in the frontend fixture."),
 	ListWorkspaceChanges: (input) =>
 		Effect.gen(function* () {
 			yield* Effect.void;
@@ -495,6 +503,8 @@ export const FixtureArtisanClientService = {
 				journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
 			};
 		}),
+	ListWorkspaceFiles: () =>
+		FixtureFailure("Workspace file discovery is unavailable in the frontend fixture."),
 	OpenAsset: (asset_id) =>
 		Effect.gen(function* () {
 			const output = fixture_artisan_client_data.asset_output[asset_id];
@@ -535,6 +545,14 @@ export const FixtureArtisanClientService = {
 	RequestGitIndexMutation: (input) =>
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-git-index-mutation");
+		}),
+	ExecuteArtisanTool: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-artisan-tool-execute");
+		}),
+	ResolveArtisanApproval: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-artisan-approval-resolve");
 		}),
 	ResolveGitMutation: (input) =>
 		Effect.gen(function* () {
