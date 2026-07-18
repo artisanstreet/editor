@@ -1,10 +1,14 @@
 appId: com.usebarekey.artisan-editor
 productName: Artisan Editor
 directories:
-    output: .dist/release
+    output: .dist/electron-release
 files:
-    - .dist/**/*
-    - modules/backend/drizzle/**/*
+    - from: .dist/desktop
+      to: .dist/desktop
+    - from: .dist/frontend
+      to: .dist/frontend
+    - from: modules/backend/drizzle
+      to: modules/backend/drizzle
     - package.json
     - node_modules/**/*
 asar: true

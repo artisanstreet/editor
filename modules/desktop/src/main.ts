@@ -15,6 +15,7 @@ import { DesktopSessionSupervisor } from "./session-supervisor";
 
 const request_channel = "artisan:request-connection";
 let main_window: BrowserWindow | undefined;
+let quitting = false;
 
 protocol.registerSchemesAsPrivileged([
 	{
@@ -59,24 +60,36 @@ export const StartDesktop = async () => {
 			? net.fetch(pathToFileURL(file).toString())
 			: new Response("Not found", { status: 404 });
 	});
-
-	main_window = new BrowserWindow({
-		webPreferences: {
-			contextIsolation: true,
-			nodeIntegration: false,
-			preload: paths.preload_path,
-			sandbox: true,
-		},
-	});
-	main_window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-	main_window.webContents.on("will-navigate", (event, url) => {
-		if (!allowed_url(url)) {
-			event.preventDefault();
+	const CreateWindow = async () => {
+		if (main_window) {
+			return main_window;
 		}
-	});
-	main_window.on("closed", () => {
-		main_window = undefined;
-	});
+
+		const window = new BrowserWindow({
+			webPreferences: {
+				contextIsolation: true,
+				nodeIntegration: false,
+				preload: paths.preload_path,
+				sandbox: true,
+			},
+		});
+
+		main_window = window;
+		window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+		window.webContents.on("will-navigate", (event, url) => {
+			if (!allowed_url(url)) {
+				event.preventDefault();
+			}
+		});
+		window.on("closed", () => {
+			if (main_window === window) {
+				main_window = undefined;
+			}
+		});
+		await window.loadURL(`${DesktopRendererOrigin}/index.html`);
+
+		return window;
+	};
 	ipcMain.handle(request_channel, (event) => {
 		if (event.sender !== main_window?.webContents || event.frameId !== event.sender.mainFrame.routingId) {
 			throw new Error("Only the primary Artisan renderer may request a backend connection");
@@ -84,16 +97,36 @@ export const StartDesktop = async () => {
 
 		return supervisor.RequestConnection(event as never);
 	});
-	app.on("before-quit", () => supervisor.Dispose());
+	app.on("before-quit", (event) => {
+		if (quitting) {
+			return;
+		}
+
+		event.preventDefault();
+		void supervisor.Dispose().finally(() => {
+			quitting = true;
+			app.quit();
+		});
+	});
 	app.on("second-instance", () => {
 		if (main_window?.isMinimized()) {
 			main_window.restore();
 		}
 		main_window?.focus();
 	});
+	app.on("activate", () => {
+		if (!quitting) {
+			void CreateWindow();
+		}
+	});
+	app.on("window-all-closed", () => {
+		if (process.platform !== "darwin") {
+			app.quit();
+		}
+	});
 
 	supervisor.Start();
-	await main_window.loadURL(`${DesktopRendererOrigin}/index.html`);
+	await CreateWindow();
 };
 
 void StartDesktop();

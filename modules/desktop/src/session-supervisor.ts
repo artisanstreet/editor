@@ -10,6 +10,8 @@ export interface DesktopSessionSupervisorOptions {
 	readonly fork_utility: (utility_path: string) => DesktopUtilityProcessShape;
 	readonly paths: DesktopPaths;
 	readonly schedule: (callback: () => void, milliseconds: number) => unknown;
+	readonly shutdown_deadline_ms?: number;
+	readonly stable_run_ms?: number;
 }
 
 interface ActiveGeneration {
@@ -20,9 +22,11 @@ interface ActiveGeneration {
 export class DesktopSessionSupervisor {
 	readonly #options: DesktopSessionSupervisorOptions;
 	#disposing = false;
+	#dispose_promise: Promise<void> | undefined;
 	#generation = 0;
 	#restart_attempt = 0;
 	#utility: DesktopUtilityProcessShape | undefined;
+	#shutdown_ack: (() => void) | undefined;
 	readonly #active_by_web_contents = new Map<number, ActiveGeneration>();
 
 	constructor(options: DesktopSessionSupervisorOptions) {
@@ -37,12 +41,27 @@ export class DesktopSessionSupervisor {
 		const utility = this.#options.fork_utility(this.#options.paths.utility_path);
 
 		this.#utility = utility;
+		utility.on("message", (message: unknown) => {
+			if (
+				typeof message === "object" &&
+				message !== null &&
+				(message as { readonly kind?: unknown }).kind === "artisan:shutdown-complete"
+			) {
+				this.#shutdown_ack?.();
+			}
+		});
+		this.#options.schedule(() => {
+			if (this.#utility === utility && !this.#disposing) {
+				this.#restart_attempt = 0;
+			}
+		}, this.#options.stable_run_ms ?? 30_000);
 		utility.on("exit", () => {
 			if (this.#utility !== utility) {
 				return;
 			}
 
 			this.#utility = undefined;
+			this.#shutdown_ack?.();
 			this.#close_active_generations();
 			this.#restart();
 		});
@@ -54,6 +73,9 @@ export class DesktopSessionSupervisor {
 
 		if (!utility) {
 			throw new Error("Artisan backend utility is unavailable");
+		}
+		if (event.sender.isDestroyed()) {
+			throw new Error("Artisan renderer was destroyed before a connection could be created");
 		}
 
 		const control = this.#options.create_channel();
@@ -73,10 +95,6 @@ export class DesktopSessionSupervisor {
 			[control.port1, stream.port1],
 		);
 
-		if (event.sender.isDestroyed()) {
-			throw new Error("Artisan renderer was destroyed before the connection was transferred");
-		}
-
 		event.sender.postMessage(
 			"artisan:connection",
 			{ generation, kind: "artisan:connection" },
@@ -86,11 +104,43 @@ export class DesktopSessionSupervisor {
 		return { generation };
 	}
 
-	Dispose() {
+	Dispose(): Promise<void> {
+		if (this.#dispose_promise) {
+			return this.#dispose_promise;
+		}
+
 		this.#disposing = true;
 		this.#close_active_generations();
-		this.#utility?.kill();
-		this.#utility = undefined;
+		const utility = this.#utility;
+
+		if (!utility) {
+			return Promise.resolve();
+		}
+
+		this.#dispose_promise = new Promise<void>((resolve) => {
+			let settled = false;
+			const finish = () => {
+				if (settled) {
+					return;
+				}
+
+				settled = true;
+				this.#shutdown_ack = undefined;
+				this.#utility = undefined;
+				resolve();
+			};
+
+			this.#shutdown_ack = finish;
+			this.#options.schedule(() => {
+				if (!settled) {
+					utility.kill();
+					finish();
+				}
+			}, this.#options.shutdown_deadline_ms ?? 5_000);
+			utility.postMessage({ kind: "artisan:shutdown" });
+		});
+
+		return this.#dispose_promise;
 	}
 
 	#close_active_generations() {

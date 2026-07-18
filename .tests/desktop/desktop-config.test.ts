@@ -36,11 +36,17 @@ describe("desktop packaging configuration", () => {
 
 		expect(config).toContain("**/*.node");
 		expect(config).toContain("**/node-pty/**");
+		expect(config).toContain("output: .dist/electron-release");
+		expect(config).toContain("from: .dist/desktop");
+		expect(config).toContain("from: .dist/frontend");
+		expect(config).not.toContain("from: .dist\n");
 		expect(main).toContain("requestSingleInstanceLock");
 		expect(main).toContain("contextIsolation: true");
 		expect(main).toContain("nodeIntegration: false");
 		expect(main).toContain("sandbox: true");
 		expect(main).toContain("protocol.handle");
+		expect(main).toContain("app.on(\"activate\"");
+		expect(main).toContain("before-quit");
 		expect(preload).toContain("requestConnection");
 		expect(preload).not.toContain("ipcRenderer.send");
 	});

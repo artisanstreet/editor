@@ -67,10 +67,48 @@ export const StartUtility = async () => {
 	);
 	const server = await transport_runtime.runPromise(MessagePortTransportServer);
 	const active_generations = new Map<number, ReadonlyArray<{ readonly close: () => void }>>();
+	const active_serves = new Set<Promise<void>>();
+	let shutting_down = false;
+	let shutdown_promise: Promise<void> | undefined;
+
+	const ShutdownUtility = () => {
+		if (shutdown_promise) {
+			return shutdown_promise;
+		}
+
+		shutting_down = true;
+		shutdown_promise = (async () => {
+			for (const ports of active_generations.values()) {
+				for (const port of ports) {
+					port.close();
+				}
+			}
+			active_generations.clear();
+			await Promise.allSettled(active_serves);
+			await transport_runtime.dispose();
+			await engine_runtime.dispose();
+			process.parentPort?.postMessage({ kind: "artisan:shutdown-complete" });
+		})();
+
+		return shutdown_promise;
+	};
 
 	process.parentPort?.on("message", (event: ParentPortMessage) => {
 		void Effect.runPromise(
 			Effect.gen(function* () {
+				if (
+					typeof event.data === "object" &&
+					event.data !== null &&
+					(event.data as { readonly kind?: unknown }).kind === "artisan:shutdown"
+				) {
+					yield* Effect.promise(ShutdownUtility);
+					return;
+				}
+
+				if (shutting_down) {
+					return;
+				}
+
 				const message = parent_message(event.data);
 
 				if (message === undefined || !Number.isSafeInteger(message.generation)) {
@@ -94,7 +132,8 @@ export const StartUtility = async () => {
 				const raw_ports = event.ports as ReadonlyArray<{ readonly close: () => void }>;
 
 				active_generations.set(generation, raw_ports);
-				void transport_runtime
+				let serve: Promise<void>;
+				serve = transport_runtime
 					.runPromise(
 						Effect.scoped(
 							Effect.gen(function* () {
@@ -105,19 +144,15 @@ export const StartUtility = async () => {
 							}),
 						),
 					)
-					.finally(() => active_generations.delete(generation));
+					.finally(() => {
+						active_generations.delete(generation);
+						active_serves.delete(serve);
+					});
+				active_serves.add(serve);
 			}),
 		).catch(() => undefined);
 	});
 
-	process.once("disconnect", () => {
-		for (const ports of active_generations.values()) {
-			for (const port of ports) {
-				port.close();
-			}
-		}
-		void Promise.all([transport_runtime.dispose(), engine_runtime.dispose()]);
-	});
 };
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
