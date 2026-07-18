@@ -8,6 +8,7 @@ export type RuntimeIdPrefix =
 	| "connection"
 	| "event"
 	| "heartbeat"
+	| "intake"
 	| "message"
 	| "run"
 	| "stream_ticket";

@@ -11,6 +11,7 @@ import {
 } from "../persistence/orchestration-repository";
 import { GlobalGuidanceService } from "../guidance/guidance-service";
 import { MakeThreadDispatchFence } from "../threads/internal/thread-dispatch-fence";
+import { IntakePolicy } from "./intake-policy";
 
 interface LiveRun {
 	readonly done: Deferred.Deferred<void>;
@@ -38,6 +39,7 @@ export const AgentOrchestratorLive = Layer.effect(
 	Effect.gen(function* () {
 		const engines = yield* EngineRegistry;
 		const guidance = yield* GlobalGuidanceService;
+		const intake_policy = yield* IntakePolicy;
 		const repository = yield* OrchestrationRepository;
 		const service_scope = yield* Scope.make();
 		const live_runs = yield* Ref.make(new Map<string, LiveRun>());
@@ -309,25 +311,43 @@ export const AgentOrchestratorLive = Layer.effect(
 		const CanSteer = (command: CommandEnvelope) =>
 			command.payload.type !== "thread.send_message"
 				? Effect.succeed(false)
-				: repository.GetWork(command.thread_id).pipe(
-						Effect.flatMap((work) => {
-							if (!work || (work.status !== "running" && work.status !== "waiting")) {
-								return Effect.succeed(false);
-							}
+				: repository.GetAutoSteer(command.thread_id).pipe(
+						Effect.flatMap((enabled) =>
+							enabled
+								? repository.GetWork(command.thread_id).pipe(
+										Effect.flatMap((work) => {
+											if (
+												!work ||
+												(work.status !== "running" &&
+													work.status !== "waiting")
+											)
+												return Effect.succeed(false);
 
-							return engines.Get(work.engine_id).pipe(
-								Effect.map(
-									(engine) =>
-										engine.Descriptor.capabilities.steer.state === "supported",
-								),
-								Effect.catch(() => Effect.succeed(false)),
-							);
-						}),
+											return engines.Get(work.engine_id).pipe(
+												Effect.map(
+													(engine) =>
+														engine.Descriptor.capabilities.steer
+															.state === "supported",
+												),
+												Effect.catch(() => Effect.succeed(false)),
+											);
+										}),
+									)
+								: Effect.succeed(false),
+						),
 					);
 
 		const Handle = (command: CommandEnvelope) =>
 			Effect.gen(function* () {
-				const accepted = yield* repository.Accept(command, yield* CanSteer(command));
+				const intake =
+					command.payload.type === "thread.send_message"
+						? yield* intake_policy.Assess(command.payload.text)
+						: undefined;
+				const accepted = yield* repository.Accept(
+					command,
+					yield* CanSteer(command),
+					intake,
+				);
 
 				yield* WakeDispatcher;
 

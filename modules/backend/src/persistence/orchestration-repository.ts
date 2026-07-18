@@ -19,6 +19,7 @@ import {
 	JournalEvents,
 	OrchestrationCoordinators,
 	OrchestrationInteractions,
+	OrchestrationIntake,
 	OrchestrationMessages,
 	OrchestrationOutbox,
 	OrchestrationRawObservations,
@@ -27,6 +28,7 @@ import {
 	Threads,
 } from "./schema";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import type { IntakeAssessment } from "../orchestration/intake-policy";
 import { RecordThreadActivity } from "../threads/internal/thread-activity";
 
 type WorkStatus = ThreadWorkItem["status"];
@@ -74,6 +76,7 @@ export class OrchestrationRepository extends Context.Service<
 		readonly Accept: (
 			command: CommandEnvelope,
 			can_steer: boolean,
+			intake?: IntakeAssessment,
 		) => Effect.Effect<AcceptedOrchestrationCommand, OrchestrationError>;
 		readonly CompleteOutbox: (command_id: string) => Effect.Effect<void, OrchestrationError>;
 		readonly ClaimOutbox: (command_id: string) => Effect.Effect<boolean, OrchestrationError>;
@@ -84,6 +87,7 @@ export class OrchestrationRepository extends Context.Service<
 		readonly GetWork: (
 			thread_id: string,
 		) => Effect.Effect<ThreadWorkItem | undefined, OrchestrationError>;
+		readonly GetAutoSteer: (thread_id: string) => Effect.Effect<boolean, OrchestrationError>;
 		readonly MarkInterrupted: () => Effect.Effect<void, OrchestrationError>;
 		readonly MarkOutboxUndeliverable: (
 			command_id: string,
@@ -255,8 +259,18 @@ export const OrchestrationRepositoryLive = Layer.effect(
 					}),
 					Effect.mapError(normalize_error),
 				);
+		const GetAutoSteer = (thread_id: string) =>
+			database.client
+				.select({ enabled: OrchestrationCoordinators.auto_steer_follow_ups })
+				.from(OrchestrationCoordinators)
+				.where(eq(OrchestrationCoordinators.thread_id, thread_id))
+				.limit(1)
+				.pipe(
+					Effect.map(([row]) => row?.enabled ?? true),
+					Effect.mapError(normalize_error),
+				);
 
-		const Accept = (command: CommandEnvelope, can_steer: boolean) =>
+		const Accept = (command: CommandEnvelope, can_steer: boolean, intake?: IntakeAssessment) =>
 			Effect.gen(function* () {
 				const payload_json = JSON.stringify(command.payload);
 				const raw_origin_json = command.raw_origin
@@ -409,6 +423,252 @@ export const OrchestrationRepositoryLive = Layer.effect(
 							.limit(1);
 						const payload = command.payload;
 						const accepted_at = yield* metadata.Now;
+						if (payload.type === "thread.auto_steer.update") {
+							if (!coordinator) {
+								return yield* new OrchestrationNotFound({
+									id: command.thread_id,
+									resource: "run",
+								});
+							}
+							yield* transaction.insert(JournalCommands).values({
+								accepted_at,
+								agent_id: command.agent_id ?? null,
+								causation_id: command.causation_id ?? null,
+								message_id: command.message_id,
+								origin: command.origin,
+								payload_json,
+								payload_type: payload.type,
+								raw_origin_json,
+								assigned_run_id: coordinator.active_run_id,
+								run_id: command.run_id ?? null,
+								schema_version: command.schema_version,
+								sent_at: command.sent_at,
+								status: "accepted",
+								thread_id: command.thread_id,
+							});
+							yield* transaction
+								.update(OrchestrationCoordinators)
+								.set({
+									auto_steer_follow_ups: payload.enabled,
+									updated_at: accepted_at,
+								})
+								.where(eq(OrchestrationCoordinators.thread_id, command.thread_id));
+							const event = yield* AppendEvent(transaction, {
+								agent_id: coordinator.agent_id,
+								causation_id: command.message_id,
+								correlation_id: command.message_id,
+								payload: {
+									type: "thread.auto_steer.updated",
+									enabled: payload.enabled,
+								},
+								thread_id: command.thread_id,
+							});
+							return {
+								events: [event],
+								journal_sequence: event.journal_sequence,
+								run_id: coordinator.active_run_id ?? "none",
+								status: "accepted" as const,
+							};
+						}
+						if (payload.type === "intake.respond_question") {
+							const [pending] = yield* transaction
+								.select()
+								.from(OrchestrationIntake)
+								.where(
+									and(
+										eq(OrchestrationIntake.thread_id, command.thread_id),
+										eq(OrchestrationIntake.question_id, payload.question_id),
+										eq(OrchestrationIntake.state, "pending"),
+									),
+								)
+								.limit(1);
+							if (
+								!pending ||
+								Object.keys(payload.answers).length !== 1 ||
+								!Object.hasOwn(payload.answers, payload.question_id)
+							) {
+								return yield* new OrchestrationNotFound({
+									id: payload.question_id,
+									resource: "run",
+								});
+							}
+							const [active_coordinator_run] = coordinator?.active_run_id
+								? yield* transaction
+										.select({ status: OrchestrationRuns.status })
+										.from(OrchestrationRuns)
+										.where(
+											eq(OrchestrationRuns.run_id, coordinator.active_run_id),
+										)
+										.limit(1)
+								: [];
+							if (
+								active_coordinator_run &&
+								is_projectable_status(active_coordinator_run.status)
+							) {
+								return yield* new OrchestrationFailure({
+									cause: new Error(
+										"Cannot resolve intake while a coordinator run is active",
+									),
+								});
+							}
+							const run_id = yield* metadata.MakeId("run");
+							const intake_raw_origin = pending.raw_origin_json
+								? JSON.parse(pending.raw_origin_json)
+								: undefined;
+							const resolved_agent_id =
+								coordinator?.agent_id ??
+								command.agent_id ??
+								(yield* metadata.MakeId("agent"));
+							yield* transaction.insert(JournalCommands).values({
+								accepted_at,
+								agent_id: command.agent_id ?? null,
+								causation_id: command.causation_id ?? null,
+								message_id: command.message_id,
+								origin: command.origin,
+								payload_json,
+								payload_type: payload.type,
+								raw_origin_json,
+								assigned_run_id: run_id,
+								run_id: command.run_id ?? null,
+								schema_version: command.schema_version,
+								sent_at: command.sent_at,
+								status: "accepted",
+								thread_id: command.thread_id,
+							});
+							if (!coordinator)
+								yield* transaction.insert(OrchestrationCoordinators).values({
+									active_run_id: run_id,
+									agent_id: resolved_agent_id,
+									auto_steer_follow_ups: true,
+									created_at: accepted_at,
+									display_name: "Primary coordinator",
+									engine_id: pending.engine_id,
+									native_resume_json: null,
+									native_thread_id: null,
+									role: "primary",
+									thread_id: command.thread_id,
+									updated_at: accepted_at,
+								});
+							else
+								yield* transaction
+									.update(OrchestrationCoordinators)
+									.set({
+										active_run_id: run_id,
+										engine_id: pending.engine_id,
+										updated_at: accepted_at,
+									})
+									.where(
+										eq(OrchestrationCoordinators.thread_id, command.thread_id),
+									);
+							yield* transaction.insert(OrchestrationRuns).values({
+								agent_id: resolved_agent_id,
+								created_at: accepted_at,
+								engine_id: pending.engine_id,
+								native_resume_json: null,
+								native_thread_id: null,
+								run_id,
+								status: "queued",
+								thread_id: command.thread_id,
+								updated_at: accepted_at,
+								working_directory: pending.working_directory,
+							});
+							yield* transaction.insert(OrchestrationMessages).values({
+								agent_id: resolved_agent_id,
+								command_id: command.message_id,
+								created_at: accepted_at,
+								delivery: "queued",
+								message_id: pending.message_id,
+								run_id,
+								text: pending.text,
+								thread_id: command.thread_id,
+							});
+							yield* transaction
+								.update(OrchestrationIntake)
+								.set({ state: "resolved", updated_at: accepted_at })
+								.where(eq(OrchestrationIntake.message_id, pending.message_id));
+							const start_payload = {
+								type: "thread.send_message",
+								engine_id: pending.engine_id,
+								text: pending.text,
+								working_directory: pending.working_directory,
+								...(pending.mentioned_projects_json
+									? {
+											mentioned_projects: JSON.parse(
+												pending.mentioned_projects_json,
+											),
+										}
+									: {}),
+							};
+							yield* transaction.insert(OrchestrationOutbox).values({
+								agent_id: resolved_agent_id,
+								command_id: command.message_id,
+								created_at: accepted_at,
+								kind: "start",
+								payload_json: JSON.stringify(start_payload),
+								run_id,
+								status: "pending",
+								thread_id: command.thread_id,
+								updated_at: accepted_at,
+							});
+							const events = [
+								yield* AppendEvent(transaction, {
+									agent_id: resolved_agent_id,
+									causation_id: command.message_id,
+									correlation_id: command.message_id,
+									payload: {
+										type: "interaction.question",
+										question_id: payload.question_id,
+										answers: payload.answers,
+										state: "resolved",
+										text: pending.question ?? "Clarified",
+										source: "intake",
+									},
+									...(intake_raw_origin === undefined
+										? {}
+										: { raw_origin: intake_raw_origin }),
+									run_id,
+									thread_id: command.thread_id,
+								}),
+								yield* AppendEvent(transaction, {
+									agent_id: resolved_agent_id,
+									causation_id: command.message_id,
+									correlation_id: command.message_id,
+									payload: {
+										type: "thread.message_queued",
+										message_id: pending.message_id,
+										reason: "no_active_run",
+										text: pending.text,
+										working_directory: pending.working_directory,
+									},
+									...(intake_raw_origin === undefined
+										? {}
+										: { raw_origin: intake_raw_origin }),
+									run_id,
+									thread_id: command.thread_id,
+								}),
+								yield* AppendEvent(transaction, {
+									agent_id: resolved_agent_id,
+									causation_id: command.message_id,
+									correlation_id: command.message_id,
+									payload: {
+										type: "run.lifecycle",
+										state: "queued",
+										working_directory: pending.working_directory,
+									},
+									...(intake_raw_origin === undefined
+										? {}
+										: { raw_origin: intake_raw_origin }),
+									run_id,
+									thread_id: command.thread_id,
+								}),
+							];
+							return {
+								events,
+								journal_sequence: events.at(-1)!.journal_sequence,
+								run_id,
+								status: "accepted" as const,
+							};
+						}
 						const agent_id =
 							coordinator?.agent_id ??
 							command.agent_id ??
@@ -430,6 +690,84 @@ export const OrchestrationRepositoryLive = Layer.effect(
 						}
 
 						const send_message = payload.type === "thread.send_message";
+						if (send_message && intake?.resolution === "question") {
+							const question_id = yield* metadata.MakeId("message");
+							const intake_id = yield* metadata.MakeId("run");
+							yield* transaction.insert(JournalCommands).values({
+								accepted_at,
+								agent_id: command.agent_id ?? null,
+								causation_id: command.causation_id ?? null,
+								message_id: command.message_id,
+								origin: command.origin,
+								payload_json,
+								payload_type: payload.type,
+								raw_origin_json,
+								assigned_run_id: intake_id,
+								run_id: command.run_id ?? null,
+								schema_version: command.schema_version,
+								sent_at: command.sent_at,
+								status: "accepted",
+								thread_id: command.thread_id,
+							});
+							yield* transaction.insert(OrchestrationIntake).values({
+								assumptions_json: JSON.stringify(intake.assumptions),
+								created_at: accepted_at,
+								engine_id: payload.engine_id,
+								message_id: command.message_id,
+								question: intake.question ?? "Please clarify the request.",
+								question_id,
+								risk: intake.risk,
+								state: "pending",
+								text: payload.text,
+								mentioned_projects_json:
+									payload.mentioned_projects === undefined
+										? null
+										: JSON.stringify(payload.mentioned_projects),
+								thread_id: command.thread_id,
+								raw_origin_json,
+								updated_at: accepted_at,
+								working_directory: payload.working_directory,
+							});
+							const events = [
+								yield* AppendEvent(transaction, {
+									agent_id: command.agent_id ?? "intake",
+									causation_id: command.message_id,
+									correlation_id: command.message_id,
+									payload: {
+										type: "intake.assessed",
+										message_id: command.message_id,
+										risk: intake.risk,
+										resolution: "question",
+									},
+									...(command.raw_origin === undefined
+										? {}
+										: { raw_origin: command.raw_origin }),
+									thread_id: command.thread_id,
+								}),
+								yield* AppendEvent(transaction, {
+									agent_id: command.agent_id ?? "intake",
+									causation_id: command.message_id,
+									correlation_id: command.message_id,
+									payload: {
+										type: "interaction.question",
+										question_id,
+										state: "requested",
+										text: intake.question ?? "Please clarify the request.",
+										source: "intake",
+									},
+									...(command.raw_origin === undefined
+										? {}
+										: { raw_origin: command.raw_origin }),
+									thread_id: command.thread_id,
+								}),
+							];
+							return {
+								events,
+								journal_sequence: events.at(-1)!.journal_sequence,
+								run_id: intake_id,
+								status: "accepted" as const,
+							};
+						}
 						const requested_engine_id =
 							"engine_id" in payload ? payload.engine_id : undefined;
 						const steer =
@@ -649,6 +987,44 @@ export const OrchestrationRepositoryLive = Layer.effect(
 										resource: "run",
 									});
 								}
+							}
+						}
+
+						if (send_message && intake) {
+							events.push(
+								yield* AppendEvent(transaction, {
+									agent_id,
+									causation_id: command.message_id,
+									correlation_id: command.message_id,
+									payload: {
+										type: "intake.assessed",
+										message_id: command.message_id,
+										risk: intake.risk,
+										resolution: intake.resolution,
+									},
+									...(command.raw_origin === undefined
+										? {}
+										: { raw_origin: command.raw_origin }),
+									thread_id: command.thread_id,
+								}),
+							);
+							for (const assumption of intake.assumptions) {
+								events.push(
+									yield* AppendEvent(transaction, {
+										agent_id,
+										causation_id: command.message_id,
+										correlation_id: command.message_id,
+										payload: {
+											type: "intake.assumption_recorded",
+											message_id: command.message_id,
+											assumption,
+										},
+										...(command.raw_origin === undefined
+											? {}
+											: { raw_origin: command.raw_origin }),
+										thread_id: command.thread_id,
+									}),
+								);
 							}
 						}
 
@@ -1264,6 +1640,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 			CompleteOutbox,
 			FallbackSteering,
 			GetPending,
+			GetAutoSteer,
 			GetWork,
 			MarkInterrupted,
 			MarkOutboxUndeliverable,

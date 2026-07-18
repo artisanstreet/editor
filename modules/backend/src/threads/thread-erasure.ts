@@ -18,6 +18,7 @@ import {
 	OrchestrationGraphEdges,
 	OrchestrationGroups,
 	OrchestrationInteractions,
+	OrchestrationIntake,
 	OrchestrationJoins,
 	OrchestrationMessages,
 	OrchestrationOutbox,
@@ -297,6 +298,9 @@ export const ThreadErasureLive = Layer.effect(
 						yield* transaction
 							.delete(OrchestrationMessages)
 							.where(eq(OrchestrationMessages.thread_id, thread_id));
+						yield* transaction
+							.delete(OrchestrationIntake)
+							.where(eq(OrchestrationIntake.thread_id, thread_id));
 						yield* transaction
 							.delete(OrchestrationCoordinators)
 							.where(eq(OrchestrationCoordinators.thread_id, thread_id));

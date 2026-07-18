@@ -590,7 +590,44 @@ export const OrchestrationCoordinators = sqliteTable("orchestration_coordinators
 	native_resume_json: text("native_resume_json"),
 	created_at: text("created_at").notNull(),
 	updated_at: text("updated_at").notNull(),
+	auto_steer_follow_ups: integer("auto_steer_follow_ups", { mode: "boolean" })
+		.notNull()
+		.default(true),
 });
+
+/** Durable pre-execution intake state; a pending row deliberately has no run. */
+export const OrchestrationIntake = sqliteTable(
+	"orchestration_intake",
+	{
+		message_id: text("message_id").primaryKey(),
+		thread_id: text("thread_id").notNull(),
+		engine_id: text("engine_id").notNull(),
+		working_directory: text("working_directory").notNull(),
+		text: text("text").notNull(),
+		mentioned_projects_json: text("mentioned_projects_json"),
+		raw_origin_json: text("raw_origin_json"),
+		risk: text("risk").notNull(),
+		state: text("state").notNull(),
+		question_id: text("question_id"),
+		question: text("question"),
+		assumptions_json: text("assumptions_json").notNull(),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("orchestration_intake_question_id_unique").on(table.question_id),
+		index("orchestration_intake_thread_state_index").on(table.thread_id, table.state),
+		check(
+			"orchestration_intake_risk_check",
+			sql`${table.risk} IN ('low', 'material', 'high', 'underspecified')`,
+		),
+		check("orchestration_intake_state_check", sql`${table.state} IN ('pending', 'resolved')`),
+		check(
+			"orchestration_intake_question_shape_check",
+			sql`(${table.state} = 'pending' AND ${table.question_id} IS NOT NULL AND ${table.question} IS NOT NULL) OR (${table.state} = 'resolved')`,
+		),
+	],
+);
 
 export const OrchestrationRuns = sqliteTable(
 	"orchestration_runs",

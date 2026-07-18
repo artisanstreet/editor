@@ -127,6 +127,19 @@ export const ThreadSendMessageCommand = Schema.Struct({
 
 export type ThreadSendMessageCommand = typeof ThreadSendMessageCommand.Type;
 
+/** Updates the thread-local default for routing follow-ups to an active run. */
+export const ThreadAutoSteerUpdateCommand = Schema.Struct({
+	type: Schema.Literal("thread.auto_steer.update"),
+	enabled: Schema.Boolean,
+});
+
+/** Resolves one Artisan intake question before a run is created. */
+export const IntakeRespondQuestionCommand = Schema.Struct({
+	type: Schema.Literal("intake.respond_question"),
+	question_id: Identifier,
+	answers: Schema.Record(Identifier, Schema.NonEmptyArray(Schema.NonEmptyString)),
+});
+
 /** Opens a durable pseudoterminal owned by a thread workspace. */
 export const TerminalOpenCommand = Schema.Struct({
 	type: Schema.Literal("terminal.open"),
@@ -435,6 +448,8 @@ export const CommandPayload = Schema.Union([
 	ThreadRestoreCommand,
 	ThreadRetentionUpdateCommand,
 	ThreadSendMessageCommand,
+	ThreadAutoSteerUpdateCommand,
+	IntakeRespondQuestionCommand,
 	TerminalOpenCommand,
 	TerminalWriteCommand,
 	TerminalResizeCommand,
@@ -606,6 +621,28 @@ export const QuestionInteractionEvent = Schema.Struct({
 	question_id: Identifier,
 	state: Schema.Literals(["requested", "resolved"]),
 	text: Schema.NonEmptyString,
+	source: Schema.optional(Schema.Literals(["engine", "intake"])),
+});
+
+/** Records the explicit harness classification used before a new run starts. */
+export const IntakeAssessmentEvent = Schema.Struct({
+	type: Schema.Literal("intake.assessed"),
+	message_id: Identifier,
+	risk: Schema.Literals(["low", "material", "high", "underspecified"]),
+	resolution: Schema.Literals(["proceed", "question"]),
+});
+
+/** Records a low-risk assumption that allowed the harness to proceed. */
+export const IntakeAssumptionEvent = Schema.Struct({
+	type: Schema.Literal("intake.assumption_recorded"),
+	message_id: Identifier,
+	assumption: Schema.NonEmptyString,
+});
+
+/** Records a durable session preference change for normal composer follow-ups. */
+export const ThreadAutoSteerUpdatedEvent = Schema.Struct({
+	type: Schema.Literal("thread.auto_steer.updated"),
+	enabled: Schema.Boolean,
 });
 
 /** Records an attributed filesystem mutation without retaining file content. */
@@ -922,6 +959,9 @@ export const EventPayload = Schema.Union([
 	AssistantMessageCompletedEvent,
 	ApprovalInteractionEvent,
 	QuestionInteractionEvent,
+	IntakeAssessmentEvent,
+	IntakeAssumptionEvent,
+	ThreadAutoSteerUpdatedEvent,
 	FilesystemMutationEvent,
 	ProcessOwnershipEvent,
 	GitWorkspaceObservedEvent,

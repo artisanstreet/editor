@@ -10,6 +10,7 @@ import type { GlobalGuidanceProvider } from "@artisan/protocol";
 import { AgentGraphOrchestratorLive } from "../orchestration/agent-graph-orchestrator";
 import { AgentGraphRepositoryLive } from "../orchestration/agent-graph-repository";
 import { AgentOrchestratorLive } from "../orchestration/agent-orchestrator";
+import { IntakePolicyLive } from "../orchestration/intake-policy";
 import {
 	make_node_workspace_filesystem_registry_layer,
 	WorkspaceFilesystemRegistrationError,
@@ -271,6 +272,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(persistence),
 		Layer.provideMerge(engine_registry),
 		Layer.provideMerge(guidance),
+		Layer.provideMerge(IntakePolicyLive),
 	);
 	const graph_persistence = AgentGraphRepositoryLive.pipe(Layer.provideMerge(infrastructure));
 	const graph = AgentGraphOrchestratorLive.pipe(
