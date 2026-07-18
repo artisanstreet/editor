@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import {
 	Cause,
 	Clock,
@@ -10,6 +12,7 @@ import {
 	PubSub,
 	Queue,
 	Ref,
+	Schema,
 	Scope,
 	Semaphore,
 	Stream,
@@ -39,7 +42,7 @@ import {
 	type ModelBehaviourRetryEnvelope,
 	type ModelBehaviourUpdateEnvelope,
 	type OrchestrationGraphQueryEnvelope,
-	type OutboundControlEnvelope,
+	OutboundControlEnvelope,
 	type PreNegotiationProtocolErrorEnvelope,
 	type ProtocolErrorDetail,
 	type ProtocolErrorEnvelope,
@@ -59,7 +62,28 @@ import {
 	type WorkspaceChangeRollbackEnvelope,
 	type WorkspaceFileReadQueryEnvelope,
 	type WorkspaceFileReplaceEnvelope,
+	type CapabilityConnectPreviewEnvelope,
+	type CapabilityDetailQueryEnvelope,
+	type CapabilityRegistryQueryEnvelope,
+	type NpxSkillsDiscoverEnvelope,
+	type RoutineDetailQueryEnvelope,
+	type RoutineInstallPreviewEnvelope,
+	type RoutineRegistryQueryEnvelope,
+	type SecretReference,
 } from "@artisan/protocol";
+
+import { CapabilityRepository } from "../marketplace/capabilities/capability-repository";
+import {
+	CapabilityOAuthLifecycle,
+	CapabilityService,
+} from "../marketplace/capabilities/capability-service";
+import { CapabilityMirrorService } from "../marketplace/capabilities/provider-mirrors";
+import { RoutineService } from "../marketplace/routines/routine-service";
+import { marketplace_capability_thread_id } from "../marketplace/capabilities/capability-repository";
+import {
+	marketplace_routine_thread_id,
+	RoutineRepository,
+} from "../marketplace/routines/routine-repository";
 
 import { GitService, GitServiceError } from "../git/git-service";
 import { AgentGraphOrchestrator } from "../orchestration/agent-graph-orchestrator";
@@ -131,6 +155,22 @@ interface OrchestrationGraphProjectionSubscription {
 type ProjectionSubscription =
 	| OrchestrationGraphProjectionSubscription
 	| ThreadListProjectionSubscription;
+
+const ScopeMatches = (
+	left: import("@artisan/protocol").MarketplaceScope,
+	right: import("@artisan/protocol").MarketplaceScope,
+) =>
+	left.kind === right.kind &&
+	(left.kind === "global" ||
+		(left.kind === "workspace" &&
+			right.kind === "workspace" &&
+			left.workspace_id === right.workspace_id) ||
+		(left.kind === "project" &&
+			right.kind === "project" &&
+			left.project_id === right.project_id));
+
+const MarketplaceIntentFingerprint = (intent: unknown) =>
+	createHash("sha256").update(JSON.stringify(intent)).digest("hex");
 
 interface AwaitingHelloState {
 	readonly _tag: "AwaitingHello";
@@ -535,6 +575,36 @@ export function make_protocol_server_layer(
 			const workspace_changes = yield* WorkspaceChangeRepository;
 			const workspace_diffs = yield* WorkspaceChangeDiffService;
 			const workspace_files = yield* WorkspaceFileService;
+			const routines = yield* RoutineService;
+			const routine_repository = yield* RoutineRepository;
+			const capabilities = yield* CapabilityService;
+			const capability_repository = yield* CapabilityRepository;
+			const capability_oauth = yield* CapabilityOAuthLifecycle;
+			const capability_mirrors = yield* CapabilityMirrorService;
+			const RequireRoutineScope = <Success, Error>(
+				routine_id: string,
+				scope: import("@artisan/protocol").MarketplaceScope,
+				program: Effect.Effect<Success, Error>,
+			) =>
+				routine_repository.ReadDetail(routine_id).pipe(
+					Effect.filterOrFail(
+						(detail) => ScopeMatches(detail.scope, scope),
+						() => "Routine is outside the requested Marketplace scope",
+					),
+					Effect.andThen(program),
+				);
+			const RequireCapabilityScope = <Success, Error>(
+				capability_id: string,
+				scope: import("@artisan/protocol").MarketplaceScope,
+				program: Effect.Effect<Success, Error>,
+			) =>
+				capability_repository.ReadDetail(capability_id).pipe(
+					Effect.filterOrFail(
+						(detail) => ScopeMatches(detail.scope, scope),
+						() => "Capability is outside the requested Marketplace scope",
+					),
+					Effect.andThen(program),
+				);
 
 			const Open = Effect.gen(function* () {
 				const connection_scope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
@@ -924,7 +994,7 @@ export function make_protocol_server_layer(
 								});
 							}),
 						),
-						Effect.catch(() =>
+						Effect.catchCause(() =>
 							EnqueueError(
 								current,
 								"projection.unavailable",
@@ -957,7 +1027,7 @@ export function make_protocol_server_layer(
 								});
 							}),
 						),
-						Effect.catch(() =>
+						Effect.catchCause(() =>
 							EnqueueError(
 								current,
 								"retention.unavailable",
@@ -1034,6 +1104,641 @@ export function make_protocol_server_layer(
 						),
 					);
 
+				const HandleMarketplaceResult = <Payload>(
+					query: { readonly message_id: string },
+					current: ReadyState,
+					kind:
+						| "marketplace.routine.list.query.result"
+						| "marketplace.routine.detail.query.result"
+						| "marketplace.routine.install.preview.result"
+						| "marketplace.npx_skills.discover.result"
+						| "marketplace.capability.list.query.result"
+						| "marketplace.capability.detail.query.result"
+						| "marketplace.capability.connect.preview.result"
+						| "marketplace.routine.invoke.result"
+						| "marketplace.capability.invoke.result"
+						| "marketplace.capability.oauth.begin.result"
+						| "marketplace.capability.oauth.status.query.result",
+					program: Effect.Effect<Payload, unknown>,
+				) =>
+					program.pipe(
+						Effect.flatMap((payload) =>
+							Effect.gen(function* () {
+								const candidate: unknown = {
+									correlation_id: query.message_id,
+									kind,
+									message_id: yield* metadata.MakeId("message"),
+									origin: "backend",
+									payload,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at: yield* metadata.Now,
+								};
+								const response =
+									yield* Schema.decodeUnknownEffect(OutboundControlEnvelope)(
+										candidate,
+									);
+								yield* Enqueue(response);
+							}),
+						),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"marketplace.unavailable",
+								"The Marketplace operation could not be completed.",
+								true,
+								query.message_id,
+							),
+						),
+					);
+				/** These routes only inspect durable registry state or construct a preview. */
+				const HandleRoutineRegistryQuery = (
+					query: RoutineRegistryQueryEnvelope,
+					current: ReadyState,
+				) =>
+					HandleMarketplaceResult(
+						query,
+						current,
+						"marketplace.routine.list.query.result",
+						routines.Browse(query.payload).pipe(
+							Effect.map((routines) => ({
+								registry_version: 1 as const,
+								routines,
+							})),
+						),
+					);
+				const HandleRoutineDetailQuery = (
+					query: RoutineDetailQueryEnvelope,
+					current: ReadyState,
+				) =>
+					HandleMarketplaceResult(
+						query,
+						current,
+						"marketplace.routine.detail.query.result",
+						routines.Detail(query.payload.routine_id).pipe(
+							Effect.filterOrFail(
+								(detail) => ScopeMatches(detail.scope, query.payload.scope),
+								() => "Routine is outside the requested Marketplace scope",
+							),
+						),
+					);
+				const HandleRoutinePreview = (
+					query: RoutineInstallPreviewEnvelope,
+					current: ReadyState,
+				) =>
+					HandleMarketplaceResult(
+						query,
+						current,
+						"marketplace.routine.install.preview.result",
+						routines.Preview(query.payload),
+					);
+				const HandleNpxDiscover = (query: NpxSkillsDiscoverEnvelope, current: ReadyState) =>
+					HandleMarketplaceResult(
+						query,
+						current,
+						"marketplace.npx_skills.discover.result",
+						routines.DiscoverNpxSkills(query.payload),
+					);
+				const HandleCapabilityRegistryQuery = (
+					query: CapabilityRegistryQueryEnvelope,
+					current: ReadyState,
+				) =>
+					HandleMarketplaceResult(
+						query,
+						current,
+						"marketplace.capability.list.query.result",
+						capability_repository.ReadSummaries.pipe(
+							Effect.flatMap((capabilities) =>
+								Effect.forEach(capabilities, (summary) =>
+									capability_repository
+										.ReadDetail(summary.id)
+										.pipe(Effect.map((detail) => ({ detail, summary }))),
+								),
+							),
+							Effect.map((records) => ({
+								capabilities: records
+									.filter(
+										({ detail, summary: capability }) =>
+											(query.payload.compatibility_engine_id === undefined ||
+												detail.compatibility.some(
+													(entry) =>
+														entry.engine_id ===
+														query.payload.compatibility_engine_id,
+												)) &&
+											((capability) =>
+												(query.payload.category === undefined ||
+													query.payload.category === "capability") &&
+												(query.payload.enabled === undefined ||
+													capability.enabled === query.payload.enabled) &&
+												(query.payload.status === undefined ||
+													capability.status === query.payload.status) &&
+												(query.payload.scope === undefined ||
+													ScopeMatches(
+														capability.scope,
+														query.payload.scope,
+													)) &&
+												(query.payload.text === undefined ||
+													capability.display_name
+														.toLocaleLowerCase()
+														.includes(
+															query.payload.text.toLocaleLowerCase(),
+														)))(capability),
+									)
+									.map(({ summary }) => summary),
+								registry_version: 1 as const,
+							})),
+						),
+					);
+				const HandleCapabilityDetailQuery = (
+					query: CapabilityDetailQueryEnvelope,
+					current: ReadyState,
+				) =>
+					HandleMarketplaceResult(
+						query,
+						current,
+						"marketplace.capability.detail.query.result",
+						capability_repository.ReadDetail(query.payload.capability_id).pipe(
+							Effect.filterOrFail(
+								(detail) => ScopeMatches(detail.scope, query.payload.scope),
+								() => "Capability is outside the requested Marketplace scope",
+							),
+						),
+					);
+				const HandleCapabilityPreview = (
+					query: CapabilityConnectPreviewEnvelope,
+					current: ReadyState,
+				) =>
+					HandleMarketplaceResult(
+						query,
+						current,
+						"marketplace.capability.connect.preview.result",
+						capabilities.Preview(query.payload),
+					);
+				const HandleMarketplaceAction = (
+					envelope: { readonly kind: string; readonly message_id: string },
+					_current: ReadyState,
+					program: Effect.Effect<unknown, unknown>,
+				) =>
+					program.pipe(
+						Effect.andThen(journal.ReadReplay({ after_journal_sequence: 0 })),
+						Effect.flatMap((events) =>
+							Effect.gen(function* () {
+								yield* Enqueue({
+									causation_id: envelope.message_id,
+									correlation_id: envelope.message_id,
+									kind: "command.receipt",
+									message_id: yield* metadata.MakeId("message"),
+									origin: "backend",
+									payload: {
+										journal_sequence: latest_journal_sequence(0, events),
+										status: "accepted",
+									},
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at: yield* metadata.Now,
+									thread_id: envelope.kind.includes("capability")
+										? marketplace_capability_thread_id
+										: marketplace_routine_thread_id,
+								});
+							}),
+						),
+						Effect.catch(() =>
+							Effect.gen(function* () {
+								yield* Enqueue({
+									causation_id: envelope.message_id,
+									correlation_id: envelope.message_id,
+									kind: "command.receipt",
+									message_id: yield* metadata.MakeId("message"),
+									origin: "backend",
+									payload: {
+										error: {
+											code: "marketplace.action_rejected",
+											message:
+												"The Marketplace action was rejected before completion.",
+											retryable: false,
+										},
+										status: "rejected",
+									},
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at: yield* metadata.Now,
+									thread_id: envelope.kind.includes("capability")
+										? marketplace_capability_thread_id
+										: marketplace_routine_thread_id,
+								});
+							}),
+						),
+					);
+				const HandleRoutineInstallRequest = (
+					envelope: Extract<
+						InboundControlEnvelope,
+						{ readonly kind: "marketplace.routine.install.request" }
+					>,
+					current: ReadyState,
+				) =>
+					HandleMarketplaceAction(
+						envelope,
+						current,
+						routines.RequestInstall({
+							...envelope.payload,
+							operation_id: envelope.message_id,
+							request_fingerprint: envelope.message_id,
+						}),
+					);
+				const HandleRoutineApprovalDecision = (
+					envelope: Extract<
+						InboundControlEnvelope,
+						{ readonly kind: "marketplace.routine.install.decision" }
+					>,
+					current: ReadyState,
+				) =>
+					HandleMarketplaceAction(
+						envelope,
+						current,
+						routine_repository.ReadPendingInstall(envelope.payload.approval_id).pipe(
+							Effect.filterOrFail(
+								(request) =>
+									request.approval_fingerprint ===
+									envelope.payload.preview_fingerprint,
+								() =>
+									"Routine approval fingerprint does not match the reviewed request",
+							),
+							Effect.flatMap((request) =>
+								routines.DecideInstall({
+									approval_id: request.approval_id,
+									approved: envelope.payload.approved,
+									operation_id: request.operation_id,
+									preview_fingerprint: request.approval_fingerprint,
+									request_fingerprint: request.request_fingerprint,
+									requested_by: "user",
+									scope: request.preview.scope,
+									source: request.preview.source,
+								}),
+							),
+						),
+					);
+				const HandleRoutineInvoke = (
+					envelope: Extract<
+						InboundControlEnvelope,
+						{ readonly kind: "marketplace.routine.invoke" }
+					>,
+					current: ReadyState,
+				) =>
+					RequireRoutineScope(
+						envelope.payload.routine_id,
+						envelope.payload.scope,
+						routines.Invoke({
+							...envelope.payload,
+							engine_id: "codex",
+							operation_id: envelope.message_id,
+						}),
+					).pipe(
+						Effect.flatMap((payload) =>
+							HandleMarketplaceResult(
+								envelope,
+								current,
+								"marketplace.routine.invoke.result",
+								Effect.succeed(payload),
+							),
+						),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"marketplace.action_rejected",
+								"The Marketplace action was rejected before completion.",
+								false,
+								envelope.message_id,
+							),
+						),
+					);
+				const HandleRoutineDriftOverwriteRequest = (
+					envelope: Extract<
+						InboundControlEnvelope,
+						{ readonly kind: "marketplace.routine.drift.overwrite.request" }
+					>,
+					current: ReadyState,
+				) => {
+					const { intent_fingerprint, ...intent } = envelope.payload;
+					return HandleMarketplaceAction(
+						envelope,
+						current,
+						RequireRoutineScope(
+							envelope.payload.routine_id,
+							envelope.payload.scope,
+							Effect.gen(function* () {
+								if (MarketplaceIntentFingerprint(intent) !== intent_fingerprint)
+									return yield* Effect.fail(
+										"Routine drift overwrite intent fingerprint is invalid",
+									);
+								return yield* routine_repository.RecordPendingDriftOverwrite({
+									operation_id: envelope.message_id,
+									request: envelope.payload,
+								});
+							}),
+						),
+					);
+				};
+				const HandleRoutineDriftOverwriteDecision = (
+					envelope: Extract<
+						InboundControlEnvelope,
+						{ readonly kind: "marketplace.routine.drift.overwrite.decision" }
+					>,
+					current: ReadyState,
+				) =>
+					HandleMarketplaceAction(
+						envelope,
+						current,
+						routine_repository
+							.ReadPendingDriftOverwrite(envelope.payload.approval_id)
+							.pipe(
+								Effect.filterOrFail(
+									(record) => {
+										const request = record.request;
+										return (
+											request.intent_fingerprint ===
+												envelope.payload.intent_fingerprint &&
+											request.engine_id === envelope.payload.engine_id &&
+											request.observed_revision ===
+												envelope.payload.observed_revision &&
+											request.routine_id === envelope.payload.routine_id &&
+											ScopeMatches(request.scope, envelope.payload.scope)
+										);
+									},
+									() =>
+										"Routine drift overwrite decision does not match the reviewed intent",
+								),
+								Effect.flatMap((record) =>
+									RequireRoutineScope(
+										record.request.routine_id,
+										envelope.payload.scope,
+										routine_repository
+											.DecideDriftOverwrite({
+												approval_id: envelope.payload.approval_id,
+												approved: envelope.payload.approved,
+												intent_fingerprint:
+													envelope.payload.intent_fingerprint,
+											})
+											.pipe(
+												Effect.flatMap((decision) =>
+													decision === "denied"
+														? Effect.void
+														: routines.ExecuteApprovedDriftOverwrite({
+																engine_id: record.request.engine_id,
+																observed_revision:
+																	record.request
+																		.observed_revision,
+																operation_id: envelope.message_id,
+																routine_id:
+																	record.request.routine_id,
+															}),
+												),
+											),
+									),
+								),
+							),
+					);
+				const HandleCapabilityInvoke = (
+					envelope: Extract<
+						InboundControlEnvelope,
+						{ readonly kind: "marketplace.capability.invoke" }
+					>,
+					current: ReadyState,
+				) =>
+					RequireCapabilityScope(
+						envelope.payload.capability_id,
+						envelope.payload.scope,
+						capabilities.Invoke({
+							...envelope.payload,
+							operation_id: envelope.message_id,
+						}),
+					).pipe(
+						Effect.flatMap((payload) =>
+							HandleMarketplaceResult(
+								envelope,
+								current,
+								"marketplace.capability.invoke.result",
+								Effect.succeed(payload),
+							),
+						),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"marketplace.action_rejected",
+								"The Marketplace action was rejected before completion.",
+								false,
+								envelope.message_id,
+							),
+						),
+					);
+				const HandleCapabilityInvocationApproval = (
+					envelope: Extract<
+						InboundControlEnvelope,
+						{
+							readonly kind:
+								| "marketplace.capability.invoke.request"
+								| "marketplace.capability.invoke.decision";
+						}
+					>,
+					current: ReadyState,
+				) =>
+					RequireCapabilityScope(
+						envelope.payload.capability_id,
+						envelope.payload.scope,
+						envelope.kind === "marketplace.capability.invoke.request"
+							? capabilities.RequestInvocation({
+									...envelope.payload,
+									operation_id: envelope.message_id,
+								})
+							: capabilities.DecideInvocation(envelope.payload),
+					).pipe(
+						Effect.flatMap((payload) =>
+							HandleMarketplaceResult(
+								envelope,
+								current,
+								"marketplace.capability.invoke.result",
+								Effect.succeed(payload),
+							),
+						),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"marketplace.action_rejected",
+								"The Marketplace invocation approval was rejected.",
+								false,
+								envelope.message_id,
+							),
+						),
+					);
+				const HandleCapabilityDriftOverwrite = (
+					envelope: Extract<
+						InboundControlEnvelope,
+						{
+							readonly kind:
+								| "marketplace.capability.drift.overwrite.request"
+								| "marketplace.capability.drift.overwrite.decision";
+						}
+					>,
+					current: ReadyState,
+				) =>
+					HandleMarketplaceAction(
+						envelope,
+						current,
+						RequireCapabilityScope(
+							envelope.payload.capability_id,
+							envelope.payload.scope,
+							envelope.kind === "marketplace.capability.drift.overwrite.request"
+								? capability_mirrors.RequestOverwrite({
+										approval_fingerprint: envelope.payload.intent_fingerprint,
+										approval_id: envelope.payload.approval_id,
+										capability_id: envelope.payload.capability_id,
+										engine_id: envelope.payload.engine_id,
+										observed_revision: envelope.payload.observed_revision,
+										operation_id: envelope.message_id,
+										scope: envelope.payload.scope,
+									})
+								: capability_mirrors.DecideOverwrite({
+										approval_fingerprint: envelope.payload.intent_fingerprint,
+										approval_id: envelope.payload.approval_id,
+										approved: envelope.payload.approved,
+										capability_id: envelope.payload.capability_id,
+										engine_id: envelope.payload.engine_id,
+										observed_revision: envelope.payload.observed_revision,
+										scope: envelope.payload.scope,
+									}),
+						),
+					);
+				const HandleCapabilityConnectRequest = (
+					envelope: Extract<
+						InboundControlEnvelope,
+						{
+							readonly kind:
+								| "marketplace.capability.connect.request"
+								| "marketplace.capability.connect.decision"
+								| "marketplace.capability.start"
+								| "marketplace.capability.reconnect"
+								| "marketplace.capability.restart";
+						}
+					>,
+					current: ReadyState,
+				) => {
+					if (envelope.kind === "marketplace.capability.connect.request")
+						return HandleMarketplaceAction(
+							envelope,
+							current,
+							capabilities
+								.Preview({
+									auth: envelope.payload.auth,
+									scope: envelope.payload.scope,
+									source: envelope.payload.source,
+									transport: envelope.payload.transport,
+								})
+								.pipe(
+									Effect.filterOrFail(
+										(preview) =>
+											preview.preview_fingerprint ===
+											envelope.payload.preview_fingerprint,
+										() =>
+											"Capability preview changed; approval must be renewed",
+									),
+									Effect.flatMap((preview) =>
+										capabilities.RequestConnect({
+											approval_id: envelope.payload.approval_id,
+											detail: {
+												auth: envelope.payload.auth,
+												compatibility: [...preview.compatibility],
+												display_name: preview.candidate_name,
+												enabled: true,
+												health: { status: "unknown" },
+												id: preview.candidate_id,
+												lifecycle: "awaiting_approval",
+												permissions: [...preview.permissions],
+												policy: [],
+												resources: [],
+												scope: preview.scope,
+												source: preview.source,
+												status: "awaiting_approval",
+												sync: [],
+												tools: [...preview.tools],
+												transport: preview.transport,
+												...(preview.transport_policy === undefined
+													? {}
+													: {
+															transport_policy:
+																preview.transport_policy,
+														}),
+												trust: preview.trust,
+											},
+											operation_id: envelope.message_id,
+											preview_fingerprint: preview.preview_fingerprint,
+											request_fingerprint: envelope.message_id,
+										}),
+									),
+								),
+						);
+					if (envelope.kind === "marketplace.capability.connect.decision")
+						return HandleMarketplaceAction(
+							envelope,
+							current,
+							capabilities.DecideConnect({
+								approval_fingerprint: envelope.payload.preview_fingerprint,
+								approval_id: envelope.payload.approval_id,
+								approved: envelope.payload.approved,
+							}),
+						);
+					return HandleMarketplaceAction(
+						envelope,
+						current,
+						RequireCapabilityScope(
+							envelope.payload.capability_id,
+							envelope.payload.scope,
+							capabilities.SessionAction({
+								action:
+									envelope.kind === "marketplace.capability.start"
+										? "start"
+										: envelope.kind === "marketplace.capability.restart"
+											? "restart"
+											: "reconnect",
+								capability_id: envelope.payload.capability_id,
+								operation_id: envelope.message_id,
+							}),
+						),
+					);
+				};
+				const OAuthStatusPayload = (status: {
+					readonly capability_id: string;
+					readonly secret_reference?: SecretReference;
+					readonly state: "absent" | "active" | "expired" | "revoked";
+				}) => ({
+					capability_id: status.capability_id,
+					...(status.secret_reference === undefined
+						? {}
+						: { secret_ref: status.secret_reference }),
+					status:
+						status.state === "absent"
+							? ("not_started" as const)
+							: status.state === "active"
+								? ("authorized" as const)
+								: status.state,
+				});
+				const HandleOAuthStatus = (
+					envelope: Extract<
+						InboundControlEnvelope,
+						{ readonly kind: "marketplace.capability.oauth.status.query" }
+					>,
+					current: ReadyState,
+				) =>
+					HandleMarketplaceResult(
+						envelope,
+						current,
+						"marketplace.capability.oauth.status.query.result",
+						RequireCapabilityScope(
+							envelope.payload.capability_id,
+							envelope.payload.scope,
+							capability_oauth
+								.Status(envelope.payload.capability_id)
+								.pipe(Effect.map(OAuthStatusPayload)),
+						),
+					);
 				const HandleWorkQuery = (query: ThreadWorkQueryEnvelope, current: ReadyState) =>
 					orchestration.GetWork(query.payload.thread_id).pipe(
 						Effect.flatMap((work) =>
@@ -2008,6 +2713,332 @@ export function make_protocol_server_layer(
 							return HandleGuidanceMutation(envelope);
 						case "model_behaviour.query":
 							return HandleModelBehaviourQuery(envelope, current);
+						case "marketplace.routine.list.query":
+							return HandleRoutineRegistryQuery(envelope, current);
+						case "marketplace.routine.detail.query":
+							return HandleRoutineDetailQuery(envelope, current);
+						case "marketplace.routine.install.preview":
+							return HandleRoutinePreview(envelope, current);
+						case "marketplace.routine.install.request":
+							return HandleRoutineInstallRequest(envelope, current);
+						case "marketplace.routine.install.decision":
+							return HandleRoutineApprovalDecision(envelope, current);
+						case "marketplace.routine.enable":
+							return HandleMarketplaceAction(
+								envelope,
+								current,
+								RequireRoutineScope(
+									envelope.payload.id,
+									envelope.payload.scope,
+									routines.Enable({
+										operation_id: envelope.message_id,
+										routine_id: envelope.payload.id,
+									}),
+								),
+							);
+						case "marketplace.routine.disable":
+							return HandleMarketplaceAction(
+								envelope,
+								current,
+								RequireRoutineScope(
+									envelope.payload.id,
+									envelope.payload.scope,
+									routines.Disable({
+										operation_id: envelope.message_id,
+										routine_id: envelope.payload.id,
+									}),
+								),
+							);
+						case "marketplace.routine.remove":
+							return HandleMarketplaceAction(
+								envelope,
+								current,
+								RequireRoutineScope(
+									envelope.payload.id,
+									envelope.payload.scope,
+									routines.Remove({
+										operation_id: envelope.message_id,
+										routine_id: envelope.payload.id,
+									}),
+								),
+							);
+						case "marketplace.routine.sync":
+							return HandleMarketplaceAction(
+								envelope,
+								current,
+								RequireRoutineScope(
+									envelope.payload.id,
+									envelope.payload.scope,
+									routines.Sync({
+										engine_id: envelope.payload.engine_id,
+										operation_id: envelope.message_id,
+										routine_id: envelope.payload.id,
+									}),
+								),
+							);
+						case "marketplace.routine.drift.resolve":
+							return HandleMarketplaceAction(
+								envelope,
+								current,
+								RequireRoutineScope(
+									envelope.payload.routine_id,
+									envelope.payload.scope,
+									routines.ResolveDrift({
+										...envelope.payload,
+										operation_id: envelope.message_id,
+									}),
+								),
+							);
+						case "marketplace.routine.drift.overwrite.request":
+							return HandleRoutineDriftOverwriteRequest(envelope, current);
+						case "marketplace.routine.drift.overwrite.decision":
+							return HandleRoutineDriftOverwriteDecision(envelope, current);
+						case "marketplace.routine.rollback":
+							return HandleMarketplaceAction(
+								envelope,
+								current,
+								RequireRoutineScope(
+									envelope.payload.routine_id,
+									envelope.payload.scope,
+									routines.Rollback({
+										operation_id: envelope.message_id,
+										rollback_id: envelope.payload.rollback_id,
+										routine_id: envelope.payload.routine_id,
+									}),
+								),
+							);
+						case "marketplace.routine.invoke":
+							return HandleRoutineInvoke(envelope, current);
+						case "marketplace.npx_skills.discover":
+							return HandleNpxDiscover(envelope, current);
+						case "marketplace.npx_skills.import.request":
+							return HandleMarketplaceAction(
+								envelope,
+								current,
+								routines.PreviewNpxImport(envelope.payload).pipe(
+									Effect.flatMap((preview) =>
+										routines.RequestInstall({
+											approval_id: envelope.message_id,
+											operation_id: envelope.message_id,
+											preview_fingerprint: preview.preview_fingerprint,
+											request_fingerprint: envelope.message_id,
+											requested_by: "user",
+											scope: preview.scope,
+											source: preview.source,
+										}),
+									),
+								),
+							);
+						case "marketplace.capability.list.query":
+							return HandleCapabilityRegistryQuery(envelope, current);
+						case "marketplace.capability.detail.query":
+							return HandleCapabilityDetailQuery(envelope, current);
+						case "marketplace.capability.connect.preview":
+							return HandleCapabilityPreview(envelope, current);
+						case "marketplace.capability.connect.request":
+							return HandleCapabilityConnectRequest(envelope, current);
+						case "marketplace.capability.connect.decision":
+						case "marketplace.capability.start":
+						case "marketplace.capability.reconnect":
+						case "marketplace.capability.restart":
+							return HandleCapabilityConnectRequest(envelope, current);
+						case "marketplace.capability.enable":
+							return HandleMarketplaceAction(
+								envelope,
+								current,
+								RequireCapabilityScope(
+									envelope.payload.id,
+									envelope.payload.scope,
+									capabilities.Enable({
+										capability_id: envelope.payload.id,
+										operation_id: envelope.message_id,
+									}),
+								),
+							);
+						case "marketplace.capability.disable":
+							return HandleMarketplaceAction(
+								envelope,
+								current,
+								RequireCapabilityScope(
+									envelope.payload.id,
+									envelope.payload.scope,
+									capabilities.Disable({
+										capability_id: envelope.payload.id,
+										operation_id: envelope.message_id,
+									}),
+								),
+							);
+						case "marketplace.capability.remove":
+							return HandleMarketplaceAction(
+								envelope,
+								current,
+								RequireCapabilityScope(
+									envelope.payload.id,
+									envelope.payload.scope,
+									capabilities.Remove({
+										capability_id: envelope.payload.id,
+										operation_id: envelope.message_id,
+									}),
+								),
+							);
+						case "marketplace.capability.disconnect":
+							return HandleMarketplaceAction(
+								envelope,
+								current,
+								RequireCapabilityScope(
+									envelope.payload.capability_id,
+									envelope.payload.scope,
+									capabilities.Disconnect({
+										capability_id: envelope.payload.capability_id,
+										operation_id: envelope.message_id,
+									}),
+								),
+							);
+						case "marketplace.capability.uninstall":
+							return HandleMarketplaceAction(
+								envelope,
+								current,
+								RequireCapabilityScope(
+									envelope.payload.capability_id,
+									envelope.payload.scope,
+									capabilities.Uninstall({
+										capability_id: envelope.payload.capability_id,
+										operation_id: envelope.message_id,
+									}),
+								),
+							);
+						case "marketplace.capability.health":
+							return HandleMarketplaceAction(
+								envelope,
+								current,
+								RequireCapabilityScope(
+									envelope.payload.capability_id,
+									envelope.payload.scope,
+									capabilities.Health({
+										capability_id: envelope.payload.capability_id,
+										operation_id: envelope.message_id,
+									}),
+								),
+							);
+						case "marketplace.capability.invoke":
+							return HandleCapabilityInvoke(envelope, current);
+						case "marketplace.capability.invoke.request":
+						case "marketplace.capability.invoke.decision":
+							return HandleCapabilityInvocationApproval(envelope, current);
+						case "marketplace.capability.sync":
+							return HandleMarketplaceAction(
+								envelope,
+								current,
+								RequireCapabilityScope(
+									envelope.payload.id,
+									envelope.payload.scope,
+									capability_mirrors.Sync({
+										capability_id: envelope.payload.id,
+										engine_id: envelope.payload.engine_id,
+										operation_id: envelope.message_id,
+									}),
+								),
+							);
+						case "marketplace.capability.drift.resolve":
+							return HandleMarketplaceAction(
+								envelope,
+								current,
+								RequireCapabilityScope(
+									envelope.payload.capability_id,
+									envelope.payload.scope,
+									capability_mirrors.ResolveDrift({
+										...envelope.payload,
+										operation_id: envelope.message_id,
+									}),
+								),
+							);
+						case "marketplace.capability.drift.overwrite.request":
+						case "marketplace.capability.drift.overwrite.decision":
+							return HandleCapabilityDriftOverwrite(envelope, current);
+						case "marketplace.capability.oauth.begin":
+							return HandleMarketplaceResult(
+								envelope,
+								current,
+								"marketplace.capability.oauth.begin.result",
+								capability_repository
+									.ReadDetail(envelope.payload.capability_id)
+									.pipe(
+										Effect.filterOrFail(
+											(detail) =>
+												ScopeMatches(detail.scope, envelope.payload.scope),
+											() =>
+												"Capability is outside the requested Marketplace scope",
+										),
+										Effect.flatMap((detail) =>
+											detail.auth.kind === "oauth"
+												? capability_oauth
+														.Begin({
+															authorization_url:
+																detail.auth.authorization_url,
+															capability_id: detail.id,
+															operation_id: envelope.message_id,
+															scopes: detail.auth.scopes,
+														})
+														.pipe(
+															Effect.filterOrFail(
+																(result) =>
+																	result._tag === "started",
+																() =>
+																	"OAuth begin result is unavailable for this retry",
+															),
+															Effect.map((result) => ({
+																authorization_url:
+																	result.authorization_url,
+																continuation_reference:
+																	result.state,
+															})),
+														)
+												: Effect.fail("oauth unavailable"),
+										),
+									),
+							);
+						case "marketplace.capability.oauth.complete":
+							return HandleMarketplaceAction(
+								envelope,
+								current,
+								RequireCapabilityScope(
+									envelope.payload.capability_id,
+									envelope.payload.scope,
+									capability_oauth.Complete({
+										capability_id: envelope.payload.capability_id,
+										callback_reference: envelope.payload.callback_reference,
+										operation_id: envelope.message_id,
+									}),
+								),
+							);
+						case "marketplace.capability.oauth.refresh":
+							return HandleMarketplaceAction(
+								envelope,
+								current,
+								RequireCapabilityScope(
+									envelope.payload.capability_id,
+									envelope.payload.scope,
+									capability_oauth.Refresh({
+										capability_id: envelope.payload.capability_id,
+										operation_id: envelope.message_id,
+									}),
+								),
+							);
+						case "marketplace.capability.oauth.revoke":
+							return HandleMarketplaceAction(
+								envelope,
+								current,
+								RequireCapabilityScope(
+									envelope.payload.capability_id,
+									envelope.payload.scope,
+									capability_oauth.Revoke({
+										capability_id: envelope.payload.capability_id,
+										operation_id: envelope.message_id,
+									}),
+								),
+							);
+						case "marketplace.capability.oauth.status.query":
+							return HandleOAuthStatus(envelope, current);
 						case "model_behaviour.update":
 						case "model_behaviour.drift.resolve":
 						case "model_behaviour.sync.retry":
@@ -2028,8 +3059,12 @@ export function make_protocol_server_layer(
 							return HandleReplay(envelope, current);
 						case "heartbeat.pong":
 							return HandlePong(envelope, current);
-						default:
-							return Effect.void;
+						default: {
+							const exhaustive: never = envelope;
+							return Effect.die(
+								`Unhandled inbound control envelope: ${String(exhaustive)}`,
+							);
+						}
 					}
 				};
 

@@ -16,9 +16,12 @@ export const MarketplaceItemStatus = Schema.Literals([
 	"awaiting_approval",
 	"installing",
 	"connecting",
+	"approval_denied",
 	"enabled",
 	"disabled",
+	"failed",
 	"removed",
+	"rolled_back",
 	"rollback_available",
 	"uninstall_available",
 	"disconnect_available",
@@ -194,16 +197,40 @@ export const MarketplaceApprovalDecision = Schema.Struct({
 export type MarketplaceApprovalDecision = typeof MarketplaceApprovalDecision.Type;
 
 export const RoutineDriftResolutionRequest = Schema.Struct({
-	action: DriftResolution,
+	action: Schema.Literals(["import", "ignore"]),
 	engine_id: Identifier,
 	observed_revision: Schema.NonEmptyString,
 	routine_id: Identifier,
+	scope: MarketplaceScope,
 });
 export type RoutineDriftResolutionRequest = typeof RoutineDriftResolutionRequest.Type;
+
+/** Exact destructive provider-overwrite intent reviewed before approval is recorded. */
+export const RoutineDriftOverwriteRequest = Schema.Struct({
+	approval_id: Identifier,
+	engine_id: Identifier,
+	intent_fingerprint: Identifier,
+	observed_revision: Schema.NonEmptyString,
+	requested_by: Schema.Literals(["user", "agent"]),
+	routine_id: Identifier,
+	scope: MarketplaceScope,
+});
+export type RoutineDriftOverwriteRequest = typeof RoutineDriftOverwriteRequest.Type;
+export const RoutineDriftOverwriteDecision = Schema.Struct({
+	approval_id: Identifier,
+	approved: Schema.Boolean,
+	engine_id: Identifier,
+	intent_fingerprint: Identifier,
+	observed_revision: Schema.NonEmptyString,
+	routine_id: Identifier,
+	scope: MarketplaceScope,
+});
+export type RoutineDriftOverwriteDecision = typeof RoutineDriftOverwriteDecision.Type;
 
 export const RoutineInvocationRequest = Schema.Struct({
 	command: Schema.optional(Schema.NonEmptyString),
 	routine_id: Identifier,
+	scope: MarketplaceScope,
 	task_summary: Schema.NonEmptyString,
 });
 export type RoutineInvocationRequest = typeof RoutineInvocationRequest.Type;
@@ -233,6 +260,8 @@ export const NpxSkillsCandidate = Schema.Struct({
 	description: Schema.optional(Schema.NonEmptyString),
 	files: Schema.Array(RoutineFile),
 	name: Schema.NonEmptyString,
+	/** Opaque backend inspection identity used by the explicit import preview request. */
+	preview_fingerprint: Schema.optional(Identifier),
 	source_locator: Schema.NonEmptyString,
 	version: Schema.optional(Schema.NonEmptyString),
 });
@@ -255,11 +284,46 @@ export const McpTransport = Schema.Union([
 		args: Schema.Array(Schema.String),
 		command: Schema.NonEmptyString,
 		cwd: Schema.optional(Schema.NonEmptyString),
+		env: Schema.optional(
+			Schema.Array(
+				Schema.Struct({
+					name: Schema.NonEmptyString.check(Schema.isPattern(/^[A-Za-z_][A-Za-z0-9_]*$/)),
+					secret_ref: SecretReference,
+				}),
+			),
+		),
+		invocation_timeout_ms: Schema.optional(
+			Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 300_000 })),
+		),
 		kind: Schema.Literal("stdio"),
+		max_message_bytes: Schema.optional(
+			Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 16 * 1024 * 1024 })),
+		),
+		max_pending_requests: Schema.optional(
+			Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 1_024 })),
+		),
+		max_stderr_bytes: Schema.optional(
+			Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 16 * 1024 * 1024 })),
+		),
 		startup_timeout_ms: Schema.Int.check(Schema.isGreaterThan(0)),
 	}),
 	Schema.Struct({
 		kind: Schema.Literal("streamable_http"),
+		max_pagination_bytes: Schema.optional(
+			Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 64 * 1024 * 1024 })),
+		),
+		max_pagination_items: Schema.optional(
+			Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 100_000 })),
+		),
+		max_pagination_pages: Schema.optional(
+			Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 1_000 })),
+		),
+		max_response_bytes: Schema.optional(
+			Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 16 * 1024 * 1024 })),
+		),
+		timeout_ms: Schema.optional(
+			Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 300_000 })),
+		),
 		url: Schema.String.check(
 			Schema.isPattern(/^https?:\/\//),
 			Schema.makeFilter<string>((value) => {
@@ -276,9 +340,42 @@ export type McpTransport = typeof McpTransport.Type;
 export const McpAuth = Schema.Union([
 	Schema.Struct({ kind: Schema.Literal("none") }),
 	Schema.Struct({ kind: Schema.Literal("bearer"), secret_ref: SecretReference }),
-	Schema.Struct({ kind: Schema.Literal("api_key"), secret_ref: SecretReference }),
 	Schema.Struct({
+		header_name: Schema.NonEmptyString.check(
+			Schema.isPattern(/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/),
+			Schema.makeFilter<string>((value) =>
+				new Set([
+					"authorization",
+					"connection",
+					"content-length",
+					"cookie",
+					"host",
+					"mcp-session-id",
+					"proxy-authorization",
+					"te",
+					"trailer",
+					"transfer-encoding",
+					"upgrade",
+				]).has(value.toLowerCase())
+					? "Expected a non-reserved API-key header name"
+					: undefined,
+			),
+		),
+		kind: Schema.Literal("api_key"),
+		secret_ref: SecretReference,
+	}),
+	Schema.Struct({
+		authorization_url: Schema.String.check(
+			Schema.isPattern(/^https:\/\//),
+			Schema.makeFilter<string>((value) => {
+				const url = new URL(value);
+				return url.username.length === 0 && url.password.length === 0
+					? undefined
+					: "Expected an OAuth authorization URL without embedded credentials";
+			}),
+		),
 		kind: Schema.Literal("oauth"),
+		provider: Identifier,
 		scopes: Schema.Array(Schema.NonEmptyString),
 		token_ref: Schema.optional(SecretReference),
 		token_status: Schema.Literals([
@@ -302,6 +399,7 @@ export type McpToolPolicy = typeof McpToolPolicy.Type;
 
 export const McpToolSummary = Schema.Struct({
 	description: Schema.optional(Schema.NonEmptyString),
+	input_schema: Schema.optional(Schema.Record(Schema.String, Schema.Unknown)),
 	name: Schema.NonEmptyString,
 });
 export type McpToolSummary = typeof McpToolSummary.Type;
@@ -363,11 +461,18 @@ export const CapabilityDetail = Schema.Struct({
 	scope: MarketplaceScope,
 	status: MarketplaceItemStatus,
 	server_instructions: Schema.optional(Schema.NonEmptyString),
+	server_metadata: Schema.optional(Schema.Record(Schema.String, Schema.String)),
 	source: RoutineSource,
 	sync: Schema.Array(ProviderSyncState),
 	tools: Schema.Array(McpToolSummary),
 	transport: McpTransport,
 	trust: MarketplaceTrust,
+	transport_policy: Schema.optional(
+		Schema.Struct({
+			allowed: Schema.Boolean,
+			broad_local_binding_warning: Schema.Boolean,
+		}),
+	),
 });
 export type CapabilityDetail = typeof CapabilityDetail.Type;
 
@@ -383,6 +488,8 @@ export const CapabilityConnectPreview = Schema.Struct({
 	auth: McpAuth,
 	candidate_id: Identifier,
 	candidate_name: Schema.NonEmptyString,
+	compatibility: Schema.Array(EngineCompatibility),
+	discovery_status: Schema.Literals(["declared", "requires_connection"]),
 	permissions: Schema.Array(MarketplacePermission),
 	preview_fingerprint: Identifier,
 	rollback_available: Schema.Boolean,
@@ -390,12 +497,19 @@ export const CapabilityConnectPreview = Schema.Struct({
 	source: RoutineSource,
 	tools: Schema.Array(McpToolSummary),
 	transport: McpTransport,
+	transport_policy: Schema.optional(
+		Schema.Struct({
+			allowed: Schema.Boolean,
+			broad_local_binding_warning: Schema.Boolean,
+		}),
+	),
 	trust: MarketplaceTrust,
 });
 export type CapabilityConnectPreview = typeof CapabilityConnectPreview.Type;
 
 export const CapabilityConnectRequest = Schema.Struct({
 	approval_id: Identifier,
+	auth: McpAuth,
 	preview_fingerprint: Identifier,
 	requested_by: Schema.Literals(["user", "agent"]),
 	scope: MarketplaceScope,
@@ -407,14 +521,19 @@ export type CapabilityConnectRequest = typeof CapabilityConnectRequest.Type;
 export const RoutineRollbackRequest = Schema.Struct({
 	routine_id: Identifier,
 	rollback_id: Identifier,
+	scope: MarketplaceScope,
 });
 export type RoutineRollbackRequest = typeof RoutineRollbackRequest.Type;
 
-export const CapabilityOAuthRequest = Schema.Struct({ capability_id: Identifier });
+export const CapabilityOAuthRequest = Schema.Struct({
+	capability_id: Identifier,
+	scope: MarketplaceScope,
+});
 export type CapabilityOAuthRequest = typeof CapabilityOAuthRequest.Type;
 export const CapabilityOAuthCompleteRequest = Schema.Struct({
 	capability_id: Identifier,
 	callback_reference: Identifier,
+	scope: MarketplaceScope,
 });
 export type CapabilityOAuthCompleteRequest = typeof CapabilityOAuthCompleteRequest.Type;
 export const CapabilityOAuthTokenStatus = Schema.Struct({
@@ -430,22 +549,74 @@ export const CapabilityOAuthTokenStatus = Schema.Struct({
 	]),
 });
 export type CapabilityOAuthTokenStatus = typeof CapabilityOAuthTokenStatus.Type;
+export const CapabilityOAuthBeginResult = Schema.Struct({
+	authorization_url: Schema.NonEmptyString,
+	/** Opaque adapter continuation; never an authorization code or access token. */
+	continuation_reference: Identifier,
+});
+export type CapabilityOAuthBeginResult = typeof CapabilityOAuthBeginResult.Type;
 
 export const CapabilityDriftResolutionRequest = Schema.Struct({
-	action: DriftResolution,
+	action: Schema.Literals(["import", "ignore"]),
 	capability_id: Identifier,
 	engine_id: Identifier,
 	observed_revision: Schema.NonEmptyString,
+	scope: MarketplaceScope,
 });
 export type CapabilityDriftResolutionRequest = typeof CapabilityDriftResolutionRequest.Type;
+
+/** Exact destructive capability-mirror overwrite intent reviewed before approval. */
+export const CapabilityDriftOverwriteRequest = Schema.Struct({
+	approval_id: Identifier,
+	capability_id: Identifier,
+	engine_id: Identifier,
+	intent_fingerprint: Identifier,
+	observed_revision: Schema.NonEmptyString,
+	requested_by: Schema.Literals(["user", "agent"]),
+	scope: MarketplaceScope,
+});
+export type CapabilityDriftOverwriteRequest = typeof CapabilityDriftOverwriteRequest.Type;
+export const CapabilityDriftOverwriteDecision = Schema.Struct({
+	approval_id: Identifier,
+	approved: Schema.Boolean,
+	capability_id: Identifier,
+	engine_id: Identifier,
+	intent_fingerprint: Identifier,
+	observed_revision: Schema.NonEmptyString,
+	scope: MarketplaceScope,
+});
+export type CapabilityDriftOverwriteDecision = typeof CapabilityDriftOverwriteDecision.Type;
 
 export const CapabilityInvocationRequest = Schema.Struct({
 	arguments_json: Schema.String,
 	approval_id: Schema.optional(Identifier),
 	capability_id: Identifier,
+	scope: MarketplaceScope,
 	tool_name: Schema.NonEmptyString,
 });
 export type CapabilityInvocationRequest = typeof CapabilityInvocationRequest.Type;
+
+/** Exact tool invocation intent; arguments remain opaque JSON and secrets remain references. */
+export const CapabilityInvocationApprovalRequest = Schema.Struct({
+	approval_id: Identifier,
+	arguments_json: Schema.String,
+	capability_id: Identifier,
+	intent_fingerprint: Identifier,
+	requested_by: Schema.Literals(["user", "agent"]),
+	scope: MarketplaceScope,
+	tool_name: Schema.NonEmptyString,
+});
+export type CapabilityInvocationApprovalRequest = typeof CapabilityInvocationApprovalRequest.Type;
+export const CapabilityInvocationApprovalDecision = Schema.Struct({
+	approval_id: Identifier,
+	approved: Schema.Boolean,
+	arguments_json: Schema.String,
+	capability_id: Identifier,
+	intent_fingerprint: Identifier,
+	scope: MarketplaceScope,
+	tool_name: Schema.NonEmptyString,
+});
+export type CapabilityInvocationApprovalDecision = typeof CapabilityInvocationApprovalDecision.Type;
 
 /** Ledger-safe invocation outcome: result material remains an artifact reference. */
 export const CapabilityInvocationMetadata = Schema.Struct({
@@ -464,15 +635,25 @@ export const CapabilityRegistrySnapshot = Schema.Struct({
 });
 export type CapabilityRegistrySnapshot = typeof CapabilityRegistrySnapshot.Type;
 
-export const MarketplaceEnableRequest = Schema.Struct({ id: Identifier });
+export const MarketplaceEnableRequest = Schema.Struct({ id: Identifier, scope: MarketplaceScope });
 export type MarketplaceEnableRequest = typeof MarketplaceEnableRequest.Type;
-export const MarketplaceRemoveRequest = Schema.Struct({ id: Identifier });
+export const MarketplaceRemoveRequest = Schema.Struct({ id: Identifier, scope: MarketplaceScope });
 export type MarketplaceRemoveRequest = typeof MarketplaceRemoveRequest.Type;
-export const MarketplaceSyncRequest = Schema.Struct({ engine_id: Identifier, id: Identifier });
+export const MarketplaceSyncRequest = Schema.Struct({
+	engine_id: Identifier,
+	id: Identifier,
+	scope: MarketplaceScope,
+});
 export type MarketplaceSyncRequest = typeof MarketplaceSyncRequest.Type;
-export const CapabilityHealthRequest = Schema.Struct({ capability_id: Identifier });
+export const CapabilityHealthRequest = Schema.Struct({
+	capability_id: Identifier,
+	scope: MarketplaceScope,
+});
 export type CapabilityHealthRequest = typeof CapabilityHealthRequest.Type;
-export const CapabilityLifecycleRequest = Schema.Struct({ capability_id: Identifier });
+export const CapabilityLifecycleRequest = Schema.Struct({
+	capability_id: Identifier,
+	scope: MarketplaceScope,
+});
 export type CapabilityLifecycleRequest = typeof CapabilityLifecycleRequest.Type;
 
 /** Stable ledger payload for Marketplace state transitions. */
@@ -482,15 +663,25 @@ export const MarketplaceLedgerEvent = Schema.Struct({
 	capability_health: Schema.optional(CapabilityHealth.fields.status),
 	item_id: Identifier,
 	item_kind: Schema.Literals(["routine", "capability"]),
+	invocation_status: Schema.optional(
+		Schema.Literals(["requested", "approved", "completed", "failed", "denied"]),
+	),
 	operation: Schema.Literals([
 		"install_requested",
+		"approval_resolved",
 		"installed",
+		"install_failed",
+		"rolled_back",
 		"enabled",
 		"disabled",
 		"removed",
 		"synced",
 		"drift_resolved",
 		"connect_requested",
+		"oauth_started",
+		"oauth_completed",
+		"oauth_refreshed",
+		"oauth_revoked",
 		"connected",
 		"started",
 		"reconnected",

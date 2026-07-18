@@ -6,6 +6,7 @@ import {
 	DecodeInboundControlEnvelope,
 	DecodeOutboundControlEnvelope,
 	EncodeOutboundControlEnvelope,
+	MarketplaceLedgerEvent,
 	RoutineInstallPreviewRequest,
 	RoutineDetail,
 } from "@artisan/protocol";
@@ -27,8 +28,24 @@ const decode_capability = Schema.decodeUnknownSync(CapabilityDetail, { onExcessP
 const decode_routine_preview = Schema.decodeUnknownSync(RoutineInstallPreviewRequest, {
 	onExcessProperty: "error",
 });
+const decode_ledger_event = Schema.decodeUnknownSync(MarketplaceLedgerEvent, {
+	onExcessProperty: "error",
+});
 
 describe("Marketplace protocol", () => {
+	it("models truthful invocation lifecycle separately from item status", () => {
+		expect(
+			decode_ledger_event({
+				invocation_status: "failed",
+				item_id: "capability_1",
+				item_kind: "capability",
+				operation: "invoked",
+				status: "enabled",
+				tool_name: "read_file",
+				type: "marketplace.lifecycle",
+			}),
+		).toMatchObject({ invocation_status: "failed", status: "enabled" });
+	});
 	it("keeps canonical routines detailed only after progressive discovery", () => {
 		const routine = decode_routine({
 			author: "Artisan",
@@ -88,7 +105,9 @@ describe("Marketplace protocol", () => {
 
 		const http = decode_capability({
 			auth: {
+				authorization_url: "https://auth.example.test/authorize",
 				kind: "oauth",
+				provider: "example",
 				scopes: ["calendar.read"],
 				token_ref: { provider: "keychain", secret_id: "oauth_calendar" },
 				token_status: "refresh_required",
@@ -210,6 +229,7 @@ describe("Marketplace protocol", () => {
 			}),
 			frontend_envelope("marketplace.capability.connect.request", {
 				approval_id: "approval_mcp",
+				auth: { kind: "none" },
 				requested_by: "agent",
 				scope: { kind: "workspace", workspace_id: "workspace_1" },
 				source: { kind: "catalog", locator: "artisan:files" },
@@ -228,26 +248,50 @@ describe("Marketplace protocol", () => {
 			}),
 			frontend_envelope("marketplace.capability.oauth.begin", {
 				capability_id: "cap_calendar",
+				scope: { kind: "global" },
 			}),
 			frontend_envelope("marketplace.capability.oauth.complete", {
 				callback_reference: "callback_1",
 				capability_id: "cap_calendar",
+				scope: { kind: "global" },
 			}),
 			frontend_envelope("marketplace.capability.oauth.refresh", {
 				capability_id: "cap_calendar",
+				scope: { kind: "global" },
 			}),
 			frontend_envelope("marketplace.capability.oauth.revoke", {
 				capability_id: "cap_calendar",
+				scope: { kind: "global" },
 			}),
 			...["start", "reconnect", "health", "disconnect", "restart", "uninstall"].map(
 				(action) =>
 					frontend_envelope(`marketplace.capability.${action}`, {
 						capability_id: "cap_files",
+						scope: { kind: "workspace", workspace_id: "workspace_1" },
 					}),
 			),
+			frontend_envelope("marketplace.capability.invoke.request", {
+				approval_id: "approval_invoke",
+				arguments_json: "{}",
+				capability_id: "cap_files",
+				intent_fingerprint: "invoke_fingerprint",
+				requested_by: "user",
+				scope: { kind: "workspace", workspace_id: "workspace_1" },
+				tool_name: "read_file",
+			}),
+			frontend_envelope("marketplace.capability.invoke.decision", {
+				approval_id: "approval_invoke",
+				approved: true,
+				arguments_json: "{}",
+				capability_id: "cap_files",
+				intent_fingerprint: "invoke_fingerprint",
+				scope: { kind: "workspace", workspace_id: "workspace_1" },
+				tool_name: "read_file",
+			}),
 			frontend_envelope("marketplace.capability.invoke", {
 				arguments_json: "{}",
 				capability_id: "cap_files",
+				scope: { kind: "workspace", workspace_id: "workspace_1" },
 				tool_name: "read_file",
 			}),
 		];
@@ -256,6 +300,22 @@ describe("Marketplace protocol", () => {
 				frames.map((frame) => Effect.runPromise(DecodeInboundControlEnvelope(frame))),
 			),
 		).resolves.toEqual(frames);
+	});
+
+	it("rejects destructive overwrite through the non-approval drift command", async () => {
+		await expect(
+			Effect.runPromise(
+				DecodeInboundControlEnvelope(
+					frontend_envelope("marketplace.routine.drift.resolve", {
+						action: "overwrite",
+						engine_id: "codex",
+						observed_revision: "provider_revision",
+						routine_id: "routine_1",
+						scope: { kind: "global" },
+					}),
+				),
+			),
+		).rejects.toBeDefined();
 	});
 
 	it("encodes invocation metadata without an inline tool result", async () => {
@@ -281,6 +341,25 @@ describe("Marketplace protocol", () => {
 		await expect(Effect.runPromise(EncodeOutboundControlEnvelope(frame))).resolves.toEqual(
 			frame,
 		);
+	});
+
+	it("rejects reserved API-key headers before a connection can be approved", async () => {
+		await expect(
+			Effect.runPromise(
+				DecodeInboundControlEnvelope(
+					frontend_envelope("marketplace.capability.connect.preview", {
+						auth: {
+							header_name: "Host",
+							kind: "api_key",
+							secret_ref: { provider: "windows", secret_id: "secret_1" },
+						},
+						scope: { kind: "global" },
+						source: { kind: "catalog", locator: "catalog://capability" },
+						transport: { kind: "streamable_http", url: "https://mcp.example.test" },
+					}),
+				),
+			),
+		).rejects.toBeDefined();
 	});
 
 	it("carries Marketplace lifecycle facts through the canonical event ledger", async () => {

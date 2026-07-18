@@ -2,9 +2,14 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { NodeCrypto } from "@effect/platform-node-shared";
-import { Layer, ManagedRuntime } from "effect";
+import { Effect, Layer, ManagedRuntime } from "effect";
+import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 
-import { type Engine, make_engine_registry_layer } from "@artisan/engines";
+import {
+	type Engine,
+	EngineProcessFactoryLive,
+	make_engine_registry_layer,
+} from "@artisan/engines";
 import type { GlobalGuidanceProvider } from "@artisan/protocol";
 
 import { AgentGraphOrchestratorLive } from "../orchestration/agent-graph-orchestrator";
@@ -106,8 +111,51 @@ import { WorkspaceMutationAuthorityLive } from "../workspace/workspace-mutation-
 import { WorkspaceSnapshotStoreLive } from "../workspace/workspace-snapshot-store";
 import { WorkspaceMutationPayloadStoreLive } from "../workspace/workspace-mutation-payload-store";
 import { WorkspaceChangeDiffServiceLive } from "../workspace/workspace-change-diff-service";
+import { CapabilityRepositoryLive } from "../marketplace/capabilities/capability-repository";
+import {
+	CapabilityOAuthLifecycleLive,
+	CapabilityServiceLive,
+} from "../marketplace/capabilities/capability-service";
+import {
+	CapabilityTransportRegistry,
+	CapabilityTransportRegistryLive,
+	EmptyCapabilityTransportRegistryLive,
+} from "../marketplace/capabilities/mcp-transport";
+import { EffectHttpMcpDriverLive } from "../marketplace/capabilities/http-transport";
+import { EmptySecretStoreLive, SecretStore } from "../marketplace/capabilities/secret-store";
+import { EngineProcessStdioMcpDriverLive } from "../marketplace/capabilities/stdio-transport";
+import {
+	EmptyOAuthAdapterLive,
+	make_oauth_layer,
+	OAuthAdapter,
+} from "../marketplace/capabilities/oauth";
+import {
+	CapabilityProviderMirror,
+	EmptyCapabilityProviderMirrorLive,
+	CapabilityMirrorServiceLive,
+} from "../marketplace/capabilities/provider-mirrors";
+import { RoutineRepositoryLive } from "../marketplace/routines/routine-repository";
+import { RoutineServiceLive } from "../marketplace/routines/routine-service";
+import {
+	EmptyRoutineMirrorRegistryLive,
+	NpxSkillsAdapter,
+	RoutineInstaller,
+	RoutineInstallerError,
+	RoutineInspectorError,
+	RoutineMirrorRegistry,
+	RoutineSourceInspector,
+} from "../marketplace/routines/routine-adapters";
+import {
+	make_local_routine_installer_layer,
+	make_local_routine_source_inspector_layer,
+	make_npx_skills_process_adapter_layer,
+	type NpxSkillsProcessOptions,
+} from "../marketplace/routines/production-routine-adapters";
 
 export interface BackendOptions {
+	readonly capability_provider_mirror?: Layer.Layer<CapabilityProviderMirror>;
+	/** Explicit, inert-until-connect transport selection for reviewed MCP capabilities. */
+	readonly capability_transport_registry?: Layer.Layer<CapabilityTransportRegistry>;
 	readonly database_path: string;
 	readonly engines?: ReadonlyArray<Engine>;
 	readonly guidance?: Partial<GlobalGuidanceServiceOptions>;
@@ -118,11 +166,17 @@ export interface BackendOptions {
 		ModelBehaviourProviderRegistry,
 		ModelBehaviourRegistryError
 	>;
+	readonly npx_skills_adapter?: Layer.Layer<NpxSkillsAdapter>;
+	readonly oauth_adapter?: Layer.Layer<OAuthAdapter>;
 	readonly protocol?: Partial<ProtocolConnectionOptions>;
 	readonly project_locator?: Layer.Layer<ProjectLocator>;
 	readonly retention_clock?: Layer.Layer<ThreadRetentionClock>;
 	readonly retention_scheduler?: Layer.Layer<ThreadRetentionScheduler>;
+	readonly routine_installer?: Layer.Layer<RoutineInstaller>;
+	readonly routine_mirror_registry?: Layer.Layer<RoutineMirrorRegistry>;
+	readonly routine_source_inspector?: Layer.Layer<RoutineSourceInspector>;
 	readonly runtime_metadata?: Layer.Layer<RuntimeMetadata>;
+	readonly secret_store?: Layer.Layer<SecretStore>;
 	readonly terminal_driver?: Layer.Layer<TerminalDriver>;
 	readonly thread_metadata_refiner?: Layer.Layer<ThreadMetadataRefiner>;
 	readonly thread_resource_quiescer?: Layer.Layer<ThreadResourceQuiescer>;
@@ -161,6 +215,8 @@ export interface DesktopModelBehaviourOptions {
 export interface DesktopBackendOptions extends BackendOptions {
 	readonly guidance_platform?: DesktopGuidanceOptions;
 	readonly model_behaviour_platform?: DesktopModelBehaviourOptions;
+	/** Explicit installed `npx skills` argv; omitted means discovery fails closed. */
+	readonly npx_skills_process?: NpxSkillsProcessOptions;
 }
 
 export function make_backend_layer(options: BackendOptions) {
@@ -327,6 +383,50 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(graph),
 		Layer.provideMerge(terminals),
 	);
+	/** Marketplace defaults deliberately deny source access and transport startup. Acquisition is inert. */
+	const routine_repository = RoutineRepositoryLive.pipe(Layer.provideMerge(infrastructure));
+	const routine_inspector =
+		options.routine_source_inspector ??
+		Layer.succeed(RoutineSourceInspector, {
+			Inspect: () => Effect.fail(new RoutineInspectorError({ code: "unsupported" })),
+		});
+	const routine_installer =
+		options.routine_installer ??
+		Layer.succeed(RoutineInstaller, {
+			Install: () => Effect.fail(new RoutineInstallerError({ code: "install_failed" })),
+			Rollback: () => Effect.fail(new RoutineInstallerError({ code: "rollback_failed" })),
+		});
+	const npx_skills =
+		options.npx_skills_adapter ??
+		Layer.succeed(NpxSkillsAdapter, {
+			Discover: () => Effect.fail(new RoutineInspectorError({ code: "unsupported" })),
+		});
+	const routines = RoutineServiceLive.pipe(
+		Layer.provideMerge(routine_repository),
+		Layer.provideMerge(routine_inspector),
+		Layer.provideMerge(routine_installer),
+		Layer.provideMerge(npx_skills),
+		Layer.provideMerge(options.routine_mirror_registry ?? EmptyRoutineMirrorRegistryLive),
+	);
+	const capability_repository = CapabilityRepositoryLive.pipe(Layer.provideMerge(infrastructure));
+	const oauth = make_oauth_layer.pipe(
+		Layer.provideMerge(options.oauth_adapter ?? EmptyOAuthAdapterLive),
+	);
+	const capability_transport_registry =
+		options.capability_transport_registry ?? EmptyCapabilityTransportRegistryLive;
+	const capabilities = CapabilityServiceLive.pipe(
+		Layer.provideMerge(capability_repository),
+		Layer.provideMerge(capability_transport_registry),
+	);
+	const capability_oauth = CapabilityOAuthLifecycleLive.pipe(
+		Layer.provideMerge(capability_repository),
+		Layer.provideMerge(oauth),
+	);
+	const capability_mirrors = CapabilityMirrorServiceLive.pipe(
+		Layer.provideMerge(capability_repository),
+		Layer.provideMerge(options.capability_provider_mirror ?? EmptyCapabilityProviderMirrorLive),
+		Layer.provideMerge(infrastructure),
+	);
 	const resource_quiescer =
 		options.thread_resource_quiescer ??
 		ThreadResourceQuiescerLive.pipe(
@@ -365,6 +465,11 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(workspace_files),
 		Layer.provideMerge(workspace_changes),
 		Layer.provideMerge(workspace_diffs),
+		Layer.provideMerge(routines),
+		Layer.provideMerge(capabilities),
+		Layer.provideMerge(capability_repository),
+		Layer.provideMerge(capability_oauth),
+		Layer.provideMerge(capability_mirrors),
 	);
 
 	return protocol.pipe(
@@ -434,8 +539,33 @@ function make_desktop_model_behaviour_registry(options: DesktopBackendOptions) {
 
 /** Builds the production desktop layer with opinionated platform guidance discovery. */
 export function make_desktop_backend_layer(options: DesktopBackendOptions) {
+	const production_capability_transports = CapabilityTransportRegistryLive.pipe(
+		Layer.provideMerge(EngineProcessStdioMcpDriverLive),
+		Layer.provideMerge(EngineProcessFactoryLive),
+		Layer.provideMerge(EffectHttpMcpDriverLive),
+		Layer.provideMerge(options.secret_store ?? EmptySecretStoreLive),
+		Layer.provideMerge(FetchHttpClient.layer),
+	);
 	return make_backend_layer({
 		...options,
+		capability_transport_registry:
+			options.capability_transport_registry ?? production_capability_transports,
+		routine_source_inspector:
+			options.routine_source_inspector ?? make_local_routine_source_inspector_layer(),
+		routine_installer:
+			options.routine_installer ??
+			make_local_routine_installer_layer({
+				install_root: join(dirname(options.database_path), "marketplace", "routines"),
+			}),
+		...(options.npx_skills_adapter !== undefined
+			? { npx_skills_adapter: options.npx_skills_adapter }
+			: options.npx_skills_process === undefined
+				? {}
+				: {
+						npx_skills_adapter: make_npx_skills_process_adapter_layer(
+							options.npx_skills_process,
+						).pipe(Layer.provide(EngineProcessFactoryLive)),
+					}),
 		guidance_provider_registry:
 			options.guidance_provider_registry ?? make_desktop_guidance_registry(options),
 		model_behaviour_provider_registry:
