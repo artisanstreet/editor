@@ -8,14 +8,14 @@ import { Context, Effect, Layer, Option, PubSub, Queue, Ref, Schema, Stream } fr
 
 export const DesktopConnectionMessageType = DesktopSessionConnectionType;
 
-export const FrontendConnectionPhase = Schema.Literal(
+export const FrontendConnectionPhase = Schema.Literals([
 	"connecting",
 	"error",
 	"ready",
 	"reconnecting",
 	"stale",
 	"unavailable",
-);
+]);
 
 export type FrontendConnectionPhase = typeof FrontendConnectionPhase.Type;
 
@@ -100,6 +100,7 @@ const decode_offer = (event: DesktopConnectionMessageEvent, host: DesktopConnect
 
 	if (
 		payload.type !== DesktopConnectionMessageType ||
+		typeof generation !== "number" ||
 		!Number.isSafeInteger(generation) ||
 		generation < 1 ||
 		event.ports.length !== 2
@@ -129,17 +130,35 @@ const close_raw_ports = (ports: ReadonlyArray<unknown>) => {
 	}
 };
 
+interface RendererWindowShape {
+	readonly artisanDesktop?: {
+		readonly requestConnection: () => void | Promise<void>;
+	};
+	readonly location: { readonly origin: string };
+	readonly addEventListener: (
+		event: "message",
+		listener: (event: DesktopConnectionMessageEvent) => void,
+	) => void;
+	readonly removeEventListener: (
+		event: "message",
+		listener: (event: DesktopConnectionMessageEvent) => void,
+	) => void;
+}
+
 const window_desktop_connection_host = (): Option.Option<DesktopConnectionHost> => {
-	if (typeof window === "undefined" || window.artisanDesktop === undefined) {
+	const renderer_window = (globalThis as { readonly window?: RendererWindowShape }).window;
+
+	if (renderer_window === undefined || renderer_window.artisanDesktop === undefined) {
 		return Option.none();
 	}
 
 	return Option.some({
-		origin: window.location.origin,
-		request_connection: () => window.artisanDesktop?.requestConnection(),
-		self: window,
-		add_message_listener: (listener) => window.addEventListener("message", listener),
-		remove_message_listener: (listener) => window.removeEventListener("message", listener),
+		origin: renderer_window.location.origin,
+		request_connection: () => renderer_window.artisanDesktop?.requestConnection(),
+		self: renderer_window,
+		add_message_listener: (listener) => renderer_window.addEventListener("message", listener),
+		remove_message_listener: (listener) =>
+			renderer_window.removeEventListener("message", listener),
 	});
 };
 
@@ -178,7 +197,9 @@ export const make_frontend_message_port_connector_layer = (
 					Effect.gen(function* () {
 						const messages = yield* Queue.dropping<DesktopConnectionMessageEvent>(8);
 						const listener = (event: DesktopConnectionMessageEvent) => {
-							Queue.offerUnsafe(messages, event);
+							if (!Queue.offerUnsafe(messages, event)) {
+								close_raw_ports(event.ports);
+							}
 						};
 
 						host.add_message_listener(listener);
@@ -196,77 +217,113 @@ export const make_frontend_message_port_connector_layer = (
 								),
 							);
 
-							const ReceiveNextOffer = (): Effect.Effect<
-								DesktopConnectionOffer,
-								MessagePortConnectorError
-							> =>
-								Effect.gen(function* () {
-									const next = yield* Queue.take(messages).pipe(
-										Effect.timeoutOption(`${connection_timeout_ms} millis`),
-									);
+							const ReceiveNextOffer = (): Effect.Effect<DesktopConnectionOffer> =>
+								Effect.acquireUseRelease(
+									Queue.take(messages).pipe(
+										Effect.map((event) => ({ event, settled: false })),
+									),
+									(resource) =>
+										Effect.gen(function* () {
+											const offer = decode_offer(resource.event, host);
 
-									if (Option.isNone(next)) {
-										const error = new MessagePortConnectorError({
-											cause: new Error(
-												"Timed out waiting for the desktop MessagePort pair.",
-											),
-										});
+											if (Option.isNone(offer)) {
+												close_raw_ports(resource.event.ports);
+												resource.settled = true;
 
+												return yield* ReceiveNextOffer();
+											}
+
+											const accepted = yield* Ref.modify(
+												last_generation,
+												(generation) =>
+													offer.value.generation > generation
+														? ([true, offer.value.generation] as const)
+														: ([false, generation] as const),
+											);
+
+											if (!accepted) {
+												close_raw_ports(resource.event.ports);
+												resource.settled = true;
+
+												return yield* ReceiveNextOffer();
+											}
+
+											resource.settled = true;
+
+											return offer.value;
+										}),
+									(resource) =>
+										Effect.sync(() => {
+											if (!resource.settled) {
+												close_raw_ports(resource.event.ports);
+											}
+										}),
+								);
+							const received = yield* ReceiveNextOffer().pipe(
+								Effect.timeoutOption(`${connection_timeout_ms} millis`),
+							);
+
+							if (Option.isNone(received)) {
+								const error = new MessagePortConnectorError({
+									cause: new Error(
+										"Timed out waiting for the desktop MessagePort pair.",
+									),
+								});
+
+								yield* SetState({
+									message: String(error.cause),
+									phase: "error",
+								});
+
+								return yield* Effect.fail(error);
+							}
+
+							const offer = received.value;
+							const ports = yield* Effect.gen(function* () {
+								const control_port = yield* adapt_electron_renderer_message_port(
+									offer.control_port,
+								);
+								const stream_port = yield* adapt_electron_renderer_message_port(
+									offer.stream_port,
+								);
+
+								return { control_port, stream_port };
+							}).pipe(
+								Effect.mapError(
+									(cause) => new MessagePortConnectorError({ cause }),
+								),
+								Effect.tapError((error) =>
+									Effect.gen(function* () {
+										close_raw_ports([offer.control_port, offer.stream_port]);
 										yield* SetState({
 											message: String(error.cause),
 											phase: "error",
 										});
-
-										return yield* Effect.fail(error);
-									}
-
-									const offer = decode_offer(next.value, host);
-
-									if (Option.isNone(offer)) {
-										return yield* ReceiveNextOffer();
-									}
-
-									const accepted = yield* Ref.modify(
-										last_generation,
-										(generation) =>
-											offer.value.generation > generation
-												? ([true, offer.value.generation] as const)
-												: ([false, generation] as const),
-									);
-
-									if (!accepted) {
-										close_raw_ports(next.value.ports);
-
-										return yield* ReceiveNextOffer();
-									}
-
-									return offer.value;
-								});
-							const offer = yield* ReceiveNextOffer();
+									}),
+								),
+							);
 
 							yield* Ref.set(ever_connected, true);
 							yield* SetState({ generation: offer.generation, phase: "ready" });
 
 							return {
-								control_port: yield* adapt_electron_renderer_message_port(
-									offer.control_port,
-								).pipe(
-									Effect.mapError(
-										(cause) => new MessagePortConnectorError({ cause }),
-									),
-								),
-								stream_port: yield* adapt_electron_renderer_message_port(
-									offer.stream_port,
-								).pipe(
-									Effect.mapError(
-										(cause) => new MessagePortConnectorError({ cause }),
-									),
-								),
+								control_port: ports.control_port,
+								stream_port: ports.stream_port,
 							};
 						}),
 					({ listener, messages }) =>
 						Effect.gen(function* () {
 							yield* Effect.sync(() => host.remove_message_listener(listener));
+							const pending = yield* Queue.takeBetween(
+								messages,
+								0,
+								Number.POSITIVE_INFINITY,
+							);
+
+							for (const event of pending) {
+								close_raw_ports(event.ports);
+							}
+
 							yield* Queue.shutdown(messages);
 						}),
 				);

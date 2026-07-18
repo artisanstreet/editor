@@ -37,7 +37,46 @@ class FakeDesktopHost {
 	};
 
 	Dispatch(event: DesktopConnectionMessageEvent) {
-		this.listener?.(event);
+		if (this.listener === undefined) {
+			return false;
+		}
+
+		this.listener(event);
+
+		return true;
+	}
+}
+
+class FakeRendererPort {
+	close_count = 0;
+	readonly throw_on_start: boolean;
+	private readonly listeners = new Map<string, Set<(event: unknown) => void>>();
+
+	constructor(throw_on_start = false) {
+		this.throw_on_start = throw_on_start;
+	}
+
+	addEventListener(event: string, listener: (event: unknown) => void) {
+		const listeners = this.listeners.get(event) ?? new Set();
+
+		listeners.add(listener);
+		this.listeners.set(event, listeners);
+	}
+
+	close() {
+		this.close_count += 1;
+	}
+
+	postMessage(_message: unknown, _transfer?: ReadonlyArray<object>) {}
+
+	removeEventListener(event: string, listener: (event: unknown) => void) {
+		this.listeners.get(event)?.delete(listener);
+	}
+
+	start() {
+		if (this.throw_on_start) {
+			throw new Error("fake renderer port failed to start");
+		}
 	}
 }
 
@@ -71,6 +110,8 @@ describe("desktop renderer MessagePort connector", () => {
 	it("accepts only a current-origin, forward-generation pair and scopes its ports", async () => {
 		const host = new FakeDesktopHost();
 		const ports = MakePorts();
+		const wrong_origin_ports = [new FakeRendererPort(), new FakeRendererPort()];
+		const malformed_ports = [new FakeRendererPort(), new FakeRendererPort()];
 		const layer = make_frontend_message_port_connector_layer(host.as_host);
 
 		const result = await Effect.runPromise(
@@ -85,13 +126,13 @@ describe("desktop renderer MessagePort connector", () => {
 					host.Dispatch({
 						data: { generation: 1, type: DesktopConnectionMessageType },
 						origin: "https://untrusted.example",
-						ports: ports.client_ports,
+						ports: wrong_origin_ports,
 						source: host.self,
 					});
 					host.Dispatch({
-						data: { generation: 1, type: DesktopConnectionMessageType },
+						data: { generation: "invalid", type: DesktopConnectionMessageType },
 						origin: host.origin,
-						ports: [ports.client_ports[0]!],
+						ports: malformed_ports,
 						source: host.self,
 					});
 					host.Dispatch({
@@ -122,6 +163,97 @@ describe("desktop renderer MessagePort connector", () => {
 		expect(result.connection.control_port).toBeDefined();
 		expect(result.connection.stream_port).toBeDefined();
 		expect(result.server_message).toBe("connected");
+		expect(wrong_origin_ports.map((port) => port.close_count)).toEqual([1, 1]);
+		expect(malformed_ports.map((port) => port.close_count)).toEqual([1, 1]);
+	});
+
+	it("never publishes ready when either transferred port fails acquisition", async () => {
+		const host = new FakeDesktopHost();
+		const control_port = new FakeRendererPort(true);
+		const stream_port = new FakeRendererPort();
+		const layer = make_frontend_message_port_connector_layer(host.as_host);
+
+		const result = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const connector = yield* MessagePortConnector;
+					const lifecycle = yield* FrontendConnectionLifecycle;
+					const pending = yield* connector.Connect.pipe(Effect.exit, Effect.forkScoped);
+
+					yield* Effect.yieldNow;
+					host.Dispatch({
+						data: { generation: 1, type: DesktopConnectionMessageType },
+						origin: host.origin,
+						ports: [control_port, stream_port],
+						source: host.self,
+					});
+
+					return { exit: yield* Fiber.join(pending), state: yield* lifecycle.Current };
+				}),
+			).pipe(Effect.provide(layer)),
+		);
+
+		expect(result.exit._tag).toBe("Failure");
+		expect(result.state.phase).toBe("error");
+		expect(result.state.phase).not.toBe("ready");
+		expect(control_port.close_count).toBeGreaterThanOrEqual(1);
+		expect(stream_port.close_count).toBeGreaterThanOrEqual(1);
+	});
+
+	it("uses one deadline even while invalid offers keep arriving", async () => {
+		const host = new FakeDesktopHost();
+		const rejected_ports: Array<FakeRendererPort> = [];
+		const layer = make_frontend_message_port_connector_layer(host.as_host, {
+			connection_timeout_ms: 50,
+		});
+
+		const result = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const connector = yield* MessagePortConnector;
+					const pending = yield* connector.Connect.pipe(Effect.exit, Effect.forkScoped);
+
+					yield* Effect.yieldNow;
+					let traffic_active = true;
+					const interval = setInterval(() => {
+						const ports = [new FakeRendererPort(), new FakeRendererPort()];
+
+						const dispatched = host.Dispatch({
+							data: { generation: 1, type: "not-artisan" },
+							origin: host.origin,
+							ports,
+							source: host.self,
+						});
+
+						if (dispatched) {
+							rejected_ports.push(...ports);
+						}
+					}, 2);
+					const stop_traffic = setTimeout(() => {
+						traffic_active = false;
+						clearInterval(interval);
+					}, 1_000);
+					const exit = yield* Fiber.join(pending).pipe(
+						Effect.ensuring(
+							Effect.sync(() => {
+								clearInterval(interval);
+								clearTimeout(stop_traffic);
+							}),
+						),
+					);
+
+					return { exit, traffic_active_at_return: traffic_active };
+				}),
+			).pipe(Effect.provide(layer)),
+		);
+
+		expect(result.exit._tag).toBe("Failure");
+		expect(result.traffic_active_at_return).toBe(true);
+		expect(rejected_ports.length).toBeGreaterThan(2);
+		expect(
+			rejected_ports.every((port) => port.close_count >= 1),
+			JSON.stringify(rejected_ports.map((port) => port.close_count)),
+		).toBe(true);
 	});
 
 	it("removes the one-shot listener between reconnect generations", async () => {
