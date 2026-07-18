@@ -11,6 +11,8 @@ import {
 	ArtisanToolInvocation,
 	ArtisanToolInvocationListQuery,
 	ArtisanToolRegistryListQueryResult,
+	WorkspaceFileDiscoveryQueryResult,
+	WorkspaceLanguageCapabilitiesQueryResult,
 } from "@artisan/protocol";
 
 const timestamp = "2026-07-18T08:00:00.000Z";
@@ -102,8 +104,9 @@ describe("Artisan built-in tool protocol schemas", () => {
 			],
 			declarations: [
 				{
-					descriptor: {
-						description: "Reads an exact controlled workspace file.",
+						descriptor: {
+							approval_behavior: "never",
+							description: "Reads an exact controlled workspace file.",
 						id: "workspace.file.read",
 						kind: "workspace_file",
 						permission_requirements: ["workspace_read"],
@@ -153,6 +156,36 @@ describe("Artisan built-in tool protocol schemas", () => {
 				tool_id: "terminal.read",
 			}),
 		).resolves.toMatchObject({ limit: 100 });
+	});
+
+	it("keeps file discovery content-free and language capabilities truthful", async () => {
+		await expect(
+			Decode(WorkspaceFileDiscoveryQueryResult, {
+				entries: [
+					{
+						kind: "file",
+						modified_at: timestamp,
+						path: "src/main.ts",
+						size: 128,
+					},
+				],
+				truncated: false,
+				workspace_id: "workspace_1",
+			}),
+		).resolves.toMatchObject({ entries: [{ path: "src/main.ts" }] });
+		await expect(
+			Decode(WorkspaceLanguageCapabilitiesQueryResult, {
+				capabilities: [
+					{
+						feature: "diagnostics",
+						reason: "No language service is configured.",
+						source: "unavailable",
+						state: "unavailable",
+					},
+				],
+				workspace_id: "workspace_1",
+			}),
+		).resolves.toMatchObject({ capabilities: [{ state: "unavailable" }] });
 	});
 
 	it("rejects impossible outcome and policy-sensitive shape drift", async () => {
