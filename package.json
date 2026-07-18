@@ -5,6 +5,9 @@
 	"scripts": {
 		"check": "tsc --noEmit",
 		"check:frontend": "pnpm --filter @artisan/frontend run build",
+		"build:desktop": "pnpm run check:frontend && vite build --config desktop.vite.config.ts",
+		"desktop": "pnpm run build:desktop && electron .dist/desktop/main.js",
+		"package:desktop": "pnpm run build:desktop && electron-builder --config desktop-builder.yml",
 		"db:generate": "drizzle-kit generate --config drizzle.config.ts",
 		"format": "oxfmt --ignore-path .oxfmtignore .",
 		"format:check": "oxfmt --check --ignore-path .oxfmtignore .",
@@ -15,6 +18,7 @@
 	},
 	"devDependencies": {
 		"@artisan/backend": "workspace:*",
+		"@artisan/desktop": "workspace:*",
 		"@artisan/engines": "workspace:*",
 		"@artisan/protocol": "workspace:*",
 		"@artisan/transport": "workspace:*",
@@ -22,11 +26,13 @@
 		"@effect/vitest": "4.0.0-beta.97",
 		"@types/node": "26.1.1",
 		"drizzle-kit": "1.0.0-rc.4",
+		"electron-builder": "26.15.3",
 		"effect": "4.0.0-beta.97",
 		"es-module-lexer": "2.3.0",
 		"oxfmt": "0.58.0",
 		"oxlint": "1.73.0",
 		"typescript": "7.0.2",
+		"vite": "8.1.4",
 		"vitest": "4.1.10"
 	},
 	"packageManager": "pnpm@11.7.0"

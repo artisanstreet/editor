@@ -10,8 +10,11 @@
 		"noUncheckedIndexedAccess": true,
 		"paths": {
 			"@artisan/backend": ["./modules/backend/src/index.ts"],
+			"@artisan/desktop": ["./modules/desktop/src/index.ts"],
 			"@artisan/engines": ["./modules/engines/src/index.ts"],
-			"@artisan/protocol": ["./modules/protocol/src/index.ts"]
+			"@artisan/protocol": ["./modules/protocol/src/index.ts"],
+			"@artisan/transport": ["./modules/transport/src/index.ts"],
+			"@artisan/transport/*": ["./modules/transport/src/*.ts"]
 		},
 		"skipLibCheck": true,
 		"strict": true,

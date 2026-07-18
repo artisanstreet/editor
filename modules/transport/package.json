@@ -6,6 +6,7 @@
 		".": "./src/index.ts",
 		"./client": "./src/client.ts",
 		"./connector": "./src/connector.ts",
+		"./desktop-session": "./src/desktop-session.ts",
 		"./message-port": "./src/message-port.ts",
 		"./node": "./src/node-message-port.ts",
 		"./electron-shapes": "./src/electron-message-port.ts",

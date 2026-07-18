@@ -1,0 +1,19 @@
+appId: com.usebarekey.artisan-editor
+productName: Artisan Editor
+directories:
+    output: .dist/release
+files:
+    - .dist/**/*
+    - modules/backend/drizzle/**/*
+    - package.json
+    - node_modules/**/*
+asar: true
+asarUnpack:
+    - "**/*.node"
+    - "**/node-pty/**"
+    - "**/@artisan/bounded-file-store-native/**"
+extraMetadata:
+    main: .dist/desktop/main.js
+win:
+    target:
+        - nsis

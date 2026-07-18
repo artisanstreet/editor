@@ -2,6 +2,7 @@ packages:
     - "modules/*"
 allowBuilds:
     esbuild: true
+    electron-winstaller: true
     koffi: true
     msgpackr-extract: false
     node-pty: true
@@ -18,6 +19,7 @@ minimumReleaseAgeExclude:
     - "@koromix/koffi-linux-loong64@3.1.1"
     - "@koromix/koffi-linux-riscv64@3.1.1"
     - "@koromix/koffi-linux-x64@3.1.1"
+    - "@koromix/koffi-openbsd-arm64@3.1.1"
     - "@koromix/koffi-openbsd-ia32@3.1.1"
     - "@koromix/koffi-openbsd-x64@3.1.1"
     - "@koromix/koffi-win32-arm64@3.1.1"
