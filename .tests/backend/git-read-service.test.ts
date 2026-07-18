@@ -89,9 +89,16 @@ describe("GitReadService", () => {
 		});
 		expect(first.worktrees).toHaveLength(2);
 		expect(first.worktrees.filter((worktree) => worktree.current)).toHaveLength(1);
-		expect(
-			first.worktrees.find((worktree) => worktree.current)?.path.replaceAll("/", "\\"),
-		).toBe(root);
+		const current_root = first.worktrees.find((worktree) => worktree.current)?.path;
+		expect(current_root).toBeDefined();
+		const [current_root_stat, registered_root_stat] = await Promise.all([
+			fs.stat(current_root!),
+			fs.stat(root),
+		]);
+		expect({ dev: current_root_stat.dev, ino: current_root_stat.ino }).toEqual({
+			dev: registered_root_stat.dev,
+			ino: registered_root_stat.ino,
+		});
 		expect(first.snapshot_id).toBe(second.snapshot_id);
 
 		await fs.writeFile(join(root, "--odd name.txt"), "changed untracked content\n");

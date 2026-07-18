@@ -41,7 +41,14 @@ jobs:
 
             - run: pnpm install --frozen-lockfile
 
+            - name: Prepare canonical validation temp root
+              shell: pwsh
+              run: New-Item -ItemType Directory -Force -Path "${{ github.workspace }}\.tmp" | Out-Null
+
             - run: pnpm run validate
+              env:
+                  TEMP: ${{ github.workspace }}\.tmp
+                  TMP: ${{ github.workspace }}\.tmp
 
     live-codex:
         name: Opt-in live Codex CLI probe
