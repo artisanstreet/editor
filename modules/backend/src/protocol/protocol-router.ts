@@ -1,9 +1,10 @@
 import { Context, Effect, Layer, Match, pipe } from "effect";
 
 import {
-	DecodeCommandEnvelope,
+	DecodeInboundControlEnvelope,
 	type CommandEnvelope,
 	type CommandReceiptEnvelope,
+	type InboundControlEnvelope,
 	type OutboundEnvelope,
 	type ProtocolErrorDetail,
 	type ProtocolErrorEnvelope,
@@ -17,6 +18,22 @@ import type { ThreadMetadataError } from "../threads/thread-metadata-repository"
 import type { ThreadProjectAffinityError } from "../threads/thread-project-affinity-repository";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { CommandRouter } from "./command-router";
+
+/**
+ * Identifies the connection-level frames whose lifecycle, subscription, and
+ * query semantics belong to `ProtocolServer`, rather than the command-domain
+ * router. Keeping this explicit prevents a command-only router from being
+ * mistaken for the complete control-envelope router.
+ */
+export type ProtocolRouterInboundDispatch =
+	| {
+			readonly _tag: "Command";
+			readonly command: CommandEnvelope;
+	  }
+	| {
+			readonly _tag: "Connection";
+			readonly envelope: Exclude<InboundControlEnvelope, CommandEnvelope>;
+	  };
 
 const describe_journal_error = pipe(
 	Match.type<
@@ -129,6 +146,18 @@ const describe_journal_error = pipe(
 export class ProtocolRouter extends Context.Service<
 	ProtocolRouter,
 	{
+		/** Decodes every inbound control envelope and exposes its owning routing boundary. */
+		readonly ClassifyInbound: (
+			input: unknown,
+		) => Effect.Effect<ProtocolRouterInboundDispatch, unknown>;
+		/** Routes one already-classified durable command through its owning domain router. */
+		readonly RouteCommand: (
+			command: CommandEnvelope,
+		) => Effect.Effect<ReadonlyArray<OutboundEnvelope>>;
+		/**
+		 * Preserves the original command-only convenience boundary. Connection-owned
+		 * frames return the same uncorrelated protocol error as malformed input.
+		 */
 		readonly Route: (input: unknown) => Effect.Effect<ReadonlyArray<OutboundEnvelope>>;
 	}
 >()("Artisan/ProtocolRouter") {}
@@ -195,16 +224,32 @@ export const ProtocolRouterLive = Layer.effect(
 			return [error];
 		});
 
+		const ClassifyInbound = (input: unknown) =>
+			DecodeInboundControlEnvelope(input).pipe(
+				Effect.map((envelope): ProtocolRouterInboundDispatch => {
+					if (envelope.kind === "command") {
+						return { _tag: "Command", command: envelope };
+					}
+
+					return { _tag: "Connection", envelope };
+				}),
+			);
+
+		const RouteCommand = (command: CommandEnvelope) =>
+			commands
+				.Dispatch(command)
+				.pipe(Effect.catch((error) => MakeRejectedReceipt(command, error)));
+
 		const Route = (input: unknown) =>
-			DecodeCommandEnvelope(input).pipe(
-				Effect.flatMap((command) =>
-					commands
-						.Dispatch(command)
-						.pipe(Effect.catch((error) => MakeRejectedReceipt(command, error))),
+			ClassifyInbound(input).pipe(
+				Effect.flatMap((dispatch) =>
+					dispatch._tag === "Command"
+						? RouteCommand(dispatch.command)
+						: MakeProtocolError,
 				),
 				Effect.catch(() => MakeProtocolError),
 			);
 
-		return { Route };
+		return { ClassifyInbound, Route, RouteCommand };
 	}),
 );

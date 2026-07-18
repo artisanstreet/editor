@@ -16,7 +16,6 @@ import {
 } from "effect";
 
 import {
-	DecodeInboundControlEnvelope,
 	SupportedProtocolVersions,
 	type AckEnvelope,
 	type CommandEnvelope,
@@ -107,7 +106,7 @@ import {
 	type ProtocolConnection,
 	type ProtocolConnectionOptions,
 } from "./protocol-connection";
-import { ProtocolRouter } from "./protocol-router";
+import { ProtocolRouter, type ProtocolRouterInboundDispatch } from "./protocol-router";
 
 interface PendingHeartbeat {
 	readonly deadline_ms: number;
@@ -1602,7 +1601,7 @@ export function make_protocol_server_layer(
 
 				const HandleCommand = (command: CommandEnvelope) =>
 					Effect.gen(function* () {
-						const output = yield* router.Route(command);
+						const output = yield* router.RouteCommand(command);
 						const events = output.filter(
 							(envelope): envelope is EventEnvelope => envelope.kind === "event",
 						);
@@ -2028,13 +2027,18 @@ export function make_protocol_server_layer(
 							return HandleReplay(envelope, current);
 						case "heartbeat.pong":
 							return HandlePong(envelope, current);
-						default:
-							return Effect.void;
+						default: {
+							const unhandled: never = envelope;
+
+							return Effect.die(`Unhandled inbound envelope: ${unhandled}`);
+						}
 					}
 				};
 
-				const HandleEnvelope = (envelope: InboundControlEnvelope) =>
+				const HandleEnvelope = (dispatch: ProtocolRouterInboundDispatch) =>
 					Effect.gen(function* () {
+						const envelope =
+							dispatch._tag === "Command" ? dispatch.command : dispatch.envelope;
 						const current = yield* Ref.get(state);
 
 						if (current._tag === "Closed" || current._tag === "Rejected") {
@@ -2085,7 +2089,7 @@ export function make_protocol_server_layer(
 
 							yield* Ref.set(state, { ...current, last_activity_ms });
 
-							return yield* DecodeInboundControlEnvelope(input).pipe(
+							return yield* router.ClassifyInbound(input).pipe(
 								Effect.flatMap(HandleEnvelope),
 								Effect.catch(() =>
 									EnqueueError(

@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { Effect } from "effect";
 
-import type { CommandEnvelope } from "@artisan/protocol";
+import type { CommandEnvelope, HelloEnvelope } from "@artisan/protocol";
 import { ProtocolRouter, make_backend_runtime } from "@artisan/backend";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
@@ -51,6 +51,31 @@ async function route(runtime: ReturnType<typeof make_backend_runtime>, input: un
 	);
 }
 
+async function classify(runtime: ReturnType<typeof make_backend_runtime>, input: unknown) {
+	return runtime.runPromise(
+		Effect.gen(function* () {
+			const router = yield* ProtocolRouter;
+
+			return yield* router.ClassifyInbound(input);
+		}),
+	);
+}
+
+function make_hello(): HelloEnvelope {
+	return {
+		kind: "hello",
+		message_id: "hello_1",
+		origin: "frontend",
+		payload: {
+			event_cursors: [],
+			last_journal_sequence: 0,
+			supported_protocol_versions: [1],
+		},
+		schema_version: 1,
+		sent_at: "2026-07-10T08:00:00.000Z",
+	};
+}
+
 afterEach(async () => {
 	await Promise.all(
 		temporary_directories.splice(0).map((directory) =>
@@ -63,6 +88,31 @@ afterEach(async () => {
 });
 
 describe("protocol router", () => {
+	it("classifies validated command and connection envelopes without taking connection semantics", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+
+		try {
+			await expect(classify(runtime, make_command())).resolves.toMatchObject({
+				_tag: "Command",
+				command: { kind: "command", message_id: "message_1" },
+			});
+			await expect(classify(runtime, make_hello())).resolves.toMatchObject({
+				_tag: "Connection",
+				envelope: { kind: "hello", message_id: "hello_1" },
+			});
+
+			const [error] = await route(runtime, make_hello());
+
+			expect(error).toMatchObject({
+				kind: "protocol.error",
+				payload: { code: "protocol.invalid_message", retryable: false },
+			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("durably accepts a command and emits its correlated event", async () => {
 		const database_path = await make_database_path();
 		const runtime = make_backend_runtime({ database_path, migrations_path });
