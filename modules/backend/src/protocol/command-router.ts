@@ -47,7 +47,8 @@ export const CommandRouterLive = Layer.effect(
 						  command.payload.type === "thread.project.unlock"
 						? thread_commands.HandleProjectAffinity(command)
 						: command.payload.type.startsWith("thread.") &&
-							  command.payload.type !== "thread.send_message"
+							  command.payload.type !== "thread.send_message" &&
+							  command.payload.type !== "thread.auto_steer.update"
 							? thread_commands.HandleMetadata(command)
 							: command.payload.type.startsWith("terminal.")
 								? terminals.Handle(command).pipe(

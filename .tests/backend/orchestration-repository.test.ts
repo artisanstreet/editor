@@ -8,12 +8,14 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import type { EngineObservation } from "@artisan/engines";
 import type { CommandEnvelope } from "@artisan/protocol";
-import { make_backend_runtime } from "@artisan/backend";
+import { make_backend_runtime, ThreadErasure } from "@artisan/backend";
 
 import { OrchestrationRepository } from "../../modules/backend/src/persistence/orchestration-repository";
+import type { IntakeAssessment } from "../../modules/backend/src/orchestration/intake-policy";
 import {
 	JournalCommands,
 	OrchestrationOutbox,
+	OrchestrationIntake,
 	OrchestrationRawObservations,
 	OrchestrationRuns,
 	Threads,
@@ -63,11 +65,11 @@ const SetupThread = (thread_id: string) =>
 		});
 	});
 
-const Accept = (command: CommandEnvelope) =>
+const Accept = (command: CommandEnvelope, intake?: IntakeAssessment) =>
 	Effect.gen(function* () {
 		const repository = yield* OrchestrationRepository;
 
-		return yield* repository.Accept(command, false);
+		return yield* repository.Accept(command, false, intake);
 	});
 
 const Read = <A>(
@@ -88,6 +90,361 @@ afterEach(async () => {
 });
 
 describe("orchestration repository hardening", () => {
+	it("persists a pre-execution intake question without opening a run outbox", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			migrations_path,
+		});
+		try {
+			await runtime.runPromise(SetupThread("thread_1"));
+			const accepted = await runtime.runPromise(
+				Accept(
+					make_command("intake_1", "thread_1", {
+						engine_id: "engine_1",
+						text: "Delete production",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+					{
+						risk: "high",
+						resolution: "question",
+						assumptions: [],
+						question: "Confirm scope",
+					},
+				),
+			);
+			const [outbox, intake] = await runtime.runPromise(
+				Effect.all([
+					Read((database) => database.select().from(OrchestrationOutbox)),
+					Read((database) => database.select().from(OrchestrationIntake)),
+				]),
+			);
+
+			expect(outbox).toHaveLength(0);
+			expect(intake).toMatchObject([{ risk: "high", state: "pending" }]);
+			expect(accepted.events).toMatchObject([
+				{ payload: { type: "intake.assessed", risk: "high", resolution: "question" } },
+				{ payload: { type: "interaction.question", state: "requested", source: "intake" } },
+			]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("preserves attributed mentions through intake resolution and exact retry", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			migrations_path,
+		});
+		const origin = { provider: "fixture", reference: "intake_command_1" };
+
+		try {
+			await runtime.runPromise(SetupThread("thread_1"));
+			const intake = await runtime.runPromise(
+				Accept(
+					make_command(
+						"intake_1",
+						"thread_1",
+						{
+							engine_id: "engine_1",
+							mentioned_projects: [
+								{
+									display_name: "Beta",
+									project_id: "project_beta",
+									root_path: "C:/work/beta",
+								},
+							],
+							text: "Delete production",
+							type: "thread.send_message",
+							working_directory: "C:/work",
+						},
+						{ raw_origin: origin },
+					),
+					{
+						assumptions: [],
+						question: "Confirm scope",
+						risk: "high",
+						resolution: "question",
+					},
+				),
+			);
+			const question_event = intake.events[1];
+			const question_id =
+				question_event?.payload.type === "interaction.question"
+					? question_event.payload.question_id
+					: "";
+			const response = make_command("answer_1", "thread_1", {
+				answers: { [question_id]: ["Confirmed"] },
+				question_id,
+				type: "intake.respond_question",
+			});
+
+			const accepted = await runtime.runPromise(Accept(response));
+			const duplicate = await runtime.runPromise(Accept(response));
+			const [outbox, pending] = await runtime.runPromise(
+				Effect.all([
+					Read((database) => database.select().from(OrchestrationOutbox)),
+					Read((database) => database.select().from(OrchestrationIntake)),
+				]),
+			);
+
+			expect(accepted.events).toHaveLength(3);
+			expect(accepted.events).toEqual(
+				expect.arrayContaining([expect.objectContaining({ raw_origin: origin })]),
+			);
+			for (const event of accepted.events) {
+				expect(event.raw_origin).toEqual(origin);
+			}
+			expect(duplicate).toMatchObject({
+				journal_sequence: accepted.journal_sequence,
+				run_id: accepted.run_id,
+				status: "duplicate",
+			});
+			expect(JSON.parse(outbox[0]!.payload_json)).toMatchObject({
+				mentioned_projects: [{ project_id: "project_beta" }],
+			});
+			expect(pending).toMatchObject([{ state: "resolved" }]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("rejects extra intake answer keys and resolution while a coordinator run remains active", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			migrations_path,
+		});
+
+		try {
+			await runtime.runPromise(SetupThread("thread_1"));
+			await runtime.runPromise(
+				Accept(
+					make_command("start_1", "thread_1", {
+						engine_id: "engine_1",
+						text: "Start",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			const intake = await runtime.runPromise(
+				Accept(
+					make_command("intake_1", "thread_1", {
+						engine_id: "engine_1",
+						text: "Delete production",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+					{
+						assumptions: [],
+						question: "Confirm scope",
+						risk: "high",
+						resolution: "question",
+					},
+				),
+			);
+			const question_event = intake.events[1];
+			const question_id =
+				question_event?.payload.type === "interaction.question"
+					? question_event.payload.question_id
+					: "";
+			const extra_answers = await runtime.runPromiseExit(
+				Accept(
+					make_command("answer_extra", "thread_1", {
+						answers: { [question_id]: ["Confirmed"], unrelated: ["No"] },
+						question_id,
+						type: "intake.respond_question",
+					}),
+				),
+			);
+			const active_run = await runtime.runPromiseExit(
+				Accept(
+					make_command("answer_active", "thread_1", {
+						answers: { [question_id]: ["Confirmed"] },
+						question_id,
+						type: "intake.respond_question",
+					}),
+				),
+			);
+
+			expect(extra_answers._tag).toBe("Failure");
+			expect(active_run._tag).toBe("Failure");
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("replaces a terminal coordinator run exactly once when intake is resolved", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			migrations_path,
+		});
+
+		try {
+			await runtime.runPromise(SetupThread("thread_1"));
+			const first = await runtime.runPromise(
+				Accept(
+					make_command("start_1", "thread_1", {
+						engine_id: "engine_1",
+						text: "Start",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			await runtime.runPromise(
+				Effect.gen(function* () {
+					const repository = yield* OrchestrationRepository;
+
+					return yield* repository.RecordObservation({
+						_tag: "run_terminal",
+						artisan_run_id: first.run_id,
+						observation_id: "terminal_1",
+						raw: { engine_id: "engine_1", frame: null, transport: "fixture" },
+						sequence: 1,
+						state: "completed",
+					});
+				}),
+			);
+			const intake = await runtime.runPromise(
+				Accept(
+					make_command("intake_1", "thread_1", {
+						engine_id: "engine_1",
+						text: "Delete production",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+					{
+						assumptions: [],
+						question: "Confirm scope",
+						risk: "high",
+						resolution: "question",
+					},
+				),
+			);
+			const question_event = intake.events[1];
+			const question_id =
+				question_event?.payload.type === "interaction.question"
+					? question_event.payload.question_id
+					: "";
+			const response = make_command("answer_1", "thread_1", {
+				answers: { [question_id]: ["Confirmed"] },
+				question_id,
+				type: "intake.respond_question",
+			});
+
+			const accepted = await runtime.runPromise(Accept(response));
+			const duplicate = await runtime.runPromise(Accept(response));
+			const runs = await runtime.runPromise(
+				Read((database) => database.select().from(OrchestrationRuns)),
+			);
+
+			expect(accepted.run_id).not.toBe(first.run_id);
+			expect(duplicate).toMatchObject({ run_id: accepted.run_id, status: "duplicate" });
+			expect(runs).toMatchObject([
+				{ run_id: first.run_id, status: "completed" },
+				{ run_id: accepted.run_id, status: "queued" },
+			]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("replays an exact intake response after repository restart without a second run", async () => {
+		const database_path = await make_database_path();
+		const first_runtime = make_backend_runtime({ database_path, migrations_path });
+		let response: CommandEnvelope | undefined;
+		let accepted_run_id: string | undefined;
+
+		try {
+			await first_runtime.runPromise(SetupThread("thread_1"));
+			const intake = await first_runtime.runPromise(
+				Accept(
+					make_command("intake_1", "thread_1", {
+						engine_id: "engine_1",
+						text: "Delete production",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+					{
+						assumptions: [],
+						question: "Confirm scope",
+						risk: "high",
+						resolution: "question",
+					},
+				),
+			);
+			const question_event = intake.events[1];
+			const question_id =
+				question_event?.payload.type === "interaction.question"
+					? question_event.payload.question_id
+					: "";
+			response = make_command("answer_1", "thread_1", {
+				answers: { [question_id]: ["Confirmed"] },
+				question_id,
+				type: "intake.respond_question",
+			});
+			accepted_run_id = (await first_runtime.runPromise(Accept(response))).run_id;
+		} finally {
+			await first_runtime.dispose();
+		}
+
+		const restarted_runtime = make_backend_runtime({ database_path, migrations_path });
+		try {
+			const duplicate = await restarted_runtime.runPromise(Accept(response!));
+			const runs = await restarted_runtime.runPromise(
+				Read((database) => database.select().from(OrchestrationRuns)),
+			);
+
+			expect(duplicate).toMatchObject({ run_id: accepted_run_id, status: "duplicate" });
+			expect(runs).toHaveLength(1);
+			expect(runs[0]?.run_id).toBe(accepted_run_id);
+		} finally {
+			await restarted_runtime.dispose();
+		}
+	});
+
+	it("erases pending intake rows with their thread", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			migrations_path,
+		});
+
+		try {
+			await runtime.runPromise(SetupThread("thread_1"));
+			await runtime.runPromise(
+				Accept(
+					make_command("intake_1", "thread_1", {
+						engine_id: "engine_1",
+						text: "Delete production",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+					{
+						assumptions: [],
+						question: "Confirm scope",
+						risk: "high",
+						resolution: "question",
+					},
+				),
+			);
+			await runtime.runPromise(
+				Effect.gen(function* () {
+					return yield* (yield* ThreadErasure).CleanupExpired(
+						"9999-01-01T00:00:00.000Z",
+						"2026-07-18T12:00:00.000Z",
+					);
+				}),
+			);
+			const intake = await runtime.runPromise(
+				Read((database) => database.select().from(OrchestrationIntake)),
+			);
+
+			expect(intake).toEqual([]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
 	it("accepts an exact retry without a run id and rejects changed envelopes", async () => {
 		const runtime = make_backend_runtime({
 			database_path: await make_database_path(),
