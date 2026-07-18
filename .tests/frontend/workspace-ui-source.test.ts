@@ -64,6 +64,19 @@ describe("production workspace UI source", () => {
 			}),
 		);
 
+		it.effect("keeps the editor interaction scaffold reachable without fixture records", () =>
+			Effect.gen(function* () {
+				const { sources } = yield* WorkspaceSources;
+				const main = yield* SourceNamed(sources, "main-pane.sv");
+
+				expect(main).toContain("<QuickOpen");
+				expect(main).toContain("<FileTabStrip");
+				expect(main).toContain("<WorkspaceNavigation");
+				expect(main).toContain("editor-viewport");
+				expect(main).toContain("authoritative workspace projection");
+			}),
+		);
+
 		it.effect("renders truthful live and unavailable states without fixture records", () =>
 			Effect.gen(function* () {
 				const { aggregate, sources } = yield* WorkspaceSources;

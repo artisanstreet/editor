@@ -1,4 +1,16 @@
-import { Context, Effect, Layer, Option, Stream, SubscriptionRef } from "effect";
+import {
+	Context,
+	Data,
+	Effect,
+	Fiber,
+	Layer,
+	Option,
+	Ref,
+	Schedule,
+	Scope,
+	Stream,
+	SubscriptionRef,
+} from "effect";
 
 import type {
 	GlobalGuidanceSnapshot,
@@ -35,6 +47,7 @@ interface LiveWorkspaceState {
 	readonly list_generation: number;
 	readonly refresh_generation: number;
 	readonly selection_generation: number;
+	readonly subscription_generation: number;
 	readonly snapshot: LiveWorkspaceSnapshot;
 }
 
@@ -52,8 +65,17 @@ const EmptyState: LiveWorkspaceState = {
 	list_generation: 0,
 	refresh_generation: 0,
 	selection_generation: 0,
+	subscription_generation: 0,
 	snapshot: EmptySnapshot,
 };
+
+class ThreadListSubscriptionLost extends Data.TaggedError("ThreadListSubscriptionLost")<{
+	readonly message: string;
+}> {}
+
+const ThreadListSubscriptionRetrySchedule = Schedule.exponential("100 millis").pipe(
+	Schedule.upTo({ duration: "1 second", times: 3 }),
+);
 
 export const ToLiveWorkspacePhase = (phase: FrontendConnectionPhase): LiveWorkspacePhase => {
 	if (phase === "ready") return "ready";
@@ -107,6 +129,63 @@ export const ApplyThreadListUpdate = (
 	return reconcile_selection(snapshot, [update.thread, ...threads]);
 };
 
+/** Applies a complete backend list as the current authoritative renderer projection. */
+export const ApplyAuthoritativeThreadRefresh = (
+	snapshot: LiveWorkspaceSnapshot,
+	threads: ReadonlyArray<ThreadListItem>,
+): LiveWorkspaceSnapshot => {
+	const reconciled = reconcile_selection(snapshot, threads);
+	const selected_thread_id = Option.isSome(reconciled.selected_thread_id)
+		? reconciled.selected_thread_id
+		: threads[0] === undefined
+			? Option.none<string>()
+			: Option.some(threads[0].thread_id);
+	const selection_changed =
+		Option.getOrUndefined(reconciled.selected_thread_id) !==
+		Option.getOrUndefined(selected_thread_id);
+
+	return {
+		...reconciled,
+		error: Option.none(),
+		phase: threads.length === 0 ? "empty" : "ready",
+		selected_thread_id,
+		thread_work: selection_changed ? Option.none() : reconciled.thread_work,
+	};
+};
+
+/** Makes subscription loss actionable while retaining the last known backend projection. */
+export const ApplyThreadListSubscriptionFailure = (
+	snapshot: LiveWorkspaceSnapshot,
+	error: string,
+): LiveWorkspaceSnapshot => ({
+	...snapshot,
+	error: Option.some(error),
+	phase: "error",
+});
+
+/** Retries a dropped authoritative stream with a bounded backoff before reporting its final loss. */
+export const RunThreadListSubscription = <E extends { readonly message: string }>(
+	subscribe: Effect.Effect<Stream.Stream<ThreadListUpdate>, E, Scope.Scope>,
+	on_update: (update: ThreadListUpdate) => Effect.Effect<void>,
+	on_failure: (message: string) => Effect.Effect<void>,
+) =>
+	subscribe.pipe(
+		Effect.flatMap((updates) =>
+			Stream.runForEach(updates, on_update).pipe(
+				Effect.flatMap(() =>
+					Effect.fail(
+						new ThreadListSubscriptionLost({
+							message: "Thread-list subscription ended unexpectedly.",
+						}),
+					),
+				),
+			),
+		),
+		Effect.retry({ schedule: ThreadListSubscriptionRetrySchedule }),
+		Effect.catch((error) => on_failure(error.message)),
+		Effect.asVoid,
+	);
+
 const SelectThreadSnapshot = (snapshot: LiveWorkspaceSnapshot, thread_id: string) => ({
 	...snapshot,
 	error: Option.none(),
@@ -143,6 +222,9 @@ export const LiveWorkspaceStoreLive = Layer.effect(
 		const client = yield* ArtisanClient;
 		const lifecycle = yield* FrontendConnectionLifecycle;
 		const state = yield* SubscriptionRef.make(EmptyState);
+		const subscription_fiber = yield* Ref.make<Option.Option<Fiber.RuntimeFiber<void, never>>>(
+			Option.none(),
+		);
 
 		const Update = (update: (current: LiveWorkspaceState) => LiveWorkspaceState) =>
 			SubscriptionRef.update(state, update);
@@ -222,29 +304,20 @@ export const LiveWorkspaceStoreLive = Layer.effect(
 								return current;
 							}
 
-							const reconciled = reconcile_selection(current.snapshot, threads);
-							const selected_thread_id = Option.isSome(reconciled.selected_thread_id)
-								? reconciled.selected_thread_id
-								: threads[0] === undefined
-									? Option.none<string>()
-									: Option.some(threads[0].thread_id);
+							const refreshed = ApplyAuthoritativeThreadRefresh(
+								current.snapshot,
+								threads,
+							);
 							const selection_changed =
-								Option.getOrUndefined(reconciled.selected_thread_id) !==
-								Option.getOrUndefined(selected_thread_id);
+								Option.getOrUndefined(current.snapshot.selected_thread_id) !==
+								Option.getOrUndefined(refreshed.selected_thread_id);
 
 							return {
 								...current,
 								selection_generation: selection_changed
 									? current.selection_generation + 1
 									: current.selection_generation,
-								snapshot: {
-									...reconciled,
-									phase: threads.length === 0 ? "empty" : "ready",
-									selected_thread_id,
-									thread_work: selection_changed
-										? Option.none()
-										: reconciled.thread_work,
-								},
+								snapshot: refreshed,
 							};
 						}),
 				}),
@@ -405,6 +478,62 @@ export const LiveWorkspaceStoreLive = Layer.effect(
 					);
 			});
 
+		const StartThreadListSubscription = Effect.gen(function* () {
+			const previous = yield* Ref.get(subscription_fiber);
+			if (Option.isSome(previous)) yield* Fiber.interrupt(previous.value);
+
+			const started = yield* UpdateAndGet((current) => ({
+				...current,
+				subscription_generation: current.subscription_generation + 1,
+			}));
+			const subscription_generation = started.subscription_generation;
+			const Subscribe = RunThreadListSubscription(
+				client.SubscribeThreadList,
+				(update) =>
+					Update((current) => {
+						if (current.subscription_generation !== subscription_generation) {
+							return current;
+						}
+
+						const snapshot = ApplyThreadListUpdate(current.snapshot, update);
+						return {
+							...current,
+							list_generation: current.list_generation + 1,
+							selection_generation:
+								Option.getOrUndefined(snapshot.selected_thread_id) !==
+								Option.getOrUndefined(current.snapshot.selected_thread_id)
+									? current.selection_generation + 1
+									: current.selection_generation,
+							snapshot,
+						};
+					}),
+				(message) =>
+					Update((current) =>
+						current.subscription_generation === subscription_generation
+							? {
+									...current,
+									snapshot: ApplyThreadListSubscriptionFailure(
+										current.snapshot,
+										message,
+									),
+								}
+							: current,
+					),
+			);
+			const fiber = yield* Effect.forkScoped(Subscribe);
+			yield* Ref.set(subscription_fiber, Option.some(fiber));
+		});
+
+		const StopThreadListSubscription = Effect.gen(function* () {
+			const previous = yield* Ref.get(subscription_fiber);
+			if (Option.isSome(previous)) yield* Fiber.interrupt(previous.value);
+			yield* Ref.set(subscription_fiber, Option.none());
+			yield* Update((current) => ({
+				...current,
+				subscription_generation: current.subscription_generation + 1,
+			}));
+		});
+
 		yield* Stream.runForEach(lifecycle.Changes, (connection) =>
 			Effect.gen(function* () {
 				yield* Update((current) => ({
@@ -418,28 +547,15 @@ export const LiveWorkspaceStoreLive = Layer.effect(
 						phase: ToLiveWorkspacePhase(connection.phase),
 					},
 				}));
-				if (ShouldRefreshForConnection(connection.phase)) yield* Refresh;
+				if (ShouldRefreshForConnection(connection.phase)) {
+					yield* StartThreadListSubscription;
+					yield* Refresh;
+				} else {
+					yield* StopThreadListSubscription;
+				}
 			}),
 		).pipe(Effect.forkScoped);
-		yield* client.SubscribeThreadList.pipe(
-			Effect.flatMap((updates) =>
-				Stream.runForEach(updates, (update) =>
-					Update((current) => ({
-						...current,
-						list_generation: current.list_generation + 1,
-						selection_generation:
-							Option.getOrUndefined(
-								ApplyThreadListUpdate(current.snapshot, update).selected_thread_id,
-							) !== Option.getOrUndefined(current.snapshot.selected_thread_id)
-								? current.selection_generation + 1
-								: current.selection_generation,
-						snapshot: ApplyThreadListUpdate(current.snapshot, update),
-					})),
-				),
-			),
-			Effect.ignore,
-			Effect.forkScoped,
-		);
+		yield* StartThreadListSubscription;
 		yield* Refresh;
 
 		return LiveWorkspaceStore.of({

@@ -1,9 +1,13 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Option, Stream, SubscriptionRef } from "effect";
+import { Effect, Fiber, Option, Ref, Stream, SubscriptionRef } from "effect";
+import { TestClock } from "effect/testing";
 
 import {
+	ApplyAuthoritativeThreadRefresh,
 	ApplyThreadListUpdate,
+	ApplyThreadListSubscriptionFailure,
 	IsCurrentThreadSelection,
+	RunThreadListSubscription,
 	ShouldRefreshForConnection,
 	ToLiveWorkspacePhase,
 	type LiveWorkspaceSnapshot,
@@ -61,10 +65,65 @@ describe("live workspace state", () => {
 			selected_thread_id: Option.some("thread-2"),
 		};
 
-		expect(
-			IsCurrentThreadSelection(selected_other_thread, 2, "thread-1", 1),
-		).toBe(false);
+		expect(IsCurrentThreadSelection(selected_other_thread, 2, "thread-1", 1)).toBe(false);
 	});
+
+	it("clears a prior connection error after an authoritative refresh succeeds", () => {
+		const recovered = ApplyAuthoritativeThreadRefresh(
+			{
+				...EmptySnapshot,
+				error: Option.some("Temporary connection failure"),
+				phase: "error",
+			},
+			[],
+		);
+
+		expect(Option.isNone(recovered.error)).toBe(true);
+		expect(recovered.phase).toBe("empty");
+	});
+
+	it("retains the last projection but makes a lost thread subscription recoverable", () => {
+		const failed = ApplyThreadListSubscriptionFailure(
+			{ ...EmptySnapshot, threads: [] },
+			"Thread subscription disconnected",
+		);
+
+		expect(failed.phase).toBe("error");
+		expect(Option.getOrUndefined(failed.error)).toBe("Thread subscription disconnected");
+	});
+
+	it.effect(
+		"retries a lost subscription and applies its recovered stream without another ready event",
+		() =>
+			Effect.gen(function* () {
+				const attempts = yield* Ref.make(0);
+				const updates = yield* Ref.make(0);
+				const subscribe = Effect.gen(function* () {
+					const attempt = yield* Ref.getAndUpdate(attempts, (count) => count + 1);
+					if (attempt === 0) {
+						return yield* Effect.fail({ message: "Initial subscription loss" });
+					}
+
+					return Stream.concat(
+						Stream.fromEffect(
+							Ref.update(updates, (count) => count + 1).pipe(Effect.asVoid),
+						),
+						Stream.never,
+					);
+				});
+				const fiber = yield* RunThreadListSubscription(
+					subscribe,
+					() => Effect.void,
+					() => Effect.void,
+				).pipe(Effect.forkScoped);
+
+				yield* TestClock.adjust("100 millis");
+
+				expect(yield* Ref.get(attempts)).toBe(2);
+				expect(yield* Ref.get(updates)).toBe(1);
+				yield* Fiber.interrupt(fiber);
+			}).pipe(Effect.provide(TestClock.layer())),
+	);
 
 	it.effect("replays current state to a late renderer subscription", () =>
 		Effect.gen(function* () {

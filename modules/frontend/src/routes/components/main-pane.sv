@@ -8,11 +8,19 @@
 	} from "@tabler/icons-svelte";
 
 	import type { LiveWorkspaceSnapshot } from "$lib/live-workspace/store";
-	import type { WorkspaceMode } from "$lib/workspace/workspace-tab-model";
+	import {
+		CreateWorkspaceState,
+		type CloseTabOutcome,
+		type DirtyCloseConfirmation,
+		type WorkspaceMode,
+	} from "$lib/workspace/workspace-tab-model";
 	import { Button } from "$lib/components/ui/button";
 	import { Textarea } from "$lib/components/ui/textarea";
 
+	import FileTabStrip from "./file-tab-strip.sv";
 	import ModeSwitcher from "./mode-switcher.sv";
+	import QuickOpen from "./quick-open.sv";
+	import WorkspaceNavigation from "./workspace-navigation.sv";
 
 	let {
 		live_snapshot,
@@ -24,6 +32,9 @@
 
 	let mode = $state<WorkspaceMode>("editor");
 	let chat_draft = $state("");
+	let editor_viewport = $state<HTMLDivElement>();
+	let editor_scroll_top = $state(0);
+	const empty_workspace = yield* CreateWorkspaceState();
 
 	const SelectMode = (next_mode: WorkspaceMode) =>
 		Effect.sync(() => {
@@ -50,6 +61,18 @@
 				yield* SendLiveMessage(event);
 			}
 		});
+
+	/** These callbacks preserve the tab interaction seam while backend file discovery is unavailable. */
+	const Noop = Effect.void;
+	const TabNotFound = (tab_id: string): Effect.Effect<CloseTabOutcome> =>
+		Effect.succeed({ _tag: "TabNotFound", state: empty_workspace, tab_id });
+	const ConfirmTabNotFound = (
+		confirmation: DirtyCloseConfirmation,
+	): Effect.Effect<CloseTabOutcome> => TabNotFound(confirmation.tab_id);
+	const CaptureEditorScroll = (scroll_top: number) =>
+		Effect.sync(() => {
+			editor_scroll_top = scroll_top;
+		});
 </script>
 
 <section class="main-pane" aria-label="Workspace">
@@ -58,11 +81,33 @@
 			<strong>Workspace</strong>
 			<span>{live_snapshot.phase}</span>
 		</div>
-		<ModeSwitcher {mode} on_select={SelectMode} />
+		<div class="workspace-primary-controls">
+			<QuickOpen files={empty_workspace.recent_files} on_open={() => Noop} />
+			<ModeSwitcher {mode} on_select={SelectMode} />
+		</div>
 	</header>
 
 	{#if mode === "editor"}
-		<div class="mode-surface empty-surface">
+		<FileTabStrip
+			visible_tabs={empty_workspace.tabs}
+			overflow_tabs={[]}
+			active_tab_id={undefined}
+			on_activate={() => Noop}
+			on_pin={() => Noop}
+			on_promote={() => Noop}
+			on_close={TabNotFound}
+			on_confirm_close={ConfirmTabNotFound}
+		/>
+		<WorkspaceNavigation
+			breadcrumbs={[]}
+			recent_files={empty_workspace.recent_files}
+			changed_files={empty_workspace.changed_files}
+			overflow_tabs={[]}
+			on_open_recent={() => Noop}
+			on_open_changed={() => Noop}
+			on_activate_overflow={() => Noop}
+		/>
+		<div bind:this={editor_viewport} class="mode-surface empty-surface editor-viewport" onscroll={yield* CaptureEditorScroll(editor_viewport?.scrollTop ?? editor_scroll_top)}>
 			<FileCode size={22} aria-hidden="true" />
 			<h1>Editor ready</h1>
 			<p>File discovery and Monaco content will appear here when the authoritative workspace projection is connected.</p>
@@ -115,6 +160,12 @@
 		border-bottom: 1px solid var(--line);
 	}
 
+	.workspace-primary-controls {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+	}
+
 	.workspace-title {
 		display: flex;
 		min-width: 0;
@@ -144,6 +195,11 @@
 		gap: 8px;
 		padding: 24px;
 		text-align: center;
+	}
+
+	.editor-viewport {
+		overflow: auto;
+		outline: none;
 	}
 
 	.empty-surface h1,
