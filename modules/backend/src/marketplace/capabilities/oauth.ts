@@ -1,6 +1,5 @@
 import { Context, Data, Effect, Layer } from "effect";
-
-import type { SecretReference } from "./secret-store";
+import type { SecretReference } from "@artisan/protocol";
 
 export interface OAuthBeginInput {
 	readonly authorization_url: string;
@@ -9,8 +8,8 @@ export interface OAuthBeginInput {
 }
 export interface OAuthCompletionInput {
 	readonly capability_id: string;
-	readonly code: string;
-	readonly state: string;
+	/** Opaque resolver reference; the adapter validates provider code/state internally. */
+	readonly callback_reference: string;
 }
 export interface OAuthTokenStatus {
 	readonly capability_id: string;

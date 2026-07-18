@@ -17,7 +17,13 @@ import { SecretStore, type SecretReference } from "./secret-store";
 
 export interface HttpMcpEndpoint {
 	readonly url: string;
-	readonly bearer_secret_reference?: SecretReference;
+	readonly auth?:
+		| { readonly kind: "none" }
+		| {
+				readonly header_name: string;
+				readonly kind: "secret_header";
+				readonly secret_reference: SecretReference;
+		  };
 	readonly timeout_ms: number;
 	readonly max_response_bytes: number;
 	readonly max_pagination_bytes?: number;
@@ -28,7 +34,7 @@ export interface HttpMcpEndpoint {
 /** Renderer-safe endpoint trust metadata; callers must show a warning before approving broad local bindings. */
 export interface HttpMcpEndpointPolicy {
 	readonly allowed: boolean;
-	readonly broad_binding_warning: boolean;
+	readonly broad_local_binding_warning: boolean;
 }
 
 const JsonRpcError = Schema.Struct({
@@ -89,7 +95,8 @@ type McpOperation = McpTransportError["operation"];
 const endpoint_policy = (url: string): HttpMcpEndpointPolicy => {
 	try {
 		const parsed = new URL(url);
-		const broad_binding_warning = parsed.hostname === "0.0.0.0" || parsed.hostname === "[::]";
+		const broad_local_binding_warning =
+			parsed.hostname === "0.0.0.0" || parsed.hostname === "[::]";
 		const local_http =
 			parsed.hostname === "localhost" ||
 			parsed.hostname === "127.0.0.1" ||
@@ -100,10 +107,10 @@ const endpoint_policy = (url: string): HttpMcpEndpointPolicy => {
 				parsed.password === "" &&
 				parsed.hash === "" &&
 				(parsed.protocol === "https:" || (parsed.protocol === "http:" && local_http)),
-			broad_binding_warning,
+			broad_local_binding_warning,
 		};
 	} catch {
-		return { allowed: false, broad_binding_warning: false };
+		return { allowed: false, broad_local_binding_warning: false };
 	}
 };
 
@@ -116,6 +123,8 @@ const transport_error = (operation: McpOperation, state: McpHealth) =>
 
 const is_valid_endpoint = (endpoint: HttpMcpEndpoint) =>
 	inspect_http_mcp_endpoint(endpoint).allowed &&
+	(endpoint.auth?.kind !== "secret_header" ||
+		/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(endpoint.auth.header_name)) &&
 	Number.isSafeInteger(endpoint.timeout_ms) &&
 	endpoint.timeout_ms > 0 &&
 	Number.isSafeInteger(endpoint.max_response_bytes) &&
@@ -175,7 +184,10 @@ export class HttpMcpDriver extends Context.Service<
 	{
 		readonly Connect: (input: {
 			readonly endpoint: HttpMcpEndpoint;
-			readonly bearer_token?: Redacted.Redacted<string>;
+			readonly auth_header?: {
+				readonly name: string;
+				readonly value: Redacted.Redacted<string>;
+			};
 			readonly http_client: HttpClient.HttpClient;
 		}) => Effect.Effect<McpClientSession, McpTransportError>;
 	}
@@ -183,7 +195,7 @@ export class HttpMcpDriver extends Context.Service<
 
 /** Concrete Streamable HTTP JSON-RPC adapter built only on Effect's pinned unstable client. */
 export const EffectHttpMcpDriverLive = Layer.succeed(HttpMcpDriver, {
-	Connect: ({ endpoint, bearer_token, http_client }) =>
+	Connect: ({ endpoint, auth_header, http_client }) =>
 		Effect.gen(function* () {
 			if (!is_valid_endpoint(endpoint))
 				return yield* Effect.fail(transport_error("start", "closed"));
@@ -198,11 +210,11 @@ export const EffectHttpMcpDriverLive = Layer.succeed(HttpMcpDriver, {
 				);
 			const AddHeaders = (request: HttpClientRequest.HttpClientRequest) => {
 				let next = HttpClientRequest.setHeader(request, "Accept", "application/json");
-				if (bearer_token)
+				if (auth_header)
 					next = HttpClientRequest.setHeader(
 						next,
-						"Authorization",
-						`Bearer ${Redacted.value(bearer_token)}`,
+						auth_header.name,
+						Redacted.value(auth_header.value),
 					);
 				if (session_id)
 					next = HttpClientRequest.setHeader(next, "Mcp-Session-Id", session_id);
@@ -442,20 +454,25 @@ export const make_http_mcp_transport_layer = (endpoint: HttpMcpEndpoint) =>
 									transport_error("start", claimed ? "closed" : "connected"),
 								);
 							return Effect.gen(function* () {
-								const bearer_token = endpoint.bearer_secret_reference
-									? yield* secrets
-											.Get(endpoint.bearer_secret_reference)
-											.pipe(
-												Effect.mapError(() =>
-													transport_error("start", "closed"),
-												),
-											)
-									: undefined;
+								const secret =
+									endpoint.auth?.kind === "secret_header"
+										? yield* secrets
+												.Get(endpoint.auth.secret_reference)
+												.pipe(
+													Effect.mapError(() =>
+														transport_error("start", "closed"),
+													),
+												)
+										: undefined;
+								const auth_header =
+									secret === undefined || endpoint.auth?.kind !== "secret_header"
+										? undefined
+										: { name: endpoint.auth.header_name, value: secret };
 								return yield* driver
 									.Connect(
-										bearer_token === undefined
+										auth_header === undefined
 											? { endpoint, http_client }
-											: { endpoint, bearer_token, http_client },
+											: { auth_header, endpoint, http_client },
 									)
 									.pipe(
 										Effect.tap((session) =>

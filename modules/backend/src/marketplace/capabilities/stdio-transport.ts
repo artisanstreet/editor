@@ -15,6 +15,7 @@ export interface StdioLaunch {
 	readonly args: ReadonlyArray<string>;
 	readonly command: string;
 	readonly cwd?: string;
+	readonly env?: Readonly<Record<string, string>>;
 	readonly startup_timeout_ms: number;
 	readonly invocation_timeout_ms: number;
 	readonly max_message_bytes: number;
@@ -204,6 +205,7 @@ export const EngineProcessStdioMcpDriverLive = Layer.effect(
 							args: launch.args,
 							command: launch.command,
 							...(launch.cwd === undefined ? {} : { cwd: launch.cwd }),
+							...(launch.env === undefined ? {} : { env: launch.env }),
 						})
 						.pipe(Effect.mapError(() => transport_error("start", "crashed")));
 					const state = yield* Ref.make<McpHealth>("connected");

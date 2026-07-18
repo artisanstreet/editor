@@ -63,7 +63,7 @@ const initialize_result =
 	'{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"fake"}}}';
 
 describe("Marketplace Streamable HTTP MCP transport", () => {
-	it("is inert before explicit Connect and resolves a bearer only for the connection", async () => {
+	it("is inert before explicit Connect and resolves a secret header only for the connection", async () => {
 		const requests: Array<Parameters<HttpClient.HttpClient["execute"]>[0]> = [];
 		const client = fake_client((request) =>
 			Effect.sync(() => {
@@ -75,7 +75,11 @@ describe("Marketplace Streamable HTTP MCP transport", () => {
 		);
 		const layer = make_http_mcp_transport_layer({
 			...endpoint,
-			bearer_secret_reference: "token" as never,
+			auth: {
+				header_name: "Authorization",
+				kind: "secret_header",
+				secret_reference: "token" as never,
+			},
 		}).pipe(
 			Layer.provide(EffectHttpMcpDriverLive),
 			Layer.provide(Layer.succeed(HttpClient.HttpClient, client)),
@@ -93,7 +97,7 @@ describe("Marketplace Streamable HTTP MCP transport", () => {
 				}).pipe(Effect.provide(layer)),
 			),
 		);
-		expect(requests[0]?.headers.authorization).toBe("Bearer secret");
+		expect(requests[0]?.headers.authorization).toBe("secret");
 		expect(requests[1]?.headers["mcp-session-id"]).toBe("session-1");
 	});
 
@@ -184,7 +188,7 @@ describe("Marketplace Streamable HTTP MCP transport", () => {
 				});
 			}).pipe(Effect.provide(EffectHttpMcpDriverLive)),
 		);
-		expect(yield_health(ipv6)).resolves.toBe("connected");
+		await expect(yield_health(ipv6)).resolves.toBe("connected");
 
 		const followed_redirect = await Effect.runPromise(
 			Effect.gen(function* () {
@@ -379,8 +383,11 @@ describe("Marketplace Streamable HTTP MCP transport", () => {
 				const client = yield* HttpClient.HttpClient;
 				const driver = yield* HttpMcpDriver;
 				const session = yield* driver.Connect({
+					auth_header: {
+						name: "Authorization",
+						value: Redacted.make("Bearer secret"),
+					},
 					endpoint,
-					bearer_token: Redacted.make("secret"),
 					http_client: client,
 				});
 				return yield* Effect.exit(session.Initialize);
