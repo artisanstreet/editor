@@ -15,7 +15,10 @@ import {
 import type {
 	GlobalGuidanceSnapshot,
 	ModelBehaviourSnapshot,
+	OrchestrationGraph,
+	OrchestrationGroupListSnapshot,
 	ThreadListItem,
+	ThreadTranscriptSnapshot,
 	ThreadWorkItem,
 } from "@artisan/protocol";
 import { ArtisanClient, type ThreadListUpdate } from "@artisan/transport/client";
@@ -40,6 +43,10 @@ export interface LiveWorkspaceSnapshot {
 	readonly model_behaviour: Option.Option<ModelBehaviourSnapshot>;
 	readonly phase: LiveWorkspacePhase;
 	readonly selected_thread_id: Option.Option<string>;
+	readonly selected_group_id: Option.Option<string>;
+	readonly orchestration_graph: Option.Option<OrchestrationGraph>;
+	readonly orchestration_groups: Option.Option<OrchestrationGroupListSnapshot>;
+	readonly transcript: Option.Option<ThreadTranscriptSnapshot>;
 	readonly thread_work: Option.Option<ThreadWorkItem>;
 	readonly threads: ReadonlyArray<ThreadListItem>;
 }
@@ -58,6 +65,10 @@ const EmptySnapshot: LiveWorkspaceSnapshot = {
 	model_behaviour: Option.none(),
 	phase: "connecting",
 	selected_thread_id: Option.none(),
+	selected_group_id: Option.none(),
+	orchestration_graph: Option.none(),
+	orchestration_groups: Option.none(),
+	transcript: Option.none(),
 	thread_work: Option.none(),
 	threads: [],
 };
@@ -105,6 +116,10 @@ const reconcile_selection = (
 		: {
 				...snapshot,
 				selected_thread_id: Option.none(),
+				selected_group_id: Option.none(),
+				orchestration_graph: Option.none(),
+				orchestration_groups: Option.none(),
+				transcript: Option.none(),
 				thread_work: Option.none(),
 				threads,
 			};
@@ -219,6 +234,7 @@ export class LiveWorkspaceStore extends Context.Service<
 		readonly CreateThread: (title: string) => Effect.Effect<void>;
 		readonly Refresh: Effect.Effect<void>;
 		readonly SendMessage: (text: string) => Effect.Effect<void>;
+		readonly SelectOrchestrationGroup: (group_id: string) => Effect.Effect<void>;
 		readonly SelectThread: (thread_id: string) => Effect.Effect<void>;
 		readonly Snapshot: Effect.Effect<LiveWorkspaceSnapshot>;
 	}
@@ -274,6 +290,97 @@ export const LiveWorkspaceStoreLive = Layer.effect(
 								? {
 										...current,
 										snapshot: { ...current.snapshot, thread_work },
+									}
+								: current,
+						),
+				}),
+			);
+
+		/** Projection reads are authoritative; raw event streams never reconstruct history. */
+		const LoadThreadSurfaces = (thread_id: string, selection_generation: number) =>
+			Effect.all([
+				client.GetThreadTranscript({ thread_id }),
+				client.ListOrchestrationGroups(thread_id, true),
+			]).pipe(
+				Effect.matchEffect({
+					onFailure: (error) =>
+						Update((current) =>
+							IsCurrentThreadSelection(
+								current.snapshot,
+								current.selection_generation,
+								thread_id,
+								selection_generation,
+							)
+								? {
+										...current,
+										snapshot: {
+											...current.snapshot,
+											error: Option.some(error.message),
+										},
+									}
+								: current,
+						),
+					onSuccess: ([transcript, orchestration_groups]) =>
+						Update((current) => {
+							if (
+								!IsCurrentThreadSelection(
+									current.snapshot,
+									current.selection_generation,
+									thread_id,
+									selection_generation,
+								)
+							)
+								return current;
+							const selected_group_id = Option.getOrUndefined(
+								current.snapshot.selected_group_id,
+							);
+							const group_id = orchestration_groups.groups.some(
+								(group) => group.group_id === selected_group_id,
+							)
+								? current.snapshot.selected_group_id
+								: orchestration_groups.groups[0] === undefined
+									? Option.none<string>()
+									: Option.some(orchestration_groups.groups[0].group_id);
+							return {
+								...current,
+								snapshot: {
+									...current.snapshot,
+									transcript: Option.some(transcript),
+									orchestration_groups: Option.some(orchestration_groups),
+									selected_group_id: group_id,
+									orchestration_graph: Option.none(),
+								},
+							};
+						}),
+				}),
+			);
+
+		const LoadGraph = (group_id: string, selection_generation: number) =>
+			client.GetOrchestrationGraph(group_id).pipe(
+				Effect.matchEffect({
+					onFailure: (error) =>
+						Update((current) =>
+							current.selection_generation === selection_generation &&
+							Option.getOrUndefined(current.snapshot.selected_group_id) === group_id
+								? {
+										...current,
+										snapshot: {
+											...current.snapshot,
+											error: Option.some(error.message),
+										},
+									}
+								: current,
+						),
+					onSuccess: (orchestration_graph) =>
+						Update((current) =>
+							current.selection_generation === selection_generation &&
+							Option.getOrUndefined(current.snapshot.selected_group_id) === group_id
+								? {
+										...current,
+										snapshot: {
+											...current.snapshot,
+											orchestration_graph: Option.some(orchestration_graph),
+										},
 									}
 								: current,
 						),
@@ -338,6 +445,12 @@ export const LiveWorkspaceStoreLive = Layer.effect(
 				current.refresh_generation === refresh_generation
 			) {
 				yield* LoadSelectedThread(selected_thread_id, current.selection_generation);
+				yield* LoadThreadSurfaces(selected_thread_id, current.selection_generation);
+				const group_id = Option.getOrUndefined(
+					(yield* SubscriptionRef.get(state)).snapshot.selected_group_id,
+				);
+				if (group_id !== undefined)
+					yield* LoadGraph(group_id, current.selection_generation);
 			}
 			yield* client.GetGlobalGuidance.pipe(
 				Effect.tap((global_guidance) =>
@@ -381,6 +494,21 @@ export const LiveWorkspaceStoreLive = Layer.effect(
 					snapshot: SelectThreadSnapshot(current.snapshot, thread_id),
 				}));
 				yield* LoadSelectedThread(thread_id, selected.selection_generation);
+				yield* LoadThreadSurfaces(thread_id, selected.selection_generation);
+			});
+
+		const SelectOrchestrationGroup = (group_id: string) =>
+			Effect.gen(function* () {
+				const selected = yield* UpdateAndGet((current) => ({
+					...current,
+					selection_generation: current.selection_generation + 1,
+					snapshot: {
+						...current.snapshot,
+						selected_group_id: Option.some(group_id),
+						orchestration_graph: Option.none(),
+					},
+				}));
+				yield* LoadGraph(group_id, selected.selection_generation);
 			});
 
 		const SendMessage = (text: string) =>
@@ -572,6 +700,7 @@ export const LiveWorkspaceStoreLive = Layer.effect(
 			CreateThread,
 			Refresh,
 			SendMessage,
+			SelectOrchestrationGroup,
 			SelectThread,
 			Snapshot: SubscriptionRef.get(state).pipe(Effect.map((current) => current.snapshot)),
 		});

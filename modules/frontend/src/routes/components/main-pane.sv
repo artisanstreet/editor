@@ -120,9 +120,17 @@
 				{#if Option.isSome(live_snapshot.thread_work)}
 					<p>{live_snapshot.thread_work.value.display_name} is {live_snapshot.thread_work.value.status} with {live_snapshot.thread_work.value.engine_id}.</p>
 				{:else}
-					<p>Select an existing thread to message its active Codex run. Transcript history is unavailable until its authoritative projection is connected.</p>
+					<p>Select an existing thread to message its active Codex run.</p>
 				{/if}
 			</div>
+			{#if Option.isSome(live_snapshot.transcript)}
+				<div class="transcript" aria-label="Authoritative transcript">
+					{#if live_snapshot.transcript.value.entries.length === 0}<p>No transcript entries yet.</p>{/if}
+					{#each live_snapshot.transcript.value.entries as entry (entry.event_id)}
+						<article><small>{entry.payload.type}</small><p>{"text" in entry.payload ? entry.payload.text : "description" in entry.payload ? entry.payload.description : "assumption" in entry.payload ? entry.payload.assumption : "risk" in entry.payload ? `${entry.payload.risk}: ${entry.payload.resolution}` : "Recorded activity"}</p></article>
+					{/each}
+				</div>
+			{:else}<p class="text-muted-foreground">Loading authoritative transcript…</p>{/if}
 			<label class="chat-composer">
 				<span>Message active Codex run</span>
 				<Textarea bind:value={chat_draft} aria-label="Message active Codex run" onkeydown={yield* HandleComposerKey(event)} />
@@ -130,10 +138,14 @@
 			</label>
 		</div>
 	{:else}
-		<div class="mode-surface empty-surface">
+		<div class="mode-surface chat-surface">
 			<GitMerge size={22} aria-hidden="true" />
-			<h1>Orchestrator ready</h1>
-			<p>The live agent graph will appear here when the authoritative orchestration projection is connected.</p>
+			<h1>Orchestrator</h1>
+			{#if Option.isSome(live_snapshot.orchestration_groups)}
+				{#if live_snapshot.orchestration_groups.value.groups.length === 0}<p>No orchestration groups for this thread.</p>{/if}
+				<div class="group-list">{#each live_snapshot.orchestration_groups.value.groups as group (group.group_id)}<span class="rounded-md border px-2 py-1 text-xs">{group.state} · {group.group_id}</span>{/each}</div>
+			{:else}<p>Loading groups…</p>{/if}
+			{#if Option.isSome(live_snapshot.orchestration_graph)}<div class="transcript"><p>{live_snapshot.orchestration_graph.value.assignments.length} assignments · {live_snapshot.orchestration_graph.value.agent_runs.length} runs · {live_snapshot.orchestration_graph.value.edges.length} edges</p></div>{:else if Option.isSome(live_snapshot.selected_group_id)}<p>Loading selected graph…</p>{/if}
 		</div>
 	{/if}
 </section>
@@ -224,6 +236,10 @@
 		overflow-y: auto;
 		background: var(--canvas);
 	}
+	.transcript { display: grid; width: min(620px, 100%); justify-self: center; gap: 8px; }
+	.transcript article { border: 1px solid var(--line); border-radius: var(--radius); padding: 10px; }
+	.transcript article p, .transcript small { margin: 0; color: var(--text-muted); font-size: 12px; }
+	.group-list { display: flex; flex-wrap: wrap; gap: 8px; }
 
 	.live-copy,
 	.chat-composer {

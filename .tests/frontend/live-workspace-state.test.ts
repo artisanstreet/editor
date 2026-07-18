@@ -17,9 +17,13 @@ const EmptySnapshot: LiveWorkspaceSnapshot = {
 	error: Option.none(),
 	global_guidance: Option.none(),
 	model_behaviour: Option.none(),
+	orchestration_graph: Option.none(),
+	orchestration_groups: Option.none(),
 	phase: "ready",
+	selected_group_id: Option.none(),
 	selected_thread_id: Option.some("thread-1"),
 	thread_work: Option.none(),
+	transcript: Option.none(),
 	threads: [],
 };
 
