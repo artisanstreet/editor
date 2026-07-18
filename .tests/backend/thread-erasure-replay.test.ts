@@ -15,6 +15,7 @@ import type {
 } from "@artisan/protocol";
 import {
 	make_backend_runtime,
+	ProjectionRebuildService,
 	ProtocolServer,
 	ThreadErasure,
 	type ProtocolConnection,
@@ -25,6 +26,7 @@ import {
 	EventStreams,
 	JournalCommands,
 	JournalEvents,
+	LegacyWorkspaceChangeProjections,
 	ThreadErasureClaims,
 	WorkspaceChangeOperations,
 	WorkspaceChanges,
@@ -288,6 +290,11 @@ describe("thread erasure replay", () => {
 							version: 1,
 							workspace_id: "secret_workspace",
 						});
+						yield* database.client.insert(LegacyWorkspaceChangeProjections).values({
+							change_id: "secret_workspace_change",
+							source_command_id: "secret_workspace_command",
+							thread_id: "thread_erased",
+						});
 						yield* database.client.insert(WorkspaceChangeSnapshots).values({
 							byte_count: 22,
 							change_id: "secret_workspace_snapshot",
@@ -304,6 +311,8 @@ describe("thread erasure replay", () => {
 							thread_id: "thread_erased",
 						});
 						const erased = yield* erasure.ResumeClaimed("2026-07-10T18:04:00.000Z");
+						const rebuild = yield* ProjectionRebuildService;
+						const rebuilt = yield* rebuild.Rebuild();
 						const erased_delivery = yield* take_outbound(live, 2);
 						const repeated = yield* erasure.ResumeClaimed("2026-07-10T18:04:00.000Z");
 
@@ -353,10 +362,14 @@ describe("thread erasure replay", () => {
 							full_replay: yield* journal.ReadReplay({ after_journal_sequence: 0 }),
 							journal_commands: yield* database.client.select().from(JournalCommands),
 							journal_events: yield* database.client.select().from(JournalEvents),
+							legacy_workspace_change_projections: yield* database.client
+								.select()
+								.from(LegacyWorkspaceChangeProjections),
 							kept_later,
 							kept_run,
 							reconnect_replay,
 							repeated,
+							rebuilt,
 							streams: yield* database.client.select().from(EventStreams),
 							thread_snapshot: yield* threads.Snapshot(),
 							workspace_change_operations: yield* database.client
@@ -405,6 +418,7 @@ describe("thread erasure replay", () => {
 
 			expect(result.erased).toEqual(["thread_erased"]);
 			expect(result.repeated).toEqual([]);
+			expect(result.rebuilt.equivalent).toBe(true);
 			expect(result.after_repeat).toMatchObject([{ kind: "thread.list.query.result" }]);
 			expect(projection_updates.map((envelope) => envelope.sequence)).toEqual([
 				1, 2, 3, 4, 5, 6, 7,
@@ -514,6 +528,7 @@ describe("thread erasure replay", () => {
 			expect(result.workspace_changes).toEqual([]);
 			expect(result.workspace_change_snapshots).toEqual([]);
 			expect(result.workspace_mutation_authorities).toEqual([]);
+			expect(result.legacy_workspace_change_projections).toEqual([]);
 		} finally {
 			await runtime.dispose();
 		}

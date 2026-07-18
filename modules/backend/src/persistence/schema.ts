@@ -50,6 +50,19 @@ export const EventStreams = sqliteTable("event_streams", {
 	last_sequence: integer("last_sequence").notNull(),
 });
 
+/** Singleton writer lease used only to serialize deterministic projection rebuilds. */
+export const ProjectionRebuildLocks = sqliteTable("projection_rebuild_locks", {
+	lock_id: integer("lock_id").primaryKey(),
+	generation: integer("generation").notNull(),
+});
+
+/** Preserves pre-diff migration provenance after the old projection row is rebuilt. */
+export const LegacyWorkspaceChangeProjections = sqliteTable("legacy_workspace_change_projections", {
+	change_id: text("change_id").primaryKey(),
+	source_command_id: text("source_command_id").notNull(),
+	thread_id: text("thread_id").notNull(),
+});
+
 export const JournalEvents = sqliteTable(
 	"journal_events",
 	{

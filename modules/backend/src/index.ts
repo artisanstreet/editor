@@ -18,6 +18,16 @@ export {
 export { ProtocolRouter } from "./protocol/protocol-router";
 export { ProtocolServer } from "./protocol/protocol-server";
 export {
+	ProjectionRebuildBusy,
+	ProjectionRebuildFailure,
+	ProjectionRebuildInvariantError,
+	ProjectionRebuildService,
+	ProjectionRebuildServiceLive,
+	type ProjectionRebuildError,
+	type PublicProjectionRebuildResult,
+	type PublicProjectionRebuildVerification,
+} from "./persistence/projection-rebuild-service";
+export {
 	GlobalGuidanceConflict,
 	GlobalGuidanceInvariantError,
 	GlobalGuidanceService,
