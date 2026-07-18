@@ -111,7 +111,11 @@ describe("live workspace state", () => {
 					return Stream.concat(
 						Stream.fromEffect(
 							Ref.update(updates, (count) => count + 1).pipe(
-								Effect.as({ journal_sequence: 1, threads: [], type: "snapshot" } as const),
+								Effect.as({
+									journal_sequence: 1,
+									threads: [],
+									type: "snapshot",
+								} as const),
 							),
 						),
 						Stream.never,

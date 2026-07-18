@@ -335,9 +335,20 @@ export const make_client_subscription_coordinator = (
 			});
 
 		const fail_projection = (subscription: ProjectionSubscription, error: ArtisanClientError) =>
-			Queue.fail(subscription.queue as unknown as Queue.Queue<never, ArtisanClientError | Cause.Done<void>>, error);
+			Queue.fail(
+				subscription.queue as unknown as Queue.Queue<
+					never,
+					ArtisanClientError | Cause.Done<void>
+				>,
+				error,
+			);
 		const end_projection = (subscription: ProjectionSubscription) =>
-			Queue.end(subscription.queue as unknown as Queue.Queue<never, ArtisanClientError | Cause.Done<void>>);
+			Queue.end(
+				subscription.queue as unknown as Queue.Queue<
+					never,
+					ArtisanClientError | Cause.Done<void>
+				>,
+			);
 		const offer_projection_update = (
 			subscription: ProjectionSubscription,
 			envelope: ProjectionEnvelope,

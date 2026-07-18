@@ -173,13 +173,11 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			);
 			await Effect.runPromise(Deferred.await(snapshot_read));
 			await Effect.runPromise(
-				database.client
-					.update(OrchestrationGroups)
-					.set({
-						state: "complete",
-						updated_at: "2026-07-18T10:01:00.000Z",
-						version: 2,
-					}),
+				database.client.update(OrchestrationGroups).set({
+					state: "complete",
+					updated_at: "2026-07-18T10:01:00.000Z",
+					version: 2,
+				}),
 			);
 			const transition = await Effect.runPromise(
 				journal.AppendEvent({
@@ -245,9 +243,8 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			const updates = await Effect.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
-						const stream = yield* harness.client.SubscribeThreadTranscript(
-							"thread_snapshot_race",
-						);
+						const stream =
+							yield* harness.client.SubscribeThreadTranscript("thread_snapshot_race");
 						const fiber = yield* stream.pipe(
 							Stream.take(2),
 							Stream.runCollect,

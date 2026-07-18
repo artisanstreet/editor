@@ -229,10 +229,7 @@ describe("frontend ArtisanClient fixture runtime", () => {
 					limit: 1,
 					thread_id: "thread-editor-shell",
 				});
-				const active = yield* client.ListOrchestrationGroups(
-					"thread-editor-shell",
-					false,
-				);
+				const active = yield* client.ListOrchestrationGroups("thread-editor-shell", false);
 				const all = yield* client.ListOrchestrationGroups("thread-editor-shell", true);
 				const subscribed = yield* client.SubscribeOrchestrationGroups(
 					"thread-editor-shell",

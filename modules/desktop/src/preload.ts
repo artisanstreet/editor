@@ -6,10 +6,16 @@ const request_channel = "artisan:request-connection";
 const connection_channel = "artisan:connection";
 const renderer_window = globalThis as typeof globalThis & {
 	readonly location: { readonly origin: string };
-	readonly postMessage: (message: unknown, target_origin: string, transfer: ReadonlyArray<object>) => void;
+	readonly postMessage: (
+		message: unknown,
+		target_origin: string,
+		transfer: ReadonlyArray<object>,
+	) => void;
 };
 
-function connection_message(value: unknown): { readonly generation: number; readonly kind: string } | undefined {
+function connection_message(
+	value: unknown,
+): { readonly generation: number; readonly kind: string } | undefined {
 	if (typeof value !== "object" || value === null) {
 		return undefined;
 	}
