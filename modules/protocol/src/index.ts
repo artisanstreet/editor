@@ -5,4 +5,5 @@ export * from "./guidance";
 export * from "./git";
 export * from "./model-behaviour";
 export * from "./stream";
+export * from "./surfaces";
 export * from "./workspace-changes";

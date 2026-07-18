@@ -1,4 +1,8 @@
-import { Data, Effect, Scope, Stream } from "effect";
+import { Data, Effect, Schema, Scope, Stream } from "effect";
+
+/** Finite token quantity emitted by a provider. */
+export const TokenCount = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
+export type TokenCount = typeof TokenCount.Type;
 
 /** Describes the maturity of one provider capability. @since 0.2.0 */
 export type EngineCapabilityState = "supported" | "experimental" | "unsupported";
@@ -300,6 +304,8 @@ export interface EngineReasoningSummaryDeltaObservation extends EngineObservatio
 /** Reports provider usage measured for the run or one turn. @since 0.2.0 */
 export interface EngineUsageObservation extends EngineObservationBase {
 	readonly _tag: "usage";
+	/** States whether counts add to prior observations or replace a provider-reported total. */
+	readonly basis: "delta" | "cumulative" | "unknown";
 	readonly input_tokens?: number;
 	readonly output_tokens?: number;
 	readonly turn_id?: string;

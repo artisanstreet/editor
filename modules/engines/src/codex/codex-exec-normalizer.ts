@@ -1,5 +1,7 @@
 import { Effect, Schema } from "effect";
 
+import { TokenCount } from "../engine";
+
 import {
 	type EngineObservation,
 	type EngineObservationBase,
@@ -39,10 +41,10 @@ const turn_completed_schema = Schema.Struct({
 	type: Schema.Literal("turn.completed"),
 	usage: Schema.optional(
 		Schema.Struct({
-			cached_input_tokens: Schema.optional(Schema.Number),
-			input_tokens: Schema.optional(Schema.Number),
-			output_tokens: Schema.optional(Schema.Number),
-			reasoning_output_tokens: Schema.optional(Schema.Number),
+			cached_input_tokens: Schema.optional(TokenCount),
+			input_tokens: Schema.optional(TokenCount),
+			output_tokens: Schema.optional(TokenCount),
+			reasoning_output_tokens: Schema.optional(TokenCount),
 		}),
 	),
 });
@@ -343,6 +345,7 @@ export function NormaliseCodexExecEvent(
 									{
 										...make_base(input, type, "usage"),
 										_tag: "usage" as const,
+										basis: "delta",
 										...(value.usage.input_tokens === undefined
 											? {}
 											: { input_tokens: value.usage.input_tokens }),

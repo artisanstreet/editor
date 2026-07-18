@@ -84,6 +84,7 @@ describe("Codex normalizer", () => {
 		expect(flattened[1]).toMatchObject({
 			entries: [{ id: "turn-1:plan:0", status: "in_progress", text: "Inspect" }],
 		});
+		expect(flattened[2]).toMatchObject({ basis: "cumulative" });
 	});
 
 	it("expands multi-question and multi-file frames into uniquely identified observations", async () => {
