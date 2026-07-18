@@ -7,6 +7,7 @@ import {
 	protocol,
 	utilityProcess,
 } from "electron";
+import { delimiter, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { resolve_desktop_paths } from "./paths";
@@ -24,7 +25,8 @@ protocol.registerSchemesAsPrivileged([
 	},
 ]);
 
-const allowed_url = (url: string) => url === `${DesktopRendererOrigin}/` || url.startsWith(`${DesktopRendererOrigin}/`);
+const allowed_url = (url: string) =>
+	url === `${DesktopRendererOrigin}/` || url.startsWith(`${DesktopRendererOrigin}/`);
 
 /** Starts exactly one hardened shell window and its dedicated backend utility process. */
 export const StartDesktop = async () => {
@@ -44,8 +46,15 @@ export const StartDesktop = async () => {
 		fork_utility: (utility_path) =>
 			utilityProcess.fork(utility_path, [], {
 				env: {
+					...process.env,
 					ARTISAN_DATABASE_PATH: paths.database_path,
 					ARTISAN_MIGRATIONS_PATH: paths.migrations_path,
+					NODE_PATH: [
+						join(dirname(utility_path), "native-runtime"),
+						process.env.NODE_PATH,
+					]
+						.filter(Boolean)
+						.join(delimiter),
 				},
 				serviceName: "artisan-backend",
 				stdio: "ignore",
@@ -91,7 +100,10 @@ export const StartDesktop = async () => {
 		return window;
 	};
 	ipcMain.handle(request_channel, (event) => {
-		if (event.sender !== main_window?.webContents || event.frameId !== event.sender.mainFrame.routingId) {
+		if (
+			event.sender !== main_window?.webContents ||
+			event.frameId !== event.sender.mainFrame.routingId
+		) {
 			throw new Error("Only the primary Artisan renderer may request a backend connection");
 		}
 

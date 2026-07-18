@@ -35,6 +35,9 @@ describe("desktop packaging configuration", () => {
 
 	it("keeps native modules unpacked and exposes only the narrow preload bridge", () => {
 		const config = readFileSync(new URL("desktop-builder.yml", root), "utf8");
+		const package_manifest = JSON.parse(
+			readFileSync(new URL("package.json", root), "utf8"),
+		) as { readonly scripts?: Record<string, string> };
 		const main = readFileSync(new URL("modules/desktop/src/main.ts", root), "utf8");
 		const preload = readFileSync(new URL("modules/desktop/src/preload.ts", root), "utf8");
 		const vite_config = readFileSync(new URL("desktop.vite.config.ts", root), "utf8");
@@ -46,11 +49,17 @@ describe("desktop packaging configuration", () => {
 		expect(config).toContain("from: .dist/desktop");
 		expect(config).toContain("from: .dist/frontend");
 		expect(config).not.toContain("from: .dist\n");
+		expect(package_manifest.scripts?.["build:desktop"]).toContain(
+			"@artisan/bounded-file-store-native run build",
+		);
 		expect(vite_config).toContain("Missing .dist/bounded-file-store-native/index.cjs");
 		expect(vite_config).toContain(
 			'"node-pty": resolve(import.meta.dirname, "modules/desktop/src/node-pty-shim.ts")',
 		);
-		expect(utility).toContain('"native-runtime"');
+		expect(main).toContain('join(dirname(utility_path), "native-runtime")');
+		expect(main).toContain("...process.env");
+		expect(main).toContain("process.env.NODE_PATH");
+		expect(utility).not.toContain("_initPaths");
 		expect(main).toContain("requestSingleInstanceLock");
 		expect(main).toContain("contextIsolation: true");
 		expect(main).toContain("nodeIntegration: false");
