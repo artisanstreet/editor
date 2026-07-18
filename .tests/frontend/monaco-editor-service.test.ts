@@ -16,6 +16,7 @@ import {
 
 class FakeModel implements MonacoModel {
 	disposed = false;
+	fail_dispose = false;
 	value: string;
 
 	constructor(
@@ -27,6 +28,7 @@ class FakeModel implements MonacoModel {
 
 	dispose = () => {
 		this.disposed = true;
+		if (this.fail_dispose) throw new Error(`model disposal failed: ${this.uri}`);
 	};
 	get_value = () => this.value;
 	set_value = (value: string) => {
@@ -36,12 +38,15 @@ class FakeModel implements MonacoModel {
 
 class FakeEditor implements MonacoEditor {
 	disposed = false;
+	fail_dispose = false;
+	fail_set_model = false;
 	model: MonacoModel | undefined;
 	restored: MonacoViewState | undefined;
 	saved: MonacoViewState | undefined;
 
 	dispose = () => {
 		this.disposed = true;
+		if (this.fail_dispose) throw new Error("editor disposal failed");
 	};
 	get_model = () => this.model;
 	restore_view_state = (state: MonacoViewState) => {
@@ -50,6 +55,7 @@ class FakeEditor implements MonacoEditor {
 	save_view_state = () => this.saved;
 	set_model = (model: MonacoModel | undefined) => {
 		this.model = model;
+		if (this.fail_set_model) throw new Error("set model failed");
 	};
 }
 
@@ -59,6 +65,7 @@ class FakeMonacoAdapter {
 	readonly models: Array<FakeModel> = [];
 	readonly models_by_uri = new Map<string, FakeModel>();
 	fail_next_editor = false;
+	fail_marker_uris = new Set<string>();
 
 	readonly adapter: MonacoAdapter = {
 		create_editor: () => {
@@ -79,6 +86,9 @@ class FakeMonacoAdapter {
 		},
 		set_markers: (model, _owner, diagnostics) => {
 			this.markers.set(model.uri, diagnostics);
+			if (this.fail_marker_uris.has(model.uri)) {
+				throw new Error(`marker cleanup failed: ${model.uri}`);
+			}
 		},
 	};
 }
@@ -150,6 +160,23 @@ describe("Monaco editor service", () => {
 		expect(fake.editors[1]!.model?.uri).toBe(MonacoUriForFile(FileA));
 		expect(fake.editors[1]!.restored).toEqual({ opaque: { top: 128 } });
 		expect(fake.editors[0]!.disposed).toBe(true);
+	});
+
+	it("preserves the active file view state across a direct editor remount", async () => {
+		const fake = new FakeMonacoAdapter();
+		await Scoped(
+			fake,
+			Effect.gen(function* () {
+				const service = yield* MonacoEditorService;
+				yield* service.Attach({});
+				yield* service.Activate(FileA);
+				fake.editors[0]!.saved = { opaque: { top: 256 } };
+				yield* service.Attach({});
+			}),
+		);
+
+		expect(fake.editors[0]!.disposed).toBe(true);
+		expect(fake.editors[1]!.restored).toEqual({ opaque: { top: 256 } });
 	});
 
 	it("leaves a recoverable detached state when a replacement editor cannot be created", async () => {
@@ -284,5 +311,43 @@ describe("Monaco editor service", () => {
 		expect(fake.editors[0]!.disposed).toBe(true);
 		expect(Option.isNone(outcome.state.active_file_key)).toBe(true);
 		expect(outcome.state.open_file_keys).toHaveLength(0);
+	});
+
+	it("attempts all close and scope releases when individual Monaco callbacks throw", async () => {
+		const fake = new FakeMonacoAdapter();
+		const result = await Scoped(
+			fake,
+			Effect.gen(function* () {
+				const service = yield* MonacoEditorService;
+				yield* service.Attach({});
+				yield* service.Activate(FileA);
+				yield* service.Activate(FileB);
+				fake.fail_marker_uris.add(MonacoUriForFile(FileA));
+				fake.models[1]!.fail_dispose = true;
+				return yield* service.Dispose.pipe(Effect.exit);
+			}),
+		);
+
+		expect(result._tag).toBe("Failure");
+		expect(fake.editors[0]!.disposed).toBe(true);
+		expect(fake.models[0]!.disposed).toBe(true);
+		expect(fake.models[1]!.disposed).toBe(true);
+	});
+
+	it("releases a closed model even when detaching it from the active editor throws", async () => {
+		const fake = new FakeMonacoAdapter();
+		const result = await Scoped(
+			fake,
+			Effect.gen(function* () {
+				const service = yield* MonacoEditorService;
+				yield* service.Attach({});
+				yield* service.Activate(FileA);
+				fake.editors[0]!.fail_set_model = true;
+				return yield* service.Close(FileA).pipe(Effect.exit);
+			}),
+		);
+
+		expect(result._tag).toBe("Failure");
+		expect(fake.models[0]!.disposed).toBe(true);
 	});
 });

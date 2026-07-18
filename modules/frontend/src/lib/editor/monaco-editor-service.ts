@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Option, Ref, Scope } from "effect";
+import { Cause, Context, Effect, Exit, Layer, Option, Ref, Scope } from "effect";
 
 export interface MonacoWorkspaceFile {
 	readonly id: string;
@@ -161,21 +161,39 @@ export const MakeMonacoEditorLayer = (adapter: MonacoAdapter) =>
 			const scope = yield* Scope.Scope;
 			const state = yield* Ref.make<InternalState>(EmptyState);
 
+			/**
+			 * Monaco disposal callbacks are external browser code. Attempt every
+			 * independent release and retain all defects instead of letting the first
+			 * one strand later models or editors.
+			 */
+			const ReleaseAll = (
+				releases: ReadonlyArray<Effect.Effect<void>>,
+			): Effect.Effect<void> =>
+				Effect.forEach(releases, Effect.exit).pipe(
+					Effect.flatMap((exits) => {
+						const [first_failure, ...remaining_failures] = exits.filter(Exit.isFailure);
+						if (first_failure === undefined) return Effect.void;
+						return Effect.failCause(
+							remaining_failures.reduce(
+								(cause, exit) => Cause.combine(cause, exit.cause),
+								first_failure.cause,
+							),
+						);
+					}),
+				);
+
 			const ReleaseModel = (managed: ManagedModel) =>
-				Effect.sync(() => {
-					adapter.set_markers(managed.model, "artisan", []);
-					managed.model.dispose();
-				});
+				ReleaseAll([
+					Effect.sync(() => adapter.set_markers(managed.model, "artisan", [])),
+					Effect.sync(() => managed.model.dispose()),
+				]);
 
 			const Dispose = Ref.modify(state, (current) => [current, EmptyState] as const).pipe(
 				Effect.flatMap((current) =>
-					Effect.sync(() => Option.getOrUndefined(current.editor)?.dispose()).pipe(
-						Effect.andThen(
-							Effect.forEach(current.models.values(), ReleaseModel, {
-								discard: true,
-							}),
-						),
-					),
+					ReleaseAll([
+						Effect.sync(() => Option.getOrUndefined(current.editor)?.dispose()),
+						...Array.from(current.models.values(), ReleaseModel),
+					]),
 				),
 			);
 
@@ -184,20 +202,33 @@ export const MakeMonacoEditorLayer = (adapter: MonacoAdapter) =>
 			const Attach = (host: object) =>
 				Effect.gen(function* () {
 					const current = yield* Ref.get(state);
+					const active_key = Option.getOrUndefined(current.active_file_key);
+					const active =
+						active_key === undefined ? undefined : current.models.get(active_key);
+					const view_state = yield* Effect.sync(() =>
+						Option.getOrUndefined(current.editor)?.save_view_state(),
+					);
+					const models = new Map(current.models);
+					if (active !== undefined && view_state !== undefined) {
+						models.set(active_key!, { ...active, view_state: Option.some(view_state) });
+					}
 					yield* Effect.sync(() => Option.getOrUndefined(current.editor)?.dispose());
-					yield* Ref.set(state, { ...current, editor: Option.none() });
+					yield* Ref.set(state, { ...current, editor: Option.none(), models });
 					const editor = yield* Effect.sync(() => adapter.create_editor(host));
 					const latest = yield* Ref.get(state);
-					const active_key = Option.getOrUndefined(latest.active_file_key);
-					const active =
-						active_key === undefined ? undefined : latest.models.get(active_key);
+					const latest_active_key = Option.getOrUndefined(latest.active_file_key);
+					const latest_active =
+						latest_active_key === undefined
+							? undefined
+							: latest.models.get(latest_active_key);
 					yield* Effect.sync(() => {
-						editor.set_model(active?.model);
-						const view_state =
-							active === undefined
+						editor.set_model(latest_active?.model);
+						const latest_view_state =
+							latest_active === undefined
 								? undefined
-								: Option.getOrUndefined(active.view_state);
-						if (view_state !== undefined) editor.restore_view_state(view_state);
+								: Option.getOrUndefined(latest_active.view_state);
+						if (latest_view_state !== undefined)
+							editor.restore_view_state(latest_view_state);
 					});
 					yield* Ref.set(state, { ...latest, editor: Option.some(editor) });
 				});
@@ -373,10 +404,12 @@ export const MakeMonacoEditorLayer = (adapter: MonacoAdapter) =>
 						] as const;
 					});
 					if (closed === undefined) return;
-					if (closed.is_active) {
-						yield* Effect.sync(() => closed.editor?.set_model(undefined));
-					}
-					yield* ReleaseModel(closed.managed);
+					yield* ReleaseAll([
+						...(closed.is_active
+							? [Effect.sync(() => closed.editor?.set_model(undefined))]
+							: []),
+						ReleaseModel(closed.managed),
+					]);
 				});
 
 			const Current = Ref.get(state).pipe(
