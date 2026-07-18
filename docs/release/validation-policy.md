@@ -66,3 +66,41 @@ are additional evidence only when their corresponding validated release policy
 requires them; a skipped opt-in job is not an ordinary-CI failure. Record the
 runner identity, selected opt-ins, and outcome in the release record without
 including sensitive command output or fixture data.
+
+## Desktop integration dependency gates
+
+The current renderer release contract is a strict static Svelte build to
+`.dist/frontend`, validated by `pnpm run check:frontend` and included in
+`pnpm run validate`. Renderer source remains limited to the protocol and
+renderer-safe transport client boundary. The transport package exports typed
+Electron MessagePort shape adapters without importing Electron, and its
+in-process MessageChannel harness proves reconnect, replay, bounded control
+and stream traffic, and scoped teardown against the same client contract. The
+current evidence is `.tests/transport/artisan-client.test.ts` and
+`.tests/transport/artisan-client-protocol-server.test.ts`; neither is
+packaged-Electron restart equivalence.
+
+This is not yet an Electron package. There is no Electron main/utility/renderer
+bootstrap, packager configuration, unpack policy, or packaged-process restart
+fixture in this repository. Consequently, the static build and shape-adapter
+checks are not evidence that an ASAR layout is correct, that the native addon
+is unpacked and loadable, or that a transferred Electron `MessagePortMain`
+survives a utility-process restart. The Electron slice must add a dedicated
+packaged-desktop gate before any release relies on those claims. That gate must:
+
+- build the existing static renderer and package it as the renderer payload;
+- assert the main/utility entry points and production-only files are present in
+  the expected package layout;
+- assert the bounded native addon is explicitly unpacked when the production
+  desktop target includes it, while keeping ordinary CI free of addon loading;
+- run the existing typed client reconnect/replay fixtures through transferred
+  Electron control and stream ports, including a forced utility-process restart;
+- prove single-instance ownership and cleanup without publishing temporary
+  workspaces, databases, or logs.
+
+The current visual-fixture route provides source-level semantic, reduced-motion,
+high-contrast, long-label, and simulated 200% scale assertions. It is not a
+mounted-browser accessibility or responsive proof: no browser-runner dependency
+or Electron bootstrap is installed. Once the desktop slice selects a browser or
+packaged-Electron runner, add mounted keyboard/focus, accessible-name, computed
+responsive-layout, and real browser-zoom checks to that dedicated gate.
