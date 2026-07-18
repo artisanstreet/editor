@@ -101,6 +101,27 @@ import {
 	ModelBehaviourSnapshot,
 	ModelBehaviourUpdateRequest,
 } from "./model-behaviour";
+import {
+	PreviewAssetMetadataQuery,
+	PreviewBrowserLaunch,
+	PreviewBrowserLaunchRequest,
+	PreviewInspectionRequest,
+	PreviewInspectionResult,
+	PreviewInspectionSession,
+	PreviewInspectionSessionUpdatedEvent,
+	PreviewInspectionSessionCloseRequest,
+	PreviewInspectionSessionOpenRequest,
+	PreviewTarget,
+	PreviewTargetGetQuery,
+	PreviewTargetListQuery,
+	PreviewTargetRegistration,
+	PreviewTargetRemoveRequest,
+	PreviewTargetStateRequest,
+	PreviewTargetUpdatedEvent,
+	RichLinkAssetMetadata,
+	RichLinkResolution,
+	RichLinkResolveQuery,
+} from "./preview";
 
 export * from "./thread";
 export * from "./guidance";
@@ -108,6 +129,7 @@ export * from "./model-behaviour";
 export * from "./workspace-changes";
 export * from "./git";
 export * from "./artisan-tools";
+export * from "./preview";
 
 const FrontendTraceMetadata = {
 	message_id: Identifier,
@@ -1002,6 +1024,8 @@ export const EventPayload = Schema.Union([
 	ArtisanApprovalUpdatedEvent,
 	ArtisanAssumptionEvent,
 	ArtisanNativeActionEvent,
+	PreviewTargetUpdatedEvent,
+	PreviewInspectionSessionUpdatedEvent,
 ]);
 
 export type EventPayload = typeof EventPayload.Type;
@@ -1437,6 +1461,168 @@ export const OrchestrationGraphQueryEnvelope = Schema.Struct({
 });
 
 export type OrchestrationGraphQueryEnvelope = typeof OrchestrationGraphQueryEnvelope.Type;
+
+/** Lists explicit local preview targets without rendering their pages in Artisan. */
+export const PreviewTargetListQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("preview.target.list.query"),
+	payload: PreviewTargetListQuery,
+});
+export type PreviewTargetListQueryEnvelope = typeof PreviewTargetListQueryEnvelope.Type;
+
+export const PreviewTargetListQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("preview.target.list.query.result"),
+	payload: Schema.Struct({ targets: Schema.Array(PreviewTarget) }),
+});
+export type PreviewTargetListQueryResultEnvelope = typeof PreviewTargetListQueryResultEnvelope.Type;
+
+export const PreviewTargetGetQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("preview.target.get.query"),
+	payload: PreviewTargetGetQuery,
+});
+export type PreviewTargetGetQueryEnvelope = typeof PreviewTargetGetQueryEnvelope.Type;
+
+export const PreviewTargetGetQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("preview.target.get.query.result"),
+	payload: PreviewTarget,
+});
+export type PreviewTargetGetQueryResultEnvelope = typeof PreviewTargetGetQueryResultEnvelope.Type;
+
+export const PreviewTargetRegisterEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("preview.target.register"),
+	payload: PreviewTargetRegistration,
+});
+export type PreviewTargetRegisterEnvelope = typeof PreviewTargetRegisterEnvelope.Type;
+
+export const PreviewTargetProbeEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("preview.target.probe"),
+	payload: PreviewTargetGetQuery,
+});
+export type PreviewTargetProbeEnvelope = typeof PreviewTargetProbeEnvelope.Type;
+
+export const PreviewTargetStateEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("preview.target.state"),
+	payload: PreviewTargetStateRequest,
+});
+export type PreviewTargetStateEnvelope = typeof PreviewTargetStateEnvelope.Type;
+
+export const PreviewTargetRemoveEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("preview.target.remove"),
+	payload: PreviewTargetRemoveRequest,
+});
+export type PreviewTargetRemoveEnvelope = typeof PreviewTargetRemoveEnvelope.Type;
+
+/** Returns a correlated target mutation result; removal returns the removed target for lifecycle attribution. */
+export const PreviewTargetMutationResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("preview.target.mutation.result"),
+	payload: PreviewTarget,
+});
+export type PreviewTargetMutationResultEnvelope = typeof PreviewTargetMutationResultEnvelope.Type;
+
+export const RichLinkResolveQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("preview.rich_link.resolve.query"),
+	payload: RichLinkResolveQuery,
+});
+export type RichLinkResolveQueryEnvelope = typeof RichLinkResolveQueryEnvelope.Type;
+
+export const RichLinkResolveQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("preview.rich_link.resolve.query.result"),
+	payload: RichLinkResolution,
+});
+export type RichLinkResolveQueryResultEnvelope = typeof RichLinkResolveQueryResultEnvelope.Type;
+
+export const PreviewAssetMetadataQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("preview.asset.metadata.query"),
+	payload: PreviewAssetMetadataQuery,
+});
+export type PreviewAssetMetadataQueryEnvelope = typeof PreviewAssetMetadataQueryEnvelope.Type;
+
+export const PreviewAssetMetadataQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("preview.asset.metadata.query.result"),
+	payload: RichLinkAssetMetadata,
+});
+export type PreviewAssetMetadataQueryResultEnvelope =
+	typeof PreviewAssetMetadataQueryResultEnvelope.Type;
+
+export const PreviewBrowserLaunchEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("preview.browser.launch"),
+	payload: PreviewBrowserLaunchRequest,
+});
+export type PreviewBrowserLaunchEnvelope = typeof PreviewBrowserLaunchEnvelope.Type;
+
+export const PreviewBrowserLaunchResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("preview.browser.launch.result"),
+	payload: PreviewBrowserLaunch,
+});
+export type PreviewBrowserLaunchResultEnvelope = typeof PreviewBrowserLaunchResultEnvelope.Type;
+
+export const PreviewInspectionSessionOpenEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("preview.inspection.open"),
+	payload: PreviewInspectionSessionOpenRequest,
+});
+export type PreviewInspectionSessionOpenEnvelope = typeof PreviewInspectionSessionOpenEnvelope.Type;
+
+export const PreviewInspectionSessionOpenResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("preview.inspection.open.result"),
+	payload: PreviewInspectionSession,
+});
+export type PreviewInspectionSessionOpenResultEnvelope =
+	typeof PreviewInspectionSessionOpenResultEnvelope.Type;
+
+export const PreviewInspectionEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("preview.inspection.inspect"),
+	payload: PreviewInspectionRequest,
+});
+export type PreviewInspectionEnvelope = typeof PreviewInspectionEnvelope.Type;
+
+export const PreviewInspectionResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("preview.inspection.inspect.result"),
+	payload: PreviewInspectionResult,
+});
+export type PreviewInspectionResultEnvelope = typeof PreviewInspectionResultEnvelope.Type;
+
+export const PreviewInspectionSessionCloseEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("preview.inspection.close"),
+	payload: PreviewInspectionSessionCloseRequest,
+});
+export type PreviewInspectionSessionCloseEnvelope =
+	typeof PreviewInspectionSessionCloseEnvelope.Type;
+
+export const PreviewInspectionSessionCloseResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("preview.inspection.close.result"),
+	payload: PreviewInspectionSession,
+});
+export type PreviewInspectionSessionCloseResultEnvelope =
+	typeof PreviewInspectionSessionCloseResultEnvelope.Type;
 
 /** Returns one provider-neutral orchestration graph projection. */
 export const OrchestrationGraphQueryResultEnvelope = Schema.Struct({
@@ -1874,6 +2060,18 @@ export const InboundControlEnvelope = Schema.Union([
 	ArtisanApprovalListQueryEnvelope,
 	WorkspaceFileDiscoveryQueryEnvelope,
 	WorkspaceLanguageCapabilitiesQueryEnvelope,
+	PreviewTargetListQueryEnvelope,
+	PreviewTargetGetQueryEnvelope,
+	PreviewTargetRegisterEnvelope,
+	PreviewTargetProbeEnvelope,
+	PreviewTargetStateEnvelope,
+	PreviewTargetRemoveEnvelope,
+	RichLinkResolveQueryEnvelope,
+	PreviewAssetMetadataQueryEnvelope,
+	PreviewBrowserLaunchEnvelope,
+	PreviewInspectionSessionOpenEnvelope,
+	PreviewInspectionEnvelope,
+	PreviewInspectionSessionCloseEnvelope,
 	SubscribeEnvelope,
 	UnsubscribeEnvelope,
 	AckEnvelope,
@@ -1909,6 +2107,15 @@ export const OutboundControlEnvelope = Schema.Union([
 	ArtisanApprovalListQueryResultEnvelope,
 	WorkspaceFileDiscoveryQueryResultEnvelope,
 	WorkspaceLanguageCapabilitiesQueryResultEnvelope,
+	PreviewTargetListQueryResultEnvelope,
+	PreviewTargetGetQueryResultEnvelope,
+	PreviewTargetMutationResultEnvelope,
+	RichLinkResolveQueryResultEnvelope,
+	PreviewAssetMetadataQueryResultEnvelope,
+	PreviewBrowserLaunchResultEnvelope,
+	PreviewInspectionSessionOpenResultEnvelope,
+	PreviewInspectionResultEnvelope,
+	PreviewInspectionSessionCloseResultEnvelope,
 	SubscriptionStartedEnvelope,
 	SubscriptionStoppedEnvelope,
 	ThreadListSnapshotEnvelope,

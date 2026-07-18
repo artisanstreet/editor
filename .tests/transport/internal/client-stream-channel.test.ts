@@ -1,8 +1,11 @@
-import { Deferred, Effect, Fiber, Option, Stream } from "effect";
+import { Deferred, Effect, Fiber, Option, Schema, Stream } from "effect";
 import { describe, expect, it } from "vitest";
 
 import {
 	ArtisanClientError,
+	DecodeMessagePortStreamFrame,
+	DecodeTransportFrame,
+	MessagePortStreamEndFrame,
 	type MessagePortConnection,
 	type MessagePortLike,
 } from "@artisan/transport";
@@ -25,6 +28,30 @@ function make_fake_port(
 }
 
 describe("client stream channel", () => {
+	it("decodes a logical not-found close frame", async () => {
+		const stream_frame = {
+			channel_id: "binary_stream_1",
+			channel_sequence: 0,
+			kind: "stream.end",
+			reason: "not_found",
+			stream_id: "asset_1",
+		} as const;
+		await Effect.runPromise(
+			Schema.decodeUnknownEffect(MessagePortStreamEndFrame)(stream_frame),
+		);
+		await Effect.runPromise(DecodeMessagePortStreamFrame(stream_frame));
+		const frame = await Effect.runPromise(
+			DecodeTransportFrame({
+				connection_id: "connection_1",
+				frame: stream_frame,
+				kind: "transport.stream",
+				transport_version: 1,
+			}),
+		);
+
+		expect(frame).toMatchObject({ frame: { kind: "stream.end", reason: "not_found" } });
+	});
+
 	it("fails a full client queue and cancels its exact logical stream", async () => {
 		const sent: Array<unknown> = [];
 		const result = await Effect.runPromise(

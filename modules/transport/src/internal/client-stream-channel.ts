@@ -236,12 +236,16 @@ export const make_client_stream_channel = (
 					return;
 				}
 
+				const missing_asset = frame.reason === "not_found";
+				const source_unavailable = frame.reason === "source_error";
 				const code =
 					frame.reason === "overflow"
 						? "stream_overflow"
-						: exact_end
-							? "stream_closed"
-							: "stream_gap";
+						: missing_asset && exact_end
+							? "stream_not_found"
+							: exact_end
+								? "stream_closed"
+								: "stream_gap";
 
 				yield* fail_channel(
 					frame.channel_id,
@@ -249,8 +253,13 @@ export const make_client_stream_channel = (
 						code,
 						frame.reason === "overflow"
 							? "The backend stream queue overflowed."
-							: "The binary stream closed before clean completion.",
+							: missing_asset && exact_end
+								? "The requested binary stream was not found."
+								: source_unavailable && exact_end
+									? "The binary stream source is temporarily unavailable."
+									: "The binary stream closed before clean completion.",
 						new Error(`binary stream ended with ${frame.reason}`),
+						source_unavailable && exact_end,
 					),
 				);
 			});

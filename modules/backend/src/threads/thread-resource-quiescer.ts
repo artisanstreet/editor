@@ -3,6 +3,7 @@ import { Context, Data, Effect, Layer } from "effect";
 import { AgentGraphOrchestrator } from "../orchestration/agent-graph-orchestrator";
 import { AgentOrchestrator } from "../orchestration/agent-orchestrator";
 import { TerminalSessionService } from "../terminal/terminal-sessions";
+import { PreviewCoordinator } from "../preview/preview-coordinator";
 
 /** Wraps a failure to stop live resources before durable thread erasure. */
 export class ThreadResourceQuiescenceFailure extends Data.TaggedError(
@@ -26,6 +27,7 @@ export const ThreadResourceQuiescerLive = Layer.effect(
 	Effect.gen(function* () {
 		const graph = yield* AgentGraphOrchestrator;
 		const orchestration = yield* AgentOrchestrator;
+		const previews = yield* PreviewCoordinator;
 		const terminals = yield* TerminalSessionService;
 		const Quiesce = (thread_id: string) =>
 			Effect.all(
@@ -33,6 +35,7 @@ export const ThreadResourceQuiescerLive = Layer.effect(
 					graph.QuiesceThread(thread_id),
 					orchestration.QuiesceThread(thread_id),
 					terminals.QuiesceThread(thread_id),
+					previews.QuiesceThread(thread_id),
 				],
 				{ concurrency: "unbounded", discard: true },
 			).pipe(Effect.mapError((cause) => new ThreadResourceQuiescenceFailure({ cause })));

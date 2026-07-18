@@ -1,6 +1,6 @@
 import { Context, Data, Effect, Layer, Option, Stream } from "effect";
 
-import { RichLinkAssetStore, TerminalSessionService } from "@artisan/backend";
+import { PreviewCoordinator, TerminalSessionService } from "@artisan/backend";
 
 /** Identifies a binary stream source failure safe to expose across a port. */
 export type BinaryStreamSourceErrorCode = "not_found" | "source_error" | "unsupported";
@@ -33,7 +33,7 @@ function source_error(stream_id: string, code: BinaryStreamSourceErrorCode, caus
 export const BackendBinaryStreamSourceLive = Layer.effect(
 	BinaryStreamSource,
 	Effect.gen(function* () {
-		const assets = yield* RichLinkAssetStore;
+		const previews = yield* PreviewCoordinator;
 		const terminals = yield* TerminalSessionService;
 
 		const open = (stream_id: string) => {
@@ -48,14 +48,25 @@ export const BackendBinaryStreamSourceLive = Layer.effect(
 							),
 						),
 					),
-					Effect.mapError((cause) => source_error(stream_id, "not_found", cause)),
+					Effect.mapError((cause) => source_error(stream_id, "source_error", cause)),
 				);
 			}
 
 			if (stream_id.startsWith("asset:")) {
 				const asset_id = stream_id.slice("asset:".length);
+				const valid_asset_id = /^[a-f0-9]{64}$/u.test(asset_id);
 
-				return assets.Get(asset_id).pipe(
+				if (!valid_asset_id) {
+					return Effect.fail(
+						source_error(
+							stream_id,
+							"unsupported",
+							new Error("asset streams require a lowercase SHA-256 asset id"),
+						),
+					);
+				}
+
+				return previews.Asset(asset_id).pipe(
 					Effect.flatMap((asset) =>
 						Option.match(asset, {
 							onNone: () =>
@@ -69,6 +80,7 @@ export const BackendBinaryStreamSourceLive = Layer.effect(
 							onSome: (stored) => Effect.succeed(Stream.succeed(stored.body)),
 						}),
 					),
+					Effect.mapError((cause) => source_error(stream_id, "not_found", cause)),
 				);
 			}
 

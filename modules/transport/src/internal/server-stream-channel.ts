@@ -226,7 +226,6 @@ export const make_server_stream_channel = (
 						Option.isSome(failure) && failure.value.code === "not_found"
 							? "not_found"
 							: "source_error";
-
 					yield* send(stream_end(frame.channel_id, 0, frame.stream_id, reason));
 
 					return;

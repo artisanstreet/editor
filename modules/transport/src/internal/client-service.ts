@@ -31,6 +31,18 @@ import {
 	type ModelBehaviourUpdateEnvelope,
 	type OrchestrationGraphQueryEnvelope,
 	type OrchestrationGroupListQueryEnvelope,
+	type PreviewAssetMetadataQueryEnvelope,
+	type PreviewBrowserLaunchEnvelope,
+	type PreviewInspectionEnvelope,
+	type PreviewInspectionSessionCloseEnvelope,
+	type PreviewInspectionSessionOpenEnvelope,
+	type PreviewTargetGetQueryEnvelope,
+	type PreviewTargetListQueryEnvelope,
+	type PreviewTargetProbeEnvelope,
+	type PreviewTargetRegisterEnvelope,
+	type PreviewTargetRemoveEnvelope,
+	type PreviewTargetStateEnvelope,
+	type RichLinkResolveQueryEnvelope,
 	type TerminalListQueryEnvelope,
 	type ThreadListQueryEnvelope,
 	type ThreadRetentionQueryEnvelope,
@@ -57,6 +69,13 @@ import {
 	type ArtisanModelBehaviourDriftInput,
 	type ArtisanModelBehaviourRetryInput,
 	type ArtisanModelBehaviourUpdateInput,
+	type ArtisanPreviewAssetMetadataInput,
+	type ArtisanPreviewInspectionInput,
+	type ArtisanPreviewInspectionOpenInput,
+	type ArtisanPreviewTargetInput,
+	type ArtisanPreviewTargetRegistrationInput,
+	type ArtisanPreviewTargetStateInput,
+	type ArtisanRichLinkResolveInput,
 	type ArtisanClientError,
 	type ArtisanClientOptions,
 	type ArtisanCommandInput,
@@ -396,6 +415,206 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					return result.kind === "git.diff.query.result"
 						? result.payload
 						: yield* Effect.die("Git diff response narrowed incorrectly");
+				});
+			const list_preview_targets = (input = {}) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: PreviewTargetListQueryEnvelope = {
+						...trace,
+						kind: "preview.target.list.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"preview.target.list.query.result",
+					);
+
+					return result.kind === "preview.target.list.query.result"
+						? result.payload.targets
+						: yield* Effect.die("Preview target list response narrowed incorrectly");
+				});
+			const get_preview_target = (input: ArtisanPreviewTargetInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: PreviewTargetGetQueryEnvelope = {
+						...trace,
+						kind: "preview.target.get.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"preview.target.get.query.result",
+					);
+
+					return result.kind === "preview.target.get.query.result"
+						? result.payload
+						: yield* Effect.die("Preview target response narrowed incorrectly");
+				});
+			const get_preview_asset_metadata = (input: ArtisanPreviewAssetMetadataInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: PreviewAssetMetadataQueryEnvelope = {
+						...trace,
+						kind: "preview.asset.metadata.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"preview.asset.metadata.query.result",
+					);
+
+					return result.kind === "preview.asset.metadata.query.result"
+						? result.payload
+						: yield* Effect.die("Preview asset metadata response narrowed incorrectly");
+				});
+			const resolve_rich_link = (input: ArtisanRichLinkResolveInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: RichLinkResolveQueryEnvelope = {
+						...trace,
+						kind: "preview.rich_link.resolve.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"preview.rich_link.resolve.query.result",
+					);
+
+					return result.kind === "preview.rich_link.resolve.query.result"
+						? result.payload
+						: yield* Effect.die("Rich-link response narrowed incorrectly");
+				});
+			type PreviewTargetMutationEnvelope =
+				| PreviewTargetRegisterEnvelope
+				| PreviewTargetProbeEnvelope
+				| PreviewTargetRemoveEnvelope
+				| PreviewTargetStateEnvelope;
+			const mutate_preview_target = (envelope: PreviewTargetMutationEnvelope) =>
+				Effect.gen(function* () {
+					const result = yield* requests.Request(
+						envelope,
+						"preview.target.mutation.result",
+					);
+
+					return result.kind === "preview.target.mutation.result"
+						? result.payload
+						: yield* Effect.die(
+								"Preview target mutation response narrowed incorrectly",
+							);
+				});
+			const register_preview_target = (input: ArtisanPreviewTargetRegistrationInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+
+					return yield* mutate_preview_target({
+						...trace,
+						kind: "preview.target.register",
+						payload: input,
+					});
+				});
+			const probe_preview_target = (input: ArtisanPreviewTargetInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+
+					return yield* mutate_preview_target({
+						...trace,
+						kind: "preview.target.probe",
+						payload: input,
+					});
+				});
+			const set_preview_target_state = (input: ArtisanPreviewTargetStateInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+
+					return yield* mutate_preview_target({
+						...trace,
+						kind: "preview.target.state",
+						payload: input,
+					});
+				});
+			const remove_preview_target = (input: ArtisanPreviewTargetInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+
+					return yield* mutate_preview_target({
+						...trace,
+						kind: "preview.target.remove",
+						payload: input,
+					});
+				});
+			const launch_preview_in_external_browser = (input: ArtisanPreviewTargetInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: PreviewBrowserLaunchEnvelope = {
+						...trace,
+						kind: "preview.browser.launch",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"preview.browser.launch.result",
+					);
+
+					return result.kind === "preview.browser.launch.result"
+						? result.payload
+						: yield* Effect.die(
+								"External-browser launch response narrowed incorrectly",
+							);
+				});
+			const open_preview_inspection_session = (input: ArtisanPreviewInspectionOpenInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: PreviewInspectionSessionOpenEnvelope = {
+						...trace,
+						kind: "preview.inspection.open",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"preview.inspection.open.result",
+					);
+
+					return result.kind === "preview.inspection.open.result"
+						? result.payload
+						: yield* Effect.die(
+								"Inspection-session open response narrowed incorrectly",
+							);
+				});
+			const inspect_preview_session = (input: ArtisanPreviewInspectionInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: PreviewInspectionEnvelope = {
+						...trace,
+						kind: "preview.inspection.inspect",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"preview.inspection.inspect.result",
+					);
+
+					return result.kind === "preview.inspection.inspect.result"
+						? result.payload
+						: yield* Effect.die("Inspection response narrowed incorrectly");
+				});
+			const close_preview_inspection_session = (session_id: string) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: PreviewInspectionSessionCloseEnvelope = {
+						...trace,
+						kind: "preview.inspection.close",
+						payload: { session_id },
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"preview.inspection.close.result",
+					);
+
+					return result.kind === "preview.inspection.close.result"
+						? result.payload
+						: yield* Effect.die(
+								"Inspection-session close response narrowed incorrectly",
+							);
 				});
 
 			type GitMutationEnvelope =
@@ -989,6 +1208,8 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				ListArtisanApprovals: list_artisan_approvals,
 				ListArtisanToolInvocations: list_artisan_tool_invocations,
 				ListArtisanTools: list_artisan_tools,
+				GetPreviewAssetMetadata: get_preview_asset_metadata,
+				GetPreviewTarget: get_preview_target,
 				GetThreadRetentionPolicy: get_thread_retention_policy,
 				GetThreadWork: get_thread_work,
 				GetWorkspaceChangeDiff: get_workspace_change_diff,
@@ -997,7 +1218,12 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				ListWorkspaceFiles: list_workspace_files,
 				ListTerminals: list_terminals,
 				ListThreads: list_threads,
+				ListPreviewTargets: list_preview_targets,
 				OpenAsset: (asset_id) => streams.Open(`asset:${asset_id}`),
+				LaunchPreviewInExternalBrowser: launch_preview_in_external_browser,
+				OpenPreviewInspectionSession: open_preview_inspection_session,
+				InspectPreviewSession: inspect_preview_session,
+				ClosePreviewInspectionSession: close_preview_inspection_session,
 				OpenTerminalOutput: (terminal_id) => streams.Open(`terminal:${terminal_id}`),
 				ReadWorkspaceFile: read_workspace_file,
 				ResolveGlobalGuidanceDrift: resolve_global_guidance_drift,
@@ -1005,13 +1231,18 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				ResolveGitMutation: resolve_git_mutation,
 				ResolveArtisanApproval: resolve_artisan_approval,
 				ResolveModelBehaviourDrift: resolve_model_behaviour_drift,
+				ResolveRichLink: resolve_rich_link,
 				RetryGlobalGuidanceSync: retry_global_guidance_sync,
 				RetryModelBehaviourSync: retry_model_behaviour_sync,
+				ProbePreviewTarget: probe_preview_target,
+				RegisterPreviewTarget: register_preview_target,
+				RemovePreviewTarget: remove_preview_target,
 				ReplaceWorkspaceFile: replace_workspace_file,
 				ExecuteArtisanTool: execute_artisan_tool,
 				ReviewWorkspaceChange: review_workspace_change,
 				RollbackWorkspaceChange: rollback_workspace_change,
 				SelectGlobalGuidance: select_global_guidance,
+				SetPreviewTargetState: set_preview_target_state,
 				SubscribeOrchestrationGraph: subscriptions.SubscribeOrchestrationGraph,
 				SubscribeOrchestrationGroups: subscriptions.SubscribeOrchestrationGroups,
 				SubscribeThreadList: subscriptions.SubscribeThreadList,

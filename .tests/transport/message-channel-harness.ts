@@ -39,6 +39,7 @@ interface NativeSession {
 
 /** Configures one real-MessageChannel integration harness. */
 export interface TransportHarnessOptions {
+	readonly binary_stream_errors?: Readonly<Record<string, BinaryStreamSourceError["code"]>>;
 	readonly binary_streams?: Readonly<Record<string, ReadonlyArray<Uint8Array>>>;
 	readonly client?: ArtisanClientOptions;
 	readonly drop_first_command_receipt?: boolean;
@@ -92,10 +93,22 @@ const is_command_receipt = (message: unknown) =>
 
 function make_binary_source_layer(
 	binary_streams: Readonly<Record<string, ReadonlyArray<Uint8Array>>>,
+	binary_stream_errors: Readonly<Record<string, BinaryStreamSourceError["code"]>>,
 ) {
 	return Layer.succeed(BinaryStreamSource, {
 		Open: (stream_id) => {
+			const error_code = binary_stream_errors[stream_id];
 			const chunks = binary_streams[stream_id];
+
+			if (error_code) {
+				return Effect.fail(
+					new BinaryStreamSourceError({
+						cause: new Error("test binary source failed"),
+						code: error_code,
+						stream_id,
+					}),
+				);
+			}
 
 			return chunks
 				? Effect.succeed(
@@ -219,9 +232,10 @@ async function make_transport_stack(
 	const binary_streams = options.binary_streams ?? {
 		"asset:asset_1": [Uint8Array.of(1, 2), Uint8Array.of(3, 4, 5)],
 	};
+	const binary_stream_errors = options.binary_stream_errors ?? {};
 	const server_layer = make_message_port_transport_server_layer(options.server).pipe(
 		Layer.provide(protocol_layer),
-		Layer.provide(make_binary_source_layer(binary_streams)),
+		Layer.provide(make_binary_source_layer(binary_streams, binary_stream_errors)),
 		Layer.provide(TransportRuntimeLive),
 	);
 	const server_runtime = ManagedRuntime.make(server_layer);

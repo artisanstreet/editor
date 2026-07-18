@@ -34,7 +34,13 @@ import {
 	OrchestrationGraphCommands,
 	TerminalCommands,
 	TerminalSessions,
+	PreviewCommands,
+	PreviewDispatchLeases,
+	PreviewInspectionSessions,
+	PreviewTargets,
+	JournalEvents,
 	ThreadTombstones,
+	Threads,
 } from "../../modules/backend/src/persistence/schema";
 import { ThreadReadModel } from "../../modules/backend/src/persistence/thread-read-model";
 
@@ -701,6 +707,198 @@ describe("thread erasure dispatch fence", () => {
 			expect(terminal_driver.opens()).toBe(0);
 			expect(result.commands).toEqual([]);
 			expect(result.sessions).toEqual([]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("erases durable preview targets, inspections, and commands with their thread", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({
+			database_path,
+			engines: [make_counting_engine("preview_erase").engine],
+			migrations_path,
+		});
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const erasure = yield* ThreadErasure;
+					const router = yield* ProtocolRouter;
+					const thread_id = "thread_preview_erase";
+					yield* router.Route(
+						command(thread_id, "preview_erase_create", {
+							title: "Preview erase",
+							type: "thread.create",
+						}),
+					);
+					yield* database.client.insert(PreviewTargets).values({
+						created_at: "2026-07-18T20:00:00.000Z",
+						health_json: null,
+						journal_sequence: 1,
+						last_error: null,
+						launch_state: "idle",
+						port: 5173,
+						project_id: "project",
+						removed_at: null,
+						routes_json: "[]",
+						source_id: null,
+						source_kind: null,
+						state: "registered",
+						target_id: "target_erase",
+						thread_id,
+						updated_at: "2026-07-18T20:00:00.000Z",
+						url: "http://localhost:5173/",
+						workspace_id: "workspace",
+					});
+					yield* database.client.insert(PreviewInspectionSessions).values({
+						closed_at: null,
+						connector_id: "connector",
+						journal_sequence: 1,
+						last_error: null,
+						opened_at: "2026-07-18T20:00:00.000Z",
+						reconnect_state: "connected",
+						session_id: "session_erase",
+						state: "open",
+						target_id: "target_erase",
+						thread_id,
+						updated_at: "2026-07-18T20:00:00.000Z",
+					});
+					yield* database.client.insert(PreviewCommands).values({
+						action: "register",
+						created_at: "2026-07-18T20:00:00.000Z",
+						journal_sequence: 1,
+						message_id: "preview_erase_command",
+						payload_json: "{}",
+						thread_id,
+					});
+					yield* database.client
+						.insert(ThreadErasureClaims)
+						.values({ claimed_at: "2026-07-18T20:01:00.000Z", thread_id });
+					yield* erasure.ResumeClaimed("2026-07-18T20:02:00.000Z");
+					return {
+						commands: yield* database.client.select().from(PreviewCommands),
+						inspections: yield* database.client
+							.select()
+							.from(PreviewInspectionSessions),
+						targets: yield* database.client.select().from(PreviewTargets),
+					};
+				}),
+			);
+			expect(result).toEqual({ commands: [], inspections: [], targets: [] });
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("releases an erasure claim without deleting a thread while its preview side effect lease is live", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({
+			database_path,
+			engines: [make_counting_engine("preview_lease_fence").engine],
+			migrations_path,
+		});
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const erasure = yield* ThreadErasure;
+					const router = yield* ProtocolRouter;
+					const thread_id = "thread_preview_active_lease";
+					yield* router.Route(
+						command(thread_id, "preview_active_lease_create", {
+							title: "Preview active lease",
+							type: "thread.create",
+						}),
+					);
+					yield* database.client.insert(PreviewDispatchLeases).values({
+						acquired_at: "2026-07-18T20:00:00.000Z",
+						expires_at: "2026-07-18T20:10:00.000Z",
+						kind: "launch",
+						lease_id: "active_preview_lease",
+						owner_instance_id: "other_runtime",
+						session_id: null,
+						target_id: null,
+						thread_id,
+					});
+					yield* database.client.insert(ThreadErasureClaims).values({
+						claimed_at: "2026-07-18T20:01:00.000Z",
+						thread_id,
+					});
+					const erased = yield* erasure.ResumeClaimed("2026-07-18T20:02:00.000Z");
+					return {
+						erased,
+						claims: yield* database.client.select().from(ThreadErasureClaims),
+						threads: yield* database.client.select().from(Threads),
+					};
+				}),
+			);
+			expect(result.erased).toEqual([]);
+			expect(result.claims).toEqual([]);
+			expect(result.threads.map((thread) => thread.thread_id)).toContain(
+				"thread_preview_active_lease",
+			);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("rejects an unrelated raw journal event during a claimed preview lease", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({
+			database_path,
+			engines: [make_counting_engine("preview_trigger_fence").engine],
+			migrations_path,
+		});
+		try {
+			const rejected = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const router = yield* ProtocolRouter;
+					const thread_id = "thread_preview_trigger_fence";
+					yield* router.Route(
+						command(thread_id, "preview_trigger_fence_create", {
+							title: "Preview trigger fence",
+							type: "thread.create",
+						}),
+					);
+					yield* database.client.insert(PreviewDispatchLeases).values({
+						acquired_at: "2026-07-18T20:00:00.000Z",
+						expires_at: "2026-07-18T20:10:00.000Z",
+						kind: "launch",
+						lease_id: "preview_trigger_live_lease",
+						owner_instance_id: "other_runtime",
+						session_id: null,
+						target_id: "preview_trigger_target",
+						thread_id,
+					});
+					yield* database.client.insert(ThreadErasureClaims).values({
+						claimed_at: "2026-07-18T20:01:00.000Z",
+						thread_id,
+					});
+
+					return yield* Effect.exit(
+						database.client.insert(JournalEvents).values({
+							agent_id: null,
+							causation_id: "unrelated_raw_causation",
+							correlation_id: "unrelated_raw_correlation",
+							event_id: "unrelated_raw_event",
+							event_type: "unrelated.raw.event",
+							occurred_at: "2026-07-18T20:02:00.000Z",
+							origin: "backend",
+							payload_json: '{"type":"unrelated.raw.event"}',
+							raw_origin_json: null,
+							run_id: null,
+							schema_version: 1,
+							stream_id: `thread:${thread_id}`,
+							stream_sequence: 2,
+							thread_id,
+						}),
+					);
+				}),
+			);
+
+			expect(rejected._tag).toBe("Failure");
 		} finally {
 			await runtime.dispose();
 		}

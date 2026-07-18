@@ -22,6 +22,21 @@ import type {
 	ModelBehaviourUpdateRequest,
 	OrchestrationGraph,
 	OrchestrationGroupListSnapshot,
+	PreviewAssetId,
+	PreviewAssetMetadataQuery,
+	PreviewBrowserLaunch,
+	PreviewInspectionRequest,
+	PreviewInspectionResult,
+	PreviewInspectionSession,
+	PreviewInspectionSessionOpenRequest,
+	PreviewTarget,
+	PreviewTargetGetQuery,
+	PreviewTargetListQuery,
+	PreviewTargetRegistration,
+	PreviewTargetStateRequest,
+	RichLinkResolution,
+	RichLinkResolveQuery,
+	RichLinkAssetMetadata,
 	StreamCursor,
 	TerminalSession,
 	ThreadListItem,
@@ -63,6 +78,7 @@ export type ArtisanClientErrorCode =
 	| "request_overflow"
 	| "stream_closed"
 	| "stream_gap"
+	| "stream_not_found"
 	| "stream_overflow"
 	| "subscription_overflow";
 
@@ -133,6 +149,27 @@ export interface ArtisanGitWorkspaceInput extends GitWorkspaceQuery {}
 
 /** Supplies the exact snapshot and scope for one bounded Git diff query. */
 export interface ArtisanGitDiffInput extends GitDiffQuery {}
+
+/** Supplies one local preview target registration without giving the renderer a browser capability. */
+export interface ArtisanPreviewTargetRegistrationInput extends PreviewTargetRegistration {}
+
+/** Supplies one explicit target id for a direct target action. */
+export interface ArtisanPreviewTargetInput extends PreviewTargetGetQuery {}
+
+/** Supplies one explicit target lifecycle state. */
+export interface ArtisanPreviewTargetStateInput extends PreviewTargetStateRequest {}
+
+/** Resolves safe, bounded rich-link metadata through the backend policy boundary. */
+export interface ArtisanRichLinkResolveInput extends RichLinkResolveQuery {}
+
+/** Opens an attributable external-browser inspection session. */
+export interface ArtisanPreviewInspectionOpenInput extends PreviewInspectionSessionOpenRequest {}
+
+/** Runs one bounded connector command within an explicit inspection session. */
+export interface ArtisanPreviewInspectionInput extends PreviewInspectionRequest {}
+
+/** Looks up retained asset metadata before opening its existing binary stream channel. */
+export interface ArtisanPreviewAssetMetadataInput extends PreviewAssetMetadataQuery {}
 
 /** Supplies one approval-bearing stage or unstage request with trace attribution. */
 export interface ArtisanGitIndexMutationInput {
@@ -339,6 +376,12 @@ export class ArtisanClient extends Context.Service<
 		readonly ListArtisanTools: (
 			input: ArtisanToolRegistryListInput,
 		) => Effect.Effect<ArtisanToolRegistryListQueryResult, ArtisanClientError>;
+		readonly GetPreviewAssetMetadata: (
+			input: ArtisanPreviewAssetMetadataInput,
+		) => Effect.Effect<RichLinkAssetMetadata, ArtisanClientError>;
+		readonly GetPreviewTarget: (
+			input: ArtisanPreviewTargetInput,
+		) => Effect.Effect<PreviewTarget, ArtisanClientError>;
 		readonly GetThreadRetentionPolicy: Effect.Effect<ThreadRetentionPolicy, ArtisanClientError>;
 		readonly GetThreadWork: (
 			thread_id: string,
@@ -348,6 +391,9 @@ export class ArtisanClient extends Context.Service<
 			workspace_id: string,
 		) => Effect.Effect<ReadonlyArray<TerminalSession>, ArtisanClientError>;
 		readonly ListThreads: Effect.Effect<ReadonlyArray<ThreadListItem>, ArtisanClientError>;
+		readonly ListPreviewTargets: (
+			input?: PreviewTargetListQuery,
+		) => Effect.Effect<ReadonlyArray<PreviewTarget>, ArtisanClientError>;
 		readonly ListWorkspaceChanges: (
 			input: ArtisanWorkspaceChangeListInput,
 		) => Effect.Effect<WorkspaceChangeListQueryResult, ArtisanClientError>;
@@ -361,7 +407,7 @@ export class ArtisanClient extends Context.Service<
 			input: ArtisanWorkspaceLanguageCapabilitiesInput,
 		) => Effect.Effect<WorkspaceLanguageCapabilitiesQueryResult, ArtisanClientError>;
 		readonly OpenAsset: (
-			asset_id: string,
+			asset_id: PreviewAssetId,
 		) => Effect.Effect<
 			Stream.Stream<Uint8Array, ArtisanClientError>,
 			ArtisanClientError,
@@ -419,6 +465,33 @@ export class ArtisanClient extends Context.Service<
 		readonly ResolveModelBehaviourDrift: (
 			input: ArtisanModelBehaviourDriftInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly ProbePreviewTarget: (
+			input: ArtisanPreviewTargetInput,
+		) => Effect.Effect<PreviewTarget, ArtisanClientError>;
+		readonly RegisterPreviewTarget: (
+			input: ArtisanPreviewTargetRegistrationInput,
+		) => Effect.Effect<PreviewTarget, ArtisanClientError>;
+		readonly RemovePreviewTarget: (
+			input: ArtisanPreviewTargetInput,
+		) => Effect.Effect<PreviewTarget, ArtisanClientError>;
+		readonly ResolveRichLink: (
+			input: ArtisanRichLinkResolveInput,
+		) => Effect.Effect<RichLinkResolution, ArtisanClientError>;
+		readonly LaunchPreviewInExternalBrowser: (
+			input: ArtisanPreviewTargetInput,
+		) => Effect.Effect<PreviewBrowserLaunch, ArtisanClientError>;
+		readonly OpenPreviewInspectionSession: (
+			input: ArtisanPreviewInspectionOpenInput,
+		) => Effect.Effect<PreviewInspectionSession, ArtisanClientError>;
+		readonly InspectPreviewSession: (
+			input: ArtisanPreviewInspectionInput,
+		) => Effect.Effect<PreviewInspectionResult, ArtisanClientError>;
+		readonly ClosePreviewInspectionSession: (
+			session_id: string,
+		) => Effect.Effect<PreviewInspectionSession, ArtisanClientError>;
+		readonly SetPreviewTargetState: (
+			input: ArtisanPreviewTargetStateInput,
+		) => Effect.Effect<PreviewTarget, ArtisanClientError>;
 		readonly RetryGlobalGuidanceSync: (
 			input: ArtisanGlobalGuidanceRetryInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;

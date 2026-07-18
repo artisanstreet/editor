@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import { Effect, Schema } from "effect";
 
 import { Identifier, StreamSequence } from "@artisan/protocol";
 
@@ -122,7 +122,7 @@ export const MessagePortStreamFrame = Schema.Union([
 	MessagePortStreamReadyFrame,
 	MessagePortStreamChunkFrame,
 	MessagePortStreamEndFrame,
-]);
+]).pipe(Schema.toTaggedUnion("kind"));
 
 export type MessagePortStreamFrame = typeof MessagePortStreamFrame.Type;
 
@@ -144,16 +144,101 @@ export const TransportFrame = Schema.Union([
 	TransportStreamFrame,
 	TransportErrorFrame,
 	TransportCloseFrame,
-]);
+]).pipe(Schema.toTaggedUnion("kind"));
 
 export type TransportFrame = typeof TransportFrame.Type;
 
-/** Strictly decodes one unknown structured-clone transport value. */
-export const DecodeTransportFrame = Schema.decodeUnknownEffect(TransportFrame, {
-	onExcessProperty: "error",
+const DecodeStreamFrameKind = Schema.decodeUnknownEffect(
+	Schema.Struct({
+		kind: Schema.Literals(["stream.bind", "stream.chunk", "stream.end", "stream.ready"]),
+	}),
+	{ onExcessProperty: "preserve" },
+);
+
+const DecodeTransportFrameKind = Schema.decodeUnknownEffect(
+	Schema.Struct({
+		kind: Schema.Literals([
+			"transport.close",
+			"transport.control",
+			"transport.error",
+			"transport.hello",
+			"transport.ready",
+			"transport.stream",
+		]),
+	}),
+	{ onExcessProperty: "preserve" },
+);
+
+const TransportStreamEnvelope = Schema.Struct({
+	connection_id: Identifier,
+	frame: Schema.Unknown,
+	kind: Schema.Literal("transport.stream"),
+	transport_version: TransportVersion,
 });
 
+/** Strictly decodes one unknown structured-clone transport value. */
+export const DecodeTransportFrame = (input: unknown) =>
+	DecodeTransportFrameKind(input).pipe(
+		Effect.flatMap((frame): Effect.Effect<TransportFrame, Schema.SchemaError> => {
+			switch (frame.kind) {
+				case "transport.close":
+					return Schema.decodeUnknownEffect(TransportCloseFrame, {
+						onExcessProperty: "error",
+					})(input);
+				case "transport.control":
+					return Schema.decodeUnknownEffect(TransportControlFrame, {
+						onExcessProperty: "error",
+					})(input);
+				case "transport.error":
+					return Schema.decodeUnknownEffect(TransportErrorFrame, {
+						onExcessProperty: "error",
+					})(input);
+				case "transport.hello":
+					return Schema.decodeUnknownEffect(TransportHelloFrame, {
+						onExcessProperty: "error",
+					})(input);
+				case "transport.ready":
+					return Schema.decodeUnknownEffect(TransportReadyFrame, {
+						onExcessProperty: "error",
+					})(input);
+				case "transport.stream":
+					return Schema.decodeUnknownEffect(TransportStreamEnvelope, {
+						onExcessProperty: "error",
+					})(input).pipe(
+						Effect.flatMap((envelope) =>
+							DecodeMessagePortStreamFrame(envelope.frame).pipe(
+								Effect.map((stream_frame) => ({
+									...envelope,
+									frame: stream_frame,
+								})),
+							),
+						),
+					);
+			}
+		}),
+	);
+
 /** Strictly decodes one logical high-volume stream frame. */
-export const DecodeMessagePortStreamFrame = Schema.decodeUnknownEffect(MessagePortStreamFrame, {
-	onExcessProperty: "error",
-});
+export const DecodeMessagePortStreamFrame = (input: unknown) =>
+	DecodeStreamFrameKind(input).pipe(
+		Effect.flatMap((frame): Effect.Effect<MessagePortStreamFrame, Schema.SchemaError> => {
+			switch (frame.kind) {
+				case "stream.bind":
+					return Schema.decodeUnknownEffect(MessagePortStreamBindFrame, {
+						onExcessProperty: "error",
+					})(input);
+				case "stream.chunk":
+					return Schema.decodeUnknownEffect(MessagePortStreamChunkFrame, {
+						onExcessProperty: "error",
+					})(input);
+				case "stream.end":
+					return Schema.decodeUnknownEffect(MessagePortStreamEndFrame, {
+						onExcessProperty: "error",
+					})(input);
+				case "stream.ready":
+					return Schema.decodeUnknownEffect(MessagePortStreamReadyFrame, {
+						onExcessProperty: "error",
+					})(input);
+			}
+		}),
+	);

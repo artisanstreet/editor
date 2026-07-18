@@ -7,6 +7,10 @@ import type {
 	ModelBehaviourSnapshot,
 	OrchestrationGraph,
 	OrchestrationGroupListSnapshot,
+	PreviewTarget,
+	PreviewTargetGetQuery,
+	RichLinkAssetMetadata,
+	RichLinkResolution,
 	TerminalSession,
 	ThreadListItem,
 	ThreadRetentionPolicy,
@@ -36,6 +40,9 @@ export interface FixtureArtisanClientData {
 	readonly orchestration_graph: OrchestrationGraph;
 	readonly orchestration_groups: OrchestrationGroupListSnapshot;
 	readonly transcript: ThreadTranscriptSnapshot;
+	readonly preview_assets: Readonly<Record<string, RichLinkAssetMetadata>>;
+	readonly preview_targets: ReadonlyArray<PreviewTarget>;
+	readonly rich_links: Readonly<Record<string, RichLinkResolution>>;
 	readonly terminal_output: Readonly<Record<string, Uint8Array>>;
 	readonly terminals: ReadonlyArray<TerminalSession>;
 	readonly thread_retention_policy: ThreadRetentionPolicy;
@@ -261,6 +268,31 @@ export const fixture_artisan_client_data = {
 			},
 		],
 	},
+	preview_assets: {
+		a3c6b9aa8f1fc9f2443493ba4f997ba3d0623af616c9cbff797e51189d5b2c44: {
+			asset_id: "a3c6b9aa8f1fc9f2443493ba4f997ba3d0623af616c9cbff797e51189d5b2c44",
+			bytes: 10,
+			content_type: "image/png",
+		},
+	} as Readonly<Record<string, RichLinkAssetMetadata>>,
+	preview_targets: [
+		{
+			created_at: fixture_timestamp,
+			id: "preview-artisan",
+			journal_sequence: 48,
+			launch_state: "idle",
+			port: 5173,
+			project_id: "project-artisan-editor",
+			routes: ["/", "/visual-fixtures"],
+			source: { kind: "terminal", terminal_id: "terminal-artisan" },
+			state: "healthy",
+			thread_id: "thread-artisan",
+			updated_at: fixture_timestamp,
+			url: "http://localhost:5173/",
+			workspace_id: "workspace-artisan-editor",
+		},
+	],
+	rich_links: {} as Readonly<Record<string, RichLinkResolution>>,
 	terminal_output: {
 		"terminal-editor-shell": new Uint8Array([
 			112, 110, 112, 109, 32, 114, 117, 110, 32, 118, 97, 108, 105, 100, 97, 116, 101, 10,
@@ -414,6 +446,17 @@ const FixtureReceipt = (command_id: string, journal_sequence = 48) =>
 		});
 	});
 
+const FixturePreviewTarget = (input: PreviewTargetGetQuery) =>
+	Effect.gen(function* () {
+		const target = fixture_artisan_client_data.preview_targets.find(
+			(candidate) => candidate.id === input.target_id,
+		);
+
+		return target === undefined
+			? yield* FixtureFailure(`Unknown fixture preview target: ${input.target_id}`)
+			: target;
+	});
+
 /** Complete deterministic Artisan client service used only by fixture compositions. */
 export const FixtureArtisanClientService = {
 	Command: (input) =>
@@ -473,6 +516,15 @@ export const FixtureArtisanClientService = {
 	GetModelBehaviour: Effect.gen(function* () {
 		return yield* Effect.succeed(fixture_artisan_client_data.model_behaviour);
 	}),
+	GetPreviewAssetMetadata: (input) =>
+		Effect.gen(function* () {
+			const asset = fixture_artisan_client_data.preview_assets[input.asset_id];
+
+			return asset === undefined
+				? yield* FixtureFailure(`Unknown fixture preview asset: ${input.asset_id}`)
+				: asset;
+		}),
+	GetPreviewTarget: (input) => FixturePreviewTarget(input),
 	GetOrchestrationGraph: (group_id) =>
 		Effect.gen(function* () {
 			if (group_id !== fixture_artisan_client_data.orchestration_graph.group.group_id) {
@@ -570,6 +622,15 @@ export const FixtureArtisanClientService = {
 		FixtureFailure("Artisan tool invocations are unavailable in the frontend fixture."),
 	ListArtisanTools: () =>
 		FixtureFailure("Artisan tool registry is unavailable in the frontend fixture."),
+	ListPreviewTargets: (input = {}) =>
+		Effect.gen(function* () {
+			yield* Effect.void;
+
+			return fixture_artisan_client_data.preview_targets.filter(
+				(target) =>
+					input.workspace_id === undefined || target.workspace_id === input.workspace_id,
+			);
+		}),
 	ListWorkspaceChanges: (input) =>
 		Effect.gen(function* () {
 			yield* Effect.void;
@@ -601,6 +662,55 @@ export const FixtureArtisanClientService = {
 			}
 
 			return Stream.fromIterable([output]);
+		}),
+	LaunchPreviewInExternalBrowser: (input) =>
+		Effect.gen(function* () {
+			yield* FixturePreviewTarget(input);
+
+			return { launched_at: fixture_timestamp, target_id: input.target_id };
+		}),
+	OpenPreviewInspectionSession: (input) =>
+		Effect.gen(function* () {
+			yield* FixturePreviewTarget({ target_id: input.target_id });
+
+			return {
+				connector_id: input.connector_id,
+				opened_at: fixture_timestamp,
+				reconnect_state: "connected" as const,
+				session_id: `fixture-inspection-${input.target_id}`,
+				state: "open" as const,
+				target_id: input.target_id,
+				updated_at: fixture_timestamp,
+			};
+		}),
+	InspectPreviewSession: (input) =>
+		Effect.gen(function* () {
+			const target = yield* FixturePreviewTarget({ target_id: "preview-artisan" });
+
+			return input.operation === "health"
+				? {
+						health: {
+							checked_at: fixture_timestamp,
+							latency_ms: 4,
+							status: "healthy" as const,
+							status_code: 200,
+						},
+						operation: "health" as const,
+						session_id: input.session_id,
+					}
+				: { operation: "metadata" as const, session_id: input.session_id, target };
+		}),
+	ClosePreviewInspectionSession: (session_id) =>
+		Effect.succeed({
+			closed_at: fixture_timestamp,
+			connector_id: "fixture-browser",
+			last_error: undefined,
+			opened_at: fixture_timestamp,
+			reconnect_state: "connected" as const,
+			session_id,
+			state: "closed" as const,
+			target_id: "preview-artisan",
+			updated_at: fixture_timestamp,
 		}),
 	OpenTerminalOutput: (terminal_id) =>
 		Effect.gen(function* () {
@@ -653,6 +763,32 @@ export const FixtureArtisanClientService = {
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-model-behaviour-drift");
 		}),
+	ResolveRichLink: (input) =>
+		Effect.gen(function* () {
+			const resolved = fixture_artisan_client_data.rich_links[input.url];
+
+			return resolved === undefined
+				? yield* FixtureFailure(`Unknown fixture rich link: ${input.url}`)
+				: resolved;
+		}),
+	ProbePreviewTarget: (input) => FixturePreviewTarget(input),
+	RegisterPreviewTarget: (input) =>
+		Effect.succeed({
+			...input,
+			created_at: fixture_timestamp,
+			journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+			launch_state: "idle" as const,
+			state: "registered" as const,
+			updated_at: fixture_timestamp,
+		}),
+	RemovePreviewTarget: (input) =>
+		FixturePreviewTarget(input).pipe(
+			Effect.map((target) => ({
+				...target,
+				state: "removed" as const,
+				updated_at: fixture_timestamp,
+			})),
+		),
 	RetryGlobalGuidanceSync: (input) =>
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-guidance-retry");
@@ -672,6 +808,14 @@ export const FixtureArtisanClientService = {
 	SelectGlobalGuidance: (input) =>
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-guidance-select");
+		}),
+	SetPreviewTargetState: (input) =>
+		Effect.gen(function* () {
+			const current = yield* FixturePreviewTarget({
+				target_id: input.target_id,
+			});
+
+			return { ...current, state: input.state, updated_at: fixture_timestamp };
 		}),
 	SubscribeOrchestrationGraph: (group_id) =>
 		Effect.gen(function* () {

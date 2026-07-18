@@ -6,6 +6,38 @@ import { ArtisanClientError } from "@artisan/transport";
 import { make_transport_test_harness, wait_for } from "./message-channel-harness";
 
 describe("ArtisanClient over MessagePorts", () => {
+	it("keeps an asset source failure retryable and leaves the session available", async () => {
+		const harness = await make_transport_test_harness({
+			binary_stream_errors: { "asset:unavailable": "source_error" },
+		});
+
+		try {
+			await expect(
+				Effect.runPromise(
+					Effect.scoped(
+						Effect.gen(function* () {
+							const stream = yield* harness.client.OpenAsset("unavailable");
+							return yield* stream.pipe(Stream.runCollect);
+						}),
+					),
+				),
+			).rejects.toMatchObject({ code: "stream_closed", retryable: true });
+			const chunks = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const stream = yield* harness.client.OpenAsset("asset_1");
+						return yield* stream.pipe(Stream.runCollect);
+					}),
+				),
+			);
+
+			expect([...chunks]).toEqual([Uint8Array.of(1, 2), Uint8Array.of(3, 4, 5)]);
+			expect(harness.connector_snapshot().connections).toBe(1);
+		} finally {
+			await harness.dispose();
+		}
+	});
+
 	it("hides envelopes across commands, queries, subscriptions, ACKs, and heartbeat", async () => {
 		const harness = await make_transport_test_harness({
 			protocol: { heartbeat_after_welcome: true },

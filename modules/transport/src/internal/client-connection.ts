@@ -368,6 +368,15 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 					case "model_behaviour.query.result":
 					case "orchestration.graph.query.result":
 					case "orchestration.group.list.query.result":
+					case "preview.asset.metadata.query.result":
+					case "preview.browser.launch.result":
+					case "preview.inspection.close.result":
+					case "preview.inspection.inspect.result":
+					case "preview.inspection.open.result":
+					case "preview.rich_link.resolve.query.result":
+					case "preview.target.get.query.result":
+					case "preview.target.list.query.result":
+					case "preview.target.mutation.result":
 					case "terminal.list.query.result":
 					case "thread.list.query.result":
 					case "thread.transcript.query.result":

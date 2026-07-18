@@ -44,6 +44,18 @@ import {
 	type ModelBehaviourUpdateEnvelope,
 	type OrchestrationGraphQueryEnvelope,
 	type OrchestrationGroupListQueryEnvelope,
+	type PreviewAssetMetadataQueryEnvelope,
+	type PreviewBrowserLaunchEnvelope,
+	type PreviewInspectionEnvelope,
+	type PreviewInspectionSessionCloseEnvelope,
+	type PreviewInspectionSessionOpenEnvelope,
+	type PreviewTargetGetQueryEnvelope,
+	type PreviewTargetListQueryEnvelope,
+	type PreviewTargetProbeEnvelope,
+	type PreviewTargetRegisterEnvelope,
+	type PreviewTargetRemoveEnvelope,
+	type PreviewTargetStateEnvelope,
+	type RichLinkResolveQueryEnvelope,
 	type OutboundControlEnvelope,
 	type PreNegotiationProtocolErrorEnvelope,
 	type ProtocolErrorDetail,
@@ -111,6 +123,10 @@ import {
 	WorkspaceFileServiceError,
 } from "../workspace/workspace-file-service";
 import { ToolControlPlane } from "../tools/tool-control-plane";
+import { PreviewCoordinator } from "../preview/preview-coordinator";
+import { PreviewRepositoryError } from "../preview/preview-repository";
+import { PreviewRuntimeError } from "../preview/preview-runtime";
+import { PreviewHealthProbeError } from "../preview/preview-target";
 import {
 	DecodeProtocolConnectionOptions,
 	DefaultProtocolConnectionOptions,
@@ -335,6 +351,62 @@ function workspace_diff_error_detail(error: unknown): ProtocolErrorDetail {
 		code: "workspace.invariant_failed",
 		message: "The immutable workspace diff failed validation.",
 		retryable: false,
+	};
+}
+
+/** Converts preview-domain failures into stable renderer-safe protocol errors. */
+function preview_error_detail(error: unknown): ProtocolErrorDetail {
+	if (error instanceof PreviewRepositoryError) {
+		if (error.code === "invalid")
+			return {
+				code: "preview.invalid",
+				message: "The preview request conflicts with the durable preview state.",
+				retryable: false,
+			};
+		if (error.code === "not_found")
+			return {
+				code: "preview.not_found",
+				message: "The requested preview target or inspection session is unavailable.",
+				retryable: false,
+			};
+		return {
+			code: "preview.storage_unavailable",
+			message: "The preview state could not be durably read or updated.",
+			retryable: true,
+		};
+	}
+
+	if (error instanceof PreviewHealthProbeError)
+		return {
+			code: "preview.health_unavailable",
+			message: "The local preview health probe is currently unavailable.",
+			retryable: true,
+		};
+
+	if (error instanceof PreviewRuntimeError) {
+		if (error.code === "invalid_input" || error.code === "not_found")
+			return {
+				code: error.code === "invalid_input" ? "preview.invalid" : "preview.not_found",
+				message: "The requested preview runtime resource is unavailable.",
+				retryable: false,
+			};
+		if (error.code === "browser_unavailable")
+			return {
+				code: "preview.browser_unavailable",
+				message: "The external browser opener is currently unavailable.",
+				retryable: true,
+			};
+		return {
+			code: "preview.connector_unavailable",
+			message: "The external preview connector is currently unavailable.",
+			retryable: true,
+		};
+	}
+
+	return {
+		code: "preview.unavailable",
+		message: "The preview operation could not be completed.",
+		retryable: true,
 	};
 }
 
@@ -564,6 +636,7 @@ export function make_protocol_server_layer(
 			const workspace_changes = yield* WorkspaceChangeRepository;
 			const workspace_diffs = yield* WorkspaceChangeDiffService;
 			const workspace_files = yield* WorkspaceFileService;
+			const previews = yield* PreviewCoordinator;
 
 			const Open = Effect.gen(function* () {
 				const connection_scope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
@@ -736,7 +809,8 @@ export function make_protocol_server_layer(
 									});
 								}
 							} else if (subscription._tag === "thread.transcript") {
-								if (event.journal_sequence <= subscription.journal_sequence) continue;
+								if (event.journal_sequence <= subscription.journal_sequence)
+									continue;
 								if (event.thread_id !== subscription.thread_id) continue;
 								const snapshot = yield* transcript_read_model.Read({
 									after_journal_sequence: Math.max(0, event.journal_sequence - 1),
@@ -777,7 +851,8 @@ export function make_protocol_server_layer(
 									});
 								}
 							} else if (subscription._tag === "orchestration.group.list") {
-								if (event.journal_sequence <= subscription.journal_sequence) continue;
+								if (event.journal_sequence <= subscription.journal_sequence)
+									continue;
 								if (event.thread_id !== subscription.thread_id) continue;
 								if (event.payload.type === "thread.erased") {
 									yield* Enqueue({
@@ -838,10 +913,10 @@ export function make_protocol_server_layer(
 									journal_sequence: projection.journal_sequence,
 									kind: "orchestration.graph.patch",
 									message_id,
-									origin: "backend",
+									origin: "backend" as const,
 									payload: { graph: projection },
-									protocol_version: 1,
-									schema_version: 1,
+									protocol_version: 1 as const,
+									schema_version: 1 as const,
 									sent_at: event.sent_at,
 									sequence,
 									stream_id: subscription.stream_id,
@@ -1293,33 +1368,35 @@ export function make_protocol_server_layer(
 					query: OrchestrationGroupListQueryEnvelope,
 					current: ReadyState,
 				) =>
-					graph.ListGroupsSnapshot(query.payload.thread_id, query.payload.include_terminal).pipe(
-						Effect.flatMap((snapshot) =>
-							Effect.gen(function* () {
-								const message_id = yield* metadata.MakeId("message");
-								const sent_at = yield* metadata.Now;
-								yield* Enqueue({
-									correlation_id: query.message_id,
-									kind: "orchestration.group.list.query.result",
-									message_id,
-									origin: "backend",
-									payload: snapshot,
-									protocol_version: 1,
-									schema_version: 1,
-									sent_at,
-								});
-							}),
-						),
-						Effect.catch(() =>
-							EnqueueError(
-								current,
-								"projection.unavailable",
-								"The orchestration group list could not be read.",
-								true,
-								query.message_id,
+					graph
+						.ListGroupsSnapshot(query.payload.thread_id, query.payload.include_terminal)
+						.pipe(
+							Effect.flatMap((snapshot) =>
+								Effect.gen(function* () {
+									const message_id = yield* metadata.MakeId("message");
+									const sent_at = yield* metadata.Now;
+									yield* Enqueue({
+										correlation_id: query.message_id,
+										kind: "orchestration.group.list.query.result",
+										message_id,
+										origin: "backend",
+										payload: snapshot,
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at,
+									});
+								}),
 							),
-						),
-					);
+							Effect.catch(() =>
+								EnqueueError(
+									current,
+									"projection.unavailable",
+									"The orchestration group list could not be read.",
+									true,
+									query.message_id,
+								),
+							),
+						);
 
 				const HandleWorkspaceFileReadQuery = (
 					query: WorkspaceFileReadQueryEnvelope,
@@ -1715,6 +1792,229 @@ export function make_protocol_server_layer(
 								),
 							),
 						);
+				const HandlePreview = <A>(
+					envelope: { readonly message_id: string },
+					current: ReadyState,
+					kind:
+						| "preview.asset.metadata.query.result"
+						| "preview.browser.launch.result"
+						| "preview.inspection.close.result"
+						| "preview.inspection.inspect.result"
+						| "preview.inspection.open.result"
+						| "preview.rich_link.resolve.query.result"
+						| "preview.target.get.query.result"
+						| "preview.target.list.query.result"
+						| "preview.target.mutation.result",
+					operation: Effect.Effect<A, unknown, never>,
+				) =>
+					operation.pipe(
+						Effect.flatMap((payload) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+								const response = {
+									correlation_id: envelope.message_id,
+									kind,
+									message_id,
+									origin: "backend" as const,
+									payload,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								} as OutboundControlEnvelope;
+								yield* Enqueue(response);
+							}),
+						),
+						Effect.catch((error) => {
+							const detail = preview_error_detail(error);
+
+							return EnqueueError(
+								current,
+								detail.code,
+								detail.message,
+								detail.retryable,
+								envelope.message_id,
+							);
+						}),
+					);
+				const HandlePreviewTargetList = (
+					query: PreviewTargetListQueryEnvelope,
+					current: ReadyState,
+				) =>
+					HandlePreview(
+						query,
+						current,
+						"preview.target.list.query.result",
+						previews
+							.List(query.payload.workspace_id)
+							.pipe(Effect.map((targets) => ({ targets }))),
+					);
+				const HandlePreviewTargetGet = (
+					query: PreviewTargetGetQueryEnvelope,
+					current: ReadyState,
+				) =>
+					HandlePreview(
+						query,
+						current,
+						"preview.target.get.query.result",
+						previews.Get(query.payload.target_id),
+					);
+				const HandlePreviewTargetRegister = (
+					command: PreviewTargetRegisterEnvelope,
+					current: ReadyState,
+				) => {
+					const { source, ...registration } = command.payload;
+					return HandlePreview(
+						command,
+						current,
+						"preview.target.mutation.result",
+						previews.Register({
+							...registration,
+							...(source === undefined ? {} : { source }),
+							message_id: command.message_id,
+						}),
+					);
+				};
+				const HandlePreviewTargetProbe = (
+					command: PreviewTargetProbeEnvelope,
+					current: ReadyState,
+				) =>
+					HandlePreview(
+						command,
+						current,
+						"preview.target.mutation.result",
+						previews.Probe({
+							message_id: command.message_id,
+							target_id: command.payload.target_id,
+						}),
+					);
+				const HandlePreviewTargetState = (
+					command: PreviewTargetStateEnvelope,
+					current: ReadyState,
+				) => {
+					const requested_state = command.payload.state;
+					return requested_state === "removed"
+						? EnqueueError(
+								current,
+								"preview.invalid_state",
+								"Use the dedicated preview removal command.",
+								false,
+								command.message_id,
+							)
+						: previews.Get(command.payload.target_id).pipe(
+								Effect.flatMap((target) =>
+									HandlePreview(
+										command,
+										current,
+										"preview.target.mutation.result",
+										previews.SetState({
+											message_id: command.message_id,
+											state: requested_state,
+											target_id: command.payload.target_id,
+											thread_id: target.thread_id,
+										}),
+									),
+								),
+							);
+				};
+				const HandlePreviewTargetRemove = (
+					command: PreviewTargetRemoveEnvelope,
+					current: ReadyState,
+				) =>
+					previews.Get(command.payload.target_id).pipe(
+						Effect.flatMap((target) =>
+							HandlePreview(
+								command,
+								current,
+								"preview.target.mutation.result",
+								previews.Remove({
+									message_id: command.message_id,
+									target_id: command.payload.target_id,
+									thread_id: target.thread_id,
+								}),
+							),
+						),
+					);
+				const HandleRichLinkResolve = (
+					query: RichLinkResolveQueryEnvelope,
+					current: ReadyState,
+				) =>
+					HandlePreview(
+						query,
+						current,
+						"preview.rich_link.resolve.query.result",
+						previews.ResolveRichLink(query.payload.url),
+					);
+				const HandlePreviewAssetMetadata = (
+					query: PreviewAssetMetadataQueryEnvelope,
+					current: ReadyState,
+				) =>
+					HandlePreview(
+						query,
+						current,
+						"preview.asset.metadata.query.result",
+						previews.AssetMetadata(query.payload.asset_id).pipe(
+							Effect.flatMap((asset) =>
+								asset === undefined
+									? Effect.fail(
+											new PreviewRepositoryError({
+												code: "not_found",
+												message: "Preview asset not found",
+											}),
+										)
+									: Effect.succeed(asset),
+							),
+						),
+					);
+				const HandlePreviewLaunch = (
+					command: PreviewBrowserLaunchEnvelope,
+					current: ReadyState,
+				) =>
+					HandlePreview(
+						command,
+						current,
+						"preview.browser.launch.result",
+						previews.Launch({
+							message_id: command.message_id,
+							target_id: command.payload.target_id,
+						}),
+					);
+				const HandlePreviewInspectionOpen = (
+					command: PreviewInspectionSessionOpenEnvelope,
+					current: ReadyState,
+				) =>
+					HandlePreview(
+						command,
+						current,
+						"preview.inspection.open.result",
+						previews.OpenInspection({
+							...command.payload,
+							message_id: command.message_id,
+						}),
+					);
+				const HandlePreviewInspection = (
+					command: PreviewInspectionEnvelope,
+					current: ReadyState,
+				) =>
+					HandlePreview(
+						command,
+						current,
+						"preview.inspection.inspect.result",
+						previews.Inspect({ ...command.payload, message_id: command.message_id }),
+					);
+				const HandlePreviewInspectionClose = (
+					command: PreviewInspectionSessionCloseEnvelope,
+					current: ReadyState,
+				) =>
+					HandlePreview(
+						command,
+						current,
+						"preview.inspection.close.result",
+						previews.CloseInspection({
+							...command.payload,
+							message_id: command.message_id,
+						}),
+					);
 
 				const HandleSubscribe = (subscribe: SubscribeEnvelope, current: ReadyState) =>
 					Effect.gen(function* () {
@@ -1802,55 +2102,52 @@ export function make_protocol_server_layer(
 								.ListGroupsSnapshot(thread_id, include_terminal)
 								.pipe(
 									Effect.flatMap(({ groups, journal_sequence }) =>
-												Effect.gen(function* () {
-													const started_id =
-														yield* metadata.MakeId("message");
-													const snapshot_id =
-														yield* metadata.MakeId("message");
-													const sent_at = yield* metadata.Now;
-													const stream_id = `projection:orchestration.group.list:${thread_id}:${subscribe.subscription_id}`;
-													const subscription: OrchestrationGroupListProjectionSubscription =
-														{
-															_tag: "orchestration.group.list",
-															thread_id,
-															include_terminal,
-															journal_sequence,
-															sequence: 0,
-															stream_id,
-														};
-													yield* Ref.set(state, {
-														...current,
-														subscriptions: {
-															...current.subscriptions,
-															[subscribe.subscription_id]:
-																subscription,
-														},
-													});
-													yield* Enqueue({
-														correlation_id: subscribe.message_id,
-														kind: "subscription.started",
-														message_id: started_id,
-														origin: "backend",
-														payload: { stream_id },
-														protocol_version: 1,
-														schema_version: 1,
-														sent_at,
-														subscription_id: subscribe.subscription_id,
-													});
-													yield* Enqueue({
-														journal_sequence,
-														kind: "orchestration.group.list.snapshot",
-														message_id: snapshot_id,
-														origin: "backend",
-														payload: { groups, journal_sequence },
-														protocol_version: 1,
-														schema_version: 1,
-														sent_at,
-														sequence: 0,
-														stream_id,
-														subscription_id: subscribe.subscription_id,
-													});
-												}),
+										Effect.gen(function* () {
+											const started_id = yield* metadata.MakeId("message");
+											const snapshot_id = yield* metadata.MakeId("message");
+											const sent_at = yield* metadata.Now;
+											const stream_id = `projection:orchestration.group.list:${thread_id}:${subscribe.subscription_id}`;
+											const subscription: OrchestrationGroupListProjectionSubscription =
+												{
+													_tag: "orchestration.group.list",
+													thread_id,
+													include_terminal,
+													journal_sequence,
+													sequence: 0,
+													stream_id,
+												};
+											yield* Ref.set(state, {
+												...current,
+												subscriptions: {
+													...current.subscriptions,
+													[subscribe.subscription_id]: subscription,
+												},
+											});
+											yield* Enqueue({
+												correlation_id: subscribe.message_id,
+												kind: "subscription.started",
+												message_id: started_id,
+												origin: "backend",
+												payload: { stream_id },
+												protocol_version: 1,
+												schema_version: 1,
+												sent_at,
+												subscription_id: subscribe.subscription_id,
+											});
+											yield* Enqueue({
+												journal_sequence,
+												kind: "orchestration.group.list.snapshot",
+												message_id: snapshot_id,
+												origin: "backend",
+												payload: { groups, journal_sequence },
+												protocol_version: 1,
+												schema_version: 1,
+												sent_at,
+												sequence: 0,
+												stream_id,
+												subscription_id: subscribe.subscription_id,
+											});
+										}),
 									),
 								)
 								.pipe(
@@ -2541,6 +2838,30 @@ export function make_protocol_server_layer(
 							return HandleGitWorkspaceQuery(envelope, current);
 						case "git.diff.query":
 							return HandleGitDiffQuery(envelope, current);
+						case "preview.target.list.query":
+							return HandlePreviewTargetList(envelope, current);
+						case "preview.target.get.query":
+							return HandlePreviewTargetGet(envelope, current);
+						case "preview.target.register":
+							return HandlePreviewTargetRegister(envelope, current);
+						case "preview.target.probe":
+							return HandlePreviewTargetProbe(envelope, current);
+						case "preview.target.state":
+							return HandlePreviewTargetState(envelope, current);
+						case "preview.target.remove":
+							return HandlePreviewTargetRemove(envelope, current);
+						case "preview.rich_link.resolve.query":
+							return HandleRichLinkResolve(envelope, current);
+						case "preview.asset.metadata.query":
+							return HandlePreviewAssetMetadata(envelope, current);
+						case "preview.browser.launch":
+							return HandlePreviewLaunch(envelope, current);
+						case "preview.inspection.open":
+							return HandlePreviewInspectionOpen(envelope, current);
+						case "preview.inspection.inspect":
+							return HandlePreviewInspection(envelope, current);
+						case "preview.inspection.close":
+							return HandlePreviewInspectionClose(envelope, current);
 						case "git.index.stage.request":
 						case "git.index.unstage.request":
 						case "git.mutation.resolve":

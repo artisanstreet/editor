@@ -120,6 +120,23 @@ import { ToolInvocationRepositoryLive } from "../tools/tool-invocation-repositor
 import { ExecuteToolLive } from "../tools/tool-handlers";
 import { ToolControlPlaneLive } from "../tools/tool-control-plane";
 import { WorkspaceFileDiscoveryLive } from "../workspace/workspace-file-discovery";
+import { NodePreviewHealthProbeLive } from "../preview/node-preview-health-probe";
+import { NodePreviewExternalBrowserLive } from "../preview/node-preview-runtime";
+import { PreviewCoordinatorLive } from "../preview/preview-coordinator";
+import {
+	PreviewExternalBrowser,
+	PreviewInspectionConnector,
+	PreviewInspectionConnectorUnavailableLive,
+	make_preview_inspection_layer,
+} from "../preview/preview-runtime";
+import { PreviewRepositoryLive } from "../preview/preview-repository";
+import { PreviewServiceLive } from "../preview/preview-service";
+import { PreviewTargetClockLive } from "../preview/preview-target-service";
+import { make_preview_target_layer } from "../preview/preview-target-service";
+import { make_node_rich_link_metadata_layer } from "../preview/rich-link-service";
+import { RichLinkAssetStore } from "../preview/rich-link-asset-store";
+import { RichLinkMetadata } from "../preview/rich-link-metadata";
+import { PreviewHealthProbe } from "../preview/preview-target";
 
 export interface BackendOptions {
 	readonly database_path: string;
@@ -133,6 +150,10 @@ export interface BackendOptions {
 		ModelBehaviourRegistryError
 	>;
 	readonly protocol?: Partial<ProtocolConnectionOptions>;
+	readonly preview_external_browser?: Layer.Layer<PreviewExternalBrowser>;
+	readonly preview_health_probe?: Layer.Layer<PreviewHealthProbe>;
+	readonly preview_inspection_connector?: Layer.Layer<PreviewInspectionConnector>;
+	readonly preview_rich_links?: Layer.Layer<RichLinkMetadata | RichLinkAssetStore>;
 	readonly project_locator?: Layer.Layer<ProjectLocator>;
 	readonly retention_clock?: Layer.Layer<ThreadRetentionClock>;
 	readonly retention_scheduler?: Layer.Layer<ThreadRetentionScheduler>;
@@ -377,6 +398,40 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(tool_registry),
 		Layer.provideMerge(tool_repository),
 	);
+	const preview_repository = PreviewRepositoryLive.pipe(Layer.provide(infrastructure));
+	const preview_service = PreviewServiceLive.pipe(Layer.provide(preview_repository));
+	const preview_targets = make_preview_target_layer().pipe(
+		Layer.provide(
+			Layer.mergeAll(
+				options.preview_health_probe ?? NodePreviewHealthProbeLive,
+				PreviewTargetClockLive,
+			),
+		),
+	);
+	const preview_inspection = make_preview_inspection_layer().pipe(
+		Layer.provide(
+			Layer.mergeAll(
+				preview_targets,
+				options.preview_inspection_connector ?? PreviewInspectionConnectorUnavailableLive,
+			),
+		),
+	);
+	const preview_browser = (
+		options.preview_external_browser ?? NodePreviewExternalBrowserLive
+	).pipe(Layer.provide(preview_targets));
+	const preview_rich_links = options.preview_rich_links ?? make_node_rich_link_metadata_layer();
+	const previews = PreviewCoordinatorLive.pipe(
+		Layer.provide(
+			Layer.mergeAll(
+				preview_repository,
+				preview_service,
+				preview_targets,
+				preview_inspection,
+				preview_browser,
+				preview_rich_links,
+			),
+		),
+	);
 	const commands = CommandRouterLive.pipe(
 		Layer.provideMerge(threads),
 		Layer.provideMerge(orchestration),
@@ -389,6 +444,7 @@ export function make_backend_layer(options: BackendOptions) {
 			Layer.provideMerge(orchestration),
 			Layer.provideMerge(graph),
 			Layer.provideMerge(terminals),
+			Layer.provideMerge(previews),
 		);
 	const erasure = ThreadErasureLive.pipe(
 		Layer.provideMerge(resource_quiescer),
@@ -424,9 +480,11 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(workspace_diffs),
 		Layer.provideMerge(surfaces),
 		Layer.provideMerge(tools),
+		Layer.provideMerge(previews),
 	);
 
 	return Layer.merge(protocol, projection_rebuild).pipe(
+		Layer.provideMerge(options.preview_health_probe ?? NodePreviewHealthProbeLive),
 		Layer.provideMerge(workspace_evidence),
 		Layer.provideMerge(workspace_authority),
 		Layer.provideMerge(workspace_bounded_filesystems),

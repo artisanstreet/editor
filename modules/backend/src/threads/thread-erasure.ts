@@ -27,6 +27,10 @@ import {
 	OrchestrationOutbox,
 	OrchestrationRawObservations,
 	OrchestrationRuns,
+	PreviewCommands,
+	PreviewDispatchLeases,
+	PreviewInspectionSessions,
+	PreviewTargets,
 	SurfaceItems,
 	SurfaceUsageTotals,
 	TerminalCommands,
@@ -129,6 +133,18 @@ export const ThreadErasureLive = Layer.effect(
 						),
 					),
 			);
+		const HasActivePreviewDispatch = (thread_id: typeof Threads.thread_id, now: string) =>
+			exists(
+				database.client
+					.select({ lease_id: PreviewDispatchLeases.lease_id })
+					.from(PreviewDispatchLeases)
+					.where(
+						and(
+							eq(PreviewDispatchLeases.thread_id, thread_id),
+							sql`${PreviewDispatchLeases.expires_at} > ${now}`,
+						),
+					),
+			);
 
 		const ClaimExpired = (cutoff: string, claimed_at: string) =>
 			database.client
@@ -160,6 +176,7 @@ export const ThreadErasureLive = Layer.effect(
 												),
 										),
 									),
+									not(HasActivePreviewDispatch(Threads.thread_id, claimed_at)),
 									not(HasPendingGitMutation(Threads.thread_id)),
 									not(HasPendingToolInvocation(Threads.thread_id)),
 								),
@@ -236,8 +253,23 @@ export const ThreadErasureLive = Layer.effect(
 								),
 							)
 							.limit(1);
+						const [active_preview_dispatch] = yield* transaction
+							.select({ lease_id: PreviewDispatchLeases.lease_id })
+							.from(PreviewDispatchLeases)
+							.where(
+								and(
+									eq(PreviewDispatchLeases.thread_id, thread_id),
+									sql`${PreviewDispatchLeases.expires_at} > ${deleted_at}`,
+								),
+							)
+							.limit(1);
 
-						if (pending_mutation || pending_git_mutation || pending_tool_invocation) {
+						if (
+							pending_mutation ||
+							pending_git_mutation ||
+							pending_tool_invocation ||
+							active_preview_dispatch
+						) {
 							yield* transaction
 								.delete(ThreadErasureClaims)
 								.where(eq(ThreadErasureClaims.thread_id, thread_id));
@@ -399,6 +431,18 @@ export const ThreadErasureLive = Layer.effect(
 						yield* transaction
 							.delete(ArtisanToolInvocations)
 							.where(eq(ArtisanToolInvocations.thread_id, thread_id));
+						yield* transaction
+							.delete(PreviewInspectionSessions)
+							.where(eq(PreviewInspectionSessions.thread_id, thread_id));
+						yield* transaction
+							.delete(PreviewDispatchLeases)
+							.where(eq(PreviewDispatchLeases.thread_id, thread_id));
+						yield* transaction
+							.delete(PreviewTargets)
+							.where(eq(PreviewTargets.thread_id, thread_id));
+						yield* transaction
+							.delete(PreviewCommands)
+							.where(eq(PreviewCommands.thread_id, thread_id));
 						yield* transaction
 							.delete(JournalCommands)
 							.where(eq(JournalCommands.thread_id, thread_id));
