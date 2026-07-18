@@ -22,6 +22,7 @@
 		IconTerminal2 as Terminal2,
 		IconX as X,
 	} from "@tabler/icons-svelte";
+	import { Button } from "$lib/components/ui/button";
 
 	type FixtureTheme = "dark" | "light";
 	type FixtureMode = "editor" | "chat" | "orchestrator";
@@ -185,19 +186,19 @@
 			</div>
 
 			<div class="button-row">
-				<button class="button primary" type="button" onclick={yield* ChooseMenuAction("Started run")}>
+				<Button class="button primary" onclick={yield* ChooseMenuAction("Started run")}>
 					<PlayerPlay size={15} aria-hidden="true" /> Start run
-				</button>
-				<button class="button secondary" type="button" onclick={yield* ChooseMenuAction("Opened settings")}>
+				</Button>
+				<Button variant="secondary" class="button secondary" onclick={yield* ChooseMenuAction("Opened settings")}>
 					<Settings size={15} aria-hidden="true" /> Settings
-				</button>
-				<button class="button quiet" type="button" onclick={yield* ChooseMenuAction("Dismissed notice")}>
+				</Button>
+				<Button variant="ghost" class="button quiet" onclick={yield* ChooseMenuAction("Dismissed notice")}>
 					<X size={15} aria-hidden="true" /> Dismiss
-				</button>
-				<button class="button danger" type="button" onclick={yield* ChooseMenuAction("Stopped fixture")}>
+				</Button>
+				<Button variant="destructive" class="button danger" onclick={yield* ChooseMenuAction("Stopped fixture")}>
 					Stop fixture
-				</button>
-				<button class="button secondary" type="button" disabled title="Workspace backend integration is unavailable">Commit unavailable</button>
+				</Button>
+				<Button variant="secondary" class="button secondary" disabled title="Workspace backend integration is unavailable">Commit unavailable</Button>
 			</div>
 
 			<div class="field-grid">
@@ -302,7 +303,7 @@
 					<div class="empty-icon"><Search size={20} aria-hidden="true" /></div>
 					<strong>No matching changes</strong>
 					<p>Adjust the filter or wait for an attributed workspace change.</p>
-					<button class="button secondary" type="button" onclick={yield* ChooseMenuAction("Cleared filter")}>Clear fixture filter</button>
+					<Button variant="secondary" class="button secondary" onclick={yield* ChooseMenuAction("Cleared filter")}>Clear fixture filter</Button>
 				</div>
 
 				<div class="skeleton-card" aria-label="Loading fixture" aria-busy="true">
@@ -335,11 +336,11 @@
 				</div>
 				<div class="permission-actions">
 					{#if permission_result === "pending"}
-						<button class="button secondary" type="button" onclick={yield* ResolvePermission("denied")}>Deny preview</button>
-						<button class="button primary" type="button" onclick={yield* ResolvePermission("approved")}>Approve preview</button>
+						<Button variant="secondary" class="button secondary" onclick={yield* ResolvePermission("denied")}>Deny preview</Button>
+						<Button class="button primary" onclick={yield* ResolvePermission("approved")}>Approve preview</Button>
 					{:else}
 						<span class:approved={permission_result === "approved"} class:denied={permission_result === "denied"}>{permission_result}</span>
-						<button class="button quiet" type="button" onclick={yield* ResetPermission}>Reset</button>
+						<Button variant="ghost" class="button quiet" onclick={yield* ResetPermission}>Reset</Button>
 					{/if}
 				</div>
 			</div>
@@ -347,7 +348,7 @@
 			<div class="blocked-control">
 				<LayoutSidebarRight size={17} aria-hidden="true" />
 				<div><strong>Preview lifecycle</strong><span>Backend unavailable · control intentionally disabled</span></div>
-				<button class="button secondary" type="button" disabled>Open preview unavailable</button>
+				<Button variant="secondary" class="button secondary" disabled>Open preview unavailable</Button>
 			</div>
 		</section>
 
