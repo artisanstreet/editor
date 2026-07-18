@@ -36,6 +36,10 @@ import { JournalNotifierLive } from "../persistence/journal-notifier";
 import { JournalStoreLive } from "../persistence/journal-store";
 import { OrchestrationRepositoryLive } from "../persistence/orchestration-repository";
 import { ThreadReadModelLive } from "../persistence/thread-read-model";
+import {
+	ProjectionRebuildBarrierLive,
+	ProjectionRebuildServiceLive,
+} from "../persistence/projection-rebuild-service";
 import { CommandRouterLive } from "../protocol/command-router";
 import {
 	DefaultProtocolConnectionOptions,
@@ -172,6 +176,10 @@ export function make_backend_layer(options: BackendOptions) {
 		make_database_layer(options),
 		options.runtime_metadata ?? RuntimeMetadataLive,
 		JournalNotifierLive,
+	);
+	const projection_rebuild = ProjectionRebuildServiceLive.pipe(
+		Layer.provideMerge(ProjectionRebuildBarrierLive),
+		Layer.provideMerge(infrastructure),
 	);
 	const persistence = Layer.mergeAll(
 		JournalStoreLive,
@@ -367,7 +375,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(workspace_diffs),
 	);
 
-	return protocol.pipe(
+	return Layer.merge(protocol, projection_rebuild).pipe(
 		Layer.provideMerge(workspace_evidence),
 		Layer.provideMerge(workspace_authority),
 		Layer.provideMerge(workspace_bounded_filesystems),

@@ -12,6 +12,7 @@ import {
 	GitMutationOperations,
 	JournalCommands,
 	JournalEvents,
+	LegacyWorkspaceChangeProjections,
 	OrchestrationArtifacts,
 	OrchestrationCoordinators,
 	OrchestrationGraphCommands,
@@ -306,6 +307,9 @@ export const ThreadErasureLive = Layer.effect(
 						yield* transaction
 							.delete(WorkspaceChangeDiffs)
 							.where(eq(WorkspaceChangeDiffs.thread_id, thread_id));
+						yield* transaction
+							.delete(LegacyWorkspaceChangeProjections)
+							.where(eq(LegacyWorkspaceChangeProjections.thread_id, thread_id));
 						yield* transaction
 							.delete(WorkspaceChanges)
 							.where(eq(WorkspaceChanges.thread_id, thread_id));
