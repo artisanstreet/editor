@@ -1,7 +1,7 @@
 {
   "version": "7",
   "dialect": "sqlite",
-  "id": "ce2af377-6220-421f-8954-c144bda63bd8",
+  "id": "2abc9929-bb2a-4cfe-b272-ef6460546fdd",
   "prevIds": [
     "7653bb46-d22c-4691-929c-62520dd17f2c"
   ],
@@ -545,6 +545,16 @@
       "default": null,
       "generated": null,
       "name": "input_summary",
+      "entityType": "columns",
+      "table": "artisan_tool_invocations"
+    },
+    {
+      "type": "text",
+      "notNull": true,
+      "autoincrement": false,
+      "default": null,
+      "generated": null,
+      "name": "execution_input_json",
       "entityType": "columns",
       "table": "artisan_tool_invocations"
     },

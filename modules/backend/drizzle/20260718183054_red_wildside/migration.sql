@@ -19,6 +19,7 @@ CREATE TABLE `artisan_tool_invocations` (
 	`agent_id` text,
 	`tool_id` text NOT NULL,
 	`input_summary` text NOT NULL,
+	`execution_input_json` text NOT NULL,
 	`permission_json` text NOT NULL,
 	`raw_origin_json` text,
 	`approval_id` text,
