@@ -22,6 +22,10 @@ import type {
 	ModelBehaviourUpdateRequest,
 	OrchestrationGraph,
 	OrchestrationGroupListSnapshot,
+	SurfaceListQuery,
+	SurfaceSnapshot,
+	SurfaceUsageAggregateQuery,
+	SurfaceUsageAggregateSnapshot,
 	StreamCursor,
 	TerminalSession,
 	ThreadListItem,
@@ -30,6 +34,7 @@ import type {
 	RawOrigin,
 	ThreadTranscriptQuery,
 	ThreadTranscriptSnapshot,
+	ThreadSessionSnapshot,
 	TranscriptEntry,
 	WorkspaceFileReadQuery,
 	WorkspaceFileReadQueryResult,
@@ -37,6 +42,8 @@ import type {
 	WorkspaceChangeListQueryResult,
 	WorkspaceChangeDiffQuery,
 	WorkspaceChangeDiffQueryResult,
+	WorkspaceChangeReview,
+	WorkspaceConflictListQueryResult,
 } from "@artisan/protocol";
 
 /** Identifies a typed frontend client failure. */
@@ -101,12 +108,38 @@ export interface ArtisanWorkspaceChangeListInput {
 /** Supplies the thread and change identity for one workspace diff query. */
 export interface ArtisanWorkspaceChangeDiffInput extends WorkspaceChangeDiffQuery {}
 
-/** Supplies the durable identity and attribution for a review transition. */
-export interface ArtisanWorkspaceChangeReviewInput {
+/** Supplies review metadata shared by user and graph review transitions. */
+interface ArtisanWorkspaceChangeReviewInputBase {
 	readonly change_id: string;
+	readonly comment?: WorkspaceChangeReview["comment"];
 	readonly command_id?: string;
+	readonly outcome?: WorkspaceChangeReview["outcome"];
+	readonly raw_origin?: RawOrigin;
 	readonly thread_id: string;
 }
+
+/** Supplies an explicit user review without graph authority attribution. */
+export interface ArtisanUserWorkspaceChangeReviewInput extends ArtisanWorkspaceChangeReviewInputBase {
+	readonly assignment_id?: never;
+	readonly group_id?: never;
+	readonly reviewer_agent_id?: never;
+	readonly reviewer_kind: "user";
+	readonly reviewer_run_id?: never;
+}
+
+/** Supplies a graph review bound to one active reviewer assignment and run. */
+export interface ArtisanGraphWorkspaceChangeReviewInput extends ArtisanWorkspaceChangeReviewInputBase {
+	readonly assignment_id: string;
+	readonly group_id: string;
+	readonly reviewer_agent_id: string;
+	readonly reviewer_kind: "graph";
+	readonly reviewer_run_id: string;
+}
+
+/** Supplies the durable identity, review metadata, and reviewer authority. */
+export type ArtisanWorkspaceChangeReviewInput =
+	| ArtisanUserWorkspaceChangeReviewInput
+	| ArtisanGraphWorkspaceChangeReviewInput;
 
 /** Supplies the durable identity and attribution for a guarded rollback. */
 export interface ArtisanWorkspaceChangeRollbackInput {
@@ -242,6 +275,19 @@ export type ThreadTranscriptUpdate =
 export type OrchestrationGroupListUpdate =
 	| { readonly type: "snapshot"; readonly snapshot: OrchestrationGroupListSnapshot }
 	| { readonly type: "patch"; readonly snapshot: OrchestrationGroupListSnapshot };
+export type ThreadSessionUpdate = {
+	readonly type: "snapshot";
+	readonly snapshot: ThreadSessionSnapshot;
+};
+export type SurfaceListUpdate = { readonly type: "snapshot"; readonly snapshot: SurfaceSnapshot };
+export type SurfaceUsageAggregateUpdate = {
+	readonly type: "snapshot";
+	readonly snapshot: SurfaceUsageAggregateSnapshot;
+};
+export type WorkspaceConflictListUpdate = {
+	readonly type: "snapshot";
+	readonly snapshot: WorkspaceConflictListQueryResult;
+};
 
 /** Configures bounded client queues, reconnect timing, and request concurrency. */
 export interface ArtisanClientOptions {
@@ -274,6 +320,15 @@ export class ArtisanClient extends Context.Service<
 		readonly GetThreadTranscript: (
 			input: ThreadTranscriptQuery,
 		) => Effect.Effect<ThreadTranscriptSnapshot, ArtisanClientError>;
+		readonly GetThreadSession: (
+			thread_id: string,
+		) => Effect.Effect<ThreadSessionSnapshot, ArtisanClientError>;
+		readonly ListSurfaceItems: (
+			input: SurfaceListQuery,
+		) => Effect.Effect<SurfaceSnapshot, ArtisanClientError>;
+		readonly GetSurfaceUsageAggregate: (
+			input: SurfaceUsageAggregateQuery,
+		) => Effect.Effect<SurfaceUsageAggregateSnapshot, ArtisanClientError>;
 		readonly ListOrchestrationGroups: (
 			thread_id: string,
 			include_terminal: boolean,
@@ -298,6 +353,9 @@ export class ArtisanClient extends Context.Service<
 		readonly ListWorkspaceChanges: (
 			input: ArtisanWorkspaceChangeListInput,
 		) => Effect.Effect<WorkspaceChangeListQueryResult, ArtisanClientError>;
+		readonly ListWorkspaceConflicts: (
+			thread_id: string,
+		) => Effect.Effect<WorkspaceConflictListQueryResult, ArtisanClientError>;
 		readonly GetWorkspaceChangeDiff: (
 			input: ArtisanWorkspaceChangeDiffInput,
 		) => Effect.Effect<WorkspaceChangeDiffQueryResult, ArtisanClientError>;
@@ -323,6 +381,13 @@ export class ArtisanClient extends Context.Service<
 			ArtisanClientError,
 			Scope.Scope
 		>;
+		readonly SubscribeWorkspaceConflicts: (
+			thread_id: string,
+		) => Effect.Effect<
+			Stream.Stream<WorkspaceConflictListUpdate, ArtisanClientError>,
+			ArtisanClientError,
+			Scope.Scope
+		>;
 		readonly SubscribeOrchestrationGraph: (
 			group_id: string,
 		) => Effect.Effect<
@@ -342,6 +407,27 @@ export class ArtisanClient extends Context.Service<
 			include_terminal: boolean,
 		) => Effect.Effect<
 			Stream.Stream<OrchestrationGroupListUpdate, ArtisanClientError>,
+			ArtisanClientError,
+			Scope.Scope
+		>;
+		readonly SubscribeThreadSession: (
+			thread_id: string,
+		) => Effect.Effect<
+			Stream.Stream<ThreadSessionUpdate, ArtisanClientError>,
+			ArtisanClientError,
+			Scope.Scope
+		>;
+		readonly SubscribeSurfaceItems: (
+			input: SurfaceListQuery,
+		) => Effect.Effect<
+			Stream.Stream<SurfaceListUpdate, ArtisanClientError>,
+			ArtisanClientError,
+			Scope.Scope
+		>;
+		readonly SubscribeSurfaceUsageAggregate: (
+			input: SurfaceUsageAggregateQuery,
+		) => Effect.Effect<
+			Stream.Stream<SurfaceUsageAggregateUpdate, ArtisanClientError>,
 			ArtisanClientError,
 			Scope.Scope
 		>;

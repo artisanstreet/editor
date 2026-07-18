@@ -75,6 +75,7 @@ function make_runtime(
 	let snapshot: Uint8Array | undefined;
 	let finalize_failures = options.finalize_failures ?? 0;
 	let reconciliation_calls = 0;
+	const reconciliation_inputs: Array<unknown> = [];
 	let replace_calls = 0;
 	const claims: Array<unknown> = [];
 	const calls: Array<string> = [];
@@ -267,8 +268,9 @@ function make_runtime(
 			MarkEvidenceRecorded: () => Effect.succeed({ lifecycle }),
 			ReadChange: () => Effect.die("unused"),
 			ReadOperation: () => Effect.die("unused"),
-			ReconcileChanged: () => {
+			ReconcileChanged: (input: unknown) => {
 				reconciliation_calls += 1;
+				reconciliation_inputs.push(input);
 				const reconciliation = options.changed_reconciliations?.[reconciliation_calls - 1];
 
 				if (reconciliation) {
@@ -337,6 +339,7 @@ function make_runtime(
 			events,
 			lifecycle: () => lifecycle,
 			reconciliation_calls: () => reconciliation_calls,
+			reconciliation_inputs,
 			replace_calls: () => replace_calls,
 			reader,
 			snapshot: () => snapshot && new TextDecoder().decode(snapshot),
@@ -530,6 +533,13 @@ describe("WorkspaceFileService", () => {
 			).rejects.toMatchObject({ operation: "replace", reason: "changed" });
 
 			expect(harness.state.replace_calls()).toBe(1);
+			expect(harness.state.reconciliation_inputs).toEqual([
+				{
+					message_id: "message_1",
+					observation: "native_changed",
+					observed_identity: identity(encoder.encode("before")),
+				},
+			]);
 			expect(harness.state.events).toHaveLength(0);
 		} finally {
 			await harness.runtime.dispose();

@@ -507,8 +507,37 @@ export const FixtureArtisanClientService = {
 					: {}),
 			};
 		}),
+	GetThreadSession: (thread_id) =>
+		Effect.succeed({
+			thread_id,
+			journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+			auto_steer_enabled: true,
+			latest_intake: {
+				message_id: "message-fixture",
+				risk: "low" as const,
+				resolution: "proceed" as const,
+			},
+			assumptions: [],
+			last_routing: {
+				type: "thread.message_routed" as const,
+				message_id: "message-fixture",
+				outcome: "queued" as const,
+				reason: "no_active_run" as const,
+				run_id: "run-editor-shell",
+			},
+		}),
+	ListSurfaceItems: (_input) =>
+		Effect.succeed({
+			items: [],
+			journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+		}),
+	GetSurfaceUsageAggregate: (input) =>
+		Effect.succeed({
+			aggregate: { scope: input.scope, scope_id: input.scope_id },
+			journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+		}),
 	ListOrchestrationGroups: (thread_id, include_terminal) =>
-		Effect.gen(function* () {
+		Effect.sync(() => {
 			if (thread_id !== "thread-editor-shell")
 				return {
 					groups: [],
@@ -581,6 +610,11 @@ export const FixtureArtisanClientService = {
 				changes,
 				journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
 			};
+		}),
+	ListWorkspaceConflicts: (_thread_id) =>
+		Effect.succeed({
+			conflicts: [],
+			journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
 		}),
 	OpenAsset: (asset_id) =>
 		Effect.gen(function* () {
@@ -678,14 +712,16 @@ export const FixtureArtisanClientService = {
 						thread_id === "thread-editor-shell"
 							? {
 									...fixture_artisan_client_data.orchestration_groups,
-									groups:
-										fixture_artisan_client_data.orchestration_groups.groups.filter(
-											(group) =>
-												include_terminal ||
-												!["summarized", "stopped", "failed", "complete"].includes(
-													group.state,
-												),
-										),
+									groups: fixture_artisan_client_data.orchestration_groups.groups.filter(
+										(group) =>
+											include_terminal ||
+											![
+												"summarized",
+												"stopped",
+												"failed",
+												"complete",
+											].includes(group.state),
+									),
 								}
 							: {
 									groups: [],
@@ -721,6 +757,68 @@ export const FixtureArtisanClientService = {
 										fixture_artisan_client_data.cursors.last_journal_sequence,
 									entries: [],
 								},
+				},
+			]),
+		),
+	SubscribeThreadSession: (thread_id) =>
+		Effect.succeed(
+			Stream.fromIterable([
+				{
+					type: "snapshot" as const,
+					snapshot: {
+						thread_id,
+						journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+						auto_steer_enabled: true,
+						latest_intake: {
+							message_id: "message-fixture",
+							risk: "low" as const,
+							resolution: "proceed" as const,
+						},
+						assumptions: [],
+						last_routing: {
+							type: "thread.message_routed" as const,
+							message_id: "message-fixture",
+							outcome: "queued" as const,
+							reason: "no_active_run" as const,
+							run_id: "run-editor-shell",
+						},
+					},
+				},
+			]),
+		),
+	SubscribeSurfaceItems: (_input) =>
+		Effect.succeed(
+			Stream.fromIterable([
+				{
+					type: "snapshot" as const,
+					snapshot: {
+						items: [],
+						journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+					},
+				},
+			]),
+		),
+	SubscribeSurfaceUsageAggregate: (input) =>
+		Effect.succeed(
+			Stream.fromIterable([
+				{
+					type: "snapshot" as const,
+					snapshot: {
+						aggregate: { scope: input.scope, scope_id: input.scope_id },
+						journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+					},
+				},
+			]),
+		),
+	SubscribeWorkspaceConflicts: (_thread_id) =>
+		Effect.succeed(
+			Stream.fromIterable([
+				{
+					type: "snapshot" as const,
+					snapshot: {
+						conflicts: [],
+						journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+					},
 				},
 			]),
 		),

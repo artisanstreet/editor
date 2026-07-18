@@ -260,6 +260,14 @@ export const SurfaceSnapshot = Schema.Struct({
 });
 export type SurfaceSnapshot = typeof SurfaceSnapshot.Type;
 
+/** Selects renderer-safe surface items for one thread, optionally narrowed to ownership. */
+export const SurfaceListQuery = Schema.Struct({
+	thread_id: Identifier,
+	run_id: Schema.optional(Identifier),
+	group_id: Schema.optional(Identifier),
+});
+export type SurfaceListQuery = typeof SurfaceListQuery.Type;
+
 /** Optional token totals faithfully reported by a provider. */
 export const SurfaceUsage = Schema.Struct({
 	assignment_id: Schema.optional(Identifier),
@@ -279,3 +287,15 @@ export const SurfaceUsageAggregate = Schema.Struct({
 	output_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
 });
 export type SurfaceUsageAggregate = typeof SurfaceUsageAggregate.Type;
+
+export const SurfaceUsageAggregateQuery = Schema.Struct({
+	scope: Schema.Literals(["run", "assignment", "group"]),
+	scope_id: Identifier,
+});
+export type SurfaceUsageAggregateQuery = typeof SurfaceUsageAggregateQuery.Type;
+
+export const SurfaceUsageAggregateSnapshot = Schema.Struct({
+	aggregate: SurfaceUsageAggregate,
+	journal_sequence: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+});
+export type SurfaceUsageAggregateSnapshot = typeof SurfaceUsageAggregateSnapshot.Type;

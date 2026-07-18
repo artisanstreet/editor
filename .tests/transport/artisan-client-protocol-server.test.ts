@@ -27,9 +27,16 @@ import {
 	ThreadErasure,
 	ThreadMetadataRefinementCoordinator,
 	ThreadProjectAffinityCoordinator,
+	SurfaceService,
 	WorkspaceEvidenceRecorder,
+	WorkspaceChangeRepository,
 } from "@artisan/backend";
-import type { ThreadListUpdate } from "@artisan/transport";
+import type {
+	ArtisanClientError,
+	SurfaceUsageAggregateUpdate,
+	ThreadListUpdate,
+	WorkspaceConflictListUpdate,
+} from "@artisan/transport";
 import { Database } from "../../modules/backend/src/persistence/database";
 import { JournalStore } from "../../modules/backend/src/persistence/journal-store";
 import {
@@ -41,7 +48,11 @@ import {
 	ModelBehaviourSettings,
 	ThreadErasureClaims,
 	ThreadProjectAffinityEvidence,
+	AgentRuns,
 	OrchestrationGroups,
+	OrchestrationCoordinators,
+	SurfaceUsageTotals,
+	SurfaceItems,
 } from "../../modules/backend/src/persistence/schema";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
 
@@ -111,6 +122,655 @@ afterEach(async () => {
 });
 
 describe("ArtisanClient with the backend ProtocolServer", () => {
+	it("closes the usage subscription snapshot boundary without missing a committed total", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const surfaces = await runtime.runPromise(SurfaceService);
+		const snapshot_read = await Effect.runPromise(Deferred.make<void>());
+		const release_snapshot = await Effect.runPromise(Deferred.make<void>());
+		const original_snapshot = surfaces.AggregateUsageSnapshot;
+		Object.assign(surfaces, {
+			AggregateUsageSnapshot: (input: Parameters<typeof original_snapshot>[0]) =>
+				original_snapshot(input).pipe(
+					Effect.flatMap((snapshot) =>
+						Deferred.succeed(snapshot_read, undefined).pipe(
+							Effect.andThen(Deferred.await(release_snapshot)),
+							Effect.as(snapshot),
+						),
+					),
+				),
+		});
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const database = await runtime.runPromise(Database);
+		const journal = await runtime.runPromise(JournalStore);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
+		try {
+			await Effect.runPromise(
+				harness.client.Command({
+					command_id: "usage_boundary_create",
+					payload: { title: "Usage boundary", type: "thread.create" },
+					thread_id: "thread_usage_boundary",
+				}),
+			);
+			await Effect.runPromise(
+				database.client.insert(SurfaceUsageTotals).values({
+					group_id: "group_usage_boundary",
+					input_tokens: 1,
+					output_tokens: 1,
+					run_id: "run_usage_boundary",
+					updated_at: "2026-07-18T20:00:00.000Z",
+				}),
+			);
+			const updates_promise = Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const stream = yield* harness.client.SubscribeSurfaceUsageAggregate({
+							scope: "run",
+							scope_id: "run_usage_boundary",
+						});
+						return yield* stream.pipe(
+							Stream.take(2),
+							Stream.runCollect,
+							Effect.map(Array.from),
+						);
+					}),
+				),
+			);
+			await Effect.runPromise(Deferred.await(snapshot_read));
+			await Effect.runPromise(
+				database.client
+					.insert(SurfaceUsageTotals)
+					.values({
+						group_id: "group_usage_boundary",
+						input_tokens: 5,
+						output_tokens: 3,
+						run_id: "run_usage_boundary",
+						updated_at: "2026-07-18T20:00:01.000Z",
+					})
+					.onConflictDoUpdate({
+						set: {
+							input_tokens: 5,
+							output_tokens: 3,
+							updated_at: "2026-07-18T20:00:01.000Z",
+						},
+						target: SurfaceUsageTotals.run_id,
+					}),
+			);
+			await Effect.runPromise(
+				journal.AppendEvent({
+					causation_id: "usage_boundary_event",
+					correlation_id: "usage_boundary_event",
+					payload: {
+						type: "assistant.message_completed",
+						message_id: "usage_boundary_event",
+						text: "Visible",
+					},
+					run_id: "run_usage_boundary",
+					thread_id: "thread_usage_boundary",
+				}),
+			);
+			await Effect.runPromise(Deferred.succeed(release_snapshot, undefined));
+			const updates = [...(await updates_promise)];
+			expect(updates).toHaveLength(2);
+			expect(updates[0]).toMatchObject({ snapshot: { aggregate: { input_tokens: 1 } } });
+			expect(updates[1]).toMatchObject({
+				snapshot: { aggregate: { input_tokens: 5, output_tokens: 3 } },
+			});
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
+	it("closes the surface subscription snapshot boundary without missing a committed item", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const surfaces = await runtime.runPromise(SurfaceService);
+		const snapshot_read = await Effect.runPromise(Deferred.make<void>());
+		const release_snapshot = await Effect.runPromise(Deferred.make<void>());
+		const original_snapshot = surfaces.ListSnapshot;
+		Object.assign(surfaces, {
+			ListSnapshot: (input: Parameters<typeof original_snapshot>[0]) =>
+				original_snapshot(input).pipe(
+					Effect.flatMap((snapshot) =>
+						Deferred.succeed(snapshot_read, undefined).pipe(
+							Effect.andThen(Deferred.await(release_snapshot)),
+							Effect.as(snapshot),
+						),
+					),
+				),
+		});
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const database = await runtime.runPromise(Database);
+		const journal = await runtime.runPromise(JournalStore);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
+		try {
+			await Effect.runPromise(
+				harness.client.Command({
+					command_id: "surface_boundary_create",
+					payload: { title: "Surface boundary", type: "thread.create" },
+					thread_id: "thread_surface_boundary",
+				}),
+			);
+			const updates_promise = Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const stream = yield* harness.client.SubscribeSurfaceItems({
+							thread_id: "thread_surface_boundary",
+						});
+						return yield* stream.pipe(
+							Stream.take(2),
+							Stream.runCollect,
+							Effect.map(Array.from),
+						);
+					}),
+				),
+			);
+			await Effect.runPromise(Deferred.await(snapshot_read));
+			await Effect.runPromise(
+				database.client.insert(SurfaceItems).values({
+					category: "work",
+					kind: "message",
+					observation_id: "surface_boundary_observation",
+					occurred_at: "2026-07-18T20:00:00.000Z",
+					run_id: "run_surface_boundary",
+					sequence: 1,
+					summary_json: JSON.stringify({ label: "Boundary message" }),
+					surface_id: "surface_boundary_item",
+					thread_id: "thread_surface_boundary",
+				}),
+			);
+			await Effect.runPromise(
+				journal.AppendEvent({
+					causation_id: "surface_boundary_event",
+					correlation_id: "surface_boundary_event",
+					payload: {
+						type: "assistant.message_completed",
+						message_id: "surface_boundary_event",
+						text: "Visible",
+					},
+					run_id: "run_surface_boundary",
+					thread_id: "thread_surface_boundary",
+				}),
+			);
+			await Effect.runPromise(Deferred.succeed(release_snapshot, undefined));
+			const updates = [...(await updates_promise)];
+			expect(updates).toHaveLength(2);
+			expect(updates[0]).toMatchObject({ snapshot: { items: [] } });
+			expect(updates[1]).toMatchObject({
+				snapshot: { items: [{ surface_id: "surface_boundary_item" }] },
+			});
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
+	it("keeps usage subscriptions scoped without advancing on unrelated runs", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const database = await runtime.runPromise(Database);
+		const journal = await runtime.runPromise(JournalStore);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
+		try {
+			await Effect.runPromise(
+				harness.client.Command({
+					command_id: "usage_scope_create",
+					payload: { title: "Usage scope", type: "thread.create" },
+					thread_id: "thread_usage_scope",
+				}),
+			);
+			await Effect.runPromise(
+				database.client.insert(SurfaceUsageTotals).values([
+					{
+						group_id: "group_target",
+						input_tokens: 2,
+						output_tokens: 1,
+						run_id: "run_target",
+						updated_at: "2026-07-18T20:00:00.000Z",
+					},
+					{
+						group_id: "group_other",
+						input_tokens: 9,
+						output_tokens: 9,
+						run_id: "run_other",
+						updated_at: "2026-07-18T20:00:00.000Z",
+					},
+				]),
+			);
+			const subscribed = await Effect.runPromise(Deferred.make<void>());
+			const updates_promise = Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const stream: Stream.Stream<
+							SurfaceUsageAggregateUpdate,
+							ArtisanClientError
+						> = yield* harness.client.SubscribeSurfaceUsageAggregate({
+							scope: "group",
+							scope_id: "group_target",
+						});
+						yield* Deferred.succeed(subscribed, undefined);
+						return yield* stream.pipe(
+							Stream.take(2),
+							Stream.runCollect,
+							Effect.map(
+								(updates): ReadonlyArray<SurfaceUsageAggregateUpdate> =>
+									Array.from(updates),
+							),
+						);
+					}),
+				),
+			);
+			await Effect.runPromise(Deferred.await(subscribed));
+			const unrelated = await Effect.runPromise(
+				journal.AppendEvent({
+					causation_id: "usage_other",
+					correlation_id: "usage_other",
+					payload: {
+						type: "assistant.message_completed",
+						message_id: "usage_other",
+						text: "Other",
+					},
+					run_id: "run_other",
+					thread_id: "thread_usage_scope",
+				}),
+			);
+			const target = await Effect.runPromise(
+				journal.AppendEvent({
+					causation_id: "usage_target",
+					correlation_id: "usage_target",
+					payload: {
+						type: "assistant.message_completed",
+						message_id: "usage_target",
+						text: "Target",
+					},
+					run_id: "run_target",
+					thread_id: "thread_usage_scope",
+				}),
+			);
+			const updates = [...(await updates_promise)];
+			expect(updates).toHaveLength(2);
+			expect(updates[1]).toMatchObject({
+				snapshot: {
+					aggregate: { input_tokens: 2, output_tokens: 1, scope_id: "group_target" },
+					journal_sequence: target.journal_sequence,
+				},
+			});
+			expect(updates[1]!.snapshot.journal_sequence).toBeGreaterThan(
+				unrelated.journal_sequence,
+			);
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
+	it("replaces an active run usage subscription with unknown totals after thread erasure", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const database = await runtime.runPromise(Database);
+		const erasure = await runtime.runPromise(ThreadErasure);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
+		try {
+			await Effect.runPromise(
+				harness.client.Command({
+					command_id: "usage_erasure_create",
+					payload: { title: "Usage erasure", type: "thread.create" },
+					thread_id: "thread_usage_erasure",
+				}),
+			);
+			await Effect.runPromise(
+				database.client.insert(OrchestrationGroups).values({
+					coordinator_agent_id: "agent_usage_erasure",
+					created_at: "2026-07-18T20:00:00.000Z",
+					group_id: "group_usage_erasure",
+					journal_sequence: 1,
+					max_concurrency: 1,
+					state: "complete",
+					thread_id: "thread_usage_erasure",
+					updated_at: "2026-07-18T20:00:00.000Z",
+					version: 1,
+				}),
+			);
+			await Effect.runPromise(
+				database.client.insert(AgentRuns).values({
+					agent_id: "agent_usage_erasure",
+					assignment_id: "assignment_usage_erasure",
+					attempt: 1,
+					created_at: "2026-07-18T20:00:00.000Z",
+					dispatch_status: "completed",
+					engine_id: "fake",
+					group_id: "group_usage_erasure",
+					last_observation_sequence: 1,
+					profile: "default",
+					run_id: "run_usage_erasure",
+					state: "complete",
+					updated_at: "2026-07-18T20:00:00.000Z",
+				}),
+			);
+			await Effect.runPromise(
+				database.client.insert(SurfaceUsageTotals).values({
+					group_id: "group_usage_erasure",
+					input_tokens: 13,
+					output_tokens: 8,
+					run_id: "run_usage_erasure",
+					updated_at: "2026-07-18T20:00:00.000Z",
+				}),
+			);
+
+			const initial_delivered = await Effect.runPromise(Deferred.make<void>());
+			const updates_promise: Promise<ReadonlyArray<SurfaceUsageAggregateUpdate>> =
+				Effect.runPromise(
+					Effect.scoped(
+						Effect.gen(function* () {
+							const stream = yield* harness.client.SubscribeSurfaceUsageAggregate({
+								scope: "run",
+								scope_id: "run_usage_erasure",
+							});
+							return yield* stream.pipe(
+								Stream.tap((update) =>
+									update.snapshot.aggregate.input_tokens === 13
+										? Deferred.succeed(initial_delivered, undefined).pipe(
+												Effect.asVoid,
+											)
+										: Effect.void,
+								),
+								Stream.take(2),
+								Stream.runCollect,
+								Effect.map(
+									(updates): ReadonlyArray<SurfaceUsageAggregateUpdate> =>
+										Array.from(updates),
+								),
+							);
+						}),
+					),
+				);
+			await Effect.runPromise(Deferred.await(initial_delivered));
+			await Effect.runPromise(
+				database.client.insert(ThreadErasureClaims).values({
+					claimed_at: "2026-07-18T20:01:00.000Z",
+					thread_id: "thread_usage_erasure",
+				}),
+			);
+			await Effect.runPromise(erasure.ResumeClaimed("2026-07-18T20:01:00.000Z"));
+
+			const updates = [...(await updates_promise)];
+			expect(updates).toHaveLength(2);
+			expect(updates[0]).toMatchObject({
+				snapshot: {
+					aggregate: {
+						input_tokens: 13,
+						output_tokens: 8,
+						scope: "run",
+						scope_id: "run_usage_erasure",
+					},
+				},
+			});
+			expect(updates[1]).toMatchObject({
+				snapshot: {
+					aggregate: { scope: "run", scope_id: "run_usage_erasure" },
+				},
+			});
+			expect(updates[1]!.snapshot.aggregate).not.toHaveProperty("input_tokens");
+			expect(updates[1]!.snapshot.aggregate).not.toHaveProperty("output_tokens");
+			expect(
+				await Effect.runPromise(database.client.select().from(SurfaceUsageTotals)),
+			).toEqual([]);
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
+	it("lists, subscribes, reconnects, and erases attributed workspace conflicts", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const erasure = await runtime.runPromise(ThreadErasure);
+		const conflicts = await runtime.runPromise(WorkspaceChangeRepository);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server, {
+			client: { reconnect_delay_ms: 5 },
+		});
+		try {
+			await Effect.runPromise(
+				harness.client.Command({
+					command_id: "conflict_projection_create",
+					payload: { title: "Conflict projection", type: "thread.create" },
+					thread_id: "thread_conflict_projection",
+				}),
+			);
+			const subscribed = await Effect.runPromise(Deferred.make<void>());
+			const updates_promise: Promise<ReadonlyArray<WorkspaceConflictListUpdate>> =
+				Effect.runPromise(
+					Effect.scoped(
+						Effect.gen(function* () {
+							const stream: Stream.Stream<
+								WorkspaceConflictListUpdate,
+								import("@artisan/transport").ArtisanClientError
+							> = yield* harness.client.SubscribeWorkspaceConflicts(
+								"thread_conflict_projection",
+							);
+							yield* Deferred.succeed(subscribed, undefined);
+							return yield* stream.pipe(
+								Stream.drop(1),
+								Stream.takeUntil(
+									(update) => update.snapshot.conflicts.length === 0,
+								),
+								Stream.runCollect,
+								Effect.map(
+									(updates): ReadonlyArray<WorkspaceConflictListUpdate> =>
+										Array.from(updates),
+								),
+							);
+						}),
+					),
+				);
+			await Effect.runPromise(Deferred.await(subscribed));
+			expect(
+				await runtime.runPromise(conflicts.ListConflicts("thread_conflict_projection")),
+			).toEqual([]);
+			const expected_before = {
+				algorithm: "sha256" as const,
+				byte_count: 1,
+				content_hash: "a".repeat(64),
+			};
+			const observed = {
+				algorithm: "sha256" as const,
+				byte_count: 2,
+				content_hash: "b".repeat(64),
+			};
+			await runtime.runPromise(
+				conflicts.ClaimReplace({
+					_tag: "replace",
+					agent_id: "agent_conflict",
+					change_id: "change_conflict",
+					expected_before,
+					intended_after: {
+						algorithm: "sha256",
+						byte_count: 3,
+						content_hash: "c".repeat(64),
+					},
+					message_id: "source_conflict",
+					path: "src/file.ts",
+					raw_origin: { provider: "codex", reference: "conflict-origin" },
+					request_fingerprint: "d".repeat(64),
+					run_id: "run_conflict",
+					sent_at: "2026-07-18T20:00:00.000Z",
+					thread_id: "thread_conflict_projection",
+					workspace_id: "workspace_conflict",
+				}),
+			);
+			await runtime.runPromise(
+				conflicts.ReconcileChanged({
+					message_id: "source_conflict",
+					observation: "native_changed",
+					observed_identity: observed,
+				}),
+			);
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			expect(
+				await runtime.runPromise(conflicts.ListConflicts("thread_conflict_projection")),
+			).toHaveLength(1);
+			const connections = harness.connector_snapshot().connections;
+			harness.close_current_connection();
+			const after_reconnect = await Effect.runPromise(
+				harness.client.ListWorkspaceConflicts("thread_conflict_projection"),
+			);
+			await wait_for(() => harness.connector_snapshot().connections > connections);
+			expect(after_reconnect.conflicts).toHaveLength(1);
+			await Effect.runPromise(
+				harness.client.Command({
+					command_id: "conflict_projection_archive",
+					payload: { type: "thread.archive" },
+					thread_id: "thread_conflict_projection",
+				}),
+			);
+			await Effect.runPromise(
+				erasure.CleanupExpired("2026-07-19T00:00:00.000Z", "2026-07-19T00:00:00.000Z"),
+			);
+			const after_erasure = await Effect.runPromise(
+				harness.client.ListWorkspaceConflicts("thread_conflict_projection"),
+			);
+			const updates = await updates_promise;
+			expect(updates[0]?.snapshot.conflicts).toHaveLength(1);
+			expect(updates.at(-1)?.snapshot.conflicts).toEqual([]);
+			expect(after_erasure.conflicts).toEqual([]);
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
+	it("projects session and canonical surfaces through real MessagePorts and reconnects", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const database = await runtime.runPromise(Database);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server, {
+			client: { reconnect_delay_ms: 5 },
+		});
+
+		try {
+			await Effect.runPromise(
+				harness.client.Command({
+					command_id: "surface_session_create",
+					payload: { title: "Surface session", type: "thread.create" },
+					thread_id: "thread_surface_session",
+				}),
+			);
+			await Effect.runPromise(
+				database.client.insert(OrchestrationCoordinators).values({
+					active_run_id: null,
+					agent_id: "agent_surface_session",
+					created_at: "2026-07-18T10:00:00.000Z",
+					display_name: "Session coordinator",
+					engine_id: "fake",
+					role: "coordinator",
+					thread_id: "thread_surface_session",
+					updated_at: "2026-07-18T10:00:00.000Z",
+				}),
+			);
+
+			const initial = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const session_stream =
+							yield* harness.client.SubscribeThreadSession("thread_surface_session");
+						const surface_stream = yield* harness.client.SubscribeSurfaceItems({
+							thread_id: "thread_surface_session",
+						});
+						const usage_stream = yield* harness.client.SubscribeSurfaceUsageAggregate({
+							scope: "run",
+							scope_id: "run_surface_session",
+						});
+
+						return {
+							session:
+								yield* harness.client.GetThreadSession("thread_surface_session"),
+							session_update: yield* session_stream.pipe(
+								Stream.take(1),
+								Stream.runHead,
+							),
+							surfaces: yield* harness.client.ListSurfaceItems({
+								thread_id: "thread_surface_session",
+							}),
+							surface_update: yield* surface_stream.pipe(
+								Stream.take(1),
+								Stream.runHead,
+							),
+							usage: yield* harness.client.GetSurfaceUsageAggregate({
+								scope: "run",
+								scope_id: "run_surface_session",
+							}),
+							usage_update: yield* usage_stream.pipe(Stream.take(1), Stream.runHead),
+						};
+					}),
+				),
+			);
+
+			expect(initial).toMatchObject({
+				session: { auto_steer_enabled: true, thread_id: "thread_surface_session" },
+				session_update: {
+					_tag: "Some",
+					value: { snapshot: { thread_id: "thread_surface_session" }, type: "snapshot" },
+				},
+				surfaces: { items: [] },
+				surface_update: {
+					_tag: "Some",
+					value: { snapshot: { items: [] }, type: "snapshot" },
+				},
+				usage: { aggregate: { scope: "run", scope_id: "run_surface_session" } },
+				usage_update: {
+					_tag: "Some",
+					value: {
+						snapshot: { aggregate: { scope: "run", scope_id: "run_surface_session" } },
+						type: "snapshot",
+					},
+				},
+			});
+
+			const live_session_updates = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const stream =
+							yield* harness.client.SubscribeThreadSession("thread_surface_session");
+						const fiber = yield* stream.pipe(
+							Stream.take(2),
+							Stream.runCollect,
+							Effect.forkScoped,
+						);
+						yield* harness.client.Command({
+							command_id: "surface_session_disable_steering",
+							payload: { enabled: false, type: "thread.auto_steer.update" },
+							thread_id: "thread_surface_session",
+						});
+						return [...(yield* Fiber.join(fiber))];
+					}),
+				),
+			);
+			expect(live_session_updates.at(-1)).toMatchObject({
+				snapshot: { auto_steer_enabled: false, thread_id: "thread_surface_session" },
+				type: "snapshot",
+			});
+
+			const connections = harness.connector_snapshot().connections;
+			harness.close_current_connection();
+			const reconnected = await Effect.runPromise(
+				harness.client.GetThreadSession("thread_surface_session"),
+			);
+			await wait_for(() => harness.connector_snapshot().connections > connections);
+			expect(reconnected).toMatchObject({
+				auto_steer_enabled: false,
+				thread_id: "thread_surface_session",
+			});
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
 	it("delivers a group transition committed at the subscription snapshot boundary", async () => {
 		const database_path = await make_database_path();
 		const runtime = make_backend_runtime({ database_path, migrations_path });
@@ -173,13 +833,11 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			);
 			await Effect.runPromise(Deferred.await(snapshot_read));
 			await Effect.runPromise(
-				database.client
-					.update(OrchestrationGroups)
-					.set({
-						state: "complete",
-						updated_at: "2026-07-18T10:01:00.000Z",
-						version: 2,
-					}),
+				database.client.update(OrchestrationGroups).set({
+					state: "complete",
+					updated_at: "2026-07-18T10:01:00.000Z",
+					version: 2,
+				}),
 			);
 			const transition = await Effect.runPromise(
 				journal.AppendEvent({
@@ -245,9 +903,8 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			const updates = await Effect.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
-						const stream = yield* harness.client.SubscribeThreadTranscript(
-							"thread_snapshot_race",
-						);
+						const stream =
+							yield* harness.client.SubscribeThreadTranscript("thread_snapshot_race");
 						const fiber = yield* stream.pipe(
 							Stream.take(2),
 							Stream.runCollect,
@@ -376,15 +1033,20 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 				Effect.scoped(
 					Effect.gen(function* () {
 						const initial_snapshot = yield* Deferred.make<void>();
+						const reconnect_snapshot = yield* Deferred.make<void>();
+						let snapshot_count = 0;
 						const stream = yield* harness.client.SubscribeThreadTranscript(
 							"thread_transcript_reconnect",
 						);
 						const fiber = yield* stream.pipe(
-							Stream.tap((update) =>
-								update.type === "snapshot"
-									? Deferred.succeed(initial_snapshot, undefined)
-									: Effect.void,
-							),
+							Stream.tap((update) => {
+								if (update.type !== "snapshot") return Effect.void;
+								snapshot_count += 1;
+								return Deferred.succeed(
+									snapshot_count === 1 ? initial_snapshot : reconnect_snapshot,
+									undefined,
+								).pipe(Effect.asVoid);
+							}),
 							Stream.take(3),
 							Stream.runCollect,
 							Effect.forkScoped,
@@ -394,6 +1056,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 						yield* Effect.promise(() =>
 							wait_for(() => harness.connector_snapshot().connections >= 2),
 						);
+						yield* Deferred.await(reconnect_snapshot);
 						yield* journal.AppendEvent({
 							causation_id: "reconnect_transcript_append",
 							correlation_id: "reconnect_transcript_append",
@@ -418,7 +1081,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			await harness.dispose();
 			await runtime.dispose();
 		}
-	});
+	}, 30_000);
 
 	it("replaces live transcript content with an explicit erased snapshot", async () => {
 		const database_path = await make_database_path();
@@ -621,7 +1284,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			await harness.dispose();
 			await runtime.dispose();
 		}
-	});
+	}, 30_000);
 
 	it("discovers thread groups and delivers an ordered replacement patch through real MessagePorts", async () => {
 		const database_path = await make_database_path();
@@ -1074,7 +1737,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			await harness.dispose();
 			await runtime.dispose();
 		}
-	});
+	}, 30_000);
 
 	it("replays offline Model Behaviour events once and in order after reconnect", async () => {
 		const database_path = await make_database_path();

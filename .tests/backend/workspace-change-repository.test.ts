@@ -16,6 +16,9 @@ import {
 } from "../../modules/backend/src/persistence/journal-store";
 import {
 	EventStreams,
+	AgentRuns,
+	Assignments,
+	OrchestrationGroups,
 	JournalCommands,
 	JournalEvents,
 	ThreadErasureClaims,
@@ -23,6 +26,8 @@ import {
 	ThreadTombstones,
 	WorkspaceChangeOperations,
 	WorkspaceChanges,
+	WorkspaceConflicts,
+	WorkspaceMutationAuthorities,
 	WorkspaceMutationPayloads,
 } from "../../modules/backend/src/persistence/schema";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
@@ -357,6 +362,52 @@ describe("workspace change repository", () => {
 					const repository = yield* WorkspaceChangeRepository;
 
 					yield* SeedThreads(database, ["thread_1", "thread_2"]);
+					yield* database.client.insert(OrchestrationGroups).values({
+						coordinator_agent_id: "reviewer_agent",
+						created_at: "2026-07-11T19:00:00.000Z",
+						group_id: "review_group",
+						journal_sequence: 1,
+						max_concurrency: 1,
+						state: "active",
+						thread_id: "thread_1",
+						updated_at: "2026-07-11T19:00:00.000Z",
+						version: 1,
+					});
+					yield* database.client.insert(Assignments).values({
+						agent_id: "reviewer_agent",
+						active_run_id: "review_run",
+						assignment_id: "review_assignment",
+						created_at: "2026-07-11T19:00:00.000Z",
+						current_attempt: 1,
+						engine_id: "codex",
+						expected_result: "review",
+						group_id: "review_group",
+						instructions: "review",
+						max_attempts: 1,
+						parent_node_id: "root",
+						permission_policy_json: "{}",
+						profile: "default",
+						role: "worker",
+						scope_json: "{}",
+						state: "active",
+						summary_contract: "summary",
+						updated_at: "2026-07-11T19:00:00.000Z",
+						workspace_json: "{}",
+					});
+					yield* database.client.insert(AgentRuns).values({
+						agent_id: "reviewer_agent",
+						assignment_id: "review_assignment",
+						attempt: 1,
+						created_at: "2026-07-11T19:00:00.000Z",
+						dispatch_status: "active",
+						engine_id: "codex",
+						group_id: "review_group",
+						last_observation_sequence: 0,
+						profile: "default",
+						run_id: "review_run",
+						state: "running",
+						updated_at: "2026-07-11T19:00:00.000Z",
+					});
 
 					yield* repository.ClaimReplace(replace_claim());
 					yield* repository.MarkApplied({
@@ -375,15 +426,76 @@ describe("workspace change repository", () => {
 							thread_id: "thread_2",
 						})
 						.pipe(Effect.exit);
-					yield* repository.ClaimReview({
-						_tag: "review",
+					const invalid_graph_reviewer = yield* repository
+						.ClaimReview({
+							_tag: "review",
+							change_id: "change_1",
+							message_id: "review_invalid_graph",
+							request_fingerprint: "d".repeat(64),
+							reviewer_agent_id: "agent_1",
+							sent_at: "2026-07-11T19:00:00.000Z",
+							thread_id: "thread_1",
+						})
+						.pipe(Effect.exit);
+					const graph_review = {
+						_tag: "review" as const,
+						assignment_id: "review_assignment",
 						change_id: "change_1",
+						comment: "Looks correct",
+						group_id: "review_group",
 						message_id: "review_1",
+						outcome: "approved" as const,
+						raw_origin: { provider: "codex", reference: "review-native-1" },
 						request_fingerprint: "e".repeat(64),
+						reviewer_agent_id: "reviewer_agent",
+						reviewer_kind: "graph" as const,
+						reviewer_run_id: "review_run",
 						sent_at: "2026-07-11T19:00:00.000Z",
 						thread_id: "thread_1",
-					});
+					};
+					const non_reviewer = yield* repository
+						.ClaimReview(graph_review)
+						.pipe(Effect.exit);
+					yield* database.client.update(Assignments).set({ role: "reviewer" });
+					const denied: Array<unknown> = [non_reviewer];
+					for (const invalid_assignment of [
+						{ agent_id: "other_agent" },
+						{ active_run_id: "other_run" },
+						{ current_attempt: 2 },
+						{ state: "completed" },
+					]) {
+						yield* database.client.update(Assignments).set(invalid_assignment);
+						denied.push(yield* repository.ClaimReview(graph_review).pipe(Effect.exit));
+						yield* database.client.update(Assignments).set({
+							active_run_id: "review_run",
+							agent_id: "reviewer_agent",
+							current_attempt: 1,
+							state: "active",
+						});
+					}
+					for (const invalid_run of [
+						{ state: "completed" },
+						{ dispatch_status: "completed" },
+					]) {
+						yield* database.client.update(AgentRuns).set(invalid_run);
+						denied.push(yield* repository.ClaimReview(graph_review).pipe(Effect.exit));
+						yield* database.client
+							.update(AgentRuns)
+							.set({ dispatch_status: "active", state: "running" });
+					}
+					for (const invalid_group_state of ["completed", "failed"] as const) {
+						yield* database.client
+							.update(OrchestrationGroups)
+							.set({ state: invalid_group_state });
+						denied.push(yield* repository.ClaimReview(graph_review).pipe(Effect.exit));
+						yield* database.client.update(OrchestrationGroups).set({ state: "active" });
+					}
+					yield* repository.ClaimReview(graph_review);
 					const reviewed = yield* repository.CommitReviewed("review_1");
+					yield* database.client
+						.update(Assignments)
+						.set({ active_run_id: null, state: "completed" });
+					const evolved_retry = yield* repository.ClaimReview(graph_review);
 					const invalid = yield* repository
 						.ClaimRollback({
 							_tag: "rollback",
@@ -395,18 +507,282 @@ describe("workspace change repository", () => {
 							thread_id: "thread_1",
 						})
 						.pipe(Effect.exit);
-					return { invalid, reviewed, wrong_thread };
+					return {
+						denied,
+						evolved_retry,
+						invalid,
+						invalid_graph_reviewer,
+						reviewed,
+						wrong_thread,
+					};
 				}),
 			);
 
 			expect(result.reviewed.event.payload.change).toMatchObject({
+				agent_id: "agent_1",
 				review_state: "reviewed",
+				review: {
+					assignment_id: "review_assignment",
+					comment: "Looks correct",
+					group_id: "review_group",
+					outcome: "approved",
+					reviewer_agent_id: "reviewer_agent",
+					reviewer_run_id: "review_run",
+					reviewer_kind: "graph",
+					source_command_id: "review_1",
+				},
+				run_id: "run_1",
 				version: 2,
 			});
 			expect(JSON.stringify(result.invalid)).toContain("WorkspaceChangeTransitionError");
+			expect(JSON.stringify(result.invalid_graph_reviewer)).toContain(
+				"WorkspaceChangeTransitionError",
+			);
+			for (const denial of result.denied)
+				expect(JSON.stringify(denial)).toContain("WorkspaceChangeTransitionError");
+			expect(result.evolved_retry._tag).toBe("duplicate");
 			expect(JSON.stringify(result.wrong_thread)).toContain("WorkspaceChangeTransitionError");
 		} finally {
 			await runtime.dispose();
+		}
+	});
+
+	it("upgrades changed contention with observed identity, graph attribution, and a real competing change", async () => {
+		const runtime = make_runtime(await make_database_path());
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* WorkspaceChangeRepository;
+					yield* SeedThreads(database);
+					yield* repository.ClaimReplace(replace_claim());
+					yield* repository.ClaimReplace({
+						...replace_claim("message_competing", "change_competing"),
+						agent_id: "agent_2",
+						run_id: "run_2",
+					});
+					yield* repository.MarkApplied({
+						_tag: "replace",
+						message_id: "message_competing",
+						result_identity: after_identity,
+					});
+					yield* repository.CommitRecorded(
+						"message_competing",
+						prepared_diff({
+							change_id: "change_competing",
+							message_id: "message_competing",
+						}),
+					);
+					yield* database.client.insert(WorkspaceMutationAuthorities).values({
+						agent_id: "agent_1",
+						approval: "on_request",
+						assignment_id: "assignment_1",
+						authority_kind: "graph_run",
+						change_id: "change_1",
+						created_at: "2026-07-11T19:00:00.000Z",
+						group_id: "group_1",
+						message_id: "message_replace",
+						run_id: "run_1",
+						scope_kind: "repo",
+						scope_value: "workspace_1",
+						thread_id: "thread_1",
+						working_directory: "C:/workspace",
+						workspace_id: "workspace_1",
+					});
+					yield* repository.ReconcileChanged({
+						message_id: "message_replace",
+						observation: "preflight_changed",
+						observed_identity: before_identity,
+					});
+					yield* repository.ReconcileChanged({
+						message_id: "message_replace",
+						observation: "native_changed",
+						observed_identity: after_identity,
+					});
+					yield* repository.ReconcileChanged({
+						message_id: "message_replace",
+						observation: "native_changed",
+						observed_identity: after_identity,
+					});
+					return {
+						conflicts: yield* repository.ListConflicts("thread_1"),
+						events: (yield* database.client.select().from(JournalEvents)).filter(
+							(event) => event.event_type === "workspace.conflict.updated",
+						),
+					};
+				}),
+			);
+			expect(result.conflicts).toHaveLength(1);
+			expect(result.conflicts[0]).toMatchObject({
+				assignment_id: "assignment_1",
+				attempting_agent_id: "agent_1",
+				attempting_run_id: "run_1",
+				competing_change_id: "change_competing",
+				group_id: "group_1",
+				observed_identity: after_identity,
+				resolution: "user_action_required",
+				workspace_id: "workspace_1",
+			});
+			expect(result.events.map((event) => JSON.parse(event.payload_json))).toEqual([
+				expect.objectContaining({
+					action: "recorded",
+					conflict: expect.objectContaining({ observed_identity: before_identity }),
+					type: "workspace.conflict.updated",
+				}),
+				expect.objectContaining({
+					action: "updated",
+					conflict: expect.objectContaining({
+						competing_change_id: "change_competing",
+						observed_identity: after_identity,
+					}),
+					type: "workspace.conflict.updated",
+				}),
+			]);
+			expect(JSON.stringify(result.conflicts)).not.toContain("replacement");
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("omits ancient, rejected, and identity-mismatched edits from competing attribution", async () => {
+		const runtime = make_runtime(await make_database_path());
+		try {
+			const conflicts = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* WorkspaceChangeRepository;
+					yield* SeedThreads(database);
+					yield* repository.ClaimReplace(
+						replace_claim("message_ancient", "change_ancient"),
+					);
+					yield* repository.MarkApplied({
+						_tag: "replace",
+						message_id: "message_ancient",
+						result_identity: after_identity,
+					});
+					yield* repository.CommitRecorded(
+						"message_ancient",
+						prepared_diff({
+							change_id: "change_ancient",
+							message_id: "message_ancient",
+						}),
+					);
+					yield* database.client
+						.update(WorkspaceChanges)
+						.set({ updated_at: "2026-07-10T19:00:00.000Z" });
+					yield* repository.ClaimReplace(
+						replace_claim("message_rejected_other", "change_rejected_other"),
+					);
+					yield* repository.RejectChanged("message_rejected_other");
+					yield* repository.ClaimReplace(replace_claim());
+					yield* repository.ReconcileChanged({
+						message_id: "message_replace",
+						observation: "native_changed",
+						observed_identity: {
+							algorithm: "sha256",
+							byte_count: 9,
+							content_hash: "c".repeat(64),
+						},
+					});
+					return yield* repository.ListConflicts("thread_1");
+				}),
+			);
+			expect(conflicts).toHaveLength(1);
+			expect(conflicts[0]?.competing_change_id).toBeUndefined();
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("enforces conflict and review metadata constraints in SQLite", async () => {
+		const runtime = make_runtime(await make_database_path());
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					yield* SeedThreads(database);
+					const invalid_conflict = yield* database.client
+						.insert(WorkspaceConflicts)
+						.values({
+							attempting_agent_id: "agent_1",
+							attempting_run_id: "run_1",
+							attempting_thread_id: "thread_1",
+							change_id: "change_1",
+							conflict_id: "conflict_1",
+							detected_at: "2026-07-11T19:00:00.000Z",
+							expected_identity_json: "not-json",
+							path: "src/example.ts",
+							resolution: "invalid",
+							source_command_id: "message_1",
+							workspace_id: "workspace_1",
+						})
+						.pipe(Effect.exit);
+					yield* database.client.insert(WorkspaceChangeOperations).values({
+						action: "review",
+						change_id: "change_review",
+						created_at: "2026-07-11T19:00:00.000Z",
+						diff_format_version: 1,
+						evidence_recorded: false,
+						lifecycle: "claimed",
+						message_id: "review_constraint",
+						request_fingerprint: "a".repeat(64),
+						reviewer_kind: "user",
+						sent_at: "2026-07-11T19:00:00.000Z",
+						thread_id: "thread_1",
+						updated_at: "2026-07-11T19:00:00.000Z",
+					});
+					const invalid_review = yield* database.client
+						.update(WorkspaceChangeOperations)
+						.set({ review_comment: "x".repeat(4097) })
+						.pipe(Effect.exit);
+					return { invalid_conflict, invalid_review };
+				}),
+			);
+			expect(result.invalid_conflict._tag).toBe("Failure");
+			expect(result.invalid_review._tag).toBe("Failure");
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("orders equal-time conflicts by stable conflict identity across restart", async () => {
+		const database_path = await make_database_path();
+		const first_runtime = make_runtime(database_path);
+		try {
+			await first_runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* WorkspaceChangeRepository;
+					yield* SeedThreads(database);
+					for (const [message_id, change_id] of [
+						["message_z", "change_z"],
+						["message_a", "change_a"],
+					] as const) {
+						yield* repository.ClaimReplace(replace_claim(message_id, change_id));
+						yield* repository.ReconcileChanged({
+							message_id,
+							observation: "native_changed",
+							observed_identity: after_identity,
+						});
+					}
+				}),
+			);
+		} finally {
+			await first_runtime.dispose();
+		}
+		const restarted = make_runtime(database_path);
+		try {
+			const conflicts = await restarted.runPromise(
+				Effect.flatMap(WorkspaceChangeRepository, (repository) =>
+					repository.ListConflicts("thread_1"),
+				),
+			);
+			expect(conflicts.map((conflict) => conflict.conflict_id)).toEqual([
+				"conflict:message_a",
+				"conflict:message_z",
+			]);
+		} finally {
+			await restarted.dispose();
 		}
 	});
 
@@ -841,6 +1217,7 @@ describe("workspace change repository", () => {
 						message_id: "message_staged",
 						observation: "preflight_changed",
 					});
+					const staged_conflicts = yield* repository.ListConflicts("thread_1");
 					const staged_native = yield* repository.ReconcileChanged({
 						message_id: "message_staged",
 						observation: "native_changed",
@@ -865,6 +1242,19 @@ describe("workspace change repository", () => {
 						_tag: "replace",
 						message_id: "message_applied",
 						result_identity: after_identity,
+					});
+					yield* database.client.insert(WorkspaceConflicts).values({
+						attempting_agent_id: "agent_1",
+						attempting_run_id: "run_1",
+						attempting_thread_id: "thread_1",
+						change_id: "change_applied",
+						conflict_id: "conflict:message_applied",
+						detected_at: "2026-07-11T19:00:00.000Z",
+						expected_identity_json: JSON.stringify(before_identity),
+						path: "src/example.ts",
+						resolution: "user_action_required",
+						source_command_id: "message_applied",
+						workspace_id: "workspace_1",
 					});
 					const applied = yield* repository.ReconcileChanged({
 						message_id: "message_applied",
@@ -899,10 +1289,15 @@ describe("workspace change repository", () => {
 						thread_id: "thread_1",
 					});
 
+					const conflicts = yield* repository.ListConflicts("thread_1");
 					return {
 						applied,
 						committed,
 						committed_event,
+						conflict_events: (yield* database.client.select().from(JournalEvents))
+							.filter((event) => event.event_type === "workspace.conflict.updated")
+							.map((event) => JSON.parse(event.payload_json)),
+						conflicts,
 						missing: yield* repository
 							.ReconcileChanged({
 								message_id: "message_missing",
@@ -912,6 +1307,7 @@ describe("workspace change repository", () => {
 						rejected,
 						rejected_retry,
 						staged,
+						staged_conflicts,
 						staged_native,
 						review: yield* repository
 							.ReconcileChanged({
@@ -928,6 +1324,33 @@ describe("workspace change repository", () => {
 				_tag: "staged",
 				operation: { lifecycle: "claimed" },
 			});
+			expect(result.staged_conflicts).toEqual([]);
+			expect(
+				result.conflicts
+					.filter((conflict) => conflict.resolution === "user_action_required")
+					.map((conflict) => conflict.source_command_id),
+			).toEqual(["message_rejected", "message_staged"]);
+			expect(
+				result.conflicts.find(
+					(conflict) => conflict.source_command_id === "message_applied",
+				)?.resolution,
+			).toBe("reconciled");
+			expect(
+				result.conflicts.find(
+					(conflict) => conflict.source_command_id === "message_committed",
+				),
+			).toBeUndefined();
+			expect(
+				result.conflict_events.map((event) => [
+					event.action,
+					event.conflict.source_command_id,
+					event.conflict.resolution,
+				]),
+			).toEqual([
+				["recorded", "message_staged", "user_action_required"],
+				["recorded", "message_rejected", "user_action_required"],
+				["updated", "message_applied", "reconciled"],
+			]);
 			expect(result.staged_native).toMatchObject({
 				_tag: "rejected",
 				operation: { lifecycle: "rejected" },

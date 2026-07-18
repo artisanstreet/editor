@@ -8,6 +8,7 @@ import {
 	type GitMutationResolveEnvelope,
 	type GitWorkspaceQueryEnvelope,
 	type WorkspaceChangeListQueryEnvelope,
+	type WorkspaceConflictListQueryEnvelope,
 	type WorkspaceChangeDiffQueryEnvelope,
 	type WorkspaceChangeReviewEnvelope,
 	type WorkspaceChangeRollbackEnvelope,
@@ -24,12 +25,15 @@ import {
 	type ModelBehaviourUpdateEnvelope,
 	type OrchestrationGraphQueryEnvelope,
 	type OrchestrationGroupListQueryEnvelope,
+	type SurfaceListQueryEnvelope,
+	type SurfaceUsageAggregateQueryEnvelope,
 	type TerminalListQueryEnvelope,
 	type ThreadListQueryEnvelope,
 	type ThreadRetentionQueryEnvelope,
 	type ThreadRetentionUpdateEnvelope,
 	type ThreadWorkQueryEnvelope,
 	type ThreadTranscriptQueryEnvelope,
+	type ThreadSessionQueryEnvelope,
 } from "@artisan/protocol";
 
 import {
@@ -262,6 +266,24 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						? result.payload
 						: yield* Effect.die("workspace change diff response narrowed incorrectly");
 				});
+			const list_workspace_conflicts = (thread_id: string) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: WorkspaceConflictListQueryEnvelope = {
+						...trace,
+						kind: "workspace.conflict.list.query",
+						payload: { thread_id },
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"workspace.conflict.list.query.result",
+					);
+					return result.kind === "workspace.conflict.list.query.result"
+						? result.payload
+						: yield* Effect.die(
+								"workspace conflict list response narrowed incorrectly",
+							);
+				});
 			const get_git_workspace = (input: ArtisanGitWorkspaceInput) =>
 				Effect.gen(function* () {
 					const trace = yield* connection.MakeTrace;
@@ -436,7 +458,23 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						...trace,
 						kind: "workspace.change.review",
 						message_id: input.command_id ?? trace.message_id,
-						payload: { change_id: input.change_id },
+						payload: {
+							change_id: input.change_id,
+							reviewer_kind: input.reviewer_kind,
+							...(input.comment === undefined ? {} : { comment: input.comment }),
+							...(input.outcome === undefined ? {} : { outcome: input.outcome }),
+							...(input.raw_origin === undefined
+								? {}
+								: { raw_origin: input.raw_origin }),
+							...(input.reviewer_kind === "user"
+								? {}
+								: {
+										assignment_id: input.assignment_id,
+										group_id: input.group_id,
+										reviewer_agent_id: input.reviewer_agent_id,
+										reviewer_run_id: input.reviewer_run_id,
+									}),
+						},
 						thread_id: input.thread_id,
 					};
 
@@ -775,6 +813,53 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 							);
 				});
 
+			const get_thread_session = (thread_id: string) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ThreadSessionQueryEnvelope = {
+						...trace,
+						kind: "thread.session.query",
+						payload: { thread_id },
+					};
+					const result = yield* requests.Request(envelope, "thread.session.query.result");
+					return result.kind === "thread.session.query.result"
+						? result.payload
+						: yield* Effect.die("thread session response narrowed incorrectly");
+				});
+
+			const list_surface_items = (input: import("@artisan/protocol").SurfaceListQuery) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: SurfaceListQueryEnvelope = {
+						...trace,
+						kind: "surface.list.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(envelope, "surface.list.query.result");
+					return result.kind === "surface.list.query.result"
+						? result.payload
+						: yield* Effect.die("surface list response narrowed incorrectly");
+				});
+
+			const get_surface_usage_aggregate = (
+				input: import("@artisan/protocol").SurfaceUsageAggregateQuery,
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: SurfaceUsageAggregateQueryEnvelope = {
+						...trace,
+						kind: "surface.usage.aggregate.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"surface.usage.aggregate.query.result",
+					);
+					return result.kind === "surface.usage.aggregate.query.result"
+						? result.payload
+						: yield* Effect.die("surface usage response narrowed incorrectly");
+				});
+
 			const list_terminals = (thread_id: string, workspace_id: string) =>
 				Effect.gen(function* () {
 					const trace = yield* connection.MakeTrace;
@@ -798,6 +883,9 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				Events: subscriptions.Events,
 				GetOrchestrationGraph: get_orchestration_graph,
 				GetThreadTranscript: get_thread_transcript,
+				GetThreadSession: get_thread_session,
+				ListSurfaceItems: list_surface_items,
+				GetSurfaceUsageAggregate: get_surface_usage_aggregate,
 				ListOrchestrationGroups: list_orchestration_groups,
 				GetGlobalGuidance: get_global_guidance,
 				GetGitDiff: get_git_diff,
@@ -807,6 +895,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				GetThreadWork: get_thread_work,
 				GetWorkspaceChangeDiff: get_workspace_change_diff,
 				ListWorkspaceChanges: list_workspace_changes,
+				ListWorkspaceConflicts: list_workspace_conflicts,
 				ListTerminals: list_terminals,
 				ListThreads: list_threads,
 				OpenAsset: (asset_id) => streams.Open(`asset:${asset_id}`),
@@ -826,6 +915,10 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				SubscribeOrchestrationGroups: subscriptions.SubscribeOrchestrationGroups,
 				SubscribeThreadList: subscriptions.SubscribeThreadList,
 				SubscribeThreadTranscript: subscriptions.SubscribeThreadTranscript,
+				SubscribeThreadSession: subscriptions.SubscribeThreadSession,
+				SubscribeSurfaceItems: subscriptions.SubscribeSurfaceItems,
+				SubscribeSurfaceUsageAggregate: subscriptions.SubscribeSurfaceUsageAggregate,
+				SubscribeWorkspaceConflicts: subscriptions.SubscribeWorkspaceConflicts,
 				UpdateGlobalGuidance: update_global_guidance,
 				UpdateModelBehaviour: update_model_behaviour,
 				UpdateThreadRetentionPolicy: update_thread_retention_policy,

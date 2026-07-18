@@ -127,6 +127,7 @@ describe("ArtisanClient over MessagePorts", () => {
 			const review_input = {
 				change_id: "change_fixture",
 				command_id: "workspace_review_1",
+				reviewer_kind: "user" as const,
 				thread_id: "thread_fixture",
 			};
 			const review = await Effect.runPromise(
@@ -145,6 +146,7 @@ describe("ArtisanClient over MessagePorts", () => {
 					.ReviewWorkspaceChange({
 						change_id: "different_change",
 						command_id: review_input.command_id,
+						reviewer_kind: review_input.reviewer_kind,
 						thread_id: review_input.thread_id,
 					})
 					.pipe(Effect.flip),

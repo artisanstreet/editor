@@ -246,14 +246,12 @@ describe("WorkspaceEvidenceRecorder", () => {
 				return yield* recorder.RecordFilesystemMutation(filesystem_input());
 			}),
 		);
-
 		await first_runtime.dispose();
 
-		const second_runtime = make_backend_runtime({
+		const second_runtime = make_recorder_runtime(
 			database_path,
-			migrations_path,
-			runtime_metadata: make_metadata_layer(),
-		});
+			"workspace_evidence_recorder_restart_test",
+		);
 
 		try {
 			const duplicate = await second_runtime.runPromise(

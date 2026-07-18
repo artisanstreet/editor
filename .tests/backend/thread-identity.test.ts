@@ -510,7 +510,7 @@ describe("thread identity", () => {
 							}),
 						);
 
-						return yield* connection.Outbound.pipe(Stream.take(5), Stream.runCollect);
+						return yield* connection.Outbound.pipe(Stream.take(6), Stream.runCollect);
 					}),
 				),
 			);
@@ -520,6 +520,7 @@ describe("thread identity", () => {
 				"command.receipt",
 				"event",
 				"thread.list.upsert",
+				"event",
 				"event",
 				"thread.list.upsert",
 			]);

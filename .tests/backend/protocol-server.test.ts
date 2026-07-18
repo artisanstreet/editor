@@ -494,7 +494,7 @@ describe("protocol server", () => {
 								"after",
 							),
 						);
-						const conflict = yield* take_outbound(connection, 1);
+						const conflict = yield* take_outbound(connection, 2);
 						yield* connection.Receive(
 							workspace_review(
 								"workspace_review_unavailable",
@@ -623,6 +623,15 @@ describe("protocol server", () => {
 						status: "rejected",
 					},
 					thread_id: "thread_workspace_protocol",
+				},
+				{
+					correlation_id: "workspace_replace_conflict",
+					kind: "event",
+					payload: {
+						action: "recorded",
+						conflict: { resolution: "user_action_required" },
+						type: "workspace.conflict.updated",
+					},
 				},
 			]);
 			expect(output.replace).toMatchObject([

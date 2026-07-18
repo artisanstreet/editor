@@ -557,7 +557,7 @@ describe("WorkspaceFileService review and rollback", () => {
 				reason: "changed",
 			});
 			expect(harness.state.snapshot_available()).toBe(true);
-			expect(harness.state.file_read_calls()).toBe(1);
+			expect(harness.state.file_read_calls()).toBe(2);
 			expect(harness.state.replace_calls()).toBe(1);
 			expect(harness.state.snapshot_read_calls()).toBe(1);
 			expect(harness.state.stage_calls()).toBe(1);

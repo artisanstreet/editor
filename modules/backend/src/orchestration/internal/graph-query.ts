@@ -129,23 +129,21 @@ export function make_graph_query(context: GraphContext, codecs: PersistedGraphCo
 		include_terminal: boolean,
 	) =>
 		rows
-						.filter(
-							(row) =>
-								include_terminal ||
-								!["summarized", "stopped", "failed", "complete"].includes(
-									row.state,
-								),
-						)
-						.map((row) => ({
-							coordinator_agent_id: row.coordinator_agent_id,
-							created_at: row.created_at,
-							group_id: row.group_id,
-							max_concurrency: row.max_concurrency,
-							state: row.state as OrchestrationGroupSummary["state"],
-							thread_id: row.thread_id,
-							updated_at: row.updated_at,
-							version: row.version,
-						}));
+			.filter(
+				(row) =>
+					include_terminal ||
+					!["summarized", "stopped", "failed", "complete"].includes(row.state),
+			)
+			.map((row) => ({
+				coordinator_agent_id: row.coordinator_agent_id,
+				created_at: row.created_at,
+				group_id: row.group_id,
+				max_concurrency: row.max_concurrency,
+				state: row.state as OrchestrationGroupSummary["state"],
+				thread_id: row.thread_id,
+				updated_at: row.updated_at,
+				version: row.version,
+			}));
 
 	const list_groups = (thread_id: string, include_terminal: boolean) =>
 		list_group_rows(database.client, thread_id).pipe(

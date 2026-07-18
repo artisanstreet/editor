@@ -9,7 +9,14 @@ import {
 } from "@artisan/protocol";
 
 import { Database } from "../persistence/database";
-import { JournalEvents, SurfaceItems, SurfaceUsageTotals } from "../persistence/schema";
+import {
+	AgentRuns,
+	Assignments,
+	JournalEvents,
+	OrchestrationGroups,
+	SurfaceItems,
+	SurfaceUsageTotals,
+} from "../persistence/schema";
 
 /** Reports corrupt persisted surface state without converting a read into a defect. */
 export class SurfaceInvariantFailed extends Data.TaggedError("SurfaceInvariantFailed")<{
@@ -25,6 +32,11 @@ export class SurfaceService extends Context.Service<
 			readonly run_id?: string;
 			readonly group_id?: string;
 		}) => Effect.Effect<typeof SurfaceSnapshot.Type, SurfaceInvariantFailed>;
+		readonly ListSnapshot: (input: {
+			readonly thread_id: string;
+			readonly run_id?: string;
+			readonly group_id?: string;
+		}) => Effect.Effect<typeof SurfaceSnapshot.Type, SurfaceInvariantFailed>;
 		readonly Usage: (input: {
 			readonly run_id?: string;
 			readonly group_id?: string;
@@ -33,6 +45,24 @@ export class SurfaceService extends Context.Service<
 			readonly scope: "run" | "assignment" | "group";
 			readonly scope_id: string;
 		}) => Effect.Effect<typeof SurfaceUsageAggregate.Type, SurfaceInvariantFailed>;
+		readonly AggregateUsageSnapshot: (input: {
+			readonly scope: "run" | "assignment" | "group";
+			readonly scope_id: string;
+		}) => Effect.Effect<
+			{
+				readonly aggregate: typeof SurfaceUsageAggregate.Type;
+				readonly journal_sequence: number;
+			},
+			SurfaceInvariantFailed
+		>;
+		readonly UsageEventAffects: (
+			input: { readonly scope: "run" | "assignment" | "group"; readonly scope_id: string },
+			run_id: string | undefined,
+		) => Effect.Effect<boolean, SurfaceInvariantFailed>;
+		readonly UsageScopeThread: (input: {
+			readonly scope: "run" | "assignment" | "group";
+			readonly scope_id: string;
+		}) => Effect.Effect<string | undefined, SurfaceInvariantFailed>;
 	}
 >()("Artisan/SurfaceService") {}
 
@@ -101,31 +131,36 @@ export const SurfaceServiceLive = Layer.effect(
 						}),
 				),
 			);
-		const List = (input: {
+		const ListSnapshot = (input: {
 			readonly thread_id: string;
 			readonly run_id?: string;
 			readonly group_id?: string;
 		}) =>
-			Effect.gen(function* () {
-				const rows = yield* database.client
-					.select()
-					.from(SurfaceItems)
-					.where(
-						and(
-							eq(SurfaceItems.thread_id, input.thread_id),
-							...(input.run_id ? [eq(SurfaceItems.run_id, input.run_id)] : []),
-							...(input.group_id ? [eq(SurfaceItems.group_id, input.group_id)] : []),
-						),
-					)
-					.orderBy(asc(SurfaceItems.projection_order));
-				const items = yield* Effect.forEach(rows, DecodeSurfaceItem);
-				const [last] = yield* database.client
-					.select({ journal_sequence: JournalEvents.sequence })
-					.from(JournalEvents)
-					.orderBy(desc(JournalEvents.sequence))
-					.limit(1);
-				return { items, journal_sequence: last?.journal_sequence ?? 0 };
-			});
+			database.client.transaction((transaction) =>
+				Effect.gen(function* () {
+					const rows = yield* transaction
+						.select()
+						.from(SurfaceItems)
+						.where(
+							and(
+								eq(SurfaceItems.thread_id, input.thread_id),
+								...(input.run_id ? [eq(SurfaceItems.run_id, input.run_id)] : []),
+								...(input.group_id
+									? [eq(SurfaceItems.group_id, input.group_id)]
+									: []),
+							),
+						)
+						.orderBy(asc(SurfaceItems.projection_order));
+					const items = yield* Effect.forEach(rows, DecodeSurfaceItem);
+					const [last] = yield* transaction
+						.select({ journal_sequence: JournalEvents.sequence })
+						.from(JournalEvents)
+						.orderBy(desc(JournalEvents.sequence))
+						.limit(1);
+					return { items, journal_sequence: last?.journal_sequence ?? 0 };
+				}),
+			);
+		const List = ListSnapshot;
 		const Usage = (input: { readonly run_id?: string; readonly group_id?: string }) =>
 			database.client
 				.select()
@@ -182,6 +217,119 @@ export const SurfaceServiceLive = Layer.effect(
 								}),
 					),
 				);
-		return { List, Usage, AggregateUsage } as unknown as typeof SurfaceService.Service;
+		const AggregateUsageSnapshot = (input: {
+			readonly scope: "run" | "assignment" | "group";
+			readonly scope_id: string;
+		}) =>
+			database.client.transaction((transaction) =>
+				Effect.gen(function* () {
+					const rows = yield* transaction
+						.select()
+						.from(SurfaceUsageTotals)
+						.where(
+							input.scope === "run"
+								? eq(SurfaceUsageTotals.run_id, input.scope_id)
+								: input.scope === "assignment"
+									? eq(SurfaceUsageTotals.assignment_id, input.scope_id)
+									: eq(SurfaceUsageTotals.group_id, input.scope_id),
+						);
+					const usage = yield* Effect.forEach(rows, DecodeSurfaceUsage);
+					const sum = (values: ReadonlyArray<number | undefined>) =>
+						values.length === 0 || values.some((value) => value === undefined)
+							? undefined
+							: (values as ReadonlyArray<number>).reduce(
+									(left, right) => left + right,
+									0,
+								);
+					const aggregate = yield* Schema.decodeUnknownEffect(SurfaceUsageAggregate)({
+						scope: input.scope,
+						scope_id: input.scope_id,
+						...(sum(usage.map((row) => row.input_tokens)) === undefined
+							? {}
+							: { input_tokens: sum(usage.map((row) => row.input_tokens)) }),
+						...(sum(usage.map((row) => row.output_tokens)) === undefined
+							? {}
+							: { output_tokens: sum(usage.map((row) => row.output_tokens)) }),
+					}).pipe(
+						Effect.mapError(
+							() =>
+								new SurfaceInvariantFailed({
+									message: `Aggregate usage ${input.scope}:${input.scope_id} does not match its schema`,
+								}),
+						),
+					);
+					const [last] = yield* transaction
+						.select({ journal_sequence: JournalEvents.sequence })
+						.from(JournalEvents)
+						.orderBy(desc(JournalEvents.sequence))
+						.limit(1);
+					return { aggregate, journal_sequence: last?.journal_sequence ?? 0 };
+				}),
+			);
+		const UsageEventAffects = (
+			input: { readonly scope: "run" | "assignment" | "group"; readonly scope_id: string },
+			run_id: string | undefined,
+		) =>
+			run_id === undefined
+				? Effect.succeed(false)
+				: database.client
+						.select({ run_id: SurfaceUsageTotals.run_id })
+						.from(SurfaceUsageTotals)
+						.where(
+							and(
+								eq(SurfaceUsageTotals.run_id, run_id),
+								input.scope === "run"
+									? eq(SurfaceUsageTotals.run_id, input.scope_id)
+									: input.scope === "assignment"
+										? eq(SurfaceUsageTotals.assignment_id, input.scope_id)
+										: eq(SurfaceUsageTotals.group_id, input.scope_id),
+							),
+						)
+						.limit(1)
+						.pipe(Effect.map((rows) => rows.length === 1));
+		const UsageScopeThread = (input: {
+			readonly scope: "run" | "assignment" | "group";
+			readonly scope_id: string;
+		}) => {
+			const group_ids =
+				input.scope === "group"
+					? Effect.succeed([{ group_id: input.scope_id }])
+					: input.scope === "assignment"
+						? database.client
+								.select({ group_id: Assignments.group_id })
+								.from(Assignments)
+								.where(eq(Assignments.assignment_id, input.scope_id))
+								.limit(1)
+						: database.client
+								.select({ group_id: AgentRuns.group_id })
+								.from(AgentRuns)
+								.where(eq(AgentRuns.run_id, input.scope_id))
+								.limit(1);
+			return group_ids.pipe(
+				Effect.flatMap(([group]) =>
+					group === undefined
+						? Effect.succeed(undefined)
+						: database.client
+								.select({ thread_id: OrchestrationGroups.thread_id })
+								.from(OrchestrationGroups)
+								.where(eq(OrchestrationGroups.group_id, group.group_id))
+								.limit(1)
+								.pipe(Effect.map(([row]) => row?.thread_id)),
+				),
+				Effect.mapError(
+					() =>
+						new SurfaceInvariantFailed({ message: "Usage scope thread lookup failed" }),
+				),
+			);
+		};
+		return {
+			List,
+			ListSnapshot,
+			Usage,
+			AggregateUsage,
+			AggregateUsageSnapshot,
+			UsageEventAffects,
+			UsageScopeThread,
+		} as unknown as typeof SurfaceService.Service;
 	}),
 );

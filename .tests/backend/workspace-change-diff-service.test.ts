@@ -16,6 +16,7 @@ import {
 	WorkspaceChangeOperations,
 	WorkspaceChanges,
 	WorkspaceMutationAuthorities,
+	WorkspaceMutationPayloads,
 } from "../../modules/backend/src/persistence/schema";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
 import {
@@ -644,6 +645,14 @@ describe("WorkspaceChangeDiffService and WorkspaceChangeRepository", () => {
 							'2026-07-13T12:00:00.000Z'
 						)
 					`);
+					yield* database.client.run(`
+						INSERT INTO workspace_mutation_payloads (
+							message_id, thread_id, state, created_at, updated_at
+						) VALUES (
+							'message_legacy', 'thread_1', 'consumed',
+							'2026-07-13T12:00:00.000Z', '2026-07-13T12:00:00.000Z'
+						)
+					`);
 				}),
 			);
 		} finally {
@@ -660,6 +669,9 @@ describe("WorkspaceChangeDiffService and WorkspaceChangeRepository", () => {
 						.select()
 						.from(WorkspaceMutationAuthorities);
 					const changes = yield* database.client.select().from(WorkspaceChanges);
+					const payloads = yield* database.client
+						.select()
+						.from(WorkspaceMutationPayloads);
 					const all_diffs = yield* database.client.select().from(WorkspaceChangeDiffs);
 					const authority = authorities.find(
 						(row) => row.message_id === "message_legacy",
@@ -688,6 +700,7 @@ describe("WorkspaceChangeDiffService and WorkspaceChangeRepository", () => {
 						diffs,
 						invalid_diff_state,
 						invalid_operation_version,
+						payloads,
 						read,
 					};
 				}),
@@ -700,6 +713,9 @@ describe("WorkspaceChangeDiffService and WorkspaceChangeRepository", () => {
 			});
 			expect(result.change).toMatchObject({ diff_state: "legacy_unavailable" });
 			expect(result.diffs).toEqual([]);
+			expect(result.payloads).toEqual([
+				expect.objectContaining({ message_id: "message_legacy", state: "consumed" }),
+			]);
 			expect(Exit.isFailure(result.invalid_operation_version)).toBe(true);
 			expect(Exit.isFailure(result.invalid_diff_state)).toBe(true);
 			expect(failure_from(result.read)).toEqual(

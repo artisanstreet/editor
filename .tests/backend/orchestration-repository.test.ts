@@ -14,6 +14,7 @@ import { OrchestrationRepository } from "../../modules/backend/src/persistence/o
 import type { IntakeAssessment } from "../../modules/backend/src/orchestration/intake-policy";
 import {
 	JournalCommands,
+	JournalEvents,
 	OrchestrationOutbox,
 	OrchestrationIntake,
 	OrchestrationRawObservations,
@@ -191,6 +192,62 @@ describe("orchestration repository hardening", () => {
 		}
 	});
 
+	it("projects proceeded intake risk and assumptions from durable resolved state", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			migrations_path,
+		});
+
+		try {
+			await runtime.runPromise(SetupThread("thread_1"));
+			await runtime.runPromise(
+				Accept(
+					make_command("send_1", "thread_1", {
+						engine_id: "engine_1",
+						text: "Inspect the repository",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+					{
+						assumptions: ["Use the current checked-out branch"],
+						risk: "low",
+						resolution: "proceed",
+					},
+				),
+			);
+			const [session, intake] = await runtime.runPromise(
+				Effect.gen(function* () {
+					const repository = yield* OrchestrationRepository;
+
+					return yield* Effect.all([
+						repository.GetSession("thread_1"),
+						Read((database) => database.select().from(OrchestrationIntake)),
+					]);
+				}),
+			);
+
+			expect(intake).toMatchObject([
+				{
+					message_id: "send_1",
+					question: null,
+					question_id: null,
+					risk: "low",
+					state: "resolved",
+				},
+			]);
+			expect(session).toMatchObject({
+				assumptions: [
+					{ assumption: "Use the current checked-out branch", message_id: "send_1" },
+				],
+				latest_intake: { message_id: "send_1", resolution: "proceed", risk: "low" },
+				thread_id: "thread_1",
+			});
+			expect(session.pending_question).toBeUndefined();
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("preserves attributed mentions through intake resolution and exact retry", async () => {
 		const runtime = make_backend_runtime({
 			database_path: await make_database_path(),
@@ -241,14 +298,20 @@ describe("orchestration repository hardening", () => {
 
 			const accepted = await runtime.runPromise(Accept(response));
 			const duplicate = await runtime.runPromise(Accept(response));
-			const [outbox, pending] = await runtime.runPromise(
-				Effect.all([
-					Read((database) => database.select().from(OrchestrationOutbox)),
-					Read((database) => database.select().from(OrchestrationIntake)),
-				]),
+			const [outbox, pending, session, journal] = await runtime.runPromise(
+				Effect.gen(function* () {
+					const repository = yield* OrchestrationRepository;
+
+					return yield* Effect.all([
+						Read((database) => database.select().from(OrchestrationOutbox)),
+						Read((database) => database.select().from(OrchestrationIntake)),
+						repository.GetSession("thread_1"),
+						Read((database) => database.select().from(JournalEvents)),
+					]);
+				}),
 			);
 
-			expect(accepted.events).toHaveLength(3);
+			expect(accepted.events).toHaveLength(4);
 			expect(accepted.events).toEqual(
 				expect.arrayContaining([expect.objectContaining({ raw_origin: origin })]),
 			);
@@ -264,6 +327,19 @@ describe("orchestration repository hardening", () => {
 				mentioned_projects: [{ project_id: "project_beta" }],
 			});
 			expect(pending).toMatchObject([{ state: "resolved" }]);
+			expect(session.last_routing).toMatchObject({
+				message_id: "intake_1",
+				outcome: "queued",
+				reason: "no_active_run",
+				run_id: accepted.run_id,
+			});
+			expect(
+				journal.filter(
+					(event) =>
+						event.causation_id === response.message_id &&
+						event.event_type === "thread.message_routed",
+				),
+			).toHaveLength(1);
 		} finally {
 			await runtime.dispose();
 		}
