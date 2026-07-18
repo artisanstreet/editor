@@ -1,28 +1,36 @@
 # Agent Engine IO Research
 
-Last updated: 2026-07-06
+Last updated: 2026-07-18
 
-This note captures how Artisan Editor should capture input/output from the v1
-agent engines: Codex CLI and Claude Code CLI.
+Status: historical engine-I/O research. Claude Code capture notes below are
+deferred and no Claude execution adapter ships during prototyping. Codex CLI is
+the sole production Engine; the provider-neutral seam and fake harness remain.
 
-## Summary
+> Everything below that describes a Claude adapter, command, architecture, or
+> “v1” recommendation is an archived 2026-07-06 proposal, not a current product
+> requirement. It is retained only as research input for a possible future
+> adapter decision.
 
-V1 should avoid scraping interactive terminal TUIs as the primary integration.
-Both v1 engines expose more structured paths that fit Artisan's engine adapter
+This note captures the original research into how Artisan Editor could capture
+input/output from Codex CLI and Claude Code CLI.
+
+## Historical Summary (Claude Proposal Superseded)
+
+The original research recommended avoiding interactive terminal TUI scraping.
+Both candidates exposed more structured paths that fit Artisan's engine adapter
 module better.
 
 - Codex v1 preferred path: spawn `codex app-server` over stdio and speak its
   JSONL JSON-RPC protocol.
 - Codex fallback path: use `codex exec --json` for one-shot or automation-style
   runs.
-- Claude Code v1 preferred path: spawn `claude -p` in print mode with
+- Superseded Claude proposal: spawn `claude -p` in print mode with
   `--output-format stream-json --verbose`, parse stdout as streamed JSON, and
   keep stderr as raw diagnostics.
-- Claude Code SDK should not be the v1 path for the subscription/BYOK selling
-  point. The v1 product should use the user's installed Claude Code CLI and
-  local auth setup directly.
+- The proposal preferred the installed Claude Code CLI over the Claude Code SDK
+  for subscription-backed local auth. No Claude path currently ships.
 
-## Recommended Capture Architecture
+## Superseded Multi-Engine Capture Sketch (Historical)
 
 ```mermaid
 flowchart TB
@@ -131,9 +139,9 @@ Limitations:
   be made less awful with `--no-alt-screen`, but it is still screen scraping,
   not a stable interface.
 
-## Claude Code CLI Capture
+## Claude Code CLI Capture (Deferred Historical Research)
 
-### Preferred path: print mode stream JSON
+### Historical proposal: print mode stream JSON
 
 Run Claude Code as a child process in print mode:
 
@@ -168,7 +176,7 @@ claude -p --output-format stream-json --verbose --include-partial-messages "expl
 claude -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages
 ```
 
-Why this is the right v1 path:
+Why this path was originally proposed:
 
 - It keeps the product on the user's installed Claude Code CLI and local auth
   setup.
@@ -177,7 +185,7 @@ Why this is the right v1 path:
 - It gives a structured stream without using the Agent SDK as the product
   integration surface.
 
-### Avoid for v1: Claude Agent SDK as the primary path
+### Historical proposal: avoid the Claude Agent SDK as the primary path
 
 Claude's Agent SDK is technically attractive because it exposes typed async
 messages, streaming input, permissions, hooks, tools, sessions, and
@@ -185,18 +193,18 @@ interruptions. However, it points the product toward API-key-style integration
 and vendor-controlled auth rules instead of the user's already-installed CLI and
 subscription workflow.
 
-That conflicts with Artisan's v1 positioning: use the user's existing CLI and
-subscription auth instead of forcing API billing. Therefore, the v1 Claude
-adapter should integrate the CLI process, not the Agent SDK. Vendor policy
-volatility should be tracked as a risk, but it should not define the product
-architecture.
+That conflicted with Artisan's original positioning: use the user's existing CLI
+and subscription auth instead of forcing API billing. The archived proposal
+therefore favored a CLI subprocess over the Agent SDK. It is not an active
+implementation requirement.
 
-### Claude auth stance
+### Historical Claude auth proposal
 
-Artisan's Claude adapter should behave like a terminal orchestrator launching a
-local developer tool. The user is responsible for installing and authenticating
-Claude Code. Artisan discovers the executable, checks that it can run, launches
-it with structured output flags, captures stdout/stderr, and translates events.
+The proposed Claude adapter would have behaved like a terminal orchestrator
+launching a local developer tool. The user would have installed and
+authenticated Claude Code; Artisan would have discovered the executable,
+launched it with structured output flags, captured stdout/stderr, and translated
+events.
 
 Do not build v1 around direct Anthropic API billing just to satisfy the shape of
 the SDK. That would erase one of Artisan's main product advantages over API-rate
@@ -204,7 +212,8 @@ coding tools.
 
 ## Canonical Event Mapping
 
-The first pass adapter should map both engines into this minimal event set:
+The original research proposed mapping both candidate engines into this minimal
+event set. The current implementation applies this direction to Codex only:
 
 - `agent.run.started`
 - `agent.run.completed`

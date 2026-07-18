@@ -1,10 +1,10 @@
 # Artisan Editor Memory
 
-Last updated: 2026-07-13
+Last updated: 2026-07-18
 
 ## Mission
 
-Build the complete Artisan Editor backend/core and deep testing harness described by `artisan-editor-prd.md`. The backend is provider-neutral, Effect service/layer based, SQLite/Drizzle backed, and connected to a UI-only frontend through typed MessagePort RPC/events. Codex CLI and Claude Code CLI are the V1 engines; provider-native data is normalized while raw origin remains attributable.
+Build the complete Artisan Editor backend/core and deep testing harness described by `artisan-editor-prd.md`. The backend is provider-neutral, Effect service/layer based, SQLite/Drizzle backed, and connected to a UI-only frontend through typed MessagePort RPC/events. Codex CLI is the sole production engine during prototyping; the generic Engine seam and fake harness remain so future adapters can be added deliberately after the editor/core is proven. Provider-native data is normalized while raw origin remains attributable.
 
 This project is not complete until the final audit in `backend-completion-matrix.md` is proven requirement by requirement.
 
@@ -39,6 +39,8 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] The authenticated native mutation implementation is accepted for fixed local NTFS and process-crash recovery through the local gate. This does not claim power-loss atomicity or universal filesystem support.
 
 ## Active Work
+
+- [x] Removed the concrete Claude Code execution adapter, its exports, fake CLI, transcript, and adapter-specific tests. Codex app-server with exec fallback is now the sole production Engine integration during prototyping. The provider-neutral Engine contract, process boundary, deterministic fake adapter, transcript replay, and Codex conformance coverage remain. Claude guidance-file discovery/import remains a separate provider-config feature and does not imply executable engine support. Verification on 2026-07-18: the focused engine suite passed 13 files and 102 tests with one intentional live probe skipped; formatting, lint, TypeScript, and the production frontend build passed. The full parallel Vitest gate remains red in unrelated pre-existing retention-clock, Windows ACL/process timing, model-behaviour, and MessagePort saturation tests (84/92 files passed; 768/789 tests passed, 19 failed, two skipped); the Codex process test that timed out under full-suite load passes in the focused engine run.
 
 - [x] Added the private `@artisan/data` workspace module with 268 curated one-word Norwegian female agent names and 70 independently curated Artisan thinking words, including the exact semi-viral `Muhammading` reference spelling. The names include `Linnea` and `Elise`, use `Martha` instead of `Marta`, and pass JSON, uniqueness, NFC, single-word, package-discovery, formatting, and diff checks. Claude spinner references remain taste/provenance only because the published compilations are unlicensed or non-commercial and the PRD forbids blindly shipping them. Full `pnpm run validate` passes formatting, lint, TypeScript, the production frontend build, and 98 test files with 837 passing tests plus 3 intentional skips.
 
@@ -113,10 +115,9 @@ This project is not complete until the final audit in `backend-completion-matrix
 - [x] Versioned protocol envelopes, negotiation, receipts, events, ACKs, replay, heartbeats, and bounded stream transport.
 - [x] SQLite WAL persistence, Drizzle migrations, journal command deduplication, stream sequencing, and core projections.
 - [x] Codex app-server engine with exec JSONL fallback and raw-origin normalization.
-- [x] Claude Code print-mode stream JSON engine with truthful capability limits.
 - [x] Shared engine conformance, fake process, transcript replay, lifecycle, cancellation, timeout, and cleanup harnesses.
 - [x] Durable thread identity, default seven-day retention, erasure fences, restart recovery, and activity tracking.
-- [x] Canonical global guidance with Codex/Claude discovery, first-run selection, backups, drift handling, runtime handoff, and privacy tests.
+- [x] Canonical global guidance with Codex/Claude provider-file discovery, first-run selection, backups, drift handling, Codex runtime handoff, and privacy tests. Claude provider-file support is configuration import/sync only, not an executable Engine.
 - [x] First-class orchestration graph with playful names, roles, assignments, fan-out, DAG dependencies, joins, retries, steering, stop, recovery, artifacts, and heartbeats.
 - [x] Terminal session service with real/fake PTY coverage, lifecycle persistence, input, resize, clear, restart, kill, and cleanup.
 - [x] Engine-neutral filesystem, Git/process, preview target, rich-link, and network-policy service foundations.

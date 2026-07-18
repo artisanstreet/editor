@@ -40,9 +40,10 @@ The application centers on three panes:
   agent activity.
 
 The backend/core should treat external agents as engines, not as direct model
-API providers. Codex CLI, Claude Code, Gemini CLI, Aider, and future engines
-should be integrated through engine adapters. Each adapter translates engine
-input and output into Artisan's canonical session model.
+API providers. During prototyping, Codex CLI is the sole production engine.
+Future engines may be integrated through adapters after the editor/core is
+proven. Each adapter translates engine input and output into Artisan's canonical
+session model.
 
 The main architectural idea is:
 
@@ -89,17 +90,11 @@ flowchart TB
   subgraph Engines["engines/** module"]
     EngineInterface["Agent engine interface"]
     CodexAdapter["Codex CLI adapter"]
-    ClaudeAdapter["Claude Code adapter"]
-    GeminiAdapter["Gemini CLI adapter"]
-    AiderAdapter["Aider adapter"]
     FakeAdapter["Fake engine adapter for tests"]
   end
 
   subgraph External["External CLIs and local tools"]
     CodexCli["Codex CLI"]
-    ClaudeCli["Claude Code"]
-    GeminiCli["Gemini CLI"]
-    AiderCli["Aider"]
     Shell["Shell processes"]
     Git["Git"]
     Browser["User's external browser"]
@@ -130,15 +125,9 @@ flowchart TB
 
   SessionApi --> EngineInterface
   EngineInterface --> CodexAdapter
-  EngineInterface --> ClaudeAdapter
-  EngineInterface --> GeminiAdapter
-  EngineInterface --> AiderAdapter
   EngineInterface --> FakeAdapter
 
   CodexAdapter --> CodexCli
-  ClaudeAdapter --> ClaudeCli
-  GeminiAdapter --> GeminiCli
-  AiderAdapter --> AiderCli
 
   TerminalOrchestrator --> Shell
   FileOrchestrator --> FileSystem
@@ -146,9 +135,6 @@ flowchart TB
   ToolRegistry --> Browser
 
   CodexAdapter -->|"normalized events"| EventLedger
-  ClaudeAdapter -->|"normalized events"| EventLedger
-  GeminiAdapter -->|"normalized events"| EventLedger
-  AiderAdapter -->|"normalized events"| EventLedger
   FakeAdapter -->|"deterministic events"| EventLedger
 ```
 
@@ -166,9 +152,10 @@ interfaces.
 
 The canonical product term should be `Engine`, not `Provider`. An Engine is an
 executable agent harness Artisan can discover, start, resume, steer, cancel, and
-observe, such as Codex CLI or Claude Code. A Provider is descriptive metadata
-about the company, authentication source, models, and rate/subscription context
-behind an Engine. Core orchestration should depend on Engines.
+observe. Codex CLI is the only production Engine during prototyping. A Provider
+is descriptive metadata about the company, authentication source, models, and
+rate/subscription context behind an Engine. Core orchestration should depend on
+Engines.
 
 Production engine integrations should live in one obvious module with one
 folder per engine. The initial shape should be:
@@ -184,10 +171,11 @@ modules/engines/src/
     codex-normalizer.ts
 ```
 
-Future `claude/`, `gemini/`, and other folders should implement the same Engine
-interface. Adding a folder should not silently activate an engine; the backend
-composition root should register adapters explicitly so duplicate ids, missing
-Layers, and unsupported capabilities fail visibly at build or startup time.
+Future engine folders should implement the same Engine interface only when a
+new executable integration is deliberately selected. Adding a folder should not
+silently activate an engine; the backend composition root should register
+adapters explicitly so duplicate ids, missing Layers, and unsupported
+capabilities fail visibly at build or startup time.
 
 Each Engine should declare capabilities rather than forcing fake parity. Initial
 capabilities should include availability/version discovery, authentication
@@ -487,8 +475,8 @@ The surface layer should expose canonical groups:
   recipes.
 - Capabilities: tools, MCP servers, app connectors, browser/computer use, web
   search, and engine-owned native tools.
-- Engines: Codex CLI, Claude Code CLI, model profiles, engine profiles, auth
-  state, and executable health.
+- Engines: Codex CLI, future executable adapters, model profiles, engine
+  profiles, auth state, and executable health.
 - Workspace: repositories, workspaces, files, directories, symbols, tabs,
   previews, ports, and browser targets.
 - Processes: terminals, shell commands, dev servers, background tasks, and
@@ -518,10 +506,10 @@ of switching vocabulary per provider.
 Artisan should be more than a CLI wrapper. It should be an interaction harness
 around external agent engines.
 
-A thin CLI wrapper would only spawn Codex or Claude, mirror their output, and
-accept their product decisions as Artisan's product decisions. That is not
-enough. It would preserve the exact problems Artisan is meant to fix: mismatched
-tool names, inconsistent clarification behavior, hidden terminal state, and
+A thin CLI wrapper would only spawn Codex, mirror its output, and accept its
+product decisions as Artisan's product decisions. That is not enough. It would
+preserve the exact problems Artisan is meant to fix: mismatched tool names,
+inconsistent clarification behavior, hidden terminal state, and
 provider-specific UI clutter.
 
 The harness owns:
@@ -630,7 +618,7 @@ path:
 This keeps the UI unified without forcing Artisan to reimplement or rebill every
 provider capability. A user should see `Search`, `Question`, `Terminal`,
 `Change`, `Approval`, and `Timer` regardless of whether the underlying action
-was performed by Artisan, Codex, Claude, or another engine.
+was performed by Artisan, Codex, or a future engine.
 
 ## Multi-Agent Orchestration
 
@@ -664,7 +652,7 @@ Artisan should model agents as product objects:
 - `role`: derived behavior category such as reviewer, explorer, implementer,
   tester, researcher, summarizer, or custom. It should come from the selected
   agent profile or assignment, not from a separate decorative label.
-- `engine`: Codex CLI, Claude Code CLI, or future engine adapter.
+- `engine`: Codex CLI today, or a future engine adapter after the core is proven.
 - `native_agent_name`: provider-specific agent name, if the engine has one.
 - `native_display_name`: provider-specific nickname or label, if the engine has
   one.
@@ -866,8 +854,8 @@ v1.
 The model labs usually know how to tune their own harnesses for their own
 models: tool schemas, prompting style, context handling, planning behavior,
 search/browsing behavior, permission flows, and provider-native optimizations.
-Artisan should preserve those advantages by treating Codex CLI, Claude Code CLI,
-and future lab-native tools as engines.
+Artisan should preserve those advantages by treating Codex CLI, and deliberately
+selected future lab-native tools, as engines.
 
 The product job is not to replace every lab harness. The product job is to make
 lab-native engine work visible, steerable, reviewable, and consistent inside one
@@ -1709,8 +1697,9 @@ Right pane relationship:
 
 1. As a developer, I want to use my existing CLI/subscription-based agent auth,
    so that I do not need to pay duplicated API rates inside Artisan Editor.
-2. As a developer, I want to select an agent engine such as Codex CLI or Claude
-   Code, so that I can use the model/workflow I already trust.
+2. As a developer, I want Codex CLI to run through a replaceable Engine seam, so
+   that Artisan can prove the editor/core without prematurely maintaining many
+   executable adapters.
 3. As a developer, I want all engines to appear through the same Artisan UI, so
    that provider differences do not leak into my workflow.
 4. As a developer, I want agent activity to be translated into a standard event
@@ -1833,8 +1822,8 @@ Right pane relationship:
     Artisan event ledger when observable, so that I get one reviewable history
     even when the underlying tool was engine-owned.
 56. As a developer, I want Artisan to preserve lab-native engine behavior, so
-    that Codex, Claude Code, and future engines can keep the optimizations their
-    labs built for their own models.
+    that Codex, and any deliberately selected future engines, can keep the
+    optimizations their labs built for their own models.
 57. As a developer, I want links to render with favicon, page title, and
     hostname, so that chat and tool output are easier to scan than raw URLs.
 58. As a developer, I want inactive chats to auto-delete after 7 days by
@@ -1873,8 +1862,8 @@ Right pane relationship:
     joins, and final synthesis, so that I understand how parallel work was
     divided and recombined.
 73. As a developer, I want provider-native subagent names and nicknames mapped
-    into Artisan-owned identities, so that Codex, Claude, and future engines
-    appear in one coherent orchestration model.
+    into Artisan-owned identities, so that Codex and future engines appear in
+    one coherent orchestration model.
 74. As a developer, I want to provide my own playful agent name list, so that
     parallel agents have personality without losing their role labels.
 75. As a developer, I want the main pane to switch between Text Editor, Chat,
@@ -1935,8 +1924,9 @@ Right pane relationship:
   client.
 - The primary product seam is the agent engine interface, not the raw model
   provider interface.
-- Agent engines represent CLI/subscription-backed tools such as Codex CLI,
-  Claude Code, Gemini CLI, Aider, and future engines.
+- Codex CLI is the sole production Engine during prototyping. The generic seam
+  remains for deliberately selected future CLI/subscription-backed engines after
+  the editor/core is proven.
 - Engine adapters are responsible for spawning, controlling, reading, parsing,
   and translating external engine behavior into Artisan's internal event model.
 - The Artisan core owns the canonical concepts: workspace, thread, agent run,
@@ -2218,7 +2208,7 @@ Right pane relationship:
 - Clarification should be represented as a canonical `Question` surface item,
   whether it originates from the engine or from Artisan's own intake policy.
 - Surface layer naming should be strict. UI code should consume canonical
-  Artisan concepts rather than Codex, Claude, or provider-specific names.
+  Artisan concepts rather than Codex or provider-specific names.
 - Every normalized surface item should retain raw origin metadata for debugging,
   migration, replay, and engine-specific round-tripping.
 - The `engines/**` module should own external agent engine adapters and keep
@@ -2229,18 +2219,14 @@ Right pane relationship:
 - Engine and Provider should remain distinct domain terms. Core orchestration
   depends on Engine capabilities; provider, model, auth, and subscription data
   are metadata surfaced by an Engine.
-- V1 engine support should focus on Codex CLI and Claude Code CLI.
+- Prototype engine support is Codex CLI only. Additional executable adapters are
+  deferred until Artisan's editor/core and canonical surfaces are proven.
 - The Codex adapter should prefer `codex app-server` over stdio JSONL because
   it is the rich-client interface for threads, turns, approvals, and streamed
   agent events. `codex exec --json` should remain a fallback for one-shot runs.
-- The Claude Code adapter should prefer the CLI in print mode with
-  `--output-format stream-json --verbose`, keeping the integration on the
-  user's installed CLI and subscription/auth setup. The Claude Agent SDK should
-  not be the v1 integration path unless Artisan later chooses an API-key-based
-  product path.
 - Raw engine payloads should be retained alongside normalized Artisan events so
   adapter bugs, schema migrations, and replay tools can inspect the original
-  Codex or Claude event.
+  Codex event. Future adapters must preserve their own original payloads too.
 - Electron is the v1 desktop shell choice because its main and renderer process
   model is mature, heavily optimizable, and well-suited to a process-heavy
   editor that needs terminals, PTYs, filesystem access, git, IPC, and background
@@ -2429,10 +2415,10 @@ Right pane relationship:
 - Shell tests should verify that the Electron adapter exposes the typed session
   interface without leaking Electron-specific IPC details into frontend or
   backend/core code.
-- V1 engine adapter fixtures should include captured Codex app-server JSONL,
-  Codex `exec --json` JSONL, and Claude Code `stream-json` output for message
-  deltas, tool calls, file edits, shell commands, approvals, failures, and final
-  results.
+- Prototype engine adapter fixtures should include captured Codex app-server
+  JSONL and Codex `exec --json` JSONL for message deltas, tool calls, file edits,
+  shell commands, approvals, failures, and final results. The deterministic fake
+  Engine should exercise provider-neutral lifecycle behavior.
 
 ## Out of Scope
 
@@ -2468,14 +2454,11 @@ Right pane relationship:
   and previews all share one model.
 - Future brainstorming should keep updating this PRD rather than starting over.
 - Open questions to resolve later:
-    - Which engine should be supported first?
+    - Which engine should be considered after the Codex-only prototype is proven?
     - Which Codex executable path is reliably spawnable on Windows when the
       desktop app installed the CLI?
     - Does Codex app-server expose all v1 approval behavior through the stable API,
       or does Artisan need the experimental app-server capability?
-    - Can Claude Code's stream-json input mode support one long-running Artisan
-      session cleanly, or should v1 spawn one process per turn and resume by
-      session id?
     - What structured output or machine-readable mode can each target CLI provide?
     - How much terminal control should Artisan own directly versus delegate to
       engines?
@@ -2507,10 +2490,9 @@ Right pane relationship:
 - 2026-07-06: Electron selected as the v1 desktop shell. Deno Desktop deferred
   as a future experiment due to expected rough edges with the experimental
   SvelteKit/SER stack and possible platform parity gaps.
-- 2026-07-06: V1 engine IO research added in
-  `agent-engine-io-research.md`. Codex should use app-server JSONL first and
-  `exec --json` as fallback. Claude Code should use CLI print mode with
-  `stream-json` first, avoiding Agent SDK/API billing as the v1 product path.
+- 2026-07-06: Initial multi-engine IO research was recorded in
+  `agent-engine-io-research.md`; its Claude execution proposal is superseded by
+  the 2026-07-18 Codex-only prototype decision below.
 - 2026-07-06: Left pane UX specified: compact Artisan Editor header, `New chat`
   thread action, independently scrollable thread list, and pinned bottom user
   card with OS identity and deterministic fallback behavior.
@@ -2667,10 +2649,8 @@ Right pane relationship:
   its bounded probe succeeds, otherwise select `codex exec --json`. Never
   downgrade after ambiguous app-server side effects. Both transports retain
   exact raw frames and normalize through the same Engine contract.
-- 2026-07-11: Claude Code V1 uses one print-mode `stream-json` process per turn
-  with subscription-backed auth and native session resume. Unsupported
-  approval, question, steering, and subagent channels remain explicitly
-  unsupported rather than inferred from transcript text.
+- 2026-07-11: A Claude Code print-mode adapter was initially implemented. This
+  decision is superseded by the 2026-07-18 Codex-only prototype decision below.
 - 2026-07-11: Windows CLI ownership uses one private kill-on-close Job Object
   per Engine run. A waiting detached process host proves its identity over the
   original IPC channel while its candidate process handle is held; only then
@@ -2678,8 +2658,7 @@ Right pane relationship:
   discovery/reuse races and isolates concurrent agent process trees.
 - 2026-07-11: Shared engine process, JSONL framing, and event-buffer services
   own bounded bytes, terminal-last sequencing, typed spawn failures,
-  cancellation, and cleanup across Codex and Claude. Missing resume text does
-  not fabricate an empty Claude user turn.
+  cancellation, and cleanup across Codex and the deterministic fake harness.
 - 2026-07-11: Thread retention policy is opinionated and small: enabled by
   default at seven inactive days, configurable as one meaningful setting, and
   pinned threads are exempt. Startup and periodic cleanup share the same
@@ -2698,8 +2677,9 @@ Right pane relationship:
   replacement, preserve the exact raced value in backup, and never overwrite a
   concurrently created target. Stale drift commands are fenced before side
   effects, exact retries are independent of later canonical/provider changes,
-  and runtime-only guidance reaches Codex/Claude through a separate Engine field
-  without changing user or assignment text.
+  and runtime-only guidance reaches Codex through a separate Engine field
+  without changing user or assignment text. Claude provider-file discovery is
+  configuration import/sync only and does not imply Engine support.
 - 2026-07-12: The first native filesystem slice is a Windows x64 pinned-root
   bounded reader. It requires an absolute fixed-drive root on exact local NTFS,
   opens every child through parent handles with reparse traversal disabled,
@@ -2715,3 +2695,10 @@ Right pane relationship:
   selected workspace and branch are the single discoverable location of all
   accepted agent work; providers may not create hidden worktrees, branches, or
   temporary commits behind that mental model.
+- 2026-07-18: The prototype has one production Engine: Codex CLI, spawned as a
+  subprocess through app-server stdio with exec JSONL fallback. The concrete
+  Claude execution adapter, fixtures, and conformance cases were removed to
+  avoid maintaining speculative adapter breadth before the editor/core is
+  proven. The provider-neutral Engine seam and deterministic fake harness remain
+  the extension boundary. Claude provider-file discovery/import is a separate
+  configuration feature and does not imply executable Engine support.
