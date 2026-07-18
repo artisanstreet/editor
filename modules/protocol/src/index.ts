@@ -4,6 +4,8 @@ export * from "./control";
 export * from "./guidance";
 export * from "./git";
 export * from "./model-behaviour";
+export * from "./orchestration-groups";
 export * from "./stream";
 export * from "./surfaces";
+export * from "./transcript";
 export * from "./workspace-changes";

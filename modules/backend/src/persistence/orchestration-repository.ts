@@ -30,6 +30,7 @@ import {
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import type { IntakeAssessment } from "../orchestration/intake-policy";
 import { RecordThreadActivity } from "../threads/internal/thread-activity";
+import { PersistSurfaceProjection } from "../surfaces/surface-projection";
 
 type WorkStatus = ThreadWorkItem["status"];
 type OutboxKind = "start" | "steer" | "cancel" | "close" | "respond_approval" | "respond_question";
@@ -1392,13 +1393,16 @@ export const OrchestrationRepositoryLive = Layer.effect(
 							.where(eq(OrchestrationRuns.run_id, observation.artisan_run_id))
 							.limit(1);
 
-						if (
-							!run ||
-							observation._tag === "agent_message_delta" ||
-							!is_projectable_status(run.status)
-						) {
+						if (!run || !is_projectable_status(run.status)) {
 							return [];
 						}
+						const projected_at = yield* metadata.Now;
+						yield* PersistSurfaceProjection(transaction, observation, {
+							agent_id: run.agent_id,
+							occurred_at: projected_at,
+							run_id: run.run_id,
+							thread_id: run.thread_id,
+						});
 
 						const payload =
 							observation._tag === "agent_message_completed"

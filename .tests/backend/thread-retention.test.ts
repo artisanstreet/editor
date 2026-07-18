@@ -34,6 +34,8 @@ import {
 	OrchestrationArtifacts,
 	OrchestrationGroups,
 	OrchestrationRawObservations,
+	SurfaceItems,
+	SurfaceUsageTotals,
 	TerminalCommands,
 	TerminalSessions,
 	ThreadErasureClaims,
@@ -334,6 +336,28 @@ describe("thread retention", () => {
 						sequence: 1,
 						transport: "test",
 					});
+					yield* database.client.insert(SurfaceItems).values({
+						assignment_id: "assignment_1",
+						category: "work",
+						group_id: "group_1",
+						kind: "run",
+						observation_id: "observation_1",
+						occurred_at: "2026-07-01T18:00:00.000Z",
+						raw_origin_json: '{"provider":"engine_1","reference":"observation_1"}',
+						run_id: "graph_run_1",
+						sequence: 1,
+						summary_json: '{"label":"Run"}',
+						surface_id: "surface_observation_1",
+						thread_id: "thread_expired",
+					});
+					yield* database.client.insert(SurfaceUsageTotals).values({
+						assignment_id: "assignment_1",
+						group_id: "group_1",
+						input_tokens: 10,
+						output_tokens: 5,
+						run_id: "graph_run_1",
+						updated_at: "2026-07-01T18:00:00.000Z",
+					});
 					yield* database.client.insert(OrchestrationArtifacts).values({
 						artifact_id: "artifact_1",
 						assignment_id: "assignment_1",
@@ -387,6 +411,8 @@ describe("thread retention", () => {
 						groups: database.client.select().from(OrchestrationGroups),
 						raw: database.client.select().from(OrchestrationRawObservations),
 						runs: database.client.select().from(AgentRuns),
+						surfaces: database.client.select().from(SurfaceItems),
+						usage: database.client.select().from(SurfaceUsageTotals),
 						terminal_commands: database.client.select().from(TerminalCommands),
 						terminals: database.client.select().from(TerminalSessions),
 						threads: database.client.select().from(Threads),
@@ -476,9 +502,11 @@ describe("thread retention", () => {
 				groups: [],
 				raw: [],
 				runs: [],
+				surfaces: [],
 				terminal_commands: [],
 				terminals: [],
 				threads: [],
+				usage: [],
 				tombstones: [
 					{
 						deleted_at: "2026-07-10T18:00:00.000Z",

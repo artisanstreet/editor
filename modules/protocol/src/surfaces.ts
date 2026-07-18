@@ -252,3 +252,30 @@ export const SurfaceItem = Schema.Union([
 ]);
 
 export type SurfaceItem = typeof SurfaceItem.Type;
+
+/** Query-ready ordered projection snapshot; transport envelopes remain elsewhere. */
+export const SurfaceSnapshot = Schema.Struct({
+	items: Schema.Array(SurfaceItem),
+	journal_sequence: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+});
+export type SurfaceSnapshot = typeof SurfaceSnapshot.Type;
+
+/** Optional token totals faithfully reported by a provider. */
+export const SurfaceUsage = Schema.Struct({
+	assignment_id: Schema.optional(Identifier),
+	group_id: Schema.optional(Identifier),
+	input_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+	output_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+	run_id: Identifier,
+	updated_at: IsoDateTime,
+});
+export type SurfaceUsage = typeof SurfaceUsage.Type;
+
+/** Aggregate token totals for one run, assignment, or group; omitted metrics remain unknown. */
+export const SurfaceUsageAggregate = Schema.Struct({
+	scope: Schema.Literals(["run", "assignment", "group"]),
+	scope_id: Identifier,
+	input_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+	output_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+});
+export type SurfaceUsageAggregate = typeof SurfaceUsageAggregate.Type;

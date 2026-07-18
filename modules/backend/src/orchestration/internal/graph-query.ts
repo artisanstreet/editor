@@ -1,4 +1,4 @@
-import { and, asc, eq, notExists } from "drizzle-orm";
+import { and, asc, desc, eq, notExists } from "drizzle-orm";
 import { Effect } from "effect";
 
 import {
@@ -6,11 +6,14 @@ import {
 	AssignmentScope,
 	AssignmentWorkspace,
 	type OrchestrationGraph,
+	type OrchestrationGroupListSnapshot,
+	type OrchestrationGroupSummary,
 } from "@artisan/protocol";
 
 import {
 	AgentRuns,
 	Assignments,
+	JournalEvents,
 	OrchestrationGroups,
 	ThreadErasureClaims,
 } from "../../persistence/schema";
@@ -25,6 +28,14 @@ import type { PersistedGraphCodecs } from "./persisted-graph-codecs";
 
 export interface GraphQuery {
 	readonly get_graph: (group_id: string) => Effect.Effect<OrchestrationGraph, AgentGraphError>;
+	readonly list_groups: (
+		thread_id: string,
+		include_terminal: boolean,
+	) => Effect.Effect<ReadonlyArray<OrchestrationGroupSummary>, AgentGraphError>;
+	readonly list_groups_snapshot: (
+		thread_id: string,
+		include_terminal: boolean,
+	) => Effect.Effect<OrchestrationGroupListSnapshot, AgentGraphError>;
 	readonly get_pending_runs: () => Effect.Effect<ReadonlyArray<PendingAgentRun>, AgentGraphError>;
 	readonly read_owned_assignment: (
 		transaction: GraphTransaction,
@@ -106,6 +117,60 @@ export function make_graph_query(context: GraphContext, codecs: PersistedGraphCo
 	const get_graph = (group_id: string) =>
 		codecs.build_graph(database.client, group_id).pipe(Effect.mapError(normalize_graph_error));
 
+	const list_group_rows = (transaction: GraphTransaction, thread_id: string) =>
+		transaction
+			.select()
+			.from(OrchestrationGroups)
+			.where(eq(OrchestrationGroups.thread_id, thread_id))
+			.orderBy(desc(OrchestrationGroups.updated_at), asc(OrchestrationGroups.group_id));
+
+	const summarize_groups = (
+		rows: ReadonlyArray<typeof OrchestrationGroups.$inferSelect>,
+		include_terminal: boolean,
+	) =>
+		rows
+						.filter(
+							(row) =>
+								include_terminal ||
+								!["summarized", "stopped", "failed", "complete"].includes(
+									row.state,
+								),
+						)
+						.map((row) => ({
+							coordinator_agent_id: row.coordinator_agent_id,
+							created_at: row.created_at,
+							group_id: row.group_id,
+							max_concurrency: row.max_concurrency,
+							state: row.state as OrchestrationGroupSummary["state"],
+							thread_id: row.thread_id,
+							updated_at: row.updated_at,
+							version: row.version,
+						}));
+
+	const list_groups = (thread_id: string, include_terminal: boolean) =>
+		list_group_rows(database.client, thread_id).pipe(
+			Effect.map((rows) => summarize_groups(rows, include_terminal)),
+			Effect.mapError(normalize_graph_error),
+		);
+
+	const list_groups_snapshot = (thread_id: string, include_terminal: boolean) =>
+		database.client
+			.transaction((transaction) =>
+				Effect.gen(function* () {
+					const rows = yield* list_group_rows(transaction, thread_id);
+					const [watermark] = yield* transaction
+						.select({ journal_sequence: JournalEvents.sequence })
+						.from(JournalEvents)
+						.orderBy(desc(JournalEvents.sequence))
+						.limit(1);
+					return {
+						groups: summarize_groups(rows, include_terminal),
+						journal_sequence: watermark?.journal_sequence ?? 0,
+					};
+				}),
+			)
+			.pipe(Effect.mapError(normalize_graph_error));
+
 	const get_pending_runs = () =>
 		database.client
 			.select({
@@ -185,5 +250,12 @@ export function make_graph_query(context: GraphContext, codecs: PersistedGraphCo
 				Effect.mapError(normalize_graph_error),
 			);
 
-	return { get_graph, get_pending_runs, read_owned_assignment, read_owned_group };
+	return {
+		get_graph,
+		get_pending_runs,
+		list_groups,
+		list_groups_snapshot,
+		read_owned_assignment,
+		read_owned_group,
+	};
 }

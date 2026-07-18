@@ -39,6 +39,7 @@ import {
 	type ModelBehaviourRetryEnvelope,
 	type ModelBehaviourUpdateEnvelope,
 	type OrchestrationGraphQueryEnvelope,
+	type OrchestrationGroupListQueryEnvelope,
 	type OutboundControlEnvelope,
 	type PreNegotiationProtocolErrorEnvelope,
 	type ProtocolErrorDetail,
@@ -48,6 +49,7 @@ import {
 	type SubscribeEnvelope,
 	type ThreadListItem,
 	type ThreadListQueryEnvelope,
+	type ThreadTranscriptQueryEnvelope,
 	type ThreadRetentionQueryEnvelope,
 	type ThreadRetentionUpdateEnvelope,
 	type ThreadWorkQueryEnvelope,
@@ -85,6 +87,7 @@ import {
 } from "../persistence/journal-store";
 import { OrchestrationRepository } from "../persistence/orchestration-repository";
 import { ThreadReadModel } from "../persistence/thread-read-model";
+import { TranscriptReadModel } from "../persistence/transcript-read-model";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { TerminalSessionService } from "../terminal/terminal-sessions";
 import { thread_activity_kind_from_event } from "../threads/internal/thread-activity";
@@ -127,9 +130,26 @@ interface OrchestrationGraphProjectionSubscription {
 	readonly sequence: number;
 	readonly stream_id: string;
 }
+interface ThreadTranscriptProjectionSubscription {
+	readonly _tag: "thread.transcript";
+	readonly thread_id: string;
+	readonly journal_sequence: number;
+	readonly sequence: number;
+	readonly stream_id: string;
+}
+interface OrchestrationGroupListProjectionSubscription {
+	readonly _tag: "orchestration.group.list";
+	readonly thread_id: string;
+	readonly include_terminal: boolean;
+	readonly journal_sequence: number;
+	readonly sequence: number;
+	readonly stream_id: string;
+}
 
 type ProjectionSubscription =
 	| OrchestrationGraphProjectionSubscription
+	| ThreadTranscriptProjectionSubscription
+	| OrchestrationGroupListProjectionSubscription
 	| ThreadListProjectionSubscription;
 
 interface AwaitingHelloState {
@@ -531,6 +551,7 @@ export function make_protocol_server_layer(
 			const orchestration = yield* OrchestrationRepository;
 			const terminals = yield* TerminalSessionService;
 			const thread_read_model = yield* ThreadReadModel;
+			const transcript_read_model = yield* TranscriptReadModel;
 			const retention_policy = yield* ThreadRetentionPolicyService;
 			const workspace_changes = yield* WorkspaceChangeRepository;
 			const workspace_diffs = yield* WorkspaceChangeDiffService;
@@ -706,6 +727,96 @@ export function make_protocol_server_layer(
 										subscription_id,
 									});
 								}
+							} else if (subscription._tag === "thread.transcript") {
+								if (event.journal_sequence <= subscription.journal_sequence) continue;
+								if (event.thread_id !== subscription.thread_id) continue;
+								const snapshot = yield* transcript_read_model.Read({
+									after_journal_sequence: Math.max(0, event.journal_sequence - 1),
+									limit: 500,
+									thread_id: event.thread_id,
+								});
+								if (snapshot.status !== "available") {
+									yield* Enqueue({
+										journal_sequence: event.journal_sequence,
+										kind: "thread.transcript.snapshot",
+										message_id,
+										origin: "backend",
+										payload: snapshot,
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at: event.sent_at,
+										sequence,
+										stream_id: subscription.stream_id,
+										subscription_id,
+									});
+								} else {
+									const entries = snapshot.entries.filter(
+										(entry) => entry.journal_sequence <= event.journal_sequence,
+									);
+									if (entries.length === 0) continue;
+									yield* Enqueue({
+										journal_sequence: event.journal_sequence,
+										kind: "thread.transcript.append",
+										message_id,
+										origin: "backend",
+										payload: { entries },
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at: event.sent_at,
+										sequence,
+										stream_id: subscription.stream_id,
+										subscription_id,
+									});
+								}
+							} else if (subscription._tag === "orchestration.group.list") {
+								if (event.journal_sequence <= subscription.journal_sequence) continue;
+								if (event.thread_id !== subscription.thread_id) continue;
+								if (event.payload.type === "thread.erased") {
+									yield* Enqueue({
+										journal_sequence: event.journal_sequence,
+										kind: "orchestration.group.list.patch",
+										message_id,
+										origin: "backend",
+										payload: {
+											groups: [],
+											journal_sequence: event.journal_sequence,
+										},
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at: event.sent_at,
+										sequence,
+										stream_id: subscription.stream_id,
+										subscription_id,
+									});
+									subscriptions = {
+										...subscriptions,
+										[subscription_id]: {
+											...subscription,
+											journal_sequence: event.journal_sequence,
+											sequence,
+										},
+									};
+									continue;
+								}
+								const group_id = graph_group_id_from_event(event);
+								if (!group_id) continue;
+								const groups = yield* graph.ListGroups(
+									subscription.thread_id,
+									subscription.include_terminal,
+								);
+								yield* Enqueue({
+									journal_sequence: event.journal_sequence,
+									kind: "orchestration.group.list.patch",
+									message_id,
+									origin: "backend",
+									payload: { groups, journal_sequence: event.journal_sequence },
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at: event.sent_at,
+									sequence,
+									stream_id: subscription.stream_id,
+									subscription_id,
+								});
 							} else {
 								const group_id = graph_group_id_from_event(event);
 
@@ -732,7 +843,15 @@ export function make_protocol_server_layer(
 
 							subscriptions = {
 								...subscriptions,
-								[subscription_id]: { ...subscription, sequence },
+								[subscription_id]:
+									subscription._tag === "thread.transcript" ||
+									subscription._tag === "orchestration.group.list"
+										? {
+												...subscription,
+												journal_sequence: event.journal_sequence,
+												sequence,
+											}
+										: { ...subscription, sequence },
 							};
 						}
 
@@ -1130,6 +1249,70 @@ export function make_protocol_server_layer(
 						),
 					);
 
+				const HandleTranscriptQuery = (
+					query: ThreadTranscriptQueryEnvelope,
+					current: ReadyState,
+				) =>
+					transcript_read_model.Read(query.payload).pipe(
+						Effect.flatMap((snapshot) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "thread.transcript.query.result",
+									message_id,
+									origin: "backend",
+									payload: snapshot,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"projection.unavailable",
+								"The thread transcript could not be read.",
+								true,
+								query.message_id,
+							),
+						),
+					);
+
+				const HandleGroupListQuery = (
+					query: OrchestrationGroupListQueryEnvelope,
+					current: ReadyState,
+				) =>
+					graph.ListGroupsSnapshot(query.payload.thread_id, query.payload.include_terminal).pipe(
+						Effect.flatMap((snapshot) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "orchestration.group.list.query.result",
+									message_id,
+									origin: "backend",
+									payload: snapshot,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"projection.unavailable",
+								"The orchestration group list could not be read.",
+								true,
+								query.message_id,
+							),
+						),
+					);
+
 				const HandleWorkspaceFileReadQuery = (
 					query: WorkspaceFileReadQueryEnvelope,
 					current: ReadyState,
@@ -1314,6 +1497,142 @@ export function make_protocol_server_layer(
 							);
 
 							return;
+						}
+
+						if (subscribe.payload.type === "thread.transcript") {
+							const thread_id = subscribe.payload.thread_id;
+							return yield* transcript_read_model
+								.Read({ thread_id })
+								.pipe(
+									Effect.flatMap((snapshot) =>
+										Effect.gen(function* () {
+											const started_id = yield* metadata.MakeId("message");
+											const snapshot_id = yield* metadata.MakeId("message");
+											const sent_at = yield* metadata.Now;
+											const stream_id = `projection:thread.transcript:${thread_id}:${subscribe.subscription_id}`;
+											const subscription: ThreadTranscriptProjectionSubscription =
+												{
+													_tag: "thread.transcript",
+													thread_id,
+													journal_sequence: snapshot.journal_sequence,
+													sequence: 0,
+													stream_id,
+												};
+											yield* Ref.set(state, {
+												...current,
+												subscriptions: {
+													...current.subscriptions,
+													[subscribe.subscription_id]: subscription,
+												},
+											});
+											yield* Enqueue({
+												correlation_id: subscribe.message_id,
+												kind: "subscription.started",
+												message_id: started_id,
+												origin: "backend",
+												payload: { stream_id },
+												protocol_version: 1,
+												schema_version: 1,
+												sent_at,
+												subscription_id: subscribe.subscription_id,
+											});
+											yield* Enqueue({
+												journal_sequence: snapshot.journal_sequence,
+												kind: "thread.transcript.snapshot",
+												message_id: snapshot_id,
+												origin: "backend",
+												payload: snapshot,
+												protocol_version: 1,
+												schema_version: 1,
+												sent_at,
+												sequence: 0,
+												stream_id,
+												subscription_id: subscribe.subscription_id,
+											});
+										}),
+									),
+								)
+								.pipe(
+									Effect.catch(() =>
+										EnqueueError(
+											current,
+											"projection.unavailable",
+											"The thread transcript could not be read.",
+											true,
+											subscribe.message_id,
+										),
+									),
+								);
+						}
+
+						if (subscribe.payload.type === "orchestration.group.list") {
+							const { thread_id, include_terminal } = subscribe.payload;
+							return yield* graph
+								.ListGroupsSnapshot(thread_id, include_terminal)
+								.pipe(
+									Effect.flatMap(({ groups, journal_sequence }) =>
+												Effect.gen(function* () {
+													const started_id =
+														yield* metadata.MakeId("message");
+													const snapshot_id =
+														yield* metadata.MakeId("message");
+													const sent_at = yield* metadata.Now;
+													const stream_id = `projection:orchestration.group.list:${thread_id}:${subscribe.subscription_id}`;
+													const subscription: OrchestrationGroupListProjectionSubscription =
+														{
+															_tag: "orchestration.group.list",
+															thread_id,
+															include_terminal,
+															journal_sequence,
+															sequence: 0,
+															stream_id,
+														};
+													yield* Ref.set(state, {
+														...current,
+														subscriptions: {
+															...current.subscriptions,
+															[subscribe.subscription_id]:
+																subscription,
+														},
+													});
+													yield* Enqueue({
+														correlation_id: subscribe.message_id,
+														kind: "subscription.started",
+														message_id: started_id,
+														origin: "backend",
+														payload: { stream_id },
+														protocol_version: 1,
+														schema_version: 1,
+														sent_at,
+														subscription_id: subscribe.subscription_id,
+													});
+													yield* Enqueue({
+														journal_sequence,
+														kind: "orchestration.group.list.snapshot",
+														message_id: snapshot_id,
+														origin: "backend",
+														payload: { groups, journal_sequence },
+														protocol_version: 1,
+														schema_version: 1,
+														sent_at,
+														sequence: 0,
+														stream_id,
+														subscription_id: subscribe.subscription_id,
+													});
+												}),
+									),
+								)
+								.pipe(
+									Effect.catch(() =>
+										EnqueueError(
+											current,
+											"projection.unavailable",
+											"The orchestration group list could not be read.",
+											true,
+											subscribe.message_id,
+										),
+									),
+								);
 						}
 
 						if (subscribe.payload.type === "orchestration.graph") {
@@ -2018,6 +2337,10 @@ export function make_protocol_server_layer(
 							return HandleTerminalListQuery(envelope, current);
 						case "orchestration.graph.query":
 							return HandleGraphQuery(envelope, current);
+						case "thread.transcript.query":
+							return HandleTranscriptQuery(envelope, current);
+						case "orchestration.group.list.query":
+							return HandleGroupListQuery(envelope, current);
 						case "subscribe":
 							return HandleSubscribe(envelope, current);
 						case "unsubscribe":

@@ -27,6 +27,7 @@ import { is_terminal_state, terminal_state_from_engine, type GraphContext } from
 import type { GraphLedger } from "./graph-ledger";
 import type { RawObservationLedger } from "./raw-observation-ledger";
 import type { RunTransitions } from "./run-transitions";
+import { PersistSurfaceProjection } from "../../surfaces/surface-projection";
 
 export interface RunLifecycle {
 	readonly activate_run: (
@@ -327,6 +328,15 @@ export function make_run_lifecycle(
 					if (!group) {
 						return [];
 					}
+					const projected_at = yield* metadata.Now;
+					yield* PersistSurfaceProjection(transaction, observation, {
+						agent_id: run.agent_id,
+						assignment_id: run.assignment_id,
+						group_id: run.group_id,
+						occurred_at: projected_at,
+						run_id: run.run_id,
+						thread_id: group.thread_id,
+					});
 
 					const updated_at = yield* metadata.Now;
 					const advanced = yield* transaction

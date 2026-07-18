@@ -1,7 +1,12 @@
 import { Context, Deferred, Effect, Exit, Layer, Option, Ref, Scope, Stream } from "effect";
 
 import { EngineRegistry, type EngineCommand, type EngineRun } from "@artisan/engines";
-import type { CommandEnvelope, OrchestrationGraph } from "@artisan/protocol";
+import type {
+	CommandEnvelope,
+	OrchestrationGraph,
+	OrchestrationGroupListSnapshot,
+	OrchestrationGroupSummary,
+} from "@artisan/protocol";
 
 import { GlobalGuidanceService } from "../guidance/guidance-service";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
@@ -36,6 +41,14 @@ export class AgentGraphOrchestrator extends Context.Service<
 			command: CommandEnvelope,
 		) => Effect.Effect<AcceptedAgentGraphCommand, AgentGraphError>;
 		readonly GetGraph: (group_id: string) => Effect.Effect<OrchestrationGraph, AgentGraphError>;
+		readonly ListGroups: (
+			thread_id: string,
+			include_terminal: boolean,
+		) => Effect.Effect<ReadonlyArray<OrchestrationGroupSummary>, AgentGraphError>;
+		readonly ListGroupsSnapshot: (
+			thread_id: string,
+			include_terminal: boolean,
+		) => Effect.Effect<OrchestrationGroupListSnapshot, AgentGraphError>;
 		readonly Recover: Effect.Effect<void, AgentGraphError>;
 		readonly QuiesceThread: (thread_id: string) => Effect.Effect<void>;
 	}
@@ -478,6 +491,8 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 
 		return {
 			GetGraph: repository.GetGraph,
+			ListGroups: repository.ListGroups,
+			ListGroupsSnapshot: repository.ListGroupsSnapshot,
 			Handle: handle,
 			QuiesceThread,
 			Recover: recover,

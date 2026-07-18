@@ -11,6 +11,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import type { EventEnvelope, ProjectRef } from "@artisan/protocol";
 import {
 	make_backend_runtime,
+	AgentGraphOrchestrator,
 	make_codex_auto_compaction_mapping,
 	make_thread_metadata_refiner_test_layer,
 	make_codex_model_behaviour_provider,
@@ -40,6 +41,7 @@ import {
 	ModelBehaviourSettings,
 	ThreadErasureClaims,
 	ThreadProjectAffinityEvidence,
+	OrchestrationGroups,
 } from "../../modules/backend/src/persistence/schema";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
 
@@ -109,6 +111,710 @@ afterEach(async () => {
 });
 
 describe("ArtisanClient with the backend ProtocolServer", () => {
+	it("delivers a group transition committed at the subscription snapshot boundary", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const graph = await runtime.runPromise(AgentGraphOrchestrator);
+		const snapshot_read = await Effect.runPromise(Deferred.make<void>());
+		const release_snapshot = await Effect.runPromise(Deferred.make<void>());
+		const original_snapshot = graph.ListGroupsSnapshot;
+		Object.assign(graph, {
+			ListGroupsSnapshot: (thread_id: string, include_terminal: boolean) =>
+				original_snapshot(thread_id, include_terminal).pipe(
+					Effect.flatMap((snapshot) =>
+						Deferred.succeed(snapshot_read, undefined).pipe(
+							Effect.andThen(Deferred.await(release_snapshot)),
+							Effect.as(snapshot),
+						),
+					),
+				),
+		});
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const database = await runtime.runPromise(Database);
+		const journal = await runtime.runPromise(JournalStore);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
+		try {
+			await Effect.runPromise(
+				harness.client.Command({
+					command_id: "group_boundary_create",
+					payload: { title: "Group boundary", type: "thread.create" },
+					thread_id: "thread_group_boundary",
+				}),
+			);
+			await Effect.runPromise(
+				database.client.insert(OrchestrationGroups).values({
+					group_id: "group_boundary",
+					thread_id: "thread_group_boundary",
+					coordinator_agent_id: "agent_boundary",
+					state: "running",
+					max_concurrency: 1,
+					version: 1,
+					journal_sequence: 1,
+					created_at: "2026-07-18T10:00:00.000Z",
+					updated_at: "2026-07-18T10:00:00.000Z",
+				}),
+			);
+
+			const updates_promise = Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const stream = yield* harness.client.SubscribeOrchestrationGroups(
+							"thread_group_boundary",
+							false,
+						);
+
+						return yield* stream.pipe(
+							Stream.take(2),
+							Stream.runCollect,
+							Effect.map(Array.from),
+						);
+					}),
+				),
+			);
+			await Effect.runPromise(Deferred.await(snapshot_read));
+			await Effect.runPromise(
+				database.client
+					.update(OrchestrationGroups)
+					.set({
+						state: "complete",
+						updated_at: "2026-07-18T10:01:00.000Z",
+						version: 2,
+					}),
+			);
+			const transition = await Effect.runPromise(
+				journal.AppendEvent({
+					causation_id: "group_boundary_transition",
+					correlation_id: "group_boundary_transition",
+					payload: {
+						type: "orchestration.graph.lifecycle",
+						group_id: "group_boundary",
+						node_id: "group_boundary",
+						node_type: "orchestration_group",
+						state: "complete",
+						action: "completed_at_snapshot_boundary",
+					},
+					thread_id: "thread_group_boundary",
+				}),
+			);
+			await Effect.runPromise(Deferred.succeed(release_snapshot, undefined));
+
+			const updates = await updates_promise;
+			expect(updates).toMatchObject([
+				{
+					type: "snapshot",
+					snapshot: { groups: [{ group_id: "group_boundary", state: "running" }] },
+				},
+				{ type: "patch", snapshot: { groups: [] } },
+			]);
+			expect(updates[1]).toMatchObject({
+				snapshot: { journal_sequence: transition.journal_sequence },
+			});
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
+	it("does not append snapshot history again when subscription registration races a pending journal tail", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const journal = await runtime.runPromise(JournalStore);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
+		try {
+			await Effect.runPromise(
+				harness.client.Command({
+					command_id: "snapshot_race_create",
+					payload: { title: "Snapshot race", type: "thread.create" },
+					thread_id: "thread_snapshot_race",
+				}),
+			);
+			await runtime.runPromise(
+				journal.AppendEvent({
+					causation_id: "snapshot_race_first",
+					correlation_id: "snapshot_race_first",
+					payload: {
+						type: "assistant.message_completed",
+						message_id: "snapshot_race_first",
+						text: "Already represented by the snapshot.",
+					},
+					thread_id: "thread_snapshot_race",
+				}),
+			);
+
+			const updates = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const stream = yield* harness.client.SubscribeThreadTranscript(
+							"thread_snapshot_race",
+						);
+						const fiber = yield* stream.pipe(
+							Stream.take(2),
+							Stream.runCollect,
+							Effect.forkScoped,
+						);
+						yield* journal.AppendEvent({
+							causation_id: "snapshot_race_second",
+							correlation_id: "snapshot_race_second",
+							payload: {
+								type: "assistant.message_completed",
+								message_id: "snapshot_race_second",
+								text: "Only this entry should append.",
+							},
+							thread_id: "thread_snapshot_race",
+						});
+						return [...(yield* Fiber.join(fiber))];
+					}),
+				),
+			);
+
+			expect(updates[0]).toMatchObject({
+				type: "snapshot",
+				transcript: {
+					entries: [{ payload: { text: "Already represented by the snapshot." } }],
+				},
+			});
+			expect(updates[1]).toMatchObject({
+				type: "append",
+				entries: [{ payload: { text: "Only this entry should append." } }],
+			});
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
+	it("reads and appends the journal-derived safe transcript through real MessagePorts", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const journal = await runtime.runPromise(JournalStore);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server, {
+			client: { event_capacity: 1_000 },
+		});
+		try {
+			await Effect.runPromise(
+				harness.client.Command({
+					command_id: "transcript_create",
+					payload: { title: "Transcript", type: "thread.create" },
+					thread_id: "thread_transcript",
+				}),
+			);
+			const updates = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const stream =
+							yield* harness.client.SubscribeThreadTranscript("thread_transcript");
+						const fiber = yield* stream.pipe(
+							Stream.take(2),
+							Stream.runCollect,
+							Effect.forkScoped,
+						);
+						yield* journal.AppendEvent({
+							causation_id: "transcript_append",
+							correlation_id: "transcript_append",
+							payload: {
+								type: "assistant.message_completed",
+								message_id: "assistant_transcript",
+								text: "Safe transcript content.",
+							},
+							thread_id: "thread_transcript",
+						});
+						return [...(yield* Fiber.join(fiber))];
+					}),
+				),
+			);
+			const queried = await Effect.runPromise(
+				harness.client.GetThreadTranscript({ thread_id: "thread_transcript" }),
+			);
+			expect(updates).toMatchObject([
+				{ type: "snapshot", transcript: { status: "available" } },
+				{
+					type: "append",
+					entries: [
+						{
+							payload: {
+								type: "assistant.message_completed",
+								text: "Safe transcript content.",
+							},
+						},
+					],
+				},
+			]);
+			expect(queried).toMatchObject({
+				status: "available",
+				entries: [
+					{
+						journal_sequence: expect.any(Number),
+						payload: { text: "Safe transcript content." },
+					},
+				],
+			});
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
+	it("re-establishes a transcript projection after a real MessagePort reconnect", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const journal = await runtime.runPromise(JournalStore);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server, {
+			client: { reconnect_delay_ms: 5 },
+		});
+		try {
+			await Effect.runPromise(
+				harness.client.Command({
+					command_id: "reconnect_transcript_create",
+					payload: { title: "Reconnect transcript", type: "thread.create" },
+					thread_id: "thread_transcript_reconnect",
+				}),
+			);
+			const updates = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const initial_snapshot = yield* Deferred.make<void>();
+						const stream = yield* harness.client.SubscribeThreadTranscript(
+							"thread_transcript_reconnect",
+						);
+						const fiber = yield* stream.pipe(
+							Stream.tap((update) =>
+								update.type === "snapshot"
+									? Deferred.succeed(initial_snapshot, undefined)
+									: Effect.void,
+							),
+							Stream.take(3),
+							Stream.runCollect,
+							Effect.forkScoped,
+						);
+						yield* Deferred.await(initial_snapshot);
+						harness.close_current_connection();
+						yield* Effect.promise(() =>
+							wait_for(() => harness.connector_snapshot().connections >= 2),
+						);
+						yield* journal.AppendEvent({
+							causation_id: "reconnect_transcript_append",
+							correlation_id: "reconnect_transcript_append",
+							payload: {
+								type: "assistant.message_completed",
+								message_id: "assistant_reconnect",
+								text: "Delivered after reconnect.",
+							},
+							thread_id: "thread_transcript_reconnect",
+						});
+						const all = [...(yield* Fiber.join(fiber))];
+						return all;
+					}),
+				),
+			);
+			expect(updates.filter((update) => update.type === "snapshot")).not.toHaveLength(0);
+			const append = updates.find((update) => update.type === "append");
+			expect(append).toMatchObject({
+				entries: [{ payload: { text: "Delivered after reconnect." } }],
+			});
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
+	it("replaces live transcript content with an explicit erased snapshot", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const journal = await runtime.runPromise(JournalStore);
+		const erasure = await runtime.runPromise(ThreadErasure);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
+		try {
+			await Effect.runPromise(
+				harness.client.Command({
+					command_id: "erase_transcript_create",
+					payload: { title: "Erase transcript", type: "thread.create" },
+					thread_id: "thread_transcript_erased",
+				}),
+			);
+			await Effect.runPromise(
+				journal.AppendEvent({
+					causation_id: "erase_transcript_message",
+					correlation_id: "erase_transcript_message",
+					payload: {
+						type: "assistant.message_completed",
+						message_id: "erase_assistant",
+						text: "This must disappear.",
+					},
+					thread_id: "thread_transcript_erased",
+				}),
+			);
+			const updates = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const stream = yield* harness.client.SubscribeThreadTranscript(
+							"thread_transcript_erased",
+						);
+						const fiber = yield* stream.pipe(
+							Stream.take(2),
+							Stream.runCollect,
+							Effect.forkScoped,
+						);
+						yield* harness.client.Command({
+							command_id: "erase_transcript_archive",
+							payload: { type: "thread.archive" },
+							thread_id: "thread_transcript_erased",
+						});
+						yield* erasure.CleanupExpired(
+							"2026-07-19T00:00:00.000Z",
+							"2026-07-19T00:00:00.000Z",
+						);
+						return [...(yield* Fiber.join(fiber))];
+					}),
+				),
+			);
+			expect(updates).toMatchObject([
+				{
+					type: "snapshot",
+					transcript: {
+						status: "available",
+						entries: [{ payload: { text: "This must disappear." } }],
+					},
+				},
+				{ type: "snapshot", transcript: { status: "erased", entries: [] } },
+			]);
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
+	it("does not duplicate transcript appends when a later journal fact is visible during an earlier notification", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const journal = await runtime.runPromise(JournalStore);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
+		try {
+			await Effect.runPromise(
+				harness.client.Command({
+					command_id: "race_transcript_create",
+					payload: { title: "Race transcript", type: "thread.create" },
+					thread_id: "thread_transcript_race",
+				}),
+			);
+			const updates = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const stream =
+							yield* harness.client.SubscribeThreadTranscript(
+								"thread_transcript_race",
+							);
+						const fiber = yield* stream.pipe(
+							Stream.take(3),
+							Stream.runCollect,
+							Effect.forkScoped,
+						);
+						yield* Effect.all(
+							[
+								journal.AppendEvent({
+									causation_id: "race_one",
+									correlation_id: "race_one",
+									payload: {
+										type: "assistant.message_completed",
+										message_id: "race_message_one",
+										text: "one",
+									},
+									thread_id: "thread_transcript_race",
+								}),
+								journal.AppendEvent({
+									causation_id: "race_two",
+									correlation_id: "race_two",
+									payload: {
+										type: "assistant.message_completed",
+										message_id: "race_message_two",
+										text: "two",
+									},
+									thread_id: "thread_transcript_race",
+								}),
+							],
+							{ concurrency: 1, discard: true },
+						);
+						return [...(yield* Fiber.join(fiber))];
+					}),
+				),
+			);
+			const appended = updates
+				.filter((update) => update.type === "append")
+				.flatMap((update) => update.entries.map((entry) => entry.event_id));
+			expect(appended).toHaveLength(2);
+			expect(new Set(appended).size).toBe(2);
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
+	it("returns latest safe transcript pages despite more than one limit of mixed journal facts", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const journal = await runtime.runPromise(JournalStore);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server, {
+			client: { event_capacity: 1_000 },
+		});
+		try {
+			await Effect.runPromise(
+				harness.client.Command({
+					command_id: "history_create",
+					payload: { title: "History", type: "thread.create" },
+					thread_id: "thread_history",
+				}),
+			);
+			await Effect.runPromise(
+				Effect.forEach(
+					Array.from({ length: 205 }, (_, index) => index + 1),
+					(index) =>
+						Effect.all(
+							[
+								journal.AppendEvent({
+									causation_id: `history_safe_${index}`,
+									correlation_id: `history_safe_${index}`,
+									payload: {
+										type: "assistant.message_completed",
+										message_id: `history_message_${index}`,
+										text: `safe ${index}`,
+									},
+									thread_id: "thread_history",
+								}),
+								journal.AppendEvent({
+									causation_id: `history_raw_${index}`,
+									correlation_id: `history_raw_${index}`,
+									payload: {
+										type: "filesystem.mutation",
+										operation: "write",
+										path: `C:/private/${index}`,
+									},
+									thread_id: "thread_history",
+								}),
+							],
+							{ concurrency: 1, discard: true },
+						),
+				),
+			);
+			const newest = await Effect.runPromise(
+				harness.client.GetThreadTranscript({ thread_id: "thread_history", limit: 2 }),
+			);
+			const previous = await Effect.runPromise(
+				harness.client.GetThreadTranscript({
+					thread_id: "thread_history",
+					limit: 2,
+					before_journal_sequence: newest.next_before_journal_sequence,
+				}),
+			);
+			expect(newest).toMatchObject({
+				entries: [{ payload: { text: "safe 204" } }, { payload: { text: "safe 205" } }],
+			});
+			expect(newest.next_before_journal_sequence).toBeDefined();
+			expect(previous).toMatchObject({
+				entries: [{ payload: { text: "safe 202" } }, { payload: { text: "safe 203" } }],
+			});
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
+	it("discovers thread groups and delivers an ordered replacement patch through real MessagePorts", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const database = await runtime.runPromise(Database);
+		const journal = await runtime.runPromise(JournalStore);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
+		try {
+			await Effect.runPromise(
+				harness.client.Command({
+					command_id: "groups_create",
+					payload: { title: "Groups", type: "thread.create" },
+					thread_id: "thread_groups",
+				}),
+			);
+			await Effect.runPromise(
+				harness.client.Command({
+					command_id: "groups_other_create",
+					payload: { title: "Other Groups", type: "thread.create" },
+					thread_id: "thread_groups_other",
+				}),
+			);
+			await Effect.runPromise(
+				database.client.insert(OrchestrationGroups).values({
+					group_id: "group_other",
+					thread_id: "thread_groups_other",
+					coordinator_agent_id: "agent_other",
+					state: "running",
+					max_concurrency: 1,
+					version: 1,
+					journal_sequence: 3,
+					created_at: "2026-07-18T10:00:00.000Z",
+					updated_at: "2026-07-18T10:00:00.000Z",
+				}),
+			);
+			await Effect.runPromise(
+				database.client.insert(OrchestrationGroups).values({
+					group_id: "group_live",
+					thread_id: "thread_groups",
+					coordinator_agent_id: "agent_coordinator",
+					state: "running",
+					max_concurrency: 2,
+					version: 1,
+					journal_sequence: 2,
+					created_at: "2026-07-18T10:00:00.000Z",
+					updated_at: "2026-07-18T10:00:00.000Z",
+				}),
+			);
+			await Effect.runPromise(
+				database.client.insert(OrchestrationGroups).values({
+					group_id: "group_terminal",
+					thread_id: "thread_groups",
+					coordinator_agent_id: "agent_coordinator",
+					state: "complete",
+					max_concurrency: 2,
+					version: 1,
+					journal_sequence: 2,
+					created_at: "2026-07-18T10:00:00.000Z",
+					updated_at: "2026-07-18T10:00:00.000Z",
+				}),
+			);
+			const discovered = await Effect.runPromise(
+				harness.client.ListOrchestrationGroups("thread_groups", false),
+			);
+			const with_terminal = await Effect.runPromise(
+				harness.client.ListOrchestrationGroups("thread_groups", true),
+			);
+			const updates = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const stream = yield* harness.client.SubscribeOrchestrationGroups(
+							"thread_groups",
+							false,
+						);
+						const fiber = yield* stream.pipe(
+							Stream.take(2),
+							Stream.runCollect,
+							Effect.forkScoped,
+						);
+						yield* journal.AppendEvent({
+							causation_id: "group_other_patch",
+							correlation_id: "group_other_patch",
+							payload: {
+								type: "orchestration.graph.lifecycle",
+								group_id: "group_other",
+								node_id: "group_other",
+								node_type: "orchestration_group",
+								state: "running",
+								action: "unrelated",
+							},
+							thread_id: "thread_groups_other",
+						});
+						const own = yield* journal.AppendEvent({
+							causation_id: "group_patch",
+							correlation_id: "group_patch",
+							payload: {
+								type: "orchestration.graph.lifecycle",
+								group_id: "group_live",
+								node_id: "group_live",
+								node_type: "orchestration_group",
+								state: "running",
+								action: "refreshed",
+							},
+							thread_id: "thread_groups",
+						});
+						return { own, updates: [...(yield* Fiber.join(fiber))] };
+					}),
+				),
+			);
+			expect(discovered).toMatchObject({
+				groups: [{ group_id: "group_live", state: "running" }],
+			});
+			expect(discovered.groups).toHaveLength(1);
+			expect(with_terminal.groups.map((group) => group.group_id)).toEqual([
+				"group_live",
+				"group_terminal",
+			]);
+			expect(updates.updates).toMatchObject([
+				{ type: "snapshot", snapshot: { groups: [{ group_id: "group_live" }] } },
+				{ type: "patch", snapshot: { groups: [{ group_id: "group_live" }] } },
+			]);
+			expect(updates.updates[1]?.snapshot.journal_sequence).toBe(
+				updates.own.journal_sequence,
+			);
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
+	it("clears an active group-list subscription when its thread is erased", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const database = await runtime.runPromise(Database);
+		const erasure = await runtime.runPromise(ThreadErasure);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
+		try {
+			await Effect.runPromise(
+				harness.client.Command({
+					command_id: "erase_groups_create",
+					payload: { title: "Erase groups", type: "thread.create" },
+					thread_id: "thread_groups_erased",
+				}),
+			);
+			await Effect.runPromise(
+				database.client.insert(OrchestrationGroups).values({
+					group_id: "group_erased",
+					thread_id: "thread_groups_erased",
+					coordinator_agent_id: "agent_erased",
+					state: "running",
+					max_concurrency: 1,
+					version: 1,
+					journal_sequence: 2,
+					created_at: "2026-07-18T10:00:00.000Z",
+					updated_at: "2026-07-18T10:00:00.000Z",
+				}),
+			);
+			const updates = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const stream = yield* harness.client.SubscribeOrchestrationGroups(
+							"thread_groups_erased",
+							false,
+						);
+						const fiber = yield* stream.pipe(
+							Stream.take(2),
+							Stream.runCollect,
+							Effect.forkScoped,
+						);
+						yield* harness.client.Command({
+							command_id: "erase_groups_archive",
+							payload: { type: "thread.archive" },
+							thread_id: "thread_groups_erased",
+						});
+						yield* erasure.CleanupExpired(
+							"2026-07-19T00:00:00.000Z",
+							"2026-07-19T00:00:00.000Z",
+						);
+						return [...(yield* Fiber.join(fiber))];
+					}),
+				),
+			);
+			expect(updates).toMatchObject([
+				{ type: "snapshot", snapshot: { groups: [{ group_id: "group_erased" }] } },
+				{ type: "patch", snapshot: { groups: [] } },
+			]);
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
 	it("projects a multi-source project rehome through real MessagePorts", async () => {
 		const database_path = await make_database_path();
 		const now = { value: "2026-07-11T18:00:00.000Z" };

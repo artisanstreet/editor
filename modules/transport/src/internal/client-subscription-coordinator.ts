@@ -12,6 +12,8 @@ import type {
 	ArtisanClientCursors,
 	ArtisanClientError,
 	OrchestrationGraphUpdate,
+	OrchestrationGroupListUpdate,
+	ThreadTranscriptUpdate,
 	ThreadListUpdate,
 } from "../client-contract";
 import {
@@ -38,8 +40,23 @@ interface OrchestrationGraphSubscription extends ProjectionSubscriptionBase {
 	readonly _tag: "orchestration.graph";
 	readonly queue: Queue.Queue<OrchestrationGraphUpdate, ArtisanClientError | Cause.Done<void>>;
 }
+interface ThreadTranscriptSubscription extends ProjectionSubscriptionBase {
+	readonly _tag: "thread.transcript";
+	readonly queue: Queue.Queue<ThreadTranscriptUpdate, ArtisanClientError | Cause.Done<void>>;
+}
+interface OrchestrationGroupListSubscription extends ProjectionSubscriptionBase {
+	readonly _tag: "orchestration.group.list";
+	readonly queue: Queue.Queue<
+		OrchestrationGroupListUpdate,
+		ArtisanClientError | Cause.Done<void>
+	>;
+}
 
-type ProjectionSubscription = OrchestrationGraphSubscription | ThreadListSubscription;
+type ProjectionSubscription =
+	| OrchestrationGraphSubscription
+	| ThreadListSubscription
+	| ThreadTranscriptSubscription
+	| OrchestrationGroupListSubscription;
 
 type ProjectionEnvelope = Extract<
 	OutboundControlEnvelope,
@@ -49,7 +66,11 @@ type ProjectionEnvelope = Extract<
 			| "orchestration.graph.snapshot"
 			| "thread.list.snapshot"
 			| "thread.list.upsert"
-			| "thread.list.remove";
+			| "thread.list.remove"
+			| "thread.transcript.snapshot"
+			| "thread.transcript.append"
+			| "orchestration.group.list.snapshot"
+			| "orchestration.group.list.patch";
 	}
 >;
 
@@ -113,6 +134,21 @@ export interface ClientSubscriptionCoordinator {
 	>;
 	readonly SubscribeThreadList: Effect.Effect<
 		Stream.Stream<ThreadListUpdate, ArtisanClientError>,
+		ArtisanClientError,
+		Scope.Scope
+	>;
+	readonly SubscribeThreadTranscript: (
+		thread_id: string,
+	) => Effect.Effect<
+		Stream.Stream<ThreadTranscriptUpdate, ArtisanClientError>,
+		ArtisanClientError,
+		Scope.Scope
+	>;
+	readonly SubscribeOrchestrationGroups: (
+		thread_id: string,
+		include_terminal: boolean,
+	) => Effect.Effect<
+		Stream.Stream<OrchestrationGroupListUpdate, ArtisanClientError>,
 		ArtisanClientError,
 		Scope.Scope
 	>;
@@ -299,13 +335,9 @@ export const make_client_subscription_coordinator = (
 			});
 
 		const fail_projection = (subscription: ProjectionSubscription, error: ArtisanClientError) =>
-			subscription._tag === "thread.list"
-				? Queue.fail(subscription.queue, error)
-				: Queue.fail(subscription.queue, error);
+			Queue.fail(subscription.queue as unknown as Queue.Queue<never, ArtisanClientError | Cause.Done<void>>, error);
 		const end_projection = (subscription: ProjectionSubscription) =>
-			subscription._tag === "thread.list"
-				? Queue.end(subscription.queue)
-				: Queue.end(subscription.queue);
+			Queue.end(subscription.queue as unknown as Queue.Queue<never, ArtisanClientError | Cause.Done<void>>);
 		const offer_projection_update = (
 			subscription: ProjectionSubscription,
 			envelope: ProjectionEnvelope,
@@ -350,6 +382,42 @@ export const make_client_subscription_coordinator = (
 				};
 
 				return Queue.offerUnsafe(subscription.queue, update) ? "offered" : "overflow";
+			}
+
+			if (
+				subscription._tag === "thread.transcript" &&
+				(envelope.kind === "thread.transcript.snapshot" ||
+					envelope.kind === "thread.transcript.append")
+			) {
+				const update: ThreadTranscriptUpdate =
+					envelope.kind === "thread.transcript.snapshot"
+						? {
+								type: "snapshot",
+								journal_sequence: envelope.journal_sequence,
+								transcript: envelope.payload,
+							}
+						: {
+								type: "append",
+								journal_sequence: envelope.journal_sequence,
+								entries: envelope.payload.entries,
+							};
+				return Queue.offerUnsafe(subscription.queue, update) ? "offered" : "overflow";
+			}
+
+			if (
+				subscription._tag === "orchestration.group.list" &&
+				(envelope.kind === "orchestration.group.list.snapshot" ||
+					envelope.kind === "orchestration.group.list.patch")
+			) {
+				return Queue.offerUnsafe(subscription.queue, {
+					type:
+						envelope.kind === "orchestration.group.list.snapshot"
+							? "snapshot"
+							: "patch",
+					snapshot: envelope.payload,
+				})
+					? "offered"
+					: "overflow";
 			}
 
 			return "mismatch";
@@ -621,6 +689,62 @@ export const make_client_subscription_coordinator = (
 			),
 		}));
 
+		const subscribe_thread_transcript = (thread_id: string) =>
+			Effect.gen(function* () {
+				const trace = yield* make_trace;
+				const subscription_id = yield* make_id("thread_transcript_subscription");
+				const queue = yield* Effect.acquireRelease(
+					Queue.dropping<ThreadTranscriptUpdate, ArtisanClientError | Cause.Done<void>>(
+						subscription_capacity,
+					),
+					Queue.shutdown,
+				);
+				const started = yield* Deferred.make<void, ArtisanClientError>();
+				const subscription: ThreadTranscriptSubscription = {
+					_tag: "thread.transcript",
+					envelope: {
+						...trace,
+						kind: "subscribe",
+						payload: { type: "thread.transcript", thread_id },
+						subscription_id,
+					},
+					expected_sequence: -1,
+					queue,
+					started,
+					stream_id: Option.none(),
+				};
+				yield* start_subscription(subscription);
+				return Stream.fromQueue(queue);
+			});
+		const subscribe_orchestration_groups = (thread_id: string, include_terminal: boolean) =>
+			Effect.gen(function* () {
+				const trace = yield* make_trace;
+				const subscription_id = yield* make_id("orchestration_group_list_subscription");
+				const queue = yield* Effect.acquireRelease(
+					Queue.dropping<
+						OrchestrationGroupListUpdate,
+						ArtisanClientError | Cause.Done<void>
+					>(subscription_capacity),
+					Queue.shutdown,
+				);
+				const started = yield* Deferred.make<void, ArtisanClientError>();
+				const subscription: OrchestrationGroupListSubscription = {
+					_tag: "orchestration.group.list",
+					envelope: {
+						...trace,
+						kind: "subscribe",
+						payload: { type: "orchestration.group.list", thread_id, include_terminal },
+						subscription_id,
+					},
+					expected_sequence: -1,
+					queue,
+					started,
+					stream_id: Option.none(),
+				};
+				yield* start_subscription(subscription);
+				return Stream.fromQueue(queue);
+			});
+
 		const retry = Ref.modify(
 			state,
 			(current): readonly [ReadonlyArray<ProjectionSubscription>, SubscriptionState] => [
@@ -680,6 +804,8 @@ export const make_client_subscription_coordinator = (
 			ResumeCursors: cursors,
 			Retry: retry,
 			SubscribeOrchestrationGraph: subscribe_orchestration_graph,
+			SubscribeOrchestrationGroups: subscribe_orchestration_groups,
 			SubscribeThreadList: subscribe_thread_list,
+			SubscribeThreadTranscript: subscribe_thread_transcript,
 		} satisfies ClientSubscriptionCoordinator;
 	});

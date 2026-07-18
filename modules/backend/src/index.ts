@@ -16,6 +16,7 @@ export {
 	ProtocolConnectionOptionsSchema,
 } from "./protocol/protocol-connection";
 export { ProtocolRouter } from "./protocol/protocol-router";
+export { SurfaceService, SurfaceServiceLive } from "./surfaces/surface-service";
 export { ProtocolServer } from "./protocol/protocol-server";
 export {
 	GlobalGuidanceConflict,

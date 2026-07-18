@@ -1,6 +1,12 @@
 import { Schema } from "effect";
 
 import {
+	OrchestrationGroupListQuery,
+	OrchestrationGroupListSnapshot,
+} from "./orchestration-groups";
+import { ThreadTranscriptQuery, ThreadTranscriptSnapshot, TranscriptEntry } from "./transcript";
+
+import {
 	WorkspaceChangeListQuery,
 	WorkspaceChangeListQueryResult,
 	WorkspaceChangeDiffQuery,
@@ -1420,6 +1426,39 @@ export const OrchestrationGraphQueryResultEnvelope = Schema.Struct({
 export type OrchestrationGraphQueryResultEnvelope =
 	typeof OrchestrationGraphQueryResultEnvelope.Type;
 
+/** Requests renderer-safe, bounded journal facts for one thread. */
+export const ThreadTranscriptQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("thread.transcript.query"),
+	payload: ThreadTranscriptQuery,
+});
+export type ThreadTranscriptQueryEnvelope = typeof ThreadTranscriptQueryEnvelope.Type;
+
+export const ThreadTranscriptQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("thread.transcript.query.result"),
+	payload: ThreadTranscriptSnapshot,
+});
+export type ThreadTranscriptQueryResultEnvelope = typeof ThreadTranscriptQueryResultEnvelope.Type;
+
+/** Discovers a thread's current and historic orchestration groups without a known id. */
+export const OrchestrationGroupListQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("orchestration.group.list.query"),
+	payload: OrchestrationGroupListQuery,
+});
+export type OrchestrationGroupListQueryEnvelope = typeof OrchestrationGroupListQueryEnvelope.Type;
+
+export const OrchestrationGroupListQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("orchestration.group.list.query.result"),
+	payload: OrchestrationGroupListSnapshot,
+});
+export type OrchestrationGroupListQueryResultEnvelope =
+	typeof OrchestrationGroupListQueryResultEnvelope.Type;
+
 /** Requests ordered updates for the thread-list projection. */
 export const SubscribeEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
@@ -1427,6 +1466,12 @@ export const SubscribeEnvelope = Schema.Struct({
 	payload: Schema.Union([
 		Schema.Struct({ type: Schema.Literal("thread.list") }),
 		Schema.Struct({ type: Schema.Literal("orchestration.graph"), group_id: Identifier }),
+		Schema.Struct({ type: Schema.Literal("thread.transcript"), thread_id: Identifier }),
+		Schema.Struct({
+			type: Schema.Literal("orchestration.group.list"),
+			thread_id: Identifier,
+			include_terminal: Schema.Boolean,
+		}),
 	]),
 	subscription_id: Identifier,
 });
@@ -1534,6 +1579,51 @@ export const OrchestrationGraphPatchEnvelope = Schema.Struct({
 
 export type OrchestrationGraphPatchEnvelope = typeof OrchestrationGraphPatchEnvelope.Type;
 
+export const ThreadTranscriptSnapshotEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	journal_sequence: JournalSequence,
+	kind: Schema.Literal("thread.transcript.snapshot"),
+	payload: ThreadTranscriptSnapshot,
+	sequence: StreamSequence,
+	stream_id: Identifier,
+	subscription_id: Identifier,
+});
+export type ThreadTranscriptSnapshotEnvelope = typeof ThreadTranscriptSnapshotEnvelope.Type;
+
+export const ThreadTranscriptAppendEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	journal_sequence: JournalSequence,
+	kind: Schema.Literal("thread.transcript.append"),
+	payload: Schema.Struct({ entries: Schema.Array(TranscriptEntry) }),
+	sequence: StreamSequence,
+	stream_id: Identifier,
+	subscription_id: Identifier,
+});
+export type ThreadTranscriptAppendEnvelope = typeof ThreadTranscriptAppendEnvelope.Type;
+
+export const OrchestrationGroupListSnapshotEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	journal_sequence: JournalSequence,
+	kind: Schema.Literal("orchestration.group.list.snapshot"),
+	payload: OrchestrationGroupListSnapshot,
+	sequence: StreamSequence,
+	stream_id: Identifier,
+	subscription_id: Identifier,
+});
+export type OrchestrationGroupListSnapshotEnvelope =
+	typeof OrchestrationGroupListSnapshotEnvelope.Type;
+
+export const OrchestrationGroupListPatchEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	journal_sequence: JournalSequence,
+	kind: Schema.Literal("orchestration.group.list.patch"),
+	payload: OrchestrationGroupListSnapshot,
+	sequence: StreamSequence,
+	stream_id: Identifier,
+	subscription_id: Identifier,
+});
+export type OrchestrationGroupListPatchEnvelope = typeof OrchestrationGroupListPatchEnvelope.Type;
+
 /** Acknowledges the highest contiguous journal position and durable event cursors. */
 export const AckEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
@@ -1624,6 +1714,8 @@ export const InboundControlEnvelope = Schema.Union([
 	ThreadWorkQueryEnvelope,
 	TerminalListQueryEnvelope,
 	OrchestrationGraphQueryEnvelope,
+	ThreadTranscriptQueryEnvelope,
+	OrchestrationGroupListQueryEnvelope,
 	SubscribeEnvelope,
 	UnsubscribeEnvelope,
 	AckEnvelope,
@@ -1652,6 +1744,8 @@ export const OutboundControlEnvelope = Schema.Union([
 	ThreadWorkQueryResultEnvelope,
 	TerminalListQueryResultEnvelope,
 	OrchestrationGraphQueryResultEnvelope,
+	ThreadTranscriptQueryResultEnvelope,
+	OrchestrationGroupListQueryResultEnvelope,
 	SubscriptionStartedEnvelope,
 	SubscriptionStoppedEnvelope,
 	ThreadListSnapshotEnvelope,
@@ -1659,6 +1753,10 @@ export const OutboundControlEnvelope = Schema.Union([
 	ThreadListRemoveEnvelope,
 	OrchestrationGraphSnapshotEnvelope,
 	OrchestrationGraphPatchEnvelope,
+	ThreadTranscriptSnapshotEnvelope,
+	ThreadTranscriptAppendEnvelope,
+	OrchestrationGroupListSnapshotEnvelope,
+	OrchestrationGroupListPatchEnvelope,
 	ReplayCompleteEnvelope,
 	HeartbeatPingEnvelope,
 ]);

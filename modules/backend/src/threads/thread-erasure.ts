@@ -24,6 +24,8 @@ import {
 	OrchestrationOutbox,
 	OrchestrationRawObservations,
 	OrchestrationRuns,
+	SurfaceItems,
+	SurfaceUsageTotals,
 	TerminalCommands,
 	TerminalSessions,
 	ThreadErasureClaims,
@@ -307,6 +309,14 @@ export const ThreadErasureLive = Layer.effect(
 						yield* transaction
 							.delete(OrchestrationRuns)
 							.where(eq(OrchestrationRuns.thread_id, thread_id));
+						yield* transaction
+							.delete(SurfaceItems)
+							.where(eq(SurfaceItems.thread_id, thread_id));
+						if (run_ids.length > 0) {
+							yield* transaction
+								.delete(SurfaceUsageTotals)
+								.where(inArray(SurfaceUsageTotals.run_id, run_ids));
+						}
 						yield* transaction
 							.delete(WorkspaceChangeDiffs)
 							.where(eq(WorkspaceChangeDiffs.thread_id, thread_id));

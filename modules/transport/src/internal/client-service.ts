@@ -23,11 +23,13 @@ import {
 	type ModelBehaviourRetryEnvelope,
 	type ModelBehaviourUpdateEnvelope,
 	type OrchestrationGraphQueryEnvelope,
+	type OrchestrationGroupListQueryEnvelope,
 	type TerminalListQueryEnvelope,
 	type ThreadListQueryEnvelope,
 	type ThreadRetentionQueryEnvelope,
 	type ThreadRetentionUpdateEnvelope,
 	type ThreadWorkQueryEnvelope,
+	type ThreadTranscriptQueryEnvelope,
 } from "@artisan/protocol";
 
 import {
@@ -735,6 +737,44 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						: yield* Effect.die("orchestration graph response narrowed incorrectly");
 				});
 
+			const get_thread_transcript = (
+				input: import("@artisan/protocol").ThreadTranscriptQuery,
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ThreadTranscriptQueryEnvelope = {
+						...trace,
+						kind: "thread.transcript.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"thread.transcript.query.result",
+					);
+					return result.kind === "thread.transcript.query.result"
+						? result.payload
+						: yield* Effect.die("thread transcript response narrowed incorrectly");
+				});
+
+			const list_orchestration_groups = (thread_id: string, include_terminal: boolean) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: OrchestrationGroupListQueryEnvelope = {
+						...trace,
+						kind: "orchestration.group.list.query",
+						payload: { thread_id, include_terminal },
+					};
+					const result = yield* requests.Request(
+						envelope,
+						"orchestration.group.list.query.result",
+					);
+					return result.kind === "orchestration.group.list.query.result"
+						? result.payload
+						: yield* Effect.die(
+								"orchestration group list response narrowed incorrectly",
+							);
+				});
+
 			const list_terminals = (thread_id: string, workspace_id: string) =>
 				Effect.gen(function* () {
 					const trace = yield* connection.MakeTrace;
@@ -757,6 +797,8 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				Errors: Stream.fromQueue(errors),
 				Events: subscriptions.Events,
 				GetOrchestrationGraph: get_orchestration_graph,
+				GetThreadTranscript: get_thread_transcript,
+				ListOrchestrationGroups: list_orchestration_groups,
 				GetGlobalGuidance: get_global_guidance,
 				GetGitDiff: get_git_diff,
 				GetGitWorkspace: get_git_workspace,
@@ -781,7 +823,9 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				RollbackWorkspaceChange: rollback_workspace_change,
 				SelectGlobalGuidance: select_global_guidance,
 				SubscribeOrchestrationGraph: subscriptions.SubscribeOrchestrationGraph,
+				SubscribeOrchestrationGroups: subscriptions.SubscribeOrchestrationGroups,
 				SubscribeThreadList: subscriptions.SubscribeThreadList,
+				SubscribeThreadTranscript: subscriptions.SubscribeThreadTranscript,
 				UpdateGlobalGuidance: update_global_guidance,
 				UpdateModelBehaviour: update_model_behaviour,
 				UpdateThreadRetentionPolicy: update_thread_retention_policy,

@@ -11,6 +11,7 @@ import { AgentGraphOrchestratorLive } from "../orchestration/agent-graph-orchest
 import { AgentGraphRepositoryLive } from "../orchestration/agent-graph-repository";
 import { AgentOrchestratorLive } from "../orchestration/agent-orchestrator";
 import { IntakePolicyLive } from "../orchestration/intake-policy";
+import { SurfaceServiceLive } from "../surfaces/surface-service";
 import {
 	make_node_workspace_filesystem_registry_layer,
 	WorkspaceFilesystemRegistrationError,
@@ -37,6 +38,7 @@ import { JournalNotifierLive } from "../persistence/journal-notifier";
 import { JournalStoreLive } from "../persistence/journal-store";
 import { OrchestrationRepositoryLive } from "../persistence/orchestration-repository";
 import { ThreadReadModelLive } from "../persistence/thread-read-model";
+import { TranscriptReadModelLive } from "../persistence/transcript-read-model";
 import { CommandRouterLive } from "../protocol/command-router";
 import {
 	DefaultProtocolConnectionOptions,
@@ -178,6 +180,7 @@ export function make_backend_layer(options: BackendOptions) {
 		JournalStoreLive,
 		OrchestrationRepositoryLive,
 		ThreadReadModelLive,
+		TranscriptReadModelLive,
 	).pipe(Layer.provideMerge(infrastructure));
 	const workspace_evidence = WorkspaceEvidenceRecorderLive.pipe(Layer.provideMerge(persistence));
 	const workspace_changes = WorkspaceChangeRepositoryLive.pipe(
@@ -350,6 +353,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(commands),
 		Layer.provideMerge(terminals),
 	);
+	const surfaces = SurfaceServiceLive.pipe(Layer.provideMerge(infrastructure));
 
 	const protocol = make_protocol_server_layer(protocol_options).pipe(
 		Layer.provideMerge(routing),
@@ -367,6 +371,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(workspace_files),
 		Layer.provideMerge(workspace_changes),
 		Layer.provideMerge(workspace_diffs),
+		Layer.provideMerge(surfaces),
 	);
 
 	return protocol.pipe(
