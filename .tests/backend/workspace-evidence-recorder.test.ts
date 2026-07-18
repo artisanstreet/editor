@@ -11,6 +11,7 @@ import type { CommandEnvelope } from "@artisan/protocol";
 import {
 	make_backend_runtime,
 	ProtocolRouter,
+	ThreadRetentionClock,
 	WorkspaceEvidenceRecorder,
 	WorkspaceEvidenceRecorderLive,
 } from "@artisan/backend";
@@ -65,6 +66,10 @@ function make_metadata_layer(instance_id = "workspace_evidence_recorder_test") {
 		Now: Effect.succeed("2026-07-11T19:00:00.000Z"),
 	});
 }
+
+const FixedRetentionClock = Layer.succeed(ThreadRetentionClock, {
+	Now: Effect.succeed("2026-07-12T19:00:00.000Z"),
+});
 
 interface EvidenceReadGate {
 	readonly continue_recording: Deferred.Deferred<void>;
@@ -235,6 +240,7 @@ describe("WorkspaceEvidenceRecorder", () => {
 		const first_runtime = make_backend_runtime({
 			database_path,
 			migrations_path,
+			retention_clock: FixedRetentionClock,
 			runtime_metadata: make_metadata_layer(),
 		});
 
@@ -252,6 +258,7 @@ describe("WorkspaceEvidenceRecorder", () => {
 		const second_runtime = make_backend_runtime({
 			database_path,
 			migrations_path,
+			retention_clock: FixedRetentionClock,
 			runtime_metadata: make_metadata_layer(),
 		});
 
