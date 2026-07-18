@@ -93,7 +93,7 @@ describe("WorkspaceGitRegistry", () => {
 		expect(result.authorized.workspace_id).toBe("workspace_one");
 		expect(result.rejected._tag).toBe("WorkspaceGitAuthorizationError");
 		expect(invocations).toHaveLength(1);
-		expect(invocations[0]?.cwd).toBe(await fs.realpath(root));
+		expect(invocations[0]?.cwd).toBe(result.authorized.git.root);
 	});
 
 	it("fails a command after a registered symlink is retargeted", async () => {
