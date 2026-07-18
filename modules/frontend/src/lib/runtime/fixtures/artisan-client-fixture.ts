@@ -696,14 +696,16 @@ export const FixtureArtisanClientService = {
 						thread_id === "thread-editor-shell"
 							? {
 									...fixture_artisan_client_data.orchestration_groups,
-									groups:
-										fixture_artisan_client_data.orchestration_groups.groups.filter(
-											(group) =>
-												include_terminal ||
-												!["summarized", "stopped", "failed", "complete"].includes(
-													group.state,
-												),
-										),
+									groups: fixture_artisan_client_data.orchestration_groups.groups.filter(
+										(group) =>
+											include_terminal ||
+											![
+												"summarized",
+												"stopped",
+												"failed",
+												"complete",
+											].includes(group.state),
+									),
 								}
 							: {
 									groups: [],

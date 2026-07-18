@@ -11,7 +11,10 @@ import { make_database_layer, Database } from "../../../modules/backend/src/pers
 import { JournalNotifierLive } from "../../../modules/backend/src/persistence/journal-notifier";
 import { JournalStoreLive } from "../../../modules/backend/src/persistence/journal-store";
 import { Threads } from "../../../modules/backend/src/persistence/schema";
-import { RuntimeMetadata } from "../../../modules/backend/src/runtime/runtime-metadata";
+import {
+	RuntimeMetadata,
+	type RuntimeIdPrefix,
+} from "../../../modules/backend/src/runtime/runtime-metadata";
 import { ArtisanToolApprovalPolicyLive } from "../../../modules/backend/src/tools/approval-policy";
 import {
 	ArtisanBuiltInToolRegistrations,
@@ -42,17 +45,7 @@ let metadata_sequence = 0;
 
 const metadata = Layer.succeed(RuntimeMetadata, {
 	instance_id: "tools_test",
-	MakeId: (
-		prefix:
-			| "agent"
-			| "backend"
-			| "connection"
-			| "event"
-			| "heartbeat"
-			| "message"
-			| "run"
-			| "stream_ticket",
-	) => Effect.sync(() => `${prefix}_${++metadata_sequence}`),
+	MakeId: (prefix: RuntimeIdPrefix) => Effect.sync(() => `${prefix}_${++metadata_sequence}`),
 	Now: Effect.succeed("2026-07-18T12:00:00.000Z"),
 });
 
@@ -261,33 +254,15 @@ describe("ToolControlPlane", () => {
 		let first_sequence = 0;
 		const first_metadata = Layer.succeed(RuntimeMetadata, {
 			instance_id: "first",
-			MakeId: (
-				prefix:
-					| "agent"
-					| "backend"
-					| "connection"
-					| "event"
-					| "heartbeat"
-					| "message"
-					| "run"
-					| "stream_ticket",
-			) => Effect.sync(() => `${prefix}_first_${++first_sequence}`),
+			MakeId: (prefix: RuntimeIdPrefix) =>
+				Effect.sync(() => `${prefix}_first_${++first_sequence}`),
 			Now: Effect.succeed("2026-07-18T12:00:00.000Z"),
 		});
 		let later_sequence = 0;
 		const later_metadata = Layer.succeed(RuntimeMetadata, {
 			instance_id: "later",
-			MakeId: (
-				prefix:
-					| "agent"
-					| "backend"
-					| "connection"
-					| "event"
-					| "heartbeat"
-					| "message"
-					| "run"
-					| "stream_ticket",
-			) => Effect.sync(() => `${prefix}_later_${++later_sequence}`),
+			MakeId: (prefix: RuntimeIdPrefix) =>
+				Effect.sync(() => `${prefix}_later_${++later_sequence}`),
 			Now: Effect.succeed("2026-07-18T12:01:00.000Z"),
 		});
 		const request = {
@@ -348,32 +323,14 @@ describe("ToolControlPlane", () => {
 		let later_sequence = 0;
 		const first_metadata = Layer.succeed(RuntimeMetadata, {
 			instance_id: "allowed_first",
-			MakeId: (
-				prefix:
-					| "agent"
-					| "backend"
-					| "connection"
-					| "event"
-					| "heartbeat"
-					| "message"
-					| "run"
-					| "stream_ticket",
-			) => Effect.sync(() => `${prefix}_allowed_first_${++first_sequence}`),
+			MakeId: (prefix: RuntimeIdPrefix) =>
+				Effect.sync(() => `${prefix}_allowed_first_${++first_sequence}`),
 			Now: Effect.succeed("2026-07-18T12:00:00.000Z"),
 		});
 		const later_metadata = Layer.succeed(RuntimeMetadata, {
 			instance_id: "allowed_later",
-			MakeId: (
-				prefix:
-					| "agent"
-					| "backend"
-					| "connection"
-					| "event"
-					| "heartbeat"
-					| "message"
-					| "run"
-					| "stream_ticket",
-			) => Effect.sync(() => `${prefix}_allowed_later_${++later_sequence}`),
+			MakeId: (prefix: RuntimeIdPrefix) =>
+				Effect.sync(() => `${prefix}_allowed_later_${++later_sequence}`),
 			Now: Effect.succeed("2026-07-18T12:01:00.000Z"),
 		});
 		const request = {
