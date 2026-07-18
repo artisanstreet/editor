@@ -1,0 +1,109 @@
+name: Release validation
+
+on:
+    workflow_dispatch:
+        inputs:
+            run_live_codex:
+                description: Run the authenticated, non-billable Codex CLI probe on the dedicated self-hosted runner.
+                required: true
+                default: false
+                type: boolean
+            run_native_addon:
+                description: Run the Windows native-addon smoke/recovery gate on the dedicated self-hosted runner.
+                required: true
+                default: false
+                type: boolean
+
+permissions:
+    contents: read
+
+concurrency:
+    group: release-validation-${{ github.ref }}
+    cancel-in-progress: false
+
+jobs:
+    validate:
+        name: Ordinary release gate
+        runs-on: windows-2025
+        timeout-minutes: 30
+        steps:
+            - uses: actions/checkout@v5
+
+            - uses: pnpm/action-setup@v4
+              with:
+                  version: 11.7.0
+
+            - uses: actions/setup-node@v5
+              with:
+                  node-version: 24
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+
+            - run: pnpm install --frozen-lockfile
+
+            - run: pnpm run validate
+
+    live-codex:
+        name: Opt-in live Codex CLI probe
+        needs: validate
+        if: ${{ inputs.run_live_codex }}
+        runs-on: [self-hosted, Windows, X64, artisan-live-codex]
+        environment: live-codex-validation
+        timeout-minutes: 15
+        steps:
+            - uses: actions/checkout@v5
+
+            - uses: pnpm/action-setup@v4
+              with:
+                  version: 11.7.0
+
+            - uses: actions/setup-node@v5
+              with:
+                  node-version: 24
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+
+            - run: pnpm install --frozen-lockfile
+
+            - name: Verify the trusted runner has Codex CLI
+              shell: pwsh
+              run: |
+                  $ErrorActionPreference = "Stop"
+                  $codex_executable = if ($env:ARTISAN_CODEX_EXECUTABLE) { $env:ARTISAN_CODEX_EXECUTABLE } else { "codex" }
+                  Get-Command $codex_executable -ErrorAction Stop | Out-Null
+
+            - name: Run the non-billable Codex probe
+              shell: pwsh
+              run: |
+                  $ErrorActionPreference = "Stop"
+                  $env:ARTISAN_ENGINE_LIVE = "1"
+                  pnpm exec vitest run .tests/engines/codex-engine.test.ts
+
+    native-addon:
+        name: Opt-in native-addon smoke/recovery gate
+        needs: validate
+        if: ${{ inputs.run_native_addon }}
+        runs-on: [self-hosted, Windows, X64, artisan-native-addon]
+        environment: native-addon-validation
+        timeout-minutes: 30
+        steps:
+            - uses: actions/checkout@v5
+
+            - uses: pnpm/action-setup@v4
+              with:
+                  version: 11.7.0
+
+            - uses: actions/setup-node@v5
+              with:
+                  node-version: 24
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+
+            - run: pnpm install --frozen-lockfile
+
+            - name: Run the explicit native smoke/recovery gate
+              shell: pwsh
+              run: |
+                  $ErrorActionPreference = "Stop"
+                  $env:ARTISAN_RUN_NATIVE_ADDON_SMOKE = "1"
+                  pnpm --filter @artisan/bounded-file-store-native verify:local
