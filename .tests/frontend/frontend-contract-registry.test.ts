@@ -99,7 +99,7 @@ describe("frontend contract registry", () => {
 			"main.chat-steer": "live",
 			"main.file-read": "backend_moving",
 			"main.file-replace": "backend_moving",
-			"main.transcript": "fixture",
+			"main.transcript": "live",
 			"right.git": "blocked",
 			"right.session-policy": "blocked",
 			"right.terminals": "live",

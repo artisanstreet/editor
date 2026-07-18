@@ -252,10 +252,9 @@ describe("WorkspaceEvidenceRecorder", () => {
 				return yield* recorder.RecordFilesystemMutation(filesystem_input());
 			}),
 		);
-
 		await first_runtime.dispose();
 
-		const second_runtime = make_backend_runtime({
+		const second_runtime = make_recorder_runtime(
 			database_path,
 			migrations_path,
 			retention_clock: FixedRetentionClock,

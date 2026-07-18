@@ -5,6 +5,12 @@ import {
 	OrchestrationGroupListSnapshot,
 } from "./orchestration-groups";
 import { ThreadTranscriptQuery, ThreadTranscriptSnapshot, TranscriptEntry } from "./transcript";
+import {
+	SurfaceListQuery,
+	SurfaceSnapshot,
+	SurfaceUsageAggregateQuery,
+	SurfaceUsageAggregateSnapshot,
+} from "./surfaces";
 
 import {
 	WorkspaceChangeListQuery,
@@ -14,6 +20,9 @@ import {
 	WorkspaceChangeReviewRequest,
 	WorkspaceChangeRollbackRequest,
 	WorkspaceChangeUpdatedEvent,
+	WorkspaceConflictListQuery,
+	WorkspaceConflictListQueryResult,
+	WorkspaceConflictUpdatedEvent,
 	WorkspaceFileReadQuery,
 	WorkspaceFileReadQueryResult,
 	WorkspaceFileReplaceRequest,
@@ -613,7 +622,15 @@ export const ThreadMessageQueuedEvent = Schema.Struct({
 	type: Schema.Literal("thread.message_queued"),
 	message_id: Identifier,
 	mentioned_projects: Schema.optional(Schema.Array(ProjectRef)),
-	reason: Schema.Literals(["no_active_run", "steering_rejected", "unsupported"]),
+	reason: Schema.Literals([
+		"no_active_run",
+		"steering_rejected",
+		"disabled",
+		"unsupported",
+		"ambiguous_target",
+		"delivery_failed",
+		"rejected",
+	]),
 	text: Schema.NonEmptyString,
 	working_directory: Schema.NonEmptyString,
 });
@@ -626,6 +643,50 @@ export const ThreadMessageSteeringEvent = Schema.Struct({
 	text: Schema.NonEmptyString,
 	working_directory: Schema.NonEmptyString,
 });
+
+/** Records the final durable routing decision for normal-composer text. */
+export const ThreadMessageRoutedEvent = Schema.Struct({
+	type: Schema.Literal("thread.message_routed"),
+	message_id: Identifier,
+	outcome: Schema.Literals(["steered", "queued"]),
+	reason: Schema.optional(
+		Schema.Literals([
+			"no_active_run",
+			"disabled",
+			"unsupported",
+			"ambiguous_target",
+			"delivery_failed",
+			"rejected",
+		]),
+	),
+	run_id: Schema.optional(Identifier),
+});
+export type ThreadMessageRoutedEvent = typeof ThreadMessageRoutedEvent.Type;
+
+export const ThreadSessionSnapshot = Schema.Struct({
+	thread_id: Identifier,
+	journal_sequence: JournalSequence,
+	auto_steer_enabled: Schema.Boolean,
+	latest_intake: Schema.optional(
+		Schema.Struct({
+			message_id: Identifier,
+			risk: Schema.Literals(["low", "material", "high", "underspecified"]),
+			resolution: Schema.Literals(["proceed", "question"]),
+		}),
+	),
+	assumptions: Schema.Array(
+		Schema.Struct({ message_id: Identifier, assumption: Schema.NonEmptyString }),
+	),
+	pending_question: Schema.optional(
+		Schema.Struct({
+			question_id: Identifier,
+			state: Schema.Literals(["pending", "resolved"]),
+			text: Schema.NonEmptyString,
+		}),
+	),
+	last_routing: Schema.optional(ThreadMessageRoutedEvent),
+});
+export type ThreadSessionSnapshot = typeof ThreadSessionSnapshot.Type;
 
 /** Records an authoritative lifecycle state for one durable run. */
 export const RunLifecycleEvent = Schema.Struct({
@@ -1000,8 +1061,10 @@ export const EventPayload = Schema.Union([
 	ModelBehaviourSettingUpdatedEvent,
 	ModelBehaviourProviderReconciledEvent,
 	WorkspaceChangeUpdatedEvent,
+	WorkspaceConflictUpdatedEvent,
 	ThreadMessageQueuedEvent,
 	ThreadMessageSteeringEvent,
+	ThreadMessageRoutedEvent,
 	RunLifecycleEvent,
 	AssistantMessageCompletedEvent,
 	ApprovalInteractionEvent,
@@ -1248,6 +1311,21 @@ export const WorkspaceChangeListQueryResultEnvelope = Schema.Struct({
 
 export type WorkspaceChangeListQueryResultEnvelope =
 	typeof WorkspaceChangeListQueryResultEnvelope.Type;
+
+export const WorkspaceConflictListQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("workspace.conflict.list.query"),
+	payload: WorkspaceConflictListQuery,
+});
+export type WorkspaceConflictListQueryEnvelope = typeof WorkspaceConflictListQueryEnvelope.Type;
+export const WorkspaceConflictListQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("workspace.conflict.list.query.result"),
+	payload: WorkspaceConflictListQueryResult,
+});
+export type WorkspaceConflictListQueryResultEnvelope =
+	typeof WorkspaceConflictListQueryResultEnvelope.Type;
 
 /** Requests the unified diff for one recorded workspace change. */
 export const WorkspaceChangeDiffQueryEnvelope = Schema.Struct({
@@ -1668,6 +1746,49 @@ export const OrchestrationGroupListQueryResultEnvelope = Schema.Struct({
 export type OrchestrationGroupListQueryResultEnvelope =
 	typeof OrchestrationGroupListQueryResultEnvelope.Type;
 
+export const ThreadSessionQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("thread.session.query"),
+	payload: Schema.Struct({ thread_id: Identifier }),
+});
+export type ThreadSessionQueryEnvelope = typeof ThreadSessionQueryEnvelope.Type;
+export const ThreadSessionQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("thread.session.query.result"),
+	payload: ThreadSessionSnapshot,
+});
+export type ThreadSessionQueryResultEnvelope = typeof ThreadSessionQueryResultEnvelope.Type;
+
+export const SurfaceListQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("surface.list.query"),
+	payload: SurfaceListQuery,
+});
+export type SurfaceListQueryEnvelope = typeof SurfaceListQueryEnvelope.Type;
+export const SurfaceListQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("surface.list.query.result"),
+	payload: SurfaceSnapshot,
+});
+export type SurfaceListQueryResultEnvelope = typeof SurfaceListQueryResultEnvelope.Type;
+
+export const SurfaceUsageAggregateQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("surface.usage.aggregate.query"),
+	payload: SurfaceUsageAggregateQuery,
+});
+export type SurfaceUsageAggregateQueryEnvelope = typeof SurfaceUsageAggregateQueryEnvelope.Type;
+export const SurfaceUsageAggregateQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("surface.usage.aggregate.query.result"),
+	payload: SurfaceUsageAggregateSnapshot,
+});
+export type SurfaceUsageAggregateQueryResultEnvelope =
+	typeof SurfaceUsageAggregateQueryResultEnvelope.Type;
+
 /** Requests ordered updates for the thread-list projection. */
 export const SubscribeEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
@@ -1680,6 +1801,13 @@ export const SubscribeEnvelope = Schema.Struct({
 			type: Schema.Literal("orchestration.group.list"),
 			thread_id: Identifier,
 			include_terminal: Schema.Boolean,
+		}),
+		Schema.Struct({ type: Schema.Literal("thread.session"), thread_id: Identifier }),
+		Schema.Struct({ type: Schema.Literal("surface.list"), query: SurfaceListQuery }),
+		Schema.Struct({ type: Schema.Literal("workspace.conflict.list"), thread_id: Identifier }),
+		Schema.Struct({
+			type: Schema.Literal("surface.usage.aggregate"),
+			query: SurfaceUsageAggregateQuery,
 		}),
 	]),
 	subscription_id: Identifier,
@@ -1832,6 +1960,49 @@ export const OrchestrationGroupListPatchEnvelope = Schema.Struct({
 	subscription_id: Identifier,
 });
 export type OrchestrationGroupListPatchEnvelope = typeof OrchestrationGroupListPatchEnvelope.Type;
+
+export const ThreadSessionSnapshotEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	journal_sequence: JournalSequence,
+	kind: Schema.Literal("thread.session.snapshot"),
+	payload: ThreadSessionSnapshot,
+	sequence: StreamSequence,
+	stream_id: Identifier,
+	subscription_id: Identifier,
+});
+export type ThreadSessionSnapshotEnvelope = typeof ThreadSessionSnapshotEnvelope.Type;
+export const SurfaceListSnapshotEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	journal_sequence: JournalSequence,
+	kind: Schema.Literal("surface.list.snapshot"),
+	payload: SurfaceSnapshot,
+	sequence: StreamSequence,
+	stream_id: Identifier,
+	subscription_id: Identifier,
+});
+export type SurfaceListSnapshotEnvelope = typeof SurfaceListSnapshotEnvelope.Type;
+export const SurfaceUsageAggregateSnapshotEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	journal_sequence: JournalSequence,
+	kind: Schema.Literal("surface.usage.aggregate.snapshot"),
+	payload: SurfaceUsageAggregateSnapshot,
+	sequence: StreamSequence,
+	stream_id: Identifier,
+	subscription_id: Identifier,
+});
+export type SurfaceUsageAggregateSnapshotEnvelope =
+	typeof SurfaceUsageAggregateSnapshotEnvelope.Type;
+export const WorkspaceConflictListSnapshotEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	journal_sequence: JournalSequence,
+	kind: Schema.Literal("workspace.conflict.list.snapshot"),
+	payload: WorkspaceConflictListQueryResult,
+	sequence: StreamSequence,
+	stream_id: Identifier,
+	subscription_id: Identifier,
+});
+export type WorkspaceConflictListSnapshotEnvelope =
+	typeof WorkspaceConflictListSnapshotEnvelope.Type;
 
 /** Acknowledges the highest contiguous journal position and durable event cursors. */
 export const AckEnvelope = Schema.Struct({
@@ -2033,6 +2204,7 @@ export const InboundControlEnvelope = Schema.Union([
 	WorkspaceChangeReviewEnvelope,
 	WorkspaceChangeRollbackEnvelope,
 	WorkspaceChangeListQueryEnvelope,
+	WorkspaceConflictListQueryEnvelope,
 	WorkspaceChangeDiffQueryEnvelope,
 	GitWorkspaceQueryEnvelope,
 	GitDiffQueryEnvelope,
@@ -2072,6 +2244,9 @@ export const InboundControlEnvelope = Schema.Union([
 	PreviewInspectionSessionOpenEnvelope,
 	PreviewInspectionEnvelope,
 	PreviewInspectionSessionCloseEnvelope,
+	ThreadSessionQueryEnvelope,
+	SurfaceListQueryEnvelope,
+	SurfaceUsageAggregateQueryEnvelope,
 	SubscribeEnvelope,
 	UnsubscribeEnvelope,
 	AckEnvelope,
@@ -2092,6 +2267,7 @@ export const OutboundControlEnvelope = Schema.Union([
 	ThreadRetentionQueryResultEnvelope,
 	WorkspaceFileReadQueryResultEnvelope,
 	WorkspaceChangeListQueryResultEnvelope,
+	WorkspaceConflictListQueryResultEnvelope,
 	WorkspaceChangeDiffQueryResultEnvelope,
 	GitWorkspaceQueryResultEnvelope,
 	GitDiffQueryResultEnvelope,
@@ -2116,6 +2292,9 @@ export const OutboundControlEnvelope = Schema.Union([
 	PreviewInspectionSessionOpenResultEnvelope,
 	PreviewInspectionResultEnvelope,
 	PreviewInspectionSessionCloseResultEnvelope,
+	ThreadSessionQueryResultEnvelope,
+	SurfaceListQueryResultEnvelope,
+	SurfaceUsageAggregateQueryResultEnvelope,
 	SubscriptionStartedEnvelope,
 	SubscriptionStoppedEnvelope,
 	ThreadListSnapshotEnvelope,
@@ -2127,6 +2306,10 @@ export const OutboundControlEnvelope = Schema.Union([
 	ThreadTranscriptAppendEnvelope,
 	OrchestrationGroupListSnapshotEnvelope,
 	OrchestrationGroupListPatchEnvelope,
+	ThreadSessionSnapshotEnvelope,
+	SurfaceListSnapshotEnvelope,
+	SurfaceUsageAggregateSnapshotEnvelope,
+	WorkspaceConflictListSnapshotEnvelope,
 	ReplayCompleteEnvelope,
 	HeartbeatPingEnvelope,
 ]);

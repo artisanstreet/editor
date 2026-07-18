@@ -79,6 +79,8 @@ describe("frontend ArtisanClient fixture runtime", () => {
 						"GetPreviewAssetMetadata",
 						"GetPreviewTarget",
 						"GetOrchestrationGraph",
+						"GetSurfaceUsageAggregate",
+						"GetThreadSession",
 						"GetThreadTranscript",
 						"GetThreadRetentionPolicy",
 						"GetThreadWork",
@@ -90,9 +92,11 @@ describe("frontend ArtisanClient fixture runtime", () => {
 						"ListArtisanTools",
 						"ListTerminals",
 						"ListOrchestrationGroups",
+						"ListSurfaceItems",
 						"ListThreads",
 						"ListPreviewTargets",
 						"ListWorkspaceChanges",
+						"ListWorkspaceConflicts",
 						"ListWorkspaceFiles",
 						"OpenAsset",
 						"LaunchPreviewInExternalBrowser",
@@ -119,8 +123,12 @@ describe("frontend ArtisanClient fixture runtime", () => {
 						"SetPreviewTargetState",
 						"SubscribeOrchestrationGraph",
 						"SubscribeOrchestrationGroups",
+						"SubscribeSurfaceItems",
+						"SubscribeSurfaceUsageAggregate",
 						"SubscribeThreadList",
+						"SubscribeThreadSession",
 						"SubscribeThreadTranscript",
+						"SubscribeWorkspaceConflicts",
 						"UpdateGlobalGuidance",
 						"UpdateModelBehaviour",
 						"UpdateThreadRetentionPolicy",
@@ -216,6 +224,42 @@ describe("frontend ArtisanClient fixture runtime", () => {
 	});
 
 	layer(FixtureArtisanClientLayer)((it) => {
+		it.effect("exposes deterministic session and canonical surface projections", () =>
+			Effect.gen(function* () {
+				const client = yield* ArtisanClient;
+				const session = yield* client.GetThreadSession("thread-editor-shell");
+				const surfaces = yield* client.ListSurfaceItems({
+					thread_id: "thread-editor-shell",
+				});
+				const usage = yield* client.GetSurfaceUsageAggregate({
+					scope: "run",
+					scope_id: "run-editor-shell",
+				});
+				const session_updates = yield* client.SubscribeThreadSession("thread-editor-shell");
+				const surface_updates = yield* client.SubscribeSurfaceItems({
+					thread_id: "thread-editor-shell",
+				});
+				const usage_updates = yield* client.SubscribeSurfaceUsageAggregate({
+					scope: "run",
+					scope_id: "run-editor-shell",
+				});
+
+				expect(session).toMatchObject({
+					auto_steer_enabled: true,
+					latest_intake: { resolution: "proceed", risk: "low" },
+					thread_id: "thread-editor-shell",
+				});
+				expect(surfaces).toMatchObject({ items: [], journal_sequence: 48 });
+				expect(usage).toMatchObject({
+					aggregate: { scope: "run", scope_id: "run-editor-shell" },
+					journal_sequence: 48,
+				});
+				expect([...(yield* Stream.runCollect(session_updates))]).toHaveLength(1);
+				expect([...(yield* Stream.runCollect(surface_updates))]).toHaveLength(1);
+				expect([...(yield* Stream.runCollect(usage_updates))]).toHaveLength(1);
+			}),
+		);
+
 		it.effect("honors transcript pagination and orchestration terminal filters", () =>
 			Effect.gen(function* () {
 				const client = yield* ArtisanClient;
@@ -281,10 +325,29 @@ describe("frontend ArtisanClient fixture runtime", () => {
 				expect(
 					yield* client.ReviewWorkspaceChange({
 						change_id: listed.changes[0]!.change_id,
+						comment: "The fixture change is ready.",
 						command_id: "command-review-fixture",
+						outcome: "approved",
+						raw_origin: { provider: "codex", reference: "fixture-user-review" },
+						reviewer_kind: "user",
 						thread_id: "thread-editor-shell",
 					}),
 				).toMatchObject({ command_id: "command-review-fixture", status: "accepted" });
+				expect(
+					yield* client.ReviewWorkspaceChange({
+						assignment_id: "assignment-review-fixture",
+						change_id: listed.changes[0]!.change_id,
+						command_id: "command-graph-review-fixture",
+						group_id: "group-editor-shell",
+						reviewer_agent_id: "agent-reviewer-fixture",
+						reviewer_kind: "graph",
+						reviewer_run_id: "run-reviewer-fixture",
+						thread_id: "thread-editor-shell",
+					}),
+				).toMatchObject({
+					command_id: "command-graph-review-fixture",
+					status: "accepted",
+				});
 				expect(
 					yield* client.RollbackWorkspaceChange({
 						change_id: listed.changes[0]!.change_id,

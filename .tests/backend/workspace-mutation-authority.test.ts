@@ -783,13 +783,19 @@ describe("WorkspaceMutationAuthority", () => {
 								}),
 							});
 						} else if (corruption === "malformed_operation_raw_origin") {
-							yield* database.client
-								.update(WorkspaceChangeOperations)
-								.set({ raw_origin_json: "{malformed" });
+							yield* database.client.update(WorkspaceChangeOperations).set({
+								raw_origin_json: JSON.stringify({
+									provider: "",
+									reference: "origin",
+								}),
+							});
 						} else if (corruption === "malformed_projection_raw_origin") {
-							yield* database.client
-								.update(WorkspaceChanges)
-								.set({ raw_origin_json: "{malformed" });
+							yield* database.client.update(WorkspaceChanges).set({
+								raw_origin_json: JSON.stringify({
+									provider: "",
+									reference: "origin",
+								}),
+							});
 						} else if (corruption === "mismatched_raw_origin") {
 							yield* database.client.update(WorkspaceChangeOperations).set({
 								raw_origin_json: JSON.stringify({

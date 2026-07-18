@@ -111,6 +111,68 @@ export const WorkspaceChangeRollbackState = Schema.Literals(["available", "consu
 
 export type WorkspaceChangeRollbackState = typeof WorkspaceChangeRollbackState.Type;
 
+/** Bounds human review metadata without admitting source bytes into projections. */
+export const WorkspaceReviewText = Schema.String.check(
+	Schema.makeFilter<string>((value) =>
+		value.length <= 4096 && !/[\p{Cc}]/u.test(value)
+			? undefined
+			: "Expected at most 4096 visible characters",
+	),
+);
+
+export const WorkspaceReviewOutcome = Schema.Literals(["approved", "changes_requested"]);
+export const WorkspaceReviewerKind = Schema.Literals(["user", "graph"]);
+
+/** Identifies the reviewer without changing the original change attribution. */
+export const WorkspaceChangeReview = Schema.Struct({
+	reviewer_kind: WorkspaceReviewerKind,
+	assignment_id: Schema.optional(Identifier),
+	comment: Schema.optional(WorkspaceReviewText),
+	group_id: Schema.optional(Identifier),
+	outcome: Schema.optional(WorkspaceReviewOutcome),
+	raw_origin: Schema.optional(RawOrigin),
+	reviewer_agent_id: Schema.optional(Identifier),
+	reviewer_run_id: Schema.optional(Identifier),
+	reviewed_at: IsoDateTime,
+	source_command_id: Identifier,
+});
+export type WorkspaceChangeReview = typeof WorkspaceChangeReview.Type;
+
+export const WorkspaceConflictResolution = Schema.Literals([
+	"rejected",
+	"reconciled",
+	"user_action_required",
+]);
+
+/** Projects one source-free contention attempt without exposing workspace bytes. */
+export const WorkspaceConflict = Schema.Struct({
+	assignment_id: Schema.optional(Identifier),
+	attempting_agent_id: Identifier,
+	attempting_run_id: Identifier,
+	attempting_thread_id: Identifier,
+	change_id: Identifier,
+	competing_change_id: Schema.optional(Identifier),
+	conflict_id: Identifier,
+	detected_at: IsoDateTime,
+	expected_identity: ContentIdentity,
+	group_id: Schema.optional(Identifier),
+	observed_identity: Schema.optional(ContentIdentity),
+	path: WorkspacePath,
+	raw_origin: Schema.optional(RawOrigin),
+	resolution: WorkspaceConflictResolution,
+	source_command_id: Identifier,
+	workspace_id: Identifier,
+});
+export type WorkspaceConflict = typeof WorkspaceConflict.Type;
+
+/** Announces a source-free conflict projection after durable creation or reconciliation. */
+export const WorkspaceConflictUpdatedEvent = Schema.Struct({
+	type: Schema.Literal("workspace.conflict.updated"),
+	action: Schema.Literals(["recorded", "updated"]),
+	conflict: WorkspaceConflict,
+});
+export type WorkspaceConflictUpdatedEvent = typeof WorkspaceConflictUpdatedEvent.Type;
+
 /** Projects an attributed, reviewable replacement of one existing UTF-8 workspace file. */
 export const WorkspaceChange = Schema.Struct({
 	after_identity: ContentIdentity,
@@ -121,6 +183,7 @@ export const WorkspaceChange = Schema.Struct({
 	path: WorkspacePath,
 	raw_origin: Schema.optional(RawOrigin),
 	review_state: WorkspaceChangeReviewState,
+	review: Schema.optional(WorkspaceChangeReview),
 	reviewed_at: Schema.optional(IsoDateTime),
 	rollback_state: WorkspaceChangeRollbackState,
 	rolled_back_at: Schema.optional(IsoDateTime),
@@ -175,6 +238,14 @@ export type WorkspaceFileReplaceRequest = typeof WorkspaceFileReplaceRequest.Typ
 /** Requests that one workspace change be marked as reviewed. */
 export const WorkspaceChangeReviewRequest = Schema.Struct({
 	change_id: Identifier,
+	reviewer_kind: Schema.optional(WorkspaceReviewerKind),
+	assignment_id: Schema.optional(Identifier),
+	comment: Schema.optional(WorkspaceReviewText),
+	group_id: Schema.optional(Identifier),
+	outcome: Schema.optional(WorkspaceReviewOutcome),
+	raw_origin: Schema.optional(RawOrigin),
+	reviewer_agent_id: Schema.optional(Identifier),
+	reviewer_run_id: Schema.optional(Identifier),
 });
 
 export type WorkspaceChangeReviewRequest = typeof WorkspaceChangeReviewRequest.Type;
@@ -202,6 +273,19 @@ export const WorkspaceChangeListQueryResult = Schema.Struct({
 });
 
 export type WorkspaceChangeListQueryResult = typeof WorkspaceChangeListQueryResult.Type;
+
+/** Requests source-free workspace conflicts attributed to one thread. */
+export const WorkspaceConflictListQuery = Schema.Struct({
+	thread_id: Identifier,
+});
+export type WorkspaceConflictListQuery = typeof WorkspaceConflictListQuery.Type;
+
+/** Returns the complete ordered conflict projection for the requested thread. */
+export const WorkspaceConflictListQueryResult = Schema.Struct({
+	conflicts: Schema.Array(WorkspaceConflict),
+	journal_sequence: JournalSequence,
+});
+export type WorkspaceConflictListQueryResult = typeof WorkspaceConflictListQueryResult.Type;
 
 /** Requests the unified diff for one recorded workspace change. */
 export const WorkspaceChangeDiffQuery = Schema.Struct({

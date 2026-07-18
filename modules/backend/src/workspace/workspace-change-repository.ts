@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, or } from "drizzle-orm";
+import { and, asc, desc, eq, gte, ne, or } from "drizzle-orm";
 import { Context, Crypto, Data, Effect, Encoding, Layer, Option, Schema } from "effect";
 
 import {
@@ -7,7 +7,12 @@ import {
 	IsoDateTime,
 	RawOrigin,
 	WorkspaceChange,
+	WorkspaceConflict,
+	WorkspaceConflictUpdatedEvent,
 	WorkspaceChangeUpdatedEvent,
+	WorkspaceReviewOutcome,
+	WorkspaceReviewerKind,
+	WorkspaceReviewText,
 	WorkspacePath,
 	workspace_diff_context_lines,
 	workspace_diff_format_version,
@@ -18,6 +23,8 @@ import {
 	type RawOrigin as RawOriginValue,
 	type WorkspaceChange as WorkspaceChangeValue,
 	type WorkspaceChangeUpdatedEvent as WorkspaceChangeUpdatedEventValue,
+	type WorkspaceConflict as WorkspaceConflictValue,
+	type WorkspaceConflictUpdatedEvent as WorkspaceConflictUpdatedEventValue,
 } from "@artisan/protocol";
 
 import { Database } from "../persistence/database";
@@ -25,6 +32,9 @@ import { JournalNotifier } from "../persistence/journal-notifier";
 import { RetrySqliteWrite } from "../persistence/sqlite-write-retry";
 import {
 	EventStreams,
+	AgentRuns,
+	Assignments,
+	OrchestrationGroups,
 	JournalCommands,
 	JournalEvents,
 	ThreadErasureClaims,
@@ -33,7 +43,9 @@ import {
 	WorkspaceChangeOperations,
 	WorkspaceChangeDiffs,
 	WorkspaceChanges,
+	WorkspaceConflicts,
 	WorkspaceMutationPayloads,
+	WorkspaceMutationAuthorities,
 } from "../persistence/schema";
 import {
 	CommandIdConflict,
@@ -78,6 +90,14 @@ const WorkspaceChangeOperation = Schema.Union([
 	Schema.Struct({
 		...WorkspaceChangeOperationBase,
 		action: Schema.Literal("review"),
+		reviewer_kind: WorkspaceReviewerKind,
+		assignment_id: Schema.optional(Identifier),
+		comment: Schema.optional(WorkspaceReviewText),
+		group_id: Schema.optional(Identifier),
+		outcome: Schema.optional(WorkspaceReviewOutcome),
+		raw_origin: Schema.optional(RawOrigin),
+		reviewer_agent_id: Schema.optional(Identifier),
+		reviewer_run_id: Schema.optional(Identifier),
 	}),
 	Schema.Struct({
 		...WorkspaceChangeOperationBase,
@@ -128,6 +148,14 @@ export interface ClaimReview {
 	readonly request_fingerprint: string;
 	readonly sent_at: string;
 	readonly thread_id: string;
+	readonly reviewer_kind?: "user" | "graph";
+	readonly assignment_id?: string;
+	readonly comment?: string;
+	readonly group_id?: string;
+	readonly outcome?: "approved" | "changes_requested";
+	readonly raw_origin?: RawOriginValue;
+	readonly reviewer_agent_id?: string;
+	readonly reviewer_run_id?: string;
 }
 
 /** Identifies a guarded rollback operation before filesystem mutation. */
@@ -188,6 +216,7 @@ export type WorkspaceChangeReconciliation =
 export interface ReconcileWorkspaceChange {
 	readonly message_id: string;
 	readonly observation: "native_changed" | "preflight_changed";
+	readonly observed_identity?: ContentIdentityValue;
 }
 
 /** Reports an immutable collision between distinct replacement operations. */
@@ -261,6 +290,16 @@ export class WorkspaceChangeRepository extends Context.Service<
 		) => Effect.Effect<
 			{
 				readonly changes: ReadonlyArray<WorkspaceChangeValue>;
+				readonly journal_sequence: number;
+			},
+			WorkspaceChangeRepositoryError
+		>;
+		readonly ListConflicts: (
+			thread_id: string,
+		) => Effect.Effect<ReadonlyArray<WorkspaceConflictValue>, WorkspaceChangeRepositoryError>;
+		readonly ListConflictSnapshot: (thread_id: string) => Effect.Effect<
+			{
+				readonly conflicts: ReadonlyArray<WorkspaceConflictValue>;
 				readonly journal_sequence: number;
 			},
 			WorkspaceChangeRepositoryError
@@ -490,7 +529,20 @@ function operation_from_claim(
 		return { ...base, action: "rollback", expected_identity: input.expected_after };
 	}
 
-	return { ...base, action: "review" };
+	return {
+		...base,
+		action: "review",
+		reviewer_kind: input.reviewer_kind ?? "user",
+		...(input.assignment_id === undefined ? {} : { assignment_id: input.assignment_id }),
+		...(input.comment === undefined ? {} : { comment: input.comment }),
+		...(input.group_id === undefined ? {} : { group_id: input.group_id }),
+		...(input.outcome === undefined ? {} : { outcome: input.outcome }),
+		...(input.raw_origin === undefined ? {} : { raw_origin: input.raw_origin }),
+		...(input.reviewer_agent_id === undefined
+			? {}
+			: { reviewer_agent_id: input.reviewer_agent_id }),
+		...(input.reviewer_run_id === undefined ? {} : { reviewer_run_id: input.reviewer_run_id }),
+	};
 }
 
 function immutable_operations_match(
@@ -509,7 +561,16 @@ function immutable_operations_match(
 	}
 
 	if (stored.action === "review" && claimed.action === "review") {
-		return true;
+		return (
+			stored.reviewer_kind === claimed.reviewer_kind &&
+			stored.assignment_id === claimed.assignment_id &&
+			stored.comment === claimed.comment &&
+			stored.group_id === claimed.group_id &&
+			stored.outcome === claimed.outcome &&
+			raw_origins_match(stored.raw_origin, claimed.raw_origin) &&
+			stored.reviewer_agent_id === claimed.reviewer_agent_id &&
+			stored.reviewer_run_id === claimed.reviewer_run_id
+		);
 	}
 
 	if (stored.action === "rollback" && claimed.action === "rollback") {
@@ -566,6 +627,14 @@ function DecodeOperation(row: typeof WorkspaceChangeOperations.$inferSelect) {
 					message_id: row.message_id,
 					path: row.path,
 					raw_origin: identities.raw_origin,
+					reviewer_kind:
+						row.action === "review" ? (row.reviewer_kind ?? "user") : undefined,
+					assignment_id: row.reviewer_assignment_id,
+					comment: row.review_comment,
+					group_id: row.reviewer_group_id,
+					outcome: row.review_outcome,
+					reviewer_agent_id: row.reviewer_agent_id,
+					reviewer_run_id: row.reviewer_run_id,
 					request_fingerprint: row.request_fingerprint,
 					result_identity: identities.result_identity,
 					run_id: row.run_id,
@@ -591,6 +660,12 @@ function DecodeOperation(row: typeof WorkspaceChangeOperations.$inferSelect) {
 
 function DecodeChange(row: typeof WorkspaceChanges.$inferSelect) {
 	return Effect.all({
+		reviewer_raw_origin:
+			row.reviewer_raw_origin_json === null
+				? Effect.succeed(undefined)
+				: DecodeJson(row.reviewer_raw_origin_json).pipe(
+						Effect.flatMap(Schema.decodeUnknownEffect(RawOrigin)),
+					),
 		after_identity: DecodeJson(row.after_identity_json).pipe(
 			Effect.flatMap(Schema.decodeUnknownEffect(ContentIdentity)),
 		),
@@ -616,6 +691,21 @@ function DecodeChange(row: typeof WorkspaceChanges.$inferSelect) {
 					raw_origin: json.raw_origin,
 					review_state: row.review_state,
 					reviewed_at: row.reviewed_at,
+					review:
+						row.review_source_command_id === null
+							? undefined
+							: optional_fields({
+									assignment_id: row.reviewer_assignment_id,
+									comment: row.review_comment,
+									group_id: row.reviewer_group_id,
+									outcome: row.review_outcome,
+									reviewer_kind: row.reviewer_kind ?? "user",
+									raw_origin: json.reviewer_raw_origin,
+									reviewer_agent_id: row.reviewer_agent_id,
+									reviewer_run_id: row.reviewer_run_id,
+									reviewed_at: row.reviewed_at,
+									source_command_id: row.review_source_command_id,
+								}),
 					rollback_state: row.rollback_state,
 					rolled_back_at: row.rolled_back_at,
 					run_id: row.run_id,
@@ -636,6 +726,31 @@ function DecodeChange(row: typeof WorkspaceChanges.$inferSelect) {
 			() =>
 				new JournalInvariantError({
 					message: `Stored workspace change ${row.change_id} is invalid`,
+				}),
+		),
+	);
+}
+
+function DecodeConflict(row: typeof WorkspaceConflicts.$inferSelect) {
+	return Effect.all({
+		expected_identity: DecodeJson(row.expected_identity_json).pipe(
+			Effect.flatMap(Schema.decodeUnknownEffect(ContentIdentity)),
+		),
+		observed_identity:
+			row.observed_identity_json === null
+				? Effect.succeed(undefined)
+				: DecodeJson(row.observed_identity_json).pipe(
+						Effect.flatMap(Schema.decodeUnknownEffect(ContentIdentity)),
+					),
+		raw_origin: DecodeStoredRawOrigin(row.raw_origin_json, "Stored conflict origin is invalid"),
+	}).pipe(
+		Effect.flatMap((decoded) =>
+			Schema.decodeUnknownEffect(WorkspaceConflict)(optional_fields({ ...row, ...decoded })),
+		),
+		Effect.mapError(
+			() =>
+				new JournalInvariantError({
+					message: `Stored workspace conflict ${row.conflict_id} is invalid`,
 				}),
 		),
 	);
@@ -946,7 +1061,12 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 				const [event] = yield* transaction
 					.select({ event_id: JournalEvents.event_id })
 					.from(JournalEvents)
-					.where(eq(JournalEvents.correlation_id, operation.message_id))
+					.where(
+						and(
+							eq(JournalEvents.correlation_id, operation.message_id),
+							ne(JournalEvents.event_type, "workspace.conflict.updated"),
+						),
+					)
 					.limit(1);
 
 				if (command || event) {
@@ -1169,7 +1289,12 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 				const rows = yield* transaction
 					.select()
 					.from(JournalEvents)
-					.where(eq(JournalEvents.correlation_id, operation.message_id))
+					.where(
+						and(
+							eq(JournalEvents.correlation_id, operation.message_id),
+							eq(JournalEvents.event_type, "workspace.change.updated"),
+						),
+					)
 					.orderBy(asc(JournalEvents.sequence));
 
 				if (rows.length !== 1) {
@@ -1252,6 +1377,83 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 						);
 
 						yield* EnsureLiveThread(transaction, decoded_claim.thread_id);
+						const [committed_retry] = yield* transaction
+							.select()
+							.from(WorkspaceChangeOperations)
+							.where(eq(WorkspaceChangeOperations.message_id, input.message_id))
+							.limit(1);
+						if (committed_retry?.lifecycle === "committed") {
+							const operation = yield* DecodeOperation(committed_retry);
+							if (!immutable_operations_match(operation, decoded_claim)) {
+								return yield* new CommandIdConflict({
+									message_id: input.message_id,
+								});
+							}
+							return {
+								_tag: "duplicate" as const,
+								event: yield* ReadDuplicate(transaction, operation),
+								operation,
+							};
+						}
+						if (decoded_claim.action === "review") {
+							const graph_fields = [
+								decoded_claim.assignment_id,
+								decoded_claim.group_id,
+								decoded_claim.reviewer_agent_id,
+								decoded_claim.reviewer_run_id,
+							];
+							if (decoded_claim.reviewer_kind === "user") {
+								if (graph_fields.some((value) => value !== undefined))
+									return yield* new WorkspaceChangeTransitionError({
+										message: "User review cannot claim graph attribution",
+									});
+							} else {
+								if (graph_fields.some((value) => value === undefined))
+									return yield* new WorkspaceChangeTransitionError({
+										message: "Graph review attribution is incomplete",
+									});
+								const [run] = yield* transaction
+									.select()
+									.from(AgentRuns)
+									.where(eq(AgentRuns.run_id, decoded_claim.reviewer_run_id!))
+									.limit(1);
+								const [assignment] = yield* transaction
+									.select()
+									.from(Assignments)
+									.where(
+										eq(Assignments.assignment_id, decoded_claim.assignment_id!),
+									)
+									.limit(1);
+								const [group] = yield* transaction
+									.select()
+									.from(OrchestrationGroups)
+									.where(
+										eq(OrchestrationGroups.group_id, decoded_claim.group_id!),
+									)
+									.limit(1);
+								if (
+									!run ||
+									!assignment ||
+									!group ||
+									run.agent_id !== decoded_claim.reviewer_agent_id ||
+									run.assignment_id !== decoded_claim.assignment_id ||
+									run.group_id !== decoded_claim.group_id ||
+									assignment.group_id !== decoded_claim.group_id ||
+									assignment.agent_id !== decoded_claim.reviewer_agent_id ||
+									assignment.role !== "reviewer" ||
+									assignment.state !== "active" ||
+									assignment.active_run_id !== decoded_claim.reviewer_run_id ||
+									assignment.current_attempt !== run.attempt ||
+									run.state !== "running" ||
+									run.dispatch_status !== "active" ||
+									group.state !== "active" ||
+									group.thread_id !== decoded_claim.thread_id
+								)
+									return yield* new WorkspaceChangeTransitionError({
+										message: "Graph reviewer authority is invalid",
+									});
+							}
+						}
 
 						const [existing] = yield* transaction
 							.select()
@@ -1290,7 +1492,12 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 							const [event] = yield* transaction
 								.select({ event_id: JournalEvents.event_id })
 								.from(JournalEvents)
-								.where(eq(JournalEvents.correlation_id, operation.message_id))
+								.where(
+									and(
+										eq(JournalEvents.correlation_id, operation.message_id),
+										ne(JournalEvents.event_type, "workspace.conflict.updated"),
+									),
+								)
 								.limit(1);
 
 							if (command || event) {
@@ -1363,9 +1570,37 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 							message_id: decoded_claim.message_id,
 							path: decoded_claim.action === "replace" ? decoded_claim.path : null,
 							raw_origin_json:
-								decoded_claim.action === "replace" &&
+								decoded_claim.action !== "rollback" &&
 								decoded_claim.raw_origin !== undefined
 									? JSON.stringify(decoded_claim.raw_origin)
+									: null,
+							reviewer_agent_id:
+								decoded_claim.action === "review"
+									? (decoded_claim.reviewer_agent_id ?? null)
+									: null,
+							reviewer_kind:
+								decoded_claim.action === "review"
+									? decoded_claim.reviewer_kind
+									: null,
+							reviewer_run_id:
+								decoded_claim.action === "review"
+									? (decoded_claim.reviewer_run_id ?? null)
+									: null,
+							reviewer_assignment_id:
+								decoded_claim.action === "review"
+									? (decoded_claim.assignment_id ?? null)
+									: null,
+							reviewer_group_id:
+								decoded_claim.action === "review"
+									? (decoded_claim.group_id ?? null)
+									: null,
+							review_outcome:
+								decoded_claim.action === "review"
+									? (decoded_claim.outcome ?? null)
+									: null,
+							review_comment:
+								decoded_claim.action === "review"
+									? (decoded_claim.comment ?? null)
 									: null,
 							request_fingerprint: decoded_claim.request_fingerprint,
 							result_identity_json:
@@ -1533,6 +1768,72 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 			database.client
 				.transaction((transaction) =>
 					Effect.gen(function* () {
+						const Complete = (
+							reconciliation: WorkspaceChangeReconciliation,
+							journal_sequence?: number,
+						) => ({ journal_sequence, reconciliation });
+						const AppendConflictEvent = (
+							action: WorkspaceConflictUpdatedEventValue["action"],
+							conflict: WorkspaceConflictValue,
+							occurred_at: string,
+						) =>
+							Effect.gen(function* () {
+								const stream_id = `thread:${operation.thread_id}`;
+								const [stream] = yield* transaction
+									.select({ last_sequence: EventStreams.last_sequence })
+									.from(EventStreams)
+									.where(eq(EventStreams.stream_id, stream_id))
+									.limit(1);
+								const sequence = (stream?.last_sequence ?? 0) + 1;
+								if (stream) {
+									yield* transaction
+										.update(EventStreams)
+										.set({ last_sequence: sequence })
+										.where(eq(EventStreams.stream_id, stream_id));
+								} else {
+									yield* transaction
+										.insert(EventStreams)
+										.values({ last_sequence: sequence, stream_id });
+								}
+								const payload = yield* Schema.decodeUnknownEffect(
+									WorkspaceConflictUpdatedEvent,
+									{ onExcessProperty: "error" },
+								)({ action, conflict, type: "workspace.conflict.updated" });
+								const [event] = yield* transaction
+									.insert(JournalEvents)
+									.values({
+										agent_id:
+											operation.action === "replace"
+												? operation.agent_id
+												: null,
+										causation_id: operation.message_id,
+										correlation_id: operation.message_id,
+										event_id: yield* metadata.MakeId("event"),
+										event_type: payload.type,
+										occurred_at,
+										origin: "backend",
+										payload_json: JSON.stringify(payload),
+										raw_origin_json:
+											operation.action === "replace" &&
+											operation.raw_origin !== undefined
+												? JSON.stringify(operation.raw_origin)
+												: null,
+										run_id:
+											operation.action === "replace"
+												? operation.run_id
+												: null,
+										schema_version: 1,
+										stream_id,
+										stream_sequence: sequence,
+										thread_id: operation.thread_id,
+									})
+									.returning({ journal_sequence: JournalEvents.sequence });
+								if (!event)
+									return yield* new JournalInvariantError({
+										message: "Workspace conflict event was not persisted",
+									});
+								return event.journal_sequence;
+							});
 						const message_id = input.message_id;
 						const [row] = yield* transaction
 							.select()
@@ -1557,28 +1858,290 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 						}
 
 						if (operation.lifecycle === "committed") {
-							return {
-								_tag: "committed" as const,
-								event: yield* ReadDuplicate(transaction, operation),
-								operation,
-							};
+							const [reconciled] = yield* transaction
+								.update(WorkspaceConflicts)
+								.set({ resolution: "reconciled" })
+								.where(
+									and(
+										eq(
+											WorkspaceConflicts.source_command_id,
+											operation.message_id,
+										),
+										ne(WorkspaceConflicts.resolution, "reconciled"),
+									),
+								)
+								.returning();
+							const reconciliation_sequence = reconciled
+								? yield* AppendConflictEvent(
+										"updated",
+										yield* DecodeConflict(reconciled),
+										yield* metadata.Now,
+									)
+								: undefined;
+							return Complete(
+								{
+									_tag: "committed" as const,
+									event: yield* ReadDuplicate(transaction, operation),
+									operation,
+								},
+								reconciliation_sequence,
+							);
 						}
 
 						if (operation.lifecycle === "applied") {
-							return { _tag: "applied" as const, operation };
-						}
-
-						if (operation.lifecycle === "rejected") {
-							yield* ValidateRejectedState(transaction, operation);
-
-							return { _tag: "rejected" as const, operation };
+							const [reconciled] = yield* transaction
+								.update(WorkspaceConflicts)
+								.set({ resolution: "reconciled" })
+								.where(
+									and(
+										eq(
+											WorkspaceConflicts.source_command_id,
+											operation.message_id,
+										),
+										ne(WorkspaceConflicts.resolution, "reconciled"),
+									),
+								)
+								.returning();
+							const reconciliation_sequence = reconciled
+								? yield* AppendConflictEvent(
+										"updated",
+										yield* DecodeConflict(reconciled),
+										yield* metadata.Now,
+									)
+								: undefined;
+							return Complete(
+								{ _tag: "applied" as const, operation },
+								reconciliation_sequence,
+							);
 						}
 
 						if (
 							input.observation === "preflight_changed" &&
 							(yield* HasAvailablePayload(transaction, operation))
 						) {
-							return { _tag: "staged" as const, operation };
+							return Complete({ _tag: "staged" as const, operation });
+						}
+
+						const [source_change] = yield* transaction
+							.select()
+							.from(WorkspaceChanges)
+							.where(eq(WorkspaceChanges.change_id, operation.change_id))
+							.limit(1);
+						const workspace_id =
+							operation.action === "replace"
+								? operation.workspace_id
+								: source_change?.workspace_id;
+						const path =
+							operation.action === "replace" ? operation.path : source_change?.path;
+						if (workspace_id === undefined || path === undefined) {
+							return yield* new JournalInvariantError({
+								message: `Workspace operation ${message_id} has no conflict attribution`,
+							});
+						}
+						const authority_message_id =
+							operation.action === "replace"
+								? operation.message_id
+								: source_change?.source_command_id;
+						const [authority] =
+							authority_message_id === undefined
+								? []
+								: yield* transaction
+										.select()
+										.from(WorkspaceMutationAuthorities)
+										.where(
+											eq(
+												WorkspaceMutationAuthorities.message_id,
+												authority_message_id,
+											),
+										)
+										.limit(1);
+
+						const projection_candidates = yield* transaction
+							.select({
+								after_identity_json: WorkspaceChanges.after_identity_json,
+								change_id: WorkspaceChanges.change_id,
+								updated_at: WorkspaceChanges.updated_at,
+							})
+							.from(WorkspaceChanges)
+							.where(
+								and(
+									eq(WorkspaceChanges.workspace_id, workspace_id),
+									eq(WorkspaceChanges.path, path),
+									ne(WorkspaceChanges.change_id, operation.change_id),
+								),
+							)
+							.orderBy(
+								desc(WorkspaceChanges.updated_at),
+								asc(WorkspaceChanges.change_id),
+							);
+						const competing_projection = Option.getOrUndefined(
+							input.observed_identity === undefined
+								? Option.none()
+								: yield* Effect.findFirst(projection_candidates, (candidate) =>
+										candidate.updated_at >= row.created_at
+											? DecodeJson(candidate.after_identity_json).pipe(
+													Effect.flatMap(
+														Schema.decodeUnknownEffect(ContentIdentity),
+													),
+													Effect.map((identity) =>
+														identities_match(
+															identity,
+															input.observed_identity!,
+														),
+													),
+												)
+											: Effect.succeed(false),
+									),
+						);
+						const [competing_operation] =
+							competing_projection !== undefined ||
+							input.observed_identity === undefined
+								? []
+								: yield* transaction
+										.select({ change_id: WorkspaceChangeOperations.change_id })
+										.from(WorkspaceChangeOperations)
+										.where(
+											and(
+												eq(WorkspaceChangeOperations.action, "replace"),
+												eq(
+													WorkspaceChangeOperations.workspace_id,
+													workspace_id,
+												),
+												eq(WorkspaceChangeOperations.path, path),
+												eq(WorkspaceChangeOperations.lifecycle, "applied"),
+												gte(
+													WorkspaceChangeOperations.updated_at,
+													row.created_at,
+												),
+												eq(
+													WorkspaceChangeOperations.result_identity_json,
+													JSON.stringify(input.observed_identity),
+												),
+												ne(
+													WorkspaceChangeOperations.change_id,
+													operation.change_id,
+												),
+											),
+										)
+										.orderBy(
+											desc(WorkspaceChangeOperations.created_at),
+											asc(WorkspaceChangeOperations.change_id),
+										)
+										.limit(1);
+						const detected_at = yield* metadata.Now;
+						const resolution = "user_action_required" as const;
+						const conflict_row = {
+							assignment_id: authority?.assignment_id ?? null,
+							attempting_agent_id:
+								operation.action === "replace"
+									? operation.agent_id
+									: (source_change?.agent_id ?? "unknown"),
+							attempting_run_id:
+								operation.action === "replace"
+									? operation.run_id
+									: (source_change?.run_id ?? "unknown"),
+							attempting_thread_id: operation.thread_id,
+							change_id: operation.change_id,
+							competing_change_id:
+								competing_projection?.change_id ??
+								competing_operation?.change_id ??
+								null,
+							conflict_id: `conflict:${operation.message_id}`,
+							detected_at,
+							expected_identity_json: JSON.stringify(operation.expected_identity),
+							group_id: authority?.group_id ?? null,
+							observed_identity_json:
+								input.observed_identity === undefined
+									? null
+									: JSON.stringify(input.observed_identity),
+							path,
+							raw_origin_json:
+								operation.action === "replace" && operation.raw_origin !== undefined
+									? JSON.stringify(operation.raw_origin)
+									: null,
+							resolution,
+							source_command_id: operation.message_id,
+							workspace_id,
+						};
+						let conflict_journal_sequence: number | undefined;
+						if (
+							input.observation === "native_changed" ||
+							input.observed_identity !== undefined
+						) {
+							const [existing_conflict] = yield* transaction
+								.select()
+								.from(WorkspaceConflicts)
+								.where(
+									eq(WorkspaceConflicts.source_command_id, operation.message_id),
+								)
+								.limit(1);
+							if (existing_conflict) {
+								yield* DecodeConflict(existing_conflict);
+								if (
+									existing_conflict.assignment_id !==
+										conflict_row.assignment_id ||
+									existing_conflict.attempting_agent_id !==
+										conflict_row.attempting_agent_id ||
+									existing_conflict.attempting_run_id !==
+										conflict_row.attempting_run_id ||
+									existing_conflict.attempting_thread_id !==
+										conflict_row.attempting_thread_id ||
+									existing_conflict.change_id !== conflict_row.change_id ||
+									existing_conflict.conflict_id !== conflict_row.conflict_id ||
+									existing_conflict.expected_identity_json !==
+										conflict_row.expected_identity_json ||
+									existing_conflict.group_id !== conflict_row.group_id ||
+									existing_conflict.path !== conflict_row.path ||
+									existing_conflict.raw_origin_json !==
+										conflict_row.raw_origin_json ||
+									existing_conflict.workspace_id !== conflict_row.workspace_id
+								) {
+									return yield* new JournalInvariantError({
+										message: `Workspace conflict ${existing_conflict.conflict_id} changed immutable attribution`,
+									});
+								}
+							}
+							const materially_changed =
+								!existing_conflict ||
+								existing_conflict.competing_change_id !==
+									conflict_row.competing_change_id ||
+								existing_conflict.observed_identity_json !==
+									conflict_row.observed_identity_json ||
+								existing_conflict.resolution !== resolution;
+							if (materially_changed) {
+								const [written_conflict] = yield* transaction
+									.insert(WorkspaceConflicts)
+									.values(conflict_row)
+									.onConflictDoUpdate({
+										set: {
+											competing_change_id: conflict_row.competing_change_id,
+											observed_identity_json:
+												conflict_row.observed_identity_json,
+											resolution,
+										},
+										target: WorkspaceConflicts.source_command_id,
+									})
+									.returning();
+								if (!written_conflict)
+									return yield* new JournalInvariantError({
+										message: "Workspace conflict was not persisted",
+									});
+								const conflict = yield* DecodeConflict(written_conflict);
+								conflict_journal_sequence = yield* AppendConflictEvent(
+									existing_conflict ? "updated" : "recorded",
+									conflict,
+									detected_at,
+								);
+							}
+						}
+
+						if (operation.lifecycle === "rejected") {
+							yield* ValidateRejectedState(transaction, operation);
+
+							return Complete(
+								{ _tag: "rejected" as const, operation },
+								conflict_journal_sequence,
+							);
 						}
 
 						yield* ValidateRejectedState(transaction, operation);
@@ -1601,17 +2164,29 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 							});
 						}
 
-						return {
-							_tag: "rejected" as const,
-							operation: yield* DecodeOperation({
-								...row,
-								lifecycle: "rejected",
-								updated_at,
-							}),
-						};
+						return Complete(
+							{
+								_tag: "rejected" as const,
+								operation: yield* DecodeOperation({
+									...row,
+									lifecycle: "rejected",
+									updated_at,
+								}),
+							},
+							conflict_journal_sequence,
+						);
 					}),
 				)
-				.pipe(RetrySqliteWrite, Effect.mapError(normalize_error));
+				.pipe(
+					RetrySqliteWrite,
+					Effect.tap((result) =>
+						result.journal_sequence === undefined
+							? Effect.void
+							: notifier.Publish(result.journal_sequence),
+					),
+					Effect.map((result) => result.reconciliation),
+					Effect.mapError(normalize_error),
+				);
 
 		const AppendEvent = (
 			transaction: typeof database.client,
@@ -1797,6 +2372,15 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 										: JSON.stringify(operation.raw_origin),
 								review_state: "needs_review",
 								reviewed_at: null,
+								review_source_command_id: null,
+								reviewer_agent_id: null,
+								reviewer_kind: null,
+								reviewer_run_id: null,
+								reviewer_assignment_id: null,
+								reviewer_group_id: null,
+								reviewer_raw_origin_json: null,
+								review_outcome: null,
+								review_comment: null,
 								rollback_state: "available",
 								rolled_back_at: null,
 								run_id: operation.run_id,
@@ -1839,12 +2423,34 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 							}
 
 							const stored = transition.row;
+							if (action === "reviewed" && operation.action !== "review") {
+								return yield* new WorkspaceChangeTransitionError({
+									message: `Workspace operation ${message_id} is not a review`,
+								});
+							}
+							const review_operation =
+								operation.action === "review" ? operation : undefined;
 							const updated =
 								action === "reviewed"
 									? {
 											...stored,
 											review_state: "reviewed",
 											reviewed_at: now,
+											review_source_command_id: operation.message_id,
+											reviewer_agent_id:
+												review_operation?.reviewer_agent_id ?? null,
+											reviewer_kind: review_operation?.reviewer_kind ?? null,
+											reviewer_run_id:
+												review_operation?.reviewer_run_id ?? null,
+											reviewer_assignment_id:
+												review_operation?.assignment_id ?? null,
+											reviewer_group_id: review_operation?.group_id ?? null,
+											reviewer_raw_origin_json:
+												review_operation?.raw_origin === undefined
+													? null
+													: JSON.stringify(review_operation.raw_origin),
+											review_outcome: review_operation?.outcome ?? null,
+											review_comment: review_operation?.comment ?? null,
 											updated_at: now,
 											version: stored.version + 1,
 										}
@@ -2029,6 +2635,42 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 				)
 				.pipe(Effect.mapError(normalize_error));
 
+		const ListConflicts = (thread_id: string) =>
+			database.client
+				.select()
+				.from(WorkspaceConflicts)
+				.where(eq(WorkspaceConflicts.attempting_thread_id, thread_id))
+				.orderBy(asc(WorkspaceConflicts.detected_at), asc(WorkspaceConflicts.conflict_id))
+				.pipe(
+					Effect.flatMap((rows) => Effect.forEach(rows, DecodeConflict)),
+					Effect.mapError(normalize_error),
+				);
+
+		const ListConflictSnapshot = (thread_id: string) =>
+			database.client
+				.transaction((transaction) =>
+					Effect.gen(function* () {
+						const rows = yield* transaction
+							.select()
+							.from(WorkspaceConflicts)
+							.where(eq(WorkspaceConflicts.attempting_thread_id, thread_id))
+							.orderBy(
+								asc(WorkspaceConflicts.detected_at),
+								asc(WorkspaceConflicts.conflict_id),
+							);
+						const [latest] = yield* transaction
+							.select({ journal_sequence: JournalEvents.sequence })
+							.from(JournalEvents)
+							.orderBy(desc(JournalEvents.sequence))
+							.limit(1);
+						return {
+							conflicts: yield* Effect.forEach(rows, DecodeConflict),
+							journal_sequence: latest?.journal_sequence ?? 0,
+						};
+					}),
+				)
+				.pipe(Effect.mapError(normalize_error));
+
 		return {
 			ClaimReplace: Claim,
 			ClaimReview: Claim,
@@ -2038,6 +2680,8 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 			CommitReviewed: (message_id) => Commit(message_id, "reviewed"),
 			CommitRolledBack: (message_id) => Commit(message_id, "rolled_back"),
 			List,
+			ListConflictSnapshot,
+			ListConflicts,
 			MarkApplied,
 			MarkEvidenceRecorded,
 			ReconcileChanged,

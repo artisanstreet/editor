@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { make_backend_runtime } from "@artisan/backend";
 
 import { Database } from "../../modules/backend/src/persistence/database";
+import { JournalStore } from "../../modules/backend/src/persistence/journal-store";
 import { SurfaceItems, SurfaceUsageTotals } from "../../modules/backend/src/persistence/schema";
 import { SurfaceService } from "../../modules/backend/src/surfaces/surface-service";
 import { PersistSurfaceProjection } from "../../modules/backend/src/surfaces/surface-projection";
@@ -459,6 +460,91 @@ describe("surface projection read model", () => {
 				scope_id: "assignment_1",
 			});
 			expect(result.group).toEqual({ scope: "group", scope_id: "group_1" });
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("reads surface and usage snapshots at one atomic watermark and filters usage scopes", async () => {
+		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const journal = yield* JournalStore;
+					const surfaces = yield* SurfaceService;
+					const created = yield* journal.AcceptThreadCreate({
+						kind: "command",
+						message_id: "surface_snapshot_create",
+						origin: "frontend",
+						payload: { title: "Surface snapshot", type: "thread.create" },
+						protocol_version: 1,
+						schema_version: 1,
+						sent_at: "2026-07-18T00:00:00.000Z",
+						thread_id: "thread_snapshot",
+					});
+					yield* database.client.insert(SurfaceUsageTotals).values([
+						{
+							assignment_id: "assignment_target",
+							group_id: "group_target",
+							input_tokens: 4,
+							output_tokens: 2,
+							run_id: "run_target",
+							updated_at: "2026-07-18T00:00:01.000Z",
+						},
+						{
+							assignment_id: "assignment_other",
+							group_id: "group_other",
+							input_tokens: 8,
+							output_tokens: 3,
+							run_id: "run_other",
+							updated_at: "2026-07-18T00:00:02.000Z",
+						},
+					]);
+					return {
+						list: yield* surfaces.ListSnapshot({ thread_id: "thread_snapshot" }),
+						usage: yield* surfaces.AggregateUsageSnapshot({
+							scope: "group",
+							scope_id: "group_target",
+						}),
+						affects: {
+							group_target: yield* surfaces.UsageEventAffects(
+								{ scope: "group", scope_id: "group_target" },
+								"run_target",
+							),
+							group_other: yield* surfaces.UsageEventAffects(
+								{ scope: "group", scope_id: "group_target" },
+								"run_other",
+							),
+							assignment_target: yield* surfaces.UsageEventAffects(
+								{ scope: "assignment", scope_id: "assignment_target" },
+								"run_target",
+							),
+							missing_run: yield* surfaces.UsageEventAffects(
+								{ scope: "run", scope_id: "run_target" },
+								undefined,
+							),
+						},
+						watermark: created.journal_sequence,
+					};
+				}),
+			);
+			expect(result.list.journal_sequence).toBe(result.watermark);
+			expect(result.usage).toEqual({
+				aggregate: {
+					input_tokens: 4,
+					output_tokens: 2,
+					scope: "group",
+					scope_id: "group_target",
+				},
+				journal_sequence: result.watermark,
+			});
+			expect(result.affects).toEqual({
+				assignment_target: true,
+				group_other: false,
+				group_target: true,
+				missing_run: false,
+			});
 		} finally {
 			await runtime.dispose();
 		}

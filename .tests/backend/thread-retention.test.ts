@@ -41,6 +41,7 @@ import {
 	ThreadErasureClaims,
 	Threads,
 	ThreadTombstones,
+	WorkspaceConflicts,
 } from "../../modules/backend/src/persistence/schema";
 import { ThreadReadModel } from "../../modules/backend/src/persistence/thread-read-model";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
@@ -393,6 +394,23 @@ describe("thread retention", () => {
 						terminal_id: "terminal_1",
 						updated_at: "2026-07-01T18:00:00.000Z",
 					});
+					yield* database.client.insert(WorkspaceConflicts).values({
+						attempting_agent_id: "agent_1",
+						attempting_run_id: "graph_run_1",
+						attempting_thread_id: "thread_expired",
+						change_id: "change_1",
+						conflict_id: "conflict_1",
+						detected_at: "2026-07-01T18:00:00.000Z",
+						expected_identity_json: JSON.stringify({
+							algorithm: "sha256",
+							byte_count: 1,
+							content_hash: "a".repeat(64),
+						}),
+						path: "src/private.ts",
+						resolution: "user_action_required",
+						source_command_id: "workspace_command_1",
+						workspace_id: "workspace_1",
+					});
 
 					const erased = yield* erasure.CleanupExpired(
 						"2026-07-08T18:00:00.000Z",
@@ -415,6 +433,7 @@ describe("thread retention", () => {
 						usage: database.client.select().from(SurfaceUsageTotals),
 						terminal_commands: database.client.select().from(TerminalCommands),
 						terminals: database.client.select().from(TerminalSessions),
+						workspace_conflicts: database.client.select().from(WorkspaceConflicts),
 						threads: database.client.select().from(Threads),
 						tombstones: database.client.select().from(ThreadTombstones),
 					});
@@ -456,6 +475,7 @@ describe("thread retention", () => {
 					{ last_sequence: 1, stream_id: "settings:guidance" },
 					{ last_sequence: 2, stream_id: "thread:thread_expired" },
 				],
+				workspace_conflicts: [],
 				events: [
 					{
 						event_type: "guidance.canonical.updated",

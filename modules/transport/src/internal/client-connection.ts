@@ -377,6 +377,9 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 					case "preview.target.get.query.result":
 					case "preview.target.list.query.result":
 					case "preview.target.mutation.result":
+					case "thread.session.query.result":
+					case "surface.list.query.result":
+					case "surface.usage.aggregate.query.result":
 					case "terminal.list.query.result":
 					case "thread.list.query.result":
 					case "thread.transcript.query.result":
@@ -386,6 +389,7 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 					case "workspace.file.discovery.query.result":
 					case "workspace.language.capabilities.query.result":
 					case "workspace.change.list.query.result":
+					case "workspace.conflict.list.query.result":
 					case "workspace.change.diff.query.result":
 						return handlers.requests.Resolve(envelope);
 					case "event":
@@ -427,6 +431,10 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 					case "thread.transcript.append":
 					case "orchestration.group.list.snapshot":
 					case "orchestration.group.list.patch":
+					case "thread.session.snapshot":
+					case "surface.list.snapshot":
+					case "surface.usage.aggregate.snapshot":
+					case "workspace.conflict.list.snapshot":
 						return handlers.subscriptions.HandleUpdate(envelope);
 					case "replay.complete":
 					case "subscription.stopped":

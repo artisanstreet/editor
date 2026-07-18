@@ -185,7 +185,7 @@ describe("single coordinator orchestration", () => {
 							}),
 						);
 
-						const accepted = yield* take_outbound(connection, 3);
+						const accepted = yield* take_outbound(connection, 4);
 						const interactions = yield* connection.Outbound.pipe(
 							Stream.filter(
 								(envelope) =>
@@ -230,6 +230,7 @@ describe("single coordinator orchestration", () => {
 			expect(result.accepted).toMatchObject([
 				{ kind: "command.receipt", payload: { status: "accepted" } },
 				{ kind: "event", payload: { type: "thread.message_queued" } },
+				{ kind: "event", payload: { type: "thread.message_routed" } },
 				{ kind: "event", payload: { state: "queued", type: "run.lifecycle" } },
 			]);
 

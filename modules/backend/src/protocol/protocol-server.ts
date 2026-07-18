@@ -56,6 +56,8 @@ import {
 	type PreviewTargetRemoveEnvelope,
 	type PreviewTargetStateEnvelope,
 	type RichLinkResolveQueryEnvelope,
+	type SurfaceListQueryEnvelope,
+	type SurfaceUsageAggregateQueryEnvelope,
 	type OutboundControlEnvelope,
 	type PreNegotiationProtocolErrorEnvelope,
 	type ProtocolErrorDetail,
@@ -66,6 +68,7 @@ import {
 	type ThreadListItem,
 	type ThreadListQueryEnvelope,
 	type ThreadTranscriptQueryEnvelope,
+	type ThreadSessionQueryEnvelope,
 	type ThreadRetentionQueryEnvelope,
 	type ThreadRetentionUpdateEnvelope,
 	type ThreadWorkQueryEnvelope,
@@ -75,6 +78,7 @@ import {
 	type WorkspaceChangeDiffQueryEnvelope,
 	type WorkspaceChangeReviewEnvelope,
 	type WorkspaceChangeRollbackEnvelope,
+	type WorkspaceConflictListQueryEnvelope,
 	type WorkspaceFileReadQueryEnvelope,
 	type WorkspaceFileReplaceEnvelope,
 	type WorkspaceFileDiscoveryQueryEnvelope,
@@ -97,6 +101,7 @@ import {
 	ModelBehaviourService,
 } from "../model-behaviour/model-behaviour-service";
 import { JournalNotifier } from "../persistence/journal-notifier";
+import { SurfaceService } from "../surfaces/surface-service";
 import {
 	CommandIdConflict,
 	JournalInvariantError,
@@ -168,11 +173,44 @@ interface OrchestrationGroupListProjectionSubscription {
 	readonly sequence: number;
 	readonly stream_id: string;
 }
+interface ThreadSessionProjectionSubscription {
+	readonly _tag: "thread.session";
+	readonly thread_id: string;
+	readonly journal_sequence: number;
+	readonly sequence: number;
+	readonly stream_id: string;
+}
+interface SurfaceListProjectionSubscription {
+	readonly _tag: "surface.list";
+	readonly query: import("@artisan/protocol").SurfaceListQuery;
+	readonly journal_sequence: number;
+	readonly sequence: number;
+	readonly stream_id: string;
+}
+interface SurfaceUsageProjectionSubscription {
+	readonly _tag: "surface.usage.aggregate";
+	readonly thread_id?: string;
+	readonly query: import("@artisan/protocol").SurfaceUsageAggregateQuery;
+	readonly journal_sequence: number;
+	readonly sequence: number;
+	readonly stream_id: string;
+}
+interface WorkspaceConflictListProjectionSubscription {
+	readonly _tag: "workspace.conflict.list";
+	readonly thread_id: string;
+	readonly journal_sequence: number;
+	readonly sequence: number;
+	readonly stream_id: string;
+}
 
 type ProjectionSubscription =
 	| OrchestrationGraphProjectionSubscription
 	| ThreadTranscriptProjectionSubscription
 	| OrchestrationGroupListProjectionSubscription
+	| ThreadSessionProjectionSubscription
+	| SurfaceListProjectionSubscription
+	| SurfaceUsageProjectionSubscription
+	| WorkspaceConflictListProjectionSubscription
 	| ThreadListProjectionSubscription;
 
 interface AwaitingHelloState {
@@ -621,6 +659,7 @@ export function make_protocol_server_layer(
 			const options = yield* DecodeProtocolConnectionOptions(input_options);
 			const git = yield* GitService;
 			const graph = yield* AgentGraphOrchestrator;
+			const surfaces = yield* SurfaceService;
 			const guidance = yield* GlobalGuidanceService;
 			const model_behaviour = yield* ModelBehaviourService;
 			const journal = yield* JournalStore;
@@ -634,6 +673,8 @@ export function make_protocol_server_layer(
 			const transcript_read_model = yield* TranscriptReadModel;
 			const retention_policy = yield* ThreadRetentionPolicyService;
 			const workspace_changes = yield* WorkspaceChangeRepository;
+			const ReadWorkspaceConflictSnapshot = (thread_id: string) =>
+				workspace_changes.ListConflictSnapshot(thread_id);
 			const workspace_diffs = yield* WorkspaceChangeDiffService;
 			const workspace_files = yield* WorkspaceFileService;
 			const previews = yield* PreviewCoordinator;
@@ -773,6 +814,11 @@ export function make_protocol_server_layer(
 						)) {
 							const message_id = yield* metadata.MakeId("message");
 							const sequence = subscription.sequence + 1;
+							let next_journal_sequence = event.journal_sequence;
+							let next_usage_thread_id =
+								subscription._tag === "surface.usage.aggregate"
+									? subscription.thread_id
+									: undefined;
 
 							if (subscription._tag === "thread.list") {
 								if (!thread_patch) {
@@ -900,6 +946,124 @@ export function make_protocol_server_layer(
 									stream_id: subscription.stream_id,
 									subscription_id,
 								});
+							} else if (subscription._tag === "thread.session") {
+								const refreshes_thread_session =
+									event.payload.type === "intake.assessed" ||
+									event.payload.type === "intake.assumption_recorded" ||
+									event.payload.type === "thread.auto_steer.updated" ||
+									event.payload.type === "thread.message_routed" ||
+									event.payload.type === "thread.erased";
+								if (
+									event.journal_sequence <= subscription.journal_sequence ||
+									event.thread_id !== subscription.thread_id ||
+									!refreshes_thread_session
+								)
+									continue;
+								const snapshot = yield* orchestration.GetSession(
+									subscription.thread_id,
+								);
+								yield* Enqueue({
+									journal_sequence: event.journal_sequence,
+									kind: "thread.session.snapshot",
+									message_id,
+									origin: "backend",
+									payload: snapshot,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at: event.sent_at,
+									sequence,
+									stream_id: subscription.stream_id,
+									subscription_id,
+								});
+							} else if (subscription._tag === "surface.list") {
+								if (
+									event.journal_sequence <= subscription.journal_sequence ||
+									event.thread_id !== subscription.query.thread_id
+								)
+									continue;
+								const snapshot = yield* surfaces.ListSnapshot({
+									thread_id: subscription.query.thread_id,
+									...(subscription.query.run_id === undefined
+										? {}
+										: { run_id: subscription.query.run_id }),
+									...(subscription.query.group_id === undefined
+										? {}
+										: { group_id: subscription.query.group_id }),
+								});
+								next_journal_sequence = snapshot.journal_sequence;
+								yield* Enqueue({
+									journal_sequence: snapshot.journal_sequence,
+									kind: "surface.list.snapshot",
+									message_id,
+									origin: "backend",
+									payload: snapshot,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at: event.sent_at,
+									sequence,
+									stream_id: subscription.stream_id,
+									subscription_id,
+								});
+							} else if (subscription._tag === "workspace.conflict.list") {
+								if (
+									event.journal_sequence <= subscription.journal_sequence ||
+									event.thread_id !== subscription.thread_id
+								)
+									continue;
+								const snapshot = yield* ReadWorkspaceConflictSnapshot(
+									subscription.thread_id,
+								);
+								next_journal_sequence = snapshot.journal_sequence;
+								yield* Enqueue({
+									journal_sequence: snapshot.journal_sequence,
+									kind: "workspace.conflict.list.snapshot",
+									message_id,
+									origin: "backend",
+									payload: snapshot,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at: event.sent_at,
+									sequence,
+									stream_id: subscription.stream_id,
+									subscription_id,
+								});
+							} else if (subscription._tag === "surface.usage.aggregate") {
+								if (event.journal_sequence <= subscription.journal_sequence)
+									continue;
+								const erases_usage_scope =
+									event.payload.type === "thread.erased" &&
+									subscription.thread_id !== undefined &&
+									event.thread_id === subscription.thread_id;
+								if (
+									!erases_usage_scope &&
+									!(yield* surfaces.UsageEventAffects(
+										subscription.query,
+										event.run_id,
+									))
+								)
+									continue;
+								const snapshot = yield* surfaces.AggregateUsageSnapshot(
+									subscription.query,
+								);
+								if (!erases_usage_scope) {
+									next_usage_thread_id = yield* surfaces.UsageScopeThread(
+										subscription.query,
+									);
+								}
+								next_journal_sequence = snapshot.journal_sequence;
+								yield* Enqueue({
+									journal_sequence: snapshot.journal_sequence,
+									kind: "surface.usage.aggregate.snapshot",
+									message_id,
+									origin: "backend",
+									payload: snapshot,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at: event.sent_at,
+									sequence,
+									stream_id: subscription.stream_id,
+									subscription_id,
+								});
 							} else {
 								const group_id = graph_group_id_from_event(event);
 
@@ -924,17 +1088,30 @@ export function make_protocol_server_layer(
 								});
 							}
 
+							const next_subscription =
+								subscription._tag === "thread.transcript" ||
+								subscription._tag === "orchestration.group.list" ||
+								subscription._tag === "thread.session" ||
+								subscription._tag === "surface.list" ||
+								subscription._tag === "surface.usage.aggregate" ||
+								subscription._tag === "workspace.conflict.list"
+									? {
+											...subscription,
+											journal_sequence: next_journal_sequence,
+											sequence,
+										}
+									: { ...subscription, sequence };
 							subscriptions = {
 								...subscriptions,
 								[subscription_id]:
-									subscription._tag === "thread.transcript" ||
-									subscription._tag === "orchestration.group.list"
+									subscription._tag === "surface.usage.aggregate"
 										? {
-												...subscription,
-												journal_sequence: event.journal_sequence,
-												sequence,
+												...next_subscription,
+												...(next_usage_thread_id === undefined
+													? {}
+													: { thread_id: next_usage_thread_id }),
 											}
-										: { ...subscription, sequence },
+										: next_subscription,
 							};
 						}
 
@@ -1398,6 +1575,112 @@ export function make_protocol_server_layer(
 							),
 						);
 
+				const HandleThreadSessionQuery = (
+					query: ThreadSessionQueryEnvelope,
+					current: ReadyState,
+				) =>
+					orchestration.GetSession(query.payload.thread_id).pipe(
+						Effect.flatMap((snapshot) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "thread.session.query.result",
+									message_id,
+									origin: "backend",
+									payload: snapshot,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"projection.unavailable",
+								"The thread session could not be read.",
+								true,
+								query.message_id,
+							),
+						),
+					);
+
+				const HandleSurfaceListQuery = (
+					query: SurfaceListQueryEnvelope,
+					current: ReadyState,
+				) =>
+					surfaces
+						.List({
+							thread_id: query.payload.thread_id,
+							...(query.payload.run_id === undefined
+								? {}
+								: { run_id: query.payload.run_id }),
+							...(query.payload.group_id === undefined
+								? {}
+								: { group_id: query.payload.group_id }),
+						})
+						.pipe(
+							Effect.flatMap((snapshot) =>
+								Effect.gen(function* () {
+									const message_id = yield* metadata.MakeId("message");
+									const sent_at = yield* metadata.Now;
+									yield* Enqueue({
+										correlation_id: query.message_id,
+										kind: "surface.list.query.result",
+										message_id,
+										origin: "backend",
+										payload: snapshot,
+										protocol_version: 1,
+										schema_version: 1,
+										sent_at,
+									});
+								}),
+							),
+							Effect.catch(() =>
+								EnqueueError(
+									current,
+									"projection.unavailable",
+									"Surface items could not be read.",
+									true,
+									query.message_id,
+								),
+							),
+						);
+
+				const HandleSurfaceUsageQuery = (
+					query: SurfaceUsageAggregateQueryEnvelope,
+					current: ReadyState,
+				) =>
+					surfaces.AggregateUsageSnapshot(query.payload).pipe(
+						Effect.flatMap((snapshot) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "surface.usage.aggregate.query.result",
+									message_id,
+									origin: "backend",
+									payload: snapshot,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"projection.unavailable",
+								"Surface usage could not be read.",
+								true,
+								query.message_id,
+							),
+						),
+					);
+
 				const HandleWorkspaceFileReadQuery = (
 					query: WorkspaceFileReadQueryEnvelope,
 					current: ReadyState,
@@ -1467,6 +1750,36 @@ export function make_protocol_server_layer(
 								),
 							),
 						);
+
+				const HandleWorkspaceConflictListQuery = (
+					query: WorkspaceConflictListQueryEnvelope,
+					current: ReadyState,
+				) =>
+					ReadWorkspaceConflictSnapshot(query.payload.thread_id).pipe(
+						Effect.flatMap((snapshot) =>
+							Effect.gen(function* () {
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "workspace.conflict.list.query.result",
+									message_id: yield* metadata.MakeId("message"),
+									origin: "backend",
+									payload: snapshot,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at: yield* metadata.Now,
+								});
+							}),
+						),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"projection.unavailable",
+								"The workspace conflict projection could not be read.",
+								true,
+								query.message_id,
+							),
+						),
+					);
 
 				const HandleWorkspaceChangeDiffQuery = (
 					query: WorkspaceChangeDiffQueryEnvelope,
@@ -2027,6 +2340,200 @@ export function make_protocol_server_layer(
 								subscribe.message_id,
 							);
 
+							return;
+						}
+
+						if (subscribe.payload.type === "thread.session") {
+							const snapshot = yield* orchestration.GetSession(
+								subscribe.payload.thread_id,
+							);
+							const stream_id = `projection:thread.session:${subscribe.payload.thread_id}:${subscribe.subscription_id}`;
+							const subscription: ThreadSessionProjectionSubscription = {
+								_tag: "thread.session",
+								thread_id: subscribe.payload.thread_id,
+								journal_sequence: snapshot.journal_sequence,
+								sequence: 0,
+								stream_id,
+							};
+							yield* Ref.set(state, {
+								...current,
+								subscriptions: {
+									...current.subscriptions,
+									[subscribe.subscription_id]: subscription,
+								},
+							});
+							const sent_at = yield* metadata.Now;
+							yield* Enqueue({
+								correlation_id: subscribe.message_id,
+								kind: "subscription.started",
+								message_id: yield* metadata.MakeId("message"),
+								origin: "backend",
+								payload: { stream_id },
+								protocol_version: 1,
+								schema_version: 1,
+								sent_at,
+								subscription_id: subscribe.subscription_id,
+							});
+							yield* Enqueue({
+								journal_sequence: snapshot.journal_sequence,
+								kind: "thread.session.snapshot",
+								message_id: yield* metadata.MakeId("message"),
+								origin: "backend",
+								payload: snapshot,
+								protocol_version: 1,
+								schema_version: 1,
+								sent_at,
+								sequence: 0,
+								stream_id,
+								subscription_id: subscribe.subscription_id,
+							});
+							return;
+						}
+
+						if (subscribe.payload.type === "surface.list") {
+							const query = subscribe.payload.query;
+							const snapshot = yield* surfaces.ListSnapshot({
+								thread_id: query.thread_id,
+								...(query.run_id === undefined ? {} : { run_id: query.run_id }),
+								...(query.group_id === undefined
+									? {}
+									: { group_id: query.group_id }),
+							});
+							const stream_id = `projection:surface.list:${query.thread_id}:${subscribe.subscription_id}`;
+							const subscription: SurfaceListProjectionSubscription = {
+								_tag: "surface.list",
+								query,
+								journal_sequence: snapshot.journal_sequence,
+								sequence: 0,
+								stream_id,
+							};
+							yield* Ref.set(state, {
+								...current,
+								subscriptions: {
+									...current.subscriptions,
+									[subscribe.subscription_id]: subscription,
+								},
+							});
+							const sent_at = yield* metadata.Now;
+							yield* Enqueue({
+								correlation_id: subscribe.message_id,
+								kind: "subscription.started",
+								message_id: yield* metadata.MakeId("message"),
+								origin: "backend",
+								payload: { stream_id },
+								protocol_version: 1,
+								schema_version: 1,
+								sent_at,
+								subscription_id: subscribe.subscription_id,
+							});
+							yield* Enqueue({
+								journal_sequence: snapshot.journal_sequence,
+								kind: "surface.list.snapshot",
+								message_id: yield* metadata.MakeId("message"),
+								origin: "backend",
+								payload: snapshot,
+								protocol_version: 1,
+								schema_version: 1,
+								sent_at,
+								sequence: 0,
+								stream_id,
+								subscription_id: subscribe.subscription_id,
+							});
+							return;
+						}
+
+						if (subscribe.payload.type === "workspace.conflict.list") {
+							const thread_id = subscribe.payload.thread_id;
+							const snapshot = yield* ReadWorkspaceConflictSnapshot(thread_id);
+							const stream_id = `projection:workspace.conflict.list:${thread_id}:${subscribe.subscription_id}`;
+							const subscription: WorkspaceConflictListProjectionSubscription = {
+								_tag: "workspace.conflict.list",
+								thread_id,
+								journal_sequence: snapshot.journal_sequence,
+								sequence: 0,
+								stream_id,
+							};
+							yield* Ref.set(state, {
+								...current,
+								subscriptions: {
+									...current.subscriptions,
+									[subscribe.subscription_id]: subscription,
+								},
+							});
+							const sent_at = yield* metadata.Now;
+							yield* Enqueue({
+								correlation_id: subscribe.message_id,
+								kind: "subscription.started",
+								message_id: yield* metadata.MakeId("message"),
+								origin: "backend",
+								payload: { stream_id },
+								protocol_version: 1,
+								schema_version: 1,
+								sent_at,
+								subscription_id: subscribe.subscription_id,
+							});
+							yield* Enqueue({
+								journal_sequence: snapshot.journal_sequence,
+								kind: "workspace.conflict.list.snapshot",
+								message_id: yield* metadata.MakeId("message"),
+								origin: "backend",
+								payload: snapshot,
+								protocol_version: 1,
+								schema_version: 1,
+								sent_at,
+								sequence: 0,
+								stream_id,
+								subscription_id: subscribe.subscription_id,
+							});
+							return;
+						}
+
+						if (subscribe.payload.type === "surface.usage.aggregate") {
+							const query = subscribe.payload.query;
+							const snapshot = yield* surfaces.AggregateUsageSnapshot(query);
+							const thread_id = yield* surfaces.UsageScopeThread(query);
+							const journal_sequence = snapshot.journal_sequence;
+							const stream_id = `projection:surface.usage.aggregate:${query.scope}:${query.scope_id}:${subscribe.subscription_id}`;
+							const subscription: SurfaceUsageProjectionSubscription = {
+								_tag: "surface.usage.aggregate",
+								query,
+								...(thread_id === undefined ? {} : { thread_id }),
+								journal_sequence,
+								sequence: 0,
+								stream_id,
+							};
+							yield* Ref.set(state, {
+								...current,
+								subscriptions: {
+									...current.subscriptions,
+									[subscribe.subscription_id]: subscription,
+								},
+							});
+							const sent_at = yield* metadata.Now;
+							yield* Enqueue({
+								correlation_id: subscribe.message_id,
+								kind: "subscription.started",
+								message_id: yield* metadata.MakeId("message"),
+								origin: "backend",
+								payload: { stream_id },
+								protocol_version: 1,
+								schema_version: 1,
+								sent_at,
+								subscription_id: subscribe.subscription_id,
+							});
+							yield* Enqueue({
+								journal_sequence,
+								kind: "surface.usage.aggregate.snapshot",
+								message_id: yield* metadata.MakeId("message"),
+								origin: "backend",
+								payload: snapshot,
+								protocol_version: 1,
+								schema_version: 1,
+								sent_at,
+								sequence: 0,
+								stream_id,
+								subscription_id: subscribe.subscription_id,
+							});
 							return;
 						}
 
@@ -2832,6 +3339,8 @@ export function make_protocol_server_layer(
 							return HandleWorkspaceFileReadQuery(envelope, current);
 						case "workspace.change.list.query":
 							return HandleWorkspaceChangeListQuery(envelope, current);
+						case "workspace.conflict.list.query":
+							return HandleWorkspaceConflictListQuery(envelope, current);
 						case "workspace.change.diff.query":
 							return HandleWorkspaceChangeDiffQuery(envelope, current);
 						case "git.workspace.query":
@@ -2907,6 +3416,12 @@ export function make_protocol_server_layer(
 							return HandleToolExecute(envelope, current);
 						case "artisan.approval.resolve":
 							return HandleToolApprovalResolve(envelope, current);
+						case "thread.session.query":
+							return HandleThreadSessionQuery(envelope, current);
+						case "surface.list.query":
+							return HandleSurfaceListQuery(envelope, current);
+						case "surface.usage.aggregate.query":
+							return HandleSurfaceUsageQuery(envelope, current);
 						case "subscribe":
 							return HandleSubscribe(envelope, current);
 						case "unsubscribe":

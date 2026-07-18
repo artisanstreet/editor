@@ -18,7 +18,10 @@ import {
 
 import { Database } from "../../modules/backend/src/persistence/database";
 import {
+	AgentRuns,
+	Assignments,
 	OrchestrationCoordinators,
+	OrchestrationGroups,
 	OrchestrationRuns,
 } from "../../modules/backend/src/persistence/schema";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
@@ -257,6 +260,52 @@ describe("ArtisanClient workspace operations with the backend ProtocolServer", (
 					updated_at: now,
 					working_directory: root,
 				});
+				yield* database.client.insert(OrchestrationGroups).values({
+					coordinator_agent_id: "agent_workspace_public",
+					created_at: now,
+					group_id: "group_workspace_review",
+					journal_sequence: 1,
+					max_concurrency: 2,
+					state: "active",
+					thread_id: "thread_workspace_public",
+					updated_at: now,
+					version: 1,
+				});
+				yield* database.client.insert(Assignments).values({
+					active_run_id: "run_workspace_reviewer",
+					agent_id: "agent_workspace_reviewer",
+					assignment_id: "assignment_workspace_review",
+					created_at: now,
+					current_attempt: 1,
+					engine_id: "engine_workspace_public",
+					expected_result: "Review the workspace change",
+					group_id: "group_workspace_review",
+					instructions: "Review the workspace change",
+					max_attempts: 1,
+					parent_node_id: "node_workspace_review",
+					permission_policy_json: "{}",
+					profile: "reviewer",
+					role: "reviewer",
+					scope_json: "{}",
+					state: "active",
+					summary_contract: "Return a review outcome",
+					updated_at: now,
+					workspace_json: "{}",
+				});
+				yield* database.client.insert(AgentRuns).values({
+					agent_id: "agent_workspace_reviewer",
+					assignment_id: "assignment_workspace_review",
+					attempt: 1,
+					created_at: now,
+					dispatch_status: "active",
+					engine_id: "engine_workspace_public",
+					group_id: "group_workspace_review",
+					last_observation_sequence: 0,
+					profile: "reviewer",
+					run_id: "run_workspace_reviewer",
+					state: "running",
+					updated_at: now,
+				});
 			}),
 		);
 
@@ -307,11 +356,26 @@ describe("ArtisanClient workspace operations with the backend ProtocolServer", (
 						const reviewed = yield* AtStep(
 							"review",
 							harness.client.ReviewWorkspaceChange({
+								assignment_id: "assignment_workspace_review",
 								change_id: "change_workspace_public",
+								comment: "The replacement needs a follow-up.",
 								command_id: "review_workspace_public",
+								group_id: "group_workspace_review",
+								outcome: "changes_requested",
+								raw_origin: {
+									provider: "codex",
+									reference: "workspace-review-turn",
+								},
+								reviewer_agent_id: "agent_workspace_reviewer",
+								reviewer_kind: "graph",
+								reviewer_run_id: "run_workspace_reviewer",
 								thread_id: "thread_workspace_public",
 							}),
 						);
+						const after_review = yield* harness.client.ListWorkspaceChanges({
+							thread_id: "thread_workspace_public",
+							workspace_id: "workspace_public",
+						});
 
 						yield* database.client
 							.update(OrchestrationRuns)
@@ -338,6 +402,7 @@ describe("ArtisanClient workspace operations with the backend ProtocolServer", (
 
 						return {
 							after_rollback,
+							after_review,
 							before_review,
 							events: [...events],
 							initial,
@@ -362,6 +427,24 @@ describe("ArtisanClient workspace operations with the backend ProtocolServer", (
 				},
 			]);
 			expect(result.reviewed.status).toBe("accepted");
+			expect(result.after_review.changes).toMatchObject([
+				{
+					review: {
+						assignment_id: "assignment_workspace_review",
+						comment: "The replacement needs a follow-up.",
+						group_id: "group_workspace_review",
+						outcome: "changes_requested",
+						raw_origin: {
+							provider: "codex",
+							reference: "workspace-review-turn",
+						},
+						reviewer_agent_id: "agent_workspace_reviewer",
+						reviewer_kind: "graph",
+						reviewer_run_id: "run_workspace_reviewer",
+					},
+					review_state: "reviewed",
+				},
+			]);
 			expect(result.rolled_back.status).toBe("accepted");
 			expect(result.restored).toMatchObject({
 				content: "before",

@@ -13,6 +13,10 @@ import type {
 	ArtisanClientError,
 	OrchestrationGraphUpdate,
 	OrchestrationGroupListUpdate,
+	SurfaceListUpdate,
+	SurfaceUsageAggregateUpdate,
+	WorkspaceConflictListUpdate,
+	ThreadSessionUpdate,
 	ThreadTranscriptUpdate,
 	ThreadListUpdate,
 } from "../client-contract";
@@ -51,12 +55,32 @@ interface OrchestrationGroupListSubscription extends ProjectionSubscriptionBase 
 		ArtisanClientError | Cause.Done<void>
 	>;
 }
+interface ThreadSessionSubscription extends ProjectionSubscriptionBase {
+	readonly _tag: "thread.session";
+	readonly queue: Queue.Queue<ThreadSessionUpdate, ArtisanClientError | Cause.Done<void>>;
+}
+interface SurfaceListSubscription extends ProjectionSubscriptionBase {
+	readonly _tag: "surface.list";
+	readonly queue: Queue.Queue<SurfaceListUpdate, ArtisanClientError | Cause.Done<void>>;
+}
+interface SurfaceUsageAggregateSubscription extends ProjectionSubscriptionBase {
+	readonly _tag: "surface.usage.aggregate";
+	readonly queue: Queue.Queue<SurfaceUsageAggregateUpdate, ArtisanClientError | Cause.Done<void>>;
+}
+interface WorkspaceConflictListSubscription extends ProjectionSubscriptionBase {
+	readonly _tag: "workspace.conflict.list";
+	readonly queue: Queue.Queue<WorkspaceConflictListUpdate, ArtisanClientError | Cause.Done<void>>;
+}
 
 type ProjectionSubscription =
 	| OrchestrationGraphSubscription
 	| ThreadListSubscription
 	| ThreadTranscriptSubscription
-	| OrchestrationGroupListSubscription;
+	| OrchestrationGroupListSubscription
+	| ThreadSessionSubscription
+	| SurfaceListSubscription
+	| SurfaceUsageAggregateSubscription
+	| WorkspaceConflictListSubscription;
 
 type ProjectionEnvelope = Extract<
 	OutboundControlEnvelope,
@@ -70,7 +94,11 @@ type ProjectionEnvelope = Extract<
 			| "thread.transcript.snapshot"
 			| "thread.transcript.append"
 			| "orchestration.group.list.snapshot"
-			| "orchestration.group.list.patch";
+			| "orchestration.group.list.patch"
+			| "thread.session.snapshot"
+			| "surface.list.snapshot"
+			| "surface.usage.aggregate.snapshot"
+			| "workspace.conflict.list.snapshot";
 	}
 >;
 
@@ -149,6 +177,34 @@ export interface ClientSubscriptionCoordinator {
 		include_terminal: boolean,
 	) => Effect.Effect<
 		Stream.Stream<OrchestrationGroupListUpdate, ArtisanClientError>,
+		ArtisanClientError,
+		Scope.Scope
+	>;
+	readonly SubscribeThreadSession: (
+		thread_id: string,
+	) => Effect.Effect<
+		Stream.Stream<ThreadSessionUpdate, ArtisanClientError>,
+		ArtisanClientError,
+		Scope.Scope
+	>;
+	readonly SubscribeSurfaceItems: (
+		input: import("@artisan/protocol").SurfaceListQuery,
+	) => Effect.Effect<
+		Stream.Stream<SurfaceListUpdate, ArtisanClientError>,
+		ArtisanClientError,
+		Scope.Scope
+	>;
+	readonly SubscribeSurfaceUsageAggregate: (
+		input: import("@artisan/protocol").SurfaceUsageAggregateQuery,
+	) => Effect.Effect<
+		Stream.Stream<SurfaceUsageAggregateUpdate, ArtisanClientError>,
+		ArtisanClientError,
+		Scope.Scope
+	>;
+	readonly SubscribeWorkspaceConflicts: (
+		thread_id: string,
+	) => Effect.Effect<
+		Stream.Stream<WorkspaceConflictListUpdate, ArtisanClientError>,
 		ArtisanClientError,
 		Scope.Scope
 	>;
@@ -425,6 +481,47 @@ export const make_client_subscription_coordinator = (
 						envelope.kind === "orchestration.group.list.snapshot"
 							? "snapshot"
 							: "patch",
+					snapshot: envelope.payload,
+				})
+					? "offered"
+					: "overflow";
+			}
+			if (
+				subscription._tag === "thread.session" &&
+				envelope.kind === "thread.session.snapshot"
+			) {
+				return Queue.offerUnsafe(subscription.queue, {
+					type: "snapshot",
+					snapshot: envelope.payload,
+				})
+					? "offered"
+					: "overflow";
+			}
+			if (subscription._tag === "surface.list" && envelope.kind === "surface.list.snapshot") {
+				return Queue.offerUnsafe(subscription.queue, {
+					type: "snapshot",
+					snapshot: envelope.payload,
+				})
+					? "offered"
+					: "overflow";
+			}
+			if (
+				subscription._tag === "surface.usage.aggregate" &&
+				envelope.kind === "surface.usage.aggregate.snapshot"
+			) {
+				return Queue.offerUnsafe(subscription.queue, {
+					type: "snapshot",
+					snapshot: envelope.payload,
+				})
+					? "offered"
+					: "overflow";
+			}
+			if (
+				subscription._tag === "workspace.conflict.list" &&
+				envelope.kind === "workspace.conflict.list.snapshot"
+			) {
+				return Queue.offerUnsafe(subscription.queue, {
+					type: "snapshot",
 					snapshot: envelope.payload,
 				})
 					? "offered"
@@ -755,6 +852,42 @@ export const make_client_subscription_coordinator = (
 				yield* start_subscription(subscription);
 				return Stream.fromQueue(queue);
 			});
+		const subscribe_snapshot = <
+			Update,
+			Tag extends
+				| "thread.session"
+				| "surface.list"
+				| "surface.usage.aggregate"
+				| "workspace.conflict.list",
+		>(
+			tag: Tag,
+			payload: SubscribeEnvelope["payload"],
+		): Effect.Effect<
+			Stream.Stream<Update, ArtisanClientError>,
+			ArtisanClientError,
+			Scope.Scope
+		> =>
+			Effect.gen(function* () {
+				const trace = yield* make_trace;
+				const subscription_id = yield* make_id(`${tag}_subscription`);
+				const queue = yield* Effect.acquireRelease(
+					Queue.dropping<Update, ArtisanClientError | Cause.Done<void>>(
+						subscription_capacity,
+					),
+					Queue.shutdown,
+				);
+				const started = yield* Deferred.make<void, ArtisanClientError>();
+				const subscription = {
+					_tag: tag,
+					envelope: { ...trace, kind: "subscribe" as const, payload, subscription_id },
+					expected_sequence: -1,
+					queue,
+					started,
+					stream_id: Option.none(),
+				} as unknown as ProjectionSubscription;
+				yield* start_subscription(subscription);
+				return Stream.fromQueue(queue);
+			});
 
 		const retry = Ref.modify(
 			state,
@@ -818,5 +951,25 @@ export const make_client_subscription_coordinator = (
 			SubscribeOrchestrationGroups: subscribe_orchestration_groups,
 			SubscribeThreadList: subscribe_thread_list,
 			SubscribeThreadTranscript: subscribe_thread_transcript,
+			SubscribeThreadSession: (thread_id) =>
+				subscribe_snapshot<ThreadSessionUpdate, "thread.session">("thread.session", {
+					type: "thread.session",
+					thread_id,
+				}),
+			SubscribeSurfaceItems: (query) =>
+				subscribe_snapshot<SurfaceListUpdate, "surface.list">("surface.list", {
+					type: "surface.list",
+					query,
+				}),
+			SubscribeSurfaceUsageAggregate: (query) =>
+				subscribe_snapshot<SurfaceUsageAggregateUpdate, "surface.usage.aggregate">(
+					"surface.usage.aggregate",
+					{ type: "surface.usage.aggregate", query },
+				),
+			SubscribeWorkspaceConflicts: (thread_id) =>
+				subscribe_snapshot<WorkspaceConflictListUpdate, "workspace.conflict.list">(
+					"workspace.conflict.list",
+					{ type: "workspace.conflict.list", thread_id },
+				),
 		} satisfies ClientSubscriptionCoordinator;
 	});

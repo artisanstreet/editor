@@ -221,7 +221,7 @@ export const AgentOrchestratorLive = Layer.effect(
 
 				if (!live) {
 					if (work.kind === "steer") {
-						yield* repository.FallbackSteering(work.command_id);
+						yield* repository.FallbackSteering(work.command_id, "rejected");
 					} else {
 						yield* repository.MarkOutboxUndeliverable(work.command_id);
 					}
@@ -266,7 +266,7 @@ export const AgentOrchestratorLive = Layer.effect(
 				if (delivered) {
 					yield* repository.CompleteOutbox(work.command_id);
 				} else if (work.kind === "steer") {
-					yield* repository.FallbackSteering(work.command_id);
+					yield* repository.FallbackSteering(work.command_id, "delivery_failed");
 				} else {
 					yield* repository.MarkOutboxUndeliverable(work.command_id);
 				}
@@ -308,34 +308,44 @@ export const AgentOrchestratorLive = Layer.effect(
 			}
 		});
 
-		const CanSteer = (command: CommandEnvelope) =>
-			command.payload.type !== "thread.send_message"
-				? Effect.succeed(false)
-				: repository.GetAutoSteer(command.thread_id).pipe(
-						Effect.flatMap((enabled) =>
-							enabled
-								? repository.GetWork(command.thread_id).pipe(
-										Effect.flatMap((work) => {
-											if (
-												!work ||
-												(work.status !== "running" &&
-													work.status !== "waiting")
-											)
-												return Effect.succeed(false);
-
-											return engines.Get(work.engine_id).pipe(
-												Effect.map(
-													(engine) =>
-														engine.Descriptor.capabilities.steer
-															.state === "supported",
-												),
-												Effect.catch(() => Effect.succeed(false)),
-											);
-										}),
-									)
-								: Effect.succeed(false),
-						),
-					);
+		type RoutingDecision =
+			| { readonly can_steer: true }
+			| {
+					readonly can_steer: false;
+					readonly reason:
+						| "no_active_run"
+						| "disabled"
+						| "unsupported"
+						| "ambiguous_target";
+			  };
+		const CanSteer = (
+			command: CommandEnvelope,
+		): Effect.Effect<RoutingDecision, OrchestrationError> =>
+			Effect.gen(function* () {
+				if (command.payload.type !== "thread.send_message") {
+					return { can_steer: false, reason: "no_active_run" } as const;
+				}
+				const requested_engine_id = command.payload.engine_id;
+				if (!(yield* repository.GetAutoSteer(command.thread_id))) {
+					return { can_steer: false, reason: "disabled" } as const;
+				}
+				const work = yield* repository.GetWork(command.thread_id);
+				if (!work || (work.status !== "running" && work.status !== "waiting")) {
+					return { can_steer: false, reason: "no_active_run" } as const;
+				}
+				if (work.engine_id !== requested_engine_id) {
+					return { can_steer: false, reason: "ambiguous_target" } as const;
+				}
+				const supported = yield* engines.Get(work.engine_id).pipe(
+					Effect.map(
+						(engine) => engine.Descriptor.capabilities.steer.state === "supported",
+					),
+					Effect.catch(() => Effect.succeed(false)),
+				);
+				return supported
+					? ({ can_steer: true } as const)
+					: ({ can_steer: false, reason: "unsupported" } as const);
+			});
 
 		const Handle = (command: CommandEnvelope) =>
 			Effect.gen(function* () {
@@ -343,10 +353,12 @@ export const AgentOrchestratorLive = Layer.effect(
 					command.payload.type === "thread.send_message"
 						? yield* intake_policy.Assess(command.payload.text)
 						: undefined;
+				const routing = yield* CanSteer(command);
 				const accepted = yield* repository.Accept(
 					command,
-					yield* CanSteer(command),
+					routing.can_steer,
 					intake,
+					"reason" in routing ? routing.reason : undefined,
 				);
 
 				yield* WakeDispatcher;

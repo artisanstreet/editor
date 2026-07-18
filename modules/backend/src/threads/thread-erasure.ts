@@ -41,6 +41,7 @@ import {
 	WorkspaceChangeOperations,
 	WorkspaceChangeDiffs,
 	WorkspaceChanges,
+	WorkspaceConflicts,
 	WorkspaceChangeSnapshots,
 	WorkspaceMutationAuthorities,
 	WorkspaceMutationPayloads,
@@ -325,6 +326,11 @@ export const ThreadErasureLive = Layer.effect(
 						const tool_invocation_ids = tool_invocation_rows.map(
 							(invocation) => invocation.invocation_id,
 						);
+						const change_rows = yield* transaction
+							.select({ change_id: WorkspaceChanges.change_id })
+							.from(WorkspaceChanges)
+							.where(eq(WorkspaceChanges.thread_id, thread_id));
+						const change_ids = change_rows.map((change) => change.change_id);
 
 						if (run_ids.length > 0) {
 							yield* transaction
@@ -400,6 +406,14 @@ export const ThreadErasureLive = Layer.effect(
 						yield* transaction
 							.delete(LegacyWorkspaceChangeProjections)
 							.where(eq(LegacyWorkspaceChangeProjections.thread_id, thread_id));
+						yield* transaction
+							.delete(WorkspaceConflicts)
+							.where(eq(WorkspaceConflicts.attempting_thread_id, thread_id));
+						if (change_ids.length > 0) {
+							yield* transaction
+								.delete(WorkspaceConflicts)
+								.where(inArray(WorkspaceConflicts.competing_change_id, change_ids));
+						}
 						yield* transaction
 							.delete(WorkspaceChanges)
 							.where(eq(WorkspaceChanges.thread_id, thread_id));

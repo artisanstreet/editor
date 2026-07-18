@@ -222,6 +222,13 @@ export const WorkspaceChangeOperations = sqliteTable(
 		run_id: text("run_id"),
 		agent_id: text("agent_id"),
 		raw_origin_json: text("raw_origin_json"),
+		reviewer_agent_id: text("reviewer_agent_id"),
+		reviewer_kind: text("reviewer_kind"),
+		reviewer_run_id: text("reviewer_run_id"),
+		reviewer_assignment_id: text("reviewer_assignment_id"),
+		reviewer_group_id: text("reviewer_group_id"),
+		review_outcome: text("review_outcome"),
+		review_comment: text("review_comment"),
 		workspace_id: text("workspace_id"),
 		path: text("path"),
 		expected_identity_json: text("expected_identity_json"),
@@ -247,6 +254,18 @@ export const WorkspaceChangeOperations = sqliteTable(
 		check(
 			"workspace_change_operations_diff_format_version_check",
 			sql`${table.diff_format_version} = ${sql.raw(String(workspace_diff_format_version))}`,
+		),
+		check(
+			"workspace_change_operations_reviewer_shape_check",
+			sql`(${table.reviewer_kind} IS NULL AND ${table.reviewer_agent_id} IS NULL AND ${table.reviewer_run_id} IS NULL AND ${table.reviewer_assignment_id} IS NULL AND ${table.reviewer_group_id} IS NULL) OR (${table.reviewer_kind} = 'user' AND ${table.reviewer_agent_id} IS NULL AND ${table.reviewer_run_id} IS NULL AND ${table.reviewer_assignment_id} IS NULL AND ${table.reviewer_group_id} IS NULL) OR (${table.reviewer_kind} = 'graph' AND ${table.reviewer_agent_id} IS NOT NULL AND ${table.reviewer_run_id} IS NOT NULL AND ${table.reviewer_assignment_id} IS NOT NULL AND ${table.reviewer_group_id} IS NOT NULL)`,
+		),
+		check(
+			"workspace_change_operations_review_metadata_check",
+			sql`(${table.review_outcome} IS NULL OR ${table.review_outcome} IN ('approved', 'changes_requested')) AND (${table.review_comment} IS NULL OR length(${table.review_comment}) <= 4096)`,
+		),
+		check(
+			"workspace_change_operations_raw_origin_check",
+			sql`${table.raw_origin_json} IS NULL OR json_valid(${table.raw_origin_json})`,
 		),
 	],
 );
@@ -317,6 +336,15 @@ export const WorkspaceChanges = sqliteTable(
 		review_state: text("review_state").notNull(),
 		rollback_state: text("rollback_state").notNull(),
 		reviewed_at: text("reviewed_at"),
+		review_source_command_id: text("review_source_command_id"),
+		reviewer_agent_id: text("reviewer_agent_id"),
+		reviewer_kind: text("reviewer_kind"),
+		reviewer_run_id: text("reviewer_run_id"),
+		reviewer_assignment_id: text("reviewer_assignment_id"),
+		reviewer_group_id: text("reviewer_group_id"),
+		reviewer_raw_origin_json: text("reviewer_raw_origin_json"),
+		review_outcome: text("review_outcome"),
+		review_comment: text("review_comment"),
 		rolled_back_at: text("rolled_back_at"),
 		version: integer("version").notNull(),
 		created_at: text("created_at").notNull(),
@@ -330,6 +358,75 @@ export const WorkspaceChanges = sqliteTable(
 		check(
 			"workspace_changes_diff_state_check",
 			sql`${table.diff_state} IN ('available', 'legacy_unavailable')`,
+		),
+		check(
+			"workspace_changes_reviewer_shape_check",
+			sql`(${table.reviewer_kind} IS NULL AND ${table.reviewer_agent_id} IS NULL AND ${table.reviewer_run_id} IS NULL AND ${table.reviewer_assignment_id} IS NULL AND ${table.reviewer_group_id} IS NULL) OR (${table.reviewer_kind} = 'user' AND ${table.reviewer_agent_id} IS NULL AND ${table.reviewer_run_id} IS NULL AND ${table.reviewer_assignment_id} IS NULL AND ${table.reviewer_group_id} IS NULL) OR (${table.reviewer_kind} = 'graph' AND ${table.reviewer_agent_id} IS NOT NULL AND ${table.reviewer_run_id} IS NOT NULL AND ${table.reviewer_assignment_id} IS NOT NULL AND ${table.reviewer_group_id} IS NOT NULL)`,
+		),
+		check(
+			"workspace_changes_review_metadata_check",
+			sql`(${table.review_outcome} IS NULL OR ${table.review_outcome} IN ('approved', 'changes_requested')) AND (${table.review_comment} IS NULL OR length(${table.review_comment}) <= 4096)`,
+		),
+		check(
+			"workspace_changes_reviewer_raw_origin_check",
+			sql`${table.reviewer_raw_origin_json} IS NULL OR json_valid(${table.reviewer_raw_origin_json})`,
+		),
+	],
+);
+
+/** Stores source-free, idempotent workspace contention projections. */
+export const WorkspaceConflicts = sqliteTable(
+	"workspace_conflicts",
+	{
+		conflict_id: text("conflict_id").primaryKey(),
+		source_command_id: text("source_command_id").notNull().unique(),
+		change_id: text("change_id").notNull(),
+		attempting_thread_id: text("attempting_thread_id").notNull(),
+		attempting_run_id: text("attempting_run_id").notNull(),
+		attempting_agent_id: text("attempting_agent_id").notNull(),
+		assignment_id: text("assignment_id"),
+		group_id: text("group_id"),
+		workspace_id: text("workspace_id").notNull(),
+		path: text("path").notNull(),
+		expected_identity_json: text("expected_identity_json").notNull(),
+		observed_identity_json: text("observed_identity_json"),
+		competing_change_id: text("competing_change_id"),
+		raw_origin_json: text("raw_origin_json"),
+		resolution: text("resolution").notNull(),
+		detected_at: text("detected_at").notNull(),
+	},
+	(table) => [
+		index("workspace_conflicts_thread_index").on(table.attempting_thread_id),
+		index("workspace_conflicts_change_index").on(table.change_id),
+		check(
+			"workspace_conflicts_resolution_check",
+			sql`${table.resolution} IN ('rejected', 'reconciled', 'user_action_required')`,
+		),
+		check(
+			"workspace_conflicts_identity_check",
+			sql`
+				json_valid(${table.expected_identity_json})
+				AND json_extract(${table.expected_identity_json}, '$.algorithm') = 'sha256'
+				AND json_type(${table.expected_identity_json}, '$.byte_count') = 'integer'
+				AND json_extract(${table.expected_identity_json}, '$.byte_count') >= 0
+				AND length(json_extract(${table.expected_identity_json}, '$.content_hash')) = 64
+				AND json_extract(${table.expected_identity_json}, '$.content_hash') NOT GLOB '*[^0-9a-f]*'
+				AND (
+					${table.observed_identity_json} IS NULL
+					OR (
+						json_valid(${table.observed_identity_json})
+						AND json_extract(${table.observed_identity_json}, '$.algorithm') = 'sha256'
+						AND json_type(${table.observed_identity_json}, '$.byte_count') = 'integer'
+						AND json_extract(${table.observed_identity_json}, '$.byte_count') >= 0
+						AND length(json_extract(${table.observed_identity_json}, '$.content_hash')) = 64
+						AND json_extract(${table.observed_identity_json}, '$.content_hash') NOT GLOB '*[^0-9a-f]*'
+					)
+				)
+			`,
+		),
+		check(
+			"workspace_conflicts_raw_origin_check",
+			sql`${table.raw_origin_json} IS NULL OR json_valid(${table.raw_origin_json})`,
 		),
 	],
 );

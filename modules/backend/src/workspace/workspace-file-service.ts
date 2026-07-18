@@ -152,6 +152,14 @@ function review_fingerprint(input: WorkspaceFileReviewInput) {
 		message_id: input.message_id,
 		sent_at: input.sent_at,
 		thread_id: input.thread_id,
+		reviewer_kind: input.reviewer_kind ?? "user",
+		assignment_id: input.assignment_id,
+		comment: input.comment,
+		group_id: input.group_id,
+		outcome: input.outcome,
+		raw_origin: input.raw_origin,
+		reviewer_agent_id: input.reviewer_agent_id,
+		reviewer_run_id: input.reviewer_run_id,
 	});
 }
 
@@ -482,6 +490,7 @@ export const WorkspaceFileServiceLive = Layer.effect(
 									const reconciliation = yield* repository.ReconcileChanged({
 										message_id: decoded.message_id,
 										observation: "preflight_changed",
+										observed_identity: current_identity,
 									});
 
 									return yield* ResolvePreflight(reconciliation);
@@ -556,9 +565,15 @@ export const WorkspaceFileServiceLive = Layer.effect(
 						});
 
 						if (replace._tag === "Changed") {
+							const observed = yield* admission.store.ReadRegularFile(
+								decoded.path,
+								workspace_text_maximum_bytes,
+							);
+							const observed_identity = yield* ComputeIdentity(observed);
 							const reconciliation = yield* repository.ReconcileChanged({
 								message_id: decoded.message_id,
 								observation: "native_changed",
+								observed_identity,
 							});
 
 							return yield* pipe(
@@ -607,8 +622,26 @@ export const WorkspaceFileServiceLive = Layer.effect(
 							change_id: decoded.change_id,
 							message_id: decoded.message_id,
 							request_fingerprint,
+							reviewer_kind: decoded.reviewer_kind ?? "user",
 							sent_at: decoded.sent_at,
 							thread_id: decoded.thread_id,
+							...(decoded.assignment_id === undefined
+								? {}
+								: { assignment_id: decoded.assignment_id }),
+							...(decoded.comment === undefined ? {} : { comment: decoded.comment }),
+							...(decoded.group_id === undefined
+								? {}
+								: { group_id: decoded.group_id }),
+							...(decoded.outcome === undefined ? {} : { outcome: decoded.outcome }),
+							...(decoded.raw_origin === undefined
+								? {}
+								: { raw_origin: decoded.raw_origin }),
+							...(decoded.reviewer_agent_id === undefined
+								? {}
+								: { reviewer_agent_id: decoded.reviewer_agent_id }),
+							...(decoded.reviewer_run_id === undefined
+								? {}
+								: { reviewer_run_id: decoded.reviewer_run_id }),
 						});
 
 						if (claim._tag === "duplicate") {
@@ -819,6 +852,7 @@ export const WorkspaceFileServiceLive = Layer.effect(
 									const reconciliation = yield* repository.ReconcileChanged({
 										message_id: decoded.message_id,
 										observation: "preflight_changed",
+										observed_identity: current_identity,
 									});
 
 									return yield* ResolvePreflight(reconciliation);
@@ -881,9 +915,15 @@ export const WorkspaceFileServiceLive = Layer.effect(
 						});
 
 						if (replace._tag === "Changed") {
+							const observed = yield* admission.store.ReadRegularFile(
+								source.path,
+								workspace_text_maximum_bytes,
+							);
+							const observed_identity = yield* ComputeIdentity(observed);
 							const reconciliation = yield* repository.ReconcileChanged({
 								message_id: decoded.message_id,
 								observation: "native_changed",
+								observed_identity,
 							});
 
 							return yield* pipe(

@@ -79,6 +79,9 @@ export type PendingRequestEnvelope = Extract<
 			| "preview.target.register"
 			| "preview.target.remove"
 			| "preview.target.state"
+			| "thread.session.query"
+			| "surface.list.query"
+			| "surface.usage.aggregate.query"
 			| "terminal.list.query"
 			| "thread.list.query"
 			| "thread.transcript.query"
@@ -90,6 +93,7 @@ export type PendingRequestEnvelope = Extract<
 			| "workspace.language.capabilities.query"
 			| "workspace.file.replace"
 			| "workspace.change.list.query"
+			| "workspace.conflict.list.query"
 			| "workspace.change.diff.query"
 			| "workspace.change.review"
 			| "workspace.change.rollback";
@@ -120,6 +124,9 @@ export type PendingResultEnvelope = Extract<
 			| "preview.target.get.query.result"
 			| "preview.target.list.query.result"
 			| "preview.target.mutation.result"
+			| "thread.session.query.result"
+			| "surface.list.query.result"
+			| "surface.usage.aggregate.query.result"
 			| "terminal.list.query.result"
 			| "thread.list.query.result"
 			| "thread.transcript.query.result"
@@ -129,6 +136,7 @@ export type PendingResultEnvelope = Extract<
 			| "workspace.file.discovery.query.result"
 			| "workspace.language.capabilities.query.result"
 			| "workspace.change.list.query.result"
+			| "workspace.conflict.list.query.result"
 			| "workspace.change.diff.query.result";
 	}
 >;
