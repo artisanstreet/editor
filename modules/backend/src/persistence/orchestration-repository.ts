@@ -3,6 +3,7 @@ import { Context, Data, Effect, Layer, Schema } from "effect";
 
 import {
 	EventPayload,
+	ThreadSessionPolicy,
 	RawOrigin,
 	CommandPayload,
 	type CommandEnvelope,
@@ -93,6 +94,9 @@ export class OrchestrationRepository extends Context.Service<
 			thread_id: string,
 		) => Effect.Effect<ThreadWorkItem | undefined, OrchestrationError>;
 		readonly GetAutoSteer: (thread_id: string) => Effect.Effect<boolean, OrchestrationError>;
+		readonly GetSessionPolicy: (
+			thread_id: string,
+		) => Effect.Effect<ThreadSessionPolicy, OrchestrationError>;
 		readonly GetSession: (
 			thread_id: string,
 		) => Effect.Effect<ThreadSessionSnapshot, OrchestrationError>;
@@ -277,13 +281,76 @@ export const OrchestrationRepositoryLive = Layer.effect(
 					Effect.map(([row]) => row?.enabled ?? true),
 					Effect.mapError(normalize_error),
 				);
+		const DefaultSessionPolicy = {
+			engine_id: "codex",
+			reasoning_effort: "medium",
+			permission_mode: "on_request",
+			sandbox_mode: "workspace_write",
+			web_search_enabled: false,
+			strict_clarification: false,
+		} as const satisfies ThreadSessionPolicy;
+		const DecodeSessionPolicy = (
+			row:
+				| {
+						readonly policy_model: string | null;
+						readonly policy_reasoning_effort: string;
+						readonly policy_permission_mode: string;
+						readonly policy_sandbox_mode: string;
+						readonly policy_web_search_enabled: boolean;
+						readonly policy_strict_clarification: boolean;
+				  }
+				| undefined,
+		) =>
+			row
+				? Schema.decodeUnknownEffect(ThreadSessionPolicy, {
+						onExcessProperty: "error",
+					})({
+						engine_id: "codex",
+						...(row.policy_model === null ? {} : { model: row.policy_model }),
+						reasoning_effort: row.policy_reasoning_effort,
+						permission_mode: row.policy_permission_mode,
+						sandbox_mode: row.policy_sandbox_mode,
+						web_search_enabled: row.policy_web_search_enabled,
+						strict_clarification: row.policy_strict_clarification,
+					}).pipe(Effect.mapError((cause) => new OrchestrationFailure({ cause })))
+				: Effect.succeed(DefaultSessionPolicy);
+		const GetSessionPolicy = (thread_id: string) =>
+			database.client
+				.select({
+					policy_model: OrchestrationCoordinators.policy_model,
+					policy_reasoning_effort: OrchestrationCoordinators.policy_reasoning_effort,
+					policy_permission_mode: OrchestrationCoordinators.policy_permission_mode,
+					policy_sandbox_mode: OrchestrationCoordinators.policy_sandbox_mode,
+					policy_web_search_enabled: OrchestrationCoordinators.policy_web_search_enabled,
+					policy_strict_clarification:
+						OrchestrationCoordinators.policy_strict_clarification,
+				})
+				.from(OrchestrationCoordinators)
+				.where(eq(OrchestrationCoordinators.thread_id, thread_id))
+				.limit(1)
+				.pipe(
+					Effect.flatMap(([row]) => DecodeSessionPolicy(row)),
+					Effect.mapError(normalize_error),
+				);
 
 		const GetSession = (thread_id: string) =>
 			database.client
 				.transaction((transaction) =>
 					Effect.gen(function* () {
 						const [coordinator] = yield* transaction
-							.select({ enabled: OrchestrationCoordinators.auto_steer_follow_ups })
+							.select({
+								enabled: OrchestrationCoordinators.auto_steer_follow_ups,
+								policy_model: OrchestrationCoordinators.policy_model,
+								policy_reasoning_effort:
+									OrchestrationCoordinators.policy_reasoning_effort,
+								policy_permission_mode:
+									OrchestrationCoordinators.policy_permission_mode,
+								policy_sandbox_mode: OrchestrationCoordinators.policy_sandbox_mode,
+								policy_web_search_enabled:
+									OrchestrationCoordinators.policy_web_search_enabled,
+								policy_strict_clarification:
+									OrchestrationCoordinators.policy_strict_clarification,
+							})
 							.from(OrchestrationCoordinators)
 							.where(eq(OrchestrationCoordinators.thread_id, thread_id))
 							.limit(1);
@@ -332,6 +399,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 							thread_id,
 							journal_sequence: watermark?.journal_sequence ?? 0,
 							auto_steer_enabled: coordinator?.enabled ?? true,
+							policy: yield* DecodeSessionPolicy(coordinator),
 							...(intake
 								? {
 										latest_intake: {
@@ -563,6 +631,73 @@ export const OrchestrationRepositoryLive = Layer.effect(
 								events: [event],
 								journal_sequence: event.journal_sequence,
 								run_id: coordinator.active_run_id ?? "none",
+								status: "accepted" as const,
+							};
+						}
+						if (payload.type === "thread.session_policy.update") {
+							const agent_id =
+								coordinator?.agent_id ?? (yield* metadata.MakeId("agent"));
+							yield* transaction.insert(JournalCommands).values({
+								accepted_at,
+								agent_id: command.agent_id ?? null,
+								causation_id: command.causation_id ?? null,
+								message_id: command.message_id,
+								origin: command.origin,
+								payload_json,
+								payload_type: payload.type,
+								raw_origin_json,
+								assigned_run_id: coordinator?.active_run_id ?? null,
+								run_id: command.run_id ?? null,
+								schema_version: command.schema_version,
+								sent_at: command.sent_at,
+								status: "accepted",
+								thread_id: command.thread_id,
+							});
+							const policy_columns = {
+								engine_id: "codex",
+								policy_model: payload.policy.model ?? null,
+								policy_reasoning_effort: payload.policy.reasoning_effort,
+								policy_permission_mode: payload.policy.permission_mode,
+								policy_sandbox_mode: payload.policy.sandbox_mode,
+								policy_web_search_enabled: payload.policy.web_search_enabled,
+								policy_strict_clarification: payload.policy.strict_clarification,
+								updated_at: accepted_at,
+							};
+							if (coordinator) {
+								yield* transaction
+									.update(OrchestrationCoordinators)
+									.set(policy_columns)
+									.where(
+										eq(OrchestrationCoordinators.thread_id, command.thread_id),
+									);
+							} else {
+								yield* transaction.insert(OrchestrationCoordinators).values({
+									active_run_id: null,
+									agent_id,
+									auto_steer_follow_ups: true,
+									created_at: accepted_at,
+									display_name: "Primary coordinator",
+									native_resume_json: null,
+									native_thread_id: null,
+									role: "primary",
+									thread_id: command.thread_id,
+									...policy_columns,
+								});
+							}
+							const event = yield* AppendEvent(transaction, {
+								agent_id,
+								causation_id: command.message_id,
+								correlation_id: command.message_id,
+								payload: {
+									type: "thread.session_policy.updated",
+									policy: payload.policy,
+								},
+								thread_id: command.thread_id,
+							});
+							return {
+								events: [event],
+								journal_sequence: event.journal_sequence,
+								run_id: coordinator?.active_run_id ?? "none",
 								status: "accepted" as const,
 							};
 						}
@@ -1852,6 +1987,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 			FallbackSteering,
 			GetPending,
 			GetAutoSteer,
+			GetSessionPolicy,
 			GetSession,
 			GetWork,
 			MarkInterrupted,

@@ -666,6 +666,7 @@ describe("Codex exec fallback", () => {
 							provider_options: {
 								"codex.exec.profile": "fixture-profile",
 								"codex.exec.skip_git_repo_check": true,
+								"codex.reasoning_effort": "high",
 							},
 							working_directory: "C:\\workspace",
 						});
@@ -706,6 +707,8 @@ describe("Codex exec fallback", () => {
 					'approval_policy="on-request"',
 					"-c",
 					"sandbox_workspace_write.network_access=false",
+					"-c",
+					'model_reasoning_effort="high"',
 					"--profile",
 					"fixture-profile",
 					"--sandbox",

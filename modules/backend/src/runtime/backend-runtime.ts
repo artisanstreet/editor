@@ -10,7 +10,6 @@ import {
 	EngineProcessFactoryLive,
 	make_engine_registry_layer,
 } from "@artisan/engines";
-import type { GlobalGuidanceProvider } from "@artisan/protocol";
 
 import { AgentGraphOrchestratorLive } from "../orchestration/agent-graph-orchestrator";
 import { AgentGraphRepositoryLive } from "../orchestration/agent-graph-repository";
@@ -232,10 +231,8 @@ export interface BackendOptions {
 
 /** Configures platform-native provider discovery for the production desktop composition. */
 export interface DesktopGuidanceOptions {
-	readonly claude_config_directory?: string;
 	readonly codex_home?: string;
 	readonly home_directory?: string;
-	readonly providers?: ReadonlyArray<GlobalGuidanceProvider>;
 }
 
 /** Configures provider-native Model Behaviour discovery for desktop composition. */
@@ -372,6 +369,7 @@ export function make_backend_layer(options: BackendOptions) {
 	const graph_persistence = AgentGraphRepositoryLive.pipe(Layer.provideMerge(infrastructure));
 	const graph = AgentGraphOrchestratorLive.pipe(
 		Layer.provideMerge(graph_persistence),
+		Layer.provideMerge(persistence),
 		Layer.provideMerge(engine_registry),
 		Layer.provideMerge(infrastructure),
 		Layer.provideMerge(guidance),
@@ -601,10 +599,6 @@ export function make_backend_layer(options: BackendOptions) {
 	);
 }
 
-function is_guidance_provider(value: string): value is GlobalGuidanceProvider {
-	return value === "claude" || value === "codex";
-}
-
 function make_desktop_guidance_registry(options: DesktopBackendOptions) {
 	const configured_home_directory = options.guidance_platform?.home_directory;
 	const home_directory = configured_home_directory ?? homedir();
@@ -612,24 +606,10 @@ function make_desktop_guidance_registry(options: DesktopBackendOptions) {
 		options.guidance_platform?.codex_home ??
 		(configured_home_directory === undefined ? process.env.CODEX_HOME : undefined) ??
 		join(home_directory, ".codex");
-	const claude_config_directory =
-		options.guidance_platform?.claude_config_directory ??
-		(configured_home_directory === undefined ? process.env.CLAUDE_CONFIG_DIR : undefined) ??
-		join(home_directory, ".claude");
-	const providers = [
-		...new Set(
-			options.guidance_platform?.providers ??
-				(options.engines ?? [])
-					.map((engine) => engine.Descriptor.id)
-					.filter(is_guidance_provider),
-		),
-	];
 
 	return make_platform_guidance_provider_registry_layer({
-		claude_path: join(claude_config_directory, "CLAUDE.md"),
 		codex_agents_path: join(codex_home, "AGENTS.md"),
 		codex_override_path: join(codex_home, "AGENTS.override.md"),
-		providers,
 	}).pipe(Layer.provide(GuidanceFileStoreLive));
 }
 
@@ -658,6 +638,9 @@ function make_desktop_model_behaviour_registry(options: DesktopBackendOptions) {
 
 /** Builds the production desktop layer with opinionated platform guidance discovery. */
 export function make_desktop_backend_layer(options: DesktopBackendOptions) {
+	if ((options.engines ?? []).some((engine) => engine.Descriptor.id !== "codex")) {
+		throw new Error("Desktop production accepts only the Codex engine.");
+	}
 	const production_capability_transports = CapabilityTransportRegistryLive.pipe(
 		Layer.provideMerge(EngineProcessStdioMcpDriverLive),
 		Layer.provideMerge(EngineProcessFactoryLive),

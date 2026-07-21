@@ -13,6 +13,7 @@ import {
 	make_backend_runtime,
 	type NativeBoundedRegularFileStoreOptions,
 	ProtocolRouter,
+	ThreadRetentionClock,
 	ThreadRetentionScheduler,
 	WorkspaceChangeRepository,
 	WorkspaceFileService,
@@ -461,6 +462,7 @@ function make_runtime(
 	return make_backend_runtime({
 		database_path,
 		migrations_path,
+		retention_clock: Layer.succeed(ThreadRetentionClock, { Now: Effect.succeed(now) }),
 		retention_scheduler: make_inert_scheduler_layer(),
 		runtime_metadata: make_metadata_layer(instance_id),
 		...(workspace_bounded_regular_file_store_registry === undefined

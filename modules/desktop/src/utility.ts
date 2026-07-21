@@ -1,3 +1,7 @@
+import { createRequire } from "node:module";
+import { tmpdir } from "node:os";
+import { mkdirSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Effect, Layer, ManagedRuntime } from "effect";
@@ -19,6 +23,28 @@ interface UtilityEnvironment {
 	readonly database_path: string;
 	readonly migrations_path: string;
 }
+
+const report_utility_diagnostic = (kind: string, value: Readonly<Record<string, unknown>> = {}) =>
+	process.parentPort?.postMessage({ kind, ...value });
+
+const describe_error = (cause: unknown, depth = 0): unknown => {
+	if (depth >= 4 || typeof cause !== "object" || cause === null) return String(cause);
+	const candidate = cause as Record<string, unknown>;
+	return {
+		_tag: candidate._tag,
+		cause: describe_error(candidate.cause, depth + 1),
+		code: candidate.code,
+		dropped_messages: candidate.dropped_messages,
+		message: cause instanceof Error ? cause.message : candidate.message,
+		name: cause instanceof Error ? cause.name : candidate.name,
+	};
+};
+
+const error_diagnostic = (cause: unknown) => ({
+	details: describe_error(cause),
+	message: cause instanceof Error ? cause.message : "Unknown utility failure",
+	stack: cause instanceof Error ? cause.stack : undefined,
+});
 
 function parent_message(
 	value: unknown,
@@ -45,9 +71,66 @@ function read_environment(): UtilityEnvironment {
 	return { database_path, migrations_path };
 }
 
+/** Opens the exact staged native modules, without consulting externally injected NODE_PATH entries. */
+function verify_packaged_native_runtime() {
+	const require = createRequire(import.meta.url);
+	const koffi_native_binding_path =
+		require.resolve("./native-runtime/@koromix/koffi-win32-x64/win32_x64/koffi.node");
+	const koffi_module_path = require.resolve("./native-runtime/@koromix/koffi-win32-x64");
+	const koffi = require(koffi_module_path) as { readonly version?: string };
+	if (koffi.version !== "3.1.1") {
+		throw new Error("Packaged Koffi runtime did not load the expected native binding");
+	}
+	const node_pty_module_path = require.resolve("./native-runtime/node-pty");
+	const node_pty = require(node_pty_module_path) as {
+		readonly spawn: (
+			file: string,
+			args: ReadonlyArray<string>,
+			options: Readonly<Record<string, unknown>>,
+		) => { readonly kill: () => void };
+	};
+	const terminal = node_pty.spawn(process.execPath, ["-e", "process.exit(0)"], {
+		cols: 1,
+		cwd: tmpdir(),
+		env: { ...process.env },
+		name: "xterm-256color",
+		rows: 1,
+	});
+	terminal.kill();
+
+	const bounded_native_binding_path =
+		require.resolve("./native-runtime/@artisan/bounded-file-store-native/bounded_file_store_native.win32-x64-msvc.node");
+	const bounded_native = require(bounded_native_binding_path) as {
+		readonly NativeBoundedRegularFileStore: new (
+			root: string,
+			receipt_authentication_key: Uint8Array,
+		) => { readonly close: () => unknown };
+	};
+	const smoke_root = process.env.ARTISAN_PACKAGED_SMOKE_ROOT;
+	if (!smoke_root) {
+		throw new Error("Packaged desktop smoke requires an isolated smoke root");
+	}
+	const store_root = join(smoke_root, "native-store");
+	mkdirSync(store_root, { recursive: true });
+	const store = new bounded_native.NativeBoundedRegularFileStore(store_root, new Uint8Array(32));
+	store.close();
+
+	return {
+		bounded_native_binding_path,
+		koffi_native_binding_path,
+		native_store_root: store_root,
+		node_pty_module_path,
+	};
+}
+
 /** Starts the desktop-only backend runtime and serves each current connection generation. */
 export const StartUtility = async () => {
 	const environment = read_environment();
+	mkdirSync(dirname(environment.database_path), { recursive: true });
+	if (process.env.ARTISAN_PACKAGED_SMOKE === "1") {
+		const native_load = verify_packaged_native_runtime();
+		process.parentPort?.postMessage({ kind: "artisan:smoke-native-load", ...native_load });
+	}
 	const engine_runtime = ManagedRuntime.make(
 		make_codex_engine_layer().pipe(Layer.provide(CodexProcessFactoryLive)),
 	);
@@ -64,6 +147,7 @@ export const StartUtility = async () => {
 		),
 	);
 	const server = await transport_runtime.runPromise(MessagePortTransportServer);
+	report_utility_diagnostic("artisan:utility-ready");
 	const active_generations = new Map<number, ReadonlyArray<{ readonly close: () => void }>>();
 	const active_serves = new Set<Promise<void>>();
 	let shutting_down = false;
@@ -126,6 +210,10 @@ export const StartUtility = async () => {
 				if (message.kind !== "artisan:connect" || event.ports.length !== 2) {
 					return;
 				}
+				report_utility_diagnostic("artisan:utility-connect", {
+					generation,
+					port_count: event.ports.length,
+				});
 
 				const raw_ports = event.ports as ReadonlyArray<{ readonly close: () => void }>;
 
@@ -146,6 +234,12 @@ export const StartUtility = async () => {
 							}),
 						),
 					)
+					.catch((cause) => {
+						report_utility_diagnostic("artisan:utility-serve-failure", {
+							generation,
+							...error_diagnostic(cause),
+						});
+					})
 					.finally(() => {
 						active_generations.delete(generation);
 						active_serves.delete(serve);
@@ -157,5 +251,7 @@ export const StartUtility = async () => {
 };
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-	void StartUtility();
+	void StartUtility().catch((cause) => {
+		report_utility_diagnostic("artisan:utility-fatal", error_diagnostic(cause));
+	});
 }

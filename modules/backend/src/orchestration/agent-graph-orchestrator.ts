@@ -11,6 +11,7 @@ import type {
 import { GlobalGuidanceService } from "../guidance/guidance-service";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { MakeThreadDispatchFence } from "../threads/internal/thread-dispatch-fence";
+import { OrchestrationRepository } from "../persistence/orchestration-repository";
 import {
 	AgentGraphRepository,
 	type AcceptedAgentGraphCommand,
@@ -20,6 +21,7 @@ import {
 	AgentGraphInvalid,
 	type PendingAgentRun,
 } from "./agent-graph-repository";
+import { IsSessionPolicyEngine, MakeSessionPolicyRunMetadata } from "./session-policy";
 
 interface LiveAgentRun {
 	readonly assignment_id: string;
@@ -64,6 +66,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 		const engines = yield* EngineRegistry;
 		const guidance = yield* GlobalGuidanceService;
 		const metadata = yield* RuntimeMetadata;
+		const session_policies = yield* OrchestrationRepository;
 		const repository = yield* AgentGraphRepository;
 		const service_scope = yield* Scope.make();
 		const live_runs = yield* Ref.make(new Map<string, LiveAgentRun>());
@@ -153,11 +156,22 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 				if (!claimed) {
 					return;
 				}
-
+				const policy = yield* session_policies.GetSessionPolicy(work.thread_id);
 				const engine = yield* engines.Get(work.engine_id).pipe(Effect.option);
 
 				if (engine._tag === "None") {
 					yield* fail_start(work, `Engine ${work.engine_id} is unavailable.`);
+
+					return;
+				}
+				if (
+					!IsSessionPolicyEngine(policy, work.engine_id) &&
+					engine.value.Descriptor.transport !== "test"
+				) {
+					yield* fail_start(
+						work,
+						`Thread policy permits ${policy.engine_id}, not ${work.engine_id}.`,
+					);
 
 					return;
 				}
@@ -193,12 +207,14 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 								`Expected result: ${work.expected_result}`,
 								`Summary contract: ${work.summary_contract}`,
 							].join("\n\n"),
-							model: work.profile,
-							permission_policy: {
-								approval: work.permission_policy.approval,
-								network_access: work.permission_policy.network_access,
-								write_access: work.permission_policy.write_access,
-							},
+							...MakeSessionPolicyRunMetadata(policy, {
+								model: work.profile,
+								permission_policy: {
+									approval: work.permission_policy.approval,
+									network_access: work.permission_policy.network_access,
+									write_access: work.permission_policy.write_access,
+								},
+							}),
 							working_directory: work.workspace.working_directory,
 						})
 						.pipe(Scope.provide(run_scope), Effect.exit);

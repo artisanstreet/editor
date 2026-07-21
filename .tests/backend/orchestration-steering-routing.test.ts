@@ -49,6 +49,7 @@ function make_engine(
 ) {
 	const commands: Array<EngineCommand> = [];
 	const opened: Array<string> = [];
+	const open_inputs: Array<Parameters<Engine["Open"]>[0]> = [];
 	const closed: Array<Deferred.Deferred<"closed">> = [];
 	const capabilities = Object.fromEntries(
 		[
@@ -73,6 +74,7 @@ function make_engine(
 		Open: (input) =>
 			Effect.gen(function* () {
 				opened.push(input.artisan_run_id);
+				open_inputs.push(input);
 				const run_closed = yield* Deferred.make<"closed">();
 				closed.push(run_closed);
 				yield* Effect.addFinalizer(() => Deferred.succeed(run_closed, "closed"));
@@ -98,7 +100,7 @@ function make_engine(
 			}),
 		Probe: () => Effect.die("not used"),
 	};
-	return { closed, commands, engine, opened };
+	return { closed, commands, engine, open_inputs, opened };
 }
 
 async function wait_for(predicate: () => boolean | Promise<boolean>) {
@@ -173,6 +175,44 @@ afterEach(async () => {
 });
 
 describe("thread follow-up steering routing", () => {
+	it("resolves durable thread policy into the normal engine launch metadata", async () => {
+		const policy_engine = make_engine("policy-engine");
+		const context = await setup([policy_engine.engine]);
+
+		try {
+			await context.runtime.runPromise(
+				context.orchestrator.Handle(
+					command("set_policy", context.thread_id, {
+						policy: {
+							engine_id: "codex",
+							model: "gpt-5.3-codex",
+							permission_mode: "never",
+							reasoning_effort: "xhigh",
+							sandbox_mode: "read_only",
+							strict_clarification: true,
+							web_search_enabled: true,
+						},
+						type: "thread.session_policy.update",
+					}),
+				),
+			);
+			await start(context, "policy-engine");
+			await wait_for(() => policy_engine.open_inputs.length === 1);
+
+			expect(policy_engine.open_inputs[0]).toMatchObject({
+				model: "gpt-5.3-codex",
+				permission_policy: {
+					approval: "never",
+					network_access: false,
+					write_access: false,
+				},
+				provider_options: { "codex.reasoning_effort": "xhigh" },
+			});
+		} finally {
+			await context.runtime.dispose();
+		}
+	});
+
 	it("steers a capable active run by default and exact retries do not redeliver", async () => {
 		const capable = make_engine("capable");
 		const context = await setup([capable.engine]);

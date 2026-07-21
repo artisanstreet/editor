@@ -38,9 +38,34 @@ export const BackendBinaryStreamSourceLive = Layer.effect(
 
 		const open = (stream_id: string) => {
 			if (stream_id.startsWith("terminal:")) {
-				const terminal_id = stream_id.slice("terminal:".length);
+				const parts = stream_id.slice("terminal:".length).split(":");
+				if (parts.length !== 3) {
+					return Effect.fail(
+						source_error(
+							stream_id,
+							"unsupported",
+							new Error("terminal stream scope is required"),
+						),
+					);
+				}
+				const [thread_id, workspace_id, terminal_id] = parts.map((part) =>
+					decodeURIComponent(part),
+				);
+				if (
+					thread_id === undefined ||
+					workspace_id === undefined ||
+					terminal_id === undefined
+				) {
+					return Effect.fail(
+						source_error(
+							stream_id,
+							"unsupported",
+							new Error("terminal stream scope is invalid"),
+						),
+					);
+				}
 
-				return terminals.Output(terminal_id).pipe(
+				return terminals.Output({ terminal_id, thread_id, workspace_id }).pipe(
 					Effect.map((output) =>
 						output.pipe(
 							Stream.mapError((cause) =>

@@ -232,6 +232,24 @@ export const ThreadAutoSteerUpdateCommand = Schema.Struct({
 	enabled: Schema.Boolean,
 });
 
+/** The durable, provider-neutral launch policy selected for one thread. */
+export const ThreadSessionPolicy = Schema.Struct({
+	engine_id: Schema.Literal("codex"),
+	model: Schema.optional(Schema.NonEmptyString),
+	reasoning_effort: Schema.Literals(["low", "medium", "high", "xhigh"]),
+	permission_mode: Schema.Literals(["never", "on_request"]),
+	sandbox_mode: Schema.Literals(["read_only", "workspace_write"]),
+	web_search_enabled: Schema.Boolean,
+	strict_clarification: Schema.Boolean,
+});
+export type ThreadSessionPolicy = typeof ThreadSessionPolicy.Type;
+
+/** Replaces the complete policy atomically, so retries have one exact intent. */
+export const ThreadSessionPolicyUpdateCommand = Schema.Struct({
+	type: Schema.Literal("thread.session_policy.update"),
+	policy: ThreadSessionPolicy,
+});
+
 /** Resolves one Artisan intake question before a run is created. */
 export const IntakeRespondQuestionCommand = Schema.Struct({
 	type: Schema.Literal("intake.respond_question"),
@@ -290,6 +308,13 @@ export const TerminalCloseCommand = Schema.Struct({
 export const TerminalRestartCommand = Schema.Struct({
 	type: Schema.Literal("terminal.restart"),
 	terminal_id: Identifier,
+});
+
+/** Keeps a terminal visible across ordinary session cleanup without changing its authority. */
+export const TerminalPinCommand = Schema.Struct({
+	type: Schema.Literal("terminal.pin"),
+	terminal_id: Identifier,
+	pinned: Schema.Boolean,
 });
 
 /** Describes the bounded resource surface delegated to one assignment. */
@@ -548,6 +573,7 @@ export const CommandPayload = Schema.Union([
 	ThreadRetentionUpdateCommand,
 	ThreadSendMessageCommand,
 	ThreadAutoSteerUpdateCommand,
+	ThreadSessionPolicyUpdateCommand,
 	IntakeRespondQuestionCommand,
 	TerminalOpenCommand,
 	TerminalWriteCommand,
@@ -556,6 +582,7 @@ export const CommandPayload = Schema.Union([
 	TerminalKillCommand,
 	TerminalCloseCommand,
 	TerminalRestartCommand,
+	TerminalPinCommand,
 	OrchestrationGroupStartCommand,
 	AgentInstanceRenameCommand,
 	AssignmentHeartbeatCommand,
@@ -710,6 +737,7 @@ export const ThreadSessionSnapshot = Schema.Struct({
 	thread_id: Identifier,
 	journal_sequence: JournalSequence,
 	auto_steer_enabled: Schema.Boolean,
+	policy: ThreadSessionPolicy,
 	latest_intake: Schema.optional(
 		Schema.Struct({
 			message_id: Identifier,
@@ -796,6 +824,12 @@ export const ThreadAutoSteerUpdatedEvent = Schema.Struct({
 	enabled: Schema.Boolean,
 });
 
+/** Records the authoritative policy used by later engine launches. */
+export const ThreadSessionPolicyUpdatedEvent = Schema.Struct({
+	type: Schema.Literal("thread.session_policy.updated"),
+	policy: ThreadSessionPolicy,
+});
+
 /** Records an attributed filesystem mutation without retaining file content. */
 export const FilesystemMutationEvent = Schema.Struct({
 	destination_path: Schema.optional(Schema.NonEmptyString),
@@ -821,6 +855,20 @@ export const GitWorkspaceObservedEvent = Schema.Struct({
 	worktree_path: Schema.NonEmptyString,
 });
 
+/** Identifies the principal that launched a durable terminal session. */
+export const TerminalOwnership = Schema.Union([
+	Schema.Struct({ kind: Schema.Literal("user") }),
+	Schema.Struct({ kind: Schema.Literal("agent"), agent_id: Identifier, run_id: Identifier }),
+]);
+
+/** Describes a local preview registered against a terminal, not a discovered process port. */
+export const TerminalPreviewTarget = Schema.Struct({
+	target_id: Identifier,
+	url: Schema.NonEmptyString,
+	port: PositiveInt,
+	state: Schema.NonEmptyString,
+});
+
 /** Describes durable metadata for a terminal session. */
 export const TerminalSession = Schema.Struct({
 	terminal_id: Identifier,
@@ -833,6 +881,9 @@ export const TerminalSession = Schema.Struct({
 	generation: PositiveInt,
 	rows: PositiveInt,
 	pid: Schema.optional(PositiveInt),
+	ownership: Schema.optional(TerminalOwnership),
+	pinned: Schema.optional(Schema.Boolean),
+	associated_previews: Schema.optional(Schema.Array(TerminalPreviewTarget)),
 	state: Schema.Literals(["opening", "active", "closed", "failed"]),
 	exit_code: Schema.optional(Schema.Int),
 	exit_signal: Schema.optional(Schema.Int),
@@ -1082,6 +1133,8 @@ export const TerminalLifecycleEvent = Schema.Struct({
 		"exited",
 		"failed",
 		"recovered",
+		"pinned",
+		"unpinned",
 	]),
 	terminal: TerminalSession,
 });
@@ -1116,6 +1169,7 @@ export const EventPayload = Schema.Union([
 	IntakeAssessmentEvent,
 	IntakeAssumptionEvent,
 	ThreadAutoSteerUpdatedEvent,
+	ThreadSessionPolicyUpdatedEvent,
 	FilesystemMutationEvent,
 	ProcessOwnershipEvent,
 	GitWorkspaceObservedEvent,

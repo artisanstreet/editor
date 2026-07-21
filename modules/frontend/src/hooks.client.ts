@@ -1,7 +1,7 @@
 import { ClientRuntime } from "svelte-effect-runtime";
 
-import { FrontendRuntimeLive } from "$lib/runtime/frontend-runtime";
+import { BrowserFrontendRuntimeLive } from "$lib/runtime/browser-frontend-runtime";
 
 export const init = () => {
-	ClientRuntime.make(FrontendRuntimeLive);
+	ClientRuntime.make(BrowserFrontendRuntimeLive);
 };

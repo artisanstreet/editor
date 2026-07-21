@@ -48,7 +48,8 @@ export const CommandRouterLive = Layer.effect(
 						? thread_commands.HandleProjectAffinity(command)
 						: command.payload.type.startsWith("thread.") &&
 							  command.payload.type !== "thread.send_message" &&
-							  command.payload.type !== "thread.auto_steer.update"
+							  command.payload.type !== "thread.auto_steer.update" &&
+							  command.payload.type !== "thread.session_policy.update"
 							? thread_commands.HandleMetadata(command)
 							: command.payload.type.startsWith("terminal.")
 								? terminals.Handle(command).pipe(

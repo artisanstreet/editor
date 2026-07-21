@@ -12,6 +12,7 @@ export {
 } from "./electron-message-port";
 export {
 	DesktopSessionConnectionType,
+	type DesktopIdentity,
 	type DesktopSessionBridge,
 	type DesktopSessionConnection,
 } from "./desktop-session";

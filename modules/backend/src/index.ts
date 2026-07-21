@@ -53,7 +53,6 @@ export {
 export {
 	EmptyGuidanceProviderRegistryLive,
 	GuidanceProviderRegistry,
-	make_claude_guidance_adapter,
 	make_codex_guidance_adapter,
 	make_guidance_provider_registry_layer,
 	make_platform_guidance_provider_registry_layer,

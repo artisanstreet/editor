@@ -67,6 +67,19 @@ const SetupThread = (thread_id: string) =>
 		});
 	});
 
+const SetupFreshThread = (thread_id: string) =>
+	Effect.gen(function* () {
+		const database = yield* Database;
+
+		yield* database.client.insert(Threads).values({
+			created_at: "2099-01-01T00:00:00.000Z",
+			last_activity_at: "2099-01-01T00:00:00.000Z",
+			thread_id,
+			title: thread_id,
+			updated_at: "2099-01-01T00:00:00.000Z",
+		});
+	});
+
 const Accept = (command: CommandEnvelope, intake?: IntakeAssessment) =>
 	Effect.gen(function* () {
 		const repository = yield* OrchestrationRepository;
@@ -577,6 +590,126 @@ describe("orchestration repository hardening", () => {
 			);
 
 			expect(intake).toEqual([]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("persists an exact Codex-only session policy across restart and erasure", async () => {
+		const database_path = await make_database_path();
+		const policy = {
+			engine_id: "codex" as const,
+			model: "gpt-5.3-codex",
+			permission_mode: "on_request" as const,
+			reasoning_effort: "high" as const,
+			sandbox_mode: "workspace_write" as const,
+			strict_clarification: true,
+			web_search_enabled: true,
+		};
+		const command = make_command("policy_1", "thread_1", {
+			type: "thread.session_policy.update",
+			policy,
+		});
+		const first_runtime = make_backend_runtime({ database_path, migrations_path });
+
+		try {
+			await first_runtime.runPromise(SetupFreshThread("thread_1"));
+			const accepted = await first_runtime.runPromise(Accept(command));
+			const duplicate = await first_runtime.runPromise(Accept(command));
+			const persisted = await first_runtime.runPromise(
+				Effect.gen(function* () {
+					return yield* (yield* OrchestrationRepository).GetSession("thread_1");
+				}),
+			);
+
+			expect(accepted.events).toMatchObject([
+				{
+					payload: {
+						type: "thread.session_policy.updated",
+						policy,
+					},
+				},
+			]);
+			expect(duplicate).toMatchObject({
+				journal_sequence: accepted.journal_sequence,
+				status: "duplicate",
+			});
+			expect(persisted.policy).toEqual(policy);
+		} finally {
+			await first_runtime.dispose();
+		}
+
+		const restarted_runtime = make_backend_runtime({ database_path, migrations_path });
+		try {
+			const session = await restarted_runtime.runPromise(
+				Effect.gen(function* () {
+					return yield* (yield* OrchestrationRepository).GetSession("thread_1");
+				}),
+			);
+			const journal = await restarted_runtime.runPromise(
+				Read((database) => database.select().from(JournalEvents)),
+			);
+			expect(
+				journal.some((event) => event.event_type === "thread.session_policy.updated"),
+			).toBe(true);
+			expect(session.policy).toEqual(policy);
+			await restarted_runtime.runPromise(
+				Effect.gen(function* () {
+					return yield* (yield* ThreadErasure).CleanupExpired(
+						"9999-01-01T00:00:00.000Z",
+						"2026-07-18T12:00:00.000Z",
+					);
+				}),
+			);
+			const erased = await restarted_runtime.runPromise(
+				Effect.gen(function* () {
+					return yield* (yield* OrchestrationRepository).GetSession("thread_1");
+				}),
+			);
+			expect(erased.policy).toMatchObject({ engine_id: "codex", reasoning_effort: "medium" });
+		} finally {
+			await restarted_runtime.dispose();
+		}
+	});
+
+	it("rejects corrupt persisted session policy rows instead of casting them into launches", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			migrations_path,
+		});
+
+		try {
+			await runtime.runPromise(SetupThread("thread_1"));
+			await runtime.runPromise(
+				Accept(
+					make_command("policy_corrupt", "thread_1", {
+						policy: {
+							engine_id: "codex",
+							permission_mode: "on_request",
+							reasoning_effort: "medium",
+							sandbox_mode: "workspace_write",
+							strict_clarification: false,
+							web_search_enabled: false,
+						},
+						type: "thread.session_policy.update",
+					}),
+				),
+			);
+			await runtime.runPromise(
+				Read((database) =>
+					database.run(
+						"UPDATE orchestration_coordinators SET policy_reasoning_effort = 'invalid' WHERE thread_id = 'thread_1'",
+					),
+				),
+			);
+
+			await expect(
+				runtime.runPromise(
+					Effect.gen(function* () {
+						return yield* (yield* OrchestrationRepository).GetSessionPolicy("thread_1");
+					}),
+				),
+			).rejects.toMatchObject({ _tag: "OrchestrationFailure" });
 		} finally {
 			await runtime.dispose();
 		}

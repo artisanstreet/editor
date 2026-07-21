@@ -14,6 +14,8 @@ import {
 	EventStreams,
 	JournalCommands,
 	JournalEvents,
+	PreviewTargets,
+	OrchestrationRuns,
 	TerminalCommands,
 	TerminalSessions,
 	ThreadErasureClaims,
@@ -45,6 +47,7 @@ export type TerminalCommandTransition =
 	| { readonly _tag: "active"; readonly pid: number }
 	| { readonly _tag: "current" }
 	| { readonly _tag: "failed"; readonly failure: string }
+	| { readonly _tag: "pin"; readonly pinned: boolean }
 	| { readonly _tag: "resize"; readonly cols: number; readonly rows: number };
 
 export interface TerminalCommit {
@@ -221,6 +224,15 @@ const DecodeStoredSession = (row: typeof TerminalSessions.$inferSelect) =>
 			failure: row.failure ?? undefined,
 			generation: row.generation,
 			pid: row.pid ?? undefined,
+			ownership:
+				row.owner_kind === "agent" && row.owner_agent_id && row.owner_run_id
+					? {
+							kind: "agent" as const,
+							agent_id: row.owner_agent_id,
+							run_id: row.owner_run_id,
+						}
+					: { kind: "user" as const },
+			pinned: row.pinned,
 			rows: row.rows,
 			state: row.state,
 			terminal_id: row.terminal_id,
@@ -496,6 +508,35 @@ export const TerminalRepositoryLive = Layer.effect(
 			database.client
 				.transaction((transaction) =>
 					Effect.gen(function* () {
+						const ResolveAgentOwnership = () =>
+							command.agent_id === undefined || command.run_id === undefined
+								? Effect.succeed(undefined)
+								: transaction
+										.select({ agent_id: OrchestrationRuns.agent_id })
+										.from(OrchestrationRuns)
+										.where(
+											and(
+												eq(OrchestrationRuns.run_id, command.run_id),
+												eq(OrchestrationRuns.thread_id, command.thread_id),
+												eq(OrchestrationRuns.agent_id, command.agent_id),
+												inArray(OrchestrationRuns.status, [
+													"running",
+													"waiting",
+												]),
+											),
+										)
+										.limit(1)
+										.pipe(
+											Effect.map(([run]) =>
+												run === undefined
+													? undefined
+													: {
+															agent_id: run.agent_id,
+															run_id: command.run_id!,
+														},
+											),
+										);
+						const agent_ownership = yield* ResolveAgentOwnership();
 						const payload = command.payload as TerminalCommand;
 						const [erasure_claim] = yield* transaction
 							.select({ thread_id: ThreadErasureClaims.thread_id })
@@ -613,7 +654,17 @@ export const TerminalRepositoryLive = Layer.effect(
 									env_json: payload.env ? JSON.stringify(payload.env) : null,
 									executable: payload.executable,
 									generation: 1,
+									owner_kind: agent_ownership === undefined ? "user" : "agent",
+									owner_agent_id:
+										agent_ownership === undefined
+											? null
+											: agent_ownership.agent_id,
+									owner_run_id:
+										agent_ownership === undefined
+											? null
+											: agent_ownership.run_id,
 									owner_instance_id: instance_id,
+									pinned: false,
 									rows: payload.rows,
 									state: "opening",
 									terminal_id: payload.terminal_id,
@@ -656,6 +707,13 @@ export const TerminalRepositoryLive = Layer.effect(
 								.returning();
 
 							row = restarted!;
+						} else if (payload.type === "terminal.pin") {
+							if (!current || current.thread_id !== command.thread_id) {
+								return yield* new TerminalNotFound({
+									terminal_id: payload.terminal_id,
+								});
+							}
+							row = current;
 						} else {
 							if (!current || current.thread_id !== command.thread_id) {
 								return yield* new TerminalNotFound({
@@ -716,10 +774,22 @@ export const TerminalRepositoryLive = Layer.effect(
 			transaction: typeof database.client,
 			row: typeof TerminalSessions.$inferSelect,
 			transition: TerminalCommandTransition,
+			adopt?: { readonly agent_id: string; readonly run_id: string },
 		) =>
 			Effect.gen(function* () {
 				if (transition._tag === "current") {
-					return yield* DecodeStoredSession(row);
+					if (!adopt) return yield* DecodeStoredSession(row);
+					const [updated] = yield* transaction
+						.update(TerminalSessions)
+						.set({
+							owner_agent_id: adopt.agent_id,
+							owner_kind: "agent",
+							owner_run_id: adopt.run_id,
+							updated_at: yield* metadata.Now,
+						})
+						.where(eq(TerminalSessions.terminal_id, row.terminal_id))
+						.returning();
+					return yield* DecodeStoredSession(updated!);
 				}
 
 				if (
@@ -732,8 +802,15 @@ export const TerminalRepositoryLive = Layer.effect(
 				}
 
 				const updated_at = yield* metadata.Now;
-				const values =
-					transition._tag === "active"
+				const values = {
+					...(adopt
+						? {
+								owner_agent_id: adopt.agent_id,
+								owner_kind: "agent" as const,
+								owner_run_id: adopt.run_id,
+							}
+						: {}),
+					...(transition._tag === "active"
 						? { pid: transition.pid, state: "active", updated_at }
 						: transition._tag === "resize"
 							? {
@@ -741,13 +818,16 @@ export const TerminalRepositoryLive = Layer.effect(
 									rows: transition.rows,
 									updated_at,
 								}
-							: {
-									closed_at: updated_at,
-									failure: transition.failure,
-									pid: null,
-									state: "failed",
-									updated_at,
-								};
+							: transition._tag === "pin"
+								? { pinned: transition.pinned, updated_at }
+								: {
+										closed_at: updated_at,
+										failure: transition.failure,
+										pid: null,
+										state: "failed",
+										updated_at,
+									}),
+				};
 				const [updated] = yield* transaction
 					.update(TerminalSessions)
 					.set(values)
@@ -777,6 +857,24 @@ export const TerminalRepositoryLive = Layer.effect(
 			database.client
 				.transaction((transaction) =>
 					Effect.gen(function* () {
+						const agent_ownership =
+							command.agent_id !== undefined && command.run_id !== undefined
+								? (yield* transaction
+										.select({ agent_id: OrchestrationRuns.agent_id })
+										.from(OrchestrationRuns)
+										.where(
+											and(
+												eq(OrchestrationRuns.run_id, command.run_id),
+												eq(OrchestrationRuns.thread_id, command.thread_id),
+												eq(OrchestrationRuns.agent_id, command.agent_id),
+												inArray(OrchestrationRuns.status, [
+													"running",
+													"waiting",
+												]),
+											),
+										)
+										.limit(1)).at(0)
+								: undefined;
 						const claim = yield* ReadClaim(transaction, command.message_id, generation);
 						const [row] = yield* transaction
 							.select()
@@ -796,7 +894,14 @@ export const TerminalRepositoryLive = Layer.effect(
 							});
 						}
 
-						const stored = yield* ApplyTransition(transaction, row, transition);
+						const stored = yield* ApplyTransition(
+							transaction,
+							row,
+							transition,
+							agent_ownership === undefined || command.run_id === undefined
+								? undefined
+								: { agent_id: agent_ownership.agent_id, run_id: command.run_id },
+						);
 						const event = yield* AppendEvent(
 							transaction,
 							CommandEventInput(command, action, stored.terminal),
@@ -1020,8 +1125,43 @@ export const TerminalRepositoryLive = Layer.effect(
 				)
 				.orderBy(asc(TerminalSessions.created_at), asc(TerminalSessions.terminal_id))
 				.pipe(
-					Effect.flatMap((rows) => Effect.forEach(rows, DecodeStoredSession)),
-					Effect.map((stored) => stored.map(({ terminal }) => terminal)),
+					Effect.flatMap((rows) =>
+						Effect.gen(function* () {
+							const stored = yield* Effect.forEach(rows, DecodeStoredSession);
+							const terminal_ids = stored.map(({ terminal }) => terminal.terminal_id);
+							const previews =
+								terminal_ids.length === 0
+									? []
+									: yield* database.client
+											.select({
+												port: PreviewTargets.port,
+												source_id: PreviewTargets.source_id,
+												state: PreviewTargets.state,
+												target_id: PreviewTargets.target_id,
+												url: PreviewTargets.url,
+											})
+											.from(PreviewTargets)
+											.where(
+												and(
+													eq(PreviewTargets.thread_id, thread_id),
+													eq(PreviewTargets.workspace_id, workspace_id),
+													eq(PreviewTargets.source_kind, "terminal"),
+													inArray(PreviewTargets.source_id, terminal_ids),
+												),
+											);
+							return stored.map(({ terminal }) => ({
+								...terminal,
+								associated_previews: previews
+									.filter((preview) => preview.source_id === terminal.terminal_id)
+									.map(({ port, state, target_id, url }) => ({
+										port,
+										state,
+										target_id,
+										url,
+									})),
+							}));
+						}),
+					),
 					Effect.mapError(normalize_error),
 				);
 

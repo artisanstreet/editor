@@ -1063,6 +1063,16 @@ export const OrchestrationCoordinators = sqliteTable("orchestration_coordinators
 	auto_steer_follow_ups: integer("auto_steer_follow_ups", { mode: "boolean" })
 		.notNull()
 		.default(true),
+	policy_model: text("policy_model"),
+	policy_reasoning_effort: text("policy_reasoning_effort").notNull().default("medium"),
+	policy_permission_mode: text("policy_permission_mode").notNull().default("on_request"),
+	policy_sandbox_mode: text("policy_sandbox_mode").notNull().default("workspace_write"),
+	policy_web_search_enabled: integer("policy_web_search_enabled", { mode: "boolean" })
+		.notNull()
+		.default(false),
+	policy_strict_clarification: integer("policy_strict_clarification", { mode: "boolean" })
+		.notNull()
+		.default(false),
 });
 
 /** Durable pre-execution intake state; a pending row deliberately has no run. */
@@ -1401,6 +1411,10 @@ export const TerminalSessions = sqliteTable(
 		generation: integer("generation").notNull(),
 		rows: integer("rows").notNull(),
 		pid: integer("pid"),
+		owner_kind: text("owner_kind").notNull().default("user"),
+		owner_agent_id: text("owner_agent_id"),
+		owner_run_id: text("owner_run_id"),
+		pinned: integer("pinned", { mode: "boolean" }).notNull().default(false),
 		owner_instance_id: text("owner_instance_id").notNull(),
 		state: text("state").notNull(),
 		exit_code: integer("exit_code"),
@@ -1414,6 +1428,11 @@ export const TerminalSessions = sqliteTable(
 	(table) => [
 		index("terminal_sessions_thread_workspace_index").on(table.thread_id, table.workspace_id),
 		index("terminal_sessions_state_index").on(table.state),
+		check("terminal_sessions_owner_kind_check", sql`${table.owner_kind} IN ('user', 'agent')`),
+		check(
+			"terminal_sessions_owner_identity_check",
+			sql`(${table.owner_kind} = 'user' AND ${table.owner_agent_id} IS NULL AND ${table.owner_run_id} IS NULL) OR (${table.owner_kind} = 'agent' AND ${table.owner_agent_id} IS NOT NULL AND ${table.owner_run_id} IS NOT NULL)`,
+		),
 	],
 );
 

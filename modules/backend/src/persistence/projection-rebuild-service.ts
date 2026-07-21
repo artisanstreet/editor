@@ -183,6 +183,17 @@ const workspace_change_row = (
 	path: change.path,
 	raw_origin_json: change.raw_origin ? JSON.stringify(change.raw_origin) : null,
 	review_state: change.review_state,
+	review_source_command_id: change.review?.source_command_id ?? null,
+	reviewer_agent_id: change.review?.reviewer_agent_id ?? null,
+	reviewer_assignment_id: change.review?.assignment_id ?? null,
+	reviewer_group_id: change.review?.group_id ?? null,
+	reviewer_kind: change.review?.reviewer_kind ?? null,
+	reviewer_raw_origin_json: change.review?.raw_origin
+		? JSON.stringify(change.review.raw_origin)
+		: null,
+	reviewer_run_id: change.review?.reviewer_run_id ?? null,
+	review_outcome: change.review?.outcome ?? null,
+	review_comment: change.review?.comment ?? null,
 	reviewed_at: change.reviewed_at ?? null,
 	rollback_state: change.rollback_state,
 	rolled_back_at: change.rolled_back_at ?? null,

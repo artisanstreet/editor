@@ -1,0 +1,14 @@
+{
+	"version": 1,
+	"asset": "/activity/artisan-working-sprite.png",
+	"frame_width": 128,
+	"frame_height": 128,
+	"columns": 2,
+	"rows": 2,
+	"frame_count": 4,
+	"frame_rate_fps": 2.5,
+	"duration_ms": 1600,
+	"loop": true,
+	"accessible_label": "Artisan is working",
+	"reduced_motion_frame": 0
+}

@@ -10,7 +10,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import type { EventEnvelope, ProjectRef } from "@artisan/protocol";
 import {
-	make_backend_runtime,
+	make_backend_runtime as make_unconfigured_backend_runtime,
 	AgentGraphOrchestrator,
 	make_codex_auto_compaction_mapping,
 	make_thread_metadata_refiner_test_layer,
@@ -28,6 +28,7 @@ import {
 	ThreadMetadataRefinementCoordinator,
 	ThreadProjectAffinityCoordinator,
 	SurfaceService,
+	ThreadRetentionClock,
 	WorkspaceEvidenceRecorder,
 	WorkspaceChangeRepository,
 } from "@artisan/backend";
@@ -62,6 +63,21 @@ import {
 } from "./message-channel-harness";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
+
+const fixture_retention_now = "2026-07-18T20:00:00.000Z";
+
+function make_backend_runtime(options: Parameters<typeof make_unconfigured_backend_runtime>[0]) {
+	return make_unconfigured_backend_runtime({
+		...options,
+		retention_clock:
+			options.retention_clock ??
+			Layer.succeed(ThreadRetentionClock, {
+				Now: Effect.succeed(fixture_retention_now),
+			}),
+		runtime_metadata:
+			options.runtime_metadata ?? make_metadata_layer({ value: fixture_retention_now }),
+	});
+}
 
 const temporary_directories: Array<string> = [];
 
@@ -542,6 +558,8 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 				}),
 			);
 			const subscribed = await Effect.runPromise(Deferred.make<void>());
+			const reconnect_snapshot = await Effect.runPromise(Deferred.make<void>());
+			let awaiting_reconnect_snapshot = false;
 			const updates_promise: Promise<ReadonlyArray<WorkspaceConflictListUpdate>> =
 				Effect.runPromise(
 					Effect.scoped(
@@ -554,6 +572,13 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 							);
 							yield* Deferred.succeed(subscribed, undefined);
 							return yield* stream.pipe(
+								Stream.tap((update) =>
+									awaiting_reconnect_snapshot && update.type === "snapshot"
+										? Deferred.succeed(reconnect_snapshot, undefined).pipe(
+												Effect.asVoid,
+											)
+										: Effect.void,
+								),
 								Stream.drop(1),
 								Stream.takeUntil(
 									(update) => update.snapshot.conflicts.length === 0,
@@ -614,11 +639,13 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 				await runtime.runPromise(conflicts.ListConflicts("thread_conflict_projection")),
 			).toHaveLength(1);
 			const connections = harness.connector_snapshot().connections;
+			awaiting_reconnect_snapshot = true;
 			harness.close_current_connection();
 			const after_reconnect = await Effect.runPromise(
 				harness.client.ListWorkspaceConflicts("thread_conflict_projection"),
 			);
 			await wait_for(() => harness.connector_snapshot().connections > connections);
+			await Effect.runPromise(Deferred.await(reconnect_snapshot));
 			expect(after_reconnect.conflicts).toHaveLength(1);
 			await Effect.runPromise(
 				harness.client.Command({

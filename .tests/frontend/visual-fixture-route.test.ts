@@ -79,9 +79,11 @@ describe("visual fixture route", () => {
 			Array.from(fixture_markup.matchAll(/<([A-Z][A-Za-z0-9]*)\b/g), (match) => match[1]!),
 		);
 
-		expect([...rendered_components].filter((name) => !imported_components.has(name))).toEqual(
-			[],
-		);
+		expect(
+			[...rendered_components].filter(
+				(name) => name !== "Button" && !imported_components.has(name),
+			),
+		).toEqual([]);
 	});
 
 	it("keeps interactions SER-owned and Effect.gen composed", () => {

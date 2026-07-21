@@ -18,7 +18,11 @@ interface CodexPermissionSettings {
 	readonly skip_git_repo_check: boolean;
 }
 
-const allowed_provider_options = new Set(["codex.exec.profile", "codex.exec.skip_git_repo_check"]);
+const allowed_provider_options = new Set([
+	"codex.exec.profile",
+	"codex.exec.skip_git_repo_check",
+	"codex.reasoning_effort",
+]);
 
 function FailConfiguration(option: string, value: unknown) {
 	return Effect.fail(new EngineConfigurationError({ engine_id: "codex", option, value }));
@@ -44,6 +48,7 @@ function ResolveCodexPermissions(input: EngineOpenInput, transport: CodexTranspo
 
 		const exec_profile = provider_options["codex.exec.profile"];
 		const skip_git_repo_check = provider_options["codex.exec.skip_git_repo_check"];
+		const reasoning_effort = provider_options["codex.reasoning_effort"];
 
 		if (
 			exec_profile !== undefined &&
@@ -56,6 +61,16 @@ function ResolveCodexPermissions(input: EngineOpenInput, transport: CodexTranspo
 			return yield* FailConfiguration(
 				"provider_options.codex.exec.skip_git_repo_check",
 				skip_git_repo_check,
+			);
+		}
+		if (
+			reasoning_effort !== undefined &&
+			(typeof reasoning_effort !== "string" ||
+				!new Set(["low", "medium", "high", "xhigh"]).has(reasoning_effort))
+		) {
+			return yield* FailConfiguration(
+				"provider_options.codex.reasoning_effort",
+				reasoning_effort,
 			);
 		}
 
@@ -150,6 +165,21 @@ export function MakeCodexAppServerThreadOptions(input: EngineOpenInput) {
 								? "workspaceWrite"
 								: "readOnly",
 					}),
+			...(input.provider_options?.["codex.reasoning_effort"] === undefined
+				? {}
+				: {
+						config: {
+							...(permissions.network_access === undefined
+								? {}
+								: {
+										sandbox_workspace_write: {
+											network_access: permissions.network_access,
+										},
+									}),
+							model_reasoning_effort:
+								input.provider_options["codex.reasoning_effort"],
+						},
+					}),
 		})),
 	);
 }
@@ -166,6 +196,12 @@ export function MakeCodexExecPermissionArgs(input: EngineOpenInput) {
 				: [
 						"-c",
 						`sandbox_workspace_write.network_access=${String(permissions.network_access)}`,
+					]),
+			...(input.provider_options?.["codex.reasoning_effort"] === undefined
+				? []
+				: [
+						"-c",
+						`model_reasoning_effort=${toml_string(input.provider_options["codex.reasoning_effort"] as string)}`,
 					]),
 			...(permissions.exec_profile === undefined
 				? []

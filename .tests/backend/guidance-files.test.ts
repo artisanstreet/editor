@@ -7,10 +7,10 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import {
 	guidance_hash,
-	make_claude_guidance_adapter,
 	make_codex_guidance_adapter,
 	normalize_guidance_content,
 } from "../../modules/backend/src/guidance/provider-mirrors";
+import { make_test_native_guidance_adapter } from "./guidance-test-adapter";
 import {
 	GuidanceFileStore,
 	GuidanceFileStoreLive,
@@ -129,7 +129,7 @@ describe("guidance file and provider adapters", () => {
 		const result = await Effect.runPromise(
 			Effect.gen(function* () {
 				const codex = yield* make_codex_guidance_adapter(override, agents);
-				const claude = yield* make_claude_guidance_adapter(claude_path);
+				const claude = yield* make_test_native_guidance_adapter("claude", claude_path);
 
 				return {
 					claude: yield* claude.Discover,

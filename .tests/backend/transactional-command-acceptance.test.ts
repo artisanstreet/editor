@@ -123,6 +123,33 @@ describe("generic transactional command acceptance", () => {
 		}
 	});
 
+	it("deduplicates a semantic retry when only its transport timestamp changes", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+
+		try {
+			const first = await route(runtime, make_command());
+			const after_first = await durable_state(runtime);
+			const duplicate = await route(runtime, {
+				...make_command(),
+				sent_at: "2026-07-18T12:00:01.000Z",
+			});
+			const after_duplicate = await durable_state(runtime);
+
+			expect(first).toMatchObject([
+				{ kind: "command.receipt", payload: { status: "accepted" } },
+				{ kind: "event", payload: { type: "thread.created" } },
+			]);
+			expect(duplicate).toMatchObject([
+				{ kind: "command.receipt", payload: { status: "duplicate" } },
+				{ kind: "event", payload: { type: "thread.created" } },
+			]);
+			expect(after_duplicate).toEqual(after_first);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("rolls back a rejected duplicate-intent command without creating a second command, event, cursor, or projection", async () => {
 		const database_path = await make_database_path();
 		const runtime = make_backend_runtime({ database_path, migrations_path });

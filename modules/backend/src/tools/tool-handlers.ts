@@ -321,6 +321,9 @@ export const ExecuteToolLive = Layer.effect(
 					return Effect.gen(function* () {
 						const sent_at = yield* metadata.Now;
 						const acceptance = yield* terminals.Handle({
+							...(request.agent_id === undefined
+								? {}
+								: { agent_id: request.agent_id }),
 							kind: "command",
 							message_id: request.invocation_id,
 							origin: "frontend",
@@ -330,6 +333,10 @@ export const ExecuteToolLive = Layer.effect(
 								type: "terminal.write",
 							},
 							protocol_version: 1,
+							...(request.raw_origin === undefined
+								? {}
+								: { raw_origin: request.raw_origin }),
+							...(request.run_id === undefined ? {} : { run_id: request.run_id }),
 							schema_version: 1,
 							sent_at,
 							thread_id: request.thread_id,
@@ -345,11 +352,18 @@ export const ExecuteToolLive = Layer.effect(
 					return Effect.gen(function* () {
 						const sent_at = yield* metadata.Now;
 						const acceptance = yield* terminals.Handle({
+							...(request.agent_id === undefined
+								? {}
+								: { agent_id: request.agent_id }),
 							kind: "command",
 							message_id: request.invocation_id,
 							origin: "frontend",
 							payload: { terminal_id: input.terminal_id, type: "terminal.restart" },
 							protocol_version: 1,
+							...(request.raw_origin === undefined
+								? {}
+								: { raw_origin: request.raw_origin }),
+							...(request.run_id === undefined ? {} : { run_id: request.run_id }),
 							schema_version: 1,
 							sent_at,
 							thread_id: request.thread_id,
@@ -365,6 +379,9 @@ export const ExecuteToolLive = Layer.effect(
 					return Effect.gen(function* () {
 						const sent_at = yield* metadata.Now;
 						const acceptance = yield* terminals.Handle({
+							...(request.agent_id === undefined
+								? {}
+								: { agent_id: request.agent_id }),
 							kind: "command",
 							message_id: request.invocation_id,
 							origin: "frontend",
@@ -374,6 +391,10 @@ export const ExecuteToolLive = Layer.effect(
 								type: "terminal.kill",
 							},
 							protocol_version: 1,
+							...(request.raw_origin === undefined
+								? {}
+								: { raw_origin: request.raw_origin }),
+							...(request.run_id === undefined ? {} : { run_id: request.run_id }),
 							schema_version: 1,
 							sent_at,
 							thread_id: request.thread_id,
@@ -386,7 +407,7 @@ export const ExecuteToolLive = Layer.effect(
 						return Success("terminal_stop");
 					}).pipe(Effect.catch(() => Effect.succeed(Failed())));
 				case "terminal.read":
-					return terminals.Output(input.terminal_id).pipe(
+					return terminals.ReadOutput(input.terminal_id).pipe(
 						Effect.as(Success("terminal_read")),
 						Effect.catch(() => Effect.succeed(Failed())),
 					);

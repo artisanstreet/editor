@@ -40,6 +40,7 @@ interface LiveTerminal {
 	readonly handle: TerminalDriverHandle;
 	readonly scope: Scope.Closeable;
 	readonly thread_id: string;
+	readonly workspace_id: string;
 }
 
 /** Unions terminal persistence and canonical journal failures. */
@@ -60,11 +61,20 @@ export class TerminalSessionService extends Context.Service<
 		readonly Handle: (
 			command: CommandEnvelope,
 		) => Effect.Effect<TerminalCommandAcceptance, TerminalSessionError>;
+		readonly HandleAsAgent: (
+			command: CommandEnvelope,
+			authority: { readonly agent_id: string; readonly run_id: string },
+		) => Effect.Effect<TerminalCommandAcceptance, TerminalSessionError>;
 		readonly List: (
 			thread_id: string,
 			workspace_id: string,
 		) => Effect.Effect<ReadonlyArray<TerminalSession>, TerminalSessionError>;
-		readonly Output: (
+		readonly Output: (input: {
+			readonly terminal_id: string;
+			readonly thread_id: string;
+			readonly workspace_id: string;
+		}) => Effect.Effect<Stream.Stream<Uint8Array>, TerminalSessionError>;
+		readonly ReadOutput: (
 			terminal_id: string,
 		) => Effect.Effect<Stream.Stream<Uint8Array>, TerminalSessionError>;
 		readonly QuiesceThread: (thread_id: string) => Effect.Effect<void, TerminalSessionError>;
@@ -166,6 +176,7 @@ export const TerminalSessionServiceLive = Layer.effect(
 					handle,
 					scope,
 					thread_id: stored.terminal.thread_id,
+					workspace_id: stored.terminal.workspace_id,
 				} satisfies LiveTerminal;
 
 				yield* Ref.update(live_terminals, (terminals) =>
@@ -300,6 +311,20 @@ export const TerminalSessionServiceLive = Layer.effect(
 				return Start(command, claim, "restarted");
 			}
 
+			if (payload.type === "terminal.pin") {
+				return repository
+					.CommitCommand(
+						command,
+						claim.generation,
+						payload.pinned ? "pinned" : "unpinned",
+						{
+							_tag: "pin",
+							pinned: payload.pinned,
+						},
+					)
+					.pipe(Effect.map((commit) => acceptance(commit, "accepted")));
+			}
+
 			return Effect.gen(function* () {
 				const live_map = yield* Ref.get(live_terminals);
 				const live = live_map.get(payload.terminal_id);
@@ -402,8 +427,20 @@ export const TerminalSessionServiceLive = Layer.effect(
 				return yield* Dispatch(command, payload, claim);
 			});
 
+		const UserCommand = (command: CommandEnvelope): CommandEnvelope => {
+			const { agent_id: _agent_id, run_id: _run_id, ...user_command } = command;
+
+			return user_command;
+		};
 		const Handle = (command: CommandEnvelope) =>
-			Semaphore.withPermit(command_lock)(HandleUnlocked(command));
+			Semaphore.withPermit(command_lock)(HandleUnlocked(UserCommand(command)));
+		const HandleAsAgent = (
+			command: CommandEnvelope,
+			authority: { readonly agent_id: string; readonly run_id: string },
+		) =>
+			Semaphore.withPermit(command_lock)(
+				HandleUnlocked({ ...UserCommand(command), ...authority }),
+			);
 
 		const Recover = Effect.gen(function* () {
 			const stale = yield* repository.ReadStale(metadata.instance_id);
@@ -458,12 +495,25 @@ export const TerminalSessionServiceLive = Layer.effect(
 
 		return {
 			Handle,
+			HandleAsAgent,
 			List: repository.List,
-			Output: (terminal_id) =>
+			Output: (input) =>
+				Ref.get(live_terminals).pipe(
+					Effect.flatMap((terminals) => {
+						const live = terminals.get(input.terminal_id);
+						return live &&
+							live.thread_id === input.thread_id &&
+							live.workspace_id === input.workspace_id
+							? Effect.succeed(live.handle.Output)
+							: Effect.fail(
+									new TerminalNotActive({ terminal_id: input.terminal_id }),
+								);
+					}),
+				),
+			ReadOutput: (terminal_id) =>
 				Ref.get(live_terminals).pipe(
 					Effect.flatMap((terminals) => {
 						const live = terminals.get(terminal_id);
-
 						return live
 							? Effect.succeed(live.handle.Output)
 							: Effect.fail(new TerminalNotActive({ terminal_id }));

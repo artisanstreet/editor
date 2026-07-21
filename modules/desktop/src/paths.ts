@@ -20,7 +20,7 @@ export const resolve_desktop_paths = (input: {
 		frontend_index_path: join(frontend_root, "index.html"),
 		frontend_root,
 		migrations_path: join(source_root, "modules", "backend", "drizzle"),
-		preload_path: join(packaged_root, ".dist", "desktop", "preload.js"),
+		preload_path: join(packaged_root, ".dist", "desktop", "preload.cjs"),
 		utility_path: join(packaged_root, ".dist", "desktop", "utility.js"),
 	};
 };

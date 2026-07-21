@@ -42,6 +42,10 @@ describe("desktop packaging configuration", () => {
 		const preload = readFileSync(new URL("modules/desktop/src/preload.ts", root), "utf8");
 		const vite_config = readFileSync(new URL("desktop.vite.config.ts", root), "utf8");
 		const utility = readFileSync(new URL("modules/desktop/src/utility.ts", root), "utf8");
+		const window_activity = readFileSync(
+			new URL("modules/desktop/src/window-activity.ts", root),
+			"utf8",
+		);
 
 		expect(config).toContain("**/*.node");
 		expect(config).toContain("**/native-runtime/**");
@@ -51,6 +55,9 @@ describe("desktop packaging configuration", () => {
 		expect(config).not.toContain("from: .dist\n");
 		expect(package_manifest.scripts?.["build:desktop"]).toContain(
 			"@artisan/bounded-file-store-native run build",
+		);
+		expect(package_manifest.scripts?.["build:desktop"]).toContain(
+			"desktop.preload.vite.config.ts",
 		);
 		expect(vite_config).toContain("Missing .dist/bounded-file-store-native/index.cjs");
 		expect(vite_config).toContain(
@@ -68,6 +75,13 @@ describe("desktop packaging configuration", () => {
 		expect(main).toContain('app.on("activate"');
 		expect(main).toContain("before-quit");
 		expect(preload).toContain("requestConnection");
+		expect(preload).toContain("identity");
+		expect(preload).toContain("setWorking");
+		expect(main).toContain("read_desktop_identity");
+		expect(main).toContain("mainFrame.ipc.handle(identity_channel");
+		expect(main).toContain("mainFrame.ipc.handle(activity_channel");
+		expect(window_activity).toContain('setProgressBar(2, { mode: "indeterminate" })');
+		expect(main).toContain("activity.RestoreIdle()");
 		expect(preload).not.toContain("ipcRenderer.send");
 	});
 });

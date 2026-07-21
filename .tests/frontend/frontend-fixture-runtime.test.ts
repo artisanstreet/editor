@@ -172,6 +172,7 @@ describe("frontend ArtisanClient fixture runtime", () => {
 						"SyncRoutine",
 						"UpdateGlobalGuidance",
 						"UpdateModelBehaviour",
+						"UpdateThreadSessionPolicy",
 						"UpdateThreadRetentionPolicy",
 						"UninstallCapability",
 					].sort(),

@@ -55,7 +55,15 @@ export function adapt_electron_message_port_main(
 				};
 			},
 			close: () => port.close(),
-			post_message: (message, transfer) => port.postMessage(message, transfer),
+			post_message: (message, transfer) => {
+				if (transfer) {
+					port.postMessage(message, transfer);
+
+					return;
+				}
+
+				port.postMessage(message);
+			},
 			start: () => port.start(),
 		},
 		options,
@@ -89,7 +97,15 @@ export function adapt_electron_renderer_message_port(
 				return () => port.removeEventListener("message", wrapped);
 			},
 			close: () => port.close(),
-			post_message: (message, transfer) => port.postMessage(message, transfer),
+			post_message: (message, transfer) => {
+				if (transfer) {
+					port.postMessage(message, transfer);
+
+					return;
+				}
+
+				port.postMessage(message);
+			},
 			start: () => port.start(),
 		},
 		options,

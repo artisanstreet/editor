@@ -140,6 +140,7 @@ export class MonacoEditorService extends Context.Service<
 		readonly Attach: (host: object) => Effect.Effect<void>;
 		readonly Close: (file: MonacoFileReference) => Effect.Effect<void>;
 		readonly Current: Effect.Effect<MonacoEditorState>;
+		readonly Detach: Effect.Effect<void>;
 		readonly Dispose: Effect.Effect<void>;
 		readonly Mark: (
 			file: MonacoFileReference,
@@ -232,6 +233,23 @@ export const MakeMonacoEditorLayer = (adapter: MonacoAdapter) =>
 					});
 					yield* Ref.set(state, { ...latest, editor: Option.some(editor) });
 				});
+
+			const Detach = Effect.gen(function* () {
+				const current = yield* Ref.get(state);
+				const editor = Option.getOrUndefined(current.editor);
+				if (editor === undefined) return;
+				const active_key = Option.getOrUndefined(current.active_file_key);
+				const active =
+					active_key === undefined ? undefined : current.models.get(active_key);
+				const view_state = yield* Effect.sync(() => editor.save_view_state()).pipe(
+					Effect.catchCause(() => Effect.succeed(undefined)),
+				);
+				const models = new Map(current.models);
+				if (active !== undefined && view_state !== undefined)
+					models.set(active_key!, { ...active, view_state: Option.some(view_state) });
+				yield* Ref.set(state, { ...current, editor: Option.none(), models });
+				yield* Effect.sync(() => editor.dispose());
+			});
 
 			const Activate = (file: MonacoWorkspaceFile) =>
 				Effect.gen(function* () {
@@ -431,6 +449,7 @@ export const MakeMonacoEditorLayer = (adapter: MonacoAdapter) =>
 				Attach,
 				Close,
 				Current,
+				Detach,
 				Dispose,
 				Mark,
 				Save,

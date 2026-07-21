@@ -21,6 +21,7 @@ describe("frontend contract registry", () => {
 				"main.workspace-modes",
 				"main.file-tabs",
 				"main.current-work",
+				"main.activity-status",
 				"main.transcript",
 				"main.chat-send",
 				"main.chat-steer",
@@ -42,6 +43,7 @@ describe("frontend contract registry", () => {
 				"right.permissions-usage",
 				"connection.lifecycle",
 				"desktop-shell.electron-bootstrap",
+				"desktop-shell.activity-indicator",
 			]),
 		);
 		for (const entry of FrontendContractRegistry) {
@@ -89,19 +91,21 @@ describe("frontend contract registry", () => {
 
 	it("records the audited integration state for moving and unavailable domains", () => {
 		const expected_states = {
-			"desktop-shell.electron-bootstrap": "blocked",
-			"left.identity": "blocked",
-			"left.marketplace": "blocked",
-			"main.change-diff": "backend_moving",
-			"main.change-review": "backend_moving",
-			"main.change-rollback": "backend_moving",
+			"desktop-shell.electron-bootstrap": "live",
+			"desktop-shell.activity-indicator": "live",
+			"left.identity": "live",
+			"left.marketplace": "live",
+			"main.change-diff": "live",
+			"main.change-review": "live",
+			"main.change-rollback": "live",
 			"main.chat-send": "live",
 			"main.chat-steer": "live",
-			"main.file-read": "backend_moving",
-			"main.file-replace": "backend_moving",
+			"main.file-read": "live",
+			"main.file-replace": "live",
 			"main.transcript": "live",
-			"right.git": "blocked",
-			"right.session-policy": "blocked",
+			"main.activity-status": "live",
+			"right.git": "live",
+			"right.session-policy": "live",
 			"right.terminals": "live",
 		} as const;
 

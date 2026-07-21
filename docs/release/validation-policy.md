@@ -61,11 +61,12 @@ state through workflow artifacts.
 
 ## Release acceptance
 
-A release candidate requires the ordinary release gate to pass. The opt-in jobs
-are additional evidence only when their corresponding validated release policy
-requires them; a skipped opt-in job is not an ordinary-CI failure. Record the
-runner identity, selected opt-ins, and outcome in the release record without
-including sensitive command output or fixture data.
+A release candidate requires both the ordinary release gate and the packaged
+desktop release gate to pass. Live Codex and the standalone native-addon
+recovery jobs remain explicit opt-ins; a skipped opt-in job is not an
+ordinary-CI failure. Record the runner identity, selected opt-ins, and outcome
+in the release record without including sensitive command output or fixture
+data.
 
 ## Desktop integration dependency gates
 
@@ -80,27 +81,43 @@ current evidence is `.tests/transport/artisan-client.test.ts` and
 `.tests/transport/artisan-client-protocol-server.test.ts`; neither is
 packaged-Electron restart equivalence.
 
-This is not yet an Electron package. There is no Electron main/utility/renderer
-bootstrap, packager configuration, unpack policy, or packaged-process restart
-fixture in this repository. Consequently, the static build and shape-adapter
-checks are not evidence that an ASAR layout is correct, that the native addon
-is unpacked and loadable, or that a transferred Electron `MessagePortMain`
-survives a utility-process restart. The Electron slice must add a dedicated
-packaged-desktop gate before any release relies on those claims. That gate must:
+Electron packaging is required release-only evidence. Every manually dispatched
+release validation run executes the `packaged-desktop` job on the protected
+native-capable runner, which runs `package:desktop` followed by
+`verify:desktop-package`; ordinary CI and the ordinary release gate do neither.
+The verifier inspects the actual ASAR and unpacked runtime paths, creates a
+unique temporary user-data directory, clears external `NODE_PATH`, starts the
+packaged executable with a bounded deadline, and requires one machine-readable
+success record. The smoke opens the exact staged `node-pty`, bounded-file-store,
+and Koffi bindings in two distinct utility epochs. It creates a thread through
+`ArtisanClient`, records accepted utility termination plus old/new utility
+epochs and PIDs, reconnects over newly transferred `MessagePortMain` pairs,
+proves semantic duplicate-safe durable replay even when the client regenerates
+transport timestamps, accepts a later command, and then disposes the utility.
+
+The same packaged executable creates the real BrowserWindow, loads the renderer
+through the custom protocol, and verifies the narrow preload bridge. Electron
+delivers trusted keyboard activation to `New chat` before and after the utility
+restart and trusted native mouse input to Marketplace and the
+chat/editor/orchestrator controls. The smoke also verifies Marketplace focus
+restoration, trusted composer input, right-pane keyboard reachability, truthful
+no-file/no-terminal states, the activity/taskbar bridge, accessible names,
+computed wide/narrow pane state, and Electron's real 200% zoom factor. It never
+starts an Engine run or calls a model. Temporary smoke data, including the
+native-store root, and descendant processes are removed on every outcome.
 
 - build the existing static renderer and package it as the renderer payload;
 - assert the main/utility entry points and production-only files are present in
   the expected package layout;
-- assert the bounded native addon is explicitly unpacked when the production
-  desktop target includes it, while keeping ordinary CI free of addon loading;
+- assert `node-pty`, the bounded native addon, and Koffi are explicitly staged
+  and unpacked while keeping ordinary CI free of addon loading;
 - run the existing typed client reconnect/replay fixtures through transferred
   Electron control and stream ports, including a forced utility-process restart;
 - prove single-instance ownership and cleanup without publishing temporary
   workspaces, databases, or logs.
 
-The current visual-fixture route provides source-level semantic, reduced-motion,
-high-contrast, long-label, and simulated 200% scale assertions. It is not a
-mounted-browser accessibility or responsive proof: no browser-runner dependency
-or Electron bootstrap is installed. Once the desktop slice selects a browser or
-packaged-Electron runner, add mounted keyboard/focus, accessible-name, computed
-responsive-layout, and real browser-zoom checks to that dedicated gate.
+The packaged Electron gate is the mounted renderer proof: it provides
+keyboard/focus, accessible-name, computed responsive-layout, and real
+browser-zoom checks without adding an external browser dependency or starting a
+development server. The visual-fixture route remains supplementary source-level
+coverage for semantic, reduced-motion, high-contrast, and long-label states.

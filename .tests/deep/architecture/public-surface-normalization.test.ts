@@ -139,11 +139,11 @@ describe("deep architecture and public-surface normalization", () => {
 	it("keeps unavailable product domains explicit instead of normalizing fixtures as live", () => {
 		const normalized = normalized_surfaces();
 		const dependency_gates = new Map([
-			["desktop-shell.electron-bootstrap", "blocked"],
-			["left.marketplace", "blocked"],
-			["right.permissions-usage", "blocked"],
-			["right.previews", "blocked"],
-			["right.processes-ports", "fixture"],
+			["desktop-shell.electron-bootstrap", "live"],
+			["left.marketplace", "live"],
+			["right.permissions-usage", "live"],
+			["right.previews", "live"],
+			["right.processes-ports", "live"],
 		]);
 
 		for (const [id, state] of dependency_gates) {

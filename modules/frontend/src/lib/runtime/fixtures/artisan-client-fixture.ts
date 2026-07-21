@@ -567,6 +567,14 @@ export const FixtureArtisanClientService = {
 			thread_id,
 			journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
 			auto_steer_enabled: true,
+			policy: {
+				engine_id: "codex" as const,
+				reasoning_effort: "medium" as const,
+				permission_mode: "on_request" as const,
+				sandbox_mode: "workspace_write" as const,
+				web_search_enabled: false,
+				strict_clarification: false,
+			},
 			latest_intake: {
 				message_id: "message-fixture",
 				risk: "low" as const,
@@ -751,8 +759,16 @@ export const FixtureArtisanClientService = {
 			target_id: "preview-artisan",
 			updated_at: fixture_timestamp,
 		}),
-	OpenTerminalOutput: (terminal_id) =>
+	OpenTerminalOutput: ({ terminal_id, thread_id, workspace_id }) =>
 		Effect.gen(function* () {
+			const terminal = fixture_artisan_client_data.terminals.find(
+				(candidate) =>
+					candidate.terminal_id === terminal_id &&
+					candidate.thread_id === thread_id &&
+					candidate.workspace_id === workspace_id,
+			);
+			if (terminal === undefined)
+				return yield* FixtureFailure(`Unknown fixture terminal scope: ${terminal_id}`);
 			const output = fixture_artisan_client_data.terminal_output[terminal_id];
 
 			if (output === undefined) {
@@ -994,6 +1010,14 @@ export const FixtureArtisanClientService = {
 						thread_id,
 						journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
 						auto_steer_enabled: true,
+						policy: {
+							engine_id: "codex" as const,
+							reasoning_effort: "medium" as const,
+							permission_mode: "on_request" as const,
+							sandbox_mode: "workspace_write" as const,
+							web_search_enabled: false,
+							strict_clarification: false,
+						},
 						latest_intake: {
 							message_id: "message-fixture",
 							risk: "low" as const,
@@ -1054,6 +1078,10 @@ export const FixtureArtisanClientService = {
 	UpdateModelBehaviour: (input) =>
 		Effect.gen(function* () {
 			return yield* FixtureReceipt(input.command_id ?? "fixture-model-behaviour-update");
+		}),
+	UpdateThreadSessionPolicy: (input) =>
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(input.command_id ?? "fixture-session-policy-update");
 		}),
 	UpdateThreadRetentionPolicy: (input) =>
 		Effect.gen(function* () {

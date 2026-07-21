@@ -125,6 +125,8 @@ describe("MessagePort adapters", () => {
 	});
 
 	it("normalizes Electron main and renderer event shapes without Electron", async () => {
+		const main_send_argument_counts: Array<number> = [];
+		const renderer_send_argument_counts: Array<number> = [];
 		const output = await Effect.runPromise(
 			Effect.scoped(
 				Effect.gen(function* () {
@@ -134,14 +136,18 @@ describe("MessagePort adapters", () => {
 						close: () => main_registry.emit("close"),
 						off: (event, listener) => main_registry.remove(event, listener),
 						on: (event, listener) => main_registry.add(event, listener),
-						postMessage: () => undefined,
+						postMessage: (...arguments_) => {
+							main_send_argument_counts.push(arguments_.length);
+						},
 						start: () => undefined,
 					});
 					const renderer = yield* adapt_electron_renderer_message_port({
 						addEventListener: (event, listener) =>
 							renderer_registry.add(event, listener),
 						close: () => renderer_registry.emit("close"),
-						postMessage: () => undefined,
+						postMessage: (...arguments_) => {
+							renderer_send_argument_counts.push(arguments_.length);
+						},
 						removeEventListener: (event, listener) =>
 							renderer_registry.remove(event, listener),
 						start: () => undefined,
@@ -149,6 +155,8 @@ describe("MessagePort adapters", () => {
 
 					main_registry.emit("message", { data: "main payload" });
 					renderer_registry.emit("message", { data: "renderer payload" });
+					yield* main.Send("main response");
+					yield* renderer.Send("renderer response");
 
 					return {
 						main: yield* main.Receive,
@@ -159,6 +167,8 @@ describe("MessagePort adapters", () => {
 		);
 
 		expect(output).toEqual({ main: "main payload", renderer: "renderer payload" });
+		expect(main_send_argument_counts).toEqual([1]);
+		expect(renderer_send_argument_counts).toEqual([1]);
 	});
 
 	it("validates buffer limits before registering native listeners", async () => {

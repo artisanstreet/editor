@@ -22,6 +22,7 @@ async function make_paths() {
 
 	return {
 		canonical: join(root, "guidance", "GLOBAL.md"),
+		claude: join(root, ".claude", "CLAUDE.md"),
 		codex_agents: join(codex_home, "AGENTS.md"),
 		codex_home,
 		codex_override: join(codex_home, "AGENTS.override.md"),
@@ -39,17 +40,30 @@ afterEach(async () => {
 });
 
 describe("desktop guidance composition", () => {
+	it("fails closed before composing a non-Codex production engine", async () => {
+		const paths = await make_paths();
+
+		expect(() =>
+			make_desktop_backend_runtime({
+				database_path: paths.database,
+				engines: [make_fake_engine({ engine_id: "claude" })],
+				migrations_path,
+			}),
+		).toThrow("Desktop production accepts only the Codex engine.");
+	});
+
 	it("derives the native Codex registry from the installed Engine", async () => {
 		const paths = await make_paths();
 
 		await writeFile(paths.codex_agents, "Desktop provider guidance\n", "utf8");
+		await mkdir(join(paths.root, ".claude"), { recursive: true });
+		await writeFile(paths.claude, "Must remain untouched\n", "utf8");
 
 		const runtime = make_desktop_backend_runtime({
 			database_path: paths.database,
 			engines: [make_fake_engine({ engine_id: "codex" })],
 			guidance: { canonical_path: paths.canonical },
 			guidance_platform: {
-				claude_config_directory: join(paths.root, "claude-home"),
 				codex_home: paths.codex_home,
 				home_directory: paths.root,
 			},
@@ -70,6 +84,7 @@ describe("desktop guidance composition", () => {
 				{ provider: "codex", status: "synced" },
 			]);
 			expect(await readFile(paths.canonical, "utf8")).toBe("Desktop provider guidance\n");
+			expect(await readFile(paths.claude, "utf8")).toBe("Must remain untouched\n");
 		} finally {
 			await runtime.dispose();
 		}

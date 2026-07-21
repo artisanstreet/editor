@@ -64,10 +64,8 @@ export const EmptyGuidanceProviderRegistryLive = Layer.succeed(GuidanceProviderR
 
 /** Configures native user-guidance paths for providers present in the desktop runtime. */
 export interface PlatformGuidanceProviderOptions {
-	readonly claude_path: string;
 	readonly codex_agents_path: string;
 	readonly codex_override_path: string;
-	readonly providers: ReadonlyArray<GlobalGuidanceProvider>;
 }
 
 interface GuidanceReader {
@@ -117,31 +115,21 @@ export function make_guidance_provider_registry_layer(
 	return Layer.succeed(GuidanceProviderRegistry, { Providers: providers });
 }
 
-/** Creates the opinionated Codex/Claude registry used by the desktop composition root. */
+/** Creates the Codex-only registry used by the desktop production composition root. */
 export function make_platform_guidance_provider_registry_layer(
 	options: PlatformGuidanceProviderOptions,
 ) {
-	const requested = new Set(options.providers);
-
 	return Layer.effect(
 		GuidanceProviderRegistry,
 		Effect.gen(function* () {
-			const providers: Array<GuidanceProviderAdapter> = [];
-
-			if (requested.has("codex")) {
-				providers.push(
+			return {
+				Providers: [
 					yield* make_codex_guidance_adapter(
 						options.codex_override_path,
 						options.codex_agents_path,
 					),
-				);
-			}
-
-			if (requested.has("claude")) {
-				providers.push(yield* make_claude_guidance_adapter(options.claude_path));
-			}
-
-			return { Providers: providers };
+				],
+			};
 		}),
 	);
 }
@@ -158,19 +146,6 @@ export function make_unsupported_guidance_adapter(
 	provider: GlobalGuidanceProvider,
 ): UnsupportedGuidanceProviderAdapter {
 	return { mode: "unsupported", provider };
-}
-
-/** Creates the native Claude adapter for its user-level CLAUDE.md file. */
-export function make_claude_guidance_adapter(path: string) {
-	return Effect.gen(function* () {
-		const files = yield* GuidanceFileStore;
-
-		return {
-			Discover: discover_file(files, path),
-			mode: "native_file" as const,
-			provider: "claude" as const,
-		} satisfies NativeGuidanceProviderAdapter;
-	});
 }
 
 /** Creates the native Codex adapter with override-file precedence. */

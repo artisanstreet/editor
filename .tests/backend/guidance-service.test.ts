@@ -14,12 +14,12 @@ import {
 import {
 	GuidanceProviderRegistry,
 	guidance_hash,
-	make_claude_guidance_adapter,
 	make_codex_guidance_adapter,
 	make_runtime_guidance_adapter,
 	make_unsupported_guidance_adapter,
 	normalize_guidance_content,
 } from "../../modules/backend/src/guidance/provider-mirrors";
+import { make_test_native_guidance_adapter } from "./guidance-test-adapter";
 import {
 	GuidanceFileStore,
 	GuidanceFileStoreFailure,
@@ -177,7 +177,10 @@ function make_runtime(paths: GuidancePaths, options: RuntimeOptions = {}) {
 							paths.codex_override,
 							paths.codex_agents,
 						);
-						const claude = yield* make_claude_guidance_adapter(paths.claude);
+						const claude = yield* make_test_native_guidance_adapter(
+							"claude",
+							paths.claude,
+						);
 
 						return { Providers: [codex, claude] };
 					}),
@@ -207,7 +210,7 @@ function make_mutating_claude_registry(
 	const registry = Layer.effect(
 		GuidanceProviderRegistry,
 		Effect.gen(function* () {
-			const claude = yield* make_claude_guidance_adapter(path);
+			const claude = yield* make_test_native_guidance_adapter("claude", path);
 			const Discover = Effect.gen(function* () {
 				if (armed) {
 					discovery_count += 1;

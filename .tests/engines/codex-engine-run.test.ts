@@ -156,6 +156,7 @@ describe("Codex engine run", () => {
 								network_access: true,
 								write_access: true,
 							},
+							provider_options: { "codex.reasoning_effort": "high" },
 							working_directory: "C:\\workspace",
 						});
 
@@ -197,7 +198,10 @@ describe("Codex engine run", () => {
 					method: "thread/start",
 					params: {
 						approvalPolicy: "never",
-						config: { sandbox_workspace_write: { network_access: true } },
+						config: {
+							model_reasoning_effort: "high",
+							sandbox_workspace_write: { network_access: true },
+						},
 						cwd: "C:\\workspace",
 						developerInstructions: "Use project guidance.",
 						model: "gpt-5",

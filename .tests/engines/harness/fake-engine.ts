@@ -27,6 +27,7 @@ export interface FakeEngineOptions {
 	readonly engine_id?: string;
 	readonly event_capacity?: number;
 	readonly on_cleanup?: () => void;
+	readonly transport?: string;
 	readonly unsupported_commands?: ReadonlyArray<EngineCommand["_tag"]>;
 }
 
@@ -116,7 +117,7 @@ function make_descriptor(options: FakeEngineOptions): EngineDescriptor {
 		capabilities: make_capabilities(unsupported_commands),
 		display_name: "Deterministic fake engine",
 		id: options.engine_id ?? "fake",
-		transport: "deterministic-test",
+		transport: options.transport ?? "deterministic-test",
 	};
 }
 

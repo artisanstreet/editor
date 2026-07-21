@@ -642,7 +642,6 @@ export const JournalStoreLive = Layer.effect(
 									raw_origin_json: JournalCommands.raw_origin_json,
 									run_id: JournalCommands.run_id,
 									schema_version: JournalCommands.schema_version,
-									sent_at: JournalCommands.sent_at,
 									thread_id: JournalCommands.thread_id,
 								})
 								.from(JournalCommands)
@@ -659,8 +658,7 @@ export const JournalStoreLive = Layer.effect(
 										(command.causation_id ?? null) &&
 									existing_command.origin === command.origin &&
 									existing_command.raw_origin_json === raw_origin_json &&
-									existing_command.schema_version === command.schema_version &&
-									existing_command.sent_at === command.sent_at;
+									existing_command.schema_version === command.schema_version;
 
 								if (!command_matches) {
 									return yield* new CommandIdConflict({

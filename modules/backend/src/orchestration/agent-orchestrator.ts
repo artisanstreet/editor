@@ -12,6 +12,7 @@ import {
 import { GlobalGuidanceService } from "../guidance/guidance-service";
 import { MakeThreadDispatchFence } from "../threads/internal/thread-dispatch-fence";
 import { IntakePolicy } from "./intake-policy";
+import { IsSessionPolicyEngine, MakeSessionPolicyRunMetadata } from "./session-policy";
 
 interface LiveRun {
 	readonly done: Deferred.Deferred<void>;
@@ -148,6 +149,16 @@ export const AgentOrchestratorLive = Layer.effect(
 				}
 
 				const run_scope = yield* Scope.make();
+				const policy = yield* repository.GetSessionPolicy(work.thread_id);
+				if (
+					!IsSessionPolicyEngine(policy, work.engine_id) &&
+					engine.Descriptor.transport !== "test"
+				) {
+					yield* Scope.close(run_scope, Exit.succeed(undefined));
+					yield* MarkStartFailure(work);
+
+					return;
+				}
 				const run = yield* engine
 					.Open({
 						_tag: "start",
@@ -156,6 +167,7 @@ export const AgentOrchestratorLive = Layer.effect(
 							? { global_guidance: resolved_guidance.value.value }
 							: {}),
 						initial_text: work.payload.text,
+						...MakeSessionPolicyRunMetadata(policy),
 						working_directory: work.working_directory,
 					})
 					.pipe(
@@ -349,10 +361,26 @@ export const AgentOrchestratorLive = Layer.effect(
 
 		const Handle = (command: CommandEnvelope) =>
 			Effect.gen(function* () {
-				const intake =
+				const initial_intake =
 					command.payload.type === "thread.send_message"
 						? yield* intake_policy.Assess(command.payload.text)
 						: undefined;
+				const policy =
+					command.payload.type === "thread.send_message"
+						? yield* repository.GetSessionPolicy(command.thread_id)
+						: undefined;
+				const intake =
+					initial_intake &&
+					policy?.strict_clarification &&
+					initial_intake.assumptions.length > 0
+						? {
+								...initial_intake,
+								resolution: "question" as const,
+								question:
+									"Please confirm the intended scope before Artisan proceeds.",
+								assumptions: [],
+							}
+						: initial_intake;
 				const routing = yield* CanSteer(command);
 				const accepted = yield* repository.Accept(
 					command,

@@ -279,6 +279,21 @@ describe("durable multi-agent graph", () => {
 			await create_thread(runtime);
 			await route(
 				runtime,
+				command("set_graph_session_policy", {
+					policy: {
+						engine_id: "codex",
+						model: "gpt-5.3-codex",
+						permission_mode: "on_request",
+						reasoning_effort: "high",
+						sandbox_mode: "workspace_write",
+						strict_clarification: true,
+						web_search_enabled: true,
+					},
+					type: "thread.session_policy.update",
+				}),
+			);
+			await route(
+				runtime,
 				start_command(
 					"start_graph",
 					[
@@ -319,13 +334,13 @@ describe("durable multi-agent graph", () => {
 				expect.arrayContaining([
 					{
 						approval: "on_request",
-						network_access: true,
+						network_access: false,
 						write_access: false,
 					},
 					{
 						approval: "on_request",
 						network_access: false,
-						write_access: true,
+						write_access: false,
 					},
 					{
 						approval: "on_request",
@@ -334,6 +349,16 @@ describe("durable multi-agent graph", () => {
 					},
 				]),
 			);
+			expect(fake.runs.map(({ input }) => input.model)).toEqual([
+				"gpt-5.3-codex",
+				"gpt-5.3-codex",
+				"gpt-5.3-codex",
+			]);
+			expect(fake.runs.map(({ input }) => input.provider_options)).toEqual([
+				{ "codex.reasoning_effort": "high" },
+				{ "codex.reasoning_effort": "high" },
+				{ "codex.reasoning_effort": "high" },
+			]);
 			expect(
 				graph.agent_runs.map(({ native_identity, native_thread_id }) => ({
 					native_identity,

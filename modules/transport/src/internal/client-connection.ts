@@ -1,4 +1,4 @@
-import { Cause, Deferred, Effect, Option, Ref, Scope } from "effect";
+import { Cause, Deferred, Effect, Fiber, Option, Ref, Scope } from "effect";
 
 import {
 	DecodeOutboundControlEnvelope,
@@ -118,24 +118,22 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 					transport_version: SupportedTransportVersions[0],
 				} satisfies TransportControlFrame)
 				.pipe(Effect.mapError(map_port_error));
+		const send_active = (active: ActiveClientSession, envelope: InboundControlEnvelope) =>
+			send_control(active, envelope).pipe(
+				Effect.catch(() =>
+					Effect.all([active.ports.control_port.Close, active.ports.stream_port.Close], {
+						concurrency: "unbounded",
+						discard: true,
+					}),
+				),
+			);
 
 		const send_current = (envelope: InboundControlEnvelope) =>
 			Ref.get(state).pipe(
 				Effect.flatMap((current) =>
 					Option.match(current.active, {
 						onNone: () => Effect.void,
-						onSome: (active) =>
-							send_control(active, envelope).pipe(
-								Effect.catch(() =>
-									Effect.all(
-										[
-											active.ports.control_port.Close,
-											active.ports.stream_port.Close,
-										],
-										{ concurrency: "unbounded", discard: true },
-									),
-								),
-							),
+						onSome: (active) => send_active(active, envelope),
 					}),
 				),
 			);
@@ -593,18 +591,10 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 						protocol_connection_id: welcome.payload.connection_id,
 						stream_ticket: welcome.payload.stream_ticket,
 					};
-					const previous_signal = yield* Ref.modify(
-						state,
-						(current): readonly [Deferred.Deferred<void>, ConnectionState] => [
-							current.connection_signal,
-							{ ...current, active: Option.some(active) },
-						],
-					);
-
-					yield* Deferred.succeed(previous_signal, undefined);
 					yield* handlers.requests.ResetConnection;
-					yield* handlers.requests.Retry;
-					yield* handlers.subscriptions.Retry;
+					yield* handlers.subscriptions.Retry((envelope) =>
+						send_active(active, envelope),
+					);
 
 					const control_loop = Effect.forever(
 						ports.control_port.Receive.pipe(
@@ -630,15 +620,39 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 							),
 						),
 					);
-					const session_exit = yield* Effect.exit(
-						Effect.raceAllFirst([
-							control_loop,
-							stream_loop,
-							ports.control_port.Closed,
-							ports.stream_port.Closed,
-							Deferred.await(disposed_signal),
-						]),
+					const session = Effect.raceAllFirst([
+						control_loop,
+						stream_loop,
+						ports.control_port.Closed,
+						ports.stream_port.Closed,
+						Deferred.await(disposed_signal),
+					]);
+					const session_fiber = yield* Effect.forkScoped(session);
+					yield* Effect.raceFirst(
+						handlers.subscriptions.AwaitReady,
+						Fiber.join(session_fiber).pipe(
+							Effect.andThen(
+								Effect.fail(
+									client_error(
+										"connection",
+										"The transport session ended before subscriptions were established.",
+										new Error("subscription reconnect readiness interrupted"),
+										true,
+									),
+								),
+							),
+						),
 					);
+					const previous_signal = yield* Ref.modify(
+						state,
+						(current): readonly [Deferred.Deferred<void>, ConnectionState] => [
+							current.connection_signal,
+							{ ...current, active: Option.some(active) },
+						],
+					);
+					yield* Deferred.succeed(previous_signal, undefined);
+					yield* handlers.requests.Retry;
+					const session_exit = yield* Effect.exit(Fiber.join(session_fiber));
 					const next_signal = yield* Deferred.make<void>();
 
 					yield* Ref.update(state, (current) =>

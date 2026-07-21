@@ -122,10 +122,9 @@ describe("three-pane shell source layout", () => {
 				);
 				expect(aggregate).toContain("Open thread navigation");
 				expect(aggregate).toContain("Open session pane");
-				expect(aggregate).toMatch(/(?:t-panel|edge-panel)/);
+				expect(aggregate).toContain("<Sheet");
+				expect(aggregate).toContain("<SheetContent");
 				expect(aggregate).toContain("data-open");
-				expect(aggregate).toContain("const OpenPane =");
-				expect(aggregate).not.toMatch(/OpenPane[\s\S]{0,180}\.Save\(/);
 				expect(aggregate).toContain("const ClosePanes = Effect.gen");
 				expect(aggregate).not.toMatch(/ClosePanes[\s\S]{0,160}\.Save\(/);
 			}),
@@ -147,9 +146,7 @@ describe("three-pane shell source layout", () => {
 				expect(aggregate).toMatch(/ExpandRight[\s\S]{0,140}yield\* SavePresentation/);
 				expect(aggregate).toContain('aria-label="Collapse thread navigation"');
 				expect(aggregate).toContain('aria-label="Collapse session pane"');
-				expect(aggregate).toMatch(
-					/max-width:\s*1279px[\s\S]*?\.collapse-pane[\s\S]*?display:\s*none/,
-				);
+				expect(aggregate).toMatch(/max-width:\s*1279px[\s\S]*?desktop-right-slot/);
 			}),
 		);
 
@@ -177,10 +174,7 @@ describe("three-pane shell source layout", () => {
 				expect(aggregate).toContain("--pane-action-space: 10px");
 				expect(aggregate).toContain("--pane-action-space: 48px");
 				expect(aggregate).toContain("--pane-action-space: 82px");
-				expect(aggregate).toContain("var(--pane-action-space, 10px)");
-				expect(aggregate).not.toMatch(
-					/workspace-header[\s\S]{0,180}padding-right:\s*(?:48|82)px/,
-				);
+				expect(aggregate).toContain("compact-pane-actions");
 			}),
 		);
 
@@ -213,11 +207,13 @@ describe("three-pane shell source layout", () => {
 			}),
 		);
 
-		it.effect("labels preview-only data and supplies a reduced-motion state", () =>
+		it.effect("keeps previews external-only and supplies a reduced-motion state", () =>
 			Effect.gen(function* () {
 				const { aggregate, sources } = yield* FrontendSources;
 
-				expect(aggregate).toContain("Preview data");
+				expect(aggregate).toContain("External previews");
+				expect(aggregate).toContain("LaunchPreviewInExternalBrowser");
+				expect(aggregate).not.toMatch(/<iframe|<webview/i);
 				yield* ExpectSource(
 					sources,
 					/prefers-reduced-motion:\s*reduce/,

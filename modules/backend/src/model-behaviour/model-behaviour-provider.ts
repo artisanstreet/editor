@@ -22,7 +22,6 @@ import {
 	BuildModelBehaviourCapabilities,
 	make_codex_auto_compaction_mapping,
 	make_unavailable_auto_compaction_mapping,
-	make_unsupported_auto_compaction_mapping,
 	type ModelBehaviourProviderMapping,
 } from "./model-behaviour-registry";
 
@@ -304,7 +303,7 @@ function mapping_from_probe(probe: CodexModelBehaviourProbeResult) {
 			);
 }
 
-/** Builds the desktop Codex and Claude provider registry after probing the installed CLI. */
+/** Builds the desktop Codex provider registry after probing the installed CLI. */
 export function make_desktop_model_behaviour_provider_registry_layer(
 	options: DesktopModelBehaviourProviderOptions,
 ) {
@@ -314,10 +313,6 @@ export function make_desktop_model_behaviour_provider_registry_layer(
 			const probe = yield* CodexModelBehaviourProbe;
 			const files = yield* ModelBehaviourConfigFiles;
 			const codex_mapping = mapping_from_probe(yield* probe.Probe);
-			const claude_mapping = make_unsupported_auto_compaction_mapping(
-				"claude",
-				"Claude Code has no supported native mapping for this global control.",
-			);
 			const providers = [
 				codex_mapping.state === "supported" || codex_mapping.state === "experimental"
 					? make_codex_model_behaviour_provider({
@@ -327,7 +322,6 @@ export function make_desktop_model_behaviour_provider_registry_layer(
 							target_path: options.codex_config_path,
 						})
 					: make_inactive_model_behaviour_provider(codex_mapping),
-				make_inactive_model_behaviour_provider(claude_mapping),
 			];
 
 			return yield* BuildProviderRegistry(providers);

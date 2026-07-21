@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import { NodeFileSystem } from "@effect/platform-node-shared";
-import { Effect, Layer, Redacted, Stream } from "effect";
+import { Deferred, Effect, Layer, Redacted, Stream } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type {
@@ -17,6 +17,7 @@ import type {
 	WorkspaceChangeListQueryEnvelope,
 	WorkspaceFileReplaceEnvelope,
 } from "@artisan/protocol";
+import type { Engine, EngineOpenInput } from "@artisan/engines";
 import {
 	make_backend_runtime,
 	make_workspace_bounded_regular_file_store_registry_layer,
@@ -164,18 +165,20 @@ function MakeRuntime(
 	close_count: { value: number },
 	instance_id: string,
 	engine_cleanup_count: { value: number },
+	engine?: Engine,
 ) {
 	let next_id = 0;
 
 	return make_backend_runtime({
 		database_path,
 		engines: [
-			make_fake_engine({
-				engine_id: "fake_engine",
-				on_cleanup: () => {
-					engine_cleanup_count.value += 1;
-				},
-			}),
+			engine ??
+				make_fake_engine({
+					engine_id: "fake_engine",
+					on_cleanup: () => {
+						engine_cleanup_count.value += 1;
+					},
+				}),
 		],
 		migrations_path,
 		runtime_metadata: Layer.succeed(RuntimeMetadata, {
@@ -192,6 +195,34 @@ function MakeRuntime(
 				},
 			).pipe(Layer.provide(NodeFileSystem.layer)),
 	});
+}
+
+/** Keeps the fixture's provider run observable until workspace mutation evidence is asserted. */
+function MakeBlockingFakeEngine(engine_cleanup_count: { value: number }) {
+	const release = Deferred.makeUnsafe<void>();
+	const fake = make_fake_engine({
+		engine_id: "fake_engine",
+		on_cleanup: () => {
+			engine_cleanup_count.value += 1;
+		},
+		transport: "test",
+	});
+	const engine = {
+		...fake,
+		Open: (input: EngineOpenInput) =>
+			fake.Open(input).pipe(
+				Effect.map((run) => ({
+					...run,
+					Closed: Deferred.await(release).pipe(Effect.as("closed" as const)),
+					Events: Stream.concat(
+						run.Events.pipe(Stream.filter((event) => event._tag !== "run_terminal")),
+						Stream.fromEffect(Deferred.await(release)).pipe(Stream.drain),
+					),
+				})),
+			),
+	} satisfies Engine;
+
+	return { engine, release };
 }
 
 const OpenConnection = Effect.gen(function* () {
@@ -321,12 +352,14 @@ describe("deep public-protocol workspace integration", () => {
 		const { database_path, directory, root } = await MakeFixture();
 		const first_close_count = { value: 0 };
 		const first_engine_cleanup_count = { value: 0 };
+		const blocking_engine = MakeBlockingFakeEngine(first_engine_cleanup_count);
 		const first_runtime = MakeRuntime(
 			database_path,
 			root,
 			first_close_count,
 			"deep_first",
 			first_engine_cleanup_count,
+			blocking_engine.engine,
 		);
 
 		try {
@@ -398,6 +431,7 @@ describe("deep public-protocol workspace integration", () => {
 			expect(
 				(await RunCommand("git", ["diff", "--", "src/example.ts"], { cwd: root })).stdout,
 			).toContain("+after");
+			await Effect.runPromise(Deferred.succeed(blocking_engine.release, undefined));
 		} finally {
 			await first_runtime.dispose();
 		}

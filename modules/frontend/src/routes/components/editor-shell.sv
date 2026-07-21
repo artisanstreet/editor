@@ -1,5 +1,6 @@
 <script lang="ts" effect>
 	import { Effect, Stream } from "effect";
+	import type { DesktopIdentity } from "@artisan/transport/client";
 	import { IconLayoutSidebar as PanelLeft, IconLayoutSidebarRight as PanelRight } from "@tabler/icons-svelte";
 	import {
 		DefaultShellPresentationState,
@@ -7,6 +8,7 @@
 	} from "$lib/runtime/shell-presentation-preferences";
 	import { Button } from "$lib/components/ui/button";
 	import { Sheet, SheetContent, SheetTrigger } from "$lib/components/ui/sheet";
+	import { HasActiveWorkspaceWork } from "$lib/live-workspace/activity-status";
 	import { LiveWorkspaceStore, type LiveWorkspaceSnapshot } from "$lib/live-workspace/store";
 
 	import LeftPane from "./left-pane.sv";
@@ -15,11 +17,43 @@
 
 	const shell_presentation_preferences = yield* ShellPresentationPreferences;
 	const live_workspace = yield* LiveWorkspaceStore;
+	const fallback_identity: DesktopIdentity = {
+		display_name: "Local user",
+		machine_name: "Local machine",
+		avatar_seed: "artisan:local",
+	};
+	let desktop_identity = $state.raw<DesktopIdentity>(fallback_identity);
+	const desktop_bridge = typeof window === "undefined" ? undefined : window.artisanDesktop;
+	if (desktop_bridge !== undefined) {
+		desktop_identity = yield* Effect.tryPromise(() => desktop_bridge.identity()).pipe(
+			Effect.catch(() => Effect.succeed(fallback_identity)),
+		);
+	}
 	const initial_presentation = yield* shell_presentation_preferences.Load;
 	let live_snapshot = $state.raw<LiveWorkspaceSnapshot>(yield* live_workspace.Snapshot);
+	let desktop_working = false;
+	const SetDesktopWorking = (working: boolean) =>
+		Effect.suspend(() => {
+			if (desktop_bridge === undefined || desktop_working === working) return Effect.void;
+			const previous = desktop_working;
+			desktop_working = working;
+			return Effect.tryPromise(async () => {
+				await desktop_bridge.setWorking(working);
+			}).pipe(
+				Effect.tapError(() =>
+					Effect.sync(() => {
+						if (desktop_working === working) desktop_working = previous;
+					}),
+				),
+				Effect.ignore,
+			);
+		});
+	yield* SetDesktopWorking(HasActiveWorkspaceWork(live_snapshot));
+	yield* Effect.addFinalizer(SetDesktopWorking(false));
 	yield* Stream.runForEach(live_workspace.Changes, (next_snapshot) =>
-		Effect.sync(() => {
+		Effect.gen(function* () {
 			live_snapshot = next_snapshot;
+			yield* SetDesktopWorking(HasActiveWorkspaceWork(next_snapshot));
 		}),
 	).pipe(Effect.forkScoped);
 
@@ -27,7 +61,6 @@
 	let right_open = $state(false);
 	let left_collapsed = $state(initial_presentation.left_collapsed);
 	let right_collapsed = $state(initial_presentation.right_collapsed);
-	let selected_thread = $state("thread-editor");
 
 	const SavePresentation = Effect.gen(function* () {
 		yield* shell_presentation_preferences.Save({
@@ -66,7 +99,6 @@
 
 	const SelectThread = (thread_id: string) =>
 		Effect.gen(function* () {
-			selected_thread = thread_id;
 			yield* live_workspace.SelectThread(thread_id);
 		});
 
@@ -92,11 +124,11 @@
 	data-right-open={right_open}
 >
 	<div class="pane-slot desktop-left-slot">
-		<LeftPane compact={false} instance_id="desktop-left" {selected_thread} live_snapshot={live_snapshot} on_select_thread={SelectThread} on_new_chat={NewChat} on_collapse={CollapseLeft} />
+		<LeftPane compact={false} instance_id="desktop-left" live_snapshot={live_snapshot} identity={desktop_identity} actions={live_workspace.Actions} marketplace_api={live_workspace} on_select_thread={SelectThread} on_new_chat={NewChat} on_collapse={CollapseLeft} />
 	</div>
 
 	<div class="left-rail-slot">
-		<LeftPane compact={true} instance_id="rail-left" {selected_thread} live_snapshot={live_snapshot} on_select_thread={SelectThread} on_new_chat={NewChat} />
+		<LeftPane compact={true} instance_id="rail-left" live_snapshot={live_snapshot} identity={desktop_identity} actions={live_workspace.Actions} marketplace_api={live_workspace} on_select_thread={SelectThread} on_new_chat={NewChat} />
 	</div>
 
 	<main class="main-slot">
@@ -116,7 +148,7 @@
 					{/snippet}
 				</SheetTrigger>
 				<SheetContent side="left" class="w-[min(18rem,calc(100vw-1.5rem))] p-0" aria-label="Thread navigation">
-					<LeftPane compact={false} instance_id="sheet-left" {selected_thread} live_snapshot={live_snapshot} on_select_thread={SelectThread} on_new_chat={NewChat} />
+					<LeftPane compact={false} instance_id="sheet-left" live_snapshot={live_snapshot} identity={desktop_identity} actions={live_workspace.Actions} marketplace_api={live_workspace} on_select_thread={SelectThread} on_new_chat={NewChat} />
 				</SheetContent>
 			</Sheet>
 			<Sheet bind:open={right_open}>
@@ -128,15 +160,23 @@
 					{/snippet}
 				</SheetTrigger>
 				<SheetContent side="right" class="w-[min(21.25rem,calc(100vw-1.5rem))] p-0" aria-label="Session">
-					<RightPane instance_id="sheet-right" live_snapshot={live_snapshot} />
+					<RightPane instance_id="sheet-right" live_snapshot={live_snapshot} controller={live_workspace} />
 				</SheetContent>
 			</Sheet>
 		</div>
-		<MainPane live_snapshot={live_snapshot} on_send_live_message={live_workspace.SendMessage} />
+		<MainPane
+			live_snapshot={live_snapshot}
+			actions={live_workspace.Actions}
+			on_send_live_message={live_workspace.SendMessage}
+			on_refresh_workspace_files={live_workspace.RefreshWorkspaceFiles}
+			on_read_workspace_file={live_workspace.ReadWorkspaceFile}
+			on_replace_workspace_file={live_workspace.ReplaceWorkspaceFile}
+			on_select_orchestration_group={live_workspace.SelectOrchestrationGroup}
+		/>
 	</main>
 
 	<div class="pane-slot desktop-right-slot">
-		<RightPane instance_id="desktop-right" live_snapshot={live_snapshot} on_collapse={CollapseRight} />
+		<RightPane instance_id="desktop-right" live_snapshot={live_snapshot} controller={live_workspace} on_collapse={CollapseRight} />
 	</div>
 
 </div>

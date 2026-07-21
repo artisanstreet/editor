@@ -3,6 +3,8 @@ import { contextBridge, ipcRenderer } from "electron";
 import { DesktopSessionConnectionType } from "@artisan/transport/desktop-session";
 
 const request_channel = "artisan:request-connection";
+const identity_channel = "artisan:desktop-identity";
+const activity_channel = "artisan:desktop-activity";
 const connection_channel = "artisan:connection";
 const renderer_window = globalThis as typeof globalThis & {
 	readonly location: { readonly origin: string };
@@ -49,5 +51,8 @@ ipcRenderer.on(connection_channel, (event, message: unknown) => {
 });
 
 contextBridge.exposeInMainWorld("artisanDesktop", {
+	identity: () => ipcRenderer.invoke(identity_channel),
 	requestConnection: () => ipcRenderer.invoke(request_channel).then(() => undefined),
+	setWorking: (working: boolean) =>
+		ipcRenderer.invoke(activity_channel, working).then(() => undefined),
 });

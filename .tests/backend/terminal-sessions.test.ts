@@ -26,6 +26,8 @@ import {
 	type TerminalDriverExit,
 } from "@artisan/backend";
 import { JournalStore } from "../../modules/backend/src/persistence/journal-store";
+import { Database } from "../../modules/backend/src/persistence/database";
+import { OrchestrationRuns } from "../../modules/backend/src/persistence/schema";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const crash_fixture_path = fileURLToPath(new URL("./terminal-crash-fixture.ts", import.meta.url));
@@ -321,6 +323,100 @@ afterEach(async () => {
 });
 
 describe("terminal session orchestration", () => {
+	it("keeps caller-supplied agent provenance user-owned on the public command path", async () => {
+		const database_path = await make_database_path();
+		const fake = make_fake_terminal_driver();
+		let runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			terminal_driver: fake.layer,
+		});
+
+		try {
+			await create_thread(runtime);
+			await runtime.runPromise(
+				Effect.gen(function* () {
+					const terminals = yield* TerminalSessionService;
+					yield* Effect.forEach(
+						[
+							["forged", "agent_forged", "run_forged"],
+							["nonexistent", "agent_missing", "run_missing"],
+							["cross_thread", "agent_other", "run_other"],
+						] as const,
+						([suffix, agent_id, run_id]) =>
+							terminals.Handle({
+								...open_command(`forged_agent_${suffix}`, `terminal_${suffix}`),
+								agent_id,
+								run_id,
+							}),
+						{ discard: true },
+					);
+				}),
+			);
+			const terminals = await list(runtime);
+			expect(terminals.map((terminal) => terminal.ownership)).toEqual([
+				{ kind: "user" },
+				{ kind: "user" },
+				{ kind: "user" },
+			]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("adopts agent ownership only through the internal durable-authority path", async () => {
+		const database_path = await make_database_path();
+		const fake = make_fake_terminal_driver();
+		let runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			terminal_driver: fake.layer,
+		});
+		try {
+			await create_thread(runtime);
+			await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					yield* database.client.insert(OrchestrationRuns).values({
+						agent_id: "agent_valid",
+						created_at: "2026-07-10T08:00:00.000Z",
+						engine_id: "codex",
+						run_id: "run_valid",
+						status: "running",
+						thread_id: "thread_terminal",
+						updated_at: "2026-07-10T08:00:00.000Z",
+						working_directory: tmpdir(),
+					});
+					const terminals = yield* TerminalSessionService;
+					yield* terminals.HandleAsAgent(
+						open_command("valid_agent_open", "terminal_valid"),
+						{ agent_id: "agent_valid", run_id: "run_valid" },
+					);
+				}),
+			);
+			const [terminal] = await list(runtime);
+			expect(terminal?.ownership).toEqual({
+				agent_id: "agent_valid",
+				kind: "agent",
+				run_id: "run_valid",
+			});
+			await runtime.dispose();
+			runtime = make_backend_runtime({
+				database_path,
+				migrations_path,
+				terminal_driver: fake.layer,
+			});
+			const [restarted] = await list(runtime);
+			expect(restarted?.ownership).toEqual({
+				agent_id: "agent_valid",
+				kind: "agent",
+				run_id: "run_valid",
+			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("streams real node-pty input and records natural exit metadata", async () => {
 		const database_path = await make_database_path();
 		const runtime = make_backend_runtime({ database_path, migrations_path });
@@ -348,11 +444,39 @@ describe("terminal session orchestration", () => {
 				Effect.scoped(
 					Effect.gen(function* () {
 						const terminals = yield* TerminalSessionService;
-						const stream = yield* terminals.Output("terminal_real");
+						const stream = yield* terminals.Output({
+							terminal_id: "terminal_real",
+							thread_id: "thread_terminal",
+							workspace_id: "workspace_1",
+						});
 						const output_fiber = yield* stream.pipe(
 							Stream.runCollect,
 							Effect.forkChild,
 						);
+						const cross_scope = yield* terminals
+							.Output({
+								terminal_id: "terminal_real",
+								thread_id: "other_thread",
+								workspace_id: "workspace_1",
+							})
+							.pipe(Effect.exit);
+						if (cross_scope._tag !== "Failure") {
+							return yield* Effect.die(
+								new Error("cross-thread terminal output was exposed"),
+							);
+						}
+						const cross_workspace = yield* terminals
+							.Output({
+								terminal_id: "terminal_real",
+								thread_id: "thread_terminal",
+								workspace_id: "other_workspace",
+							})
+							.pipe(Effect.exit);
+						if (cross_workspace._tag !== "Failure") {
+							return yield* Effect.die(
+								new Error("cross-workspace terminal output was exposed"),
+							);
+						}
 
 						yield* terminals.Handle(
 							command("write_real", {

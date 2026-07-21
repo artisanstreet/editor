@@ -139,6 +139,8 @@ export interface ClientSubscriptionCoordinator {
 	readonly ApplyEvent: (
 		event: EventEnvelope,
 	) => Effect.Effect<ArtisanClientCursors, ArtisanClientError>;
+	/** Waits for every subscription retained across the current connection generation. */
+	readonly AwaitReady: Effect.Effect<void, ArtisanClientError>;
 	readonly Cursors: Effect.Effect<ArtisanClientCursors>;
 	readonly Dispose: (error: Option.Option<ArtisanClientError>) => Effect.Effect<void>;
 	readonly Events: Stream.Stream<EventEnvelope, ArtisanClientError>;
@@ -152,7 +154,7 @@ export interface ClientSubscriptionCoordinator {
 	) => Effect.Effect<boolean, ArtisanClientError>;
 	readonly ResetConnection: Effect.Effect<void>;
 	readonly ResumeCursors: Effect.Effect<ArtisanClientCursors>;
-	readonly Retry: Effect.Effect<void>;
+	readonly Retry: (send?: SendCurrent) => Effect.Effect<void>;
 	readonly SubscribeOrchestrationGraph: (
 		group_id: string,
 	) => Effect.Effect<
@@ -779,23 +781,34 @@ export const make_client_subscription_coordinator = (
 				return Stream.fromQueue(queue);
 			});
 
-		const reset_connection = Ref.update(state, (current) => ({
-			...current,
-			ignored_correlations: new Set<string>(),
-			subscriptions: new Map(
-				[...current.subscriptions].map(
-					([id, subscription]) =>
-						[
-							id,
-							{
-								...subscription,
-								expected_sequence: -1,
-								stream_id: Option.none<string>(),
-							},
-						] as const,
+		const reset_connection = Effect.gen(function* () {
+			const current = yield* Ref.get(state);
+			const starts = yield* Effect.forEach([...current.subscriptions.entries()], ([id]) =>
+				Deferred.make<void, ArtisanClientError>().pipe(
+					Effect.map((started) => [id, started] as const),
 				),
-			),
-		}));
+			);
+			const by_id = new Map(starts);
+
+			yield* Ref.update(state, (latest) => ({
+				...latest,
+				ignored_correlations: new Set<string>(),
+				subscriptions: new Map(
+					[...latest.subscriptions].map(
+						([id, subscription]) =>
+							[
+								id,
+								{
+									...subscription,
+									expected_sequence: -1,
+									started: by_id.get(id) ?? subscription.started,
+									stream_id: Option.none<string>(),
+								},
+							] as const,
+					),
+				),
+			}));
+		});
 
 		const subscribe_thread_transcript = (thread_id: string) =>
 			Effect.gen(function* () {
@@ -889,17 +902,26 @@ export const make_client_subscription_coordinator = (
 				return Stream.fromQueue(queue);
 			});
 
-		const retry = Ref.modify(
-			state,
-			(current): readonly [ReadonlyArray<ProjectionSubscription>, SubscriptionState] => [
-				[...current.subscriptions.values()],
-				{ ...current, ignored_correlations: new Set<string>() },
-			],
-		).pipe(
-			Effect.flatMap((subscriptions) =>
+		const retry = (send: SendCurrent = send_current) =>
+			Ref.modify(
+				state,
+				(current): readonly [ReadonlyArray<ProjectionSubscription>, SubscriptionState] => [
+					[...current.subscriptions.values()],
+					{ ...current, ignored_correlations: new Set<string>() },
+				],
+			).pipe(
+				Effect.flatMap((subscriptions) =>
+					Effect.forEach(subscriptions, (subscription) => send(subscription.envelope), {
+						discard: true,
+					}),
+				),
+			);
+
+		const await_ready = Ref.get(state).pipe(
+			Effect.flatMap((current) =>
 				Effect.forEach(
-					subscriptions,
-					(subscription) => send_current(subscription.envelope),
+					current.subscriptions.values(),
+					(subscription) => Deferred.await(subscription.started),
 					{ discard: true },
 				),
 			),
@@ -938,6 +960,7 @@ export const make_client_subscription_coordinator = (
 
 		return {
 			ApplyEvent: apply_event,
+			AwaitReady: await_ready,
 			Cursors: cursors,
 			Dispose: dispose,
 			Events: Stream.fromQueue(events),

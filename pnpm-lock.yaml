@@ -29,6 +29,9 @@ importers:
       '@effect/vitest':
         specifier: 4.0.0-beta.97
         version: 4.0.0-beta.97(effect@4.0.0-beta.97)(vitest@4.1.10(@types/node@26.1.1)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))
+      '@electron/asar':
+        specifier: 3.4.1
+        version: 3.4.1
       '@types/node':
         specifier: 26.1.1
         version: 26.1.1

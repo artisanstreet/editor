@@ -1021,6 +1021,7 @@ export function make_protocol_server_layer(
 									event.payload.type === "intake.assessed" ||
 									event.payload.type === "intake.assumption_recorded" ||
 									event.payload.type === "thread.auto_steer.updated" ||
+									event.payload.type === "thread.session_policy.updated" ||
 									event.payload.type === "thread.message_routed" ||
 									event.payload.type === "thread.erased";
 								if (

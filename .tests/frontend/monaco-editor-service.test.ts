@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { Effect, Layer, Option } from "effect";
+import { Effect, Option } from "effect";
 
 import {
 	MakeMonacoEditorLayer,
@@ -177,6 +177,32 @@ describe("Monaco editor service", () => {
 
 		expect(fake.editors[0]!.disposed).toBe(true);
 		expect(fake.editors[1]!.restored).toEqual({ opaque: { top: 256 } });
+	});
+
+	it("detaches the browser editor without disposing its models and restores the active view", async () => {
+		const fake = new FakeMonacoAdapter();
+		const detached = await Scoped(
+			fake,
+			Effect.gen(function* () {
+				const service = yield* MonacoEditorService;
+				yield* service.Attach({});
+				yield* service.Activate(FileA);
+				fake.editors[0]!.saved = { opaque: { top: 384 } };
+				yield* service.Detach;
+				const state = yield* service.Current;
+				const model_disposed = fake.models[0]!.disposed;
+				yield* service.Attach({});
+				return { model_disposed, state };
+			}),
+		);
+
+		expect(fake.editors[0]!.disposed).toBe(true);
+		expect(fake.models[0]!.disposed).toBe(true);
+		expect(detached.model_disposed).toBe(false);
+		expect(detached.state.active_file_key).toEqual(Option.some(MonacoFileKeyForFile(FileA)));
+		expect(detached.state.open_file_keys).toContain(MonacoFileKeyForFile(FileA));
+		expect(fake.editors[1]!.model).toBe(fake.models[0]);
+		expect(fake.editors[1]!.restored).toEqual({ opaque: { top: 384 } });
 	});
 
 	it("leaves a recoverable detached state when a replacement editor cannot be created", async () => {

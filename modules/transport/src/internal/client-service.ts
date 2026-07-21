@@ -137,6 +137,7 @@ import {
 	type ArtisanWorkspaceLanguageCapabilitiesInput,
 	type ArtisanWorkspaceFileReplaceInput,
 	type ArtisanThreadRetentionUpdateInput,
+	type ArtisanThreadSessionPolicyUpdateInput,
 	type ArtisanMarketplaceBrowseInput,
 	type ArtisanRoutineDetailInput,
 	type ArtisanRoutineInstallInput,
@@ -1839,6 +1840,13 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					} satisfies ArtisanCommandReceipt;
 				});
 
+			const update_thread_session_policy = (input: ArtisanThreadSessionPolicyUpdateInput) =>
+				command({
+					...(input.command_id === undefined ? {} : { command_id: input.command_id }),
+					payload: { type: "thread.session_policy.update", policy: input.policy },
+					thread_id: input.thread_id,
+				});
+
 			const get_thread_work = (thread_id: string) =>
 				Effect.gen(function* () {
 					const trace = yield* connection.MakeTrace;
@@ -2013,7 +2021,10 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				OpenPreviewInspectionSession: open_preview_inspection_session,
 				InspectPreviewSession: inspect_preview_session,
 				ClosePreviewInspectionSession: close_preview_inspection_session,
-				OpenTerminalOutput: (terminal_id) => streams.Open(`terminal:${terminal_id}`),
+				OpenTerminalOutput: ({ terminal_id, thread_id, workspace_id }) =>
+					streams.Open(
+						`terminal:${encodeURIComponent(thread_id)}:${encodeURIComponent(workspace_id)}:${encodeURIComponent(terminal_id)}`,
+					),
 				ReadWorkspaceFile: read_workspace_file,
 				ResolveGlobalGuidanceDrift: resolve_global_guidance_drift,
 				RequestGitIndexMutation: request_git_index_mutation,
@@ -2091,6 +2102,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				UpdateGlobalGuidance: update_global_guidance,
 				UpdateModelBehaviour: update_model_behaviour,
 				UpdateThreadRetentionPolicy: update_thread_retention_policy,
+				UpdateThreadSessionPolicy: update_thread_session_policy,
 			};
 		}),
 	);

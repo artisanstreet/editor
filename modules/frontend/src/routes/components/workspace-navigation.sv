@@ -7,6 +7,13 @@
 		WorkspaceFileReference,
 		WorkspaceTab,
 	} from "$lib/workspace/workspace-tab-model";
+	import { Button } from "$lib/components/ui/button";
+	import {
+		DropdownMenu,
+		DropdownMenuContent,
+		DropdownMenuItem,
+		DropdownMenuTrigger,
+	} from "$lib/components/ui/dropdown-menu";
 
 	let {
 		breadcrumbs,
@@ -25,34 +32,6 @@
 		on_open_changed: (file_id: string) => Effect.Effect<void>;
 		on_activate_overflow: (tab_id: string) => Effect.Effect<void>;
 	} = $props();
-	let recent_selection = $state("");
-	let changed_selection = $state("");
-	let overflow_selection = $state("");
-
-	const SelectRecent = (file_id: string) =>
-		Effect.gen(function* () {
-			if (file_id.length > 0) {
-				yield* on_open_recent(file_id);
-			}
-			recent_selection = "";
-		});
-
-	const SelectChanged = (file_id: string) =>
-		Effect.gen(function* () {
-			if (file_id.length > 0) {
-				yield* on_open_changed(file_id);
-			}
-			changed_selection = "";
-		});
-
-	const SelectOverflow = (tab_id: string) =>
-		Effect.gen(function* () {
-			if (tab_id.length > 0) {
-				yield* on_activate_overflow(tab_id);
-			}
-			overflow_selection = "";
-		});
-
 	const TabOptionLabel = (tab: WorkspaceTab) =>
 		Effect.gen(function* () {
 			yield* Effect.void;
@@ -82,28 +61,33 @@
 		{/each}
 	</div>
 	<div class="navigation-selects">
-		<label>
-			<span class="sr-only">Recent files</span>
-			<select aria-label="Recent files" bind:value={recent_selection} onchange={yield* SelectRecent(event.currentTarget.value)}>
-				<option value="">Recent</option>
-				{#each recent_files as file}<option value={file.id}>{file.name}</option>{/each}
-			</select>
-		</label>
-		<label>
-			<span class="sr-only">Changed files</span>
-			<select aria-label="Changed files" bind:value={changed_selection} onchange={yield* SelectChanged(event.currentTarget.value)}>
-				<option value="">Changed ({changed_files.length})</option>
-				{#each changed_files as changed}<option value={changed.file.id}>{changed.file.name} · {changed.change.agent_name}</option>{/each}
-			</select>
-		</label>
+		<DropdownMenu>
+			<DropdownMenuTrigger>
+				{#snippet child({ props })}<Button size="xs" variant="outline" aria-label="Recent files" {...props}>Recent</Button>{/snippet}
+			</DropdownMenuTrigger>
+			<DropdownMenuContent align="end">
+				{#if recent_files.length === 0}<DropdownMenuItem disabled>No recent files</DropdownMenuItem>{/if}
+				{#each recent_files as file}<DropdownMenuItem onclick={yield* on_open_recent(file.id)}>{file.name}</DropdownMenuItem>{/each}
+			</DropdownMenuContent>
+		</DropdownMenu>
+		<DropdownMenu>
+			<DropdownMenuTrigger>
+				{#snippet child({ props })}<Button size="xs" variant="outline" aria-label="Changed files" {...props}>Changed ({changed_files.length})</Button>{/snippet}
+			</DropdownMenuTrigger>
+			<DropdownMenuContent align="end">
+				{#if changed_files.length === 0}<DropdownMenuItem disabled>No changed files</DropdownMenuItem>{/if}
+				{#each changed_files as changed}<DropdownMenuItem onclick={yield* on_open_changed(changed.file.id)}>{changed.file.name} · {changed.change.agent_name}</DropdownMenuItem>{/each}
+			</DropdownMenuContent>
+		</DropdownMenu>
 		{#if overflow_tabs.length > 0}
-			<label>
-				<span class="sr-only">Overflow tabs</span>
-				<select aria-label="Overflow tabs" bind:value={overflow_selection} onchange={yield* SelectOverflow(event.currentTarget.value)}>
-					<option value="">More tabs ({overflow_tabs.length})</option>
-					{#each overflow_tabs as tab}<option value={tab.id}>{yield* TabOptionLabel(tab)}</option>{/each}
-				</select>
-			</label>
+			<DropdownMenu>
+				<DropdownMenuTrigger>
+					{#snippet child({ props })}<Button size="xs" variant="outline" aria-label="Overflow tabs" {...props}>More tabs ({overflow_tabs.length})</Button>{/snippet}
+				</DropdownMenuTrigger>
+				<DropdownMenuContent align="end">
+					{#each overflow_tabs as tab}<DropdownMenuItem onclick={yield* on_activate_overflow(tab.id)}>{yield* TabOptionLabel(tab)}</DropdownMenuItem>{/each}
+				</DropdownMenuContent>
+			</DropdownMenu>
 		{/if}
 	</div>
 </nav>
@@ -145,30 +129,6 @@
 		flex: 0 0 auto;
 		align-items: center;
 		gap: 4px;
-	}
-
-	select {
-		max-width: 122px;
-		height: 22px;
-		padding: 0 20px 0 7px;
-		border: 1px solid var(--line);
-		border-radius: var(--radius-sm);
-		background: var(--pane-inset);
-		color: var(--text-muted);
-		font-size: 9px;
-		cursor: pointer;
-	}
-
-	.sr-only {
-		position: absolute;
-		width: 1px;
-		height: 1px;
-		padding: 0;
-		margin: -1px;
-		overflow: hidden;
-		clip: rect(0, 0, 0, 0);
-		white-space: nowrap;
-		border: 0;
 	}
 
 	@media (max-width: 799px) {

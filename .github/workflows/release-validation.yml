@@ -51,6 +51,34 @@ jobs:
 
             - run: pnpm run validate
 
+    packaged-desktop:
+        name: Required packaged desktop release gate
+        needs: validate
+        runs-on: [self-hosted, Windows, X64, artisan-native-addon]
+        environment: native-addon-validation
+        timeout-minutes: 30
+        steps:
+            - uses: actions/checkout@v5
+
+            - uses: pnpm/action-setup@v4
+              with:
+                  version: 11.7.0
+
+            - uses: actions/setup-node@v5
+              with:
+                  node-version: 24
+                  cache: pnpm
+                  cache-dependency-path: pnpm-lock.yaml
+
+            - run: pnpm install --frozen-lockfile
+
+            - name: Package and smoke the Electron release artifact
+              shell: pwsh
+              run: |
+                  $ErrorActionPreference = "Stop"
+                  pnpm run package:desktop
+                  pnpm run verify:desktop-package
+
     live-codex:
         name: Opt-in live Codex CLI probe
         needs: validate

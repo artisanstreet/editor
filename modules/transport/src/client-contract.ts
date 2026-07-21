@@ -72,6 +72,7 @@ import type {
 	ThreadTranscriptQuery,
 	ThreadTranscriptSnapshot,
 	ThreadSessionSnapshot,
+	ThreadSessionPolicy,
 	TranscriptEntry,
 	RoutineDetail,
 	RoutineDriftResolutionRequest,
@@ -299,6 +300,13 @@ export interface ArtisanThreadRetentionUpdateInput {
 	readonly command_id?: string;
 	readonly enabled: boolean;
 	readonly inactivity_days: number;
+}
+
+/** Supplies a durable thread-local Engine launch policy and optional retry identity. */
+export interface ArtisanThreadSessionPolicyUpdateInput {
+	readonly command_id?: string;
+	readonly policy: ThreadSessionPolicy;
+	readonly thread_id: string;
 }
 
 /** Supplies canonical guidance content and an optional durable retry identity. */
@@ -649,9 +657,11 @@ export class ArtisanClient extends Context.Service<
 			ArtisanClientError,
 			Scope.Scope
 		>;
-		readonly OpenTerminalOutput: (
-			terminal_id: string,
-		) => Effect.Effect<
+		readonly OpenTerminalOutput: (input: {
+			readonly terminal_id: string;
+			readonly thread_id: string;
+			readonly workspace_id: string;
+		}) => Effect.Effect<
 			Stream.Stream<Uint8Array, ArtisanClientError>,
 			ArtisanClientError,
 			Scope.Scope
@@ -884,6 +894,9 @@ export class ArtisanClient extends Context.Service<
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly UpdateThreadRetentionPolicy: (
 			input: ArtisanThreadRetentionUpdateInput,
+		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
+		readonly UpdateThreadSessionPolicy: (
+			input: ArtisanThreadSessionPolicyUpdateInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly ReplaceWorkspaceFile: (
 			input: ArtisanWorkspaceFileReplaceInput,
