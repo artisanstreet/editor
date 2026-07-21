@@ -61,7 +61,7 @@ import {
 	type RichLinkResolveQueryEnvelope,
 	type SurfaceListQueryEnvelope,
 	type SurfaceUsageAggregateQueryEnvelope,
-	type OutboundControlEnvelope,
+	OutboundControlEnvelope,
 	type PreNegotiationProtocolErrorEnvelope,
 	type ProtocolErrorDetail,
 	type ProtocolErrorEnvelope,

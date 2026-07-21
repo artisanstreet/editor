@@ -562,7 +562,7 @@ export function make_backend_layer(options: BackendOptions) {
 	);
 	const surfaces = SurfaceServiceLive.pipe(Layer.provideMerge(infrastructure));
 
-	const protocol = make_protocol_server_layer(protocol_options).pipe(
+	const protocol_foundation = make_protocol_server_layer(protocol_options).pipe(
 		Layer.provideMerge(routing),
 		Layer.provideMerge(retention_policy),
 		Layer.provideMerge(graph),
@@ -578,6 +578,8 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(workspace_files),
 		Layer.provideMerge(workspace_changes),
 		Layer.provideMerge(workspace_diffs),
+	);
+	const protocol = protocol_foundation.pipe(
 		Layer.provideMerge(surfaces),
 		Layer.provideMerge(tools),
 		Layer.provideMerge(previews),
