@@ -258,6 +258,7 @@ describe("WorkspaceEvidenceRecorder", () => {
 
 		const second_runtime = make_backend_runtime({
 			database_path,
+			migrations_path,
 			retention_clock,
 			runtime_metadata: make_metadata_layer("workspace_evidence_recorder_restart_test"),
 		});
