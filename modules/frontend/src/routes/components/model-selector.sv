@@ -264,27 +264,27 @@
 		background:
 			radial-gradient(
 				ellipse 28% 20% at 50% -24%,
-				oklch(from var(--foreground) l c h / 34%) 0%,
-				oklch(from var(--foreground) l c h / 12%) 48%,
+				oklch(from var(--foreground) l c h / 48%) 0%,
+				oklch(from var(--foreground) l c h / 17%) 48%,
 				transparent 100%
 			),
 			radial-gradient(
 				ellipse 46% 96% at 50% -16%,
-				oklch(from var(--foreground) l c h / 14%) 0%,
-				oklch(from var(--foreground) l c h / 6%) 46%,
+				oklch(from var(--foreground) l c h / 20%) 0%,
+				oklch(from var(--foreground) l c h / 8%) 46%,
 				transparent 100%
 			);
 		filter: blur(0.125rem);
 		-webkit-mask-image: radial-gradient(
 			ellipse 50% 104% at 50% -16%,
-			rgb(0 0 0 / 68%) 0%,
-			rgb(0 0 0 / 54%) 42%,
+			rgb(0 0 0 / 78%) 0%,
+			rgb(0 0 0 / 64%) 42%,
 			transparent 100%
 		);
 		mask-image: radial-gradient(
 			ellipse 50% 104% at 50% -16%,
-			rgb(0 0 0 / 68%) 0%,
-			rgb(0 0 0 / 54%) 42%,
+			rgb(0 0 0 / 78%) 0%,
+			rgb(0 0 0 / 64%) 42%,
 			transparent 100%
 		);
 		transform: translateX(-50%);
