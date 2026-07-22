@@ -131,7 +131,7 @@
 	<PopoverContent
 		align="end"
 		sideOffset={8}
-		class="w-[min(32rem,calc(100vw-2rem))] gap-2 overflow-hidden bg-background p-2"
+		class="w-[min(20rem,calc(100vw-2rem))] gap-2 overflow-hidden bg-background p-2"
 	>
 		<Tabs bind:value={active_engine} class="min-h-0 gap-2">
 			<TabsList
