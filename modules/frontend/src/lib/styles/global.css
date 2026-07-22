@@ -5,17 +5,17 @@
 :root {
 	color-scheme: dark;
 
-	--canvas: oklch(0.145 0.007 264);
-	--pane: oklch(0.175 0.008 264);
-	--pane-inset: oklch(0.125 0.006 264);
-	--raised: oklch(0.215 0.01 264);
-	--raised-hover: oklch(0.245 0.012 264);
-	--text-primary: oklch(0.94 0.006 264);
-	--text-secondary: oklch(0.75 0.012 264);
-	--text-muted: oklch(0.58 0.014 264);
-	--line: oklch(0.31 0.012 264 / 0.72);
-	--line-strong: oklch(0.43 0.016 264 / 0.9);
-	--focus: oklch(0.72 0.13 242);
+	--canvas: oklch(0.141 0.005 285.823);
+	--pane: oklch(0.18 0.006 285.885);
+	--pane-inset: oklch(0.115 0.004 285.823);
+	--raised: oklch(0.21 0.006 285.885);
+	--raised-hover: oklch(0.274 0.006 286.033);
+	--text-primary: oklch(0.985 0 0);
+	--text-secondary: oklch(0.82 0.01 286.067);
+	--text-muted: oklch(0.705 0.015 286.067);
+	--line: oklch(1 0 0 / 10%);
+	--line-strong: oklch(1 0 0 / 15%);
+	--focus: oklch(0.552 0.016 285.938);
 	--selection: oklch(0.48 0.13 250 / 0.42);
 
 	--diff-added: oklch(0.76 0.14 154);
@@ -32,7 +32,7 @@
 	--run-failed: oklch(0.7 0.18 24);
 	--run-stopped: oklch(0.62 0.03 264);
 
-	--radius-pane: 0.75rem;
+	--radius-pane: 1.5rem;
 	--radius-control: 0.5rem;
 	--radius-raised: 0.625rem;
 	--radius-pill: 999px;
@@ -191,6 +191,21 @@
 @utility artisan-wordmark {
 	font-family: var(--font-logo);
 	letter-spacing: var(--tracking-wordmark);
+}
+
+@utility card-surface {
+	box-shadow:
+		0 -0.5px oklch(1 0 0 / 8%),
+		0 4px 8px oklch(0 0 0 / 6%),
+		0 0 0 0.5px oklch(1 0 0 / 8%),
+		0 1px 6px -4px oklch(0 0 0);
+}
+
+@utility card-surface-lg {
+	box-shadow:
+		0 -0.5px oklch(1 0 0 / 10%),
+		0 10px 24px oklch(0 0 0 / 10%),
+		0 0 0 0.5px oklch(1 0 0 / 8%);
 }
 
 @media (prefers-reduced-motion: reduce) {

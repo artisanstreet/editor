@@ -91,6 +91,10 @@ export default defineConfig({
 			"node-pty": resolve(import.meta.dirname, "modules/desktop/src/node-pty-shim.ts"),
 		},
 	},
+	// Installed Electron applications cannot resolve workspace dependencies from
+	// the repository. Bundle every JavaScript dependency; only Electron and Node
+	// built-ins remain external through Rollup/Vite's platform handling.
+	ssr: { noExternal: true },
 	build: {
 		outDir: ".dist/desktop",
 		rollupOptions: {

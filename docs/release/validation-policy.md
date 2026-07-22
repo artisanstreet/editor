@@ -85,11 +85,16 @@ Electron packaging is required release-only evidence. Every manually dispatched
 release validation run executes the `packaged-desktop` job on the protected
 native-capable runner, which runs `package:desktop` followed by
 `verify:desktop-package`; ordinary CI and the ordinary release gate do neither.
-The verifier inspects the actual ASAR and unpacked runtime paths, creates a
-unique temporary user-data directory, clears external `NODE_PATH`, starts the
-packaged executable with a bounded deadline, and requires one machine-readable
-success record. The smoke opens the exact staged `node-pty`, bounded-file-store,
-and Koffi bindings in two distinct utility epochs. It creates a thread through
+The verifier inspects the actual ASAR and unpacked runtime paths, rejects every
+unresolved bare JavaScript package import from the privileged desktop bundle,
+then copies the exact `win-unpacked` application to a unique temporary location
+outside the repository before starting it. This makes the smoke independent of
+the checkout's `node_modules`; clearing external `NODE_PATH` is an additional
+defense, not the proof of isolation. It creates a unique temporary user-data
+directory, starts the packaged executable with a bounded deadline, and requires
+one machine-readable success record. The smoke opens the exact staged
+`node-pty`, bounded-file-store, and Koffi bindings in two distinct utility
+epochs. It creates a thread through
 `ArtisanClient`, records accepted utility termination plus old/new utility
 epochs and PIDs, reconnects over newly transferred `MessagePortMain` pairs,
 proves semantic duplicate-safe durable replay even when the client regenerates

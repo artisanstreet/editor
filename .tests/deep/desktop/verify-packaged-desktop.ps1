@@ -1,10 +1,11 @@
 $ErrorActionPreference = "Stop"
 
-$release_root = Join-Path $PSScriptRoot "../../../.dist/electron-release/win-unpacked"
-$resources = Join-Path $release_root "resources"
-$asar = Join-Path $resources "app.asar"
-$unpacked = Join-Path $resources "app.asar.unpacked/.dist/desktop/native-runtime"
-$executable = Join-Path $release_root "Artisan Editor.exe"
+$artifact_release_root = Join-Path $PSScriptRoot "../../../.dist/electron-release/win-unpacked"
+$artifact_resources = Join-Path $artifact_release_root "resources"
+$artifact_asar = Join-Path $artifact_resources "app.asar"
+$artifact_unpacked = Join-Path $artifact_resources "app.asar.unpacked/.dist/desktop/native-runtime"
+$artifact_executable = Join-Path $artifact_release_root "Artisan Editor.exe"
+$executable = $artifact_executable
 
 function Get-PackagedSmokeProcesses {
 	@(Get-CimInstance Win32_Process -Filter "Name = 'Artisan Editor.exe'" |
@@ -25,23 +26,25 @@ function Stop-PackagedSmokeProcesses {
 	}
 }
 
-foreach ($path in @($asar, $unpacked, $executable)) {
+foreach ($path in @($artifact_asar, $artifact_unpacked, $artifact_executable)) {
 	if (-not (Test-Path -LiteralPath $path)) { throw "Missing packaged desktop evidence path: $path" }
 }
 
 # A prior aborted smoke must not satisfy the single-instance lock or survive this gate.
 Stop-PackagedSmokeProcesses -Reason "preflight"
 
-$asar_entries = @(pnpm exec asar list $asar | ForEach-Object { $_.Replace("\", "/") })
+$asar_entries = @(pnpm exec asar list $artifact_asar | ForEach-Object { $_.Replace("\", "/") })
 if ($LASTEXITCODE -ne 0) { throw "Could not enumerate the packaged ASAR" }
 foreach ($entry in @("/.dist/desktop/main.js", "/.dist/desktop/preload.cjs", "/.dist/desktop/utility.js", "/.dist/frontend/index.html", "/modules/backend/drizzle")) {
 	if ($asar_entries -notcontains $entry -and -not ($asar_entries | Where-Object { $_ -like "$entry/*" })) { throw "Missing ASAR entry: $entry" }
 }
 foreach ($native in @("node-pty", "@artisan/bounded-file-store-native/bounded_file_store_native.win32-x64-msvc.node", "@koromix/koffi-win32-x64/win32_x64/koffi.node")) {
-	if (-not (Test-Path -LiteralPath (Join-Path $unpacked $native))) { throw "Missing unpacked native runtime: $native" }
+	if (-not (Test-Path -LiteralPath (Join-Path $artifact_unpacked $native))) { throw "Missing unpacked native runtime: $native" }
 }
 
 $smoke_root = Join-Path ([System.IO.Path]::GetTempPath()) ("artisan-packaged-smoke-" + [guid]::NewGuid().ToString("N"))
+$structural_root = Join-Path $smoke_root "structural-asar"
+$isolated_release_root = Join-Path $smoke_root "application"
 $stdout_path = Join-Path $smoke_root "stdout.log"
 $stderr_path = Join-Path $smoke_root "stderr.log"
 New-Item -ItemType Directory -Path $smoke_root | Out-Null
@@ -51,6 +54,43 @@ $previous_smoke_root = $env:ARTISAN_PACKAGED_SMOKE_ROOT
 $previous_node_path = $env:NODE_PATH
 $process = $null
 try {
+	# Inspect the actual ASAR, not source output. Privileged bundles may import
+	# only Electron, Node built-ins, or sibling chunks: a bare package import can
+	# otherwise climb from this repository's release directory into node_modules.
+	pnpm exec asar extract $artifact_asar $structural_root
+	if ($LASTEXITCODE -ne 0) { throw "Could not extract the packaged ASAR for dependency inspection" }
+	$bare_imports = @(
+		Get-ChildItem -LiteralPath (Join-Path $structural_root ".dist/desktop") -Recurse -File -Filter *.js |
+			Where-Object { $_.FullName -notlike "*\native-runtime\*" } |
+			ForEach-Object {
+				$source = Get-Content -Raw -LiteralPath $_.FullName
+				$matches = @([regex]::Matches($source, '(?m)^\s*(?:import|export)\b.*?\bfrom\s+["''](?<specifier>[^"''\r\n]+)["'']')) +
+					@([regex]::Matches($source, '(?m)^\s*import\s*["''](?<specifier>[^"''\r\n]+)["'']')) +
+					@([regex]::Matches($source, '\bimport\s*\(\s*["''](?<specifier>[^"''\r\n]+)["'']\s*\)'))
+				foreach ($match in $matches) {
+					$specifier = $match.Groups["specifier"].Value
+					if (-not $specifier.StartsWith(".") -and -not $specifier.StartsWith("node:") -and $specifier -ne "electron") {
+						"$($_.FullName):$specifier"
+					}
+				}
+			}
+	)
+	if ($bare_imports.Count -ne 0) {
+		throw "Packaged desktop JavaScript contains unresolved bare package imports: $($bare_imports -join ', ')"
+	}
+
+	# Launch an exact copy outside the repository. This prevents Node resolution
+	# from walking up to this checkout's node_modules and masks no missing bundle.
+	Copy-Item -LiteralPath $artifact_release_root -Destination $isolated_release_root -Recurse
+	$release_root = $isolated_release_root
+	$resources = Join-Path $release_root "resources"
+	$asar = Join-Path $resources "app.asar"
+	$unpacked = Join-Path $resources "app.asar.unpacked/.dist/desktop/native-runtime"
+	$executable = Join-Path $release_root "Artisan Editor.exe"
+	foreach ($path in @($asar, $unpacked, $executable)) {
+		if (-not (Test-Path -LiteralPath $path)) { throw "Isolated packaged smoke is missing evidence path: $path" }
+	}
+
 	$env:ARTISAN_PACKAGED_SMOKE = "1"
 	$env:ARTISAN_PACKAGED_SMOKE_USER_DATA = (Join-Path $smoke_root "user-data")
 	$env:ARTISAN_PACKAGED_SMOKE_ROOT = $smoke_root
@@ -77,7 +117,7 @@ try {
 	$records = @(Get-Content -LiteralPath $stdout_path | ForEach-Object {
 		try { $_ | ConvertFrom-Json } catch { $null }
 	} | Where-Object { $_ -and $_.kind -eq "artisan:packaged-smoke" })
-	if ($records.Count -ne 1 -or -not $records[0].ok) { throw "Packaged desktop smoke did not emit one successful evidence record" }
+	if ($records.Count -ne 1 -or -not $records[0].ok) { throw "Packaged desktop smoke did not emit one successful evidence record: stdout=$(Get-Content -Raw -LiteralPath $stdout_path) stderr=$(Get-Content -Raw -LiteralPath $stderr_path)" }
 	$record = $records[0]
 	if (-not $record.native_load.initial.bounded_native_binding_path -or -not $record.native_load.initial.koffi_native_binding_path -or -not $record.native_load.initial.node_pty_module_path -or -not $record.native_load.restarted.bounded_native_binding_path -or -not $record.native_load.restarted.koffi_native_binding_path -or -not $record.native_load.restarted.node_pty_module_path) { throw "Packaged desktop smoke did not prove native bindings were opened in both utility epochs" }
 	if ($record.restart.previous_utility_epoch -ge $record.restart.next_utility_epoch -or -not $record.restart.previous_utility_exit_observed -or -not $record.restart.kill_accepted -or -not $record.native_load.initial.utility_pid -or -not $record.native_load.restarted.utility_pid -or $record.native_load.initial.utility_pid -eq $record.native_load.restarted.utility_pid) { throw "Packaged desktop smoke did not prove utility replacement" }
@@ -98,16 +138,15 @@ try {
 	foreach ($store_root in @($record.native_load.initial.native_store_root, $record.native_load.restarted.native_store_root)) {
 		if (-not $store_root -or -not ([System.IO.Path]::GetFullPath($store_root)).StartsWith($expected_smoke_root, [System.StringComparison]::OrdinalIgnoreCase)) { throw "Packaged desktop smoke opened its native store outside the unique smoke root" }
 	}
-	if (-not $record.mounted_ui -or -not $record.mounted_ui.wide.bridge_available -or -not $record.mounted_ui.wide.accessible_names.Contains("New chat") -or -not $record.mounted_ui.wide.accessible_names.Contains("Open Marketplace")) { throw "Packaged desktop smoke did not prove mounted accessible renderer controls" }
+	if (-not $record.mounted_ui -or -not $record.mounted_ui.wide.bridge_available -or -not $record.mounted_ui.wide.accessible_names.Contains("New chat")) { throw "Packaged desktop smoke did not prove mounted accessible renderer controls" }
 	foreach ($keyboard_activation in @($record.mounted_ui.keyboard_thread_counts.initial, $record.mounted_ui.keyboard_thread_counts.restarted)) {
 		if ($keyboard_activation.focused_name -ne "New chat" -or $keyboard_activation.thread_count -lt 1 -or -not $keyboard_activation.event.is_trusted -or $keyboard_activation.event.detail -ne 0 -or -not $keyboard_activation.event.active_before_click) { throw "Packaged desktop smoke did not prove a trusted Electron keyboard activation on the focused New chat control" }
 	}
 	if ($record.mounted_ui.keyboard_thread_counts.restarted.thread_count -le $record.mounted_ui.keyboard_thread_counts.initial.thread_count) { throw "Packaged desktop smoke did not prove renderer keyboard commands across utility restart" }
 	$interactions = $record.mounted_ui.product_interactions
-	if (-not $interactions -or -not $interactions.activity_bridge -or -not $interactions.marketplace.open -or -not $interactions.marketplace.focus_restored -or -not $interactions.marketplace.click.is_trusted -or $interactions.marketplace.click.detail -ne 1 -or -not $interactions.composer.is_trusted -or -not $interactions.composer.value.Contains("h") -or -not $interactions.editor_restore.restored -or -not $interactions.editor_restore.click.is_trusted -or -not $interactions.unavailable.no_active_file -or -not $interactions.unavailable.no_terminal_sessions) { throw "Packaged desktop smoke did not prove mounted activity, Marketplace, mode, composer, and unavailable-state interactions" }
+	if (-not $interactions -or -not $interactions.activity_bridge -or -not $interactions.route_path.StartsWith("/thread/") -or -not $interactions.composer.is_trusted -or -not $interactions.composer.value.Contains("h") -or -not $interactions.editor_restore.restored -or -not $interactions.editor_restore.click.is_trusted) { throw "Packaged desktop smoke did not prove mounted routed activity, mode, and composer interactions" }
 	if (@($interactions.modes).Count -ne 4 -or (@($interactions.modes | Where-Object { -not $_.click.is_trusted -or $_.click.detail -ne 1 -or $_.visible_region -notin @("Chat", "Editor", "Orchestrator") }).Count -ne 0)) { throw "Packaged desktop smoke did not prove trusted mounted workspace mode interactions" }
-	if (-not $interactions.right_tab_keyboard) { throw "Packaged desktop smoke did not prove right-pane tab keyboard reachability" }
-	if ($record.mounted_ui.wide.grid_template_columns.Split(" ").Count -lt 3 -or $record.mounted_ui.narrow.grid_template_columns.Split(" ").Count -ne 1 -or -not $record.mounted_ui.wide.left_visible -or -not $record.mounted_ui.wide.right_visible -or $record.mounted_ui.narrow.left_visible -or $record.mounted_ui.narrow.right_visible -or $record.mounted_ui.zoom_factor -ne 2) { throw "Packaged desktop smoke did not prove wide/narrow responsive layout and 200% zoom" }
+	if ($record.mounted_ui.wide.grid_template_columns.Split(" ").Count -lt 2 -or $record.mounted_ui.narrow.grid_template_columns.Split(" ").Count -ne 1 -or -not $record.mounted_ui.wide.left_visible -or -not $record.mounted_ui.wide.right_visible -or $record.mounted_ui.narrow.left_visible -or -not $record.mounted_ui.narrow.right_visible -or $record.mounted_ui.zoom_factor -ne 2) { throw "Packaged desktop smoke did not prove routed wide/narrow responsive layout and 200% zoom" }
 	Write-Output ("Packaged smoke evidence: " + ($record | ConvertTo-Json -Compress -Depth 10))
 } finally {
 	if ($process -and -not $process.HasExited) { & taskkill.exe /PID $process.Id /T /F | Out-Null }

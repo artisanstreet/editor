@@ -355,9 +355,11 @@ export const ApplyThreadListUpdate = (
 		| { readonly type: "upsert"; readonly thread: ThreadListItem }
 		| { readonly type: "remove"; readonly thread_id: string },
 ): LiveWorkspaceSnapshot => {
-	if (update.type === "snapshot") return reconcile_selection(snapshot, update.threads);
+	/** A list stream snapshot is authoritative, including the legitimate no-thread state. */
+	if (update.type === "snapshot")
+		return ApplyAuthoritativeThreadRefresh(snapshot, update.threads);
 	if (update.type === "remove") {
-		return reconcile_selection(
+		return ApplyAuthoritativeThreadRefresh(
 			snapshot,
 			snapshot.threads.filter((thread) => thread.thread_id !== update.thread_id),
 		);
@@ -366,7 +368,7 @@ export const ApplyThreadListUpdate = (
 	const threads = snapshot.threads.filter(
 		(thread) => thread.thread_id !== update.thread.thread_id,
 	);
-	return reconcile_selection(snapshot, [update.thread, ...threads]);
+	return ApplyAuthoritativeThreadRefresh(snapshot, [update.thread, ...threads]);
 };
 
 /** Applies a complete backend list as the current authoritative renderer projection. */
@@ -1010,6 +1012,18 @@ export const LiveWorkspaceStoreLive = Layer.effect(
 				yield* Ref.set(selected_subscription_fibers, fibers);
 			});
 
+		/** Hydrates a new authoritative selection after either a query or stream snapshot. */
+		const HydrateSelectedThread = (thread_id: string, selection_generation: number) =>
+			Effect.gen(function* () {
+				yield* LoadSelectedThread(thread_id, selection_generation);
+				yield* LoadThreadSurfaces(thread_id, selection_generation);
+				yield* StartSelectedSubscriptions(thread_id, selection_generation);
+				const group_id = Option.getOrUndefined(
+					(yield* SubscriptionRef.get(state)).snapshot.selected_group_id,
+				);
+				if (group_id !== undefined) yield* LoadGraph(group_id, selection_generation);
+			});
+
 		const Refresh = Effect.gen(function* () {
 			const started = yield* UpdateAndGet((current) => ({
 				...current,
@@ -1078,14 +1092,7 @@ export const LiveWorkspaceStoreLive = Layer.effect(
 				selected_thread_id !== undefined &&
 				current.refresh_generation === refresh_generation
 			) {
-				yield* LoadSelectedThread(selected_thread_id, current.selection_generation);
-				yield* LoadThreadSurfaces(selected_thread_id, current.selection_generation);
-				yield* StartSelectedSubscriptions(selected_thread_id, current.selection_generation);
-				const group_id = Option.getOrUndefined(
-					(yield* SubscriptionRef.get(state)).snapshot.selected_group_id,
-				);
-				if (group_id !== undefined)
-					yield* LoadGraph(group_id, current.selection_generation);
+				yield* HydrateSelectedThread(selected_thread_id, current.selection_generation);
 			}
 			yield* client.GetGlobalGuidance.pipe(
 				Effect.tap((global_guidance) =>
@@ -1758,8 +1765,17 @@ export const LiveWorkspaceStoreLive = Layer.effect(
 						if (
 							Option.getOrUndefined(next.snapshot.selected_thread_id) !==
 							selected_thread_id
-						)
+						) {
 							yield* StopTerminalOutputWatchers();
+							const next_thread_id = Option.getOrUndefined(
+								next.snapshot.selected_thread_id,
+							);
+							if (next_thread_id !== undefined)
+								yield* HydrateSelectedThread(
+									next_thread_id,
+									next.selection_generation,
+								);
+						}
 					}),
 				(message) =>
 					Update((current) =>

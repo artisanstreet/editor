@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 const workspace_root = resolve(import.meta.dirname, "../../..");
 const frontend_root = resolve(workspace_root, "modules/frontend");
 const frontend_config = readFileSync(resolve(frontend_root, "vite.config.ts"), "utf8");
+const desktop_config = readFileSync(resolve(workspace_root, "desktop.vite.config.ts"), "utf8");
 const release_policy = readFileSync(
 	resolve(workspace_root, "docs/release/validation-policy.md"),
 	"utf8",
@@ -92,9 +93,8 @@ describe("deep desktop release gates", () => {
 		expect(utility).toContain("mkdirSync(dirname(environment.database_path)");
 		expect(utility).toContain("bounded_file_store_native.win32-x64-msvc.node");
 		expect(utility).toContain("koffi_native_binding_path");
-		expect(readFileSync(resolve(workspace_root, "desktop.vite.config.ts"), "utf8")).toContain(
-			"koffi-win32-x64",
-		);
+		expect(desktop_config).toContain("koffi-win32-x64");
+		expect(desktop_config).toContain("ssr: { noExternal: true }");
 	});
 
 	it("records the packaged layout and native unpack policy as release-only evidence", () => {
@@ -123,6 +123,9 @@ describe("deep desktop release gates", () => {
 		expect(release_policy).toMatch(/real\s+browser-zoom/);
 		expect(verifier).toContain('Stop-PackagedSmokeProcesses -Reason "preflight"');
 		expect(verifier).toContain('Stop-PackagedSmokeProcesses -Reason "cleanup"');
+		expect(verifier).toContain("unresolved bare package imports");
+		expect(verifier).toContain("Copy-Item -LiteralPath $artifact_release_root");
+		expect(verifier).toContain("outside the repository");
 		expect(verifier).toContain("is_trusted");
 		expect(verifier).toContain("active_before_click");
 	});

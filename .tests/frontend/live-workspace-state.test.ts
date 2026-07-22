@@ -95,6 +95,24 @@ describe("live workspace state", () => {
 		expect(updated.threads).toEqual([]);
 		expect(Option.isNone(updated.selected_thread_id)).toBe(true);
 		expect(Option.isNone(updated.thread_work)).toBe(true);
+		expect(updated.phase).toBe("empty");
+	});
+
+	it("selects and marks the first thread ready when the live list creates it", () => {
+		const updated = ApplyThreadListUpdate(
+			{
+				...EmptySnapshot,
+				selected_thread_id: Option.none(),
+				phase: "empty",
+			},
+			{
+				thread: { thread_id: "thread-2" } as never,
+				type: "upsert",
+			},
+		);
+
+		expect(Option.getOrUndefined(updated.selected_thread_id)).toBe("thread-2");
+		expect(updated.phase).toBe("ready");
 	});
 
 	it("rejects a late work result after the user selected another thread", () => {

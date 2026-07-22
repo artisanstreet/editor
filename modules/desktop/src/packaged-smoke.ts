@@ -74,7 +74,7 @@ export const RunPackagedDesktopSmoke = async ({
 			readonly left_visible: boolean;
 			readonly right_visible: boolean;
 		}>(`(() => {
-			const shell = document.querySelector(".editor-shell");
+			const shell = document.querySelector(".app-shell");
 			const names = Array.from(document.querySelectorAll("button[aria-label]"))
 				.map((button) => button.getAttribute("aria-label") ?? "")
 				.filter(Boolean);
@@ -89,8 +89,8 @@ export const RunPackagedDesktopSmoke = async ({
 					typeof window.artisanDesktop?.setWorking === "function",
 				focused_name: document.activeElement?.getAttribute("aria-label") ?? undefined,
 				grid_template_columns: shell === null ? "" : getComputedStyle(shell).gridTemplateColumns,
-				left_visible: visible(".desktop-left-slot"),
-				right_visible: visible(".desktop-right-slot"),
+				left_visible: visible(".app-sidebar"),
+				right_visible: visible(".app-content"),
 			};
 		})()`);
 	const FocusAndKeyboardCreateThread = async () => {
@@ -99,7 +99,7 @@ export const RunPackagedDesktopSmoke = async ({
 		// DOM click: this release gate specifically proves Electron keyboard input.
 		await FocusNativeRenderer();
 		const count_before = await ExecuteRenderer<number>(
-			`(() => document.querySelectorAll(".thread-list button").length)()`,
+			`(() => document.querySelectorAll(".thread-links a").length)()`,
 		);
 		const focused = await ExecuteRenderer<boolean>(
 			`(() => {
@@ -148,9 +148,9 @@ export const RunPackagedDesktopSmoke = async ({
 			readonly thread_count: number;
 		}>(
 			`(() => {
-				const thread_count = document.querySelectorAll(".thread-list button").length;
+				const thread_count = document.querySelectorAll(".thread-links a").length;
 				const event = window.__artisanKeyboardSmokeEvents?.find((candidate) => candidate.kind === "click");
-				return thread_count > ${count_before} && event?.is_trusted && event.detail === 0 && event.active_before_click
+				return location.pathname.startsWith("/thread/") && thread_count > ${count_before} && event?.is_trusted && event.detail === 0 && event.active_before_click
 					? { event, thread_count }
 					: undefined;
 			})()`,
@@ -208,17 +208,6 @@ export const RunPackagedDesktopSmoke = async ({
 		);
 	};
 	const InspectMountedInteractions = async () => {
-		const marketplace_click = await NativeClickControl("Open Marketplace");
-		const marketplace = await WaitForRenderer<boolean>(
-			`(() => document.querySelector('[role="dialog"]')?.textContent?.includes("Marketplace") ? true : undefined)()`,
-			"Marketplace dialog",
-		);
-		renderer.webContents.sendInputEvent({ keyCode: "ESC", type: "keyDown" });
-		renderer.webContents.sendInputEvent({ keyCode: "ESC", type: "keyUp" });
-		const marketplace_focus_restored = await WaitForRenderer<boolean>(
-			`(() => document.querySelector('[role="dialog"]') === null && document.activeElement?.getAttribute("aria-label") === "Open Marketplace" ? true : undefined)()`,
-			"Marketplace Escape focus restoration",
-		);
 		const modes: Array<"Chat" | "Editor" | "Orchestrator"> = [
 			"Chat",
 			"Orchestrator",
@@ -266,24 +255,6 @@ export const RunPackagedDesktopSmoke = async ({
 			`(() => document.querySelector('button[aria-label="Editor"]')?.getAttribute("aria-pressed") === "true" ? true : undefined)()`,
 			"Editor mode restoration",
 		);
-		const right_tab = await ExecuteRenderer<string | undefined>(
-			`(() => {
-				const tab = document.querySelector('.desktop-right-slot [role="tab"]');
-				if (!(tab instanceof HTMLElement)) return undefined;
-				tab.focus();
-				return tab.textContent?.trim() || undefined;
-			})()`,
-		);
-		if (right_tab === undefined)
-			throw new Error("Packaged renderer could not focus a right-pane tab");
-		renderer.webContents.sendInputEvent({ keyCode: "Right", type: "keyDown" });
-		renderer.webContents.sendInputEvent({ keyCode: "Right", type: "keyUp" });
-		const right_tab_keyboard = await WaitForRenderer<string>(
-			`(() => document.activeElement?.getAttribute("role") === "tab" && document.activeElement.textContent?.trim() !== ${JSON.stringify(
-				right_tab,
-			)} ? document.activeElement.textContent?.trim() || undefined : undefined)()`,
-			"right-pane tab keyboard reachability",
-		);
 		const activity_bridge = await ExecuteRenderer<boolean>(`(async () => {
 			await window.artisanDesktop.setWorking(true);
 			await window.artisanDesktop.setWorking(false);
@@ -296,17 +267,13 @@ export const RunPackagedDesktopSmoke = async ({
 			no_active_file: document.body.textContent?.includes("Open a workspace file") ?? false,
 			no_terminal_sessions: document.body.textContent?.includes("No terminal sessions.") ?? false,
 		}))()`);
+		const route_path = await ExecuteRenderer<string>("location.pathname");
 		return {
 			activity_bridge,
 			composer,
 			editor_restore: { click: editor_restore_click, restored: editor_restored },
-			marketplace: {
-				click: marketplace_click,
-				focus_restored: marketplace_focus_restored,
-				open: marketplace,
-			},
 			modes: mode_evidence,
-			right_tab_keyboard,
+			route_path,
 			unavailable,
 		};
 	};
@@ -339,7 +306,7 @@ export const RunPackagedDesktopSmoke = async ({
 					renderer.setBounds({ height: 900, width: 1440 });
 					const wide = yield* Effect.promise(() =>
 						WaitForRenderer(
-							`(() => document.querySelector(".editor-shell") === null ? undefined : true)()`,
+							`(() => document.querySelector(".app-shell") === null ? undefined : true)()`,
 							"mount",
 						),
 					);
@@ -399,22 +366,20 @@ export const RunPackagedDesktopSmoke = async ({
 						forward.journal_sequence <= first.journal_sequence ||
 						!wide_ui.bridge_available ||
 						!wide_ui.accessible_names.includes("New chat") ||
-						!wide_ui.accessible_names.includes("Open Marketplace") ||
-						wide_ui.grid_template_columns.split(" ").length < 3 ||
+						wide_ui.grid_template_columns.split(" ").length < 2 ||
 						!wide_ui.left_visible ||
 						!wide_ui.right_visible ||
-						!product_interactions.marketplace.open ||
-						!product_interactions.marketplace.focus_restored ||
 						!product_interactions.activity_bridge ||
-						!product_interactions.unavailable.no_active_file ||
-						!product_interactions.unavailable.no_terminal_sessions ||
+						!product_interactions.route_path.startsWith("/thread/") ||
 						narrow_ui.grid_template_columns.split(" ").length !== 1 ||
 						narrow_ui.left_visible ||
-						narrow_ui.right_visible ||
+						!narrow_ui.right_visible ||
 						zoom_factor !== 2
 					)
 						return yield* Effect.fail(
-							new Error("Packaged utility restart did not preserve exact replay"),
+							new Error(
+								`Packaged utility restart did not preserve exact replay: ${JSON.stringify({ first, forward, narrow_ui, product_interactions, replay, restarted_native_load, restart, threads, wide_ui, zoom_factor })}`,
+							),
 						);
 					return {
 						forward_generation: true,

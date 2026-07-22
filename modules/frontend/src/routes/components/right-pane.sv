@@ -71,11 +71,14 @@
 		instance_id,
 		live_snapshot,
 		controller,
+		include_settings = false,
 		on_collapse,
 	}: {
 		instance_id: string;
 		live_snapshot: LiveWorkspaceSnapshot;
 		controller: WorkspaceController;
+		/** Global settings belong to the dedicated settings route, never the thread inspector. */
+		include_settings?: boolean;
 		on_collapse?: Effect.Effect<void>;
 	} = $props();
 
@@ -431,7 +434,7 @@
 			<TabsTrigger value="session">Session</TabsTrigger>
 			<TabsTrigger value="changes">Changes</TabsTrigger>
 			<TabsTrigger value="tools">Tools</TabsTrigger>
-			<TabsTrigger value="settings">Settings</TabsTrigger>
+			{#if include_settings}<TabsTrigger value="settings">Settings</TabsTrigger>{/if}
 		</TabsList>
 		<ScrollArea class="min-h-0 flex-1">
 			<TabsContent value="session" class="m-0 grid gap-3 p-3">
@@ -534,7 +537,7 @@
 				</Accordion>
 			</TabsContent>
 
-			<TabsContent value="settings" class="m-0 grid gap-3 p-3">
+			{#if include_settings}<TabsContent value="settings" class="m-0 grid gap-3 p-3">
 				<Card>
 					<CardHeader class="p-3 pb-2"><CardTitle class="text-sm">Session policy</CardTitle></CardHeader>
 					<CardContent class="grid gap-3 p-3 pt-0 text-xs">
@@ -597,7 +600,7 @@
 						{#each model_behaviour?.providers ?? [] as provider (`${provider.provider_id}:${provider.setting_id}`)}<div class="grid gap-1 rounded-md border p-2"><div class="flex items-center gap-2"><span>{provider.provider_id}</span><Badge variant="secondary">{provider.status}</Badge></div>{#if provider.last_error_code}<code class="text-destructive">{provider.last_error_code}</code>{/if}<div class="flex flex-wrap gap-1">{#if provider.status === "drift_detected" && provider.observed_hash}<Button size="xs" variant="outline" onclick={yield* ResolveModelDrift(provider.provider_id, provider.setting_id, provider.observed_hash, "import")}>Import</Button><Button size="xs" variant="outline" onclick={yield* ResolveModelDrift(provider.provider_id, provider.setting_id, provider.observed_hash, "overwrite")}>Overwrite</Button><Button size="xs" variant="ghost" onclick={yield* ResolveModelDrift(provider.provider_id, provider.setting_id, provider.observed_hash, "ignore")}>Ignore</Button>{/if}{#if provider.status === "sync_failed"}<Button size="xs" variant="outline" onclick={yield* RetryModelSync(provider.provider_id, provider.setting_id)}>Retry sync</Button>{/if}</div></div>{/each}
 					</CardContent>
 				</Card>
-			</TabsContent>
+			</TabsContent>{/if}
 		</ScrollArea>
 	</Tabs>
 
