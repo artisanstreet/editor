@@ -111,7 +111,7 @@
 			<TabsList
 				variant="line"
 				aria-label="Coding engines"
-				class="card h-auto! w-full justify-start overflow-x-auto rounded-3xl! bg-linear-to-b from-foreground/5 to-foreground/2.5 p-1"
+				class="card h-auto! w-full justify-start overflow-x-auto rounded-lg! bg-linear-to-b from-foreground/10 to-foreground/5 p-1"
 			>
 				{#each engines as engine (engine.id)}
 					{@const EngineIcon = engine.icon}

@@ -39,7 +39,7 @@ describe("Barekey docs shell reset", () => {
 		expect(model_selector).toContain("SvglGoogleAntigravityLogo");
 		expect(model_selector).not.toMatch(/Cline|Terminal2/);
 		expect(model_selector).toContain('gap-2 overflow-hidden bg-background p-2');
-		expect(model_selector).toContain('rounded-3xl! bg-linear-to-b from-foreground/5 to-foreground/2.5 p-1');
+		expect(model_selector).toContain('rounded-lg! bg-linear-to-b from-foreground/10 to-foreground/5 p-1');
 		expect(model_selector).toContain('after:hidden hover:text-foreground data-active:border-transparent data-active:bg-transparent');
 		expect(model_selector).toContain('<ScrollArea class="h-64 rounded-xl">');
 		expect(model_selector).toContain('truncate text-base font-semibold text-foreground');
