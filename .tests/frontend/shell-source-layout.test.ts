@@ -23,19 +23,25 @@ describe("Barekey docs shell reset", () => {
 		const layout = Read("modules/frontend/src/routes/+layout.sv");
 		const thread = Read("modules/frontend/src/routes/thread/[id]/+page.sv");
 		const thread_panel = Read("modules/frontend/src/routes/components/thread-panel.sv");
+		const model_selector = Read("modules/frontend/src/routes/components/model-selector.sv");
 
 		expect(layout).toContain("/^\\/thread\\/[^/]+\\/?$/");
 		expect(layout).toContain("<ThreadPanel />");
 		expect(layout).toContain("secondary={is_thread ? secondary : undefined}");
 		expect(thread).toContain("Thread · Artisan Editor");
-		expect(thread_panel).toContain('import { SvglOpenAILogo } from "@selemondev/svgl-svelte"');
-		expect(thread_panel).toContain('class="flex flex-row items-center gap-4"');
-		expect(thread_panel).toContain('class="size-8 shrink-0 fill-foreground"');
-		expect(thread_panel).toContain('class="flex flex-col -space-y-1"');
-		expect(thread_panel).toContain(
-			'class="text-lg font-semibold text-foreground">GPT 5.6 Sol</span>',
-		);
-		expect(thread_panel).toContain('class="text-sm text-muted-foreground">OpenAI</span>');
+		expect(thread_panel).toContain("<ModelSelector />");
+		expect(model_selector).toContain('aria-label="Select model"');
+		expect(model_selector).toContain('aria-label="Coding engines"');
+		expect(model_selector).toContain("SvglCodexLogo");
+		expect(model_selector).toContain("SvglClaudeAILogo");
+		expect(model_selector).toContain("SvglGrokLogo");
+		expect(model_selector).toContain("SvglOpenCodeLogo");
+		expect(model_selector).toContain("SvglGoogleAntigravityLogo");
+		expect(model_selector).toContain('{ id: "cline", name: "Cline", icon: Terminal2');
+		expect(model_selector).toContain('<ScrollArea class="h-64 rounded-xl">');
+		expect(model_selector).toContain('aria-label="Available models"');
+		expect(model_selector).toContain('name: "GPT 5.6 Sol", lab: "Codex"');
+		expect(model_selector).not.toContain('lab: "OpenAI"');
 	});
 
 	it("matches the Barekey docs inset sidebar and circular toggle", () => {
