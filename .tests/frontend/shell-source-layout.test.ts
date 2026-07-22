@@ -34,6 +34,9 @@ describe("Barekey docs shell reset", () => {
 		expect(model_selector).toContain('aria-label="Select model"');
 		expect(model_selector).toContain('rounded-2xl bg-linear-to-b from-foreground/7.5 to-foreground/2.5 p-2');
 		expect(model_selector).toContain("transition-colors card-lg");
+		expect(model_selector).toContain('? "size-6 shrink-0 dark:invert"');
+		expect(model_selector).toContain('truncate text-base font-semibold text-foreground">{selected_model.name}');
+		expect(model_selector).toContain('truncate text-xs text-muted-foreground">{selected_model.lab}');
 		expect(model_selector).toContain('<Selector class="pointer-events-none size-4 shrink-0 text-muted-foreground" />');
 		expect(model_selector).toContain('aria-label="Coding engines"');
 		expect(model_selector).toContain("SvglOpenAILogo");

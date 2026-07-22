@@ -90,12 +90,12 @@
 		{@const SelectedIcon = selected_engine.icon}
 		<SelectedIcon
 			class={selected_engine.monochrome
-				? "size-8 shrink-0 dark:invert"
-				: "size-8 shrink-0"}
+				? "size-6 shrink-0 dark:invert"
+				: "size-6 shrink-0"}
 		/>
 		<div class="flex min-w-0 flex-1 flex-col -space-y-1">
-			<span class="truncate text-lg font-semibold text-foreground">{selected_model.name}</span>
-			<span class="truncate text-sm text-muted-foreground">{selected_model.lab}</span>
+			<span class="truncate text-base font-semibold text-foreground">{selected_model.name}</span>
+			<span class="truncate text-xs text-muted-foreground">{selected_model.lab}</span>
 		</div>
 		<Selector class="pointer-events-none size-4 shrink-0 text-muted-foreground" />
 	</PopoverTrigger>
