@@ -31,7 +31,7 @@ describe("Barekey docs shell reset", () => {
 		expect(thread_panel).toContain('import { SvglOpenAILogo } from "@selemondev/svgl-svelte"');
 		expect(thread_panel).toContain('class="flex flex-row items-center gap-2"');
 		expect(thread_panel).toContain(
-			'class="text-2xl font-semibold text-foreground">GPT 5.6 Sol</span>',
+			'class="text-xl font-semibold text-foreground">GPT 5.6 Sol</span>',
 		);
 		expect(thread_panel).toContain('class="text-sm text-muted-foreground">OpenAI</span>');
 	});

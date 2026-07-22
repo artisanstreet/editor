@@ -519,4 +519,5 @@ Implemented, independently reviewed, committed, and verified:
 - [x] Added the conditional third shell surface through the existing secondary snippet contract. The layout passes it only for concrete `/thread/<id>` paths, and the restored dynamic thread route is deliberately content-empty pending the user's next step. Browser verification confirmed two gradient content cards on `/thread/demo`; `/` retains one.
 - [x] Added the first thread-panel content: a compact top model identity row using Barekey's `@selemondev/svgl-svelte` source, the foreground-aware OpenAI mark, hard-coded `OpenAI GPT 5.6 Sol`, and muted `OpenAI` lab label. Browser verification confirmed dark-mode contrast and spacing.
 - [x] Refined the thread model identity hierarchy: the heading is now `text-2xl` and reads only `GPT 5.6 Sol`; the separate muted `OpenAI` lab label carries the provider identity without duplication.
+- [x] Reduced the thread model heading to `text-xl` after visual review.
 - [ ] Continue only from the user's next visual direction; do not restore or invent the removed navigation, welcome, thread, settings, or workspace UI without an explicit next step.
