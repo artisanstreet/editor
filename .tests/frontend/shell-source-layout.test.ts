@@ -38,9 +38,10 @@ describe("Barekey docs shell reset", () => {
 		expect(model_selector).toContain('icon: OpenCodeIcon');
 		expect(model_selector).toContain("SvglGoogleAntigravityLogo");
 		expect(model_selector).not.toMatch(/Cline|Terminal2/);
-		expect(model_selector).toContain('class="card w-full justify-start overflow-x-auto rounded-xl bg-muted/40 p-1"');
+		expect(model_selector).toContain('gap-2 overflow-hidden bg-background p-2');
+		expect(model_selector).toContain('rounded-3xl! bg-linear-to-b from-foreground/5 to-foreground/2.5 p-1');
 		expect(model_selector).toContain('after:hidden hover:text-foreground data-active:border-transparent data-active:bg-transparent');
-		expect(model_selector).toContain('<ScrollArea class="h-64 rounded-xl bg-background">');
+		expect(model_selector).toContain('<ScrollArea class="h-64 rounded-xl">');
 		expect(model_selector).toContain('truncate text-base font-semibold text-foreground');
 		expect(model_selector).toContain('aria-label="Available models"');
 		expect(model_selector).toContain('name: "GPT 5.6 Sol", lab: "Codex"');

@@ -105,13 +105,13 @@
 	<PopoverContent
 		align="end"
 		sideOffset={8}
-		class="w-[min(32rem,calc(100vw-2rem))] gap-2 overflow-hidden p-2"
+		class="w-[min(32rem,calc(100vw-2rem))] gap-2 overflow-hidden bg-background p-2"
 	>
 		<Tabs bind:value={active_engine} class="min-h-0 gap-2">
 			<TabsList
 				variant="line"
 				aria-label="Coding engines"
-				class="card w-full justify-start overflow-x-auto rounded-xl bg-muted/40 p-1"
+				class="card h-auto! w-full justify-start overflow-x-auto rounded-3xl! bg-linear-to-b from-foreground/5 to-foreground/2.5 p-1"
 			>
 				{#each engines as engine (engine.id)}
 					{@const EngineIcon = engine.icon}
@@ -126,7 +126,7 @@
 				{/each}
 			</TabsList>
 
-			<ScrollArea class="h-64 rounded-xl bg-background">
+			<ScrollArea class="h-64 rounded-xl">
 				<table class="w-full border-separate border-spacing-y-1" aria-label="Available models">
 					<tbody>
 						{#each active_models as model (model.id)}
