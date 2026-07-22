@@ -1,20 +1,19 @@
 <script lang="ts">
 	import ChevronDown from "@tabler/icons-svelte/icons/chevron-down";
-	import Terminal2 from "@tabler/icons-svelte/icons/terminal-2";
 	import {
 		SvglClaudeAILogo,
-		SvglCodexLogo,
 		SvglGoogleAntigravityLogo,
 		SvglGrokLogo,
-		SvglOpenCodeLogo,
+		SvglOpenAILogo,
 	} from "@selemondev/svgl-svelte";
 	import type { Component } from "svelte";
 
 	import { Popover, PopoverContent, PopoverTrigger } from "$lib/components/ui/popover";
 	import { ScrollArea } from "$lib/components/ui/scroll-area";
 	import { Tabs, TabsList, TabsTrigger } from "$lib/components/ui/tabs";
+	import OpenCodeIcon from "./opencode-icon.sv";
 
-	type EngineId = "codex" | "claude" | "grok" | "opencode" | "cline" | "antigravity";
+	type EngineId = "codex" | "claude" | "grok" | "opencode" | "antigravity";
 
 	type Engine = {
 		id: EngineId;
@@ -31,11 +30,10 @@
 	};
 
 	const engines: ReadonlyArray<Engine> = [
-		{ id: "codex", name: "Codex", icon: SvglCodexLogo, monochrome: true },
+		{ id: "codex", name: "Codex", icon: SvglOpenAILogo, monochrome: true },
 		{ id: "claude", name: "Claude Code", icon: SvglClaudeAILogo, monochrome: false },
 		{ id: "grok", name: "Grok", icon: SvglGrokLogo, monochrome: true },
-		{ id: "opencode", name: "OpenCode", icon: SvglOpenCodeLogo, monochrome: false },
-		{ id: "cline", name: "Cline", icon: Terminal2, monochrome: false },
+		{ id: "opencode", name: "OpenCode", icon: OpenCodeIcon, monochrome: false },
 		{
 			id: "antigravity",
 			name: "Antigravity",
@@ -53,8 +51,6 @@
 		{ id: "grok-4-5", engine: "grok", name: "Grok 4.5", lab: "Grok" },
 		{ id: "opencode-zen", engine: "opencode", name: "OpenCode Zen", lab: "OpenCode" },
 		{ id: "opencode-any", engine: "opencode", name: "Configured model", lab: "OpenCode" },
-		{ id: "cline-cli", engine: "cline", name: "Cline CLI", lab: "Cline" },
-		{ id: "cline-gpt", engine: "cline", name: "GPT 5.5", lab: "Cline" },
 		{
 			id: "antigravity-flash",
 			engine: "antigravity",
@@ -130,7 +126,7 @@
 				<table class="w-full border-separate border-spacing-y-1" aria-label="Available models">
 					<tbody>
 						{#each active_models as model (model.id)}
-							{@const ModelIcon = engines.find((engine) => engine.id === model.engine)?.icon ?? Terminal2}
+							{@const ModelIcon = engines.find((engine) => engine.id === model.engine)?.icon ?? SvglOpenAILogo}
 							{@const is_monochrome = engines.find((engine) => engine.id === model.engine)?.monochrome ?? false}
 							<tr>
 								<td class="p-0">

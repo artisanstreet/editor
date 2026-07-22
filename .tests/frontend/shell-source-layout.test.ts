@@ -32,12 +32,12 @@ describe("Barekey docs shell reset", () => {
 		expect(thread_panel).toContain("<ModelSelector />");
 		expect(model_selector).toContain('aria-label="Select model"');
 		expect(model_selector).toContain('aria-label="Coding engines"');
-		expect(model_selector).toContain("SvglCodexLogo");
+		expect(model_selector).toContain("SvglOpenAILogo");
 		expect(model_selector).toContain("SvglClaudeAILogo");
 		expect(model_selector).toContain("SvglGrokLogo");
-		expect(model_selector).toContain("SvglOpenCodeLogo");
+		expect(model_selector).toContain('icon: OpenCodeIcon');
 		expect(model_selector).toContain("SvglGoogleAntigravityLogo");
-		expect(model_selector).toContain('{ id: "cline", name: "Cline", icon: Terminal2');
+		expect(model_selector).not.toMatch(/Cline|Terminal2/);
 		expect(model_selector).toContain('<ScrollArea class="h-64 rounded-xl">');
 		expect(model_selector).toContain('aria-label="Available models"');
 		expect(model_selector).toContain('name: "GPT 5.6 Sol", lab: "Codex"');
