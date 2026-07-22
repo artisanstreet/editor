@@ -258,23 +258,23 @@
 		position: absolute;
 		top: -0.375rem;
 		left: 50%;
-		width: 3.5rem;
+		width: 2rem;
 		height: calc(100% + 0.375rem);
 		content: "";
 		background:
 			radial-gradient(
-				ellipse 32% 18% at 50% 0%,
+				ellipse 28% 16% at 50% 0%,
 				oklch(from var(--foreground) l c h / 56%) 0%,
 				oklch(from var(--foreground) l c h / 18%) 42%,
 				transparent 100%
 			),
 			radial-gradient(
-				ellipse 58% 100% at 50% 0%,
+				ellipse 46% 92% at 50% 0%,
 				oklch(from var(--foreground) l c h / 18%) 0%,
 				oklch(from var(--foreground) l c h / 7%) 42%,
 				transparent 78%
 			);
-		filter: blur(0.125rem);
+		filter: blur(0.0625rem);
 		transform: translateX(-50%);
 	}
 

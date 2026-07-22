@@ -57,7 +57,8 @@ describe("Barekey docs shell reset", () => {
 		expect(model_selector).toContain('engine_indicator_animated = animate && engine_indicator_visible');
 		expect(model_selector).toContain('class="model-selector-engine-light"');
 		expect(model_selector).toContain('radial-gradient(');
-		expect(model_selector).toContain('filter: blur(0.125rem);');
+		expect(model_selector).toContain('width: 2rem;');
+		expect(model_selector).toContain('filter: blur(0.0625rem);');
 		expect(model_selector).not.toContain('clip-path: polygon');
 		expect(model_selector).not.toContain('engine_indicator_height');
 		expect(model_selector).toContain('<svelte:window onresize={() => position_engine_indicator(false)} />');
