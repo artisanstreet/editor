@@ -35,7 +35,7 @@ describe("Barekey docs shell reset", () => {
 		expect(panel).toContain(
 			"rounded-3xl bg-linear-to-b from-foreground/5 to-foreground/2.5 p-1 card",
 		);
-		expect(panel).toContain("rounded-[calc(var(--radius-3xl)-0.25rem)]");
+		expect(panel).not.toContain("bg-background");
 	});
 
 	it("shows only the copied docs header identity inside the sidebar", () => {

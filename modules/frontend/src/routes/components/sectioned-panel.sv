@@ -42,22 +42,14 @@
 			<section
 				class="min-h-0 min-w-0 flex-1 rounded-3xl bg-linear-to-b from-foreground/5 to-foreground/2.5 p-1 card"
 			>
-				<div
-					class="h-full overflow-hidden rounded-[calc(var(--radius-3xl)-0.25rem)] bg-background"
-				>
-					{@render primary()}
-				</div>
+				{@render primary()}
 			</section>
 
 			{#if secondary}
 				<section
 					class="min-h-0 w-[clamp(16rem,25vw,350px)] shrink-0 rounded-3xl bg-linear-to-b from-foreground/5 to-foreground/2.5 p-1 card"
 				>
-					<div
-						class="h-full overflow-hidden rounded-[calc(var(--radius-3xl)-0.25rem)] bg-background"
-					>
-						{@render secondary()}
-					</div>
+					{@render secondary()}
 				</section>
 			{/if}
 		</div>
