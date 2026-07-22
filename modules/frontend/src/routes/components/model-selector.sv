@@ -261,30 +261,26 @@
 		width: 2rem;
 		height: 1.5rem;
 		content: "";
-		background:
-			radial-gradient(
-				ellipse 28% 20% at 50% -24%,
-				oklch(from var(--foreground) l c h / 48%) 0%,
-				oklch(from var(--foreground) l c h / 12%) 28%,
-				transparent 72%
-			),
-			radial-gradient(
-				ellipse 46% 96% at 50% -16%,
-				oklch(from var(--foreground) l c h / 14%) 0%,
-				oklch(from var(--foreground) l c h / 6%) 46%,
-				transparent 100%
-			);
+		background: linear-gradient(
+			to bottom,
+			oklch(from var(--foreground) l c h / 38%) 0%,
+			oklch(from var(--foreground) l c h / 16%) 38%,
+			oklch(from var(--foreground) l c h / 5%) 72%,
+			transparent 100%
+		);
 		filter: blur(0.125rem);
 		-webkit-mask-image: radial-gradient(
-			ellipse 50% 104% at 50% -16%,
-			rgb(0 0 0 / 68%) 0%,
-			rgb(0 0 0 / 54%) 42%,
+			ellipse 48% 70% at 50% 35%,
+			#000 0%,
+			rgb(0 0 0 / 50%) 55%,
+			rgb(0 0 0 / 10%) 82%,
 			transparent 100%
 		);
 		mask-image: radial-gradient(
-			ellipse 50% 104% at 50% -16%,
-			rgb(0 0 0 / 68%) 0%,
-			rgb(0 0 0 / 54%) 42%,
+			ellipse 48% 70% at 50% 35%,
+			#000 0%,
+			rgb(0 0 0 / 50%) 55%,
+			rgb(0 0 0 / 10%) 82%,
 			transparent 100%
 		);
 		transform: translateX(-50%);

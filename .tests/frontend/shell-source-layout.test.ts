@@ -56,9 +56,11 @@ describe("Barekey docs shell reset", () => {
 		expect(model_selector).toContain('data-engine={engine.id}');
 		expect(model_selector).toContain('engine_indicator_animated = animate && engine_indicator_visible');
 		expect(model_selector).toContain('class="model-selector-engine-light"');
-		expect(model_selector).toContain('radial-gradient(');
+		expect(model_selector).toContain('linear-gradient(');
 		expect(model_selector).toContain('width: 2rem;');
-		expect(model_selector).toContain('ellipse 28% 20% at 50% -24%');
+		expect(model_selector).toContain('ellipse 48% 70% at 50% 35%');
+		expect(model_selector).toContain('rgb(0 0 0 / 50%) 55%');
+		expect(model_selector).toContain('rgb(0 0 0 / 10%) 82%');
 		expect(model_selector).toContain('filter: blur(0.125rem);');
 		expect(model_selector).toContain('height: 1.5rem;');
 		expect(model_selector).toContain('mask-image: radial-gradient(');
