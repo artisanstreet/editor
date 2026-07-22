@@ -24,6 +24,7 @@ describe("Barekey docs shell reset", () => {
 		const thread = Read("modules/frontend/src/routes/thread/[id]/+page.sv");
 		const thread_panel = Read("modules/frontend/src/routes/components/thread-panel.sv");
 		const model_selector = Read("modules/frontend/src/routes/components/model-selector.sv");
+		const popover_content = Read("modules/frontend/src/lib/components/ui/popover/popover-content.sv");
 
 		expect(layout).toContain("/^\\/thread\\/[^/]+\\/?$/");
 		expect(layout).toContain("<ThreadPanel />");
@@ -38,7 +39,9 @@ describe("Barekey docs shell reset", () => {
 		expect(model_selector).toContain('icon: OpenCodeIcon');
 		expect(model_selector).toContain("SvglGoogleAntigravityLogo");
 		expect(model_selector).not.toMatch(/Cline|Terminal2/);
-		expect(model_selector).toContain('class="card! w-[min(32rem,calc(100vw-2rem))]');
+		expect(popover_content).toContain('"card bg-popover text-popover-foreground');
+		expect(popover_content).not.toMatch(/ring-foreground|shadow-2xl|ring-1/);
+		expect(model_selector).not.toContain("card!");
 		expect(model_selector).toContain('rounded-lg! bg-linear-to-b from-foreground/10 to-foreground/5 p-1');
 		expect(model_selector).toContain('after:hidden hover:text-foreground data-active:border-transparent data-active:bg-transparent');
 		expect(model_selector).toContain('<ScrollArea class="h-64 rounded-xl">');
