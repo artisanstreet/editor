@@ -33,7 +33,7 @@ describe("Barekey docs shell reset", () => {
 		expect(thread_panel).toContain('class="size-8 shrink-0 fill-foreground"');
 		expect(thread_panel).toContain('class="flex flex-col -space-y-1"');
 		expect(thread_panel).toContain(
-			'class="text-xl font-semibold text-foreground">GPT 5.6 Sol</span>',
+			'class="text-lg font-semibold text-foreground">GPT 5.6 Sol</span>',
 		);
 		expect(thread_panel).toContain('class="text-sm text-muted-foreground">OpenAI</span>');
 	});
