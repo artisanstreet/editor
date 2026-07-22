@@ -254,36 +254,27 @@
 		will-change: transform, width;
 	}
 
-	.model-selector-engine-light::before {
-		position: absolute;
-		top: 0;
-		left: 50%;
-		width: 0.625rem;
-		height: 0.25rem;
-		content: "";
-		background: linear-gradient(
-			to bottom,
-			oklch(from var(--foreground) l c h / 92%),
-			oklch(from var(--foreground) l c h / 42%)
-		);
-		clip-path: polygon(0 0, 100% 0, 50% 100%);
-		filter: drop-shadow(0 0.125rem 0.25rem oklch(from var(--foreground) l c h / 62%));
-		transform: translateX(-50%);
-	}
-
 	.model-selector-engine-light::after {
 		position: absolute;
-		top: 0;
+		top: -0.375rem;
 		left: 50%;
-		width: 2.75rem;
-		height: 100%;
+		width: 3.5rem;
+		height: calc(100% + 0.375rem);
 		content: "";
-		background: radial-gradient(
-			ellipse at 50% 0%,
-			oklch(from var(--foreground) l c h / 24%) 0%,
-			oklch(from var(--foreground) l c h / 8%) 38%,
-			transparent 74%
-		);
+		background:
+			radial-gradient(
+				ellipse 32% 18% at 50% 0%,
+				oklch(from var(--foreground) l c h / 56%) 0%,
+				oklch(from var(--foreground) l c h / 18%) 42%,
+				transparent 100%
+			),
+			radial-gradient(
+				ellipse 58% 100% at 50% 0%,
+				oklch(from var(--foreground) l c h / 18%) 0%,
+				oklch(from var(--foreground) l c h / 7%) 42%,
+				transparent 78%
+			);
+		filter: blur(0.125rem);
 		transform: translateX(-50%);
 	}
 
