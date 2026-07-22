@@ -75,6 +75,13 @@
 	let hover_top = $state(0);
 	let hover_visible = $state(false);
 	let hover_width = $state(0);
+	let engine_surface = $state<HTMLElement>();
+	let engine_indicator_animated = $state(false);
+	let engine_indicator_height = $state(0);
+	let engine_indicator_left = $state(0);
+	let engine_indicator_top = $state(0);
+	let engine_indicator_visible = $state(false);
+	let engine_indicator_width = $state(0);
 
 	const active_models = $derived(models.filter((model) => model.engine === active_engine));
 	const selected_model = $derived(models.find((model) => model.id === selected_model_id) ?? models[0]);
@@ -108,7 +115,38 @@
 		hover_visible = true;
 		hover_width = target_rect.width;
 	};
+
+	const position_engine_indicator = (animate: boolean) => {
+		const active_tab = engine_surface?.querySelector<HTMLElement>(
+			`[data-engine="${active_engine}"]`,
+		);
+
+		if (!active_tab || !engine_surface) {
+			return;
+		}
+
+		const surface_rect = engine_surface.getBoundingClientRect();
+		const tab_rect = active_tab.getBoundingClientRect();
+
+		engine_indicator_animated = animate && engine_indicator_visible;
+		engine_indicator_height = tab_rect.height;
+		engine_indicator_left = tab_rect.left - surface_rect.left;
+		engine_indicator_top = tab_rect.top - surface_rect.top;
+		engine_indicator_visible = true;
+		engine_indicator_width = tab_rect.width;
+	};
+
+	$effect(() => {
+		void active_engine;
+		void engine_surface;
+
+		const frame = requestAnimationFrame(() => position_engine_indicator(true));
+
+		return () => cancelAnimationFrame(frame);
+	});
 </script>
+
+<svelte:window onresize={() => position_engine_indicator(false)} />
 
 <Popover bind:open>
 	<PopoverTrigger
@@ -135,17 +173,26 @@
 	>
 		<Tabs bind:value={active_engine} class="min-h-0 gap-2">
 			<TabsList
+				bind:ref={engine_surface}
 				variant="line"
 				aria-label="Coding engines"
-				class="card h-auto! w-full justify-start overflow-x-auto rounded-lg! bg-linear-to-b from-foreground/10 to-foreground/5 p-1"
+				class="card relative h-auto! w-full justify-start overflow-x-auto rounded-lg! bg-linear-to-b from-foreground/10 to-foreground/5 p-1"
 			>
+				<div
+					class="docs-sidebar-hover-highlight"
+					data-active={engine_indicator_visible}
+					data-animate={engine_indicator_animated}
+					aria-hidden="true"
+					style={`--docs-sidebar-hover-x: ${engine_indicator_left}px; --docs-sidebar-hover-y: ${engine_indicator_top}px; --docs-sidebar-hover-width: ${engine_indicator_width}px; --docs-sidebar-hover-height: ${engine_indicator_height}px;`}
+				></div>
 				{#each engines as engine (engine.id)}
 					{@const EngineIcon = engine.icon}
 					<TabsTrigger
 						value={engine.id}
+						data-engine={engine.id}
 						aria-label={engine.name}
 						title={engine.name}
-						class="size-8 flex-none px-0 text-foreground after:hidden hover:text-foreground data-active:border-transparent data-active:bg-transparent data-active:text-foreground dark:hover:text-foreground dark:data-active:border-transparent dark:data-active:bg-transparent"
+						class="relative z-1 size-8 flex-none px-0 text-foreground after:hidden hover:text-foreground data-active:border-transparent data-active:bg-transparent data-active:text-foreground dark:hover:text-foreground dark:data-active:border-transparent dark:data-active:bg-transparent"
 					>
 						<EngineIcon class={engine.monochrome ? "size-4 dark:invert" : "size-4"} />
 					</TabsTrigger>

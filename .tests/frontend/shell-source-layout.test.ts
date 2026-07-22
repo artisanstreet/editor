@@ -51,6 +51,10 @@ describe("Barekey docs shell reset", () => {
 		expect(model_selector).not.toContain("card!");
 		expect(model_selector).not.toContain('orientation="vertical"');
 		expect(model_selector).toContain('h-auto! w-full justify-start overflow-x-auto');
+		expect(model_selector).toContain('bind:ref={engine_surface}');
+		expect(model_selector).toContain('data-engine={engine.id}');
+		expect(model_selector).toContain('engine_indicator_animated = animate && engine_indicator_visible');
+		expect(model_selector).toContain('<svelte:window onresize={() => position_engine_indicator(false)} />');
 		expect(model_selector).toContain('rounded-lg! bg-linear-to-b from-foreground/10 to-foreground/5 p-1');
 		expect(model_selector).toContain('after:hidden hover:text-foreground data-active:border-transparent data-active:bg-transparent');
 		expect(model_selector).toContain('<ScrollArea class="h-48 rounded-xl">');
