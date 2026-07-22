@@ -521,4 +521,5 @@ Implemented, independently reviewed, committed, and verified:
 - [x] Refined the thread model identity hierarchy: the heading is now `text-2xl` and reads only `GPT 5.6 Sol`; the separate muted `OpenAI` lab label carries the provider identity without duplication.
 - [x] Reduced the thread model heading to `text-xl` after visual review.
 - [x] Sized the OpenAI mark from the full two-line identity row with `aspect-square h-full w-auto` and increased the mark-to-copy spacing to `gap-4`.
+- [x] Replaced the percentage-height OpenAI mark after it resolved against the full panel height. The model identity now uses an optically balanced fixed `size-10` mark while retaining `gap-4`.
 - [ ] Continue only from the user's next visual direction; do not restore or invent the removed navigation, welcome, thread, settings, or workspace UI without an explicit next step.
