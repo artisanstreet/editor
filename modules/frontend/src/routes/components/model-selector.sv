@@ -68,6 +68,13 @@
 	let open = $state(false);
 	let active_engine = $state<EngineId>("codex");
 	let selected_model_id = $state("codex-sol");
+	let model_surface = $state<HTMLElement>();
+	let hover_animated = $state(false);
+	let hover_height = $state(0);
+	let hover_left = $state(0);
+	let hover_top = $state(0);
+	let hover_visible = $state(false);
+	let hover_width = $state(0);
 
 	const active_models = $derived(models.filter((model) => model.engine === active_engine));
 	const selected_model = $derived(models.find((model) => model.id === selected_model_id) ?? models[0]);
@@ -79,6 +86,27 @@
 		selected_model_id = model.id;
 		active_engine = model.engine;
 		open = false;
+	};
+
+	const clear_hover = () => {
+		hover_animated = false;
+		hover_visible = false;
+	};
+
+	const move_hover = (event: Event) => {
+		if (!(event.currentTarget instanceof HTMLElement) || !model_surface) {
+			return;
+		}
+
+		const surface_rect = model_surface.getBoundingClientRect();
+		const target_rect = event.currentTarget.getBoundingClientRect();
+
+		hover_animated = hover_visible;
+		hover_height = target_rect.height;
+		hover_left = target_rect.left - surface_rect.left;
+		hover_top = target_rect.top - surface_rect.top;
+		hover_visible = true;
+		hover_width = target_rect.width;
 	};
 </script>
 
@@ -105,11 +133,11 @@
 		sideOffset={8}
 		class="w-[min(32rem,calc(100vw-2rem))] gap-2 overflow-hidden bg-background p-2"
 	>
-		<Tabs bind:value={active_engine} orientation="vertical" class="min-h-0 flex-row gap-2">
+		<Tabs bind:value={active_engine} class="min-h-0 gap-2">
 			<TabsList
 				variant="line"
 				aria-label="Coding engines"
-				class="card h-64! w-auto justify-start overflow-y-auto rounded-lg! bg-linear-to-b from-foreground/10 to-foreground/5 p-1"
+				class="card h-auto! w-full justify-start overflow-x-auto rounded-lg! bg-linear-to-b from-foreground/10 to-foreground/5 p-1"
 			>
 				{#each engines as engine (engine.id)}
 					{@const EngineIcon = engine.icon}
@@ -117,15 +145,23 @@
 						value={engine.id}
 						aria-label={engine.name}
 						title={engine.name}
-						class="size-9 flex-none px-0 text-foreground after:hidden hover:text-foreground data-active:border-transparent data-active:bg-transparent data-active:text-foreground dark:hover:text-foreground dark:data-active:border-transparent dark:data-active:bg-transparent"
+						class="size-8 flex-none px-0 text-foreground after:hidden hover:text-foreground data-active:border-transparent data-active:bg-transparent data-active:text-foreground dark:hover:text-foreground dark:data-active:border-transparent dark:data-active:bg-transparent"
 					>
-						<EngineIcon class={engine.monochrome ? "size-5 dark:invert" : "size-5"} />
+						<EngineIcon class={engine.monochrome ? "size-4 dark:invert" : "size-4"} />
 					</TabsTrigger>
 				{/each}
 			</TabsList>
 
-			<ScrollArea class="h-64 min-w-0 flex-1 rounded-xl">
-				<table class="w-full border-separate border-spacing-y-1" aria-label="Available models">
+			<ScrollArea class="h-48 rounded-xl">
+				<div bind:this={model_surface} class="relative" role="presentation" onpointerleave={clear_hover}>
+					<div
+						class="docs-sidebar-hover-highlight"
+						data-active={hover_visible}
+						data-animate={hover_animated}
+						aria-hidden="true"
+						style={`--docs-sidebar-hover-x: ${hover_left}px; --docs-sidebar-hover-y: ${hover_top}px; --docs-sidebar-hover-width: ${hover_width}px; --docs-sidebar-hover-height: ${hover_height}px;`}
+					></div>
+				<table class="relative z-1 w-full border-separate border-spacing-y-0.5" aria-label="Available models">
 					<tbody>
 						{#each active_models as model (model.id)}
 							{@const ModelIcon = engines.find((engine) => engine.id === model.engine)?.icon ?? SvglOpenAILogo}
@@ -134,18 +170,20 @@
 								<td class="p-0">
 									<button
 										type="button"
-										class="flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
+										class="flex w-full items-center gap-2 rounded-md px-2.5 py-1.5 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
 										aria-current={model.id === selected_model_id ? "true" : undefined}
+										onfocus={move_hover}
+										onpointerenter={move_hover}
 										onclick={() => select_model(model)}
 									>
 										<ModelIcon
 											class={is_monochrome
-												? "size-6 shrink-0 dark:invert"
-												: "size-6 shrink-0"}
+												? "size-5 shrink-0 dark:invert"
+												: "size-5 shrink-0"}
 										/>
 										<span class="flex min-w-0 flex-col space-y-0">
-											<span class="truncate text-base font-semibold text-foreground">{model.name}</span>
-											<span class="truncate text-sm text-muted-foreground">{model.lab}</span>
+											<span class="truncate text-sm font-semibold text-foreground">{model.name}</span>
+											<span class="truncate text-xs text-muted-foreground">{model.lab}</span>
 										</span>
 									</button>
 								</td>
@@ -153,6 +191,7 @@
 						{/each}
 					</tbody>
 				</table>
+				</div>
 			</ScrollArea>
 		</Tabs>
 	</PopoverContent>
