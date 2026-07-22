@@ -164,6 +164,9 @@ importers:
       '@fontsource/cal-sans':
         specifier: 5.2.3
         version: 5.2.3
+      '@selemondev/svgl-svelte':
+        specifier: ^2.17.0
+        version: 2.17.0(svelte@5.56.4)
       cuelume:
         specifier: ^0.1.2
         version: 0.1.2
@@ -1571,6 +1574,11 @@ packages:
 
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
+
+  '@selemondev/svgl-svelte@2.17.0':
+    resolution: {integrity: sha512-0f4CXwZ2oIazs8hufSxP5Sp5HUhlPqFKNKx4AlqCulq4M5ZYDKJTwAjzcGktyFXFVSTzVMbsmqf5Po83y70CBA==}
+    peerDependencies:
+      svelte: ^5.0.0
 
   '@sindresorhus/is@4.6.0':
     resolution: {integrity: sha512-t09vSN3MdfsyCHoFcTRCH/iUtG7OJ0CsjzB8cjAmKc/va/kIgeDI/TxsigdncE/4be734m0cvIYwNaV4i2XqAw==}
@@ -4660,6 +4668,10 @@ snapshots:
     optional: true
 
   '@rolldown/pluginutils@1.0.1': {}
+
+  '@selemondev/svgl-svelte@2.17.0(svelte@5.56.4)':
+    dependencies:
+      svelte: 5.56.4
 
   '@sindresorhus/is@4.6.0': {}
 

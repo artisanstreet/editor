@@ -7,6 +7,7 @@
 	import { ModeWatcher } from "mode-watcher";
 	import ArtisanSidebar from "./components/artisan-sidebar.sv";
 	import SectionedPanel from "./components/sectioned-panel.sv";
+	import ThreadPanel from "./components/thread-panel.sv";
 
 	let { children } = $props();
 	const is_thread = $derived(/^\/thread\/[^/]+\/?$/.test(page.url.pathname));
@@ -22,6 +23,8 @@
 	{@render children()}
 {/snippet}
 
-{#snippet secondary()}{/snippet}
+{#snippet secondary()}
+	<ThreadPanel />
+{/snippet}
 
 <SectionedPanel {sidebar} {primary} secondary={is_thread ? secondary : undefined} />

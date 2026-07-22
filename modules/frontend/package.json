@@ -16,6 +16,7 @@
 		"@effect/platform-browser": "4.0.0-beta.97",
 		"@fontsource-variable/jetbrains-mono": "5.2.8",
 		"@fontsource/cal-sans": "5.2.3",
+		"@selemondev/svgl-svelte": "^2.17.0",
 		"cuelume": "^0.1.2",
 		"effect": "4.0.0-beta.97",
 		"mode-watcher": "1.1.0",

@@ -22,11 +22,16 @@ describe("Barekey docs shell reset", () => {
 	it("mounts the third panel only for concrete thread routes", () => {
 		const layout = Read("modules/frontend/src/routes/+layout.sv");
 		const thread = Read("modules/frontend/src/routes/thread/[id]/+page.sv");
+		const thread_panel = Read("modules/frontend/src/routes/components/thread-panel.sv");
 
-		expect(layout).toContain('/^\\/thread\\/[^/]+\\/?$/');
-		expect(layout).toContain("{#snippet secondary()}{/snippet}");
+		expect(layout).toContain("/^\\/thread\\/[^/]+\\/?$/");
+		expect(layout).toContain("<ThreadPanel />");
 		expect(layout).toContain("secondary={is_thread ? secondary : undefined}");
 		expect(thread).toContain("Thread · Artisan Editor");
+		expect(thread_panel).toContain('import { SvglOpenAILogo } from "@selemondev/svgl-svelte"');
+		expect(thread_panel).toContain('class="flex flex-row items-center gap-2"');
+		expect(thread_panel).toContain("OpenAI GPT 5.6 Sol");
+		expect(thread_panel).toContain('class="text-sm text-muted-foreground">OpenAI</span>');
 	});
 
 	it("matches the Barekey docs inset sidebar and circular toggle", () => {
