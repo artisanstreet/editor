@@ -520,4 +520,5 @@ Implemented, independently reviewed, committed, and verified:
 - [x] Added the first thread-panel content: a compact top model identity row using Barekey's `@selemondev/svgl-svelte` source, the foreground-aware OpenAI mark, hard-coded `OpenAI GPT 5.6 Sol`, and muted `OpenAI` lab label. Browser verification confirmed dark-mode contrast and spacing.
 - [x] Refined the thread model identity hierarchy: the heading is now `text-2xl` and reads only `GPT 5.6 Sol`; the separate muted `OpenAI` lab label carries the provider identity without duplication.
 - [x] Reduced the thread model heading to `text-xl` after visual review.
+- [x] Sized the OpenAI mark from the full two-line identity row with `aspect-square h-full w-auto` and increased the mark-to-copy spacing to `gap-4`.
 - [ ] Continue only from the user's next visual direction; do not restore or invent the removed navigation, welcome, thread, settings, or workspace UI without an explicit next step.
