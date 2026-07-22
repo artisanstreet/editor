@@ -85,7 +85,7 @@
 <Popover bind:open>
 	<PopoverTrigger
 		aria-label="Select model"
-		class="flex w-full flex-row items-center gap-4 rounded-2xl bg-linear-to-b from-foreground/7.5 to-foreground/2.5 p-2 text-left text-muted-foreground outline-none transition-colors card-lg hover:text-foreground focus-visible:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
+		class="flex w-full flex-row items-center gap-4 rounded-2xl bg-linear-to-b from-foreground/7.5 to-foreground/2.5 p-2 pl-4 text-left text-muted-foreground outline-none transition-colors card-lg hover:text-foreground focus-visible:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
 	>
 		{@const SelectedIcon = selected_engine.icon}
 		<SelectedIcon
