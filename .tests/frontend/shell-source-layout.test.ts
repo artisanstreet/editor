@@ -59,8 +59,8 @@ describe("Barekey docs shell reset", () => {
 		expect(model_selector).toContain('linear-gradient(');
 		expect(model_selector).toContain('width: 2rem;');
 		expect(model_selector).toContain('ellipse 48% 70% at 50% 35%');
-		expect(model_selector).toContain('rgb(0 0 0 / 50%) 55%');
-		expect(model_selector).toContain('rgb(0 0 0 / 10%) 82%');
+		expect(model_selector).toContain('rgb(0 0 0 / 50%) 42%');
+		expect(model_selector).toContain('rgb(0 0 0 / 10%) 68%');
 		expect(model_selector).toContain('filter: blur(0.125rem);');
 		expect(model_selector).toContain('height: 1.5rem;');
 		expect(model_selector).toContain('mask-image: radial-gradient(');

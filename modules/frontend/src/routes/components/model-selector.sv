@@ -263,25 +263,25 @@
 		content: "";
 		background: linear-gradient(
 			to bottom,
-			oklch(from var(--foreground) l c h / 38%) 0%,
-			oklch(from var(--foreground) l c h / 16%) 38%,
-			oklch(from var(--foreground) l c h / 5%) 72%,
-			transparent 100%
+			oklch(from var(--foreground) l c h / 32%) 0%,
+			oklch(from var(--foreground) l c h / 10%) 26%,
+			oklch(from var(--foreground) l c h / 2%) 52%,
+			transparent 74%
 		);
 		filter: blur(0.125rem);
 		-webkit-mask-image: radial-gradient(
 			ellipse 48% 70% at 50% 35%,
 			#000 0%,
-			rgb(0 0 0 / 50%) 55%,
-			rgb(0 0 0 / 10%) 82%,
-			transparent 100%
+			rgb(0 0 0 / 50%) 42%,
+			rgb(0 0 0 / 10%) 68%,
+			transparent 88%
 		);
 		mask-image: radial-gradient(
 			ellipse 48% 70% at 50% 35%,
 			#000 0%,
-			rgb(0 0 0 / 50%) 55%,
-			rgb(0 0 0 / 10%) 82%,
-			transparent 100%
+			rgb(0 0 0 / 50%) 42%,
+			rgb(0 0 0 / 10%) 68%,
+			transparent 88%
 		);
 		transform: translateX(-50%);
 	}
