@@ -108,21 +108,25 @@
 		class="w-[min(32rem,calc(100vw-2rem))] gap-2 overflow-hidden p-2"
 	>
 		<Tabs bind:value={active_engine} class="min-h-0 gap-2">
-			<TabsList variant="line" aria-label="Coding engines" class="w-full justify-start overflow-x-auto px-1">
+			<TabsList
+				variant="line"
+				aria-label="Coding engines"
+				class="card w-full justify-start overflow-x-auto rounded-xl bg-muted/40 p-1"
+			>
 				{#each engines as engine (engine.id)}
 					{@const EngineIcon = engine.icon}
 					<TabsTrigger
 						value={engine.id}
 						aria-label={engine.name}
 						title={engine.name}
-						class="size-9 flex-none px-0"
+						class="size-9 flex-none px-0 text-foreground after:hidden hover:text-foreground data-active:border-transparent data-active:bg-transparent data-active:text-foreground dark:hover:text-foreground dark:data-active:border-transparent dark:data-active:bg-transparent"
 					>
 						<EngineIcon class={engine.monochrome ? "size-5 dark:invert" : "size-5"} />
 					</TabsTrigger>
 				{/each}
 			</TabsList>
 
-			<ScrollArea class="h-64 rounded-xl">
+			<ScrollArea class="h-64 rounded-xl bg-background">
 				<table class="w-full border-separate border-spacing-y-1" aria-label="Available models">
 					<tbody>
 						{#each active_models as model (model.id)}
@@ -142,8 +146,8 @@
 												: "size-6 shrink-0"}
 										/>
 										<span class="flex min-w-0 flex-col space-y-0">
-											<span class="truncate text-sm font-semibold text-foreground">{model.name}</span>
-											<span class="truncate text-xs text-muted-foreground">{model.lab}</span>
+											<span class="truncate text-base font-semibold text-foreground">{model.name}</span>
+											<span class="truncate text-sm text-muted-foreground">{model.lab}</span>
 										</span>
 									</button>
 								</td>
