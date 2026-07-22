@@ -1,5 +1,5 @@
 <script lang="ts">
-	import ChevronDown from "@tabler/icons-svelte/icons/chevron-down";
+	import Selector from "@tabler/icons-svelte/icons/selector";
 	import {
 		SvglClaudeAILogo,
 		SvglGoogleAntigravityLogo,
@@ -85,7 +85,7 @@
 <Popover bind:open>
 	<PopoverTrigger
 		aria-label="Select model"
-		class="group/model-selector flex w-full flex-row items-center gap-4 rounded-xl p-0 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+		class="flex w-full flex-row items-center gap-4 rounded-2xl bg-linear-to-b from-foreground/7.5 to-foreground/2.5 p-2 text-left text-muted-foreground outline-none transition-colors card-lg hover:text-foreground focus-visible:text-foreground focus-visible:ring-[3px] focus-visible:ring-ring/50"
 	>
 		{@const SelectedIcon = selected_engine.icon}
 		<SelectedIcon
@@ -97,9 +97,7 @@
 			<span class="truncate text-lg font-semibold text-foreground">{selected_model.name}</span>
 			<span class="truncate text-sm text-muted-foreground">{selected_model.lab}</span>
 		</div>
-		<ChevronDown
-			class="size-4 shrink-0 text-muted-foreground transition-transform group-data-[state=open]/model-selector:rotate-180"
-		/>
+		<Selector class="pointer-events-none size-4 shrink-0 text-muted-foreground" />
 	</PopoverTrigger>
 
 	<PopoverContent
