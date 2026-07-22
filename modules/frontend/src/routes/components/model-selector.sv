@@ -256,10 +256,10 @@
 
 	.model-selector-engine-light::after {
 		position: absolute;
-		top: -0.375rem;
+		top: -0.125rem;
 		left: 50%;
 		width: 2rem;
-		height: calc(100% + 0.375rem);
+		height: 1.5rem;
 		content: "";
 		background:
 			radial-gradient(
@@ -272,9 +272,21 @@
 				ellipse 46% 92% at 50% 0%,
 				oklch(from var(--foreground) l c h / 18%) 0%,
 				oklch(from var(--foreground) l c h / 7%) 42%,
-				transparent 78%
+				transparent 100%
 			);
 		filter: blur(0.0625rem);
+		-webkit-mask-image: radial-gradient(
+			ellipse 50% 100% at 50% 0%,
+			#000 0%,
+			rgb(0 0 0 / 72%) 38%,
+			transparent 100%
+		);
+		mask-image: radial-gradient(
+			ellipse 50% 100% at 50% 0%,
+			#000 0%,
+			rgb(0 0 0 / 72%) 38%,
+			transparent 100%
+		);
 		transform: translateX(-50%);
 	}
 
