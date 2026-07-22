@@ -4,10 +4,19 @@
 	import "$lib/styles/artisan-compatibility.css";
 
 	import { ModeWatcher } from "mode-watcher";
-	import AppShell from "./components/app-shell.sv";
+	import ArtisanSidebar from "./components/artisan-sidebar.sv";
+	import SectionedPanel from "./components/sectioned-panel.sv";
 
 	let { children } = $props();
 </script>
 
 <ModeWatcher defaultMode="dark" />
-<AppShell>{@render children()}</AppShell>
+<SectionedPanel>
+	{#snippet sidebar()}
+		<ArtisanSidebar />
+	{/snippet}
+
+	{#snippet primary()}
+		{@render children()}
+	{/snippet}
+</SectionedPanel>

@@ -1,96 +1,60 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-import { describe, expect, it } from "@effect/vitest";
+import { describe, expect, it } from "vitest";
 
 const Read = (path: string) => readFileSync(resolve(path), "utf8");
 
-describe("routed application shell source layout", () => {
-	it("keeps one persistent sidebar around every routed page", () => {
+describe("Barekey docs shell reset", () => {
+	it("lets the layout compose page surfaces through snippets", () => {
 		const layout = Read("modules/frontend/src/routes/+layout.sv");
-		const shell = Read("modules/frontend/src/routes/components/app-shell.sv");
+		const panel = Read("modules/frontend/src/routes/components/sectioned-panel.sv");
 
-		expect(layout).toContain("<AppShell");
-		expect(shell).toContain("<AppSidebar");
-		expect(shell).toContain("100dvh");
-		expect(shell).toContain('class="app-content"');
+		expect(layout).toContain("<SectionedPanel>");
+		expect(layout).toContain("{#snippet sidebar()}");
+		expect(layout).toContain("{#snippet primary()}");
+		expect(layout).toContain("{@render children()}");
+		expect(panel).toContain("primary: Snippet");
+		expect(panel).toContain("secondary?: Snippet");
+		expect(panel).toContain("sidebar: Snippet");
 	});
 
-	it("uses client-side SPA routing for dynamic Electron protocol routes", () => {
-		const layout = Read("modules/frontend/src/routes/+layout.ts");
+	it("matches the Barekey docs inset sidebar and circular toggle", () => {
+		const panel = Read("modules/frontend/src/routes/components/sectioned-panel.sv");
 
-		expect(layout).toContain("prerender = false");
-		expect(layout).toContain("ssr = false");
+		expect(panel).toContain('style="--sidebar-width: 16rem; --sidebar-width-icon: 2.5rem;"');
+		expect(panel).toContain('<Sidebar.Root variant="inset" collapsible="icon">');
+		expect(panel).toContain("absolute right-0 top-2 hidden size-10");
+		expect(panel).toContain("rounded-full bg-foreground/5 card");
+		expect(panel).toContain("<LayoutSidebar");
 	});
 
-	it("provides welcome, thread, and settings route boundaries", () => {
+	it("uses the Barekey docs gradient card surface for page content", () => {
+		const panel = Read("modules/frontend/src/routes/components/sectioned-panel.sv");
+
+		expect(panel).toContain(
+			"rounded-3xl bg-linear-to-b from-foreground/5 to-foreground/2.5 p-1 card",
+		);
+		expect(panel).toContain("rounded-[calc(var(--radius-3xl)-0.25rem)]");
+	});
+
+	it("shows only the copied docs header identity inside the sidebar", () => {
+		const sidebar = Read("modules/frontend/src/routes/components/artisan-sidebar.sv");
 		const home = Read("modules/frontend/src/routes/+page.sv");
-		const thread = Read("modules/frontend/src/routes/thread/[id]/+page.sv");
-		const settings = Read("modules/frontend/src/routes/settings/+page.sv");
 
-		expect(home).toContain("<WelcomePage");
-		expect(thread).toContain("<ThreadWorkspace");
-		expect(settings).toContain("<SettingsPage");
+		expect(sidebar).toContain("$lib/assets/barekey/logo-40.png");
+		expect(sidebar).toContain('class="size-5 shrink-0 invert dark:invert-0"');
+		expect(sidebar).toContain('<span class="font-logo">Artisan Editor</span>');
+		expect(sidebar).toContain('<Sidebar.Header class="pl-6 pr-14 lg:pl-2">');
+		expect(home).not.toMatch(/WelcomePage|ThreadWorkspace|SettingsPage|LiveWorkspaceStore/);
 	});
 
-	it("switches the sidebar to anchored settings navigation", () => {
-		const sidebar = Read("modules/frontend/src/routes/components/app-sidebar.sv");
-
-		expect(sidebar).toContain('pathname === "/settings"');
-		for (const section of [
-			"general",
-			"codex",
-			"guidance",
-			"model-behaviour",
-			"retention",
-			"appearance",
-		]) {
-			expect(sidebar).toContain(`["${section}",`);
-		}
-		expect(sidebar).toContain("/settings#${section_id}");
-		expect(sidebar).toContain('href="/settings"');
-	});
-
-	it("renders the authorized Barekey logo with Artisan identity", () => {
-		const sidebar = Read("modules/frontend/src/routes/components/app-sidebar.sv");
-
-		expect(sidebar).toContain("/barekey-logo.png");
-		expect(sidebar).toContain("Artisan Editor");
-	});
-
-	it("loads the complete Barekey style and font foundation", () => {
-		const layout = Read("modules/frontend/src/routes/+layout.sv");
+	it("retains the complete Barekey style foundation", () => {
 		const global = Read("modules/frontend/src/lib/styles/global.css");
-		const fonts = Read("modules/frontend/src/lib/styles/fonts.css");
 
 		for (const stylesheet of ["sidebar.css", "prose.css", "markdown.css"])
 			expect(global).toContain(`@import "./${stylesheet}"`);
 		for (const utility of ["inset-shadow", "card", "card-color", "card-lg", "card-diff"])
 			expect(global).toContain(`@utility ${utility}`);
-		expect(global).toContain('@plugin "@tailwindcss/typography"');
-		expect(fonts).toContain('font-family: "PP Neue Montreal"');
-		expect(fonts).toContain('font-family: "Artisan Neo"');
-		expect(layout).toContain("$lib/styles/fonts.css");
-		expect(layout).toContain("$lib/styles/artisan-compatibility.css");
-	});
-
-	it("keeps previews external-only and supplies reduced-motion behavior", () => {
-		const source = Read("modules/frontend/src/lib/styles/artisan-compatibility.css");
-		const right_pane = Read("modules/frontend/src/routes/components/right-pane.sv");
-
-		expect(right_pane).toContain("LaunchPreviewInExternalBrowser");
-		expect(right_pane).not.toMatch(/<iframe|<webview/i);
-		expect(source).toMatch(/prefers-reduced-motion:\s*reduce/);
-	});
-
-	it("keeps component behavior in SER without browser-side runners", () => {
-		const sources = [
-			"app-shell.sv",
-			"app-sidebar.sv",
-			"welcome-page.sv",
-			"settings-page.sv",
-		].map((name) => Read(`modules/frontend/src/routes/components/${name}`));
-
-		for (const source of sources) expect(source).not.toMatch(/Effect\.run\w*/);
 	});
 });

@@ -505,3 +505,13 @@ Implemented, independently reviewed, committed, and verified:
 - [x] Final independent re-review is clean through P2. Focused review verification passed 86 tests before the final POSIX/UNC/coherence fixes; targeted re-review then passed 62 service/protocol tests with no remaining P0-P2 finding.
 - [x] Completion matrix now marks the verified Git status/branch/worktree/diff/session slice implemented. Full repository validation passed: formatting, lint, root TypeScript, production frontend build, 104 test files, 886 passing tests, and 2 intentional skips. One pre-existing Windows ACL integration test received an explicit 30-second timeout because its successful isolated execution takes just over the global 15-second default; no Model Behaviour production code changed.
 - [x] Git backend implementation checkpoint `079157d` was pushed to `origin/codex/backend-services`; immediately after the push, local `HEAD` and the upstream branch both resolved to `079157d8b12f339af926b3022355bf619943139a`.
+
+## Frontend Barekey Docs Shell Reset
+
+- [x] Intentionally removed the previous routed Artisan presentation (`/`, `/settings`, `/thread/[id]`, `/visual-fixtures`) and its route-level workspace/settings/fixture components at the user's direction. Backend services, transport contracts, state models, and low-level UI primitives remain intact.
+- [x] Copied the Barekey docs sidebar primitive family, mobile hook, sidebar motion helper, and the exact Barekey `logo-40.png` asset into the frontend. Added the primitive's `cuelume` runtime dependency.
+- [x] Added `SectionedPanel`, a snippet-driven shell whose layout owns the sidebar and gradient card surfaces while route pages provide the primary and optional secondary card content.
+- [x] The first rendered milestone is deliberately sparse: the docs-style left sidebar contains only the Barekey mark, `Artisan Editor` wordmark, and circular collapse trigger; `/` supplies no card content yet.
+- [x] Browser verification at `http://localhost:5173/` confirmed the expanded shell and successful collapse to the icon rail. The copied logo SHA-256 matches Barekey's source asset.
+- [x] Verification passed: formatting, lint, root TypeScript, production frontend build, 13 frontend test files with 84 tests, and the full Vitest suite with 153 files, 1,184 passing tests, and 2 intentional skips.
+- [ ] Continue only from the user's next visual direction; do not restore or invent the removed navigation, welcome, thread, settings, or workspace UI without an explicit next step.

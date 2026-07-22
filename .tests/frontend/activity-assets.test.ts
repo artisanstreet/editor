@@ -4,11 +4,6 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const asset_root = join(process.cwd(), "modules/frontend/static/activity");
-const component_path = join(
-	process.cwd(),
-	"modules/frontend/src/routes/components/activity-status.sv",
-);
-
 describe("Artisan working sprite", () => {
 	it("has a valid RGBA bitmap and internally consistent manifest", () => {
 		const image = readFileSync(join(asset_root, "artisan-working-sprite.png"));
@@ -34,14 +29,5 @@ describe("Artisan working sprite", () => {
 			reduced_motion_frame: 0,
 			rows: 2,
 		});
-	});
-
-	it("uses crisp integer sprite scaling and an explicit reduced-motion still", () => {
-		const source = readFileSync(component_path, "utf8");
-
-		expect(source).toContain("image-rendering: pixelated");
-		expect(source).toContain("@media (prefers-reduced-motion: reduce)");
-		expect(source).toMatch(/animation:\s*none/);
-		expect(source).toContain('aria-label="Artisan is working"');
 	});
 });
