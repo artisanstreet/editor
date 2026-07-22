@@ -190,7 +190,13 @@
 						title={engine.name}
 						class="relative z-1 size-8 flex-none px-0 text-foreground after:hidden hover:text-foreground data-active:border-transparent data-active:bg-transparent data-active:text-foreground dark:hover:text-foreground dark:data-active:border-transparent dark:data-active:bg-transparent"
 					>
-						<EngineIcon class={engine.monochrome ? "size-4 dark:invert" : "size-4"} />
+						<EngineIcon
+							class={engine.id === "opencode"
+								? "size-4 text-foreground"
+								: engine.monochrome
+									? "size-4 dark:invert"
+									: "size-4"}
+						/>
 					</TabsTrigger>
 				{/each}
 			</TabsList>

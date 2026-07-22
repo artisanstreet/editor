@@ -44,6 +44,8 @@ describe("Barekey docs shell reset", () => {
 		expect(model_selector).toContain("SvglClaudeAILogo");
 		expect(model_selector).toContain("SvglGrokLogo");
 		expect(model_selector).toContain('icon: OpenCodeIcon');
+		expect(model_selector).toContain('engine.id === "opencode"');
+		expect(model_selector).toContain('? "size-4 text-foreground"');
 		expect(model_selector).toContain("SvglGoogleAntigravityLogo");
 		expect(model_selector).not.toMatch(/Cline|Terminal2/);
 		expect(popover_content).toContain('"card bg-popover text-popover-foreground');
