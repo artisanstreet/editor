@@ -58,8 +58,24 @@ describe("routed application shell source layout", () => {
 		expect(sidebar).toContain("Artisan Editor");
 	});
 
+	it("loads the complete Barekey style and font foundation", () => {
+		const layout = Read("modules/frontend/src/routes/+layout.sv");
+		const global = Read("modules/frontend/src/lib/styles/global.css");
+		const fonts = Read("modules/frontend/src/lib/styles/fonts.css");
+
+		for (const stylesheet of ["sidebar.css", "prose.css", "markdown.css"])
+			expect(global).toContain(`@import "./${stylesheet}"`);
+		for (const utility of ["inset-shadow", "card", "card-color", "card-lg", "card-diff"])
+			expect(global).toContain(`@utility ${utility}`);
+		expect(global).toContain('@plugin "@tailwindcss/typography"');
+		expect(fonts).toContain('font-family: "PP Neue Montreal"');
+		expect(fonts).toContain('font-family: "Artisan Neo"');
+		expect(layout).toContain("$lib/styles/fonts.css");
+		expect(layout).toContain("$lib/styles/artisan-compatibility.css");
+	});
+
 	it("keeps previews external-only and supplies reduced-motion behavior", () => {
-		const source = Read("modules/frontend/src/lib/styles/global.css");
+		const source = Read("modules/frontend/src/lib/styles/artisan-compatibility.css");
 		const right_pane = Read("modules/frontend/src/routes/components/right-pane.sv");
 
 		expect(right_pane).toContain("LaunchPreviewInExternalBrowser");

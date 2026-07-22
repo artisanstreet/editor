@@ -1,0 +1,97 @@
+@reference "../tailwind-reference.css";
+
+.prose.prose :where(code):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
+	@apply font-mono font-normal text-foreground;
+}
+
+.prose :where(:not(pre) > code):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
+	@apply inline align-baseline rounded-full bg-linear-to-t
+    from-background/30 to-foreground/5 px-2 py-0.5 font-mono text-[0.88em]
+    font-normal leading-none text-foreground card;
+	white-space: pre;
+}
+
+.prose :where(:not(pre) > code):not(:where([class~="not-prose"], [class~="not-prose"] *))::before,
+.prose :where(:not(pre) > code):not(:where([class~="not-prose"], [class~="not-prose"] *))::after {
+	@apply content-none;
+}
+
+.prose
+	:where(:not(pre) > code.docs-inline-code-highlight):not(
+		:where([class~="not-prose"], [class~="not-prose"] *)
+	) {
+	white-space: pre;
+}
+
+.prose.prose
+	:where(:not(pre) > code.docs-inline-code-icon):not(
+		:where([class~="not-prose"], [class~="not-prose"] *)
+	) {
+	font-family: var(--font-sans);
+	white-space: nowrap;
+}
+
+.prose :not(pre) > code.docs-inline-code-icon .docs-file-icon {
+	display: inline-block;
+	height: 1em;
+	width: 1em;
+	margin-right: 0.375em;
+	vertical-align: -0.125em;
+}
+
+.prose :not(pre) > code.docs-inline-code-icon .docs-file-icon-brand {
+	display: inline-block;
+}
+
+.prose :not(pre) > code.docs-inline-code-icon .docs-inline-code-source-location {
+	@apply inline-flex items-center gap-1.5 text-foreground no-underline;
+}
+
+.prose :not(pre) > code.docs-inline-code-icon .docs-source-location-name {
+	@apply font-normal text-foreground;
+}
+
+.prose :not(pre) > code.docs-inline-code-icon .docs-source-location-position {
+	@apply font-medium text-muted-foreground;
+}
+
+.prose
+	:not(pre)
+	> code.docs-inline-code-icon
+	.docs-inline-code-source-location[href]
+	.docs-source-location-position {
+	@apply font-medium text-blue-600 transition-colors duration-(--duration-fast) ease-in-out
+		dark:text-blue-400;
+}
+
+.prose
+	:not(pre)
+	> code.docs-inline-code-icon
+	.docs-inline-code-source-location[href]:hover
+	.docs-source-location-position {
+	@apply text-blue-500 dark:text-blue-300;
+}
+
+.prose
+	:where(:not(pre) > code.docs-inline-code-highlight):not(
+		:where([class~="not-prose"], [class~="not-prose"] *)
+	),
+.prose
+	:where(:not(pre) > code.docs-inline-code-highlight span):not(
+		:where([class~="not-prose"], [class~="not-prose"] *)
+	) {
+	@apply text-[var(--shiki-light)];
+}
+
+.dark
+	.prose
+	:where(:not(pre) > code.docs-inline-code-highlight):not(
+		:where([class~="not-prose"], [class~="not-prose"] *)
+	),
+.dark
+	.prose
+	:where(:not(pre) > code.docs-inline-code-highlight span):not(
+		:where([class~="not-prose"], [class~="not-prose"] *)
+	) {
+	@apply text-[var(--shiki-dark)];
+}

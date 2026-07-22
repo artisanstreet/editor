@@ -1,0 +1,7 @@
+@reference "../tailwind-reference.css";
+
+.prose.prose :where(a):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
+	@apply text-foreground underline underline-offset-3 transition-colors
+    duration-(--duration-fast) ease-in-out hover:text-foreground-extra
+    motion-reduce:transition-none;
+}

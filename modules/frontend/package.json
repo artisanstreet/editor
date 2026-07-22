@@ -25,6 +25,7 @@
 		"@sveltejs/kit": "2.69.2",
 		"@sveltejs/vite-plugin-svelte": "7.2.0",
 		"@tabler/icons-svelte": "3.44.0",
+		"@tailwindcss/typography": "^0.5.20",
 		"@tailwindcss/vite": "4.3.2",
 		"bits-ui": "2.18.1",
 		"clsx": "2.1.1",

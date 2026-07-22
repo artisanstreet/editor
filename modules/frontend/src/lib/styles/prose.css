@@ -1,0 +1,4 @@
+@import "./prose/base.css";
+@import "./prose/headings.css";
+@import "./prose/links.css";
+@import "./prose/inline-code.css";
