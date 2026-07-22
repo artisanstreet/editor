@@ -141,7 +141,7 @@
 												? "size-6 shrink-0 dark:invert"
 												: "size-6 shrink-0"}
 										/>
-										<span class="flex min-w-0 flex-col -space-y-1">
+										<span class="flex min-w-0 flex-col space-y-0">
 											<span class="truncate text-sm font-semibold text-foreground">{model.name}</span>
 											<span class="truncate text-xs text-muted-foreground">{model.lab}</span>
 										</span>
