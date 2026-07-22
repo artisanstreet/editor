@@ -10,13 +10,23 @@ describe("Barekey docs shell reset", () => {
 		const layout = Read("modules/frontend/src/routes/+layout.sv");
 		const panel = Read("modules/frontend/src/routes/components/sectioned-panel.sv");
 
-		expect(layout).toContain("<SectionedPanel>");
+		expect(layout).toContain("<SectionedPanel {sidebar} {primary}");
 		expect(layout).toContain("{#snippet sidebar()}");
 		expect(layout).toContain("{#snippet primary()}");
 		expect(layout).toContain("{@render children()}");
 		expect(panel).toContain("primary: Snippet");
 		expect(panel).toContain("secondary?: Snippet");
 		expect(panel).toContain("sidebar: Snippet");
+	});
+
+	it("mounts the third panel only for concrete thread routes", () => {
+		const layout = Read("modules/frontend/src/routes/+layout.sv");
+		const thread = Read("modules/frontend/src/routes/thread/[id]/+page.sv");
+
+		expect(layout).toContain('/^\\/thread\\/[^/]+\\/?$/');
+		expect(layout).toContain("{#snippet secondary()}{/snippet}");
+		expect(layout).toContain("secondary={is_thread ? secondary : undefined}");
+		expect(thread).toContain("Thread · Artisan Editor");
 	});
 
 	it("matches the Barekey docs inset sidebar and circular toggle", () => {
