@@ -263,28 +263,28 @@
 		content: "";
 		background:
 			radial-gradient(
-				ellipse 28% 16% at 50% 0%,
-				oklch(from var(--foreground) l c h / 56%) 0%,
-				oklch(from var(--foreground) l c h / 18%) 42%,
+				ellipse 28% 20% at 50% -24%,
+				oklch(from var(--foreground) l c h / 34%) 0%,
+				oklch(from var(--foreground) l c h / 12%) 48%,
 				transparent 100%
 			),
 			radial-gradient(
-				ellipse 46% 92% at 50% 0%,
-				oklch(from var(--foreground) l c h / 18%) 0%,
-				oklch(from var(--foreground) l c h / 7%) 42%,
+				ellipse 46% 96% at 50% -16%,
+				oklch(from var(--foreground) l c h / 14%) 0%,
+				oklch(from var(--foreground) l c h / 6%) 46%,
 				transparent 100%
 			);
-		filter: blur(0.0625rem);
+		filter: blur(0.125rem);
 		-webkit-mask-image: radial-gradient(
-			ellipse 50% 100% at 50% 0%,
-			#000 0%,
-			rgb(0 0 0 / 72%) 38%,
+			ellipse 50% 104% at 50% -16%,
+			rgb(0 0 0 / 68%) 0%,
+			rgb(0 0 0 / 54%) 42%,
 			transparent 100%
 		);
 		mask-image: radial-gradient(
-			ellipse 50% 100% at 50% 0%,
-			#000 0%,
-			rgb(0 0 0 / 72%) 38%,
+			ellipse 50% 104% at 50% -16%,
+			rgb(0 0 0 / 68%) 0%,
+			rgb(0 0 0 / 54%) 42%,
 			transparent 100%
 		);
 		transform: translateX(-50%);
