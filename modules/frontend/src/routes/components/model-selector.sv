@@ -105,11 +105,11 @@
 		sideOffset={8}
 		class="w-[min(32rem,calc(100vw-2rem))] gap-2 overflow-hidden bg-background p-2"
 	>
-		<Tabs bind:value={active_engine} class="min-h-0 gap-2">
+		<Tabs bind:value={active_engine} orientation="vertical" class="min-h-0 flex-row gap-2">
 			<TabsList
 				variant="line"
 				aria-label="Coding engines"
-				class="card h-auto! w-full justify-start overflow-x-auto rounded-lg! bg-linear-to-b from-foreground/10 to-foreground/5 p-1"
+				class="card h-64! w-auto justify-start overflow-y-auto rounded-lg! bg-linear-to-b from-foreground/10 to-foreground/5 p-1"
 			>
 				{#each engines as engine (engine.id)}
 					{@const EngineIcon = engine.icon}
@@ -124,7 +124,7 @@
 				{/each}
 			</TabsList>
 
-			<ScrollArea class="h-64 rounded-xl">
+			<ScrollArea class="h-64 min-w-0 flex-1 rounded-xl">
 				<table class="w-full border-separate border-spacing-y-1" aria-label="Available models">
 					<tbody>
 						{#each active_models as model (model.id)}
