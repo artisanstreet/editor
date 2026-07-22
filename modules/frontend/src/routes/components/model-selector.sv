@@ -77,9 +77,7 @@
 	let hover_width = $state(0);
 	let engine_surface = $state<HTMLElement | null>(null);
 	let engine_indicator_animated = $state(false);
-	let engine_indicator_height = $state(0);
 	let engine_indicator_left = $state(0);
-	let engine_indicator_top = $state(0);
 	let engine_indicator_visible = $state(false);
 	let engine_indicator_width = $state(0);
 
@@ -129,9 +127,7 @@
 		const tab_rect = active_tab.getBoundingClientRect();
 
 		engine_indicator_animated = animate && engine_indicator_visible;
-		engine_indicator_height = tab_rect.height;
 		engine_indicator_left = tab_rect.left - surface_rect.left;
-		engine_indicator_top = tab_rect.top - surface_rect.top;
 		engine_indicator_visible = true;
 		engine_indicator_width = tab_rect.width;
 	};
@@ -179,11 +175,11 @@
 				class="card relative h-auto! w-full justify-start overflow-x-auto rounded-lg! bg-linear-to-b from-foreground/10 to-foreground/5 p-1"
 			>
 				<div
-					class="docs-sidebar-hover-highlight"
+					class="model-selector-engine-light"
 					data-active={engine_indicator_visible}
 					data-animate={engine_indicator_animated}
 					aria-hidden="true"
-					style={`--docs-sidebar-hover-x: ${engine_indicator_left}px; --docs-sidebar-hover-y: ${engine_indicator_top}px; --docs-sidebar-hover-width: ${engine_indicator_width}px; --docs-sidebar-hover-height: ${engine_indicator_height}px;`}
+					style={`--engine-light-x: ${engine_indicator_left}px; --engine-light-width: ${engine_indicator_width}px;`}
 				></div>
 				{#each engines as engine (engine.id)}
 					{@const EngineIcon = engine.icon}
@@ -243,3 +239,67 @@
 		</Tabs>
 	</PopoverContent>
 </Popover>
+
+<style>
+	.model-selector-engine-light {
+		position: absolute;
+		top: 0;
+		left: 0;
+		z-index: 0;
+		width: var(--engine-light-width, 0);
+		height: 100%;
+		pointer-events: none;
+		opacity: 0;
+		transform: translate3d(var(--engine-light-x, 0), 0, 0);
+		will-change: transform, width;
+	}
+
+	.model-selector-engine-light::before {
+		position: absolute;
+		top: 0;
+		left: 50%;
+		width: 0.625rem;
+		height: 0.25rem;
+		content: "";
+		background: linear-gradient(
+			to bottom,
+			oklch(from var(--foreground) l c h / 92%),
+			oklch(from var(--foreground) l c h / 42%)
+		);
+		clip-path: polygon(0 0, 100% 0, 50% 100%);
+		filter: drop-shadow(0 0.125rem 0.25rem oklch(from var(--foreground) l c h / 62%));
+		transform: translateX(-50%);
+	}
+
+	.model-selector-engine-light::after {
+		position: absolute;
+		top: 0;
+		left: 50%;
+		width: 2.75rem;
+		height: 100%;
+		content: "";
+		background: radial-gradient(
+			ellipse at 50% 0%,
+			oklch(from var(--foreground) l c h / 24%) 0%,
+			oklch(from var(--foreground) l c h / 8%) 38%,
+			transparent 74%
+		);
+		transform: translateX(-50%);
+	}
+
+	.model-selector-engine-light[data-active="true"] {
+		opacity: 1;
+	}
+
+	.model-selector-engine-light[data-animate="true"] {
+		transition:
+			transform var(--duration-fast) var(--ease-smooth-out),
+			width var(--duration-fast) var(--ease-smooth-out);
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		.model-selector-engine-light {
+			transition: none !important;
+		}
+	}
+</style>
