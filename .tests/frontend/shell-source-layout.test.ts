@@ -30,7 +30,7 @@ describe("Barekey docs shell reset", () => {
 		expect(thread).toContain("Thread · Artisan Editor");
 		expect(thread_panel).toContain('import { SvglOpenAILogo } from "@selemondev/svgl-svelte"');
 		expect(thread_panel).toContain('class="flex flex-row items-center gap-4"');
-		expect(thread_panel).toContain('class="size-10 shrink-0 fill-foreground"');
+		expect(thread_panel).toContain('class="size-8 shrink-0 fill-foreground"');
 		expect(thread_panel).toContain(
 			'class="text-xl font-semibold text-foreground">GPT 5.6 Sol</span>',
 		);
