@@ -514,4 +514,5 @@ Implemented, independently reviewed, committed, and verified:
 - [x] The first rendered milestone is deliberately sparse: the docs-style left sidebar contains only the Barekey mark, `Artisan Editor` wordmark, and circular collapse trigger; `/` supplies no card content yet.
 - [x] Browser verification at `http://localhost:5173/` confirmed the expanded shell and successful collapse to the icon rail. The copied logo SHA-256 matches Barekey's source asset.
 - [x] Verification passed: formatting, lint, root TypeScript, production frontend build, 13 frontend test files with 84 tests, and the full Vitest suite with 153 files, 1,184 passing tests, and 2 intentional skips.
+- [x] Barekey docs shell reset checkpoint `b32410b` was pushed to `origin/codex/backend-services`; local `HEAD` and the upstream branch both resolved to `b32410bcb1f565c7d3f2d6001a968d9c73d36a77` immediately after the push.
 - [ ] Continue only from the user's next visual direction; do not restore or invent the removed navigation, welcome, thread, settings, or workspace UI without an explicit next step.
