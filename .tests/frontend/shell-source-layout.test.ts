@@ -52,6 +52,7 @@ describe("Barekey docs shell reset", () => {
 		expect(model_selector).not.toContain('orientation="vertical"');
 		expect(model_selector).toContain('h-auto! w-full justify-start overflow-x-auto');
 		expect(model_selector).toContain('bind:ref={engine_surface}');
+		expect(model_selector).toContain('let engine_surface = $state<HTMLElement | null>(null);');
 		expect(model_selector).toContain('data-engine={engine.id}');
 		expect(model_selector).toContain('engine_indicator_animated = animate && engine_indicator_visible');
 		expect(model_selector).toContain('<svelte:window onresize={() => position_engine_indicator(false)} />');

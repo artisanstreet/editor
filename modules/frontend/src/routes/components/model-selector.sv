@@ -75,7 +75,7 @@
 	let hover_top = $state(0);
 	let hover_visible = $state(false);
 	let hover_width = $state(0);
-	let engine_surface = $state<HTMLElement>();
+	let engine_surface = $state<HTMLElement | null>(null);
 	let engine_indicator_animated = $state(false);
 	let engine_indicator_height = $state(0);
 	let engine_indicator_left = $state(0);
