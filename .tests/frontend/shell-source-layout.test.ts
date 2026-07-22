@@ -76,11 +76,13 @@ describe("Barekey docs shell reset", () => {
 
 	it("uses the Barekey docs gradient card surface for page content", () => {
 		const panel = Read("modules/frontend/src/routes/components/sectioned-panel.sv");
+		const global_styles = Read("modules/frontend/src/lib/styles/global.css");
 
 		expect(panel).toContain(
 			"rounded-3xl bg-linear-to-b from-foreground/5 to-foreground/2.5 p-1 card",
 		);
 		expect(panel).not.toContain("bg-background");
+		expect(global_styles).toContain('--font-sans: "Artisan Neo", sans-serif;');
 	});
 
 	it("shows only the copied docs header identity inside the sidebar", () => {

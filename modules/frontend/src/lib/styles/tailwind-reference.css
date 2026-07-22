@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 @theme inline {
-	--font-sans: "PP Neue Montreal", sans-serif;
+	--font-sans: "Artisan Neo", sans-serif;
 	--font-mono: "JetBrains Mono", monospace;
 	--color-chart-5: var(--chart-5);
 	--color-chart-4: var(--chart-4);
