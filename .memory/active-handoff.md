@@ -10,11 +10,11 @@ product and architecture requirements are indexed by
 ## Working State
 
 - Repository: `C:\Users\sander\Desktop\artisan-editor`
-- Branch: `codex/backend-services`
-- `HEAD` and upstream were equal at `a494481` when this handoff was created.
-- The shared working tree is intentionally very dirty with concurrent,
-  uncommitted rehabilitation work. Preserve all unrelated edits; do not reset,
-  revert, bulk-stage, or commit another worker's files.
+- Branch: `master`
+- `master` is the GitHub default branch and the repository's pre-release
+  integration branch.
+- Work directly on `master`; do not create branches, worktrees, or pull requests
+  unless the user explicitly requests one.
 - The current program is the repository-wide Effect rehabilitation requested on
   2026-07-26, including a shared Snowflake ID service with epoch
   `2026-06-19T00:00:00.000Z`.

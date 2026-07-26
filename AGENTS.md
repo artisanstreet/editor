@@ -36,10 +36,16 @@
 
 ## Workflow Guardrails
 
-- Work on the existing feature branch unless `.memory/active-handoff.md` says a
-  new branch is required.
+- Artisan is unreleased and under active development. Work directly on
+  `master`, keep the checkout contained to `master`, and push verified milestone
+  commits there.
+- Do not create feature branches, worktrees, or pull requests unless the user
+  explicitly requests one for a specific task.
+- These repository rules override `sanders-skill` branching and pull-request
+  etiquette for Artisan Editor. Continue following its commit-quality,
+  verification, and Git-safety requirements.
 - Use pnpm and the repository scripts. Run `pnpm run validate` before a milestone commit.
 - Use `apply_patch` for manual file edits.
 - Do not start a development server unless explicitly requested.
 - Do not discard, reset, or revert dirty work that is not yours.
-- Commit coherent, verified milestones. Never push to `main` or `master` without explicit approval.
+- Commit coherent, verified milestones directly to `master`.
