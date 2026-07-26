@@ -37,14 +37,7 @@
 	const sidebar_layout_duration_ms = 300;
 	const flip_animations = new Map<HTMLElement, Animation>();
 	let layout_change_id = 0;
-	const layout_queue = yield* Queue.unbounded<Effect.Effect<void>>();
-	yield* Effect.forkScoped(
-		Effect.forever(
-			Queue.take(layout_queue).pipe(
-				Effect.flatMap(Effect.forkScoped),
-			),
-		),
-	);
+	let layout_queue: Queue.Queue<Effect.Effect<void>> | undefined;
 
 	const get_flip_targets = () => {
 		if (!ref) {
@@ -125,7 +118,7 @@
 		open = value;
 		on_open_change(value);
 
-		layout_queue.unsafeOffer(
+		layout_queue?.unsafeOffer(
 			Effect.gen(function* () {
 				yield* Effect.promise(tick);
 				if (change_id === layout_change_id) play_flip_animations(before_targets);
@@ -141,6 +134,15 @@
 		open: () => open,
 		set_open: set_open_with_flip,
 	});
+
+	layout_queue = yield* Queue.unbounded<Effect.Effect<void>>();
+	yield* Effect.forkScoped(
+		Effect.forever(
+			Queue.take(layout_queue).pipe(
+				Effect.flatMap(Effect.forkScoped),
+			),
+		),
+	);
 
 	onDestroy(() => {
 		for (const animation of flip_animations.values()) {

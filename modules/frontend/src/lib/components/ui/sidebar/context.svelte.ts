@@ -91,5 +91,9 @@ export function set_sidebar(props: SidebarStateProps): SidebarState {
  * so you cannot destructure it.
  */
 export function use_sidebar(): SidebarState {
-	return getContext(Symbol.for(symbol_key));
+	const sidebar = getContext<SidebarState | undefined>(Symbol.for(symbol_key));
+	if (sidebar === undefined) {
+		throw new Error("Sidebar components must be rendered inside Sidebar.Provider");
+	}
+	return sidebar;
 }

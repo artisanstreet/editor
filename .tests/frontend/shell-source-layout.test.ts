@@ -91,6 +91,7 @@ describe("Barekey docs shell reset", () => {
 
 	it("matches the Barekey docs inset sidebar and circular toggle", () => {
 		const panel = Read("modules/frontend/src/routes/components/sectioned-panel.sv");
+		const provider = Read("modules/frontend/src/lib/components/ui/sidebar/sidebar-provider.sv");
 
 		expect(panel).toContain(
 			'style="--sidebar-width: 16rem; --sidebar-width-icon: 2.5rem; min-height: 0;"',
@@ -99,6 +100,9 @@ describe("Barekey docs shell reset", () => {
 		expect(panel).toContain("absolute right-0 top-2 hidden size-10");
 		expect(panel).toContain("rounded-full bg-surface-125 card");
 		expect(panel).toContain("<LayoutSidebar");
+		expect(provider.indexOf("const sidebar = set_sidebar")).toBeLessThan(
+			provider.indexOf("yield* Queue.unbounded"),
+		);
 	});
 
 	it("uses the Barekey docs gradient card surface for page content", () => {

@@ -43,8 +43,8 @@ product and architecture requirements are indexed by
   dedicated modules. Both main repositories remain large; continue extracting
   cohesive ownership without duplicating the canonical transaction-local
   journal append invariant.
-- The working tree remains shared and very dirty. Reconcile ownership and split
-  coherent commits before publishing.
+- Sidebar context registration now precedes every Effect suspension in its
+  provider; browser WebSocket reconnect attempts use a one-second cadence.
 
 ## Verification Snapshot
 

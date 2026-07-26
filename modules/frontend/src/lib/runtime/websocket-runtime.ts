@@ -158,7 +158,7 @@ export const make_websocket_client_runtime_layer = (
 	url: string,
 	create_socket?: (url: string) => BrowserWebSocket,
 ) =>
-	make_artisan_client_layer().pipe(
+	make_artisan_client_layer({ reconnect_delay_ms: 1_000 }).pipe(
 		Layer.provideMerge(make_websocket_connection_lifecycle_layer(url, create_socket)),
 		Layer.provide(TransportRuntimeLive),
 	);
