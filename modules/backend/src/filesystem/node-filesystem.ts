@@ -5,6 +5,7 @@ import { watch as watch_native } from "node:fs";
 import { NodeCrypto, NodeFileSystem, NodePath } from "@effect/platform-node-shared";
 import {
 	Cause,
+	Clock,
 	Crypto,
 	Effect,
 	Exit,
@@ -1161,7 +1162,7 @@ function BuildNodeFilesystemCapabilities(options: {
 						);
 					const destination = path_service.resolve(
 						trash,
-						`${Date.now()}-${yield* RandomUuid("delete", path)}-${path_service.basename(source)}`,
+						`${yield* Clock.currentTimeMillis}-${yield* RandomUuid("delete", path)}-${path_service.basename(source)}`,
 					);
 					yield* file_system.rename(source, destination).pipe(map_error("delete", path));
 					return path_service.relative(root, destination).replaceAll("\\", "/");

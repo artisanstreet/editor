@@ -6,9 +6,6 @@
 		".": "./src/index.ts"
 	},
 	"dependencies": {
-		"@artisan/backend": "workspace:*",
-		"@artisan/engines": "workspace:*",
-		"@artisan/transport": "workspace:*",
 		"effect": "4.0.0-beta.97",
 		"electron": "43.1.1"
 	}

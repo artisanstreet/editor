@@ -1,4 +1,5 @@
 import type { ElectronRendererMessagePortShape } from "./electron-message-port";
+import type { ProjectRef } from "@artisan/protocol";
 
 /** Fixed renderer event name shared by the preload and frontend boundaries. */
 export const DesktopSessionConnectionType = "artisan.desktop.connection";
@@ -20,8 +21,10 @@ export interface DesktopIdentity {
 
 /** The complete narrow capability exposed by Electron preload code to the renderer. */
 export interface DesktopSessionBridge {
+	readonly forgeWebSocketEndpoint?: string;
 	readonly identity: () => Promise<DesktopIdentity>;
-	readonly requestConnection: () => void | Promise<void>;
+	/** Opens the shell-owned directory picker; undefined means the user cancelled. */
+	readonly selectProjectDirectory: () => Promise<ProjectRef | undefined>;
 	/** Best-effort native taskbar/Dock activity state for the focused desktop shell. */
 	readonly setWorking: (working: boolean) => void | Promise<void>;
 }

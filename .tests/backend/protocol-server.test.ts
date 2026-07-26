@@ -1,11 +1,10 @@
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { NodeFileSystem } from "@effect/platform-node-shared";
-import { Effect, Fiber, Layer, Redacted, Stream } from "effect";
+import { Effect, Fiber, Stream } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type {
@@ -26,7 +25,6 @@ import type {
 import {
 	DecodeProtocolConnectionOptions,
 	make_backend_runtime,
-	make_workspace_bounded_regular_file_store_registry_layer,
 	ProtocolServer,
 	type ProtocolConnection,
 } from "@artisan/backend";
@@ -38,21 +36,13 @@ import {
 	OrchestrationRuns,
 	WorkspaceChanges,
 } from "../../modules/backend/src/persistence/schema";
+import { MakeNodeTestWorkspaceBoundedRegularFileStoreRegistryLayer } from "./bounded-regular-file-store-harness";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 
 const temporary_directories: Array<string> = [];
 const workspace_time = "2026-07-12T14:00:00.000Z";
-const workspace_receipt_key = Redacted.make(new Uint8Array(32).fill(7));
 const workspace_encoder = new TextEncoder();
-
-interface NativeReplacementOptions {
-	readonly expected: Uint8Array;
-	readonly maximumBytes: number;
-	readonly operationId: string;
-	readonly path: string;
-	readonly replacement: Uint8Array;
-}
 
 function content_identity(content: string): ContentIdentity {
 	const bytes = workspace_encoder.encode(content);
@@ -62,103 +52,6 @@ function content_identity(content: string): ContentIdentity {
 		byte_count: bytes.byteLength,
 		content_hash: createHash("sha256").update(bytes).digest("hex"),
 	};
-}
-
-function bytes_match(left: Uint8Array, right: Uint8Array) {
-	return (
-		left.byteLength === right.byteLength && left.every((value, index) => value === right[index])
-	);
-}
-
-function replacement_options_match(
-	left: NativeReplacementOptions,
-	right: NativeReplacementOptions,
-) {
-	return (
-		left.maximumBytes === right.maximumBytes &&
-		left.operationId === right.operationId &&
-		left.path === right.path &&
-		bytes_match(left.expected, right.expected) &&
-		bytes_match(left.replacement, right.replacement)
-	);
-}
-
-function make_workspace_native_module(root: string) {
-	const receipts = new Map<string, NativeReplacementOptions>();
-
-	class FakeNativeBoundedRegularFileStore {
-		constructor(
-			readonly configured_root: string,
-			_receipt_authentication_key: Uint8Array,
-		) {}
-
-		authorizeRoot(candidate_root: string) {
-			return Promise.resolve(candidate_root === this.configured_root);
-		}
-
-		close() {}
-
-		async finalizeRegularFileReplacement(options: NativeReplacementOptions) {
-			const receipt = receipts.get(options.operationId);
-
-			if (receipt === undefined || !replacement_options_match(receipt, options)) {
-				throw new Error("replacement receipt is unavailable");
-			}
-
-			receipts.delete(options.operationId);
-		}
-
-		async readRegularFile(path: string, maximum_bytes: number) {
-			const bytes = new Uint8Array(await readFile(join(root, path)));
-
-			if (bytes.byteLength > maximum_bytes) {
-				throw new Error("file exceeds maximum bytes");
-			}
-
-			return bytes;
-		}
-
-		async replaceRegularFile(options: NativeReplacementOptions) {
-			const receipt = receipts.get(options.operationId);
-
-			if (receipt !== undefined) {
-				if (!replacement_options_match(receipt, options)) {
-					throw new Error("replacement receipt intent changed");
-				}
-
-				return "AlreadyReplaced";
-			}
-
-			const target = join(root, options.path);
-			const current = new Uint8Array(await readFile(target));
-			const matches =
-				current.byteLength === options.expected.byteLength &&
-				current.every((value, index) => value === options.expected[index]);
-
-			if (!matches || options.replacement.byteLength > options.maximumBytes) {
-				return "Changed";
-			}
-
-			await writeFile(target, options.replacement);
-			receipts.set(options.operationId, {
-				...options,
-				expected: Uint8Array.from(options.expected),
-				replacement: Uint8Array.from(options.replacement),
-			});
-
-			return "Replaced";
-		}
-	}
-
-	return () => ({
-		NativeBoundedRegularFileStore: FakeNativeBoundedRegularFileStore,
-		getNativeBuildDescriptor: () => ({
-			architecture: "x86_64",
-			operatingSystem: "windows",
-			target: "x86_64-pc-windows-msvc",
-			testHooksEnabled: false,
-		}),
-	});
 }
 
 async function make_database_path() {
@@ -173,7 +66,6 @@ async function make_workspace_runtime() {
 	const directory = await mkdtemp(join(tmpdir(), "artisan-editor-workspace-protocol-"));
 	const root = join(directory, "workspace");
 	const database_path = join(directory, "artisan.db");
-	const load_native_module = make_workspace_native_module(root);
 
 	temporary_directories.push(directory);
 	await mkdir(join(root, "src"), { recursive: true });
@@ -186,13 +78,9 @@ async function make_workspace_runtime() {
 			database_path,
 			migrations_path,
 			workspace_bounded_regular_file_store_registry:
-				make_workspace_bounded_regular_file_store_registry_layer(
-					[{ root, workspace_id: "workspace_protocol" }],
-					{
-						load_native_module,
-						receipt_authentication_key: workspace_receipt_key,
-					},
-				).pipe(Layer.provide(NodeFileSystem.layer)),
+				MakeNodeTestWorkspaceBoundedRegularFileStoreRegistryLayer([
+					{ root, workspace_id: "workspace_protocol" },
+				]),
 		}),
 	};
 }

@@ -6,3 +6,4 @@ export * from "./electron-message-port";
 export * from "./message-port";
 export * from "./transport-runtime";
 export * from "./wire";
+export * from "./websocket/client";

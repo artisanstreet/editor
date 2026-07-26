@@ -1,22 +1,26 @@
 appId: com.usebarekey.artisan-editor
 productName: Artisan Editor
 directories:
+    app: .dist/desktop
     output: .dist/electron-release
+electronDist: .dist/electron-runtime-43.1.1-offline
 files:
-    - from: .dist/desktop
-      to: .dist/desktop
-    - from: .dist/frontend
-      to: .dist/frontend
-    - from: modules/backend/drizzle
-      to: modules/backend/drizzle
+    - main.js
+    - preload.cjs
     - package.json
+extraResources:
+    - from: .dist/forge
+      to: artisan-forge
 asar: true
+beforeBuild: .scripts/build/electron-before-build.ts
 disableDefaultIgnoredFiles: true
 asarUnpack:
     - "**/*.node"
-    - "**/native-runtime/**"
 extraMetadata:
-    main: .dist/desktop/main.js
+    main: main.js
 win:
+    signExecutable: false
     target:
         - nsis
+nsis:
+    include: .scripts/package/nsis/artisan-path.nsh

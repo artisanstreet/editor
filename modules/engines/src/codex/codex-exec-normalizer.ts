@@ -161,6 +161,10 @@ function make_base(
 	};
 }
 
+function canonical_item_id(input: CodexExecNormalizationInput, native_item_id: string) {
+	return `${input.artisan_run_id}:exec:item:${native_item_id}`;
+}
+
 function native_action(
 	input: CodexExecNormalizationInput,
 	type: string,
@@ -200,7 +204,10 @@ function NormaliseItem(input: CodexExecNormalizationInput, type: string, item_ty
 							{
 								...make_base(input, type),
 								_tag: "agent_message_completed",
+								item_id: canonical_item_id(input, value.item.id),
 								message: value.item.text,
+								/** `codex exec --json` agent messages do not carry a phase. */
+								phase: "unspecified",
 								turn_id: input.turn_id,
 							} satisfies EngineAgentMessageCompletedObservation,
 						]

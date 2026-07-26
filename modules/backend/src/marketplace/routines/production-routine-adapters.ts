@@ -10,7 +10,7 @@ import {
 	NpxSkillsDiscoveryResult,
 	RoutineCommand,
 } from "@artisan/protocol";
-import { Effect, Layer, Schema } from "effect";
+import { Effect, Layer, Schema, Stream } from "effect";
 
 import {
 	NpxSkillsAdapter,
@@ -73,36 +73,42 @@ const Frontmatter = (content: string) => {
 };
 
 const ReadBounded = (root: string, path: string, max_file_bytes: number) =>
-	Effect.tryPromise({
-		try: async () => {
-			const before = await lstat(path);
-			if (!before.isFile() || before.isSymbolicLink()) throw new Error("invalid file");
-			const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW);
-			try {
-				const opened = await handle.stat();
-				const canonical = await realpath(path);
-				const after = await lstat(path);
-				if (
-					!opened.isFile() ||
-					after.isSymbolicLink() ||
-					!after.isFile() ||
-					opened.dev !== before.dev ||
-					opened.ino !== before.ino ||
-					opened.dev !== after.dev ||
-					opened.ino !== after.ino ||
-					!IsWithin(root, canonical) ||
-					opened.size > max_file_bytes
-				)
-					throw new Error("file identity changed");
-				const bytes = new Uint8Array(await handle.readFile());
-				if (bytes.byteLength > max_file_bytes) throw new Error("file exceeded bound");
-				return bytes;
-			} finally {
-				await handle.close();
-			}
-		},
-		catch: () => new RoutineInspectorError({ code: "read_failed" }),
-	});
+	Effect.gen(function* () {
+		const before = yield* Effect.tryPromise(() => lstat(path));
+		if (!before.isFile() || before.isSymbolicLink()) {
+			return yield* Effect.fail(new Error("invalid file"));
+		}
+		return yield* Effect.acquireUseRelease(
+			Effect.tryPromise(() => open(path, constants.O_RDONLY | constants.O_NOFOLLOW)),
+			(handle) =>
+				Effect.gen(function* () {
+					const [opened, canonical, after] = yield* Effect.all([
+						Effect.tryPromise(() => handle.stat()),
+						Effect.tryPromise(() => realpath(path)),
+						Effect.tryPromise(() => lstat(path)),
+					]);
+					if (
+						!opened.isFile() ||
+						after.isSymbolicLink() ||
+						!after.isFile() ||
+						opened.dev !== before.dev ||
+						opened.ino !== before.ino ||
+						opened.dev !== after.dev ||
+						opened.ino !== after.ino ||
+						!IsWithin(root, canonical) ||
+						opened.size > max_file_bytes
+					) {
+						return yield* Effect.fail(new Error("file identity changed"));
+					}
+					const bytes = new Uint8Array(yield* Effect.tryPromise(() => handle.readFile()));
+					if (bytes.byteLength > max_file_bytes) {
+						return yield* Effect.fail(new Error("file exceeded bound"));
+					}
+					return bytes;
+				}),
+			(handle) => Effect.promise(() => handle.close()).pipe(Effect.ignore),
+		);
+	}).pipe(Effect.mapError(() => new RoutineInspectorError({ code: "read_failed" })));
 
 /**
  * Inspects an explicit local file or directory without writing. Every traversed entry must be a
@@ -272,225 +278,249 @@ const SafeRelativePath = (path: string) => {
 };
 
 const InstallerError = (code: RoutineInstallerError["code"]) => new RoutineInstallerError({ code });
+const IsErrorCode = (cause: unknown, code: string) =>
+	(cause as NodeJS.ErrnoException).code === code;
+const InstallerFs = <A>(
+	try_: () => Promise<A>,
+	code: RoutineInstallerError["code"] = "install_failed",
+) =>
+	Effect.tryPromise({
+		try: try_,
+		catch: (cause) => (cause instanceof RoutineInstallerError ? cause : InstallerError(code)),
+	});
+const InstallerFsOptional = <A>(try_: () => Promise<A>) =>
+	Effect.tryPromise({
+		try: try_,
+		catch: (cause) => (IsErrorCode(cause, "ENOENT") ? undefined : InstallerError("conflict")),
+	}).pipe(
+		Effect.matchEffect({
+			onFailure: (failure) =>
+				failure === undefined ? Effect.succeed(undefined) : Effect.fail(failure),
+			onSuccess: (value) => Effect.succeed(value),
+		}),
+	);
 
 /** Atomic local materialization. Acquisition is inert; all filesystem effects are explicit. */
 export const make_local_routine_installer_layer = (options: LocalRoutineInstallerOptions) =>
 	Layer.succeed(RoutineInstaller, {
 		Install: ({ inspection, operation_id, scope }) =>
-			Effect.tryPromise({
-				try: async () => {
-					if (inspection.source.kind !== "local" || !isAbsolute(options.install_root))
-						throw InstallerError("install_failed");
-					const paths = Object.keys(inspection.content_hashes).sort();
-					const max_files = options.max_files ?? 256;
-					const max_file_bytes = options.max_file_bytes ?? 1_048_576;
-					const max_total_bytes = options.max_total_bytes ?? 8_388_608;
-					if (
-						paths.length === 0 ||
-						paths.length > max_files ||
-						paths.some((path) => !SafeRelativePath(path))
-					)
-						throw InstallerError("conflict");
-					const source_locator = resolve(inspection.source.locator);
-					const source_stat = await lstat(source_locator);
-					if (source_stat.isSymbolicLink()) throw InstallerError("conflict");
-					const source_root = await realpath(
-						source_stat.isDirectory() ? source_locator : dirname(source_locator),
-					);
-					const materialized = new Map<string, Uint8Array>();
-					let total = 0;
-					for (const path of paths) {
-						const bytes = await Effect.runPromise(
-							ReadBounded(
-								source_root,
-								join(source_root, ...path.split("/")),
-								max_file_bytes,
-							),
-						);
-						total += bytes.byteLength;
-						if (
-							total > max_total_bytes ||
-							Hash(bytes) !== inspection.content_hashes[path]
-						)
-							throw InstallerError("conflict");
-						materialized.set(path, bytes);
-					}
-					const fingerprint = Hash(
-						JSON.stringify({ content_hashes: inspection.content_hashes, scope }),
-					);
-					const target_name = Hash(
-						`${inspection.candidate_id}\0${JSON.stringify(scope)}`,
-					).slice(0, 32);
-					const rollback_id = `rollback_${target_name}_${fingerprint}`;
-					const receipt = {
-						artifact_refs: inspection.artifact_refs,
-						fingerprint,
-						operation_id,
-						rollback_id,
-						target_name,
-					};
-					const root = resolve(options.install_root);
-					const target = join(root, target_name);
-					const stage = join(root, `.stage-${Hash(operation_id).slice(0, 32)}`);
-					await mkdir(root, { recursive: true });
-					const root_stat = await lstat(root);
-					if (!root_stat.isDirectory() || root_stat.isSymbolicLink())
-						throw InstallerError("install_failed");
-					await rm(stage, { force: true, recursive: true });
-					try {
-						const existing_stat = await lstat(target);
-						if (!existing_stat.isDirectory() || existing_stat.isSymbolicLink())
-							throw InstallerError("conflict");
-						const existing = JSON.parse(
-							new TextDecoder().decode(
-								await Effect.runPromise(
-									ReadBounded(
-										await realpath(target),
-										join(target, ".artisan-install.json"),
-										65_536,
-									),
-								),
-							),
-						) as typeof receipt;
-						if (
-							existing.operation_id !== operation_id ||
-							existing.fingerprint !== fingerprint ||
-							existing.rollback_id !== rollback_id
-						)
-							throw InstallerError("conflict");
-						const existing_root = await realpath(target);
-						for (const path of paths) {
-							const bytes = await Effect.runPromise(
-								ReadBounded(
+			Effect.gen(function* () {
+				if (inspection.source.kind !== "local" || !isAbsolute(options.install_root))
+					return yield* InstallerError("install_failed");
+				const paths = Object.keys(inspection.content_hashes).sort();
+				const max_files = options.max_files ?? 256;
+				const max_file_bytes = options.max_file_bytes ?? 1_048_576;
+				const max_total_bytes = options.max_total_bytes ?? 8_388_608;
+				if (
+					paths.length === 0 ||
+					paths.length > max_files ||
+					paths.some((path) => !SafeRelativePath(path))
+				)
+					return yield* InstallerError("conflict");
+				const source_locator = resolve(inspection.source.locator);
+				const source_stat = yield* InstallerFs(() => lstat(source_locator));
+				if (source_stat.isSymbolicLink()) return yield* InstallerError("conflict");
+				const source_root = yield* InstallerFs(() =>
+					realpath(source_stat.isDirectory() ? source_locator : dirname(source_locator)),
+				);
+				const materialized = new Map<string, Uint8Array>();
+				let total = 0;
+				for (const path of paths) {
+					const bytes = yield* ReadBounded(
+						source_root,
+						join(source_root, ...path.split("/")),
+						max_file_bytes,
+					).pipe(Effect.mapError(() => InstallerError("conflict")));
+					total += bytes.byteLength;
+					if (total > max_total_bytes || Hash(bytes) !== inspection.content_hashes[path])
+						return yield* InstallerError("conflict");
+					materialized.set(path, bytes);
+				}
+				const fingerprint = Hash(
+					JSON.stringify({ content_hashes: inspection.content_hashes, scope }),
+				);
+				const target_name = Hash(
+					`${inspection.candidate_id}\0${JSON.stringify(scope)}`,
+				).slice(0, 32);
+				const rollback_id = `rollback_${target_name}_${fingerprint}`;
+				const receipt = {
+					artifact_refs: inspection.artifact_refs,
+					fingerprint,
+					operation_id,
+					rollback_id,
+					target_name,
+				};
+				const root = resolve(options.install_root);
+				const target = join(root, target_name);
+				const stage = join(root, `.stage-${Hash(operation_id).slice(0, 32)}`);
+				yield* InstallerFs(() => mkdir(root, { recursive: true }));
+				const root_stat = yield* InstallerFs(() => lstat(root));
+				if (!root_stat.isDirectory() || root_stat.isSymbolicLink())
+					return yield* InstallerError("install_failed");
+				yield* InstallerFs(() => rm(stage, { force: true, recursive: true }));
+				const existing_stat = yield* InstallerFsOptional(() => lstat(target));
+				const existing =
+					existing_stat === undefined
+						? undefined
+						: yield* Effect.gen(function* () {
+								if (!existing_stat.isDirectory() || existing_stat.isSymbolicLink())
+									return yield* InstallerError("conflict");
+								const existing_root = yield* InstallerFs(
+									() => realpath(target),
+									"conflict",
+								);
+								const receipt_bytes = yield* ReadBounded(
 									existing_root,
-									join(target, ...path.split("/")),
-									max_file_bytes,
-								),
-							);
-							if (Hash(bytes) !== inspection.content_hashes[path])
-								throw InstallerError("conflict");
-						}
-						return { artifact_refs: existing.artifact_refs, rollback_id };
-					} catch (cause) {
-						if (
-							!(cause instanceof Error && "code" in cause && cause.code === "ENOENT")
-						) {
-							if (cause instanceof RoutineInstallerError) throw cause;
-							throw InstallerError("conflict");
-						}
+									join(target, ".artisan-install.json"),
+									65_536,
+								).pipe(Effect.mapError(() => InstallerError("conflict")));
+								const existing = yield* Effect.try({
+									try: () =>
+										JSON.parse(
+											new TextDecoder().decode(receipt_bytes),
+										) as typeof receipt,
+									catch: () => InstallerError("conflict"),
+								});
+								if (
+									existing.operation_id !== operation_id ||
+									existing.fingerprint !== fingerprint ||
+									existing.rollback_id !== rollback_id
+								)
+									return yield* InstallerError("conflict");
+								for (const path of paths) {
+									const bytes = yield* ReadBounded(
+										existing_root,
+										join(target, ...path.split("/")),
+										max_file_bytes,
+									).pipe(Effect.mapError(() => InstallerError("conflict")));
+									if (Hash(bytes) !== inspection.content_hashes[path])
+										return yield* InstallerError("conflict");
+								}
+								return existing;
+							});
+				if (existing !== undefined)
+					return { artifact_refs: existing.artifact_refs, rollback_id };
+				yield* InstallerFs(() => mkdir(stage));
+				yield* Effect.gen(function* () {
+					for (const [path, bytes] of materialized) {
+						const destination = join(stage, ...path.split("/"));
+						yield* InstallerFs(() => mkdir(dirname(destination), { recursive: true }));
+						yield* InstallerFs(() => writeFile(destination, bytes, { flag: "wx" }));
 					}
-					await mkdir(stage);
-					try {
-						for (const [path, bytes] of materialized) {
-							const destination = join(stage, ...path.split("/"));
-							await mkdir(dirname(destination), { recursive: true });
-							await writeFile(destination, bytes, { flag: "wx" });
-						}
-						await writeFile(
-							join(stage, ".artisan-install.json"),
-							JSON.stringify(receipt),
-							{
-								flag: "wx",
-							},
-						);
-						await rename(stage, target);
-					} catch (cause) {
-						await rm(stage, { force: true, recursive: true });
-						throw cause;
-					}
-					return { artifact_refs: inspection.artifact_refs, rollback_id };
-				},
-				catch: (cause) =>
-					cause instanceof RoutineInstallerError
-						? cause
-						: InstallerError("install_failed"),
+					yield* InstallerFs(() =>
+						writeFile(join(stage, ".artisan-install.json"), JSON.stringify(receipt), {
+							flag: "wx",
+						}),
+					);
+					yield* InstallerFs(() => rename(stage, target));
+				}).pipe(
+					Effect.onError(() =>
+						InstallerFs(() => rm(stage, { force: true, recursive: true })).pipe(
+							Effect.ignore,
+						),
+					),
+				);
+				return { artifact_refs: inspection.artifact_refs, rollback_id };
 			}),
 		Rollback: ({ rollback_id }) =>
-			Effect.tryPromise({
-				try: async () => {
-					const match = rollback_id.match(/^rollback_([a-f0-9]{32})_([a-f0-9]{64})$/);
-					if (!match) throw InstallerError("rollback_failed");
-					const root = resolve(options.install_root);
-					const target = join(root, match[1]!);
-					const marker_root = join(root, ".rollbacks");
-					const marker = join(marker_root, `${Hash(rollback_id)}.json`);
-					const trash = join(root, `.rollback-${Hash(rollback_id).slice(0, 32)}`);
-					await mkdir(marker_root, { recursive: true });
-					const root_stat = await lstat(root);
-					const marker_root_stat = await lstat(marker_root);
-					if (!root_stat.isDirectory() || root_stat.isSymbolicLink())
-						throw InstallerError("rollback_failed");
-					if (!marker_root_stat.isDirectory() || marker_root_stat.isSymbolicLink())
-						throw InstallerError("rollback_failed");
-					try {
-						await lstat(marker);
-						const marker_payload = JSON.parse(
-							new TextDecoder().decode(
-								await Effect.runPromise(
-									ReadBounded(await realpath(marker_root), marker, 4_096),
-								),
-							),
-						) as { readonly rollback_id?: string };
-						if (marker_payload.rollback_id !== rollback_id)
-							throw InstallerError("rollback_failed");
-						await rm(trash, { force: true, recursive: true });
-						return;
-					} catch (cause) {
-						if (!(cause instanceof Error && "code" in cause && cause.code === "ENOENT"))
-							throw cause;
-					}
-					try {
-						const target_root = await realpath(target);
-						const target_stat = await lstat(target);
-						if (
-							!target_stat.isDirectory() ||
-							target_stat.isSymbolicLink() ||
-							!IsWithin(root, target_root)
-						)
-							throw InstallerError("rollback_failed");
-						const receipt = JSON.parse(
-							new TextDecoder().decode(
-								await Effect.runPromise(
-									ReadBounded(
-										target_root,
-										join(target, ".artisan-install.json"),
-										65_536,
-									),
-								),
-							),
-						) as { readonly rollback_id?: string };
-						if (receipt.rollback_id !== rollback_id)
-							throw InstallerError("rollback_failed");
-						await rename(target, trash);
-					} catch (cause) {
-						if (!(cause instanceof Error && "code" in cause && cause.code === "ENOENT"))
-							throw cause;
-						try {
-							await lstat(trash);
-						} catch {
-							throw InstallerError("rollback_failed");
-						}
-					}
-					await writeFile(marker, JSON.stringify({ rollback_id }), { flag: "wx" });
-					await rm(trash, { recursive: true });
-				},
-				catch: (cause) =>
+			Effect.gen(function* () {
+				const match = rollback_id.match(/^rollback_([a-f0-9]{32})_([a-f0-9]{64})$/);
+				if (!match) return yield* InstallerError("rollback_failed");
+				const root = resolve(options.install_root);
+				const target = join(root, match[1]!);
+				const marker_root = join(root, ".rollbacks");
+				const marker = join(marker_root, `${Hash(rollback_id)}.json`);
+				const trash = join(root, `.rollback-${Hash(rollback_id).slice(0, 32)}`);
+				yield* InstallerFs(
+					() => mkdir(marker_root, { recursive: true }),
+					"rollback_failed",
+				);
+				const root_stat = yield* InstallerFs(() => lstat(root), "rollback_failed");
+				const marker_root_stat = yield* InstallerFs(
+					() => lstat(marker_root),
+					"rollback_failed",
+				);
+				if (!root_stat.isDirectory() || root_stat.isSymbolicLink())
+					return yield* InstallerError("rollback_failed");
+				if (!marker_root_stat.isDirectory() || marker_root_stat.isSymbolicLink())
+					return yield* InstallerError("rollback_failed");
+
+				const marker_exists = yield* InstallerFsOptional(() => lstat(marker));
+				if (marker_exists !== undefined) {
+					const canonical_marker_root = yield* InstallerFs(
+						() => realpath(marker_root),
+						"rollback_failed",
+					);
+					const marker_bytes = yield* ReadBounded(canonical_marker_root, marker, 4_096);
+					const marker_payload = yield* Effect.try({
+						try: () =>
+							JSON.parse(new TextDecoder().decode(marker_bytes)) as {
+								readonly rollback_id?: string;
+							},
+						catch: () => InstallerError("rollback_failed"),
+					});
+					if (marker_payload.rollback_id !== rollback_id)
+						return yield* InstallerError("rollback_failed");
+					yield* InstallerFs(
+						() => rm(trash, { force: true, recursive: true }),
+						"rollback_failed",
+					);
+					return;
+				}
+
+				const target_root = yield* InstallerFsOptional(() => realpath(target));
+				if (target_root !== undefined) {
+					const target_stat = yield* InstallerFs(() => lstat(target), "rollback_failed");
+					if (
+						!target_stat.isDirectory() ||
+						target_stat.isSymbolicLink() ||
+						!IsWithin(root, target_root)
+					)
+						return yield* InstallerError("rollback_failed");
+					const receipt_bytes = yield* ReadBounded(
+						target_root,
+						join(target, ".artisan-install.json"),
+						65_536,
+					);
+					const receipt = yield* Effect.try({
+						try: () =>
+							JSON.parse(new TextDecoder().decode(receipt_bytes)) as {
+								readonly rollback_id?: string;
+							},
+						catch: () => InstallerError("rollback_failed"),
+					});
+					if (receipt.rollback_id !== rollback_id)
+						return yield* InstallerError("rollback_failed");
+					yield* InstallerFs(() => rename(target, trash), "rollback_failed");
+				} else if ((yield* InstallerFsOptional(() => lstat(trash))) === undefined) {
+					return yield* InstallerError("rollback_failed");
+				}
+				yield* InstallerFs(
+					() => writeFile(marker, JSON.stringify({ rollback_id }), { flag: "wx" }),
+					"rollback_failed",
+				);
+				yield* InstallerFs(() => rm(trash, { recursive: true }), "rollback_failed");
+			}).pipe(
+				Effect.mapError((cause) =>
 					cause instanceof RoutineInstallerError
 						? cause
 						: InstallerError("rollback_failed"),
-			}),
+				),
+			),
 	});
 
 const ReadProcessStream = (stream: AsyncIterable<Uint8Array>, max_bytes: number) =>
-	Effect.tryPromise({
-		try: async () => {
-			const chunks: Array<Uint8Array> = [];
-			let total = 0;
-			for await (const chunk of stream) {
-				total += chunk.byteLength;
-				if (total > max_bytes) throw new Error("output bound exceeded");
-				chunks.push(chunk);
-			}
+	Stream.fromAsyncIterable(stream, () => new RoutineInspectorError({ code: "read_failed" })).pipe(
+		Stream.runFoldEffect(
+			() => ({ chunks: [] as Array<Uint8Array>, total: 0 }),
+			(state, chunk) => {
+				const total = state.total + chunk.byteLength;
+				return total > max_bytes
+					? Effect.fail(new RoutineInspectorError({ code: "read_failed" }))
+					: Effect.succeed({ chunks: [...state.chunks, chunk], total });
+			},
+		),
+		Effect.map(({ chunks, total }) => {
 			const output = new Uint8Array(total);
 			let offset = 0;
 			for (const chunk of chunks) {
@@ -498,9 +528,8 @@ const ReadProcessStream = (stream: AsyncIterable<Uint8Array>, max_bytes: number)
 				offset += chunk.byteLength;
 			}
 			return output;
-		},
-		catch: () => new RoutineInspectorError({ code: "read_failed" }),
-	});
+		}),
+	);
 
 /** Explicit, bounded argv-only `npx skills` discovery. Layer acquisition never spawns. */
 export const make_npx_skills_process_adapter_layer = (options: NpxSkillsProcessOptions) =>

@@ -11,7 +11,8 @@
 
 .docs-code-snippet-filename {
 	@apply flex w-min flex-row items-center gap-2 rounded-3xl bg-linear-to-b
-		from-foreground/7.5 to-foreground/2.5 px-2 py-px text-sm text-foreground
+		from-surface-175 to-surface-75 px-2 py-px text-sm text-foreground
+		dark:from-surface-875 dark:to-surface-925
 		no-underline card-lg;
 }
 
@@ -46,7 +47,8 @@
 
 .docs-code-snippet-body {
 	@apply max-w-full w-full items-center overflow-x-auto rounded-3xl
-    bg-linear-to-t from-background/30 to-foreground/5 p-4 card-lg;
+    bg-linear-to-t from-surface-50 to-surface-125 p-4 card-lg
+    dark:from-surface-950 dark:to-surface-900;
 }
 
 .docs-code-snippet-body .shiki {

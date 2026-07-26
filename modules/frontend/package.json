@@ -11,6 +11,8 @@
 		"test": "vitest run --passWithNoTests"
 	},
 	"dependencies": {
+		"@artisan/catalog": "workspace:*",
+		"@artisan/data": "workspace:*",
 		"@artisan/protocol": "workspace:*",
 		"@artisan/transport": "workspace:*",
 		"@effect/platform-browser": "4.0.0-beta.97",

@@ -232,6 +232,124 @@ describe("Codex normalizer", () => {
 		expect(flattened[1]).not.toHaveProperty("delta");
 	});
 
+	it("keeps each assistant item's delta and completion identity stable within one turn", async () => {
+		const observations = await Effect.runPromise(
+			Effect.all([
+				normalise(
+					"item/agentMessage/delta",
+					{
+						delta: "First ",
+						itemId: "assistant-item-1",
+						threadId: "thread-1",
+						turnId: "turn-1",
+					},
+					{ frame_sequence: 10 },
+				),
+				normalise(
+					"item/agentMessage/delta",
+					{
+						delta: "Second ",
+						itemId: "assistant-item-2",
+						threadId: "thread-1",
+						turnId: "turn-1",
+					},
+					{ frame_sequence: 11 },
+				),
+				normalise(
+					"item/completed",
+					{
+						completedAtMs: 12,
+						item: {
+							id: "assistant-item-1",
+							memoryCitation: null,
+							phase: "commentary",
+							text: "First message",
+							type: "agentMessage",
+						},
+						threadId: "thread-1",
+						turnId: "turn-1",
+					},
+					{ frame_sequence: 12 },
+				),
+				normalise(
+					"item/completed",
+					{
+						completedAtMs: 13,
+						item: {
+							id: "assistant-item-2",
+							memoryCitation: null,
+							phase: null,
+							text: "Second message",
+							type: "agentMessage",
+						},
+						threadId: "thread-1",
+						turnId: "turn-1",
+					},
+					{ frame_sequence: 13 },
+				),
+			]),
+		);
+
+		expect(observations.flat()).toMatchObject([
+			{ _tag: "agent_message_delta", item_id: "assistant-item-1", phase: "unspecified" },
+			{ _tag: "agent_message_delta", item_id: "assistant-item-2", phase: "unspecified" },
+			{ _tag: "agent_message_completed", item_id: "assistant-item-1", phase: "commentary" },
+			{ _tag: "agent_message_completed", item_id: "assistant-item-2", phase: "unspecified" },
+		]);
+
+		const [unknown_phase] = await Effect.runPromise(
+			normalise("item/completed", {
+				item: {
+					id: "assistant-item-3",
+					memoryCitation: null,
+					phase: "future-provider-phase",
+					text: "Third message",
+					type: "agentMessage",
+				},
+				threadId: "thread-1",
+				turnId: "turn-1",
+			}),
+		);
+		expect(unknown_phase).toMatchObject({
+			_tag: "agent_message_completed",
+			phase: "unspecified",
+		});
+	});
+
+	it("preserves the provider retry lifecycle rather than flattening errors into diagnostics", async () => {
+		const observations = await Effect.runPromise(
+			Effect.all([
+				normalise("error", {
+					error: { message: "Temporarily unavailable" },
+					threadId: "thread-1",
+					turnId: "turn-1",
+					willRetry: true,
+				}),
+				normalise("error", {
+					error: { message: "Invalid request" },
+					threadId: "thread-1",
+					turnId: "turn-1",
+					willRetry: false,
+				}),
+			]),
+		);
+
+		expect(observations.flat()).toMatchObject([
+			{
+				_tag: "retry",
+				attempt_state: "retrying",
+				message: "Temporarily unavailable",
+				will_retry: true,
+			},
+			{
+				_tag: "retry",
+				attempt_state: "terminal",
+				message: "Invalid request",
+				will_retry: false,
+			},
+		]);
+	});
+
 	it("preserves unknown and malformed known frames without inventing canonical facts", async () => {
 		const observations = await Effect.runPromise(
 			Effect.all([

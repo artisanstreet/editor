@@ -45,6 +45,7 @@ import {
 	GlobalGuidanceProviderSync,
 	JournalCommands,
 	JournalEvents,
+	MessageImageAttachments,
 	ModelBehaviourProviderStates,
 	ModelBehaviourSettings,
 	ThreadErasureClaims,
@@ -962,6 +963,136 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 				type: "append",
 				entries: [{ payload: { text: "Only this entry should append." } }],
 			});
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
+	it("queries and streams durable canonical conversation patches through real MessagePorts", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const journal = await runtime.runPromise(JournalStore);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
+		try {
+			await Effect.runPromise(
+				harness.client.Command({
+					command_id: "conversation_create",
+					payload: { title: "Conversation", type: "thread.create" },
+					thread_id: "thread_conversation",
+				}),
+			);
+			const updates = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const stream =
+							yield* harness.client.SubscribeConversation("thread_conversation");
+						const fiber = yield* stream.pipe(
+							Stream.take(2),
+							Stream.runCollect,
+							Effect.forkScoped,
+						);
+						yield* journal.AppendEvent({
+							causation_id: "conversation_message",
+							correlation_id: "conversation_message",
+							payload: {
+								message_id: "conversation_message",
+								reason: "no_active_run",
+								text: "Canonical user message.",
+								type: "thread.message_queued",
+								working_directory: "C:\\workspace",
+							},
+							thread_id: "thread_conversation",
+						});
+						return [...(yield* Fiber.join(fiber))];
+					}),
+				),
+			);
+			const queried = await Effect.runPromise(
+				harness.client.GetConversation({ thread_id: "thread_conversation" }),
+			);
+			expect(updates[0]).toMatchObject({
+				snapshot: { items: [], last_patch_sequence: 0 },
+				type: "snapshot",
+			});
+			expect(updates[1]).toMatchObject({
+				batch: {
+					from_sequence: 1,
+					patches: [
+						{ type: "turn_upsert" },
+						{ item: { text: "Canonical user message.", type: "user_message" } },
+					],
+					to_sequence: 2,
+				},
+				type: "patch",
+			});
+			expect(queried).toMatchObject({
+				items: [{ text: "Canonical user message.", type: "user_message" }],
+				last_patch_sequence: 2,
+			});
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
+	it("reads a thread-owned message image attachment through the typed client", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const database = await runtime.runPromise(Database);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
+		const bytes = new Uint8Array([0x89, 0x50, 0x4e, 0x47]);
+		try {
+			await runtime.runPromise(
+				database.client.transaction((transaction) =>
+					Effect.gen(function* () {
+						yield* transaction.insert(JournalCommands).values({
+							accepted_at: fixture_retention_now,
+							message_id: "message_image_query",
+							origin: "frontend",
+							payload_json: "{}",
+							payload_type: "thread.send_message",
+							schema_version: 1,
+							sent_at: fixture_retention_now,
+							status: "accepted",
+							thread_id: "thread_image_query",
+						});
+						yield* transaction.insert(MessageImageAttachments).values({
+							attachment_id: "attachment_image_query",
+							content: Buffer.from(bytes),
+							media_type: "image/png",
+							message_id: "message_image_query",
+							name: "query.png",
+							position: 0,
+							size_bytes: bytes.byteLength,
+						});
+					}),
+				),
+			);
+
+			const found = await Effect.runPromise(
+				harness.client.GetMessageImageAttachment({
+					attachment_id: "attachment_image_query",
+					thread_id: "thread_image_query",
+				}),
+			);
+			const denied = await Effect.runPromise(
+				harness.client.GetMessageImageAttachment({
+					attachment_id: "attachment_image_query",
+					thread_id: "thread_other",
+				}),
+			);
+
+			expect(Option.getOrThrow(found)).toMatchObject({
+				id: "attachment_image_query",
+				media_type: "image/png",
+				name: "query.png",
+				size_bytes: bytes.byteLength,
+			});
+			expect([...Option.getOrThrow(found).bytes]).toEqual([...bytes]);
+			expect(Option.isNone(denied)).toBe(true);
 		} finally {
 			await harness.dispose();
 			await runtime.dispose();
@@ -2106,7 +2237,6 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 						const initial_snapshot = yield* Deferred.make<void>();
 						const reconnect_snapshot = yield* Deferred.make<void>();
 						const removal_delivered = yield* Deferred.make<void>();
-						const guidance_delivered = yield* Deferred.make<void>();
 						const replayed_kept_event = yield* Deferred.make<void>();
 						const updates = yield* Ref.make<ReadonlyArray<ThreadListUpdate>>([]);
 						const events = yield* Ref.make<ReadonlyArray<EventEnvelope>>([]);
@@ -2149,12 +2279,6 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 								Effect.gen(function* () {
 									yield* Ref.update(events, (current) => [...current, event]);
 
-									if (event.payload.type === "guidance.canonical.updated") {
-										yield* Deferred.succeed(guidance_delivered, undefined).pipe(
-											Effect.asVoid,
-										);
-									}
-
 									if (
 										event.payload.type === "thread.erased" &&
 										event.thread_id === "thread_erased"
@@ -2180,7 +2304,12 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 							Effect.forkScoped,
 						);
 
-						yield* Deferred.await(guidance_delivered);
+						/**
+						 * `Events` is an optional hot observation stream. The initial
+						 * guidance event may already have advanced the transport cursor
+						 * before this observer exists, and must not be retained for it.
+						 */
+						yield* Effect.yieldNow;
 						yield* Deferred.await(initial_snapshot);
 
 						yield* harness.client.Command({
@@ -2285,46 +2414,19 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 				},
 			);
 			const current_replay_harness = replay_harness;
-			const replayed_events = await Effect.runPromise(
-				Effect.scoped(
-					Effect.gen(function* () {
-						const events = current_replay_harness.client.Events;
-						const replay_fiber = yield* events.pipe(
-							Stream.take(8),
-							Stream.runCollect,
-							Effect.forkScoped,
-						);
-
-						yield* Effect.promise(() =>
-							wait_for(
-								() => current_replay_harness.connector_snapshot().connections >= 1,
-							),
-						);
-						yield* current_replay_harness.client.ListThreads;
-
-						return [...(yield* Fiber.join(replay_fiber))];
-					}),
-				),
+			const replayed_threads = await Effect.runPromise(
+				current_replay_harness.client.ListThreads,
 			);
 			const removal_index = output.updates.findIndex(
 				(update) => update.type === "remove" && update.thread_id === "thread_erased",
 			);
-			const serialized_replay = JSON.stringify(replayed_events);
+			const serialized_replay = JSON.stringify(replayed_threads);
 
-			expect(output.events[0]).toMatchObject({
-				journal_sequence: 1,
-				payload: { type: "guidance.canonical.updated" },
-				stream_id: "settings:guidance",
-				thread_id: "settings/guidance",
-			});
-			expect(output.events[0]?.payload).not.toHaveProperty("content");
-			expect(output.events.slice(1).map((event) => event.journal_sequence)).toEqual([
+			expect(output.events.map((event) => event.journal_sequence)).toEqual([
 				2, 3, 4, 5, 6, 7, 8,
 			]);
-			expect(output.events.slice(1).map((event) => event.sequence)).toEqual([
-				1, 1, 2, 2, 3, 4, 3,
-			]);
-			expect(output.events.slice(1).map((event) => event.thread_id)).toEqual([
+			expect(output.events.map((event) => event.sequence)).toEqual([1, 1, 2, 2, 3, 4, 3]);
+			expect(output.events.map((event) => event.thread_id)).toEqual([
 				"thread_erased",
 				"thread_kept",
 				"thread_erased",
@@ -2369,6 +2471,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 				],
 				last_journal_sequence: 8,
 			});
+			expect(replayed_threads.map((thread) => thread.thread_id)).toEqual(["thread_kept"]);
 			expect(serialized_replay).not.toContain("Secret erased title");
 			expect(serialized_replay).not.toContain("Private erased message body");
 			expect(serialized_replay).not.toContain("Private erased artifact diff");

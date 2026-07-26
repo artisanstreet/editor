@@ -4,6 +4,7 @@ import CssWorker from "monaco-editor/esm/vs/language/css/css.worker?worker";
 import HtmlWorker from "monaco-editor/esm/vs/language/html/html.worker?worker";
 import JsonWorker from "monaco-editor/esm/vs/language/json/json.worker?worker";
 import TsWorker from "monaco-editor/esm/vs/language/typescript/ts.worker?worker";
+import { Effect, Layer } from "effect";
 
 import type {
 	MonacoAdapter,
@@ -12,40 +13,48 @@ import type {
 	MonacoViewState,
 } from "./monaco-editor-service";
 
-let workers_configured = false;
-
-/** Configure ESM workers once; Electron's app protocol supports bundled workers. */
-export const ConfigureMonacoWorkers = () => {
-	if (workers_configured || typeof self === "undefined") return;
-
-	const monaco_global = self as typeof self & {
-		MonacoEnvironment?: {
-			getWorker: (module_id: string, label: string) => Worker;
-		};
+type MonacoGlobal = typeof globalThis & {
+	MonacoEnvironment?: {
+		getWorker: (module_id: string, label: string) => Worker;
 	};
-	monaco_global.MonacoEnvironment = {
-		getWorker: (_module_id, label) => {
-			switch (label) {
-				case "css":
-				case "less":
-				case "scss":
-					return new CssWorker();
-				case "html":
-				case "handlebars":
-				case "razor":
-					return new HtmlWorker();
-				case "json":
-					return new JsonWorker();
-				case "javascript":
-				case "typescript":
-					return new TsWorker();
-				default:
-					return new EditorWorker();
-			}
-		},
-	};
-	workers_configured = true;
 };
+
+/** Owns Monaco's process-global worker configuration for the browser runtime scope. */
+export const BrowserMonacoWorkersLive = Layer.effectDiscard(
+	Effect.acquireRelease(
+		Effect.sync(() => {
+			const monaco_global = globalThis as MonacoGlobal;
+			const previous = monaco_global.MonacoEnvironment;
+			monaco_global.MonacoEnvironment = {
+				getWorker: (_module_id, label) => {
+					switch (label) {
+						case "css":
+						case "less":
+						case "scss":
+							return new CssWorker();
+						case "html":
+						case "handlebars":
+						case "razor":
+							return new HtmlWorker();
+						case "json":
+							return new JsonWorker();
+						case "javascript":
+						case "typescript":
+							return new TsWorker();
+						default:
+							return new EditorWorker();
+					}
+				},
+			};
+			return { monaco_global, previous };
+		}),
+		({ monaco_global, previous }) =>
+			Effect.sync(() => {
+				if (previous === undefined) delete monaco_global.MonacoEnvironment;
+				else monaco_global.MonacoEnvironment = previous;
+			}),
+	),
+);
 
 const ToModel = (model: monaco.editor.ITextModel): MonacoModel => ({
 	dispose: () => model.dispose(),
@@ -73,7 +82,6 @@ const ToDiagnostic = (diagnostic: MonacoDiagnostic): monaco.editor.IMarkerData =
 
 export const BrowserMonacoAdapter: MonacoAdapter = {
 	create_editor: (host) => {
-		ConfigureMonacoWorkers();
 		const editor = monaco.editor.create(host as never, {
 			automaticLayout: true,
 			fontFamily: "var(--font-mono)",

@@ -1,4 +1,4 @@
-import { Context, Data, Effect, Layer, Option, Ref, Scope } from "effect";
+import { Clock, Context, Data, Effect, Layer, Option, Ref, Scope } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
 import { is_local_preview_hostname } from "./network-policy";
@@ -277,7 +277,7 @@ export const make_preview_inspection_layer = () =>
 
 						const session: PreviewInspectionSession = {
 							...input,
-							opened_at_ms: Date.now(),
+							opened_at_ms: yield* Clock.currentTimeMillis,
 							session_id: `preview-inspection-${++next_session_id}`,
 						};
 

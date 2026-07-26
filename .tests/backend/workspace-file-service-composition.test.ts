@@ -4,14 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { NodeFileSystem } from "@effect/platform-node-shared";
-import { Deferred, Effect, Exit, Layer, Redacted, Semaphore } from "effect";
+import { Deferred, Effect, Exit, Layer, Semaphore } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { ContentIdentity } from "@artisan/protocol";
 import {
 	make_backend_runtime,
-	type NativeBoundedRegularFileStoreOptions,
+	type BoundedRegularFileStore,
+	BoundedRegularFileStoreError,
+	type ReplaceRegularFileOptions,
 	ProtocolRouter,
 	ThreadRetentionClock,
 	ThreadRetentionScheduler,
@@ -21,10 +22,8 @@ import {
 	WorkspaceSnapshotStore,
 } from "@artisan/backend";
 
-import {
-	make_workspace_bounded_regular_file_store_registry_layer,
-	WorkspaceBoundedRegularFileStoreRegistry,
-} from "../../modules/backend/src/filesystem/workspace-bounded-regular-file-store-registry";
+import { WorkspaceBoundedRegularFileStoreRegistry } from "../../modules/backend/src/filesystem/workspace-bounded-regular-file-store-registry";
+import { MakeTestWorkspaceBoundedRegularFileStoreRegistryLayer } from "./bounded-regular-file-store-harness";
 import { JournalStore } from "../../modules/backend/src/persistence/journal-store";
 import {
 	OrchestrationCoordinators,
@@ -41,27 +40,23 @@ import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metad
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];
-const receipt_authentication_key = Redacted.make(new Uint8Array(32).fill(9));
 const now = "2026-07-12T13:00:00.000Z";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
-type NativeController = {
+type BoundedStoreController = {
 	readonly arm_preflight_race: (gate: PreflightRaceGate) => void;
 	readonly change_next_replacement: () => void;
 	readonly changed_results: { value: number };
-	readonly close_attempts: { value: number };
 	readonly finalization_attempts: { value: number };
 	readonly load_attempts: { value: number };
 	readonly replace_attempts: { value: number };
 	readonly write_attempts: { value: number };
 	readonly fail_next_finalization: () => void;
-	readonly load_native_module: NonNullable<
-		NativeBoundedRegularFileStoreOptions["load_native_module"]
-	>;
+	readonly MakeStore: (root: string) => typeof BoundedRegularFileStore.Service;
 };
 
-type NativeReplacementGate = {
+type ReplacementGate = {
 	readonly continue_first: Deferred.Deferred<void>;
 	readonly continue_second: Deferred.Deferred<void>;
 	readonly first_started: Deferred.Deferred<void>;
@@ -80,14 +75,6 @@ type PreflightRaceGate = {
 type AuthorityProofGate = {
 	readonly continue_proof: Deferred.Deferred<void>;
 	readonly proof_started: Deferred.Deferred<void>;
-};
-
-type NativeReplacementOptions = {
-	readonly expected: Uint8Array;
-	readonly maximumBytes: number;
-	readonly operationId: string;
-	readonly path: string;
-	readonly replacement: Uint8Array;
 };
 
 function content_identity(bytes: Uint8Array): ContentIdentity {
@@ -178,176 +165,198 @@ function bytes_match(left: Uint8Array, right: Uint8Array) {
 }
 
 function replacement_options_match(
-	left: NativeReplacementOptions,
-	right: NativeReplacementOptions,
+	left: ReplaceRegularFileOptions,
+	right: ReplaceRegularFileOptions,
 ) {
 	return (
-		left.maximumBytes === right.maximumBytes &&
-		left.operationId === right.operationId &&
+		left.maximum_bytes === right.maximum_bytes &&
+		left.operation_id === right.operation_id &&
 		left.path === right.path &&
 		bytes_match(left.expected, right.expected) &&
 		bytes_match(left.replacement, right.replacement)
 	);
 }
 
-function make_native_controller(replacement_gate?: NativeReplacementGate): NativeController {
+function make_bounded_store_controller(replacement_gate?: ReplacementGate): BoundedStoreController {
 	const changed_results = { value: 0 };
-	const close_attempts = { value: 0 };
 	const finalization_attempts = { value: 0 };
 	const load_attempts = { value: 0 };
 	const replace_attempts = { value: 0 };
 	const write_attempts = { value: 0 };
-	const receipts = new Map<string, NativeReplacementOptions>();
+	const receipts = new Map<string, ReplaceRegularFileOptions>();
 	const replacement_lock = Semaphore.makeUnsafe(1);
 	let preflight_race_gate: PreflightRaceGate | undefined;
 	let preflight_read_attempts = 0;
 	let remaining_changed_results = 0;
 	let remaining_finalization_failures = 0;
 
-	class FakeNativeBoundedRegularFileStore {
-		constructor(
-			readonly root: string,
-			_receipt_authentication_key: Uint8Array,
-		) {}
+	const MakeStore = (root: string): typeof BoundedRegularFileStore.Service => ({
+		FinalizeRegularFileReplacement: (options) =>
+			Effect.gen(function* () {
+				finalization_attempts.value += 1;
 
-		authorizeRoot(candidate_root: string) {
-			return Promise.resolve(candidate_root === this.root);
-		}
+				if (remaining_finalization_failures > 0) {
+					remaining_finalization_failures -= 1;
 
-		close() {
-			close_attempts.value += 1;
-		}
-
-		async finalizeRegularFileReplacement(options: NativeReplacementOptions) {
-			finalization_attempts.value += 1;
-
-			if (remaining_finalization_failures > 0) {
-				remaining_finalization_failures -= 1;
-
-				throw new Error("deterministic finalization failure");
-			}
-
-			const receipt = receipts.get(options.operationId);
-
-			if (receipt === undefined) {
-				const target = new Uint8Array(await readFile(join(this.root, options.path)));
-
-				if (!bytes_match(target, options.replacement)) {
-					throw new Error("replacement receipt is missing before publication");
+					return yield* new BoundedRegularFileStoreError({
+						cause: new Error("deterministic finalization failure"),
+						operation: "finalize",
+						path: options.path,
+					});
 				}
 
-				return;
-			}
+				const receipt = receipts.get(options.operation_id);
 
-			if (!replacement_options_match(receipt, options)) {
-				throw new Error("replacement receipt intent changed");
-			}
-
-			receipts.delete(options.operationId);
-		}
-
-		async readRegularFile(path: string, maximum_bytes: number) {
-			if (preflight_race_gate) {
-				preflight_read_attempts += 1;
-				const attempt = preflight_read_attempts;
-
-				if (attempt === 1) {
-					await Effect.runPromise(
-						Deferred.succeed(preflight_race_gate.first_read_started, undefined),
+				if (receipt === undefined) {
+					const target = yield* Effect.tryPromise(() =>
+						readFile(join(root, options.path)),
 					);
-					await Effect.runPromise(
-						Deferred.await(preflight_race_gate.continue_first_read),
-					);
+
+					if (!bytes_match(target, options.replacement)) {
+						return yield* new BoundedRegularFileStoreError({
+							cause: new Error("replacement receipt is missing before publication"),
+							operation: "finalize",
+							path: options.path,
+						});
+					}
+
+					return;
 				}
 
-				if (attempt === 2) {
-					await Effect.runPromise(
-						Deferred.succeed(preflight_race_gate.second_read_started, undefined),
-					);
-					await Effect.runPromise(
-						Deferred.await(preflight_race_gate.continue_second_read),
-					);
+				if (!replacement_options_match(receipt, options)) {
+					return yield* new BoundedRegularFileStoreError({
+						cause: new Error("replacement receipt intent changed"),
+						operation: "finalize",
+						path: options.path,
+					});
 				}
-			}
 
-			const bytes = new Uint8Array(await readFile(join(this.root, path)));
+				receipts.delete(options.operation_id);
+			}).pipe(
+				Effect.mapError((cause) =>
+					cause instanceof BoundedRegularFileStoreError
+						? cause
+						: new BoundedRegularFileStoreError({
+								cause,
+								operation: "finalize",
+								path: options.path,
+							}),
+				),
+			),
+		ReadRegularFile: (path, maximum_bytes) =>
+			Effect.gen(function* () {
+				if (preflight_race_gate) {
+					preflight_read_attempts += 1;
+					const attempt = preflight_read_attempts;
 
-			if (bytes.byteLength > maximum_bytes) throw new Error("file exceeds maximum");
+					if (attempt === 1) {
+						yield* Deferred.succeed(preflight_race_gate.first_read_started, undefined);
+						yield* Deferred.await(preflight_race_gate.continue_first_read);
+					}
 
-			return bytes;
-		}
+					if (attempt === 2) {
+						yield* Deferred.succeed(preflight_race_gate.second_read_started, undefined);
+						yield* Deferred.await(preflight_race_gate.continue_second_read);
+					}
+				}
 
-		async replaceRegularFile(options: NativeReplacementOptions) {
-			replace_attempts.value += 1;
-			const attempt = replace_attempts.value;
+				const bytes = yield* Effect.tryPromise(() => readFile(join(root, path)));
 
-			if (replacement_gate && attempt === 1) {
-				await Effect.runPromise(
-					Deferred.succeed(replacement_gate.first_started, undefined),
-				);
-				await Effect.runPromise(Deferred.await(replacement_gate.continue_first));
-			}
+				if (bytes.byteLength > maximum_bytes) {
+					return yield* new BoundedRegularFileStoreError({
+						cause: new Error("file exceeds maximum"),
+						operation: "read",
+						path,
+					});
+				}
 
-			if (replacement_gate && attempt === 2) {
-				await Effect.runPromise(
-					Deferred.succeed(replacement_gate.second_started, undefined),
-				);
-				await Effect.runPromise(Deferred.await(replacement_gate.continue_second));
-			}
+				return bytes;
+			}).pipe(
+				Effect.mapError((cause) =>
+					cause instanceof BoundedRegularFileStoreError
+						? cause
+						: new BoundedRegularFileStoreError({ cause, operation: "read", path }),
+				),
+			),
+		ReplaceRegularFile: (options) =>
+			Effect.gen(function* () {
+				replace_attempts.value += 1;
+				const attempt = replace_attempts.value;
 
-			const result = await Effect.runPromise(
-				replacement_lock.withPermit(
-					Effect.promise(async () => {
-						const receipt = receipts.get(options.operationId);
+				if (replacement_gate && attempt === 1) {
+					yield* Deferred.succeed(replacement_gate.first_started, undefined);
+					yield* Deferred.await(replacement_gate.continue_first);
+				}
+
+				if (replacement_gate && attempt === 2) {
+					yield* Deferred.succeed(replacement_gate.second_started, undefined);
+					yield* Deferred.await(replacement_gate.continue_second);
+				}
+
+				const result = yield* replacement_lock.withPermit(
+					Effect.gen(function* () {
+						const receipt = receipts.get(options.operation_id);
 
 						if (receipt !== undefined) {
 							if (!replacement_options_match(receipt, options)) {
-								throw new Error("replacement operation intent changed");
+								return yield* new BoundedRegularFileStoreError({
+									cause: new Error("replacement operation intent changed"),
+									operation: "replace",
+									path: options.path,
+								});
 							}
 
-							return "AlreadyReplaced" as const;
+							return { _tag: "AlreadyReplaced" } as const;
 						}
 
 						if (remaining_changed_results > 0) {
 							remaining_changed_results -= 1;
 
-							return "Changed" as const;
+							return { _tag: "Changed" } as const;
 						}
 
-						const target = join(this.root, options.path);
-						const current = new Uint8Array(await readFile(target));
+						const target = join(root, options.path);
+						const current = yield* Effect.tryPromise(() => readFile(target));
 						const matches =
 							current.byteLength === options.expected.byteLength &&
 							current.every((value, index) => value === options.expected[index]);
 
-						if (!matches || options.replacement.byteLength > options.maximumBytes) {
-							return "Changed" as const;
+						if (!matches || options.replacement.byteLength > options.maximum_bytes) {
+							return { _tag: "Changed" } as const;
 						}
 
 						write_attempts.value += 1;
-						await writeFile(target, options.replacement);
-						receipts.set(options.operationId, {
+						yield* Effect.tryPromise(() => writeFile(target, options.replacement));
+						receipts.set(options.operation_id, {
 							...options,
 							expected: new Uint8Array(options.expected),
 							replacement: new Uint8Array(options.replacement),
 						});
 
-						return "Replaced" as const;
+						return { _tag: "Replaced" } as const;
 					}),
+				);
+				if (result._tag === "Changed") {
+					changed_results.value += 1;
+				}
+
+				if (result._tag === "Replaced" && preflight_race_gate) {
+					yield* Deferred.succeed(preflight_race_gate.published, undefined);
+					yield* Deferred.await(preflight_race_gate.continue_publisher);
+				}
+
+				return result;
+			}).pipe(
+				Effect.mapError(
+					(cause) =>
+						new BoundedRegularFileStoreError({
+							cause,
+							operation: "replace",
+							path: options.path,
+						}),
 				),
-			);
-			if (result === "Changed") {
-				changed_results.value += 1;
-			}
-
-			if (result === "Replaced" && preflight_race_gate) {
-				await Effect.runPromise(Deferred.succeed(preflight_race_gate.published, undefined));
-				await Effect.runPromise(Deferred.await(preflight_race_gate.continue_publisher));
-			}
-
-			return result;
-		}
-	}
+			),
+	});
 
 	return {
 		arm_preflight_race: (gate) => {
@@ -358,7 +367,6 @@ function make_native_controller(replacement_gate?: NativeReplacementGate): Nativ
 			remaining_changed_results += 1;
 		},
 		changed_results,
-		close_attempts,
 		finalization_attempts,
 		load_attempts,
 		replace_attempts,
@@ -366,18 +374,9 @@ function make_native_controller(replacement_gate?: NativeReplacementGate): Nativ
 		fail_next_finalization: () => {
 			remaining_finalization_failures += 1;
 		},
-		load_native_module: () => {
+		MakeStore: (root) => {
 			load_attempts.value += 1;
-
-			return {
-				NativeBoundedRegularFileStore: FakeNativeBoundedRegularFileStore,
-				getNativeBuildDescriptor: () => ({
-					architecture: "x86_64",
-					operatingSystem: "windows",
-					target: "x86_64-pc-windows-msvc",
-					testHooksEnabled: false,
-				}),
-			};
+			return MakeStore(root);
 		},
 	};
 }
@@ -413,20 +412,20 @@ function make_inert_scheduler_layer() {
 function make_runtime(
 	database_path: string,
 	root: string,
-	controller?: NativeController,
+	controller?: BoundedStoreController,
 	instance_id = "workspace_file_service_composition",
 	authority_proof_gate?: AuthorityProofGate,
 ) {
 	const registry =
 		controller === undefined
 			? undefined
-			: make_workspace_bounded_regular_file_store_registry_layer(
-					[{ root, workspace_id: "workspace_file" }],
+			: MakeTestWorkspaceBoundedRegularFileStoreRegistryLayer([
 					{
-						load_native_module: controller.load_native_module,
-						receipt_authentication_key,
+						root,
+						store: controller.MakeStore(root),
+						workspace_id: "workspace_file",
 					},
-				).pipe(Layer.provide(NodeFileSystem.layer));
+				]);
 	const workspace_bounded_regular_file_store_registry =
 		registry === undefined || authority_proof_gate === undefined
 			? registry
@@ -703,7 +702,7 @@ afterEach(async () => {
 describe("WorkspaceFileService production composition", () => {
 	it("reads and replaces through SQLite-backed services while retaining the private preimage", async () => {
 		const { database_path, root } = await make_workspace();
-		const controller = make_native_controller();
+		const controller = make_bounded_store_controller();
 		const runtime = make_runtime(database_path, root, controller);
 
 		try {
@@ -741,19 +740,17 @@ describe("WorkspaceFileService production composition", () => {
 		} finally {
 			await runtime.dispose();
 		}
-
-		expect(controller.close_attempts.value).toBe(1);
 	});
 
 	it("converges concurrent exact replacements across runtimes without publishing twice", async () => {
 		const { database_path, root } = await make_workspace();
-		const replacement_gate: NativeReplacementGate = {
+		const replacement_gate: ReplacementGate = {
 			continue_first: await Effect.runPromise(Deferred.make<void>()),
 			continue_second: await Effect.runPromise(Deferred.make<void>()),
 			first_started: await Effect.runPromise(Deferred.make<void>()),
 			second_started: await Effect.runPromise(Deferred.make<void>()),
 		};
-		const controller = make_native_controller(replacement_gate);
+		const controller = make_bounded_store_controller(replacement_gate);
 		const first_runtime = make_runtime(
 			database_path,
 			root,
@@ -821,8 +818,6 @@ describe("WorkspaceFileService production composition", () => {
 			await Effect.runPromise(Deferred.succeed(replacement_gate.continue_second, undefined));
 			await Promise.all([first_runtime.dispose(), second_runtime.dispose()]);
 		}
-
-		expect(controller.close_attempts.value).toBe(2);
 	});
 
 	it("preserves an exact replacement published during a retry preflight", async () => {
@@ -835,7 +830,7 @@ describe("WorkspaceFileService production composition", () => {
 			published: await Effect.runPromise(Deferred.make<void>()),
 			second_read_started: await Effect.runPromise(Deferred.make<void>()),
 		};
-		const controller = make_native_controller();
+		const controller = make_bounded_store_controller();
 		const first_runtime = make_runtime(
 			database_path,
 			root,
@@ -909,13 +904,11 @@ describe("WorkspaceFileService production composition", () => {
 			await Effect.runPromise(Deferred.succeed(preflight_gate.continue_publisher, undefined));
 			await Promise.all([first_runtime.dispose(), second_runtime.dispose()]);
 		}
-
-		expect(controller.close_attempts.value).toBe(2);
 	});
 
 	it("converges synchronized committed cleanup across runtime instances", async () => {
 		const { database_path, root } = await make_workspace();
-		const controller = make_native_controller();
+		const controller = make_bounded_store_controller();
 		const first_runtime = make_runtime(
 			database_path,
 			root,
@@ -984,8 +977,6 @@ describe("WorkspaceFileService production composition", () => {
 			await first_runtime.runPromise(RemoveEvidenceFailure()).catch(() => undefined);
 			await Promise.all([first_runtime.dispose(), second_runtime.dispose()]);
 		}
-
-		expect(controller.close_attempts.value).toBe(2);
 	});
 
 	it("fails closed when thread erasure wins during the authority root proof", async () => {
@@ -994,7 +985,7 @@ describe("WorkspaceFileService production composition", () => {
 			continue_proof: await Effect.runPromise(Deferred.make<void>()),
 			proof_started: await Effect.runPromise(Deferred.make<void>()),
 		};
-		const controller = make_native_controller();
+		const controller = make_bounded_store_controller();
 		const replacing_runtime = make_runtime(
 			database_path,
 			root,
@@ -1043,13 +1034,11 @@ describe("WorkspaceFileService production composition", () => {
 			);
 			await Promise.all([replacing_runtime.dispose(), erasing_runtime.dispose()]);
 		}
-
-		expect(controller.close_attempts.value).toBe(2);
 	});
 
 	it("settles an exact committed retry after restart without reopening the terminal run", async () => {
 		const { database_path, root } = await make_workspace();
-		const controller = make_native_controller();
+		const controller = make_bounded_store_controller();
 		const first_runtime = make_runtime(database_path, root, controller, "workspace_file_first");
 		let accepted_event: unknown;
 
@@ -1061,7 +1050,6 @@ describe("WorkspaceFileService production composition", () => {
 			await first_runtime.dispose();
 		}
 
-		expect(controller.close_attempts.value).toBe(1);
 		expect(controller.load_attempts.value).toBe(1);
 
 		const second_runtime = make_runtime(
@@ -1085,13 +1073,11 @@ describe("WorkspaceFileService production composition", () => {
 		} finally {
 			await second_runtime.dispose();
 		}
-
-		expect(controller.close_attempts.value).toBe(2);
 	});
 
-	it("resumes finalization after native publication without issuing another replacement", async () => {
+	it("resumes finalization after publication without issuing another replacement", async () => {
 		const { database_path, root } = await make_workspace();
-		const controller = make_native_controller();
+		const controller = make_bounded_store_controller();
 		const first_runtime = make_runtime(
 			database_path,
 			root,
@@ -1111,7 +1097,6 @@ describe("WorkspaceFileService production composition", () => {
 			await first_runtime.dispose();
 		}
 
-		expect(controller.close_attempts.value).toBe(1);
 		expect(controller.load_attempts.value).toBe(1);
 
 		const second_runtime = make_runtime(
@@ -1142,13 +1127,11 @@ describe("WorkspaceFileService production composition", () => {
 		} finally {
 			await second_runtime.dispose();
 		}
-
-		expect(controller.close_attempts.value).toBe(2);
 	});
 
 	it("persists changed as terminal and keeps its exact retry side-effect free after restart", async () => {
 		const { database_path, root } = await make_workspace();
-		const controller = make_native_controller();
+		const controller = make_bounded_store_controller();
 		const first_runtime = make_runtime(
 			database_path,
 			root,
@@ -1168,7 +1151,6 @@ describe("WorkspaceFileService production composition", () => {
 			await first_runtime.dispose();
 		}
 
-		expect(controller.close_attempts.value).toBe(1);
 		expect(controller.load_attempts.value).toBe(1);
 
 		const second_runtime = make_runtime(
@@ -1218,13 +1200,11 @@ describe("WorkspaceFileService production composition", () => {
 		} finally {
 			await second_runtime.dispose();
 		}
-
-		expect(controller.close_attempts.value).toBe(2);
 	});
 
 	it("reviews and rolls back through the pinned source authority after its run terminates", async () => {
 		const { database_path, root } = await make_workspace();
-		const controller = make_native_controller();
+		const controller = make_bounded_store_controller();
 		const first_runtime = make_runtime(
 			database_path,
 			root,
@@ -1302,13 +1282,12 @@ describe("WorkspaceFileService production composition", () => {
 			await second_runtime.dispose();
 		}
 
-		expect(controller.close_attempts.value).toBe(2);
 		expect(controller.load_attempts.value).toBe(2);
 	});
 
 	it("recovers an applied rollback after restart without replacing the file again", async () => {
 		const { database_path, root } = await make_workspace();
-		const controller = make_native_controller();
+		const controller = make_bounded_store_controller();
 		const first_runtime = make_runtime(
 			database_path,
 			root,
@@ -1359,13 +1338,12 @@ describe("WorkspaceFileService production composition", () => {
 			await second_runtime.dispose();
 		}
 
-		expect(controller.close_attempts.value).toBe(2);
 		expect(controller.load_attempts.value).toBe(2);
 	});
 
 	it("recovers committed rollback cleanup after snapshot consumption aborts", async () => {
 		const { database_path, root } = await make_workspace();
-		const controller = make_native_controller();
+		const controller = make_bounded_store_controller();
 		const first_runtime = make_runtime(
 			database_path,
 			root,
@@ -1456,13 +1434,12 @@ describe("WorkspaceFileService production composition", () => {
 			await second_runtime.dispose();
 		}
 
-		expect(controller.close_attempts.value).toBe(2);
 		expect(controller.load_attempts.value).toBe(2);
 	});
 
-	it("keeps a native-rejected rollback terminal while erasing its staged payload", async () => {
+	it("keeps a store-rejected rollback terminal while erasing its staged payload", async () => {
 		const { database_path, root } = await make_workspace();
-		const controller = make_native_controller();
+		const controller = make_bounded_store_controller();
 		const first_runtime = make_runtime(
 			database_path,
 			root,
@@ -1529,7 +1506,6 @@ describe("WorkspaceFileService production composition", () => {
 			await second_runtime.dispose();
 		}
 
-		expect(controller.close_attempts.value).toBe(2);
 		expect(controller.load_attempts.value).toBe(2);
 	});
 

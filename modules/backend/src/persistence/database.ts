@@ -4,6 +4,8 @@ import { migrate } from "drizzle-orm/effect-sqlite-node/migrator";
 
 import * as SQLiteNodeDrizzle from "drizzle-orm/effect-sqlite-node";
 
+export type DatabaseClient = SQLiteNodeDrizzle.EffectSQLiteNodeDatabase;
+
 export interface DatabaseOptions {
 	readonly database_path: string;
 	readonly migrations_path: string;
@@ -12,7 +14,7 @@ export interface DatabaseOptions {
 export class Database extends Context.Service<
 	Database,
 	{
-		readonly client: SQLiteNodeDrizzle.EffectSQLiteNodeDatabase;
+		readonly client: DatabaseClient;
 	}
 >()("Artisan/Database") {}
 

@@ -1,7 +1,7 @@
 import { lookup } from "node:dns/promises";
 import { isIP } from "node:net";
 
-import { Effect, Layer, Option, Ref } from "effect";
+import { Clock, Effect, Layer, Option, Ref } from "effect";
 
 import {
 	RichLinkClock,
@@ -20,7 +20,7 @@ export interface InMemoryRichLinkCacheOptions {
 
 /** Provides wall-clock epoch milliseconds for production metadata caching. */
 export const RichLinkClockLive = Layer.succeed(RichLinkClock, {
-	Now: Effect.sync(() => Date.now()),
+	Now: Clock.currentTimeMillis,
 });
 
 /** Builds an isolated in-memory rich-link metadata cache. */

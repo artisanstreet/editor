@@ -1,4 +1,4 @@
-import { Cause, Effect, Fiber, Option, Schedule, Stream } from "effect";
+import { Cause, Deferred, Effect, Fiber, Option, Schedule, Stream } from "effect";
 import { describe, expect, it } from "vitest";
 
 import { ArtisanClientError } from "@artisan/transport";
@@ -1065,51 +1065,123 @@ describe("ArtisanClient over MessagePorts", () => {
 		}
 	});
 
-	it("fails the client before ACKing an event that cannot enter its bounded queue", async () => {
+	it("fails the client before ACKing an event that cannot enter a stalled Events observer", async () => {
 		const harness = await make_transport_test_harness({
 			client: { event_capacity: 1 },
 		});
 
 		try {
-			const error = Effect.runPromise(
-				harness.client.Errors.pipe(
-					Stream.take(1),
-					Stream.runCollect,
-					Effect.timeout("1 second"),
+			const output = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const hold = yield* Deferred.make<void>();
+						const started = yield* Deferred.make<void>();
+						const error = yield* harness.client.Errors.pipe(
+							Stream.take(1),
+							Stream.runCollect,
+							Effect.forkScoped,
+						);
+						const observer = yield* harness.client.Events.pipe(
+							Stream.runForEach(() =>
+								Deferred.succeed(started, undefined).pipe(
+									Effect.andThen(Deferred.await(hold)),
+								),
+							),
+							Effect.forkScoped,
+						);
+						yield* Effect.yieldNow;
+
+						yield* harness.client.Command({
+							command_id: "event_capacity_command_1",
+							payload: { title: "Queued event 1", type: "thread.create" },
+							thread_id: "event_capacity_thread_1",
+						});
+						yield* Deferred.await(started).pipe(Effect.timeout("1 second"));
+
+						let attempted_events = 1;
+						for (const index of [2, 3, 4, 5, 6, 7, 8]) {
+							if (error.pollUnsafe() !== undefined) break;
+
+							attempted_events = index;
+							yield* harness.client
+								.Command({
+									command_id: `event_capacity_command_${index}`,
+									payload: {
+										title: `Queued event ${index}`,
+										type: "thread.create",
+									},
+									thread_id: `event_capacity_thread_${index}`,
+								})
+								.pipe(Effect.timeout("1 second"), Effect.exit);
+							yield* Effect.yieldNow;
+						}
+						yield* Deferred.succeed(hold, undefined);
+
+						return {
+							attempted_events,
+							error: yield* Fiber.join(error),
+							observer_error: yield* Fiber.join(observer).pipe(Effect.flip),
+						};
+					}),
 				),
 			);
 
-			await Effect.runPromise(
-				harness.client
-					.Command({
-						command_id: "event_capacity_command_1",
-						payload: { title: "First queued event", type: "thread.create" },
-						thread_id: "event_capacity_thread_1",
-					})
-					.pipe(Effect.timeout("1 second")),
+			expect(output.error).toMatchObject([{ code: "event_overflow" }]);
+			expect(output.observer_error).toMatchObject({ code: "event_overflow" });
+			expect(harness.protocol_snapshot().acknowledgements.length).toBeLessThan(
+				output.attempted_events,
 			);
-			await Effect.runPromise(
-				harness.client
-					.Command({
-						command_id: "event_capacity_command_2",
-						payload: { title: "Overflowed event", type: "thread.create" },
-						thread_id: "event_capacity_thread_2",
-					})
-					.pipe(Effect.timeout("1 second")),
-			);
+		} finally {
+			await harness.dispose();
+		}
+	});
 
-			const disposed_error = await Effect.runPromise(
-				harness.client.ListThreads.pipe(Effect.flip, Effect.timeout("1 second")),
-			);
+	it("keeps transport live when no Events observer is attached", async () => {
+		const harness = await make_transport_test_harness({
+			client: { event_capacity: 1 },
+		});
 
-			expect(disposed_error).toMatchObject({ code: "event_overflow" });
-			expect([...(await error)]).toMatchObject([{ code: "event_overflow" }]);
-			expect(harness.protocol_snapshot().acknowledgements).toHaveLength(1);
-			expect(
+		try {
+			for (const index of [1, 2]) {
 				await Effect.runPromise(
-					harness.client.ListThreads.pipe(Effect.flip, Effect.timeout("1 second")),
+					harness.client.Command({
+						command_id: `unobserved_event_command_${index}`,
+						payload: { title: `Unobserved event ${index}`, type: "thread.create" },
+						thread_id: `unobserved_event_thread_${index}`,
+					}),
+				);
+			}
+
+			await wait_for(() => harness.protocol_snapshot().acknowledgements.length === 2);
+			expect(await Effect.runPromise(harness.client.ListThreads)).toHaveLength(2);
+			expect(await Effect.runPromise(harness.client.Cursors)).toMatchObject({
+				last_journal_sequence: 2,
+			});
+
+			const next_event = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const observer = yield* harness.client.Events.pipe(
+							Stream.take(1),
+							Stream.runCollect,
+							Effect.forkScoped,
+						);
+						yield* Effect.yieldNow;
+						yield* harness.client.Command({
+							command_id: "unobserved_event_command_3",
+							payload: {
+								title: "Observed only after subscribing",
+								type: "thread.create",
+							},
+							thread_id: "unobserved_event_thread_3",
+						});
+						return yield* Fiber.join(observer);
+					}),
 				),
-			).toMatchObject({ code: "disposed" });
+			);
+			expect([...next_event]).toMatchObject([
+				{ journal_sequence: 3, thread_id: "unobserved_event_thread_3" },
+			]);
 		} finally {
 			await harness.dispose();
 		}

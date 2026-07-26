@@ -2,6 +2,7 @@ node_modules/
 __pycache__/
 *.pyc
 .dist/
+.svelte-kit/
 modules/frontend/.svelte-kit/
 coverage/
 .env

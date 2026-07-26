@@ -28,6 +28,7 @@ import type { GraphLedger } from "./graph-ledger";
 import type { RawObservationLedger } from "./raw-observation-ledger";
 import type { RunTransitions } from "./run-transitions";
 import { PersistSurfaceProjection } from "../../surfaces/surface-projection";
+import { ApplyEngineObservation } from "../../conversation/index.ts";
 
 export interface RunLifecycle {
 	readonly activate_run: (
@@ -337,6 +338,12 @@ export function make_run_lifecycle(
 						run_id: run.run_id,
 						thread_id: group.thread_id,
 					});
+					yield* ApplyEngineObservation(transaction, observation, {
+						agent_id: run.agent_id,
+						occurred_at: projected_at,
+						run_id: run.run_id,
+						thread_id: group.thread_id,
+					}) as Effect.Effect<unknown, unknown, never>;
 
 					const updated_at = yield* metadata.Now;
 					const advanced = yield* transaction
@@ -496,6 +503,7 @@ export function make_run_lifecycle(
 			);
 
 			yield* ledger.publish_events(events);
+			yield* context.notifier.Publish(events.at(-1)?.journal_sequence ?? 0);
 
 			return events;
 		}).pipe(Effect.mapError(normalize_graph_error));

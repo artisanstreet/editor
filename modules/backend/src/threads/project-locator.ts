@@ -113,44 +113,49 @@ const ResolveLocation = (location: string) => {
 		);
 	}
 
-	return Effect.tryPromise({
-		try: async () => {
-			let candidate = resolve(location);
+	const ResolveCandidate = (candidate: string): Effect.Effect<string, ProjectLocatorError> =>
+		Effect.tryPromise({
+			try: () => realpath(candidate),
+			catch: (cause) => cause,
+		}).pipe(
+			Effect.flatMap((canonical_path) =>
+				Effect.tryPromise({
+					try: () => stat(canonical_path),
+					catch: (cause) => cause,
+				}).pipe(
+					Effect.map((metadata) =>
+						metadata.isDirectory() ? canonical_path : dirname(canonical_path),
+					),
+				),
+			),
+			Effect.catch((cause) => {
+				const parent = dirname(candidate);
+				return is_missing_path_error(cause) && parent !== candidate
+					? ResolveCandidate(parent)
+					: Effect.fail(project_locator_error(location, "normalize", cause));
+			}),
+		);
 
-			while (true) {
-				try {
-					const canonical_path = await realpath(candidate);
-					const metadata = await stat(canonical_path);
-
-					return metadata.isDirectory() ? canonical_path : dirname(canonical_path);
-				} catch (cause) {
-					const parent = dirname(candidate);
-
-					if (!is_missing_path_error(cause) || parent === candidate) {
-						throw cause;
-					}
-
-					candidate = parent;
-				}
-			}
-		},
-		catch: (cause) => project_locator_error(location, "normalize", cause),
-	});
+	return ResolveCandidate(resolve(location));
 };
 
 const ResolveGitRoot = (location: string) =>
-	Effect.tryPromise({
-		try: async () => {
-			const canonical_path = await realpath(location);
-			const metadata = await stat(canonical_path);
-
-			if (!metadata.isDirectory()) {
-				throw new Error("Git worktree root was not a directory");
-			}
-
-			return canonical_path;
-		},
-		catch: (cause) => project_locator_error(location, "normalize", cause),
+	Effect.gen(function* () {
+		const canonical_path = yield* Effect.tryPromise({
+			try: () => realpath(location),
+			catch: (cause) => project_locator_error(location, "normalize", cause),
+		});
+		const metadata = yield* Effect.tryPromise({
+			try: () => stat(canonical_path),
+			catch: (cause) => project_locator_error(location, "normalize", cause),
+		});
+		if (!metadata.isDirectory())
+			return yield* project_locator_error(
+				location,
+				"normalize",
+				new Error("Git worktree root was not a directory"),
+			);
+		return canonical_path;
 	});
 
 /** Builds a Node locator that prefers Git worktree roots over local directories. */

@@ -84,7 +84,7 @@ describe("Transcript process replay", () => {
 					.pipe(Effect.exit);
 
 				return { invocation, write };
-			}).pipe(Effect.provide(replay.Layer)),
+			}).pipe(Effect.scoped, Effect.provide(replay.Layer)),
 		);
 
 		expect(error_from(invalid)).toBeDefined();
@@ -158,7 +158,7 @@ describe("Transcript process replay", () => {
 				const handle = yield* factory.Spawn({ args: [], command: "codex" });
 
 				return yield* handle.Exit;
-			}).pipe(Effect.provide(crash_replay.Layer)),
+			}).pipe(Effect.scoped, Effect.provide(crash_replay.Layer)),
 		);
 		const eof_exit = await Effect.runPromise(
 			Effect.gen(function* () {
@@ -166,7 +166,7 @@ describe("Transcript process replay", () => {
 				const handle = yield* factory.Spawn({ args: [], command: "codex" });
 
 				return yield* handle.Exit;
-			}).pipe(Effect.provide(eof_replay.Layer)),
+			}).pipe(Effect.scoped, Effect.provide(eof_replay.Layer)),
 		);
 		const diagnostics = await Effect.runPromise(
 			Effect.scoped(

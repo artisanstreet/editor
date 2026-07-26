@@ -1,10 +1,9 @@
-<script lang="ts">
+<script lang="ts" effect>
 	import { Button } from "$lib/components/ui/button/index.js";
 	import LayoutSidebar from "@tabler/icons-svelte/icons/layout-sidebar";
 	import { cn } from "$lib/utils.js";
 	import { play } from "cuelume";
-	import { Effect, type Fiber } from "effect";
-	import { onDestroy } from "svelte";
+	import { Effect, Fiber } from "effect";
 	import type { ComponentProps } from "svelte";
 	import { use_sidebar } from "$lib/components/ui/sidebar/context.svelte.js";
 
@@ -96,7 +95,7 @@
 		is_stretching = false;
 	});
 
-	function replay_velocity_stretch() {
+	const ReplayVelocityStretch = Effect.gen(function* () {
 		const will_open =
 			sidebar.motion_phase === "children-exiting"
 				? true
@@ -114,9 +113,9 @@
 		stretch_distance = 2.5 + velocity * 2.5;
 		is_stretching = false;
 
-		stretch_fiber?.interruptUnsafe();
-		stretch_fiber = Effect.runFork(play_stretch_animation);
-	}
+		if (stretch_fiber !== undefined) yield* Fiber.interrupt(stretch_fiber);
+		stretch_fiber = yield* Effect.forkScoped(play_stretch_animation);
+	});
 
 	const queue_sidebar_collapse = Effect.gen(function* () {
 		sidebar.set_motion_phase("children-exiting");
@@ -128,8 +127,8 @@
 		sidebar.set_motion_phase("idle");
 	});
 
-	function toggle_sidebar() {
-		collapse_fiber?.interruptUnsafe();
+	const ToggleSidebar = Effect.gen(function* () {
+		if (collapse_fiber !== undefined) yield* Fiber.interrupt(collapse_fiber);
 
 		if (sidebar.is_mobile) {
 			sidebar.toggle();
@@ -144,17 +143,18 @@
 		}
 
 		if (sidebar.open) {
-			collapse_fiber = Effect.runFork(queue_sidebar_collapse);
+			collapse_fiber = yield* Effect.forkScoped(queue_sidebar_collapse);
 			return;
 		}
 
 		sidebar.set_motion_phase("idle");
 		sidebar.set_open(true);
-	}
+	});
 
-	onDestroy(() => {
-		stretch_fiber?.interruptUnsafe();
-		collapse_fiber?.interruptUnsafe();
+	const HandleClick = (event: MouseEvent) => Effect.gen(function* () {
+		onclick?.(event);
+		yield* ReplayVelocityStretch;
+		yield* ToggleSidebar;
 	});
 </script>
 
@@ -169,11 +169,7 @@
 	data-stretching={is_stretching}
 	data-stretch-direction={stretch_direction}
 	style={`--sidebar-stretch-x: ${stretch_x.toFixed(3)}; --sidebar-stretch-y: ${stretch_y.toFixed(3)}; --sidebar-stretch-distance: ${stretch_distance.toFixed(2)}px; ${style ?? ""}`}
-	onclick={(event) => {
-		onclick?.(event);
-		replay_velocity_stretch();
-		toggle_sidebar();
-	}}
+	onclick={yield* HandleClick(event)}
 	{...rest_props}
 >
 	{#if children}

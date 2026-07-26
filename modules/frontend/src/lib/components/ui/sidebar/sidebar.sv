@@ -49,7 +49,7 @@
 				"t-panel-slide-x bg-background text-foreground inset-y-2 left-0 h-auto w-[min(var(--sidebar-width),calc(100vw-0.5rem))] rounded-l-none rounded-r-2xl border-0 p-0 card",
 				class_name
 			)}
-			closeButtonClass="top-2 right-2 size-10 rounded-full bg-foreground/5 text-muted-foreground card hover:text-foreground"
+			closeButtonClass="top-2 right-2 size-10 rounded-full bg-surface-125 text-muted-foreground card hover:text-foreground dark:bg-surface-900"
 			onCloseButtonClick={() => play("toggle")}
 			style="--sidebar-width: {sidebar_width_mobile};"
 			{side}

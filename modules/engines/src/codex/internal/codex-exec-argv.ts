@@ -9,6 +9,7 @@ export function MakeCodexExecSpawn(
 	input: EngineOpenInput,
 	executable: string,
 	executable_args: ReadonlyArray<string>,
+	image_paths: ReadonlyArray<string> = [],
 ) {
 	return Effect.gen(function* () {
 		if (input._tag === "resume") {
@@ -27,6 +28,7 @@ export function MakeCodexExecSpawn(
 			"--cd",
 			input.working_directory,
 			...(input.model === undefined ? [] : ["--model", input.model]),
+			...image_paths.flatMap((path) => ["--image", path]),
 			...permission_args,
 			"-",
 		];

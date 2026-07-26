@@ -1,10 +1,10 @@
-import { randomUUID } from "node:crypto";
 import { basename, extname } from "node:path";
 
 import { Context, Data, Effect, Layer, Option, Semaphore } from "effect";
 
 import type { EngineGlobalGuidance } from "@artisan/engines";
 import { global_guidance_maximum_bytes } from "@artisan/protocol";
+import { SnowflakeId } from "@artisan/protocol";
 import type {
 	GlobalGuidanceCandidate,
 	GlobalGuidanceDriftResolutionRequest,
@@ -189,11 +189,11 @@ function provider_state_matches(
 		: discovery._tag === "Present" && discovery.hash === expected.hash;
 }
 
-function backup_name(label: string, path: string) {
+function backup_name(label: string, path: string, id: string) {
 	const extension = extname(path);
 	const stem = basename(path, extension).replace(/[^a-zA-Z0-9._-]/g, "_");
 
-	return `${label}-${stem}-${randomUUID()}${extension || ".md"}`;
+	return `${label}-${stem}-${id}${extension || ".md"}`;
 }
 
 function guidance_file_error_code(error: GuidanceFileStoreFailure) {
@@ -229,6 +229,7 @@ export function make_global_guidance_service_layer(options: GlobalGuidanceServic
 			const providers = yield* GuidanceProviderRegistry;
 			const repository = yield* GlobalGuidanceRepository;
 			const lock = yield* Semaphore.make(1);
+			const snowflake_id = yield* SnowflakeId;
 
 			const ReadCanonical = files.Read(options.canonical_path).pipe(
 				Effect.flatMap(
@@ -311,7 +312,11 @@ export function make_global_guidance_service_layer(options: GlobalGuidanceServic
 					}
 
 					const replacement = yield* files.ReplaceAtomic({
-						backup_name: backup_name(label, options.canonical_path),
+						backup_name: backup_name(
+							label,
+							options.canonical_path,
+							yield* snowflake_id.Make("backup"),
+						),
 						backups_directory: options.backups_directory,
 						content: next.content,
 						...(Option.isSome(observed)
@@ -497,7 +502,11 @@ export function make_global_guidance_service_layer(options: GlobalGuidanceServic
 
 					if (discovery._tag === "Absent" || discovery.hash !== canonical.content_hash) {
 						const replacement = yield* files.ReplaceAtomic({
-							backup_name: backup_name(adapter.provider, discovery.path),
+							backup_name: backup_name(
+								adapter.provider,
+								discovery.path,
+								yield* snowflake_id.Make("backup"),
+							),
 							backups_directory: options.backups_directory,
 							content: canonical.content,
 							...(discovery._tag === "Present"

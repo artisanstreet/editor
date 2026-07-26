@@ -1,58 +1,46 @@
 import { contextBridge, ipcRenderer } from "electron";
+import { Effect, Schema } from "effect";
 
-import { DesktopSessionConnectionType } from "@artisan/transport/desktop-session";
+import { ProjectRef } from "@artisan/protocol";
 
-const request_channel = "artisan:request-connection";
 const identity_channel = "artisan:desktop-identity";
 const activity_channel = "artisan:desktop-activity";
-const connection_channel = "artisan:connection";
-const renderer_window = globalThis as typeof globalThis & {
-	readonly location: { readonly origin: string };
-	readonly postMessage: (
-		message: unknown,
-		target_origin: string,
-		transfer: ReadonlyArray<object>,
-	) => void;
-};
+const project_picker_channel = "artisan:select-project-directory";
 
-function connection_message(
-	value: unknown,
-): { readonly generation: number; readonly kind: string } | undefined {
-	if (typeof value !== "object" || value === null) {
-		return undefined;
-	}
-
-	const candidate = value as { readonly generation?: unknown; readonly kind?: unknown };
-
-	return typeof candidate.kind === "string" && typeof candidate.generation === "number"
-		? { generation: candidate.generation, kind: candidate.kind }
-		: undefined;
-}
-
-/** Forwards transferred ports into main world without exposing Electron's IPC surface. */
-ipcRenderer.on(connection_channel, (event, message: unknown) => {
-	const connection = connection_message(message);
-
-	if (
-		connection === undefined ||
-		connection.kind !== "artisan:connection" ||
-		!Number.isSafeInteger(connection.generation) ||
-		connection.generation < 1 ||
-		event.ports.length !== 2
-	) {
-		return;
-	}
-
-	renderer_window.postMessage(
-		{ generation: connection.generation, type: DesktopSessionConnectionType },
-		renderer_window.location.origin,
-		event.ports,
-	);
-});
+/** The contextBridge is the single browser-Promise adaptation boundary. */
+const RunBridge = <A, E>(program: Effect.Effect<A, E>): Promise<A> => Effect.runPromise(program);
 
 contextBridge.exposeInMainWorld("artisanDesktop", {
-	identity: () => ipcRenderer.invoke(identity_channel),
-	requestConnection: () => ipcRenderer.invoke(request_channel).then(() => undefined),
+	forgeWebSocketEndpoint: process.argv
+		.find((argument) => argument.startsWith("--artisan-forge-ws="))
+		?.slice("--artisan-forge-ws=".length),
+	identity: () =>
+		RunBridge(
+			Effect.tryPromise({
+				try: () => ipcRenderer.invoke(identity_channel),
+				catch: (cause) => cause,
+			}),
+		),
+	selectProjectDirectory: () =>
+		RunBridge(
+			Effect.tryPromise({
+				try: () => ipcRenderer.invoke(project_picker_channel),
+				catch: (cause) => cause,
+			}).pipe(
+				Effect.flatMap((project) =>
+					project === undefined
+						? Effect.succeed(undefined)
+						: Schema.decodeUnknownEffect(ProjectRef, {
+								onExcessProperty: "error",
+							})(project),
+				),
+			),
+		),
 	setWorking: (working: boolean) =>
-		ipcRenderer.invoke(activity_channel, working).then(() => undefined),
+		RunBridge(
+			Effect.tryPromise({
+				try: () => ipcRenderer.invoke(activity_channel, working),
+				catch: (cause) => cause,
+			}).pipe(Effect.asVoid),
+		),
 });

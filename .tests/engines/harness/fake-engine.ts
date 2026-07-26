@@ -315,6 +315,8 @@ function open_fake_run(
 									...base,
 									_tag: "agent_message_delta" as const,
 									delta: command.text,
+									item_id: `message:${command.command_id}`,
+									phase: "unspecified" as const,
 									turn_id: command.command_id,
 								}
 							: command._tag === "respond_approval"
@@ -327,7 +329,9 @@ function open_fake_run(
 								: {
 										...base,
 										_tag: "agent_message_completed" as const,
+										item_id: `message:${command.command_id}`,
 										message: Object.values(command.answers).flat().join("\n"),
+										phase: "final" as const,
 										turn_id:
 											Object.keys(command.answers)[0] ?? command.command_id,
 									};

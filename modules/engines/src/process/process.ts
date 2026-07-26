@@ -2,9 +2,10 @@ import { type ChildProcess, type ChildProcessWithoutNullStreams } from "node:chi
 import { randomUUID } from "node:crypto";
 import { fileURLToPath } from "node:url";
 
+import * as NodeFileSystem from "@effect/platform-node-shared/NodeFileSystem";
 import cross_spawn from "cross-spawn";
 
-import { Context, Effect, Layer } from "effect";
+import { Context, Deferred, Effect, FileSystem, Layer, Scope } from "effect";
 
 import { EngineProcessError } from "../engine";
 import {
@@ -44,49 +45,112 @@ export class EngineProcessFactory extends Context.Service<
 	{
 		readonly Spawn: (
 			input: EngineProcessSpawnInput,
-		) => Effect.Effect<EngineProcessHandle, EngineProcessError>;
+		) => Effect.Effect<EngineProcessHandle, EngineProcessError, Scope.Scope>;
 	}
 >()("Artisan/EngineProcessFactory") {}
+
+export interface EngineProcessEnvironmentService {
+	readonly environment: NodeJS.ProcessEnv;
+	readonly is_electron: boolean;
+	readonly node_executable: string;
+	readonly platform: NodeJS.Platform;
+	readonly MakeClaimToken: Effect.Effect<string>;
+	readonly windows_process_host_path: string;
+}
+
+export class EngineProcessEnvironment extends Context.Service<
+	EngineProcessEnvironment,
+	EngineProcessEnvironmentService
+>()("Artisan/EngineProcessEnvironment") {}
+
+export interface EngineProcessRuntime {
+	readonly environment: NodeJS.ProcessEnv;
+	readonly exec_path: string;
+	readonly is_electron: boolean;
+	readonly platform: NodeJS.Platform;
+}
+
+/** Resolves the process host configuration from an explicitly supplied runtime snapshot. */
+export const MakeEngineProcessEnvironmentLayer = (runtime: EngineProcessRuntime) =>
+	Layer.effect(
+		EngineProcessEnvironment,
+		Effect.gen(function* () {
+			const file_system = yield* FileSystem.FileSystem;
+			const configured_path = runtime.environment.ARTISAN_WINDOWS_PROCESS_HOST?.trim();
+			const built_path = fileURLToPath(new URL("./windows-process-host.js", import.meta.url));
+			const source_path = fileURLToPath(
+				new URL("./windows-process-host.ts", import.meta.url),
+			);
+			const built_exists =
+				configured_path === undefined || configured_path.length === 0
+					? yield* file_system.access(built_path).pipe(
+							Effect.as(true),
+							Effect.catch(() => Effect.succeed(false)),
+						)
+					: false;
+
+			return {
+				environment: { ...runtime.environment },
+				is_electron: runtime.is_electron,
+				node_executable: runtime.environment.ARTISAN_NODE_EXECUTABLE ?? runtime.exec_path,
+				platform: runtime.platform,
+				MakeClaimToken: Effect.sync(randomUUID),
+				windows_process_host_path:
+					configured_path && configured_path.length > 0
+						? configured_path
+						: built_exists
+							? built_path
+							: source_path,
+			};
+		}),
+	);
+
+/** Captures Node process configuration once at the executable composition boundary. */
+export const EngineProcessEnvironmentLive = Layer.unwrap(
+	Effect.sync(() =>
+		MakeEngineProcessEnvironmentLayer({
+			environment: { ...process.env },
+			exec_path: process.execPath,
+			is_electron: process.versions.electron !== undefined,
+			platform: process.platform,
+		}),
+	),
+).pipe(Layer.provide(NodeFileSystem.layer));
 
 function make_process_exit(
 	child: ChildProcessWithoutNullStreams,
 	release: () => void = () => undefined,
 ) {
+	const exit = Deferred.makeUnsafe<EngineProcessExit, EngineProcessError>();
 	let process_closed = false;
-	let settled = false;
-	let fail_exit = (_cause: unknown) => undefined;
-	const exit = new Promise<EngineProcessExit>((resolve, reject) => {
-		fail_exit = (cause) => {
-			if (settled) {
-				return;
-			}
+	const fail_exit = (cause: unknown) => {
+		const completed = Deferred.doneUnsafe(
+			exit,
+			Effect.fail(new EngineProcessError({ cause, operation: "exit" })),
+		);
 
-			settled = true;
+		if (completed) {
 			release();
-			reject(cause);
-		};
+		}
+	};
+	const close_exit = (code: number | null, signal: NodeJS.Signals | null) => {
+		process_closed = true;
 
-		child.once("error", fail_exit);
-		child.once("close", (code, signal) => {
-			process_closed = true;
-
-			if (settled) {
-				return;
-			}
-
-			settled = true;
+		if (Deferred.doneUnsafe(exit, Effect.succeed({ code, signal }))) {
 			release();
-			resolve({ code, signal });
-		});
-	});
+		}
+	};
 
-	exit.catch(() => undefined);
+	child.once("error", fail_exit);
+	child.once("close", close_exit);
 
 	return {
-		Exit: Effect.tryPromise({
-			try: () => exit,
-			catch: (cause) => new EngineProcessError({ cause, operation: "exit" }),
+		Cleanup: Effect.sync(() => {
+			child.off("error", fail_exit);
+			child.off("close", close_exit);
+			release();
 		}),
+		Exit: Deferred.await(exit),
 		Fail: fail_exit,
 		IsClosed: () => process_closed,
 	};
@@ -174,10 +238,6 @@ type WindowsProcessHost = ChildProcessWithoutNullStreams & {
 	readonly send: NonNullable<ChildProcess["send"]>;
 };
 
-const windows_process_host_path = fileURLToPath(
-	new URL("./windows-process-host.mjs", import.meta.url),
-);
-
 function is_windows_process_host_message(
 	message: unknown,
 ): message is WindowsProcessHostMessage | WindowsProcessHostError | WindowsProcessHostClaim {
@@ -189,18 +249,25 @@ function is_windows_process_host_message(
 	);
 }
 
-function spawn_windows_process(input: EngineProcessSpawnInput) {
-	return new Promise<OwnedEngineProcess>((resolve, reject) => {
-		const spawned_child = cross_spawn(process.execPath, [windows_process_host_path], {
-			detached: true,
-			env: {
-				...process.env,
-				...(process.versions.electron ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
+function SpawnWindowsProcess(
+	input: EngineProcessSpawnInput,
+	environment: EngineProcessEnvironmentService,
+	claim_token: string,
+) {
+	return Effect.callback<OwnedEngineProcess, EngineProcessError>((resume) => {
+		const spawned_child = cross_spawn(
+			environment.node_executable,
+			[environment.windows_process_host_path],
+			{
+				detached: true,
+				env: {
+					...environment.environment,
+					...(environment.is_electron ? { ELECTRON_RUN_AS_NODE: "1" } : {}),
+				},
+				stdio: ["pipe", "pipe", "pipe", "ipc"],
+				windowsHide: true,
 			},
-			stdio: ["pipe", "pipe", "pipe", "ipc"],
-			windowsHide: true,
-		});
-		const claim_token = randomUUID();
+		);
 		let candidate: WindowsJobCandidate | undefined;
 		let job: WindowsJob | undefined;
 		let settled = false;
@@ -212,9 +279,18 @@ function spawn_windows_process(input: EngineProcessSpawnInput) {
 			spawned_child.send === undefined
 		) {
 			spawned_child.kill("SIGKILL");
-			reject(new Error("Windows process host did not provide piped IPC and stdio"));
+			resume(
+				Effect.fail(
+					new EngineProcessError({
+						cause: new Error(
+							"Windows process host did not provide piped IPC and stdio",
+						),
+						operation: "spawn",
+					}),
+				),
+			);
 
-			return;
+			return Effect.void;
 		}
 
 		const child = spawned_child as WindowsProcessHost;
@@ -223,16 +299,12 @@ function spawn_windows_process(input: EngineProcessSpawnInput) {
 			job?.Close();
 		};
 		const process_exit = make_process_exit(child, release);
-		const timeout = setTimeout(() => {
-			fail(new Error("Windows process host startup timed out"));
-		}, 5_000);
 		const fail = (cause: unknown) => {
 			if (settled) {
 				return;
 			}
 
 			settled = true;
-			clearTimeout(timeout);
 
 			try {
 				if (job) {
@@ -245,7 +317,14 @@ function spawn_windows_process(input: EngineProcessSpawnInput) {
 			}
 
 			release();
-			reject(cause);
+			resume(
+				Effect.fail(
+					new EngineProcessError({
+						cause,
+						operation: "spawn",
+					}),
+				),
+			);
 		};
 
 		child.once("spawn", () => {
@@ -323,20 +402,38 @@ function spawn_windows_process(input: EngineProcessSpawnInput) {
 			const owned_job = job;
 
 			settled = true;
-			clearTimeout(timeout);
-			resolve({
-				child,
-				process_exit,
-				Terminate: () =>
-					Effect.try({
-						try: () => owned_job.Terminate(1),
-						catch: (cause) => new EngineProcessError({ cause, operation: "kill" }),
-					}),
-			});
+			resume(
+				Effect.succeed({
+					child,
+					process_exit,
+					Terminate: () =>
+						Effect.try({
+							try: () => owned_job.Terminate(1),
+							catch: (cause) => new EngineProcessError({ cause, operation: "kill" }),
+						}),
+				}),
+			);
 		});
 		child.once("error", fail);
 		child.once("close", () => fail(new Error("Windows process host exited during startup")));
-	});
+
+		return Effect.sync(() => {
+			if (!settled) {
+				fail(new Error("Windows process host startup was interrupted"));
+			}
+		});
+	}).pipe(
+		Effect.timeoutOrElse({
+			duration: 5_000,
+			orElse: () =>
+				Effect.fail(
+					new EngineProcessError({
+						cause: new Error("Windows process host startup timed out"),
+						operation: "spawn",
+					}),
+				),
+		}),
+	);
 }
 
 function spawn_posix_process(input: EngineProcessSpawnInput): OwnedEngineProcess {
@@ -362,68 +459,88 @@ function spawn_posix_process(input: EngineProcessSpawnInput): OwnedEngineProcess
 	};
 }
 
-function spawn_owned_process(input: EngineProcessSpawnInput) {
-	return process.platform === "win32"
-		? spawn_windows_process(input)
-		: Promise.resolve(spawn_posix_process(input));
-}
-
 /** Provides the Node child-process implementation used by all CLI engines. @since 0.4.0 */
-export const EngineProcessFactoryLive = Layer.succeed(EngineProcessFactory, {
-	Spawn: (input) =>
-		Effect.tryPromise({
-			try: () => spawn_owned_process(input),
-			catch: (cause) => new EngineProcessError({ cause, operation: "spawn" }),
-		}).pipe(
-			Effect.map((owned) => {
-				const child = owned.child;
-				const process_exit = owned.process_exit;
-				const Exit = process_exit.Exit;
-				const Kill = (signal: NodeJS.Signals = "SIGTERM") =>
-					process_exit.IsClosed() ? Effect.void : owned.Terminate(signal);
-				const EndInput = make_close_stdin(child);
-				let close_started = false;
-				const Close: Effect.Effect<void> = Effect.suspend(() => {
-					if (process_exit.IsClosed()) {
-						return Effect.void;
-					}
+export const EngineProcessFactoryLayer = Layer.effect(
+	EngineProcessFactory,
+	Effect.gen(function* () {
+		const environment = yield* EngineProcessEnvironment;
 
-					if (close_started) {
-						return Exit.pipe(Effect.timeoutOption(500), Effect.ignore);
-					}
+		return {
+			Spawn: (input) =>
+				Effect.gen(function* () {
+					const claim_token = yield* environment.MakeClaimToken;
+					const AcquireOwned =
+						environment.platform === "win32"
+							? SpawnWindowsProcess(input, environment, claim_token)
+							: Effect.try({
+									try: () => spawn_posix_process(input),
+									catch: (cause) =>
+										new EngineProcessError({ cause, operation: "spawn" }),
+								});
+					const owned = yield* Effect.acquireRelease(AcquireOwned, (owned) =>
+						owned.process_exit.IsClosed()
+							? owned.process_exit.Cleanup
+							: owned
+									.Terminate("SIGKILL")
+									.pipe(
+										Effect.ignore,
+										Effect.andThen(owned.process_exit.Cleanup),
+									),
+					);
 
-					close_started = true;
+					const child = owned.child;
+					const process_exit = owned.process_exit;
+					const Exit = process_exit.Exit;
+					const Kill = (signal: NodeJS.Signals = "SIGTERM") =>
+						process_exit.IsClosed() ? Effect.void : owned.Terminate(signal);
+					const EndInput = make_close_stdin(child);
+					let close_started = false;
+					const Close: Effect.Effect<void> = Effect.suspend(() => {
+						if (process_exit.IsClosed()) {
+							return Effect.void;
+						}
 
-					return Effect.gen(function* () {
-						if (process.platform === "win32") {
-							yield* Kill("SIGTERM").pipe(Effect.ignore);
-						} else {
-							yield* EndInput.pipe(Effect.ignore);
+						if (close_started) {
+							return Exit.pipe(Effect.timeoutOption(500), Effect.ignore);
+						}
 
-							if (is_process_running(child)) {
+						close_started = true;
+
+						return Effect.gen(function* () {
+							if (environment.platform === "win32") {
 								yield* Kill("SIGTERM").pipe(Effect.ignore);
+							} else {
+								yield* EndInput.pipe(Effect.ignore);
+
+								if (is_process_running(child)) {
+									yield* Kill("SIGTERM").pipe(Effect.ignore);
+								}
 							}
-						}
 
-						yield* Exit.pipe(Effect.timeoutOption(750), Effect.ignore);
+							yield* Exit.pipe(Effect.timeoutOption(750), Effect.ignore);
 
-						if (!process_exit.IsClosed()) {
-							yield* Kill("SIGKILL").pipe(Effect.ignore);
-						}
+							if (!process_exit.IsClosed()) {
+								yield* Kill("SIGKILL").pipe(Effect.ignore);
+							}
 
-						yield* Exit.pipe(Effect.timeoutOption(750), Effect.ignore);
+							yield* Exit.pipe(Effect.timeoutOption(750), Effect.ignore);
+						});
 					});
-				});
 
-				return {
-					Close,
-					EndInput,
-					Exit,
-					Kill,
-					Stderr: child.stderr,
-					Stdout: child.stdout,
-					Write: (chunk: Uint8Array) => make_write(child, chunk),
-				};
-			}),
-		),
-});
+					return {
+						Close,
+						EndInput,
+						Exit,
+						Kill,
+						Stderr: child.stderr,
+						Stdout: child.stdout,
+						Write: (chunk: Uint8Array) => make_write(child, chunk),
+					};
+				}),
+		};
+	}),
+);
+
+export const EngineProcessFactoryLive = EngineProcessFactoryLayer.pipe(
+	Layer.provide(EngineProcessEnvironmentLive),
+);

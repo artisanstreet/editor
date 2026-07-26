@@ -18,6 +18,11 @@ import type {
 	CapabilityOAuthTokenStatus,
 	CapabilityRegistrySnapshot,
 	CapabilityHealthRequest,
+	ConversationPatchBatch,
+	ConversationQuery,
+	ConversationSnapshot,
+	MessageImageAttachment,
+	MessageImageAttachmentQuery,
 	EventEnvelope,
 	GlobalGuidanceDriftResolutionRequest,
 	GlobalGuidanceProvider,
@@ -105,6 +110,12 @@ import type {
 	WorkspaceLanguageCapabilitiesQueryResult,
 	WorkspaceChangeReview,
 	WorkspaceConflictListQueryResult,
+} from "@artisan/protocol";
+import type {
+	ProjectDirectoryList,
+	ProjectDirectoryListInput,
+	ProjectDirectorySelectInput,
+	ProjectRef,
 } from "@artisan/protocol";
 
 /** Identifies a typed frontend client failure. */
@@ -524,6 +535,9 @@ export type ThreadTranscriptUpdate =
 			readonly journal_sequence: number;
 			readonly entries: ReadonlyArray<TranscriptEntry>;
 	  };
+export type ConversationUpdate =
+	| { readonly type: "snapshot"; readonly snapshot: ConversationSnapshot }
+	| { readonly type: "patch"; readonly batch: ConversationPatchBatch };
 export type OrchestrationGroupListUpdate =
 	| { readonly type: "snapshot"; readonly snapshot: OrchestrationGroupListSnapshot }
 	| { readonly type: "patch"; readonly snapshot: OrchestrationGroupListSnapshot };
@@ -569,6 +583,12 @@ export class ArtisanClient extends Context.Service<
 		readonly GetOrchestrationGraph: (
 			group_id: string,
 		) => Effect.Effect<OrchestrationGraph, ArtisanClientError>;
+		readonly GetConversation: (
+			input: ConversationQuery,
+		) => Effect.Effect<ConversationSnapshot, ArtisanClientError>;
+		readonly GetMessageImageAttachment: (
+			input: MessageImageAttachmentQuery,
+		) => Effect.Effect<Option.Option<MessageImageAttachment>, ArtisanClientError>;
 		readonly GetThreadTranscript: (
 			input: ThreadTranscriptQuery,
 		) => Effect.Effect<ThreadTranscriptSnapshot, ArtisanClientError>;
@@ -626,6 +646,12 @@ export class ArtisanClient extends Context.Service<
 			workspace_id: string,
 		) => Effect.Effect<ReadonlyArray<TerminalSession>, ArtisanClientError>;
 		readonly ListThreads: Effect.Effect<ReadonlyArray<ThreadListItem>, ArtisanClientError>;
+		readonly ListProjectDirectories: (
+			input?: ProjectDirectoryListInput,
+		) => Effect.Effect<ProjectDirectoryList, ArtisanClientError>;
+		readonly SelectProjectDirectory: (
+			input: ProjectDirectorySelectInput,
+		) => Effect.Effect<ProjectRef, ArtisanClientError>;
 		readonly ListPreviewTargets: (
 			input?: PreviewTargetListQuery,
 		) => Effect.Effect<ReadonlyArray<PreviewTarget>, ArtisanClientError>;
@@ -692,6 +718,13 @@ export class ArtisanClient extends Context.Service<
 			thread_id: string,
 		) => Effect.Effect<
 			Stream.Stream<ThreadTranscriptUpdate, ArtisanClientError>,
+			ArtisanClientError,
+			Scope.Scope
+		>;
+		readonly SubscribeConversation: (
+			thread_id: string,
+		) => Effect.Effect<
+			Stream.Stream<ConversationUpdate, ArtisanClientError>,
 			ArtisanClientError,
 			Scope.Scope
 		>;

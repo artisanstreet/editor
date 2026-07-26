@@ -1,6 +1,7 @@
 import { NodeChildProcessSpawner, NodeFileSystem, NodePath } from "@effect/platform-node-shared";
 import { Context, Data, Deferred, Effect, Layer, Ref, Schema, Stream, type Duration } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { ProcessEnvironment, ProcessEnvironmentLive } from "../runtime/process-environment";
 
 const maximum_retained_output_bytes = 32 * 1024 * 1024;
 const maximum_stdin_bytes = 4 * 1024 * 1024;
@@ -141,9 +142,12 @@ const Capture = <E, R>(
 		),
 	);
 
-function sanitized_environment(mode: GitCommandInput["mode"]) {
+function sanitized_environment(
+	mode: GitCommandInput["mode"],
+	environment: Readonly<Record<string, string | undefined>>,
+) {
 	const inherited = Object.fromEntries(
-		Object.entries(process.env).filter(
+		Object.entries(environment).filter(
 			([key, value]) => value !== undefined && !/^(?:GCM_|GIT_)/iu.test(key),
 		),
 	);
@@ -172,112 +176,125 @@ export function make_git_command_executor_layer(options: GitCommandExecutorOptio
 		GitCommandExecutor,
 		Effect.gen(function* () {
 			const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+			const process_environment = yield* ProcessEnvironment;
 			const Run = (input: GitCommandInput) =>
-				Schema.decodeUnknownEffect(GitCommandInput, { onExcessProperty: "error" })(
-					input,
-				).pipe(
-					Effect.mapError(
-						(cause) =>
-							new GitCommandExecutorError({ cause, operation: "configuration" }),
-					),
-					Effect.flatMap((request) => {
-						if (
-							request.stdin !== undefined &&
-							request.stdin.byteLength > request.max_stdin_bytes
-						) {
-							return Effect.fail(
-								new GitCommandExecutorError({
-									cause: new Error(
-										"Git stdin exceeded its configured byte limit",
-									),
-									operation: "configuration",
+				Effect.gen(function* () {
+					const inherited_environment = yield* process_environment.Variables;
+					return yield* Schema.decodeUnknownEffect(GitCommandInput, {
+						onExcessProperty: "error",
+					})(input).pipe(
+						Effect.mapError(
+							(cause) =>
+								new GitCommandExecutorError({ cause, operation: "configuration" }),
+						),
+						Effect.flatMap((request) => {
+							if (
+								request.stdin !== undefined &&
+								request.stdin.byteLength > request.max_stdin_bytes
+							) {
+								return Effect.fail(
+									new GitCommandExecutorError({
+										cause: new Error(
+											"Git stdin exceeded its configured byte limit",
+										),
+										operation: "configuration",
+									}),
+								);
+							}
+
+							const child = ChildProcess.make(command, request.args, {
+								cwd: request.cwd,
+								env: sanitized_environment(request.mode, inherited_environment),
+								extendEnv: false,
+								forceKillAfter: force_kill_after,
+								shell: false,
+								stderr: "pipe",
+								stdin:
+									request.stdin === undefined
+										? "ignore"
+										: Stream.make(request.stdin),
+								stdout: "pipe",
+							});
+
+							return Effect.scoped(
+								Effect.gen(function* () {
+									const handle = yield* spawner.spawn(child);
+									const overflow = yield* Deferred.make<"stderr" | "stdout">();
+									const stdout_state = yield* Ref.make(InitialCaptureState());
+									const stderr_state = yield* Ref.make(InitialCaptureState());
+									const completed = Effect.all(
+										[
+											Capture(
+												handle.stdout,
+												request.max_stdout_bytes,
+												stdout_state,
+												overflow,
+												"stdout",
+											),
+											Capture(
+												handle.stderr,
+												request.max_stderr_bytes,
+												stderr_state,
+												overflow,
+												"stderr",
+											),
+											handle.exitCode,
+										] as const,
+										{ concurrency: "unbounded" },
+									).pipe(
+										Effect.map(([, , exit_code]) => ({
+											exit_code,
+											type: "exit" as const,
+										})),
+									);
+									const output_limited = Deferred.await(overflow).pipe(
+										Effect.map((channel) => ({
+											channel,
+											type: "output_limit" as const,
+										})),
+									);
+									const timed_out = Effect.sleep(timeout).pipe(
+										Effect.as({ type: "timeout" as const }),
+									);
+									const outcome = yield* Effect.raceFirst(
+										Effect.raceFirst(completed, output_limited),
+										timed_out,
+									);
+									const stdout = materialize_capture(
+										yield* Ref.get(stdout_state),
+									);
+									const stderr = materialize_capture(
+										yield* Ref.get(stderr_state),
+									);
+
+									return outcome.type === "exit"
+										? { exit_code: outcome.exit_code, stderr, stdout }
+										: {
+												exit_code: -1,
+												...(outcome.type === "output_limit"
+													? { output_limit_channel: outcome.channel }
+													: {}),
+												stderr,
+												stdout,
+												termination: outcome.type,
+											};
 								}),
+							).pipe(
+								Effect.mapError(
+									(cause) =>
+										new GitCommandExecutorError({
+											cause,
+											operation: "process",
+										}),
+								),
 							);
-						}
-
-						const child = ChildProcess.make(command, request.args, {
-							cwd: request.cwd,
-							env: sanitized_environment(request.mode),
-							extendEnv: false,
-							forceKillAfter: force_kill_after,
-							shell: false,
-							stderr: "pipe",
-							stdin:
-								request.stdin === undefined ? "ignore" : Stream.make(request.stdin),
-							stdout: "pipe",
-						});
-
-						return Effect.scoped(
-							Effect.gen(function* () {
-								const handle = yield* spawner.spawn(child);
-								const overflow = yield* Deferred.make<"stderr" | "stdout">();
-								const stdout_state = yield* Ref.make(InitialCaptureState());
-								const stderr_state = yield* Ref.make(InitialCaptureState());
-								const completed = Effect.all(
-									[
-										Capture(
-											handle.stdout,
-											request.max_stdout_bytes,
-											stdout_state,
-											overflow,
-											"stdout",
-										),
-										Capture(
-											handle.stderr,
-											request.max_stderr_bytes,
-											stderr_state,
-											overflow,
-											"stderr",
-										),
-										handle.exitCode,
-									] as const,
-									{ concurrency: "unbounded" },
-								).pipe(
-									Effect.map(([, , exit_code]) => ({
-										exit_code,
-										type: "exit" as const,
-									})),
-								);
-								const output_limited = Deferred.await(overflow).pipe(
-									Effect.map((channel) => ({
-										channel,
-										type: "output_limit" as const,
-									})),
-								);
-								const timed_out = Effect.sleep(timeout).pipe(
-									Effect.as({ type: "timeout" as const }),
-								);
-								const outcome = yield* Effect.raceFirst(
-									Effect.raceFirst(completed, output_limited),
-									timed_out,
-								);
-								const stdout = materialize_capture(yield* Ref.get(stdout_state));
-								const stderr = materialize_capture(yield* Ref.get(stderr_state));
-
-								return outcome.type === "exit"
-									? { exit_code: outcome.exit_code, stderr, stdout }
-									: {
-											exit_code: -1,
-											...(outcome.type === "output_limit"
-												? { output_limit_channel: outcome.channel }
-												: {}),
-											stderr,
-											stdout,
-											termination: outcome.type,
-										};
-							}),
-						).pipe(
-							Effect.mapError(
-								(cause) =>
-									new GitCommandExecutorError({ cause, operation: "process" }),
-							),
-						);
-					}),
-				);
+						}),
+					);
+				});
 
 			return { Run };
 		}),
-	);
+	).pipe(Layer.provide(ProcessEnvironmentLive));
 }
 
 /** Builds the production Node Git executor from Effect filesystem, path, and process layers. */

@@ -106,6 +106,7 @@ function make_controlled_engine() {
 		observation:
 			| {
 					readonly _tag: "agent_message_completed";
+					readonly item_id: string;
 					readonly message: string;
 					readonly turn_id: string;
 			  }
@@ -338,6 +339,7 @@ describe("multi-agent graph lifecycle", () => {
 				await Effect.runPromise(
 					controlled.Emit(run_a, {
 						_tag: "agent_message_completed",
+						item_id: "assistant_a",
 						message: "Durable result A",
 						turn_id: "turn_a",
 					}),

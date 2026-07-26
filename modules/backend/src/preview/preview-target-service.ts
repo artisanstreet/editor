@@ -1,4 +1,4 @@
-import { Effect, Layer, Option, PubSub, Ref, Stream } from "effect";
+import { Clock, Effect, Layer, Option, PubSub, Ref, Stream } from "effect";
 
 import { is_local_preview_hostname } from "./network-policy";
 import {
@@ -249,5 +249,5 @@ export function make_preview_target_layer(options: PreviewTargetOptions = {}) {
 
 /** Provides wall-clock timestamps for preview target production composition. */
 export const PreviewTargetClockLive = Layer.succeed(PreviewTargetClock, {
-	Now: Effect.sync(() => Date.now()),
+	Now: Clock.currentTimeMillis,
 });

@@ -120,9 +120,22 @@ export interface EngineResumeToken {
 	readonly opaque_checkpoint?: string;
 }
 
+/** Provider-neutral, ordered multimodal input supplied with a user turn. */
+export type EngineUserInputPart =
+	| { readonly text: string; readonly type: "text" }
+	| {
+			readonly bytes: Uint8Array;
+			readonly id: string;
+			readonly media_type: "image/gif" | "image/jpeg" | "image/png" | "image/webp";
+			readonly name: string;
+			readonly type: "image";
+	  };
+
 /** Opens a new native thread from initial user text. @since 0.2.0 */
 export interface EngineStartInput extends EngineRunContext {
 	readonly _tag: "start";
+	/** When supplied, retains the user's exact text/image ordering. */
+	readonly initial_content?: ReadonlyArray<EngineUserInputPart>;
 	readonly initial_text: string;
 }
 
@@ -195,13 +208,24 @@ export interface EngineTurnStateObservation extends EngineObservationBase {
 export interface EngineAgentMessageDeltaObservation extends EngineObservationBase {
 	readonly _tag: "agent_message_delta";
 	readonly delta: string;
+	/** Identifies the native assistant message item this delta extends. */
+	readonly item_id: string;
+	/** Preserves a provider-disclosed display phase without inferring it from message order. */
+	readonly phase: EngineAssistantMessagePhase;
 	readonly turn_id: string;
 }
+
+/** Distinguishes progress commentary from a settled assistant reply. @since 0.4.0 */
+export type EngineAssistantMessagePhase = "commentary" | "final" | "unspecified";
 
 /** Completes one agent-authored message. @since 0.2.0 */
 export interface EngineAgentMessageCompletedObservation extends EngineObservationBase {
 	readonly _tag: "agent_message_completed";
+	/** Identifies the native assistant message item completed by this observation. */
+	readonly item_id: string;
 	readonly message: string;
+	/** Preserves a provider-disclosed display phase without inferring it from message order. */
+	readonly phase: EngineAssistantMessagePhase;
 	readonly turn_id: string;
 }
 
@@ -311,6 +335,20 @@ export interface EngineUsageObservation extends EngineObservationBase {
 	readonly turn_id?: string;
 }
 
+/**
+ * Reports a provider error and whether the provider will continue the current attempt.
+ *
+ * `attempt_state` intentionally models only the lifecycle disclosed by the provider;
+ * adapters must not synthesize an attempt number when native data does not include one.
+ */
+export interface EngineRetryObservation extends EngineObservationBase {
+	readonly _tag: "retry";
+	readonly attempt_state: "retrying" | "terminal";
+	readonly message: string;
+	readonly turn_id: string;
+	readonly will_retry: boolean;
+}
+
 /** Reports a decoded transport or protocol diagnostic. @since 0.2.0 */
 export interface EngineProtocolDiagnosticObservation extends EngineObservationBase {
 	readonly _tag: "protocol_diagnostic";
@@ -338,6 +376,7 @@ export type EngineObservation =
 	| EngineProtocolDiagnosticObservation
 	| EngineQuestionObservation
 	| EngineReasoningSummaryDeltaObservation
+	| EngineRetryObservation
 	| EngineRunStateObservation
 	| EngineRunTerminalObservation
 	| EngineSearchObservation
@@ -350,6 +389,8 @@ export type EngineObservation =
 export interface EngineSteerCommand {
 	readonly _tag: "steer";
 	readonly command_id: string;
+	/** When supplied, retains the user's exact text/image ordering. */
+	readonly content?: ReadonlyArray<EngineUserInputPart> | undefined;
 	readonly text: string;
 }
 

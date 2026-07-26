@@ -1,0 +1,19 @@
+{
+	"name": "@artisan/forge",
+	"private": true,
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts",
+		"./entry": "./src/entry.ts"
+	},
+	"dependencies": {
+		"@artisan/backend": "workspace:*",
+		"@artisan/engines": "workspace:*",
+		"@artisan/protocol": "workspace:*",
+		"@artisan/transport": "workspace:*",
+		"@effect/platform-node-shared": "4.0.0-beta.97",
+		"@types/ws": "8.18.1",
+		"effect": "4.0.0-beta.97",
+		"ws": "8.21.0"
+	}
+}

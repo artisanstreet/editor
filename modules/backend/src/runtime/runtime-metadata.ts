@@ -1,6 +1,6 @@
-import { randomUUID } from "node:crypto";
+import { Clock, Context, Effect, Layer } from "effect";
 
-import { Context, Effect, Layer } from "effect";
+import { MakeSnowflakeIdLive, SnowflakeId } from "@artisan/protocol";
 
 export type RuntimeIdPrefix =
 	| "agent"
@@ -22,8 +22,18 @@ export class RuntimeMetadata extends Context.Service<
 	}
 >()("Artisan/RuntimeMetadata") {}
 
-export const RuntimeMetadataLive = Layer.sync(RuntimeMetadata, () => ({
-	instance_id: `backend_${randomUUID()}`,
-	MakeId: (prefix) => Effect.sync(() => `${prefix}_${randomUUID()}`),
-	Now: Effect.sync(() => new Date().toISOString()),
-}));
+export const RuntimeMetadataLive = Layer.effect(
+	RuntimeMetadata,
+	Effect.gen(function* () {
+		const snowflake_id = yield* SnowflakeId;
+		const instance_id = yield* snowflake_id.Make("backend");
+
+		return RuntimeMetadata.of({
+			instance_id,
+			MakeId: snowflake_id.Make,
+			Now: Clock.currentTimeMillis.pipe(
+				Effect.map((milliseconds) => new Date(milliseconds).toISOString()),
+			),
+		});
+	}),
+).pipe(Layer.provide(MakeSnowflakeIdLive(0)));

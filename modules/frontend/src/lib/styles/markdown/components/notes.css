@@ -15,8 +15,8 @@
 }
 
 .docs-note {
-	@apply flex flex-col gap-2 rounded-3xl bg-linear-to-t from-background/30
-    to-foreground/5 p-4 card-lg;
+	@apply flex flex-col gap-2 rounded-3xl bg-linear-to-t from-surface-50
+	to-surface-125 p-4 card-lg dark:from-surface-950 dark:to-surface-900;
 }
 
 .docs-note-header {
@@ -69,8 +69,9 @@
 
 .docs-note-header code,
 .docs-note-body code {
-	@apply inline align-baseline rounded-full bg-linear-to-t from-background/30
-		to-foreground/5 px-2 py-0.5 font-mono text-[0.88em] font-normal
+	@apply inline align-baseline rounded-full bg-linear-to-t from-surface-50
+		to-surface-125 px-2 py-0.5 font-mono text-[0.88em] font-normal
+		dark:from-surface-950 dark:to-surface-900
 		leading-none text-foreground card;
 	white-space: pre;
 }

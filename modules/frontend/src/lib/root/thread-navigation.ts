@@ -1,0 +1,106 @@
+import type { ProjectRef, ThreadListItem } from "@artisan/protocol";
+import type { ThreadListUpdate } from "@artisan/transport/client";
+
+/** Applies the authoritative thread-list stream without introducing UI-only identity. */
+export const ApplyRootThreadListUpdate = (
+	threads: ReadonlyArray<ThreadListItem>,
+	update: ThreadListUpdate,
+): ReadonlyArray<ThreadListItem> => {
+	if (update.type === "snapshot") return SortRecentThreads(update.threads);
+	if (update.type === "remove")
+		return threads.filter((thread) => thread.thread_id !== update.thread_id);
+
+	return SortRecentThreads([
+		...threads.filter((thread) => thread.thread_id !== update.thread.thread_id),
+		update.thread,
+	]);
+};
+
+/** Sorts durable projections by their backend-owned activity timestamp. */
+export const SortRecentThreads = (threads: ReadonlyArray<ThreadListItem>) =>
+	[...threads].sort((left, right) => right.last_activity_at.localeCompare(left.last_activity_at));
+
+/** Projects one selectable project per durable project id, preferring the most recently active thread. */
+export const ProjectsForNewThread = (
+	threads: ReadonlyArray<ThreadListItem>,
+): ReadonlyArray<ProjectRef> => {
+	const projects = new Map<string, ProjectRef>();
+
+	for (const thread of SortRecentThreads(threads)) {
+		const thread_projects = [
+			...(thread.primary_project === undefined ? [] : [thread.primary_project]),
+			...thread.linked_projects,
+		];
+
+		for (const project of thread_projects) {
+			if (!projects.has(project.project_id)) {
+				projects.set(project.project_id, project);
+			}
+		}
+	}
+
+	return [...projects.values()];
+};
+
+/** Describes one sidebar project section and its durably scoped recent threads. */
+export type ProjectScopedThreadGroup =
+	| {
+			readonly project: ProjectRef;
+			readonly threads: ReadonlyArray<ThreadListItem>;
+			readonly type: "project";
+	  }
+	| {
+			readonly threads: ReadonlyArray<ThreadListItem>;
+			readonly type: "unassigned";
+	  };
+
+/** Groups each thread exactly once by its primary project for sidebar presentation. */
+export const ProjectScopedThreadGroups = (
+	threads: ReadonlyArray<ThreadListItem>,
+): ReadonlyArray<ProjectScopedThreadGroup> => {
+	const project_groups = new Map<
+		string,
+		{
+			project: ProjectRef;
+			threads: Array<ThreadListItem>;
+		}
+	>();
+	const unassigned_threads: Array<ThreadListItem> = [];
+
+	for (const thread of SortRecentThreads(threads)) {
+		const project = thread.primary_project;
+		if (project === undefined) {
+			unassigned_threads.push(thread);
+			continue;
+		}
+
+		const group = project_groups.get(project.project_id);
+		if (group === undefined) {
+			project_groups.set(project.project_id, { project, threads: [thread] });
+			continue;
+		}
+
+		group.threads.push(thread);
+	}
+
+	return [
+		...[...project_groups.values()].map((group) => ({
+			project: group.project,
+			threads: group.threads,
+			type: "project" as const,
+		})),
+		...(unassigned_threads.length === 0
+			? []
+			: [{ threads: unassigned_threads, type: "unassigned" as const }]),
+	];
+};
+
+/** Formats an ISO activity timestamp for the compact recent-thread table. */
+export const FormatRecentThreadTime = (value: string, now_ms: number) => {
+	const elapsed_seconds = Math.max(0, Math.floor((now_ms - Date.parse(value)) / 1_000));
+	if (elapsed_seconds < 60) return "Just now";
+	if (elapsed_seconds < 3_600) return `${Math.floor(elapsed_seconds / 60)} min ago`;
+	if (elapsed_seconds < 86_400) return `${Math.floor(elapsed_seconds / 3_600)} hr ago`;
+	if (elapsed_seconds < 172_800) return "Yesterday";
+	return `${Math.floor(elapsed_seconds / 86_400)} days ago`;
+};

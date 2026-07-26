@@ -1,4 +1,5 @@
 import { hostname, userInfo } from "node:os";
+import { Effect } from "effect";
 
 import type { DesktopIdentity } from "./contracts";
 
@@ -31,13 +32,11 @@ export const resolve_desktop_identity = (input: {
 };
 
 /** Reads only the stable local account and hostname; avatar acquisition remains deliberately optional. */
-export const read_desktop_identity = (): DesktopIdentity => {
-	try {
-		return resolve_desktop_identity({
+export const read_desktop_identity = Effect.try({
+	try: () =>
+		resolve_desktop_identity({
 			machine_name: hostname(),
 			username: userInfo().username,
-		});
-	} catch {
-		return resolve_desktop_identity({ machine_name: undefined, username: undefined });
-	}
-};
+		}),
+	catch: () => resolve_desktop_identity({ machine_name: undefined, username: undefined }),
+}).pipe(Effect.catch((identity) => Effect.succeed(identity)));

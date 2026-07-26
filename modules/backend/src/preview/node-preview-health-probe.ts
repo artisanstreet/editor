@@ -1,7 +1,7 @@
 import { request as request_http, type IncomingMessage } from "node:http";
 import { request as request_https } from "node:https";
 
-import { Effect, Layer, Option } from "effect";
+import { Clock, Effect, Layer, Option } from "effect";
 
 import {
 	PreviewHealthProbe,
@@ -79,120 +79,127 @@ export const make_node_preview_health_probe_layer = (
 				);
 			}
 
-			return Effect.callback<PreviewHealthProbeResult, PreviewHealthProbeError>((resume) => {
+			return Effect.gen(function* () {
 				const url = new URL(target.url);
 				const pinned = loopback_address(url);
-				const started_at_ms = Date.now();
+				const started_at_ms = yield* Clock.currentTimeMillis;
 				const request_fn = url.protocol === "https:" ? request_https : request_http;
-				let completed = false;
-				let response: IncomingMessage | undefined;
-				let timer: ReturnType<typeof setTimeout> | undefined;
-				const complete = (
-					result: Effect.Effect<PreviewHealthProbeResult, PreviewHealthProbeError>,
-				) => {
-					if (completed) {
-						return;
-					}
+				const result = yield* Effect.callback<
+					Omit<PreviewHealthProbeResult, "latency_ms">,
+					PreviewHealthProbeError
+				>((resume) => {
+					let completed = false;
+					let response: IncomingMessage | undefined;
+					const complete = (
+						outcome: Effect.Effect<
+							Omit<PreviewHealthProbeResult, "latency_ms">,
+							PreviewHealthProbeError
+						>,
+					) => {
+						if (completed) {
+							return;
+						}
 
-					completed = true;
-					if (timer !== undefined) {
-						clearTimeout(timer);
-					}
-					resume(result);
-				};
-				const request = request_fn(
-					{
-						agent: false,
-						headers: {
-							Accept: "text/plain, application/json;q=0.9, */*;q=0.1",
-							"Accept-Encoding": "identity",
-							Host: url.host,
-							"User-Agent": "ArtisanEditor-PreviewHealth/1.0",
+						completed = true;
+						resume(outcome);
+					};
+					const request = request_fn(
+						{
+							agent: false,
+							headers: {
+								Accept: "text/plain, application/json;q=0.9, */*;q=0.1",
+								"Accept-Encoding": "identity",
+								Host: url.host,
+								"User-Agent": "ArtisanEditor-PreviewHealth/1.0",
+							},
+							family: pinned.family,
+							hostname: pinned.hostname,
+							method: "GET",
+							path: `${url.pathname}${url.search}`,
+							port: url.port || undefined,
+							...(url.protocol === "https:" ? { servername: url.hostname } : {}),
 						},
-						family: pinned.family,
-						hostname: pinned.hostname,
-						method: "GET",
-						path: `${url.pathname}${url.search}`,
-						port: url.port || undefined,
-						...(url.protocol === "https:" ? { servername: url.hostname } : {}),
-					},
-					(incoming) => {
-						response = incoming;
-						const chunks: Array<Uint8Array> = [];
-						let received_bytes = 0;
+						(incoming) => {
+							response = incoming;
+							const chunks: Array<Uint8Array> = [];
+							let received_bytes = 0;
 
-						incoming.once("error", (cause) =>
-							complete(Effect.fail(probe_error(target, cause))),
-						);
-						incoming.on("data", (chunk: Uint8Array) => {
-							if (completed) {
-								return;
-							}
-
-							received_bytes += chunk.byteLength;
-							if (received_bytes > maximum_bytes) {
-								incoming.destroy();
-								complete(
-									Effect.fail(
-										probe_error(
-											target,
-											new Error("health response exceeded byte limit"),
-										),
-									),
-								);
-
-								return;
-							}
-
-							chunks.push(chunk);
-						});
-						incoming.once("end", () => {
-							const body = new Uint8Array(received_bytes);
-							let offset = 0;
-
-							for (const chunk of chunks) {
-								body.set(chunk, offset);
-								offset += chunk.byteLength;
-							}
-
-							const status_code = incoming.statusCode ?? 0;
-							complete(
-								Effect.succeed({
-									latency_ms: Math.max(0, Date.now() - started_at_ms),
-									message: message_from_response(incoming, body),
-									status:
-										status_code >= 200 && status_code < 400
-											? "healthy"
-											: "unhealthy",
-									status_code: Option.some(status_code),
-								}),
+							incoming.once("error", (cause) =>
+								complete(Effect.fail(probe_error(target, cause))),
 							);
-						});
-					},
-				);
+							incoming.on("data", (chunk: Uint8Array) => {
+								if (completed) {
+									return;
+								}
 
-				request.once("error", (cause) => complete(Effect.fail(probe_error(target, cause))));
-				timer = setTimeout(() => {
-					request.destroy();
-					response?.destroy();
-					complete(
-						Effect.fail(probe_error(target, new Error("health request timed out"))),
+								received_bytes += chunk.byteLength;
+								if (received_bytes > maximum_bytes) {
+									incoming.destroy();
+									complete(
+										Effect.fail(
+											probe_error(
+												target,
+												new Error("health response exceeded byte limit"),
+											),
+										),
+									);
+
+									return;
+								}
+
+								chunks.push(chunk);
+							});
+							incoming.once("end", () => {
+								const body = new Uint8Array(received_bytes);
+								let offset = 0;
+
+								for (const chunk of chunks) {
+									body.set(chunk, offset);
+									offset += chunk.byteLength;
+								}
+
+								const status_code = incoming.statusCode ?? 0;
+								complete(
+									Effect.succeed({
+										message: message_from_response(incoming, body),
+										status:
+											status_code >= 200 && status_code < 400
+												? "healthy"
+												: "unhealthy",
+										status_code: Option.some(status_code),
+									}),
+								);
+							});
+						},
 					);
-				}, timeout_ms);
-				request.end();
 
-				return Effect.sync(() => {
-					if (completed) {
-						return;
-					}
+					request.once("error", (cause) =>
+						complete(Effect.fail(probe_error(target, cause))),
+					);
+					request.end();
 
-					completed = true;
-					if (timer !== undefined) {
-						clearTimeout(timer);
-					}
-					request.destroy();
-					response?.destroy();
-				});
+					return Effect.sync(() => {
+						if (completed) {
+							return;
+						}
+
+						completed = true;
+						request.destroy();
+						response?.destroy();
+					});
+				}).pipe(
+					Effect.timeoutOrElse({
+						duration: timeout_ms,
+						orElse: () =>
+							Effect.fail(probe_error(target, new Error("health request timed out"))),
+					}),
+				);
+				const completed_at_ms = yield* Clock.currentTimeMillis;
+
+				return {
+					...result,
+					latency_ms: Math.max(0, completed_at_ms - started_at_ms),
+				};
 			});
 		},
 	});

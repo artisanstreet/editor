@@ -4,6 +4,8 @@
 	"type": "module",
 	"exports": {
 		"./activity-status/thinking-words.json": "./activity-status/thinking-words.json",
+		"./composer/placeholders.json": "./composer/placeholders.json",
+		"./file-icons/associations.json": "./file-icons/associations.json",
 		"./names/norwegian-females.json": "./names/norwegian-females.json"
 	}
 }

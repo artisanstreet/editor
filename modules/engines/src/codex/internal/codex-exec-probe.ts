@@ -1,4 +1,4 @@
-import { Effect } from "effect";
+import { Effect, Stream } from "effect";
 
 import {
 	EngineProbeTimeoutError,
@@ -23,30 +23,37 @@ function ReadBoundedStream(
 	channel: "stderr" | "stdout",
 	max_bytes: number,
 ) {
-	return Effect.tryPromise({
-		try: async () => {
-			const output = new Uint8Array(max_bytes);
-			let length = 0;
+	return Stream.fromAsyncIterable(
+		stream,
+		(cause) => new EngineProcessError({ cause, operation: "read" }),
+	).pipe(
+		Stream.runFoldEffect(
+			() => ({ chunks: [] as Array<Uint8Array>, length: 0 }),
+			(state, chunk) =>
+				state.length + chunk.length > max_bytes
+					? Effect.fail(
+							new EngineProtocolError({
+								engine_id: "codex",
+								message: `Codex version ${channel} exceeded ${max_bytes} bytes`,
+							}),
+						)
+					: Effect.succeed({
+							chunks: [...state.chunks, chunk],
+							length: state.length + chunk.length,
+						}),
+		),
+		Effect.map(({ chunks, length }) => {
+			const output = new Uint8Array(length);
+			let offset = 0;
 
-			for await (const chunk of stream) {
-				if (length + chunk.length > max_bytes) {
-					throw new EngineProtocolError({
-						engine_id: "codex",
-						message: `Codex version ${channel} exceeded ${max_bytes} bytes`,
-					});
-				}
-
-				output.set(chunk, length);
-				length += chunk.length;
+			for (const chunk of chunks) {
+				output.set(chunk, offset);
+				offset += chunk.length;
 			}
 
-			return output.slice(0, length);
-		},
-		catch: (cause) =>
-			cause instanceof EngineProtocolError
-				? cause
-				: new EngineProcessError({ cause, operation: "read" }),
-	});
+			return output;
+		}),
+	);
 }
 
 function ParseVersion(stdout: Uint8Array) {
@@ -65,37 +72,39 @@ function ParseVersion(stdout: Uint8Array) {
 
 /** Probes the exec executable with argv-only `--version` and bounded output. */
 export function ProbeCodexExecVersion(options: CodexExecProbeOptions) {
-	const Probe = Effect.gen(function* () {
-		const handle = yield* options.factory.Spawn({
-			args: [...options.executable_args, "--version"],
-			command: options.executable,
-		});
+	const Probe = Effect.scoped(
+		Effect.gen(function* () {
+			const handle = yield* options.factory.Spawn({
+				args: [...options.executable_args, "--version"],
+				command: options.executable,
+			});
 
-		return yield* Effect.all(
-			[
-				ReadBoundedStream(handle.Stdout, "stdout", options.max_stdout_bytes),
-				ReadBoundedStream(handle.Stderr, "stderr", options.max_stderr_bytes),
-				handle.Exit,
-			],
-			{ concurrency: "unbounded" },
-		).pipe(
-			Effect.ensuring(handle.Close),
-			Effect.flatMap(([stdout, stderr, process_exit]) => {
-				if (process_exit.code !== 0) {
-					const detail = new TextDecoder().decode(stderr).trim();
+			return yield* Effect.all(
+				[
+					ReadBoundedStream(handle.Stdout, "stdout", options.max_stdout_bytes),
+					ReadBoundedStream(handle.Stderr, "stderr", options.max_stderr_bytes),
+					handle.Exit,
+				],
+				{ concurrency: "unbounded" },
+			).pipe(
+				Effect.ensuring(handle.Close),
+				Effect.flatMap(([stdout, stderr, process_exit]) => {
+					if (process_exit.code !== 0) {
+						const detail = new TextDecoder().decode(stderr).trim();
 
-					return Effect.fail(
-						new EngineUnavailableError({
-							engine_id: "codex",
-							message: `Codex --version exited with code ${String(process_exit.code)}${detail.length === 0 ? "" : `: ${detail}`}`,
-						}),
-					);
-				}
+						return Effect.fail(
+							new EngineUnavailableError({
+								engine_id: "codex",
+								message: `Codex --version exited with code ${String(process_exit.code)}${detail.length === 0 ? "" : `: ${detail}`}`,
+							}),
+						);
+					}
 
-				return ParseVersion(stdout);
-			}),
-		);
-	});
+					return ParseVersion(stdout);
+				}),
+			);
+		}),
+	);
 
 	return Probe.pipe(
 		Effect.timeoutOrElse({

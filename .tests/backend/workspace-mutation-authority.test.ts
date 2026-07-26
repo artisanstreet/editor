@@ -4,14 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { NodeCrypto, NodeFileSystem } from "@effect/platform-node-shared";
-import { Deferred, Effect, Layer, ManagedRuntime, Redacted } from "effect";
+import { NodeCrypto } from "@effect/platform-node-shared";
+import { Deferred, Effect, Layer, ManagedRuntime } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
-import {
-	make_workspace_bounded_regular_file_store_registry_layer,
-	WorkspaceBoundedRegularFileStoreRegistry,
-} from "../../modules/backend/src/filesystem/workspace-bounded-regular-file-store-registry";
+import { WorkspaceBoundedRegularFileStoreRegistry } from "../../modules/backend/src/filesystem/workspace-bounded-regular-file-store-registry";
+import { MakeNodeTestWorkspaceBoundedRegularFileStoreRegistryLayer } from "./bounded-regular-file-store-harness";
 import { Database, make_database_layer } from "../../modules/backend/src/persistence/database";
 import { JournalNotifierLive } from "../../modules/backend/src/persistence/journal-notifier";
 import { JournalStoreLive } from "../../modules/backend/src/persistence/journal-store";
@@ -42,7 +40,6 @@ import type { PreparedWorkspaceChangeDiff } from "../../modules/backend/src/work
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];
 const now = "2026-07-12T08:00:00.000Z";
-const receipt_authentication_key = Redacted.make(new Uint8Array(32).fill(4));
 
 type RaceProbe = {
 	readonly authorize_attempts: { value: number };
@@ -82,36 +79,9 @@ function make_runtime(
 		Layer.provideMerge(NodeCrypto.layer),
 		Layer.provideMerge(infrastructure),
 	);
-	const registry = make_workspace_bounded_regular_file_store_registry_layer(
-		[{ root, workspace_id: "workspace_1" }],
-		{
-			load_native_module: () => ({
-				NativeBoundedRegularFileStore: class {
-					authorizeRoot(candidate_root: string) {
-						return Promise.resolve(candidate_root === root);
-					}
-
-					close() {}
-					finalizeRegularFileReplacement() {
-						return Promise.resolve();
-					}
-					readRegularFile() {
-						return Promise.resolve(new Uint8Array());
-					}
-					replaceRegularFile() {
-						return Promise.resolve("Replaced");
-					}
-				},
-				getNativeBuildDescriptor: () => ({
-					architecture: "x86_64",
-					operatingSystem: "windows",
-					target: "x86_64-pc-windows-msvc",
-					testHooksEnabled: false,
-				}),
-			}),
-			receipt_authentication_key,
-		},
-	).pipe(Layer.provide(NodeFileSystem.layer));
+	const registry = MakeNodeTestWorkspaceBoundedRegularFileStoreRegistryLayer([
+		{ root, workspace_id: "workspace_1" },
+	]);
 	const race_probe = options.race_probe;
 	const gated_registry = race_probe
 		? Layer.effect(

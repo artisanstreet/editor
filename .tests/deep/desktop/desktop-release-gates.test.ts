@@ -8,6 +8,7 @@ const workspace_root = resolve(import.meta.dirname, "../../..");
 const frontend_root = resolve(workspace_root, "modules/frontend");
 const frontend_config = readFileSync(resolve(frontend_root, "vite.config.ts"), "utf8");
 const desktop_config = readFileSync(resolve(workspace_root, "desktop.vite.config.ts"), "utf8");
+const forge_config = readFileSync(resolve(workspace_root, "forge.vite.config.ts"), "utf8");
 const release_policy = readFileSync(
 	resolve(workspace_root, "docs/release/validation-policy.md"),
 	"utf8",
@@ -48,66 +49,52 @@ describe("deep desktop release gates", () => {
 		expect(frontend_config).toContain('fallback: "index.html"');
 		expect(frontend_config).toContain("precompress: true");
 		expect(frontend_config).toContain("strict: true");
-		expect(frontend_config).not.toMatch(/\b(?:electron|node:|@artisan\/backend)\b/);
+		expect(frontend_config).not.toMatch(/\b(?:electron|@artisan\/backend)\b/);
 	});
 
-	it("keeps typed Electron-port adapters in the renderer-safe transport entry", () => {
-		const transport_entry = readFileSync(
-			resolve(workspace_root, "modules/transport/src/index.ts"),
-			"utf8",
-		);
-		const electron_adapter = readFileSync(
-			resolve(workspace_root, "modules/transport/src/electron-message-port.ts"),
-			"utf8",
-		);
-
-		expect(transport_entry).toContain('export * from "./electron-message-port"');
-		expect(electron_adapter).toContain("ElectronMessagePortMainShape");
-		expect(electron_adapter).toContain("ElectronRendererMessagePortShape");
-		expect(electron_adapter).toContain("adapt_electron_message_port_main");
-		expect(electron_adapter).toContain("adapt_electron_renderer_message_port");
-		expect(electron_adapter).not.toMatch(/from\s+["']electron["']/);
-	});
-
-	it("has a dedicated packaged-Electron smoke path rather than treating source strings as evidence", () => {
-		const smoke = readFileSync(
-			resolve(workspace_root, "modules/desktop/src/packaged-smoke.ts"),
-			"utf8",
-		);
+	it("runs the packaged smoke through the Forge HTTP and WebSocket daemon", () => {
 		const main = readFileSync(resolve(workspace_root, "modules/desktop/src/main.ts"), "utf8");
-		const utility = readFileSync(
-			resolve(workspace_root, "modules/desktop/src/utility.ts"),
+		const supervisor = readFileSync(
+			resolve(workspace_root, "modules/desktop/src/forge-process-supervisor.ts"),
 			"utf8",
 		);
 
 		expect(has_electron_packaging_configuration()).toBe(true);
-		expect(smoke).toContain("ArtisanClient");
-		expect(smoke).toContain("ForceRestartForSmoke");
-		expect(smoke).toContain("FocusAndKeyboardCreateThread");
-		expect(smoke).toContain("mounted_ui");
-		expect(smoke).toContain('Effect.timeout("45 seconds")');
-		expect(smoke).toContain('type: "thread.create"');
 		expect(main).toContain("ARTISAN_PACKAGED_SMOKE");
 		expect(main).toContain("ARTISAN_PACKAGED_SMOKE_USER_DATA");
-		expect(utility).toContain("verify_packaged_native_runtime");
-		expect(utility).toContain("mkdirSync(dirname(environment.database_path)");
-		expect(utility).toContain("bounded_file_store_native.win32-x64-msvc.node");
-		expect(utility).toContain("koffi_native_binding_path");
+		expect(main).toContain("window.loadURL(forge_http_endpoint.toString())");
+		expect(main).toContain("forge_websocket_endpoint");
+		expect(main).toContain("has_native_bridge");
+		expect(supervisor).toContain("paths.forge_executable_path");
+		expect(supervisor).toContain("ARTISAN_STATIC_FRONTEND_ROOT");
+		expect(supervisor).toContain("ARTISAN_AUTH_TOKEN");
+		expect(supervisor).toContain("/api/pair/request");
+		expect(supervisor).not.toContain("searchParams.set");
+		expect(supervisor).not.toContain("MessagePort");
 		expect(desktop_config).toContain("koffi-win32-x64");
 		expect(desktop_config).toContain("ssr: { noExternal: true }");
+		expect(forge_config).toContain('"ae.cmd"');
+		expect(forge_config).toContain("ARTISAN_NATIVE_RUNTIME=%~dp0native-runtime");
+		expect(forge_config).toContain('"update-user-path.ps1"');
+		const builder = readFileSync(resolve(workspace_root, "desktop-builder.yml"), "utf8");
+		expect(builder).toContain("include: .scripts/package/nsis/artisan-path.nsh");
+		const path_installer = readFileSync(
+			resolve(workspace_root, ".scripts/package/nsis/artisan-path.nsh"),
+			"utf8",
+		);
+		expect(path_installer).toContain("-Action Add");
+		expect(path_installer).toContain("-Action Remove");
 	});
 
 	it("records the packaged layout and native unpack policy as release-only evidence", () => {
 		expect(release_policy).toContain("Desktop integration dependency gates");
 		expect(release_policy).toContain("expected package layout");
-		expect(release_policy).toContain(
-			"`node-pty`, the bounded native addon, and Koffi are explicitly staged",
-		);
+		expect(release_policy).toContain("`node-pty` and Koffi are explicitly staged and unpacked");
 		expect(release_policy).toContain("trusted native mouse input");
 		expect(release_policy).toContain("required release-only evidence");
 	});
 
-	it("makes packaged Electron mounted accessibility and responsive evidence mandatory", () => {
+	it("makes the separate Forge process and connected renderer mandatory", () => {
 		const verifier = readFileSync(
 			resolve(workspace_root, ".tests/deep/desktop/verify-packaged-desktop.ps1"),
 			"utf8",
@@ -118,16 +105,12 @@ describe("deep desktop release gates", () => {
 		);
 		expect(workflow).toContain("name: Required packaged desktop release gate");
 		expect(workflow).not.toContain("if: ${{ inputs.run_packaged_desktop }}");
-		expect(release_policy).toContain("keyboard/focus");
-		expect(release_policy).toContain("computed responsive-layout");
-		expect(release_policy).toMatch(/real\s+browser-zoom/);
-		expect(verifier).toContain('Stop-PackagedSmokeProcesses -Reason "preflight"');
-		expect(verifier).toContain('Stop-PackagedSmokeProcesses -Reason "cleanup"');
-		expect(verifier).toContain("unresolved bare package imports");
+		expect(verifier).toContain("$artifact_forge_executable");
+		expect(verifier).toContain("$record.forge_pid -eq $process.Id");
+		expect(verifier).toContain('StartsWith("ws://127.0.0.1:")');
+		expect(verifier).toContain("$record.renderer.has_native_bridge");
+		expect(verifier).toContain("Artisan Forge survived desktop smoke shutdown");
 		expect(verifier).toContain("Copy-Item -LiteralPath $artifact_release_root");
-		expect(verifier).toContain("outside the repository");
-		expect(verifier).toContain("is_trusted");
-		expect(verifier).toContain("active_before_click");
 	});
 
 	it("parses the packaged verifier before release execution on Windows", () => {

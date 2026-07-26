@@ -130,7 +130,9 @@ describe("orchestration repository hardening", () => {
 						_tag: "agent_message_delta",
 						artisan_run_id: accepted.run_id,
 						delta: "Partial response",
+						item_id: "assistant_1",
 						observation_id: "delta_1",
+						phase: "unspecified",
 						raw: {
 							engine_id: "engine_1",
 							frame: { text: "Partial response" },
@@ -603,7 +605,9 @@ describe("orchestration repository hardening", () => {
 			permission_mode: "on_request" as const,
 			reasoning_effort: "high" as const,
 			sandbox_mode: "workspace_write" as const,
+			service_tier: "standard" as const,
 			strict_clarification: true,
+			workflow_mode: "build" as const,
 			web_search_enabled: true,
 		};
 		const command = make_command("policy_1", "thread_1", {
@@ -688,7 +692,9 @@ describe("orchestration repository hardening", () => {
 							permission_mode: "on_request",
 							reasoning_effort: "medium",
 							sandbox_mode: "workspace_write",
+							service_tier: "standard",
 							strict_clarification: false,
+							workflow_mode: "build",
 							web_search_enabled: false,
 						},
 						type: "thread.session_policy.update",

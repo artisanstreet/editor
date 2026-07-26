@@ -11,10 +11,11 @@ import {
 	type ThreadCreatedEvent,
 } from "@artisan/protocol";
 
-import { Database } from "./database";
+import { Database, type DatabaseClient } from "./database";
 import { EventStreams, JournalCommands, JournalEvents, Threads } from "./schema";
 import { JournalNotifier } from "./journal-notifier";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import { ApplyJournalEvent } from "../conversation/index.ts";
 import { RecordThreadActivity } from "../threads/internal/thread-activity";
 import { is_settings_scope_id } from "../settings/internal-scope";
 
@@ -47,6 +48,90 @@ export interface JournalEventInput {
 	readonly run_id?: string;
 	readonly thread_id: string;
 }
+
+/**
+ * Appends one event while preserving the caller's database transaction.
+ *
+ * Repositories with additional atomic writes use this capability instead of
+ * reproducing journal stream sequencing, activity, and projection invariants.
+ */
+export const AppendJournalEventInTransaction = (
+	transaction: DatabaseClient,
+	metadata: {
+		readonly MakeId: (prefix: "event") => Effect.Effect<string>;
+		readonly Now: Effect.Effect<string>;
+	},
+	input: JournalEventInput,
+) =>
+	Effect.gen(function* () {
+		const stream_id = `thread:${input.thread_id}`;
+		const [stream] = yield* transaction
+			.select({ last_sequence: EventStreams.last_sequence })
+			.from(EventStreams)
+			.where(eq(EventStreams.stream_id, stream_id))
+			.limit(1);
+		const sequence = (stream?.last_sequence ?? 0) + 1;
+		const event_id = yield* metadata.MakeId("event");
+		const occurred_at = yield* metadata.Now;
+
+		yield* RecordThreadActivity(transaction, input.thread_id, occurred_at, input.payload);
+
+		if (stream) {
+			yield* transaction
+				.update(EventStreams)
+				.set({ last_sequence: sequence })
+				.where(eq(EventStreams.stream_id, stream_id));
+		} else {
+			yield* transaction.insert(EventStreams).values({
+				last_sequence: sequence,
+				stream_id,
+			});
+		}
+
+		const [inserted] = yield* transaction
+			.insert(JournalEvents)
+			.values({
+				agent_id: input.agent_id ?? null,
+				causation_id: input.causation_id,
+				correlation_id: input.correlation_id,
+				event_id,
+				event_type: input.payload.type,
+				...(input.idempotency_key === undefined
+					? {}
+					: { idempotency_key: input.idempotency_key }),
+				occurred_at,
+				origin: "backend",
+				payload_json: JSON.stringify(input.payload),
+				raw_origin_json: input.raw_origin ? JSON.stringify(input.raw_origin) : null,
+				run_id: input.run_id ?? null,
+				schema_version: 1,
+				stream_id,
+				stream_sequence: sequence,
+				thread_id: input.thread_id,
+			})
+			.returning({ journal_sequence: JournalEvents.sequence });
+
+		const event = {
+			...(input.agent_id ? { agent_id: input.agent_id } : {}),
+			causation_id: input.causation_id,
+			correlation_id: input.correlation_id,
+			journal_sequence: inserted!.journal_sequence,
+			kind: "event" as const,
+			message_id: event_id,
+			origin: "backend" as const,
+			payload: input.payload,
+			protocol_version: 1 as const,
+			...(input.raw_origin ? { raw_origin: input.raw_origin } : {}),
+			...(input.run_id ? { run_id: input.run_id } : {}),
+			schema_version: 1 as const,
+			sequence,
+			sent_at: occurred_at,
+			stream_id,
+			thread_id: input.thread_id,
+		} satisfies EventEnvelope;
+		yield* ApplyJournalEvent(transaction, event) as Effect.Effect<unknown, unknown, never>;
+		return event;
+	});
 
 export class CommandIdConflict extends Data.TaggedError("CommandIdConflict")<{
 	readonly message_id: string;
@@ -396,80 +481,7 @@ export const JournalStoreLive = Layer.effect(
 		const AppendEvent = (input: JournalEventInput) =>
 			database.client
 				.transaction((transaction) =>
-					Effect.gen(function* () {
-						const stream_id = `thread:${input.thread_id}`;
-						const [stream] = yield* transaction
-							.select({ last_sequence: EventStreams.last_sequence })
-							.from(EventStreams)
-							.where(eq(EventStreams.stream_id, stream_id))
-							.limit(1);
-						const sequence = (stream?.last_sequence ?? 0) + 1;
-						const event_id = yield* metadata.MakeId("event");
-						const occurred_at = yield* metadata.Now;
-
-						yield* RecordThreadActivity(
-							transaction,
-							input.thread_id,
-							occurred_at,
-							input.payload,
-						);
-
-						if (stream) {
-							yield* transaction
-								.update(EventStreams)
-								.set({ last_sequence: sequence })
-								.where(eq(EventStreams.stream_id, stream_id));
-						} else {
-							yield* transaction.insert(EventStreams).values({
-								last_sequence: sequence,
-								stream_id,
-							});
-						}
-
-						const [inserted] = yield* transaction
-							.insert(JournalEvents)
-							.values({
-								agent_id: input.agent_id ?? null,
-								causation_id: input.causation_id,
-								correlation_id: input.correlation_id,
-								event_id,
-								event_type: input.payload.type,
-								...(input.idempotency_key === undefined
-									? {}
-									: { idempotency_key: input.idempotency_key }),
-								occurred_at,
-								origin: "backend",
-								payload_json: JSON.stringify(input.payload),
-								raw_origin_json: input.raw_origin
-									? JSON.stringify(input.raw_origin)
-									: null,
-								run_id: input.run_id ?? null,
-								schema_version: 1,
-								stream_id,
-								stream_sequence: sequence,
-								thread_id: input.thread_id,
-							})
-							.returning({ journal_sequence: JournalEvents.sequence });
-
-						return {
-							...(input.agent_id ? { agent_id: input.agent_id } : {}),
-							causation_id: input.causation_id,
-							correlation_id: input.correlation_id,
-							journal_sequence: inserted!.journal_sequence,
-							kind: "event" as const,
-							message_id: event_id,
-							origin: "backend" as const,
-							payload: input.payload,
-							protocol_version: 1 as const,
-							...(input.raw_origin ? { raw_origin: input.raw_origin } : {}),
-							...(input.run_id ? { run_id: input.run_id } : {}),
-							schema_version: 1 as const,
-							sequence,
-							sent_at: occurred_at,
-							stream_id,
-							thread_id: input.thread_id,
-						} satisfies EventEnvelope;
-					}),
+					AppendJournalEventInTransaction(transaction, metadata, input),
 				)
 				.pipe(
 					Effect.mapError(normalize_journal_error),

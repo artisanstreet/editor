@@ -1,4 +1,4 @@
-import { Context, Deferred, Effect, Layer, Ref, Schema, Scope } from "effect";
+import { Context, Deferred, Effect, Layer, Ref, Schema, Scope, Stream } from "effect";
 import { EngineJsonlFramer, EngineProcessFactory } from "@artisan/engines";
 
 import {
@@ -158,6 +158,12 @@ interface PendingRequest {
 	readonly waiter: Deferred.Deferred<unknown, McpTransportError>;
 }
 
+interface RequestState {
+	readonly close_started: boolean;
+	readonly next_id: number;
+	readonly pending: ReadonlyMap<number, PendingRequest>;
+}
+
 const encoder = new TextEncoder();
 
 function transport_error(operation: McpOperation, state: McpHealth) {
@@ -213,14 +219,18 @@ export const EngineProcessStdioMcpDriverLive = Layer.effect(
 						"idle",
 					);
 					const initialized = yield* Deferred.make<McpInitialize, McpTransportError>();
-					const pending = new Map<number, PendingRequest>();
-					let next_id = 1;
-					let process_close_started = false;
+					const requests = yield* Ref.make<RequestState>({
+						close_started: false,
+						next_id: 1,
+						pending: new Map(),
+					});
 					const FailAndClearPending = (health: McpHealth) =>
 						Effect.gen(function* () {
-							const requests = [...pending.values()];
-							pending.clear();
-							yield* Effect.forEach(requests, ({ operation, waiter }) =>
+							const pending = yield* Ref.modify(requests, (current) => [
+								[...current.pending.values()],
+								{ ...current, pending: new Map() },
+							]);
+							yield* Effect.forEach(pending, ({ operation, waiter }) =>
 								Deferred.fail(waiter, transport_error(operation, health)),
 							);
 						});
@@ -234,8 +244,11 @@ export const EngineProcessStdioMcpDriverLive = Layer.effect(
 							)
 								return;
 							yield* Ref.set(state, health);
-							if (!process_close_started) {
-								process_close_started = true;
+							const close_process = yield* Ref.modify(requests, (current) => [
+								!current.close_started,
+								{ ...current, close_started: true },
+							]);
+							if (close_process) {
 								yield* process.Close.pipe(Effect.ignore);
 							}
 							yield* FailAndClearPending(health);
@@ -245,7 +258,6 @@ export const EngineProcessStdioMcpDriverLive = Layer.effect(
 							);
 						});
 					const CloseProcess = Terminate("closed");
-					yield* Effect.addFinalizer(() => CloseProcess);
 					const framer = new EngineJsonlFramer({
 						max_frame_bytes: launch.max_message_bytes,
 					});
@@ -254,50 +266,66 @@ export const EngineProcessStdioMcpDriverLive = Layer.effect(
 							payload,
 						).pipe(
 							Effect.mapError(() => transport_error("health", "unhealthy")),
-							Effect.flatMap((message) => {
-								if (!("result" in message) && !("error" in message))
-									return Effect.void;
-								if (
-									message.id <= 0 ||
-									(message.result === undefined) === (message.error === undefined)
-								)
-									return Effect.fail(transport_error("health", "unhealthy"));
-								const request = pending.get(message.id);
-								if (!request) return Effect.void;
-								pending.delete(message.id);
-								return message.error === undefined
-									? Deferred.succeed(request.waiter, message.result)
-									: Deferred.fail(
-											request.waiter,
-											transport_error(request.operation, "unhealthy"),
+							Effect.flatMap((message) =>
+								Effect.gen(function* () {
+									if (!("result" in message) && !("error" in message)) return;
+									if (
+										message.id <= 0 ||
+										(message.result === undefined) ===
+											(message.error === undefined)
+									)
+										return yield* Effect.fail(
+											transport_error("health", "unhealthy"),
 										);
-							}),
+									const request = yield* Ref.modify(requests, (current) => {
+										const request = current.pending.get(message.id);
+										if (request === undefined)
+											return [undefined, current] as const;
+										const pending = new Map(current.pending);
+										pending.delete(message.id);
+										return [request, { ...current, pending }] as const;
+									});
+									if (!request) return;
+									return yield* message.error === undefined
+										? Deferred.succeed(request.waiter, message.result)
+										: Deferred.fail(
+												request.waiter,
+												transport_error(request.operation, "unhealthy"),
+											);
+								}),
+							),
 						);
-					const PumpStdout = Effect.tryPromise({
-						try: async () => {
-							for await (const chunk of process.Stdout)
-								for (const payload of framer.Push(chunk))
-									await Effect.runPromise(RouteIncoming(payload));
-							framer.Finish();
-						},
-						catch: () => transport_error("health", "unhealthy"),
-					}).pipe(
+					const PumpStdout = Stream.fromAsyncIterable(process.Stdout, () =>
+						transport_error("health", "unhealthy"),
+					).pipe(
+						Stream.runForEach((chunk) =>
+							Effect.forEach(framer.Push(chunk), RouteIncoming, {
+								discard: true,
+							}),
+						),
+						Effect.andThen(
+							Effect.try({
+								try: () => framer.Finish(),
+								catch: () => transport_error("health", "unhealthy"),
+							}),
+						),
 						Effect.matchEffect({
 							onFailure: () => Terminate("unhealthy"),
 							onSuccess: () => Terminate("crashed"),
 						}),
 					);
-					const PumpStderr = Effect.tryPromise({
-						try: async () => {
-							let bytes = 0;
-							for await (const chunk of process.Stderr) {
-								bytes += chunk.byteLength;
-								if (bytes > launch.max_stderr_bytes)
-									throw new Error("MCP stderr exceeded bound");
-							}
-						},
-						catch: () => transport_error("health", "crashed"),
-					}).pipe(
+					const PumpStderr = Stream.fromAsyncIterable(process.Stderr, () =>
+						transport_error("health", "crashed"),
+					).pipe(
+						Stream.runFoldEffect(
+							() => 0,
+							(bytes, chunk) => {
+								const total = bytes + chunk.byteLength;
+								return total <= launch.max_stderr_bytes
+									? Effect.succeed(total)
+									: Effect.fail(transport_error("health", "crashed"));
+							},
+						),
 						Effect.catch(() => Terminate("crashed")),
 						Effect.asVoid,
 					);
@@ -308,6 +336,8 @@ export const EngineProcessStdioMcpDriverLive = Layer.effect(
 					yield* Effect.forkScoped(PumpStdout);
 					yield* Effect.forkScoped(PumpStderr);
 					yield* Effect.forkScoped(WatchExit);
+					/** Close first so blocked async iterators wake before their scoped fibers stop. */
+					yield* Effect.addFinalizer(() => CloseProcess);
 					const Request = (
 						operation: McpOperation,
 						method: string,
@@ -318,15 +348,23 @@ export const EngineProcessStdioMcpDriverLive = Layer.effect(
 							const health = yield* Ref.get(state);
 							if (health !== "connected")
 								return yield* Effect.fail(transport_error(operation, health));
-							const id = next_id++;
 							const waiter = yield* Deferred.make<unknown, McpTransportError>();
-							const accepted = yield* Effect.sync(() => {
-								if (pending.size >= launch.max_pending_requests) return false;
+							const id = yield* Ref.modify(requests, (current) => {
+								if (current.pending.size >= launch.max_pending_requests)
+									return [undefined, current] as const;
+								const id = current.next_id;
+								const pending = new Map(current.pending);
 								pending.set(id, { operation, waiter });
-								return true;
+								return [id, { ...current, next_id: id + 1, pending }] as const;
 							});
-							if (!accepted)
+							if (id === undefined)
 								return yield* Effect.fail(transport_error(operation, "unhealthy"));
+							const RemovePending = Ref.update(requests, (current) => {
+								if (!current.pending.has(id)) return current;
+								const pending = new Map(current.pending);
+								pending.delete(id);
+								return { ...current, pending };
+							});
 							yield* process
 								.Write(
 									encoder.encode(
@@ -335,13 +373,13 @@ export const EngineProcessStdioMcpDriverLive = Layer.effect(
 								)
 								.pipe(
 									Effect.mapError(() => transport_error(operation, "crashed")),
-									Effect.onError(() => Effect.sync(() => pending.delete(id))),
+									Effect.onError(() => RemovePending),
 								);
 							return yield* WithTimeout(
 								Deferred.await(waiter),
 								timeout_ms,
 								transport_error(operation, "unhealthy"),
-							).pipe(Effect.ensuring(Effect.sync(() => pending.delete(id))));
+							).pipe(Effect.ensuring(RemovePending));
 						});
 					const InitializeOnce = Request(
 						"initialize",

@@ -4,6 +4,10 @@ import { defineConfig } from "vite";
 
 /** Electron preloads are CommonJS even though the privileged main runtime is ESM. */
 export default defineConfig({
+	// Sandboxed preloads may only require Electron and a small Node subset.
+	// Bundle every application dependency so the installed shell has no
+	// workspace/node_modules dependency at runtime.
+	ssr: { noExternal: true },
 	build: {
 		outDir: ".dist/desktop",
 		rollupOptions: {

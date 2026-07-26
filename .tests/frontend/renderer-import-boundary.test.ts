@@ -64,7 +64,14 @@ describe("frontend renderer import boundary", () => {
 		);
 
 		for (const specifier of artisan_imports) {
-			expect(["@artisan/protocol", "@artisan/transport/client"]).toContain(specifier);
+			expect([
+				"@artisan/catalog",
+				"@artisan/data/composer/placeholders.json",
+				"@artisan/data/file-icons/associations.json",
+				"@artisan/protocol",
+				"@artisan/transport/client",
+				"@artisan/transport/websocket/client",
+			]).toContain(specifier);
 		}
 	});
 });

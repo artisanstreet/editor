@@ -1,4 +1,4 @@
-import { Context, Data, Effect, Exit, Layer, Scope } from "effect";
+import { Clock, Context, Data, Effect, Exit, Layer, Scope } from "effect";
 
 import { ThreadErasure, type ThreadErasureFailure } from "./thread-erasure";
 import { ThreadRetentionPolicyService } from "./thread-retention-policy";
@@ -37,7 +37,9 @@ export class ThreadRetention extends Context.Service<
 
 /** Uses the system UTC clock for production retention decisions. */
 export const ThreadRetentionClockLive = Layer.succeed(ThreadRetentionClock, {
-	Now: Effect.sync(() => new Date().toISOString()),
+	Now: Clock.currentTimeMillis.pipe(
+		Effect.map((milliseconds) => new Date(milliseconds).toISOString()),
+	),
 });
 
 /** Runs production cleanup hourly while the backend runtime remains scoped. */

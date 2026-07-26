@@ -1,7 +1,6 @@
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
-import { NodeCrypto } from "@effect/platform-node-shared";
+import { NodeCrypto, NodeFileSystem, NodePath } from "@effect/platform-node-shared";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import * as FetchHttpClient from "effect/unstable/http/FetchHttpClient";
 
@@ -10,6 +9,7 @@ import {
 	EngineProcessFactoryLive,
 	make_engine_registry_layer,
 } from "@artisan/engines";
+import { MakeSnowflakeIdLive } from "@artisan/protocol";
 
 import { AgentGraphOrchestratorLive } from "../orchestration/agent-graph-orchestrator";
 import { AgentGraphRepositoryLive } from "../orchestration/agent-graph-repository";
@@ -23,10 +23,8 @@ import {
 } from "../filesystem/workspace-filesystem-registry";
 import {
 	EmptyWorkspaceBoundedRegularFileStoreRegistryLive,
-	WorkspaceBoundedRegularFileStoreRegistrationError,
 	WorkspaceBoundedRegularFileStoreRegistry,
 } from "../filesystem/workspace-bounded-regular-file-store-registry";
-import { NativeBoundedRegularFileStoreInitializationError } from "../filesystem/native-bounded-regular-file-store";
 import { NodeProcessRunnerLive } from "../git/node-process-runner";
 import { GitMutationDriverLive } from "../git/git-mutation-driver";
 import { GitReadServiceLive } from "../git/git-read-service";
@@ -47,6 +45,7 @@ import {
 	ProjectionRebuildServiceLive,
 } from "../persistence/projection-rebuild-service";
 import { TranscriptReadModelLive } from "../persistence/transcript-read-model";
+import { ConversationReadModelLive } from "../conversation/index.ts";
 import { CommandRouterLive } from "../protocol/command-router";
 import {
 	DefaultProtocolConnectionOptions,
@@ -67,6 +66,10 @@ import {
 	ThreadMetadataRefinerLive,
 } from "../threads/thread-metadata-refiner";
 import { make_node_project_locator_layer, ProjectLocator } from "../threads/project-locator";
+import {
+	make_project_directory_service_layer,
+	ProjectDirectoryService,
+} from "../projects/project-directory-service";
 import {
 	ThreadProjectAffinityCoordinatorDisabled,
 	ThreadProjectAffinityCoordinatorLive,
@@ -89,6 +92,10 @@ import { TerminalDriver } from "../terminal/terminal-driver";
 import { TerminalRepositoryLive } from "../terminal/terminal-repository";
 import { TerminalSessionServiceLive } from "../terminal/terminal-sessions";
 import { RuntimeMetadata, RuntimeMetadataLive } from "./runtime-metadata";
+import {
+	DesktopEngineConfigurationError,
+	ResolveBackendRuntimeConfiguration,
+} from "./backend-runtime-config";
 import { GlobalGuidanceRepositoryLive } from "../guidance/guidance-repository";
 import {
 	make_global_guidance_service_layer,
@@ -204,6 +211,8 @@ export interface BackendOptions {
 	readonly preview_inspection_connector?: Layer.Layer<PreviewInspectionConnector>;
 	readonly preview_rich_links?: Layer.Layer<RichLinkMetadata | RichLinkAssetStore>;
 	readonly project_locator?: Layer.Layer<ProjectLocator>;
+	readonly project_directory_roots?: ReadonlyArray<string>;
+	readonly project_directory_service?: Layer.Layer<ProjectDirectoryService>;
 	readonly retention_clock?: Layer.Layer<ThreadRetentionClock>;
 	readonly retention_scheduler?: Layer.Layer<ThreadRetentionScheduler>;
 	readonly routine_installer?: Layer.Layer<RoutineInstaller>;
@@ -222,11 +231,7 @@ export interface BackendOptions {
 		WorkspaceGitRegistry,
 		WorkspaceGitRegistrationError
 	>;
-	readonly workspace_bounded_regular_file_store_registry?: Layer.Layer<
-		WorkspaceBoundedRegularFileStoreRegistry,
-		| NativeBoundedRegularFileStoreInitializationError
-		| WorkspaceBoundedRegularFileStoreRegistrationError
-	>;
+	readonly workspace_bounded_regular_file_store_registry?: Layer.Layer<WorkspaceBoundedRegularFileStoreRegistry>;
 }
 
 /** Configures platform-native provider discovery for the production desktop composition. */
@@ -256,10 +261,12 @@ export function make_backend_layer(options: BackendOptions) {
 		...DefaultProtocolConnectionOptions,
 		...options.protocol,
 	};
+	const domain_ids = MakeSnowflakeIdLive(1).pipe(Layer.orDie);
 	const infrastructure = Layer.mergeAll(
 		make_database_layer(options),
 		options.runtime_metadata ?? RuntimeMetadataLive,
 		JournalNotifierLive,
+		domain_ids,
 	);
 	const projection_rebuild = ProjectionRebuildServiceLive.pipe(
 		Layer.provideMerge(ProjectionRebuildBarrierLive),
@@ -270,6 +277,7 @@ export function make_backend_layer(options: BackendOptions) {
 		OrchestrationRepositoryLive,
 		ThreadReadModelLive,
 		TranscriptReadModelLive,
+		ConversationReadModelLive,
 	).pipe(Layer.provideMerge(infrastructure));
 	const workspace_evidence = WorkspaceEvidenceRecorderLive.pipe(Layer.provideMerge(persistence));
 	const workspace_changes = WorkspaceChangeRepositoryLive.pipe(
@@ -401,6 +409,30 @@ export function make_backend_layer(options: BackendOptions) {
 					Layer.provideMerge(persistence),
 					Layer.provideMerge(infrastructure),
 				);
+	const project_locator =
+		options.project_locator ??
+		make_node_project_locator_layer().pipe(Layer.provideMerge(NodeProcessRunnerLive));
+	const project_directories =
+		options.project_directory_service ??
+		Layer.unwrap(
+			ResolveBackendRuntimeConfiguration().pipe(
+				Effect.map((runtime_config) =>
+					make_project_directory_service_layer(
+						options.project_directory_roots ?? [
+							runtime_config.home_directory,
+							runtime_config.current_directory,
+						],
+					),
+				),
+				Effect.provide(NodeFileSystem.layer),
+				Effect.provide(NodePath.layer),
+			),
+		).pipe(
+			Layer.provideMerge(project_locator),
+			Layer.provideMerge(NodeFileSystem.layer),
+			Layer.provideMerge(NodePath.layer),
+			Layer.provideMerge(infrastructure),
+		);
 	const retention_policy = ThreadRetentionPolicyServiceLive.pipe(Layer.provideMerge(persistence));
 	const threads = ThreadCommandsLive.pipe(
 		Layer.provideMerge(persistence),
@@ -570,6 +602,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(retention),
 		Layer.provideMerge(metadata_refinement),
 		Layer.provideMerge(project_affinity_coordination),
+		Layer.provideMerge(project_directories),
 		Layer.provideMerge(guidance),
 		Layer.provideMerge(git),
 		Layer.provideMerge(model_behaviour),
@@ -600,26 +633,17 @@ export function make_backend_layer(options: BackendOptions) {
 }
 
 function make_desktop_guidance_registry(options: DesktopBackendOptions) {
-	const configured_home_directory = options.guidance_platform?.home_directory;
-	const home_directory = configured_home_directory ?? homedir();
-	const codex_home =
-		options.guidance_platform?.codex_home ??
-		(configured_home_directory === undefined ? process.env.CODEX_HOME : undefined) ??
-		join(home_directory, ".codex");
-
-	return make_platform_guidance_provider_registry_layer({
-		codex_agents_path: join(codex_home, "AGENTS.md"),
-		codex_override_path: join(codex_home, "AGENTS.override.md"),
-	}).pipe(Layer.provide(GuidanceFileStoreLive));
+	return ResolveBackendRuntimeConfiguration(options.guidance_platform).pipe(
+		Effect.map((runtime_config) =>
+			make_platform_guidance_provider_registry_layer({
+				codex_agents_path: join(runtime_config.codex_home, "AGENTS.md"),
+				codex_override_path: join(runtime_config.codex_home, "AGENTS.override.md"),
+			}).pipe(Layer.provide(GuidanceFileStoreLive)),
+		),
+	);
 }
 
 function make_desktop_model_behaviour_registry(options: DesktopBackendOptions) {
-	const configured_home_directory = options.model_behaviour_platform?.home_directory;
-	const home_directory = configured_home_directory ?? homedir();
-	const codex_home =
-		options.model_behaviour_platform?.codex_home ??
-		(configured_home_directory === undefined ? process.env.CODEX_HOME : undefined) ??
-		join(home_directory, ".codex");
 	const model_behaviour_directory = join(dirname(options.database_path), "model-behaviour");
 	const probe = make_codex_model_behaviour_probe_layer({
 		...(options.model_behaviour_platform?.codex_command === undefined
@@ -628,19 +652,20 @@ function make_desktop_model_behaviour_registry(options: DesktopBackendOptions) {
 		cwd: dirname(options.database_path),
 	}).pipe(Layer.provide(NodeProcessRunnerLive));
 
-	return make_desktop_model_behaviour_provider_registry_layer({
-		backups_directory:
-			options.model_behaviour_platform?.backups_directory ??
-			join(model_behaviour_directory, "backups"),
-		codex_config_path: join(codex_home, "config.toml"),
-	}).pipe(Layer.provideMerge(ModelBehaviourConfigFilesLive), Layer.provideMerge(probe));
+	return ResolveBackendRuntimeConfiguration(options.model_behaviour_platform).pipe(
+		Effect.map((runtime_config) =>
+			make_desktop_model_behaviour_provider_registry_layer({
+				backups_directory:
+					options.model_behaviour_platform?.backups_directory ??
+					join(model_behaviour_directory, "backups"),
+				codex_config_path: join(runtime_config.codex_home, "config.toml"),
+			}).pipe(Layer.provideMerge(ModelBehaviourConfigFilesLive), Layer.provideMerge(probe)),
+		),
+	);
 }
 
 /** Builds the production desktop layer with opinionated platform guidance discovery. */
 export function make_desktop_backend_layer(options: DesktopBackendOptions) {
-	if ((options.engines ?? []).some((engine) => engine.Descriptor.id !== "codex")) {
-		throw new Error("Desktop production accepts only the Codex engine.");
-	}
 	const production_capability_transports = CapabilityTransportRegistryLive.pipe(
 		Layer.provideMerge(EngineProcessStdioMcpDriverLive),
 		Layer.provideMerge(EngineProcessFactoryLive),
@@ -648,36 +673,55 @@ export function make_desktop_backend_layer(options: DesktopBackendOptions) {
 		Layer.provideMerge(options.secret_store ?? EmptySecretStoreLive),
 		Layer.provideMerge(FetchHttpClient.layer),
 	);
-	return make_backend_layer({
-		...options,
-		capability_transport_registry:
-			options.capability_transport_registry ?? production_capability_transports,
-		routine_source_inspector:
-			options.routine_source_inspector ?? make_local_routine_source_inspector_layer(),
-		routine_installer:
-			options.routine_installer ??
-			make_local_routine_installer_layer({
-				install_root: join(dirname(options.database_path), "marketplace", "routines"),
-			}),
-		...(options.npx_skills_adapter !== undefined
-			? { npx_skills_adapter: options.npx_skills_adapter }
-			: options.npx_skills_process === undefined
-				? {}
-				: {
-						npx_skills_adapter: make_npx_skills_process_adapter_layer(
-							options.npx_skills_process,
-						).pipe(Layer.provide(EngineProcessFactoryLive)),
+	return Layer.unwrap(
+		Effect.gen(function* () {
+			if ((options.engines ?? []).some((engine) => engine.Descriptor.id !== "codex")) {
+				return yield* new DesktopEngineConfigurationError({
+					message: "Desktop production accepts only the Codex engine.",
+				});
+			}
+
+			const guidance_provider_registry =
+				options.guidance_provider_registry ??
+				(yield* make_desktop_guidance_registry(options));
+			const model_behaviour_provider_registry =
+				options.model_behaviour_provider_registry ??
+				(yield* make_desktop_model_behaviour_registry(options));
+
+			return make_backend_layer({
+				...options,
+				capability_transport_registry:
+					options.capability_transport_registry ?? production_capability_transports,
+				routine_source_inspector:
+					options.routine_source_inspector ?? make_local_routine_source_inspector_layer(),
+				routine_installer:
+					options.routine_installer ??
+					make_local_routine_installer_layer({
+						install_root: join(
+							dirname(options.database_path),
+							"marketplace",
+							"routines",
+						),
 					}),
-		guidance_provider_registry:
-			options.guidance_provider_registry ?? make_desktop_guidance_registry(options),
-		model_behaviour_provider_registry:
-			options.model_behaviour_provider_registry ??
-			make_desktop_model_behaviour_registry(options),
-		project_locator:
-			options.project_locator ??
-			make_node_project_locator_layer().pipe(Layer.provide(NodeProcessRunnerLive)),
-		thread_metadata_refiner: options.thread_metadata_refiner ?? ThreadMetadataRefinerLive,
-	});
+				...(options.npx_skills_adapter !== undefined
+					? { npx_skills_adapter: options.npx_skills_adapter }
+					: options.npx_skills_process === undefined
+						? {}
+						: {
+								npx_skills_adapter: make_npx_skills_process_adapter_layer(
+									options.npx_skills_process,
+								).pipe(Layer.provide(EngineProcessFactoryLive)),
+							}),
+				guidance_provider_registry,
+				model_behaviour_provider_registry,
+				project_locator:
+					options.project_locator ??
+					make_node_project_locator_layer().pipe(Layer.provide(NodeProcessRunnerLive)),
+				thread_metadata_refiner:
+					options.thread_metadata_refiner ?? ThreadMetadataRefinerLive,
+			});
+		}).pipe(Effect.provide(NodeFileSystem.layer), Effect.provide(NodePath.layer)),
+	);
 }
 
 export function make_backend_runtime(options: BackendOptions) {

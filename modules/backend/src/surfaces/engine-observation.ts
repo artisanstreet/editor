@@ -100,6 +100,13 @@ export const SurfaceFromEngineObservation = (
 				kind: "compaction",
 				summary: summary("Compaction", observation.state),
 			};
+		case "retry":
+			return {
+				...base,
+				category: "native_action",
+				kind: "provider_diagnostic",
+				summary: summary("Retry", observation.attempt_state),
+			};
 		case "protocol_diagnostic":
 		case "process_diagnostic":
 			return {

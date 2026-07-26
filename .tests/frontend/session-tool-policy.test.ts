@@ -8,7 +8,9 @@ const SessionPolicy = (overrides: Partial<ThreadSessionPolicy> = {}): ThreadSess
 	permission_mode: "on_request",
 	reasoning_effort: "medium",
 	sandbox_mode: "workspace_write",
+	service_tier: "standard",
 	strict_clarification: false,
+	workflow_mode: "build",
 	web_search_enabled: false,
 	...overrides,
 });

@@ -78,7 +78,7 @@ describe("Codex process factory", () => {
 				yield* handle.Close;
 
 				return performance.now() - started_at;
-			}).pipe(Effect.provide(CodexProcessFactoryLive)),
+			}).pipe(Effect.scoped, Effect.provide(CodexProcessFactoryLive)),
 		);
 
 		expect(elapsed_ms).toBeLessThan(750);
@@ -104,7 +104,7 @@ describe("Codex process factory", () => {
 					exit: yield* handle.Exit,
 					output: yield* Fiber.join(output_fiber),
 				};
-			}).pipe(Effect.provide(CodexProcessFactoryLive)),
+			}).pipe(Effect.scoped, Effect.provide(CodexProcessFactoryLive)),
 		);
 
 		expect(result.output).toBe("hello\n");
@@ -120,7 +120,7 @@ describe("Codex process factory", () => {
 				yield* handle.Kill();
 
 				return yield* handle.Exit;
-			}).pipe(Effect.provide(CodexProcessFactoryLive)),
+			}).pipe(Effect.scoped, Effect.provide(CodexProcessFactoryLive)),
 		);
 
 		if (process.platform === "win32") {
@@ -139,10 +139,66 @@ describe("Codex process factory", () => {
 				yield* handle.Close;
 
 				return yield* handle.Exit;
-			}).pipe(Effect.provide(CodexProcessFactoryLive)),
+			}).pipe(Effect.scoped, Effect.provide(CodexProcessFactoryLive)),
 		);
 
 		expect(exit).not.toEqual({ code: 0, signal: null });
+	});
+
+	it("cleans up the process tree when its owning scope is interrupted", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "artisan-engine-interruption-"));
+		const pid_path = join(directory, "children.pid");
+
+		try {
+			const child_pids = await Effect.runPromise(
+				Effect.gen(function* () {
+					const owner = yield* Effect.gen(function* () {
+						const factory = yield* CodexProcessFactory;
+
+						yield* factory.Spawn({
+							args: [spawning_children_fixture_path],
+							command: process.execPath,
+							env: { ...process.env, FAKE_CHILD_PID_FILE: pid_path },
+						});
+						yield* Effect.never;
+					}).pipe(
+						Effect.scoped,
+						Effect.provide(CodexProcessFactoryLive),
+						Effect.forkChild,
+					);
+					const pids = yield* Effect.promise(async () => {
+						for (let attempt = 0; attempt < 100; attempt += 1) {
+							try {
+								const observed = (await readFile(pid_path, "utf8"))
+									.trim()
+									.split("\n")
+									.map(Number);
+
+								if (observed.length >= 2) {
+									return observed;
+								}
+							} catch {
+								/** The fixture has not written its first child yet. */
+							}
+
+							await new Promise((resolve) => setTimeout(resolve, 10));
+						}
+
+						throw new Error("Timed out waiting for interrupted process tree");
+					});
+
+					yield* Fiber.interrupt(owner);
+
+					return pids;
+				}),
+			);
+
+			await expect
+				.poll(() => child_pids.every((pid) => !is_process_alive(pid)), { timeout: 5_000 })
+				.toBe(true);
+		} finally {
+			await rm(directory, { force: true, recursive: true });
+		}
 	});
 
 	it("cleans up a grandchild when stdin close makes the parent exit", async () => {
@@ -189,7 +245,7 @@ describe("Codex process factory", () => {
 						}
 						throw new Error("Timed out waiting for grandchild exit");
 					});
-				}).pipe(Effect.provide(CodexProcessFactoryLive)),
+				}).pipe(Effect.scoped, Effect.provide(CodexProcessFactoryLive)),
 			);
 		} finally {
 			await rm(directory, { force: true, recursive: true });
@@ -235,7 +291,7 @@ describe("Codex process factory", () => {
 						.trim()
 						.split("\n")
 						.map(Number);
-				}).pipe(Effect.provide(CodexProcessFactoryLive)),
+				}).pipe(Effect.scoped, Effect.provide(CodexProcessFactoryLive)),
 			);
 
 			await expect
@@ -314,8 +370,11 @@ describe("Codex process factory", () => {
 						yield* first_handle.Close;
 						yield* first_handle.Exit;
 
-						return pids;
-					}).pipe(Effect.provide(CodexProcessFactoryLive)),
+						return {
+							...pids,
+							second_was_alive: pids.second.some(is_process_alive),
+						};
+					}).pipe(Effect.scoped, Effect.provide(CodexProcessFactoryLive)),
 				);
 
 				await expect
@@ -323,7 +382,7 @@ describe("Codex process factory", () => {
 						timeout: 2_000,
 					})
 					.toBe(true);
-				expect(result.second.some(is_process_alive)).toBe(true);
+				expect(result.second_was_alive).toBe(true);
 			} finally {
 				if (second_handle) {
 					await Effect.runPromise(second_handle.Close);
@@ -380,7 +439,7 @@ describe("Codex process factory", () => {
 						yield* handle.Write(encoder.encode(prompt));
 						yield* handle.EndInput;
 						yield* handle.Exit;
-					}).pipe(Effect.provide(CodexProcessFactoryLive)),
+					}).pipe(Effect.scoped, Effect.provide(CodexProcessFactoryLive)),
 				);
 
 				expect(JSON.parse(await readFile(invocation_path, "utf8"))).toEqual([

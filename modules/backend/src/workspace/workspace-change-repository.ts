@@ -1,19 +1,9 @@
 import { and, asc, desc, eq, gte, ne, or } from "drizzle-orm";
-import { Context, Crypto, Data, Effect, Encoding, Layer, Option, Schema } from "effect";
+import { Crypto, Effect, Encoding, Layer, Option, Schema } from "effect";
 
 import {
 	ContentIdentity,
-	Identifier,
-	IsoDateTime,
-	RawOrigin,
-	WorkspaceChange,
-	WorkspaceConflict,
 	WorkspaceConflictUpdatedEvent,
-	WorkspaceChangeUpdatedEvent,
-	WorkspaceReviewOutcome,
-	WorkspaceReviewerKind,
-	WorkspaceReviewText,
-	WorkspacePath,
 	workspace_diff_context_lines,
 	workspace_diff_format_version,
 	workspace_diff_maximum_bytes,
@@ -31,7 +21,6 @@ import { Database } from "../persistence/database";
 import { JournalNotifier } from "../persistence/journal-notifier";
 import { RetrySqliteWrite } from "../persistence/sqlite-write-retry";
 import {
-	EventStreams,
 	AgentRuns,
 	Assignments,
 	OrchestrationGroups,
@@ -48,6 +37,7 @@ import {
 	WorkspaceMutationAuthorities,
 } from "../persistence/schema";
 import {
+	AppendJournalEventInTransaction,
 	CommandIdConflict,
 	JournalInvariantError,
 	JournalStoreFailure,
@@ -58,268 +48,47 @@ import {
 	type PreparedWorkspaceChangeDiff,
 } from "./workspace-change-diff-service";
 import { workspace_diff_patch_matches_path } from "./workspace-change-diff-format";
-
-const WorkspaceChangeLifecycle = Schema.Literals(["claimed", "applied", "committed", "rejected"]);
-const RequestFingerprint = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/));
-const JournalSequence = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));
-
-const WorkspaceChangeOperationBase = {
-	change_id: Identifier,
-	diff_format_version: Schema.Literal(workspace_diff_format_version),
-	evidence_recorded: Schema.Boolean,
-	journal_sequence: Schema.optional(JournalSequence),
-	lifecycle: WorkspaceChangeLifecycle,
-	message_id: Identifier,
-	request_fingerprint: RequestFingerprint,
-	sent_at: IsoDateTime,
-	thread_id: Identifier,
-};
-
-const WorkspaceChangeOperation = Schema.Union([
-	Schema.Struct({
-		...WorkspaceChangeOperationBase,
-		action: Schema.Literal("replace"),
-		agent_id: Identifier,
-		expected_identity: ContentIdentity,
-		path: WorkspacePath,
-		raw_origin: Schema.optional(RawOrigin),
-		result_identity: ContentIdentity,
-		run_id: Identifier,
-		workspace_id: Identifier,
-	}),
-	Schema.Struct({
-		...WorkspaceChangeOperationBase,
-		action: Schema.Literal("review"),
-		reviewer_kind: WorkspaceReviewerKind,
-		assignment_id: Schema.optional(Identifier),
-		comment: Schema.optional(WorkspaceReviewText),
-		group_id: Schema.optional(Identifier),
-		outcome: Schema.optional(WorkspaceReviewOutcome),
-		raw_origin: Schema.optional(RawOrigin),
-		reviewer_agent_id: Schema.optional(Identifier),
-		reviewer_run_id: Schema.optional(Identifier),
-	}),
-	Schema.Struct({
-		...WorkspaceChangeOperationBase,
-		action: Schema.Literal("rollback"),
-		expected_identity: ContentIdentity,
-	}),
-]);
-
-const WorkspaceChangeCommandIdentity = Schema.Struct({
-	action: Schema.Literals(["replace", "review", "rollback"]),
-	change_id: Identifier,
-	request_fingerprint: RequestFingerprint,
-	type: Schema.Literal("workspace.change.command"),
-});
-
-const WorkspaceChangeJournalEvent = Schema.Struct({
-	causation_id: Identifier,
-	correlation_id: Identifier,
-	event_id: Identifier,
-	journal_sequence: JournalSequence,
-	occurred_at: IsoDateTime,
-	payload: WorkspaceChangeUpdatedEvent,
-	sequence: JournalSequence,
-});
-
-/** Identifies a replacement operation before filesystem mutation. */
-export interface ClaimReplace {
-	readonly _tag: "replace";
-	readonly agent_id: string;
-	readonly change_id: string;
-	readonly expected_before: ContentIdentityValue;
-	readonly intended_after: ContentIdentityValue;
-	readonly message_id: string;
-	readonly path: string;
-	readonly raw_origin?: RawOriginValue;
-	readonly request_fingerprint: string;
-	readonly run_id: string;
-	readonly sent_at: string;
-	readonly thread_id: string;
-	readonly workspace_id: string;
-}
-
-/** Identifies a user review operation before projection transition. */
-export interface ClaimReview {
-	readonly _tag: "review";
-	readonly change_id: string;
-	readonly message_id: string;
-	readonly request_fingerprint: string;
-	readonly sent_at: string;
-	readonly thread_id: string;
-	readonly reviewer_kind?: "user" | "graph";
-	readonly assignment_id?: string;
-	readonly comment?: string;
-	readonly group_id?: string;
-	readonly outcome?: "approved" | "changes_requested";
-	readonly raw_origin?: RawOriginValue;
-	readonly reviewer_agent_id?: string;
-	readonly reviewer_run_id?: string;
-}
-
-/** Identifies a guarded rollback operation before filesystem mutation. */
-export interface ClaimRollback {
-	readonly _tag: "rollback";
-	readonly change_id: string;
-	readonly expected_after: ContentIdentityValue;
-	readonly message_id: string;
-	readonly request_fingerprint: string;
-	readonly sent_at: string;
-	readonly thread_id: string;
-}
-
-/** Represents the immutable identity of a workspace operation. */
-export type WorkspaceChangeOperation = typeof WorkspaceChangeOperation.Type;
-
-/** Returns the result of claiming a workspace operation. */
-export type WorkspaceChangeClaim =
-	| { readonly _tag: "claimed"; readonly operation: WorkspaceChangeOperation }
-	| { readonly _tag: "incomplete_retry"; readonly operation: WorkspaceChangeOperation }
-	| { readonly _tag: "rejected"; readonly operation: WorkspaceChangeOperation }
-	| {
-			readonly _tag: "duplicate";
-			readonly event: WorkspaceChangeEvent;
-			readonly operation: WorkspaceChangeOperation;
-	  };
-
-/** Carries one stored workspace-change journal event. */
-export type WorkspaceChangeEvent = typeof WorkspaceChangeJournalEvent.Type;
-
-/** Returns an accepted transition or its exact duplicate. */
-export interface WorkspaceChangeCommit {
-	readonly event: WorkspaceChangeEvent;
-	readonly status: "accepted" | "duplicate";
-}
-
-/** Resolves a native changed observation against one exact durable operation. */
-export type WorkspaceChangeReconciliation =
-	| {
-			readonly _tag: "applied";
-			readonly operation: WorkspaceChangeOperation;
-	  }
-	| {
-			readonly _tag: "committed";
-			readonly event: WorkspaceChangeEvent;
-			readonly operation: WorkspaceChangeOperation;
-	  }
-	| {
-			readonly _tag: "rejected";
-			readonly operation: WorkspaceChangeOperation;
-	  }
-	| {
-			readonly _tag: "staged";
-			readonly operation: WorkspaceChangeOperation;
-	  };
-
-/** Identifies where a changed file observation occurred in mutation execution. */
-export interface ReconcileWorkspaceChange {
-	readonly message_id: string;
-	readonly observation: "native_changed" | "preflight_changed";
-	readonly observed_identity?: ContentIdentityValue;
-}
-
-/** Reports an immutable collision between distinct replacement operations. */
-export class WorkspaceChangeIdConflict extends Data.TaggedError("WorkspaceChangeIdConflict")<{
-	readonly change_id: string;
-}> {}
-
-/** Reports an invalid operation lifecycle, action, or change transition. */
-export class WorkspaceChangeTransitionError extends Data.TaggedError(
-	"WorkspaceChangeTransitionError",
-)<{ readonly message: string }> {}
-
-/** Represents failures surfaced by the workspace change repository. */
-export type WorkspaceChangeRepositoryError =
-	| CommandIdConflict
-	| JournalInvariantError
-	| JournalStoreFailure
-	| WorkspaceChangeIdConflict
-	| WorkspaceChangeTransitionError;
-
-/** Owns durable, source-free workspace change operations and projections. */
-export class WorkspaceChangeRepository extends Context.Service<
+import {
+	WorkspaceChangeCommandIdentity,
+	WorkspaceChangeIdConflict,
+	WorkspaceChangeJournalEvent,
+	WorkspaceChangeOperationSchema,
 	WorkspaceChangeRepository,
-	{
-		readonly ClaimReplace: (
-			input: ClaimReplace,
-		) => Effect.Effect<WorkspaceChangeClaim, WorkspaceChangeRepositoryError>;
-		readonly ClaimReview: (
-			input: ClaimReview,
-		) => Effect.Effect<WorkspaceChangeClaim, WorkspaceChangeRepositoryError>;
-		readonly ClaimRollback: (
-			input: ClaimRollback,
-		) => Effect.Effect<WorkspaceChangeClaim, WorkspaceChangeRepositoryError>;
-		readonly MarkApplied: (
-			input:
-				| {
-						readonly _tag: "replace";
-						readonly message_id: string;
-						readonly result_identity: ContentIdentityValue;
-				  }
-				| { readonly _tag: "rollback"; readonly message_id: string },
-		) => Effect.Effect<WorkspaceChangeOperation, WorkspaceChangeRepositoryError>;
-		readonly RejectChanged: (
-			message_id: string,
-		) => Effect.Effect<WorkspaceChangeOperation, WorkspaceChangeRepositoryError>;
-		readonly ReconcileChanged: (
-			input: ReconcileWorkspaceChange,
-		) => Effect.Effect<WorkspaceChangeReconciliation, WorkspaceChangeRepositoryError>;
-		readonly CommitRecorded: (
-			message_id: string,
-			prepared_diff: PreparedWorkspaceChangeDiff,
-		) => Effect.Effect<WorkspaceChangeCommit, WorkspaceChangeRepositoryError>;
-		readonly CommitReviewed: (
-			message_id: string,
-		) => Effect.Effect<WorkspaceChangeCommit, WorkspaceChangeRepositoryError>;
-		readonly CommitRolledBack: (
-			message_id: string,
-		) => Effect.Effect<WorkspaceChangeCommit, WorkspaceChangeRepositoryError>;
-		readonly MarkEvidenceRecorded: (
-			message_id: string,
-		) => Effect.Effect<WorkspaceChangeOperation, WorkspaceChangeRepositoryError>;
-		readonly ReadChange: (
-			change_id: string,
-		) => Effect.Effect<Option.Option<WorkspaceChangeValue>, WorkspaceChangeRepositoryError>;
-		readonly ReadOperation: (
-			message_id: string,
-		) => Effect.Effect<Option.Option<WorkspaceChangeOperation>, WorkspaceChangeRepositoryError>;
-		readonly List: (
-			thread_id: string,
-			workspace_id?: string,
-		) => Effect.Effect<
-			{
-				readonly changes: ReadonlyArray<WorkspaceChangeValue>;
-				readonly journal_sequence: number;
-			},
-			WorkspaceChangeRepositoryError
-		>;
-		readonly ListConflicts: (
-			thread_id: string,
-		) => Effect.Effect<ReadonlyArray<WorkspaceConflictValue>, WorkspaceChangeRepositoryError>;
-		readonly ListConflictSnapshot: (thread_id: string) => Effect.Effect<
-			{
-				readonly conflicts: ReadonlyArray<WorkspaceConflictValue>;
-				readonly journal_sequence: number;
-			},
-			WorkspaceChangeRepositoryError
-		>;
-	}
->()("Artisan/WorkspaceChangeRepository") {}
+	WorkspaceChangeTransitionError,
+	type ClaimReplace,
+	type ClaimReview,
+	type ClaimRollback,
+	type ReconcileWorkspaceChange,
+	type WorkspaceChangeEvent,
+	type WorkspaceChangeOperation,
+	type WorkspaceChangeReconciliation,
+	type WorkspaceChangeRepositoryError,
+} from "./change-repository/model";
+import {
+	DecodeChange,
+	DecodeConflict,
+	DecodeEvent,
+	DecodeOperation,
+	DecodeStoredRawOrigin,
+} from "./change-repository/storage-codec";
+
+export {
+	WorkspaceChangeIdConflict,
+	WorkspaceChangeRepository,
+	WorkspaceChangeTransitionError,
+	type ClaimReplace,
+	type ClaimReview,
+	type ClaimRollback,
+	type ReconcileWorkspaceChange,
+	type WorkspaceChangeClaim,
+	type WorkspaceChangeCommit,
+	type WorkspaceChangeEvent,
+	type WorkspaceChangeOperation,
+	type WorkspaceChangeReconciliation,
+	type WorkspaceChangeRepositoryError,
+} from "./change-repository/model";
 
 const DecodeJson = Schema.decodeUnknownEffect(Schema.UnknownFromJsonString);
-
-function DecodeStoredRawOrigin(raw_origin_json: string | null, message: string) {
-	if (raw_origin_json === null) {
-		return Effect.succeed<RawOriginValue | undefined>(undefined);
-	}
-
-	return DecodeJson(raw_origin_json).pipe(
-		Effect.flatMap(Schema.decodeUnknownEffect(RawOrigin)),
-		Effect.map((raw_origin): RawOriginValue | undefined => raw_origin),
-		Effect.mapError(() => new JournalInvariantError({ message })),
-	);
-}
 
 function normalize_error(error: unknown): WorkspaceChangeRepositoryError {
 	if (
@@ -355,10 +124,6 @@ function bytes_match(left: Uint8Array, right: Uint8Array) {
 	);
 }
 
-function optional_fields<T extends Readonly<Record<string, unknown>>>(input: T) {
-	return Object.fromEntries(Object.entries(input).filter(([, value]) => value != null));
-}
-
 function command_payload_json(operation: WorkspaceChangeOperation) {
 	return JSON.stringify({
 		action: operation.action,
@@ -383,50 +148,6 @@ function raw_origins_match(left: RawOriginValue | undefined, right: RawOriginVal
 			right !== undefined &&
 			left.provider === right.provider &&
 			left.reference === right.reference)
-	);
-}
-
-function operation_state_is_valid(operation: WorkspaceChangeOperation) {
-	const is_committed = operation.lifecycle === "committed";
-	const has_journal_sequence = operation.journal_sequence !== undefined;
-
-	if (operation.lifecycle === "rejected") {
-		return (
-			operation.action !== "review" && !operation.evidence_recorded && !has_journal_sequence
-		);
-	}
-
-	return (
-		is_committed === has_journal_sequence &&
-		!(operation.action === "review" && operation.lifecycle === "applied") &&
-		(!operation.evidence_recorded ||
-			(operation.action !== "review" && operation.lifecycle === "committed"))
-	);
-}
-
-function change_state_is_valid(change: WorkspaceChangeValue) {
-	if (change.review_state === "needs_review") {
-		return (
-			change.reviewed_at === undefined &&
-			change.rollback_state === "available" &&
-			change.rolled_back_at === undefined &&
-			change.version === 1
-		);
-	}
-
-	if (change.review_state === "reviewed") {
-		return (
-			change.reviewed_at !== undefined &&
-			change.rollback_state === "available" &&
-			change.rolled_back_at === undefined &&
-			change.version === 2
-		);
-	}
-
-	return (
-		change.rollback_state === "consumed" &&
-		change.rolled_back_at !== undefined &&
-		change.version === (change.reviewed_at === undefined ? 2 : 3)
 	);
 }
 
@@ -589,197 +310,6 @@ function immutable_operations_match(
 		raw_origins_match(stored.raw_origin, claimed.raw_origin) &&
 		stored.run_id === claimed.run_id &&
 		stored.workspace_id === claimed.workspace_id
-	);
-}
-
-function DecodeOperation(row: typeof WorkspaceChangeOperations.$inferSelect) {
-	return Effect.all({
-		expected_identity:
-			row.expected_identity_json === null
-				? Effect.succeed(undefined)
-				: DecodeJson(row.expected_identity_json).pipe(
-						Effect.flatMap(Schema.decodeUnknownEffect(ContentIdentity)),
-					),
-		result_identity:
-			row.result_identity_json === null
-				? Effect.succeed(undefined)
-				: DecodeJson(row.result_identity_json).pipe(
-						Effect.flatMap(Schema.decodeUnknownEffect(ContentIdentity)),
-					),
-		raw_origin:
-			row.raw_origin_json === null
-				? Effect.succeed(undefined)
-				: DecodeJson(row.raw_origin_json).pipe(
-						Effect.flatMap(Schema.decodeUnknownEffect(RawOrigin)),
-					),
-	}).pipe(
-		Effect.flatMap((identities) =>
-			Schema.decodeUnknownEffect(WorkspaceChangeOperation, { onExcessProperty: "error" })(
-				optional_fields({
-					action: row.action,
-					agent_id: row.agent_id,
-					change_id: row.change_id,
-					diff_format_version: row.diff_format_version,
-					evidence_recorded: row.evidence_recorded,
-					expected_identity: identities.expected_identity,
-					journal_sequence: row.journal_sequence,
-					lifecycle: row.lifecycle,
-					message_id: row.message_id,
-					path: row.path,
-					raw_origin: identities.raw_origin,
-					reviewer_kind:
-						row.action === "review" ? (row.reviewer_kind ?? "user") : undefined,
-					assignment_id: row.reviewer_assignment_id,
-					comment: row.review_comment,
-					group_id: row.reviewer_group_id,
-					outcome: row.review_outcome,
-					reviewer_agent_id: row.reviewer_agent_id,
-					reviewer_run_id: row.reviewer_run_id,
-					request_fingerprint: row.request_fingerprint,
-					result_identity: identities.result_identity,
-					run_id: row.run_id,
-					sent_at: row.sent_at,
-					thread_id: row.thread_id,
-					workspace_id: row.workspace_id,
-				}),
-			),
-		),
-		Effect.flatMap((operation) =>
-			operation_state_is_valid(operation)
-				? Effect.succeed(operation)
-				: Effect.fail(new Error("Invalid workspace operation lifecycle")),
-		),
-		Effect.mapError(
-			() =>
-				new JournalInvariantError({
-					message: `Stored workspace operation ${row.message_id} is invalid`,
-				}),
-		),
-	);
-}
-
-function DecodeChange(row: typeof WorkspaceChanges.$inferSelect) {
-	return Effect.all({
-		reviewer_raw_origin:
-			row.reviewer_raw_origin_json === null
-				? Effect.succeed(undefined)
-				: DecodeJson(row.reviewer_raw_origin_json).pipe(
-						Effect.flatMap(Schema.decodeUnknownEffect(RawOrigin)),
-					),
-		after_identity: DecodeJson(row.after_identity_json).pipe(
-			Effect.flatMap(Schema.decodeUnknownEffect(ContentIdentity)),
-		),
-		before_identity: DecodeJson(row.before_identity_json).pipe(
-			Effect.flatMap(Schema.decodeUnknownEffect(ContentIdentity)),
-		),
-		raw_origin:
-			row.raw_origin_json === null
-				? Effect.succeed(undefined)
-				: DecodeJson(row.raw_origin_json).pipe(
-						Effect.flatMap(Schema.decodeUnknownEffect(RawOrigin)),
-					),
-	}).pipe(
-		Effect.flatMap((json) =>
-			Schema.decodeUnknownEffect(WorkspaceChange, { onExcessProperty: "error" })(
-				optional_fields({
-					after_identity: json.after_identity,
-					agent_id: row.agent_id,
-					before_identity: json.before_identity,
-					change_id: row.change_id,
-					created_at: row.created_at,
-					path: row.path,
-					raw_origin: json.raw_origin,
-					review_state: row.review_state,
-					reviewed_at: row.reviewed_at,
-					review:
-						row.review_source_command_id === null
-							? undefined
-							: optional_fields({
-									assignment_id: row.reviewer_assignment_id,
-									comment: row.review_comment,
-									group_id: row.reviewer_group_id,
-									outcome: row.review_outcome,
-									reviewer_kind: row.reviewer_kind ?? "user",
-									raw_origin: json.reviewer_raw_origin,
-									reviewer_agent_id: row.reviewer_agent_id,
-									reviewer_run_id: row.reviewer_run_id,
-									reviewed_at: row.reviewed_at,
-									source_command_id: row.review_source_command_id,
-								}),
-					rollback_state: row.rollback_state,
-					rolled_back_at: row.rolled_back_at,
-					run_id: row.run_id,
-					source_command_id: row.source_command_id,
-					thread_id: row.thread_id,
-					updated_at: row.updated_at,
-					version: row.version,
-					workspace_id: row.workspace_id,
-				}),
-			),
-		),
-		Effect.flatMap((change) =>
-			change_state_is_valid(change)
-				? Effect.succeed(change)
-				: Effect.fail(new Error("Invalid workspace change lifecycle")),
-		),
-		Effect.mapError(
-			() =>
-				new JournalInvariantError({
-					message: `Stored workspace change ${row.change_id} is invalid`,
-				}),
-		),
-	);
-}
-
-function DecodeConflict(row: typeof WorkspaceConflicts.$inferSelect) {
-	return Effect.all({
-		expected_identity: DecodeJson(row.expected_identity_json).pipe(
-			Effect.flatMap(Schema.decodeUnknownEffect(ContentIdentity)),
-		),
-		observed_identity:
-			row.observed_identity_json === null
-				? Effect.succeed(undefined)
-				: DecodeJson(row.observed_identity_json).pipe(
-						Effect.flatMap(Schema.decodeUnknownEffect(ContentIdentity)),
-					),
-		raw_origin: DecodeStoredRawOrigin(row.raw_origin_json, "Stored conflict origin is invalid"),
-	}).pipe(
-		Effect.flatMap((decoded) =>
-			Schema.decodeUnknownEffect(WorkspaceConflict)(optional_fields({ ...row, ...decoded })),
-		),
-		Effect.mapError(
-			() =>
-				new JournalInvariantError({
-					message: `Stored workspace conflict ${row.conflict_id} is invalid`,
-				}),
-		),
-	);
-}
-
-function DecodeEvent(row: typeof JournalEvents.$inferSelect) {
-	return DecodeJson(row.payload_json).pipe(
-		Effect.flatMap((payload) =>
-			Schema.decodeUnknownEffect(WorkspaceChangeJournalEvent, { onExcessProperty: "error" })({
-				causation_id: row.causation_id,
-				correlation_id: row.correlation_id,
-				event_id: row.event_id,
-				journal_sequence: row.sequence,
-				occurred_at: row.occurred_at,
-				payload,
-				sequence: row.stream_sequence,
-			}),
-		),
-		Effect.flatMap((event) =>
-			change_state_is_valid(event.payload.change)
-				? Effect.succeed(event)
-				: Effect.fail(new Error("Invalid workspace event projection")),
-		),
-		Effect.mapError(
-			() =>
-				new JournalInvariantError({
-					message: `Stored workspace event ${row.event_id} is invalid`,
-				}),
-		),
 	);
 }
 
@@ -1365,7 +895,7 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 					Effect.gen(function* () {
 						const claimed = operation_from_claim(input);
 						const decoded_claim = yield* Schema.decodeUnknownEffect(
-							WorkspaceChangeOperation,
+							WorkspaceChangeOperationSchema,
 							{ onExcessProperty: "error" },
 						)(claimed).pipe(
 							Effect.mapError(
@@ -1778,60 +1308,33 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 							occurred_at: string,
 						) =>
 							Effect.gen(function* () {
-								const stream_id = `thread:${operation.thread_id}`;
-								const [stream] = yield* transaction
-									.select({ last_sequence: EventStreams.last_sequence })
-									.from(EventStreams)
-									.where(eq(EventStreams.stream_id, stream_id))
-									.limit(1);
-								const sequence = (stream?.last_sequence ?? 0) + 1;
-								if (stream) {
-									yield* transaction
-										.update(EventStreams)
-										.set({ last_sequence: sequence })
-										.where(eq(EventStreams.stream_id, stream_id));
-								} else {
-									yield* transaction
-										.insert(EventStreams)
-										.values({ last_sequence: sequence, stream_id });
-								}
 								const payload = yield* Schema.decodeUnknownEffect(
 									WorkspaceConflictUpdatedEvent,
 									{ onExcessProperty: "error" },
 								)({ action, conflict, type: "workspace.conflict.updated" });
-								const [event] = yield* transaction
-									.insert(JournalEvents)
-									.values({
-										agent_id:
-											operation.action === "replace"
-												? operation.agent_id
-												: null,
+								const event = yield* AppendJournalEventInTransaction(
+									transaction,
+									{
+										MakeId: metadata.MakeId,
+										Now: Effect.succeed(occurred_at),
+									},
+									{
+										...(operation.action === "replace"
+											? {
+													agent_id: operation.agent_id,
+													run_id: operation.run_id,
+												}
+											: {}),
+										...(operation.action === "replace" &&
+										operation.raw_origin !== undefined
+											? { raw_origin: operation.raw_origin }
+											: {}),
 										causation_id: operation.message_id,
 										correlation_id: operation.message_id,
-										event_id: yield* metadata.MakeId("event"),
-										event_type: payload.type,
-										occurred_at,
-										origin: "backend",
-										payload_json: JSON.stringify(payload),
-										raw_origin_json:
-											operation.action === "replace" &&
-											operation.raw_origin !== undefined
-												? JSON.stringify(operation.raw_origin)
-												: null,
-										run_id:
-											operation.action === "replace"
-												? operation.run_id
-												: null,
-										schema_version: 1,
-										stream_id,
-										stream_sequence: sequence,
+										payload,
 										thread_id: operation.thread_id,
-									})
-									.returning({ journal_sequence: JournalEvents.sequence });
-								if (!event)
-									return yield* new JournalInvariantError({
-										message: "Workspace conflict event was not persisted",
-									});
+									},
+								);
 								return event.journal_sequence;
 							});
 						const message_id = input.message_id;
@@ -2196,64 +1699,49 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 			occurred_at: string,
 		) =>
 			Effect.gen(function* () {
-				const stream_id = `thread:${operation.thread_id}`;
-				const [stream] = yield* transaction
-					.select({ last_sequence: EventStreams.last_sequence })
-					.from(EventStreams)
-					.where(eq(EventStreams.stream_id, stream_id))
-					.limit(1);
-				const sequence = (stream?.last_sequence ?? 0) + 1;
-				const event_id = yield* metadata.MakeId("event");
 				const payload = { action, change, type: "workspace.change.updated" } as const;
-
-				if (stream) {
-					yield* transaction
-						.update(EventStreams)
-						.set({ last_sequence: sequence })
-						.where(eq(EventStreams.stream_id, stream_id));
-				} else {
-					yield* transaction
-						.insert(EventStreams)
-						.values({ last_sequence: sequence, stream_id });
-				}
-
-				const [row] = yield* transaction
-					.insert(JournalEvents)
-					.values({
-						agent_id:
-							action === "recorded" && operation.action === "replace"
-								? operation.agent_id
-								: null,
+				const event = yield* AppendJournalEventInTransaction(
+					transaction,
+					{
+						MakeId: metadata.MakeId,
+						Now: Effect.succeed(occurred_at),
+					},
+					{
+						...(action === "recorded" && operation.action === "replace"
+							? {
+									agent_id: operation.agent_id,
+									run_id: operation.run_id,
+								}
+							: {}),
+						...(action === "recorded" &&
+						operation.action === "replace" &&
+						operation.raw_origin !== undefined
+							? { raw_origin: operation.raw_origin }
+							: {}),
 						causation_id: operation.message_id,
 						correlation_id: operation.message_id,
-						event_id,
-						event_type: payload.type,
-						occurred_at,
-						origin: "backend",
-						payload_json: JSON.stringify(payload),
-						raw_origin_json:
-							action === "recorded" &&
-							operation.action === "replace" &&
-							operation.raw_origin !== undefined
-								? JSON.stringify(operation.raw_origin)
-								: null,
-						run_id:
-							action === "recorded" && operation.action === "replace"
-								? operation.run_id
-								: null,
-						schema_version: 1,
-						stream_id,
-						stream_sequence: sequence,
+						payload,
 						thread_id: operation.thread_id,
-					})
-					.returning();
-
-				if (!row)
-					return yield* new JournalInvariantError({
-						message: "Workspace event was not persisted",
-					});
-
-				return yield* DecodeEvent(row);
+					},
+				);
+				return yield* Schema.decodeUnknownEffect(WorkspaceChangeJournalEvent, {
+					onExcessProperty: "error",
+				})({
+					causation_id: event.causation_id,
+					correlation_id: event.correlation_id,
+					event_id: event.message_id,
+					journal_sequence: event.journal_sequence,
+					occurred_at: event.sent_at,
+					payload: event.payload,
+					sequence: event.sequence,
+				}).pipe(
+					Effect.mapError(
+						() =>
+							new JournalInvariantError({
+								message: `Stored workspace event ${event.message_id} is invalid`,
+							}),
+					),
+				);
 			});
 
 		const Commit = (

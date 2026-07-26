@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
 import { Cause, Deferred, Effect, Exit, Fiber, Layer, Ref, Stream } from "effect";
+import { NodeFileSystem } from "@effect/platform-node-shared";
+import { FileSystem } from "effect/FileSystem";
 import { TestClock } from "effect/testing";
 
 import {
@@ -746,11 +748,15 @@ describe("Codex exec fallback", () => {
 
 	it("rejects runtime global guidance before any exec provider side effect", async () => {
 		let spawn_count = 0;
+		const file_system = await Effect.runPromise(
+			FileSystem.pipe(Effect.provide(NodeFileSystem.layer)),
+		);
 		const engine = make_codex_exec_engine({
 			event_capacity: 16,
 			executable: "codex",
 			executable_args: [],
 			fallback_reason: "test fallback",
+			file_system,
 			factory: {
 				Spawn: () => {
 					spawn_count += 1;

@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 
-import { Deferred, Effect, Exit, Ref, Scope, Semaphore, Stream } from "effect";
+import { Deferred, Effect, Exit, FileSystem, Ref, Scope, Semaphore, Stream } from "effect";
 
 import {
 	type EngineCapabilities,
@@ -41,6 +41,7 @@ export interface CodexExecRunOptions {
 	readonly executable_args: ReadonlyArray<string>;
 	readonly executable: string;
 	readonly fallback_reason: string;
+	readonly file_system: FileSystem.FileSystem;
 	readonly factory: typeof CodexProcessFactory.Service;
 	readonly max_frame_bytes: number;
 	readonly max_stderr_bytes: number;
@@ -114,9 +115,45 @@ export function OpenCodexExecRun(
 		yield* ValidatePositiveOption("exec_max_stdout_bytes", options.max_stdout_bytes);
 		yield* ValidatePositiveOption("exec_timeout_ms", options.timeout_ms);
 
-		const spawn = yield* MakeCodexExecSpawn(input, options.executable, options.executable_args);
 		const run_scope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
 			Scope.close(scope, Exit.succeed(undefined)),
+		);
+		const initial_content = input._tag === "start" ? input.initial_content : undefined;
+		const image_paths =
+			initial_content === undefined
+				? []
+				: yield* Effect.gen(function* () {
+						const images = initial_content.filter((part) => part.type === "image");
+						if (images.length === 0) return [];
+						const directory = yield* options.file_system
+							.makeTempDirectoryScoped({ prefix: "artisan-codex-images-" })
+							.pipe(
+								Scope.provide(run_scope),
+								Effect.mapError(
+									(cause) =>
+										new EngineProcessError({ cause, operation: "write" }),
+								),
+							);
+						return yield* Effect.forEach(images, (image, index) => {
+							const extension =
+								image.media_type === "image/jpeg"
+									? "jpg"
+									: image.media_type.slice(6);
+							const path = `${directory}/image-${index}.${extension}`;
+							return options.file_system.writeFile(path, image.bytes).pipe(
+								Effect.as(path),
+								Effect.mapError(
+									(cause) =>
+										new EngineProcessError({ cause, operation: "write" }),
+								),
+							);
+						});
+					});
+		const spawn = yield* MakeCodexExecSpawn(
+			input,
+			options.executable,
+			options.executable_args,
+			image_paths,
 		);
 		const handle = yield* options.factory.Spawn(spawn);
 
@@ -370,7 +407,15 @@ export function OpenCodexExecRun(
 		yield* Scope.addFinalizer(run_scope, event_buffer.Finish("closed"));
 
 		if (input._tag === "start") {
-			yield* handle.Write(new TextEncoder().encode(input.initial_text));
+			const prompt =
+				input.initial_content === undefined
+					? input.initial_text
+					: input.initial_content
+							.map((part) =>
+								part.type === "text" ? part.text : `[Attached image: ${part.name}]`,
+							)
+							.join("");
+			yield* handle.Write(new TextEncoder().encode(prompt));
 		}
 
 		yield* handle.EndInput;

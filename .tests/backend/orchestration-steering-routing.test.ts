@@ -189,7 +189,9 @@ describe("thread follow-up steering routing", () => {
 							permission_mode: "never",
 							reasoning_effort: "xhigh",
 							sandbox_mode: "read_only",
+							service_tier: "standard",
 							strict_clarification: true,
+							workflow_mode: "build",
 							web_search_enabled: true,
 						},
 						type: "thread.session_policy.update",
@@ -263,7 +265,11 @@ describe("thread follow-up steering routing", () => {
 			);
 			expect(after_restart.status).toBe("duplicate");
 			expect(capable.commands).toHaveLength(1);
-			expect(capable.opened).toHaveLength(1);
+			expect(capable.opened).toHaveLength(2);
+			expect(capable.open_inputs[1]).toMatchObject({
+				_tag: "resume",
+				artisan_run_id: capable.open_inputs[0]!.artisan_run_id,
+			});
 			const restarted_journal = await restarted.runPromise(JournalStore);
 			expect(
 				await restarted.runPromise(restarted_journal.ReadCorrelatedEvents("follow_up")),

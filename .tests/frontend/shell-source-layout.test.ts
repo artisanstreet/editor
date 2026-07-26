@@ -19,76 +19,85 @@ describe("Barekey docs shell reset", () => {
 		expect(panel).toContain("sidebar: Snippet");
 	});
 
-	it("mounts the third panel only for concrete thread routes", () => {
+	it("mounts the inspector only for concrete thread routes and keeps controls in the composer", () => {
 		const layout = Read("modules/frontend/src/routes/+layout.sv");
-		const thread = Read("modules/frontend/src/routes/thread/[id]/+page.sv");
+		const thread = Read("modules/frontend/src/routes/threads/[id]/+page.sv");
+		const thread_route = Read("modules/frontend/src/routes/threads/[id]/thread-route.sv");
 		const thread_panel = Read("modules/frontend/src/routes/components/thread-panel.sv");
+		const composer = Read("modules/frontend/src/routes/components/thread-composer.sv");
 		const model_selector = Read("modules/frontend/src/routes/components/model-selector.sv");
-		const popover_content = Read("modules/frontend/src/lib/components/ui/popover/popover-content.sv");
 
-		expect(layout).toContain("/^\\/thread\\/[^/]+\\/?$/");
+		expect(layout).toContain("/^\\/threads\\/[^/]+\\/?$/");
 		expect(layout).toContain("<ThreadPanel />");
 		expect(layout).toContain("secondary={is_thread ? secondary : undefined}");
 		expect(thread).toContain("Thread · Artisan Editor");
-		expect(thread_panel).toContain("<ModelSelector />");
+		expect(thread).toContain("{#key thread_id}");
+		expect(thread).toContain("<ThreadRoute {thread_id} />");
+		expect(thread_route).toContain("<ThreadWorkspace");
+		expect(thread_panel).not.toContain("<ModelSelector");
+		expect(composer).toContain("<ModelSelector");
+		expect(composer).toContain("onpolicychange");
 		expect(model_selector).toContain('aria-label="Select model"');
-		expect(model_selector).toContain('rounded-2xl bg-linear-to-b from-foreground/7.5 to-foreground/2.5 p-2');
-		expect(model_selector).toContain("transition-colors card-lg");
-		expect(model_selector).toContain('? "size-6 shrink-0 dark:invert"');
-		expect(model_selector).toContain('truncate text-base font-semibold text-foreground">{selected_model.name}');
-		expect(model_selector).toContain('truncate text-xs text-muted-foreground">{selected_model.lab}');
-		expect(model_selector).toContain('<Selector class="pointer-events-none size-4 shrink-0 text-muted-foreground" />');
-		expect(model_selector).toContain('aria-label="Coding engines"');
-		expect(model_selector).toContain('w-[min(20rem,calc(100vw-2rem))]');
 		expect(model_selector).toContain("SvglOpenAILogo");
-		expect(model_selector).toContain("SvglClaudeAILogo");
-		expect(model_selector).toContain("SvglGrokLogo");
-		expect(model_selector).toContain('icon: OpenCodeIcon');
-		expect(model_selector).toContain('engine.id === "opencode"');
-		expect(model_selector).toContain('? "size-4 text-foreground"');
-		expect(model_selector).toContain("SvglGoogleAntigravityLogo");
-		expect(model_selector).not.toMatch(/Cline|Terminal2/);
-		expect(popover_content).toContain('"card bg-popover text-popover-foreground');
-		expect(popover_content).not.toMatch(/ring-foreground|shadow-2xl|ring-1/);
-		expect(model_selector).not.toContain("card!");
-		expect(model_selector).not.toContain('orientation="vertical"');
-		expect(model_selector).toContain('h-auto! w-full justify-start overflow-x-auto');
-		expect(model_selector).toContain('bind:ref={engine_surface}');
-		expect(model_selector).toContain('let engine_surface = $state<HTMLElement | null>(null);');
-		expect(model_selector).toContain('data-engine={engine.id}');
-		expect(model_selector).toContain('engine_indicator_animated = animate && engine_indicator_visible');
-		expect(model_selector).toContain('class="model-selector-engine-light"');
-		expect(model_selector).toContain('linear-gradient(');
-		expect(model_selector).toContain('width: 2rem;');
-		expect(model_selector).toContain('ellipse 48% 70% at 50% 35%');
-		expect(model_selector).toContain('rgb(0 0 0 / 50%) 42%');
-		expect(model_selector).toContain('rgb(0 0 0 / 10%) 68%');
-		expect(model_selector).toContain('filter: blur(0.125rem);');
-		expect(model_selector).toContain('height: 1.5rem;');
-		expect(model_selector).toContain('mask-image: radial-gradient(');
-		expect(model_selector).not.toContain('clip-path: polygon');
-		expect(model_selector).not.toContain('engine_indicator_height');
-		expect(model_selector).toContain('<svelte:window onresize={() => position_engine_indicator(false)} />');
-		expect(model_selector).toContain('rounded-lg! bg-linear-to-b from-foreground/10 to-foreground/5 p-1');
-		expect(model_selector).toContain('after:hidden hover:text-foreground data-active:border-transparent data-active:bg-transparent');
-		expect(model_selector).toContain('<ScrollArea class="h-48 rounded-xl">');
-		expect(model_selector).toContain('class="docs-sidebar-hover-highlight"');
-		expect(model_selector).toContain('onfocus={move_hover}');
-		expect(model_selector).toContain('onpointerenter={move_hover}');
-		expect(model_selector).toContain('gap-2 rounded-md px-2.5 py-1.5');
-		expect(model_selector).toContain('truncate text-sm font-semibold text-foreground');
-		expect(model_selector).toContain('aria-label="Available models"');
-		expect(model_selector).toContain('name: "GPT 5.6 Sol", lab: "Codex"');
-		expect(model_selector).not.toContain('lab: "OpenAI"');
+		expect(model_selector).not.toMatch(/Claude|Anthropic/);
+		expect(model_selector).toContain("service_tier");
+		expect(model_selector).toContain("workflow_mode");
+	});
+
+	it("owns conversation subscriptions and snapshots by route identity", () => {
+		const route = Read("modules/frontend/src/routes/threads/[id]/+page.sv");
+		const controller = Read("modules/frontend/src/routes/threads/[id]/thread-route.sv");
+		const interaction = Read("modules/frontend/src/lib/thread-interaction/commands.ts");
+		const accepted_command = interaction.indexOf("const result = yield* command;");
+		const background_reconciliation = interaction.indexOf(
+			"Effect.forkIn(after_acceptance.pipe(Effect.ignore), scope)",
+			accepted_command,
+		);
+		const sender_resync = controller.indexOf("yield* Resync;");
+		const interaction_refresh = controller.indexOf(
+			"yield* RefreshInteractionContext;",
+			sender_resync,
+		);
+
+		expect(route).toContain("const thread_id = $derived(page.params.id)");
+		expect(route).toContain("{#key thread_id}");
+		expect(controller).toContain("const thread_scope = yield* Scope.make()");
+		expect(controller).toContain("Scope.close(thread_scope, Exit.void)");
+		expect(controller).toContain("Effect.forkIn(");
+		expect(controller).toContain("update.batch.thread_id !== thread_id");
+		expect(controller).toContain("update.batch.conversation_id !== conversation_id");
+		expect(controller).toContain("!CanReplaceConversationSnapshot(snapshot, next)");
+		expect(controller).toContain("yield* SubmitDurableCommand(");
+		expect(accepted_command).toBeGreaterThan(-1);
+		expect(background_reconciliation).toBeGreaterThan(accepted_command);
+		expect(sender_resync).toBeGreaterThan(-1);
+		expect(interaction_refresh).toBeGreaterThan(sender_resync);
+	});
+
+	it("does not expose a disclosure control for an empty settled work trace", () => {
+		const work_session = Read(
+			"modules/frontend/src/routes/components/conversation-work-session.sv",
+		);
+
+		expect(work_session).toContain(
+			"const can_collapse = $derived(!is_working && has_visible_details);",
+		);
+		expect(work_session).toContain("{#if can_collapse}");
+		expect(work_session).toContain("<button");
+		expect(work_session).toContain("{:else if !is_working}");
+		expect(work_session).toContain("<span>{label}</span>");
+		expect(work_session).toContain("hidden={!is_working && !has_visible_details}");
 	});
 
 	it("matches the Barekey docs inset sidebar and circular toggle", () => {
 		const panel = Read("modules/frontend/src/routes/components/sectioned-panel.sv");
 
-		expect(panel).toContain('style="--sidebar-width: 16rem; --sidebar-width-icon: 2.5rem;"');
+		expect(panel).toContain(
+			'style="--sidebar-width: 16rem; --sidebar-width-icon: 2.5rem; min-height: 0;"',
+		);
 		expect(panel).toContain('<Sidebar.Root variant="inset" collapsible="icon">');
 		expect(panel).toContain("absolute right-0 top-2 hidden size-10");
-		expect(panel).toContain("rounded-full bg-foreground/5 card");
+		expect(panel).toContain("rounded-full bg-surface-125 card");
 		expect(panel).toContain("<LayoutSidebar");
 	});
 
@@ -97,20 +106,40 @@ describe("Barekey docs shell reset", () => {
 		const global_styles = Read("modules/frontend/src/lib/styles/global.css");
 
 		expect(panel).toContain(
-			"rounded-3xl bg-linear-to-b from-foreground/5 to-foreground/2.5 p-1 card",
+			"rounded-3xl bg-linear-to-b from-surface-125 to-surface-75 p-1 card",
 		);
 		expect(panel).not.toContain("bg-background");
 		expect(global_styles).toContain('--font-sans: "Artisan Neo", sans-serif;');
 	});
 
-	it("shows only the copied docs header identity inside the sidebar", () => {
+	it("keeps the copied docs identity and live creation controls in the sidebar", () => {
 		const sidebar = Read("modules/frontend/src/routes/components/artisan-sidebar.sv");
 		const home = Read("modules/frontend/src/routes/+page.sv");
 
 		expect(sidebar).toContain("$lib/assets/barekey/logo-40.png");
 		expect(sidebar).toContain('class="size-5 shrink-0 invert dark:invert-0"');
 		expect(sidebar).toContain('<span class="font-logo">Artisan Editor</span>');
-		expect(sidebar).toContain('<Sidebar.Header class="pl-6 pr-14 lg:pl-2">');
+		expect(sidebar).toContain(
+			'<Sidebar.Header class="h-14 justify-center pl-6 pr-14 lg:pl-2">',
+		);
+		expect(sidebar).toContain('type: "thread.create"');
+		expect(sidebar).toContain("selectProjectDirectory");
+		expect(sidebar).toContain("client.ListProjectDirectories");
+		expect(sidebar).toContain("client.SelectProjectDirectory");
+		expect(sidebar).toContain("Select a project folder");
+		expect(sidebar).not.toContain("Folder selection is available in the Artisan desktop app.");
+		expect(sidebar).toContain('type: "thread.project.assign"');
+		expect(sidebar).not.toContain("No existing projects");
+		expect(sidebar).not.toContain("<Sidebar.GroupLabel>Threads</Sidebar.GroupLabel>");
+		expect(sidebar).toContain("ProjectScopedThreadGroups(threads)");
+		expect(sidebar).toContain("<Sidebar.MenuSub");
+		expect(sidebar).toContain("<Sidebar.MenuSubButton");
+		expect(sidebar).toContain('project?.display_name ?? "Unassigned"');
+		expect(sidebar).toContain("client.SubscribeThreadList");
+		expect(sidebar).toContain("ApplyRootThreadListUpdate");
+		expect(sidebar).toContain(
+			"isActive={page.url.pathname === `/threads/${thread.thread_id}`}",
+		);
 		expect(home).not.toMatch(/WelcomePage|ThreadWorkspace|SettingsPage|LiveWorkspaceStore/);
 	});
 

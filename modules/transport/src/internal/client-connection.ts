@@ -2,6 +2,7 @@ import { Cause, Deferred, Effect, Fiber, Option, Ref, Scope } from "effect";
 
 import {
 	DecodeOutboundControlEnvelope,
+	IsControlRpcSuccess,
 	SupportedProtocolVersions,
 	type AckEnvelope,
 	type HeartbeatPongEnvelope,
@@ -27,7 +28,6 @@ import {
 	type ActiveClientSession,
 	type AwaitActive,
 	type FrontendTrace,
-	type PendingResultEnvelope,
 	type SendCurrent,
 } from "./client-common";
 import type { ClientRequestCoordinator } from "./client-request-coordinator";
@@ -39,32 +39,6 @@ interface ConnectionState {
 	readonly connection_signal: Deferred.Deferred<void>;
 	readonly disposed: boolean;
 }
-
-type MarketplacePendingResultKind = Extract<PendingResultEnvelope["kind"], `marketplace.${string}`>;
-
-const marketplace_pending_result_kinds = <
-	const Kinds extends ReadonlyArray<MarketplacePendingResultKind>,
->(
-	...kinds: Kinds &
-		(Exclude<MarketplacePendingResultKind, Kinds[number]> extends never
-			? unknown
-			: readonly ["Missing Marketplace pending result kind"])
-) => kinds;
-
-/** Marketplace responses that complete a correlated renderer request. */
-export const MarketplacePendingResultKinds = marketplace_pending_result_kinds(
-	"marketplace.routine.list.query.result",
-	"marketplace.routine.detail.query.result",
-	"marketplace.routine.install.preview.result",
-	"marketplace.routine.invoke.result",
-	"marketplace.npx_skills.discover.result",
-	"marketplace.capability.list.query.result",
-	"marketplace.capability.detail.query.result",
-	"marketplace.capability.connect.preview.result",
-	"marketplace.capability.invoke.result",
-	"marketplace.capability.oauth.begin.result",
-	"marketplace.capability.oauth.status.query.result",
-);
 
 /** Supplies the coordinators invoked by one negotiated connection. */
 export interface ClientConnectionHandlers {
@@ -382,52 +356,11 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 				active: ActiveClientSession,
 				envelope: OutboundControlEnvelope,
 			) => {
+				if (IsControlRpcSuccess(envelope)) {
+					return handlers.requests.Resolve(envelope);
+				}
+
 				switch (envelope.kind) {
-					case "command.receipt":
-					case "artisan.approval.list.query.result":
-					case "artisan.tool.invocation.list.query.result":
-					case "artisan.tool.registry.list.query.result":
-					case "guidance.query.result":
-					case "git.diff.query.result":
-					case "git.workspace.query.result":
-					case "model_behaviour.query.result":
-					case "orchestration.graph.query.result":
-					case "orchestration.group.list.query.result":
-					case "preview.asset.metadata.query.result":
-					case "preview.browser.launch.result":
-					case "preview.inspection.close.result":
-					case "preview.inspection.inspect.result":
-					case "preview.inspection.open.result":
-					case "preview.rich_link.resolve.query.result":
-					case "preview.target.get.query.result":
-					case "preview.target.list.query.result":
-					case "preview.target.mutation.result":
-					case "thread.session.query.result":
-					case "surface.list.query.result":
-					case "surface.usage.aggregate.query.result":
-					case "terminal.list.query.result":
-					case "thread.list.query.result":
-					case "thread.transcript.query.result":
-					case "thread.retention.query.result":
-					case "thread.work.query.result":
-					case "workspace.file.read.query.result":
-					case "workspace.file.discovery.query.result":
-					case "workspace.language.capabilities.query.result":
-					case "workspace.change.list.query.result":
-					case "workspace.conflict.list.query.result":
-					case "workspace.change.diff.query.result":
-					case "marketplace.routine.list.query.result":
-					case "marketplace.routine.detail.query.result":
-					case "marketplace.routine.install.preview.result":
-					case "marketplace.routine.invoke.result":
-					case "marketplace.npx_skills.discover.result":
-					case "marketplace.capability.list.query.result":
-					case "marketplace.capability.detail.query.result":
-					case "marketplace.capability.connect.preview.result":
-					case "marketplace.capability.invoke.result":
-					case "marketplace.capability.oauth.begin.result":
-					case "marketplace.capability.oauth.status.query.result":
-						return handlers.requests.Resolve(envelope);
 					case "event":
 						return handlers.subscriptions.ApplyEvent(envelope).pipe(
 							Effect.flatMap((cursors) =>
@@ -463,6 +396,8 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 					case "thread.list.remove":
 					case "orchestration.graph.snapshot":
 					case "orchestration.graph.patch":
+					case "conversation.snapshot":
+					case "conversation.patch":
 					case "thread.transcript.snapshot":
 					case "thread.transcript.append":
 					case "orchestration.group.list.snapshot":

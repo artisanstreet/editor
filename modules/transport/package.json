@@ -11,6 +11,9 @@
 		"./node": "./src/node-message-port.ts",
 		"./electron-shapes": "./src/electron-message-port.ts",
 		"./server": "./src/server.ts",
+		"./websocket/client": "./src/websocket/client.ts",
+		"./websocket/protocol": "./src/websocket/protocol.ts",
+		"./websocket/server": "./src/websocket/server.ts",
 		"./wire": "./src/wire.ts"
 	},
 	"dependencies": {

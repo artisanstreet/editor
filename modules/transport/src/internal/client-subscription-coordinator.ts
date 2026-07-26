@@ -19,6 +19,7 @@ import type {
 	ThreadSessionUpdate,
 	ThreadTranscriptUpdate,
 	ThreadListUpdate,
+	ConversationUpdate,
 } from "../client-contract";
 import {
 	client_error,
@@ -48,6 +49,10 @@ interface ThreadTranscriptSubscription extends ProjectionSubscriptionBase {
 	readonly _tag: "thread.transcript";
 	readonly queue: Queue.Queue<ThreadTranscriptUpdate, ArtisanClientError | Cause.Done<void>>;
 }
+interface ConversationSubscription extends ProjectionSubscriptionBase {
+	readonly _tag: "conversation";
+	readonly queue: Queue.Queue<ConversationUpdate, ArtisanClientError | Cause.Done<void>>;
+}
 interface OrchestrationGroupListSubscription extends ProjectionSubscriptionBase {
 	readonly _tag: "orchestration.group.list";
 	readonly queue: Queue.Queue<
@@ -76,6 +81,7 @@ type ProjectionSubscription =
 	| OrchestrationGraphSubscription
 	| ThreadListSubscription
 	| ThreadTranscriptSubscription
+	| ConversationSubscription
 	| OrchestrationGroupListSubscription
 	| ThreadSessionSubscription
 	| SurfaceListSubscription
@@ -93,6 +99,8 @@ type ProjectionEnvelope = Extract<
 			| "thread.list.remove"
 			| "thread.transcript.snapshot"
 			| "thread.transcript.append"
+			| "conversation.snapshot"
+			| "conversation.patch"
 			| "orchestration.group.list.snapshot"
 			| "orchestration.group.list.patch"
 			| "thread.session.snapshot"
@@ -104,17 +112,32 @@ type ProjectionEnvelope = Extract<
 
 interface SubscriptionState {
 	readonly disposed: boolean;
+	readonly event_observers: ReadonlyMap<
+		string,
+		Queue.Queue<EventEnvelope, ArtisanClientError | Cause.Done<void>>
+	>;
 	readonly event_cursors: Readonly<Record<string, number>>;
+	readonly event_terminal: EventTerminal;
 	readonly ignored_correlations: ReadonlySet<string>;
 	readonly last_journal_sequence: number;
 	readonly subscriptions: ReadonlyMap<string, ProjectionSubscription>;
 }
 
+type EventTerminal =
+	| { readonly _tag: "active" }
+	| { readonly _tag: "ended" }
+	| { readonly _tag: "failed"; readonly error: ArtisanClientError };
+
 type EventApplication =
 	| { readonly _tag: "Applied"; readonly cursors: ArtisanClientCursors }
 	| { readonly _tag: "Duplicate" }
 	| { readonly _tag: "Gap" }
-	| { readonly _tag: "Overflow" };
+	| {
+			readonly _tag: "Overflow";
+			readonly observers: ReadonlyArray<
+				Queue.Queue<EventEnvelope, ArtisanClientError | Cause.Done<void>>
+			>;
+	  };
 
 type SubscriptionDelivery =
 	| { readonly _tag: "Delivered" }
@@ -174,6 +197,13 @@ export interface ClientSubscriptionCoordinator {
 		ArtisanClientError,
 		Scope.Scope
 	>;
+	readonly SubscribeConversation: (
+		thread_id: string,
+	) => Effect.Effect<
+		Stream.Stream<ConversationUpdate, ArtisanClientError>,
+		ArtisanClientError,
+		Scope.Scope
+	>;
 	readonly SubscribeOrchestrationGroups: (
 		thread_id: string,
 		include_terminal: boolean,
@@ -222,13 +252,16 @@ export const make_client_subscription_coordinator = (
 	publish_error: (error: ArtisanClientError) => Effect.Effect<void>,
 ) =>
 	Effect.gen(function* () {
-		const events = yield* Effect.acquireRelease(
-			Queue.dropping<EventEnvelope, ArtisanClientError | Cause.Done<void>>(event_capacity),
-			Queue.shutdown,
+		const overflow_error = client_error(
+			"event_overflow",
+			"The frontend event queue overflowed before the event was applied.",
+			new Error("event delivery queue overflow"),
 		);
 		const state = yield* Ref.make<SubscriptionState>({
 			disposed: false,
+			event_observers: new Map(),
 			event_cursors: {},
+			event_terminal: { _tag: "active" },
 			ignored_correlations: new Set<string>(),
 			last_journal_sequence: 0,
 			subscriptions: new Map(),
@@ -260,9 +293,19 @@ export const make_client_subscription_coordinator = (
 					return [{ _tag: "Gap" }, current];
 				}
 
-				if (!Queue.offerUnsafe(events, event)) {
-					return [{ _tag: "Overflow" }, current];
+				/**
+				 * Events are an optional hot observation stream. A missing observer must
+				 * not retain the durable journal forever or make transport liveness depend
+				 * on a renderer-only consumer. A slow active observer still fails closed.
+				 */
+				const observers = [...current.event_observers.values()];
+				if (observers.some((observer) => Queue.isFullUnsafe(observer))) {
+					return [
+						{ _tag: "Overflow", observers },
+						{ ...current, event_terminal: { _tag: "failed", error: overflow_error } },
+					];
 				}
+				for (const observer of observers) Queue.offerUnsafe(observer, event);
 
 				const event_cursors = {
 					...current.event_cursors,
@@ -300,15 +343,11 @@ export const make_client_subscription_coordinator = (
 								),
 							);
 						case "Overflow": {
-							const error = client_error(
-								"event_overflow",
-								"The frontend event queue overflowed before the event was applied.",
-								new Error("event delivery queue overflow"),
-							);
-
-							return Queue.fail(events, error).pipe(
-								Effect.andThen(Effect.fail(error)),
-							);
+							return Effect.forEach(
+								outcome.observers,
+								(observer) => Queue.fail(observer, overflow_error),
+								{ discard: true },
+							).pipe(Effect.andThen(Effect.fail(overflow_error)));
 						}
 					}
 				}),
@@ -470,6 +509,19 @@ export const make_client_subscription_coordinator = (
 								journal_sequence: envelope.journal_sequence,
 								entries: envelope.payload.entries,
 							};
+				return Queue.offerUnsafe(subscription.queue, update) ? "offered" : "overflow";
+			}
+
+			if (
+				subscription._tag === "conversation" &&
+				(envelope.kind === "conversation.snapshot" ||
+					envelope.kind === "conversation.patch")
+			) {
+				const update: ConversationUpdate =
+					envelope.kind === "conversation.snapshot"
+						? { type: "snapshot", snapshot: envelope.payload }
+						: { type: "patch", batch: envelope.payload };
+
 				return Queue.offerUnsafe(subscription.queue, update) ? "offered" : "overflow";
 			}
 
@@ -837,6 +889,34 @@ export const make_client_subscription_coordinator = (
 				yield* start_subscription(subscription);
 				return Stream.fromQueue(queue);
 			});
+
+		const subscribe_conversation = (thread_id: string) =>
+			Effect.gen(function* () {
+				const trace = yield* make_trace;
+				const subscription_id = yield* make_id("conversation_subscription");
+				const queue = yield* Effect.acquireRelease(
+					Queue.dropping<ConversationUpdate, ArtisanClientError | Cause.Done<void>>(
+						subscription_capacity,
+					),
+					Queue.shutdown,
+				);
+				const started = yield* Deferred.make<void, ArtisanClientError>();
+				const subscription: ConversationSubscription = {
+					_tag: "conversation",
+					envelope: {
+						...trace,
+						kind: "subscribe",
+						payload: { type: "conversation", thread_id },
+						subscription_id,
+					},
+					expected_sequence: -1,
+					queue,
+					started,
+					stream_id: Option.none(),
+				};
+				yield* start_subscription(subscription);
+				return Stream.fromQueue(queue);
+			});
 		const subscribe_orchestration_groups = (thread_id: string, include_terminal: boolean) =>
 			Effect.gen(function* () {
 				const trace = yield* make_trace;
@@ -952,10 +1032,26 @@ export const make_client_subscription_coordinator = (
 					{ discard: true },
 				);
 
-				yield* Option.match(error, {
-					onNone: () => Queue.end(events),
-					onSome: (failure) => Queue.fail(events, failure),
-				});
+				const observers = yield* Ref.modify(state, (current) => [
+					[...current.event_observers.values()],
+					{
+						...current,
+						event_observers: new Map(),
+						event_terminal: Option.match(error, {
+							onNone: () => ({ _tag: "ended" }) as const,
+							onSome: (failure) => ({ _tag: "failed", error: failure }) as const,
+						}),
+					},
+				]);
+				yield* Effect.forEach(
+					observers,
+					(observer) =>
+						Option.match(error, {
+							onNone: () => Queue.end(observer),
+							onSome: (failure) => Queue.fail(observer, failure),
+						}),
+					{ discard: true },
+				);
 			});
 
 		return {
@@ -963,7 +1059,49 @@ export const make_client_subscription_coordinator = (
 			AwaitReady: await_ready,
 			Cursors: cursors,
 			Dispose: dispose,
-			Events: Stream.fromQueue(events),
+			Events: Stream.scoped(
+				Stream.unwrap(
+					Effect.gen(function* () {
+						const observer_id = yield* make_id("event_observer");
+						const observer = yield* Effect.acquireRelease(
+							Queue.dropping<EventEnvelope, ArtisanClientError | Cause.Done<void>>(
+								event_capacity,
+							),
+							Queue.shutdown,
+						);
+						const terminal = yield* Ref.modify<SubscriptionState, EventTerminal>(
+							state,
+							(current) => {
+								if (current.event_terminal._tag !== "active") {
+									return [current.event_terminal, current];
+								}
+								return [
+									current.event_terminal,
+									{
+										...current,
+										event_observers: new Map(current.event_observers).set(
+											observer_id,
+											observer,
+										),
+									},
+								];
+							},
+						);
+						yield* Effect.addFinalizer(() =>
+							Ref.update(state, (current) => {
+								const event_observers = new Map(current.event_observers);
+								event_observers.delete(observer_id);
+								return { ...current, event_observers };
+							}),
+						);
+						return terminal._tag === "active"
+							? Stream.fromQueue(observer)
+							: terminal._tag === "ended"
+								? Stream.empty
+								: Stream.fail(terminal.error);
+					}),
+				),
+			),
 			HandleStarted: handle_started,
 			HandleUpdate: handle_update,
 			Reject: reject,
@@ -974,6 +1112,7 @@ export const make_client_subscription_coordinator = (
 			SubscribeOrchestrationGroups: subscribe_orchestration_groups,
 			SubscribeThreadList: subscribe_thread_list,
 			SubscribeThreadTranscript: subscribe_thread_transcript,
+			SubscribeConversation: subscribe_conversation,
 			SubscribeThreadSession: (thread_id) =>
 				subscribe_snapshot<ThreadSessionUpdate, "thread.session">("thread.session", {
 					type: "thread.session",

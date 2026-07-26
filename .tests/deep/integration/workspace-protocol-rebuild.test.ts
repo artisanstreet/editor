@@ -6,8 +6,7 @@ import { join } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
-import { NodeFileSystem } from "@effect/platform-node-shared";
-import { Deferred, Effect, Layer, Redacted, Stream } from "effect";
+import { Deferred, Effect, Layer, Stream } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type {
@@ -20,8 +19,8 @@ import type {
 import type { Engine, EngineOpenInput } from "@artisan/engines";
 import {
 	make_backend_runtime,
-	make_workspace_bounded_regular_file_store_registry_layer,
 	ProtocolServer,
+	ThreadRetentionClock,
 	type ProtocolConnection,
 } from "@artisan/backend";
 import { make_fake_engine } from "../../engines/harness/fake-engine";
@@ -29,21 +28,13 @@ import { make_fake_engine } from "../../engines/harness/fake-engine";
 import { Database } from "../../../modules/backend/src/persistence/database";
 import { OrchestrationRuns } from "../../../modules/backend/src/persistence/schema";
 import { RuntimeMetadata } from "../../../modules/backend/src/runtime/runtime-metadata";
+import { MakeNodeTestWorkspaceBoundedRegularFileStoreRegistryLayer } from "../../backend/bounded-regular-file-store-harness";
 
 const migrations_path = fileURLToPath(new URL("../../../modules/backend/drizzle", import.meta.url));
 const RunCommand = promisify(exec_file);
 const temporary_directories: Array<string> = [];
 const sent_at = "2026-07-18T12:00:00.000Z";
-const receipt_key = Redacted.make(new Uint8Array(32).fill(8));
 const encoder = new TextEncoder();
-
-type ReplacementOptions = {
-	readonly expected: Uint8Array;
-	readonly maximumBytes: number;
-	readonly operationId: string;
-	readonly path: string;
-	readonly replacement: Uint8Array;
-};
 
 function ContentIdentityFor(content: string): ContentIdentity {
 	const bytes = encoder.encode(content);
@@ -53,92 +44,6 @@ function ContentIdentityFor(content: string): ContentIdentity {
 		byte_count: bytes.byteLength,
 		content_hash: createHash("sha256").update(bytes).digest("hex"),
 	};
-}
-
-function SameBytes(left: Uint8Array, right: Uint8Array) {
-	return (
-		left.byteLength === right.byteLength && left.every((value, index) => value === right[index])
-	);
-}
-
-function MakeNativeModule(root: string, close_count: { value: number }) {
-	const receipts = new Map<string, ReplacementOptions>();
-
-	class FakeNativeBoundedRegularFileStore {
-		constructor(
-			readonly configured_root: string,
-			_receipt_authentication_key: Uint8Array,
-		) {}
-
-		authorizeRoot(candidate_root: string) {
-			return Promise.resolve(candidate_root === this.configured_root);
-		}
-
-		close() {
-			close_count.value += 1;
-		}
-
-		async finalizeRegularFileReplacement(options: ReplacementOptions) {
-			const receipt = receipts.get(options.operationId);
-
-			if (receipt === undefined) {
-				return;
-			}
-
-			if (
-				receipt.path !== options.path ||
-				!SameBytes(receipt.expected, options.expected) ||
-				!SameBytes(receipt.replacement, options.replacement)
-			) {
-				throw new Error("replacement receipt intent changed");
-			}
-
-			receipts.delete(options.operationId);
-		}
-
-		async readRegularFile(path: string, maximum_bytes: number) {
-			const bytes = new Uint8Array(await readFile(join(root, path)));
-
-			if (bytes.byteLength > maximum_bytes) throw new Error("file exceeds maximum bytes");
-
-			return bytes;
-		}
-
-		async replaceRegularFile(options: ReplacementOptions) {
-			const receipt = receipts.get(options.operationId);
-
-			if (receipt !== undefined) return "AlreadyReplaced";
-
-			const target = join(root, options.path);
-			const current = new Uint8Array(await readFile(target));
-
-			if (
-				!SameBytes(current, options.expected) ||
-				options.replacement.byteLength > options.maximumBytes
-			) {
-				return "Changed";
-			}
-
-			await writeFile(target, options.replacement);
-			receipts.set(options.operationId, {
-				...options,
-				expected: Uint8Array.from(options.expected),
-				replacement: Uint8Array.from(options.replacement),
-			});
-
-			return "Replaced";
-		}
-	}
-
-	return () => ({
-		NativeBoundedRegularFileStore: FakeNativeBoundedRegularFileStore,
-		getNativeBuildDescriptor: () => ({
-			architecture: "x86_64",
-			operatingSystem: "windows",
-			target: "x86_64-pc-windows-msvc",
-			testHooksEnabled: false,
-		}),
-	});
 }
 
 async function MakeFixture() {
@@ -162,7 +67,6 @@ async function MakeFixture() {
 function MakeRuntime(
 	database_path: string,
 	root: string,
-	close_count: { value: number },
 	instance_id: string,
 	engine_cleanup_count: { value: number },
 	engine?: Engine,
@@ -181,19 +85,18 @@ function MakeRuntime(
 				}),
 		],
 		migrations_path,
+		retention_clock: Layer.succeed(ThreadRetentionClock, {
+			Now: Effect.succeed(sent_at),
+		}),
 		runtime_metadata: Layer.succeed(RuntimeMetadata, {
 			instance_id,
 			MakeId: (prefix) => Effect.sync(() => `${instance_id}_${prefix}_${++next_id}`),
 			Now: Effect.succeed(sent_at),
 		}),
 		workspace_bounded_regular_file_store_registry:
-			make_workspace_bounded_regular_file_store_registry_layer(
-				[{ root, workspace_id: "workspace_deep" }],
-				{
-					load_native_module: MakeNativeModule(root, close_count),
-					receipt_authentication_key: receipt_key,
-				},
-			).pipe(Layer.provide(NodeFileSystem.layer)),
+			MakeNodeTestWorkspaceBoundedRegularFileStoreRegistryLayer([
+				{ root, workspace_id: "workspace_deep" },
+			]),
 	});
 }
 
@@ -350,13 +253,11 @@ afterEach(async () => {
 describe("deep public-protocol workspace integration", () => {
 	it("preserves one observable workspace effect and rebuilt projection across a backend restart", async () => {
 		const { database_path, directory, root } = await MakeFixture();
-		const first_close_count = { value: 0 };
 		const first_engine_cleanup_count = { value: 0 };
 		const blocking_engine = MakeBlockingFakeEngine(first_engine_cleanup_count);
 		const first_runtime = MakeRuntime(
 			database_path,
 			root,
-			first_close_count,
 			"deep_first",
 			first_engine_cleanup_count,
 			blocking_engine.engine,
@@ -437,12 +338,10 @@ describe("deep public-protocol workspace integration", () => {
 		}
 		expect(first_engine_cleanup_count.value).toBe(1);
 
-		const second_close_count = { value: 0 };
 		const second_engine_cleanup_count = { value: 0 };
 		const second_runtime = MakeRuntime(
 			database_path,
 			root,
-			second_close_count,
 			"deep_second",
 			second_engine_cleanup_count,
 		);
@@ -483,8 +382,6 @@ describe("deep public-protocol workspace integration", () => {
 			await second_runtime.dispose();
 		}
 
-		expect(first_close_count.value).toBeGreaterThan(0);
-		expect(second_close_count.value).toBeGreaterThan(0);
 		expect(second_engine_cleanup_count.value).toBe(0);
 		await rm(directory, { force: true, recursive: true });
 		temporary_directories.splice(temporary_directories.indexOf(directory), 1);

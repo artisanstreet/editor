@@ -8,7 +8,7 @@ const production_sources = [
 	"modules/backend/src/runtime/backend-runtime.ts",
 	"modules/backend/src/guidance/provider-mirrors.ts",
 	"modules/backend/src/model-behaviour/model-behaviour-provider.ts",
-	"modules/desktop/src/utility.ts",
+	"modules/forge/src",
 	"modules/engines/src",
 	"modules/frontend/src",
 ];

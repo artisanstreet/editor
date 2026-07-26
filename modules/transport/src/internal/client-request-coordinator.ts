@@ -1,6 +1,10 @@
-import { Deferred, Effect, Ref } from "effect";
+import { Deferred, Effect, Ref, Schema } from "effect";
 
-import type { ProtocolErrorDetail } from "@artisan/protocol";
+import {
+	GetControlRpc,
+	type ControlRpcSuccessFor,
+	type ProtocolErrorDetail,
+} from "@artisan/protocol";
 
 import type { ArtisanClientError } from "../client-contract";
 import {
@@ -8,14 +12,13 @@ import {
 	protocol_client_error,
 	type PendingRequestEnvelope,
 	type PendingResultEnvelope,
-	type PendingResultKind,
 	type SendCurrent,
 } from "./client-common";
 
 interface PendingRequest {
 	readonly deferred: Deferred.Deferred<PendingResultEnvelope, ArtisanClientError>;
 	readonly envelope: PendingRequestEnvelope;
-	readonly expected_kind: PendingResultKind;
+	readonly accepts: (envelope: PendingResultEnvelope) => boolean;
 }
 
 interface RequestState {
@@ -42,10 +45,9 @@ export interface ClientRequestCoordinator {
 		correlation_id: string,
 		detail: ProtocolErrorDetail,
 	) => Effect.Effect<boolean, ArtisanClientError>;
-	readonly Request: (
-		envelope: PendingRequestEnvelope,
-		expected_kind: PendingResultKind,
-	) => Effect.Effect<PendingResultEnvelope, ArtisanClientError>;
+	readonly Request: <Request extends PendingRequestEnvelope>(
+		envelope: Request,
+	) => Effect.Effect<ControlRpcSuccessFor<Request>, ArtisanClientError>;
 	readonly ResetConnection: Effect.Effect<void>;
 	readonly Resolve: (envelope: PendingResultEnvelope) => Effect.Effect<void, ArtisanClientError>;
 	readonly Retry: Effect.Effect<void>;
@@ -92,10 +94,15 @@ export const make_client_request_coordinator = (
 				];
 			});
 
-		const request = (envelope: PendingRequestEnvelope, expected_kind: PendingResultKind) =>
+		const request = <Request extends PendingRequestEnvelope>(envelope: Request) =>
 			Effect.gen(function* () {
 				const deferred = yield* Deferred.make<PendingResultEnvelope, ArtisanClientError>();
-				const pending = { deferred, envelope, expected_kind };
+				const rpc = GetControlRpc(envelope.kind);
+				const pending = {
+					accepts: Schema.is(rpc.successSchema),
+					deferred,
+					envelope,
+				};
 				const registration = yield* register(pending);
 
 				switch (registration._tag) {
@@ -127,7 +134,7 @@ export const make_client_request_coordinator = (
 						yield* send_current(envelope);
 				}
 
-				return yield* Deferred.await(deferred).pipe(
+				return (yield* Deferred.await(deferred).pipe(
 					Effect.onInterrupt(() =>
 						Ref.update(state, (current) => {
 							const pending_requests = new Map(current.pending);
@@ -143,7 +150,7 @@ export const make_client_request_coordinator = (
 							};
 						}),
 					),
-				);
+				)) as ControlRpcSuccessFor<Request>;
 			});
 
 		const resolve = (envelope: PendingResultEnvelope) =>
@@ -187,7 +194,7 @@ export const make_client_request_coordinator = (
 					);
 				}
 
-				if (match.pending.expected_kind !== envelope.kind) {
+				if (!match.pending.accepts(envelope)) {
 					const error = client_error(
 						"correlation_conflict",
 						"The backend response kind did not match its request.",

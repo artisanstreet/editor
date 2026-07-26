@@ -1,5 +1,7 @@
 import { Clock, Context, Effect, Layer } from "effect";
 
+import { MakeSnowflakeIdLive, SnowflakeId } from "@artisan/protocol";
+
 /** Supplies transport identifiers and canonical timestamps. */
 export class TransportRuntime extends Context.Service<
 	TransportRuntime,
@@ -9,10 +11,17 @@ export class TransportRuntime extends Context.Service<
 	}
 >()("Artisan/TransportRuntime") {}
 
-/** Provides cryptographically random identifiers and the Effect clock. */
-export const TransportRuntimeLive = Layer.succeed(TransportRuntime, {
-	MakeId: (prefix) => Effect.sync(() => `${prefix}_${globalThis.crypto.randomUUID()}`),
-	Now: Clock.currentTimeMillis.pipe(
-		Effect.map((milliseconds) => new Date(milliseconds).toISOString()),
-	),
-});
+/** Provides Snowflake identifiers and the Effect clock. */
+export const TransportRuntimeLive = Layer.effect(
+	TransportRuntime,
+	Effect.gen(function* () {
+		const snowflake_id = yield* SnowflakeId;
+
+		return TransportRuntime.of({
+			MakeId: snowflake_id.Make,
+			Now: Clock.currentTimeMillis.pipe(
+				Effect.map((milliseconds) => new Date(milliseconds).toISOString()),
+			),
+		});
+	}),
+).pipe(Layer.provide(MakeSnowflakeIdLive(1)));

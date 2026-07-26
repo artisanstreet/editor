@@ -5,6 +5,7 @@ import { TokenCount } from "../engine";
 import type {
 	EngineAgentMessageCompletedObservation,
 	EngineAgentMessageDeltaObservation,
+	EngineAssistantMessagePhase,
 	EngineApprovalObservation,
 	EngineCompactionObservation,
 	EngineFileObservation,
@@ -15,6 +16,7 @@ import type {
 	EngineQuestionObservation,
 	EngineRawProvenance,
 	EngineReasoningSummaryDeltaObservation,
+	EngineRetryObservation,
 	EngineRunStateObservation,
 	EngineSearchObservation,
 	EngineTerminalActivityObservation,
@@ -82,6 +84,9 @@ const AgentMessageItemSchema = Schema.Struct({
 	text: Schema.String,
 	type: Schema.Literal("agentMessage"),
 });
+
+const assistant_message_phase = (phase: string | null): EngineAssistantMessagePhase =>
+	phase === "commentary" || phase === "final" ? phase : "unspecified";
 const PlanItemSchema = Schema.Struct({
 	id: Schema.String,
 	text: Schema.String,
@@ -363,6 +368,8 @@ export function normalise_codex_notification(
 					...base,
 					_tag: "agent_message_delta",
 					delta: value.delta,
+					item_id: value.itemId,
+					phase: "unspecified",
 					sequence: 0,
 					turn_id: value.turnId,
 				} satisfies EngineAgentMessageDeltaObservation,
@@ -453,11 +460,13 @@ export function normalise_codex_notification(
 			return decode_known(input, ErrorSchema, (value) => [
 				{
 					...base,
-					_tag: "protocol_diagnostic",
-					level: "error",
+					_tag: "retry",
+					attempt_state: value.willRetry ? "retrying" : "terminal",
 					message: value.error.message,
 					sequence: 0,
-				} satisfies EngineProtocolDiagnosticObservation,
+					turn_id: value.turnId,
+					will_retry: value.willRetry,
+				} satisfies EngineRetryObservation,
 			]);
 		case "warning":
 			return decode_known(input, WarningSchema, (value) => [
@@ -512,7 +521,9 @@ export function normalise_codex_notification(
 									{
 										...base,
 										_tag: "agent_message_completed",
+										item_id: value.item.id,
 										message: value.item.text,
+										phase: assistant_message_phase(value.item.phase),
 										sequence: 0,
 										turn_id: value.turnId,
 									} satisfies EngineAgentMessageCompletedObservation,

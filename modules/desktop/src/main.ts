@@ -1,21 +1,19 @@
-import { app, BrowserWindow, MessageChannelMain, protocol, utilityProcess } from "electron";
-import { readFile } from "node:fs/promises";
-import { delimiter, dirname, extname, join } from "node:path";
+import { app, BrowserWindow, dialog, Menu, session as electron_session } from "electron";
+import { Deferred, Duration, Effect, Option, Queue, Ref, Schedule } from "effect";
 
-import { resolve_desktop_paths } from "./paths";
+import { AcquireForgeProcessSupervisor } from "./forge-process-supervisor";
 import { read_desktop_identity } from "./identity";
-import { DesktopRendererOrigin, resolve_frontend_request } from "./protocol";
-import { DesktopSessionSupervisor } from "./session-supervisor";
-import { RunPackagedDesktopSmoke } from "./packaged-smoke";
+import { resolve_desktop_paths } from "./paths";
+import { SelectDesktopProjectDirectory } from "./project-picker";
 import { make_desktop_window_activity } from "./window-activity";
 
-const request_channel = "artisan:request-connection";
 const identity_channel = "artisan:desktop-identity";
 const activity_channel = "artisan:desktop-activity";
-let main_window: BrowserWindow | undefined;
-let quitting = false;
+const project_picker_channel = "artisan:select-project-directory";
 
 if (process.env.ARTISAN_PACKAGED_SMOKE === "1") {
+	app.commandLine.appendSwitch("in-process-gpu");
+	app.commandLine.appendSwitch("no-sandbox");
 	const smoke_user_data = process.env.ARTISAN_PACKAGED_SMOKE_USER_DATA;
 	if (!smoke_user_data) {
 		throw new Error("Packaged desktop smoke requires an isolated user-data directory");
@@ -23,212 +21,263 @@ if (process.env.ARTISAN_PACKAGED_SMOKE === "1") {
 	app.setPath("userData", smoke_user_data);
 }
 
-protocol.registerSchemesAsPrivileged([
-	{
-		privileges: { codeCache: true, secure: true, standard: true, supportFetchAPI: true },
-		scheme: "artisan",
-	},
-]);
+const AwaitAppReady = Effect.tryPromise({
+	try: () => app.whenReady(),
+	catch: (cause) => cause,
+});
 
-const allowed_url = (url: string) =>
-	url === `${DesktopRendererOrigin}/` || url.startsWith(`${DesktopRendererOrigin}/`);
-
-const frontend_content_type = (file: string) => {
-	switch (extname(file).toLowerCase()) {
-		case ".css":
-			return "text/css";
-		case ".html":
-			return "text/html";
-		case ".js":
-			return "text/javascript";
-		case ".json":
-			return "application/json";
-		case ".svg":
-			return "image/svg+xml";
-		case ".woff":
-			return "font/woff";
-		case ".woff2":
-			return "font/woff2";
-		default:
-			return "application/octet-stream";
-	}
-};
-
-/** Starts exactly one hardened shell window and its dedicated backend utility process. */
-export const StartDesktop = async () => {
-	if (!app.requestSingleInstanceLock()) {
-		if (process.env.ARTISAN_PACKAGED_SMOKE === "1") app.exit(1);
-		else app.quit();
-		return;
-	}
-
-	await app.whenReady();
-	const paths = resolve_desktop_paths({
-		app_data_path: app.getPath("userData"),
-		app_root_path: app.getAppPath(),
-		resources_path: process.resourcesPath,
+const InstallBrowserSession = ({
+	http_endpoint,
+	token,
+}: {
+	readonly http_endpoint: string;
+	readonly token: string;
+}) =>
+	Effect.tryPromise({
+		try: () =>
+			electron_session.defaultSession.cookies.set({
+				httpOnly: true,
+				name: "artisan_forge_session",
+				path: "/",
+				sameSite: "strict",
+				secure: http_endpoint.startsWith("https:"),
+				url: http_endpoint,
+				value: token,
+			}),
+		catch: (cause) => cause,
 	});
-	const supervisor = new DesktopSessionSupervisor({
-		create_channel: () => new MessageChannelMain(),
-		fork_utility: (utility_path) =>
-			utilityProcess.fork(utility_path, [], {
-				env: {
-					...process.env,
-					ARTISAN_DATABASE_PATH: paths.database_path,
-					ARTISAN_MIGRATIONS_PATH: paths.migrations_path,
-					NODE_PATH:
-						process.env.ARTISAN_PACKAGED_SMOKE === "1"
-							? join(dirname(utility_path), "native-runtime")
-							: [join(dirname(utility_path), "native-runtime"), process.env.NODE_PATH]
-									.filter(Boolean)
-									.join(delimiter),
-				},
-				serviceName: "artisan-backend",
-				// Release smoke inherits utility diagnostics into its redirected gate logs.
-				// Normal desktop sessions keep the backend process detached from a console.
-				stdio: process.env.ARTISAN_PACKAGED_SMOKE === "1" ? "inherit" : "ignore",
-			}) as never,
-		paths,
-		report_diagnostic: (message) => {
-			if (process.env.ARTISAN_PACKAGED_SMOKE === "1") {
-				console.error(JSON.stringify(message));
-			}
-		},
-		schedule: (callback, milliseconds) => setTimeout(callback, milliseconds),
-	});
-	const desktop_identity = read_desktop_identity();
-	await protocol.handle("artisan", async (request) => {
-		const file = resolve_frontend_request(paths.frontend_root, request.url);
 
-		if (!file) {
-			return new Response(
-				JSON.stringify({ frontend_root: paths.frontend_root, request_url: request.url }),
-				{ status: 404 },
-			);
-		}
-		try {
-			return new Response(await readFile(file), {
-				headers: { "content-type": frontend_content_type(file) },
-			});
-		} catch (cause) {
-			return new Response(
-				JSON.stringify({
-					file,
-					message:
-						cause instanceof Error ? cause.message : "Unable to read packaged asset",
-				}),
-				{ status: 404 },
-			);
-		}
-	});
-	const CreateWindow = async () => {
-		if (main_window) {
-			return main_window;
-		}
-
-		const window = new BrowserWindow({
-			webPreferences: {
-				contextIsolation: true,
-				nodeIntegration: false,
-				preload: paths.preload_path,
-				sandbox: true,
-			},
-		});
-
-		main_window = window;
-		const activity = make_desktop_window_activity(window);
-		/** Frame-scoped IPC accepts messages only from this top-level renderer frame. */
-		window.webContents.mainFrame.ipc.handle(request_channel, (event) =>
-			supervisor.RequestConnection(event as never),
-		);
-		window.webContents.mainFrame.ipc.handle(identity_channel, () => desktop_identity);
-		window.webContents.mainFrame.ipc.handle(activity_channel, (_event, working: unknown) => {
-			if (typeof working !== "boolean") {
-				throw new Error("Desktop activity state must be a boolean");
-			}
-			activity.SetWorking(working);
-		});
-		window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
-		window.webContents.on("will-navigate", (event, url) => {
-			if (!allowed_url(url)) {
-				event.preventDefault();
-			}
-		});
-		window.on("closed", () => {
-			activity.RestoreIdle();
-			if (main_window === window) {
-				main_window = undefined;
-			}
-		});
-		await window.loadURL(`${DesktopRendererOrigin}/`);
-
-		return window;
-	};
-	app.on("before-quit", (event) => {
-		if (quitting) {
+/** Runs the complete Electron shell lifecycle inside one Effect scope. */
+export const StartDesktop = Effect.scoped(
+	Effect.gen(function* () {
+		if (!app.requestSingleInstanceLock()) {
+			if (process.env.ARTISAN_PACKAGED_SMOKE === "1") app.exit(1);
+			else app.quit();
 			return;
 		}
 
-		event.preventDefault();
-		void supervisor.Dispose().finally(() => {
-			quitting = true;
-			app.quit();
+		yield* AwaitAppReady;
+		Menu.setApplicationMenu(null);
+		const paths = resolve_desktop_paths({
+			app_data_path: app.getPath("userData"),
+			app_root_path: app.getAppPath(),
+			is_packaged: app.isPackaged,
+			resources_path: process.resourcesPath,
 		});
-	});
-	app.on("second-instance", () => {
-		if (main_window?.isMinimized()) {
-			main_window.restore();
-		}
-		main_window?.focus();
-	});
-	app.on("activate", () => {
-		if (!quitting) {
-			void CreateWindow();
-		}
-	});
-	app.on("window-all-closed", () => {
-		if (process.platform !== "darwin") {
-			app.quit();
-		}
-	});
+		const supervisor = yield* AcquireForgeProcessSupervisor(paths, {
+			InstallBrowserSession,
+		});
+		const forge_connection = yield* supervisor.Start;
+		const forge_http_endpoint = new URL(forge_connection.http_endpoint);
+		const renderer_origin = forge_http_endpoint.origin;
+		const desktop_identity = yield* read_desktop_identity;
+		const main_window = yield* Ref.make<Option.Option<BrowserWindow>>(Option.none());
+		const quitting = yield* Ref.make(false);
+		const shutdown = yield* Deferred.make<void>();
+		const dispatch_queue = yield* Queue.unbounded<{
+			readonly effect: Effect.Effect<unknown, unknown>;
+			readonly reject: (cause: unknown) => void;
+			readonly resolve: (value: unknown) => void;
+		}>();
+		yield* Effect.forkScoped(
+			Effect.forever(
+				Queue.take(dispatch_queue).pipe(
+					Effect.flatMap((request) =>
+						request.effect.pipe(
+							Effect.match({
+								onFailure: (cause) => request.reject(cause),
+								onSuccess: (value) => request.resolve(value),
+							}),
+						),
+					),
+				),
+			),
+		);
+		const DispatchPromise = <A, E>(effect: Effect.Effect<A, E>) =>
+			new Promise<A>((resolve, reject) => {
+				const accepted = Queue.offerUnsafe(dispatch_queue, {
+					effect,
+					reject,
+					resolve: (value) => resolve(value as A),
+				});
+				if (!accepted) reject(new Error("Desktop Effect dispatcher is closed"));
+			});
+		const Dispatch = <A, E>(effect: Effect.Effect<A, E>) => {
+			void DispatchPromise(effect).catch((cause) => console.error(cause));
+		};
 
-	supervisor.Start();
-	if (process.env.ARTISAN_PACKAGED_SMOKE === "1") {
-		let exit_code = 0;
-		try {
-			const renderer = await CreateWindow();
-			const evidence = await RunPackagedDesktopSmoke({ renderer, supervisor });
-			console.log(JSON.stringify({ kind: "artisan:packaged-smoke", ok: true, ...evidence }));
-		} catch (cause) {
-			console.error(
-				JSON.stringify({
-					kind: "artisan:packaged-smoke",
-					message:
-						cause instanceof Error ? cause.message : "Unknown packaged smoke failure",
-					ok: false,
+		const CreateWindow = Effect.gen(function* () {
+			const current = yield* Ref.get(main_window);
+			if (Option.isSome(current)) return current.value;
+
+			const window = new BrowserWindow({
+				...(process.platform === "darwin"
+					? {
+							titleBarStyle: "hiddenInset" as const,
+							trafficLightPosition: { x: 16, y: 16 },
+						}
+					: {
+							titleBarStyle: "hidden" as const,
+							titleBarOverlay: {
+								color: "#00000000",
+								height: 40,
+								symbolColor: "#a1a1aa",
+							},
+						}),
+				webPreferences: {
+					additionalArguments: [
+						`--artisan-forge-ws=${forge_connection.websocket_endpoint}`,
+					],
+					contextIsolation: true,
+					nodeIntegration: false,
+					preload: paths.preload_path,
+					sandbox: true,
+				},
+			});
+			yield* Ref.set(main_window, Option.some(window));
+			const activity = yield* make_desktop_window_activity(window);
+			window.webContents.mainFrame.ipc.handle(identity_channel, () => desktop_identity);
+			window.webContents.mainFrame.ipc.handle(activity_channel, (_event, working: unknown) =>
+				DispatchPromise(
+					typeof working === "boolean"
+						? activity.SetWorking(working)
+						: Effect.fail(new Error("Desktop activity state must be a boolean")),
+				),
+			);
+			window.webContents.mainFrame.ipc.handle(project_picker_channel, () =>
+				DispatchPromise(
+					SelectDesktopProjectDirectory({
+						ShowOpenDialog: () =>
+							Effect.tryPromise({
+								try: () =>
+									dialog.showOpenDialog(window, {
+										buttonLabel: "Choose project",
+										properties: ["createDirectory", "openDirectory"],
+										title: "Choose project folder",
+									}),
+								catch: (cause) => cause,
+							}),
+					}).pipe(Effect.map(Option.getOrUndefined)),
+				),
+			);
+			window.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+			window.webContents.on("will-navigate", (event, url) => {
+				if (new URL(url).origin !== renderer_origin) event.preventDefault();
+			});
+			window.on("closed", () => {
+				Dispatch(
+					activity.RestoreIdle.pipe(
+						Effect.andThen(
+							Ref.update(main_window, (candidate) =>
+								Option.filter(candidate, (value) => value !== window),
+							),
+						),
+					),
+				);
+			});
+			yield* Effect.tryPromise({
+				try: () => window.loadURL(forge_http_endpoint.toString()),
+				catch: (cause) => cause,
+			});
+			return window;
+		});
+
+		const on_before_quit = (event: Electron.Event) => {
+			event.preventDefault();
+			Dispatch(
+				Ref.modify(quitting, (current) => [!current, true] as const).pipe(
+					Effect.flatMap((first_request) =>
+						first_request
+							? supervisor.Dispose.pipe(
+									Effect.andThen(Deferred.succeed(shutdown, undefined)),
+								)
+							: Effect.void,
+					),
+				),
+			);
+		};
+		const on_second_instance = () => {
+			Dispatch(
+				Ref.get(main_window).pipe(
+					Effect.tap((candidate) =>
+						Effect.sync(() => {
+							const window = Option.getOrUndefined(candidate);
+							if (window?.isMinimized()) window.restore();
+							window?.focus();
+						}),
+					),
+				),
+			);
+		};
+		const on_activate = () => {
+			Dispatch(
+				Ref.get(quitting).pipe(
+					Effect.flatMap((is_quitting) => (is_quitting ? Effect.void : CreateWindow)),
+				),
+			);
+		};
+		const on_all_closed = () => {
+			if (process.platform !== "darwin") app.quit();
+		};
+		app.on("before-quit", on_before_quit);
+		app.on("second-instance", on_second_instance);
+		app.on("activate", on_activate);
+		app.on("window-all-closed", on_all_closed);
+		yield* Effect.addFinalizer(() =>
+			Effect.sync(() => {
+				app.off("before-quit", on_before_quit);
+				app.off("second-instance", on_second_instance);
+				app.off("activate", on_activate);
+				app.off("window-all-closed", on_all_closed);
+			}),
+		);
+
+		const window = yield* CreateWindow;
+		if (process.env.ARTISAN_PACKAGED_SMOKE === "1") {
+			const ReadRendererEvidence = Effect.tryPromise({
+				try: async () => {
+					const evidence = await window.webContents.executeJavaScript(
+						`(() => {
+							const body = document.body?.innerText ?? "";
+							return document.title === "Artisan Editor" && body.includes("No threads yet. Create one from the sidebar.")
+								? { body, has_native_bridge: typeof window.artisanDesktop?.identity === "function", title: document.title }
+								: undefined;
+						})()`,
+						true,
+					);
+					if (evidence === undefined) throw new Error("Renderer is not ready");
+					return evidence;
+				},
+				catch: (cause) => cause,
+			}).pipe(
+				Effect.retry(Schedule.spaced(Duration.millis(50))),
+				Effect.timeoutOrElse({
+					duration: Duration.seconds(20),
+					orElse: () => Effect.fail(new Error("Packaged renderer readiness timed out")),
 				}),
 			);
-			exit_code = 1;
-		} finally {
-			try {
-				main_window?.destroy();
-			} catch {
-				/** Renderer teardown is best-effort before the process-level smoke exit. */
-			}
-			try {
-				await supervisor.Dispose();
-			} catch {
-				/** The smoke already has its own failure result; shutdown must not prevent exit. */
-			} finally {
-				app.exit(exit_code);
-			}
+			const renderer_evidence = yield* ReadRendererEvidence;
+			const forge_pid = Option.getOrUndefined(yield* supervisor.GetForgePid);
+			console.log(
+				JSON.stringify({
+					forge_pid,
+					forge_websocket_endpoint: forge_connection.websocket_endpoint,
+					kind: "artisan:packaged-smoke",
+					ok: renderer_evidence !== undefined && forge_pid !== undefined,
+					renderer: renderer_evidence,
+				}),
+			);
+			app.exit(renderer_evidence !== undefined && forge_pid !== undefined ? 0 : 1);
+			return;
 		}
-		return;
-	}
-	await CreateWindow();
-};
+		yield* Deferred.await(shutdown);
+		app.off("before-quit", on_before_quit);
+		app.quit();
+	}),
+);
 
-void StartDesktop().catch((cause) => {
+/** The sole Desktop Effect runtime bootstrap. */
+void Effect.runPromise(StartDesktop).catch((cause) => {
 	console.error(
 		JSON.stringify({
 			kind: "artisan:packaged-smoke",

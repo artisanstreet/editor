@@ -8,11 +8,6 @@ on:
                 required: true
                 default: false
                 type: boolean
-            run_native_addon:
-                description: Run the Windows native-addon smoke/recovery gate on the dedicated self-hosted runner.
-                required: true
-                default: false
-                type: boolean
 
 permissions:
     contents: read
@@ -114,32 +109,3 @@ jobs:
                   $ErrorActionPreference = "Stop"
                   $env:ARTISAN_ENGINE_LIVE = "1"
                   pnpm exec vitest run .tests/engines/codex-engine.test.ts
-
-    native-addon:
-        name: Opt-in native-addon smoke/recovery gate
-        needs: validate
-        if: ${{ inputs.run_native_addon }}
-        runs-on: [self-hosted, Windows, X64, artisan-native-addon]
-        environment: native-addon-validation
-        timeout-minutes: 30
-        steps:
-            - uses: actions/checkout@v5
-
-            - uses: pnpm/action-setup@v4
-              with:
-                  version: 11.7.0
-
-            - uses: actions/setup-node@v5
-              with:
-                  node-version: 24
-                  cache: pnpm
-                  cache-dependency-path: pnpm-lock.yaml
-
-            - run: pnpm install --frozen-lockfile
-
-            - name: Run the explicit native smoke/recovery gate
-              shell: pwsh
-              run: |
-                  $ErrorActionPreference = "Stop"
-                  $env:ARTISAN_RUN_NATIVE_ADDON_SMOKE = "1"
-                  pnpm --filter @artisan/bounded-file-store-native verify:local

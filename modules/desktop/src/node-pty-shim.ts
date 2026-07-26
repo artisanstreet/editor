@@ -1,8 +1,8 @@
 import { createRequire } from "node:module";
 
-/** Loads the explicitly staged PTY package beside the bundled utility entry. */
+/** Resolves through the launcher-owned `NODE_PATH`, without ambient configuration. */
 const require = createRequire(import.meta.url);
-const node_pty = require("./native-runtime/node-pty") as {
+const node_pty = require("node-pty") as {
 	readonly spawn: (file: string, args: ReadonlyArray<string>, options: object) => unknown;
 };
 

@@ -32,6 +32,8 @@ import {
 	type CapabilityRestartEnvelope,
 	type CapabilityStartEnvelope,
 	type CapabilitySyncEnvelope,
+	type ConversationQueryEnvelope,
+	type MessageImageAttachmentQueryEnvelope,
 	type CapabilityUninstallEnvelope,
 	type GitDiffQueryEnvelope,
 	type GitIndexStageRequestEnvelope,
@@ -69,6 +71,10 @@ import {
 	type PreviewTargetRegisterEnvelope,
 	type PreviewTargetRemoveEnvelope,
 	type PreviewTargetStateEnvelope,
+	type ProjectDirectoryListInput,
+	type ProjectDirectoryListQueryEnvelope,
+	type ProjectDirectorySelectEnvelope,
+	type ProjectDirectorySelectInput,
 	type RichLinkResolveQueryEnvelope,
 	type SurfaceListQueryEnvelope,
 	type SurfaceUsageAggregateQueryEnvelope,
@@ -281,7 +287,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						...(input.causation_id ? { causation_id: input.causation_id } : {}),
 						...(input.run_id ? { run_id: input.run_id } : {}),
 					};
-					const result = yield* requests.Request(envelope, "command.receipt");
+					const result = yield* requests.Request(envelope);
 
 					if (result.kind !== "command.receipt") {
 						return yield* Effect.die("command response narrowed incorrectly");
@@ -313,12 +319,40 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					kind: "thread.list.query",
 					payload: {},
 				};
-				const result = yield* requests.Request(envelope, "thread.list.query.result");
+				const result = yield* requests.Request(envelope);
 
 				return result.kind === "thread.list.query.result"
 					? result.payload.threads
 					: yield* Effect.die("thread list response narrowed incorrectly");
 			});
+			const list_project_directories = (input: ProjectDirectoryListInput = {}) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ProjectDirectoryListQueryEnvelope = {
+						...trace,
+						kind: "project.directory.list.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(envelope);
+					return result.kind === "project.directory.list.query.result"
+						? result.payload
+						: yield* Effect.die("project directory list response narrowed incorrectly");
+				});
+			const select_project_directory = (input: ProjectDirectorySelectInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ProjectDirectorySelectEnvelope = {
+						...trace,
+						kind: "project.directory.select",
+						payload: input,
+					};
+					const result = yield* requests.Request(envelope);
+					return result.kind === "project.directory.select.result"
+						? result.payload
+						: yield* Effect.die(
+								"project directory select response narrowed incorrectly",
+							);
+				});
 			const list_artisan_tools = (input: ArtisanToolRegistryListInput) =>
 				Effect.gen(function* () {
 					const trace = yield* connection.MakeTrace;
@@ -327,10 +361,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "artisan.tool.registry.list.query",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"artisan.tool.registry.list.query.result",
-					);
+					const result = yield* requests.Request(envelope);
 
 					return result.kind === "artisan.tool.registry.list.query.result"
 						? result.payload
@@ -344,10 +375,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "artisan.tool.invocation.list.query",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"artisan.tool.invocation.list.query.result",
-					);
+					const result = yield* requests.Request(envelope);
 
 					return result.kind === "artisan.tool.invocation.list.query.result"
 						? result.payload
@@ -363,10 +391,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "artisan.approval.list.query",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"artisan.approval.list.query.result",
-					);
+					const result = yield* requests.Request(envelope);
 
 					return result.kind === "artisan.approval.list.query.result"
 						? result.payload
@@ -381,10 +406,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "workspace.file.read.query",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"workspace.file.read.query.result",
-					);
+					const result = yield* requests.Request(envelope);
 
 					return result.kind === "workspace.file.read.query.result"
 						? result.payload
@@ -398,10 +420,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "workspace.file.discovery.query",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"workspace.file.discovery.query.result",
-					);
+					const result = yield* requests.Request(envelope);
 
 					return result.kind === "workspace.file.discovery.query.result"
 						? result.payload
@@ -419,10 +438,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "workspace.language.capabilities.query",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"workspace.language.capabilities.query.result",
-					);
+					const result = yield* requests.Request(envelope);
 
 					return result.kind === "workspace.language.capabilities.query.result"
 						? result.payload
@@ -438,10 +454,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "workspace.change.list.query",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"workspace.change.list.query.result",
-					);
+					const result = yield* requests.Request(envelope);
 
 					return result.kind === "workspace.change.list.query.result"
 						? result.payload
@@ -455,10 +468,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "workspace.change.diff.query",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"workspace.change.diff.query.result",
-					);
+					const result = yield* requests.Request(envelope);
 
 					return result.kind === "workspace.change.diff.query.result"
 						? result.payload
@@ -472,10 +482,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "workspace.conflict.list.query",
 						payload: { thread_id },
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"workspace.conflict.list.query.result",
-					);
+					const result = yield* requests.Request(envelope);
 					return result.kind === "workspace.conflict.list.query.result"
 						? result.payload
 						: yield* Effect.die(
@@ -490,7 +497,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "git.workspace.query",
 						payload: input,
 					};
-					const result = yield* requests.Request(envelope, "git.workspace.query.result");
+					const result = yield* requests.Request(envelope);
 
 					return result.kind === "git.workspace.query.result"
 						? result.payload
@@ -504,7 +511,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "git.diff.query",
 						payload: input,
 					};
-					const result = yield* requests.Request(envelope, "git.diff.query.result");
+					const result = yield* requests.Request(envelope);
 
 					return result.kind === "git.diff.query.result"
 						? result.payload
@@ -518,10 +525,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "preview.target.list.query",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"preview.target.list.query.result",
-					);
+					const result = yield* requests.Request(envelope);
 
 					return result.kind === "preview.target.list.query.result"
 						? result.payload.targets
@@ -535,10 +539,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "preview.target.get.query",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"preview.target.get.query.result",
-					);
+					const result = yield* requests.Request(envelope);
 
 					return result.kind === "preview.target.get.query.result"
 						? result.payload
@@ -552,10 +553,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "preview.asset.metadata.query",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"preview.asset.metadata.query.result",
-					);
+					const result = yield* requests.Request(envelope);
 
 					return result.kind === "preview.asset.metadata.query.result"
 						? result.payload
@@ -569,10 +567,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "preview.rich_link.resolve.query",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"preview.rich_link.resolve.query.result",
-					);
+					const result = yield* requests.Request(envelope);
 
 					return result.kind === "preview.rich_link.resolve.query.result"
 						? result.payload
@@ -585,10 +580,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				| PreviewTargetStateEnvelope;
 			const mutate_preview_target = (envelope: PreviewTargetMutationEnvelope) =>
 				Effect.gen(function* () {
-					const result = yield* requests.Request(
-						envelope,
-						"preview.target.mutation.result",
-					);
+					const result = yield* requests.Request(envelope);
 
 					return result.kind === "preview.target.mutation.result"
 						? result.payload
@@ -644,10 +636,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "preview.browser.launch",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"preview.browser.launch.result",
-					);
+					const result = yield* requests.Request(envelope);
 
 					return result.kind === "preview.browser.launch.result"
 						? result.payload
@@ -663,10 +652,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "preview.inspection.open",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"preview.inspection.open.result",
-					);
+					const result = yield* requests.Request(envelope);
 
 					return result.kind === "preview.inspection.open.result"
 						? result.payload
@@ -682,10 +668,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "preview.inspection.inspect",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"preview.inspection.inspect.result",
-					);
+					const result = yield* requests.Request(envelope);
 
 					return result.kind === "preview.inspection.inspect.result"
 						? result.payload
@@ -699,10 +682,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "preview.inspection.close",
 						payload: { session_id },
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"preview.inspection.close.result",
-					);
+					const result = yield* requests.Request(envelope);
 
 					return result.kind === "preview.inspection.close.result"
 						? result.payload
@@ -717,7 +697,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				| GitMutationResolveEnvelope;
 			const send_git_mutation = (envelope: GitMutationEnvelope) =>
 				Effect.gen(function* () {
-					const result = yield* requests.Request(envelope, "command.receipt");
+					const result = yield* requests.Request(envelope);
 
 					if (result.kind !== "command.receipt") {
 						return yield* Effect.die("Git mutation receipt narrowed incorrectly");
@@ -802,7 +782,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				| ArtisanToolExecuteEnvelope;
 			const send_artisan_tool_mutation = (envelope: ArtisanToolMutationEnvelope) =>
 				Effect.gen(function* () {
-					const result = yield* requests.Request(envelope, "command.receipt");
+					const result = yield* requests.Request(envelope);
 
 					if (result.kind !== "command.receipt") {
 						return yield* Effect.die(
@@ -879,7 +859,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				| WorkspaceFileReplaceEnvelope;
 			const send_workspace_mutation = (envelope: WorkspaceMutationEnvelope) =>
 				Effect.gen(function* () {
-					const result = yield* requests.Request(envelope, "command.receipt");
+					const result = yield* requests.Request(envelope);
 
 					if (result.kind !== "command.receipt") {
 						return yield* Effect.die("workspace mutation receipt narrowed incorrectly");
@@ -978,7 +958,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					kind: "thread.retention.query",
 					payload: {},
 				};
-				const result = yield* requests.Request(envelope, "thread.retention.query.result");
+				const result = yield* requests.Request(envelope);
 
 				return result.kind === "thread.retention.query.result"
 					? result.payload
@@ -992,7 +972,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					kind: "guidance.query",
 					payload: {},
 				};
-				const result = yield* requests.Request(envelope, "guidance.query.result");
+				const result = yield* requests.Request(envelope);
 
 				return result.kind === "guidance.query.result"
 					? result.payload
@@ -1006,7 +986,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				| GlobalGuidanceUpdateEnvelope;
 			const send_guidance_mutation = (envelope: GuidanceMutationEnvelope) =>
 				Effect.gen(function* () {
-					const result = yield* requests.Request(envelope, "command.receipt");
+					const result = yield* requests.Request(envelope);
 
 					if (result.kind !== "command.receipt") {
 						return yield* Effect.die("global guidance receipt narrowed incorrectly");
@@ -1093,7 +1073,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					kind: "model_behaviour.query",
 					payload: {},
 				};
-				const result = yield* requests.Request(envelope, "model_behaviour.query.result");
+				const result = yield* requests.Request(envelope);
 
 				return result.kind === "model_behaviour.query.result"
 					? result.payload
@@ -1106,7 +1086,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				| ModelBehaviourUpdateEnvelope;
 			const send_model_behaviour_mutation = (envelope: ModelBehaviourMutationEnvelope) =>
 				Effect.gen(function* () {
-					const result = yield* requests.Request(envelope, "command.receipt");
+					const result = yield* requests.Request(envelope);
 
 					if (result.kind !== "command.receipt") {
 						return yield* Effect.die("Model Behaviour receipt narrowed incorrectly");
@@ -1213,7 +1193,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				| CapabilityOAuthRevokeEnvelope;
 			const send_marketplace_mutation = (envelope: MarketplaceReceiptEnvelope) =>
 				Effect.gen(function* () {
-					const result = yield* requests.Request(envelope, "command.receipt");
+					const result = yield* requests.Request(envelope);
 
 					if (result.kind !== "command.receipt") {
 						return yield* Effect.die("Marketplace receipt narrowed incorrectly");
@@ -1245,10 +1225,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "marketplace.routine.list.query",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"marketplace.routine.list.query.result",
-					);
+					const result = yield* requests.Request(envelope);
 					return result.kind === "marketplace.routine.list.query.result"
 						? result.payload
 						: yield* Effect.die("routine registry response narrowed incorrectly");
@@ -1261,10 +1238,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "marketplace.routine.detail.query",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"marketplace.routine.detail.query.result",
-					);
+					const result = yield* requests.Request(envelope);
 					return result.kind === "marketplace.routine.detail.query.result"
 						? result.payload
 						: yield* Effect.die("routine detail response narrowed incorrectly");
@@ -1277,10 +1251,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "marketplace.routine.install.preview",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"marketplace.routine.install.preview.result",
-					);
+					const result = yield* requests.Request(envelope);
 					return result.kind === "marketplace.routine.install.preview.result"
 						? result.payload
 						: yield* Effect.die(
@@ -1295,10 +1266,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "marketplace.npx_skills.discover",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"marketplace.npx_skills.discover.result",
-					);
+					const result = yield* requests.Request(envelope);
 					return result.kind === "marketplace.npx_skills.discover.result"
 						? result.payload
 						: yield* Effect.die("npx skills discovery response narrowed incorrectly");
@@ -1456,10 +1424,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "marketplace.routine.invoke",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"marketplace.routine.invoke.result",
-					);
+					const result = yield* requests.Request(envelope);
 					return result.kind === "marketplace.routine.invoke.result"
 						? result.payload
 						: yield* Effect.die("routine invocation response narrowed incorrectly");
@@ -1473,10 +1438,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "marketplace.capability.list.query",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"marketplace.capability.list.query.result",
-					);
+					const result = yield* requests.Request(envelope);
 					return result.kind === "marketplace.capability.list.query.result"
 						? result.payload
 						: yield* Effect.die("capability registry response narrowed incorrectly");
@@ -1489,10 +1451,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "marketplace.capability.detail.query",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"marketplace.capability.detail.query.result",
-					);
+					const result = yield* requests.Request(envelope);
 					return result.kind === "marketplace.capability.detail.query.result"
 						? result.payload
 						: yield* Effect.die("capability detail response narrowed incorrectly");
@@ -1505,10 +1464,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "marketplace.capability.connect.preview",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"marketplace.capability.connect.preview.result",
-					);
+					const result = yield* requests.Request(envelope);
 					return result.kind === "marketplace.capability.connect.preview.result"
 						? result.payload
 						: yield* Effect.die(
@@ -1672,23 +1628,20 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 			) =>
 				Effect.gen(function* () {
 					const trace = yield* connection.MakeTrace;
-					const result = yield* requests.Request(
-						{
-							...trace,
-							message_id: input.command_id ?? trace.message_id,
-							kind: "marketplace.capability.invoke.request",
-							payload: {
-								approval_id: input.approval_id,
-								arguments_json: input.arguments_json,
-								capability_id: input.capability_id,
-								intent_fingerprint: input.intent_fingerprint,
-								requested_by: input.requested_by,
-								scope: input.scope,
-								tool_name: input.tool_name,
-							},
+					const result = yield* requests.Request({
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "marketplace.capability.invoke.request",
+						payload: {
+							approval_id: input.approval_id,
+							arguments_json: input.arguments_json,
+							capability_id: input.capability_id,
+							intent_fingerprint: input.intent_fingerprint,
+							requested_by: input.requested_by,
+							scope: input.scope,
+							tool_name: input.tool_name,
 						},
-						"marketplace.capability.invoke.result",
-					);
+					});
 					return result.kind === "marketplace.capability.invoke.result"
 						? result.payload
 						: yield* Effect.die("capability invocation request narrowed incorrectly");
@@ -1698,23 +1651,20 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 			) =>
 				Effect.gen(function* () {
 					const trace = yield* connection.MakeTrace;
-					const result = yield* requests.Request(
-						{
-							...trace,
-							message_id: input.command_id ?? trace.message_id,
-							kind: "marketplace.capability.invoke.decision",
-							payload: {
-								approval_id: input.approval_id,
-								approved: input.approved,
-								arguments_json: input.arguments_json,
-								capability_id: input.capability_id,
-								intent_fingerprint: input.intent_fingerprint,
-								scope: input.scope,
-								tool_name: input.tool_name,
-							},
+					const result = yield* requests.Request({
+						...trace,
+						message_id: input.command_id ?? trace.message_id,
+						kind: "marketplace.capability.invoke.decision",
+						payload: {
+							approval_id: input.approval_id,
+							approved: input.approved,
+							arguments_json: input.arguments_json,
+							capability_id: input.capability_id,
+							intent_fingerprint: input.intent_fingerprint,
+							scope: input.scope,
+							tool_name: input.tool_name,
 						},
-						"marketplace.capability.invoke.result",
-					);
+					});
 					return result.kind === "marketplace.capability.invoke.result"
 						? result.payload
 						: yield* Effect.die("capability invocation decision narrowed incorrectly");
@@ -1727,10 +1677,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "marketplace.capability.invoke",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"marketplace.capability.invoke.result",
-					);
+					const result = yield* requests.Request(envelope);
 					return result.kind === "marketplace.capability.invoke.result"
 						? result.payload
 						: yield* Effect.die("capability invocation response narrowed incorrectly");
@@ -1761,10 +1708,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "marketplace.capability.oauth.begin",
 						payload: { capability_id: input.capability_id, scope: input.scope },
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"marketplace.capability.oauth.begin.result",
-					);
+					const result = yield* requests.Request(envelope);
 					return result.kind === "marketplace.capability.oauth.begin.result"
 						? result.payload
 						: yield* Effect.die("capability OAuth begin response narrowed incorrectly");
@@ -1791,10 +1735,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "marketplace.capability.oauth.status.query",
 						payload: { capability_id: input.capability_id, scope: input.scope },
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"marketplace.capability.oauth.status.query.result",
-					);
+					const result = yield* requests.Request(envelope);
 					return result.kind === "marketplace.capability.oauth.status.query.result"
 						? result.payload
 						: yield* Effect.die(
@@ -1815,7 +1756,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 							inactivity_days: input.inactivity_days,
 						},
 					};
-					const result = yield* requests.Request(envelope, "command.receipt");
+					const result = yield* requests.Request(envelope);
 
 					if (result.kind !== "command.receipt") {
 						return yield* Effect.die("thread retention receipt narrowed incorrectly");
@@ -1855,7 +1796,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "thread.work.query",
 						payload: { thread_id },
 					};
-					const result = yield* requests.Request(envelope, "thread.work.query.result");
+					const result = yield* requests.Request(envelope);
 
 					return result.kind === "thread.work.query.result"
 						? Option.fromUndefinedOr(result.payload.work)
@@ -1870,10 +1811,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "orchestration.graph.query",
 						payload: { group_id },
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"orchestration.graph.query.result",
-					);
+					const result = yield* requests.Request(envelope);
 
 					return result.kind === "orchestration.graph.query.result"
 						? result.payload.graph
@@ -1890,13 +1828,48 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "thread.transcript.query",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"thread.transcript.query.result",
-					);
+					const result = yield* requests.Request(envelope);
 					return result.kind === "thread.transcript.query.result"
 						? result.payload
 						: yield* Effect.die("thread transcript response narrowed incorrectly");
+				});
+
+			const get_conversation = (input: import("@artisan/protocol").ConversationQuery) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ConversationQueryEnvelope = {
+						...trace,
+						kind: "conversation.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(envelope);
+
+					return result.kind === "conversation.query.result"
+						? result.payload
+						: yield* Effect.die("conversation response narrowed incorrectly");
+				});
+
+			const get_message_image_attachment = (
+				input: import("@artisan/protocol").MessageImageAttachmentQuery,
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: MessageImageAttachmentQueryEnvelope = {
+						...trace,
+						kind: "message.image_attachment.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(envelope);
+
+					if (result.kind !== "message.image_attachment.query.result") {
+						return yield* Effect.die(
+							"message image attachment response narrowed incorrectly",
+						);
+					}
+
+					return result.payload.status === "found"
+						? Option.some(result.payload.attachment)
+						: Option.none();
 				});
 
 			const list_orchestration_groups = (thread_id: string, include_terminal: boolean) =>
@@ -1907,10 +1880,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "orchestration.group.list.query",
 						payload: { thread_id, include_terminal },
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"orchestration.group.list.query.result",
-					);
+					const result = yield* requests.Request(envelope);
 					return result.kind === "orchestration.group.list.query.result"
 						? result.payload
 						: yield* Effect.die(
@@ -1926,7 +1896,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "thread.session.query",
 						payload: { thread_id },
 					};
-					const result = yield* requests.Request(envelope, "thread.session.query.result");
+					const result = yield* requests.Request(envelope);
 					return result.kind === "thread.session.query.result"
 						? result.payload
 						: yield* Effect.die("thread session response narrowed incorrectly");
@@ -1940,7 +1910,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "surface.list.query",
 						payload: input,
 					};
-					const result = yield* requests.Request(envelope, "surface.list.query.result");
+					const result = yield* requests.Request(envelope);
 					return result.kind === "surface.list.query.result"
 						? result.payload
 						: yield* Effect.die("surface list response narrowed incorrectly");
@@ -1956,10 +1926,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "surface.usage.aggregate.query",
 						payload: input,
 					};
-					const result = yield* requests.Request(
-						envelope,
-						"surface.usage.aggregate.query.result",
-					);
+					const result = yield* requests.Request(envelope);
 					return result.kind === "surface.usage.aggregate.query.result"
 						? result.payload
 						: yield* Effect.die("surface usage response narrowed incorrectly");
@@ -1973,7 +1940,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						kind: "terminal.list.query",
 						payload: { thread_id, workspace_id },
 					};
-					const result = yield* requests.Request(envelope, "terminal.list.query.result");
+					const result = yield* requests.Request(envelope);
 
 					return result.kind === "terminal.list.query.result"
 						? result.payload.terminals
@@ -1986,6 +1953,8 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				Dispose: shutdown(Option.none()),
 				Errors: Stream.fromQueue(errors),
 				Events: subscriptions.Events,
+				GetConversation: get_conversation,
+				GetMessageImageAttachment: get_message_image_attachment,
 				GetOrchestrationGraph: get_orchestration_graph,
 				GetThreadTranscript: get_thread_transcript,
 				GetThreadSession: get_thread_session,
@@ -2013,6 +1982,8 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				ListWorkspaceConflicts: list_workspace_conflicts,
 				ListTerminals: list_terminals,
 				ListThreads: list_threads,
+				ListProjectDirectories: list_project_directories,
+				SelectProjectDirectory: select_project_directory,
 				ListPreviewTargets: list_preview_targets,
 				ListRoutines: list_routines,
 				ListCapabilities: list_capabilities,
@@ -2093,6 +2064,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				SetPreviewTargetState: set_preview_target_state,
 				SubscribeOrchestrationGraph: subscriptions.SubscribeOrchestrationGraph,
 				SubscribeOrchestrationGroups: subscriptions.SubscribeOrchestrationGroups,
+				SubscribeConversation: subscriptions.SubscribeConversation,
 				SubscribeThreadList: subscriptions.SubscribeThreadList,
 				SubscribeThreadTranscript: subscriptions.SubscribeThreadTranscript,
 				SubscribeThreadSession: subscriptions.SubscribeThreadSession,

@@ -156,7 +156,11 @@ describe("Codex engine run", () => {
 								network_access: true,
 								write_access: true,
 							},
-							provider_options: { "codex.reasoning_effort": "high" },
+							provider_options: {
+								"codex.reasoning_effort": "high",
+								"codex.service_tier": "fast",
+								"codex.workflow_mode": "plan",
+							},
 							working_directory: "C:\\workspace",
 						});
 
@@ -206,12 +210,22 @@ describe("Codex engine run", () => {
 						developerInstructions: "Use project guidance.",
 						model: "gpt-5",
 						sandbox: "workspaceWrite",
+						serviceTier: "fast",
 					},
 				},
 				{
 					method: "turn/start",
 					params: {
+						collaborationMode: {
+							mode: "plan",
+							settings: {
+								developer_instructions: null,
+								model: "gpt-5",
+								reasoning_effort: "high",
+							},
+						},
 						input: [{ text: "Start", text_elements: [], type: "text" }],
+						serviceTier: "fast",
 						threadId: "thread-started",
 					},
 				},

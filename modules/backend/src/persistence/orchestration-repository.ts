@@ -1,11 +1,10 @@
-import { and, asc, desc, eq, inArray, notExists, or } from "drizzle-orm";
-import { Context, Data, Effect, Layer, Schema } from "effect";
+import { and, desc, eq, inArray, or } from "drizzle-orm";
+import { Effect, Layer, Schema } from "effect";
 
 import {
 	EventPayload,
 	ThreadSessionPolicy,
 	RawOrigin,
-	CommandPayload,
 	type CommandEnvelope,
 	type EventEnvelope,
 	type ThreadMessageRoutedEvent,
@@ -15,11 +14,28 @@ import {
 import type { EngineObservation } from "@artisan/engines";
 
 import { Database } from "./database";
+import { AppendJournalEventInTransaction } from "./journal-store";
+import {
+	ImageAttachmentsFor,
+	SanitisePayload,
+	ValidateImageAttachments,
+} from "./orchestration/message-attachments";
+import { make_outbox_operations } from "./orchestration/outbox";
+import {
+	OrchestrationCommandConflict,
+	OrchestrationFailure,
+	OrchestrationNotFound,
+	OrchestrationRepository,
+	type OrchestrationError,
+	type OutboxKind,
+	type RecoverableNativeRun,
+	type WorkStatus,
+} from "./orchestration/contracts";
 import { JournalNotifier } from "./journal-notifier";
 import {
-	EventStreams,
 	JournalCommands,
 	JournalEvents,
+	MessageImageAttachments,
 	OrchestrationCoordinators,
 	OrchestrationInteractions,
 	OrchestrationIntake,
@@ -27,96 +43,23 @@ import {
 	OrchestrationOutbox,
 	OrchestrationRawObservations,
 	OrchestrationRuns,
-	ThreadErasureClaims,
 	Threads,
 } from "./schema";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import { ApplyEngineObservation } from "../conversation/index.ts";
 import type { IntakeAssessment } from "../orchestration/intake-policy";
-import { RecordThreadActivity } from "../threads/internal/thread-activity";
 import { PersistSurfaceProjection } from "../surfaces/surface-projection";
 
-type WorkStatus = ThreadWorkItem["status"];
-type OutboxKind = "start" | "steer" | "cancel" | "close" | "respond_approval" | "respond_question";
-
-export class OrchestrationCommandConflict extends Data.TaggedError("OrchestrationCommandConflict")<{
-	readonly message_id: string;
-}> {}
-
-export class OrchestrationNotFound extends Data.TaggedError("OrchestrationNotFound")<{
-	readonly resource: "run" | "thread";
-	readonly id: string;
-}> {}
-
-export class OrchestrationFailure extends Data.TaggedError("OrchestrationFailure")<{
-	readonly cause: unknown;
-}> {}
-
-export type OrchestrationError =
-	| OrchestrationCommandConflict
-	| OrchestrationFailure
-	| OrchestrationNotFound;
-
-export interface AcceptedOrchestrationCommand {
-	readonly events: ReadonlyArray<EventEnvelope>;
-	readonly journal_sequence: number;
-	readonly run_id: string;
-	readonly status: "accepted" | "duplicate";
-}
-
-export interface PendingWork {
-	readonly agent_id: string;
-	readonly command_id: string;
-	readonly engine_id: string;
-	readonly kind: OutboxKind;
-	readonly payload: CommandEnvelope["payload"];
-	readonly run_id: string;
-	readonly thread_id: string;
-	readonly working_directory: string;
-}
-
-export class OrchestrationRepository extends Context.Service<
+export {
+	OrchestrationCommandConflict,
+	OrchestrationFailure,
+	OrchestrationNotFound,
 	OrchestrationRepository,
-	{
-		readonly Accept: (
-			command: CommandEnvelope,
-			can_steer: boolean,
-			intake?: IntakeAssessment,
-			routing_reason?: ThreadMessageRoutedEvent["reason"],
-		) => Effect.Effect<AcceptedOrchestrationCommand, OrchestrationError>;
-		readonly CompleteOutbox: (command_id: string) => Effect.Effect<void, OrchestrationError>;
-		readonly ClaimOutbox: (command_id: string) => Effect.Effect<boolean, OrchestrationError>;
-		readonly FallbackSteering: (
-			command_id: string,
-			reason?: "delivery_failed" | "rejected",
-		) => Effect.Effect<ReadonlyArray<EventEnvelope>, OrchestrationError>;
-		readonly GetPending: () => Effect.Effect<ReadonlyArray<PendingWork>, OrchestrationError>;
-		readonly GetWork: (
-			thread_id: string,
-		) => Effect.Effect<ThreadWorkItem | undefined, OrchestrationError>;
-		readonly GetAutoSteer: (thread_id: string) => Effect.Effect<boolean, OrchestrationError>;
-		readonly GetSessionPolicy: (
-			thread_id: string,
-		) => Effect.Effect<ThreadSessionPolicy, OrchestrationError>;
-		readonly GetSession: (
-			thread_id: string,
-		) => Effect.Effect<ThreadSessionSnapshot, OrchestrationError>;
-		readonly MarkInterrupted: () => Effect.Effect<void, OrchestrationError>;
-		readonly MarkOutboxUndeliverable: (
-			command_id: string,
-		) => Effect.Effect<void, OrchestrationError>;
-		readonly MarkRunStarted: (
-			run_id: string,
-		) => Effect.Effect<ReadonlyArray<EventEnvelope>, OrchestrationError>;
-		readonly PersistNativeRun: (
-			run_id: string,
-			native_thread_id: string,
-			resume_token: unknown,
-		) => Effect.Effect<void, OrchestrationError>;
-		readonly RecordObservation: (
-			observation: EngineObservation,
-		) => Effect.Effect<ReadonlyArray<EventEnvelope>, OrchestrationError>;
-	}
->()("Artisan/OrchestrationRepository") {}
+	type AcceptedOrchestrationCommand,
+	type OrchestrationError,
+	type PendingWork,
+	type RecoverableNativeRun,
+} from "./orchestration/contracts";
 
 function normalize_error(error: unknown): OrchestrationError {
 	if (error instanceof OrchestrationCommandConflict || error instanceof OrchestrationNotFound) {
@@ -133,6 +76,12 @@ function is_active_status(status: string): status is "running" | "waiting" {
 function is_projectable_status(status: string): status is "queued" | "running" | "waiting" {
 	return status === "queued" || is_active_status(status);
 }
+
+/** Validates the minimal provider-owned identity needed to reopen one native run. */
+const EngineResumeTokenSchema = Schema.Struct({
+	native_thread_id: Schema.String,
+	opaque_checkpoint: Schema.optional(Schema.String),
+});
 
 export const OrchestrationRepositoryLive = Layer.effect(
 	OrchestrationRepository,
@@ -157,85 +106,8 @@ export const OrchestrationRepositoryLive = Layer.effect(
 
 		const AppendEvent = (
 			transaction: typeof database.client,
-			input: {
-				readonly agent_id: string;
-				readonly causation_id: string;
-				readonly correlation_id: string;
-				readonly payload: EventPayload;
-				readonly raw_origin?: { readonly provider: string; readonly reference: string };
-				readonly run_id?: string;
-				readonly thread_id: string;
-			},
-		) =>
-			Effect.gen(function* () {
-				const stream_id = `thread:${input.thread_id}`;
-				const [stream] = yield* transaction
-					.select({ last_sequence: EventStreams.last_sequence })
-					.from(EventStreams)
-					.where(eq(EventStreams.stream_id, stream_id))
-					.limit(1);
-				const sequence = (stream?.last_sequence ?? 0) + 1;
-				const event_id = yield* metadata.MakeId("event");
-				const occurred_at = yield* metadata.Now;
-
-				yield* RecordThreadActivity(
-					transaction,
-					input.thread_id,
-					occurred_at,
-					input.payload,
-				);
-
-				if (stream) {
-					yield* transaction
-						.update(EventStreams)
-						.set({ last_sequence: sequence })
-						.where(eq(EventStreams.stream_id, stream_id));
-				} else {
-					yield* transaction.insert(EventStreams).values({
-						last_sequence: sequence,
-						stream_id,
-					});
-				}
-
-				const [inserted] = yield* transaction
-					.insert(JournalEvents)
-					.values({
-						agent_id: input.agent_id,
-						causation_id: input.causation_id,
-						correlation_id: input.correlation_id,
-						event_id,
-						event_type: input.payload.type,
-						occurred_at,
-						origin: "backend",
-						payload_json: JSON.stringify(input.payload),
-						raw_origin_json: input.raw_origin ? JSON.stringify(input.raw_origin) : null,
-						...(input.run_id ? { run_id: input.run_id } : {}),
-						schema_version: 1,
-						stream_id,
-						stream_sequence: sequence,
-						thread_id: input.thread_id,
-					})
-					.returning({ journal_sequence: JournalEvents.sequence });
-
-				return {
-					agent_id: input.agent_id,
-					causation_id: input.causation_id,
-					correlation_id: input.correlation_id,
-					journal_sequence: inserted!.journal_sequence,
-					kind: "event" as const,
-					message_id: event_id,
-					origin: "backend" as const,
-					payload: input.payload,
-					protocol_version: 1 as const,
-					...(input.raw_origin ? { raw_origin: input.raw_origin } : {}),
-					...(input.run_id ? { run_id: input.run_id } : {}),
-					schema_version: 1 as const,
-					sequence,
-					sent_at: occurred_at,
-					stream_id,
-					thread_id: input.thread_id,
-				} satisfies EventEnvelope;
-			});
+			input: Parameters<typeof AppendJournalEventInTransaction>[2],
+		) => AppendJournalEventInTransaction(transaction, metadata, input);
 
 		const GetWork = (thread_id: string) =>
 			database.client
@@ -286,6 +158,8 @@ export const OrchestrationRepositoryLive = Layer.effect(
 			reasoning_effort: "medium",
 			permission_mode: "on_request",
 			sandbox_mode: "workspace_write",
+			service_tier: "standard",
+			workflow_mode: "build",
 			web_search_enabled: false,
 			strict_clarification: false,
 		} as const satisfies ThreadSessionPolicy;
@@ -296,6 +170,8 @@ export const OrchestrationRepositoryLive = Layer.effect(
 						readonly policy_reasoning_effort: string;
 						readonly policy_permission_mode: string;
 						readonly policy_sandbox_mode: string;
+						readonly policy_service_tier: string;
+						readonly policy_workflow_mode: string;
 						readonly policy_web_search_enabled: boolean;
 						readonly policy_strict_clarification: boolean;
 				  }
@@ -310,6 +186,8 @@ export const OrchestrationRepositoryLive = Layer.effect(
 						reasoning_effort: row.policy_reasoning_effort,
 						permission_mode: row.policy_permission_mode,
 						sandbox_mode: row.policy_sandbox_mode,
+						service_tier: row.policy_service_tier,
+						workflow_mode: row.policy_workflow_mode,
 						web_search_enabled: row.policy_web_search_enabled,
 						strict_clarification: row.policy_strict_clarification,
 					}).pipe(Effect.mapError((cause) => new OrchestrationFailure({ cause })))
@@ -321,6 +199,8 @@ export const OrchestrationRepositoryLive = Layer.effect(
 					policy_reasoning_effort: OrchestrationCoordinators.policy_reasoning_effort,
 					policy_permission_mode: OrchestrationCoordinators.policy_permission_mode,
 					policy_sandbox_mode: OrchestrationCoordinators.policy_sandbox_mode,
+					policy_service_tier: OrchestrationCoordinators.policy_service_tier,
+					policy_workflow_mode: OrchestrationCoordinators.policy_workflow_mode,
 					policy_web_search_enabled: OrchestrationCoordinators.policy_web_search_enabled,
 					policy_strict_clarification:
 						OrchestrationCoordinators.policy_strict_clarification,
@@ -346,6 +226,9 @@ export const OrchestrationRepositoryLive = Layer.effect(
 								policy_permission_mode:
 									OrchestrationCoordinators.policy_permission_mode,
 								policy_sandbox_mode: OrchestrationCoordinators.policy_sandbox_mode,
+								policy_service_tier: OrchestrationCoordinators.policy_service_tier,
+								policy_workflow_mode:
+									OrchestrationCoordinators.policy_workflow_mode,
 								policy_web_search_enabled:
 									OrchestrationCoordinators.policy_web_search_enabled,
 								policy_strict_clarification:
@@ -436,7 +319,13 @@ export const OrchestrationRepositoryLive = Layer.effect(
 			routing_reason?: ThreadMessageRoutedEvent["reason"],
 		) =>
 			Effect.gen(function* () {
-				const payload_json = JSON.stringify(command.payload);
+				const payload_json = yield* Effect.try({
+					try: () => {
+						ValidateImageAttachments(command.payload);
+						return JSON.stringify(SanitisePayload(command.payload));
+					},
+					catch: (cause) => new OrchestrationFailure({ cause }),
+				});
 				const raw_origin_json = command.raw_origin
 					? JSON.stringify(command.raw_origin)
 					: null;
@@ -659,6 +548,8 @@ export const OrchestrationRepositoryLive = Layer.effect(
 								policy_reasoning_effort: payload.policy.reasoning_effort,
 								policy_permission_mode: payload.policy.permission_mode,
 								policy_sandbox_mode: payload.policy.sandbox_mode,
+								policy_service_tier: payload.policy.service_tier,
+								policy_workflow_mode: payload.policy.workflow_mode,
 								policy_web_search_enabled: payload.policy.web_search_enabled,
 								policy_strict_clarification: payload.policy.strict_clarification,
 								updated_at: accepted_at,
@@ -1065,6 +956,22 @@ export const OrchestrationRepositoryLive = Layer.effect(
 							status: "accepted",
 							thread_id: command.thread_id,
 						});
+						if (
+							payload.type === "thread.send_message" &&
+							payload.attachments !== undefined
+						) {
+							yield* transaction.insert(MessageImageAttachments).values(
+								payload.attachments.map((attachment, position) => ({
+									attachment_id: attachment.id,
+									content: Buffer.from(attachment.bytes!),
+									media_type: attachment.media_type,
+									message_id: command.message_id,
+									name: attachment.name,
+									position,
+									size_bytes: attachment.bytes!.byteLength,
+								})),
+							);
+						}
 
 						if (!coordinator) {
 							yield* transaction.insert(OrchestrationCoordinators).values({
@@ -1117,6 +1024,12 @@ export const OrchestrationRepositoryLive = Layer.effect(
 									correlation_id: command.message_id,
 									payload: {
 										message_id: command.message_id,
+										...(payload.attachments === undefined
+											? {}
+											: { attachments: ImageAttachmentsFor(payload) }),
+										...(payload.content === undefined
+											? {}
+											: { content: payload.content }),
 										...(payload.mentioned_projects === undefined
 											? {}
 											: { mentioned_projects: payload.mentioned_projects }),
@@ -1191,6 +1104,12 @@ export const OrchestrationRepositoryLive = Layer.effect(
 									correlation_id: command.message_id,
 									payload: {
 										message_id: command.message_id,
+										...(payload.attachments === undefined
+											? {}
+											: { attachments: ImageAttachmentsFor(payload) }),
+										...(payload.content === undefined
+											? {}
+											: { content: payload.content }),
 										...(payload.mentioned_projects === undefined
 											? {}
 											: { mentioned_projects: payload.mentioned_projects }),
@@ -1352,158 +1271,8 @@ export const OrchestrationRepositoryLive = Layer.effect(
 				return acceptance;
 			}).pipe(Effect.mapError(normalize_error));
 
-		const GetPending = () =>
-			database.client
-				.select({
-					agent_id: OrchestrationOutbox.agent_id,
-					command_id: OrchestrationOutbox.command_id,
-					engine_id: OrchestrationRuns.engine_id,
-					kind: OrchestrationOutbox.kind,
-					payload_json: OrchestrationOutbox.payload_json,
-					run_id: OrchestrationOutbox.run_id,
-					status: OrchestrationRuns.status,
-					thread_id: OrchestrationOutbox.thread_id,
-					working_directory: OrchestrationRuns.working_directory,
-				})
-				.from(OrchestrationOutbox)
-				.innerJoin(
-					OrchestrationRuns,
-					eq(OrchestrationOutbox.run_id, OrchestrationRuns.run_id),
-				)
-				.where(
-					and(
-						eq(OrchestrationOutbox.status, "pending"),
-						notExists(
-							database.client
-								.select({ thread_id: ThreadErasureClaims.thread_id })
-								.from(ThreadErasureClaims)
-								.where(
-									eq(
-										ThreadErasureClaims.thread_id,
-										OrchestrationOutbox.thread_id,
-									),
-								),
-						),
-					),
-				)
-				.orderBy(asc(OrchestrationOutbox.created_at), asc(OrchestrationOutbox.command_id))
-				.pipe(
-					Effect.flatMap((rows) =>
-						Effect.forEach(
-							rows.filter((row) => row.kind !== "start" || row.status === "queued"),
-							(row) =>
-								ParsePersistedJson(row.payload_json).pipe(
-									Effect.flatMap((value) =>
-										Schema.decodeUnknownEffect(CommandPayload)(value).pipe(
-											Effect.mapError(
-												(cause) => new OrchestrationFailure({ cause }),
-											),
-										),
-									),
-									Effect.map(
-										(payload) =>
-											({
-												agent_id: row.agent_id,
-												command_id: row.command_id,
-												engine_id: row.engine_id,
-												kind: row.kind as OutboxKind,
-												payload,
-												run_id: row.run_id,
-												thread_id: row.thread_id,
-												working_directory: row.working_directory,
-											}) satisfies PendingWork,
-									),
-								),
-						),
-					),
-					Effect.mapError(normalize_error),
-				);
-
-		const CompleteOutbox = (command_id: string) =>
-			Effect.gen(function* () {
-				const updated_at = yield* metadata.Now;
-				const events = yield* database.client.transaction((transaction) =>
-					Effect.gen(function* () {
-						const [outbox] = yield* transaction
-							.update(OrchestrationOutbox)
-							.set({ status: "delivered", updated_at })
-							.where(
-								and(
-									eq(OrchestrationOutbox.command_id, command_id),
-									eq(OrchestrationOutbox.status, "dispatching"),
-								),
-							)
-							.returning();
-						if (!outbox || outbox.kind !== "steer") return [];
-						const [message] = yield* transaction
-							.select()
-							.from(OrchestrationMessages)
-							.where(eq(OrchestrationMessages.command_id, command_id))
-							.limit(1);
-						if (
-							!message ||
-							message.delivery !== "steering" ||
-							message.run_id === null ||
-							message.agent_id === null
-						)
-							return [];
-						return [
-							yield* AppendEvent(transaction, {
-								agent_id: message.agent_id,
-								causation_id: command_id,
-								correlation_id: command_id,
-								payload: {
-									message_id: message.message_id,
-									outcome: "steered",
-									run_id: message.run_id,
-									type: "thread.message_routed",
-								},
-								run_id: message.run_id,
-								thread_id: message.thread_id,
-							}),
-						];
-					}),
-				);
-				if (events.length > 0) yield* notifier.Publish(events.at(-1)!.journal_sequence);
-			}).pipe(Effect.mapError(normalize_error));
-
-		const ClaimOutbox = (command_id: string) =>
-			Effect.gen(function* () {
-				const updated_at = yield* metadata.Now;
-				const claimed = yield* database.client
-					.update(OrchestrationOutbox)
-					.set({ status: "dispatching", updated_at })
-					.where(
-						and(
-							eq(OrchestrationOutbox.command_id, command_id),
-							eq(OrchestrationOutbox.status, "pending"),
-							notExists(
-								database.client
-									.select({ thread_id: ThreadErasureClaims.thread_id })
-									.from(ThreadErasureClaims)
-									.where(
-										eq(
-											ThreadErasureClaims.thread_id,
-											OrchestrationOutbox.thread_id,
-										),
-									),
-							),
-						),
-					)
-					.returning({ command_id: OrchestrationOutbox.command_id });
-
-				return claimed.length === 1;
-			}).pipe(Effect.mapError(normalize_error));
-
-		const MarkOutboxUndeliverable = (command_id: string) =>
-			Effect.gen(function* () {
-				const updated_at = yield* metadata.Now;
-
-				yield* database.client
-					.update(OrchestrationOutbox)
-					.set({ status: "undeliverable", updated_at })
-					.where(eq(OrchestrationOutbox.command_id, command_id));
-			}).pipe(Effect.mapError(normalize_error));
+		const { ClaimOutbox, CompleteOutbox, GetPending, MarkOutboxUndeliverable } =
+			make_outbox_operations(database.client, metadata, notifier);
 
 		const PersistNativeRun = (
 			run_id: string,
@@ -1582,6 +1351,50 @@ export const OrchestrationRepositoryLive = Layer.effect(
 				}
 
 				return result;
+			}).pipe(Effect.mapError(normalize_error));
+
+		const MarkRunResumed = (run_id: string) =>
+			Effect.gen(function* () {
+				const events = yield* database.client.transaction((transaction) =>
+					Effect.gen(function* () {
+						const updated_at = yield* metadata.Now;
+						const [run] = yield* transaction
+							.update(OrchestrationRuns)
+							.set({ status: "running", updated_at })
+							.where(
+								and(
+									eq(OrchestrationRuns.run_id, run_id),
+									eq(OrchestrationRuns.status, "interrupted"),
+								),
+							)
+							.returning();
+
+						if (!run) {
+							return [];
+						}
+
+						return [
+							yield* AppendEvent(transaction, {
+								agent_id: run.agent_id,
+								causation_id: `resume:${run_id}`,
+								correlation_id: run_id,
+								payload: {
+									state: "running",
+									type: "run.lifecycle",
+									working_directory: run.working_directory,
+								},
+								run_id,
+								thread_id: run.thread_id,
+							}),
+						];
+					}),
+				);
+
+				if (events.length > 0) {
+					yield* notifier.Publish(events.at(-1)!.journal_sequence);
+				}
+
+				return events.length === 1;
 			}).pipe(Effect.mapError(normalize_error));
 
 		const FallbackSteering = (
@@ -1745,6 +1558,12 @@ export const OrchestrationRepositoryLive = Layer.effect(
 							run_id: run.run_id,
 							thread_id: run.thread_id,
 						});
+						yield* ApplyEngineObservation(transaction, observation, {
+							agent_id: run.agent_id,
+							occurred_at: projected_at,
+							run_id: run.run_id,
+							thread_id: run.thread_id,
+						}) as Effect.Effect<unknown, unknown, never>;
 
 						const payload =
 							observation._tag === "agent_message_completed"
@@ -1906,16 +1725,14 @@ export const OrchestrationRepositoryLive = Layer.effect(
 					}),
 				);
 
-				if (result.length > 0) {
-					yield* notifier.Publish(result.at(-1)!.journal_sequence);
-				}
+				yield* notifier.Publish(result.at(-1)?.journal_sequence ?? 0);
 
 				return result;
 			}).pipe(Effect.mapError(normalize_error));
 
-		const MarkInterrupted = () =>
+		const ClaimNativeRecoveries = () =>
 			Effect.gen(function* () {
-				const events = yield* database.client.transaction((transaction) =>
+				const recovery = yield* database.client.transaction((transaction) =>
 					Effect.gen(function* () {
 						const updated_at = yield* metadata.Now;
 						const stranded = yield* transaction
@@ -1948,14 +1765,15 @@ export const OrchestrationRepositoryLive = Layer.effect(
 										)
 									: inArray(OrchestrationRuns.status, ["running", "waiting"]),
 							);
-						const recovered: EventEnvelope[] = [];
+						const events: EventEnvelope[] = [];
+						const recoverable: RecoverableNativeRun[] = [];
 
 						for (const run of live_runs) {
 							yield* transaction
 								.update(OrchestrationRuns)
 								.set({ status: "interrupted", updated_at })
 								.where(eq(OrchestrationRuns.run_id, run.run_id));
-							recovered.push(
+							events.push(
 								yield* AppendEvent(transaction, {
 									agent_id: run.agent_id,
 									causation_id: `recovery:${run.run_id}`,
@@ -1969,20 +1787,58 @@ export const OrchestrationRepositoryLive = Layer.effect(
 									thread_id: run.thread_id,
 								}),
 							);
+
+							if (
+								!is_active_status(run.status) ||
+								!run.native_thread_id ||
+								!run.native_resume_json
+							) {
+								continue;
+							}
+
+							const decoded = yield* Schema.decodeUnknownEffect(
+								EngineResumeTokenSchema,
+							)(yield* ParsePersistedJson(run.native_resume_json)).pipe(
+								Effect.option,
+							);
+
+							if (
+								decoded._tag === "Some" &&
+								decoded.value.native_thread_id === run.native_thread_id
+							) {
+								recoverable.push({
+									agent_id: run.agent_id,
+									engine_id: run.engine_id,
+									resume_token: {
+										native_thread_id: decoded.value.native_thread_id,
+										...(decoded.value.opaque_checkpoint !== undefined
+											? { opaque_checkpoint: decoded.value.opaque_checkpoint }
+											: {}),
+									},
+									run_id: run.run_id,
+									thread_id: run.thread_id,
+									working_directory: run.working_directory,
+								});
+							}
 						}
 
-						return recovered;
+						return { events, recoverable };
 					}),
 				);
 
-				if (events.length > 0) {
-					yield* notifier.Publish(events.at(-1)!.journal_sequence);
+				if (recovery.events.length > 0) {
+					yield* notifier.Publish(recovery.events.at(-1)!.journal_sequence);
 				}
+
+				return recovery.recoverable;
 			}).pipe(Effect.mapError(normalize_error));
+
+		const MarkInterrupted = () => ClaimNativeRecoveries().pipe(Effect.asVoid);
 
 		return {
 			Accept,
 			ClaimOutbox,
+			ClaimNativeRecoveries,
 			CompleteOutbox,
 			FallbackSteering,
 			GetPending,
@@ -1993,6 +1849,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 			MarkInterrupted,
 			MarkOutboxUndeliverable,
 			MarkRunStarted,
+			MarkRunResumed,
 			PersistNativeRun,
 			RecordObservation,
 		};

@@ -1,7 +1,21 @@
-import { existsSync } from "node:fs";
-import { join } from "node:path";
+import { homedir } from "node:os";
+import { delimiter, join } from "node:path";
+import { NodeFileSystem } from "@effect/platform-node-shared";
 
-import { Cause, Context, Effect, Exit, Layer, Ref, Schema, Scope, Semaphore, Stream } from "effect";
+import {
+	Cause,
+	Context,
+	Effect,
+	Encoding,
+	Exit,
+	FileSystem,
+	Layer,
+	Ref,
+	Schema,
+	Scope,
+	Semaphore,
+	Stream,
+} from "effect";
 
 import {
 	type Engine,
@@ -11,6 +25,7 @@ import {
 	type EngineFailure,
 	type EngineObservation,
 	type EngineOpenInput,
+	type EngineUserInputPart,
 	type EngineProbe,
 	type EngineProbeInput,
 	type EngineRun,
@@ -89,6 +104,33 @@ export interface CodexEngineOptions {
 
 /** Provides a dependency-free Codex engine assembled by its Layer. @since 0.3.0 */
 export class CodexEngine extends Context.Service<CodexEngine, Engine>()("Artisan/CodexEngine") {}
+
+/** Supplies the host paths and inherited environment used by Codex process composition. */
+export class CodexRuntimeEnvironment extends Context.Service<
+	CodexRuntimeEnvironment,
+	{
+		readonly architecture: string;
+		readonly inherited_environment: Readonly<NodeJS.ProcessEnv>;
+		readonly local_app_data: string;
+		readonly platform: NodeJS.Platform;
+		readonly user_profile: string;
+	}
+>()("Artisan/CodexRuntimeEnvironment") {}
+
+/** Acquires Node host state once at the live platform boundary. */
+export const CodexRuntimeEnvironmentLive = Layer.sync(CodexRuntimeEnvironment, () => {
+	const inherited_environment = { ...process.env };
+	const user_profile = inherited_environment.USERPROFILE?.trim() || homedir();
+
+	return {
+		architecture: process.arch,
+		inherited_environment,
+		local_app_data:
+			inherited_environment.LOCALAPPDATA?.trim() || join(user_profile, "AppData", "Local"),
+		platform: process.platform,
+		user_profile,
+	};
+});
 
 interface CodexRunState {
 	readonly active_turn_id: string | undefined;
@@ -255,7 +297,7 @@ function RunVersionProbe(
 function command_intent(command: EngineCommand) {
 	switch (command._tag) {
 		case "steer":
-			return JSON.stringify([command._tag, command.text]);
+			return JSON.stringify([command._tag, command.text, command.content]);
 		case "respond_approval":
 			return JSON.stringify([command._tag, command.approval_id, command.approved]);
 		case "respond_question":
@@ -339,40 +381,175 @@ function map_diagnostic(
 	};
 }
 
-function make_text_input(text: string) {
-	return [{ text, text_elements: [], type: "text" }];
+function make_turn_input(text: string, content: ReadonlyArray<EngineUserInputPart> | undefined) {
+	const parts = content ?? [{ text, type: "text" }];
+
+	return parts.map((part) =>
+		part.type === "text"
+			? { text: part.text, text_elements: [], type: "text" }
+			: {
+					type: "image",
+					url: `data:${part.media_type};base64,${Encoding.encodeBase64(part.bytes)}`,
+				},
+	);
 }
 
-function default_codex_executable() {
-	const configured_executable = process.env.ARTISAN_CODEX_EXECUTABLE;
-	const local_app_data = process.env.LOCALAPPDATA;
+export interface CodexExecutableResolverInput {
+	readonly architecture?: string;
+	readonly environment?: Readonly<NodeJS.ProcessEnv>;
+	readonly Exists?: (path: string) => boolean;
+	readonly local_app_data?: string;
+	readonly platform?: NodeJS.Platform;
+	readonly ReadDirectory?: (path: string) => ReadonlyArray<string>;
+}
 
-	if (configured_executable) {
+const IsWindowsAppsPath = (path: string, local_app_data: string | undefined) =>
+	local_app_data !== undefined &&
+	path
+		.toLocaleLowerCase()
+		.startsWith(join(local_app_data, "Microsoft", "WindowsApps").toLocaleLowerCase());
+
+const CompareCodexDirectoryNames = (left: string, right: string) =>
+	left.localeCompare(right, undefined, { numeric: true, sensitivity: "base" });
+
+/**
+ * Resolves a directly executable Codex CLI without falling through to Windows'
+ * inaccessible App Execution Alias. The explicit Artisan override remains the
+ * authority, then first-party packaged installations and an ordinary PATH CLI
+ * are considered in deterministic order.
+ */
+export function resolve_codex_executable(input: CodexExecutableResolverInput = {}) {
+	const environment = input.environment ?? {};
+	const configured_executable = environment.ARTISAN_CODEX_EXECUTABLE?.trim();
+	const platform = input.platform ?? "linux";
+	const architecture = input.architecture ?? "x64";
+	const Exists = input.Exists ?? (() => false);
+	const ReadDirectory = input.ReadDirectory ?? (() => []);
+
+	if (configured_executable !== undefined && configured_executable.length > 0) {
 		return configured_executable;
 	}
 
-	if (process.platform !== "win32" || local_app_data === undefined) {
-		return "codex";
-	}
+	if (platform !== "win32") return "codex";
 
-	const winget_executable = join(
-		local_app_data,
-		"Microsoft",
-		"WinGet",
-		"Packages",
-		"OpenAI.Codex_Microsoft.Winget.Source_8wekyb3d8bbwe",
-		`codex-${process.arch === "arm64" ? "aarch64" : "x86_64"}-pc-windows-msvc.exe`,
-	);
+	const local_app_data = environment.LOCALAPPDATA?.trim() || input.local_app_data;
+	const local_codex_root = join(local_app_data ?? "", "OpenAI", "Codex", "bin");
+	const winget_executable =
+		local_app_data === undefined
+			? undefined
+			: join(
+					local_app_data,
+					"Microsoft",
+					"WinGet",
+					"Packages",
+					"OpenAI.Codex_Microsoft.Winget.Source_8wekyb3d8bbwe",
+					`codex-${architecture === "arm64" ? "aarch64" : "x86_64"}-pc-windows-msvc.exe`,
+				);
+	const local_candidates = [
+		join(local_codex_root, "codex.exe"),
+		...[...ReadDirectory(local_codex_root)]
+			.sort(CompareCodexDirectoryNames)
+			.reverse()
+			.map((directory) => join(local_codex_root, directory, "codex.exe")),
+	];
+	const path_candidates = (environment.PATH ?? "")
+		.split(delimiter)
+		.filter((path) => path.length > 0 && !IsWindowsAppsPath(path, local_app_data))
+		.map((path) => join(path, "codex.exe"));
+	const candidates = [
+		...local_candidates,
+		...(winget_executable === undefined ? [] : [winget_executable]),
+		...path_candidates,
+	];
 
-	return existsSync(winget_executable) ? winget_executable : "codex";
+	return candidates.find(Exists) ?? join(local_codex_root, "codex.exe");
 }
+
+/**
+ * Supplies Codex with its ordinary local home without moving, copying, or
+ * serializing credentials. Every app-server and exec spawn receives this same
+ * explicit environment through the engine's process-factory boundary.
+ */
+export function make_codex_process_environment(
+	environment: NodeJS.ProcessEnv = {},
+	inherited_environment: Readonly<NodeJS.ProcessEnv> = {},
+	user_profile = inherited_environment.USERPROFILE?.trim() ?? "",
+) {
+	const resolved_environment = { ...inherited_environment, ...environment };
+
+	if (resolved_environment.CODEX_HOME?.trim()) return resolved_environment;
+
+	return {
+		...resolved_environment,
+		CODEX_HOME: join(resolved_environment.USERPROFILE?.trim() || user_profile, ".codex"),
+	};
+}
+
+const ResolveCodexExecutable = (
+	file_system: FileSystem.FileSystem,
+	runtime_environment: typeof CodexRuntimeEnvironment.Service,
+) =>
+	Effect.gen(function* () {
+		const local_codex_root = join(runtime_environment.local_app_data, "OpenAI", "Codex", "bin");
+		const directory_names = yield* file_system
+			.readDirectory(local_codex_root)
+			.pipe(Effect.orElseSucceed(() => []));
+		const candidates = resolve_codex_executable({
+			architecture: runtime_environment.architecture,
+			environment: runtime_environment.inherited_environment,
+			Exists: () => false,
+			local_app_data: runtime_environment.local_app_data,
+			platform: runtime_environment.platform,
+			ReadDirectory: () => directory_names,
+		});
+
+		if (runtime_environment.platform !== "win32") return candidates;
+
+		const environment = runtime_environment.inherited_environment;
+		const configured_executable = environment.ARTISAN_CODEX_EXECUTABLE?.trim();
+		if (configured_executable) return configured_executable;
+
+		const local_app_data =
+			environment.LOCALAPPDATA?.trim() || runtime_environment.local_app_data;
+		const local_candidates = [
+			join(local_app_data, "OpenAI", "Codex", "bin", "codex.exe"),
+			...directory_names
+				.sort(CompareCodexDirectoryNames)
+				.reverse()
+				.map((directory) =>
+					join(local_app_data, "OpenAI", "Codex", "bin", directory, "codex.exe"),
+				),
+			join(
+				local_app_data,
+				"Microsoft",
+				"WinGet",
+				"Packages",
+				"OpenAI.Codex_Microsoft.Winget.Source_8wekyb3d8bbwe",
+				`codex-${
+					runtime_environment.architecture === "arm64" ? "aarch64" : "x86_64"
+				}-pc-windows-msvc.exe`,
+			),
+			...(environment.PATH ?? "")
+				.split(delimiter)
+				.filter((path) => path.length > 0 && !IsWindowsAppsPath(path, local_app_data))
+				.map((path) => join(path, "codex.exe")),
+		];
+
+		for (const candidate of local_candidates) {
+			if (yield* file_system.exists(candidate).pipe(Effect.orElseSucceed(() => false))) {
+				return candidate;
+			}
+		}
+
+		return candidates;
+	});
 
 function make_codex_app_server_engine(
 	factory: typeof CodexProcessFactory.Service,
 	options: CodexEngineOptions,
 ): Engine {
 	const app_server_max_frame_bytes = options.app_server_max_frame_bytes ?? 8 * 1_024 * 1_024;
-	const executable = options.executable ?? default_codex_executable();
+	const executable = options.executable ?? resolve_codex_executable();
 	const event_capacity = options.event_capacity ?? 256;
 	const executable_args = options.executable_args ?? [];
 	const request_timeout_ms = options.request_timeout_ms ?? 10_000;
@@ -389,80 +566,82 @@ function make_codex_app_server_engine(
 			spawn,
 		}).pipe(Effect.provideService(CodexProcessFactory, factory), MapSessionFailure);
 	const Probe = (input: EngineProbeInput): Effect.Effect<EngineProbe, EngineFailure> =>
-		Effect.gen(function* () {
-			const version_chunks = yield* RunVersionProbe(
-				factory,
-				{ args: [...executable_args, "--version"], command: executable },
-				version_timeout_ms,
-			);
-			const version = yield* ParseCodexVersion(version_chunks);
+		Effect.scoped(
+			Effect.gen(function* () {
+				const version_chunks = yield* RunVersionProbe(
+					factory,
+					{ args: [...executable_args, "--version"], command: executable },
+					version_timeout_ms,
+				);
+				const version = yield* ParseCodexVersion(version_chunks);
 
-			yield* ValidateCodexTransportVersion(version);
+				yield* ValidateCodexTransportVersion(version);
 
-			const probe_result = yield* Effect.scoped(
-				Effect.gen(function* () {
-					const session = yield* OpenSession();
-					const initialized = yield* MapSessionFailure(
-						session.Handshake({
-							client_name: input.client_name ?? "artisan-editor",
-							client_version: input.client_version ?? "0.3.0",
-						}),
-					);
-					const account_response = yield* MapSessionFailure(
-						session.Request("account/read", {}),
-					);
-					const account = yield* Schema.decodeUnknownEffect(AccountReadSchema)(
-						account_response.result,
-					).pipe(
-						Effect.mapError(
-							() =>
-								new EngineProtocolError({
-									engine_id: "codex",
-									message: "Codex account/read returned an invalid result",
-								}),
-						),
-					);
-
-					return { account, initialized };
-				}),
-			).pipe(
-				Effect.timeoutOrElse({
-					duration: initialize_timeout_ms,
-					orElse: () =>
-						Effect.fail(
-							new EngineProbeTimeoutError({
-								engine_id: "codex",
-								phase: "initialize",
-								timeout_ms: initialize_timeout_ms,
+				const probe_result = yield* Effect.scoped(
+					Effect.gen(function* () {
+						const session = yield* OpenSession();
+						const initialized = yield* MapSessionFailure(
+							session.Handshake({
+								client_name: input.client_name ?? "artisan-editor",
+								client_version: input.client_version ?? "0.3.0",
 							}),
-						),
-				}),
-			);
-			const account_type = probe_result.account.account?.type;
-			const authentication =
-				account_type !== undefined
-					? { state: "authenticated" as const, reason: account_type }
-					: {
-							state: "unauthenticated" as const,
-							reason: probe_result.account.requiresOpenaiAuth
-								? "OpenAI authentication required"
-								: "No ChatGPT or API-key account is active",
-						};
+						);
+						const account_response = yield* MapSessionFailure(
+							session.Request("account/read", {}),
+						);
+						const account = yield* Schema.decodeUnknownEffect(AccountReadSchema)(
+							account_response.result,
+						).pipe(
+							Effect.mapError(
+								() =>
+									new EngineProtocolError({
+										engine_id: "codex",
+										message: "Codex account/read returned an invalid result",
+									}),
+							),
+						);
 
-			return {
-				authentication,
-				capabilities: CodexEngineDescriptor.capabilities,
-				descriptor: CodexEngineDescriptor,
-				metadata: {
-					codex_home: probe_result.initialized.result.codexHome,
-					platform_family: probe_result.initialized.result.platformFamily,
-					platform_os: probe_result.initialized.result.platformOs,
-					user_agent: probe_result.initialized.result.userAgent,
-				},
-				ready: authentication.state === "authenticated",
-				version,
-			};
-		});
+						return { account, initialized };
+					}),
+				).pipe(
+					Effect.timeoutOrElse({
+						duration: initialize_timeout_ms,
+						orElse: () =>
+							Effect.fail(
+								new EngineProbeTimeoutError({
+									engine_id: "codex",
+									phase: "initialize",
+									timeout_ms: initialize_timeout_ms,
+								}),
+							),
+					}),
+				);
+				const account_type = probe_result.account.account?.type;
+				const authentication =
+					account_type !== undefined
+						? { state: "authenticated" as const, reason: account_type }
+						: {
+								state: "unauthenticated" as const,
+								reason: probe_result.account.requiresOpenaiAuth
+									? "OpenAI authentication required"
+									: "No ChatGPT or API-key account is active",
+							};
+
+				return {
+					authentication,
+					capabilities: CodexEngineDescriptor.capabilities,
+					descriptor: CodexEngineDescriptor,
+					metadata: {
+						codex_home: probe_result.initialized.result.codexHome,
+						platform_family: probe_result.initialized.result.platformFamily,
+						platform_os: probe_result.initialized.result.platformOs,
+						user_agent: probe_result.initialized.result.userAgent,
+					},
+					ready: authentication.state === "authenticated",
+					version,
+				};
+			}),
+		);
 	const Open = (input: EngineOpenInput): Effect.Effect<EngineRun, EngineFailure, Scope.Scope> =>
 		Effect.gen(function* () {
 			yield* ValidateEventCapacity(event_capacity);
@@ -652,9 +831,31 @@ function make_codex_app_server_engine(
 			const initial_text = input._tag === "start" ? input.initial_text : input.next_text;
 
 			if (initial_text !== undefined) {
+				const workflow_mode = input.provider_options?.["codex.workflow_mode"];
+				const collaboration_mode =
+					workflow_mode === "plan" && input.model !== undefined
+						? {
+								mode: "plan" as const,
+								settings: {
+									developer_instructions: null,
+									model: input.model,
+									reasoning_effort:
+										input.provider_options?.["codex.reasoning_effort"] ?? null,
+								},
+							}
+						: undefined;
 				const turn_response = yield* MapSessionFailure(
 					session.Request("turn/start", {
-						input: make_text_input(initial_text),
+						...(collaboration_mode === undefined
+							? {}
+							: { collaborationMode: collaboration_mode }),
+						input: make_turn_input(
+							initial_text,
+							input._tag === "start" ? input.initial_content : undefined,
+						),
+						...(input.provider_options?.["codex.service_tier"] === "fast"
+							? { serviceTier: "fast" }
+							: {}),
 						threadId: thread.thread.id,
 					}),
 				);
@@ -736,7 +937,7 @@ function make_codex_app_server_engine(
 							yield* MapSessionFailure(
 								session.Request("turn/steer", {
 									expectedTurnId: current.active_turn_id,
-									input: make_text_input(command.text),
+									input: make_turn_input(command.text, command.content),
 									threadId: thread.thread.id,
 								}),
 							);
@@ -961,8 +1162,27 @@ export function make_codex_engine_layer(
 	return Layer.effect(
 		CodexEngine,
 		Effect.gen(function* () {
-			const factory = yield* CodexProcessFactory;
-			const app_server_engine = make_codex_app_server_engine(factory, options);
+			const base_factory = yield* CodexProcessFactory;
+			const file_system = yield* FileSystem.FileSystem;
+			const runtime_environment = yield* CodexRuntimeEnvironment;
+			const executable =
+				options.executable ??
+				(yield* ResolveCodexExecutable(file_system, runtime_environment));
+			const factory = {
+				Spawn: (input: CodexProcessSpawnInput) =>
+					base_factory.Spawn({
+						...input,
+						env: make_codex_process_environment(
+							input.env,
+							runtime_environment.inherited_environment,
+							runtime_environment.user_profile,
+						),
+					}),
+			};
+			const app_server_engine = make_codex_app_server_engine(factory, {
+				...options,
+				executable,
+			});
 
 			if (options.transport_selection === "app_server_only") {
 				return app_server_engine;
@@ -978,9 +1198,10 @@ export function make_codex_engine_layer(
 
 			return make_codex_exec_engine({
 				event_capacity: options.event_capacity ?? 256,
-				executable: options.executable ?? default_codex_executable(),
+				executable,
 				executable_args: options.executable_args ?? [],
 				fallback_reason: selection_failure_reason(probe),
+				file_system,
 				factory,
 				max_frame_bytes: options.exec_max_frame_bytes ?? 256 * 1_024,
 				max_stderr_bytes: options.exec_max_stderr_bytes ?? 1_024 * 1_024,
@@ -989,5 +1210,8 @@ export function make_codex_engine_layer(
 				version_timeout_ms: options.version_timeout_ms ?? 5_000,
 			});
 		}),
+	).pipe(
+		Layer.provideMerge(NodeFileSystem.layer),
+		Layer.provideMerge(CodexRuntimeEnvironmentLive),
 	);
 }

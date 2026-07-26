@@ -5,6 +5,7 @@ import { join } from "node:path";
 
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
+import { MakeSnowflakeIdLive } from "@artisan/protocol";
 
 import { GlobalGuidanceRepositoryLive } from "../../modules/backend/src/guidance/guidance-repository";
 import {
@@ -193,6 +194,7 @@ function make_runtime(paths: GuidancePaths, options: RuntimeOptions = {}) {
 		Layer.provideMerge(registry),
 		Layer.provideMerge(file_store),
 		Layer.provideMerge(metadata),
+		Layer.provideMerge(MakeSnowflakeIdLive(37).pipe(Layer.orDie)),
 	);
 
 	return ManagedRuntime.make(service);

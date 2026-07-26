@@ -14,7 +14,13 @@ import type {
 	EngineOpenInput,
 	EngineRun,
 } from "@artisan/engines";
-import { make_backend_runtime, ProtocolServer, type ProtocolConnection } from "@artisan/backend";
+import {
+	AgentOrchestrator,
+	make_backend_runtime,
+	ProtocolServer,
+	type ProtocolConnection,
+} from "@artisan/backend";
+import { ConversationReadModel } from "../../modules/backend/src/conversation";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];
@@ -24,11 +30,14 @@ interface Instrumentation {
 	readonly commands: Array<EngineCommand>;
 	readonly events_consumed: () => number;
 	readonly opened: () => number;
+	readonly open_inputs: () => ReadonlyArray<EngineOpenInput>;
 	readonly scopes_closed: () => number;
 }
 
 interface EngineOptions {
+	readonly die_open_attempts?: number;
 	readonly fail_open?: boolean;
+	readonly fail_resume?: boolean;
 	readonly fail_send?: boolean;
 	readonly open_delay?: number;
 }
@@ -41,6 +50,7 @@ function make_engine(options: EngineOptions = {}): {
 	let events_consumed = 0;
 	let scopes_closed = 0;
 	const commands: Array<EngineCommand> = [];
+	const open_inputs: Array<EngineOpenInput> = [];
 	const capabilities = Object.fromEntries(
 		[
 			"approval",
@@ -67,8 +77,13 @@ function make_engine(options: EngineOptions = {}): {
 			}
 
 			opened += 1;
+			open_inputs.push(input);
 
-			if (options.fail_open) {
+			if (opened <= (options.die_open_attempts ?? 0)) {
+				yield* Effect.die("synthetic engine startup defect");
+			}
+
+			if (options.fail_open || (options.fail_resume && input._tag === "resume")) {
 				yield* Effect.fail({ _tag: "open_failed" } as never);
 			}
 
@@ -111,6 +126,7 @@ function make_engine(options: EngineOptions = {}): {
 			commands,
 			events_consumed: () => events_consumed,
 			opened: () => opened,
+			open_inputs: () => open_inputs,
 			scopes_closed: () => scopes_closed,
 		},
 	};
@@ -261,6 +277,71 @@ describe("agent orchestrator lifecycle supervision", () => {
 		}
 	});
 
+	it("terminalizes an engine startup defect and dispatches the next accepted message", async () => {
+		const database_path = await make_database_path();
+		const instrumented = make_engine({ die_open_attempts: 1 });
+		const runtime = make_backend_runtime({
+			database_path,
+			engines: [instrumented.engine],
+			migrations_path,
+		});
+
+		try {
+			const connection = await open_connection(runtime);
+			await runtime.runPromise(
+				connection.Receive(
+					make_command("defective_open", {
+						engine_id: "instrumented",
+						text: "first",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			await expect
+				.poll(() => instrumented.instrumentation.opened(), { timeout: 2_000 })
+				.toBe(1);
+			const failed_snapshot = await runtime.runPromise(
+				Effect.gen(function* () {
+					const conversations = yield* ConversationReadModel;
+
+					return yield* conversations.ReadSnapshot("thread_1");
+				}),
+			);
+			expect(failed_snapshot.status).toBe("available");
+			if (failed_snapshot.status !== "available") {
+				throw new Error("Expected a durable conversation snapshot");
+			}
+			expect(failed_snapshot.snapshot.turns.at(-1)?.lifecycle).toBe("failed");
+			expect(failed_snapshot.snapshot.items).toContainEqual(
+				expect.objectContaining({
+					summary: "Engine startup failed before the native session became ready.",
+					type: "native_event",
+				}),
+			);
+
+			await runtime.runPromise(
+				connection.Receive(
+					make_command("after_defective_open", {
+						engine_id: "instrumented",
+						text: "second",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+
+			await expect
+				.poll(() => instrumented.instrumentation.opened(), { timeout: 2_000 })
+				.toBe(2);
+			await expect
+				.poll(() => instrumented.instrumentation.events_consumed(), { timeout: 2_000 })
+				.toBe(1);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("closes a never-ending run scope when the runtime is disposed", async () => {
 		const database_path = await make_database_path();
 		const instrumented = make_engine();
@@ -289,6 +370,122 @@ describe("agent orchestrator lifecycle supervision", () => {
 
 		expect(instrumented.instrumentation.events_consumed()).toBe(1);
 		expect(instrumented.instrumentation.scopes_closed()).toBe(1);
+	});
+
+	it("reopens a persisted native run once with Engine.Open resume after restart", async () => {
+		const database_path = await make_database_path();
+		const initial = make_engine();
+		const initial_runtime = make_backend_runtime({
+			database_path,
+			engines: [initial.engine],
+			migrations_path,
+		});
+
+		try {
+			const connection = await open_connection(initial_runtime);
+			await initial_runtime.runPromise(
+				connection.Receive(
+					make_command("resume_after_restart", {
+						engine_id: "instrumented",
+						text: "Continue this native thread",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			await expect.poll(() => initial.instrumentation.opened(), { timeout: 2_000 }).toBe(1);
+		} finally {
+			await initial_runtime.dispose();
+		}
+
+		const recovery = make_engine();
+		const recovery_runtime = make_backend_runtime({
+			database_path,
+			engines: [recovery.engine],
+			migrations_path,
+		});
+
+		try {
+			await recovery_runtime.runPromise(
+				Effect.gen(function* () {
+					yield* AgentOrchestrator;
+				}),
+			);
+			await expect.poll(() => recovery.instrumentation.opened(), { timeout: 2_000 }).toBe(1);
+			expect(recovery.instrumentation.open_inputs()).toEqual([
+				expect.objectContaining({
+					_tag: "resume",
+					resume_token: { native_thread_id: expect.any(String) },
+				}),
+			]);
+		} finally {
+			await recovery_runtime.dispose();
+		}
+	});
+
+	it("fails closed when a native resume is rejected and never starts a replacement run", async () => {
+		const database_path = await make_database_path();
+		const initial = make_engine();
+		const initial_runtime = make_backend_runtime({
+			database_path,
+			engines: [initial.engine],
+			migrations_path,
+		});
+
+		try {
+			const connection = await open_connection(initial_runtime);
+			await initial_runtime.runPromise(
+				connection.Receive(
+					make_command("reject_resume", {
+						engine_id: "instrumented",
+						text: "Do not duplicate this run",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			await expect.poll(() => initial.instrumentation.opened(), { timeout: 2_000 }).toBe(1);
+		} finally {
+			await initial_runtime.dispose();
+		}
+
+		const rejected = make_engine({ fail_resume: true });
+		const rejected_runtime = make_backend_runtime({
+			database_path,
+			engines: [rejected.engine],
+			migrations_path,
+		});
+
+		try {
+			await rejected_runtime.runPromise(
+				Effect.gen(function* () {
+					yield* AgentOrchestrator;
+				}),
+			);
+			await expect.poll(() => rejected.instrumentation.opened(), { timeout: 2_000 }).toBe(1);
+			expect(rejected.instrumentation.open_inputs()[0]).toMatchObject({ _tag: "resume" });
+		} finally {
+			await rejected_runtime.dispose();
+		}
+
+		const later = make_engine();
+		const later_runtime = make_backend_runtime({
+			database_path,
+			engines: [later.engine],
+			migrations_path,
+		});
+
+		try {
+			await later_runtime.runPromise(
+				Effect.gen(function* () {
+					yield* AgentOrchestrator;
+				}),
+			);
+			await new Promise((resolve) => setTimeout(resolve, 50));
+			expect(later.instrumentation.opened()).toBe(0);
+		} finally {
+			await later_runtime.dispose();
+		}
 	});
 
 	it("dispositions failed opens and sends so they are not retried", async () => {

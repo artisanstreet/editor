@@ -1,0 +1,153 @@
+import { Context, Data, Effect, Layer, Option } from "effect";
+import { and, desc, eq } from "drizzle-orm";
+
+import type {
+	ConversationPatch,
+	ConversationSnapshot,
+	MessageImageAttachment,
+	MessageImageAttachmentQuery,
+} from "@artisan/protocol";
+
+import { Database } from "../persistence/database";
+import {
+	JournalCommands,
+	JournalEvents,
+	MessageImageAttachments,
+	ThreadTombstones,
+	Threads,
+} from "../persistence/schema";
+import { ReadConversationPatches, ReadConversationSnapshot } from "./projection";
+
+export class ConversationReadModelFailure extends Data.TaggedError("ConversationReadModelFailure")<{
+	readonly cause: unknown;
+}> {}
+
+export type ConversationAvailability =
+	| { readonly status: "available"; readonly snapshot: ConversationSnapshot }
+	| { readonly status: "erased"; readonly journal_sequence: number }
+	| { readonly status: "unavailable"; readonly journal_sequence: number };
+
+export class ConversationReadModel extends Context.Service<
+	ConversationReadModel,
+	{
+		readonly ReadSnapshot: (
+			thread_id: string,
+		) => Effect.Effect<ConversationAvailability, ConversationReadModelFailure>;
+		readonly ReadPatches: (
+			thread_id: string,
+			after_sequence: number,
+		) => Effect.Effect<ReadonlyArray<ConversationPatch>, ConversationReadModelFailure>;
+		readonly ReadImageAttachment: (
+			query: MessageImageAttachmentQuery,
+		) => Effect.Effect<Option.Option<MessageImageAttachment>, ConversationReadModelFailure>;
+	}
+>()("Artisan/ConversationReadModel") {}
+
+const watermark = (transaction: any) =>
+	transaction
+		.select({ sequence: JournalEvents.sequence })
+		.from(JournalEvents)
+		.orderBy(desc(JournalEvents.sequence))
+		.limit(1)
+		.pipe(Effect.map(([row]: ReadonlyArray<{ sequence: number }>) => row?.sequence ?? 0));
+
+/** Reads renderer-safe conversation projections at a single SQLite transaction boundary. */
+export const ConversationReadModelLive = Layer.effect(
+	ConversationReadModel,
+	Effect.gen(function* () {
+		const database = yield* Database;
+		const ReadSnapshot = (
+			thread_id: string,
+		): Effect.Effect<ConversationAvailability, ConversationReadModelFailure> =>
+			database.client
+				.transaction((transaction) =>
+					Effect.gen(function* () {
+						const journal_sequence = yield* watermark(transaction);
+						const [erased] = yield* transaction
+							.select()
+							.from(ThreadTombstones)
+							.where(eq(ThreadTombstones.thread_id, thread_id))
+							.limit(1);
+						if (erased) return { status: "erased" as const, journal_sequence };
+						const [thread] = yield* transaction
+							.select()
+							.from(Threads)
+							.where(eq(Threads.thread_id, thread_id))
+							.limit(1);
+						if (!thread) return { status: "unavailable" as const, journal_sequence };
+						const snapshot = yield* ReadConversationSnapshot(transaction, thread_id);
+						if (!snapshot)
+							return {
+								status: "available" as const,
+								snapshot: {
+									conversation_id: `conversation:${thread_id}`,
+									items: [],
+									journal_sequence,
+									last_patch_sequence: 0,
+									schema_version: 1 as const,
+									thread_id,
+									turns: [],
+									updated_at: thread.last_activity_at,
+								},
+							};
+						return { status: "available" as const, snapshot };
+					}),
+				)
+				.pipe(
+					Effect.mapError((cause) => new ConversationReadModelFailure({ cause })),
+				) as any;
+		const ReadPatches = (
+			thread_id: string,
+			after_sequence: number,
+		): Effect.Effect<ReadonlyArray<ConversationPatch>, ConversationReadModelFailure> =>
+			database.client
+				.transaction((transaction) =>
+					ReadConversationPatches(transaction, thread_id, after_sequence),
+				)
+				.pipe(
+					Effect.mapError((cause) => new ConversationReadModelFailure({ cause })),
+				) as any;
+		const ReadImageAttachment = (
+			query: MessageImageAttachmentQuery,
+		): Effect.Effect<Option.Option<MessageImageAttachment>, ConversationReadModelFailure> =>
+			database.client
+				.transaction((transaction) =>
+					transaction
+						.select({
+							attachment_id: MessageImageAttachments.attachment_id,
+							content: MessageImageAttachments.content,
+							media_type: MessageImageAttachments.media_type,
+							name: MessageImageAttachments.name,
+							size_bytes: MessageImageAttachments.size_bytes,
+						})
+						.from(MessageImageAttachments)
+						.innerJoin(
+							JournalCommands,
+							eq(MessageImageAttachments.message_id, JournalCommands.message_id),
+						)
+						.where(
+							and(
+								eq(MessageImageAttachments.attachment_id, query.attachment_id),
+								eq(JournalCommands.thread_id, query.thread_id),
+							),
+						)
+						.limit(1)
+						.pipe(
+							Effect.map(([row]) =>
+								row === undefined
+									? Option.none<MessageImageAttachment>()
+									: Option.some({
+											bytes: new Uint8Array(row.content),
+											id: row.attachment_id,
+											media_type:
+												row.media_type as MessageImageAttachment["media_type"],
+											name: row.name,
+											size_bytes: row.size_bytes,
+										}),
+							),
+						),
+				)
+				.pipe(Effect.mapError((cause) => new ConversationReadModelFailure({ cause })));
+		return { ReadImageAttachment, ReadPatches, ReadSnapshot };
+	}),
+);

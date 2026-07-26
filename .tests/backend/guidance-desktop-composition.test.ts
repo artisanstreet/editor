@@ -43,13 +43,26 @@ describe("desktop guidance composition", () => {
 	it("fails closed before composing a non-Codex production engine", async () => {
 		const paths = await make_paths();
 
-		expect(() =>
-			make_desktop_backend_runtime({
-				database_path: paths.database,
-				engines: [make_fake_engine({ engine_id: "claude" })],
-				migrations_path,
-			}),
-		).toThrow("Desktop production accepts only the Codex engine.");
+		const runtime = make_desktop_backend_runtime({
+			database_path: paths.database,
+			engines: [make_fake_engine({ engine_id: "claude" })],
+			migrations_path,
+		});
+
+		try {
+			await expect(
+				runtime.runPromise(
+					Effect.gen(function* () {
+						yield* GlobalGuidanceService;
+					}),
+				),
+			).rejects.toMatchObject({
+				_tag: "DesktopEngineConfigurationError",
+				message: "Desktop production accepts only the Codex engine.",
+			});
+		} finally {
+			await runtime.dispose();
+		}
 	});
 
 	it("derives the native Codex registry from the installed Engine", async () => {

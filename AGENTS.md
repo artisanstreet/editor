@@ -2,10 +2,18 @@
 
 ## Start Here
 
-- Read `MEMORY.md` before planning, editing, delegating, reviewing, or committing.
-- Treat `MEMORY.md` as the persistent handoff for current progress, unresolved findings, and next work.
-- Update `MEMORY.md` after every substantive milestone, review, newly discovered blocker, verification run, and before handing work to another session.
-- Keep `backend-completion-matrix.md` aligned with verified implementation status. Do not mark a slice implemented from intent or narrow tests.
+- Read `docs/status/backend-completion-matrix.md` and
+  `.memory/active-handoff.md` before planning, editing, delegating, reviewing, or
+  committing.
+- Treat the completion matrix as durable verified product status and the active
+  handoff as concise branch continuity. Do not copy durable history into the
+  handoff.
+- Update `.memory/active-handoff.md` after every substantive milestone, review,
+  newly discovered blocker, verification run, and before handing work to
+  another session.
+- Keep `.memory/active-handoff.md` below 120 lines and 8 KiB. Replace resolved
+  entries with current state instead of appending a transcript.
+- Keep `docs/status/backend-completion-matrix.md` aligned with verified implementation status. Do not mark a slice implemented from intent or narrow tests.
 
 ## Required Skill
 
@@ -28,7 +36,8 @@
 
 ## Workflow Guardrails
 
-- Work on the existing feature branch unless `MEMORY.md` says a new branch is required.
+- Work on the existing feature branch unless `.memory/active-handoff.md` says a
+  new branch is required.
 - Use pnpm and the repository scripts. Run `pnpm run validate` before a milestone commit.
 - Use `apply_patch` for manual file edits.
 - Do not start a development server unless explicitly requested.

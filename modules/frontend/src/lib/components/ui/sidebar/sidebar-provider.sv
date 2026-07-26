@@ -1,8 +1,8 @@
-<script lang="ts">
+<script lang="ts" effect>
 	import * as Tooltip from "$lib/components/ui/tooltip/index.js";
 	import { get_sidebar_flip_translation } from "$lib/client/sidebar-motion.js";
 	import { cn, type WithElementRef } from "$lib/utils.js";
-	import { Effect } from "effect";
+	import { Effect, Queue } from "effect";
 	import { onDestroy, tick } from "svelte";
 	import type { HTMLAttributes } from "svelte/elements";
 	import {
@@ -37,7 +37,14 @@
 	const sidebar_layout_duration_ms = 300;
 	const flip_animations = new Map<HTMLElement, Animation>();
 	let layout_change_id = 0;
-	let overflow_cleanup_timeout: ReturnType<typeof setTimeout> | undefined;
+	const layout_queue = yield* Queue.unbounded<Effect.Effect<void>>();
+	yield* Effect.forkScoped(
+		Effect.forever(
+			Queue.take(layout_queue).pipe(
+				Effect.flatMap(Effect.forkScoped),
+			),
+		),
+	);
 
 	const get_flip_targets = () => {
 		if (!ref) {
@@ -101,7 +108,8 @@
 				}
 			};
 
-			void animation.finished.then(cleanup_animation, cleanup_animation);
+			animation.onfinish = cleanup_animation;
+			animation.oncancel = cleanup_animation;
 		}
 	};
 
@@ -114,26 +122,17 @@
 			ref.dataset.sidebarFlipActive = "true";
 		}
 
-		clearTimeout(overflow_cleanup_timeout);
-		overflow_cleanup_timeout = setTimeout(() => {
-			if (change_id === layout_change_id && ref) {
-				delete ref.dataset.sidebarFlipActive;
-			}
-		}, sidebar_layout_duration_ms);
-
 		open = value;
 		on_open_change(value);
 
-		void tick().then(() => {
-			if (change_id === layout_change_id) {
-				play_flip_animations(before_targets);
-			}
-		});
-
-		Effect.runSync(
-			Effect.sync(() => {
+		layout_queue.unsafeOffer(
+			Effect.gen(function* () {
+				yield* Effect.promise(tick);
+				if (change_id === layout_change_id) play_flip_animations(before_targets);
 				document.cookie = `${sidebar_cookie_name}=${open}; path=/; max-age=${sidebar_cookie_max_age}`;
-			})
+				yield* Effect.sleep(`${sidebar_layout_duration_ms} millis`);
+				if (change_id === layout_change_id && ref) delete ref.dataset.sidebarFlipActive;
+			}),
 		);
 	};
 
@@ -144,8 +143,6 @@
 	});
 
 	onDestroy(() => {
-		clearTimeout(overflow_cleanup_timeout);
-
 		for (const animation of flip_animations.values()) {
 			animation.cancel();
 		}

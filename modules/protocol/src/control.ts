@@ -1,10 +1,23 @@
-import { Schema } from "effect";
+import { Effect, Schema } from "effect";
 
+import {
+	ProjectDirectoryList,
+	ProjectDirectoryListInput,
+	ProjectDirectorySelectInput,
+} from "./project-directory";
 import {
 	OrchestrationGroupListQuery,
 	OrchestrationGroupListSnapshot,
 } from "./orchestration-groups";
 import { ThreadTranscriptQuery, ThreadTranscriptSnapshot, TranscriptEntry } from "./transcript";
+import { ConversationPatchBatch, ConversationQuery, ConversationSnapshot } from "./conversation";
+import {
+	ImageAttachmentReference,
+	ImageAttachmentUpload,
+	MessageImageAttachmentQuery,
+	MessageImageAttachmentQueryResult,
+	UserMessageContentPart,
+} from "./attachments";
 import {
 	SurfaceListQuery,
 	SurfaceSnapshot,
@@ -217,6 +230,8 @@ const EnvironmentVariableName = Schema.String.check(
 
 /** Queues user text for a thread or steers its active capable run. */
 export const ThreadSendMessageCommand = Schema.Struct({
+	attachments: Schema.optional(Schema.Array(ImageAttachmentUpload).check(Schema.isMaxLength(4))),
+	content: Schema.optional(Schema.Array(UserMessageContentPart)),
 	type: Schema.Literal("thread.send_message"),
 	engine_id: Identifier,
 	mentioned_projects: Schema.optional(Schema.Array(ProjectRef)),
@@ -236,9 +251,17 @@ export const ThreadAutoSteerUpdateCommand = Schema.Struct({
 export const ThreadSessionPolicy = Schema.Struct({
 	engine_id: Schema.Literal("codex"),
 	model: Schema.optional(Schema.NonEmptyString),
-	reasoning_effort: Schema.Literals(["low", "medium", "high", "xhigh"]),
+	reasoning_effort: Schema.Literals(["low", "medium", "high", "xhigh", "max"]),
 	permission_mode: Schema.Literals(["never", "on_request"]),
 	sandbox_mode: Schema.Literals(["read_only", "workspace_write"]),
+	service_tier: Schema.NonEmptyString.pipe(
+		Schema.optional,
+		Schema.withDecodingDefault(Effect.succeed("standard")),
+	),
+	workflow_mode: Schema.Literals(["build", "plan"]).pipe(
+		Schema.optional,
+		Schema.withDecodingDefault(Effect.succeed("build" as const)),
+	),
 	web_search_enabled: Schema.Boolean,
 	strict_clarification: Schema.Boolean,
 });
@@ -689,6 +712,8 @@ export type CommandReceiptEnvelope = typeof CommandReceiptEnvelope.Type;
 
 /** Records user text that is durably queued for a future run. */
 export const ThreadMessageQueuedEvent = Schema.Struct({
+	attachments: Schema.optional(Schema.Array(ImageAttachmentReference)),
+	content: Schema.optional(Schema.Array(UserMessageContentPart)),
 	type: Schema.Literal("thread.message_queued"),
 	message_id: Identifier,
 	mentioned_projects: Schema.optional(Schema.Array(ProjectRef)),
@@ -707,6 +732,8 @@ export const ThreadMessageQueuedEvent = Schema.Struct({
 
 /** Records user text accepted as a steering request for a live run. */
 export const ThreadMessageSteeringEvent = Schema.Struct({
+	attachments: Schema.optional(Schema.Array(ImageAttachmentReference)),
+	content: Schema.optional(Schema.Array(UserMessageContentPart)),
 	type: Schema.Literal("thread.message_steering"),
 	message_id: Identifier,
 	mentioned_projects: Schema.optional(Schema.Array(ProjectRef)),
@@ -1253,6 +1280,41 @@ export const ThreadListQueryResultEnvelope = Schema.Struct({
 });
 
 export type ThreadListQueryResultEnvelope = typeof ThreadListQueryResultEnvelope.Type;
+
+/** Lists allowed server-side roots or the children of one opaque directory id. */
+export const ProjectDirectoryListQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("project.directory.list.query"),
+	payload: ProjectDirectoryListInput,
+});
+export type ProjectDirectoryListQueryEnvelope = typeof ProjectDirectoryListQueryEnvelope.Type;
+
+/** Returns bounded browser-safe directory metadata. */
+export const ProjectDirectoryListQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("project.directory.list.query.result"),
+	payload: ProjectDirectoryList,
+});
+export type ProjectDirectoryListQueryResultEnvelope =
+	typeof ProjectDirectoryListQueryResultEnvelope.Type;
+
+/** Resolves an opaque directory id to a canonical project reference. */
+export const ProjectDirectorySelectEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("project.directory.select"),
+	payload: ProjectDirectorySelectInput,
+});
+export type ProjectDirectorySelectEnvelope = typeof ProjectDirectorySelectEnvelope.Type;
+
+/** Returns the canonical project selected by the server-side locator. */
+export const ProjectDirectorySelectResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("project.directory.select.result"),
+	payload: ProjectRef,
+});
+export type ProjectDirectorySelectResultEnvelope = typeof ProjectDirectorySelectResultEnvelope.Type;
 
 /** Requests the current global inactive-thread retention policy. */
 export const ThreadRetentionQueryEnvelope = Schema.Struct({
@@ -2162,6 +2224,39 @@ export const ThreadTranscriptQueryResultEnvelope = Schema.Struct({
 });
 export type ThreadTranscriptQueryResultEnvelope = typeof ThreadTranscriptQueryResultEnvelope.Type;
 
+/** Requests the canonical renderer-ready conversation projection for one thread. */
+export const ConversationQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("conversation.query"),
+	payload: ConversationQuery,
+});
+export type ConversationQueryEnvelope = typeof ConversationQueryEnvelope.Type;
+
+export const ConversationQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("conversation.query.result"),
+	payload: ConversationSnapshot,
+});
+export type ConversationQueryResultEnvelope = typeof ConversationQueryResultEnvelope.Type;
+
+/** Reads one persisted user image without widening conversation snapshots or events. */
+export const MessageImageAttachmentQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("message.image_attachment.query"),
+	payload: MessageImageAttachmentQuery,
+});
+export type MessageImageAttachmentQueryEnvelope = typeof MessageImageAttachmentQueryEnvelope.Type;
+
+export const MessageImageAttachmentQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("message.image_attachment.query.result"),
+	payload: MessageImageAttachmentQueryResult,
+});
+export type MessageImageAttachmentQueryResultEnvelope =
+	typeof MessageImageAttachmentQueryResultEnvelope.Type;
+
 /** Discovers a thread's current and historic orchestration groups without a known id. */
 export const OrchestrationGroupListQueryEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
@@ -2230,6 +2325,7 @@ export const SubscribeEnvelope = Schema.Struct({
 		Schema.Struct({ type: Schema.Literal("thread.list") }),
 		Schema.Struct({ type: Schema.Literal("orchestration.graph"), group_id: Identifier }),
 		Schema.Struct({ type: Schema.Literal("thread.transcript"), thread_id: Identifier }),
+		Schema.Struct({ type: Schema.Literal("conversation"), thread_id: Identifier }),
 		Schema.Struct({
 			type: Schema.Literal("orchestration.group.list"),
 			thread_id: Identifier,
@@ -2370,6 +2466,28 @@ export const ThreadTranscriptAppendEnvelope = Schema.Struct({
 	subscription_id: Identifier,
 });
 export type ThreadTranscriptAppendEnvelope = typeof ThreadTranscriptAppendEnvelope.Type;
+
+export const ConversationSnapshotEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	journal_sequence: JournalSequence,
+	kind: Schema.Literal("conversation.snapshot"),
+	payload: ConversationSnapshot,
+	sequence: StreamSequence,
+	stream_id: Identifier,
+	subscription_id: Identifier,
+});
+export type ConversationSnapshotEnvelope = typeof ConversationSnapshotEnvelope.Type;
+
+export const ConversationPatchEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	journal_sequence: JournalSequence,
+	kind: Schema.Literal("conversation.patch"),
+	payload: ConversationPatchBatch,
+	sequence: StreamSequence,
+	stream_id: Identifier,
+	subscription_id: Identifier,
+});
+export type ConversationPatchEnvelope = typeof ConversationPatchEnvelope.Type;
 
 export const OrchestrationGroupListSnapshotEnvelope = Schema.Struct({
 	...NegotiatedBackendTraceMetadata,
@@ -2630,6 +2748,8 @@ export const InboundControlEnvelope = Schema.Union([
 	HelloEnvelope,
 	CommandEnvelope,
 	ThreadListQueryEnvelope,
+	ProjectDirectoryListQueryEnvelope,
+	ProjectDirectorySelectEnvelope,
 	ThreadRetentionQueryEnvelope,
 	ThreadRetentionUpdateEnvelope,
 	WorkspaceFileReadQueryEnvelope,
@@ -2699,6 +2819,8 @@ export const InboundControlEnvelope = Schema.Union([
 	TerminalListQueryEnvelope,
 	OrchestrationGraphQueryEnvelope,
 	ThreadTranscriptQueryEnvelope,
+	ConversationQueryEnvelope,
+	MessageImageAttachmentQueryEnvelope,
 	OrchestrationGroupListQueryEnvelope,
 	ArtisanToolRegistryListQueryEnvelope,
 	ArtisanToolExecuteEnvelope,
@@ -2739,6 +2861,8 @@ export const OutboundControlEnvelope = Schema.Union([
 	EventEnvelope,
 	ProtocolErrorEnvelope,
 	ThreadListQueryResultEnvelope,
+	ProjectDirectoryListQueryResultEnvelope,
+	ProjectDirectorySelectResultEnvelope,
 	ThreadRetentionQueryResultEnvelope,
 	WorkspaceFileReadQueryResultEnvelope,
 	WorkspaceChangeListQueryResultEnvelope,
@@ -2763,6 +2887,8 @@ export const OutboundControlEnvelope = Schema.Union([
 	TerminalListQueryResultEnvelope,
 	OrchestrationGraphQueryResultEnvelope,
 	ThreadTranscriptQueryResultEnvelope,
+	ConversationQueryResultEnvelope,
+	MessageImageAttachmentQueryResultEnvelope,
 	OrchestrationGroupListQueryResultEnvelope,
 	ArtisanToolRegistryListQueryResultEnvelope,
 	ArtisanToolInvocationListQueryResultEnvelope,
@@ -2790,6 +2916,8 @@ export const OutboundControlEnvelope = Schema.Union([
 	OrchestrationGraphPatchEnvelope,
 	ThreadTranscriptSnapshotEnvelope,
 	ThreadTranscriptAppendEnvelope,
+	ConversationSnapshotEnvelope,
+	ConversationPatchEnvelope,
 	OrchestrationGroupListSnapshotEnvelope,
 	OrchestrationGroupListPatchEnvelope,
 	ThreadSessionSnapshotEnvelope,

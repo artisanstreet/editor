@@ -28,37 +28,24 @@ import {
 	type ArtisanToolRegistryListQueryEnvelope,
 	type CommandEnvelope,
 	type EventEnvelope,
-	type GlobalGuidanceDriftResolutionEnvelope,
-	type GlobalGuidanceQueryEnvelope,
-	type GlobalGuidanceRetryEnvelope,
-	type GlobalGuidanceSelectionEnvelope,
-	type GlobalGuidanceUpdateEnvelope,
-	type GitDiffQueryEnvelope,
 	type GitIndexStageRequestEnvelope,
 	type GitIndexUnstageRequestEnvelope,
 	type GitMutationResolveEnvelope,
-	type GitWorkspaceQueryEnvelope,
 	type HeartbeatPongEnvelope,
 	type HelloEnvelope,
 	type InboundControlEnvelope,
-	type ModelBehaviourDriftResolutionEnvelope,
-	type ModelBehaviourQueryEnvelope,
-	type ModelBehaviourRetryEnvelope,
-	type ModelBehaviourUpdateEnvelope,
 	type OrchestrationGraphQueryEnvelope,
 	type OrchestrationGroupListQueryEnvelope,
-	type PreviewAssetMetadataQueryEnvelope,
 	type PreviewBrowserLaunchEnvelope,
 	type PreviewInspectionEnvelope,
 	type PreviewInspectionSessionCloseEnvelope,
 	type PreviewInspectionSessionOpenEnvelope,
-	type PreviewTargetGetQueryEnvelope,
-	type PreviewTargetListQueryEnvelope,
 	type PreviewTargetProbeEnvelope,
 	type PreviewTargetRegisterEnvelope,
 	type PreviewTargetRemoveEnvelope,
 	type PreviewTargetStateEnvelope,
-	type RichLinkResolveQueryEnvelope,
+	type ProjectDirectoryListQueryEnvelope,
+	type ProjectDirectorySelectEnvelope,
 	type SurfaceListQueryEnvelope,
 	type SurfaceUsageAggregateQueryEnvelope,
 	OutboundControlEnvelope,
@@ -69,33 +56,15 @@ import {
 	type StreamCursor,
 	type SubscribeEnvelope,
 	type ThreadListItem,
-	type ThreadListQueryEnvelope,
-	type ThreadTranscriptQueryEnvelope,
-	type ThreadSessionQueryEnvelope,
-	type ThreadRetentionQueryEnvelope,
 	type ThreadRetentionUpdateEnvelope,
-	type ThreadWorkQueryEnvelope,
 	type TerminalListQueryEnvelope,
 	type UnsubscribeEnvelope,
-	type WorkspaceChangeListQueryEnvelope,
-	type WorkspaceChangeDiffQueryEnvelope,
 	type WorkspaceChangeReviewEnvelope,
 	type WorkspaceChangeRollbackEnvelope,
-	type WorkspaceConflictListQueryEnvelope,
-	type WorkspaceFileReadQueryEnvelope,
 	type WorkspaceFileReplaceEnvelope,
-	type WorkspaceFileDiscoveryQueryEnvelope,
-	type WorkspaceLanguageCapabilitiesQueryEnvelope,
-	type CapabilityConnectPreviewEnvelope,
-	type CapabilityDetailQueryEnvelope,
-	type CapabilityRegistryQueryEnvelope,
-	type NpxSkillsDiscoverEnvelope,
-	type RoutineDetailQueryEnvelope,
-	type RoutineInstallPreviewEnvelope,
-	type RoutineRegistryQueryEnvelope,
-	type SecretReference,
 } from "@artisan/protocol";
 
+import { ProjectDirectoryService } from "../projects/project-directory-service";
 import { CapabilityRepository } from "../marketplace/capabilities/capability-repository";
 import {
 	CapabilityOAuthLifecycle,
@@ -111,42 +80,18 @@ import {
 
 import { GitService, GitServiceError } from "../git/git-service";
 import { AgentGraphOrchestrator } from "../orchestration/agent-graph-orchestrator";
-import { GuidanceFileStoreFailure } from "../guidance/file-store";
-import { global_guidance_thread_id } from "../guidance/guidance-repository";
-import {
-	GlobalGuidanceConflict,
-	GlobalGuidanceInvariantError,
-	GlobalGuidanceService,
-} from "../guidance/guidance-service";
-import { model_behaviour_thread_id } from "../model-behaviour/model-behaviour-repository";
-import {
-	ModelBehaviourConflict,
-	ModelBehaviourInvariantError,
-	ModelBehaviourService,
-} from "../model-behaviour/model-behaviour-service";
 import { JournalNotifier } from "../persistence/journal-notifier";
 import { SurfaceService } from "../surfaces/surface-service";
-import {
-	CommandIdConflict,
-	JournalInvariantError,
-	JournalStore,
-	JournalStoreFailure,
-} from "../persistence/journal-store";
+import { CommandIdConflict, JournalStore } from "../persistence/journal-store";
 import { OrchestrationRepository } from "../persistence/orchestration-repository";
 import { ThreadReadModel } from "../persistence/thread-read-model";
 import { TranscriptReadModel } from "../persistence/transcript-read-model";
+import { ConversationReadModel } from "../conversation/index.ts";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { TerminalSessionService } from "../terminal/terminal-sessions";
 import { thread_activity_kind_from_event } from "../threads/internal/thread-activity";
-import {
-	thread_retention_policy_thread_id,
-	ThreadRetentionPolicyService,
-} from "../threads/thread-retention-policy";
+import { thread_retention_policy_thread_id } from "../threads/thread-retention-policy";
 import { WorkspaceChangeRepository } from "../workspace/workspace-change-repository";
-import {
-	WorkspaceChangeDiffService,
-	WorkspaceChangeDiffUnavailable,
-} from "../workspace/workspace-change-diff-service";
 import {
 	WorkspaceFileService,
 	WorkspaceFileServiceError,
@@ -163,6 +108,10 @@ import {
 	type ProtocolConnectionOptions,
 } from "./protocol-connection";
 import { ProtocolRouter, type ProtocolRouterInboundDispatch } from "./protocol-router";
+import { MakeSettingsMutationHandler } from "./rpc/mutation-handlers/settings";
+import { MakeMarketplaceQueryHandler } from "./rpc/query-handlers/marketplace";
+import { MakeThreadQueryHandler } from "./rpc/query-handlers/thread";
+import { MakeWorkspaceInspectionQueryHandler } from "./rpc/query-handlers/workspace-inspection";
 
 interface PendingHeartbeat {
 	readonly deadline_ms: number;
@@ -186,6 +135,14 @@ interface ThreadTranscriptProjectionSubscription {
 	readonly _tag: "thread.transcript";
 	readonly thread_id: string;
 	readonly journal_sequence: number;
+	readonly sequence: number;
+	readonly stream_id: string;
+}
+interface ConversationProjectionSubscription {
+	readonly _tag: "conversation";
+	readonly thread_id: string;
+	readonly journal_sequence: number;
+	readonly patch_sequence: number;
 	readonly sequence: number;
 	readonly stream_id: string;
 }
@@ -230,6 +187,7 @@ interface WorkspaceConflictListProjectionSubscription {
 type ProjectionSubscription =
 	| OrchestrationGraphProjectionSubscription
 	| ThreadTranscriptProjectionSubscription
+	| ConversationProjectionSubscription
 	| OrchestrationGroupListProjectionSubscription
 	| ThreadSessionProjectionSubscription
 	| SurfaceListProjectionSubscription
@@ -309,86 +267,6 @@ function latest_journal_sequence(fallback: number, events: ReadonlyArray<EventEn
 	return events.reduce((sequence, event) => Math.max(sequence, event.journal_sequence), fallback);
 }
 
-function guidance_error_detail(error: unknown): ProtocolErrorDetail {
-	if (error instanceof CommandIdConflict) {
-		return {
-			code: "command.id_conflict",
-			message: "This command id has already been used for different intent.",
-			retryable: false,
-		};
-	}
-
-	if (error instanceof GlobalGuidanceConflict) {
-		return {
-			code: "guidance.conflict",
-			message: "The provider guidance changed; refresh before retrying.",
-			retryable: false,
-		};
-	}
-
-	if (error instanceof JournalInvariantError) {
-		return {
-			code: "journal.invariant_failed",
-			message: "The journal could not reconstruct the guidance command.",
-			retryable: false,
-		};
-	}
-
-	if (error instanceof GlobalGuidanceInvariantError) {
-		return {
-			code: "guidance.invariant_failed",
-			message: "The canonical guidance state failed validation.",
-			retryable: false,
-		};
-	}
-
-	if (error instanceof GuidanceFileStoreFailure || error instanceof JournalStoreFailure) {
-		return {
-			code: "guidance.unavailable",
-			message: "Global guidance could not be durably updated.",
-			retryable: true,
-		};
-	}
-
-	return {
-		code: "guidance.unavailable",
-		message: "Global guidance could not be durably updated.",
-		retryable: true,
-	};
-}
-
-function model_behaviour_error_detail(error: unknown): ProtocolErrorDetail {
-	if (error instanceof CommandIdConflict) {
-		return {
-			code: "command.id_conflict",
-			message: "This command id has already been used for different intent.",
-			retryable: false,
-		};
-	}
-
-	if (error instanceof ModelBehaviourConflict) {
-		return {
-			code: "model_behaviour.conflict",
-			message: error.message,
-			retryable: false,
-		};
-	}
-
-	if (error instanceof JournalInvariantError || error instanceof ModelBehaviourInvariantError) {
-		return {
-			code: "model_behaviour.invariant_failed",
-			message: "The canonical Model Behaviour state failed validation.",
-			retryable: false,
-		};
-	}
-
-	return {
-		code: "model_behaviour.unavailable",
-		message: "Model Behaviour settings could not be durably reconciled.",
-		retryable: true,
-	};
-}
-
 function workspace_error_detail(error: unknown): ProtocolErrorDetail {
 	if (error instanceof WorkspaceFileServiceError && error.reason === "changed") {
 		return {
@@ -402,33 +280,6 @@ function workspace_error_detail(error: unknown): ProtocolErrorDetail {
 		code: "workspace.unavailable",
 		message: "The workspace operation could not be completed.",
 		retryable: true,
-	};
-}
-
-function workspace_diff_error_detail(error: unknown): ProtocolErrorDetail {
-	if (
-		error instanceof WorkspaceChangeDiffUnavailable &&
-		(error.reason === "legacy_unavailable" || error.reason === "missing")
-	) {
-		return {
-			code: "workspace.diff_unavailable",
-			message: "No immutable diff is available for this workspace change.",
-			retryable: false,
-		};
-	}
-
-	if (error instanceof WorkspaceChangeDiffUnavailable && error.reason === "erased") {
-		return {
-			code: "workspace.unavailable",
-			message: "The workspace change is no longer available.",
-			retryable: false,
-		};
-	}
-
-	return {
-		code: "workspace.invariant_failed",
-		message: "The immutable workspace diff failed validation.",
-		retryable: false,
 	};
 }
 
@@ -700,8 +551,6 @@ export function make_protocol_server_layer(
 			const git = yield* GitService;
 			const graph = yield* AgentGraphOrchestrator;
 			const surfaces = yield* SurfaceService;
-			const guidance = yield* GlobalGuidanceService;
-			const model_behaviour = yield* ModelBehaviourService;
 			const journal = yield* JournalStore;
 			const metadata = yield* RuntimeMetadata;
 			const notifier = yield* JournalNotifier;
@@ -711,11 +560,11 @@ export function make_protocol_server_layer(
 			const tools = yield* ToolControlPlane;
 			const thread_read_model = yield* ThreadReadModel;
 			const transcript_read_model = yield* TranscriptReadModel;
-			const retention_policy = yield* ThreadRetentionPolicyService;
+			const conversation_read_model = yield* ConversationReadModel;
+			const project_directories = yield* ProjectDirectoryService;
 			const workspace_changes = yield* WorkspaceChangeRepository;
 			const ReadWorkspaceConflictSnapshot = (thread_id: string) =>
 				workspace_changes.ListConflictSnapshot(thread_id);
-			const workspace_diffs = yield* WorkspaceChangeDiffService;
 			const workspace_files = yield* WorkspaceFileService;
 			const previews = yield* PreviewCoordinator;
 			const routines = yield* RoutineService;
@@ -724,6 +573,10 @@ export function make_protocol_server_layer(
 			const capability_repository = yield* CapabilityRepository;
 			const capability_oauth = yield* CapabilityOAuthLifecycle;
 			const capability_mirrors = yield* CapabilityMirrorService;
+			const HandleSettingsMutation = yield* MakeSettingsMutationHandler;
+			const HandleMarketplaceQuery = yield* MakeMarketplaceQueryHandler;
+			const HandleThreadQuery = yield* MakeThreadQueryHandler;
+			const HandleWorkspaceInspectionQuery = yield* MakeWorkspaceInspectionQueryHandler;
 			const RequireRoutineScope = <Success, Error>(
 				routine_id: string,
 				scope: import("@artisan/protocol").MarketplaceScope,
@@ -882,6 +735,7 @@ export function make_protocol_server_layer(
 						for (const [subscription_id, subscription] of Object.entries(
 							current.subscriptions,
 						)) {
+							if (subscription._tag === "conversation") continue;
 							const message_id = yield* metadata.MakeId("message");
 							const sequence = subscription.sequence + 1;
 							let next_journal_sequence = event.journal_sequence;
@@ -1189,6 +1043,54 @@ export function make_protocol_server_layer(
 						return subscriptions;
 					});
 
+				const EnqueueConversationPatches = (current: ReadyState) =>
+					Effect.gen(function* () {
+						let subscriptions = current.subscriptions;
+						for (const [subscription_id, subscription] of Object.entries(
+							current.subscriptions,
+						)) {
+							if (subscription._tag !== "conversation") continue;
+							const patches = yield* conversation_read_model.ReadPatches(
+								subscription.thread_id,
+								subscription.patch_sequence,
+							);
+							if (patches.length === 0) continue;
+							const sequence = subscription.sequence + 1;
+							const message_id = yield* metadata.MakeId("message");
+							const sent_at = yield* metadata.Now;
+							const to_sequence = patches.at(-1)!.sequence;
+							yield* Enqueue({
+								journal_sequence: current.delivered_journal_sequence,
+								kind: "conversation.patch",
+								message_id,
+								origin: "backend",
+								payload: {
+									conversation_id: `conversation:${subscription.thread_id}`,
+									from_sequence: subscription.patch_sequence + 1,
+									patches,
+									thread_id: subscription.thread_id,
+									to_sequence,
+								},
+								protocol_version: 1,
+								schema_version: 1,
+								sent_at,
+								sequence,
+								stream_id: subscription.stream_id,
+								subscription_id,
+							});
+							subscriptions = {
+								...subscriptions,
+								[subscription_id]: {
+									...subscription,
+									journal_sequence: current.delivered_journal_sequence,
+									patch_sequence: to_sequence,
+									sequence,
+								},
+							};
+						}
+						return subscriptions;
+					});
+
 				const DeliverLiveEvents = (events: ReadonlyArray<EventEnvelope>) =>
 					Effect.gen(function* () {
 						const current = yield* Ref.get(state);
@@ -1210,16 +1112,22 @@ export function make_protocol_server_layer(
 							);
 						}
 
+						const delivered_journal_sequence = latest_journal_sequence(
+							current.delivered_journal_sequence,
+							new_events,
+						);
+						subscriptions = yield* EnqueueConversationPatches({
+							...current,
+							delivered_journal_sequence,
+							subscriptions,
+						});
 						yield* Ref.set(state, {
 							...current,
 							delivered_cursors: apply_event_cursors(
 								current.delivered_cursors,
 								new_events,
 							),
-							delivered_journal_sequence: latest_journal_sequence(
-								current.delivered_journal_sequence,
-								new_events,
-							),
+							delivered_journal_sequence,
 							subscriptions,
 						});
 					});
@@ -1355,19 +1263,21 @@ export function make_protocol_server_layer(
 							);
 					});
 
-				const HandleQuery = (query: ThreadListQueryEnvelope, current: ReadyState) =>
-					thread_read_model.Snapshot().pipe(
-						Effect.flatMap((snapshot) =>
+				const HandleProjectDirectoryList = (
+					query: ProjectDirectoryListQueryEnvelope,
+					current: ReadyState,
+				) =>
+					project_directories.List(query.payload).pipe(
+						Effect.flatMap((payload) =>
 							Effect.gen(function* () {
 								const message_id = yield* metadata.MakeId("message");
 								const sent_at = yield* metadata.Now;
-
 								yield* Enqueue({
 									correlation_id: query.message_id,
-									kind: "thread.list.query.result",
+									kind: "project.directory.list.query.result",
 									message_id,
 									origin: "backend",
-									payload: snapshot,
+									payload,
 									protocol_version: 1,
 									schema_version: 1,
 									sent_at,
@@ -1377,30 +1287,29 @@ export function make_protocol_server_layer(
 						Effect.catchCause(() =>
 							EnqueueError(
 								current,
-								"projection.unavailable",
-								"The thread projection could not be read.",
+								"project_directory.unavailable",
+								"The server directory listing could not be read.",
 								true,
 								query.message_id,
 							),
 						),
 					);
 
-				const HandleRetentionQuery = (
-					query: ThreadRetentionQueryEnvelope,
+				const HandleProjectDirectorySelect = (
+					query: ProjectDirectorySelectEnvelope,
 					current: ReadyState,
 				) =>
-					retention_policy.Read.pipe(
-						Effect.flatMap((policy) =>
+					project_directories.Select(query.payload).pipe(
+						Effect.flatMap((payload) =>
 							Effect.gen(function* () {
 								const message_id = yield* metadata.MakeId("message");
 								const sent_at = yield* metadata.Now;
-
 								yield* Enqueue({
 									correlation_id: query.message_id,
-									kind: "thread.retention.query.result",
+									kind: "project.directory.select.result",
 									message_id,
 									origin: "backend",
-									payload: policy,
+									payload,
 									protocol_version: 1,
 									schema_version: 1,
 									sent_at,
@@ -1410,75 +1319,9 @@ export function make_protocol_server_layer(
 						Effect.catchCause(() =>
 							EnqueueError(
 								current,
-								"retention.unavailable",
-								"The thread retention policy could not be read.",
-								true,
-								query.message_id,
-							),
-						),
-					);
-
-				const HandleGuidanceQuery = (
-					query: GlobalGuidanceQueryEnvelope,
-					current: ReadyState,
-				) =>
-					guidance.Get.pipe(
-						Effect.flatMap((snapshot) =>
-							Effect.gen(function* () {
-								const message_id = yield* metadata.MakeId("message");
-								const sent_at = yield* metadata.Now;
-
-								yield* Enqueue({
-									correlation_id: query.message_id,
-									kind: "guidance.query.result",
-									message_id,
-									origin: "backend",
-									payload: snapshot,
-									protocol_version: 1,
-									schema_version: 1,
-									sent_at,
-								});
-							}),
-						),
-						Effect.catch(() =>
-							EnqueueError(
-								current,
-								"guidance.unavailable",
-								"Global guidance could not be read or reconciled.",
-								true,
-								query.message_id,
-							),
-						),
-					);
-
-				const HandleModelBehaviourQuery = (
-					query: ModelBehaviourQueryEnvelope,
-					current: ReadyState,
-				) =>
-					model_behaviour.Get.pipe(
-						Effect.flatMap((snapshot) =>
-							Effect.gen(function* () {
-								const message_id = yield* metadata.MakeId("message");
-								const sent_at = yield* metadata.Now;
-
-								yield* Enqueue({
-									correlation_id: query.message_id,
-									kind: "model_behaviour.query.result",
-									message_id,
-									origin: "backend",
-									payload: snapshot,
-									protocol_version: 1,
-									schema_version: 1,
-									sent_at,
-								});
-							}),
-						),
-						Effect.catch(() =>
-							EnqueueError(
-								current,
-								"model_behaviour.unavailable",
-								"Model Behaviour settings could not be read or reconciled.",
-								true,
+								"project_directory.invalid",
+								"The selected server directory is unavailable.",
+								false,
 								query.message_id,
 							),
 						),
@@ -1488,17 +1331,9 @@ export function make_protocol_server_layer(
 					query: { readonly message_id: string },
 					current: ReadyState,
 					kind:
-						| "marketplace.routine.list.query.result"
-						| "marketplace.routine.detail.query.result"
-						| "marketplace.routine.install.preview.result"
-						| "marketplace.npx_skills.discover.result"
-						| "marketplace.capability.list.query.result"
-						| "marketplace.capability.detail.query.result"
-						| "marketplace.capability.connect.preview.result"
 						| "marketplace.routine.invoke.result"
 						| "marketplace.capability.invoke.result"
-						| "marketplace.capability.oauth.begin.result"
-						| "marketplace.capability.oauth.status.query.result",
+						| "marketplace.capability.oauth.begin.result",
 					program: Effect.Effect<Payload, unknown>,
 				) =>
 					program.pipe(
@@ -1530,129 +1365,6 @@ export function make_protocol_server_layer(
 								query.message_id,
 							),
 						),
-					);
-				/** These routes only inspect durable registry state or construct a preview. */
-				const HandleRoutineRegistryQuery = (
-					query: RoutineRegistryQueryEnvelope,
-					current: ReadyState,
-				) =>
-					HandleMarketplaceResult(
-						query,
-						current,
-						"marketplace.routine.list.query.result",
-						routines.Browse(query.payload).pipe(
-							Effect.map((routines) => ({
-								registry_version: 1 as const,
-								routines,
-							})),
-						),
-					);
-				const HandleRoutineDetailQuery = (
-					query: RoutineDetailQueryEnvelope,
-					current: ReadyState,
-				) =>
-					HandleMarketplaceResult(
-						query,
-						current,
-						"marketplace.routine.detail.query.result",
-						routines.Detail(query.payload.routine_id).pipe(
-							Effect.filterOrFail(
-								(detail) => ScopeMatches(detail.scope, query.payload.scope),
-								() => "Routine is outside the requested Marketplace scope",
-							),
-						),
-					);
-				const HandleRoutinePreview = (
-					query: RoutineInstallPreviewEnvelope,
-					current: ReadyState,
-				) =>
-					HandleMarketplaceResult(
-						query,
-						current,
-						"marketplace.routine.install.preview.result",
-						routines.Preview(query.payload),
-					);
-				const HandleNpxDiscover = (query: NpxSkillsDiscoverEnvelope, current: ReadyState) =>
-					HandleMarketplaceResult(
-						query,
-						current,
-						"marketplace.npx_skills.discover.result",
-						routines.DiscoverNpxSkills(query.payload),
-					);
-				const HandleCapabilityRegistryQuery = (
-					query: CapabilityRegistryQueryEnvelope,
-					current: ReadyState,
-				) =>
-					HandleMarketplaceResult(
-						query,
-						current,
-						"marketplace.capability.list.query.result",
-						capability_repository.ReadSummaries.pipe(
-							Effect.flatMap((capabilities) =>
-								Effect.forEach(capabilities, (summary) =>
-									capability_repository
-										.ReadDetail(summary.id)
-										.pipe(Effect.map((detail) => ({ detail, summary }))),
-								),
-							),
-							Effect.map((records) => ({
-								capabilities: records
-									.filter(
-										({ detail, summary: capability }) =>
-											(query.payload.compatibility_engine_id === undefined ||
-												detail.compatibility.some(
-													(entry) =>
-														entry.engine_id ===
-														query.payload.compatibility_engine_id,
-												)) &&
-											((capability) =>
-												(query.payload.category === undefined ||
-													query.payload.category === "capability") &&
-												(query.payload.enabled === undefined ||
-													capability.enabled === query.payload.enabled) &&
-												(query.payload.status === undefined ||
-													capability.status === query.payload.status) &&
-												(query.payload.scope === undefined ||
-													ScopeMatches(
-														capability.scope,
-														query.payload.scope,
-													)) &&
-												(query.payload.text === undefined ||
-													capability.display_name
-														.toLocaleLowerCase()
-														.includes(
-															query.payload.text.toLocaleLowerCase(),
-														)))(capability),
-									)
-									.map(({ summary }) => summary),
-								registry_version: 1 as const,
-							})),
-						),
-					);
-				const HandleCapabilityDetailQuery = (
-					query: CapabilityDetailQueryEnvelope,
-					current: ReadyState,
-				) =>
-					HandleMarketplaceResult(
-						query,
-						current,
-						"marketplace.capability.detail.query.result",
-						capability_repository.ReadDetail(query.payload.capability_id).pipe(
-							Effect.filterOrFail(
-								(detail) => ScopeMatches(detail.scope, query.payload.scope),
-								() => "Capability is outside the requested Marketplace scope",
-							),
-						),
-					);
-				const HandleCapabilityPreview = (
-					query: CapabilityConnectPreviewEnvelope,
-					current: ReadyState,
-				) =>
-					HandleMarketplaceResult(
-						query,
-						current,
-						"marketplace.capability.connect.preview.result",
-						capabilities.Preview(query.payload),
 					);
 				const HandleMarketplaceAction = (
 					envelope: { readonly kind: string; readonly message_id: string },
@@ -2084,71 +1796,6 @@ export function make_protocol_server_layer(
 						),
 					);
 				};
-				const OAuthStatusPayload = (status: {
-					readonly capability_id: string;
-					readonly secret_reference?: SecretReference;
-					readonly state: "absent" | "active" | "expired" | "revoked";
-				}) => ({
-					capability_id: status.capability_id,
-					...(status.secret_reference === undefined
-						? {}
-						: { secret_ref: status.secret_reference }),
-					status:
-						status.state === "absent"
-							? ("not_started" as const)
-							: status.state === "active"
-								? ("authorized" as const)
-								: status.state,
-				});
-				const HandleOAuthStatus = (
-					envelope: Extract<
-						InboundControlEnvelope,
-						{ readonly kind: "marketplace.capability.oauth.status.query" }
-					>,
-					current: ReadyState,
-				) =>
-					HandleMarketplaceResult(
-						envelope,
-						current,
-						"marketplace.capability.oauth.status.query.result",
-						RequireCapabilityScope(
-							envelope.payload.capability_id,
-							envelope.payload.scope,
-							capability_oauth
-								.Status(envelope.payload.capability_id)
-								.pipe(Effect.map(OAuthStatusPayload)),
-						),
-					);
-				const HandleWorkQuery = (query: ThreadWorkQueryEnvelope, current: ReadyState) =>
-					orchestration.GetWork(query.payload.thread_id).pipe(
-						Effect.flatMap((work) =>
-							Effect.gen(function* () {
-								const message_id = yield* metadata.MakeId("message");
-								const sent_at = yield* metadata.Now;
-
-								yield* Enqueue({
-									correlation_id: query.message_id,
-									kind: "thread.work.query.result",
-									message_id,
-									origin: "backend",
-									payload: work ? { work } : {},
-									protocol_version: 1,
-									schema_version: 1,
-									sent_at,
-								});
-							}),
-						),
-						Effect.catch(() =>
-							EnqueueError(
-								current,
-								"projection.unavailable",
-								"The thread work projection could not be read.",
-								true,
-								query.message_id,
-							),
-						),
-					);
-
 				const HandleTerminalListQuery = (
 					query: TerminalListQueryEnvelope,
 					current: ReadyState,
@@ -2215,38 +1862,6 @@ export function make_protocol_server_layer(
 						),
 					);
 
-				const HandleTranscriptQuery = (
-					query: ThreadTranscriptQueryEnvelope,
-					current: ReadyState,
-				) =>
-					transcript_read_model.Read(query.payload).pipe(
-						Effect.flatMap((snapshot) =>
-							Effect.gen(function* () {
-								const message_id = yield* metadata.MakeId("message");
-								const sent_at = yield* metadata.Now;
-								yield* Enqueue({
-									correlation_id: query.message_id,
-									kind: "thread.transcript.query.result",
-									message_id,
-									origin: "backend",
-									payload: snapshot,
-									protocol_version: 1,
-									schema_version: 1,
-									sent_at,
-								});
-							}),
-						),
-						Effect.catch(() =>
-							EnqueueError(
-								current,
-								"projection.unavailable",
-								"The thread transcript could not be read.",
-								true,
-								query.message_id,
-							),
-						),
-					);
-
 				const HandleGroupListQuery = (
 					query: OrchestrationGroupListQueryEnvelope,
 					current: ReadyState,
@@ -2280,38 +1895,6 @@ export function make_protocol_server_layer(
 								),
 							),
 						);
-
-				const HandleThreadSessionQuery = (
-					query: ThreadSessionQueryEnvelope,
-					current: ReadyState,
-				) =>
-					orchestration.GetSession(query.payload.thread_id).pipe(
-						Effect.flatMap((snapshot) =>
-							Effect.gen(function* () {
-								const message_id = yield* metadata.MakeId("message");
-								const sent_at = yield* metadata.Now;
-								yield* Enqueue({
-									correlation_id: query.message_id,
-									kind: "thread.session.query.result",
-									message_id,
-									origin: "backend",
-									payload: snapshot,
-									protocol_version: 1,
-									schema_version: 1,
-									sent_at,
-								});
-							}),
-						),
-						Effect.catch(() =>
-							EnqueueError(
-								current,
-								"projection.unavailable",
-								"The thread session could not be read.",
-								true,
-								query.message_id,
-							),
-						),
-					);
 
 				const HandleSurfaceListQuery = (
 					query: SurfaceListQueryEnvelope,
@@ -2385,208 +1968,6 @@ export function make_protocol_server_layer(
 								query.message_id,
 							),
 						),
-					);
-
-				const HandleWorkspaceFileReadQuery = (
-					query: WorkspaceFileReadQueryEnvelope,
-					current: ReadyState,
-				) =>
-					workspace_files.Read(query.payload).pipe(
-						Effect.flatMap((result) =>
-							Effect.gen(function* () {
-								const message_id = yield* metadata.MakeId("message");
-								const sent_at = yield* metadata.Now;
-
-								yield* Enqueue({
-									correlation_id: query.message_id,
-									kind: "workspace.file.read.query.result",
-									message_id,
-									origin: "backend",
-									payload: result,
-									protocol_version: 1,
-									schema_version: 1,
-									sent_at,
-								});
-							}),
-						),
-						Effect.catch((error) => {
-							const detail = workspace_error_detail(error);
-
-							return EnqueueError(
-								current,
-								detail.code,
-								detail.message,
-								detail.retryable,
-								query.message_id,
-							);
-						}),
-					);
-
-				const HandleWorkspaceChangeListQuery = (
-					query: WorkspaceChangeListQueryEnvelope,
-					current: ReadyState,
-				) =>
-					workspace_changes
-						.List(query.payload.thread_id, query.payload.workspace_id)
-						.pipe(
-							Effect.flatMap((result) =>
-								Effect.gen(function* () {
-									const message_id = yield* metadata.MakeId("message");
-									const sent_at = yield* metadata.Now;
-
-									yield* Enqueue({
-										correlation_id: query.message_id,
-										kind: "workspace.change.list.query.result",
-										message_id,
-										origin: "backend",
-										payload: result,
-										protocol_version: 1,
-										schema_version: 1,
-										sent_at,
-									});
-								}),
-							),
-							Effect.catch(() =>
-								EnqueueError(
-									current,
-									"projection.unavailable",
-									"The workspace change projection could not be read.",
-									true,
-									query.message_id,
-								),
-							),
-						);
-
-				const HandleWorkspaceConflictListQuery = (
-					query: WorkspaceConflictListQueryEnvelope,
-					current: ReadyState,
-				) =>
-					ReadWorkspaceConflictSnapshot(query.payload.thread_id).pipe(
-						Effect.flatMap((snapshot) =>
-							Effect.gen(function* () {
-								yield* Enqueue({
-									correlation_id: query.message_id,
-									kind: "workspace.conflict.list.query.result",
-									message_id: yield* metadata.MakeId("message"),
-									origin: "backend",
-									payload: snapshot,
-									protocol_version: 1,
-									schema_version: 1,
-									sent_at: yield* metadata.Now,
-								});
-							}),
-						),
-						Effect.catch(() =>
-							EnqueueError(
-								current,
-								"projection.unavailable",
-								"The workspace conflict projection could not be read.",
-								true,
-								query.message_id,
-							),
-						),
-					);
-
-				const HandleWorkspaceChangeDiffQuery = (
-					query: WorkspaceChangeDiffQueryEnvelope,
-					current: ReadyState,
-				) =>
-					workspace_diffs.Read(query.payload).pipe(
-						Effect.flatMap((result) =>
-							Effect.gen(function* () {
-								const message_id = yield* metadata.MakeId("message");
-								const sent_at = yield* metadata.Now;
-
-								yield* Enqueue({
-									correlation_id: query.message_id,
-									kind: "workspace.change.diff.query.result",
-									message_id,
-									origin: "backend",
-									payload: result,
-									protocol_version: 1,
-									schema_version: 1,
-									sent_at,
-								});
-							}),
-						),
-						Effect.catch((error) => {
-							const detail = workspace_diff_error_detail(error);
-
-							return EnqueueError(
-								current,
-								detail.code,
-								detail.message,
-								detail.retryable,
-								query.message_id,
-							);
-						}),
-					);
-
-				const HandleGitWorkspaceQuery = (
-					query: GitWorkspaceQueryEnvelope,
-					current: ReadyState,
-				) =>
-					git.Query(query).pipe(
-						Effect.flatMap((result) =>
-							Effect.gen(function* () {
-								const message_id = yield* metadata.MakeId("message");
-								const sent_at = yield* metadata.Now;
-
-								yield* Enqueue({
-									correlation_id: query.message_id,
-									kind: "git.workspace.query.result",
-									message_id,
-									origin: "backend",
-									payload: result,
-									protocol_version: 1,
-									schema_version: 1,
-									sent_at,
-								});
-							}),
-						),
-						Effect.catch((error) => {
-							const detail = git_error_detail(error);
-
-							return EnqueueError(
-								current,
-								detail.code,
-								detail.message,
-								detail.retryable,
-								query.message_id,
-							);
-						}),
-					);
-
-				const HandleGitDiffQuery = (query: GitDiffQueryEnvelope, current: ReadyState) =>
-					git.Diff(query).pipe(
-						Effect.flatMap((result) =>
-							Effect.gen(function* () {
-								const message_id = yield* metadata.MakeId("message");
-								const sent_at = yield* metadata.Now;
-
-								yield* Enqueue({
-									correlation_id: query.message_id,
-									kind: "git.diff.query.result",
-									message_id,
-									origin: "backend",
-									payload: result,
-									protocol_version: 1,
-									schema_version: 1,
-									sent_at,
-								});
-							}),
-						),
-						Effect.catch((error) => {
-							const detail = git_error_detail(error);
-
-							return EnqueueError(
-								current,
-								detail.code,
-								detail.message,
-								detail.retryable,
-								query.message_id,
-							);
-						}),
 					);
 
 				const HandleToolRegistryQuery = (
@@ -2671,64 +2052,6 @@ export function make_protocol_server_layer(
 								current,
 								"artisan.tool.unavailable",
 								"Tool approvals are unavailable.",
-								true,
-								query.message_id,
-							),
-						),
-					);
-				const HandleWorkspaceDiscoveryQuery = (
-					query: WorkspaceFileDiscoveryQueryEnvelope,
-					current: ReadyState,
-				) =>
-					tools.Discover(query.payload).pipe(
-						Effect.flatMap((payload) =>
-							Effect.gen(function* () {
-								yield* Enqueue({
-									correlation_id: query.message_id,
-									kind: "workspace.file.discovery.query.result",
-									message_id: yield* metadata.MakeId("message"),
-									origin: "backend",
-									payload,
-									protocol_version: 1,
-									schema_version: 1,
-									sent_at: yield* metadata.Now,
-								});
-							}),
-						),
-						Effect.catch(() =>
-							EnqueueError(
-								current,
-								"workspace.discovery.unavailable",
-								"Workspace file discovery is unavailable.",
-								true,
-								query.message_id,
-							),
-						),
-					);
-				const HandleLanguageCapabilitiesQuery = (
-					query: WorkspaceLanguageCapabilitiesQueryEnvelope,
-					current: ReadyState,
-				) =>
-					tools.LanguageCapabilities(query.payload).pipe(
-						Effect.flatMap((payload) =>
-							Effect.gen(function* () {
-								yield* Enqueue({
-									correlation_id: query.message_id,
-									kind: "workspace.language.capabilities.query.result",
-									message_id: yield* metadata.MakeId("message"),
-									origin: "backend",
-									payload,
-									protocol_version: 1,
-									schema_version: 1,
-									sent_at: yield* metadata.Now,
-								});
-							}),
-						),
-						Effect.catch(() =>
-							EnqueueError(
-								current,
-								"workspace.language.unavailable",
-								"Language capabilities are unavailable.",
 								true,
 								query.message_id,
 							),
@@ -2856,28 +2179,6 @@ export function make_protocol_server_layer(
 							);
 						}),
 					);
-				const HandlePreviewTargetList = (
-					query: PreviewTargetListQueryEnvelope,
-					current: ReadyState,
-				) =>
-					HandlePreview(
-						query,
-						current,
-						"preview.target.list.query.result",
-						previews
-							.List(query.payload.workspace_id)
-							.pipe(Effect.map((targets) => ({ targets }))),
-					);
-				const HandlePreviewTargetGet = (
-					query: PreviewTargetGetQueryEnvelope,
-					current: ReadyState,
-				) =>
-					HandlePreview(
-						query,
-						current,
-						"preview.target.get.query.result",
-						previews.Get(query.payload.target_id),
-					);
 				const HandlePreviewTargetRegister = (
 					command: PreviewTargetRegisterEnvelope,
 					current: ReadyState,
@@ -2951,37 +2252,6 @@ export function make_protocol_server_layer(
 									target_id: command.payload.target_id,
 									thread_id: target.thread_id,
 								}),
-							),
-						),
-					);
-				const HandleRichLinkResolve = (
-					query: RichLinkResolveQueryEnvelope,
-					current: ReadyState,
-				) =>
-					HandlePreview(
-						query,
-						current,
-						"preview.rich_link.resolve.query.result",
-						previews.ResolveRichLink(query.payload.url),
-					);
-				const HandlePreviewAssetMetadata = (
-					query: PreviewAssetMetadataQueryEnvelope,
-					current: ReadyState,
-				) =>
-					HandlePreview(
-						query,
-						current,
-						"preview.asset.metadata.query.result",
-						previews.AssetMetadata(query.payload.asset_id).pipe(
-							Effect.flatMap((asset) =>
-								asset === undefined
-									? Effect.fail(
-											new PreviewRepositoryError({
-												code: "not_found",
-												message: "Preview asset not found",
-											}),
-										)
-									: Effect.succeed(asset),
 							),
 						),
 					);
@@ -3241,6 +2511,90 @@ export function make_protocol_server_layer(
 								subscription_id: subscribe.subscription_id,
 							});
 							return;
+						}
+
+						if (subscribe.payload.type === "conversation") {
+							const thread_id = subscribe.payload.thread_id;
+							return yield* conversation_read_model.ReadSnapshot(thread_id).pipe(
+								Effect.flatMap((availability) =>
+									availability.status === "available"
+										? Effect.gen(function* () {
+												const started_id =
+													yield* metadata.MakeId("message");
+												const snapshot_id =
+													yield* metadata.MakeId("message");
+												const sent_at = yield* metadata.Now;
+												const stream_id = `projection:conversation:${thread_id}:${subscribe.subscription_id}`;
+												const subscription: ConversationProjectionSubscription =
+													{
+														_tag: "conversation",
+														thread_id,
+														journal_sequence:
+															availability.snapshot.journal_sequence,
+														patch_sequence:
+															availability.snapshot
+																.last_patch_sequence,
+														sequence: 0,
+														stream_id,
+													};
+												const registered = {
+													...current,
+													subscriptions: {
+														...current.subscriptions,
+														[subscribe.subscription_id]: subscription,
+													},
+												} satisfies ReadyState;
+												yield* Ref.set(state, registered);
+												yield* Enqueue({
+													correlation_id: subscribe.message_id,
+													kind: "subscription.started",
+													message_id: started_id,
+													origin: "backend",
+													payload: { stream_id },
+													protocol_version: 1,
+													schema_version: 1,
+													sent_at,
+													subscription_id: subscribe.subscription_id,
+												});
+												yield* Enqueue({
+													journal_sequence:
+														availability.snapshot.journal_sequence,
+													kind: "conversation.snapshot",
+													message_id: snapshot_id,
+													origin: "backend",
+													payload: availability.snapshot,
+													protocol_version: 1,
+													schema_version: 1,
+													sent_at,
+													sequence: 0,
+													stream_id,
+													subscription_id: subscribe.subscription_id,
+												});
+												const subscriptions =
+													yield* EnqueueConversationPatches(registered);
+												yield* Ref.set(state, {
+													...registered,
+													subscriptions,
+												});
+											})
+										: EnqueueError(
+												current,
+												"projection.unavailable",
+												"The conversation projection is unavailable.",
+												true,
+												subscribe.message_id,
+											),
+								),
+								Effect.catch(() =>
+									EnqueueError(
+										current,
+										"projection.unavailable",
+										"The conversation projection could not be read.",
+										true,
+										subscribe.message_id,
+									),
+								),
+							);
 						}
 
 						if (subscribe.payload.type === "thread.transcript") {
@@ -3698,167 +3052,27 @@ export function make_protocol_server_layer(
 						sent_at: update.sent_at,
 						thread_id: thread_retention_policy_thread_id,
 					});
-				type GuidanceMutationEnvelope =
-					| GlobalGuidanceDriftResolutionEnvelope
-					| GlobalGuidanceRetryEnvelope
-					| GlobalGuidanceSelectionEnvelope
-					| GlobalGuidanceUpdateEnvelope;
-				const HandleGuidanceMutation = (envelope: GuidanceMutationEnvelope) => {
-					const trace = {
-						message_id: envelope.message_id,
-						origin: envelope.origin,
-						sent_at: envelope.sent_at,
-					};
-					const operation =
-						envelope.kind === "guidance.update"
-							? guidance.Update({ ...trace, content: envelope.payload.content })
-							: envelope.kind === "guidance.selection"
-								? guidance.Select({ ...trace, ...envelope.payload })
-								: envelope.kind === "guidance.drift.resolve"
-									? guidance.ResolveDrift({ ...trace, ...envelope.payload })
-									: guidance.RetrySync({ ...trace, ...envelope.payload });
+				const HandleSettingsMutationResult = (
+					envelope: Parameters<typeof HandleSettingsMutation>[0],
+				) =>
+					Effect.gen(function* () {
+						const result = yield* HandleSettingsMutation(envelope);
+						yield* Enqueue(result.receipt);
 
-					return operation.pipe(
-						Effect.flatMap(({ acceptance }) =>
-							Effect.gen(function* () {
-								const message_id = yield* metadata.MakeId("message");
-								const sent_at = yield* metadata.Now;
+						const latest = yield* Ref.get(state);
+						const undelivered =
+							latest._tag === "Ready"
+								? result.events.filter(
+										(event) =>
+											event.journal_sequence >
+											latest.delivered_journal_sequence,
+									)
+								: [];
 
-								yield* Enqueue({
-									causation_id: envelope.message_id,
-									correlation_id: envelope.message_id,
-									kind: "command.receipt",
-									message_id,
-									origin: "backend",
-									payload: {
-										journal_sequence: acceptance.event.journal_sequence,
-										status: acceptance.status,
-									},
-									protocol_version: 1,
-									schema_version: 1,
-									sent_at,
-									thread_id: global_guidance_thread_id,
-								});
-
-								const latest = yield* Ref.get(state);
-
-								if (
-									latest._tag === "Ready" &&
-									acceptance.event.journal_sequence >
-										latest.delivered_journal_sequence
-								) {
-									yield* DeliverLiveEvents([acceptance.event]);
-								}
-							}),
-						),
-						Effect.catch((error) =>
-							Effect.gen(function* () {
-								const message_id = yield* metadata.MakeId("message");
-								const sent_at = yield* metadata.Now;
-
-								yield* Enqueue({
-									causation_id: envelope.message_id,
-									correlation_id: envelope.message_id,
-									kind: "command.receipt",
-									message_id,
-									origin: "backend",
-									payload: {
-										error: guidance_error_detail(error),
-										status: "rejected",
-									},
-									protocol_version: 1,
-									schema_version: 1,
-									sent_at,
-									thread_id: global_guidance_thread_id,
-								});
-							}),
-						),
-					);
-				};
-				type ModelBehaviourMutationEnvelope =
-					| ModelBehaviourDriftResolutionEnvelope
-					| ModelBehaviourRetryEnvelope
-					| ModelBehaviourUpdateEnvelope;
-				const HandleModelBehaviourMutation = (envelope: ModelBehaviourMutationEnvelope) => {
-					const trace = {
-						message_id: envelope.message_id,
-						origin: envelope.origin,
-						sent_at: envelope.sent_at,
-					};
-					const operation =
-						envelope.kind === "model_behaviour.update"
-							? model_behaviour.Update({ ...trace, ...envelope.payload })
-							: envelope.kind === "model_behaviour.drift.resolve"
-								? model_behaviour.ResolveDrift({ ...trace, ...envelope.payload })
-								: model_behaviour.RetrySync({ ...trace, ...envelope.payload });
-
-					return operation.pipe(
-						Effect.flatMap((result) =>
-							Effect.gen(function* () {
-								const events = yield* journal.ReadCorrelatedEvents(
-									envelope.message_id,
-								);
-								const journal_sequence =
-									events.at(-1)?.journal_sequence ??
-									(yield* journal.ReadWatermark());
-								const message_id = yield* metadata.MakeId("message");
-								const sent_at = yield* metadata.Now;
-
-								yield* Enqueue({
-									causation_id: envelope.message_id,
-									correlation_id: envelope.message_id,
-									kind: "command.receipt",
-									message_id,
-									origin: "backend",
-									payload: {
-										journal_sequence,
-										status: result.status,
-									},
-									protocol_version: 1,
-									schema_version: 1,
-									sent_at,
-									thread_id: model_behaviour_thread_id,
-								});
-
-								const latest = yield* Ref.get(state);
-								const undelivered =
-									latest._tag === "Ready"
-										? events.filter(
-												(event) =>
-													event.journal_sequence >
-													latest.delivered_journal_sequence,
-											)
-										: [];
-
-								if (undelivered.length > 0) {
-									yield* DeliverLiveEvents(undelivered);
-								}
-							}),
-						),
-						Effect.catch((error) =>
-							Effect.gen(function* () {
-								const message_id = yield* metadata.MakeId("message");
-								const sent_at = yield* metadata.Now;
-
-								yield* Enqueue({
-									causation_id: envelope.message_id,
-									correlation_id: envelope.message_id,
-									kind: "command.receipt",
-									message_id,
-									origin: "backend",
-									payload: {
-										error: model_behaviour_error_detail(error),
-										status: "rejected",
-									},
-									protocol_version: 1,
-									schema_version: 1,
-									sent_at,
-									thread_id: model_behaviour_thread_id,
-								});
-							}),
-						),
-					);
-				};
+						if (undelivered.length > 0) {
+							yield* DeliverLiveEvents(undelivered);
+						}
+					});
 				type WorkspaceMutationEnvelope =
 					| WorkspaceChangeReviewEnvelope
 					| WorkspaceChangeRollbackEnvelope
@@ -4028,6 +3242,60 @@ export function make_protocol_server_layer(
 					);
 				};
 
+				const HandleThreadReadQuery = (
+					envelope: Parameters<typeof HandleThreadQuery>[0],
+					current: ReadyState,
+				) =>
+					HandleThreadQuery(envelope).pipe(
+						Effect.matchEffect({
+							onFailure: (detail) =>
+								EnqueueError(
+									current,
+									detail.code,
+									detail.message,
+									detail.retryable,
+									envelope.message_id,
+								),
+							onSuccess: Enqueue,
+						}),
+					);
+
+				const HandleWorkspaceInspectionReadQuery = (
+					envelope: Parameters<typeof HandleWorkspaceInspectionQuery>[0],
+					current: ReadyState,
+				) =>
+					HandleWorkspaceInspectionQuery(envelope).pipe(
+						Effect.matchEffect({
+							onFailure: (detail) =>
+								EnqueueError(
+									current,
+									detail.code,
+									detail.message,
+									detail.retryable,
+									envelope.message_id,
+								),
+							onSuccess: Enqueue,
+						}),
+					);
+
+				const HandleMarketplaceReadQuery = (
+					envelope: Parameters<typeof HandleMarketplaceQuery>[0],
+					current: ReadyState,
+				) =>
+					HandleMarketplaceQuery(envelope).pipe(
+						Effect.matchEffect({
+							onFailure: (detail) =>
+								EnqueueError(
+									current,
+									detail.code,
+									detail.message,
+									detail.retryable,
+									envelope.message_id,
+								),
+							onSuccess: Enqueue,
+						}),
+					);
+
 				const HandleReadyEnvelope = (
 					envelope: Exclude<InboundControlEnvelope, HelloEnvelope>,
 					current: ReadyState,
@@ -4036,27 +3304,32 @@ export function make_protocol_server_layer(
 						case "command":
 							return HandleCommand(envelope);
 						case "thread.list.query":
-							return HandleQuery(envelope, current);
 						case "thread.retention.query":
-							return HandleRetentionQuery(envelope, current);
+						case "thread.work.query":
+						case "thread.transcript.query":
+						case "conversation.query":
+						case "message.image_attachment.query":
+						case "thread.session.query":
+							return HandleThreadReadQuery(envelope, current);
+						case "project.directory.list.query":
+							return HandleProjectDirectoryList(envelope, current);
+						case "project.directory.select":
+							return HandleProjectDirectorySelect(envelope, current);
 						case "thread.retention.update":
 							return HandleRetentionUpdate(envelope);
 						case "workspace.file.read.query":
-							return HandleWorkspaceFileReadQuery(envelope, current);
 						case "workspace.change.list.query":
-							return HandleWorkspaceChangeListQuery(envelope, current);
 						case "workspace.conflict.list.query":
-							return HandleWorkspaceConflictListQuery(envelope, current);
 						case "workspace.change.diff.query":
-							return HandleWorkspaceChangeDiffQuery(envelope, current);
 						case "git.workspace.query":
-							return HandleGitWorkspaceQuery(envelope, current);
 						case "git.diff.query":
-							return HandleGitDiffQuery(envelope, current);
 						case "preview.target.list.query":
-							return HandlePreviewTargetList(envelope, current);
 						case "preview.target.get.query":
-							return HandlePreviewTargetGet(envelope, current);
+						case "preview.rich_link.resolve.query":
+						case "preview.asset.metadata.query":
+						case "workspace.file.discovery.query":
+						case "workspace.language.capabilities.query":
+							return HandleWorkspaceInspectionReadQuery(envelope, current);
 						case "preview.target.register":
 							return HandlePreviewTargetRegister(envelope, current);
 						case "preview.target.probe":
@@ -4065,10 +3338,6 @@ export function make_protocol_server_layer(
 							return HandlePreviewTargetState(envelope, current);
 						case "preview.target.remove":
 							return HandlePreviewTargetRemove(envelope, current);
-						case "preview.rich_link.resolve.query":
-							return HandleRichLinkResolve(envelope, current);
-						case "preview.asset.metadata.query":
-							return HandlePreviewAssetMetadata(envelope, current);
 						case "preview.browser.launch":
 							return HandlePreviewLaunch(envelope, current);
 						case "preview.inspection.open":
@@ -4086,20 +3355,21 @@ export function make_protocol_server_layer(
 						case "workspace.change.rollback":
 							return HandleWorkspaceMutation(envelope);
 						case "guidance.query":
-							return HandleGuidanceQuery(envelope, current);
+						case "model_behaviour.query":
+						case "marketplace.routine.list.query":
+						case "marketplace.routine.detail.query":
+						case "marketplace.routine.install.preview":
+						case "marketplace.npx_skills.discover":
+						case "marketplace.capability.list.query":
+						case "marketplace.capability.detail.query":
+						case "marketplace.capability.connect.preview":
+						case "marketplace.capability.oauth.status.query":
+							return HandleMarketplaceReadQuery(envelope, current);
 						case "guidance.update":
 						case "guidance.selection":
 						case "guidance.drift.resolve":
 						case "guidance.sync.retry":
-							return HandleGuidanceMutation(envelope);
-						case "model_behaviour.query":
-							return HandleModelBehaviourQuery(envelope, current);
-						case "marketplace.routine.list.query":
-							return HandleRoutineRegistryQuery(envelope, current);
-						case "marketplace.routine.detail.query":
-							return HandleRoutineDetailQuery(envelope, current);
-						case "marketplace.routine.install.preview":
-							return HandleRoutinePreview(envelope, current);
+							return HandleSettingsMutationResult(envelope);
 						case "marketplace.routine.install.request":
 							return HandleRoutineInstallRequest(envelope, current);
 						case "marketplace.routine.install.decision":
@@ -4190,8 +3460,6 @@ export function make_protocol_server_layer(
 							);
 						case "marketplace.routine.invoke":
 							return HandleRoutineInvoke(envelope, current);
-						case "marketplace.npx_skills.discover":
-							return HandleNpxDiscover(envelope, current);
 						case "marketplace.npx_skills.import.request":
 							return HandleMarketplaceAction(
 								envelope,
@@ -4210,12 +3478,6 @@ export function make_protocol_server_layer(
 									),
 								),
 							);
-						case "marketplace.capability.list.query":
-							return HandleCapabilityRegistryQuery(envelope, current);
-						case "marketplace.capability.detail.query":
-							return HandleCapabilityDetailQuery(envelope, current);
-						case "marketplace.capability.connect.preview":
-							return HandleCapabilityPreview(envelope, current);
 						case "marketplace.capability.connect.request":
 							return HandleCapabilityConnectRequest(envelope, current);
 						case "marketplace.capability.connect.decision":
@@ -4418,20 +3680,14 @@ export function make_protocol_server_layer(
 									}),
 								),
 							);
-						case "marketplace.capability.oauth.status.query":
-							return HandleOAuthStatus(envelope, current);
 						case "model_behaviour.update":
 						case "model_behaviour.drift.resolve":
 						case "model_behaviour.sync.retry":
-							return HandleModelBehaviourMutation(envelope);
-						case "thread.work.query":
-							return HandleWorkQuery(envelope, current);
+							return HandleSettingsMutationResult(envelope);
 						case "terminal.list.query":
 							return HandleTerminalListQuery(envelope, current);
 						case "orchestration.graph.query":
 							return HandleGraphQuery(envelope, current);
-						case "thread.transcript.query":
-							return HandleTranscriptQuery(envelope, current);
 						case "orchestration.group.list.query":
 							return HandleGroupListQuery(envelope, current);
 						case "artisan.tool.registry.list.query":
@@ -4440,16 +3696,10 @@ export function make_protocol_server_layer(
 							return HandleToolInvocationQuery(envelope, current);
 						case "artisan.approval.list.query":
 							return HandleToolApprovalQuery(envelope, current);
-						case "workspace.file.discovery.query":
-							return HandleWorkspaceDiscoveryQuery(envelope, current);
-						case "workspace.language.capabilities.query":
-							return HandleLanguageCapabilitiesQuery(envelope, current);
 						case "artisan.tool.execute":
 							return HandleToolExecute(envelope, current);
 						case "artisan.approval.resolve":
 							return HandleToolApprovalResolve(envelope, current);
-						case "thread.session.query":
-							return HandleThreadSessionQuery(envelope, current);
 						case "surface.list.query":
 							return HandleSurfaceListQuery(envelope, current);
 						case "surface.usage.aggregate.query":

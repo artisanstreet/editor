@@ -22,6 +22,8 @@ const allowed_provider_options = new Set([
 	"codex.exec.profile",
 	"codex.exec.skip_git_repo_check",
 	"codex.reasoning_effort",
+	"codex.service_tier",
+	"codex.workflow_mode",
 ]);
 
 function FailConfiguration(option: string, value: unknown) {
@@ -49,6 +51,8 @@ function ResolveCodexPermissions(input: EngineOpenInput, transport: CodexTranspo
 		const exec_profile = provider_options["codex.exec.profile"];
 		const skip_git_repo_check = provider_options["codex.exec.skip_git_repo_check"];
 		const reasoning_effort = provider_options["codex.reasoning_effort"];
+		const service_tier = provider_options["codex.service_tier"];
+		const workflow_mode = provider_options["codex.workflow_mode"];
 
 		if (
 			exec_profile !== undefined &&
@@ -66,12 +70,24 @@ function ResolveCodexPermissions(input: EngineOpenInput, transport: CodexTranspo
 		if (
 			reasoning_effort !== undefined &&
 			(typeof reasoning_effort !== "string" ||
-				!new Set(["low", "medium", "high", "xhigh"]).has(reasoning_effort))
+				!new Set(["low", "medium", "high", "xhigh", "max"]).has(reasoning_effort))
 		) {
 			return yield* FailConfiguration(
 				"provider_options.codex.reasoning_effort",
 				reasoning_effort,
 			);
+		}
+		if (
+			service_tier !== undefined &&
+			(typeof service_tier !== "string" || !new Set(["standard", "fast"]).has(service_tier))
+		) {
+			return yield* FailConfiguration("provider_options.codex.service_tier", service_tier);
+		}
+		if (
+			workflow_mode !== undefined &&
+			(typeof workflow_mode !== "string" || !new Set(["build", "plan"]).has(workflow_mode))
+		) {
+			return yield* FailConfiguration("provider_options.codex.workflow_mode", workflow_mode);
 		}
 
 		if (
@@ -148,6 +164,9 @@ export function MakeCodexAppServerThreadOptions(input: EngineOpenInput) {
 				? {}
 				: { developerInstructions: input.global_guidance.content }),
 			...(input.model === undefined ? {} : { model: input.model }),
+			...(input.provider_options?.["codex.service_tier"] === "fast"
+				? { serviceTier: "fast" }
+				: {}),
 			...(permissions.network_access === undefined
 				? {}
 				: {

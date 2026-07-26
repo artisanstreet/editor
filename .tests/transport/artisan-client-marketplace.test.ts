@@ -4,13 +4,12 @@ import { describe, expect, it } from "vitest";
 import { ProtocolServer, type ProtocolConnection } from "@artisan/backend";
 import {
 	DecodeInboundControlEnvelope,
+	ControlRpcGroup,
 	type CapabilityConnectRequestEnvelope,
 	type InboundControlEnvelope,
 	type OutboundControlEnvelope,
 	type RoutineRegistryQueryEnvelope,
 } from "@artisan/protocol";
-
-import { MarketplacePendingResultKinds } from "../../modules/transport/src/internal/client-connection";
 
 import { make_transport_test_harness_with_protocol_server } from "./message-channel-harness";
 
@@ -234,7 +233,12 @@ describe("ArtisanClient Marketplace surface", () => {
 		"marketplace.capability.invoke.result",
 		"marketplace.capability.oauth.status.query.result",
 	] as const)("routes the correlated %s envelope through the request coordinator", (kind) => {
-		expect(MarketplacePendingResultKinds).toContain(kind);
+		const success_kinds = Array.from(
+			ControlRpcGroup.requests.values(),
+			(rpc) => rpc.successSchema,
+		).map((schema) => schema.ast);
+
+		expect(success_kinds.some((ast) => JSON.stringify(ast).includes(kind))).toBe(true);
 	});
 
 	it("sends filtered browse and approval-bound connection envelopes with exact correlations", async () => {

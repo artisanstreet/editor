@@ -33,6 +33,10 @@ export const MakeSessionPolicyRunMetadata = (
 			? {}
 			: { model: policy.model ?? requested.model }),
 		permission_policy: { approval, network_access, write_access },
-		provider_options: { "codex.reasoning_effort": policy.reasoning_effort },
+		provider_options: {
+			"codex.reasoning_effort": policy.reasoning_effort,
+			"codex.service_tier": policy.service_tier ?? "standard",
+			"codex.workflow_mode": policy.workflow_mode ?? "build",
+		},
 	};
 };

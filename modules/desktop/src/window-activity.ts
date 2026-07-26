@@ -1,3 +1,5 @@
+import { Effect, Ref } from "effect";
+
 /** Minimal BrowserWindow capability for the native taskbar/Dock activity signal. */
 export interface DesktopWindowProgress {
 	readonly setProgressBar: (
@@ -6,28 +8,24 @@ export interface DesktopWindowProgress {
 	) => void;
 }
 
-/**
- * Keeps the native activity indicator idempotent and best-effort. Electron maps this
- * to the platform taskbar/Dock where it is available; no custom tray or overlay UI is
- * introduced for Windows.
- */
-export const make_desktop_window_activity = (window: DesktopWindowProgress) => {
-	let working = false;
+/** Acquires Effect-owned, idempotent native taskbar/Dock activity state. */
+export const make_desktop_window_activity = (window: DesktopWindowProgress) =>
+	Effect.gen(function* () {
+		const working = yield* Ref.make(false);
+		const SetWorking = (next_working: boolean) =>
+			Ref.modify(working, (current) => [current !== next_working, next_working]).pipe(
+				Effect.tap((changed) =>
+					!changed
+						? Effect.void
+						: Effect.try({
+								try: () =>
+									next_working
+										? window.setProgressBar(2, { mode: "indeterminate" })
+										: window.setProgressBar(-1),
+								catch: () => undefined,
+							}).pipe(Effect.ignore),
+				),
+			);
 
-	const SetWorking = (next_working: boolean) => {
-		if (working === next_working) return false;
-		working = next_working;
-		try {
-			if (next_working) {
-				window.setProgressBar(2, { mode: "indeterminate" });
-			} else {
-				window.setProgressBar(-1);
-			}
-		} catch {
-			/** Native progress is optional platform polish and must never break the shell. */
-		}
-		return true;
-	};
-
-	return { RestoreIdle: () => SetWorking(false), SetWorking };
-};
+		return { RestoreIdle: SetWorking(false), SetWorking };
+	});

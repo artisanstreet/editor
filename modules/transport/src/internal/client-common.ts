@@ -1,8 +1,9 @@
 import { Effect } from "effect";
 
 import type {
+	ControlRpcRequest,
+	ControlRpcSuccess,
 	InboundControlEnvelope,
-	OutboundControlEnvelope,
 	ProtocolErrorDetail,
 } from "@artisan/protocol";
 
@@ -40,162 +41,8 @@ export interface FrontendTrace {
 /** Creates a fresh trace once; reconnect retries retain the completed envelope. */
 export type MakeTrace = Effect.Effect<FrontendTrace>;
 
-/** Narrows client requests that expect exactly one correlated result. */
-export type PendingRequestEnvelope = Extract<
-	InboundControlEnvelope,
-	{
-		readonly kind:
-			| "command"
-			| "artisan.tool.registry.list.query"
-			| "artisan.tool.execute"
-			| "artisan.approval.resolve"
-			| "artisan.tool.invocation.list.query"
-			| "artisan.approval.list.query"
-			| "git.diff.query"
-			| "git.index.stage.request"
-			| "git.index.unstage.request"
-			| "git.mutation.resolve"
-			| "git.workspace.query"
-			| "guidance.drift.resolve"
-			| "guidance.query"
-			| "guidance.selection"
-			| "guidance.sync.retry"
-			| "guidance.update"
-			| "model_behaviour.drift.resolve"
-			| "model_behaviour.query"
-			| "model_behaviour.sync.retry"
-			| "model_behaviour.update"
-			| "marketplace.routine.list.query"
-			| "marketplace.routine.detail.query"
-			| "marketplace.routine.install.preview"
-			| "marketplace.routine.install.request"
-			| "marketplace.routine.install.decision"
-			| "marketplace.routine.enable"
-			| "marketplace.routine.disable"
-			| "marketplace.routine.remove"
-			| "marketplace.routine.sync"
-			| "marketplace.routine.drift.resolve"
-			| "marketplace.routine.drift.overwrite.request"
-			| "marketplace.routine.drift.overwrite.decision"
-			| "marketplace.routine.invoke"
-			| "marketplace.routine.rollback"
-			| "marketplace.npx_skills.discover"
-			| "marketplace.npx_skills.import.request"
-			| "marketplace.capability.list.query"
-			| "marketplace.capability.detail.query"
-			| "marketplace.capability.connect.preview"
-			| "marketplace.capability.connect.request"
-			| "marketplace.capability.connect.decision"
-			| "marketplace.capability.start"
-			| "marketplace.capability.reconnect"
-			| "marketplace.capability.health"
-			| "marketplace.capability.disconnect"
-			| "marketplace.capability.restart"
-			| "marketplace.capability.uninstall"
-			| "marketplace.capability.enable"
-			| "marketplace.capability.disable"
-			| "marketplace.capability.remove"
-			| "marketplace.capability.sync"
-			| "marketplace.capability.drift.resolve"
-			| "marketplace.capability.drift.overwrite.request"
-			| "marketplace.capability.drift.overwrite.decision"
-			| "marketplace.capability.invoke.request"
-			| "marketplace.capability.invoke.decision"
-			| "marketplace.capability.invoke"
-			| "marketplace.capability.oauth.begin"
-			| "marketplace.capability.oauth.complete"
-			| "marketplace.capability.oauth.refresh"
-			| "marketplace.capability.oauth.revoke"
-			| "marketplace.capability.oauth.status.query"
-			| "orchestration.graph.query"
-			| "orchestration.group.list.query"
-			| "preview.asset.metadata.query"
-			| "preview.browser.launch"
-			| "preview.inspection.close"
-			| "preview.inspection.inspect"
-			| "preview.inspection.open"
-			| "preview.rich_link.resolve.query"
-			| "preview.target.get.query"
-			| "preview.target.list.query"
-			| "preview.target.probe"
-			| "preview.target.register"
-			| "preview.target.remove"
-			| "preview.target.state"
-			| "thread.session.query"
-			| "surface.list.query"
-			| "surface.usage.aggregate.query"
-			| "terminal.list.query"
-			| "thread.list.query"
-			| "thread.transcript.query"
-			| "thread.retention.query"
-			| "thread.retention.update"
-			| "thread.work.query"
-			| "workspace.file.read.query"
-			| "workspace.file.discovery.query"
-			| "workspace.language.capabilities.query"
-			| "workspace.file.replace"
-			| "workspace.change.list.query"
-			| "workspace.conflict.list.query"
-			| "workspace.change.diff.query"
-			| "workspace.change.review"
-			| "workspace.change.rollback";
-	}
->;
-
-/** Narrows backend results completed through the request coordinator. */
-export type PendingResultEnvelope = Extract<
-	OutboundControlEnvelope,
-	{
-		readonly kind:
-			| "command.receipt"
-			| "artisan.tool.registry.list.query.result"
-			| "artisan.tool.invocation.list.query.result"
-			| "artisan.approval.list.query.result"
-			| "git.diff.query.result"
-			| "git.workspace.query.result"
-			| "guidance.query.result"
-			| "model_behaviour.query.result"
-			| "marketplace.routine.list.query.result"
-			| "marketplace.routine.detail.query.result"
-			| "marketplace.routine.install.preview.result"
-			| "marketplace.routine.invoke.result"
-			| "marketplace.npx_skills.discover.result"
-			| "marketplace.capability.list.query.result"
-			| "marketplace.capability.detail.query.result"
-			| "marketplace.capability.connect.preview.result"
-			| "marketplace.capability.invoke.result"
-			| "marketplace.capability.oauth.begin.result"
-			| "marketplace.capability.oauth.status.query.result"
-			| "orchestration.graph.query.result"
-			| "orchestration.group.list.query.result"
-			| "preview.asset.metadata.query.result"
-			| "preview.browser.launch.result"
-			| "preview.inspection.close.result"
-			| "preview.inspection.inspect.result"
-			| "preview.inspection.open.result"
-			| "preview.rich_link.resolve.query.result"
-			| "preview.target.get.query.result"
-			| "preview.target.list.query.result"
-			| "preview.target.mutation.result"
-			| "thread.session.query.result"
-			| "surface.list.query.result"
-			| "surface.usage.aggregate.query.result"
-			| "terminal.list.query.result"
-			| "thread.list.query.result"
-			| "thread.transcript.query.result"
-			| "thread.retention.query.result"
-			| "thread.work.query.result"
-			| "workspace.file.read.query.result"
-			| "workspace.file.discovery.query.result"
-			| "workspace.language.capabilities.query.result"
-			| "workspace.change.list.query.result"
-			| "workspace.conflict.list.query.result"
-			| "workspace.change.diff.query.result";
-	}
->;
-
-/** Identifies the expected result kind for one pending request. */
-export type PendingResultKind = PendingResultEnvelope["kind"];
+export type PendingRequestEnvelope = ControlRpcRequest;
+export type PendingResultEnvelope = ControlRpcSuccess;
 
 /** Creates one consistently shaped typed client failure. */
 export function client_error(

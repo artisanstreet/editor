@@ -36,12 +36,57 @@
 	--chart-3: oklch(0.442 0.017 285.786);
 	--chart-4: oklch(0.37 0.013 285.805);
 	--chart-5: oklch(0.274 0.006 286.033);
+	--surface-0: oklch(1 0 0);
+	--surface-25: oklch(0.9925 0 0);
+	--surface-50: oklch(0.985 0 0);
+	--surface-75: oklch(0.976 0.0005 286.375);
+	--surface-100: oklch(0.967 0.001 286.375);
+	--surface-125: oklch(0.9552 0.0018 286.361);
+	--surface-150: oklch(0.9435 0.0025 286.347);
+	--surface-175: oklch(0.9318 0.0033 286.334);
+	--surface-200: oklch(0.92 0.004 286.32);
+	--surface-225: oklch(0.9078 0.0045 286.312);
+	--surface-250: oklch(0.8955 0.005 286.303);
+	--surface-275: oklch(0.8832 0.0055 286.294);
+	--surface-300: oklch(0.871 0.006 286.286);
+	--surface-325: oklch(0.8295 0.0083 286.231);
+	--surface-350: oklch(0.788 0.0105 286.177);
+	--surface-375: oklch(0.7465 0.0127 286.122);
+	--surface-400: oklch(0.705 0.015 286.067);
+	--surface-425: oklch(0.6667 0.0152 286.035);
+	--surface-450: oklch(0.6285 0.0155 286.002);
+	--surface-475: oklch(0.5903 0.0158 285.97);
+	--surface-500: oklch(0.552 0.016 285.938);
+	--surface-525: oklch(0.5245 0.0163 285.9);
+	--surface-550: oklch(0.497 0.0165 285.862);
+	--surface-575: oklch(0.4695 0.0168 285.824);
+	--surface-600: oklch(0.442 0.017 285.786);
+	--surface-625: oklch(0.424 0.016 285.791);
+	--surface-650: oklch(0.406 0.015 285.796);
+	--surface-675: oklch(0.388 0.014 285.8);
+	--surface-700: oklch(0.37 0.013 285.805);
+	--surface-725: oklch(0.346 0.0112 285.862);
+	--surface-750: oklch(0.322 0.0095 285.919);
+	--surface-775: oklch(0.298 0.0077 285.976);
+	--surface-800: oklch(0.274 0.006 286.033);
+	--surface-825: oklch(0.258 0.006 285.996);
+	--surface-850: oklch(0.242 0.006 285.959);
+	--surface-875: oklch(0.226 0.006 285.922);
+	--surface-900: oklch(0.21 0.006 285.885);
+	--surface-925: oklch(0.1755 0.0055 285.854);
+	--surface-950: oklch(0.141 0.005 285.823);
+	--surface-975: oklch(0.0705 0.0025 285.823);
+	--surface-1000: oklch(0 0 0);
 	--radius: 0.625rem;
 	--duration-quick: 150ms;
 	--duration-fast: 250ms;
 	--duration-medium: 350ms;
 	--ease-in-out: ease-in-out;
 	--ease-smooth-out: cubic-bezier(0.22, 1, 0.36, 1);
+	--acc-expand: 250ms;
+	--acc-collapse: 250ms;
+	--acc-chevron: 250ms;
+	--acc-ease: cubic-bezier(0.22, 1, 0.36, 1);
 	--floating-feedback-dur: 1400ms;
 	--floating-feedback-rise: 18px;
 	--floating-feedback-ease: cubic-bezier(0.22, 1, 0.36, 1);
@@ -118,6 +163,47 @@
 	--color-popover: var(--popover);
 	--color-card-foreground: var(--card-foreground);
 	--color-card: var(--card);
+	--color-surface-0: var(--surface-0);
+	--color-surface-25: var(--surface-25);
+	--color-surface-50: var(--surface-50);
+	--color-surface-75: var(--surface-75);
+	--color-surface-100: var(--surface-100);
+	--color-surface-125: var(--surface-125);
+	--color-surface-150: var(--surface-150);
+	--color-surface-175: var(--surface-175);
+	--color-surface-200: var(--surface-200);
+	--color-surface-225: var(--surface-225);
+	--color-surface-250: var(--surface-250);
+	--color-surface-275: var(--surface-275);
+	--color-surface-300: var(--surface-300);
+	--color-surface-325: var(--surface-325);
+	--color-surface-350: var(--surface-350);
+	--color-surface-375: var(--surface-375);
+	--color-surface-400: var(--surface-400);
+	--color-surface-425: var(--surface-425);
+	--color-surface-450: var(--surface-450);
+	--color-surface-475: var(--surface-475);
+	--color-surface-500: var(--surface-500);
+	--color-surface-525: var(--surface-525);
+	--color-surface-550: var(--surface-550);
+	--color-surface-575: var(--surface-575);
+	--color-surface-600: var(--surface-600);
+	--color-surface-625: var(--surface-625);
+	--color-surface-650: var(--surface-650);
+	--color-surface-675: var(--surface-675);
+	--color-surface-700: var(--surface-700);
+	--color-surface-725: var(--surface-725);
+	--color-surface-750: var(--surface-750);
+	--color-surface-775: var(--surface-775);
+	--color-surface-800: var(--surface-800);
+	--color-surface-825: var(--surface-825);
+	--color-surface-850: var(--surface-850);
+	--color-surface-875: var(--surface-875);
+	--color-surface-900: var(--surface-900);
+	--color-surface-925: var(--surface-925);
+	--color-surface-950: var(--surface-950);
+	--color-surface-975: var(--surface-975);
+	--color-surface-1000: var(--surface-1000);
 	--color-foreground-extra: var(--foreground-extra);
 	--color-foreground: var(--foreground);
 	--color-background: var(--background);
@@ -147,6 +233,15 @@
 		0 4px 8px rgba(0, 0, 0, 0.06),
 		0 0 0 0.5px oklch(from var(--highlight) l c h / 8%),
 		0 1px 6px -4px #000;
+}
+
+@utility glass-card {
+	box-shadow:
+		0 -1px 0 rgb(255 255 255 / 14%),
+		inset 0 1px 0 rgb(255 255 255 / 10%),
+		inset 0 -1px 0 rgb(0 0 0 / 22%),
+		0 18px 48px -18px rgb(0 0 0 / 70%),
+		0 0 0 0.5px rgb(255 255 255 / 8%);
 }
 
 @utility card-color {

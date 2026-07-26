@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 
-import { Cause, Deferred, Effect, Layer, Queue, Ref, Scope, Stream } from "effect";
+import { Cause, Deferred, Effect, FiberSet, Layer, Queue, Ref, Scope, Stream } from "effect";
 import { spawn, type IDisposable, type IPty } from "node-pty";
 
 import {
@@ -11,6 +11,7 @@ import {
 	type TerminalDriverOpenInput,
 	type TerminalDriverOperation,
 } from "./terminal-driver";
+import { ProcessEnvironment, ProcessEnvironmentLive } from "../runtime/process-environment";
 
 /** Configures the bounded native PTY adapter. */
 export interface NodePtyTerminalDriverOptions {
@@ -73,6 +74,7 @@ function make_handle(
 		const output = yield* Queue.dropping<Uint8Array, Cause.Done<void>>(output_capacity);
 		const exit = yield* Deferred.make<TerminalDriverExit>();
 		const state = yield* Ref.make<TerminalState>({});
+		const run_callback = yield* FiberSet.makeRuntime();
 		let data_listener: IDisposable | undefined;
 		let exit_listener: IDisposable | undefined;
 
@@ -126,7 +128,7 @@ function make_handle(
 					signal: null,
 				};
 
-				Effect.runFork(
+				run_callback(
 					try_native("output", () => pty.kill()).pipe(
 						Effect.ignore,
 						Effect.andThen(Finish(terminal_exit)),
@@ -137,7 +139,7 @@ function make_handle(
 			}
 		});
 		exit_listener = pty.onExit(({ exitCode, signal }) => {
-			Effect.runFork(
+			run_callback(
 				Ref.get(state).pipe(
 					Effect.flatMap((current) =>
 						Finish({
@@ -212,37 +214,44 @@ export function make_node_pty_terminal_driver_layer(options: NodePtyTerminalDriv
 	const output_capacity = options.output_capacity ?? 512;
 	const output_chunk_bytes = options.output_chunk_bytes ?? 16_384;
 
-	return Layer.succeed(TerminalDriver, {
-		Open: (input) =>
-			Effect.gen(function* () {
-				yield* validate_positive("close_timeout_ms", close_timeout_ms);
-				yield* validate_open_input(input, output_capacity);
-				yield* validate_positive("output_chunk_bytes", output_chunk_bytes);
+	return Layer.effect(
+		TerminalDriver,
+		Effect.gen(function* () {
+			const process_environment = yield* ProcessEnvironment;
+			return {
+				Open: (input) =>
+					Effect.gen(function* () {
+						const inherited_environment = yield* process_environment.Variables;
+						yield* validate_positive("close_timeout_ms", close_timeout_ms);
+						yield* validate_open_input(input, output_capacity);
+						yield* validate_positive("output_chunk_bytes", output_chunk_bytes);
 
-				const pty = yield* Effect.try({
-					try: () =>
-						spawn(input.executable, [...input.args], {
-							cols: input.cols,
-							cwd: input.cwd,
-							env: { ...process.env, ...input.env },
-							handleFlowControl: false,
-							name: "xterm-256color",
-							rows: input.rows,
-							...(process.platform === "win32"
-								? { useConpty: true, useConptyDll: true }
-								: {}),
-						}),
-					catch: (cause) => terminal_error("spawn", cause),
-				});
+						const pty = yield* Effect.try({
+							try: () =>
+								spawn(input.executable, [...input.args], {
+									cols: input.cols,
+									cwd: input.cwd,
+									env: { ...inherited_environment, ...input.env },
+									handleFlowControl: false,
+									name: "xterm-256color",
+									rows: input.rows,
+									...(process.platform === "win32"
+										? { useConpty: true, useConptyDll: true }
+										: {}),
+								}),
+							catch: (cause) => terminal_error("spawn", cause),
+						});
 
-				return yield* make_handle(
-					pty,
-					close_timeout_ms,
-					output_capacity,
-					output_chunk_bytes,
-				);
-			}),
-	});
+						return yield* make_handle(
+							pty,
+							close_timeout_ms,
+							output_capacity,
+							output_chunk_bytes,
+						);
+					}),
+			};
+		}),
+	).pipe(Layer.provide(ProcessEnvironmentLive));
 }
 
 /** Provides the production node-pty driver with bounded output buffering. */

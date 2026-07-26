@@ -3,14 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { NodeFileSystem } from "@effect/platform-node-shared";
-import { Effect, Fiber, Layer, Redacted, Stream } from "effect";
+import { Effect, Fiber, Layer, Stream } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import {
 	make_backend_runtime,
-	make_workspace_bounded_regular_file_store_registry_layer,
-	type NativeBoundedRegularFileStoreOptions,
 	ProtocolRouter,
 	ProtocolServer,
 	ThreadRetentionScheduler,
@@ -26,132 +23,11 @@ import {
 } from "../../modules/backend/src/persistence/schema";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
 import { make_transport_test_harness_with_protocol_server } from "./message-channel-harness";
+import { MakeNodeTestWorkspaceBoundedRegularFileStoreRegistryLayer } from "../backend/bounded-regular-file-store-harness";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
-const receipt_authentication_key = Redacted.make(new Uint8Array(32).fill(13));
 const now = "2026-07-12T16:00:00.000Z";
 const temporary_directories: Array<string> = [];
-
-interface NativeReplacementOptions {
-	readonly expected: Uint8Array;
-	readonly maximumBytes: number;
-	readonly operationId: string;
-	readonly path: string;
-	readonly replacement: Uint8Array;
-}
-
-interface NativeController {
-	readonly finalization_attempts: { value: number };
-	readonly load_native_module: NonNullable<
-		NativeBoundedRegularFileStoreOptions["load_native_module"]
-	>;
-	readonly replace_attempts: { value: number };
-}
-
-function bytes_match(left: Uint8Array, right: Uint8Array) {
-	return (
-		left.byteLength === right.byteLength && left.every((value, index) => value === right[index])
-	);
-}
-
-function replacement_options_match(
-	left: NativeReplacementOptions,
-	right: NativeReplacementOptions,
-) {
-	return (
-		left.maximumBytes === right.maximumBytes &&
-		left.operationId === right.operationId &&
-		left.path === right.path &&
-		bytes_match(left.expected, right.expected) &&
-		bytes_match(left.replacement, right.replacement)
-	);
-}
-
-function make_native_controller(): NativeController {
-	const finalization_attempts = { value: 0 };
-	const replace_attempts = { value: 0 };
-	const receipts = new Map<string, NativeReplacementOptions>();
-
-	class FakeNativeBoundedRegularFileStore {
-		constructor(
-			readonly root: string,
-			_receipt_authentication_key: Uint8Array,
-		) {}
-
-		authorizeRoot(candidate_root: string) {
-			return Promise.resolve(candidate_root === this.root);
-		}
-
-		close() {}
-
-		async finalizeRegularFileReplacement(options: NativeReplacementOptions) {
-			finalization_attempts.value += 1;
-
-			const receipt = receipts.get(options.operationId);
-
-			if (receipt === undefined || !replacement_options_match(receipt, options)) {
-				throw new Error("replacement receipt intent changed");
-			}
-
-			receipts.delete(options.operationId);
-		}
-
-		async readRegularFile(path: string, maximum_bytes: number) {
-			const bytes = new Uint8Array(await readFile(join(this.root, path)));
-
-			if (bytes.byteLength > maximum_bytes) {
-				throw new Error("file exceeds maximum");
-			}
-
-			return bytes;
-		}
-
-		async replaceRegularFile(options: NativeReplacementOptions) {
-			replace_attempts.value += 1;
-
-			const receipt = receipts.get(options.operationId);
-
-			if (receipt !== undefined) {
-				if (!replacement_options_match(receipt, options)) {
-					throw new Error("replacement operation intent changed");
-				}
-
-				return "AlreadyReplaced";
-			}
-
-			const target = join(this.root, options.path);
-			const current = new Uint8Array(await readFile(target));
-			const matches = bytes_match(current, options.expected);
-
-			if (!matches || options.replacement.byteLength > options.maximumBytes) {
-				return "Changed";
-			}
-
-			await writeFile(target, options.replacement);
-			receipts.set(options.operationId, {
-				...options,
-				expected: new Uint8Array(options.expected),
-				replacement: new Uint8Array(options.replacement),
-			});
-
-			return "Replaced";
-		}
-	}
-
-	return {
-		finalization_attempts,
-		load_native_module: () => ({
-			NativeBoundedRegularFileStore: FakeNativeBoundedRegularFileStore,
-			getNativeBuildDescriptor: () => ({
-				architecture: "x86_64",
-				operatingSystem: "windows",
-				target: "x86_64-pc-windows-msvc",
-				testHooksEnabled: false,
-			}),
-		}),
-		replace_attempts,
-	};
-}
 
 async function make_workspace() {
 	const directory = await mkdtemp(join(tmpdir(), "artisan-client-workspace-protocol-"));
@@ -204,20 +80,15 @@ afterEach(async () => {
 describe("ArtisanClient workspace operations with the backend ProtocolServer", () => {
 	it("reads, replaces, reviews, and rolls back through real MessagePorts", async () => {
 		const { database_path, root } = await make_workspace();
-		const controller = make_native_controller();
 		const runtime = make_backend_runtime({
 			database_path,
 			migrations_path,
 			retention_scheduler: make_inert_scheduler_layer(),
 			runtime_metadata: make_metadata_layer(),
 			workspace_bounded_regular_file_store_registry:
-				make_workspace_bounded_regular_file_store_registry_layer(
-					[{ root, workspace_id: "workspace_public" }],
-					{
-						load_native_module: controller.load_native_module,
-						receipt_authentication_key,
-					},
-				).pipe(Layer.provide(NodeFileSystem.layer)),
+				MakeNodeTestWorkspaceBoundedRegularFileStoreRegistryLayer([
+					{ root, workspace_id: "workspace_public" },
+				]),
 		});
 		const protocol_server = await runtime.runPromise(ProtocolServer);
 		const router = await runtime.runPromise(ProtocolRouter);
@@ -474,8 +345,6 @@ describe("ArtisanClient workspace operations with the backend ProtocolServer", (
 				connections: 2,
 				dropped_command_receipts: 1,
 			});
-			expect(controller.replace_attempts.value).toBe(2);
-			expect(controller.finalization_attempts.value).toBe(2);
 			expect(await readFile(join(root, "src", "example.ts"), "utf8")).toBe("before");
 		} finally {
 			await harness.dispose();

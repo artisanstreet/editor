@@ -5,7 +5,7 @@ import { defineConfig } from "vite";
 
 const desktop_root = resolve(import.meta.dirname, ".dist", "desktop");
 
-/** Stages only runtime native packages beside the utility entry for Node resolution. */
+/** Stages runtime native packages for the separately built Artisan Forge. */
 const stage_desktop_native_packages = () => ({
 	closeBundle: () => {
 		const native_runtime_root = resolve(desktop_root, "native-runtime");
@@ -15,15 +15,15 @@ const stage_desktop_native_packages = () => ({
 		);
 		const koffi_source = resolve(
 			realpathSync(resolve(import.meta.dirname, "modules/engines/node_modules/koffi")),
-			"..",
-			"@koromix",
-			"koffi-win32-x64",
 		);
+		const koffi_native_source = resolve(koffi_source, "..", "@koromix", "koffi-win32-x64");
 
-		if (!existsSync(node_pty_source) || !existsSync(koffi_source)) {
-			throw new Error(
-				"node-pty and Koffi are required to package the Artisan desktop utility",
-			);
+		if (
+			!existsSync(node_pty_source) ||
+			!existsSync(koffi_source) ||
+			!existsSync(koffi_native_source)
+		) {
+			throw new Error("node-pty and Koffi are required to package Artisan Forge");
 		}
 
 		mkdirSync(native_runtime_root, { recursive: true });
@@ -37,45 +37,56 @@ const stage_desktop_native_packages = () => ({
 			});
 		}
 
-		const koffi_destination = resolve(native_runtime_root, "@koromix", "koffi-win32-x64");
-		mkdirSync(koffi_destination, { recursive: true });
-		for (const path of ["index.js", "package.json", "win32_x64"]) {
+		const koffi_destination = resolve(native_runtime_root, "koffi");
+		mkdirSync(resolve(koffi_destination, "src", "koffi"), { recursive: true });
+		for (const path of [
+			"index.cjs",
+			"package.json",
+			"src/koffi/index.cjs",
+			"src/koffi/src/static.cjs",
+		]) {
 			cpSync(resolve(koffi_source, path), resolve(koffi_destination, path), {
+				dereference: true,
+			});
+		}
+
+		const koffi_native_destination = resolve(
+			native_runtime_root,
+			"@koromix",
+			"koffi-win32-x64",
+		);
+		mkdirSync(koffi_native_destination, { recursive: true });
+		for (const path of ["index.js", "package.json", "win32_x64"]) {
+			cpSync(resolve(koffi_native_source, path), resolve(koffi_native_destination, path), {
 				dereference: true,
 				recursive: true,
 			});
 		}
 
-		const bounded_source = resolve(import.meta.dirname, ".dist/bounded-file-store-native");
-
-		if (!existsSync(resolve(bounded_source, "index.cjs"))) {
-			throw new Error(
-				"Missing .dist/bounded-file-store-native/index.cjs; build the production native addon before packaging desktop",
-			);
-		}
-
-		const bounded_destination = resolve(
-			native_runtime_root,
-			"@artisan",
-			"bounded-file-store-native",
-		);
-
-		mkdirSync(bounded_destination, { recursive: true });
-		for (const path of [
-			"bounded_file_store_native.win32-x64-msvc.node",
-			"index.cjs",
-			"index.d.ts",
-		]) {
-			cpSync(resolve(bounded_source, path), resolve(bounded_destination, path), {
-				dereference: true,
-			});
-		}
 		writeFileSync(
-			resolve(bounded_destination, "package.json"),
+			resolve(desktop_root, "package.json"),
 			JSON.stringify({
-				main: "./index.cjs",
-				name: "@artisan/bounded-file-store-native",
+				main: "./main.js",
+				name: "artisan-editor-desktop",
+				packageManager: "npm@11.4.2",
 				private: true,
+				type: "module",
+				version: "0.1.0",
+			}),
+		);
+		writeFileSync(
+			resolve(desktop_root, "package-lock.json"),
+			JSON.stringify({
+				lockfileVersion: 3,
+				name: "artisan-editor-desktop",
+				packages: {
+					"": {
+						name: "artisan-editor-desktop",
+						version: "0.1.0",
+					},
+				},
+				requires: true,
+				version: "0.1.0",
 			}),
 		);
 	},
@@ -99,10 +110,7 @@ export default defineConfig({
 		outDir: ".dist/desktop",
 		rollupOptions: {
 			external: ["electron"],
-			input: {
-				main: resolve(import.meta.dirname, "modules/desktop/src/main.ts"),
-				utility: resolve(import.meta.dirname, "modules/desktop/src/utility.ts"),
-			},
+			input: resolve(import.meta.dirname, "modules/desktop/src/main.ts"),
 			output: { entryFileNames: "[name].js", format: "es" },
 		},
 		ssr: true,

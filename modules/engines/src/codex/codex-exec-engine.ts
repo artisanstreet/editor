@@ -1,4 +1,4 @@
-import { Effect } from "effect";
+import { Effect, type FileSystem } from "effect";
 
 import {
 	type Engine,
@@ -71,6 +71,7 @@ export interface CodexExecEngineOptions {
 	readonly executable_args: ReadonlyArray<string>;
 	readonly executable: string;
 	readonly fallback_reason: string;
+	readonly file_system: FileSystem.FileSystem;
 	readonly factory: typeof CodexProcessFactory.Service;
 	readonly max_frame_bytes: number;
 	readonly max_stderr_bytes: number;
@@ -123,6 +124,7 @@ export function make_codex_exec_engine(options: CodexExecEngineOptions): Engine 
 						executable: options.executable,
 						executable_args: options.executable_args,
 						fallback_reason: options.fallback_reason,
+						file_system: options.file_system,
 						factory: options.factory,
 						max_frame_bytes: options.max_frame_bytes,
 						max_stderr_bytes: options.max_stderr_bytes,

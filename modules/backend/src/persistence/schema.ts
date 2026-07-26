@@ -1067,6 +1067,8 @@ export const OrchestrationCoordinators = sqliteTable("orchestration_coordinators
 	policy_reasoning_effort: text("policy_reasoning_effort").notNull().default("medium"),
 	policy_permission_mode: text("policy_permission_mode").notNull().default("on_request"),
 	policy_sandbox_mode: text("policy_sandbox_mode").notNull().default("workspace_write"),
+	policy_service_tier: text("policy_service_tier").notNull().default("standard"),
+	policy_workflow_mode: text("policy_workflow_mode").notNull().default("build"),
 	policy_web_search_enabled: integer("policy_web_search_enabled", { mode: "boolean" })
 		.notNull()
 		.default(false),
@@ -1139,6 +1141,27 @@ export const OrchestrationMessages = sqliteTable("orchestration_messages", {
 	delivery: text("delivery").notNull(),
 	created_at: text("created_at").notNull(),
 });
+
+/** Binary user image evidence. Journal, events, and conversation projections retain references only. */
+export const MessageImageAttachments = sqliteTable(
+	"message_image_attachments",
+	{
+		attachment_id: text("attachment_id").primaryKey(),
+		message_id: text("message_id").notNull(),
+		name: text("name").notNull(),
+		media_type: text("media_type").notNull(),
+		size_bytes: integer("size_bytes").notNull(),
+		content: blob("content", { mode: "buffer" }).notNull(),
+		position: integer("position").notNull(),
+	},
+	(table) => [
+		index("message_image_attachments_message_index").on(table.message_id, table.position),
+		check(
+			"message_image_attachments_media_type_check",
+			sql`${table.media_type} IN ('image/gif', 'image/jpeg', 'image/png', 'image/webp')`,
+		),
+	],
+);
 
 export const OrchestrationInteractions = sqliteTable(
 	"orchestration_interactions",
@@ -1447,4 +1470,67 @@ export const TerminalCommands = sqliteTable("terminal_commands", {
 	failure: text("failure"),
 	created_at: text("created_at").notNull(),
 	updated_at: text("updated_at").notNull(),
+});
+
+/** Renderer-ready canonical conversation state. Source identities make projection replay idempotent. */
+export const ConversationThreads = sqliteTable("conversation_threads", {
+	thread_id: text("thread_id").primaryKey(),
+	next_ordinal: integer("next_ordinal").notNull().default(0),
+	last_patch_sequence: integer("last_patch_sequence").notNull().default(0),
+	journal_sequence: integer("journal_sequence").notNull().default(0),
+	updated_at: text("updated_at").notNull(),
+});
+
+export const ConversationTurns = sqliteTable(
+	"conversation_turns",
+	{
+		turn_id: text("turn_id").primaryKey(),
+		thread_id: text("thread_id").notNull(),
+		ordinal: integer("ordinal").notNull(),
+		entity_json: text("entity_json").notNull(),
+	},
+	(table) => [
+		uniqueIndex("conversation_turns_thread_ordinal_unique").on(table.thread_id, table.ordinal),
+		index("conversation_turns_thread_index").on(table.thread_id),
+	],
+);
+
+export const ConversationItems = sqliteTable(
+	"conversation_items",
+	{
+		item_id: text("item_id").primaryKey(),
+		thread_id: text("thread_id").notNull(),
+		turn_id: text("turn_id").notNull(),
+		ordinal: integer("ordinal").notNull(),
+		entity_json: text("entity_json").notNull(),
+	},
+	(table) => [
+		uniqueIndex("conversation_items_thread_ordinal_unique").on(table.thread_id, table.ordinal),
+		index("conversation_items_thread_turn_index").on(table.thread_id, table.turn_id),
+	],
+);
+
+export const ConversationPatches = sqliteTable(
+	"conversation_patches",
+	{
+		patch_id: text("patch_id").primaryKey(),
+		thread_id: text("thread_id").notNull(),
+		sequence: integer("sequence").notNull(),
+		patch_json: text("patch_json").notNull(),
+	},
+	(table) => [
+		uniqueIndex("conversation_patches_thread_sequence_unique").on(
+			table.thread_id,
+			table.sequence,
+		),
+		index("conversation_patches_thread_index").on(table.thread_id, table.sequence),
+	],
+);
+
+/** One successful source admission means an exact replay cannot allocate another ordinal or patch. */
+export const ConversationSources = sqliteTable("conversation_sources", {
+	source_id: text("source_id").primaryKey(),
+	thread_id: text("thread_id").notNull(),
+	journal_sequence: integer("journal_sequence"),
+	observed_at: text("observed_at").notNull(),
 });

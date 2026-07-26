@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { Context, Effect, Layer, Option, Ref } from "effect";
+import { Clock, Context, Effect, Layer, Option, Ref } from "effect";
 
 import type {
 	PreviewBrowserLaunch,
@@ -351,7 +351,9 @@ export const PreviewCoordinatorLive = Layer.effect(
 								{
 									action: "probe",
 									health_json: JSON.stringify({
-										checked_at: new Date().toISOString(),
+										checked_at: new Date(
+											yield* Clock.currentTimeMillis,
+										).toISOString(),
 										...observed,
 										message: Option.getOrUndefined(observed.message),
 										status_code: Option.getOrUndefined(observed.status_code),
@@ -617,7 +619,9 @@ export const PreviewCoordinatorLive = Layer.effect(
 								{
 									action: "probe",
 									health_json: JSON.stringify({
-										checked_at: new Date().toISOString(),
+										checked_at: new Date(
+											yield* Clock.currentTimeMillis,
+										).toISOString(),
 										latency_ms: result.latency_ms,
 										message: Option.getOrUndefined(result.message),
 										status: result.status,
@@ -635,7 +639,9 @@ export const PreviewCoordinatorLive = Layer.effect(
 							);
 							return {
 								health: {
-									checked_at: new Date().toISOString(),
+									checked_at: new Date(
+										yield* Clock.currentTimeMillis,
+									).toISOString(),
 									latency_ms: result.latency_ms,
 									...(Option.isSome(result.message)
 										? { message: result.message.value }

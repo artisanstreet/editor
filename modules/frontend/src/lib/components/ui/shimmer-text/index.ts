@@ -1,0 +1,2 @@
+export { default as ShimmerText } from "./shimmer-text.svelte";
+export type { ShimmerTextVariant } from "./shimmer-text.svelte";

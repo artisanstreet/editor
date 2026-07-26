@@ -186,6 +186,11 @@ export {
 	type ProjectLocatorOperation,
 } from "./threads/project-locator";
 export {
+	make_project_directory_service_layer,
+	ProjectDirectoryError,
+	ProjectDirectoryService,
+} from "./projects/project-directory-service";
+export {
 	ThreadProjectAffinityEvidenceInput,
 	ThreadProjectAffinityNotFound,
 	ThreadProjectAffinityRepository,
@@ -288,6 +293,21 @@ export {
 	type WorkspaceMutationRollbackAdmission,
 	type WorkspaceMutationRollbackSource,
 } from "./workspace/workspace-mutation-authority";
+export {
+	make_private_file_permissions_layer,
+	PosixPrivateFilePermissionsSnapshot,
+	PrivateFilePermissions,
+	PrivateFilePermissionsCaptureError,
+	PrivateFilePermissionsCreateError,
+	PrivateFilePermissionsPlatform,
+	PrivateFilePermissionsRestrictError,
+	PrivateFilePermissionsRestoreError,
+	PrivateFilePermissionsSnapshotPlatformMismatchError,
+	WindowsPrivateFilePermissionsSnapshot,
+	type PrivateFileIdentity,
+	type PrivateFilePermissionsPlatformKind,
+	type PrivateFilePermissionsSnapshot,
+} from "./model-behaviour/private-file-permissions";
 export { AgentOrchestrator } from "./orchestration/agent-orchestrator";
 export {
 	AgentGraphOrchestrator,
@@ -314,21 +334,11 @@ export {
 	type ReplaceRegularFileResult,
 } from "./filesystem/bounded-regular-file-store";
 export {
-	BuildNativeBoundedRegularFileStore,
-	make_native_bounded_regular_file_store_layer,
-	NativeBoundedRegularFileStoreInitializationError,
-	type NativeBoundedRegularFileStoreOptions,
-} from "./filesystem/native-bounded-regular-file-store";
-export {
 	EmptyWorkspaceBoundedRegularFileStoreRegistryLive,
-	make_workspace_bounded_regular_file_store_registry_layer,
 	WorkspaceBoundedRegularFileStoreAuthorizationError,
 	WorkspaceBoundedRegularFileStoreNotFoundError,
-	WorkspaceBoundedRegularFileStoreRegistrationError,
 	WorkspaceBoundedRegularFileStoreRegistry,
 	type WorkspaceBoundedRegularFileStoreAuthorization,
-	type WorkspaceBoundedRegularFileStoreRegistration,
-	type WorkspaceBoundedRegularFileStoreRegistryOptions,
 } from "./filesystem/workspace-bounded-regular-file-store-registry";
 export {
 	Filesystem,
@@ -641,3 +651,10 @@ export {
 	type DesktopGuidanceOptions,
 	type DesktopModelBehaviourOptions,
 } from "./runtime/backend-runtime";
+export {
+	BackendRuntimeConfigurationError,
+	DesktopEngineConfigurationError,
+	ResolveBackendRuntimeConfiguration,
+	type BackendRuntimeConfiguration,
+	type BackendRuntimePlatformOptions,
+} from "./runtime/backend-runtime-config";

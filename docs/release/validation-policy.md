@@ -16,7 +16,6 @@ Ordinary CI must remain hermetic and must not:
 
 - require an installed or authenticated Codex CLI;
 - run a paid, subscription-backed, or otherwise live Engine action;
-- build or load the native bounded-file-store addon; or
 - upload test transcripts, temporary databases, workspace contents, logs, or
   other fixtures as artifacts.
 
@@ -45,28 +44,13 @@ user prompt, record a transcript, or echo authentication material.
 Codex CLI is the only live production-engine policy covered here. This workflow
 does not install or invoke Claude, another agent CLI, or an agent SDK.
 
-## Explicit native-addon verification
-
-The same manually dispatched workflow creates `native-addon` only when
-`run_native_addon: true`. It requires the separate `artisan-native-addon`
-self-hosted runner label and protected `native-addon-validation` environment.
-The isolated runner needs the project-supported Windows GNU/Rust toolchain and
-must be approved for native filesystem smoke and crash-recovery execution.
-
-The job sets `ARTISAN_RUN_NATIVE_ADDON_SMOKE=1` immediately before invoking the
-package's canonical `verify:local` gate. That variable is intentionally absent
-from ordinary CI and all other release jobs. Do not add native execution to
-`pnpm run validate`, and do not expose native outputs or temporary filesystem
-state through workflow artifacts.
-
 ## Release acceptance
 
 A release candidate requires both the ordinary release gate and the packaged
-desktop release gate to pass. Live Codex and the standalone native-addon
-recovery jobs remain explicit opt-ins; a skipped opt-in job is not an
-ordinary-CI failure. Record the runner identity, selected opt-ins, and outcome
-in the release record without including sensitive command output or fixture
-data.
+desktop release gate to pass. Live Codex remains an explicit opt-in; a skipped
+opt-in job is not an ordinary-CI failure. Record the runner identity, selected
+opt-ins, and outcome in the release record without including sensitive command
+output or fixture data.
 
 ## Desktop integration dependency gates
 
@@ -93,7 +77,7 @@ the checkout's `node_modules`; clearing external `NODE_PATH` is an additional
 defense, not the proof of isolation. It creates a unique temporary user-data
 directory, starts the packaged executable with a bounded deadline, and requires
 one machine-readable success record. The smoke opens the exact staged
-`node-pty`, bounded-file-store, and Koffi bindings in two distinct utility
+`node-pty` and Koffi bindings in two distinct utility
 epochs. It creates a thread through
 `ArtisanClient`, records accepted utility termination plus old/new utility
 epochs and PIDs, reconnects over newly transferred `MessagePortMain` pairs,
@@ -108,14 +92,13 @@ chat/editor/orchestrator controls. The smoke also verifies Marketplace focus
 restoration, trusted composer input, right-pane keyboard reachability, truthful
 no-file/no-terminal states, the activity/taskbar bridge, accessible names,
 computed wide/narrow pane state, and Electron's real 200% zoom factor. It never
-starts an Engine run or calls a model. Temporary smoke data, including the
-native-store root, and descendant processes are removed on every outcome.
+starts an Engine run or calls a model. Temporary smoke data and descendant
+processes are removed on every outcome.
 
 - build the existing static renderer and package it as the renderer payload;
 - assert the main/utility entry points and production-only files are present in
   the expected package layout;
-- assert `node-pty`, the bounded native addon, and Koffi are explicitly staged
-  and unpacked while keeping ordinary CI free of addon loading;
+- assert `node-pty` and Koffi are explicitly staged and unpacked;
 - run the existing typed client reconnect/replay fixtures through transferred
   Electron control and stream ports, including a forced utility-process restart;
 - prove single-instance ownership and cleanup without publishing temporary
