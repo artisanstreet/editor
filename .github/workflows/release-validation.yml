@@ -197,8 +197,7 @@ jobs:
         name: Qualified product / Windows x64
         if: github.event_name == 'workflow_dispatch' && inputs.mode != 'resume'
         needs: [plan, staging]
-        runs-on: [self-hosted, Windows, X64, artisan-native-addon]
-        environment: native-addon-validation
+        runs-on: windows-2025
         timeout-minutes: 45
         permissions:
             contents: read
