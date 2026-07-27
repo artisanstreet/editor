@@ -1,6 +1,7 @@
 packages:
     - "modules/*"
 allowBuilds:
+    electron: true
     esbuild: true
     electron-winstaller: true
     koffi: true
