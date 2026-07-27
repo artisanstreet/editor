@@ -10,6 +10,7 @@
 ## Current status
 
 - [Backend completion matrix](./status/backend-completion-matrix.md)
+- [Archived branch inventory](./status/archived-branch-inventory.md)
 - [Active branch handoff](../.memory/active-handoff.md)
 
 The completion matrix is the durable, evidence-backed product status. The
