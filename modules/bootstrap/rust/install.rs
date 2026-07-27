@@ -401,20 +401,25 @@ fn integrate_path(bin: &Path) -> Result<()> {
         .map_err(io("HKCU\\Environment"))?;
     let current: String = environment.get_value("Path").unwrap_or_default();
     let candidate = bin.display().to_string();
-    if !current
-        .split(';')
-        .any(|entry| entry.eq_ignore_ascii_case(&candidate))
-    {
-        let next = if current.is_empty() {
-            candidate
-        } else {
-            format!("{current};{candidate}")
-        };
+    let next = prepend_windows_path_entry(&current, &candidate);
+    if next != current {
         environment
             .set_value("Path", &next)
             .map_err(io("HKCU\\Environment\\Path"))?;
     }
     Ok(())
+}
+
+#[cfg(windows)]
+fn prepend_windows_path_entry(current: &str, candidate: &str) -> String {
+    std::iter::once(candidate)
+        .chain(
+            current
+                .split(';')
+                .filter(|entry| !entry.is_empty() && !entry.eq_ignore_ascii_case(candidate)),
+        )
+        .collect::<Vec<_>>()
+        .join(";")
 }
 
 #[cfg(unix)]
@@ -652,6 +657,9 @@ mod tests {
     use sha2::{Digest, Sha256};
     use tempfile::tempdir;
 
+    #[cfg(windows)]
+    use super::prepend_windows_path_entry;
+
     #[test]
     fn sha256_representation_matches_release_contract() {
         let mut hasher = Sha256::new();
@@ -672,5 +680,17 @@ mod tests {
             "artisan-bootstrap"
         });
         assert!(expected.starts_with(root.path().join("versions")));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn stable_cli_precedes_stale_path_entries() {
+        let stable = r"C:\Users\test\AppData\Local\Artisan\bin";
+        let legacy = r"C:\Users\test\AppData\Local\Programs\artisan-editor\resources\artisan-forge";
+
+        assert_eq!(
+            prepend_windows_path_entry(&format!("{legacy};{stable};C:\\Windows"), stable),
+            format!("{stable};{legacy};C:\\Windows")
+        );
     }
 }

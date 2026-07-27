@@ -1,5 +1,6 @@
 use std::{
     fs::{self, OpenOptions},
+    path::Path,
     process::{Command, Stdio},
     thread,
     time::Duration,
@@ -28,6 +29,7 @@ pub fn start(
     }
     let executable = manifest.forge_executable();
     let forge_root = manifest.version_root().join("forge");
+    let native_runtime = forge_root.join("native-runtime");
     let host_entry = forge_root.join("host.js");
     if !executable.is_file() {
         return Err(CliError::Installation(format!(
@@ -54,7 +56,6 @@ pub fn start(
         .env("ARTISAN_MIGRATIONS_PATH", forge_root.join("migrations"))
         .env("ARTISAN_STATIC_FRONTEND_ROOT", forge_root.join("frontend"))
         .env("ARTISAN_NODE_EXECUTABLE", forge_root.join(node_name()))
-        .env("ARTISAN_NATIVE_RUNTIME", forge_root.join("native-runtime"))
         .env(
             "ARTISAN_WINDOWS_PROCESS_HOST",
             forge_root.join("windows-process-host.js"),
@@ -65,6 +66,7 @@ pub fn start(
         .env("ARTISAN_FORGE_LOG_PATH", &paths.log)
         .env("ARTISAN_LISTEN_HOST", &profile.listen_host)
         .env("ARTISAN_LISTEN_PORT", profile.listen_port.to_string());
+    configure_native_runtime(&mut command, &native_runtime);
     if foreground {
         let status = command.status().map_err(io("start Forge"))?;
         if !status.success() {
@@ -79,6 +81,12 @@ pub fn start(
         command.spawn().map_err(io("start Forge"))?;
     }
     Ok(())
+}
+
+fn configure_native_runtime(command: &mut Command, native_runtime: &Path) {
+    command
+        .env("ARTISAN_NATIVE_RUNTIME", native_runtime)
+        .env("NODE_PATH", native_runtime);
 }
 
 #[cfg(target_os = "windows")]
@@ -103,6 +111,28 @@ fn detach(command: &mut Command) {
 fn detach(_: &mut Command) {
     // std has no portable daemon/session API. Redirected stdio still makes the
     // child independent of this terminal; installers may add a service manager.
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{ffi::OsStr, path::Path};
+
+    use super::{Command, configure_native_runtime};
+
+    #[test]
+    fn exposes_packaged_native_modules_to_forge_node_resolution() {
+        let native_runtime = Path::new("C:/Artisan/forge/native-runtime");
+        let mut command = Command::new("forge");
+
+        configure_native_runtime(&mut command, native_runtime);
+
+        let environment = command.get_envs().collect::<Vec<_>>();
+        for name in ["ARTISAN_NATIVE_RUNTIME", "NODE_PATH"] {
+            assert!(environment.iter().any(|(key, value)| {
+                *key == OsStr::new(name) && value.as_deref() == Some(native_runtime.as_os_str())
+            }));
+        }
+    }
 }
 
 pub fn stop(name: &str, paths: &ProfilePaths, secrets: &Secrets) -> Result<()> {
