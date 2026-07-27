@@ -382,7 +382,7 @@ jobs:
         steps:
             - name: Create or verify matching draft
               env:
-                  GH_TOKEN: ${{ github.token }}
+                  GH_TOKEN: ${{ secrets.ARTISAN_RELEASE_GITHUB_TOKEN }}
                   REPOSITORY: ${{ github.repository }}
                   TAG: ${{ needs.plan.outputs.tag }}
                   COMMIT: ${{ needs.plan.outputs.commit }}
@@ -416,7 +416,7 @@ jobs:
                   github-token: ${{ github.token }}
             - name: Upload absent assets and reject byte drift
               env:
-                  GH_TOKEN: ${{ github.token }}
+                  GH_TOKEN: ${{ secrets.ARTISAN_RELEASE_GITHUB_TOKEN }}
                   REPOSITORY: ${{ github.repository }}
                   TAG: ${{ needs.plan.outputs.tag }}
               run: |
@@ -459,7 +459,7 @@ jobs:
                   github-token: ${{ github.token }}
             - name: Reverify frozen bytes and publish normal latest-eligible release
               env:
-                  GH_TOKEN: ${{ github.token }}
+                  GH_TOKEN: ${{ secrets.ARTISAN_RELEASE_GITHUB_TOKEN }}
                   REPOSITORY: ${{ github.repository }}
                   TAG: ${{ needs.plan.outputs.tag }}
               run: |
