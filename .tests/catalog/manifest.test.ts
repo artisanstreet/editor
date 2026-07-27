@@ -1,4 +1,5 @@
 import {
+	ModelDefinition,
 	ModelManifest,
 	PermissionCapability,
 	SpeedOptions,
@@ -43,7 +44,7 @@ describe("model catalog", () => {
 	});
 
 	it("lists every first-party model exposed by the supported coding harnesses", () => {
-		const native_models_by_harness = (harness: "codex" | "claude" | "grok") =>
+		const native_models_by_harness = (harness: "codex" | "claude" | "grok" | "cursor") =>
 			model_manifest.models
 				.filter((model) => model.harness === harness)
 				.map((model) => model.native_model_id);
@@ -64,6 +65,11 @@ describe("model catalog", () => {
 			"claude-haiku-4-5",
 		]);
 		expect(native_models_by_harness("grok")).toEqual(["grok-4.5"]);
+		expect(native_models_by_harness("cursor")).toEqual([
+			"composer-2.5",
+			"auto",
+			"cursor-grok-4.5",
+		]);
 	});
 
 	it("rejects unsupported defaults and non-bottom-up options", () => {
@@ -92,16 +98,18 @@ describe("model catalog", () => {
 		expect(sparse.options.map((option) => option.id)).toEqual(["light", "high"]);
 	});
 
-	it("contains only the three primary coding harnesses and providers", () => {
+	it("contains the four primary coding harnesses and providers", () => {
 		expect(model_manifest.harnesses.map((harness) => harness.id)).toEqual([
 			"codex",
 			"claude",
 			"grok",
+			"cursor",
 		]);
 		expect(model_manifest.providers.map((provider) => provider.id)).toEqual([
 			"openai",
 			"anthropic",
 			"xai",
+			"cursor",
 		]);
 	});
 
@@ -152,6 +160,8 @@ describe("model catalog", () => {
 		const sol = model_manifest.models.find((model) => model.id === "codex-sol");
 		const opus = model_manifest.models.find((model) => model.id === "claude-opus");
 		const grok = model_manifest.models.find((model) => model.id === "grok-4-5");
+		const composer = model_manifest.models.find((model) => model.id === "cursor-composer-2-5");
+		const cursor_grok = model_manifest.models.find((model) => model.id === "cursor-grok-4-5");
 
 		expect(sol?.capabilities.speed_options).toMatchObject([
 			{ consumption_multiplier: 1, id: "standard", speed_multiplier: 1 },
@@ -176,12 +186,53 @@ describe("model catalog", () => {
 		expect(grok?.capabilities.speed_options).toMatchObject([
 			{ consumption_multiplier: 1, id: "standard", speed_multiplier: 1 },
 		]);
+		expect(composer?.capabilities.speed_options).toMatchObject([
+			{
+				consumption_multiplier: 1,
+				id: "standard",
+				input_consumption_multiplier: 1,
+				output_consumption_multiplier: 1,
+				speed_multiplier: 1,
+			},
+			{
+				availability: "dynamic",
+				consumption_basis: "usage-credit-price",
+				consumption_multiplier: 6,
+				id: "fast",
+				input_consumption_multiplier: 6,
+				output_consumption_multiplier: 6,
+				speed_multiplier: null,
+			},
+		]);
+		expect(cursor_grok?.capabilities.speed_options).toMatchObject([
+			{ id: "standard" },
+			{
+				consumption_multiplier: null,
+				id: "fast",
+				input_consumption_multiplier: 2,
+				output_consumption_multiplier: 3,
+				speed_multiplier: null,
+			},
+		]);
 		for (const model of model_manifest.models) {
 			for (const option of model.capabilities.speed_options) {
 				expect(option.description).toMatch(new RegExp(`^${model.name} uses `));
 				expect(option.description).toMatch(/Fast mode is (available|not available)/);
 			}
 		}
+	});
+
+	it("represents disabled models by the presence of a reason only", () => {
+		const composer = model_manifest.models.find((model) => model.id === "cursor-composer-2-5");
+		expect(composer).toBeDefined();
+
+		const disabled = Schema.decodeUnknownSync(ModelDefinition)({
+			...composer,
+			disabled: { reason: "Unavailable for this account." },
+		});
+
+		expect(disabled.disabled).toEqual({ reason: "Unavailable for this account." });
+		expect("enabled" in disabled).toBe(false);
 	});
 
 	it("accepts arbitrary future speed tiers without changing the schema", () => {
@@ -230,6 +281,28 @@ describe("model catalog", () => {
 		expect(options.map((option) => option.id)).toEqual(["economy", "standard", "accelerated"]);
 	});
 
+	it("rejects contradictory aggregate and component speed economics", () => {
+		expect(() =>
+			Schema.decodeUnknownSync(SpeedOptions)([
+				{
+					availability: "always",
+					consumption_basis: "usage-credit-price",
+					consumption_multiplier: 6,
+					default: true,
+					description: "Contradictory economics.",
+					id: "fast",
+					input_consumption_multiplier: 2,
+					label: "Fast",
+					native_value: "fast",
+					output_consumption_multiplier: 3,
+					source_url: "https://example.test/speed",
+					speed_multiplier: null,
+					verified_at: "2026-07-27",
+				},
+			]),
+		).toThrow();
+	});
+
 	it("maps native harness permissions onto a sparse uniform autonomy scale", () => {
 		const permissions = Object.fromEntries(
 			model_manifest.harnesses.map((harness) => [
@@ -256,6 +329,27 @@ describe("model catalog", () => {
 				["autonomous", "auto"],
 				["unrestricted", "always-approve"],
 			],
+			cursor: [
+				["supervised", "default"],
+				["unrestricted", "force"],
+			],
+		});
+	});
+
+	it("does not promote Cursor permission rules into invented runtime modes", () => {
+		const cursor = model_manifest.harnesses.find((harness) => harness.id === "cursor");
+		const composer = model_manifest.models.find((model) => model.id === "cursor-composer-2-5");
+
+		expect(cursor?.permissions.options).toMatchObject([
+			{ availability: "always", id: "supervised", native_value: "default" },
+			{ availability: "dynamic", id: "unrestricted", native_value: "force" },
+		]);
+		expect(
+			cursor?.permissions.options.some((option) => option.native_value.includes(".")),
+		).toBe(false);
+		expect(composer?.capabilities).toMatchObject({
+			image_input: false,
+			web_search: false,
 		});
 	});
 

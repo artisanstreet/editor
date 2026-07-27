@@ -1,9 +1,10 @@
 import { Schema } from "effect";
 
-export const HarnessId = Schema.Literals(["codex", "claude", "grok"]);
+export const HarnessId = Schema.Literals(["codex", "claude", "grok", "cursor"]);
 export type HarnessId = typeof HarnessId.Type;
 
-export const ProviderId = Schema.Literals(["openai", "anthropic", "xai"]);
+/** Provider identifiers are open because account-discovered harnesses add labs independently. */
+export const ProviderId = Schema.NonEmptyString;
 export type ProviderId = typeof ProviderId.Type;
 
 /** Artisan's ordered presentation vocabulary. Adapters retain their native value separately. */
@@ -79,19 +80,59 @@ export const ThinkingCapability = Schema.Union([
 ]);
 export type ThinkingCapability = typeof ThinkingCapability.Type;
 
+export const Disabled = Schema.Struct({
+	reason: Schema.NonEmptyString,
+});
+export type Disabled = typeof Disabled.Type;
+
 export const SpeedOption = Schema.Struct({
 	availability: Schema.Literals(["always", "dynamic"]),
 	consumption_basis: Schema.Literals(["standard", "chatgpt-credits", "usage-credit-price"]),
-	consumption_multiplier: Schema.Number.check(Schema.isGreaterThanOrEqualTo(1)),
+	/** Null when pricing is unpublished or input/output ratios are asymmetric. */
+	consumption_multiplier: Schema.NullOr(Schema.Number.check(Schema.isGreaterThanOrEqualTo(1))),
+	input_consumption_multiplier: Schema.optional(
+		Schema.NullOr(Schema.Number.check(Schema.isGreaterThanOrEqualTo(1))),
+	),
+	output_consumption_multiplier: Schema.optional(
+		Schema.NullOr(Schema.Number.check(Schema.isGreaterThanOrEqualTo(1))),
+	),
 	default: Schema.Boolean,
 	description: Schema.String,
+	disabled: Schema.optional(Disabled),
 	id: Schema.NonEmptyString,
 	label: Schema.NonEmptyString,
 	native_value: Schema.NonEmptyString,
 	source_url: Schema.NonEmptyString,
-	speed_multiplier: Schema.Number.check(Schema.isGreaterThanOrEqualTo(1)),
+	/** Null when the provider markets a faster tier without publishing a numeric ratio. */
+	speed_multiplier: Schema.NullOr(Schema.Number.check(Schema.isGreaterThanOrEqualTo(1))),
 	verified_at: Schema.NonEmptyString,
-});
+}).check(
+	Schema.makeFilter((option) => {
+		const input = option.input_consumption_multiplier;
+		const output = option.output_consumption_multiplier;
+		if (input === undefined || output === undefined) {
+			return [];
+		}
+		if (input === null || output === null || input !== output) {
+			return option.consumption_multiplier === null
+				? []
+				: [
+						{
+							path: ["consumption_multiplier"],
+							issue: "aggregate multiplier must be null when component ratios differ or are unknown",
+						},
+					];
+		}
+		return option.consumption_multiplier === input
+			? []
+			: [
+					{
+						path: ["consumption_multiplier"],
+						issue: "aggregate multiplier must match equal input and output ratios",
+					},
+				];
+	}),
+);
 export type SpeedOption = typeof SpeedOption.Type;
 
 export const SpeedOptions = Schema.NonEmptyArray(SpeedOption).check(
@@ -211,6 +252,7 @@ export type HarnessDefinition = typeof HarnessDefinition.Type;
 
 export const ModelDefinition = Schema.Struct({
 	capabilities: ModelCapabilities,
+	disabled: Schema.optional(Disabled),
 	harness: HarnessId,
 	id: Schema.String,
 	name: Schema.String,

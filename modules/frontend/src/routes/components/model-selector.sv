@@ -127,9 +127,13 @@
 		selected_model?.definition.capabilities.speed_options ?? [],
 	);
 	const selected_speed_option = $derived(
-		selected_speed_options.find((option) => option.id === speed_option_id) ??
-			selected_speed_options.find((option) => option.default) ??
-			selected_speed_options[0],
+		selected_speed_options.find(
+			(option) => option.id === speed_option_id && option.disabled === undefined,
+		) ??
+			selected_speed_options.find(
+				(option) => option.default && option.disabled === undefined,
+			) ??
+			selected_speed_options.find((option) => option.disabled === undefined),
 	);
 	const selected_thinking = $derived(
 		selected_model?.definition.capabilities.thinking ?? { availability: "unavailable" as const },
@@ -154,14 +158,21 @@
 	const composer_controls: ReadonlyArray<ComposerControl> = ["model"];
 
 	const select_model = (model: ModelChoice) => {
+		if (model.definition.disabled !== undefined) {
+			return;
+		}
 		selected_model_id = model.id;
 		active_engine = model.engine;
 		if (model.definition.capabilities.thinking.availability === "supported") {
 			thinking_level = model.definition.capabilities.thinking.default;
 		}
 		const default_speed =
-			model.definition.capabilities.speed_options.find((option) => option.default) ??
-			model.definition.capabilities.speed_options[0];
+			model.definition.capabilities.speed_options.find(
+				(option) => option.default && option.disabled === undefined,
+			) ??
+			model.definition.capabilities.speed_options.find(
+				(option) => option.disabled === undefined,
+			);
 		speed_option_id = default_speed?.id ?? "standard";
 		PatchPolicy({
 			model: model.definition.native_model_id,
@@ -181,6 +192,9 @@
 	};
 
 	const select_speed = (option: SpeedOption) => {
+		if (option.disabled !== undefined) {
+			return;
+		}
 		speed_option_id = option.id;
 		PatchPolicy({ service_tier: option.native_value });
 		speed_open = false;
@@ -329,8 +343,9 @@
 										<td class="p-0">
 											<button
 												type="button"
-												disabled={disabled}
-												class="flex w-full items-center gap-2 rounded-[calc(var(--radius-3xl)-0.5rem)] px-2.5 py-1.5 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
+												disabled={disabled || model.definition.disabled !== undefined}
+												title={model.definition.disabled?.reason}
+												class="flex w-full items-center gap-2 rounded-[calc(var(--radius-3xl)-0.5rem)] px-2.5 py-1.5 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-45"
 												aria-current={model.id === selected_model_id ? "true" : undefined}
 												onfocus={move_hover}
 												onpointerenter={move_hover}
@@ -344,6 +359,11 @@
 												<span class="flex min-w-0 flex-col space-y-0">
 													<span class="truncate text-sm font-semibold text-foreground">{model.name}</span>
 													<span class="truncate text-xs text-muted-foreground">{model.lab}</span>
+													{#if model.definition.disabled !== undefined}
+														<span class="truncate text-xs text-muted-foreground">
+															{model.definition.disabled.reason}
+														</span>
+													{/if}
 												</span>
 											</button>
 										</td>
@@ -435,8 +455,9 @@
 								{#each selected_speed_options as option (option.id)}
 									<button
 										type="button"
-										disabled={disabled}
-										class="flex w-full items-start justify-between gap-3 rounded-[calc(var(--radius-2xl)-0.375rem)] px-3 py-2 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
+										disabled={disabled || option.disabled !== undefined}
+										title={option.disabled?.reason}
+										class="flex w-full items-start justify-between gap-3 rounded-[calc(var(--radius-2xl)-0.375rem)] px-3 py-2 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-45"
 										onfocus={move_hover}
 										onpointerenter={move_hover}
 										onclick={() => select_speed(option)}
@@ -444,6 +465,11 @@
 										<span class="flex min-w-0 flex-col">
 											<span class="text-sm text-foreground">{option.label}</span>
 											<span class="text-sm text-muted-foreground">{option.description}</span>
+											{#if option.disabled !== undefined}
+												<span class="text-xs text-muted-foreground">
+													{option.disabled.reason}
+												</span>
+											{/if}
 										</span>
 										{#if option.id === speed_option_id}
 											<Check class="size-4 shrink-0 self-center text-muted-foreground" />

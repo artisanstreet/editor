@@ -29,6 +29,8 @@ const openai_standard_speed = (model: string, fast_available: boolean) =>
 		availability: "always",
 		consumption_basis: "standard",
 		consumption_multiplier: 1,
+		input_consumption_multiplier: 1,
+		output_consumption_multiplier: 1,
 		default: true,
 		description: `${model} uses 1x ChatGPT credits for 1x speed. Fast mode is ${
 			fast_available
@@ -48,6 +50,8 @@ const openai_fast_speed = (model: string, consumption_multiplier: number) =>
 		availability: "dynamic",
 		consumption_basis: "chatgpt-credits",
 		consumption_multiplier,
+		input_consumption_multiplier: consumption_multiplier,
+		output_consumption_multiplier: consumption_multiplier,
 		default: false,
 		description: `${model} uses ${consumption_multiplier}x ChatGPT credits for 1.5x speed. Fast mode is available when signed in with ChatGPT; API-key sessions use API token pricing instead.`,
 		id: "fast",
@@ -63,6 +67,8 @@ const anthropic_standard_speed = (model: string, fast_available: boolean) =>
 		availability: "always",
 		consumption_basis: "standard",
 		consumption_multiplier: 1,
+		input_consumption_multiplier: 1,
+		output_consumption_multiplier: 1,
 		default: true,
 		description: `${model} uses 1x token price for 1x speed. Fast mode is ${
 			fast_available
@@ -82,6 +88,8 @@ const anthropic_fast_speed = (model: string) =>
 		availability: "dynamic",
 		consumption_basis: "usage-credit-price",
 		consumption_multiplier: 2,
+		input_consumption_multiplier: 2,
+		output_consumption_multiplier: 2,
 		default: false,
 		description: `${model} uses 2x token price for up to 2.5x speed. Fast mode is available for eligible sessions with usage credits and does not use included subscription limits.`,
 		id: "fast",
@@ -97,6 +105,8 @@ const xai_standard_speed = (model: string) =>
 		availability: "always",
 		consumption_basis: "standard",
 		consumption_multiplier: 1,
+		input_consumption_multiplier: 1,
+		output_consumption_multiplier: 1,
 		default: true,
 		description: `${model} uses 1x usage for 1x speed. Fast mode is not available in Grok Build.`,
 		id: "standard",
@@ -104,6 +114,95 @@ const xai_standard_speed = (model: string) =>
 		native_value: "standard",
 		source_url: "https://docs.x.ai/build/cli/reference",
 		speed_multiplier: 1,
+		verified_at: "2026-07-27",
+	});
+
+const cursor_standard_speed = (model: string) =>
+	speed({
+		availability: "always",
+		consumption_basis: "standard",
+		consumption_multiplier: 1,
+		input_consumption_multiplier: 1,
+		output_consumption_multiplier: 1,
+		default: false,
+		description: `${model} uses 1x token price for standard speed. Fast mode is available and enabled by default where the Cursor account supports it.`,
+		id: "standard",
+		label: "Standard",
+		native_value: "standard",
+		source_url: "https://cursor.com/changelog/composer-2-5",
+		speed_multiplier: 1,
+		verified_at: "2026-07-27",
+	});
+
+const cursor_fast_speed = (model: string) =>
+	speed({
+		availability: "dynamic",
+		consumption_basis: "usage-credit-price",
+		consumption_multiplier: 6,
+		input_consumption_multiplier: 6,
+		output_consumption_multiplier: 6,
+		default: true,
+		description: `${model} uses 6x token price for faster responses. Fast mode is available by default where the Cursor account supports it; Cursor has not published a numerical speed multiplier.`,
+		id: "fast",
+		label: "Fast",
+		native_value: "fast",
+		source_url: "https://cursor.com/changelog/composer-2-5",
+		speed_multiplier: null,
+		verified_at: "2026-07-27",
+	});
+
+const cursor_native_speed = (model: string, fast_available: boolean) =>
+	speed({
+		availability: "dynamic",
+		consumption_basis: "usage-credit-price",
+		consumption_multiplier: 1,
+		input_consumption_multiplier: 1,
+		output_consumption_multiplier: 1,
+		default: true,
+		description: `${model} uses its selected model's token price for provider-native speed. Fast mode is ${
+			fast_available
+				? "available in supported Cursor account configurations"
+				: "not available as a separate configuration"
+		}.`,
+		id: "standard",
+		label: "Native",
+		native_value: "standard",
+		source_url: "https://cursor.com/docs/models",
+		speed_multiplier: 1,
+		verified_at: "2026-07-27",
+	});
+
+const cursor_grok_standard_speed = (model: string) =>
+	speed({
+		availability: "always",
+		consumption_basis: "usage-credit-price",
+		consumption_multiplier: 1,
+		input_consumption_multiplier: 1,
+		output_consumption_multiplier: 1,
+		default: true,
+		description: `${model} uses 1x token price for standard speed. Fast mode is available in supported Cursor accounts.`,
+		id: "standard",
+		label: "Standard",
+		native_value: "standard",
+		source_url: "https://cursor.com/grok",
+		speed_multiplier: 1,
+		verified_at: "2026-07-27",
+	});
+
+const cursor_grok_fast_speed = (model: string) =>
+	speed({
+		availability: "dynamic",
+		consumption_basis: "usage-credit-price",
+		consumption_multiplier: null,
+		input_consumption_multiplier: 2,
+		output_consumption_multiplier: 3,
+		default: false,
+		description: `${model} uses 2x input token price and 3x output token price for faster responses. Fast mode is available where the Cursor account supports it; Cursor has not published a numerical speed multiplier.`,
+		id: "fast",
+		label: "Fast",
+		native_value: "fast",
+		source_url: "https://cursor.com/grok",
+		speed_multiplier: null,
 		verified_at: "2026-07-27",
 	});
 
@@ -120,11 +219,12 @@ const exceptional = (id: ThinkingOption["id"], native_value: string) =>
 	});
 
 export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
-	revision: "2026-07-27.1",
+	revision: "2026-07-27.2",
 	providers: [
 		{ id: "openai", label: "OpenAI" },
 		{ id: "anthropic", label: "Anthropic" },
 		{ id: "xai", label: "xAI" },
+		{ id: "cursor", label: "Cursor" },
 	],
 	harnesses: [
 		{
@@ -273,6 +373,38 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 						id: "unrestricted",
 						label: "Always approve",
 						native_value: "always-approve",
+						safety_boundary: "rules",
+					}),
+				],
+			},
+		},
+		{
+			id: "cursor",
+			gateways: [],
+			label: "Cursor Agent",
+			permissions: {
+				default: "supervised",
+				options: [
+					permission({
+						approval_behavior: "prompts",
+						availability: "always",
+						description:
+							"Use Cursor's interactive default and ask before terminal commands; configured deny rules remain authoritative.",
+						edit_scope: "host",
+						id: "supervised",
+						label: "Supervised",
+						native_value: "default",
+						safety_boundary: "rules",
+					}),
+					permission({
+						approval_behavior: "none",
+						availability: "dynamic",
+						description:
+							"Run print mode with --force so commands and writes proceed without prompts; explicit deny rules still win.",
+						edit_scope: "host",
+						id: "unrestricted",
+						label: "Force allow",
+						native_value: "force",
 						safety_boundary: "rules",
 					}),
 				],
@@ -601,6 +733,79 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 				local_tools: true,
 				mcp: false,
 				web_search: true,
+			},
+		},
+		{
+			id: "cursor-composer-2-5",
+			name: "Composer 2.5",
+			native_model_id: "composer-2.5",
+			harness: "cursor",
+			provider: "cursor",
+			routing: { kind: "default" },
+			status: "prototype",
+			capabilities: {
+				thinking: {
+					availability: "native",
+					description:
+						"Composer 2.5 adapts its reasoning internally. Cursor CLI documents model selection but no explicit reasoning-effort control.",
+				},
+				speed_options: [
+					cursor_standard_speed("Composer 2.5"),
+					cursor_fast_speed("Composer 2.5"),
+				],
+				image_input: false,
+				local_tools: true,
+				mcp: true,
+				web_search: false,
+			},
+		},
+		{
+			id: "cursor-auto",
+			name: "Auto",
+			native_model_id: "auto",
+			harness: "cursor",
+			provider: "cursor",
+			routing: { kind: "default" },
+			status: "prototype",
+			capabilities: {
+				thinking: {
+					availability: "native",
+					description:
+						"Cursor Router selects the underlying model and offers Cost, Balance, and Intelligence optimization modes. The selected model and effort can vary per request.",
+				},
+				speed_options: [cursor_native_speed("Auto", false)],
+				image_input: false,
+				local_tools: true,
+				mcp: true,
+				web_search: false,
+			},
+		},
+		{
+			id: "cursor-grok-4-5",
+			name: "Cursor Grok 4.5",
+			native_model_id: "cursor-grok-4.5",
+			harness: "cursor",
+			provider: "cursor",
+			routing: { kind: "default" },
+			status: "prototype",
+			capabilities: {
+				thinking: {
+					availability: "supported",
+					default: "high",
+					options: [
+						standard("light", "low"),
+						standard("medium", "medium"),
+						standard("high", "high"),
+					],
+				},
+				speed_options: [
+					cursor_grok_standard_speed("Cursor Grok 4.5"),
+					cursor_grok_fast_speed("Cursor Grok 4.5"),
+				],
+				image_input: false,
+				local_tools: true,
+				mcp: true,
+				web_search: false,
 			},
 		},
 	],

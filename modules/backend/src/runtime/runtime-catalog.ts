@@ -35,7 +35,7 @@ export const RuntimeCatalogLive = Layer.effect(
 		const providers = model_manifest.providers.filter((provider) =>
 			provider_ids.has(provider.id),
 		);
-		const default_model_id = models[0]?.id;
+		const default_model_id = models.find((model) => model.disabled === undefined)?.id;
 		const catalog = yield* Schema.decodeUnknownEffect(RuntimeCatalog)({
 			...(default_model_id === undefined ? {} : { default_model_id }),
 			manifest: {
@@ -75,6 +75,12 @@ export const RuntimeCatalogLive = Layer.effect(
 						message: `Model ${policy.model ?? "<default>"} is unavailable for ${policy.engine_id}.`,
 					});
 				}
+				if (model.disabled !== undefined) {
+					return yield* new RuntimeCatalogPolicyError({
+						field: "model",
+						message: `Model ${model.native_model_id} is disabled: ${model.disabled.reason}`,
+					});
+				}
 
 				const permission_mode =
 					policy.sandbox_mode === "read_only"
@@ -107,7 +113,9 @@ export const RuntimeCatalogLive = Layer.effect(
 
 				if (
 					!model.capabilities.speed_options.some(
-						(option) => option.native_value === policy.service_tier,
+						(option) =>
+							option.native_value === policy.service_tier &&
+							option.disabled === undefined,
 					)
 				) {
 					return yield* new RuntimeCatalogPolicyError({
