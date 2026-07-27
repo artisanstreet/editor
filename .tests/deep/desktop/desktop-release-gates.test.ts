@@ -99,12 +99,12 @@ describe("deep desktop release gates", () => {
 		expect(verifier).toContain("Packaged stateless desktop evidence");
 		expect(verifier).not.toContain("ARTISAN_PACKAGED_SMOKE");
 		expect(verifier).not.toContain("Stop-Process");
-		expect(workflow).toContain("CSC_LINK: ${{ secrets.ARTISAN_WINDOWS_CSC_LINK }}");
+		expect(workflow).toContain('ARTISAN_ALLOW_UNSIGNED_PRERELEASE: "1"');
 		expect(workflow).toContain(
-			"CSC_KEY_PASSWORD: ${{ secrets.ARTISAN_WINDOWS_CSC_KEY_PASSWORD }}",
+			"ARTISAN_RELEASE_SIGNING_KEY_PEM: ${{ secrets.ARTISAN_RELEASE_SIGNING_KEY_PEM }}",
 		);
-		expect(workflow).toContain("Get-AuthenticodeSignature");
-		expect(workflow).toContain('if ($signature.Status -ne "Valid")');
+		expect(workflow).toContain("ARTISAN_RELEASE_CHANNEL: beta");
+		expect(workflow).not.toContain("ARTISAN_WINDOWS_CSC_LINK");
 	});
 
 	it("parses the packaged verifier before release execution on Windows", () => {
