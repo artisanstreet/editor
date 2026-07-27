@@ -16,10 +16,32 @@ describe("Barekey docs shell reset", () => {
 		expect(layout).toContain("{@render children()}");
 		expect(layout).toContain("client.ListProjects");
 		expect(layout).toContain("client.ListThreads");
-		expect(layout).toContain("{#if forge_ready}");
+		expect(layout).toContain("{#if forge_gate.has_hydrated_shell}");
+		expect(layout).toContain("<ForgeShellPreview />");
+		expect(layout).toContain("<ForgeConnectionOverlay");
+		expect(layout).toContain('inert={forge_gate.state.phase !== "ready"}');
+		expect(layout).not.toContain("<ForgeConnectionBanner");
 		expect(panel).toContain("primary: Snippet");
 		expect(panel).toContain("secondary?: Snippet");
 		expect(panel).toContain("sidebar: Snippet");
+	});
+
+	it("gates Forge loading and disconnection with a centered blurred overlay", () => {
+		const overlay = Read("modules/frontend/src/routes/components/forge-connection-overlay.sv");
+		const preview = Read("modules/frontend/src/routes/components/forge-shell-preview.sv");
+
+		expect(overlay).toContain("absolute inset-0 z-50 grid place-items-center");
+		expect(overlay).toContain("backdrop-blur-md");
+		expect(overlay).toContain('role={presentation.tone === "error" ? "alert" : "status"}');
+		expect(overlay).toContain("aria-live=");
+		expect(overlay).toContain('tabindex="-1"');
+		expect(overlay).toContain("document.activeElement");
+		expect(overlay).toContain('querySelector<HTMLElement>("a, button")');
+		expect(overlay).toContain("previous_focus.focus({ preventScroll: true })");
+		expect(overlay).toContain("ForgeStartLaunchUrl");
+		expect(overlay).toContain("retry_connection");
+		expect(overlay).toContain("retry_hydration");
+		expect(preview).toContain("bg-linear-to-b from-surface-125 to-surface-75 p-1 card");
 	});
 
 	it("mounts the inspector only for concrete thread routes and keeps controls in the composer", () => {

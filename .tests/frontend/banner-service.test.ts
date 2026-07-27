@@ -1,11 +1,5 @@
 import { describe, expect, it } from "vitest";
 import { Deferred, Effect, Layer } from "effect";
-import { ArtisanClientError } from "../../modules/transport/src/client-contract";
-
-import {
-	ForgeConnectionBannerId,
-	PresentForgeConnectionState,
-} from "../../modules/frontend/src/lib/banner/connection-banner";
 import {
 	BannerPresenter,
 	BannerReporter,
@@ -123,69 +117,5 @@ describe("BannerService", () => {
 				yield* Deferred.await(completed);
 			}).pipe(Effect.provide(BannerServiceLive.pipe(Layer.provide(dependencies)))),
 		);
-	});
-
-	it("replaces connection progress with errors and dismisses it when ready", async () => {
-		const presented: Array<BannerEvent> = [];
-		const dismissed: Array<string> = [];
-		const dependencies = Layer.merge(
-			Layer.succeed(
-				BannerPresenter,
-				BannerPresenter.of({
-					Dismiss: (id) => Effect.sync(() => dismissed.push(id)),
-					Show: (event) => Effect.sync(() => presented.push(event)),
-				}),
-			),
-			Layer.succeed(BannerReporter, BannerReporter.of({ Report: () => Effect.void })),
-		);
-		const runtime = BannerServiceLive.pipe(Layer.provide(dependencies));
-
-		await Effect.runPromise(
-			Effect.gen(function* () {
-				yield* PresentForgeConnectionState({ phase: "connecting" }, Effect.void);
-				yield* PresentForgeConnectionState(
-					{
-						attempts: 5,
-						error: new ArtisanClientError({
-							cause: new Error("opaque browser event"),
-							code: "connection",
-							message: "Transport bootstrap failed.",
-							protocol_code: "transport.connection",
-							retryable: true,
-						}),
-						phase: "exhausted",
-					},
-					Effect.void,
-				);
-				yield* PresentForgeConnectionState({ phase: "ready" }, Effect.void);
-			}).pipe(Effect.provide(runtime)),
-		);
-
-		expect(presented).toMatchObject([
-			{
-				description: "Keep this page open while Artisan establishes the session.",
-				id: ForgeConnectionBannerId,
-				severity: "info",
-				title: "Connecting to Forge…",
-			},
-			{
-				actions: [
-					{
-						href: "artisan://forge/start",
-						id: "start-forge",
-						label: "Start Forge",
-					},
-					{
-						id: "retry",
-						label: "Retry now",
-					},
-				],
-				description: "Start the installed local service, or retry this connection.",
-				id: ForgeConnectionBannerId,
-				severity: "error",
-				title: "Could not connect to Forge",
-			},
-		]);
-		expect(dismissed).toEqual([ForgeConnectionBannerId]);
 	});
 });

@@ -256,3 +256,20 @@ Branch continuity only. Durable status lives in
   pre-existing formatter mismatch in
   `docs/status/backend-completion-matrix.md`; the aggregate Vitest run also
   exceeded a bounded two-minute capture without reporting a failure.
+- Forge availability is now a layout-owned application gate rather than a
+  connection banner. Initial connection renders a lightweight shell preview
+  beneath a centered backdrop-blur status overlay; after the first successful
+  hydration, the real sidebar/workspace remains mounted and visually frozen
+  beneath reconnect, offline, and rehydration states. The covered shell is
+  `inert`, focus moves into the status or first recovery action and returns to
+  its prior shell control after recovery, progress is announced politely, and
+  terminal failures use an alert. Connection versus hydration failures expose
+  the appropriate recovery action. Hydration runs in scoped fibers, consumes
+  the connection state from one current-emitting stream, and a generation
+  counter rejects stale completion/failure updates after a connection
+  transition.
+  Seventeen focused frontend tests, scoped formatting/lint, `git diff --check`,
+  and the production frontend build pass. Full validation still stops
+  immediately on the pre-existing formatter mismatch in
+  `docs/status/backend-completion-matrix.md`; no local install overlay was
+  performed.
