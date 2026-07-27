@@ -76,8 +76,8 @@ describe("Barekey docs shell reset", () => {
 		expect(composer).not.toContain('aria-label="Add images"');
 		expect(composer).toContain('"Stop current run"');
 		expect(composer).toContain("PlayerStopFilled");
-		expect(composer).toContain("card-glass rounded-full bg-white/25");
-		expect(composer).not.toContain("text-white/25");
+		expect(composer).toContain("card-glass rounded-full text-white/25");
+		expect(composer).not.toContain("bg-white/25");
 		expect(composer).toContain("motion-reduce:transition-none");
 		expect(composer).toContain("yield* Cancel");
 		expect(thread_route).toContain('work?.status === "running"');

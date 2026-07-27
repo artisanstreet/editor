@@ -168,7 +168,7 @@ Branch continuity only. Durable status lives in
   pre-existing `items_after_test_module` ordering in
   `modules/cli/rust/process.rs`, outside this compatibility change.
 - The thread composer toolbar exposes model selection and one primary action.
-  Its circular `card-glass` surface uses `white/25` with a dark send glyph that
+  Its circular action uses the `card-glass` surface with a `white/25` SVG that
   rotates into a filled stop glyph while authoritative thread work is `running`
   or `waiting`; activating stop sends the existing typed `run.cancel` command
   and suppresses duplicate cancellation until Forge reports a terminal state.
