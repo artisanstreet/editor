@@ -100,6 +100,8 @@ Branch continuity only. Durable status lives in
   archive. Real released-asset qualification, website routing, Windows arm64,
   macOS, and Linux product gates remain. The public landing page and script
   endpoints are live; the first product GitHub Release is still required.
+  Candidate CI exposed and fixed Node 24 ESM resolution of extensionless
+  TypeScript imports in the distribution builder.
 - Permanent `ae` now exposes update/uninstall, treats plain invocation as open
   only for a healthy installation, combines Forge and installation diagnostics,
   repairs only manifest-owned integrations, and retains Forge data by default.

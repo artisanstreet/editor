@@ -9,7 +9,7 @@ import {
 	SafeArchivePath,
 	SemanticVersion,
 	Sha256Digest,
-} from "./common";
+} from "./common.ts";
 
 export const ArtifactArchiveFormat = Schema.Literals(["zip", "tar.zst"]);
 export type ArtifactArchiveFormat = typeof ArtifactArchiveFormat.Type;

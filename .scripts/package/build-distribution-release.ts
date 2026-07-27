@@ -5,8 +5,8 @@ import { pathToFileURL } from "node:url";
 
 import { Data, Effect, Schema } from "effect";
 
-import { ReleaseManifest } from "../../modules/distribution/src/release-manifest";
-import { ReleaseManifestSignature } from "../../modules/distribution/src/verification";
+import { ReleaseManifest } from "../../modules/distribution/src/release-manifest.ts";
+import { ReleaseManifestSignature } from "../../modules/distribution/src/verification.ts";
 
 const DistributionReleaseInput = Schema.Struct({
 	architecture: Schema.Literal("x64"),

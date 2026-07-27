@@ -2,7 +2,7 @@ import { createHash, createPublicKey, verify } from "node:crypto";
 
 import { Context, Data, Effect, Layer, Schema } from "effect";
 
-import { type ReleaseArtifact, ReleaseManifest } from "./release-manifest";
+import { type ReleaseArtifact, ReleaseManifest } from "./release-manifest.ts";
 
 export const ReleaseManifestSignature = Schema.Struct({
 	algorithm: Schema.Literal("ed25519"),
