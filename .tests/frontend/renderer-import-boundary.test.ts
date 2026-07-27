@@ -66,6 +66,7 @@ describe("frontend renderer import boundary", () => {
 		for (const specifier of artisan_imports) {
 			expect([
 				"@artisan/catalog",
+				"@artisan/data/activity-status/thinking-words.json",
 				"@artisan/data/composer/placeholders.json",
 				"@artisan/data/file-icons/associations.json",
 				"@artisan/protocol",
