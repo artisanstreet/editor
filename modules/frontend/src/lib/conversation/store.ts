@@ -250,13 +250,7 @@ export const MakeConversationRenderBlocks = (
 		const work_session = work_session_by_turn.get(group_key);
 		if (work_session === undefined) return false;
 		if (collapsible_work_types.has(item.type) || item_is_explicit_commentary(item)) return true;
-		if (
-			item_is_resolved_approval(item) &&
-			work_session.lifecycle === "completed" &&
-			work_session.ended_at !== undefined &&
-			concrete_work_turns.has(group_key)
-		)
-			return true;
+		if (item_is_resolved_approval(item) && concrete_work_turns.has(group_key)) return true;
 		return (
 			item.type === "assistant_message" &&
 			item.id !== final_message_by_turn.get(group_key)?.id

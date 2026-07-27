@@ -321,11 +321,19 @@ describe("conversation view store", () => {
 		});
 		const active_view = MakeConversationViewState(active_work);
 		if (active_view._tag !== "applied") throw new Error("active fixture must initialize");
+		const active_blocks = MakeConversationRenderBlocks(active_view.state);
+		const active_work_group = active_blocks.find(
+			(block) => block.type === "work_group" && block.session.id === "mock-work-1",
+		);
+		if (active_work_group?.type !== "work_group") throw new Error("active work must render");
+		expect(active_work_group.details).toContainEqual(
+			expect.objectContaining({ id: "approval-resolved", type: "approval" }),
+		);
 		expect(
-			MakeConversationRenderBlocks(active_view.state).some(
+			active_blocks.some(
 				(block) => block.type === "item" && block.item.id === "approval-resolved",
 			),
-		).toBe(true);
+		).toBe(false);
 	});
 
 	it("keeps commentary interleaved with activity inside completed work", () => {
