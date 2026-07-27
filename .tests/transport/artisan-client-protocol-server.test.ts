@@ -228,7 +228,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			);
 			const threads = await Effect.runPromise(harness.client.ListThreads);
 
-			expect(created.thread_id).toMatch(/^thread_\d+$/);
+			expect(created.thread_id).toMatch(/^\d+$/);
 			expect(created.title).toBe("Forge-owned identity");
 			expect(threads).toContainEqual(created);
 			expect(projects).toEqual({ projects: [] });

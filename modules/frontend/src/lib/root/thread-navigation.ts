@@ -1,5 +1,34 @@
 import type { ProjectRef, ThreadListItem } from "@artisan/protocol";
 import type { ThreadListUpdate } from "@artisan/transport/client";
+import { Option } from "effect";
+
+const legacy_thread_prefix = "thread_";
+
+/** Removes the historical domain prefix from the public thread route segment. */
+export const ThreadRouteId = (thread_id: string) => {
+	const route_id = thread_id.startsWith(legacy_thread_prefix)
+		? thread_id.slice(legacy_thread_prefix.length)
+		: thread_id;
+
+	return route_id.length > 0 ? route_id : thread_id;
+};
+
+/** Builds the canonical public URL for both current and historical thread identities. */
+export const ThreadRoutePath = (thread_id: string) =>
+	`/threads/${encodeURIComponent(ThreadRouteId(thread_id))}`;
+
+/**
+ * Resolves canonical bare route IDs while retaining access to historical
+ * `thread_` records. Exact current identities win if both forms ever coexist.
+ */
+export const ResolveThreadRoute = (
+	threads: ReadonlyArray<ThreadListItem>,
+	route_id: string,
+): Option.Option<ThreadListItem> =>
+	Option.fromUndefinedOr(
+		threads.find((thread) => thread.thread_id === route_id) ??
+			threads.find((thread) => ThreadRouteId(thread.thread_id) === route_id),
+	);
 
 /** Applies the authoritative thread-list stream without introducing UI-only identity. */
 export const ApplyRootThreadListUpdate = (

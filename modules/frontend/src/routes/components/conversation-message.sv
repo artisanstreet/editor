@@ -92,7 +92,11 @@
 </script>
 
 {#if item.type === "user_message"}
-	<article class="ml-auto flex max-w-xl flex-col items-end gap-2" aria-label="Your message">
+	<article
+		class="ml-auto flex max-w-xl flex-col items-end gap-2"
+		aria-label="Your message"
+		data-conversation-item-id={item.id}
+	>
 		{#if (item.attachments?.length ?? 0) > 0}
 			<div
 				use:observe_image_visibility

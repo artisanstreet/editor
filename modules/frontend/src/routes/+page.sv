@@ -8,6 +8,7 @@
 	import {
 		ApplyRootThreadListUpdate,
 		FormatRecentThreadTime,
+		ThreadRoutePath,
 	} from "$lib/root/thread-navigation";
 
 	const client = yield* ArtisanClient;
@@ -64,7 +65,7 @@
 								<tr class="group border-b border-border last:border-b-0">
 									<td class="p-0">
 										<a
-											href={`/threads/${thread.thread_id}`}
+											href={ThreadRoutePath(thread.thread_id)}
 											class="flex items-center gap-2 py-3 font-medium text-foreground outline-none transition-colors duration-(--duration-fast) ease-in-out group-hover:text-foreground-extra group-focus-within:text-foreground-extra motion-reduce:transition-none"
 										>
 											<MessageCircle

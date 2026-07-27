@@ -21,11 +21,12 @@
 		ThreadInteractionError,
 	} from "$lib/thread-interaction/commands";
 	import type { ComposerSubmission } from "$lib/composer/image-attachments";
+	import { ResolveThreadRoute } from "$lib/root/thread-navigation";
 	import { Effect, Exit, Option, Queue, Scope } from "effect";
 	import ThreadWorkspace from "../../components/thread-workspace.sv";
 
 	let { thread_id: route_thread_id }: { readonly thread_id: string } = $props();
-	const thread_id = untrack(() => route_thread_id);
+	const route_id = untrack(() => route_thread_id);
 
 	const client = yield* ArtisanClient;
 	const frontend_scope = yield* Scope.Scope;
@@ -52,12 +53,24 @@
 		frontend_scope,
 	);
 
+	const threads = yield* client.ListThreads;
+	const initial_thread = yield* Option.match(
+		ResolveThreadRoute(threads, route_id),
+		{
+			onNone: () =>
+				Effect.fail(
+					new ThreadInteractionError({
+						message: `Thread ${route_id} does not exist.`,
+					}),
+				),
+			onSome: Effect.succeed,
+		},
+	);
+	const thread_id = initial_thread.thread_id;
 	let session = $state.raw<ThreadSessionSnapshot | undefined>(
 		yield* client.GetThreadSession(thread_id),
 	);
-	let thread = $state.raw<ThreadListItem | undefined>(
-		(yield* client.ListThreads).find((candidate) => candidate.thread_id === thread_id),
-	);
+	let thread = $state.raw<ThreadListItem | undefined>(initial_thread);
 	let work = $state.raw<ThreadWorkItem | undefined>(
 		Option.getOrUndefined(yield* client.GetThreadWork(thread_id)),
 	);
@@ -187,7 +200,15 @@
 
 			const result = BuildThreadMessageCommand({ session, thread, thread_id, work }, submission);
 			if (result._tag === "invalid") return yield* Effect.fail(result.error);
+			const expects_user_message =
+				result.command.payload.type === "thread.send_message";
 
+			/**
+			 * Command acceptance is the durable submission boundary. The stream may
+			 * still be establishing (or may have missed this exact handoff), so refresh
+			 * the canonical projection immediately for the sender. Later assistant
+			 * patches remain exclusively stream-driven through `ApplyUpdate`.
+			 */
 			yield* SubmitDurableCommand(
 				client.Command(result.command),
 				Effect.gen(function* () {
@@ -196,12 +217,7 @@
 				}),
 				thread_scope,
 			);
-			/**
-			 * Command acceptance is the durable user-message boundary. The stream may
-			 * still be establishing (or may have missed this exact handoff), so refresh
-			 * the canonical projection immediately for the sender. Later assistant
-			 * patches remain exclusively stream-driven through `ApplyUpdate`.
-			 */
+			return { expects_user_message };
 		});
 
 	const UpdateSessionPolicy = (policy: ThreadSessionPolicy) =>

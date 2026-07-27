@@ -27,6 +27,10 @@ export type ThreadMessageCommandResult =
 	| { readonly _tag: "ready"; readonly command: ArtisanCommandInput }
 	| { readonly _tag: "invalid"; readonly error: ThreadInteractionError };
 
+export interface ThreadMessageSubmissionOutcome {
+	readonly expects_user_message: boolean;
+}
+
 /** Serializes component submit fibers without coupling them to DOM timing. */
 export interface SubmitGate {
 	readonly Acquire: Effect.Effect<boolean>;

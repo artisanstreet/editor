@@ -72,7 +72,10 @@ describe("Barekey docs shell reset", () => {
 
 		expect(route).toContain("const thread_id = $derived(page.params.id)");
 		expect(route).toContain("{#key thread_id}");
+		expect(route).toContain("goto(canonical_path");
+		expect(route).toContain("replaceState: true");
 		expect(controller).toContain("const thread_scope = yield* Scope.make()");
+		expect(controller).toContain("ResolveThreadRoute(threads, route_id)");
 		expect(controller).toContain("Scope.close(thread_scope, Exit.void)");
 		expect(controller).toContain("Queue.offerUnsafe(action_queue");
 		expect(controller).not.toContain(".unsafeOffer(");
@@ -85,6 +88,19 @@ describe("Barekey docs shell reset", () => {
 		expect(background_reconciliation).toBeGreaterThan(accepted_command);
 		expect(sender_resync).toBeGreaterThan(-1);
 		expect(interaction_refresh).toBeGreaterThan(sender_resync);
+	});
+
+	it("positions loaded threads at the bottom and promotes a local turn to the top inset", () => {
+		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.sv");
+		const message = Read("modules/frontend/src/routes/components/conversation-message.sv");
+
+		expect(workspace).toContain("bind:viewportRef={viewport}");
+		expect(workspace).toContain("ConversationBottomScrollTop(");
+		expect(workspace).toContain("NewestConversationUserMessage(current_items");
+		expect(workspace).toContain("ConversationEndSpaceHeight(");
+		expect(workspace).toContain("outcome.expects_user_message");
+		expect(workspace).toContain('"smooth"');
+		expect(message).toContain("data-conversation-item-id={item.id}");
 	});
 
 	it("renders active work with the Artisan sprite and data-driven activity copy", () => {
@@ -166,10 +182,11 @@ describe("Barekey docs shell reset", () => {
 		expect(sidebar).toContain("<Sidebar.MenuSub");
 		expect(sidebar).toContain("<Sidebar.MenuSubButton");
 		expect(sidebar).toContain('project?.display_name ?? "Unassigned"');
+		expect(sidebar).toContain("ThreadRoutePath(thread.thread_id)");
 		expect(sidebar).toContain("client.SubscribeThreadList");
 		expect(sidebar).toContain("ApplyRootThreadListUpdate");
 		expect(sidebar).toContain(
-			"isActive={page.url.pathname === `/threads/${thread.thread_id}`}",
+			"isActive={page.url.pathname === ThreadRoutePath(thread.thread_id)}",
 		);
 		expect(home).not.toMatch(/WelcomePage|ThreadWorkspace|SettingsPage|LiveWorkspaceStore/);
 	});

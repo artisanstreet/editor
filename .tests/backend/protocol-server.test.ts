@@ -405,7 +405,7 @@ describe("protocol server", () => {
 				(envelope) => envelope.kind === "thread.create.result",
 			);
 
-			expect(first_result?.payload.thread_id).toMatch(/^thread_\d+$/);
+			expect(first_result?.payload.thread_id).toMatch(/^\d+$/);
 			expect(replay_result?.payload.thread_id).toBe(first_result?.payload.thread_id);
 		} finally {
 			await runtime.dispose();

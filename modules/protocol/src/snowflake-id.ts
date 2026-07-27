@@ -16,11 +16,12 @@ interface SnowflakeState {
 	readonly timestamp_ms: number;
 }
 
-/** Generates prefix-preserving, process-unique identifiers without number precision loss. */
+/** Generates process-unique prefixed or bare identifiers without number precision loss. */
 export class SnowflakeId extends Context.Service<
 	SnowflakeId,
 	{
 		readonly Make: (prefix: string) => Effect.Effect<string>;
+		readonly MakeBare: Effect.Effect<string>;
 	}
 >()("Artisan/SnowflakeId") {}
 
@@ -45,33 +46,34 @@ export const MakeSnowflakeIdLive = (
 				timestamp_ms: SnowflakeEpochMilliseconds,
 			});
 
+			const Allocate = Effect.gen(function* () {
+				const now_ms = yield* Clock.currentTimeMillis;
+				return yield* Ref.modify(state, (current) => {
+					const observed_ms = Math.max(now_ms, SnowflakeEpochMilliseconds);
+					const timestamp_ms = Math.max(observed_ms, current.timestamp_ms);
+					const same_millisecond = timestamp_ms === current.timestamp_ms;
+					const next_sequence = same_millisecond ? current.sequence + 1 : 0;
+					const sequence_overflow = next_sequence > 4_095;
+					const logical_timestamp_ms = sequence_overflow
+						? timestamp_ms + 1
+						: timestamp_ms;
+					const sequence = sequence_overflow ? 0 : next_sequence;
+					const timestamp_component =
+						BigInt(logical_timestamp_ms - SnowflakeEpochMilliseconds) << 22n;
+					const worker_component = BigInt(decoded_worker_id) << 12n;
+					const snowflake = timestamp_component | worker_component | BigInt(sequence);
+
+					return [snowflake, { sequence, timestamp_ms: logical_timestamp_ms }] as const;
+				});
+			});
 			const Make = (prefix: string) =>
 				Effect.gen(function* () {
-					const now_ms = yield* Clock.currentTimeMillis;
-					const payload = yield* Ref.modify(state, (current) => {
-						const observed_ms = Math.max(now_ms, SnowflakeEpochMilliseconds);
-						const timestamp_ms = Math.max(observed_ms, current.timestamp_ms);
-						const same_millisecond = timestamp_ms === current.timestamp_ms;
-						const next_sequence = same_millisecond ? current.sequence + 1 : 0;
-						const sequence_overflow = next_sequence > 4_095;
-						const logical_timestamp_ms = sequence_overflow
-							? timestamp_ms + 1
-							: timestamp_ms;
-						const sequence = sequence_overflow ? 0 : next_sequence;
-						const timestamp_component =
-							BigInt(logical_timestamp_ms - SnowflakeEpochMilliseconds) << 22n;
-						const worker_component = BigInt(decoded_worker_id) << 12n;
-						const snowflake = timestamp_component | worker_component | BigInt(sequence);
-
-						return [
-							snowflake,
-							{ sequence, timestamp_ms: logical_timestamp_ms },
-						] as const;
-					});
+					const payload = yield* Allocate;
 
 					return `${prefix}_${payload.toString(10)}`;
 				});
+			const MakeBare = Allocate.pipe(Effect.map((payload) => payload.toString(10)));
 
-			return SnowflakeId.of({ Make });
+			return SnowflakeId.of({ Make, MakeBare });
 		}),
 	);

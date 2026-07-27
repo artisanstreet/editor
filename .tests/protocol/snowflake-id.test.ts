@@ -30,6 +30,20 @@ describe("SnowflakeId", () => {
 		expect(Schema.is(Identifier)(identifier)).toBe(true);
 	});
 
+	it("allocates bare identifiers for domains whose public identity is the snowflake", async () => {
+		const identifier = await RunGenerator(
+			Effect.gen(function* () {
+				yield* TestClock.setTime(SnowflakeEpochMilliseconds);
+
+				return yield* (yield* SnowflakeId).MakeBare;
+			}),
+		);
+
+		expect(identifier).toBe((37n << 12n).toString(10));
+		expect(identifier).toMatch(/^\d+$/);
+		expect(Schema.is(Identifier)(identifier)).toBe(true);
+	});
+
 	it("allocates unique ordered sequences atomically under concurrency", async () => {
 		const identifiers = await RunGenerator(
 			Effect.gen(function* () {

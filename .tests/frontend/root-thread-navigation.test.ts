@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
+import { Option } from "effect";
 
 import type { ThreadListItem } from "@artisan/protocol";
 import {
 	ApplyRootThreadListUpdate,
 	FormatRecentThreadTime,
 	ProjectScopedThreadGroups,
+	ResolveThreadRoute,
+	ThreadRouteId,
+	ThreadRoutePath,
 } from "../../modules/frontend/src/lib/root/thread-navigation";
 
 const MakeThread = (
@@ -41,6 +45,17 @@ const MakeThread = (
 });
 
 describe("root thread navigation", () => {
+	it("uses bare Snowflakes in public routes and resolves historical prefixed records", () => {
+		const legacy = MakeThread("thread_13913946054463488", "2026-07-27T00:00:00.000Z");
+		const current = MakeThread("13913946054463489", "2026-07-27T00:00:01.000Z");
+
+		expect(ThreadRouteId(legacy.thread_id)).toBe("13913946054463488");
+		expect(ThreadRoutePath(legacy.thread_id)).toBe("/threads/13913946054463488");
+		expect(ThreadRoutePath(current.thread_id)).toBe("/threads/13913946054463489");
+		expect(Option.getOrThrow(ResolveThreadRoute([legacy], "13913946054463488"))).toBe(legacy);
+		expect(Option.getOrThrow(ResolveThreadRoute([current], current.thread_id))).toBe(current);
+	});
+
 	it("keeps the authoritative stream sorted and replaces an upsert by id", () => {
 		const older = MakeThread("thread-older", "2026-07-25T10:00:00.000Z");
 		const newer = MakeThread("thread-newer", "2026-07-25T11:00:00.000Z");

@@ -1390,7 +1390,7 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 						}
 
 						thread_sequence += 1;
-						const thread_id = `thread_1378080849396121${thread_sequence}`;
+						const thread_id = `1378080849396121${thread_sequence}`;
 						const trace = backend_trace();
 						const item: ThreadListItem = {
 							activity_version: 0,

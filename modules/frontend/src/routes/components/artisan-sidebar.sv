@@ -29,6 +29,7 @@
 	import {
 		ApplyRootThreadListUpdate,
 		ProjectScopedThreadGroups,
+		ThreadRoutePath,
 	} from "$lib/root/thread-navigation";
 	import * as Sidebar from "$lib/components/ui/sidebar";
 
@@ -75,7 +76,7 @@
 				project_id: project.project_id,
 				title: "New thread",
 			});
-			yield* Effect.promise(() => goto(`/threads/${thread.thread_id}`));
+			yield* Effect.promise(() => goto(ThreadRoutePath(thread.thread_id)));
 		}).pipe(
 			Effect.ensuring(
 				Effect.sync(() => {
@@ -308,8 +309,8 @@
 								{#each group.threads as thread (thread.thread_id)}
 									<Sidebar.MenuSubItem>
 										<Sidebar.MenuSubButton
-											href={`/threads/${thread.thread_id}`}
-											isActive={page.url.pathname === `/threads/${thread.thread_id}`}
+											href={ThreadRoutePath(thread.thread_id)}
+											isActive={page.url.pathname === ThreadRoutePath(thread.thread_id)}
 											class="h-8 translate-x-0 rounded-lg pl-9 pr-2 text-sm"
 											title={thread.title}
 										>

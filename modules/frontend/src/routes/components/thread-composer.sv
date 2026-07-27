@@ -37,7 +37,9 @@
 	}: {
 		disabled?: boolean;
 		onpolicychange?: (policy: ThreadSessionPolicy) => void;
-		onsubmit?: (submission: ComposerSubmission) => Effect.Effect<void, { readonly message: string }>;
+		onsubmit?: (
+			submission: ComposerSubmission,
+		) => Effect.Effect<unknown, { readonly message: string }>;
 		policy?: ThreadSessionPolicy;
 	} = $props();
 

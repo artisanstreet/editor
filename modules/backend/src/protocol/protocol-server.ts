@@ -3260,7 +3260,7 @@ export function make_protocol_server_layer(
 							request.message_id,
 						);
 						const thread_id = yield* Option.match(existing_thread_id, {
-							onNone: () => snowflake_id.Make("thread"),
+							onNone: () => snowflake_id.MakeBare,
 							onSome: Effect.succeed,
 						});
 						const output = yield* router.RouteCommand({
