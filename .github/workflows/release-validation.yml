@@ -224,6 +224,10 @@ jobs:
                   }
                   $public_key_hex = node -e "const {createPublicKey}=require('node:crypto'); process.stdout.write(createPublicKey(process.env.ARTISAN_RELEASE_SIGNING_KEY_PEM).export({format:'der',type:'spki'}).toString('hex'))"
                   $env:ARTISAN_RELEASE_PUBLIC_KEY_HEX = $public_key_hex
+                  pnpm exec install-electron
+                  if (-not (Test-Path -LiteralPath "node_modules/electron/dist/electron.exe")) {
+                      throw "Electron runtime installation did not produce electron.exe"
+                  }
                   pnpm run package:desktop
                   cargo build --workspace --release --locked
                   node .scripts/package/build-distribution-release-entry.ts
