@@ -10,7 +10,7 @@ Branch continuity only. Durable status lives in
 - Branch: `master`
 - `master` is the GitHub default pre-release integration branch.
 - Work directly on `master`; do not create branches, worktrees, or pull requests
-  unless the user explicitly requests one.
+  unless explicitly requested.
 - Distribution uses a temporary native bootstrap from GitHub Releases and
   permanent `ae` ownership. npm is outside the release and install contract.
 
@@ -29,6 +29,11 @@ Branch continuity only. Durable status lives in
 
 ## Current Work and Remaining Integration
 
+- The rehabilitation PRD now requires an Orca-inspired root README with a
+  visual major-feature table and a complete, verified shipped-feature inventory.
+- The source-extension cleanup converted all 135 remaining frontend `.svelte`
+  components to the TypeScript-first `.sv` format and all eight tracked `.mjs`
+  test fixtures/loaders to `.ts`, including import and subprocess references.
 - Forge is the only owner of application state; legacy client-owned thread and
   project inputs are removed.
 - Thread, workspace-inspection, and Marketplace read handlers are extracted
@@ -59,15 +64,30 @@ Branch continuity only. Durable status lives in
   attachment IDs before persistence.
 - The runtime model/capability catalog is a typed Forge query filtered by the
   registered engine adapters. Production frontend code no longer owns a static
-  model catalog. Its curated inventory now contains only Codex, Claude Code, and
-  Grok Build; thinking and permission options use sparse standardized scales,
-  while speed options retain model-specific native multipliers and billing
-  semantics. OpenCode and Antigravity are removed pending real adapters.
+  model catalog. It curates Codex, Claude Code, Grok Build, and Cursor Agent.
+  Cursor statically curates Router/Auto, Composer 2.5, and Cursor Grok 4.5, then
+  materializes every account-returned CLI configuration without aliasing native
+  IDs. Provider inference covers major labs with an unknown-provider fallback;
+  encoded effort/Fast variants remain native without invented controls. Models
+  can carry an optional `disabled.reason`; runtime rejects them and the selector
+  renders the reason. OpenCode and Antigravity remain removed.
 - Public generic commands no longer accept `thread.create`; clients must use
   the idempotent create RPC and its Forge-issued Snowflake ID. Historical
   durable event schemas remain readable for replay.
 - `ae open` launches the paired browser. A future native-rendered client needs a
   Forge/CLI-owned public handoff and must not regain profile-secret access.
+- Browser WebSocket clients explicitly request `ArrayBuffer` binary delivery.
+  Without it, Chromium supplies MessagePack frames as `Blob`, causing the client
+  to close an authenticated `101 Switching Protocols` session before protocol
+  negotiation. Exhausted connection banners again offer the fixed
+  `artisan://forge/start` capability plus in-page retry. The per-user handler
+  targets stable native `ae`, while setup/doctor repair own registration and
+  Forge pairing remains inside `ae open`.
+- Codex app-server support is minimum-version based rather than exact-version
+  pinned. The adapter accepts additive JSON-RPC metadata while retaining
+  unambiguous routing validation, and emits canonical kebab-case sandbox values
+  (`read-only` / `workspace-write`) accepted by current Codex app-server
+  releases.
 - `ae` profiles, setup, doctor repair, launch configuration, and Forge
   environment bootstrap no longer contain or infer project roots. Doctor repair
   now restores installation/profile/protocol state without project input.
@@ -79,8 +99,19 @@ Branch continuity only. Durable status lives in
 
 ## Verification Snapshot
 
+- The source-extension migration passed frontend format/lint/build, root lint
+  and TypeScript, focused fixture tests (91 passed, 1 skipped), independent
+  review, and native format/Clippy. An aggregate run overlapped the concurrent
+  Cursor catalog edit and reached 1,430 passing tests plus 6 skips before five
+  transient catalog expectation mismatches. Aggregate formatting currently
+  reports the concurrently edited Cargo manifests. Bootstrap's 8 Rust tests
+  pass, while Windows Application Control blocks execution of the CLI Rust test
+  binary.
 - The catalog redesign passed formatting, lint, TypeScript, the frontend build,
-  focused suites, and 1,423 aggregate tests. Only three standalone Forge cases
+  focused suites, and 1,423 aggregate tests. Cursor's focused catalog
+  suite now passes 21 tests plus root TypeScript and the production frontend
+  build. Full validation exceeded the 120s capture window during aggregate tests.
+  Dependency preflight may still block on Electron's ignored install script. Only three standalone Forge cases
   failed because `Artisan Forge.exe` is absent; packaging is blocked by the
   missing offline Electron 43.1.1 runtime. Scoped
   distribution formatting and 108 focused bootstrap/distribution tests pass.
@@ -89,32 +120,139 @@ Branch continuity only. Durable status lives in
   Updates quiesce every running owned Forge profile, validate staged runtime
   semantics, restart the exact prior set, and restore the previous runtime on
   failure. Current versions require pointer/layout/integration/semantic health.
-  New installs stay partial until bounded setup/start and typed running status
-  finalize; legacy state maps pending. Uninstall stops all profiles, removes
+  New installs stay partial until bounded setup/start. Uninstall stops all profiles, removes
   owned integrations, and uses a verified out-of-tree deletion helper; data
   removal stays explicit. Start Menu actions target stable launchers; updates retain
   active/rollback versions, and native commands are bounded and tree-killed.
   Rust bootstrap/CLI checks, Clippy, 19 unit tests, Windows transport tests,
-  TypeScript, and focused artifact tests pass. Native release CI now emits the
+  TypeScript, and focused artifact tests pass. Native release CI emits the
   Windows bootstrap/checksum and embeds both Rust executables in the product
-  archive. Real released-asset qualification, website routing, Windows arm64,
-  macOS, and Linux product gates remain. The public landing page and script
-  endpoints are live; the first product GitHub Release is still required.
-  Candidate CI exposed and fixed Node 24 ESM resolution of extensionless
-  TypeScript imports in the distribution builder.
+  archive. `v0.1.0` was published from exact dry-run candidate
+  `30249509490` at commit `4b30c0d6cef24ab2c7201a22b3524edded7275c2`;
+  resume run `30251161900` restored, reverified, uploaded, redownloaded, and
+  finalized the same five manifest-bound assets. The public Windows transport
+  resolves the latest release, its checksum matches the downloaded native
+  bootstrap, and the bootstrap starts successfully. Windows arm64, macOS, and
+  Linux product gates remain.
 - Permanent `ae` now exposes update/uninstall, treats plain invocation as open
   only for a healthy installation, combines Forge and installation diagnostics,
   repairs only manifest-owned integrations, and retains Forge data by default.
   Missing/corrupt installed release trust fails without replacement while
   doctor remains diagnostic; bootstrap alone seeds public trust.
+- Sander's local `0.1.0` runtime was overlaid from the verified current
+  `.dist/forge` build and both installed CLI locations now use the current
+  release-mode Rust binary. The previous runtime is recoverable from
+  `%LOCALAPPDATA%\Artisan\.local-backup-20260727-112031`. Local acceptance
+  completed a fresh one-time pairing, WebSocket negotiation, authoritative
+  hydration, rendered the real application shell, submitted and persisted a
+  text-only message, entered the live agent-work state, and cancelled the test
+  run without browser exceptions or transport loss. The send path now uses
+  Effect 4's static `Queue.offerUnsafe` API, and Forge skips attachment inserts
+  for empty attachment arrays instead of invoking Drizzle `values([])`. Forge
+  static hosting now serves the SPA shell for extensionless client navigation
+  routes, including hard-refreshed thread URLs, while reserved API/framework and
+  missing asset paths remain 404; installed-runtime HTTP and browser hard-reload
+  acceptance pass.
+- The local runtime was rebuilt and overlaid again after removing Codex's exact
+  `0.142.5` gate. Focused engine coverage passed 45 tests with one skip;
+  TypeScript, frontend production build, and desktop build passed. The real
+  packaged-Forge/Codex acceptance passed against installed
+  `0.146.0-alpha.3.1`, including two streamed durable answers and restart
+  restoration. A fresh browser pairing then showed the active `Working` label
+  and rendered `APP_SERVER_FIXED` from the real app-server in six seconds.
+- Final compatibility hardening rejects ambiguous envelopes with preserved
+  invalid request IDs and updates the active-work source contract. Focused
+  engine/frontend coverage passes 53 tests with one skip; formatting, lint,
+  TypeScript, and the production frontend build pass. Full aggregate tests
+  exceeded the five-minute capture window. Native Clippy remains blocked by the
+  pre-existing `items_after_test_module` ordering in
+  `modules/cli/rust/process.rs`, outside this compatibility change.
+- The thread composer toolbar now exposes only model selection and send.
+  File-picker, effort, permission, speed, voice, active-run stop, and legacy
+  Build/Plan controls are absent; image paste/drop remains supported.
+  `workflow_mode` is removed from current policy, catalog, persistence mapping,
+  provider options, and Codex app-server requests. The old SQLite column remains
+  inert for backward database compatibility.
+- Active work no longer renders the flat `Working` divider. It uses the shipped
+  Artisan bitmap sprite with rotating `@artisan/data` verbs, yields to the latest
+  concrete active engine event, and respects reduced motion with a still frame.
+  Formatting, lint, TypeScript, 77 focused tests, and the production frontend
+  build pass. A later full validation run was stopped at the user's request to
+  avoid repeatedly rebuilding the product during UI iteration.
+- The silent-black Forge startup was reproduced against Sander's installed
+  runtime and fixed at two boundaries. The connection banner presents the
+  current state before subscribing to later changes. The typed hello contract
+  now explicitly distinguishes `fresh` from `resume`; a fresh stateless client
+  starts at Forge's transactionally consistent authoritative journal
+  watermark/current cursors instead of replaying the entire durable journal,
+  while genuine reconnects still replay deltas. CDP acceptance confirmed HTTP
+  101, typed control/stream hello and ready frames, successful fresh pairing,
+  authoritative project/thread hydration, a rendered shell, and no browser
+  errors. A speculative pre-activation WebSocket buffer was removed after
+  independent review found lifecycle and memory-bound risks. The synchronized
+  local runtime is live at
+  `http://127.0.0.1:52985/`; rollback copies are under
+  `%LOCALAPPDATA%\Artisan\.local-backup-20260727-130139` and
+  `.local-backup-20260727-130614`, with the final pre-contract runtime at
+  `.local-backup-20260727-131208`. Twenty-five focused
+  protocol/WebSocket/lifecycle tests and TypeScript pass. The code fix is
+  committed on `master` as `63ace8b`; it has not been pushed.
+- The missing `artisan://` handoff was traced to the native Rust installer:
+  Electron Builder protocol metadata never registers an unpacked `dir` target,
+  and Rust activation previously recorded only PATH. Windows now registers the
+  exact per-user command `"stable ae.exe" protocol "%1"`; the hidden CLI command
+  accepts only `artisan://forge/start` and reuses `ae open`. First-time setup and
+  `ae doctor --fix` repair missing owned state, doctor reports protocol health,
+  foreign/partial unowned handlers are preserved, repair records ownership
+  before registry mutation, and uninstall removes only an exact owned tree.
+  Native tests pass 29 cases including an isolated HKCU lifecycle test; scoped
+  Clippy, TypeScript, banner tests, release native build, frontend/Forge build,
+  real registry repair/drift preservation, OS URL launch, HTTP 200, and local
+  Forge status all pass. Sander's synchronized install is running at
+  `http://127.0.0.1:52985/`; its pre-change runtime is recoverable from
+  `%LOCALAPPDATA%\Artisan\.local-backup-20260727-133134`.
+- Forge now allocates new thread identities as bare Snowflake decimals rather
+  than `thread_<snowflake>`. Every frontend route builder uses the canonical
+  bare segment; historical persisted `thread_` identities resolve through a
+  compatibility lookup and legacy URLs replace-navigate to their canonical
+  form. Thread navigation mounts at the transcript bottom with a direct,
+  non-animated `scrollTop` assignment. A locally accepted user-message command
+  waits for its durable projection, then smoothly aligns that user card 16px
+  below the transcript top. A compensating end spacer shrinks as streamed
+  assistant content grows, so stream patches never retrigger or fight the
+  scroll. Intake-question responses do not arm user-message alignment.
+  Thirty-one focused frontend/protocol tests, both Forge thread-creation
+  integration cases, root TypeScript, frontend lint, and scoped lint pass.
+  Per the user's request, this milestone did not rebuild the product.
 - Disk-I/O hardening, managed Editor packaging, and focused regressions pass.
   Exact Codex-binary write measurement, CI Authenticode verification, and
   clean-runner packaging remain release qualifications.
-
-## Handoff Maintenance
-
-- Keep this file below 120 lines and 8 KiB.
-- Replace resolved entries with the next actionable state; do not append
-  completed milestone history, transcripts, machine incident detail, secrets, or
-  artifact hashes.
-- Promote durable verified truth to the completion matrix or relevant PRD.
+- The installed Forge remains bound to `127.0.0.1:52985`, and the already
+  running Portless proxy now has a persistent `artisan` alias to that port.
+  `https://artisan.localhost/` returns HTTP 200 and
+  `http://artisan.localhost/` redirects to HTTPS. The installed 0.1.0 CLI
+  rejects an explicit HTTPS localhost origin, so pairing was launched with
+  `ae open --origin http://artisan.localhost`; Portless performs the HTTPS
+  upgrade while preserving the pairing fragment. No product rebuild was done.
+- Interaction-triggered Forge disconnects were traced to the transport client
+  discarding a fresh session's authoritative `replay.complete` journal/cursor
+  baseline. The first live command event consequently looked like a journal
+  gap and terminated the otherwise healthy socket. The client now adopts the
+  non-regressing replay boundary, a single WebSocket demultiplexer owns both
+  logical channels, initial send failures remain typed and unregister their
+  request instead of hanging, and normal Forge session interruption no longer
+  becomes an unhandled promise rejection. Thread routes also use debounced
+  thread-event invalidation to resync the canonical conversation when a live
+  projection misses the command-to-patch handoff. The installed runtime was
+  rebuilt and overlaid; its preceding state remains recoverable from
+  `%LOCALAPPDATA%\Artisan\.local-backup-20260727-144412`.
+  Direct-Forge and Portless command/assistant completion acceptance pass. A
+  fresh paired Chrome session then created a thread, submitted a real prompt,
+  rendered the user and completed assistant messages live without reload, and
+  showed neither reconnecting nor connection-error state. A long persisted
+  thread opened with zero remaining scroll distance. Forty-six focused tests,
+  root TypeScript, scoped formatting/lint, the production frontend build, and
+  the desktop/Forge build pass. Full validation remains blocked first by the
+  pre-existing formatter mismatch in
+  `docs/status/backend-completion-matrix.md`; the aggregate Vitest run also
+  exceeded a bounded two-minute capture without reporting a failure.

@@ -129,7 +129,7 @@ export const make_client_connection_lifecycle = (
 				.pipe(Effect.mapError(map_port_error));
 		const send_active = (active: ActiveClientSession, envelope: InboundControlEnvelope) =>
 			send_control(active, envelope).pipe(
-				Effect.catch(() =>
+				Effect.tapError(() =>
 					Effect.all([active.ports.control_port.Close, active.ports.stream_port.Close], {
 						concurrency: "unbounded",
 						discard: true,
@@ -448,6 +448,7 @@ export const make_client_connection_lifecycle = (
 					case "workspace.conflict.list.snapshot":
 						return handlers.subscriptions.HandleUpdate(envelope);
 					case "replay.complete":
+						return handlers.subscriptions.ApplyReplayComplete(envelope);
 					case "subscription.stopped":
 						return Effect.void;
 					case "welcome":

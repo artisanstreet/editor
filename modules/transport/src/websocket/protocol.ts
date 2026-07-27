@@ -1,7 +1,12 @@
 import { Cause, Deferred, Effect, Queue, Schema } from "effect";
 import { RpcSerialization } from "effect/unstable/rpc";
 
-import type { MessagePortAdapterOptions, MessagePortError, MessagePortLike } from "../message-port";
+import type {
+	MessagePortAdapterOptions,
+	MessagePortClose,
+	MessagePortError,
+	MessagePortLike,
+} from "../message-port";
 import { MessagePortError as MessagePortFailure } from "../message-port";
 import type { MessagePortConnection } from "../connector";
 import { DecodeTransportFrame } from "../wire";
@@ -86,10 +91,10 @@ export const EncodeWebSocketTransportFrame = (channel: WebSocketChannel, input: 
 	);
 
 /** Adapts one channel on a shared socket into the established bounded MessagePort contract. */
-export const make_websocket_message_port = (
+const MakeWebSocketMultiplexer = (
 	endpoint: WebSocketEndpoint,
-	channel: WebSocketChannel,
 	options: MessagePortAdapterOptions = {},
+	accepted_channel?: WebSocketChannel,
 ) => {
 	const incoming_capacity = options.incoming_capacity ?? 256;
 
@@ -104,121 +109,190 @@ export const make_websocket_message_port = (
 			);
 		}
 
+		const raw_capacity = Math.min(Number.MAX_SAFE_INTEGER, incoming_capacity * 2);
 		const raw_frames = yield* Effect.acquireRelease(
+			Queue.dropping<unknown, MessagePortError>(raw_capacity),
+			Queue.shutdown,
+		);
+		const control_incoming = yield* Effect.acquireRelease(
 			Queue.dropping<unknown, MessagePortError>(incoming_capacity),
 			Queue.shutdown,
 		);
-		const incoming = yield* Effect.acquireRelease(
+		const stream_incoming = yield* Effect.acquireRelease(
 			Queue.dropping<unknown, MessagePortError>(incoming_capacity),
 			Queue.shutdown,
 		);
-		const closed = yield* Deferred.make<{
-			readonly code: "closed" | "message_error" | "overflow";
-			readonly dropped_messages: number;
-		}>();
+		const closed = yield* Deferred.make<MessagePortClose>();
+		let close_state: MessagePortClose | undefined;
+		let socket_closed = false;
 		const Fail = (code: "message_error" | "overflow", cause: unknown) =>
 			new MessagePortFailure({ cause, code, dropped_messages: code === "overflow" ? 1 : 0 });
-		const Finish = (code: "closed" | "message_error" | "overflow", cause?: unknown) =>
-			Effect.sync(() => {
-				Deferred.doneUnsafe(
-					closed,
-					Effect.succeed({
-						code,
-						dropped_messages: code === "overflow" ? 1 : 0,
-					}),
-				);
-				if (cause !== undefined) {
-					Queue.failCauseUnsafe(
-						incoming,
-						Cause.fail(Fail(code as "message_error" | "overflow", cause)),
-					);
+		const close_socket = () => {
+			if (!socket_closed) {
+				socket_closed = true;
+				try {
+					endpoint.close();
+				} catch {
+					/** Socket close is best-effort after local transport state is closed. */
 				}
-			});
+			}
+		};
+		const finish = (
+			state: MessagePortClose,
+			failure?: MessagePortError,
+			close_endpoint = false,
+		) => {
+			if (close_state) {
+				return;
+			}
+
+			close_state = state;
+			Deferred.doneUnsafe(closed, Effect.succeed(state));
+			const queue_failure =
+				failure ??
+				new MessagePortFailure({
+					cause: new Error("WebSocket closed"),
+					code: "closed",
+					dropped_messages: state.dropped_messages,
+				});
+			const cause = Cause.fail(queue_failure);
+			Queue.failCauseUnsafe(control_incoming, cause);
+			Queue.failCauseUnsafe(stream_incoming, cause);
+
+			if (close_endpoint) {
+				close_socket();
+			}
+		};
 
 		const remove_message = endpoint.add_message_listener((raw) => {
-			if (!Queue.offerUnsafe(raw_frames, raw)) {
-				Queue.failCauseUnsafe(
-					raw_frames,
-					Cause.fail(Fail("overflow", new Error("WebSocket frame buffer overflowed"))),
+			if (!close_state && !Queue.offerUnsafe(raw_frames, raw)) {
+				const failure = Fail(
+					"overflow",
+					new Error("WebSocket physical frame buffer overflowed"),
 				);
+				finish({ code: "overflow", dropped_messages: 1 }, failure, true);
 			}
 		});
 		const remove_error = endpoint.add_error_listener((cause) => {
-			Queue.failCauseUnsafe(raw_frames, Cause.fail(Fail("message_error", cause)));
+			const failure = Fail("message_error", cause);
+			finish({ code: "message_error", dropped_messages: 0 }, failure, true);
 		});
 		const remove_close = endpoint.add_close_listener(() => {
-			Queue.failCauseUnsafe(
-				raw_frames,
-				Cause.fail(Fail("message_error", new Error("WebSocket closed"))),
-			);
+			finish({ code: "closed", dropped_messages: 0 });
 		});
 		yield* Effect.addFinalizer(() =>
 			Effect.sync(() => {
 				remove_message();
 				remove_error();
 				remove_close();
-			}).pipe(
-				Effect.andThen(Finish("closed")),
-				Effect.tap(() => Effect.sync(endpoint.close)),
-			),
+				finish({ code: "closed", dropped_messages: 0 }, undefined, true);
+			}),
 		);
 
 		yield* Effect.forever(
 			Queue.take(raw_frames).pipe(
 				Effect.flatMap(DecodeWebSocketEnvelope),
 				Effect.flatMap((envelope) =>
-					envelope.channel === channel
-						? Queue.offer(incoming, envelope.payload)
-						: Effect.void,
+					Effect.sync(() => {
+						if (
+							accepted_channel !== undefined &&
+							envelope.channel !== accepted_channel
+						) {
+							return;
+						}
+						const incoming =
+							envelope.channel === "control" ? control_incoming : stream_incoming;
+						if (!Queue.offerUnsafe(incoming, envelope.payload)) {
+							const failure = Fail(
+								"overflow",
+								new Error(
+									`WebSocket ${envelope.channel} channel buffer overflowed`,
+								),
+							);
+							finish({ code: "overflow", dropped_messages: 1 }, failure, true);
+						}
+					}),
 				),
 			),
 		).pipe(
-			Effect.catchCause((cause) => Finish("message_error", Cause.squash(cause))),
+			Effect.catchCause((cause) =>
+				Cause.hasInterruptsOnly(cause)
+					? Effect.void
+					: Effect.sync(() => {
+							const failure = Fail("message_error", Cause.squash(cause));
+							finish({ code: "message_error", dropped_messages: 0 }, failure, true);
+						}),
+			),
 			Effect.forkScoped,
 		);
 
-		const Close = Finish("closed").pipe(Effect.tap(() => Effect.sync(endpoint.close)));
-		const Send = (message: unknown) =>
-			EncodeWebSocketTransportFrame(channel, message).pipe(
-				Effect.flatMap((encoded) =>
-					Effect.try({
-						try: () => endpoint.send(encoded),
-						catch: (cause) =>
-							new MessagePortFailure({ cause, code: "send", dropped_messages: 0 }),
-					}),
-				),
-				Effect.mapError((cause) =>
-					cause instanceof MessagePortFailure
-						? cause
-						: new MessagePortFailure({ cause, code: "send", dropped_messages: 0 }),
-				),
-			);
-
-		return {
+		const Close = Effect.sync(() =>
+			finish({ code: "closed", dropped_messages: 0 }, undefined, true),
+		);
+		const MakePort = (
+			channel: WebSocketChannel,
+			incoming: Queue.Queue<unknown, MessagePortError>,
+		): MessagePortLike => ({
 			Close,
 			Closed: Deferred.await(closed),
 			Receive: Queue.take(incoming),
-			Send,
-		} satisfies MessagePortLike;
+			Send: (message: unknown) =>
+				EncodeWebSocketTransportFrame(channel, message).pipe(
+					Effect.flatMap((encoded) =>
+						Effect.try({
+							try: () => {
+								if (close_state) {
+									throw new MessagePortFailure({
+										cause: new Error("cannot send after WebSocket close"),
+										code: "closed",
+										dropped_messages: close_state.dropped_messages,
+									});
+								}
+								endpoint.send(encoded);
+							},
+							catch: (cause) =>
+								cause instanceof MessagePortFailure
+									? cause
+									: new MessagePortFailure({
+											cause,
+											code: "send",
+											dropped_messages: 0,
+										}),
+						}),
+					),
+					Effect.mapError((cause) =>
+						cause instanceof MessagePortFailure
+							? cause
+							: new MessagePortFailure({ cause, code: "send", dropped_messages: 0 }),
+					),
+				),
+		});
+
+		return {
+			control_port: MakePort("control", control_incoming),
+			stream_port: MakePort("stream", stream_incoming),
+		} satisfies MessagePortConnection;
 	});
 };
+
+/**
+ * Adapts one channel on a socket into the established bounded MessagePort contract.
+ * A socket requiring both channels must use MakeWebSocketConnection so it has one owner.
+ */
+export const make_websocket_message_port = (
+	endpoint: WebSocketEndpoint,
+	channel: WebSocketChannel,
+	options: MessagePortAdapterOptions = {},
+) =>
+	MakeWebSocketMultiplexer(endpoint, options, channel).pipe(
+		Effect.map((connection) =>
+			channel === "control" ? connection.control_port : connection.stream_port,
+		),
+	);
 
 /** Opens the two existing logical transport ports over one shared WebSocket endpoint. */
 export const MakeWebSocketConnection = (
 	endpoint: WebSocketEndpoint,
 	options: MessagePortAdapterOptions = {},
 ): Effect.Effect<MessagePortConnection, MessagePortError, import("effect").Scope.Scope> =>
-	Effect.gen(function* () {
-		const control_port: MessagePortLike = yield* make_websocket_message_port(
-			endpoint,
-			"control",
-			options,
-		);
-		const stream_port: MessagePortLike = yield* make_websocket_message_port(
-			endpoint,
-			"stream",
-			options,
-		);
-
-		return { control_port, stream_port };
-	});
+	MakeWebSocketMultiplexer(endpoint, options);

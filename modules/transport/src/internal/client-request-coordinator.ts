@@ -50,7 +50,7 @@ export interface ClientRequestCoordinator {
 	) => Effect.Effect<ControlRpcSuccessFor<Request>, ArtisanClientError>;
 	readonly ResetConnection: Effect.Effect<void>;
 	readonly Resolve: (envelope: PendingResultEnvelope) => Effect.Effect<void, ArtisanClientError>;
-	readonly Retry: Effect.Effect<void>;
+	readonly Retry: Effect.Effect<void, ArtisanClientError>;
 }
 
 /** Builds the exact-envelope retry and correlation coordinator. */
@@ -93,6 +93,18 @@ export const make_client_request_coordinator = (
 					},
 				];
 			});
+		const unregister_failed_send = (request: PendingRequest) =>
+			Ref.update(state, (current) => {
+				if (current.pending.get(request.envelope.message_id) !== request) {
+					return current;
+				}
+
+				const pending = new Map(current.pending);
+
+				pending.delete(request.envelope.message_id);
+
+				return { ...current, pending };
+			});
 
 		const request = <Request extends PendingRequestEnvelope>(envelope: Request) =>
 			Effect.gen(function* () {
@@ -131,7 +143,9 @@ export const make_client_request_coordinator = (
 							),
 						);
 					case "Registered":
-						yield* send_current(envelope);
+						yield* send_current(envelope).pipe(
+							Effect.tapError(() => unregister_failed_send(pending)),
+						);
 				}
 
 				return (yield* Deferred.await(deferred).pipe(

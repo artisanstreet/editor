@@ -80,6 +80,9 @@ describe("Barekey docs shell reset", () => {
 		expect(controller).toContain("Queue.offerUnsafe(action_queue");
 		expect(controller).not.toContain(".unsafeOffer(");
 		expect(controller).toContain("Effect.forkIn(");
+		expect(controller).toContain("RunAuthoritativeSubscription(");
+		expect(controller).toContain("client.Events.pipe(");
+		expect(controller).toContain('Stream.debounce("50 millis")');
 		expect(controller).toContain("update.batch.thread_id !== thread_id");
 		expect(controller).toContain("update.batch.conversation_id !== conversation_id");
 		expect(controller).toContain("!CanReplaceConversationSnapshot(snapshot, next)");
@@ -95,6 +98,8 @@ describe("Barekey docs shell reset", () => {
 		const message = Read("modules/frontend/src/routes/components/conversation-message.sv");
 
 		expect(workspace).toContain("bind:viewportRef={viewport}");
+		expect(workspace).toContain("const PositionLoadedThread = async () =>");
+		expect(workspace).toContain("await tick();");
 		expect(workspace).toContain("ConversationBottomScrollTop(");
 		expect(workspace).toContain("NewestConversationUserMessage(current_items");
 		expect(workspace).toContain("ConversationEndSpaceHeight(");

@@ -84,6 +84,7 @@ interface LiveConnection {
 
 /** Configures deterministic protocol behavior used by transport integration tests. */
 export interface FakeProtocolOptions {
+	readonly baseline_journal_sequence?: number;
 	readonly duplicate_query_result?: boolean;
 	readonly heartbeat_after_welcome?: boolean;
 	readonly query_delay_ms?: number;
@@ -149,6 +150,7 @@ function guidance_hash(content: string) {
 
 /** Creates a durable in-memory ProtocolServer with connection-local projections. */
 export function make_fake_protocol_server(options: FakeProtocolOptions = {}): FakeProtocolHarness {
+	const baseline_journal_sequence = options.baseline_journal_sequence ?? 0;
 	const acknowledgements: Array<AckEnvelope> = [];
 	const command_attempts: Array<CommandEnvelope> = [];
 	const commands = new Map<string, StoredCommand>();
@@ -351,7 +353,7 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 				version: 1,
 			},
 			joins: [],
-			journal_sequence: events.at(-1)?.journal_sequence ?? 0,
+			journal_sequence: events.at(-1)?.journal_sequence ?? baseline_journal_sequence,
 		};
 
 		graphs.set(group_id, graph);
@@ -515,11 +517,16 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 
 				negotiated = true;
 				live_connections.add(live_connection);
-				const replay = events.filter(
-					(event) => event.journal_sequence > hello.payload.last_journal_sequence,
-				);
+				const replay =
+					hello.payload.resume_mode === "fresh"
+						? []
+						: events.filter(
+								(event) =>
+									event.journal_sequence > hello.payload.last_journal_sequence,
+							);
 				const current_cursors = ordered_cursors(events);
-				const journal_sequence = events.at(-1)?.journal_sequence ?? 0;
+				const journal_sequence =
+					events.at(-1)?.journal_sequence ?? baseline_journal_sequence;
 
 				yield* enqueue({
 					...backend_trace(),
@@ -596,7 +603,7 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 					return;
 				}
 
-				const journal_sequence = events.length + 1;
+				const journal_sequence = baseline_journal_sequence + events.length + 1;
 				let event: EventEnvelope;
 
 				if (command.payload.type === "agent_instance.rename") {
@@ -773,7 +780,7 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 					return;
 				}
 
-				const journal_sequence = events.length + 1;
+				const journal_sequence = baseline_journal_sequence + events.length + 1;
 				const stream_id = `thread:${internal_thread_id}`;
 				const sequence = events.filter((event) => event.stream_id === stream_id).length + 1;
 				const event: EventEnvelope = {
@@ -885,7 +892,7 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 					return;
 				}
 
-				const journal_sequence = events.length + 1;
+				const journal_sequence = baseline_journal_sequence + events.length + 1;
 				const stream_id = "settings:guidance";
 				const sequence = events.filter((event) => event.stream_id === stream_id).length + 1;
 				const content =
@@ -1244,7 +1251,7 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 									updated_at: mutation.sent_at,
 									version: workspace_change.version + 1,
 								};
-				const journal_sequence = events.length + 1;
+				const journal_sequence = baseline_journal_sequence + events.length + 1;
 				const stream_id = `thread:${mutation.thread_id}`;
 				const sequence = events.filter((event) => event.stream_id === stream_id).length + 1;
 				const event: EventEnvelope = {
@@ -1349,7 +1356,7 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 				});
 				yield* enqueue({
 					...backend_trace(),
-					journal_sequence: events.at(-1)?.journal_sequence ?? 0,
+					journal_sequence: events.at(-1)?.journal_sequence ?? baseline_journal_sequence,
 					kind: "thread.list.snapshot",
 					payload: { threads: [...threads.values()] },
 					sequence: 0,
@@ -1414,7 +1421,7 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 							...trace,
 							causation_id: input.message_id,
 							correlation_id: input.message_id,
-							journal_sequence: events.length + 1,
+							journal_sequence: baseline_journal_sequence + events.length + 1,
 							kind: "event",
 							payload: { title: input.payload.title, type: "thread.created" },
 							sequence: 1,
@@ -1448,7 +1455,8 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 							correlation_id: input.message_id,
 							kind: "thread.list.query.result",
 							payload: {
-								journal_sequence: events.at(-1)?.journal_sequence ?? 0,
+								journal_sequence:
+									events.at(-1)?.journal_sequence ?? baseline_journal_sequence,
 								threads: [...threads.values()],
 							},
 						};
@@ -1595,7 +1603,7 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 				return;
 			}
 
-			const journal_sequence = events.length + 1;
+			const journal_sequence = baseline_journal_sequence + events.length + 1;
 			const stream_id = `thread:${thread_id}`;
 			const sequence = events.filter((event) => event.stream_id === stream_id).length + 1;
 			const event_id = `thread_erased_${thread_id}`;

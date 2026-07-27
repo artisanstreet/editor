@@ -1,10 +1,10 @@
-import { Effect } from "effect";
+import { Effect, Fiber } from "effect";
 import { describe, expect, it } from "vitest";
 
 import {
 	DecodeWebSocketTransportFrame,
 	EncodeWebSocketTransportFrame,
-	make_websocket_message_port,
+	MakeWebSocketConnection,
 	type WebSocketEndpoint,
 } from "@artisan/transport/websocket/protocol";
 import {
@@ -20,6 +20,7 @@ const make_pair = () => {
 		const errors = new Set<Listener<unknown>>();
 		const closes = new Set<Listener<void>>();
 		let send: (data: Uint8Array) => void = (_data) => undefined;
+		let close_count = 0;
 		const endpoint: WebSocketEndpoint = {
 			add_close_listener: (listener) => (closes.add(listener), () => closes.delete(listener)),
 			add_error_listener: (listener) => (errors.add(listener), () => errors.delete(listener)),
@@ -27,11 +28,16 @@ const make_pair = () => {
 				messages.add(listener),
 				() => messages.delete(listener)
 			),
-			close: () => closes.forEach((listener) => listener()),
+			close: () => {
+				close_count += 1;
+				closes.forEach((listener) => listener());
+			},
 			send: (data) => send(data),
 		};
 		return {
+			close_count: () => close_count,
 			endpoint,
+			message_listener_count: () => messages.size,
 			receive: (value: unknown) => messages.forEach((listener) => listener(value)),
 			set_peer: (next: { readonly receive: (value: unknown) => void }) => {
 				send = (data) => next.receive(data);
@@ -43,7 +49,7 @@ const make_pair = () => {
 	left.set_peer(right);
 	right.set_peer(left);
 
-	return [left.endpoint, right.endpoint] as const;
+	return [left, right] as const;
 };
 
 const hello = {
@@ -63,25 +69,14 @@ describe("WebSocket transport framing", () => {
 	});
 
 	it("keeps control and stream frames separated while preserving binary chunks", async () => {
-		const [left_endpoint, right_endpoint] = make_pair();
+		const [left, right] = make_pair();
 		const output = await Effect.runPromise(
 			Effect.scoped(
 				Effect.gen(function* () {
-					const left_control = yield* make_websocket_message_port(
-						left_endpoint,
-						"control",
-					);
-					const left_stream = yield* make_websocket_message_port(left_endpoint, "stream");
-					const right_control = yield* make_websocket_message_port(
-						right_endpoint,
-						"control",
-					);
-					const right_stream = yield* make_websocket_message_port(
-						right_endpoint,
-						"stream",
-					);
-					yield* left_control.Send(hello);
-					yield* left_stream.Send({
+					const left_connection = yield* MakeWebSocketConnection(left.endpoint);
+					const right_connection = yield* MakeWebSocketConnection(right.endpoint);
+					yield* left_connection.control_port.Send(hello);
+					yield* left_connection.stream_port.Send({
 						connection_id: "connection_1",
 						frame: {
 							channel_id: "channel_1",
@@ -95,8 +90,8 @@ describe("WebSocket transport framing", () => {
 					});
 
 					return {
-						control: yield* right_control.Receive,
-						stream: yield* right_stream.Receive,
+						control: yield* right_connection.control_port.Receive,
+						stream: yield* right_connection.stream_port.Receive,
 					};
 				}),
 			),
@@ -132,5 +127,98 @@ describe("WebSocket transport framing", () => {
 		expect(await Effect.runPromise(DecodeWebSocketTransportFrame(encoded, "control"))).toEqual(
 			hello,
 		);
+	});
+
+	it("decodes interleaved traffic once without overflowing active channel consumers", async () => {
+		const [left, right] = make_pair();
+		const count = 150;
+		const received = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const left_connection = yield* MakeWebSocketConnection(left.endpoint, {
+						incoming_capacity: 256,
+					});
+					const right_connection = yield* MakeWebSocketConnection(right.endpoint, {
+						incoming_capacity: 256,
+					});
+					expect(right.message_listener_count()).toBe(1);
+					const controls = yield* Effect.forEach(
+						Array.from({ length: count }),
+						() => right_connection.control_port.Receive,
+						{ concurrency: "unbounded" },
+					).pipe(Effect.forkScoped);
+					const streams = yield* Effect.forEach(
+						Array.from({ length: count }),
+						() => right_connection.stream_port.Receive,
+						{ concurrency: "unbounded" },
+					).pipe(Effect.forkScoped);
+
+					for (let index = 0; index < count; index += 1) {
+						yield* left_connection.control_port.Send({
+							...hello,
+							attempt_id: `attempt_${index}`,
+						});
+						yield* left_connection.stream_port.Send({
+							connection_id: "connection_1",
+							frame: {
+								channel_id: "channel_1",
+								channel_sequence: index + 1,
+								data: Uint8Array.of(index % 256),
+								kind: "stream.chunk",
+								stream_id: "stream_1",
+							},
+							kind: "transport.stream",
+							transport_version: 1,
+						});
+						if (index % 32 === 31) {
+							yield* Effect.sleep("1 millis");
+						}
+					}
+
+					return {
+						controls: yield* Fiber.join(controls),
+						streams: yield* Fiber.join(streams),
+					};
+				}),
+			),
+		);
+
+		expect(received.controls).toHaveLength(count);
+		expect(received.streams).toHaveLength(count);
+		expect((received.controls.at(-1) as { attempt_id: string }).attempt_id).toBe(
+			`attempt_${count - 1}`,
+		);
+	});
+
+	it("closes a shared socket exactly once when either logical port closes", async () => {
+		const [left] = make_pair();
+		const closed = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const connection = yield* MakeWebSocketConnection(left.endpoint);
+					yield* connection.control_port.Close;
+					yield* connection.stream_port.Close;
+					return yield* connection.control_port.Closed;
+				}),
+			),
+		);
+
+		expect(closed).toEqual({ code: "closed", dropped_messages: 0 });
+		expect(left.close_count()).toBe(1);
+	});
+
+	it("treats scoped decoder interruption as a normal shared close", async () => {
+		const [left] = make_pair();
+		await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					yield* MakeWebSocketConnection(left.endpoint);
+					expect(left.message_listener_count()).toBe(1);
+				}),
+			),
+		);
+
+		expect(left.close_count()).toBe(1);
+		expect(left.message_listener_count()).toBe(0);
 	});
 });

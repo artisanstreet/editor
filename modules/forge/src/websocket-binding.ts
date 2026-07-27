@@ -1,6 +1,6 @@
 import type { IncomingMessage } from "node:http";
 
-import { Data, Effect, Exit, FiberSet, Scope } from "effect";
+import { Cause, Data, Effect, Exit, FiberSet, Scope } from "effect";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 
 import type { WebSocketEndpoint } from "@artisan/transport/websocket/protocol";
@@ -84,7 +84,7 @@ export const BindForgeWebSocket = (
 ): Effect.Effect<ForgeTransportHandle, ForgeWebSocketFailure> =>
 	Effect.gen(function* () {
 		const session_scope = yield* Scope.make();
-		const run_session = yield* FiberSet.makeRuntimePromise().pipe(
+		const run_session = yield* FiberSet.makeRuntime().pipe(
 			Effect.provideService(Scope.Scope, session_scope),
 		);
 		return yield* Effect.try({
@@ -94,6 +94,7 @@ export const BindForgeWebSocket = (
 					noServer: true,
 				});
 				const sockets = new Set<WebSocket>();
+				const pending_upgrades = new Set<import("node:stream").Duplex>();
 
 				const on_upgrade = (
 					request: IncomingMessage,
@@ -111,8 +112,15 @@ export const BindForgeWebSocket = (
 						write_upgrade_rejection(socket, 403);
 						return;
 					}
-					void run_session(ForgeSessionAllowed(request, input)).then((session) => {
-						if (!session) {
+					pending_upgrades.add(socket);
+					socket.once("close", () => pending_upgrades.delete(socket));
+					run_session(ForgeSessionAllowed(request, input)).addObserver((exit) => {
+						pending_upgrades.delete(socket);
+						if (Exit.isFailure(exit)) {
+							socket.destroy();
+							return;
+						}
+						if (!exit.value) {
 							write_upgrade_rejection(socket, 401);
 							return;
 						}
@@ -130,20 +138,25 @@ export const BindForgeWebSocket = (
 						is_loopback: is_loopback(request.socket.remoteAddress),
 						remote_address: request.socket.remoteAddress,
 					};
-					void run_session(
+					run_session(
 						input.ServeWebSocket(websocket_endpoint(socket), peer).pipe(
 							Effect.catchCause((cause) =>
-								Effect.sync(() => {
-									if (socket.readyState === WebSocket.OPEN) {
-										socket.close(1011, "Artisan transport session failed");
-									}
-									console.error(
-										JSON.stringify({
-											kind: "artisan:forge-session-failed",
-											message: String(cause),
+								Cause.hasInterruptsOnly(cause)
+									? Effect.void
+									: Effect.sync(() => {
+											if (socket.readyState === WebSocket.OPEN) {
+												socket.close(
+													1011,
+													"Artisan transport session failed",
+												);
+											}
+											console.error(
+												JSON.stringify({
+													kind: "artisan:forge-session-failed",
+													message: String(cause),
+												}),
+											);
 										}),
-									);
-								}),
 							),
 						),
 					);
@@ -158,6 +171,10 @@ export const BindForgeWebSocket = (
 							for (const socket of sockets) {
 								socket.close(1001, "Artisan Forge is stopping");
 							}
+							for (const socket of pending_upgrades) {
+								socket.destroy();
+							}
+							pending_upgrades.clear();
 							await new Promise<void>((accept) =>
 								websocket_server.close(() => accept()),
 							);

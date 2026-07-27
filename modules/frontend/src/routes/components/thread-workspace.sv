@@ -159,12 +159,17 @@
 		);
 	};
 
-	onMount(() => {
-		if (viewport === null) return;
+	const PositionLoadedThread = async () => {
+		await tick();
+		if (destroyed || viewport === null) return;
 		viewport.scrollTop = ConversationBottomScrollTop(
 			viewport.scrollHeight,
 			viewport.clientHeight,
 		);
+	};
+
+	onMount(() => {
+		void PositionLoadedThread();
 	});
 
 	onDestroy(() => {

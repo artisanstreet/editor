@@ -14,7 +14,10 @@
 		MakeConversationViewState,
 		type ConversationViewState,
 	} from "$lib/conversation/store";
-	import { RunConversationSubscription } from "$lib/conversation/subscription";
+	import {
+		RunAuthoritativeSubscription,
+		RunConversationSubscription,
+	} from "$lib/conversation/subscription";
 	import {
 		BuildThreadMessageCommand,
 		SubmitDurableCommand,
@@ -22,7 +25,7 @@
 	} from "$lib/thread-interaction/commands";
 	import type { ComposerSubmission } from "$lib/composer/image-attachments";
 	import { ResolveThreadRoute } from "$lib/root/thread-navigation";
-	import { Effect, Exit, Option, Queue, Scope } from "effect";
+	import { Effect, Exit, Option, Queue, Scope, Stream } from "effect";
 	import ThreadWorkspace from "../../components/thread-workspace.sv";
 
 	let { thread_id: route_thread_id }: { readonly thread_id: string } = $props();
@@ -300,6 +303,19 @@
 		RunConversationSubscription(
 			client.SubscribeConversation(thread_id),
 			ApplyUpdate,
+			Resync,
+		),
+		thread_scope,
+	);
+	yield* Effect.forkIn(
+		RunAuthoritativeSubscription(
+			Effect.succeed(
+				client.Events.pipe(
+					Stream.filter((event) => event.thread_id === thread_id),
+					Stream.debounce("50 millis"),
+				),
+			),
+			() => Resync,
 			Resync,
 		),
 		thread_scope,

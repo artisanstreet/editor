@@ -24,7 +24,9 @@ export interface ActiveClientSession {
 }
 
 /** Sends one already-built envelope if a connection is currently ready. */
-export type SendCurrent = (envelope: InboundControlEnvelope) => Effect.Effect<void>;
+export type SendCurrent = (
+	envelope: InboundControlEnvelope,
+) => Effect.Effect<void, ArtisanClientError>;
 
 /** Waits for the current negotiated session without exposing connection state. */
 export type AwaitActive = Effect.Effect<ActiveClientSession, ArtisanClientError>;
@@ -70,6 +72,15 @@ export function record_to_cursors(cursors: Readonly<Record<string, number>>) {
 	return Object.entries(cursors)
 		.map(([stream_id, sequence]) => ({ sequence, stream_id }))
 		.sort((left, right) => left.stream_id.localeCompare(right.stream_id));
+}
+
+/** Converts an ordered protocol cursor list into the client's lookup representation. */
+export function cursors_to_record(
+	cursors: ReadonlyArray<{ readonly sequence: number; readonly stream_id: string }>,
+) {
+	return Object.fromEntries(
+		cursors.map(({ sequence, stream_id }) => [stream_id, sequence]),
+	) as Readonly<Record<string, number>>;
 }
 
 /** Validates all client limits before any scoped fibers or queues are acquired. */

@@ -6,6 +6,35 @@ import { ArtisanClientError } from "@artisan/transport";
 import { make_transport_test_harness, wait_for } from "./message-channel-harness";
 
 describe("ArtisanClient over MessagePorts", () => {
+	it("adopts a non-empty fresh-session baseline before applying the first live event", async () => {
+		const harness = await make_transport_test_harness({
+			protocol: { baseline_journal_sequence: 37 },
+		});
+
+		try {
+			const thread = await Effect.runPromise(
+				harness.client
+					.CreateThread({ title: "Fresh baseline" })
+					.pipe(Effect.timeout("2 seconds")),
+			);
+			const state = await Effect.runPromise(harness.client.ConnectionState);
+			await wait_for(
+				() =>
+					harness.protocol_snapshot().acknowledgements.at(-1)?.payload
+						.journal_sequence === 38,
+			);
+
+			expect(thread.thread_id).toBeTruthy();
+			expect(state.phase).toBe("ready");
+			expect(harness.connector_snapshot().connections).toBe(1);
+			expect(await Effect.runPromise(harness.client.Cursors)).toMatchObject({
+				last_journal_sequence: 38,
+			});
+		} finally {
+			await harness.dispose();
+		}
+	});
+
 	it("keeps an asset source failure retryable and leaves the session available", async () => {
 		const harness = await make_transport_test_harness({
 			binary_stream_errors: { "asset:unavailable": "source_error" },

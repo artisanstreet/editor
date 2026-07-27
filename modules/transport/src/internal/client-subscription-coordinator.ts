@@ -24,6 +24,7 @@ import type {
 } from "../client-contract";
 import {
 	client_error,
+	cursors_to_record,
 	protocol_client_error,
 	record_to_cursors,
 	type MakeTrace,
@@ -171,6 +172,9 @@ export interface ClientSubscriptionCoordinator {
 	readonly ApplyEvent: (
 		event: EventEnvelope,
 	) => Effect.Effect<ArtisanClientCursors, ArtisanClientError>;
+	readonly ApplyReplayComplete: (
+		envelope: Extract<OutboundControlEnvelope, { kind: "replay.complete" }>,
+	) => Effect.Effect<void, ArtisanClientError>;
 	/** Waits for every subscription retained across the current connection generation. */
 	readonly AwaitReady: Effect.Effect<void, ArtisanClientError>;
 	readonly Cursors: Effect.Effect<ArtisanClientCursors>;
@@ -186,7 +190,7 @@ export interface ClientSubscriptionCoordinator {
 	) => Effect.Effect<boolean, ArtisanClientError>;
 	readonly ResetConnection: Effect.Effect<void>;
 	readonly ResumeCursors: Effect.Effect<ArtisanClientCursors>;
-	readonly Retry: (send?: SendCurrent) => Effect.Effect<void>;
+	readonly Retry: (send?: SendCurrent) => Effect.Effect<void, ArtisanClientError>;
 	readonly SubscribeOrchestrationGraph: (
 		group_id: string,
 	) => Effect.Effect<
@@ -367,6 +371,43 @@ export const make_client_subscription_coordinator = (
 				}),
 			);
 
+		const apply_replay_complete = (
+			envelope: Extract<OutboundControlEnvelope, { kind: "replay.complete" }>,
+		) =>
+			Ref.modify<SubscriptionState, boolean>(state, (current) => {
+				const replay_cursors = cursors_to_record(envelope.payload.current_event_cursors);
+				const cursor_regressed = Object.entries(current.event_cursors).some(
+					([stream_id, sequence]) => (replay_cursors[stream_id] ?? 0) < sequence,
+				);
+				const journal_regressed =
+					envelope.payload.journal_sequence < current.last_journal_sequence;
+
+				if (cursor_regressed || journal_regressed) {
+					return [false, current];
+				}
+
+				return [
+					true,
+					{
+						...current,
+						event_cursors: replay_cursors,
+						last_journal_sequence: envelope.payload.journal_sequence,
+					},
+				];
+			}).pipe(
+				Effect.filterOrFail(
+					(applied) => applied,
+					() =>
+						client_error(
+							"stream_gap",
+							"The replay boundary regressed behind the applied event cursor.",
+							envelope,
+							true,
+						),
+				),
+				Effect.asVoid,
+			);
+
 		const handle_started = (
 			envelope: Extract<OutboundControlEnvelope, { kind: "subscription.started" }>,
 		) =>
@@ -442,7 +483,7 @@ export const make_client_subscription_coordinator = (
 					subscription_id,
 				};
 
-				yield* send_current(unsubscribe);
+				yield* send_current(unsubscribe).pipe(Effect.ignore);
 			});
 
 		const fail_projection = (subscription: ProjectionSubscription, error: ArtisanClientError) =>
@@ -1108,6 +1149,7 @@ export const make_client_subscription_coordinator = (
 
 		return {
 			ApplyEvent: apply_event,
+			ApplyReplayComplete: apply_replay_complete,
 			AwaitReady: await_ready,
 			Cursors: cursors,
 			Dispose: dispose,
