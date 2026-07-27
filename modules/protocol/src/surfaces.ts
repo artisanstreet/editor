@@ -299,3 +299,34 @@ export const SurfaceUsageAggregateSnapshot = Schema.Struct({
 	journal_sequence: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
 });
 export type SurfaceUsageAggregateSnapshot = typeof SurfaceUsageAggregateSnapshot.Type;
+
+/** Identifies one UTC calendar day, matching the day component of `IsoDateTime`. */
+export const IsoDate = Schema.String.check(
+	Schema.isPattern(/^\d{4}-\d{2}-\d{2}$/, { message: "Expected a YYYY-MM-DD calendar date" }),
+);
+export type IsoDate = typeof IsoDate.Type;
+
+/**
+ * Token spend for one UTC day. Unlike `SurfaceUsageAggregate`, the totals are
+ * required: a provider that reports no metric simply does not contribute, so an
+ * absent day and a zero day are both expressed as zero rather than as unknown.
+ */
+export const SurfaceUsageDailyBucket = Schema.Struct({
+	date: IsoDate,
+	input_tokens: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+	output_tokens: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+});
+export type SurfaceUsageDailyBucket = typeof SurfaceUsageDailyBucket.Type;
+
+/** Requests a bounded window of daily token totals ending at the current day. */
+export const SurfaceUsageDailyQuery = Schema.Struct({
+	day_count: Schema.Int.check(Schema.isBetween({ maximum: 366, minimum: 1 })),
+});
+export type SurfaceUsageDailyQuery = typeof SurfaceUsageDailyQuery.Type;
+
+/** Daily buckets in ascending date order; days without spend are omitted. */
+export const SurfaceUsageDailySnapshot = Schema.Struct({
+	buckets: Schema.Array(SurfaceUsageDailyBucket).check(Schema.isMaxLength(366)),
+	journal_sequence: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+});
+export type SurfaceUsageDailySnapshot = typeof SurfaceUsageDailySnapshot.Type;

@@ -115,6 +115,9 @@ export type CalendarActivity = {
 		tooltip_y = event.clientY - bounds.top;
 	};
 
+	/** Redraws when activities arrive asynchronously, not only on mount and resize. */
+	$effect(draw);
+
 	onMount(() => {
 		const resize_observer = new ResizeObserver(draw);
 		const theme_observer = new MutationObserver(draw);

@@ -125,6 +125,72 @@
 	transition: border-color var(--resize-dur) var(--resize-ease);
 }
 
+@property --docs-scroll-fade-start {
+	syntax: "<length>";
+	inherits: false;
+	initial-value: 0px;
+}
+
+@property --docs-scroll-fade-end {
+	syntax: "<length>";
+	inherits: false;
+	initial-value: 24px;
+}
+
+/*
+ * Fades scrollable content into the container edges, matching the thread
+ * transcript. Each edge only fades while content is actually hidden past it,
+ * so a list that fits never dims its first or last row.
+ */
+.docs-scroll-fade {
+	--docs-scroll-fade-size: 24px;
+	-webkit-mask-image: linear-gradient(
+		to bottom,
+		transparent,
+		black var(--docs-scroll-fade-start),
+		black calc(100% - var(--docs-scroll-fade-end)),
+		transparent
+	);
+	mask-image: linear-gradient(
+		to bottom,
+		transparent,
+		black var(--docs-scroll-fade-start),
+		black calc(100% - var(--docs-scroll-fade-end)),
+		transparent
+	);
+	overscroll-behavior: contain;
+}
+
+@supports (animation-timeline: scroll()) {
+	.docs-scroll-fade {
+		animation:
+			docs-scroll-fade-start linear both,
+			docs-scroll-fade-end linear both;
+		animation-timeline: scroll(self block), scroll(self block);
+		animation-range:
+			0 var(--docs-scroll-fade-size),
+			calc(100% - var(--docs-scroll-fade-size)) 100%;
+	}
+}
+
+@keyframes docs-scroll-fade-start {
+	from {
+		--docs-scroll-fade-start: 0px;
+	}
+	to {
+		--docs-scroll-fade-start: var(--docs-scroll-fade-size);
+	}
+}
+
+@keyframes docs-scroll-fade-end {
+	from {
+		--docs-scroll-fade-end: var(--docs-scroll-fade-size);
+	}
+	to {
+		--docs-scroll-fade-end: 0px;
+	}
+}
+
 .docs-sidebar-hover-highlight {
 	position: absolute;
 	top: 0;

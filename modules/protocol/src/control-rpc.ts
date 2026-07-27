@@ -237,6 +237,11 @@ export const ControlRpcGroup = RpcGroup.make(
 		Control.SurfaceUsageAggregateQueryResultEnvelope,
 	),
 	ControlRpc(
+		"surface.usage.daily.query",
+		Control.SurfaceUsageDailyQueryEnvelope,
+		Control.SurfaceUsageDailyQueryResultEnvelope,
+	),
+	ControlRpc(
 		"terminal.list.query",
 		Control.TerminalListQueryEnvelope,
 		Control.TerminalListQueryResultEnvelope,

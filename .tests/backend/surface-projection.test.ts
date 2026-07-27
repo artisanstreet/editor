@@ -465,6 +465,57 @@ describe("surface projection read model", () => {
 		}
 	});
 
+	it("rolls run totals into ordered UTC day buckets and drops rows outside the window", async () => {
+		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
+		try {
+			const day_ms = 86_400_000;
+			const now_ms = Date.now();
+			const iso_at = (days_ago: number) => new Date(now_ms - days_ago * day_ms).toISOString();
+			const date_at = (days_ago: number) => iso_at(days_ago).slice(0, 10);
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const surfaces = yield* SurfaceService;
+					yield* database.client.insert(SurfaceUsageTotals).values([
+						{
+							input_tokens: 10,
+							output_tokens: 5,
+							run_id: "run_today_reported",
+							updated_at: iso_at(0),
+						},
+						{
+							/** An unreported metric contributes nothing rather than reading as unknown. */
+							input_tokens: 7,
+							output_tokens: null,
+							run_id: "run_today_partial",
+							updated_at: iso_at(0),
+						},
+						{
+							input_tokens: 3,
+							output_tokens: 1,
+							run_id: "run_yesterday",
+							updated_at: iso_at(1),
+						},
+						{
+							input_tokens: 99,
+							output_tokens: 99,
+							run_id: "run_outside_window",
+							updated_at: iso_at(10),
+						},
+					]);
+					return yield* surfaces.DailyUsageSnapshot({ day_count: 3 });
+				}),
+			);
+
+			expect(result.buckets).toEqual([
+				{ date: date_at(1), input_tokens: 3, output_tokens: 1 },
+				{ date: date_at(0), input_tokens: 17, output_tokens: 5 },
+			]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("reads surface and usage snapshots at one atomic watermark and filters usage scopes", async () => {
 		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
 		try {

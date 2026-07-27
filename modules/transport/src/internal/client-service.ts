@@ -81,6 +81,7 @@ import {
 	type RichLinkResolveQueryEnvelope,
 	type SurfaceListQueryEnvelope,
 	type SurfaceUsageAggregateQueryEnvelope,
+	type SurfaceUsageDailyQueryEnvelope,
 	type TerminalListQueryEnvelope,
 	type ThreadCreateEnvelope,
 	type ThreadCreateInput,
@@ -1988,6 +1989,22 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						: yield* Effect.die("surface usage response narrowed incorrectly");
 				});
 
+			const get_surface_usage_daily = (
+				input: import("@artisan/protocol").SurfaceUsageDailyQuery,
+			) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: SurfaceUsageDailyQueryEnvelope = {
+						...trace,
+						kind: "surface.usage.daily.query",
+						payload: input,
+					};
+					const result = yield* requests.Request(envelope);
+					return result.kind === "surface.usage.daily.query.result"
+						? result.payload
+						: yield* Effect.die("daily surface usage response narrowed incorrectly");
+				});
+
 			const list_terminals = (thread_id: string, workspace_id: string) =>
 				Effect.gen(function* () {
 					const trace = yield* connection.MakeTrace;
@@ -2019,6 +2036,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				GetThreadSession: get_thread_session,
 				ListSurfaceItems: list_surface_items,
 				GetSurfaceUsageAggregate: get_surface_usage_aggregate,
+				GetSurfaceUsageDaily: get_surface_usage_daily,
 				ListOrchestrationGroups: list_orchestration_groups,
 				GetGlobalGuidance: get_global_guidance,
 				GetGitDiff: get_git_diff,

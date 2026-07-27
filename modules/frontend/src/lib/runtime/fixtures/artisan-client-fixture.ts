@@ -10,6 +10,7 @@ import type {
 	ModelBehaviourSnapshot,
 	OrchestrationGraph,
 	OrchestrationGroupListSnapshot,
+	SurfaceUsageDailyBucket,
 	PreviewTarget,
 	PreviewTargetGetQuery,
 	RichLinkAssetMetadata,
@@ -42,6 +43,7 @@ export interface FixtureArtisanClientData {
 	readonly model_behaviour: ModelBehaviourSnapshot;
 	readonly orchestration_graph: OrchestrationGraph;
 	readonly orchestration_groups: OrchestrationGroupListSnapshot;
+	readonly surface_usage_daily: ReadonlyArray<SurfaceUsageDailyBucket>;
 	readonly transcript: ThreadTranscriptSnapshot;
 	readonly preview_assets: Readonly<Record<string, RichLinkAssetMetadata>>;
 	readonly preview_targets: ReadonlyArray<PreviewTarget>;
@@ -447,6 +449,12 @@ export const fixture_artisan_client_data = {
 		],
 		journal_sequence: 48,
 	},
+	surface_usage_daily: [
+		{ date: "2026-07-24", input_tokens: 48_120, output_tokens: 6_430 },
+		{ date: "2026-07-25", input_tokens: 131_890, output_tokens: 18_240 },
+		{ date: "2026-07-26", input_tokens: 22_470, output_tokens: 3_110 },
+		{ date: "2026-07-27", input_tokens: 96_540, output_tokens: 12_780 },
+	],
 	transcript: {
 		status: "available",
 		journal_sequence: 48,
@@ -804,6 +812,11 @@ export const FixtureArtisanClientService = {
 	GetSurfaceUsageAggregate: (input) =>
 		Effect.succeed({
 			aggregate: { scope: input.scope, scope_id: input.scope_id },
+			journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+		}),
+	GetSurfaceUsageDaily: (input) =>
+		Effect.succeed({
+			buckets: fixture_artisan_client_data.surface_usage_daily.slice(-input.day_count),
 			journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
 		}),
 	ListOrchestrationGroups: (thread_id, include_terminal) =>

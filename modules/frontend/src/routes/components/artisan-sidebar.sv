@@ -232,7 +232,7 @@
 	</Dialog.Content>
 </Dialog.Root>
 
-<div class="t-sidebar-flyout flex flex-1 flex-col">
+<div class="t-sidebar-flyout flex min-w-0 flex-1 flex-col">
 	<Sidebar.Header class="h-14 justify-center pl-6 pr-14 lg:pl-2">
 		<div
 			class="t-sidebar-flyout-inline inline-block min-w-0 max-w-[var(--sidebar-flyout-inline-width,none)] overflow-visible whitespace-nowrap"

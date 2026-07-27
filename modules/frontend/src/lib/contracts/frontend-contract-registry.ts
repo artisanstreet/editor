@@ -208,6 +208,18 @@ export const FrontendContractRegistry: ReadonlyArray<FrontendContractEntry> = [
 		],
 	},
 	{
+		id: "main.usage-activity",
+		state: "live",
+		owner: "artisan_client",
+		surface: "main",
+		pane: "landing",
+		reason: "Persisted run totals roll up into UTC calendar days, so the landing grid reports recorded spend rather than an estimate.",
+		contract_names: ["ArtisanClient.GetSurfaceUsageDaily", "SurfaceUsageDailyBucket"],
+		guidance: [
+			"Render an empty grid when no run has reported usage; never synthesize sample activity.",
+		],
+	},
+	{
 		id: "main.orchestration-known-id",
 		state: "live",
 		owner: "artisan_client",

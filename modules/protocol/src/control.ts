@@ -26,6 +26,8 @@ import {
 	SurfaceSnapshot,
 	SurfaceUsageAggregateQuery,
 	SurfaceUsageAggregateSnapshot,
+	SurfaceUsageDailyQuery,
+	SurfaceUsageDailySnapshot,
 } from "./surfaces";
 
 import {
@@ -2403,6 +2405,20 @@ export const SurfaceUsageAggregateQueryResultEnvelope = Schema.Struct({
 export type SurfaceUsageAggregateQueryResultEnvelope =
 	typeof SurfaceUsageAggregateQueryResultEnvelope.Type;
 
+export const SurfaceUsageDailyQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("surface.usage.daily.query"),
+	payload: SurfaceUsageDailyQuery,
+});
+export type SurfaceUsageDailyQueryEnvelope = typeof SurfaceUsageDailyQueryEnvelope.Type;
+export const SurfaceUsageDailyQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("surface.usage.daily.query.result"),
+	payload: SurfaceUsageDailySnapshot,
+});
+export type SurfaceUsageDailyQueryResultEnvelope = typeof SurfaceUsageDailyQueryResultEnvelope.Type;
+
 /** Requests ordered updates for the thread-list projection. */
 export const SubscribeEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
@@ -2957,6 +2973,7 @@ export const InboundControlEnvelope = Schema.Union([
 	ThreadSessionQueryEnvelope,
 	SurfaceListQueryEnvelope,
 	SurfaceUsageAggregateQueryEnvelope,
+	SurfaceUsageDailyQueryEnvelope,
 	SubscribeEnvelope,
 	UnsubscribeEnvelope,
 	AckEnvelope,
@@ -3026,6 +3043,7 @@ export const OutboundControlEnvelope = Schema.Union([
 	ThreadSessionQueryResultEnvelope,
 	SurfaceListQueryResultEnvelope,
 	SurfaceUsageAggregateQueryResultEnvelope,
+	SurfaceUsageDailyQueryResultEnvelope,
 	SubscriptionStartedEnvelope,
 	SubscriptionStoppedEnvelope,
 	ThreadListSnapshotEnvelope,

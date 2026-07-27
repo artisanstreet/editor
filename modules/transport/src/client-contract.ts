@@ -68,6 +68,8 @@ import type {
 	SurfaceSnapshot,
 	SurfaceUsageAggregateQuery,
 	SurfaceUsageAggregateSnapshot,
+	SurfaceUsageDailyQuery,
+	SurfaceUsageDailySnapshot,
 	StreamCursor,
 	TerminalSession,
 	ThreadCreateInput,
@@ -623,6 +625,9 @@ export class ArtisanClient extends Context.Service<
 		readonly GetSurfaceUsageAggregate: (
 			input: SurfaceUsageAggregateQuery,
 		) => Effect.Effect<SurfaceUsageAggregateSnapshot, ArtisanClientError>;
+		readonly GetSurfaceUsageDaily: (
+			input: SurfaceUsageDailyQuery,
+		) => Effect.Effect<SurfaceUsageDailySnapshot, ArtisanClientError>;
 		readonly ListOrchestrationGroups: (
 			thread_id: string,
 			include_terminal: boolean,

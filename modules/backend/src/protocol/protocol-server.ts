@@ -52,6 +52,7 @@ import {
 	type RuntimeCatalogQueryEnvelope,
 	type SurfaceListQueryEnvelope,
 	type SurfaceUsageAggregateQueryEnvelope,
+	type SurfaceUsageDailyQueryEnvelope,
 	OutboundControlEnvelope,
 	type PreNegotiationProtocolErrorEnvelope,
 	type ProtocolErrorDetail,
@@ -2132,6 +2133,38 @@ export function make_protocol_server_layer(
 						),
 					);
 
+				const HandleSurfaceUsageDailyQuery = (
+					query: SurfaceUsageDailyQueryEnvelope,
+					current: ReadyState,
+				) =>
+					surfaces.DailyUsageSnapshot(query.payload).pipe(
+						Effect.flatMap((snapshot) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "surface.usage.daily.query.result",
+									message_id,
+									origin: "backend",
+									payload: snapshot,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"projection.unavailable",
+								"Daily surface usage could not be read.",
+								true,
+								query.message_id,
+							),
+						),
+					);
+
 				const HandleToolRegistryQuery = (
 					query: ArtisanToolRegistryListQueryEnvelope,
 					current: ReadyState,
@@ -4025,6 +4058,8 @@ export function make_protocol_server_layer(
 							return HandleSurfaceListQuery(envelope, current);
 						case "surface.usage.aggregate.query":
 							return HandleSurfaceUsageQuery(envelope, current);
+						case "surface.usage.daily.query":
+							return HandleSurfaceUsageDailyQuery(envelope, current);
 						case "subscribe":
 							return HandleSubscribe(envelope, current);
 						case "unsubscribe":

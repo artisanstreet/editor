@@ -1,11 +1,12 @@
-import { Context, Data, Effect, Layer, Schema } from "effect";
-import { and, asc, desc, eq } from "drizzle-orm";
+import { Clock, Context, Data, Effect, Layer, Schema } from "effect";
+import { and, asc, desc, eq, gte, lte } from "drizzle-orm";
 
 import {
 	SurfaceItem,
 	SurfaceSnapshot,
 	SurfaceUsage,
 	SurfaceUsageAggregate,
+	SurfaceUsageDailySnapshot,
 } from "@artisan/protocol";
 
 import { Database } from "../persistence/database";
@@ -55,6 +56,9 @@ export class SurfaceService extends Context.Service<
 			},
 			SurfaceInvariantFailed
 		>;
+		readonly DailyUsageSnapshot: (input: {
+			readonly day_count: number;
+		}) => Effect.Effect<typeof SurfaceUsageDailySnapshot.Type, SurfaceInvariantFailed>;
 		readonly UsageEventAffects: (
 			input: { readonly scope: "run" | "assignment" | "group"; readonly scope_id: string },
 			run_id: string | undefined,
@@ -266,6 +270,64 @@ export const SurfaceServiceLive = Layer.effect(
 					return { aggregate, journal_sequence: last?.journal_sequence ?? 0 };
 				}),
 			);
+		/**
+		 * Rolls persisted run totals up into UTC calendar days. `updated_at` is
+		 * the last time a run reported usage rather than the instant each token
+		 * was spent, so a long-running run attributes its whole total to the day
+		 * it finished reporting.
+		 */
+		const DailyUsageSnapshot = (input: { readonly day_count: number }) =>
+			database.client.transaction((transaction) =>
+				Effect.gen(function* () {
+					const now_ms = yield* Clock.currentTimeMillis;
+					const day_ms = 86_400_000;
+					const iso_date = (at_ms: number) => new Date(at_ms).toISOString().slice(0, 10);
+					const first_date = iso_date(now_ms - (input.day_count - 1) * day_ms);
+					const last_date = iso_date(now_ms);
+					const rows = yield* transaction
+						.select()
+						.from(SurfaceUsageTotals)
+						.where(
+							and(
+								gte(SurfaceUsageTotals.updated_at, `${first_date}T00:00:00.000Z`),
+								lte(SurfaceUsageTotals.updated_at, `${last_date}T23:59:59.999Z`),
+							),
+						);
+					const usage = yield* Effect.forEach(rows, DecodeSurfaceUsage);
+					const totals = new Map<
+						string,
+						{ input_tokens: number; output_tokens: number }
+					>();
+
+					for (const row of usage) {
+						const date = row.updated_at.slice(0, 10);
+						const running = totals.get(date) ?? { input_tokens: 0, output_tokens: 0 };
+						totals.set(date, {
+							input_tokens: running.input_tokens + (row.input_tokens ?? 0),
+							output_tokens: running.output_tokens + (row.output_tokens ?? 0),
+						});
+					}
+
+					const [last] = yield* transaction
+						.select({ journal_sequence: JournalEvents.sequence })
+						.from(JournalEvents)
+						.orderBy(desc(JournalEvents.sequence))
+						.limit(1);
+					return yield* Schema.decodeUnknownEffect(SurfaceUsageDailySnapshot)({
+						buckets: [...totals.entries()]
+							.sort(([left], [right]) => left.localeCompare(right))
+							.map(([date, bucket]) => ({ date, ...bucket })),
+						journal_sequence: last?.journal_sequence ?? 0,
+					}).pipe(
+						Effect.mapError(
+							() =>
+								new SurfaceInvariantFailed({
+									message: "Daily usage does not match its schema",
+								}),
+						),
+					);
+				}),
+			);
 		const UsageEventAffects = (
 			input: { readonly scope: "run" | "assignment" | "group"; readonly scope_id: string },
 			run_id: string | undefined,
@@ -328,6 +390,7 @@ export const SurfaceServiceLive = Layer.effect(
 			Usage,
 			AggregateUsage,
 			AggregateUsageSnapshot,
+			DailyUsageSnapshot,
 			UsageEventAffects,
 			UsageScopeThread,
 		} as unknown as typeof SurfaceService.Service;
