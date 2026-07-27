@@ -30,5 +30,11 @@ describe("release policy", () => {
 		expect(workflow).toContain(
 			"if: always() && needs.plan.result == 'success' && needs.candidate.result == 'success'",
 		);
+		expect(workflow).toContain(
+			"if: always() && needs.plan.result == 'success' && needs.candidate.result == 'success' && needs.github_prepare.result == 'success'",
+		);
+		expect(workflow).toContain(
+			"if: always() && needs.plan.result == 'success' && needs.github_upload.result == 'success'",
+		);
 	});
 });

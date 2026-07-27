@@ -397,6 +397,7 @@ jobs:
 
     github_upload:
         name: GitHub / Upload exact assets
+        if: always() && needs.plan.result == 'success' && needs.candidate.result == 'success' && needs.github_prepare.result == 'success'
         needs: [plan, candidate, github_prepare]
         runs-on: ubuntu-24.04
         timeout-minutes: 15
@@ -440,6 +441,7 @@ jobs:
 
     github_finalize:
         name: GitHub / Finalize release
+        if: always() && needs.plan.result == 'success' && needs.github_upload.result == 'success'
         needs: [plan, github_upload]
         runs-on: ubuntu-24.04
         timeout-minutes: 10
