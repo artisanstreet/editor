@@ -1,8 +1,5 @@
 [workspace]
-members = [
-	"modules/bootstrap",
-	"modules/cli",
-]
+members = ["modules/bootstrap", "modules/cli"]
 resolver = "2"
 
 [workspace.package]

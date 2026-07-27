@@ -337,6 +337,18 @@ The final root should contain only documents that function as repository entry
 points. At minimum, `AGENTS.md` remains at root. A future `README.md`,
 `CONTRIBUTING.md`, `LICENSE`, or security policy may also belong there.
 
+The future root `README.md` must be a polished product entry point modeled on
+the presentation of the
+[Orca README](https://github.com/stablyai/orca/blob/main/README.md?plain=1).
+It must include a neat, scannable feature table that pairs each major Artisan
+capability with concise benefit-led copy and an accurate screenshot, animation,
+or other purposeful visual. The showcase must be followed by a compact inventory
+covering all remaining shipped features, supported engines and platforms, with
+links to deeper documentation where available. README claims and visuals must
+describe verified product behavior rather than planned or aspirational scope,
+and the inventory must be updated whenever a milestone adds, removes, or
+materially changes a user-facing capability.
+
 Target document layout:
 
 ```text
