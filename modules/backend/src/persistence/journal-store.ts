@@ -38,6 +38,11 @@ export interface ReplayRequest {
 	readonly stream_cursors?: ReadonlyArray<StreamCursor>;
 }
 
+export interface JournalBaseline {
+	readonly event_cursors: ReadonlyArray<StreamCursor>;
+	readonly journal_sequence: number;
+}
+
 export interface JournalEventInput {
 	readonly agent_id?: string;
 	readonly causation_id: string;
@@ -175,6 +180,7 @@ export class JournalStore extends Context.Service<
 		readonly ReadCorrelatedEvents: (
 			correlation_id: string,
 		) => Effect.Effect<ReadonlyArray<EventEnvelope>, JournalStoreError>;
+		readonly ReadBaseline: () => Effect.Effect<JournalBaseline, JournalStoreError>;
 		readonly ReadCurrentCursors: () => Effect.Effect<
 			ReadonlyArray<StreamCursor>,
 			JournalStoreError
@@ -428,6 +434,45 @@ const AssertMatchingCursors = (
 		}
 	});
 
+const ReadBaselineInTransaction = (transaction: DatabaseClient) =>
+	Effect.gen(function* () {
+		const current_cursor_rows = yield* transaction
+			.select({
+				sequence: EventStreams.last_sequence,
+				stream_id: EventStreams.stream_id,
+			})
+			.from(EventStreams)
+			.orderBy(asc(EventStreams.stream_id));
+		const event_rows = yield* transaction
+			.select({
+				sequence: JournalEvents.stream_sequence,
+				stream_id: JournalEvents.stream_id,
+			})
+			.from(JournalEvents)
+			.orderBy(asc(JournalEvents.stream_id), asc(JournalEvents.stream_sequence));
+		const [watermark] = yield* transaction
+			.select({ journal_sequence: JournalEvents.sequence })
+			.from(JournalEvents)
+			.orderBy(desc(JournalEvents.sequence))
+			.limit(1);
+		const event_cursors = yield* Effect.forEach(current_cursor_rows, (row) =>
+			DecodeStreamCursor(row, "Current stream cursor"),
+		);
+		const expected_cursors = yield* DeriveStreamCursors(event_rows);
+
+		yield* AssertMatchingCursors(event_cursors, expected_cursors, "Current stream cursors");
+
+		return {
+			event_cursors,
+			journal_sequence: watermark
+				? yield* DecodePersistedJournalSequence(
+						watermark.journal_sequence,
+						"Journal watermark",
+					)
+				: 0,
+		} satisfies JournalBaseline;
+	});
+
 export const JournalStoreLive = Layer.effect(
 	JournalStore,
 	Effect.gen(function* () {
@@ -491,42 +536,12 @@ export const JournalStoreLive = Layer.effect(
 					Effect.tap((event) => notifier.Publish(event.journal_sequence)),
 				);
 
-		const ReadCurrentCursors = () =>
+		const ReadBaseline = () =>
 			database.client
-				.transaction((transaction) =>
-					Effect.gen(function* () {
-						const current_cursor_rows = yield* transaction
-							.select({
-								sequence: EventStreams.last_sequence,
-								stream_id: EventStreams.stream_id,
-							})
-							.from(EventStreams)
-							.orderBy(asc(EventStreams.stream_id));
-						const event_rows = yield* transaction
-							.select({
-								sequence: JournalEvents.stream_sequence,
-								stream_id: JournalEvents.stream_id,
-							})
-							.from(JournalEvents)
-							.orderBy(
-								asc(JournalEvents.stream_id),
-								asc(JournalEvents.stream_sequence),
-							);
-						const current_cursors = yield* Effect.forEach(current_cursor_rows, (row) =>
-							DecodeStreamCursor(row, "Current stream cursor"),
-						);
-						const expected_cursors = yield* DeriveStreamCursors(event_rows);
-
-						yield* AssertMatchingCursors(
-							current_cursors,
-							expected_cursors,
-							"Current stream cursors",
-						);
-
-						return current_cursors;
-					}),
-				)
+				.transaction(ReadBaselineInTransaction)
 				.pipe(Effect.mapError(normalize_journal_error));
+		const ReadCurrentCursors = () =>
+			ReadBaseline().pipe(Effect.map((baseline) => baseline.event_cursors));
 
 		const ReadReplay = (request: ReplayRequest) =>
 			database.client
@@ -870,6 +885,7 @@ export const JournalStoreLive = Layer.effect(
 			AcceptThreadCreate,
 			AppendEvent,
 			FindCommandThreadId,
+			ReadBaseline,
 			ReadCurrentCursors,
 			ReadCorrelatedEvents,
 			ReadReplay,

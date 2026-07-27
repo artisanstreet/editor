@@ -236,6 +236,7 @@ function make_hello(
 	last_journal_sequence = 0,
 	event_cursors: HelloEnvelope["payload"]["event_cursors"] = [],
 	supported_protocol_versions: HelloEnvelope["payload"]["supported_protocol_versions"] = [1],
+	resume_mode: NonNullable<HelloEnvelope["payload"]["resume_mode"]> = "fresh",
 ): HelloEnvelope {
 	return {
 		kind: "hello",
@@ -244,6 +245,7 @@ function make_hello(
 		payload: {
 			event_cursors,
 			last_journal_sequence,
+			resume_mode,
 			supported_protocol_versions,
 		},
 		schema_version: 1,
@@ -769,6 +771,50 @@ describe("protocol server", () => {
 		}
 	});
 
+	it("preserves replay-from-origin for legacy and explicit resume hellos", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+
+		try {
+			const output = await runtime.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const legacy_connection = yield* open_connection;
+						const fresh_shape = make_hello("hello_legacy");
+						const { resume_mode: _resume_mode, ...legacy_payload } =
+							fresh_shape.payload;
+						const legacy = yield* negotiate(legacy_connection, {
+							...fresh_shape,
+							payload: legacy_payload,
+						});
+						const resume_connection = yield* open_connection;
+						const resume = yield* negotiate(
+							resume_connection,
+							make_hello("hello_resume", 0, [], [1], "resume"),
+						);
+
+						return { legacy, resume };
+					}),
+				),
+			);
+
+			for (const handshake of [output.legacy, output.resume]) {
+				expect(handshake.map((envelope) => envelope.kind)).toEqual([
+					"welcome",
+					"event",
+					"replay.complete",
+				]);
+				expect(handshake[1]).toMatchObject({
+					journal_sequence: 1,
+					payload: { type: "guidance.canonical.updated" },
+					stream_id: "settings:guidance",
+				});
+			}
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("negotiates, returns a query snapshot, and validates acknowledgements", async () => {
 		const database_path = await make_database_path();
 		const runtime = make_backend_runtime({ database_path, migrations_path });
@@ -824,13 +870,14 @@ describe("protocol server", () => {
 
 			expect(output.handshake.map((envelope) => envelope.kind)).toEqual([
 				"welcome",
-				"event",
 				"replay.complete",
 			]);
-			expect(output.handshake[1]).toMatchObject({
-				journal_sequence: 1,
-				payload: { type: "guidance.canonical.updated" },
-				stream_id: "settings:guidance",
+			expect(output.handshake[0]).toMatchObject({
+				kind: "welcome",
+				payload: {
+					current_event_cursors: [{ sequence: 1, stream_id: "settings:guidance" }],
+					journal_sequence: 1,
+				},
 			});
 			expect(output.command).toMatchObject([
 				{
@@ -980,10 +1027,16 @@ describe("protocol server", () => {
 						const reconnecting_connection = yield* open_connection;
 
 						yield* reconnecting_connection.Receive(
-							make_hello("hello_reconnect", 2, [
-								{ sequence: 1, stream_id: "settings:guidance" },
-								{ sequence: 1, stream_id: `thread:${first_thread_id}` },
-							]),
+							make_hello(
+								"hello_reconnect",
+								2,
+								[
+									{ sequence: 1, stream_id: "settings:guidance" },
+									{ sequence: 1, stream_id: `thread:${first_thread_id}` },
+								],
+								[1],
+								"resume",
+							),
 						);
 
 						return {

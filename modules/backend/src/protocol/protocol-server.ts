@@ -1220,13 +1220,43 @@ export function make_protocol_server_layer(
 							return;
 						}
 
-						return yield* journal
-							.ReadReplay({
-								after_journal_sequence: hello.payload.last_journal_sequence,
-								stream_cursors: hello.payload.event_cursors,
-							})
-							.pipe(
-								Effect.flatMap((events) =>
+						const is_fresh_session = hello.payload.resume_mode === "fresh";
+						const replay = is_fresh_session
+							? journal.ReadBaseline().pipe(
+									Effect.map((baseline) => ({
+										delivered_cursors: baseline.event_cursors,
+										events: [] as ReadonlyArray<EventEnvelope>,
+										journal_sequence: baseline.journal_sequence,
+									})),
+								)
+							: journal
+									.ReadReplay({
+										after_journal_sequence: hello.payload.last_journal_sequence,
+										stream_cursors: hello.payload.event_cursors,
+									})
+									.pipe(
+										Effect.map((events) => ({
+											delivered_cursors: record_to_cursors(
+												apply_event_cursors(
+													cursors_to_record(hello.payload.event_cursors),
+													events,
+												),
+											),
+											events,
+											journal_sequence: latest_journal_sequence(
+												hello.payload.last_journal_sequence,
+												events,
+											),
+										})),
+									);
+
+						return yield* replay.pipe(
+							Effect.flatMap(
+								({
+									delivered_cursors: current_cursors,
+									events,
+									journal_sequence,
+								}) =>
 									Effect.gen(function* () {
 										const connection_id = yield* metadata.MakeId("connection");
 										const stream_ticket =
@@ -1234,21 +1264,16 @@ export function make_protocol_server_layer(
 										const welcome_id = yield* metadata.MakeId("message");
 										const replay_id = yield* metadata.MakeId("message");
 										const sent_at = yield* metadata.Now;
-										const delivered_cursors = apply_event_cursors(
-											cursors_to_record(hello.payload.event_cursors),
-											events,
-										);
-										const journal_sequence = latest_journal_sequence(
-											hello.payload.last_journal_sequence,
-											events,
-										);
+										const delivered_cursors =
+											cursors_to_record(current_cursors);
 										const ready: ReadyState = {
 											_tag: "Ready",
-											acknowledged_cursors: cursors_to_record(
-												hello.payload.event_cursors,
-											),
-											acknowledged_journal_sequence:
-												hello.payload.last_journal_sequence,
+											acknowledged_cursors: is_fresh_session
+												? delivered_cursors
+												: cursors_to_record(hello.payload.event_cursors),
+											acknowledged_journal_sequence: is_fresh_session
+												? journal_sequence
+												: hello.payload.last_journal_sequence,
 											connection_id,
 											delivered_cursors,
 											delivered_journal_sequence: journal_sequence,
@@ -1264,8 +1289,7 @@ export function make_protocol_server_layer(
 											origin: "backend",
 											payload: {
 												connection_id,
-												current_event_cursors:
-													record_to_cursors(delivered_cursors),
+												current_event_cursors: current_cursors,
 												heartbeat_interval_ms:
 													options.heartbeat_interval_ms,
 												heartbeat_timeout_ms: options.heartbeat_timeout_ms,
@@ -1284,8 +1308,7 @@ export function make_protocol_server_layer(
 											message_id: replay_id,
 											origin: "backend",
 											payload: {
-												current_event_cursors:
-													record_to_cursors(delivered_cursors),
+												current_event_cursors: current_cursors,
 												journal_sequence,
 											},
 											protocol_version: 1,
@@ -1294,17 +1317,21 @@ export function make_protocol_server_layer(
 										});
 										yield* Deferred.succeed(connection_ready, undefined);
 									}),
+							),
+							Effect.catch(() =>
+								EnqueueError(
+									current,
+									is_fresh_session
+										? "protocol.bootstrap_failed"
+										: "protocol.resume_invalid",
+									is_fresh_session
+										? "Forge could not establish a fresh client session."
+										: "The supplied resume cursor does not match the journal.",
+									is_fresh_session,
+									hello.message_id,
 								),
-								Effect.catch(() =>
-									EnqueueError(
-										current,
-										"protocol.resume_invalid",
-										"The supplied resume cursor does not match the journal.",
-										false,
-										hello.message_id,
-									),
-								),
-							);
+							),
+						);
 					});
 
 				const HandleProjectDirectoryList = (

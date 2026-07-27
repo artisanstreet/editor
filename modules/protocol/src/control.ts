@@ -654,6 +654,7 @@ export const HelloEnvelope = Schema.Struct({
 	payload: Schema.Struct({
 		event_cursors: Schema.Array(StreamCursor),
 		last_journal_sequence: JournalSequence,
+		resume_mode: Schema.optional(Schema.Literals(["fresh", "resume"])),
 		supported_protocol_versions: Schema.NonEmptyArray(ProtocolVersion),
 	}),
 });

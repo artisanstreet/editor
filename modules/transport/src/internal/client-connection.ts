@@ -521,6 +521,7 @@ export const make_client_connection_lifecycle = (
 					}
 
 					const resume = yield* handlers.subscriptions.ResumeCursors;
+					const connected_before_attempt = yield* Ref.get(ever_connected);
 					const trace = yield* make_trace;
 					const hello: HelloEnvelope = {
 						kind: "hello",
@@ -529,6 +530,7 @@ export const make_client_connection_lifecycle = (
 						payload: {
 							event_cursors: resume.event_cursors,
 							last_journal_sequence: resume.last_journal_sequence,
+							resume_mode: connected_before_attempt ? "resume" : "fresh",
 							supported_protocol_versions: [...SupportedProtocolVersions],
 						},
 						schema_version: 1,

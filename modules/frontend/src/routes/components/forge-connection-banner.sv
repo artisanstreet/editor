@@ -5,6 +5,11 @@
 	import { PresentForgeConnectionState } from "$lib/banner/connection-banner";
 
 	const client = yield* ArtisanClient;
+	yield* client.ConnectionState.pipe(
+		Effect.flatMap((state) =>
+			PresentForgeConnectionState(state, client.RetryConnection),
+		),
+	);
 	yield* client.ConnectionChanges.pipe(
 		Stream.runForEach((state) =>
 			PresentForgeConnectionState(state, client.RetryConnection),
