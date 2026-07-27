@@ -5,7 +5,7 @@ runs:
     using: composite
     steps:
         - name: Install pnpm
-          uses: pnpm/action-setup@41ff72655933c73d8c5467b7bce92242612f65b1
+          uses: pnpm/action-setup@f40ffcd9367d9f12939873eb1018b921a783ffaa
           with:
               version: 11.7.0
 
