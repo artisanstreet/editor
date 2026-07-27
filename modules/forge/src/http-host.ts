@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { extname, resolve, sep } from "node:path";
 import { timingSafeEqual } from "node:crypto";
 
-import { Data, Effect, Exit, FiberSet, Scope } from "effect";
+import { Data, Effect, Exit, FiberSet, Option, Scope } from "effect";
 
 import type { ForgeControlAuthorityShape } from "./control-authority";
 import type { ForgeConfig } from "./config";
@@ -99,57 +99,66 @@ const ReadJson = (request: IncomingMessage) =>
 
 const ResolveStaticFile = (root: string, pathname: string) =>
 	Effect.gen(function* () {
-		const requested = yield* Effect.try({
+		const decoded_pathname = yield* Effect.try({
 			try: () => decodeURIComponent(pathname),
-			catch: () => ({ status: 400 as const }),
-		});
-		if (typeof requested !== "string") return requested;
+			catch: () => undefined,
+		}).pipe(Effect.option);
+		if (Option.isNone(decoded_pathname)) return { status: 400 as const };
+		const requested = decoded_pathname.value;
 
-		const root_path = yield* Effect.tryPromise({
-			try: () => realpath(resolve(root)),
-			catch: () => ({ status: 404 as const }),
-		});
-		if (typeof root_path !== "string") return root_path;
+		const root_path = yield* Effect.tryPromise(() => realpath(resolve(root))).pipe(
+			Effect.option,
+		);
+		if (Option.isNone(root_path)) return { status: 404 as const };
+		const real_root_path = root_path.value;
 		const requested_candidate = resolve(
-			root_path,
+			real_root_path,
 			`.${requested === "/" ? "/index.html" : requested}`,
 		);
 
 		if (
-			requested_candidate !== root_path &&
-			!requested_candidate.startsWith(`${root_path}${sep}`)
+			requested_candidate !== real_root_path &&
+			!requested_candidate.startsWith(`${real_root_path}${sep}`)
 		) {
 			return { status: 403 as const };
 		}
 
-		const candidate = yield* Effect.tryPromise({
-			try: () =>
-				Promise.all([
-					access(requested_candidate),
-					realpath(requested_candidate),
-					stat(requested_candidate),
-				]),
-			catch: () => undefined,
-		});
-		if (candidate !== undefined) {
-			const [, real_candidate, metadata] = candidate;
-			if (real_candidate !== root_path && !real_candidate.startsWith(`${root_path}${sep}`)) {
+		const candidate = yield* Effect.tryPromise(() =>
+			Promise.all([
+				access(requested_candidate),
+				realpath(requested_candidate),
+				stat(requested_candidate),
+			]),
+		).pipe(Effect.option);
+		if (Option.isSome(candidate)) {
+			const [, real_candidate, metadata] = candidate.value;
+			if (
+				real_candidate !== real_root_path &&
+				!real_candidate.startsWith(`${real_root_path}${sep}`)
+			) {
 				return { status: 403 as const };
 			}
 			if (metadata.isFile()) return { path: real_candidate, status: 200 as const };
 		}
 
-		if (extname(requested) === "") {
-			const index_path = resolve(root_path, "index.html");
-			const real_index = yield* Effect.tryPromise({
-				try: () => realpath(index_path),
-				catch: () => undefined,
-			});
-			if (real_index !== undefined) {
-				if (real_index !== root_path && !real_index.startsWith(`${root_path}${sep}`)) {
+		const is_reserved_route =
+			requested === "/api" ||
+			requested.startsWith("/api/") ||
+			requested === "/_app" ||
+			requested.startsWith("/_app/");
+		if (!is_reserved_route && extname(requested) === "") {
+			const index_path = resolve(real_root_path, "index.html");
+			const real_index = yield* Effect.tryPromise(() => realpath(index_path)).pipe(
+				Effect.option,
+			);
+			if (Option.isSome(real_index)) {
+				if (
+					real_index.value !== real_root_path &&
+					!real_index.value.startsWith(`${real_root_path}${sep}`)
+				) {
 					return { status: 403 as const };
 				}
-				return { path: real_index, status: 200 as const };
+				return { path: real_index.value, status: 200 as const };
 			}
 		}
 		return { status: 404 as const };
