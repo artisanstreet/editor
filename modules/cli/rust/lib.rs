@@ -8,5 +8,5 @@ pub mod paths;
 pub mod process;
 pub mod profile;
 
-pub use commands::{run, Cli};
+pub use commands::{Cli, run};
 pub use error::{CliError, Result};

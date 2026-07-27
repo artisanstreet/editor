@@ -4,9 +4,9 @@ use std::path::PathBuf;
 pub enum BootstrapError {
     #[error("unsupported platform: {0}")]
     UnsupportedPlatform(String),
-	#[cfg(unix)]
-	#[error("could not determine the current user's home directory")]
-	MissingHome,
+    #[cfg(unix)]
+    #[error("could not determine the current user's home directory")]
+    MissingHome,
     #[error("invalid trust key: {0}")]
     InvalidTrustKey(String),
     #[error("release manifest request failed: {0}")]
@@ -17,10 +17,10 @@ pub enum BootstrapError {
     InvalidManifest(#[source] serde_json::Error),
     #[error("release manifest signature is invalid")]
     InvalidSignature,
-	#[error("release payload is invalid: {0}")]
-	InvalidPayload(#[source] serde_json::Error),
-	#[error("release contract is invalid: {0}")]
-	InvalidRelease(String),
+    #[error("release payload is invalid: {0}")]
+    InvalidPayload(#[source] serde_json::Error),
+    #[error("release contract is invalid: {0}")]
+    InvalidRelease(String),
     #[error("release contains no artifact for component {component} on {target}")]
     MissingArtifact { component: String, target: String },
     #[error("bootstrap {current} cannot install a release requiring bootstrap {minimum}")]
@@ -65,9 +65,9 @@ pub enum BootstrapError {
     TemporaryDirectory(#[source] std::io::Error),
     #[error("refusing to delete a bootstrap outside the temporary directory: {0}")]
     UnsafeSelfCleanup(PathBuf),
-	#[cfg(unix)]
-	#[error("path is not valid UTF-8: {0}")]
-	NonUtf8Path(PathBuf),
+    #[cfg(unix)]
+    #[error("path is not valid UTF-8: {0}")]
+    NonUtf8Path(PathBuf),
     #[error("could not start self-cleanup helper: {0}")]
     CleanupHelper(#[source] std::io::Error),
 }

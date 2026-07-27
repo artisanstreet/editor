@@ -66,19 +66,15 @@ fn extract_zip<R: Read + Seek>(
         let mut entry = archive
             .by_index(index)
             .map_err(|error| BootstrapError::Archive(error.to_string()))?;
-		let enclosed = entry
-			.enclosed_name()
-			.ok_or_else(|| BootstrapError::UnsafeArchiveEntry(entry.name().to_owned()))?
-			.clone();
+        let enclosed = entry
+            .enclosed_name()
+            .ok_or_else(|| BootstrapError::UnsafeArchiveEntry(entry.name().to_owned()))?
+            .clone();
         if !safe_relative(&enclosed) || entry.is_symlink() {
-            return Err(BootstrapError::UnsafeArchiveEntry(
-                entry.name().to_owned(),
-            ));
+            return Err(BootstrapError::UnsafeArchiveEntry(entry.name().to_owned()));
         }
         if entry.size() > MAX_ENTRY_BYTES {
-            return Err(BootstrapError::UnsafeArchiveEntry(
-                entry.name().to_owned(),
-            ));
+            return Err(BootstrapError::UnsafeArchiveEntry(entry.name().to_owned()));
         }
         expanded = expanded.saturating_add(entry.size());
         if expanded > MAX_EXPANDED_BYTES {

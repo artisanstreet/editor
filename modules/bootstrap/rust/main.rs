@@ -13,8 +13,7 @@ use manifest::TrustKey;
 use platform::Platform;
 use url::Url;
 
-const DEFAULT_MANIFEST: &str =
-    "https://github.com/sandersonstabo/artisan-editor/releases/latest/download/release-manifest.json";
+const DEFAULT_MANIFEST: &str = "https://github.com/sandersonstabo/artisan-editor/releases/latest/download/release-manifest.json";
 
 #[derive(Clone, Debug, ValueEnum)]
 enum Component {
@@ -96,29 +95,20 @@ async fn run() -> Result<()> {
     let components = if arguments.component.is_empty() {
         vec!["editor", "forge", "cli"]
     } else {
-        arguments
-            .component
-            .iter()
-            .map(Component::as_str)
-            .collect()
+        arguments.component.iter().map(Component::as_str).collect()
     };
-	let root = arguments
-		.install_root
-		.clone()
-		.unwrap_or_else(Platform::default_install_root);
+    let root = arguments
+        .install_root
+        .clone()
+        .unwrap_or_else(Platform::default_install_root);
 
     if let Some(operation) = arguments.operation.as_ref() {
         match operation {
             Operation::Update => {
                 let trust = TrustKey::resolve(arguments.public_key.as_deref())?;
-				install(make_install_options(
-					&arguments,
-					platform,
-					components,
-					root,
-					trust,
-					false,
-				))
+                install(make_install_options(
+                    &arguments, platform, components, root, trust, false,
+                ))
                 .await?;
             }
             Operation::Repair => repair(&root)?,
@@ -156,7 +146,7 @@ fn make_install_options(
     trust: TrustKey,
     run_setup: bool,
 ) -> InstallOptions {
-	InstallOptions {
+    InstallOptions {
         signature_url: arguments.signature_url.clone().unwrap_or_else(|| {
             Url::parse(&arguments.manifest_url.as_str().replace(".json", ".sig"))
                 .expect("derived signature URL")
@@ -167,7 +157,7 @@ fn make_install_options(
         install_root,
         trust,
         run_setup,
-	}
+    }
 }
 
 fn schedule_self_cleanup() -> Result<()> {

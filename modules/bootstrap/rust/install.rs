@@ -39,35 +39,35 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         .manifest_url
         .join("./")
         .map_err(|error| BootstrapError::InvalidTrustKey(error.to_string()))?;
-	let manifest = fetch(
-		&client,
-		options.manifest_url.clone(),
-		options.signature_url.clone(),
-		&options.trust,
-	)
+    let manifest = fetch(
+        &client,
+        options.manifest_url.clone(),
+        options.signature_url.clone(),
+        &options.trust,
+    )
     .await?;
     let current_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
         .map_err(|error| BootstrapError::InvalidTrustKey(error.to_string()))?;
-	let minimum_version = semver::Version::parse(&manifest.minimum_bootstrap_version)
-		.map_err(|error| BootstrapError::InvalidTrustKey(error.to_string()))?;
-	if current_version < minimum_version {
+    let minimum_version = semver::Version::parse(&manifest.minimum_bootstrap_version)
+        .map_err(|error| BootstrapError::InvalidTrustKey(error.to_string()))?;
+    if current_version < minimum_version {
         return Err(BootstrapError::BootstrapTooOld {
             current: current_version.to_string(),
             minimum: minimum_version.to_string(),
-		});
-	}
-	let product_version = semver::Version::parse(&manifest.product_version)
-		.map_err(|error| BootstrapError::InvalidRelease(error.to_string()))?;
-	let compatibility_version =
-		semver::Version::parse(&manifest.editor_forge_compatibility_version)
-			.map_err(|error| BootstrapError::InvalidRelease(error.to_string()))?;
-	let minimum_cli_version = semver::Version::parse(&manifest.minimum_cli_version)
-		.map_err(|error| BootstrapError::InvalidRelease(error.to_string()))?;
-	if product_version != compatibility_version || product_version < minimum_cli_version {
-		return Err(BootstrapError::InvalidRelease(
-			"product, Editor/Forge compatibility, and minimum CLI versions disagree".to_owned(),
-		));
-	}
+        });
+    }
+    let product_version = semver::Version::parse(&manifest.product_version)
+        .map_err(|error| BootstrapError::InvalidRelease(error.to_string()))?;
+    let compatibility_version =
+        semver::Version::parse(&manifest.editor_forge_compatibility_version)
+            .map_err(|error| BootstrapError::InvalidRelease(error.to_string()))?;
+    let minimum_cli_version = semver::Version::parse(&manifest.minimum_cli_version)
+        .map_err(|error| BootstrapError::InvalidRelease(error.to_string()))?;
+    if product_version != compatibility_version || product_version < minimum_cli_version {
+        return Err(BootstrapError::InvalidRelease(
+            "product, Editor/Forge compatibility, and minimum CLI versions disagree".to_owned(),
+        ));
+    }
     std::fs::create_dir_all(&options.install_root).map_err(io(&options.install_root))?;
     let existing_release = options
         .install_root
@@ -93,13 +93,11 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         invoke_ae(&existing_release, &["--version"])?;
         return Ok(());
     }
-    let stage = options
-        .install_root
-        .join(format!(
-            ".stage-{}-{}",
-            manifest.product_version,
-            std::process::id()
-        ));
+    let stage = options.install_root.join(format!(
+        ".stage-{}-{}",
+        manifest.product_version,
+        std::process::id()
+    ));
     if stage.exists() {
         return Err(BootstrapError::ExistingRelease(manifest.product_version));
     }
@@ -197,18 +195,19 @@ async fn install_artifact(
             url: artifact_url.clone(),
         });
     }
-	let download = stage.join(format!(".{}.download", artifact.id));
+    let download = stage.join(format!(".{}.download", artifact.id));
     let mut file = File::create(&download).map_err(io(&download))?;
     let mut response = response;
     let mut downloaded = 0_u64;
     let mut hasher = Sha256::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|source| BootstrapError::ArtifactRequest {
-            url: artifact_url.clone(),
-            source,
-        })?
+    while let Some(chunk) =
+        response
+            .chunk()
+            .await
+            .map_err(|source| BootstrapError::ArtifactRequest {
+                url: artifact_url.clone(),
+                source,
+            })?
     {
         downloaded = downloaded.saturating_add(chunk.len() as u64);
         if downloaded > artifact.size {
@@ -305,11 +304,11 @@ fn activate(
             "artifact_id": manifest.artifacts.iter()
                 .find(|artifact| artifact.platform == options.platform.os
                     && artifact.architecture == options.platform.arch)
-				.map_or("unknown", |artifact| artifact.id.as_str()),
+                .map_or("unknown", |artifact| artifact.id.as_str()),
             "sha256": manifest.artifacts.iter()
                 .find(|artifact| artifact.platform == options.platform.os
                     && artifact.architecture == options.platform.arch)
-				.map_or("", |artifact| artifact.sha256.as_str()),
+                .map_or("", |artifact| artifact.sha256.as_str()),
             "signing_key_id": manifest.signing_identity.key_id.as_str(),
         },
         "transaction": { "state": "idle" }
@@ -395,17 +394,25 @@ fn schedule_stable_cli_replacement(source: &Path, destination: &Path) -> Result<
 fn integrate_path(bin: &Path) -> Result<()> {
     use winreg::{RegKey, enums::HKEY_CURRENT_USER};
     let environment = RegKey::predef(HKEY_CURRENT_USER)
-        .open_subkey_with_flags("Environment", winreg::enums::KEY_READ | winreg::enums::KEY_WRITE)
+        .open_subkey_with_flags(
+            "Environment",
+            winreg::enums::KEY_READ | winreg::enums::KEY_WRITE,
+        )
         .map_err(io("HKCU\\Environment"))?;
     let current: String = environment.get_value("Path").unwrap_or_default();
     let candidate = bin.display().to_string();
-    if !current.split(';').any(|entry| entry.eq_ignore_ascii_case(&candidate)) {
+    if !current
+        .split(';')
+        .any(|entry| entry.eq_ignore_ascii_case(&candidate))
+    {
         let next = if current.is_empty() {
             candidate
         } else {
             format!("{current};{candidate}")
         };
-        environment.set_value("Path", &next).map_err(io("HKCU\\Environment\\Path"))?;
+        environment
+            .set_value("Path", &next)
+            .map_err(io("HKCU\\Environment\\Path"))?;
     }
     Ok(())
 }
@@ -433,7 +440,7 @@ fn integrate_path(bin: &Path) -> Result<()> {
 fn hash_file(path: &Path) -> Result<String> {
     let mut file = File::open(path).map_err(io(path))?;
     let mut hasher = Sha256::new();
-	let mut buffer = vec![0_u8; 64 * 1024];
+    let mut buffer = vec![0_u8; 64 * 1024];
     loop {
         let read = file.read(&mut buffer).map_err(io(path))?;
         if read == 0 {
@@ -523,7 +530,10 @@ pub fn uninstall(root: &Path, remove_data: bool) -> Result<()> {
 fn remove_path_integration(bin: &Path) -> Result<()> {
     use winreg::{RegKey, enums::HKEY_CURRENT_USER};
     let environment = RegKey::predef(HKEY_CURRENT_USER)
-        .open_subkey_with_flags("Environment", winreg::enums::KEY_READ | winreg::enums::KEY_WRITE)
+        .open_subkey_with_flags(
+            "Environment",
+            winreg::enums::KEY_READ | winreg::enums::KEY_WRITE,
+        )
         .map_err(io("HKCU\\Environment"))?;
     let current: String = environment.get_value("Path").unwrap_or_default();
     let candidate = bin.display().to_string();
@@ -593,12 +603,7 @@ fn schedule_installation_cleanup(root: &Path, remove_data: bool) -> Result<()> {
         } else {
             "ping 127.0.0.1 -n 3 > nul & rmdir /s /q \"%ARTISAN_VERSIONS%\""
         };
-        command.args([
-            "/d",
-            "/s",
-            "/c",
-            script,
-        ]);
+        command.args(["/d", "/s", "/c", script]);
         command.env("ARTISAN_VERSIONS", versions);
         command.env("ARTISAN_ROOT", root);
         command
@@ -608,7 +613,11 @@ fn schedule_installation_cleanup(root: &Path, remove_data: bool) -> Result<()> {
     }
     #[cfg(unix)]
     {
-        let target = if remove_data { root } else { versions.as_path() };
+        let target = if remove_data {
+            root
+        } else {
+            versions.as_path()
+        };
         std::process::Command::new("sh")
             .args(["-c", "sleep 1; rm -rf -- \"$1\"", "artisan-uninstall"])
             .arg(target)
@@ -647,10 +656,10 @@ mod tests {
     fn sha256_representation_matches_release_contract() {
         let mut hasher = Sha256::new();
         hasher.update(b"artisan");
-		assert_eq!(
-			hex::encode(hasher.finalize()),
-			"0b74ed7ff22b86fd0838fd29a78940a8d54377951e968867948a57b3e53646fc"
-		);
+        assert_eq!(
+            hex::encode(hasher.finalize()),
+            "0b74ed7ff22b86fd0838fd29a78940a8d54377951e968867948a57b3e53646fc"
+        );
     }
 
     #[test]

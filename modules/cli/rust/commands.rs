@@ -10,13 +10,13 @@ use std::{
 use clap::{Parser, Subcommand, ValueEnum};
 
 use crate::{
+    CliError, Result,
     error::io,
     http::{self, PairResponse},
     manifest::InstallationManifest,
     paths::Layout,
     process,
     profile::{self, ForgeMode, State},
-    CliError, Result,
 };
 
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
@@ -131,10 +131,7 @@ pub fn run(cli: Cli) -> Result<()> {
                     "`ae setup --autostart` is not available in the Rust CLI yet".into(),
                 ));
             }
-            let data_root = data_root
-                .as_deref()
-                .map(validate_data_root)
-                .transpose()?;
+            let data_root = data_root.as_deref().map(validate_data_root).transpose()?;
             profile::setup(
                 &layout,
                 &profile,
@@ -297,7 +294,9 @@ fn doctor(layout: &Layout, name: &str, fix: bool, json: bool) -> Result<()> {
     if healthy {
         Ok(())
     } else {
-        Err(CliError::Installation("doctor found unresolved issues".into()))
+        Err(CliError::Installation(
+            "doctor found unresolved issues".into(),
+        ))
     }
 }
 
@@ -350,10 +349,7 @@ fn validate_origin(origin: &str) -> Result<String> {
         let (host, suffix) = bracketed
             .split_once(']')
             .ok_or_else(|| CliError::Control("browser origin host is invalid".into()))?;
-        if !suffix.is_empty()
-            && (!suffix.starts_with(':')
-                || suffix[1..].parse::<u16>().is_err())
-        {
+        if !suffix.is_empty() && (!suffix.starts_with(':') || suffix[1..].parse::<u16>().is_err()) {
             return Err(CliError::Control("browser origin port is invalid".into()));
         }
         host
@@ -405,7 +401,10 @@ fn delegate_bootstrap(layout: &Layout, operation: &str, remove_data: bool) -> Re
         )));
     }
     let mut command = Command::new(bootstrap);
-    command.arg(operation).arg("--install-root").arg(&manifest.install_root);
+    command
+        .arg(operation)
+        .arg("--install-root")
+        .arg(&manifest.install_root);
     if remove_data {
         command.arg("--remove-data");
     }

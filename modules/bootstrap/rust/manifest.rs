@@ -28,11 +28,21 @@ impl TrustKey {
         let bytes = match bytes.as_slice() {
             // RFC 8410 SubjectPublicKeyInfo prefix used by the existing
             // TypeScript release trust contract.
-            [0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00, rest @ ..]
-                if rest.len() == 32 =>
-            {
-                rest.to_vec()
-            }
+            [
+                0x30,
+                0x2a,
+                0x30,
+                0x05,
+                0x06,
+                0x03,
+                0x2b,
+                0x65,
+                0x70,
+                0x03,
+                0x21,
+                0x00,
+                rest @ ..,
+            ] if rest.len() == 32 => rest.to_vec(),
             _ => bytes,
         };
         let bytes: [u8; 32] = bytes.try_into().map_err(|bytes: Vec<u8>| {
@@ -79,8 +89,8 @@ pub struct SigningIdentity {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Artifact {
-	#[serde(rename = "artifact_id")]
-	pub id: String,
+    #[serde(rename = "artifact_id")]
+    pub id: String,
     pub platform: String,
     pub architecture: String,
     pub libc: Option<String>,
@@ -113,10 +123,16 @@ pub async fn fetch(
         .await
         .and_then(reqwest::Response::error_for_status)
         .map_err(BootstrapError::ManifestRequest)?;
-    if response.content_length().is_some_and(|size| size > MAX_MANIFEST_BYTES) {
+    if response
+        .content_length()
+        .is_some_and(|size| size > MAX_MANIFEST_BYTES)
+    {
         return Err(BootstrapError::ManifestTooLarge(MAX_MANIFEST_BYTES));
     }
-    let bytes = response.bytes().await.map_err(BootstrapError::ManifestRequest)?;
+    let bytes = response
+        .bytes()
+        .await
+        .map_err(BootstrapError::ManifestRequest)?;
     let signature = client
         .get(signature_url)
         .send()

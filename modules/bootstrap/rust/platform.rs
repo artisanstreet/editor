@@ -28,11 +28,11 @@ impl Platform {
         format!("{}-{}", self.os, self.arch)
     }
 
-	pub fn default_install_root() -> PathBuf {
+    pub fn default_install_root() -> PathBuf {
         #[cfg(windows)]
         {
-			std::env::var_os("LOCALAPPDATA")
-				.map_or_else(std::env::temp_dir, PathBuf::from)
+            std::env::var_os("LOCALAPPDATA")
+                .map_or_else(std::env::temp_dir, PathBuf::from)
                 .join("Artisan")
         }
         #[cfg(not(windows))]
@@ -58,10 +58,13 @@ mod tests {
             arch: "x64",
         };
         assert_eq!(platform.target(), "linux-x64");
-        assert_eq!(crate::install::platform_libc(), if cfg!(target_env = "musl") {
-            "musl"
-        } else {
-            "glibc"
-        });
+        assert_eq!(
+            crate::install::platform_libc(),
+            if cfg!(target_env = "musl") {
+                "musl"
+            } else {
+                "glibc"
+            }
+        );
     }
 }

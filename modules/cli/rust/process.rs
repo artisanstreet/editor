@@ -6,11 +6,11 @@ use std::{
 };
 
 use crate::{
+    CliError, Result,
     error::io,
     http,
     manifest::InstallationManifest,
     profile::{Profile, ProfilePaths, Secrets, State},
-    CliError, Result,
 };
 
 pub fn start(
@@ -47,7 +47,10 @@ pub fn start(
     }
     command
         .env("ARTISAN_AUTH_TOKEN", &secrets.auth_token)
-        .env("ARTISAN_DATABASE_PATH", profile.data_root.join("artisan.sqlite"))
+        .env(
+            "ARTISAN_DATABASE_PATH",
+            profile.data_root.join("artisan.sqlite"),
+        )
         .env("ARTISAN_MIGRATIONS_PATH", forge_root.join("migrations"))
         .env("ARTISAN_STATIC_FRONTEND_ROOT", forge_root.join("frontend"))
         .env("ARTISAN_NODE_EXECUTABLE", forge_root.join(node_name()))

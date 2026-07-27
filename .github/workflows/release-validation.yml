@@ -125,18 +125,7 @@ jobs:
               run: |
                   pnpm run check
                   pnpm exec vitest run .tests/release
-                  cargo fmt --all
-            - name: Export canonical Rust formatting
-              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
-              with:
-                  name: rustfmt-source
-                  path: |
-                      modules/bootstrap/rust
-                      modules/cli/rust
-                  if-no-files-found: error
-                  retention-days: 1
-            - name: Require committed Rust formatting
-              run: git diff --exit-code -- modules/bootstrap/rust modules/cli/rust
+                  cargo fmt --all -- --check
 
     lane_policy:
         name: Platform lane policy

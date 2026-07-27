@@ -68,7 +68,9 @@ pub fn request(endpoint_url: &str, path: &str, token: &str, method: &str) -> Res
     let body = &response[(split + 4)..];
     if headers.lines().any(|line| {
         line.eq_ignore_ascii_case("transfer-encoding: chunked")
-            || line.to_ascii_lowercase().starts_with("transfer-encoding: chunked")
+            || line
+                .to_ascii_lowercase()
+                .starts_with("transfer-encoding: chunked")
     }) {
         decode_chunked(body)
     } else {
@@ -99,7 +101,9 @@ fn decode_chunked(mut input: &[u8]) -> Result<Vec<u8>> {
             return Ok(output);
         }
         if size > input.len() || output.len().saturating_add(size) > 1024 * 1024 {
-            return Err(CliError::Control("Forge response exceeded its bound".into()));
+            return Err(CliError::Control(
+                "Forge response exceeded its bound".into(),
+            ));
         }
         output.extend_from_slice(&input[..size]);
         input = input
@@ -114,10 +118,7 @@ mod tests {
 
     #[test]
     fn decodes_bounded_chunked_body() {
-        assert_eq!(
-            decode_chunked(b"4\r\ntest\r\n0\r\n\r\n").unwrap(),
-            b"test"
-        );
+        assert_eq!(decode_chunked(b"4\r\ntest\r\n0\r\n\r\n").unwrap(), b"test");
     }
 
     #[test]

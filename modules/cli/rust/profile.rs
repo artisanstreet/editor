@@ -4,10 +4,10 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 
-use crate::{error::io, paths::Layout, CliError, Result};
+use crate::{CliError, Result, error::io, paths::Layout};
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct Profile {
@@ -50,15 +50,33 @@ pub struct ProfilePaths {
 pub fn validate_name(name: &str) -> Result<()> {
     let valid = !name.is_empty()
         && name.len() <= 64
-        && name
-            .bytes()
-            .enumerate()
-            .all(|(index, byte)| byte.is_ascii_alphanumeric() || (index > 0 && matches!(byte, b'_' | b'-')));
+        && name.bytes().enumerate().all(|(index, byte)| {
+            byte.is_ascii_alphanumeric() || (index > 0 && matches!(byte, b'_' | b'-'))
+        });
     let reserved = matches!(
         name.to_ascii_uppercase().as_str(),
-        "CON" | "PRN" | "AUX" | "NUL" | "COM1" | "COM2" | "COM3" | "COM4" | "COM5"
-            | "COM6" | "COM7" | "COM8" | "COM9" | "LPT1" | "LPT2" | "LPT3" | "LPT4"
-            | "LPT5" | "LPT6" | "LPT7" | "LPT8" | "LPT9"
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
     );
     if valid && !reserved {
         Ok(())
@@ -148,8 +166,9 @@ pub fn setup(
     write_private_json(&paths.config, &profile)?;
     if !paths.secrets.exists() {
         let mut token = [0_u8; 32];
-        getrandom::fill(&mut token)
-            .map_err(|error| CliError::Installation(format!("secure random source failed: {error}")))?;
+        getrandom::fill(&mut token).map_err(|error| {
+            CliError::Installation(format!("secure random source failed: {error}"))
+        })?;
         write_private_json(
             &paths.secrets,
             &Secrets {
@@ -175,7 +194,9 @@ fn write_private_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
         .map_err(|error| CliError::Installation(format!("secure random source failed: {error}")))?;
     let temporary = directory.join(format!(
         ".{}.{}.tmp",
-        path.file_name().and_then(|name| name.to_str()).unwrap_or("profile"),
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("profile"),
         URL_SAFE_NO_PAD.encode(nonce)
     ));
     let result = (|| -> Result<()> {
@@ -191,8 +212,7 @@ fn write_private_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
             .map_err(io("create temporary profile file"))?;
         file.write_all(&bytes)
             .map_err(io("write temporary profile file"))?;
-        file.sync_all()
-            .map_err(io("sync temporary profile file"))?;
+        file.sync_all().map_err(io("sync temporary profile file"))?;
         drop(file);
         reject_unsafe_destination(path)?;
         fs::rename(&temporary, path).map_err(io("activate profile file"))?;
@@ -263,10 +283,8 @@ mod tests {
 
     #[test]
     fn private_writer_replaces_regular_files_without_leaving_temporary_files() {
-        let directory = std::env::temp_dir().join(format!(
-            "artisan-cli-profile-test-{}",
-            std::process::id()
-        ));
+        let directory =
+            std::env::temp_dir().join(format!("artisan-cli-profile-test-{}", std::process::id()));
         let _ = fs::remove_dir_all(&directory);
         fs::create_dir(&directory).unwrap();
         let destination = directory.join("config.json");
