@@ -79,6 +79,9 @@
 	let work = $state.raw<ThreadWorkItem | undefined>(
 		Option.getOrUndefined(yield* client.GetThreadWork(thread_id)),
 	);
+	const run_active = $derived(
+		work?.status === "running" || work?.status === "waiting",
+	);
 	const initial_snapshot = yield* client.GetConversation({ thread_id });
 	if (initial_snapshot.thread_id !== thread_id) {
 		yield* Effect.fail(
@@ -272,12 +275,15 @@
 			})
 			.pipe(Effect.andThen(RefreshInteractionContext));
 
-	const RunCommand = (payload:
-		| { readonly type: "run.cancel" }
-		| {
-				readonly type: "run.respond_question";
-				readonly answers: Record<string, [string, ...string[]]>;
-		  }) => {
+	const CancelRun = () =>
+		client
+			.Command({ payload: { type: "run.cancel" }, thread_id })
+			.pipe(Effect.andThen(RefreshInteractionContext), Effect.asVoid);
+
+	const RunCommand = (payload: {
+		readonly type: "run.respond_question";
+		readonly answers: Record<string, [string, ...string[]]>;
+	}) => {
 		Dispatch(
 			client.Command({ payload, thread_id }).pipe(
 				Effect.andThen(RefreshInteractionContext),
@@ -285,6 +291,11 @@
 			),
 		);
 	};
+
+	const RefreshAuthoritativeThread = Effect.all(
+		[Resync, RefreshInteractionContext],
+		{ concurrency: "unbounded", discard: true },
+	);
 
 	const ApplyUpdate = (update: ConversationUpdate) =>
 		update.type === "snapshot"
@@ -349,8 +360,8 @@
 					Stream.debounce("50 millis"),
 				),
 			),
-			() => Resync,
-			Resync,
+			() => RefreshAuthoritativeThread,
+			RefreshAuthoritativeThread,
 		),
 		thread_scope,
 	);
@@ -358,6 +369,7 @@
 
 <ThreadWorkspace
 	{image_sources}
+	onabort={CancelRun}
 	{snapshot}
 	disabled={session === undefined}
 	onapproval={RespondApproval}
@@ -370,4 +382,5 @@
 	onpolicychange={PersistSessionPolicy}
 	onsubmit={SendMessage}
 	policy={session?.policy}
+	{run_active}
 />

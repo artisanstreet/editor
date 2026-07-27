@@ -1,5 +1,6 @@
 <script lang="ts" effect>
 	import ArrowUp from "@tabler/icons-svelte/icons/arrow-up";
+	import PlayerStopFilled from "@tabler/icons-svelte/icons/player-stop-filled";
 	import X from "@tabler/icons-svelte/icons/x";
 	import { onDestroy } from "svelte";
 	import { Effect } from "effect";
@@ -31,20 +32,25 @@
 
 	let {
 		disabled = false,
+		onabort,
 		onpolicychange,
 		onsubmit,
 		policy,
+		run_active = false,
 	}: {
 		disabled?: boolean;
+		onabort?: () => Effect.Effect<unknown, { readonly message: string }>;
 		onpolicychange?: (policy: ThreadSessionPolicy) => void;
 		onsubmit?: (
 			submission: ComposerSubmission,
 		) => Effect.Effect<unknown, { readonly message: string }>;
 		policy?: ThreadSessionPolicy;
+		run_active?: boolean;
 	} = $props();
 
 	let editor = $state<HTMLDivElement | null>(null);
 	let attachments = $state<ReadonlyMap<string, ComposerImageAttachment>>(new Map());
+	let cancelling = $state(false);
 	let draft = $state("");
 	let image_viewer_open = $state(false);
 	let submitting = $state(false);
@@ -286,6 +292,30 @@
 		);
 	});
 
+	const Cancel = Effect.gen(function* () {
+		if (disabled || cancelling || onabort === undefined) return;
+		cancelling = true;
+
+		yield* onabort().pipe(
+			Effect.matchEffect({
+				onFailure: (error) =>
+					Effect.gen(function* () {
+						cancelling = false;
+						yield* banner.error("Could not stop run", { description: error.message });
+					}),
+				onSuccess: () => Effect.void,
+			}),
+		);
+	});
+
+	const ActivatePrimaryAction = Effect.gen(function* () {
+		if (run_active) {
+			yield* Cancel;
+			return;
+		}
+		yield* Submit;
+	});
+
 	const HandleComposerKey = (event: KeyboardEvent) =>
 		Effect.gen(function* () {
 			if (event.isComposing || event.key !== "Enter" || event.shiftKey) return;
@@ -319,6 +349,10 @@
 
 	onDestroy(() => {
 		for (const attachment of attachments.values()) revoke_attachment(attachment);
+	});
+
+	$effect(() => {
+		if (!run_active) cancelling = false;
 	});
 </script>
 
@@ -377,7 +411,27 @@
 
 			<div class="flex items-center justify-between gap-2">
 				<ModelSelector {disabled} {policy} {onpolicychange} />
-				<Button size="icon" aria-label="Send message" disabled={disabled || submitting || (draft.trim().length === 0 && attachments.size === 0) || onsubmit === undefined} onclick={yield* Submit}><ArrowUp /></Button>
+				<Button
+					size="icon"
+					aria-label={run_active ? "Stop current run" : "Send message"}
+					disabled={run_active
+						? disabled || cancelling || onabort === undefined
+						: disabled || submitting || (draft.trim().length === 0 && attachments.size === 0) || onsubmit === undefined}
+					onclick={yield* ActivatePrimaryAction}
+				>
+					<span class="relative size-4" aria-hidden="true">
+						<ArrowUp
+							class={`absolute inset-0 size-4 text-white/25 transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none ${
+								run_active ? "rotate-90 opacity-0" : "rotate-0 opacity-100"
+							}`}
+						/>
+						<PlayerStopFilled
+							class={`absolute inset-0 size-4 text-white/25 transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none ${
+								run_active ? "rotate-0 opacity-100" : "-rotate-90 opacity-0"
+							}`}
+						/>
+					</span>
+				</Button>
 			</div>
 		</div>
 	</ShaderGlassSurface>

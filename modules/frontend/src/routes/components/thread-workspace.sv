@@ -32,16 +32,19 @@
 	let {
 		disabled = false,
 		image_sources,
+		onabort,
 		onapproval,
 		onpolicychange,
 		onquestion,
 		onimagevisibilitychange,
 		onsubmit,
 		policy,
+		run_active = false,
 		snapshot,
 	}: {
 		disabled?: boolean;
 		image_sources?: ReadonlyMap<string, string>;
+		onabort?: () => Effect.Effect<unknown, { readonly message: string }>;
 		onapproval?: (
 			approval_id: string,
 			approved: boolean,
@@ -59,6 +62,7 @@
 			{ readonly message: string }
 		>;
 		policy?: ThreadSessionPolicy;
+		run_active?: boolean;
 		snapshot: ConversationSnapshot;
 	} = $props();
 	const view = $derived(MakeConversationViewState(snapshot));
@@ -279,9 +283,11 @@
 
 	<ThreadComposer
 		{disabled}
+		{onabort}
 		{onpolicychange}
 		onsubmit={onsubmit === undefined ? undefined : SubmitMessage}
 		{policy}
+		{run_active}
 	/>
 </main>
 

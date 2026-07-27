@@ -167,9 +167,16 @@ Branch continuity only. Durable status lives in
   exceeded the five-minute capture window. Native Clippy remains blocked by the
   pre-existing `items_after_test_module` ordering in
   `modules/cli/rust/process.rs`, outside this compatibility change.
-- The thread composer toolbar now exposes only model selection and send.
-  File-picker, effort, permission, speed, voice, active-run stop, and legacy
-  Build/Plan controls are absent; image paste/drop remains supported.
+- The thread composer toolbar exposes model selection and one primary action.
+  The send glyph uses `white/25` and rotates into a filled stop glyph while
+  authoritative thread work is `running` or `waiting`; activating stop sends
+  the existing typed `run.cancel` command and suppresses duplicate cancellation
+  until Forge reports a terminal state. Authoritative thread events refresh
+  both the conversation and work status, while Enter retains normal
+  submit/steer behavior. File-picker, effort, permission, speed, voice, and
+  legacy Build/Plan controls remain absent; image paste/drop remains supported.
+  The focused shell contract (10 tests), frontend lint, root TypeScript,
+  production frontend build, and `git diff --check` pass.
   `workflow_mode` is removed from current policy, catalog, persistence mapping,
   provider options, and Codex app-server requests. The old SQLite column remains
   inert for backward database compatibility.

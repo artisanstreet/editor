@@ -73,7 +73,16 @@ describe("Barekey docs shell reset", () => {
 		expect(model_selector).not.toContain("Toggle workflow mode");
 		expect(model_selector).not.toMatch(/>Build<|>Plan</);
 		expect(composer).not.toContain('aria-label="Add images"');
-		expect(composer).not.toContain('aria-label="Stop current run"');
+		expect(composer).toContain('"Stop current run"');
+		expect(composer).toContain("PlayerStopFilled");
+		expect(composer).toContain("text-white/25");
+		expect(composer).toContain("motion-reduce:transition-none");
+		expect(composer).toContain("yield* Cancel");
+		expect(thread_route).toContain('work?.status === "running"');
+		expect(thread_route).toContain('work?.status === "waiting"');
+		expect(thread_route).toContain('payload: { type: "run.cancel" }');
+		expect(thread_route).toContain("onabort={CancelRun}");
+		expect(thread_route).toContain("RefreshAuthoritativeThread");
 		expect(composer).not.toContain('aria-label="Use voice input"');
 	});
 
