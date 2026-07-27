@@ -35,9 +35,9 @@
 		| { readonly _tag: "Stop" };
 	const action_queue = yield* Queue.unbounded<ThreadAction>();
 	const Dispatch = (effect: Effect.Effect<void>) => {
-		action_queue.unsafeOffer({ _tag: "Run", effect });
+		Queue.offerUnsafe(action_queue, { _tag: "Run", effect });
 	};
-	onDestroy(() => action_queue.unsafeOffer({ _tag: "Stop" }));
+	onDestroy(() => Queue.offerUnsafe(action_queue, { _tag: "Stop" }));
 	yield* Effect.forkIn(
 		Effect.gen(function* () {
 			while (true) {

@@ -118,15 +118,19 @@
 		open = value;
 		on_open_change(value);
 
-		layout_queue?.unsafeOffer(
-			Effect.gen(function* () {
-				yield* Effect.promise(tick);
-				if (change_id === layout_change_id) play_flip_animations(before_targets);
-				document.cookie = `${sidebar_cookie_name}=${open}; path=/; max-age=${sidebar_cookie_max_age}`;
-				yield* Effect.sleep(`${sidebar_layout_duration_ms} millis`);
-				if (change_id === layout_change_id && ref) delete ref.dataset.sidebarFlipActive;
-			}),
-		);
+		if (layout_queue !== undefined) {
+			Queue.offerUnsafe(
+				layout_queue,
+				Effect.gen(function* () {
+					yield* Effect.promise(tick);
+					if (change_id === layout_change_id) play_flip_animations(before_targets);
+					document.cookie = `${sidebar_cookie_name}=${open}; path=/; max-age=${sidebar_cookie_max_age}`;
+					yield* Effect.sleep(`${sidebar_layout_duration_ms} millis`);
+					if (change_id === layout_change_id && ref)
+						delete ref.dataset.sidebarFlipActive;
+				}),
+			);
+		}
 	};
 
 	const sidebar = set_sidebar({

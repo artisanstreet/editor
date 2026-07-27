@@ -1072,7 +1072,8 @@ export const OrchestrationRepositoryLive = Layer.effect(
 						});
 						if (
 							payload.type === "thread.send_message" &&
-							payload.attachments !== undefined
+							payload.attachments !== undefined &&
+							payload.attachments.length > 0
 						) {
 							yield* transaction.insert(MessageImageAttachments).values(
 								payload.attachments.map((attachment, position) => ({

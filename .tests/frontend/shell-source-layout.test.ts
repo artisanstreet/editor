@@ -66,6 +66,8 @@ describe("Barekey docs shell reset", () => {
 		expect(route).toContain("{#key thread_id}");
 		expect(controller).toContain("const thread_scope = yield* Scope.make()");
 		expect(controller).toContain("Scope.close(thread_scope, Exit.void)");
+		expect(controller).toContain("Queue.offerUnsafe(action_queue");
+		expect(controller).not.toContain(".unsafeOffer(");
 		expect(controller).toContain("Effect.forkIn(");
 		expect(controller).toContain("update.batch.thread_id !== thread_id");
 		expect(controller).toContain("update.batch.conversation_id !== conversation_id");
@@ -106,6 +108,8 @@ describe("Barekey docs shell reset", () => {
 		expect(provider.indexOf("const sidebar = set_sidebar")).toBeLessThan(
 			provider.indexOf("yield* Queue.unbounded"),
 		);
+		expect(provider).toContain("Queue.offerUnsafe(");
+		expect(provider).not.toContain(".unsafeOffer(");
 	});
 
 	it("uses the Barekey docs gradient card surface for page content", () => {

@@ -115,6 +115,35 @@ afterEach(async () => {
 });
 
 describe("orchestration repository hardening", () => {
+	it("accepts an ordinary text message with an empty attachment list", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			migrations_path,
+		});
+		try {
+			await runtime.runPromise(SetupThread("thread_1"));
+			const accepted = await runtime.runPromise(
+				Accept(
+					make_command("message_1", "thread_1", {
+						attachments: [],
+						engine_id: "engine_1",
+						text: "Hello",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			const attachments = await runtime.runPromise(
+				Read((database) => database.select().from(MessageImageAttachments)),
+			);
+
+			expect(accepted.status).toBe("accepted");
+			expect(attachments).toEqual([]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("derives project authority and replaces client attachment tokens atomically", async () => {
 		const runtime = make_backend_runtime({
 			database_path: await make_database_path(),
