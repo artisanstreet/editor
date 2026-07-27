@@ -1,8 +1,22 @@
 import { basename } from "node:path";
+import { inspect } from "node:util";
 
 import { Effect } from "effect";
 
-import { BuildWindowsDistributionReleaseFromEnvironment } from "./build-distribution-release.ts";
+import {
+	BuildWindowsDistributionReleaseFromEnvironment,
+	DistributionReleaseBuildError,
+} from "./build-distribution-release.ts";
+
+const RenderFailure = (cause: unknown) => {
+	if (cause instanceof DistributionReleaseBuildError)
+		return `${cause.code}: ${
+			cause.cause instanceof Error
+				? (cause.cause.stack ?? cause.cause.message)
+				: inspect(cause.cause)
+		}`;
+	return cause instanceof Error ? (cause.stack ?? cause.message) : inspect(cause);
+};
 
 Effect.runPromise(BuildWindowsDistributionReleaseFromEnvironment(process.env))
 	.then((output) => {
@@ -16,8 +30,6 @@ Effect.runPromise(BuildWindowsDistributionReleaseFromEnvironment(process.env))
 		);
 	})
 	.catch((cause: unknown) => {
-		process.stderr.write(
-			`${cause instanceof Error ? cause.message : "Distribution release build failed"}\n`,
-		);
-		process.exitCode = 1;
+		process.stderr.write(`${RenderFailure(cause)}\n`);
+		process.exit(1);
 	});

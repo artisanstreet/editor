@@ -226,7 +226,13 @@ jobs:
                   pnpm run package:desktop
                   cargo build --workspace --release --locked
                   node .scripts/package/build-distribution-release-entry.ts
+                  if ($LASTEXITCODE -ne 0) {
+                      throw "Distribution release builder failed with exit code $LASTEXITCODE"
+                  }
                   $bootstrap = ".dist/distribution-release/artisan-bootstrap-windows-x64.exe"
+                  if (-not (Test-Path -LiteralPath ".dist/distribution-release")) {
+                      throw "Distribution release builder did not create its output directory"
+                  }
                   Copy-Item target/release/artisan-bootstrap.exe $bootstrap
                   $digest = (Get-FileHash -LiteralPath $bootstrap -Algorithm SHA256).Hash.ToLowerInvariant()
                   "$digest  artisan-bootstrap-windows-x64.exe" | Set-Content -NoNewline "$bootstrap.sha256"
