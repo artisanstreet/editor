@@ -26,10 +26,7 @@ describe("release policy", () => {
 	});
 
 	it("continues exact resume verification after build lanes are skipped", () => {
-		const workflow = readFileSync(
-			resolve(".github/workflows/release-validation.yml"),
-			"utf8",
-		);
+		const workflow = readFileSync(resolve(".github/workflows/release-validation.yml"), "utf8");
 		expect(workflow).toContain(
 			"if: always() && needs.plan.result == 'success' && needs.candidate.result == 'success'",
 		);
