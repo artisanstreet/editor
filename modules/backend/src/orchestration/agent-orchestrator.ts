@@ -15,6 +15,11 @@ import {
 	type PendingWork,
 	type RecoverableNativeRun,
 } from "../persistence/orchestration-repository";
+import type {
+	AuthoritativeCommandEnvelope,
+	AuthoritativeThreadSendMessageCommand,
+	InboundOrAuthoritativeCommandEnvelope,
+} from "../persistence/orchestration/message-command";
 import { GlobalGuidanceService } from "../guidance/guidance-service";
 import { MakeThreadDispatchFence } from "../threads/internal/thread-dispatch-fence";
 import { IntakePolicy } from "./intake-policy";
@@ -34,9 +39,7 @@ const engine_open_timeout_ms = 60_000;
 
 type StartFailureKind = "configuration" | "engine_error" | "interrupted" | "timeout";
 
-const InitialContent = (
-	payload: Extract<CommandEnvelope["payload"], { type: "thread.send_message" }>,
-) => {
+const InitialContent = (payload: AuthoritativeThreadSendMessageCommand) => {
 	if (payload.content === undefined) return undefined;
 	const attachments = new Map(
 		(payload.attachments ?? []).map((attachment) => [attachment.id, attachment]),
@@ -111,6 +114,9 @@ export class AgentOrchestrator extends Context.Service<
 	AgentOrchestrator,
 	{
 		readonly Handle: (
+			command: AuthoritativeCommandEnvelope,
+		) => Effect.Effect<AcceptedOrchestrationCommand, OrchestrationError>;
+		readonly HandleInbound: (
 			command: CommandEnvelope,
 		) => Effect.Effect<AcceptedOrchestrationCommand, OrchestrationError>;
 		readonly Recover: Effect.Effect<void, OrchestrationError>;
@@ -617,7 +623,7 @@ export const AgentOrchestratorLive = Layer.effect(
 						| "ambiguous_target";
 			  };
 		const CanSteer = (
-			command: CommandEnvelope,
+			command: InboundOrAuthoritativeCommandEnvelope,
 		): Effect.Effect<RoutingDecision, OrchestrationError> =>
 			Effect.gen(function* () {
 				if (command.payload.type !== "thread.send_message") {
@@ -645,7 +651,7 @@ export const AgentOrchestratorLive = Layer.effect(
 					: ({ can_steer: false, reason: "unsupported" } as const);
 			});
 
-		const Handle = (command: CommandEnvelope) =>
+		const HandleCommand = (command: InboundOrAuthoritativeCommandEnvelope, inbound: boolean) =>
 			Effect.gen(function* () {
 				const initial_intake =
 					command.payload.type === "thread.send_message"
@@ -668,17 +674,26 @@ export const AgentOrchestratorLive = Layer.effect(
 							}
 						: initial_intake;
 				const routing = yield* CanSteer(command);
-				const accepted = yield* repository.Accept(
-					command,
-					routing.can_steer,
-					intake,
-					"reason" in routing ? routing.reason : undefined,
-				);
+				const accepted = yield* inbound
+					? repository.AcceptInbound(
+							command as CommandEnvelope,
+							routing.can_steer,
+							intake,
+							"reason" in routing ? routing.reason : undefined,
+						)
+					: repository.Accept(
+							command as AuthoritativeCommandEnvelope,
+							routing.can_steer,
+							intake,
+							"reason" in routing ? routing.reason : undefined,
+						);
 
 				yield* WakeDispatcher;
 
 				return accepted;
 			});
+		const Handle = (command: AuthoritativeCommandEnvelope) => HandleCommand(command, false);
+		const HandleInbound = (command: CommandEnvelope) => HandleCommand(command, true);
 
 		const Recover = Effect.gen(function* () {
 			/** Recovery is a cold-start operation. Never interrupt an in-memory run merely because a caller re-reads recovery state. */
@@ -725,6 +740,6 @@ export const AgentOrchestratorLive = Layer.effect(
 
 		yield* Recover;
 
-		return { Handle, QuiesceThread, Recover };
+		return { Handle, HandleInbound, QuiesceThread, Recover };
 	}),
 );

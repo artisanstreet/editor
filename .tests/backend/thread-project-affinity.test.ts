@@ -17,6 +17,7 @@ import {
 } from "../../modules/backend/src/persistence/schema";
 import { ThreadReadModel } from "../../modules/backend/src/persistence/thread-read-model";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+import { ProjectCatalog } from "../../modules/backend/src/projects/project-catalog";
 import {
 	ThreadProjectAffinityRepository,
 	type ThreadProjectAffinityEvidenceInput,
@@ -354,9 +355,11 @@ describe("thread project affinity repository", () => {
 					const threads = yield* ThreadReadModel;
 
 					yield* router.Route(make_create_command());
+					const projects = yield* ProjectCatalog;
+					yield* projects.Attach(ProjectAlpha);
 					yield* router.Route(
 						make_command("assign_alpha", {
-							project: ProjectAlpha,
+							project_id: ProjectAlpha.project_id,
 							type: "thread.project.assign",
 						}),
 					);
@@ -486,7 +489,7 @@ describe("thread project affinity repository", () => {
 	it("keeps a manual assignment exact across retry, conflict, and restart", async () => {
 		const database_path = await make_database_path();
 		const assign = make_command("assign_retry", {
-			project: ProjectAlpha,
+			project_id: ProjectAlpha.project_id,
 			type: "thread.project.assign",
 		});
 		const first_runtime = make_backend_runtime({
@@ -498,15 +501,18 @@ describe("thread project affinity repository", () => {
 		try {
 			const result = await first_runtime.runPromise(
 				Effect.gen(function* () {
+					const projects = yield* ProjectCatalog;
 					const router = yield* ProtocolRouter;
 
 					yield* router.Route(make_create_command());
+					yield* projects.Attach(ProjectAlpha);
+					yield* projects.Attach(ProjectBeta);
 					const first = yield* router.Route(assign);
 					const duplicate = yield* router.Route(assign);
 					const conflict = yield* router.Route({
 						...assign,
 						payload: {
-							project: ProjectBeta,
+							project_id: ProjectBeta.project_id,
 							type: "thread.project.assign",
 						},
 					});

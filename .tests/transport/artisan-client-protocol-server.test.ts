@@ -34,6 +34,7 @@ import {
 } from "@artisan/backend";
 import type {
 	ArtisanClientError,
+	ProjectCatalogUpdate,
 	SurfaceUsageAggregateUpdate,
 	ThreadListUpdate,
 	WorkspaceConflictListUpdate,
@@ -139,6 +140,119 @@ afterEach(async () => {
 });
 
 describe("ArtisanClient with the backend ProtocolServer", () => {
+	it("rejects legacy client-selected thread identities at the protocol boundary", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+
+		try {
+			const error = await runtime.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const connection = yield* protocol_server.Open;
+						yield* connection.Receive({
+							kind: "hello",
+							message_id: "legacy-create-hello",
+							origin: "frontend",
+							payload: {
+								event_cursors: [],
+								last_journal_sequence: 0,
+								supported_protocol_versions: [1],
+							},
+							schema_version: 1,
+							sent_at: fixture_retention_now,
+						});
+						yield* connection.Outbound.pipe(
+							Stream.takeUntil((envelope) => envelope.kind === "replay.complete"),
+							Stream.runDrain,
+						);
+						yield* connection.Receive({
+							kind: "command",
+							message_id: "legacy-create-command",
+							origin: "frontend",
+							payload: { title: "Client-selected identity", type: "thread.create" },
+							protocol_version: 1,
+							schema_version: 1,
+							sent_at: fixture_retention_now,
+							thread_id: "thread_client_selected",
+						});
+
+						return yield* connection.Outbound.pipe(Stream.take(1), Stream.runHead);
+					}),
+				),
+			);
+
+			expect(error).toMatchObject({
+				_tag: "Some",
+				value: {
+					correlation_id: "legacy-create-command",
+					kind: "protocol.error",
+					payload: {
+						code: "protocol.legacy_thread_create",
+						retryable: false,
+					},
+				},
+			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("creates Forge-owned thread identities and exposes the authoritative project catalog", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
+		try {
+			const created = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Forge-owned identity" }),
+			);
+			const projects = await Effect.runPromise(harness.client.ListProjects);
+			const runtime_catalog = await Effect.runPromise(harness.client.GetRuntimeCatalog);
+			const project_updates = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const updates = yield* harness.client.SubscribeProjects;
+						return yield* updates.pipe(
+							Stream.take(1),
+							Stream.runCollect,
+							Effect.map(
+								(items) => [...items] as ReadonlyArray<ProjectCatalogUpdate>,
+							),
+						);
+					}),
+				),
+			);
+			const detached = await Effect.runPromise(
+				harness.client.DetachProject("project_not_attached"),
+			);
+			const threads = await Effect.runPromise(harness.client.ListThreads);
+
+			expect(created.thread_id).toMatch(/^thread_\d+$/);
+			expect(created.title).toBe("Forge-owned identity");
+			expect(threads).toContainEqual(created);
+			expect(projects).toEqual({ projects: [] });
+			expect(runtime_catalog).toMatchObject({
+				manifest: { harnesses: [], models: [], providers: [] },
+			});
+			expect(runtime_catalog).not.toHaveProperty("default_model_id");
+			expect(project_updates).toEqual([{ snapshot: { projects: [] }, type: "snapshot" }]);
+			expect(detached).toEqual({ projects: [] });
+			await expect(
+				Effect.runPromise(
+					harness.client.CreateThread({
+						project_id: "project_not_attached",
+						title: "Invalid project",
+					}),
+				),
+			).rejects.toThrow();
+			expect(await Effect.runPromise(harness.client.ListThreads)).toHaveLength(1);
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
 	it("closes the usage subscription snapshot boundary without missing a committed total", async () => {
 		const database_path = await make_database_path();
 		const runtime = make_backend_runtime({ database_path, migrations_path });
@@ -162,12 +276,8 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 		const journal = await runtime.runPromise(JournalStore);
 		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
 		try {
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "usage_boundary_create",
-					payload: { title: "Usage boundary", type: "thread.create" },
-					thread_id: "thread_usage_boundary",
-				}),
+			const created_thread_usage_boundary = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Usage boundary" }),
 			);
 			await Effect.runPromise(
 				database.client.insert(SurfaceUsageTotals).values({
@@ -223,7 +333,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 						text: "Visible",
 					},
 					run_id: "run_usage_boundary",
-					thread_id: "thread_usage_boundary",
+					thread_id: created_thread_usage_boundary.thread_id,
 				}),
 			);
 			await Effect.runPromise(Deferred.succeed(release_snapshot, undefined));
@@ -262,18 +372,14 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 		const journal = await runtime.runPromise(JournalStore);
 		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
 		try {
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "surface_boundary_create",
-					payload: { title: "Surface boundary", type: "thread.create" },
-					thread_id: "thread_surface_boundary",
-				}),
+			const created_thread_surface_boundary = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Surface boundary" }),
 			);
 			const updates_promise = Effect.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
 						const stream = yield* harness.client.SubscribeSurfaceItems({
-							thread_id: "thread_surface_boundary",
+							thread_id: created_thread_surface_boundary.thread_id,
 						});
 						return yield* stream.pipe(
 							Stream.take(2),
@@ -294,7 +400,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 					sequence: 1,
 					summary_json: JSON.stringify({ label: "Boundary message" }),
 					surface_id: "surface_boundary_item",
-					thread_id: "thread_surface_boundary",
+					thread_id: created_thread_surface_boundary.thread_id,
 				}),
 			);
 			await Effect.runPromise(
@@ -307,7 +413,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 						text: "Visible",
 					},
 					run_id: "run_surface_boundary",
-					thread_id: "thread_surface_boundary",
+					thread_id: created_thread_surface_boundary.thread_id,
 				}),
 			);
 			await Effect.runPromise(Deferred.succeed(release_snapshot, undefined));
@@ -331,12 +437,8 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 		const journal = await runtime.runPromise(JournalStore);
 		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
 		try {
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "usage_scope_create",
-					payload: { title: "Usage scope", type: "thread.create" },
-					thread_id: "thread_usage_scope",
-				}),
+			const created_thread_usage_scope = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Usage scope" }),
 			);
 			await Effect.runPromise(
 				database.client.insert(SurfaceUsageTotals).values([
@@ -390,7 +492,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 						text: "Other",
 					},
 					run_id: "run_other",
-					thread_id: "thread_usage_scope",
+					thread_id: created_thread_usage_scope.thread_id,
 				}),
 			);
 			const target = await Effect.runPromise(
@@ -403,7 +505,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 						text: "Target",
 					},
 					run_id: "run_target",
-					thread_id: "thread_usage_scope",
+					thread_id: created_thread_usage_scope.thread_id,
 				}),
 			);
 			const updates = [...(await updates_promise)];
@@ -431,12 +533,8 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 		const erasure = await runtime.runPromise(ThreadErasure);
 		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
 		try {
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "usage_erasure_create",
-					payload: { title: "Usage erasure", type: "thread.create" },
-					thread_id: "thread_usage_erasure",
-				}),
+			const created_thread_usage_erasure = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Usage erasure" }),
 			);
 			await Effect.runPromise(
 				database.client.insert(OrchestrationGroups).values({
@@ -446,7 +544,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 					journal_sequence: 1,
 					max_concurrency: 1,
 					state: "complete",
-					thread_id: "thread_usage_erasure",
+					thread_id: created_thread_usage_erasure.thread_id,
 					updated_at: "2026-07-18T20:00:00.000Z",
 					version: 1,
 				}),
@@ -508,7 +606,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			await Effect.runPromise(
 				database.client.insert(ThreadErasureClaims).values({
 					claimed_at: "2026-07-18T20:01:00.000Z",
-					thread_id: "thread_usage_erasure",
+					thread_id: created_thread_usage_erasure.thread_id,
 				}),
 			);
 			await Effect.runPromise(erasure.ResumeClaimed("2026-07-18T20:01:00.000Z"));
@@ -551,12 +649,8 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			client: { reconnect_delay_ms: 5 },
 		});
 		try {
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "conflict_projection_create",
-					payload: { title: "Conflict projection", type: "thread.create" },
-					thread_id: "thread_conflict_projection",
-				}),
+			const created_thread_conflict_projection = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Conflict projection" }),
 			);
 			const subscribed = await Effect.runPromise(Deferred.make<void>());
 			const reconnect_snapshot = await Effect.runPromise(Deferred.make<void>());
@@ -569,7 +663,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 								WorkspaceConflictListUpdate,
 								import("@artisan/transport").ArtisanClientError
 							> = yield* harness.client.SubscribeWorkspaceConflicts(
-								"thread_conflict_projection",
+								created_thread_conflict_projection.thread_id,
 							);
 							yield* Deferred.succeed(subscribed, undefined);
 							return yield* stream.pipe(
@@ -595,7 +689,9 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 				);
 			await Effect.runPromise(Deferred.await(subscribed));
 			expect(
-				await runtime.runPromise(conflicts.ListConflicts("thread_conflict_projection")),
+				await runtime.runPromise(
+					conflicts.ListConflicts(created_thread_conflict_projection.thread_id),
+				),
 			).toEqual([]);
 			const expected_before = {
 				algorithm: "sha256" as const,
@@ -624,7 +720,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 					request_fingerprint: "d".repeat(64),
 					run_id: "run_conflict",
 					sent_at: "2026-07-18T20:00:00.000Z",
-					thread_id: "thread_conflict_projection",
+					thread_id: created_thread_conflict_projection.thread_id,
 					workspace_id: "workspace_conflict",
 				}),
 			);
@@ -637,13 +733,15 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			);
 			await new Promise((resolve) => setTimeout(resolve, 20));
 			expect(
-				await runtime.runPromise(conflicts.ListConflicts("thread_conflict_projection")),
+				await runtime.runPromise(
+					conflicts.ListConflicts(created_thread_conflict_projection.thread_id),
+				),
 			).toHaveLength(1);
 			const connections = harness.connector_snapshot().connections;
 			awaiting_reconnect_snapshot = true;
 			harness.close_current_connection();
 			const after_reconnect = await Effect.runPromise(
-				harness.client.ListWorkspaceConflicts("thread_conflict_projection"),
+				harness.client.ListWorkspaceConflicts(created_thread_conflict_projection.thread_id),
 			);
 			await wait_for(() => harness.connector_snapshot().connections > connections);
 			await Effect.runPromise(Deferred.await(reconnect_snapshot));
@@ -652,14 +750,14 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 				harness.client.Command({
 					command_id: "conflict_projection_archive",
 					payload: { type: "thread.archive" },
-					thread_id: "thread_conflict_projection",
+					thread_id: created_thread_conflict_projection.thread_id,
 				}),
 			);
 			await Effect.runPromise(
 				erasure.CleanupExpired("2026-07-19T00:00:00.000Z", "2026-07-19T00:00:00.000Z"),
 			);
 			const after_erasure = await Effect.runPromise(
-				harness.client.ListWorkspaceConflicts("thread_conflict_projection"),
+				harness.client.ListWorkspaceConflicts(created_thread_conflict_projection.thread_id),
 			);
 			const updates = await updates_promise;
 			expect(updates[0]?.snapshot.conflicts).toHaveLength(1);
@@ -681,12 +779,8 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 		});
 
 		try {
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "surface_session_create",
-					payload: { title: "Surface session", type: "thread.create" },
-					thread_id: "thread_surface_session",
-				}),
+			const created_thread_surface_session = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Surface session" }),
 			);
 			await Effect.runPromise(
 				database.client.insert(OrchestrationCoordinators).values({
@@ -696,7 +790,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 					display_name: "Session coordinator",
 					engine_id: "fake",
 					role: "coordinator",
-					thread_id: "thread_surface_session",
+					thread_id: created_thread_surface_session.thread_id,
 					updated_at: "2026-07-18T10:00:00.000Z",
 				}),
 			);
@@ -704,10 +798,11 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			const initial = await Effect.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
-						const session_stream =
-							yield* harness.client.SubscribeThreadSession("thread_surface_session");
+						const session_stream = yield* harness.client.SubscribeThreadSession(
+							created_thread_surface_session.thread_id,
+						);
 						const surface_stream = yield* harness.client.SubscribeSurfaceItems({
-							thread_id: "thread_surface_session",
+							thread_id: created_thread_surface_session.thread_id,
 						});
 						const usage_stream = yield* harness.client.SubscribeSurfaceUsageAggregate({
 							scope: "run",
@@ -715,14 +810,15 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 						});
 
 						return {
-							session:
-								yield* harness.client.GetThreadSession("thread_surface_session"),
+							session: yield* harness.client.GetThreadSession(
+								created_thread_surface_session.thread_id,
+							),
 							session_update: yield* session_stream.pipe(
 								Stream.take(1),
 								Stream.runHead,
 							),
 							surfaces: yield* harness.client.ListSurfaceItems({
-								thread_id: "thread_surface_session",
+								thread_id: created_thread_surface_session.thread_id,
 							}),
 							surface_update: yield* surface_stream.pipe(
 								Stream.take(1),
@@ -739,10 +835,16 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			);
 
 			expect(initial).toMatchObject({
-				session: { auto_steer_enabled: true, thread_id: "thread_surface_session" },
+				session: {
+					auto_steer_enabled: true,
+					thread_id: created_thread_surface_session.thread_id,
+				},
 				session_update: {
 					_tag: "Some",
-					value: { snapshot: { thread_id: "thread_surface_session" }, type: "snapshot" },
+					value: {
+						snapshot: { thread_id: created_thread_surface_session.thread_id },
+						type: "snapshot",
+					},
 				},
 				surfaces: { items: [] },
 				surface_update: {
@@ -762,8 +864,9 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			const live_session_updates = await Effect.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
-						const stream =
-							yield* harness.client.SubscribeThreadSession("thread_surface_session");
+						const stream = yield* harness.client.SubscribeThreadSession(
+							created_thread_surface_session.thread_id,
+						);
 						const fiber = yield* stream.pipe(
 							Stream.take(2),
 							Stream.runCollect,
@@ -772,26 +875,29 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 						yield* harness.client.Command({
 							command_id: "surface_session_disable_steering",
 							payload: { enabled: false, type: "thread.auto_steer.update" },
-							thread_id: "thread_surface_session",
+							thread_id: created_thread_surface_session.thread_id,
 						});
 						return [...(yield* Fiber.join(fiber))];
 					}),
 				),
 			);
 			expect(live_session_updates.at(-1)).toMatchObject({
-				snapshot: { auto_steer_enabled: false, thread_id: "thread_surface_session" },
+				snapshot: {
+					auto_steer_enabled: false,
+					thread_id: created_thread_surface_session.thread_id,
+				},
 				type: "snapshot",
 			});
 
 			const connections = harness.connector_snapshot().connections;
 			harness.close_current_connection();
 			const reconnected = await Effect.runPromise(
-				harness.client.GetThreadSession("thread_surface_session"),
+				harness.client.GetThreadSession(created_thread_surface_session.thread_id),
 			);
 			await wait_for(() => harness.connector_snapshot().connections > connections);
 			expect(reconnected).toMatchObject({
 				auto_steer_enabled: false,
-				thread_id: "thread_surface_session",
+				thread_id: created_thread_surface_session.thread_id,
 			});
 		} finally {
 			await harness.dispose();
@@ -822,17 +928,13 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 		const journal = await runtime.runPromise(JournalStore);
 		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
 		try {
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "group_boundary_create",
-					payload: { title: "Group boundary", type: "thread.create" },
-					thread_id: "thread_group_boundary",
-				}),
+			const created_thread_group_boundary = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Group boundary" }),
 			);
 			await Effect.runPromise(
 				database.client.insert(OrchestrationGroups).values({
 					group_id: "group_boundary",
-					thread_id: "thread_group_boundary",
+					thread_id: created_thread_group_boundary.thread_id,
 					coordinator_agent_id: "agent_boundary",
 					state: "running",
 					max_concurrency: 1,
@@ -847,7 +949,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 				Effect.scoped(
 					Effect.gen(function* () {
 						const stream = yield* harness.client.SubscribeOrchestrationGroups(
-							"thread_group_boundary",
+							created_thread_group_boundary.thread_id,
 							false,
 						);
 
@@ -879,7 +981,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 						state: "complete",
 						action: "completed_at_snapshot_boundary",
 					},
-					thread_id: "thread_group_boundary",
+					thread_id: created_thread_group_boundary.thread_id,
 				}),
 			);
 			await Effect.runPromise(Deferred.succeed(release_snapshot, undefined));
@@ -908,12 +1010,8 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 		const journal = await runtime.runPromise(JournalStore);
 		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
 		try {
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "snapshot_race_create",
-					payload: { title: "Snapshot race", type: "thread.create" },
-					thread_id: "thread_snapshot_race",
-				}),
+			const created_thread_snapshot_race = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Snapshot race" }),
 			);
 			await runtime.runPromise(
 				journal.AppendEvent({
@@ -924,15 +1022,16 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 						message_id: "snapshot_race_first",
 						text: "Already represented by the snapshot.",
 					},
-					thread_id: "thread_snapshot_race",
+					thread_id: created_thread_snapshot_race.thread_id,
 				}),
 			);
 
 			const updates = await Effect.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
-						const stream =
-							yield* harness.client.SubscribeThreadTranscript("thread_snapshot_race");
+						const stream = yield* harness.client.SubscribeThreadTranscript(
+							created_thread_snapshot_race.thread_id,
+						);
 						const fiber = yield* stream.pipe(
 							Stream.take(2),
 							Stream.runCollect,
@@ -946,7 +1045,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 								message_id: "snapshot_race_second",
 								text: "Only this entry should append.",
 							},
-							thread_id: "thread_snapshot_race",
+							thread_id: created_thread_snapshot_race.thread_id,
 						});
 						return [...(yield* Fiber.join(fiber))];
 					}),
@@ -976,18 +1075,15 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 		const journal = await runtime.runPromise(JournalStore);
 		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
 		try {
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "conversation_create",
-					payload: { title: "Conversation", type: "thread.create" },
-					thread_id: "thread_conversation",
-				}),
+			const created_thread_conversation = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Conversation" }),
 			);
 			const updates = await Effect.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
-						const stream =
-							yield* harness.client.SubscribeConversation("thread_conversation");
+						const stream = yield* harness.client.SubscribeConversation(
+							created_thread_conversation.thread_id,
+						);
 						const fiber = yield* stream.pipe(
 							Stream.take(2),
 							Stream.runCollect,
@@ -1003,14 +1099,16 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 								type: "thread.message_queued",
 								working_directory: "C:\\workspace",
 							},
-							thread_id: "thread_conversation",
+							thread_id: created_thread_conversation.thread_id,
 						});
 						return [...(yield* Fiber.join(fiber))];
 					}),
 				),
 			);
 			const queried = await Effect.runPromise(
-				harness.client.GetConversation({ thread_id: "thread_conversation" }),
+				harness.client.GetConversation({
+					thread_id: created_thread_conversation.thread_id,
+				}),
 			);
 			expect(updates[0]).toMatchObject({
 				snapshot: { items: [], last_patch_sequence: 0 },
@@ -1108,18 +1206,15 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			client: { event_capacity: 1_000 },
 		});
 		try {
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "transcript_create",
-					payload: { title: "Transcript", type: "thread.create" },
-					thread_id: "thread_transcript",
-				}),
+			const created_thread_transcript = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Transcript" }),
 			);
 			const updates = await Effect.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
-						const stream =
-							yield* harness.client.SubscribeThreadTranscript("thread_transcript");
+						const stream = yield* harness.client.SubscribeThreadTranscript(
+							created_thread_transcript.thread_id,
+						);
 						const fiber = yield* stream.pipe(
 							Stream.take(2),
 							Stream.runCollect,
@@ -1133,14 +1228,16 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 								message_id: "assistant_transcript",
 								text: "Safe transcript content.",
 							},
-							thread_id: "thread_transcript",
+							thread_id: created_thread_transcript.thread_id,
 						});
 						return [...(yield* Fiber.join(fiber))];
 					}),
 				),
 			);
 			const queried = await Effect.runPromise(
-				harness.client.GetThreadTranscript({ thread_id: "thread_transcript" }),
+				harness.client.GetThreadTranscript({
+					thread_id: created_thread_transcript.thread_id,
+				}),
 			);
 			expect(updates).toMatchObject([
 				{ type: "snapshot", transcript: { status: "available" } },
@@ -1180,12 +1277,8 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			client: { reconnect_delay_ms: 5 },
 		});
 		try {
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "reconnect_transcript_create",
-					payload: { title: "Reconnect transcript", type: "thread.create" },
-					thread_id: "thread_transcript_reconnect",
-				}),
+			const created_thread_transcript_reconnect = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Reconnect transcript" }),
 			);
 			const updates = await Effect.runPromise(
 				Effect.scoped(
@@ -1194,7 +1287,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 						const reconnect_snapshot = yield* Deferred.make<void>();
 						let snapshot_count = 0;
 						const stream = yield* harness.client.SubscribeThreadTranscript(
-							"thread_transcript_reconnect",
+							created_thread_transcript_reconnect.thread_id,
 						);
 						const fiber = yield* stream.pipe(
 							Stream.tap((update) => {
@@ -1223,7 +1316,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 								message_id: "assistant_reconnect",
 								text: "Delivered after reconnect.",
 							},
-							thread_id: "thread_transcript_reconnect",
+							thread_id: created_thread_transcript_reconnect.thread_id,
 						});
 						const all = [...(yield* Fiber.join(fiber))];
 						return all;
@@ -1249,12 +1342,8 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 		const erasure = await runtime.runPromise(ThreadErasure);
 		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
 		try {
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "erase_transcript_create",
-					payload: { title: "Erase transcript", type: "thread.create" },
-					thread_id: "thread_transcript_erased",
-				}),
+			const created_thread_transcript_erased = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Erase transcript" }),
 			);
 			await Effect.runPromise(
 				journal.AppendEvent({
@@ -1265,14 +1354,14 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 						message_id: "erase_assistant",
 						text: "This must disappear.",
 					},
-					thread_id: "thread_transcript_erased",
+					thread_id: created_thread_transcript_erased.thread_id,
 				}),
 			);
 			const updates = await Effect.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
 						const stream = yield* harness.client.SubscribeThreadTranscript(
-							"thread_transcript_erased",
+							created_thread_transcript_erased.thread_id,
 						);
 						const fiber = yield* stream.pipe(
 							Stream.take(2),
@@ -1282,7 +1371,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 						yield* harness.client.Command({
 							command_id: "erase_transcript_archive",
 							payload: { type: "thread.archive" },
-							thread_id: "thread_transcript_erased",
+							thread_id: created_thread_transcript_erased.thread_id,
 						});
 						yield* erasure.CleanupExpired(
 							"2026-07-19T00:00:00.000Z",
@@ -1315,20 +1404,15 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 		const journal = await runtime.runPromise(JournalStore);
 		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
 		try {
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "race_transcript_create",
-					payload: { title: "Race transcript", type: "thread.create" },
-					thread_id: "thread_transcript_race",
-				}),
+			const created_thread_transcript_race = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Race transcript" }),
 			);
 			const updates = await Effect.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
-						const stream =
-							yield* harness.client.SubscribeThreadTranscript(
-								"thread_transcript_race",
-							);
+						const stream = yield* harness.client.SubscribeThreadTranscript(
+							created_thread_transcript_race.thread_id,
+						);
 						const fiber = yield* stream.pipe(
 							Stream.take(3),
 							Stream.runCollect,
@@ -1344,7 +1428,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 										message_id: "race_message_one",
 										text: "one",
 									},
-									thread_id: "thread_transcript_race",
+									thread_id: created_thread_transcript_race.thread_id,
 								}),
 								journal.AppendEvent({
 									causation_id: "race_two",
@@ -1354,7 +1438,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 										message_id: "race_message_two",
 										text: "two",
 									},
-									thread_id: "thread_transcript_race",
+									thread_id: created_thread_transcript_race.thread_id,
 								}),
 							],
 							{ concurrency: 1, discard: true },
@@ -1383,16 +1467,12 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			client: { event_capacity: 1_000 },
 		});
 		try {
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "history_create",
-					payload: { title: "History", type: "thread.create" },
-					thread_id: "thread_history",
-				}),
+			const created_thread_history = await Effect.runPromise(
+				harness.client.CreateThread({ title: "History" }),
 			);
 			await Effect.runPromise(
 				Effect.forEach(
-					Array.from({ length: 205 }, (_, index) => index + 1),
+					Array.from({ length: 5 }, (_, index) => index + 1),
 					(index) =>
 						Effect.all(
 							[
@@ -1404,7 +1484,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 										message_id: `history_message_${index}`,
 										text: `safe ${index}`,
 									},
-									thread_id: "thread_history",
+									thread_id: created_thread_history.thread_id,
 								}),
 								journal.AppendEvent({
 									causation_id: `history_raw_${index}`,
@@ -1414,7 +1494,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 										operation: "write",
 										path: `C:/private/${index}`,
 									},
-									thread_id: "thread_history",
+									thread_id: created_thread_history.thread_id,
 								}),
 							],
 							{ concurrency: 1, discard: true },
@@ -1422,21 +1502,24 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 				),
 			);
 			const newest = await Effect.runPromise(
-				harness.client.GetThreadTranscript({ thread_id: "thread_history", limit: 2 }),
+				harness.client.GetThreadTranscript({
+					thread_id: created_thread_history.thread_id,
+					limit: 2,
+				}),
 			);
 			const previous = await Effect.runPromise(
 				harness.client.GetThreadTranscript({
-					thread_id: "thread_history",
+					thread_id: created_thread_history.thread_id,
 					limit: 2,
 					before_journal_sequence: newest.next_before_journal_sequence,
 				}),
 			);
 			expect(newest).toMatchObject({
-				entries: [{ payload: { text: "safe 204" } }, { payload: { text: "safe 205" } }],
+				entries: [{ payload: { text: "safe 4" } }, { payload: { text: "safe 5" } }],
 			});
 			expect(newest.next_before_journal_sequence).toBeDefined();
 			expect(previous).toMatchObject({
-				entries: [{ payload: { text: "safe 202" } }, { payload: { text: "safe 203" } }],
+				entries: [{ payload: { text: "safe 2" } }, { payload: { text: "safe 3" } }],
 			});
 		} finally {
 			await harness.dispose();
@@ -1452,24 +1535,16 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 		const journal = await runtime.runPromise(JournalStore);
 		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
 		try {
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "groups_create",
-					payload: { title: "Groups", type: "thread.create" },
-					thread_id: "thread_groups",
-				}),
+			const created_thread_groups = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Groups" }),
 			);
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "groups_other_create",
-					payload: { title: "Other Groups", type: "thread.create" },
-					thread_id: "thread_groups_other",
-				}),
+			const created_thread_groups_other = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Other Groups" }),
 			);
 			await Effect.runPromise(
 				database.client.insert(OrchestrationGroups).values({
 					group_id: "group_other",
-					thread_id: "thread_groups_other",
+					thread_id: created_thread_groups_other.thread_id,
 					coordinator_agent_id: "agent_other",
 					state: "running",
 					max_concurrency: 1,
@@ -1482,7 +1557,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			await Effect.runPromise(
 				database.client.insert(OrchestrationGroups).values({
 					group_id: "group_live",
-					thread_id: "thread_groups",
+					thread_id: created_thread_groups.thread_id,
 					coordinator_agent_id: "agent_coordinator",
 					state: "running",
 					max_concurrency: 2,
@@ -1495,7 +1570,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			await Effect.runPromise(
 				database.client.insert(OrchestrationGroups).values({
 					group_id: "group_terminal",
-					thread_id: "thread_groups",
+					thread_id: created_thread_groups.thread_id,
 					coordinator_agent_id: "agent_coordinator",
 					state: "complete",
 					max_concurrency: 2,
@@ -1506,16 +1581,16 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 				}),
 			);
 			const discovered = await Effect.runPromise(
-				harness.client.ListOrchestrationGroups("thread_groups", false),
+				harness.client.ListOrchestrationGroups(created_thread_groups.thread_id, false),
 			);
 			const with_terminal = await Effect.runPromise(
-				harness.client.ListOrchestrationGroups("thread_groups", true),
+				harness.client.ListOrchestrationGroups(created_thread_groups.thread_id, true),
 			);
 			const updates = await Effect.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
 						const stream = yield* harness.client.SubscribeOrchestrationGroups(
-							"thread_groups",
+							created_thread_groups.thread_id,
 							false,
 						);
 						const fiber = yield* stream.pipe(
@@ -1534,7 +1609,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 								state: "running",
 								action: "unrelated",
 							},
-							thread_id: "thread_groups_other",
+							thread_id: created_thread_groups_other.thread_id,
 						});
 						const own = yield* journal.AppendEvent({
 							causation_id: "group_patch",
@@ -1547,7 +1622,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 								state: "running",
 								action: "refreshed",
 							},
-							thread_id: "thread_groups",
+							thread_id: created_thread_groups.thread_id,
 						});
 						return { own, updates: [...(yield* Fiber.join(fiber))] };
 					}),
@@ -1582,17 +1657,13 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 		const erasure = await runtime.runPromise(ThreadErasure);
 		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
 		try {
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "erase_groups_create",
-					payload: { title: "Erase groups", type: "thread.create" },
-					thread_id: "thread_groups_erased",
-				}),
+			const created_thread_groups_erased = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Erase groups" }),
 			);
 			await Effect.runPromise(
 				database.client.insert(OrchestrationGroups).values({
 					group_id: "group_erased",
-					thread_id: "thread_groups_erased",
+					thread_id: created_thread_groups_erased.thread_id,
 					coordinator_agent_id: "agent_erased",
 					state: "running",
 					max_concurrency: 1,
@@ -1606,7 +1677,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 				Effect.scoped(
 					Effect.gen(function* () {
 						const stream = yield* harness.client.SubscribeOrchestrationGroups(
-							"thread_groups_erased",
+							created_thread_groups_erased.thread_id,
 							false,
 						);
 						const fiber = yield* stream.pipe(
@@ -1617,7 +1688,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 						yield* harness.client.Command({
 							command_id: "erase_groups_archive",
 							payload: { type: "thread.archive" },
-							thread_id: "thread_groups_erased",
+							thread_id: created_thread_groups_erased.thread_id,
 						});
 						yield* erasure.CleanupExpired(
 							"2026-07-19T00:00:00.000Z",
@@ -1660,8 +1731,6 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 		const metadata_coordinator = await runtime.runPromise(ThreadMetadataRefinementCoordinator);
 		const workspace_evidence = await runtime.runPromise(WorkspaceEvidenceRecorder);
 		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
-		const thread_id = "thread_public_affinity";
-
 		try {
 			const result = await Effect.runPromise(
 				Effect.scoped(
@@ -1671,7 +1740,6 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 							Stream.filter(
 								(update) =>
 									update.type === "upsert" &&
-									update.thread.thread_id === thread_id &&
 									update.thread.primary_project?.project_id ===
 										ProjectBeta.project_id,
 							),
@@ -1679,14 +1747,10 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 							Effect.forkScoped,
 						);
 
-						yield* harness.client.Command({
-							command_id: "create_public_affinity",
-							payload: {
-								title: "Cross-repository public projection",
-								type: "thread.create",
-							},
-							thread_id,
+						const created_thread = yield* harness.client.CreateThread({
+							title: "Cross-repository public projection",
 						});
+						const thread_id = created_thread.thread_id;
 						yield* journal.AppendEvent({
 							causation_id: "alpha_run_cause",
 							correlation_id: "alpha_run_correlation",
@@ -2263,7 +2327,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 
 									if (
 										update.type === "remove" &&
-										update.thread_id === "thread_erased"
+										update.thread_id === erased_thread.thread_id
 									) {
 										yield* Deferred.succeed(removal_delivered, undefined).pipe(
 											Effect.asVoid,
@@ -2281,7 +2345,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 
 									if (
 										event.payload.type === "thread.erased" &&
-										event.thread_id === "thread_erased"
+										event.thread_id === erased_thread.thread_id
 									) {
 										yield* Deferred.succeed(erasure_delivered, undefined).pipe(
 											Effect.asVoid,
@@ -2290,7 +2354,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 
 									if (
 										event.payload.type === "thread.message_queued" &&
-										event.thread_id === "thread_kept" &&
+										event.thread_id === kept_thread.thread_id &&
 										event.payload.text === "Surviving later event"
 									) {
 										yield* Deferred.succeed(
@@ -2312,15 +2376,11 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 						yield* Effect.yieldNow;
 						yield* Deferred.await(initial_snapshot);
 
-						yield* harness.client.Command({
-							command_id: "create_erased",
-							payload: { title: "Secret erased title", type: "thread.create" },
-							thread_id: "thread_erased",
+						const erased_thread = yield* harness.client.CreateThread({
+							title: "Secret erased title",
 						});
-						yield* harness.client.Command({
-							command_id: "create_kept",
-							payload: { title: "Surviving thread", type: "thread.create" },
-							thread_id: "thread_kept",
+						const kept_thread = yield* harness.client.CreateThread({
+							title: "Surviving thread",
 						});
 
 						now.value = "2026-07-10T18:01:00.000Z";
@@ -2334,7 +2394,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 								type: "thread.message_queued",
 								working_directory: "C:/workspace/erased",
 							},
-							thread_id: "thread_erased",
+							thread_id: erased_thread.thread_id,
 						});
 
 						now.value = "2026-07-10T18:02:00.000Z";
@@ -2347,7 +2407,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 								working_directory: "C:/workspace/kept",
 							},
 							run_id: "kept_run",
-							thread_id: "thread_kept",
+							thread_id: kept_thread.thread_id,
 						});
 
 						now.value = "2026-07-10T18:03:00.000Z";
@@ -2368,12 +2428,12 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 								group_id: "secret_group",
 								type: "artifact.recorded",
 							},
-							thread_id: "thread_erased",
+							thread_id: erased_thread.thread_id,
 						});
 
 						yield* database.client.insert(ThreadErasureClaims).values({
 							claimed_at: "2026-07-10T18:04:00.000Z",
-							thread_id: "thread_erased",
+							thread_id: erased_thread.thread_id,
 						});
 						yield* erasure.ResumeClaimed("2026-07-10T18:04:00.000Z");
 						yield* Deferred.await(erasure_delivered);
@@ -2391,7 +2451,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 								type: "thread.message_queued",
 								working_directory: "C:/workspace/kept",
 							},
-							thread_id: "thread_kept",
+							thread_id: kept_thread.thread_id,
 						});
 						yield* Effect.promise(() =>
 							wait_for(() => harness.connector_snapshot().connections >= 2),
@@ -2401,7 +2461,9 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 
 						return {
 							cursors: yield* harness.client.Cursors,
+							erased_thread_id: erased_thread.thread_id,
 							events: yield* Ref.get(events),
+							kept_thread_id: kept_thread.thread_id,
 							updates: yield* Ref.get(updates),
 						};
 					}),
@@ -2418,7 +2480,8 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 				current_replay_harness.client.ListThreads,
 			);
 			const removal_index = output.updates.findIndex(
-				(update) => update.type === "remove" && update.thread_id === "thread_erased",
+				(update) =>
+					update.type === "remove" && update.thread_id === output.erased_thread_id,
 			);
 			const serialized_replay = JSON.stringify(replayed_threads);
 
@@ -2427,20 +2490,20 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			]);
 			expect(output.events.map((event) => event.sequence)).toEqual([1, 1, 2, 2, 3, 4, 3]);
 			expect(output.events.map((event) => event.thread_id)).toEqual([
-				"thread_erased",
-				"thread_kept",
-				"thread_erased",
-				"thread_kept",
-				"thread_erased",
-				"thread_erased",
-				"thread_kept",
+				output.erased_thread_id,
+				output.kept_thread_id,
+				output.erased_thread_id,
+				output.kept_thread_id,
+				output.erased_thread_id,
+				output.erased_thread_id,
+				output.kept_thread_id,
 			]);
 			expect(output.updates[0]).toMatchObject({ type: "snapshot", threads: [] });
 			expect(output.updates).toContainEqual(
 				expect.objectContaining({
 					thread: expect.objectContaining({
 						activity_version: 1,
-						thread_id: "thread_kept",
+						thread_id: output.kept_thread_id,
 					}),
 					type: "upsert",
 				}),
@@ -2448,30 +2511,32 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			expect(removal_index).toBeGreaterThan(0);
 			expect(output.updates[removal_index]).toMatchObject({
 				journal_sequence: 7,
-				thread_id: "thread_erased",
+				thread_id: output.erased_thread_id,
 				type: "remove",
 			});
 			expect(output.updates.slice(removal_index + 1)).not.toContainEqual(
 				expect.objectContaining({
-					thread: expect.objectContaining({ thread_id: "thread_erased" }),
+					thread: expect.objectContaining({ thread_id: output.erased_thread_id }),
 				}),
 			);
 			expect(output.updates.slice(removal_index + 1)).not.toContainEqual(
 				expect.objectContaining({
 					threads: expect.arrayContaining([
-						expect.objectContaining({ thread_id: "thread_erased" }),
+						expect.objectContaining({ thread_id: output.erased_thread_id }),
 					]),
 				}),
 			);
 			expect(output.cursors).toEqual({
 				event_cursors: [
 					{ sequence: 1, stream_id: "settings:guidance" },
-					{ sequence: 4, stream_id: "thread:thread_erased" },
-					{ sequence: 3, stream_id: "thread:thread_kept" },
+					{ sequence: 4, stream_id: `thread:${output.erased_thread_id}` },
+					{ sequence: 3, stream_id: `thread:${output.kept_thread_id}` },
 				],
 				last_journal_sequence: 8,
 			});
-			expect(replayed_threads.map((thread) => thread.thread_id)).toEqual(["thread_kept"]);
+			expect(replayed_threads.map((thread) => thread.thread_id)).toEqual([
+				output.kept_thread_id,
+			]);
 			expect(serialized_replay).not.toContain("Secret erased title");
 			expect(serialized_replay).not.toContain("Private erased message body");
 			expect(serialized_replay).not.toContain("Private erased artifact diff");

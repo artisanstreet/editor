@@ -11,6 +11,18 @@ export interface DatabaseOptions {
 	readonly migrations_path: string;
 }
 
+/**
+ * Reduces SQLite's transient disk churn while retaining ordinary WAL crash
+ * resilience. `NORMAL` may lose the most recent commits after OS or power
+ * failure, and checkpoint thresholds are not hard WAL-size ceilings while a
+ * reader holds a snapshot. Packaged qualification still measures actual I/O.
+ */
+export const DatabaseDiskIoPolicy = {
+	cache_size_kib: 64 * 1_024,
+	journal_size_limit_bytes: 8 * 1_024 * 1_024,
+	wal_autocheckpoint_pages: 1_000,
+} as const;
+
 export class Database extends Context.Service<
 	Database,
 	{
@@ -32,6 +44,16 @@ export function make_database_layer(options: DatabaseOptions) {
 			yield* migrate(client, {
 				migrationsFolder: options.migrations_path,
 			});
+
+			yield* client.run("PRAGMA synchronous = NORMAL");
+			yield* client.run("PRAGMA temp_store = MEMORY");
+			yield* client.run(`PRAGMA cache_size = -${DatabaseDiskIoPolicy.cache_size_kib}`);
+			yield* client.run(
+				`PRAGMA journal_size_limit = ${DatabaseDiskIoPolicy.journal_size_limit_bytes}`,
+			);
+			yield* client.run(
+				`PRAGMA wal_autocheckpoint = ${DatabaseDiskIoPolicy.wal_autocheckpoint_pages}`,
+			);
 
 			return { client };
 		}),

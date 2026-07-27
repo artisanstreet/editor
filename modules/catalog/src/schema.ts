@@ -1,19 +1,9 @@
 import { Schema } from "effect";
 
-export const HarnessId = Schema.Literals(["codex", "claude", "grok", "opencode", "antigravity"]);
+export const HarnessId = Schema.Literals(["codex", "claude", "grok"]);
 export type HarnessId = typeof HarnessId.Type;
 
-export const ProviderId = Schema.Literals([
-	"openai",
-	"anthropic",
-	"xai",
-	"opencode",
-	"google",
-	"zai",
-	"alibaba",
-	"moonshot",
-	"deepseek",
-]);
+export const ProviderId = Schema.Literals(["openai", "anthropic", "xai"]);
 export type ProviderId = typeof ProviderId.Type;
 
 /** Artisan's ordered presentation vocabulary. Adapters retain their native value separately. */
@@ -90,11 +80,17 @@ export const ThinkingCapability = Schema.Union([
 export type ThinkingCapability = typeof ThinkingCapability.Type;
 
 export const SpeedOption = Schema.Struct({
+	availability: Schema.Literals(["always", "dynamic"]),
+	consumption_basis: Schema.Literals(["standard", "chatgpt-credits", "usage-credit-price"]),
+	consumption_multiplier: Schema.Number.check(Schema.isGreaterThanOrEqualTo(1)),
 	default: Schema.Boolean,
 	description: Schema.String,
 	id: Schema.NonEmptyString,
 	label: Schema.NonEmptyString,
 	native_value: Schema.NonEmptyString,
+	source_url: Schema.NonEmptyString,
+	speed_multiplier: Schema.Number.check(Schema.isGreaterThanOrEqualTo(1)),
+	verified_at: Schema.NonEmptyString,
 });
 export type SpeedOption = typeof SpeedOption.Type;
 
@@ -116,6 +112,74 @@ export const SpeedOptions = Schema.NonEmptyArray(SpeedOption).check(
 	}),
 );
 export type SpeedOptions = typeof SpeedOptions.Type;
+
+/** Artisan's ordered permission vocabulary; harnesses may expose a sparse subset. */
+export const PermissionLevel = Schema.Literals([
+	"restricted",
+	"supervised",
+	"trusted",
+	"autonomous",
+	"unrestricted",
+]);
+export type PermissionLevel = typeof PermissionLevel.Type;
+
+export const permission_level_order = Schema.decodeUnknownSync(Schema.Array(PermissionLevel))([
+	"restricted",
+	"supervised",
+	"trusted",
+	"autonomous",
+	"unrestricted",
+]);
+
+const permission_rank = new Map(permission_level_order.map((level, index) => [level, index]));
+
+export const PermissionOption = Schema.Struct({
+	approval_behavior: Schema.Literals(["prompts", "classifier", "none"]),
+	availability: Schema.Literals(["always", "dynamic"]),
+	description: Schema.NonEmptyString,
+	edit_scope: Schema.Literals(["none", "workspace", "host"]),
+	id: PermissionLevel,
+	label: Schema.NonEmptyString,
+	native_value: Schema.NonEmptyString,
+	safety_boundary: Schema.Literals(["plan", "sandbox", "rules", "bypassed"]),
+});
+export type PermissionOption = typeof PermissionOption.Type;
+
+export const PermissionCapability = Schema.Struct({
+	default: PermissionLevel,
+	options: Schema.NonEmptyArray(PermissionOption),
+}).check(
+	Schema.makeFilter((capability) => {
+		const issues: Array<Schema.FilterIssue> = [];
+		const ids = capability.options.map((option) => option.id);
+		if (new Set(ids).size !== ids.length) {
+			issues.push({ path: ["options"], issue: "permission option IDs must be unique" });
+		}
+		const native_values = capability.options.map((option) => option.native_value);
+		if (new Set(native_values).size !== native_values.length) {
+			issues.push({
+				path: ["options"],
+				issue: "native permission values must be unique",
+			});
+		}
+		if (!ids.includes(capability.default)) {
+			issues.push({ path: ["default"], issue: "default permission level must be supported" });
+		}
+		for (let index = 1; index < ids.length; index += 1) {
+			const previous = permission_rank.get(ids[index - 1] as PermissionLevel);
+			const current = permission_rank.get(ids[index] as PermissionLevel);
+			if (previous === undefined || current === undefined || previous >= current) {
+				issues.push({
+					path: ["options", index],
+					issue: "permission options must be ordered from least to most autonomous",
+				});
+				break;
+			}
+		}
+		return issues;
+	}),
+);
+export type PermissionCapability = typeof PermissionCapability.Type;
 
 export const ModelCapabilities = Schema.Struct({
 	image_input: Schema.Boolean,
@@ -141,7 +205,7 @@ export const HarnessDefinition = Schema.Struct({
 	id: HarnessId,
 	gateways: Schema.Array(GatewayDefinition),
 	label: Schema.String,
-	permission_modes: Schema.Array(Schema.String),
+	permissions: PermissionCapability,
 	workflow_modes: Schema.Array(Schema.Literals(["plan", "build"])),
 });
 export type HarnessDefinition = typeof HarnessDefinition.Type;

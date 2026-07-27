@@ -8,6 +8,7 @@ import { AgentOrchestrator } from "../orchestration/agent-orchestrator";
 import type { OrchestrationError } from "../persistence/orchestration-repository";
 import type { JournalStoreError } from "../persistence/journal-store";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import { RuntimeCatalogService, type RuntimeCatalogPolicyError } from "../runtime/runtime-catalog";
 import { ThreadCommands } from "../threads/thread-commands";
 import type { ThreadMetadataError } from "../threads/thread-metadata-repository";
 import type { ThreadProjectAffinityError } from "../threads/thread-project-affinity-repository";
@@ -23,6 +24,7 @@ export class CommandRouter extends Context.Service<
 			| AgentGraphError
 			| JournalStoreError
 			| OrchestrationError
+			| RuntimeCatalogPolicyError
 			| TerminalSessionError
 			| ThreadMetadataError
 			| ThreadProjectAffinityError
@@ -36,8 +38,15 @@ export const CommandRouterLive = Layer.effect(
 		const graph = yield* AgentGraphOrchestrator;
 		const orchestrator = yield* AgentOrchestrator;
 		const metadata = yield* RuntimeMetadata;
+		const runtime_catalog = yield* RuntimeCatalogService;
 		const thread_commands = yield* ThreadCommands;
 		const terminals = yield* TerminalSessionService;
+		const HandleOrchestration = (command: CommandEnvelope) =>
+			command.payload.type === "thread.session_policy.update"
+				? runtime_catalog
+						.ValidateThreadSessionPolicy(command.payload.policy)
+						.pipe(Effect.andThen(orchestrator.HandleInbound(command)))
+				: orchestrator.HandleInbound(command);
 		const Dispatch = (command: CommandEnvelope) =>
 			command.payload.type === "thread.create"
 				? thread_commands.HandleCreate(command)
@@ -118,7 +127,7 @@ export const CommandRouterLive = Layer.effect(
 												}),
 											),
 										)
-									: orchestrator.Handle(command).pipe(
+									: HandleOrchestration(command).pipe(
 											Effect.flatMap((accepted) =>
 												Effect.gen(function* () {
 													const message_id =

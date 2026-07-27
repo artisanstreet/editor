@@ -70,6 +70,7 @@ import {
 	make_project_directory_service_layer,
 	ProjectDirectoryService,
 } from "../projects/project-directory-service";
+import { ProjectCatalogLive } from "../projects/project-catalog";
 import {
 	ThreadProjectAffinityCoordinatorDisabled,
 	ThreadProjectAffinityCoordinatorLive,
@@ -92,6 +93,7 @@ import { TerminalDriver } from "../terminal/terminal-driver";
 import { TerminalRepositoryLive } from "../terminal/terminal-repository";
 import { TerminalSessionServiceLive } from "../terminal/terminal-sessions";
 import { RuntimeMetadata, RuntimeMetadataLive } from "./runtime-metadata";
+import { RuntimeCatalogLive } from "./runtime-catalog";
 import {
 	DesktopEngineConfigurationError,
 	ResolveBackendRuntimeConfiguration,
@@ -346,6 +348,7 @@ export function make_backend_layer(options: BackendOptions) {
 			),
 		);
 	const engine_registry = make_engine_registry_layer(options.engines ?? []);
+	const runtime_catalog = RuntimeCatalogLive.pipe(Layer.provideMerge(engine_registry));
 	const guidance_repository = GlobalGuidanceRepositoryLive.pipe(Layer.provideMerge(persistence));
 	const guidance_directory = join(dirname(options.database_path), "guidance");
 	const guidance = make_global_guidance_service_layer({
@@ -400,6 +403,7 @@ export function make_backend_layer(options: BackendOptions) {
 	const project_affinity = ThreadProjectAffinityRepositoryLive.pipe(
 		Layer.provideMerge(infrastructure),
 	);
+	const project_catalog = ProjectCatalogLive.pipe(Layer.provideMerge(infrastructure));
 	const project_affinity_coordination =
 		options.project_locator === undefined
 			? ThreadProjectAffinityCoordinatorDisabled
@@ -523,6 +527,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(orchestration),
 		Layer.provideMerge(graph),
 		Layer.provideMerge(terminals),
+		Layer.provideMerge(runtime_catalog),
 	);
 	/** Marketplace defaults deliberately deny source access and transport startup. Acquisition is inert. */
 	const routine_repository = RoutineRepositoryLive.pipe(Layer.provideMerge(infrastructure));
@@ -603,6 +608,8 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(metadata_refinement),
 		Layer.provideMerge(project_affinity_coordination),
 		Layer.provideMerge(project_directories),
+		Layer.provideMerge(project_catalog),
+		Layer.provideMerge(runtime_catalog),
 		Layer.provideMerge(guidance),
 		Layer.provideMerge(git),
 		Layer.provideMerge(model_behaviour),

@@ -1,4 +1,5 @@
 import { Effect, Layer, Option, Schema, Stream } from "effect";
+import { model_manifest } from "@artisan/catalog";
 
 import { ConversationSnapshot as ConversationSnapshotSchema } from "@artisan/protocol";
 import type {
@@ -659,6 +660,14 @@ export const FixtureArtisanClientService = {
 				input.command_id ?? `fixture-command-${input.payload.type}`,
 			);
 		}),
+	CreateThread: (input) =>
+		Effect.succeed({
+			...fixture_artisan_client_data.threads[0]!,
+			thread_id: "thread-fixture-created",
+			title: input.title,
+		}),
+	ConnectionChanges: Stream.empty,
+	ConnectionState: Effect.succeed({ phase: "ready" as const }),
 	Cursors: Effect.gen(function* () {
 		return yield* Effect.succeed(fixture_artisan_client_data.cursors);
 	}),
@@ -667,6 +676,7 @@ export const FixtureArtisanClientService = {
 	}),
 	Errors: Stream.empty,
 	Events: Stream.fromIterable(fixture_artisan_client_data.events),
+	RetryConnection: Effect.void,
 	GetGlobalGuidance: Effect.gen(function* () {
 		return yield* Effect.succeed(fixture_artisan_client_data.global_guidance);
 	}),
@@ -854,6 +864,25 @@ export const FixtureArtisanClientService = {
 	ListThreads: Effect.gen(function* () {
 		return yield* Effect.succeed(fixture_artisan_client_data.threads);
 	}),
+	ListProjects: Effect.succeed({
+		projects: [
+			{
+				...fixture_project,
+				attached_at: fixture_timestamp,
+				updated_at: fixture_timestamp,
+			},
+		],
+	}),
+	GetRuntimeCatalog: Effect.succeed({
+		default_model_id: "codex-sol",
+		manifest: {
+			...model_manifest,
+			harnesses: model_manifest.harnesses.filter((harness) => harness.id === "codex"),
+			models: model_manifest.models.filter((model) => model.harness === "codex"),
+			providers: model_manifest.providers.filter((provider) => provider.id === "openai"),
+		},
+	}),
+	DetachProject: () => Effect.succeed({ projects: [] }),
 	ListProjectDirectories: () =>
 		FixtureFailure("Project directory browsing is unavailable in the frontend fixture."),
 	SelectProjectDirectory: () =>
@@ -1185,6 +1214,22 @@ export const FixtureArtisanClientService = {
 			]),
 		);
 	}),
+	SubscribeProjects: Effect.succeed(
+		Stream.fromIterable([
+			{
+				snapshot: {
+					projects: [
+						{
+							...fixture_project,
+							attached_at: fixture_timestamp,
+							updated_at: fixture_timestamp,
+						},
+					],
+				},
+				type: "snapshot" as const,
+			},
+		]),
+	),
 	SubscribeConversation: (thread_id) =>
 		Effect.succeed(
 			Stream.fromIterable([

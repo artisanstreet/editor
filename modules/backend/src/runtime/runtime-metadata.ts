@@ -4,6 +4,7 @@ import { MakeSnowflakeIdLive, SnowflakeId } from "@artisan/protocol";
 
 export type RuntimeIdPrefix =
 	| "agent"
+	| "attachment"
 	| "backend"
 	| "connection"
 	| "event"

@@ -47,11 +47,11 @@ async function make_fixture() {
 	};
 }
 
-const query = (message_id: string): GitWorkspaceQueryEnvelope => ({
+const query = (message_id: string, thread_id: string): GitWorkspaceQueryEnvelope => ({
 	kind: "git.workspace.query",
 	message_id,
 	origin: "frontend",
-	payload: { thread_id: "thread_git", workspace_id: "workspace_git" },
+	payload: { thread_id, workspace_id: "workspace_git" },
 	protocol_version: 1,
 	schema_version: 1,
 	sent_at,
@@ -80,19 +80,18 @@ describe("production Git backend integration", () => {
 		let transport:
 			| Awaited<ReturnType<typeof make_transport_test_harness_with_protocol_server>>
 			| undefined;
+		let thread_id = "";
 
 		try {
 			const protocol_server = await first_runtime.runPromise(ProtocolServer);
 			transport = await make_transport_test_harness_with_protocol_server(protocol_server);
 			const result = await Effect.runPromise(
 				Effect.gen(function* () {
-					yield* transport!.client.Command({
-						command_id: "create_thread",
-						payload: { title: "Git integration", type: "thread.create" },
-						thread_id: "thread_git",
-					});
+					thread_id = (yield* transport!.client.CreateThread({
+						title: "Git integration",
+					})).thread_id;
 					const before = yield* transport!.client.GetGitWorkspace({
-						thread_id: "thread_git",
+						thread_id,
 						workspace_id: "workspace_git",
 					});
 
@@ -108,11 +107,11 @@ describe("production Git backend integration", () => {
 						kind: "stage",
 						mutation_id: "mutation_stage",
 						paths: ["tracked.txt"],
-						thread_id: "thread_git",
+						thread_id,
 						workspace_id: "workspace_git",
 					});
 					const pending = yield* transport!.client.GetGitWorkspace({
-						thread_id: "thread_git",
+						thread_id,
 						workspace_id: "workspace_git",
 					});
 					const resolution = {
@@ -120,11 +119,11 @@ describe("production Git backend integration", () => {
 						approved: true,
 						command_id: "resolve_stage",
 						mutation_id: "mutation_stage",
-						thread_id: "thread_git",
+						thread_id,
 					} as const;
 					const resolved = yield* transport!.client.ResolveGitMutation(resolution);
 					const after = yield* transport!.client.GetGitWorkspace({
-						thread_id: "thread_git",
+						thread_id,
 						workspace_id: "workspace_git",
 					});
 
@@ -156,7 +155,7 @@ describe("production Git backend integration", () => {
 
 		try {
 			const after_restart = await restarted.runPromise(
-				Effect.flatMap(GitService, (git) => git.Query(query("query_restart"))),
+				Effect.flatMap(GitService, (git) => git.Query(query("query_restart", thread_id))),
 			);
 			const cached = await run_git(fixture.root, ["diff", "--cached", "--name-only"]);
 

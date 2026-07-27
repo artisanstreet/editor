@@ -6,6 +6,7 @@
 		".": "./src/index.ts"
 	},
 	"dependencies": {
+		"@artisan/catalog": "workspace:*",
 		"@artisan/engines": "workspace:*",
 		"@artisan/protocol": "workspace:*",
 		"@decimalturn/toml-patch": "2.0.0",

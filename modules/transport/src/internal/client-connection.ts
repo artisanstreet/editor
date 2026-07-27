@@ -1,4 +1,15 @@
-import { Cause, Deferred, Effect, Fiber, Option, Ref, Scope } from "effect";
+import {
+	Cause,
+	Deferred,
+	Effect,
+	Fiber,
+	Option,
+	Ref,
+	Schedule,
+	Scope,
+	Stream,
+	SubscriptionRef,
+} from "effect";
 
 import {
 	DecodeOutboundControlEnvelope,
@@ -12,6 +23,7 @@ import {
 } from "@artisan/protocol";
 
 import { ArtisanClientError } from "../client-contract";
+import type { ArtisanConnectionState } from "../client-contract";
 import { MessagePortConnector } from "../connector";
 import { TransportRuntime } from "../transport-runtime";
 import {
@@ -53,14 +65,20 @@ export interface ClientConnectionHandlers {
 export interface ClientConnectionLifecycle {
 	readonly AwaitActive: AwaitActive;
 	readonly Current: Effect.Effect<Option.Option<ActiveClientSession>>;
+	readonly ConnectionChanges: Stream.Stream<ArtisanConnectionState>;
+	readonly ConnectionState: Effect.Effect<ArtisanConnectionState>;
 	readonly Dispose: Effect.Effect<void>;
 	readonly MakeTrace: Effect.Effect<FrontendTrace>;
+	readonly RetryConnection: Effect.Effect<void>;
 	readonly SendCurrent: SendCurrent;
 	readonly Start: (handlers: ClientConnectionHandlers) => Effect.Effect<void, never, Scope.Scope>;
 }
 
 /** Builds client connection state without starting its reconnect supervisor. */
-export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
+export const make_client_connection_lifecycle = (
+	reconnect_delay_ms: number,
+	reconnect_attempts = 5,
+) =>
 	Effect.gen(function* () {
 		const connector = yield* MessagePortConnector;
 		const runtime = yield* TransportRuntime;
@@ -71,6 +89,23 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 			active: Option.none(),
 			connection_signal: initial_signal,
 			disposed: false,
+		});
+		const connection_state = yield* SubscriptionRef.make<ArtisanConnectionState>({
+			phase: "connecting",
+		});
+		const ever_connected = yield* Ref.make(false);
+		const initial_retry_gate = yield* Deferred.make<void>();
+		const retry_gate = yield* Ref.make(initial_retry_gate);
+
+		const SetConnectionState = (next: ArtisanConnectionState) =>
+			SubscriptionRef.set(connection_state, next);
+
+		const retry_connection = Effect.gen(function* () {
+			const current = yield* SubscriptionRef.get(connection_state);
+			if (current.phase !== "exhausted") return;
+			yield* Ref.get(retry_gate).pipe(
+				Effect.flatMap((gate) => Deferred.succeed(gate, undefined)),
+			);
 		});
 
 		const make_trace = Effect.gen(function* () {
@@ -147,6 +182,9 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 
 			yield* Deferred.succeed(current.connection_signal, undefined);
 			yield* Deferred.succeed(disposed_signal, undefined);
+			yield* Ref.get(retry_gate).pipe(
+				Effect.flatMap((gate) => Deferred.succeed(gate, undefined)),
+			);
 
 			if (Option.isSome(current.active)) {
 				yield* current.active.value.ports.control_port
@@ -394,6 +432,8 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 					case "thread.list.snapshot":
 					case "thread.list.upsert":
 					case "thread.list.remove":
+					case "project.list.snapshot":
+					case "project.list.updated":
 					case "orchestration.graph.snapshot":
 					case "orchestration.graph.patch":
 					case "conversation.snapshot":
@@ -587,6 +627,8 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 					);
 					yield* Deferred.succeed(previous_signal, undefined);
 					yield* handlers.requests.Retry;
+					yield* SetConnectionState({ phase: "ready" });
+					yield* Ref.set(ever_connected, true);
 					const session_exit = yield* Effect.exit(Fiber.join(session_fiber));
 					const next_signal = yield* Deferred.make<void>();
 
@@ -603,20 +645,22 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 					yield* handlers.streams.Disconnect(active.connection_id);
 					yield* handlers.subscriptions.ResetConnection;
 
-					if (session_exit._tag === "Failure") {
-						const failure = Cause.squash(session_exit.cause);
+					const failure =
+						session_exit._tag === "Failure"
+							? Cause.squash(session_exit.cause)
+							: new Error("transport session closed");
+					const connection_error =
+						failure instanceof ArtisanClientError
+							? failure
+							: client_error(
+									"connection",
+									"The transport session disconnected.",
+									failure,
+									true,
+								);
 
-						return yield* Effect.fail(
-							failure instanceof ArtisanClientError
-								? failure
-								: client_error(
-										"connection",
-										"The transport session failed.",
-										failure,
-										true,
-									),
-						);
-					}
+					yield* handlers.publish_error(connection_error);
+					return yield* Effect.fail(connection_error);
 				}),
 			);
 
@@ -628,17 +672,29 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 						return;
 					}
 
-					const session = yield* Effect.exit(run_session);
+					const retry_schedule = Schedule.exponential(
+						`${reconnect_delay_ms} millis`,
+					).pipe(Schedule.jittered, Schedule.upTo({ times: reconnect_attempts - 1 }));
+					const session = yield* Effect.exit(
+						Effect.gen(function* () {
+							const connected = yield* Ref.get(ever_connected);
+							yield* SetConnectionState({
+								phase: connected ? "reconnecting" : "connecting",
+							});
+							return yield* run_session;
+						}).pipe(Effect.retry(retry_schedule)),
+					);
 					const after = yield* Ref.get(state);
 
 					if (after.disposed) {
 						return;
 					}
 
-					const failure =
-						session._tag === "Failure"
-							? Cause.squash(session.cause)
-							: new Error("transport session closed");
+					if (session._tag === "Success") {
+						continue;
+					}
+
+					const failure = Cause.squash(session.cause);
 					const error =
 						failure instanceof ArtisanClientError
 							? failure
@@ -650,7 +706,15 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 								);
 
 					yield* handlers.publish_error(error);
-					yield* Effect.sleep(reconnect_delay_ms);
+					yield* SetConnectionState({
+						attempts: reconnect_attempts,
+						error,
+						phase: "exhausted",
+					});
+					const gate = yield* Ref.get(retry_gate);
+					yield* Deferred.await(gate);
+					const next_gate = yield* Deferred.make<void>();
+					yield* Ref.set(retry_gate, next_gate);
 				}
 			});
 
@@ -659,9 +723,12 @@ export const make_client_connection_lifecycle = (reconnect_delay_ms: number) =>
 
 		return {
 			AwaitActive: await_active,
+			ConnectionChanges: SubscriptionRef.changes(connection_state),
+			ConnectionState: SubscriptionRef.get(connection_state),
 			Current: Ref.get(state).pipe(Effect.map((current) => current.active)),
 			Dispose: dispose,
 			MakeTrace: make_trace,
+			RetryConnection: retry_connection,
 			SendCurrent: send_current,
 			Start: start,
 		} satisfies ClientConnectionLifecycle;

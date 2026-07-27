@@ -6,8 +6,14 @@ import { fileURLToPath } from "node:url";
 import { Effect, Layer, Stream } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { CommandEnvelope, HelloEnvelope, SubscribeEnvelope } from "@artisan/protocol";
-import { make_backend_runtime, ProtocolRouter, ProtocolServer } from "@artisan/backend";
+import type { HelloEnvelope, SubscribeEnvelope, ThreadCreateEnvelope } from "@artisan/protocol";
+import type { AuthoritativeCommandEnvelope } from "../../modules/backend/src/persistence/orchestration/message-command";
+import {
+	AgentOrchestrator,
+	make_backend_runtime,
+	ProtocolRouter,
+	ProtocolServer,
+} from "@artisan/backend";
 import { JournalStore } from "../../modules/backend/src/persistence/journal-store";
 import { ThreadReadModel } from "../../modules/backend/src/persistence/thread-read-model";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
@@ -24,7 +30,7 @@ async function make_database_path() {
 	return join(directory, "artisan.db");
 }
 
-function make_create_command(): CommandEnvelope {
+function make_create_command(): AuthoritativeCommandEnvelope {
 	return {
 		kind: "command",
 		message_id: "create_1",
@@ -42,8 +48,9 @@ function make_create_command(): CommandEnvelope {
 
 function make_thread_command(
 	message_id: string,
-	payload: CommandEnvelope["payload"],
-): CommandEnvelope {
+	payload: AuthoritativeCommandEnvelope["payload"],
+	thread_id = "thread_1",
+): AuthoritativeCommandEnvelope {
 	return {
 		kind: "command",
 		message_id,
@@ -52,7 +59,19 @@ function make_thread_command(
 		protocol_version: 1,
 		schema_version: 1,
 		sent_at: "2026-07-10T18:00:00.000Z",
-		thread_id: "thread_1",
+		thread_id,
+	};
+}
+
+function make_thread_create_request(message_id: string, title: string): ThreadCreateEnvelope {
+	return {
+		kind: "thread.create.request",
+		message_id,
+		origin: "frontend",
+		payload: { title },
+		protocol_version: 1,
+		schema_version: 1,
+		sent_at: "2026-07-10T18:00:00.000Z",
 	};
 }
 
@@ -380,12 +399,13 @@ describe("thread identity", () => {
 		try {
 			const thread = await runtime.runPromise(
 				Effect.gen(function* () {
+					const orchestrator = yield* AgentOrchestrator;
 					const router = yield* ProtocolRouter;
 					const threads = yield* ThreadReadModel;
 
 					yield* router.Route(make_create_command());
 					now.value = "2026-07-11T18:00:00.000Z";
-					yield* router.Route(
+					yield* orchestrator.Handle(
 						make_thread_command("message_1", {
 							engine_id: "missing_engine",
 							text: "Please implement durable erasure",
@@ -425,17 +445,32 @@ describe("thread identity", () => {
 						yield* connection.Outbound.pipe(Stream.take(2), Stream.runCollect);
 						yield* connection.Receive(make_thread_subscribe());
 						yield* connection.Outbound.pipe(Stream.take(2), Stream.runCollect);
-						yield* connection.Receive(make_create_command());
+						yield* connection.Receive(
+							make_thread_create_request(
+								"create_subscription",
+								"Durable thread identity",
+							),
+						);
 						const created = yield* connection.Outbound.pipe(
 							Stream.take(3),
 							Stream.runCollect,
 						);
+						const created_thread = created.find(
+							(envelope) => envelope.kind === "thread.create.result",
+						);
+						if (created_thread?.kind !== "thread.create.result") {
+							return yield* Effect.die("Forge did not return the created thread");
+						}
 						now.value = "2026-07-11T18:00:00.000Z";
 						yield* connection.Receive(
-							make_thread_command("rename_subscription", {
-								title: "Locked sidebar title",
-								type: "thread.rename",
-							}),
+							make_thread_command(
+								"rename_subscription",
+								{
+									title: "Locked sidebar title",
+									type: "thread.rename",
+								},
+								created_thread.payload.thread_id,
+							),
 						);
 						const renamed = yield* connection.Outbound.pipe(
 							Stream.take(3),
@@ -490,6 +525,7 @@ describe("thread identity", () => {
 			const output = await runtime.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
+						const orchestrator = yield* AgentOrchestrator;
 						const server = yield* ProtocolServer;
 						const connection = yield* server.Open;
 
@@ -497,27 +533,52 @@ describe("thread identity", () => {
 						yield* connection.Outbound.pipe(Stream.take(2), Stream.runCollect);
 						yield* connection.Receive(make_thread_subscribe());
 						yield* connection.Outbound.pipe(Stream.take(2), Stream.runCollect);
-						yield* connection.Receive(make_create_command());
-						yield* connection.Outbound.pipe(Stream.take(3), Stream.runCollect);
+						yield* connection.Receive(
+							make_thread_create_request(
+								"create_activity",
+								"Durable thread identity",
+							),
+						);
+						const created = yield* connection.Outbound.pipe(
+							Stream.take(3),
+							Stream.runCollect,
+						);
+						const created_thread = created.find(
+							(envelope) => envelope.kind === "thread.create.result",
+						);
+						if (created_thread?.kind !== "thread.create.result") {
+							return yield* Effect.die("Forge did not return the created thread");
+						}
 
 						now.value = "2026-07-11T18:00:00.000Z";
-						yield* connection.Receive(
-							make_thread_command("message_subscription", {
-								engine_id: "missing_engine",
-								text: "Advance the live sidebar activity",
-								type: "thread.send_message",
-								working_directory: "C:/workspace",
-							}),
+						yield* orchestrator.Handle(
+							make_thread_command(
+								"message_subscription",
+								{
+									engine_id: "missing_engine",
+									text: "Advance the live sidebar activity",
+									type: "thread.send_message",
+									working_directory: "C:/workspace",
+								},
+								created_thread.payload.thread_id,
+							),
 						);
 
-						return yield* connection.Outbound.pipe(Stream.take(6), Stream.runCollect);
+						return {
+							envelopes: yield* connection.Outbound.pipe(
+								Stream.take(5),
+								Stream.runCollect,
+							),
+							thread_id: created_thread.payload.thread_id,
+						};
 					}),
 				),
 			);
-			const upserts = output.filter((envelope) => envelope.kind === "thread.list.upsert");
+			const upserts = output.envelopes.filter(
+				(envelope) => envelope.kind === "thread.list.upsert",
+			);
 
-			expect(output.map((envelope) => envelope.kind)).toEqual([
-				"command.receipt",
+			expect(output.envelopes.map((envelope) => envelope.kind)).toEqual([
 				"event",
 				"thread.list.upsert",
 				"event",
@@ -532,7 +593,7 @@ describe("thread identity", () => {
 			expect(upserts.at(-1)).toMatchObject({
 				payload: {
 					last_activity_at: "2026-07-11T18:00:00.000Z",
-					thread_id: "thread_1",
+					thread_id: output.thread_id,
 				},
 			});
 		} finally {
@@ -561,8 +622,23 @@ describe("thread identity", () => {
 						yield* connection.Outbound.pipe(Stream.take(2), Stream.runCollect);
 						yield* connection.Receive(make_thread_subscribe());
 						yield* connection.Outbound.pipe(Stream.take(2), Stream.runCollect);
-						yield* connection.Receive(make_create_command());
-						yield* connection.Outbound.pipe(Stream.take(3), Stream.runCollect);
+						yield* connection.Receive(
+							make_thread_create_request(
+								"create_resources",
+								"Durable thread identity",
+							),
+						);
+						const created = yield* connection.Outbound.pipe(
+							Stream.take(3),
+							Stream.runCollect,
+						);
+						const created_thread = created.find(
+							(envelope) => envelope.kind === "thread.create.result",
+						);
+						if (created_thread?.kind !== "thread.create.result") {
+							return yield* Effect.die("Forge did not return the created thread");
+						}
+						const thread_id = created_thread.payload.thread_id;
 
 						now.value = "2026-07-11T18:00:00.000Z";
 						yield* journal.AppendEvent({
@@ -579,14 +655,14 @@ describe("thread identity", () => {
 									rows: 24,
 									state: "active",
 									terminal_id: "terminal_1",
-									thread_id: "thread_1",
+									thread_id,
 									updated_at: now.value,
 									workspace_id: "workspace_1",
 									working_directory: "C:/workspace",
 								},
 								type: "terminal.lifecycle",
 							},
-							thread_id: "thread_1",
+							thread_id,
 						});
 						const terminal = yield* connection.Outbound.pipe(
 							Stream.take(2),
@@ -610,7 +686,7 @@ describe("thread identity", () => {
 								group_id: "group_1",
 								type: "artifact.recorded",
 							},
-							thread_id: "thread_1",
+							thread_id,
 						});
 						const file = yield* connection.Outbound.pipe(
 							Stream.take(2),
@@ -634,7 +710,7 @@ describe("thread identity", () => {
 								group_id: "group_1",
 								type: "artifact.recorded",
 							},
-							thread_id: "thread_1",
+							thread_id,
 						});
 						const diff = yield* connection.Outbound.pipe(
 							Stream.take(2),
@@ -642,10 +718,14 @@ describe("thread identity", () => {
 						);
 
 						yield* connection.Receive(
-							make_thread_command("process_activity", {
-								activity_kind: "process_attached",
-								type: "thread.activity.record",
-							}),
+							make_thread_command(
+								"process_activity",
+								{
+									activity_kind: "process_attached",
+									type: "thread.activity.record",
+								},
+								thread_id,
+							),
 						);
 						const process = yield* connection.Outbound.pipe(
 							Stream.take(3),

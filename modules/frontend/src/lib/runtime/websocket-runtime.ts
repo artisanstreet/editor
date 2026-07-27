@@ -4,21 +4,11 @@ import {
 } from "@artisan/transport/websocket/client";
 import {
 	MessagePortConnector,
+	MessagePortConnectorError,
 	make_artisan_client_layer,
 	TransportRuntimeLive,
 } from "@artisan/transport/client";
-import { Effect, Layer, PubSub, Ref, Stream } from "effect";
-
-import {
-	FrontendConnectionLifecycle,
-	type FrontendConnectionState,
-} from "./desktop-message-port-connector";
-
-interface WebSocketDesktopBridge {
-	readonly forgeWebSocketEndpoint?: unknown;
-	readonly forgeWebSocketUrl?: unknown;
-	readonly websocketUrl?: unknown;
-}
+import { Effect, Layer } from "effect";
 
 export interface WebSocketRuntimeLocation {
 	readonly origin: string;
@@ -26,14 +16,12 @@ export interface WebSocketRuntimeLocation {
 }
 
 export interface WebSocketRuntimeTargetInput {
-	readonly desktop?: WebSocketDesktopBridge;
 	readonly development_url?: unknown;
 	readonly is_development: boolean;
 	readonly location?: WebSocketRuntimeLocation;
 }
 
 export type WebSocketRuntimeTarget =
-	| { readonly _tag: "desktop" }
 	| { readonly _tag: "unavailable" }
 	| { readonly _tag: "websocket"; readonly url: string };
 
@@ -74,9 +62,8 @@ const BrowserWebSocketUrl = (location: WebSocketRuntimeLocation | undefined) => 
 };
 
 /**
- * Selects one real connection boundary. Browser development can opt into an explicit endpoint;
- * otherwise an http(s) page connects to its colocated Forge at `/api/ws`. The desktop
- * MessagePort remains the production fallback for installed builds that do not expose a socket.
+ * Selects the browser's only real connection boundary. Development can opt into
+ * an explicit endpoint; otherwise an HTTP(S) page connects to its colocated Forge.
  */
 export const ResolveWebSocketRuntimeTarget = (
 	input: WebSocketRuntimeTargetInput,
@@ -86,79 +73,42 @@ export const ResolveWebSocketRuntimeTarget = (
 		: undefined;
 	if (development_url !== undefined) return { _tag: "websocket", url: development_url };
 
-	const desktop_url =
-		ParseWebSocketUrl(input.desktop?.forgeWebSocketEndpoint) ??
-		ParseWebSocketUrl(input.desktop?.forgeWebSocketUrl) ??
-		ParseWebSocketUrl(input.desktop?.websocketUrl);
-	if (desktop_url !== undefined) return { _tag: "websocket", url: desktop_url };
-
 	const browser_url = BrowserWebSocketUrl(input.location);
 	if (browser_url !== undefined) return { _tag: "websocket", url: browser_url };
 
-	return input.desktop === undefined ? { _tag: "unavailable" } : { _tag: "desktop" };
+	return { _tag: "unavailable" };
 };
 
-const make_websocket_connection_lifecycle_layer = (
+const make_websocket_connector_runtime_layer = (
 	url: string,
 	create_socket?: (url: string) => BrowserWebSocket,
 ) =>
-	Layer.unwrap(
-		Effect.gen(function* () {
-			const current = yield* Ref.make<FrontendConnectionState>({ phase: "connecting" });
-			const changes = yield* PubSub.sliding<FrontendConnectionState>(16);
-			const ever_connected = yield* Ref.make(false);
-			const SetState = (state: FrontendConnectionState) =>
-				Effect.gen(function* () {
-					yield* Ref.set(current, state);
-					yield* PubSub.publish(changes, state);
-				});
+	make_websocket_connector_layer({
+		...(create_socket === undefined ? {} : { create_socket }),
+		url,
+	});
 
-			const socket_connector = make_websocket_connector_layer({
-				...(create_socket === undefined ? {} : { create_socket }),
-				url,
-			});
-			const observable_connector = Layer.effect(
-				MessagePortConnector,
-				Effect.gen(function* () {
-					const connector = yield* MessagePortConnector;
-
-					return {
-						Connect: Effect.gen(function* () {
-							const connected = yield* Ref.get(ever_connected);
-							yield* SetState({ phase: connected ? "reconnecting" : "connecting" });
-							const connection = yield* connector.Connect.pipe(
-								Effect.tapError((error) =>
-									SetState({ message: String(error.cause), phase: "error" }),
-								),
-							);
-							yield* Ref.set(ever_connected, true);
-							yield* SetState({ phase: "ready" });
-
-							return connection;
-						}),
-					};
-				}),
-			).pipe(Layer.provide(socket_connector));
-
-			return Layer.merge(
-				observable_connector,
-				Layer.succeed(
-					FrontendConnectionLifecycle,
-					FrontendConnectionLifecycle.of({
-						Changes: Stream.fromPubSub(changes),
-						Current: Ref.get(current),
-					}),
-				),
-			);
-		}),
-	);
+const UnavailableWebSocketConnectorLive = Layer.succeed(
+	MessagePortConnector,
+	MessagePortConnector.of({
+		Connect: Effect.fail(
+			new MessagePortConnectorError({
+				cause: new Error("Artisan Forge WebSocket endpoint is unavailable."),
+			}),
+		),
+	}),
+);
 
 /** Provides the existing typed client and renderer lifecycle through a browser WebSocket. */
 export const make_websocket_client_runtime_layer = (
-	url: string,
+	target: WebSocketRuntimeTarget,
 	create_socket?: (url: string) => BrowserWebSocket,
 ) =>
-	make_artisan_client_layer({ reconnect_delay_ms: 1_000 }).pipe(
-		Layer.provideMerge(make_websocket_connection_lifecycle_layer(url, create_socket)),
+	make_artisan_client_layer({ reconnect_delay_ms: 500 }).pipe(
+		Layer.provideMerge(
+			target._tag === "websocket"
+				? make_websocket_connector_runtime_layer(target.url, create_socket)
+				: UnavailableWebSocketConnectorLive,
+		),
 		Layer.provide(TransportRuntimeLive),
 	);

@@ -4,7 +4,6 @@ import type { ThreadListItem } from "@artisan/protocol";
 import {
 	ApplyRootThreadListUpdate,
 	FormatRecentThreadTime,
-	ProjectsForNewThread,
 	ProjectScopedThreadGroups,
 } from "../../modules/frontend/src/lib/root/thread-navigation";
 
@@ -63,19 +62,6 @@ describe("root thread navigation", () => {
 			type: "upsert",
 		});
 		expect(result.map((thread) => thread.thread_id)).toEqual(["thread-older", "thread-newer"]);
-	});
-
-	it("derives unique existing projects from most recently active threads", () => {
-		const projects = ProjectsForNewThread([
-			MakeThread("thread-one", "2026-07-25T10:00:00.000Z", "project-one"),
-			MakeThread("thread-two", "2026-07-25T12:00:00.000Z", "project-two"),
-			MakeThread("thread-three", "2026-07-25T11:00:00.000Z", "project-one"),
-		]);
-
-		expect(projects.map((project) => project.project_id)).toEqual([
-			"project-two",
-			"project-one",
-		]);
 	});
 
 	it("groups recent threads once by their primary project and keeps unassigned threads last", () => {

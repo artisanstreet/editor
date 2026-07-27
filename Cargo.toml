@@ -1,0 +1,21 @@
+[workspace]
+members = [
+	"modules/bootstrap",
+	"modules/cli",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+license = "BSD-3-Clause"
+repository = "https://github.com/sandersonstabo/artisan-editor"
+rust-version = "1.85"
+version = "0.1.0"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "deny"
+pedantic = "deny"
+

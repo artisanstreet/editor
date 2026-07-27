@@ -111,10 +111,10 @@ export const BootstrapBrowserPairing: Effect.Effect<
 	const request = yield* Schema.decodeUnknownEffect(PairingRequest)({ code }).pipe(
 		Effect.mapError(PairingFailure),
 	);
-	yield* navigation.ReplaceUrl(`${location.pathname}${location.search}`);
 	const paired = yield* exchange.Pair(request).pipe(Effect.mapError(PairingFailure));
 	const decoded_response = yield* Schema.decodeUnknownEffect(PairingResponse)({
 		ok: paired,
 	}).pipe(Effect.mapError(PairingFailure));
 	if (!decoded_response.ok) return yield* Effect.fail(PairingFailure());
+	yield* navigation.ReplaceUrl(`${location.pathname}${location.search}`);
 });

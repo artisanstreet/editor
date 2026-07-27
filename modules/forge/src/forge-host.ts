@@ -68,7 +68,6 @@ const MakeForgeRuntime = (config: ForgeConfig) => {
 				database_path: config.database_path,
 				engines: [codex_engine],
 				migrations_path: config.migrations_path,
-				project_directory_roots: config.project_directory_roots,
 			});
 		}),
 	).pipe(Layer.provide(engine_layer));

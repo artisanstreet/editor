@@ -6,21 +6,16 @@ directories:
 electronDist: .dist/electron-runtime-43.1.1-offline
 files:
     - main.js
-    - preload.cjs
     - package.json
-extraResources:
-    - from: .dist/forge
-      to: artisan-forge
 asar: true
 beforeBuild: .scripts/build/electron-before-build.ts
 disableDefaultIgnoredFiles: true
-asarUnpack:
-    - "**/*.node"
 extraMetadata:
     main: main.js
+protocols:
+    - name: Artisan Forge
+      schemes:
+          - artisan
 win:
-    signExecutable: false
     target:
-        - nsis
-nsis:
-    include: .scripts/package/nsis/artisan-path.nsh
+        - dir

@@ -1,4 +1,4 @@
-import { cpSync, existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { defineConfig } from "vite";
 
@@ -6,20 +6,60 @@ const forge_root = resolve(import.meta.dirname, ".dist", "forge");
 
 const stage_forge_runtime = () => ({
 	closeBundle: () => {
-		const native_source = resolve(import.meta.dirname, ".dist/desktop/native-runtime");
+		const native_runtime_root = resolve(forge_root, "native-runtime");
 		const frontend_source = resolve(import.meta.dirname, ".dist/frontend");
 		const migrations_source = resolve(import.meta.dirname, "modules/backend/drizzle");
-		if (!existsSync(native_source)) {
-			throw new Error("Build the desktop native runtime before Artisan Forge");
-		}
 		if (!existsSync(frontend_source)) {
 			throw new Error("Build the static frontend before Artisan Forge");
 		}
+		const node_pty_source = resolve(
+			import.meta.dirname,
+			"modules/backend/node_modules/node-pty",
+		);
+		const koffi_source = resolve(
+			realpathSync(resolve(import.meta.dirname, "modules/engines/node_modules/koffi")),
+		);
+		const koffi_native_source = resolve(koffi_source, "..", "@koromix", "koffi-win32-x64");
+		if (
+			!existsSync(node_pty_source) ||
+			!existsSync(koffi_source) ||
+			!existsSync(koffi_native_source)
+		) {
+			throw new Error("node-pty and Koffi are required to package Artisan Forge");
+		}
 		mkdirSync(forge_root, { recursive: true });
-		cpSync(native_source, resolve(forge_root, "native-runtime"), {
-			dereference: true,
-			recursive: true,
-		});
+		const node_pty_destination = resolve(native_runtime_root, "node-pty");
+		mkdirSync(node_pty_destination, { recursive: true });
+		for (const path of ["LICENSE", "package.json", "lib", "prebuilds/win32-x64"]) {
+			cpSync(resolve(node_pty_source, path), resolve(node_pty_destination, path), {
+				dereference: true,
+				recursive: true,
+			});
+		}
+		const koffi_destination = resolve(native_runtime_root, "koffi");
+		mkdirSync(resolve(koffi_destination, "src", "koffi"), { recursive: true });
+		for (const path of [
+			"index.cjs",
+			"package.json",
+			"src/koffi/index.cjs",
+			"src/koffi/src/static.cjs",
+		]) {
+			cpSync(resolve(koffi_source, path), resolve(koffi_destination, path), {
+				dereference: true,
+			});
+		}
+		const koffi_native_destination = resolve(
+			native_runtime_root,
+			"@koromix",
+			"koffi-win32-x64",
+		);
+		mkdirSync(koffi_native_destination, { recursive: true });
+		for (const path of ["index.js", "package.json", "win32_x64"]) {
+			cpSync(resolve(koffi_native_source, path), resolve(koffi_native_destination, path), {
+				dereference: true,
+				recursive: true,
+			});
+		}
 		cpSync(frontend_source, resolve(forge_root, "frontend"), {
 			dereference: true,
 			recursive: true,
@@ -45,7 +85,7 @@ const stage_forge_runtime = () => ({
 		);
 		writeFileSync(
 			resolve(forge_root, "ae.cmd"),
-			'@echo off\r\nset "ARTISAN_NATIVE_RUNTIME=%~dp0native-runtime"\r\n"%~dp0node.exe" "%~dp0ae.js" %*\r\n',
+			'@echo off\r\nset "ARTISAN_NATIVE_RUNTIME=%~dp0native-runtime"\r\nset "NODE_PATH=%~dp0native-runtime;%NODE_PATH%"\r\n"%~dp0node.exe" "%~dp0ae.js" %*\r\n',
 		);
 	},
 	name: "stage-artisan-forge-runtime",

@@ -49,9 +49,6 @@ export const ForgeProfileConfig = Schema.Struct({
 	listen_host: Schema.Literals(["127.0.0.1", "::1"]),
 	listen_port: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 65_535 })),
 	mode: ForgeMode,
-	project_roots: Schema.NonEmptyArray(
-		Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4_096)),
-	),
 	version: Schema.Literal(1),
 });
 export type ForgeProfileConfig = typeof ForgeProfileConfig.Type;
@@ -97,6 +94,7 @@ export class ForgeProfileStore extends Context.Service<
 			config: ForgeProfileConfig,
 		) => Effect.Effect<void, ForgeProfileError>;
 		readonly Load: (profile: string) => Effect.Effect<ForgeProfileConfig, ForgeProfileError>;
+		readonly List: () => Effect.Effect<ReadonlyArray<string>, ForgeProfileError>;
 		readonly LoadSecrets: (profile: string) => Effect.Effect<ForgeSecrets, ForgeProfileError>;
 		readonly ReadState: (
 			profile: string,
@@ -143,6 +141,7 @@ export const make_memory_profile_store = () => {
 					? Effect.fail(new ForgeProfileError({ code: "missing" }))
 					: Effect.succeed(config);
 			},
+			List: () => Effect.succeed([...configs.keys()].sort()),
 			LoadSecrets: (profile) => {
 				const secret = secrets.get(profile);
 				return secret === undefined

@@ -10,6 +10,11 @@ import {
 	ArtisanToolApprovals,
 	ArtisanToolInvocations,
 	Assignments,
+	ConversationItems,
+	ConversationPatches,
+	ConversationSources,
+	ConversationThreads,
+	ConversationTurns,
 	EventStreams,
 	GitMutationOperations,
 	JournalCommands,
@@ -457,6 +462,21 @@ export const ThreadErasureLive = Layer.effect(
 						yield* transaction
 							.delete(PreviewCommands)
 							.where(eq(PreviewCommands.thread_id, thread_id));
+						yield* transaction
+							.delete(ConversationPatches)
+							.where(eq(ConversationPatches.thread_id, thread_id));
+						yield* transaction
+							.delete(ConversationSources)
+							.where(eq(ConversationSources.thread_id, thread_id));
+						yield* transaction
+							.delete(ConversationItems)
+							.where(eq(ConversationItems.thread_id, thread_id));
+						yield* transaction
+							.delete(ConversationTurns)
+							.where(eq(ConversationTurns.thread_id, thread_id));
+						yield* transaction
+							.delete(ConversationThreads)
+							.where(eq(ConversationThreads.thread_id, thread_id));
 						yield* transaction
 							.delete(JournalCommands)
 							.where(eq(JournalCommands.thread_id, thread_id));

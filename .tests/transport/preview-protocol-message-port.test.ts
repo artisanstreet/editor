@@ -108,12 +108,8 @@ describe("preview public MessagePort protocol", () => {
 		const server = await runtime.runPromise(ProtocolServer);
 		const harness = await make_transport_test_harness_with_protocol_server(server);
 		try {
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "preview-failed-launch-thread",
-					payload: { title: "Failed launch", type: "thread.create" },
-					thread_id: "preview-failed-launch-thread",
-				}),
+			const created_preview_failed_launch_thread = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Failed launch" }),
 			);
 			await Effect.runPromise(
 				harness.client.RegisterPreviewTarget({
@@ -121,7 +117,7 @@ describe("preview public MessagePort protocol", () => {
 					port: 4173,
 					project_id: "preview-failed-launch-project",
 					routes: ["/"],
-					thread_id: "preview-failed-launch-thread",
+					thread_id: created_preview_failed_launch_thread.thread_id,
 					url: "http://127.0.0.1:4173/",
 					workspace_id: "preview-failed-launch-workspace",
 				}),
@@ -185,12 +181,8 @@ describe("preview public MessagePort protocol", () => {
 		const server_a = await runtime_a.runPromise(ProtocolServer);
 		const harness_a = await make_transport_test_harness_with_protocol_server(server_a);
 		try {
-			await Effect.runPromise(
-				harness_a.client.Command({
-					command_id: "preview-launch-lease-thread",
-					payload: { title: "Preview lease", type: "thread.create" },
-					thread_id: "preview-launch-lease-thread",
-				}),
+			const created_preview_launch_lease_thread = await Effect.runPromise(
+				harness_a.client.CreateThread({ title: "Preview lease" }),
 			);
 			await Effect.runPromise(
 				harness_a.client.RegisterPreviewTarget({
@@ -198,7 +190,7 @@ describe("preview public MessagePort protocol", () => {
 					port: 5173,
 					project_id: "project",
 					routes: [],
-					thread_id: "preview-launch-lease-thread",
+					thread_id: created_preview_launch_lease_thread.thread_id,
 					url: "http://localhost:5173/",
 					workspace_id: "workspace",
 				}),
@@ -217,7 +209,7 @@ describe("preview public MessagePort protocol", () => {
 					const erasure = yield* ThreadErasure;
 					yield* database.client.insert(ThreadErasureClaims).values({
 						claimed_at: new Date().toISOString(),
-						thread_id: "preview-launch-lease-thread",
+						thread_id: created_preview_launch_lease_thread.thread_id,
 					});
 					return yield* erasure.ResumeClaimed(new Date().toISOString());
 				}),
@@ -232,12 +224,12 @@ describe("preview public MessagePort protocol", () => {
 					const erasure = yield* ThreadErasure;
 					yield* database.client.insert(ThreadErasureClaims).values({
 						claimed_at: new Date().toISOString(),
-						thread_id: "preview-launch-lease-thread",
+						thread_id: created_preview_launch_lease_thread.thread_id,
 					});
 					return yield* erasure.ResumeClaimed(new Date().toISOString());
 				}),
 			);
-			expect(erased).toEqual(["preview-launch-lease-thread"]);
+			expect(erased).toEqual([created_preview_launch_lease_thread.thread_id]);
 			expect(launches).toBe(1);
 		} finally {
 			await harness_a.dispose();
@@ -292,16 +284,12 @@ describe("preview public MessagePort protocol", () => {
 			const runtime_b = make_backend_runtime(options);
 			const server_a = await runtime_a.runPromise(ProtocolServer);
 			const harness_a = await make_transport_test_harness_with_protocol_server(server_a);
-			const thread_id = `preview-${operation}-lease-thread`;
 			const target_id = `preview-${operation}-lease-target`;
 			try {
-				await Effect.runPromise(
-					harness_a.client.Command({
-						command_id: `${thread_id}-create`,
-						payload: { title: "Preview lease", type: "thread.create" },
-						thread_id,
-					}),
+				const created_thread = await Effect.runPromise(
+					harness_a.client.CreateThread({ title: "Preview lease" }),
 				);
+				const thread_id = created_thread.thread_id;
 				await Effect.runPromise(
 					harness_a.client.RegisterPreviewTarget({
 						id: target_id,
@@ -402,12 +390,8 @@ describe("preview public MessagePort protocol", () => {
 		const server = await runtime.runPromise(ProtocolServer);
 		const harness = await make_transport_test_harness_with_protocol_server(server);
 		try {
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "preview-browser-unavailable-thread",
-					payload: { title: "Preview", type: "thread.create" },
-					thread_id: "preview-browser-unavailable-thread",
-				}),
+			const created_preview_browser_unavailable_thread = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Preview" }),
 			);
 			await Effect.runPromise(
 				harness.client.RegisterPreviewTarget({
@@ -415,7 +399,7 @@ describe("preview public MessagePort protocol", () => {
 					port: 4173,
 					project_id: "preview-browser-unavailable-project",
 					routes: ["/"],
-					thread_id: "preview-browser-unavailable-thread",
+					thread_id: created_preview_browser_unavailable_thread.thread_id,
 					url: "http://127.0.0.1:4173/",
 					workspace_id: "preview-browser-unavailable-workspace",
 				}),
@@ -486,12 +470,8 @@ describe("preview public MessagePort protocol", () => {
 		const server = await runtime.runPromise(ProtocolServer);
 		const harness = await make_transport_test_harness_with_protocol_server(server);
 		try {
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "preview-quiesce-thread",
-					payload: { title: "Preview quiesce", type: "thread.create" },
-					thread_id: "preview-quiesce-thread",
-				}),
+			const created_preview_quiesce_thread = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Preview quiesce" }),
 			);
 			await Effect.runPromise(
 				harness.client.RegisterPreviewTarget({
@@ -499,7 +479,7 @@ describe("preview public MessagePort protocol", () => {
 					port: 4173,
 					project_id: "preview-quiesce-project",
 					routes: ["/"],
-					thread_id: "preview-quiesce-thread",
+					thread_id: created_preview_quiesce_thread.thread_id,
 					url: "http://127.0.0.1:4173/",
 					workspace_id: "preview-quiesce-workspace",
 				}),
@@ -512,7 +492,7 @@ describe("preview public MessagePort protocol", () => {
 			);
 			await runtime.runPromise(
 				Effect.flatMap(PreviewCoordinator, (coordinator) =>
-					coordinator.QuiesceThread("preview-quiesce-thread"),
+					coordinator.QuiesceThread(created_preview_quiesce_thread.thread_id),
 				),
 			);
 
@@ -536,7 +516,7 @@ describe("preview public MessagePort protocol", () => {
 						port: 4174,
 						project_id: "preview-quiesce-project",
 						routes: ["/"],
-						thread_id: "preview-quiesce-thread",
+						thread_id: created_preview_quiesce_thread.thread_id,
 						url: "http://127.0.0.1:4174/",
 						workspace_id: "preview-quiesce-workspace",
 					}),
@@ -578,12 +558,8 @@ describe("preview public MessagePort protocol", () => {
 		const server = await runtime.runPromise(ProtocolServer);
 		const harness = await make_transport_test_harness_with_protocol_server(server);
 		try {
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "preview-erasure-thread",
-					payload: { title: "Preview erasure", type: "thread.create" },
-					thread_id: "preview-erasure-thread",
-				}),
+			const created_preview_erasure_thread = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Preview erasure" }),
 			);
 			await Effect.runPromise(
 				harness.client.RegisterPreviewTarget({
@@ -591,7 +567,7 @@ describe("preview public MessagePort protocol", () => {
 					port: 4173,
 					project_id: "preview-erasure-project",
 					routes: ["/"],
-					thread_id: "preview-erasure-thread",
+					thread_id: created_preview_erasure_thread.thread_id,
 					url: "http://127.0.0.1:4173/",
 					workspace_id: "preview-erasure-workspace",
 				}),
@@ -613,7 +589,7 @@ describe("preview public MessagePort protocol", () => {
 				}),
 			);
 
-			expect(erased).toContain("preview-erasure-thread");
+			expect(erased).toContain(created_preview_erasure_thread.thread_id);
 			expect(connector_closes).toBe(1);
 			await expect(
 				Effect.runPromise(
@@ -663,12 +639,8 @@ describe("preview public MessagePort protocol", () => {
 		const server = await runtime.runPromise(ProtocolServer);
 		const harness = await make_transport_test_harness_with_protocol_server(server);
 		try {
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "preview-erasure-race-thread",
-					payload: { title: "Preview erasure race", type: "thread.create" },
-					thread_id: "preview-erasure-race-thread",
-				}),
+			const created_preview_erasure_race_thread = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Preview erasure race" }),
 			);
 			await Effect.runPromise(
 				harness.client.RegisterPreviewTarget({
@@ -676,7 +648,7 @@ describe("preview public MessagePort protocol", () => {
 					port: 4173,
 					project_id: "preview-erasure-race-project",
 					routes: ["/"],
-					thread_id: "preview-erasure-race-thread",
+					thread_id: created_preview_erasure_race_thread.thread_id,
 					url: "http://127.0.0.1:4173/",
 					workspace_id: "preview-erasure-race-workspace",
 				}),
@@ -692,7 +664,7 @@ describe("preview public MessagePort protocol", () => {
 					const database = yield* Database;
 					yield* database.client.insert(ThreadErasureClaims).values({
 						claimed_at: "2027-01-01T00:00:00.000Z",
-						thread_id: "preview-erasure-race-thread",
+						thread_id: created_preview_erasure_race_thread.thread_id,
 					});
 				}),
 			);
@@ -740,12 +712,8 @@ describe("preview public MessagePort protocol", () => {
 		const server1 = await runtime1.runPromise(ProtocolServer);
 		const harness1 = await make_transport_test_harness_with_protocol_server(server1);
 		try {
-			await Effect.runPromise(
-				harness1.client.Command({
-					command_id: "preview-restart-thread",
-					payload: { title: "Preview restart", type: "thread.create" },
-					thread_id: "preview-restart-thread",
-				}),
+			const created_thread = await Effect.runPromise(
+				harness1.client.CreateThread({ title: "Preview restart" }),
 			);
 			await Effect.runPromise(
 				harness1.client.RegisterPreviewTarget({
@@ -754,7 +722,7 @@ describe("preview public MessagePort protocol", () => {
 					project_id: "preview-restart-project",
 					routes: ["/", "/health"],
 					source: { kind: "process", process_id: "preview-restart-process" },
-					thread_id: "preview-restart-thread",
+					thread_id: created_thread.thread_id,
 					url: "http://127.0.0.1:4173",
 					workspace_id: "preview-restart-workspace",
 				}),
@@ -798,7 +766,7 @@ describe("preview public MessagePort protocol", () => {
 		const server = await runtime.runPromise(ProtocolServer);
 		const harness = await make_transport_test_harness_with_protocol_server(server);
 		try {
-			const events = await Effect.runPromise(
+			const output = await Effect.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
 						const collector = yield* harness.client.Events.pipe(
@@ -812,17 +780,15 @@ describe("preview public MessagePort protocol", () => {
 							Effect.forkChild,
 						);
 						yield* Effect.yieldNow;
-						yield* harness.client.Command({
-							command_id: "preview-events-thread",
-							payload: { title: "Preview events", type: "thread.create" },
-							thread_id: "preview-events-thread",
+						const created_thread = yield* harness.client.CreateThread({
+							title: "Preview events",
 						});
 						yield* harness.client.RegisterPreviewTarget({
 							id: "preview-events-target",
 							port: 4173,
 							project_id: "preview-events-project",
 							routes: ["/"],
-							thread_id: "preview-events-thread",
+							thread_id: created_thread.thread_id,
 							url: "http://127.0.0.1:4173",
 							workspace_id: "preview-events-workspace",
 						});
@@ -830,23 +796,26 @@ describe("preview public MessagePort protocol", () => {
 							connector_id: "preview-events-connector",
 							target_id: "preview-events-target",
 						});
-						return yield* Fiber.join(collector);
+						return {
+							events: yield* Fiber.join(collector),
+							thread_id: created_thread.thread_id,
+						};
 					}),
 				),
 			);
-			const [target, inspection] = [...events] as [
-				NonNullable<(typeof events)[number]>,
-				NonNullable<(typeof events)[number]>,
+			const [target, inspection] = [...output.events] as [
+				NonNullable<(typeof output.events)[number]>,
+				NonNullable<(typeof output.events)[number]>,
 			];
 			expect(target).toMatchObject({
 				payload: { type: "preview.target.updated" },
 				sequence: 2,
-				stream_id: "thread:preview-events-thread",
+				stream_id: `thread:${output.thread_id}`,
 			});
 			expect(inspection).toMatchObject({
 				payload: { type: "preview.inspection.updated" },
 				sequence: 3,
-				stream_id: "thread:preview-events-thread",
+				stream_id: `thread:${output.thread_id}`,
 			});
 			expect(inspection.journal_sequence).toBe(target.journal_sequence + 1);
 		} finally {
@@ -915,12 +884,8 @@ describe("preview public MessagePort protocol", () => {
 			binary_streams: { [`asset:${asset_id}`]: [asset_body] },
 		});
 		try {
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "preview-thread",
-					payload: { title: "Preview", type: "thread.create" },
-					thread_id: "preview-thread",
-				}),
+			const created_preview_thread = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Preview" }),
 			);
 			const target = await Effect.runPromise(
 				harness.client.RegisterPreviewTarget({
@@ -929,7 +894,7 @@ describe("preview public MessagePort protocol", () => {
 					project_id: "preview-project",
 					routes: ["/", "/health"],
 					source: { kind: "process", process_id: "preview-process" },
-					thread_id: "preview-thread",
+					thread_id: created_preview_thread.thread_id,
 					url: "http://127.0.0.1:4173",
 					workspace_id: "preview-workspace",
 				}),

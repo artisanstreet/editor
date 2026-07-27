@@ -383,11 +383,13 @@ Release behavior should include:
   derived caches without touching user projects, conversations, credentials, or
   canonical ledger data.
 
-Windows should use the existing NSIS packaging path with an updater that stages
-and applies on exit. macOS should use signed and notarized application artifacts.
-Linux package-manager installations should remain owned by their package
-manager; a portable AppImage may opt into application-managed updates. Store
-policies take precedence for store-distributed builds.
+The distribution PRD supersedes the former NSIS proposal on Windows. Windows
+uses the permanent `ae`-managed installation and update lifecycle around a
+signed unpacked Editor payload. macOS should use signed and notarized
+application artifacts. Linux package-manager installations should remain owned
+by their package manager; a portable AppImage may opt into
+application-managed updates. Store policies take precedence for
+store-distributed builds.
 
 The ordinary workspace should show no update banner. Update UI appears only for
 security-critical restarts, blocked migrations, prolonged incompatibility,

@@ -10,7 +10,7 @@ import {
 	NodeTerminal,
 } from "@effect/platform-node-shared";
 import { Console, Effect, Layer, Option, Stream } from "effect";
-import { Command, Flag, Prompt } from "effect/unstable/cli";
+import { Command, Flag } from "effect/unstable/cli";
 
 import {
 	BrowserOpener,
@@ -20,12 +20,15 @@ import {
 	make_cli_platform_layer,
 	make_windows_autostart_layer,
 } from "./adapters";
+import { DistributionOperations, DistributionOperationsError } from "./distribution";
 import { ForgeLifecycle, make_forge_lifecycle_layer } from "./lifecycle";
 import { ForgeControlLive } from "./node-control";
 import { make_node_forge_launcher_layer } from "./node-launcher";
 import { make_node_profile_store_layer } from "./node-profile-store";
+import { make_node_distribution_runtime_layer } from "./node-distribution-runtime";
 import { ForgeProfileStore } from "./profile";
 import { ForgeOperations, make_forge_operations_layer } from "./operations";
+import { make_forge_protocol_handler_layer } from "./protocol-handler";
 
 /**
  * Declarative command surface. Runtime composition is deliberately exported by
@@ -37,12 +40,9 @@ const profile = Flag.string("profile").pipe(
 	Flag.withDescription("Forge profile name"),
 );
 const json = Flag.boolean("json").pipe(Flag.withDescription("Emit deterministic JSON"));
+const fix = Flag.boolean("fix").pipe(Flag.withDescription("Repair safe local Forge prerequisites"));
 const foreground = Flag.boolean("foreground").pipe(
 	Flag.withDescription("Run attached to this terminal"),
-);
-const project_root = Flag.string("project-root").pipe(
-	Flag.atLeast(0),
-	Flag.withDescription("Allowed project root; repeat as needed"),
 );
 const mode = Flag.choice("mode", ["local", "headless"] as const).pipe(
 	Flag.withDefault("local"),
@@ -65,38 +65,56 @@ const lines = Flag.integer("lines").pipe(
 const origin = Flag.optional(
 	Flag.string("origin").pipe(Flag.withDescription("Explicit local browser origin")),
 );
+const remove_data = Flag.boolean("remove-data").pipe(
+	Flag.withDescription("Also permanently remove Forge profiles and conversation data"),
+);
 
-export const AeCommand = Command.make("ae").pipe(
+/** Stops every profile inventoried by Forge before product files are released. */
+export const StopAllForgeProfiles = Effect.gen(function* () {
+	const profile_store = yield* ForgeProfileStore;
+	const lifecycle = yield* ForgeLifecycle;
+	yield* Effect.forEach(
+		yield* profile_store.List(),
+		(profile_name) => lifecycle.Stop(profile_name),
+		{ concurrency: 1, discard: true },
+	);
+});
+
+export const AeCommand = Command.make("ae", {}, () =>
+	Effect.gen(function* () {
+		const report = yield* (yield* DistributionOperations).Doctor();
+		if (!report.healthy) {
+			return yield* new DistributionOperationsError({
+				code: "installation_partial",
+				operation: "doctor",
+			});
+		}
+		const url = yield* (yield* ForgeLifecycle).Open("default");
+		yield* (yield* BrowserOpener).Open(url);
+	}),
+).pipe(
 	Command.withSubcommands([
-		Command.make(
-			"setup",
-			{ autostart, data_root, listen_port, mode, profile, project_root },
-			(input) =>
-				Effect.gen(function* () {
-					const store = yield* ForgeProfileStore;
-					const platform = yield* CliPlatform;
-					const roots =
-						input.project_root.length > 0
-							? input.project_root
-							: [yield* PromptForProjectRoot()];
-					yield* store.Ensure(input.profile, {
-						data_root: Option.getOrElse(
-							input.data_root,
-							() => `${platform.home}/profiles/${input.profile}/data`,
-						),
-						listen_host: "127.0.0.1",
-						listen_port: Option.getOrElse(input.listen_port, () => 0),
-						mode: input.mode,
-						project_roots: roots as readonly [string, ...string[]],
-						version: 1,
+		Command.make("setup", { autostart, data_root, listen_port, mode, profile }, (input) =>
+			Effect.gen(function* () {
+				const store = yield* ForgeProfileStore;
+				const platform = yield* CliPlatform;
+				yield* store.Ensure(input.profile, {
+					data_root: Option.getOrElse(
+						input.data_root,
+						() => `${platform.home}/profiles/${input.profile}/data`,
+					),
+					listen_host: "127.0.0.1",
+					listen_port: Option.getOrElse(input.listen_port, () => 0),
+					mode: input.mode,
+					version: 1,
+				});
+				if (input.autostart)
+					yield* (yield* ForgeAutostart).Configure({
+						enabled: true,
+						profile: input.profile,
 					});
-					if (input.autostart)
-						yield* (yield* ForgeAutostart).Configure({
-							enabled: true,
-							profile: input.profile,
-						});
-					yield* Console.log(`Configured Forge profile ${input.profile}`);
-				}),
+				yield* Console.log(`Configured Forge profile ${input.profile}`);
+			}),
 		).pipe(Command.withDescription("Create or update a loopback-only Forge profile")),
 		Command.make("start", { foreground, profile }, (input) =>
 			Effect.gen(function* () {
@@ -130,15 +148,29 @@ export const AeCommand = Command.make("ae").pipe(
 						.pipe(Stream.runForEach((chunk) => Console.log(chunk)));
 			}),
 		).pipe(Command.withDescription("Show or follow Forge log output")),
-		Command.make("doctor", { json, profile }, (input) =>
+		Command.make("doctor", { fix, json, profile }, (input) =>
 			Effect.gen(function* () {
-				const result = yield* (yield* ForgeOperations).Doctor(input.profile);
+				const operations = yield* ForgeOperations;
+				const forge = input.fix
+					? yield* operations.Repair(input.profile)
+					: yield* operations.Doctor(input.profile);
+				const distribution = input.fix
+					? yield* (yield* DistributionOperations).Repair()
+					: yield* (yield* DistributionOperations).Doctor();
+				const result = { distribution, forge };
 				yield* Console.log(
 					input.json
 						? JSON.stringify(result)
-						: result.checks
-								.map((check) => `${check.state}: ${check.name} — ${check.detail}`)
-								.join("\n"),
+						: [
+								...forge.checks.map(
+									(check) => `${check.state}: ${check.name} — ${check.detail}`,
+								),
+								`${distribution.healthy ? "ok" : "error"}: installation — ${distribution.installation}`,
+								...distribution.integrations.map(
+									(integration) =>
+										`${integration._tag === "Owned" ? "ok" : "error"}: ${integration.kind} — ${integration._tag}`,
+								),
+							].join("\n"),
 				);
 			}),
 		).pipe(Command.withDescription("Check local Forge prerequisites and status")),
@@ -151,11 +183,36 @@ export const AeCommand = Command.make("ae").pipe(
 				yield* (yield* BrowserOpener).Open(url);
 			}),
 		).pipe(Command.withDescription("Open a one-time local browser pairing link")),
+		Command.make("update", {}, () =>
+			Effect.gen(function* () {
+				const outcome = yield* (yield* DistributionOperations).Update();
+				yield* Console.log(
+					outcome._tag === "Current"
+						? `Artisan ${outcome.manifest.active_version} is current`
+						: `Artisan ${outcome.manifest.active_version} is ready`,
+				);
+			}),
+		).pipe(Command.withDescription("Update Artisan through the signed release channel")),
+		Command.make("uninstall", { remove_data }, (input) =>
+			Effect.gen(function* () {
+				yield* StopAllForgeProfiles;
+				const result = yield* (yield* DistributionOperations).Uninstall(input.remove_data);
+				yield* Console.log(
+					result.forge_data_removed
+						? "Scheduled Artisan removal and removed Forge data"
+						: "Scheduled Artisan removal; Forge data was retained",
+				);
+				yield* Console.log(
+					`If detached cleanup fails, run: ${result.manual_cleanup_command}`,
+				);
+			}),
+		).pipe(
+			Command.withDescription(
+				"Uninstall Artisan while retaining Forge data unless --remove-data is explicit",
+			),
+		),
 	]),
 );
-
-/** Keeps Prompt in the stable CLI boundary for interactive setup composition. */
-export const PromptForProjectRoot = () => Prompt.text({ message: "Project root" });
 
 const NodePlatformLive = Layer.mergeAll(
 	NodeFileSystem.layer,
@@ -173,9 +230,17 @@ const ForgeLauncherLive = make_node_forge_launcher_layer.pipe(Layer.provide(Prof
 const ForgeLifecycleLive = make_forge_lifecycle_layer.pipe(
 	Layer.provide(Layer.mergeAll(ProfileStoreLive, ForgeLauncherLive, ForgeControlLive)),
 );
+const ForgeProtocolHandlerLive = make_forge_protocol_handler_layer.pipe(
+	Layer.provide(NodeFileSystem.layer),
+);
 const ForgeOperationsLive = make_forge_operations_layer.pipe(
 	Layer.provide(
-		Layer.mergeAll(ProfileStoreLive, ForgeLifecycleLive, make_windows_autostart_layer()),
+		Layer.mergeAll(
+			ProfileStoreLive,
+			ForgeLifecycleLive,
+			make_windows_autostart_layer(),
+			ForgeProtocolHandlerLive,
+		),
 	),
 );
 
@@ -186,6 +251,8 @@ const AeRuntimeLive = Layer.mergeAll(
 	ForgeControlLive,
 	ForgeLifecycleLive,
 	ForgeOperationsLive,
+	ForgeProtocolHandlerLive,
+	make_node_distribution_runtime_layer(),
 	make_browser_opener_layer,
 	make_windows_autostart_layer(),
 ).pipe(Layer.provideMerge(CliPlatformLive));

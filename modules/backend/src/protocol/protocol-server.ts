@@ -20,6 +20,7 @@ import {
 
 import {
 	SupportedProtocolVersions,
+	SnowflakeId,
 	type AckEnvelope,
 	type ArtisanApprovalListQueryEnvelope,
 	type ArtisanApprovalResolveEnvelope,
@@ -46,6 +47,9 @@ import {
 	type PreviewTargetStateEnvelope,
 	type ProjectDirectoryListQueryEnvelope,
 	type ProjectDirectorySelectEnvelope,
+	type ProjectDetachEnvelope,
+	type ProjectListQueryEnvelope,
+	type RuntimeCatalogQueryEnvelope,
 	type SurfaceListQueryEnvelope,
 	type SurfaceUsageAggregateQueryEnvelope,
 	OutboundControlEnvelope,
@@ -55,6 +59,7 @@ import {
 	type ReplayEnvelope,
 	type StreamCursor,
 	type SubscribeEnvelope,
+	type ThreadCreateEnvelope,
 	type ThreadListItem,
 	type ThreadRetentionUpdateEnvelope,
 	type TerminalListQueryEnvelope,
@@ -65,6 +70,7 @@ import {
 } from "@artisan/protocol";
 
 import { ProjectDirectoryService } from "../projects/project-directory-service";
+import { ProjectCatalog } from "../projects/project-catalog";
 import { CapabilityRepository } from "../marketplace/capabilities/capability-repository";
 import {
 	CapabilityOAuthLifecycle,
@@ -86,8 +92,12 @@ import { CommandIdConflict, JournalStore } from "../persistence/journal-store";
 import { OrchestrationRepository } from "../persistence/orchestration-repository";
 import { ThreadReadModel } from "../persistence/thread-read-model";
 import { TranscriptReadModel } from "../persistence/transcript-read-model";
-import { ConversationReadModel } from "../conversation/index.ts";
+import {
+	ConversationReadModel,
+	conversation_patch_replay_batch_size,
+} from "../conversation/index.ts";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import { RuntimeCatalogService } from "../runtime/runtime-catalog";
 import { TerminalSessionService } from "../terminal/terminal-sessions";
 import { thread_activity_kind_from_event } from "../threads/internal/thread-activity";
 import { thread_retention_policy_thread_id } from "../threads/thread-retention-policy";
@@ -121,6 +131,11 @@ interface PendingHeartbeat {
 
 interface ThreadListProjectionSubscription {
 	readonly _tag: "thread.list";
+	readonly sequence: number;
+	readonly stream_id: string;
+}
+interface ProjectListProjectionSubscription {
+	readonly _tag: "project.list";
 	readonly sequence: number;
 	readonly stream_id: string;
 }
@@ -193,6 +208,7 @@ type ProjectionSubscription =
 	| SurfaceListProjectionSubscription
 	| SurfaceUsageProjectionSubscription
 	| WorkspaceConflictListProjectionSubscription
+	| ProjectListProjectionSubscription
 	| ThreadListProjectionSubscription;
 
 const ScopeMatches = (
@@ -553,6 +569,7 @@ export function make_protocol_server_layer(
 			const surfaces = yield* SurfaceService;
 			const journal = yield* JournalStore;
 			const metadata = yield* RuntimeMetadata;
+			const snowflake_id = yield* SnowflakeId;
 			const notifier = yield* JournalNotifier;
 			const router = yield* ProtocolRouter;
 			const orchestration = yield* OrchestrationRepository;
@@ -562,6 +579,8 @@ export function make_protocol_server_layer(
 			const transcript_read_model = yield* TranscriptReadModel;
 			const conversation_read_model = yield* ConversationReadModel;
 			const project_directories = yield* ProjectDirectoryService;
+			const project_catalog = yield* ProjectCatalog;
+			const runtime_catalog = yield* RuntimeCatalogService;
 			const workspace_changes = yield* WorkspaceChangeRepository;
 			const ReadWorkspaceConflictSnapshot = (thread_id: string) =>
 				workspace_changes.ListConflictSnapshot(thread_id);
@@ -612,6 +631,9 @@ export function make_protocol_server_layer(
 					Queue.shutdown,
 				).pipe(Scope.provide(connection_scope));
 				const journal_subscription = yield* notifier.Subscribe.pipe(
+					Scope.provide(connection_scope),
+				);
+				const project_subscription = yield* project_catalog.Subscribe.pipe(
 					Scope.provide(connection_scope),
 				);
 				const state = yield* Ref.make<ConnectionState>({
@@ -719,6 +741,14 @@ export function make_protocol_server_layer(
 						);
 						let thread_patch = direct_thread_list_patch_from_event(event);
 
+						if (has_thread_list && event.payload.type === "thread.created") {
+							const thread = yield* thread_read_model.Lookup(event.thread_id);
+							thread_patch = Option.match(thread, {
+								onNone: () => undefined,
+								onSome: (item) => ({ _tag: "Upsert" as const, thread: item }),
+							});
+						}
+
 						if (
 							has_thread_list &&
 							!thread_patch &&
@@ -735,7 +765,11 @@ export function make_protocol_server_layer(
 						for (const [subscription_id, subscription] of Object.entries(
 							current.subscriptions,
 						)) {
-							if (subscription._tag === "conversation") continue;
+							if (
+								subscription._tag === "conversation" ||
+								subscription._tag === "project.list"
+							)
+								continue;
 							const message_id = yield* metadata.MakeId("message");
 							const sequence = subscription.sequence + 1;
 							let next_journal_sequence = event.journal_sequence;
@@ -1045,48 +1079,58 @@ export function make_protocol_server_layer(
 
 				const EnqueueConversationPatches = (current: ReadyState) =>
 					Effect.gen(function* () {
+						const maximum_batches_per_delivery = 4;
 						let subscriptions = current.subscriptions;
 						for (const [subscription_id, subscription] of Object.entries(
 							current.subscriptions,
 						)) {
 							if (subscription._tag !== "conversation") continue;
-							const patches = yield* conversation_read_model.ReadPatches(
-								subscription.thread_id,
-								subscription.patch_sequence,
-							);
-							if (patches.length === 0) continue;
-							const sequence = subscription.sequence + 1;
-							const message_id = yield* metadata.MakeId("message");
-							const sent_at = yield* metadata.Now;
-							const to_sequence = patches.at(-1)!.sequence;
-							yield* Enqueue({
-								journal_sequence: current.delivered_journal_sequence,
-								kind: "conversation.patch",
-								message_id,
-								origin: "backend",
-								payload: {
-									conversation_id: `conversation:${subscription.thread_id}`,
-									from_sequence: subscription.patch_sequence + 1,
-									patches,
-									thread_id: subscription.thread_id,
-									to_sequence,
-								},
-								protocol_version: 1,
-								schema_version: 1,
-								sent_at,
-								sequence,
-								stream_id: subscription.stream_id,
-								subscription_id,
-							});
-							subscriptions = {
-								...subscriptions,
-								[subscription_id]: {
-									...subscription,
+							let patch_sequence = subscription.patch_sequence;
+							let stream_sequence = subscription.sequence;
+							let delivered_batches = 0;
+							while (delivered_batches < maximum_batches_per_delivery) {
+								const patches = yield* conversation_read_model.ReadPatches(
+									subscription.thread_id,
+									patch_sequence,
+								);
+								if (patches.length === 0) break;
+								delivered_batches += 1;
+								stream_sequence += 1;
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+								const from_sequence = patch_sequence + 1;
+								patch_sequence = patches.at(-1)!.sequence;
+								yield* Enqueue({
 									journal_sequence: current.delivered_journal_sequence,
-									patch_sequence: to_sequence,
-									sequence,
-								},
-							};
+									kind: "conversation.patch",
+									message_id,
+									origin: "backend",
+									payload: {
+										conversation_id: `conversation:${subscription.thread_id}`,
+										from_sequence,
+										patches,
+										thread_id: subscription.thread_id,
+										to_sequence: patch_sequence,
+									},
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+									sequence: stream_sequence,
+									stream_id: subscription.stream_id,
+									subscription_id,
+								});
+								subscriptions = {
+									...subscriptions,
+									[subscription_id]: {
+										...subscription,
+										journal_sequence: current.delivered_journal_sequence,
+										patch_sequence,
+										sequence: stream_sequence,
+									},
+								};
+								if (patches.length < conversation_patch_replay_batch_size) break;
+								yield* Effect.yieldNow;
+							}
 						}
 						return subscriptions;
 					});
@@ -1300,6 +1344,7 @@ export function make_protocol_server_layer(
 					current: ReadyState,
 				) =>
 					project_directories.Select(query.payload).pipe(
+						Effect.flatMap(project_catalog.Attach),
 						Effect.flatMap((payload) =>
 							Effect.gen(function* () {
 								const message_id = yield* metadata.MakeId("message");
@@ -1322,6 +1367,96 @@ export function make_protocol_server_layer(
 								"project_directory.invalid",
 								"The selected server directory is unavailable.",
 								false,
+								query.message_id,
+							),
+						),
+					);
+
+				const HandleProjectList = (query: ProjectListQueryEnvelope, current: ReadyState) =>
+					project_catalog.Snapshot.pipe(
+						Effect.flatMap((payload) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "project.list.query.result",
+									message_id,
+									origin: "backend",
+									payload,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catchCause(() =>
+							EnqueueError(
+								current,
+								"project_catalog.unavailable",
+								"The Forge project catalog could not be read.",
+								true,
+								query.message_id,
+							),
+						),
+					);
+
+				const HandleProjectDetach = (query: ProjectDetachEnvelope, current: ReadyState) =>
+					project_catalog.Detach(query.payload.project_id).pipe(
+						Effect.flatMap((payload) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "project.detach.result",
+									message_id,
+									origin: "backend",
+									payload,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catchCause(() =>
+							EnqueueError(
+								current,
+								"project_catalog.unavailable",
+								"The Forge project could not be detached.",
+								true,
+								query.message_id,
+							),
+						),
+					);
+
+				const HandleRuntimeCatalog = (
+					query: RuntimeCatalogQueryEnvelope,
+					current: ReadyState,
+				) =>
+					runtime_catalog.Get.pipe(
+						Effect.flatMap((payload) =>
+							Effect.gen(function* () {
+								const message_id = yield* metadata.MakeId("message");
+								const sent_at = yield* metadata.Now;
+								yield* Enqueue({
+									correlation_id: query.message_id,
+									kind: "runtime.catalog.query.result",
+									message_id,
+									origin: "backend",
+									payload,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+								});
+							}),
+						),
+						Effect.catchCause(() =>
+							EnqueueError(
+								current,
+								"runtime_catalog.unavailable",
+								"The Forge runtime catalog could not be read.",
+								true,
 								query.message_id,
 							),
 						),
@@ -2366,6 +2501,48 @@ export function make_protocol_server_layer(
 							return;
 						}
 
+						if (subscribe.payload.type === "project.list") {
+							const snapshot = yield* project_catalog.Snapshot;
+							const stream_id = `projection:project.list:${subscribe.subscription_id}`;
+							const subscription: ProjectListProjectionSubscription = {
+								_tag: "project.list",
+								sequence: 0,
+								stream_id,
+							};
+							yield* Ref.set(state, {
+								...current,
+								subscriptions: {
+									...current.subscriptions,
+									[subscribe.subscription_id]: subscription,
+								},
+							});
+							const sent_at = yield* metadata.Now;
+							yield* Enqueue({
+								correlation_id: subscribe.message_id,
+								kind: "subscription.started",
+								message_id: yield* metadata.MakeId("message"),
+								origin: "backend",
+								payload: { stream_id },
+								protocol_version: 1,
+								schema_version: 1,
+								sent_at,
+								subscription_id: subscribe.subscription_id,
+							});
+							yield* Enqueue({
+								kind: "project.list.snapshot",
+								message_id: yield* metadata.MakeId("message"),
+								origin: "backend",
+								payload: snapshot,
+								protocol_version: 1,
+								schema_version: 1,
+								sent_at,
+								sequence: 0,
+								stream_id,
+								subscription_id: subscribe.subscription_id,
+							});
+							return;
+						}
+
 						if (subscribe.payload.type === "surface.list") {
 							const query = subscribe.payload.query;
 							const snapshot = yield* surfaces.ListSnapshot({
@@ -3016,6 +3193,18 @@ export function make_protocol_server_layer(
 
 				const HandleCommand = (command: CommandEnvelope) =>
 					Effect.gen(function* () {
+						if (command.payload.type === "thread.create") {
+							const current = yield* Ref.get(state);
+							yield* EnqueueError(
+								current,
+								"protocol.legacy_thread_create",
+								"Clients must create threads through thread.create.request so Forge owns the thread identity.",
+								false,
+								command.message_id,
+							);
+							return;
+						}
+
 						const output = yield* router.RouteCommand(command);
 						const events = output.filter(
 							(envelope): envelope is EventEnvelope => envelope.kind === "event",
@@ -3038,6 +3227,103 @@ export function make_protocol_server_layer(
 							yield* DeliverLiveEvents(new_events);
 						}
 					});
+				const HandleThreadCreate = (request: ThreadCreateEnvelope, current: ReadyState) =>
+					Effect.gen(function* () {
+						const existing_thread_id = yield* journal.FindCommandThreadId(
+							request.message_id,
+						);
+						const thread_id = yield* Option.match(existing_thread_id, {
+							onNone: () => snowflake_id.Make("thread"),
+							onSome: Effect.succeed,
+						});
+						const output = yield* router.RouteCommand({
+							kind: "command",
+							message_id: request.message_id,
+							origin: request.origin,
+							payload: {
+								...request.payload,
+								type: "thread.create",
+							},
+							protocol_version: request.protocol_version,
+							schema_version: request.schema_version,
+							sent_at: request.sent_at,
+							thread_id,
+						});
+						const receipt = output.find(
+							(envelope) => envelope.kind === "command.receipt",
+						);
+
+						if (
+							receipt?.kind !== "command.receipt" ||
+							receipt.payload.status === "rejected"
+						) {
+							const detail =
+								receipt?.kind === "command.receipt" &&
+								receipt.payload.status === "rejected"
+									? receipt.payload.error
+									: {
+											code: "thread.create_failed",
+											message: "Forge could not durably create the thread.",
+											retryable: true,
+										};
+							return yield* EnqueueError(
+								current,
+								detail.code,
+								detail.message,
+								detail.retryable,
+								request.message_id,
+							);
+						}
+
+						const thread = yield* thread_read_model.Lookup(thread_id);
+						const projection = yield* Option.match(thread, {
+							onNone: () =>
+								Effect.fail(
+									new Error(
+										"Created thread is missing from its authoritative projection",
+									),
+								),
+							onSome: Effect.succeed,
+						});
+						const message_id = yield* metadata.MakeId("message");
+						const sent_at = yield* metadata.Now;
+						yield* Enqueue({
+							correlation_id: request.message_id,
+							kind: "thread.create.result",
+							message_id,
+							origin: "backend",
+							payload: projection,
+							protocol_version: 1,
+							schema_version: 1,
+							sent_at,
+						});
+
+						const events = output.filter(
+							(envelope): envelope is EventEnvelope => envelope.kind === "event",
+						);
+						const latest = yield* Ref.get(state);
+						const undelivered =
+							latest._tag === "Ready"
+								? events.filter(
+										(event) =>
+											event.journal_sequence >
+											latest.delivered_journal_sequence,
+									)
+								: [];
+						if (undelivered.length > 0) {
+							yield* DeliverLiveEvents(undelivered);
+						}
+					}).pipe(
+						Effect.catchCause(() =>
+							EnqueueError(
+								current,
+								"thread.create_failed",
+								"Forge could not durably create the thread.",
+								true,
+								request.message_id,
+							),
+						),
+					);
 				const HandleRetentionUpdate = (update: ThreadRetentionUpdateEnvelope) =>
 					HandleCommand({
 						kind: "command",
@@ -3303,6 +3589,8 @@ export function make_protocol_server_layer(
 					switch (envelope.kind) {
 						case "command":
 							return HandleCommand(envelope);
+						case "thread.create.request":
+							return HandleThreadCreate(envelope, current);
 						case "thread.list.query":
 						case "thread.retention.query":
 						case "thread.work.query":
@@ -3315,6 +3603,12 @@ export function make_protocol_server_layer(
 							return HandleProjectDirectoryList(envelope, current);
 						case "project.directory.select":
 							return HandleProjectDirectorySelect(envelope, current);
+						case "project.list.query":
+							return HandleProjectList(envelope, current);
+						case "project.detach":
+							return HandleProjectDetach(envelope, current);
+						case "runtime.catalog.query":
+							return HandleRuntimeCatalog(envelope, current);
 						case "thread.retention.update":
 							return HandleRetentionUpdate(envelope);
 						case "workspace.file.read.query":
@@ -3827,6 +4121,51 @@ export function make_protocol_server_layer(
 					),
 				);
 
+				const DeliverProjectCatalog = (
+					snapshot: import("@artisan/protocol").ProjectCatalogSnapshot,
+				) =>
+					Semaphore.withPermit(receive_lock)(
+						Effect.gen(function* () {
+							const current = yield* Ref.get(state);
+							if (current._tag !== "Ready") return;
+							let subscriptions = current.subscriptions;
+							const sent_at = yield* metadata.Now;
+							for (const [subscription_id, subscription] of Object.entries(
+								current.subscriptions,
+							)) {
+								if (subscription._tag !== "project.list") continue;
+								const sequence = subscription.sequence + 1;
+								yield* Enqueue({
+									kind: "project.list.updated",
+									message_id: yield* metadata.MakeId("message"),
+									origin: "backend",
+									payload: snapshot,
+									protocol_version: 1,
+									schema_version: 1,
+									sent_at,
+									sequence,
+									stream_id: subscription.stream_id,
+									subscription_id,
+								});
+								subscriptions = {
+									...subscriptions,
+									[subscription_id]: { ...subscription, sequence },
+								};
+							}
+							yield* Ref.set(state, { ...current, subscriptions });
+						}),
+					);
+
+				const ProjectCatalogTail = Deferred.await(connection_ready).pipe(
+					Effect.andThen(
+						Effect.forever(
+							PubSub.take(project_subscription).pipe(
+								Effect.flatMap(DeliverProjectCatalog),
+							),
+						),
+					),
+				);
+
 				const HeartbeatTick = Semaphore.withPermit(receive_lock)(
 					Effect.gen(function* () {
 						const current = yield* Ref.get(state);
@@ -3880,6 +4219,7 @@ export function make_protocol_server_layer(
 				);
 
 				yield* Effect.forkIn(JournalTail, connection_scope);
+				yield* Effect.forkIn(ProjectCatalogTail, connection_scope);
 				yield* Effect.forkIn(Heartbeat, connection_scope);
 
 				return {

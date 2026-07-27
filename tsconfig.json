@@ -11,8 +11,10 @@
 		"paths": {
 			"@artisan/catalog": ["./modules/catalog/src/index.ts"],
 			"@artisan/backend": ["./modules/backend/src/index.ts"],
+			"@artisan/bootstrap": ["./modules/bootstrap/src/index.ts"],
 			"@artisan/cli": ["./modules/cli/src/index.ts"],
 			"@artisan/desktop": ["./modules/desktop/src/index.ts"],
+			"@artisan/distribution": ["./modules/distribution/src/index.ts"],
 			"@artisan/engines": ["./modules/engines/src/index.ts"],
 			"@artisan/forge": ["./modules/forge/src/index.ts"],
 			"@artisan/protocol": ["./modules/protocol/src/index.ts"],

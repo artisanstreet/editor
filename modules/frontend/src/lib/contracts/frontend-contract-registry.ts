@@ -31,8 +31,8 @@ export const FrontendContractRegistry: ReadonlyArray<FrontendContractEntry> = [
 		owner: "artisan_client",
 		surface: "left",
 		pane: "thread-actions",
-		reason: "Thread creation is a durable public command whose retry identity belongs to the client.",
-		contract_names: ["ArtisanClient.Command", "ThreadCreateCommand"],
+		reason: "Forge creates the durable thread identity and returns its authoritative projection through the dedicated client RPC.",
+		contract_names: ["ArtisanClient.CreateThread", "ThreadCreateInput"],
 	},
 	{
 		id: "left.thread-select",
@@ -96,12 +96,11 @@ export const FrontendContractRegistry: ReadonlyArray<FrontendContractEntry> = [
 	},
 	{
 		id: "left.identity",
-		state: "live",
-		owner: "artisan_client",
+		state: "blocked",
+		owner: "missing",
 		surface: "left",
 		pane: "identity-card",
-		reason: "The narrow preload bridge projects OS username, machine fallback, and a stable avatar seed without renderer host access.",
-		contract_names: ["DesktopSessionBridge", "DesktopIdentity"],
+		reason: "Identity must be projected by Forge after pairing; clients have no host-inspection bridge.",
 	},
 	{
 		id: "left.marketplace",
@@ -450,18 +449,9 @@ export const FrontendContractRegistry: ReadonlyArray<FrontendContractEntry> = [
 	{
 		id: "desktop-shell.electron-bootstrap",
 		state: "live",
-		owner: "artisan_client",
-		surface: "desktop_shell",
-		pane: "application",
-		reason: "Electron main, utility, preload, renderer MessagePorts, packaging, single-instance ownership, restart replay, and mounted renderer smoke are implemented.",
-		contract_names: ["DesktopSessionBridge", "DesktopSessionConnection"],
-	},
-	{
-		id: "desktop-shell.activity-indicator",
-		state: "live",
 		owner: "frontend",
 		surface: "desktop_shell",
 		pane: "application",
-		reason: "The renderer reduces canonical working projections to one boolean and the narrow preload bridge drives an idempotent native taskbar or Dock progress signal.",
+		reason: "Electron is a single-instance artisan:// launcher that delegates lifecycle and browser pairing to ae; it has no renderer, preload, IPC, or application state.",
 	},
 ] as const;

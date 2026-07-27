@@ -125,20 +125,18 @@ export const BuildThreadMessageCommand = (
 				: { agent_id: context.work.agent_id, run_id: context.work.run_id }),
 			payload: {
 				engine_id: context.work?.engine_id ?? context.session.policy.engine_id,
-				mentioned_projects: [project],
 				attachments: submission.attachments.map((attachment) => ({
 					bytes: Uint8Array.from(
 						globalThis.atob(attachment.content_base64),
 						(character) => character.codePointAt(0) ?? 0,
 					),
-					id: attachment.id,
+					client_token: attachment.id,
 					media_type: attachment.mime_type,
 					name: attachment.name,
 				})),
 				content: MakeUserMessageContent(submission.text, submission.attachments),
 				text: trimmed || "Attached image",
 				type: "thread.send_message",
-				working_directory: project.root_path,
 			} satisfies ThreadSendMessageCommand,
 			thread_id: context.thread_id,
 		},

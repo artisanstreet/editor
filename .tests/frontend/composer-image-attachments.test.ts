@@ -77,9 +77,9 @@ describe("composer image attachments", () => {
 			]),
 		).toEqual([
 			{ text: "First", type: "text" },
-			{ attachment_id: "one", type: "image" },
+			{ client_token: "one", type: "image" },
 			{ text: "Second", type: "text" },
-			{ attachment_id: "two", type: "image" },
+			{ client_token: "two", type: "image" },
 			{ text: "Third", type: "text" },
 		]);
 	});

@@ -2,7 +2,7 @@ import { execFile as exec_file } from "node:child_process";
 import { createHash } from "node:crypto";
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
@@ -29,6 +29,7 @@ import { Database } from "../../../modules/backend/src/persistence/database";
 import { OrchestrationRuns } from "../../../modules/backend/src/persistence/schema";
 import { RuntimeMetadata } from "../../../modules/backend/src/runtime/runtime-metadata";
 import { MakeNodeTestWorkspaceBoundedRegularFileStoreRegistryLayer } from "../../backend/bounded-regular-file-store-harness";
+import { make_transport_test_harness_with_protocol_server } from "../../transport/message-channel-harness";
 
 const migrations_path = fileURLToPath(new URL("../../../modules/backend/drizzle", import.meta.url));
 const RunCommand = promisify(exec_file);
@@ -85,6 +86,7 @@ function MakeRuntime(
 				}),
 		],
 		migrations_path,
+		project_directory_roots: [root],
 		retention_clock: Layer.succeed(ThreadRetentionClock, {
 			Now: Effect.succeed(sent_at),
 		}),
@@ -167,7 +169,11 @@ function Hello(): HelloEnvelope {
 	};
 }
 
-function Replace(agent_id: string, run_id: string): WorkspaceFileReplaceEnvelope {
+function Replace(
+	agent_id: string,
+	run_id: string,
+	thread_id: string,
+): WorkspaceFileReplaceEnvelope {
 	return {
 		agent_id,
 		kind: "workspace.file.replace",
@@ -185,28 +191,28 @@ function Replace(agent_id: string, run_id: string): WorkspaceFileReplaceEnvelope
 		run_id,
 		schema_version: 1,
 		sent_at,
-		thread_id: "thread_deep",
+		thread_id,
 	};
 }
 
-function List(): WorkspaceChangeListQueryEnvelope {
+function List(thread_id: string): WorkspaceChangeListQueryEnvelope {
 	return {
 		kind: "workspace.change.list.query",
 		message_id: "list_deep",
 		origin: "frontend",
-		payload: { thread_id: "thread_deep", workspace_id: "workspace_deep" },
+		payload: { thread_id, workspace_id: "workspace_deep" },
 		protocol_version: 1,
 		schema_version: 1,
 		sent_at,
 	};
 }
 
-function Diff(): WorkspaceChangeDiffQueryEnvelope {
+function Diff(thread_id: string): WorkspaceChangeDiffQueryEnvelope {
 	return {
 		kind: "workspace.change.diff.query",
 		message_id: "diff_deep",
 		origin: "frontend",
-		payload: { change_id: "change_deep", thread_id: "thread_deep" },
+		payload: { change_id: "change_deep", thread_id },
 		protocol_version: 1,
 		schema_version: 1,
 		sent_at,
@@ -226,13 +232,14 @@ function Command(thread_id: string, message_id: string, payload: Record<string, 
 	};
 }
 
-const RunningAuthority = (root: string) =>
+const RunningAuthority = (root: string, thread_id: string) =>
 	Effect.gen(function* () {
 		const database = yield* Database;
 		const runs = yield* database.client.select().from(OrchestrationRuns);
 		const run = runs.find(
 			(candidate) =>
-				candidate.thread_id === "thread_deep" && candidate.working_directory === root,
+				candidate.thread_id === thread_id &&
+				resolve(candidate.working_directory) === resolve(root),
 		);
 
 		if (!run) {
@@ -262,8 +269,31 @@ describe("deep public-protocol workspace integration", () => {
 			first_engine_cleanup_count,
 			blocking_engine.engine,
 		);
+		let thread_id = "";
 
 		try {
+			const protocol_server = await first_runtime.runPromise(ProtocolServer);
+			const creation_harness =
+				await make_transport_test_harness_with_protocol_server(protocol_server);
+			try {
+				const directories = await Effect.runPromise(
+					creation_harness.client.ListProjectDirectories(),
+				);
+				const project = await Effect.runPromise(
+					creation_harness.client.SelectProjectDirectory({
+						directory_id: directories.directories[0]!.directory_id,
+					}),
+				);
+				const created = await Effect.runPromise(
+					creation_harness.client.CreateThread({
+						project_id: project.project_id,
+						title: "Deep integration",
+					}),
+				);
+				thread_id = created.thread_id;
+			} finally {
+				await creation_harness.dispose();
+			}
 			const output = await first_runtime.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
@@ -272,21 +302,17 @@ describe("deep public-protocol workspace integration", () => {
 						yield* connection.Receive(Hello());
 						yield* TakeThroughReplayComplete(connection);
 						yield* connection.Receive(
-							Command("thread_deep", "create_engine_thread", {
-								title: "Deep integration",
-								type: "thread.create",
-							}),
-						);
-						yield* TakeCorrelated(connection, "create_engine_thread", 2);
-						yield* connection.Receive(
-							Command("thread_deep", "start_deep_run", {
+							Command(thread_id, "start_deep_run", {
 								engine_id: "fake_engine",
 								text: "Prepare the attributed workspace change",
 								type: "thread.send_message",
-								working_directory: root,
 							}),
 						);
-						yield* TakeCorrelated(connection, "start_deep_run", 1);
+						const [receipt] = yield* TakeCorrelated(connection, "start_deep_run", 1);
+						expect(receipt).toMatchObject({
+							kind: "command.receipt",
+							payload: { status: "accepted" },
+						});
 						yield* connection.Outbound.pipe(
 							Stream.filter(
 								(envelope) =>
@@ -297,15 +323,19 @@ describe("deep public-protocol workspace integration", () => {
 							Stream.take(1),
 							Stream.runDrain,
 						);
-						const authority = yield* RunningAuthority(root);
-						const replacement = Replace(authority.agent_id, authority.run_id);
+						const authority = yield* RunningAuthority(root, thread_id);
+						const replacement = Replace(
+							authority.agent_id,
+							authority.run_id,
+							thread_id,
+						);
 
 						yield* connection.Receive(replacement);
 						const accepted = yield* TakeCorrelated(connection, "replace_deep", 2);
 						yield* connection.Receive(replacement);
 						const duplicate = yield* TakeCorrelated(connection, "replace_deep", 1);
 
-						return { accepted, duplicate };
+						return { accepted, duplicate, thread_id };
 					}),
 				),
 			);
@@ -354,9 +384,9 @@ describe("deep public-protocol workspace integration", () => {
 
 						yield* connection.Receive(Hello());
 						yield* TakeThroughReplayComplete(connection);
-						yield* connection.Receive(List());
+						yield* connection.Receive(List(thread_id));
 						const list = yield* TakeOutbound(connection, 1);
-						yield* connection.Receive(Diff());
+						yield* connection.Receive(Diff(thread_id));
 						const diff = yield* TakeOutbound(connection, 1);
 
 						return { diff, list };

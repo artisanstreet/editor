@@ -17,6 +17,7 @@ import {
 } from "@artisan/backend";
 
 import { Database } from "../../modules/backend/src/persistence/database";
+import { ProjectCatalog } from "../../modules/backend/src/projects/project-catalog";
 import { JournalStore } from "../../modules/backend/src/persistence/journal-store";
 import { ThreadProjectAffinityEvidence } from "../../modules/backend/src/persistence/schema";
 import { ThreadReadModel } from "../../modules/backend/src/persistence/thread-read-model";
@@ -210,6 +211,7 @@ describe("thread project affinity coordinator", () => {
 					const coordinator = yield* ThreadProjectAffinityCoordinator;
 					const database = yield* Database;
 					const journal = yield* JournalStore;
+					const projects = yield* ProjectCatalog;
 					const router = yield* ProtocolRouter;
 					const threads = yield* ThreadReadModel;
 
@@ -219,9 +221,10 @@ describe("thread project affinity coordinator", () => {
 							type: "thread.create",
 						}),
 					);
+					yield* projects.Attach(ProjectAlpha);
 					yield* router.Route(
 						make_command("assign_locked_alpha", {
-							project: ProjectAlpha,
+							project_id: ProjectAlpha.project_id,
 							type: "thread.project.assign",
 						}),
 					);

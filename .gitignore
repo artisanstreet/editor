@@ -5,6 +5,7 @@ __pycache__/
 .svelte-kit/
 modules/frontend/.svelte-kit/
 coverage/
+target/
 .env
 .env.*
 !.env.example

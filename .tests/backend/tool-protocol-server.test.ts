@@ -75,24 +75,28 @@ describe("built-in tool protocol routes", () => {
 						const connection = yield* server.Open;
 						yield* negotiate(connection);
 						yield* connection.Receive(
-							envelope(
-								"command",
-								"create",
-								{ title: "Tools", type: "thread.create" },
-								"thread_tools",
-							),
+							envelope("thread.create.request", "create", { title: "Tools" }),
 						);
-						yield* read_until(connection, "command.receipt");
+						const creation = yield* read_until(connection, "thread.create.result");
+						const created = [...creation].find(
+							(frame) => frame.kind === "thread.create.result",
+						);
+						if (created?.kind !== "thread.create.result") {
+							return yield* Effect.die(
+								new Error("Forge did not return the created tool thread"),
+							);
+						}
+						const thread_id = created.payload.thread_id;
 						const queries = [
 							envelope("artisan.tool.registry.list.query", "registry", {
 								policy,
-								thread_id: "thread_tools",
+								thread_id,
 							}),
 							envelope("artisan.tool.invocation.list.query", "invocations", {
-								thread_id: "thread_tools",
+								thread_id,
 							}),
 							envelope("artisan.approval.list.query", "approvals", {
-								thread_id: "thread_tools",
+								thread_id,
 							}),
 							envelope("workspace.file.discovery.query", "discovery", {
 								workspace_id: "missing",
@@ -128,7 +132,7 @@ describe("built-in tool protocol routes", () => {
 										statement: "safe",
 									},
 								},
-								"thread_tools",
+								thread_id,
 							),
 						);
 						results.push(...(yield* read_until(connection, "command.receipt")));
@@ -146,7 +150,7 @@ describe("built-in tool protocol routes", () => {
 										permission_requirements: ["user_interaction"],
 									},
 								},
-								"thread_tools",
+								thread_id,
 							),
 						);
 						results.push(...(yield* read_until(connection, "command.receipt")));
@@ -160,16 +164,16 @@ describe("built-in tool protocol routes", () => {
 									invocation_id: "approval_invocation",
 									resolution_id: "resolution",
 								},
-								"thread_tools",
+								thread_id,
 							),
 						);
 						results.push(...(yield* read_until(connection, "command.receipt")));
 						for (const query of [
 							envelope("artisan.tool.invocation.list.query", "invocations_after", {
-								thread_id: "thread_tools",
+								thread_id,
 							}),
 							envelope("artisan.approval.list.query", "approvals_after", {
-								thread_id: "thread_tools",
+								thread_id,
 							}),
 						]) {
 							yield* connection.Receive(query);

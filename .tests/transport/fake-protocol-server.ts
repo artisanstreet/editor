@@ -179,11 +179,13 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 	const workspace_file_replace_attempts: Array<WorkspaceFileReplaceEnvelope> = [];
 	const subscription_attempts: Array<SubscribeEnvelope> = [];
 	const threads = new Map<string, ThreadListItem>();
+	const thread_creations = new Map<string, ThreadListItem>();
 	let retention_policy: ThreadRetentionPolicy = { enabled: true, inactivity_days: 7 };
 	let active_connections = 0;
 	let active_subscriptions = 0;
 	let id_sequence = 0;
 	let opened_connections = 0;
+	let thread_sequence = 0;
 	let guidance_snapshot: GlobalGuidanceSnapshot = {
 		candidates: [],
 		content: "Initial guidance\n",
@@ -424,7 +426,8 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 				for (const [subscription_id, subscription] of subscriptions) {
 					if (
 						subscription._tag === "thread.list" &&
-						event.payload.type === "thread.created"
+						(event.payload.type === "thread.created" ||
+							event.payload.type === "thread.metadata.updated")
 					) {
 						subscription.sequence += 1;
 						yield* enqueue({
@@ -618,6 +621,54 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 							display_name: command.payload.display_name,
 							group_id: command.payload.group_id,
 							type: "agent_instance.renamed",
+						},
+						sequence,
+						stream_id,
+						thread_id: command.thread_id,
+					};
+				} else if (command.payload.type === "thread.rename") {
+					const current = threads.get(command.thread_id);
+					const stream_id = `thread:${command.thread_id}`;
+					const sequence =
+						events.filter((candidate) => candidate.stream_id === stream_id).length + 1;
+					const updated: ThreadListItem = {
+						...(current ?? {
+							activity_version: 0,
+							affinity_version: 0,
+							created_at: backend_trace().sent_at,
+							last_activity_at: backend_trace().sent_at,
+							linked_projects: [],
+							live_status: "Idle",
+							metadata_version: 0,
+							pinned: false,
+							project_affinity_scores: [],
+							project_locked: false,
+							thread_id: command.thread_id,
+							title_locked: false,
+							title_source: "initial",
+							updated_at: backend_trace().sent_at,
+						}),
+						activity_version: (current?.activity_version ?? 0) + 1,
+						current_goal: command.payload.title,
+						metadata_version: (current?.metadata_version ?? 0) + 1,
+						title: command.payload.title,
+						title_locked: true,
+						title_source: "manual",
+						updated_at: backend_trace().sent_at,
+					};
+
+					threads.set(command.thread_id, updated);
+					event = {
+						...backend_trace(),
+						causation_id: command.message_id,
+						correlation_id: command.message_id,
+						journal_sequence,
+						kind: "event",
+						payload: {
+							activity_kind: "renamed",
+							change: "rename",
+							thread: updated,
+							type: "thread.metadata.updated",
 						},
 						sequence,
 						stream_id,
@@ -1326,6 +1377,67 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 						yield* handle_command(input);
 
 						return;
+					case "thread.create.request": {
+						const previous = thread_creations.get(input.message_id);
+						if (previous) {
+							yield* enqueue({
+								...backend_trace(),
+								correlation_id: input.message_id,
+								kind: "thread.create.result",
+								payload: previous,
+							});
+							return;
+						}
+
+						thread_sequence += 1;
+						const thread_id = `thread_1378080849396121${thread_sequence}`;
+						const trace = backend_trace();
+						const item: ThreadListItem = {
+							activity_version: 0,
+							affinity_version: 0,
+							created_at: trace.sent_at,
+							current_goal: input.payload.title,
+							last_activity_at: trace.sent_at,
+							linked_projects: [],
+							live_status: "Idle",
+							metadata_version: 0,
+							pinned: false,
+							project_affinity_scores: [],
+							project_locked: false,
+							thread_id,
+							title: input.payload.title,
+							title_locked: false,
+							title_source: "initial",
+							updated_at: trace.sent_at,
+						};
+						const event: EventEnvelope = {
+							...trace,
+							causation_id: input.message_id,
+							correlation_id: input.message_id,
+							journal_sequence: events.length + 1,
+							kind: "event",
+							payload: { title: input.payload.title, type: "thread.created" },
+							sequence: 1,
+							stream_id: `thread:${thread_id}`,
+							thread_id,
+						};
+
+						threads.set(thread_id, item);
+						thread_creations.set(input.message_id, item);
+						events.push(event);
+						yield* enqueue({
+							...backend_trace(),
+							correlation_id: input.message_id,
+							kind: "thread.create.result",
+							payload: item,
+						});
+						yield* Effect.forEach(
+							live_connections,
+							(connection) => connection.deliver_event(event),
+							{ discard: true },
+						);
+						return;
+					}
 					case "thread.list.query":
 						if (options.query_delay_ms) {
 							yield* Effect.sleep(options.query_delay_ms);

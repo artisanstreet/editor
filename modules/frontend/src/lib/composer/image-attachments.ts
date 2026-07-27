@@ -96,18 +96,18 @@ export const MakeUserMessageContent = (
 	tokens: ReadonlyArray<{ readonly id: string; readonly position: number }>,
 ): ReadonlyArray<
 	| { readonly text: string; readonly type: "text" }
-	| { readonly attachment_id: string; readonly type: "image" }
+	| { readonly client_token: string; readonly type: "image" }
 > => {
 	const content: Array<
 		| { readonly text: string; readonly type: "text" }
-		| { readonly attachment_id: string; readonly type: "image" }
+		| { readonly client_token: string; readonly type: "image" }
 	> = [];
 	let cursor = 0;
 	for (const token of tokens) {
 		const position = Math.max(cursor, Math.min(text.length, token.position));
 		const preceding = text.slice(cursor, position);
 		if (preceding.length > 0) content.push({ text: preceding, type: "text" });
-		content.push({ attachment_id: token.id, type: "image" });
+		content.push({ client_token: token.id, type: "image" });
 		cursor = position;
 	}
 	const trailing = text.slice(cursor);

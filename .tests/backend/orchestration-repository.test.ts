@@ -8,6 +8,7 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import type { EngineObservation } from "@artisan/engines";
 import type { CommandEnvelope } from "@artisan/protocol";
+import type { AuthoritativeCommandEnvelope } from "../../modules/backend/src/persistence/orchestration/message-command";
 import { make_backend_runtime, ThreadErasure } from "@artisan/backend";
 
 import { OrchestrationRepository } from "../../modules/backend/src/persistence/orchestration-repository";
@@ -15,10 +16,12 @@ import type { IntakeAssessment } from "../../modules/backend/src/orchestration/i
 import {
 	JournalCommands,
 	JournalEvents,
+	MessageImageAttachments,
 	OrchestrationOutbox,
 	OrchestrationIntake,
 	OrchestrationRawObservations,
 	OrchestrationRuns,
+	Projects,
 	SurfaceItems,
 	Threads,
 } from "../../modules/backend/src/persistence/schema";
@@ -38,9 +41,9 @@ async function make_database_path() {
 function make_command(
 	message_id: string,
 	thread_id: string,
-	payload: CommandEnvelope["payload"],
-	options: Partial<Pick<CommandEnvelope, "raw_origin" | "run_id">> = {},
-): CommandEnvelope {
+	payload: AuthoritativeCommandEnvelope["payload"],
+	options: Partial<Pick<AuthoritativeCommandEnvelope, "raw_origin" | "run_id">> = {},
+): AuthoritativeCommandEnvelope {
 	return {
 		kind: "command",
 		message_id,
@@ -80,11 +83,18 @@ const SetupFreshThread = (thread_id: string) =>
 		});
 	});
 
-const Accept = (command: CommandEnvelope, intake?: IntakeAssessment) =>
+const Accept = (command: AuthoritativeCommandEnvelope, intake?: IntakeAssessment) =>
 	Effect.gen(function* () {
 		const repository = yield* OrchestrationRepository;
 
 		return yield* repository.Accept(command, false, intake);
+	});
+
+const AcceptInbound = (command: CommandEnvelope) =>
+	Effect.gen(function* () {
+		const repository = yield* OrchestrationRepository;
+
+		return yield* repository.AcceptInbound(command, false);
 	});
 
 const Read = <A>(
@@ -105,6 +115,93 @@ afterEach(async () => {
 });
 
 describe("orchestration repository hardening", () => {
+	it("derives project authority and replaces client attachment tokens atomically", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			migrations_path,
+		});
+		const client_token = "temporary-client-token";
+		try {
+			await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					yield* database.client.insert(Projects).values({
+						attached_at: "2026-07-10T10:00:00.000Z",
+						display_name: "Workspace",
+						project_id: "project_1",
+						root_path: "C:/forge/workspace",
+						updated_at: "2026-07-10T10:00:00.000Z",
+					});
+					yield* database.client.insert(Threads).values({
+						created_at: "2026-07-10T10:00:00.000Z",
+						primary_project_id: "project_1",
+						thread_id: "thread_1",
+						title: "thread_1",
+						updated_at: "2026-07-10T10:00:00.000Z",
+					});
+				}),
+			);
+
+			const accepted = await runtime.runPromise(
+				AcceptInbound({
+					kind: "command",
+					message_id: "message_1",
+					origin: "frontend",
+					payload: {
+						attachments: [
+							{
+								bytes: new Uint8Array([
+									0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+								]),
+								client_token,
+								media_type: "image/png",
+								name: "image.png",
+							},
+						],
+						content: [{ client_token, type: "image" }],
+						engine_id: "engine_1",
+						text: "Inspect this image",
+						type: "thread.send_message",
+					},
+					protocol_version: 1,
+					schema_version: 1,
+					sent_at: "2026-07-10T10:00:00.000Z",
+					thread_id: "thread_1",
+				}),
+			);
+			const persisted = await runtime.runPromise(
+				Read((database) =>
+					Effect.all({
+						attachments: database.select().from(MessageImageAttachments),
+						commands: database.select().from(JournalCommands),
+						outbox: database.select().from(OrchestrationOutbox),
+					}),
+				),
+			);
+			const durable_id = persisted.attachments[0]?.attachment_id;
+			const queued = accepted.events.find(
+				(event) => event.payload.type === "thread.message_queued",
+			);
+
+			expect(durable_id).toBeDefined();
+			expect(durable_id).not.toBe(client_token);
+			expect(JSON.stringify(persisted)).not.toContain(client_token);
+			expect(queued?.payload).toMatchObject({
+				content: [{ attachment_id: durable_id, type: "image" }],
+				mentioned_projects: [
+					{
+						display_name: "Workspace",
+						project_id: "project_1",
+						root_path: "C:/forge/workspace",
+					},
+				],
+				working_directory: "C:/forge/workspace",
+			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("projects an agent message delta while retaining its raw observation", async () => {
 		const runtime = make_backend_runtime({
 			database_path: await make_database_path(),
@@ -504,7 +601,7 @@ describe("orchestration repository hardening", () => {
 	it("replays an exact intake response after repository restart without a second run", async () => {
 		const database_path = await make_database_path();
 		const first_runtime = make_backend_runtime({ database_path, migrations_path });
-		let response: CommandEnvelope | undefined;
+		let response: AuthoritativeCommandEnvelope | undefined;
 		let accepted_run_id: string | undefined;
 
 		try {

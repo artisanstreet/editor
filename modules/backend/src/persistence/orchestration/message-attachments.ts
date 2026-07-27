@@ -5,9 +5,10 @@ import { type CommandPayload, type ImageAttachmentReference } from "@artisan/pro
 
 import type { DatabaseClient } from "../database";
 import { MessageImageAttachments } from "../schema";
+import type { AuthoritativeThreadSendMessageCommand } from "./message-command";
 
 export const ImageAttachmentsFor = (
-	payload: CommandPayload,
+	payload: AuthoritativeThreadSendMessageCommand,
 ): ReadonlyArray<ImageAttachmentReference> =>
 	payload.type === "thread.send_message"
 		? (payload.attachments ?? []).map((attachment) => ({
@@ -18,7 +19,7 @@ export const ImageAttachmentsFor = (
 			}))
 		: [];
 
-export const SanitisePayload = (payload: CommandPayload) =>
+export const SanitisePayload = (payload: CommandPayload | AuthoritativeThreadSendMessageCommand) =>
 	payload.type !== "thread.send_message" || payload.attachments === undefined
 		? payload
 		: {
@@ -27,6 +28,30 @@ export const SanitisePayload = (payload: CommandPayload) =>
 					({ bytes: _bytes, ...attachment }) => attachment,
 				),
 			};
+
+/** Produces token-free, deterministic client intent for idempotency comparison. */
+export const CanonicaliseClientMessageIntent = (payload: CommandPayload) => {
+	if (payload.type !== "thread.send_message") return SanitisePayload(payload);
+	const slots = new Map(
+		(payload.attachments ?? []).map((attachment, index) => [attachment.client_token, index]),
+	);
+	return {
+		...payload,
+		attachments: (payload.attachments ?? []).map((attachment, index) => ({
+			idempotency_slot: index,
+			media_type: attachment.media_type,
+			name: attachment.name,
+		})),
+		content: payload.content?.map((part) =>
+			part.type === "text"
+				? part
+				: {
+						idempotency_slot: slots.get(part.client_token),
+						type: "image" as const,
+					},
+		),
+	};
+};
 
 const BytesMatchImageType = (
 	media_type: "image/gif" | "image/jpeg" | "image/png" | "image/webp",
@@ -52,9 +77,11 @@ const BytesMatchImageType = (
 	}
 };
 
-export const ValidateImageAttachments = (payload: CommandPayload) => {
+export const ValidateImageAttachments = (
+	payload: CommandPayload | AuthoritativeThreadSendMessageCommand,
+) => {
 	if (payload.type !== "thread.send_message" || payload.attachments === undefined) return;
-	const ids = new Set<string>();
+	const tokens = new Set<string>();
 	let total_bytes = 0;
 	for (const attachment of payload.attachments) {
 		if (attachment.bytes === undefined) {
@@ -63,19 +90,31 @@ export const ValidateImageAttachments = (payload: CommandPayload) => {
 		if (!BytesMatchImageType(attachment.media_type, attachment.bytes)) {
 			throw new Error(`Image bytes do not match ${attachment.media_type}`);
 		}
-		if (ids.has(attachment.id)) throw new Error("Message image attachment ids must be unique");
-		ids.add(attachment.id);
+		const token = "client_token" in attachment ? attachment.client_token : attachment.id;
+		if (tokens.has(token)) {
+			throw new Error("Message image attachment client tokens must be unique");
+		}
+		tokens.add(token);
 		total_bytes += attachment.bytes.byteLength;
 	}
 	if (total_bytes > 8 * 1024 * 1024) throw new Error("Message images may total at most 8 MiB");
 	for (const part of payload.content ?? []) {
-		if (part.type === "image" && !ids.has(part.attachment_id)) {
+		const token =
+			part.type === "image"
+				? "client_token" in part
+					? part.client_token
+					: part.attachment_id
+				: undefined;
+		if (token !== undefined && !tokens.has(token)) {
 			throw new Error("Every image content part must reference an uploaded attachment");
 		}
 	}
 };
 
-export const HydrateImageAttachments = (database: DatabaseClient, payload: CommandPayload) => {
+export const HydrateImageAttachments = (
+	database: DatabaseClient,
+	payload: AuthoritativeThreadSendMessageCommand,
+) => {
 	if (payload.type !== "thread.send_message" || payload.attachments === undefined) {
 		return Effect.succeed(payload);
 	}

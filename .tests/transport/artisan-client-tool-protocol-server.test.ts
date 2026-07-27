@@ -41,9 +41,11 @@ describe("ArtisanClient built-in tools with the backend ProtocolServer", () => {
 		});
 		const protocol_server = await runtime.runPromise(ProtocolServer);
 		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
-		const thread_id = "thread_tool_transport";
-
 		try {
+			const created_thread = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Tool transport" }),
+			);
+			const thread_id = created_thread.thread_id;
 			const result = await Effect.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
@@ -61,11 +63,6 @@ describe("ArtisanClient built-in tools with the backend ProtocolServer", () => {
 							Stream.runCollect,
 							Effect.forkScoped,
 						);
-						yield* harness.client.Command({
-							command_id: "create_tool_transport_thread",
-							payload: { title: "Tool transport", type: "thread.create" },
-							thread_id,
-						});
 						const registry = yield* harness.client.ListArtisanTools({ policy });
 						const discovery_error = yield* harness.client
 							.ListWorkspaceFiles({ workspace_id: "missing_workspace" })

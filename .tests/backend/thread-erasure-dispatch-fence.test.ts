@@ -14,7 +14,7 @@ import type {
 	EngineRun,
 	EngineRunTerminalState,
 } from "@artisan/engines";
-import type { CommandEnvelope } from "@artisan/protocol";
+import type { AuthoritativeCommandEnvelope } from "../../modules/backend/src/persistence/orchestration/message-command";
 import {
 	AgentGraphOrchestrator,
 	AgentGraphInvalid,
@@ -234,11 +234,11 @@ async function make_database_path() {
 	return join(directory, "artisan.db");
 }
 
-function command(
+function command<const Payload extends AuthoritativeCommandEnvelope["payload"]>(
 	thread_id: string,
 	message_id: string,
-	payload: CommandEnvelope["payload"],
-): CommandEnvelope {
+	payload: Payload,
+): Omit<AuthoritativeCommandEnvelope, "payload"> & { readonly payload: Payload } {
 	return {
 		kind: "command",
 		message_id,
@@ -251,7 +251,7 @@ function command(
 	};
 }
 
-function graph_start(thread_id: string, assignment_count = 1): CommandEnvelope {
+function graph_start(thread_id: string, assignment_count = 1) {
 	return command(thread_id, "graph_start", {
 		assignments: Array.from({ length: assignment_count }, (_, index) => ({
 			assignment_id: `assignment_graph_${index + 1}`,

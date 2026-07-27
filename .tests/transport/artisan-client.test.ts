@@ -47,6 +47,9 @@ describe("ArtisanClient over MessagePorts", () => {
 			const output = await Effect.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
+						const thread = yield* harness.client.CreateThread({
+							title: "Transport seed",
+						});
 						const updates = yield* harness.client.SubscribeThreadList;
 						const updates_fiber = yield* updates.pipe(
 							Stream.take(2),
@@ -62,17 +65,17 @@ describe("ArtisanClient over MessagePorts", () => {
 							command_id: "command_with_spaces",
 							payload: {
 								title: "Transport title with spaces",
-								type: "thread.create",
+								type: "thread.rename",
 							},
-							thread_id: "thread_1",
+							thread_id: thread.thread_id,
 						});
 						const thread_lists = yield* Effect.all(
 							Array.from({ length: 12 }, () => harness.client.ListThreads),
 							{ concurrency: "unbounded" },
 						);
-						const work = yield* harness.client.GetThreadWork("thread_1");
+						const work = yield* harness.client.GetThreadWork(thread.thread_id);
 						const terminals = yield* harness.client.ListTerminals(
-							"thread_1",
+							thread.thread_id,
 							"workspace_1",
 						);
 						const events = yield* Fiber.join(event_fiber);
@@ -90,24 +93,36 @@ describe("ArtisanClient over MessagePorts", () => {
 				),
 			);
 
-			await wait_for(() => harness.protocol_snapshot().acknowledgements.length === 1);
+			await wait_for(() => harness.protocol_snapshot().acknowledgements.length >= 1);
 			await wait_for(() => harness.protocol_snapshot().pongs.length === 1);
 
 			expect(output.receipt).toEqual({
 				command_id: "command_with_spaces",
-				journal_sequence: 1,
+				journal_sequence: 2,
 				status: "accepted",
 			});
 			expect(output.events).toMatchObject([
 				{
-					journal_sequence: 1,
-					payload: { title: "Transport title with spaces", type: "thread.created" },
+					journal_sequence: 2,
+					payload: {
+						change: "rename",
+						thread: { title: "Transport title with spaces" },
+						type: "thread.metadata.updated",
+					},
 				},
 			]);
 			expect(output.updates).toMatchObject([
-				{ threads: [], type: "snapshot" },
 				{
-					thread: { thread_id: "thread_1", title: "Transport title with spaces" },
+					threads: [
+						{
+							thread_id: expect.any(String),
+							title: "Transport seed",
+						},
+					],
+					type: "snapshot",
+				},
+				{
+					thread: { title: "Transport title with spaces" },
 					type: "upsert",
 				},
 			]);
@@ -115,11 +130,11 @@ describe("ArtisanClient over MessagePorts", () => {
 			expect(output.thread_lists.every((threads) => threads.length === 1)).toBe(true);
 			expect(output.terminals).toEqual([]);
 			expect(output.work_is_none).toBe(true);
-			expect(harness.protocol_snapshot().acknowledgements[0]).toMatchObject({
+			expect(harness.protocol_snapshot().acknowledgements.at(-1)).toMatchObject({
 				kind: "ack",
 				payload: {
-					event_cursors: [{ sequence: 1, stream_id: "thread:thread_1" }],
-					journal_sequence: 1,
+					event_cursors: [expect.objectContaining({ sequence: 2 })],
+					journal_sequence: 2,
 				},
 			});
 		} finally {
@@ -569,7 +584,7 @@ describe("ArtisanClient over MessagePorts", () => {
 		const harness = await make_transport_test_harness();
 
 		try {
-			const updates = await Effect.runPromise(
+			const output = await Effect.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
 						const stream = yield* harness.client.SubscribeThreadList;
@@ -579,24 +594,25 @@ describe("ArtisanClient over MessagePorts", () => {
 							Effect.forkScoped,
 						);
 
-						yield* harness.client.Command({
-							command_id: "create_then_erase",
-							payload: { title: "Erase through projection", type: "thread.create" },
-							thread_id: "thread_erased",
+						const thread = yield* harness.client.CreateThread({
+							title: "Erase through projection",
 						});
-						yield* harness.erase_thread("thread_erased");
+						yield* harness.erase_thread(thread.thread_id);
 
-						return [...(yield* Fiber.join(updates_fiber))];
+						return {
+							thread_id: thread.thread_id,
+							updates: [...(yield* Fiber.join(updates_fiber))],
+						};
 					}),
 				),
 			);
 
-			expect(updates).toMatchObject([
+			expect(output.updates).toMatchObject([
 				{ type: "snapshot" },
-				{ thread: { thread_id: "thread_erased" }, type: "upsert" },
+				{ thread: { thread_id: output.thread_id }, type: "upsert" },
 				{
 					journal_sequence: 2,
-					thread_id: "thread_erased",
+					thread_id: output.thread_id,
 					type: "remove",
 				},
 			]);
@@ -784,11 +800,14 @@ describe("ArtisanClient over MessagePorts", () => {
 		});
 
 		try {
+			const thread = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Retry seed" }),
+			);
 			const receipt = await Effect.runPromise(
 				harness.client.Command({
 					command_id: "durable_command_1",
-					payload: { title: "Accepted before disconnect", type: "thread.create" },
-					thread_id: "thread_retry",
+					payload: { title: "Accepted before disconnect", type: "thread.rename" },
+					thread_id: thread.thread_id,
 				}),
 			);
 
@@ -798,7 +817,7 @@ describe("ArtisanClient over MessagePorts", () => {
 
 			expect(receipt).toEqual({
 				command_id: "durable_command_1",
-				journal_sequence: 1,
+				journal_sequence: 2,
 				status: "duplicate",
 			});
 			expect(harness.connector_snapshot().dropped_command_receipts).toBe(1);
@@ -823,12 +842,8 @@ describe("ArtisanClient over MessagePorts", () => {
 				harness.client.Events.pipe(Stream.take(1), Stream.runCollect),
 			);
 
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "cursor_command_1",
-					payload: { title: "First cursor", type: "thread.create" },
-					thread_id: "cursor_thread_1",
-				}),
+			const first_thread = await Effect.runPromise(
+				harness.client.CreateThread({ title: "First cursor" }),
 			);
 			await first_event;
 			await wait_for(() => harness.protocol_snapshot().acknowledgements.length === 1);
@@ -839,7 +854,7 @@ describe("ArtisanClient over MessagePorts", () => {
 			const reconnect_hello = harness.protocol_snapshot().hellos[1];
 
 			expect(reconnect_hello?.payload).toMatchObject({
-				event_cursors: [{ sequence: 1, stream_id: "thread:cursor_thread_1" }],
+				event_cursors: [{ sequence: 1, stream_id: `thread:${first_thread.thread_id}` }],
 				last_journal_sequence: 1,
 			});
 
@@ -847,17 +862,13 @@ describe("ArtisanClient over MessagePorts", () => {
 				harness.client.Events.pipe(Stream.take(1), Stream.runCollect),
 			);
 
-			await Effect.runPromise(
-				harness.client.Command({
-					command_id: "cursor_command_2",
-					payload: { title: "Second cursor", type: "thread.create" },
-					thread_id: "cursor_thread_2",
-				}),
+			const second_thread = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Second cursor" }),
 			);
 			const second = await second_event;
 
 			expect([...second]).toMatchObject([
-				{ journal_sequence: 2, thread_id: "cursor_thread_2" },
+				{ journal_sequence: 2, thread_id: second_thread.thread_id },
 			]);
 			await wait_for(() => harness.protocol_snapshot().acknowledgements.length === 2);
 
@@ -865,8 +876,8 @@ describe("ArtisanClient over MessagePorts", () => {
 
 			expect(cursors).toEqual({
 				event_cursors: [
-					{ sequence: 1, stream_id: "thread:cursor_thread_1" },
-					{ sequence: 1, stream_id: "thread:cursor_thread_2" },
+					{ sequence: 1, stream_id: `thread:${first_thread.thread_id}` },
+					{ sequence: 1, stream_id: `thread:${second_thread.thread_id}` },
 				],
 				last_journal_sequence: 2,
 			});
@@ -879,14 +890,17 @@ describe("ArtisanClient over MessagePorts", () => {
 		const harness = await make_transport_test_harness();
 
 		try {
+			const thread = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Concurrent seed" }),
+			);
 			const exits = await Effect.runPromise(
 				Effect.all(
 					Array.from({ length: 2 }, () =>
 						harness.client
 							.Command({
 								command_id: "concurrent_command_id",
-								payload: { title: "One durable command", type: "thread.create" },
-								thread_id: "thread_concurrent",
+								payload: { title: "One durable command", type: "thread.rename" },
+								thread_id: thread.thread_id,
 							})
 							.pipe(Effect.exit),
 					),
@@ -1042,11 +1056,7 @@ describe("ArtisanClient over MessagePorts", () => {
 							Effect.forkScoped,
 						);
 
-						yield* harness.client.Command({
-							command_id: "subscription_overflow_command",
-							payload: { title: "Overflow projection", type: "thread.create" },
-							thread_id: "subscription_overflow_thread",
-						});
+						yield* harness.client.CreateThread({ title: "Overflow projection" });
 
 						return {
 							errors: [...(yield* Fiber.join(error_fiber))],
@@ -1091,11 +1101,7 @@ describe("ArtisanClient over MessagePorts", () => {
 						);
 						yield* Effect.yieldNow;
 
-						yield* harness.client.Command({
-							command_id: "event_capacity_command_1",
-							payload: { title: "Queued event 1", type: "thread.create" },
-							thread_id: "event_capacity_thread_1",
-						});
+						yield* harness.client.CreateThread({ title: "Queued event 1" });
 						yield* Deferred.await(started).pipe(Effect.timeout("1 second"));
 
 						let attempted_events = 1;
@@ -1104,14 +1110,7 @@ describe("ArtisanClient over MessagePorts", () => {
 
 							attempted_events = index;
 							yield* harness.client
-								.Command({
-									command_id: `event_capacity_command_${index}`,
-									payload: {
-										title: `Queued event ${index}`,
-										type: "thread.create",
-									},
-									thread_id: `event_capacity_thread_${index}`,
-								})
+								.CreateThread({ title: `Queued event ${index}` })
 								.pipe(Effect.timeout("1 second"), Effect.exit);
 							yield* Effect.yieldNow;
 						}
@@ -1144,11 +1143,7 @@ describe("ArtisanClient over MessagePorts", () => {
 		try {
 			for (const index of [1, 2]) {
 				await Effect.runPromise(
-					harness.client.Command({
-						command_id: `unobserved_event_command_${index}`,
-						payload: { title: `Unobserved event ${index}`, type: "thread.create" },
-						thread_id: `unobserved_event_thread_${index}`,
-					}),
+					harness.client.CreateThread({ title: `Unobserved event ${index}` }),
 				);
 			}
 
@@ -1158,7 +1153,7 @@ describe("ArtisanClient over MessagePorts", () => {
 				last_journal_sequence: 2,
 			});
 
-			const next_event = await Effect.runPromise(
+			const observed = await Effect.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
 						const observer = yield* harness.client.Events.pipe(
@@ -1167,20 +1162,18 @@ describe("ArtisanClient over MessagePorts", () => {
 							Effect.forkScoped,
 						);
 						yield* Effect.yieldNow;
-						yield* harness.client.Command({
-							command_id: "unobserved_event_command_3",
-							payload: {
-								title: "Observed only after subscribing",
-								type: "thread.create",
-							},
-							thread_id: "unobserved_event_thread_3",
+						const thread = yield* harness.client.CreateThread({
+							title: "Observed only after subscribing",
 						});
-						return yield* Fiber.join(observer);
+						return {
+							events: yield* Fiber.join(observer),
+							thread_id: thread.thread_id,
+						};
 					}),
 				),
 			);
-			expect([...next_event]).toMatchObject([
-				{ journal_sequence: 3, thread_id: "unobserved_event_thread_3" },
+			expect([...observed.events]).toMatchObject([
+				{ journal_sequence: 3, thread_id: observed.thread_id },
 			]);
 		} finally {
 			await harness.dispose();

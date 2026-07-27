@@ -7,15 +7,20 @@
 	import MessageCircle from "@tabler/icons-svelte/icons/message-circle";
 	import Plus from "@tabler/icons-svelte/icons/plus";
 	import ShoppingBag from "@tabler/icons-svelte/icons/shopping-bag";
-	import { Effect, Stream } from "effect";
+	import { Effect } from "effect";
 	import type {
+		Project,
 		ProjectDirectoryId,
 		ProjectDirectoryList,
-		ProjectRef,
 		ThreadListItem,
 	} from "@artisan/protocol";
-	import { SnowflakeId } from "@artisan/protocol";
-	import { ArtisanClient, type ThreadListUpdate } from "@artisan/transport/client";
+	import {
+		ArtisanClient,
+		type ProjectCatalogUpdate,
+		type ThreadListUpdate,
+	} from "@artisan/transport/client";
+	import { BannerService } from "$lib/banner/service";
+	import { RunAuthoritativeSubscription } from "$lib/conversation/subscription";
 	import barekey_logo from "$lib/assets/barekey/logo-40.png";
 	import { Button } from "$lib/components/ui/button";
 	import * as Dialog from "$lib/components/ui/dialog";
@@ -24,19 +29,17 @@
 	import {
 		ApplyRootThreadListUpdate,
 		ProjectScopedThreadGroups,
-		ProjectsForNewThread,
 	} from "$lib/root/thread-navigation";
 	import * as Sidebar from "$lib/components/ui/sidebar";
 
 	const client = yield* ArtisanClient;
-	const snowflake_id = yield* SnowflakeId;
+	const banner = yield* BannerService;
 	let threads = $state.raw<ReadonlyArray<ThreadListItem>>([]);
-	let create_error = $state<string | undefined>();
+	let projects = $state.raw<ReadonlyArray<Project>>([]);
 	let creating = $state(false);
 	let project_picker_open = $state(false);
 	let project_directories = $state.raw<ProjectDirectoryList | undefined>();
 	let project_directory_history = $state.raw<ReadonlyArray<ProjectDirectoryId>>([]);
-	const projects = $derived(ProjectsForNewThread(threads));
 	const project_thread_groups = $derived(ProjectScopedThreadGroups(threads));
 
 	const ApplyThreadListUpdate = (update: ThreadListUpdate) =>
@@ -51,26 +54,28 @@
 			type: "snapshot" as const,
 		})),
 		Effect.flatMap(ApplyThreadListUpdate),
-		/** Initial sidebar discovery is optional; creation errors remain user-visible. */
-		Effect.catch(() => Effect.void),
 	);
 
-	const CreateThreadInProject = (project: ProjectRef) =>
+	const ApplyProjectCatalogUpdate = (update: ProjectCatalogUpdate) =>
+		Effect.sync(() => {
+			projects = update.snapshot.projects;
+		});
+
+	const RefreshProjects = client.ListProjects.pipe(
+		Effect.map((snapshot) => ({ snapshot, type: "snapshot" as const })),
+		Effect.flatMap(ApplyProjectCatalogUpdate),
+	);
+
+	const CreateThreadInProject = (project: Project) =>
 		Effect.gen(function* () {
-			const thread_id = yield* snowflake_id.Make("thread");
 			yield* Effect.sync(() => {
 				creating = true;
-				create_error = undefined;
 			});
-			yield* client.Command({
-				payload: { title: "New thread", type: "thread.create" },
-				thread_id,
+			const thread = yield* client.CreateThread({
+				project_id: project.project_id,
+				title: "New thread",
 			});
-			yield* client.Command({
-				payload: { project, type: "thread.project.assign" },
-				thread_id,
-			});
-			yield* Effect.promise(() => goto(`/threads/${thread_id}`));
+			yield* Effect.promise(() => goto(`/threads/${thread.thread_id}`));
 		}).pipe(
 			Effect.ensuring(
 				Effect.sync(() => {
@@ -78,9 +83,7 @@
 				}),
 			),
 			Effect.catch((error) =>
-				Effect.sync(() => {
-					create_error = error.message;
-				}),
+				banner.error("Could not create thread", { description: error.message }),
 			),
 		);
 
@@ -98,7 +101,6 @@
 		Effect.gen(function* () {
 			yield* Effect.sync(() => {
 				creating = true;
-				create_error = undefined;
 			});
 			const listing = yield* client.ListProjectDirectories(
 				parent_directory_id === undefined ? undefined : { parent_directory_id },
@@ -115,9 +117,7 @@
 				}),
 			),
 			Effect.catch((error) =>
-				Effect.sync(() => {
-					create_error = error.message;
-				}),
+				banner.error("Could not load project folders", { description: error.message }),
 			),
 		);
 
@@ -133,7 +133,6 @@
 		Effect.gen(function* () {
 			yield* Effect.sync(() => {
 				creating = true;
-				create_error = undefined;
 			});
 			const project = yield* client.SelectProjectDirectory({ directory_id });
 			yield* Effect.sync(() => {
@@ -147,58 +146,28 @@
 				}),
 			),
 			Effect.catch((error) =>
-				Effect.sync(() => {
-					create_error = error.message;
-				}),
+				banner.error("Could not select project folder", { description: error.message }),
 			),
 		);
 
 	const SelectProjectAndCreateThread = () =>
-		Effect.gen(function* () {
-			const desktop = globalThis.window?.artisanDesktop;
-			if (desktop?.selectProjectDirectory === undefined) {
-				yield* LoadProjectDirectories();
-				return;
-			}
-
-			yield* Effect.sync(() => {
-				creating = true;
-				create_error = undefined;
-			});
-			const project = yield* Effect.tryPromise({
-				try: () => desktop.selectProjectDirectory(),
-				catch: (cause) =>
-					new Error(
-						cause instanceof Error
-							? cause.message
-							: "Artisan could not open the selected folder.",
-					),
-			});
-
-			if (project !== undefined) {
-				yield* CreateThreadInProject(project);
-			}
-		}).pipe(
-			Effect.ensuring(
-				Effect.sync(() => {
-					creating = false;
-				}),
-			),
-			Effect.catch((error) =>
-				Effect.sync(() => {
-					create_error = error.message;
-				}),
-			),
-		);
+		LoadProjectDirectories();
 
 	yield* RefreshThreads;
+	yield* RefreshProjects;
 
-	yield* client.SubscribeThreadList.pipe(
-		Effect.flatMap((updates) => Stream.runForEach(updates, ApplyThreadListUpdate)),
-		/** The sidebar remains usable when a transient list subscription drops. */
-		Effect.catch(() => Effect.void),
+	yield* RunAuthoritativeSubscription(
+		client.SubscribeThreadList,
+		ApplyThreadListUpdate,
+		RefreshThreads,
+	).pipe(
 		Effect.forkScoped,
 	);
+	yield* RunAuthoritativeSubscription(
+		client.SubscribeProjects,
+		ApplyProjectCatalogUpdate,
+		RefreshProjects,
+	).pipe(Effect.forkScoped);
 </script>
 
 <Dialog.Root bind:open={project_picker_open}>
@@ -317,9 +286,6 @@
 						<span class="group-data-[collapsible=icon]:hidden">Marketplace</span>
 					</Button>
 				</div>
-				{#if create_error !== undefined}
-					<p class="px-1 text-xs text-destructive" role="alert">{create_error}</p>
-				{/if}
 			</Sidebar.GroupContent>
 		</Sidebar.Group>
 

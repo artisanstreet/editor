@@ -70,10 +70,12 @@ import type {
 	SurfaceUsageAggregateSnapshot,
 	StreamCursor,
 	TerminalSession,
+	ThreadCreateInput,
 	ThreadListItem,
 	ThreadRetentionPolicy,
 	ThreadWorkItem,
 	RawOrigin,
+	RuntimeCatalog,
 	ThreadTranscriptQuery,
 	ThreadTranscriptSnapshot,
 	ThreadSessionSnapshot,
@@ -112,10 +114,11 @@ import type {
 	WorkspaceConflictListQueryResult,
 } from "@artisan/protocol";
 import type {
+	Project,
+	ProjectCatalogSnapshot,
 	ProjectDirectoryList,
 	ProjectDirectoryListInput,
 	ProjectDirectorySelectInput,
-	ProjectRef,
 } from "@artisan/protocol";
 
 /** Identifies a typed frontend client failure. */
@@ -148,7 +151,7 @@ export interface ArtisanCommandInput {
 	readonly agent_id?: string;
 	readonly causation_id?: string;
 	readonly command_id?: string;
-	readonly payload: CommandPayload;
+	readonly payload: Exclude<CommandPayload, { readonly type: "thread.create" }>;
 	readonly run_id?: string;
 	readonly thread_id: string;
 }
@@ -524,6 +527,12 @@ export type ThreadListUpdate =
 			readonly type: "remove";
 	  };
 
+/** Delivers the complete Forge-owned project catalog and ordered replacements. */
+export type ProjectCatalogUpdate = {
+	readonly snapshot: ProjectCatalogSnapshot;
+	readonly type: "snapshot" | "replacement";
+};
+
 export type ThreadTranscriptUpdate =
 	| {
 			readonly type: "snapshot";
@@ -565,6 +574,16 @@ export interface ArtisanClientOptions {
 	readonly subscription_capacity?: number;
 }
 
+export type ArtisanConnectionState =
+	| { readonly phase: "connecting" }
+	| { readonly phase: "reconnecting" }
+	| { readonly phase: "ready" }
+	| {
+			readonly attempts: number;
+			readonly error: ArtisanClientError;
+			readonly phase: "exhausted";
+	  };
+
 /**
  * Provides typed frontend operations while hiding protocol envelopes and cursors.
  * MessagePorts are reliable while alive: commands retry only after reconnect,
@@ -577,9 +596,12 @@ export class ArtisanClient extends Context.Service<
 			input: ArtisanCommandInput,
 		) => Effect.Effect<ArtisanCommandReceipt, ArtisanClientError>;
 		readonly Cursors: Effect.Effect<ArtisanClientCursors>;
+		readonly ConnectionChanges: Stream.Stream<ArtisanConnectionState>;
+		readonly ConnectionState: Effect.Effect<ArtisanConnectionState>;
 		readonly Dispose: Effect.Effect<void>;
 		readonly Errors: Stream.Stream<ArtisanClientError>;
 		readonly Events: Stream.Stream<EventEnvelope, ArtisanClientError>;
+		readonly RetryConnection: Effect.Effect<void>;
 		readonly GetOrchestrationGraph: (
 			group_id: string,
 		) => Effect.Effect<OrchestrationGraph, ArtisanClientError>;
@@ -641,17 +663,25 @@ export class ArtisanClient extends Context.Service<
 		readonly GetThreadWork: (
 			thread_id: string,
 		) => Effect.Effect<Option.Option<ThreadWorkItem>, ArtisanClientError>;
+		readonly CreateThread: (
+			input: ThreadCreateInput,
+		) => Effect.Effect<ThreadListItem, ArtisanClientError>;
 		readonly ListTerminals: (
 			thread_id: string,
 			workspace_id: string,
 		) => Effect.Effect<ReadonlyArray<TerminalSession>, ArtisanClientError>;
 		readonly ListThreads: Effect.Effect<ReadonlyArray<ThreadListItem>, ArtisanClientError>;
+		readonly ListProjects: Effect.Effect<ProjectCatalogSnapshot, ArtisanClientError>;
+		readonly GetRuntimeCatalog: Effect.Effect<RuntimeCatalog, ArtisanClientError>;
+		readonly DetachProject: (
+			project_id: string,
+		) => Effect.Effect<ProjectCatalogSnapshot, ArtisanClientError>;
 		readonly ListProjectDirectories: (
 			input?: ProjectDirectoryListInput,
 		) => Effect.Effect<ProjectDirectoryList, ArtisanClientError>;
 		readonly SelectProjectDirectory: (
 			input: ProjectDirectorySelectInput,
-		) => Effect.Effect<ProjectRef, ArtisanClientError>;
+		) => Effect.Effect<Project, ArtisanClientError>;
 		readonly ListPreviewTargets: (
 			input?: PreviewTargetListQuery,
 		) => Effect.Effect<ReadonlyArray<PreviewTarget>, ArtisanClientError>;
@@ -697,6 +727,11 @@ export class ArtisanClient extends Context.Service<
 		) => Effect.Effect<WorkspaceFileReadQueryResult, ArtisanClientError>;
 		readonly SubscribeThreadList: Effect.Effect<
 			Stream.Stream<ThreadListUpdate, ArtisanClientError>,
+			ArtisanClientError,
+			Scope.Scope
+		>;
+		readonly SubscribeProjects: Effect.Effect<
+			Stream.Stream<ProjectCatalogUpdate, ArtisanClientError>,
 			ArtisanClientError,
 			Scope.Scope
 		>;

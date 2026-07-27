@@ -7,10 +7,10 @@ import { Effect, Layer, Stream } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type {
-	CommandEnvelope,
 	HelloEnvelope,
 	OutboundControlEnvelope,
 	SubscribeEnvelope,
+	ThreadCreateEnvelope,
 	ThreadListQueryEnvelope,
 } from "@artisan/protocol";
 import {
@@ -77,16 +77,15 @@ function make_hello(
 	};
 }
 
-function make_create(message_id: string, thread_id: string, title: string): CommandEnvelope {
+function make_create(message_id: string, title: string): ThreadCreateEnvelope {
 	return {
-		kind: "command",
+		kind: "thread.create.request",
 		message_id,
 		origin: "frontend",
-		payload: { title, type: "thread.create" },
+		payload: { title },
 		protocol_version: 1,
 		schema_version: 1,
 		sent_at: "2026-07-10T18:00:00.000Z",
-		thread_id,
 	};
 }
 
@@ -164,14 +163,25 @@ describe("thread erasure replay", () => {
 						yield* live.Receive(make_subscribe("live_threads"));
 						yield* take_outbound(live, 2);
 
-						yield* live.Receive(
-							make_create("create_erased", "thread_erased", "Secret erased title"),
-						);
+						yield* live.Receive(make_create("create_erased", "Secret erased title"));
 						const created_erased = yield* take_outbound(live, 3);
-						yield* live.Receive(
-							make_create("create_kept", "thread_kept", "Surviving thread"),
+						const erased_create_result = created_erased.find(
+							(envelope) => envelope.kind === "thread.create.result",
 						);
+						if (erased_create_result?.kind !== "thread.create.result") {
+							return yield* Effect.die("Forge did not return the erased thread");
+						}
+						const erased_thread_id = erased_create_result.payload.thread_id;
+
+						yield* live.Receive(make_create("create_kept", "Surviving thread"));
 						const created_kept = yield* take_outbound(live, 3);
+						const kept_create_result = created_kept.find(
+							(envelope) => envelope.kind === "thread.create.result",
+						);
+						if (kept_create_result?.kind !== "thread.create.result") {
+							return yield* Effect.die("Forge did not return the retained thread");
+						}
+						const kept_thread_id = kept_create_result.payload.thread_id;
 
 						now.value = "2026-07-10T18:01:00.000Z";
 						yield* journal.AppendEvent({
@@ -190,7 +200,7 @@ describe("thread erasure replay", () => {
 								reference: "secret_raw_reference",
 							},
 							run_id: "secret_run",
-							thread_id: "thread_erased",
+							thread_id: erased_thread_id,
 						});
 						const erased_message = yield* take_outbound(live, 2);
 
@@ -204,7 +214,7 @@ describe("thread erasure replay", () => {
 								working_directory: "C:/workspace/kept",
 							},
 							run_id: "kept_run",
-							thread_id: "thread_kept",
+							thread_id: kept_thread_id,
 						});
 						const kept_run = yield* take_outbound(live, 2);
 
@@ -232,7 +242,7 @@ describe("thread erasure replay", () => {
 								reference: "secret_artifact_reference",
 							},
 							run_id: "secret_artifact_run",
-							thread_id: "thread_erased",
+							thread_id: erased_thread_id,
 						});
 						const erased_artifact = yield* take_outbound(live, 2);
 						const content_identity = JSON.stringify({
@@ -254,7 +264,7 @@ describe("thread erasure replay", () => {
 							result_identity_json: content_identity,
 							run_id: "secret_workspace_run",
 							sent_at: now.value,
-							thread_id: "thread_erased",
+							thread_id: erased_thread_id,
 							updated_at: now.value,
 							workspace_id: "secret_workspace",
 						});
@@ -270,7 +280,7 @@ describe("thread erasure replay", () => {
 							run_id: "secret_workspace_run",
 							scope_kind: null,
 							scope_value: null,
-							thread_id: "thread_erased",
+							thread_id: erased_thread_id,
 							working_directory: "C:/workspace/erased",
 							workspace_id: "secret_workspace",
 						});
@@ -285,7 +295,7 @@ describe("thread erasure replay", () => {
 							rollback_state: "available",
 							run_id: "secret_workspace_run",
 							source_command_id: "secret_workspace_command",
-							thread_id: "thread_erased",
+							thread_id: erased_thread_id,
 							updated_at: now.value,
 							version: 1,
 							workspace_id: "secret_workspace",
@@ -293,7 +303,7 @@ describe("thread erasure replay", () => {
 						yield* database.client.insert(LegacyWorkspaceChangeProjections).values({
 							change_id: "secret_workspace_change",
 							source_command_id: "secret_workspace_command",
-							thread_id: "thread_erased",
+							thread_id: erased_thread_id,
 						});
 						yield* database.client.insert(WorkspaceChangeSnapshots).values({
 							byte_count: 22,
@@ -302,13 +312,13 @@ describe("thread erasure replay", () => {
 							content_hash: "c".repeat(64),
 							created_at: now.value,
 							state: "available",
-							thread_id: "thread_erased",
+							thread_id: erased_thread_id,
 							updated_at: now.value,
 						});
 
 						yield* database.client.insert(ThreadErasureClaims).values({
 							claimed_at: "2026-07-10T18:04:00.000Z",
-							thread_id: "thread_erased",
+							thread_id: erased_thread_id,
 						});
 						const erased = yield* erasure.ResumeClaimed("2026-07-10T18:04:00.000Z");
 						const rebuild = yield* ProjectionRebuildService;
@@ -330,7 +340,7 @@ describe("thread erasure replay", () => {
 								type: "thread.message_queued",
 								working_directory: "C:/workspace/kept",
 							},
-							thread_id: "thread_kept",
+							thread_id: kept_thread_id,
 						});
 						const kept_later = yield* take_outbound(live, 2);
 						yield* live.Close;
@@ -340,8 +350,8 @@ describe("thread erasure replay", () => {
 						yield* reconnect.Receive(
 							make_hello("hello_reconnect", 3, [
 								{ sequence: 1, stream_id: "settings:guidance" },
-								{ sequence: 1, stream_id: "thread:thread_erased" },
-								{ sequence: 1, stream_id: "thread:thread_kept" },
+								{ sequence: 1, stream_id: `thread:${erased_thread_id}` },
+								{ sequence: 1, stream_id: `thread:${kept_thread_id}` },
 							]),
 						);
 						const reconnect_replay = yield* take_through_replay_complete(reconnect);
@@ -355,6 +365,7 @@ describe("thread erasure replay", () => {
 							created_kept,
 							current_cursors: yield* journal.ReadCurrentCursors(),
 							erased,
+							erased_thread_id,
 							erased_artifact,
 							erased_delivery,
 							erased_message,
@@ -366,6 +377,7 @@ describe("thread erasure replay", () => {
 								.select()
 								.from(LegacyWorkspaceChangeProjections),
 							kept_later,
+							kept_thread_id,
 							kept_run,
 							reconnect_replay,
 							repeated,
@@ -408,15 +420,15 @@ describe("thread erasure replay", () => {
 			);
 			const replay_events = event_envelopes(result.reconnect_replay);
 			const erased_stream = result.full_replay.filter(
-				(event) => event.thread_id === "thread_erased",
+				(event) => event.thread_id === result.erased_thread_id,
 			);
 			const kept_stream = result.full_replay.filter(
-				(event) => event.thread_id === "thread_kept",
+				(event) => event.thread_id === result.kept_thread_id,
 			);
 			const serialized_replay = JSON.stringify(result.full_replay);
 			const serialized_reconnect_replay = JSON.stringify(result.reconnect_replay);
 
-			expect(result.erased).toEqual(["thread_erased"]);
+			expect(result.erased).toEqual([result.erased_thread_id]);
 			expect(result.repeated).toEqual([]);
 			expect(result.rebuilt.equivalent).toBe(true);
 			expect(result.after_repeat).toMatchObject([{ kind: "thread.list.query.result" }]);
@@ -427,7 +439,7 @@ describe("thread erasure replay", () => {
 				{
 					journal_sequence: 7,
 					kind: "thread.list.remove",
-					payload: { thread_id: "thread_erased" },
+					payload: { thread_id: result.erased_thread_id },
 					sequence: 6,
 				},
 			]);
@@ -481,12 +493,12 @@ describe("thread erasure replay", () => {
 			expect(replay_events.map((event) => event.journal_sequence)).toEqual([4, 5, 6, 7, 8]);
 			expect(
 				replay_events
-					.filter((event) => event.thread_id === "thread_erased")
+					.filter((event) => event.thread_id === result.erased_thread_id)
 					.map((event) => event.sequence),
 			).toEqual([2, 3, 4]);
 			expect(
 				replay_events
-					.filter((event) => event.thread_id === "thread_kept")
+					.filter((event) => event.thread_id === result.kept_thread_id)
 					.map((event) => event.sequence),
 			).toEqual([2, 3]);
 			expect(result.reconnect_replay.at(-1)).toMatchObject({
@@ -494,8 +506,8 @@ describe("thread erasure replay", () => {
 				payload: {
 					current_event_cursors: [
 						{ sequence: 1, stream_id: "settings:guidance" },
-						{ sequence: 4, stream_id: "thread:thread_erased" },
-						{ sequence: 3, stream_id: "thread:thread_kept" },
+						{ sequence: 4, stream_id: `thread:${result.erased_thread_id}` },
+						{ sequence: 3, stream_id: `thread:${result.kept_thread_id}` },
 					],
 					journal_sequence: 8,
 				},
@@ -503,26 +515,30 @@ describe("thread erasure replay", () => {
 
 			expect(result.current_cursors).toEqual([
 				{ sequence: 1, stream_id: "settings:guidance" },
-				{ sequence: 4, stream_id: "thread:thread_erased" },
-				{ sequence: 3, stream_id: "thread:thread_kept" },
+				{ sequence: 4, stream_id: `thread:${result.erased_thread_id}` },
+				{ sequence: 3, stream_id: `thread:${result.kept_thread_id}` },
 			]);
 			expect(result.streams).toEqual([
 				{ last_sequence: 1, stream_id: "settings:guidance" },
-				{ last_sequence: 4, stream_id: "thread:thread_erased" },
-				{ last_sequence: 3, stream_id: "thread:thread_kept" },
+				{ last_sequence: 4, stream_id: `thread:${result.erased_thread_id}` },
+				{ last_sequence: 3, stream_id: `thread:${result.kept_thread_id}` },
 			]);
 			expect(result.thread_snapshot.threads).toMatchObject([
-				{ thread_id: "thread_kept", title: "Surviving thread" },
+				{ thread_id: result.kept_thread_id, title: "Surviving thread" },
 			]);
 			expect(result.fresh_subscription[1]).toMatchObject({
 				kind: "thread.list.snapshot",
-				payload: { threads: [{ thread_id: "thread_kept" }] },
+				payload: { threads: [{ thread_id: result.kept_thread_id }] },
 			});
 			expect(
-				result.journal_commands.filter((command) => command.thread_id === "thread_erased"),
+				result.journal_commands.filter(
+					(command) => command.thread_id === result.erased_thread_id,
+				),
 			).toEqual([]);
 			expect(
-				result.journal_events.filter((event) => event.thread_id === "thread_erased"),
+				result.journal_events.filter(
+					(event) => event.thread_id === result.erased_thread_id,
+				),
 			).toHaveLength(4);
 			expect(result.workspace_change_operations).toEqual([]);
 			expect(result.workspace_changes).toEqual([]);

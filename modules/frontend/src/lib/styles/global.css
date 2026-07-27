@@ -28,6 +28,10 @@
 	--accent: oklch(0.967 0.001 286.375);
 	--accent-foreground: oklch(0.21 0.006 285.885);
 	--destructive: oklch(0.577 0.245 27.325);
+	--banner-info: oklch(0.623 0.214 259.815);
+	--banner-error: oklch(0.577 0.245 27.325);
+	--banner-warning: oklch(0.681 0.162 75.834);
+	--banner-success: oklch(0.527 0.154 150.069);
 	--border: oklch(0.92 0.004 286.32);
 	--input: oklch(0.92 0.004 286.32);
 	--ring: oklch(0.705 0.015 286.067);
@@ -129,6 +133,10 @@
 	--accent: oklch(0.274 0.006 286.033);
 	--accent-foreground: oklch(0.985 0 0);
 	--destructive: oklch(0.704 0.191 22.216);
+	--banner-info: oklch(0.707 0.165 254.624);
+	--banner-error: oklch(0.704 0.191 22.216);
+	--banner-warning: oklch(0.795 0.184 86.047);
+	--banner-success: oklch(0.723 0.219 149.579);
 	--border: oklch(1 0 0 / 10%);
 	--input: oklch(1 0 0 / 15%);
 	--ring: oklch(0.552 0.016 285.938);
@@ -252,6 +260,42 @@
 		0 1px 6px -4px color-mix(in oklab, var(--card-color) 35%, #000);
 }
 
+@utility card-info {
+	--card-color: oklch(70.7% 0.165 254.624);
+	box-shadow:
+		0 -0.5px color-mix(in oklab, var(--card-color) 18%, transparent),
+		0 4px 8px rgba(0, 0, 0, 0.06),
+		0 0 0 0.5px color-mix(in oklab, var(--card-color) 20%, transparent),
+		0 1px 6px -4px #000;
+}
+
+@utility card-error {
+	--card-color: oklch(70.4% 0.191 22.216);
+	box-shadow:
+		0 -0.5px color-mix(in oklab, var(--card-color) 18%, transparent),
+		0 4px 8px rgba(0, 0, 0, 0.06),
+		0 0 0 0.5px color-mix(in oklab, var(--card-color) 20%, transparent),
+		0 1px 6px -4px #000;
+}
+
+@utility card-warning {
+	--card-color: oklch(82.8% 0.189 84.429);
+	box-shadow:
+		0 -0.5px color-mix(in oklab, var(--card-color) 18%, transparent),
+		0 4px 8px rgba(0, 0, 0, 0.06),
+		0 0 0 0.5px color-mix(in oklab, var(--card-color) 20%, transparent),
+		0 1px 6px -4px #000;
+}
+
+@utility card-success {
+	--card-color: oklch(79.2% 0.209 151.711);
+	box-shadow:
+		0 -0.5px color-mix(in oklab, var(--card-color) 18%, transparent),
+		0 4px 8px rgba(0, 0, 0, 0.06),
+		0 0 0 0.5px color-mix(in oklab, var(--card-color) 20%, transparent),
+		0 1px 6px -4px #000;
+}
+
 @utility card-lg {
 	box-shadow:
 		0 -0.5px rgba(255, 255, 255, 0.12),
@@ -326,4 +370,124 @@
 		@apply font-sans;
 		font-synthesis-weight: none;
 	}
+}
+
+[data-sonner-toaster] {
+	--width: min(calc(100vw - 2rem), 24rem);
+}
+
+@utility banner {
+	--banner-tone: var(--foreground);
+	--banner-surface: var(--surface-100);
+	--banner-surface-from: var(--surface-125);
+	--banner-surface-to: var(--surface-75);
+	position: relative;
+	isolation: isolate;
+	gap: 0.125rem;
+	padding: 1rem 1.5rem;
+	overflow: hidden;
+	border-radius: var(--radius-lg);
+	background-color: var(--banner-surface);
+	background-image: linear-gradient(
+		to bottom,
+		var(--banner-surface-from),
+		var(--banner-surface-to)
+	);
+	color: var(--banner-tone);
+
+	&::before {
+		position: absolute;
+		z-index: 0;
+		inset: 0;
+		background-image:
+			linear-gradient(
+				to right,
+				color-mix(in oklch, var(--banner-tone) 3%, transparent) 1px,
+				transparent 1px
+			),
+			linear-gradient(
+				to bottom,
+				color-mix(in oklch, var(--banner-tone) 3%, transparent) 1px,
+				transparent 1px
+			);
+		background-size: 14px 24px;
+		content: "";
+		mask-image: radial-gradient(ellipse 80% 50% at 50% 0%, #000 70%, transparent 110%);
+		pointer-events: none;
+	}
+
+	& > * {
+		position: relative;
+		z-index: 1;
+	}
+
+	& > span {
+		color: var(--banner-tone);
+		font-size: 0.8125rem;
+		font-weight: 550;
+		line-height: 1.125rem;
+	}
+
+	& > p {
+		color: color-mix(in oklch, var(--foreground) 66%, var(--background));
+		font-size: 0.75rem;
+		line-height: 1rem;
+	}
+}
+
+.dark .banner {
+	--banner-surface: var(--surface-925);
+	--banner-surface-from: var(--surface-900);
+	--banner-surface-to: var(--surface-950);
+}
+
+@utility banner-info {
+	--banner-tone: oklch(70.7% 0.165 254.624);
+}
+
+@utility banner-error {
+	--banner-tone: oklch(70.4% 0.191 22.216);
+}
+
+@utility banner-warning {
+	--banner-tone: oklch(82.8% 0.189 84.429);
+}
+
+@utility banner-success {
+	--banner-tone: oklch(79.2% 0.209 151.711);
+}
+
+.banner-actions {
+	display: flex;
+	align-items: center;
+	gap: 0.5rem;
+	padding-top: 0.5rem;
+}
+
+.banner-action {
+	display: inline-flex;
+	height: 1.75rem;
+	align-items: center;
+	gap: 0.375rem;
+	padding-inline: 0.625rem;
+	border-radius: var(--radius-md);
+	background: color-mix(in oklch, var(--banner-tone) 10%, transparent);
+	color: inherit;
+	font-size: 0.75rem;
+	font-weight: 550;
+	transition: background var(--duration-quick) var(--ease-in-out);
+}
+
+.banner-action:hover {
+	background: color-mix(in oklch, var(--banner-tone) 16%, transparent);
+}
+
+.banner-action:focus-visible {
+	outline: 2px solid color-mix(in oklch, var(--banner-tone) 42%, transparent);
+	outline-offset: 2px;
+}
+
+.banner-action > svg {
+	width: 0.875rem;
+	height: 0.875rem;
 }

@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import { Effect, Exit, Scope, Stream } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { CommandEnvelope, HelloEnvelope } from "@artisan/protocol";
+import type { HelloEnvelope } from "@artisan/protocol";
+import type { AuthoritativeCommandEnvelope } from "../../modules/backend/src/persistence/orchestration/message-command";
 import type {
 	Engine,
 	EngineCommand,
@@ -17,8 +18,8 @@ import type {
 import {
 	AgentOrchestrator,
 	make_backend_runtime,
+	ProtocolRouter,
 	ProtocolServer,
-	type ProtocolConnection,
 } from "@artisan/backend";
 import { ConversationReadModel } from "../../modules/backend/src/conversation";
 
@@ -143,7 +144,10 @@ function make_hello(): HelloEnvelope {
 	};
 }
 
-function make_command(message_id: string, payload: CommandEnvelope["payload"]): CommandEnvelope {
+function make_command(
+	message_id: string,
+	payload: AuthoritativeCommandEnvelope["payload"],
+): AuthoritativeCommandEnvelope {
 	return {
 		kind: "command",
 		message_id,
@@ -170,32 +174,28 @@ async function open_connection(runtime: ReturnType<typeof make_backend_runtime>)
 
 	return runtime.runPromise(
 		Effect.gen(function* () {
+			const orchestrator = yield* AgentOrchestrator;
+			const router = yield* ProtocolRouter;
 			const server = yield* ProtocolServer;
 			const connection = yield* server.Open.pipe(Scope.provide(connection_scope));
 
 			yield* connection.Receive(make_hello());
 			yield* connection.Outbound.pipe(Stream.take(2), Stream.runDrain);
-			yield* connection.Receive(
+			yield* router.Route(
 				make_command("create_thread", {
 					title: "Lifecycle",
 					type: "thread.create",
 				}),
 			);
-			yield* connection.Outbound.pipe(Stream.take(2), Stream.runDrain);
 
-			return connection;
+			return {
+				...connection,
+				Receive: (envelope: AuthoritativeCommandEnvelope | HelloEnvelope) =>
+					envelope.kind === "command" && envelope.payload.type === "thread.send_message"
+						? orchestrator.Handle(envelope)
+						: connection.Receive(envelope),
+			};
 		}),
-	);
-}
-
-function wait_for_receipt(connection: ProtocolConnection, correlation_id: string) {
-	return connection.Outbound.pipe(
-		Stream.filter(
-			(envelope) =>
-				envelope.kind === "command.receipt" && envelope.correlation_id === correlation_id,
-		),
-		Stream.take(1),
-		Stream.runCollect,
 	);
 }
 
@@ -226,22 +226,18 @@ describe("agent orchestrator lifecycle supervision", () => {
 			const connection = await open_connection(runtime);
 			const started_at = Date.now();
 			const receipt = runtime.runPromise(
-				Effect.gen(function* () {
-					yield* connection.Receive(
-						make_command("slow_open", {
-							engine_id: "instrumented",
-							text: "start",
-							type: "thread.send_message",
-							working_directory: "C:/work",
-						}),
-					);
-
-					return yield* wait_for_receipt(connection, "slow_open");
-				}),
+				connection.Receive(
+					make_command("slow_open", {
+						engine_id: "instrumented",
+						text: "start",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
 			);
 
 			expect(Date.now() - started_at).toBeLessThan(80);
-			expect((await receipt)[0]).toMatchObject({ payload: { status: "accepted" } });
+			expect(await receipt).toMatchObject({ status: "accepted" });
 		} finally {
 			await runtime.dispose();
 		}

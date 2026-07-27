@@ -1,6 +1,5 @@
 <script lang="ts" effect>
 	import { onDestroy, untrack } from "svelte";
-	import { dev } from "$app/environment";
 	import type {
 		ImageAttachmentReference,
 		ThreadListItem,
@@ -16,7 +15,6 @@
 		type ConversationViewState,
 	} from "$lib/conversation/store";
 	import { RunConversationSubscription } from "$lib/conversation/subscription";
-	import { MakeMockConversation } from "$lib/conversation/mock";
 	import {
 		BuildThreadMessageCommand,
 		SubmitDurableCommand,
@@ -54,21 +52,16 @@
 		frontend_scope,
 	);
 
-	const is_fixture = dev && thread_id === "glass-composer";
 	let session = $state.raw<ThreadSessionSnapshot | undefined>(
-		is_fixture ? undefined : yield* client.GetThreadSession(thread_id),
+		yield* client.GetThreadSession(thread_id),
 	);
 	let thread = $state.raw<ThreadListItem | undefined>(
-		is_fixture
-			? undefined
-			: (yield* client.ListThreads).find((candidate) => candidate.thread_id === thread_id),
+		(yield* client.ListThreads).find((candidate) => candidate.thread_id === thread_id),
 	);
 	let work = $state.raw<ThreadWorkItem | undefined>(
-		is_fixture ? undefined : Option.getOrUndefined(yield* client.GetThreadWork(thread_id)),
+		Option.getOrUndefined(yield* client.GetThreadWork(thread_id)),
 	);
-	const initial_snapshot = is_fixture
-		? MakeMockConversation(thread_id)
-		: yield* client.GetConversation({ thread_id });
+	const initial_snapshot = yield* client.GetConversation({ thread_id });
 	if (initial_snapshot.thread_id !== thread_id) {
 		yield* Effect.fail(
 			new ThreadInteractionError({
@@ -95,7 +88,6 @@
 
 	const RequestImageAttachment = (attachment: ImageAttachmentReference) => {
 		if (
-			is_fixture ||
 			image_sources.has(attachment.id) ||
 			requested_image_ids.has(attachment.id)
 		)
@@ -175,7 +167,6 @@
 	});
 
 	const RefreshInteractionContext = Effect.gen(function* () {
-		if (is_fixture) return;
 		const [next_session, threads, next_work] = yield* Effect.all([
 			client.GetThreadSession(thread_id),
 			client.ListThreads,
@@ -188,13 +179,6 @@
 
 	const SendMessage = (submission: ComposerSubmission) =>
 		Effect.gen(function* () {
-			if (is_fixture) {
-				return yield* Effect.fail(
-					new ThreadInteractionError({
-						message: "The development fixture does not send messages to Codex.",
-					}),
-				);
-			}
 			if (session === undefined) {
 				return yield* Effect.fail(
 					new ThreadInteractionError({ message: "Thread session context is still loading." }),
@@ -222,7 +206,6 @@
 
 	const UpdateSessionPolicy = (policy: ThreadSessionPolicy) =>
 		Effect.gen(function* () {
-			if (is_fixture) return;
 			yield* client.UpdateThreadSessionPolicy({ policy, thread_id });
 			yield* RefreshInteractionContext;
 		});
@@ -297,22 +280,20 @@
 					}
 				});
 
-	if (!is_fixture) {
-		yield* Effect.forkIn(
-			RunConversationSubscription(
-				client.SubscribeConversation(thread_id),
-				ApplyUpdate,
-				Resync,
-			),
-			thread_scope,
-		);
-	}
+	yield* Effect.forkIn(
+		RunConversationSubscription(
+			client.SubscribeConversation(thread_id),
+			ApplyUpdate,
+			Resync,
+		),
+		thread_scope,
+	);
 </script>
 
 <ThreadWorkspace
 	{image_sources}
 	{snapshot}
-	disabled={is_fixture || session === undefined}
+	disabled={session === undefined}
 	oncancel={() => RunCommand({ type: "run.cancel" })}
 	onapproval={(approval_id, approved) =>
 		RunCommand({ approval_id, approved, type: "run.respond_approval" })}

@@ -22,6 +22,9 @@ export class ConversationProjectionError extends Error {
 	readonly _tag = "ConversationProjectionError";
 }
 
+/** Caps every replay query and its corresponding transport envelope. */
+export const conversation_patch_replay_batch_size = 64;
+
 export interface ConversationObservationContext {
 	readonly agent_id?: string;
 	readonly occurred_at: string;
@@ -187,6 +190,13 @@ const UpsertTurn = (
 			prior.lifecycle === "completed" ||
 			prior.lifecycle === "failed" ||
 			prior.lifecycle === "cancelled"
+		)
+			return prior;
+		/** Streaming observations do not change the stable active turn itself. */
+		if (
+			prior.lifecycle === lifecycle(turn.lifecycle) &&
+			prior.run_id === turn.run_id &&
+			prior.agent_id === turn.agent_id
 		)
 			return prior;
 		const entity = yield* Decode(
@@ -911,6 +921,7 @@ export const ReadConversationPatches = (
 	transaction: any,
 	thread_id: string,
 	after_sequence: number,
+	maximum = conversation_patch_replay_batch_size,
 ) =>
 	transaction
 		.select()
@@ -922,6 +933,7 @@ export const ReadConversationPatches = (
 			),
 		)
 		.orderBy(asc(ConversationPatches.sequence))
+		.limit(Math.min(Math.max(1, maximum), conversation_patch_replay_batch_size))
 		.pipe(
 			Effect.flatMap((rows: ReadonlyArray<any>) =>
 				Effect.forEach(rows, (row) =>

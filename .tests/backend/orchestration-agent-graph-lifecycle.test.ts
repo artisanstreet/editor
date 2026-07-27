@@ -20,6 +20,7 @@ import type {
 	OrchestrationGraph,
 	OrchestrationGraphQueryEnvelope,
 	SubscribeEnvelope,
+	ThreadCreateEnvelope,
 } from "@artisan/protocol";
 import {
 	AgentGraphOrchestrator,
@@ -220,12 +221,16 @@ function start_with_join(strategy: "first_success" | "require_all") {
 	});
 }
 
-function start_retry_group() {
-	return command("start_retry", {
-		assignments: [assignment("assignment_a", 2), assignment("assignment_b")],
-		group_id: "group_graph",
-		type: "orchestration.group.start",
-	});
+function start_retry_group(thread_id = "thread_graph") {
+	return command(
+		"start_retry",
+		{
+			assignments: [assignment("assignment_a", 2), assignment("assignment_b")],
+			group_id: "group_graph",
+			type: "orchestration.group.start",
+		},
+		thread_id,
+	);
 }
 
 function start_downstream_group(strategy: "review" | "synthesize") {
@@ -298,6 +303,18 @@ function hello(): HelloEnvelope {
 		message_id: "hello_graph",
 		origin: "frontend",
 		payload: { event_cursors: [], last_journal_sequence: 0, supported_protocol_versions: [1] },
+		schema_version: 1,
+		sent_at: "2026-07-10T08:00:00.000Z",
+	};
+}
+
+function thread_create_request(): ThreadCreateEnvelope {
+	return {
+		kind: "thread.create.request",
+		message_id: "create_graph_thread",
+		origin: "frontend",
+		payload: { title: "Agent graph" },
+		protocol_version: 1,
 		schema_version: 1,
 		sent_at: "2026-07-10T08:00:00.000Z",
 	};
@@ -666,14 +683,17 @@ describe("multi-agent graph lifecycle", () => {
 
 						yield* connection.Receive(hello());
 						yield* take(connection, 2);
-						yield* connection.Receive(
-							command("create_graph_thread", {
-								title: "Agent graph",
-								type: "thread.create",
-							}),
+						yield* connection.Receive(thread_create_request());
+						const created = yield* take(connection, 2);
+						const create_result = created.find(
+							(envelope) => envelope.kind === "thread.create.result",
 						);
-						yield* take(connection, 2);
-						yield* connection.Receive(start_retry_group());
+						if (create_result?.kind !== "thread.create.result") {
+							return yield* Effect.die("Forge did not return the graph thread");
+						}
+						const thread_id = create_result.payload.thread_id;
+
+						yield* connection.Receive(start_retry_group(thread_id));
 						yield* take(connection, 4);
 
 						const query: OrchestrationGraphQueryEnvelope = {
@@ -712,12 +732,16 @@ describe("multi-agent graph lifecycle", () => {
 								: undefined;
 
 						yield* connection.Receive(
-							command("rename_for_patch", {
-								agent_id: worker!.agent_id,
-								display_name: "Patchwork",
-								group_id: "group_graph",
-								type: "agent_instance.rename",
-							}),
+							command(
+								"rename_for_patch",
+								{
+									agent_id: worker!.agent_id,
+									display_name: "Patchwork",
+									group_id: "group_graph",
+									type: "agent_instance.rename",
+								},
+								thread_id,
+							),
 						);
 						const patched = yield* take(connection, 3);
 

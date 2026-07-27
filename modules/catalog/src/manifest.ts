@@ -1,6 +1,12 @@
 import { Schema } from "effect";
 
-import { ModelManifest, SpeedOption, ThinkingLevel, ThinkingOption } from "./schema";
+import {
+	ModelManifest,
+	PermissionOption,
+	SpeedOption,
+	ThinkingLevel,
+	ThinkingOption,
+} from "./schema";
 
 export const thinking_level_labels = Schema.decodeUnknownSync(
 	Schema.Record(ThinkingLevel, Schema.String),
@@ -16,29 +22,92 @@ const unavailable = Schema.decodeUnknownSync(
 	Schema.Struct({ availability: Schema.Literal("unavailable") }),
 )({ availability: "unavailable" });
 
-const standard_speed = Schema.decodeUnknownSync(SpeedOption)({
-	default: true,
-	description: "Standard service tier.",
-	id: "standard",
-	label: "Standard",
-	native_value: "standard",
-});
+const speed = (input: SpeedOption) => Schema.decodeUnknownSync(SpeedOption)(input);
 
-const fast_speed = Schema.decodeUnknownSync(SpeedOption)({
-	default: false,
-	description: "Prioritizes lower latency through the provider's fast service tier.",
-	id: "fast",
-	label: "Fast",
-	native_value: "fast",
-});
+const openai_standard_speed = (model: string, fast_available: boolean) =>
+	speed({
+		availability: "always",
+		consumption_basis: "standard",
+		consumption_multiplier: 1,
+		default: true,
+		description: `${model} uses 1x ChatGPT credits for 1x speed. Fast mode is ${
+			fast_available
+				? "available on supported ChatGPT sessions"
+				: "not available for this model"
+		}; API-key sessions use API token pricing instead.`,
+		id: "standard",
+		label: "Standard",
+		native_value: "standard",
+		source_url: "https://learn.chatgpt.com/docs/agent-configuration/speed",
+		speed_multiplier: 1,
+		verified_at: "2026-07-27",
+	});
 
-const native_thinking = (description: string) =>
-	Schema.decodeUnknownSync(
-		Schema.Struct({
-			availability: Schema.Literal("native"),
-			description: Schema.String,
-		}),
-	)({ availability: "native", description });
+const openai_fast_speed = (model: string, consumption_multiplier: number) =>
+	speed({
+		availability: "dynamic",
+		consumption_basis: "chatgpt-credits",
+		consumption_multiplier,
+		default: false,
+		description: `${model} uses ${consumption_multiplier}x ChatGPT credits for 1.5x speed. Fast mode is available when signed in with ChatGPT; API-key sessions use API token pricing instead.`,
+		id: "fast",
+		label: "Fast",
+		native_value: "fast",
+		source_url: "https://learn.chatgpt.com/docs/agent-configuration/speed",
+		speed_multiplier: 1.5,
+		verified_at: "2026-07-27",
+	});
+
+const anthropic_standard_speed = (model: string, fast_available: boolean) =>
+	speed({
+		availability: "always",
+		consumption_basis: "standard",
+		consumption_multiplier: 1,
+		default: true,
+		description: `${model} uses 1x token price for 1x speed. Fast mode is ${
+			fast_available
+				? "available with separately billed usage credits"
+				: "not available for this model"
+		}.`,
+		id: "standard",
+		label: "Standard",
+		native_value: "standard",
+		source_url: "https://code.claude.com/docs/en/fast-mode",
+		speed_multiplier: 1,
+		verified_at: "2026-07-27",
+	});
+
+const anthropic_fast_speed = (model: string) =>
+	speed({
+		availability: "dynamic",
+		consumption_basis: "usage-credit-price",
+		consumption_multiplier: 2,
+		default: false,
+		description: `${model} uses 2x token price for up to 2.5x speed. Fast mode is available for eligible sessions with usage credits and does not use included subscription limits.`,
+		id: "fast",
+		label: "Fast",
+		native_value: "fast",
+		source_url: "https://code.claude.com/docs/en/fast-mode",
+		speed_multiplier: 2.5,
+		verified_at: "2026-07-27",
+	});
+
+const xai_standard_speed = (model: string) =>
+	speed({
+		availability: "always",
+		consumption_basis: "standard",
+		consumption_multiplier: 1,
+		default: true,
+		description: `${model} uses 1x usage for 1x speed. Fast mode is not available in Grok Build.`,
+		id: "standard",
+		label: "Standard",
+		native_value: "standard",
+		source_url: "https://docs.x.ai/build/cli/reference",
+		speed_multiplier: 1,
+		verified_at: "2026-07-27",
+	});
+
+const permission = (input: PermissionOption) => Schema.decodeUnknownSync(PermissionOption)(input);
 
 const standard = (id: ThinkingOption["id"], native_value: string) =>
 	Schema.decodeUnknownSync(ThinkingOption)({ economics: "standard", id, native_value });
@@ -51,60 +120,166 @@ const exceptional = (id: ThinkingOption["id"], native_value: string) =>
 	});
 
 export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
-	revision: "2026-07-26.1",
+	revision: "2026-07-27.1",
 	providers: [
 		{ id: "openai", label: "OpenAI" },
 		{ id: "anthropic", label: "Anthropic" },
 		{ id: "xai", label: "xAI" },
-		{ id: "opencode", label: "OpenCode" },
-		{ id: "google", label: "Google" },
-		{ id: "zai", label: "Z.ai" },
-		{ id: "alibaba", label: "Alibaba" },
-		{ id: "moonshot", label: "Moonshot AI" },
-		{ id: "deepseek", label: "DeepSeek" },
 	],
 	harnesses: [
 		{
 			id: "codex",
 			gateways: [],
 			label: "Codex",
-			permission_modes: ["read-only", "workspace-write", "full-access"],
+			permissions: {
+				default: "supervised",
+				options: [
+					permission({
+						approval_behavior: "none",
+						availability: "always",
+						description:
+							"Inspect the workspace without writing files; Codex still applies its read-only sandbox.",
+						edit_scope: "none",
+						id: "restricted",
+						label: "Read only",
+						native_value: "read-only",
+						safety_boundary: "sandbox",
+					}),
+					permission({
+						approval_behavior: "prompts",
+						availability: "always",
+						description:
+							"Write inside the workspace while Codex decides when an action needs approval.",
+						edit_scope: "workspace",
+						id: "supervised",
+						label: "Supervised",
+						native_value: "workspace-write",
+						safety_boundary: "sandbox",
+					}),
+					permission({
+						approval_behavior: "none",
+						availability: "always",
+						description:
+							"Run without approval prompts while remaining inside Codex's workspace-write sandbox.",
+						edit_scope: "workspace",
+						id: "autonomous",
+						label: "Auto approve",
+						native_value: "workspace-write-no-prompts",
+						safety_boundary: "sandbox",
+					}),
+				],
+			},
 			workflow_modes: [],
 		},
 		{
 			id: "claude",
 			gateways: [],
 			label: "Claude Code",
-			permission_modes: ["default", "accept-edits", "plan", "bypass-permissions"],
+			permissions: {
+				default: "supervised",
+				options: [
+					permission({
+						approval_behavior: "prompts",
+						availability: "always",
+						description:
+							"Explore and propose a plan without editing source files until the plan is approved.",
+						edit_scope: "none",
+						id: "restricted",
+						label: "Plan only",
+						native_value: "plan",
+						safety_boundary: "plan",
+					}),
+					permission({
+						approval_behavior: "prompts",
+						availability: "always",
+						description:
+							"Auto-approve reads and ask before actions that require permission.",
+						edit_scope: "host",
+						id: "supervised",
+						label: "Supervised",
+						native_value: "default",
+						safety_boundary: "rules",
+					}),
+					permission({
+						approval_behavior: "prompts",
+						availability: "always",
+						description:
+							"Auto-approve in-scope edits and common filesystem operations; prompt for other commands.",
+						edit_scope: "host",
+						id: "trusted",
+						label: "Accept edits",
+						native_value: "acceptEdits",
+						safety_boundary: "rules",
+					}),
+					permission({
+						approval_behavior: "classifier",
+						availability: "dynamic",
+						description:
+							"Use Anthropic's classifier to run routine actions and block or escalate risky actions.",
+						edit_scope: "host",
+						id: "autonomous",
+						label: "Auto",
+						native_value: "auto",
+						safety_boundary: "rules",
+					}),
+					permission({
+						approval_behavior: "none",
+						availability: "dynamic",
+						description:
+							"Disable ordinary permission prompts and safety checks; administrator policy may forbid this mode.",
+						edit_scope: "host",
+						id: "unrestricted",
+						label: "Bypass permissions",
+						native_value: "bypassPermissions",
+						safety_boundary: "bypassed",
+					}),
+				],
+			},
 			workflow_modes: [],
 		},
 		{
 			id: "grok",
 			gateways: [],
 			label: "Grok Build",
-			permission_modes: ["runtime-managed"],
-			workflow_modes: [],
-		},
-		{
-			id: "opencode",
-			gateways: [
-				{ id: "zen", kind: "managed", label: "Zen" },
-				{ id: "go", kind: "managed", label: "Go" },
-				{ id: "black", kind: "managed", label: "Black" },
-				{ id: "alibaba", kind: "provider-direct", label: "Alibaba" },
-				{ id: "moonshot", kind: "provider-direct", label: "Moonshot AI" },
-				{ id: "deepseek", kind: "provider-direct", label: "DeepSeek" },
-			],
-			label: "OpenCode",
-			permission_modes: ["ask", "allow", "deny"],
+			permissions: {
+				default: "supervised",
+				options: [
+					permission({
+						approval_behavior: "prompts",
+						availability: "always",
+						description:
+							"Prompt for tool calls that are not already allowed by a rule.",
+						edit_scope: "host",
+						id: "supervised",
+						label: "Supervised",
+						native_value: "ask",
+						safety_boundary: "rules",
+					}),
+					permission({
+						approval_behavior: "classifier",
+						availability: "dynamic",
+						description:
+							"Use xAI's classifier to approve safe tools while dangerous actions may still prompt.",
+						edit_scope: "host",
+						id: "autonomous",
+						label: "Auto",
+						native_value: "auto",
+						safety_boundary: "rules",
+					}),
+					permission({
+						approval_behavior: "none",
+						availability: "always",
+						description:
+							"Auto-approve tool calls while deny rules and pre-tool hooks remain authoritative.",
+						edit_scope: "host",
+						id: "unrestricted",
+						label: "Always approve",
+						native_value: "always-approve",
+						safety_boundary: "rules",
+					}),
+				],
+			},
 			workflow_modes: ["plan", "build"],
-		},
-		{
-			id: "antigravity",
-			gateways: [],
-			label: "Antigravity",
-			permission_modes: [],
-			workflow_modes: [],
 		},
 	],
 	models: [
@@ -125,10 +300,12 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 						standard("medium", "medium"),
 						standard("high", "high"),
 						standard("xhigh", "xhigh"),
-						exceptional("max", "max"),
 					],
 				},
-				speed_options: [standard_speed, fast_speed],
+				speed_options: [
+					openai_standard_speed("GPT 5.6 Sol", true),
+					openai_fast_speed("GPT 5.6 Sol", 2.5),
+				],
 				image_input: true,
 				local_tools: true,
 				mcp: true,
@@ -152,10 +329,12 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 						standard("medium", "medium"),
 						standard("high", "high"),
 						standard("xhigh", "xhigh"),
-						exceptional("max", "max"),
 					],
 				},
-				speed_options: [standard_speed],
+				speed_options: [
+					openai_standard_speed("GPT 5.6 Terra", true),
+					openai_fast_speed("GPT 5.6 Terra", 2.5),
+				],
 				image_input: true,
 				local_tools: true,
 				mcp: true,
@@ -179,10 +358,12 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 						standard("medium", "medium"),
 						standard("high", "high"),
 						standard("xhigh", "xhigh"),
-						exceptional("max", "max"),
 					],
 				},
-				speed_options: [standard_speed],
+				speed_options: [
+					openai_standard_speed("GPT 5.6 Luna", true),
+					openai_fast_speed("GPT 5.6 Luna", 2.5),
+				],
 				image_input: true,
 				local_tools: true,
 				mcp: true,
@@ -208,7 +389,10 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 						standard("xhigh", "xhigh"),
 					],
 				},
-				speed_options: [standard_speed],
+				speed_options: [
+					openai_standard_speed("GPT 5.5", true),
+					openai_fast_speed("GPT 5.5", 2.5),
+				],
 				image_input: true,
 				local_tools: true,
 				mcp: true,
@@ -234,7 +418,10 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 						standard("xhigh", "xhigh"),
 					],
 				},
-				speed_options: [standard_speed],
+				speed_options: [
+					openai_standard_speed("GPT 5.4", true),
+					openai_fast_speed("GPT 5.4", 2),
+				],
 				image_input: true,
 				local_tools: true,
 				mcp: true,
@@ -260,7 +447,7 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 						standard("xhigh", "xhigh"),
 					],
 				},
-				speed_options: [standard_speed],
+				speed_options: [openai_standard_speed("GPT 5.4 Mini", false)],
 				image_input: true,
 				local_tools: true,
 				mcp: true,
@@ -286,7 +473,7 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 						standard("xhigh", "xhigh"),
 					],
 				},
-				speed_options: [standard_speed],
+				speed_options: [openai_standard_speed("GPT 5.3 Codex Spark", false)],
 				image_input: false,
 				local_tools: true,
 				mcp: true,
@@ -313,7 +500,7 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 						exceptional("max", "max"),
 					],
 				},
-				speed_options: [standard_speed],
+				speed_options: [anthropic_standard_speed("Claude Fable 5", false)],
 				image_input: true,
 				local_tools: true,
 				mcp: true,
@@ -340,7 +527,10 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 						exceptional("max", "max"),
 					],
 				},
-				speed_options: [standard_speed],
+				speed_options: [
+					anthropic_standard_speed("Claude Opus 5", true),
+					anthropic_fast_speed("Claude Opus 5"),
+				],
 				image_input: true,
 				local_tools: true,
 				mcp: true,
@@ -367,7 +557,7 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 						exceptional("max", "max"),
 					],
 				},
-				speed_options: [standard_speed],
+				speed_options: [anthropic_standard_speed("Claude Sonnet 5", false)],
 				image_input: true,
 				local_tools: true,
 				mcp: true,
@@ -384,7 +574,7 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 			status: "prototype",
 			capabilities: {
 				thinking: unavailable,
-				speed_options: [standard_speed],
+				speed_options: [anthropic_standard_speed("Claude Haiku 4.5", false)],
 				image_input: true,
 				local_tools: true,
 				mcp: true,
@@ -400,129 +590,18 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 			routing: { kind: "default" },
 			status: "prototype",
 			capabilities: {
-				thinking: native_thinking("Reported by the active ACP runtime when available."),
-				speed_options: [standard_speed],
+				thinking: {
+					availability: "supported",
+					default: "high",
+					options: [
+						standard("light", "low"),
+						standard("medium", "medium"),
+						standard("high", "high"),
+					],
+				},
+				speed_options: [xai_standard_speed("Grok 4.5")],
 				image_input: true,
 				local_tools: true,
-				mcp: false,
-				web_search: true,
-			},
-		},
-		{
-			id: "opencode-zen-sol",
-			name: "GPT 5.6 Sol",
-			native_model_id: "openai/gpt-5.6-sol",
-			harness: "opencode",
-			provider: "openai",
-			routing: { gateway_id: "zen", kind: "gateway" },
-			status: "prototype",
-			capabilities: {
-				thinking: native_thinking("Defined by the selected provider and model route."),
-				speed_options: [standard_speed],
-				image_input: false,
-				local_tools: true,
-				mcp: true,
-				web_search: false,
-			},
-		},
-		{
-			id: "opencode-go-sonnet",
-			name: "Claude Sonnet 4.6",
-			native_model_id: "anthropic/claude-sonnet-4-6",
-			harness: "opencode",
-			provider: "anthropic",
-			routing: { gateway_id: "go", kind: "gateway" },
-			status: "prototype",
-			capabilities: {
-				thinking: native_thinking("Defined by the selected provider and model route."),
-				speed_options: [standard_speed],
-				image_input: false,
-				local_tools: true,
-				mcp: true,
-				web_search: false,
-			},
-		},
-		{
-			id: "opencode-black-grok",
-			name: "Grok 4.5",
-			native_model_id: "xai/grok-4-5",
-			harness: "opencode",
-			provider: "xai",
-			routing: { gateway_id: "black", kind: "gateway" },
-			status: "prototype",
-			capabilities: {
-				thinking: native_thinking("Defined by the selected provider and model route."),
-				speed_options: [standard_speed],
-				image_input: false,
-				local_tools: true,
-				mcp: true,
-				web_search: false,
-			},
-		},
-		{
-			id: "opencode-qwen",
-			name: "Qwen Coder",
-			native_model_id: "qwen/qwen-coder",
-			harness: "opencode",
-			provider: "alibaba",
-			routing: { gateway_id: "alibaba", kind: "gateway" },
-			status: "prototype",
-			capabilities: {
-				thinking: native_thinking("Defined by the configured OpenCode provider route."),
-				speed_options: [standard_speed],
-				image_input: false,
-				local_tools: true,
-				mcp: true,
-				web_search: false,
-			},
-		},
-		{
-			id: "opencode-kimi",
-			name: "Kimi K3",
-			native_model_id: "moonshot/kimi-k3",
-			harness: "opencode",
-			provider: "moonshot",
-			routing: { gateway_id: "moonshot", kind: "gateway" },
-			status: "prototype",
-			capabilities: {
-				thinking: native_thinking("Defined by the configured OpenCode provider route."),
-				speed_options: [standard_speed],
-				image_input: false,
-				local_tools: true,
-				mcp: true,
-				web_search: false,
-			},
-		},
-		{
-			id: "opencode-deepseek",
-			name: "DeepSeek V4",
-			native_model_id: "deepseek/deepseek-v4",
-			harness: "opencode",
-			provider: "deepseek",
-			routing: { gateway_id: "deepseek", kind: "gateway" },
-			status: "prototype",
-			capabilities: {
-				thinking: native_thinking("Defined by the configured OpenCode provider route."),
-				speed_options: [standard_speed],
-				image_input: false,
-				local_tools: true,
-				mcp: true,
-				web_search: false,
-			},
-		},
-		{
-			id: "antigravity-pro",
-			name: "Gemini 3.1 Pro High",
-			native_model_id: "gemini-3.1-pro-high",
-			harness: "antigravity",
-			provider: "google",
-			routing: { kind: "default" },
-			status: "prototype",
-			capabilities: {
-				thinking: native_thinking("Pending an Antigravity adapter contract."),
-				speed_options: [standard_speed],
-				image_input: true,
-				local_tools: false,
 				mcp: false,
 				web_search: true,
 			},

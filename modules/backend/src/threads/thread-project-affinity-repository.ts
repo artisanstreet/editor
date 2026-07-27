@@ -28,6 +28,7 @@ import {
 	EventStreams,
 	JournalCommands,
 	JournalEvents,
+	Projects,
 	ThreadErasureClaims,
 	ThreadProjectAffinityEvidence,
 	Threads,
@@ -598,6 +599,26 @@ export const ThreadProjectAffinityRepositoryLive = Layer.effect(
 						let projection: ThreadListItem | undefined;
 
 						if (payload.type === "thread.project.assign") {
+							const [project_row] = yield* transaction
+								.select()
+								.from(Projects)
+								.where(eq(Projects.project_id, payload.project_id))
+								.limit(1);
+							if (!project_row) {
+								return yield* new JournalInvariantError({
+									message: `Project ${payload.project_id} is not attached to Forge`,
+								});
+							}
+							const project = yield* Schema.decodeUnknownEffect(ProjectRef)(
+								project_row,
+							).pipe(
+								Effect.mapError(
+									() =>
+										new JournalInvariantError({
+											message: `Project ${payload.project_id} is invalid`,
+										}),
+								),
+							);
 							const linked_projects = unique_projects(
 								[
 									...current.linked_projects,
@@ -606,14 +627,14 @@ export const ThreadProjectAffinityRepositoryLive = Layer.effect(
 										(score) => score.project,
 									),
 								],
-								payload.project,
+								project,
 							);
 
 							projection = yield* MakeProjection(
 								current,
 								{
 									linked_projects,
-									primary_project: payload.project,
+									primary_project: project,
 									project_affinity_scores: current.project_affinity_scores,
 									project_locked: true,
 								},

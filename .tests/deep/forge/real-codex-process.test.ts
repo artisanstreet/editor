@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -86,7 +86,6 @@ const StartForge = async (database_path: string, codex_home: string): Promise<Ru
 			ARTISAN_MIGRATIONS_PATH: resolve(".dist/forge/migrations"),
 			ARTISAN_NATIVE_RUNTIME: resolve(".dist/forge/native-runtime"),
 			ARTISAN_NODE_EXECUTABLE: resolve(".dist/forge/node.exe"),
-			ARTISAN_PROJECT_ROOTS: JSON.stringify([process.cwd()]),
 			ARTISAN_STATIC_FRONTEND_ROOT: resolve(".dist/forge/frontend"),
 			ARTISAN_WINDOWS_PROCESS_HOST: resolve(".dist/forge/windows-process-host.js"),
 			CODEX_HOME: codex_home,
@@ -160,25 +159,24 @@ const MakeClient = async (endpoint: string) => {
 	);
 };
 
-const CreateThread = (client: typeof ArtisanClient.Service, thread_id: string, title: string) =>
+const CreateThread = (client: typeof ArtisanClient.Service, title: string) =>
 	Effect.gen(function* () {
-		yield* client.Command({
-			command_id: `create:${thread_id}`,
-			payload: { title, type: "thread.create" },
-			thread_id,
+		const roots = yield* client.ListProjectDirectories();
+		const repository = roots.directories.find(
+			(directory) =>
+				directory.kind === "root" && directory.display_name === basename(process.cwd()),
+		);
+		if (repository === undefined) {
+			return yield* Effect.die("Forge did not expose the acceptance repository root");
+		}
+		const project = yield* client.SelectProjectDirectory({
+			directory_id: repository.directory_id,
 		});
-		yield* client.Command({
-			command_id: `project:${thread_id}`,
-			payload: {
-				project: {
-					display_name: "Artisan Editor",
-					project_id: "project_artisan_real_acceptance",
-					root_path: process.cwd(),
-				},
-				type: "thread.project.assign",
-			},
-			thread_id,
+		const created = yield* client.CreateThread({
+			project_id: project.project_id,
+			title,
 		});
+		return created.thread_id;
 	});
 
 const WaitForFinal = (client: typeof ArtisanClient.Service, thread_id: string, marker: string) =>
@@ -235,10 +233,8 @@ const RunPrompt = (
 				command_id: `prompt:${thread_id}`,
 				payload: {
 					engine_id: "codex",
-					mentioned_projects: [],
 					text: `Reply with exactly ${marker} and no other text. Do not call tools.`,
 					type: "thread.send_message",
-					working_directory: process.cwd(),
 				},
 				thread_id,
 			});
@@ -275,8 +271,8 @@ describe.runIf(process.env.ARTISAN_RUN_REAL_CODEX_E2E === "1")(
 					join(codex_home, "config.toml"),
 				);
 			}
-			const alpha_thread = `thread_alpha_${randomUUID()}`;
-			const beta_thread = `thread_beta_${randomUUID()}`;
+			let alpha_thread = "";
+			let beta_thread = "";
 			const alpha_marker = `ARTISAN_ALPHA_${randomUUID().replaceAll("-", "")}`;
 			const beta_marker = `ARTISAN_BETA_${randomUUID().replaceAll("-", "")}`;
 			const first = await StartForge(database_path, codex_home);
@@ -288,8 +284,8 @@ describe.runIf(process.env.ARTISAN_RUN_REAL_CODEX_E2E === "1")(
 			let beta: ConversationSnapshot;
 
 			try {
-				await runtime.runPromise(CreateThread(client, alpha_thread, "Alpha real Codex"));
-				await runtime.runPromise(CreateThread(client, beta_thread, "Beta real Codex"));
+				alpha_thread = await runtime.runPromise(CreateThread(client, "Alpha real Codex"));
+				beta_thread = await runtime.runPromise(CreateThread(client, "Beta real Codex"));
 				alpha = await runtime.runPromise(
 					RunPrompt(client, alpha_thread, alpha_marker, alpha_updates),
 				);

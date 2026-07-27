@@ -195,18 +195,12 @@ export const make_node_profile_store_layer = (home_override?: string) => {
 							file_system,
 							config.data_root,
 						).pipe(Effect.mapError(() => profile_error("invalid")));
-						const project_roots = yield* Effect.forEach(config.project_roots, (root) =>
-							CanonicalDirectory(file_system, root).pipe(
-								Effect.mapError(() => profile_error("invalid")),
-							),
-						);
 						const normalized = yield* Effect.try({
 							catch: () => profile_error("invalid"),
 							try: () =>
 								DecodeForgeProfileConfig({
 									...config,
 									data_root,
-									project_roots: [...new Set(project_roots)],
 								}),
 						});
 						yield* WriteAtomicPrivate(paths.config_path, normalized, permissions);
@@ -240,6 +234,23 @@ export const make_node_profile_store_layer = (home_override?: string) => {
 						const paths = yield* ExistingPaths(profile);
 						return yield* ReadRequired(paths.config_path, DecodeForgeProfileConfig);
 					}),
+				List: () =>
+					Effect.gen(function* () {
+						const profiles_directory = resolve(home, "profiles");
+						const exists = yield* file_system.exists(profiles_directory);
+						if (!exists) return [];
+						const names = yield* file_system.readDirectory(profiles_directory);
+						return names
+							.filter((name) => {
+								try {
+									DecodeProfile(name);
+									return true;
+								} catch {
+									return false;
+								}
+							})
+							.sort();
+					}).pipe(Effect.mapError(() => profile_error("invalid"))),
 				LoadSecrets: (profile) =>
 					Effect.gen(function* () {
 						const paths = yield* ExistingPaths(profile);

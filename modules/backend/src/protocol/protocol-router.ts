@@ -17,6 +17,7 @@ import type { TerminalSessionError } from "../terminal/terminal-sessions";
 import type { ThreadMetadataError } from "../threads/thread-metadata-repository";
 import type { ThreadProjectAffinityError } from "../threads/thread-project-affinity-repository";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import type { RuntimeCatalogPolicyError } from "../runtime/runtime-catalog";
 import { CommandRouter } from "./command-router";
 
 /**
@@ -40,6 +41,7 @@ const describe_journal_error = pipe(
 		| AgentGraphError
 		| JournalStoreError
 		| OrchestrationError
+		| RuntimeCatalogPolicyError
 		| TerminalSessionError
 		| ThreadMetadataError
 		| ThreadProjectAffinityError
@@ -75,10 +77,26 @@ const describe_journal_error = pipe(
 			message: `The requested ${error.resource} does not exist.`,
 			retryable: false,
 		}),
+		OrchestrationProjectAuthorityError: (error): ProtocolErrorDetail => ({
+			code:
+				error.reason === "thread_unassigned"
+					? "thread.project_required"
+					: "project.not_found",
+			message:
+				error.reason === "thread_unassigned"
+					? "Assign an attached project to this thread before sending a message."
+					: "The thread's assigned project is no longer attached to Forge.",
+			retryable: false,
+		}),
 		OrchestrationFailure: (): ProtocolErrorDetail => ({
 			code: "orchestration.unavailable",
 			message: "The command could not be durably orchestrated.",
 			retryable: true,
+		}),
+		RuntimeCatalogPolicyError: (error): ProtocolErrorDetail => ({
+			code: `thread.session_policy.${error.field}.unavailable`,
+			message: error.message,
+			retryable: false,
 		}),
 		TerminalCommandConflict: (): ProtocolErrorDetail => ({
 			code: "command.id_conflict",
@@ -174,6 +192,7 @@ export const ProtocolRouterLive = Layer.effect(
 				| AgentGraphError
 				| JournalStoreError
 				| OrchestrationError
+				| RuntimeCatalogPolicyError
 				| TerminalSessionError
 				| ThreadMetadataError
 				| ThreadProjectAffinityError,

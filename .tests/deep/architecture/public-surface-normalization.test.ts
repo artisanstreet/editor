@@ -41,7 +41,7 @@ const boundaries: ReadonlyArray<PackageBoundary> = [
 	{
 		name: "protocol",
 		entry: resolve(workspace_root, "modules/protocol/src/index.ts"),
-		allowed_artisan: new Set(),
+		allowed_artisan: new Set(["@artisan/catalog"]),
 		forbidden_external: new Set(["drizzle-orm"]),
 		forbid_node: true,
 	},

@@ -1,11 +1,12 @@
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { describe, expect, it } from "vitest";
-import { Effect, Layer, ManagedRuntime, Stream } from "effect";
+import { Effect, Layer, ManagedRuntime, Option, Stream } from "effect";
 
 import {
+	CliPlatform,
 	ForgeAutostart,
 	ForgeTaskName,
 	task_scheduler_arguments,
@@ -14,8 +15,18 @@ import { ForgeLifecycle } from "../../modules/cli/src/lifecycle";
 import { ForgeOperations, make_forge_operations_layer } from "../../modules/cli/src/operations";
 import { make_node_profile_store_layer } from "../../modules/cli/src/node-profile-store";
 import { ForgeProfileStore } from "../../modules/cli/src/profile";
+import { ForgeProtocolCommand } from "../../modules/cli/src/protocol-handler";
 
 const MakeRuntime = (home: string) => {
+	const platform = Layer.succeed(
+		CliPlatform,
+		CliPlatform.of({
+			cli_entry_path: Option.some("C:\\Artisan\\ae.js"),
+			executable_path: "C:\\Artisan\\node.exe",
+			home,
+			kind: "win32",
+		}),
+	);
 	const profiles = make_node_profile_store_layer(home);
 	const lifecycle = Layer.succeed(
 		ForgeLifecycle,
@@ -38,8 +49,9 @@ const MakeRuntime = (home: string) => {
 	return ManagedRuntime.make(
 		Layer.mergeAll(
 			profiles,
+			platform,
 			make_forge_operations_layer.pipe(
-				Layer.provide(Layer.mergeAll(profiles, lifecycle, autostart)),
+				Layer.provide(Layer.mergeAll(profiles, lifecycle, autostart, platform)),
 			),
 		),
 	);
@@ -58,7 +70,6 @@ describe("ae command operations", () => {
 					listen_host: "127.0.0.1",
 					listen_port: 0,
 					mode: "local",
-					project_roots: [home],
 					version: 1,
 				}),
 			);
@@ -100,7 +111,6 @@ describe("ae command operations", () => {
 					listen_host: "127.0.0.1",
 					listen_port: 0,
 					mode: "headless",
-					project_roots: [home],
 					version: 1,
 				}),
 			);
@@ -111,13 +121,59 @@ describe("ae command operations", () => {
 			expect(report.checks.map((check) => check.name)).toEqual([
 				"profile",
 				"config",
-				"roots",
 				"artifacts",
 				"codex",
 				"autostart",
 				"live",
 			]);
 			expect(JSON.stringify(report)).not.toContain(secret.auth_token);
+		} finally {
+			await runtime.dispose();
+			await rm(home, { force: true, recursive: true });
+		}
+	});
+
+	it("continues doctor diagnostics when the profile is missing", async () => {
+		const home = await mkdtemp(join(tmpdir(), "artisan-cli-"));
+		const runtime = MakeRuntime(home);
+		try {
+			const report = await runtime.runPromise(
+				(await runtime.runPromise(ForgeOperations)).Doctor("default"),
+			);
+			expect(report.healthy).toBe(false);
+			expect(report.checks.map((check) => check.name)).toEqual([
+				"profile",
+				"config",
+				"artifacts",
+				"codex",
+				"autostart",
+				"live",
+			]);
+			expect(report.checks[0]).toMatchObject({
+				name: "profile",
+				state: "error",
+			});
+		} finally {
+			await runtime.dispose();
+			await rm(home, { force: true, recursive: true });
+		}
+	});
+
+	it("does not create a missing profile during Forge repair", async () => {
+		const home = await mkdtemp(join(tmpdir(), "artisan-cli-"));
+		const runtime = MakeRuntime(home);
+		try {
+			const operations = await runtime.runPromise(ForgeOperations);
+			const report = await runtime.runPromise(operations.Repair("default"));
+			const profiles = await runtime.runPromise(ForgeProfileStore);
+
+			await expect(runtime.runPromise(profiles.Load("default"))).rejects.toMatchObject({
+				code: "invalid",
+			});
+			await expect(
+				readFile(join(home, "profiles", "default", "config.json")),
+			).rejects.toMatchObject({ code: "ENOENT" });
+			expect(report.checks.find((check) => check.name === "profile")?.state).toBe("error");
 		} finally {
 			await runtime.dispose();
 			await rm(home, { force: true, recursive: true });
@@ -150,5 +206,11 @@ describe("ae command operations", () => {
 				profile: "default",
 			}),
 		).toEqual(arguments_without_entry);
+	});
+
+	it("builds a quoted desktop protocol command", () => {
+		expect(ForgeProtocolCommand("C:\\Program Files\\Artisan Editor\\Artisan Editor.exe")).toBe(
+			'"C:\\Program Files\\Artisan Editor\\Artisan Editor.exe" "%1"',
+		);
 	});
 });

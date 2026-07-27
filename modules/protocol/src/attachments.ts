@@ -16,11 +16,13 @@ export const ImageAttachmentBytes = Schema.Uint8Array.check(
 	),
 );
 
-/** Bytes are accepted only at the authenticated command boundary and never projected to clients. */
+/**
+ * Bytes are accepted only at the authenticated command boundary. The token is
+ * request-local and Forge replaces it with a durable attachment identity.
+ */
 export const ImageAttachmentUpload = Schema.Struct({
-	/** Omitted only after the backend has durably replaced command bytes with an attachment reference. */
 	bytes: Schema.optional(ImageAttachmentBytes),
-	id: Identifier,
+	client_token: Identifier,
 	media_type: ImageMediaType,
 	name: Schema.String.check(
 		Schema.makeFilter<string>((value) =>
@@ -31,6 +33,13 @@ export const ImageAttachmentUpload = Schema.Struct({
 	),
 });
 export type ImageAttachmentUpload = typeof ImageAttachmentUpload.Type;
+
+/** Preserves authored ordering while image references are request-local tokens. */
+export const UserMessageInputContentPart = Schema.Union([
+	Schema.Struct({ text: Schema.String, type: Schema.Literal("text") }),
+	Schema.Struct({ client_token: Identifier, type: Schema.Literal("image") }),
+]).pipe(Schema.toTaggedUnion("type"));
+export type UserMessageInputContentPart = typeof UserMessageInputContentPart.Type;
 
 /** Safe attachment facts exposed in conversation projections and read boundaries. */
 export const ImageAttachmentReference = Schema.Struct({

@@ -3,35 +3,8 @@ import { MessageChannel } from "node:worker_threads";
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 
-import {
-	adapt_electron_message_port_main,
-	adapt_electron_renderer_message_port,
-	make_message_port_like,
-} from "@artisan/transport";
+import { make_message_port_like } from "@artisan/transport";
 import { adapt_node_message_port } from "@artisan/transport/node";
-
-type Listener = (event?: unknown) => void;
-
-function listener_registry() {
-	const listeners = new Map<string, Set<Listener>>();
-
-	return {
-		add: (event: string, listener: Listener) => {
-			const current = listeners.get(event) ?? new Set<Listener>();
-
-			current.add(listener);
-			listeners.set(event, current);
-		},
-		emit: (event: string, value?: unknown) => {
-			for (const listener of listeners.get(event) ?? []) {
-				listener(value);
-			}
-		},
-		remove: (event: string, listener: Listener) => {
-			listeners.get(event)?.delete(listener);
-		},
-	};
-}
 
 describe("MessagePort adapters", () => {
 	it("round-trips structured clone bytes and rejects post-close sends", async () => {
@@ -122,53 +95,6 @@ describe("MessagePort adapters", () => {
 		);
 
 		expect(closed).toEqual({ code: "overflow", dropped_messages: 1 });
-	});
-
-	it("normalizes Electron main and renderer event shapes without Electron", async () => {
-		const main_send_argument_counts: Array<number> = [];
-		const renderer_send_argument_counts: Array<number> = [];
-		const output = await Effect.runPromise(
-			Effect.scoped(
-				Effect.gen(function* () {
-					const main_registry = listener_registry();
-					const renderer_registry = listener_registry();
-					const main = yield* adapt_electron_message_port_main({
-						close: () => main_registry.emit("close"),
-						off: (event, listener) => main_registry.remove(event, listener),
-						on: (event, listener) => main_registry.add(event, listener),
-						postMessage: (...arguments_) => {
-							main_send_argument_counts.push(arguments_.length);
-						},
-						start: () => undefined,
-					});
-					const renderer = yield* adapt_electron_renderer_message_port({
-						addEventListener: (event, listener) =>
-							renderer_registry.add(event, listener),
-						close: () => renderer_registry.emit("close"),
-						postMessage: (...arguments_) => {
-							renderer_send_argument_counts.push(arguments_.length);
-						},
-						removeEventListener: (event, listener) =>
-							renderer_registry.remove(event, listener),
-						start: () => undefined,
-					});
-
-					main_registry.emit("message", { data: "main payload" });
-					renderer_registry.emit("message", { data: "renderer payload" });
-					yield* main.Send("main response");
-					yield* renderer.Send("renderer response");
-
-					return {
-						main: yield* main.Receive,
-						renderer: yield* renderer.Receive,
-					};
-				}),
-			),
-		);
-
-		expect(output).toEqual({ main: "main payload", renderer: "renderer payload" });
-		expect(main_send_argument_counts).toEqual([1]);
-		expect(renderer_send_argument_counts).toEqual([1]);
 	});
 
 	it("validates buffer limits before registering native listeners", async () => {

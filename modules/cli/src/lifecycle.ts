@@ -208,6 +208,7 @@ export const make_forge_lifecycle_layer = Layer.effect(
 				),
 			Open: (profile, origin) =>
 				Effect.gen(function* () {
+					yield* Start(profile);
 					const state = yield* store.ReadState(profile);
 					if (!state || state.profile !== profile)
 						return yield* Effect.fail(new ForgeLifecycleError({ code: "not_running" }));

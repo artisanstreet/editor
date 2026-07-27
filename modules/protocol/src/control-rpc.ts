@@ -26,6 +26,11 @@ const ControlRpc = <
 export const ControlRpcGroup = RpcGroup.make(
 	ControlRpc("command", Control.CommandEnvelope, Control.CommandReceiptEnvelope),
 	ControlRpc(
+		"thread.create.request",
+		Control.ThreadCreateEnvelope,
+		Control.ThreadCreateResultEnvelope,
+	),
+	ControlRpc(
 		"artisan.tool.registry.list.query",
 		Control.ArtisanToolRegistryListQueryEnvelope,
 		Control.ArtisanToolRegistryListQueryResultEnvelope,
@@ -200,6 +205,21 @@ export const ControlRpcGroup = RpcGroup.make(
 		"project.directory.select",
 		Control.ProjectDirectorySelectEnvelope,
 		Control.ProjectDirectorySelectResultEnvelope,
+	),
+	ControlRpc(
+		"project.list.query",
+		Control.ProjectListQueryEnvelope,
+		Control.ProjectListQueryResultEnvelope,
+	),
+	ControlRpc(
+		"project.detach",
+		Control.ProjectDetachEnvelope,
+		Control.ProjectDetachResultEnvelope,
+	),
+	ControlRpc(
+		"runtime.catalog.query",
+		Control.RuntimeCatalogQueryEnvelope,
+		Control.RuntimeCatalogQueryResultEnvelope,
 	),
 	ControlRpc(
 		"thread.session.query",

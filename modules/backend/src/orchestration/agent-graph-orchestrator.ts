@@ -7,6 +7,7 @@ import type {
 	OrchestrationGroupListSnapshot,
 	OrchestrationGroupSummary,
 } from "@artisan/protocol";
+import { OrchestrationFanoutLimits } from "@artisan/protocol";
 
 import { GlobalGuidanceService } from "../guidance/guidance-service";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
@@ -255,6 +256,10 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 		) => {
 			const active_by_group = new Map<string, number>();
 			const selected: Array<PendingAgentRun> = [];
+			const available_global_slots = Math.max(
+				0,
+				OrchestrationFanoutLimits.max_concurrency - live.size,
+			);
 
 			for (const current of live.values()) {
 				active_by_group.set(
@@ -264,13 +269,20 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 			}
 
 			for (const work of pending) {
-				if (selected.length >= 16) {
+				if (
+					selected.length >= OrchestrationFanoutLimits.max_assignments ||
+					selected.length >= available_global_slots
+				) {
 					break;
 				}
 
 				const active = active_by_group.get(work.group_id) ?? 0;
+				const max_concurrency =
+					Number.isSafeInteger(work.max_concurrency) && work.max_concurrency > 0
+						? Math.min(work.max_concurrency, OrchestrationFanoutLimits.max_concurrency)
+						: 0;
 
-				if (active >= work.max_concurrency) {
+				if (active >= max_concurrency) {
 					continue;
 				}
 
@@ -287,7 +299,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 			const selected = select_dispatchable(pending, live);
 
 			yield* Effect.forEach(selected, start_run, {
-				concurrency: "unbounded",
+				concurrency: OrchestrationFanoutLimits.max_concurrency,
 				discard: true,
 			});
 		});
@@ -434,12 +446,39 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 
 				return result.value;
 			});
+		const validate_fanout = (
+			payload: Extract<AgentGraphCommand, { readonly type: "orchestration.group.start" }>,
+		) =>
+			Effect.gen(function* () {
+				if (
+					!Array.isArray(payload.assignments) ||
+					payload.assignments.length > OrchestrationFanoutLimits.max_assignments
+				) {
+					return yield* new AgentGraphInvalid({
+						message: `An orchestration group may contain at most ${OrchestrationFanoutLimits.max_assignments} assignments.`,
+					});
+				}
+
+				if (
+					payload.max_concurrency !== undefined &&
+					(!Number.isSafeInteger(payload.max_concurrency) ||
+						payload.max_concurrency < 1 ||
+						payload.max_concurrency > OrchestrationFanoutLimits.max_concurrency)
+				) {
+					return yield* new AgentGraphInvalid({
+						message: `Orchestration concurrency must be between 1 and ${OrchestrationFanoutLimits.max_concurrency}.`,
+					});
+				}
+			});
 
 		const handle = (command: CommandEnvelope) => {
 			const payload = command.payload as AgentGraphCommand;
 
 			if (payload.type === "orchestration.group.start") {
-				return repository.StartGroup(command).pipe(Effect.tap(() => wake_dispatcher()));
+				return validate_fanout(payload).pipe(
+					Effect.andThen(repository.StartGroup(command)),
+					Effect.tap(() => wake_dispatcher()),
+				);
 			}
 
 			if (payload.type === "agent_instance.rename") {

@@ -12,6 +12,8 @@ import {
 	type PendingWork,
 } from "./contracts";
 import { HydrateImageAttachments } from "./message-attachments";
+import { AuthoritativeThreadSendMessageCommand } from "./message-command";
+import type { PendingWork as PendingWorkContract } from "./contracts";
 import {
 	OrchestrationMessages,
 	OrchestrationOutbox,
@@ -32,6 +34,34 @@ const ParsePersistedJson = (json: string) =>
 	Effect.try({
 		try: () => JSON.parse(json),
 		catch: (cause) => new OrchestrationFailure({ cause }),
+	});
+
+type PersistedPayload = PendingWorkContract["payload"];
+
+const DecodePersistedPayload = (
+	value: unknown,
+): Effect.Effect<PersistedPayload, OrchestrationFailure> =>
+	Effect.gen(function* () {
+		if (
+			typeof value === "object" &&
+			value !== null &&
+			"type" in value &&
+			value.type === "thread.send_message"
+		) {
+			return yield* Schema.decodeUnknownEffect(AuthoritativeThreadSendMessageCommand)(
+				value,
+			).pipe(Effect.mapError((cause) => new OrchestrationFailure({ cause })));
+		}
+
+		const decoded = yield* Schema.decodeUnknownEffect(CommandPayload)(value).pipe(
+			Effect.mapError((cause) => new OrchestrationFailure({ cause })),
+		);
+		if (decoded.type === "thread.send_message") {
+			return yield* new OrchestrationFailure({
+				cause: new Error("Persisted message payload is missing Forge authority"),
+			});
+		}
+		return decoded as PersistedPayload;
 	});
 
 /** Owns the durable dispatch queue while leaving command acceptance in the repository. */
@@ -74,31 +104,25 @@ export const make_outbox_operations = (
 					Effect.forEach(
 						rows.filter((row) => row.kind !== "start" || row.status === "queued"),
 						(row) =>
-							ParsePersistedJson(row.payload_json).pipe(
-								Effect.flatMap((value) =>
-									Schema.decodeUnknownEffect(CommandPayload)(value).pipe(
-										Effect.mapError(
-											(cause) => new OrchestrationFailure({ cause }),
-										),
-									),
-								),
-								Effect.flatMap((payload) =>
-									HydrateImageAttachments(database, payload),
-								),
-								Effect.map(
-									(payload) =>
-										({
-											agent_id: row.agent_id,
-											command_id: row.command_id,
-											engine_id: row.engine_id,
-											kind: row.kind as OutboxKind,
-											payload,
-											run_id: row.run_id,
-											thread_id: row.thread_id,
-											working_directory: row.working_directory,
-										}) satisfies PendingWork,
-								),
-							),
+							Effect.gen(function* () {
+								const value = yield* ParsePersistedJson(row.payload_json);
+								const decoded = yield* DecodePersistedPayload(value);
+								const payload: PersistedPayload =
+									decoded.type === "thread.send_message"
+										? yield* HydrateImageAttachments(database, decoded)
+										: decoded;
+
+								return {
+									agent_id: row.agent_id,
+									command_id: row.command_id,
+									engine_id: row.engine_id,
+									kind: row.kind as OutboxKind,
+									payload,
+									run_id: row.run_id,
+									thread_id: row.thread_id,
+									working_directory: row.working_directory,
+								} satisfies PendingWork;
+							}),
 					),
 				),
 				Effect.mapError(NormalizeError),

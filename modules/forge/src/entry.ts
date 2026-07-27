@@ -7,6 +7,7 @@ import { Clock, Console, Effect, Layer, Schema } from "effect";
 
 import { decode_forge_config } from "./config";
 import { StartForge } from "./forge-host";
+import { MaintainBoundedForgeLog } from "./log-retention";
 import { RemoveForgeState, WriteForgeState } from "./state";
 
 const ForgeParentMessage = Schema.Struct({
@@ -21,18 +22,6 @@ const RequiredEnvironment = (name: string) =>
 		}
 		return value;
 	});
-
-const ProjectDirectoryRoots = Effect.try({
-	try: () => {
-		const configured = process.env.ARTISAN_PROJECT_ROOTS;
-		if (configured === undefined) return [process.cwd()];
-
-		return Schema.decodeUnknownSync(Schema.Array(Schema.String.check(Schema.isMinLength(1))))(
-			JSON.parse(configured),
-		);
-	},
-	catch: (cause) => new Error("ARTISAN_PROJECT_ROOTS is invalid", { cause }),
-});
 
 const AwaitProcessShutdown = Effect.callback<void>((resume) => {
 	const shutdown = () => resume(Effect.void);
@@ -60,7 +49,6 @@ export const StartForgeFromEnvironment = Effect.gen(function* () {
 		process.env.ARTISAN_FORGE_INSTANCE_ID ?? (yield* snowflake_id.Make("forge"));
 	const database_path = yield* RequiredEnvironment("ARTISAN_DATABASE_PATH");
 	const migrations_path = yield* RequiredEnvironment("ARTISAN_MIGRATIONS_PATH");
-	const project_directory_roots = yield* ProjectDirectoryRoots;
 	const host = yield* StartForge(
 		decode_forge_config({
 			database_path,
@@ -70,7 +58,6 @@ export const StartForgeFromEnvironment = Effect.gen(function* () {
 				? Number(process.env.ARTISAN_LISTEN_PORT)
 				: 0,
 			migrations_path,
-			project_directory_roots,
 			...(process.env.ARTISAN_ALLOWED_ORIGINS === undefined
 				? {}
 				: {
@@ -90,6 +77,10 @@ export const StartForgeFromEnvironment = Effect.gen(function* () {
 	);
 	const state_path = process.env.ARTISAN_FORGE_STATE_PATH;
 	const profile = process.env.ARTISAN_FORGE_PROFILE ?? "default";
+	const log_path = process.env.ARTISAN_FORGE_LOG_PATH;
+	if (log_path !== undefined) {
+		yield* Effect.forkScoped(MaintainBoundedForgeLog(log_path));
+	}
 
 	yield* Effect.acquireUseRelease(
 		Effect.gen(function* () {

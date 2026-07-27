@@ -14,6 +14,9 @@ describe("Barekey docs shell reset", () => {
 		expect(layout).toContain("{#snippet sidebar()}");
 		expect(layout).toContain("{#snippet primary()}");
 		expect(layout).toContain("{@render children()}");
+		expect(layout).toContain("client.ListProjects");
+		expect(layout).toContain("client.ListThreads");
+		expect(layout).toContain("{#if forge_ready}");
 		expect(panel).toContain("primary: Snippet");
 		expect(panel).toContain("secondary?: Snippet");
 		expect(panel).toContain("sidebar: Snippet");
@@ -126,13 +129,15 @@ describe("Barekey docs shell reset", () => {
 		expect(sidebar).toContain(
 			'<Sidebar.Header class="h-14 justify-center pl-6 pr-14 lg:pl-2">',
 		);
-		expect(sidebar).toContain('type: "thread.create"');
-		expect(sidebar).toContain("selectProjectDirectory");
+		expect(sidebar).toContain("client.CreateThread");
+		expect(sidebar).not.toContain('type: "thread.create"');
+		expect(sidebar).not.toContain("artisanDesktop");
 		expect(sidebar).toContain("client.ListProjectDirectories");
 		expect(sidebar).toContain("client.SelectProjectDirectory");
 		expect(sidebar).toContain("Select a project folder");
 		expect(sidebar).not.toContain("Folder selection is available in the Artisan desktop app.");
-		expect(sidebar).toContain('type: "thread.project.assign"');
+		expect(sidebar).not.toContain('type: "thread.project.assign"');
+		expect(sidebar).toContain("project_id: project.project_id");
 		expect(sidebar).not.toContain("No existing projects");
 		expect(sidebar).not.toContain("<Sidebar.GroupLabel>Threads</Sidebar.GroupLabel>");
 		expect(sidebar).toContain("ProjectScopedThreadGroups(threads)");

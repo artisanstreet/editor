@@ -8,12 +8,11 @@ import { Effect, ManagedRuntime } from "effect";
 import { make_node_profile_store_layer } from "../../modules/cli/src/node-profile-store";
 import { ForgeProfileStore } from "../../modules/cli/src/profile";
 
-const MakeConfig = (data_root: string, project_roots: readonly string[]) => ({
+const MakeConfig = (data_root: string) => ({
 	data_root,
 	listen_host: "127.0.0.1" as const,
 	listen_port: 0,
 	mode: "local" as const,
-	project_roots: project_roots as readonly [string, ...string[]],
 	version: 1 as const,
 });
 
@@ -31,19 +30,17 @@ const WithStore = async (
 };
 
 describe("node Forge profile store", () => {
-	it("writes schema-valid atomic JSON, persists a 32-byte token, and canonicalizes roots", async () => {
+	it("writes schema-valid atomic JSON and persists a 32-byte token", async () => {
 		await WithStore(async (store, home) => {
 			const data_root = join(home, "data");
-			const project_root = join(home, "project");
-			await Promise.all([mkdir(data_root), mkdir(project_root)]);
-			const config = MakeConfig(data_root, [project_root, join(project_root, ".")]);
+			await mkdir(data_root);
+			const config = MakeConfig(data_root);
 
 			await Effect.runPromise(store.Ensure("default", config));
 			const paths = await Effect.runPromise(store.Paths("default"));
 			expect(JSON.parse(await readFile(paths.config_path, "utf8"))).toEqual(
 				expect.objectContaining({ version: 1 }),
 			);
-			expect((await Effect.runPromise(store.Load("default"))).project_roots).toHaveLength(1);
 			const first_token = (await Effect.runPromise(store.LoadSecrets("default"))).auth_token;
 			expect(first_token).toMatch(/^[A-Za-z0-9_-]{43}$/);
 			await Effect.runPromise(store.Ensure("default", config));
@@ -53,7 +50,7 @@ describe("node Forge profile store", () => {
 		});
 	});
 
-	it("rejects unsafe profile names and nonexistent roots", async () => {
+	it("rejects unsafe profile names", async () => {
 		await WithStore(async (store, home) => {
 			const existing = join(home, "existing");
 			await mkdir(existing);
@@ -61,14 +58,7 @@ describe("node Forge profile store", () => {
 				code: "invalid",
 			});
 			await expect(
-				Effect.runPromise(
-					store.Ensure("CON", MakeConfig(existing, [join(home, "missing")])),
-				),
-			).rejects.toMatchObject({ code: "invalid" });
-			await expect(
-				Effect.runPromise(
-					store.Ensure("default", MakeConfig(existing, [join(home, "missing")])),
-				),
+				Effect.runPromise(store.Ensure("CON", MakeConfig(existing))),
 			).rejects.toMatchObject({ code: "invalid" });
 		});
 	});
@@ -76,9 +66,8 @@ describe("node Forge profile store", () => {
 	it("treats malformed state as absent and preserves nonmatching owned state", async () => {
 		await WithStore(async (store, home) => {
 			const data_root = join(home, "data");
-			const project_root = join(home, "project");
-			await Promise.all([mkdir(data_root), mkdir(project_root)]);
-			await Effect.runPromise(store.Ensure("default", MakeConfig(data_root, [project_root])));
+			await mkdir(data_root);
+			await Effect.runPromise(store.Ensure("default", MakeConfig(data_root)));
 			const paths = await Effect.runPromise(store.Paths("default"));
 			await writeFile(paths.state_path, "not-json", "utf8");
 			expect(await Effect.runPromise(store.ReadState("default"))).toBeUndefined();

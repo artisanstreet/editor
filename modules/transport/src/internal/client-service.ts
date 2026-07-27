@@ -75,10 +75,15 @@ import {
 	type ProjectDirectoryListQueryEnvelope,
 	type ProjectDirectorySelectEnvelope,
 	type ProjectDirectorySelectInput,
+	type ProjectDetachEnvelope,
+	type ProjectListQueryEnvelope,
+	type RuntimeCatalogQueryEnvelope,
 	type RichLinkResolveQueryEnvelope,
 	type SurfaceListQueryEnvelope,
 	type SurfaceUsageAggregateQueryEnvelope,
 	type TerminalListQueryEnvelope,
+	type ThreadCreateEnvelope,
+	type ThreadCreateInput,
 	type ThreadListQueryEnvelope,
 	type ThreadRetentionQueryEnvelope,
 	type ThreadRetentionUpdateEnvelope,
@@ -325,6 +330,20 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 					? result.payload.threads
 					: yield* Effect.die("thread list response narrowed incorrectly");
 			});
+			const create_thread = (input: ThreadCreateInput) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ThreadCreateEnvelope = {
+						...trace,
+						kind: "thread.create.request",
+						payload: input,
+					};
+					const result = yield* requests.Request(envelope);
+
+					return result.kind === "thread.create.result"
+						? result.payload
+						: yield* Effect.die("thread create response narrowed incorrectly");
+				});
 			const list_project_directories = (input: ProjectDirectoryListInput = {}) =>
 				Effect.gen(function* () {
 					const trace = yield* connection.MakeTrace;
@@ -352,6 +371,43 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						: yield* Effect.die(
 								"project directory select response narrowed incorrectly",
 							);
+				});
+			const list_projects = Effect.gen(function* () {
+				const trace = yield* connection.MakeTrace;
+				const envelope: ProjectListQueryEnvelope = {
+					...trace,
+					kind: "project.list.query",
+					payload: {},
+				};
+				const result = yield* requests.Request(envelope);
+				return result.kind === "project.list.query.result"
+					? result.payload
+					: yield* Effect.die("project list response narrowed incorrectly");
+			});
+			const get_runtime_catalog = Effect.gen(function* () {
+				const trace = yield* connection.MakeTrace;
+				const envelope: RuntimeCatalogQueryEnvelope = {
+					...trace,
+					kind: "runtime.catalog.query",
+					payload: {},
+				};
+				const result = yield* requests.Request(envelope);
+				return result.kind === "runtime.catalog.query.result"
+					? result.payload
+					: yield* Effect.die("runtime catalog response narrowed incorrectly");
+			});
+			const detach_project = (project_id: string) =>
+				Effect.gen(function* () {
+					const trace = yield* connection.MakeTrace;
+					const envelope: ProjectDetachEnvelope = {
+						...trace,
+						kind: "project.detach",
+						payload: { project_id },
+					};
+					const result = yield* requests.Request(envelope);
+					return result.kind === "project.detach.result"
+						? result.payload
+						: yield* Effect.die("project detach response narrowed incorrectly");
 				});
 			const list_artisan_tools = (input: ArtisanToolRegistryListInput) =>
 				Effect.gen(function* () {
@@ -1949,10 +2005,13 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 
 			return {
 				Command: command,
+				ConnectionChanges: connection.ConnectionChanges,
+				ConnectionState: connection.ConnectionState,
 				Cursors: subscriptions.Cursors,
 				Dispose: shutdown(Option.none()),
 				Errors: Stream.fromQueue(errors),
 				Events: subscriptions.Events,
+				RetryConnection: connection.RetryConnection,
 				GetConversation: get_conversation,
 				GetMessageImageAttachment: get_message_image_attachment,
 				GetOrchestrationGraph: get_orchestration_graph,
@@ -1975,6 +2034,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				GetCapabilityOAuthStatus: get_capability_oauth_status,
 				GetThreadRetentionPolicy: get_thread_retention_policy,
 				GetThreadWork: get_thread_work,
+				CreateThread: create_thread,
 				GetWorkspaceChangeDiff: get_workspace_change_diff,
 				GetWorkspaceLanguageCapabilities: get_workspace_language_capabilities,
 				ListWorkspaceChanges: list_workspace_changes,
@@ -1982,6 +2042,9 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				ListWorkspaceConflicts: list_workspace_conflicts,
 				ListTerminals: list_terminals,
 				ListThreads: list_threads,
+				ListProjects: list_projects,
+				GetRuntimeCatalog: get_runtime_catalog,
+				DetachProject: detach_project,
 				ListProjectDirectories: list_project_directories,
 				SelectProjectDirectory: select_project_directory,
 				ListPreviewTargets: list_preview_targets,
@@ -2066,6 +2129,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				SubscribeOrchestrationGroups: subscriptions.SubscribeOrchestrationGroups,
 				SubscribeConversation: subscriptions.SubscribeConversation,
 				SubscribeThreadList: subscriptions.SubscribeThreadList,
+				SubscribeProjects: subscriptions.SubscribeProjects,
 				SubscribeThreadTranscript: subscriptions.SubscribeThreadTranscript,
 				SubscribeThreadSession: subscriptions.SubscribeThreadSession,
 				SubscribeSurfaceItems: subscriptions.SubscribeSurfaceItems,

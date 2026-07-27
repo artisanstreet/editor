@@ -6,7 +6,8 @@ import { fileURLToPath } from "node:url";
 import { Effect, Stream } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
-import type { CommandEnvelope, HelloEnvelope } from "@artisan/protocol";
+import type { HelloEnvelope } from "@artisan/protocol";
+import type { AuthoritativeCommandEnvelope } from "../../modules/backend/src/persistence/orchestration/message-command";
 import type {
 	Engine,
 	EngineCommand,
@@ -14,7 +15,13 @@ import type {
 	EngineOpenInput,
 	EngineRun,
 } from "@artisan/engines";
-import { make_backend_runtime, ProtocolServer, type ProtocolConnection } from "@artisan/backend";
+import {
+	AgentOrchestrator,
+	make_backend_runtime,
+	ProtocolRouter,
+	ProtocolServer,
+	type ProtocolConnection,
+} from "@artisan/backend";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];
@@ -125,7 +132,10 @@ function make_hello(): HelloEnvelope {
 	};
 }
 
-function make_command(message_id: string, payload: CommandEnvelope["payload"]): CommandEnvelope {
+function make_command(
+	message_id: string,
+	payload: AuthoritativeCommandEnvelope["payload"],
+): AuthoritativeCommandEnvelope {
 	return {
 		kind: "command",
 		message_id,
@@ -164,19 +174,21 @@ describe("single coordinator orchestration", () => {
 			const result = await runtime.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
+						const orchestrator = yield* AgentOrchestrator;
+						const router = yield* ProtocolRouter;
 						const server = yield* ProtocolServer;
 						const connection = yield* server.Open;
 
 						yield* connection.Receive(make_hello());
 						yield* take_outbound(connection, 2);
-						yield* connection.Receive(
+						yield* router.Route(
 							make_command("create_1", {
 								title: "Orchestration",
 								type: "thread.create",
 							}),
 						);
-						yield* take_outbound(connection, 2);
-						yield* connection.Receive(
+						yield* take_outbound(connection, 1);
+						yield* orchestrator.Handle(
 							make_command("send_1", {
 								engine_id: "deterministic",
 								text: "Start work",
@@ -185,7 +197,7 @@ describe("single coordinator orchestration", () => {
 							}),
 						);
 
-						const accepted = yield* take_outbound(connection, 4);
+						const accepted = yield* take_outbound(connection, 3);
 						const interactions = yield* connection.Outbound.pipe(
 							Stream.filter(
 								(envelope) =>
@@ -228,7 +240,6 @@ describe("single coordinator orchestration", () => {
 			);
 
 			expect(result.accepted).toMatchObject([
-				{ kind: "command.receipt", payload: { status: "accepted" } },
 				{ kind: "event", payload: { type: "thread.message_queued" } },
 				{ kind: "event", payload: { type: "thread.message_routed" } },
 				{ kind: "event", payload: { state: "queued", type: "run.lifecycle" } },

@@ -1,5 +1,6 @@
 import {
 	ModelManifest,
+	PermissionCapability,
 	SpeedOptions,
 	SupportedThinkingCapability,
 	model_manifest,
@@ -29,7 +30,7 @@ describe("model catalog", () => {
 		}
 	});
 
-	it("keeps max exceptional and model-specific", () => {
+	it("keeps max exceptional and limited to documented Claude models", () => {
 		const models_with_max = model_manifest.models
 			.filter(
 				(model) =>
@@ -38,14 +39,7 @@ describe("model catalog", () => {
 			)
 			.map((model) => model.id);
 
-		expect(models_with_max).toEqual([
-			"codex-sol",
-			"codex-terra",
-			"codex-luna",
-			"claude-fable",
-			"claude-opus",
-			"claude-sonnet",
-		]);
+		expect(models_with_max).toEqual(["claude-fable", "claude-opus", "claude-sonnet"]);
 	});
 
 	it("lists every first-party model exposed by the supported coding harnesses", () => {
@@ -98,19 +92,17 @@ describe("model catalog", () => {
 		expect(sparse.options.map((option) => option.id)).toEqual(["light", "high"]);
 	});
 
-	it("models every OpenCode gateway without flattening models", () => {
-		const opencode = model_manifest.harnesses.find((harness) => harness.id === "opencode");
-		const modeled_gateways = model_manifest.models.flatMap((model) =>
-			model.harness === "opencode" && model.routing.kind === "gateway"
-				? [model.routing.gateway_id]
-				: [],
-		);
-
-		expect(modeled_gateways).toEqual(opencode?.gateways.map((gateway) => gateway.id));
-		expect(model_manifest.models.find((model) => model.id === "opencode-qwen")).toMatchObject({
-			name: "Qwen Coder",
-			routing: { gateway_id: "alibaba", kind: "gateway" },
-		});
+	it("contains only the three primary coding harnesses and providers", () => {
+		expect(model_manifest.harnesses.map((harness) => harness.id)).toEqual([
+			"codex",
+			"claude",
+			"grok",
+		]);
+		expect(model_manifest.providers.map((provider) => provider.id)).toEqual([
+			"openai",
+			"anthropic",
+			"xai",
+		]);
 	});
 
 	it("rejects ambiguous native values and invalid speed option sets", () => {
@@ -127,74 +119,173 @@ describe("model catalog", () => {
 		expect(() =>
 			Schema.decodeUnknownSync(SpeedOptions)([
 				{
+					availability: "always",
+					consumption_basis: "standard",
+					consumption_multiplier: 1,
 					default: true,
 					description: "Ordinary route.",
 					id: "standard",
 					label: "Standard",
 					native_value: "standard",
+					source_url: "https://example.test/speed",
+					speed_multiplier: 1,
+					verified_at: "2026-07-27",
 				},
 				{
+					availability: "always",
+					consumption_basis: "standard",
+					consumption_multiplier: 1,
 					default: true,
 					description: "Another route.",
 					id: "other",
 					label: "Other",
 					native_value: "standard",
+					source_url: "https://example.test/speed",
+					speed_multiplier: 1,
+					verified_at: "2026-07-27",
 				},
 			]),
 		).toThrow();
 	});
 
-	it("models speed as ordered provider-native options", () => {
+	it("models documented provider speed and consumption ratios", () => {
 		const sol = model_manifest.models.find((model) => model.id === "codex-sol");
+		const opus = model_manifest.models.find((model) => model.id === "claude-opus");
+		const grok = model_manifest.models.find((model) => model.id === "grok-4-5");
 
-		expect(sol?.capabilities.speed_options).toEqual([
+		expect(sol?.capabilities.speed_options).toMatchObject([
+			{ consumption_multiplier: 1, id: "standard", speed_multiplier: 1 },
 			{
-				default: true,
-				description: "Standard service tier.",
-				id: "standard",
-				label: "Standard",
-				native_value: "standard",
-			},
-			{
-				default: false,
-				description: "Prioritizes lower latency through the provider's fast service tier.",
+				availability: "dynamic",
+				consumption_basis: "chatgpt-credits",
+				consumption_multiplier: 2.5,
 				id: "fast",
-				label: "Fast",
-				native_value: "fast",
+				speed_multiplier: 1.5,
 			},
 		]);
-		expect(
-			model_manifest.models
-				.filter((model) => model.id !== "codex-sol")
-				.every((model) => model.capabilities.speed_options.length === 1),
-		).toBe(true);
+		expect(opus?.capabilities.speed_options).toMatchObject([
+			{ consumption_multiplier: 1, id: "standard", speed_multiplier: 1 },
+			{
+				availability: "dynamic",
+				consumption_basis: "usage-credit-price",
+				consumption_multiplier: 2,
+				id: "fast",
+				speed_multiplier: 2.5,
+			},
+		]);
+		expect(grok?.capabilities.speed_options).toMatchObject([
+			{ consumption_multiplier: 1, id: "standard", speed_multiplier: 1 },
+		]);
+		for (const model of model_manifest.models) {
+			for (const option of model.capabilities.speed_options) {
+				expect(option.description).toMatch(new RegExp(`^${model.name} uses `));
+				expect(option.description).toMatch(/Fast mode is (available|not available)/);
+			}
+		}
 	});
 
 	it("accepts arbitrary future speed tiers without changing the schema", () => {
 		const options = Schema.decodeUnknownSync(SpeedOptions)([
 			{
+				availability: "always",
+				consumption_basis: "standard",
+				consumption_multiplier: 1,
 				default: false,
 				description: "Trades latency for lower cost.",
 				id: "economy",
 				label: "Economy",
 				native_value: "provider-economy",
+				source_url: "https://example.test/speed",
+				speed_multiplier: 1,
+				verified_at: "2026-07-27",
 			},
 			{
+				availability: "always",
+				consumption_basis: "standard",
+				consumption_multiplier: 1,
 				default: true,
 				description: "The provider default.",
 				id: "standard",
 				label: "Standard",
 				native_value: "provider-standard",
+				source_url: "https://example.test/speed",
+				speed_multiplier: 1,
+				verified_at: "2026-07-27",
 			},
 			{
+				availability: "dynamic",
+				consumption_basis: "usage-credit-price",
+				consumption_multiplier: 2,
 				default: false,
 				description: "Runs on a dedicated inference backend.",
 				id: "accelerated",
 				label: "Accelerated",
 				native_value: "provider-accelerated",
+				source_url: "https://example.test/speed",
+				speed_multiplier: 2,
+				verified_at: "2026-07-27",
 			},
 		]);
 
 		expect(options.map((option) => option.id)).toEqual(["economy", "standard", "accelerated"]);
+	});
+
+	it("maps native harness permissions onto a sparse uniform autonomy scale", () => {
+		const permissions = Object.fromEntries(
+			model_manifest.harnesses.map((harness) => [
+				harness.id,
+				harness.permissions.options.map(({ id, native_value }) => [id, native_value]),
+			]),
+		);
+
+		expect(permissions).toEqual({
+			claude: [
+				["restricted", "plan"],
+				["supervised", "default"],
+				["trusted", "acceptEdits"],
+				["autonomous", "auto"],
+				["unrestricted", "bypassPermissions"],
+			],
+			codex: [
+				["restricted", "read-only"],
+				["supervised", "workspace-write"],
+				["autonomous", "workspace-write-no-prompts"],
+			],
+			grok: [
+				["supervised", "ask"],
+				["autonomous", "auto"],
+				["unrestricted", "always-approve"],
+			],
+		});
+	});
+
+	it("rejects unordered or unsupported permission defaults", () => {
+		expect(() =>
+			Schema.decodeUnknownSync(PermissionCapability)({
+				default: "trusted",
+				options: [
+					{
+						approval_behavior: "none",
+						availability: "always",
+						description: "No prompts.",
+						edit_scope: "host",
+						id: "unrestricted",
+						label: "Unrestricted",
+						native_value: "bypass",
+						safety_boundary: "bypassed",
+					},
+					{
+						approval_behavior: "prompts",
+						availability: "always",
+						description: "Ask first.",
+						edit_scope: "host",
+						id: "supervised",
+						label: "Supervised",
+						native_value: "ask",
+						safety_boundary: "rules",
+					},
+				],
+			}),
+		).toThrow();
 	});
 });

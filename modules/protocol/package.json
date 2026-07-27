@@ -6,6 +6,7 @@
 		".": "./src/index.ts"
 	},
 	"dependencies": {
+		"@artisan/catalog": "workspace:*",
 		"effect": "4.0.0-beta.97"
 	}
 }

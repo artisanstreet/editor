@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { access, mkdir, open } from "node:fs/promises";
+import { access, mkdir, open, stat, truncate } from "node:fs/promises";
 import { delimiter, dirname, join } from "node:path";
 
 import { MakeSnowflakeIdLive } from "@artisan/protocol";
@@ -8,6 +8,7 @@ import { ChildProcess } from "effect/unstable/process";
 import { decode_forge_config, RemoveForgeState, StartForge, WriteForgeState } from "@artisan/forge";
 
 import { ResolveForgeArtifact } from "./forge-adapter";
+import type { ForgeArtifact } from "./forge-adapter";
 import { ForgeLauncher, ForgeLifecycleError } from "./lifecycle";
 import { ForgeProfileStore } from "./profile";
 import type { ForgeRuntimeState } from "./profile";
@@ -16,6 +17,67 @@ interface ForgeLauncherEnvironmentValue {
 	readonly inherited: Readonly<Record<string, string | undefined>>;
 	readonly node_path: string | undefined;
 }
+
+/** Detached output is reset before launch once it reaches 4 MiB; a running child keeps its own FD. */
+export const MAX_DETACHED_FORGE_LOG_BYTES = 4 * 1024 * 1024;
+
+/**
+ * The detached child needs Node's inherited environment shape, but Forge-owned
+ * storage and its conservative Rust diagnostic level are explicit overrides.
+ */
+export const ForgeChildEnvironment = (
+	input: {
+		readonly config: {
+			readonly data_root: string;
+			readonly listen_host: "127.0.0.1" | "::1";
+			readonly listen_port: number;
+		};
+		readonly instance_id: string;
+		readonly profile: string;
+		readonly token: string;
+	},
+	artifact: ForgeArtifact,
+	environment: ForgeLauncherEnvironmentValue,
+	paths: { readonly log_path: string; readonly state_path: string },
+) => ({
+	...environment.inherited,
+	ARTISAN_AUTH_TOKEN: input.token,
+	ARTISAN_DATABASE_PATH: join(input.config.data_root, "artisan.sqlite"),
+	ARTISAN_MIGRATIONS_PATH: artifact.migrations_path,
+	ARTISAN_STATIC_FRONTEND_ROOT: artifact.static_frontend_root,
+	ARTISAN_NODE_EXECUTABLE: artifact.node_executable_path,
+	ARTISAN_NATIVE_RUNTIME: artifact.native_runtime_path,
+	CODEX_SQLITE_HOME: join(input.config.data_root, "codex-sqlite"),
+	NODE_PATH: [artifact.native_runtime_path, environment.node_path]
+		.filter((value): value is string => value !== undefined && value !== "")
+		.join(delimiter),
+	RUST_LOG: "warn",
+	ARTISAN_FORGE_INSTANCE_ID: input.instance_id,
+	ARTISAN_FORGE_LOG_PATH: paths.log_path,
+	ARTISAN_FORGE_PROFILE: input.profile,
+	ARTISAN_FORGE_STATE_PATH: paths.state_path,
+	ARTISAN_LISTEN_HOST: input.config.listen_host,
+	ARTISAN_LISTEN_PORT: String(input.config.listen_port),
+	ARTISAN_WINDOWS_PROCESS_HOST: artifact.windows_process_host_path,
+});
+
+/**
+ * Cap detached diagnostics before assigning the child's append-only descriptor.
+ * We retain one current log only: a previous log at or above 4 MiB is safely
+ * truncated before the next launch, preventing restart-driven disk growth.
+ */
+export const PrepareDetachedForgeLog = (path: string) =>
+	Effect.tryPromise({
+		try: async () => {
+			const info = await stat(path).catch((cause: NodeJS.ErrnoException) =>
+				cause.code === "ENOENT" ? undefined : Promise.reject(cause),
+			);
+			if (info !== undefined && info.size >= MAX_DETACHED_FORGE_LOG_BYTES) {
+				await truncate(path, 0);
+			}
+		},
+		catch: (cause) => new ForgeLifecycleError({ cause, code: "timeout" }),
+	});
 
 class ForgeLauncherEnvironment extends Context.Service<
 	ForgeLauncherEnvironment,
@@ -69,7 +131,6 @@ export const make_node_forge_launcher_layer = Layer.effect(
 					readonly data_root: string;
 					readonly listen_host: "127.0.0.1" | "::1";
 					readonly listen_port: number;
-					readonly project_roots: ReadonlyArray<string>;
 				};
 				readonly profile: string;
 				readonly token: string;
@@ -106,31 +167,22 @@ export const make_node_forge_launcher_layer = Layer.effect(
 					try: () => mkdir(dirname(paths.log_path), { recursive: true, mode: 0o700 }),
 					catch: (cause) => new ForgeLifecycleError({ cause, code: "timeout" }),
 				});
+				yield* Effect.tryPromise({
+					try: () =>
+						mkdir(join(input.config.data_root, "codex-sqlite"), {
+							recursive: true,
+							mode: 0o700,
+						}),
+					catch: (cause) => new ForgeLifecycleError({ cause, code: "timeout" }),
+				});
+				if (!foreground) yield* PrepareDetachedForgeLog(paths.log_path);
 				const log = foreground
 					? undefined
 					: yield* Effect.tryPromise({
 							try: () => open(paths.log_path, "a", 0o600),
 							catch: (cause) => new ForgeLifecycleError({ cause, code: "timeout" }),
 						});
-				const env = {
-					...environment.inherited,
-					ARTISAN_AUTH_TOKEN: input.token,
-					ARTISAN_DATABASE_PATH: join(input.config.data_root, "artisan.sqlite"),
-					ARTISAN_MIGRATIONS_PATH: artifact.migrations_path,
-					ARTISAN_STATIC_FRONTEND_ROOT: artifact.static_frontend_root,
-					ARTISAN_NODE_EXECUTABLE: artifact.node_executable_path,
-					ARTISAN_NATIVE_RUNTIME: artifact.native_runtime_path,
-					NODE_PATH: [artifact.native_runtime_path, environment.node_path]
-						.filter((value): value is string => value !== undefined && value !== "")
-						.join(delimiter),
-					ARTISAN_FORGE_INSTANCE_ID: input.instance_id,
-					ARTISAN_FORGE_PROFILE: input.profile,
-					ARTISAN_FORGE_STATE_PATH: paths.state_path,
-					ARTISAN_LISTEN_HOST: input.config.listen_host,
-					ARTISAN_LISTEN_PORT: String(input.config.listen_port),
-					ARTISAN_PROJECT_ROOTS: JSON.stringify(input.config.project_roots),
-					ARTISAN_WINDOWS_PROCESS_HOST: artifact.windows_process_host_path,
-				};
+				const env = ForgeChildEnvironment(input, artifact, environment, paths);
 				// Build an argv-only Effect process command for traceability; spawn supplies
 				// the platform-specific detached/file-descriptor controls below.
 				void ChildProcess.make(artifact.executable_path, [artifact.host_entry_path]);
@@ -179,7 +231,6 @@ export const make_node_forge_launcher_layer = Layer.effect(
 				readonly data_root: string;
 				readonly listen_host: "127.0.0.1" | "::1";
 				readonly listen_port: number;
-				readonly project_roots: ReadonlyArray<string>;
 			};
 			readonly instance_id: string;
 			readonly profile: string;
@@ -202,7 +253,6 @@ export const make_node_forge_launcher_layer = Layer.effect(
 							listen_host: input.config.listen_host,
 							listen_port: input.config.listen_port,
 							migrations_path: artifact.migrations_path,
-							project_directory_roots: input.config.project_roots,
 							static_frontend_root: artifact.static_frontend_root,
 						}),
 					).pipe(

@@ -22,23 +22,12 @@ describe("frontend WebSocket runtime target", () => {
 		).toEqual({ _tag: "websocket", url: "wss://artisan.example/api/ws" });
 	});
 
-	it("prefers a desktop-owned WebSocket endpoint when one is exposed", () => {
+	it("reports unavailable outside HTTP(S) instead of falling back to a native bridge", () => {
 		expect(
 			ResolveWebSocketRuntimeTarget({
-				desktop: { forgeWebSocketEndpoint: "ws://127.0.0.1:4311/api/ws" },
 				is_development: false,
 				location: { origin: "app://artisan", protocol: "app:" },
 			}),
-		).toEqual({ _tag: "websocket", url: "ws://127.0.0.1:4311/api/ws" });
-	});
-
-	it("retains the MessagePort path for installed desktop builds without a socket endpoint", () => {
-		expect(
-			ResolveWebSocketRuntimeTarget({
-				desktop: {},
-				is_development: false,
-				location: { origin: "app://artisan", protocol: "app:" },
-			}),
-		).toEqual({ _tag: "desktop" });
+		).toEqual({ _tag: "unavailable" });
 	});
 });

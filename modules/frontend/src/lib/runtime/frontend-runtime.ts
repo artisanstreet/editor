@@ -1,11 +1,8 @@
-import { BrowserHttpClient, BrowserKeyValueStore } from "@effect/platform-browser";
+import { BrowserHttpClient } from "@effect/platform-browser";
 import { MakeSnowflakeIdLive } from "@artisan/protocol";
 import { Effect, Exit, Layer, Scope } from "effect";
 import * as KeyValueStore from "effect/unstable/persistence/KeyValueStore";
 
-import { make_artisan_client_layer, TransportRuntimeLive } from "@artisan/transport/client";
-
-import { FrontendMessagePortConnectorLive } from "./desktop-message-port-connector";
 import {
 	BootstrapBrowserPairing,
 	BrowserNavigationLive,
@@ -19,17 +16,9 @@ import {
 
 export const RecoverKeyValueStore = Layer.catchCause(() => KeyValueStore.layerMemory);
 
-const ResilientBrowserKeyValueStoreLive =
-	BrowserKeyValueStore.layerLocalStorage.pipe(RecoverKeyValueStore);
-
 const ShellPresentationPreferencesRuntimeLive = Layer.provide(
 	ShellPresentationPreferencesLive,
-	ResilientBrowserKeyValueStoreLive,
-);
-
-const DesktopClientRuntimeLive = make_artisan_client_layer().pipe(
-	Layer.provideMerge(FrontendMessagePortConnectorLive),
-	Layer.provide(TransportRuntimeLive),
+	KeyValueStore.layerMemory,
 );
 
 const ArtisanClientRuntimeLive = Layer.unwrap(
@@ -37,11 +26,6 @@ const ArtisanClientRuntimeLive = Layer.unwrap(
 		const renderer_window = (
 			globalThis as {
 				readonly window?: {
-					readonly artisanDesktop?: {
-						readonly forgeWebSocketEndpoint?: unknown;
-						readonly forgeWebSocketUrl?: unknown;
-						readonly websocketUrl?: unknown;
-					};
 					readonly location?: {
 						readonly hash: string;
 						readonly origin: string;
@@ -73,9 +57,6 @@ const ArtisanClientRuntimeLive = Layer.unwrap(
 			}
 		).env;
 		const target = ResolveWebSocketRuntimeTarget({
-			...(renderer_window?.artisanDesktop === undefined
-				? {}
-				: { desktop: renderer_window.artisanDesktop }),
 			...(environment?.VITE_ARTISAN_FORGE_WS_URL === undefined
 				? {}
 				: { development_url: environment.VITE_ARTISAN_FORGE_WS_URL }),
@@ -85,9 +66,7 @@ const ArtisanClientRuntimeLive = Layer.unwrap(
 				: { location: renderer_window.location }),
 		});
 
-		return target._tag === "websocket"
-			? make_websocket_client_runtime_layer(target.url)
-			: DesktopClientRuntimeLive;
+		return make_websocket_client_runtime_layer(target);
 	}),
 );
 

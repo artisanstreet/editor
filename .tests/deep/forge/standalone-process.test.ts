@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { Effect, Fiber, Layer, ManagedRuntime, Stream } from "effect";
 import { WebSocket } from "ws";
 
+import type { Project } from "@artisan/protocol";
 import { ArtisanClient } from "@artisan/transport/client";
 import { make_artisan_client_layer, TransportRuntimeLive } from "@artisan/transport/client";
 import {
@@ -101,7 +102,6 @@ const StartForge = async (input: {
 			ARTISAN_MIGRATIONS_PATH: resolve(".dist/forge/migrations"),
 			ARTISAN_NATIVE_RUNTIME: resolve(".dist/forge/native-runtime"),
 			ARTISAN_NODE_EXECUTABLE: process.execPath,
-			ARTISAN_PROJECT_ROOTS: JSON.stringify([process.cwd()]),
 			ARTISAN_STATIC_FRONTEND_ROOT: resolve(".dist/forge/frontend"),
 			ARTISAN_WINDOWS_PROCESS_HOST: resolve(".dist/forge/windows-process-host.js"),
 			/** Exercises the canonical long-lived Codex CLI stdio boundary. */
@@ -260,32 +260,35 @@ describe("standalone Artisan Forge process", () => {
 		roots.push(root);
 		const database_path = join(root, "artisan.db");
 		const token = "standalone-codex-flow-token-with-32-chars";
-		const thread_id = "thread_standalone_codex";
-		const project = {
-			display_name: "Standalone Codex fixture",
-			project_id: "project_standalone_codex",
-			root_path: root,
-		};
+		let thread_id = "";
+		let project: Project;
 		const first = await StartForge({ database_path, root, token });
 		const first_runtime = await MakeClient(first.ready.endpoint, token);
 		const first_client = await first_runtime.runPromise(ArtisanClient);
 
 		try {
 			expect(await first_runtime.runPromise(first_client.ListThreads)).toEqual([]);
-			await first_runtime.runPromise(
-				first_client.Command({
-					command_id: "standalone-create-thread",
-					payload: { title: "Standalone Codex flow", type: "thread.create" },
-					thread_id,
+			const repository_roots = await first_runtime.runPromise(
+				first_client.ListProjectDirectories(),
+			);
+			const repository_root = repository_roots.directories.find(
+				(directory) =>
+					directory.kind === "root" && directory.display_name === basename(process.cwd()),
+			);
+			expect(repository_root).toBeDefined();
+			project = await first_runtime.runPromise(
+				first_client.SelectProjectDirectory({
+					directory_id: repository_root!.directory_id,
 				}),
 			);
-			await first_runtime.runPromise(
-				first_client.Command({
-					command_id: "standalone-assign-project",
-					payload: { project, type: "thread.project.assign" },
-					thread_id,
-				}),
-			);
+			thread_id = (
+				await first_runtime.runPromise(
+					first_client.CreateThread({
+						project_id: project.project_id,
+						title: "Standalone Codex flow",
+					}),
+				)
+			).thread_id;
 
 			const updates = await first_runtime.runPromise(
 				Effect.scoped(
@@ -300,10 +303,8 @@ describe("standalone Artisan Forge process", () => {
 							command_id: "standalone-send-message",
 							payload: {
 								engine_id: "codex",
-								mentioned_projects: [project],
 								text: "Reply through the Codex fixture.",
 								type: "thread.send_message",
-								working_directory: root,
 							},
 							thread_id,
 						});
@@ -410,7 +411,7 @@ describe("standalone Artisan Forge process", () => {
 		roots.push(root);
 		const database_path = join(root, "artisan.db");
 		const token = "standalone-browser-project-token-with-32-chars";
-		const thread_id = "thread_standalone_browser_project";
+		let thread_id = "";
 		const repository_name = basename(process.cwd());
 		const first = await StartForge({ database_path, root, token });
 		const first_runtime = await MakeClient(first.ready.endpoint, token);
@@ -460,20 +461,14 @@ describe("standalone Artisan Forge process", () => {
 			});
 			expect(project.root_path).toBeTruthy();
 
-			await first_runtime.runPromise(
-				first_client.Command({
-					command_id: "standalone-browser-create-thread",
-					payload: { title: "Standalone browser project", type: "thread.create" },
-					thread_id,
-				}),
-			);
-			await first_runtime.runPromise(
-				first_client.Command({
-					command_id: "standalone-browser-assign-project",
-					payload: { project, type: "thread.project.assign" },
-					thread_id,
-				}),
-			);
+			thread_id = (
+				await first_runtime.runPromise(
+					first_client.CreateThread({
+						project_id: project.project_id,
+						title: "Standalone browser project",
+					}),
+				)
+			).thread_id;
 		} finally {
 			await first_runtime.runPromise(first_client.Dispose).catch(() => undefined);
 			await first_runtime.dispose().catch(() => undefined);
@@ -488,7 +483,11 @@ describe("standalone Artisan Forge process", () => {
 			expect(threads).toEqual(
 				expect.arrayContaining([
 					expect.objectContaining({
-						primary_project: project!,
+						primary_project: {
+							display_name: project!.display_name,
+							project_id: project!.project_id,
+							root_path: project!.root_path,
+						},
 						thread_id,
 					}),
 				]),

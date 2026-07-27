@@ -3,10 +3,12 @@ import { Effect, Layer, Schema } from "effect";
 
 import {
 	EventPayload,
+	Project,
 	ThreadSessionPolicy,
 	RawOrigin,
 	type CommandEnvelope,
 	type EventEnvelope,
+	type ProjectRef,
 	type ThreadMessageRoutedEvent,
 	type ThreadSessionSnapshot,
 	type ThreadWorkItem,
@@ -17,6 +19,7 @@ import { Database } from "./database";
 import { AppendJournalEventInTransaction } from "./journal-store";
 import {
 	ImageAttachmentsFor,
+	CanonicaliseClientMessageIntent,
 	SanitisePayload,
 	ValidateImageAttachments,
 } from "./orchestration/message-attachments";
@@ -25,12 +28,17 @@ import {
 	OrchestrationCommandConflict,
 	OrchestrationFailure,
 	OrchestrationNotFound,
+	OrchestrationProjectAuthorityError,
 	OrchestrationRepository,
 	type OrchestrationError,
 	type OutboxKind,
 	type RecoverableNativeRun,
 	type WorkStatus,
 } from "./orchestration/contracts";
+import type {
+	AuthoritativeThreadSendMessageCommand,
+	InboundOrAuthoritativeCommandEnvelope,
+} from "./orchestration/message-command";
 import { JournalNotifier } from "./journal-notifier";
 import {
 	JournalCommands,
@@ -44,6 +52,7 @@ import {
 	OrchestrationRawObservations,
 	OrchestrationRuns,
 	Threads,
+	Projects,
 } from "./schema";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { ApplyEngineObservation } from "../conversation/index.ts";
@@ -61,8 +70,18 @@ export {
 	type RecoverableNativeRun,
 } from "./orchestration/contracts";
 
+type AuthoritativePayload =
+	| (CommandEnvelope["payload"] & {
+			readonly type: Exclude<CommandEnvelope["payload"]["type"], "thread.send_message">;
+	  })
+	| AuthoritativeThreadSendMessageCommand;
+
 function normalize_error(error: unknown): OrchestrationError {
-	if (error instanceof OrchestrationCommandConflict || error instanceof OrchestrationNotFound) {
+	if (
+		error instanceof OrchestrationCommandConflict ||
+		error instanceof OrchestrationNotFound ||
+		error instanceof OrchestrationProjectAuthorityError
+	) {
 		return error;
 	}
 
@@ -312,17 +331,24 @@ export const OrchestrationRepositoryLive = Layer.effect(
 				)
 				.pipe(Effect.mapError(normalize_error));
 
-		const Accept = (
-			command: CommandEnvelope,
+		const AcceptCommand = (
+			command: InboundOrAuthoritativeCommandEnvelope,
 			can_steer: boolean,
 			intake?: IntakeAssessment,
 			routing_reason?: ThreadMessageRoutedEvent["reason"],
+			client_intent = false,
 		) =>
 			Effect.gen(function* () {
 				const payload_json = yield* Effect.try({
 					try: () => {
 						ValidateImageAttachments(command.payload);
-						return JSON.stringify(SanitisePayload(command.payload));
+						return JSON.stringify(
+							client_intent
+								? CanonicaliseClientMessageIntent(
+										command.payload as CommandEnvelope["payload"],
+									)
+								: SanitisePayload(command.payload),
+						);
 					},
 					catch: (cause) => new OrchestrationFailure({ cause }),
 				});
@@ -457,7 +483,10 @@ export const OrchestrationRepositoryLive = Layer.effect(
 						}
 
 						const [thread] = yield* transaction
-							.select({ thread_id: Threads.thread_id })
+							.select({
+								primary_project_id: Threads.primary_project_id,
+								thread_id: Threads.thread_id,
+							})
 							.from(Threads)
 							.where(eq(Threads.thread_id, command.thread_id))
 							.limit(1);
@@ -469,12 +498,97 @@ export const OrchestrationRepositoryLive = Layer.effect(
 							});
 						}
 
+						const incoming_payload = command.payload;
+						const payload: AuthoritativePayload =
+							incoming_payload.type !== "thread.send_message" ||
+							"working_directory" in incoming_payload
+								? (incoming_payload as AuthoritativePayload)
+								: yield* Effect.gen(function* () {
+										if (thread.primary_project_id === null) {
+											return yield* new OrchestrationProjectAuthorityError({
+												reason: "thread_unassigned",
+												thread_id: command.thread_id,
+											});
+										}
+
+										const [project_row] = yield* transaction
+											.select()
+											.from(Projects)
+											.where(
+												eq(Projects.project_id, thread.primary_project_id),
+											)
+											.limit(1);
+										if (!project_row) {
+											return yield* new OrchestrationProjectAuthorityError({
+												project_id: thread.primary_project_id,
+												reason: "project_detached",
+												thread_id: command.thread_id,
+											});
+										}
+
+										const project = yield* Schema.decodeUnknownEffect(Project)(
+											project_row,
+										).pipe(
+											Effect.mapError(
+												(cause) => new OrchestrationFailure({ cause }),
+											),
+										);
+										const project_ref: ProjectRef = {
+											display_name: project.display_name,
+											project_id: project.project_id,
+											root_path: project.root_path,
+										};
+										const attachments = yield* Effect.forEach(
+											incoming_payload.attachments ?? [],
+											(attachment) =>
+												metadata.MakeId("attachment").pipe(
+													Effect.map((id) => ({
+														bytes: attachment.bytes,
+														id,
+														media_type: attachment.media_type,
+														name: attachment.name,
+														token: attachment.client_token,
+													})),
+												),
+										);
+										const attachment_ids = new Map(
+											attachments.map((attachment) => [
+												attachment.token,
+												attachment.id,
+											]),
+										);
+										const content = incoming_payload.content?.map((part) =>
+											part.type === "text"
+												? part
+												: {
+														attachment_id: attachment_ids.get(
+															part.client_token,
+														)!,
+														type: "image" as const,
+													},
+										);
+
+										return {
+											...incoming_payload,
+											...(attachments.length === 0
+												? {}
+												: {
+														attachments: attachments.map(
+															({ token: _token, ...attachment }) =>
+																attachment,
+														),
+													}),
+											...(content === undefined ? {} : { content }),
+											mentioned_projects: [project_ref],
+											working_directory: project.root_path,
+										} as AuthoritativeThreadSendMessageCommand;
+									});
+
 						const [coordinator] = yield* transaction
 							.select()
 							.from(OrchestrationCoordinators)
 							.where(eq(OrchestrationCoordinators.thread_id, command.thread_id))
 							.limit(1);
-						const payload = command.payload;
 						const accepted_at = yield* metadata.Now;
 						if (payload.type === "thread.auto_steer.update") {
 							if (!coordinator) {
@@ -1246,7 +1360,10 @@ export const OrchestrationRepositoryLive = Layer.effect(
 							command_id: command.message_id,
 							created_at: accepted_at,
 							kind,
-							payload_json,
+							payload_json:
+								payload.type === "thread.send_message"
+									? JSON.stringify(SanitisePayload(payload))
+									: payload_json,
 							run_id,
 							status: "pending",
 							thread_id: command.thread_id,
@@ -1514,13 +1631,25 @@ export const OrchestrationRepositoryLive = Layer.effect(
 
 		const RecordObservation = (observation: EngineObservation) =>
 			Effect.gen(function* () {
+				const frame_json = JSON.stringify(observation.raw.frame) ?? "null";
+				/**
+				 * UTF-8 JSON can reconstruct an identical raw frame byte-for-byte. Retaining
+				 * its base64 twin duplicates the full payload, but base64 stays for binary or
+				 * otherwise non-identical native frames where it is the exact record.
+				 */
+				const raw_frame_base64 =
+					observation.raw.raw_frame_base64 !== undefined &&
+					Buffer.from(frame_json, "utf8").toString("base64") ===
+						observation.raw.raw_frame_base64
+						? null
+						: (observation.raw.raw_frame_base64 ?? null);
 				const result = yield* database.client.transaction((transaction) =>
 					Effect.gen(function* () {
 						const inserted_observation = yield* transaction
 							.insert(OrchestrationRawObservations)
 							.values({
 								engine_id: observation.raw.engine_id,
-								frame_json: JSON.stringify(observation.raw.frame) ?? "null",
+								frame_json,
 								native_id:
 									observation.raw.native_id === undefined
 										? null
@@ -1528,7 +1657,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 								native_method: observation.raw.native_method ?? null,
 								observation_id: observation.observation_id,
 								protocol_version: observation.raw.protocol_version ?? null,
-								raw_frame_base64: observation.raw.raw_frame_base64 ?? null,
+								raw_frame_base64,
 								run_id: observation.artisan_run_id,
 								sequence: observation.sequence,
 								transport: observation.raw.transport,
@@ -1834,9 +1963,22 @@ export const OrchestrationRepositoryLive = Layer.effect(
 			}).pipe(Effect.mapError(normalize_error));
 
 		const MarkInterrupted = () => ClaimNativeRecoveries().pipe(Effect.asVoid);
+		const Accept = (
+			command: import("./orchestration/message-command").AuthoritativeCommandEnvelope,
+			can_steer: boolean,
+			intake?: IntakeAssessment,
+			routing_reason?: ThreadMessageRoutedEvent["reason"],
+		) => AcceptCommand(command, can_steer, intake, routing_reason);
+		const AcceptInbound = (
+			command: CommandEnvelope,
+			can_steer: boolean,
+			intake?: IntakeAssessment,
+			routing_reason?: ThreadMessageRoutedEvent["reason"],
+		) => AcceptCommand(command, can_steer, intake, routing_reason, true);
 
 		return {
 			Accept,
+			AcceptInbound,
 			ClaimOutbox,
 			ClaimNativeRecoveries,
 			CompleteOutbox,

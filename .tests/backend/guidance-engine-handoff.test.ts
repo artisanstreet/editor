@@ -7,8 +7,9 @@ import { Effect, Layer, Stream } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { Engine, EngineOpenInput } from "@artisan/engines";
-import type { CommandEnvelope } from "@artisan/protocol";
+import type { AuthoritativeCommandEnvelope } from "../../modules/backend/src/persistence/orchestration/message-command";
 import {
+	AgentOrchestrator,
 	GlobalGuidanceService,
 	GuidanceProviderRegistry,
 	make_backend_runtime,
@@ -101,8 +102,8 @@ async function make_paths(label: string) {
 function command(
 	message_id: string,
 	thread_id: string,
-	payload: CommandEnvelope["payload"],
-): CommandEnvelope {
+	payload: AuthoritativeCommandEnvelope["payload"],
+): AuthoritativeCommandEnvelope {
 	return {
 		kind: "command",
 		message_id,
@@ -115,9 +116,17 @@ function command(
 	};
 }
 
-function route(runtime: ReturnType<typeof make_backend_runtime>, envelope: CommandEnvelope) {
+function route(
+	runtime: ReturnType<typeof make_backend_runtime>,
+	envelope: AuthoritativeCommandEnvelope,
+) {
 	return runtime.runPromise(
 		Effect.gen(function* () {
+			if (envelope.payload.type === "thread.send_message") {
+				const orchestrator = yield* AgentOrchestrator;
+
+				return yield* orchestrator.Handle(envelope);
+			}
 			const router = yield* ProtocolRouter;
 
 			return yield* router.Route(envelope);

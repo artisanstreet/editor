@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { Effect } from "effect";
 
-import { DecodeCommandEnvelope, DecodeOutboundControlEnvelope } from "@artisan/protocol";
+import {
+	DecodeCommandEnvelope,
+	DecodeInboundControlEnvelope,
+	DecodeOutboundControlEnvelope,
+} from "@artisan/protocol";
 
 const mentioned_projects = [
 	{
@@ -46,6 +50,25 @@ function make_input() {
 }
 
 describe("protocol codec", () => {
+	it("decodes Forge-owned thread creation without a client-selected thread id", async () => {
+		const input = {
+			kind: "thread.create.request",
+			message_id: "message_create",
+			origin: "frontend",
+			payload: {
+				project_id: "project_artisan",
+				title: "Forge identity",
+			},
+			protocol_version: 1,
+			schema_version: 1,
+			sent_at: "2026-07-10T08:00:00.000Z",
+		};
+
+		await expect(Effect.runPromise(DecodeInboundControlEnvelope(input))).resolves.toEqual(
+			input,
+		);
+	});
+
 	it("decodes a valid command envelope", async () => {
 		const input = make_input();
 
@@ -93,19 +116,32 @@ describe("protocol codec", () => {
 		await expect(Effect.runPromise(DecodeCommandEnvelope(input))).rejects.toBeDefined();
 	});
 
-	it("roundtrips structured project mentions through message commands", async () => {
+	it("accepts message intent without filesystem authority", async () => {
 		const input = {
 			...make_input(),
 			payload: {
 				type: "thread.send_message",
 				engine_id: "engine_1",
-				mentioned_projects,
 				text: "Use the Artisan repository.",
-				working_directory: "C:/Users/Sander/Desktop/artisan-editor",
 			},
 		};
 
 		await expect(Effect.runPromise(DecodeCommandEnvelope(input))).resolves.toEqual(input);
+	});
+
+	it("rejects client-origin project and path authority on message commands", async () => {
+		const input = {
+			...make_input(),
+			payload: {
+				engine_id: "engine_1",
+				mentioned_projects,
+				text: "Use the Artisan repository.",
+				type: "thread.send_message",
+				working_directory: "C:/Users/Sander/Desktop/artisan-editor",
+			},
+		};
+
+		await expect(Effect.runPromise(DecodeCommandEnvelope(input))).rejects.toBeDefined();
 	});
 
 	it("roundtrips resolved project mentions through metadata refinement commands", async () => {

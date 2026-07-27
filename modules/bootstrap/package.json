@@ -1,0 +1,32 @@
+{
+	"name": "artisan-editor",
+	"version": "0.1.0",
+	"description": "Disposable signed installer bootstrap for Artisan Editor and Artisan Forge",
+	"bin": {
+		"ae": "./.dist/entry.js"
+	},
+	"files": [
+		".dist/entry.js"
+	],
+	"os": [
+		"win32"
+	],
+	"type": "module",
+	"exports": {
+		".": "./src/index.ts"
+	},
+	"scripts": {
+		"build": "vite build --config vite.config.ts",
+		"build:production": "vite build --config vite.config.ts --mode artisan-production",
+		"pack:check": "pnpm run build && npm pack --dry-run --json"
+	},
+	"devDependencies": {
+		"@artisan/distribution": "workspace:*",
+		"@effect/platform-node-shared": "4.0.0-beta.97",
+		"effect": "4.0.0-beta.97",
+		"vite": "8.1.4"
+	},
+	"engines": {
+		"node": ">=22"
+	}
+}

@@ -9,6 +9,7 @@
 	import { SnowflakeId } from "@artisan/protocol";
 	import type { ThreadSessionPolicy } from "@artisan/protocol";
 	import { Button } from "$lib/components/ui/button";
+	import { BannerService } from "$lib/banner/service";
 	import {
 		MakeSubmitGate,
 		type SubmitGate,
@@ -29,6 +30,7 @@
 	import ShaderGlassSurface from "./shader-glass-surface.sv";
 
 	const snowflake_id = yield* SnowflakeId;
+	const banner = yield* BannerService;
 
 	let {
 		active = false,
@@ -51,7 +53,6 @@
 	let attachments = $state<ReadonlyMap<string, ComposerImageAttachment>>(new Map());
 	let draft = $state("");
 	let image_viewer_open = $state(false);
-	let submit_error = $state<string | undefined>();
 	let submitting = $state(false);
 	let viewed_attachment = $state<ComposerImageAttachment | undefined>();
 	let placeholder = $state(MakeComposerPlaceholderState());
@@ -233,22 +234,22 @@
 				files.map((file) => ({ name: file.name, size_bytes: file.size, type: file.type })),
 			);
 			if (validation !== undefined) {
-				submit_error = validation;
+				yield* banner.error("Could not attach image", { description: validation });
 				return;
 			}
 			const loaded: Array<ComposerImageAttachment> = [];
 			yield* Effect.forEach(files, (file) =>
 				ReadFile(file).pipe(Effect.tap((attachment) => Effect.sync(() => loaded.push(attachment)))),
 			).pipe(
-				Effect.match({
-					onFailure: (cause) => {
+				Effect.matchEffect({
+					onFailure: (cause) =>
+						Effect.gen(function* () {
 						for (const attachment of loaded) revoke_attachment(attachment);
-						submit_error = cause.message;
-					},
+						yield* banner.error("Could not attach image", { description: cause.message });
+					}),
 					onSuccess: () => {
 						attachments = new Map([...attachments, ...loaded.map((attachment) => [attachment.id, attachment])]);
 						insert_attachments(loaded, range);
-						submit_error = undefined;
 					},
 				}),
 			);
@@ -278,15 +279,13 @@
 
 		yield* onsubmit({ attachments: attachment_parts, text }).pipe(
 			Effect.matchEffect({
-				onFailure: (error) => Effect.sync(() => {
-					submit_error = error.message;
-				}),
+				onFailure: (error) =>
+					banner.error("Could not send message", { description: error.message }),
 				onSuccess: () => Effect.sync(() => {
 					for (const attachment of attachments.values()) revoke_attachment(attachment);
 					attachments = new Map();
 					editor?.replaceChildren();
 					update_draft("");
-					submit_error = undefined;
 				}),
 			}),
 			Effect.ensuring(Effect.all([submit_gate.Release, Effect.sync(() => { submitting = false; })])),
@@ -398,7 +397,6 @@
 				</div>
 			</div>
 			<input bind:this={file_input} class="sr-only" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple onchange={yield* AddFiles([...(event.currentTarget.files ?? [])]).pipe(Effect.ensuring(Effect.sync(() => { event.currentTarget.value = ""; })))} />
-			{#if submit_error !== undefined}<p class="px-3 text-sm text-destructive" role="alert">{submit_error}</p>{/if}
 		</div>
 	</ShaderGlassSurface>
 </div>

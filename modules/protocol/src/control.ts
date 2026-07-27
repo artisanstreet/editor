@@ -5,6 +5,8 @@ import {
 	ProjectDirectoryListInput,
 	ProjectDirectorySelectInput,
 } from "./project-directory";
+import { Project, ProjectCatalogSnapshot, ProjectDetachInput } from "./project";
+import { RuntimeCatalog } from "./runtime-catalog";
 import {
 	OrchestrationGroupListQuery,
 	OrchestrationGroupListSnapshot,
@@ -16,6 +18,7 @@ import {
 	ImageAttachmentUpload,
 	MessageImageAttachmentQuery,
 	MessageImageAttachmentQueryResult,
+	UserMessageInputContentPart,
 	UserMessageContentPart,
 } from "./attachments";
 import {
@@ -86,6 +89,7 @@ import {
 	ThreadArchiveCommand,
 	ThreadContentErasedEvent,
 	ThreadCreateCommand,
+	ThreadCreateInput,
 	ThreadCreatedEvent,
 	ThreadErasedEvent,
 	ThreadListItem,
@@ -231,12 +235,10 @@ const EnvironmentVariableName = Schema.String.check(
 /** Queues user text for a thread or steers its active capable run. */
 export const ThreadSendMessageCommand = Schema.Struct({
 	attachments: Schema.optional(Schema.Array(ImageAttachmentUpload).check(Schema.isMaxLength(4))),
-	content: Schema.optional(Schema.Array(UserMessageContentPart)),
+	content: Schema.optional(Schema.Array(UserMessageInputContentPart)),
 	type: Schema.Literal("thread.send_message"),
 	engine_id: Identifier,
-	mentioned_projects: Schema.optional(Schema.Array(ProjectRef)),
 	text: Schema.NonEmptyString,
-	working_directory: Schema.NonEmptyString,
 });
 
 export type ThreadSendMessageCommand = typeof ThreadSendMessageCommand.Type;
@@ -442,6 +444,20 @@ const graph_action_status = Schema.String.check(
 	),
 );
 
+/**
+ * Caps one graph command's durable fan-out at a level the Forge dispatcher can
+ * safely absorb. The default concurrency remains four; a graph may queue up to
+ * one dispatcher batch of assignments without opening more app-server processes.
+ */
+export const OrchestrationFanoutLimits = {
+	max_assignments: 16,
+	max_concurrency: 4,
+} as const;
+
+const BoundedOrchestrationConcurrency = PositiveInt.check(
+	Schema.isLessThanOrEqualTo(OrchestrationFanoutLimits.max_concurrency),
+);
+
 /** Defines one bounded unit of intent in a fan-out orchestration group. */
 export const AssignmentSpec = Schema.Struct({
 	assignment_id: Identifier,
@@ -486,11 +502,14 @@ export type JoinSpec = typeof JoinSpec.Type;
 export const OrchestrationGroupStartCommand = Schema.Struct({
 	type: Schema.Literal("orchestration.group.start"),
 	group_id: Identifier,
-	assignments: Schema.Array(AssignmentSpec).check(Schema.isMinLength(2)),
+	assignments: Schema.Array(AssignmentSpec).check(
+		Schema.isMinLength(2),
+		Schema.isMaxLength(OrchestrationFanoutLimits.max_assignments),
+	),
 	edges: Schema.optional(Schema.Array(GraphEdgeSpec)),
 	joins: Schema.optional(Schema.Array(JoinSpec)),
 	name_bank: Schema.optional(Schema.NonEmptyArray(graph_visible_name)),
-	max_concurrency: Schema.optional(PositiveInt),
+	max_concurrency: Schema.optional(BoundedOrchestrationConcurrency),
 });
 
 /** Renames an Artisan-owned agent identity inside one visible group. */
@@ -1281,6 +1300,25 @@ export const ThreadListQueryResultEnvelope = Schema.Struct({
 
 export type ThreadListQueryResultEnvelope = typeof ThreadListQueryResultEnvelope.Type;
 
+/** Requests a new Forge-owned thread without accepting a client-selected identity. */
+export const ThreadCreateEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("thread.create.request"),
+	payload: ThreadCreateInput,
+});
+
+export type ThreadCreateEnvelope = typeof ThreadCreateEnvelope.Type;
+
+/** Returns the complete authoritative projection for the newly created thread. */
+export const ThreadCreateResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("thread.create.result"),
+	payload: ThreadListItem,
+});
+
+export type ThreadCreateResultEnvelope = typeof ThreadCreateResultEnvelope.Type;
+
 /** Lists allowed server-side roots or the children of one opaque directory id. */
 export const ProjectDirectoryListQueryEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
@@ -1312,9 +1350,60 @@ export const ProjectDirectorySelectResultEnvelope = Schema.Struct({
 	...NegotiatedBackendTraceMetadata,
 	correlation_id: Identifier,
 	kind: Schema.Literal("project.directory.select.result"),
-	payload: ProjectRef,
+	payload: Project,
 });
 export type ProjectDirectorySelectResultEnvelope = typeof ProjectDirectorySelectResultEnvelope.Type;
+
+/** Requests the complete authoritative project catalog owned by Forge. */
+export const ProjectListQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("project.list.query"),
+	payload: Schema.Struct({}),
+});
+export type ProjectListQueryEnvelope = typeof ProjectListQueryEnvelope.Type;
+
+/** Returns the complete authoritative Forge project catalog. */
+export const ProjectListQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("project.list.query.result"),
+	payload: ProjectCatalogSnapshot,
+});
+export type ProjectListQueryResultEnvelope = typeof ProjectListQueryResultEnvelope.Type;
+
+/** Detaches one Forge-owned project without accepting client filesystem data. */
+export const ProjectDetachEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("project.detach"),
+	payload: ProjectDetachInput,
+});
+export type ProjectDetachEnvelope = typeof ProjectDetachEnvelope.Type;
+
+/** Returns the authoritative catalog after a project mutation. */
+export const ProjectDetachResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("project.detach.result"),
+	payload: ProjectCatalogSnapshot,
+});
+export type ProjectDetachResultEnvelope = typeof ProjectDetachResultEnvelope.Type;
+
+/** Requests the immutable capability catalog exposed by this Forge process. */
+export const RuntimeCatalogQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("runtime.catalog.query"),
+	payload: Schema.Struct({}),
+});
+export type RuntimeCatalogQueryEnvelope = typeof RuntimeCatalogQueryEnvelope.Type;
+
+/** Returns only model and harness capabilities backed by registered Forge adapters. */
+export const RuntimeCatalogQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("runtime.catalog.query.result"),
+	payload: RuntimeCatalog,
+});
+export type RuntimeCatalogQueryResultEnvelope = typeof RuntimeCatalogQueryResultEnvelope.Type;
 
 /** Requests the current global inactive-thread retention policy. */
 export const ThreadRetentionQueryEnvelope = Schema.Struct({
@@ -2322,6 +2411,7 @@ export const SubscribeEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
 	kind: Schema.Literal("subscribe"),
 	payload: Schema.Union([
+		Schema.Struct({ type: Schema.Literal("project.list") }),
 		Schema.Struct({ type: Schema.Literal("thread.list") }),
 		Schema.Struct({ type: Schema.Literal("orchestration.graph"), group_id: Identifier }),
 		Schema.Struct({ type: Schema.Literal("thread.transcript"), thread_id: Identifier }),
@@ -2418,6 +2508,28 @@ export const ThreadListRemoveEnvelope = Schema.Struct({
 });
 
 export type ThreadListRemoveEnvelope = typeof ThreadListRemoveEnvelope.Type;
+
+/** Provides the current Forge-owned project catalog for one ordered subscription. */
+export const ProjectListSnapshotEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	kind: Schema.Literal("project.list.snapshot"),
+	payload: ProjectCatalogSnapshot,
+	sequence: StreamSequence,
+	stream_id: Identifier,
+	subscription_id: Identifier,
+});
+export type ProjectListSnapshotEnvelope = typeof ProjectListSnapshotEnvelope.Type;
+
+/** Replaces the Forge-owned project catalog after an attach or detach mutation. */
+export const ProjectListUpdatedEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	kind: Schema.Literal("project.list.updated"),
+	payload: ProjectCatalogSnapshot,
+	sequence: StreamSequence,
+	stream_id: Identifier,
+	subscription_id: Identifier,
+});
+export type ProjectListUpdatedEnvelope = typeof ProjectListUpdatedEnvelope.Type;
 
 /** Provides the initial graph projection for one ordered subscription. */
 export const OrchestrationGraphSnapshotEnvelope = Schema.Struct({
@@ -2747,9 +2859,13 @@ export type WorkspaceLanguageCapabilitiesQueryResultEnvelope =
 export const InboundControlEnvelope = Schema.Union([
 	HelloEnvelope,
 	CommandEnvelope,
+	ThreadCreateEnvelope,
 	ThreadListQueryEnvelope,
 	ProjectDirectoryListQueryEnvelope,
 	ProjectDirectorySelectEnvelope,
+	ProjectListQueryEnvelope,
+	ProjectDetachEnvelope,
+	RuntimeCatalogQueryEnvelope,
 	ThreadRetentionQueryEnvelope,
 	ThreadRetentionUpdateEnvelope,
 	WorkspaceFileReadQueryEnvelope,
@@ -2860,9 +2976,15 @@ export const OutboundControlEnvelope = Schema.Union([
 	CommandReceiptEnvelope,
 	EventEnvelope,
 	ProtocolErrorEnvelope,
+	ThreadCreateResultEnvelope,
 	ThreadListQueryResultEnvelope,
 	ProjectDirectoryListQueryResultEnvelope,
 	ProjectDirectorySelectResultEnvelope,
+	ProjectListQueryResultEnvelope,
+	ProjectDetachResultEnvelope,
+	ProjectListSnapshotEnvelope,
+	ProjectListUpdatedEnvelope,
+	RuntimeCatalogQueryResultEnvelope,
 	ThreadRetentionQueryResultEnvelope,
 	WorkspaceFileReadQueryResultEnvelope,
 	WorkspaceChangeListQueryResultEnvelope,

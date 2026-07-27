@@ -13,7 +13,8 @@ import {
 	type EngineCommand,
 	type EngineRun,
 } from "@artisan/engines";
-import type { CommandEnvelope, EventEnvelope } from "@artisan/protocol";
+import type { EventEnvelope } from "@artisan/protocol";
+import type { AuthoritativeCommandEnvelope } from "../../modules/backend/src/persistence/orchestration/message-command";
 import { JournalStore } from "../../modules/backend/src/persistence/journal-store";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
@@ -25,11 +26,11 @@ async function make_database_path() {
 	return join(directory, "artisan.db");
 }
 
-function command(
+function command<const Payload extends AuthoritativeCommandEnvelope["payload"]>(
 	message_id: string,
 	thread_id: string,
-	payload: CommandEnvelope["payload"],
-): CommandEnvelope {
+	payload: Payload,
+): Omit<AuthoritativeCommandEnvelope, "payload"> & { readonly payload: Payload } {
 	return {
 		kind: "command",
 		message_id,

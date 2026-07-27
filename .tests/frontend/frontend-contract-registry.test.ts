@@ -43,7 +43,6 @@ describe("frontend contract registry", () => {
 				"right.permissions-usage",
 				"connection.lifecycle",
 				"desktop-shell.electron-bootstrap",
-				"desktop-shell.activity-indicator",
 			]),
 		);
 		for (const entry of FrontendContractRegistry) {
@@ -92,8 +91,7 @@ describe("frontend contract registry", () => {
 	it("records the audited integration state for moving and unavailable domains", () => {
 		const expected_states = {
 			"desktop-shell.electron-bootstrap": "live",
-			"desktop-shell.activity-indicator": "live",
-			"left.identity": "live",
+			"left.identity": "blocked",
 			"left.marketplace": "live",
 			"main.change-diff": "live",
 			"main.change-review": "live",
@@ -117,6 +115,12 @@ describe("frontend contract registry", () => {
 				state,
 			});
 		}
+
+		expect(
+			FrontendContractRegistry.some(
+				(entry) => entry.id === "desktop-shell.activity-indicator",
+			),
+		).toBe(false);
 	});
 
 	it("records the one-visible-checkout assignment constraint", () => {

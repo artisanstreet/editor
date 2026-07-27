@@ -279,23 +279,6 @@ describe("durable multi-agent graph", () => {
 			await create_thread(runtime);
 			await route(
 				runtime,
-				command("set_graph_session_policy", {
-					policy: {
-						engine_id: "codex",
-						model: "gpt-5.3-codex",
-						permission_mode: "on_request",
-						reasoning_effort: "high",
-						sandbox_mode: "workspace_write",
-						service_tier: "standard",
-						strict_clarification: true,
-						workflow_mode: "build",
-						web_search_enabled: true,
-					},
-					type: "thread.session_policy.update",
-				}),
-			);
-			await route(
-				runtime,
 				start_command(
 					"start_graph",
 					[
@@ -352,23 +335,23 @@ describe("durable multi-agent graph", () => {
 				]),
 			);
 			expect(fake.runs.map(({ input }) => input.model)).toEqual([
-				"gpt-5.3-codex",
-				"gpt-5.3-codex",
-				"gpt-5.3-codex",
+				"researcher-profile",
+				"implementer-profile",
+				"tester-profile",
 			]);
 			expect(fake.runs.map(({ input }) => input.provider_options)).toEqual([
 				{
-					"codex.reasoning_effort": "high",
+					"codex.reasoning_effort": "medium",
 					"codex.service_tier": "standard",
 					"codex.workflow_mode": "build",
 				},
 				{
-					"codex.reasoning_effort": "high",
+					"codex.reasoning_effort": "medium",
 					"codex.service_tier": "standard",
 					"codex.workflow_mode": "build",
 				},
 				{
-					"codex.reasoning_effort": "high",
+					"codex.reasoning_effort": "medium",
 					"codex.service_tier": "standard",
 					"codex.workflow_mode": "build",
 				},

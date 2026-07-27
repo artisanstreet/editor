@@ -125,6 +125,19 @@ export const Threads = sqliteTable(
 	],
 );
 
+/** Stores the authoritative catalog of projects attached to this Forge instance. */
+export const Projects = sqliteTable(
+	"projects",
+	{
+		attached_at: text("attached_at").notNull(),
+		display_name: text("display_name").notNull(),
+		project_id: text("project_id").primaryKey(),
+		root_path: text("root_path").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [uniqueIndex("projects_root_path_unique").on(table.root_path)],
+);
+
 /** Stores idempotent, content-free evidence used to calculate project affinity. */
 export const ThreadProjectAffinityEvidence = sqliteTable(
 	"thread_project_affinity_evidence",

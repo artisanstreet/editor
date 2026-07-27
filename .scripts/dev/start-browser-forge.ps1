@@ -14,8 +14,7 @@ $env:ARTISAN_HOME = $profile_home
 	--profile browser-dev `
 	--mode local `
 	--data-root (Join-Path $development "browser-forge") `
-	--listen-port 4848 `
-	--project-root $workspace
+	--listen-port 4848
 if ($LASTEXITCODE -ne 0) {
 	throw "Could not configure the browser development Forge profile"
 }

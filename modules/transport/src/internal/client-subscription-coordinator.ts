@@ -11,6 +11,7 @@ import type {
 import type {
 	ArtisanClientCursors,
 	ArtisanClientError,
+	ProjectCatalogUpdate,
 	OrchestrationGraphUpdate,
 	OrchestrationGroupListUpdate,
 	SurfaceListUpdate,
@@ -39,6 +40,11 @@ interface ProjectionSubscriptionBase {
 interface ThreadListSubscription extends ProjectionSubscriptionBase {
 	readonly _tag: "thread.list";
 	readonly queue: Queue.Queue<ThreadListUpdate, ArtisanClientError | Cause.Done<void>>;
+}
+
+interface ProjectCatalogSubscription extends ProjectionSubscriptionBase {
+	readonly _tag: "project.list";
+	readonly queue: Queue.Queue<ProjectCatalogUpdate, ArtisanClientError | Cause.Done<void>>;
 }
 
 interface OrchestrationGraphSubscription extends ProjectionSubscriptionBase {
@@ -79,6 +85,7 @@ interface WorkspaceConflictListSubscription extends ProjectionSubscriptionBase {
 
 type ProjectionSubscription =
 	| OrchestrationGraphSubscription
+	| ProjectCatalogSubscription
 	| ThreadListSubscription
 	| ThreadTranscriptSubscription
 	| ConversationSubscription
@@ -97,6 +104,8 @@ type ProjectionEnvelope = Extract<
 			| "thread.list.snapshot"
 			| "thread.list.upsert"
 			| "thread.list.remove"
+			| "project.list.snapshot"
+			| "project.list.updated"
 			| "thread.transcript.snapshot"
 			| "thread.transcript.append"
 			| "conversation.snapshot"
@@ -187,6 +196,11 @@ export interface ClientSubscriptionCoordinator {
 	>;
 	readonly SubscribeThreadList: Effect.Effect<
 		Stream.Stream<ThreadListUpdate, ArtisanClientError>,
+		ArtisanClientError,
+		Scope.Scope
+	>;
+	readonly SubscribeProjects: Effect.Effect<
+		Stream.Stream<ProjectCatalogUpdate, ArtisanClientError>,
 		ArtisanClientError,
 		Scope.Scope
 	>;
@@ -475,6 +489,18 @@ export const make_client_subscription_coordinator = (
 									type: "remove",
 								};
 
+				return Queue.offerUnsafe(subscription.queue, update) ? "offered" : "overflow";
+			}
+
+			if (
+				subscription._tag === "project.list" &&
+				(envelope.kind === "project.list.snapshot" ||
+					envelope.kind === "project.list.updated")
+			) {
+				const update: ProjectCatalogUpdate = {
+					snapshot: envelope.payload,
+					type: envelope.kind === "project.list.snapshot" ? "snapshot" : "replacement",
+				};
 				return Queue.offerUnsafe(subscription.queue, update) ? "offered" : "overflow";
 			}
 
@@ -801,6 +827,32 @@ export const make_client_subscription_coordinator = (
 
 			return Stream.fromQueue(queue);
 		});
+		const subscribe_projects = Effect.gen(function* () {
+			const trace = yield* make_trace;
+			const subscription_id = yield* make_id("project_list_subscription");
+			const queue = yield* Effect.acquireRelease(
+				Queue.dropping<ProjectCatalogUpdate, ArtisanClientError | Cause.Done<void>>(
+					subscription_capacity,
+				),
+				Queue.shutdown,
+			);
+			const started = yield* Deferred.make<void, ArtisanClientError>();
+			const subscription: ProjectCatalogSubscription = {
+				_tag: "project.list",
+				envelope: {
+					...trace,
+					kind: "subscribe",
+					payload: { type: "project.list" },
+					subscription_id,
+				},
+				expected_sequence: -1,
+				queue,
+				started,
+				stream_id: Option.none(),
+			};
+			yield* start_subscription(subscription);
+			return Stream.fromQueue(queue);
+		});
 
 		const subscribe_orchestration_graph = (group_id: string) =>
 			Effect.gen(function* () {
@@ -1111,6 +1163,7 @@ export const make_client_subscription_coordinator = (
 			SubscribeOrchestrationGraph: subscribe_orchestration_graph,
 			SubscribeOrchestrationGroups: subscribe_orchestration_groups,
 			SubscribeThreadList: subscribe_thread_list,
+			SubscribeProjects: subscribe_projects,
 			SubscribeThreadTranscript: subscribe_thread_transcript,
 			SubscribeConversation: subscribe_conversation,
 			SubscribeThreadSession: (thread_id) =>

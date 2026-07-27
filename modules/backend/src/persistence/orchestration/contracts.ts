@@ -11,6 +11,10 @@ import {
 import type { EngineObservation, EngineResumeToken } from "@artisan/engines";
 
 import type { IntakeAssessment } from "../../orchestration/intake-policy";
+import type {
+	AuthoritativeCommandEnvelope,
+	AuthoritativeThreadSendMessageCommand,
+} from "./message-command";
 
 export type WorkStatus = ThreadWorkItem["status"];
 export type OutboxKind =
@@ -26,8 +30,17 @@ export class OrchestrationCommandConflict extends Data.TaggedError("Orchestratio
 }> {}
 
 export class OrchestrationNotFound extends Data.TaggedError("OrchestrationNotFound")<{
-	readonly resource: "run" | "thread";
+	readonly resource: "project" | "run" | "thread";
 	readonly id: string;
+}> {}
+
+/** Rejects message execution when its thread has no live Forge-owned project authority. */
+export class OrchestrationProjectAuthorityError extends Data.TaggedError(
+	"OrchestrationProjectAuthorityError",
+)<{
+	readonly project_id?: string;
+	readonly reason: "project_detached" | "thread_unassigned";
+	readonly thread_id: string;
 }> {}
 
 export class OrchestrationFailure extends Data.TaggedError("OrchestrationFailure")<{
@@ -37,7 +50,8 @@ export class OrchestrationFailure extends Data.TaggedError("OrchestrationFailure
 export type OrchestrationError =
 	| OrchestrationCommandConflict
 	| OrchestrationFailure
-	| OrchestrationNotFound;
+	| OrchestrationNotFound
+	| OrchestrationProjectAuthorityError;
 
 export interface AcceptedOrchestrationCommand {
 	readonly events: ReadonlyArray<EventEnvelope>;
@@ -51,7 +65,11 @@ export interface PendingWork {
 	readonly command_id: string;
 	readonly engine_id: string;
 	readonly kind: OutboxKind;
-	readonly payload: CommandEnvelope["payload"];
+	readonly payload:
+		| (CommandEnvelope["payload"] & {
+				readonly type: Exclude<CommandEnvelope["payload"]["type"], "thread.send_message">;
+		  })
+		| AuthoritativeThreadSendMessageCommand;
 	readonly run_id: string;
 	readonly thread_id: string;
 	readonly working_directory: string;
@@ -71,6 +89,12 @@ export class OrchestrationRepository extends Context.Service<
 	OrchestrationRepository,
 	{
 		readonly Accept: (
+			command: AuthoritativeCommandEnvelope,
+			can_steer: boolean,
+			intake?: IntakeAssessment,
+			routing_reason?: ThreadMessageRoutedEvent["reason"],
+		) => Effect.Effect<AcceptedOrchestrationCommand, OrchestrationError>;
+		readonly AcceptInbound: (
 			command: CommandEnvelope,
 			can_steer: boolean,
 			intake?: IntakeAssessment,

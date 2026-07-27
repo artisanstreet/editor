@@ -1,5 +1,5 @@
 import { asc, desc, eq, gt, lte } from "drizzle-orm";
-import { Context, Data, Effect, Layer, Schema } from "effect";
+import { Context, Data, Effect, Layer, Option, Schema } from "effect";
 
 import {
 	EventEnvelope,
@@ -12,7 +12,7 @@ import {
 } from "@artisan/protocol";
 
 import { Database, type DatabaseClient } from "./database";
-import { EventStreams, JournalCommands, JournalEvents, Threads } from "./schema";
+import { EventStreams, JournalCommands, JournalEvents, Projects, Threads } from "./schema";
 import { JournalNotifier } from "./journal-notifier";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { ApplyJournalEvent } from "../conversation/index.ts";
@@ -169,6 +169,9 @@ export class JournalStore extends Context.Service<
 		readonly AppendEvent: (
 			input: JournalEventInput,
 		) => Effect.Effect<EventEnvelope, JournalStoreError>;
+		readonly FindCommandThreadId: (
+			message_id: string,
+		) => Effect.Effect<Option.Option<string>, JournalStoreError>;
 		readonly ReadCorrelatedEvents: (
 			correlation_id: string,
 		) => Effect.Effect<ReadonlyArray<EventEnvelope>, JournalStoreError>;
@@ -731,6 +734,27 @@ export const JournalStoreLive = Layer.effect(
 							const event_id = yield* metadata.MakeId("event");
 							const occurred_at = yield* metadata.Now;
 							const stream_id = `thread:${command.thread_id}`;
+							const project =
+								payload.project_id === undefined
+									? undefined
+									: (yield* transaction
+											.select()
+											.from(Projects)
+											.where(eq(Projects.project_id, payload.project_id))
+											.limit(1))[0];
+							if (payload.project_id !== undefined && project === undefined) {
+								return yield* new JournalInvariantError({
+									message: `Project ${payload.project_id} is not attached to Forge`,
+								});
+							}
+							const project_ref =
+								project === undefined
+									? undefined
+									: {
+											display_name: project.display_name,
+											project_id: project.project_id,
+											root_path: project.root_path,
+										};
 							const event_payload = {
 								type: "thread.created" as const,
 								title: payload.title,
@@ -754,12 +778,21 @@ export const JournalStoreLive = Layer.effect(
 
 							yield* transaction.insert(Threads).values({
 								activity_version: 0,
+								affinity_version: project_ref === undefined ? 0 : 1,
 								created_at: occurred_at,
 								current_goal: payload.title,
 								last_activity_at: occurred_at,
 								live_status: "Idle",
 								metadata_version: 0,
 								pinned: false,
+								...(project_ref === undefined
+									? {}
+									: {
+											linked_projects_json: JSON.stringify([project_ref]),
+											primary_project_id: project_ref.project_id,
+											primary_project_json: JSON.stringify(project_ref),
+											project_locked: true,
+										}),
 								thread_id: command.thread_id,
 								title: payload.title,
 								title_locked: false,
@@ -816,12 +849,27 @@ export const JournalStoreLive = Layer.effect(
 						),
 					);
 			});
+		const FindCommandThreadId = (message_id: string) =>
+			database.client
+				.select({ thread_id: JournalCommands.thread_id })
+				.from(JournalCommands)
+				.where(eq(JournalCommands.message_id, message_id))
+				.limit(1)
+				.pipe(
+					Effect.map(([command]) =>
+						command === undefined
+							? Option.none<string>()
+							: Option.some(command.thread_id),
+					),
+					Effect.mapError(normalize_journal_error),
+				);
 		const ValidateReplayPoint = (request: Required<ReplayRequest>) =>
 			ReadReplay(request).pipe(Effect.asVoid);
 
 		return {
 			AcceptThreadCreate,
 			AppendEvent,
+			FindCommandThreadId,
 			ReadCurrentCursors,
 			ReadCorrelatedEvents,
 			ReadReplay,

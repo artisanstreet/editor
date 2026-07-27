@@ -15,7 +15,6 @@ import {
 	type ProtocolConnection,
 } from "@artisan/backend";
 import type {
-	CommandEnvelope,
 	EventEnvelope,
 	GitDiffQueryEnvelope,
 	GitDiffQueryResult,
@@ -27,6 +26,7 @@ import type {
 	GitWorkspaceQueryResult,
 	HelloEnvelope,
 	OutboundControlEnvelope,
+	ThreadCreateEnvelope,
 } from "@artisan/protocol";
 
 import { JournalStore } from "../../modules/backend/src/persistence/journal-store";
@@ -59,28 +59,28 @@ function make_hello(): HelloEnvelope {
 	};
 }
 
-function thread_create(): CommandEnvelope {
+function thread_create(): ThreadCreateEnvelope {
 	return {
-		kind: "command",
+		kind: "thread.create.request",
 		message_id: "create_git_protocol_thread",
 		origin: "frontend",
-		payload: { title: "Git protocol", type: "thread.create" },
+		payload: { title: "Git protocol" },
 		protocol_version: 1,
 		schema_version: 1,
 		sent_at,
-		thread_id: "thread_git_protocol",
 	};
 }
 
 function workspace_query(
 	message_id = "git_workspace_query",
 	workspace_id = "workspace_git_protocol",
+	thread_id = "thread_git_protocol",
 ): GitWorkspaceQueryEnvelope {
 	return {
 		kind: "git.workspace.query",
 		message_id,
 		origin: "frontend",
-		payload: { thread_id: "thread_git_protocol", workspace_id },
+		payload: { thread_id, workspace_id },
 		protocol_version: 1,
 		schema_version: 1,
 		sent_at,
@@ -111,6 +111,7 @@ function diff_query(
 function stage_request(
 	message_id = "git_stage_request",
 	path = "src/example.ts",
+	thread_id = "thread_git_protocol",
 ): GitIndexStageRequestEnvelope {
 	return {
 		agent_id: "agent_git_protocol",
@@ -130,11 +131,11 @@ function stage_request(
 		run_id: "run_git_protocol",
 		schema_version: 1,
 		sent_at,
-		thread_id: "thread_git_protocol",
+		thread_id,
 	};
 }
 
-function unstage_request(): GitIndexUnstageRequestEnvelope {
+function unstage_request(thread_id = "thread_git_protocol"): GitIndexUnstageRequestEnvelope {
 	return {
 		agent_id: "agent_git_protocol",
 		kind: "git.index.unstage.request",
@@ -152,11 +153,11 @@ function unstage_request(): GitIndexUnstageRequestEnvelope {
 		run_id: "run_git_protocol",
 		schema_version: 1,
 		sent_at,
-		thread_id: "thread_git_protocol",
+		thread_id,
 	};
 }
 
-function resolve_request(): GitMutationResolveEnvelope {
+function resolve_request(thread_id = "thread_git_protocol"): GitMutationResolveEnvelope {
 	return {
 		agent_id: "agent_reviewer",
 		kind: "git.mutation.resolve",
@@ -171,7 +172,7 @@ function resolve_request(): GitMutationResolveEnvelope {
 		run_id: "run_reviewer",
 		schema_version: 1,
 		sent_at,
-		thread_id: "thread_git_protocol",
+		thread_id,
 	};
 }
 
@@ -443,6 +444,16 @@ function to_array(output: Iterable<OutboundControlEnvelope>) {
 	return Array.from(output);
 }
 
+function created_thread_id(output: Iterable<OutboundControlEnvelope>) {
+	const result = [...output].find((envelope) => envelope.kind === "thread.create.result");
+
+	if (result?.kind !== "thread.create.result") {
+		throw new Error("Forge did not return the created Git protocol thread");
+	}
+
+	return result.payload.thread_id;
+}
+
 afterEach(async () => {
 	await Promise.all(
 		temporary_directories
@@ -471,9 +482,14 @@ describe("Git protocol server", () => {
 						fake.bind_journal(journal);
 						yield* negotiate(connection);
 						yield* connection.Receive(thread_create());
-						yield* take_outbound(connection, 2);
+						const creation = yield* take_outbound(connection, 2);
+						const thread_id = created_thread_id(creation);
 
-						const query = workspace_query();
+						const query = workspace_query(
+							"git_workspace_query",
+							"workspace_git_protocol",
+							thread_id,
+						);
 						yield* connection.Receive(query);
 						const query_output = yield* take_outbound(connection, 1);
 
@@ -481,22 +497,30 @@ describe("Git protocol server", () => {
 						yield* connection.Receive(diff);
 						const diff_output = yield* take_outbound(connection, 1);
 
-						const stage = stage_request();
+						const stage = stage_request(
+							"git_stage_request",
+							"src/example.ts",
+							thread_id,
+						);
 						yield* connection.Receive(stage);
 						const stage_output = yield* take_outbound(connection, 2);
 
 						yield* connection.Receive(stage);
 						const duplicate_output = yield* take_outbound(connection, 1);
 
-						const query_after_duplicate = workspace_query("query_after_duplicate");
+						const query_after_duplicate = workspace_query(
+							"query_after_duplicate",
+							"workspace_git_protocol",
+							thread_id,
+						);
 						yield* connection.Receive(query_after_duplicate);
 						const after_duplicate_output = yield* take_outbound(connection, 1);
 
-						const unstage = unstage_request();
+						const unstage = unstage_request(thread_id);
 						yield* connection.Receive(unstage);
 						const unstage_output = yield* take_outbound(connection, 2);
 
-						const resolve = resolve_request();
+						const resolve = resolve_request(thread_id);
 						yield* connection.Receive(resolve);
 						const resolve_output = yield* take_outbound(connection, 4);
 
@@ -507,6 +531,7 @@ describe("Git protocol server", () => {
 							query_output,
 							resolve_output,
 							stage_output,
+							thread_id,
 							unstage_output,
 						};
 					}),
@@ -592,12 +617,20 @@ describe("Git protocol server", () => {
 				payload: { type: "process.ownership" },
 			});
 			expect(fake.queries).toEqual([
-				workspace_query(),
-				workspace_query("query_after_duplicate"),
+				workspace_query("git_workspace_query", "workspace_git_protocol", output.thread_id),
+				workspace_query(
+					"query_after_duplicate",
+					"workspace_git_protocol",
+					output.thread_id,
+				),
 			]);
 			expect(fake.diffs).toEqual([diff_query()]);
-			expect(fake.requests).toEqual([stage_request(), stage_request(), unstage_request()]);
-			expect(fake.resolutions).toEqual([resolve_request()]);
+			expect(fake.requests).toEqual([
+				stage_request("git_stage_request", "src/example.ts", output.thread_id),
+				stage_request("git_stage_request", "src/example.ts", output.thread_id),
+				unstage_request(output.thread_id),
+			]);
+			expect(fake.resolutions).toEqual([resolve_request(output.thread_id)]);
 		} finally {
 			await runtime.dispose();
 		}
@@ -619,16 +652,25 @@ describe("Git protocol server", () => {
 						const connection = yield* open_connection;
 
 						yield* negotiate(connection);
+						yield* connection.Receive(thread_create());
+						const creation = yield* take_outbound(connection, 2);
+						const thread_id = created_thread_id(creation);
 
 						yield* connection.Receive(
-							workspace_query("git_query_failure", "workspace_unavailable"),
+							workspace_query(
+								"git_query_failure",
+								"workspace_unavailable",
+								thread_id,
+							),
 						);
 						const query_error = yield* take_outbound(connection, 1);
 
 						yield* connection.Receive(diff_query("git_diff_failure", "c".repeat(64)));
 						const diff_error = yield* take_outbound(connection, 1);
 
-						yield* connection.Receive(stage_request("git_stage_failure", "invalid.ts"));
+						yield* connection.Receive(
+							stage_request("git_stage_failure", "invalid.ts", thread_id),
+						);
 						const mutation_error = yield* take_outbound(connection, 1);
 
 						return { diff_error, mutation_error, query_error };

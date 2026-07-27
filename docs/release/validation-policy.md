@@ -69,43 +69,18 @@ Electron packaging is required release-only evidence. Every manually dispatched
 release validation run executes the `packaged-desktop` job on the protected
 native-capable runner, which runs `package:desktop` followed by
 `verify:desktop-package`; ordinary CI and the ordinary release gate do neither.
-The verifier inspects the actual ASAR and unpacked runtime paths, rejects every
-unresolved bare JavaScript package import from the privileged desktop bundle,
-then copies the exact `win-unpacked` application to a unique temporary location
-outside the repository before starting it. This makes the smoke independent of
-the checkout's `node_modules`; clearing external `NODE_PATH` is an additional
-defense, not the proof of isolation. It creates a unique temporary user-data
-directory, starts the packaged executable with a bounded deadline, and requires
-one machine-readable success record. The smoke opens the exact staged
-`node-pty` and Koffi bindings in two distinct utility
-epochs. It creates a thread through
-`ArtisanClient`, records accepted utility termination plus old/new utility
-epochs and PIDs, reconnects over newly transferred `MessagePortMain` pairs,
-proves semantic duplicate-safe durable replay even when the client regenerates
-transport timestamps, accepts a later command, and then disposes the utility.
+`package:desktop` emits only `.dist/electron-release/win-unpacked`, the exact
+Editor directory incorporated into the managed distribution archive. It does
+not emit NSIS, embed Forge, install integrations, or own update/uninstall state.
+The verifier inspects the actual ASAR, requires the protocol-launcher executable,
+rejects legacy preload/utility/backend payloads, and rejects an embedded
+`resources/artisan-forge` tree.
 
-The same packaged executable creates the real BrowserWindow, loads the renderer
-through the custom protocol, and verifies the narrow preload bridge. Electron
-delivers trusted keyboard activation to `New chat` before and after the utility
-restart and trusted native mouse input to Marketplace and the
-chat/editor/orchestrator controls. The smoke also verifies Marketplace focus
-restoration, trusted composer input, right-pane keyboard reachability, truthful
-no-file/no-terminal states, the activity/taskbar bridge, accessible names,
-computed wide/narrow pane state, and Electron's real 200% zoom factor. It never
-starts an Engine run or calls a model. Temporary smoke data and descendant
-processes are removed on every outcome.
-
-- build the existing static renderer and package it as the renderer payload;
-- assert the main/utility entry points and production-only files are present in
-  the expected package layout;
-- assert `node-pty` and Koffi are explicitly staged and unpacked;
-- run the existing typed client reconnect/replay fixtures through transferred
-  Electron control and stream ports, including a forced utility-process restart;
-- prove single-instance ownership and cleanup without publishing temporary
-  workspaces, databases, or logs.
-
-The packaged Electron gate is the mounted renderer proof: it provides
-keyboard/focus, accessible-name, computed responsive-layout, and real
-browser-zoom checks without adding an external browser dependency or starting a
-development server. The visual-fixture route remains supplementary source-level
-coverage for semantic, reduced-motion, high-contrast, and long-label states.
+Electron Builder's standard Windows signing path is enabled. The protected
+release environment supplies `ARTISAN_WINDOWS_CSC_LINK` and
+`ARTISAN_WINDOWS_CSC_KEY_PASSWORD`, mapped only for the packaging step to
+Electron Builder's `CSC_LINK` and `CSC_KEY_PASSWORD`. Production packaging fails
+closed when either secret is absent. After packaging, the workflow calls
+`Get-AuthenticodeSignature` on the exact `Artisan Editor.exe` consumed by the
+distribution builder and requires status `Valid` before any distribution
+release is retained.

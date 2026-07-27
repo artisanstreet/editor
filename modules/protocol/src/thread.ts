@@ -105,8 +105,17 @@ export const ThreadListItem = Schema.Struct({
 
 export type ThreadListItem = typeof ThreadListItem.Type;
 
+/** Describes client intent for Forge-owned thread creation. */
+export const ThreadCreateInput = Schema.Struct({
+	project_id: Schema.optional(Identifier),
+	title: Schema.NonEmptyString,
+});
+
+export type ThreadCreateInput = typeof ThreadCreateInput.Type;
+
 /** Creates a durable thread with an initial auto-managed identity. */
 export const ThreadCreateCommand = Schema.Struct({
+	project_id: Schema.optional(Identifier),
 	type: Schema.Literal("thread.create"),
 	title: Schema.NonEmptyString,
 });
@@ -123,7 +132,7 @@ export type ThreadRenameCommand = typeof ThreadRenameCommand.Type;
 
 /** Unconditionally pins a thread to the user's project in durable command order. */
 export const ThreadProjectAssignCommand = Schema.Struct({
-	project: ProjectRef,
+	project_id: Identifier,
 	type: Schema.Literal("thread.project.assign"),
 });
 

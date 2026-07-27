@@ -20,28 +20,6 @@ export const ApplyRootThreadListUpdate = (
 export const SortRecentThreads = (threads: ReadonlyArray<ThreadListItem>) =>
 	[...threads].sort((left, right) => right.last_activity_at.localeCompare(left.last_activity_at));
 
-/** Projects one selectable project per durable project id, preferring the most recently active thread. */
-export const ProjectsForNewThread = (
-	threads: ReadonlyArray<ThreadListItem>,
-): ReadonlyArray<ProjectRef> => {
-	const projects = new Map<string, ProjectRef>();
-
-	for (const thread of SortRecentThreads(threads)) {
-		const thread_projects = [
-			...(thread.primary_project === undefined ? [] : [thread.primary_project]),
-			...thread.linked_projects,
-		];
-
-		for (const project of thread_projects) {
-			if (!projects.has(project.project_id)) {
-				projects.set(project.project_id, project);
-			}
-		}
-	}
-
-	return [...projects.values()];
-};
-
 /** Describes one sidebar project section and its durably scoped recent threads. */
 export type ProjectScopedThreadGroup =
 	| {

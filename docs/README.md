@@ -4,6 +4,7 @@
 
 - [Artisan Editor V1](./prds/artisan-editor-v1.md)
 - [Artisan Cowork](./prds/artisan-cowork-prd.md)
+- [Artisan distribution and first-time setup](./prds/artisan-distribution-prd.md)
 - [Codebase rehabilitation](./prds/codebase-rehabilitation-prd.md)
 
 ## Current status
@@ -18,5 +19,6 @@ used as a product-history archive.
 ## Engineering and design
 
 - [Frontend checkpoints](./engineering/frontend-checkpoints.md)
+- [Disk I/O safety](./engineering/disk-io-safety.md)
 - [Barekey design-language inspection](./design/barekey-design-language.md)
 - [Agent engine I/O research](./research/agent-engine-io.md)

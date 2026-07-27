@@ -1,0 +1,26 @@
+name: Setup Artisan workspace
+description: Install the frozen Node, pnpm, Rust, and workspace dependency set.
+
+runs:
+    using: composite
+    steps:
+        - name: Install pnpm
+          uses: pnpm/action-setup@41ff72655933c73d8c5467b7bce92242612f65b1
+          with:
+              version: 11.7.0
+
+        - name: Install Node
+          uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+          with:
+              node-version: 24
+              cache: pnpm
+              cache-dependency-path: pnpm-lock.yaml
+
+        - name: Install Rust
+          uses: dtolnay/rust-toolchain@b3b07ba8b418998c39fb20f53e8b695cdcc8de1b
+          with:
+              toolchain: stable
+
+        - name: Install frozen workspace
+          shell: bash
+          run: pnpm install --frozen-lockfile

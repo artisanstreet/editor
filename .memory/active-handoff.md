@@ -1,23 +1,18 @@
 # Active Branch Handoff
 
-Last updated: 2026-07-26
-
-This file contains branch continuity only. Durable verified product status lives
-in [`docs/status/backend-completion-matrix.md`](../docs/status/backend-completion-matrix.md);
-product and architecture requirements are indexed by
-[`docs/README.md`](../docs/README.md).
+Last updated: 2026-07-27
+Branch continuity only. Durable status lives in
+[`docs/status/backend-completion-matrix.md`](../docs/status/backend-completion-matrix.md).
 
 ## Working State
 
 - Repository: `C:\Users\sander\Desktop\artisan-editor`
 - Branch: `master`
-- `master` is the GitHub default branch and the repository's pre-release
-  integration branch.
+- `master` is the GitHub default pre-release integration branch.
 - Work directly on `master`; do not create branches, worktrees, or pull requests
   unless the user explicitly requests one.
-- The current program is the repository-wide Effect rehabilitation requested on
-  2026-07-26, including a shared Snowflake ID service with epoch
-  `2026-06-19T00:00:00.000Z`.
+- Distribution uses a temporary native bootstrap from GitHub Releases and
+  permanent `ae` ownership. npm is outside the release and install contract.
 
 ## Integrated Direction
 
@@ -34,32 +29,85 @@ product and architecture requirements are indexed by
 
 ## Current Work and Remaining Integration
 
-- The integrated Effect/Snowflake/native-binary transport migration passes the
-  complete repository validation gate.
+- Forge is the only owner of application state; legacy client-owned thread and
+  project inputs are removed.
 - Thread, workspace-inspection, and Marketplace read handlers are extracted
   from `protocol-server.ts`; Guidance/Model Behaviour mutations are also
   extracted. Continue splitting remaining mutation domains incrementally.
-- Orchestration outbox operations and workspace persisted-row codecs now have
-  dedicated modules. Both main repositories remain large; continue extracting
-  cohesive ownership without duplicating the canonical transaction-local
-  journal append invariant.
-- Sidebar context registration now precedes every Effect suspension in its
-  provider; browser WebSocket reconnect attempts use a one-second cadence.
+- Typed `BannerService` notifications own connection status, five jittered
+  exponential retries, immediate `Start Forge` recovery, and the future
+  Sentry/PostHog reporting seam. `ae open` starts an already configured Forge
+  before issuing the one-time pairing capability; only explicit `ae setup`
+  creates a profile.
+- Rust `artisan-bootstrap` owns authenticated release installation and retained
+  update/repair/uninstall mechanics. Rust `ae` owns the permanent Forge command
+  UX; only explicit setup creates profiles. Neither depends on npm or Node.
+- Forge now has a durable project catalog with server-directory attachment,
+  ID-only detach/list RPCs, ordered project-list snapshot/update subscriptions,
+  ID-only thread assignment, and atomic create-in-project validation. The typed
+  transport exposes catalog list/detach/subscription operations, and its
+  dedicated create-thread RPC accepts only title/project intent while Forge
+  generates the Snowflake thread ID and returns the authoritative projection.
+  The frontend now consumes these APIs only after pairing and authoritative
+  project/thread/runtime-catalog hydration.
+- The application shell stays unmounted until the authenticated transport is
+  ready and the initial Forge snapshots have loaded. Disconnects return the
+  client to this inert state.
+- Public message commands contain only user intent and request-local image
+  tokens. Forge resolves the thread's attached project, derives working
+  directory/project context, and replaces image tokens with durable Snowflake
+  attachment IDs before persistence.
+- The runtime model/capability catalog is a typed Forge query filtered by the
+  registered engine adapters. Production frontend code no longer owns a static
+  model catalog. Its curated inventory now contains only Codex, Claude Code, and
+  Grok Build; thinking and permission options use sparse standardized scales,
+  while speed options retain model-specific native multipliers and billing
+  semantics. OpenCode and Antigravity are removed pending real adapters.
+- Public generic commands no longer accept `thread.create`; clients must use
+  the idempotent create RPC and its Forge-issued Snowflake ID. Historical
+  durable event schemas remain readable for replay.
+- `ae open` launches the paired browser. A future native-rendered client needs a
+  Forge/CLI-owned public handoff and must not regain profile-secret access.
+- `ae` profiles, setup, doctor repair, launch configuration, and Forge
+  environment bootstrap no longer contain or infer project roots. Doctor repair
+  now restores installation/profile/protocol state without project input.
+- PowerShell/POSIX landing transports select a platform-native GitHub Release
+  bootstrap, verify its digest, run it temporarily, and clean it up.
+- `https://sonstabo.com/editor` and its `/windows` and `/unix` script endpoints
+  are deployed on Vercel. Release publication uses protected `candidate`
+  dry-run/release/resume workflows with immutable GitHub candidate bytes.
 
 ## Verification Snapshot
 
-- The last durable full-product baseline is recorded in the completion matrix;
-  do not replace it with narrow concurrent test results.
-- On 2026-07-26, `pnpm run validate` passed formatting, lint, TypeScript, the
-  production frontend build, and 1,301 tests across 183 files with 4 skips.
-- The standalone Forge process regression found during integration was fixed by
-  retaining its backend Layer in an explicit child scope and releasing the
-  database lease before IPC disconnect.
-- Run `pnpm run validate` before a milestone commit. If it fails, distinguish
-  task-owned failures from unrelated dirty/generated format drift and record the
-  exact current blocker here.
-- Always run `git diff --check` and scoped formatting/lint/type checks for files
-  owned by the milestone.
+- The catalog redesign passed formatting, lint, TypeScript, the frontend build,
+  focused suites, and 1,423 aggregate tests. Only three standalone Forge cases
+  failed because `Artisan Forge.exe` is absent; packaging is blocked by the
+  missing offline Electron 43.1.1 runtime. Scoped
+  distribution formatting and 108 focused bootstrap/distribution tests pass.
+- Windows distribution has signed GitHub retrieval, deterministic x64 archives,
+  resumable activation/rollback, and owned integrations.
+  Updates quiesce every running owned Forge profile, validate staged runtime
+  semantics, restart the exact prior set, and restore the previous runtime on
+  failure. Current versions require pointer/layout/integration/semantic health.
+  New installs stay partial until bounded setup/start and typed running status
+  finalize; legacy state maps pending. Uninstall stops all profiles, removes
+  owned integrations, and uses a verified out-of-tree deletion helper; data
+  removal stays explicit. Start Menu actions target stable launchers; updates retain
+  active/rollback versions, and native commands are bounded and tree-killed.
+  Rust bootstrap/CLI checks, Clippy, 19 unit tests, Windows transport tests,
+  TypeScript, and focused artifact tests pass. Native release CI now emits the
+  Windows bootstrap/checksum and embeds both Rust executables in the product
+  archive. Real released-asset qualification, website routing, Windows arm64,
+  macOS, and Linux product gates remain. The public landing page and script
+  endpoints are live; the first product GitHub Release is still required.
+- Permanent `ae` now exposes update/uninstall, treats plain invocation as open
+  only for a healthy installation, combines Forge and installation diagnostics,
+  repairs only manifest-owned integrations, and retains Forge data by default.
+  Missing/corrupt installed release trust fails without replacement while
+  doctor remains diagnostic; bootstrap alone seeds public trust.
+- Disk-I/O hardening, managed Editor packaging, and focused regressions pass.
+  Exact Codex-binary write measurement, CI Authenticode verification, and
+  clean-runner packaging remain release qualifications.
 
 ## Handoff Maintenance
 
@@ -67,5 +115,4 @@ product and architecture requirements are indexed by
 - Replace resolved entries with the next actionable state; do not append
   completed milestone history, transcripts, machine incident detail, secrets, or
   artifact hashes.
-- Promote durable verified product truth to the completion matrix or the
-  relevant PRD/design document, then remove it from this file.
+- Promote durable verified truth to the completion matrix or relevant PRD.

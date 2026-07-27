@@ -10,10 +10,11 @@ import {
 } from "../../modules/cli/src/lifecycle";
 import {
 	make_memory_profile_store,
+	ForgeProfileError,
 	ForgeProfileStore,
 	type ForgeRuntimeState,
 } from "../../modules/cli/src/profile";
-import { AeCommand, PromptForProjectRoot } from "../../modules/cli/src/entry";
+import { AeCommand, StopAllForgeProfiles } from "../../modules/cli/src/entry";
 import { task_scheduler_arguments } from "../../modules/cli/src/adapters";
 
 const config = {
@@ -21,11 +22,10 @@ const config = {
 	listen_host: "127.0.0.1" as const,
 	listen_port: 0,
 	mode: "local" as const,
-	project_roots: ["C:/work"] as const,
 	version: 1 as const,
 };
 
-const MakeRuntime = (healthy = false) => {
+const MakeRuntime = (healthy = false, profile_missing = false) => {
 	let current_health = healthy;
 	let starts = 0;
 	let foreground = 0;
@@ -35,7 +35,11 @@ const MakeRuntime = (healthy = false) => {
 		ForgeProfileStore,
 		ForgeProfileStore.of({
 			Ensure: () => Effect.void,
-			Load: () => Effect.succeed(config),
+			Load: () =>
+				profile_missing
+					? Effect.fail(new ForgeProfileError({ code: "missing" }))
+					: Effect.succeed(config),
+			List: () => Effect.succeed(["default"]),
 			LoadSecrets: () => Effect.succeed({ auth_token: "a".repeat(43), version: 1 as const }),
 			ReadState: (profile) => Effect.succeed(states.get(profile)),
 			RemoveStateIfOwned: (profile, instance_id) =>
@@ -109,14 +113,24 @@ const MakeRuntime = (healthy = false) => {
 };
 
 describe("ae lifecycle contract", () => {
-	it("declares the complete stable command surface and interactive setup prompt", () => {
+	it("declares the complete stable command surface", () => {
 		expect(
 			AeCommand.subcommands
 				.flatMap((group) => group.commands)
 				.map((command) => command.name)
 				.toSorted(),
-		).toEqual(["doctor", "logs", "open", "restart", "setup", "start", "status", "stop"]);
-		expect(PromptForProjectRoot()).toBeDefined();
+		).toEqual([
+			"doctor",
+			"logs",
+			"open",
+			"restart",
+			"setup",
+			"start",
+			"status",
+			"stop",
+			"uninstall",
+			"update",
+		]);
 	});
 
 	it("sets up profile config and never exposes its generated secret", async () => {
@@ -138,6 +152,20 @@ describe("ae lifecycle contract", () => {
 		await runtime.runPromise(lifecycle.Start("default"));
 		await runtime.runPromise(lifecycle.Start("default"));
 		expect(counts().starts).toBe(1);
+		await runtime.dispose();
+	});
+
+	it("fails start and open with a typed missing-profile error without creating one", async () => {
+		const { runtime, counts } = MakeRuntime(false, true);
+		const lifecycle = await runtime.runPromise(ForgeLifecycle);
+
+		await expect(runtime.runPromise(lifecycle.Start("default"))).rejects.toMatchObject({
+			code: "missing",
+		});
+		await expect(runtime.runPromise(lifecycle.Open("default"))).rejects.toMatchObject({
+			code: "missing",
+		});
+		expect(counts().starts).toBe(0);
 		await runtime.dispose();
 	});
 
@@ -201,12 +229,17 @@ describe("ae lifecycle contract", () => {
 		await runtime.dispose();
 	});
 
-	it("reports missing, supports foreground finalization path, and opens only a fragment pair capability", async () => {
+	it("reports missing, supports foreground finalization, and starts before opening a fragment pair capability", async () => {
 		const { runtime, counts } = MakeRuntime(false);
 		const store = await runtime.runPromise(ForgeProfileStore);
 		await runtime.runPromise(store.Ensure("default", config));
 		const lifecycle = await runtime.runPromise(ForgeLifecycle);
 		expect(await runtime.runPromise(lifecycle.Status("default"))).toEqual({ state: "missing" });
+		expect(await runtime.runPromise(lifecycle.Open("default"))).toBe(
+			"http://127.0.0.1:4848/#pair=one-time-code",
+		);
+		expect(counts().starts).toBe(1);
+		await runtime.runPromise(lifecycle.Stop("default"));
 		await runtime.runPromise(lifecycle.Start("default", true));
 		expect(counts().foreground).toBe(1);
 		await runtime.dispose();
@@ -220,6 +253,34 @@ describe("ae lifecycle contract", () => {
 				profile: "default",
 			}),
 		).toEqual(expect.arrayContaining(["/SC", "ONLOGON", "/RL", "LIMITED"]));
+	});
+
+	it("stops every inventoried named Forge profile before uninstall", async () => {
+		const stopped: Array<string> = [];
+		const profile_store = make_memory_profile_store();
+		const lifecycle = Layer.succeed(
+			ForgeLifecycle,
+			ForgeLifecycle.of({
+				Doctor: () => Effect.die("not used"),
+				Open: () => Effect.die("not used"),
+				Restart: () => Effect.die("not used"),
+				Start: () => Effect.die("not used"),
+				Status: () => Effect.die("not used"),
+				Stop: (profile) =>
+					Effect.sync(() => {
+						stopped.push(profile);
+					}),
+			}),
+		);
+		await Effect.runPromise(
+			Effect.gen(function* () {
+				const store = yield* ForgeProfileStore;
+				yield* store.Ensure("beta", config);
+				yield* store.Ensure("default", config);
+				yield* StopAllForgeProfiles;
+			}).pipe(Effect.provide(Layer.mergeAll(profile_store, lifecycle))),
+		);
+		expect(stopped).toEqual(["beta", "default"]);
 	});
 
 	it("accepts only explicitly local browser origins for pairing links", async () => {

@@ -58,7 +58,7 @@ describe("browser pairing bootstrap", () => {
 		expect(config).toContain("target: ForgeDevelopmentOrigin");
 	});
 
-	it("exchanges an exact fragment capability and removes it before transport construction", async () => {
+	it("exchanges an exact fragment capability and removes it after successful pairing", async () => {
 		const requests: Array<{ readonly code: string }> = [];
 		const replacements: string[] = [];
 
@@ -97,6 +97,6 @@ describe("browser pairing bootstrap", () => {
 
 		expect(Exit.isFailure(result)).toBe(true);
 		expect(JSON.stringify(result)).not.toContain("secret");
-		expect(replacements).toEqual(["/threads/thread_1?view=full"]);
+		expect(replacements).toEqual([]);
 	});
 });

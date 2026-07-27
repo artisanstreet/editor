@@ -1,10 +1,10 @@
 import { Data, Duration, Effect, Schedule, Scope, Stream } from "effect";
 
-class ConversationSubscriptionLost extends Data.TaggedError("ConversationSubscriptionLost")<{
+class AuthoritativeSubscriptionLost extends Data.TaggedError("AuthoritativeSubscriptionLost")<{
 	readonly message: string;
 }> {}
 
-const ConversationSubscriptionRetrySchedule = Schedule.exponential("100 millis").pipe(
+const AuthoritativeSubscriptionRetrySchedule = Schedule.exponential("100 millis").pipe(
 	Schedule.modifyDelay(({ duration }) =>
 		Effect.succeed(Duration.min(duration, Duration.seconds(5))),
 	),
@@ -17,7 +17,7 @@ const ConversationSubscriptionRetrySchedule = Schedule.exponential("100 millis")
  * subscription is registered. Recovery first resyncs the durable snapshot, then
  * retries with capped exponential backoff.
  */
-export const RunConversationSubscription = <Update, SubscribeError, StreamError>(
+export const RunAuthoritativeSubscription = <Update, SubscribeError, StreamError>(
 	subscribe: Effect.Effect<Stream.Stream<Update, StreamError>, SubscribeError, Scope.Scope>,
 	on_update: (update: Update) => Effect.Effect<void>,
 	on_recover: Effect.Effect<void>,
@@ -28,8 +28,8 @@ export const RunConversationSubscription = <Update, SubscribeError, StreamError>
 				Stream.runForEach(updates, on_update).pipe(
 					Effect.flatMap(() =>
 						Effect.fail(
-							new ConversationSubscriptionLost({
-								message: "Conversation subscription ended unexpectedly.",
+							new AuthoritativeSubscriptionLost({
+								message: "Authoritative subscription ended unexpectedly.",
 							}),
 						),
 					),
@@ -39,7 +39,9 @@ export const RunConversationSubscription = <Update, SubscribeError, StreamError>
 	).pipe(Effect.tapError(() => on_recover.pipe(Effect.catch(() => Effect.void))));
 
 	return Attempt.pipe(
-		Effect.retry({ schedule: ConversationSubscriptionRetrySchedule }),
+		Effect.retry({ schedule: AuthoritativeSubscriptionRetrySchedule }),
 		Effect.asVoid,
 	);
 };
+
+export const RunConversationSubscription = RunAuthoritativeSubscription;

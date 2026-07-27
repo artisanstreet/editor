@@ -1,4 +1,4 @@
-<script lang="ts">
+<script lang="ts" effect>
 	import Selector from "@tabler/icons-svelte/icons/selector";
 	import Bolt from "@tabler/icons-svelte/icons/bolt";
 	import Brain from "@tabler/icons-svelte/icons/brain";
@@ -7,28 +7,28 @@
 	import ListCheck from "@tabler/icons-svelte/icons/list-check";
 	import Tool from "@tabler/icons-svelte/icons/tool";
 	import {
-		SvglGoogleAntigravityLogo,
 		SvglGrokLogo,
 		SvglOpenAILogo,
 	} from "@selemondev/svgl-svelte";
 	import type { Component } from "svelte";
-	import type { ThreadSessionPolicy } from "@artisan/protocol";
+	import type { RuntimeCatalog, ThreadSessionPolicy } from "@artisan/protocol";
+	import { ArtisanClient } from "@artisan/transport/client";
 
-	import { LipCard } from "$lib/components/ui/lip-card";
 	import { Popover, PopoverContent, PopoverTrigger } from "$lib/components/ui/popover";
 	import { ScrollArea } from "$lib/components/ui/scroll-area";
 	import { Tabs, TabsList, TabsTrigger } from "$lib/components/ui/tabs";
-	import {
-		model_manifest,
-		thinking_level_labels,
-		type HarnessId,
-		type ModelDefinition,
-		type SpeedOption,
-		type ThinkingLevel,
-	} from "@artisan/catalog";
-	import OpenCodeIcon from "./opencode-icon.sv";
 	import DropdownHoverSurface from "./dropdown-hover-surface.sv";
 	import ShaderGlassSurface from "./shader-glass-surface.sv";
+
+	type ModelDefinition = RuntimeCatalog["manifest"]["models"][number];
+	type HarnessId = ModelDefinition["harness"];
+	type PermissionOption =
+		RuntimeCatalog["manifest"]["harnesses"][number]["permissions"]["options"][number];
+	type SpeedOption = ModelDefinition["capabilities"]["speed_options"][number];
+	type ThinkingLevel = Exclude<
+		ModelDefinition["capabilities"]["thinking"],
+		{ readonly availability: "native" | "unavailable" }
+	>["options"][number]["id"];
 
 	type Engine = {
 		id: HarnessId;
@@ -57,17 +57,27 @@
 		policy?: ThreadSessionPolicy;
 	} = $props();
 
-	const engines: ReadonlyArray<Engine> = [
-		{ id: "codex", name: "Codex", icon: SvglOpenAILogo, monochrome: true },
-		{ id: "grok", name: "Grok", icon: SvglGrokLogo, monochrome: true },
-		{ id: "opencode", name: "OpenCode", icon: OpenCodeIcon, monochrome: false },
-		{
-			id: "antigravity",
-			name: "Antigravity",
-			icon: SvglGoogleAntigravityLogo,
-			monochrome: false,
-		},
-	];
+	const client = yield* ArtisanClient;
+	const runtime_catalog = yield* client.GetRuntimeCatalog;
+	const model_manifest = runtime_catalog.manifest;
+	const engine_decoration: Readonly<
+		Partial<Record<HarnessId, { icon: Component; monochrome: boolean }>>
+	> = {
+		codex: { icon: SvglOpenAILogo, monochrome: true },
+		grok: { icon: SvglGrokLogo, monochrome: true },
+	};
+	const engines: ReadonlyArray<Engine> = model_manifest.harnesses.map((harness) => ({
+		id: harness.id,
+		name: harness.label,
+		...(engine_decoration[harness.id] ?? { icon: Tool, monochrome: true }),
+	}));
+	const thinking_level_labels: Readonly<Record<ThinkingLevel, string>> = {
+		high: "High",
+		light: "Light",
+		max: "Max",
+		medium: "Medium",
+		xhigh: "Extra High",
+	};
 
 	const harness_labels = new Map(model_manifest.harnesses.map((harness) => [harness.id, harness.label]));
 	const models: ReadonlyArray<ModelChoice> = model_manifest.models.map((model) => ({
@@ -77,53 +87,15 @@
 		lab: harness_labels.get(model.harness) ?? model.harness,
 		name: model.name,
 	}));
-	const opencode_gateways =
-		model_manifest.harnesses.find((harness) => harness.id === "opencode")?.gateways ?? [];
-	const permission_content: Readonly<Record<string, { description: string; label: string }>> = {
-		"accept-edits": {
-			label: "Auto-accept edits",
-			description: "Auto-approve edits, ask before other actions.",
-		},
-		allow: { label: "Full access", description: "Allow commands and edits without prompts." },
-		ask: { label: "Supervised", description: "Ask before commands and file changes." },
-		"bypass-permissions": {
-			label: "Full access",
-			description: "Allow commands and edits without prompts.",
-		},
-		default: { label: "Supervised", description: "Ask before commands and file changes." },
-		deny: { label: "Read only", description: "Use the model without workspace actions." },
-		"full-access": {
-			label: "Full access",
-			description: "Allow commands and edits without prompts.",
-		},
-		plan: { label: "Plan only", description: "Inspect and plan without making changes." },
-		"read-only": {
-			label: "Read only",
-			description: "Inspect files and answer questions without making changes.",
-		},
-		"runtime-managed": {
-			label: "Managed by runtime",
-			description: "Permissions are controlled by the engine runtime.",
-		},
-		"workspace-write": {
-			label: "Auto-accept edits",
-			description: "Apply workspace edits automatically; ask before other actions.",
-		},
-	};
-
 	let open = $state(false);
 	let permission_open = $state(false);
 	let speed_open = $state(false);
 	let thinking_open = $state(false);
-	let thinking_level = $state<ThinkingLevel>("high");
+	let thinking_level = $state<ThinkingLevel>("medium");
 	let speed_option_id = $state("standard");
-	let active_engine = $state<HarnessId>("codex");
-	let opencode_mode = $state("zen");
-	let opencode_mode_surface = $state<HTMLElement | null>(null);
-	let opencode_mode_overflow_end = $state(false);
-	let opencode_mode_overflow_start = $state(false);
-	let permission_mode = $state("full-access");
-	let selected_model_id = $state("codex-sol");
+	let active_engine = $state<HarnessId>(models[0]?.engine ?? "codex");
+	let permission_mode = $state("workspace-write");
+	let selected_model_id = $state(runtime_catalog.default_model_id ?? models[0]?.id ?? "");
 	let workflow_mode = $state<"build" | "plan">("build");
 	let engine_surface = $state<HTMLElement | null>(null);
 	let engine_indicator_animated = $state(false);
@@ -142,7 +114,7 @@
 		value.sandbox_mode === "read_only"
 			? "read-only"
 			: value.permission_mode === "never"
-				? "full-access"
+				? "workspace-write-no-prompts"
 				: "workspace-write";
 	const PatchPolicy = (patch: Partial<ThreadSessionPolicy>) => {
 		if (disabled || policy === undefined || onpolicychange === undefined) return;
@@ -150,41 +122,36 @@
 	};
 
 	const active_models = $derived(
-		models.filter(
-			(model) =>
-				model.engine === active_engine &&
-				(active_engine !== "opencode" ||
-					(model.definition.routing.kind === "gateway" &&
-						model.definition.routing.gateway_id === opencode_mode)),
-		),
+		models.filter((model) => model.engine === active_engine),
 	);
 	const selected_model = $derived(models.find((model) => model.id === selected_model_id) ?? models[0]);
 	const selected_speed_options = $derived(
-		selected_model.definition.capabilities.speed_options,
+		selected_model?.definition.capabilities.speed_options ?? [],
 	);
 	const selected_speed_option = $derived(
 		selected_speed_options.find((option) => option.id === speed_option_id) ??
 			selected_speed_options.find((option) => option.default) ??
 			selected_speed_options[0],
 	);
-	const selected_thinking = $derived(selected_model.definition.capabilities.thinking);
+	const selected_thinking = $derived(
+		selected_model?.definition.capabilities.thinking ?? { availability: "unavailable" as const },
+	);
 	const selected_thinking_native_value = $derived(
 		selected_thinking.availability === "supported"
 			? selected_thinking.options.find((option) => option.id === thinking_level)?.native_value
 			: undefined,
 	);
 	const selected_engine = $derived(
-		engines.find((engine) => engine.id === selected_model.engine) ?? engines[0],
+		engines.find((engine) => engine.id === selected_model?.engine) ??
+			engines[0] ?? { id: "codex", icon: Tool, monochrome: true, name: "Unavailable" },
 	);
 	const selected_harness = $derived(
-		model_manifest.harnesses.find((harness) => harness.id === selected_model.engine),
+		model_manifest.harnesses.find((harness) => harness.id === selected_model?.engine),
 	);
-	const selected_permission_modes = $derived(selected_harness?.permission_modes ?? []);
+	const selected_permission_options = $derived(selected_harness?.permissions.options ?? []);
 	const selected_permission = $derived(
-		permission_content[permission_mode] ?? {
-			label: permission_mode,
-			description: "Use the engine's native permission behavior.",
-		},
+		selected_permission_options.find((option) => option.native_value === permission_mode) ??
+			selected_permission_options[0],
 	);
 	const composer_controls = $derived.by<ReadonlyArray<ComposerControl>>(() => {
 		const controls: Array<ComposerControl> = ["model"];
@@ -192,7 +159,7 @@
 		if (selected_thinking.availability === "supported") {
 			controls.push("thinking");
 		}
-		if (selected_permission_modes.length > 0) {
+		if (selected_permission_options.length > 0) {
 			controls.push("permission");
 		}
 		if (selected_speed_options.length > 1) {
@@ -204,7 +171,6 @@
 	});
 
 	const select_model = (model: ModelChoice) => {
-		if (model.engine !== "codex") return;
 		selected_model_id = model.id;
 		active_engine = model.engine;
 		if (model.definition.capabilities.thinking.availability === "supported") {
@@ -237,12 +203,12 @@
 		speed_open = false;
 	};
 
-	const select_permission = (mode: string) => {
-		permission_mode = mode;
+	const select_permission = (option: PermissionOption) => {
+		permission_mode = option.native_value;
 		PatchPolicy(
-			mode === "read-only"
+			option.native_value === "read-only"
 				? { permission_mode: "never", sandbox_mode: "read_only" }
-				: mode === "full-access"
+				: option.native_value === "workspace-write-no-prompts"
 					? { permission_mode: "never", sandbox_mode: "workspace_write" }
 					: { permission_mode: "on_request", sandbox_mode: "workspace_write" },
 		);
@@ -272,44 +238,15 @@
 		engine_indicator_width = tab_rect.width;
 	};
 
-	const update_opencode_mode_overflow = () => {
-		if (!opencode_mode_surface) {
-			opencode_mode_overflow_end = false;
-			opencode_mode_overflow_start = false;
-			return;
-		}
-
-		const remaining = opencode_mode_surface.scrollWidth - opencode_mode_surface.clientWidth;
-		opencode_mode_overflow_start = opencode_mode_surface.scrollLeft > 1;
-		opencode_mode_overflow_end = opencode_mode_surface.scrollLeft < remaining - 1;
-	};
-
-	const wheel_opencode_modes = (event: WheelEvent) => {
-		if (!opencode_mode_surface) {
-			return;
-		}
-
-		const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
-		const can_scroll = delta < 0 ? opencode_mode_overflow_start : opencode_mode_overflow_end;
-		if (!can_scroll) {
-			return;
-		}
-
-		event.preventDefault();
-		opencode_mode_surface.scrollLeft += delta;
-		update_opencode_mode_overflow();
-	};
-
 	$effect(() => {
 		if (policy === undefined) return;
 		const model = models.find(
 			(candidate) =>
-				candidate.engine === "codex" &&
-				(candidate.definition.native_model_id === policy.model ||
-					(policy.model === undefined && candidate.id === "codex-sol")),
+				candidate.definition.native_model_id === policy.model ||
+				(policy.model === undefined && candidate.id === runtime_catalog.default_model_id),
 		);
 		if (model !== undefined) selected_model_id = model.id;
-		active_engine = "codex";
+		if (model !== undefined) active_engine = model.engine;
 		thinking_level = ThinkingLevelFromPolicy(policy.reasoning_effort);
 		permission_mode = PermissionModeFromPolicy(policy);
 		const speed_option =
@@ -330,26 +267,17 @@
 	});
 
 	$effect(() => {
-		const modes = selected_permission_modes;
-		if (modes.length > 0 && !modes.includes(permission_mode)) {
-			permission_mode = modes.includes("full-access") ? "full-access" : (modes[0] ?? "");
+		const options = selected_permission_options;
+		if (
+			options.length > 0 &&
+			!options.some((option) => option.native_value === permission_mode)
+		) {
+			permission_mode =
+				options.find((option) => option.id === selected_harness?.permissions.default)
+					?.native_value ??
+				options[0]?.native_value ??
+				"";
 		}
-	});
-
-	$effect(() => {
-		if (!opencode_mode_surface) {
-			return;
-		}
-
-		const surface = opencode_mode_surface;
-		const observer = new ResizeObserver(update_opencode_mode_overflow);
-		const frame = requestAnimationFrame(update_opencode_mode_overflow);
-		observer.observe(surface);
-
-		return () => {
-			cancelAnimationFrame(frame);
-			observer.disconnect();
-		};
 	});
 </script>
 
@@ -370,7 +298,7 @@
 					? "size-4 shrink-0 dark:invert"
 					: "size-4 shrink-0"}
 			/>
-			<span class="truncate text-sm text-foreground">{selected_model.name}</span>
+			<span class="truncate text-sm text-foreground">{selected_model?.name ?? "No models"}</span>
 			<Selector class="pointer-events-none size-3.5 shrink-0 text-muted-foreground" />
 		</PopoverTrigger>
 
@@ -383,7 +311,6 @@
 		>
 			<ShaderGlassSurface strength="strong" class="w-full rounded-3xl">
 				<Tabs bind:value={active_engine} class="min-h-0 gap-2 p-2">
-			<LipCard class="w-full rounded-lg" open={active_engine === "opencode"}>
 				<TabsList
 					bind:ref={engine_surface}
 					variant="line"
@@ -401,52 +328,16 @@
 						{@const EngineIcon = engine.icon}
 						<TabsTrigger
 							value={engine.id}
-							disabled={disabled || engine.id !== "codex"}
+							disabled={disabled}
 							data-engine={engine.id}
 							aria-label={engine.name}
 							title={engine.name}
 							class="relative z-1 size-8 flex-none px-0 text-foreground after:hidden hover:text-foreground data-active:border-transparent data-active:bg-transparent data-active:text-foreground dark:hover:text-foreground dark:data-active:border-transparent dark:data-active:bg-transparent"
 						>
-							<EngineIcon
-								class={engine.id === "opencode"
-									? "size-4 text-foreground"
-									: engine.monochrome
-										? "size-4 dark:invert"
-										: "size-4"}
-							/>
+							<EngineIcon class={engine.monochrome ? "size-4 dark:invert" : "size-4"} />
 						</TabsTrigger>
 					{/each}
 				</TabsList>
-				{#snippet lip()}
-					<div class="p-2">
-						<Tabs bind:value={opencode_mode}>
-							<div class="relative">
-								<div
-									bind:this={opencode_mode_surface}
-									class="opencode-mode-scroll scroll-smooth overflow-x-auto motion-reduce:scroll-auto"
-									data-overflow-start={opencode_mode_overflow_start}
-									data-overflow-end={opencode_mode_overflow_end}
-									onscroll={update_opencode_mode_overflow}
-									onwheel={wheel_opencode_modes}
-								>
-									<TabsList
-										variant="line"
-										aria-label="OpenCode mode"
-										class="h-8 w-max min-w-full justify-start rounded-lg! bg-transparent p-1"
-									>
-								{#each opencode_gateways as mode (mode.id)}
-									<TabsTrigger value={mode.id} class="h-6 flex-none rounded-md px-2 py-0 text-xs">
-										{mode.label}
-											</TabsTrigger>
-										{/each}
-									</TabsList>
-								</div>
-							</div>
-						</Tabs>
-					</div>
-				{/snippet}
-			</LipCard>
-
 			<ScrollArea class="h-48 rounded-xl">
 				<DropdownHoverSurface
 					class="[--docs-sidebar-hover-radius:calc(var(--radius-3xl)-0.5rem)]"
@@ -461,7 +352,7 @@
 										<td class="p-0">
 											<button
 												type="button"
-												disabled={disabled || model.engine !== "codex"}
+												disabled={disabled}
 												class="flex w-full items-center gap-2 rounded-[calc(var(--radius-3xl)-0.5rem)] px-2.5 py-1.5 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
 												aria-current={model.id === selected_model_id ? "true" : undefined}
 												onfocus={move_hover}
@@ -598,7 +489,7 @@
 				class="flex h-8 shrink-0 items-center gap-1.5 rounded-xl bg-transparent px-2 text-sm text-foreground outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset"
 			>
 				<Lock class="size-4 text-muted-foreground" />
-				<span class="hidden sm:inline">{selected_permission.label}</span>
+				<span class="hidden sm:inline">{selected_permission?.label ?? "Permission"}</span>
 				<Selector class="size-3.5 text-muted-foreground" />
 			</PopoverTrigger>
 			<PopoverContent
@@ -614,24 +505,20 @@
 					>
 						{#snippet children({ move_hover })}
 							<div class="flex flex-col gap-0.5">
-								{#each selected_permission_modes as mode (mode)}
-									{@const content = permission_content[mode] ?? {
-										label: mode,
-										description: "Use the engine's native permission behavior.",
-									}}
+								{#each selected_permission_options as option (option.id)}
 									<button
 										type="button"
 										disabled={disabled}
 										class="flex w-full items-start justify-between gap-3 rounded-[calc(var(--radius-2xl)-0.375rem)] px-3 py-2 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
 										onfocus={move_hover}
 										onpointerenter={move_hover}
-										onclick={() => select_permission(mode)}
+										onclick={() => select_permission(option)}
 									>
 										<span class="flex min-w-0 flex-col">
-											<span class="text-sm text-foreground">{content.label}</span>
-											<span class="text-sm text-muted-foreground">{content.description}</span>
+											<span class="text-sm text-foreground">{option.label}</span>
+											<span class="text-sm text-muted-foreground">{option.description}</span>
 										</span>
-										{#if mode === permission_mode}
+										{#if option.native_value === permission_mode}
 											<Check class="size-4 shrink-0 self-center text-muted-foreground" />
 										{/if}
 									</button>
@@ -730,40 +617,5 @@
 		.model-selector-engine-light {
 			transition: none !important;
 		}
-	}
-
-	.opencode-mode-scroll {
-		scrollbar-width: none;
-	}
-
-	.opencode-mode-scroll::-webkit-scrollbar {
-		display: none;
-	}
-
-	.opencode-mode-scroll[data-overflow-start="true"][data-overflow-end="true"] {
-		-webkit-mask-image: linear-gradient(
-			to right,
-			transparent,
-			black 16px,
-			black calc(100% - 16px),
-			transparent
-		);
-		mask-image: linear-gradient(
-			to right,
-			transparent,
-			black 16px,
-			black calc(100% - 16px),
-			transparent
-		);
-	}
-
-	.opencode-mode-scroll[data-overflow-start="false"][data-overflow-end="true"] {
-		-webkit-mask-image: linear-gradient(to right, black calc(100% - 16px), transparent);
-		mask-image: linear-gradient(to right, black calc(100% - 16px), transparent);
-	}
-
-	.opencode-mode-scroll[data-overflow-start="true"][data-overflow-end="false"] {
-		-webkit-mask-image: linear-gradient(to right, transparent, black 16px);
-		mask-image: linear-gradient(to right, transparent, black 16px);
 	}
 </style>

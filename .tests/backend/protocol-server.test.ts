@@ -9,11 +9,11 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import type {
 	AckEnvelope,
-	CommandEnvelope,
 	ContentIdentity,
 	HelloEnvelope,
 	OutboundControlEnvelope,
 	SubscribeEnvelope,
+	ThreadCreateEnvelope,
 	ThreadListQueryEnvelope,
 	WorkspaceChangeDiffQueryEnvelope,
 	WorkspaceChangeListQueryEnvelope,
@@ -251,24 +251,29 @@ function make_hello(
 	};
 }
 
-function make_command(
+function make_thread_create(
 	message_id = "command_1",
-	thread_id = "thread_1",
 	title = "Protocol integration",
-): CommandEnvelope {
+): ThreadCreateEnvelope {
 	return {
-		kind: "command",
+		kind: "thread.create.request",
 		message_id,
 		origin: "frontend",
-		payload: {
-			title,
-			type: "thread.create",
-		},
+		payload: { title },
 		protocol_version: 1,
 		schema_version: 1,
 		sent_at: "2026-07-10T08:00:00.000Z",
-		thread_id,
 	};
+}
+
+function created_thread_id(envelopes: Iterable<OutboundControlEnvelope>) {
+	const result = [...envelopes].find((envelope) => envelope.kind === "thread.create.result");
+
+	if (result?.kind !== "thread.create.result") {
+		throw new Error("Forge did not return a created thread projection");
+	}
+
+	return result.payload.thread_id;
 }
 
 function make_query(message_id = "query_1"): ThreadListQueryEnvelope {
@@ -351,6 +356,60 @@ afterEach(async () => {
 });
 
 describe("protocol server", () => {
+	it("replays a Forge-owned create request with its original durable thread id", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const request: ThreadCreateEnvelope = {
+			kind: "thread.create.request",
+			message_id: "forge_create_retry",
+			origin: "frontend",
+			payload: { title: "Retry-safe Forge identity" },
+			protocol_version: 1,
+			schema_version: 1,
+			sent_at: workspace_time,
+		};
+
+		try {
+			const first = await runtime.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const connection = yield* open_connection;
+						yield* negotiate(connection);
+						yield* connection.Receive(request);
+						return yield* take_until_outbound(
+							connection,
+							(envelope) => envelope.kind === "thread.create.result",
+						);
+					}),
+				),
+			);
+			const replay = await runtime.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const connection = yield* open_connection;
+						yield* negotiate(connection);
+						yield* connection.Receive(request);
+						return yield* take_until_outbound(
+							connection,
+							(envelope) => envelope.kind === "thread.create.result",
+						);
+					}),
+				),
+			);
+			const first_result = [...first].find(
+				(envelope) => envelope.kind === "thread.create.result",
+			);
+			const replay_result = [...replay].find(
+				(envelope) => envelope.kind === "thread.create.result",
+			);
+
+			expect(first_result?.payload.thread_id).toMatch(/^thread_\d+$/);
+			expect(replay_result?.payload.thread_id).toBe(first_result?.payload.thread_id);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("routes controlled workspace queries and mutations through correlated receipts", async () => {
 		const { root, runtime } = await make_workspace_runtime();
 
@@ -674,7 +733,7 @@ describe("protocol server", () => {
 					Effect.gen(function* () {
 						const before_hello_connection = yield* open_connection;
 
-						yield* before_hello_connection.Receive(make_command());
+						yield* before_hello_connection.Receive(make_thread_create());
 
 						const before_hello = yield* take_outbound(before_hello_connection, 1);
 						const unsupported_connection = yield* open_connection;
@@ -721,9 +780,10 @@ describe("protocol server", () => {
 						const connection = yield* open_connection;
 						const handshake = yield* negotiate(connection);
 
-						yield* connection.Receive(make_command());
+						yield* connection.Receive(make_thread_create());
 
 						const command = yield* take_outbound(connection, 2);
+						const thread_id = created_thread_id(command);
 
 						yield* connection.Receive(make_query());
 
@@ -732,13 +792,13 @@ describe("protocol server", () => {
 						yield* connection.Receive(
 							make_ack("ack_valid", 2, [
 								{ sequence: 1, stream_id: "settings:guidance" },
-								{ sequence: 1, stream_id: "thread:thread_1" },
+								{ sequence: 1, stream_id: `thread:${thread_id}` },
 							]),
 						);
 						yield* connection.Receive(
 							make_ack("ack_duplicate_cursor", 2, [
-								{ sequence: 1, stream_id: "thread:thread_1" },
-								{ sequence: 1, stream_id: "thread:thread_1" },
+								{ sequence: 1, stream_id: `thread:${thread_id}` },
+								{ sequence: 1, stream_id: `thread:${thread_id}` },
 							]),
 						);
 						yield* connection.Receive(
@@ -751,13 +811,13 @@ describe("protocol server", () => {
 						);
 						yield* connection.Receive(
 							make_ack("ack_out_of_range", 3, [
-								{ sequence: 2, stream_id: "thread:thread_1" },
+								{ sequence: 2, stream_id: `thread:${thread_id}` },
 							]),
 						);
 
 						const acknowledgement = yield* take_outbound(connection, 3);
 
-						return { acknowledgement, command, handshake, query };
+						return { acknowledgement, command, handshake, query, thread_id };
 					}),
 				),
 			);
@@ -775,8 +835,8 @@ describe("protocol server", () => {
 			expect(output.command).toMatchObject([
 				{
 					correlation_id: "command_1",
-					kind: "command.receipt",
-					payload: { journal_sequence: 2, status: "accepted" },
+					kind: "thread.create.result",
+					payload: { thread_id: output.thread_id, title: "Protocol integration" },
 				},
 				{
 					correlation_id: "command_1",
@@ -790,7 +850,7 @@ describe("protocol server", () => {
 					kind: "thread.list.query.result",
 					payload: {
 						journal_sequence: 2,
-						threads: [{ thread_id: "thread_1", title: "Protocol integration" }],
+						threads: [{ thread_id: output.thread_id, title: "Protocol integration" }],
 					},
 				},
 			]);
@@ -825,20 +885,21 @@ describe("protocol server", () => {
 
 						const subscription = yield* take_outbound(connection, 2);
 
-						yield* connection.Receive(make_command());
+						yield* connection.Receive(make_thread_create());
 
 						const accepted = yield* take_outbound(connection, 3);
+						const thread_id = created_thread_id(accepted);
 						const duplicate_delivery = yield* take_until_outbound(
 							connection,
 							(envelope) => envelope.kind === "thread.list.query.result",
 						).pipe(Effect.forkChild);
 
-						yield* connection.Receive(make_command());
+						yield* connection.Receive(make_thread_create());
 						yield* connection.Receive(make_query("query_after_duplicate"));
 
 						const after_duplicate = yield* Fiber.join(duplicate_delivery);
 
-						return { accepted, after_duplicate, subscription };
+						return { accepted, after_duplicate, subscription, thread_id };
 					}),
 				),
 			);
@@ -858,25 +919,28 @@ describe("protocol server", () => {
 			]);
 			expect(output.accepted).toMatchObject([
 				{
-					kind: "command.receipt",
-					payload: { status: "accepted" },
+					kind: "thread.create.result",
+					payload: { thread_id: output.thread_id },
 				},
 				{ kind: "event", journal_sequence: 2 },
 				{
 					kind: "thread.list.upsert",
-					payload: { thread_id: "thread_1", title: "Protocol integration" },
+					payload: {
+						thread_id: output.thread_id,
+						title: "Protocol integration",
+					},
 					sequence: 1,
 				},
 			]);
 			expect(output.after_duplicate.map((envelope) => envelope.kind)).toEqual([
-				"command.receipt",
+				"thread.create.result",
 				"thread.list.query.result",
 			]);
 			expect(output.after_duplicate).toMatchObject([
 				{
 					correlation_id: "command_1",
-					kind: "command.receipt",
-					payload: { status: "duplicate" },
+					kind: "thread.create.result",
+					payload: { thread_id: output.thread_id },
 				},
 				{
 					correlation_id: "query_after_duplicate",
@@ -899,41 +963,46 @@ describe("protocol server", () => {
 						const initial_connection = yield* open_connection;
 
 						yield* negotiate(initial_connection);
-						yield* initial_connection.Receive(make_command());
-						yield* take_outbound(initial_connection, 2);
+						yield* initial_connection.Receive(make_thread_create());
+						const initial = yield* take_outbound(initial_connection, 2);
+						const first_thread_id = created_thread_id(initial);
 						yield* initial_connection.Close;
 
 						const producer_connection = yield* open_connection;
 
 						yield* negotiate(producer_connection, make_hello("hello_producer"));
 						yield* producer_connection.Receive(
-							make_command("command_2", "thread_2", "Missing event"),
+							make_thread_create("command_2", "Missing event"),
 						);
-						yield* take_outbound(producer_connection, 2);
+						const produced = yield* take_outbound(producer_connection, 2);
+						const second_thread_id = created_thread_id(produced);
 
 						const reconnecting_connection = yield* open_connection;
 
 						yield* reconnecting_connection.Receive(
 							make_hello("hello_reconnect", 2, [
 								{ sequence: 1, stream_id: "settings:guidance" },
-								{ sequence: 1, stream_id: "thread:thread_1" },
+								{ sequence: 1, stream_id: `thread:${first_thread_id}` },
 							]),
 						);
 
-						return yield* take_outbound(reconnecting_connection, 3);
+						return {
+							replay: yield* take_outbound(reconnecting_connection, 3),
+							second_thread_id,
+						};
 					}),
 				),
 			);
 
-			expect(replay.map((envelope) => envelope.kind)).toEqual([
+			expect(replay.replay.map((envelope) => envelope.kind)).toEqual([
 				"welcome",
 				"event",
 				"replay.complete",
 			]);
-			expect(replay[1]).toMatchObject({
+			expect(replay.replay[1]).toMatchObject({
 				journal_sequence: 3,
 				payload: { title: "Missing event", type: "thread.created" },
-				thread_id: "thread_2",
+				thread_id: replay.second_thread_id,
 			});
 		} finally {
 			await runtime.dispose();
@@ -953,20 +1022,23 @@ describe("protocol server", () => {
 
 						yield* negotiate(source_connection, make_hello("hello_source"));
 						yield* negotiate(observer_connection, make_hello("hello_observer"));
-						yield* source_connection.Receive(make_command());
-						yield* take_outbound(source_connection, 2);
+						yield* source_connection.Receive(make_thread_create());
+						const source_output = yield* take_outbound(source_connection, 2);
 
-						return yield* take_outbound(observer_connection, 1);
+						return {
+							event: yield* take_outbound(observer_connection, 1),
+							thread_id: created_thread_id(source_output),
+						};
 					}),
 				),
 			);
 
-			expect(observer_event).toMatchObject([
+			expect(observer_event.event).toMatchObject([
 				{
 					correlation_id: "command_1",
 					journal_sequence: 2,
 					kind: "event",
-					thread_id: "thread_1",
+					thread_id: observer_event.thread_id,
 				},
 			]);
 		} finally {
