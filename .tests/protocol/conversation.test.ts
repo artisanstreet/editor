@@ -136,6 +136,46 @@ describe("canonical conversation protocol", () => {
 		});
 	});
 
+	it("decodes typed approval requests without invalidating legacy approval rows", () => {
+		const decode_item = Schema.decodeUnknownSync(ConversationItem, {
+			onExcessProperty: "error",
+		});
+		const { phase: _phase, text: _text, ...item_base } = assistant;
+		const approval_base = {
+			...item_base,
+			id: "approval_1",
+			interaction_id: "opaque_response_id",
+			lifecycle: "waiting",
+			prompt: "Run the test suite",
+			requested_at: at,
+			state: "requested",
+			type: "approval",
+		};
+
+		expect(
+			decode_item({
+				...approval_base,
+				request: {
+					command: "pnpm test",
+					cwd: "C:\\workspace",
+					kind: "command",
+					reason: "Run the test suite",
+				},
+			}),
+		).toMatchObject({
+			interaction_id: "opaque_response_id",
+			request: {
+				command: "pnpm test",
+				cwd: "C:\\workspace",
+				kind: "command",
+			},
+		});
+		expect(decode_item(approval_base)).toMatchObject({
+			interaction_id: "opaque_response_id",
+			type: "approval",
+		});
+	});
+
 	it("rebuilds streaming text in order and makes exact replay idempotent", () => {
 		const patches = [
 			decode_patch({

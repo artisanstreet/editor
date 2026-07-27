@@ -407,4 +407,109 @@ describe("conversation projection", () => {
 			await runtime.dispose();
 		}
 	});
+
+	it("projects typed approval details without provider method or item identifiers", async () => {
+		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
+		try {
+			const availability = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const read_model = yield* ConversationReadModel;
+					yield* database.client.insert(Threads).values({
+						created_at: "2026-07-24T00:00:00.000Z",
+						last_activity_at: "2026-07-24T00:00:00.000Z",
+						thread_id: "thread_1",
+						title: "Conversation",
+						updated_at: "2026-07-24T00:00:00.000Z",
+					});
+					yield* database.client.transaction((transaction) =>
+						Effect.gen(function* () {
+							const context = {
+								occurred_at: "2026-07-24T00:00:01.000Z",
+								run_id: "run_1",
+								thread_id: "thread_1",
+							};
+							yield* ApplyEngineObservation(
+								transaction,
+								{
+									_tag: "approval",
+									approval_id: "opaque_response_id",
+									artisan_run_id: "run_1",
+									description: "Run the test suite",
+									observation_id: "approval_observation",
+									raw: {
+										engine_id: "codex",
+										frame: {
+											itemId: "call_command",
+											method: "item/commandExecution/requestApproval",
+										},
+										transport: "test",
+									},
+									request: {
+										command: "pnpm test",
+										cwd: "C:\\workspace",
+										kind: "command",
+										reason: "Run the test suite",
+									},
+									sequence: 1,
+									state: "requested",
+								},
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
+							yield* ApplyEngineObservation(
+								transaction,
+								{
+									_tag: "approval",
+									approval_id: "blank_response_id",
+									artisan_run_id: "run_1",
+									description: "  ",
+									observation_id: "blank_approval_observation",
+									raw: { engine_id: "test", frame: {}, transport: "test" },
+									request: {
+										command: "\t",
+										cwd: " ",
+										kind: "command",
+										reason: "\n",
+									},
+									sequence: 2,
+									state: "requested",
+								},
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
+						}),
+					);
+					return yield* read_model.ReadSnapshot("thread_1");
+				}),
+			);
+
+			expect(availability.status).toBe("available");
+			if (availability.status !== "available") return;
+			const approval = availability.snapshot.items.find((item) => item.type === "approval");
+			expect(approval).toMatchObject({
+				interaction_id: "opaque_response_id",
+				prompt: "Run the test suite",
+				request: {
+					command: "pnpm test",
+					cwd: "C:\\workspace",
+					kind: "command",
+					reason: "Run the test suite",
+				},
+				type: "approval",
+			});
+			expect(JSON.stringify(approval)).not.toContain("item/commandExecution");
+			expect(JSON.stringify(approval)).not.toContain("call_command");
+			expect(
+				availability.snapshot.items.find(
+					(item) =>
+						item.type === "approval" && item.interaction_id === "blank_response_id",
+				),
+			).toMatchObject({
+				prompt: "Approval requested",
+				request: { kind: "command" },
+				type: "approval",
+			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
 });

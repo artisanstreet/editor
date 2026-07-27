@@ -236,10 +236,20 @@ const ModelRerouteSchema = Schema.Struct({
 	toModel: Schema.String,
 	turnId: Schema.String,
 });
-const ApprovalSchema = Schema.Struct({
+const ApprovalFields = {
 	itemId: Schema.String,
 	threadId: Schema.String,
-	turnId: Schema.String,
+	turnId: Schema.NullOr(Schema.String),
+};
+const CommandApprovalSchema = Schema.Struct({
+	...ApprovalFields,
+	command: Schema.optional(Schema.String),
+	cwd: Schema.optional(Schema.String),
+	reason: Schema.optional(Schema.NullOr(Schema.String)),
+});
+const FileChangeApprovalSchema = Schema.Struct({
+	...ApprovalFields,
+	reason: Schema.optional(Schema.NullOr(Schema.String)),
 });
 const QuestionSchema = Schema.Struct({
 	itemId: Schema.String,
@@ -483,17 +493,47 @@ export function normalise_codex_notification(
 				native_action(input, `${value.fromModel} -> ${value.toModel}: ${value.reason}`),
 			]);
 		case "item/commandExecution/requestApproval":
+			return decode_known(input, CommandApprovalSchema, (value) => {
+				const reason = value.reason?.trim() || undefined;
+				const command = value.command?.trim() || undefined;
+				const cwd = value.cwd?.trim() || undefined;
+
+				return [
+					{
+						...base,
+						_tag: "approval",
+						approval_id: String(input.id ?? value.itemId),
+						description: reason ?? "Run a command",
+						request: {
+							kind: "command",
+							...(command === undefined ? {} : { command }),
+							...(cwd === undefined ? {} : { cwd }),
+							...(reason === undefined ? {} : { reason }),
+						},
+						sequence: 0,
+						state: "requested",
+					} satisfies EngineApprovalObservation,
+				];
+			});
 		case "item/fileChange/requestApproval":
-			return decode_known(input, ApprovalSchema, (value) => [
-				{
-					...base,
-					_tag: "approval",
-					approval_id: String(input.id ?? value.itemId),
-					description: `${input.method} for ${value.itemId}`,
-					sequence: 0,
-					state: "requested",
-				} satisfies EngineApprovalObservation,
-			]);
+			return decode_known(input, FileChangeApprovalSchema, (value) => {
+				const reason = value.reason?.trim() || undefined;
+
+				return [
+					{
+						...base,
+						_tag: "approval",
+						approval_id: String(input.id ?? value.itemId),
+						description: reason ?? "Apply file changes",
+						request: {
+							kind: "file_change",
+							...(reason === undefined ? {} : { reason }),
+						},
+						sequence: 0,
+						state: "requested",
+					} satisfies EngineApprovalObservation,
+				];
+			});
 		case "item/tool/requestUserInput":
 			return decode_known(input, QuestionSchema, (value) =>
 				value.questions.map(

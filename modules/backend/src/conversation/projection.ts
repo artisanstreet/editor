@@ -67,6 +67,11 @@ const source_refs = (
 ];
 
 const text = (value: string) => value.slice(0, 4_096);
+const optional_text = (value: string | undefined) => {
+	const normalized = value?.trim();
+
+	return normalized ? text(normalized) : undefined;
+};
 
 const EnsureThread = (transaction: any, thread_id: string, updated_at: string) =>
 	transaction
@@ -521,6 +526,40 @@ export const ApplyEngineObservation = (
 					common,
 				);
 			case "approval":
+				const approval_reason = optional_text(observation.request.reason);
+				const approval_command =
+					observation.request.kind === "command"
+						? optional_text(observation.request.command)
+						: undefined;
+				const approval_cwd =
+					observation.request.kind === "command"
+						? optional_text(observation.request.cwd)
+						: undefined;
+				const approval_request =
+					observation.request.kind === "command"
+						? {
+								kind: "command" as const,
+								...(approval_command === undefined
+									? {}
+									: { command: approval_command }),
+								...(approval_cwd === undefined ? {} : { cwd: approval_cwd }),
+								...(approval_reason === undefined
+									? {}
+									: { reason: approval_reason }),
+							}
+						: observation.request.kind === "file_change"
+							? {
+									kind: "file_change" as const,
+									...(approval_reason === undefined
+										? {}
+										: { reason: approval_reason }),
+								}
+							: {
+									kind: "action" as const,
+									...(approval_reason === undefined
+										? {}
+										: { reason: approval_reason }),
+								};
 				return yield* UpsertItem(
 					transaction,
 					input.thread_id,
@@ -534,7 +573,11 @@ export const ApplyEngineObservation = (
 						),
 						type: "approval",
 						interaction_id: observation.approval_id,
-						prompt: text(observation.description) || "Approval requested",
+						prompt:
+							approval_reason ??
+							optional_text(observation.description) ??
+							"Approval requested",
+						request: approval_request,
 						requested_at: input.occurred_at,
 						state:
 							observation.state === "requested"

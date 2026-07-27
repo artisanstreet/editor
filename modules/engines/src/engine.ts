@@ -291,12 +291,30 @@ export interface EngineNativeActionObservation extends EngineObservationBase {
 	readonly detail?: string;
 }
 
+/** Describes the provider-neutral action bound to an approval. @since 0.3.0 */
+export type EngineApprovalRequest =
+	| {
+			readonly command?: string;
+			readonly cwd?: string;
+			readonly kind: "command";
+			readonly reason?: string;
+	  }
+	| {
+			readonly kind: "file_change";
+			readonly reason?: string;
+	  }
+	| {
+			readonly kind: "action";
+			readonly reason?: string;
+	  };
+
 /** Reports an approval request or its resolution. @since 0.2.0 */
 export interface EngineApprovalObservation extends EngineObservationBase {
 	readonly _tag: "approval";
 	readonly approval_id: string;
 	readonly approved?: boolean;
 	readonly description: string;
+	readonly request: EngineApprovalRequest;
 	readonly state: "requested" | "resolved";
 }
 

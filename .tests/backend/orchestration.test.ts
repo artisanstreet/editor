@@ -69,6 +69,7 @@ function make_engine() {
 					description: "Approve deterministic action",
 					observation_id: "approval_observation",
 					raw: { engine_id: "deterministic", frame: "approval", transport: "test" },
+					request: { kind: "action", reason: "Approve deterministic action" },
 					sequence: 1,
 					state: "requested",
 				},

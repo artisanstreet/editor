@@ -42,7 +42,10 @@
 	}: {
 		disabled?: boolean;
 		image_sources?: ReadonlyMap<string, string>;
-		onapproval?: (approval_id: string, approved: boolean) => void;
+		onapproval?: (
+			approval_id: string,
+			approved: boolean,
+		) => Effect.Effect<void, { readonly message: string }>;
 		onpolicychange?: (policy: ThreadSessionPolicy) => void;
 		onquestion?: (question_id: string, answer: string) => void;
 		onimagevisibilitychange?: (

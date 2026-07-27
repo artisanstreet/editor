@@ -1,6 +1,8 @@
 <script lang="ts">
 	import type { ConversationItem, ImageAttachmentReference } from "@artisan/protocol";
+	import type { Effect } from "effect";
 	import ConversationActivity from "./conversation-activity.sv";
+	import ConversationApproval from "./conversation-approval.sv";
 	import ConversationChange from "./conversation-change.sv";
 	import ConversationMessage from "./conversation-message.sv";
 	import ConversationPrompt from "./conversation-prompt.sv";
@@ -18,7 +20,10 @@
 	}: {
 		item: ConversationItem;
 		image_sources?: ReadonlyMap<string, string>;
-		onapproval?: (approval_id: string, approved: boolean) => void;
+		onapproval?: (
+			approval_id: string,
+			approved: boolean,
+		) => Effect.Effect<void, { readonly message: string }>;
 		onimagevisibilitychange?: (
 			attachments: ReadonlyArray<ImageAttachmentReference>,
 			visible: boolean,
@@ -36,8 +41,10 @@
 	<ConversationActivity {item} {trailing} />
 {:else if item.type === "change_set" || item.type === "file_change"}
 	<ConversationChange {item} />
-{:else if item.type === "plan" || item.type === "approval" || item.type === "question"}
-	<ConversationPrompt {item} {onapproval} {onquestion} />
+{:else if item.type === "approval"}
+	<ConversationApproval {item} {onapproval} />
+{:else if item.type === "plan" || item.type === "question"}
+	<ConversationPrompt {item} {onquestion} />
 {:else}
 	<ConversationStatus {item} {trailing} />
 {/if}

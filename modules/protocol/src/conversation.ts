@@ -78,6 +78,25 @@ const ConversationItemFields = {
 	turn_id: Identifier,
 };
 
+/** Describes the user-visible action bound to an opaque approval interaction. */
+export const ConversationApprovalRequest = Schema.Union([
+	Schema.Struct({
+		command: Schema.optional(ConversationSafeText),
+		cwd: Schema.optional(ConversationSafeText),
+		kind: Schema.Literal("command"),
+		reason: Schema.optional(ConversationSafeText),
+	}),
+	Schema.Struct({
+		kind: Schema.Literal("file_change"),
+		reason: Schema.optional(ConversationSafeText),
+	}),
+	Schema.Struct({
+		kind: Schema.Literal("action"),
+		reason: Schema.optional(ConversationSafeText),
+	}),
+]);
+export type ConversationApprovalRequest = typeof ConversationApprovalRequest.Type;
+
 /** A normalized, renderer-ready entity. Its `type` is a domain discriminator, not a UI label. */
 export const ConversationItem = Schema.Union([
 	Schema.Struct({
@@ -157,6 +176,7 @@ export const ConversationItem = Schema.Union([
 		...ConversationItemFields,
 		interaction_id: Identifier,
 		prompt: ConversationSafeText,
+		request: Schema.optional(ConversationApprovalRequest),
 		requested_at: IsoDateTime,
 		resolution: Schema.optional(ConversationSafeText),
 		resolved_at: Schema.optional(IsoDateTime),

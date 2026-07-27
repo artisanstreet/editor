@@ -7,11 +7,9 @@
 
 	let {
 		item,
-		onapproval,
 		onquestion,
 	}: {
-		item: Extract<ConversationItem, { type: "plan" | "approval" | "question" }>;
-		onapproval?: (approval_id: string, approved: boolean) => void;
+		item: Extract<ConversationItem, { type: "plan" | "question" }>;
 		onquestion?: (question_id: string, answer: string) => void;
 	} = $props();
 
@@ -19,13 +17,9 @@
 	const label = $derived(
 		item.type === "plan"
 			? "Plan"
-			: item.type === "approval"
-				? item.state === "requested"
-					? "Approval needed"
-					: item.state
-				: item.state === "requested"
-					? "Question"
-					: "Answered",
+			: item.state === "requested"
+				? "Question"
+				: "Answered",
 	);
 	const text = $derived(item.type === "plan" ? item.entries.map((entry) => entry.text).join("\n") : item.prompt);
 
@@ -42,20 +36,7 @@
 		<Badge variant="outline">{label}</Badge>
 		<p class="whitespace-pre-wrap text-base leading-7">{text}</p>
 
-		{#if item.type === "approval" && item.state === "requested"}
-			<div class="flex flex-wrap items-center gap-2">
-				<Button size="sm" onclick={() => onapproval?.(item.interaction_id, true)}>
-					Approve
-				</Button>
-				<Button
-					size="sm"
-					variant="outline"
-					onclick={() => onapproval?.(item.interaction_id, false)}
-				>
-					Deny
-				</Button>
-			</div>
-		{:else if item.type === "question" && item.state === "requested"}
+		{#if item.type === "question" && item.state === "requested"}
 			<form
 				class="flex items-center gap-2"
 				onsubmit={(event) => {
@@ -70,7 +51,7 @@
 				/>
 				<Button type="submit" size="sm" disabled={answer.trim().length === 0}>Answer</Button>
 			</form>
-		{:else if item.type !== "plan" && item.resolution !== undefined}
+		{:else if item.type === "question" && item.resolution !== undefined}
 			<p class="text-sm text-muted-foreground">{item.resolution}</p>
 		{/if}
 	</CardContent>

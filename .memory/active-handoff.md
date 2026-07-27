@@ -297,3 +297,23 @@ Branch continuity only. Durable status lives in
   have a computed 1px divider. Full validation still stops first on the
   pre-existing formatter mismatch in
   `docs/status/backend-completion-matrix.md`.
+- Codex command/file approvals now retain a typed provider-neutral request
+  descriptor across normalization, Engine runtime state, canonical projection,
+  protocol decoding, and rendering. Ordinary command approvals preserve the
+  user-visible reason, command, and working directory while the opaque
+  JSON-RPC response identity remains response-only; raw provider method names
+  and `call_*` item identifiers remain solely in provenance. Pending approvals
+  render as compact action-specific decision cards, gate duplicate responses,
+  and report rejected responses through `BannerService`; resolved approvals
+  collapse to quiet receipts. Renderer-local heading IDs do not expose opaque
+  interaction handles. A compatibility presentation guard also removes the
+  already-persisted `item/.../requestApproval for call_*` strings from old rows
+  without invalidating their protocol shape.
+  Five focused test files (23 tests), root TypeScript, scoped lint, the
+  production frontend build, the Forge bundle, installed-runtime HTTP status,
+  and live Chrome inspection pass. The installed `0.1.0` Forge is running with
+  the new bundle and paired at `https://artisan.localhost/`; the previous
+  installed runtime and frontend remain recoverable from
+  `%LOCALAPPDATA%\Artisan\.local-backup-20260728-000743-approval-ui`.
+  Full validation still stops first on the pre-existing formatter mismatch in
+  `docs/status/backend-completion-matrix.md`.

@@ -264,13 +264,16 @@
 		Dispatch(UpdateSessionPolicy(policy).pipe(Effect.catch(() => Effect.void)));
 	};
 
+	const RespondApproval = (approval_id: string, approved: boolean) =>
+		client
+			.Command({
+				payload: { approval_id, approved, type: "run.respond_approval" },
+				thread_id,
+			})
+			.pipe(Effect.andThen(RefreshInteractionContext));
+
 	const RunCommand = (payload:
 		| { readonly type: "run.cancel" }
-		| {
-				readonly type: "run.respond_approval";
-				readonly approval_id: string;
-				readonly approved: boolean;
-		  }
 		| {
 				readonly type: "run.respond_question";
 				readonly answers: Record<string, [string, ...string[]]>;
@@ -357,8 +360,7 @@
 	{image_sources}
 	{snapshot}
 	disabled={session === undefined}
-	onapproval={(approval_id, approved) =>
-		RunCommand({ approval_id, approved, type: "run.respond_approval" })}
+	onapproval={RespondApproval}
 	onquestion={(question_id, answer) =>
 		RunCommand({
 			answers: { [question_id]: [answer] },

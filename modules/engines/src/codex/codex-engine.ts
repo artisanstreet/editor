@@ -19,6 +19,7 @@ import {
 
 import {
 	type Engine,
+	type EngineApprovalObservation,
 	type EngineCommand,
 	type EngineCommandFailure,
 	type EngineDescriptor,
@@ -142,6 +143,7 @@ interface CodexRunState {
 interface PendingApproval {
 	readonly description: string;
 	readonly native_request_id: string | number;
+	readonly request: EngineApprovalObservation["request"];
 }
 
 interface PendingQuestion {
@@ -698,6 +700,7 @@ function make_codex_app_server_engine(
 							approvals: new Map(current.approvals).set(observation.approval_id, {
 								description: observation.description,
 								native_request_id: observation.raw.native_id,
+								request: observation.request,
 							}),
 						};
 					}
@@ -998,6 +1001,7 @@ function make_codex_app_server_engine(
 									protocol_version: CodexTransportMetadata.protocol_version,
 									transport: CodexTransportMetadata.transport,
 								},
+								request: pending.request,
 								sequence: 0,
 								state: "resolved",
 							});

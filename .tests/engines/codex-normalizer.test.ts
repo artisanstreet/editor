@@ -159,6 +159,73 @@ describe("Codex normalizer", () => {
 		expect(new Set(expanded.map((observation) => observation.observation_id)).size).toBe(4);
 	});
 
+	it("keeps approval response identity opaque while projecting human action details", async () => {
+		const [command, file_change] = await Effect.runPromise(
+			Effect.all([
+				normalise(
+					"item/commandExecution/requestApproval",
+					{
+						additionalPermissions: { network: { enabled: true } },
+						command: "pnpm test",
+						cwd: "C:\\workspace",
+						itemId: "call_command",
+						reason: "Run the test suite",
+						threadId: "thread-1",
+						turnId: "turn-1",
+					},
+					{ frame_sequence: 6, id: "approval-command" },
+				),
+				normalise(
+					"item/fileChange/requestApproval",
+					{
+						grantRoot: "C:\\workspace",
+						itemId: "call_files",
+						reason: "Apply the generated fixes",
+						threadId: "thread-1",
+						turnId: "turn-1",
+					},
+					{ frame_sequence: 7, id: "approval-files" },
+				),
+			]),
+		);
+
+		expect(command).toMatchObject([
+			{
+				approval_id: "approval-command",
+				description: "Run the test suite",
+				request: {
+					command: "pnpm test",
+					cwd: "C:\\workspace",
+					kind: "command",
+					reason: "Run the test suite",
+				},
+				state: "requested",
+			},
+		]);
+		expect(file_change).toMatchObject([
+			{
+				approval_id: "approval-files",
+				description: "Apply the generated fixes",
+				request: {
+					kind: "file_change",
+					reason: "Apply the generated fixes",
+				},
+				state: "requested",
+			},
+		]);
+		expect(command[0]?.raw.frame).toMatchObject({
+			additionalPermissions: { network: { enabled: true } },
+			itemId: "call_command",
+		});
+		expect(file_change[0]?.raw.frame).toMatchObject({
+			grantRoot: "C:\\workspace",
+			itemId: "call_files",
+		});
+		expect(JSON.stringify([...command, ...file_change])).not.toContain(
+			"requestApproval for call_",
+		);
+	});
+
 	it("surfaces safe reasoning summaries and stateful search plus compaction activity", async () => {
 		const observations = await Effect.runPromise(
 			Effect.all([
