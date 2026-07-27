@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { describe, expect, it } from "vitest";
 
 import { release_lanes, transport_asset_names } from "../../build/release/policy.ts";
@@ -20,5 +23,15 @@ describe("release policy", () => {
 		);
 		expect(transport_asset_names("1.2.3")).toContain("release-manifest.json");
 		expect(transport_asset_names("1.2.3")).toContain("release-manifest.sig");
+	});
+
+	it("continues exact resume verification after build lanes are skipped", () => {
+		const workflow = readFileSync(
+			resolve(".github/workflows/release-validation.yml"),
+			"utf8",
+		);
+		expect(workflow).toContain(
+			"if: always() && needs.plan.result == 'success' && needs.candidate.result == 'success'",
+		);
 	});
 });

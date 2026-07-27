@@ -323,6 +323,7 @@ jobs:
 
     candidate_verify:
         name: Verify and smoke frozen candidate
+        if: always() && needs.plan.result == 'success' && needs.candidate.result == 'success'
         needs: [plan, candidate]
         runs-on: ubuntu-24.04
         timeout-minutes: 10
