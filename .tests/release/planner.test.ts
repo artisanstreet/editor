@@ -54,6 +54,25 @@ describe("release planner", () => {
 		).toThrow("Resume requires exact version, commit, and run ID.");
 	});
 
+	it("publishes an exact resumed candidate without rebuilding it", () => {
+		const plan = make_release_plan({
+			event: "workflow_dispatch",
+			ref: "refs/heads/candidate",
+			commit,
+			version: "0.1.0",
+			workspace_version: "0.1.0",
+			run_id: "100",
+			mode: "resume",
+			resume_commit: commit,
+			resume_version: "0.1.0",
+			resume_run_id: "42",
+		});
+
+		expect(plan.construct_candidate).toBe(false);
+		expect(plan.publish).toBe(true);
+		expect(plan.run_id).toBe("42");
+	});
+
 	it("rejects manual release work outside the protected pointer", () => {
 		expect(() =>
 			make_release_plan({

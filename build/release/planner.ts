@@ -79,7 +79,7 @@ export const make_release_plan = (input: PlanInput): ReleasePlan => {
 		tag: `v${version}`,
 		candidate_artifact: `artisan-candidate-${version}-${commit}-${selected_run_id}`,
 		construct_candidate: event === "workflow_dispatch" && mode !== "resume",
-		publish: event === "workflow_dispatch" && mode === "release",
+		publish: event === "workflow_dispatch" && (mode === "release" || mode === "resume"),
 		unsigned_prerelease: true,
 		assets: Object.freeze(transport_asset_names(version)),
 		lanes: release_lanes,

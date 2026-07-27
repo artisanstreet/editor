@@ -372,7 +372,7 @@ jobs:
 
     github_prepare:
         name: GitHub / Prepare draft
-        if: inputs.mode == 'release' || inputs.mode == 'resume'
+        if: always() && needs.plan.result == 'success' && needs.candidate_verify.result == 'success' && needs.plan.outputs.publish == 'true'
         needs: [plan, candidate_verify]
         runs-on: ubuntu-24.04
         timeout-minutes: 10
