@@ -218,6 +218,7 @@ jobs:
                   ARTISAN_RELEASE_VERSION: ${{ needs.plan.outputs.version }}
               run: |
                   $ErrorActionPreference = "Stop"
+                  $PSNativeCommandUseErrorActionPreference = $true
                   if ([string]::IsNullOrWhiteSpace($env:ARTISAN_RELEASE_SIGNING_KEY_PEM)) {
                       throw "ARTISAN_RELEASE_SIGNING_KEY_PEM is required"
                   }

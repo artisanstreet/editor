@@ -92,7 +92,7 @@ describe("deep desktop release gates", () => {
 			resolve(workspace_root, ".github/workflows/release-validation.yml"),
 			"utf8",
 		);
-		expect(workflow).toContain("name: Required packaged desktop release gate");
+		expect(workflow).toContain("name: Qualified product / Windows x64");
 		expect(workflow).not.toContain("if: ${{ inputs.run_packaged_desktop }}");
 		expect(verifier).toContain("$embedded_forge");
 		expect(verifier).toContain("must not embed a parallel Forge lifecycle");

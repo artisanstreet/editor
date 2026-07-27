@@ -3,7 +3,7 @@ productName: Artisan Editor
 directories:
     app: .dist/desktop
     output: .dist/electron-release
-electronDist: .dist/electron-runtime-43.1.1-offline
+electronDist: node_modules/electron/dist
 files:
     - main.js
     - package.json
