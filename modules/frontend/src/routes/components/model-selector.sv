@@ -153,22 +153,7 @@
 		selected_permission_options.find((option) => option.native_value === permission_mode) ??
 			selected_permission_options[0],
 	);
-	const composer_controls = $derived.by<ReadonlyArray<ComposerControl>>(() => {
-		const controls: Array<ComposerControl> = ["model"];
-
-		if (selected_thinking.availability === "supported") {
-			controls.push("thinking");
-		}
-		if (selected_permission_options.length > 0) {
-			controls.push("permission");
-		}
-		if (selected_speed_options.length > 1) {
-			controls.push("speed");
-		}
-		controls.push("workflow");
-
-		return controls;
-	});
+	const composer_controls: ReadonlyArray<ComposerControl> = ["model", "workflow"];
 
 	const select_model = (model: ModelChoice) => {
 		selected_model_id = model.id;

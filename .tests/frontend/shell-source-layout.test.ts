@@ -45,6 +45,12 @@ describe("Barekey docs shell reset", () => {
 		expect(model_selector).not.toMatch(/Claude|Anthropic/);
 		expect(model_selector).toContain("service_tier");
 		expect(model_selector).toContain("workflow_mode");
+		expect(model_selector).toContain(
+			'const composer_controls: ReadonlyArray<ComposerControl> = ["model", "workflow"];',
+		);
+		expect(composer).not.toContain('aria-label="Add images"');
+		expect(composer).not.toContain('aria-label="Stop current run"');
+		expect(composer).not.toContain('aria-label="Use voice input"');
 	});
 
 	it("owns conversation subscriptions and snapshots by route identity", () => {

@@ -294,7 +294,6 @@
 	{image_sources}
 	{snapshot}
 	disabled={session === undefined}
-	oncancel={() => RunCommand({ type: "run.cancel" })}
 	onapproval={(approval_id, approved) =>
 		RunCommand({ approval_id, approved, type: "run.respond_approval" })}
 	onquestion={(question_id, answer) =>

@@ -23,7 +23,6 @@
 		disabled = false,
 		image_sources,
 		onapproval,
-		oncancel,
 		onpolicychange,
 		onquestion,
 		onimagevisibilitychange,
@@ -34,7 +33,6 @@
 		disabled?: boolean;
 		image_sources?: ReadonlyMap<string, string>;
 		onapproval?: (approval_id: string, approved: boolean) => void;
-		oncancel?: () => void;
 		onpolicychange?: (policy: ThreadSessionPolicy) => void;
 		onquestion?: (question_id: string, answer: string) => void;
 		onimagevisibilitychange?: (
@@ -48,11 +46,6 @@
 	const view = $derived(MakeConversationViewState(snapshot));
 	const render_blocks = $derived(
 		view._tag === "applied" ? MakeConversationRenderBlocks(view.state) : [],
-	);
-	const active = $derived(
-		snapshot.turns.some((turn) =>
-			["pending", "streaming", "active", "waiting"].includes(turn.lifecycle),
-		),
 	);
 
 	const render_groups = $derived.by(() => {
@@ -119,7 +112,7 @@
 		</div>
 	</ScrollArea>
 
-	<ThreadComposer {active} {disabled} {oncancel} {onpolicychange} {onsubmit} {policy} />
+	<ThreadComposer {disabled} {onpolicychange} {onsubmit} {policy} />
 </main>
 
 <style>

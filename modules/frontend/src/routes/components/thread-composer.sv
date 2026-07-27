@@ -1,8 +1,5 @@
 <script lang="ts" effect>
 	import ArrowUp from "@tabler/icons-svelte/icons/arrow-up";
-	import ImagePlus from "@tabler/icons-svelte/icons/photo-plus";
-	import Microphone from "@tabler/icons-svelte/icons/microphone";
-	import Square from "@tabler/icons-svelte/icons/square";
 	import X from "@tabler/icons-svelte/icons/x";
 	import { onDestroy } from "svelte";
 	import { Effect } from "effect";
@@ -33,23 +30,18 @@
 	const banner = yield* BannerService;
 
 	let {
-		active = false,
 		disabled = false,
-		oncancel,
 		onpolicychange,
 		onsubmit,
 		policy,
 	}: {
-		active?: boolean;
 		disabled?: boolean;
-		oncancel?: () => void;
 		onpolicychange?: (policy: ThreadSessionPolicy) => void;
 		onsubmit?: (submission: ComposerSubmission) => Effect.Effect<void, { readonly message: string }>;
 		policy?: ThreadSessionPolicy;
 	} = $props();
 
 	let editor = $state<HTMLDivElement | null>(null);
-	let file_input = $state<HTMLInputElement | null>(null);
 	let attachments = $state<ReadonlyMap<string, ComposerImageAttachment>>(new Map());
 	let draft = $state("");
 	let image_viewer_open = $state(false);
@@ -382,21 +374,9 @@
 			</div>
 
 			<div class="flex items-center justify-between gap-2">
-				<div class="flex min-w-0 items-center gap-1">
-					<Button variant="ghost" size="icon" aria-label="Add images" disabled={disabled || submitting} onclick={() => { const range = selected_range(); file_input?.click(); queueMicrotask(() => focus_range(range)); }}>
-						<ImagePlus class="text-muted-foreground" />
-					</Button>
-					<ModelSelector {disabled} {policy} {onpolicychange} />
-				</div>
-				<div class="flex items-center gap-1">
-					{#if active && oncancel !== undefined}
-						<Button variant="ghost" size="icon" aria-label="Stop current run" onclick={oncancel}><Square class="size-3.5 fill-current text-muted-foreground" /></Button>
-					{/if}
-					<Button variant="ghost" size="icon" aria-label="Use voice input"><Microphone class="text-muted-foreground" /></Button>
-					<Button size="icon" aria-label="Send message" disabled={disabled || submitting || (draft.trim().length === 0 && attachments.size === 0) || onsubmit === undefined} onclick={yield* Submit}><ArrowUp /></Button>
-				</div>
+				<ModelSelector {disabled} {policy} {onpolicychange} />
+				<Button size="icon" aria-label="Send message" disabled={disabled || submitting || (draft.trim().length === 0 && attachments.size === 0) || onsubmit === undefined} onclick={yield* Submit}><ArrowUp /></Button>
 			</div>
-			<input bind:this={file_input} class="sr-only" type="file" accept="image/jpeg,image/png,image/webp,image/gif" multiple onchange={yield* AddFiles([...(event.currentTarget.files ?? [])]).pipe(Effect.ensuring(Effect.sync(() => { event.currentTarget.value = ""; })))} />
 		</div>
 	</ShaderGlassSurface>
 </div>
