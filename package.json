@@ -12,7 +12,7 @@
 		"desktop": "pnpm run build:desktop && electron .dist/desktop/main.js",
 		"dev:forge": "powershell -NoProfile -ExecutionPolicy Bypass -File .scripts/dev/start-browser-forge.ps1",
 		"package:desktop": "pnpm run build:desktop && electron-builder --config desktop-builder.yml --win dir --publish never",
-		"package:distribution:windows": "pnpm run build:native && pnpm run package:desktop && node .scripts/package/build-distribution-release.ts",
+		"package:distribution:windows": "pnpm run build:native && pnpm run package:desktop && node .scripts/package/build-distribution-release-entry.ts",
 		"verify:desktop-package": "powershell -NoProfile -ExecutionPolicy Bypass -File .tests/deep/desktop/verify-packaged-desktop.ps1",
 		"verify:distribution:windows": "vitest run .tests/deep/distribution/windows-release-artifact.test.ts",
 		"db:generate": "drizzle-kit generate --config drizzle.config.ts",

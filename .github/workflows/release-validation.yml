@@ -225,7 +225,7 @@ jobs:
                   $env:ARTISAN_RELEASE_PUBLIC_KEY_HEX = $public_key_hex
                   pnpm run package:desktop
                   cargo build --workspace --release --locked
-                  node .scripts/package/build-distribution-release.ts
+                  node .scripts/package/build-distribution-release-entry.ts
                   $bootstrap = ".dist/distribution-release/artisan-bootstrap-windows-x64.exe"
                   Copy-Item target/release/artisan-bootstrap.exe $bootstrap
                   $digest = (Get-FileHash -LiteralPath $bootstrap -Algorithm SHA256).Hash.ToLowerInvariant()

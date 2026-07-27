@@ -1,7 +1,6 @@
 import { createHash, createPrivateKey, createPublicKey, sign, verify } from "node:crypto";
 import { lstat, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { basename, join, relative, resolve, sep } from "node:path";
-import { pathToFileURL } from "node:url";
 
 import { Data, Effect, Schema } from "effect";
 
@@ -434,26 +433,3 @@ export const BuildWindowsDistributionReleaseFromEnvironment = (environment: Node
 			product_version: environment.ARTISAN_RELEASE_VERSION ?? "0.1.0",
 		});
 	});
-
-if (
-	process.argv[1] !== undefined &&
-	import.meta.url === pathToFileURL(resolve(process.argv[1])).href
-) {
-	Effect.runPromise(BuildWindowsDistributionReleaseFromEnvironment(process.env))
-		.then((output) => {
-			process.stdout.write(
-				`${JSON.stringify({
-					archive: basename(output.archive_path),
-					entries: output.archive_entries.length,
-					manifest: basename(output.manifest_path),
-					signature: basename(output.signature_path),
-				})}\n`,
-			);
-		})
-		.catch((cause: unknown) => {
-			process.stderr.write(
-				`${cause instanceof Error ? cause.message : "Distribution release build failed"}\n`,
-			);
-			process.exitCode = 1;
-		});
-}
