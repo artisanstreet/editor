@@ -49,6 +49,7 @@ describe("Barekey docs shell reset", () => {
 		const thread = Read("modules/frontend/src/routes/threads/[id]/+page.sv");
 		const thread_route = Read("modules/frontend/src/routes/threads/[id]/thread-route.sv");
 		const thread_panel = Read("modules/frontend/src/routes/components/thread-panel.sv");
+		const thread_workspace = Read("modules/frontend/src/routes/components/thread-workspace.sv");
 		const composer = Read("modules/frontend/src/routes/components/thread-composer.sv");
 		const model_selector = Read("modules/frontend/src/routes/components/model-selector.sv");
 
@@ -84,6 +85,9 @@ describe("Barekey docs shell reset", () => {
 		expect(thread_route).toContain('payload: { type: "run.cancel" }');
 		expect(thread_route).toContain("onabort={CancelRun}");
 		expect(thread_route).toContain("RefreshAuthoritativeThread");
+		expect(thread_workspace).toContain("fold_resolved_approvals_into_work");
+		expect(thread_workspace).toContain('block.item.type === "approval"');
+		expect(thread_workspace).toContain('block.item.state !== "requested"');
 		expect(composer).not.toContain('aria-label="Use voice input"');
 	});
 

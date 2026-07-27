@@ -66,8 +66,55 @@
 		snapshot: ConversationSnapshot;
 	} = $props();
 	const view = $derived(MakeConversationViewState(snapshot));
+	type ConversationItemBlock = Extract<ConversationRenderBlock, { type: "item" }>;
+
+	const block_is_resolved_approval = (
+		block: ConversationRenderBlock,
+	): block is ConversationItemBlock =>
+		block.type === "item" &&
+		block.item.type === "approval" &&
+		block.item.state !== "requested";
+
+	const fold_resolved_approvals_into_work = (
+		blocks: ReadonlyArray<ConversationRenderBlock>,
+	): ReadonlyArray<ConversationRenderBlock> => {
+		const worked_turns = new Set(
+			blocks
+				.filter(
+					(block) => block.type === "work_group" && block.duration_kind === "worked",
+				)
+				.map((block) => block.turn_id),
+		);
+		const approvals_by_turn = new Map<string, Array<ConversationItemBlock["item"]>>();
+
+		for (const block of blocks) {
+			if (!block_is_resolved_approval(block) || !worked_turns.has(block.turn_id)) continue;
+			const approvals = approvals_by_turn.get(block.turn_id) ?? [];
+			approvals.push(block.item);
+			approvals_by_turn.set(block.turn_id, approvals);
+		}
+
+		return blocks.flatMap((block): ReadonlyArray<ConversationRenderBlock> => {
+			if (block_is_resolved_approval(block) && worked_turns.has(block.turn_id)) return [];
+			if (block.type !== "work_group" || block.duration_kind !== "worked") return [block];
+
+			const approvals = approvals_by_turn.get(block.turn_id) ?? [];
+			return [
+				{
+					...block,
+					details: [...block.details, ...approvals].sort(
+						(left, right) =>
+							left.ordinal - right.ordinal || left.id.localeCompare(right.id),
+					),
+				},
+			];
+		});
+	};
+
 	const render_blocks = $derived(
-		view._tag === "applied" ? MakeConversationRenderBlocks(view.state) : [],
+		view._tag === "applied"
+			? fold_resolved_approvals_into_work(MakeConversationRenderBlocks(view.state))
+			: [],
 	);
 
 	const render_groups = $derived.by(() => {

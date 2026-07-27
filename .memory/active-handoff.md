@@ -177,9 +177,9 @@ Branch continuity only. Durable status lives in
   permission, speed, voice, and legacy Build/Plan controls remain absent; image
   paste/drop remains supported. The focused shell contract (10 tests), frontend
   lint, root TypeScript, production frontend build, and `git diff --check` pass.
-  Resolved approval receipts are grouped into the matching concrete `Worked`
-  trace as soon as that work group exists; pending approval requests remain
-  visible at the top level.
+  The Svelte thread workspace groups resolved approval receipts into the
+  matching concrete `Worked` trace as soon as that work group exists; pending
+  approval requests remain visible at the top level.
   `workflow_mode` is removed from current policy, catalog, persistence mapping,
   provider options, and Codex app-server requests. The old SQLite column remains
   inert for backward database compatibility.

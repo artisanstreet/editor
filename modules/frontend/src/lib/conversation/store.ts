@@ -124,9 +124,6 @@ const item_is_change = (
 ): item is ConversationChangeSet | ConversationFileChange =>
 	item.type === "change_set" || item.type === "file_change";
 
-const item_is_resolved_approval = (item: ConversationItem): boolean =>
-	item.type === "approval" && item.state !== "requested";
-
 interface LegacyWorkAliases {
 	readonly canonical_sessions: ReadonlyMap<string, ConversationWorkSession>;
 	readonly turn_aliases: ReadonlyMap<string, string>;
@@ -250,7 +247,6 @@ export const MakeConversationRenderBlocks = (
 		const work_session = work_session_by_turn.get(group_key);
 		if (work_session === undefined) return false;
 		if (collapsible_work_types.has(item.type) || item_is_explicit_commentary(item)) return true;
-		if (item_is_resolved_approval(item) && concrete_work_turns.has(group_key)) return true;
 		return (
 			item.type === "assistant_message" &&
 			item.id !== final_message_by_turn.get(group_key)?.id
