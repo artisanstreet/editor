@@ -70,7 +70,7 @@ export const CodexEngineDescriptor: EngineDescriptor = {
 		probe: { state: "supported" },
 		question: {
 			state: "experimental",
-			reason: "Codex request_user_input is experimental in 0.142.5.",
+			reason: "Codex request_user_input remains an experimental provider capability.",
 		},
 		raw_frames: { state: "supported" },
 		resume: { state: "supported" },
@@ -226,13 +226,25 @@ function ParseCodexVersion(stdout: Uint8Array) {
 			);
 }
 
+const CompareSemanticVersions = (left: string, right: string) => {
+	const left_parts = left.split(".").map(Number);
+	const right_parts = right.split(".").map(Number);
+
+	for (let index = 0; index < 3; index += 1) {
+		const difference = left_parts[index]! - right_parts[index]!;
+		if (difference !== 0) return difference;
+	}
+
+	return 0;
+};
+
 function ValidateCodexTransportVersion(version: string) {
-	return version === CodexTransportMetadata.cli_version
+	return CompareSemanticVersions(version, CodexTransportMetadata.minimum_cli_version) >= 0
 		? Effect.void
 		: Effect.fail(
 				new EngineProtocolError({
 					engine_id: "codex",
-					message: `Codex ${version} does not match pinned transport ${CodexTransportMetadata.cli_version}`,
+					message: `Codex ${version} is older than minimum supported ${CodexTransportMetadata.minimum_cli_version}`,
 				}),
 			);
 }

@@ -85,6 +85,37 @@ describe("Codex engine probe", () => {
 		expect(probe.version).toBe("0.142.5");
 	});
 
+	it("accepts newer Codex versions against the minimum transport contract", async () => {
+		process.env.FAKE_APP_SERVER_SCENARIO = "version-newer";
+
+		const probe = await Effect.runPromise(
+			Effect.gen(function* () {
+				const engine = yield* CodexEngine;
+
+				return yield* engine.Probe({});
+			}).pipe(Effect.provide(make_layer())),
+		);
+
+		expect(probe.version).toBe("0.146.0");
+	});
+
+	it("rejects Codex versions older than the minimum transport contract", async () => {
+		process.env.FAKE_APP_SERVER_SCENARIO = "version-older";
+
+		await expect(
+			Effect.runPromise(
+				Effect.gen(function* () {
+					const engine = yield* CodexEngine;
+
+					return yield* engine.Probe({});
+				}).pipe(Effect.provide(make_layer())),
+			),
+		).rejects.toMatchObject({
+			_tag: "EngineProtocolError",
+			message: "Codex 0.142.4 is older than minimum supported 0.142.5",
+		});
+	});
+
 	it.each(["stdout", "stderr"] as const)(
 		"bounds app-server version %s before transport selection",
 		async (channel) => {

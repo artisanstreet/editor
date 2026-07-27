@@ -89,7 +89,8 @@ describe("Barekey docs shell reset", () => {
 		);
 		expect(work_session).toContain("{#if can_collapse}");
 		expect(work_session).toContain("<button");
-		expect(work_session).toContain("{:else if !is_working}");
+		expect(work_session).toContain("{:else}");
+		expect(work_session).toContain('aria-live={is_working ? "polite" : undefined}');
 		expect(work_session).toContain("<span>{label}</span>");
 		expect(work_session).toContain("hidden={!is_working && !has_visible_details}");
 	});

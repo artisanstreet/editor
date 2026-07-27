@@ -75,6 +75,16 @@ if (process.argv.includes("--version")) {
 		process.exit(0);
 	}
 
+	if (version_scenarios.includes("version-newer")) {
+		process.stdout.write("codex-cli 0.146.0-alpha.3.1\n");
+		process.exit(0);
+	}
+
+	if (version_scenarios.includes("version-older")) {
+		process.stdout.write("codex-cli 0.142.4\n");
+		process.exit(0);
+	}
+
 	if (version_scenarios.includes("version-stdout-overflow")) {
 		await new Promise((resolve) => process.stdout.write("x".repeat(64 * 1_024 + 1), resolve));
 		process.exit(0);
@@ -159,7 +169,7 @@ function make_thread_response(thread: FixtureRecord, resumed: boolean) {
 			excludeSlashTmp: false,
 			excludeTmpdirEnvVar: false,
 			networkAccess: false,
-			type: "workspaceWrite",
+			type: "workspace-write",
 			writableRoots: [thread.cwd],
 		},
 		serviceTier: null,
@@ -526,6 +536,17 @@ function handle_request(request: FixtureRecord) {
 		return;
 	}
 
+	if (request.method === "scenario/additiveNotification") {
+		write_frame({
+			emittedAtMs: 42,
+			method: "test/additive",
+			params: { value: "preserved" },
+		});
+		respond(request.id, { ok: true });
+
+		return;
+	}
+
 	if (request.method === "scenario/oversizedLine") {
 		process.stdout.write(`{"type":"fixture.oversized","payload":"${"x".repeat(4_096)}`);
 
@@ -541,7 +562,8 @@ function handle_request(request: FixtureRecord) {
 		write_frame({ id: 1.5, result: {} });
 		write_frame({ error: { code: 1.5, message: "fractional code" }, id: request.id });
 		write_frame({ jsonrpc: "1.0", method: "invalid/jsonrpc" });
-		write_frame({ extra: true, method: "invalid/excess", params: {} });
+		write_frame({ extra: true, method: "", params: {} });
+		write_frame({ id: null, method: "invalid/additive-id", params: {} });
 		respond(request.id, { ok: true });
 
 		return;

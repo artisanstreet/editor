@@ -151,7 +151,7 @@ function ResolveCodexPermissions(input: EngineOpenInput, transport: CodexTranspo
 	});
 }
 
-/** Builds exact legacy app-server thread fields from canonical permission policy. */
+/** Builds app-server thread fields from Artisan's canonical permission policy. */
 export function MakeCodexAppServerThreadOptions(input: EngineOpenInput) {
 	return ValidateEngineGlobalGuidance("codex", input.global_guidance).pipe(
 		Effect.andThen(ResolveCodexPermissions(input, "app-server")),
@@ -176,14 +176,7 @@ export function MakeCodexAppServerThreadOptions(input: EngineOpenInput) {
 							},
 						},
 					}),
-			...(permissions.sandbox === undefined
-				? {}
-				: {
-						sandbox:
-							permissions.sandbox === "workspace-write"
-								? "workspaceWrite"
-								: "readOnly",
-					}),
+			...(permissions.sandbox === undefined ? {} : { sandbox: permissions.sandbox }),
 			...(input.provider_options?.["codex.reasoning_effort"] === undefined
 				? {}
 				: {

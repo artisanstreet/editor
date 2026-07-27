@@ -312,7 +312,7 @@ function turn_state(status: "completed" | "failed" | "inProgress" | "interrupted
 }
 
 /**
- * Validates the Codex 0.142.5 fields needed for provider-neutral events while
+ * Validates the minimum supported Codex fields needed for provider-neutral events while
  * preserving provider additions in raw provenance. Unknown or malformed future
  * frames remain observable as native actions.
  *
@@ -633,6 +633,6 @@ export function normalise_codex_notification(
 		case "thread/closed":
 			return Effect.succeed([native_action(input, "Native Codex thread closed")]);
 		default:
-			return Effect.succeed([native_action(input, "Unknown Codex 0.142.5 method")]);
+			return Effect.succeed([native_action(input, "Unknown Codex method")]);
 	}
 }

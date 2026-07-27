@@ -80,8 +80,11 @@
 				aria-hidden="true"
 			/>
 		</button>
-	{:else if !is_working}
-		<div class="flex w-full items-center gap-1 border-b border-border pb-2">
+	{:else}
+		<div
+			class="flex w-full items-center gap-1 border-b border-border pb-2"
+			aria-live={is_working ? "polite" : undefined}
+		>
 			<span>{label}</span>
 		</div>
 	{/if}

@@ -176,6 +176,36 @@ describe("Codex app-server session", () => {
 		expect(response.result).toEqual({ count: 8 });
 	});
 
+	it("accepts additive metadata on otherwise valid JSON-RPC envelopes", async () => {
+		const result = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const session = yield* make_session();
+					const notification_fiber = yield* Stream.runCollect(
+						session.Notifications.pipe(Stream.take(1)),
+					).pipe(Effect.forkChild);
+					const response = yield* session.Request("scenario/additiveNotification", {});
+
+					return {
+						notification: [...(yield* Fiber.join(notification_fiber))],
+						response,
+					};
+				}).pipe(Effect.provide(CodexProcessFactoryLive)),
+			),
+		);
+
+		expect(result.response.result).toEqual({ ok: true });
+		expect(result.notification).toMatchObject([
+			{
+				method: "test/additive",
+				payload: {
+					emittedAtMs: 42,
+					params: { value: "preserved" },
+				},
+			},
+		]);
+	});
+
 	it("finalizes when the downstream notification queue is full and unconsumed", async () => {
 		const finalized = await Effect.runPromise(
 			Effect.scoped(
@@ -275,7 +305,7 @@ describe("Codex app-server session", () => {
 				Effect.gen(function* () {
 					const session = yield* make_session();
 					const diagnostics_fiber = yield* Stream.runCollect(
-						session.Diagnostics.pipe(Stream.take(5)),
+						session.Diagnostics.pipe(Stream.take(6)),
 					).pipe(Effect.forkChild);
 					const response = yield* session.Request("scenario/invalidEnvelopes", {});
 
@@ -288,9 +318,9 @@ describe("Codex app-server session", () => {
 		);
 
 		expect(result.response.result).toEqual({ ok: true });
-		expect(result.diagnostics).toHaveLength(5);
+		expect(result.diagnostics).toHaveLength(6);
 		expect(result.diagnostics.map((diagnostic) => diagnostic.frame_sequence)).toEqual([
-			1, 2, 3, 4, 5,
+			1, 2, 3, 4, 5, 6,
 		]);
 		expect(result.diagnostics.every((diagnostic) => diagnostic.raw_frame_base64)).toBe(true);
 	});

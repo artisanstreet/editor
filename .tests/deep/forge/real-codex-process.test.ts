@@ -1,6 +1,6 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
 import { copyFile, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -65,7 +65,16 @@ afterEach(async () => {
 const StartForge = async (database_path: string, codex_home: string): Promise<RunningForge> => {
 	const executable = resolve(".dist/forge/Artisan Forge.exe");
 	const entry = resolve(".dist/forge/host.js");
-	const codex_executable = resolve_codex_executable();
+	const codex_executable = resolve_codex_executable({
+		architecture: process.arch,
+		environment: process.env,
+		Exists: existsSync,
+		platform: process.platform,
+		ReadDirectory: (path) => readdirSync(path),
+		...(process.env.LOCALAPPDATA === undefined
+			? {}
+			: { local_app_data: process.env.LOCALAPPDATA }),
+	});
 	if (!existsSync(codex_executable)) {
 		throw new Error(`Real Codex CLI was not found at ${codex_executable}`);
 	}

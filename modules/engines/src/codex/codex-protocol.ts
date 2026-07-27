@@ -1,9 +1,9 @@
-import { Data, Schema } from "effect";
+import { Data, Effect, Schema } from "effect";
 
-/** Pins the observed Codex CLI transport contract used by this adapter. @since 0.1.0 */
+/** Describes the minimum Codex CLI transport contract used by this adapter. @since 0.1.0 */
 export const CodexTransportMetadata = {
-	cli_version: "0.142.5",
 	initialize_method: "initialize",
+	minimum_cli_version: "0.142.5",
 	protocol_version: "v1",
 	transport: "stdio-jsonl",
 } as const;
@@ -98,7 +98,7 @@ export const CodexInitializeCapabilities = Schema.Struct({
 	requestAttestation: Schema.optional(Schema.Boolean),
 });
 
-/** Describes the version-pinned JSON-RPC initialize request. @since 0.1.0 */
+/** Describes the minimum-compatible JSON-RPC initialize request. @since 0.1.0 */
 export const CodexInitializeRequest = Schema.Struct({
 	id: CodexRequestId,
 	method: Schema.Literal(CodexTransportMetadata.initialize_method),
@@ -116,7 +116,7 @@ export const CodexInitializeResult = Schema.Struct({
 	userAgent: Schema.NonEmptyString,
 });
 
-/** Describes the version-pinned JSON-RPC initialize response. @since 0.1.0 */
+/** Describes the minimum-compatible JSON-RPC initialize response. @since 0.1.0 */
 export const CodexInitializeResponse = Schema.Struct({
 	id: CodexRequestId,
 	result: CodexInitializeResult,
@@ -197,7 +197,7 @@ export type CodexInitializeResponse = Schema.Schema.Type<typeof CodexInitializeR
 /** Represents a validated Codex account/read request. @since 0.3.0 */
 export type CodexAccountReadRequest = Schema.Schema.Type<typeof CodexAccountReadRequest>;
 
-/** Represents a stable approval decision accepted by Codex 0.142.5. @since 0.3.0 */
+/** Represents a stable approval decision accepted by the minimum Codex contract. @since 0.3.0 */
 export type CodexApprovalDecision = Schema.Schema.Type<typeof CodexApprovalDecision>;
 
 /** Represents a response to a server-initiated approval request. @since 0.3.0 */
@@ -258,10 +258,41 @@ export class CodexAppServerConfigurationError extends Data.TaggedError(
 /** Decodes unknown JSON into a validated Codex initialize response. @since 0.1.0 */
 export const DecodeCodexInitializeResponse = Schema.decodeUnknownEffect(CodexInitializeResponse);
 
-/** Strictly decodes one inbound Codex JSON-RPC envelope. @since 0.3.0 */
-export const DecodeCodexInboundEnvelope = Schema.decodeUnknownEffect(CodexInboundEnvelope, {
-	onExcessProperty: "error",
-});
+const HasOwn = (value: object, key: PropertyKey) =>
+	Object.prototype.hasOwnProperty.call(value, key);
+
+const IsCodexRequestId = (value: unknown) =>
+	typeof value === "string" || (typeof value === "number" && Number.isInteger(value));
+
+/**
+ * Accepts additive provider metadata while keeping JSON-RPC routing
+ * discriminants unambiguous.
+ */
+const IsUnambiguousCodexInboundEnvelope = (envelope: CodexInboundEnvelope) => {
+	const record = envelope as Record<PropertyKey, unknown>;
+	const has_method = HasOwn(envelope, "method");
+	const has_id = HasOwn(envelope, "id");
+	const has_result = HasOwn(envelope, "result");
+	const has_error = HasOwn(envelope, "error");
+
+	return has_method
+		? !has_result && !has_error && (!has_id || IsCodexRequestId(record.id))
+		: has_id && has_result !== has_error;
+};
+
+/** Decodes one forward-compatible inbound Codex JSON-RPC envelope. @since 0.3.0 */
+export const DecodeCodexInboundEnvelope = (input: unknown) =>
+	Schema.decodeUnknownEffect(CodexInboundEnvelope, {
+		onExcessProperty: "preserve",
+	})(input).pipe(
+		Effect.filterOrFail(
+			IsUnambiguousCodexInboundEnvelope,
+			() =>
+				new CodexAppServerProtocolError({
+					message: "Codex JSON-RPC envelope has ambiguous routing discriminants",
+				}),
+		),
+	);
 
 /**
  * Builds the non-billable JSON-RPC initialize request for a Codex app-server.
@@ -269,7 +300,7 @@ export const DecodeCodexInboundEnvelope = Schema.decodeUnknownEffect(CodexInboun
  * @since 0.1.0
  * @param client_name - Stable client name reported to the app-server.
  * @param client_version - Client version reported to the app-server.
- * @returns A request compatible with the observed 0.142.5 transport.
+ * @returns A request compatible with the minimum supported transport.
  */
 export function make_codex_initialize_request(
 	client_name: string,
@@ -296,7 +327,7 @@ export function make_codex_initialize_request(
  *
  * @since 0.3.0
  * @param id - Unique request identifier assigned by the transport.
- * @returns The minimal account/read request accepted by Codex 0.142.5.
+ * @returns The minimal account/read request accepted by the minimum Codex contract.
  */
 export function make_codex_account_read_request(id: CodexRequestId): CodexAccountReadRequest {
 	return { id, method: "account/read", params: {} };
