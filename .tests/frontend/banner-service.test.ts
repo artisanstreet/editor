@@ -163,14 +163,7 @@ describe("BannerService", () => {
 
 		expect(presented).toMatchObject([
 			{
-				actions: [
-					{
-						href: "artisan://forge/start",
-						id: "start-forge",
-						label: "Start Forge",
-					},
-				],
-				description: "If Forge is not already running, start the installed local service.",
+				description: "Keep this page open while Artisan establishes the session.",
 				id: ForgeConnectionBannerId,
 				severity: "info",
 				title: "Connecting to Forge…",
@@ -178,16 +171,11 @@ describe("BannerService", () => {
 			{
 				actions: [
 					{
-						href: "artisan://forge/start",
-						id: "start-forge",
-						label: "Start Forge",
-					},
-					{
 						id: "retry",
 						label: "Retry now",
 					},
 				],
-				description: "Five connection attempts failed.",
+				description: "Run ae open in a terminal, then retry this connection.",
 				id: ForgeConnectionBannerId,
 				severity: "error",
 				title: "Could not connect to Forge",

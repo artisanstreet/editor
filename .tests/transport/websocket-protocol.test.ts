@@ -7,6 +7,10 @@ import {
 	make_websocket_message_port,
 	type WebSocketEndpoint,
 } from "@artisan/transport/websocket/protocol";
+import {
+	prepare_browser_websocket,
+	type BrowserWebSocket,
+} from "@artisan/transport/websocket/client";
 
 type Listener<T> = (value: T) => void;
 
@@ -51,6 +55,13 @@ const hello = {
 };
 
 describe("WebSocket transport framing", () => {
+	it("requests ArrayBuffer delivery for browser binary frames", () => {
+		const socket = { binaryType: "blob" } as BrowserWebSocket;
+
+		expect(prepare_browser_websocket(socket)).toBe(socket);
+		expect(socket.binaryType).toBe("arraybuffer");
+	});
+
 	it("keeps control and stream frames separated while preserving binary chunks", async () => {
 		const [left_endpoint, right_endpoint] = make_pair();
 		const output = await Effect.runPromise(

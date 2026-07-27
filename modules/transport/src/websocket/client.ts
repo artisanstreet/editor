@@ -6,6 +6,7 @@ import { MakeWebSocketConnection, type WebSocketEndpoint } from "./protocol";
 /** Browser-compatible WebSocket surface; injectable for local dev and tests. */
 export interface BrowserWebSocket {
 	readonly addEventListener: (event: string, listener: (event: Event) => void) => void;
+	binaryType: "arraybuffer" | "blob";
 	readonly close: () => void;
 	readonly removeEventListener: (event: string, listener: (event: Event) => void) => void;
 	readonly send: (data: ArrayBufferView) => void;
@@ -16,6 +17,12 @@ export interface WebSocketClientOptions {
 	readonly incoming_capacity?: number;
 	readonly url: string | (() => string);
 }
+
+/** Makes browser binary messages decode as ArrayBuffer instead of Blob. */
+export const prepare_browser_websocket = (socket: BrowserWebSocket) => {
+	socket.binaryType = "arraybuffer";
+	return socket;
+};
 
 const browser_endpoint = (socket: BrowserWebSocket): WebSocketEndpoint => ({
 	add_close_listener: (listener) => {
@@ -80,7 +87,7 @@ export const make_websocket_connector_layer = (options: WebSocketClientOptions) 
 	const Connect = Effect.gen(function* () {
 		const url = typeof options.url === "function" ? options.url() : options.url;
 		const socket = yield* Effect.try({
-			try: () => create_socket(url),
+			try: () => prepare_browser_websocket(create_socket(url)),
 			catch: (cause) => new MessagePortConnectorError({ cause }),
 		});
 

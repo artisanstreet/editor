@@ -20,16 +20,7 @@ export const PresentForgeConnectionState = (
 			Match.when({ phase: "connecting" }, () =>
 				banner.info("Connecting to Forge…", {
 					...persistent,
-					actions: [
-						{
-							href: "artisan://forge/start",
-							icon: "player-play",
-							id: "start-forge",
-							label: "Start Forge",
-						},
-					],
-					description:
-						"If Forge is not already running, start the installed local service.",
+					description: "Keep this page open while Artisan establishes the session.",
 				}),
 			),
 			Match.when({ phase: "reconnecting" }, () =>
@@ -43,12 +34,6 @@ export const PresentForgeConnectionState = (
 					...persistent,
 					actions: [
 						{
-							href: "artisan://forge/start",
-							icon: "player-play",
-							id: "start-forge",
-							label: "Start Forge",
-						},
-						{
 							Execute: retry_connection,
 							icon: "refresh",
 							id: "retry",
@@ -56,7 +41,7 @@ export const PresentForgeConnectionState = (
 						},
 					],
 					code: "forge.connection.failed",
-					description: "Five connection attempts failed.",
+					description: "Run ae open in a terminal, then retry this connection.",
 					metadata: { transport_message: error.message },
 				}),
 			),
