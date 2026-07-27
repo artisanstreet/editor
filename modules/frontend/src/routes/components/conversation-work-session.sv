@@ -1,20 +1,25 @@
-<script lang="ts">
+<script lang="ts" effect>
 	import type { ConversationItem } from "@artisan/protocol";
 	import ChevronRight from "@tabler/icons-svelte/icons/chevron-right";
+	import { Effect } from "effect";
 	import type { Snippet } from "svelte";
+	import { thinking_word_at } from "$lib/conversation/activity-status";
 
 	let {
+		activity_label,
 		item,
 		details,
 		duration_kind,
 	}: {
+		activity_label?: string;
 		item: Extract<ConversationItem, { type: "work_session" }>;
 		details?: Snippet;
-		duration_kind: "thought" | "worked";
+		duration_kind?: "thought" | "worked";
 	} = $props();
 	let open = $state(false);
 	let details_element = $state<HTMLDivElement>();
 	let has_visible_details = $state(false);
+	let thinking_word_index = $state(0);
 
 	const FormatDuration = (started_at: string, ended_at: string) => {
 		const total_seconds = Math.max(
@@ -36,11 +41,19 @@
 
 	const label = $derived(
 		item.ended_at === undefined
-			? "Working"
+			? (activity_label ?? thinking_word_at(thinking_word_index))
 			: `${duration_kind === "worked" ? "Worked" : "Thought"} for ${FormatDuration(item.started_at, item.ended_at)}`,
 	);
 	const is_working = $derived(item.ended_at === undefined);
 	const can_collapse = $derived(!is_working && has_visible_details);
+
+	yield* Effect.gen(function* () {
+		while (is_working) {
+			yield* Effect.sleep("2 seconds");
+			if (!is_working) return;
+			if (activity_label === undefined) thinking_word_index += 1;
+		}
+	});
 
 	/** Snippets are opaque; observe their rendered trace rather than treating their presence as content. */
 	$effect(() => {
@@ -81,12 +94,23 @@
 			/>
 		</button>
 	{:else}
-		<div
-			class="flex w-full items-center gap-1 border-b border-border pb-2"
-			aria-live={is_working ? "polite" : undefined}
-		>
-			<span>{label}</span>
-		</div>
+		{#if is_working}
+			<div
+				class="flex w-fit items-center gap-2 py-0.5"
+				role="status"
+				aria-label={activity_label ?? "Artisan is working"}
+			>
+				<span class="artisan-working-sprite size-5 shrink-0" aria-hidden="true"></span>
+				<span class="motion-reduce:hidden" aria-hidden="true">{label}</span>
+				<span class="hidden motion-reduce:inline" aria-hidden="true">
+					{activity_label ?? "Working..."}
+				</span>
+			</div>
+		{:else}
+			<div class="flex w-full items-center gap-1">
+				<span>{label}</span>
+			</div>
+		{/if}
 	{/if}
 
 	{#if details !== undefined}
@@ -99,6 +123,34 @@
 </section>
 
 <style>
+	.artisan-working-sprite {
+		background-image: url("/activity/artisan-working-sprite.png");
+		background-repeat: no-repeat;
+		background-position: 0 0;
+		background-size: 200% 200%;
+		image-rendering: pixelated;
+		animation: artisan-working-frames 1600ms steps(1, end) infinite;
+	}
+
+	@keyframes artisan-working-frames {
+		0%,
+		100% {
+			background-position: 0 0;
+		}
+
+		25% {
+			background-position: 100% 0;
+		}
+
+		50% {
+			background-position: 0 100%;
+		}
+
+		75% {
+			background-position: 100% 100%;
+		}
+	}
+
 	.t-acc-panel {
 		display: grid;
 		grid-template-rows: 0fr;
@@ -128,6 +180,11 @@
 	}
 
 	@media (prefers-reduced-motion: reduce) {
+		.artisan-working-sprite {
+			animation: none;
+			background-position: 0 0;
+		}
+
 		.t-acc-panel,
 		.t-acc-panel-inner {
 			transition: none !important;

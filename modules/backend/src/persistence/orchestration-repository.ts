@@ -178,7 +178,6 @@ export const OrchestrationRepositoryLive = Layer.effect(
 			permission_mode: "on_request",
 			sandbox_mode: "workspace_write",
 			service_tier: "standard",
-			workflow_mode: "build",
 			web_search_enabled: false,
 			strict_clarification: false,
 		} as const satisfies ThreadSessionPolicy;
@@ -190,7 +189,6 @@ export const OrchestrationRepositoryLive = Layer.effect(
 						readonly policy_permission_mode: string;
 						readonly policy_sandbox_mode: string;
 						readonly policy_service_tier: string;
-						readonly policy_workflow_mode: string;
 						readonly policy_web_search_enabled: boolean;
 						readonly policy_strict_clarification: boolean;
 				  }
@@ -206,7 +204,6 @@ export const OrchestrationRepositoryLive = Layer.effect(
 						permission_mode: row.policy_permission_mode,
 						sandbox_mode: row.policy_sandbox_mode,
 						service_tier: row.policy_service_tier,
-						workflow_mode: row.policy_workflow_mode,
 						web_search_enabled: row.policy_web_search_enabled,
 						strict_clarification: row.policy_strict_clarification,
 					}).pipe(Effect.mapError((cause) => new OrchestrationFailure({ cause })))
@@ -219,7 +216,6 @@ export const OrchestrationRepositoryLive = Layer.effect(
 					policy_permission_mode: OrchestrationCoordinators.policy_permission_mode,
 					policy_sandbox_mode: OrchestrationCoordinators.policy_sandbox_mode,
 					policy_service_tier: OrchestrationCoordinators.policy_service_tier,
-					policy_workflow_mode: OrchestrationCoordinators.policy_workflow_mode,
 					policy_web_search_enabled: OrchestrationCoordinators.policy_web_search_enabled,
 					policy_strict_clarification:
 						OrchestrationCoordinators.policy_strict_clarification,
@@ -246,8 +242,6 @@ export const OrchestrationRepositoryLive = Layer.effect(
 									OrchestrationCoordinators.policy_permission_mode,
 								policy_sandbox_mode: OrchestrationCoordinators.policy_sandbox_mode,
 								policy_service_tier: OrchestrationCoordinators.policy_service_tier,
-								policy_workflow_mode:
-									OrchestrationCoordinators.policy_workflow_mode,
 								policy_web_search_enabled:
 									OrchestrationCoordinators.policy_web_search_enabled,
 								policy_strict_clarification:
@@ -663,7 +657,6 @@ export const OrchestrationRepositoryLive = Layer.effect(
 								policy_permission_mode: payload.policy.permission_mode,
 								policy_sandbox_mode: payload.policy.sandbox_mode,
 								policy_service_tier: payload.policy.service_tier,
-								policy_workflow_mode: payload.policy.workflow_mode,
 								policy_web_search_enabled: payload.policy.web_search_enabled,
 								policy_strict_clarification: payload.policy.strict_clarification,
 								updated_at: accepted_at,

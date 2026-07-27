@@ -260,10 +260,6 @@ export const ThreadSessionPolicy = Schema.Struct({
 		Schema.optional,
 		Schema.withDecodingDefault(Effect.succeed("standard")),
 	),
-	workflow_mode: Schema.Literals(["build", "plan"]).pipe(
-		Schema.optional,
-		Schema.withDecodingDefault(Effect.succeed("build" as const)),
-	),
 	web_search_enabled: Schema.Boolean,
 	strict_clarification: Schema.Boolean,
 });

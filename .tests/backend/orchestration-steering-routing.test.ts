@@ -192,7 +192,6 @@ describe("thread follow-up steering routing", () => {
 							sandbox_mode: "read_only",
 							service_tier: "standard",
 							strict_clarification: true,
-							workflow_mode: "build",
 							web_search_enabled: true,
 						},
 						type: "thread.session_policy.update",

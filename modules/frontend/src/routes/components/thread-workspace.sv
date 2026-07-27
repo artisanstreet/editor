@@ -7,6 +7,7 @@
 	import type { Effect } from "effect";
 	import type { ComposerSubmission } from "$lib/composer/image-attachments";
 	import { ScrollArea } from "$lib/components/ui/scroll-area";
+	import { latest_active_activity_label } from "$lib/conversation/activity-status";
 	import {
 		MakeConversationRenderBlocks,
 		MakeConversationViewState,
@@ -85,6 +86,7 @@
 								/>
 							{:else if block.type === "work_group"}
 								<ConversationWorkSession
+									activity_label={latest_active_activity_label(block.details)}
 									duration_kind={block.duration_kind}
 									item={block.session}
 								>

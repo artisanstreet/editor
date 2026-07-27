@@ -343,17 +343,14 @@ describe("durable multi-agent graph", () => {
 				{
 					"codex.reasoning_effort": "medium",
 					"codex.service_tier": "standard",
-					"codex.workflow_mode": "build",
 				},
 				{
 					"codex.reasoning_effort": "medium",
 					"codex.service_tier": "standard",
-					"codex.workflow_mode": "build",
 				},
 				{
 					"codex.reasoning_effort": "medium",
 					"codex.service_tier": "standard",
-					"codex.workflow_mode": "build",
 				},
 			]);
 			expect(

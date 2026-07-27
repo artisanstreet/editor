@@ -206,7 +206,6 @@ export const HarnessDefinition = Schema.Struct({
 	gateways: Schema.Array(GatewayDefinition),
 	label: Schema.String,
 	permissions: PermissionCapability,
-	workflow_modes: Schema.Array(Schema.Literals(["plan", "build"])),
 });
 export type HarnessDefinition = typeof HarnessDefinition.Type;
 

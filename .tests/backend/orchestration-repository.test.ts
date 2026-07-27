@@ -723,7 +723,7 @@ describe("orchestration repository hardening", () => {
 		}
 	});
 
-	it("persists an exact Codex-only session policy across restart and erasure", async () => {
+	it("persists an exact Codex-only session policy while ignoring the legacy workflow column", async () => {
 		const database_path = await make_database_path();
 		const policy = {
 			engine_id: "codex" as const,
@@ -733,7 +733,6 @@ describe("orchestration repository hardening", () => {
 			sandbox_mode: "workspace_write" as const,
 			service_tier: "standard" as const,
 			strict_clarification: true,
-			workflow_mode: "build" as const,
 			web_search_enabled: true,
 		};
 		const command = make_command("policy_1", "thread_1", {
@@ -746,6 +745,13 @@ describe("orchestration repository hardening", () => {
 			await first_runtime.runPromise(SetupFreshThread("thread_1"));
 			const accepted = await first_runtime.runPromise(Accept(command));
 			const duplicate = await first_runtime.runPromise(Accept(command));
+			await first_runtime.runPromise(
+				Read((database) =>
+					database.run(
+						"UPDATE orchestration_coordinators SET policy_workflow_mode = 'plan' WHERE thread_id = 'thread_1'",
+					),
+				),
+			);
 			const persisted = await first_runtime.runPromise(
 				Effect.gen(function* () {
 					return yield* (yield* OrchestrationRepository).GetSession("thread_1");
@@ -820,7 +826,6 @@ describe("orchestration repository hardening", () => {
 							sandbox_mode: "workspace_write",
 							service_tier: "standard",
 							strict_clarification: false,
-							workflow_mode: "build",
 							web_search_enabled: false,
 						},
 						type: "thread.session_policy.update",

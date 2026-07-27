@@ -10,7 +10,6 @@ const SessionPolicy = (overrides: Partial<ThreadSessionPolicy> = {}): ThreadSess
 	sandbox_mode: "workspace_write",
 	service_tier: "standard",
 	strict_clarification: false,
-	workflow_mode: "build",
 	web_search_enabled: false,
 	...overrides,
 });

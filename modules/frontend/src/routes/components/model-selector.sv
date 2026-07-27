@@ -4,7 +4,6 @@
 	import Brain from "@tabler/icons-svelte/icons/brain";
 	import Check from "@tabler/icons-svelte/icons/check";
 	import Lock from "@tabler/icons-svelte/icons/lock";
-	import ListCheck from "@tabler/icons-svelte/icons/list-check";
 	import Tool from "@tabler/icons-svelte/icons/tool";
 	import {
 		SvglGrokLogo,
@@ -45,7 +44,7 @@
 		lab: string;
 	};
 
-	type ComposerControl = "model" | "speed" | "thinking" | "permission" | "workflow";
+	type ComposerControl = "model" | "speed" | "thinking" | "permission";
 
 	let {
 		disabled = false,
@@ -96,7 +95,6 @@
 	let active_engine = $state<HarnessId>(models[0]?.engine ?? "codex");
 	let permission_mode = $state("workspace-write");
 	let selected_model_id = $state(runtime_catalog.default_model_id ?? models[0]?.id ?? "");
-	let workflow_mode = $state<"build" | "plan">("build");
 	let engine_surface = $state<HTMLElement | null>(null);
 	let engine_indicator_animated = $state(false);
 	let engine_indicator_left = $state(0);
@@ -153,7 +151,7 @@
 		selected_permission_options.find((option) => option.native_value === permission_mode) ??
 			selected_permission_options[0],
 	);
-	const composer_controls: ReadonlyArray<ComposerControl> = ["model", "workflow"];
+	const composer_controls: ReadonlyArray<ComposerControl> = ["model"];
 
 	const select_model = (model: ModelChoice) => {
 		selected_model_id = model.id;
@@ -200,11 +198,6 @@
 		permission_open = false;
 	};
 
-	const toggle_workflow = () => {
-		workflow_mode = workflow_mode === "build" ? "plan" : "build";
-		PatchPolicy({ workflow_mode });
-	};
-
 	const position_engine_indicator = (animate: boolean) => {
 		const active_tab = engine_surface?.querySelector<HTMLElement>(
 			`[data-engine="${active_engine}"]`,
@@ -239,7 +232,6 @@
 				(option) => option.native_value === policy.service_tier,
 			) ?? model?.definition.capabilities.speed_options.find((option) => option.default);
 		speed_option_id = speed_option?.id ?? "standard";
-		workflow_mode = policy.workflow_mode;
 	});
 
 	$effect(() => {
@@ -516,29 +508,6 @@
 		</Popover>
 	{/if}
 
-	{#if control === "workflow"}
-	<button
-		type="button"
-		aria-label="Toggle workflow mode"
-		aria-pressed={workflow_mode === "plan"}
-		class={[
-			"flex h-8 shrink-0 items-center gap-1.5 rounded-xl px-2 text-sm outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset",
-			workflow_mode === "plan"
-				? "bg-blue-500/15 text-foreground hover:bg-blue-500/20"
-				: "bg-transparent text-foreground",
-		]}
-		onclick={toggle_workflow}
-		disabled={disabled}
-	>
-		{#if workflow_mode === "build"}
-			<Tool class="size-4 text-muted-foreground" />
-			<span class="hidden sm:inline">Build</span>
-		{:else}
-			<ListCheck class="size-4 text-muted-foreground" />
-			<span class="hidden sm:inline">Plan</span>
-		{/if}
-	</button>
-	{/if}
 	{/each}
 </div>
 

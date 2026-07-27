@@ -781,7 +781,6 @@ export const FixtureArtisanClientService = {
 				service_tier: "standard" as const,
 				web_search_enabled: false,
 				strict_clarification: false,
-				workflow_mode: "build" as const,
 			},
 			latest_intake: {
 				message_id: "message-fixture",
@@ -1274,7 +1273,6 @@ export const FixtureArtisanClientService = {
 							service_tier: "standard" as const,
 							web_search_enabled: false,
 							strict_clarification: false,
-							workflow_mode: "build" as const,
 						},
 						latest_intake: {
 							message_id: "message-fixture",

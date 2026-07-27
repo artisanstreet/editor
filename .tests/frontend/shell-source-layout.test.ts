@@ -44,10 +44,12 @@ describe("Barekey docs shell reset", () => {
 		expect(model_selector).toContain("SvglOpenAILogo");
 		expect(model_selector).not.toMatch(/Claude|Anthropic/);
 		expect(model_selector).toContain("service_tier");
-		expect(model_selector).toContain("workflow_mode");
 		expect(model_selector).toContain(
-			'const composer_controls: ReadonlyArray<ComposerControl> = ["model", "workflow"];',
+			'const composer_controls: ReadonlyArray<ComposerControl> = ["model"];',
 		);
+		expect(model_selector).not.toContain("workflow_mode");
+		expect(model_selector).not.toContain("Toggle workflow mode");
+		expect(model_selector).not.toMatch(/>Build<|>Plan</);
 		expect(composer).not.toContain('aria-label="Add images"');
 		expect(composer).not.toContain('aria-label="Stop current run"');
 		expect(composer).not.toContain('aria-label="Use voice input"');
@@ -85,10 +87,11 @@ describe("Barekey docs shell reset", () => {
 		expect(interaction_refresh).toBeGreaterThan(sender_resync);
 	});
 
-	it("does not expose a disclosure control for an empty settled work trace", () => {
+	it("renders active work with the Artisan sprite and data-driven activity copy", () => {
 		const work_session = Read(
 			"modules/frontend/src/routes/components/conversation-work-session.sv",
 		);
+		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.sv");
 
 		expect(work_session).toContain(
 			"const can_collapse = $derived(!is_working && has_visible_details);",
@@ -96,9 +99,17 @@ describe("Barekey docs shell reset", () => {
 		expect(work_session).toContain("{#if can_collapse}");
 		expect(work_session).toContain("<button");
 		expect(work_session).toContain("{:else}");
-		expect(work_session).toContain('aria-live={is_working ? "polite" : undefined}');
+		expect(work_session).toContain('role="status"');
+		expect(work_session).toContain("artisan-working-sprite.png");
+		expect(work_session).toContain("thinking_word_at(thinking_word_index)");
+		expect(work_session).toContain('Effect.sleep("2 seconds")');
+		expect(work_session).toContain('{activity_label ?? "Working..."}');
+		expect(work_session).not.toContain(
+			'class="flex w-full items-center gap-1 border-b border-border pb-2"',
+		);
 		expect(work_session).toContain("<span>{label}</span>");
 		expect(work_session).toContain("hidden={!is_working && !has_visible_details}");
+		expect(workspace).toContain("latest_active_activity_label(block.details)");
 	});
 
 	it("matches the Barekey docs inset sidebar and circular toggle", () => {

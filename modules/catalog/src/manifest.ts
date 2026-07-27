@@ -169,7 +169,6 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 					}),
 				],
 			},
-			workflow_modes: [],
 		},
 		{
 			id: "claude",
@@ -235,7 +234,6 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 					}),
 				],
 			},
-			workflow_modes: [],
 		},
 		{
 			id: "grok",
@@ -279,7 +277,6 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 					}),
 				],
 			},
-			workflow_modes: ["plan", "build"],
 		},
 	],
 	models: [

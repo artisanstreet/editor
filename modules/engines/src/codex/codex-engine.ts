@@ -843,24 +843,8 @@ function make_codex_app_server_engine(
 			const initial_text = input._tag === "start" ? input.initial_text : input.next_text;
 
 			if (initial_text !== undefined) {
-				const workflow_mode = input.provider_options?.["codex.workflow_mode"];
-				const collaboration_mode =
-					workflow_mode === "plan" && input.model !== undefined
-						? {
-								mode: "plan" as const,
-								settings: {
-									developer_instructions: null,
-									model: input.model,
-									reasoning_effort:
-										input.provider_options?.["codex.reasoning_effort"] ?? null,
-								},
-							}
-						: undefined;
 				const turn_response = yield* MapSessionFailure(
 					session.Request("turn/start", {
-						...(collaboration_mode === undefined
-							? {}
-							: { collaborationMode: collaboration_mode }),
 						input: make_turn_input(
 							initial_text,
 							input._tag === "start" ? input.initial_content : undefined,
