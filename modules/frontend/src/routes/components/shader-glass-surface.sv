@@ -22,7 +22,7 @@
 	bind:this={ref}
 	class={cn(
 		"shader-glass-surface relative isolate overflow-hidden",
-		use_card && "glass-card",
+		use_card && "card-glass",
 		class_name,
 	)}
 	data-strength={strength}

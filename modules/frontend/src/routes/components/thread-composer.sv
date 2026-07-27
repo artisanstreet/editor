@@ -413,6 +413,7 @@
 				<ModelSelector {disabled} {policy} {onpolicychange} />
 				<Button
 					size="icon"
+					class="card-glass rounded-full bg-white/25 text-surface-950 hover:bg-white/30 disabled:bg-white/25"
 					aria-label={run_active ? "Stop current run" : "Send message"}
 					disabled={run_active
 						? disabled || cancelling || onabort === undefined
@@ -421,12 +422,12 @@
 				>
 					<span class="relative size-4" aria-hidden="true">
 						<ArrowUp
-							class={`absolute inset-0 size-4 text-white/25 transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none ${
+							class={`absolute inset-0 size-4 transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none ${
 								run_active ? "rotate-90 opacity-0" : "rotate-0 opacity-100"
 							}`}
 						/>
 						<PlayerStopFilled
-							class={`absolute inset-0 size-4 text-white/25 transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none ${
+							class={`absolute inset-0 size-4 transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none ${
 								run_active ? "rotate-0 opacity-100" : "-rotate-90 opacity-0"
 							}`}
 						/>

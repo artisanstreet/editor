@@ -75,7 +75,8 @@ describe("Barekey docs shell reset", () => {
 		expect(composer).not.toContain('aria-label="Add images"');
 		expect(composer).toContain('"Stop current run"');
 		expect(composer).toContain("PlayerStopFilled");
-		expect(composer).toContain("text-white/25");
+		expect(composer).toContain("card-glass rounded-full bg-white/25");
+		expect(composer).not.toContain("text-white/25");
 		expect(composer).toContain("motion-reduce:transition-none");
 		expect(composer).toContain("yield* Cancel");
 		expect(thread_route).toContain('work?.status === "running"');
@@ -238,7 +239,14 @@ describe("Barekey docs shell reset", () => {
 
 		for (const stylesheet of ["sidebar.css", "prose.css", "markdown.css"])
 			expect(global).toContain(`@import "./${stylesheet}"`);
-		for (const utility of ["inset-shadow", "card", "card-color", "card-lg", "card-diff"])
+		for (const utility of [
+			"inset-shadow",
+			"card",
+			"card-glass",
+			"card-color",
+			"card-lg",
+			"card-diff",
+		])
 			expect(global).toContain(`@utility ${utility}`);
 	});
 });
