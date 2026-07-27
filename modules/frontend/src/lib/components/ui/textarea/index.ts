@@ -1,4 +1,4 @@
-import Root from "./textarea.svelte";
+import Root from "./textarea.sv";
 
 export {
 	Root,

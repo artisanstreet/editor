@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { AlertDialog as AlertDialogPrimitive } from "bits-ui";
-	import AlertDialogPortal from "./alert-dialog-portal.svelte";
-	import AlertDialogOverlay from "./alert-dialog-overlay.svelte";
+	import AlertDialogPortal from "./alert-dialog-portal.sv";
+	import AlertDialogOverlay from "./alert-dialog-overlay.sv";
 	import { cn, type WithoutChildrenOrChild } from "$lib/utils.js";
 	import type { ComponentProps } from "svelte";
 	import type { Snippet } from "svelte";

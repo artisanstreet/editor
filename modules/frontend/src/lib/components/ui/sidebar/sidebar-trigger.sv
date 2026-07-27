@@ -5,7 +5,7 @@
 	import { play } from "cuelume";
 	import { Effect, Fiber } from "effect";
 	import type { ComponentProps } from "svelte";
-	import { use_sidebar } from "$lib/components/ui/sidebar/context.svelte.js";
+	import { use_sidebar } from "$lib/components/ui/sidebar/context.svelte.ts";
 
 	let {
 		ref = $bindable(null),

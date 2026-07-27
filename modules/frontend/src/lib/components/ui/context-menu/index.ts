@@ -1,19 +1,19 @@
-import Root from "./context-menu.svelte";
-import Sub from "./context-menu-sub.svelte";
-import Portal from "./context-menu-portal.svelte";
-import Trigger from "./context-menu-trigger.svelte";
-import Group from "./context-menu-group.svelte";
-import RadioGroup from "./context-menu-radio-group.svelte";
-import Item from "./context-menu-item.svelte";
-import GroupHeading from "./context-menu-group-heading.svelte";
-import Content from "./context-menu-content.svelte";
-import Shortcut from "./context-menu-shortcut.svelte";
-import RadioItem from "./context-menu-radio-item.svelte";
-import Separator from "./context-menu-separator.svelte";
-import SubContent from "./context-menu-sub-content.svelte";
-import SubTrigger from "./context-menu-sub-trigger.svelte";
-import CheckboxItem from "./context-menu-checkbox-item.svelte";
-import Label from "./context-menu-label.svelte";
+import Root from "./context-menu.sv";
+import Sub from "./context-menu-sub.sv";
+import Portal from "./context-menu-portal.sv";
+import Trigger from "./context-menu-trigger.sv";
+import Group from "./context-menu-group.sv";
+import RadioGroup from "./context-menu-radio-group.sv";
+import Item from "./context-menu-item.sv";
+import GroupHeading from "./context-menu-group-heading.sv";
+import Content from "./context-menu-content.sv";
+import Shortcut from "./context-menu-shortcut.sv";
+import RadioItem from "./context-menu-radio-item.sv";
+import Separator from "./context-menu-separator.sv";
+import SubContent from "./context-menu-sub-content.sv";
+import SubTrigger from "./context-menu-sub-trigger.sv";
+import CheckboxItem from "./context-menu-checkbox-item.sv";
+import Label from "./context-menu-label.sv";
 
 export {
 	Root,

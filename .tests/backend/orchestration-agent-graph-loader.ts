@@ -1,5 +1,8 @@
 /** Resolves extensionless repository imports for an isolated TypeScript crash fixture. */
-export async function resolve(specifier, context, next_resolve) {
+type ResolveResult = { format?: string; shortCircuit?: boolean; url: string };
+type ResolveNext = (specifier: string, context: object) => Promise<ResolveResult>;
+
+export async function resolve(specifier: string, context: object, next_resolve: ResolveNext) {
 	try {
 		return await next_resolve(specifier, context);
 	} catch (error) {

@@ -1,9 +1,9 @@
-import Root from "./input-group.svelte";
-import Addon from "./input-group-addon.svelte";
-import Button from "./input-group-button.svelte";
-import Input from "./input-group-input.svelte";
-import Text from "./input-group-text.svelte";
-import Textarea from "./input-group-textarea.svelte";
+import Root from "./input-group.sv";
+import Addon from "./input-group-addon.sv";
+import Button from "./input-group-button.sv";
+import Input from "./input-group-input.sv";
+import Text from "./input-group-text.sv";
+import Textarea from "./input-group-textarea.sv";
 
 export {
 	Root,

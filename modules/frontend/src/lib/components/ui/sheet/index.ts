@@ -1,13 +1,13 @@
-import Root from "./sheet.svelte";
-import Portal from "./sheet-portal.svelte";
-import Trigger from "./sheet-trigger.svelte";
-import Close from "./sheet-close.svelte";
-import Overlay from "./sheet-overlay.svelte";
-import Content from "./sheet-content.svelte";
-import Header from "./sheet-header.svelte";
-import Footer from "./sheet-footer.svelte";
-import Title from "./sheet-title.svelte";
-import Description from "./sheet-description.svelte";
+import Root from "./sheet.sv";
+import Portal from "./sheet-portal.sv";
+import Trigger from "./sheet-trigger.sv";
+import Close from "./sheet-close.sv";
+import Overlay from "./sheet-overlay.sv";
+import Content from "./sheet-content.sv";
+import Header from "./sheet-header.sv";
+import Footer from "./sheet-footer.sv";
+import Title from "./sheet-title.sv";
+import Description from "./sheet-description.sv";
 
 export {
 	Root,

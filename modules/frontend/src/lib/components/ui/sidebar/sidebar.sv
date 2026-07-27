@@ -4,7 +4,7 @@
 	import { play } from "cuelume";
 	import type { HTMLAttributes } from "svelte/elements";
 	import { sidebar_width_mobile } from "$lib/components/ui/sidebar/constants.js";
-	import { use_sidebar } from "$lib/components/ui/sidebar/context.svelte.js";
+	import { use_sidebar } from "$lib/components/ui/sidebar/context.svelte.ts";
 
 	let {
 		ref = $bindable(null),

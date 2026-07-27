@@ -13,10 +13,10 @@ import {
 	type CodexProcessHandle,
 } from "@artisan/engines";
 
-const fixture_path = fileURLToPath(new URL("./fixtures/fake-child.mjs", import.meta.url));
+const fixture_path = fileURLToPath(new URL("./fixtures/fake-child.ts", import.meta.url));
 const cmd_fixture_path = fileURLToPath(new URL("./fixtures/fake-codex.cmd", import.meta.url));
 const spawning_children_fixture_path = fileURLToPath(
-	new URL("./fixtures/fake-spawning-children.mjs", import.meta.url),
+	new URL("./fixtures/fake-spawning-children.ts", import.meta.url),
 );
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -211,10 +211,7 @@ describe("Codex process factory", () => {
 					const factory = yield* CodexProcessFactory;
 					const handle = yield* factory.Spawn({
 						args: [
-							fixture_path.replace(
-								"fake-child.mjs",
-								"fake-stdin-exit-grandchild.mjs",
-							),
+							fixture_path.replace("fake-child.ts", "fake-stdin-exit-grandchild.ts"),
 						],
 						command: process.execPath,
 						env: { ...process.env, FAKE_GRANDCHILD_PID_FILE: pid_path },

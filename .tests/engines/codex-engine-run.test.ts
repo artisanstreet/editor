@@ -15,7 +15,7 @@ import {
 } from "@artisan/engines";
 import { MakeCodexAppServerEventBuffer } from "../../modules/engines/src/codex/internal/codex-app-server-event-buffer";
 
-const fixture_path = fileURLToPath(new URL("./fixtures/fake-app-server.mjs", import.meta.url));
+const fixture_path = fileURLToPath(new URL("./fixtures/fake-app-server.ts", import.meta.url));
 const original_pid_file = process.env.FAKE_APP_SERVER_PID_FILE;
 const original_request_file = process.env.FAKE_APP_SERVER_REQUEST_FILE;
 const original_scenario = process.env.FAKE_APP_SERVER_SCENARIO;

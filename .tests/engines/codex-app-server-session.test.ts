@@ -5,7 +5,7 @@ import { Cause, Effect, Exit, Fiber, Stream } from "effect";
 
 import { CodexProcessFactoryLive, open_codex_app_server_session } from "@artisan/engines";
 
-const fixture_path = fileURLToPath(new URL("./fixtures/fake-app-server.mjs", import.meta.url));
+const fixture_path = fileURLToPath(new URL("./fixtures/fake-app-server.ts", import.meta.url));
 const snowman = String.fromCodePoint(0x2603);
 
 interface CircularValue {

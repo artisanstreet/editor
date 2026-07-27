@@ -4,10 +4,13 @@ import { appendFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const encoder = new TextEncoder();
-const grandchild_path = fileURLToPath(new URL("./fake-grandchild.mjs", import.meta.url));
-const received = [];
+const grandchild_path = fileURLToPath(new URL("./fake-grandchild.ts", import.meta.url));
+type FixtureRecord = Record<string, any>;
+type FrameOptions = { crlf?: boolean; split_at?: number };
+
+const received: FixtureRecord[] = [];
 let pending = "";
-let active_turn_id = null;
+let active_turn_id: string | null = null;
 let approval_resolved = false;
 let questions_resolved = false;
 
@@ -44,13 +47,13 @@ const thread_resume_params = new Set([
 ]);
 
 if (process.argv.includes("exec")) {
-	const { run_fake_codex_exec } = await import("./fake-codex-exec.mjs");
+	const { run_fake_codex_exec } = await import("./fake-codex-exec.ts");
 
 	await run_fake_codex_exec();
 
 	if (
 		["hang", "hang-ignore-term", "stderr-overflow"].includes(
-			process.env.FAKE_CODEX_EXEC_SCENARIO,
+			process.env.FAKE_CODEX_EXEC_SCENARIO ?? "",
 		)
 	) {
 		await new Promise(() => {});
@@ -63,7 +66,7 @@ if (process.argv.includes("--version")) {
 	const version_scenarios = [
 		process.env.FAKE_APP_SERVER_SCENARIO,
 		process.env.FAKE_CODEX_EXEC_SCENARIO,
-	];
+	].filter((scenario): scenario is string => scenario !== undefined);
 
 	if (version_scenarios.includes("version-fragmented")) {
 		process.stdout.write("codex-cli 0.");
@@ -100,7 +103,7 @@ if (process.env.FAKE_APP_SERVER_PID_FILE) {
 	writeFileSync(process.env.FAKE_APP_SERVER_PID_FILE, String(process.pid));
 }
 
-function make_turn(id, status = "inProgress") {
+function make_turn(id: string | null, status = "inProgress") {
 	return {
 		completedAt: status === "inProgress" ? null : 2,
 		durationMs: status === "inProgress" ? null : 1_000,
@@ -113,7 +116,7 @@ function make_turn(id, status = "inProgress") {
 	};
 }
 
-function make_thread(id, turns = []) {
+function make_thread(id: string, turns: FixtureRecord[] = []) {
 	return {
 		agentNickname: null,
 		agentRole: null,
@@ -139,7 +142,7 @@ function make_thread(id, turns = []) {
 	};
 }
 
-function make_thread_response(thread, resumed) {
+function make_thread_response(thread: FixtureRecord, resumed: boolean) {
 	return {
 		activePermissionProfile: { extends: null, id: ":workspace" },
 		approvalPolicy: "on-request",
@@ -178,7 +181,7 @@ function complete_request_turn() {
 	});
 }
 
-function write_frame(frame, options = {}) {
+function write_frame(frame: FixtureRecord, options: FrameOptions = {}) {
 	const text = `${JSON.stringify(frame)}${options.crlf ? "\r\n" : "\n"}`;
 	const bytes = encoder.encode(text);
 	const split_at = options.split_at;
@@ -193,11 +196,11 @@ function write_frame(frame, options = {}) {
 	setTimeout(() => process.stdout.write(bytes.subarray(split_at)), 2);
 }
 
-function respond(id, result, options) {
+function respond(id: unknown, result: unknown, options?: FrameOptions) {
 	write_frame({ id, result }, options);
 }
 
-function validate_thread_params(request) {
+function validate_thread_params(request: FixtureRecord) {
 	const allowed = request.method === "thread/start" ? thread_start_params : thread_resume_params;
 	const unknown = Object.keys(request.params ?? {}).filter((key) => !allowed.has(key));
 
@@ -216,7 +219,7 @@ function validate_thread_params(request) {
 	return false;
 }
 
-function handle_request(request) {
+function handle_request(request: FixtureRecord) {
 	received.push(request);
 
 	if (request.method === "initialize") {
@@ -293,14 +296,14 @@ function handle_request(request) {
 		const turns =
 			resumed &&
 			["resume-active", "resume-active-next-text", "steer-failure"].includes(
-				process.env.FAKE_APP_SERVER_SCENARIO,
+				process.env.FAKE_APP_SERVER_SCENARIO ?? "",
 			)
 				? [make_turn("turn-live")]
 				: [];
 		const thread = make_thread(thread_id, turns);
 
 		if (turns.length > 0) {
-			active_turn_id = turns[0].id;
+			active_turn_id = String(turns[0]!.id);
 		}
 
 		write_frame({

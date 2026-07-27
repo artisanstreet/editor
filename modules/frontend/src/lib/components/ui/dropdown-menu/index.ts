@@ -1,20 +1,20 @@
-import Root from "./dropdown-menu.svelte";
-import Sub from "./dropdown-menu-sub.svelte";
-import CheckboxGroup from "./dropdown-menu-checkbox-group.svelte";
-import CheckboxItem from "./dropdown-menu-checkbox-item.svelte";
-import Content from "./dropdown-menu-content.svelte";
-import Group from "./dropdown-menu-group.svelte";
-import Item from "./dropdown-menu-item.svelte";
-import Label from "./dropdown-menu-label.svelte";
-import RadioGroup from "./dropdown-menu-radio-group.svelte";
-import RadioItem from "./dropdown-menu-radio-item.svelte";
-import Separator from "./dropdown-menu-separator.svelte";
-import Shortcut from "./dropdown-menu-shortcut.svelte";
-import Trigger from "./dropdown-menu-trigger.svelte";
-import SubContent from "./dropdown-menu-sub-content.svelte";
-import SubTrigger from "./dropdown-menu-sub-trigger.svelte";
-import GroupHeading from "./dropdown-menu-group-heading.svelte";
-import Portal from "./dropdown-menu-portal.svelte";
+import Root from "./dropdown-menu.sv";
+import Sub from "./dropdown-menu-sub.sv";
+import CheckboxGroup from "./dropdown-menu-checkbox-group.sv";
+import CheckboxItem from "./dropdown-menu-checkbox-item.sv";
+import Content from "./dropdown-menu-content.sv";
+import Group from "./dropdown-menu-group.sv";
+import Item from "./dropdown-menu-item.sv";
+import Label from "./dropdown-menu-label.sv";
+import RadioGroup from "./dropdown-menu-radio-group.sv";
+import RadioItem from "./dropdown-menu-radio-item.sv";
+import Separator from "./dropdown-menu-separator.sv";
+import Shortcut from "./dropdown-menu-shortcut.sv";
+import Trigger from "./dropdown-menu-trigger.sv";
+import SubContent from "./dropdown-menu-sub-content.sv";
+import SubTrigger from "./dropdown-menu-sub-trigger.sv";
+import GroupHeading from "./dropdown-menu-group-heading.sv";
+import Portal from "./dropdown-menu-portal.sv";
 
 export {
 	CheckboxGroup,

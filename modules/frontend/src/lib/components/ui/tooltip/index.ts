@@ -1,8 +1,8 @@
-import Root from "./tooltip.svelte";
-import Trigger from "./tooltip-trigger.svelte";
-import Content from "./tooltip-content.svelte";
-import Provider from "./tooltip-provider.svelte";
-import Portal from "./tooltip-portal.svelte";
+import Root from "./tooltip.sv";
+import Trigger from "./tooltip-trigger.sv";
+import Content from "./tooltip-content.sv";
+import Provider from "./tooltip-provider.sv";
+import Portal from "./tooltip-portal.sv";
 
 export {
 	Root,

@@ -31,7 +31,7 @@ import { OrchestrationRuns } from "../../modules/backend/src/persistence/schema"
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const crash_fixture_path = fileURLToPath(new URL("./terminal-crash-fixture.ts", import.meta.url));
-const typescript_loader_url = new URL("./terminal-typescript-loader.mjs", import.meta.url).href;
+const typescript_loader_url = new URL("./terminal-typescript-loader.ts", import.meta.url).href;
 const temporary_directories: Array<string> = [];
 
 interface FakeTerminal {

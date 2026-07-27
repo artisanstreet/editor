@@ -10,7 +10,7 @@ import {
 	make_codex_engine_layer,
 } from "@artisan/engines";
 
-const fixture_path = fileURLToPath(new URL("./fixtures/fake-app-server.mjs", import.meta.url));
+const fixture_path = fileURLToPath(new URL("./fixtures/fake-app-server.ts", import.meta.url));
 const original_scenario = process.env.FAKE_APP_SERVER_SCENARIO;
 
 afterEach(() => {

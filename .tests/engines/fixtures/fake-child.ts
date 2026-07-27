@@ -4,7 +4,10 @@ const decoder = new TextDecoder();
 const keep_alive = setInterval(() => undefined, 1_000);
 
 process.stdin.on("data", (chunk) => {
-	const lines = decoder.decode(chunk, { stream: true }).split("\n").filter(Boolean);
+	const lines = decoder
+		.decode(typeof chunk === "string" ? Buffer.from(chunk) : chunk, { stream: true })
+		.split("\n")
+		.filter(Boolean);
 
 	for (const line of lines) {
 		const instruction = JSON.parse(line);

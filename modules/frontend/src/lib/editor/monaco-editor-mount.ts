@@ -1,7 +1,7 @@
 import { Fiber } from "effect";
 import { andThen, runFork } from "effect/Effect";
 
-import type { MonacoEditorMount } from "../components/editor/monaco-editor.svelte";
+import type { MonacoEditorMount } from "../components/editor/monaco-editor.sv";
 import type { MonacoEditorService } from "./monaco-editor-service";
 
 /** Bridges Svelte's synchronous mount lifecycle to the already-provided scoped service. */

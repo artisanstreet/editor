@@ -22,7 +22,7 @@ import { make_codex_exec_engine } from "../../modules/engines/src/codex/codex-ex
 import { MakeCodexExecEventBuffer } from "../../modules/engines/src/codex/internal/codex-exec-event-buffer";
 import { WatchCodexExecTimeout } from "../../modules/engines/src/codex/internal/codex-exec-run";
 
-const fixture_path = fileURLToPath(new URL("./fixtures/fake-app-server.mjs", import.meta.url));
+const fixture_path = fileURLToPath(new URL("./fixtures/fake-app-server.ts", import.meta.url));
 const transcript_path = fileURLToPath(
 	new URL("./fixtures/transcripts/codex-exec-jsonl.jsonl", import.meta.url),
 );

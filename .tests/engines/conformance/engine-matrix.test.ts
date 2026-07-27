@@ -12,7 +12,7 @@ import { EngineOpenScenarios } from "../scenarios/engine-scenarios";
 import { EngineTranscriptSequence } from "../transcript";
 import { assert_engine_lifecycle_contract } from "./engine-lifecycle-contract";
 
-const fixture_path = fileURLToPath(new URL("../fixtures/fake-app-server.mjs", import.meta.url));
+const fixture_path = fileURLToPath(new URL("../fixtures/fake-app-server.ts", import.meta.url));
 const transcript_path = new URL("../fixtures/transcripts/engine-lifecycle.json", import.meta.url);
 const original_scenario = process.env.FAKE_APP_SERVER_SCENARIO;
 
@@ -65,7 +65,7 @@ describe("Shared Engine lifecycle contract", () => {
 		const portable = recorded.map((record) => ({
 			...record,
 			args: record.args.map((argument) =>
-				argument === "{{FAKE_APP_SERVER}}" || argument.endsWith("fake-app-server.mjs")
+				argument === "{{FAKE_APP_SERVER}}" || argument.endsWith("fake-app-server.ts")
 					? fixture_path
 					: argument,
 			),

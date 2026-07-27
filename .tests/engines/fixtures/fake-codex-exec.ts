@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 const transcript_path = fileURLToPath(
 	new URL("./transcripts/codex-exec-jsonl.jsonl", import.meta.url),
 );
-const grandchild_path = fileURLToPath(new URL("./fake-grandchild.mjs", import.meta.url));
+const grandchild_path = fileURLToPath(new URL("./fake-grandchild.ts", import.meta.url));
 
 function record_invocation() {
 	if (!process.env.FAKE_CODEX_EXEC_INVOCATION_FILE) {
@@ -32,7 +32,7 @@ async function record_stdin() {
 	writeFileSync(process.env.FAKE_CODEX_EXEC_STDIN_FILE, Buffer.concat(chunks));
 }
 
-function write_fragmented(bytes) {
+function write_fragmented(bytes: Buffer) {
 	const splits = [7, 31, 79, 151].filter((offset) => offset < bytes.length);
 	let start = 0;
 
@@ -42,7 +42,7 @@ function write_fragmented(bytes) {
 	}
 }
 
-function write_event(event) {
+function write_event(event: object) {
 	process.stdout.write(`${JSON.stringify(event)}\n`);
 }
 

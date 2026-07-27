@@ -11,7 +11,7 @@
 		sidebar_width,
 		sidebar_width_icon,
 	} from "$lib/components/ui/sidebar/constants.js";
-	import { set_sidebar } from "$lib/components/ui/sidebar/context.svelte.js";
+	import { set_sidebar } from "$lib/components/ui/sidebar/context.svelte.ts";
 
 	let {
 		ref = $bindable(null),

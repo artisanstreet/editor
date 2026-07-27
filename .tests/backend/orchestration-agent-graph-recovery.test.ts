@@ -21,7 +21,7 @@ const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", i
 const crash_fixture_path = fileURLToPath(
 	new URL("./orchestration-agent-graph-crash-fixture.ts", import.meta.url),
 );
-const typescript_loader_url = new URL("./orchestration-agent-graph-loader.mjs", import.meta.url)
+const typescript_loader_url = new URL("./orchestration-agent-graph-loader.ts", import.meta.url)
 	.href;
 const temporary_directories: Array<string> = [];
 
