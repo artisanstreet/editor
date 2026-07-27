@@ -124,6 +124,9 @@ const item_is_change = (
 ): item is ConversationChangeSet | ConversationFileChange =>
 	item.type === "change_set" || item.type === "file_change";
 
+const item_is_resolved_approval = (item: ConversationItem): boolean =>
+	item.type === "approval" && item.state !== "requested";
+
 interface LegacyWorkAliases {
 	readonly canonical_sessions: ReadonlyMap<string, ConversationWorkSession>;
 	readonly turn_aliases: ReadonlyMap<string, string>;
@@ -187,6 +190,7 @@ export const MakeConversationRenderBlocks = (
 	const details_by_turn = new Map<string, Array<ConversationItem>>();
 	const change_sets_by_turn = new Map<string, Array<ConversationChangeSet>>();
 	const files_by_turn = new Map<string, Array<ConversationFileChange>>();
+	const concrete_work_turns = new Set<string>();
 	const final_message_by_turn = new Map<string, ConversationAssistantMessage>();
 	const turns_by_id = new Map(
 		state.rebuild.snapshot.turns.map((turn) => [turn.id, turn] as const),
@@ -194,6 +198,9 @@ export const MakeConversationRenderBlocks = (
 
 	for (const item of ordered_items) {
 		const group_key = ConversationRenderKey(item, legacy_work.turn_aliases);
+		if (item.type === "activity" || item_is_change(item)) {
+			concrete_work_turns.add(group_key);
+		}
 		if (item.type === "work_session") {
 			const sessions = sessions_by_turn.get(group_key) ?? [];
 			sessions.push(item);
@@ -240,8 +247,16 @@ export const MakeConversationRenderBlocks = (
 	}
 
 	const ItemIsWorkDetail = (item: ConversationItem, group_key: string): boolean => {
-		if (!work_session_by_turn.has(group_key)) return false;
+		const work_session = work_session_by_turn.get(group_key);
+		if (work_session === undefined) return false;
 		if (collapsible_work_types.has(item.type) || item_is_explicit_commentary(item)) return true;
+		if (
+			item_is_resolved_approval(item) &&
+			work_session.lifecycle === "completed" &&
+			work_session.ended_at !== undefined &&
+			concrete_work_turns.has(group_key)
+		)
+			return true;
 		return (
 			item.type === "assistant_message" &&
 			item.id !== final_message_by_turn.get(group_key)?.id
@@ -268,16 +283,10 @@ export const MakeConversationRenderBlocks = (
 			if (item.type === "work_session") {
 				const session = work_session_by_turn.get(group_key);
 				if (session === undefined || session.id !== item.id) return [];
-				const has_concrete_work =
-					(details_by_turn.get(group_key) ?? []).some(
-						(detail) => detail.type === "activity",
-					) ||
-					(change_sets_by_turn.get(group_key)?.length ?? 0) > 0 ||
-					(files_by_turn.get(group_key)?.length ?? 0) > 0;
 				return [
 					{
 						details: details_by_turn.get(group_key) ?? [],
-						duration_kind: has_concrete_work ? "worked" : "thought",
+						duration_kind: concrete_work_turns.has(group_key) ? "worked" : "thought",
 						id: `work:${item.id}`,
 						session,
 						turn_id: group_key,

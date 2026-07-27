@@ -218,6 +218,116 @@ describe("conversation view store", () => {
 		).toBe(false);
 	});
 
+	it("hides resolved approval receipts under worked while keeping requests visible", () => {
+		const mock = MakeMockConversation("approval-grouping");
+		const with_approvals = Schema.decodeUnknownSync(ConversationSnapshot)({
+			...mock,
+			items: [
+				...mock.items,
+				{
+					created_at: "2026-07-24T00:00:00.000Z",
+					id: "approval-resolved",
+					interaction_id: "approval-response-resolved",
+					lifecycle: "completed",
+					ordinal: 50,
+					prompt: "Run the test suite",
+					references: [],
+					requested_at: "2026-07-24T00:00:00.000Z",
+					resolution: "Approved",
+					resolved_at: "2026-07-24T00:00:01.000Z",
+					revision: 1,
+					source_refs: [],
+					state: "approved",
+					turn_id: "mock-turn-1",
+					type: "approval",
+					updated_at: "2026-07-24T00:00:01.000Z",
+				},
+				{
+					created_at: "2026-07-24T00:00:00.000Z",
+					id: "approval-requested",
+					interaction_id: "approval-response-requested",
+					lifecycle: "waiting",
+					ordinal: 51,
+					prompt: "Apply the generated changes",
+					references: [],
+					requested_at: "2026-07-24T00:00:00.000Z",
+					revision: 0,
+					source_refs: [],
+					state: "requested",
+					turn_id: "mock-turn-1",
+					type: "approval",
+					updated_at: "2026-07-24T00:00:00.000Z",
+				},
+			],
+		});
+		const initial = MakeConversationViewState(with_approvals);
+		if (initial._tag !== "applied") throw new Error("fixture must initialize");
+
+		const blocks = MakeConversationRenderBlocks(initial.state);
+		const work = blocks.find(
+			(block) => block.type === "work_group" && block.session.id === "mock-work-1",
+		);
+		if (work?.type !== "work_group") throw new Error("work must render");
+
+		const detail_ids = work.details.map((item) => item.id);
+		expect(detail_ids).toContain("approval-resolved");
+		expect(detail_ids).not.toContain("approval-requested");
+		expect(detail_ids.indexOf("mock-activity-1-1")).toBeLessThan(
+			detail_ids.indexOf("approval-resolved"),
+		);
+		expect(
+			make_conversation_trace_segments(work.details, false).some(
+				(segment) => segment.type === "item" && segment.item.id === "approval-resolved",
+			),
+		).toBe(true);
+		expect(
+			blocks.some((block) => block.type === "item" && block.item.id === "approval-resolved"),
+		).toBe(false);
+		expect(
+			blocks.some((block) => block.type === "item" && block.item.id === "approval-requested"),
+		).toBe(true);
+
+		const thought_only = Schema.decodeUnknownSync(ConversationSnapshot)({
+			...with_approvals,
+			items: with_approvals.items.filter(
+				(item) => item.turn_id !== "mock-turn-1" || item.type !== "activity",
+			),
+		});
+		const thought_view = MakeConversationViewState(thought_only);
+		if (thought_view._tag !== "applied") throw new Error("thought fixture must initialize");
+		const thought_blocks = MakeConversationRenderBlocks(thought_view.state);
+		expect(
+			thought_blocks.find(
+				(block) => block.type === "work_group" && block.session.id === "mock-work-1",
+			),
+		).toMatchObject({ duration_kind: "thought" });
+		expect(
+			thought_blocks.some(
+				(block) => block.type === "item" && block.item.id === "approval-resolved",
+			),
+		).toBe(true);
+
+		const active_work = Schema.decodeUnknownSync(ConversationSnapshot)({
+			...with_approvals,
+			items: with_approvals.items.map((item) => {
+				if (item.id !== "mock-work-1" || item.type !== "work_session") return item;
+				const { ended_at: _ended_at, ...active_session } = item;
+				return {
+					...active_session,
+					lifecycle: "active",
+					status: "active",
+				};
+			}),
+		});
+		const active_view = MakeConversationViewState(active_work);
+		if (active_view._tag !== "applied") throw new Error("active fixture must initialize");
+		expect(
+			MakeConversationRenderBlocks(active_view.state).some(
+				(block) => block.type === "item" && block.item.id === "approval-resolved",
+			),
+		).toBe(true);
+	});
+
 	it("keeps commentary interleaved with activity inside completed work", () => {
 		const completed_at = "2026-07-26T12:00:06.000Z";
 		const interleaved = Schema.decodeUnknownSync(ConversationSnapshot)({

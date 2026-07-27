@@ -311,11 +311,15 @@ Branch continuity only. Durable status lives in
   JSON-RPC response identity remains response-only; raw provider method names
   and `call_*` item identifiers remain solely in provenance. Pending approvals
   render as compact action-specific decision cards, gate duplicate responses,
-  and report rejected responses through `BannerService`; resolved approvals
-  collapse to quiet receipts. Renderer-local heading IDs do not expose opaque
-  interaction handles. A compatibility presentation guard also removes the
+  and report rejected responses through `BannerService`; resolved approval
+  receipts collapse under a completed concrete `Worked for …` disclosure while
+  requests, active-session receipts, and thought-only receipts stay visible.
+  Renderer-local heading IDs do not expose opaque interaction handles. A
+  compatibility presentation guard also removes the
   already-persisted `item/.../requestApproval for call_*` strings from old rows
   without invalidating their protocol shape.
+  The grouping follow-up passes 15 focused store/presentation tests, frontend
+  lint, root TypeScript, the production frontend build, and `git diff --check`.
   Five focused test files (23 tests), root TypeScript, scoped lint, the
   production frontend build, the Forge bundle, installed-runtime HTTP status,
   and live Chrome inspection pass. The installed `0.1.0` Forge is running with
