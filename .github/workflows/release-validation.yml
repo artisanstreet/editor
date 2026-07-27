@@ -34,7 +34,7 @@ on:
 permissions: {}
 
 concurrency:
-    group: ${{ github.event_name != 'workflow_dispatch' && format('artisan-staging-{0}', github.ref) || inputs.mode == 'dry-run' && format('artisan-dry-run-{0}', github.ref) || 'artisan-release' }}
+    group: ${{ github.event_name != 'workflow_dispatch' && format('artisan-staging-{0}', github.ref) || inputs.mode == 'dry-run' && format('artisan-dry-run-{0}', github.sha) || 'artisan-release' }}
     cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' || inputs.mode == 'dry-run' }}
 
 jobs:
