@@ -15,8 +15,7 @@
 		ConversationBaseEndSpacePixels,
 		ConversationBottomScrollTop,
 		ConversationEndSpaceHeight,
-		ConversationUserMessageIds,
-		NewestConversationUserMessage,
+		ConversationUserMessageWithSourceReference,
 	} from "$lib/conversation/scroll-position";
 	import {
 		MakeConversationRenderBlocks,
@@ -87,7 +86,7 @@
 	let transcript_content = $state<HTMLElement | null>(null);
 	let end_space = $state<HTMLElement | null>(null);
 	let end_space_height = $state(ConversationBaseEndSpacePixels);
-	let pending_user_message_ids = $state.raw<ReadonlySet<string> | undefined>();
+	let pending_user_message_reference = $state<string | undefined>();
 	let anchored_user_item_id = $state<string | undefined>();
 	let anchor_layout_frame = 0;
 	let smooth_anchor_pending = false;
@@ -146,16 +145,19 @@
 	const SubmitMessage = (submission: ComposerSubmission) => {
 		const submit = onsubmit;
 		if (submit === undefined) return Effect.void;
-		const previous_ids = ConversationUserMessageIds(snapshot.items);
+		pending_user_message_reference = undefined;
+		const ClearPendingUserMessage = Effect.sync(() => {
+			pending_user_message_reference = undefined;
+		});
 
 		return submit(submission).pipe(
 			Effect.tap((outcome) =>
-				outcome.expects_user_message
-					? Effect.sync(() => {
-							pending_user_message_ids = previous_ids;
-						})
-					: Effect.void,
+				Effect.sync(() => {
+					pending_user_message_reference =
+						outcome.user_message_reference;
+				}),
 			),
+			Effect.tapError(() => ClearPendingUserMessage),
 		);
 	};
 
@@ -179,13 +181,16 @@
 
 	$effect(() => {
 		const current_items = snapshot.items;
-		const previous_ids = pending_user_message_ids;
-		if (previous_ids !== undefined) {
+		const source_reference = pending_user_message_reference;
+		if (source_reference !== undefined) {
 			const item_id = Option.getOrUndefined(
-				NewestConversationUserMessage(current_items, previous_ids),
+				ConversationUserMessageWithSourceReference(
+					current_items,
+					source_reference,
+				),
 			);
 			if (item_id !== undefined) {
-				pending_user_message_ids = undefined;
+				pending_user_message_reference = undefined;
 				anchored_user_item_id = item_id;
 				ScheduleAnchorLayout(true);
 				return;

@@ -273,3 +273,27 @@ Branch continuity only. Durable status lives in
   immediately on the pre-existing formatter mismatch in
   `docs/status/backend-completion-matrix.md`; no local install overlay was
   performed.
+- Accepted thread messages now reconcile against their exact durable Forge
+  receipt instead of relying on one best-effort post-submit refresh. The
+  command itself remains at-most-once; after its receipt, an Effect schedule
+  performs a short bounded canonical query until the matching user-message
+  source reference is projected, then replaces the route snapshot. The
+  canonical projection now preserves the accepted command/message identity as
+  `source_refs.reference` alongside the journal event ID and sequence. This closes
+  the send-before-subscription race without inventing client-owned optimistic
+  state. The returned receipt reference also drives smooth alignment of the
+  exact submitted turn, so another paired client's concurrent message cannot
+  satisfy or scroll this submission. Completed `Thought for` / `Worked for`
+  rows again render the requested bottom divider while the active Artisan verb
+  row stays undivided.
+  Twenty-eight focused frontend/projection tests, root TypeScript, scoped lint,
+  `git diff --check`, and the production frontend plus Forge builds pass.
+  Independent review's multi-client correlation finding is addressed by the
+  exact receipt/source-reference match. The rebuilt runtime is synchronized to
+  Sander's installed `0.1.0` Forge with rollback at
+  `%LOCALAPPDATA%\Artisan\.local-backup-20260727-234111`; it is running and
+  paired at `https://artisan.localhost/`. Live inspection confirms a loaded
+  long thread starts at zero distance from the bottom and completed work rows
+  have a computed 1px divider. Full validation still stops first on the
+  pre-existing formatter mismatch in
+  `docs/status/backend-completion-matrix.md`.

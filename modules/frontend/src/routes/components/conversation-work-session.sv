@@ -107,7 +107,7 @@
 				</span>
 			</div>
 		{:else}
-			<div class="flex w-full items-center gap-1">
+			<div class="flex w-full items-center gap-1 border-b border-border pb-2">
 				<span>{label}</span>
 			</div>
 		{/if}

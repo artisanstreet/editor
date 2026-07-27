@@ -82,14 +82,14 @@ describe("Barekey docs shell reset", () => {
 		const controller = Read("modules/frontend/src/routes/threads/[id]/thread-route.sv");
 		const interaction = Read("modules/frontend/src/lib/thread-interaction/commands.ts");
 		const accepted_command = interaction.indexOf("const result = yield* command;");
-		const background_reconciliation = interaction.indexOf(
-			"Effect.forkIn(after_acceptance.pipe(Effect.ignore), scope)",
+		const accepted_reconciliation = interaction.indexOf(
+			"yield* after_acceptance(result).pipe(Effect.ignore);",
 			accepted_command,
 		);
-		const sender_resync = controller.indexOf("yield* Resync;");
+		const sender_reconciliation = controller.indexOf("ObserveAcceptedProjection(");
 		const interaction_refresh = controller.indexOf(
-			"yield* RefreshInteractionContext;",
-			sender_resync,
+			"RefreshInteractionContext.pipe(Effect.ignore)",
+			sender_reconciliation,
 		);
 
 		expect(route).toContain("const thread_id = $derived(page.params.id)");
@@ -109,10 +109,13 @@ describe("Barekey docs shell reset", () => {
 		expect(controller).toContain("update.batch.conversation_id !== conversation_id");
 		expect(controller).toContain("!CanReplaceConversationSnapshot(snapshot, next)");
 		expect(controller).toContain("yield* SubmitDurableCommand(");
+		expect(controller).toContain("ReconcileAcceptedUserMessage");
+		expect(controller).toContain("receipt.command_id");
+		expect(controller).toContain("ConversationUserMessageWithSourceReference");
 		expect(accepted_command).toBeGreaterThan(-1);
-		expect(background_reconciliation).toBeGreaterThan(accepted_command);
-		expect(sender_resync).toBeGreaterThan(-1);
-		expect(interaction_refresh).toBeGreaterThan(sender_resync);
+		expect(accepted_reconciliation).toBeGreaterThan(accepted_command);
+		expect(sender_reconciliation).toBeGreaterThan(-1);
+		expect(interaction_refresh).toBeGreaterThan(sender_reconciliation);
 	});
 
 	it("positions loaded threads at the bottom and promotes a local turn to the top inset", () => {
@@ -123,9 +126,11 @@ describe("Barekey docs shell reset", () => {
 		expect(workspace).toContain("const PositionLoadedThread = async () =>");
 		expect(workspace).toContain("await tick();");
 		expect(workspace).toContain("ConversationBottomScrollTop(");
-		expect(workspace).toContain("NewestConversationUserMessage(current_items");
+		expect(workspace).toContain("ConversationUserMessageWithSourceReference(");
 		expect(workspace).toContain("ConversationEndSpaceHeight(");
-		expect(workspace).toContain("outcome.expects_user_message");
+		expect(workspace).toContain("pending_user_message_reference = undefined");
+		expect(workspace).toContain("outcome.user_message_reference");
+		expect(workspace).toContain("ConversationUserMessageWithSourceReference");
 		expect(workspace).toContain('"smooth"');
 		expect(message).toContain("data-conversation-item-id={item.id}");
 	});
@@ -147,9 +152,10 @@ describe("Barekey docs shell reset", () => {
 		expect(work_session).toContain("thinking_word_at(thinking_word_index)");
 		expect(work_session).toContain('Effect.sleep("2 seconds")');
 		expect(work_session).toContain('{activity_label ?? "Working..."}');
-		expect(work_session).not.toContain(
+		expect(work_session).toContain(
 			'class="flex w-full items-center gap-1 border-b border-border pb-2"',
 		);
+		expect(work_session).toContain('class="flex w-fit items-center gap-2 py-0.5"');
 		expect(work_session).toContain("<span>{label}</span>");
 		expect(work_session).toContain("hidden={!is_working && !has_visible_details}");
 		expect(workspace).toContain("latest_active_activity_label(block.details)");

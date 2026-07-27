@@ -7,6 +7,7 @@ import {
 	ConversationBottomScrollTop,
 	ConversationEndSpaceHeight,
 	ConversationUserMessageIds,
+	ConversationUserMessageWithSourceReference,
 	NewestConversationUserMessage,
 } from "../../modules/frontend/src/lib/conversation/scroll-position";
 
@@ -16,7 +17,13 @@ const Item = (
 	id: string,
 	ordinal: number,
 	type: ScrollItem["type"] = "user_message",
-): ScrollItem => ({ id, ordinal, type });
+	source_reference = id,
+): ScrollItem => ({
+	id,
+	ordinal,
+	source_refs: [{ reference: source_reference }],
+	type,
+});
 
 describe("conversation scroll position", () => {
 	it("finds only the newest user message projected after local submission", () => {
@@ -33,6 +40,27 @@ describe("conversation scroll position", () => {
 			"user-3",
 		);
 		expect(Option.isNone(NewestConversationUserMessage(existing, previous_ids))).toBe(true);
+	});
+
+	it("waits for this client's accepted message when another client projects first", () => {
+		const current = [
+			Item("user-existing", 1),
+			Item("user-other-client", 2, "user_message", "command-other"),
+		];
+
+		expect(
+			Option.isNone(ConversationUserMessageWithSourceReference(current, "command-local")),
+		).toBe(true);
+
+		const with_local_message = [
+			...current,
+			Item("user-local", 3, "user_message", "command-local"),
+		];
+		expect(
+			Option.getOrUndefined(
+				ConversationUserMessageWithSourceReference(with_local_message, "command-local"),
+			),
+		).toBe("user-local");
 	});
 
 	it("positions initial navigation at the bottom without animation state", () => {

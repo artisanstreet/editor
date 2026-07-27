@@ -1,9 +1,10 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Deferred, Effect, Exit, Fiber, Ref, Scope } from "effect";
+import { Deferred, Effect, Fiber, Option, Ref } from "effect";
 
 import {
 	BuildThreadMessageCommand,
 	MakeSubmitGate,
+	ObserveAcceptedProjection,
 	SubmitDurableCommand,
 	ThreadInteractionError,
 	type ThreadInteractionContext,
@@ -133,26 +134,53 @@ describe("thread interaction commands", () => {
 		});
 	});
 
-	it("keeps an accepted durable command successful while reconciliation is blocked", async () => {
-		const result = await Effect.runPromise(
+	it("retries an authoritative query until the accepted projection is visible", async () => {
+		let attempts = 0;
+		const observed = await Effect.runPromise(
+			ObserveAcceptedProjection(
+				Effect.suspend(() => {
+					attempts += 1;
+					return attempts === 1
+						? Effect.fail("transient query failure")
+						: Effect.succeed({ attempt: attempts, visible: attempts >= 3 });
+				}),
+				(projection) => projection.visible,
+			),
+		);
+
+		expect(Option.getOrUndefined(observed)).toEqual({ attempt: 3, visible: true });
+		expect(attempts).toBe(3);
+	});
+
+	it("keeps an accepted command successful after bounded projection exhaustion", async () => {
+		const output = await Effect.runPromise(
 			Effect.gen(function* () {
-				const scope = yield* Scope.make();
-				const started = yield* Deferred.make<void>();
-				const hold = yield* Deferred.make<void>();
-
+				const command_invocations = yield* Ref.make(0);
+				const query_invocations = yield* Ref.make(0);
 				const accepted = yield* SubmitDurableCommand(
-					Effect.succeed("accepted"),
-					Deferred.succeed(started, undefined).pipe(Effect.andThen(Deferred.await(hold))),
-					scope,
+					Ref.update(command_invocations, (count) => count + 1).pipe(
+						Effect.as("accepted"),
+					),
+					() =>
+						ObserveAcceptedProjection(
+							Ref.update(query_invocations, (count) => count + 1).pipe(
+								Effect.as({ visible: false }),
+							),
+							(projection) => projection.visible,
+						).pipe(Effect.asVoid),
 				);
-				yield* Deferred.await(started);
-				yield* Scope.close(scope, Exit.void);
 
-				return accepted;
+				return {
+					accepted,
+					command_invocations: yield* Ref.get(command_invocations),
+					query_invocations: yield* Ref.get(query_invocations),
+				};
 			}),
 		);
 
-		expect(result).toBe("accepted");
+		expect(output.accepted).toBe("accepted");
+		expect(output.command_invocations).toBe(1);
+		expect(output.query_invocations).toBeGreaterThan(1);
 	});
 
 	it("keeps a rejected command as a submit failure without starting reconciliation", async () => {
@@ -160,15 +188,11 @@ describe("thread interaction commands", () => {
 
 		const output = await Effect.runPromise(
 			Effect.gen(function* () {
-				const scope = yield* Scope.make();
 				const reconciled = yield* Deferred.make<void>();
-				const exit = yield* SubmitDurableCommand(
-					Effect.fail(error),
+				const exit = yield* SubmitDurableCommand(Effect.fail(error), () =>
 					Deferred.succeed(reconciled, undefined),
-					scope,
 				).pipe(Effect.exit);
 				const reconciliation = yield* Deferred.poll(reconciled);
-				yield* Scope.close(scope, Exit.void);
 
 				return { exit, reconciliation };
 			}),

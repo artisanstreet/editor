@@ -251,7 +251,7 @@ describe("conversation projection", () => {
 		}
 	});
 
-	it("projects a queued user message exactly once", async () => {
+	it("projects a queued user message once with its accepted command identity", async () => {
 		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
 		try {
 			const availability = await runtime.runPromise(
@@ -273,7 +273,7 @@ describe("conversation projection", () => {
 						message_id: "event_1",
 						origin: "backend",
 						payload: {
-							message_id: "user_1",
+							message_id: "command_1",
 							reason: "no_active_run",
 							text: "Ship it",
 							type: "thread.message_queued",
@@ -307,6 +307,14 @@ describe("conversation projection", () => {
 			if (availability.status !== "available") return;
 			expect(availability.snapshot.items).toHaveLength(1);
 			expect(availability.snapshot.items[0]).toMatchObject({
+				id: "message:command_1",
+				source_refs: [
+					{
+						event_id: "event_1",
+						journal_sequence: 1,
+						reference: "command_1",
+					},
+				],
 				text: "Ship it",
 				type: "user_message",
 			});

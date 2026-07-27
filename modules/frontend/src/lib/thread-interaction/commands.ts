@@ -1,4 +1,4 @@
-import { Data, Effect, Ref, Scope } from "effect";
+import { Data, Effect, Option, Ref, Schedule } from "effect";
 
 import type {
 	ThreadListItem,
@@ -23,12 +23,17 @@ export class ThreadInteractionError extends Data.TaggedError("ThreadInteractionE
 	readonly message: string;
 }> {}
 
+class AcceptedProjectionPending extends Data.TaggedError("AcceptedProjectionPending")<{
+	readonly message: string;
+}> {}
+
 export type ThreadMessageCommandResult =
 	| { readonly _tag: "ready"; readonly command: ArtisanCommandInput }
 	| { readonly _tag: "invalid"; readonly error: ThreadInteractionError };
 
 export interface ThreadMessageSubmissionOutcome {
 	readonly expects_user_message: boolean;
+	readonly user_message_reference?: string;
 }
 
 /** Serializes component submit fibers without coupling them to DOM timing. */
@@ -47,6 +52,34 @@ export const MakeSubmitGate = Ref.make(false).pipe(
 	),
 );
 
+const AcceptedProjectionRetrySchedule = Schedule.spaced("50 millis").pipe(
+	Schedule.upTo({ duration: "1 second", times: 8 }),
+);
+
+/**
+ * Polls the authoritative query after a durable receipt until it contains the
+ * accepted projection. Query failures and projection lag share one short,
+ * bounded retry budget because neither may turn an accepted command into a
+ * second submission.
+ */
+export const ObserveAcceptedProjection = <Projection, QueryError, QueryRequirements>(
+	query: Effect.Effect<Projection, QueryError, QueryRequirements>,
+	is_observed: (projection: Projection) => boolean,
+) =>
+	query.pipe(
+		Effect.filterOrFail(
+			is_observed,
+			() =>
+				new AcceptedProjectionPending({
+					message: "The accepted command is not projected yet.",
+				}),
+		),
+		Effect.retry({ schedule: AcceptedProjectionRetrySchedule }),
+		Effect.option,
+		Effect.timeoutOption("1 second"),
+		Effect.map(Option.flatten),
+	);
+
 /**
  * A command receipt is the irreversible submit boundary. Refreshing projections
  * after that receipt improves immediacy, but failure to refresh must not invite
@@ -59,13 +92,12 @@ export const SubmitDurableCommand = <
 	RefreshRequirements,
 >(
 	command: Effect.Effect<Command, CommandError, CommandRequirements>,
-	after_acceptance: Effect.Effect<void, unknown, RefreshRequirements>,
-	scope: Scope.Scope,
+	after_acceptance: (accepted: Command) => Effect.Effect<void, unknown, RefreshRequirements>,
 ) =>
 	Effect.gen(function* () {
 		const result = yield* command;
 
-		yield* Effect.forkIn(after_acceptance.pipe(Effect.ignore), scope);
+		yield* after_acceptance(result).pipe(Effect.ignore);
 
 		return result;
 	});

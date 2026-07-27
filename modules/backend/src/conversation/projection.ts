@@ -835,7 +835,7 @@ export const ApplyJournalEvent = (transaction: any, event: EventEnvelope) =>
 					"completed",
 					event.message_id,
 				),
-				source_refs: source_refs(event.message_id, {
+				source_refs: source_refs(payload.message_id, {
 					event_id: event.message_id,
 					journal_sequence: event.journal_sequence,
 				}),
@@ -861,7 +861,7 @@ export const ApplyJournalEvent = (transaction: any, event: EventEnvelope) =>
 				...(payload.content === undefined ? {} : { content: payload.content }),
 				type: "user_message",
 				text: text(payload.text) || "Message",
-				source_refs: source_refs(event.message_id, {
+				source_refs: source_refs(payload.message_id, {
 					event_id: event.message_id,
 					journal_sequence: event.journal_sequence,
 				}),

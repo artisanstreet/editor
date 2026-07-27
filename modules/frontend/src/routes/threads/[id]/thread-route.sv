@@ -20,9 +20,11 @@
 	} from "$lib/conversation/subscription";
 	import {
 		BuildThreadMessageCommand,
+		ObserveAcceptedProjection,
 		SubmitDurableCommand,
 		ThreadInteractionError,
 	} from "$lib/thread-interaction/commands";
+	import { ConversationUserMessageWithSourceReference } from "$lib/conversation/scroll-position";
 	import type { ComposerSubmission } from "$lib/composer/image-attachments";
 	import { ResolveThreadRoute } from "$lib/root/thread-navigation";
 	import { Effect, Exit, Option, Queue, Scope, Stream } from "effect";
@@ -205,22 +207,51 @@
 			if (result._tag === "invalid") return yield* Effect.fail(result.error);
 			const expects_user_message =
 				result.command.payload.type === "thread.send_message";
+			const ReconcileAcceptedUserMessage = (command_id: string) =>
+				Effect.suspend(() => {
+					const has_accepted_user_message = (candidate: typeof snapshot) =>
+						Option.isSome(
+							ConversationUserMessageWithSourceReference(
+								candidate.items,
+								command_id,
+							),
+						);
+					if (!expects_user_message || has_accepted_user_message(snapshot)) {
+						return Effect.void;
+					}
+					return ObserveAcceptedProjection(
+						client.GetConversation({ thread_id }),
+						has_accepted_user_message,
+					).pipe(
+						Effect.flatMap(
+							Option.match({
+								onNone: () => Effect.void,
+								onSome: ReplaceSnapshot,
+							}),
+						),
+					);
+				});
 
 			/**
 			 * Command acceptance is the durable submission boundary. The stream may
-			 * still be establishing (or may have missed this exact handoff), so refresh
-			 * the canonical projection immediately for the sender. Later assistant
-			 * patches remain exclusively stream-driven through `ApplyUpdate`.
+			 * still be establishing (or may have missed this exact handoff), so
+			 * reconcile until the canonical projection contains this user turn.
+			 * Later assistant patches remain stream-driven through `ApplyUpdate`.
 			 */
-			yield* SubmitDurableCommand(
+			const receipt = yield* SubmitDurableCommand(
 				client.Command(result.command),
-				Effect.gen(function* () {
-					yield* Resync;
-					yield* RefreshInteractionContext;
-				}),
+				(receipt) => ReconcileAcceptedUserMessage(receipt.command_id),
+			);
+			yield* Effect.forkIn(
+				RefreshInteractionContext.pipe(Effect.ignore),
 				thread_scope,
 			);
-			return { expects_user_message };
+			return {
+				expects_user_message,
+				...(expects_user_message
+					? { user_message_reference: receipt.command_id }
+					: {}),
+			};
 		});
 
 	const UpdateSessionPolicy = (policy: ThreadSessionPolicy) =>

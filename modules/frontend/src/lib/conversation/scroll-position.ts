@@ -4,7 +4,7 @@ import { Option } from "effect";
 export const ConversationBaseEndSpacePixels = 192;
 export const ConversationTurnTopInsetPixels = 16;
 
-type ConversationScrollItem = Pick<ConversationItem, "id" | "ordinal" | "type">;
+type ConversationScrollItem = Pick<ConversationItem, "id" | "ordinal" | "source_refs" | "type">;
 
 /** Captures the durable user turns visible before a local submission begins. */
 export const ConversationUserMessageIds = (
@@ -23,6 +23,23 @@ export const NewestConversationUserMessage = (
 
 	return Option.fromUndefinedOr(candidates[0]?.id);
 };
+
+/** Resolves one accepted command to its exact canonical user-message item. */
+export const ConversationUserMessageWithSourceReference = (
+	items: ReadonlyArray<ConversationScrollItem>,
+	source_reference: string,
+): Option.Option<string> =>
+	Option.fromUndefinedOr(
+		items.find(
+			(item) =>
+				item.type === "user_message" &&
+				item.source_refs.some(
+					(source) =>
+						source.reference === source_reference ||
+						source.event_id === source_reference,
+				),
+		)?.id,
+	);
 
 /** Computes an immediate bottom position without inheriting smooth-scroll CSS. */
 export const ConversationBottomScrollTop = (scroll_height: number, viewport_height: number) =>
