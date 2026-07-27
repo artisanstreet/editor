@@ -92,6 +92,18 @@ export const BindForgeWebSocket = (
 				const websocket_server = new WebSocketServer({
 					maxPayload: 16 * 1024 * 1024,
 					noServer: true,
+					/**
+					 * Context takeover is deliberately left enabled. Projection and
+					 * event frames repeat near-identical schema keys and snowflake
+					 * ids, so the sliding window is where most of the saving comes
+					 * from; the listener is loopback-only, which bounds how many
+					 * zlib contexts can exist at once.
+					 */
+					perMessageDeflate: {
+						concurrencyLimit: 10,
+						threshold: 1024,
+						zlibDeflateOptions: { level: 6 },
+					},
 				});
 				const sockets = new Set<WebSocket>();
 				const pending_upgrades = new Set<import("node:stream").Duplex>();

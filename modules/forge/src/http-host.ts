@@ -138,7 +138,8 @@ const ResolveStaticFile = (root: string, pathname: string) =>
 			) {
 				return { status: 403 as const };
 			}
-			if (metadata.isFile()) return { path: real_candidate, status: 200 as const };
+			if (metadata.isFile())
+				return { path: real_candidate, root: real_root_path, status: 200 as const };
 		}
 
 		const is_reserved_route =
@@ -158,16 +159,52 @@ const ResolveStaticFile = (root: string, pathname: string) =>
 				) {
 					return { status: 403 as const };
 				}
-				return { path: real_index.value, status: 200 as const };
+				return { path: real_index.value, root: real_root_path, status: 200 as const };
 			}
 		}
 		return { status: 404 as const };
+	});
+
+interface EncodedVariant {
+	readonly encoding: string;
+	readonly path: string;
+}
+
+const encoded_variants: ReadonlyArray<{ readonly encoding: string; readonly suffix: string }> = [
+	{ encoding: "br", suffix: ".br" },
+	{ encoding: "gzip", suffix: ".gz" },
+];
+
+/**
+ * Resolves the precompressed sibling that adapter-static already emits, so a
+ * forwarded session does not pay for uncompressed bundle bytes. The variant is
+ * realpath-checked against the root exactly like the origin file, because a
+ * symlinked `.br` could otherwise escape the static directory.
+ */
+const ResolveEncodedVariant = (root: string, path: string, accept_encoding: string) =>
+	Effect.gen(function* () {
+		for (const variant of encoded_variants) {
+			if (!accept_encoding.includes(variant.encoding)) continue;
+			const real_variant = yield* Effect.tryPromise(() =>
+				realpath(`${path}${variant.suffix}`),
+			).pipe(Effect.option);
+			if (Option.isNone(real_variant)) continue;
+			if (real_variant.value !== root && !real_variant.value.startsWith(`${root}${sep}`)) {
+				continue;
+			}
+			return Option.some<EncodedVariant>({
+				encoding: variant.encoding,
+				path: real_variant.value,
+			});
+		}
+		return Option.none<EncodedVariant>();
 	});
 
 const ServeStatic = (
 	root: string,
 	pathname: string,
 	method: "GET" | "HEAD",
+	request: IncomingMessage,
 	response: ServerResponse,
 ) =>
 	Effect.gen(function* () {
@@ -177,15 +214,46 @@ const ServeStatic = (
 			response.end();
 			return;
 		}
-		response.writeHead(200, {
+		const accept_encoding = request.headers["accept-encoding"];
+		const variant = yield* ResolveEncodedVariant(
+			resolved.root,
+			resolved.path,
+			Array.isArray(accept_encoding) ? accept_encoding.join(",") : (accept_encoding ?? ""),
+		);
+		const served_path = Option.isSome(variant) ? variant.value.path : resolved.path;
+		const served_metadata = yield* Effect.tryPromise(() => stat(served_path)).pipe(
+			Effect.option,
+		);
+		const etag = Option.isSome(served_metadata)
+			? `"${served_metadata.value.size.toString(16)}-${served_metadata.value.mtimeMs.toString(16)}"`
+			: undefined;
+		const headers: Record<string, string> = {
+			/**
+			 * Hashed bundle output is content-addressed, so it is safe to pin.
+			 * Everything else revalidates against the etag on each load.
+			 */
+			"cache-control": pathname.startsWith("/_app/immutable/")
+				? "public, max-age=31536000, immutable"
+				: "no-cache",
 			"content-type": mime_types[extname(resolved.path)] ?? "application/octet-stream",
-		});
+			vary: "accept-encoding",
+		};
+		if (Option.isSome(variant)) headers["content-encoding"] = variant.value.encoding;
+		if (etag !== undefined) headers.etag = etag;
+
+		if (etag !== undefined && request.headers["if-none-match"] === etag) {
+			response.writeHead(304, headers);
+			response.end();
+			return;
+		}
+
+		response.writeHead(200, headers);
 		if (method === "HEAD") {
 			response.end();
 			return;
 		}
 		yield* Effect.callback<void, Error>((resume) => {
-			const stream = createReadStream(resolved.path);
+			const stream = createReadStream(served_path);
 			const on_error = (cause: Error) => resume(Effect.fail(cause));
 			const on_finish = () => resume(Effect.void);
 			stream.once("error", on_error);
@@ -347,6 +415,7 @@ export function start_forge_http(
 						config.static_frontend_root,
 						url.pathname,
 						request.method,
+						request,
 						response,
 					).pipe(
 						Effect.catch(() =>
