@@ -46,8 +46,8 @@ runtime, update, repair, or uninstall contract.
 - There is one documented installation path across Windows, macOS, and Linux.
 - Editor and Forge install together by default.
 - First-time setup presents one recommended action; customization is secondary.
-- Artisan Forge remains authoritative. Editor is a stateless client and native
-  `artisan://` launcher.
+- Artisan Forge remains authoritative. Editor is a stateless client; permanent
+  native `ae` owns the `artisan://` launch handoff.
 - Installation and the permanent product do not depend on npm, Node from the
   user's PATH, an app store, apt repository, Homebrew, Flatpak, or AppImage.
 - GitHub Releases is the artifact origin. Every artifact is authenticated before
@@ -336,9 +336,10 @@ artisan://forge/start
 Protocol input is decoded as a strict typed contract. Arbitrary commands,
 credentials, fragments, or shell strings are rejected.
 
-Protocol registration points at the permanent Editor launcher or a stable
-native Artisan launcher, never the temporary download bootstrap. The launcher
-delegates to permanent `ae` and owns no Forge state.
+Protocol registration points at stable permanent `ae`, never a versioned
+Editor executable or the temporary download bootstrap. The internal protocol
+command accepts only the fixed capability and delegates to the same Forge
+health, one-time pairing, and browser-open path as `ae open`.
 
 ## Windows Integration
 

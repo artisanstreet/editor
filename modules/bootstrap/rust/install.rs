@@ -2,6 +2,7 @@ use std::{
     fs::File,
     io::{Read, Write},
     path::{Path, PathBuf},
+    process::Stdio,
 };
 
 use chrono::Utc;
@@ -12,6 +13,9 @@ use url::Url;
 use crate::{
     archive,
     error::{BootstrapError, Result, io},
+    integrations::{
+        OwnedIntegration, apply_protocol, prepare_protocol, remove_protocol, verify_protocol,
+    },
     manifest::{Artifact, TrustKey, fetch},
     platform::Platform,
 };
@@ -75,6 +79,7 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         .join(&manifest.product_version);
     if existing_release.is_dir() {
         let stable_ae = install_stable_cli(&options.install_root, &existing_release)?;
+        let existing_protocol = read_existing_protocol(&options.install_root)?;
         let bootstrap = existing_release.join("bin").join(if cfg!(windows) {
             "artisan-bootstrap.exe"
         } else {
@@ -83,13 +88,16 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         if !bootstrap.is_file() {
             return Err(BootstrapError::MissingBootstrap(bootstrap));
         }
+        let protocol = prepare_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?;
         activate(
             &options.install_root,
             &existing_release,
             &manifest,
             &options,
             &stable_ae,
+            protocol.as_ref(),
         )?;
+        apply_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?;
         invoke_ae(&existing_release, &["--version"])?;
         return Ok(());
     }
@@ -137,6 +145,7 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         }
         std::fs::rename(&stage, &release).map_err(io(&release))?;
         let stable_ae = install_stable_cli(&options.install_root, &release)?;
+        let existing_protocol = read_existing_protocol(&options.install_root)?;
         let bootstrap = release.join("bin").join(if cfg!(windows) {
             "artisan-bootstrap.exe"
         } else {
@@ -145,13 +154,16 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         if !bootstrap.is_file() {
             return Err(BootstrapError::MissingBootstrap(bootstrap));
         }
+        let protocol = prepare_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?;
         activate(
             &options.install_root,
             &release,
             &manifest,
             &options,
             &stable_ae,
+            protocol.as_ref(),
         )?;
+        apply_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?;
         if options.run_setup && options.components.contains(&"cli") {
             invoke_ae(&release, &["setup"])?;
             invoke_ae(&release, &["start"])?;
@@ -255,12 +267,6 @@ fn prune_unselected_components(stage: &Path, selected: &[&str]) -> Result<()> {
 }
 
 #[derive(Debug, Serialize)]
-struct OwnedIntegration {
-    path: String,
-    fingerprint: String,
-}
-
-#[derive(Debug, Serialize)]
 struct Components {
     editor: bool,
     forge: bool,
@@ -272,10 +278,29 @@ fn activate(
     manifest: &crate::manifest::ReleaseManifest,
     options: &InstallOptions,
     stable_ae: &Path,
+    protocol: Option<&OwnedIntegration>,
 ) -> Result<()> {
     let next = root.join(".installation.json.tmp");
     let current = root.join("installation.json");
     let now = Utc::now().to_rfc3339();
+    let mut integrations = serde_json::Map::from_iter([(
+        "ae_path".to_owned(),
+        serde_json::to_value(OwnedIntegration {
+            path: stable_ae.display().to_string(),
+            fingerprint: hash_file(&release.join("bin").join(if cfg!(windows) {
+                "ae.exe"
+            } else {
+                "ae"
+            }))?,
+        })
+        .map_err(BootstrapError::InvalidPayload)?,
+    )]);
+    if let Some(protocol) = protocol {
+        integrations.insert(
+            "protocol".to_owned(),
+            serde_json::to_value(protocol).map_err(BootstrapError::InvalidPayload)?,
+        );
+    }
     let contents = serde_json::json!({
         "format_version": 1,
         "install_root": root,
@@ -286,14 +311,7 @@ fn activate(
             editor: options.components.contains(&"editor"),
             forge: options.components.contains(&"forge"),
         },
-        "integrations": {
-            "ae_path": OwnedIntegration {
-                path: stable_ae.display().to_string(),
-                fingerprint: hash_file(
-                    &release.join("bin").join(if cfg!(windows) { "ae.exe" } else { "ae" })
-                )?,
-            }
-        },
+        "integrations": integrations,
         "installed_at": now,
         "updated_at": now,
         "activation_state": "active",
@@ -468,13 +486,8 @@ struct InstalledState {
 
 #[derive(Debug, Default, Deserialize)]
 struct InstalledIntegrations {
-    ae_path: Option<InstalledOwnedIntegration>,
-}
-
-#[derive(Debug, Deserialize)]
-struct InstalledOwnedIntegration {
-    path: PathBuf,
-    fingerprint: String,
+    ae_path: Option<OwnedIntegration>,
+    protocol: Option<OwnedIntegration>,
 }
 
 pub fn repair(root: &Path) -> Result<()> {
@@ -495,7 +508,34 @@ pub fn repair(root: &Path) -> Result<()> {
             "permanent ae path is outside the bootstrap-owned layout".to_owned(),
         ));
     }
+    let platform = Platform::detect()?;
+    let existing_protocol = state.integrations.protocol.as_ref();
+    let protocol = prepare_protocol(&platform, &stable, existing_protocol)?;
+    if protocol.as_ref() != state.integrations.protocol.as_ref()
+        && let Some(protocol) = protocol.as_ref()
+    {
+        persist_protocol_record(root, protocol)?;
+    }
+    apply_protocol(&platform, &stable, existing_protocol)?;
     invoke_ae_diagnostic(&release, &["doctor"])
+}
+
+pub fn diagnose(root: &Path) -> Result<()> {
+    let state = read_installed_state(root)?;
+    validate_state_root(root, &state)?;
+    let stable = root
+        .join("bin")
+        .join(if cfg!(windows) { "ae.exe" } else { "ae" });
+    if stable != state.permanent_ae_path || !stable.is_file() {
+        return Err(BootstrapError::InvalidInstallation(
+            "permanent ae path is missing or outside the bootstrap-owned layout".to_owned(),
+        ));
+    }
+    verify_protocol(
+        &Platform::detect()?,
+        &stable,
+        state.integrations.protocol.as_ref(),
+    )
 }
 
 fn invoke_ae_diagnostic(release: &Path, arguments: &[&str]) -> Result<()> {
@@ -509,6 +549,8 @@ fn invoke_ae_diagnostic(release: &Path, arguments: &[&str]) -> Result<()> {
     // installation invariants above and must not recurse through `--fix`.
     let _status = std::process::Command::new(&executable)
         .args(arguments)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map_err(io(&executable))?;
     Ok(())
@@ -517,9 +559,15 @@ fn invoke_ae_diagnostic(release: &Path, arguments: &[&str]) -> Result<()> {
 pub fn uninstall(root: &Path, remove_data: bool) -> Result<()> {
     let state = read_installed_state(root)?;
     validate_state_root(root, &state)?;
+    remove_protocol(
+        &Platform::detect()?,
+        &state.permanent_ae_path,
+        state.integrations.protocol.as_ref(),
+    )?;
     if let Some(integration) = state.integrations.ae_path {
-        if integration.path.is_file() && hash_file(&integration.path)? == integration.fingerprint {
-            std::fs::remove_file(&integration.path).map_err(io(&integration.path))?;
+        let path = Path::new(&integration.path);
+        if path.is_file() && hash_file(path)? == integration.fingerprint {
+            std::fs::remove_file(path).map_err(io(path))?;
         }
     }
     remove_path_integration(&root.join("bin"))?;
@@ -571,6 +619,48 @@ fn read_installed_state(root: &Path) -> Result<InstalledState> {
     let path = root.join("installation.json");
     let bytes = std::fs::read(&path).map_err(io(&path))?;
     serde_json::from_slice(&bytes).map_err(BootstrapError::InvalidPayload)
+}
+
+fn read_existing_protocol(root: &Path) -> Result<Option<OwnedIntegration>> {
+    let path = root.join("installation.json");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    read_installed_state(root).map(|state| state.integrations.protocol)
+}
+
+fn persist_protocol_record(root: &Path, protocol: &OwnedIntegration) -> Result<()> {
+    let current = root.join("installation.json");
+    let next = root.join(".installation.json.protocol");
+    let bytes = std::fs::read(&current).map_err(io(&current))?;
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(BootstrapError::InvalidPayload)?;
+    let integrations = document
+        .get_mut("integrations")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| {
+            BootstrapError::InvalidInstallation(
+                "installation manifest integrations are missing".to_owned(),
+            )
+        })?;
+    integrations.insert(
+        "protocol".to_owned(),
+        serde_json::to_value(protocol).map_err(BootstrapError::InvalidPayload)?,
+    );
+    let mut file = File::create(&next).map_err(io(&next))?;
+    serde_json::to_writer(&mut file, &document).map_err(BootstrapError::InvalidPayload)?;
+    file.sync_all().map_err(io(&next))?;
+
+    let previous = root.join(".installation.json.protocol.previous");
+    if previous.exists() {
+        std::fs::remove_file(&previous).map_err(io(&previous))?;
+    }
+    std::fs::rename(&current, &previous).map_err(io(&current))?;
+    if let Err(source) = std::fs::rename(&next, &current) {
+        let _ = std::fs::rename(&previous, &current);
+        return Err(io(&current)(source));
+    }
+    std::fs::remove_file(&previous).map_err(io(&previous))
 }
 
 fn validate_state_root(root: &Path, state: &InstalledState) -> Result<()> {

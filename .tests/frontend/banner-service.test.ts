@@ -171,11 +171,16 @@ describe("BannerService", () => {
 			{
 				actions: [
 					{
+						href: "artisan://forge/start",
+						id: "start-forge",
+						label: "Start Forge",
+					},
+					{
 						id: "retry",
 						label: "Retry now",
 					},
 				],
-				description: "Run ae open in a terminal, then retry this connection.",
+				description: "Start the installed local service, or retry this connection.",
 				id: ForgeConnectionBannerId,
 				severity: "error",
 				title: "Could not connect to Forge",

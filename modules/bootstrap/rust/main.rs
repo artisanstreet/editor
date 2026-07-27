@@ -1,6 +1,7 @@
 mod archive;
 mod error;
 mod install;
+mod integrations;
 mod manifest;
 mod platform;
 
@@ -8,7 +9,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use error::{BootstrapError, Result};
-use install::{InstallOptions, install, repair, uninstall};
+use install::{InstallOptions, diagnose, install, repair, uninstall};
 use manifest::TrustKey;
 use platform::Platform;
 use url::Url;
@@ -69,6 +70,9 @@ struct Arguments {
 
 #[derive(Debug, Subcommand)]
 enum Operation {
+    /// Verify bootstrap-owned integrations without changing them.
+    #[command(hide = true)]
+    Diagnose,
     /// Install the latest signed release without first-time profile setup.
     Update,
     /// Restore bootstrap-owned launchers, PATH integration, and installation health.
@@ -104,6 +108,7 @@ async fn run() -> Result<()> {
 
     if let Some(operation) = arguments.operation.as_ref() {
         match operation {
+            Operation::Diagnose => diagnose(&root)?,
             Operation::Update => {
                 let trust = TrustKey::resolve(arguments.public_key.as_deref())?;
                 install(make_install_options(
@@ -231,5 +236,12 @@ mod tests {
             arguments.operation,
             Some(Operation::Uninstall { remove_data: false })
         ));
+    }
+
+    #[test]
+    fn diagnostic_operation_is_available_to_permanent_ae() {
+        let arguments =
+            Arguments::try_parse_from(["artisan-bootstrap", "diagnose"]).expect("diagnose");
+        assert!(matches!(arguments.operation, Some(Operation::Diagnose)));
     }
 }

@@ -2,7 +2,7 @@ use std::{
     fs::File,
     io::{Read, Seek, SeekFrom},
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
     thread,
     time::Duration,
 };
@@ -21,6 +21,7 @@ use crate::{
 
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
 const MAX_FOLLOW_BYTES: u64 = 64 * 1024;
+const FORGE_START_LAUNCH_URL: &str = "artisan://forge/start";
 
 #[derive(Debug, Parser)]
 #[command(name = "ae", version, about = "Artisan Editor and Forge")]
@@ -31,6 +32,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Commands {
+    /// Handle one fixed operating-system URL capability.
+    #[command(hide = true)]
+    Protocol {
+        url: String,
+    },
     /// Explicitly create or update a Forge profile.
     Setup {
         #[arg(long, default_value = "default")]
@@ -118,6 +124,7 @@ pub fn run(cli: Cli) -> Result<()> {
         profile: "default".into(),
         origin: None,
     }) {
+        Commands::Protocol { url } => handle_protocol(&layout, &url),
         Commands::Setup {
             profile,
             listen_port,
@@ -139,6 +146,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 listen_port,
                 data_root.as_deref(),
             )?;
+            delegate_bootstrap(&layout, "repair", false)?;
             println!("Configured Forge profile {profile}");
             Ok(())
         }
@@ -269,15 +277,23 @@ fn doctor(layout: &Layout, name: &str, fix: bool, json: bool) -> Result<()> {
         delegate_bootstrap(layout, "repair", false)?;
     }
     let installation = InstallationManifest::load(&layout.manifest);
+    let protocol = if installation.is_ok() {
+        delegate_bootstrap(layout, "diagnose", false)
+    } else {
+        Err(CliError::Installation(
+            "protocol health is unavailable without a valid installation".to_owned(),
+        ))
+    };
     let profile_state = profile::load(layout, name);
     // Repair never invents a profile. `ae setup` is the sole explicit creator.
-    let healthy = installation.is_ok() && profile_state.is_ok();
+    let healthy = installation.is_ok() && protocol.is_ok() && profile_state.is_ok();
     if json {
         println!(
             "{}",
             serde_json::json!({
                 "healthy": healthy,
                 "installation": if installation.is_ok() { "ok" } else { "error" },
+                "protocol": if protocol.is_ok() { "ok" } else { "error" },
                 "profile": if profile_state.is_ok() { "ok" } else { "missing" },
             })
         );
@@ -285,6 +301,10 @@ fn doctor(layout: &Layout, name: &str, fix: bool, json: bool) -> Result<()> {
         println!(
             "{}: installation",
             if installation.is_ok() { "ok" } else { "error" }
+        );
+        println!(
+            "{}: artisan:// protocol",
+            if protocol.is_ok() { "ok" } else { "error" }
         );
         println!(
             "{}: profile {name}",
@@ -298,6 +318,15 @@ fn doctor(layout: &Layout, name: &str, fix: bool, json: bool) -> Result<()> {
             "doctor found unresolved issues".into(),
         ))
     }
+}
+
+fn handle_protocol(layout: &Layout, url: &str) -> Result<()> {
+    if url != FORGE_START_LAUNCH_URL {
+        return Err(CliError::Control(
+            "unsupported artisan:// launch request".to_owned(),
+        ));
+    }
+    open(layout, "default", None)
 }
 
 fn open(layout: &Layout, name: &str, origin: Option<&str>) -> Result<()> {
@@ -412,6 +441,9 @@ fn delegate_bootstrap(layout: &Layout, operation: &str, remove_data: bool) -> Re
     if remove_data {
         command.arg("--remove-data");
     }
+    if operation == "diagnose" {
+        command.stdout(Stdio::null()).stderr(Stdio::null());
+    }
     let status = command.status().map_err(io("run installer lifecycle"))?;
     if status.success() {
         Ok(())
@@ -439,6 +471,35 @@ mod tests {
             cli.command,
             Some(Commands::Uninstall { remove_data: false })
         ));
+    }
+
+    #[test]
+    fn protocol_command_accepts_only_one_url_argument() {
+        let cli =
+            Cli::try_parse_from(["ae", "protocol", FORGE_START_LAUNCH_URL]).expect("protocol");
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Protocol { url }) if url == FORGE_START_LAUNCH_URL
+        ));
+        assert!(
+            Cli::try_parse_from(["ae", "protocol", FORGE_START_LAUNCH_URL, "unexpected"]).is_err()
+        );
+    }
+
+    #[test]
+    fn protocol_decoder_rejects_every_non_capability_url() {
+        let layout = Layout::discover().expect("layout");
+        for candidate in [
+            "artisan://forge/start?command=calc",
+            "artisan://forge/start#token",
+            "artisan://forge/stop",
+            "https://forge/start",
+        ] {
+            assert!(matches!(
+                handle_protocol(&layout, candidate),
+                Err(CliError::Control(message)) if message == "unsupported artisan:// launch request"
+            ));
+        }
     }
 
     #[test]

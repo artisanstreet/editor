@@ -1,4 +1,5 @@
 import type { ArtisanConnectionState } from "@artisan/transport/client";
+import { ForgeStartLaunchUrl } from "@artisan/protocol";
 import { Effect, Match } from "effect";
 
 import { BannerService } from "./service";
@@ -34,6 +35,12 @@ export const PresentForgeConnectionState = (
 					...persistent,
 					actions: [
 						{
+							href: ForgeStartLaunchUrl,
+							icon: "player-play",
+							id: "start-forge",
+							label: "Start Forge",
+						},
+						{
 							Execute: retry_connection,
 							icon: "refresh",
 							id: "retry",
@@ -41,7 +48,7 @@ export const PresentForgeConnectionState = (
 						},
 					],
 					code: "forge.connection.failed",
-					description: "Run ae open in a terminal, then retry this connection.",
+					description: "Start the installed local service, or retry this connection.",
 					metadata: { transport_message: error.message },
 				}),
 			),
