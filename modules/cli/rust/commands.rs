@@ -324,8 +324,12 @@ fn open(layout: &Layout, name: &str, origin: Option<&str>) -> Result<()> {
         path: paths.state,
         source,
     })?;
-    let origin = validate_origin(origin.unwrap_or("http://artisan-editor.localhost"))?;
+    let origin = resolve_browser_origin(origin, &state.endpoint)?;
     launch_url(&format!("{origin}/#pair={}", pair.code))
+}
+
+fn resolve_browser_origin(origin: Option<&str>, forge_endpoint: &str) -> Result<String> {
+    validate_origin(origin.unwrap_or(forge_endpoint))
 }
 
 fn validate_data_root(path: &Path) -> Result<PathBuf> {
@@ -459,5 +463,21 @@ mod tests {
         assert!(validate_origin("http://user@localhost").is_err());
         assert!(validate_origin("http://artisan-editor.localhost").is_ok());
         assert!(validate_origin("http://127.0.0.1:4317").is_ok());
+    }
+
+    #[test]
+    fn browser_origin_defaults_to_the_live_forge_endpoint() {
+        assert_eq!(
+            resolve_browser_origin(None, "http://127.0.0.1:62244/").expect("Forge endpoint"),
+            "http://127.0.0.1:62244"
+        );
+        assert_eq!(
+            resolve_browser_origin(
+                Some("http://artisan-editor.localhost"),
+                "http://127.0.0.1:62244/"
+            )
+            .expect("explicit local forwarding origin"),
+            "http://artisan-editor.localhost"
+        );
     }
 }
