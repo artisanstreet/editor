@@ -1,9 +1,64 @@
-import { randomBytes, timingSafeEqual } from "node:crypto";
+import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 
-import { Clock, Context, Deferred, Effect, Layer, Option, Ref } from "effect";
+import { Clock, Context, Deferred, Effect, Layer, Option, Ref, Schema } from "effect";
 
 const pair_lifetime_ms = 60_000;
 const session_lifetime_ms = 12 * 60 * 60 * 1_000;
+
+const SessionStore = Schema.Struct({
+	sessions: Schema.Array(
+		Schema.Struct({
+			expires_at: Schema.Int,
+			hash: Schema.String.check(Schema.isMinLength(1)),
+		}),
+	),
+	version: Schema.Literal(1),
+});
+
+const decode_session_store = Schema.decodeUnknownEffect(SessionStore);
+
+const hash_session = (session: string) => createHash("sha256").update(session).digest("hex");
+
+const LoadSessions = (path: string, now: number) =>
+	Effect.tryPromise(() => readFile(path, "utf8")).pipe(
+		Effect.flatMap((encoded) => Effect.try(() => JSON.parse(encoded) as unknown)),
+		Effect.flatMap((decoded) => decode_session_store(decoded)),
+		Effect.map(
+			(store) =>
+				new Map(
+					store.sessions
+						.filter((entry) => entry.expires_at >= now)
+						.map((entry) => [entry.hash, entry.expires_at] as const),
+				),
+		),
+		Effect.catch(() => Effect.succeed(new Map<string, number>())),
+	);
+
+/**
+ * Persists session digests through a same-directory replacement so a crash can
+ * never leave partial JSON. Only SHA-256 digests reach disk: reading the store
+ * cannot recover a cookie value, so durability does not widen the trust
+ * boundary beyond the profile directory's own permissions.
+ */
+const PersistSessions = (path: string, sessions: ReadonlyMap<string, number>) =>
+	Effect.gen(function* () {
+		yield* Effect.tryPromise(() => mkdir(dirname(path), { recursive: true }));
+		const temporary = `${path}.${randomBytes(6).toString("hex")}.tmp`;
+		const encoded = JSON.stringify({
+			sessions: [...sessions].map(([hash, expires_at]) => ({ expires_at, hash })),
+			version: 1,
+		});
+		yield* Effect.tryPromise(() =>
+			writeFile(temporary, `${encoded}\n`, { encoding: "utf8", mode: 0o600 }),
+		);
+		yield* Effect.tryPromise(() => rename(temporary, path)).pipe(
+			Effect.ensuring(
+				Effect.tryPromise(() => rm(temporary, { force: true })).pipe(Effect.ignore),
+			),
+		);
+	}).pipe(Effect.ignore);
 
 export interface ForgeControlAuthorityShape {
 	readonly ConsumePair: (code: string) => Effect.Effect<Option.Option<string>>;
@@ -20,6 +75,11 @@ export class ForgeControlAuthority extends Context.Service<
 
 export interface ForgeControlAuthorityOptions {
 	readonly now?: () => number;
+	/**
+	 * Durable session digest store. When present, paired sessions survive a
+	 * Forge restart instead of logging every browser out on update.
+	 */
+	readonly session_store_path?: string;
 }
 
 /** Creates process-local pairing and shutdown authority for one Forge instance. */
@@ -33,7 +93,15 @@ export const make_forge_control_authority_layer = (options: ForgeControlAuthorit
 			const pairing = yield* Ref.make<
 				Option.Option<{ readonly code: string; readonly expires_at: number }>
 			>(Option.none());
-			const sessions = yield* Ref.make(new Map<string, number>());
+			const store_path = options.session_store_path;
+			const boot_time = yield* CurrentTime;
+			const sessions = yield* Ref.make(
+				store_path === undefined
+					? new Map<string, number>()
+					: yield* LoadSessions(store_path, boot_time),
+			);
+			const Persist = (current: ReadonlyMap<string, number>) =>
+				store_path === undefined ? Effect.void : PersistSessions(store_path, current);
 			const RequestPair = Effect.gen(function* () {
 				const code = randomBytes(32).toString("base64url");
 				const now = yield* CurrentTime;
@@ -57,9 +125,10 @@ export const make_forge_control_authority_layer = (options: ForgeControlAuthorit
 						return Option.none();
 					}
 					const session = randomBytes(32).toString("base64url");
-					yield* Ref.update(sessions, (existing) =>
-						new Map(existing).set(session, now + session_lifetime_ms),
+					const updated = yield* Ref.updateAndGet(sessions, (existing) =>
+						new Map(existing).set(hash_session(session), now + session_lifetime_ms),
 					);
+					yield* Persist(updated);
 					return Option.some(session);
 				});
 
@@ -74,8 +143,19 @@ export const make_forge_control_authority_layer = (options: ForgeControlAuthorit
 										([, expires_at]) => expires_at >= current_time,
 									),
 								);
-								return [session !== undefined && active.has(session), active];
+								const allowed =
+									session !== undefined && active.has(hash_session(session));
+								return [
+									{ allowed, pruned: active.size < existing.size, active },
+									active,
+								] as const;
 							}),
+						),
+						Effect.flatMap((outcome) =>
+							/** Persist only when expiry pruned something, not per request. */
+							(outcome.pruned ? Persist(outcome.active) : Effect.void).pipe(
+								Effect.as(outcome.allowed),
+							),
 						),
 					),
 				RequestPair,

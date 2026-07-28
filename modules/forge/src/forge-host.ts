@@ -1,3 +1,5 @@
+import { dirname, join } from "node:path";
+
 import { NodeFileSystem, NodePath } from "@effect/platform-node-shared";
 import { Clock, Effect, Exit, FileSystem, Layer, Path, Scope } from "effect";
 import { MakeSnowflakeIdLive } from "@artisan/protocol";
@@ -109,7 +111,17 @@ const MakeForgeRuntime = (config: ForgeConfig) => {
 		Layer.provideMerge(RichLinkAssetStoreLive),
 	);
 
-	return Layer.mergeAll(engine_layer, transport_layer, make_forge_control_authority_layer());
+	return Layer.mergeAll(
+		engine_layer,
+		transport_layer,
+		/**
+		 * Session digests persist beside the database so a Forge restart —
+		 * notably an update — does not log out every paired browser.
+		 */
+		make_forge_control_authority_layer({
+			session_store_path: join(dirname(config.database_path), "forge-sessions.json"),
+		}),
+	);
 };
 
 /**
