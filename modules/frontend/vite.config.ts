@@ -12,7 +12,18 @@ import { sv } from "svelte-sv-extension";
 const WorkspaceSource = (relative_path: string) =>
 	fileURLToPath(new URL(relative_path, import.meta.url));
 
+/**
+ * Development-only Forge target. It lives exclusively inside `server`, which
+ * `vite dev` consumes and `vite build` never emits, so the production bundle
+ * keeps resolving its Forge strictly same-origin. The HMR page itself stays
+ * same-origin too: pairing, health, and the control/stream WebSocket all pass
+ * through this loopback proxy, so no cross-origin allowance is needed on the
+ * Forge side.
+ */
 const ForgeDevelopmentOrigin = process.env.ARTISAN_FORGE_DEV_ORIGIN ?? "http://127.0.0.1:4848";
+
+/** Fixed so `ae open --origin` can deliver the pairing fragment deterministically. */
+const FrontendDevelopmentPort = Number(process.env.ARTISAN_FRONTEND_DEV_PORT ?? "4849");
 
 export default defineConfig({
 	resolve: {
@@ -49,15 +60,32 @@ export default defineConfig({
 		fs: {
 			allow: [WorkspaceSource("../..")],
 		},
+		/**
+		 * Bound to the explicit IPv4 loopback so the origin the pairing
+		 * capability lands on (`ae open --origin http://127.0.0.1:4849`) is
+		 * exactly the origin the listener answers; the default `localhost` can
+		 * resolve to `::1` only.
+		 */
+		host: "127.0.0.1",
+		port: FrontendDevelopmentPort,
 		proxy: {
-			"/api/pair": {
-				target: ForgeDevelopmentOrigin,
-			},
-			"/api/ws": {
+			/**
+			 * The whole Forge API surface — pairing, instance listing, and the
+			 * `/api/ws` control/stream upgrade — forwards to the development
+			 * Forge. `Host` is deliberately not rewritten: the Forge compares the
+			 * browser's `Origin` against `Host`, so the untouched Vite loopback
+			 * pair passes its same-origin policy without any server-side change.
+			 */
+			"/api": {
 				target: ForgeDevelopmentOrigin,
 				ws: true,
 			},
+			/** The dev-instance badge and connection gate probe Forge health. */
+			"/health": {
+				target: ForgeDevelopmentOrigin,
+			},
 		},
+		strictPort: true,
 	},
 	plugins: [
 		compose(

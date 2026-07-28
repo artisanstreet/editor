@@ -1,15 +1,16 @@
 <script lang="ts">
 	import { onMount } from "svelte";
 
-	/**
-	 * An installed release always serves the `default` profile, so any other name
-	 * means this renderer is talking to a development Forge pointed at a separate
-	 * data root. Showing that removes the standing ambiguity between an installed
-	 * app and a repository build, which otherwise look identical and differ only
-	 * in which database they read.
-	 */
-	const release_profile = "default";
+	import { DevInstanceProfile, DevMarkedTitle } from "$lib/root/dev-instance";
 
+	/**
+	 * A non-`default` `/health` profile means this renderer is talking to a
+	 * development Forge pointed at a separate data root — whether the page is
+	 * the built bundle served by that Forge or the HMR dev server proxying to
+	 * it. Showing that removes the standing ambiguity between an installed app
+	 * and a repository build, which otherwise look identical and differ only in
+	 * which database they read.
+	 */
 	let profile = $state<string | undefined>(undefined);
 
 	onMount(() => {
@@ -28,13 +29,8 @@
 					const response = await fetch("/health", { cache: "no-store" });
 					if (response.ok) {
 						const body: unknown = await response.json();
-						const named =
-							typeof body === "object" && body !== null && "profile" in body
-								? (body as { readonly profile?: unknown }).profile
-								: undefined;
-						if (!cancelled && typeof named === "string" && named !== release_profile) {
-							profile = named;
-						}
+						const named = DevInstanceProfile(body);
+						if (!cancelled && named !== undefined) profile = named;
 						return;
 					}
 				} catch {
@@ -48,6 +44,27 @@
 		return () => {
 			cancelled = true;
 		};
+	});
+
+	/**
+	 * Routes own their titles through `svelte:head`, so navigation rewrites the
+	 * whole title after this component has marked it. Observing the head keeps
+	 * the `[Dev]` marker on every route-owned title for as long as the page is
+	 * known to face a development Forge; the idempotent prefix cannot loop with
+	 * its own mutations.
+	 */
+	$effect(() => {
+		if (profile === undefined) return;
+
+		const Mark = () => {
+			const marked = DevMarkedTitle(document.title);
+			if (document.title !== marked) document.title = marked;
+		};
+
+		Mark();
+		const observer = new MutationObserver(Mark);
+		observer.observe(document.head, { characterData: true, childList: true, subtree: true });
+		return () => observer.disconnect();
 	});
 </script>
 

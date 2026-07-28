@@ -1,0 +1,99 @@
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { extname, join, resolve } from "node:path";
+
+import { describe, expect, it } from "vitest";
+
+import {
+	dev_title_marker,
+	DevInstanceProfile,
+	DevMarkedTitle,
+	release_forge_profile,
+} from "../../modules/frontend/src/lib/root/dev-instance";
+
+const Read = (path: string) => readFileSync(resolve(path), "utf8");
+
+const text_extensions = new Set([".css", ".html", ".js", ".json", ".sv", ".svelte", ".ts"]);
+
+const ReadTextTree = (
+	root: string,
+): ReadonlyArray<{ readonly path: string; readonly text: string }> =>
+	readdirSync(root, { recursive: true, withFileTypes: true })
+		.filter((entry) => entry.isFile() && text_extensions.has(extname(entry.name)))
+		.map((entry) => {
+			const path = join(entry.parentPath, entry.name);
+			return { path, text: readFileSync(path, "utf8") };
+		});
+
+describe("development instance visibility", () => {
+	it("derives a dev profile only from a non-release health body", () => {
+		expect(DevInstanceProfile({ profile: "browser-dev" })).toBe("browser-dev");
+		expect(DevInstanceProfile({ profile: release_forge_profile })).toBeUndefined();
+		expect(DevInstanceProfile({ profile: "" })).toBeUndefined();
+		expect(DevInstanceProfile({ profile: 4848 })).toBeUndefined();
+		expect(DevInstanceProfile({})).toBeUndefined();
+		expect(DevInstanceProfile(undefined)).toBeUndefined();
+		expect(DevInstanceProfile("browser-dev")).toBeUndefined();
+	});
+
+	it("marks document titles idempotently", () => {
+		expect(DevMarkedTitle("Artisan Editor")).toBe(`${dev_title_marker} Artisan Editor`);
+		expect(DevMarkedTitle(`${dev_title_marker} Artisan Editor`)).toBe(
+			`${dev_title_marker} Artisan Editor`,
+		);
+		expect(DevMarkedTitle("")).toBe(dev_title_marker);
+	});
+
+	it("wires the badge into the shell and the marker into route-owned titles", () => {
+		const layout = Read("modules/frontend/src/routes/+layout.sv");
+		const badge = Read("modules/frontend/src/routes/components/dev-instance-badge.sv");
+
+		expect(layout).toContain("<DevInstanceBadge />");
+		expect(badge).toContain('fetch("/health"');
+		expect(badge).toContain("DevInstanceProfile(");
+		expect(badge).toContain("DevMarkedTitle(document.title)");
+		expect(badge).toContain("new MutationObserver(");
+		expect(badge).toContain("observer.disconnect()");
+	});
+
+	it("confines the development Forge origin to the dev-only Vite server block", () => {
+		const vite_config = Read("modules/frontend/vite.config.ts");
+
+		expect(vite_config).toContain(
+			'process.env.ARTISAN_FORGE_DEV_ORIGIN ?? "http://127.0.0.1:4848"',
+		);
+		expect(vite_config).toContain("strictPort: true");
+		expect(vite_config).toContain('host: "127.0.0.1"');
+		expect(vite_config).toContain("port: FrontendDevelopmentPort");
+		expect(vite_config).toContain('"/api": {');
+		expect(vite_config).toContain("ws: true");
+		expect(vite_config).toContain('"/health": {');
+		/**
+		 * The origin constant must feed only proxy targets. A `define` or an
+		 * import of the constant would leak the development endpoint into the
+		 * production bundle.
+		 */
+		expect(vite_config.match(/ForgeDevelopmentOrigin/g)).toHaveLength(3);
+		expect(vite_config.split("target: ForgeDevelopmentOrigin")).toHaveLength(3);
+		expect(vite_config).not.toContain("define:");
+	});
+
+	it("keeps frontend sources free of any hardcoded development Forge endpoint", () => {
+		for (const source of ReadTextTree("modules/frontend/src")) {
+			expect(source.text, source.path).not.toContain("127.0.0.1:4848");
+			expect(source.text, source.path).not.toContain("127.0.0.1:4849");
+			expect(source.text, source.path).not.toContain("ARTISAN_FORGE_DEV_ORIGIN");
+		}
+	});
+
+	it.runIf(existsSync(resolve(".dist/frontend")))(
+		"keeps the production bundle free of the development origin override",
+		() => {
+			const bundle = ReadTextTree(".dist/frontend");
+			expect(bundle.length).toBeGreaterThan(0);
+			for (const asset of bundle) {
+				expect(asset.text, asset.path).not.toContain("127.0.0.1:4848");
+				expect(asset.text, asset.path).not.toContain("ARTISAN_FORGE_DEV_ORIGIN");
+			}
+		},
+	);
+});

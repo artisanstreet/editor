@@ -54,7 +54,12 @@ describe("browser pairing bootstrap", () => {
 			new URL("../../modules/frontend/vite.config.ts", import.meta.url),
 			"utf8",
 		);
-		expect(config).toContain('"/api/pair"');
+		/**
+		 * The whole `/api` surface proxies to the development Forge, so the
+		 * pairing exchange (`/api/pair`) stays same-origin on the HMR page
+		 * exactly like it does on the built bundle.
+		 */
+		expect(config).toContain('"/api": {');
 		expect(config).toContain("target: ForgeDevelopmentOrigin");
 	});
 
