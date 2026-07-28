@@ -191,6 +191,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 		error_capacity: input_options.error_capacity ?? 64,
 		event_capacity: input_options.event_capacity ?? 256,
 		max_pending_requests: input_options.max_pending_requests ?? 128,
+		reconnect_attempts: input_options.reconnect_attempts ?? 5,
 		reconnect_delay_ms: input_options.reconnect_delay_ms ?? 50,
 		stream_capacity: input_options.stream_capacity ?? 64,
 		subscription_capacity: input_options.subscription_capacity ?? 64,
@@ -215,7 +216,10 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				Queue.shutdown,
 			);
 			const disposed = yield* Ref.make(false);
-			const connection = yield* make_client_connection_lifecycle(options.reconnect_delay_ms);
+			const connection = yield* make_client_connection_lifecycle(
+				options.reconnect_delay_ms,
+				options.reconnect_attempts,
+			);
 
 			const publish_error = (error: ArtisanClientError) =>
 				Effect.sync(() => {

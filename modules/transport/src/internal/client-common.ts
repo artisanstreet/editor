@@ -92,6 +92,8 @@ export function validate_client_options(options: Required<ArtisanClientOptions>)
 		options.event_capacity > 0 &&
 		Number.isSafeInteger(options.max_pending_requests) &&
 		options.max_pending_requests > 0 &&
+		Number.isSafeInteger(options.reconnect_attempts) &&
+		options.reconnect_attempts > 0 &&
 		Number.isSafeInteger(options.reconnect_delay_ms) &&
 		options.reconnect_delay_ms >= 0 &&
 		Number.isSafeInteger(options.stream_capacity) &&

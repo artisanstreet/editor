@@ -104,7 +104,12 @@ export const make_websocket_client_runtime_layer = (
 	target: WebSocketRuntimeTarget,
 	create_socket?: (url: string) => BrowserWebSocket,
 ) =>
-	make_artisan_client_layer({ reconnect_delay_ms: 500 }).pipe(
+	/**
+	 * Fail fast on an unreachable Forge: three quick attempts, then surface the
+	 * gate's recovery controls. A loopback refusal is immediate, so waiting out
+	 * a long exponential ladder only delays the Start/Retry affordances.
+	 */
+	make_artisan_client_layer({ reconnect_attempts: 3, reconnect_delay_ms: 250 }).pipe(
 		Layer.provideMerge(
 			target._tag === "websocket"
 				? make_websocket_connector_runtime_layer(target.url, create_socket)

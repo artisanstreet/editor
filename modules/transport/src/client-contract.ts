@@ -571,6 +571,7 @@ export interface ArtisanClientOptions {
 	readonly error_capacity?: number;
 	readonly event_capacity?: number;
 	readonly max_pending_requests?: number;
+	readonly reconnect_attempts?: number;
 	readonly reconnect_delay_ms?: number;
 	readonly stream_capacity?: number;
 	readonly subscription_capacity?: number;
