@@ -395,8 +395,16 @@ fn handle_protocol(layout: &Layout, url: &str) -> Result<()> {
 }
 
 fn ready_state(layout: &Layout, name: &str) -> Result<State> {
-    start(layout, name, false)?;
     let (paths, _, secrets) = profile::load(layout, name)?;
+    // An already-healthy Forge needs no launch, so opening against one works
+    // even in homes without an installation manifest (the repo development
+    // Forge runs from `.dist/forge`, started by its own CLI).
+    if let Ok(candidate) = profile::read_json::<State>(&paths.state)
+        && http::healthy(&candidate.endpoint, &secrets.auth_token)
+    {
+        return Ok(candidate);
+    }
+    start(layout, name, false)?;
     for _ in 0..50 {
         if let Ok(candidate) = profile::read_json::<State>(&paths.state)
             && http::healthy(&candidate.endpoint, &secrets.auth_token)

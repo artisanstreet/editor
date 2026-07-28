@@ -14,6 +14,16 @@ pub struct InstallationManifest {
 
 impl InstallationManifest {
     pub fn load(path: &Path) -> Result<Self> {
+        if !path.is_file() {
+            return Err(CliError::Installation(format!(
+                "no installation manifest at {}; this Artisan home has no installation. \
+                 The repo development Forge runs without one (`pnpm run dev:forge`, then \
+                 `pnpm run dev:open` or `dev:pair`); to exercise the installed flow in \
+                 development, create the sandboxed installation with \
+                 `pnpm run dev:ae-bootstrap -- install`",
+                path.display()
+            )));
+        }
         let value: Self = read_json(path)?;
         if value.activation_state != "active" {
             return Err(CliError::Installation(
@@ -54,5 +64,22 @@ impl InstallationManifest {
         return directory.join("artisan-bootstrap.exe");
         #[cfg(not(target_os = "windows"))]
         directory.join("artisan-bootstrap")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_home_without_an_installation_names_the_gap_and_both_development_paths() {
+        let missing = std::env::temp_dir()
+            .join(format!("artisan-cli-manifest-test-{}", std::process::id()))
+            .join("installation.json");
+        let error = InstallationManifest::load(&missing).unwrap_err();
+        let message = error.to_string();
+        assert!(message.contains("no installation manifest"), "{message}");
+        assert!(message.contains("pnpm run dev:forge"), "{message}");
+        assert!(message.contains("dev:ae-bootstrap -- install"), "{message}");
     }
 }
