@@ -78,7 +78,7 @@ dependencies = [
 
 [[package]]
 name = "artisan-bootstrap"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64",
  "chrono",
@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "artisan-editor-cli"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "base64",
  "clap",

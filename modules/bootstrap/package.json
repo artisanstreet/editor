@@ -1,6 +1,6 @@
 {
 	"name": "artisan-editor",
-	"version": "0.2.1",
+	"version": "0.2.2",
 	"description": "Disposable signed installer bootstrap for Artisan Editor and Artisan Forge",
 	"bin": {
 		"ae": "./.dist/entry.js"
