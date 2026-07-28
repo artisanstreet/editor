@@ -33,32 +33,69 @@
 
 	/**
 	 * `artisan://forge/start` is an OS-global protocol handler, so it can only
-	 * ever boot the installed default Forge. Offering it while this page is
-	 * served by a differently named instance would boot the wrong process, so
-	 * the button is gated on this origin's own profile and the gate instead
-	 * lists the other announced instances to switch to.
+	 * ever boot the installed default Forge. And a reachable /health while the
+	 * transport fails means the server is fine but this browser holds no
+	 * session — offering "Start Forge" there would misdiagnose a pairing
+	 * problem as an outage, so the gate switches to pairing guidance instead.
 	 */
 	let origin_profile = $state<string | undefined>(undefined);
+	let origin_reachable = $state(false);
 	let other_instances = $state<ReadonlyArray<ReachableForge>>([]);
+	let pair_command_copied = $state(false);
+	const unpaired = $derived(presentation.tone === "error" && origin_reachable);
 	const show_start = $derived(
-		presentation.show_start && (origin_profile === undefined || origin_profile === "default"),
+		presentation.show_start &&
+			!origin_reachable &&
+			(origin_profile === undefined || origin_profile === "default"),
 	);
+	const pair_command = $derived(
+		origin_profile === undefined || origin_profile === "default"
+			? "ae open"
+			: `ae open --profile ${origin_profile}`,
+	);
+
+	const copy_pair_command = async () => {
+		try {
+			await navigator.clipboard.writeText(pair_command);
+			pair_command_copied = true;
+			setTimeout(() => {
+				pair_command_copied = false;
+			}, 1500);
+		} catch {
+			/** Clipboard access can be denied; the command stays selectable text. */
+		}
+	};
 
 	$effect(() => {
 		if (!is_visible || presentation.tone !== "error") return;
 		let cancelled = false;
 
 		const Discover = async () => {
-			try {
-				const health = await fetch("/health", { cache: "no-store" });
-				if (health.ok) {
-					const body: unknown = await health.json();
-					const named =
-						typeof body === "object" && body !== null && "profile" in body
-							? (body as { readonly profile?: unknown }).profile
-							: undefined;
-					if (!cancelled && typeof named === "string") origin_profile = named;
+			/**
+			 * The origin may be mid-restart when the gate appears, so a single
+			 * probe would latch a stale "offline" diagnosis. A short retry
+			 * ladder keeps the gate honest without polling forever.
+			 */
+			for (let attempt = 0; attempt < 5 && !cancelled; attempt += 1) {
+				try {
+					const health = await fetch("/health", { cache: "no-store" });
+					if (health.ok) {
+						const body: unknown = await health.json();
+						const named =
+							typeof body === "object" && body !== null && "profile" in body
+								? (body as { readonly profile?: unknown }).profile
+								: undefined;
+						if (cancelled) return;
+						if (typeof named === "string") origin_profile = named;
+						origin_reachable = true;
+						break;
+					}
+				} catch {
+					/** Unreachable this attempt; try again shortly. */
 				}
+				await new Promise((settle) => setTimeout(settle, 1_500));
+			}
+			try {
 				const listing = await fetch("/api/instances", { cache: "no-store" });
 				if (!listing.ok) return;
 				const decoded: unknown = await listing.json();
@@ -83,6 +120,7 @@
 		void Discover();
 		return () => {
 			cancelled = true;
+			origin_reachable = false;
 		};
 	});
 	let previous_focus: HTMLElement | null = null;
@@ -148,11 +186,24 @@
 					presentation.tone === "error" ? "text-destructive" : "text-foreground"
 				}`}
 			>
-				{presentation.title}
+				{unpaired ? "This browser isn't paired" : presentation.title}
 			</h2>
 			<p class="mt-1.5 max-w-sm text-sm leading-6 text-muted-foreground">
-				{presentation.description}
+				{unpaired
+					? `Forge “${origin_profile}” is running, but this browser holds no session for it. Pair from a terminal, then retry.`
+					: presentation.description}
 			</p>
+
+			{#if unpaired}
+				<button
+					type="button"
+					class="mt-3 inline-flex items-center gap-2 rounded-lg bg-surface-100 px-3 py-1.5 font-mono text-xs text-foreground hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none dark:bg-surface-900"
+					onclick={copy_pair_command}
+				>
+					<span>{pair_command}</span>
+					<span class="text-muted-foreground">{pair_command_copied ? "copied" : "copy"}</span>
+				</button>
+			{/if}
 
 			{#if show_start || presentation.retry !== undefined}
 				<div

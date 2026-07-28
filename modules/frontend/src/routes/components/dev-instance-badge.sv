@@ -16,23 +16,31 @@
 		let cancelled = false;
 
 		const Probe = async () => {
-			try {
-				const response = await fetch("/health", { cache: "no-store" });
-				if (!response.ok) return;
-				const body: unknown = await response.json();
-				const named =
-					typeof body === "object" && body !== null && "profile" in body
-						? (body as { readonly profile?: unknown }).profile
-						: undefined;
-				if (!cancelled && typeof named === "string" && named !== release_profile) {
-					profile = named;
+			/**
+			 * A page can load while its Forge is mid-restart, so one failed probe
+			 * must not hide the badge for the whole session. A short retry
+			 * ladder settles the answer; the desktop shell serves the renderer
+			 * from `artisan://app` where this never resolves, and a permanently
+			 * missing badge is the correct outcome there.
+			 */
+			for (let attempt = 0; attempt < 5 && !cancelled; attempt += 1) {
+				try {
+					const response = await fetch("/health", { cache: "no-store" });
+					if (response.ok) {
+						const body: unknown = await response.json();
+						const named =
+							typeof body === "object" && body !== null && "profile" in body
+								? (body as { readonly profile?: unknown }).profile
+								: undefined;
+						if (!cancelled && typeof named === "string" && named !== release_profile) {
+							profile = named;
+						}
+						return;
+					}
+				} catch {
+					/** Unreachable this attempt; try again shortly. */
 				}
-			} catch {
-				/**
-				 * The desktop shell serves the renderer from `artisan://app`, where
-				 * this probe does not resolve. A missing badge is the correct
-				 * outcome there, so the failure stays silent.
-				 */
+				await new Promise((settle) => setTimeout(settle, 2_000));
 			}
 		};
 
