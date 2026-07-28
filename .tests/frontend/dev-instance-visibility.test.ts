@@ -66,12 +66,14 @@ describe("development instance visibility", () => {
 		expect(vite_config).toContain("ws: true");
 		expect(vite_config).toContain('"/health": {');
 		/**
-		 * The origin constant must feed only proxy targets. A `define` or an
-		 * import of the constant would leak the development endpoint into the
-		 * production bundle.
+		 * The origin constant must feed only dev-server surfaces: the two proxy
+		 * targets and the development pairing middleware, all of which exist
+		 * exclusively inside `vite dev`. A `define` or an import of the constant
+		 * would leak the development endpoint into the production bundle.
 		 */
-		expect(vite_config.match(/ForgeDevelopmentOrigin/g)).toHaveLength(3);
+		expect(vite_config.match(/ForgeDevelopmentOrigin/g)).toHaveLength(4);
 		expect(vite_config.split("target: ForgeDevelopmentOrigin")).toHaveLength(3);
+		expect(vite_config).toContain("`${ForgeDevelopmentOrigin}/api/pair/request`");
 		expect(vite_config).not.toContain("define:");
 	});
 

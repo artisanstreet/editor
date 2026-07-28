@@ -20,6 +20,7 @@
 		ObserveForgeConnection,
 	} from "$lib/forge/gate";
 	import { ForgeHttpUrl } from "$lib/runtime/forge-endpoint";
+	import { AttemptDevelopmentSelfPair } from "$lib/runtime/pairing";
 	import ArtisanSidebar from "./components/artisan-sidebar.sv";
 	import DevInstanceBadge from "./components/dev-instance-badge.sv";
 	import ForgeConnectionOverlay from "./components/forge-connection-overlay.sv";
@@ -102,6 +103,14 @@
 				),
 			).pipe(Effect.catch(() => Effect.succeed(false)));
 			if (!reachable || forge_gate.state.phase !== "exhausted") continue;
+			/**
+			 * A reachable Forge with an exhausted connection is the unpaired
+			 * symptom in browser development; self-pair over the dev server's
+			 * same-origin endpoint before retrying so no terminal is needed.
+			 */
+			if (import.meta.env.DEV) {
+				yield* AttemptDevelopmentSelfPair;
+			}
 			attempted = true;
 			yield* client.RetryConnection;
 		}

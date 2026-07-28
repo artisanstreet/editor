@@ -1,8 +1,9 @@
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import adapter from "@sveltejs/adapter-static";
 import tailwindcss from "@tailwindcss/vite";
-import { defineConfig } from "vite";
+import { defineConfig, type ViteDevServer } from "vite";
 import { effect } from "svelte-effect-runtime";
 import { href } from "svelte-auto-href";
 import { ts } from "svelte-global-typescript";
@@ -24,6 +25,78 @@ const ForgeDevelopmentOrigin = process.env.ARTISAN_FORGE_DEV_ORIGIN ?? "http://1
 
 /** Fixed so `ae open --origin` can deliver the pairing fragment deterministically. */
 const FrontendDevelopmentPort = Number(process.env.ARTISAN_FRONTEND_DEV_PORT ?? "4849");
+
+/**
+ * The development pairing secret. The dev runner passes it explicitly; when
+ * Vite is started by hand the same secret is read from the development home
+ * the CLI and runner share. Missing both means self-pairing simply reports
+ * unavailable and the manual `ae open` flow remains.
+ */
+const development_auth_token = (): string | undefined => {
+	const explicit = process.env.ARTISAN_DEV_AUTH_TOKEN;
+	if (explicit !== undefined && explicit.length >= 32) return explicit;
+	try {
+		const secrets = JSON.parse(
+			readFileSync(WorkspaceSource("../../.dist/dev/forge-home/secrets.json"), "utf8"),
+		) as { readonly auth_token?: unknown };
+		return typeof secrets.auth_token === "string" && secrets.auth_token.length >= 32
+			? secrets.auth_token
+			: undefined;
+	} catch {
+		return undefined;
+	}
+};
+
+/**
+ * Development-only same-origin pairing: the dev server (a trusted local
+ * process) mints a one-time code from the Forge with the bearer secret and
+ * hands it to the page it itself served. This middleware exists only inside
+ * `vite dev` — production bundles never carry it — and foreign pages can
+ * never read the response because CORS blocks cross-origin reads while
+ * Vite's host checks refuse rebound hostnames.
+ */
+const development_pairing = () => ({
+	configureServer(server: ViteDevServer) {
+		server.middlewares.use("/api/dev/pair-code", (request, response, next) => {
+			if (request.method !== "POST") {
+				next();
+				return;
+			}
+			void (async () => {
+				const token = development_auth_token();
+				if (token === undefined) {
+					response.writeHead(503, { "content-type": "application/json" });
+					response.end(JSON.stringify({ error: "pairing_secret_unavailable" }));
+					return;
+				}
+				const minted = await fetch(`${ForgeDevelopmentOrigin}/api/pair/request`, {
+					headers: { authorization: `Bearer ${token}` },
+					method: "POST",
+				});
+				if (!minted.ok) {
+					response.writeHead(502, { "content-type": "application/json" });
+					response.end(JSON.stringify({ error: "forge_unreachable" }));
+					return;
+				}
+				const body = (await minted.json()) as { readonly code?: unknown };
+				if (typeof body.code !== "string" || body.code.length === 0) {
+					response.writeHead(502, { "content-type": "application/json" });
+					response.end(JSON.stringify({ error: "invalid_pairing_code" }));
+					return;
+				}
+				response.writeHead(200, {
+					"cache-control": "no-store",
+					"content-type": "application/json",
+				});
+				response.end(JSON.stringify({ code: body.code }));
+			})().catch(() => {
+				response.writeHead(500, { "content-type": "application/json" });
+				response.end(JSON.stringify({ error: "pairing_failed" }));
+			});
+		});
+	},
+	name: "artisan-development-pairing",
+});
 
 export default defineConfig({
 	resolve: {
@@ -88,6 +161,7 @@ export default defineConfig({
 		strictPort: true,
 	},
 	plugins: [
+		development_pairing(),
 		compose(
 			[
 				effect(),

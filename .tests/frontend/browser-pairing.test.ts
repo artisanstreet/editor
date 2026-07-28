@@ -65,6 +65,37 @@ describe("browser pairing bootstrap", () => {
 		expect(config).toContain("target: ForgeDevelopmentOrigin");
 	});
 
+	it("self-pairs same-origin in development without any terminal round-trip", () => {
+		const config = readFileSync(
+			new URL("../../modules/frontend/vite.config.ts", import.meta.url),
+			"utf8",
+		);
+		const layout = readFileSync(
+			new URL("../../modules/frontend/src/routes/+layout.sv", import.meta.url),
+			"utf8",
+		);
+
+		/** The dev server mints codes with the bearer secret; pages only receive them. */
+		expect(config).toContain('server.middlewares.use("/api/dev/pair-code"');
+		expect(config).toContain("/api/pair/request");
+		expect(config).toContain("ARTISAN_DEV_AUTH_TOKEN");
+		expect(layout).toContain("if (import.meta.env.DEV) {");
+		expect(layout).toContain("yield* AttemptDevelopmentSelfPair;");
+	});
+
+	it("reports self-pairing as unavailable outside development", async () => {
+		const original_fetch = globalThis.fetch;
+		globalThis.fetch = (() =>
+			Promise.resolve({ ok: false } as Response)) as typeof globalThis.fetch;
+		try {
+			const { AttemptDevelopmentSelfPair } =
+				await import("../../modules/frontend/src/lib/runtime/pairing");
+			expect(await Effect.runPromise(AttemptDevelopmentSelfPair)).toBe(false);
+		} finally {
+			globalThis.fetch = original_fetch;
+		}
+	});
+
 	it("exchanges an exact fragment capability and removes it after successful pairing", async () => {
 		const requests: Array<{ readonly code: string }> = [];
 		const replacements: string[] = [];

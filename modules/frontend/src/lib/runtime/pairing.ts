@@ -120,6 +120,31 @@ const DecodePairingCode = (hash: unknown, page_protocol: string) =>
 		);
 	});
 
+const DevelopmentPairingCode = Schema.Struct({ code: PairingCode });
+
+/**
+ * Development-only self-pairing: the Vite dev server mints a one-time code
+ * from the Forge on behalf of the page it served, and the ordinary pairing
+ * exchange consumes it — all strictly same-origin. The endpoint exists only
+ * inside `vite dev`, so outside development this resolves to `false` without
+ * side effects. Callers gate on `import.meta.env.DEV` so production bundles
+ * drop the path entirely.
+ */
+export const AttemptDevelopmentSelfPair: Effect.Effect<boolean> = Effect.tryPromise(async () => {
+	const minted = await fetch("/api/dev/pair-code", {
+		cache: "no-store",
+		method: "POST",
+	});
+	if (!minted.ok) return false;
+	const decoded = Schema.decodeUnknownSync(DevelopmentPairingCode)(await minted.json());
+	const paired = await fetch("/api/pair", {
+		body: JSON.stringify({ code: decoded.code }),
+		headers: { "content-type": "application/json" },
+		method: "POST",
+	});
+	return paired.ok;
+}).pipe(Effect.catch(() => Effect.succeed(false)));
+
 /**
  * Exchanges exactly one URL-fragment pairing capability for a same-origin session
  * before the browser transport is constructed. The capability never escapes this

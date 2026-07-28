@@ -4,6 +4,20 @@ import { defineConfig } from "vite";
 
 const forge_root = resolve(import.meta.dirname, ".dist", "forge");
 
+/**
+ * A staged file can be held open by a running development Forge on Windows.
+ * The stage keeps the previous copy instead of failing the whole rebuild —
+ * only a copy that leaves nothing staged at all is a real error.
+ */
+const stage = (from: string, to: string) => {
+	try {
+		cpSync(from, to, { dereference: true, recursive: true });
+	} catch (error) {
+		if (!existsSync(to)) throw error;
+		console.warn(`[forge-build] kept the staged copy of ${to} (source copy blocked)`);
+	}
+};
+
 const stage_forge_runtime = () => ({
 	closeBundle: () => {
 		const native_runtime_root = resolve(forge_root, "native-runtime");
@@ -31,10 +45,7 @@ const stage_forge_runtime = () => ({
 		const node_pty_destination = resolve(native_runtime_root, "node-pty");
 		mkdirSync(node_pty_destination, { recursive: true });
 		for (const path of ["LICENSE", "package.json", "lib", "prebuilds/win32-x64"]) {
-			cpSync(resolve(node_pty_source, path), resolve(node_pty_destination, path), {
-				dereference: true,
-				recursive: true,
-			});
+			stage(resolve(node_pty_source, path), resolve(node_pty_destination, path));
 		}
 		const koffi_destination = resolve(native_runtime_root, "koffi");
 		mkdirSync(resolve(koffi_destination, "src", "koffi"), { recursive: true });
@@ -44,9 +55,7 @@ const stage_forge_runtime = () => ({
 			"src/koffi/index.cjs",
 			"src/koffi/src/static.cjs",
 		]) {
-			cpSync(resolve(koffi_source, path), resolve(koffi_destination, path), {
-				dereference: true,
-			});
+			stage(resolve(koffi_source, path), resolve(koffi_destination, path));
 		}
 		const koffi_native_destination = resolve(
 			native_runtime_root,
@@ -55,27 +64,19 @@ const stage_forge_runtime = () => ({
 		);
 		mkdirSync(koffi_native_destination, { recursive: true });
 		for (const path of ["index.js", "package.json", "win32_x64"]) {
-			cpSync(resolve(koffi_native_source, path), resolve(koffi_native_destination, path), {
-				dereference: true,
-				recursive: true,
-			});
+			stage(resolve(koffi_native_source, path), resolve(koffi_native_destination, path));
 		}
-		cpSync(frontend_source, resolve(forge_root, "frontend"), {
-			dereference: true,
-			recursive: true,
-		});
-		cpSync(migrations_source, resolve(forge_root, "migrations"), {
-			dereference: true,
-			recursive: true,
-		});
-		cpSync(process.execPath, resolve(forge_root, "Artisan Forge.exe"));
+		stage(frontend_source, resolve(forge_root, "frontend"));
+		stage(migrations_source, resolve(forge_root, "migrations"));
 		/**
 		 * Engine subprocess brokers require ordinary Node semantics. Keep this
 		 * runtime distinct from the branded daemon executable so headless and
 		 * packaged launches use the same explicit process boundary.
 		 */
-		cpSync(process.execPath, resolve(forge_root, "node.exe"));
-		cpSync(
+		for (const executable of ["Artisan Forge.exe", "node.exe"]) {
+			stage(process.execPath, resolve(forge_root, executable));
+		}
+		stage(
 			resolve(import.meta.dirname, ".scripts", "package", "update-user-path.ps1"),
 			resolve(forge_root, "update-user-path.ps1"),
 		);
@@ -102,6 +103,12 @@ export default defineConfig({
 	},
 	ssr: { noExternal: true },
 	build: {
+		/**
+		 * Watch builds must not empty the staged runtime: the running dev Forge
+		 * executes from it, and the native runtime may be locked on Windows.
+		 * Clean release builds keep the default empty-then-stage behavior.
+		 */
+		emptyOutDir: process.env.ARTISAN_FORGE_WATCH !== "1",
 		outDir: ".dist/forge",
 		rollupOptions: {
 			input: {
