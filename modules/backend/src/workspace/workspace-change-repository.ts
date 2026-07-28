@@ -20,6 +20,7 @@ import {
 import { Database } from "../persistence/database";
 import { JournalNotifier } from "../persistence/journal-notifier";
 import { RetrySqliteWrite } from "../persistence/sqlite-write-retry";
+import { IsThreadLive } from "../persistence/thread-liveness";
 import {
 	AgentRuns,
 	Assignments,
@@ -360,29 +361,16 @@ export const WorkspaceChangeRepositoryLive = Layer.effect(
 			);
 
 		const EnsureLiveThread = (transaction: typeof database.client, thread_id: string) =>
-			Effect.gen(function* () {
-				const [thread] = yield* transaction
-					.select({ thread_id: Threads.thread_id })
-					.from(Threads)
-					.where(eq(Threads.thread_id, thread_id))
-					.limit(1);
-				const [claim] = yield* transaction
-					.select({ thread_id: ThreadErasureClaims.thread_id })
-					.from(ThreadErasureClaims)
-					.where(eq(ThreadErasureClaims.thread_id, thread_id))
-					.limit(1);
-				const [tombstone] = yield* transaction
-					.select({ thread_id: ThreadTombstones.thread_id })
-					.from(ThreadTombstones)
-					.where(eq(ThreadTombstones.thread_id, thread_id))
-					.limit(1);
-
-				if (!thread || claim || tombstone) {
-					return yield* new WorkspaceChangeTransitionError({
-						message: `Thread ${thread_id} is unavailable for workspace changes`,
-					});
-				}
-			});
+			IsThreadLive(transaction, thread_id).pipe(
+				Effect.filterOrFail(
+					(live) => live,
+					() =>
+						new WorkspaceChangeTransitionError({
+							message: `Thread ${thread_id} is unavailable for workspace changes`,
+						}),
+				),
+				Effect.asVoid,
+			);
 
 		const ReadTransitionChange = (
 			transaction: typeof database.client,

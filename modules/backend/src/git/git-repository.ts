@@ -44,6 +44,7 @@ import {
 	Threads,
 } from "../persistence/schema";
 import { RetrySqliteWrite } from "../persistence/sqlite-write-retry";
+import { IsThreadLive } from "../persistence/thread-liveness";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { RecordThreadActivity } from "../threads/internal/thread-activity";
 
@@ -883,24 +884,13 @@ export const GitRepositoryLive = Layer.effect(
 			});
 
 		const EnsureLiveThread = (transaction: typeof database.client, thread_id: string) =>
-			Effect.gen(function* () {
-				const [thread] = yield* transaction
-					.select({ thread_id: Threads.thread_id })
-					.from(Threads)
-					.where(eq(Threads.thread_id, thread_id))
-					.limit(1);
-				const [erasure] = yield* transaction
-					.select({ thread_id: ThreadErasureClaims.thread_id })
-					.from(ThreadErasureClaims)
-					.where(eq(ThreadErasureClaims.thread_id, thread_id))
-					.limit(1);
-
-				if (thread === undefined || erasure !== undefined) {
-					return yield* Effect.fail(
-						new GitRepositoryConflict({ reason: "thread_unavailable" }),
-					);
-				}
-			});
+			IsThreadLive(transaction, thread_id).pipe(
+				Effect.filterOrFail(
+					(live) => live,
+					() => new GitRepositoryConflict({ reason: "thread_unavailable" }),
+				),
+				Effect.asVoid,
+			);
 
 		const ReadWorkspaceTransaction = (
 			transaction: typeof database.client,
