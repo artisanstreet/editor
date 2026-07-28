@@ -78,7 +78,16 @@ describe("Barekey docs shell reset", () => {
 		expect(composer).toContain("PlayerStopFilled");
 		expect(composer).toContain("card-glass rounded-full text-white/25");
 		expect(composer).not.toContain("bg-white/25");
-		expect(composer).toContain("motion-reduce:transition-none");
+		/**
+		 * The send/stop icons cross-fade through the shared t-icon-swap
+		 * transition, so the reduced-motion guard is the stylesheet media query
+		 * that zeroes it rather than a per-icon utility class.
+		 */
+		expect(composer).toContain('data-state={run_active ? "b" : "a"}');
+		expect(composer).toContain("@media (prefers-reduced-motion: reduce)");
+		expect(composer).toMatch(
+			/@media \(prefers-reduced-motion: reduce\) \{[\s\S]*\.t-icon-swap\) \.t-icon,/,
+		);
 		expect(composer).toContain("yield* Cancel");
 		expect(thread_route).toContain('work?.status === "running"');
 		expect(thread_route).toContain('work?.status === "waiting"');

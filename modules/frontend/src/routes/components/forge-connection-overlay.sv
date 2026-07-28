@@ -24,6 +24,67 @@
 
 	const presentation = $derived(PresentForgeGate(model));
 	const is_visible = $derived(model.state.phase !== "ready");
+
+	interface ReachableForge {
+		readonly endpoint: string;
+		readonly profile: string;
+		readonly self: boolean;
+	}
+
+	/**
+	 * `artisan://forge/start` is an OS-global protocol handler, so it can only
+	 * ever boot the installed default Forge. Offering it while this page is
+	 * served by a differently named instance would boot the wrong process, so
+	 * the button is gated on this origin's own profile and the gate instead
+	 * lists the other announced instances to switch to.
+	 */
+	let origin_profile = $state<string | undefined>(undefined);
+	let other_instances = $state<ReadonlyArray<ReachableForge>>([]);
+	const show_start = $derived(
+		presentation.show_start && (origin_profile === undefined || origin_profile === "default"),
+	);
+
+	$effect(() => {
+		if (!is_visible || presentation.tone !== "error") return;
+		let cancelled = false;
+
+		const Discover = async () => {
+			try {
+				const health = await fetch("/health", { cache: "no-store" });
+				if (health.ok) {
+					const body: unknown = await health.json();
+					const named =
+						typeof body === "object" && body !== null && "profile" in body
+							? (body as { readonly profile?: unknown }).profile
+							: undefined;
+					if (!cancelled && typeof named === "string") origin_profile = named;
+				}
+				const listing = await fetch("/api/instances", { cache: "no-store" });
+				if (!listing.ok) return;
+				const decoded: unknown = await listing.json();
+				const instances =
+					typeof decoded === "object" && decoded !== null && "instances" in decoded
+						? (decoded as { readonly instances?: unknown }).instances
+						: undefined;
+				if (cancelled || !Array.isArray(instances)) return;
+				other_instances = instances.filter(
+					(candidate): candidate is ReachableForge =>
+						typeof candidate === "object" &&
+						candidate !== null &&
+						typeof (candidate as ReachableForge).endpoint === "string" &&
+						typeof (candidate as ReachableForge).profile === "string" &&
+						(candidate as ReachableForge).self === false,
+				);
+			} catch {
+				/** An unreachable origin cannot enumerate siblings; the gate keeps its plain remedies. */
+			}
+		};
+
+		void Discover();
+		return () => {
+			cancelled = true;
+		};
+	});
 	let previous_focus: HTMLElement | null = null;
 	let recovery_actions = $state<HTMLDivElement | null>(null);
 	let status_element = $state<HTMLElement | null>(null);
@@ -93,12 +154,12 @@
 				{presentation.description}
 			</p>
 
-			{#if presentation.show_start || presentation.retry !== undefined}
+			{#if show_start || presentation.retry !== undefined}
 				<div
 					bind:this={recovery_actions}
 					class="mt-5 flex flex-wrap justify-center gap-2"
 				>
-					{#if presentation.show_start}
+					{#if show_start}
 						<Button href={ForgeStartLaunchUrl} variant="destructive">
 							<PlayerPlay aria-hidden="true" />
 							Start Forge
@@ -115,6 +176,27 @@
 							Retry loading
 						</Button>
 					{/if}
+				</div>
+			{/if}
+
+			{#if presentation.tone === "error" && other_instances.length > 0}
+				<div class="mt-6 w-full max-w-sm text-left">
+					<p class="text-xs font-medium tracking-wide text-muted-foreground uppercase">
+						Other Forge instances on this machine
+					</p>
+					<ul class="mt-2 flex flex-col gap-1.5">
+						{#each other_instances as instance (instance.endpoint)}
+							<li>
+								<a
+									href={instance.endpoint}
+									class="flex items-baseline justify-between gap-3 rounded-xl bg-surface-100 px-3 py-2 text-sm text-foreground hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none dark:bg-surface-900"
+								>
+									<span class="font-medium">{instance.profile}</span>
+									<span class="truncate text-xs text-muted-foreground">{instance.endpoint}</span>
+								</a>
+							</li>
+						{/each}
+					</ul>
 				</div>
 			{/if}
 		</section>

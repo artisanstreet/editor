@@ -7,6 +7,7 @@
 	import { SnowflakeId } from "@artisan/protocol";
 	import type { ThreadSessionPolicy } from "@artisan/protocol";
 	import { Button } from "$lib/components/ui/button";
+	import send_gradient from "$lib/assets/composer/send-gradient.svg";
 	import { BannerService } from "$lib/banner/service";
 	import {
 		MakeSubmitGate,
@@ -414,24 +415,17 @@
 				<Button
 					variant="ghost"
 					size="icon"
-					class="card-glass rounded-full text-white/25 hover:bg-white/5 hover:text-white/30 disabled:text-white/25"
+					class="composer-send card-glass rounded-full text-white/25 hover:text-white/25 disabled:text-white/25"
+					style={`--composer-send-image: url("${send_gradient}")`}
 					aria-label={run_active ? "Stop current run" : "Send message"}
 					disabled={run_active
 						? disabled || cancelling || onabort === undefined
 						: disabled || submitting || (draft.trim().length === 0 && attachments.size === 0) || onsubmit === undefined}
 					onclick={yield* ActivatePrimaryAction}
 				>
-					<span class="relative size-4" aria-hidden="true">
-						<ArrowUp
-							class={`absolute inset-0 size-4 text-white/25 transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none ${
-								run_active ? "rotate-90 opacity-0" : "rotate-0 opacity-100"
-							}`}
-						/>
-						<PlayerStopFilled
-							class={`absolute inset-0 size-4 text-white/25 transition-[opacity,transform] duration-200 ease-out motion-reduce:transition-none ${
-								run_active ? "rotate-0 opacity-100" : "-rotate-90 opacity-0"
-							}`}
-						/>
+					<span class="t-icon-swap size-4" data-state={run_active ? "b" : "a"} aria-hidden="true">
+						<span class="t-icon" data-icon="a"><ArrowUp class="size-4" /></span>
+						<span class="t-icon" data-icon="b"><PlayerStopFilled class="size-4" /></span>
 					</span>
 				</Button>
 			</div>
@@ -452,7 +446,51 @@
 	:global(:root) {
 		--resize-dur: 300ms;
 		--resize-ease: cubic-bezier(0.22, 1, 0.36, 1);
+		--icon-swap-dur: var(--duration-fast);
+		--icon-swap-blur: 2px;
+		--icon-swap-start-scale: 0.25;
+		--icon-swap-ease: var(--ease-in-out);
 	}
+
+	:global(.t-icon-swap) {
+		position: relative;
+		display: inline-grid;
+	}
+	:global(.t-icon-swap) .t-icon {
+		grid-area: 1 / 1;
+		transition:
+			opacity var(--icon-swap-dur) var(--icon-swap-ease),
+			filter var(--icon-swap-dur) var(--icon-swap-ease),
+			transform var(--icon-swap-dur) var(--icon-swap-ease);
+		will-change: opacity, filter, transform;
+	}
+	:global(.t-icon-swap[data-state="a"]) .t-icon[data-icon="a"],
+	:global(.t-icon-swap[data-state="b"]) .t-icon[data-icon="b"] {
+		opacity: 1;
+		filter: blur(0);
+		transform: scale(1);
+	}
+	:global(.t-icon-swap[data-state="a"]) .t-icon[data-icon="b"],
+	:global(.t-icon-swap[data-state="b"]) .t-icon[data-icon="a"] {
+		opacity: 0;
+		filter: blur(var(--icon-swap-blur));
+		transform: scale(var(--icon-swap-start-scale));
+	}
+
+	/**
+	 * The gradient is an opaque background image, so a hover background-color
+	 * would paint underneath it and never show. Hover and active read as
+	 * brightness on the artwork itself instead.
+	 */
+	:global(.composer-send) {
+		background-image: var(--composer-send-image);
+		background-size: cover;
+		background-position: center;
+		transition: filter var(--duration-quick) var(--ease-in-out);
+	}
+	:global(.composer-send:hover:not(:disabled)) { filter: brightness(1.12); }
+	:global(.composer-send:active:not(:disabled)) { filter: brightness(0.94); }
+	:global(.composer-send:disabled) { filter: saturate(0.55) brightness(0.75); }
 
 	:global(.t-resize) {
 		transition:
@@ -485,6 +523,8 @@
 	.placeholder-reveal:global(.is-shown) .placeholder-character { opacity: 1; transform: translateY(0); }
 	@media (prefers-reduced-motion: reduce) {
 		:global(.t-resize),
+		:global(.t-icon-swap) .t-icon,
+		:global(.composer-send),
 		.composer-attachment-tray,
 		.composer-attachment-tray-content,
 		.composer-attachment-preview,

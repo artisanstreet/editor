@@ -20,6 +20,7 @@
 		ObserveForgeConnection,
 	} from "$lib/forge/gate";
 	import ArtisanSidebar from "./components/artisan-sidebar.sv";
+	import DevInstanceBadge from "./components/dev-instance-badge.sv";
 	import ForgeConnectionOverlay from "./components/forge-connection-overlay.sv";
 	import ForgeShellPreview from "./components/forge-shell-preview.sv";
 	import SectionedPanel from "./components/sectioned-panel.sv";
@@ -85,6 +86,7 @@
 
 <ModeWatcher defaultMode="dark" />
 <Toaster position="top-center" />
+<DevInstanceBadge />
 
 {#snippet sidebar()}
 	<ArtisanSidebar />
