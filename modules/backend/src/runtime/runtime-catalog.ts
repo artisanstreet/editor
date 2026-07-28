@@ -82,20 +82,26 @@ export const RuntimeCatalogLive = Layer.effect(
 					});
 				}
 
-				const permission_mode =
+				/**
+				 * The provider-neutral policy resolves to a neutral permission
+				 * option id; every harness names its options with the same ids
+				 * while `native_value` stays provider vocabulary. Matching on
+				 * the native value here would reject every non-Codex engine.
+				 */
+				const permission_option_id =
 					policy.sandbox_mode === "read_only"
-						? "read-only"
+						? "restricted"
 						: policy.permission_mode === "never"
-							? "workspace-write-no-prompts"
-							: "workspace-write";
+							? "autonomous"
+							: "supervised";
 				if (
 					!harness.permissions.options.some(
-						(option) => option.native_value === permission_mode,
+						(option) => option.id === permission_option_id,
 					)
 				) {
 					return yield* new RuntimeCatalogPolicyError({
 						field: "permission",
-						message: `Permission mode ${permission_mode} is unavailable for ${policy.engine_id}.`,
+						message: `Permission ${permission_option_id} is unavailable for ${policy.engine_id}.`,
 					});
 				}
 

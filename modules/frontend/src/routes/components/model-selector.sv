@@ -98,7 +98,8 @@
 	let thinking_level = $state<ThinkingLevel>("medium");
 	let speed_option_id = $state("standard");
 	let active_engine = $state<HarnessId>(models[0]?.engine ?? "codex");
-	let permission_mode = $state("workspace-write");
+	/** Tracks the harness-neutral permission option id, never a native value. */
+	let permission_mode = $state("supervised");
 	let selected_model_id = $state(runtime_catalog.default_model_id ?? models[0]?.id ?? "");
 	let engine_surface = $state<HTMLElement | null>(null);
 	let engine_indicator_animated = $state(false);
@@ -115,10 +116,10 @@
 		level === "light" ? "low" : level;
 	const PermissionModeFromPolicy = (value: ThreadSessionPolicy) =>
 		value.sandbox_mode === "read_only"
-			? "read-only"
+			? "restricted"
 			: value.permission_mode === "never"
-				? "workspace-write-no-prompts"
-				: "workspace-write";
+				? "autonomous"
+				: "supervised";
 	const PatchPolicy = (patch: Partial<ThreadSessionPolicy>) => {
 		if (disabled || policy === undefined || onpolicychange === undefined) return;
 		onpolicychange({ ...policy, ...patch });
@@ -157,7 +158,7 @@
 	);
 	const selected_permission_options = $derived(selected_harness?.permissions.options ?? []);
 	const selected_permission = $derived(
-		selected_permission_options.find((option) => option.native_value === permission_mode) ??
+		selected_permission_options.find((option) => option.id === permission_mode) ??
 			selected_permission_options[0],
 	);
 	const composer_controls: ReadonlyArray<ComposerControl> = ["model"];
@@ -210,11 +211,11 @@
 	};
 
 	const select_permission = (option: PermissionOption) => {
-		permission_mode = option.native_value;
+		permission_mode = option.id;
 		PatchPolicy(
-			option.native_value === "read-only"
+			option.id === "restricted"
 				? { permission_mode: "never", sandbox_mode: "read_only" }
-				: option.native_value === "workspace-write-no-prompts"
+				: option.id === "autonomous"
 					? { permission_mode: "never", sandbox_mode: "workspace_write" }
 					: { permission_mode: "on_request", sandbox_mode: "workspace_write" },
 		);
@@ -268,15 +269,8 @@
 
 	$effect(() => {
 		const options = selected_permission_options;
-		if (
-			options.length > 0 &&
-			!options.some((option) => option.native_value === permission_mode)
-		) {
-			permission_mode =
-				options.find((option) => option.id === selected_harness?.permissions.default)
-					?.native_value ??
-				options[0]?.native_value ??
-				"";
+		if (options.length > 0 && !options.some((option) => option.id === permission_mode)) {
+			permission_mode = selected_harness?.permissions.default ?? options[0]?.id ?? "";
 		}
 	});
 </script>
@@ -533,7 +527,7 @@
 											<span class="text-sm text-foreground">{option.label}</span>
 											<span class="text-sm text-muted-foreground">{option.description}</span>
 										</span>
-										{#if option.native_value === permission_mode}
+										{#if option.id === permission_mode}
 											<Check class="size-4 shrink-0 self-center text-muted-foreground" />
 										{/if}
 									</button>
