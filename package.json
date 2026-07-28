@@ -11,6 +11,7 @@
 		"check:native": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings",
 		"desktop": "pnpm run build:desktop && electron .dist/desktop/main.js",
 		"dev:forge": "powershell -NoProfile -ExecutionPolicy Bypass -File .scripts/dev/start-browser-forge.ps1",
+	"dev:open": "powershell -NoProfile -ExecutionPolicy Bypass -File .scripts/dev/open-browser-forge.ps1",
 		"package:desktop": "pnpm run build:desktop && electron-builder --config desktop-builder.yml --win dir --publish never",
 		"package:distribution:windows": "pnpm run build:native && pnpm run package:desktop && node .scripts/package/build-distribution-release-entry.ts",
 		"verify:desktop-package": "powershell -NoProfile -ExecutionPolicy Bypass -File .tests/deep/desktop/verify-packaged-desktop.ps1",
