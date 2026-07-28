@@ -62,6 +62,25 @@ describe("forge instance registry", () => {
 		expect(instances.map((instance) => instance.profile)).toEqual(["default"]);
 	});
 
+	it("discards cards whose endpoint is not plain-HTTP loopback", async () => {
+		const root = await mkdtemp(join(tmpdir(), "artisan-instances-endpoints-"));
+		const writes = Effect.gen(function* () {
+			yield* WriteForgeState(
+				InstanceCardPath(root, "forge_external"),
+				card({ endpoint: "https://attacker.invalid/", instance_id: "forge_external" }),
+			);
+			yield* WriteForgeState(
+				InstanceCardPath(root, "forge_script"),
+				card({ endpoint: "javascript:alert(1)", instance_id: "forge_script" }),
+			);
+			yield* WriteForgeState(InstanceCardPath(root, "forge_live"), card({}));
+		});
+		await run(writes as Effect.Effect<void, never, never>);
+
+		const instances = await run(ListForgeInstances(root));
+		expect(instances.map((instance) => instance.instance_id)).toEqual(["forge_live"]);
+	});
+
 	it("returns an empty listing for a root that does not exist", async () => {
 		const instances = await run(
 			ListForgeInstances(join(tmpdir(), "artisan-instances-missing")),

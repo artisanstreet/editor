@@ -59,6 +59,25 @@ const origin_allowed = (request: IncomingMessage) => {
 	}
 };
 
+const loopback_host_names = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/**
+ * Defeats DNS rebinding: a page on an attacker hostname that resolves to
+ * loopback reaches this listener with its own Host header and, for same-origin
+ * GETs, no Origin header at all — passing the origin check. The listener only
+ * ever binds loopback, so any other Host name is an impostor and control
+ * surfaces refuse it before responding.
+ */
+const host_allowed = (request: IncomingMessage) => {
+	const host = request.headers.host;
+	if (host === undefined) return false;
+	try {
+		return loopback_host_names.has(new URL(`http://${host}`).hostname.toLowerCase());
+	} catch {
+		return false;
+	}
+};
+
 const ReadJson = (request: IncomingMessage) =>
 	Effect.callback<unknown, Error>((resume) => {
 		const chunks: Buffer[] = [];
@@ -285,6 +304,15 @@ export function start_forge_http(
 		const server = createServer((request, response) => {
 			const url = new URL(request.url ?? "/", "http://artisan.invalid");
 
+			if (
+				(url.pathname === "/health" ||
+					url.pathname === "/healthz" ||
+					url.pathname.startsWith("/api/")) &&
+				!host_allowed(request)
+			) {
+				respond_json(response, 403, { error: "forbidden" });
+				return;
+			}
 			if (url.pathname === "/health" || url.pathname === "/healthz") {
 				/**
 				 * The profile name is unauthenticated on purpose: the renderer

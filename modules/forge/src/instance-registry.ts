@@ -42,6 +42,23 @@ const alive = (pid: number) => {
 	}
 };
 
+const loopback_hosts = new Set(["127.0.0.1", "localhost", "[::1]"]);
+
+/**
+ * Cards are plain files any same-user process can write, and listings end up
+ * rendered as navigation targets. Only plain-HTTP loopback endpoints are
+ * meaningful for a local Forge, so anything else — external hosts, other
+ * schemes, javascript: URLs — is discarded at read time rather than trusted.
+ */
+const loopback_endpoint = (endpoint: string) => {
+	try {
+		const url = new URL(endpoint);
+		return url.protocol === "http:" && loopback_hosts.has(url.hostname.toLowerCase());
+	} catch {
+		return false;
+	}
+};
+
 const decode_card = Schema.decodeUnknownEffect(ForgeState);
 
 const ReadCard = (path: string) =>
@@ -77,7 +94,9 @@ export const ListForgeInstances = (registry_root: string) =>
 		const cards = (yield* Effect.all([...card_reads, ...state_reads])).flat();
 		const by_instance = new Map<string, ForgeInstanceCard>();
 		for (const card of cards) {
-			if (alive(card.pid)) by_instance.set(card.instance_id, card);
+			if (alive(card.pid) && loopback_endpoint(card.endpoint)) {
+				by_instance.set(card.instance_id, card);
+			}
 		}
 		return [...by_instance.values()];
 	});

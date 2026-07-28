@@ -1,4 +1,4 @@
-import type { IncomingMessage } from "node:http";
+import http, { type IncomingMessage } from "node:http";
 import { mkdtemp, mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -116,6 +116,30 @@ describe("Forge boundary", () => {
 			headers: { origin: "https://attacker.invalid" },
 		});
 		expect(foreign_instances.status).toBe(403);
+		/**
+		 * DNS rebinding presents an attacker Host name to the loopback
+		 * listener. fetch() strips a caller-supplied Host header, so the probe
+		 * speaks raw HTTP.
+		 */
+		const rebound_status = (pathname: string) =>
+			new Promise<number>((accept, reject) => {
+				const probe = http.request(
+					{
+						headers: { host: "attacker.invalid:4849" },
+						host: host.endpoint.hostname,
+						path: pathname,
+						port: host.endpoint.port,
+					},
+					(response) => {
+						response.resume();
+						accept(response.statusCode ?? 0);
+					},
+				);
+				probe.once("error", reject);
+				probe.end();
+			});
+		expect(await rebound_status("/health")).toBe(403);
+		expect(await rebound_status("/api/instances")).toBe(403);
 		expect((await fetch(new URL("/api/unknown", host.endpoint))).status).toBe(404);
 		expect((await fetch(new URL("/_app/unknown", host.endpoint))).status).toBe(404);
 		expect((await fetch(new URL("/_app/does-not-exist.js", host.endpoint))).status).toBe(404);
