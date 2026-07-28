@@ -10,6 +10,8 @@
 		"build:native": "cargo build --workspace --release",
 		"check:native": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings",
 		"desktop": "pnpm run build:desktop && electron .dist/desktop/main.js",
+		"dev:ae": "powershell -NoProfile -ExecutionPolicy Bypass -File .scripts/dev/run-dev-ae.ps1",
+		"dev:ae-bootstrap": "powershell -NoProfile -ExecutionPolicy Bypass -File .scripts/dev/run-dev-ae-bootstrap.ps1",
 		"dev:forge": "powershell -NoProfile -ExecutionPolicy Bypass -File .scripts/dev/start-browser-forge.ps1",
 		"dev:open": "powershell -NoProfile -ExecutionPolicy Bypass -File .scripts/dev/open-browser-forge.ps1",
 		"package:desktop": "pnpm run build:desktop && electron-builder --config desktop-builder.yml --win dir --publish never",

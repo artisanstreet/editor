@@ -56,7 +56,7 @@ struct Arguments {
     component: Vec<Component>,
 
     /// Per-user installation root.
-    #[arg(long, global = true)]
+    #[arg(long, env = "ARTISAN_INSTALL_ROOT", global = true)]
     install_root: Option<PathBuf>,
 
     /// Do not invoke permanent ae setup/doctor/status after activation.
@@ -105,6 +105,8 @@ async fn run() -> Result<()> {
         .install_root
         .clone()
         .unwrap_or_else(Platform::default_install_root);
+    #[cfg(debug_assertions)]
+    platform::forbid_default_install_root(&root)?;
 
     if let Some(operation) = arguments.operation.as_ref() {
         match operation {

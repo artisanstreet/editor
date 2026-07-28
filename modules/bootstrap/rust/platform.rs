@@ -47,6 +47,44 @@ impl Platform {
     }
 }
 
+/// Debug bootstrap builds are development tools. They must never operate on
+/// the real per-user installation root, so every operation aborts here unless
+/// a sandboxed root was supplied. Release builds carry no guard.
+#[cfg(debug_assertions)]
+pub fn forbid_default_install_root(root: &std::path::Path) -> Result<()> {
+    let installed = Platform::default_install_root();
+    if !is_same_or_inside(root, &installed) {
+        return Ok(());
+    }
+    Err(BootstrapError::DebugBuildGuard(format!(
+        "this debug bootstrap build refuses to operate on the installed Artisan root at {}; \
+         pass --install-root (or set ARTISAN_INSTALL_ROOT) to a sandbox such as \
+         <repo>/.dist/dev/install-root, for example via `pnpm run dev:ae-bootstrap`",
+        installed.display()
+    )))
+}
+
+#[cfg(debug_assertions)]
+fn is_same_or_inside(candidate: &std::path::Path, base: &std::path::Path) -> bool {
+    let candidate = comparable_components(candidate);
+    let base = comparable_components(base);
+    candidate.len() >= base.len() && candidate[..base.len()] == base[..]
+}
+
+#[cfg(debug_assertions)]
+fn comparable_components(path: &std::path::Path) -> Vec<String> {
+    path.components()
+        .map(|component| {
+            let text = component.as_os_str().to_string_lossy();
+            if cfg!(windows) {
+                text.to_lowercase()
+            } else {
+                text.into_owned()
+            }
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::Platform;
@@ -66,5 +104,46 @@ mod tests {
                 "glibc"
             }
         );
+    }
+
+    #[cfg(debug_assertions)]
+    #[test]
+    fn debug_builds_require_a_sandboxed_install_root() {
+        use super::forbid_default_install_root;
+        use crate::error::BootstrapError;
+
+        let installed = Platform::default_install_root();
+        assert!(matches!(
+            forbid_default_install_root(&installed),
+            Err(BootstrapError::DebugBuildGuard(message))
+                if message.contains("ARTISAN_INSTALL_ROOT")
+        ));
+        assert!(forbid_default_install_root(&installed.join("versions")).is_err());
+        assert!(
+            forbid_default_install_root(&std::env::temp_dir().join("artisan-dev-install-root"))
+                .is_ok()
+        );
+    }
+
+    #[cfg(all(debug_assertions, windows))]
+    #[test]
+    fn sandbox_detection_ignores_case_and_trailing_separators() {
+        use std::path::Path;
+
+        use super::is_same_or_inside;
+
+        let base = Path::new(r"C:\Users\Test\AppData\Local\Artisan");
+        assert!(is_same_or_inside(
+            Path::new(r"c:\users\test\appdata\local\ARTISAN\"),
+            base
+        ));
+        assert!(is_same_or_inside(
+            Path::new(r"C:\Users\Test\AppData\Local\Artisan\bin"),
+            base
+        ));
+        assert!(!is_same_or_inside(
+            Path::new(r"C:\Users\Test\AppData\Local\Artisan-dev"),
+            base
+        ));
     }
 }

@@ -488,7 +488,12 @@ mod tests {
 
     #[test]
     fn protocol_decoder_rejects_every_non_capability_url() {
-        let layout = Layout::discover().expect("layout");
+        let root = std::env::temp_dir().join("artisan-protocol-test-home");
+        let layout = Layout {
+            profiles: root.join("profiles"),
+            manifest: root.join("installation.json"),
+            root,
+        };
         for candidate in [
             "artisan://forge/start?command=calc",
             "artisan://forge/start#token",

@@ -411,6 +411,13 @@ fn schedule_stable_cli_replacement(source: &Path, destination: &Path) -> Result<
 #[cfg(windows)]
 fn integrate_path(bin: &Path) -> Result<()> {
     use winreg::{RegKey, enums::HKEY_CURRENT_USER};
+    if cfg!(debug_assertions) {
+        eprintln!(
+            "development build guard: leaving the user PATH untouched instead of registering {}",
+            bin.display()
+        );
+        return Ok(());
+    }
     let environment = RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey_with_flags(
             "Environment",
@@ -443,6 +450,13 @@ fn prepend_windows_path_entry(current: &str, candidate: &str) -> String {
 #[cfg(unix)]
 fn integrate_path(bin: &Path) -> Result<()> {
     use std::os::unix::fs::symlink;
+    if cfg!(debug_assertions) {
+        eprintln!(
+            "development build guard: leaving ~/.local/bin untouched instead of linking {}",
+            bin.display()
+        );
+        return Ok(());
+    }
     let home = std::env::var_os("HOME").ok_or(BootstrapError::MissingHome)?;
     let command_bin = PathBuf::from(home).join(".local").join("bin");
     std::fs::create_dir_all(&command_bin).map_err(io(&command_bin))?;
@@ -582,6 +596,13 @@ pub fn uninstall(root: &Path, remove_data: bool) -> Result<()> {
 #[cfg(windows)]
 fn remove_path_integration(bin: &Path) -> Result<()> {
     use winreg::{RegKey, enums::HKEY_CURRENT_USER};
+    if cfg!(debug_assertions) {
+        eprintln!(
+            "development build guard: leaving the user PATH untouched instead of removing {}",
+            bin.display()
+        );
+        return Ok(());
+    }
     let environment = RegKey::predef(HKEY_CURRENT_USER)
         .open_subkey_with_flags(
             "Environment",
@@ -605,6 +626,13 @@ fn remove_path_integration(bin: &Path) -> Result<()> {
 
 #[cfg(unix)]
 fn remove_path_integration(bin: &Path) -> Result<()> {
+    if cfg!(debug_assertions) {
+        eprintln!(
+            "development build guard: leaving ~/.local/bin untouched instead of unlinking {}",
+            bin.display()
+        );
+        return Ok(());
+    }
     let home = std::env::var_os("HOME").ok_or(BootstrapError::MissingHome)?;
     let link = PathBuf::from(home).join(".local").join("bin").join("ae");
     if link.symlink_metadata().is_ok()

@@ -14,6 +14,8 @@ pub enum CliError {
     Control(String),
     #[error("unsupported operation: {0}")]
     Unsupported(String),
+    #[error("development build guard: {0}")]
+    DebugBuildGuard(String),
     #[error("refusing unsafe filesystem operation on {0}")]
     UnsafePath(PathBuf),
     #[error("{context}: {source}")]

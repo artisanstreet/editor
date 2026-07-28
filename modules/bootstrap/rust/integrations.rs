@@ -332,6 +332,12 @@ fn write_windows_protocol_at(
 ) -> Result<()> {
     use winreg::{RegKey, enums::HKEY_CURRENT_USER};
 
+    if cfg!(debug_assertions) && registry_subkey == PROTOCOL_REGISTRY_SUBKEY {
+        eprintln!(
+            "development build guard: leaving the artisan:// registration at {registry_path} untouched"
+        );
+        return Ok(());
+    }
     let current_user = RegKey::predef(HKEY_CURRENT_USER);
     let (protocol, _) = current_user
         .create_subkey(registry_subkey)
@@ -355,6 +361,12 @@ fn delete_windows_protocol_at(registry_subkey: &str, registry_path: &str) -> Res
     use std::io::ErrorKind;
     use winreg::{RegKey, enums::HKEY_CURRENT_USER};
 
+    if cfg!(debug_assertions) && registry_subkey == PROTOCOL_REGISTRY_SUBKEY {
+        eprintln!(
+            "development build guard: leaving the artisan:// registration at {registry_path} untouched"
+        );
+        return Ok(());
+    }
     let current_user = RegKey::predef(HKEY_CURRENT_USER);
     match current_user.delete_subkey_all(registry_subkey) {
         Ok(()) => Ok(()),

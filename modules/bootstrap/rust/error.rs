@@ -57,6 +57,8 @@ pub enum BootstrapError {
     MissingBootstrap(PathBuf),
     #[error("installation state is invalid: {0}")]
     InvalidInstallation(String),
+    #[error("development build guard: {0}")]
+    DebugBuildGuard(String),
     #[error("permanent ae {command} failed with status {status}")]
     CliFailed { command: String, status: String },
     #[error("could not find current executable: {0}")]
