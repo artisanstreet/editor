@@ -20,6 +20,12 @@ export {
 } from "./control-authority";
 export { BindForgeWebSocket, ForgeOriginAllowed, ForgeSessionAllowed } from "./websocket-binding";
 export {
+	InstanceCardPath,
+	ListForgeInstances,
+	ResolveInstanceRegistryRoot,
+	type ForgeInstanceCard,
+} from "./instance-registry";
+export {
 	ForgeState,
 	ForgeStateFailure,
 	RemoveForgeState,

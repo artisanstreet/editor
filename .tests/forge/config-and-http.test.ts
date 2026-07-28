@@ -39,6 +39,18 @@ describe("Forge boundary", () => {
 
 		expect(config.listen_host).toBe("127.0.0.1");
 		expect(config.listen_port).toBe(0);
+		expect(config.profile).toBe("default");
+	});
+
+	it("carries a named profile so a renderer can tell instances apart", () => {
+		const config = decode_forge_config({
+			database_path: "C:/artisan/data.sqlite",
+			instance_id: test_instance_id,
+			migrations_path: "C:/artisan/migrations",
+			profile: "browser-dev",
+		});
+
+		expect(config.profile).toBe("browser-dev");
 	});
 
 	it("rejects a second owner for the same durable database", async () => {
@@ -82,6 +94,7 @@ describe("Forge boundary", () => {
 
 		const health = await fetch(new URL("/healthz", host.endpoint));
 		expect(await health.json()).toEqual({
+			profile: "default",
 			service: "artisan-forge",
 			status: "ready",
 			version: 1,
@@ -97,6 +110,12 @@ describe("Forge boundary", () => {
 		expect(deep_link_head.status).toBe(200);
 		expect(deep_link_head.headers.get("content-type")).toBe("text/html; charset=utf-8");
 		expect(await deep_link_head.text()).toBe("");
+		const instances = await fetch(new URL("/api/instances", host.endpoint));
+		expect(await instances.json()).toEqual({ instances: [] });
+		const foreign_instances = await fetch(new URL("/api/instances", host.endpoint), {
+			headers: { origin: "https://attacker.invalid" },
+		});
+		expect(foreign_instances.status).toBe(403);
 		expect((await fetch(new URL("/api/unknown", host.endpoint))).status).toBe(404);
 		expect((await fetch(new URL("/_app/unknown", host.endpoint))).status).toBe(404);
 		expect((await fetch(new URL("/_app/does-not-exist.js", host.endpoint))).status).toBe(404);

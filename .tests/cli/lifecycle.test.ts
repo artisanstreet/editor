@@ -121,6 +121,7 @@ describe("ae lifecycle contract", () => {
 				.toSorted(),
 		).toEqual([
 			"doctor",
+			"instances",
 			"logs",
 			"open",
 			"restart",

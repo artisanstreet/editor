@@ -1,5 +1,6 @@
 import { NodeFileSystem, NodePath } from "@effect/platform-node-shared";
-import { Effect, Exit, FileSystem, Layer, Path, Scope } from "effect";
+import { Clock, Effect, Exit, FileSystem, Layer, Path, Scope } from "effect";
+import { MakeSnowflakeIdLive } from "@artisan/protocol";
 
 import { make_desktop_backend_layer, RichLinkAssetStoreLive } from "@artisan/backend";
 import {
@@ -19,6 +20,8 @@ import { ForgeControlAuthority, make_forge_control_authority_layer } from "./con
 import type { ForgeConfig } from "./config";
 import { AcquireForgeDatabaseLease } from "./database-lease";
 import { start_forge_http } from "./http-host";
+import { InstanceCardPath } from "./instance-registry";
+import { RemoveForgeState, WriteForgeState } from "./state";
 import type { ForgeTransportBindingService } from "./transport-binding";
 import { BindForgeWebSocket } from "./websocket-binding";
 
@@ -42,6 +45,27 @@ const MakeForgeHost = (config: ForgeConfig, transport_binding: ForgeTransportBin
 		const http = yield* Effect.acquireRelease(start_forge_http(config, authority), (server) =>
 			server.Close.pipe(Effect.ignore),
 		);
+		if (config.instance_registry_root !== undefined) {
+			/**
+			 * Announcement lives with the host, not the launcher, so every start
+			 * path — detached entry, foreground CLI, embedded composition — is
+			 * discoverable. It is best-effort: a Forge that cannot write its card
+			 * still serves its own origin, it just stays invisible to the picker.
+			 */
+			const card_path = InstanceCardPath(config.instance_registry_root, config.instance_id);
+			const now = yield* Clock.currentTimeMillis;
+			yield* Effect.acquireRelease(
+				WriteForgeState(card_path, {
+					endpoint: http.endpoint.toString(),
+					instance_id: config.instance_id,
+					pid: process.pid,
+					profile: config.profile,
+					started_at: new Date(now).toISOString(),
+					version: 1,
+				}).pipe(Effect.provide(Layer.orDie(MakeSnowflakeIdLive(4))), Effect.ignore),
+				() => RemoveForgeState(card_path, config.instance_id).pipe(Effect.ignore),
+			);
+		}
 		yield* Effect.acquireRelease(
 			transport_binding.Bind({
 				authority,

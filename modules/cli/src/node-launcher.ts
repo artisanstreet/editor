@@ -5,7 +5,13 @@ import { delimiter, dirname, join } from "node:path";
 import { MakeSnowflakeIdLive } from "@artisan/protocol";
 import { Clock, Context, Effect, Layer } from "effect";
 import { ChildProcess } from "effect/unstable/process";
-import { decode_forge_config, RemoveForgeState, StartForge, WriteForgeState } from "@artisan/forge";
+import {
+	decode_forge_config,
+	RemoveForgeState,
+	ResolveInstanceRegistryRoot,
+	StartForge,
+	WriteForgeState,
+} from "@artisan/forge";
 
 import { ResolveForgeArtifact } from "./forge-adapter";
 import type { ForgeArtifact } from "./forge-adapter";
@@ -245,6 +251,9 @@ export const make_node_forge_launcher_layer = Layer.effect(
 								(cause) => new ForgeLifecycleError({ cause, code: "timeout" }),
 							),
 						);
+					const instance_registry_root =
+						process.env.ARTISAN_INSTANCE_REGISTRY_ROOT ??
+						ResolveInstanceRegistryRoot(process.env);
 					const host = yield* StartForge(
 						decode_forge_config({
 							auth_token: input.token,
@@ -253,6 +262,10 @@ export const make_node_forge_launcher_layer = Layer.effect(
 							listen_host: input.config.listen_host,
 							listen_port: input.config.listen_port,
 							migrations_path: artifact.migrations_path,
+							profile: input.profile,
+							...(instance_registry_root === undefined
+								? {}
+								: { instance_registry_root }),
 							static_frontend_root: artifact.static_frontend_root,
 						}),
 					).pipe(

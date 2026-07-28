@@ -220,6 +220,7 @@ describe("standalone Artisan Forge process", () => {
 		expect(ready.pid).toBe(child.pid);
 		const health = await fetch(new URL("/health", ready.endpoint));
 		expect(await health.json()).toEqual({
+			profile: "default",
 			service: "artisan-forge",
 			status: "ready",
 			version: 1,

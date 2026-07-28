@@ -8,6 +8,7 @@ import { Data, Effect, Exit, FiberSet, Option, Scope } from "effect";
 
 import type { ForgeControlAuthorityShape } from "./control-authority";
 import type { ForgeConfig } from "./config";
+import { ListForgeInstances } from "./instance-registry";
 
 export class ForgeHttpFailure extends Data.TaggedError("ForgeHttpFailure")<{
 	readonly cause: unknown;
@@ -285,11 +286,52 @@ export function start_forge_http(
 			const url = new URL(request.url ?? "/", "http://artisan.invalid");
 
 			if (url.pathname === "/health" || url.pathname === "/healthz") {
+				/**
+				 * The profile name is unauthenticated on purpose: the renderer
+				 * reads it before pairing so it can label a development instance,
+				 * and the listener is loopback-only. Nothing that identifies the
+				 * data root or the machine belongs in this response.
+				 */
 				respond_json(response, 200, {
+					profile: config.profile,
 					service: "artisan-forge",
 					status: "ready",
 					version: 1,
 				});
+				return;
+			}
+			if (request.method === "GET" && url.pathname === "/api/instances") {
+				void run_request(
+					Effect.gen(function* () {
+						if (!origin_allowed(request)) {
+							respond_json(response, 403, { error: "forbidden" });
+							return;
+						}
+						/**
+						 * Deliberately reachable before pairing: the connection gate
+						 * uses this listing to offer other local Forges when this one
+						 * has no session yet. It carries no secrets — endpoints and
+						 * profile names only — and the origin check keeps it away
+						 * from foreign websites.
+						 */
+						const instances =
+							config.instance_registry_root === undefined
+								? []
+								: yield* ListForgeInstances(config.instance_registry_root);
+						respond_json(
+							response,
+							200,
+							{
+								instances: instances.map((instance) => ({
+									endpoint: instance.endpoint,
+									profile: instance.profile,
+									self: instance.instance_id === config.instance_id,
+								})),
+							},
+							{ "cache-control": "no-store" },
+						);
+					}),
+				);
 				return;
 			}
 			if (request.method === "GET" && url.pathname === "/api/control/status") {

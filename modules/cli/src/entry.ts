@@ -11,6 +11,7 @@ import {
 } from "@effect/platform-node-shared";
 import { Console, Effect, Layer, Option, Stream } from "effect";
 import { Command, Flag } from "effect/unstable/cli";
+import { ListForgeInstances, ResolveInstanceRegistryRoot } from "@artisan/forge";
 
 import {
 	BrowserOpener,
@@ -137,6 +138,26 @@ export const AeCommand = Command.make("ae", {}, () =>
 				yield* Console.log(input.json ? JSON.stringify(result) : result.state);
 			}),
 		).pipe(Command.withDescription("Show Forge runtime status")),
+		Command.make("instances", { json }, (input) =>
+			Effect.gen(function* () {
+				const registry_root = ResolveInstanceRegistryRoot(process.env);
+				const instances =
+					registry_root === undefined ? [] : yield* ListForgeInstances(registry_root);
+				if (input.json) {
+					yield* Console.log(JSON.stringify({ instances }));
+					return;
+				}
+				if (instances.length === 0) {
+					yield* Console.log("No running Forge instances found");
+					return;
+				}
+				for (const instance of instances) {
+					yield* Console.log(
+						`${instance.profile}\t${instance.endpoint}\tpid ${instance.pid}`,
+					);
+				}
+			}),
+		).pipe(Command.withDescription("List every running Forge announced on this machine")),
 		Command.make("logs", { follow, lines, profile }, (input) =>
 			Effect.gen(function* () {
 				const operations = yield* ForgeOperations;

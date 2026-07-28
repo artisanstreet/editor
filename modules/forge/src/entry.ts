@@ -7,6 +7,7 @@ import { Clock, Console, Effect, Layer, Schema } from "effect";
 
 import { decode_forge_config } from "./config";
 import { StartForge } from "./forge-host";
+import { ResolveInstanceRegistryRoot } from "./instance-registry";
 import { MaintainBoundedForgeLog } from "./log-retention";
 import { RemoveForgeState, WriteForgeState } from "./state";
 
@@ -49,10 +50,15 @@ export const StartForgeFromEnvironment = Effect.gen(function* () {
 		process.env.ARTISAN_FORGE_INSTANCE_ID ?? (yield* snowflake_id.Make("forge"));
 	const database_path = yield* RequiredEnvironment("ARTISAN_DATABASE_PATH");
 	const migrations_path = yield* RequiredEnvironment("ARTISAN_MIGRATIONS_PATH");
+	const profile = process.env.ARTISAN_FORGE_PROFILE ?? "default";
+	const instance_registry_root =
+		process.env.ARTISAN_INSTANCE_REGISTRY_ROOT ?? ResolveInstanceRegistryRoot(process.env);
 	const host = yield* StartForge(
 		decode_forge_config({
 			database_path,
 			instance_id,
+			profile,
+			...(instance_registry_root === undefined ? {} : { instance_registry_root }),
 			listen_host: process.env.ARTISAN_LISTEN_HOST === "::1" ? "::1" : "127.0.0.1",
 			listen_port: process.env.ARTISAN_LISTEN_PORT
 				? Number(process.env.ARTISAN_LISTEN_PORT)
@@ -76,7 +82,6 @@ export const StartForgeFromEnvironment = Effect.gen(function* () {
 		}),
 	);
 	const state_path = process.env.ARTISAN_FORGE_STATE_PATH;
-	const profile = process.env.ARTISAN_FORGE_PROFILE ?? "default";
 	const log_path = process.env.ARTISAN_FORGE_LOG_PATH;
 	if (log_path !== undefined) {
 		yield* Effect.forkScoped(MaintainBoundedForgeLog(log_path));
