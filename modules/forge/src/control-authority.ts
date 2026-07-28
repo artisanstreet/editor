@@ -1,8 +1,9 @@
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { readFile } from "node:fs/promises";
 
-import { Clock, Context, Deferred, Effect, Layer, Option, Ref, Schema } from "effect";
+import { Clock, Context, Deferred, Effect, Layer, Option, Ref, Schema, Semaphore } from "effect";
+
+import { WriteFileAtomically } from "./atomic-file";
 
 const pair_lifetime_ms = 60_000;
 const session_lifetime_ms = 12 * 60 * 60 * 1_000;
@@ -37,28 +38,18 @@ const LoadSessions = (path: string, now: number) =>
 	);
 
 /**
- * Persists session digests through a same-directory replacement so a crash can
- * never leave partial JSON. Only SHA-256 digests reach disk: reading the store
- * cannot recover a cookie value, so durability does not widen the trust
- * boundary beyond the profile directory's own permissions.
+ * Persists session digests atomically. Only SHA-256 digests reach disk:
+ * reading the store cannot recover a cookie value, so durability does not
+ * widen the trust boundary beyond the profile directory's own permissions.
  */
 const PersistSessions = (path: string, sessions: ReadonlyMap<string, number>) =>
-	Effect.gen(function* () {
-		yield* Effect.tryPromise(() => mkdir(dirname(path), { recursive: true }));
-		const temporary = `${path}.${randomBytes(6).toString("hex")}.tmp`;
-		const encoded = JSON.stringify({
+	WriteFileAtomically(
+		path,
+		`${JSON.stringify({
 			sessions: [...sessions].map(([hash, expires_at]) => ({ expires_at, hash })),
 			version: 1,
-		});
-		yield* Effect.tryPromise(() =>
-			writeFile(temporary, `${encoded}\n`, { encoding: "utf8", mode: 0o600 }),
-		);
-		yield* Effect.tryPromise(() => rename(temporary, path)).pipe(
-			Effect.ensuring(
-				Effect.tryPromise(() => rm(temporary, { force: true })).pipe(Effect.ignore),
-			),
-		);
-	}).pipe(Effect.ignore);
+		})}\n`,
+	).pipe(Effect.ignore);
 
 export interface ForgeControlAuthorityShape {
 	readonly ConsumePair: (code: string) => Effect.Effect<Option.Option<string>>;
@@ -100,8 +91,20 @@ export const make_forge_control_authority_layer = (options: ForgeControlAuthorit
 					? new Map<string, number>()
 					: yield* LoadSessions(store_path, boot_time),
 			);
-			const Persist = (current: ReadonlyMap<string, number>) =>
-				store_path === undefined ? Effect.void : PersistSessions(store_path, current);
+			/**
+			 * Persists are serialized and always re-read the live map, so an
+			 * interleaved add and prune can never overwrite the store with a
+			 * stale snapshot missing a just-minted session.
+			 */
+			const persist_gate = yield* Semaphore.make(1);
+			const Persist =
+				store_path === undefined
+					? Effect.void
+					: persist_gate.withPermits(1)(
+							Ref.get(sessions).pipe(
+								Effect.flatMap((current) => PersistSessions(store_path, current)),
+							),
+						);
 			const RequestPair = Effect.gen(function* () {
 				const code = randomBytes(32).toString("base64url");
 				const now = yield* CurrentTime;
@@ -125,10 +128,10 @@ export const make_forge_control_authority_layer = (options: ForgeControlAuthorit
 						return Option.none();
 					}
 					const session = randomBytes(32).toString("base64url");
-					const updated = yield* Ref.updateAndGet(sessions, (existing) =>
+					yield* Ref.update(sessions, (existing) =>
 						new Map(existing).set(hash_session(session), now + session_lifetime_ms),
 					);
-					yield* Persist(updated);
+					yield* Persist;
 					return Option.some(session);
 				});
 
@@ -146,14 +149,14 @@ export const make_forge_control_authority_layer = (options: ForgeControlAuthorit
 								const allowed =
 									session !== undefined && active.has(hash_session(session));
 								return [
-									{ allowed, pruned: active.size < existing.size, active },
+									{ allowed, pruned: active.size < existing.size },
 									active,
 								] as const;
 							}),
 						),
 						Effect.flatMap((outcome) =>
 							/** Persist only when expiry pruned something, not per request. */
-							(outcome.pruned ? Persist(outcome.active) : Effect.void).pipe(
+							(outcome.pruned ? Persist : Effect.void).pipe(
 								Effect.as(outcome.allowed),
 							),
 						),

@@ -1,8 +1,9 @@
-import { lstat, mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rm } from "node:fs/promises";
 import { dirname } from "node:path";
 
-import { SnowflakeId } from "@artisan/protocol";
 import { Data, Effect, Schema } from "effect";
+
+import { WriteFileAtomically } from "./atomic-file";
 
 export const ForgeState = Schema.Struct({
 	endpoint: Schema.String,
@@ -61,26 +62,8 @@ export const WriteForgeState = (path: string, state: ForgeState) =>
 		yield* AssertSafeStateBoundary(path).pipe(
 			Effect.mapError((error) => StateFailure(path, "write", error.cause)),
 		);
-		const temporary_id = yield* (yield* SnowflakeId).Make("state");
-		const temporary = `${path}.${temporary_id}.tmp`;
-		yield* Effect.tryPromise({
-			try: () =>
-				writeFile(temporary, `${JSON.stringify(state)}\n`, {
-					encoding: "utf8",
-					mode: 0o600,
-				}),
-			catch: (cause) => StateFailure(path, "write", cause),
-		});
-		yield* Effect.tryPromise({
-			try: () => rename(temporary, path),
-			catch: (cause) => StateFailure(path, "write", cause),
-		}).pipe(
-			Effect.ensuring(
-				Effect.tryPromise({
-					try: () => rm(temporary, { force: true }),
-					catch: () => undefined,
-				}).pipe(Effect.ignore),
-			),
+		yield* WriteFileAtomically(path, `${JSON.stringify(state)}\n`).pipe(
+			Effect.mapError((cause) => StateFailure(path, "write", cause)),
 		);
 	});
 

@@ -2,7 +2,6 @@ import { dirname, join } from "node:path";
 
 import { NodeFileSystem, NodePath } from "@effect/platform-node-shared";
 import { Clock, Effect, Exit, FileSystem, Layer, Path, Scope } from "effect";
-import { MakeSnowflakeIdLive } from "@artisan/protocol";
 
 import { make_desktop_backend_layer, RichLinkAssetStoreLive } from "@artisan/backend";
 import {
@@ -64,7 +63,13 @@ const MakeForgeHost = (config: ForgeConfig, transport_binding: ForgeTransportBin
 					profile: config.profile,
 					started_at: new Date(now).toISOString(),
 					version: 1,
-				}).pipe(Effect.provide(Layer.orDie(MakeSnowflakeIdLive(4))), Effect.ignore),
+				}).pipe(
+					Effect.catch((failure) =>
+						Effect.logWarning(
+							`Forge instance card was not announced: ${String(failure.cause)}`,
+						),
+					),
+				),
 				() => RemoveForgeState(card_path, config.instance_id).pipe(Effect.ignore),
 			);
 		}
