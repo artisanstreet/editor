@@ -39,7 +39,7 @@ pub enum Commands {
     },
     /// Explicitly create or update a Forge profile.
     Setup {
-        #[arg(long, default_value = "default")]
+        #[arg(long, env = "ARTISAN_PROFILE", default_value = "default")]
         profile: String,
         #[arg(long, default_value_t = 0)]
         listen_port: u16,
@@ -55,29 +55,29 @@ pub enum Commands {
         serve_frontend: bool,
     },
     Start {
-        #[arg(long, default_value = "default")]
+        #[arg(long, env = "ARTISAN_PROFILE", default_value = "default")]
         profile: String,
         #[arg(long)]
         foreground: bool,
     },
     Stop {
-        #[arg(long, default_value = "default")]
+        #[arg(long, env = "ARTISAN_PROFILE", default_value = "default")]
         profile: String,
     },
     Restart {
-        #[arg(long, default_value = "default")]
+        #[arg(long, env = "ARTISAN_PROFILE", default_value = "default")]
         profile: String,
         #[arg(long)]
         foreground: bool,
     },
     Status {
-        #[arg(long, default_value = "default")]
+        #[arg(long, env = "ARTISAN_PROFILE", default_value = "default")]
         profile: String,
         #[arg(long)]
         json: bool,
     },
     Logs {
-        #[arg(long, default_value = "default")]
+        #[arg(long, env = "ARTISAN_PROFILE", default_value = "default")]
         profile: String,
         #[arg(long, default_value_t = 200)]
         lines: usize,
@@ -87,13 +87,13 @@ pub enum Commands {
     Doctor {
         #[arg(long)]
         fix: bool,
-        #[arg(long, default_value = "default")]
+        #[arg(long, env = "ARTISAN_PROFILE", default_value = "default")]
         profile: String,
         #[arg(long)]
         json: bool,
     },
     Open {
-        #[arg(long, default_value = "default")]
+        #[arg(long, env = "ARTISAN_PROFILE", default_value = "default")]
         profile: String,
         /// Open a paired browser at this loopback origin instead of the editor.
         #[arg(long, conflicts_with = "handoff")]
@@ -133,8 +133,10 @@ impl From<Mode> for ForgeMode {
 
 pub fn run(cli: Cli) -> Result<()> {
     let layout = Layout::discover()?;
-    match cli.command.unwrap_or(Commands::Open {
-        profile: "default".into(),
+    match cli.command.unwrap_or_else(|| Commands::Open {
+        // Plain invocation honors the same ambient profile as every explicit
+        // command, so single-profile worlds (the dev home) never name it.
+        profile: std::env::var("ARTISAN_PROFILE").unwrap_or_else(|_| "default".into()),
         origin: None,
         browser: false,
         handoff: false,
@@ -433,6 +435,15 @@ fn mint_pair_code(layout: &Layout, name: &str, state: &State) -> Result<String> 
 
 fn open(layout: &Layout, name: &str, origin: Option<&str>, flow: OpenFlow) -> Result<()> {
     let state = ready_state(layout, name)?;
+    // A home without an installation has no editor payload to launch; the
+    // paired browser against the (already running) Forge is the only
+    // renderer there, so the default flow degrades to it instead of failing.
+    let flow = if matches!(flow, OpenFlow::Editor) && !layout.manifest.is_file() {
+        eprintln!("no installation in this Artisan home; opening the paired browser instead");
+        OpenFlow::Browser
+    } else {
+        flow
+    };
     match flow {
         OpenFlow::Editor => launch_editor(layout, name),
         OpenFlow::Browser => {
