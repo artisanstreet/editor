@@ -77,10 +77,11 @@ The branch also carries 13 protocol codecs with no counterpart on `master`:
 ### Deliberately excluded — do not revive
 
 - `modules/engines/src/claude/` (`claude-engine`, `claude-jsonl`,
-  `claude-normalizer`). `master` is Codex-only by design, enforced by
-  `.tests/backend/codex-only-production.test.ts`, which fails if the tokens
-  `claude`, `anthropic`, `CLAUDE_CONFIG_DIR`, or `.claude` appear in production
-  source. Reviving the Claude engine means deliberately retiring that boundary.
+  `claude-normalizer`) — revived on `master` on 2026-07-28. The codex-only
+  boundary and its enforcement test
+  (`.tests/backend/codex-only-production.test.ts`) were deliberately retired as
+  part of that revival; the adapter now lives at `modules/engines/src/claude/`
+  under the current Engine contract and is registered in Forge alongside Codex.
 - `modules/backend/src/filesystem/native-bounded-regular-file-store.ts` and the
   `@artisan/bounded-file-store-native` package, removed by the rehabilitation
   milestone as dormant.

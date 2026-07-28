@@ -2,7 +2,13 @@ import { NodeFileSystem, NodePath } from "@effect/platform-node-shared";
 import { Effect, Exit, FileSystem, Layer, Path, Scope } from "effect";
 
 import { make_desktop_backend_layer, RichLinkAssetStoreLive } from "@artisan/backend";
-import { CodexEngine, CodexProcessFactoryLive, make_codex_engine_layer } from "@artisan/engines";
+import {
+	ClaudeEngine,
+	CodexEngine,
+	CodexProcessFactoryLive,
+	make_claude_engine_layer,
+	make_codex_engine_layer,
+} from "@artisan/engines";
 import {
 	make_backend_message_port_transport_server_layer,
 	MessagePortTransportServer,
@@ -60,13 +66,16 @@ const MakeForgeHost = (config: ForgeConfig, transport_binding: ForgeTransportBin
 	}).pipe(Effect.onError(() => Effect.logError("Artisan Forge host acquisition failed")));
 
 const MakeForgeRuntime = (config: ForgeConfig) => {
-	const engine_layer = make_codex_engine_layer().pipe(Layer.provide(CodexProcessFactoryLive));
+	const engine_layer = Layer.mergeAll(make_codex_engine_layer(), make_claude_engine_layer()).pipe(
+		Layer.provide(CodexProcessFactoryLive),
+	);
 	const backend_layer = Layer.unwrap(
 		Effect.gen(function* () {
 			const codex_engine = yield* CodexEngine;
+			const claude_engine = yield* ClaudeEngine;
 			return make_desktop_backend_layer({
 				database_path: config.database_path,
-				engines: [codex_engine],
+				engines: [codex_engine, claude_engine],
 				migrations_path: config.migrations_path,
 			});
 		}),

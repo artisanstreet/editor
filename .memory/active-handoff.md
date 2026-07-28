@@ -1,6 +1,6 @@
 # Active Branch Handoff
 
-Last updated: 2026-07-27
+Last updated: 2026-07-28
 Branch continuity only. Durable status lives in
 [`docs/status/backend-completion-matrix.md`](../docs/status/backend-completion-matrix.md).
 
@@ -29,6 +29,17 @@ Branch continuity only. Durable status lives in
 
 ## Current Work and Remaining Integration
 
+- The Claude Code engine adapter is revived at `modules/engines/src/claude/`
+  under the current Engine contract (item_id/phase, usage basis, approval
+  request shapes) and registered in Forge alongside Codex, so the runtime
+  catalog now exposes the four curated Claude models. The codex-only
+  production boundary and `.tests/backend/codex-only-production.test.ts` are
+  deliberately retired; both status docs record this. Probe uses
+  `claude --version` + `claude auth status` (JSON `loggedIn`), 15s default
+  phase timeouts (the Windows `claude.cmd` shim chain needs ~10s per phase).
+  Steer/approval/question/subagents remain honestly unsupported;
+  `Open` re-probes before every run (~20s on Windows dev) — known future
+  optimization.
 - The rehabilitation PRD now requires an Orca-inspired root README with a
   visual major-feature table and a complete, verified shipped-feature inventory.
 - The source-extension cleanup converted all 135 remaining frontend `.svelte`
@@ -99,6 +110,14 @@ Branch continuity only. Durable status lives in
 
 ## Verification Snapshot
 
+- The Claude adapter revival passed every validate constituent run directly on
+  2026-07-28: repo-wide formatting (the pre-existing completion-matrix
+  formatter mismatch is fixed), lint, root TypeScript, the production frontend
+  build, the full aggregate Vitest suite (220 files, 1,511 passed, 7 skipped),
+  native fmt/Clippy, and cargo tests. Focused Claude suites pass 38 tests plus
+  the shared lifecycle conformance contract; the opt-in non-billable
+  `ARTISAN_ENGINE_LIVE=1` probe passed against installed Claude Code 2.1.220
+  with a logged-in max subscription.
 - The source-extension migration passed frontend format/lint/build, root lint
   and TypeScript, focused fixture tests (91 passed, 1 skipped), independent
   review, and native format/Clippy. An aggregate run overlapped the concurrent
