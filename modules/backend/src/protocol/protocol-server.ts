@@ -54,6 +54,7 @@ import {
 	type SurfaceUsageAggregateQueryEnvelope,
 	type SurfaceUsageDailyQueryEnvelope,
 	OutboundControlEnvelope,
+	type OutboundEnvelope,
 	type PreNegotiationProtocolErrorEnvelope,
 	type ProtocolErrorDetail,
 	type ProtocolErrorEnvelope,
@@ -3588,59 +3589,38 @@ export function make_protocol_server_layer(
 					);
 				};
 
-				const HandleThreadReadQuery = (
-					envelope: Parameters<typeof HandleThreadQuery>[0],
-					current: ReadyState,
-				) =>
-					HandleThreadQuery(envelope).pipe(
-						Effect.matchEffect({
-							onFailure: (detail) =>
-								EnqueueError(
-									current,
-									detail.code,
-									detail.message,
-									detail.retryable,
-									envelope.message_id,
-								),
-							onSuccess: Enqueue,
-						}),
-					);
+				/**
+				 * Adapts an extracted typed RPC handler to the connection: its typed
+				 * ProtocolErrorDetail failure becomes an error envelope and its success
+				 * envelope is enqueued. One adapter serves every extracted handler.
+				 */
+				const AdaptRpcHandler =
+					<
+						Query extends { readonly message_id: string },
+						Result extends OutboundEnvelope,
+					>(
+						handler: (query: Query) => Effect.Effect<Result, ProtocolErrorDetail>,
+					) =>
+					(envelope: Query, current: ReadyState) =>
+						handler(envelope).pipe(
+							Effect.matchEffect({
+								onFailure: (detail) =>
+									EnqueueError(
+										current,
+										detail.code,
+										detail.message,
+										detail.retryable,
+										envelope.message_id,
+									),
+								onSuccess: Enqueue,
+							}),
+						);
 
-				const HandleWorkspaceInspectionReadQuery = (
-					envelope: Parameters<typeof HandleWorkspaceInspectionQuery>[0],
-					current: ReadyState,
-				) =>
-					HandleWorkspaceInspectionQuery(envelope).pipe(
-						Effect.matchEffect({
-							onFailure: (detail) =>
-								EnqueueError(
-									current,
-									detail.code,
-									detail.message,
-									detail.retryable,
-									envelope.message_id,
-								),
-							onSuccess: Enqueue,
-						}),
-					);
-
-				const HandleMarketplaceReadQuery = (
-					envelope: Parameters<typeof HandleMarketplaceQuery>[0],
-					current: ReadyState,
-				) =>
-					HandleMarketplaceQuery(envelope).pipe(
-						Effect.matchEffect({
-							onFailure: (detail) =>
-								EnqueueError(
-									current,
-									detail.code,
-									detail.message,
-									detail.retryable,
-									envelope.message_id,
-								),
-							onSuccess: Enqueue,
-						}),
-					);
+				const HandleThreadReadQuery = AdaptRpcHandler(HandleThreadQuery);
+				const HandleWorkspaceInspectionReadQuery = AdaptRpcHandler(
+					HandleWorkspaceInspectionQuery,
+				);
+				const HandleMarketplaceReadQuery = AdaptRpcHandler(HandleMarketplaceQuery);
 
 				const HandleReadyEnvelope = (
 					envelope: Exclude<InboundControlEnvelope, HelloEnvelope>,

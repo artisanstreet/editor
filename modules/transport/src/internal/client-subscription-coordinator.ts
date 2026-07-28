@@ -486,6 +486,12 @@ export const make_client_subscription_coordinator = (
 				yield* send_current(unsubscribe).pipe(Effect.ignore);
 			});
 
+		/**
+		 * Queue is invariant in its element type, so the union of per-kind
+		 * queues cannot be addressed directly. Failing and ending touch only
+		 * the error and done channels — never the element — so narrowing the
+		 * element to `never` is the safe direction of the cast.
+		 */
 		const fail_projection = (subscription: ProjectionSubscription, error: ArtisanClientError) =>
 			Queue.fail(
 				subscription.queue as unknown as Queue.Queue<
@@ -839,93 +845,71 @@ export const make_client_subscription_coordinator = (
 				);
 			});
 
-		const subscribe_thread_list = Effect.gen(function* () {
-			const trace = yield* make_trace;
-			const subscription_id = yield* make_id("thread_list_subscription");
-			const queue = yield* Effect.acquireRelease(
-				Queue.dropping<ThreadListUpdate, ArtisanClientError | Cause.Done<void>>(
-					subscription_capacity,
-				),
-				Queue.shutdown,
-			);
-			const started = yield* Deferred.make<void, ArtisanClientError>();
-			const envelope: SubscribeEnvelope = {
-				...trace,
-				kind: "subscribe",
-				payload: { type: "thread.list" },
-				subscription_id,
-			};
-			const subscription: ThreadListSubscription = {
-				_tag: "thread.list",
-				envelope,
-				expected_sequence: -1,
-				queue,
-				started,
-				stream_id: Option.none(),
-			};
-
-			yield* start_subscription(subscription);
-
-			return Stream.fromQueue(queue);
-		});
-		const subscribe_projects = Effect.gen(function* () {
-			const trace = yield* make_trace;
-			const subscription_id = yield* make_id("project_list_subscription");
-			const queue = yield* Effect.acquireRelease(
-				Queue.dropping<ProjectCatalogUpdate, ArtisanClientError | Cause.Done<void>>(
-					subscription_capacity,
-				),
-				Queue.shutdown,
-			);
-			const started = yield* Deferred.make<void, ArtisanClientError>();
-			const subscription: ProjectCatalogSubscription = {
-				_tag: "project.list",
-				envelope: {
-					...trace,
-					kind: "subscribe",
-					payload: { type: "project.list" },
-					subscription_id,
-				},
-				expected_sequence: -1,
-				queue,
-				started,
-				stream_id: Option.none(),
-			};
-			yield* start_subscription(subscription);
-			return Stream.fromQueue(queue);
-		});
-
-		const subscribe_orchestration_graph = (group_id: string) =>
+		/**
+		 * One factory owns every projection subscription lifecycle: trace, id,
+		 * bounded queue, start registration, and stream exposure. Each kind supplies
+		 * only its typed identity through the builder, whose annotation ties the
+		 * queue element type to the subscription tag — the pairing the previous
+		 * hand-written copies re-stated six times and the old generic asserted with
+		 * a cast.
+		 */
+		const subscribe_projection = <Update, S extends ProjectionSubscription>(
+			id_prefix: string,
+			payload: SubscribeEnvelope["payload"],
+			build: (parts: {
+				readonly envelope: SubscribeEnvelope;
+				readonly expected_sequence: number;
+				readonly queue: Queue.Queue<Update, ArtisanClientError | Cause.Done<void>>;
+				readonly started: Deferred.Deferred<void, ArtisanClientError>;
+				readonly stream_id: Option.Option<string>;
+			}) => S,
+		): Effect.Effect<
+			Stream.Stream<Update, ArtisanClientError>,
+			ArtisanClientError,
+			Scope.Scope
+		> =>
 			Effect.gen(function* () {
 				const trace = yield* make_trace;
-				const subscription_id = yield* make_id("orchestration_graph_subscription");
+				const subscription_id = yield* make_id(id_prefix);
 				const queue = yield* Effect.acquireRelease(
-					Queue.dropping<OrchestrationGraphUpdate, ArtisanClientError | Cause.Done<void>>(
+					Queue.dropping<Update, ArtisanClientError | Cause.Done<void>>(
 						subscription_capacity,
 					),
 					Queue.shutdown,
 				);
 				const started = yield* Deferred.make<void, ArtisanClientError>();
-				const envelope: SubscribeEnvelope = {
-					...trace,
-					kind: "subscribe",
-					payload: { group_id, type: "orchestration.graph" },
-					subscription_id,
-				};
-				const subscription: OrchestrationGraphSubscription = {
-					_tag: "orchestration.graph",
-					envelope,
-					expected_sequence: -1,
-					queue,
-					started,
-					stream_id: Option.none(),
-				};
-
-				yield* start_subscription(subscription);
-
+				yield* start_subscription(
+					build({
+						envelope: { ...trace, kind: "subscribe", payload, subscription_id },
+						expected_sequence: -1,
+						queue,
+						started,
+						stream_id: Option.none(),
+					}),
+				);
 				return Stream.fromQueue(queue);
 			});
 
+		const subscribe_thread_list = subscribe_projection<
+			ThreadListUpdate,
+			ThreadListSubscription
+		>("thread_list_subscription", { type: "thread.list" }, (parts) => ({
+			_tag: "thread.list",
+			...parts,
+		}));
+		const subscribe_projects = subscribe_projection<
+			ProjectCatalogUpdate,
+			ProjectCatalogSubscription
+		>("project_list_subscription", { type: "project.list" }, (parts) => ({
+			_tag: "project.list",
+			...parts,
+		}));
+		const subscribe_orchestration_graph = (group_id: string) =>
+			subscribe_projection<OrchestrationGraphUpdate, OrchestrationGraphSubscription>(
+				"orchestration_graph_subscription",
+				{ group_id, type: "orchestration.graph" },
+				(parts) => ({ _tag: "orchestration.graph", ...parts }),
+			);
 		const reset_connection = Effect.gen(function* () {
 			const current = yield* Ref.get(state);
 			const starts = yield* Effect.forEach([...current.subscriptions.entries()], ([id]) =>
@@ -956,125 +940,23 @@ export const make_client_subscription_coordinator = (
 		});
 
 		const subscribe_thread_transcript = (thread_id: string) =>
-			Effect.gen(function* () {
-				const trace = yield* make_trace;
-				const subscription_id = yield* make_id("thread_transcript_subscription");
-				const queue = yield* Effect.acquireRelease(
-					Queue.dropping<ThreadTranscriptUpdate, ArtisanClientError | Cause.Done<void>>(
-						subscription_capacity,
-					),
-					Queue.shutdown,
-				);
-				const started = yield* Deferred.make<void, ArtisanClientError>();
-				const subscription: ThreadTranscriptSubscription = {
-					_tag: "thread.transcript",
-					envelope: {
-						...trace,
-						kind: "subscribe",
-						payload: { type: "thread.transcript", thread_id },
-						subscription_id,
-					},
-					expected_sequence: -1,
-					queue,
-					started,
-					stream_id: Option.none(),
-				};
-				yield* start_subscription(subscription);
-				return Stream.fromQueue(queue);
-			});
-
+			subscribe_projection<ThreadTranscriptUpdate, ThreadTranscriptSubscription>(
+				"thread_transcript_subscription",
+				{ type: "thread.transcript", thread_id },
+				(parts) => ({ _tag: "thread.transcript", ...parts }),
+			);
 		const subscribe_conversation = (thread_id: string) =>
-			Effect.gen(function* () {
-				const trace = yield* make_trace;
-				const subscription_id = yield* make_id("conversation_subscription");
-				const queue = yield* Effect.acquireRelease(
-					Queue.dropping<ConversationUpdate, ArtisanClientError | Cause.Done<void>>(
-						subscription_capacity,
-					),
-					Queue.shutdown,
-				);
-				const started = yield* Deferred.make<void, ArtisanClientError>();
-				const subscription: ConversationSubscription = {
-					_tag: "conversation",
-					envelope: {
-						...trace,
-						kind: "subscribe",
-						payload: { type: "conversation", thread_id },
-						subscription_id,
-					},
-					expected_sequence: -1,
-					queue,
-					started,
-					stream_id: Option.none(),
-				};
-				yield* start_subscription(subscription);
-				return Stream.fromQueue(queue);
-			});
+			subscribe_projection<ConversationUpdate, ConversationSubscription>(
+				"conversation_subscription",
+				{ type: "conversation", thread_id },
+				(parts) => ({ _tag: "conversation", ...parts }),
+			);
 		const subscribe_orchestration_groups = (thread_id: string, include_terminal: boolean) =>
-			Effect.gen(function* () {
-				const trace = yield* make_trace;
-				const subscription_id = yield* make_id("orchestration_group_list_subscription");
-				const queue = yield* Effect.acquireRelease(
-					Queue.dropping<
-						OrchestrationGroupListUpdate,
-						ArtisanClientError | Cause.Done<void>
-					>(subscription_capacity),
-					Queue.shutdown,
-				);
-				const started = yield* Deferred.make<void, ArtisanClientError>();
-				const subscription: OrchestrationGroupListSubscription = {
-					_tag: "orchestration.group.list",
-					envelope: {
-						...trace,
-						kind: "subscribe",
-						payload: { type: "orchestration.group.list", thread_id, include_terminal },
-						subscription_id,
-					},
-					expected_sequence: -1,
-					queue,
-					started,
-					stream_id: Option.none(),
-				};
-				yield* start_subscription(subscription);
-				return Stream.fromQueue(queue);
-			});
-		const subscribe_snapshot = <
-			Update,
-			Tag extends
-				| "thread.session"
-				| "surface.list"
-				| "surface.usage.aggregate"
-				| "workspace.conflict.list",
-		>(
-			tag: Tag,
-			payload: SubscribeEnvelope["payload"],
-		): Effect.Effect<
-			Stream.Stream<Update, ArtisanClientError>,
-			ArtisanClientError,
-			Scope.Scope
-		> =>
-			Effect.gen(function* () {
-				const trace = yield* make_trace;
-				const subscription_id = yield* make_id(`${tag}_subscription`);
-				const queue = yield* Effect.acquireRelease(
-					Queue.dropping<Update, ArtisanClientError | Cause.Done<void>>(
-						subscription_capacity,
-					),
-					Queue.shutdown,
-				);
-				const started = yield* Deferred.make<void, ArtisanClientError>();
-				const subscription = {
-					_tag: tag,
-					envelope: { ...trace, kind: "subscribe" as const, payload, subscription_id },
-					expected_sequence: -1,
-					queue,
-					started,
-					stream_id: Option.none(),
-				} as unknown as ProjectionSubscription;
-				yield* start_subscription(subscription);
-				return Stream.fromQueue(queue);
-			});
-
+			subscribe_projection<OrchestrationGroupListUpdate, OrchestrationGroupListSubscription>(
+				"orchestration_group_list_subscription",
+				{ type: "orchestration.group.list", thread_id, include_terminal },
+				(parts) => ({ _tag: "orchestration.group.list", ...parts }),
+			);
 		const retry = (send: SendCurrent = send_current) =>
 			Ref.modify(
 				state,
@@ -1209,24 +1091,34 @@ export const make_client_subscription_coordinator = (
 			SubscribeThreadTranscript: subscribe_thread_transcript,
 			SubscribeConversation: subscribe_conversation,
 			SubscribeThreadSession: (thread_id) =>
-				subscribe_snapshot<ThreadSessionUpdate, "thread.session">("thread.session", {
-					type: "thread.session",
-					thread_id,
-				}),
+				subscribe_projection<ThreadSessionUpdate, ThreadSessionSubscription>(
+					"thread.session_subscription",
+					{ type: "thread.session", thread_id },
+					(parts) => ({ _tag: "thread.session", ...parts }),
+				),
 			SubscribeSurfaceItems: (query) =>
-				subscribe_snapshot<SurfaceListUpdate, "surface.list">("surface.list", {
-					type: "surface.list",
-					query,
-				}),
+				subscribe_projection<SurfaceListUpdate, SurfaceListSubscription>(
+					"surface.list_subscription",
+					{ type: "surface.list", query },
+					(parts) => ({ _tag: "surface.list", ...parts }),
+				),
 			SubscribeSurfaceUsageAggregate: (query) =>
-				subscribe_snapshot<SurfaceUsageAggregateUpdate, "surface.usage.aggregate">(
-					"surface.usage.aggregate",
+				subscribe_projection<
+					SurfaceUsageAggregateUpdate,
+					SurfaceUsageAggregateSubscription
+				>(
+					"surface.usage.aggregate_subscription",
 					{ type: "surface.usage.aggregate", query },
+					(parts) => ({ _tag: "surface.usage.aggregate", ...parts }),
 				),
 			SubscribeWorkspaceConflicts: (thread_id) =>
-				subscribe_snapshot<WorkspaceConflictListUpdate, "workspace.conflict.list">(
-					"workspace.conflict.list",
+				subscribe_projection<
+					WorkspaceConflictListUpdate,
+					WorkspaceConflictListSubscription
+				>(
+					"workspace.conflict.list_subscription",
 					{ type: "workspace.conflict.list", thread_id },
+					(parts) => ({ _tag: "workspace.conflict.list", ...parts }),
 				),
 		} satisfies ClientSubscriptionCoordinator;
 	});
