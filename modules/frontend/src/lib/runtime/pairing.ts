@@ -2,6 +2,8 @@ import { Context, Data, Effect, Layer, Schema } from "effect";
 import * as HttpBody from "effect/unstable/http/HttpBody";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 
+import { AdoptForgeEndpoint, ForgeHttpUrl } from "./forge-endpoint";
+
 const PairingHash = Schema.String;
 
 const PairingCode = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256));
@@ -15,6 +17,7 @@ export class BrowserPairingFailure extends Data.TaggedError("BrowserPairingFailu
 export interface BrowserPairingLocation {
 	readonly hash: string;
 	readonly pathname: string;
+	readonly protocol: string;
 	readonly search: string;
 }
 
@@ -32,7 +35,12 @@ export const BrowserPairingExchangeLive = Layer.effect(
 	Effect.gen(function* () {
 		const client = yield* HttpClient.HttpClient;
 		const Pair = (request: typeof PairingRequest.Type) =>
-			client.post("/api/pair", { body: HttpBody.jsonUnsafe(request) }).pipe(
+			/**
+			 * The URL is resolved per call: a same-origin page exchanges at its
+			 * own `/api/pair`, while the app-scheme renderer targets the adopted
+			 * loopback Forge endpoint delivered in the launch fragment.
+			 */
+			client.post(ForgeHttpUrl("/api/pair"), { body: HttpBody.jsonUnsafe(request) }).pipe(
 				Effect.map((response) => response.status >= 200 && response.status < 300),
 				Effect.mapError(PairingFailure),
 			);
@@ -57,6 +65,7 @@ export const BrowserNavigationLive = Layer.sync(BrowserNavigation, () => {
 	const Location = Effect.sync(() => ({
 		hash: browser.location.hash,
 		pathname: browser.location.pathname,
+		protocol: browser.location.protocol,
 		search: browser.location.search,
 	}));
 	const ReplaceUrl = (url: string) =>
@@ -68,11 +77,23 @@ export const BrowserNavigationLive = Layer.sync(BrowserNavigation, () => {
 	return BrowserNavigation.of({ Location, ReplaceUrl });
 });
 
-const pair_hash = /^#pair=([^&=]+)$/;
+/**
+ * Exactly two launch grammars exist: the browser flow's `#pair=<code>` and the
+ * installed editor's `#pair=<code>&forge=<endpoint>`. Anything else is treated
+ * as absent so an untrusted fragment can never smuggle extra parameters into
+ * the exchange.
+ */
+const pair_hash = /^#pair=([^&=]+)(?:&forge=([^&=]+))?$/;
 
 const PairingFailure = () => new BrowserPairingFailure();
 
-const DecodePairingCode = (hash: unknown) =>
+const DecodeFragmentComponent = (encoded: string) =>
+	Effect.try({
+		catch: PairingFailure,
+		try: () => decodeURIComponent(encoded),
+	});
+
+const DecodePairingCode = (hash: unknown, page_protocol: string) =>
 	Effect.gen(function* () {
 		const decoded_hash = yield* Schema.decodeUnknownEffect(PairingHash)(hash).pipe(
 			Effect.mapError(PairingFailure),
@@ -82,10 +103,17 @@ const DecodePairingCode = (hash: unknown) =>
 
 		const encoded_code = matched[1];
 		if (encoded_code === undefined) return undefined;
-		const code = yield* Effect.try({
-			catch: PairingFailure,
-			try: () => decodeURIComponent(encoded_code),
-		});
+		if (matched[2] !== undefined) {
+			/**
+			 * A Forge endpoint travels only in the installed editor's app-scheme
+			 * launch. `AdoptForgeEndpoint` refuses HTTP(S) pages, so a crafted
+			 * link to a Forge-served page cannot redirect this client — and its
+			 * host-scoped session cookie — to a sibling loopback port.
+			 */
+			const endpoint = yield* DecodeFragmentComponent(matched[2]);
+			if (!AdoptForgeEndpoint(endpoint, page_protocol)) return undefined;
+		}
+		const code = yield* DecodeFragmentComponent(encoded_code);
 
 		return yield* Schema.decodeUnknownEffect(PairingCode)(code).pipe(
 			Effect.mapError(PairingFailure),
@@ -105,7 +133,7 @@ export const BootstrapBrowserPairing: Effect.Effect<
 	const navigation = yield* BrowserNavigation;
 	const exchange = yield* BrowserPairingExchange;
 	const location = yield* navigation.Location;
-	const code = yield* DecodePairingCode(location.hash);
+	const code = yield* DecodePairingCode(location.hash, location.protocol);
 	if (code === undefined) return;
 
 	const request = yield* Schema.decodeUnknownEffect(PairingRequest)({ code }).pipe(

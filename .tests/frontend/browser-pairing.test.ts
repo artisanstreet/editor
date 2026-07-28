@@ -9,9 +9,10 @@ import {
 	BrowserPairingExchange,
 } from "../../modules/frontend/src/lib/runtime/pairing";
 
-const location = (hash: string) => ({
+const location = (hash: string, protocol = "http:") => ({
 	hash,
 	pathname: "/threads/thread_1",
+	protocol,
 	search: "?view=full",
 });
 
@@ -20,6 +21,7 @@ const RunPairing = (
 	paired: boolean,
 	requests: Array<{ readonly code: string }>,
 	replacements: string[],
+	protocol = "http:",
 ) =>
 	BootstrapBrowserPairing.pipe(
 		Effect.provide(
@@ -27,7 +29,7 @@ const RunPairing = (
 				Layer.succeed(
 					BrowserNavigation,
 					BrowserNavigation.of({
-						Location: Effect.succeed(location(hash)),
+						Location: Effect.succeed(location(hash, protocol)),
 						ReplaceUrl: (url) =>
 							Effect.sync(() => {
 								replacements.push(url);
@@ -90,6 +92,46 @@ describe("browser pairing bootstrap", () => {
 
 		await Effect.runPromise(RunPairing("#pair=secret&next=untrusted", true, requests, []));
 
+		expect(requests).toEqual([]);
+	});
+
+	it("accepts the editor's forge endpoint fragment only on a non-HTTP(S) page", async () => {
+		const app_requests: Array<{ readonly code: string }> = [];
+		const app_replacements: string[] = [];
+		await Effect.runPromise(
+			RunPairing(
+				"#pair=editor%20code&forge=http%3A%2F%2F127.0.0.1%3A4949",
+				true,
+				app_requests,
+				app_replacements,
+				"artisan:",
+			),
+		);
+		expect(app_requests).toEqual([{ code: "editor code" }]);
+		expect(app_replacements).toEqual(["/threads/thread_1?view=full"]);
+
+		/**
+		 * A crafted link to a Forge-served HTTP page must not be able to point
+		 * the client — and its host-scoped loopback cookies — at a sibling port.
+		 */
+		const web_requests: Array<{ readonly code: string }> = [];
+		await Effect.runPromise(
+			RunPairing("#pair=secret&forge=http%3A%2F%2F127.0.0.1%3A4949", true, web_requests, []),
+		);
+		expect(web_requests).toEqual([]);
+	});
+
+	it("rejects a non-loopback forge endpoint even on the app scheme", async () => {
+		const requests: Array<{ readonly code: string }> = [];
+		await Effect.runPromise(
+			RunPairing(
+				"#pair=secret&forge=http%3A%2F%2Fattacker.example%3A80",
+				true,
+				requests,
+				[],
+				"artisan:",
+			),
+		);
 		expect(requests).toEqual([]);
 	});
 

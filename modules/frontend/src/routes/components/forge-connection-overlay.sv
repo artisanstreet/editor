@@ -11,6 +11,7 @@
 		PresentForgeGate,
 		type ForgeGateModel,
 	} from "$lib/forge/gate";
+	import { ForgeHttpUrl } from "$lib/runtime/forge-endpoint";
 
 	let {
 		model,
@@ -81,7 +82,7 @@
 			 */
 			for (let attempt = 0; attempt < 5 && !cancelled; attempt += 1) {
 				try {
-					const health = await fetch("/health", { cache: "no-store" });
+					const health = await fetch(ForgeHttpUrl("/health"), { cache: "no-store" });
 					if (health.ok) {
 						const body: unknown = await health.json();
 						const named =
@@ -99,7 +100,7 @@
 				await new Promise((settle) => setTimeout(settle, 1_500));
 			}
 			try {
-				const listing = await fetch("/api/instances", { cache: "no-store" });
+				const listing = await fetch(ForgeHttpUrl("/api/instances"), { cache: "no-store" });
 				if (!listing.ok) return;
 				const decoded: unknown = await listing.json();
 				const instances =

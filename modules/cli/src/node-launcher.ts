@@ -37,6 +37,7 @@ export const ForgeChildEnvironment = (
 			readonly data_root: string;
 			readonly listen_host: "127.0.0.1" | "::1";
 			readonly listen_port: number;
+			readonly serve_frontend?: boolean | undefined;
 		};
 		readonly instance_id: string;
 		readonly profile: string;
@@ -50,7 +51,14 @@ export const ForgeChildEnvironment = (
 	ARTISAN_AUTH_TOKEN: input.token,
 	ARTISAN_DATABASE_PATH: join(input.config.data_root, "artisan.sqlite"),
 	ARTISAN_MIGRATIONS_PATH: artifact.migrations_path,
-	ARTISAN_STATIC_FRONTEND_ROOT: artifact.static_frontend_root,
+	/**
+	 * Static web hosting is a per-profile development capability. Installed
+	 * profiles keep the variable absent, so their Forge serves only health and
+	 * control/WS surfaces while SPA routes 404.
+	 */
+	...(input.config.serve_frontend === true
+		? { ARTISAN_STATIC_FRONTEND_ROOT: artifact.static_frontend_root }
+		: {}),
 	ARTISAN_NODE_EXECUTABLE: artifact.node_executable_path,
 	ARTISAN_NATIVE_RUNTIME: artifact.native_runtime_path,
 	CODEX_SQLITE_HOME: join(input.config.data_root, "codex-sqlite"),
@@ -137,6 +145,7 @@ export const make_node_forge_launcher_layer = Layer.effect(
 					readonly data_root: string;
 					readonly listen_host: "127.0.0.1" | "::1";
 					readonly listen_port: number;
+					readonly serve_frontend?: boolean | undefined;
 				};
 				readonly profile: string;
 				readonly token: string;
@@ -157,7 +166,9 @@ export const make_node_forge_launcher_layer = Layer.effect(
 						artifact.executable_path,
 						artifact.host_entry_path,
 						artifact.migrations_path,
-						artifact.static_frontend_root,
+						...(input.config.serve_frontend === true
+							? [artifact.static_frontend_root]
+							: []),
 						artifact.native_runtime_path,
 						artifact.node_executable_path,
 						artifact.windows_process_host_path,
@@ -237,6 +248,7 @@ export const make_node_forge_launcher_layer = Layer.effect(
 				readonly data_root: string;
 				readonly listen_host: "127.0.0.1" | "::1";
 				readonly listen_port: number;
+				readonly serve_frontend?: boolean | undefined;
 			};
 			readonly instance_id: string;
 			readonly profile: string;
@@ -266,7 +278,9 @@ export const make_node_forge_launcher_layer = Layer.effect(
 							...(instance_registry_root === undefined
 								? {}
 								: { instance_registry_root }),
-							static_frontend_root: artifact.static_frontend_root,
+							...(input.config.serve_frontend === true
+								? { static_frontend_root: artifact.static_frontend_root }
+								: {}),
 						}),
 					).pipe(
 						Effect.mapError(

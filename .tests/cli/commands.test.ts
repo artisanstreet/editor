@@ -33,6 +33,7 @@ const MakeRuntime = (home: string) => {
 		ForgeLifecycle.of({
 			Doctor: () => Effect.succeed({ healthy: false, state: "missing" as const }),
 			Open: () => Effect.die("not used"),
+			PairHandoff: () => Effect.die("not used"),
 			Restart: () => Effect.void,
 			Start: () => Effect.void,
 			Status: () => Effect.succeed({ state: "missing" as const }),

@@ -49,6 +49,12 @@ export const ForgeProfileConfig = Schema.Struct({
 	listen_host: Schema.Literals(["127.0.0.1", "::1"]),
 	listen_port: Schema.Int.check(Schema.isBetween({ minimum: 0, maximum: 65_535 })),
 	mode: ForgeMode,
+	/**
+	 * Static web hosting is a development-profile capability. Absent or false,
+	 * the launched Forge exposes only health and control/WS surfaces; installed
+	 * default profiles never enable it and render through the Electron editor.
+	 */
+	serve_frontend: Schema.optional(Schema.Boolean),
 	version: Schema.Literal(1),
 });
 export type ForgeProfileConfig = typeof ForgeProfileConfig.Type;

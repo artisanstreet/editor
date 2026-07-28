@@ -40,7 +40,7 @@ describe("desktop packaging configuration", () => {
 		});
 	});
 
-	it("packages only the native protocol launcher for managed distribution", () => {
+	it("packages a sandboxed renderer host without any privileged bridge", () => {
 		const config = readFileSync(new URL("desktop-builder.yml", root), "utf8");
 		const package_manifest = JSON.parse(
 			readFileSync(new URL("package.json", root), "utf8"),
@@ -51,6 +51,7 @@ describe("desktop packaging configuration", () => {
 		expect(config).toContain("output: .dist/electron-release");
 		expect(config).toContain("app: .dist/desktop");
 		expect(config).toContain("- main.js");
+		expect(config).toContain("- frontend/**");
 		expect(config).not.toContain("preload.cjs");
 		expect(config).not.toContain("asarUnpack:");
 		expect(config).not.toContain("extraResources:");
@@ -64,12 +65,20 @@ describe("desktop packaging configuration", () => {
 		expect(package_manifest.scripts?.["build:desktop"]).not.toContain("preload");
 		expect(vite_config).not.toContain("node-pty");
 		expect(vite_config).not.toContain("koffi");
+		/** The staged renderer copy gets the loopback CSP variant; the browser copy stays same-origin. */
+		expect(vite_config).toContain("connect-src 'self' http://127.0.0.1:*");
 		expect(main).toContain("requestSingleInstanceLock");
 		expect(main).not.toContain("setAsDefaultProtocolClient");
-		expect(main).toContain('RunAe(paths.ae_command_path, "open")');
-		expect(main).toContain('RunAe(paths.ae_command_path, "start")');
+		/** The window is a pure renderer host: sandboxed, isolated, and bridge-free. */
+		expect(main).toContain("BrowserWindow");
+		expect(main).toContain("contextIsolation: true");
+		expect(main).toContain("nodeIntegration: false");
+		expect(main).toContain("sandbox: true");
+		expect(main).not.toContain("preload:");
+		expect(main).not.toContain("ipcMain");
+		/** Pairing stays `ae`-owned: the editor only runs the hidden one-time handoff. */
+		expect(main).toContain('"open", "--handoff"');
 		expect(main).not.toContain("ARTISAN_AUTH_TOKEN");
 		expect(main).not.toContain("ARTISAN_DATABASE_PATH");
-		expect(main).not.toContain("BrowserWindow");
 	});
 });

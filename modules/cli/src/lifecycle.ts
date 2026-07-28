@@ -68,6 +68,17 @@ export class ForgeLifecycle extends Context.Service<
 			profile: string,
 			origin?: string,
 		) => Effect.Effect<string, ForgeLifecycleError | ForgeProfileError>;
+		/**
+		 * Starts the profile's Forge when needed and mints one one-time pairing
+		 * capability for a trusted local caller such as the installed editor.
+		 * The code is single-use and short-lived; nothing durable is returned.
+		 */
+		readonly PairHandoff: (
+			profile: string,
+		) => Effect.Effect<
+			{ readonly endpoint: string; readonly pair_code: string },
+			ForgeLifecycleError | ForgeProfileError
+		>;
 		readonly Restart: (
 			profile: string,
 			foreground?: boolean,
@@ -201,6 +212,22 @@ export const make_forge_lifecycle_layer = Layer.effect(
 				}),
 			);
 
+		const PairHandoff = (profile: string) =>
+			Effect.gen(function* () {
+				yield* Start(profile);
+				const state = yield* store.ReadState(profile);
+				if (!state || state.profile !== profile)
+					return yield* Effect.fail(new ForgeLifecycleError({ code: "not_running" }));
+				const secret = yield* store.LoadSecrets(profile);
+				const healthy = yield* control
+					.Health(state.endpoint, state.instance_id, secret.auth_token)
+					.pipe(Effect.catch(() => Effect.succeed(false)));
+				if (!healthy)
+					return yield* Effect.fail(new ForgeLifecycleError({ code: "not_running" }));
+				const pair_code = yield* control.Pair(state.endpoint, secret.auth_token);
+				return { endpoint: state.endpoint, pair_code };
+			});
+
 		return ForgeLifecycle.of({
 			Doctor: (profile) =>
 				Status(profile).pipe(
@@ -208,21 +235,14 @@ export const make_forge_lifecycle_layer = Layer.effect(
 				),
 			Open: (profile, origin) =>
 				Effect.gen(function* () {
-					yield* Start(profile);
-					const state = yield* store.ReadState(profile);
-					if (!state || state.profile !== profile)
-						return yield* Effect.fail(new ForgeLifecycleError({ code: "not_running" }));
-					const secret = yield* store.LoadSecrets(profile);
-					const healthy = yield* control
-						.Health(state.endpoint, state.instance_id, secret.auth_token)
-						.pipe(Effect.catch(() => Effect.succeed(false)));
-					if (!healthy)
-						return yield* Effect.fail(new ForgeLifecycleError({ code: "not_running" }));
-					const code = yield* control.Pair(state.endpoint, secret.auth_token);
+					const handoff = yield* PairHandoff(profile);
 					const browser_origin =
-						origin === undefined ? state.endpoint : yield* DecodeBrowserOrigin(origin);
-					return `${browser_origin.replace(/\/$/, "")}/#pair=${encodeURIComponent(code)}`;
+						origin === undefined
+							? handoff.endpoint
+							: yield* DecodeBrowserOrigin(origin);
+					return `${browser_origin.replace(/\/$/, "")}/#pair=${encodeURIComponent(handoff.pair_code)}`;
 				}),
+			PairHandoff,
 			Restart: (profile, foreground) =>
 				Effect.andThen(Stop(profile), Start(profile, foreground)),
 			Start,

@@ -47,25 +47,7 @@ pub fn start(
     if host_entry.is_file() {
         command.arg(&host_entry);
     }
-    command
-        .env("ARTISAN_AUTH_TOKEN", &secrets.auth_token)
-        .env(
-            "ARTISAN_DATABASE_PATH",
-            profile.data_root.join("artisan.sqlite"),
-        )
-        .env("ARTISAN_MIGRATIONS_PATH", forge_root.join("migrations"))
-        .env("ARTISAN_STATIC_FRONTEND_ROOT", forge_root.join("frontend"))
-        .env("ARTISAN_NODE_EXECUTABLE", forge_root.join(node_name()))
-        .env(
-            "ARTISAN_WINDOWS_PROCESS_HOST",
-            forge_root.join("windows-process-host.js"),
-        )
-        .env("CODEX_SQLITE_HOME", profile.data_root.join("codex-sqlite"))
-        .env("ARTISAN_FORGE_PROFILE", name)
-        .env("ARTISAN_FORGE_STATE_PATH", &paths.state)
-        .env("ARTISAN_FORGE_LOG_PATH", &paths.log)
-        .env("ARTISAN_LISTEN_HOST", &profile.listen_host)
-        .env("ARTISAN_LISTEN_PORT", profile.listen_port.to_string());
+    configure_forge_environment(&mut command, name, paths, profile, secrets, &forge_root);
     configure_native_runtime(&mut command, &native_runtime);
     if foreground {
         let status = command.status().map_err(io("start Forge"))?;
@@ -81,6 +63,39 @@ pub fn start(
         command.spawn().map_err(io("start Forge"))?;
     }
     Ok(())
+}
+
+fn configure_forge_environment(
+    command: &mut Command,
+    name: &str,
+    paths: &ProfilePaths,
+    profile: &Profile,
+    secrets: &Secrets,
+    forge_root: &Path,
+) {
+    command
+        .env("ARTISAN_AUTH_TOKEN", &secrets.auth_token)
+        .env(
+            "ARTISAN_DATABASE_PATH",
+            profile.data_root.join("artisan.sqlite"),
+        )
+        .env("ARTISAN_MIGRATIONS_PATH", forge_root.join("migrations"))
+        .env("ARTISAN_NODE_EXECUTABLE", forge_root.join(node_name()))
+        .env(
+            "ARTISAN_WINDOWS_PROCESS_HOST",
+            forge_root.join("windows-process-host.js"),
+        )
+        .env("CODEX_SQLITE_HOME", profile.data_root.join("codex-sqlite"))
+        .env("ARTISAN_FORGE_PROFILE", name)
+        .env("ARTISAN_FORGE_STATE_PATH", &paths.state)
+        .env("ARTISAN_FORGE_LOG_PATH", &paths.log)
+        .env("ARTISAN_LISTEN_HOST", &profile.listen_host)
+        .env("ARTISAN_LISTEN_PORT", profile.listen_port.to_string());
+    // Web hosting is a per-profile development capability. Without the flag,
+    // Forge exposes only its health and control/WS surfaces and SPA routes 404.
+    if profile.serve_frontend {
+        command.env("ARTISAN_STATIC_FRONTEND_ROOT", forge_root.join("frontend"));
+    }
 }
 
 fn configure_native_runtime(command: &mut Command, native_runtime: &Path) {
@@ -149,9 +164,79 @@ pub fn stop(name: &str, paths: &ProfilePaths, secrets: &Secrets) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsStr, path::Path};
+    use std::{
+        ffi::OsStr,
+        path::{Path, PathBuf},
+    };
 
-    use super::{Command, configure_native_runtime};
+    use super::{
+        Command, Profile, ProfilePaths, Secrets, configure_forge_environment,
+        configure_native_runtime,
+    };
+    use crate::profile::ForgeMode;
+
+    fn test_profile(serve_frontend: bool) -> (ProfilePaths, Profile, Secrets) {
+        let directory = PathBuf::from("C:/artisan-home/profiles/default");
+        (
+            ProfilePaths {
+                config: directory.join("config.json"),
+                secrets: directory.join("secrets.json"),
+                state: directory.join("state.json"),
+                log: directory.join("forge.log"),
+                directory,
+            },
+            Profile {
+                data_root: PathBuf::from("C:/artisan-home/profiles/default/data"),
+                listen_host: "127.0.0.1".into(),
+                listen_port: 0,
+                mode: ForgeMode::Local,
+                serve_frontend,
+                version: 1,
+            },
+            Secrets {
+                auth_token: "token".into(),
+                version: 1,
+            },
+        )
+    }
+
+    /// Installed-profile gate: without the explicit development flag, the
+    /// launched Forge never receives a static frontend root, so it cannot
+    /// host the web renderer.
+    #[test]
+    fn static_hosting_is_absent_unless_the_profile_opts_in() {
+        let forge_root = Path::new("C:/Artisan/versions/1.0.0/forge");
+        let (paths, profile, secrets) = test_profile(false);
+        let mut command = Command::new("forge");
+        configure_forge_environment(
+            &mut command,
+            "default",
+            &paths,
+            &profile,
+            &secrets,
+            forge_root,
+        );
+        assert!(
+            command
+                .get_envs()
+                .all(|(key, _)| key != OsStr::new("ARTISAN_STATIC_FRONTEND_ROOT"))
+        );
+
+        let (paths, profile, secrets) = test_profile(true);
+        let mut serving = Command::new("forge");
+        configure_forge_environment(
+            &mut serving,
+            "default",
+            &paths,
+            &profile,
+            &secrets,
+            forge_root,
+        );
+        assert!(serving.get_envs().any(|(key, value)| {
+            key == OsStr::new("ARTISAN_STATIC_FRONTEND_ROOT")
+                && value.is_some_and(|path| Path::new(path).ends_with("frontend"))
+        }));
+    }
 
     #[test]
     fn exposes_packaged_native_modules_to_forge_node_resolution() {

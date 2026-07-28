@@ -58,6 +58,9 @@ const listen_port = Flag.optional(
 const autostart = Flag.boolean("autostart").pipe(
 	Flag.withDescription("Enable current-user Forge autostart"),
 );
+const serve_frontend = Flag.boolean("serve-frontend").pipe(
+	Flag.withDescription("Serve the bundled web frontend (development browser profiles only)"),
+);
 const follow = Flag.boolean("follow").pipe(Flag.withDescription("Stream appended log content"));
 const lines = Flag.integer("lines").pipe(
 	Flag.withDefault(200),
@@ -68,6 +71,11 @@ const origin = Flag.optional(
 );
 const remove_data = Flag.boolean("remove-data").pipe(
 	Flag.withDescription("Also permanently remove Forge profiles and conversation data"),
+);
+const handoff = Flag.boolean("handoff").pipe(
+	Flag.withDescription(
+		"Print a one-time {endpoint, pair_code} JSON handoff for a trusted local caller",
+	),
 );
 
 /** Stops every profile inventoried by Forge before product files are released. */
@@ -95,27 +103,31 @@ export const AeCommand = Command.make("ae", {}, () =>
 	}),
 ).pipe(
 	Command.withSubcommands([
-		Command.make("setup", { autostart, data_root, listen_port, mode, profile }, (input) =>
-			Effect.gen(function* () {
-				const store = yield* ForgeProfileStore;
-				const platform = yield* CliPlatform;
-				yield* store.Ensure(input.profile, {
-					data_root: Option.getOrElse(
-						input.data_root,
-						() => `${platform.home}/profiles/${input.profile}/data`,
-					),
-					listen_host: "127.0.0.1",
-					listen_port: Option.getOrElse(input.listen_port, () => 0),
-					mode: input.mode,
-					version: 1,
-				});
-				if (input.autostart)
-					yield* (yield* ForgeAutostart).Configure({
-						enabled: true,
-						profile: input.profile,
+		Command.make(
+			"setup",
+			{ autostart, data_root, listen_port, mode, profile, serve_frontend },
+			(input) =>
+				Effect.gen(function* () {
+					const store = yield* ForgeProfileStore;
+					const platform = yield* CliPlatform;
+					yield* store.Ensure(input.profile, {
+						data_root: Option.getOrElse(
+							input.data_root,
+							() => `${platform.home}/profiles/${input.profile}/data`,
+						),
+						listen_host: "127.0.0.1",
+						listen_port: Option.getOrElse(input.listen_port, () => 0),
+						mode: input.mode,
+						serve_frontend: input.serve_frontend,
+						version: 1,
 					});
-				yield* Console.log(`Configured Forge profile ${input.profile}`);
-			}),
+					if (input.autostart)
+						yield* (yield* ForgeAutostart).Configure({
+							enabled: true,
+							profile: input.profile,
+						});
+					yield* Console.log(`Configured Forge profile ${input.profile}`);
+				}),
 		).pipe(Command.withDescription("Create or update a loopback-only Forge profile")),
 		Command.make("start", { foreground, profile }, (input) =>
 			Effect.gen(function* () {
@@ -195,9 +207,20 @@ export const AeCommand = Command.make("ae", {}, () =>
 				);
 			}),
 		).pipe(Command.withDescription("Check local Forge prerequisites and status")),
-		Command.make("open", { origin, profile }, (input) =>
+		Command.make("open", { handoff, origin, profile }, (input) =>
 			Effect.gen(function* () {
-				const url = yield* (yield* ForgeLifecycle).Open(
+				const lifecycle = yield* ForgeLifecycle;
+				if (input.handoff) {
+					/**
+					 * The capability is one-time and short-lived; stdout reaches
+					 * only the trusted local process that invoked this mode, so no
+					 * secret ever travels through argv or a browser navigation.
+					 */
+					const exchange = yield* lifecycle.PairHandoff(input.profile);
+					yield* Console.log(JSON.stringify({ ...exchange, version: 1 }));
+					return;
+				}
+				const url = yield* lifecycle.Open(
 					input.profile,
 					Option.getOrUndefined(input.origin),
 				);

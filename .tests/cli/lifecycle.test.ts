@@ -264,6 +264,7 @@ describe("ae lifecycle contract", () => {
 			ForgeLifecycle.of({
 				Doctor: () => Effect.die("not used"),
 				Open: () => Effect.die("not used"),
+				PairHandoff: () => Effect.die("not used"),
 				Restart: () => Effect.die("not used"),
 				Start: () => Effect.die("not used"),
 				Status: () => Effect.die("not used"),

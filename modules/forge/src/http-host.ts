@@ -49,15 +49,43 @@ const bearer_allowed = (request: IncomingMessage, config: ForgeConfig) => {
 	return supplied.length === expected.length && timingSafeEqual(supplied, expected);
 };
 
-const origin_allowed = (request: IncomingMessage) => {
+/**
+ * Resolves a configured application origin such as `artisan://app`. The
+ * allow-list is per-profile configuration, so only compositions that opt into
+ * an app scheme (the packaged Electron renderer) ever match; web pages on
+ * foreign origins can never claim membership because browsers own the header.
+ */
+const allowed_app_origin = (request: IncomingMessage, config: ForgeConfig) => {
+	const origin = request.headers.origin;
+	if (origin === undefined) return undefined;
+	return config.allowed_origins.includes(origin) ? origin : undefined;
+};
+
+const origin_allowed = (request: IncomingMessage, config: ForgeConfig) => {
 	const origin = request.headers.origin;
 	if (origin === undefined) return true;
+	if (allowed_app_origin(request, config) !== undefined) return true;
 	try {
 		return new URL(origin).host === request.headers.host;
 	} catch {
 		return false;
 	}
 };
+
+/**
+ * Cross-origin headers are emitted only for a configured app origin and only
+ * on the pre-session surfaces that origin legitimately needs: health, the
+ * instance listing, and the one-time pairing exchange. Credentialed responses
+ * echo the exact origin, never a wildcard.
+ */
+const app_cors_headers = (app_origin: string | undefined): Record<string, string> =>
+	app_origin === undefined
+		? {}
+		: {
+				"access-control-allow-credentials": "true",
+				"access-control-allow-origin": app_origin,
+				vary: "origin",
+			};
 
 const loopback_host_names = new Set(["127.0.0.1", "localhost", "[::1]"]);
 
@@ -303,6 +331,7 @@ export function start_forge_http(
 		);
 		const server = createServer((request, response) => {
 			const url = new URL(request.url ?? "/", "http://artisan.invalid");
+			const app_origin = allowed_app_origin(request, config);
 
 			if (
 				(url.pathname === "/health" ||
@@ -320,18 +349,49 @@ export function start_forge_http(
 				 * and the listener is loopback-only. Nothing that identifies the
 				 * data root or the machine belongs in this response.
 				 */
-				respond_json(response, 200, {
-					profile: config.profile,
-					service: "artisan-forge",
-					status: "ready",
-					version: 1,
+				respond_json(
+					response,
+					200,
+					{
+						profile: config.profile,
+						service: "artisan-forge",
+						status: "ready",
+						version: 1,
+					},
+					app_cors_headers(app_origin),
+				);
+				return;
+			}
+			if (
+				request.method === "OPTIONS" &&
+				url.pathname === "/api/pair" &&
+				app_origin !== undefined
+			) {
+				/**
+				 * The pairing exchange posts JSON, which browsers preflight from a
+				 * cross-origin app renderer. Only the configured app origin gets a
+				 * preflight grant; every other origin falls through to the 404
+				 * default below. Requested headers are echoed because the typed
+				 * HTTP client attaches tracing headers (`traceparent`) beside
+				 * `content-type`; the origin allow-list is the actual boundary.
+				 */
+				const requested_headers = request.headers["access-control-request-headers"];
+				response.writeHead(204, {
+					"access-control-allow-headers":
+						typeof requested_headers === "string" && requested_headers.length > 0
+							? requested_headers
+							: "content-type",
+					"access-control-allow-methods": "POST",
+					"access-control-max-age": "600",
+					...app_cors_headers(app_origin),
 				});
+				response.end();
 				return;
 			}
 			if (request.method === "GET" && url.pathname === "/api/instances") {
 				void run_request(
 					Effect.gen(function* () {
-						if (!origin_allowed(request)) {
+						if (!origin_allowed(request, config)) {
 							respond_json(response, 403, { error: "forbidden" });
 							return;
 						}
@@ -356,14 +416,14 @@ export function start_forge_http(
 									self: instance.instance_id === config.instance_id,
 								})),
 							},
-							{ "cache-control": "no-store" },
+							{ "cache-control": "no-store", ...app_cors_headers(app_origin) },
 						);
 					}),
 				);
 				return;
 			}
 			if (request.method === "GET" && url.pathname === "/api/control/status") {
-				if (!origin_allowed(request)) {
+				if (!origin_allowed(request, config)) {
 					respond_json(response, 403, { error: "forbidden" });
 					return;
 				}
@@ -388,7 +448,7 @@ export function start_forge_http(
 			if (request.method === "POST" && url.pathname === "/api/control/shutdown") {
 				void run_request(
 					Effect.gen(function* () {
-						if (!origin_allowed(request)) {
+						if (!origin_allowed(request, config)) {
 							respond_json(response, 403, { error: "forbidden" });
 							return;
 						}
@@ -405,7 +465,7 @@ export function start_forge_http(
 			if (request.method === "POST" && url.pathname === "/api/pair/request") {
 				void run_request(
 					Effect.gen(function* () {
-						if (!origin_allowed(request)) {
+						if (!origin_allowed(request, config)) {
 							respond_json(response, 403, { error: "forbidden" });
 							return;
 						}
@@ -426,7 +486,7 @@ export function start_forge_http(
 			if (request.method === "POST" && url.pathname === "/api/pair") {
 				void run_request(
 					Effect.gen(function* () {
-						if (!origin_allowed(request)) {
+						if (!origin_allowed(request, config)) {
 							respond_json(response, 403, { error: "forbidden" });
 							return;
 						}
@@ -451,16 +511,32 @@ export function start_forge_http(
 						}
 						const session = yield* authority.ConsumePair(code);
 						if (session._tag === "None") {
-							respond_json(response, 401, { error: "invalid_pairing_code" });
+							respond_json(
+								response,
+								401,
+								{ error: "invalid_pairing_code" },
+								app_cors_headers(app_origin),
+							);
 							return;
 						}
+						/**
+						 * A same-origin browser session keeps the strict cookie. The
+						 * configured app origin (the Electron renderer on its custom
+						 * scheme) is a cross-site caller in cookie terms, so its
+						 * session must be `SameSite=None`; Chromium then requires
+						 * `Secure`, which it accepts for this trustworthy loopback
+						 * listener without TLS.
+						 */
+						const cookie_policy =
+							app_origin === undefined ? "SameSite=Strict" : "SameSite=None; Secure";
 						respond_json(
 							response,
 							200,
 							{ status: "paired" },
 							{
 								"cache-control": "no-store",
-								"set-cookie": `artisan_forge_session=${session.value}; HttpOnly; Max-Age=43200; SameSite=Strict; Path=/`,
+								"set-cookie": `artisan_forge_session=${session.value}; HttpOnly; Max-Age=43200; ${cookie_policy}; Path=/`,
+								...app_cors_headers(app_origin),
 							},
 						);
 					}).pipe(

@@ -22,11 +22,28 @@ describe("frontend WebSocket runtime target", () => {
 		).toEqual({ _tag: "websocket", url: "wss://artisan.example/api/ws" });
 	});
 
+	it("targets the adopted loopback Forge from the installed editor's app scheme", () => {
+		expect(
+			ResolveWebSocketRuntimeTarget({
+				forge_endpoint: "http://127.0.0.1:52985",
+				is_development: false,
+				location: { origin: "artisan://app", protocol: "artisan:" },
+			}),
+		).toEqual({ _tag: "websocket", url: "ws://127.0.0.1:52985/api/ws" });
+	});
+
 	it("reports unavailable outside HTTP(S) instead of falling back to a native bridge", () => {
 		expect(
 			ResolveWebSocketRuntimeTarget({
 				is_development: false,
 				location: { origin: "app://artisan", protocol: "app:" },
+			}),
+		).toEqual({ _tag: "unavailable" });
+		expect(
+			ResolveWebSocketRuntimeTarget({
+				forge_endpoint: "not a url",
+				is_development: false,
+				location: { origin: "artisan://app", protocol: "artisan:" },
 			}),
 		).toEqual({ _tag: "unavailable" });
 	});

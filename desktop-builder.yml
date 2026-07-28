@@ -7,6 +7,7 @@ electronDist: node_modules/electron/dist
 files:
     - main.js
     - package.json
+    - frontend/**
 asar: true
 beforeBuild: .scripts/build/electron-before-build.ts
 disableDefaultIgnoredFiles: true

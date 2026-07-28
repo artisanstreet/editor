@@ -49,6 +49,10 @@ pub enum Commands {
         data_root: Option<PathBuf>,
         #[arg(long)]
         autostart: bool,
+        /// Serve the bundled web frontend from this Forge (development browser
+        /// profiles only; installed profiles render through the editor).
+        #[arg(long)]
+        serve_frontend: bool,
     },
     Start {
         #[arg(long, default_value = "default")]
@@ -91,8 +95,17 @@ pub enum Commands {
     Open {
         #[arg(long, default_value = "default")]
         profile: String,
-        #[arg(long)]
+        /// Open a paired browser at this loopback origin instead of the editor.
+        #[arg(long, conflicts_with = "handoff")]
         origin: Option<String>,
+        /// Open the paired browser flow instead of the installed editor.
+        #[arg(long, conflicts_with = "handoff")]
+        browser: bool,
+        /// Print a one-time `{endpoint, pair_code}` handoff as JSON on stdout
+        /// for a trusted local caller (the installed editor) instead of
+        /// launching anything.
+        #[arg(long, hide = true)]
+        handoff: bool,
     },
     Update,
     Uninstall {
@@ -123,6 +136,8 @@ pub fn run(cli: Cli) -> Result<()> {
     match cli.command.unwrap_or(Commands::Open {
         profile: "default".into(),
         origin: None,
+        browser: false,
+        handoff: false,
     }) {
         Commands::Protocol { url } => handle_protocol(&layout, &url),
         Commands::Setup {
@@ -131,6 +146,7 @@ pub fn run(cli: Cli) -> Result<()> {
             mode,
             data_root,
             autostart,
+            serve_frontend,
         } => {
             require_installation(&layout)?;
             if autostart {
@@ -145,6 +161,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 mode.into(),
                 listen_port,
                 data_root.as_deref(),
+                serve_frontend,
             )?;
             delegate_bootstrap(&layout, "repair", false)?;
             println!("Configured Forge profile {profile}");
@@ -169,7 +186,21 @@ pub fn run(cli: Cli) -> Result<()> {
             follow,
         } => logs(&layout, &profile, lines, follow),
         Commands::Doctor { fix, profile, json } => doctor(&layout, &profile, fix, json),
-        Commands::Open { profile, origin } => open(&layout, &profile, origin.as_deref()),
+        Commands::Open {
+            profile,
+            origin,
+            browser,
+            handoff,
+        } => {
+            let flow = if handoff {
+                OpenFlow::Handoff
+            } else if browser || origin.is_some() {
+                OpenFlow::Browser
+            } else {
+                OpenFlow::Editor
+            };
+            open(&layout, &profile, origin.as_deref(), flow)
+        }
         Commands::Update => delegate_bootstrap(&layout, "update", false),
         Commands::Uninstall { remove_data } => {
             stop_all_profiles(&layout)?;
@@ -320,29 +351,41 @@ fn doctor(layout: &Layout, name: &str, fix: bool, json: bool) -> Result<()> {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum OpenFlow {
+    /// Launch the installed Electron editor; it obtains its own handoff.
+    Editor,
+    /// Launch the operating-system browser with a one-time pairing fragment.
+    Browser,
+    /// Print a one-time `{endpoint, pair_code}` JSON handoff on stdout.
+    Handoff,
+}
+
 fn handle_protocol(layout: &Layout, url: &str) -> Result<()> {
     if url != FORGE_START_LAUNCH_URL {
         return Err(CliError::Control(
             "unsupported artisan:// launch request".to_owned(),
         ));
     }
-    open(layout, "default", None)
+    open(layout, "default", None, OpenFlow::Editor)
 }
 
-fn open(layout: &Layout, name: &str, origin: Option<&str>) -> Result<()> {
+fn ready_state(layout: &Layout, name: &str) -> Result<State> {
     start(layout, name, false)?;
     let (paths, _, secrets) = profile::load(layout, name)?;
-    let mut state = None;
     for _ in 0..50 {
         if let Ok(candidate) = profile::read_json::<State>(&paths.state)
             && http::healthy(&candidate.endpoint, &secrets.auth_token)
         {
-            state = Some(candidate);
-            break;
+            return Ok(candidate);
         }
         thread::sleep(Duration::from_millis(100));
     }
-    let state = state.ok_or_else(|| CliError::Control("Forge did not become ready".into()))?;
+    Err(CliError::Control("Forge did not become ready".into()))
+}
+
+fn mint_pair_code(layout: &Layout, name: &str, state: &State) -> Result<String> {
+    let (paths, _, secrets) = profile::load(layout, name)?;
     let body = http::request(
         &state.endpoint,
         "/api/pair/request",
@@ -353,8 +396,55 @@ fn open(layout: &Layout, name: &str, origin: Option<&str>) -> Result<()> {
         path: paths.state,
         source,
     })?;
-    let origin = resolve_browser_origin(origin, &state.endpoint)?;
-    launch_url(&format!("{origin}/#pair={}", pair.code))
+    Ok(pair.code)
+}
+
+fn open(layout: &Layout, name: &str, origin: Option<&str>, flow: OpenFlow) -> Result<()> {
+    let state = ready_state(layout, name)?;
+    match flow {
+        OpenFlow::Editor => launch_editor(layout, name),
+        OpenFlow::Browser => {
+            let code = mint_pair_code(layout, name, &state)?;
+            let origin = resolve_browser_origin(origin, &state.endpoint)?;
+            launch_url(&format!("{origin}/#pair={code}"))
+        }
+        OpenFlow::Handoff => {
+            let code = mint_pair_code(layout, name, &state)?;
+            // The capability is one-time and short-lived; stdout reaches only
+            // the trusted local process that invoked this hidden mode.
+            println!(
+                "{}",
+                serde_json::json!({
+                    "endpoint": state.endpoint,
+                    "pair_code": code,
+                    "version": 1,
+                })
+            );
+            Ok(())
+        }
+    }
+}
+
+/// The installed editor renders the bundled frontend itself and performs its
+/// own `ae open --handoff` exchange, so no capability travels through argv —
+/// only the non-secret profile name the editor should hand off against.
+fn launch_editor(layout: &Layout, profile: &str) -> Result<()> {
+    let manifest = require_installation(layout)?;
+    let editor = manifest.editor_executable();
+    if !editor.is_file() {
+        return Err(CliError::Installation(format!(
+            "the Artisan editor is missing at {}; run `ae doctor --fix` or use `ae open --browser`",
+            editor.display()
+        )));
+    }
+    Command::new(&editor)
+        .arg(format!("--forge-profile={profile}"))
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(io("start Artisan editor"))?;
+    Ok(())
 }
 
 fn resolve_browser_origin(origin: Option<&str>, forge_endpoint: &str) -> Result<String> {
@@ -462,6 +552,57 @@ mod tests {
     fn plain_invocation_maps_to_open() {
         let cli = Cli::try_parse_from(["ae"]).unwrap();
         assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn open_defaults_to_the_editor_and_keeps_explicit_browser_and_handoff_flows() {
+        let default_open = Cli::try_parse_from(["ae", "open"]).unwrap();
+        assert!(matches!(
+            default_open.command,
+            Some(Commands::Open {
+                browser: false,
+                handoff: false,
+                origin: None,
+                ..
+            })
+        ));
+        let browser = Cli::try_parse_from(["ae", "open", "--browser"]).unwrap();
+        assert!(matches!(
+            browser.command,
+            Some(Commands::Open { browser: true, .. })
+        ));
+        let handoff = Cli::try_parse_from(["ae", "open", "--handoff"]).unwrap();
+        assert!(matches!(
+            handoff.command,
+            Some(Commands::Open { handoff: true, .. })
+        ));
+        // The handoff prints a capability for a trusted local caller; it never
+        // combines with a browser navigation that would expose it elsewhere.
+        assert!(Cli::try_parse_from(["ae", "open", "--handoff", "--browser"]).is_err());
+        assert!(
+            Cli::try_parse_from(["ae", "open", "--handoff", "--origin", "http://127.0.0.1:1"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn setup_keeps_static_hosting_an_explicit_opt_in() {
+        let default_setup = Cli::try_parse_from(["ae", "setup"]).unwrap();
+        assert!(matches!(
+            default_setup.command,
+            Some(Commands::Setup {
+                serve_frontend: false,
+                ..
+            })
+        ));
+        let dev_setup = Cli::try_parse_from(["ae", "setup", "--serve-frontend"]).unwrap();
+        assert!(matches!(
+            dev_setup.command,
+            Some(Commands::Setup {
+                serve_frontend: true,
+                ..
+            })
+        ));
     }
 
     #[test]

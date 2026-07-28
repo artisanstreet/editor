@@ -52,23 +52,32 @@ describe("deep desktop release gates", () => {
 		expect(frontend_config).not.toMatch(/\b(?:electron|@artisan\/backend)\b/);
 	});
 
-	it("packages a stateless launcher around the ae-managed Forge", () => {
+	it("packages a sandboxed renderer host around the ae-managed Forge", () => {
 		const main = readFileSync(resolve(workspace_root, "modules/desktop/src/main.ts"), "utf8");
 
 		expect(has_electron_packaging_configuration()).toBe(true);
-		expect(main).toContain('RunAe(paths.ae_command_path, "open")');
-		expect(main).toContain('RunAe(paths.ae_command_path, "start")');
+		/** The editor renders the bundled frontend and pairs through `ae`'s one-time handoff. */
+		expect(main).toContain("BrowserWindow");
+		expect(main).toContain("contextIsolation: true");
+		expect(main).toContain("nodeIntegration: false");
+		expect(main).toContain("sandbox: true");
+		expect(main).not.toContain("preload:");
+		expect(main).not.toContain("ipcMain");
+		expect(main).toContain('"open", "--handoff"');
 		expect(main).not.toContain("ARTISAN_AUTH_TOKEN");
 		expect(main).not.toContain("ARTISAN_DATABASE_PATH");
-		expect(main).not.toContain("BrowserWindow");
 		expect(desktop_config).not.toContain("koffi-win32-x64");
 		expect(desktop_config).toContain("ssr: { noExternal: true }");
+		/** The editor stages its own frontend copy with the loopback CSP variant. */
+		expect(desktop_config).toContain('resolve(desktop_root, "frontend")');
+		expect(desktop_config).toContain("connect-src 'self' http://127.0.0.1:*");
 		expect(forge_config).toContain("koffi-win32-x64");
 		expect(forge_config).toContain('"ae.cmd"');
 		expect(forge_config).toContain("ARTISAN_NATIVE_RUNTIME=%~dp0native-runtime");
 		expect(forge_config).toContain('"update-user-path.ps1"');
 		const builder = readFileSync(resolve(workspace_root, "desktop-builder.yml"), "utf8");
 		expect(builder).toContain("- dir");
+		expect(builder).toContain("- frontend/**");
 		expect(builder).not.toContain("nsis");
 		expect(builder).not.toContain("signExecutable: false");
 		expect(builder).not.toContain("extraResources:");
@@ -96,7 +105,11 @@ describe("deep desktop release gates", () => {
 		expect(workflow).not.toContain("if: ${{ inputs.run_packaged_desktop }}");
 		expect(verifier).toContain("$embedded_forge");
 		expect(verifier).toContain("must not embed a parallel Forge lifecycle");
-		expect(verifier).toContain("Packaged stateless desktop evidence");
+		expect(verifier).toContain("Packaged desktop renderer evidence");
+		/** The verifier now proves the honest renderer shape, not a launcher-only ASAR. */
+		expect(verifier).toContain('"/frontend/index.html"');
+		expect(verifier).toContain("loopback Forge CSP allowance");
+		expect(verifier).toContain('"/preload.cjs"');
 		expect(verifier).not.toContain("ARTISAN_PACKAGED_SMOKE");
 		expect(verifier).not.toContain("Stop-Process");
 		expect(workflow).toContain('ARTISAN_ALLOW_UNSIGNED_PRERELEASE: "1"');

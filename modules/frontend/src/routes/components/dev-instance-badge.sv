@@ -2,6 +2,7 @@
 	import { onMount } from "svelte";
 
 	import { DevInstanceProfile, DevMarkedTitle } from "$lib/root/dev-instance";
+	import { ForgeHttpUrl } from "$lib/runtime/forge-endpoint";
 
 	/**
 	 * A non-`default` `/health` profile means this renderer is talking to a
@@ -20,13 +21,13 @@
 			/**
 			 * A page can load while its Forge is mid-restart, so one failed probe
 			 * must not hide the badge for the whole session. A short retry
-			 * ladder settles the answer; the desktop shell serves the renderer
-			 * from `artisan://app` where this never resolves, and a permanently
-			 * missing badge is the correct outcome there.
+			 * ladder settles the answer. Under the installed editor the probe
+			 * targets the adopted loopback Forge, whose release profile reports
+			 * `default` and correctly leaves the badge hidden.
 			 */
 			for (let attempt = 0; attempt < 5 && !cancelled; attempt += 1) {
 				try {
-					const response = await fetch("/health", { cache: "no-store" });
+					const response = await fetch(ForgeHttpUrl("/health"), { cache: "no-store" });
 					if (response.ok) {
 						const body: unknown = await response.json();
 						const named = DevInstanceProfile(body);

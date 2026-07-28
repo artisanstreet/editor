@@ -40,6 +40,14 @@ impl InstallationManifest {
         directory.join("artisan-forge")
     }
 
+    pub fn editor_executable(&self) -> PathBuf {
+        let directory = self.version_root().join("editor");
+        #[cfg(target_os = "windows")]
+        return directory.join("Artisan Editor.exe");
+        #[cfg(not(target_os = "windows"))]
+        directory.join("artisan-editor")
+    }
+
     pub fn bootstrap_executable(&self) -> PathBuf {
         let directory = self.version_root().join("bin");
         #[cfg(target_os = "windows")]

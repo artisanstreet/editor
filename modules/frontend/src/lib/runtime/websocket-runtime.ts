@@ -17,6 +17,11 @@ export interface WebSocketRuntimeLocation {
 
 export interface WebSocketRuntimeTargetInput {
 	readonly development_url?: unknown;
+	/**
+	 * Adopted loopback Forge origin for the installed editor's app-scheme
+	 * renderer, whose page origin carries no usable Forge address of its own.
+	 */
+	readonly forge_endpoint?: string;
 	readonly is_development: boolean;
 	readonly location?: WebSocketRuntimeLocation;
 }
@@ -63,7 +68,8 @@ const BrowserWebSocketUrl = (location: WebSocketRuntimeLocation | undefined) => 
 
 /**
  * Selects the browser's only real connection boundary. Development can opt into
- * an explicit endpoint; otherwise an HTTP(S) page connects to its colocated Forge.
+ * an explicit endpoint; the installed editor supplies its adopted loopback
+ * Forge; otherwise an HTTP(S) page connects to its colocated Forge.
  */
 export const ResolveWebSocketRuntimeTarget = (
 	input: WebSocketRuntimeTargetInput,
@@ -72,6 +78,12 @@ export const ResolveWebSocketRuntimeTarget = (
 		? ParseWebSocketUrl(input.development_url)
 		: undefined;
 	if (development_url !== undefined) return { _tag: "websocket", url: development_url };
+
+	const forge_endpoint_url =
+		input.forge_endpoint === undefined
+			? undefined
+			: ParseWebSocketUrl(`${input.forge_endpoint.replace(/\/+$/, "")}/api/ws`);
+	if (forge_endpoint_url !== undefined) return { _tag: "websocket", url: forge_endpoint_url };
 
 	const browser_url = BrowserWebSocketUrl(input.location);
 	if (browser_url !== undefined) return { _tag: "websocket", url: browser_url };

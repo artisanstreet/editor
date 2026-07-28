@@ -3,6 +3,7 @@ import { MakeSnowflakeIdLive } from "@artisan/protocol";
 import { Effect, Exit, Layer, Scope } from "effect";
 import * as KeyValueStore from "effect/unstable/persistence/KeyValueStore";
 
+import { ResolveForgeEndpoint } from "./forge-endpoint";
 import {
 	BootstrapBrowserPairing,
 	BrowserNavigationLive,
@@ -42,7 +43,21 @@ const ArtisanClientRuntimeLive = Layer.unwrap(
 					Layer.merge(
 						BrowserNavigationLive,
 						BrowserPairingExchangeLive.pipe(
-							Layer.provide(BrowserHttpClient.layerFetch),
+							/**
+							 * The app-scheme renderer pairs cross-origin against the
+							 * adopted loopback Forge, so its session cookie only
+							 * exists when the exchange carries credentials. On a
+							 * same-origin page this is identical to the default.
+							 */
+							Layer.provide(
+								BrowserHttpClient.layerFetch.pipe(
+									Layer.provide(
+										Layer.succeed(BrowserHttpClient.RequestInit, {
+											credentials: "include",
+										}),
+									),
+								),
+							),
 						),
 					),
 				),
@@ -56,10 +71,12 @@ const ArtisanClientRuntimeLive = Layer.unwrap(
 				};
 			}
 		).env;
+		const forge_endpoint = ResolveForgeEndpoint();
 		const target = ResolveWebSocketRuntimeTarget({
 			...(environment?.VITE_ARTISAN_FORGE_WS_URL === undefined
 				? {}
 				: { development_url: environment.VITE_ARTISAN_FORGE_WS_URL }),
+			...(forge_endpoint === undefined ? {} : { forge_endpoint }),
 			is_development: environment?.DEV === true,
 			...(renderer_window?.location === undefined
 				? {}

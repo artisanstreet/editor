@@ -15,6 +15,11 @@ pub struct Profile {
     pub listen_host: String,
     pub listen_port: u16,
     pub mode: ForgeMode,
+    /// Static web hosting is a development capability. Installed profiles
+    /// default to a control-surface-only Forge; the Electron editor renders
+    /// the bundled frontend instead of a Forge-served page.
+    #[serde(default)]
+    pub serve_frontend: bool,
     pub version: u8,
 }
 
@@ -152,6 +157,7 @@ pub fn setup(
     mode: ForgeMode,
     port: u16,
     data_root: Option<&Path>,
+    serve_frontend: bool,
 ) -> Result<()> {
     let paths = paths(layout, name)?;
     fs::create_dir_all(&paths.directory).map_err(io("create profile directory"))?;
@@ -161,6 +167,7 @@ pub fn setup(
         listen_host: "127.0.0.1".into(),
         listen_port: port,
         mode,
+        serve_frontend,
         version: 1,
     };
     write_private_json(&paths.config, &profile)?;
@@ -272,6 +279,15 @@ fn sync_directory(path: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profiles_without_the_flag_never_serve_the_frontend() {
+        let profile: Profile = serde_json::from_str(
+            r#"{"data_root":"C:/data","listen_host":"127.0.0.1","listen_port":0,"mode":"local","version":1}"#,
+        )
+        .expect("legacy profile config");
+        assert!(!profile.serve_frontend);
+    }
 
     #[test]
     fn validates_single_component_profile_names() {

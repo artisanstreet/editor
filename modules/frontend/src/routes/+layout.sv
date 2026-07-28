@@ -19,6 +19,7 @@
 		InitialForgeGateModel,
 		ObserveForgeConnection,
 	} from "$lib/forge/gate";
+	import { ForgeHttpUrl } from "$lib/runtime/forge-endpoint";
 	import ArtisanSidebar from "./components/artisan-sidebar.sv";
 	import DevInstanceBadge from "./components/dev-instance-badge.sv";
 	import ForgeConnectionOverlay from "./components/forge-connection-overlay.sv";
@@ -96,7 +97,9 @@
 			}
 			if (attempted) continue;
 			const reachable = yield* Effect.tryPromise(() =>
-				fetch("/health", { cache: "no-store" }).then((response) => response.ok),
+				fetch(ForgeHttpUrl("/health"), { cache: "no-store" }).then(
+					(response) => response.ok,
+				),
 			).pipe(Effect.catch(() => Effect.succeed(false)));
 			if (!reachable || forge_gate.state.phase !== "exhausted") continue;
 			attempted = true;

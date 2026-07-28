@@ -72,8 +72,9 @@ native-capable runner, which runs `package:desktop` followed by
 `package:desktop` emits only `.dist/electron-release/win-unpacked`, the exact
 Editor directory incorporated into the managed distribution archive. It does
 not emit NSIS, embed Forge, install integrations, or own update/uninstall state.
-The verifier inspects the actual ASAR, requires the protocol-launcher executable,
-rejects legacy preload/utility/backend payloads, and rejects an embedded
+The verifier inspects the actual ASAR, requires the launcher entry plus the
+bundled static frontend with its loopback-Forge CSP variant, rejects any
+preload/utility/backend payload, and rejects an embedded
 `resources/artisan-forge` tree.
 
 Electron Builder's standard Windows signing path is enabled. The protected
