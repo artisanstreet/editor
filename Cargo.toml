@@ -7,7 +7,7 @@ edition = "2024"
 license = "BSD-3-Clause"
 repository = "https://github.com/sandersonstabo/artisan-editor"
 rust-version = "1.85"
-version = "0.2.0"
+version = "0.2.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
