@@ -8,7 +8,7 @@ import { ForgeState } from "./state";
 /**
  * One announced Forge process. Cards reuse the durable state shape, so a card
  * is simply that state written to the machine-global registry instead of the
- * profile's private home.
+ * instance's private home.
  */
 export type ForgeInstanceCard = ForgeState;
 
@@ -16,9 +16,7 @@ export type ForgeInstanceCard = ForgeState;
  * Resolves the machine-global root that every Forge announces into, regardless
  * of which `ARTISAN_HOME` it serves. Discovery across separate installs only
  * works because this location is shared: a development checkout and the
- * installed release each have private profile homes, but both write cards
- * here. The installed release also keeps `profiles/<name>/state.json` under
- * this same root, which lets listing see older Forges that predate cards.
+ * installed release each have private homes, but both write cards here.
  */
 export const ResolveInstanceRegistryRoot = (environment: {
 	readonly HOME?: string;
@@ -86,12 +84,7 @@ export const ListForgeInstances = (registry_root: string) =>
 			.filter((entry) => entry.isFile() && entry.name.endsWith(".json"))
 			.map((entry) => ReadCard(join(registry_root, "instances", entry.name)));
 
-		const profile_entries = yield* ListDirectory(join(registry_root, "profiles"));
-		const state_reads = profile_entries
-			.filter((entry) => entry.isDirectory())
-			.map((entry) => ReadCard(join(registry_root, "profiles", entry.name, "state.json")));
-
-		const cards = (yield* Effect.all([...card_reads, ...state_reads])).flat();
+		const cards = (yield* Effect.all(card_reads)).flat();
 		const by_instance = new Map<string, ForgeInstanceCard>();
 		for (const card of cards) {
 			if (alive(card.pid) && loopback_endpoint(card.endpoint)) {

@@ -4,12 +4,10 @@ use std::{io, path::PathBuf};
 pub enum CliError {
     #[error("Artisan is not installed correctly: {0}")]
     Installation(String),
-    #[error("Forge profile `{0}` does not exist; run `ae setup --profile {0}`")]
-    MissingProfile(String),
-    #[error("invalid Forge profile name `{0}`")]
-    InvalidProfile(String),
-    #[error("Forge is not running for profile `{0}`")]
-    NotRunning(String),
+    #[error("Forge is not configured in this Artisan home; run `ae setup`")]
+    MissingInstance,
+    #[error("Forge is not running")]
+    NotRunning,
     #[error("Forge control request failed: {0}")]
     Control(String),
     #[error("unsupported operation: {0}")]
@@ -35,8 +33,7 @@ pub enum CliError {
 impl CliError {
     pub const fn exit_code(&self) -> i32 {
         match self {
-            Self::InvalidProfile(_) => 2,
-            Self::MissingProfile(_) | Self::NotRunning(_) => 3,
+            Self::MissingInstance | Self::NotRunning => 3,
             Self::Installation(_) => 4,
             _ => 1,
         }

@@ -60,7 +60,6 @@ const MakeForgeHost = (config: ForgeConfig, transport_binding: ForgeTransportBin
 					endpoint: http.endpoint.toString(),
 					instance_id: config.instance_id,
 					pid: process.pid,
-					profile: config.profile,
 					started_at: new Date(now).toISOString(),
 					version: 1,
 				}).pipe(

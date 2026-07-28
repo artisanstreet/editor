@@ -23,7 +23,7 @@ import {
 } from "../../modules/distribution/src";
 
 const invocation: BootstrapInvocation = {
-	argv: ["open", "--profile", "default"],
+	argv: ["open"],
 	bootstrap_pid: 42,
 	npm_executable: "C:\\Program Files\\nodejs\\npm.cmd",
 	npm_prefix: "D:\\Portable\\npm-global",
@@ -205,11 +205,11 @@ describe("disposable bootstrap", () => {
 		expect(events).toEqual([
 			"install",
 			"verify:C:\\Users\\test\\AppData\\Local\\Artisan\\bin\\ae.exe",
-			"setup:C:\\Users\\test\\AppData\\Local\\Artisan\\bin\\ae.exe:setup|--profile|default",
-			"start:C:\\Users\\test\\AppData\\Local\\Artisan\\bin\\ae.exe:start|--profile|default",
-			"status:C:\\Users\\test\\AppData\\Local\\Artisan\\bin\\ae.exe:status|--profile|default|--json",
+			"setup:C:\\Users\\test\\AppData\\Local\\Artisan\\bin\\ae.exe:setup",
+			"start:C:\\Users\\test\\AppData\\Local\\Artisan\\bin\\ae.exe:start",
+			"status:C:\\Users\\test\\AppData\\Local\\Artisan\\bin\\ae.exe:status|--json",
 			"manifest:active:complete",
-			"delegate:C:\\Users\\test\\AppData\\Local\\Artisan\\bin\\ae.exe:open|--profile|default",
+			"delegate:C:\\Users\\test\\AppData\\Local\\Artisan\\bin\\ae.exe:open",
 			'cleanup:"C:\\Program Files\\nodejs\\npm.cmd" uninstall --global --prefix D:\\Portable\\npm-global artisan-editor',
 		]);
 	});

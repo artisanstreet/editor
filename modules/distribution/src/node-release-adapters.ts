@@ -30,13 +30,8 @@ import {
 const MaximumRedirects = 5;
 const MaximumManifestBytes = 1024 * 1024;
 const MaximumProcessOutputBytes = 1024 * 1024;
-const OwnedForgeProfileName = Schema.String.check(
-	Schema.isPattern(
-		/^(?!CON$|PRN$|AUX$|NUL$|COM[1-9]$|LPT[1-9]$)[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/i,
-	),
-);
 const ForgeStatusJson = Schema.Struct({
-	state: Schema.Literals(["foreign", "missing", "running", "stale"]),
+	state: Schema.Literals(["missing", "running", "stale"]),
 });
 const ForgeDoctorJson = Schema.Struct({
 	distribution: Schema.Struct({ healthy: Schema.Boolean }),
@@ -833,7 +828,7 @@ const DecodeJsonOutput = (output: string) =>
 		catch: (cause) => cause,
 	});
 
-/** Coordinates every owned Forge profile across an atomic version switch. */
+/** Coordinates the home's single Forge instance across an atomic version switch. */
 export const make_node_forge_update_lifecycle_layer = (
 	installation_root: string,
 	command_interpreter = process.env.ComSpec ?? "C:\\Windows\\System32\\cmd.exe",
@@ -844,26 +839,9 @@ export const make_node_forge_update_lifecycle_layer = (
 			const file_system = yield* FileSystem.FileSystem;
 			const path_service = yield* Path.Path;
 			const process_host = yield* HealthProcessHost;
-			const profiles_root = path_service.join(installation_root, "profiles");
+			const config_path = path_service.join(installation_root, "config.json");
 
-			const Profiles = () =>
-				Effect.gen(function* () {
-					if (!(yield* file_system.exists(profiles_root))) return [];
-					const profiles: Array<string> = [];
-					for (const candidate of yield* file_system.readDirectory(profiles_root)) {
-						const decoded = yield* Schema.decodeUnknownEffect(OwnedForgeProfileName)(
-							candidate,
-						).pipe(Effect.option);
-						if (decoded._tag === "None") continue;
-						const config_path = path_service.join(
-							profiles_root,
-							decoded.value,
-							"config.json",
-						);
-						if (yield* file_system.exists(config_path)) profiles.push(decoded.value);
-					}
-					return profiles.sort();
-				});
+			const Configured = () => file_system.exists(config_path);
 
 			const Run = (version: string, argv: ReadonlyArray<string>) =>
 				Effect.gen(function* () {
@@ -883,92 +861,68 @@ export const make_node_forge_update_lifecycle_layer = (
 					return result.stdout;
 				});
 
-			const Status = (version: string, profile: string) =>
-				Run(version, ["status", "--profile", profile, "--json"]).pipe(
+			const Status = (version: string) =>
+				Run(version, ["status", "--json"]).pipe(
 					Effect.flatMap(DecodeJsonOutput),
 					Effect.flatMap(Schema.decodeUnknownEffect(ForgeStatusJson)),
 				);
 
-			const ReadDoctor = (version: string, profile: string) =>
-				Run(version, ["doctor", "--profile", profile, "--json"]).pipe(
+			const ReadDoctor = (version: string) =>
+				Run(version, ["doctor", "--json"]).pipe(
 					Effect.flatMap(DecodeJsonOutput),
 					Effect.flatMap(Schema.decodeUnknownEffect(ForgeDoctorJson)),
 				);
 
-			const RequireHealthyDistribution = (version: string, profile: string) =>
-				ReadDoctor(version, profile).pipe(
+			const RequireHealthyDistribution = (version: string) =>
+				ReadDoctor(version).pipe(
 					Effect.filterOrFail(
 						(report) => report.distribution.healthy,
 						(report) =>
 							new Error(
-								`Distribution doctor is unhealthy for profile ${profile}: ${JSON.stringify(
-									report,
-								)}`,
+								`Distribution doctor is unhealthy: ${JSON.stringify(report)}`,
 							),
 					),
 					Effect.asVoid,
 				);
 
-			const StartAndVerify = (
-				version: string,
-				profiles: ReadonlyArray<string>,
-				operation: "restore" | "resume",
-			) =>
-				Effect.forEach(
-					profiles,
-					(profile) =>
-						Effect.gen(function* () {
-							yield* Run(version, ["start", "--profile", profile]);
-							const status = yield* Status(version, profile);
-							if (status.state !== "running")
-								return yield* Effect.fail(
-									new Error(`Forge profile ${profile} did not restart`),
-								);
-							yield* RequireHealthyDistribution(version, profile);
-						}).pipe(
-							Effect.mapError(
-								(cause) =>
-									new ForgeUpdateLifecycleFailure({
-										cause,
-										operation,
-										profile,
-										version,
-									}),
-							),
-						),
-					{ concurrency: 1, discard: true },
+			const StartAndVerify = (version: string, operation: "restore" | "resume") =>
+				Effect.gen(function* () {
+					yield* Run(version, ["start"]);
+					const status = yield* Status(version);
+					if (status.state !== "running")
+						return yield* Effect.fail(new Error("Forge did not restart"));
+					yield* RequireHealthyDistribution(version);
+				}).pipe(
+					Effect.mapError(
+						(cause) =>
+							new ForgeUpdateLifecycleFailure({
+								cause,
+								operation,
+								version,
+							}),
+					),
 				);
 
 			return ForgeUpdateLifecycle.of({
 				Quiesce: (version) => {
-					const stopped_profiles: Array<string> = [];
+					let stopped = false;
 					return Effect.gen(function* () {
-						const running_profiles: Array<string> = [];
-						for (const profile of yield* Profiles()) {
-							const status = yield* Status(version, profile);
-							if (status.state === "foreign" || status.state === "stale")
-								return yield* Effect.fail(
-									new Error(
-										`Forge profile ${profile} is ${status.state}; refusing update`,
-									),
-								);
-							if (status.state === "running") running_profiles.push(profile);
-						}
-						for (const profile of running_profiles) {
-							yield* Run(version, ["stop", "--profile", profile]);
-							stopped_profiles.push(profile);
-							const status = yield* Status(version, profile);
-							if (status.state !== "missing")
-								return yield* Effect.fail(
-									new Error(`Forge profile ${profile} did not stop`),
-								);
-						}
-						return { running_profiles };
+						if (!(yield* Configured())) return { was_running: false };
+						const status = yield* Status(version);
+						if (status.state === "stale")
+							return yield* Effect.fail(new Error("Forge is stale; refusing update"));
+						if (status.state !== "running") return { was_running: false };
+						yield* Run(version, ["stop"]);
+						stopped = true;
+						const verified = yield* Status(version);
+						if (verified.state !== "missing")
+							return yield* Effect.fail(new Error("Forge did not stop"));
+						return { was_running: true };
 					}).pipe(
 						Effect.onError(() =>
-							StartAndVerify(version, stopped_profiles, "restore").pipe(
-								Effect.ignore,
-							),
+							stopped
+								? StartAndVerify(version, "restore").pipe(Effect.ignore)
+								: Effect.void,
 						),
 						Effect.mapError(
 							(cause) =>
@@ -981,35 +935,21 @@ export const make_node_forge_update_lifecycle_layer = (
 					);
 				},
 				Restore: (version, snapshot) =>
-					StartAndVerify(version, snapshot.running_profiles, "restore"),
+					snapshot.was_running ? StartAndVerify(version, "restore") : Effect.void,
 				ResumeAndVerify: (version, snapshot) =>
-					StartAndVerify(version, snapshot.running_profiles, "resume"),
+					snapshot.was_running ? StartAndVerify(version, "resume") : Effect.void,
 				VerifyCurrent: (version) =>
 					Effect.gen(function* () {
-						yield* Effect.forEach(
-							yield* Profiles(),
-							(profile) =>
-								Effect.gen(function* () {
-									const status = yield* Status(version, profile);
-									if (status.state === "foreign" || status.state === "stale")
-										return yield* Effect.fail(
-											new Error(
-												`Forge profile ${profile} is ${status.state}`,
-											),
-										);
-									yield* RequireHealthyDistribution(version, profile);
-									if (status.state === "running") {
-										const verified = yield* Status(version, profile);
-										if (verified.state !== "running")
-											return yield* Effect.fail(
-												new Error(
-													`Forge profile ${profile} is not running`,
-												),
-											);
-									}
-								}),
-							{ concurrency: 1, discard: true },
-						);
+						if (!(yield* Configured())) return;
+						const status = yield* Status(version);
+						if (status.state === "stale")
+							return yield* Effect.fail(new Error("Forge is stale"));
+						yield* RequireHealthyDistribution(version);
+						if (status.state === "running") {
+							const verified = yield* Status(version);
+							if (verified.state !== "running")
+								return yield* Effect.fail(new Error("Forge is not running"));
+						}
 					}).pipe(
 						Effect.mapError(
 							(cause) =>

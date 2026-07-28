@@ -6,7 +6,6 @@ import { Effect, Exit, Option } from "effect";
 import { describe, expect, it } from "vitest";
 
 import {
-	DecodeForgeProfileArgument,
 	DecodeHandoffOutput,
 	renderer_url,
 	ServeRendererAsset,
@@ -57,16 +56,6 @@ describe("desktop renderer host", () => {
 			),
 		).toBe("artisan://app/#pair=code%20with%20spaces&forge=http%3A%2F%2F127.0.0.1%3A52985%2F");
 		expect(renderer_url(Option.none())).toBe("artisan://app/");
-	});
-
-	it("accepts only a validated --forge-profile argument", () => {
-		expect(DecodeForgeProfileArgument(["editor.exe", "--forge-profile=browser-dev"])).toBe(
-			"browser-dev",
-		);
-		expect(DecodeForgeProfileArgument(["editor.exe"])).toBeUndefined();
-		expect(DecodeForgeProfileArgument(["--forge-profile=../escape"])).toBeUndefined();
-		expect(DecodeForgeProfileArgument(["--forge-profile=has space"])).toBeUndefined();
-		expect(DecodeForgeProfileArgument(["--forge-profile="])).toBeUndefined();
 	});
 
 	it("serves bundled assets with an index fallback confined to the payload", async () => {

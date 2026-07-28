@@ -26,28 +26,37 @@ Branch continuity only. Durable status lives in
   the codex-only boundary is retired. Steer/approval/question/subagents remain
   honestly unsupported for Claude; `Open` re-probes every run (~20s Windows).
 
-## Dev/Install Separation (current milestone)
+## One Forge Per Home (current milestone)
 
-- Dev world: `pnpm run dev:forge` (browser-dev profile, built bundle on 4848,
-  the only composition that passes `--serve-frontend`), `pnpm run dev` (Vite
-  HMR on 4849 proxying `/api` + `/health`), `dev:open`/`dev:pair` (`ae open`,
-  optionally `--origin`), `dev:ae`/`dev:ae-bootstrap` source-run CLI wrappers.
-  Dev badge + `[Dev]` title key off a non-`default` `/health` profile. Debug
-  Rust builds refuse the installed home.
+- The profile concept is removed. Each Artisan home (`ARTISAN_HOME`, default
+  `%LOCALAPPDATA%\Artisan`) hosts exactly one Forge: `config.json`,
+  `secrets.json`, `state.json`, `forge.log`, and `data/` live at the home
+  root beside `installation.json`. Both CLIs auto-migrate a single legacy
+  `profiles/<name>/` directory into the home root at the path-resolution
+  choke point (Rust `instance.rs`, TS `node-instance-store.ts`) and fail
+  with an actionable error when several legacy profiles exist. No
+  `--profile` flag or `ARTISAN_PROFILE` env remains anywhere.
+- Dev world: `pnpm run dev:forge` (built bundle on 4848, the only composition
+  that passes `--serve-frontend`), `pnpm run dev` (Vite HMR on 4849 proxying
+  `/api` + `/health`), `dev:open`/`dev:pair` (`ae open`, optionally
+  `--origin`), `dev:ae`/`dev:ae-bootstrap` source-run CLI wrappers. The dev
+  home is `.dist/dev/forge-home`. Dev badge + `[Dev]` title key off
+  `development: true` in `/health` (true iff `serve_frontend`). Debug Rust
+  builds refuse the installed home.
 - Installed world: `ae open` (and `artisan://forge/start`) launches the
-  Electron editor from the version payload with `--forge-profile=<name>`;
-  `ae open --browser` / `--origin` keep the paired-browser flow. The editor is
-  a sandboxed, context-isolated, bridge-free window that loads the bundled
-  frontend from `artisan://app`, obtains `{endpoint, pair_code}` from hidden
-  `ae open --handoff` stdout (one-time, never argv/disk), pairs cross-origin
-  at `/api/pair` with credentials, and connects WS to the adopted loopback
-  endpoint. Session cookie lives in a non-persistent partition.
-- Forge static hosting is per-profile config (`serve_frontend`; env
-  `ARTISAN_STATIC_FRONTEND_ROOT` only when enabled). Installed default
-  profiles serve `/health` + `/api` control/WS only; SPA routes 404. The
-  frontend stays bundled in the forge payload (one build pipeline); serving is
-  gated, not the artifact. Gate: `.tests/forge/static-hosting-gate.test.ts`
-  plus Rust `process.rs`/`profile.rs` unit gates.
+  Electron editor from the version payload; `ae open --browser` / `--origin`
+  keep the paired-browser flow. The editor is a sandboxed, context-isolated,
+  bridge-free window that loads the bundled frontend from `artisan://app`,
+  obtains `{endpoint, pair_code}` from hidden `ae open --handoff` stdout
+  (one-time, never argv/disk), pairs cross-origin at `/api/pair` with
+  credentials, and connects WS to the adopted loopback endpoint. Session
+  cookie lives in a non-persistent partition.
+- Forge static hosting is per-home config (`serve_frontend`; env
+  `ARTISAN_STATIC_FRONTEND_ROOT` only when enabled). Installed homes serve
+  `/health` + `/api` control/WS only; SPA routes 404. The frontend stays
+  bundled in the forge payload (one build pipeline); serving is gated, not
+  the artifact. Gate: `.tests/forge/static-hosting-gate.test.ts` plus Rust
+  `process.rs`/`instance.rs` unit gates.
 - Frontend endpoint adoption is restricted to non-HTTP(S) pages
   (`lib/runtime/forge-endpoint.ts`): a crafted `#pair=…&forge=…` link on a
   Forge-served page cannot redirect host-scoped loopback cookies to a sibling
@@ -64,17 +73,18 @@ Branch continuity only. Durable status lives in
   versions (≤0.2.1) as `unverifiable`, which stays healthy. Diagnostic only.
 - Engine-state audit: Forge-owned state (artisan.sqlite, forge-sessions.json,
   guidance, model-behaviour) and Codex's sqlite family (`CODEX_SQLITE_HOME` →
-  `data_root/codex-sqlite`; proven on the installed profile) are per-profile.
-  By design `CODEX_HOME` (auth/config/rollout sessions) stays user-global;
-  Claude has no state/credential split — `CLAUDE_CONFIG_DIR` would relocate
-  `.credentials.json` and de-authenticate every profile — so Forge-spawned
-  Claude runs share `~/.claude` project history. Documented gap, unfixed.
+  `data_root/codex-sqlite`) are scoped to the home's `data_root`. By design
+  `CODEX_HOME` (auth/config/rollout sessions) stays user-global; Claude has
+  no state/credential split — `CLAUDE_CONFIG_DIR` would relocate
+  `.credentials.json` and de-authenticate the user — so Forge-spawned Claude
+  runs share `~/.claude` project history. Documented gap, unfixed.
 
 ## Other Standing Facts
 
-- `ae` profiles/setup/doctor contain no project roots; doctor repair restores
-  installation/profile/protocol state only; only explicit `ae setup` creates
-  profiles. Uninstall removes an exact owned tree; data removal stays explicit.
+- `ae` setup/doctor contain no project roots; doctor repair restores
+  installation/instance/protocol state only; only explicit `ae setup` creates
+  the Forge config. Uninstall removes an exact owned tree; data removal stays
+  explicit.
 - The per-user `artisan://` handler targets stable native `ae`; hidden
   `ae protocol` accepts only `artisan://forge/start`.
 - Codex app-server support is minimum-version based with canonical kebab-case
@@ -90,19 +100,20 @@ Branch continuity only. Durable status lives in
 
 ## Verification Snapshot
 
-- 2026-07-28 dev/install separation slice: root TypeScript clean; focused
-  Vitest green — `.tests/forge` + `.tests/desktop` + `.tests/cli` (17 files,
-  69 tests) and `.tests/frontend` (31 files, 169 tests) including the new
-  static-hosting gate, forge-endpoint, renderer-host, pairing-fragment, and
-  WS-target suites; `cargo fmt`/`clippy -D warnings` clean; cargo tests 17
-  bootstrap + 25 CLI passing (payload-manifest writer + doctor drift checks). Desktop shape tests and the packaged verifier
-  now assert the renderer payload. A headed Electron smoke passed via CDP
-  against the dev Forge: `artisan://app` load, fragment consumed/stripped,
-  `[Dev]` title and badge, cross-origin pairing, WS transport, hydrated
-  shell; `package:desktop` plus the rewritten `verify:desktop-package`
-  passed. Still unverified: the installed-payload path end to end (real
-  install, Rust `ae open` → packaged editor; unit-tested only), and
-  release-only/signing CI gates.
+- 2026-07-28 single-Forge-per-home refactor: full `pnpm run test` green (228
+  files passed, 3 skipped; 1,548 tests passed, 7 skipped; ~286s); root
+  TypeScript, oxlint, and oxfmt clean; `cargo fmt --check`/`clippy -D
+warnings` clean; cargo tests 17 bootstrap + 28 CLI passing (including new
+  legacy-profile migration gates in `instance.rs`). Functional dev-flow
+  proof: the dev home migrated `profiles/browser-dev` to the home root via
+  the choke-point migration, TS `ae setup`/`start` run profile-less, 4848
+  `/health` reports `development:true`, the SPA serves, and Rust `dev:ae`
+  `status`/`doctor`/`open`/`open --handoff` all operate on the single
+  instance (doctor honestly reports the dev home's missing installation).
+  Still unverified: the installed-payload path end to end (the real install
+  migrates itself when a future release's `ae` runs there; simulated only in
+  temp-dir tests), the packaged desktop editor against the profile-less
+  handoff, and release-only/signing CI gates.
 - Earlier standing results: the Claude adapter revival passed full validate
   (220 files, 1,511 passed, 7 skipped) on 2026-07-28; Windows distribution
   artifact/lifecycle and packaged-bootstrap gates passed 2026-07-27; live

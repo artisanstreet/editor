@@ -13,12 +13,6 @@ export const ForgeConfigSchema = Schema.Struct({
 	listen_port: Schema.Int.check(Schema.isBetween({ maximum: 65_535, minimum: 0 })),
 	migrations_path: Schema.String,
 	/**
-	 * Names the Forge profile this host serves. It is reported on `/health` so a
-	 * renderer can tell an installed release apart from a development instance
-	 * pointed at a different data root.
-	 */
-	profile: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128)),
-	/**
 	 * Machine-global root the instance registry lives under. Absent in embedded
 	 * compositions that have no announcement duty, such as tests.
 	 */
@@ -38,7 +32,6 @@ export type ForgeConfigInput = Readonly<{
 	readonly listen_port?: number;
 	readonly instance_registry_root?: string;
 	readonly migrations_path: string;
-	readonly profile?: string;
 	readonly static_frontend_root?: string;
 }>;
 
@@ -49,7 +42,6 @@ export function decode_forge_config(input: ForgeConfigInput): ForgeConfig {
 		allowed_origins: input.allowed_origins ?? ["artisan://app"],
 		listen_host: input.listen_host ?? "127.0.0.1",
 		listen_port: input.listen_port ?? 0,
-		profile: input.profile ?? "default",
 		websocket_path: "/api/ws",
 	});
 }

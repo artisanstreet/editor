@@ -8,7 +8,6 @@ import { resolve_desktop_paths } from "./paths";
 import {
 	app_host,
 	app_scheme,
-	DecodeForgeProfileArgument,
 	DecodeHandoffOutput,
 	DesktopLauncherError,
 	renderer_url,
@@ -28,20 +27,17 @@ protocol.registerSchemesAsPrivileged([
 
 /**
  * Obtains `{endpoint, pair_code}` from the installed `ae`, which owns Forge
- * lifecycle, profiles, and pairing. The capability travels only through this
- * process's stdout pipe — never argv, disk, or a browser navigation.
+ * lifecycle and pairing for the home's single instance. The capability travels
+ * only through this process's stdout pipe — never argv, disk, or a browser
+ * navigation.
  */
-const RequestForgeHandoff = (ae_command_path: string, profile: string | undefined) =>
+const RequestForgeHandoff = (ae_command_path: string) =>
 	Effect.callback<ForgeHandoff, DesktopLauncherError>((resume) => {
-		const child = spawn(
-			ae_command_path,
-			["open", "--handoff", ...(profile === undefined ? [] : ["--profile", profile])],
-			{
-				shell: process.platform === "win32",
-				stdio: ["ignore", "pipe", "ignore"],
-				windowsHide: true,
-			},
-		);
+		const child = spawn(ae_command_path, ["open", "--handoff"], {
+			shell: process.platform === "win32",
+			stdio: ["ignore", "pipe", "ignore"],
+			windowsHide: true,
+		});
 		let stdout = "";
 		let settled = false;
 		const complete = (result: Effect.Effect<ForgeHandoff, DesktopLauncherError>) => {
@@ -81,9 +77,9 @@ const RequestForgeHandoff = (ae_command_path: string, profile: string | undefine
 
 /**
  * The installed editor is a windowed renderer host and nothing more: `ae`
- * owns Forge lifecycle, profiles, and pairing; the renderer talks to Forge
- * over plain HTTP/WS exactly like a paired browser. There is no preload and
- * no IPC surface — the window is sandboxed with context isolation on.
+ * owns Forge lifecycle and pairing; the renderer talks to Forge over plain
+ * HTTP/WS exactly like a paired browser. There is no preload and no IPC
+ * surface — the window is sandboxed with context isolation on.
  */
 export const StartDesktop = Effect.gen(function* () {
 	if (!app.requestSingleInstanceLock()) {
@@ -113,10 +109,7 @@ export const StartDesktop = Effect.gen(function* () {
 		Effect.runPromise(ServeRendererAsset(frontend_root, request.url)),
 	);
 
-	let forge_profile = DecodeForgeProfileArgument(process.argv);
-	const ObtainHandoff = Effect.suspend(() =>
-		RequestForgeHandoff(paths.ae_command_path, forge_profile),
-	).pipe(
+	const ObtainHandoff = Effect.suspend(() => RequestForgeHandoff(paths.ae_command_path)).pipe(
 		Effect.tapCause((cause) =>
 			Effect.sync(() =>
 				console.error(
@@ -170,11 +163,10 @@ export const StartDesktop = Effect.gen(function* () {
 			catch: (cause) => cause,
 		});
 	});
-	app.on("second-instance", (_event, command_line) => {
+	app.on("second-instance", () => {
 		if (editor_window.isMinimized()) editor_window.restore();
 		editor_window.focus();
-		/** A repeated `ae open --profile x` retargets the running editor's next pairing. */
-		forge_profile = DecodeForgeProfileArgument(command_line) ?? forge_profile;
+		/** A repeated `ae open` re-pairs the running editor with a fresh capability. */
 		void Effect.runPromise(LoadRenderer).catch(() => undefined);
 	});
 	app.on("window-all-closed", () => app.quit());

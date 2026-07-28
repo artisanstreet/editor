@@ -292,7 +292,7 @@ const MakeHarness = async (): Promise<Harness> => {
 		Layer.succeed(
 			ForgeUpdateLifecycle,
 			ForgeUpdateLifecycle.of({
-				Quiesce: () => Effect.succeed({ running_profiles: [] }),
+				Quiesce: () => Effect.succeed({ was_running: false }),
 				Restore: () => Effect.void,
 				ResumeAndVerify: () => Effect.void,
 				VerifyCurrent: () => Effect.void,
@@ -531,9 +531,9 @@ describe("hermetic Windows distribution lifecycle", () => {
 		});
 		expect(harness.events).toEqual([
 			`health:${harness.permanent_ae_path}`,
-			`setup:${harness.permanent_ae_path}:setup|--profile|default`,
-			`start:${harness.permanent_ae_path}:start|--profile|default`,
-			`status:${harness.permanent_ae_path}:status|--profile|default|--json`,
+			`setup:${harness.permanent_ae_path}:setup`,
+			`start:${harness.permanent_ae_path}:start`,
+			`status:${harness.permanent_ae_path}:status|--json`,
 			`delegate:${harness.permanent_ae_path}:status`,
 			"cleanup",
 		]);

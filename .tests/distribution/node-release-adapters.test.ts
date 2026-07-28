@@ -357,10 +357,9 @@ describe("Node release adapters", () => {
 		});
 	});
 
-	it("stops every running owned profile and restarts exactly that set on the new version", async () => {
+	it("stops a running Forge and restarts it on the new version", async () => {
 		const root = await mkdtemp(join(tmpdir(), "artisan-forge-update-"));
-		await mkdir(join(root, "profiles", "default"), { recursive: true });
-		await writeFile(join(root, "profiles", "default", "config.json"), "{}");
+		await writeFile(join(root, "config.json"), "{}");
 		const outputs = [
 			'{"state":"running"}',
 			"",
@@ -392,30 +391,22 @@ describe("Node release adapters", () => {
 				ForgeUpdateLifecycle.pipe(Effect.provide(layer)),
 			);
 			const snapshot = await Effect.runPromise(lifecycle.Quiesce("0.1.0"));
-			expect(snapshot).toEqual({ running_profiles: ["default"] });
+			expect(snapshot).toEqual({ was_running: true });
 			await Effect.runPromise(lifecycle.ResumeAndVerify("0.2.0", snapshot));
 			expect(requests.map((request) => request.argv.at(-1))).toEqual([
-				expect.stringContaining(
-					'versions\\0.1.0\\bin\\ae.cmd" status --profile default --json',
-				),
-				expect.stringContaining('versions\\0.1.0\\bin\\ae.cmd" stop --profile default'),
-				expect.stringContaining(
-					'versions\\0.1.0\\bin\\ae.cmd" status --profile default --json',
-				),
-				expect.stringContaining('versions\\0.2.0\\bin\\ae.cmd" start --profile default'),
-				expect.stringContaining(
-					'versions\\0.2.0\\bin\\ae.cmd" status --profile default --json',
-				),
-				expect.stringContaining(
-					'versions\\0.2.0\\bin\\ae.cmd" doctor --profile default --json',
-				),
+				expect.stringContaining('versions\\0.1.0\\bin\\ae.cmd" status --json'),
+				expect.stringContaining('versions\\0.1.0\\bin\\ae.cmd" stop'),
+				expect.stringContaining('versions\\0.1.0\\bin\\ae.cmd" status --json'),
+				expect.stringContaining('versions\\0.2.0\\bin\\ae.cmd" start'),
+				expect.stringContaining('versions\\0.2.0\\bin\\ae.cmd" status --json'),
+				expect.stringContaining('versions\\0.2.0\\bin\\ae.cmd" doctor --json'),
 			]);
 		} finally {
 			await rm(root, { force: true, recursive: true });
 		}
 	});
 
-	it("treats an installation with no Forge profiles as a valid empty update snapshot", async () => {
+	it("treats an installation with no configured Forge as a valid empty update snapshot", async () => {
 		const root = await mkdtemp(join(tmpdir(), "artisan-forge-update-"));
 		let process_calls = 0;
 		const host = Layer.succeed(
@@ -436,7 +427,7 @@ describe("Node release adapters", () => {
 				ForgeUpdateLifecycle.pipe(Effect.provide(layer)),
 			);
 			await expect(Effect.runPromise(lifecycle.Quiesce("0.1.0"))).resolves.toEqual({
-				running_profiles: [],
+				was_running: false,
 			});
 			await expect(
 				Effect.runPromise(lifecycle.VerifyCurrent("0.1.0")),
@@ -449,8 +440,7 @@ describe("Node release adapters", () => {
 
 	it("rejects non-JSON Forge status as a typed quiesce failure", async () => {
 		const root = await mkdtemp(join(tmpdir(), "artisan-forge-update-"));
-		await mkdir(join(root, "profiles", "default"), { recursive: true });
-		await writeFile(join(root, "profiles", "default", "config.json"), "{}");
+		await writeFile(join(root, "config.json"), "{}");
 		const host = Layer.succeed(
 			HealthProcessHost,
 			HealthProcessHost.of({

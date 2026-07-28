@@ -39,18 +39,6 @@ describe("Forge boundary", () => {
 
 		expect(config.listen_host).toBe("127.0.0.1");
 		expect(config.listen_port).toBe(0);
-		expect(config.profile).toBe("default");
-	});
-
-	it("carries a named profile so a renderer can tell instances apart", () => {
-		const config = decode_forge_config({
-			database_path: "C:/artisan/data.sqlite",
-			instance_id: test_instance_id,
-			migrations_path: "C:/artisan/migrations",
-			profile: "browser-dev",
-		});
-
-		expect(config.profile).toBe("browser-dev");
 	});
 
 	it("rejects a second owner for the same durable database", async () => {
@@ -93,8 +81,9 @@ describe("Forge boundary", () => {
 		});
 
 		const health = await fetch(new URL("/healthz", host.endpoint));
+		/** Static hosting is on in this composition, so health marks development. */
 		expect(await health.json()).toEqual({
-			profile: "default",
+			development: true,
 			service: "artisan-forge",
 			status: "ready",
 			version: 1,
@@ -252,7 +241,6 @@ describe("Forge boundary", () => {
 				endpoint: "http://127.0.0.1:4848/",
 				instance_id: "instance-a",
 				pid: 42,
-				profile: "default",
 				started_at: "2026-07-26T00:00:00.000Z",
 				version: 1,
 			}).pipe(Effect.provide(MakeSnowflakeIdLive(37))),

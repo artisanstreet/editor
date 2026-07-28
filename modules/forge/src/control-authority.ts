@@ -40,7 +40,7 @@ const LoadSessions = (path: string, now: number) =>
 /**
  * Persists session digests atomically. Only SHA-256 digests reach disk:
  * reading the store cannot recover a cookie value, so durability does not
- * widen the trust boundary beyond the profile directory's own permissions.
+ * widen the trust boundary beyond the home directory's own permissions.
  */
 const PersistSessions = (path: string, sessions: ReadonlyMap<string, number>) =>
 	WriteFileAtomically(

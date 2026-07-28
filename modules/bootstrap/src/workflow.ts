@@ -111,8 +111,8 @@ export const RunBootstrap = (input: unknown) =>
 
 		if (route !== "delegated") {
 			for (const [operation, argv] of [
-				["setup", ["setup", "--profile", "default"]],
-				["start", ["start", "--profile", "default"]],
+				["setup", ["setup"]],
+				["start", ["start"]],
 			] as const) {
 				const result = yield* permanent_ae.Execute(
 					handoff.permanent_ae_path,
@@ -124,8 +124,6 @@ export const RunBootstrap = (input: unknown) =>
 
 			const status = yield* permanent_ae.Execute(handoff.permanent_ae_path, "status", [
 				"status",
-				"--profile",
-				"default",
 				"--json",
 			]);
 			yield* RequireSuccess("status", status);

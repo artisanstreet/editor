@@ -562,7 +562,7 @@ fn invoke_ae_diagnostic(release: &Path, arguments: &[&str]) -> Result<()> {
     if !executable.is_file() {
         return Err(BootstrapError::MissingCli(executable));
     }
-    // Doctor reports profile-level problems independently. Repair owns the
+    // Doctor reports Forge-instance problems independently. Repair owns the
     // installation invariants above and must not recurse through `--fix`.
     let _status = std::process::Command::new(&executable)
         .args(arguments)
@@ -591,7 +591,18 @@ pub fn uninstall(root: &Path, remove_data: bool) -> Result<()> {
     remove_path_in_root(root, &root.join("bin"))?;
     remove_path_in_root(root, &root.join("installation.json"))?;
     if remove_data {
-        remove_path_in_root(root, &root.join("profiles"))?;
+        // The home hosts one Forge instance at its root; legacy `profiles/`
+        // trees predate the single-instance layout and are removed alongside.
+        for name in [
+            "config.json",
+            "secrets.json",
+            "state.json",
+            "forge.log",
+            "data",
+            "profiles",
+        ] {
+            remove_path_in_root(root, &root.join(name))?;
+        }
     }
     schedule_installation_cleanup(root, remove_data)
 }

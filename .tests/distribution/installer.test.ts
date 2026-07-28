@@ -191,19 +191,15 @@ const WithInstaller = async (
 				Quiesce: (version) =>
 					Effect.sync(() => {
 						lifecycle_events.push(`quiesce:${version}`);
-						return { running_profiles: ["default"] };
+						return { was_running: true };
 					}),
 				Restore: (version, snapshot) =>
 					Effect.sync(() => {
-						lifecycle_events.push(
-							`restore:${version}:${snapshot.running_profiles.join(",")}`,
-						);
+						lifecycle_events.push(`restore:${version}:${String(snapshot.was_running)}`);
 					}),
 				ResumeAndVerify: (version, snapshot) =>
 					Effect.sync(() => {
-						lifecycle_events.push(
-							`resume:${version}:${snapshot.running_profiles.join(",")}`,
-						);
+						lifecycle_events.push(`resume:${version}:${String(snapshot.was_running)}`);
 					}).pipe(
 						Effect.andThen(
 							options.resume_failure === true
@@ -419,8 +415,8 @@ describe("Installer", () => {
 				});
 				expect(lifecycle_events).toEqual([
 					"quiesce:0.1.0",
-					"resume:0.2.0:default",
-					"restore:0.1.0:default",
+					"resume:0.2.0:true",
+					"restore:0.1.0:true",
 				]);
 				expect(await readdir(join(root, "versions"))).toContain("0.0.9");
 			},

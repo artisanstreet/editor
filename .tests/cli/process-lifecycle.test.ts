@@ -4,13 +4,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { ForgeControl } from "../../modules/cli/src/lifecycle";
 import { ForgeControlLive } from "../../modules/cli/src/node-control";
 import { VerifyStoppedForgeProcess } from "../../modules/cli/src/node-launcher";
-import type { ForgeRuntimeState } from "../../modules/cli/src/profile";
+import type { ForgeRuntimeState } from "../../modules/cli/src/instance";
 
 const State = (pid: number): ForgeRuntimeState => ({
 	endpoint: "http://127.0.0.1:4848",
 	instance_id: "2ef3d1c0-e8a4-4f4d-9d8a-744b1f18879d",
 	pid,
-	profile: "default",
 	started_at: "2026-07-26T00:00:00.000Z",
 	version: 1,
 });

@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 
-use crate::{CliError, Result, profile::read_json};
+use crate::{CliError, Result, instance::read_json};
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct InstallationManifest {

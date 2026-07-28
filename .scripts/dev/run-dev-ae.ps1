@@ -2,14 +2,11 @@ $ErrorActionPreference = "Stop"
 
 $workspace = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $development = Join-Path $workspace ".dist\dev"
-$profile_home = Join-Path $development "forge-home"
+$forge_home = Join-Path $development "forge-home"
 
-New-Item -ItemType Directory -Force -Path $profile_home | Out-Null
+New-Item -ItemType Directory -Force -Path $forge_home | Out-Null
 
-$env:ARTISAN_HOME = $profile_home
-# The dev world has exactly one profile; make it the ambient default so no
-# dev command ever needs `--profile browser-dev`.
-$env:ARTISAN_PROFILE = "browser-dev"
+$env:ARTISAN_HOME = $forge_home
 
 # pnpm forwards the literal `--` separator into the script's arguments, so
 # both `pnpm run dev:ae open` and `pnpm run dev:ae -- open` reach the CLI

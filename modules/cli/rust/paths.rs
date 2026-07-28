@@ -5,7 +5,6 @@ use crate::{CliError, Result};
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Layout {
     pub root: PathBuf,
-    pub profiles: PathBuf,
     pub manifest: PathBuf,
 }
 
@@ -18,7 +17,6 @@ impl Layout {
         #[cfg(debug_assertions)]
         forbid_installed_home(&root)?;
         Ok(Self {
-            profiles: root.join("profiles"),
             manifest: root.join("installation.json"),
             root,
         })
@@ -88,15 +86,13 @@ mod tests {
     use super::*;
 
     #[test]
-    fn layout_keeps_manifest_and_profiles_under_root() {
+    fn layout_keeps_the_manifest_under_root() {
         let root = PathBuf::from("example");
         let layout = Layout {
-            profiles: root.join("profiles"),
             manifest: root.join("installation.json"),
             root: root.clone(),
         };
         assert!(layout.manifest.starts_with(&root));
-        assert!(layout.profiles.starts_with(&root));
     }
 
     #[cfg(debug_assertions)]
@@ -107,7 +103,7 @@ mod tests {
             forbid_installed_home(&installed),
             Err(CliError::DebugBuildGuard(message)) if message.contains("pnpm run dev:ae")
         ));
-        assert!(forbid_installed_home(&installed.join("profiles")).is_err());
+        assert!(forbid_installed_home(&installed.join("data")).is_err());
         assert!(forbid_installed_home(&std::env::temp_dir().join("artisan-dev-home")).is_ok());
     }
 
@@ -122,7 +118,7 @@ mod tests {
             base
         ));
         assert!(is_same_or_inside(
-            Path::new(r"C:\Users\Test\AppData\Local\Artisan\profiles"),
+            Path::new(r"C:\Users\Test\AppData\Local\Artisan\data"),
             base
         ));
         assert!(!is_same_or_inside(

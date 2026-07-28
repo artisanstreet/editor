@@ -6,32 +6,30 @@ import {
 	PrivateFilePermissions,
 	PrivateFilePermissionsPlatform,
 } from "@artisan/backend";
-import { Effect, FileSystem, Layer, Option, Path, Schema } from "effect";
+import { Console, Effect, FileSystem, Layer, Option, Path, Schema } from "effect";
 
 import { CliPlatform, make_cli_platform_layer } from "./adapters";
 import {
-	DecodeForgeProfileConfig,
-	ForgeProfileError,
-	ForgeProfileName,
-	ForgeProfileStore,
+	DecodeForgeInstanceConfig,
+	ForgeInstanceError,
+	ForgeInstanceStore,
 	ForgeRuntimeState,
 	ForgeSecrets,
-	type ForgeProfilePaths,
+	type ForgeInstancePaths,
 	GenerateForgeToken,
-} from "./profile";
+} from "./instance";
 
-const DecodeProfile = Schema.decodeUnknownSync(ForgeProfileName);
 const DecodeSecrets = Schema.decodeUnknownSync(ForgeSecrets);
 const DecodeState = Schema.decodeUnknownSync(ForgeRuntimeState);
 
-const profile_error = (code: ForgeProfileError["code"]) => new ForgeProfileError({ code });
+const instance_error = (code: ForgeInstanceError["code"]) => new ForgeInstanceError({ code });
 
-/** Rejects links at every directory the CLI owns before a profile file is opened. */
+/** Rejects links at every directory the CLI owns before an instance file is opened. */
 const AssertPrivateDirectory = (file_system: FileSystem.FileSystem, path: string) =>
 	file_system.stat(path).pipe(
 		Effect.filterOrFail(
 			(metadata) => metadata.type === "Directory",
-			() => new Error("unsafe profile directory"),
+			() => new Error("unsafe Artisan home directory"),
 		),
 		Effect.asVoid,
 	);
@@ -50,39 +48,100 @@ const AssertPrivateRegularFile = (file_system: FileSystem.FileSystem, path: stri
 	file_system.stat(path).pipe(
 		Effect.filterOrFail(
 			(metadata) => metadata.type === "File",
-			() => new Error("unsafe profile file"),
+			() => new Error("unsafe Forge instance file"),
 		),
 		Effect.asVoid,
 	);
 
+/**
+ * Migrates the legacy `profiles/<name>/` layout into the home root. Runs at
+ * the store's path-resolution choke point: with exactly one legacy profile its
+ * contents move to the home root and the empty tree is removed; with more the
+ * home is ambiguous and every command fails until the user deletes all but
+ * one. A home that already has a root `config.json` is current and skipped.
+ */
+const MigrateLegacyProfiles = (
+	file_system: FileSystem.FileSystem,
+	path_service: Path.Path,
+	home: string,
+) =>
+	Effect.gen(function* () {
+		const { join, resolve } = path_service;
+		const home_directory = resolve(home);
+		if (yield* file_system.exists(join(home_directory, "config.json"))) return;
+		const profiles_directory = join(home_directory, "profiles");
+		if (!(yield* file_system.exists(profiles_directory))) return;
+		const entries = yield* file_system.readDirectory(profiles_directory);
+		const directories: Array<string> = [];
+		for (const entry of entries) {
+			const metadata = yield* file_system.stat(join(profiles_directory, entry));
+			if (metadata.type === "Directory") directories.push(entry);
+		}
+		if (directories.length > 1) {
+			return yield* Effect.fail(
+				new ForgeInstanceError({
+					cause: new Error(
+						`this Artisan home has multiple legacy Forge profiles (${directories
+							.sort()
+							.join(", ")}) and Artisan now runs one Forge per home; ` +
+							`delete all but one directory under ${profiles_directory} and retry`,
+					),
+					code: "legacy_profiles",
+				}),
+			);
+		}
+		const single = directories[0];
+		if (single !== undefined) {
+			const source = join(profiles_directory, single);
+			for (const entry of yield* file_system.readDirectory(source)) {
+				const destination = join(home_directory, entry);
+				if (yield* file_system.exists(destination)) {
+					return yield* Effect.fail(
+						new ForgeInstanceError({
+							cause: new Error(
+								`cannot migrate legacy Forge profile \`${single}\`: ${destination} already exists`,
+							),
+							code: "legacy_profiles",
+						}),
+					);
+				}
+				yield* file_system.rename(join(source, entry), destination);
+			}
+			yield* Console.error(
+				`migrated legacy Forge profile \`${single}\` into the Artisan home root at ${home_directory}`,
+			);
+		}
+		yield* file_system.remove(profiles_directory, { force: true, recursive: true });
+	}).pipe(
+		Effect.mapError((cause) =>
+			cause instanceof ForgeInstanceError
+				? cause
+				: new ForgeInstanceError({ cause, code: "invalid" }),
+		),
+	);
+
 /** Node is needed only for atomic same-directory publication and no-follow directory checks. */
-export const make_node_profile_store_layer = (home_override?: string) => {
-	const ProfileStoreLive = Layer.effect(
-		ForgeProfileStore,
+export const make_node_instance_store_layer = (home_override?: string) => {
+	const InstanceStoreLive = Layer.effect(
+		ForgeInstanceStore,
 		Effect.gen(function* () {
 			const file_system = yield* FileSystem.FileSystem;
 			const path_service = yield* Path.Path;
 			const platform = yield* CliPlatform;
 			const home = home_override ?? platform.home;
 			const { dirname, join, resolve } = path_service;
-			const Paths = (profile: string): Effect.Effect<ForgeProfilePaths, ForgeProfileError> =>
-				Effect.try({
-					catch: () => profile_error("invalid"),
-					try: () => {
-						const name = DecodeProfile(profile);
-						const profile_directory = resolve(home, "profiles", name);
-						const profiles_directory = resolve(home, "profiles");
-						if (dirname(profile_directory) !== profiles_directory)
-							throw new Error("profile escaped home");
-						return {
-							config_path: join(profile_directory, "config.json"),
-							log_path: join(profile_directory, "forge.log"),
-							readiness_path: join(profile_directory, "ready.json"),
-							secrets_path: join(profile_directory, "secrets.json"),
-							state_path: join(profile_directory, "state.json"),
-						};
-					},
-				});
+			const home_directory = resolve(home);
+			const instance_paths: ForgeInstancePaths = {
+				config_path: join(home_directory, "config.json"),
+				log_path: join(home_directory, "forge.log"),
+				readiness_path: join(home_directory, "ready.json"),
+				secrets_path: join(home_directory, "secrets.json"),
+				state_path: join(home_directory, "state.json"),
+			};
+			const Migrated = yield* Effect.cached(
+				MigrateLegacyProfiles(file_system, path_service, home),
+			);
+			const Paths = () => Migrated.pipe(Effect.as(instance_paths));
 
 			const EnsureDirectory = (
 				path: string,
@@ -91,51 +150,43 @@ export const make_node_profile_store_layer = (home_override?: string) => {
 				file_system.makeDirectory(path, { recursive: true, mode: 0o700 }).pipe(
 					Effect.andThen(AssertPrivateDirectory(file_system, path)),
 					Effect.andThen(permissions.RestrictDirectory(path)),
-					Effect.mapError(() => profile_error("invalid")),
+					Effect.mapError(() => instance_error("invalid")),
 				);
 
-			const EnsureProfileDirectory = (
-				profile: string,
-				permissions: PrivateFilePermissions["Service"],
-			) =>
-				Effect.gen(function* () {
-					const paths = yield* Paths(profile);
-					const home_directory = resolve(home);
-					yield* EnsureDirectory(home_directory, permissions);
-					yield* EnsureDirectory(dirname(dirname(paths.config_path)), permissions);
-					yield* EnsureDirectory(dirname(paths.config_path), permissions);
-					return paths;
-				});
+			const EnsureHomeDirectory = (permissions: PrivateFilePermissions["Service"]) =>
+				EnsureDirectory(home_directory, permissions).pipe(
+					Effect.andThen(Migrated),
+					Effect.as(instance_paths),
+				);
 
 			const ReadRequired = <A>(path: string, decode: (input: unknown) => A) =>
 				file_system.exists(path).pipe(
 					Effect.filterOrFail(
 						(exists) => exists,
-						() => profile_error("missing"),
+						() => instance_error("missing"),
 					),
 					Effect.andThen(AssertPrivateRegularFile(file_system, path)),
 					Effect.andThen(file_system.readFileString(path, "utf8")),
 					Effect.flatMap((encoded) =>
 						Effect.try({
 							try: () => decode(JSON.parse(encoded)),
-							catch: () => profile_error("invalid"),
+							catch: () => instance_error("invalid"),
 						}),
 					),
 					Effect.mapError((cause) =>
-						cause instanceof ForgeProfileError ? cause : profile_error("invalid"),
+						cause instanceof ForgeInstanceError ? cause : instance_error("invalid"),
 					),
 				);
 
-			const ExistingPaths = (profile: string) =>
-				Effect.gen(function* () {
-					const paths = yield* Paths(profile);
-					yield* Effect.all([
-						AssertPrivateDirectory(file_system, resolve(home)),
-						AssertPrivateDirectory(file_system, dirname(dirname(paths.config_path))),
-						AssertPrivateDirectory(file_system, dirname(paths.config_path)),
-					]).pipe(Effect.mapError(() => profile_error("invalid")));
-					return paths;
-				});
+			const ExistingPaths = () =>
+				Migrated.pipe(
+					Effect.andThen(
+						AssertPrivateDirectory(file_system, home_directory).pipe(
+							Effect.mapError(() => instance_error("invalid")),
+						),
+					),
+					Effect.as(instance_paths),
+				);
 
 			const ReadState = (path: string) =>
 				AssertPrivateRegularFile(file_system, path).pipe(
@@ -143,7 +194,7 @@ export const make_node_profile_store_layer = (home_override?: string) => {
 					Effect.flatMap((encoded) =>
 						Effect.try({
 							try: () => DecodeState(JSON.parse(encoded)),
-							catch: () => profile_error("invalid"),
+							catch: () => instance_error("invalid"),
 						}),
 					),
 					/** A stale, absent, or malformed ownership hint is never actionable. */
@@ -158,47 +209,48 @@ export const make_node_profile_store_layer = (home_override?: string) => {
 				Effect.gen(function* () {
 					/** Decode before serialization so even internal callers cannot write invalid state. */
 					const encoded = JSON.stringify(value);
-					if (encoded === undefined) return yield* Effect.fail(profile_error("invalid"));
+					if (encoded === undefined) return yield* Effect.fail(instance_error("invalid"));
 					const temporary = join(dirname(path), `.${randomUUID()}.tmp`);
 					const created = yield* permissions
 						.CreatePrivate(temporary)
-						.pipe(Effect.mapError(() => profile_error("invalid")));
-					if (Option.isNone(created)) return yield* Effect.fail(profile_error("invalid"));
+						.pipe(Effect.mapError(() => instance_error("invalid")));
+					if (Option.isNone(created))
+						return yield* Effect.fail(instance_error("invalid"));
 					yield* file_system
 						.writeFileString(temporary, `${encoded}\n`, { flag: "w" })
-						.pipe(Effect.mapError(() => profile_error("invalid")));
+						.pipe(Effect.mapError(() => instance_error("invalid")));
 					yield* permissions
 						.RestrictOwned(temporary, created.value)
-						.pipe(Effect.mapError(() => profile_error("invalid")));
+						.pipe(Effect.mapError(() => instance_error("invalid")));
 					yield* file_system.rename(temporary, path).pipe(
-						Effect.mapError(() => profile_error("invalid")),
+						Effect.mapError(() => instance_error("invalid")),
 						Effect.ensuring(
 							file_system.remove(temporary, { force: true }).pipe(Effect.ignore),
 						),
 					);
 					yield* permissions
 						.Restrict(path)
-						.pipe(Effect.mapError(() => profile_error("invalid")));
+						.pipe(Effect.mapError(() => instance_error("invalid")));
 				});
 
 			const permissions = yield* PrivateFilePermissions;
-			return ForgeProfileStore.of({
-				Ensure: (profile, input) =>
+			return ForgeInstanceStore.of({
+				Ensure: (input) =>
 					Effect.gen(function* () {
-						const paths = yield* EnsureProfileDirectory(profile, permissions);
+						const paths = yield* EnsureHomeDirectory(permissions);
 						const config = yield* Effect.try({
-							catch: () => profile_error("invalid"),
-							try: () => DecodeForgeProfileConfig(input),
+							catch: () => instance_error("invalid"),
+							try: () => DecodeForgeInstanceConfig(input),
 						});
 						yield* EnsureDirectory(config.data_root, permissions);
 						const data_root = yield* CanonicalDirectory(
 							file_system,
 							config.data_root,
-						).pipe(Effect.mapError(() => profile_error("invalid")));
+						).pipe(Effect.mapError(() => instance_error("invalid")));
 						const normalized = yield* Effect.try({
-							catch: () => profile_error("invalid"),
+							catch: () => instance_error("invalid"),
 							try: () =>
-								DecodeForgeProfileConfig({
+								DecodeForgeInstanceConfig({
 									...config,
 									data_root,
 								}),
@@ -219,7 +271,7 @@ export const make_node_profile_store_layer = (home_override?: string) => {
 							yield* WriteAtomicPrivate(
 								paths.secrets_path,
 								yield* Effect.try({
-									catch: () => profile_error("invalid"),
+									catch: () => instance_error("invalid"),
 									try: () =>
 										DecodeSecrets({
 											auth_token: GenerateForgeToken(),
@@ -229,50 +281,29 @@ export const make_node_profile_store_layer = (home_override?: string) => {
 								permissions,
 							);
 					}),
-				Load: (profile) =>
+				Load: () =>
 					Effect.gen(function* () {
-						const paths = yield* ExistingPaths(profile);
-						return yield* ReadRequired(paths.config_path, DecodeForgeProfileConfig);
+						const paths = yield* ExistingPaths();
+						return yield* ReadRequired(paths.config_path, DecodeForgeInstanceConfig);
 					}),
-				List: () =>
+				LoadSecrets: () =>
 					Effect.gen(function* () {
-						const profiles_directory = resolve(home, "profiles");
-						const exists = yield* file_system.exists(profiles_directory);
-						if (!exists) return [];
-						const names = yield* file_system.readDirectory(profiles_directory);
-						return names
-							.filter((name) => {
-								try {
-									DecodeProfile(name);
-									return true;
-								} catch {
-									return false;
-								}
-							})
-							.sort();
-					}).pipe(Effect.mapError(() => profile_error("invalid"))),
-				LoadSecrets: (profile) =>
-					Effect.gen(function* () {
-						const paths = yield* ExistingPaths(profile);
+						const paths = yield* ExistingPaths();
 						return yield* ReadRequired(paths.secrets_path, DecodeSecrets);
 					}),
-				ReadState: (profile) =>
+				ReadState: () =>
 					Effect.gen(function* () {
-						const paths = yield* ExistingPaths(profile);
+						const paths = yield* ExistingPaths();
 						return yield* ReadState(paths.state_path);
 					}),
-				RemoveStateIfOwned: (profile, expected_instance_id) =>
+				RemoveStateIfOwned: (expected_instance_id) =>
 					Effect.gen(function* () {
-						const paths = yield* ExistingPaths(profile);
+						const paths = yield* ExistingPaths();
 						const state = yield* ReadState(paths.state_path);
-						if (
-							state?.profile !== DecodeProfile(profile) ||
-							state.instance_id !== expected_instance_id
-						)
-							return false;
+						if (state?.instance_id !== expected_instance_id) return false;
 						yield* file_system
 							.remove(paths.state_path, { force: true })
-							.pipe(Effect.mapError(() => profile_error("invalid")));
+							.pipe(Effect.mapError(() => instance_error("invalid")));
 						return true;
 					}),
 				Paths,
@@ -300,7 +331,7 @@ export const make_node_profile_store_layer = (home_override?: string) => {
 			);
 		}),
 	).pipe(Layer.provide(platform_services));
-	return ProfileStoreLive.pipe(
+	return InstanceStoreLive.pipe(
 		Layer.provideMerge(selected_permissions),
 		Layer.provideMerge(platform_services),
 	);

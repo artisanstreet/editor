@@ -2,11 +2,11 @@ import { MakeSnowflakeIdLive, SnowflakeId } from "@artisan/protocol";
 import { Context, Data, Effect, Layer, Semaphore } from "effect";
 
 import {
-	ForgeProfileError,
-	ForgeProfileStore,
-	type ForgeProfileConfig,
+	ForgeInstanceError,
+	ForgeInstanceStore,
+	type ForgeInstanceConfig,
 	type ForgeRuntimeState,
-} from "./profile";
+} from "./instance";
 
 export class ForgeLifecycleError extends Data.TaggedError("ForgeLifecycleError")<{
 	readonly cause?: unknown;
@@ -17,15 +17,13 @@ export class ForgeLauncher extends Context.Service<
 	ForgeLauncher,
 	{
 		readonly StartBackground: (input: {
-			readonly config: ForgeProfileConfig;
+			readonly config: ForgeInstanceConfig;
 			readonly instance_id: string;
-			readonly profile: string;
 			readonly token: string;
 		}) => Effect.Effect<void, ForgeLifecycleError>;
 		readonly StartForeground: (input: {
-			readonly config: ForgeProfileConfig;
+			readonly config: ForgeInstanceConfig;
 			readonly instance_id: string;
-			readonly profile: string;
 			readonly token: string;
 		}) => Effect.Effect<void, ForgeLifecycleError>;
 		readonly TerminateVerified: (
@@ -53,49 +51,38 @@ export class ForgeControl extends Context.Service<
 	}
 >()("Artisan/ForgeControl") {}
 
-type ForgeStatus = "missing" | "running" | "stale" | "foreign";
+type ForgeStatus = "missing" | "running" | "stale";
 
 export class ForgeLifecycle extends Context.Service<
 	ForgeLifecycle,
 	{
-		readonly Doctor: (
-			profile: string,
-		) => Effect.Effect<
+		readonly Doctor: () => Effect.Effect<
 			{ readonly healthy: boolean; readonly state: ForgeStatus },
-			ForgeLifecycleError | ForgeProfileError
+			ForgeLifecycleError | ForgeInstanceError
 		>;
 		readonly Open: (
-			profile: string,
 			origin?: string,
-		) => Effect.Effect<string, ForgeLifecycleError | ForgeProfileError>;
+		) => Effect.Effect<string, ForgeLifecycleError | ForgeInstanceError>;
 		/**
-		 * Starts the profile's Forge when needed and mints one one-time pairing
+		 * Starts the home's Forge when needed and mints one one-time pairing
 		 * capability for a trusted local caller such as the installed editor.
 		 * The code is single-use and short-lived; nothing durable is returned.
 		 */
-		readonly PairHandoff: (
-			profile: string,
-		) => Effect.Effect<
+		readonly PairHandoff: () => Effect.Effect<
 			{ readonly endpoint: string; readonly pair_code: string },
-			ForgeLifecycleError | ForgeProfileError
+			ForgeLifecycleError | ForgeInstanceError
 		>;
 		readonly Restart: (
-			profile: string,
 			foreground?: boolean,
-		) => Effect.Effect<void, ForgeLifecycleError | ForgeProfileError>;
+		) => Effect.Effect<void, ForgeLifecycleError | ForgeInstanceError>;
 		readonly Start: (
-			profile: string,
 			foreground?: boolean,
-		) => Effect.Effect<void, ForgeLifecycleError | ForgeProfileError>;
-		readonly Status: (
-			profile: string,
-		) => Effect.Effect<
+		) => Effect.Effect<void, ForgeLifecycleError | ForgeInstanceError>;
+		readonly Status: () => Effect.Effect<
 			{ readonly state: ForgeStatus },
-			ForgeLifecycleError | ForgeProfileError
+			ForgeLifecycleError | ForgeInstanceError
 		>;
-		readonly Stop: (
-			profile: string,
-		) => Effect.Effect<void, ForgeLifecycleError | ForgeProfileError>;
+		readonly Stop: () => Effect.Effect<void, ForgeLifecycleError | ForgeInstanceError>;
 	}
 >()("Artisan/ForgeLifecycle") {}
 
@@ -103,20 +90,19 @@ export class ForgeLifecycle extends Context.Service<
 export const make_forge_lifecycle_layer = Layer.effect(
 	ForgeLifecycle,
 	Effect.gen(function* () {
-		const store = yield* ForgeProfileStore;
+		const store = yield* ForgeInstanceStore;
 		const launcher = yield* ForgeLauncher;
 		const control = yield* ForgeControl;
 		const snowflake_id = yield* SnowflakeId;
 		const lifecycle_mutex = yield* Semaphore.make(1);
 
-		const Status = (profile: string) =>
+		const Status = () =>
 			Effect.gen(function* () {
 				const state = yield* store
-					.ReadState(profile)
+					.ReadState()
 					.pipe(Effect.catch(() => Effect.succeed(undefined)));
 				if (!state) return { state: "missing" as const };
-				if (state.profile !== profile) return { state: "foreign" as const };
-				const secret = yield* store.LoadSecrets(profile);
+				const secret = yield* store.LoadSecrets();
 				const healthy = yield* control
 					.Health(state.endpoint, state.instance_id, secret.auth_token)
 					.pipe(Effect.catch(() => Effect.succeed(false)));
@@ -124,101 +110,93 @@ export const make_forge_lifecycle_layer = Layer.effect(
 			});
 
 		const WaitForReady = (
-			profile: string,
 			instance_id: string,
 			token: string,
 		): Effect.Effect<void, ForgeLifecycleError> =>
 			Effect.gen(function* () {
 				const state = yield* store
-					.ReadState(profile)
+					.ReadState()
 					.pipe(Effect.catch(() => Effect.succeed(undefined)));
-				if (state?.instance_id === instance_id && state.profile === profile) {
+				if (state?.instance_id === instance_id) {
 					const healthy = yield* control
 						.Health(state.endpoint, instance_id, token)
 						.pipe(Effect.catch(() => Effect.succeed(false)));
 					if (healthy) return;
 				}
 				yield* Effect.sleep("100 millis");
-				yield* WaitForReady(profile, instance_id, token);
+				yield* WaitForReady(instance_id, token);
 			}).pipe(
 				Effect.timeout("15 seconds"),
 				Effect.mapError((cause) => new ForgeLifecycleError({ cause, code: "timeout" })),
 			);
 
-		const WaitForStopped = (
-			profile: string,
-			instance_id: string,
-		): Effect.Effect<void, ForgeLifecycleError> =>
+		const WaitForStopped = (instance_id: string): Effect.Effect<void, ForgeLifecycleError> =>
 			Effect.gen(function* () {
 				const state = yield* store
-					.ReadState(profile)
+					.ReadState()
 					.pipe(Effect.catch(() => Effect.succeed(undefined)));
 				if (state?.instance_id !== instance_id) return;
 				yield* Effect.sleep("100 millis");
-				yield* WaitForStopped(profile, instance_id);
+				yield* WaitForStopped(instance_id);
 			}).pipe(
 				Effect.timeout("15 seconds"),
 				Effect.mapError((cause) => new ForgeLifecycleError({ cause, code: "timeout" })),
 			);
 
-		const Start = (profile: string, foreground = false) =>
+		const Start = (foreground = false) =>
 			lifecycle_mutex.withPermits(1)(
 				Effect.gen(function* () {
-					const status = yield* Status(profile);
+					const status = yield* Status();
 					if (status.state === "running") return;
-					if (status.state === "foreign")
-						return yield* Effect.fail(new ForgeLifecycleError({ code: "ownership" }));
 					if (status.state === "stale") {
-						const stale = yield* store.ReadState(profile);
-						if (!stale || stale.profile !== profile)
+						const stale = yield* store.ReadState();
+						if (!stale)
 							return yield* Effect.fail(
 								new ForgeLifecycleError({ code: "ownership" }),
 							);
 						yield* launcher.TerminateVerified(stale);
-						yield* store.RemoveStateIfOwned(profile, stale.instance_id);
+						yield* store.RemoveStateIfOwned(stale.instance_id);
 					}
-					const config = yield* store.Load(profile);
-					const secret = yield* store.LoadSecrets(profile);
+					const config = yield* store.Load();
+					const secret = yield* store.LoadSecrets();
 					const instance_id = yield* snowflake_id.Make("forge");
-					const input = { config, instance_id, profile, token: secret.auth_token };
+					const input = { config, instance_id, token: secret.auth_token };
 					if (foreground) return yield* launcher.StartForeground(input);
 					yield* launcher.StartBackground(input);
-					yield* WaitForReady(profile, instance_id, secret.auth_token).pipe(
+					yield* WaitForReady(instance_id, secret.auth_token).pipe(
 						Effect.onError(() =>
-							store.RemoveStateIfOwned(profile, instance_id).pipe(Effect.ignore),
+							store.RemoveStateIfOwned(instance_id).pipe(Effect.ignore),
 						),
 					);
 				}),
 			);
 
-		const Stop = (profile: string) =>
+		const Stop = () =>
 			lifecycle_mutex.withPermits(1)(
 				Effect.gen(function* () {
-					const state = yield* store.ReadState(profile);
+					const state = yield* store.ReadState();
 					if (!state) return;
-					if (state.profile !== profile)
-						return yield* Effect.fail(new ForgeLifecycleError({ code: "ownership" }));
-					const secret = yield* store.LoadSecrets(profile);
+					const secret = yield* store.LoadSecrets();
 					const healthy = yield* control
 						.Health(state.endpoint, state.instance_id, secret.auth_token)
 						.pipe(Effect.catch(() => Effect.succeed(false)));
 					if (healthy) {
 						yield* control.Shutdown(state.endpoint, secret.auth_token);
-						yield* WaitForStopped(profile, state.instance_id);
+						yield* WaitForStopped(state.instance_id);
 						return;
 					}
 					yield* launcher.TerminateVerified(state);
-					yield* store.RemoveStateIfOwned(profile, state.instance_id);
+					yield* store.RemoveStateIfOwned(state.instance_id);
 				}),
 			);
 
-		const PairHandoff = (profile: string) =>
+		const PairHandoff = () =>
 			Effect.gen(function* () {
-				yield* Start(profile);
-				const state = yield* store.ReadState(profile);
-				if (!state || state.profile !== profile)
+				yield* Start();
+				const state = yield* store.ReadState();
+				if (!state)
 					return yield* Effect.fail(new ForgeLifecycleError({ code: "not_running" }));
-				const secret = yield* store.LoadSecrets(profile);
+				const secret = yield* store.LoadSecrets();
 				const healthy = yield* control
 					.Health(state.endpoint, state.instance_id, secret.auth_token)
 					.pipe(Effect.catch(() => Effect.succeed(false)));
@@ -229,13 +207,13 @@ export const make_forge_lifecycle_layer = Layer.effect(
 			});
 
 		return ForgeLifecycle.of({
-			Doctor: (profile) =>
-				Status(profile).pipe(
+			Doctor: () =>
+				Status().pipe(
 					Effect.map((result) => ({ healthy: result.state === "running", ...result })),
 				),
-			Open: (profile, origin) =>
+			Open: (origin) =>
 				Effect.gen(function* () {
-					const handoff = yield* PairHandoff(profile);
+					const handoff = yield* PairHandoff();
 					const browser_origin =
 						origin === undefined
 							? handoff.endpoint
@@ -243,8 +221,7 @@ export const make_forge_lifecycle_layer = Layer.effect(
 					return `${browser_origin.replace(/\/$/, "")}/#pair=${encodeURIComponent(handoff.pair_code)}`;
 				}),
 			PairHandoff,
-			Restart: (profile, foreground) =>
-				Effect.andThen(Stop(profile), Start(profile, foreground)),
+			Restart: (foreground) => Effect.andThen(Stop(), Start(foreground)),
 			Start,
 			Status,
 			Stop,

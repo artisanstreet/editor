@@ -28,32 +28,27 @@
 
 	interface ReachableForge {
 		readonly endpoint: string;
-		readonly profile: string;
 		readonly self: boolean;
 	}
 
 	/**
 	 * `artisan://forge/start` is an OS-global protocol handler, so it can only
-	 * ever boot the installed default Forge. And a reachable /health while the
+	 * ever boot the installed Forge. And a reachable /health while the
 	 * transport fails means the server is fine but this browser holds no
 	 * session — offering "Start Forge" there would misdiagnose a pairing
 	 * problem as an outage, so the gate switches to pairing guidance instead.
+	 * A development origin is never bootable through the handler either, so a
+	 * `development: true` health latches the start affordance off.
 	 */
-	let origin_profile = $state<string | undefined>(undefined);
+	let origin_development = $state(false);
 	let origin_reachable = $state(false);
 	let other_instances = $state<ReadonlyArray<ReachableForge>>([]);
 	let pair_command_copied = $state(false);
 	const unpaired = $derived(presentation.tone === "error" && origin_reachable);
 	const show_start = $derived(
-		presentation.show_start &&
-			!origin_reachable &&
-			(origin_profile === undefined || origin_profile === "default"),
+		presentation.show_start && !origin_reachable && !origin_development,
 	);
-	const pair_command = $derived(
-		origin_profile === undefined || origin_profile === "default"
-			? "ae open"
-			: `ae open --profile ${origin_profile}`,
-	);
+	const pair_command = "ae open";
 
 	const copy_pair_command = async () => {
 		try {
@@ -85,12 +80,14 @@
 					const health = await fetch(ForgeHttpUrl("/health"), { cache: "no-store" });
 					if (health.ok) {
 						const body: unknown = await health.json();
-						const named =
-							typeof body === "object" && body !== null && "profile" in body
-								? (body as { readonly profile?: unknown }).profile
-								: undefined;
 						if (cancelled) return;
-						if (typeof named === "string") origin_profile = named;
+						if (
+							typeof body === "object" &&
+							body !== null &&
+							"development" in body &&
+							(body as { readonly development?: unknown }).development === true
+						)
+							origin_development = true;
 						origin_reachable = true;
 						break;
 					}
@@ -113,7 +110,6 @@
 						typeof candidate === "object" &&
 						candidate !== null &&
 						typeof (candidate as ReachableForge).endpoint === "string" &&
-						typeof (candidate as ReachableForge).profile === "string" &&
 						(candidate as ReachableForge).self === false,
 				);
 			} catch {
@@ -193,7 +189,7 @@
 			</h2>
 			<p class="mt-1.5 max-w-sm text-sm leading-6 text-muted-foreground">
 				{unpaired
-					? `Forge “${origin_profile}” is running, but this browser holds no session for it. Pair from a terminal, then retry.`
+					? "Forge is running, but this browser holds no session for it. Pair from a terminal, then retry."
 					: presentation.description}
 			</p>
 
@@ -245,8 +241,7 @@
 									href={instance.endpoint}
 									class="flex items-baseline justify-between gap-3 rounded-xl bg-surface-100 px-3 py-2 text-sm text-foreground hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none dark:bg-surface-900"
 								>
-									<span class="font-medium">{instance.profile}</span>
-									<span class="truncate text-xs text-muted-foreground">{instance.endpoint}</span>
+									<span class="truncate font-medium">{instance.endpoint}</span>
 								</a>
 							</li>
 						{/each}

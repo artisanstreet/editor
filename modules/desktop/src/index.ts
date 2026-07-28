@@ -10,7 +10,6 @@ export type { ForgeStartLaunchRequestType } from "./launch-request";
 export {
 	app_host,
 	app_scheme,
-	DecodeForgeProfileArgument,
 	DecodeHandoffOutput,
 	DesktopLauncherError,
 	ForgeHandoff,

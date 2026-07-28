@@ -19,7 +19,7 @@ import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner
 import { ForgeAutostart } from "./adapters";
 import { ResolveForgeArtifact } from "./forge-adapter";
 import { ForgeLifecycle } from "./lifecycle";
-import { ForgeProfileStore } from "./profile";
+import { ForgeInstanceStore } from "./instance";
 
 export class ForgeOperationsError extends Data.TaggedError("ForgeOperationsError")<{
 	readonly cause?: unknown;
@@ -27,7 +27,7 @@ export class ForgeOperationsError extends Data.TaggedError("ForgeOperationsError
 }> {}
 
 export interface ForgeDoctorCheck {
-	readonly name: "profile" | "config" | "artifacts" | "codex" | "autostart" | "live";
+	readonly name: "instance" | "config" | "artifacts" | "codex" | "autostart" | "live";
 	readonly state: "ok" | "warning" | "error" | "unsupported";
 	readonly detail: string;
 }
@@ -40,15 +40,18 @@ export interface ForgeDoctorReport {
 export class ForgeOperations extends Context.Service<
 	ForgeOperations,
 	{
-		readonly Doctor: (
-			profile: string,
-		) => Effect.Effect<ForgeDoctorReport, ForgeOperationsError, ChildProcessSpawner>;
-		readonly Repair: (
-			profile: string,
-		) => Effect.Effect<ForgeDoctorReport, ForgeOperationsError, ChildProcessSpawner>;
-		readonly FollowLogs: (profile: string) => Stream.Stream<string, ForgeOperationsError>;
+		readonly Doctor: () => Effect.Effect<
+			ForgeDoctorReport,
+			ForgeOperationsError,
+			ChildProcessSpawner
+		>;
+		readonly Repair: () => Effect.Effect<
+			ForgeDoctorReport,
+			ForgeOperationsError,
+			ChildProcessSpawner
+		>;
+		readonly FollowLogs: () => Stream.Stream<string, ForgeOperationsError>;
 		readonly ReadLogs: (
-			profile: string,
 			lines: number,
 		) => Effect.Effect<ReadonlyArray<string>, ForgeOperationsError>;
 	}
@@ -209,18 +212,18 @@ const CodexExecutableAvailable = (file_system: FileSystem.FileSystem, path: stri
 export const make_forge_operations_layer = Layer.effect(
 	ForgeOperations,
 	Effect.gen(function* () {
-		const store = yield* ForgeProfileStore;
+		const store = yield* ForgeInstanceStore;
 		const lifecycle = yield* ForgeLifecycle;
 		const autostart = yield* ForgeAutostart;
 		const file_system = yield* FileSystem.FileSystem;
 		const artifact = yield* ResolveForgeArtifact;
 		const executable_path = yield* Config.string("PATH").pipe(Config.withDefault(""));
-		const Doctor = (profile: string) =>
+		const Doctor = () =>
 			Effect.gen(function* () {
-				const config_option = yield* store.Load(profile).pipe(Effect.option);
+				const config_option = yield* store.Load().pipe(Effect.option);
 				const live = Option.isSome(config_option)
 					? yield* lifecycle
-							.Status(profile)
+							.Status()
 							.pipe(
 								Effect.mapError(
 									(cause) =>
@@ -229,7 +232,7 @@ export const make_forge_operations_layer = Layer.effect(
 							)
 					: { state: "missing" as const };
 				const autostart_state = yield* autostart
-					.Status({ profile })
+					.Status()
 					.pipe(Effect.catch(() => Effect.succeed({ state: "unsupported" as const })));
 				const artifacts_available = (yield* Effect.forEach(
 					[
@@ -249,15 +252,15 @@ export const make_forge_operations_layer = Layer.effect(
 				const checks: ReadonlyArray<ForgeDoctorCheck> = [
 					{
 						detail: Option.isSome(config_option)
-							? "Profile loaded"
-							: "Profile is missing or invalid; run ae setup",
-						name: "profile",
+							? "Forge instance loaded"
+							: "Forge is not configured in this home; run ae setup",
+						name: "instance",
 						state: Option.isSome(config_option) ? "ok" : "error",
 					},
 					{
 						detail: Option.isSome(config_option)
 							? `Loopback listener ${config_option.value.listen_host}`
-							: "Configuration cannot be checked without a valid profile",
+							: "Configuration cannot be checked without a configured Forge",
 						name: "config",
 						state: Option.isSome(config_option) ? "ok" : "error",
 					},
@@ -291,17 +294,17 @@ export const make_forge_operations_layer = Layer.effect(
 
 		return ForgeOperations.of({
 			Doctor,
-			FollowLogs: (profile) =>
+			FollowLogs: () =>
 				Stream.unwrap(
-					store.Paths(profile).pipe(
+					store.Paths().pipe(
 						Effect.map((paths) => FollowForgeLogFile(paths.log_path)(file_system)),
 						Effect.mapError(
 							(cause) => new ForgeOperationsError({ cause, code: "invalid" }),
 						),
 					),
 				),
-			ReadLogs: (profile, lines) =>
-				store.Paths(profile).pipe(
+			ReadLogs: (lines) =>
+				store.Paths().pipe(
 					Effect.flatMap((paths) => ReadLogTail(file_system, paths.log_path)),
 					Effect.map((text) => TailLines(text, lines)),
 					Effect.mapError((cause) =>

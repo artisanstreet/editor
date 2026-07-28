@@ -1,8 +1,6 @@
-import { Config, Context, Data, Effect, Layer, Option, Path, Schema } from "effect";
+import { Config, Context, Data, Effect, Layer, Option, Path } from "effect";
 import { ChildProcess } from "effect/unstable/process";
 import { ChildProcessSpawner } from "effect/unstable/process/ChildProcessSpawner";
-
-import { ForgeProfileName } from "./profile";
 
 export type CliPlatformKind = "darwin" | "linux" | "win32";
 
@@ -91,15 +89,12 @@ export class ForgeAutostart extends Context.Service<
 	{
 		readonly Configure: (input: {
 			readonly enabled: boolean;
-			readonly profile: string;
 		}) => Effect.Effect<
 			{ readonly state: "enabled" | "disabled" | "unsupported" },
 			ForgeAutostartError,
 			ChildProcessSpawner
 		>;
-		readonly Status: (input: {
-			readonly profile: string;
-		}) => Effect.Effect<
+		readonly Status: () => Effect.Effect<
 			{ readonly state: "enabled" | "disabled" | "unsupported" },
 			ForgeAutostartError,
 			ChildProcessSpawner
@@ -107,10 +102,8 @@ export class ForgeAutostart extends Context.Service<
 	}
 >()("Artisan/ForgeAutostart") {}
 
-const valid_profile = Schema.is(ForgeProfileName);
-
-/** The task name is deliberately profile-scoped and cannot name a system task. */
-export const ForgeTaskName = (profile: string) => `Artisan Forge ${profile}`;
+/** The fixed product task name cannot collide with or name a system task. */
+export const ForgeTaskName = "Artisan Forge";
 
 export class BrowserOpener extends Context.Service<
 	BrowserOpener,
@@ -157,26 +150,14 @@ export const task_scheduler_arguments = (input: {
 	readonly cli_entry_path?: string;
 	readonly enabled: boolean;
 	readonly executable_path: string;
-	readonly profile: string;
 }) => {
 	const launch =
 		input.cli_entry_path === undefined
-			? `"${input.executable_path}" start --profile ${input.profile}`
-			: `"${input.executable_path}" "${input.cli_entry_path}" start --profile ${input.profile}`;
+			? `"${input.executable_path}" start`
+			: `"${input.executable_path}" "${input.cli_entry_path}" start`;
 	return input.enabled
-		? [
-				"/Create",
-				"/F",
-				"/SC",
-				"ONLOGON",
-				"/RL",
-				"LIMITED",
-				"/TN",
-				ForgeTaskName(input.profile),
-				"/TR",
-				launch,
-			]
-		: ["/Delete", "/F", "/TN", ForgeTaskName(input.profile)];
+		? ["/Create", "/F", "/SC", "ONLOGON", "/RL", "LIMITED", "/TN", ForgeTaskName, "/TR", launch]
+		: ["/Delete", "/F", "/TN", ForgeTaskName];
 };
 
 /**
@@ -197,11 +178,9 @@ export const make_windows_autostart_layer = (
 			const cli_entry_path =
 				options.cli_entry_path ?? Option.getOrUndefined(platform.cli_entry_path);
 			return ForgeAutostart.of({
-				Configure: ({ enabled, profile }) => {
+				Configure: ({ enabled }) => {
 					if (platform.kind !== "win32")
 						return Effect.succeed({ state: "unsupported" as const });
-					if (!valid_profile(profile))
-						return Effect.fail(new ForgeAutostartError({ code: "failed" }));
 					return Effect.scoped(
 						ChildProcess.make(
 							"schtasks.exe",
@@ -209,7 +188,6 @@ export const make_windows_autostart_layer = (
 								...(cli_entry_path === undefined ? {} : { cli_entry_path }),
 								enabled,
 								executable_path,
-								profile,
 							}),
 							{ stderr: "ignore", stdin: "ignore", stdout: "ignore" },
 						).pipe(
@@ -231,21 +209,15 @@ export const make_windows_autostart_layer = (
 						),
 					);
 				},
-				Status: ({ profile }) => {
+				Status: () => {
 					if (platform.kind !== "win32")
 						return Effect.succeed({ state: "unsupported" as const });
-					if (!valid_profile(profile))
-						return Effect.fail(new ForgeAutostartError({ code: "failed" }));
 					return Effect.scoped(
-						ChildProcess.make(
-							"schtasks.exe",
-							["/Query", "/TN", ForgeTaskName(profile)],
-							{
-								stderr: "ignore",
-								stdin: "ignore",
-								stdout: "ignore",
-							},
-						).pipe(
+						ChildProcess.make("schtasks.exe", ["/Query", "/TN", ForgeTaskName], {
+							stderr: "ignore",
+							stdin: "ignore",
+							stdout: "ignore",
+						}).pipe(
 							Effect.flatMap((child) => child.exitCode),
 							Effect.map((code) => ({
 								state: code === 0 ? ("enabled" as const) : ("disabled" as const),

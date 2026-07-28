@@ -15,9 +15,9 @@ $development = Join-Path $workspace ".dist\dev"
 $env:ARTISAN_HOME = Join-Path $development "forge-home"
 
 if ($Origin) {
-	& (Join-Path $runtime "ae.cmd") open --profile browser-dev --origin $Origin
+	& (Join-Path $runtime "ae.cmd") open --origin $Origin
 } else {
-	& (Join-Path $runtime "ae.cmd") open --profile browser-dev
+	& (Join-Path $runtime "ae.cmd") open
 }
 if ($LASTEXITCODE -ne 0) {
 	throw "Could not open a paired browser for the development Forge; is `pnpm run dev:forge` running?"

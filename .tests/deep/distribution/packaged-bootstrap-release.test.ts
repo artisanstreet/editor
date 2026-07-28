@@ -189,11 +189,11 @@ describe("packed npm bootstrap with signed Windows release", () => {
 			running_installations.push({ environment, permanent_ae });
 			await RunCmd(bootstrap_ae, [], environment, 120_000).catch(async (cause: unknown) => {
 				const forge_log = await readFile(
-					join(installation_root, "profiles", "default", "forge.log"),
+					join(installation_root, "forge.log"),
 					"utf8",
 				).catch(() => "<Forge log unavailable>");
 				const forge_state = await readFile(
-					join(installation_root, "profiles", "default", "state.json"),
+					join(installation_root, "state.json"),
 					"utf8",
 				).catch(() => "<Forge state unavailable>");
 				const requests = await readFile(fetch_log, "utf8").catch(
@@ -212,7 +212,8 @@ describe("packed npm bootstrap with signed Windows release", () => {
 			);
 			expect(await Exists(join(npm_prefix, "node_modules", "artisan-editor"))).toBe(false);
 			expect(await Exists(permanent_ae)).toBe(true);
-			expect(await readdir(join(installation_root, "profiles"))).toEqual(["default"]);
+			expect(await Exists(join(installation_root, "config.json"))).toBe(true);
+			expect(await Exists(join(installation_root, "profiles"))).toBe(false);
 			expect(await readFile(join(installation_root, "current"), "utf8")).toContain(
 				manifest.product_version,
 			);

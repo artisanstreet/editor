@@ -39,7 +39,7 @@ const LoopbackForgeEndpoint = Schema.String.check(
 /**
  * The one-time pairing capability handed to this trusted local caller by
  * `ae open --handoff`. It is single-use and short-lived; the editor never
- * reads profile secrets or any durable credential.
+ * reads Forge secrets or any durable credential.
  */
 export const ForgeHandoff = Schema.Struct({
 	endpoint: LoopbackForgeEndpoint,
@@ -64,21 +64,6 @@ export const DecodeHandoffOutput = (stdout: string) =>
 		}
 		return yield* Effect.fail(new DesktopLauncherError({ reason: "handoff_invalid" }));
 	});
-
-const forge_profile_argument = /^--forge-profile=([A-Za-z0-9][A-Za-z0-9._-]{0,127})$/;
-
-/**
- * The launcher may name the Forge profile the handoff should target. Only the
- * non-secret profile name ever travels through argv; anything malformed
- * degrades to the default profile instead of reaching `ae`.
- */
-export const DecodeForgeProfileArgument = (argv: ReadonlyArray<string>): string | undefined => {
-	for (const argument of [...argv].reverse()) {
-		const matched = forge_profile_argument.exec(argument);
-		if (matched?.[1] !== undefined) return matched[1];
-	}
-	return undefined;
-};
 
 const mime_types: Readonly<Record<string, string>> = {
 	".css": "text/css; charset=utf-8",
@@ -130,7 +115,7 @@ export const ServeRendererAsset = (frontend_root: string, request_url: string) =
 	});
 
 /**
- * The launch URL carries the one-time pairing capability and the profile's
+ * The launch URL carries the one-time pairing capability and the home's
  * loopback Forge endpoint in the fragment, which never reaches any network
  * request; the renderer consumes and strips it exactly once.
  */

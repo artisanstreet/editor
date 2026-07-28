@@ -28,7 +28,7 @@ import {
 	DistributionOperationsLive,
 	DistributionRemoval,
 } from "./distribution";
-import { ForgeProfileConfig } from "./profile";
+import { ForgeInstanceConfig } from "./instance";
 
 export const ResolveInstallationRoot = ResolveWindowsInstallationRoot;
 
@@ -192,13 +192,11 @@ export const make_node_distribution_runtime_layer = (
 			return DistributionRemoval.of({
 				RemoveForgeData: () =>
 					Effect.gen(function* () {
-						const profiles_root = win32.join(root, "profiles");
-						const exists = yield* file_system.exists(profiles_root);
-						if (!exists) return;
-						const profile_names = yield* file_system.readDirectory(profiles_root);
-						const data_roots = yield* Effect.forEach(profile_names, (name) =>
-							file_system
-								.readFileString(win32.join(profiles_root, name, "config.json"))
+						const config_path = win32.join(root, "config.json");
+						const data_roots: Array<string> = [];
+						if (yield* file_system.exists(config_path)) {
+							const configuration = yield* file_system
+								.readFileString(config_path)
 								.pipe(
 									Effect.flatMap((encoded) =>
 										Effect.try({
@@ -206,18 +204,27 @@ export const make_node_distribution_runtime_layer = (
 											catch: (cause) => cause,
 										}),
 									),
-									Effect.flatMap(Schema.decodeUnknownEffect(ForgeProfileConfig)),
-									Effect.map((configuration) => configuration.data_root),
-								),
-						);
-						for (const data_root of new Set(data_roots)) {
+									Effect.flatMap(Schema.decodeUnknownEffect(ForgeInstanceConfig)),
+								);
+							data_roots.push(configuration.data_root);
+						}
+						for (const data_root of data_roots) {
 							if (win32.dirname(data_root) === data_root)
 								return yield* Effect.fail(
 									new Error("Refusing to remove a filesystem root"),
 								);
 						}
+						/** Legacy `profiles/` trees predate the single-instance layout. */
 						yield* Effect.forEach(
-							[...new Set(data_roots), profiles_root],
+							[
+								...new Set(data_roots),
+								config_path,
+								win32.join(root, "secrets.json"),
+								win32.join(root, "state.json"),
+								win32.join(root, "forge.log"),
+								win32.join(root, "data"),
+								win32.join(root, "profiles"),
+							],
 							(path) => file_system.remove(path, { force: true, recursive: true }),
 							{ concurrency: 1, discard: true },
 						);

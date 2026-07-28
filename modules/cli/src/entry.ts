@@ -25,9 +25,9 @@ import { DistributionOperations, DistributionOperationsError } from "./distribut
 import { ForgeLifecycle, make_forge_lifecycle_layer } from "./lifecycle";
 import { ForgeControlLive } from "./node-control";
 import { make_node_forge_launcher_layer } from "./node-launcher";
-import { make_node_profile_store_layer } from "./node-profile-store";
+import { make_node_instance_store_layer } from "./node-instance-store";
 import { make_node_distribution_runtime_layer } from "./node-distribution-runtime";
-import { ForgeProfileStore } from "./profile";
+import { ForgeInstanceStore } from "./instance";
 import { ForgeOperations, make_forge_operations_layer } from "./operations";
 import { make_forge_protocol_handler_layer } from "./protocol-handler";
 
@@ -36,10 +36,6 @@ import { make_forge_protocol_handler_layer } from "./protocol-handler";
  * the module, so packaging can provide Forge adapters without this entrypoint
  * importing a concurrently renamed host package.
  */
-const profile = Flag.string("profile").pipe(
-	Flag.withDefault("default"),
-	Flag.withDescription("Forge profile name"),
-);
 const json = Flag.boolean("json").pipe(Flag.withDescription("Emit deterministic JSON"));
 const fix = Flag.boolean("fix").pipe(Flag.withDescription("Repair safe local Forge prerequisites"));
 const foreground = Flag.boolean("foreground").pipe(
@@ -59,7 +55,7 @@ const autostart = Flag.boolean("autostart").pipe(
 	Flag.withDescription("Enable current-user Forge autostart"),
 );
 const serve_frontend = Flag.boolean("serve-frontend").pipe(
-	Flag.withDescription("Serve the bundled web frontend (development browser profiles only)"),
+	Flag.withDescription("Serve the bundled web frontend (development homes only)"),
 );
 const follow = Flag.boolean("follow").pipe(Flag.withDescription("Stream appended log content"));
 const lines = Flag.integer("lines").pipe(
@@ -70,7 +66,7 @@ const origin = Flag.optional(
 	Flag.string("origin").pipe(Flag.withDescription("Explicit local browser origin")),
 );
 const remove_data = Flag.boolean("remove-data").pipe(
-	Flag.withDescription("Also permanently remove Forge profiles and conversation data"),
+	Flag.withDescription("Also permanently remove Forge data and conversations"),
 );
 const handoff = Flag.boolean("handoff").pipe(
 	Flag.withDescription(
@@ -78,15 +74,10 @@ const handoff = Flag.boolean("handoff").pipe(
 	),
 );
 
-/** Stops every profile inventoried by Forge before product files are released. */
-export const StopAllForgeProfiles = Effect.gen(function* () {
-	const profile_store = yield* ForgeProfileStore;
+/** Stops this home's Forge instance before product files are released. */
+export const StopForgeInstance = Effect.gen(function* () {
 	const lifecycle = yield* ForgeLifecycle;
-	yield* Effect.forEach(
-		yield* profile_store.List(),
-		(profile_name) => lifecycle.Stop(profile_name),
-		{ concurrency: 1, discard: true },
-	);
+	yield* lifecycle.Stop();
 });
 
 export const AeCommand = Command.make("ae", {}, () =>
@@ -98,23 +89,20 @@ export const AeCommand = Command.make("ae", {}, () =>
 				operation: "doctor",
 			});
 		}
-		const url = yield* (yield* ForgeLifecycle).Open("default");
+		const url = yield* (yield* ForgeLifecycle).Open();
 		yield* (yield* BrowserOpener).Open(url);
 	}),
 ).pipe(
 	Command.withSubcommands([
 		Command.make(
 			"setup",
-			{ autostart, data_root, listen_port, mode, profile, serve_frontend },
+			{ autostart, data_root, listen_port, mode, serve_frontend },
 			(input) =>
 				Effect.gen(function* () {
-					const store = yield* ForgeProfileStore;
+					const store = yield* ForgeInstanceStore;
 					const platform = yield* CliPlatform;
-					yield* store.Ensure(input.profile, {
-						data_root: Option.getOrElse(
-							input.data_root,
-							() => `${platform.home}/profiles/${input.profile}/data`,
-						),
+					yield* store.Ensure({
+						data_root: Option.getOrElse(input.data_root, () => `${platform.home}/data`),
 						listen_host: "127.0.0.1",
 						listen_port: Option.getOrElse(input.listen_port, () => 0),
 						mode: input.mode,
@@ -122,31 +110,28 @@ export const AeCommand = Command.make("ae", {}, () =>
 						version: 1,
 					});
 					if (input.autostart)
-						yield* (yield* ForgeAutostart).Configure({
-							enabled: true,
-							profile: input.profile,
-						});
-					yield* Console.log(`Configured Forge profile ${input.profile}`);
+						yield* (yield* ForgeAutostart).Configure({ enabled: true });
+					yield* Console.log("Configured Forge");
 				}),
-		).pipe(Command.withDescription("Create or update a loopback-only Forge profile")),
-		Command.make("start", { foreground, profile }, (input) =>
+		).pipe(Command.withDescription("Create or update this home's loopback-only Forge")),
+		Command.make("start", { foreground }, (input) =>
 			Effect.gen(function* () {
-				yield* (yield* ForgeLifecycle).Start(input.profile, input.foreground);
+				yield* (yield* ForgeLifecycle).Start(input.foreground);
 			}),
 		).pipe(Command.withDescription("Start Forge in the background")),
-		Command.make("stop", { profile }, (input) =>
+		Command.make("stop", {}, () =>
 			Effect.gen(function* () {
-				yield* (yield* ForgeLifecycle).Stop(input.profile);
+				yield* (yield* ForgeLifecycle).Stop();
 			}),
-		).pipe(Command.withDescription("Stop the named Forge instance")),
-		Command.make("restart", { foreground, profile }, (input) =>
+		).pipe(Command.withDescription("Stop the Forge instance")),
+		Command.make("restart", { foreground }, (input) =>
 			Effect.gen(function* () {
-				yield* (yield* ForgeLifecycle).Restart(input.profile, input.foreground);
+				yield* (yield* ForgeLifecycle).Restart(input.foreground);
 			}),
-		).pipe(Command.withDescription("Restart the named Forge instance")),
-		Command.make("status", { json, profile }, (input) =>
+		).pipe(Command.withDescription("Restart the Forge instance")),
+		Command.make("status", { json }, (input) =>
 			Effect.gen(function* () {
-				const result = yield* (yield* ForgeLifecycle).Status(input.profile);
+				const result = yield* (yield* ForgeLifecycle).Status();
 				yield* Console.log(input.json ? JSON.stringify(result) : result.state);
 			}),
 		).pipe(Command.withDescription("Show Forge runtime status")),
@@ -164,29 +149,25 @@ export const AeCommand = Command.make("ae", {}, () =>
 					return;
 				}
 				for (const instance of instances) {
-					yield* Console.log(
-						`${instance.profile}\t${instance.endpoint}\tpid ${instance.pid}`,
-					);
+					yield* Console.log(`${instance.endpoint}\tpid ${instance.pid}`);
 				}
 			}),
 		).pipe(Command.withDescription("List every running Forge announced on this machine")),
-		Command.make("logs", { follow, lines, profile }, (input) =>
+		Command.make("logs", { follow, lines }, (input) =>
 			Effect.gen(function* () {
 				const operations = yield* ForgeOperations;
-				const recent = yield* operations.ReadLogs(input.profile, input.lines);
+				const recent = yield* operations.ReadLogs(input.lines);
 				yield* Effect.forEach(recent, (line) => Console.log(line));
 				if (input.follow)
 					yield* operations
-						.FollowLogs(input.profile)
+						.FollowLogs()
 						.pipe(Stream.runForEach((chunk) => Console.log(chunk)));
 			}),
 		).pipe(Command.withDescription("Show or follow Forge log output")),
-		Command.make("doctor", { fix, json, profile }, (input) =>
+		Command.make("doctor", { fix, json }, (input) =>
 			Effect.gen(function* () {
 				const operations = yield* ForgeOperations;
-				const forge = input.fix
-					? yield* operations.Repair(input.profile)
-					: yield* operations.Doctor(input.profile);
+				const forge = input.fix ? yield* operations.Repair() : yield* operations.Doctor();
 				const distribution = input.fix
 					? yield* (yield* DistributionOperations).Repair()
 					: yield* (yield* DistributionOperations).Doctor();
@@ -207,7 +188,7 @@ export const AeCommand = Command.make("ae", {}, () =>
 				);
 			}),
 		).pipe(Command.withDescription("Check local Forge prerequisites and status")),
-		Command.make("open", { handoff, origin, profile }, (input) =>
+		Command.make("open", { handoff, origin }, (input) =>
 			Effect.gen(function* () {
 				const lifecycle = yield* ForgeLifecycle;
 				if (input.handoff) {
@@ -216,14 +197,11 @@ export const AeCommand = Command.make("ae", {}, () =>
 					 * only the trusted local process that invoked this mode, so no
 					 * secret ever travels through argv or a browser navigation.
 					 */
-					const exchange = yield* lifecycle.PairHandoff(input.profile);
+					const exchange = yield* lifecycle.PairHandoff();
 					yield* Console.log(JSON.stringify({ ...exchange, version: 1 }));
 					return;
 				}
-				const url = yield* lifecycle.Open(
-					input.profile,
-					Option.getOrUndefined(input.origin),
-				);
+				const url = yield* lifecycle.Open(Option.getOrUndefined(input.origin));
 				yield* (yield* BrowserOpener).Open(url);
 			}),
 		).pipe(Command.withDescription("Open a one-time local browser pairing link")),
@@ -239,7 +217,7 @@ export const AeCommand = Command.make("ae", {}, () =>
 		).pipe(Command.withDescription("Update Artisan through the signed release channel")),
 		Command.make("uninstall", { remove_data }, (input) =>
 			Effect.gen(function* () {
-				yield* StopAllForgeProfiles;
+				yield* StopForgeInstance;
 				const result = yield* (yield* DistributionOperations).Uninstall(input.remove_data);
 				yield* Console.log(
 					result.forge_data_removed
@@ -269,10 +247,10 @@ const NodePlatformLive = Layer.mergeAll(
 );
 const CliPlatformLive = make_cli_platform_layer().pipe(Layer.provide(NodePath.layer));
 
-const ProfileStoreLive = make_node_profile_store_layer();
-const ForgeLauncherLive = make_node_forge_launcher_layer.pipe(Layer.provide(ProfileStoreLive));
+const InstanceStoreLive = make_node_instance_store_layer();
+const ForgeLauncherLive = make_node_forge_launcher_layer.pipe(Layer.provide(InstanceStoreLive));
 const ForgeLifecycleLive = make_forge_lifecycle_layer.pipe(
-	Layer.provide(Layer.mergeAll(ProfileStoreLive, ForgeLauncherLive, ForgeControlLive)),
+	Layer.provide(Layer.mergeAll(InstanceStoreLive, ForgeLauncherLive, ForgeControlLive)),
 );
 const ForgeProtocolHandlerLive = make_forge_protocol_handler_layer.pipe(
 	Layer.provide(NodeFileSystem.layer),
@@ -280,7 +258,7 @@ const ForgeProtocolHandlerLive = make_forge_protocol_handler_layer.pipe(
 const ForgeOperationsLive = make_forge_operations_layer.pipe(
 	Layer.provide(
 		Layer.mergeAll(
-			ProfileStoreLive,
+			InstanceStoreLive,
 			ForgeLifecycleLive,
 			make_windows_autostart_layer(),
 			ForgeProtocolHandlerLive,
@@ -290,7 +268,7 @@ const ForgeOperationsLive = make_forge_operations_layer.pipe(
 
 const AeRuntimeLive = Layer.mergeAll(
 	NodePlatformLive,
-	ProfileStoreLive,
+	InstanceStoreLive,
 	ForgeLauncherLive,
 	ForgeControlLive,
 	ForgeLifecycleLive,

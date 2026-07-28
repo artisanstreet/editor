@@ -39,7 +39,7 @@ if ($forge_ready) {
 			try {
 				$response = Invoke-WebRequest -Uri $origin -UseBasicParsing -TimeoutSec 2
 				if ($response.StatusCode -eq 200) {
-					& $ae_command open --profile browser-dev --origin $origin
+					& $ae_command open --origin $origin
 					return
 				}
 			} catch {}

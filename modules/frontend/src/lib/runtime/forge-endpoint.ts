@@ -1,7 +1,7 @@
 /**
  * The renderer normally talks to the Forge that served it, strictly
  * same-origin. The installed editor is the one exception: Electron loads this
- * bundle from the `artisan://app` scheme and hands the profile's loopback
+ * bundle from the `artisan://app` scheme and hands the home's loopback
  * Forge endpoint over in the pairing fragment. That endpoint is adopted here —
  * validated, session-scoped, never durable — and every Forge-facing URL is
  * built through it so the rest of the client stays origin-agnostic.

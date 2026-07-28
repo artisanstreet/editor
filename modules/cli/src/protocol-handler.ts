@@ -19,12 +19,12 @@ export class ForgeProtocolHandlerError extends Data.TaggedError("ForgeProtocolHa
 export class ForgeProtocolHandler extends Context.Service<
 	ForgeProtocolHandler,
 	{
-		readonly Configure: (
-			profile: string,
-		) => Effect.Effect<void, ForgeProtocolHandlerError, ChildProcessSpawner>;
-		readonly Status: (
-			profile: string,
-		) => Effect.Effect<
+		readonly Configure: () => Effect.Effect<
+			void,
+			ForgeProtocolHandlerError,
+			ChildProcessSpawner
+		>;
+		readonly Status: () => Effect.Effect<
 			ForgeProtocolHandlerState,
 			ForgeProtocolHandlerError,
 			ChildProcessSpawner

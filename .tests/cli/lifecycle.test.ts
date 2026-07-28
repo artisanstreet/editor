@@ -9,12 +9,12 @@ import {
 	make_forge_lifecycle_layer,
 } from "../../modules/cli/src/lifecycle";
 import {
-	make_memory_profile_store,
-	ForgeProfileError,
-	ForgeProfileStore,
+	make_memory_instance_store,
+	ForgeInstanceError,
+	ForgeInstanceStore,
 	type ForgeRuntimeState,
-} from "../../modules/cli/src/profile";
-import { AeCommand, StopAllForgeProfiles } from "../../modules/cli/src/entry";
+} from "../../modules/cli/src/instance";
+import { AeCommand, StopForgeInstance } from "../../modules/cli/src/entry";
 import { task_scheduler_arguments } from "../../modules/cli/src/adapters";
 
 const config = {
@@ -25,36 +25,35 @@ const config = {
 	version: 1 as const,
 };
 
-const MakeRuntime = (healthy = false, profile_missing = false) => {
+const MakeRuntime = (healthy = false, instance_missing = false) => {
 	let current_health = healthy;
 	let starts = 0;
 	let foreground = 0;
 	let stopped = 0;
 	const states = new Map<string, ForgeRuntimeState>();
-	const profile_store = Layer.succeed(
-		ForgeProfileStore,
-		ForgeProfileStore.of({
+	const instance_store = Layer.succeed(
+		ForgeInstanceStore,
+		ForgeInstanceStore.of({
 			Ensure: () => Effect.void,
 			Load: () =>
-				profile_missing
-					? Effect.fail(new ForgeProfileError({ code: "missing" }))
+				instance_missing
+					? Effect.fail(new ForgeInstanceError({ code: "missing" }))
 					: Effect.succeed(config),
-			List: () => Effect.succeed(["default"]),
 			LoadSecrets: () => Effect.succeed({ auth_token: "a".repeat(43), version: 1 as const }),
-			ReadState: (profile) => Effect.succeed(states.get(profile)),
-			RemoveStateIfOwned: (profile, instance_id) =>
+			ReadState: () => Effect.succeed(states.get("instance")),
+			RemoveStateIfOwned: (instance_id) =>
 				Effect.sync(() => {
-					if (states.get(profile)?.instance_id !== instance_id) return false;
-					states.delete(profile);
+					if (states.get("instance")?.instance_id !== instance_id) return false;
+					states.delete("instance");
 					return true;
 				}),
-			Paths: (profile) =>
+			Paths: () =>
 				Effect.succeed({
-					config_path: `${profile}/config.json`,
-					log_path: `${profile}/forge.log`,
-					readiness_path: `${profile}/ready.json`,
-					secrets_path: `${profile}/secrets.json`,
-					state_path: `${profile}/state.json`,
+					config_path: "home/config.json",
+					log_path: "home/forge.log",
+					readiness_path: "home/ready.json",
+					secrets_path: "home/secrets.json",
+					state_path: "home/state.json",
 				}),
 		}),
 	);
@@ -65,11 +64,10 @@ const MakeRuntime = (healthy = false, profile_missing = false) => {
 				Effect.sync(() => {
 					starts += 1;
 					current_health = true;
-					states.set(input.profile, {
+					states.set("instance", {
 						endpoint: "http://127.0.0.1:4848",
 						instance_id: input.instance_id,
 						pid: 1,
-						profile: input.profile,
 						started_at: new Date().toISOString(),
 						version: 1,
 					});
@@ -106,7 +104,7 @@ const MakeRuntime = (healthy = false, profile_missing = false) => {
 			make_forge_lifecycle_layer.pipe(
 				Layer.provideMerge(launcher),
 				Layer.provideMerge(control),
-				Layer.provideMerge(profile_store),
+				Layer.provideMerge(instance_store),
 			),
 		),
 	};
@@ -134,36 +132,34 @@ describe("ae lifecycle contract", () => {
 		]);
 	});
 
-	it("sets up profile config and never exposes its generated secret", async () => {
-		const runtime = ManagedRuntime.make(make_memory_profile_store());
-		const store = await runtime.runPromise(ForgeProfileStore);
-		await runtime.runPromise(store.Ensure("default", config));
-		expect(await runtime.runPromise(store.Load("default"))).toEqual(config);
-		expect((await runtime.runPromise(store.LoadSecrets("default"))).auth_token).toHaveLength(
-			43,
-		);
+	it("sets up the instance config and never exposes its generated secret", async () => {
+		const runtime = ManagedRuntime.make(make_memory_instance_store());
+		const store = await runtime.runPromise(ForgeInstanceStore);
+		await runtime.runPromise(store.Ensure(config));
+		expect(await runtime.runPromise(store.Load())).toEqual(config);
+		expect((await runtime.runPromise(store.LoadSecrets())).auth_token).toHaveLength(43);
 		await runtime.dispose();
 	});
 
 	it("starts only once when Forge is healthy", async () => {
 		const { runtime, counts } = MakeRuntime(true);
-		const store = await runtime.runPromise(ForgeProfileStore);
-		await runtime.runPromise(store.Ensure("default", config));
+		const store = await runtime.runPromise(ForgeInstanceStore);
+		await runtime.runPromise(store.Ensure(config));
 		const lifecycle = await runtime.runPromise(ForgeLifecycle);
-		await runtime.runPromise(lifecycle.Start("default"));
-		await runtime.runPromise(lifecycle.Start("default"));
+		await runtime.runPromise(lifecycle.Start());
+		await runtime.runPromise(lifecycle.Start());
 		expect(counts().starts).toBe(1);
 		await runtime.dispose();
 	});
 
-	it("fails start and open with a typed missing-profile error without creating one", async () => {
+	it("fails start and open with a typed missing-instance error without creating one", async () => {
 		const { runtime, counts } = MakeRuntime(false, true);
 		const lifecycle = await runtime.runPromise(ForgeLifecycle);
 
-		await expect(runtime.runPromise(lifecycle.Start("default"))).rejects.toMatchObject({
+		await expect(runtime.runPromise(lifecycle.Start())).rejects.toMatchObject({
 			code: "missing",
 		});
-		await expect(runtime.runPromise(lifecycle.Open("default"))).rejects.toMatchObject({
+		await expect(runtime.runPromise(lifecycle.Open())).rejects.toMatchObject({
 			code: "missing",
 		});
 		expect(counts().starts).toBe(0);
@@ -172,14 +168,14 @@ describe("ae lifecycle contract", () => {
 
 	it("waits for graceful state release before restarting with a new instance", async () => {
 		const { runtime, counts, states } = MakeRuntime(false);
-		const store = await runtime.runPromise(ForgeProfileStore);
-		await runtime.runPromise(store.Ensure("default", config));
+		const store = await runtime.runPromise(ForgeInstanceStore);
+		await runtime.runPromise(store.Ensure(config));
 		const lifecycle = await runtime.runPromise(ForgeLifecycle);
 
-		await runtime.runPromise(lifecycle.Start("default"));
-		const first_instance = states.get("default")?.instance_id;
-		await runtime.runPromise(lifecycle.Restart("default"));
-		const second_instance = states.get("default")?.instance_id;
+		await runtime.runPromise(lifecycle.Start());
+		const first_instance = states.get("instance")?.instance_id;
+		await runtime.runPromise(lifecycle.Restart());
+		const second_instance = states.get("instance")?.instance_id;
 
 		expect(first_instance).toBeDefined();
 		expect(second_instance).toBeDefined();
@@ -190,58 +186,39 @@ describe("ae lifecycle contract", () => {
 		await runtime.dispose();
 	});
 
-	it("preserves a foreign record instead of deleting it to start", async () => {
-		const { runtime, states } = MakeRuntime(false);
-		states.set("default", {
-			endpoint: "http://127.0.0.1:4848",
-			instance_id: "11111111-1111-4111-8111-111111111111",
-			pid: 10,
-			profile: "other",
-			started_at: new Date().toISOString(),
-			version: 1,
-		});
-		const lifecycle = await runtime.runPromise(ForgeLifecycle);
-		await expect(runtime.runPromise(lifecycle.Start("default"))).rejects.toMatchObject({
-			code: "ownership",
-		});
-		expect(states.get("default")?.instance_id).toBe("11111111-1111-4111-8111-111111111111");
-		await runtime.dispose();
-	});
-
 	it("reclaims a definitely stopped stale instance before a later start", async () => {
 		const { runtime, states, counts, set_health } = MakeRuntime(false);
-		const store = await runtime.runPromise(ForgeProfileStore);
-		await runtime.runPromise(store.Ensure("default", config));
-		states.set("default", {
+		const store = await runtime.runPromise(ForgeInstanceStore);
+		await runtime.runPromise(store.Ensure(config));
+		states.set("instance", {
 			endpoint: "http://127.0.0.1:4848",
 			instance_id: "11111111-1111-4111-8111-111111111111",
 			pid: 2_147_483_647,
-			profile: "default",
 			started_at: new Date().toISOString(),
 			version: 1,
 		});
 		const lifecycle = await runtime.runPromise(ForgeLifecycle);
-		await runtime.runPromise(lifecycle.Stop("default"));
-		expect(states.has("default")).toBe(false);
+		await runtime.runPromise(lifecycle.Stop());
+		expect(states.has("instance")).toBe(false);
 		expect(counts().stopped).toBe(1);
 		set_health(true);
-		await runtime.runPromise(lifecycle.Start("default"));
+		await runtime.runPromise(lifecycle.Start());
 		expect(counts().starts).toBe(1);
 		await runtime.dispose();
 	});
 
 	it("reports missing, supports foreground finalization, and starts before opening a fragment pair capability", async () => {
 		const { runtime, counts } = MakeRuntime(false);
-		const store = await runtime.runPromise(ForgeProfileStore);
-		await runtime.runPromise(store.Ensure("default", config));
+		const store = await runtime.runPromise(ForgeInstanceStore);
+		await runtime.runPromise(store.Ensure(config));
 		const lifecycle = await runtime.runPromise(ForgeLifecycle);
-		expect(await runtime.runPromise(lifecycle.Status("default"))).toEqual({ state: "missing" });
-		expect(await runtime.runPromise(lifecycle.Open("default"))).toBe(
+		expect(await runtime.runPromise(lifecycle.Status())).toEqual({ state: "missing" });
+		expect(await runtime.runPromise(lifecycle.Open())).toBe(
 			"http://127.0.0.1:4848/#pair=one-time-code",
 		);
 		expect(counts().starts).toBe(1);
-		await runtime.runPromise(lifecycle.Stop("default"));
-		await runtime.runPromise(lifecycle.Start("default", true));
+		await runtime.runPromise(lifecycle.Stop());
+		await runtime.runPromise(lifecycle.Start(true));
 		expect(counts().foreground).toBe(1);
 		await runtime.dispose();
 	});
@@ -251,14 +228,12 @@ describe("ae lifecycle contract", () => {
 			task_scheduler_arguments({
 				enabled: true,
 				executable_path: "C:/Program Files/Artisan/ae.exe",
-				profile: "default",
 			}),
 		).toEqual(expect.arrayContaining(["/SC", "ONLOGON", "/RL", "LIMITED"]));
 	});
 
-	it("stops every inventoried named Forge profile before uninstall", async () => {
-		const stopped: Array<string> = [];
-		const profile_store = make_memory_profile_store();
+	it("stops the home's Forge instance before uninstall", async () => {
+		let stopped = 0;
 		const lifecycle = Layer.succeed(
 			ForgeLifecycle,
 			ForgeLifecycle.of({
@@ -268,21 +243,14 @@ describe("ae lifecycle contract", () => {
 				Restart: () => Effect.die("not used"),
 				Start: () => Effect.die("not used"),
 				Status: () => Effect.die("not used"),
-				Stop: (profile) =>
+				Stop: () =>
 					Effect.sync(() => {
-						stopped.push(profile);
+						stopped += 1;
 					}),
 			}),
 		);
-		await Effect.runPromise(
-			Effect.gen(function* () {
-				const store = yield* ForgeProfileStore;
-				yield* store.Ensure("beta", config);
-				yield* store.Ensure("default", config);
-				yield* StopAllForgeProfiles;
-			}).pipe(Effect.provide(Layer.mergeAll(profile_store, lifecycle))),
-		);
-		expect(stopped).toEqual(["beta", "default"]);
+		await Effect.runPromise(StopForgeInstance.pipe(Effect.provide(lifecycle)));
+		expect(stopped).toBe(1);
 	});
 
 	it("accepts only explicitly local browser origins for pairing links", async () => {

@@ -74,13 +74,13 @@ enum Operation {
     /// Verify bootstrap-owned integrations without changing them.
     #[command(hide = true)]
     Diagnose,
-    /// Install the latest signed release without first-time profile setup.
+    /// Install the latest signed release without first-time Forge setup.
     Update,
     /// Restore bootstrap-owned launchers, PATH integration, and installation health.
     Repair,
     /// Remove installed binaries and owned integrations.
     Uninstall {
-        /// Also permanently remove Forge profiles, projects, and conversations.
+        /// Also permanently remove Forge data, projects, and conversations.
         #[arg(long)]
         remove_data: bool,
     },

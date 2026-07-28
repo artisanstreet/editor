@@ -51,7 +51,7 @@ const bearer_allowed = (request: IncomingMessage, config: ForgeConfig) => {
 
 /**
  * Resolves a configured application origin such as `artisan://app`. The
- * allow-list is per-profile configuration, so only compositions that opt into
+ * allow-list is per-instance configuration, so only compositions that opt into
  * an app scheme (the packaged Electron renderer) ever match; web pages on
  * foreign origins can never claim membership because browsers own the header.
  */
@@ -344,16 +344,17 @@ export function start_forge_http(
 			}
 			if (url.pathname === "/health" || url.pathname === "/healthz") {
 				/**
-				 * The profile name is unauthenticated on purpose: the renderer
-				 * reads it before pairing so it can label a development instance,
-				 * and the listener is loopback-only. Nothing that identifies the
-				 * data root or the machine belongs in this response.
+				 * The development marker is unauthenticated on purpose: the
+				 * renderer reads it before pairing so it can label a development
+				 * instance, and the listener is loopback-only. Only development
+				 * Forges serve the SPA, so static hosting is the marker; nothing
+				 * that identifies the data root or the machine belongs here.
 				 */
 				respond_json(
 					response,
 					200,
 					{
-						profile: config.profile,
+						development: config.static_frontend_root !== undefined,
 						service: "artisan-forge",
 						status: "ready",
 						version: 1,
@@ -398,9 +399,9 @@ export function start_forge_http(
 						/**
 						 * Deliberately reachable before pairing: the connection gate
 						 * uses this listing to offer other local Forges when this one
-						 * has no session yet. It carries no secrets — endpoints and
-						 * profile names only — and the origin check keeps it away
-						 * from foreign websites.
+						 * has no session yet. It carries no secrets — loopback
+						 * endpoints only — and the origin check keeps it away from
+						 * foreign websites.
 						 */
 						const instances =
 							config.instance_registry_root === undefined
@@ -412,7 +413,6 @@ export function start_forge_http(
 							{
 								instances: instances.map((instance) => ({
 									endpoint: instance.endpoint,
-									profile: instance.profile,
 									self: instance.instance_id === config.instance_id,
 								})),
 							},

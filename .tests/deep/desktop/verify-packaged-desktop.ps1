@@ -68,7 +68,7 @@ foreach ($entry in @(
 }
 
 # The bundled shell must carry the loopback CSP variant so the app-scheme
-# renderer can reach the profile's Forge, while remaining otherwise strict.
+# renderer can reach the home's Forge, while remaining otherwise strict.
 $extract_root = Join-Path ([System.IO.Path]::GetTempPath()) ("artisan-desktop-shell-" + [Guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $extract_root | Out-Null
 try {
@@ -97,7 +97,7 @@ try {
 }
 
 # The managed editor payload never embeds a parallel Forge lifecycle; `ae`
-# owns the daemon, profiles, and pairing.
+# owns the daemon and pairing.
 $embedded_forge = Join-Path $artifact_resources "artisan-forge"
 if (Test-Path -LiteralPath $embedded_forge) {
 	throw "The managed Editor payload must not embed a parallel Forge lifecycle"

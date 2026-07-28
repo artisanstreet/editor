@@ -219,8 +219,9 @@ describe("standalone Artisan Forge process", () => {
 		const ready = await AwaitReady(child);
 		expect(ready.pid).toBe(child.pid);
 		const health = await fetch(new URL("/health", ready.endpoint));
+		/** This composition serves the SPA, so health marks it as development. */
 		expect(await health.json()).toEqual({
-			profile: "default",
+			development: true,
 			service: "artisan-forge",
 			status: "ready",
 			version: 1,

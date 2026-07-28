@@ -16,8 +16,8 @@ import {
 import { ResolveForgeArtifact } from "./forge-adapter";
 import type { ForgeArtifact } from "./forge-adapter";
 import { ForgeLauncher, ForgeLifecycleError } from "./lifecycle";
-import { ForgeProfileStore } from "./profile";
-import type { ForgeRuntimeState } from "./profile";
+import { ForgeInstanceStore } from "./instance";
+import type { ForgeRuntimeState } from "./instance";
 
 interface ForgeLauncherEnvironmentValue {
 	readonly inherited: Readonly<Record<string, string | undefined>>;
@@ -40,7 +40,6 @@ export const ForgeChildEnvironment = (
 			readonly serve_frontend?: boolean | undefined;
 		};
 		readonly instance_id: string;
-		readonly profile: string;
 		readonly token: string;
 	},
 	artifact: ForgeArtifact,
@@ -52,9 +51,9 @@ export const ForgeChildEnvironment = (
 	ARTISAN_DATABASE_PATH: join(input.config.data_root, "artisan.sqlite"),
 	ARTISAN_MIGRATIONS_PATH: artifact.migrations_path,
 	/**
-	 * Static web hosting is a per-profile development capability. Installed
-	 * profiles keep the variable absent, so their Forge serves only health and
-	 * control/WS surfaces while SPA routes 404.
+	 * Static web hosting is a development capability. Installed homes keep the
+	 * variable absent, so their Forge serves only health and control/WS
+	 * surfaces while SPA routes 404.
 	 */
 	...(input.config.serve_frontend === true
 		? { ARTISAN_STATIC_FRONTEND_ROOT: artifact.static_frontend_root }
@@ -68,7 +67,6 @@ export const ForgeChildEnvironment = (
 	RUST_LOG: "warn",
 	ARTISAN_FORGE_INSTANCE_ID: input.instance_id,
 	ARTISAN_FORGE_LOG_PATH: paths.log_path,
-	ARTISAN_FORGE_PROFILE: input.profile,
 	ARTISAN_FORGE_STATE_PATH: paths.state_path,
 	ARTISAN_LISTEN_HOST: input.config.listen_host,
 	ARTISAN_LISTEN_PORT: String(input.config.listen_port),
@@ -136,7 +134,7 @@ export const VerifyStoppedForgeProcess = (
 export const make_node_forge_launcher_layer = Layer.effect(
 	ForgeLauncher,
 	Effect.gen(function* () {
-		const store = yield* ForgeProfileStore;
+		const store = yield* ForgeInstanceStore;
 		const environment = yield* ForgeLauncherEnvironment;
 		const artifact = yield* ResolveForgeArtifact;
 		const Launch = (
@@ -147,7 +145,6 @@ export const make_node_forge_launcher_layer = Layer.effect(
 					readonly listen_port: number;
 					readonly serve_frontend?: boolean | undefined;
 				};
-				readonly profile: string;
 				readonly token: string;
 				readonly instance_id: string;
 			},
@@ -155,7 +152,7 @@ export const make_node_forge_launcher_layer = Layer.effect(
 		) =>
 			Effect.gen(function* () {
 				const paths = yield* store
-					.Paths(input.profile)
+					.Paths()
 					.pipe(
 						Effect.mapError(
 							(cause) => new ForgeLifecycleError({ cause, code: "timeout" }),
@@ -251,13 +248,12 @@ export const make_node_forge_launcher_layer = Layer.effect(
 				readonly serve_frontend?: boolean | undefined;
 			};
 			readonly instance_id: string;
-			readonly profile: string;
 			readonly token: string;
 		}) =>
 			Effect.scoped(
 				Effect.gen(function* () {
 					const paths = yield* store
-						.Paths(input.profile)
+						.Paths()
 						.pipe(
 							Effect.mapError(
 								(cause) => new ForgeLifecycleError({ cause, code: "timeout" }),
@@ -274,7 +270,6 @@ export const make_node_forge_launcher_layer = Layer.effect(
 							listen_host: input.config.listen_host,
 							listen_port: input.config.listen_port,
 							migrations_path: artifact.migrations_path,
-							profile: input.profile,
 							...(instance_registry_root === undefined
 								? {}
 								: { instance_registry_root }),
@@ -292,7 +287,6 @@ export const make_node_forge_launcher_layer = Layer.effect(
 						endpoint: host.endpoint.toString(),
 						instance_id: input.instance_id,
 						pid: process.pid,
-						profile: input.profile,
 						started_at: new Date(now).toISOString(),
 						version: 1,
 					}).pipe(

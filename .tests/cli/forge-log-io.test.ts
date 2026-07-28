@@ -81,7 +81,6 @@ describe("Forge log I/O", () => {
 					listen_port: 4848,
 				},
 				instance_id: "forge_1",
-				profile: "default",
 				token: "secret",
 			},
 			{

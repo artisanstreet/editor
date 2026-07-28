@@ -279,14 +279,14 @@ export const MakeWindowsIntegrationSpecifications = (
 			"Start Artisan Forge",
 			"Start Artisan Forge",
 			ae_path,
-			'start --profile "default"',
+			"start",
 		),
 		Shortcut(
 			"forge_logs_shortcut",
 			"Artisan Forge Logs",
 			"Show Artisan Forge logs",
 			ae_path,
-			'logs --profile "default"',
+			"logs",
 		),
 		Shortcut(
 			"uninstall_shortcut",
@@ -313,7 +313,7 @@ export const MakeWindowsIntegrationSpecifications = (
 			kind: "autostart",
 			path: configuration.autostart_task_name,
 			content: EncodeWindowsAutostart({
-				arguments: 'start --profile "default"',
+				arguments: "start",
 				executable_path: ae_path,
 				task_name: configuration.autostart_task_name,
 				working_directory: `${root}\\bin`,

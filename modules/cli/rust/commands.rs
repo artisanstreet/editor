@@ -13,10 +13,10 @@ use crate::{
     CliError, Result,
     error::io,
     http::{self, PairResponse},
+    instance::{self, ForgeMode, State},
     manifest::InstallationManifest,
     paths::Layout,
     payload, process,
-    profile::{self, ForgeMode, State},
 };
 
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
@@ -37,10 +37,8 @@ pub enum Commands {
     Protocol {
         url: String,
     },
-    /// Explicitly create or update a Forge profile.
+    /// Explicitly create or update this home's Forge configuration.
     Setup {
-        #[arg(long, env = "ARTISAN_PROFILE", default_value = "default")]
-        profile: String,
         #[arg(long, default_value_t = 0)]
         listen_port: u16,
         #[arg(long, value_enum, default_value_t = Mode::Local)]
@@ -49,36 +47,25 @@ pub enum Commands {
         data_root: Option<PathBuf>,
         #[arg(long)]
         autostart: bool,
-        /// Serve the bundled web frontend from this Forge (development browser
-        /// profiles only; installed profiles render through the editor).
+        /// Serve the bundled web frontend from this Forge (development homes
+        /// only; installed homes render through the editor).
         #[arg(long)]
         serve_frontend: bool,
     },
     Start {
-        #[arg(long, env = "ARTISAN_PROFILE", default_value = "default")]
-        profile: String,
         #[arg(long)]
         foreground: bool,
     },
-    Stop {
-        #[arg(long, env = "ARTISAN_PROFILE", default_value = "default")]
-        profile: String,
-    },
+    Stop,
     Restart {
-        #[arg(long, env = "ARTISAN_PROFILE", default_value = "default")]
-        profile: String,
         #[arg(long)]
         foreground: bool,
     },
     Status {
-        #[arg(long, env = "ARTISAN_PROFILE", default_value = "default")]
-        profile: String,
         #[arg(long)]
         json: bool,
     },
     Logs {
-        #[arg(long, env = "ARTISAN_PROFILE", default_value = "default")]
-        profile: String,
         #[arg(long, default_value_t = 200)]
         lines: usize,
         #[arg(long)]
@@ -87,14 +74,10 @@ pub enum Commands {
     Doctor {
         #[arg(long)]
         fix: bool,
-        #[arg(long, env = "ARTISAN_PROFILE", default_value = "default")]
-        profile: String,
         #[arg(long)]
         json: bool,
     },
     Open {
-        #[arg(long, env = "ARTISAN_PROFILE", default_value = "default")]
-        profile: String,
         /// Open a paired browser at this loopback origin instead of the editor.
         #[arg(long, conflicts_with = "handoff")]
         origin: Option<String>,
@@ -109,7 +92,7 @@ pub enum Commands {
     },
     Update,
     Uninstall {
-        /// Permanently remove Forge profiles, projects, and conversations.
+        /// Permanently remove Forge data, projects, and conversations.
         #[arg(long)]
         remove_data: bool,
     },
@@ -133,17 +116,13 @@ impl From<Mode> for ForgeMode {
 
 pub fn run(cli: Cli) -> Result<()> {
     let layout = Layout::discover()?;
-    match cli.command.unwrap_or_else(|| Commands::Open {
-        // Plain invocation honors the same ambient profile as every explicit
-        // command, so single-profile worlds (the dev home) never name it.
-        profile: std::env::var("ARTISAN_PROFILE").unwrap_or_else(|_| "default".into()),
+    match cli.command.unwrap_or(Commands::Open {
         origin: None,
         browser: false,
         handoff: false,
     }) {
         Commands::Protocol { url } => handle_protocol(&layout, &url),
         Commands::Setup {
-            profile,
             listen_port,
             mode,
             data_root,
@@ -157,39 +136,27 @@ pub fn run(cli: Cli) -> Result<()> {
                 ));
             }
             let data_root = data_root.as_deref().map(validate_data_root).transpose()?;
-            profile::setup(
+            instance::setup(
                 &layout,
-                &profile,
                 mode.into(),
                 listen_port,
                 data_root.as_deref(),
                 serve_frontend,
             )?;
             delegate_bootstrap(&layout, "repair", false)?;
-            println!("Configured Forge profile {profile}");
+            println!("Configured Forge");
             Ok(())
         }
-        Commands::Start {
-            profile,
-            foreground,
-        } => start(&layout, &profile, foreground),
-        Commands::Stop { profile } => stop(&layout, &profile),
-        Commands::Restart {
-            profile,
-            foreground,
-        } => {
-            let _ = stop(&layout, &profile);
-            start(&layout, &profile, foreground)
+        Commands::Start { foreground } => start(&layout, foreground),
+        Commands::Stop => stop(&layout),
+        Commands::Restart { foreground } => {
+            let _ = stop(&layout);
+            start(&layout, foreground)
         }
-        Commands::Status { profile, json } => status(&layout, &profile, json),
-        Commands::Logs {
-            profile,
-            lines,
-            follow,
-        } => logs(&layout, &profile, lines, follow),
-        Commands::Doctor { fix, profile, json } => doctor(&layout, &profile, fix, json),
+        Commands::Status { json } => status(&layout, json),
+        Commands::Logs { lines, follow } => logs(&layout, lines, follow),
+        Commands::Doctor { fix, json } => doctor(&layout, fix, json),
         Commands::Open {
-            profile,
             origin,
             browser,
             handoff,
@@ -201,11 +168,14 @@ pub fn run(cli: Cli) -> Result<()> {
             } else {
                 OpenFlow::Editor
             };
-            open(&layout, &profile, origin.as_deref(), flow)
+            open(&layout, origin.as_deref(), flow)
         }
         Commands::Update => delegate_bootstrap(&layout, "update", false),
         Commands::Uninstall { remove_data } => {
-            stop_all_profiles(&layout)?;
+            match stop(&layout) {
+                Ok(()) | Err(CliError::NotRunning | CliError::MissingInstance) => {}
+                Err(error) => return Err(error),
+            }
             delegate_bootstrap(&layout, "uninstall", remove_data)
         }
     }
@@ -215,31 +185,20 @@ fn require_installation(layout: &Layout) -> Result<InstallationManifest> {
     InstallationManifest::load(&layout.manifest)
 }
 
-fn start(layout: &Layout, name: &str, foreground: bool) -> Result<()> {
+fn start(layout: &Layout, foreground: bool) -> Result<()> {
     let manifest = require_installation(layout)?;
-    let (paths, profile, secrets) = profile::load(layout, name)?;
-    process::start(&manifest, name, &paths, &profile, &secrets, foreground)
+    let (paths, config, secrets) = instance::load(layout)?;
+    process::start(&manifest, &paths, &config, &secrets, foreground)
 }
 
-fn stop(layout: &Layout, name: &str) -> Result<()> {
-    let (paths, _, secrets) = profile::load(layout, name)?;
-    process::stop(name, &paths, &secrets)
+fn stop(layout: &Layout) -> Result<()> {
+    let (paths, _, secrets) = instance::load(layout)?;
+    process::stop(&paths, &secrets)
 }
 
-fn stop_all_profiles(layout: &Layout) -> Result<()> {
-    for name in profile::list_names(layout)? {
-        let (paths, _, secrets) = profile::load(layout, &name)?;
-        match process::stop(&name, &paths, &secrets) {
-            Ok(()) | Err(CliError::NotRunning(_)) => {}
-            Err(error) => return Err(error),
-        }
-    }
-    Ok(())
-}
-
-fn status(layout: &Layout, name: &str, json: bool) -> Result<()> {
-    let (paths, _, secrets) = profile::load(layout, name)?;
-    let state = profile::read_json::<State>(&paths.state).ok();
+fn status(layout: &Layout, json: bool) -> Result<()> {
+    let (paths, _, secrets) = instance::load(layout)?;
+    let state = instance::read_json::<State>(&paths.state).ok();
     let running = state
         .as_ref()
         .is_some_and(|state| http::healthy(&state.endpoint, &secrets.auth_token));
@@ -256,8 +215,8 @@ fn status(layout: &Layout, name: &str, json: bool) -> Result<()> {
     Ok(())
 }
 
-fn logs(layout: &Layout, name: &str, lines: usize, follow: bool) -> Result<()> {
-    let (paths, _, _) = profile::load(layout, name)?;
+fn logs(layout: &Layout, lines: usize, follow: bool) -> Result<()> {
+    let (paths, _, _) = instance::load(layout)?;
     let mut file = File::open(&paths.log).map_err(io("open Forge log"))?;
     let size = file.metadata().map_err(io("inspect Forge log"))?.len();
     file.seek(SeekFrom::Start(size.saturating_sub(MAX_LOG_BYTES)))
@@ -305,7 +264,7 @@ fn follow_log(mut file: File, mut offset: u64) -> Result<()> {
     }
 }
 
-fn doctor(layout: &Layout, name: &str, fix: bool, json: bool) -> Result<()> {
+fn doctor(layout: &Layout, fix: bool, json: bool) -> Result<()> {
     if fix {
         delegate_bootstrap(layout, "repair", false)?;
     }
@@ -317,7 +276,7 @@ fn doctor(layout: &Layout, name: &str, fix: bool, json: bool) -> Result<()> {
             "protocol health is unavailable without a valid installation".to_owned(),
         ))
     };
-    let profile_state = profile::load(layout, name);
+    let instance_state = instance::load(layout);
     // Payload drift (for example a development build copied over an installed
     // version) is reported, never repaired. Versions installed before payload
     // manifests existed stay honestly unverifiable without failing doctor.
@@ -325,10 +284,11 @@ fn doctor(layout: &Layout, name: &str, fix: bool, json: bool) -> Result<()> {
         payload::PayloadHealth::Unverifiable,
         |manifest: &InstallationManifest| payload::verify(&manifest.version_root()),
     );
-    // Repair never invents a profile. `ae setup` is the sole explicit creator.
+    // Repair never invents a Forge configuration. `ae setup` is the sole
+    // explicit creator.
     let healthy = installation.is_ok()
         && protocol.is_ok()
-        && profile_state.is_ok()
+        && instance_state.is_ok()
         && !matches!(payload_health, payload::PayloadHealth::Modified(_));
     if json {
         println!(
@@ -337,7 +297,7 @@ fn doctor(layout: &Layout, name: &str, fix: bool, json: bool) -> Result<()> {
                 "healthy": healthy,
                 "installation": if installation.is_ok() { "ok" } else { "error" },
                 "protocol": if protocol.is_ok() { "ok" } else { "error" },
-                "profile": if profile_state.is_ok() { "ok" } else { "missing" },
+                "instance": if instance_state.is_ok() { "ok" } else { "missing" },
                 "payload": payload_health.as_str(),
                 "payload_issues": match &payload_health {
                     payload::PayloadHealth::Modified(issues) => issues.clone(),
@@ -355,8 +315,12 @@ fn doctor(layout: &Layout, name: &str, fix: bool, json: bool) -> Result<()> {
             if protocol.is_ok() { "ok" } else { "error" }
         );
         println!(
-            "{}: profile {name}",
-            if profile_state.is_ok() { "ok" } else { "error" }
+            "{}: forge instance",
+            if instance_state.is_ok() {
+                "ok"
+            } else {
+                "error"
+            }
         );
         match &payload_health {
             payload::PayloadHealth::Verified => println!("ok: version payload"),
@@ -393,22 +357,22 @@ fn handle_protocol(layout: &Layout, url: &str) -> Result<()> {
             "unsupported artisan:// launch request".to_owned(),
         ));
     }
-    open(layout, "default", None, OpenFlow::Editor)
+    open(layout, None, OpenFlow::Editor)
 }
 
-fn ready_state(layout: &Layout, name: &str) -> Result<State> {
-    let (paths, _, secrets) = profile::load(layout, name)?;
+fn ready_state(layout: &Layout) -> Result<State> {
+    let (paths, _, secrets) = instance::load(layout)?;
     // An already-healthy Forge needs no launch, so opening against one works
     // even in homes without an installation manifest (the repo development
     // Forge runs from `.dist/forge`, started by its own CLI).
-    if let Ok(candidate) = profile::read_json::<State>(&paths.state)
+    if let Ok(candidate) = instance::read_json::<State>(&paths.state)
         && http::healthy(&candidate.endpoint, &secrets.auth_token)
     {
         return Ok(candidate);
     }
-    start(layout, name, false)?;
+    start(layout, false)?;
     for _ in 0..50 {
-        if let Ok(candidate) = profile::read_json::<State>(&paths.state)
+        if let Ok(candidate) = instance::read_json::<State>(&paths.state)
             && http::healthy(&candidate.endpoint, &secrets.auth_token)
         {
             return Ok(candidate);
@@ -418,8 +382,8 @@ fn ready_state(layout: &Layout, name: &str) -> Result<State> {
     Err(CliError::Control("Forge did not become ready".into()))
 }
 
-fn mint_pair_code(layout: &Layout, name: &str, state: &State) -> Result<String> {
-    let (paths, _, secrets) = profile::load(layout, name)?;
+fn mint_pair_code(layout: &Layout, state: &State) -> Result<String> {
+    let (paths, _, secrets) = instance::load(layout)?;
     let body = http::request(
         &state.endpoint,
         "/api/pair/request",
@@ -433,8 +397,8 @@ fn mint_pair_code(layout: &Layout, name: &str, state: &State) -> Result<String> 
     Ok(pair.code)
 }
 
-fn open(layout: &Layout, name: &str, origin: Option<&str>, flow: OpenFlow) -> Result<()> {
-    let state = ready_state(layout, name)?;
+fn open(layout: &Layout, origin: Option<&str>, flow: OpenFlow) -> Result<()> {
+    let state = ready_state(layout)?;
     // A home without an installation has no editor payload to launch; the
     // paired browser against the (already running) Forge is the only
     // renderer there, so the default flow degrades to it instead of failing.
@@ -445,14 +409,14 @@ fn open(layout: &Layout, name: &str, origin: Option<&str>, flow: OpenFlow) -> Re
         flow
     };
     match flow {
-        OpenFlow::Editor => launch_editor(layout, name),
+        OpenFlow::Editor => launch_editor(layout),
         OpenFlow::Browser => {
-            let code = mint_pair_code(layout, name, &state)?;
+            let code = mint_pair_code(layout, &state)?;
             let origin = resolve_browser_origin(origin, &state.endpoint)?;
             launch_url(&format!("{origin}/#pair={code}"))
         }
         OpenFlow::Handoff => {
-            let code = mint_pair_code(layout, name, &state)?;
+            let code = mint_pair_code(layout, &state)?;
             // The capability is one-time and short-lived; stdout reaches only
             // the trusted local process that invoked this hidden mode.
             println!(
@@ -469,9 +433,9 @@ fn open(layout: &Layout, name: &str, origin: Option<&str>, flow: OpenFlow) -> Re
 }
 
 /// The installed editor renders the bundled frontend itself and performs its
-/// own `ae open --handoff` exchange, so no capability travels through argv —
-/// only the non-secret profile name the editor should hand off against.
-fn launch_editor(layout: &Layout, profile: &str) -> Result<()> {
+/// own `ae open --handoff` exchange against this home's single Forge, so no
+/// capability travels through argv.
+fn launch_editor(layout: &Layout) -> Result<()> {
     let manifest = require_installation(layout)?;
     let editor = manifest.editor_executable();
     if !editor.is_file() {
@@ -481,7 +445,6 @@ fn launch_editor(layout: &Layout, profile: &str) -> Result<()> {
         )));
     }
     Command::new(&editor)
-        .arg(format!("--forge-profile={profile}"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -606,7 +569,6 @@ mod tests {
                 browser: false,
                 handoff: false,
                 origin: None,
-                ..
             })
         ));
         let browser = Cli::try_parse_from(["ae", "open", "--browser"]).unwrap();
@@ -649,6 +611,18 @@ mod tests {
     }
 
     #[test]
+    fn the_profile_flag_no_longer_exists() {
+        // One Forge per Artisan home: naming an instance is not a concept.
+        for arguments in [
+            ["ae", "setup", "--profile", "default"],
+            ["ae", "start", "--profile", "default"],
+            ["ae", "open", "--profile", "default"],
+        ] {
+            assert!(Cli::try_parse_from(arguments).is_err());
+        }
+    }
+
+    #[test]
     fn removal_of_data_is_explicit() {
         let cli = Cli::try_parse_from(["ae", "uninstall"]).unwrap();
         assert!(matches!(
@@ -674,7 +648,6 @@ mod tests {
     fn protocol_decoder_rejects_every_non_capability_url() {
         let root = std::env::temp_dir().join("artisan-protocol-test-home");
         let layout = Layout {
-            profiles: root.join("profiles"),
             manifest: root.join("installation.json"),
             root,
         };

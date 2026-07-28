@@ -13,8 +13,8 @@ import {
 } from "../../modules/cli/src/adapters";
 import { ForgeLifecycle } from "../../modules/cli/src/lifecycle";
 import { ForgeOperations, make_forge_operations_layer } from "../../modules/cli/src/operations";
-import { make_node_profile_store_layer } from "../../modules/cli/src/node-profile-store";
-import { ForgeProfileStore } from "../../modules/cli/src/profile";
+import { make_node_instance_store_layer } from "../../modules/cli/src/node-instance-store";
+import { ForgeInstanceStore } from "../../modules/cli/src/instance";
 import { ForgeProtocolCommand } from "../../modules/cli/src/protocol-handler";
 
 const MakeRuntime = (home: string) => {
@@ -27,7 +27,7 @@ const MakeRuntime = (home: string) => {
 			kind: "win32",
 		}),
 	);
-	const profiles = make_node_profile_store_layer(home);
+	const instances = make_node_instance_store_layer(home);
 	const lifecycle = Layer.succeed(
 		ForgeLifecycle,
 		ForgeLifecycle.of({
@@ -49,10 +49,10 @@ const MakeRuntime = (home: string) => {
 	);
 	return ManagedRuntime.make(
 		Layer.mergeAll(
-			profiles,
+			instances,
 			platform,
 			make_forge_operations_layer.pipe(
-				Layer.provide(Layer.mergeAll(profiles, lifecycle, autostart, platform)),
+				Layer.provide(Layer.mergeAll(instances, lifecycle, autostart, platform)),
 			),
 		),
 	);
@@ -63,10 +63,10 @@ describe("ae command operations", () => {
 		const home = await mkdtemp(join(tmpdir(), "artisan-cli-"));
 		const runtime = MakeRuntime(home);
 		try {
-			const profiles = await runtime.runPromise(ForgeProfileStore);
+			const instances = await runtime.runPromise(ForgeInstanceStore);
 			await mkdir(join(home, "data"));
 			await runtime.runPromise(
-				profiles.Ensure("default", {
+				instances.Ensure({
 					data_root: join(home, "data"),
 					listen_host: "127.0.0.1",
 					listen_port: 0,
@@ -74,10 +74,10 @@ describe("ae command operations", () => {
 					version: 1,
 				}),
 			);
-			const paths = await runtime.runPromise(profiles.Paths("default"));
+			const paths = await runtime.runPromise(instances.Paths());
 			await writeFile(paths.log_path, "first\nsecond\nthird \u00e6\n", "utf8");
 			const operations = await runtime.runPromise(ForgeOperations);
-			expect(await runtime.runPromise(operations.ReadLogs("default", 2))).toEqual([
+			expect(await runtime.runPromise(operations.ReadLogs(2))).toEqual([
 				"second",
 				"third \u00e6",
 			]);
@@ -91,7 +91,7 @@ describe("ae command operations", () => {
 				50,
 			);
 			const followed = await runtime.runPromise(
-				operations.FollowLogs("default").pipe(Stream.take(1), Stream.runCollect),
+				operations.FollowLogs().pipe(Stream.take(1), Stream.runCollect),
 			);
 			expect([...followed]).toEqual(["fourth \u00f8\n"]);
 		} finally {
@@ -104,10 +104,10 @@ describe("ae command operations", () => {
 		const home = await mkdtemp(join(tmpdir(), "artisan-cli-"));
 		const runtime = MakeRuntime(home);
 		try {
-			const profiles = await runtime.runPromise(ForgeProfileStore);
+			const instances = await runtime.runPromise(ForgeInstanceStore);
 			await mkdir(join(home, "data"));
 			await runtime.runPromise(
-				profiles.Ensure("default", {
+				instances.Ensure({
 					data_root: join(home, "data"),
 					listen_host: "127.0.0.1",
 					listen_port: 0,
@@ -115,12 +115,12 @@ describe("ae command operations", () => {
 					version: 1,
 				}),
 			);
-			const secret = await runtime.runPromise(profiles.LoadSecrets("default"));
+			const secret = await runtime.runPromise(instances.LoadSecrets());
 			const report = await runtime.runPromise(
-				(await runtime.runPromise(ForgeOperations)).Doctor("default"),
+				(await runtime.runPromise(ForgeOperations)).Doctor(),
 			);
 			expect(report.checks.map((check) => check.name)).toEqual([
-				"profile",
+				"instance",
 				"config",
 				"artifacts",
 				"codex",
@@ -134,16 +134,16 @@ describe("ae command operations", () => {
 		}
 	});
 
-	it("continues doctor diagnostics when the profile is missing", async () => {
+	it("continues doctor diagnostics when the Forge is unconfigured", async () => {
 		const home = await mkdtemp(join(tmpdir(), "artisan-cli-"));
 		const runtime = MakeRuntime(home);
 		try {
 			const report = await runtime.runPromise(
-				(await runtime.runPromise(ForgeOperations)).Doctor("default"),
+				(await runtime.runPromise(ForgeOperations)).Doctor(),
 			);
 			expect(report.healthy).toBe(false);
 			expect(report.checks.map((check) => check.name)).toEqual([
-				"profile",
+				"instance",
 				"config",
 				"artifacts",
 				"codex",
@@ -151,7 +151,7 @@ describe("ae command operations", () => {
 				"live",
 			]);
 			expect(report.checks[0]).toMatchObject({
-				name: "profile",
+				name: "instance",
 				state: "error",
 			});
 		} finally {
@@ -160,33 +160,32 @@ describe("ae command operations", () => {
 		}
 	});
 
-	it("does not create a missing profile during Forge repair", async () => {
+	it("does not create a missing Forge configuration during repair", async () => {
 		const home = await mkdtemp(join(tmpdir(), "artisan-cli-"));
 		const runtime = MakeRuntime(home);
 		try {
 			const operations = await runtime.runPromise(ForgeOperations);
-			const report = await runtime.runPromise(operations.Repair("default"));
-			const profiles = await runtime.runPromise(ForgeProfileStore);
+			const report = await runtime.runPromise(operations.Repair());
+			const instances = await runtime.runPromise(ForgeInstanceStore);
 
-			await expect(runtime.runPromise(profiles.Load("default"))).rejects.toMatchObject({
-				code: "invalid",
+			await expect(runtime.runPromise(instances.Load())).rejects.toMatchObject({
+				code: "missing",
 			});
-			await expect(
-				readFile(join(home, "profiles", "default", "config.json")),
-			).rejects.toMatchObject({ code: "ENOENT" });
-			expect(report.checks.find((check) => check.name === "profile")?.state).toBe("error");
+			await expect(readFile(join(home, "config.json"))).rejects.toMatchObject({
+				code: "ENOENT",
+			});
+			expect(report.checks.find((check) => check.name === "instance")?.state).toBe("error");
 		} finally {
 			await runtime.dispose();
 			await rm(home, { force: true, recursive: true });
 		}
 	});
 
-	it("keeps scheduler arguments profile-scoped", () => {
-		expect(ForgeTaskName("default")).toBe("Artisan Forge default");
+	it("keeps scheduler arguments fixed to the product task", () => {
+		expect(ForgeTaskName).toBe("Artisan Forge");
 		const arguments_without_entry = task_scheduler_arguments({
 			enabled: true,
 			executable_path: "C:/Program Files/Artisan/ae.exe",
-			profile: "default",
 		});
 		expect(arguments_without_entry).toEqual(
 			expect.arrayContaining(["/RL", "LIMITED", "/SC", "ONLOGON"]),
@@ -195,16 +194,14 @@ describe("ae command operations", () => {
 			cli_entry_path: "C:/Program Files/Artisan/ae.js",
 			enabled: true,
 			executable_path: "C:/Program Files/Artisan/node.exe",
-			profile: "default",
 		});
 		expect(arguments_with_entry[arguments_with_entry.indexOf("/TR") + 1]).toBe(
-			'"C:/Program Files/Artisan/node.exe" "C:/Program Files/Artisan/ae.js" start --profile default',
+			'"C:/Program Files/Artisan/node.exe" "C:/Program Files/Artisan/ae.js" start',
 		);
 		expect(
 			task_scheduler_arguments({
 				enabled: true,
 				executable_path: "C:/Program Files/Artisan/ae.exe",
-				profile: "default",
 			}),
 		).toEqual(arguments_without_entry);
 	});

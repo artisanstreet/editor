@@ -5,9 +5,8 @@ import { describe, expect, it } from "vitest";
 
 import {
 	dev_title_marker,
-	DevInstanceProfile,
 	DevMarkedTitle,
-	release_forge_profile,
+	IsDevelopmentInstance,
 } from "../../modules/frontend/src/lib/root/dev-instance";
 
 const Read = (path: string) => readFileSync(resolve(path), "utf8");
@@ -25,14 +24,13 @@ const ReadTextTree = (
 		});
 
 describe("development instance visibility", () => {
-	it("derives a dev profile only from a non-release health body", () => {
-		expect(DevInstanceProfile({ profile: "browser-dev" })).toBe("browser-dev");
-		expect(DevInstanceProfile({ profile: release_forge_profile })).toBeUndefined();
-		expect(DevInstanceProfile({ profile: "" })).toBeUndefined();
-		expect(DevInstanceProfile({ profile: 4848 })).toBeUndefined();
-		expect(DevInstanceProfile({})).toBeUndefined();
-		expect(DevInstanceProfile(undefined)).toBeUndefined();
-		expect(DevInstanceProfile("browser-dev")).toBeUndefined();
+	it("marks a development instance only from an explicit health boolean", () => {
+		expect(IsDevelopmentInstance({ development: true })).toBe(true);
+		expect(IsDevelopmentInstance({ development: false })).toBe(false);
+		expect(IsDevelopmentInstance({ development: "true" })).toBe(false);
+		expect(IsDevelopmentInstance({})).toBe(false);
+		expect(IsDevelopmentInstance(undefined)).toBe(false);
+		expect(IsDevelopmentInstance("development")).toBe(false);
 	});
 
 	it("marks document titles idempotently", () => {
@@ -49,7 +47,7 @@ describe("development instance visibility", () => {
 
 		expect(layout).toContain("<DevInstanceBadge />");
 		expect(badge).toContain('fetch(ForgeHttpUrl("/health")');
-		expect(badge).toContain("DevInstanceProfile(");
+		expect(badge).toContain("IsDevelopmentInstance(");
 		expect(badge).toContain("DevMarkedTitle(document.title)");
 		expect(badge).toContain("new MutationObserver(");
 		expect(badge).toContain("observer.disconnect()");

@@ -169,7 +169,7 @@ describe("WindowsIntegrationAdapterLive", () => {
 
 	it("uses a current-user scheduled task and idempotent removal", async () => {
 		const autostart = EncodeWindowsAutostart({
-			arguments: 'start --profile "default"',
+			arguments: "start",
 			executable_path: "C:\\Artisan\\bin\\ae.exe",
 			task_name: "Artisan Forge",
 		});

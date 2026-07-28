@@ -10,19 +10,18 @@ use crate::{
     CliError, Result,
     error::io,
     http,
+    instance::{InstanceConfig, InstancePaths, Secrets, State},
     manifest::InstallationManifest,
-    profile::{Profile, ProfilePaths, Secrets, State},
 };
 
 pub fn start(
     manifest: &InstallationManifest,
-    name: &str,
-    paths: &ProfilePaths,
-    profile: &Profile,
+    paths: &InstancePaths,
+    config: &InstanceConfig,
     secrets: &Secrets,
     foreground: bool,
 ) -> Result<()> {
-    if let Ok(state) = crate::profile::read_json::<State>(&paths.state)
+    if let Ok(state) = crate::instance::read_json::<State>(&paths.state)
         && http::healthy(&state.endpoint, &secrets.auth_token)
     {
         return Ok(());
@@ -37,7 +36,7 @@ pub fn start(
             executable.display()
         )));
     }
-    fs::create_dir_all(&profile.data_root).map_err(io("create Forge data directory"))?;
+    fs::create_dir_all(&config.data_root).map_err(io("create Forge data directory"))?;
     let log = OpenOptions::new()
         .create(true)
         .append(true)
@@ -47,7 +46,7 @@ pub fn start(
     if host_entry.is_file() {
         command.arg(&host_entry);
     }
-    configure_forge_environment(&mut command, name, paths, profile, secrets, &forge_root);
+    configure_forge_environment(&mut command, paths, config, secrets, &forge_root);
     configure_native_runtime(&mut command, &native_runtime);
     if foreground {
         let status = command.status().map_err(io("start Forge"))?;
@@ -67,9 +66,8 @@ pub fn start(
 
 fn configure_forge_environment(
     command: &mut Command,
-    name: &str,
-    paths: &ProfilePaths,
-    profile: &Profile,
+    paths: &InstancePaths,
+    config: &InstanceConfig,
     secrets: &Secrets,
     forge_root: &Path,
 ) {
@@ -77,7 +75,7 @@ fn configure_forge_environment(
         .env("ARTISAN_AUTH_TOKEN", &secrets.auth_token)
         .env(
             "ARTISAN_DATABASE_PATH",
-            profile.data_root.join("artisan.sqlite"),
+            config.data_root.join("artisan.sqlite"),
         )
         .env("ARTISAN_MIGRATIONS_PATH", forge_root.join("migrations"))
         .env("ARTISAN_NODE_EXECUTABLE", forge_root.join(node_name()))
@@ -85,15 +83,14 @@ fn configure_forge_environment(
             "ARTISAN_WINDOWS_PROCESS_HOST",
             forge_root.join("windows-process-host.js"),
         )
-        .env("CODEX_SQLITE_HOME", profile.data_root.join("codex-sqlite"))
-        .env("ARTISAN_FORGE_PROFILE", name)
+        .env("CODEX_SQLITE_HOME", config.data_root.join("codex-sqlite"))
         .env("ARTISAN_FORGE_STATE_PATH", &paths.state)
         .env("ARTISAN_FORGE_LOG_PATH", &paths.log)
-        .env("ARTISAN_LISTEN_HOST", &profile.listen_host)
-        .env("ARTISAN_LISTEN_PORT", profile.listen_port.to_string());
-    // Web hosting is a per-profile development capability. Without the flag,
-    // Forge exposes only its health and control/WS surfaces and SPA routes 404.
-    if profile.serve_frontend {
+        .env("ARTISAN_LISTEN_HOST", &config.listen_host)
+        .env("ARTISAN_LISTEN_PORT", config.listen_port.to_string());
+    // Web hosting is a development capability. Without the flag, Forge
+    // exposes only its health and control/WS surfaces and SPA routes 404.
+    if config.serve_frontend {
         command.env("ARTISAN_STATIC_FRONTEND_ROOT", forge_root.join("frontend"));
     }
 }
@@ -128,11 +125,11 @@ fn detach(_: &mut Command) {
     // child independent of this terminal; installers may add a service manager.
 }
 
-pub fn stop(name: &str, paths: &ProfilePaths, secrets: &Secrets) -> Result<()> {
+pub fn stop(paths: &InstancePaths, secrets: &Secrets) -> Result<()> {
     let state_metadata = match fs::symlink_metadata(&paths.state) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(CliError::NotRunning(name.into()));
+            return Err(CliError::NotRunning);
         }
         Err(source) => {
             return Err(CliError::Io {
@@ -144,7 +141,7 @@ pub fn stop(name: &str, paths: &ProfilePaths, secrets: &Secrets) -> Result<()> {
     if state_metadata.file_type().is_symlink() || !state_metadata.is_file() {
         return Err(CliError::UnsafePath(paths.state.clone()));
     }
-    let state: State = crate::profile::read_json(&paths.state)?;
+    let state: State = crate::instance::read_json(&paths.state)?;
     http::request(
         &state.endpoint,
         "/api/control/shutdown",
@@ -157,9 +154,9 @@ pub fn stop(name: &str, paths: &ProfilePaths, secrets: &Secrets) -> Result<()> {
         }
         thread::sleep(Duration::from_millis(100));
     }
-    Err(CliError::Control(format!(
-        "Forge profile `{name}` accepted shutdown but remained reachable"
-    )))
+    Err(CliError::Control(
+        "Forge accepted shutdown but remained reachable".into(),
+    ))
 }
 
 #[cfg(test)]
@@ -170,23 +167,22 @@ mod tests {
     };
 
     use super::{
-        Command, Profile, ProfilePaths, Secrets, configure_forge_environment,
+        Command, InstanceConfig, InstancePaths, Secrets, configure_forge_environment,
         configure_native_runtime,
     };
-    use crate::profile::ForgeMode;
+    use crate::instance::ForgeMode;
 
-    fn test_profile(serve_frontend: bool) -> (ProfilePaths, Profile, Secrets) {
-        let directory = PathBuf::from("C:/artisan-home/profiles/default");
+    fn test_instance(serve_frontend: bool) -> (InstancePaths, InstanceConfig, Secrets) {
+        let home = PathBuf::from("C:/artisan-home");
         (
-            ProfilePaths {
-                config: directory.join("config.json"),
-                secrets: directory.join("secrets.json"),
-                state: directory.join("state.json"),
-                log: directory.join("forge.log"),
-                directory,
+            InstancePaths {
+                config: home.join("config.json"),
+                secrets: home.join("secrets.json"),
+                state: home.join("state.json"),
+                log: home.join("forge.log"),
             },
-            Profile {
-                data_root: PathBuf::from("C:/artisan-home/profiles/default/data"),
+            InstanceConfig {
+                data_root: home.join("data"),
                 listen_host: "127.0.0.1".into(),
                 listen_port: 0,
                 mode: ForgeMode::Local,
@@ -200,38 +196,24 @@ mod tests {
         )
     }
 
-    /// Installed-profile gate: without the explicit development flag, the
+    /// Installed-home gate: without the explicit development flag, the
     /// launched Forge never receives a static frontend root, so it cannot
     /// host the web renderer.
     #[test]
-    fn static_hosting_is_absent_unless_the_profile_opts_in() {
+    fn static_hosting_is_absent_unless_the_home_opts_in() {
         let forge_root = Path::new("C:/Artisan/versions/1.0.0/forge");
-        let (paths, profile, secrets) = test_profile(false);
+        let (paths, config, secrets) = test_instance(false);
         let mut command = Command::new("forge");
-        configure_forge_environment(
-            &mut command,
-            "default",
-            &paths,
-            &profile,
-            &secrets,
-            forge_root,
-        );
+        configure_forge_environment(&mut command, &paths, &config, &secrets, forge_root);
         assert!(
             command
                 .get_envs()
                 .all(|(key, _)| key != OsStr::new("ARTISAN_STATIC_FRONTEND_ROOT"))
         );
 
-        let (paths, profile, secrets) = test_profile(true);
+        let (paths, config, secrets) = test_instance(true);
         let mut serving = Command::new("forge");
-        configure_forge_environment(
-            &mut serving,
-            "default",
-            &paths,
-            &profile,
-            &secrets,
-            forge_root,
-        );
+        configure_forge_environment(&mut serving, &paths, &config, &secrets, forge_root);
         assert!(serving.get_envs().any(|(key, value)| {
             key == OsStr::new("ARTISAN_STATIC_FRONTEND_ROOT")
                 && value.is_some_and(|path| Path::new(path).ends_with("frontend"))

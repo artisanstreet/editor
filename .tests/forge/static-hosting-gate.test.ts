@@ -33,14 +33,13 @@ const launcher_input = (serve_frontend: boolean | undefined) => ({
 		...(serve_frontend === undefined ? {} : { serve_frontend }),
 	},
 	instance_id: "forge_gate",
-	profile: "default",
 	token: "secret",
 });
 
 /**
- * Architecture gate: static web hosting is a development-profile capability.
- * An installed default profile composes a Forge that serves only its health
- * and control/WS surfaces; the Electron editor renders the bundled frontend.
+ * Architecture gate: static web hosting is a development capability.
+ * An installed home composes a Forge that serves only its health and
+ * control/WS surfaces; the Electron editor renders the bundled frontend.
  */
 describe("static hosting production gate", () => {
 	const closers: Array<() => Promise<void>> = [];
@@ -49,7 +48,7 @@ describe("static hosting production gate", () => {
 		await Promise.all(closers.splice(0).map((close) => close()));
 	});
 
-	it("keeps the installed-profile composition free of a static frontend root", () => {
+	it("keeps the installed composition free of a static frontend root", () => {
 		const config = decode_forge_config({
 			database_path: "C:/artisan/data.sqlite",
 			instance_id: test_instance_id,
@@ -95,7 +94,12 @@ describe("static hosting production gate", () => {
 		expect((await fetch(new URL("/index.html", host.endpoint))).status).toBe(404);
 
 		const health = await fetch(new URL("/health", host.endpoint));
-		expect(await health.json()).toMatchObject({ service: "artisan-forge", status: "ready" });
+		/** A hosting-off Forge never reports itself as a development instance. */
+		expect(await health.json()).toMatchObject({
+			development: false,
+			service: "artisan-forge",
+			status: "ready",
+		});
 
 		/**
 		 * The installed editor pairs cross-origin from `artisan://app`; the
@@ -142,7 +146,7 @@ describe("static hosting production gate", () => {
 				serving_scripts.push(entry.name);
 			}
 		}
-		/** The browser-dev profile is the only composition that opts into hosting. */
+		/** The browser development Forge is the only composition that opts into hosting. */
 		expect(serving_scripts).toEqual(["start-browser-forge.ps1"]);
 
 		const rust_cli = await readFile(
@@ -156,7 +160,7 @@ describe("static hosting production gate", () => {
 			resolve(import.meta.dirname, "../../modules/cli/rust/process.rs"),
 			"utf8",
 		);
-		expect(rust_process).toContain("if profile.serve_frontend {");
+		expect(rust_process).toContain("if config.serve_frontend {");
 
 		const ts_entry = await readFile(
 			resolve(import.meta.dirname, "../../modules/cli/src/entry.ts"),

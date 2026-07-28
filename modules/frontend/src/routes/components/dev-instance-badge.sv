@@ -1,18 +1,18 @@
 <script lang="ts">
 	import { onMount } from "svelte";
 
-	import { DevInstanceProfile, DevMarkedTitle } from "$lib/root/dev-instance";
+	import { DevMarkedTitle, IsDevelopmentInstance } from "$lib/root/dev-instance";
 	import { ForgeHttpUrl } from "$lib/runtime/forge-endpoint";
 
 	/**
-	 * A non-`default` `/health` profile means this renderer is talking to a
-	 * development Forge pointed at a separate data root — whether the page is
-	 * the built bundle served by that Forge or the HMR dev server proxying to
-	 * it. Showing that removes the standing ambiguity between an installed app
-	 * and a repository build, which otherwise look identical and differ only in
-	 * which database they read.
+	 * A `/health` body with `development: true` means this renderer is talking
+	 * to a development Forge pointed at a separate data root — whether the page
+	 * is the built bundle served by that Forge or the HMR dev server proxying
+	 * to it. Showing that removes the standing ambiguity between an installed
+	 * app and a repository build, which otherwise look identical and differ
+	 * only in which database they read.
 	 */
-	let profile = $state<string | undefined>(undefined);
+	let development = $state(false);
 
 	onMount(() => {
 		let cancelled = false;
@@ -22,16 +22,15 @@
 			 * A page can load while its Forge is mid-restart, so one failed probe
 			 * must not hide the badge for the whole session. A short retry
 			 * ladder settles the answer. Under the installed editor the probe
-			 * targets the adopted loopback Forge, whose release profile reports
-			 * `default` and correctly leaves the badge hidden.
+			 * targets the adopted loopback Forge, which does not serve the web
+			 * frontend and correctly leaves the badge hidden.
 			 */
 			for (let attempt = 0; attempt < 5 && !cancelled; attempt += 1) {
 				try {
 					const response = await fetch(ForgeHttpUrl("/health"), { cache: "no-store" });
 					if (response.ok) {
 						const body: unknown = await response.json();
-						const named = DevInstanceProfile(body);
-						if (!cancelled && named !== undefined) profile = named;
+						if (!cancelled && IsDevelopmentInstance(body)) development = true;
 						return;
 					}
 				} catch {
@@ -55,7 +54,7 @@
 	 * its own mutations.
 	 */
 	$effect(() => {
-		if (profile === undefined) return;
+		if (!development) return;
 
 		const Mark = () => {
 			const marked = DevMarkedTitle(document.title);
@@ -69,11 +68,10 @@
 	});
 </script>
 
-{#if profile !== undefined}
-	<div class="dev-instance-badge" role="note" aria-label={`Development Forge profile ${profile}`}>
+{#if development}
+	<div class="dev-instance-badge" role="note" aria-label="Development Forge">
 		<span class="dev-instance-badge-dot" aria-hidden="true"></span>
 		<span class="dev-instance-badge-label">dev</span>
-		<span class="dev-instance-badge-profile">{profile}</span>
 	</div>
 {/if}
 
@@ -108,8 +106,5 @@
 	.dev-instance-badge-label {
 		font-weight: 600;
 		text-transform: uppercase;
-	}
-	.dev-instance-badge-profile {
-		color: rgb(255 255 255 / 0.5);
 	}
 </style>

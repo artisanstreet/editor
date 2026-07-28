@@ -9,7 +9,6 @@ export const ForgeState = Schema.Struct({
 	endpoint: Schema.String,
 	instance_id: Schema.String,
 	pid: Schema.Int,
-	profile: Schema.String,
 	started_at: Schema.String,
 	version: Schema.Literal(1),
 });

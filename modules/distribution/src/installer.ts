@@ -155,13 +155,12 @@ export class InstallationHealth extends Context.Service<
 >()("Artisan/Distribution/InstallationHealth") {}
 
 export interface RunningForgeSnapshot {
-	readonly running_profiles: ReadonlyArray<string>;
+	readonly was_running: boolean;
 }
 
 export class ForgeUpdateLifecycleFailure extends Data.TaggedError("ForgeUpdateLifecycleFailure")<{
 	readonly cause?: unknown;
 	readonly operation: "quiesce" | "restore" | "resume" | "verify_current";
-	readonly profile?: string;
 	readonly version: string;
 }> {}
 
@@ -468,7 +467,7 @@ export const make_installer_layer = (configuration_input: unknown) =>
 						);
 					const running_snapshot: RunningForgeSnapshot =
 						previous === undefined
-							? { running_profiles: [] }
+							? { was_running: false }
 							: yield* forge_lifecycle.Quiesce(previous.active_version);
 					const activated_at = yield* IsoNow();
 					const activated: ActivatedInstallationManifest = {
