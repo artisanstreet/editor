@@ -184,6 +184,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 		const DecodeSessionPolicy = (
 			row:
 				| {
+						readonly engine_id: string;
 						readonly policy_model: string | null;
 						readonly policy_reasoning_effort: string;
 						readonly policy_permission_mode: string;
@@ -198,7 +199,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 				? Schema.decodeUnknownEffect(ThreadSessionPolicy, {
 						onExcessProperty: "error",
 					})({
-						engine_id: "codex",
+						engine_id: row.engine_id,
 						...(row.policy_model === null ? {} : { model: row.policy_model }),
 						reasoning_effort: row.policy_reasoning_effort,
 						permission_mode: row.policy_permission_mode,
@@ -211,6 +212,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 		const GetSessionPolicy = (thread_id: string) =>
 			database.client
 				.select({
+					engine_id: OrchestrationCoordinators.engine_id,
 					policy_model: OrchestrationCoordinators.policy_model,
 					policy_reasoning_effort: OrchestrationCoordinators.policy_reasoning_effort,
 					policy_permission_mode: OrchestrationCoordinators.policy_permission_mode,
@@ -235,6 +237,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 						const [coordinator] = yield* transaction
 							.select({
 								enabled: OrchestrationCoordinators.auto_steer_follow_ups,
+								engine_id: OrchestrationCoordinators.engine_id,
 								policy_model: OrchestrationCoordinators.policy_model,
 								policy_reasoning_effort:
 									OrchestrationCoordinators.policy_reasoning_effort,
@@ -651,7 +654,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 								thread_id: command.thread_id,
 							});
 							const policy_columns = {
-								engine_id: "codex",
+								engine_id: payload.policy.engine_id,
 								policy_model: payload.policy.model ?? null,
 								policy_reasoning_effort: payload.policy.reasoning_effort,
 								policy_permission_mode: payload.policy.permission_mode,

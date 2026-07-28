@@ -66,6 +66,8 @@
 		snapshot: ConversationSnapshot;
 	} = $props();
 	const view = $derived(MakeConversationViewState(snapshot));
+	/** Once a session has produced conversation, its engine can never change. */
+	const engine_locked = $derived(run_active || snapshot.items.length > 0);
 	type ConversationItemBlock = Extract<ConversationRenderBlock, { type: "item" }>;
 
 	const block_is_resolved_approval = (
@@ -330,6 +332,7 @@
 
 	<ThreadComposer
 		{disabled}
+		{engine_locked}
 		{onabort}
 		{onpolicychange}
 		onsubmit={onsubmit === undefined ? undefined : SubmitMessage}

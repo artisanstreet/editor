@@ -261,13 +261,31 @@ describe("Barekey docs shell reset", () => {
 
 		expect(draft).toContain("client.CreateThread");
 		expect(draft).toContain("draft_thread_project.set(catalog.projects[0])");
-		expect(draft).toContain(
-			"pending_first_submission.set({ submission, thread_id: thread.thread_id })",
-		);
+		expect(draft).toContain("pending_first_submission.set({ submission, thread_id })");
 		expect(draft).toContain("Select a project at the top of the panel before sending.");
+		/** The draft owns the session policy: the engine locks after the first send. */
+		expect(draft).toContain("draft_thread_policy.set({");
+		expect(draft).toContain("client.UpdateThreadSessionPolicy({ policy, thread_id })");
+		expect(draft).toContain("created_thread_id ??");
 		expect(route).toContain("get(pending_first_submission)");
 		expect(route).toContain("pending_first_submission.set(undefined)");
 		expect(route).toContain("SendMessage(pending.submission)");
+	});
+
+	it("locks the engine once a session has conversation and routes engine choice through policy", () => {
+		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.sv");
+		const composer = Read("modules/frontend/src/routes/components/thread-composer.sv");
+		const selector = Read("modules/frontend/src/routes/components/model-selector.sv");
+
+		expect(workspace).toContain(
+			"const engine_locked = $derived(run_active || snapshot.items.length > 0);",
+		);
+		expect(composer).toContain(
+			"<ModelSelector {disabled} {engine_locked} {policy} {onpolicychange} />",
+		);
+		expect(selector).toContain("engine_id: model.engine,");
+		expect(selector).toContain("engine_locked && engine.id !== selected_engine.id");
+		expect(selector).toContain("engine is locked for this session");
 	});
 
 	it("surfaces the thread's project at the top of the thread panel and assigns it there", () => {

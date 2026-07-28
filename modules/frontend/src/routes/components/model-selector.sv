@@ -49,10 +49,13 @@
 
 	let {
 		disabled = false,
+		engine_locked = false,
 		onpolicychange,
 		policy,
 	}: {
 		disabled?: boolean;
+		/** A session that has produced conversation cannot move to another engine. */
+		engine_locked?: boolean;
 		onpolicychange?: (policy: ThreadSessionPolicy) => void;
 		policy?: ThreadSessionPolicy;
 	} = $props();
@@ -163,6 +166,9 @@
 		if (model.definition.disabled !== undefined) {
 			return;
 		}
+		if (engine_locked && model.engine !== selected_model?.engine) {
+			return;
+		}
 		selected_model_id = model.id;
 		active_engine = model.engine;
 		if (model.definition.capabilities.thinking.availability === "supported") {
@@ -177,6 +183,7 @@
 			);
 		speed_option_id = default_speed?.id ?? "standard";
 		PatchPolicy({
+			engine_id: model.engine,
 			model: model.definition.native_model_id,
 			reasoning_effort:
 				model.definition.capabilities.thinking.availability === "supported"
@@ -321,10 +328,13 @@
 						{@const EngineIcon = engine.icon}
 						<TabsTrigger
 							value={engine.id}
-							disabled={disabled}
+							disabled={disabled ||
+								(engine_locked && engine.id !== selected_engine.id)}
 							data-engine={engine.id}
 							aria-label={engine.name}
-							title={engine.name}
+							title={engine_locked && engine.id !== selected_engine.id
+								? `${engine.name} — engine is locked for this session`
+								: engine.name}
 							class="relative z-1 size-8 flex-none px-0 text-foreground after:hidden hover:text-foreground data-active:border-transparent data-active:bg-transparent data-active:text-foreground dark:hover:text-foreground dark:data-active:border-transparent dark:data-active:bg-transparent"
 						>
 							<EngineIcon class={engine.monochrome ? "size-4 dark:invert" : "size-4"} />

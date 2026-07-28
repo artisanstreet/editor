@@ -253,7 +253,8 @@ export const ThreadAutoSteerUpdateCommand = Schema.Struct({
 
 /** The durable, provider-neutral launch policy selected for one thread. */
 export const ThreadSessionPolicy = Schema.Struct({
-	engine_id: Schema.Literal("codex"),
+	/** Any engine identifier decodes; the runtime catalog rejects unregistered engines. */
+	engine_id: Identifier,
 	model: Schema.optional(Schema.NonEmptyString),
 	reasoning_effort: Schema.Literals(["low", "medium", "high", "xhigh", "max"]),
 	permission_mode: Schema.Literals(["never", "on_request"]),

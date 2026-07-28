@@ -1,6 +1,6 @@
 import { writable } from "svelte/store";
 
-import type { Project } from "@artisan/protocol";
+import type { Project, ThreadSessionPolicy } from "@artisan/protocol";
 import type { ComposerSubmission } from "$lib/composer/image-attachments";
 
 /**
@@ -9,6 +9,13 @@ import type { ComposerSubmission } from "$lib/composer/image-attachments";
  * panel surfaces and edits it while the draft route is active.
  */
 export const draft_thread_project = writable<Project | undefined>(undefined);
+
+/**
+ * The engine and model chosen for the draft. The engine locks the moment the
+ * first message creates the session, so the draft is the only place a
+ * different engine can be picked.
+ */
+export const draft_thread_policy = writable<ThreadSessionPolicy | undefined>(undefined);
 
 /**
  * Hands the draft's first submission to the routed thread, which owns the

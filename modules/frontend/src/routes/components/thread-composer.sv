@@ -33,6 +33,7 @@
 
 	let {
 		disabled = false,
+		engine_locked = false,
 		onabort,
 		onpolicychange,
 		onsubmit,
@@ -40,6 +41,7 @@
 		run_active = false,
 	}: {
 		disabled?: boolean;
+		engine_locked?: boolean;
 		onabort?: () => Effect.Effect<unknown, { readonly message: string }>;
 		onpolicychange?: (policy: ThreadSessionPolicy) => void;
 		onsubmit?: (
@@ -411,7 +413,7 @@
 			</div>
 
 			<div class="flex items-center justify-between gap-2">
-				<ModelSelector {disabled} {policy} {onpolicychange} />
+				<ModelSelector {disabled} {engine_locked} {policy} {onpolicychange} />
 				<Button
 					variant="ghost"
 					size="icon"
