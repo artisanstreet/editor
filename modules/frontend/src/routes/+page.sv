@@ -1,5 +1,6 @@
 <script lang="ts" effect>
 	import MessageCircle from "@tabler/icons-svelte/icons/message-circle";
+	import Plus from "@tabler/icons-svelte/icons/plus";
 	import { Clock, Effect, Stream } from "effect";
 	import type { SurfaceUsageDailyBucket, ThreadListItem } from "@artisan/protocol";
 	import { ArtisanClient, type ThreadListUpdate } from "@artisan/transport/client";
@@ -19,14 +20,25 @@
 	const recent_thread_limit = 4;
 	/** One year of UTC days, matching the grid's densest readable layout. */
 	const usage_day_count = 365;
+	const day_in_ms = 86_400_000;
 	let threads = $state.raw<ReadonlyArray<ThreadListItem>>([]);
 	let usage = $state.raw<ReadonlyArray<SurfaceUsageDailyBucket>>([]);
 	const recent_threads = $derived(threads.slice(0, recent_thread_limit));
+	/** Before any usage exists, the grid keeps its full layout with zero-token days. */
+	const empty_usage_days = (): ReadonlyArray<{ date: string; tokens: number }> =>
+		Array.from({ length: usage_day_count }, (_, index) => ({
+			date: new Date(now_ms - (usage_day_count - 1 - index) * day_in_ms)
+				.toISOString()
+				.slice(0, 10),
+			tokens: 0,
+		}));
 	const activities = $derived(
-		usage.map((bucket) => ({
-			date: bucket.date,
-			tokens: bucket.input_tokens + bucket.output_tokens,
-		})),
+		usage.length === 0
+			? empty_usage_days()
+			: usage.map((bucket) => ({
+					date: bucket.date,
+					tokens: bucket.input_tokens + bucket.output_tokens,
+				})),
 	);
 
 	const ApplyUpdate = (update: ThreadListUpdate) =>
@@ -80,13 +92,9 @@
 <main class="flex h-full min-h-0 items-center justify-center overflow-hidden p-6 lg:p-10">
 	<div class="w-full max-w-[800px]">
 		<section class="mb-8 min-w-0" aria-label="Token usage">
-			{#if activities.length > 0}
-				<div class="flex h-24 w-full">
-					<VerticalCalendarActivityGrid {activities} />
-				</div>
-			{:else}
-				<p class="py-3 text-sm text-muted-foreground">No token usage recorded yet.</p>
-			{/if}
+			<div class="flex h-24 w-full">
+				<VerticalCalendarActivityGrid {activities} />
+			</div>
 		</section>
 		<div class="min-w-0">
 				<table class="w-full border-collapse text-left" aria-label="Recent threads">
@@ -115,9 +123,17 @@
 								</tr>
 							{/each}
 							{#if threads.length === 0}
-								<tr>
-									<td colspan="2" class="py-3 text-sm text-muted-foreground">
-										No threads yet. Create one from the sidebar.
+								<tr class="group border-b border-border last:border-b-0">
+									<td colspan="2" class="p-0">
+										<a
+											href="/threads/new"
+											class="flex w-full items-center gap-2 py-3 font-medium text-foreground outline-none transition-colors duration-(--duration-fast) ease-in-out group-hover:text-foreground-extra group-focus-within:text-foreground-extra motion-reduce:transition-none"
+										>
+											<Plus
+												class="size-4 shrink-0 text-muted-foreground transition-colors duration-(--duration-fast) ease-in-out group-hover:text-foreground-extra group-focus-within:text-foreground-extra motion-reduce:transition-none"
+											/>
+											<span class="truncate">New thread</span>
+										</a>
 									</td>
 								</tr>
 							{/if}

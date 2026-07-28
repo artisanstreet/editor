@@ -215,7 +215,7 @@ describe("Barekey docs shell reset", () => {
 		expect(global_styles).toContain('--font-sans: "Artisan Neo", sans-serif;');
 	});
 
-	it("keeps the copied docs identity and live creation controls in the sidebar", () => {
+	it("keeps the copied docs identity and the draft-thread quick link in the sidebar", () => {
 		const sidebar = Read("modules/frontend/src/routes/components/artisan-sidebar.sv");
 		const home = Read("modules/frontend/src/routes/+page.sv");
 
@@ -225,16 +225,20 @@ describe("Barekey docs shell reset", () => {
 		expect(sidebar).toContain(
 			'<Sidebar.Header class="h-14 justify-center pl-6 pr-14 lg:pl-2">',
 		);
-		expect(sidebar).toContain("client.CreateThread");
+		/**
+		 * New thread is a plain link into the draft route: no dropdown, no
+		 * project picking, and no durable thread creation from the sidebar.
+		 */
+		expect(sidebar).toContain('href="/threads/new"');
+		expect(sidebar).toContain('variant="ghost"');
+		expect(sidebar).toContain(">New thread</span>");
+		expect(sidebar).not.toContain("DropdownMenu");
+		expect(sidebar).not.toContain("client.CreateThread");
+		expect(sidebar).not.toContain("client.ListProjectDirectories");
+		expect(sidebar).not.toContain("client.SelectProjectDirectory");
 		expect(sidebar).not.toContain('type: "thread.create"');
-		expect(sidebar).not.toContain("artisanDesktop");
-		expect(sidebar).toContain("client.ListProjectDirectories");
-		expect(sidebar).toContain("client.SelectProjectDirectory");
-		expect(sidebar).toContain("Select a project folder");
-		expect(sidebar).not.toContain("Folder selection is available in the Artisan desktop app.");
 		expect(sidebar).not.toContain('type: "thread.project.assign"');
-		expect(sidebar).toContain("project_id: project.project_id");
-		expect(sidebar).not.toContain("No existing projects");
+		expect(sidebar).not.toContain("artisanDesktop");
 		expect(sidebar).not.toContain("<Sidebar.GroupLabel>Threads</Sidebar.GroupLabel>");
 		expect(sidebar).toContain("ProjectScopedThreadGroups(threads)");
 		expect(sidebar).toContain("<Sidebar.MenuSub");
@@ -246,7 +250,39 @@ describe("Barekey docs shell reset", () => {
 		expect(sidebar).toContain(
 			"isActive={page.url.pathname === ThreadRoutePath(thread.thread_id)}",
 		);
+		expect(home).toContain('href="/threads/new"');
+		expect(home).toContain(">New thread</span>");
 		expect(home).not.toMatch(/WelcomePage|ThreadWorkspace|SettingsPage|LiveWorkspaceStore/);
+	});
+
+	it("materializes the durable thread only at the draft's first send", () => {
+		const draft = Read("modules/frontend/src/routes/threads/new/+page.sv");
+		const route = Read("modules/frontend/src/routes/threads/[id]/thread-route.sv");
+
+		expect(draft).toContain("client.CreateThread");
+		expect(draft).toContain("draft_thread_project.set(catalog.projects[0])");
+		expect(draft).toContain(
+			"pending_first_submission.set({ submission, thread_id: thread.thread_id })",
+		);
+		expect(draft).toContain("Select a project at the top of the panel before sending.");
+		expect(route).toContain("get(pending_first_submission)");
+		expect(route).toContain("pending_first_submission.set(undefined)");
+		expect(route).toContain("SendMessage(pending.submission)");
+	});
+
+	it("surfaces the thread's project at the top of the thread panel and assigns it there", () => {
+		const panel = Read("modules/frontend/src/routes/components/thread-panel.sv");
+
+		expect(panel).toContain('aria-label="Thread project"');
+		expect(panel).toContain('{project?.display_name ?? "No project"}');
+		expect(panel).toContain("ResolveThreadRoute(threads, route_id)");
+		expect(panel).toContain('type: "thread.project.assign"');
+		expect(panel).toContain("client.ListProjectDirectories");
+		expect(panel).toContain("client.SelectProjectDirectory");
+		expect(panel).toContain("<Dialog.Title>Select a project</Dialog.Title>");
+		/** On the draft route the same picker edits the client-side draft project. */
+		expect(panel).toContain("draft_thread_project.set(candidate)");
+		expect(panel).toContain('page.url.pathname === "/threads/new"');
 	});
 
 	it("retains the complete Barekey style foundation", () => {

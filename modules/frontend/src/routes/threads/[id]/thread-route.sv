@@ -26,14 +26,18 @@
 	} from "$lib/thread-interaction/commands";
 	import { ConversationUserMessageWithSourceReference } from "$lib/conversation/scroll-position";
 	import type { ComposerSubmission } from "$lib/composer/image-attachments";
+	import { BannerService } from "$lib/banner/service";
+	import { pending_first_submission } from "$lib/root/draft-thread";
 	import { ResolveThreadRoute } from "$lib/root/thread-navigation";
 	import { Effect, Exit, Option, Queue, Scope, Stream } from "effect";
+	import { get } from "svelte/store";
 	import ThreadWorkspace from "../../components/thread-workspace.sv";
 
 	let { thread_id: route_thread_id }: { readonly thread_id: string } = $props();
 	const route_id = untrack(() => route_thread_id);
 
 	const client = yield* ArtisanClient;
+	const banner = yield* BannerService;
 	const frontend_scope = yield* Scope.Scope;
 	const thread_scope = yield* Scope.make();
 	type ThreadAction =
@@ -365,6 +369,23 @@
 		),
 		thread_scope,
 	);
+
+	/**
+	 * A thread reached from the draft route was created by its first submission;
+	 * send that message through the normal durable pipeline exactly once.
+	 */
+	const pending = get(pending_first_submission);
+	if (pending?.thread_id === thread_id) {
+		pending_first_submission.set(undefined);
+		Dispatch(
+			SendMessage(pending.submission).pipe(
+				Effect.asVoid,
+				Effect.catch((error) =>
+					banner.error("Could not send message", { description: error.message }),
+				),
+			),
+		);
+	}
 </script>
 
 <ThreadWorkspace
