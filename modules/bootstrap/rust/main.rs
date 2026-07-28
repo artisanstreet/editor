@@ -3,6 +3,7 @@ mod error;
 mod install;
 mod integrations;
 mod manifest;
+mod payload;
 mod platform;
 
 use std::path::PathBuf;

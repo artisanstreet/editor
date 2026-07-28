@@ -5,6 +5,7 @@ pub mod error;
 pub mod http;
 pub mod manifest;
 pub mod paths;
+pub mod payload;
 pub mod process;
 pub mod profile;
 

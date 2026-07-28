@@ -130,6 +130,9 @@ pub async fn install(options: InstallOptions) -> Result<()> {
             .map_err(|error| BootstrapError::InvalidTrustKey(error.to_string()))?;
         install_artifact(&client, artifact, artifact_url, &stage).await?;
         prune_unselected_components(&stage, &options.components)?;
+        // The tree is final: record per-file digests so `ae doctor` can
+        // detect payload drift after activation.
+        crate::payload::write_manifest(&stage)?;
 
         let release = options
             .install_root
@@ -474,7 +477,7 @@ fn integrate_path(bin: &Path) -> Result<()> {
     symlink(target, &link).map_err(io(&link))
 }
 
-fn hash_file(path: &Path) -> Result<String> {
+pub(crate) fn hash_file(path: &Path) -> Result<String> {
     let mut file = File::open(path).map_err(io(path))?;
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 64 * 1024];

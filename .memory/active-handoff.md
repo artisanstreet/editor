@@ -57,6 +57,18 @@ Branch continuity only. Durable status lives in
   with the loopback `connect-src` CSP patch (browser copy stays `'self'`);
   `desktop-builder.yml` ships `frontend/**`; `verify-packaged-desktop.ps1`
   proves renderer-present, loopback-CSP, bridge-free, no embedded Forge.
+- Payload drift: bootstrap staging writes `payload-manifest.json` (relative
+  path → sha256; format in `modules/bootstrap/rust/payload.rs`) into
+  `versions/<v>`; `ae doctor` verifies (`modules/cli/rust/payload.rs`), names
+  modified/missing/unexpected files, fails on drift, and reports pre-manifest
+  versions (≤0.2.1) as `unverifiable`, which stays healthy. Diagnostic only.
+- Engine-state audit: Forge-owned state (artisan.sqlite, forge-sessions.json,
+  guidance, model-behaviour) and Codex's sqlite family (`CODEX_SQLITE_HOME` →
+  `data_root/codex-sqlite`; proven on the installed profile) are per-profile.
+  By design `CODEX_HOME` (auth/config/rollout sessions) stays user-global;
+  Claude has no state/credential split — `CLAUDE_CONFIG_DIR` would relocate
+  `.credentials.json` and de-authenticate every profile — so Forge-spawned
+  Claude runs share `~/.claude` project history. Documented gap, unfixed.
 
 ## Other Standing Facts
 
@@ -82,8 +94,8 @@ Branch continuity only. Durable status lives in
   Vitest green — `.tests/forge` + `.tests/desktop` + `.tests/cli` (17 files,
   69 tests) and `.tests/frontend` (31 files, 169 tests) including the new
   static-hosting gate, forge-endpoint, renderer-host, pairing-fragment, and
-  WS-target suites; `cargo fmt`/`clippy -D warnings` clean; cargo tests 16
-  bootstrap + 21 CLI passing. Desktop shape tests and the packaged verifier
+  WS-target suites; `cargo fmt`/`clippy -D warnings` clean; cargo tests 17
+  bootstrap + 25 CLI passing (payload-manifest writer + doctor drift checks). Desktop shape tests and the packaged verifier
   now assert the renderer payload. A headed Electron smoke passed via CDP
   against the dev Forge: `artisan://app` load, fragment consumed/stripped,
   `[Dev]` title and badge, cross-origin pairing, WS transport, hydrated

@@ -15,7 +15,7 @@ use crate::{
     http::{self, PairResponse},
     manifest::InstallationManifest,
     paths::Layout,
-    process,
+    payload, process,
     profile::{self, ForgeMode, State},
 };
 
@@ -316,8 +316,18 @@ fn doctor(layout: &Layout, name: &str, fix: bool, json: bool) -> Result<()> {
         ))
     };
     let profile_state = profile::load(layout, name);
+    // Payload drift (for example a development build copied over an installed
+    // version) is reported, never repaired. Versions installed before payload
+    // manifests existed stay honestly unverifiable without failing doctor.
+    let payload_health = installation.as_ref().map_or(
+        payload::PayloadHealth::Unverifiable,
+        |manifest: &InstallationManifest| payload::verify(&manifest.version_root()),
+    );
     // Repair never invents a profile. `ae setup` is the sole explicit creator.
-    let healthy = installation.is_ok() && protocol.is_ok() && profile_state.is_ok();
+    let healthy = installation.is_ok()
+        && protocol.is_ok()
+        && profile_state.is_ok()
+        && !matches!(payload_health, payload::PayloadHealth::Modified(_));
     if json {
         println!(
             "{}",
@@ -326,6 +336,11 @@ fn doctor(layout: &Layout, name: &str, fix: bool, json: bool) -> Result<()> {
                 "installation": if installation.is_ok() { "ok" } else { "error" },
                 "protocol": if protocol.is_ok() { "ok" } else { "error" },
                 "profile": if profile_state.is_ok() { "ok" } else { "missing" },
+                "payload": payload_health.as_str(),
+                "payload_issues": match &payload_health {
+                    payload::PayloadHealth::Modified(issues) => issues.clone(),
+                    _ => Vec::new(),
+                },
             })
         );
     } else {
@@ -341,6 +356,15 @@ fn doctor(layout: &Layout, name: &str, fix: bool, json: bool) -> Result<()> {
             "{}: profile {name}",
             if profile_state.is_ok() { "ok" } else { "error" }
         );
+        match &payload_health {
+            payload::PayloadHealth::Verified => println!("ok: version payload"),
+            payload::PayloadHealth::Modified(issues) => {
+                println!("error: version payload modified ({})", issues.join(", "));
+            }
+            payload::PayloadHealth::Unverifiable => {
+                println!("warn: version payload (unverifiable: no payload manifest)");
+            }
+        }
     }
     if healthy {
         Ok(())
