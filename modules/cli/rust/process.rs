@@ -113,28 +113,6 @@ fn detach(_: &mut Command) {
     // child independent of this terminal; installers may add a service manager.
 }
 
-#[cfg(test)]
-mod tests {
-    use std::{ffi::OsStr, path::Path};
-
-    use super::{Command, configure_native_runtime};
-
-    #[test]
-    fn exposes_packaged_native_modules_to_forge_node_resolution() {
-        let native_runtime = Path::new("C:/Artisan/forge/native-runtime");
-        let mut command = Command::new("forge");
-
-        configure_native_runtime(&mut command, native_runtime);
-
-        let environment = command.get_envs().collect::<Vec<_>>();
-        for name in ["ARTISAN_NATIVE_RUNTIME", "NODE_PATH"] {
-            assert!(environment.iter().any(|(key, value)| {
-                *key == OsStr::new(name) && value.as_deref() == Some(native_runtime.as_os_str())
-            }));
-        }
-    }
-}
-
 pub fn stop(name: &str, paths: &ProfilePaths, secrets: &Secrets) -> Result<()> {
     let state_metadata = match fs::symlink_metadata(&paths.state) {
         Ok(metadata) => metadata,
@@ -167,4 +145,26 @@ pub fn stop(name: &str, paths: &ProfilePaths, secrets: &Secrets) -> Result<()> {
     Err(CliError::Control(format!(
         "Forge profile `{name}` accepted shutdown but remained reachable"
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{ffi::OsStr, path::Path};
+
+    use super::{Command, configure_native_runtime};
+
+    #[test]
+    fn exposes_packaged_native_modules_to_forge_node_resolution() {
+        let native_runtime = Path::new("C:/Artisan/forge/native-runtime");
+        let mut command = Command::new("forge");
+
+        configure_native_runtime(&mut command, native_runtime);
+
+        let environment = command.get_envs().collect::<Vec<_>>();
+        for name in ["ARTISAN_NATIVE_RUNTIME", "NODE_PATH"] {
+            assert!(environment.iter().any(|(key, value)| {
+                *key == OsStr::new(name) && value.as_deref() == Some(native_runtime.as_os_str())
+            }));
+        }
+    }
 }

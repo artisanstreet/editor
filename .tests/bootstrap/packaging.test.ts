@@ -11,9 +11,17 @@ const bootstrap_root = resolve("modules/bootstrap");
 
 describe("published bootstrap artifact", () => {
 	it("builds a self-contained bundle without optional cloud or workspace runtime imports", async () => {
+		/**
+		 * `root` must be the bootstrap package, not the process working
+		 * directory. The config declares a relative `outDir` of `.dist` with
+		 * `emptyOutDir`, so building from the repository root would resolve it to
+		 * the repository's own `.dist` and erase the desktop, frontend, and Forge
+		 * build outputs that the deep suites run against.
+		 */
 		await build({
 			configFile: join(bootstrap_root, "vite.config.ts"),
 			logLevel: "silent",
+			root: bootstrap_root,
 		});
 
 		const bundle = await readFile(join(bootstrap_root, ".dist", "entry.js"), "utf8");
