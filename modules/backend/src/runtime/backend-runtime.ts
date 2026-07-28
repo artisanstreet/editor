@@ -671,6 +671,13 @@ function make_desktop_model_behaviour_registry(options: DesktopBackendOptions) {
 	);
 }
 
+/**
+ * Engines the desktop production composition may load. Anything else fails
+ * closed before composing, so an experimental adapter cannot reach a user
+ * installation by simply being passed in.
+ */
+const production_engine_ids: ReadonlySet<string> = new Set(["codex", "claude"]);
+
 /** Builds the production desktop layer with opinionated platform guidance discovery. */
 export function make_desktop_backend_layer(options: DesktopBackendOptions) {
 	const production_capability_transports = CapabilityTransportRegistryLive.pipe(
@@ -682,9 +689,13 @@ export function make_desktop_backend_layer(options: DesktopBackendOptions) {
 	);
 	return Layer.unwrap(
 		Effect.gen(function* () {
-			if ((options.engines ?? []).some((engine) => engine.Descriptor.id !== "codex")) {
+			if (
+				(options.engines ?? []).some(
+					(engine) => !production_engine_ids.has(engine.Descriptor.id),
+				)
+			) {
 				return yield* new DesktopEngineConfigurationError({
-					message: "Desktop production accepts only the Codex engine.",
+					message: "Desktop production accepts only the Codex and Claude engines.",
 				});
 			}
 

@@ -40,12 +40,12 @@ afterEach(async () => {
 });
 
 describe("desktop guidance composition", () => {
-	it("fails closed before composing a non-Codex production engine", async () => {
+	it("fails closed before composing an unknown production engine", async () => {
 		const paths = await make_paths();
 
 		const runtime = make_desktop_backend_runtime({
 			database_path: paths.database,
-			engines: [make_fake_engine({ engine_id: "claude" })],
+			engines: [make_fake_engine({ engine_id: "gemini" })],
 			migrations_path,
 		});
 
@@ -58,7 +58,7 @@ describe("desktop guidance composition", () => {
 				),
 			).rejects.toMatchObject({
 				_tag: "DesktopEngineConfigurationError",
-				message: "Desktop production accepts only the Codex engine.",
+				message: "Desktop production accepts only the Codex and Claude engines.",
 			});
 		} finally {
 			await runtime.dispose();
