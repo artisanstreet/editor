@@ -1,4 +1,5 @@
 <script lang="ts">
+	import MarkdownContent from "$lib/components/markdown/content.sv";
 	import { ShimmerText } from "$lib/components/ui/shimmer-text";
 	import { user_message_style_config } from "$lib/conversation-style-config";
 	import type { ConversationItem, ImageAttachmentReference } from "@artisan/protocol";
@@ -143,7 +144,7 @@
 				{item.text}
 			</ShimmerText>
 		{:else}
-			<p class="whitespace-pre-wrap text-base leading-7 text-foreground">{item.text}</p>
+			<MarkdownContent streaming={item.lifecycle === "streaming"} text={item.text} />
 			{#if trailing !== undefined}{@render trailing()}{/if}
 		{/if}
 	</article>

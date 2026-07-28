@@ -15,6 +15,7 @@
 		"@artisan/data": "workspace:*",
 		"@artisan/protocol": "workspace:*",
 		"@artisan/transport": "workspace:*",
+		"@comark/svelte": "^0.5.1",
 		"@effect/platform-browser": "4.0.0-beta.97",
 		"@fontsource-variable/jetbrains-mono": "5.2.8",
 		"@fontsource/cal-sans": "5.2.3",
