@@ -25,5 +25,6 @@
 	 */
 	:global(.comark-content.conversation-markdown.prose) {
 		--tw-prose-body: var(--foreground);
+		color: var(--foreground);
 	}
 </style>
