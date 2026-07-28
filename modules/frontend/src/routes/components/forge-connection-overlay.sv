@@ -67,7 +67,10 @@
 	};
 
 	$effect(() => {
-		if (!is_visible || presentation.tone !== "error") return;
+		if (!is_visible || presentation.tone !== "error") {
+			origin_reachable = false;
+			return;
+		}
 		let cancelled = false;
 
 		const Discover = async () => {
@@ -120,7 +123,6 @@
 		void Discover();
 		return () => {
 			cancelled = true;
-			origin_reachable = false;
 		};
 	});
 	let previous_focus: HTMLElement | null = null;

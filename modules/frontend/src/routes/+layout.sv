@@ -79,6 +79,32 @@
 		Effect.forkScoped,
 	);
 
+	/**
+	 * The transport parks after its reconnect budget, which a Forge restart
+	 * (notably an update) always exhausts. This watcher probes the origin while
+	 * the gate is parked and re-arms the connection once — so a returning Forge
+	 * reconnects by itself, and the gate's "isn't paired" diagnosis is only ever
+	 * shown after a real attempt against a reachable Forge has failed.
+	 */
+	const AutoRecoverConnection = Effect.gen(function* () {
+		let attempted = false;
+		while (true) {
+			yield* Effect.sleep("2 seconds");
+			if (forge_gate.state.phase !== "exhausted") {
+				attempted = false;
+				continue;
+			}
+			if (attempted) continue;
+			const reachable = yield* Effect.tryPromise(() =>
+				fetch("/health", { cache: "no-store" }).then((response) => response.ok),
+			).pipe(Effect.catch(() => Effect.succeed(false)));
+			if (!reachable || forge_gate.state.phase !== "exhausted") continue;
+			attempted = true;
+			yield* client.RetryConnection;
+		}
+	});
+	yield* AutoRecoverConnection.pipe(Effect.forkScoped);
+
 	onMount(() => {
 		desktop_runtime = navigator.userAgent.includes("Electron/");
 	});
