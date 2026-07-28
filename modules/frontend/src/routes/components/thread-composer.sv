@@ -415,7 +415,7 @@
 				<Button
 					variant="ghost"
 					size="icon"
-					class="composer-send card-glass rounded-full text-white/25 hover:text-white/25 disabled:text-white/25"
+					class="composer-send inset-shadow rounded-full text-white/50 hover:text-white/50 disabled:text-white/50"
 					style={`--composer-send-image: url("${send_gradient}")`}
 					aria-label={run_active ? "Stop current run" : "Send message"}
 					disabled={run_active

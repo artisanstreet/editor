@@ -65,7 +65,8 @@ describe("Barekey docs shell reset", () => {
 		expect(composer).toContain("onpolicychange");
 		expect(model_selector).toContain('aria-label="Select model"');
 		expect(model_selector).toContain("SvglOpenAILogo");
-		expect(model_selector).not.toMatch(/Claude|Anthropic/);
+		expect(model_selector).toContain("SvglClaudeAILogo");
+		expect(model_selector).toContain("claude: { icon: SvglClaudeAILogo, monochrome: false }");
 		expect(model_selector).toContain("service_tier");
 		expect(model_selector).toContain(
 			'const composer_controls: ReadonlyArray<ComposerControl> = ["model"];',
@@ -76,8 +77,9 @@ describe("Barekey docs shell reset", () => {
 		expect(composer).not.toContain('aria-label="Add images"');
 		expect(composer).toContain('"Stop current run"');
 		expect(composer).toContain("PlayerStopFilled");
-		expect(composer).toContain("card-glass rounded-full text-white/25");
-		expect(composer).not.toContain("bg-white/25");
+		expect(composer).toContain("inset-shadow rounded-full text-white/50");
+		expect(composer).not.toContain("card-glass");
+		expect(composer).not.toContain("bg-white/50");
 		/**
 		 * The send/stop icons cross-fade through the shared t-icon-swap
 		 * transition, so the reduced-motion guard is the stylesheet media query

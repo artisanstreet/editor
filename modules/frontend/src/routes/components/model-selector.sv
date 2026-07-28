@@ -6,6 +6,7 @@
 	import Lock from "@tabler/icons-svelte/icons/lock";
 	import Tool from "@tabler/icons-svelte/icons/tool";
 	import {
+		SvglClaudeAILogo,
 		SvglGrokLogo,
 		SvglOpenAILogo,
 	} from "@selemondev/svgl-svelte";
@@ -62,6 +63,7 @@
 	const engine_decoration: Readonly<
 		Partial<Record<HarnessId, { icon: Component; monochrome: boolean }>>
 	> = {
+		claude: { icon: SvglClaudeAILogo, monochrome: false },
 		codex: { icon: SvglOpenAILogo, monochrome: true },
 		grok: { icon: SvglGrokLogo, monochrome: true },
 	};
