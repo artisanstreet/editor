@@ -11,8 +11,10 @@ $env:ARTISAN_HOME = $install_root
 
 # pnpm forwards the literal `--` separator into the script's arguments, so
 # both calling forms reach the bootstrap cleanly; only the leading separator
-# is dropped.
-$forwarded = if ($args.Count -gt 0 -and $args[0] -eq "--") { @($args | Select-Object -Skip 1) } else { @($args) }
+# is dropped. The outer @(...) must wrap the whole `if`: Windows PowerShell
+# collapses a one-element statement result to a scalar string, and splatting
+# a scalar over a native command splits it into characters.
+$forwarded = @(if ($args.Count -gt 0 -and $args[0] -eq "--") { $args | Select-Object -Skip 1 } else { $args })
 
 & cargo run -p artisan-bootstrap -- @forwarded
 exit $LASTEXITCODE
