@@ -1,8 +1,12 @@
 import {
+	SvglAnthropicLogo,
 	SvglClaudeAILogo,
 	SvglCursorLogo,
+	SvglGeminiLogo,
 	SvglGrokLogo,
+	SvglKimiLogo,
 	SvglOpenAILogo,
+	SvglXAILogo,
 } from "@selemondev/svgl-svelte";
 import Tool from "@tabler/icons-svelte/icons/tool";
 import type { Component } from "svelte";
@@ -34,6 +38,23 @@ const unknown_engine_mark: EngineMark = {
 /** Resolves the provider mark for an engine, falling back to a neutral tool glyph. */
 export const EngineMarkFor = (engine_id: string | undefined): EngineMark =>
 	(engine_id === undefined ? undefined : engine_marks[engine_id]) ?? unknown_engine_mark;
+
+/**
+ * Marks for the lab that made a model, distinct from the engine serving it:
+ * a Cursor-hosted GPT model carries the OpenAI mark, not the Cursor cube.
+ */
+const provider_marks: Readonly<Record<string, EngineMark>> = {
+	anthropic: { accent: "#d97757", icon: SvglAnthropicLogo, monochrome: true },
+	cursor: { accent: "#6b7280", icon: SvglCursorLogo, monochrome: true },
+	google: { accent: "#4285f4", icon: SvglGeminiLogo, monochrome: false },
+	moonshot: { accent: "#6b7280", icon: SvglKimiLogo, monochrome: true },
+	openai: { accent: "#10a37f", icon: SvglOpenAILogo, monochrome: true },
+	xai: { accent: "#6b7280", icon: SvglXAILogo, monochrome: true },
+};
+
+/** Resolves the mark for a model's lab, falling back to a neutral tool glyph. */
+export const ProviderMarkFor = (provider_id: string | undefined): EngineMark =>
+	(provider_id === undefined ? undefined : provider_marks[provider_id]) ?? unknown_engine_mark;
 
 /** Names the Tailwind classes that size a provider mark and keep it theme-correct. */
 export const EngineMarkClass = (mark: EngineMark, size = "size-5") =>

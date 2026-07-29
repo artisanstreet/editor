@@ -5,11 +5,10 @@
 	import Check from "@tabler/icons-svelte/icons/check";
 	import Lock from "@tabler/icons-svelte/icons/lock";
 	import Tool from "@tabler/icons-svelte/icons/tool";
-	import { SvglOpenAILogo } from "@selemondev/svgl-svelte";
 	import type { Component } from "svelte";
 	import type { RuntimeCatalog, ThreadSessionPolicy } from "@artisan/protocol";
 	import { ArtisanClient } from "@artisan/transport/client";
-	import { EngineMarkFor } from "$lib/engine/presentation";
+	import { EngineMarkClass, EngineMarkFor, ProviderMarkFor } from "$lib/engine/presentation";
 	import { remember_last_model } from "$lib/root/last-model";
 
 	import { Popover, PopoverContent, PopoverTrigger } from "$lib/components/ui/popover";
@@ -298,8 +297,8 @@
 			<table class="w-full border-separate border-spacing-y-0.5" aria-label="Available models">
 				<tbody>
 					{#each active_models as model (model.id)}
-						{@const ModelIcon = engines.find((engine) => engine.id === model.engine)?.icon ?? SvglOpenAILogo}
-						{@const is_monochrome = engines.find((engine) => engine.id === model.engine)?.monochrome ?? false}
+						{@const lab_mark = ProviderMarkFor(model.definition.provider)}
+						{@const LabIcon = lab_mark.icon}
 						<tr>
 							<td class="p-0">
 								<div
@@ -320,11 +319,7 @@
 										aria-current={model.id === selected_model_id ? "true" : undefined}
 										onclick={() => select_model(model)}
 									>
-										<ModelIcon
-											class={is_monochrome
-												? "size-5 shrink-0 dark:invert"
-												: "size-5 shrink-0"}
-										/>
+										<LabIcon class={EngineMarkClass(lab_mark, "size-5")} />
 										<span class="flex min-w-0 flex-col space-y-0">
 											<span class="truncate text-sm font-semibold text-foreground">{model.name}</span>
 											<span class="truncate text-xs text-muted-foreground">{model.lab}</span>
