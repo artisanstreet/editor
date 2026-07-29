@@ -236,7 +236,7 @@ const cursor_hosted_thinking = {
 } as const;
 
 export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
-	revision: "2026-07-29.2",
+	revision: "2026-07-29.3",
 	providers: [
 		{ id: "openai", label: "OpenAI" },
 		{ id: "anthropic", label: "Anthropic" },
@@ -1148,12 +1148,22 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 			id: "cursor-kimi-k3",
 			name: "Kimi K3",
 			native_model_id: "kimi-k3",
+			description: "Open-weight frontier model for long agentic engineering sessions.",
 			harness: "cursor",
 			provider: "moonshot",
 			routing: { kind: "default" },
 			status: "prototype",
 			capabilities: {
-				thinking: cursor_hosted_thinking,
+				/** Kimi documents reasoning_effort low/high/max; Kimi Code defaults to high. */
+				thinking: {
+					availability: "supported",
+					default: "high",
+					options: [
+						standard("light", "low"),
+						standard("high", "high"),
+						exceptional("max", "max"),
+					],
+				},
 				speed_options: [cursor_native_speed("Kimi K3", false)],
 				image_input: false,
 				local_tools: true,
@@ -1165,12 +1175,22 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 			id: "cursor-glm-5-2",
 			name: "GLM 5.2",
 			native_model_id: "glm-5.2",
+			description: "Z.ai's flagship model for reasoning, coding, and long-horizon agentic work.",
 			harness: "cursor",
 			provider: "zai",
 			routing: { kind: "default" },
 			status: "prototype",
 			capabilities: {
-				thinking: cursor_hosted_thinking,
+				/** GLM 5.2 documents non-thinking plus High and Max thinking efforts. */
+				thinking: {
+					availability: "supported",
+					default: "high",
+					options: [
+						standard("light", "none"),
+						standard("high", "high"),
+						exceptional("max", "max"),
+					],
+				},
 				speed_options: [cursor_native_speed("GLM 5.2", false)],
 				image_input: false,
 				local_tools: true,
