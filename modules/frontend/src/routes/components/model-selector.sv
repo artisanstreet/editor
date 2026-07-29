@@ -85,12 +85,15 @@
 		xhigh: "Extra High",
 	};
 
-	const harness_labels = new Map(model_manifest.harnesses.map((harness) => [harness.id, harness.label]));
+	/** The lab that made the model (OpenAI, Anthropic), not the harness serving it. */
+	const provider_labels = new Map(
+		model_manifest.providers.map((provider) => [provider.id, provider.label]),
+	);
 	const models: ReadonlyArray<ModelChoice> = model_manifest.models.map((model) => ({
 		definition: model,
 		engine: model.harness,
 		id: model.id,
-		lab: harness_labels.get(model.harness) ?? model.harness,
+		lab: provider_labels.get(model.provider) ?? model.provider,
 		name: model.name,
 	}));
 	let open = $state(false);
@@ -324,9 +327,7 @@
 										/>
 										<span class="flex min-w-0 flex-col space-y-0">
 											<span class="truncate text-sm font-semibold text-foreground">{model.name}</span>
-											<span class="text-pretty text-xs text-muted-foreground">
-												{model.definition.description ?? model.lab}
-											</span>
+											<span class="truncate text-xs text-muted-foreground">{model.lab}</span>
 											{#if model.definition.disabled !== undefined}
 												<span class="text-pretty text-xs text-muted-foreground">
 													{model.definition.disabled.reason}
@@ -513,19 +514,16 @@
 						{@render model_rows()}
 					</div>
 					{#if previewed_model !== undefined}
-						{@const PreviewIcon = engines.find((engine) => engine.id === previewed_model.engine)?.icon ?? SvglOpenAILogo}
-						{@const preview_monochrome = engines.find((engine) => engine.id === previewed_model.engine)?.monochrome ?? false}
 						<div class="h-48 w-56 shrink-0">
-							<div class="flex h-full flex-col gap-2 overflow-y-auto p-2.5">
-								<div class="flex items-center gap-2">
-									<PreviewIcon
-										class={preview_monochrome ? "size-4 shrink-0 dark:invert" : "size-4 shrink-0"}
-									/>
+							<div class="flex h-full flex-col justify-between gap-2 overflow-y-auto p-2.5">
+								<div class="flex min-w-0 flex-col gap-1">
 									<span class="truncate text-sm font-semibold text-foreground">{previewed_model.name}</span>
+									{#if previewed_model.definition.description !== undefined}
+										<span class="text-pretty text-xs text-muted-foreground">
+											{previewed_model.definition.description}
+										</span>
+									{/if}
 								</div>
-								<span class="text-pretty text-xs text-muted-foreground">
-									{previewed_model.definition.description ?? previewed_model.lab}
-								</span>
 								{@render model_config(previewed_model)}
 							</div>
 						</div>

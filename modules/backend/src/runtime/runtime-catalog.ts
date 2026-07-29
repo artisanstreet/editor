@@ -25,25 +25,18 @@ export const RuntimeCatalogLive = Layer.effect(
 	Effect.gen(function* () {
 		const registry = yield* EngineRegistry;
 		const engines = yield* registry.List;
-		const harness_ids = new Set(engines.map((engine) => engine.Descriptor.id));
-		const harnesses = model_manifest.harnesses.filter((harness) => harness_ids.has(harness.id));
-		const available_harness_ids = new Set(harnesses.map((harness) => harness.id));
-		const models = model_manifest.models.filter((model) =>
-			available_harness_ids.has(model.harness),
-		);
-		const provider_ids = new Set(models.map((model) => model.provider));
-		const providers = model_manifest.providers.filter((provider) =>
-			provider_ids.has(provider.id),
-		);
-		const default_model_id = models.find((model) => model.disabled === undefined)?.id;
+		const runnable = new Set(engines.map((engine) => engine.Descriptor.id));
+		/**
+		 * The full catalog ships so pickers can preview every model; only a
+		 * runnable harness may default or start a session.
+		 */
+		const default_model_id = model_manifest.models.find(
+			(model) => model.disabled === undefined && runnable.has(model.harness),
+		)?.id;
 		const catalog = yield* Schema.decodeUnknownEffect(RuntimeCatalog)({
 			...(default_model_id === undefined ? {} : { default_model_id }),
-			manifest: {
-				harnesses,
-				models,
-				providers,
-				revision: model_manifest.revision,
-			},
+			manifest: model_manifest,
+			runnable_harness_ids: [...runnable],
 		}).pipe(Effect.orDie);
 
 		const ValidateThreadSessionPolicy = (policy: ThreadSessionPolicy) =>
@@ -54,7 +47,13 @@ export const RuntimeCatalogLive = Layer.effect(
 				if (harness === undefined) {
 					return yield* new RuntimeCatalogPolicyError({
 						field: "engine_id",
-						message: `Engine ${policy.engine_id} is not registered in this Forge process.`,
+						message: `Engine ${policy.engine_id} is not in the catalog.`,
+					});
+				}
+				if (!catalog.runnable_harness_ids.some((id) => id === policy.engine_id)) {
+					return yield* new RuntimeCatalogPolicyError({
+						field: "engine_id",
+						message: `Engine ${policy.engine_id} has no registered runtime in this Forge process.`,
 					});
 				}
 

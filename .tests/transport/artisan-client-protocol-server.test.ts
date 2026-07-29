@@ -232,9 +232,8 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			expect(created.title).toBe("Forge-owned identity");
 			expect(threads).toContainEqual(created);
 			expect(projects).toEqual({ projects: [] });
-			expect(runtime_catalog).toMatchObject({
-				manifest: { harnesses: [], models: [], providers: [] },
-			});
+			expect(runtime_catalog.manifest.models.length).toBeGreaterThan(0);
+			expect(runtime_catalog.runnable_harness_ids).toEqual([]);
 			expect(runtime_catalog).not.toHaveProperty("default_model_id");
 			expect(project_updates).toEqual([{ snapshot: { projects: [] }, type: "snapshot" }]);
 			expect(detached).toEqual({ projects: [] });

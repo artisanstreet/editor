@@ -898,6 +898,7 @@ export const FixtureArtisanClientService = {
 			models: model_manifest.models.filter((model) => model.harness === "codex"),
 			providers: model_manifest.providers.filter((provider) => provider.id === "openai"),
 		},
+		runnable_harness_ids: ["codex" as const],
 	}),
 	GetHostIdentity: Effect.succeed({
 		display_name: "Sander Sonstabo",

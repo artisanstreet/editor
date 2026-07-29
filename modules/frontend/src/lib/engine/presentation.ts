@@ -1,4 +1,9 @@
-import { SvglClaudeAILogo, SvglGrokLogo, SvglOpenAILogo } from "@selemondev/svgl-svelte";
+import {
+	SvglClaudeAILogo,
+	SvglCursorLogo,
+	SvglGrokLogo,
+	SvglOpenAILogo,
+} from "@selemondev/svgl-svelte";
 import Tool from "@tabler/icons-svelte/icons/tool";
 import type { Component } from "svelte";
 
@@ -12,6 +17,7 @@ export interface EngineMark {
 const engine_marks: Readonly<Record<string, EngineMark>> = {
 	claude: { icon: SvglClaudeAILogo, monochrome: false },
 	codex: { icon: SvglOpenAILogo, monochrome: true },
+	cursor: { icon: SvglCursorLogo, monochrome: true },
 	grok: { icon: SvglGrokLogo, monochrome: true },
 };
 

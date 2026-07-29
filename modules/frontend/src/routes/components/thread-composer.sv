@@ -6,7 +6,14 @@
 	import { Effect } from "effect";
 	import { SnowflakeId } from "@artisan/protocol";
 	import type { ThreadSessionPolicy } from "@artisan/protocol";
+	import { ArtisanClient } from "@artisan/transport/client";
 	import { Button } from "$lib/components/ui/button";
+	import {
+		Tooltip,
+		TooltipContent,
+		TooltipProvider,
+		TooltipTrigger,
+	} from "$lib/components/ui/tooltip";
 	import send_gradient from "$lib/assets/composer/send-gradient.svg";
 	import { BannerService } from "$lib/banner/service";
 	import {
@@ -30,6 +37,8 @@
 
 	const snowflake_id = yield* SnowflakeId;
 	const banner = yield* BannerService;
+	const client = yield* ArtisanClient;
+	const runtime_catalog = yield* client.GetRuntimeCatalog;
 
 	let {
 		disabled = false,
@@ -50,6 +59,17 @@
 		policy?: ThreadSessionPolicy;
 		run_active?: boolean;
 	} = $props();
+
+	/** Catalog models without a registered engine can be picked but never run. */
+	const preview_engine_reason = $derived.by(() => {
+		const engine_id = policy?.engine_id;
+		if (engine_id === undefined) return undefined;
+		if (runtime_catalog.runnable_harness_ids.includes(engine_id)) return undefined;
+		const label =
+			runtime_catalog.manifest.harnesses.find((harness) => harness.id === engine_id)?.label ??
+			engine_id;
+		return `${label} models are preview-only — this engine cannot run in Artisan yet`;
+	});
 
 	let editor = $state<HTMLDivElement | null>(null);
 	let attachments = $state<ReadonlyMap<string, ComposerImageAttachment>>(new Map());
@@ -414,22 +434,39 @@
 
 			<div class="flex items-center justify-between gap-2">
 				<ModelSelector {disabled} {engine_locked} {policy} {onpolicychange} />
-				<Button
-					variant="ghost"
-					size="icon"
-					class="composer-send inset-shadow rounded-[calc(var(--composer-radius)-0.5rem)] text-white hover:text-white disabled:text-white"
-					style={`--composer-send-image: url("${send_gradient}")`}
-					aria-label={run_active ? "Stop current run" : "Send message"}
-					disabled={run_active
-						? disabled || cancelling || onabort === undefined
-						: disabled || submitting || (draft.trim().length === 0 && attachments.size === 0) || onsubmit === undefined}
-					onclick={yield* ActivatePrimaryAction}
-				>
-					<span class="t-icon-swap size-4" data-state={run_active ? "b" : "a"} aria-hidden="true">
-						<span class="t-icon" data-icon="a"><ArrowUp class="size-4" /></span>
-						<span class="t-icon" data-icon="b"><PlayerStopFilled class="size-4" /></span>
-					</span>
-				</Button>
+				<TooltipProvider delayDuration={0}>
+					<Tooltip>
+						<TooltipTrigger>
+							{#snippet child({ props: tooltip_props })}
+								<span {...tooltip_props} class="flex has-[:disabled]:cursor-not-allowed">
+									<Button
+										variant="ghost"
+										size="icon"
+										class="composer-send inset-shadow rounded-[calc(var(--composer-radius)-0.5rem)] text-white hover:text-white disabled:text-white"
+										style={`--composer-send-image: url("${send_gradient}")`}
+										aria-label={run_active ? "Stop current run" : "Send message"}
+										disabled={run_active
+											? disabled || cancelling || onabort === undefined
+											: disabled ||
+												submitting ||
+												preview_engine_reason !== undefined ||
+												(draft.trim().length === 0 && attachments.size === 0) ||
+												onsubmit === undefined}
+										onclick={yield* ActivatePrimaryAction}
+									>
+										<span class="t-icon-swap size-4" data-state={run_active ? "b" : "a"} aria-hidden="true">
+											<span class="t-icon" data-icon="a"><ArrowUp class="size-4" /></span>
+											<span class="t-icon" data-icon="b"><PlayerStopFilled class="size-4" /></span>
+										</span>
+									</Button>
+								</span>
+							{/snippet}
+						</TooltipTrigger>
+						{#if preview_engine_reason !== undefined && !run_active}
+							<TooltipContent>{preview_engine_reason}</TooltipContent>
+						{/if}
+					</Tooltip>
+				</TooltipProvider>
 			</div>
 		</div>
 	</ShaderGlassSurface>
