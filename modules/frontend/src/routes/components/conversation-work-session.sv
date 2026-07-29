@@ -16,7 +16,8 @@
 		details?: Snippet;
 		duration_kind?: "thought" | "worked";
 	} = $props();
-	let open = $state(false);
+	/** Failed work opens by default: its explanation must not hide behind a click. */
+	let open = $state(item.status === "failed" || item.status === "cancelled");
 	let details_element = $state<HTMLDivElement>();
 	let has_visible_details = $state(false);
 	let thinking_word_index = $state(0);
@@ -39,10 +40,16 @@
 			.join(" ");
 	};
 
+	const is_failed = $derived(item.status === "failed");
+	const is_cancelled = $derived(item.status === "cancelled");
 	const label = $derived(
 		item.ended_at === undefined
 			? (activity_label ?? thinking_word_at(thinking_word_index))
-			: `${duration_kind === "worked" ? "Worked" : "Thought"} for ${FormatDuration(item.started_at, item.ended_at)}`,
+			: is_failed
+				? `Failed after ${FormatDuration(item.started_at, item.ended_at)}`
+				: is_cancelled
+					? `Cancelled after ${FormatDuration(item.started_at, item.ended_at)}`
+					: `${duration_kind === "worked" ? "Worked" : "Thought"} for ${FormatDuration(item.started_at, item.ended_at)}`,
 	);
 	const is_working = $derived(item.ended_at === undefined);
 	const can_collapse = $derived(!is_working && has_visible_details);
@@ -87,7 +94,7 @@
 			aria-expanded={open}
 			onclick={() => (open = !open)}
 		>
-			<span>{label}</span>
+			<span class={is_failed ? "text-destructive" : ""}>{label}</span>
 			<ChevronRight
 				class={`size-4 transition-transform duration-250 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${open ? "rotate-90" : ""}`}
 				aria-hidden="true"
@@ -108,7 +115,7 @@
 			</div>
 		{:else}
 			<div class="flex w-full items-center gap-1 border-b border-border pb-2">
-				<span>{label}</span>
+				<span class={is_failed ? "text-destructive" : ""}>{label}</span>
 			</div>
 		{/if}
 	{/if}

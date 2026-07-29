@@ -299,7 +299,11 @@
 										item={block.session}
 									>
 										{#snippet details()}
-											<ConversationTrace items={block.details} />
+											<ConversationTrace
+												failed={block.session.status === "failed" ||
+													block.session.status === "cancelled"}
+												items={block.details}
+											/>
 										{/snippet}
 									</ConversationWorkSession>
 								{:else if block.type === "changes"}

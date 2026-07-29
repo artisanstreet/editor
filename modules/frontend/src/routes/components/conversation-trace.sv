@@ -1,5 +1,6 @@
 <script lang="ts">
 	import type { ConversationItem } from "@artisan/protocol";
+	import AlertTriangle from "@tabler/icons-svelte/icons/alert-triangle";
 	import Bug from "@tabler/icons-svelte/icons/bug";
 	import Terminal2 from "@tabler/icons-svelte/icons/terminal-2";
 	import Tool from "@tabler/icons-svelte/icons/tool";
@@ -12,11 +13,18 @@
 	} from "$lib/conversation/trace";
 	import ConversationItemView from "./conversation-item.sv";
 
-	let { items }: { items: ReadonlyArray<ConversationItem> } = $props();
+	let {
+		failed = false,
+		items,
+	}: {
+		/** Failed work must explain itself: diagnostics render open and unmuted. */
+		failed?: boolean;
+		items: ReadonlyArray<ConversationItem>;
+	} = $props();
 	let open_groups = $state<Record<string, boolean>>({});
 
 	const segments = $derived(
-		make_conversation_trace_segments(items, $conversation_diagnostics_enabled),
+		make_conversation_trace_segments(items, $conversation_diagnostics_enabled, failed),
 	);
 
 	const IsCommandGroup = (activities: ReadonlyArray<ConversationActivityItem>) =>
@@ -80,20 +88,26 @@
 					</div>
 				</div>
 			{:else}
-				{@const open = open_groups[segment.id] ?? false}
+				{@const open = open_groups[segment.id] ?? failed}
 				<div
 					class="trace-acc flex flex-col"
 					data-open={open}
 					data-state={open ? "open" : "closed"}
+					role={failed ? "alert" : undefined}
 				>
 					<button
 						type="button"
-						class="trace-acc-head flex w-fit cursor-pointer items-center gap-2 py-0.5 text-base text-muted-foreground transition-colors duration-150 hover:text-foreground motion-reduce:transition-none"
+						class={`trace-acc-head flex w-fit cursor-pointer items-center gap-2 py-0.5 text-base transition-colors duration-150 motion-reduce:transition-none ${failed ? "text-destructive hover:text-destructive" : "text-muted-foreground hover:text-foreground"}`}
 						aria-expanded={open}
 						onclick={() => ToggleGroup(segment.id)}
 					>
-						<Bug class="size-4" aria-hidden="true" />
-						<span>Diagnostics</span>
+						{#if failed}
+							<AlertTriangle class="size-4" aria-hidden="true" />
+							<span>Failure details</span>
+						{:else}
+							<Bug class="size-4" aria-hidden="true" />
+							<span>Diagnostics</span>
+						{/if}
 						<span class="trace-acc-chevron flex">
 							<ChevronRight class="size-3.5" aria-hidden="true" />
 						</span>
@@ -102,8 +116,14 @@
 					<div class="trace-acc-panel">
 						<div class="trace-acc-panel-inner flex flex-col gap-1 pt-1">
 							{#each segment.items as diagnostic (diagnostic.id)}
-								<div class="flex min-w-0 items-start gap-2 py-0.5 text-sm text-muted-foreground">
-									<Bug class="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+								<div
+									class={`flex min-w-0 items-start gap-2 py-0.5 text-sm ${failed ? "text-destructive" : "text-muted-foreground"}`}
+								>
+									{#if failed}
+										<AlertTriangle class="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+									{:else}
+										<Bug class="mt-0.5 size-4 shrink-0" aria-hidden="true" />
+									{/if}
 									<span class="min-w-0 break-words">{diagnostic.summary}</span>
 								</div>
 							{/each}

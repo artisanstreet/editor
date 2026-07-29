@@ -1,8 +1,14 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
 
 import { ConversationItem } from "@artisan/protocol";
 import { make_conversation_trace_segments } from "../../modules/frontend/src/lib/conversation/trace";
+
+const ReadSource = (path: string) =>
+	readFileSync(resolve(import.meta.dirname, "../..", path), "utf8");
 
 const base = {
 	created_at: "2026-07-26T00:00:00.000Z",
@@ -81,5 +87,47 @@ describe("conversation trace", () => {
 				type: "diagnostic_group",
 			}),
 		]);
+	});
+
+	it("always surfaces diagnostics for failed work, overriding the preference", () => {
+		const failure_diagnostic = item({
+			...base,
+			id: "diagnostic_failure",
+			summary:
+				"Engine startup failed before the native session became ready (EngineConfigurationError).",
+			type: "native_event",
+		});
+
+		const hidden = make_conversation_trace_segments([failure_diagnostic], false, false);
+		const surfaced = make_conversation_trace_segments([failure_diagnostic], false, true);
+
+		expect(hidden).toEqual([]);
+		expect(surfaced).toEqual([
+			expect.objectContaining({
+				items: [expect.objectContaining({ id: "diagnostic_failure" })],
+				type: "diagnostic_group",
+			}),
+		]);
+	});
+
+	it("renders failed work as an unmissable failure in the workspace", () => {
+		const work_session = ReadSource(
+			"modules/frontend/src/routes/components/conversation-work-session.sv",
+		);
+		const trace = ReadSource("modules/frontend/src/routes/components/conversation-trace.sv");
+		const workspace = ReadSource("modules/frontend/src/routes/components/thread-workspace.sv");
+
+		expect(work_session).toContain("`Failed after ${FormatDuration(");
+		expect(work_session).toContain("`Cancelled after ${FormatDuration(");
+		expect(work_session).toContain(
+			'let open = $state(item.status === "failed" || item.status === "cancelled");',
+		);
+		expect(work_session).toContain('is_failed ? "text-destructive" : ""');
+		expect(trace).toContain(
+			"make_conversation_trace_segments(items, $conversation_diagnostics_enabled, failed)",
+		);
+		expect(trace).toContain(">Failure details</span>");
+		expect(trace).toContain('role={failed ? "alert" : undefined}');
+		expect(workspace).toContain('failed={block.session.status === "failed" ||');
 	});
 });

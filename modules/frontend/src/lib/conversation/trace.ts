@@ -29,11 +29,17 @@ const is_active_reasoning = (
 /**
  * Builds one deterministic work trace. Diagnostics never decide whether reasoning
  * is visible and collapse into one disclosure at their first observed position.
+ *
+ * `failure_visible` overrides the diagnostics preference: when the surrounding
+ * work failed, its diagnostics are the explanation and must never be silenced
+ * by a developer toggle.
  */
 export const make_conversation_trace_segments = (
 	items: ReadonlyArray<ConversationItem>,
 	diagnostics_enabled: boolean,
+	failure_visible = false,
 ): ReadonlyArray<ConversationTraceSegment> => {
+	const diagnostics_visible = diagnostics_enabled || failure_visible;
 	const diagnostics = items.filter(
 		(item): item is ConversationDiagnosticItem => item.type === "native_event",
 	);
@@ -50,7 +56,7 @@ export const make_conversation_trace_segments = (
 
 	for (const item of items) {
 		if (item.type === "native_event") {
-			if (diagnostics_enabled && !diagnostics_inserted) {
+			if (diagnostics_visible && !diagnostics_inserted) {
 				segments.push({
 					id: `diagnostics:${item.id}`,
 					items: diagnostics,

@@ -181,7 +181,9 @@ describe("Barekey docs shell reset", () => {
 			'class="flex w-full items-center gap-1 border-b border-border pb-2"',
 		);
 		expect(work_session).toContain('class="flex w-fit items-center gap-2 py-0.5"');
-		expect(work_session).toContain("<span>{label}</span>");
+		expect(work_session).toContain(
+			'<span class={is_failed ? "text-destructive" : ""}>{label}</span>',
+		);
 		expect(work_session).toContain("hidden={!is_working && !has_visible_details}");
 		expect(workspace).toContain("latest_active_activity_label(block.details)");
 	});
