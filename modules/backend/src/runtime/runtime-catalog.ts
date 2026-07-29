@@ -5,7 +5,13 @@ import type { ThreadSessionPolicy } from "@artisan/protocol";
 import { Context, Data, Effect, Layer, Schema } from "effect";
 
 export class RuntimeCatalogPolicyError extends Data.TaggedError("RuntimeCatalogPolicyError")<{
-	readonly field: "engine_id" | "model" | "permission" | "reasoning_effort" | "service_tier";
+	readonly field:
+		| "context_window"
+		| "engine_id"
+		| "model"
+		| "permission"
+		| "reasoning_effort"
+		| "service_tier";
 	readonly message: string;
 }> {}
 
@@ -114,6 +120,21 @@ export const RuntimeCatalogLive = Layer.effect(
 						field: "reasoning_effort",
 						message: `Reasoning effort ${policy.reasoning_effort} is unavailable for ${model.id}.`,
 					});
+				}
+
+				if (policy.context_window !== undefined) {
+					const context_capability = model.capabilities.context_window;
+					if (
+						context_capability === undefined ||
+						!context_capability.options.some(
+							(option) => option.native_suffix === policy.context_window,
+						)
+					) {
+						return yield* new RuntimeCatalogPolicyError({
+							field: "context_window",
+							message: `Context window ${policy.context_window} is unavailable for ${model.id}.`,
+						});
+					}
 				}
 
 				if (

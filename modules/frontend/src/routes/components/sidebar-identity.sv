@@ -41,8 +41,15 @@
 		return `${words[0]?.[0] ?? ""}${words[1]?.[0] ?? ""}`.toUpperCase();
 	};
 
+	/** Ticks in one meter; 14 keeps each segment legible at the panel's 72px track. */
+	const usage_segments = 14;
+
 	const WindowLabel = (window: EngineUsageWindow): string =>
 		window.label ?? window_kind_labels[window.kind];
+
+	/** The reset time no longer fits on the row, so it lives in the row's tooltip. */
+	const ResetTitle = (window: EngineUsageWindow): string | undefined =>
+		window.resets_at === undefined ? undefined : `Resets ${RelativeReset(window.resets_at)}`;
 
 	/**
 	 * Splits an engine's windows so the 5-hour session limits — the ones that
@@ -158,21 +165,23 @@
 </script>
 
 {#snippet usage_window(window: EngineUsageWindow, accent: string)}
-	<div class="flex flex-col gap-0.5">
-		<div class="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-			<span class="truncate">{WindowLabel(window)}</span>
-			<span class="shrink-0 tabular-nums">
-				{Math.round(window.percent_used)}%{window.resets_at
-					? ` · ${RelativeReset(window.resets_at)}`
-					: ""}
-			</span>
-		</div>
-		<div class="bg-muted h-1 w-full overflow-hidden rounded-full">
-			<div
-				class="h-full rounded-full"
-				style={`width: ${Math.min(100, Math.max(0, window.percent_used))}%; background-color: ${accent}`}
-			></div>
-		</div>
+	{@const percent = Math.min(100, Math.max(0, window.percent_used))}
+	<div class="flex items-center gap-2.5" title={ResetTitle(window)}>
+		<span class="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+			{WindowLabel(window)}
+		</span>
+		<span class="flex w-18 shrink-0 gap-[2px]">
+			{#each { length: usage_segments } as _, index (index)}
+				{@const lit = (index + 1) / usage_segments <= percent / 100}
+				<span
+					class="h-2 flex-1 rounded-[1px]"
+					style={`background-color: ${lit ? accent : "color-mix(in oklab, var(--foreground) 11%, transparent)"}`}
+				></span>
+			{/each}
+		</span>
+		<span class="w-8 shrink-0 text-right text-xs tabular-nums text-foreground/80">
+			{Math.round(window.percent_used)}%
+		</span>
 	</div>
 {/snippet}
 

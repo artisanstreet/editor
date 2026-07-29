@@ -68,10 +68,14 @@ describe("Barekey docs shell reset", () => {
 		const engine_presentation = Read("modules/frontend/src/lib/engine/presentation.ts");
 		expect(model_selector).toContain("EngineMarkFor(harness.id)");
 		expect(engine_presentation).toContain(
-			"claude: { icon: SvglClaudeAILogo, monochrome: false }",
+			'claude: { accent: "#d97757", icon: SvglClaudeAILogo, monochrome: false }',
 		);
-		expect(engine_presentation).toContain("codex: { icon: SvglOpenAILogo, monochrome: true }");
-		expect(engine_presentation).toContain("grok: { icon: SvglGrokLogo, monochrome: true }");
+		expect(engine_presentation).toContain(
+			'codex: { accent: "#10a37f", icon: SvglOpenAILogo, monochrome: true }',
+		);
+		expect(engine_presentation).toContain(
+			'grok: { accent: "#6b7280", icon: SvglGrokLogo, monochrome: true }',
+		);
 		expect(model_selector).toContain("service_tier");
 		expect(model_selector).toContain(
 			'const composer_controls: ReadonlyArray<ComposerControl> = ["model"];',

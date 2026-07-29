@@ -6,7 +6,7 @@ import {
 	SvglKimiLogo,
 	SvglOpenAILogo,
 } from "@selemondev/svgl-svelte";
-import Tool from "@tabler/icons-svelte/icons/tool";
+import QuestionMark from "@tabler/icons-svelte/icons/question-mark";
 import type { Component } from "svelte";
 
 /** Presents one engine's provider mark. @since 0.7.0 */
@@ -16,6 +16,8 @@ export interface EngineMark {
 	readonly icon: Component;
 	/** Marks a single-color logo that must invert with the theme. */
 	readonly monochrome: boolean;
+	/** Renders via currentColor in muted foreground; for placeholder glyphs, not logos. */
+	readonly muted?: boolean;
 }
 
 const engine_marks: Readonly<Record<string, EngineMark>> = {
@@ -29,8 +31,9 @@ const engine_marks: Readonly<Record<string, EngineMark>> = {
 
 const unknown_engine_mark: EngineMark = {
 	accent: "var(--primary)",
-	icon: Tool,
-	monochrome: true,
+	icon: QuestionMark,
+	monochrome: false,
+	muted: true,
 };
 
 /** Resolves the provider mark for an engine, falling back to a neutral tool glyph. */
@@ -57,5 +60,7 @@ export const ProviderMarkFor = (provider_id: string | undefined): EngineMark =>
 	(provider_id === undefined ? undefined : provider_marks[provider_id]) ?? unknown_engine_mark;
 
 /** Names the Tailwind classes that size a provider mark and keep it theme-correct. */
-export const EngineMarkClass = (mark: EngineMark, size = "size-5") =>
-	mark.monochrome ? `${size} shrink-0 dark:invert` : `${size} shrink-0`;
+export const EngineMarkClass = (mark: EngineMark, size = "size-5") => {
+	const color = mark.muted === true ? " text-muted-foreground" : "";
+	return mark.monochrome ? `${size} shrink-0 dark:invert${color}` : `${size} shrink-0${color}`;
+};

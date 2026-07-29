@@ -258,6 +258,11 @@ export const ThreadSessionPolicy = Schema.Struct({
 	/** Any engine identifier decodes; the runtime catalog rejects unregistered engines. */
 	engine_id: Identifier,
 	model: Schema.optional(Schema.NonEmptyString),
+	/**
+	 * The native context-window suffix appended to the model id (for example
+	 * Claude Code's `[1m]`). Absent means the model's base window.
+	 */
+	context_window: Schema.optional(Schema.NonEmptyString),
 	reasoning_effort: Schema.Literals(["low", "medium", "high", "xhigh", "max"]),
 	permission_mode: Schema.Literals(["never", "on_request"]),
 	sandbox_mode: Schema.Literals(["read_only", "workspace_write"]),

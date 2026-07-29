@@ -54,10 +54,16 @@ export const MakeSessionPolicyRunMetadata = (
 		policy.permission_mode === "never" || requested_permissions?.approval === "never"
 			? "never"
 			: "on_request";
+	/**
+	 * The context-window choice travels as a native model-id suffix (for
+	 * example Claude Code's `[1m]`), so the engine sees one composed id.
+	 */
 	const resolved_model =
 		policy.model ?? requested.model ?? catalog_default_model(policy.engine_id);
 	const model_metadata: Pick<EngineRunMetadata, "model"> =
-		resolved_model === undefined ? {} : { model: resolved_model };
+		resolved_model === undefined
+			? {}
+			: { model: `${resolved_model}${policy.context_window ?? ""}` };
 
 	/**
 	 * The Claude adapter has no native mapping for a canonical permission

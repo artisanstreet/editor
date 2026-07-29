@@ -186,6 +186,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 				| {
 						readonly engine_id: string;
 						readonly policy_model: string | null;
+						readonly policy_context_window: string | null;
 						readonly policy_reasoning_effort: string;
 						readonly policy_permission_mode: string;
 						readonly policy_sandbox_mode: string;
@@ -201,6 +202,9 @@ export const OrchestrationRepositoryLive = Layer.effect(
 					})({
 						engine_id: row.engine_id,
 						...(row.policy_model === null ? {} : { model: row.policy_model }),
+						...(row.policy_context_window === null
+							? {}
+							: { context_window: row.policy_context_window }),
 						reasoning_effort: row.policy_reasoning_effort,
 						permission_mode: row.policy_permission_mode,
 						sandbox_mode: row.policy_sandbox_mode,
@@ -214,6 +218,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 				.select({
 					engine_id: OrchestrationCoordinators.engine_id,
 					policy_model: OrchestrationCoordinators.policy_model,
+					policy_context_window: OrchestrationCoordinators.policy_context_window,
 					policy_reasoning_effort: OrchestrationCoordinators.policy_reasoning_effort,
 					policy_permission_mode: OrchestrationCoordinators.policy_permission_mode,
 					policy_sandbox_mode: OrchestrationCoordinators.policy_sandbox_mode,
@@ -239,6 +244,8 @@ export const OrchestrationRepositoryLive = Layer.effect(
 								enabled: OrchestrationCoordinators.auto_steer_follow_ups,
 								engine_id: OrchestrationCoordinators.engine_id,
 								policy_model: OrchestrationCoordinators.policy_model,
+								policy_context_window:
+									OrchestrationCoordinators.policy_context_window,
 								policy_reasoning_effort:
 									OrchestrationCoordinators.policy_reasoning_effort,
 								policy_permission_mode:
@@ -656,6 +663,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 							const policy_columns = {
 								engine_id: payload.policy.engine_id,
 								policy_model: payload.policy.model ?? null,
+								policy_context_window: payload.policy.context_window ?? null,
 								policy_reasoning_effort: payload.policy.reasoning_effort,
 								policy_permission_mode: payload.policy.permission_mode,
 								policy_sandbox_mode: payload.policy.sandbox_mode,

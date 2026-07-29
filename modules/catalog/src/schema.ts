@@ -80,6 +80,42 @@ export const ThinkingCapability = Schema.Union([
 ]);
 export type ThinkingCapability = typeof ThinkingCapability.Type;
 
+export const ContextWindowOption = Schema.Struct({
+	id: Schema.NonEmptyString,
+	label: Schema.NonEmptyString,
+	/** Appended verbatim to the native model id; empty for the base window. */
+	native_suffix: Schema.String,
+	tokens: Schema.Int.check(Schema.isGreaterThan(0)),
+});
+export type ContextWindowOption = typeof ContextWindowOption.Type;
+
+/**
+ * A model's context-window choice. Models without the capability omit it from
+ * `ModelCapabilities`; the window is whatever the harness serves.
+ */
+export const ContextWindowCapability = Schema.Struct({
+	availability: Schema.Literal("configurable"),
+	default: Schema.NonEmptyString,
+	options: Schema.NonEmptyArray(ContextWindowOption),
+}).check(
+	Schema.makeFilter((capability) => {
+		const issues: Array<Schema.FilterIssue> = [];
+		const ids = capability.options.map((option) => option.id);
+		if (new Set(ids).size !== ids.length) {
+			issues.push({ path: ["options"], issue: "context window option IDs must be unique" });
+		}
+		const suffixes = capability.options.map((option) => option.native_suffix);
+		if (new Set(suffixes).size !== suffixes.length) {
+			issues.push({ path: ["options"], issue: "native context suffixes must be unique" });
+		}
+		if (!ids.includes(capability.default)) {
+			issues.push({ path: ["default"], issue: "default context window must be an option" });
+		}
+		return issues;
+	}),
+);
+export type ContextWindowCapability = typeof ContextWindowCapability.Type;
+
 export const Disabled = Schema.Struct({
 	reason: Schema.NonEmptyString,
 });
@@ -223,6 +259,7 @@ export const PermissionCapability = Schema.Struct({
 export type PermissionCapability = typeof PermissionCapability.Type;
 
 export const ModelCapabilities = Schema.Struct({
+	context_window: Schema.optional(ContextWindowCapability),
 	image_input: Schema.Boolean,
 	local_tools: Schema.Boolean,
 	mcp: Schema.Boolean,

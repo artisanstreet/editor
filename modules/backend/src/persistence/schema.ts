@@ -1077,6 +1077,7 @@ export const OrchestrationCoordinators = sqliteTable("orchestration_coordinators
 		.notNull()
 		.default(true),
 	policy_model: text("policy_model"),
+	policy_context_window: text("policy_context_window"),
 	policy_reasoning_effort: text("policy_reasoning_effort").notNull().default("medium"),
 	policy_permission_mode: text("policy_permission_mode").notNull().default("on_request"),
 	policy_sandbox_mode: text("policy_sandbox_mode").notNull().default("workspace_write"),

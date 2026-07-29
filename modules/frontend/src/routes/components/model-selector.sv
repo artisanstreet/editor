@@ -1,4 +1,5 @@
 <script lang="ts" effect>
+	import ArrowsHorizontal from "@tabler/icons-svelte/icons/arrows-horizontal";
 	import Selector from "@tabler/icons-svelte/icons/selector";
 	import BoltFilled from "@tabler/icons-svelte/icons/bolt-filled";
 	import Brain from "@tabler/icons-svelte/icons/brain";
@@ -54,6 +55,9 @@
 	};
 
 	type ComposerControl = "model" | "speed" | "thinking" | "permission";
+	type ContextWindowChoice = NonNullable<
+		ModelDefinition["capabilities"]["context_window"]
+	>["options"][number];
 
 	let {
 		disabled = false,
@@ -157,7 +161,7 @@
 	);
 
 	/** Makes the model current without closing the popover; false when barred. */
-	const adopt_model = (model: ModelChoice): boolean => {
+	const adopt_model = (model: ModelChoice, context_suffix = ""): boolean => {
 		if (model.definition.disabled !== undefined) {
 			return false;
 		}
@@ -177,16 +181,39 @@
 				(option) => option.disabled === undefined,
 			);
 		speed_option_id = default_speed?.id ?? "standard";
-		PatchPolicy({
-			engine_id: model.engine,
-			model: model.definition.native_model_id,
-			reasoning_effort:
-				model.definition.capabilities.thinking.availability === "supported"
-					? PolicyEffortFromThinking(model.definition.capabilities.thinking.default)
-					: (policy?.reasoning_effort ?? "medium"),
-			service_tier: default_speed?.native_value ?? "standard",
-		});
+		if (!disabled && policy !== undefined && onpolicychange !== undefined) {
+			/** A different model invalidates the previous context-window suffix. */
+			const { context_window: _reset, ...rest } = policy;
+			const next: ThreadSessionPolicy = {
+				...rest,
+				...(context_suffix === "" ? {} : { context_window: context_suffix }),
+				engine_id: model.engine,
+				model: model.definition.native_model_id,
+				reasoning_effort:
+					model.definition.capabilities.thinking.availability === "supported"
+						? PolicyEffortFromThinking(model.definition.capabilities.thinking.default)
+						: policy.reasoning_effort,
+				service_tier: default_speed?.native_value ?? "standard",
+			};
+			remember_last_model(next);
+			onpolicychange(next);
+		}
 		return true;
+	};
+
+	const apply_model_context = (model: ModelChoice, option: ContextWindowChoice) => {
+		if (model.id !== selected_model_id) {
+			adopt_model(model, option.native_suffix);
+			return;
+		}
+		if (disabled || policy === undefined || onpolicychange === undefined) return;
+		const { context_window: _previous, ...rest } = policy;
+		const next: ThreadSessionPolicy =
+			option.native_suffix === ""
+				? rest
+				: { ...rest, context_window: option.native_suffix };
+		remember_last_model(next);
+		onpolicychange(next);
 	};
 
 	const select_model = (model: ModelChoice) => {
@@ -412,10 +439,53 @@
 	{/if}
 {/snippet}
 
+{#snippet context_select(model: ModelChoice)}
+	{@const context = model.definition.capabilities.context_window}
+	{#if context !== undefined}
+		{@const current =
+			(model.id === selected_model_id
+				? context.options.find((option) =>
+						policy?.context_window === undefined
+							? option.native_suffix === ""
+							: option.native_suffix === policy.context_window,
+					)
+				: undefined) ??
+				context.options.find((option) => option.id === context.default) ??
+				context.options[0]}
+		<Select
+			type="single"
+			value={current.id}
+			onValueChange={(value) => {
+				const option = context.options.find((candidate) => candidate.id === value);
+				if (option !== undefined) apply_model_context(model, option);
+			}}
+			disabled={disabled}
+		>
+			<div class="card min-w-0 rounded-md bg-linear-to-b from-surface-225 to-surface-200 dark:from-surface-800 dark:to-surface-925">
+				<SelectTrigger
+					size="sm"
+					class="h-6 w-full border-transparent bg-transparent px-2 text-xs shadow-none data-[size=sm]:h-6 dark:bg-transparent dark:hover:bg-transparent dark:hover:text-foreground"
+				>
+					<ArrowsHorizontal class="size-3.5 shrink-0 text-muted-foreground" />
+					<span class="truncate">{current.label}</span>
+				</SelectTrigger>
+			</div>
+			<SelectContent class="rounded-2xl border-transparent bg-transparent p-0 shadow-none">
+				<ShaderGlassSurface strength="strong" class="rounded-2xl p-1">
+					{#each context.options as option (option.id)}
+						<SelectItem value={option.id}>{option.label}</SelectItem>
+					{/each}
+				</ShaderGlassSurface>
+			</SelectContent>
+		</Select>
+	{/if}
+{/snippet}
+
 {#snippet model_config(model: ModelChoice)}
 	<div class="flex flex-col gap-1.5">
 		{@render effort_select(model)}
 		{@render speed_select(model)}
+		{@render context_select(model)}
 	</div>
 {/snippet}
 

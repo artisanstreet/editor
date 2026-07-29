@@ -218,6 +218,16 @@ const exceptional = (id: ThinkingOption["id"], native_value: string) =>
 		native_value,
 	});
 
+/** Claude Code selects the long-context variant via a native model-id suffix. */
+const anthropic_context_window = {
+	availability: "configurable",
+	default: "standard",
+	options: [
+		{ id: "standard", label: "200K", native_suffix: "", tokens: 200000 },
+		{ id: "extended", label: "1M", native_suffix: "[1m]", tokens: 1000000 },
+	],
+} as const;
+
 /** Cursor hosts frontier models without exposing a separate reasoning-effort control. */
 const cursor_hosted_thinking = {
 	availability: "native",
@@ -226,7 +236,7 @@ const cursor_hosted_thinking = {
 } as const;
 
 export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
-	revision: "2026-07-29.1",
+	revision: "2026-07-29.2",
 	providers: [
 		{ id: "openai", label: "OpenAI" },
 		{ id: "anthropic", label: "Anthropic" },
@@ -647,6 +657,7 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 						exceptional("max", "max"),
 					],
 				},
+				context_window: anthropic_context_window,
 				speed_options: [anthropic_standard_speed("Claude Fable 5", false)],
 				image_input: true,
 				local_tools: true,
@@ -675,6 +686,7 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 						exceptional("max", "max"),
 					],
 				},
+				context_window: anthropic_context_window,
 				speed_options: [
 					anthropic_standard_speed("Claude Opus 5", true),
 					anthropic_fast_speed("Claude Opus 5"),
@@ -706,6 +718,7 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 						exceptional("max", "max"),
 					],
 				},
+				context_window: anthropic_context_window,
 				speed_options: [anthropic_standard_speed("Claude Sonnet 5", false)],
 				image_input: true,
 				local_tools: true,
