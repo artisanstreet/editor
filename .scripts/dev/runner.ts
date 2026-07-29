@@ -140,6 +140,13 @@ export const make_forge_environment = (
 	ARTISAN_MIGRATIONS_PATH: join(paths.forge_runtime, "migrations"),
 	ARTISAN_NATIVE_RUNTIME: join(paths.forge_runtime, "native-runtime"),
 	ARTISAN_STATIC_FRONTEND_ROOT: join(paths.forge_runtime, "frontend"),
+	/**
+	 * Engine adapters spawn through the staged process host; without this the
+	 * host path resolves relative to the bundled chunk and does not exist.
+	 * The system Node that runs the Forge also runs the host, so no staged
+	 * executable override is needed.
+	 */
+	ARTISAN_WINDOWS_PROCESS_HOST: join(paths.forge_runtime, "windows-process-host.js"),
 	NODE_PATH: join(paths.forge_runtime, "native-runtime"),
 });
 

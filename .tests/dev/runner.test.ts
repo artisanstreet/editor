@@ -172,6 +172,7 @@ describe("dev home interop", () => {
 		expect(environment.ARTISAN_MIGRATIONS_PATH).toContain("migrations");
 		expect(environment.ARTISAN_NATIVE_RUNTIME).toContain("native-runtime");
 		expect(environment.ARTISAN_STATIC_FRONTEND_ROOT).toContain("frontend");
+		expect(environment.ARTISAN_WINDOWS_PROCESS_HOST).toContain("windows-process-host.js");
 		expect(environment.ARTISAN_HOME).toBe(paths.forge_home);
 	});
 });
