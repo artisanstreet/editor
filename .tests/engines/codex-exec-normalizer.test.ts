@@ -75,6 +75,55 @@ describe("Codex exec normalizer usage", () => {
 		);
 	});
 
+	it("closes the reasoning phase on a completed reasoning item that never streamed a delta", async () => {
+		const observations = await Effect.runPromise(
+			NormaliseCodexExecEvent({
+				artisan_run_id: "run_1",
+				frame_sequence: 1,
+				payload: {
+					item: {
+						id: "reasoning-1",
+						text: "Inspecting the adapter contract.",
+						type: "reasoning",
+					},
+					type: "item.completed",
+				},
+				raw_frame_base64: "e30=",
+				turn_id: "turn_1",
+			}),
+		);
+
+		expect(observations).toEqual([
+			expect.objectContaining({
+				_tag: "reasoning_summary_completed",
+				item_id: "run_1:exec:item:reasoning-1",
+				turn_id: "turn_1",
+			}),
+		]);
+	});
+
+	it("keeps a started or updated reasoning item as a native action, not a completion", async () => {
+		const observations = await Effect.runPromise(
+			NormaliseCodexExecEvent({
+				artisan_run_id: "run_1",
+				frame_sequence: 1,
+				payload: {
+					item: { id: "reasoning-1", type: "reasoning" },
+					type: "item.started",
+				},
+				raw_frame_base64: "e30=",
+				turn_id: "turn_1",
+			}),
+		);
+
+		expect(observations).toEqual([
+			expect.objectContaining({
+				_tag: "native_action",
+				detail: "Reasoning started; text retained only in raw provenance",
+			}),
+		]);
+	});
+
 	it("rejects invalid token counts instead of normalizing usage", async () => {
 		const observations = await Effect.runPromise(
 			NormaliseCodexExecEvent({

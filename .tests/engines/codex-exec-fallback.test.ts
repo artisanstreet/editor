@@ -477,10 +477,7 @@ describe("Codex exec fallback", () => {
 		);
 		expect(result.events).toEqual(
 			expect.arrayContaining([
-				expect.objectContaining({
-					_tag: "native_action",
-					detail: expect.stringContaining("Reasoning"),
-				}),
+				expect.objectContaining({ _tag: "reasoning_summary_completed" }),
 				expect.objectContaining({ _tag: "terminal_activity" }),
 				expect.objectContaining({ _tag: "file" }),
 				expect.objectContaining({ _tag: "search" }),

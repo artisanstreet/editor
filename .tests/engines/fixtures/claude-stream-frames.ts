@@ -137,6 +137,54 @@ export const claude_thinking_only_assistant_frame = {
 	uuid: "7c8d9e0f-1a2b-4c3d-8e4f-5a6b7c8d9e0f",
 };
 
+/**
+ * A Sonnet 5 buffered assistant frame with display-omitted (adaptive)
+ * thinking: the model reasoned, but the settled `thinking` block carries an
+ * empty string rather than the summary text the haiku fixtures above show.
+ * This is the shape that left the reasoning phase stuck in "streaming" before
+ * `reasoning_summary_completed` existed, since no delta ever preceded it.
+ */
+export const claude_sonnet5_empty_thinking_assistant_frame = {
+	type: "assistant",
+	message: {
+		model: "claude-sonnet-5-20260101",
+		id: "msg_011CdVSx52pWZx8S1tJU7uoQ",
+		type: "message",
+		role: "assistant",
+		content: [{ type: "thinking", thinking: "", signature: "EsMI" }],
+		stop_reason: null,
+		usage: { input_tokens: 10, output_tokens: 4 },
+	},
+	parent_tool_use_id: null,
+	session_id,
+	uuid: "a1b2c3d4-5e6f-4708-9a0b-1c2d3e4f5061",
+};
+
+/**
+ * A Sonnet 5 assistant frame carrying both the display-omitted (empty-text)
+ * thinking block and the settled text reply, exercising a frame that must
+ * yield a reasoning completion alongside the message completion.
+ */
+export const claude_thinking_and_text_assistant_frame = {
+	type: "assistant",
+	message: {
+		model: "claude-sonnet-5-20260101",
+		id: "msg_011CdVSx52pWZx8S1tJU7uoQ",
+		type: "message",
+		role: "assistant",
+		content: [
+			{ type: "thinking", thinking: "", signature: "EsMI" },
+			{ type: "text", text: "I'm not sure what you'd like me to help with." },
+		],
+		stop_reason: null,
+		stop_sequence: null,
+		usage: { input_tokens: 10, output_tokens: 4 },
+	},
+	parent_tool_use_id: null,
+	session_id,
+	uuid: "b2c3d4e5-6f70-4819-8a0b-1c2d3e4f5062",
+};
+
 export const claude_assistant_text_frame = {
 	type: "assistant",
 	message: {

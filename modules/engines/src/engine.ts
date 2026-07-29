@@ -343,6 +343,20 @@ export interface EngineReasoningSummaryDeltaObservation extends EngineObservatio
 	readonly turn_id: string;
 }
 
+/**
+ * Closes a reasoning phase for one turn. Providers whose reasoning display is
+ * suppressed (for example Claude models with omitted thinking display) may
+ * complete a phase that streamed no delta at all, so consumers must settle
+ * reasoning state on this observation rather than on delta arrival.
+ *
+ * @since 0.6.0
+ */
+export interface EngineReasoningSummaryCompletedObservation extends EngineObservationBase {
+	readonly _tag: "reasoning_summary_completed";
+	readonly item_id: string;
+	readonly turn_id: string;
+}
+
 /** Reports provider usage measured for the run or one turn. @since 0.2.0 */
 export interface EngineUsageObservation extends EngineObservationBase {
 	readonly _tag: "usage";
@@ -393,6 +407,7 @@ export type EngineObservation =
 	| EngineProcessDiagnosticObservation
 	| EngineProtocolDiagnosticObservation
 	| EngineQuestionObservation
+	| EngineReasoningSummaryCompletedObservation
 	| EngineReasoningSummaryDeltaObservation
 	| EngineRetryObservation
 	| EngineRunStateObservation

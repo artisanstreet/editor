@@ -15,10 +15,12 @@ import {
 	claude_rate_limit_allowed_frame,
 	claude_rate_limit_exceeded_frame,
 	claude_signature_delta_frame,
+	claude_sonnet5_empty_thinking_assistant_frame,
 	claude_status_frame,
 	claude_terminal_failure_frame,
 	claude_terminal_result_frame,
 	claude_text_delta_frame,
+	claude_thinking_and_text_assistant_frame,
 	claude_thinking_delta_frame,
 	claude_thinking_only_assistant_frame,
 	claude_thinking_tokens_frame,
@@ -95,8 +97,52 @@ describe("claude stream-json normalization", () => {
 		expect((delta as { item_id: string }).item_id).toBe("claude:run_1:message");
 	});
 
-	it("treats a thinking-only assistant frame as already-delivered reasoning", () => {
-		expect(normalize(claude_thinking_only_assistant_frame)).toEqual([]);
+	it("closes the reasoning phase when a thinking-only assistant frame settles", () => {
+		expect(normalize(claude_thinking_only_assistant_frame)).toEqual([
+			expect.objectContaining({
+				_tag: "reasoning_summary_completed",
+				item_id: "msg_011CdVSx52pWZx8S1tJU7uoQ:reasoning",
+				turn_id: "claude:run_1:turn",
+			}),
+		]);
+	});
+
+	it("closes a suppressed-display reasoning phase even when no delta ever streamed", () => {
+		const message_id = read_claude_stream_message_id(claude_message_start_frame);
+		if (message_id === undefined) throw new Error("message_start must announce an id");
+
+		const [delta] = normalize(claude_thinking_delta_frame, { stream_message_id: message_id });
+		const observations = normalize(claude_sonnet5_empty_thinking_assistant_frame, {
+			stream_message_id: message_id,
+		});
+
+		expect(observations).toEqual([
+			expect.objectContaining({
+				_tag: "reasoning_summary_completed",
+				item_id: (delta as { item_id: string }).item_id,
+				turn_id: "claude:run_1:turn",
+			}),
+		]);
+	});
+
+	it("emits the reasoning completion before the message completion when a frame carries both", () => {
+		expect(normalize(claude_thinking_and_text_assistant_frame)).toEqual([
+			expect.objectContaining({
+				_tag: "reasoning_summary_completed",
+				item_id: "msg_011CdVSx52pWZx8S1tJU7uoQ:reasoning",
+			}),
+			expect.objectContaining({
+				_tag: "agent_message_completed",
+				item_id: "msg_011CdVSx52pWZx8S1tJU7uoQ",
+				message: "I'm not sure what you'd like me to help with.",
+			}),
+		]);
+	});
+
+	it("adds no reasoning completion when an assistant frame carries no thinking blocks", () => {
+		expect(normalize(claude_assistant_text_frame)).toEqual([
+			expect.objectContaining({ _tag: "agent_message_completed" }),
+		]);
 	});
 
 	it("normalizes the type-less terminal frame into usage", () => {

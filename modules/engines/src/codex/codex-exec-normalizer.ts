@@ -11,6 +11,7 @@ import {
 	type EngineNativeActionObservation,
 	type EnginePlanObservation,
 	type EngineProtocolDiagnosticObservation,
+	type EngineReasoningSummaryCompletedObservation,
 	type EngineRunStateObservation,
 	type EngineSearchObservation,
 	type EngineTerminalActivityObservation,
@@ -61,6 +62,13 @@ const agent_message_schema = Schema.Struct({
 		id: Schema.String,
 		text: Schema.String,
 		type: Schema.Literal("agent_message"),
+	}),
+	type: Schema.Literals(["item.started", "item.updated", "item.completed"]),
+});
+const reasoning_item_schema = Schema.Struct({
+	item: Schema.Struct({
+		id: Schema.String,
+		type: Schema.Literal("reasoning"),
 	}),
 	type: Schema.Literals(["item.started", "item.updated", "item.completed"]),
 });
@@ -214,13 +222,30 @@ function NormaliseItem(input: CodexExecNormalizationInput, type: string, item_ty
 					: [native_action(input, type, `Agent message ${action}`)],
 			);
 		case "reasoning":
-			return Effect.succeed([
-				native_action(
-					input,
-					type,
-					`Reasoning ${action}; text retained only in raw provenance`,
-				),
-			]);
+			/**
+			 * `codex exec --json` never streams a reasoning delta of its own;
+			 * the item's summary text stays in raw provenance. Its completion
+			 * still must close the reasoning phase the item opened, since
+			 * nothing else in this transport ever does.
+			 */
+			return DecodeKnown(input, type, reasoning_item_schema, (value) =>
+				value.type === "item.completed"
+					? [
+							{
+								...make_base(input, type),
+								_tag: "reasoning_summary_completed",
+								item_id: canonical_item_id(input, value.item.id),
+								turn_id: input.turn_id,
+							} satisfies EngineReasoningSummaryCompletedObservation,
+						]
+					: [
+							native_action(
+								input,
+								type,
+								`Reasoning ${action}; text retained only in raw provenance`,
+							),
+						],
+			);
 		case "command_execution":
 			return DecodeKnown(input, type, command_schema, (value) => [
 				{

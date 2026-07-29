@@ -8,6 +8,7 @@ import type {
 	EngineFileObservation,
 	EngineObservation,
 	EngineRawProvenance,
+	EngineReasoningSummaryCompletedObservation,
 	EngineReasoningSummaryDeltaObservation,
 	EngineSearchObservation,
 	EngineTerminalActivityObservation,
@@ -281,6 +282,25 @@ function usage_observation(
 	};
 }
 
+/**
+ * Closes the reasoning item a buffered `assistant` frame's `thinking` block(s)
+ * belong to. Constructed with the same item id the thinking-delta path uses
+ * (native message id when known, else the threaded `stream_message_id`, else
+ * the run-stable fallback) so the completion always resolves onto the item
+ * the deltas opened, even when the provider streamed no delta text at all.
+ */
+function reasoning_summary_completed_observation(
+	input: ClaudeNormalizationInput,
+	native_message_id: string | undefined,
+): EngineReasoningSummaryCompletedObservation {
+	return {
+		...make_base(input, "assistant.thinking"),
+		_tag: "reasoning_summary_completed",
+		item_id: `${message_item_id(input, native_message_id)}:reasoning`,
+		turn_id: input.turn_id,
+	};
+}
+
 function tool_observation(
 	input: ClaudeNormalizationInput,
 	tool: Schema.Schema.Type<typeof ToolUseSchema>,
@@ -407,6 +427,9 @@ export function normalize_claude_event(
 	if (assistant !== undefined) {
 		const text_parts: Array<string> = [];
 		const observations: Array<EngineObservation> = [];
+		const has_thinking = assistant.message.content.some(
+			(item) => decode(ThinkingSchema, item) !== undefined,
+		);
 		assistant.message.content.forEach((item, index) => {
 			const text = decode(TextSchema, item);
 			const tool = decode(ToolUseSchema, item);
@@ -431,15 +454,20 @@ export function normalize_claude_event(
 				phase: "unspecified",
 				turn_id: input.turn_id,
 			} satisfies EngineAgentMessageCompletedObservation);
-		if (observations.length > 0) return observations;
 		/**
-		 * A thinking-only assistant frame is the settled form of reasoning the
-		 * stream already delivered; it carries no unseen public content.
+		 * A buffered `thinking` block (including Sonnet 5's suppressed-display
+		 * shape, whose `thinking` text is empty) is the settled form of a
+		 * reasoning phase that may never have streamed a delta. It closes the
+		 * item the delta path opened, ordered first since thinking blocks
+		 * precede the public content that follows them in the same frame.
 		 */
+		if (has_thinking)
+			observations.unshift(
+				reasoning_summary_completed_observation(input, assistant.message.id),
+			);
+		if (observations.length > 0) return observations;
 		if (assistant.error !== undefined) return [native_action(input, assistant.error)];
-		return assistant.message.content.some((item) => decode(ThinkingSchema, item) !== undefined)
-			? []
-			: [native_action(input, "Assistant event without public content")];
+		return [native_action(input, "Assistant event without public content")];
 	}
 
 	const user = decode(UserSchema, input.payload);
