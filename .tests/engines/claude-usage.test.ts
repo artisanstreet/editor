@@ -1,17 +1,70 @@
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { Effect, Schema } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
+import type { EngineProcessFactory } from "../../modules/engines/src/process/process";
 import {
 	ClaudeUsageResponseSchema,
 	MakeClaudeUsage,
 	map_claude_account_usage,
+	parse_claude_cli_usage_windows,
+	type ClaudeUsageFetch,
 } from "../../modules/engines/src/claude/claude-usage";
 
 const decode = (body: unknown) => Schema.decodeUnknownSync(ClaudeUsageResponseSchema)(body);
+
+/** Builds a fetch stub whose response never touches the network. */
+function stub_fetch(response: {
+	readonly json?: () => Promise<unknown>;
+	readonly ok: boolean;
+	readonly status: number;
+}): ClaudeUsageFetch {
+	return () =>
+		Promise.resolve({
+			json: response.json ?? (() => Promise.resolve({})),
+			ok: response.ok,
+			status: response.status,
+		});
+}
+
+/** Builds a fake `claude` CLI process factory whose `/usage` result text and exit code are fixed. */
+function stub_claude_cli_factory(
+	result_text: string,
+	exit_code = 0,
+): typeof EngineProcessFactory.Service {
+	return {
+		Spawn: () =>
+			Effect.succeed({
+				Close: Effect.void,
+				EndInput: Effect.void,
+				Exit: Effect.succeed({ code: exit_code, signal: null }),
+				Kill: () => Effect.void,
+				Stderr: (async function* () {
+					/* no stderr output */
+				})(),
+				Stdout: (async function* () {
+					yield new TextEncoder().encode(JSON.stringify({ result: result_text }));
+				})(),
+				Write: () => Effect.void,
+			}),
+	};
+}
+
+/** Fails the test if `Spawn` is ever called; proves a 401 never reaches the CLI fallback. */
+const never_spawn_factory: typeof EngineProcessFactory.Service = {
+	Spawn: () => Effect.die("claude-usage must not spawn the CLI on a 401"),
+};
+
+async function write_claude_credentials(config_dir: string): Promise<void> {
+	await writeFile(
+		join(config_dir, ".credentials.json"),
+		JSON.stringify({ claudeAiOauth: { accessToken: "test-token" } }),
+		"utf8",
+	);
+}
 
 let created_dirs: Array<string> = [];
 
@@ -129,5 +182,126 @@ describe("Claude usage credentials resolution", () => {
 			},
 			windows: [],
 		});
+	});
+});
+
+describe("parse_claude_cli_usage_windows", () => {
+	const sample_result = [
+		"You are currently using your subscription to power your Claude Code usage",
+		"",
+		"Current session: 17% used · resets Jul 29, 7:50am (Europe/Oslo)",
+		"Current week (all models): 3% used · resets Aug 5, 12am (Europe/Oslo)",
+		"Current week (Fable): 5% used · resets Aug 5, 12am (Europe/Oslo)",
+		"",
+		"What's contributing to your limits usage?",
+		"Last 24h · 2083 requests · 9 sessions",
+		"  88% of your usage was at >150k context",
+	].join("\n");
+
+	it("maps the three recognized lines to windows, ignoring junk and behavioral lines", () => {
+		expect(parse_claude_cli_usage_windows(sample_result)).toEqual([
+			{ id: "five_hour", kind: "session", percent_used: 17, window_minutes: 300 },
+			{ id: "seven_day", kind: "weekly", percent_used: 3, window_minutes: 10_080 },
+			{
+				id: "seven_day:fable",
+				kind: "weekly",
+				label: "Fable",
+				percent_used: 5,
+				window_minutes: 10_080,
+			},
+		]);
+	});
+
+	it("omits resets_at entirely, since the reset clause is locale/timezone text, not a timestamp", () => {
+		for (const window of parse_claude_cli_usage_windows(sample_result)) {
+			expect(window).not.toHaveProperty("resets_at");
+		}
+	});
+
+	it("clamps out-of-range percentages", () => {
+		expect(parse_claude_cli_usage_windows("Current session: 142% used")).toEqual([
+			{ id: "five_hour", kind: "session", percent_used: 100, window_minutes: 300 },
+		]);
+	});
+
+	it("signals no windows when nothing recognizable is present", () => {
+		expect(parse_claude_cli_usage_windows("Nothing here matches any known line.")).toEqual([]);
+	});
+});
+
+describe("Claude usage CLI fallback", () => {
+	let dir: string;
+
+	afterEach(async () => {
+		if (dir !== undefined) await rm(dir, { force: true, recursive: true });
+	});
+
+	it("falls back to the CLI on a 429 and reports its parsed windows as authenticated", async () => {
+		dir = await mkdtemp(join(tmpdir(), "artisan-claude-usage-"));
+		await write_claude_credentials(dir);
+
+		const usage = await Effect.runPromise(
+			MakeClaudeUsage({
+				claude_config_dir: dir,
+				factory: stub_claude_cli_factory(
+					"Current session: 17% used · resets Jul 29, 7:50am (Europe/Oslo)\n" +
+						"Current week (all models): 3% used · resets Aug 5, 12am (Europe/Oslo)",
+				),
+				fetch: stub_fetch({ ok: false, status: 429 }),
+			}),
+		);
+
+		expect(usage).toEqual({
+			authentication: { state: "authenticated" },
+			windows: [
+				{ id: "five_hour", kind: "session", percent_used: 17, window_minutes: 300 },
+				{ id: "seven_day", kind: "weekly", percent_used: 3, window_minutes: 10_080 },
+			],
+		});
+	});
+
+	it("fails with the original endpoint error when the CLI fallback also reports no windows", async () => {
+		dir = await mkdtemp(join(tmpdir(), "artisan-claude-usage-"));
+		await write_claude_credentials(dir);
+
+		const exit = await Effect.runPromiseExit(
+			MakeClaudeUsage({
+				claude_config_dir: dir,
+				factory: stub_claude_cli_factory("Nothing usage-shaped in here."),
+				fetch: stub_fetch({ ok: false, status: 429 }),
+			}),
+		);
+
+		expect(exit._tag).toBe("Failure");
+		const message = exit._tag === "Failure" ? JSON.stringify(exit.cause) : "";
+		expect(message).toContain("429");
+	});
+
+	it("never spawns the CLI on a 401; reports unauthenticated instead", async () => {
+		dir = await mkdtemp(join(tmpdir(), "artisan-claude-usage-"));
+		await write_claude_credentials(dir);
+
+		const usage = await Effect.runPromise(
+			MakeClaudeUsage({
+				claude_config_dir: dir,
+				factory: never_spawn_factory,
+				fetch: stub_fetch({ ok: false, status: 401 }),
+			}),
+		);
+
+		expect(usage).toEqual({
+			authentication: { reason: "token expired or revoked", state: "unauthenticated" },
+			windows: [],
+		});
+	});
+
+	it("never spawns the CLI when credentials are missing", async () => {
+		dir = await mkdtemp(join(tmpdir(), "artisan-claude-usage-"));
+
+		const usage = await Effect.runPromise(
+			MakeClaudeUsage({ claude_config_dir: dir, factory: never_spawn_factory }),
+		);
+
+		expect(usage.authentication.state).toBe("unauthenticated");
 	});
 });

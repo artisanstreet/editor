@@ -1,3 +1,4 @@
+import { Buffer } from "node:buffer";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -9,11 +10,29 @@ import {
 	type EngineFailure,
 	type EngineQuotaWindow,
 	type EngineQuotaWindowKind,
+	EngineProcessError,
 	EngineProtocolError,
 	EngineUnavailableError,
 } from "../engine";
+import { EngineProcessFactory } from "../process/process";
 
-/** Configures how {@link MakeClaudeUsage} locates the CLI's saved OAuth session. @since 0.6.0 */
+/**
+ * The minimal fetch surface this adapter depends on. Narrower than
+ * `typeof globalThis.fetch` so tests can simulate a 429/5xx/network failure
+ * with a plain object instead of a full `Response`.
+ */
+export interface ClaudeUsageFetch {
+	(
+		input: string,
+		init: { readonly headers: Record<string, string> },
+	): Promise<{
+		readonly json: () => Promise<unknown>;
+		readonly ok: boolean;
+		readonly status: number;
+	}>;
+}
+
+/** Configures how {@link MakeClaudeUsage} locates the CLI's saved OAuth session and reaches the CLI fallback. @since 0.6.0 */
 export interface ClaudeUsageOptions {
 	/**
 	 * Overrides Claude's config-dir resolution (normally env `CLAUDE_CONFIG_DIR`,
@@ -21,6 +40,19 @@ export interface ClaudeUsageOptions {
 	 * temporary directory instead of touching the real credentials file.
 	 */
 	readonly claude_config_dir?: string;
+	/** Matches `ClaudeEngineOptions.executable`; defaults to `"claude"`. */
+	readonly executable?: string;
+	/** Matches `ClaudeEngineOptions.executable_args`; defaults to `[]`. */
+	readonly executable_args?: ReadonlyArray<string>;
+	/**
+	 * Spawns the CLI fallback when the OAuth endpoint fetch fails. Absent in
+	 * contexts (such as pure-mapping tests) that never exercise the fallback;
+	 * when absent, a failed endpoint fetch fails outright instead of falling
+	 * back.
+	 */
+	readonly factory?: typeof EngineProcessFactory.Service;
+	/** Overrides `globalThis.fetch`; exists so tests can simulate endpoint failures without a network call. */
+	readonly fetch?: ClaudeUsageFetch;
 }
 
 /** Mirrors the on-disk shape of `<claude_config_dir>/.credentials.json`; unknown keys are ignored. */
@@ -207,10 +239,12 @@ type ClaudeUsageFetchOutcome =
  */
 function fetch_claude_usage(
 	access_token: string,
+	options: ClaudeUsageOptions,
 ): Effect.Effect<ClaudeUsageFetchOutcome, EngineFailure> {
+	const fetch_impl = options.fetch ?? globalThis.fetch;
 	return Effect.tryPromise({
 		try: () =>
-			globalThis.fetch(claude_usage_endpoint, {
+			fetch_impl(claude_usage_endpoint, {
 				headers: {
 					Authorization: `Bearer ${access_token}`,
 					"User-Agent": claude_usage_user_agent,
@@ -257,17 +291,221 @@ function fetch_claude_usage(
 	);
 }
 
+/** Decodes the `result` field of `claude -p "/usage" --output-format json`; every other field is ignored. */
+const ClaudeCliUsageResultSchema = Schema.Struct({
+	result: Schema.String,
+});
+
+const claude_cli_usage_args = ["-p", "/usage", "--output-format", "json"] as const;
+const claude_cli_usage_max_bytes = 1_048_576;
+const claude_cli_usage_timeout = "20 seconds";
+
+/** Matches `Current session: N% used` in the CLI's `/usage` result text. */
+const CLAUDE_CLI_SESSION_LINE = /^Current session:\s*(\d+)%\s*used\b/;
+/** Matches `Current week (all models): N% used`; checked before the labeled pattern below. */
+const CLAUDE_CLI_WEEKLY_ALL_LINE = /^Current week \(all models\):\s*(\d+)%\s*used\b/;
+/** Matches `Current week (<Label>): N% used` for any other per-model weekly bucket. */
+const CLAUDE_CLI_WEEKLY_LABELED_LINE = /^Current week \(([^)]+)\):\s*(\d+)%\s*used\b/;
+
+/** Turns a provider-supplied label into a stable, lowercase, hyphenated id fragment. */
+function slugify_claude_cli_label(label: string): string {
+	return label
+		.trim()
+		.toLowerCase()
+		.replace(/[^a-z0-9]+/g, "-")
+		.replace(/^-+|-+$/g, "");
+}
+
+/**
+ * Parses the plain-text `result` of the CLI's `/usage` slash command into
+ * canonical quota windows. Pure and side-effect free so it can be unit tested
+ * without spawning the CLI. Ignores every line that is not one of the two
+ * recognized `Current session:`/`Current week (...)` prefixes, including the
+ * trailing `resets ...` clause (locale/timezone formatted, not parsed here)
+ * and the behavioral-breakdown lines that follow. An empty or wholly
+ * unrecognized result yields an empty array, which the caller treats as a
+ * failed fallback.
+ *
+ * @since 0.6.0
+ * @param result_text - The CLI's `/usage` result text, verbatim.
+ * @returns Zero or more quota windows in the order they appeared.
+ */
+export function parse_claude_cli_usage_windows(
+	result_text: string,
+): ReadonlyArray<EngineQuotaWindow> {
+	const windows: Array<EngineQuotaWindow> = [];
+
+	for (const raw_line of result_text.split("\n")) {
+		const line = raw_line.trim();
+
+		const session_match = CLAUDE_CLI_SESSION_LINE.exec(line);
+		if (session_match !== null) {
+			windows.push({
+				id: "five_hour",
+				kind: "session",
+				percent_used: clamp_percent(Number(session_match[1])),
+				window_minutes: 300,
+			});
+			continue;
+		}
+
+		const weekly_all_match = CLAUDE_CLI_WEEKLY_ALL_LINE.exec(line);
+		if (weekly_all_match !== null) {
+			windows.push({
+				id: "seven_day",
+				kind: "weekly",
+				percent_used: clamp_percent(Number(weekly_all_match[1])),
+				window_minutes: 10_080,
+			});
+			continue;
+		}
+
+		const weekly_labeled_match = CLAUDE_CLI_WEEKLY_LABELED_LINE.exec(line);
+		if (weekly_labeled_match !== null) {
+			const label = weekly_labeled_match[1]!;
+			windows.push({
+				id: `seven_day:${slugify_claude_cli_label(label)}`,
+				kind: "weekly",
+				label,
+				percent_used: clamp_percent(Number(weekly_labeled_match[2])),
+				window_minutes: 10_080,
+			});
+		}
+	}
+
+	return windows;
+}
+
+/** Reads a stream to completion, failing rather than growing without bound. */
+function read_claude_cli_stream(stream: AsyncIterable<Uint8Array>, max_bytes: number) {
+	return Effect.tryPromise({
+		try: async () => {
+			const chunks: Array<Uint8Array> = [];
+			let total = 0;
+			for await (const chunk of stream) {
+				total += chunk.length;
+				if (total > max_bytes)
+					throw new Error(`Claude CLI usage output exceeded ${max_bytes} bytes`);
+				chunks.push(chunk);
+			}
+			return Buffer.concat(chunks);
+		},
+		catch: (cause) => new EngineProcessError({ cause, operation: "read" }),
+	});
+}
+
+/**
+ * Falls back to the Claude CLI's own `/usage` slash command when the OAuth
+ * usage endpoint is unreachable. The CLI authenticates through its own
+ * internal path rather than the bucketed `api/oauth/usage` endpoint, so it
+ * can succeed while that endpoint is stuck returning 429. Never logs the
+ * CLI's result text; only short, provider-neutral reasons reach the error
+ * channel. Requires `options.factory`; without one (for example in pure
+ * mapping tests) the fallback fails immediately so the caller reports the
+ * original endpoint error.
+ */
+function run_claude_cli_usage_fallback(
+	options: ClaudeUsageOptions,
+): Effect.Effect<EngineAccountUsage, EngineFailure> {
+	const factory = options.factory;
+	if (factory === undefined)
+		return Effect.fail(
+			new EngineUnavailableError({
+				engine_id: "claude",
+				message: "Claude CLI usage fallback has no process factory configured",
+			}),
+		);
+
+	const executable = options.executable ?? "claude";
+	const executable_args = options.executable_args ?? [];
+
+	return Effect.scoped(
+		Effect.gen(function* () {
+			const handle = yield* factory.Spawn({
+				args: [...executable_args, ...claude_cli_usage_args],
+				command: executable,
+			});
+			const [stdout, , exit] = yield* Effect.all(
+				[
+					read_claude_cli_stream(handle.Stdout, claude_cli_usage_max_bytes),
+					read_claude_cli_stream(handle.Stderr, claude_cli_usage_max_bytes),
+					handle.Exit,
+				],
+				{ concurrency: "unbounded" },
+			).pipe(Effect.ensuring(handle.Close));
+
+			if (exit.code !== 0)
+				return yield* Effect.fail(
+					new EngineUnavailableError({
+						engine_id: "claude",
+						message: `Claude CLI usage fallback exited with code ${String(exit.code)}`,
+					}),
+				);
+
+			const parsed = yield* Effect.try({
+				try: () => JSON.parse(new TextDecoder().decode(stdout)) as unknown,
+				catch: () =>
+					new EngineProtocolError({
+						engine_id: "claude",
+						message: "Claude CLI usage fallback did not return valid JSON",
+					}),
+			});
+
+			const decoded = Schema.decodeUnknownOption(ClaudeCliUsageResultSchema)(parsed);
+			if (Option.isNone(decoded))
+				return yield* Effect.fail(
+					new EngineProtocolError({
+						engine_id: "claude",
+						message:
+							"Claude CLI usage fallback response did not match the expected shape",
+					}),
+				);
+
+			const windows = parse_claude_cli_usage_windows(decoded.value.result);
+			if (windows.length === 0)
+				return yield* Effect.fail(
+					new EngineUnavailableError({
+						engine_id: "claude",
+						message: "Claude CLI usage fallback reported no usage windows",
+					}),
+				);
+
+			return {
+				authentication: { state: "authenticated" as const },
+				windows,
+			} satisfies EngineAccountUsage;
+		}),
+	).pipe(
+		Effect.timeout(claude_cli_usage_timeout),
+		Effect.mapError((cause: EngineFailure | Cause.TimeoutError) =>
+			cause._tag === "EngineProtocolError" ||
+			cause._tag === "EngineUnavailableError" ||
+			cause._tag === "EngineProcessError"
+				? cause
+				: new EngineUnavailableError({
+						engine_id: "claude",
+						message: `Claude CLI usage fallback timed out after ${claude_cli_usage_timeout}`,
+					}),
+		),
+	);
+}
+
 /**
  * Reports Claude's provider-account quota windows without starting a run.
  * Resolves credentials from `<claude_config_dir>/.credentials.json`, never
- * logging or embedding the token, and never attempts a refresh.
+ * logging or embedding the token, and never attempts a refresh. Missing
+ * credentials and a 401 both resolve to the unauthenticated value untouched;
+ * every other endpoint failure (429, 5xx, network error, timeout, or an
+ * invalid body) instead attempts the CLI fallback, and only reports the
+ * original endpoint error when that fallback also fails, since the endpoint
+ * error is the more diagnosable of the two.
  *
  * @since 0.6.0
  */
 export function MakeClaudeUsage(
 	options: ClaudeUsageOptions = {},
 ): Effect.Effect<EngineAccountUsage, EngineFailure> {
-	return Effect.gen(function* () {
+	const primary = Effect.gen(function* () {
 		const credentials_path = resolve_claude_credentials_path(options);
 		const access_token = yield* read_claude_access_token(credentials_path);
 
@@ -280,7 +518,7 @@ export function MakeClaudeUsage(
 				windows: [],
 			} satisfies EngineAccountUsage;
 
-		const outcome = yield* fetch_claude_usage(access_token);
+		const outcome = yield* fetch_claude_usage(access_token, options);
 
 		if (outcome._tag === "unauthenticated")
 			return {
@@ -299,4 +537,12 @@ export function MakeClaudeUsage(
 
 		return map_claude_account_usage(decoded.value);
 	});
+
+	return primary.pipe(
+		Effect.catch((original_error) =>
+			run_claude_cli_usage_fallback(options).pipe(
+				Effect.catch(() => Effect.fail(original_error)),
+			),
+		),
+	);
 }

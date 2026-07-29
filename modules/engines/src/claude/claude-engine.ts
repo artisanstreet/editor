@@ -832,11 +832,14 @@ export function make_claude_engine_layer(
 						);
 					return yield* open_run(factory, configured, input);
 				});
-			const Usage: Required<Engine>["Usage"] = MakeClaudeUsage(
-				configured.claude_config_dir === undefined
+			const Usage: Required<Engine>["Usage"] = MakeClaudeUsage({
+				...(configured.claude_config_dir === undefined
 					? {}
-					: { claude_config_dir: configured.claude_config_dir },
-			);
+					: { claude_config_dir: configured.claude_config_dir }),
+				executable: configured.executable,
+				executable_args: configured.executable_args,
+				factory,
+			});
 			return { Descriptor: ClaudeEngineDescriptor, Open, Probe, Usage };
 		}),
 	);
