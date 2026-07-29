@@ -1,12 +1,10 @@
 import {
-	SvglAnthropicLogo,
 	SvglClaudeAILogo,
 	SvglCursorLogo,
 	SvglGeminiLogo,
 	SvglGrokLogo,
 	SvglKimiLogo,
 	SvglOpenAILogo,
-	SvglXAILogo,
 } from "@selemondev/svgl-svelte";
 import Tool from "@tabler/icons-svelte/icons/tool";
 import type { Component } from "svelte";
@@ -42,14 +40,16 @@ export const EngineMarkFor = (engine_id: string | undefined): EngineMark =>
 /**
  * Marks for the lab that made a model, distinct from the engine serving it:
  * a Cursor-hosted GPT model carries the OpenAI mark, not the Cursor cube.
+ * Anthropic and xAI wear their product marks (Claude, Grok) — that is what
+ * people recognize, not the corporate logos.
  */
 const provider_marks: Readonly<Record<string, EngineMark>> = {
-	anthropic: { accent: "#d97757", icon: SvglAnthropicLogo, monochrome: true },
+	anthropic: { accent: "#d97757", icon: SvglClaudeAILogo, monochrome: false },
 	cursor: { accent: "#6b7280", icon: SvglCursorLogo, monochrome: true },
 	google: { accent: "#4285f4", icon: SvglGeminiLogo, monochrome: false },
 	moonshot: { accent: "#6b7280", icon: SvglKimiLogo, monochrome: true },
 	openai: { accent: "#10a37f", icon: SvglOpenAILogo, monochrome: true },
-	xai: { accent: "#6b7280", icon: SvglXAILogo, monochrome: true },
+	xai: { accent: "#6b7280", icon: SvglGrokLogo, monochrome: true },
 };
 
 /** Resolves the mark for a model's lab, falling back to a neutral tool glyph. */
