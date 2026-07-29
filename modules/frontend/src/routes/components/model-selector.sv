@@ -13,6 +13,12 @@
 	import { remember_last_model } from "$lib/root/last-model";
 
 	import { Popover, PopoverContent, PopoverTrigger } from "$lib/components/ui/popover";
+	import {
+		Select,
+		SelectContent,
+		SelectItem,
+		SelectTrigger,
+	} from "$lib/components/ui/select";
 	import { Tabs, TabsList, TabsTrigger } from "$lib/components/ui/tabs";
 	import {
 		Tooltip,
@@ -338,61 +344,82 @@
 	</DropdownHoverSurface>
 {/snippet}
 
-{#snippet effort_chips(model: ModelChoice)}
+{#snippet effort_select(model: ModelChoice)}
 	{@const thinking = model.definition.capabilities.thinking}
 	{#if thinking.availability === "supported"}
-		<div class="flex items-center gap-2">
-			<Brain class="size-3.5 shrink-0 text-muted-foreground" />
-			<div class="flex flex-wrap gap-1">
-				{#each thinking.options as level_option (level_option.id)}
-					<button
-						type="button"
-						disabled={disabled}
-						aria-pressed={model.id === selected_model_id
-							? thinking_level === level_option.id
-							: thinking.default === level_option.id}
-						class="rounded-full bg-foreground/5 px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none aria-pressed:bg-foreground/15 aria-pressed:text-foreground"
-						onclick={() => apply_model_thinking(model, level_option.id)}
-					>
-						{thinking_level_labels[level_option.id]}
-					</button>
-				{/each}
+		{@const current_level = model.id === selected_model_id ? thinking_level : thinking.default}
+		<Select
+			type="single"
+			value={current_level}
+			onValueChange={(value) => apply_model_thinking(model, value as ThinkingLevel)}
+			disabled={disabled}
+		>
+			<div class="card min-w-0 rounded-md bg-linear-to-b from-surface-225 to-surface-200 dark:from-surface-800 dark:to-surface-925">
+				<SelectTrigger
+					size="sm"
+					class="h-6 w-full border-transparent bg-transparent px-2 text-xs shadow-none data-[size=sm]:h-6 dark:bg-transparent dark:hover:bg-transparent dark:hover:text-foreground"
+				>
+					<Brain class="size-3.5 shrink-0 text-muted-foreground" />
+					<span class="truncate">{thinking_level_labels[current_level]}</span>
+				</SelectTrigger>
 			</div>
-		</div>
+				<SelectContent class="rounded-2xl border-transparent bg-transparent p-0 shadow-none">
+					<ShaderGlassSurface strength="strong" class="rounded-2xl p-1">
+						{#each thinking.options as level_option (level_option.id)}
+							<SelectItem value={level_option.id}>
+								{thinking_level_labels[level_option.id]}
+							</SelectItem>
+						{/each}
+					</ShaderGlassSurface>
+				</SelectContent>
+		</Select>
 	{/if}
 {/snippet}
 
-{#snippet speed_chips(model: ModelChoice)}
+{#snippet speed_select(model: ModelChoice)}
 	{@const speeds = model.definition.capabilities.speed_options.filter(
 		(option) => option.disabled === undefined,
 	)}
 	{#if speeds.length > 1}
-		<div class="flex items-center gap-2">
-			<BoltFilled class="size-3.5 shrink-0 text-muted-foreground" />
-			<div class="flex flex-wrap gap-1">
-				{#each speeds as speed (speed.id)}
-					<button
-						type="button"
-						disabled={disabled}
-						title={speed.description}
-						aria-pressed={model.id === selected_model_id
-							? speed_option_id === speed.id
-							: speed.default === true}
-						class="rounded-full bg-foreground/5 px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none aria-pressed:bg-foreground/15 aria-pressed:text-foreground"
-						onclick={() => apply_model_speed(model, speed)}
-					>
-						{speed.label}
-					</button>
-				{/each}
+		{@const current_speed =
+			(model.id === selected_model_id
+				? speeds.find((option) => option.id === speed_option_id)
+				: undefined) ??
+				speeds.find((option) => option.default) ??
+				speeds[0]}
+		<Select
+			type="single"
+			value={current_speed?.id}
+			onValueChange={(value) => {
+				const option = speeds.find((candidate) => candidate.id === value);
+				if (option !== undefined) apply_model_speed(model, option);
+			}}
+			disabled={disabled}
+		>
+			<div class="card min-w-0 rounded-md bg-linear-to-b from-surface-225 to-surface-200 dark:from-surface-800 dark:to-surface-925">
+				<SelectTrigger
+					size="sm"
+					class="h-6 w-full border-transparent bg-transparent px-2 text-xs shadow-none data-[size=sm]:h-6 dark:bg-transparent dark:hover:bg-transparent dark:hover:text-foreground"
+				>
+					<BoltFilled class="size-3.5 shrink-0 text-muted-foreground" />
+					<span class="truncate">{current_speed?.label ?? "Speed"}</span>
+				</SelectTrigger>
 			</div>
-		</div>
+				<SelectContent class="rounded-2xl border-transparent bg-transparent p-0 shadow-none">
+					<ShaderGlassSurface strength="strong" class="rounded-2xl p-1">
+						{#each speeds as speed (speed.id)}
+							<SelectItem value={speed.id}>{speed.label}</SelectItem>
+						{/each}
+					</ShaderGlassSurface>
+				</SelectContent>
+		</Select>
 	{/if}
 {/snippet}
 
 {#snippet model_config(model: ModelChoice)}
 	<div class="flex flex-col gap-1.5">
-		{@render effort_chips(model)}
-		{@render speed_chips(model)}
+		{@render effort_select(model)}
+		{@render speed_select(model)}
 	</div>
 {/snippet}
 
@@ -488,17 +515,19 @@
 					{#if previewed_model !== undefined}
 						{@const PreviewIcon = engines.find((engine) => engine.id === previewed_model.engine)?.icon ?? SvglOpenAILogo}
 						{@const preview_monochrome = engines.find((engine) => engine.id === previewed_model.engine)?.monochrome ?? false}
-						<div class="flex h-48 w-44 shrink-0 flex-col gap-2 overflow-y-auto rounded-xl bg-foreground/3 p-2.5">
-							<div class="flex items-center gap-2">
-								<PreviewIcon
-									class={preview_monochrome ? "size-4 shrink-0 dark:invert" : "size-4 shrink-0"}
-								/>
-								<span class="truncate text-sm font-semibold text-foreground">{previewed_model.name}</span>
+						<div class="h-48 w-56 shrink-0">
+							<div class="flex h-full flex-col gap-2 overflow-y-auto p-2.5">
+								<div class="flex items-center gap-2">
+									<PreviewIcon
+										class={preview_monochrome ? "size-4 shrink-0 dark:invert" : "size-4 shrink-0"}
+									/>
+									<span class="truncate text-sm font-semibold text-foreground">{previewed_model.name}</span>
+								</div>
+								<span class="text-pretty text-xs text-muted-foreground">
+									{previewed_model.definition.description ?? previewed_model.lab}
+								</span>
+								{@render model_config(previewed_model)}
 							</div>
-							<span class="text-pretty text-xs text-muted-foreground">
-								{previewed_model.definition.description ?? previewed_model.lab}
-							</span>
-							{@render model_config(previewed_model)}
 						</div>
 					{/if}
 				</div>
