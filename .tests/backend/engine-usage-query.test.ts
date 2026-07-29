@@ -36,12 +36,19 @@ const query: EngineUsageQueryEnvelope = {
 	sent_at: "2026-07-29T12:00:00.000Z",
 };
 
+/** Builds one handler instance (one cache `Ref`) so a test can issue several queries against it. */
+function make_handler(engines: ReadonlyArray<Engine>) {
+	return MakeEngineUsageQueryHandler.pipe(
+		Effect.provide(Layer.mergeAll(MetadataLive, make_engine_registry_layer(engines))),
+	);
+}
+
 function run_handler(engines: ReadonlyArray<Engine>) {
 	return Effect.gen(function* () {
-		const Handle = yield* MakeEngineUsageQueryHandler;
+		const Handle = yield* make_handler(engines);
 
 		return (yield* Handle(query)) as EngineUsageQueryResultEnvelope;
-	}).pipe(Effect.provide(Layer.mergeAll(MetadataLive, make_engine_registry_layer(engines))));
+	});
 }
 
 describe("engine usage query handler", () => {
@@ -134,6 +141,103 @@ describe("engine usage query handler", () => {
 				},
 			]);
 		}),
+	);
+
+	it.effect("serves the fresh cache without re-invoking Usage on a second query", () =>
+		Effect.gen(function* () {
+			let calls = 0;
+			const engine = make_test_engine({
+				display_name: "Claude",
+				id: "claude",
+				usage: Effect.sync(() => {
+					calls += 1;
+
+					return { authentication: { state: "authenticated" as const }, windows: [] };
+				}),
+			});
+
+			const Handle = yield* make_handler([engine]);
+
+			yield* Handle(query);
+			yield* Handle(query);
+
+			expect(calls).toBe(1);
+		}),
+	);
+
+	it.effect(
+		"falls back to the last-good cached report when a later query's Usage fails after the cache goes stale",
+		() =>
+			Effect.gen(function* () {
+				let should_fail = false;
+				const engine = make_test_engine({
+					display_name: "Claude",
+					id: "claude",
+					usage: Effect.gen(function* () {
+						if (should_fail) {
+							return yield* Effect.fail({
+								_tag: "EngineUnavailableError",
+								engine_id: "claude",
+								message: "Claude rate limited",
+							} as unknown as EngineFailure);
+						}
+
+						return {
+							authentication: { state: "authenticated" as const },
+							windows: [
+								{ id: "five_hour", kind: "session" as const, percent_used: 50 },
+							],
+						};
+					}),
+				});
+
+				const Handle = yield* make_handler([engine]);
+				const first = (yield* Handle(query)) as EngineUsageQueryResultEnvelope;
+
+				expect(first.payload.engines).toEqual([
+					{
+						authentication: "authenticated",
+						display_name: "Claude",
+						engine_id: "claude",
+						windows: [{ id: "five_hour", kind: "session", percent_used: 50 }],
+					},
+				]);
+
+				should_fail = true;
+				yield* TestClock.adjust("181 seconds");
+
+				const second = (yield* Handle(query)) as EngineUsageQueryResultEnvelope;
+
+				expect(second.payload.engines).toEqual(first.payload.engines);
+			}),
+	);
+
+	it.effect(
+		"serves the failure-shaped report when the very first query has no cache to fall back on",
+		() =>
+			Effect.gen(function* () {
+				const result = yield* run_handler([
+					make_test_engine({
+						display_name: "Claude",
+						id: "claude",
+						usage: Effect.fail({
+							_tag: "EngineUnavailableError",
+							engine_id: "claude",
+							message: "Claude CLI not found",
+						} as unknown as EngineFailure),
+					}),
+				]);
+
+				expect(result.payload.engines).toEqual([
+					{
+						authentication: "unknown",
+						display_name: "Claude",
+						engine_id: "claude",
+						failure: "Claude CLI not found",
+						windows: [],
+					},
+				]);
+			}),
 	);
 
 	it("reports unknown authentication when Usage exceeds its 15-second timeout", async () => {

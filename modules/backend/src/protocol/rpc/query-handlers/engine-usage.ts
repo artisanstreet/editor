@@ -1,4 +1,4 @@
-import { Effect } from "effect";
+import { Clock, Effect, Ref } from "effect";
 
 import type {
 	EngineUsageQueryEnvelope,
@@ -14,6 +14,28 @@ import { RuntimeMetadata } from "../../../runtime/runtime-metadata";
 const max_windows_per_report = 64;
 const max_engines_per_snapshot = 16;
 const usage_timeout = "15 seconds";
+
+/**
+ * A cached report is served as-is, with no engine call, while it is younger than this window.
+ * Once it ages past the window it is still kept as the "last-good" fallback (see
+ * `FetchUsageOutcome` below) for as long as no newer success replaces it.
+ */
+const usage_fresh_window_ms = 180_000;
+
+/** The last successful report for one engine, plus when it was fetched. */
+interface UsageCacheEntry {
+	readonly fetched_at_ms: number;
+	readonly report: EngineUsageReport;
+}
+
+/** Last-good usage reports keyed by `engine_id`. Empty entries mean "never succeeded yet". */
+type UsageCache = ReadonlyMap<string, UsageCacheEntry>;
+
+/** The result of attempting one engine's `Usage` effect, tagged so success is never inferred from report shape. */
+interface UsageOutcome {
+	readonly ok: boolean;
+	readonly report: EngineUsageReport;
+}
 
 function to_usage_window(window: EngineQuotaWindow): EngineUsageWindow {
 	return {
@@ -45,47 +67,95 @@ function describe_usage_failure(cause: unknown): string {
 		: `Usage lookup failed (${tag}).`;
 }
 
-/** Reports one engine's provider-account usage, absorbing any failure into the report shape. */
-function ReportFor(engine: Engine): Effect.Effect<EngineUsageReport> {
+/** Runs one engine's `Usage` effect and tags whether it truly succeeded, absorbing failure into the report shape. */
+function FetchUsageOutcome(engine: Engine): Effect.Effect<UsageOutcome> {
 	const usage = engine.Usage;
 
 	if (usage === undefined) {
 		return Effect.succeed({
-			authentication: "unknown",
-			display_name: engine.Descriptor.display_name,
-			engine_id: engine.Descriptor.id,
-			windows: [],
+			ok: false,
+			report: {
+				authentication: "unknown",
+				display_name: engine.Descriptor.display_name,
+				engine_id: engine.Descriptor.id,
+				windows: [],
+			},
 		});
 	}
 
 	return usage.pipe(
 		Effect.timeout(usage_timeout),
 		Effect.match({
-			onFailure: (cause): EngineUsageReport => ({
-				authentication: "unknown",
-				display_name: engine.Descriptor.display_name,
-				engine_id: engine.Descriptor.id,
-				failure: describe_usage_failure(cause),
-				windows: [],
+			onFailure: (cause): UsageOutcome => ({
+				ok: false,
+				report: {
+					authentication: "unknown",
+					display_name: engine.Descriptor.display_name,
+					engine_id: engine.Descriptor.id,
+					failure: describe_usage_failure(cause),
+					windows: [],
+				},
 			}),
-			onSuccess: (account_usage): EngineUsageReport => ({
-				authentication: account_usage.authentication.state,
-				display_name: engine.Descriptor.display_name,
-				engine_id: engine.Descriptor.id,
-				...(account_usage.authentication.reason === undefined
-					? {}
-					: { failure: account_usage.authentication.reason }),
-				windows: account_usage.windows
-					.slice(0, max_windows_per_report)
-					.map(to_usage_window),
+			onSuccess: (account_usage): UsageOutcome => ({
+				ok: true,
+				report: {
+					authentication: account_usage.authentication.state,
+					display_name: engine.Descriptor.display_name,
+					engine_id: engine.Descriptor.id,
+					...(account_usage.authentication.reason === undefined
+						? {}
+						: { failure: account_usage.authentication.reason }),
+					windows: account_usage.windows
+						.slice(0, max_windows_per_report)
+						.map(to_usage_window),
+				},
 			}),
 		}),
 	);
 }
 
+/**
+ * Reports one engine's usage, serving the cache instead of the engine whenever possible.
+ *
+ * - A cached report younger than `usage_fresh_window_ms` is returned with no engine call.
+ * - Otherwise the engine's `Usage` effect runs. A success refreshes the cache and is returned.
+ *   A failure (including timeout) falls back to the last-good cached report, of any age, if one
+ *   exists; only an engine that has never once succeeded produces the failure-shaped report.
+ *
+ * This is decided per engine, so one engine being stale or failing never blocks another's fresh
+ * fetch, and a snapshot where every engine's cache is fresh makes zero engine calls.
+ */
+function ReportWithCache(
+	engine: Engine,
+	cache: Ref.Ref<UsageCache>,
+	now_ms: number,
+): Effect.Effect<EngineUsageReport> {
+	return Effect.gen(function* () {
+		const engine_id = engine.Descriptor.id;
+		const cached = (yield* Ref.get(cache)).get(engine_id);
+
+		if (cached !== undefined && now_ms - cached.fetched_at_ms < usage_fresh_window_ms) {
+			return cached.report;
+		}
+
+		const outcome = yield* FetchUsageOutcome(engine);
+
+		if (outcome.ok) {
+			yield* Ref.update(cache, (entries) =>
+				new Map(entries).set(engine_id, { fetched_at_ms: now_ms, report: outcome.report }),
+			);
+
+			return outcome.report;
+		}
+
+		return cached === undefined ? outcome.report : cached.report;
+	});
+}
+
 export const MakeEngineUsageQueryHandler = Effect.gen(function* () {
 	const registry = yield* EngineRegistry;
 	const metadata = yield* RuntimeMetadata;
+	const cache = yield* Ref.make<UsageCache>(new Map());
 
 	const Envelope = <Kind extends EngineUsageQueryResultEnvelope["kind"], Payload>(
 		query: EngineUsageQueryEnvelope,
@@ -110,22 +180,22 @@ export const MakeEngineUsageQueryHandler = Effect.gen(function* () {
 
 	const handlers = {
 		"engine.usage.query": (query: EngineUsageQueryEnvelope) =>
-			registry.List.pipe(
-				Effect.map((engines) => engines.filter((engine) => engine.Usage !== undefined)),
-				Effect.flatMap((engines) =>
-					Effect.all(engines.map(ReportFor), { concurrency: "unbounded" }),
-				),
-				Effect.flatMap((reports) =>
-					Effect.gen(function* () {
-						const fetched_at = yield* metadata.Now;
+			Effect.gen(function* () {
+				const now_ms = yield* Clock.currentTimeMillis;
+				const engines = (yield* registry.List).filter(
+					(engine) => engine.Usage !== undefined,
+				);
+				const reports = yield* Effect.all(
+					engines.map((engine) => ReportWithCache(engine, cache, now_ms)),
+					{ concurrency: "unbounded" },
+				);
+				const fetched_at = yield* metadata.Now;
 
-						return yield* Envelope(query, "engine.usage.query.result", {
-							engines: reports.slice(0, max_engines_per_snapshot),
-							fetched_at,
-						});
-					}),
-				),
-			),
+				return yield* Envelope(query, "engine.usage.query.result", {
+					engines: reports.slice(0, max_engines_per_snapshot),
+					fetched_at,
+				});
+			}),
 	};
 
 	return (
