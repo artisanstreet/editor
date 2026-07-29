@@ -574,9 +574,51 @@ export interface EngineRun {
 	readonly Send: (command: EngineCommand) => Effect.Effect<void, EngineCommandFailure>;
 }
 
+/** Classifies one provider quota window by its billing cadence. @since 0.6.0 */
+export type EngineQuotaWindowKind = "session" | "weekly" | "monthly" | "unknown";
+
+/**
+ * Reports one provider-account quota window as a used percentage.
+ *
+ * `id` is the provider's stable bucket identifier (for example `five_hour` or
+ * `codex_bengalfox`); `label` carries the provider's human bucket name when one
+ * exists (for example a model-scoped weekly limit). `resets_at` is an ISO 8601
+ * UTC timestamp.
+ *
+ * @since 0.6.0
+ */
+export interface EngineQuotaWindow {
+	readonly id: string;
+	readonly kind: EngineQuotaWindowKind;
+	readonly label?: string;
+	readonly percent_used: number;
+	readonly resets_at?: string;
+	readonly window_minutes?: number;
+}
+
+/**
+ * Reports provider-account authentication and quota usage without starting a
+ * run. `windows` is empty when the account is unauthenticated or the provider
+ * exposes no quota surface.
+ *
+ * @since 0.6.0
+ */
+export interface EngineAccountUsage {
+	readonly authentication: EngineAuthReadiness;
+	readonly windows: ReadonlyArray<EngineQuotaWindow>;
+}
+
 /** Defines the dependency-free provider-neutral seam implemented by every engine adapter. @since 0.2.0 */
 export interface Engine {
 	readonly Descriptor: EngineDescriptor;
 	readonly Open: (input: EngineOpenInput) => Effect.Effect<EngineRun, EngineFailure, Scope.Scope>;
 	readonly Probe: (input: EngineProbeInput) => Effect.Effect<EngineProbe, EngineFailure>;
+	/**
+	 * Reports provider-account quota usage when the adapter supports it. Absent
+	 * on adapters whose provider exposes no account-usage surface; the effect is
+	 * non-billable and must not start a run.
+	 *
+	 * @since 0.6.0
+	 */
+	readonly Usage?: Effect.Effect<EngineAccountUsage, EngineFailure>;
 }

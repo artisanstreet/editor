@@ -48,6 +48,7 @@ import {
 } from "./codex-app-server-session";
 import { CodexProcessFactory, type CodexProcessSpawnInput } from "./codex-process";
 import { CodexTransportMetadata } from "./codex-protocol";
+import { MakeCodexUsage } from "./codex-usage";
 import { MakeCodexAppServerEventBuffer } from "./internal/codex-app-server-event-buffer";
 import { MakeCodexAppServerThreadOptions } from "./internal/codex-permissions";
 
@@ -1179,10 +1180,27 @@ export function make_codex_engine_layer(
 						),
 					}),
 			};
-			const app_server_engine = make_codex_app_server_engine(factory, {
-				...options,
+			const codex_home =
+				make_codex_process_environment(
+					{},
+					runtime_environment.inherited_environment,
+					runtime_environment.user_profile,
+				).CODEX_HOME ?? join(runtime_environment.user_profile, ".codex");
+			const Usage = MakeCodexUsage({
+				codex_home,
 				executable,
+				executable_args: options.executable_args ?? [],
+				factory,
+				file_system,
+				request_timeout_ms: options.request_timeout_ms ?? 10_000,
 			});
+			const app_server_engine: Engine = {
+				...make_codex_app_server_engine(factory, {
+					...options,
+					executable,
+				}),
+				Usage,
+			};
 
 			if (options.transport_selection === "app_server_only") {
 				return app_server_engine;
@@ -1196,19 +1214,22 @@ export function make_codex_engine_layer(
 				return app_server_engine;
 			}
 
-			return make_codex_exec_engine({
-				event_capacity: options.event_capacity ?? 256,
-				executable,
-				executable_args: options.executable_args ?? [],
-				fallback_reason: selection_failure_reason(probe),
-				file_system,
-				factory,
-				max_frame_bytes: options.exec_max_frame_bytes ?? 256 * 1_024,
-				max_stderr_bytes: options.exec_max_stderr_bytes ?? 1_024 * 1_024,
-				max_stdout_bytes: options.exec_max_stdout_bytes ?? 8 * 1_024 * 1_024,
-				timeout_ms: options.exec_timeout_ms ?? 30 * 60 * 1_000,
-				version_timeout_ms: options.version_timeout_ms ?? 5_000,
-			});
+			return {
+				...make_codex_exec_engine({
+					event_capacity: options.event_capacity ?? 256,
+					executable,
+					executable_args: options.executable_args ?? [],
+					fallback_reason: selection_failure_reason(probe),
+					file_system,
+					factory,
+					max_frame_bytes: options.exec_max_frame_bytes ?? 256 * 1_024,
+					max_stderr_bytes: options.exec_max_stderr_bytes ?? 1_024 * 1_024,
+					max_stdout_bytes: options.exec_max_stdout_bytes ?? 8 * 1_024 * 1_024,
+					timeout_ms: options.exec_timeout_ms ?? 30 * 60 * 1_000,
+					version_timeout_ms: options.version_timeout_ms ?? 5_000,
+				}),
+				Usage,
+			};
 		}),
 	).pipe(
 		Layer.provideMerge(NodeFileSystem.layer),

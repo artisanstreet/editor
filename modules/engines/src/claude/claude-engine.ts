@@ -45,6 +45,7 @@ import {
 	ClaudeJsonlOversizedLineError,
 	type ClaudeJsonlDecode,
 } from "./claude-jsonl";
+import { MakeClaudeUsage } from "./claude-usage";
 import {
 	classify_claude_semantic_failure,
 	is_claude_init_event,
@@ -101,6 +102,8 @@ export const ClaudeEngineDescriptor: EngineDescriptor = {
 /** Configures Claude CLI execution and all bounded process/protocol limits. @since 0.6.0 */
 export interface ClaudeEngineOptions {
 	readonly auth_timeout_ms?: number;
+	/** Overrides Claude's config-dir resolution used by `Usage` (normally env `CLAUDE_CONFIG_DIR`, else `~/.claude`). */
+	readonly claude_config_dir?: string;
 	readonly event_capacity?: number;
 	readonly executable?: string;
 	readonly executable_args?: ReadonlyArray<string>;
@@ -829,7 +832,12 @@ export function make_claude_engine_layer(
 						);
 					return yield* open_run(factory, configured, input);
 				});
-			return { Descriptor: ClaudeEngineDescriptor, Open, Probe };
+			const Usage: Required<Engine>["Usage"] = MakeClaudeUsage(
+				configured.claude_config_dir === undefined
+					? {}
+					: { claude_config_dir: configured.claude_config_dir },
+			);
+			return { Descriptor: ClaudeEngineDescriptor, Open, Probe, Usage };
 		}),
 	);
 }
