@@ -86,7 +86,9 @@ describe("Barekey docs shell reset", () => {
 		expect(composer).not.toContain('aria-label="Add images"');
 		expect(composer).toContain('"Stop current run"');
 		expect(composer).toContain("PlayerStopFilled");
-		expect(composer).toContain("inset-shadow rounded-full text-white/50");
+		expect(composer).toContain(
+			"composer-send inset-shadow rounded-[calc(var(--composer-radius)-0.5rem)] text-white",
+		);
 		expect(composer).not.toContain("card-glass");
 		expect(composer).not.toContain("bg-white/50");
 		/**
