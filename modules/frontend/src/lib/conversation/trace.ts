@@ -46,10 +46,12 @@ export const make_conversation_trace_segments = (
 	const concrete_items = items.filter(
 		(item) => item.type !== "reasoning_summary" && item.type !== "native_event",
 	);
+	/**
+	 * Reasoning stays visible while it is live even after concrete work starts,
+	 * so streamed thinking never vanishes mid-run; completed summaries retire.
+	 */
 	const visible_item_ids = new Set(
-		(concrete_items.length > 0 ? concrete_items : items.filter(is_active_reasoning)).map(
-			(item) => item.id,
-		),
+		[...concrete_items, ...items.filter(is_active_reasoning)].map((item) => item.id),
 	);
 	const segments: Array<ConversationTraceSegment> = [];
 	let diagnostics_inserted = false;

@@ -49,6 +49,39 @@ describe("conversation trace", () => {
 		expect(segments).toEqual([expect.objectContaining({ id: "reasoning_1", type: "item" })]);
 	});
 
+	it("keeps live reasoning visible after concrete work starts and retires it on completion", () => {
+		const activity = item({
+			...base,
+			id: "activity_1",
+			kind: "tool_activity",
+			label: "Read a file",
+			ordinal: 2,
+			status: "completed",
+			type: "activity",
+		});
+		const reasoning = (lifecycle: string) =>
+			item({
+				...base,
+				id: "reasoning_1",
+				lifecycle,
+				ordinal: 3,
+				text: "Reading the skill reference",
+				type: "reasoning_summary",
+			});
+
+		const streaming = make_conversation_trace_segments(
+			[activity, reasoning("streaming")],
+			false,
+		);
+		expect(streaming).toEqual([
+			expect.objectContaining({ type: "activity_group" }),
+			expect.objectContaining({ id: "reasoning_1", type: "item" }),
+		]);
+
+		const completed = make_conversation_trace_segments([activity, reasoning("completed")], false);
+		expect(completed).toEqual([expect.objectContaining({ type: "activity_group" })]);
+	});
+
 	it("groups every diagnostic behind one disclosure when enabled", () => {
 		const segments = make_conversation_trace_segments(
 			[
