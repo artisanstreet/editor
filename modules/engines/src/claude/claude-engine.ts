@@ -50,6 +50,7 @@ import {
 	is_claude_init_event,
 	normalize_claude_event,
 	read_claude_session_id,
+	read_claude_stream_message_id,
 } from "./claude-normalizer";
 
 /** Declares the deliberately limited, truthful Claude Code capability surface. @since 0.6.0 */
@@ -491,6 +492,8 @@ function open_run(
 			command_intents: new Map<string, string>(),
 			session_id: spawn_input.session_id,
 			init_seen: false,
+			/** The message id announced by the newest `message_start` frame. */
+			stream_message_id: undefined as string | undefined,
 		});
 		const stdout_drained = yield* Deferred.make<void>();
 		const stderr_drained = yield* Deferred.make<void>();
@@ -566,12 +569,26 @@ function open_run(
 				}
 				if (classify_claude_semantic_failure(decode.payload))
 					yield* Ref.update(state, (current) => ({ ...current, semantic_failure: true }));
+				/**
+				 * `message_start` is the only frame that names the message its
+				 * deltas belong to, so the id is carried forward until the next
+				 * message begins. Without it the completion would land on a
+				 * second conversation item beside the streamed one.
+				 */
+				const announced_message_id = read_claude_stream_message_id(decode.payload);
+				const stream_message_id = announced_message_id ?? current_state.stream_message_id;
+				if (announced_message_id !== undefined)
+					yield* Ref.update(state, (current) => ({
+						...current,
+						stream_message_id: announced_message_id,
+					}));
 				yield* Effect.forEach(
 					normalize_claude_event({
 						artisan_run_id: input.artisan_run_id,
 						frame_sequence,
 						payload: decode.payload,
 						raw_frame_base64: decode.raw_frame_base64,
+						...(stream_message_id === undefined ? {} : { stream_message_id }),
 						turn_id: `claude:${input.artisan_run_id}:turn`,
 					}),
 					event_buffer.Emit,

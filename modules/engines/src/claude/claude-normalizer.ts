@@ -8,6 +8,7 @@ import type {
 	EngineFileObservation,
 	EngineObservation,
 	EngineRawProvenance,
+	EngineReasoningSummaryDeltaObservation,
 	EngineSearchObservation,
 	EngineTerminalActivityObservation,
 	EngineToolObservation,
@@ -20,6 +21,12 @@ export interface ClaudeNormalizationInput {
 	readonly frame_sequence: number;
 	readonly payload: unknown;
 	readonly raw_frame_base64: string;
+	/**
+	 * The native message id most recently announced by `message_start`. Delta
+	 * frames never carry it themselves, so the caller threads it through to keep
+	 * a streamed message and its completion on one conversation item.
+	 */
+	readonly stream_message_id?: string;
 	readonly turn_id: string;
 }
 
@@ -28,13 +35,16 @@ const InitSchema = Schema.Struct({
 	type: Schema.Literal("system"),
 	subtype: Schema.Literal("init"),
 	session_id: Schema.String,
-	model: Schema.String,
 	tools: Schema.Array(Schema.Unknown),
-	permissionMode: Schema.String,
 });
 const RetrySchema = Schema.Struct({
 	type: Schema.Literal("system"),
 	subtype: Schema.Literal("api_retry"),
+});
+/** Names the `system` bookkeeping subtypes the CLI emits around every turn. */
+const SystemSubtypeSchema = Schema.Struct({
+	type: Schema.Literal("system"),
+	subtype: Schema.String,
 });
 const DeltaSchema = Schema.Struct({
 	type: Schema.Literal("stream_event"),
@@ -42,6 +52,51 @@ const DeltaSchema = Schema.Struct({
 		type: Schema.Literal("content_block_delta"),
 		delta: Schema.Struct({ type: Schema.Literal("text_delta"), text: Schema.String }),
 	}),
+});
+/**
+ * Claude streams private reasoning as `thinking_delta` blocks. Only the
+ * provider-authored summary text travels onward; the canonical reasoning
+ * observation is what the renderer shows while a turn is still thinking.
+ */
+const ThinkingDeltaSchema = Schema.Struct({
+	type: Schema.Literal("stream_event"),
+	event: Schema.Struct({
+		type: Schema.Literal("content_block_delta"),
+		index: Schema.optional(Schema.Number),
+		delta: Schema.Struct({
+			type: Schema.Literal("thinking_delta"),
+			thinking: Schema.String,
+		}),
+	}),
+});
+/** Announces the native message id every subsequent delta belongs to. */
+const MessageStartSchema = Schema.Struct({
+	type: Schema.Literal("stream_event"),
+	event: Schema.Struct({
+		type: Schema.Literal("message_start"),
+		message: Schema.Struct({ id: Schema.String }),
+	}),
+});
+/** Names the stream lifecycle frames that carry no public content of their own. */
+const StreamLifecycleSchema = Schema.Struct({
+	type: Schema.Literal("stream_event"),
+	event: Schema.Struct({ type: Schema.String }),
+});
+/**
+ * Content-block deltas that carry neither assistant text nor reasoning:
+ * thinking-block signatures and streamed tool-input JSON, whose settled forms
+ * arrive in the assistant frame.
+ */
+const OpaqueContentDeltaSchema = Schema.Struct({
+	type: Schema.Literal("stream_event"),
+	event: Schema.Struct({
+		type: Schema.Literal("content_block_delta"),
+		delta: Schema.Struct({ type: Schema.String }),
+	}),
+});
+const RateLimitSchema = Schema.Struct({
+	type: Schema.Literal("rate_limit_event"),
+	rate_limit_info: Schema.Struct({ status: Schema.optional(Schema.String) }),
 });
 const TextSchema = Schema.Struct({ type: Schema.Literal("text"), text: Schema.String });
 const ToolUseSchema = Schema.Struct({
@@ -86,6 +141,17 @@ const ResultSchema = Schema.Struct({
 	permission_denials: Schema.optional(Schema.Array(Schema.Unknown)),
 	errors: Schema.optional(Schema.Array(Schema.String)),
 });
+/**
+ * The CLI's terminal frame omits `type` in the current protocol, so the
+ * result is recognized by its own terminal fields instead of an envelope tag.
+ */
+const TerminalResultSchema = Schema.Struct({
+	is_error: Schema.Boolean,
+	stop_reason: Schema.optional(Schema.NullOr(Schema.String)),
+	session_id: Schema.optional(Schema.String),
+	usage: Schema.optional(UsageSchema),
+	permission_denials: Schema.optional(Schema.Array(Schema.Unknown)),
+});
 
 type DecodedSchema<S extends Schema.ConstraintDecoder<unknown>> = S["Type"] | undefined;
 
@@ -124,14 +190,47 @@ export function is_claude_init_event(payload: unknown) {
 
 /**
  * Names the assistant message item extended or completed by one observation.
- * Claude stream-json delta frames never disclose their native message id, so a
- * run-stable synthesized id keeps deltas correlated without inventing
- * per-message identity; assistant completions prefer the native `message.id`
- * whenever the CLI discloses one.
+ *
+ * A streamed message and its completion must resolve to the same item, or the
+ * completion upserts a second copy beside the streamed one. Only `message_start`
+ * discloses the native id, so the caller threads it forward and both paths
+ * prefer it; a run-stable synthesized id remains the fallback when the CLI
+ * streams content without ever announcing a message.
  */
 function message_item_id(input: ClaudeNormalizationInput, native_id: string | undefined) {
-	return native_id ?? `claude:${input.artisan_run_id}:message`;
+	return native_id ?? input.stream_message_id ?? `claude:${input.artisan_run_id}:message`;
 }
+
+/**
+ * Reads the native message id announced by a `message_start` frame so the
+ * caller can correlate the deltas that follow it.
+ *
+ * @since 0.7.0
+ */
+export function read_claude_stream_message_id(payload: unknown): string | undefined {
+	return decode(MessageStartSchema, payload)?.event.message.id;
+}
+
+/**
+ * Names the frames that exist purely for CLI bookkeeping. Every frame is
+ * already retained verbatim as raw provenance, so re-emitting these as
+ * canonical observations would only bury real diagnostics in noise.
+ */
+const silent_system_subtypes = new Set([
+	"hook_started",
+	"hook_response",
+	"status",
+	"thinking_tokens",
+	"compact_boundary",
+]);
+const silent_stream_events = new Set([
+	"message_start",
+	"message_delta",
+	"message_stop",
+	"content_block_start",
+	"content_block_stop",
+	"ping",
+]);
 
 function make_base(input: ClaudeNormalizationInput, native_method: string, suffix?: string) {
 	const raw: EngineRawProvenance = {
@@ -258,6 +357,10 @@ export function normalize_claude_event(
 	if (decode(RetrySchema, input.payload) !== undefined)
 		return [native_action(input, "Claude API retry progress")];
 
+	/** Bookkeeping frames stay in raw provenance only. */
+	const system_frame = decode(SystemSubtypeSchema, input.payload);
+	if (system_frame !== undefined && silent_system_subtypes.has(system_frame.subtype)) return [];
+
 	const delta = decode(DeltaSchema, input.payload);
 	if (delta !== undefined)
 		return [
@@ -270,6 +373,35 @@ export function normalize_claude_event(
 				turn_id: input.turn_id,
 			} satisfies EngineAgentMessageDeltaObservation,
 		];
+
+	const thinking_delta = decode(ThinkingDeltaSchema, input.payload);
+	if (thinking_delta !== undefined)
+		return [
+			{
+				...make_base(input, "stream_event.thinking_delta"),
+				_tag: "reasoning_summary_delta",
+				delta: thinking_delta.event.delta.thinking,
+				item_id: `${message_item_id(input, undefined)}:reasoning`,
+				summary_index: thinking_delta.event.index ?? 0,
+				turn_id: input.turn_id,
+			} satisfies EngineReasoningSummaryDeltaObservation,
+		];
+
+	const stream_lifecycle = decode(StreamLifecycleSchema, input.payload);
+	if (stream_lifecycle !== undefined && silent_stream_events.has(stream_lifecycle.event.type))
+		return [];
+	if (decode(OpaqueContentDeltaSchema, input.payload) !== undefined) return [];
+
+	const rate_limit = decode(RateLimitSchema, input.payload);
+	if (rate_limit !== undefined)
+		return rate_limit.rate_limit_info.status === "allowed"
+			? []
+			: [
+					native_action(
+						input,
+						`Claude rate limit ${rate_limit.rate_limit_info.status ?? "status unknown"}`,
+					),
+				];
 
 	const assistant = decode(AssistantSchema, input.payload);
 	if (assistant !== undefined) {
@@ -299,9 +431,15 @@ export function normalize_claude_event(
 				phase: "unspecified",
 				turn_id: input.turn_id,
 			} satisfies EngineAgentMessageCompletedObservation);
-		return observations.length === 0
-			? [native_action(input, assistant.error ?? "Assistant event without public content")]
-			: observations;
+		if (observations.length > 0) return observations;
+		/**
+		 * A thinking-only assistant frame is the settled form of reasoning the
+		 * stream already delivered; it carries no unseen public content.
+		 */
+		if (assistant.error !== undefined) return [native_action(input, assistant.error)];
+		return assistant.message.content.some((item) => decode(ThinkingSchema, item) !== undefined)
+			? []
+			: [native_action(input, "Assistant event without public content")];
 	}
 
 	const user = decode(UserSchema, input.payload);
@@ -340,6 +478,33 @@ export function normalize_claude_event(
 					: `Claude result failure: ${result.subtype}`,
 			),
 		];
+	}
+
+	/**
+	 * The current CLI emits its terminal summary without an envelope `type`,
+	 * so it is recognized by its own terminal fields. Usage is the only
+	 * canonical content; a failure surfaces its stop reason.
+	 */
+	const terminal = decode(TerminalResultSchema, input.payload);
+	if (terminal !== undefined) {
+		const observations: Array<EngineObservation> = [];
+		if (terminal.usage !== undefined)
+			observations.push(usage_observation(input, terminal.usage));
+		if (terminal.permission_denials !== undefined && terminal.permission_denials.length > 0)
+			observations.push(
+				native_action(
+					input,
+					"Claude permission denial retained without approval semantics",
+				),
+			);
+		if (terminal.is_error)
+			observations.push(
+				native_action(
+					input,
+					`Claude run failed: ${terminal.stop_reason ?? "no stop reason reported"}`,
+				),
+			);
+		return observations;
 	}
 
 	const event = decode(EventSchema, input.payload);
