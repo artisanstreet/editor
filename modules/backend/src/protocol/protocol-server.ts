@@ -98,6 +98,7 @@ import {
 	ConversationReadModel,
 	conversation_patch_replay_batch_size,
 } from "../conversation/index.ts";
+import { HostIdentityLive } from "../runtime/host-identity";
 import { RuntimeMetadata } from "../runtime/runtime-metadata";
 import { RuntimeCatalogService } from "../runtime/runtime-catalog";
 import { TerminalSessionService } from "../terminal/terminal-sessions";
@@ -121,6 +122,8 @@ import {
 } from "./protocol-connection";
 import { ProtocolRouter, type ProtocolRouterInboundDispatch } from "./protocol-router";
 import { MakeSettingsMutationHandler } from "./rpc/mutation-handlers/settings";
+import { MakeEngineUsageQueryHandler } from "./rpc/query-handlers/engine-usage";
+import { MakeHostIdentityQueryHandler } from "./rpc/query-handlers/host-identity";
 import { MakeMarketplaceQueryHandler } from "./rpc/query-handlers/marketplace";
 import { MakeThreadQueryHandler } from "./rpc/query-handlers/thread";
 import { MakeWorkspaceInspectionQueryHandler } from "./rpc/query-handlers/workspace-inspection";
@@ -595,6 +598,8 @@ export function make_protocol_server_layer(
 			const capability_oauth = yield* CapabilityOAuthLifecycle;
 			const capability_mirrors = yield* CapabilityMirrorService;
 			const HandleSettingsMutation = yield* MakeSettingsMutationHandler;
+			const HandleEngineUsageQuery = yield* MakeEngineUsageQueryHandler;
+			const HandleHostIdentityQuery = yield* MakeHostIdentityQueryHandler;
 			const HandleMarketplaceQuery = yield* MakeMarketplaceQueryHandler;
 			const HandleThreadQuery = yield* MakeThreadQueryHandler;
 			const HandleWorkspaceInspectionQuery = yield* MakeWorkspaceInspectionQueryHandler;
@@ -3621,6 +3626,8 @@ export function make_protocol_server_layer(
 					HandleWorkspaceInspectionQuery,
 				);
 				const HandleMarketplaceReadQuery = AdaptRpcHandler(HandleMarketplaceQuery);
+				const HandleHostIdentityReadQuery = AdaptRpcHandler(HandleHostIdentityQuery);
+				const HandleEngineUsageReadQuery = AdaptRpcHandler(HandleEngineUsageQuery);
 
 				const HandleReadyEnvelope = (
 					envelope: Exclude<InboundControlEnvelope, HelloEnvelope>,
@@ -4040,6 +4047,10 @@ export function make_protocol_server_layer(
 							return HandleSurfaceUsageQuery(envelope, current);
 						case "surface.usage.daily.query":
 							return HandleSurfaceUsageDailyQuery(envelope, current);
+						case "host.identity.query":
+							return HandleHostIdentityReadQuery(envelope, current);
+						case "engine.usage.query":
+							return HandleEngineUsageReadQuery(envelope, current);
 						case "subscribe":
 							return HandleSubscribe(envelope, current);
 						case "unsubscribe":
@@ -4276,5 +4287,5 @@ export function make_protocol_server_layer(
 
 			return { Open };
 		}),
-	);
+	).pipe(Layer.provide(HostIdentityLive));
 }
