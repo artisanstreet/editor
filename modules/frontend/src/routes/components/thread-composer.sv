@@ -361,7 +361,7 @@
 
 <div class="pointer-events-none absolute inset-x-0 bottom-0 z-20 px-4 pb-4 sm:px-6 sm:pb-6">
 	<ShaderGlassSurface
-		class="t-resize thread-composer pointer-events-auto mx-auto w-full max-w-3xl rounded-3xl"
+		class="t-resize thread-composer pointer-events-auto mx-auto w-full max-w-3xl rounded-(--composer-radius)"
 		data-has-attachments={attachments.size > 0}
 	>
 		<div class="relative z-10 flex min-h-32 flex-col p-2">
@@ -417,7 +417,7 @@
 				<Button
 					variant="ghost"
 					size="icon"
-					class="composer-send inset-shadow rounded-full text-white/50 hover:text-white/50 disabled:text-white/50"
+					class="composer-send inset-shadow rounded-[calc(var(--composer-radius)-0.5rem)] text-white hover:text-white disabled:text-white"
 					style={`--composer-send-image: url("${send_gradient}")`}
 					aria-label={run_active ? "Stop current run" : "Send message"}
 					disabled={run_active
@@ -494,6 +494,29 @@
 	:global(.composer-send:active:not(:disabled)) { filter: brightness(0.94); }
 	:global(.composer-send:disabled) { filter: saturate(0.55) brightness(0.75); }
 
+	/**
+	 * The inset-shadow utility is tuned for dark chrome; its 6% layers vanish
+	 * over the bright gradient artwork. Same shadow shape, artwork strength.
+	 */
+	:global(.composer-send.inset-shadow) {
+		box-shadow:
+			inset 0px 1px 1px -0.5px rgba(0, 0, 0, 0.3),
+			inset 0px 3px 3px -1.5px rgba(0, 0, 0, 0.26),
+			inset 0px 6px 6px -3px rgba(0, 0, 0, 0.22),
+			inset 0 -0.5px rgba(255, 255, 255, 0.5),
+			inset 0 0 0 0.5px oklch(from var(--highlight) l c h / 35%);
+	}
+
+	/**
+	 * Full-white glyph + blend instead of opacity: the icon SVG is layered, so
+	 * opacity double-exposes where paths overlap. Overlay lets the artwork
+	 * light the glyph; isolation on inset-shadow keeps the blend inside the
+	 * button.
+	 */
+	:global(.composer-send .t-icon-swap) {
+		mix-blend-mode: overlay;
+	}
+
 	:global(.t-resize) {
 		transition:
 			width var(--resize-dur) var(--resize-ease),
@@ -502,6 +525,7 @@
 	}
 
 	:global(.thread-composer) {
+		--composer-radius: calc(var(--radius-3xl) - 0.375rem);
 		--composer-resize-dur: var(--resize-dur);
 		--composer-resize-ease: var(--resize-ease);
 	}

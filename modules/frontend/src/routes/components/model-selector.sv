@@ -1,6 +1,6 @@
 <script lang="ts" effect>
 	import Selector from "@tabler/icons-svelte/icons/selector";
-	import Bolt from "@tabler/icons-svelte/icons/bolt";
+	import BoltFilled from "@tabler/icons-svelte/icons/bolt-filled";
 	import Brain from "@tabler/icons-svelte/icons/brain";
 	import Check from "@tabler/icons-svelte/icons/check";
 	import Lock from "@tabler/icons-svelte/icons/lock";
@@ -10,10 +10,16 @@
 	import type { RuntimeCatalog, ThreadSessionPolicy } from "@artisan/protocol";
 	import { ArtisanClient } from "@artisan/transport/client";
 	import { EngineMarkFor } from "$lib/engine/presentation";
+	import { remember_last_model } from "$lib/root/last-model";
 
 	import { Popover, PopoverContent, PopoverTrigger } from "$lib/components/ui/popover";
-	import { ScrollArea } from "$lib/components/ui/scroll-area";
 	import { Tabs, TabsList, TabsTrigger } from "$lib/components/ui/tabs";
+	import {
+		Tooltip,
+		TooltipContent,
+		TooltipProvider,
+		TooltipTrigger,
+	} from "$lib/components/ui/tooltip";
 	import DropdownHoverSurface from "./dropdown-hover-surface.sv";
 	import ShaderGlassSurface from "./shader-glass-surface.sv";
 
@@ -83,8 +89,8 @@
 	}));
 	let open = $state(false);
 	let permission_open = $state(false);
-	let speed_open = $state(false);
-	let thinking_open = $state(false);
+	/** The row under the pointer, shown in the detail pane; falls back to selected. */
+	let previewed_model_id = $state<string | undefined>(undefined);
 	let thinking_level = $state<ThinkingLevel>("medium");
 	let speed_option_id = $state("standard");
 	let active_engine = $state<HarnessId>(models[0]?.engine ?? "codex");
@@ -112,33 +118,15 @@
 				: "supervised";
 	const PatchPolicy = (patch: Partial<ThreadSessionPolicy>) => {
 		if (disabled || policy === undefined || onpolicychange === undefined) return;
-		onpolicychange({ ...policy, ...patch });
+		const next = { ...policy, ...patch };
+		remember_last_model(next);
+		onpolicychange(next);
 	};
 
 	const active_models = $derived(
 		models.filter((model) => model.engine === active_engine),
 	);
 	const selected_model = $derived(models.find((model) => model.id === selected_model_id) ?? models[0]);
-	const selected_speed_options = $derived(
-		selected_model?.definition.capabilities.speed_options ?? [],
-	);
-	const selected_speed_option = $derived(
-		selected_speed_options.find(
-			(option) => option.id === speed_option_id && option.disabled === undefined,
-		) ??
-			selected_speed_options.find(
-				(option) => option.default && option.disabled === undefined,
-			) ??
-			selected_speed_options.find((option) => option.disabled === undefined),
-	);
-	const selected_thinking = $derived(
-		selected_model?.definition.capabilities.thinking ?? { availability: "unavailable" as const },
-	);
-	const selected_thinking_native_value = $derived(
-		selected_thinking.availability === "supported"
-			? selected_thinking.options.find((option) => option.id === thinking_level)?.native_value
-			: undefined,
-	);
 	const selected_engine = $derived(
 		engines.find((engine) => engine.id === selected_model?.engine) ??
 			engines[0] ?? { id: "codex", icon: Tool, monochrome: true, name: "Unavailable" },
@@ -152,13 +140,21 @@
 			selected_permission_options[0],
 	);
 	const composer_controls: ReadonlyArray<ComposerControl> = ["model"];
+	const previewed_model = $derived(
+		models.find((model) => model.id === previewed_model_id) ?? selected_model,
+	);
+	/** The only way the whole selector disables: the thread session is not connected. */
+	const disabled_reason = $derived(
+		disabled ? "Unavailable until the thread's session is connected" : undefined,
+	);
 
-	const select_model = (model: ModelChoice) => {
+	/** Makes the model current without closing the popover; false when barred. */
+	const adopt_model = (model: ModelChoice): boolean => {
 		if (model.definition.disabled !== undefined) {
-			return;
+			return false;
 		}
 		if (engine_locked && model.engine !== selected_model?.engine) {
-			return;
+			return false;
 		}
 		selected_model_id = model.id;
 		active_engine = model.engine;
@@ -182,13 +178,16 @@
 					: (policy?.reasoning_effort ?? "medium"),
 			service_tier: default_speed?.native_value ?? "standard",
 		});
-		open = false;
+		return true;
+	};
+
+	const select_model = (model: ModelChoice) => {
+		if (adopt_model(model)) open = false;
 	};
 
 	const select_thinking_level = (level: ThinkingLevel) => {
 		thinking_level = level;
 		PatchPolicy({ reasoning_effort: PolicyEffortFromThinking(level) });
-		thinking_open = false;
 	};
 
 	const select_speed = (option: SpeedOption) => {
@@ -197,7 +196,17 @@
 		}
 		speed_option_id = option.id;
 		PatchPolicy({ service_tier: option.native_value });
-		speed_open = false;
+	};
+
+	/** An inline chip pick adopts its model first, then applies the option. */
+	const apply_model_thinking = (model: ModelChoice, level: ThinkingLevel) => {
+		if (selected_model?.id !== model.id && !adopt_model(model)) return;
+		select_thinking_level(level);
+	};
+
+	const apply_model_speed = (model: ModelChoice, option: SpeedOption) => {
+		if (selected_model?.id !== model.id && !adopt_model(model)) return;
+		select_speed(option);
 	};
 
 	const select_permission = (option: PermissionOption) => {
@@ -257,6 +266,11 @@
 		return () => cancelAnimationFrame(frame);
 	});
 
+	/** A fresh open previews the selected model until a row is hovered. */
+	$effect(() => {
+		if (!open) previewed_model_id = undefined;
+	});
+
 	$effect(() => {
 		const options = selected_permission_options;
 		if (options.length > 0 && !options.some((option) => option.id === permission_mode)) {
@@ -267,31 +281,158 @@
 
 <svelte:window onresize={() => position_engine_indicator(false)} />
 
+{#snippet model_rows()}
+	<DropdownHoverSurface
+		class="pr-2 [--docs-sidebar-hover-radius:calc(var(--radius-3xl)-0.5rem)]"
+	>
+		{#snippet children({ move_hover })}
+			<table class="w-full border-separate border-spacing-y-0.5" aria-label="Available models">
+				<tbody>
+					{#each active_models as model (model.id)}
+						{@const ModelIcon = engines.find((engine) => engine.id === model.engine)?.icon ?? SvglOpenAILogo}
+						{@const is_monochrome = engines.find((engine) => engine.id === model.engine)?.monochrome ?? false}
+						<tr>
+							<td class="p-0">
+								<div
+									role="presentation"
+									class="mr-1 flex items-center gap-1"
+									onpointerenter={(event) => {
+										move_hover(event);
+										previewed_model_id = model.id;
+									}}
+									onpointermove={move_hover}
+									onfocusin={move_hover}
+								>
+									<button
+										type="button"
+										disabled={disabled || model.definition.disabled !== undefined}
+										title={model.definition.disabled?.reason}
+										class="flex min-w-0 grow items-center gap-2 rounded-[calc(var(--radius-3xl)-0.5rem)] px-2.5 py-1.5 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-45"
+										aria-current={model.id === selected_model_id ? "true" : undefined}
+										onclick={() => select_model(model)}
+									>
+										<ModelIcon
+											class={is_monochrome
+												? "size-5 shrink-0 dark:invert"
+												: "size-5 shrink-0"}
+										/>
+										<span class="flex min-w-0 flex-col space-y-0">
+											<span class="truncate text-sm font-semibold text-foreground">{model.name}</span>
+											<span class="text-pretty text-xs text-muted-foreground">
+												{model.definition.description ?? model.lab}
+											</span>
+											{#if model.definition.disabled !== undefined}
+												<span class="text-pretty text-xs text-muted-foreground">
+													{model.definition.disabled.reason}
+												</span>
+											{/if}
+										</span>
+									</button>
+								</div>
+							</td>
+						</tr>
+					{/each}
+				</tbody>
+			</table>
+		{/snippet}
+	</DropdownHoverSurface>
+{/snippet}
+
+{#snippet effort_chips(model: ModelChoice)}
+	{@const thinking = model.definition.capabilities.thinking}
+	{#if thinking.availability === "supported"}
+		<div class="flex items-center gap-2">
+			<Brain class="size-3.5 shrink-0 text-muted-foreground" />
+			<div class="flex flex-wrap gap-1">
+				{#each thinking.options as level_option (level_option.id)}
+					<button
+						type="button"
+						disabled={disabled}
+						aria-pressed={model.id === selected_model_id
+							? thinking_level === level_option.id
+							: thinking.default === level_option.id}
+						class="rounded-full bg-foreground/5 px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none aria-pressed:bg-foreground/15 aria-pressed:text-foreground"
+						onclick={() => apply_model_thinking(model, level_option.id)}
+					>
+						{thinking_level_labels[level_option.id]}
+					</button>
+				{/each}
+			</div>
+		</div>
+	{/if}
+{/snippet}
+
+{#snippet speed_chips(model: ModelChoice)}
+	{@const speeds = model.definition.capabilities.speed_options.filter(
+		(option) => option.disabled === undefined,
+	)}
+	{#if speeds.length > 1}
+		<div class="flex items-center gap-2">
+			<BoltFilled class="size-3.5 shrink-0 text-muted-foreground" />
+			<div class="flex flex-wrap gap-1">
+				{#each speeds as speed (speed.id)}
+					<button
+						type="button"
+						disabled={disabled}
+						title={speed.description}
+						aria-pressed={model.id === selected_model_id
+							? speed_option_id === speed.id
+							: speed.default === true}
+						class="rounded-full bg-foreground/5 px-2 py-0.5 text-xs text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none aria-pressed:bg-foreground/15 aria-pressed:text-foreground"
+						onclick={() => apply_model_speed(model, speed)}
+					>
+						{speed.label}
+					</button>
+				{/each}
+			</div>
+		</div>
+	{/if}
+{/snippet}
+
+{#snippet model_config(model: ModelChoice)}
+	<div class="flex flex-col gap-1.5">
+		{@render effort_chips(model)}
+		{@render speed_chips(model)}
+	</div>
+{/snippet}
+
+<TooltipProvider delayDuration={0}>
 <div class="no-scrollbar flex min-w-0 max-w-full items-center gap-1 overflow-x-auto">
 	{#each composer_controls as control (control)}
 	{#if control === "model"}
 	<Popover bind:open>
-		<PopoverTrigger
-			aria-label="Select model"
-			disabled={disabled}
-			class="flex h-8 min-w-0 max-w-44 shrink-0 items-center gap-2 rounded-xl bg-transparent px-2 text-left text-foreground outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset"
-		>
-			{@const SelectedIcon = selected_engine.icon}
-			<SelectedIcon
-				class={selected_engine.monochrome
-					? "size-4 shrink-0 dark:invert"
-					: "size-4 shrink-0"}
-			/>
-			<span class="truncate text-sm text-foreground">{selected_model?.name ?? "No models"}</span>
-			<Selector class="pointer-events-none size-3.5 shrink-0 text-muted-foreground" />
-		</PopoverTrigger>
+		<Tooltip>
+			<TooltipTrigger>
+				{#snippet child({ props: tooltip_props })}
+					<span {...tooltip_props} class="flex min-w-0 has-[:disabled]:cursor-not-allowed">
+						<PopoverTrigger
+							aria-label="Select model"
+							disabled={disabled}
+							class="flex h-6 min-w-0 max-w-44 shrink-0 items-center gap-2 rounded-[calc(var(--radius-3xl)-1rem)] bg-transparent px-2 text-left text-foreground outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset disabled:pointer-events-none"
+						>
+							{@const SelectedIcon = selected_engine.icon}
+							<SelectedIcon
+								class={selected_engine.monochrome
+									? "size-4 shrink-0 dark:invert"
+									: "size-4 shrink-0"}
+							/>
+							<span class="truncate text-sm text-foreground">{selected_model?.name ?? "No models"}</span>
+							<Selector class="pointer-events-none size-3.5 shrink-0 text-muted-foreground" />
+						</PopoverTrigger>
+					</span>
+				{/snippet}
+			</TooltipTrigger>
+			{#if disabled_reason !== undefined}
+				<TooltipContent>{disabled_reason}</TooltipContent>
+			{/if}
+		</Tooltip>
 
 		<PopoverContent
 			variant="bare"
 			align="end"
 			side="top"
 			sideOffset={8}
-			class="w-[min(20rem,calc(100vw-2rem))] rounded-3xl"
+			class="w-[min(30rem,calc(100vw-2rem))] rounded-3xl"
 		>
 			<ShaderGlassSurface strength="strong" class="w-full rounded-3xl">
 				<Tabs bind:value={active_engine} class="min-h-0 gap-2 p-2">
@@ -310,174 +451,61 @@
 					></div>
 					{#each engines as engine (engine.id)}
 						{@const EngineIcon = engine.icon}
-						<TabsTrigger
-							value={engine.id}
-							disabled={disabled ||
-								(engine_locked && engine.id !== selected_engine.id)}
-							data-engine={engine.id}
-							aria-label={engine.name}
-							title={engine_locked && engine.id !== selected_engine.id
+						{@const engine_disabled_reason =
+							engine_locked && engine.id !== selected_engine.id
 								? `${engine.name} — engine is locked for this session`
-								: engine.name}
-							class="relative z-1 size-8 flex-none px-0 text-foreground after:hidden hover:text-foreground data-active:border-transparent data-active:bg-transparent data-active:text-foreground dark:hover:text-foreground dark:data-active:border-transparent dark:data-active:bg-transparent"
-						>
-							<EngineIcon class={engine.monochrome ? "size-4 dark:invert" : "size-4"} />
-						</TabsTrigger>
+								: disabled_reason}
+						<Tooltip>
+							<TooltipTrigger>
+								{#snippet child({ props: tooltip_props })}
+									<span
+										{...tooltip_props}
+										class="flex flex-none has-[:disabled]:cursor-not-allowed"
+									>
+										<TabsTrigger
+											value={engine.id}
+											disabled={disabled ||
+												(engine_locked && engine.id !== selected_engine.id)}
+											data-engine={engine.id}
+											aria-label={engine.name}
+											class="relative z-1 size-8 flex-none px-0 text-foreground after:hidden hover:text-foreground data-active:border-transparent data-active:bg-transparent data-active:text-foreground dark:hover:text-foreground dark:data-active:border-transparent dark:data-active:bg-transparent"
+										>
+											<EngineIcon class={engine.monochrome ? "size-4 dark:invert" : "size-4"} />
+										</TabsTrigger>
+									</span>
+								{/snippet}
+							</TooltipTrigger>
+							{#if engine_disabled_reason !== undefined}
+								<TooltipContent>{engine_disabled_reason}</TooltipContent>
+							{/if}
+						</Tooltip>
 					{/each}
 				</TabsList>
-			<ScrollArea class="h-48 rounded-xl">
-				<DropdownHoverSurface
-					class="[--docs-sidebar-hover-radius:calc(var(--radius-3xl)-0.5rem)]"
-				>
-					{#snippet children({ move_hover })}
-						<table class="w-full border-separate border-spacing-y-0.5" aria-label="Available models">
-							<tbody>
-								{#each active_models as model (model.id)}
-									{@const ModelIcon = engines.find((engine) => engine.id === model.engine)?.icon ?? SvglOpenAILogo}
-									{@const is_monochrome = engines.find((engine) => engine.id === model.engine)?.monochrome ?? false}
-									<tr>
-										<td class="p-0">
-											<button
-												type="button"
-												disabled={disabled || model.definition.disabled !== undefined}
-												title={model.definition.disabled?.reason}
-												class="flex w-full items-center gap-2 rounded-[calc(var(--radius-3xl)-0.5rem)] px-2.5 py-1.5 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-45"
-												aria-current={model.id === selected_model_id ? "true" : undefined}
-												onfocus={move_hover}
-												onpointerenter={move_hover}
-												onclick={() => select_model(model)}
-											>
-												<ModelIcon
-													class={is_monochrome
-														? "size-5 shrink-0 dark:invert"
-														: "size-5 shrink-0"}
-												/>
-												<span class="flex min-w-0 flex-col space-y-0">
-													<span class="truncate text-sm font-semibold text-foreground">{model.name}</span>
-													<span class="truncate text-xs text-muted-foreground">{model.lab}</span>
-													{#if model.definition.disabled !== undefined}
-														<span class="truncate text-xs text-muted-foreground">
-															{model.definition.disabled.reason}
-														</span>
-													{/if}
-												</span>
-											</button>
-										</td>
-									</tr>
-								{/each}
-							</tbody>
-						</table>
-					{/snippet}
-				</DropdownHoverSurface>
-			</ScrollArea>
+				<div class="flex min-w-0 gap-2">
+					<div class="model-scroll h-48 min-w-0 grow overflow-y-auto rounded-xl">
+						{@render model_rows()}
+					</div>
+					{#if previewed_model !== undefined}
+						{@const PreviewIcon = engines.find((engine) => engine.id === previewed_model.engine)?.icon ?? SvglOpenAILogo}
+						{@const preview_monochrome = engines.find((engine) => engine.id === previewed_model.engine)?.monochrome ?? false}
+						<div class="flex h-48 w-44 shrink-0 flex-col gap-2 overflow-y-auto rounded-xl bg-foreground/3 p-2.5">
+							<div class="flex items-center gap-2">
+								<PreviewIcon
+									class={preview_monochrome ? "size-4 shrink-0 dark:invert" : "size-4 shrink-0"}
+								/>
+								<span class="truncate text-sm font-semibold text-foreground">{previewed_model.name}</span>
+							</div>
+							<span class="text-pretty text-xs text-muted-foreground">
+								{previewed_model.definition.description ?? previewed_model.lab}
+							</span>
+							{@render model_config(previewed_model)}
+						</div>
+					{/if}
+				</div>
 				</Tabs>
 			</ShaderGlassSurface>
 		</PopoverContent>
 	</Popover>
-	{/if}
-
-	{#if control === "thinking"}
-		<Popover bind:open={thinking_open}>
-			<PopoverTrigger
-				aria-label="Thinking level"
-				disabled={disabled}
-				data-native-value={selected_thinking_native_value}
-				class="flex h-8 shrink-0 items-center gap-1.5 rounded-xl bg-transparent px-2 text-sm text-foreground outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset"
-			>
-				<Brain class="size-4 text-muted-foreground" />
-				<span class="hidden sm:inline">{thinking_level_labels[thinking_level]}</span>
-				<Selector class="size-3.5 text-muted-foreground" />
-			</PopoverTrigger>
-			<PopoverContent
-				variant="bare"
-				align="end"
-				side="top"
-				sideOffset={6}
-				class="w-48 rounded-2xl"
-			>
-				<ShaderGlassSurface strength="strong" class="w-full rounded-2xl">
-					<DropdownHoverSurface
-						class="p-1.5 [--docs-sidebar-hover-radius:calc(var(--radius-2xl)-0.375rem)]"
-					>
-						{#snippet children({ move_hover })}
-							<div class="flex flex-col gap-0.5">
-								{#each selected_thinking.options as option (option.id)}
-									<button
-										type="button"
-										disabled={disabled}
-										class="flex w-full items-center justify-between gap-3 rounded-[calc(var(--radius-2xl)-0.375rem)] px-3 py-2 text-left text-sm text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
-										onfocus={move_hover}
-										onpointerenter={move_hover}
-										onclick={() => select_thinking_level(option.id)}
-									>
-										<span>{thinking_level_labels[option.id]}</span>
-										{#if option.id === thinking_level}
-											<Check class="size-4 text-muted-foreground" />
-										{/if}
-									</button>
-								{/each}
-							</div>
-						{/snippet}
-					</DropdownHoverSurface>
-				</ShaderGlassSurface>
-			</PopoverContent>
-		</Popover>
-	{/if}
-
-	{#if control === "speed"}
-		<Popover bind:open={speed_open}>
-			<PopoverTrigger
-				aria-label={`Speed: ${selected_speed_option?.label ?? "Select"}`}
-				disabled={disabled}
-				class="flex h-8 shrink-0 items-center gap-1.5 rounded-xl bg-transparent px-2 text-sm text-foreground outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset"
-			>
-				<Bolt class="size-4 text-muted-foreground" />
-				<span class="hidden sm:inline">{selected_speed_option?.label ?? "Speed"}</span>
-				<Selector class="size-3.5 text-muted-foreground" />
-			</PopoverTrigger>
-			<PopoverContent
-				variant="bare"
-				side="top"
-				sideOffset={6}
-				align="end"
-				class="w-72 rounded-2xl"
-			>
-				<ShaderGlassSurface strength="strong" class="w-full rounded-2xl">
-					<DropdownHoverSurface
-						class="p-1.5 [--docs-sidebar-hover-radius:calc(var(--radius-2xl)-0.375rem)]"
-					>
-						{#snippet children({ move_hover })}
-							<div class="flex flex-col gap-0.5">
-								{#each selected_speed_options as option (option.id)}
-									<button
-										type="button"
-										disabled={disabled || option.disabled !== undefined}
-										title={option.disabled?.reason}
-										class="flex w-full items-start justify-between gap-3 rounded-[calc(var(--radius-2xl)-0.375rem)] px-3 py-2 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-45"
-										onfocus={move_hover}
-										onpointerenter={move_hover}
-										onclick={() => select_speed(option)}
-									>
-										<span class="flex min-w-0 flex-col">
-											<span class="text-sm text-foreground">{option.label}</span>
-											<span class="text-sm text-muted-foreground">{option.description}</span>
-											{#if option.disabled !== undefined}
-												<span class="text-xs text-muted-foreground">
-													{option.disabled.reason}
-												</span>
-											{/if}
-										</span>
-										{#if option.id === speed_option_id}
-											<Check class="size-4 shrink-0 self-center text-muted-foreground" />
-										{/if}
-									</button>
-								{/each}
-							</div>
-						{/snippet}
-					</DropdownHoverSurface>
-				</ShaderGlassSurface>
-			</PopoverContent>
-		</Popover>
 	{/if}
 
 	{#if control === "permission"}
@@ -532,6 +560,7 @@
 
 	{/each}
 </div>
+</TooltipProvider>
 
 <style>
 	.model-selector-engine-light {
@@ -594,4 +623,10 @@
 			transition: none !important;
 		}
 	}
+
+	.model-scroll {
+		scrollbar-width: thin;
+		scrollbar-color: var(--surface-500) transparent;
+	}
+
 </style>

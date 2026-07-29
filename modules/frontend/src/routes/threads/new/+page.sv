@@ -10,6 +10,7 @@
 		draft_thread_project,
 		pending_first_submission,
 	} from "$lib/root/draft-thread";
+	import { recall_last_model } from "$lib/root/last-model";
 	import { ThreadRoutePath } from "$lib/root/thread-navigation";
 	import ThreadComposer from "../../components/thread-composer.sv";
 
@@ -21,8 +22,10 @@
 
 	/**
 	 * The draft is the only place the engine can be chosen: it locks once the
-	 * first message creates the session. The default mirrors the backend's
-	 * default session policy with the runtime catalog's default model engine.
+	 * first message creates the session. A new draft inherits the model the
+	 * user chose last time (with that model's own default effort and speed, as
+	 * if re-picked); with no usable history it mirrors the backend's default
+	 * session policy with the runtime catalog's default model engine.
 	 *
 	 * This route remounts on every navigation to/from the draft (e.g. the user
 	 * picks a model, navigates away, then back). Seeding unconditionally would
@@ -32,15 +35,31 @@
 	 */
 	const runtime_catalog = yield* client.GetRuntimeCatalog;
 	if (get(draft_thread_policy) === undefined) {
+		const last_model_id = recall_last_model();
+		const last_model = runtime_catalog.manifest.models.find(
+			(model) =>
+				model.native_model_id === last_model_id && model.disabled === undefined,
+		);
 		const default_model = runtime_catalog.manifest.models.find(
 			(model) => model.id === runtime_catalog.default_model_id,
 		);
+		const seed_model = last_model ?? default_model;
+		const seed_thinking = last_model?.capabilities.thinking;
 		draft_thread_policy.set({
-			engine_id: default_model?.harness ?? "codex",
+			engine_id: seed_model?.harness ?? "codex",
+			model: last_model?.native_model_id,
 			permission_mode: "on_request",
-			reasoning_effort: "medium",
+			reasoning_effort:
+				seed_thinking?.availability === "supported"
+					? seed_thinking.default === "light"
+						? "low"
+						: seed_thinking.default
+					: "medium",
 			sandbox_mode: "workspace_write",
-			service_tier: "standard",
+			service_tier:
+				last_model?.capabilities.speed_options.find(
+					(option) => option.default && option.disabled === undefined,
+				)?.native_value ?? "standard",
 			strict_clarification: false,
 			web_search_enabled: false,
 		});
