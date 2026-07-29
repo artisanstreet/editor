@@ -101,10 +101,7 @@ export const FrontendContractRegistry: ReadonlyArray<FrontendContractEntry> = [
 		surface: "left",
 		pane: "identity-card",
 		reason: "Forge projects the signed-in host identity and per-engine provider usage through dedicated queries.",
-		contract_names: [
-			"ArtisanClient.GetHostIdentity",
-			"ArtisanClient.GetEngineUsage",
-		],
+		contract_names: ["ArtisanClient.GetHostIdentity", "ArtisanClient.GetEngineUsage"],
 	},
 	{
 		id: "left.marketplace",

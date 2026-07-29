@@ -120,6 +120,21 @@ Branch continuity only. Durable status lives in
   change intermixed with Sander's live thinking/speed redesign WIP —
   commit it together with that redesign.
 
+## Usage Reliability + Caching (2026-07-29)
+
+- Diagnosed live: `api.anthropic.com/api/oauth/usage` returns a sticky
+  per-machine 429 (token valid, UA correct) — the cause of "Claude usage
+  unavailable". Claude usage now falls back to headless
+  `claude -p "/usage" --output-format json` (zero-token, CLI-internal auth
+  path) parsed for session/weekly/per-model percents (no resets on the
+  fallback); zero parsed windows ⇒ surface the original endpoint error.
+  Verified live through the real factory: 429 → fallback → real windows.
+- `engine.usage.query` keeps a per-engine last-good in-memory cache:
+  <180s fresh ⇒ zero engine calls; provider failure ⇒ serve last-good.
+  Frontend persists the last snapshot (`lib/identity/usage-cache.ts`,
+  KeyValueStore, schema-validated, self-healing) and renders it instantly,
+  refreshing once per session in the background.
+
 ## Other Standing Facts
 
 - `ae` setup/doctor contain no project roots; doctor repair restores

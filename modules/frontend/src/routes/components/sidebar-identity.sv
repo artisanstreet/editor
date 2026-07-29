@@ -1,6 +1,6 @@
 <script lang="ts" effect>
 	import Settings from "@tabler/icons-svelte/icons/settings";
-	import { Effect, Queue } from "effect";
+	import { Effect, Option, Queue } from "effect";
 	import type { EngineUsageSnapshot, EngineUsageWindow, HostIdentitySnapshot } from "@artisan/protocol";
 	import { ArtisanClient } from "@artisan/transport/client";
 	import { Avatar, AvatarFallback } from "$lib/components/ui/avatar";
@@ -13,11 +13,17 @@
 	} from "$lib/components/ui/dropdown-menu";
 	import { Skeleton } from "$lib/components/ui/skeleton";
 	import { EngineMarkClass, EngineMarkFor } from "$lib/engine/presentation";
+	import { EngineUsageCache, EngineUsageCacheBrowserLive } from "$lib/identity/usage-cache";
 
 	type UsageState =
 		| { readonly status: "idle" }
 		| { readonly status: "loading" }
-		| { readonly status: "loaded"; readonly snapshot: EngineUsageSnapshot }
+		| {
+				readonly status: "loaded";
+				readonly snapshot: EngineUsageSnapshot;
+				/** A fresh fetch is in flight; keep showing `snapshot` rather than regressing to skeletons. */
+				readonly refreshing: boolean;
+		  }
 		| { readonly status: "error" };
 
 	const window_kind_labels: Readonly<Record<EngineUsageWindow["kind"], string>> = {
@@ -52,10 +58,13 @@
 	};
 
 	const client = yield* ArtisanClient;
+	const usage_cache = yield* EngineUsageCache.pipe(Effect.provide(EngineUsageCacheBrowserLive));
 
 	let identity = $state<HostIdentitySnapshot | undefined>(undefined);
 	let open = $state(false);
 	let usage_state = $state<UsageState>({ status: "idle" });
+	/** Guards the once-per-session fresh fetch; not template-reactive. */
+	let has_requested_fresh_usage = false;
 
 	const profile_name = $derived(identity?.display_name ?? identity?.username ?? identity?.hostname);
 	const initials = $derived(profile_name === undefined ? "?" : InitialsFor(profile_name));
@@ -80,20 +89,31 @@
 
 	const FetchUsage = client.GetEngineUsage.pipe(
 		Effect.tap((snapshot) =>
-			Effect.sync(() => {
-				usage_state = { status: "loaded", snapshot };
+			Effect.gen(function* () {
+				usage_state = { status: "loaded", snapshot, refreshing: false };
+				yield* usage_cache.Save(snapshot).pipe(Effect.catch(() => Effect.void));
 			}),
 		),
 		Effect.catch(() =>
 			Effect.sync(() => {
-				usage_state = { status: "error" };
+				/** Keep cached values on screen; only regress to an error state when there was nothing cached. */
+				usage_state =
+					usage_state.status === "loaded"
+						? { ...usage_state, refreshing: false }
+						: { status: "error" };
 			}),
 		),
 	);
 
 	const RequestUsage = () => {
-		if (usage_state.status !== "idle") return;
-		usage_state = { status: "loading" };
+		if (has_requested_fresh_usage) return;
+		has_requested_fresh_usage = true;
+
+		usage_state =
+			usage_state.status === "loaded"
+				? { ...usage_state, refreshing: true }
+				: { status: "loading" };
+
 		Queue.offerUnsafe(usage_requests, undefined);
 	};
 
@@ -105,6 +125,11 @@
 		),
 		Effect.catch(() => Effect.void),
 	);
+
+	const cached_usage = yield* usage_cache.Load;
+	if (Option.isSome(cached_usage)) {
+		usage_state = { status: "loaded", snapshot: cached_usage.value, refreshing: false };
+	}
 
 	yield* Queue.take(usage_requests).pipe(
 		Effect.flatMap(() => FetchUsage),
