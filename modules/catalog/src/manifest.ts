@@ -228,15 +228,8 @@ const anthropic_context_window = {
 	],
 } as const;
 
-/** Cursor hosts frontier models without exposing a separate reasoning-effort control. */
-const cursor_hosted_thinking = {
-	availability: "native",
-	description:
-		"Cursor manages reasoning for hosted frontier models; the CLI documents model choice without a separate effort control.",
-} as const;
-
 export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
-	revision: "2026-07-29.3",
+	revision: "2026-07-29.4",
 	providers: [
 		{ id: "openai", label: "OpenAI" },
 		{ id: "anthropic", label: "Anthropic" },
@@ -923,7 +916,16 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 			routing: { kind: "default" },
 			status: "prototype",
 			capabilities: {
-				thinking: cursor_hosted_thinking,
+				thinking: {
+					availability: "supported",
+					default: "high",
+					options: [
+						standard("light", "low"),
+						standard("medium", "medium"),
+						standard("high", "high"),
+						standard("xhigh", "xhigh"),
+					],
+				},
 				speed_options: [cursor_native_speed("GPT 5.6 Sol", true)],
 				image_input: false,
 				local_tools: true,
@@ -941,7 +943,16 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 			routing: { kind: "default" },
 			status: "prototype",
 			capabilities: {
-				thinking: cursor_hosted_thinking,
+				thinking: {
+					availability: "supported",
+					default: "high",
+					options: [
+						standard("light", "low"),
+						standard("medium", "medium"),
+						standard("high", "high"),
+						standard("xhigh", "xhigh"),
+					],
+				},
 				speed_options: [cursor_native_speed("GPT 5.6 Terra", true)],
 				image_input: false,
 				local_tools: true,
@@ -959,7 +970,16 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 			routing: { kind: "default" },
 			status: "prototype",
 			capabilities: {
-				thinking: cursor_hosted_thinking,
+				thinking: {
+					availability: "supported",
+					default: "medium",
+					options: [
+						standard("light", "low"),
+						standard("medium", "medium"),
+						standard("high", "high"),
+						standard("xhigh", "xhigh"),
+					],
+				},
 				speed_options: [cursor_native_speed("GPT 5.6 Luna", true)],
 				image_input: false,
 				local_tools: true,
@@ -977,7 +997,16 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 			routing: { kind: "default" },
 			status: "prototype",
 			capabilities: {
-				thinking: cursor_hosted_thinking,
+				thinking: {
+					availability: "supported",
+					default: "high",
+					options: [
+						standard("light", "low"),
+						standard("medium", "medium"),
+						standard("high", "high"),
+						standard("xhigh", "xhigh"),
+					],
+				},
 				speed_options: [cursor_native_speed("GPT 5.5", true)],
 				image_input: false,
 				local_tools: true,
@@ -995,7 +1024,16 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 			routing: { kind: "default" },
 			status: "prototype",
 			capabilities: {
-				thinking: cursor_hosted_thinking,
+				thinking: {
+					availability: "supported",
+					default: "high",
+					options: [
+						standard("light", "low"),
+						standard("medium", "medium"),
+						standard("high", "high"),
+						standard("xhigh", "xhigh"),
+					],
+				},
 				speed_options: [cursor_native_speed("GPT 5.4", true)],
 				image_input: false,
 				local_tools: true,
@@ -1013,7 +1051,16 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 			routing: { kind: "default" },
 			status: "prototype",
 			capabilities: {
-				thinking: cursor_hosted_thinking,
+				thinking: {
+					availability: "supported",
+					default: "medium",
+					options: [
+						standard("light", "low"),
+						standard("medium", "medium"),
+						standard("high", "high"),
+						standard("xhigh", "xhigh"),
+					],
+				},
 				speed_options: [cursor_native_speed("GPT 5.4 Mini", false)],
 				image_input: false,
 				local_tools: true,
@@ -1025,12 +1072,22 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 			id: "cursor-gpt-5-3-codex",
 			name: "GPT 5.3 Codex",
 			native_model_id: "gpt-5.3-codex",
+			description: "Previous-generation agentic coding model.",
 			harness: "cursor",
 			provider: "openai",
 			routing: { kind: "default" },
 			status: "prototype",
 			capabilities: {
-				thinking: cursor_hosted_thinking,
+				thinking: {
+					availability: "supported",
+					default: "medium",
+					options: [
+						standard("light", "low"),
+						standard("medium", "medium"),
+						standard("high", "high"),
+						standard("xhigh", "xhigh"),
+					],
+				},
 				speed_options: [cursor_native_speed("GPT 5.3 Codex", false)],
 				image_input: false,
 				local_tools: true,
@@ -1048,7 +1105,17 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 			routing: { kind: "default" },
 			status: "prototype",
 			capabilities: {
-				thinking: cursor_hosted_thinking,
+				thinking: {
+					availability: "supported",
+					default: "high",
+					options: [
+						standard("light", "low"),
+						standard("medium", "medium"),
+						standard("high", "high"),
+						standard("xhigh", "xhigh"),
+						exceptional("max", "max"),
+					],
+				},
 				speed_options: [cursor_native_speed("Claude Fable 5", false)],
 				image_input: false,
 				local_tools: true,
@@ -1066,7 +1133,17 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 			routing: { kind: "default" },
 			status: "prototype",
 			capabilities: {
-				thinking: cursor_hosted_thinking,
+				thinking: {
+					availability: "supported",
+					default: "high",
+					options: [
+						standard("light", "low"),
+						standard("medium", "medium"),
+						standard("high", "high"),
+						standard("xhigh", "xhigh"),
+						exceptional("max", "max"),
+					],
+				},
 				speed_options: [cursor_native_speed("Claude Opus 5", true)],
 				image_input: false,
 				local_tools: true,
@@ -1084,7 +1161,17 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 			routing: { kind: "default" },
 			status: "prototype",
 			capabilities: {
-				thinking: cursor_hosted_thinking,
+				thinking: {
+					availability: "supported",
+					default: "high",
+					options: [
+						standard("light", "low"),
+						standard("medium", "medium"),
+						standard("high", "high"),
+						standard("xhigh", "xhigh"),
+						exceptional("max", "max"),
+					],
+				},
 				speed_options: [cursor_native_speed("Claude Sonnet 5", false)],
 				image_input: false,
 				local_tools: true,
@@ -1114,12 +1201,21 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 			id: "cursor-gemini-3-6-flash",
 			name: "Gemini 3.6 Flash",
 			native_model_id: "gemini-3.6-flash",
+			description: "Google's fast production workhorse for coding and multi-step agents.",
 			harness: "cursor",
 			provider: "google",
 			routing: { kind: "default" },
 			status: "prototype",
 			capabilities: {
-				thinking: cursor_hosted_thinking,
+				thinking: {
+					availability: "supported",
+					default: "medium",
+					options: [
+						standard("light", "minimal"),
+						standard("medium", "medium"),
+						standard("high", "high"),
+					],
+				},
 				speed_options: [cursor_native_speed("Gemini 3.6 Flash", false)],
 				image_input: false,
 				local_tools: true,
@@ -1131,12 +1227,21 @@ export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
 			id: "cursor-gemini-3-1-pro",
 			name: "Gemini 3.1 Pro",
 			native_model_id: "gemini-3.1-pro",
+			description: "Google's Pro-tier model, strongest on deep reasoning tasks.",
 			harness: "cursor",
 			provider: "google",
 			routing: { kind: "default" },
 			status: "prototype",
 			capabilities: {
-				thinking: cursor_hosted_thinking,
+				thinking: {
+					availability: "supported",
+					default: "high",
+					options: [
+						standard("light", "minimal"),
+						standard("medium", "medium"),
+						standard("high", "high"),
+					],
+				},
 				speed_options: [cursor_native_speed("Gemini 3.1 Pro", false)],
 				image_input: false,
 				local_tools: true,
