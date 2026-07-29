@@ -1,17 +1,21 @@
-<script lang="ts" effect>
+<script lang="ts">
 	import type { ConversationItem } from "@artisan/protocol";
 	import ChevronRight from "@tabler/icons-svelte/icons/chevron-right";
-	import { Effect } from "effect";
 	import type { Snippet } from "svelte";
-	import { thinking_word_at } from "$lib/conversation/activity-status";
+	import { thinking_word_for } from "$lib/conversation/activity-status";
+	import { ShimmerText } from "$lib/components/ui/shimmer-text";
+	import { EngineMarkClass, EngineMarkFor } from "$lib/engine/presentation";
 
 	let {
 		activity_label,
+		engine_id,
 		item,
 		details,
 		duration_kind,
 	}: {
 		activity_label?: string;
+		/** Names the engine whose mark spins while this session works. */
+		engine_id?: string;
 		item: Extract<ConversationItem, { type: "work_session" }>;
 		details?: Snippet;
 		duration_kind?: "thought" | "worked";
@@ -20,7 +24,6 @@
 	let open = $state(item.status === "failed" || item.status === "cancelled");
 	let details_element = $state<HTMLDivElement>();
 	let has_visible_details = $state(false);
-	let thinking_word_index = $state(0);
 
 	const FormatDuration = (started_at: string, ended_at: string) => {
 		const total_seconds = Math.max(
@@ -42,9 +45,12 @@
 
 	const is_failed = $derived(item.status === "failed");
 	const is_cancelled = $derived(item.status === "cancelled");
+	const engine_mark = $derived(EngineMarkFor(engine_id));
+	/** One word for this session's whole life, chosen from its own identity. */
+	const thinking_word = $derived(thinking_word_for(item.id));
 	const label = $derived(
 		item.ended_at === undefined
-			? (activity_label ?? thinking_word_at(thinking_word_index))
+			? (activity_label ?? thinking_word)
 			: is_failed
 				? `Failed after ${FormatDuration(item.started_at, item.ended_at)}`
 				: is_cancelled
@@ -53,14 +59,6 @@
 	);
 	const is_working = $derived(item.ended_at === undefined);
 	const can_collapse = $derived(!is_working && has_visible_details);
-
-	yield* Effect.gen(function* () {
-		while (is_working) {
-			yield* Effect.sleep("2 seconds");
-			if (!is_working) return;
-			if (activity_label === undefined) thinking_word_index += 1;
-		}
-	});
 
 	/** Snippets are opaque; observe their rendered trace rather than treating their presence as content. */
 	$effect(() => {
@@ -102,16 +100,16 @@
 		</button>
 	{:else}
 		{#if is_working}
+			{@const EngineIcon = engine_mark.icon}
 			<div
 				class="flex w-fit items-center gap-2 py-0.5"
 				role="status"
 				aria-label={activity_label ?? "Artisan is working"}
 			>
-				<span class="artisan-working-sprite size-5 shrink-0" aria-hidden="true"></span>
-				<span class="motion-reduce:hidden" aria-hidden="true">{label}</span>
-				<span class="hidden motion-reduce:inline" aria-hidden="true">
-					{activity_label ?? "Working..."}
+				<span class="engine-working-mark inline-flex shrink-0" aria-hidden="true">
+					<EngineIcon class={EngineMarkClass(engine_mark)} />
 				</span>
+				<ShimmerText class="text-base" aria-hidden="true">{label}</ShimmerText>
 			</div>
 		{:else}
 			<div class="flex w-full items-center gap-1 border-b border-border pb-2">
@@ -130,31 +128,20 @@
 </section>
 
 <style>
-	.artisan-working-sprite {
-		background-image: url("/activity/artisan-working-sprite.png");
-		background-repeat: no-repeat;
-		background-position: 0 0;
-		background-size: 200% 200%;
-		image-rendering: pixelated;
-		animation: artisan-working-frames 1600ms steps(1, end) infinite;
+	/**
+	 * The provider mark spins while its engine works, so the running engine is
+	 * legible at a glance instead of a generic Artisan sprite.
+	 */
+	.engine-working-mark {
+		animation: engine-working-spin 1400ms linear infinite;
 	}
 
-	@keyframes artisan-working-frames {
-		0%,
-		100% {
-			background-position: 0 0;
+	@keyframes engine-working-spin {
+		from {
+			transform: rotate(0deg);
 		}
-
-		25% {
-			background-position: 100% 0;
-		}
-
-		50% {
-			background-position: 0 100%;
-		}
-
-		75% {
-			background-position: 100% 100%;
+		to {
+			transform: rotate(360deg);
 		}
 	}
 
@@ -187,9 +174,8 @@
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.artisan-working-sprite {
-			animation: none;
-			background-position: 0 0;
+		.engine-working-mark {
+			animation: none !important;
 		}
 
 		.t-acc-panel,

@@ -296,6 +296,7 @@
 									<ConversationWorkSession
 										activity_label={latest_active_activity_label(block.details)}
 										duration_kind={block.duration_kind}
+										engine_id={policy?.engine_id}
 										item={block.session}
 									>
 										{#snippet details()}

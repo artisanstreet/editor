@@ -5,14 +5,11 @@
 	import Check from "@tabler/icons-svelte/icons/check";
 	import Lock from "@tabler/icons-svelte/icons/lock";
 	import Tool from "@tabler/icons-svelte/icons/tool";
-	import {
-		SvglClaudeAILogo,
-		SvglGrokLogo,
-		SvglOpenAILogo,
-	} from "@selemondev/svgl-svelte";
+	import { SvglOpenAILogo } from "@selemondev/svgl-svelte";
 	import type { Component } from "svelte";
 	import type { RuntimeCatalog, ThreadSessionPolicy } from "@artisan/protocol";
 	import { ArtisanClient } from "@artisan/transport/client";
+	import { EngineMarkFor } from "$lib/engine/presentation";
 
 	import { Popover, PopoverContent, PopoverTrigger } from "$lib/components/ui/popover";
 	import { ScrollArea } from "$lib/components/ui/scroll-area";
@@ -63,17 +60,10 @@
 	const client = yield* ArtisanClient;
 	const runtime_catalog = yield* client.GetRuntimeCatalog;
 	const model_manifest = runtime_catalog.manifest;
-	const engine_decoration: Readonly<
-		Partial<Record<HarnessId, { icon: Component; monochrome: boolean }>>
-	> = {
-		claude: { icon: SvglClaudeAILogo, monochrome: false },
-		codex: { icon: SvglOpenAILogo, monochrome: true },
-		grok: { icon: SvglGrokLogo, monochrome: true },
-	};
 	const engines: ReadonlyArray<Engine> = model_manifest.harnesses.map((harness) => ({
 		id: harness.id,
 		name: harness.label,
-		...(engine_decoration[harness.id] ?? { icon: Tool, monochrome: true }),
+		...EngineMarkFor(harness.id),
 	}));
 	const thinking_level_labels: Readonly<Record<ThinkingLevel, string>> = {
 		high: "High",

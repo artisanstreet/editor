@@ -64,9 +64,14 @@ describe("Barekey docs shell reset", () => {
 		expect(composer).toContain("<ModelSelector");
 		expect(composer).toContain("onpolicychange");
 		expect(model_selector).toContain('aria-label="Select model"');
-		expect(model_selector).toContain("SvglOpenAILogo");
-		expect(model_selector).toContain("SvglClaudeAILogo");
-		expect(model_selector).toContain("claude: { icon: SvglClaudeAILogo, monochrome: false }");
+		/** Provider marks live in one shared module so every surface agrees. */
+		const engine_presentation = Read("modules/frontend/src/lib/engine/presentation.ts");
+		expect(model_selector).toContain("EngineMarkFor(harness.id)");
+		expect(engine_presentation).toContain(
+			"claude: { icon: SvglClaudeAILogo, monochrome: false }",
+		);
+		expect(engine_presentation).toContain("codex: { icon: SvglOpenAILogo, monochrome: true }");
+		expect(engine_presentation).toContain("grok: { icon: SvglGrokLogo, monochrome: true }");
 		expect(model_selector).toContain("service_tier");
 		expect(model_selector).toContain(
 			'const composer_controls: ReadonlyArray<ComposerControl> = ["model"];',
@@ -160,7 +165,7 @@ describe("Barekey docs shell reset", () => {
 		expect(message).toContain("data-conversation-item-id={item.id}");
 	});
 
-	it("renders active work with the Artisan sprite and data-driven activity copy", () => {
+	it("renders active work with the running engine's spinning mark and one shimmering word", () => {
 		const work_session = Read(
 			"modules/frontend/src/routes/components/conversation-work-session.sv",
 		);
@@ -173,10 +178,18 @@ describe("Barekey docs shell reset", () => {
 		expect(work_session).toContain("<button");
 		expect(work_session).toContain("{:else}");
 		expect(work_session).toContain('role="status"');
-		expect(work_session).toContain("artisan-working-sprite.png");
-		expect(work_session).toContain("thinking_word_at(thinking_word_index)");
-		expect(work_session).toContain('Effect.sleep("2 seconds")');
-		expect(work_session).toContain('{activity_label ?? "Working..."}');
+		/**
+		 * The generic sprite and the two-second verb carousel are gone: the
+		 * provider mark spins and one word, derived from the session's own
+		 * identity, shimmers for the session's whole life.
+		 */
+		expect(work_session).not.toContain("artisan-working-sprite");
+		expect(work_session).not.toContain('Effect.sleep("2 seconds")');
+		expect(work_session).not.toContain("thinking_word_index");
+		expect(work_session).toContain("thinking_word_for(item.id)");
+		expect(work_session).toContain("EngineMarkFor(engine_id)");
+		expect(work_session).toContain("animation: engine-working-spin");
+		expect(work_session).toContain("<ShimmerText");
 		expect(work_session).toContain(
 			'class="flex w-full items-center gap-1 border-b border-border pb-2"',
 		);
@@ -186,6 +199,7 @@ describe("Barekey docs shell reset", () => {
 		);
 		expect(work_session).toContain("hidden={!is_working && !has_visible_details}");
 		expect(workspace).toContain("latest_active_activity_label(block.details)");
+		expect(workspace).toContain("engine_id={policy?.engine_id}");
 	});
 
 	it("matches the Barekey docs inset sidebar and circular toggle", () => {

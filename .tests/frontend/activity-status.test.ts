@@ -5,6 +5,7 @@ import {
 	artisan_thinking_words,
 	latest_active_activity_label,
 	thinking_word_at,
+	thinking_word_for,
 } from "../../modules/frontend/src/lib/conversation/activity-status";
 
 const activity = (
@@ -25,6 +26,22 @@ const activity = (
 	turn_id: "turn-1",
 	type: "activity",
 	updated_at: "2026-07-27T10:00:00.000Z",
+});
+
+describe("per-session thinking word", () => {
+	it("keeps one word for a session and varies it across sessions", () => {
+		const session = "work:run:run_1";
+
+		expect(thinking_word_for(session)).toBe(thinking_word_for(session));
+		expect(artisan_thinking_words).toContain(thinking_word_for(session));
+
+		const chosen = new Set(
+			Array.from({ length: 200 }, (_, index) => thinking_word_for(`work:run:run_${index}`)),
+		);
+		/** A per-session choice must not collapse to a single constant word. */
+		expect(chosen.size).toBeGreaterThan(1);
+		for (const word of chosen) expect(artisan_thinking_words).toContain(word);
+	});
 });
 
 describe("Artisan thinking vocabulary", () => {
