@@ -10,11 +10,13 @@
 		children,
 		strength = "quiet",
 		use_card = true,
+		use_rays = true,
 		...rest_props
 	}: WithElementRef<HTMLAttributes<HTMLDivElement>> & {
 		children: Snippet;
 		strength?: "quiet" | "strong";
 		use_card?: boolean;
+		use_rays?: boolean;
 	} = $props();
 </script>
 
@@ -28,9 +30,11 @@
 	data-strength={strength}
 	{...rest_props}
 >
-	<div aria-hidden="true" class="pointer-events-none absolute inset-0 z-0 overflow-hidden">
-		<PaperGodRays />
-	</div>
+	{#if use_rays}
+		<div aria-hidden="true" class="pointer-events-none absolute inset-0 z-0 overflow-hidden">
+			<PaperGodRays />
+		</div>
+	{/if}
 	<div aria-hidden="true" class="shader-glass-material"></div>
 	<div aria-hidden="true" class="shader-glass-highlight"></div>
 	<div class="relative z-10 size-full">
@@ -44,6 +48,12 @@
 		inset: 0;
 		z-index: 1;
 		pointer-events: none;
+		/**
+		 * Chromium composites backdrop-filter without honoring the ancestor's
+		 * rounded overflow clip; the layer must carry the radius itself or the
+		 * blurred square corners bleed past the surface.
+		 */
+		border-radius: inherit;
 		background: linear-gradient(145deg, rgb(82 82 91 / 0.2), rgb(39 39 42 / 0.14));
 		-webkit-backdrop-filter: blur(12px) saturate(115%) brightness(102%);
 		backdrop-filter: blur(12px) saturate(115%) brightness(102%);

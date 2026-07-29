@@ -1,6 +1,6 @@
 <script lang="ts" effect>
 	import Selector from "@tabler/icons-svelte/icons/selector";
-	import Bolt from "@tabler/icons-svelte/icons/bolt";
+	import BoltFilled from "@tabler/icons-svelte/icons/bolt-filled";
 	import Brain from "@tabler/icons-svelte/icons/brain";
 	import Check from "@tabler/icons-svelte/icons/check";
 	import Lock from "@tabler/icons-svelte/icons/lock";
@@ -10,10 +10,19 @@
 	import type { RuntimeCatalog, ThreadSessionPolicy } from "@artisan/protocol";
 	import { ArtisanClient } from "@artisan/transport/client";
 	import { EngineMarkFor } from "$lib/engine/presentation";
+	import { remember_last_model } from "$lib/root/last-model";
+	import send_gradient from "$lib/assets/composer/send-gradient.svg";
 
+	import { Button } from "$lib/components/ui/button";
 	import { Popover, PopoverContent, PopoverTrigger } from "$lib/components/ui/popover";
 	import { ScrollArea } from "$lib/components/ui/scroll-area";
 	import { Tabs, TabsList, TabsTrigger } from "$lib/components/ui/tabs";
+	import {
+		Tooltip,
+		TooltipContent,
+		TooltipProvider,
+		TooltipTrigger,
+	} from "$lib/components/ui/tooltip";
 	import DropdownHoverSurface from "./dropdown-hover-surface.sv";
 	import ShaderGlassSurface from "./shader-glass-surface.sv";
 
@@ -112,7 +121,9 @@
 				: "supervised";
 	const PatchPolicy = (patch: Partial<ThreadSessionPolicy>) => {
 		if (disabled || policy === undefined || onpolicychange === undefined) return;
-		onpolicychange({ ...policy, ...patch });
+		const next = { ...policy, ...patch };
+		remember_last_model(next);
+		onpolicychange(next);
 	};
 
 	const active_models = $derived(
@@ -151,7 +162,21 @@
 		selected_permission_options.find((option) => option.id === permission_mode) ??
 			selected_permission_options[0],
 	);
-	const composer_controls: ReadonlyArray<ComposerControl> = ["model"];
+	const composer_controls: ReadonlyArray<ComposerControl> = ["model", "thinking", "speed"];
+	/** The only way the whole selector disables: the thread session is not connected. */
+	const disabled_reason = $derived(
+		disabled ? "Unavailable until the thread's session is connected" : undefined,
+	);
+	const enabled_speed_options = $derived(
+		selected_speed_options.filter((option) => option.disabled === undefined),
+	);
+	const default_speed_option = $derived(
+		enabled_speed_options.find((option) => option.default) ?? enabled_speed_options[0],
+	);
+	const speed_engaged = $derived(
+		selected_speed_option !== undefined &&
+			selected_speed_option.id !== default_speed_option?.id,
+	);
 
 	const select_model = (model: ModelChoice) => {
 		if (model.definition.disabled !== undefined) {
@@ -197,7 +222,17 @@
 		}
 		speed_option_id = option.id;
 		PatchPolicy({ service_tier: option.native_value });
-		speed_open = false;
+	};
+
+	const toggle_speed = () => {
+		if (enabled_speed_options.length < 2) {
+			return;
+		}
+		const index = enabled_speed_options.findIndex(
+			(option) => option.id === selected_speed_option?.id,
+		);
+		const next = enabled_speed_options[(index + 1) % enabled_speed_options.length];
+		if (next !== undefined) select_speed(next);
 	};
 
 	const select_permission = (option: PermissionOption) => {
@@ -267,24 +302,43 @@
 
 <svelte:window onresize={() => position_engine_indicator(false)} />
 
-<div class="no-scrollbar flex min-w-0 max-w-full items-center gap-1 overflow-x-auto">
+<TooltipProvider delayDuration={0}>
+<ShaderGlassSurface
+	use_rays={false}
+	class="min-w-0 max-w-full rounded-[calc(var(--radius-3xl)-0.875rem)]"
+>
+<div
+	class="no-scrollbar flex min-w-0 max-w-full items-center gap-1 overflow-x-auto p-0.5"
+	style={`--composer-accent-image: url("${send_gradient}")`}
+>
 	{#each composer_controls as control (control)}
 	{#if control === "model"}
 	<Popover bind:open>
-		<PopoverTrigger
-			aria-label="Select model"
-			disabled={disabled}
-			class="flex h-8 min-w-0 max-w-44 shrink-0 items-center gap-2 rounded-xl bg-transparent px-2 text-left text-foreground outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset"
-		>
-			{@const SelectedIcon = selected_engine.icon}
-			<SelectedIcon
-				class={selected_engine.monochrome
-					? "size-4 shrink-0 dark:invert"
-					: "size-4 shrink-0"}
-			/>
-			<span class="truncate text-sm text-foreground">{selected_model?.name ?? "No models"}</span>
-			<Selector class="pointer-events-none size-3.5 shrink-0 text-muted-foreground" />
-		</PopoverTrigger>
+		<Tooltip>
+			<TooltipTrigger>
+				{#snippet child({ props: tooltip_props })}
+					<span {...tooltip_props} class="flex min-w-0 has-[:disabled]:cursor-not-allowed">
+						<PopoverTrigger
+							aria-label="Select model"
+							disabled={disabled}
+							class="flex h-6 min-w-0 max-w-44 shrink-0 items-center gap-2 rounded-[calc(var(--radius-3xl)-1rem)] bg-transparent px-2 text-left text-foreground outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset disabled:pointer-events-none"
+						>
+							{@const SelectedIcon = selected_engine.icon}
+							<SelectedIcon
+								class={selected_engine.monochrome
+									? "size-4 shrink-0 dark:invert"
+									: "size-4 shrink-0"}
+							/>
+							<span class="truncate text-sm text-foreground">{selected_model?.name ?? "No models"}</span>
+							<Selector class="pointer-events-none size-3.5 shrink-0 text-muted-foreground" />
+						</PopoverTrigger>
+					</span>
+				{/snippet}
+			</TooltipTrigger>
+			{#if disabled_reason !== undefined}
+				<TooltipContent>{disabled_reason}</TooltipContent>
+			{/if}
+		</Tooltip>
 
 		<PopoverContent
 			variant="bare"
@@ -310,19 +364,34 @@
 					></div>
 					{#each engines as engine (engine.id)}
 						{@const EngineIcon = engine.icon}
-						<TabsTrigger
-							value={engine.id}
-							disabled={disabled ||
-								(engine_locked && engine.id !== selected_engine.id)}
-							data-engine={engine.id}
-							aria-label={engine.name}
-							title={engine_locked && engine.id !== selected_engine.id
+						{@const engine_disabled_reason =
+							engine_locked && engine.id !== selected_engine.id
 								? `${engine.name} — engine is locked for this session`
-								: engine.name}
-							class="relative z-1 size-8 flex-none px-0 text-foreground after:hidden hover:text-foreground data-active:border-transparent data-active:bg-transparent data-active:text-foreground dark:hover:text-foreground dark:data-active:border-transparent dark:data-active:bg-transparent"
-						>
-							<EngineIcon class={engine.monochrome ? "size-4 dark:invert" : "size-4"} />
-						</TabsTrigger>
+								: disabled_reason}
+						<Tooltip>
+							<TooltipTrigger>
+								{#snippet child({ props: tooltip_props })}
+									<span
+										{...tooltip_props}
+										class="flex flex-none has-[:disabled]:cursor-not-allowed"
+									>
+										<TabsTrigger
+											value={engine.id}
+											disabled={disabled ||
+												(engine_locked && engine.id !== selected_engine.id)}
+											data-engine={engine.id}
+											aria-label={engine.name}
+											class="relative z-1 size-8 flex-none px-0 text-foreground after:hidden hover:text-foreground data-active:border-transparent data-active:bg-transparent data-active:text-foreground dark:hover:text-foreground dark:data-active:border-transparent dark:data-active:bg-transparent"
+										>
+											<EngineIcon class={engine.monochrome ? "size-4 dark:invert" : "size-4"} />
+										</TabsTrigger>
+									</span>
+								{/snippet}
+							</TooltipTrigger>
+							{#if engine_disabled_reason !== undefined}
+								<TooltipContent>{engine_disabled_reason}</TooltipContent>
+							{/if}
+						</Tooltip>
 					{/each}
 				</TabsList>
 			<ScrollArea class="h-48 rounded-xl">
@@ -376,28 +445,39 @@
 	</Popover>
 	{/if}
 
-	{#if control === "thinking"}
+	{#if control === "thinking" && selected_thinking.availability === "supported"}
 		<Popover bind:open={thinking_open}>
-			<PopoverTrigger
-				aria-label="Thinking level"
-				disabled={disabled}
-				data-native-value={selected_thinking_native_value}
-				class="flex h-8 shrink-0 items-center gap-1.5 rounded-xl bg-transparent px-2 text-sm text-foreground outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset"
-			>
-				<Brain class="size-4 text-muted-foreground" />
-				<span class="hidden sm:inline">{thinking_level_labels[thinking_level]}</span>
-				<Selector class="size-3.5 text-muted-foreground" />
-			</PopoverTrigger>
+			<Tooltip>
+				<TooltipTrigger>
+					{#snippet child({ props: tooltip_props })}
+						<span {...tooltip_props} class="flex shrink-0 has-[:disabled]:cursor-not-allowed">
+							<PopoverTrigger
+								aria-label={`Thinking: ${thinking_level_labels[thinking_level]}`}
+								disabled={disabled}
+								data-native-value={selected_thinking_native_value}
+								class="flex h-6 shrink-0 items-center gap-1 rounded-[calc(var(--radius-3xl)-1rem)] bg-transparent px-2 text-sm text-foreground outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset disabled:pointer-events-none"
+							>
+								<Brain class="size-4 shrink-0 text-muted-foreground" />
+								<span>{thinking_level_labels[thinking_level]}</span>
+								<Selector class="pointer-events-none size-3.5 shrink-0 text-muted-foreground" />
+							</PopoverTrigger>
+						</span>
+					{/snippet}
+				</TooltipTrigger>
+				{#if disabled_reason !== undefined}
+					<TooltipContent>{disabled_reason}</TooltipContent>
+				{/if}
+			</Tooltip>
 			<PopoverContent
 				variant="bare"
 				align="end"
 				side="top"
-				sideOffset={6}
-				class="w-48 rounded-2xl"
+				sideOffset={8}
+				class="w-56 rounded-3xl"
 			>
-				<ShaderGlassSurface strength="strong" class="w-full rounded-2xl">
+				<ShaderGlassSurface strength="strong" class="w-full rounded-3xl">
 					<DropdownHoverSurface
-						class="p-1.5 [--docs-sidebar-hover-radius:calc(var(--radius-2xl)-0.375rem)]"
+						class="p-2 [--docs-sidebar-hover-radius:calc(var(--radius-3xl)-0.5rem)]"
 					>
 						{#snippet children({ move_hover })}
 							<div class="flex flex-col gap-0.5">
@@ -405,14 +485,17 @@
 									<button
 										type="button"
 										disabled={disabled}
-										class="flex w-full items-center justify-between gap-3 rounded-[calc(var(--radius-2xl)-0.375rem)] px-3 py-2 text-left text-sm text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
+										class="flex w-full items-center justify-between gap-3 rounded-[calc(var(--radius-3xl)-0.5rem)] px-2.5 py-1.5 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
+										aria-current={option.id === thinking_level ? "true" : undefined}
 										onfocus={move_hover}
 										onpointerenter={move_hover}
 										onclick={() => select_thinking_level(option.id)}
 									>
-										<span>{thinking_level_labels[option.id]}</span>
+										<span class="text-sm font-semibold text-foreground">
+											{thinking_level_labels[option.id]}
+										</span>
 										{#if option.id === thinking_level}
-											<Check class="size-4 text-muted-foreground" />
+											<Check class="size-4 shrink-0 text-muted-foreground" />
 										{/if}
 									</button>
 								{/each}
@@ -425,59 +508,105 @@
 	{/if}
 
 	{#if control === "speed"}
-		<Popover bind:open={speed_open}>
-			<PopoverTrigger
-				aria-label={`Speed: ${selected_speed_option?.label ?? "Select"}`}
-				disabled={disabled}
-				class="flex h-8 shrink-0 items-center gap-1.5 rounded-xl bg-transparent px-2 text-sm text-foreground outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset"
-			>
-				<Bolt class="size-4 text-muted-foreground" />
-				<span class="hidden sm:inline">{selected_speed_option?.label ?? "Speed"}</span>
-				<Selector class="size-3.5 text-muted-foreground" />
-			</PopoverTrigger>
-			<PopoverContent
-				variant="bare"
-				side="top"
-				sideOffset={6}
-				align="end"
-				class="w-72 rounded-2xl"
-			>
-				<ShaderGlassSurface strength="strong" class="w-full rounded-2xl">
-					<DropdownHoverSurface
-						class="p-1.5 [--docs-sidebar-hover-radius:calc(var(--radius-2xl)-0.375rem)]"
-					>
-						{#snippet children({ move_hover })}
-							<div class="flex flex-col gap-0.5">
-								{#each selected_speed_options as option (option.id)}
-									<button
-										type="button"
-										disabled={disabled || option.disabled !== undefined}
-										title={option.disabled?.reason}
-										class="flex w-full items-start justify-between gap-3 rounded-[calc(var(--radius-2xl)-0.375rem)] px-3 py-2 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-45"
-										onfocus={move_hover}
-										onpointerenter={move_hover}
-										onclick={() => select_speed(option)}
-									>
-										<span class="flex min-w-0 flex-col">
-											<span class="text-sm text-foreground">{option.label}</span>
-											<span class="text-sm text-muted-foreground">{option.description}</span>
-											{#if option.disabled !== undefined}
-												<span class="text-xs text-muted-foreground">
-													{option.disabled.reason}
-												</span>
-											{/if}
-										</span>
-										{#if option.id === speed_option_id}
-											<Check class="size-4 shrink-0 self-center text-muted-foreground" />
-										{/if}
-									</button>
-								{/each}
-							</div>
+		{#if enabled_speed_options.length > 2}
+			<Popover bind:open={speed_open}>
+				<Tooltip>
+					<TooltipTrigger>
+						{#snippet child({ props: tooltip_props })}
+							<span {...tooltip_props} class="flex shrink-0 has-[:disabled]:cursor-not-allowed">
+								<PopoverTrigger disabled={disabled}>
+									{#snippet child({ props: popover_props })}
+										<Button
+											{...popover_props}
+											variant="ghost"
+											size="icon-xs"
+											disabled={disabled}
+											aria-label={`Speed: ${selected_speed_option?.label ?? "Select"}`}
+											class={`rounded-[calc(var(--radius-3xl)-1rem)] text-muted-foreground transition-colors ${speed_engaged ? "composer-accent-button inset-shadow text-white hover:text-white" : ""}`}
+										>
+											<BoltFilled />
+										</Button>
+									{/snippet}
+								</PopoverTrigger>
+							</span>
 						{/snippet}
-					</DropdownHoverSurface>
-				</ShaderGlassSurface>
-			</PopoverContent>
-		</Popover>
+					</TooltipTrigger>
+					{#if disabled_reason !== undefined}
+						<TooltipContent>{disabled_reason}</TooltipContent>
+					{/if}
+				</Tooltip>
+				<PopoverContent
+					variant="bare"
+					side="top"
+					sideOffset={6}
+					align="end"
+					class="w-72 rounded-2xl"
+				>
+					<ShaderGlassSurface strength="strong" class="w-full rounded-2xl">
+						<DropdownHoverSurface
+							class="p-1.5 [--docs-sidebar-hover-radius:calc(var(--radius-2xl)-0.375rem)]"
+						>
+							{#snippet children({ move_hover })}
+								<div class="flex flex-col gap-0.5">
+									{#each selected_speed_options as option (option.id)}
+										<button
+											type="button"
+											disabled={disabled || option.disabled !== undefined}
+											title={option.disabled?.reason}
+											class="flex w-full items-start justify-between gap-3 rounded-[calc(var(--radius-2xl)-0.375rem)] px-3 py-2 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-45"
+											onfocus={move_hover}
+											onpointerenter={move_hover}
+											onclick={() => {
+												select_speed(option);
+												speed_open = false;
+											}}
+										>
+											<span class="flex min-w-0 flex-col">
+												<span class="text-sm text-foreground">{option.label}</span>
+												<span class="text-sm text-muted-foreground">{option.description}</span>
+												{#if option.disabled !== undefined}
+													<span class="text-xs text-muted-foreground">
+														{option.disabled.reason}
+													</span>
+												{/if}
+											</span>
+											{#if option.id === speed_option_id}
+												<Check class="size-4 shrink-0 self-center text-muted-foreground" />
+											{/if}
+										</button>
+									{/each}
+								</div>
+							{/snippet}
+						</DropdownHoverSurface>
+					</ShaderGlassSurface>
+				</PopoverContent>
+			</Popover>
+		{:else}
+			<Tooltip>
+				<TooltipTrigger>
+					{#snippet child({ props: tooltip_props })}
+						<span {...tooltip_props} class="flex shrink-0 has-[:disabled]:cursor-not-allowed">
+							<Button
+								variant="ghost"
+								size="icon-xs"
+								aria-label={`Speed: ${selected_speed_option?.label ?? "Unavailable"}`}
+								aria-pressed={speed_engaged}
+								disabled={disabled || enabled_speed_options.length < 2}
+								class={`rounded-[calc(var(--radius-3xl)-1rem)] text-muted-foreground transition-colors ${speed_engaged ? "composer-accent-button inset-shadow text-white hover:text-white" : ""}`}
+								onclick={toggle_speed}
+							>
+								<BoltFilled />
+							</Button>
+						</span>
+					{/snippet}
+				</TooltipTrigger>
+				{#if disabled || enabled_speed_options.length < 2}
+					<TooltipContent>
+						{disabled_reason ?? "This model has a single speed"}
+					</TooltipContent>
+				{/if}
+			</Tooltip>
+		{/if}
 	{/if}
 
 	{#if control === "permission"}
@@ -532,6 +661,8 @@
 
 	{/each}
 </div>
+</ShaderGlassSurface>
+</TooltipProvider>
 
 <style>
 	.model-selector-engine-light {
@@ -593,5 +724,34 @@
 		.model-selector-engine-light {
 			transition: none !important;
 		}
+	}
+
+	/**
+	 * The send button's amplified inner shadow, applied while the gradient
+	 * artwork is visible so the engaged chip gets the same carved rim.
+	 */
+	:global(.composer-accent-button.inset-shadow) {
+		box-shadow:
+			inset 0px 1px 1px -0.5px rgba(0, 0, 0, 0.3),
+			inset 0px 3px 3px -1.5px rgba(0, 0, 0, 0.26),
+			inset 0px 6px 6px -3px rgba(0, 0, 0, 0.22),
+			inset 0 -0.5px rgba(255, 255, 255, 0.5),
+			inset 0 0 0 0.5px oklch(from var(--highlight) l c h / 35%);
+	}
+
+	/**
+	 * Engaged controls borrow the send button's treatment: the gradient artwork
+	 * as an opaque background, a full-white glyph blended with overlay so the
+	 * artwork lights it, and isolation to keep the blend inside the button.
+	 */
+	:global(.composer-accent-button) {
+		background-image: var(--composer-accent-image);
+		background-size: cover;
+		background-position: center;
+		isolation: isolate;
+	}
+
+	:global(.composer-accent-button svg) {
+		mix-blend-mode: overlay;
 	}
 </style>
