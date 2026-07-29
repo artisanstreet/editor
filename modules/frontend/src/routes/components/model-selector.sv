@@ -393,7 +393,7 @@
 								{#each thinking.options as level_option (level_option.id)}
 									<SelectItem
 										value={level_option.id}
-										class="focus:bg-transparent data-highlighted:bg-foreground/5 data-highlighted:text-foreground"
+										class="focus:bg-transparent! data-highlighted:bg-foreground/5! data-highlighted:text-foreground!"
 										onpointerenter={move_hover}
 									>
 										{thinking_level_labels[level_option.id]}
@@ -443,7 +443,7 @@
 								{#each speeds as speed (speed.id)}
 									<SelectItem
 										value={speed.id}
-										class="focus:bg-transparent data-highlighted:bg-foreground/5 data-highlighted:text-foreground"
+										class="focus:bg-transparent! data-highlighted:bg-foreground/5! data-highlighted:text-foreground!"
 										onpointerenter={move_hover}
 									>
 										{speed.label}
@@ -495,7 +495,7 @@
 							{#each context.options as option (option.id)}
 								<SelectItem
 									value={option.id}
-									class="focus:bg-transparent data-highlighted:bg-foreground/5 data-highlighted:text-foreground"
+									class="focus:bg-transparent! data-highlighted:bg-foreground/5! data-highlighted:text-foreground!"
 									onpointerenter={move_hover}
 								>
 									{option.label}
