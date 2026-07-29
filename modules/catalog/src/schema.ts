@@ -252,6 +252,12 @@ export type HarnessDefinition = typeof HarnessDefinition.Type;
 
 export const ModelDefinition = Schema.Struct({
 	capabilities: ModelCapabilities,
+	/**
+	 * One-line vendor copy sourced from the harness's own model picker or the
+	 * provider's docs. Absent for dynamically discovered models (for example
+	 * Cursor account inventory), which have no official description to quote.
+	 */
+	description: Schema.optional(Schema.NonEmptyString),
 	disabled: Schema.optional(Disabled),
 	harness: HarnessId,
 	id: Schema.String,
