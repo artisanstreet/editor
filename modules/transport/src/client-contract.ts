@@ -78,6 +78,8 @@ import type {
 	ThreadWorkItem,
 	RawOrigin,
 	RuntimeCatalog,
+	HostIdentitySnapshot,
+	EngineUsageSnapshot,
 	ThreadTranscriptQuery,
 	ThreadTranscriptSnapshot,
 	ThreadSessionSnapshot,
@@ -679,6 +681,8 @@ export class ArtisanClient extends Context.Service<
 		readonly ListThreads: Effect.Effect<ReadonlyArray<ThreadListItem>, ArtisanClientError>;
 		readonly ListProjects: Effect.Effect<ProjectCatalogSnapshot, ArtisanClientError>;
 		readonly GetRuntimeCatalog: Effect.Effect<RuntimeCatalog, ArtisanClientError>;
+		readonly GetHostIdentity: Effect.Effect<HostIdentitySnapshot, ArtisanClientError>;
+		readonly GetEngineUsage: Effect.Effect<EngineUsageSnapshot, ArtisanClientError>;
 		readonly DetachProject: (
 			project_id: string,
 		) => Effect.Effect<ProjectCatalogSnapshot, ArtisanClientError>;

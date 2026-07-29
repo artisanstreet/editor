@@ -78,6 +78,8 @@ import {
 	type ProjectDetachEnvelope,
 	type ProjectListQueryEnvelope,
 	type RuntimeCatalogQueryEnvelope,
+	type HostIdentityQueryEnvelope,
+	type EngineUsageQueryEnvelope,
 	type RichLinkResolveQueryEnvelope,
 	type SurfaceListQueryEnvelope,
 	type SurfaceUsageAggregateQueryEnvelope,
@@ -400,6 +402,30 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				return result.kind === "runtime.catalog.query.result"
 					? result.payload
 					: yield* Effect.die("runtime catalog response narrowed incorrectly");
+			});
+			const get_host_identity = Effect.gen(function* () {
+				const trace = yield* connection.MakeTrace;
+				const envelope: HostIdentityQueryEnvelope = {
+					...trace,
+					kind: "host.identity.query",
+					payload: {},
+				};
+				const result = yield* requests.Request(envelope);
+				return result.kind === "host.identity.query.result"
+					? result.payload
+					: yield* Effect.die("host identity response narrowed incorrectly");
+			});
+			const get_engine_usage = Effect.gen(function* () {
+				const trace = yield* connection.MakeTrace;
+				const envelope: EngineUsageQueryEnvelope = {
+					...trace,
+					kind: "engine.usage.query",
+					payload: {},
+				};
+				const result = yield* requests.Request(envelope);
+				return result.kind === "engine.usage.query.result"
+					? result.payload
+					: yield* Effect.die("engine usage response narrowed incorrectly");
 			});
 			const detach_project = (project_id: string) =>
 				Effect.gen(function* () {
@@ -2066,6 +2092,8 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				ListThreads: list_threads,
 				ListProjects: list_projects,
 				GetRuntimeCatalog: get_runtime_catalog,
+				GetHostIdentity: get_host_identity,
+				GetEngineUsage: get_engine_usage,
 				DetachProject: detach_project,
 				ListProjectDirectories: list_project_directories,
 				SelectProjectDirectory: select_project_directory,
