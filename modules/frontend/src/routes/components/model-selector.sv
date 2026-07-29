@@ -201,6 +201,23 @@
 		return true;
 	};
 
+	/**
+	 * Follows bits' data-highlighted marker so the hover pill tracks the
+	 * initially highlighted item on open, keyboard arrows, and pointer hover
+	 * through one signal instead of pointer events alone.
+	 */
+	const follow_highlight =
+		(move_hover: (event: Event) => void) => (node: HTMLElement) => {
+			const notify = () => {
+				if (node.dataset.highlighted === undefined) return;
+				move_hover({ currentTarget: node, type: "highlight" } as unknown as Event);
+			};
+			notify();
+			const observer = new MutationObserver(notify);
+			observer.observe(node, { attributeFilter: ["data-highlighted"], attributes: true });
+			return () => observer.disconnect();
+		};
+
 	const apply_model_context = (model: ModelChoice, option: ContextWindowChoice) => {
 		if (model.id !== selected_model_id) {
 			adopt_model(model, option.native_suffix);
@@ -393,8 +410,8 @@
 								{#each thinking.options as level_option (level_option.id)}
 									<SelectItem
 										value={level_option.id}
-										class="focus:bg-transparent! data-highlighted:bg-foreground/5! data-highlighted:text-foreground!"
-										onpointerenter={move_hover}
+										class="focus:bg-transparent! data-highlighted:bg-transparent! data-highlighted:text-foreground!"
+										{@attach follow_highlight(move_hover)}
 									>
 										{thinking_level_labels[level_option.id]}
 									</SelectItem>
@@ -443,8 +460,8 @@
 								{#each speeds as speed (speed.id)}
 									<SelectItem
 										value={speed.id}
-										class="focus:bg-transparent! data-highlighted:bg-foreground/5! data-highlighted:text-foreground!"
-										onpointerenter={move_hover}
+										class="focus:bg-transparent! data-highlighted:bg-transparent! data-highlighted:text-foreground!"
+										{@attach follow_highlight(move_hover)}
 									>
 										{speed.label}
 									</SelectItem>
@@ -495,8 +512,8 @@
 							{#each context.options as option (option.id)}
 								<SelectItem
 									value={option.id}
-									class="focus:bg-transparent! data-highlighted:bg-foreground/5! data-highlighted:text-foreground!"
-									onpointerenter={move_hover}
+									class="focus:bg-transparent! data-highlighted:bg-transparent! data-highlighted:text-foreground!"
+									{@attach follow_highlight(move_hover)}
 								>
 									{option.label}
 								</SelectItem>
