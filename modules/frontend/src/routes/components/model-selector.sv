@@ -388,11 +388,19 @@
 			</div>
 				<SelectContent class="rounded-2xl border-transparent bg-transparent p-0 shadow-none">
 					<ShaderGlassSurface strength="strong" class="rounded-2xl p-1">
-						{#each thinking.options as level_option (level_option.id)}
-							<SelectItem value={level_option.id}>
-								{thinking_level_labels[level_option.id]}
-							</SelectItem>
-						{/each}
+						<DropdownHoverSurface class="[--docs-sidebar-hover-radius:var(--radius-xl)]">
+							{#snippet children({ move_hover })}
+								{#each thinking.options as level_option (level_option.id)}
+									<SelectItem
+										value={level_option.id}
+										class="focus:bg-transparent data-highlighted:bg-foreground/5 data-highlighted:text-foreground"
+										onpointerenter={move_hover}
+									>
+										{thinking_level_labels[level_option.id]}
+									</SelectItem>
+								{/each}
+							{/snippet}
+						</DropdownHoverSurface>
 					</ShaderGlassSurface>
 				</SelectContent>
 		</Select>
@@ -430,9 +438,19 @@
 			</div>
 				<SelectContent class="rounded-2xl border-transparent bg-transparent p-0 shadow-none">
 					<ShaderGlassSurface strength="strong" class="rounded-2xl p-1">
-						{#each speeds as speed (speed.id)}
-							<SelectItem value={speed.id}>{speed.label}</SelectItem>
-						{/each}
+						<DropdownHoverSurface class="[--docs-sidebar-hover-radius:var(--radius-xl)]">
+							{#snippet children({ move_hover })}
+								{#each speeds as speed (speed.id)}
+									<SelectItem
+										value={speed.id}
+										class="focus:bg-transparent data-highlighted:bg-foreground/5 data-highlighted:text-foreground"
+										onpointerenter={move_hover}
+									>
+										{speed.label}
+									</SelectItem>
+								{/each}
+							{/snippet}
+						</DropdownHoverSurface>
 					</ShaderGlassSurface>
 				</SelectContent>
 		</Select>
@@ -472,9 +490,19 @@
 			</div>
 			<SelectContent class="rounded-2xl border-transparent bg-transparent p-0 shadow-none">
 				<ShaderGlassSurface strength="strong" class="rounded-2xl p-1">
-					{#each context.options as option (option.id)}
-						<SelectItem value={option.id}>{option.label}</SelectItem>
-					{/each}
+					<DropdownHoverSurface class="[--docs-sidebar-hover-radius:var(--radius-xl)]">
+						{#snippet children({ move_hover })}
+							{#each context.options as option (option.id)}
+								<SelectItem
+									value={option.id}
+									class="focus:bg-transparent data-highlighted:bg-foreground/5 data-highlighted:text-foreground"
+									onpointerenter={move_hover}
+								>
+									{option.label}
+								</SelectItem>
+							{/each}
+						{/snippet}
+					</DropdownHoverSurface>
 				</ShaderGlassSurface>
 			</SelectContent>
 		</Select>

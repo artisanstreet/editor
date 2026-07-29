@@ -12,6 +12,12 @@
 		DropdownMenuTrigger,
 	} from "$lib/components/ui/dropdown-menu";
 	import { Skeleton } from "$lib/components/ui/skeleton";
+	import {
+		Tooltip,
+		TooltipContent,
+		TooltipProvider,
+		TooltipTrigger,
+	} from "$lib/components/ui/tooltip";
 	import { EngineMarkClass, EngineMarkFor } from "$lib/engine/presentation";
 	import { EngineUsageCache, EngineUsageCacheBrowserLive } from "$lib/identity/usage-cache";
 
@@ -47,9 +53,19 @@
 	const WindowLabel = (window: EngineUsageWindow): string =>
 		window.label ?? window_kind_labels[window.kind];
 
-	/** The reset time no longer fits on the row, so it lives in the row's tooltip. */
-	const ResetTitle = (window: EngineUsageWindow): string | undefined =>
-		window.resets_at === undefined ? undefined : `Resets ${RelativeReset(window.resets_at)}`;
+	/**
+	 * The meter is quantised, so the fill snaps to whole ticks. Reporting the raw
+	 * percentage next to a meter that rounds it down would contradict itself.
+	 */
+	const LitFraction = (percent_used: number): number =>
+		Math.floor((Math.min(100, Math.max(0, percent_used)) / 100) * usage_segments) /
+		usage_segments;
+
+	/** The row shows no number, so the tooltip carries the exact figure and the reset. */
+	const UsageTooltip = (window: EngineUsageWindow): string =>
+		`${Math.round(window.percent_used)}% used${
+			window.resets_at === undefined ? "" : ` · resets ${RelativeReset(window.resets_at)}`
+		}`;
 
 	/**
 	 * Splits an engine's windows so the 5-hour session limits — the ones that
@@ -98,6 +114,8 @@
 			? usage_state.snapshot.engines.filter((engine) => engine.authentication === "authenticated")
 			: [],
 	);
+	/** Drives the meter shimmer while a fresh snapshot is in flight behind cached values. */
+	const is_refreshing = $derived(usage_state.status === "loaded" && usage_state.refreshing);
 	const unavailable_engines = $derived(
 		usage_state.status === "loaded"
 			? usage_state.snapshot.engines.filter(
@@ -164,25 +182,24 @@
 	});
 </script>
 
-{#snippet usage_window(window: EngineUsageWindow, accent: string)}
-	{@const percent = Math.min(100, Math.max(0, window.percent_used))}
-	<div class="flex items-center gap-2.5" title={ResetTitle(window)}>
-		<span class="min-w-0 flex-1 truncate text-xs text-muted-foreground">
-			{WindowLabel(window)}
-		</span>
-		<span class="flex w-18 shrink-0 gap-[2px]">
-			{#each { length: usage_segments } as _, index (index)}
-				{@const lit = (index + 1) / usage_segments <= percent / 100}
-				<span
-					class="h-2 flex-1 rounded-[1px]"
-					style={`background-color: ${lit ? accent : "color-mix(in oklab, var(--foreground) 11%, transparent)"}`}
-				></span>
-			{/each}
-		</span>
-		<span class="w-8 shrink-0 text-right text-xs tabular-nums text-foreground/80">
-			{Math.round(window.percent_used)}%
-		</span>
-	</div>
+{#snippet usage_window(window: EngineUsageWindow, accent: string, refreshing: boolean)}
+	<Tooltip>
+		<TooltipTrigger>
+			{#snippet child({ props: tooltip_props })}
+				<span {...tooltip_props} class="flex items-center gap-4">
+					<span class="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+						{WindowLabel(window)}
+					</span>
+					<span
+						class="t-usage-meter h-2 w-18 min-w-18 shrink-0"
+						class:animate-pulse={refreshing}
+						style={`--meter-accent: ${accent}; --meter-lit: ${LitFraction(window.percent_used) * 100}%; --meter-ticks: ${usage_segments}`}
+					></span>
+				</span>
+			{/snippet}
+		</TooltipTrigger>
+		<TooltipContent>{UsageTooltip(window)}</TooltipContent>
+	</Tooltip>
 {/snippet}
 
 <DropdownMenu bind:open>
@@ -202,7 +219,7 @@
 		</span>
 	</DropdownMenuTrigger>
 
-	<DropdownMenuContent side="top" align="start" class="w-64">
+	<DropdownMenuContent side="top" align="start" class="w-auto min-w-64 max-w-88">
 		<DropdownMenuItem>
 			<Settings class="size-4 shrink-0 text-muted-foreground" />
 			Settings
@@ -222,6 +239,7 @@
 		{:else if authenticated_engines.length === 0 && unavailable_engines.length === 0}
 			<p class="px-3 py-2.5 text-xs text-muted-foreground">No engine accounts connected.</p>
 		{:else}
+			<TooltipProvider delayDuration={300}>
 			<div class="flex flex-col gap-2.5 px-1 py-1">
 				{#each authenticated_engines as engine (engine.engine_id)}
 					{@const mark = EngineMarkFor(engine.engine_id)}
@@ -237,14 +255,14 @@
 						{#if groups.session.length > 0}
 							<div class="flex flex-col gap-1.5">
 								{#each groups.session as window (window.id)}
-									{@render usage_window(window, mark.accent)}
+									{@render usage_window(window, mark.accent, is_refreshing)}
 								{/each}
 							</div>
 						{/if}
 						{#if groups.extended.length > 0}
 							<div class="flex flex-col gap-1.5" class:mt-2={groups.session.length > 0}>
 								{#each groups.extended as window (window.id)}
-									{@render usage_window(window, mark.accent)}
+									{@render usage_window(window, mark.accent, is_refreshing)}
 								{/each}
 							</div>
 						{/if}
@@ -262,6 +280,33 @@
 					</div>
 				{/each}
 			</div>
+			</TooltipProvider>
 		{/if}
 	</DropdownMenuContent>
 </DropdownMenu>
+
+<style>
+	/**
+	 * One element rather than N tick spans: the ticks are a repeating mask over a
+	 * single fill gradient, so a row costs one node and one paint.
+	 */
+	.t-usage-meter {
+		--meter-dim: color-mix(in oklab, var(--foreground) 11%, transparent);
+		--meter-pitch: calc(100% / var(--meter-ticks));
+		background-image: linear-gradient(
+			to right,
+			var(--meter-accent) 0 var(--meter-lit),
+			var(--meter-dim) var(--meter-lit) 100%
+		);
+		mask-image: repeating-linear-gradient(
+			to right,
+			#000 0 calc(var(--meter-pitch) - 2px),
+			transparent calc(var(--meter-pitch) - 2px) var(--meter-pitch)
+		);
+		-webkit-mask-image: repeating-linear-gradient(
+			to right,
+			#000 0 calc(var(--meter-pitch) - 2px),
+			transparent calc(var(--meter-pitch) - 2px) var(--meter-pitch)
+		);
+	}
+</style>
