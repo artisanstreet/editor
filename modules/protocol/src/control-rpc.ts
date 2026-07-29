@@ -242,6 +242,16 @@ export const ControlRpcGroup = RpcGroup.make(
 		Control.SurfaceUsageDailyQueryResultEnvelope,
 	),
 	ControlRpc(
+		"host.identity.query",
+		Control.HostIdentityQueryEnvelope,
+		Control.HostIdentityQueryResultEnvelope,
+	),
+	ControlRpc(
+		"engine.usage.query",
+		Control.EngineUsageQueryEnvelope,
+		Control.EngineUsageQueryResultEnvelope,
+	),
+	ControlRpc(
 		"terminal.list.query",
 		Control.TerminalListQueryEnvelope,
 		Control.TerminalListQueryResultEnvelope,

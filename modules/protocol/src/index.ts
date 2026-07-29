@@ -6,8 +6,10 @@ export * from "./conversation";
 export * from "./conversation-activity";
 export * from "./control";
 export * from "./control-rpc";
+export * from "./engine-usage";
 export * from "./forge-launch-request";
 export * from "./guidance";
+export * from "./host-identity";
 export * from "./git";
 export * from "./model-behaviour";
 

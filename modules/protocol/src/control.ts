@@ -29,6 +29,8 @@ import {
 	SurfaceUsageDailyQuery,
 	SurfaceUsageDailySnapshot,
 } from "./surfaces";
+import { EngineUsageQuery, EngineUsageSnapshot } from "./engine-usage";
+import { HostIdentitySnapshot } from "./host-identity";
 
 import {
 	WorkspaceChangeListQuery,
@@ -2420,6 +2422,36 @@ export const SurfaceUsageDailyQueryResultEnvelope = Schema.Struct({
 });
 export type SurfaceUsageDailyQueryResultEnvelope = typeof SurfaceUsageDailyQueryResultEnvelope.Type;
 
+/** Requests the signed-in OS account identity of the machine hosting Forge. */
+export const HostIdentityQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("host.identity.query"),
+	payload: Schema.Struct({}),
+});
+export type HostIdentityQueryEnvelope = typeof HostIdentityQueryEnvelope.Type;
+export const HostIdentityQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("host.identity.query.result"),
+	payload: HostIdentitySnapshot,
+});
+export type HostIdentityQueryResultEnvelope = typeof HostIdentityQueryResultEnvelope.Type;
+
+/** Requests provider-account quota usage for every registered engine. */
+export const EngineUsageQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("engine.usage.query"),
+	payload: EngineUsageQuery,
+});
+export type EngineUsageQueryEnvelope = typeof EngineUsageQueryEnvelope.Type;
+export const EngineUsageQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("engine.usage.query.result"),
+	payload: EngineUsageSnapshot,
+});
+export type EngineUsageQueryResultEnvelope = typeof EngineUsageQueryResultEnvelope.Type;
+
 /** Requests ordered updates for the thread-list projection. */
 export const SubscribeEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
@@ -2975,6 +3007,8 @@ export const InboundControlEnvelope = Schema.Union([
 	SurfaceListQueryEnvelope,
 	SurfaceUsageAggregateQueryEnvelope,
 	SurfaceUsageDailyQueryEnvelope,
+	HostIdentityQueryEnvelope,
+	EngineUsageQueryEnvelope,
 	SubscribeEnvelope,
 	UnsubscribeEnvelope,
 	AckEnvelope,
@@ -3045,6 +3079,8 @@ export const OutboundControlEnvelope = Schema.Union([
 	SurfaceListQueryResultEnvelope,
 	SurfaceUsageAggregateQueryResultEnvelope,
 	SurfaceUsageDailyQueryResultEnvelope,
+	HostIdentityQueryResultEnvelope,
+	EngineUsageQueryResultEnvelope,
 	SubscriptionStartedEnvelope,
 	SubscriptionStoppedEnvelope,
 	ThreadListSnapshotEnvelope,
