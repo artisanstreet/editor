@@ -96,11 +96,15 @@ export const FrontendContractRegistry: ReadonlyArray<FrontendContractEntry> = [
 	},
 	{
 		id: "left.identity",
-		state: "blocked",
-		owner: "missing",
+		state: "live",
+		owner: "artisan_client",
 		surface: "left",
 		pane: "identity-card",
-		reason: "Identity must be projected by Forge after pairing; clients have no host-inspection bridge.",
+		reason: "Forge projects the signed-in host identity and per-engine provider usage through dedicated queries.",
+		contract_names: [
+			"ArtisanClient.GetHostIdentity",
+			"ArtisanClient.GetEngineUsage",
+		],
 	},
 	{
 		id: "left.marketplace",

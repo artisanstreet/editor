@@ -1,6 +1,6 @@
 # Active Branch Handoff
 
-Last updated: 2026-07-28
+Last updated: 2026-07-29
 Branch continuity only. Durable status lives in
 [`docs/status/backend-completion-matrix.md`](../docs/status/backend-completion-matrix.md).
 
@@ -78,6 +78,32 @@ Branch continuity only. Durable status lives in
   no state/credential split — `CLAUDE_CONFIG_DIR` would relocate
   `.credentials.json` and de-authenticate the user — so Forge-spawned Claude
   runs share `~/.claude` project history. Documented gap, unfixed.
+
+## Sidebar Identity + Engine Usage (2026-07-29)
+
+- New control queries `host.identity.query` (OS profile: display name via
+  Windows CIM `Win32_UserAccount.FullName` / macOS `id -F` / Linux GECOS,
+  hostname fallback; cached per process, never fails) and
+  `engine.usage.query` (per-engine provider-account quota windows).
+  Contracts in `modules/protocol/src/{host-identity,engine-usage}.ts`;
+  handlers follow the extracted query-handler template.
+- `Engine` seam gained optional non-billable `Usage` reporting
+  `EngineAccountUsage { authentication, windows }`. Claude adapter reads
+  `.credentials.json` and calls the undocumented
+  `api.anthropic.com/api/oauth/usage` (per-model `limits[]`; 401 →
+  unauthenticated value, no token refresh — refreshing would race the CLI).
+  Codex adapter prechecks `auth.json` then spawns `codex app-server` for
+  `account/rateLimits/read` (multi-bucket `rateLimitsByLimitId`, e.g.
+  GPT-5.3-Codex-Spark). Grok has no engine adapter, so it never reports.
+- Frontend: `left.identity` contract registry entry is live. Sidebar footer
+  hosts `sidebar-identity.sv` — initials Avatar (new `ui/avatar` over
+  bits-ui) + profile name, dropdown with Settings item, separator, and
+  per-authenticated-engine usage bars; usage fetched lazily on first open
+  (server may spawn a CLI), cached for the session. Fixture serves
+  deterministic identity + usage data.
+- Risk note: the Claude usage endpoint is undocumented and rate-limits
+  aggressively without a CLI-style User-Agent (sent; poll ≥3 min if ever
+  polled). Headless `/usage` text parsing is the documented fallback path.
 
 ## Other Standing Facts
 

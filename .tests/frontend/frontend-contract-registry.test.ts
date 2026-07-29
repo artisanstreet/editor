@@ -91,7 +91,7 @@ describe("frontend contract registry", () => {
 	it("records the audited integration state for moving and unavailable domains", () => {
 		const expected_states = {
 			"desktop-shell.electron-bootstrap": "live",
-			"left.identity": "blocked",
+			"left.identity": "live",
 			"left.marketplace": "live",
 			"main.change-diff": "live",
 			"main.change-review": "live",

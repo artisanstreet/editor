@@ -252,6 +252,11 @@ export const FixtureConversation = (thread_id: string): ConversationSnapshot => 
 
 const fixture_timestamp = "2026-07-12T10:00:00.000Z";
 
+/** Claude's session usage window resets a few hours after the fixture's base timestamp. */
+const fixture_engine_usage_session_reset_at = new Date(
+	Date.parse(fixture_timestamp) + 3 * 60 * 60 * 1000,
+).toISOString();
+
 const fixture_project = {
 	display_name: "Artisan Editor",
 	project_id: "project-artisan-editor",
@@ -893,6 +898,65 @@ export const FixtureArtisanClientService = {
 			models: model_manifest.models.filter((model) => model.harness === "codex"),
 			providers: model_manifest.providers.filter((provider) => provider.id === "openai"),
 		},
+	}),
+	GetHostIdentity: Effect.succeed({
+		display_name: "Sander Sonstabo",
+		hostname: "DESKTOP-FIXTURE",
+		platform: "win32" as const,
+		username: "sander",
+	}),
+	GetEngineUsage: Effect.succeed({
+		engines: [
+			{
+				authentication: "authenticated" as const,
+				display_name: "Claude",
+				engine_id: "claude",
+				windows: [
+					{
+						id: "session",
+						kind: "session" as const,
+						percent_used: 17,
+						resets_at: fixture_engine_usage_session_reset_at,
+					},
+					{
+						id: "claude_weekly",
+						kind: "weekly" as const,
+						percent_used: 3,
+					},
+					{
+						id: "claude_weekly_fable",
+						kind: "weekly" as const,
+						label: "Fable",
+						percent_used: 5,
+					},
+				],
+			},
+			{
+				authentication: "authenticated" as const,
+				display_name: "Codex",
+				engine_id: "codex",
+				windows: [
+					{
+						id: "codex",
+						kind: "weekly" as const,
+						percent_used: 12,
+					},
+					{
+						id: "codex_weekly_gpt_5_3_spark",
+						kind: "weekly" as const,
+						label: "GPT-5.3-Codex-Spark",
+						percent_used: 2,
+					},
+				],
+			},
+			{
+				authentication: "unauthenticated" as const,
+				display_name: "Grok",
+				engine_id: "grok",
+				windows: [],
+			},
+		],
+		fetched_at: fixture_timestamp,
 	}),
 	DetachProject: () => Effect.succeed({ projects: [] }),
 	ListProjectDirectories: () =>

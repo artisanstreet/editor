@@ -15,6 +15,7 @@
 		ThreadRoutePath,
 	} from "$lib/root/thread-navigation";
 	import * as Sidebar from "$lib/components/ui/sidebar";
+	import SidebarIdentity from "./sidebar-identity.sv";
 
 	const client = yield* ArtisanClient;
 	let threads = $state.raw<ReadonlyArray<ThreadListItem>>([]);
@@ -118,4 +119,8 @@
 			</Sidebar.GroupContent>
 		</Sidebar.Group>
 	</Sidebar.Content>
+
+	<Sidebar.Footer class="group-data-[collapsible=icon]:hidden">
+		<SidebarIdentity />
+	</Sidebar.Footer>
 </div>
