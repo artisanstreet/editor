@@ -9,19 +9,27 @@ import type { Component } from "svelte";
 
 /** Presents one engine's provider mark. @since 0.7.0 */
 export interface EngineMark {
+	/** The provider's own accent, as a CSS color, for meters and other tinted chrome. */
+	readonly accent: string;
 	readonly icon: Component;
 	/** Marks a single-color logo that must invert with the theme. */
 	readonly monochrome: boolean;
 }
 
 const engine_marks: Readonly<Record<string, EngineMark>> = {
-	claude: { icon: SvglClaudeAILogo, monochrome: false },
-	codex: { icon: SvglOpenAILogo, monochrome: true },
-	cursor: { icon: SvglCursorLogo, monochrome: true },
-	grok: { icon: SvglGrokLogo, monochrome: true },
+	/** Claude clay. */
+	claude: { accent: "#d97757", icon: SvglClaudeAILogo, monochrome: false },
+	/** OpenAI's sole chromatic accent; the marks themselves are monochrome. */
+	codex: { accent: "#10a37f", icon: SvglOpenAILogo, monochrome: true },
+	cursor: { accent: "#6b7280", icon: SvglCursorLogo, monochrome: true },
+	grok: { accent: "#6b7280", icon: SvglGrokLogo, monochrome: true },
 };
 
-const unknown_engine_mark: EngineMark = { icon: Tool, monochrome: true };
+const unknown_engine_mark: EngineMark = {
+	accent: "var(--primary)",
+	icon: Tool,
+	monochrome: true,
+};
 
 /** Resolves the provider mark for an engine, falling back to a neutral tool glyph. */
 export const EngineMarkFor = (engine_id: string | undefined): EngineMark =>

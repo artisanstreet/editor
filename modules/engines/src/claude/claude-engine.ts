@@ -94,7 +94,7 @@ export const ClaudeEngineDescriptor: EngineDescriptor = {
 		},
 		subagents: { state: "unsupported", reason: "Subagent events are not canonicalized." },
 	},
-	display_name: "Claude Code",
+	display_name: "Claude",
 	id: "claude",
 	transport: "claude-cli-stream-json",
 };

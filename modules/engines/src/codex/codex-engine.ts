@@ -83,7 +83,7 @@ export const CodexEngineDescriptor: EngineDescriptor = {
 			reason: "Subagent and collaboration activity remains provider-native.",
 		},
 	},
-	display_name: "Codex CLI",
+	display_name: "Codex",
 	id: "codex",
 	transport: CodexTransportMetadata.transport,
 };

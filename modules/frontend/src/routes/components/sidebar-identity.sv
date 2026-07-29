@@ -44,6 +44,21 @@
 	const WindowLabel = (window: EngineUsageWindow): string =>
 		window.label ?? window_kind_labels[window.kind];
 
+	/**
+	 * Splits an engine's windows so the 5-hour session limits — the ones that
+	 * actually gate the next prompt — lead the list, set apart from the longer
+	 * windows below them. Provider order is preserved within each group.
+	 */
+	const GroupWindows = (
+		windows: ReadonlyArray<EngineUsageWindow>,
+	): {
+		readonly session: ReadonlyArray<EngineUsageWindow>;
+		readonly extended: ReadonlyArray<EngineUsageWindow>;
+	} => ({
+		session: windows.filter((window) => window.kind === "session"),
+		extended: windows.filter((window) => window.kind !== "session"),
+	});
+
 	/** Renders a compact relative time (`in 3h`, `2d ago`) with no new dependency. */
 	const RelativeReset = (iso: string): string => {
 		const diff_ms = new Date(iso).getTime() - Date.now();
@@ -142,6 +157,25 @@
 	});
 </script>
 
+{#snippet usage_window(window: EngineUsageWindow, accent: string)}
+	<div class="flex flex-col gap-0.5">
+		<div class="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+			<span class="truncate">{WindowLabel(window)}</span>
+			<span class="shrink-0 tabular-nums">
+				{Math.round(window.percent_used)}%{window.resets_at
+					? ` · ${RelativeReset(window.resets_at)}`
+					: ""}
+			</span>
+		</div>
+		<div class="bg-muted h-1 w-full overflow-hidden rounded-full">
+			<div
+				class="h-full rounded-full"
+				style={`width: ${Math.min(100, Math.max(0, window.percent_used))}%; background-color: ${accent}`}
+			></div>
+		</div>
+	</div>
+{/snippet}
+
 <DropdownMenu bind:open>
 	<DropdownMenuTrigger
 		class="hover:bg-sidebar-accent hover:text-sidebar-accent-foreground flex w-full min-w-0 items-center gap-2 rounded-xl px-2 py-1.5 text-left outline-none transition-colors focus-visible:ring-2 focus-visible:ring-ring/50"
@@ -183,6 +217,7 @@
 				{#each authenticated_engines as engine (engine.engine_id)}
 					{@const mark = EngineMarkFor(engine.engine_id)}
 					{@const MarkIcon = mark.icon}
+					{@const groups = GroupWindows(engine.windows)}
 					<div class="flex flex-col gap-1.5 px-2 py-1">
 						<div class="flex items-center gap-2">
 							<MarkIcon class={EngineMarkClass(mark, "size-4")} />
@@ -190,26 +225,20 @@
 								{engine.display_name}
 							</span>
 						</div>
-						<div class="flex flex-col gap-1.5">
-							{#each engine.windows as window (window.id)}
-								<div class="flex flex-col gap-0.5">
-									<div class="flex items-center justify-between gap-2 text-xs text-muted-foreground">
-										<span class="truncate">{WindowLabel(window)}</span>
-										<span class="shrink-0 tabular-nums">
-											{Math.round(window.percent_used)}%{window.resets_at
-												? ` · ${RelativeReset(window.resets_at)}`
-												: ""}
-										</span>
-									</div>
-									<div class="bg-muted h-1 w-full overflow-hidden rounded-full">
-										<div
-											class="h-full rounded-full bg-primary"
-											style={`width: ${Math.min(100, Math.max(0, window.percent_used))}%`}
-										></div>
-									</div>
-								</div>
-							{/each}
-						</div>
+						{#if groups.session.length > 0}
+							<div class="flex flex-col gap-1.5">
+								{#each groups.session as window (window.id)}
+									{@render usage_window(window, mark.accent)}
+								{/each}
+							</div>
+						{/if}
+						{#if groups.extended.length > 0}
+							<div class="flex flex-col gap-1.5" class:mt-2={groups.session.length > 0}>
+								{#each groups.extended as window (window.id)}
+									{@render usage_window(window, mark.accent)}
+								{/each}
+							</div>
+						{/if}
 					</div>
 				{/each}
 
