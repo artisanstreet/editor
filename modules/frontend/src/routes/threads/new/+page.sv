@@ -23,20 +23,28 @@
 	 * The draft is the only place the engine can be chosen: it locks once the
 	 * first message creates the session. The default mirrors the backend's
 	 * default session policy with the runtime catalog's default model engine.
+	 *
+	 * This route remounts on every navigation to/from the draft (e.g. the user
+	 * picks a model, navigates away, then back). Seeding unconditionally would
+	 * wipe whatever the user already shaped in the draft. Seed the default only
+	 * when no draft policy exists yet; a draft the user has touched survives
+	 * remounts until the first message creates the durable thread.
 	 */
 	const runtime_catalog = yield* client.GetRuntimeCatalog;
-	const default_model = runtime_catalog.manifest.models.find(
-		(model) => model.id === runtime_catalog.default_model_id,
-	);
-	draft_thread_policy.set({
-		engine_id: default_model?.harness ?? "codex",
-		permission_mode: "on_request",
-		reasoning_effort: "medium",
-		sandbox_mode: "workspace_write",
-		service_tier: "standard",
-		strict_clarification: false,
-		web_search_enabled: false,
-	});
+	if (get(draft_thread_policy) === undefined) {
+		const default_model = runtime_catalog.manifest.models.find(
+			(model) => model.id === runtime_catalog.default_model_id,
+		);
+		draft_thread_policy.set({
+			engine_id: default_model?.harness ?? "codex",
+			permission_mode: "on_request",
+			reasoning_effort: "medium",
+			sandbox_mode: "workspace_write",
+			service_tier: "standard",
+			strict_clarification: false,
+			web_search_enabled: false,
+		});
+	}
 
 	/** A retried submit must reuse the already created thread instead of minting another. */
 	let created_thread_id: string | undefined;

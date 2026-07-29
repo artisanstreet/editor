@@ -81,29 +81,44 @@ Branch continuity only. Durable status lives in
 
 ## Sidebar Identity + Engine Usage (2026-07-29)
 
-- New control queries `host.identity.query` (OS profile: display name via
-  Windows CIM `Win32_UserAccount.FullName` / macOS `id -F` / Linux GECOS,
-  hostname fallback; cached per process, never fails) and
-  `engine.usage.query` (per-engine provider-account quota windows).
-  Contracts in `modules/protocol/src/{host-identity,engine-usage}.ts`;
-  handlers follow the extracted query-handler template.
-- `Engine` seam gained optional non-billable `Usage` reporting
-  `EngineAccountUsage { authentication, windows }`. Claude adapter reads
-  `.credentials.json` and calls the undocumented
-  `api.anthropic.com/api/oauth/usage` (per-model `limits[]`; 401 →
-  unauthenticated value, no token refresh — refreshing would race the CLI).
-  Codex adapter prechecks `auth.json` then spawns `codex app-server` for
-  `account/rateLimits/read` (multi-bucket `rateLimitsByLimitId`, e.g.
-  GPT-5.3-Codex-Spark). Grok has no engine adapter, so it never reports.
-- Frontend: `left.identity` contract registry entry is live. Sidebar footer
-  hosts `sidebar-identity.sv` — initials Avatar (new `ui/avatar` over
-  bits-ui) + profile name, dropdown with Settings item, separator, and
-  per-authenticated-engine usage bars; usage fetched lazily on first open
-  (server may spawn a CLI), cached for the session. Fixture serves
-  deterministic identity + usage data.
-- Risk note: the Claude usage endpoint is undocumented and rate-limits
-  aggressively without a CLI-style User-Agent (sent; poll ≥3 min if ever
-  polled). Headless `/usage` text parsing is the documented fallback path.
+- New control queries `host.identity.query` (OS profile: Windows CIM
+  full-name / macOS `id -F` / Linux GECOS, hostname fallback; cached, never
+  fails) and `engine.usage.query` (per-engine provider quota windows).
+  `Engine` seam gained optional non-billable `Usage`. Claude adapter calls
+  the undocumented `api.anthropic.com/api/oauth/usage` with the
+  `.credentials.json` token (401 → unauthenticated value; NEVER refresh the
+  token — it races the CLI). Codex prechecks `auth.json` then spawns
+  `codex app-server` for `account/rateLimits/read` (multi-bucket).
+- Frontend: `left.identity` is live — sidebar footer `sidebar-identity.sv`
+  with initials Avatar (new `ui/avatar`), Settings item, separator, and
+  per-authenticated-engine usage bars fetched lazily on first open.
+
+## Model-Reset + Stuck-Thinking Fixes (2026-07-29)
+
+- Root causes of "picked Sonnet, got Fable": `/threads/new` re-seeded
+  `draft_thread_policy` (model-less) on every remount, and the selector
+  rendered the catalog default indistinguishably from an explicit pick.
+  Fixed: seed only when undefined; muted "Default" hint when unpicked;
+  `MakeSessionPolicyRunMetadata` now resolves the catalog's first enabled
+  `native_model_id` for the engine instead of omitting `--model` (which let
+  the CLI use the operator's personal default).
+- Root cause of stuck thinking stage: no terminal reasoning observation
+  existed; Sonnet 5 omitted-display thinking streams empty deltas and the
+  normalizer dropped the thinking-only completion frame. Fixed: new
+  `reasoning_summary_completed` observation (claude + codex-exec emit it;
+  codex app-server protocol has no reasoning completion signal — gap
+  documented), projection completes the item via `item_lifecycle` patch
+  (no-op when no delta ever created it), conversation store also promotes
+  a completed last-in-turn message once its work session settles, and
+  native_event summaries now surface `observation.detail`.
+- Known red (pre-existing, unrelated, on master before today):
+  `.tests/deep/integration/workspace-protocol-rebuild.test.ts` (engine
+  cleanup count on rebuild) and `.tests/frontend/shell-source-layout.test.ts`
+  (expects `composer_controls: ["model"]`; broken by the uncommitted
+  thinking/speed composer WIP in the worktree).
+- Uncommitted on purpose: `model-selector.sv` carries the "Default" hint
+  change intermixed with Sander's live thinking/speed redesign WIP —
+  commit it together with that redesign.
 
 ## Other Standing Facts
 

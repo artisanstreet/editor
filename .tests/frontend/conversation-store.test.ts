@@ -510,6 +510,162 @@ describe("conversation view store", () => {
 		).toBe(false);
 	});
 
+	it("promotes a settled reply once its own lifecycle completes, even if the turn's completion patch lags", () => {
+		// Mirrors Claude: phase is always "unspecified" and the turn's own
+		// completion patch can lag or drop behind a stuck reasoning item fixed
+		// elsewhere. The reply's own lifecycle already says "completed" and it
+		// is the last item in the turn, so it must not stay hidden forever.
+		const settled_at = "2026-07-29T12:00:02.000Z";
+		const dangling_turn = Schema.decodeUnknownSync(ConversationSnapshot)({
+			conversation_id: "conversation-dangling-turn",
+			items: [
+				{
+					created_at: "2026-07-29T12:00:00.000Z",
+					ended_at: settled_at,
+					id: "work-dangling",
+					lifecycle: "completed",
+					ordinal: 1,
+					references: [],
+					revision: 1,
+					source_refs: [],
+					started_at: "2026-07-29T12:00:00.000Z",
+					status: "completed",
+					title: "Agent work",
+					turn_id: "turn-dangling",
+					type: "work_session",
+					updated_at: settled_at,
+				},
+				{
+					created_at: "2026-07-29T12:00:01.000Z",
+					id: "reply-dangling",
+					lifecycle: "completed",
+					ordinal: 2,
+					phase: "unspecified",
+					references: [],
+					revision: 0,
+					source_refs: [],
+					text: "Here is the answer.",
+					turn_id: "turn-dangling",
+					type: "assistant_message",
+					updated_at: settled_at,
+				},
+			],
+			journal_sequence: 0,
+			last_patch_sequence: 0,
+			schema_version: 1,
+			thread_id: "thread-dangling-turn",
+			turns: [
+				{
+					created_at: "2026-07-29T12:00:00.000Z",
+					id: "turn-dangling",
+					// The turn's own completion patch never arrived (dropped/delayed).
+					lifecycle: "streaming",
+					ordinal: 0,
+					references: [],
+					revision: 1,
+					source_refs: [],
+					type: "turn",
+					updated_at: "2026-07-29T12:00:00.000Z",
+				},
+			],
+			updated_at: settled_at,
+		});
+		const initial = MakeConversationViewState(dangling_turn);
+		if (initial._tag !== "applied") throw new Error("fixture must initialize");
+
+		const blocks = MakeConversationRenderBlocks(initial.state);
+		const work = blocks.find((block) => block.type === "work_group");
+		if (work?.type !== "work_group") throw new Error("work must render");
+
+		expect(work.details.some((item) => item.id === "reply-dangling")).toBe(false);
+		expect(
+			blocks.some((block) => block.type === "item" && block.item.id === "reply-dangling"),
+		).toBe(true);
+	});
+
+	it("does not promote a completed message early when a later item follows it in the same turn", () => {
+		const settled_at = "2026-07-29T12:00:03.000Z";
+		const mid_turn_tool_call = Schema.decodeUnknownSync(ConversationSnapshot)({
+			conversation_id: "conversation-mid-turn-tool-call",
+			items: [
+				{
+					created_at: "2026-07-29T12:00:00.000Z",
+					ended_at: settled_at,
+					id: "work-mid-turn",
+					lifecycle: "completed",
+					ordinal: 1,
+					references: [],
+					revision: 1,
+					source_refs: [],
+					started_at: "2026-07-29T12:00:00.000Z",
+					status: "completed",
+					title: "Agent work",
+					turn_id: "turn-mid-turn",
+					type: "work_session",
+					updated_at: settled_at,
+				},
+				{
+					created_at: "2026-07-29T12:00:01.000Z",
+					id: "interim-reply",
+					lifecycle: "completed",
+					ordinal: 2,
+					phase: "unspecified",
+					references: [],
+					revision: 0,
+					source_refs: [],
+					text: "Let me check something first.",
+					turn_id: "turn-mid-turn",
+					type: "assistant_message",
+					updated_at: "2026-07-29T12:00:01.000Z",
+				},
+				{
+					created_at: "2026-07-29T12:00:02.000Z",
+					id: "later-activity",
+					kind: "terminal_activity",
+					label: "Ran a command",
+					lifecycle: "completed",
+					ordinal: 3,
+					references: [],
+					revision: 0,
+					source_refs: [],
+					status: "completed",
+					turn_id: "turn-mid-turn",
+					type: "activity",
+					updated_at: settled_at,
+				},
+			],
+			journal_sequence: 0,
+			last_patch_sequence: 0,
+			schema_version: 1,
+			thread_id: "thread-mid-turn-tool-call",
+			turns: [
+				{
+					created_at: "2026-07-29T12:00:00.000Z",
+					id: "turn-mid-turn",
+					lifecycle: "streaming",
+					ordinal: 0,
+					references: [],
+					revision: 1,
+					source_refs: [],
+					type: "turn",
+					updated_at: "2026-07-29T12:00:00.000Z",
+				},
+			],
+			updated_at: settled_at,
+		});
+		const initial = MakeConversationViewState(mid_turn_tool_call);
+		if (initial._tag !== "applied") throw new Error("fixture must initialize");
+
+		const blocks = MakeConversationRenderBlocks(initial.state);
+		const work = blocks.find((block) => block.type === "work_group");
+		if (work?.type !== "work_group") throw new Error("work must render");
+
+		expect(work.details.some((item) => item.id === "interim-reply")).toBe(true);
+		expect(
+			blocks.some((block) => block.type === "item" && block.item.id === "interim-reply"),
+		).toBe(false);
+	});
+
 	it("places one changed-files card after the turn's final response", () => {
 		const initial = MakeConversationViewState(MakeMockConversation("changes-test"));
 		if (initial._tag !== "applied") throw new Error("fixture must initialize");

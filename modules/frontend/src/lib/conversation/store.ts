@@ -229,18 +229,39 @@ export const MakeConversationRenderBlocks = (
 	 * a real work turn, the last completed non-commentary message is the settled
 	 * reply; all prior assistant messages remain progress in their source order.
 	 */
+	const last_item_id_by_turn = new Map<string, string>();
+	for (const item of ordered_items) {
+		last_item_id_by_turn.set(ConversationRenderKey(item, legacy_work.turn_aliases), item.id);
+	}
+
 	for (const item of ordered_items) {
 		const group_key = ConversationRenderKey(item, legacy_work.turn_aliases);
+		const work_session = work_session_by_turn.get(group_key);
 		if (
-			!work_session_by_turn.has(group_key) ||
-			turns_by_id.get(group_key)?.lifecycle !== "completed" ||
+			work_session === undefined ||
 			item.type !== "assistant_message" ||
 			item.phase === "commentary" ||
 			item.lifecycle !== "completed" ||
 			item.text.length === 0
 		)
 			continue;
-		final_message_by_turn.set(group_key, item);
+		const turn_completed = turns_by_id.get(group_key)?.lifecycle === "completed";
+		/**
+		 * Some providers (Claude) never emit phase "final" and can leave their
+		 * turn's completion patch dangling behind a stuck reasoning item that is
+		 * fixed upstream. When the work session itself has already settled and
+		 * this message is the last item anywhere in the turn — no later tool
+		 * call or message queued behind it — promote the reply without waiting
+		 * on the turn's own lifecycle patch. Requiring "last item" is what keeps
+		 * a mid-turn tool sequence from promoting an interim message early: a
+		 * later item in the same turn withholds promotion until it, in turn,
+		 * becomes the settled last item.
+		 */
+		const session_settled = work_session.lifecycle === "completed";
+		const is_last_item_in_turn = last_item_id_by_turn.get(group_key) === item.id;
+		if (turn_completed || (session_settled && is_last_item_in_turn)) {
+			final_message_by_turn.set(group_key, item);
+		}
 	}
 
 	const ItemIsWorkDetail = (item: ConversationItem, group_key: string): boolean => {
