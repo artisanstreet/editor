@@ -68,4 +68,30 @@ describe("session policy run metadata", () => {
 
 		expect(narrowed.provider_options?.["claude.permission_mode"]).toBe("plan");
 	});
+
+	it("falls back to the catalog's default model instead of the operator's personal CLI default", () => {
+		const codex_default = MakeSessionPolicyRunMetadata(policy_for({ model: undefined }));
+		const claude_default = MakeSessionPolicyRunMetadata(
+			policy_for({ engine_id: "claude", model: undefined }),
+		);
+
+		expect(codex_default.model).toBe("gpt-5.6-sol");
+		expect(claude_default.model).toBe("claude-fable-5");
+	});
+
+	it("keeps an explicit request model when the policy leaves the model unset", () => {
+		const metadata = MakeSessionPolicyRunMetadata(policy_for({ model: undefined }), {
+			model: "gpt-5.5",
+		});
+
+		expect(metadata.model).toBe("gpt-5.5");
+	});
+
+	it("leaves the model unset when the policy explicitly requests one, unchanged", () => {
+		const metadata = MakeSessionPolicyRunMetadata(
+			policy_for({ engine_id: "claude", model: "claude-opus-5" }),
+		);
+
+		expect(metadata.model).toBe("claude-opus-5");
+	});
 });

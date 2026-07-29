@@ -27,6 +27,7 @@ export const SurfaceFromEngineObservation = (
 	switch (observation._tag) {
 		case "agent_message_delta":
 		case "agent_message_completed":
+		case "reasoning_summary_completed":
 		case "reasoning_summary_delta":
 			return {
 				...base,

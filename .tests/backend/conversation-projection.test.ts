@@ -512,4 +512,227 @@ describe("conversation projection", () => {
 			await runtime.dispose();
 		}
 	});
+
+	it("completes a reasoning summary streamed by delta and emits an item_lifecycle patch", async () => {
+		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const read_model = yield* ConversationReadModel;
+					yield* database.client.insert(Threads).values({
+						created_at: "2026-07-24T00:00:00.000Z",
+						last_activity_at: "2026-07-24T00:00:00.000Z",
+						thread_id: "thread_1",
+						title: "Conversation",
+						updated_at: "2026-07-24T00:00:00.000Z",
+					});
+					const context = {
+						occurred_at: "2026-07-24T00:00:01.000Z",
+						run_id: "run_1",
+						thread_id: "thread_1",
+					};
+					yield* database.client.transaction((transaction) =>
+						Effect.gen(function* () {
+							yield* ApplyEngineObservation(
+								transaction,
+								{
+									_tag: "reasoning_summary_delta",
+									artisan_run_id: "run_1",
+									delta: "Weighing the options",
+									item_id: "reasoning_1",
+									observation_id: "observation_reasoning_delta",
+									raw: { engine_id: "codex", frame: {}, transport: "test" },
+									sequence: 1,
+									summary_index: 0,
+									turn_id: "turn_1",
+								},
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
+							yield* ApplyEngineObservation(
+								transaction,
+								{
+									_tag: "reasoning_summary_completed",
+									artisan_run_id: "run_1",
+									item_id: "reasoning_1",
+									observation_id: "observation_reasoning_completed",
+									raw: { engine_id: "codex", frame: {}, transport: "test" },
+									sequence: 2,
+									turn_id: "turn_1",
+								},
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
+						}),
+					);
+					return {
+						patches: yield* read_model.ReadPatches("thread_1", 0),
+						snapshot: yield* read_model.ReadSnapshot("thread_1"),
+					};
+				}),
+			);
+
+			expect(result.snapshot.status).toBe("available");
+			if (result.snapshot.status !== "available") return;
+			expect(
+				result.snapshot.snapshot.items.find((item) => item.id === "reasoning_1"),
+			).toMatchObject({
+				id: "reasoning_1",
+				lifecycle: "completed",
+				text: "Weighing the options",
+				type: "reasoning_summary",
+			});
+			expect(
+				result.patches.some(
+					(patch) =>
+						patch.type === "item_lifecycle" &&
+						patch.item_id === "reasoning_1" &&
+						patch.lifecycle === "completed",
+				),
+			).toBe(true);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("no-ops a reasoning summary completion when no delta ever created the item", async () => {
+		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
+		try {
+			const availability = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const read_model = yield* ConversationReadModel;
+					yield* database.client.insert(Threads).values({
+						created_at: "2026-07-24T00:00:00.000Z",
+						last_activity_at: "2026-07-24T00:00:00.000Z",
+						thread_id: "thread_1",
+						title: "Conversation",
+						updated_at: "2026-07-24T00:00:00.000Z",
+					});
+					const context = {
+						occurred_at: "2026-07-24T00:00:01.000Z",
+						run_id: "run_1",
+						thread_id: "thread_1",
+					};
+					yield* database.client.transaction(
+						(transaction) =>
+							ApplyEngineObservation(
+								transaction,
+								{
+									_tag: "reasoning_summary_completed",
+									artisan_run_id: "run_1",
+									item_id: "reasoning_never_streamed",
+									observation_id: "observation_reasoning_completed_only",
+									raw: { engine_id: "claude", frame: {}, transport: "test" },
+									sequence: 1,
+									turn_id: "turn_1",
+								},
+								context,
+							) as Effect.Effect<unknown, unknown, never>,
+					);
+					return yield* read_model.ReadSnapshot("thread_1");
+				}),
+			);
+
+			expect(availability.status).toBe("available");
+			if (availability.status !== "available") return;
+			expect(
+				availability.snapshot.items.find((item) => item.id === "reasoning_never_streamed"),
+			).toBeUndefined();
+			expect(
+				availability.snapshot.items.filter((item) => item.type === "reasoning_summary"),
+			).toHaveLength(0);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("summarizes a native event from detail, falling back to action, and caps its length", async () => {
+		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
+		try {
+			const overlong_detail = "x".repeat(5_000);
+			const availability = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const read_model = yield* ConversationReadModel;
+					yield* database.client.insert(Threads).values({
+						created_at: "2026-07-24T00:00:00.000Z",
+						last_activity_at: "2026-07-24T00:00:00.000Z",
+						thread_id: "thread_1",
+						title: "Conversation",
+						updated_at: "2026-07-24T00:00:00.000Z",
+					});
+					const context = {
+						occurred_at: "2026-07-24T00:00:01.000Z",
+						run_id: "run_1",
+						thread_id: "thread_1",
+					};
+					yield* database.client.transaction((transaction) =>
+						Effect.gen(function* () {
+							yield* ApplyEngineObservation(
+								transaction,
+								{
+									_tag: "native_action",
+									action: "claude_event",
+									artisan_run_id: "run_1",
+									detail: "Provider quota narrowed to safe mode",
+									observation_id: "observation_native_detail",
+									raw: { engine_id: "claude", frame: {}, transport: "test" },
+									sequence: 1,
+								},
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
+							yield* ApplyEngineObservation(
+								transaction,
+								{
+									_tag: "native_action",
+									action: "claude_event",
+									artisan_run_id: "run_1",
+									observation_id: "observation_native_no_detail",
+									raw: { engine_id: "claude", frame: {}, transport: "test" },
+									sequence: 2,
+								},
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
+							yield* ApplyEngineObservation(
+								transaction,
+								{
+									_tag: "native_action",
+									action: "claude_event",
+									artisan_run_id: "run_1",
+									detail: overlong_detail,
+									observation_id: "observation_native_overlong",
+									raw: { engine_id: "claude", frame: {}, transport: "test" },
+									sequence: 3,
+								},
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
+						}),
+					);
+					return yield* read_model.ReadSnapshot("thread_1");
+				}),
+			);
+
+			expect(availability.status).toBe("available");
+			if (availability.status !== "available") return;
+			const native_events = availability.snapshot.items.filter(
+				(item) => item.type === "native_event",
+			);
+			expect(
+				native_events.find((item) => item.id === "native:observation_native_detail"),
+			).toMatchObject({ summary: "Provider quota narrowed to safe mode" });
+			expect(
+				native_events.find((item) => item.id === "native:observation_native_no_detail"),
+			).toMatchObject({ summary: "claude_event" });
+			const overlong_item = native_events.find(
+				(item) => item.id === "native:observation_native_overlong",
+			);
+			expect(overlong_item).toBeDefined();
+			if (overlong_item?.type === "native_event") {
+				expect(overlong_item.summary.length).toBe(4_096);
+				expect(overlong_item.summary).toBe(overlong_detail.slice(0, 4_096));
+			}
+		} finally {
+			await runtime.dispose();
+		}
+	});
 });

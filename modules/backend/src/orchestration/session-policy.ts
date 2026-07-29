@@ -19,6 +19,20 @@ const native_permission_mode = (harness_id: string, option_id: NeutralPermission
 		?.permissions.options.find((option) => option.id === option_id)?.native_value ?? "default";
 
 /**
+ * Resolves the catalog's default model for a harness when policy and request
+ * both leave it unset. A run must receive Artisan's catalog default
+ * explicitly rather than silently inheriting whatever the operator's personal
+ * CLI configuration defaults to (e.g. `~/.claude`'s own last-used model).
+ * Returns `undefined` when the harness has no enabled catalog model, in which
+ * case the field is omitted as before — an engine with no catalog models
+ * cannot be defaulted.
+ */
+const catalog_default_model = (harness_id: string) =>
+	model_manifest.models.find(
+		(model) => model.harness === harness_id && model.disabled === undefined,
+	)?.native_model_id;
+
+/**
  * Resolves the executable-facing subset of durable session policy.
  *
  * Assignment permissions may narrow a user policy, but never widen it. This
@@ -40,7 +54,8 @@ export const MakeSessionPolicyRunMetadata = (
 		policy.permission_mode === "never" || requested_permissions?.approval === "never"
 			? "never"
 			: "on_request";
-	const resolved_model = policy.model ?? requested.model;
+	const resolved_model =
+		policy.model ?? requested.model ?? catalog_default_model(policy.engine_id);
 	const model_metadata: Pick<EngineRunMetadata, "model"> =
 		resolved_model === undefined ? {} : { model: resolved_model };
 

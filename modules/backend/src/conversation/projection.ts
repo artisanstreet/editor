@@ -353,6 +353,55 @@ const AppendText = (
 		return entity;
 	});
 
+/**
+ * Settles a streaming `reasoning_summary` item to `completed` without touching its
+ * text. Tolerant of the Sonnet-5 case where reasoning display is suppressed and no
+ * delta ever created the item: a missing item is a no-op rather than a synthesized
+ * empty one, so nothing dangles for content that was never shown.
+ */
+const CompleteReasoningSummary = (
+	transaction: any,
+	thread_id: string,
+	item_id: string,
+	occurred_at: string,
+) =>
+	Effect.gen(function* () {
+		const [existing] = yield* transaction
+			.select()
+			.from(ConversationItems)
+			.where(eq(ConversationItems.item_id, item_id))
+			.limit(1);
+		if (!existing) return undefined;
+		const prior = yield* Decode(
+			ConversationItem,
+			JSON.parse(existing.entity_json),
+			"stored conversation item",
+		);
+		if (
+			prior.type !== "reasoning_summary" ||
+			["completed", "failed", "cancelled"].includes(prior.lifecycle)
+		)
+			return prior;
+		const revision = prior.revision + 1;
+		const entity = {
+			...prior,
+			lifecycle: "completed" as const,
+			revision,
+			updated_at: occurred_at,
+		};
+		yield* transaction
+			.update(ConversationItems)
+			.set({ entity_json: JSON.stringify(entity) })
+			.where(eq(ConversationItems.item_id, item_id));
+		yield* Emit(transaction, thread_id, occurred_at, {
+			type: "item_lifecycle",
+			item_id,
+			lifecycle: "completed",
+			revision,
+		});
+		return entity;
+	});
+
 const turn_base = (
 	id: string,
 	input: ConversationObservationContext,
@@ -457,6 +506,13 @@ export const ApplyEngineObservation = (
 					observation.delta,
 					"reasoning_summary",
 					common,
+				);
+			case "reasoning_summary_completed":
+				return yield* CompleteReasoningSummary(
+					transaction,
+					input.thread_id,
+					observation.item_id,
+					input.occurred_at,
 				);
 			case "turn_state":
 				return yield* Effect.gen(function* () {
@@ -775,9 +831,16 @@ export const ApplyEngineObservation = (
 							observation.observation_id,
 						),
 						type: "native_event",
+						/**
+						 * Prefers the provider-authored `detail`/`message` over the action
+						 * literal (e.g. "claude_event") — the literal is a stable tag, not a
+						 * diagnostic; using it alone collapses every native event into an
+						 * identical, undiagnosable summary.
+						 */
 						summary:
 							observation._tag === "native_action"
-								? text(observation.action) || "Native engine action"
+								? (optional_text(observation.detail) ??
+									(text(observation.action) || "Native engine action"))
 								: observation._tag === "usage"
 									? "Usage update"
 									: text(observation.message) || "Engine diagnostic",
