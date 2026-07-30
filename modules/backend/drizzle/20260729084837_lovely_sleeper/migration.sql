@@ -1,0 +1,1 @@
+ALTER TABLE `orchestration_coordinators` ADD `policy_permission` text DEFAULT 'supervised' NOT NULL;

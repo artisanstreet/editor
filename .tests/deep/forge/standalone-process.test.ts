@@ -25,6 +25,7 @@ interface ForgeReady {
 
 const roots: Array<string> = [];
 const children: Array<ChildProcess> = [];
+const forge_root = resolve(".dist/validation/forge");
 const fake_codex_path = fileURLToPath(
 	new URL("../../engines/fixtures/fake-codex.cmd", import.meta.url),
 );
@@ -88,8 +89,8 @@ const StartForge = async (input: {
 	readonly root: string;
 	readonly token: string;
 }) => {
-	const executable = resolve(".dist/forge/Artisan Forge.exe");
-	const entry = resolve(".dist/forge/host.js");
+	const executable = resolve(forge_root, "Artisan Forge.exe");
+	const entry = resolve(forge_root, "host.js");
 	const child = spawn(executable, [entry], {
 		env: {
 			...process.env,
@@ -99,15 +100,15 @@ const StartForge = async (input: {
 			ARTISAN_DATABASE_PATH: input.database_path,
 			ARTISAN_LISTEN_HOST: "127.0.0.1",
 			ARTISAN_LISTEN_PORT: "0",
-			ARTISAN_MIGRATIONS_PATH: resolve(".dist/forge/migrations"),
-			ARTISAN_NATIVE_RUNTIME: resolve(".dist/forge/native-runtime"),
+			ARTISAN_MIGRATIONS_PATH: resolve(forge_root, "migrations"),
+			ARTISAN_NATIVE_RUNTIME: resolve(forge_root, "native-runtime"),
 			ARTISAN_NODE_EXECUTABLE: process.execPath,
-			ARTISAN_STATIC_FRONTEND_ROOT: resolve(".dist/forge/frontend"),
-			ARTISAN_WINDOWS_PROCESS_HOST: resolve(".dist/forge/windows-process-host.js"),
+			ARTISAN_STATIC_FRONTEND_ROOT: resolve(forge_root, "frontend"),
+			ARTISAN_WINDOWS_PROCESS_HOST: resolve(forge_root, "windows-process-host.js"),
 			/** Exercises the canonical long-lived Codex CLI stdio boundary. */
 			FAKE_APP_SERVER_REQUEST_FILE: join(input.root, "codex-app-server-requests.jsonl"),
 			FAKE_APP_SERVER_SCENARIO: "complete",
-			NODE_PATH: [resolve(".dist/forge/native-runtime"), process.env.NODE_PATH]
+			NODE_PATH: [resolve(forge_root, "native-runtime"), process.env.NODE_PATH]
 				.filter(Boolean)
 				.join(delimiter),
 		},
@@ -192,8 +193,8 @@ describe("standalone Artisan Forge process", () => {
 	it("serves the immutable app and accepts typed protocol requests independently of Electron", async () => {
 		const root = await mkdtemp(join(tmpdir(), "artisan-forge-process-"));
 		roots.push(root);
-		const executable = resolve(".dist/forge/Artisan Forge.exe");
-		const entry = resolve(".dist/forge/host.js");
+		const executable = resolve(forge_root, "Artisan Forge.exe");
+		const entry = resolve(forge_root, "host.js");
 		const token = "standalone-process-proof-token-with-32-chars";
 		const child = spawn(executable, [entry], {
 			env: {
@@ -204,11 +205,11 @@ describe("standalone Artisan Forge process", () => {
 				ARTISAN_FORGE_DEVELOPMENT: "1",
 				ARTISAN_LISTEN_HOST: "127.0.0.1",
 				ARTISAN_LISTEN_PORT: "0",
-				ARTISAN_MIGRATIONS_PATH: resolve(".dist/forge/migrations"),
-				ARTISAN_NATIVE_RUNTIME: resolve(".dist/forge/native-runtime"),
-				ARTISAN_STATIC_FRONTEND_ROOT: resolve(".dist/forge/frontend"),
-				ARTISAN_WINDOWS_PROCESS_HOST: resolve(".dist/forge/windows-process-host.js"),
-				NODE_PATH: [resolve(".dist/forge/native-runtime"), process.env.NODE_PATH]
+				ARTISAN_MIGRATIONS_PATH: resolve(forge_root, "migrations"),
+				ARTISAN_NATIVE_RUNTIME: resolve(forge_root, "native-runtime"),
+				ARTISAN_STATIC_FRONTEND_ROOT: resolve(forge_root, "frontend"),
+				ARTISAN_WINDOWS_PROCESS_HOST: resolve(forge_root, "windows-process-host.js"),
+				NODE_PATH: [resolve(forge_root, "native-runtime"), process.env.NODE_PATH]
 					.filter(Boolean)
 					.join(delimiter),
 			},

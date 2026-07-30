@@ -6,6 +6,7 @@
 	"scripts": {
 		"check": "tsc --noEmit",
 		"check:frontend": "pnpm --filter @artisan/frontend run build",
+		"check:forge": "vite build --config forge.vite.config.ts --mode validation",
 		"build:desktop": "pnpm run check:frontend && vite build --config desktop.vite.config.ts && vite build --config forge.vite.config.ts",
 		"build:native": "cargo build --workspace --release",
 		"check:native": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings",
@@ -29,7 +30,7 @@
 		"test": "vitest run",
 		"test:native": "cargo test --workspace",
 		"test:watch": "vitest",
-		"validate": "pnpm run format:check && pnpm run lint && pnpm run check && pnpm run check:frontend && pnpm run test && pnpm run check:native && pnpm run test:native"
+		"validate": "pnpm run format:check && pnpm run lint && pnpm run check && pnpm run check:frontend && pnpm run check:forge && pnpm run test && pnpm run check:native && pnpm run test:native"
 	},
 	"devDependencies": {
 		"@artisan/backend": "workspace:*",

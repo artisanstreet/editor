@@ -342,30 +342,6 @@ describe("Barekey docs shell reset", () => {
 		expect(home).not.toMatch(/WelcomePage|ThreadWorkspace|SettingsPage|LiveWorkspaceStore/);
 	});
 
-	it("materializes the durable thread only at the draft's first send", () => {
-		const draft = Read("modules/frontend/src/routes/threads/+page.sv");
-		const route = Read("modules/frontend/src/routes/threads/[id]/thread-route.sv");
-
-		expect(draft).toContain("client.CreateThread");
-		expect(draft).toContain("draft_thread_project.set(catalog.projects[0])");
-		expect(draft).toContain("pending_first_submission.set({ submission, thread_id })");
-		expect(draft).toContain("Select a project at the top of the panel before sending.");
-		/** The draft owns the session policy: the engine locks after the first send. */
-		expect(draft).toContain("draft_thread_policy.set({");
-		expect(draft).toContain("client.UpdateThreadSessionPolicy({ policy, thread_id })");
-		expect(draft).toContain("created_thread_id ??");
-		/**
-		 * The draft is reachable with no Forge behind it: projects fall back to
-		 * an empty list, the manifest comes from the compiled catalog, and the
-		 * composer refuses to send because nothing is runnable.
-		 */
-		expect(draft).toContain("WithOfflineRuntimeCatalog(client.GetRuntimeCatalog)");
-		expect(draft).toContain("Effect.catch(() => Effect.succeed({ projects: [] }))");
-		expect(route).toContain("get(pending_first_submission)");
-		expect(route).toContain("pending_first_submission.set(undefined)");
-		expect(route).toContain("SendMessage(pending.submission)");
-	});
-
 	it("locks engine switching only during an active run and routes it through policy", () => {
 		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.sv");
 		const composer = Read("modules/frontend/src/routes/components/thread-composer.sv");

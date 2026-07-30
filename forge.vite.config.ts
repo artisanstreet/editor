@@ -2,8 +2,6 @@ import { cpSync, existsSync, mkdirSync, realpathSync, writeFileSync } from "node
 import { resolve } from "node:path";
 import { defineConfig } from "vite";
 
-const forge_root = resolve(import.meta.dirname, ".dist", "forge");
-
 /**
  * A staged file can be held open by a running development Forge on Windows.
  * The stage keeps the previous copy instead of failing the whole rebuild —
@@ -18,7 +16,7 @@ const stage = (from: string, to: string) => {
 	}
 };
 
-const stage_forge_runtime = () => ({
+const stage_forge_runtime = (forge_root: string) => ({
 	closeBundle: () => {
 		const native_runtime_root = resolve(forge_root, "native-runtime");
 		const frontend_source = resolve(import.meta.dirname, ".dist/frontend");
@@ -98,36 +96,44 @@ const stage_forge_runtime = () => ({
 	name: "stage-artisan-forge-runtime",
 });
 
-export default defineConfig({
-	plugins: [stage_forge_runtime()],
-	resolve: {
-		alias: {
-			"@artisan/forge": resolve(import.meta.dirname, "modules/forge/src/index.ts"),
-			koffi: resolve(import.meta.dirname, "modules/desktop/src/koffi-shim.ts"),
-			"node-pty": resolve(import.meta.dirname, "modules/desktop/src/node-pty-shim.ts"),
-		},
-	},
-	ssr: { noExternal: true },
-	build: {
-		/**
-		 * Watch builds must not empty the staged runtime: the running dev Forge
-		 * executes from it, and the native runtime may be locked on Windows.
-		 * Clean release builds keep the default empty-then-stage behavior.
-		 */
-		emptyOutDir: process.env.ARTISAN_FORGE_WATCH !== "1",
-		outDir: ".dist/forge",
-		rollupOptions: {
-			input: {
-				ae: resolve(import.meta.dirname, "modules/cli/src/entry.ts"),
-				host: resolve(import.meta.dirname, "modules/forge/src/entry.ts"),
-				"windows-process-host": resolve(
-					import.meta.dirname,
-					"modules/engines/src/process/windows-process-host.ts",
-				),
+export default defineConfig(({ mode }) => {
+	const forge_root = resolve(
+		import.meta.dirname,
+		".dist",
+		mode === "validation" ? "validation/forge" : "forge",
+	);
+
+	return {
+		plugins: [stage_forge_runtime(forge_root)],
+		resolve: {
+			alias: {
+				"@artisan/forge": resolve(import.meta.dirname, "modules/forge/src/index.ts"),
+				koffi: resolve(import.meta.dirname, "modules/desktop/src/koffi-shim.ts"),
+				"node-pty": resolve(import.meta.dirname, "modules/desktop/src/node-pty-shim.ts"),
 			},
-			output: { entryFileNames: "[name].js", format: "es" },
 		},
-		ssr: true,
-		target: "node22",
-	},
+		ssr: { noExternal: true },
+		build: {
+			/**
+			 * Watch builds must not empty the staged runtime: the running dev Forge
+			 * executes from it, and the native runtime may be locked on Windows.
+			 * Clean release builds keep the default empty-then-stage behavior.
+			 */
+			emptyOutDir: process.env.ARTISAN_FORGE_WATCH !== "1",
+			outDir: forge_root,
+			rollupOptions: {
+				input: {
+					ae: resolve(import.meta.dirname, "modules/cli/src/entry.ts"),
+					host: resolve(import.meta.dirname, "modules/forge/src/entry.ts"),
+					"windows-process-host": resolve(
+						import.meta.dirname,
+						"modules/engines/src/process/windows-process-host.ts",
+					),
+				},
+				output: { entryFileNames: "[name].js", format: "es" },
+			},
+			ssr: true,
+			target: "node22",
+		},
+	};
 });
