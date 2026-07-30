@@ -1,118 +1,116 @@
 # Active Branch Handoff
 
-Last updated: 2026-07-30
-Branch continuity only. Durable verified status lives in
+Last updated: 2026-07-30. Branch continuity only. Durable verified status is in
 [`docs/status/backend-completion-matrix.md`](../docs/status/backend-completion-matrix.md).
 
 ## Working State
 
-- Repository: `C:\Users\sander\Desktop\artisan-editor`
-- Branch/HEAD: `master` at `ef34399`, tracking `origin/master`. Work directly
-  on `master`; do not create branches, worktrees, or PRs unless requested.
-- The worktree contains extensive pre-existing Sander WIP across backend,
-  protocol, transport, frontend, tests, migrations, and dev tooling. Preserve
-  it. Stage only task-owned paths and never revert or overwrite unknown edits.
-- Two production Engines are registered: Codex CLI and Claude Code CLI. The
-  old Codex-only boundary is retired.
+- Repository `C:\Users\sander\Desktop\artisan-editor`; direct `master`,
+  tracking `origin/master`. Research is committed/pushed through `357bd2a`.
+- Extensive pre-existing Sander WIP is present. Preserve it and stage only
+  task-owned content. `modules/frontend/src/routes/threads/+page.sv` is
+  pre-staged user work and must remain staged but uncommitted.
+- Production Engines are Codex CLI and Claude Code CLI.
 
-## Architecture That Must Stay True
+## Invariants
 
-- Pure transformations remain ordinary TypeScript. I/O, configuration,
-  concurrency, shared mutable ownership, lifecycle, and external capabilities
-  are Effect programs supplied through Services and Layers. One top-level
-  Effect runtime exists per executable.
-- Forge owns application state. Clients consume schema-validated typed RPC and
-  native binary WebSocket frames after pairing and authoritative hydration.
-- Engine adapters own native subprocess protocols; orchestration owns visible
-  agent identity, thread/run lifecycle, policy, normalized observations, raw
-  event retention, and durable native session affinity.
-- Snowflake IDs are non-secret identities. Tokens and nonces remain
-  cryptographically random.
+- Pure transforms are ordinary TypeScript. I/O, configuration, concurrency,
+  shared state, lifecycle, and external capabilities use Effect Services and
+  Layers. Schema-decode every external or persistence boundary.
+- Forge owns application state. Engine adapters own native subprocess
+  protocols; orchestration owns thread/run lifecycle and durable affinity.
+- Native provider IDs never cross engines. Portable handoff is a private,
+  bounded, immutable checkpoint with a fixed cut and SHA-256 integrity hash.
+- A portable target always starts fresh. Compatible same-engine resume is
+  version/model gated and carries the new ordered request content explicitly.
 
 ## Active Milestone: Portable Compaction / Engine Switching
 
-- Goal: reverse engineer native compaction in every production Engine and
-  support a thread continuing on a different engine/model by extracting a
-  usable compacted checkpoint and supplying it to the new Engine.
-- Codex CLI 0.145.0: `thread/compact/start` returns no summary and public
-  `contextCompaction` items contain only an ID. OpenAI remote compaction
-  persists an encrypted `compaction` item; 1,741 local rollout records sampled
-  had no plaintext compacted message. Same-engine model switching can use
-  native resume with a version-gated model override. Cross-engine export uses
-  a settled ephemeral fork plus an ordinary captured summarization turn, with
-  canonical-transcript compaction as fallback. A provider alias can force the
-  plaintext local compactor but is internal/experimental, not production.
-- Claude Code 2.1.220: the official `PostCompact` hook supplies
-  `compact_summary` in plaintext. Load an Artisan hook plugin per invocation
-  via `--plugin-dir`; the hook records the pre-append transcript offset and
-  sends untrusted input to a private receiver. Version-gated 2.1.220 parsing
-  claims the following `compact_boundary`/`isCompactSummary` pair. Missing or
-  uncorrelated output falls back to canonical compaction. Artisan currently
-  ignores `compact_boundary`.
-- Native session identifiers never cross engines. Define a bounded, immutable,
-  typed checkpoint above adapters with source cut, summary plus post-boundary
-  tail, version, and integrity hash. A target engine starts fresh and receives
-  the checkpoint plus the next user request at user precedence; persist private
-  lineage separately from native resume tokens.
-- Effect/Effect AI research found useful typed model/prompt/chat capabilities
-  but no abstraction that makes Codex/Claude CLI continuation portable. Keep
-  CLI extraction/injection behind custom Effect Services and Layers; a
-  provider-neutral summarizer can be added behind a separate service.
-- Any implementation must coexist with Sander's modified
-  `session-policy.ts`, orchestration repository/contracts/schema, protocol
-  routes, frontend composer/model controls, and their tests. Inspect live diffs
-  before touching those files.
-- Research, focused verification, and independent review were committed and
-  pushed to `master` as `4fa57ab`. Product support is not implemented; do not
-  update the completion matrix until code and integration tests exist.
+- Canonical design and reverse engineering are in
+  `docs/research/portable-engine-handoff.md`.
+- Codex CLI 0.145.0 exposes no plaintext native compaction summary. Cross-engine
+  export uses an exact settled ephemeral `thread/fork` and one constrained,
+  no-tool structured summary turn. Invalid/unavailable export falls back to the
+  canonical transcript at the fixed cut.
+- Claude Code 2.1.220 exposes `compact_summary` through official `PostCompact`.
+  An invocation-scoped plugin records the pre-append transcript identity and
+  offset; a private receiver pairs it with the immediately following
+  `compact_boundary`/`isCompactSummary` records.
+- Codex and Claude native continuation require an explicit target model and an
+  exact version-tested adapter decision. Codex also verifies the target through
+  bounded `model/list` pagination.
 
-## Current Product Continuity
+## Completed Implementation
 
-- Each Artisan home owns one Forge with config, secrets, state, log, and data
-  at the home root. Both CLIs migrate one legacy profile and reject ambiguous
-  multi-profile homes.
-- Installed rendering uses the sandboxed, context-isolated, bridge-free
-  Electron editor at `artisan://app`; hidden `ae open --handoff` performs
-  one-time loopback pairing. Development may use Forge-hosted or Vite HMR
-  browser rendering.
-- Installed Forge does not host the SPA. Static hosting is a development
-  opt-in. `package:desktop` bundles the renderer with loopback-only CSP.
-- Forge-owned state and Codex SQLite are home-scoped. `CODEX_HOME` remains
-  user-global. Claude runs share `~/.claude` because relocating
-  `CLAUDE_CONFIG_DIR` also relocates credentials.
-- Codex app-server and exec fallback plus Claude stream-json are production
-  subprocess adapters. Claude honestly lacks steer/approval/question/subagent
-  support.
-- Session model selection resolves an explicit enabled native model rather
-  than silently inheriting a user's CLI default. Reasoning completion is
-  normalized for Claude and Codex exec; app-server exposes no equivalent
-  terminal reasoning signal.
-- Engine usage has a three-minute last-good backend cache and a
-  schema-validated frontend cache. Claude's OAuth usage endpoint may return
-  persistent 429, in which case the adapter uses headless `/usage`.
-- `ae doctor` verifies payload manifests; pre-manifest payloads are reported
-  as unverifiable but healthy. Do not modify the real installed 0.1.0 home;
-  use repository builds and temporary fixtures.
+- Engine contracts expose native compatibility, portable export, ordered
+  `next_content`, and private native-compaction results.
+- Codex export is version gated, model probed, strictly correlated, bounded,
+  pagination aware, and rejects tool/request activity. Resume sends exact
+  ordered text/image input.
+- Claude capture is private and summary-free publicly. It confines paths to the
+  real Claude project root, verifies descriptor identity, bounds bytes/time,
+  rejects symlinks/replacements/malformed input, waits the full race window for
+  conflicts, treats duplicate delivery idempotently, and selects the latest
+  valid compaction by transcript offset. The packaged helper cleans temp files.
+- `thread-continuation-model.ts` owns checkpoint bounds, hashing, canonical
+  fallback, logical post-boundary tail, and multimodal-safe injection.
+- `ThreadContinuationService` chooses fresh/native/Claude-summary/Codex-export/
+  canonical paths and persists immutable private lineage.
+- Separate continuation tables/migration avoid absorbing dirty shared
+  `schema.ts` WIP. Persistence pins exact journal cuts, verifies private
+  compactions, prepares/opens/binds/fails atomically, serializes neighboring
+  launches, reconciles cold-start stranding, and obeys erasure fences.
+- Orchestration prepares before open, strips summary material from public
+  observations, records native compaction privately after close, binds native
+  identity atomically, wakes queued dispatch, and performs cold recovery once.
+- Thread erasure deletes all continuation state. Forge packages the Claude hook
+  helper as `claude-post-compact-hook.js`.
+- End-to-end migrated-SQLite tests prove Claude → Codex, Codex → Claude,
+  compatible Claude model resume, ordered multimodal input, private lineage,
+  erasure, and three rapid serialized Codex launches.
+- Canonical history is schema-decoded and bounded in SQL, ordered by same-agent
+  logical run starts rather than the globally interleaved journal. Exact counts,
+  earliest objectives, source cuts, and native-summary boundaries remain
+  correct when the next request is queued before the prior run settles.
+- Claude boundary UUID and trigger must agree across stream, transcript, hook,
+  raw provenance, persisted state, and launch validation. Persisted summary
+  hashes are recomputed on read and launch; tampering falls back canonically.
 
-## Verification / Known Red
+## Verification
 
-- Portable-handoff focused suites: 39 passed, 1 skipped. Exact installed CLIs
-  were Codex 0.145.0 and Claude Code 2.1.220. Schema, tagged source, persisted
-  shapes, and strict-config behavior were inspected without printing user
-  conversation content. Final two-pass independent review approved; task docs
-  pass targeted oxfmt and `git diff --check`.
-- Full `pnpm run validate` stopped on formatting in four pre-existing WIP files:
-  `activity-status.test.ts`, `shell-source-layout.test.ts`,
-  `project-locator.ts`, and `global.css`. Independent lint, TypeScript, frontend
-  build, and Rust format passed. Full Vitest: 250 files passed, 3 skipped;
-  5 files/10 assertions failed in existing catalog/manifest, Forge/project-ID,
-  workspace-rebuild, and sidebar WIP. Rust tests passed 45/45; Windows
-  Application Control blocked `cargo-clippy`. The research docs are isolated
-  and verified; stage only their three task-owned paths for the milestone.
-- Last broad green: 2026-07-28 single-Forge refactor, 228 test files passed,
-  3 skipped; 1,548 tests passed, 7 skipped; TypeScript, lint, format, Rust
-  format/clippy/tests all green.
-- Aggregate `pnpm run validate` can exceed bounded capture windows. Electron
-  install preflight and Windows Application Control have caused intermittent
-  environment failures; distinguish them from product failures with focused
-  commands.
+- Final independent P0-P3 review is clean after resolving logical-run lineage,
+  summary integrity, boundary-trigger, forward-compatible raw-frame, mailbox
+  overflow, and content-only resume findings.
+- `pnpm run check` passes. The final 14-file provider/continuation/packaging
+  matrix passes 140 tests with 1 explicit skip. Native formatting/clippy and 45
+  Rust tests pass.
+- `pnpm run lint` and the production frontend build pass with pre-existing WIP
+  warnings. Full Vitest reaches 1,837 passes and 7 skips; 10 failures are in
+  unrelated dirty catalog/frontend/Forge/workspace-rebuild WIP.
+- Aggregate `pnpm run validate` stops at four unrelated dirty formatting files:
+  `.tests/frontend/activity-status.test.ts`,
+  `.tests/frontend/shell-source-layout.test.ts`,
+  `modules/backend/src/threads/project-locator.ts`, and
+  `modules/frontend/src/lib/styles/global.css`.
+- Remaining milestone work is task-only commit/push and final upstream audit.
+
+## Dirty-Tree Integration Notes
+
+- Task-owned new files are the continuation model/service/repository/schema,
+  migration `20260730121130_chilly_tarot`, Claude capture/helper, and focused
+  continuation/package tests.
+- Shared dirty files include `agent-orchestrator.ts`, `backend-runtime.ts`,
+  backend `index.ts`, `forge.vite.config.ts`, provider adapters/tests, and other
+  Sander WIP. Isolate task hunks when committing; do not absorb unrelated work.
+- Unrelated untracked migrations `20260729084837`, `20260729132743`,
+  `20260729141622`, `20260730093655`, and `20260730110447` are user WIP.
+
+## Product Continuity
+
+- One Forge per Artisan home owns config, secrets, state, log, and data.
+- Installed renderer is sandboxed at `artisan://app`; Forge does not host the
+  SPA. `ae open --handoff` performs one-time loopback pairing.
+- Codex app-server/exec fallback and Claude stream-json are production adapters.
+  Claude has no steer/approval/question/subagent support.
+- Forge state and Codex SQLite are home scoped. `CODEX_HOME` is user global;
+  Claude shares `~/.claude` because relocating config also moves credentials.

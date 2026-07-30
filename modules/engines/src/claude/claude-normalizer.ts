@@ -5,6 +5,7 @@ import { TokenCount } from "../engine";
 import type {
 	EngineAgentMessageCompletedObservation,
 	EngineAgentMessageDeltaObservation,
+	EngineCompactionObservation,
 	EngineFileObservation,
 	EngineObservation,
 	EngineRawProvenance,
@@ -41,6 +42,14 @@ const InitSchema = Schema.Struct({
 const RetrySchema = Schema.Struct({
 	type: Schema.Literal("system"),
 	subtype: Schema.Literal("api_retry"),
+});
+const CompactBoundarySchema = Schema.Struct({
+	type: Schema.Literal("system"),
+	subtype: Schema.Literal("compact_boundary"),
+	uuid: Schema.NonEmptyString,
+	compactMetadata: Schema.Struct({
+		trigger: Schema.Literals(["manual", "auto"]),
+	}),
 });
 /** Names the `system` bookkeeping subtypes the CLI emits around every turn. */
 const SystemSubtypeSchema = Schema.Struct({
@@ -222,7 +231,6 @@ const silent_system_subtypes = new Set([
 	"hook_response",
 	"status",
 	"thinking_tokens",
-	"compact_boundary",
 ]);
 const silent_stream_events = new Set([
 	"message_start",
@@ -376,6 +384,22 @@ export function normalize_claude_event(
 		return [{ ...make_base(input, "system.init"), _tag: "run_state", state: "running" }];
 	if (decode(RetrySchema, input.payload) !== undefined)
 		return [native_action(input, "Claude API retry progress")];
+	const compact_boundary = decode(CompactBoundarySchema, input.payload);
+	if (compact_boundary !== undefined) {
+		const base = make_base(input, "system.compact_boundary", "compact_boundary");
+		return [
+			{
+				...base,
+				_tag: "compaction",
+				raw: {
+					...base.raw,
+					native_id: compact_boundary.uuid,
+					native_method: "system.compact_boundary",
+				},
+				state: "completed",
+			} satisfies EngineCompactionObservation,
+		];
+	}
 
 	/** Bookkeeping frames stay in raw provenance only. */
 	const system_frame = decode(SystemSubtypeSchema, input.payload);

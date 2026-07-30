@@ -310,6 +310,29 @@ export {
 } from "./model-behaviour/private-file-permissions";
 export { AgentOrchestrator } from "./orchestration/agent-orchestrator";
 export {
+	encode_portable_checkpoint_content,
+	PortableCheckpoint,
+	render_portable_checkpoint_context,
+	render_portable_checkpoint_prompt,
+	select_portable_checkpoint_content,
+} from "./orchestration/thread-continuation-model";
+export {
+	ThreadContinuationService,
+	ThreadContinuationServiceFailure,
+	ThreadContinuationServiceLive,
+	type PreparedThreadContinuation,
+	type PrepareThreadContinuationInput,
+} from "./orchestration/thread-continuation-service";
+export {
+	ThreadContinuationConflict,
+	ThreadContinuationFailure,
+	ThreadContinuationRepository,
+	ThreadContinuationRepositoryLive,
+	type ContinuationLaunch,
+	type ThreadContinuationContext,
+	type ThreadContinuationLaunchState,
+} from "./persistence/thread-continuation-repository";
+export {
 	AgentGraphOrchestrator,
 	AgentGraphOrchestratorLive,
 } from "./orchestration/agent-graph-orchestrator";

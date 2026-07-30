@@ -3,6 +3,9 @@ import { Cause, Context, Deferred, Effect, Exit, Layer, Option, Ref, Scope, Stre
 import {
 	EngineRegistry,
 	type EngineCommand,
+	type EngineGlobalGuidance,
+	type EngineObservation,
+	type EngineOpenInput,
 	type EngineRun,
 	type EngineUserInputPart,
 } from "@artisan/engines";
@@ -10,11 +13,13 @@ import type { CommandEnvelope } from "@artisan/protocol";
 
 import {
 	OrchestrationRepository,
+	OrchestrationFailure,
 	type AcceptedOrchestrationCommand,
 	type OrchestrationError,
 	type PendingWork,
 	type RecoverableNativeRun,
 } from "../persistence/orchestration-repository";
+import { ThreadContinuationRepository } from "../persistence/thread-continuation-repository";
 import type {
 	AuthoritativeCommandEnvelope,
 	AuthoritativeThreadSendMessageCommand,
@@ -23,7 +28,19 @@ import type {
 import { GlobalGuidanceService } from "../guidance/guidance-service";
 import { MakeThreadDispatchFence } from "../threads/internal/thread-dispatch-fence";
 import { IntakePolicy } from "./intake-policy";
-import { IsSessionPolicyEngine, MakeSessionPolicyRunMetadata } from "./session-policy";
+import {
+	render_portable_checkpoint_context,
+	render_portable_checkpoint_prompt,
+} from "./thread-continuation-model";
+import {
+	ThreadContinuationService,
+	type PreparedThreadContinuation,
+} from "./thread-continuation-service";
+import {
+	IsSessionPolicyEngine,
+	MakeSessionPolicyRunMetadata,
+	SessionPolicyResolvedModel,
+} from "./session-policy";
 
 interface LiveRun {
 	readonly done: Deferred.Deferred<void>;
@@ -61,6 +78,69 @@ const InitialContent = (payload: AuthoritativeThreadSendMessageCommand) => {
 		});
 	}
 	return content;
+};
+
+const PublicObservation = (observation: EngineObservation): EngineObservation => {
+	if (observation._tag !== "compaction" || observation.summary === undefined) return observation;
+	const { summary: _private_summary, ...public_observation } = observation;
+	return public_observation;
+};
+
+const MakeEngineOpenInput = (
+	work: PendingWork & { readonly payload: AuthoritativeThreadSendMessageCommand },
+	prepared: PreparedThreadContinuation,
+	run_metadata: ReturnType<typeof MakeSessionPolicyRunMetadata>,
+	global_guidance: EngineGlobalGuidance | undefined,
+): EngineOpenInput => {
+	const content = InitialContent(work.payload);
+	const common = {
+		artisan_run_id: work.run_id,
+		...(global_guidance === undefined ? {} : { global_guidance }),
+		...run_metadata,
+		working_directory: work.working_directory,
+	};
+
+	if (prepared._tag === "native") {
+		return {
+			...common,
+			_tag: "resume" as const,
+			...(content === undefined ? {} : { next_content: content }),
+			next_text: work.payload.text,
+			resume_token: prepared.resume_token,
+		};
+	}
+
+	if (prepared._tag === "portable") {
+		return content === undefined
+			? {
+					...common,
+					_tag: "start" as const,
+					initial_text: render_portable_checkpoint_prompt({
+						checkpoint: prepared.checkpoint,
+						current_request: work.payload.text,
+					}),
+				}
+			: {
+					...common,
+					_tag: "start" as const,
+					initial_content: [
+						{
+							text: render_portable_checkpoint_context(prepared.checkpoint),
+							type: "text" as const,
+						},
+						...content,
+					],
+					// Adapters use ordered content when it is present; this required field is not duplicated.
+					initial_text: work.payload.text,
+				};
+	}
+
+	return {
+		...common,
+		_tag: "start" as const,
+		...(content === undefined ? {} : { initial_content: content }),
+		initial_text: work.payload.text,
+	};
 };
 
 interface StartFailure {
@@ -131,9 +211,12 @@ export const AgentOrchestratorLive = Layer.effect(
 		const guidance = yield* GlobalGuidanceService;
 		const intake_policy = yield* IntakePolicy;
 		const repository = yield* OrchestrationRepository;
+		const continuation = yield* ThreadContinuationService;
+		const continuation_repository = yield* ThreadContinuationRepository;
 		const service_scope = yield* Scope.make();
 		const live_runs = yield* Ref.make(new Map<string, LiveRun>());
 		const dispatch_state = yield* Ref.make<DispatchState>("idle");
+		const recovery_started = yield* Ref.make(false);
 		const dispatch_fence = yield* MakeThreadDispatchFence;
 
 		const RemoveLiveRun = (run_id: string, run_scope: Scope.Scope) =>
@@ -167,6 +250,14 @@ export const AgentOrchestratorLive = Layer.effect(
 
 		const MarkStartFailure = (work: PendingWork, failure: StartFailure) =>
 			Effect.gen(function* () {
+				// Pre-provider validation can fail before the ordinary running transition.
+				// Settling it first keeps the canonical run lifecycle from remaining queued.
+				yield* repository
+					.MarkRunStarted(work.run_id)
+					.pipe(Effect.catchCause(() => Effect.succeed([])));
+				yield* continuation_repository
+					.FailLaunch(work.run_id, `engine_start_${failure.kind}`)
+					.pipe(Effect.catchCause(() => Effect.void));
 				yield* repository
 					.RecordObservation({
 						_tag: "process_diagnostic",
@@ -199,6 +290,7 @@ export const AgentOrchestratorLive = Layer.effect(
 				yield* repository
 					.MarkOutboxUndeliverable(work.command_id)
 					.pipe(Effect.catchCause(() => Effect.void));
+				yield* Effect.suspend(() => WakeDispatcher);
 
 				yield* Effect.sync(() => {
 					console.error("Artisan engine startup failed", {
@@ -214,23 +306,65 @@ export const AgentOrchestratorLive = Layer.effect(
 			});
 
 		const ObserveRun = (work: Pick<PendingWork, "run_id">, live: LiveRun) =>
-			Stream.runForEach(live.run.Events, repository.RecordObservation).pipe(
+			Stream.runForEach(live.run.Events, (observation) => {
+				const public_observation = PublicObservation(observation);
+				return repository.RecordObservation(public_observation).pipe(
+					Effect.andThen(
+						continuation_repository.RecordObservationMetadata(public_observation),
+					),
+					Effect.asVoid,
+					Effect.catchCause((cause) =>
+						Effect.sync(() => {
+							console.error("Artisan continuation observation metadata failed", {
+								failure_kind: Cause.hasInterruptsOnly(cause)
+									? "interrupted"
+									: "persistence",
+								run_id: work.run_id,
+							});
+						}),
+					),
+				);
+			}).pipe(
 				Effect.andThen(live.run.Closed),
+				Effect.andThen(
+					live.run.NativeCompaction === undefined
+						? Effect.void
+						: live.run.NativeCompaction.pipe(
+								Effect.flatMap(
+									Option.match({
+										onNone: () => Effect.void,
+										onSome: (value) =>
+											continuation_repository.RecordNativeCompaction(
+												work.run_id,
+												value,
+											),
+									}),
+								),
+							),
+				),
 				Effect.asVoid,
-				Effect.catch(() => Effect.void),
+				Effect.catchCause((cause) =>
+					Effect.sync(() => {
+						console.error("Artisan continuation finalization failed", {
+							failure_kind: Cause.hasInterruptsOnly(cause)
+								? "interrupted"
+								: "persistence",
+							run_id: work.run_id,
+						});
+					}),
+				),
 				Effect.ensuring(
 					Effect.gen(function* () {
 						yield* Deferred.succeed(live.done, undefined);
 						yield* RemoveLiveRun(work.run_id, live.scope);
+						yield* Effect.suspend(() => WakeDispatcher);
 					}),
 				),
 			);
 
 		const StartClaimedRun = (work: PendingWork) =>
 			Effect.gen(function* () {
-				const started = yield* repository.MarkRunStarted(work.run_id);
-
-				if (started.length === 0 || work.payload.type !== "thread.send_message") {
+				if (work.payload.type !== "thread.send_message") {
 					yield* MarkStartFailure(work, {
 						kind: "configuration",
 						message:
@@ -272,13 +406,11 @@ export const AgentOrchestratorLive = Layer.effect(
 					return;
 				}
 
-				const run_scope = yield* Scope.make();
 				const policy = yield* repository.GetSessionPolicy(work.thread_id);
 				if (
 					!IsSessionPolicyEngine(policy, work.engine_id) &&
 					engine.Descriptor.transport !== "test"
 				) {
-					yield* Scope.close(run_scope, Exit.succeed(undefined));
 					yield* MarkStartFailure(work, {
 						kind: "configuration",
 						message:
@@ -287,19 +419,71 @@ export const AgentOrchestratorLive = Layer.effect(
 
 					return;
 				}
-				const initial_content = InitialContent(work.payload);
-				const open_exit = yield* engine
-					.Open({
-						_tag: "start",
-						artisan_run_id: work.run_id,
-						...(Option.isSome(resolved_guidance.value)
-							? { global_guidance: resolved_guidance.value.value }
-							: {}),
-						initial_text: work.payload.text,
-						...(initial_content === undefined ? {} : { initial_content }),
-						...MakeSessionPolicyRunMetadata(policy),
-						working_directory: work.working_directory,
+				const run_metadata = MakeSessionPolicyRunMetadata(policy);
+				const run_model = SessionPolicyResolvedModel(policy);
+				const prepared_exit = yield* continuation
+					.Prepare({
+						command_id: work.command_id,
+						...(run_metadata.model === undefined
+							? {}
+							: { target_model: run_metadata.model }),
+						...(run_model === undefined ? {} : { target_model_id: run_model }),
+						target_run_id: work.run_id,
 					})
+					.pipe(Effect.exit);
+
+				if (
+					Exit.isFailure(prepared_exit) ||
+					prepared_exit.value.launch_state !== "prepared"
+				) {
+					yield* MarkStartFailure(work, {
+						...(Exit.isFailure(prepared_exit)
+							? { diagnostic: Cause.pretty(prepared_exit.cause) }
+							: {}),
+						kind: "configuration",
+						message:
+							"Engine startup failed while preparing durable continuation state.",
+					});
+
+					return;
+				}
+				const prepared = prepared_exit.value;
+				const opening = yield* continuation_repository
+					.MarkOpening(work.run_id)
+					.pipe(Effect.exit);
+				if (Exit.isFailure(opening)) {
+					yield* MarkStartFailure(work, {
+						diagnostic: Cause.pretty(opening.cause),
+						kind: "configuration",
+						message: "Engine startup failed while fencing its continuation launch.",
+					});
+
+					return;
+				}
+				const started = yield* repository.MarkRunStarted(work.run_id);
+				if (started.length === 0) {
+					yield* MarkStartFailure(work, {
+						kind: "configuration",
+						message:
+							"Engine startup was rejected because the queued run was no longer startable.",
+					});
+
+					return;
+				}
+
+				const run_scope = yield* Scope.make();
+				const open_input = MakeEngineOpenInput(
+					work as PendingWork & {
+						readonly payload: AuthoritativeThreadSendMessageCommand;
+					},
+					prepared,
+					run_metadata,
+					Option.isSome(resolved_guidance.value)
+						? resolved_guidance.value.value
+						: undefined,
+				);
+				const open_exit = yield* engine
+					.Open(open_input)
 					.pipe(
 						Scope.provide(run_scope),
 						Effect.timeoutOption(engine_open_timeout_ms),
@@ -325,22 +509,23 @@ export const AgentOrchestratorLive = Layer.effect(
 				}
 				const opened_run = run.value;
 
-				const persisted = yield* repository
-					.PersistNativeRun(
-						work.run_id,
-						opened_run.native_thread_id,
-						opened_run.resume_token,
-					)
-					.pipe(
-						Effect.map(() => true),
-						Effect.catch(() => Effect.succeed(false)),
-					);
+				const bound = yield* continuation_repository
+					.BindTarget({
+						command_id: work.command_id,
+						...(run_model === undefined ? {} : { model_id: run_model }),
+						native_thread_id: opened_run.native_thread_id,
+						resume_token: opened_run.resume_token,
+						target_run_id: work.run_id,
+					})
+					.pipe(Effect.exit);
 
-				if (!persisted) {
+				if (Exit.isFailure(bound)) {
 					yield* Scope.close(run_scope, Exit.succeed(undefined));
 					yield* MarkStartFailure(work, {
+						diagnostic: Cause.pretty(bound.cause),
 						kind: "configuration",
-						message: "Engine startup failed while saving the native session identity.",
+						message:
+							"Engine startup failed while atomically binding its native session.",
 					});
 
 					return;
@@ -354,26 +539,18 @@ export const AgentOrchestratorLive = Layer.effect(
 					thread_id: work.thread_id,
 				} satisfies LiveRun;
 				yield* Ref.update(live_runs, (runs) => new Map(runs).set(work.run_id, live));
-				const completed = yield* repository.CompleteOutbox(work.command_id).pipe(
-					Effect.as(true),
-					Effect.catch(() => Effect.succeed(false)),
-				);
-
-				if (!completed) {
-					yield* RemoveLiveRun(work.run_id, run_scope);
-					yield* MarkStartFailure(work, {
-						kind: "configuration",
-						message: "Engine startup failed while completing its durable dispatch.",
-					});
-
-					return;
-				}
-
 				yield* Effect.forkIn(ObserveRun(work, live), service_scope);
 			});
 		const StartRunUnfenced = (work: PendingWork) =>
 			Effect.gen(function* () {
 				if ((yield* Ref.get(live_runs)).has(work.run_id)) {
+					return;
+				}
+
+				const ready = yield* continuation_repository
+					.IsDispatchReady(work.run_id)
+					.pipe(Effect.catchCause(() => Effect.succeed(false)));
+				if (!ready) {
 					return;
 				}
 
@@ -449,7 +626,12 @@ export const AgentOrchestratorLive = Layer.effect(
 				}
 
 				const persisted = yield* repository
-					.PersistNativeRun(work.run_id, run.native_thread_id, run.resume_token)
+					.PersistNativeRun(
+						work.run_id,
+						run.native_thread_id,
+						run.resume_token,
+						SessionPolicyResolvedModel(policy),
+					)
 					.pipe(
 						Effect.as(true),
 						Effect.catch(() => Effect.succeed(false)),
@@ -696,13 +878,23 @@ export const AgentOrchestratorLive = Layer.effect(
 		const HandleInbound = (command: CommandEnvelope) => HandleCommand(command, true);
 
 		const Recover = Effect.gen(function* () {
-			/** Recovery is a cold-start operation. Never interrupt an in-memory run merely because a caller re-reads recovery state. */
-			if ((yield* Ref.get(live_runs)).size > 0) {
+			/**
+			 * Recovery is a one-shot cold-start operation. In particular, a caller
+			 * must not mistake an Engine.Open that has not returned yet for an
+			 * ownerless launch merely because it is not in `live_runs`.
+			 */
+			const first_recovery = yield* Ref.modify(recovery_started, (started) =>
+				started ? ([false, true] as const) : ([true, true] as const),
+			);
+			if (!first_recovery) {
 				yield* WakeDispatcher;
 
 				return;
 			}
 
+			yield* continuation_repository
+				.ReconcileStranded()
+				.pipe(Effect.mapError((cause) => new OrchestrationFailure({ cause })));
 			const recoverable = yield* repository.ClaimNativeRecoveries();
 			yield* Effect.forEach(recoverable, ResumeRun, {
 				concurrency: "unbounded",

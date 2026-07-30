@@ -80,6 +80,11 @@ if (process.argv.includes("--version")) {
 		process.exit(0);
 	}
 
+	if (version_scenarios.some((scenario) => scenario.startsWith("continuation"))) {
+		process.stdout.write("codex-cli 0.145.0\n");
+		process.exit(0);
+	}
+
 	if (version_scenarios.includes("version-older")) {
 		process.stdout.write("codex-cli 0.142.4\n");
 		process.exit(0);
@@ -325,6 +330,53 @@ function handle_request(request: FixtureRecord) {
 		return;
 	}
 
+	if (request.method === "model/list") {
+		if (process.env.FAKE_APP_SERVER_SCENARIO === "continuation-model-pagination") {
+			respond(
+				request.id,
+				request.params.cursor === "models-page-2"
+					? { data: [{ id: "gpt-later" }], nextCursor: null }
+					: { data: [{ id: "gpt-5" }], nextCursor: "models-page-2" },
+			);
+
+			return;
+		}
+		respond(request.id, { data: [{ id: "gpt-5" }, { id: "gpt-5-mini" }] });
+
+		return;
+	}
+
+	if (request.method === "thread/fork") {
+		if (process.env.FAKE_APP_SERVER_SCENARIO === "continuation-fork-rejected") {
+			write_frame({
+				error: { code: -32601, message: "thread/fork unsupported" },
+				id: request.id,
+			});
+
+			return;
+		}
+		if (
+			request.params.threadId !== "thread-source" ||
+			request.params.lastTurnId !== "turn-settled" ||
+			request.params.cwd !== "C:\\workspace" ||
+			request.params.ephemeral !== true ||
+			request.params.approvalPolicy !== "never" ||
+			request.params.sandbox !== "read-only" ||
+			(process.env.FAKE_APP_SERVER_SCENARIO === "continuation" &&
+				request.params.model !== "gpt-5")
+		) {
+			write_frame({
+				error: { code: -32602, message: "invalid fork boundary" },
+				id: request.id,
+			});
+
+			return;
+		}
+		respond(request.id, { thread: make_thread("thread-export") });
+
+		return;
+	}
+
 	if (request.method === "turn/start") {
 		if (process.env.FAKE_APP_SERVER_REQUEST_FILE) {
 			appendFileSync(
@@ -352,6 +404,149 @@ function handle_request(request: FixtureRecord) {
 					turn: make_turn(active_turn_id),
 				},
 			});
+		}
+
+		if (request.params.threadId === "thread-export") {
+			const scenario = process.env.FAKE_APP_SERVER_SCENARIO;
+			if (
+				request.params.approvalPolicy !== "never" ||
+				request.params.sandboxPolicy?.type !== "readOnly" ||
+				request.params.outputSchema === undefined
+			) {
+				write_frame({
+					error: { code: -32602, message: "unsafe export turn" },
+					id: request.id,
+				});
+
+				return;
+			}
+			if (scenario === "continuation-pre-response") {
+				write_frame({
+					method: "item/completed",
+					params: {
+						item: {
+							id: "export-message",
+							memoryCitation: null,
+							phase: "final",
+							text: '{"summary":"handoff"}',
+							type: "agentMessage",
+						},
+						threadId: "thread-export",
+						turnId: active_turn_id,
+					},
+				});
+				write_frame({
+					method: "turn/completed",
+					params: {
+						threadId: "thread-export",
+						turn: make_turn(active_turn_id, "completed"),
+					},
+				});
+			}
+			if (scenario === "continuation-generic-tool-pre-response") {
+				write_frame({
+					method: "item/started",
+					params: {
+						item: { id: "export-command", type: "commandExecution" },
+						threadId: "thread-export",
+						turnId: active_turn_id,
+					},
+				});
+			}
+			respond(request.id, { turn: make_turn(active_turn_id) });
+			setTimeout(() => {
+				if (scenario === "continuation-timeout") return;
+				if (scenario === "continuation-pre-response") return;
+				if (scenario === "continuation-generic-tool-pre-response") return;
+				if (scenario === "continuation-server-request") {
+					write_frame({
+						id: "export-approval",
+						method: "item/commandExecution/requestApproval",
+						params: {},
+					});
+
+					return;
+				}
+				if (scenario === "continuation-tool") {
+					write_frame({ method: "item/commandExecution/outputDelta", params: {} });
+
+					return;
+				}
+				if (scenario === "continuation-foreign-thread") {
+					write_frame({
+						method: "item/completed",
+						params: {
+							item: { id: "foreign-command", type: "commandExecution" },
+							threadId: "thread-foreign",
+							turnId: active_turn_id,
+						},
+					});
+					write_frame({
+						method: "turn/completed",
+						params: {
+							threadId: "thread-foreign",
+							turn: make_turn(active_turn_id, "completed"),
+						},
+					});
+				}
+				if (scenario === "continuation-failed" || scenario === "continuation-interrupted") {
+					write_frame({
+						method: "turn/completed",
+						params: {
+							threadId: "thread-export",
+							turn: make_turn(
+								active_turn_id,
+								scenario === "continuation-failed" ? "failed" : "interrupted",
+							),
+						},
+					});
+
+					return;
+				}
+				if (scenario !== "continuation-missing-message") {
+					write_frame({
+						method: "item/completed",
+						params: {
+							item: {
+								id: "export-message",
+								memoryCitation: null,
+								phase:
+									scenario === "continuation-commentary-message"
+										? "commentary"
+										: "final",
+								text: '{"summary":"handoff"}',
+								type: "agentMessage",
+							},
+							threadId: "thread-export",
+							turnId: active_turn_id,
+						},
+					});
+					if (scenario === "continuation-duplicate-message")
+						write_frame({
+							method: "item/completed",
+							params: {
+								item: {
+									id: "export-message-2",
+									memoryCitation: null,
+									phase: "final",
+									text: '{"summary":"second"}',
+									type: "agentMessage",
+								},
+								threadId: "thread-export",
+								turnId: active_turn_id,
+							},
+						});
+				}
+				write_frame({
+					method: "turn/completed",
+					params: {
+						threadId: "thread-export",
+						turn: make_turn(active_turn_id, "completed"),
+					},
+				});
+			}, 5);
+
+			return;
 		}
 
 		respond(request.id, { turn: make_turn(active_turn_id) });

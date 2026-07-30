@@ -91,6 +91,182 @@ async function wait_for_process_exit(pid: number) {
 }
 
 describe("Codex engine run", () => {
+	it("exports a settled ephemeral fork and validates explicit native model continuation", async () => {
+		process.env.FAKE_APP_SERVER_SCENARIO = "continuation";
+
+		const result = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const engine = yield* CodexEngine;
+					const compatibility = yield* engine.CheckNativeContinuation!({
+						resume_token: { native_thread_id: "thread-source" },
+						target_model: "gpt-5-mini",
+					});
+					const exported = yield* engine.ExportContinuation!({
+						artisan_run_id: "export-run",
+						output_schema: { type: "object" },
+						prompt: "Write the handoff.",
+						settled_native_turn_id: "turn-settled",
+						source_model: "gpt-5",
+						source_resume_token: { native_thread_id: "thread-source" },
+						working_directory: "C:\\workspace",
+					});
+
+					return { compatibility, exported };
+				}),
+			).pipe(Effect.provide(make_layer())),
+		);
+
+		expect(result.compatibility).toEqual({ state: "compatible" });
+		expect(result.exported).toMatchObject({
+			export_native_item_id: "export-message",
+			export_native_thread_id: "thread-export",
+			method: "codex_fork_summary",
+			source_native_turn_id: "turn-settled",
+		});
+	});
+
+	it.each([
+		"continuation-fork-rejected",
+		"continuation-failed",
+		"continuation-interrupted",
+		"continuation-missing-message",
+		"continuation-duplicate-message",
+		"continuation-commentary-message",
+		"continuation-timeout",
+		"continuation-server-request",
+		"continuation-tool",
+		"continuation-generic-tool-pre-response",
+	])("fails closed when continuation export is %s", async (scenario) => {
+		process.env.FAKE_APP_SERVER_SCENARIO = scenario;
+
+		await expect(
+			Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const engine = yield* CodexEngine;
+
+						return yield* engine.ExportContinuation!({
+							artisan_run_id: "export-failure",
+							output_schema: { type: "object" },
+							prompt: "Write the handoff.",
+							settled_native_turn_id: "turn-settled",
+							source_resume_token: { native_thread_id: "thread-source" },
+							working_directory: "C:\\workspace",
+						});
+					}),
+				).pipe(Effect.provide(make_layer({ request_timeout_ms: 50 } as never))),
+			),
+		).rejects.toBeDefined();
+	});
+
+	it("replays export notifications received before turn/start responds", async () => {
+		process.env.FAKE_APP_SERVER_SCENARIO = "continuation-pre-response";
+		const output = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const engine = yield* CodexEngine;
+
+					return yield* engine.ExportContinuation!({
+						artisan_run_id: "pre",
+						output_schema: {},
+						prompt: "handoff",
+						settled_native_turn_id: "turn-settled",
+						source_resume_token: { native_thread_id: "thread-source" },
+						working_directory: "C:\\workspace",
+					});
+				}),
+			).pipe(Effect.provide(make_layer())),
+		);
+		expect(output.message).toContain("handoff");
+	});
+
+	it("rejects a target model absent from the current Codex catalog", async () => {
+		process.env.FAKE_APP_SERVER_SCENARIO = "continuation";
+		const output = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const engine = yield* CodexEngine;
+					return yield* engine.CheckNativeContinuation!({
+						resume_token: { native_thread_id: "thread-source" },
+						target_model: "missing",
+					});
+				}),
+			).pipe(Effect.provide(make_layer())),
+		);
+		expect(output.state).toBe("incompatible");
+	});
+
+	it("rejects native continuation without an explicit target model", async () => {
+		process.env.FAKE_APP_SERVER_SCENARIO = "continuation";
+		const output = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const engine = yield* CodexEngine;
+					return yield* engine.CheckNativeContinuation!({
+						resume_token: { native_thread_id: "thread-source" },
+					});
+				}),
+			).pipe(Effect.provide(make_layer())),
+		);
+		expect(output).toMatchObject({ state: "incompatible" });
+	});
+
+	it("follows bounded Codex model catalog pagination", async () => {
+		process.env.FAKE_APP_SERVER_SCENARIO = "continuation-model-pagination";
+		const output = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const engine = yield* CodexEngine;
+					return yield* engine.CheckNativeContinuation!({
+						resume_token: { native_thread_id: "thread-source" },
+						target_model: "gpt-later",
+					});
+				}),
+			).pipe(Effect.provide(make_layer())),
+		);
+		expect(output).toEqual({ state: "compatible" });
+	});
+
+	it.each(["version-older", "version-newer"])(
+		"rejects continuation operations outside the pinned Codex protocol version: %s",
+		async (scenario) => {
+			process.env.FAKE_APP_SERVER_SCENARIO = scenario;
+			await expect(
+				Effect.runPromise(
+					Effect.scoped(
+						Effect.gen(function* () {
+							const engine = yield* CodexEngine;
+							return yield* engine.CheckNativeContinuation!({
+								resume_token: { native_thread_id: "thread-source" },
+								target_model: "gpt-5",
+							});
+						}),
+					).pipe(Effect.provide(make_layer())),
+				),
+			).rejects.toBeDefined();
+		},
+	);
+
+	it("ignores lifecycle notifications from another export thread", async () => {
+		process.env.FAKE_APP_SERVER_SCENARIO = "continuation-foreign-thread";
+		const output = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const engine = yield* CodexEngine;
+					return yield* engine.ExportContinuation!({
+						artisan_run_id: "foreign-thread",
+						output_schema: {},
+						prompt: "handoff",
+						settled_native_turn_id: "turn-settled",
+						source_resume_token: { native_thread_id: "thread-source" },
+						working_directory: "C:\\workspace",
+					});
+				}),
+			).pipe(Effect.provide(make_layer())),
+		);
+		expect(output.message).toContain("handoff");
+	});
 	it("starts a real child, preserves ordered raw provenance, and produces one terminal", async () => {
 		process.env.FAKE_APP_SERVER_SCENARIO = "complete";
 
@@ -172,7 +348,16 @@ describe("Codex engine run", () => {
 								content: "Use project guidance.",
 								source_file: "C:\\workspace\\AGENTS.md",
 							},
-							next_text: "Resume",
+							next_content: [
+								{ text: "Resume with ", type: "text" },
+								{
+									bytes: new Uint8Array([1, 2, 3]),
+									id: "resume-image",
+									media_type: "image/png",
+									name: "resume.png",
+									type: "image",
+								},
+							],
 							permission_policy: {
 								approval: "on_request",
 								network_access: false,
@@ -233,7 +418,17 @@ describe("Codex engine run", () => {
 				{
 					method: "turn/start",
 					params: {
-						input: [{ text: "Resume", text_elements: [], type: "text" }],
+						input: [
+							{
+								text: "Resume with ",
+								text_elements: [],
+								type: "text",
+							},
+							{
+								type: "image",
+								url: "data:image/png;base64,AQID",
+							},
+						],
 						threadId: "thread-resumed",
 					},
 				},

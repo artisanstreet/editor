@@ -23,12 +23,20 @@ export const codex_exec_capabilities: EngineCapabilities = {
 	},
 	cancel: { state: "supported" },
 	close: { state: "supported" },
+	continuation_export: {
+		state: "unsupported",
+		reason: "One-shot exec cannot fork a native source session.",
+	},
 	events: { state: "supported" },
 	global_guidance: {
 		state: "unsupported",
 		reason: "V1 exec has no proven per-run native instruction channel; synced guidance files are managed outside this input.",
 	},
 	model_selection: { state: "supported" },
+	native_continuation: {
+		state: "unsupported",
+		reason: "V1 exec intentionally cannot resume native sessions.",
+	},
 	native_tools: {
 		state: "experimental",
 		reason: "Known exec item families are normalized and unknown events remain native actions.",

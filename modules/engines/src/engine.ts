@@ -1,4 +1,4 @@
-import { Data, Effect, Schema, Scope, Stream } from "effect";
+import { Data, Effect, Option, Schema, Scope, Stream } from "effect";
 
 /** Finite token quantity emitted by a provider. */
 export const TokenCount = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
@@ -13,9 +13,11 @@ export type EngineCapabilityName =
 	| "auth"
 	| "cancel"
 	| "close"
+	| "continuation_export"
 	| "events"
 	| "global_guidance"
 	| "model_selection"
+	| "native_continuation"
 	| "native_tools"
 	| "probe"
 	| "question"
@@ -142,12 +144,82 @@ export interface EngineStartInput extends EngineRunContext {
 /** Reopens provider-owned state and may continue it with new user text. @since 0.2.0 */
 export interface EngineResumeInput extends EngineRunContext {
 	readonly _tag: "resume";
+	/** When supplied, retains the next user's exact text/image ordering. */
+	readonly next_content?: ReadonlyArray<EngineUserInputPart>;
 	readonly next_text?: string;
 	readonly resume_token: EngineResumeToken;
 }
 
 /** Selects whether a run starts fresh or resumes provider-owned state. @since 0.2.0 */
 export type EngineOpenInput = EngineResumeInput | EngineStartInput;
+
+/** Asks an adapter whether one of its own native sessions can change model safely. */
+export interface EngineNativeContinuationInput {
+	readonly resume_token: EngineResumeToken;
+	readonly source_model?: string;
+	readonly target_model?: string;
+}
+
+/** Reports an explicit, version-tested native continuation decision. */
+export type EngineNativeContinuationDecision =
+	| { readonly state: "compatible" }
+	| {
+			readonly reason: string;
+			readonly state: "incompatible" | "unsupported";
+	  };
+
+/**
+ * Requests a portable summary from an isolated provider-native copy of a
+ * settled source session. The caller validates `output_schema`; the adapter
+ * must still pass it through only on a transport version that supports
+ * structured output.
+ */
+export interface EngineContinuationExportInput {
+	readonly artisan_run_id: string;
+	readonly output_schema: unknown;
+	readonly prompt: string;
+	readonly settled_native_turn_id: string;
+	readonly source_model?: string;
+	readonly source_resume_token: EngineResumeToken;
+	readonly working_directory: string;
+}
+
+/**
+ * Returns only the authoritative completed message and private native lineage
+ * needed to prove which settled source was summarized.
+ */
+export interface EngineContinuationExport {
+	readonly export_native_item_id: string;
+	readonly export_native_thread_id: string;
+	readonly export_native_turn_id: string;
+	readonly message: string;
+	readonly method: "codex_fork_summary";
+	readonly source_native_thread_id: string;
+	readonly source_native_turn_id: string;
+}
+
+/**
+ * Carries a validated native compaction captured during one live run. This is
+ * private adapter output: consumers must not project the summary or native
+ * boundary into renderer-visible observations.
+ */
+export interface EngineNativeCompaction {
+	readonly boundary_id: string;
+	readonly method: "claude_post_compact";
+	readonly observation_id: string;
+	readonly source_native_thread_id: string;
+	readonly summary: string;
+	readonly summary_sha256: string;
+	readonly trigger: "manual" | "auto";
+}
+
+/**
+ * Canonicalizes provider summary newlines before hashing at both adapter and
+ * persistence boundaries. No other Unicode or whitespace normalization is
+ * permitted because it could change provider-authored meaning.
+ */
+export const normalize_engine_compaction_summary = (summary: string) =>
+	summary.replaceAll("\r\n", "\n");
 
 /** Supplies caller metadata for a non-billable availability probe. @since 0.2.0 */
 export interface EngineProbeInput {
@@ -578,6 +650,13 @@ export interface EngineRun {
 	 * are monotonic within this live stream but are not durable storage.
 	 */
 	readonly Events: Stream.Stream<EngineObservation>;
+	/**
+	 * Reads the latest provider-native compaction captured by this run. The
+	 * effect is evaluated after `Closed` and before the owning scope is
+	 * finalized. Absence deliberately selects the canonical transcript
+	 * fallback.
+	 */
+	readonly NativeCompaction?: Effect.Effect<Option.Option<EngineNativeCompaction>>;
 	readonly native_thread_id: string;
 	readonly resume_token: EngineResumeToken;
 	/**
@@ -626,6 +705,20 @@ export interface EngineAccountUsage {
 /** Defines the dependency-free provider-neutral seam implemented by every engine adapter. @since 0.2.0 */
 export interface Engine {
 	readonly Descriptor: EngineDescriptor;
+	/**
+	 * Decides whether a source token may continue natively with the requested
+	 * model. Matching engine identifiers alone are never sufficient.
+	 */
+	readonly CheckNativeContinuation?: (
+		input: EngineNativeContinuationInput,
+	) => Effect.Effect<EngineNativeContinuationDecision, EngineFailure>;
+	/**
+	 * Exports a portable summary from an isolated, settled native source.
+	 * Adapters without a public export primitive omit this operation.
+	 */
+	readonly ExportContinuation?: (
+		input: EngineContinuationExportInput,
+	) => Effect.Effect<EngineContinuationExport, EngineFailure>;
 	readonly Open: (input: EngineOpenInput) => Effect.Effect<EngineRun, EngineFailure, Scope.Scope>;
 	readonly Probe: (input: EngineProbeInput) => Effect.Effect<EngineProbe, EngineFailure>;
 	/**

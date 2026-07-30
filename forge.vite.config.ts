@@ -113,6 +113,10 @@ export default defineConfig({
 		rollupOptions: {
 			input: {
 				ae: resolve(import.meta.dirname, "modules/cli/src/entry.ts"),
+				"claude-post-compact-hook": resolve(
+					import.meta.dirname,
+					"modules/engines/src/claude/claude-post-compact-hook.ts",
+				),
 				host: resolve(import.meta.dirname, "modules/forge/src/entry.ts"),
 				"windows-process-host": resolve(
 					import.meta.dirname,

@@ -8,6 +8,7 @@ import {
 	Encoding,
 	Exit,
 	Layer,
+	Option,
 	Ref,
 	Schema,
 	Scope,
@@ -22,6 +23,7 @@ import {
 	type EngineDescriptor,
 	type EngineFailure,
 	type EngineObservation,
+	type EngineNativeCompaction,
 	type EngineOpenInput,
 	type EngineProbe,
 	type EngineRun,
@@ -45,6 +47,13 @@ import {
 	ClaudeJsonlOversizedLineError,
 	type ClaudeJsonlDecode,
 } from "./claude-jsonl";
+import {
+	ClaudeCompactionCapture,
+	type ClaudeCapturedNativeCompaction,
+	type ClaudeCompactionCaptureOptions,
+	type ClaudeCompactionLease,
+	make_claude_compaction_capture_layer,
+} from "./claude-compaction-capture";
 import { MakeClaudeUsage } from "./claude-usage";
 import {
 	classify_claude_semantic_failure,
@@ -67,6 +76,10 @@ export const ClaudeEngineDescriptor: EngineDescriptor = {
 		},
 		cancel: { state: "supported" },
 		close: { state: "supported" },
+		continuation_export: {
+			state: "unsupported",
+			reason: "Claude has no isolated export operation; private PostCompact state is exposed only through EngineRun.NativeCompaction.",
+		},
 		events: { state: "supported" },
 		global_guidance: {
 			state: "unsupported",
@@ -75,6 +88,10 @@ export const ClaudeEngineDescriptor: EngineDescriptor = {
 		model_selection: {
 			state: "supported",
 			reason: "Native model identifiers pass through to the CLI's --model flag.",
+		},
+		native_continuation: {
+			state: "supported",
+			reason: "Same-engine model changes are explicitly target-model and Claude 2.1.220 gated.",
 		},
 		native_tools: {
 			state: "experimental",
@@ -104,6 +121,7 @@ export interface ClaudeEngineOptions {
 	readonly auth_timeout_ms?: number;
 	/** Overrides Claude's config-dir resolution used by `Usage` (normally env `CLAUDE_CONFIG_DIR`, else `~/.claude`). */
 	readonly claude_config_dir?: string;
+	readonly compaction_capture?: ClaudeCompactionCaptureOptions;
 	readonly event_capacity?: number;
 	readonly executable?: string;
 	readonly executable_args?: ReadonlyArray<string>;
@@ -157,6 +175,7 @@ const defaults = {
 	version_timeout_ms: 15_000,
 	auth_timeout_ms: 15_000,
 } as const;
+const native_continuation_version = "2.1.220";
 
 function fail_configuration(option: string, value: unknown) {
 	return Effect.fail(new EngineConfigurationError({ engine_id: "claude", option, value }));
@@ -235,11 +254,11 @@ function validate_provider_options(input: EngineOpenInput) {
 function make_spawn_input(
 	input: EngineOpenInput,
 	options: Required<Pick<ClaudeEngineOptions, "executable" | "executable_args">>,
+	capture: { readonly args: ReadonlyArray<string>; readonly environment: NodeJS.ProcessEnv },
+	session_id: string,
 ) {
 	return Effect.gen(function* () {
 		const { permission_mode, prompt_file } = yield* validate_provider_options(input);
-		const session_id =
-			input._tag === "resume" ? input.resume_token.native_thread_id : randomUUID();
 		const args = [
 			...options.executable_args,
 			...(input._tag === "resume" ? ["--resume", input.resume_token.native_thread_id] : []),
@@ -250,6 +269,7 @@ function make_spawn_input(
 			"stream-json",
 			"--verbose",
 			"--include-partial-messages",
+			...capture.args,
 			...(input._tag === "start" ? ["--session-id", session_id] : []),
 			...(input.model === undefined ? [] : ["--model", input.model]),
 			...(permission_mode === undefined ? [] : ["--permission-mode", permission_mode]),
@@ -260,6 +280,7 @@ function make_spawn_input(
 			args,
 			command: options.executable,
 			cwd: input.working_directory,
+			env: capture.environment,
 			session_id,
 		} satisfies ClaudeSpawnInput;
 	});
@@ -391,7 +412,9 @@ function make_probe(
 					message: `Claude --version exited ${String(version_exit.code)}: ${new TextDecoder().decode(version_stderr)}`,
 				}),
 			);
-		const version = new TextDecoder().decode(version_stdout).match(/\b\d+\.\d+\.\d+\b/)?.[0];
+		const version = new TextDecoder()
+			.decode(version_stdout)
+			.match(/\b\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\b/)?.[0];
 		if (version === undefined)
 			return yield* Effect.fail(
 				new EngineUnavailableError({
@@ -439,27 +462,43 @@ function make_probe(
 
 function open_run(
 	factory: typeof EngineProcessFactory.Service,
+	capture_service: typeof ClaudeCompactionCapture.Service,
 	options: ClaudeConfiguredOptions,
 	input: EngineOpenInput,
+	native_compaction_enabled: boolean,
 ): Effect.Effect<EngineRun, EngineFailure, Scope.Scope> {
 	return Effect.gen(function* () {
-		const spawn_input = yield* make_spawn_input(input, options);
 		const run_scope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
 			Scope.close(scope, Exit.succeed(undefined)),
 		);
+		const native_session_id =
+			input._tag === "resume" ? input.resume_token.native_thread_id : randomUUID();
+		const capture: ClaudeCompactionLease = native_compaction_enabled
+			? yield* capture_service
+					.Prepare({
+						artisan_run_id: input.artisan_run_id,
+						environment: process.env,
+						native_session_id,
+						working_directory: input.working_directory,
+					})
+					.pipe(Scope.provide(run_scope))
+			: {
+					args: [],
+					environment: process.env,
+					Finalize: Effect.succeed(Option.none<ClaudeCapturedNativeCompaction>()),
+				};
+		const spawn_input = yield* make_spawn_input(input, options, capture, native_session_id);
 		const handle = yield* factory.Spawn(spawn_input).pipe(Scope.provide(run_scope));
 		yield* Scope.addFinalizer(run_scope, handle.Close);
 		const prompt = input._tag === "start" ? input.initial_text : input.next_text;
+		const content = input._tag === "start" ? input.initial_content : input.next_content;
 
-		if (prompt !== undefined) {
+		if (prompt !== undefined || (content !== undefined && content.length > 0)) {
 			const message = JSON.stringify({
 				type: "user",
 				message: {
 					role: "user",
-					content: make_user_content(
-						prompt,
-						input._tag === "start" ? input.initial_content : undefined,
-					),
+					content: make_user_content(prompt ?? "", content),
 				},
 				parent_tool_use_id: null,
 				session_id: spawn_input.session_id,
@@ -469,8 +508,43 @@ function open_run(
 		}
 
 		yield* handle.EndInput;
+		const compaction_observations = yield* Ref.make(
+			new Map<
+				string,
+				| {
+						readonly observation_id: string;
+						readonly trigger: "manual" | "auto";
+				  }
+				| undefined
+			>(),
+		);
+		const native_compaction = yield* Ref.make(Option.none<EngineNativeCompaction>());
 		const event_buffer = yield* MakeEngineEventBuffer({
 			artisan_run_id: input.artisan_run_id,
+			BeforeEnqueue: (observation) =>
+				observation._tag === "compaction" && typeof observation.raw.native_id === "string"
+					? Ref.update(compaction_observations, (current) => {
+							const next = new Map(current);
+							const native_id = observation.raw.native_id as string;
+							const frame = observation.raw.frame as {
+								readonly compactMetadata?: { readonly trigger?: unknown };
+							};
+							const trigger = frame.compactMetadata?.trigger;
+							if (trigger !== "manual" && trigger !== "auto") return current;
+							const claimed = next.has(native_id);
+							const prior = next.get(native_id);
+							next.set(
+								native_id,
+								!claimed
+									? { observation_id: observation.observation_id, trigger }
+									: prior?.observation_id === observation.observation_id &&
+										  prior.trigger === trigger
+										? prior
+										: undefined,
+							);
+							return next;
+						})
+					: Effect.void,
 			capacity: options.event_capacity,
 			CloseResource: handle.Close,
 			make_terminal_observation: (state, sequence) => ({
@@ -498,6 +572,22 @@ function open_run(
 			/** The message id announced by the newest `message_start` frame. */
 			stream_message_id: undefined as string | undefined,
 		});
+		const capture_finalized = yield* Ref.make(false);
+		const capture_native_compaction = Effect.gen(function* () {
+			const should_finalize = yield* Ref.modify(capture_finalized, (done) => [!done, true]);
+			if (!should_finalize) return;
+			const captured = yield* capture.Finalize;
+			if (Option.isNone(captured)) return;
+			const value = captured.value;
+			const boundary = (yield* Ref.get(compaction_observations)).get(value.boundary_id);
+			if (boundary === undefined || boundary.trigger !== value.trigger) return;
+			yield* Ref.set(
+				native_compaction,
+				Option.some({ ...value, observation_id: boundary.observation_id }),
+			);
+		});
+		const finish_with_capture = (terminal: "cancelled" | "closed" | "completed" | "failed") =>
+			capture_native_compaction.pipe(Effect.andThen(event_buffer.Finish(terminal)));
 		const stdout_drained = yield* Deferred.make<void>();
 		const stderr_drained = yield* Deferred.make<void>();
 		const framer = new ClaudeJsonlFramer({ max_frame_bytes: options.max_frame_bytes });
@@ -626,7 +716,7 @@ function open_run(
 			Effect.catch((error) =>
 				event_buffer
 					.Emit(make_diagnostic(input, String(error), { source: "stdout" }, "error"))
-					.pipe(Effect.andThen(event_buffer.Finish("failed"))),
+					.pipe(Effect.andThen(finish_with_capture("failed"))),
 			),
 		);
 		const stderr_decoder = new TextDecoder();
@@ -674,7 +764,7 @@ function open_run(
 			Effect.catch((error) =>
 				event_buffer
 					.Emit(make_diagnostic(input, String(error), { source: "stderr" }, "error"))
-					.pipe(Effect.andThen(event_buffer.Finish("failed"))),
+					.pipe(Effect.andThen(finish_with_capture("failed"))),
 			),
 		);
 		const watch_exit = handle.Exit.pipe(
@@ -705,14 +795,14 @@ function open_run(
 								),
 							)
 							.pipe(Effect.ignore);
-					yield* event_buffer.Finish(
+					yield* finish_with_capture(
 						exit.code === 0 && current.init_seen && !current.semantic_failure
 							? "completed"
 							: "failed",
 					);
 				}),
 			),
-			Effect.catch(() => event_buffer.Finish("failed")),
+			Effect.catch(() => finish_with_capture("failed")),
 		);
 		const watch_timeout = Effect.raceFirst(
 			event_buffer.Closed.pipe(Effect.asVoid),
@@ -727,14 +817,14 @@ function open_run(
 						),
 					),
 				),
-				Effect.andThen(event_buffer.Finish("failed")),
+				Effect.andThen(finish_with_capture("failed")),
 			),
 		);
 		yield* Effect.forkScoped(pump_stdout).pipe(Scope.provide(run_scope));
 		yield* Effect.forkScoped(pump_stderr).pipe(Scope.provide(run_scope));
 		yield* Effect.forkScoped(watch_exit).pipe(Scope.provide(run_scope));
 		yield* Effect.forkScoped(watch_timeout).pipe(Scope.provide(run_scope));
-		yield* Scope.addFinalizer(run_scope, event_buffer.Finish("closed"));
+		yield* Scope.addFinalizer(run_scope, finish_with_capture("closed").pipe(Effect.ignore));
 
 		const command_lock = yield* Semaphore.make(1);
 		const Send = (command: EngineCommand): Effect.Effect<void, EngineCommandFailure> =>
@@ -767,7 +857,7 @@ function open_run(
 								intent,
 							),
 						}));
-						return yield* event_buffer.Finish(
+						return yield* finish_with_capture(
 							command._tag === "cancel" ? "cancelled" : "closed",
 						);
 					}
@@ -784,6 +874,7 @@ function open_run(
 			artisan_run_id: input.artisan_run_id,
 			Closed: event_buffer.Closed,
 			Events: event_buffer.Events,
+			NativeCompaction: event_buffer.Closed.pipe(Effect.andThen(Ref.get(native_compaction))),
 			native_thread_id: spawn_input.session_id,
 			resume_token: { native_thread_id: spawn_input.session_id },
 			Send,
@@ -814,6 +905,7 @@ export function make_claude_engine_layer(
 		ClaudeEngine,
 		Effect.gen(function* () {
 			const factory = yield* EngineProcessFactory;
+			const capture = yield* ClaudeCompactionCapture;
 			const Probe: Engine["Probe"] = () =>
 				validate_positive(configured).pipe(Effect.andThen(make_probe(factory, configured)));
 			const Open: Engine["Open"] = (input) =>
@@ -830,8 +922,32 @@ export function make_claude_engine_layer(
 									"Claude authentication is not ready",
 							}),
 						);
-					return yield* open_run(factory, configured, input);
+					return yield* open_run(
+						factory,
+						capture,
+						configured,
+						input,
+						probe.version === native_continuation_version,
+					);
 				});
+			const CheckNativeContinuation: NonNullable<Engine["CheckNativeContinuation"]> = (
+				input,
+			) =>
+				Probe({}).pipe(
+					Effect.map((probe) =>
+						probe.version !== native_continuation_version
+							? {
+									reason: `Claude native resume is verified only for ${native_continuation_version}; found ${probe.version}`,
+									state: "unsupported" as const,
+								}
+							: input.target_model === undefined
+								? {
+										reason: "Claude native continuation requires an explicit target model",
+										state: "incompatible" as const,
+									}
+								: { state: "compatible" as const },
+					),
+				);
 			const Usage: Required<Engine>["Usage"] = MakeClaudeUsage({
 				...(configured.claude_config_dir === undefined
 					? {}
@@ -840,7 +956,22 @@ export function make_claude_engine_layer(
 				executable_args: configured.executable_args,
 				factory,
 			});
-			return { Descriptor: ClaudeEngineDescriptor, Open, Probe, Usage };
+			return {
+				CheckNativeContinuation,
+				Descriptor: ClaudeEngineDescriptor,
+				Open,
+				Probe,
+				Usage,
+			};
 		}),
+	).pipe(
+		Layer.provideMerge(
+			make_claude_compaction_capture_layer({
+				...options.compaction_capture,
+				...(options.claude_config_dir === undefined
+					? {}
+					: { claude_config_dir: options.claude_config_dir }),
+			}),
+		),
 	);
 }

@@ -52,6 +52,25 @@ describe("claude stream-json normalization", () => {
 		}
 	});
 
+	it("emits a summary-free compaction marker at the native stream boundary", () => {
+		const [observation] = normalize({
+			compactMetadata: { trigger: "auto" },
+			type: "system",
+			subtype: "compact_boundary",
+			uuid: "boundary-1",
+		});
+
+		expect(observation).toMatchObject({
+			_tag: "compaction",
+			raw: {
+				native_id: "boundary-1",
+				native_method: "system.compact_boundary",
+			},
+			state: "completed",
+		});
+		expect(JSON.stringify(observation)).not.toContain("summary");
+	});
+
 	it("reports the run as running once the CLI initializes", () => {
 		expect(normalize(claude_init_frame)).toEqual([
 			expect.objectContaining({ _tag: "run_state", state: "running" }),

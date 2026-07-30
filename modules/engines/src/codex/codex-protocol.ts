@@ -2,6 +2,7 @@ import { Data, Effect, Schema } from "effect";
 
 /** Describes the minimum Codex CLI transport contract used by this adapter. @since 0.1.0 */
 export const CodexTransportMetadata = {
+	continuation_cli_version: "0.145.0",
 	initialize_method: "initialize",
 	minimum_cli_version: "0.142.5",
 	protocol_version: "v1",
@@ -141,6 +142,43 @@ export const CodexThreadResumeRequest = Schema.Struct({
 	id: CodexRequestId,
 	method: Schema.Literal("thread/resume"),
 	params: Schema.Unknown,
+});
+
+/** Describes the version-gated native copy used for a portable Codex export. @since 0.7.0 */
+export const CodexThreadForkParams = Schema.Struct({
+	approvalPolicy: Schema.Literal("never"),
+	cwd: Schema.String,
+	ephemeral: Schema.Literal(true),
+	lastTurnId: Schema.String,
+	model: Schema.optional(Schema.String),
+	sandbox: Schema.Literal("read-only"),
+	threadId: Schema.String,
+});
+
+export const CodexThreadForkRequest = Schema.Struct({
+	id: CodexRequestId,
+	method: Schema.Literal("thread/fork"),
+	params: CodexThreadForkParams,
+});
+
+/** Describes the minimum fork response required to address the disposable thread. @since 0.7.0 */
+export const CodexThreadForkResult = Schema.Struct({
+	thread: Schema.Struct({ id: Schema.String }),
+});
+
+/** Describes the strict structured output requested from a disposable export turn. @since 0.7.0 */
+export const CodexContinuationTurnStartParams = Schema.Struct({
+	approvalPolicy: Schema.Literal("never"),
+	input: Schema.Array(Schema.Struct({ text: Schema.String, type: Schema.Literal("text") })),
+	outputSchema: Schema.Unknown,
+	sandboxPolicy: Schema.Struct({ type: Schema.Literal("readOnly") }),
+	threadId: Schema.String,
+});
+
+export const CodexContinuationTurnStartRequest = Schema.Struct({
+	id: CodexRequestId,
+	method: Schema.Literal("turn/start"),
+	params: CodexContinuationTurnStartParams,
 });
 
 /** Describes a minimal turn/start request while preserving the server-owned parameter shape. @since 0.3.0 */

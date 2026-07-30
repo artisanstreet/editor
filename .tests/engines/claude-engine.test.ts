@@ -3,7 +3,7 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
 import { describe, expect, it, afterEach } from "vitest";
-import { Effect, Exit, Layer, Stream } from "effect";
+import { Effect, Exit, Layer, Option, Stream } from "effect";
 
 import {
 	ClaudeEngine,
@@ -18,12 +18,19 @@ import {
 const executable = fileURLToPath(new URL("./fixtures/fake-claude.ts", import.meta.url));
 const original_scenario = process.env.FAKE_CLAUDE_SCENARIO;
 const original_invocation = process.env.FAKE_CLAUDE_INVOCATION_FILE;
+const original_compaction_directory = process.env.FAKE_CLAUDE_COMPACTION_DIRECTORY;
+const original_version = process.env.FAKE_CLAUDE_VERSION;
 
 afterEach(() => {
 	if (original_scenario === undefined) delete process.env.FAKE_CLAUDE_SCENARIO;
 	else process.env.FAKE_CLAUDE_SCENARIO = original_scenario;
 	if (original_invocation === undefined) delete process.env.FAKE_CLAUDE_INVOCATION_FILE;
 	else process.env.FAKE_CLAUDE_INVOCATION_FILE = original_invocation;
+	if (original_compaction_directory === undefined)
+		delete process.env.FAKE_CLAUDE_COMPACTION_DIRECTORY;
+	else process.env.FAKE_CLAUDE_COMPACTION_DIRECTORY = original_compaction_directory;
+	if (original_version === undefined) delete process.env.FAKE_CLAUDE_VERSION;
+	else process.env.FAKE_CLAUDE_VERSION = original_version;
 });
 
 function get_engine(options: Record<string, unknown> = {}) {
@@ -34,6 +41,10 @@ function get_engine(options: Record<string, unknown> = {}) {
 					executable: process.execPath,
 					executable_args: [executable],
 					...options,
+					compaction_capture: {
+						settle_timeout_ms: 50,
+						...(options.compaction_capture as Record<string, unknown> | undefined),
+					},
 				}).pipe(Layer.provide(EngineProcessFactoryLive)),
 			),
 		),
@@ -144,6 +155,157 @@ describe("Claude Code engine", () => {
 		expect(native_thread_id).toBe("resume-session");
 	});
 
+	it("version-tests native continuation and permits target-model changes only on 2.1.220", async () => {
+		const engine = await get_engine();
+		const exact = await Effect.runPromise(
+			engine.CheckNativeContinuation!({
+				resume_token: { native_thread_id: "resume-session" },
+				source_model: "claude-sonnet-4",
+				target_model: "claude-opus-4",
+			}),
+		);
+		expect(exact).toEqual({ state: "compatible" });
+		const missing_target = await Effect.runPromise(
+			engine.CheckNativeContinuation!({
+				resume_token: { native_thread_id: "resume-session" },
+			}),
+		);
+		expect(missing_target).toMatchObject({ state: "incompatible" });
+		process.env.FAKE_CLAUDE_VERSION = "2.1.219";
+		const old_engine = await get_engine();
+		const old = await Effect.runPromise(
+			old_engine.CheckNativeContinuation!({
+				resume_token: { native_thread_id: "resume-session" },
+			}),
+		);
+		expect(old).toMatchObject({ state: "unsupported" });
+		process.env.FAKE_CLAUDE_VERSION = "2.1.220-beta.1";
+		const prerelease_engine = await get_engine();
+		const prerelease = await Effect.runPromise(
+			prerelease_engine.CheckNativeContinuation!({
+				resume_token: { native_thread_id: "resume-session" },
+				target_model: "claude-opus-4",
+			}),
+		);
+		expect(prerelease).toMatchObject({ state: "unsupported" });
+		process.env.FAKE_CLAUDE_VERSION = "3.0.0";
+		const new_engine = await get_engine();
+		const newer = await Effect.runPromise(
+			new_engine.CheckNativeContinuation!({
+				resume_token: { native_thread_id: "resume-session" },
+			}),
+		);
+		expect(newer).toMatchObject({ state: "unsupported" });
+		process.env.FAKE_CLAUDE_VERSION = "not-a-version";
+		const invalid_engine = await get_engine();
+		const invalid = await Effect.runPromise(
+			Effect.exit(
+				invalid_engine.CheckNativeContinuation!({
+					resume_token: { native_thread_id: "resume-session" },
+				}),
+			),
+		);
+		expect(Exit.isFailure(invalid)).toBe(true);
+	});
+
+	it("emits a summary-free compaction observation before terminal and returns its matching native capture", async () => {
+		const directory = await mkdtemp(join(process.cwd(), ".claude-compact-test-"));
+		process.env.FAKE_CLAUDE_SCENARIO = "post-compact";
+		process.env.FAKE_CLAUDE_COMPACTION_DIRECTORY = directory;
+		try {
+			const engine = await get_engine({ claude_config_dir: directory });
+			const result = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const run = yield* engine.Open(open_input());
+						const events = yield* run.Events.pipe(Stream.runCollect);
+						return { events, native: yield* run.NativeCompaction! };
+					}),
+				),
+			);
+			const compaction = result.events.find((event) => event._tag === "compaction");
+			expect(compaction).toMatchObject({
+				raw: {
+					frame: {
+						compactMetadata: { trigger: "auto" },
+						subtype: "compact_boundary",
+						type: "system",
+						uuid: "boundary-1",
+					},
+					native_id: "boundary-1",
+					native_method: "system.compact_boundary",
+				},
+			});
+			expect(compaction?.observation_id).toMatch(
+				/^claude-run:claude:\d+:compact_boundary:sequence:\d+$/,
+			);
+			expect(JSON.stringify(compaction)).not.toContain("captured compact summary");
+			expect(result.events.indexOf(compaction!)).toBeLessThan(
+				result.events.findIndex((event) => event._tag === "run_terminal"),
+			);
+			expect(Option.getOrUndefined(result.native)).toMatchObject({
+				observation_id: compaction?.observation_id,
+				summary: "captured compact summary",
+			});
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a native capture whose trigger differs from the streamed boundary", async () => {
+		const directory = await mkdtemp(join(process.cwd(), ".claude-trigger-test-"));
+		process.env.FAKE_CLAUDE_SCENARIO = "post-compact-trigger-mismatch";
+		process.env.FAKE_CLAUDE_COMPACTION_DIRECTORY = directory;
+		try {
+			const engine = await get_engine({ claude_config_dir: directory });
+			const result = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const run = yield* engine.Open(open_input());
+						const events = yield* run.Events.pipe(Stream.runCollect);
+						return { events, native: yield* run.NativeCompaction! };
+					}),
+				),
+			);
+
+			expect(result.events.some((event) => event._tag === "compaction")).toBe(true);
+			expect(Option.isNone(result.native)).toBe(true);
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it("disables native compaction capture outside the exact transcript-tested version", async () => {
+		const directory = await mkdtemp(join(process.cwd(), ".claude-version-gate-test-"));
+		const invocation = join(directory, "invocations.jsonl");
+		process.env.FAKE_CLAUDE_INVOCATION_FILE = invocation;
+		process.env.FAKE_CLAUDE_VERSION = "3.0.0";
+
+		try {
+			const engine = await get_engine({ claude_config_dir: directory });
+			const result = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const run = yield* engine.Open(open_input());
+						const events = yield* run.Events.pipe(Stream.runCollect);
+						return { events, native: yield* run.NativeCompaction! };
+					}),
+				),
+			);
+			const records = (await readFile(invocation, "utf8"))
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			const run_args = records.findLast((record) => record.args)?.args as string[];
+
+			expect(run_args).not.toContain("--plugin-dir");
+			expect(result.events.some((event) => event._tag === "compaction")).toBe(false);
+			expect(Option.isNone(result.native)).toBe(true);
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
 	it("preserves ordered text/image parts as native stream-json content blocks", async () => {
 		const directory = await mkdtemp(join(process.cwd(), ".claude-image-test-"));
 		const invocation = join(directory, "invocations.jsonl");
@@ -184,6 +346,52 @@ describe("Claude Code engine", () => {
 
 			expect(JSON.parse(stdin).message.content).toEqual([
 				{ text: "hello", type: "text" },
+				{
+					source: { data: "AQID", media_type: "image/png", type: "base64" },
+					type: "image",
+				},
+			]);
+		} finally {
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it("sends content-only resume input without requiring next_text", async () => {
+		const directory = await mkdtemp(join(process.cwd(), ".claude-content-resume-test-"));
+		const invocation = join(directory, "invocations.jsonl");
+		process.env.FAKE_CLAUDE_INVOCATION_FILE = invocation;
+
+		try {
+			const engine = await get_engine();
+			await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const run = yield* engine.Open({
+							_tag: "resume",
+							artisan_run_id: "claude-content-resume",
+							next_content: [
+								{
+									bytes: new Uint8Array([1, 2, 3]),
+									id: "image-1",
+									media_type: "image/png",
+									name: "shot.png",
+									type: "image",
+								},
+							],
+							resume_token: { native_thread_id: "resume-session" },
+							working_directory: process.cwd(),
+						});
+						yield* run.Events.pipe(Stream.runDrain);
+					}),
+				),
+			);
+
+			const records = (await readFile(invocation, "utf8"))
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+			const stdin = records.findLast((record) => record.stdin !== undefined)?.stdin as string;
+			expect(JSON.parse(stdin).message.content).toEqual([
 				{
 					source: { data: "AQID", media_type: "image/png", type: "base64" },
 					type: "image",

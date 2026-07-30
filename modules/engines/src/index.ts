@@ -3,6 +3,7 @@ export * from "./registry";
 export * from "./process/process";
 export * from "./process/jsonl";
 export * from "./claude/claude-engine";
+export * from "./claude/claude-compaction-capture";
 export * from "./claude/claude-jsonl";
 export * from "./claude/claude-normalizer";
 export * from "./codex/codex-engine";

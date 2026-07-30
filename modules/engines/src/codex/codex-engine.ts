@@ -5,11 +5,13 @@ import { NodeFileSystem } from "@effect/platform-node-shared";
 import {
 	Cause,
 	Context,
+	Deferred,
 	Effect,
 	Encoding,
 	Exit,
 	FileSystem,
 	Layer,
+	Option,
 	Ref,
 	Schema,
 	Scope,
@@ -22,10 +24,14 @@ import {
 	type EngineApprovalObservation,
 	type EngineCommand,
 	type EngineCommandFailure,
+	type EngineContinuationExport,
+	type EngineContinuationExportInput,
 	type EngineDescriptor,
 	type EngineFailure,
 	type EngineObservation,
 	type EngineOpenInput,
+	type EngineNativeContinuationDecision,
+	type EngineNativeContinuationInput,
 	type EngineUserInputPart,
 	type EngineProbe,
 	type EngineProbeInput,
@@ -47,7 +53,12 @@ import {
 	type CodexAppServerSessionFailure,
 } from "./codex-app-server-session";
 import { CodexProcessFactory, type CodexProcessSpawnInput } from "./codex-process";
-import { CodexTransportMetadata } from "./codex-protocol";
+import {
+	CodexContinuationTurnStartParams,
+	CodexThreadForkParams,
+	CodexThreadForkResult,
+	CodexTransportMetadata,
+} from "./codex-protocol";
 import { MakeCodexUsage } from "./codex-usage";
 import { MakeCodexAppServerEventBuffer } from "./internal/codex-app-server-event-buffer";
 import { MakeCodexAppServerThreadOptions } from "./internal/codex-permissions";
@@ -62,9 +73,17 @@ export const CodexEngineDescriptor: EngineDescriptor = {
 		auth: { state: "supported" },
 		cancel: { state: "supported" },
 		close: { state: "supported" },
+		continuation_export: {
+			state: "experimental",
+			reason: "Codex 0.145.0 exports a settled ephemeral fork through one structured turn.",
+		},
 		events: { state: "supported" },
 		global_guidance: { state: "supported" },
 		model_selection: { state: "supported" },
+		native_continuation: {
+			state: "experimental",
+			reason: "Codex 0.145.0 validates the requested model before explicit native resume.",
+		},
 		native_tools: {
 			state: "experimental",
 			reason: "Native tools are surfaced through normalized activity where known.",
@@ -183,6 +202,44 @@ const ThreadResponseSchema = Schema.Struct({
 	}),
 });
 const TurnResponseSchema = Schema.Struct({ turn: Schema.Struct({ id: Schema.String }) });
+const ModelListSchema = Schema.Struct({
+	data: Schema.Array(Schema.Struct({ id: Schema.String })),
+	nextCursor: Schema.optional(Schema.NullOr(Schema.String)),
+});
+const ExportAgentMessageSchema = Schema.Struct({
+	item: Schema.Struct({
+		id: Schema.String,
+		phase: Schema.Literal("final"),
+		text: Schema.String,
+		type: Schema.Literal("agentMessage"),
+	}),
+	threadId: Schema.String,
+	turnId: Schema.String,
+});
+const ExportItemLifecycleSchema = Schema.Struct({
+	item: Schema.Struct({
+		id: Schema.String,
+		text: Schema.optional(Schema.String),
+		type: Schema.String,
+	}),
+	threadId: Schema.String,
+	turnId: Schema.String,
+});
+const ExportItemIdentitySchema = Schema.Struct({
+	threadId: Schema.String,
+	turnId: Schema.String,
+});
+const ExportTurnCompletedSchema = Schema.Struct({
+	threadId: Schema.String,
+	turn: Schema.Struct({
+		id: Schema.String,
+		status: Schema.Literals(["completed", "failed", "interrupted"]),
+	}),
+});
+const ExportTurnIdentitySchema = Schema.Struct({
+	threadId: Schema.String,
+	turn: Schema.Struct({ id: Schema.String }),
+});
 
 function ReadBoundedStream(
 	stream: AsyncIterable<Uint8Array>,
@@ -248,6 +305,22 @@ function ValidateCodexTransportVersion(version: string) {
 				new EngineProtocolError({
 					engine_id: "codex",
 					message: `Codex ${version} is older than minimum supported ${CodexTransportMetadata.minimum_cli_version}`,
+				}),
+			);
+}
+
+function ParseCodexContinuationVersion(stdout: Uint8Array) {
+	const output = new TextDecoder().decode(stdout);
+	const version = output.match(
+		/\b(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)\b/,
+	)?.[1];
+
+	return version === CodexTransportMetadata.continuation_cli_version
+		? Effect.succeed(version)
+		: Effect.fail(
+				new EngineProtocolError({
+					engine_id: "codex",
+					message: `Codex continuation is verified only for ${CodexTransportMetadata.continuation_cli_version}; found ${version ?? "an unknown version"}`,
 				}),
 			);
 }
@@ -657,6 +730,331 @@ function make_codex_app_server_engine(
 				};
 			}),
 		);
+	const ReadContinuationVersion = () =>
+		RunVersionProbe(
+			factory,
+			{ args: [...executable_args, "--version"], command: executable },
+			version_timeout_ms,
+		).pipe(Effect.flatMap(ParseCodexContinuationVersion));
+	const CheckNativeContinuation = (
+		input: EngineNativeContinuationInput,
+	): Effect.Effect<EngineNativeContinuationDecision, EngineFailure> =>
+		Effect.scoped(
+			Effect.gen(function* () {
+				yield* ReadContinuationVersion();
+
+				if (input.target_model === undefined)
+					return {
+						reason: "Codex native continuation requires an explicit target model",
+						state: "incompatible" as const,
+					};
+
+				const session = yield* OpenSession();
+				yield* MapSessionFailure(
+					session.Handshake({ client_name: "artisan-editor", client_version: "0.7.0" }),
+				);
+				let cursor: string | undefined;
+				const visited_cursors = new Set<string>();
+
+				for (let page = 0; page < 16; page += 1) {
+					const response = yield* MapSessionFailure(
+						session.Request("model/list", cursor === undefined ? {} : { cursor }),
+					);
+					const models = yield* Schema.decodeUnknownEffect(ModelListSchema)(
+						response.result,
+					).pipe(
+						Effect.mapError(
+							() =>
+								new EngineProtocolError({
+									engine_id: "codex",
+									message: "Codex model/list returned an invalid result",
+								}),
+						),
+					);
+
+					if (models.data.some((model) => model.id === input.target_model)) {
+						return { state: "compatible" as const };
+					}
+
+					if (models.nextCursor === undefined || models.nextCursor === null) break;
+					if (visited_cursors.has(models.nextCursor)) {
+						return {
+							reason: "Codex model/list returned a repeated page cursor",
+							state: "incompatible" as const,
+						};
+					}
+					visited_cursors.add(models.nextCursor);
+					cursor = models.nextCursor;
+				}
+
+				return {
+					reason: `Codex does not currently advertise model ${input.target_model}`,
+					state: "incompatible" as const,
+				};
+			}),
+		);
+	const ExportContinuation = (
+		input: EngineContinuationExportInput,
+	): Effect.Effect<EngineContinuationExport, EngineFailure> =>
+		Effect.scoped(
+			Effect.gen(function* () {
+				yield* ReadContinuationVersion();
+				const session = yield* OpenSession();
+				const completed = yield* Deferred.make<
+					{ readonly item_id: string; readonly message: string },
+					EngineFailure
+				>();
+				const state = yield* Ref.make<{
+					readonly item?: { readonly item_id: string; readonly message: string };
+					readonly pending: ReadonlyArray<{
+						readonly method: string;
+						readonly params: unknown;
+					}>;
+					readonly thread_id?: string;
+					readonly turn_id?: string;
+				}>({ pending: [] });
+				const Fail = (message: string) =>
+					Deferred.fail(
+						completed,
+						new EngineProtocolError({ engine_id: "codex", message }),
+					);
+				const ProcessNotification = (
+					notification: {
+						readonly id?: string | number;
+						readonly method: string;
+						readonly params?: unknown;
+					},
+					allow_buffer: boolean,
+				) =>
+					Effect.gen(function* () {
+						if (notification.id !== undefined) {
+							return yield* Fail("Codex export received a server-initiated request");
+						}
+						if (
+							/^item\/(commandExecution|fileChange|mcpToolCall|dynamicToolCall|webSearch|tool)\b/.test(
+								notification.method,
+							)
+						) {
+							return yield* Fail("Codex export attempted provider tool activity");
+						}
+						const current = yield* Ref.get(state);
+						if (current.thread_id === undefined || current.turn_id === undefined) {
+							if (
+								!allow_buffer ||
+								(notification.method !== "item/started" &&
+									notification.method !== "item/completed" &&
+									notification.method !== "turn/completed")
+							)
+								return;
+							if (current.pending.length >= 16)
+								return yield* Fail("Codex export notification buffer overflow");
+							yield* Ref.set(state, {
+								...current,
+								pending: [
+									...current.pending,
+									{ method: notification.method, params: notification.params },
+								],
+							});
+
+							return;
+						}
+
+						if (
+							notification.method === "item/started" ||
+							notification.method === "item/completed"
+						) {
+							const identity = yield* Schema.decodeUnknownEffect(
+								ExportItemIdentitySchema,
+							)(notification.params).pipe(Effect.option);
+							if (
+								Option.isSome(identity) &&
+								identity.value.threadId === current.thread_id &&
+								identity.value.turnId === current.turn_id
+							) {
+								const decoded = yield* Schema.decodeUnknownEffect(
+									ExportItemLifecycleSchema,
+								)(notification.params).pipe(Effect.option);
+								if (Option.isNone(decoded))
+									return yield* Fail(
+										"Codex export received a malformed item lifecycle",
+									);
+								if (decoded.value.item.type !== "agentMessage")
+									return yield* Fail(
+										"Codex export attempted provider item activity",
+									);
+								if (notification.method === "item/completed") {
+									const agent = yield* Schema.decodeUnknownEffect(
+										ExportAgentMessageSchema,
+									)(notification.params).pipe(Effect.option);
+									if (Option.isNone(agent))
+										return yield* Fail(
+											"Codex export received a malformed final agent message",
+										);
+									if (current.item !== undefined)
+										return yield* Fail(
+											"Codex export completed multiple agent messages",
+										);
+									yield* Ref.set(state, {
+										...current,
+										item: {
+											item_id: agent.value.item.id,
+											message: agent.value.item.text,
+										},
+									});
+								}
+							}
+						}
+
+						if (
+							notification.method === "turn/completed" &&
+							current.turn_id !== undefined
+						) {
+							const identity = yield* Schema.decodeUnknownEffect(
+								ExportTurnIdentitySchema,
+							)(notification.params).pipe(Effect.option);
+							if (
+								Option.isSome(identity) &&
+								identity.value.threadId === current.thread_id &&
+								identity.value.turn.id === current.turn_id
+							) {
+								const decoded = yield* Schema.decodeUnknownEffect(
+									ExportTurnCompletedSchema,
+								)(notification.params).pipe(Effect.option);
+								if (Option.isNone(decoded))
+									return yield* Fail(
+										"Codex export received a malformed turn lifecycle",
+									);
+								const latest = yield* Ref.get(state);
+								if (decoded.value.turn.status !== "completed")
+									return yield* Fail(
+										`Codex export turn ${decoded.value.turn.status}`,
+									);
+								if (latest.item === undefined)
+									return yield* Fail(
+										"Codex export completed without an agent message",
+									);
+								yield* Deferred.succeed(completed, latest.item);
+							}
+						}
+					});
+				const Pump = session.Notifications.pipe(
+					Stream.runForEach((notification) => ProcessNotification(notification, true)),
+				).pipe(Effect.catch(() => Fail("Codex export notification session failed")));
+
+				yield* Effect.forkScoped(Pump);
+				yield* MapSessionFailure(
+					session.Handshake({ client_name: "artisan-editor", client_version: "0.7.0" }),
+				);
+				const fork_params = yield* Schema.decodeUnknownEffect(CodexThreadForkParams, {
+					onExcessProperty: "error",
+				})({
+					approvalPolicy: "never",
+					cwd: input.working_directory,
+					ephemeral: true,
+					lastTurnId: input.settled_native_turn_id,
+					...(input.source_model === undefined ? {} : { model: input.source_model }),
+					sandbox: "read-only",
+					threadId: input.source_resume_token.native_thread_id,
+				}).pipe(
+					Effect.mapError(
+						() =>
+							new EngineProtocolError({
+								engine_id: "codex",
+								message: "Codex export fork parameters were invalid",
+							}),
+					),
+				);
+				const fork_response = yield* MapSessionFailure(
+					session.Request("thread/fork", fork_params),
+				);
+				const fork = yield* Schema.decodeUnknownEffect(CodexThreadForkResult)(
+					fork_response.result,
+				).pipe(
+					Effect.mapError(
+						() =>
+							new EngineProtocolError({
+								engine_id: "codex",
+								message: "Codex thread/fork returned an invalid result",
+							}),
+					),
+				);
+				if (fork.thread.id === input.source_resume_token.native_thread_id) {
+					return yield* Effect.fail(
+						new EngineProtocolError({
+							engine_id: "codex",
+							message: "Codex thread/fork did not create an isolated thread",
+						}),
+					);
+				}
+				yield* Ref.update(state, (current) => ({ ...current, thread_id: fork.thread.id }));
+				const turn_params = yield* Schema.decodeUnknownEffect(
+					CodexContinuationTurnStartParams,
+					{ onExcessProperty: "error" },
+				)({
+					approvalPolicy: "never",
+					input: [{ text: input.prompt, type: "text" }],
+					outputSchema: input.output_schema,
+					sandboxPolicy: { type: "readOnly" },
+					threadId: fork.thread.id,
+				}).pipe(
+					Effect.mapError(
+						() =>
+							new EngineProtocolError({
+								engine_id: "codex",
+								message: "Codex export turn parameters were invalid",
+							}),
+					),
+				);
+				const turn_response = yield* MapSessionFailure(
+					session.Request("turn/start", turn_params),
+				);
+				const turn = yield* Schema.decodeUnknownEffect(TurnResponseSchema)(
+					turn_response.result,
+				).pipe(
+					Effect.mapError(
+						() =>
+							new EngineProtocolError({
+								engine_id: "codex",
+								message: "Codex export turn/start returned an invalid result",
+							}),
+					),
+				);
+				const pending = yield* Ref.modify(
+					state,
+					(current) =>
+						[
+							current.pending,
+							{ ...current, pending: [], turn_id: turn.turn.id },
+						] as const,
+				);
+				yield* Effect.forEach(pending, (notification) =>
+					ProcessNotification(notification, false),
+				);
+				const item = yield* Deferred.await(completed).pipe(
+					Effect.timeoutOrElse({
+						duration: request_timeout_ms,
+						orElse: () =>
+							Effect.fail(
+								new EngineProtocolError({
+									engine_id: "codex",
+									message:
+										"Codex export timed out waiting for the completed turn",
+								}),
+							),
+					}),
+				);
+
+				return {
+					export_native_item_id: item.item_id,
+					export_native_thread_id: fork.thread.id,
+					export_native_turn_id: turn.turn.id,
+					message: item.message,
+					method: "codex_fork_summary" as const,
+					source_native_thread_id: input.source_resume_token.native_thread_id,
+					source_native_turn_id: input.settled_native_turn_id,
+				};
+			}),
+		);
 	const Open = (input: EngineOpenInput): Effect.Effect<EngineRun, EngineFailure, Scope.Scope> =>
 		Effect.gen(function* () {
 			yield* ValidateEventCapacity(event_capacity);
@@ -845,14 +1243,13 @@ function make_codex_app_server_engine(
 			}
 
 			const initial_text = input._tag === "start" ? input.initial_text : input.next_text;
+			const initial_content =
+				input._tag === "start" ? input.initial_content : input.next_content;
 
-			if (initial_text !== undefined) {
+			if (initial_text !== undefined || (initial_content?.length ?? 0) > 0) {
 				const turn_response = yield* MapSessionFailure(
 					session.Request("turn/start", {
-						input: make_turn_input(
-							initial_text,
-							input._tag === "start" ? input.initial_content : undefined,
-						),
+						input: make_turn_input(initial_text ?? "", initial_content),
 						...(input.provider_options?.["codex.service_tier"] === "fast"
 							? { serviceTier: "fast" }
 							: {}),
@@ -1123,7 +1520,13 @@ function make_codex_app_server_engine(
 			};
 		});
 
-	return { Descriptor: CodexEngineDescriptor, Open, Probe };
+	return {
+		CheckNativeContinuation,
+		Descriptor: CodexEngineDescriptor,
+		ExportContinuation,
+		Open,
+		Probe,
+	};
 }
 
 function selection_failure_reason(exit: Exit.Exit<EngineProbe, EngineFailure>) {

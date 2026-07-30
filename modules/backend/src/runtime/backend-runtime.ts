@@ -15,6 +15,7 @@ import { AgentGraphOrchestratorLive } from "../orchestration/agent-graph-orchest
 import { AgentGraphRepositoryLive } from "../orchestration/agent-graph-repository";
 import { AgentOrchestratorLive } from "../orchestration/agent-orchestrator";
 import { IntakePolicyLive } from "../orchestration/intake-policy";
+import { ThreadContinuationServiceLive } from "../orchestration/thread-continuation-service";
 import { SurfaceServiceLive } from "../surfaces/surface-service";
 import {
 	make_node_workspace_filesystem_registry_layer,
@@ -39,6 +40,7 @@ import { make_database_layer } from "../persistence/database";
 import { JournalNotifierLive } from "../persistence/journal-notifier";
 import { JournalStoreLive } from "../persistence/journal-store";
 import { OrchestrationRepositoryLive } from "../persistence/orchestration-repository";
+import { ThreadContinuationRepositoryLive } from "../persistence/thread-continuation-repository";
 import { ThreadReadModelLive } from "../persistence/thread-read-model";
 import {
 	ProjectionRebuildBarrierLive,
@@ -277,10 +279,11 @@ export function make_backend_layer(options: BackendOptions) {
 	const persistence = Layer.mergeAll(
 		JournalStoreLive,
 		OrchestrationRepositoryLive,
+		ThreadContinuationRepositoryLive,
 		ThreadReadModelLive,
 		TranscriptReadModelLive,
 		ConversationReadModelLive,
-	).pipe(Layer.provideMerge(infrastructure));
+	).pipe(Layer.provideMerge(NodeCrypto.layer), Layer.provideMerge(infrastructure));
 	const workspace_evidence = WorkspaceEvidenceRecorderLive.pipe(Layer.provideMerge(persistence));
 	const workspace_changes = WorkspaceChangeRepositoryLive.pipe(
 		Layer.provideMerge(NodeCrypto.layer),
@@ -371,8 +374,15 @@ export function make_backend_layer(options: BackendOptions) {
 		),
 		Layer.provideMerge(infrastructure),
 	);
+	const continuation = ThreadContinuationServiceLive.pipe(
+		Layer.provideMerge(persistence),
+		Layer.provideMerge(engine_registry),
+		Layer.provideMerge(NodeCrypto.layer),
+		Layer.provideMerge(infrastructure),
+	);
 	const orchestration = AgentOrchestratorLive.pipe(
 		Layer.provideMerge(persistence),
+		Layer.provideMerge(continuation),
 		Layer.provideMerge(engine_registry),
 		Layer.provideMerge(guidance),
 		Layer.provideMerge(IntakePolicyLive),

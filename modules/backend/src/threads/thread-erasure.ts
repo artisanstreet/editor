@@ -5,6 +5,11 @@ import { Database } from "../persistence/database";
 import { JournalNotifier } from "../persistence/journal-notifier";
 import { RetrySqliteWrite } from "../persistence/sqlite-write-retry";
 import {
+	ThreadContinuationLaunches,
+	ThreadPortableHandoffs,
+	ThreadRunContinuationState,
+} from "../persistence/thread-continuation-schema";
+import {
 	AgentInstances,
 	AgentRuns,
 	ArtisanToolApprovals,
@@ -382,6 +387,15 @@ export const ThreadErasureLive = Layer.effect(
 						yield* transaction
 							.delete(TerminalSessions)
 							.where(eq(TerminalSessions.thread_id, thread_id));
+						yield* transaction
+							.delete(ThreadContinuationLaunches)
+							.where(eq(ThreadContinuationLaunches.thread_id, thread_id));
+						yield* transaction
+							.delete(ThreadPortableHandoffs)
+							.where(eq(ThreadPortableHandoffs.thread_id, thread_id));
+						yield* transaction
+							.delete(ThreadRunContinuationState)
+							.where(eq(ThreadRunContinuationState.thread_id, thread_id));
 						yield* transaction
 							.delete(OrchestrationOutbox)
 							.where(eq(OrchestrationOutbox.thread_id, thread_id));

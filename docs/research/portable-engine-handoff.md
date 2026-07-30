@@ -59,9 +59,10 @@ state rather than pretending that native tool state moved.
 
 Claude supports manual `/compact` and automatic compaction. Its stream-json
 protocol announces compaction progress and a `system/compact_boundary`, but the
-boundary frame itself is not the summary. Artisan currently lists
-`compact_boundary` among the system bookkeeping events it silently ignores in
-[`claude-normalizer.ts`](../../modules/engines/src/claude/claude-normalizer.ts).
+boundary frame itself is not the summary. The continuation implementation
+promotes that exact frame to a summary-free canonical compaction marker so its
+durable journal position can be paired privately with the later `PostCompact`
+summary. Other system bookkeeping remains silent.
 
 Claude's official `PostCompact` hook is the stable extraction seam. It runs for
 both `manual` and `auto` triggers and supplies:
@@ -116,6 +117,13 @@ pair to the transcript writer. Future versions must pass transcript fixtures
 for this ordering and field shape or disable native extraction and use the
 canonical fallback.
 
+The run adapter therefore enables the capture plugin only when its ordinary
+probe reports exactly `2.1.220`. It also requires the captured boundary UUID to
+match the earlier summary-free stream marker before exposing private native
+compaction state. This preserves the actual boundary journal cut and lets a
+later switch append every canonical turn after compaction, even when the switch
+occurs several resumed Claude runs later.
+
 A random mailbox path or bearer value is useful for accidental cross-run
 isolation but is not proof of process identity: environment variables and
 command arguments may be visible to child processes. Stronger provenance would
@@ -133,6 +141,12 @@ portable checkpoint and starts a fresh Claude session. A failed resume must be
 visible and must not silently retry as a new session.
 
 ## Codex CLI 0.145.0
+
+Continuation export and native model compatibility are pinned to exactly
+`0.145.0`. Newer or prerelease CLIs keep the ordinary transport available but
+disable these reverse-engineered continuation operations until their generated
+schemas and behavior pass the same fixtures; orchestration then uses the
+canonical transcript fallback.
 
 ### Native behavior
 
