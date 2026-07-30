@@ -6,11 +6,10 @@ Last updated: 2026-07-30. Branch continuity only. Durable verified status is in
 ## Working State
 
 - Repository `C:\Users\sander\Desktop\artisan-editor`; direct `master`,
-  tracking `origin/master`. The authorized integrated thermonuclear milestone
-  is `9414199b` and its complete validation is recorded below.
+  tracking `origin/master`. Thermonuclear remediation is committed through
+  clean-checkout repair `45fa22bb`; push/status recording remains.
 - Protected user work remains: `modules/frontend/src/routes/threads/+page.sv`
-  stays staged but uncommitted; `.mcp.json` and five unrelated migration
-  directories stay untracked.
+  stays staged but uncommitted and `.mcp.json` stays untracked.
 - Production Engines are Codex CLI and Claude Code CLI.
 
 ## Invariants
@@ -27,11 +26,8 @@ Last updated: 2026-07-30. Branch continuity only. Durable verified status is in
 
 ## Active Thermonuclear Remediation
 
-- Sol-light workers own non-overlapping slices; the coordinator owns architecture,
-  integration, independent review, full validation, status, and direct-master
-  milestone commits. Existing dirty WIP remains user-owned and uncommitted.
-- An early scoped-format mistake traversed 792 files; no shared dirty work was
-  reverted. Review unowned formatting deltas before staging.
+- Sol-light workers owned non-overlapping slices; the coordinator owns
+  architecture, integration, review, full validation, status, and direct-master commits.
 - Correctness/security: workspace authority revokes on detach/root change and
   subscribes before its initial snapshot; Claude compaction uses safe no-tools
   flags. Deterministic race and focused suites pass.
@@ -48,8 +44,7 @@ Last updated: 2026-07-30. Branch continuity only. Durable verified status is in
   29 atomicity/continuation/structure tests pass.
 - Transport public contract is 563/586 lines; the 1,559-line prefixed fixture is
   replaced by seven contextual modules (largest 526). The supported `client.ts`
-  facade now targets `client-api/`, eliminating its file/directory collision.
-  The live client is a
+  facade targets `client-api/`, eliminating its collision. The live client is a
   379-line lifecycle composer over ten scoped domain API modules, each below
   500 lines. Subscription coordination is now a 45-line composer acquiring
   options, identity/trace, protocol send, and error reporting through Context
@@ -89,31 +84,30 @@ Last updated: 2026-07-30. Branch continuity only. Durable verified status is in
   config/probe/graph boundaries; 83 focused tests pass.
 - The protocol `control.ts`/`control/` ESM collision is removed via the
   `control-contract/` path; its regression guard and crash fixture pass 18 tests.
-- A repository-wide source-quality guard enforces the 1,000-line ceiling,
-  contextual filenames, no raw JSON/non-null assertions, and SER ownership.
+- A repository-wide guard enforces the 1,000-line ceiling, contextual filenames,
+  no raw JSON/non-null assertions, and SER ownership.
 - All reviewed positional bundles, double casts, `Effect.orDie` conversions,
   and basename collisions are removed; both final thermos verdicts are clean.
-  Commit `9414199b` contains the authorized integrated tree and excludes every
-  protected path.
+  Commits `9414199b` and `45fa22bb` contain the authorized integrated tree and
+  reproducibility repair; the protected page and personal config remain excluded.
 
 ## Verification
 
-- `pnpm run validate` is green: format, zero-warning lint, TypeScript, production
-  build, 292 Vitest files/1,959 tests (7 skips), native format/clippy, and 45 Rust
-  tests. The global guard and both final thermos reviews are clean.
+- `pnpm run validate` is green in the integration checkout and a frozen-install
+  clean clone of `45fa22bb`: format, zero-warning lint, TypeScript, production
+  frontend and isolated Forge builds, 292 Vitest files/1,958 tests (7 skips),
+  native format/clippy, and 45 Rust tests.
+- The repair reviewer, global source guard, and both final thermos reviews are clean.
 - No development server was started.
 
 ## Dirty-Tree Integration Notes
 
-- Task-owned new files are the continuation model/service/repository/schema,
-  compactor service and its test, migrations `20260730121130_chilly_tarot` and
-  `20260730161038_silky_stingray`, and focused continuation tests. The Claude
-  capture/helper files and their capture/packaging tests are deleted (staged).
-- Shared dirty files include `agent-orchestrator.ts`, `backend-runtime.ts`,
-  backend `index.ts`, `forge.vite.config.ts`, provider adapters/tests, and other
-  Sander WIP. Isolate task hunks when committing; do not absorb unrelated work.
-- Unrelated untracked migrations `20260729084837`, `20260729132743`,
-  `20260729141622`, `20260730093655`, and `20260730110447` are user WIP.
+- The five prerequisite Drizzle migrations through `20260730110447` are now
+  committed. Their snapshots form the lineage merged by `20260730161038`; this
+  removes the dirty-checkout-only migration dependency.
+- Validation builds Forge once into `.dist/validation/forge`; release/watch keep
+  `.dist/forge`, so the gate cannot depend on or collide with a watched artifact.
+- Protected page patch hash: `84cb787c1f2422da8c5fb5c41a00837151590e10`.
 
 ## Product Continuity
 
