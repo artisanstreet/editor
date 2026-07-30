@@ -1,181 +1,119 @@
 # Active Branch Handoff
 
-Last updated: 2026-07-29
-Branch continuity only. Durable status lives in
+Last updated: 2026-07-30
+Branch continuity only. Durable verified status lives in
 [`docs/status/backend-completion-matrix.md`](../docs/status/backend-completion-matrix.md).
 
 ## Working State
 
 - Repository: `C:\Users\sander\Desktop\artisan-editor`
-- Branch: `master` (GitHub default pre-release integration branch). Work
-  directly on `master`; no branches, worktrees, or PRs unless requested.
-- Distribution uses a temporary native bootstrap from GitHub Releases and
-  permanent `ae` ownership. npm is outside the release and install contract.
+- Branch/HEAD: `master` at `ef34399`, tracking `origin/master`. Work directly
+  on `master`; do not create branches, worktrees, or PRs unless requested.
+- The worktree contains extensive pre-existing Sander WIP across backend,
+  protocol, transport, frontend, tests, migrations, and dev tooling. Preserve
+  it. Stage only task-owned paths and never revert or overwrite unknown edits.
+- Two production Engines are registered: Codex CLI and Claude Code CLI. The
+  old Codex-only boundary is retired.
 
-## Integrated Direction
+## Architecture That Must Stay True
 
-- Pure transformations stay ordinary TypeScript; I/O, time, randomness,
-  configuration, concurrency, mutable ownership, failure, and external
-  capabilities are Effect programs supplied through Services and Layers. One
-  top-level Effect runtime per executable.
-- Snowflake IDs are the shared non-secret identity mechanism; security tokens
-  and nonces remain cryptographically random.
-- Forge owns all application state; the frontend consumes typed RPC and native
-  binary WebSocket frames only after pairing and authoritative hydration.
-- Engines: Codex and Claude Code CLI adapters are registered in production;
-  the codex-only boundary is retired. Steer/approval/question/subagents remain
-  honestly unsupported for Claude; `Open` re-probes every run (~20s Windows).
+- Pure transformations remain ordinary TypeScript. I/O, configuration,
+  concurrency, shared mutable ownership, lifecycle, and external capabilities
+  are Effect programs supplied through Services and Layers. One top-level
+  Effect runtime exists per executable.
+- Forge owns application state. Clients consume schema-validated typed RPC and
+  native binary WebSocket frames after pairing and authoritative hydration.
+- Engine adapters own native subprocess protocols; orchestration owns visible
+  agent identity, thread/run lifecycle, policy, normalized observations, raw
+  event retention, and durable native session affinity.
+- Snowflake IDs are non-secret identities. Tokens and nonces remain
+  cryptographically random.
 
-## One Forge Per Home (current milestone)
+## Active Milestone: Portable Compaction / Engine Switching
 
-- The profile concept is removed. Each Artisan home (`ARTISAN_HOME`, default
-  `%LOCALAPPDATA%\Artisan`) hosts exactly one Forge: `config.json`,
-  `secrets.json`, `state.json`, `forge.log`, and `data/` live at the home
-  root beside `installation.json`. Both CLIs auto-migrate a single legacy
-  `profiles/<name>/` directory into the home root at the path-resolution
-  choke point (Rust `instance.rs`, TS `node-instance-store.ts`) and fail
-  with an actionable error when several legacy profiles exist. No
-  `--profile` flag or `ARTISAN_PROFILE` env remains anywhere.
-- Dev world: `pnpm run dev:forge` (built bundle on 4848, the only composition
-  that passes `--serve-frontend`), `pnpm run dev` (Vite HMR on 4849 proxying
-  `/api` + `/health`), `dev:open`/`dev:pair` (`ae open`, optionally
-  `--origin`), `dev:ae`/`dev:ae-bootstrap` source-run CLI wrappers. The dev
-  home is `.dist/dev/forge-home`. Dev badge + `[Dev]` title key off
-  `development: true` in `/health` (true iff `serve_frontend`). Debug Rust
-  builds refuse the installed home.
-- Installed world: `ae open` (and `artisan://forge/start`) launches the
-  Electron editor from the version payload; `ae open --browser` / `--origin`
-  keep the paired-browser flow. The editor is a sandboxed, context-isolated,
-  bridge-free window that loads the bundled frontend from `artisan://app`,
-  obtains `{endpoint, pair_code}` from hidden `ae open --handoff` stdout
-  (one-time, never argv/disk), pairs cross-origin at `/api/pair` with
-  credentials, and connects WS to the adopted loopback endpoint. Session
-  cookie lives in a non-persistent partition.
-- Forge static hosting is per-home config (`serve_frontend`; env
-  `ARTISAN_STATIC_FRONTEND_ROOT` only when enabled). Installed homes serve
-  `/health` + `/api` control/WS only; SPA routes 404. The frontend stays
-  bundled in the forge payload (one build pipeline); serving is gated, not
-  the artifact. Gate: `.tests/forge/static-hosting-gate.test.ts` plus Rust
-  `process.rs`/`instance.rs` unit gates.
-- Frontend endpoint adoption is restricted to non-HTTP(S) pages
-  (`lib/runtime/forge-endpoint.ts`): a crafted `#pair=…&forge=…` link on a
-  Forge-served page cannot redirect host-scoped loopback cookies to a sibling
-  port. `websocket-binding` allowed_origins default `artisan://app` plus
-  http-host CORS/`SameSite=None` cover the pre-session surfaces.
-- `package:desktop` stages `.dist/frontend` into `.dist/desktop/frontend`
-  with the loopback `connect-src` CSP patch (browser copy stays `'self'`);
-  `desktop-builder.yml` ships `frontend/**`; `verify-packaged-desktop.ps1`
-  proves renderer-present, loopback-CSP, bridge-free, no embedded Forge.
-- Payload drift: bootstrap staging writes `payload-manifest.json` (relative
-  path → sha256; format in `modules/bootstrap/rust/payload.rs`) into
-  `versions/<v>`; `ae doctor` verifies (`modules/cli/rust/payload.rs`), names
-  modified/missing/unexpected files, fails on drift, and reports pre-manifest
-  versions (≤0.2.1) as `unverifiable`, which stays healthy. Diagnostic only.
-- Engine-state audit: Forge-owned state (artisan.sqlite, forge-sessions.json,
-  guidance, model-behaviour) and Codex's sqlite family (`CODEX_SQLITE_HOME` →
-  `data_root/codex-sqlite`) are scoped to the home's `data_root`. By design
-  `CODEX_HOME` (auth/config/rollout sessions) stays user-global; Claude has
-  no state/credential split — `CLAUDE_CONFIG_DIR` would relocate
-  `.credentials.json` and de-authenticate the user — so Forge-spawned Claude
-  runs share `~/.claude` project history. Documented gap, unfixed.
+- Goal: reverse engineer native compaction in every production Engine and
+  support a thread continuing on a different engine/model by extracting a
+  usable compacted checkpoint and supplying it to the new Engine.
+- Codex CLI 0.145.0: `thread/compact/start` returns no summary and public
+  `contextCompaction` items contain only an ID. OpenAI remote compaction
+  persists an encrypted `compaction` item; 1,741 local rollout records sampled
+  had no plaintext compacted message. Same-engine model switching can use
+  native resume with a version-gated model override. Cross-engine export uses
+  a settled ephemeral fork plus an ordinary captured summarization turn, with
+  canonical-transcript compaction as fallback. A provider alias can force the
+  plaintext local compactor but is internal/experimental, not production.
+- Claude Code 2.1.220: the official `PostCompact` hook supplies
+  `compact_summary` in plaintext. Load an Artisan hook plugin per invocation
+  via `--plugin-dir`; the hook records the pre-append transcript offset and
+  sends untrusted input to a private receiver. Version-gated 2.1.220 parsing
+  claims the following `compact_boundary`/`isCompactSummary` pair. Missing or
+  uncorrelated output falls back to canonical compaction. Artisan currently
+  ignores `compact_boundary`.
+- Native session identifiers never cross engines. Define a bounded, immutable,
+  typed checkpoint above adapters with source cut, summary plus post-boundary
+  tail, version, and integrity hash. A target engine starts fresh and receives
+  the checkpoint plus the next user request at user precedence; persist private
+  lineage separately from native resume tokens.
+- Effect/Effect AI research found useful typed model/prompt/chat capabilities
+  but no abstraction that makes Codex/Claude CLI continuation portable. Keep
+  CLI extraction/injection behind custom Effect Services and Layers; a
+  provider-neutral summarizer can be added behind a separate service.
+- Any implementation must coexist with Sander's modified
+  `session-policy.ts`, orchestration repository/contracts/schema, protocol
+  routes, frontend composer/model controls, and their tests. Inspect live diffs
+  before touching those files.
+- Persistent harness goal is active. Reverse engineering and focused adapter
+  verification, independent review, and durable research documentation are
+  complete. Validation is next. Do not mark this feature implemented in the
+  completion matrix until product code and integration tests exist.
 
-## Sidebar Identity + Engine Usage (2026-07-29)
+## Current Product Continuity
 
-- New control queries `host.identity.query` (OS profile: Windows CIM
-  full-name / macOS `id -F` / Linux GECOS, hostname fallback; cached, never
-  fails) and `engine.usage.query` (per-engine provider quota windows).
-  `Engine` seam gained optional non-billable `Usage`. Claude adapter calls
-  the undocumented `api.anthropic.com/api/oauth/usage` with the
-  `.credentials.json` token (401 → unauthenticated value; NEVER refresh the
-  token — it races the CLI). Codex prechecks `auth.json` then spawns
-  `codex app-server` for `account/rateLimits/read` (multi-bucket).
-- Frontend: `left.identity` is live — sidebar footer `sidebar-identity.sv`
-  with initials Avatar (new `ui/avatar`), Settings item, separator, and
-  per-authenticated-engine usage bars fetched lazily on first open.
+- Each Artisan home owns one Forge with config, secrets, state, log, and data
+  at the home root. Both CLIs migrate one legacy profile and reject ambiguous
+  multi-profile homes.
+- Installed rendering uses the sandboxed, context-isolated, bridge-free
+  Electron editor at `artisan://app`; hidden `ae open --handoff` performs
+  one-time loopback pairing. Development may use Forge-hosted or Vite HMR
+  browser rendering.
+- Installed Forge does not host the SPA. Static hosting is a development
+  opt-in. `package:desktop` bundles the renderer with loopback-only CSP.
+- Forge-owned state and Codex SQLite are home-scoped. `CODEX_HOME` remains
+  user-global. Claude runs share `~/.claude` because relocating
+  `CLAUDE_CONFIG_DIR` also relocates credentials.
+- Codex app-server and exec fallback plus Claude stream-json are production
+  subprocess adapters. Claude honestly lacks steer/approval/question/subagent
+  support.
+- Session model selection resolves an explicit enabled native model rather
+  than silently inheriting a user's CLI default. Reasoning completion is
+  normalized for Claude and Codex exec; app-server exposes no equivalent
+  terminal reasoning signal.
+- Engine usage has a three-minute last-good backend cache and a
+  schema-validated frontend cache. Claude's OAuth usage endpoint may return
+  persistent 429, in which case the adapter uses headless `/usage`.
+- `ae doctor` verifies payload manifests; pre-manifest payloads are reported
+  as unverifiable but healthy. Do not modify the real installed 0.1.0 home;
+  use repository builds and temporary fixtures.
 
-## Model-Reset + Stuck-Thinking Fixes (2026-07-29)
+## Verification / Known Red
 
-- Root causes of "picked Sonnet, got Fable": `/threads/new` re-seeded
-  `draft_thread_policy` (model-less) on every remount, and the selector
-  rendered the catalog default indistinguishably from an explicit pick.
-  Fixed: seed only when undefined; muted "Default" hint when unpicked;
-  `MakeSessionPolicyRunMetadata` now resolves the catalog's first enabled
-  `native_model_id` for the engine instead of omitting `--model` (which let
-  the CLI use the operator's personal default).
-- Root cause of stuck thinking stage: no terminal reasoning observation
-  existed; Sonnet 5 omitted-display thinking streams empty deltas and the
-  normalizer dropped the thinking-only completion frame. Fixed: new
-  `reasoning_summary_completed` observation (claude + codex-exec emit it;
-  codex app-server protocol has no reasoning completion signal — gap
-  documented), projection completes the item via `item_lifecycle` patch
-  (no-op when no delta ever created it), conversation store also promotes
-  a completed last-in-turn message once its work session settles, and
-  native_event summaries now surface `observation.detail`.
-- Known red (pre-existing, unrelated, on master before today):
-  `.tests/deep/integration/workspace-protocol-rebuild.test.ts` (engine
-  cleanup count on rebuild) and `.tests/frontend/shell-source-layout.test.ts`
-  (expects `composer_controls: ["model"]`; broken by the uncommitted
-  thinking/speed composer WIP in the worktree).
-- Uncommitted on purpose: `model-selector.sv` carries the "Default" hint
-  change intermixed with Sander's live thinking/speed redesign WIP —
-  commit it together with that redesign.
-
-## Usage Reliability + Caching (2026-07-29)
-
-- Diagnosed live: `api.anthropic.com/api/oauth/usage` returns a sticky
-  per-machine 429 (token valid, UA correct) — the cause of "Claude usage
-  unavailable". Claude usage now falls back to headless
-  `claude -p "/usage" --output-format json` (zero-token, CLI-internal auth
-  path) parsed for session/weekly/per-model percents (no resets on the
-  fallback); zero parsed windows ⇒ surface the original endpoint error.
-  Verified live through the real factory: 429 → fallback → real windows.
-- `engine.usage.query` keeps a per-engine last-good in-memory cache:
-  <180s fresh ⇒ zero engine calls; provider failure ⇒ serve last-good.
-  Frontend persists the last snapshot (`lib/identity/usage-cache.ts`,
-  KeyValueStore, schema-validated, self-healing) and renders it instantly,
-  refreshing once per session in the background.
-
-## Other Standing Facts
-
-- `ae` setup/doctor contain no project roots; doctor repair restores
-  installation/instance/protocol state only; only explicit `ae setup` creates
-  the Forge config. Uninstall removes an exact owned tree; data removal stays
-  explicit.
-- The per-user `artisan://` handler targets stable native `ae`; hidden
-  `ae protocol` accepts only `artisan://forge/start`.
-- Codex app-server support is minimum-version based with canonical kebab-case
-  sandbox values. Browser WS clients request `ArrayBuffer` binary delivery.
-- Sander's installed `0.1.0` Forge is bound to `127.0.0.1:52985` with a
-  Portless `artisan` alias (`https://artisan.localhost/`). Rollback copies
-  live under `%LOCALAPPDATA%\Artisan\.local-backup-*`; latest are
-  `20260727-234111` and `20260728-000743-approval-ui`. Do not modify the real
-  installation from repo work; use repo builds and tests.
-- Release publication uses protected `candidate` dry-run/release/resume
-  workflows; `v0.1.0` is published. Windows arm64, macOS, and Linux product
-  gates remain.
-
-## Verification Snapshot
-
-- 2026-07-28 single-Forge-per-home refactor: full `pnpm run test` green (228
-  files passed, 3 skipped; 1,548 tests passed, 7 skipped; ~286s); root
-  TypeScript, oxlint, and oxfmt clean; `cargo fmt --check`/`clippy -D
-warnings` clean; cargo tests 17 bootstrap + 28 CLI passing (including new
-  legacy-profile migration gates in `instance.rs`). Functional dev-flow
-  proof: the dev home migrated `profiles/browser-dev` to the home root via
-  the choke-point migration, TS `ae setup`/`start` run profile-less, 4848
-  `/health` reports `development:true`, the SPA serves, and Rust `dev:ae`
-  `status`/`doctor`/`open`/`open --handoff` all operate on the single
-  instance (doctor honestly reports the dev home's missing installation).
-  Still unverified: the installed-payload path end to end (the real install
-  migrates itself when a future release's `ae` runs there; simulated only in
-  temp-dir tests), the packaged desktop editor against the profile-less
-  handoff, and release-only/signing CI gates.
-- Earlier standing results: the Claude adapter revival passed full validate
-  (220 files, 1,511 passed, 7 skipped) on 2026-07-28; Windows distribution
-  artifact/lifecycle and packaged-bootstrap gates passed 2026-07-27; live
-  installed-runtime acceptance (pairing, hydration, real Codex/Claude turns,
-  restart restoration) passed on the synchronized 0.1.0 install.
-- Known frictions: aggregate `pnpm run validate` has intermittently exceeded
-  bounded capture windows; Electron's ignored install script can block
-  dependency preflight; Windows Application Control has blocked one CLI Rust
-  test binary in the past (not reproduced today).
+- Portable-handoff focused suites: 39 passed, 1 skipped. Exact installed CLIs
+  were Codex 0.145.0 and Claude Code 2.1.220. Schema, tagged source, persisted
+  shapes, and strict-config behavior were inspected without printing user
+  conversation content. Final two-pass independent review approved; task docs
+  pass targeted oxfmt and `git diff --check`.
+- Full `pnpm run validate` stopped on formatting in four pre-existing WIP files:
+  `activity-status.test.ts`, `shell-source-layout.test.ts`,
+  `project-locator.ts`, and `global.css`. Independent lint, TypeScript, frontend
+  build, and Rust format passed. Full Vitest: 250 files passed, 3 skipped;
+  5 files/10 assertions failed in existing catalog/manifest, Forge/project-ID,
+  workspace-rebuild, and sidebar WIP. Rust tests passed 45/45; Windows
+  Application Control blocked `cargo-clippy`. The research docs are isolated
+  and verified; stage only their three task-owned paths for the milestone.
+- Last broad green: 2026-07-28 single-Forge refactor, 228 test files passed,
+  3 skipped; 1,548 tests passed, 7 skipped; TypeScript, lint, format, Rust
+  format/clippy/tests all green.
+- Aggregate `pnpm run validate` can exceed bounded capture windows. Electron
+  install preflight and Windows Application Control have caused intermittent
+  environment failures; distinguish them from product failures with focused
+  commands.

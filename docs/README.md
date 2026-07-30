@@ -23,3 +23,4 @@ used as a product-history archive.
 - [Disk I/O safety](./engineering/disk-io-safety.md)
 - [Barekey design-language inspection](./design/barekey-design-language.md)
 - [Agent engine I/O research](./research/agent-engine-io.md)
+- [Portable engine handoff through compaction](./research/portable-engine-handoff.md)
