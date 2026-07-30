@@ -294,20 +294,19 @@ describe("Barekey docs shell reset", () => {
 		expect(route).toContain("SendMessage(pending.submission)");
 	});
 
-	it("locks the engine once a session has conversation and routes engine choice through policy", () => {
+	it("locks engine switching only during an active run and routes it through policy", () => {
 		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.sv");
 		const composer = Read("modules/frontend/src/routes/components/thread-composer.sv");
 		const selector = Read("modules/frontend/src/routes/components/model-selector.sv");
 
-		expect(workspace).toContain(
-			"const engine_locked = $derived(run_active || snapshot.items.length > 0);",
-		);
+		expect(workspace).toContain("const engine_locked = $derived(run_active);");
+		expect(workspace).not.toContain("run_active || snapshot.items.length > 0");
 		expect(composer).toContain(
 			"<ModelSelector {disabled} {engine_locked} {policy} {onpolicychange} />",
 		);
 		expect(selector).toContain("engine_id: model.engine,");
 		expect(selector).toContain("engine_locked && engine.id !== selected_engine.id");
-		expect(selector).toContain("engine is locked for this session");
+		expect(selector).toContain("finish the active run before switching engines");
 	});
 
 	it("surfaces the thread's project at the top of the thread panel and assigns it there", () => {

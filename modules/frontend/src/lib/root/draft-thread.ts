@@ -11,9 +11,8 @@ import type { ComposerSubmission } from "$lib/composer/image-attachments";
 export const draft_thread_project = writable<Project | undefined>(undefined);
 
 /**
- * The engine and model chosen for the draft. The engine locks the moment the
- * first message creates the session, so the draft is the only place a
- * different engine can be picked.
+ * The initial engine and model chosen before the durable thread exists.
+ * Settled threads can later replace this policy through the same selector.
  */
 export const draft_thread_policy = writable<ThreadSessionPolicy | undefined>(undefined);
 

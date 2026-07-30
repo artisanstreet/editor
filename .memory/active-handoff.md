@@ -6,7 +6,8 @@ Last updated: 2026-07-30. Branch continuity only. Durable verified status is in
 ## Working State
 
 - Repository `C:\Users\sander\Desktop\artisan-editor`; direct `master`,
-  tracking `origin/master`. Research is committed/pushed through `357bd2a`.
+  tracking `origin/master`. Portable continuation is committed/pushed through
+  `1479292b`.
 - Extensive pre-existing Sander WIP is present. Preserve it and stage only
   task-owned content. `modules/frontend/src/routes/threads/+page.sv` is
   pre-staged user work and must remain staged but uncommitted.
@@ -75,6 +76,9 @@ Last updated: 2026-07-30. Branch continuity only. Durable verified status is in
 - Claude boundary UUID and trigger must agree across stream, transcript, hook,
   raw provenance, persisted state, and launch validation. Persisted summary
   hashes are recomputed on read and launch; tampering falls back canonically.
+- The live model selector permits engine changes after a run settles and keeps
+  other providers disabled only while a run is active. The existing durable
+  session-policy update then drives the next run through continuation.
 
 ## Verification
 
@@ -92,7 +96,10 @@ Last updated: 2026-07-30. Branch continuity only. Durable verified status is in
   `.tests/frontend/shell-source-layout.test.ts`,
   `modules/backend/src/threads/project-locator.ts`, and
   `modules/frontend/src/lib/styles/global.css`.
-- Remaining milestone work is task-only commit/push and final upstream audit.
+- The engine-unlock regression, root TypeScript check, and production frontend
+  build pass. No live preview was attached and repository rules prohibit
+  starting a development server without an explicit request.
+- The engine-unlock milestone is verified; no implementation work remains.
 
 ## Dirty-Tree Integration Notes
 

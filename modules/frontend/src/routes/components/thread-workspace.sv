@@ -66,8 +66,8 @@
 		snapshot: ConversationSnapshot;
 	} = $props();
 	const view = $derived(MakeConversationViewState(snapshot));
-	/** Once a session has produced conversation, its engine can never change. */
-	const engine_locked = $derived(run_active || snapshot.items.length > 0);
+	/** A settled thread may switch engines; only an in-flight run owns the current engine. */
+	const engine_locked = $derived(run_active);
 	type ConversationItemBlock = Extract<ConversationRenderBlock, { type: "item" }>;
 
 	const block_is_resolved_approval = (

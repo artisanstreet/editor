@@ -66,7 +66,7 @@
 		policy,
 	}: {
 		disabled?: boolean;
-		/** A session that has produced conversation cannot move to another engine. */
+		/** Prevents a provider change while the current run is still in flight. */
 		engine_locked?: boolean;
 		onpolicychange?: (policy: ThreadSessionPolicy) => void;
 		policy?: ThreadSessionPolicy;
@@ -591,7 +591,7 @@
 						{@const EngineIcon = engine.icon}
 						{@const engine_disabled_reason =
 							engine_locked && engine.id !== selected_engine.id
-								? `${engine.name} — engine is locked for this session`
+								? `${engine.name} — finish the active run before switching engines`
 								: disabled_reason}
 						<Tooltip>
 							<TooltipTrigger>
