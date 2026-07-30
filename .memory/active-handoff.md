@@ -62,10 +62,9 @@ Branch continuity only. Durable verified status lives in
   `session-policy.ts`, orchestration repository/contracts/schema, protocol
   routes, frontend composer/model controls, and their tests. Inspect live diffs
   before touching those files.
-- Persistent harness goal is active. Reverse engineering and focused adapter
-  verification, independent review, and durable research documentation are
-  complete. Validation is next. Do not mark this feature implemented in the
-  completion matrix until product code and integration tests exist.
+- Research, focused verification, and independent review were committed and
+  pushed to `master` as `4fa57ab`. Product support is not implemented; do not
+  update the completion matrix until code and integration tests exist.
 
 ## Current Product Continuity
 
