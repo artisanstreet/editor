@@ -7,7 +7,7 @@ Last updated: 2026-07-30. Branch continuity only. Durable verified status is in
 
 - Repository `C:\Users\sander\Desktop\artisan-editor`; direct `master`,
   tracking `origin/master`. Portable continuation is committed/pushed through
-  `1479292b`.
+  `1479292b`; the settled-thread selector unlock is pushed through `4f6d32f`.
 - Extensive pre-existing Sander WIP is present. Preserve it and stage only
   task-owned content. `modules/frontend/src/routes/threads/+page.sv` is
   pre-staged user work and must remain staged but uncommitted.
