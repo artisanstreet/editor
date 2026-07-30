@@ -15,7 +15,7 @@ import {
 	OrchestrationArtifacts,
 	OrchestrationGroups,
 	ThreadErasureClaims,
-} from "../../persistence/schema";
+} from "../../persistence/tables";
 import {
 	AgentGraphInvalid,
 	AgentGraphNotFound,
@@ -36,6 +36,7 @@ export interface RunLifecycle {
 		instance_id: string,
 		native_thread_id: string,
 		resume_token: unknown,
+		model_id?: string,
 	) => Effect.Effect<AgentRunActivation, AgentGraphError>;
 	readonly claim_run: (
 		run_id: string,
@@ -98,6 +99,7 @@ export function make_run_lifecycle(
 		instance_id: string,
 		native_thread_id: string,
 		resume_token: unknown,
+		model_id?: string,
 	) =>
 		Effect.gen(function* () {
 			const result = yield* database.client.transaction((transaction) =>
@@ -145,6 +147,7 @@ export function make_run_lifecycle(
 						.update(AgentRuns)
 						.set({
 							dispatch_status: "active",
+							...(model_id === undefined ? {} : { model_id }),
 							native_identity_json: JSON.stringify(native_identity),
 							native_resume_json: JSON.stringify(resume_token),
 							native_thread_id,

@@ -136,7 +136,7 @@ describe("dev home interop", () => {
 			listen_host: "127.0.0.1",
 			listen_port: 4848,
 			mode: "local",
-			serve_frontend: true,
+			serve_frontend: false,
 			version: 1,
 		});
 	});
@@ -171,7 +171,9 @@ describe("dev home interop", () => {
 		expect(environment.ARTISAN_DATABASE_PATH).toContain("browser-forge");
 		expect(environment.ARTISAN_MIGRATIONS_PATH).toContain("migrations");
 		expect(environment.ARTISAN_NATIVE_RUNTIME).toContain("native-runtime");
-		expect(environment.ARTISAN_STATIC_FRONTEND_ROOT).toContain("frontend");
+		/** Vite owns the development UI, so the Forge is handed no frontend to serve. */
+		expect(environment).not.toHaveProperty("ARTISAN_STATIC_FRONTEND_ROOT");
+		expect(environment.ARTISAN_FORGE_DEVELOPMENT).toBe("1");
 		expect(environment.ARTISAN_WINDOWS_PROCESS_HOST).toContain("windows-process-host.js");
 		expect(environment.ARTISAN_HOME).toBe(paths.forge_home);
 	});

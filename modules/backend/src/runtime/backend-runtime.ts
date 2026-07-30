@@ -15,22 +15,23 @@ import { AgentGraphOrchestratorLive } from "../orchestration/agent-graph-orchest
 import { AgentGraphRepositoryLive } from "../orchestration/agent-graph-repository";
 import { AgentOrchestratorLive } from "../orchestration/agent-orchestrator";
 import { IntakePolicyLive } from "../orchestration/intake-policy";
+import { ThreadContinuationCompactorLive } from "../orchestration/thread-continuation-compactor";
 import { ThreadContinuationServiceLive } from "../orchestration/thread-continuation-service";
-import { SurfaceServiceLive } from "../surfaces/surface-service";
+import { SurfaceServiceLive } from "../surfaces/service";
 import {
 	make_node_workspace_filesystem_registry_layer,
 	WorkspaceFilesystemRegistrationError,
 	WorkspaceFilesystemRegistry,
 } from "../filesystem/workspace-filesystem-registry";
 import {
-	EmptyWorkspaceBoundedRegularFileStoreRegistryLive,
+	NodeWorkspaceBoundedRegularFileStoreRegistryLive,
 	WorkspaceBoundedRegularFileStoreRegistry,
 } from "../filesystem/workspace-bounded-regular-file-store-registry";
 import { NodeProcessRunnerLive } from "../git/node-process-runner";
-import { GitMutationDriverLive } from "../git/git-mutation-driver";
-import { GitReadServiceLive } from "../git/git-read-service";
-import { GitRepositoryLive } from "../git/git-repository";
-import { GitService, GitServiceLive } from "../git/git-service";
+import { GitMutationDriverLive } from "../git/mutation-driver";
+import { GitReadServiceLive } from "../git/read-service";
+import { GitRepositoryLive } from "../git/repository";
+import { GitService, GitServiceLive } from "../git/service";
 import {
 	make_node_workspace_git_registry_layer,
 	WorkspaceGitRegistrationError,
@@ -39,8 +40,8 @@ import {
 import { make_database_layer } from "../persistence/database";
 import { JournalNotifierLive } from "../persistence/journal-notifier";
 import { JournalStoreLive } from "../persistence/journal-store";
-import { OrchestrationRepositoryLive } from "../persistence/orchestration-repository";
-import { ThreadContinuationRepositoryLive } from "../persistence/thread-continuation-repository";
+import { OrchestrationRepositoryLive } from "../persistence/orchestration/repository";
+import { ThreadContinuationRepositoryLive } from "../persistence/thread-continuation/repository";
 import { ThreadReadModelLive } from "../persistence/thread-read-model";
 import {
 	ProjectionRebuildBarrierLive,
@@ -52,9 +53,9 @@ import { CommandRouterLive } from "../protocol/command-router";
 import {
 	DefaultProtocolConnectionOptions,
 	type ProtocolConnectionOptions,
-} from "../protocol/protocol-connection";
-import { ProtocolRouterLive } from "../protocol/protocol-router";
-import { make_protocol_server_layer } from "../protocol/protocol-server";
+} from "../protocol/connection";
+import { ProtocolRouterLive } from "../protocol/router";
+import { make_protocol_server_layer } from "../protocol/server";
 import { ThreadCommandsLive } from "../threads/thread-commands";
 import { ThreadErasureLive } from "../threads/thread-erasure";
 import { ThreadMetadataRepositoryLive } from "../threads/thread-metadata-repository";
@@ -74,6 +75,11 @@ import {
 } from "../projects/project-directory-service";
 import { ProjectCatalogLive } from "../projects/project-catalog";
 import {
+	ProjectIdentityRegistry,
+	ProjectIdentityRegistryLive,
+} from "../projects/project-identity-registry";
+import { ProjectWorkspaceBindingLive } from "../workspace/projects";
+import {
 	ThreadProjectAffinityCoordinatorDisabled,
 	ThreadProjectAffinityCoordinatorLive,
 } from "../threads/thread-project-affinity-coordinator";
@@ -82,6 +88,8 @@ import {
 	ThreadResourceQuiescer,
 	ThreadResourceQuiescerLive,
 } from "../threads/thread-resource-quiescer";
+import { ModelFavoritesServiceLive } from "../model-favorites/service";
+import { SessionDefaultsServiceLive } from "../settings/session-defaults-service";
 import { ThreadRetentionPolicyServiceLive } from "../threads/thread-retention-policy";
 import {
 	ThreadRetentionClock,
@@ -90,21 +98,21 @@ import {
 	ThreadRetentionScheduler,
 	ThreadRetentionSchedulerLive,
 } from "../threads/thread-retention";
-import { NodePtyTerminalDriverLive } from "../terminal/node-pty-terminal-driver";
-import { TerminalDriver } from "../terminal/terminal-driver";
-import { TerminalRepositoryLive } from "../terminal/terminal-repository";
-import { TerminalSessionServiceLive } from "../terminal/terminal-sessions";
-import { RuntimeMetadata, RuntimeMetadataLive } from "./runtime-metadata";
-import { RuntimeCatalogLive } from "./runtime-catalog";
+import { NodePtyTerminalDriverLive } from "../terminal/node-pty-driver";
+import { TerminalDriver } from "../terminal/driver";
+import { TerminalRepositoryLive } from "../terminal/repository";
+import { TerminalSessionServiceLive } from "../terminal/sessions";
+import { RuntimeMetadata, RuntimeMetadataLive } from "./metadata";
+import { RuntimeCatalogLive } from "./catalog";
 import {
 	DesktopEngineConfigurationError,
 	ResolveBackendRuntimeConfiguration,
 } from "./backend-runtime-config";
-import { GlobalGuidanceRepositoryLive } from "../guidance/guidance-repository";
+import { GlobalGuidanceRepositoryLive } from "../guidance/repository";
 import {
 	make_global_guidance_service_layer,
 	type GlobalGuidanceServiceOptions,
-} from "../guidance/guidance-service";
+} from "../guidance/service";
 import { GuidanceFileStoreLive } from "../guidance/file-store";
 import {
 	EmptyGuidanceProviderRegistryLive,
@@ -112,51 +120,51 @@ import {
 	make_platform_guidance_provider_registry_layer,
 } from "../guidance/provider-mirrors";
 import { make_codex_model_behaviour_probe_layer } from "../model-behaviour/codex-probe";
-import { ModelBehaviourConfigFilesLive } from "../model-behaviour/model-behaviour-config-files";
+import { ModelBehaviourConfigFilesLive } from "../model-behaviour/config-files";
 import {
 	EmptyModelBehaviourProviderRegistryLive,
 	make_desktop_model_behaviour_provider_registry_layer,
 	ModelBehaviourProviderRegistry,
-} from "../model-behaviour/model-behaviour-provider";
-import { ModelBehaviourRepositoryLive } from "../model-behaviour/model-behaviour-repository";
-import { ModelBehaviourRegistryError } from "../model-behaviour/model-behaviour-registry";
-import { ModelBehaviourServiceLive } from "../model-behaviour/model-behaviour-service";
-import { WorkspaceChangeRepositoryLive } from "../workspace/workspace-change-repository";
-import { WorkspaceEvidenceRecorderLive } from "../workspace/workspace-evidence-recorder";
-import { WorkspaceFileServiceLive } from "../workspace/workspace-file-service";
-import { WorkspaceMutationAuthorityLive } from "../workspace/workspace-mutation-authority";
-import { WorkspaceSnapshotStoreLive } from "../workspace/workspace-snapshot-store";
-import { WorkspaceMutationPayloadStoreLive } from "../workspace/workspace-mutation-payload-store";
-import { WorkspaceChangeDiffServiceLive } from "../workspace/workspace-change-diff-service";
+} from "../model-behaviour/provider";
+import { ModelBehaviourRepositoryLive } from "../model-behaviour/repository";
+import { ModelBehaviourRegistryError } from "../model-behaviour/registry";
+import { ModelBehaviourServiceLive } from "../model-behaviour/service";
+import { WorkspaceChangeRepositoryLive } from "../workspace/changes/repository";
+import { WorkspaceEvidenceRecorderLive } from "../workspace/evidence";
+import { WorkspaceFileServiceLive } from "../workspace/files/service";
+import { WorkspaceMutationAuthorityLive } from "../workspace/mutations/authority";
+import { WorkspaceSnapshotStoreLive } from "../workspace/snapshot-store";
+import { WorkspaceMutationPayloadStoreLive } from "../workspace/mutations/payloads";
+import { WorkspaceChangeDiffServiceLive } from "../workspace/changes/diff";
 import { ArtisanToolApprovalPolicyLive } from "../tools/approval-policy";
 import { make_artisan_tool_registry_layer } from "../tools/artisan-tool-registry";
 import { ArtisanBuiltInToolCapabilityStateLive } from "../tools/builtin-tool-capabilities";
 import { ToolInvocationRepositoryLive } from "../tools/tool-invocation-repository";
 import { ExecuteToolLive } from "../tools/tool-handlers";
 import { ToolControlPlaneLive } from "../tools/tool-control-plane";
-import { WorkspaceFileDiscoveryLive } from "../workspace/workspace-file-discovery";
+import { WorkspaceFileDiscoveryLive } from "../workspace/files/discovery";
 import { NodePreviewHealthProbeLive } from "../preview/node-preview-health-probe";
 import { NodePreviewExternalBrowserLive } from "../preview/node-preview-runtime";
-import { PreviewCoordinatorLive } from "../preview/preview-coordinator";
+import { PreviewCoordinatorLive } from "../preview/coordinator";
 import {
 	PreviewExternalBrowser,
 	PreviewInspectionConnector,
 	PreviewInspectionConnectorUnavailableLive,
 	make_preview_inspection_layer,
-} from "../preview/preview-runtime";
-import { PreviewRepositoryLive } from "../preview/preview-repository";
-import { PreviewServiceLive } from "../preview/preview-service";
-import { PreviewTargetClockLive } from "../preview/preview-target-service";
-import { make_preview_target_layer } from "../preview/preview-target-service";
+} from "../preview/runtime";
+import { PreviewRepositoryLive } from "../preview/repository";
+import { PreviewServiceLive } from "../preview/service";
+import { PreviewTargetClockLive } from "../preview/target-service";
+import { make_preview_target_layer } from "../preview/target-service";
 import { make_node_rich_link_metadata_layer } from "../preview/rich-link-service";
 import { RichLinkAssetStore } from "../preview/rich-link-asset-store";
 import { RichLinkMetadata } from "../preview/rich-link-metadata";
-import { PreviewHealthProbe } from "../preview/preview-target";
-import { CapabilityRepositoryLive } from "../marketplace/capabilities/capability-repository";
+import { PreviewHealthProbe } from "../preview/target";
+import { CapabilityRepositoryLive } from "../marketplace/capabilities/repository";
 import {
 	CapabilityOAuthLifecycleLive,
 	CapabilityServiceLive,
-} from "../marketplace/capabilities/capability-service";
+} from "../marketplace/capabilities/service";
 import {
 	CapabilityTransportRegistry,
 	CapabilityTransportRegistryLive,
@@ -175,8 +183,8 @@ import {
 	EmptyCapabilityProviderMirrorLive,
 	CapabilityMirrorServiceLive,
 } from "../marketplace/capabilities/provider-mirrors";
-import { RoutineRepositoryLive } from "../marketplace/routines/routine-repository";
-import { RoutineServiceLive } from "../marketplace/routines/routine-service";
+import { RoutineRepositoryLive } from "../marketplace/routines/repository";
+import { RoutineServiceLive } from "../marketplace/routines/service";
 import {
 	EmptyRoutineMirrorRegistryLive,
 	NpxSkillsAdapter,
@@ -185,13 +193,13 @@ import {
 	RoutineInspectorError,
 	RoutineMirrorRegistry,
 	RoutineSourceInspector,
-} from "../marketplace/routines/routine-adapters";
+} from "../marketplace/routines/adapters";
 import {
 	make_local_routine_installer_layer,
 	make_local_routine_source_inspector_layer,
 	make_npx_skills_process_adapter_layer,
 	type NpxSkillsProcessOptions,
-} from "../marketplace/routines/production-routine-adapters";
+} from "../marketplace/routines/production-adapters";
 
 export interface BackendOptions {
 	readonly capability_provider_mirror?: Layer.Layer<CapabilityProviderMirror>;
@@ -214,7 +222,7 @@ export interface BackendOptions {
 	readonly preview_health_probe?: Layer.Layer<PreviewHealthProbe>;
 	readonly preview_inspection_connector?: Layer.Layer<PreviewInspectionConnector>;
 	readonly preview_rich_links?: Layer.Layer<RichLinkMetadata | RichLinkAssetStore>;
-	readonly project_locator?: Layer.Layer<ProjectLocator>;
+	readonly project_locator?: Layer.Layer<ProjectLocator, never, ProjectIdentityRegistry>;
 	readonly project_directory_roots?: ReadonlyArray<string>;
 	readonly project_directory_service?: Layer.Layer<ProjectDirectoryService>;
 	readonly retention_clock?: Layer.Layer<ThreadRetentionClock>;
@@ -305,9 +313,13 @@ export function make_backend_layer(options: BackendOptions) {
 		options.workspace_filesystem_registry ?? make_node_workspace_filesystem_registry_layer([]);
 	const workspace_git_registry =
 		options.workspace_git_registry ?? make_node_workspace_git_registry_layer([]);
+	/**
+	 * Node-backed rather than inert: an attached project is a real directory,
+	 * and the project binding below registers it so file reads resolve.
+	 */
 	const workspace_bounded_filesystems =
 		options.workspace_bounded_regular_file_store_registry ??
-		EmptyWorkspaceBoundedRegularFileStoreRegistryLive;
+		NodeWorkspaceBoundedRegularFileStoreRegistryLive;
 	const workspace_authority = WorkspaceMutationAuthorityLive.pipe(
 		Layer.provideMerge(workspace_bounded_filesystems),
 		Layer.provideMerge(workspace_changes),
@@ -374,7 +386,14 @@ export function make_backend_layer(options: BackendOptions) {
 		),
 		Layer.provideMerge(infrastructure),
 	);
+	const session_defaults = SessionDefaultsServiceLive.pipe(Layer.provideMerge(persistence));
+	const continuation_compactor = ThreadContinuationCompactorLive.pipe(
+		Layer.provideMerge(session_defaults),
+		Layer.provideMerge(engine_registry),
+		Layer.provideMerge(infrastructure),
+	);
 	const continuation = ThreadContinuationServiceLive.pipe(
+		Layer.provideMerge(continuation_compactor),
 		Layer.provideMerge(persistence),
 		Layer.provideMerge(engine_registry),
 		Layer.provideMerge(NodeCrypto.layer),
@@ -414,18 +433,21 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(infrastructure),
 	);
 	const project_catalog = ProjectCatalogLive.pipe(Layer.provideMerge(infrastructure));
+	/** Workspace ids are minted Snowflakes; the registry is the durable allocator. */
+	const project_identities = ProjectIdentityRegistryLive.pipe(Layer.provideMerge(infrastructure));
+	const project_locator = (
+		options.project_locator ??
+		make_node_project_locator_layer().pipe(Layer.provideMerge(NodeProcessRunnerLive))
+	).pipe(Layer.provide(project_identities));
 	const project_affinity_coordination =
 		options.project_locator === undefined
 			? ThreadProjectAffinityCoordinatorDisabled
 			: ThreadProjectAffinityCoordinatorLive.pipe(
-					Layer.provideMerge(options.project_locator),
+					Layer.provideMerge(project_locator),
 					Layer.provideMerge(project_affinity),
 					Layer.provideMerge(persistence),
 					Layer.provideMerge(infrastructure),
 				);
-	const project_locator =
-		options.project_locator ??
-		make_node_project_locator_layer().pipe(Layer.provideMerge(NodeProcessRunnerLive));
 	const project_directories =
 		options.project_directory_service ??
 		Layer.unwrap(
@@ -448,11 +470,14 @@ export function make_backend_layer(options: BackendOptions) {
 			Layer.provideMerge(infrastructure),
 		);
 	const retention_policy = ThreadRetentionPolicyServiceLive.pipe(Layer.provideMerge(persistence));
+	const model_favorites = ModelFavoritesServiceLive.pipe(Layer.provideMerge(persistence));
 	const threads = ThreadCommandsLive.pipe(
 		Layer.provideMerge(persistence),
 		Layer.provideMerge(thread_metadata),
 		Layer.provideMerge(project_affinity),
 		Layer.provideMerge(retention_policy),
+		Layer.provideMerge(model_favorites),
+		Layer.provideMerge(session_defaults),
 	);
 	const terminal_persistence = TerminalRepositoryLive.pipe(Layer.provideMerge(infrastructure));
 	const terminal_driver = options.terminal_driver ?? NodePtyTerminalDriverLive;
@@ -638,7 +663,13 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(capability_mirrors),
 	);
 
-	return Layer.merge(protocol, projection_rebuild).pipe(
+	/**
+	 * Every attached project becomes a workspace over its own directory. This
+	 * belongs in the composition rather than in the catalog: the catalog owns
+	 * persistence, and the registries own capabilities, so the binding between
+	 * them is the composition's job.
+	 */
+	return Layer.mergeAll(protocol, projection_rebuild, ProjectWorkspaceBindingLive).pipe(
 		Layer.provideMerge(options.preview_health_probe ?? NodePreviewHealthProbeLive),
 		Layer.provideMerge(workspace_evidence),
 		Layer.provideMerge(workspace_authority),
@@ -646,6 +677,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(workspace_filesystems),
 		Layer.provideMerge(workspace_snapshots),
 		Layer.provideMerge(workspace_mutation_payloads),
+		Layer.provideMerge(project_catalog),
 	);
 }
 

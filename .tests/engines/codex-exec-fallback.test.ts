@@ -18,9 +18,9 @@ import {
 	make_codex_engine_layer,
 	type EngineObservation,
 } from "@artisan/engines";
-import { make_codex_exec_engine } from "../../modules/engines/src/codex/codex-exec-engine";
-import { MakeCodexExecEventBuffer } from "../../modules/engines/src/codex/internal/codex-exec-event-buffer";
-import { WatchCodexExecTimeout } from "../../modules/engines/src/codex/internal/codex-exec-run";
+import { make_codex_exec_engine } from "../../modules/engines/src/codex/exec-engine";
+import { MakeCodexExecEventBuffer } from "../../modules/engines/src/codex/internal/exec-event-buffer";
+import { WatchCodexExecTimeout } from "../../modules/engines/src/codex/internal/exec-run";
 
 const fixture_path = fileURLToPath(new URL("./fixtures/fake-app-server.ts", import.meta.url));
 const transcript_path = fileURLToPath(

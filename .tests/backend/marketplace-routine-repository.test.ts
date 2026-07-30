@@ -11,9 +11,9 @@ import { JournalNotifierLive } from "../../modules/backend/src/persistence/journ
 import {
 	RoutineRepository,
 	RoutineRepositoryLive,
-} from "../../modules/backend/src/marketplace/routines/routine-repository";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
-import { MarketplaceRoutines } from "../../modules/backend/src/persistence/schema";
+} from "../../modules/backend/src/marketplace/routines/repository";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
+import { MarketplaceRoutines } from "../../modules/backend/src/persistence/tables";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const directories: Array<string> = [];

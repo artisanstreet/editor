@@ -8,6 +8,13 @@ export const ForgeConfigSchema = Schema.Struct({
 	allowed_origins: Schema.Array(Schema.String),
 	auth_token: Schema.optional(Schema.String.check(Schema.isMinLength(32))),
 	database_path: Schema.String,
+	/**
+	 * Marks an instance that development tooling launched, which `/health`
+	 * reports so a renderer can label it. Deliberately independent of static
+	 * hosting: a development Forge that serves no SPA is still a development
+	 * Forge, and an installed one never sets this.
+	 */
+	development: Schema.optional(Schema.Boolean),
 	instance_id: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(128)),
 	listen_host: Schema.Union([Schema.Literal("127.0.0.1"), Schema.Literal("::1")]),
 	listen_port: Schema.Int.check(Schema.isBetween({ maximum: 65_535, minimum: 0 })),
@@ -28,6 +35,7 @@ export type ForgeConfigInput = Readonly<{
 	readonly instance_id: string;
 	readonly allowed_origins?: ReadonlyArray<string>;
 	readonly auth_token?: string;
+	readonly development?: boolean;
 	readonly listen_host?: "127.0.0.1" | "::1";
 	readonly listen_port?: number;
 	readonly instance_registry_root?: string;

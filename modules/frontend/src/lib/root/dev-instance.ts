@@ -1,9 +1,9 @@
 /**
- * Only development Forges serve the web frontend, and `/health` reports that
- * capability as `development: true`. That single unauthenticated fact drives
- * every piece of development-instance visibility: the shell badge and the
- * document-title marker. Installed releases report `development: false` and
- * stay unmarked.
+ * Development tooling launches its Forge with an explicit development marker,
+ * which `/health` reports as `development: true`. That single unauthenticated
+ * fact drives every piece of development-instance visibility: the shell badge
+ * and the document-title marker. Installed releases never set it and so report
+ * `development: false` and stay unmarked.
  */
 export const dev_title_marker = "[Dev]";
 

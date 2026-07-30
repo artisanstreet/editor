@@ -38,8 +38,9 @@ const IsProcessAlive = (pid: number) => {
 const ReadLeaseOwner = (lock_path: string) =>
 	Effect.gen(function* () {
 		const encoded = yield* Effect.tryPromise(() => readFile(lock_path, "utf8"));
-		const parsed = yield* Effect.try(() => JSON.parse(encoded));
-		return yield* Schema.decodeUnknownEffect(DatabaseLeaseOwner)(parsed);
+		return yield* Schema.decodeUnknownEffect(Schema.fromJsonString(DatabaseLeaseOwner))(
+			encoded,
+		);
 	}).pipe(Effect.option);
 
 const RemoveLease = (lock_path: string) =>

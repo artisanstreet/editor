@@ -28,7 +28,7 @@ import {
 	ThreadErasure,
 } from "@artisan/backend";
 import { Database } from "../../modules/backend/src/persistence/database";
-import { OrchestrationRepository } from "../../modules/backend/src/persistence/orchestration-repository";
+import { OrchestrationRepository } from "../../modules/backend/src/persistence/orchestration/repository";
 import {
 	ThreadErasureClaims,
 	OrchestrationGraphCommands,
@@ -41,7 +41,7 @@ import {
 	JournalEvents,
 	ThreadTombstones,
 	Threads,
-} from "../../modules/backend/src/persistence/schema";
+} from "../../modules/backend/src/persistence/tables";
 import { ThreadReadModel } from "../../modules/backend/src/persistence/thread-read-model";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));

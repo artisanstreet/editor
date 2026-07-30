@@ -8,6 +8,8 @@ import type {
 	ProtocolErrorDetail,
 	ThreadListQueryEnvelope,
 	ThreadListQueryResultEnvelope,
+	ModelFavoritesQueryEnvelope,
+	ModelFavoritesQueryResultEnvelope,
 	ThreadRetentionQueryEnvelope,
 	ThreadRetentionQueryResultEnvelope,
 	ThreadSessionQueryEnvelope,
@@ -19,8 +21,9 @@ import type {
 } from "@artisan/protocol";
 
 import { ConversationReadModel } from "../../../conversation/index.ts";
-import { OrchestrationRepository } from "../../../persistence/orchestration-repository";
-import { RuntimeMetadata } from "../../../runtime/runtime-metadata";
+import { OrchestrationRepository } from "../../../persistence/orchestration/repository";
+import { RuntimeMetadata } from "../../../runtime/metadata";
+import { ModelFavoritesService } from "../../../model-favorites/service";
 import { ThreadRetentionPolicyService } from "../../../threads/thread-retention-policy";
 import { ThreadReadModel } from "../../../persistence/thread-read-model";
 import { TranscriptReadModel } from "../../../persistence/transcript-read-model";
@@ -29,6 +32,7 @@ export type ThreadQueryEnvelope =
 	| ConversationQueryEnvelope
 	| MessageImageAttachmentQueryEnvelope
 	| ThreadListQueryEnvelope
+	| ModelFavoritesQueryEnvelope
 	| ThreadRetentionQueryEnvelope
 	| ThreadSessionQueryEnvelope
 	| ThreadTranscriptQueryEnvelope
@@ -38,6 +42,7 @@ export type ThreadQueryResultEnvelope =
 	| ConversationQueryResultEnvelope
 	| MessageImageAttachmentQueryResultEnvelope
 	| ThreadListQueryResultEnvelope
+	| ModelFavoritesQueryResultEnvelope
 	| ThreadRetentionQueryResultEnvelope
 	| ThreadSessionQueryResultEnvelope
 	| ThreadTranscriptQueryResultEnvelope
@@ -55,10 +60,17 @@ const RetentionUnavailable: ProtocolErrorDetail = {
 	retryable: true,
 };
 
+const FavoritesUnavailable: ProtocolErrorDetail = {
+	code: "model_favorites.unavailable",
+	message: "The starred models could not be read.",
+	retryable: true,
+};
+
 export const MakeThreadQueryHandler = Effect.gen(function* () {
 	const conversation_read_model = yield* ConversationReadModel;
 	const metadata = yield* RuntimeMetadata;
 	const orchestration = yield* OrchestrationRepository;
+	const model_favorites = yield* ModelFavoritesService;
 	const retention_policy = yield* ThreadRetentionPolicyService;
 	const thread_read_model = yield* ThreadReadModel;
 	const transcript_read_model = yield* TranscriptReadModel;
@@ -126,6 +138,13 @@ export const MakeThreadQueryHandler = Effect.gen(function* () {
 					ProjectionUnavailable("The thread projection could not be read."),
 				),
 			),
+		"model.favorites.query": (query: ModelFavoritesQueryEnvelope) =>
+			model_favorites.Read.pipe(
+				Effect.flatMap((favorites) =>
+					Envelope(query, "model.favorites.query.result", favorites),
+				),
+				Effect.mapError(() => FavoritesUnavailable),
+			),
 		"thread.retention.query": (query: ThreadRetentionQueryEnvelope) =>
 			retention_policy.Read.pipe(
 				Effect.flatMap((policy) =>
@@ -172,6 +191,8 @@ export const MakeThreadQueryHandler = Effect.gen(function* () {
 				return handlers["message.image_attachment.query"](query);
 			case "thread.list.query":
 				return handlers["thread.list.query"](query);
+			case "model.favorites.query":
+				return handlers["model.favorites.query"](query);
 			case "thread.retention.query":
 				return handlers["thread.retention.query"](query);
 			case "thread.session.query":

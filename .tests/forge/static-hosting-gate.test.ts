@@ -131,6 +131,38 @@ describe("static hosting production gate", () => {
 		expect(paired.headers.get("set-cookie")).toContain("SameSite=None");
 	});
 
+	/**
+	 * The development marker and static hosting are independent: `pnpm dev`
+	 * serves its UI from Vite and hands the Forge no frontend, yet the shell
+	 * badge must still identify the instance.
+	 */
+	it("marks a development instance that serves no frontend", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "artisan-dev-marker-"));
+		const authority_runtime = ManagedRuntime.make(make_forge_control_authority_layer());
+		const authority = await authority_runtime.runPromise(ForgeControlAuthority);
+		const host = await Effect.runPromise(
+			start_forge_http(
+				decode_forge_config({
+					database_path: join(directory, "artisan.sqlite"),
+					development: true,
+					instance_id: test_instance_id,
+					migrations_path: join(directory, "migrations"),
+				}),
+				authority,
+			),
+		);
+		closers.push(async () => {
+			await Effect.runPromise(host.Close);
+			await authority_runtime.dispose();
+		});
+
+		expect((await fetch(host.endpoint)).status).toBe(404);
+		expect(await (await fetch(new URL("/health", host.endpoint))).json()).toMatchObject({
+			development: true,
+			status: "ready",
+		});
+	});
+
 	it("keeps --serve-frontend an explicit development opt-in across every setup path", async () => {
 		const scripts_root = resolve(import.meta.dirname, "../../.scripts");
 		const script_files = (

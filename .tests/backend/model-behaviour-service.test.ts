@@ -11,29 +11,29 @@ import type { ModelBehaviourProviderState } from "@artisan/protocol";
 import {
 	ModelBehaviourConfigFiles,
 	make_model_behaviour_config_files_layer,
-} from "../../modules/backend/src/model-behaviour/model-behaviour-config-files";
+} from "../../modules/backend/src/model-behaviour/config-files";
 import {
 	make_codex_model_behaviour_provider,
 	make_inactive_model_behaviour_provider,
 	make_model_behaviour_provider_registry_layer,
-} from "../../modules/backend/src/model-behaviour/model-behaviour-provider";
+} from "../../modules/backend/src/model-behaviour/provider";
 import {
 	make_codex_auto_compaction_mapping,
 	make_unsupported_auto_compaction_mapping,
-} from "../../modules/backend/src/model-behaviour/model-behaviour-registry";
+} from "../../modules/backend/src/model-behaviour/registry";
 import {
 	ModelBehaviourService,
 	ModelBehaviourServiceLive,
-} from "../../modules/backend/src/model-behaviour/model-behaviour-service";
+} from "../../modules/backend/src/model-behaviour/service";
 import { Database, make_database_layer } from "../../modules/backend/src/persistence/database";
 import { JournalNotifierLive } from "../../modules/backend/src/persistence/journal-notifier";
 import { JournalStoreFailure } from "../../modules/backend/src/persistence/journal-store";
-import { JournalCommands, JournalEvents } from "../../modules/backend/src/persistence/schema";
+import { JournalCommands, JournalEvents } from "../../modules/backend/src/persistence/tables";
 import {
 	ModelBehaviourRepository,
 	ModelBehaviourRepositoryLive,
-} from "../../modules/backend/src/model-behaviour/model-behaviour-repository";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+} from "../../modules/backend/src/model-behaviour/repository";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const roots: Array<string> = [];

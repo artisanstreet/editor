@@ -4,8 +4,8 @@ import { Context, Data, Effect, Layer, PubSub, Schema, Scope } from "effect";
 import { Project, ProjectCatalogSnapshot, type ProjectRef } from "@artisan/protocol";
 
 import { Database } from "../persistence/database";
-import { Projects } from "../persistence/schema";
-import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import { Projects } from "../persistence/tables";
+import { RuntimeMetadata } from "../runtime/metadata";
 
 export class ProjectCatalogError extends Data.TaggedError("ProjectCatalogError")<{
 	readonly cause?: unknown;

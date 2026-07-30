@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
-import { appendFileSync, mkdirSync, statSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { appendFileSync, writeFileSync } from "node:fs";
 
 type FixtureEvent = Record<string, unknown>;
 
@@ -8,7 +7,6 @@ const args = process.argv.slice(2);
 const scenario = process.env.FAKE_CLAUDE_SCENARIO ?? "transcript";
 const invocation_file = process.env.FAKE_CLAUDE_INVOCATION_FILE;
 const grandchild_file = process.env.FAKE_CLAUDE_GRANDCHILD_PID_FILE;
-const compaction_directory = process.env.FAKE_CLAUDE_COMPACTION_DIRECTORY;
 const version = process.env.FAKE_CLAUDE_VERSION ?? "2.1.220";
 
 if (invocation_file) appendFileSync(invocation_file, `${JSON.stringify({ args })}\n`);
@@ -62,43 +60,6 @@ if (args.includes("--version")) {
 		const session_index = args.indexOf("--session-id");
 		const resume_index = args.indexOf("--resume");
 		const session_id = session_index >= 0 ? args[session_index + 1] : args[resume_index + 1];
-		if (
-			(scenario === "post-compact" || scenario === "post-compact-trigger-mismatch") &&
-			compaction_directory
-		) {
-			const projects = join(compaction_directory, "projects", "fixture-project");
-			mkdirSync(projects, { recursive: true });
-			const transcript = join(projects, `${session_id}.jsonl`);
-			writeFileSync(transcript, '{"type":"assistant"}\n');
-			const identity = statSync(transcript);
-			const summary = "captured compact summary";
-			writeFileSync(
-				join(process.env.ARTISAN_CLAUDE_HOOK_MAILBOX!, "capture.json"),
-				JSON.stringify({
-					artisan_run_id: process.env.ARTISAN_CLAUDE_HOOK_RUN_ID,
-					claim: process.env.ARTISAN_CLAUDE_HOOK_CLAIM,
-					hook: {
-						compact_summary: summary,
-						cwd: process.cwd(),
-						hook_event_name: "PostCompact",
-						session_id,
-						transcript_path: transcript,
-						trigger: "auto",
-					},
-					received_at: new Date().toISOString(),
-					schema_version: 1,
-					transcript_identity: {
-						device: String(identity.dev),
-						inode: String(identity.ino),
-						size_before_append: identity.size,
-					},
-				}),
-			);
-			appendFileSync(
-				transcript,
-				`${JSON.stringify({ type: "system", subtype: "compact_boundary", uuid: "boundary-1", compactMetadata: { trigger: "auto" } })}\n${JSON.stringify({ type: "user", isCompactSummary: true, message: { content: summary } })}\n`,
-			);
-		}
 		const events: Array<FixtureEvent> =
 			scenario === "semantic-failure"
 				? [
@@ -127,19 +88,13 @@ if (args.includes("--version")) {
 							tools: ["Bash", "Edit", "WebSearch"],
 							permissionMode: "default",
 						},
-						...(scenario === "post-compact" ||
-						scenario === "post-compact-trigger-mismatch"
+						...(scenario === "post-compact"
 							? [
 									{
 										type: "system",
 										subtype: "compact_boundary",
 										uuid: "boundary-1",
-										compactMetadata: {
-											trigger:
-												scenario === "post-compact-trigger-mismatch"
-													? "manual"
-													: "auto",
-										},
+										compactMetadata: { trigger: "auto" },
 									} satisfies FixtureEvent,
 								]
 							: []),

@@ -181,21 +181,27 @@ export function make_graph_topology(context: GraphContext): GraphTopology {
 
 			const semantic_dependencies = [
 				...explicit_dependencies,
-				...(payload.joins ?? []).flatMap((join) =>
-					join.downstream_assignment_id
-						? join.upstream_assignment_ids.map((from_node_id) => ({
+				...(payload.joins ?? []).flatMap((join) => {
+					const downstream_assignment_id = join.downstream_assignment_id;
+					return downstream_assignment_id === undefined
+						? []
+						: join.upstream_assignment_ids.map((from_node_id) => ({
 								from_node_id,
-								to_node_id: join.downstream_assignment_id!,
-							}))
-						: [],
-				),
+								to_node_id: downstream_assignment_id,
+							}));
+				}),
 			];
 			const adjacency = new Map(
 				assignment_ids.map((assignment_id) => [assignment_id, [] as string[]]),
 			);
 
 			for (const dependency of semantic_dependencies) {
-				adjacency.get(dependency.from_node_id)!.push(dependency.to_node_id);
+				const downstream = adjacency.get(dependency.from_node_id);
+				if (downstream === undefined)
+					return yield* new AgentGraphInvalid({
+						message: `Dependency references unknown assignment ${dependency.from_node_id}`,
+					});
+				downstream.push(dependency.to_node_id);
 			}
 
 			const visiting = new Set<string>();

@@ -4,32 +4,36 @@
 	import Loader2 from "@tabler/icons-svelte/icons/loader-2";
 	import PlayerPlay from "@tabler/icons-svelte/icons/player-play";
 	import Refresh from "@tabler/icons-svelte/icons/refresh";
-	import type { Effect } from "effect";
+	import X from "@tabler/icons-svelte/icons/x";
+	import { Effect, Option, Queue } from "effect";
 
 	import { Button } from "$lib/components/ui/button";
 	import {
 		PresentForgeGate,
 		type ForgeGateModel,
 	} from "$lib/forge/gate";
-	import { ForgeHttpUrl } from "$lib/runtime/forge-endpoint";
+	import { DiscoverForge, type ReachableForge } from "$lib/forge/discovery";
 
 	let {
 		model,
+		ondismiss,
 		retry_connection,
 		retry_hydration,
 	}: {
 		model: ForgeGateModel;
+		ondismiss: () => void;
 		retry_connection: Effect.Effect<void>;
 		retry_hydration: Effect.Effect<void>;
 	} = $props();
 
 	const presentation = $derived(PresentForgeGate(model));
-	const is_visible = $derived(model.state.phase !== "ready");
+	const is_visible = $derived(model.state.phase !== "ready" && !model.dismissed);
 
-	interface ReachableForge {
-		readonly endpoint: string;
-		readonly self: boolean;
-	}
+	const DismissOnEscape = (event: KeyboardEvent) => {
+		if (!is_visible || !presentation.dismissible || event.key !== "Escape") return;
+		event.preventDefault();
+		ondismiss();
+	};
 
 	/**
 	 * `artisan://forge/start` is an OS-global protocol handler, so it can only
@@ -50,86 +54,56 @@
 	);
 	const pair_command = "ae open";
 
-	const copy_pair_command = async () => {
-		try {
-			await navigator.clipboard.writeText(pair_command);
-			pair_command_copied = true;
-			setTimeout(() => {
+	const copy_pair_command = Effect.tryPromise(() =>
+		navigator.clipboard.writeText(pair_command),
+	).pipe(
+		Effect.andThen(
+			Effect.sync(() => {
+				pair_command_copied = true;
+			}),
+		),
+		Effect.andThen(Effect.sleep("1500 millis")),
+		Effect.andThen(
+			Effect.sync(() => {
 				pair_command_copied = false;
-			}, 1500);
-		} catch {
-			/** Clipboard access can be denied; the command stays selectable text. */
-		}
-	};
+			}),
+		),
+		Effect.ignore,
+	);
 
+	const discovery_requests = yield* Queue.dropping<void>(1);
 	$effect(() => {
 		if (!is_visible || presentation.tone !== "error") {
 			origin_reachable = false;
 			return;
 		}
-		let cancelled = false;
-
-		const Discover = async () => {
-			/**
-			 * The origin may be mid-restart when the gate appears, so a single
-			 * probe would latch a stale "offline" diagnosis. A short retry
-			 * ladder keeps the gate honest without polling forever.
-			 */
-			for (let attempt = 0; attempt < 5 && !cancelled; attempt += 1) {
-				try {
-					const health = await fetch(ForgeHttpUrl("/health"), { cache: "no-store" });
-					if (health.ok) {
-						const body: unknown = await health.json();
-						if (cancelled) return;
-						if (
-							typeof body === "object" &&
-							body !== null &&
-							"development" in body &&
-							(body as { readonly development?: unknown }).development === true
-						)
-							origin_development = true;
-						origin_reachable = true;
-						break;
-					}
-				} catch {
-					/** Unreachable this attempt; try again shortly. */
-				}
-				await new Promise((settle) => setTimeout(settle, 1_500));
-			}
-			try {
-				const listing = await fetch(ForgeHttpUrl("/api/instances"), { cache: "no-store" });
-				if (!listing.ok) return;
-				const decoded: unknown = await listing.json();
-				const instances =
-					typeof decoded === "object" && decoded !== null && "instances" in decoded
-						? (decoded as { readonly instances?: unknown }).instances
-						: undefined;
-				if (cancelled || !Array.isArray(instances)) return;
-				other_instances = instances.filter(
-					(candidate): candidate is ReachableForge =>
-						typeof candidate === "object" &&
-						candidate !== null &&
-						typeof (candidate as ReachableForge).endpoint === "string" &&
-						(candidate as ReachableForge).self === false,
-				);
-			} catch {
-				/** An unreachable origin cannot enumerate siblings; the gate keeps its plain remedies. */
-			}
-		};
-
-		void Discover();
-		return () => {
-			cancelled = true;
-		};
+		Queue.offerUnsafe(discovery_requests, undefined);
 	});
+	yield* Queue.take(discovery_requests).pipe(
+		Effect.flatMap(() => DiscoverForge),
+		Effect.flatMap(({ health, others }) =>
+			Effect.sync(() => {
+				const reachable_health = Option.getOrUndefined(health);
+				origin_reachable = reachable_health !== undefined;
+				origin_development = reachable_health?.development === true;
+				other_instances = others;
+			}),
+		),
+		Effect.forever,
+		Effect.forkScoped,
+	);
 	let previous_focus: HTMLElement | null = null;
 	let recovery_actions = $state<HTMLDivElement | null>(null);
 	let status_element = $state<HTMLElement | null>(null);
 	let was_visible = false;
 
+	/**
+	 * Focus returns to wherever it came from whether the gate closed because
+	 * Forge arrived or because the user dismissed it, so this tracks the
+	 * overlay's own visibility rather than the connection phase.
+	 */
 	$effect(() => {
-		const phase = model.state.phase;
-		if (phase === "ready") {
+		if (!is_visible) {
 			if (was_visible && previous_focus?.isConnected === true) {
 				previous_focus.focus({ preventScroll: true });
 			}
@@ -155,10 +129,22 @@
 	});
 </script>
 
+<svelte:window onkeydown={DismissOnEscape} />
+
 {#if is_visible}
 	<div
 		class="absolute inset-0 z-50 grid place-items-center bg-background/45 px-6 backdrop-blur-md supports-[backdrop-filter]:bg-background/35"
 	>
+		{#if presentation.dismissible}
+			<button
+				type="button"
+				class="absolute top-4 right-4 grid size-9 place-items-center rounded-full text-muted-foreground transition-colors duration-(--duration-fast) ease-in-out hover:bg-surface-100 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none motion-reduce:transition-none dark:hover:bg-surface-900"
+				aria-label="Dismiss and browse the disconnected client"
+				onclick={ondismiss}
+			>
+				<X class="size-4" aria-hidden="true" />
+			</button>
+		{/if}
 		<section
 			bind:this={status_element}
 			class="flex max-w-md flex-col items-center text-center"
@@ -197,7 +183,7 @@
 				<button
 					type="button"
 					class="mt-3 inline-flex items-center gap-2 rounded-lg bg-surface-100 px-3 py-1.5 font-mono text-xs text-foreground hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none dark:bg-surface-900"
-					onclick={copy_pair_command}
+					onclick={yield* copy_pair_command}
 				>
 					<span>{pair_command}</span>
 					<span class="text-muted-foreground">{pair_command_copied ? "copied" : "copy"}</span>

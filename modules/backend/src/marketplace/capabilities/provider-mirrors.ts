@@ -3,8 +3,8 @@ import { createHash } from "node:crypto";
 import { Context, Data, Effect, Layer } from "effect";
 import type { MarketplaceScope, ProviderSyncState } from "@artisan/protocol";
 
-import { CapabilityRepository } from "./capability-repository";
-import { RuntimeMetadata } from "../../runtime/runtime-metadata";
+import { CapabilityRepository, CapabilityRepositoryError } from "./repository";
+import { RuntimeMetadata } from "../../runtime/metadata";
 
 const FailureState = (
 	engine_id: string,
@@ -80,14 +80,20 @@ export class CapabilityMirrorService extends Context.Service<
 			readonly capability_id: string;
 			readonly engine_id: string;
 			readonly operation_id: string;
-		}) => Effect.Effect<ProviderSyncState, never>;
+		}) => Effect.Effect<
+			ProviderSyncState,
+			CapabilityProviderMirrorError | CapabilityRepositoryError
+		>;
 		readonly ResolveDrift: (input: {
 			readonly action: "ignore" | "import";
 			readonly capability_id: string;
 			readonly engine_id: string;
 			readonly observed_revision: string;
 			readonly operation_id: string;
-		}) => Effect.Effect<ProviderSyncState, never>;
+		}) => Effect.Effect<
+			ProviderSyncState,
+			CapabilityProviderMirrorError | CapabilityRepositoryError
+		>;
 		readonly RequestOverwrite: (input: {
 			readonly approval_fingerprint: string;
 			readonly approval_id: string;
@@ -96,7 +102,7 @@ export class CapabilityMirrorService extends Context.Service<
 			readonly observed_revision: string;
 			readonly operation_id: string;
 			readonly scope: MarketplaceScope;
-		}) => Effect.Effect<void, never>;
+		}) => Effect.Effect<void, CapabilityProviderMirrorError | CapabilityRepositoryError>;
 		readonly DecideOverwrite: (input: {
 			readonly approval_fingerprint: string;
 			readonly approval_id: string;
@@ -105,7 +111,10 @@ export class CapabilityMirrorService extends Context.Service<
 			readonly engine_id: string;
 			readonly observed_revision: string;
 			readonly scope: MarketplaceScope;
-		}) => Effect.Effect<ProviderSyncState, never>;
+		}) => Effect.Effect<
+			ProviderSyncState,
+			CapabilityProviderMirrorError | CapabilityRepositoryError
+		>;
 	}
 >()("Artisan/Marketplace/CapabilityMirrorService") {}
 
@@ -147,7 +156,7 @@ export const CapabilityMirrorServiceLive = Layer.effect(
 					status: detail.status,
 				});
 				return state;
-			}).pipe(Effect.orDie);
+			});
 		const ResolveDrift = (input: {
 			readonly action: "ignore" | "import";
 			readonly capability_id: string;
@@ -176,7 +185,7 @@ export const CapabilityMirrorServiceLive = Layer.effect(
 					});
 					return state;
 				}
-			}).pipe(Effect.orDie);
+			});
 		const RequestOverwrite = (input: {
 			readonly approval_fingerprint: string;
 			readonly approval_id: string;
@@ -196,7 +205,7 @@ export const CapabilityMirrorServiceLive = Layer.effect(
 				if (expected !== input.approval_fingerprint)
 					return yield* new CapabilityProviderMirrorError({ code: "unavailable" });
 				yield* repository.RecordDriftResolution({ ...input, action: "overwrite" });
-			}).pipe(Effect.asVoid, Effect.orDie);
+			}).pipe(Effect.asVoid);
 		const DecideOverwrite = (input: {
 			readonly approval_fingerprint: string;
 			readonly approval_id: string;
@@ -257,7 +266,7 @@ export const CapabilityMirrorServiceLive = Layer.effect(
 					status: detail.status,
 				});
 				return state;
-			}).pipe(Effect.orDie);
+			});
 		return {
 			ResolveDrift: (input: {
 				readonly action: "ignore" | "import";
@@ -274,5 +283,5 @@ export const CapabilityMirrorServiceLive = Layer.effect(
 				readonly operation_id: string;
 			}) => Sync(input),
 		};
-	}).pipe(Effect.orDie),
+	}),
 );

@@ -3,7 +3,7 @@ import { Effect } from "effect";
 
 import type { CommandEnvelope, EventEnvelope } from "@artisan/protocol";
 
-import { AgentRuns, OrchestrationGraphCommands } from "../../persistence/schema";
+import { AgentRuns, OrchestrationGraphCommands } from "../../persistence/tables";
 import {
 	AgentGraphInvalid,
 	normalize_graph_error,

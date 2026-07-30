@@ -218,6 +218,106 @@ describe("conversation view store", () => {
 		).toBe(false);
 	});
 
+	it("folds a run's engine handoff into its work group", () => {
+		const handoff = Schema.decodeUnknownSync(ConversationSnapshot)({
+			conversation_id: "conversation-handoff",
+			items: [
+				{
+					continuation: "portable",
+					created_at: "2026-07-30T12:00:00.000Z",
+					id: "transition-hosted",
+					lifecycle: "completed",
+					ordinal: 1,
+					references: [],
+					revision: 0,
+					source_engine_id: "claude",
+					source_refs: [],
+					target_engine_id: "codex",
+					turn_id: "turn-handoff",
+					type: "model_transition",
+					updated_at: "2026-07-30T12:00:00.000Z",
+				},
+				{
+					created_at: "2026-07-30T12:00:01.000Z",
+					ended_at: "2026-07-30T12:00:09.000Z",
+					id: "work-handoff",
+					lifecycle: "completed",
+					ordinal: 2,
+					references: [],
+					revision: 1,
+					source_refs: [],
+					started_at: "2026-07-30T12:00:01.000Z",
+					status: "completed",
+					title: "Agent work",
+					turn_id: "turn-handoff",
+					type: "work_session",
+					updated_at: "2026-07-30T12:00:09.000Z",
+				},
+				{
+					continuation: "portable",
+					created_at: "2026-07-30T12:00:10.000Z",
+					id: "transition-orphan",
+					lifecycle: "completed",
+					ordinal: 3,
+					references: [],
+					revision: 0,
+					source_engine_id: "codex",
+					source_refs: [],
+					target_engine_id: "claude",
+					turn_id: "turn-orphan",
+					type: "model_transition",
+					updated_at: "2026-07-30T12:00:10.000Z",
+				},
+			],
+			journal_sequence: 0,
+			last_patch_sequence: 0,
+			schema_version: 1,
+			thread_id: "thread-handoff",
+			turns: [
+				{
+					created_at: "2026-07-30T12:00:00.000Z",
+					id: "turn-handoff",
+					lifecycle: "completed",
+					ordinal: 0,
+					references: [],
+					revision: 1,
+					source_refs: [],
+					type: "turn",
+					updated_at: "2026-07-30T12:00:09.000Z",
+				},
+				{
+					created_at: "2026-07-30T12:00:10.000Z",
+					id: "turn-orphan",
+					lifecycle: "completed",
+					ordinal: 4,
+					references: [],
+					revision: 0,
+					source_refs: [],
+					type: "turn",
+					updated_at: "2026-07-30T12:00:10.000Z",
+				},
+			],
+			updated_at: "2026-07-30T12:00:10.000Z",
+		});
+		const initial = MakeConversationViewState(handoff);
+		if (initial._tag !== "applied") throw new Error("fixture must initialize");
+
+		const blocks = MakeConversationRenderBlocks(initial.state);
+		const work = blocks.find(
+			(block) => block.type === "work_group" && block.session.id === "work-handoff",
+		);
+		if (work?.type !== "work_group") throw new Error("work must render");
+
+		expect(work.transition).toMatchObject({ id: "transition-hosted" });
+		expect(
+			blocks.some((block) => block.type === "item" && block.item.id === "transition-hosted"),
+		).toBe(false);
+		/** A handoff whose turn produced no session keeps its own timeline row. */
+		expect(
+			blocks.some((block) => block.type === "item" && block.item.id === "transition-orphan"),
+		).toBe(true);
+	});
+
 	it("keeps commentary interleaved with activity inside completed work", () => {
 		const completed_at = "2026-07-26T12:00:06.000Z";
 		const interleaved = Schema.decodeUnknownSync(ConversationSnapshot)({

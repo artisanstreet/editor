@@ -1,8 +1,6 @@
-	<script lang="ts">
+<script lang="ts" effect>
+	import { Effect, Fiber, Queue } from "effect";
 	import { shader_config, type ShaderConfig, type SurfaceToken } from "$lib/shader-config";
-	import { onMount } from "svelte";
-
-	let canvas: HTMLCanvasElement;
 
 	const vertex_shader = `#version 300 es
 		in vec2 a_position;
@@ -130,13 +128,18 @@
 		}
 	`;
 
-	onMount(() => {
+	const AcquirePaperRays = (canvas: HTMLCanvasElement) =>
+		Effect.sync(() => {
 		const gl = canvas.getContext("webgl2", {
 			alpha: true,
 			antialias: false,
 			powerPreference: "low-power",
 		});
 		if (gl === null) return;
+		const releases: Array<() => void> = [];
+		const ReleaseResources = () => {
+			for (const release of releases.reverse()) release();
+		};
 
 		const CompileShader = (type: number, source: string) => {
 			const shader = gl.createShader(type);
@@ -152,17 +155,22 @@
 
 		const vertex = CompileShader(gl.VERTEX_SHADER, vertex_shader);
 		const fragment = CompileShader(gl.FRAGMENT_SHADER, fragment_shader);
-		if (vertex === null || fragment === null) return;
+		if (vertex !== null) releases.push(() => gl.deleteShader(vertex));
+		if (fragment !== null) releases.push(() => gl.deleteShader(fragment));
+		if (vertex === null || fragment === null) return ReleaseResources;
 
 		const program = gl.createProgram();
-		if (program === null) return;
+		if (program === null) return ReleaseResources;
+		releases.push(() => gl.deleteProgram(program));
 		gl.attachShader(program, vertex);
 		gl.attachShader(program, fragment);
 		gl.linkProgram(program);
-		if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return;
+		if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return ReleaseResources;
 		gl.useProgram(program);
 
 		const buffer = gl.createBuffer();
+		if (buffer === null) return ReleaseResources;
+		releases.push(() => gl.deleteBuffer(buffer));
 		gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
 		gl.bufferData(
 			gl.ARRAY_BUFFER,
@@ -226,6 +234,7 @@
 			render_once();
 		};
 		const unsubscribe = shader_config.subscribe(ApplyConfig);
+		releases.push(unsubscribe);
 
 		let frame_id = 0;
 		const reduced_motion = matchMedia("(prefers-reduced-motion: reduce)").matches;
@@ -249,15 +258,44 @@
 		render_once = () => Render(performance.now());
 
 		frame_id = requestAnimationFrame(Render);
-		return () => {
-			unsubscribe();
-			cancelAnimationFrame(frame_id);
-			gl.deleteProgram(program);
-			gl.deleteShader(vertex);
-			gl.deleteShader(fragment);
-			gl.deleteBuffer(buffer);
-		};
-	});
+		releases.push(() => cancelAnimationFrame(frame_id));
+		return ReleaseResources;
+		});
+
+	const RunPaperRays = (canvas: HTMLCanvasElement) =>
+		Effect.acquireRelease(
+			AcquirePaperRays(canvas),
+			(release) => Effect.sync(() => release?.()),
+		).pipe(Effect.andThen(Effect.never));
+
+	type PaperRaysCommand =
+		| { readonly _tag: "Attach"; readonly id: number; readonly canvas: HTMLCanvasElement }
+		| { readonly _tag: "Release"; readonly id: number };
+	const paper_rays_commands = yield* Queue.unbounded<PaperRaysCommand>();
+	let next_paper_rays_id = 0;
+
+	yield* Effect.gen(function* () {
+		const renderers = new Map<number, Fiber.Fiber<never>>();
+		while (true) {
+			const command = yield* Queue.take(paper_rays_commands);
+			if (command._tag === "Attach") {
+				const fiber = yield* RunPaperRays(command.canvas).pipe(Effect.forkScoped);
+				renderers.set(command.id, fiber);
+				continue;
+			}
+			const fiber = renderers.get(command.id);
+			if (fiber !== undefined) {
+				renderers.delete(command.id);
+				yield* Fiber.interrupt(fiber);
+			}
+		}
+	}).pipe(Effect.forkScoped);
+
+	const PaperRays = (canvas: HTMLCanvasElement) => {
+		const id = next_paper_rays_id++;
+		Queue.offerUnsafe(paper_rays_commands, { _tag: "Attach", canvas, id });
+		return () => Queue.offerUnsafe(paper_rays_commands, { _tag: "Release", id });
+	};
 </script>
 
-<canvas bind:this={canvas} aria-hidden="true" class="size-full"></canvas>
+<canvas aria-hidden="true" class="size-full" {@attach PaperRays}></canvas>

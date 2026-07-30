@@ -49,10 +49,9 @@ const CodexDoctorReport = Schema.Struct({
 });
 
 function ParseDoctorReport(stdout: Uint8Array) {
-	return Effect.try(() => JSON.parse(Buffer.from(stdout).toString("utf8"))).pipe(
-		Effect.flatMap(Schema.decodeUnknownEffect(CodexDoctorReport)),
-		Effect.option,
-	);
+	return Schema.decodeUnknownEffect(Schema.fromJsonString(CodexDoctorReport))(
+		Buffer.from(stdout).toString("utf8"),
+	).pipe(Effect.option);
 }
 
 function AcquireProbeDirectory(temporary_directory: string) {

@@ -57,12 +57,9 @@ const loopback_endpoint = (endpoint: string) => {
 	}
 };
 
-const decode_card = Schema.decodeUnknownEffect(ForgeState);
-
 const ReadCard = (path: string) =>
 	Effect.tryPromise(() => readFile(path, "utf8")).pipe(
-		Effect.flatMap((encoded) => Effect.try(() => JSON.parse(encoded) as unknown)),
-		Effect.flatMap((decoded) => decode_card(decoded)),
+		Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(ForgeState))),
 		Effect.map((card) => [card] as const),
 		Effect.catch(() => Effect.succeed([] as ReadonlyArray<ForgeInstanceCard>)),
 	);

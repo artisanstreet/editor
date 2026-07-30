@@ -56,7 +56,7 @@ export const GitBranchName = Schema.String.check(
 	Schema.makeFilter<string>((name) => {
 		const segments = name.split("/");
 		const has_invalid_character = [...name].some((character) => {
-			const code = character.codePointAt(0)!;
+			const code = character.codePointAt(0) ?? 0;
 
 			return code <= 32 || code === 127 || "~^:?*[\\".includes(character);
 		});

@@ -11,15 +11,15 @@ import {
 	GitRepository,
 	GitRepositoryConflict,
 	GitRepositoryLive,
-} from "../../modules/backend/src/git/git-repository";
+} from "../../modules/backend/src/git/repository";
 import { Database, make_database_layer } from "../../modules/backend/src/persistence/database";
 import { JournalNotifierLive } from "../../modules/backend/src/persistence/journal-notifier";
 import {
 	GitMutationOperations,
 	JournalEvents,
 	Threads,
-} from "../../modules/backend/src/persistence/schema";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+} from "../../modules/backend/src/persistence/tables";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];
@@ -28,7 +28,7 @@ const snapshot_a = "a".repeat(64);
 const snapshot_b = "b".repeat(64);
 
 async function make_database_path() {
-	const directory = await mkdtemp(join(tmpdir(), "artisan-git-repository-"));
+	const directory = await mkdtemp(join(tmpdir(), "artisan-repository-"));
 
 	temporary_directories.push(directory);
 

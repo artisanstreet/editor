@@ -10,11 +10,11 @@ import { afterEach, describe, expect, it } from "vitest";
 import { make_database_layer, Database } from "../../../modules/backend/src/persistence/database";
 import { JournalNotifierLive } from "../../../modules/backend/src/persistence/journal-notifier";
 import { JournalStoreLive } from "../../../modules/backend/src/persistence/journal-store";
-import { Threads } from "../../../modules/backend/src/persistence/schema";
+import { Threads } from "../../../modules/backend/src/persistence/tables";
 import {
 	RuntimeMetadata,
 	type RuntimeIdPrefix,
-} from "../../../modules/backend/src/runtime/runtime-metadata";
+} from "../../../modules/backend/src/runtime/metadata";
 import { ArtisanToolApprovalPolicyLive } from "../../../modules/backend/src/tools/approval-policy";
 import {
 	ArtisanBuiltInToolRegistrations,
@@ -27,7 +27,7 @@ import {
 	ToolControlPlane,
 	ToolControlPlaneLive,
 } from "../../../modules/backend/src/tools/tool-control-plane";
-import { WorkspaceFileDiscovery } from "../../../modules/backend/src/workspace/workspace-file-discovery";
+import { WorkspaceFileDiscovery } from "../../../modules/backend/src/workspace/files/discovery";
 
 const migrations_path = fileURLToPath(new URL("../../../modules/backend/drizzle", import.meta.url));
 const directories: string[] = [];

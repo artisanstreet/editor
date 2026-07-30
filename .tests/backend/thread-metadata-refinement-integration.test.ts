@@ -10,9 +10,9 @@ import type { CommandEnvelope, ProjectRef } from "@artisan/protocol";
 import { make_backend_runtime, ProtocolRouter } from "@artisan/backend";
 
 import { Database } from "../../modules/backend/src/persistence/database";
-import { JournalCommands, JournalEvents } from "../../modules/backend/src/persistence/schema";
+import { JournalCommands, JournalEvents } from "../../modules/backend/src/persistence/tables";
 import { ThreadReadModel } from "../../modules/backend/src/persistence/thread-read-model";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 import { ThreadMetadataRepository } from "../../modules/backend/src/threads/thread-metadata-repository";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));

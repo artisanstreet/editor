@@ -2,14 +2,14 @@ import { Effect, Layer, Stream } from "effect";
 import { describe, expect, it } from "vitest";
 
 import { WorkspaceFilesystemRegistry } from "../../../modules/backend/src/filesystem/workspace-filesystem-registry";
-import { GitService } from "../../../modules/backend/src/git/git-service";
+import { GitService } from "../../../modules/backend/src/git/service";
 import { JournalStore } from "../../../modules/backend/src/persistence/journal-store";
-import { RuntimeMetadata } from "../../../modules/backend/src/runtime/runtime-metadata";
-import { TerminalSessionService } from "../../../modules/backend/src/terminal/terminal-sessions";
+import { RuntimeMetadata } from "../../../modules/backend/src/runtime/metadata";
+import { TerminalSessionService } from "../../../modules/backend/src/terminal/sessions";
 import { ExecuteTool, ExecuteToolLive } from "../../../modules/backend/src/tools/tool-handlers";
-import { WorkspaceEvidenceRecorder } from "../../../modules/backend/src/workspace/workspace-evidence-recorder";
-import { WorkspaceFileDiscovery } from "../../../modules/backend/src/workspace/workspace-file-discovery";
-import { WorkspaceFileService } from "../../../modules/backend/src/workspace/workspace-file-service";
+import { WorkspaceEvidenceRecorder } from "../../../modules/backend/src/workspace/evidence";
+import { WorkspaceFileDiscovery } from "../../../modules/backend/src/workspace/files/discovery";
+import { WorkspaceFileService } from "../../../modules/backend/src/workspace/files/service";
 
 const timestamp = "2026-07-18T12:00:00.000Z";
 

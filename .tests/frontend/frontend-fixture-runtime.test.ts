@@ -22,12 +22,10 @@ import {
 	FixtureArtisanClientLayer,
 	FixtureArtisanClientService,
 	fixture_artisan_client_data,
-} from "../../modules/frontend/src/lib/runtime/fixtures/artisan-client-fixture";
+} from "../../modules/frontend/src/lib/runtime/fixtures/client";
 
-const fixture_source_path = join(
-	process.cwd(),
-	"modules/frontend/src/lib/runtime/fixtures/artisan-client-fixture.ts",
-);
+const fixture_source_directory = join(process.cwd(), "modules/frontend/src/lib/runtime/fixtures");
+const transport_client_directory = join(process.cwd(), "modules/transport/src/client");
 
 class FixtureRuntimeSources extends Context.Service<
 	FixtureRuntimeSources,
@@ -40,7 +38,12 @@ class FixtureRuntimeSources extends Context.Service<
 const FixtureRuntimeSourcesLive = Layer.effect(
 	FixtureRuntimeSources,
 	Effect.gen(function* () {
-		const fixture_source = yield* Effect.try(() => readFileSync(fixture_source_path, "utf8"));
+		const fixture_paths = yield* Effect.try(() =>
+			globSync(join(fixture_source_directory, "*.ts")),
+		);
+		const fixture_source = yield* Effect.try(() =>
+			fixture_paths.map((path) => readFileSync(path, "utf8")).join("\n"),
+		);
 		const production_paths = yield* Effect.try(() =>
 			globSync("modules/frontend/src/**/*.{ts,sv}", {
 				exclude: ["modules/frontend/src/lib/runtime/fixtures/**"],
@@ -96,8 +99,13 @@ describe("frontend ArtisanClient fixture runtime", () => {
 						"GetHostIdentity",
 						"GetMessageImageAttachment",
 						"GetModelBehaviour",
+						"GetModelFavorites",
+						"UpdateModelFavorite",
 						"GetPreviewAssetMetadata",
 						"GetPreviewTarget",
+						"GetProjectDiffs",
+						"GetProjectRepositories",
+						"GetSessionDefaults",
 						"GetRoutineDetail",
 						"GetCapabilityDetail",
 						"GetCapabilityOAuthStatus",
@@ -188,6 +196,7 @@ describe("frontend ArtisanClient fixture runtime", () => {
 						"SyncRoutine",
 						"UpdateGlobalGuidance",
 						"UpdateModelBehaviour",
+						"UpdateSessionDefaults",
 						"UpdateThreadSessionPolicy",
 						"UpdateThreadRetentionPolicy",
 						"UninstallCapability",
@@ -268,6 +277,13 @@ describe("frontend ArtisanClient fixture runtime", () => {
 					25,
 				);
 				expect(fixture_source).not.toContain("make_artisan_client_layer");
+				for (const path of globSync(join(fixture_source_directory, "*.ts"))) {
+					expect(readFileSync(path, "utf8").split(/\r?\n/).length).toBeLessThan(600);
+					expect(path).not.toMatch(/client-part|artisan-client-fixture/);
+				}
+				for (const path of globSync(join(transport_client_directory, "*.ts"))) {
+					expect(readFileSync(path, "utf8").split(/\r?\n/).length).toBeLessThan(800);
+				}
 			}),
 		);
 

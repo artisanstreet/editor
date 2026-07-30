@@ -219,6 +219,15 @@ export const ConversationItem = Schema.Union([
 		summary: ConversationSafeText,
 		type: Schema.Literal("native_event"),
 	}),
+	Schema.Struct({
+		...ConversationItemFields,
+		continuation: Schema.Literals(["native", "portable"]),
+		source_engine_id: Identifier,
+		source_model_id: Schema.optional(Schema.NonEmptyString),
+		target_engine_id: Identifier,
+		target_model_id: Schema.optional(Schema.NonEmptyString),
+		type: Schema.Literal("model_transition"),
+	}),
 ]);
 export type ConversationItem = typeof ConversationItem.Type;
 

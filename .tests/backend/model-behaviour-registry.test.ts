@@ -6,7 +6,7 @@ import {
 	make_model_behaviour_capability_registry_layer,
 	make_unsupported_auto_compaction_mapping,
 	ModelBehaviourCapabilityRegistry,
-} from "../../modules/backend/src/model-behaviour/model-behaviour-registry";
+} from "../../modules/backend/src/model-behaviour/registry";
 
 describe("Model Behaviour capability registry", () => {
 	it("projects version-gated Codex support and truthful Claude support", async () => {

@@ -10,8 +10,8 @@ import {
 	GitReadService,
 	make_git_read_service_layer,
 	type GitReadServiceOptions,
-} from "../../modules/backend/src/git/git-read-service";
-import { type GitCommandResult } from "../../modules/backend/src/git/git-command-executor";
+} from "../../modules/backend/src/git/read-service";
+import { type GitCommandResult } from "../../modules/backend/src/git/executor";
 import {
 	make_node_workspace_git_registry_layer,
 	type WorkspaceGitCommandInput,
@@ -21,7 +21,7 @@ import {
 const roots: Array<string> = [];
 
 async function make_container() {
-	const root = await fs.mkdtemp(join(tmpdir(), "artisan-git-read-service-"));
+	const root = await fs.mkdtemp(join(tmpdir(), "artisan-read-service-"));
 
 	roots.push(root);
 

@@ -20,14 +20,14 @@ describe("model catalog", () => {
 		expect("extra-high" in thinking_level_labels).toBe(false);
 	});
 
-	it("maps provider-native low values into unified Light", () => {
+	it("maps provider-native low-equivalent values into unified Light", () => {
 		const supported = model_manifest.models
 			.map((model) => model.capabilities.thinking)
 			.filter((thinking) => thinking.availability === "supported");
 
 		for (const thinking of supported) {
 			const light = thinking.options.find((option) => option.id === "light");
-			expect(light?.native_value).toBe("low");
+			expect(["low", "minimal", "none"]).toContain(light?.native_value);
 		}
 	});
 
@@ -40,7 +40,16 @@ describe("model catalog", () => {
 			)
 			.map((model) => model.id);
 
-		expect(models_with_max).toEqual(["claude-fable", "claude-opus", "claude-sonnet"]);
+		expect(models_with_max).toEqual([
+			"claude-fable",
+			"claude-opus",
+			"claude-sonnet",
+			"cursor-claude-fable-5",
+			"cursor-claude-opus-5",
+			"cursor-claude-sonnet-5",
+			"cursor-kimi-k3",
+			"cursor-glm-5-2",
+		]);
 	});
 
 	it("lists every first-party model exposed by the supported coding harnesses", () => {
@@ -64,11 +73,31 @@ describe("model catalog", () => {
 			"claude-sonnet-5",
 			"claude-haiku-4-5",
 		]);
-		expect(native_models_by_harness("grok")).toEqual(["grok-4.5"]);
+		expect(native_models_by_harness("grok")).toEqual([
+			"grok-4.5",
+			"grok-4.3",
+			"grok-build-0.1",
+			"composer-2.5",
+		]);
 		expect(native_models_by_harness("cursor")).toEqual([
 			"composer-2.5",
 			"auto",
 			"cursor-grok-4.5",
+			"gpt-5.6-sol",
+			"gpt-5.6-terra",
+			"gpt-5.6-luna",
+			"gpt-5.5",
+			"gpt-5.4",
+			"gpt-5.4-mini",
+			"gpt-5.3-codex",
+			"claude-fable-5",
+			"claude-opus-5",
+			"claude-sonnet-5",
+			"claude-haiku-4-5",
+			"gemini-3.6-flash",
+			"gemini-3.1-pro",
+			"kimi-k3",
+			"glm-5.2",
 		]);
 	});
 
@@ -110,6 +139,9 @@ describe("model catalog", () => {
 			"anthropic",
 			"xai",
 			"cursor",
+			"google",
+			"moonshot",
+			"zai",
 		]);
 	});
 

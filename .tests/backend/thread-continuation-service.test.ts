@@ -5,6 +5,11 @@ import { describe, expect, it } from "vitest";
 import { make_engine_registry_layer, type Engine, type EngineCapabilities } from "@artisan/engines";
 
 import {
+	ThreadContinuationCompactor,
+	type ThreadCompactionRequest,
+	type ThreadCompactionSummary,
+} from "../../modules/backend/src/orchestration/thread-continuation-compactor";
+import {
 	ThreadContinuationService,
 	ThreadContinuationServiceLive,
 } from "../../modules/backend/src/orchestration/thread-continuation-service";
@@ -14,15 +19,14 @@ import {
 	ThreadContinuationRepository,
 	type ContinuationLaunch,
 	type ThreadContinuationContext,
-} from "../../modules/backend/src/persistence/thread-continuation-repository";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+} from "../../modules/backend/src/persistence/thread-continuation/repository";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 
 const capabilities: EngineCapabilities = {
 	approval: { state: "unsupported" },
 	auth: { state: "supported" },
 	cancel: { state: "supported" },
 	close: { state: "supported" },
-	continuation_export: { state: "unsupported" },
 	events: { state: "supported" },
 	global_guidance: { state: "supported" },
 	model_selection: { state: "supported" },
@@ -39,15 +43,12 @@ const capabilities: EngineCapabilities = {
 
 const engine = (
 	id: string,
-	operations: Partial<Pick<Engine, "CheckNativeContinuation" | "ExportContinuation">> = {},
+	operations: Partial<Pick<Engine, "CheckNativeContinuation">> = {},
 ): Engine => ({
 	...operations,
 	Descriptor: {
 		capabilities: {
 			...capabilities,
-			continuation_export: {
-				state: operations.ExportContinuation === undefined ? "unsupported" : "experimental",
-			},
 			native_continuation: {
 				state:
 					operations.CheckNativeContinuation === undefined
@@ -78,7 +79,6 @@ const base_context = (
 	overrides: Partial<ThreadContinuationContext> = {},
 ): ThreadContinuationContext => ({
 	first_target_journal_sequence: 20,
-	native_compaction: Option.none(),
 	request: {
 		command_id: "command-target",
 		message_id: "message-target",
@@ -106,6 +106,8 @@ const base_context = (
 });
 
 function make_test_layer(input: {
+	readonly compaction?: ThreadCompactionSummary;
+	readonly compaction_requests?: Array<ThreadCompactionRequest>;
 	readonly context: ThreadContinuationContext;
 	readonly earliest?: ReadonlyArray<CanonicalTranscriptEntry>;
 	readonly engines: ReadonlyArray<Engine>;
@@ -136,8 +138,16 @@ function make_test_layer(input: {
 			});
 		},
 		ReconcileStranded: () => Effect.succeed([]),
-		RecordNativeCompaction: () => Effect.void,
 		RecordObservationMetadata: () => Effect.void,
+	});
+	const compactor = ThreadContinuationCompactor.of({
+		Summarize: (request) =>
+			Effect.sync(() => {
+				input.compaction_requests?.push(request);
+				return input.compaction === undefined
+					? Option.none<ThreadCompactionSummary>()
+					: Option.some(input.compaction);
+			}),
 	});
 	let next_id = 0;
 	const runtime = RuntimeMetadata.of({
@@ -146,6 +156,7 @@ function make_test_layer(input: {
 		Now: Effect.succeed("2026-07-30T10:00:00.000Z"),
 	});
 	const dependencies = Layer.mergeAll(
+		Layer.succeed(ThreadContinuationCompactor, compactor),
 		Layer.succeed(ThreadContinuationRepository, repository),
 		Layer.succeed(RuntimeMetadata, runtime),
 		make_engine_registry_layer(input.engines).pipe(Layer.orDie),
@@ -250,123 +261,65 @@ describe("thread continuation service", () => {
 		expect(launches[0]).toMatchObject({ _tag: "portable" });
 	});
 
-	it("turns Claude PostCompact output into a bounded portable checkpoint with post-boundary tail", async () => {
+	it("builds a compactor-generated checkpoint with compactor lineage", async () => {
 		const launches: Array<ContinuationLaunch> = [];
-		const context = base_context({
-			native_compaction: Option.some({
-				through_journal_sequence: 10,
-				through_run_id: "run-source",
-				value: {
-					boundary_id: "boundary-secret",
-					method: "claude_post_compact",
-					observation_id: "observation-secret",
-					source_native_thread_id: "native-source",
-					summary: "Claude compacted state.",
-					summary_sha256: "a".repeat(64),
-					trigger: "auto",
-				},
-			}),
-		});
+		const compaction_requests: Array<ThreadCompactionRequest> = [];
 		const result = await prepare(
 			make_test_layer({
-				context,
+				compaction: {
+					compactor: { engine_id: "claude", model_id: "claude-sonnet" },
+					summary: "Model handoff summary.",
+				},
+				compaction_requests,
+				context: base_context(),
 				engines: [engine("claude"), engine("codex")],
-				latest: [message_entry(12, "assistant", "After compaction.")],
+				latest: [message_entry(12, "assistant", "Most recent settled work.")],
 				launches,
 			}),
 		);
 
 		expect(result._tag).toBe("portable");
 		if (result._tag !== "portable") return;
-		expect(result.checkpoint.method).toBe("claude_post_compact");
-		expect(result.checkpoint.tail).toEqual([{ role: "assistant", text: "After compaction." }]);
-		expect(result.lineage).toMatchObject({
-			boundary_id: "boundary-secret",
-			kind: "claude",
-			through_run_id: "run-source",
+		expect(result.checkpoint.method).toBe("compaction_model_summary");
+		expect(result.checkpoint.summary).toBe("Model handoff summary.");
+		expect(result.checkpoint.tail).toEqual([
+			{ role: "assistant", text: "Most recent settled work." },
+		]);
+		expect(result.lineage).toEqual({
+			compactor_engine_id: "claude",
+			compactor_model_id: "claude-sonnet",
+			kind: "compactor",
 		});
+		expect(compaction_requests).toEqual([
+			{
+				head: [],
+				omitted_head_entries: 0,
+				source: { engine_id: "claude", model_id: "claude-sonnet" },
+				working_directory: "C:\\workspace",
+			},
+		]);
 		const checkpoint_json = JSON.stringify(result.checkpoint);
-		expect(checkpoint_json).not.toContain("boundary-secret");
 		expect(checkpoint_json).not.toContain("native-source");
 		expect(render_portable_checkpoint_context(result.checkpoint)).not.toContain(
-			"observation-secret",
+			"native-source",
 		);
-	});
-
-	it("exports a settled Codex fork and keeps every native identifier in private lineage", async () => {
-		const launches: Array<ContinuationLaunch> = [];
-		const export_inputs: Array<unknown> = [];
-		const codex = engine("codex", {
-			ExportContinuation: (input) =>
-				Effect.sync(() => {
-					export_inputs.push(input);
-					return {
-						export_native_item_id: "item-export-secret",
-						export_native_thread_id: "thread-export-secret",
-						export_native_turn_id: "turn-export-secret",
-						message: JSON.stringify({ summary: "Codex portable state." }),
-						method: "codex_fork_summary" as const,
-						source_native_thread_id: "native-source",
-						source_native_turn_id: "turn-source",
-					};
-				}),
-		});
-		const context = base_context({
-			source: Option.some({
-				...Option.getOrThrow(base_context().source),
-				engine_id: "codex",
-				model_id: "gpt-5",
-			}),
-			target: { ...base_context().target, engine_id: "claude" },
-		});
-		const result = await prepare(
-			make_test_layer({ context, engines: [codex, engine("claude")], launches }),
-		);
-
-		expect(result._tag).toBe("portable");
-		if (result._tag !== "portable") return;
-		expect(result.checkpoint.method).toBe("codex_fork_summary");
-		expect(result.checkpoint.summary).toBe("Codex portable state.");
-		expect(result.lineage).toMatchObject({
-			export_native_item_id: "item-export-secret",
-			kind: "codex",
-		});
-		expect(JSON.stringify(result.checkpoint)).not.toMatch(
-			/(native-source|thread-export-secret|turn-export-secret|item-export-secret)/,
-		);
-		expect(export_inputs[0]).toMatchObject({
-			settled_native_turn_id: "turn-source",
-			source_model: "gpt-5",
-			source_resume_token: { native_thread_id: "native-source" },
+		expect(launches[0]).toMatchObject({
+			_tag: "portable",
+			lineage: { kind: "compactor" },
+			source_run_id: "run-source",
 		});
 	});
 
-	it("falls back to the canonical transcript when provider export is malformed", async () => {
+	it("falls back to the canonical transcript when the compactor yields nothing", async () => {
 		const launches: Array<ContinuationLaunch> = [];
-		const codex = engine("codex", {
-			ExportContinuation: () =>
-				Effect.succeed({
-					export_native_item_id: "item",
-					export_native_thread_id: "fork",
-					export_native_turn_id: "export-turn",
-					message: '{"summary":42}',
-					method: "codex_fork_summary" as const,
-					source_native_thread_id: "native-source",
-					source_native_turn_id: "turn-source",
-				}),
-		});
 		const context = base_context({
-			source: Option.some({
-				...Option.getOrThrow(base_context().source),
-				engine_id: "codex",
-			}),
 			target: { ...base_context().target, engine_id: "claude" },
 		});
 		const result = await prepare(
 			make_test_layer({
 				context,
 				earliest: [message_entry(1, "user", "Original objective.")],
-				engines: [codex, engine("claude")],
+				engines: [engine("claude"), engine("codex")],
 				latest: [message_entry(18, "assistant", "Most recent verified work.")],
 				launches,
 			}),

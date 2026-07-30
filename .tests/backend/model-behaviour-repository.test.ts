@@ -14,12 +14,12 @@ import {
 	JournalEvents,
 	ModelBehaviourProviderStates,
 	ModelBehaviourSettings,
-} from "../../modules/backend/src/persistence/schema";
+} from "../../modules/backend/src/persistence/tables";
 import {
 	ModelBehaviourRepository,
 	ModelBehaviourRepositoryLive,
-} from "../../modules/backend/src/model-behaviour/model-behaviour-repository";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+} from "../../modules/backend/src/model-behaviour/repository";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];

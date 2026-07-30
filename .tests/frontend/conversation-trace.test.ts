@@ -78,7 +78,10 @@ describe("conversation trace", () => {
 			expect.objectContaining({ id: "reasoning_1", type: "item" }),
 		]);
 
-		const completed = make_conversation_trace_segments([activity, reasoning("completed")], false);
+		const completed = make_conversation_trace_segments(
+			[activity, reasoning("completed")],
+			false,
+		);
 		expect(completed).toEqual([expect.objectContaining({ type: "activity_group" })]);
 	});
 
@@ -153,7 +156,10 @@ describe("conversation trace", () => {
 		expect(work_session).toContain("`Failed after ${FormatDuration(");
 		expect(work_session).toContain("`Cancelled after ${FormatDuration(");
 		expect(work_session).toContain(
-			'let open = $state(item.status === "failed" || item.status === "cancelled");',
+			'previous_status === "running" && (status === "failed" || status === "cancelled")',
+		);
+		expect(work_session).toContain(
+			"if (became_unsuccessful && !user_chose_disclosure) open = true;",
 		);
 		expect(work_session).toContain('is_failed ? "text-destructive" : ""');
 		expect(trace).toContain(

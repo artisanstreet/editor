@@ -13,27 +13,23 @@ import type {
 	GitWorkspaceQueryEnvelope,
 } from "@artisan/protocol";
 
-import type { GitStatusSnapshot } from "../../modules/backend/src/git/git-model";
+import type { GitStatusSnapshot } from "../../modules/backend/src/git/model";
 import {
 	GitMutationDriver,
 	GitMutationDriverError,
 	type GitMutationRequest,
-} from "../../modules/backend/src/git/git-mutation-driver";
+} from "../../modules/backend/src/git/mutation-driver";
 import {
 	GitRepository,
 	GitRepositoryConflict,
 	type GitMutationAcceptance,
 	type GitMutationSuccessCommit,
 	type GitWorkspaceCommit,
-} from "../../modules/backend/src/git/git-repository";
-import { GitReadService } from "../../modules/backend/src/git/git-read-service";
-import {
-	GitService,
-	GitServiceError,
-	GitServiceLive,
-} from "../../modules/backend/src/git/git-service";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
-import { WorkspaceEvidenceRecorder } from "../../modules/backend/src/workspace/workspace-evidence-recorder";
+} from "../../modules/backend/src/git/repository";
+import { GitReadService } from "../../modules/backend/src/git/read-service";
+import { GitService, GitServiceError, GitServiceLive } from "../../modules/backend/src/git/service";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
+import { WorkspaceEvidenceRecorder } from "../../modules/backend/src/workspace/evidence";
 
 const observed_at = "2026-07-18T12:00:00.000Z";
 const decided_at = "2026-07-18T12:01:00.000Z";

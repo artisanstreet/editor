@@ -12,8 +12,8 @@ import type {
 } from "@artisan/protocol";
 
 import { JournalStore } from "../persistence/journal-store";
-import { RuntimeMetadata } from "../runtime/runtime-metadata";
-import { WorkspaceFileDiscovery } from "../workspace/workspace-file-discovery";
+import { RuntimeMetadata } from "../runtime/metadata";
+import { WorkspaceFileDiscovery } from "../workspace/files/discovery";
 import { ArtisanToolApprovalPolicy } from "./approval-policy";
 import { ArtisanToolRegistry } from "./artisan-tool-registry";
 import { ToolInvocationRepository } from "./tool-invocation-repository";
@@ -104,7 +104,9 @@ export const ToolControlPlaneLive = Layer.effect(
 					);
 				const capability = availability.find(
 					(entry) => entry.tool_id === input.request.input.tool_id,
-				)!;
+				);
+				if (capability === undefined)
+					return yield* new ToolControlPlaneError({ reason: "unavailable" });
 				const now = yield* metadata.Now;
 				const explicit_approval =
 					input.request.input.tool_id === "approval.request"

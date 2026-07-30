@@ -17,19 +17,19 @@ import {
 	WorkspaceChanges,
 	WorkspaceMutationAuthorities,
 	WorkspaceMutationPayloads,
-} from "../../modules/backend/src/persistence/schema";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+} from "../../modules/backend/src/persistence/tables";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 import {
 	WorkspaceChangeRepository,
 	WorkspaceChangeRepositoryLive,
-} from "../../modules/backend/src/workspace/workspace-change-repository";
+} from "../../modules/backend/src/workspace/changes/repository";
 import {
 	WorkspaceChangeDiffInvalid,
 	WorkspaceChangeDiffLimit,
 	WorkspaceChangeDiffService,
 	WorkspaceChangeDiffServiceLive,
 	WorkspaceChangeDiffUnavailable,
-} from "../../modules/backend/src/workspace/workspace-change-diff-service";
+} from "../../modules/backend/src/workspace/changes/diff";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const workspace_diff_migration = "20260713095034_lively_betty_brant";

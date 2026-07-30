@@ -10,8 +10,13 @@ import { make_backend_runtime } from "@artisan/backend";
 
 import { Database } from "../../modules/backend/src/persistence/database";
 import { JournalStore } from "../../modules/backend/src/persistence/journal-store";
-import { SurfaceItems, SurfaceUsageTotals } from "../../modules/backend/src/persistence/schema";
-import { SurfaceService } from "../../modules/backend/src/surfaces/surface-service";
+import {
+	AgentRuns,
+	OrchestrationRuns,
+	SurfaceItems,
+	SurfaceUsageTotals,
+} from "../../modules/backend/src/persistence/tables";
+import { SurfaceService } from "../../modules/backend/src/surfaces/service";
 import { PersistSurfaceProjection } from "../../modules/backend/src/surfaces/surface-projection";
 import { SurfaceFromEngineObservation } from "../../modules/backend/src/surfaces/engine-observation";
 
@@ -503,13 +508,61 @@ describe("surface projection read model", () => {
 							updated_at: iso_at(10),
 						},
 					]);
+					yield* database.client.insert(OrchestrationRuns).values({
+						agent_id: "agent_daily",
+						created_at: iso_at(0),
+						engine_id: "claude",
+						model_id: "claude-fable-5",
+						run_id: "run_today_reported",
+						status: "complete",
+						thread_id: "thread_daily",
+						updated_at: iso_at(0),
+						working_directory: tmpdir(),
+					});
+					yield* database.client.insert(AgentRuns).values({
+						agent_id: "agent_daily",
+						assignment_id: "assignment_daily",
+						attempt: 1,
+						created_at: iso_at(0),
+						dispatch_status: "completed",
+						engine_id: "codex",
+						group_id: "group_daily",
+						last_observation_sequence: 1,
+						model_id: null,
+						profile: "default",
+						run_id: "run_today_partial",
+						state: "complete",
+						updated_at: iso_at(0),
+					});
 					return yield* surfaces.DailyUsageSnapshot({ day_count: 3 });
 				}),
 			);
 
+			/**
+			 * `run_yesterday` has no surviving run row, so its slice carries no engine
+			 * id; the codex run predates model stamping, so its slice has no model id.
+			 */
 			expect(result.buckets).toEqual([
-				{ date: date_at(1), input_tokens: 3, output_tokens: 1 },
-				{ date: date_at(0), input_tokens: 17, output_tokens: 5 },
+				{
+					date: date_at(1),
+					engines: [{ input_tokens: 3, output_tokens: 1 }],
+					input_tokens: 3,
+					output_tokens: 1,
+				},
+				{
+					date: date_at(0),
+					engines: [
+						{
+							engine_id: "claude",
+							input_tokens: 10,
+							model_id: "claude-fable-5",
+							output_tokens: 5,
+						},
+						{ engine_id: "codex", input_tokens: 7, output_tokens: 0 },
+					],
+					input_tokens: 17,
+					output_tokens: 5,
+				},
 			]);
 		} finally {
 			await runtime.dispose();

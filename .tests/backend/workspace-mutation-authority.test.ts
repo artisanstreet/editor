@@ -25,17 +25,17 @@ import {
 	WorkspaceChanges,
 	WorkspaceChangeOperations,
 	WorkspaceMutationAuthorities,
-} from "../../modules/backend/src/persistence/schema";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+} from "../../modules/backend/src/persistence/tables";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 import {
 	WorkspaceChangeRepository,
 	WorkspaceChangeRepositoryLive,
-} from "../../modules/backend/src/workspace/workspace-change-repository";
+} from "../../modules/backend/src/workspace/changes/repository";
 import {
 	WorkspaceMutationAuthority,
 	WorkspaceMutationAuthorityLive,
-} from "../../modules/backend/src/workspace/workspace-mutation-authority";
-import type { PreparedWorkspaceChangeDiff } from "../../modules/backend/src/workspace/workspace-change-diff-service";
+} from "../../modules/backend/src/workspace/mutations/authority";
+import type { PreparedWorkspaceChangeDiff } from "../../modules/backend/src/workspace/changes/diff";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];

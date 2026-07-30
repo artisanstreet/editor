@@ -247,6 +247,21 @@ export const ControlRpcGroup = RpcGroup.make(
 		Control.HostIdentityQueryResultEnvelope,
 	),
 	ControlRpc(
+		"project.repository.query",
+		Control.ProjectRepositoryQueryEnvelope,
+		Control.ProjectRepositoryQueryResultEnvelope,
+	),
+	ControlRpc(
+		"project.diff.query",
+		Control.ProjectDiffQueryEnvelope,
+		Control.ProjectDiffQueryResultEnvelope,
+	),
+	ControlRpc(
+		"session.defaults.query",
+		Control.SessionDefaultsQueryEnvelope,
+		Control.SessionDefaultsQueryResultEnvelope,
+	),
+	ControlRpc(
 		"engine.usage.query",
 		Control.EngineUsageQueryEnvelope,
 		Control.EngineUsageQueryResultEnvelope,
@@ -270,6 +285,11 @@ export const ControlRpcGroup = RpcGroup.make(
 		"thread.retention.query",
 		Control.ThreadRetentionQueryEnvelope,
 		Control.ThreadRetentionQueryResultEnvelope,
+	),
+	ControlRpc(
+		"model.favorites.query",
+		Control.ModelFavoritesQueryEnvelope,
+		Control.ModelFavoritesQueryResultEnvelope,
 	),
 	ControlRpc(
 		"thread.work.query",
@@ -379,6 +399,16 @@ export const ControlRpcGroup = RpcGroup.make(
 	ControlRpc(
 		"thread.retention.update",
 		Control.ThreadRetentionUpdateEnvelope,
+		Control.CommandReceiptEnvelope,
+	),
+	ControlRpc(
+		"session.defaults.update",
+		Control.SessionDefaultsUpdateEnvelope,
+		Control.CommandReceiptEnvelope,
+	),
+	ControlRpc(
+		"model.favorite.update",
+		Control.ModelFavoriteUpdateEnvelope,
 		Control.CommandReceiptEnvelope,
 	),
 	ControlRpc(
@@ -552,7 +582,13 @@ export type ControlRpcSuccessFor<Request extends ControlRpcRequest> =
 	>;
 
 /** Resolves the canonical procedure for an already schema-decoded request. */
-export const GetControlRpc = (tag: ControlRpc["_tag"]) => ControlRpcGroup.requests.get(tag)!;
+export const GetControlRpc = (tag: ControlRpc["_tag"]) => {
+	const rpc = ControlRpcGroup.requests.get(tag);
+	if (rpc === undefined) {
+		throw new Error(`Missing canonical control RPC for ${tag}`);
+	}
+	return rpc;
+};
 
 const control_rpc_success_schemas = Array.from(
 	ControlRpcGroup.requests.values(),

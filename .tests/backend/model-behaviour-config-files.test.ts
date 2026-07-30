@@ -12,7 +12,7 @@ import {
 	ModelBehaviourConfigFiles,
 	make_model_behaviour_config_files_layer,
 	make_model_behaviour_config_files_platform_layer,
-} from "../../modules/backend/src/model-behaviour/model-behaviour-config-files";
+} from "../../modules/backend/src/model-behaviour/config-files";
 import {
 	make_private_file_permissions_layer,
 	PrivateFilePermissions,

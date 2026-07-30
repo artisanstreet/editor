@@ -9,7 +9,7 @@ import type {
 } from "@artisan/protocol";
 import { EngineRegistry, type Engine, type EngineQuotaWindow } from "@artisan/engines";
 
-import { RuntimeMetadata } from "../../../runtime/runtime-metadata";
+import { RuntimeMetadata } from "../../../runtime/metadata";
 
 const max_windows_per_report = 64;
 const max_engines_per_snapshot = 16;
@@ -129,12 +129,17 @@ function ReportWithCache(
 	engine: Engine,
 	cache: Ref.Ref<UsageCache>,
 	now_ms: number,
+	force: boolean,
 ): Effect.Effect<EngineUsageReport> {
 	return Effect.gen(function* () {
 		const engine_id = engine.Descriptor.id;
 		const cached = (yield* Ref.get(cache)).get(engine_id);
 
-		if (cached !== undefined && now_ms - cached.fetched_at_ms < usage_fresh_window_ms) {
+		if (
+			!force &&
+			cached !== undefined &&
+			now_ms - cached.fetched_at_ms < usage_fresh_window_ms
+		) {
 			return cached.report;
 		}
 
@@ -183,10 +188,15 @@ export const MakeEngineUsageQueryHandler = Effect.gen(function* () {
 			Effect.gen(function* () {
 				const now_ms = yield* Clock.currentTimeMillis;
 				const engines = (yield* registry.List).filter(
-					(engine) => engine.Usage !== undefined,
+					(engine) =>
+						engine.Usage !== undefined &&
+						(query.payload.engine_id === undefined ||
+							engine.Descriptor.id === query.payload.engine_id),
 				);
 				const reports = yield* Effect.all(
-					engines.map((engine) => ReportWithCache(engine, cache, now_ms)),
+					engines.map((engine) =>
+						ReportWithCache(engine, cache, now_ms, query.payload.force === true),
+					),
 					{ concurrency: "unbounded" },
 				);
 				const fetched_at = yield* metadata.Now;

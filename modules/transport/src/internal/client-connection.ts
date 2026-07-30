@@ -22,8 +22,8 @@ import {
 	type OutboundControlEnvelope,
 } from "@artisan/protocol";
 
-import { ArtisanClientError } from "../client-contract";
-import type { ArtisanConnectionState } from "../client-contract";
+import { ArtisanClientError } from "../client-api/service";
+import type { ArtisanConnectionState } from "../client-api/service";
 import { MessagePortConnector } from "../connector";
 import { TransportRuntime } from "../transport-runtime";
 import {
@@ -44,7 +44,7 @@ import {
 } from "./client-common";
 import type { ClientRequestCoordinator } from "./client-request-coordinator";
 import type { ClientStreamChannel } from "./client-stream-channel";
-import type { ClientSubscriptionCoordinator } from "./client-subscription-coordinator";
+import type { ClientSubscriptionCoordinator } from "./subscriptions/contract";
 
 interface ConnectionState {
 	readonly active: Option.Option<ActiveClientSession>;
@@ -165,7 +165,28 @@ export const make_client_connection_lifecycle = (
 					return current.active.value;
 				}
 
-				yield* Deferred.await(current.connection_signal);
+				/**
+				 * A parked connection has spent its reconnect budget and is
+				 * holding at the retry gate, so no session is on its way. Callers
+				 * must learn that instead of awaiting a signal that only a future
+				 * reconnection can raise: an indefinite await turns every query
+				 * into a permanent pending value, which strands the surfaces that
+				 * render from it. A merely reconnecting session still queues, so
+				 * transient drops keep their retry-on-reconnect behavior.
+				 */
+				const connection = yield* SubscriptionRef.get(connection_state);
+				if (connection.phase === "exhausted") {
+					return yield* Effect.fail(connection.error);
+				}
+
+				yield* Effect.raceFirst(
+					Deferred.await(current.connection_signal),
+					SubscriptionRef.changes(connection_state).pipe(
+						Stream.filter((next) => next.phase === "exhausted"),
+						Stream.runHead,
+						Effect.asVoid,
+					),
+				);
 			}
 		});
 
@@ -629,6 +650,7 @@ export const make_client_connection_lifecycle = (
 						],
 					);
 					yield* Deferred.succeed(previous_signal, undefined);
+					yield* handlers.requests.Resume;
 					yield* handlers.requests.Retry;
 					yield* SetConnectionState({ phase: "ready" });
 					yield* Ref.set(ever_connected, true);
@@ -709,6 +731,14 @@ export const make_client_connection_lifecycle = (
 								);
 
 					yield* handlers.publish_error(error);
+					/**
+					 * Requests survive a reconnect because the supervisor resends
+					 * them once a session returns. Past the retry budget nothing
+					 * will, so holding them would strand every caller until a user
+					 * happens to retry. Failing here is what lets a disconnected
+					 * renderer finish rendering.
+					 */
+					yield* handlers.requests.Park(error);
 					yield* SetConnectionState({
 						attempts: reconnect_attempts,
 						error,

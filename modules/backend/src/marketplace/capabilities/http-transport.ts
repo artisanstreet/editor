@@ -159,23 +159,20 @@ const ReadBoundedJson = (
 		},
 	).pipe(
 		Effect.mapError(() => transport_error(operation, "unhealthy")),
-		Effect.flatMap(({ bytes, chunks }) =>
-			Effect.try({
-				try: () => {
-					const payload = new Uint8Array(bytes);
-					let offset = 0;
-					for (const chunk of chunks) {
-						payload.set(chunk, offset);
-						offset += chunk.byteLength;
-					}
-					return {
-						bytes,
-						payload: JSON.parse(new TextDecoder().decode(payload)) as unknown,
-					};
-				},
-				catch: () => transport_error(operation, "unhealthy"),
-			}),
-		),
+		Effect.flatMap(({ bytes, chunks }) => {
+			const payload = new Uint8Array(bytes);
+			let offset = 0;
+			for (const chunk of chunks) {
+				payload.set(chunk, offset);
+				offset += chunk.byteLength;
+			}
+			return Schema.decodeUnknownEffect(Schema.UnknownFromJsonString)(
+				new TextDecoder().decode(payload),
+			).pipe(
+				Effect.map((decoded) => ({ bytes, payload: decoded })),
+				Effect.mapError(() => transport_error(operation, "unhealthy")),
+			);
+		}),
 	);
 
 /** Adapts pinned Effect unstable HttpClient APIs and Streamable HTTP JSON-RPC behind a stable Marketplace seam. */

@@ -11,7 +11,7 @@ import type { CommandEnvelope } from "@artisan/protocol";
 import type { AuthoritativeCommandEnvelope } from "../../modules/backend/src/persistence/orchestration/message-command";
 import { make_backend_runtime, ThreadErasure } from "@artisan/backend";
 
-import { OrchestrationRepository } from "../../modules/backend/src/persistence/orchestration-repository";
+import { OrchestrationRepository } from "../../modules/backend/src/persistence/orchestration/repository";
 import type { IntakeAssessment } from "../../modules/backend/src/orchestration/intake-policy";
 import {
 	JournalCommands,
@@ -24,7 +24,7 @@ import {
 	Projects,
 	SurfaceItems,
 	Threads,
-} from "../../modules/backend/src/persistence/schema";
+} from "../../modules/backend/src/persistence/tables";
 import { Database } from "../../modules/backend/src/persistence/database";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
@@ -389,6 +389,44 @@ describe("orchestration repository hardening", () => {
 		}
 	});
 
+	it("reports corrupt persisted intake assumptions instead of treating them as absent", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			migrations_path,
+		});
+
+		try {
+			await runtime.runPromise(SetupThread("thread_1"));
+			await runtime.runPromise(
+				Accept(
+					make_command("send_corrupt_intake", "thread_1", {
+						engine_id: "engine_1",
+						text: "Inspect the repository",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+					{ assumptions: ["Use master"], risk: "low", resolution: "proceed" },
+				),
+			);
+			const outcome = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* OrchestrationRepository;
+					yield* database.client.run(
+						"UPDATE orchestration_intake SET assumptions_json = '{' WHERE thread_id = 'thread_1'",
+					);
+
+					return yield* Effect.exit(repository.GetSession("thread_1"));
+				}),
+			);
+
+			expect(outcome._tag).toBe("Failure");
+			expect(JSON.stringify(outcome)).toContain("OrchestrationFailure");
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("preserves attributed mentions through intake resolution and exact retry", async () => {
 		const runtime = make_backend_runtime({
 			database_path: await make_database_path(),
@@ -728,6 +766,7 @@ describe("orchestration repository hardening", () => {
 		const policy = {
 			engine_id: "codex" as const,
 			model: "gpt-5.3-codex",
+			permission: "supervised",
 			permission_mode: "on_request" as const,
 			reasoning_effort: "high" as const,
 			sandbox_mode: "workspace_write" as const,

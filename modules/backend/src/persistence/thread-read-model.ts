@@ -5,7 +5,7 @@ import { JournalSequence, type ThreadListItem } from "@artisan/protocol";
 
 import { DecodeThreadProjection } from "../threads/internal/thread-projection";
 import { Database } from "./database";
-import { JournalEvents, Threads } from "./schema";
+import { JournalEvents, Threads } from "./tables";
 import { JournalInvariantError } from "./journal-store";
 
 export class ThreadReadModelFailure extends Data.TaggedError("ThreadReadModelFailure")<{

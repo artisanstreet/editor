@@ -5,8 +5,8 @@ import {
 	PreviewHealthProbe,
 	PreviewTarget,
 	PreviewTargetClock,
-} from "../../modules/backend/src/preview/preview-target";
-import { make_preview_target_layer } from "../../modules/backend/src/preview/preview-target-service";
+} from "../../modules/backend/src/preview/target";
+import { make_preview_target_layer } from "../../modules/backend/src/preview/target-service";
 import { make_in_memory_rich_link_asset_store_layer } from "../../modules/backend/src/preview/rich-link-asset-store";
 import {
 	RichLinkClock,

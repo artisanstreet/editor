@@ -4,7 +4,7 @@ import { Effect } from "effect";
 import { type CommandPayload, type ImageAttachmentReference } from "@artisan/protocol";
 
 import type { DatabaseClient } from "../database";
-import { MessageImageAttachments } from "../schema";
+import { MessageImageAttachments } from "../tables";
 import type { AuthoritativeThreadSendMessageCommand } from "./message-command";
 
 export const ImageAttachmentsFor = (

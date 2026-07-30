@@ -1,6 +1,6 @@
 import { Buffer } from "node:buffer";
 
-import { Data } from "effect";
+import { Data, Schema } from "effect";
 
 /** Represents one malformed UTF-8 or JSON line from an engine stdio transport. @since 0.4.0 */
 export class EngineJsonlMalformedLineError extends Data.TaggedError(
@@ -40,9 +40,10 @@ function decode_line(raw_frame: Uint8Array): EngineJsonlDecode {
 	const line_base64 = Buffer.from(normalized).toString("base64");
 	const raw_frame_base64 = Buffer.from(raw_frame).toString("base64");
 	try {
+		const text = new TextDecoder("utf-8", { fatal: true }).decode(normalized);
 		return {
 			line_base64,
-			payload: JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(normalized)),
+			payload: Schema.decodeUnknownSync(Schema.UnknownFromJsonString)(text),
 			raw_frame_base64,
 		};
 	} catch (cause) {
@@ -160,7 +161,12 @@ export class EngineJsonlFramer {
 				value instanceof EngineJsonlOversizedLineError,
 		);
 		if (error) throw error;
-		return values.map((value) => (value as EngineJsonlFrame).payload);
+		return values.flatMap((value) =>
+			value instanceof EngineJsonlMalformedLineError ||
+			value instanceof EngineJsonlOversizedLineError
+				? []
+				: [value.payload],
+		);
 	}
 	/** Decodes final data and fails on a recoverable diagnostic. @since 0.4.0 */
 	Finish(): ReadonlyArray<unknown> {
@@ -171,6 +177,11 @@ export class EngineJsonlFramer {
 				value instanceof EngineJsonlOversizedLineError,
 		);
 		if (error) throw error;
-		return values.map((value) => (value as EngineJsonlFrame).payload);
+		return values.flatMap((value) =>
+			value instanceof EngineJsonlMalformedLineError ||
+			value instanceof EngineJsonlOversizedLineError
+				? []
+				: [value.payload],
+		);
 	}
 }

@@ -4,7 +4,7 @@ import { Effect } from "effect";
 import type { EventPayload, ThreadActivityKind } from "@artisan/protocol";
 
 import { Database } from "../../persistence/database";
-import { Threads } from "../../persistence/schema";
+import { Threads } from "../../persistence/tables";
 
 type ThreadTransaction = (typeof Database.Service)["client"];
 

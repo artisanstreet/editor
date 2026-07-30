@@ -29,13 +29,13 @@ import {
 	type ProtocolConnection,
 } from "@artisan/backend";
 
-import { ProtocolRouter } from "../../modules/backend/src/protocol/protocol-router";
+import { ProtocolRouter } from "../../modules/backend/src/protocol/router";
 import { Database } from "../../modules/backend/src/persistence/database";
 import {
 	OrchestrationCoordinators,
 	OrchestrationRuns,
 	WorkspaceChanges,
-} from "../../modules/backend/src/persistence/schema";
+} from "../../modules/backend/src/persistence/tables";
 import { MakeNodeTestWorkspaceBoundedRegularFileStoreRegistryLayer } from "./bounded-regular-file-store-harness";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));

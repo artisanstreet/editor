@@ -6,7 +6,7 @@ import type { EngineUsageQueryEnvelope, EngineUsageQueryResultEnvelope } from "@
 import { make_engine_registry_layer, type Engine, type EngineFailure } from "@artisan/engines";
 
 import { MakeEngineUsageQueryHandler } from "../../modules/backend/src/protocol/rpc/query-handlers/engine-usage";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 
 /** The handler consumes only the descriptor identity and the optional `Usage` effect. */
 function make_test_engine(input: {

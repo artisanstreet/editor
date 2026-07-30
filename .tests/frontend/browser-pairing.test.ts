@@ -7,6 +7,7 @@ import {
 	BootstrapBrowserPairing,
 	BrowserNavigation,
 	BrowserPairingExchange,
+	MakeBrowserNavigationLive,
 } from "../../modules/frontend/src/lib/runtime/pairing";
 
 const location = (hash: string, protocol = "http:") => ({
@@ -51,6 +52,29 @@ const RunPairing = (
 	);
 
 describe("browser pairing bootstrap", () => {
+	it("adapts an explicitly typed browser host without global casts", async () => {
+		const replacements: string[] = [];
+		const program = Effect.gen(function* () {
+			const navigation = yield* BrowserNavigation;
+			expect(yield* navigation.Location).toEqual(location("#pair=secret"));
+			yield* navigation.ReplaceUrl("/threads/1");
+		}).pipe(
+			Effect.provide(
+				MakeBrowserNavigationLive({
+					history: {
+						replaceState: (_data, _unused, url) => {
+							replacements.push(url);
+						},
+					},
+					location: location("#pair=secret"),
+				}),
+			),
+		);
+
+		await Effect.runPromise(program);
+		expect(replacements).toEqual(["/threads/1"]);
+	});
+
 	it("proxies the same-origin pairing exchange in browser development", () => {
 		const config = readFileSync(
 			new URL("../../modules/frontend/vite.config.ts", import.meta.url),

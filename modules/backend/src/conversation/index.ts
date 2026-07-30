@@ -1,2 +1,2 @@
-export * from "./projection";
+export * from "./projection-api";
 export * from "./read-model";

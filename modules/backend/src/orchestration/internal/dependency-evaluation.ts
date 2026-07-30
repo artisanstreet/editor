@@ -8,7 +8,7 @@ import {
 	Assignments,
 	OrchestrationGraphEdges,
 	OrchestrationJoins,
-} from "../../persistence/schema";
+} from "../../persistence/tables";
 import { AgentGraphInvalid } from "../agent-graph-model";
 import {
 	is_terminal_state,

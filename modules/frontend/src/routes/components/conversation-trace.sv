@@ -1,12 +1,14 @@
 <script lang="ts">
-	import type { ConversationItem } from "@artisan/protocol";
+	import { GetConversationActivityPresentation, type ConversationItem } from "@artisan/protocol";
 	import AlertTriangle from "@tabler/icons-svelte/icons/alert-triangle";
 	import Bug from "@tabler/icons-svelte/icons/bug";
 	import Terminal2 from "@tabler/icons-svelte/icons/terminal-2";
 	import Tool from "@tabler/icons-svelte/icons/tool";
 	import WorldSearch from "@tabler/icons-svelte/icons/world-search";
 	import ChevronRight from "@tabler/icons-svelte/icons/chevron-right";
+	import { conversation_activity_is_live } from "$lib/conversation/activity-status";
 	import { conversation_diagnostics_enabled } from "$lib/conversation/diagnostics";
+	import { ShimmerText } from "$lib/components/ui/shimmer-text";
 	import {
 		make_conversation_trace_segments,
 		type ConversationActivityItem,
@@ -16,10 +18,13 @@
 	let {
 		failed = false,
 		items,
+		work_active = false,
 	}: {
 		/** Failed work must explain itself: diagnostics render open and unmuted. */
 		failed?: boolean;
 		items: ReadonlyArray<ConversationItem>;
+		/** A stale provider item cannot keep animating after its owning work has settled. */
+		work_active?: boolean;
 	} = $props();
 	let open_groups = $state<Record<string, boolean>>({});
 
@@ -36,6 +41,10 @@
 		return "Used tools";
 	};
 
+	/** The newest still-running activity, whose live label fronts its group. */
+	const LiveActivity = (activities: ReadonlyArray<ConversationActivityItem>) =>
+		work_active ? activities.findLast(conversation_activity_is_live) : undefined;
+
 	const ToggleGroup = (id: string) => {
 		open_groups[id] = !open_groups[id];
 	};
@@ -48,6 +57,7 @@
 				<ConversationItemView item={segment.item} />
 			{:else if segment.type === "activity_group"}
 				{@const open = open_groups[segment.id] ?? false}
+				{@const live = LiveActivity(segment.items)}
 				<div
 					class="trace-acc flex flex-col"
 					data-open={open}
@@ -60,7 +70,13 @@
 						onclick={() => ToggleGroup(segment.id)}
 					>
 						<Terminal2 class="size-4" aria-hidden="true" />
-						<span>{GroupLabel(segment.items)}</span>
+						{#if live !== undefined}
+							<ShimmerText class="text-muted-foreground">
+							{GetConversationActivityPresentation(live).label}
+						</ShimmerText>
+						{:else}
+							<span>{GroupLabel(segment.items)}</span>
+						{/if}
 						<span class="trace-acc-chevron flex">
 							<ChevronRight class="size-3.5" aria-hidden="true" />
 						</span>

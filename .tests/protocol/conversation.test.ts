@@ -72,6 +72,7 @@ describe("canonical conversation protocol", () => {
 			"error",
 			"compaction",
 			"native_event",
+			"model_transition",
 		]) {
 			const payload =
 				type === "work_session"
@@ -98,29 +99,40 @@ describe("canonical conversation protocol", () => {
 											state: "completed",
 											summary: "Summary",
 										}
-									: type === "native_event"
-										? { summary: "Summary" }
-										: type === "plan"
-											? { entries: [], state: "draft" }
-											: ["approval", "question"].includes(type)
-												? {
-														interaction_id: `interaction_${type}`,
-														prompt: "Continue?",
-														requested_at: at,
-														state: "requested",
-													}
-												: type === "error"
-													? { message: "Failed", retry: { kind: "none" } }
-													: {
-															text:
-																type === "assistant_message" ||
-																type === "reasoning_summary"
-																	? ""
-																	: "Text",
-															...(type === "assistant_message"
-																? { phase: "final" }
-																: {}),
-														};
+									: type === "model_transition"
+										? {
+												continuation: "portable",
+												source_engine_id: "claude",
+												source_model_id: "claude-sonnet",
+												target_engine_id: "codex",
+												target_model_id: "gpt-5",
+											}
+										: type === "native_event"
+											? { summary: "Summary" }
+											: type === "plan"
+												? { entries: [], state: "draft" }
+												: ["approval", "question"].includes(type)
+													? {
+															interaction_id: `interaction_${type}`,
+															prompt: "Continue?",
+															requested_at: at,
+															state: "requested",
+														}
+													: type === "error"
+														? {
+																message: "Failed",
+																retry: { kind: "none" },
+															}
+														: {
+																text:
+																	type === "assistant_message" ||
+																	type === "reasoning_summary"
+																		? ""
+																		: "Text",
+																...(type === "assistant_message"
+																	? { phase: "final" }
+																	: {}),
+															};
 			expect(
 				decode_item({ ...item_base, ...payload, id: `item_${type}`, type }),
 			).toMatchObject({ type });

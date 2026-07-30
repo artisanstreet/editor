@@ -6,7 +6,7 @@ import * as KeyValueStore from "effect/unstable/persistence/KeyValueStore";
 import { ResolveForgeEndpoint } from "./forge-endpoint";
 import {
 	BootstrapBrowserPairing,
-	BrowserNavigationLive,
+	MakeBrowserNavigationLive,
 	BrowserPairingExchangeLive,
 } from "./pairing";
 import { ShellPresentationPreferencesLive } from "./shell-presentation-preferences";
@@ -27,6 +27,9 @@ const ArtisanClientRuntimeLive = Layer.unwrap(
 		const renderer_window = (
 			globalThis as {
 				readonly window?: {
+					readonly history?: {
+						readonly replaceState: (data: null, unused: string, url: string) => void;
+					};
 					readonly location?: {
 						readonly hash: string;
 						readonly origin: string;
@@ -37,11 +40,14 @@ const ArtisanClientRuntimeLive = Layer.unwrap(
 				};
 			}
 		).window;
-		if (renderer_window?.location !== undefined) {
+		if (renderer_window?.location !== undefined && renderer_window.history !== undefined) {
 			yield* BootstrapBrowserPairing.pipe(
 				Effect.provide(
 					Layer.merge(
-						BrowserNavigationLive,
+						MakeBrowserNavigationLive({
+							history: renderer_window.history,
+							location: renderer_window.location,
+						}),
 						BrowserPairingExchangeLive.pipe(
 							/**
 							 * The app-scheme renderer pairs cross-origin against the

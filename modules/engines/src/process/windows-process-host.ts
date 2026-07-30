@@ -1,32 +1,59 @@
-import type { ChildProcessWithoutNullStreams } from "node:child_process";
-
+import { NodeRuntime } from "@effect/platform-node-shared";
 import cross_spawn from "cross-spawn";
+import { Data, Deferred, Effect, Queue, Schema } from "effect";
 
-import type { EngineProcessSpawnInput } from "./process";
+const ClaimMessage = Schema.Struct({
+	claim_token: Schema.NonEmptyString,
+	type: Schema.Literal("claim"),
+});
 
-interface ClaimMessage {
-	readonly claim_token: string;
-	readonly type: "claim";
-}
+const StartMessage = Schema.Struct({
+	input: Schema.Struct({
+		args: Schema.Array(Schema.String),
+		command: Schema.NonEmptyString,
+		cwd: Schema.optional(Schema.String),
+		env: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+	}),
+	type: Schema.Literal("start"),
+});
 
-interface StartMessage {
-	readonly input: EngineProcessSpawnInput;
-	readonly type: "start";
-}
+class WindowsProcessHostError extends Data.TaggedError("WindowsProcessHostError")<{
+	readonly cause?: unknown;
+	readonly message: string;
+}> {}
 
-let engine_process: ChildProcessWithoutNullStreams | undefined;
-let started = false;
-let ending = false;
-let claim_token: string | undefined;
+const DecodeClaim = Schema.decodeUnknownEffect(ClaimMessage);
+const DecodeStart = Schema.decodeUnknownEffect(StartMessage);
 
-const Send = (message: unknown, callback: (cause?: Error | null) => void = () => undefined) => {
-	const send = process.send;
-	if (process.connected && send) {
-		send.call(process, message, callback);
-	} else {
-		callback();
-	}
-};
+const Send = (message: unknown) =>
+	Effect.callback<void, WindowsProcessHostError>((resume) => {
+		if (!process.connected || process.send === undefined) {
+			resume(Effect.void);
+			return;
+		}
+		process.send(message, (cause) =>
+			resume(
+				cause
+					? Effect.fail(
+							new WindowsProcessHostError({
+								cause,
+								message: "The Windows process host could not send an IPC message",
+							}),
+						)
+					: Effect.void,
+			),
+		);
+	});
+
+const FlushOutput = Effect.callback<void>((resume) => {
+	let pending = 2;
+	const flushed = () => {
+		pending -= 1;
+		if (pending === 0) resume(Effect.void);
+	};
+	process.stdout.write("", flushed);
+	process.stderr.write("", flushed);
+});
 
 const exit_code = (code: number | null, signal: NodeJS.Signals | null) => {
 	if (code !== null) return code;
@@ -36,105 +63,192 @@ const exit_code = (code: number | null, signal: NodeJS.Signals | null) => {
 	return 1;
 };
 
-const FlushAndExit = (code: number) => {
-	let pending = 2;
-	const flushed = () => {
-		pending -= 1;
-		if (pending > 0) return;
-		const disconnect = process.disconnect;
-		if (process.connected && disconnect) disconnect.call(process);
-		process.exit(code);
-	};
-
-	process.stdout.write("", flushed);
-	process.stderr.write("", flushed);
-};
-
-const Fail = (message: string) => {
-	if (ending) return;
-	ending = true;
-	Send({ message, type: "spawn_error" }, () => FlushAndExit(127));
-};
-
-const is_claim_message = (message: unknown): message is ClaimMessage =>
-	message !== null &&
-	typeof message === "object" &&
-	"type" in message &&
-	message.type === "claim" &&
-	"claim_token" in message &&
-	typeof message.claim_token === "string" &&
-	message.claim_token.length > 0;
-
-const is_start_message = (message: unknown): message is StartMessage =>
-	message !== null &&
-	typeof message === "object" &&
-	"type" in message &&
-	message.type === "start" &&
-	"input" in message &&
-	message.input !== null &&
-	typeof message.input === "object";
-
-process.on("message", (message: unknown) => {
-	if (claim_token === undefined && is_claim_message(message)) {
-		claim_token = message.claim_token;
-		Send({ claim_token, type: "claim_ack" });
-		return;
-	}
-
-	if (started || claim_token === undefined || !is_start_message(message)) {
-		Fail("The Windows process host received an invalid start message");
-		return;
-	}
-
-	started = true;
-	const input = message.input;
-
-	let spawned_engine;
-	try {
-		spawned_engine = cross_spawn(input.command, input.args, {
-			cwd: input.cwd,
-			env: input.env,
-			shell: false,
-			stdio: "pipe",
-			windowsHide: true,
-		});
-	} catch (cause) {
-		Fail(
-			`${input.command} ${input.args.join(" ")} failed to spawn: ${
-				cause instanceof Error ? cause.message : "unknown process error"
-			}`,
+const HostProgram = Effect.scoped(
+	Effect.gen(function* () {
+		const messages = yield* Queue.unbounded<unknown>();
+		const disconnected = yield* Deferred.make<void>();
+		yield* Effect.acquireRelease(
+			Effect.sync(() => {
+				const receive = (message: unknown) => Queue.offerUnsafe(messages, message);
+				const disconnect = () => Deferred.doneUnsafe(disconnected, Effect.void);
+				process.on("message", receive);
+				process.once("disconnect", disconnect);
+				return { disconnect, receive };
+			}),
+			({ disconnect, receive }) =>
+				Effect.sync(() => {
+					process.off("message", receive);
+					process.off("disconnect", disconnect);
+				}),
 		);
-		return;
-	}
+		const TakeMessage = Queue.take(messages).pipe(
+			Effect.raceFirst(
+				Deferred.await(disconnected).pipe(
+					Effect.andThen(
+						Effect.fail(
+							new WindowsProcessHostError({
+								message: "The Windows process host owner disconnected",
+							}),
+						),
+					),
+				),
+			),
+		);
 
-	if (!spawned_engine.stdin || !spawned_engine.stdout || !spawned_engine.stderr) {
-		spawned_engine.kill("SIGKILL");
-		Fail("The engine process did not provide piped stdio");
-		return;
-	}
+		const claim = yield* TakeMessage.pipe(
+			Effect.flatMap(DecodeClaim),
+			Effect.mapError(
+				(cause) =>
+					new WindowsProcessHostError({
+						cause,
+						message: "The Windows process host received an invalid claim message",
+					}),
+			),
+		);
+		yield* Send({ claim_token: claim.claim_token, type: "claim_ack" });
 
-	const child = spawned_engine as ChildProcessWithoutNullStreams;
-	engine_process = child;
-	child.stdin.once("error", () => undefined);
-	process.stdin.pipe(child.stdin);
-	child.stdout.pipe(process.stdout, { end: false });
-	child.stderr.pipe(process.stderr, { end: false });
+		const start = yield* TakeMessage.pipe(
+			Effect.flatMap(DecodeStart),
+			Effect.mapError(
+				(cause) =>
+					new WindowsProcessHostError({
+						cause,
+						message: "The Windows process host received an invalid start message",
+					}),
+			),
+		);
+		const input = start.input;
+		const child = yield* Effect.acquireRelease(
+			Effect.try({
+				try: () => {
+					const spawned = cross_spawn(input.command, [...input.args], {
+						...(input.cwd === undefined ? {} : { cwd: input.cwd }),
+						...(input.env === undefined ? {} : { env: input.env }),
+						shell: false,
+						stdio: "pipe",
+						windowsHide: true,
+					});
+					const child_stdin = spawned.stdin;
+					const child_stdout = spawned.stdout;
+					const child_stderr = spawned.stderr;
+					if (child_stdin === null || child_stdout === null || child_stderr === null) {
+						spawned.kill("SIGKILL");
+						throw new Error("The engine process did not provide piped stdio");
+					}
+					child_stdin.once("error", () => undefined);
+					process.stdin.pipe(child_stdin);
+					child_stdout.pipe(process.stdout, { end: false });
+					child_stderr.pipe(process.stderr, { end: false });
+					return spawned;
+				},
+				catch: (cause) =>
+					new WindowsProcessHostError({
+						cause,
+						message: `${input.command} ${input.args.join(" ")} failed to spawn`,
+					}),
+			}),
+			(child) =>
+				Effect.sync(() => {
+					if (child.exitCode === null && child.signalCode === null) {
+						child.kill("SIGKILL");
+					}
+				}),
+		);
 
-	child.once("spawn", () => {
-		Send({ process_id: child.pid, type: "ready" });
-	});
-	child.once("error", (cause) => {
-		Fail(`${input.command} ${input.args.join(" ")} failed to spawn: ${cause.message}`);
-	});
-	child.once("close", (code, signal) => {
-		if (ending) return;
-		ending = true;
-		FlushAndExit(exit_code(code, signal));
-	});
-});
+		const spawned = yield* Deferred.make<number, WindowsProcessHostError>();
+		const exited = yield* Deferred.make<{
+			readonly code: number | null;
+			readonly signal: NodeJS.Signals | null;
+		}>();
+		yield* Effect.acquireRelease(
+			Effect.sync(() => {
+				const on_spawned = () => {
+					if (child.pid === undefined) {
+						Deferred.doneUnsafe(
+							spawned,
+							Effect.fail(
+								new WindowsProcessHostError({
+									message: "The engine process did not expose a process id",
+								}),
+							),
+						);
+						return;
+					}
+					Deferred.doneUnsafe(spawned, Effect.succeed(child.pid));
+				};
+				const on_failed = (cause: Error) =>
+					Deferred.doneUnsafe(
+						spawned,
+						Effect.fail(
+							new WindowsProcessHostError({
+								cause,
+								message: `${input.command} ${input.args.join(" ")} failed to spawn`,
+							}),
+						),
+					);
+				const on_closed = (code: number | null, signal: NodeJS.Signals | null) =>
+					Deferred.doneUnsafe(exited, Effect.succeed({ code, signal }));
+				child.once("spawn", on_spawned);
+				child.once("error", on_failed);
+				child.once("close", on_closed);
+				return { on_closed, on_failed, on_spawned };
+			}),
+			({ on_closed, on_failed, on_spawned }) =>
+				Effect.sync(() => {
+					child.off("spawn", on_spawned);
+					child.off("error", on_failed);
+					child.off("close", on_closed);
+				}),
+		);
+		const process_id = yield* Deferred.await(spawned);
+		yield* Send({ process_id, type: "ready" });
+		const outcome = yield* Deferred.await(exited).pipe(
+			Effect.raceFirst(
+				Deferred.await(disconnected).pipe(
+					Effect.andThen(
+						Effect.fail(
+							new WindowsProcessHostError({
+								message: "The Windows process host owner disconnected",
+							}),
+						),
+					),
+				),
+			),
+			Effect.raceFirst(
+				Queue.take(messages).pipe(
+					Effect.andThen(
+						Effect.fail(
+							new WindowsProcessHostError({
+								message:
+									"The Windows process host received a message after startup",
+							}),
+						),
+					),
+				),
+			),
+		);
+		process.exitCode = exit_code(outcome.code, outcome.signal);
+	}),
+).pipe(
+	Effect.catch((cause) =>
+		Send({ message: cause.message, type: "spawn_error" }).pipe(
+			Effect.ignore,
+			Effect.andThen(Effect.sync(() => (process.exitCode = 127))),
+		),
+	),
+	Effect.ensuring(
+		FlushOutput.pipe(
+			Effect.andThen(
+				Effect.sync(() => {
+					const disconnect = process.disconnect;
+					if (process.connected && disconnect !== undefined) {
+						disconnect.call(process);
+					}
+				}),
+			),
+		),
+	),
+);
 
-process.once("disconnect", () => {
-	if (engine_process?.exitCode === null && engine_process.signalCode === null) {
-		engine_process.kill("SIGKILL");
-	}
-});
+/** The helper executable has exactly one Effect runtime boundary. */
+NodeRuntime.runMain(HostProgram);

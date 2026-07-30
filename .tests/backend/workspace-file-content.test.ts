@@ -9,7 +9,7 @@ import {
 	DecodeWorkspaceText,
 	EncodeWorkspaceText,
 	WorkspaceFileContentError,
-} from "../../modules/backend/src/workspace/workspace-file-content";
+} from "../../modules/backend/src/workspace/files/content";
 
 const utf8 = new TextEncoder();
 const node_crypto = NodeCrypto.layer;

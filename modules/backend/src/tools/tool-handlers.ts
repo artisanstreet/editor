@@ -6,13 +6,13 @@ import type {
 	RawOrigin,
 } from "@artisan/protocol";
 
-import { GitService } from "../git/git-service";
+import { GitService } from "../git/service";
 import { JournalStore } from "../persistence/journal-store";
-import { RuntimeMetadata } from "../runtime/runtime-metadata";
-import { TerminalSessionService } from "../terminal/terminal-sessions";
-import { WorkspaceEvidenceRecorder } from "../workspace/workspace-evidence-recorder";
-import { WorkspaceFileDiscovery } from "../workspace/workspace-file-discovery";
-import { WorkspaceFileService } from "../workspace/workspace-file-service";
+import { RuntimeMetadata } from "../runtime/metadata";
+import { TerminalSessionService } from "../terminal/sessions";
+import { WorkspaceEvidenceRecorder } from "../workspace/evidence";
+import { WorkspaceFileDiscovery } from "../workspace/files/discovery";
+import { WorkspaceFileService } from "../workspace/files/service";
 import { WorkspaceFilesystemRegistry } from "../filesystem/workspace-filesystem-registry";
 
 /** Dispatches a claimed invocation to a direct, backend-owned V1 capability. */

@@ -7,7 +7,7 @@ import { ThreadSessionPolicy, type ThreadSessionPolicy as Policy } from "@artisa
 import {
 	RuntimeCatalogLive,
 	RuntimeCatalogService,
-} from "../../modules/backend/src/runtime/runtime-catalog";
+} from "../../modules/backend/src/runtime/catalog";
 
 /** The catalog consumes only the descriptor identity of a registered engine. */
 const registered_engine = (id: string) => ({ Descriptor: { id } }) as unknown as Engine;

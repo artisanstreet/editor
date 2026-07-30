@@ -34,6 +34,15 @@ function normalise(
 }
 
 describe("Codex normalizer", () => {
+	it("retains completion-only compaction notifications without fabricating an identity", async () => {
+		const [observation] = await Effect.runPromise(
+			normalise("thread/compacted", { threadId: "thread-1", turnId: "turn-1" }),
+		);
+
+		expect(observation).toMatchObject({ _tag: "compaction", state: "completed" });
+		expect(observation).not.toHaveProperty("compaction_id");
+	});
+
 	it("accepts official 0.142.5 shapes while retaining byte-faithful provenance", async () => {
 		const observations = await Effect.runPromise(
 			Effect.all([
@@ -293,8 +302,8 @@ describe("Codex normalizer", () => {
 			},
 			{ _tag: "search", state: "started" },
 			{ _tag: "search", state: "completed" },
-			{ _tag: "compaction", state: "started" },
-			{ _tag: "compaction", state: "completed" },
+			{ _tag: "compaction", compaction_id: "compact-1", state: "started" },
+			{ _tag: "compaction", compaction_id: "compact-1", state: "completed" },
 		]);
 		expect(flattened[1]).not.toHaveProperty("delta");
 	});

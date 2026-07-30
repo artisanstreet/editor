@@ -5,14 +5,14 @@ import type { CommandEnvelope, CommandReceiptEnvelope, OutboundEnvelope } from "
 import { AgentGraphOrchestrator } from "../orchestration/agent-graph-orchestrator";
 import type { AgentGraphError } from "../orchestration/agent-graph-repository";
 import { AgentOrchestrator } from "../orchestration/agent-orchestrator";
-import type { OrchestrationError } from "../persistence/orchestration-repository";
+import type { OrchestrationError } from "../persistence/orchestration/repository";
 import type { JournalStoreError } from "../persistence/journal-store";
-import { RuntimeMetadata } from "../runtime/runtime-metadata";
-import { RuntimeCatalogService, type RuntimeCatalogPolicyError } from "../runtime/runtime-catalog";
+import { RuntimeMetadata } from "../runtime/metadata";
+import { RuntimeCatalogService, type RuntimeCatalogPolicyError } from "../runtime/catalog";
 import { ThreadCommands } from "../threads/thread-commands";
 import type { ThreadMetadataError } from "../threads/thread-metadata-repository";
 import type { ThreadProjectAffinityError } from "../threads/thread-project-affinity-repository";
-import { TerminalSessionService, type TerminalSessionError } from "../terminal/terminal-sessions";
+import { TerminalSessionService, type TerminalSessionError } from "../terminal/sessions";
 
 export class CommandRouter extends Context.Service<
 	CommandRouter,
@@ -91,37 +91,53 @@ export const CommandRouterLive = Layer.effect(
 				? thread_commands.HandleCreate(command)
 				: command.payload.type === "thread.retention.update"
 					? thread_commands.HandleRetentionPolicy(command)
-					: command.payload.type === "thread.project.assign" ||
-						  command.payload.type === "thread.project.unlock"
-						? thread_commands.HandleProjectAffinity(command)
-						: command.payload.type.startsWith("thread.") &&
-							  command.payload.type !== "thread.send_message" &&
-							  command.payload.type !== "thread.auto_steer.update" &&
-							  command.payload.type !== "thread.session_policy.update"
-							? thread_commands.HandleMetadata(command)
-							: command.payload.type.startsWith("terminal.")
-								? terminals
-										.Handle(command)
-										.pipe(
-											Effect.flatMap((accepted) =>
-												AcceptedReceipt(command, accepted, command.run_id),
-											),
-										)
-								: command.payload.type === "orchestration.group.start" ||
-									  command.payload.type === "agent_instance.rename" ||
-									  command.payload.type.startsWith("assignment.")
-									? graph
-											.Handle(command)
-											.pipe(
-												Effect.flatMap((accepted) =>
-													AcceptedReceipt(command, accepted, undefined),
-												),
-											)
-									: HandleOrchestration(command).pipe(
-											Effect.flatMap((accepted) =>
-												AcceptedReceipt(command, accepted, accepted.run_id),
-											),
-										);
+					: command.payload.type === "model.favorite.update"
+						? thread_commands.HandleModelFavorite(command)
+						: command.payload.type === "session.defaults.update"
+							? thread_commands.HandleSessionDefaults(command)
+							: command.payload.type === "thread.project.assign" ||
+								  command.payload.type === "thread.project.unlock"
+								? thread_commands.HandleProjectAffinity(command)
+								: command.payload.type.startsWith("thread.") &&
+									  command.payload.type !== "thread.send_message" &&
+									  command.payload.type !== "thread.auto_steer.update" &&
+									  command.payload.type !== "thread.session_policy.update"
+									? thread_commands.HandleMetadata(command)
+									: command.payload.type.startsWith("terminal.")
+										? terminals
+												.Handle(command)
+												.pipe(
+													Effect.flatMap((accepted) =>
+														AcceptedReceipt(
+															command,
+															accepted,
+															command.run_id,
+														),
+													),
+												)
+										: command.payload.type === "orchestration.group.start" ||
+											  command.payload.type === "agent_instance.rename" ||
+											  command.payload.type.startsWith("assignment.")
+											? graph
+													.Handle(command)
+													.pipe(
+														Effect.flatMap((accepted) =>
+															AcceptedReceipt(
+																command,
+																accepted,
+																undefined,
+															),
+														),
+													)
+											: HandleOrchestration(command).pipe(
+													Effect.flatMap((accepted) =>
+														AcceptedReceipt(
+															command,
+															accepted,
+															accepted.run_id,
+														),
+													),
+												);
 
 		return {
 			Dispatch,

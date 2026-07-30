@@ -15,8 +15,8 @@ import {
 	MessageImageAttachments,
 	ThreadTombstones,
 	Threads,
-} from "../persistence/schema";
-import { ReadConversationPatches, ReadConversationSnapshot } from "./projection";
+} from "../persistence/tables";
+import { ReadConversationPatches, ReadConversationSnapshot } from "./projection-api";
 
 export class ConversationReadModelFailure extends Data.TaggedError("ConversationReadModelFailure")<{
 	readonly cause: unknown;

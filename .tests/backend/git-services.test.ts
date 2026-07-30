@@ -12,7 +12,7 @@ import {
 	GitCommandExecutorError,
 	type GitCommandInput,
 	type GitCommandResult,
-} from "../../modules/backend/src/git/git-command-executor";
+} from "../../modules/backend/src/git/executor";
 import { make_git_layer, make_node_git_layer } from "../../modules/backend/src/git/node-git";
 
 const roots: Array<string> = [];

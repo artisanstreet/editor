@@ -3,7 +3,8 @@ import type { ConversationItem } from "@artisan/protocol";
 
 import {
 	artisan_thinking_words,
-	latest_active_activity_label,
+	conversation_activity_is_live,
+	conversation_work_is_live,
 	thinking_word_at,
 	thinking_word_for,
 } from "../../modules/frontend/src/lib/conversation/activity-status";
@@ -25,6 +26,23 @@ const activity = (
 	status: lifecycle,
 	turn_id: "turn-1",
 	type: "activity",
+	updated_at: "2026-07-27T10:00:00.000Z",
+});
+
+const message = (
+	lifecycle: Extract<ConversationItem, { type: "assistant_message" }>["lifecycle"],
+): Extract<ConversationItem, { type: "assistant_message" }> => ({
+	created_at: "2026-07-27T10:00:00.000Z",
+	id: "message-1",
+	lifecycle,
+	ordinal: 9,
+	phase: "unspecified",
+	references: [],
+	revision: 0,
+	source_refs: [],
+	text: "Reading through the failure",
+	turn_id: "turn-1",
+	type: "assistant_message",
 	updated_at: "2026-07-27T10:00:00.000Z",
 });
 
@@ -58,18 +76,30 @@ describe("Artisan thinking vocabulary", () => {
 		expect(thinking_word_at(artisan_thinking_words.length + 1)).toBe(artisan_thinking_words[1]);
 	});
 
-	it("prefers the latest observable engine activity over a whimsical verb", () => {
+	it("yields the status line to live work and reclaims a settled trace", () => {
 		expect(
-			latest_active_activity_label([
+			conversation_work_is_live([
 				activity("activity-1", "file.read", "completed"),
 				activity("activity-2", "test.run", "active"),
 			]),
-		).toBe("Running tests");
+		).toBe(true);
+		expect(conversation_work_is_live([message("streaming")])).toBe(true);
 		expect(
-			latest_active_activity_label([
+			conversation_work_is_live([
 				activity("activity-1", "file.read", "completed"),
 				activity("activity-2", "test.run", "completed"),
+				message("completed"),
 			]),
-		).toBeUndefined();
+		).toBe(false);
+	});
+
+	it("never lets a failed command with a dangling lifecycle read as running", () => {
+		const ghost = {
+			...activity("activity-1", "terminal", "active"),
+			status: "failed" as const,
+		};
+
+		expect(conversation_activity_is_live(ghost)).toBe(false);
+		expect(conversation_work_is_live([ghost])).toBe(false);
 	});
 });

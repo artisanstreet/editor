@@ -9,10 +9,10 @@ import type {
 } from "@artisan/protocol";
 import { OrchestrationFanoutLimits } from "@artisan/protocol";
 
-import { GlobalGuidanceService } from "../guidance/guidance-service";
-import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import { GlobalGuidanceService } from "../guidance/service";
+import { RuntimeMetadata } from "../runtime/metadata";
 import { MakeThreadDispatchFence } from "../threads/internal/thread-dispatch-fence";
-import { OrchestrationRepository } from "../persistence/orchestration-repository";
+import { OrchestrationRepository } from "../persistence/orchestration/repository";
 import {
 	AgentGraphRepository,
 	type AcceptedAgentGraphCommand,
@@ -22,7 +22,11 @@ import {
 	AgentGraphInvalid,
 	type PendingAgentRun,
 } from "./agent-graph-repository";
-import { IsSessionPolicyEngine, MakeSessionPolicyRunMetadata } from "./session-policy";
+import {
+	IsSessionPolicyEngine,
+	MakeSessionPolicyRunMetadata,
+	SessionPolicyResolvedModel,
+} from "./session-policy";
 
 interface LiveAgentRun {
 	readonly assignment_id: string;
@@ -193,6 +197,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 				}
 
 				const run_scope = yield* Scope.make();
+				const run_model = SessionPolicyResolvedModel(policy, work.profile);
 				let transferred = false;
 
 				return yield* Effect.gen(function* () {
@@ -234,6 +239,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 							metadata.instance_id,
 							run.native_thread_id,
 							run.resume_token,
+							run_model,
 						);
 						yield* register_live(work, run, run_scope);
 						transferred = true;

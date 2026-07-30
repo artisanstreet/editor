@@ -13,13 +13,14 @@ import {
 } from "./contracts";
 import { HydrateImageAttachments } from "./message-attachments";
 import { AuthoritativeThreadSendMessageCommand } from "./message-command";
+import { DecodePersistedJson, PersistedJsonValue } from "./storage-codec";
 import type { PendingWork as PendingWorkContract } from "./contracts";
 import {
 	OrchestrationMessages,
 	OrchestrationOutbox,
 	OrchestrationRuns,
 	ThreadErasureClaims,
-} from "../schema";
+} from "../tables";
 
 type RuntimeMetadata = Parameters<typeof AppendJournalEventInTransaction>[1];
 
@@ -29,12 +30,6 @@ interface JournalNotifier {
 
 const NormalizeError = (error: unknown): OrchestrationError =>
 	error instanceof OrchestrationFailure ? error : new OrchestrationFailure({ cause: error });
-
-const ParsePersistedJson = (json: string) =>
-	Effect.try({
-		try: () => JSON.parse(json),
-		catch: (cause) => new OrchestrationFailure({ cause }),
-	});
 
 type PersistedPayload = PendingWorkContract["payload"];
 
@@ -105,7 +100,10 @@ export const make_outbox_operations = (
 						rows.filter((row) => row.kind !== "start" || row.status === "queued"),
 						(row) =>
 							Effect.gen(function* () {
-								const value = yield* ParsePersistedJson(row.payload_json);
+								const value = yield* DecodePersistedJson(
+									PersistedJsonValue,
+									row.payload_json,
+								);
 								const decoded = yield* DecodePersistedPayload(value);
 								const payload: PersistedPayload =
 									decoded.type === "thread.send_message"
@@ -176,9 +174,8 @@ export const make_outbox_operations = (
 					];
 				}),
 			);
-			if (events.length > 0) {
-				yield* notifier.Publish(events.at(-1)!.journal_sequence);
-			}
+			const latest_event = events.at(-1);
+			if (latest_event !== undefined) yield* notifier.Publish(latest_event.journal_sequence);
 		}).pipe(Effect.mapError(NormalizeError));
 
 	const ClaimOutbox = (command_id: string) =>

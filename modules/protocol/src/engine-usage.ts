@@ -1,6 +1,6 @@
 import { Schema } from "effect";
 
-import { IsoDateTime } from "./common";
+import { Identifier, IsoDateTime } from "./common";
 
 /** Classifies one provider quota window by its billing cadence. */
 export const EngineUsageWindowKind = Schema.Literals(["session", "weekly", "monthly", "unknown"]);
@@ -50,8 +50,17 @@ export const EngineUsageReport = Schema.Struct({
 
 export type EngineUsageReport = typeof EngineUsageReport.Type;
 
-/** Requests provider-account usage for every registered engine. */
-export const EngineUsageQuery = Schema.Struct({});
+/**
+ * Requests provider-account usage. `engine_id` narrows the read to one engine
+ * so clients can fan out per engine and paint each report as it lands instead
+ * of waiting on the slowest provider; absent, every registered engine reports.
+ * `force` marks a user-initiated refresh: the backend re-asks providers even
+ * when its cached reports are still inside the freshness window.
+ */
+export const EngineUsageQuery = Schema.Struct({
+	engine_id: Schema.optional(Identifier),
+	force: Schema.optional(Schema.Boolean),
+});
 
 export type EngineUsageQuery = typeof EngineUsageQuery.Type;
 

@@ -28,22 +28,19 @@ import type {
 	WorkspaceLanguageCapabilitiesQueryResultEnvelope,
 } from "@artisan/protocol";
 
-import { GitService, GitServiceError } from "../../../git/git-service";
-import { PreviewCoordinator } from "../../../preview/preview-coordinator";
-import { PreviewRepositoryError } from "../../../preview/preview-repository";
-import { PreviewRuntimeError } from "../../../preview/preview-runtime";
-import { PreviewHealthProbeError } from "../../../preview/preview-target";
-import { RuntimeMetadata } from "../../../runtime/runtime-metadata";
+import { GitService, GitServiceError } from "../../../git/service";
+import { PreviewCoordinator } from "../../../preview/coordinator";
+import { PreviewRepositoryError } from "../../../preview/repository";
+import { PreviewRuntimeError } from "../../../preview/runtime";
+import { PreviewHealthProbeError } from "../../../preview/target";
+import { RuntimeMetadata } from "../../../runtime/metadata";
 import { ToolControlPlane } from "../../../tools/tool-control-plane";
-import { WorkspaceChangeRepository } from "../../../workspace/workspace-change-repository";
+import { WorkspaceChangeRepository } from "../../../workspace/changes/repository";
 import {
 	WorkspaceChangeDiffService,
 	WorkspaceChangeDiffUnavailable,
-} from "../../../workspace/workspace-change-diff-service";
-import {
-	WorkspaceFileService,
-	WorkspaceFileServiceError,
-} from "../../../workspace/workspace-file-service";
+} from "../../../workspace/changes/diff";
+import { WorkspaceFileService, WorkspaceFileServiceError } from "../../../workspace/files/service";
 
 export type WorkspaceInspectionQueryEnvelope =
 	| GitDiffQueryEnvelope
@@ -73,18 +70,25 @@ export type WorkspaceInspectionQueryResultEnvelope =
 	| WorkspaceFileReadQueryResultEnvelope
 	| WorkspaceLanguageCapabilitiesQueryResultEnvelope;
 
-const WorkspaceErrorDetail = (error: unknown): ProtocolErrorDetail =>
+/** Exported so the mapping from read failure to user-visible reason is testable. */
+export const WorkspaceErrorDetail = (error: unknown): ProtocolErrorDetail =>
 	error instanceof WorkspaceFileServiceError && error.reason === "changed"
 		? {
 				code: "workspace.conflict",
 				message: "The workspace file changed before the requested mutation could apply.",
 				retryable: false,
 			}
-		: {
-				code: "workspace.unavailable",
-				message: "The workspace operation could not be completed.",
-				retryable: true,
-			};
+		: error instanceof WorkspaceFileServiceError && error.reason === "not_text"
+			? {
+					code: "workspace.file.not_text",
+					message: "This file is not UTF-8 text, so it cannot be opened in the editor.",
+					retryable: false,
+				}
+			: {
+					code: "workspace.unavailable",
+					message: "The workspace operation could not be completed.",
+					retryable: true,
+				};
 
 const WorkspaceDiffErrorDetail = (error: unknown): ProtocolErrorDetail => {
 	if (

@@ -21,7 +21,7 @@ import {
 	RoutineSourceInspector,
 } from "@artisan/backend";
 
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];

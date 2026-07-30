@@ -7,7 +7,7 @@ import {
 	type GitCommandInput,
 	type GitCommandResult,
 	make_node_git_command_executor_layer,
-} from "./git-command-executor";
+} from "./executor";
 
 const WorkspaceGitRegistration = Schema.Struct({
 	root: Schema.NonEmptyString,

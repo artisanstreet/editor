@@ -9,7 +9,7 @@ import {
 } from "@artisan/protocol";
 
 import { Database } from "./database";
-import { JournalEvents, ThreadTombstones, Threads } from "./schema";
+import { JournalEvents, ThreadTombstones, Threads } from "./tables";
 import { JournalInvariantError } from "./journal-store";
 
 export class TranscriptReadModelFailure extends Data.TaggedError("TranscriptReadModelFailure")<{
@@ -110,13 +110,15 @@ export const TranscriptReadModelLive = Layer.effect(
 						const decoded = yield* Effect.forEach(
 							descending ? [...rows].reverse() : rows,
 							(row) => {
-								return Effect.try({
-									try: () => JSON.parse(row.payload_json) as unknown,
-									catch: () =>
-										new JournalInvariantError({
-											message: "Transcript payload contains invalid JSON",
-										}),
-								}).pipe(
+								return Schema.decodeUnknownEffect(Schema.UnknownFromJsonString)(
+									row.payload_json,
+								).pipe(
+									Effect.mapError(
+										() =>
+											new JournalInvariantError({
+												message: "Transcript payload contains invalid JSON",
+											}),
+									),
 									Effect.flatMap((payload) =>
 										Schema.decodeUnknownEffect(TranscriptEntry)({
 											event_id: row.event_id,

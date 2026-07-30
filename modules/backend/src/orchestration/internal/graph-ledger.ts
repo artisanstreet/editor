@@ -9,7 +9,7 @@ import {
 	JournalEvents,
 	OrchestrationGraphCommands,
 	OrchestrationGroups,
-} from "../../persistence/schema";
+} from "../../persistence/tables";
 import {
 	AgentGraphCommandConflict,
 	AgentGraphInvalid,
@@ -116,7 +116,11 @@ export function make_graph_ledger(
 					thread_id: input.thread_id,
 				})
 				.returning({ journal_sequence: JournalEvents.sequence });
-			const journal_sequence = inserted!.journal_sequence;
+			if (inserted === undefined)
+				return yield* new AgentGraphInvalid({
+					message: `Graph event ${event_id} returned no inserted row`,
+				});
+			const journal_sequence = inserted.journal_sequence;
 			const [group] = yield* transaction
 				.select({ version: OrchestrationGroups.version })
 				.from(OrchestrationGroups)
@@ -158,8 +162,12 @@ export function make_graph_ledger(
 			} satisfies EventEnvelope;
 		});
 
-	const publish_events = (events: ReadonlyArray<EventEnvelope>) =>
-		events.length === 0 ? Effect.void : notifier.Publish(events.at(-1)!.journal_sequence);
+	const publish_events = (events: ReadonlyArray<EventEnvelope>) => {
+		const latest_event = events.at(-1);
+		return latest_event === undefined
+			? Effect.void
+			: notifier.Publish(latest_event.journal_sequence);
+	};
 
 	const insert_journal_command = (
 		transaction: GraphTransaction,

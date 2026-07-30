@@ -10,8 +10,8 @@ import {
 	PreviewTarget,
 	PreviewTargetClock,
 	type PreviewTargetRecord,
-} from "../../modules/backend/src/preview/preview-target";
-import { make_preview_target_layer } from "../../modules/backend/src/preview/preview-target-service";
+} from "../../modules/backend/src/preview/target";
+import { make_preview_target_layer } from "../../modules/backend/src/preview/target-service";
 import {
 	make_preview_inspection_layer,
 	make_preview_external_browser_layer,
@@ -22,7 +22,7 @@ import {
 	PreviewInspectionConnectorError,
 	PreviewInspectionConnectorUnavailableLive,
 	type PreviewInspectionConnectorHandle,
-} from "../../modules/backend/src/preview/preview-runtime";
+} from "../../modules/backend/src/preview/runtime";
 
 const closeable_servers: Array<ReturnType<typeof createServer>> = [];
 

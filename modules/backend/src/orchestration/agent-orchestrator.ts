@@ -18,14 +18,14 @@ import {
 	type OrchestrationError,
 	type PendingWork,
 	type RecoverableNativeRun,
-} from "../persistence/orchestration-repository";
-import { ThreadContinuationRepository } from "../persistence/thread-continuation-repository";
+} from "../persistence/orchestration/repository";
+import { ThreadContinuationRepository } from "../persistence/thread-continuation/repository";
 import type {
 	AuthoritativeCommandEnvelope,
 	AuthoritativeThreadSendMessageCommand,
 	InboundOrAuthoritativeCommandEnvelope,
 } from "../persistence/orchestration/message-command";
-import { GlobalGuidanceService } from "../guidance/guidance-service";
+import { GlobalGuidanceService } from "../guidance/service";
 import { MakeThreadDispatchFence } from "../threads/internal/thread-dispatch-fence";
 import { IntakePolicy } from "./intake-policy";
 import {
@@ -326,22 +326,6 @@ export const AgentOrchestratorLive = Layer.effect(
 				);
 			}).pipe(
 				Effect.andThen(live.run.Closed),
-				Effect.andThen(
-					live.run.NativeCompaction === undefined
-						? Effect.void
-						: live.run.NativeCompaction.pipe(
-								Effect.flatMap(
-									Option.match({
-										onNone: () => Effect.void,
-										onSome: (value) =>
-											continuation_repository.RecordNativeCompaction(
-												work.run_id,
-												value,
-											),
-									}),
-								),
-							),
-				),
 				Effect.asVoid,
 				Effect.catchCause((cause) =>
 					Effect.sync(() => {

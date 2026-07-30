@@ -2,7 +2,7 @@ import { Effect } from "effect";
 
 import type { EngineObservation } from "@artisan/engines";
 
-import { OrchestrationRawObservations } from "../../persistence/schema";
+import { OrchestrationRawObservations } from "../../persistence/tables";
 import { AgentGraphInvalid } from "../agent-graph-model";
 import type { GraphTransaction } from "./graph-context";
 

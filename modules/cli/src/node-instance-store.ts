@@ -20,7 +20,6 @@ import {
 } from "./instance";
 
 const DecodeSecrets = Schema.decodeUnknownSync(ForgeSecrets);
-const DecodeState = Schema.decodeUnknownSync(ForgeRuntimeState);
 
 const instance_error = (code: ForgeInstanceError["code"]) => new ForgeInstanceError({ code });
 
@@ -167,9 +166,10 @@ export const make_node_instance_store_layer = (home_override?: string) => {
 					),
 					Effect.andThen(AssertPrivateRegularFile(file_system, path)),
 					Effect.andThen(file_system.readFileString(path, "utf8")),
-					Effect.flatMap((encoded) =>
+					Effect.flatMap(Schema.decodeUnknownEffect(Schema.UnknownFromJsonString)),
+					Effect.flatMap((decoded) =>
 						Effect.try({
-							try: () => decode(JSON.parse(encoded)),
+							try: () => decode(decoded),
 							catch: () => instance_error("invalid"),
 						}),
 					),
@@ -191,11 +191,8 @@ export const make_node_instance_store_layer = (home_override?: string) => {
 			const ReadState = (path: string) =>
 				AssertPrivateRegularFile(file_system, path).pipe(
 					Effect.andThen(file_system.readFileString(path, "utf8")),
-					Effect.flatMap((encoded) =>
-						Effect.try({
-							try: () => DecodeState(JSON.parse(encoded)),
-							catch: () => instance_error("invalid"),
-						}),
+					Effect.flatMap(
+						Schema.decodeUnknownEffect(Schema.fromJsonString(ForgeRuntimeState)),
 					),
 					/** A stale, absent, or malformed ownership hint is never actionable. */
 					Effect.catch(() => Effect.succeed(undefined)),

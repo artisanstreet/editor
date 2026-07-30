@@ -14,13 +14,13 @@ import {
 	GlobalGuidanceProviderSync,
 	JournalCommands,
 	JournalEvents,
-} from "../../modules/backend/src/persistence/schema";
+} from "../../modules/backend/src/persistence/tables";
 import {
 	GlobalGuidanceRepository,
 	GlobalGuidanceRepositoryLive,
-} from "../../modules/backend/src/guidance/guidance-repository";
+} from "../../modules/backend/src/guidance/repository";
 import { Database } from "../../modules/backend/src/persistence/database";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];

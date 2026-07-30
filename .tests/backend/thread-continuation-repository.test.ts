@@ -8,35 +8,33 @@ import { NodeCrypto } from "@effect/platform-node-shared";
 import { Effect, Layer, ManagedRuntime, Option } from "effect";
 import { describe, expect, it } from "vitest";
 
-import type { EngineObservation } from "@artisan/engines";
-
 import {
 	encode_portable_checkpoint_content,
 	type PortableCheckpoint,
 } from "../../modules/backend/src/orchestration/thread-continuation-model";
 import { make_database_layer, Database } from "../../modules/backend/src/persistence/database";
+import { JournalNotifierLive } from "../../modules/backend/src/persistence/journal-notifier";
 import {
 	JournalEvents,
 	OrchestrationCoordinators,
 	OrchestrationMessages,
 	OrchestrationOutbox,
-	OrchestrationRawObservations,
 	OrchestrationRuns,
 	ThreadErasureClaims,
 	Threads,
-} from "../../modules/backend/src/persistence/schema";
+} from "../../modules/backend/src/persistence/tables";
 import {
 	ThreadContinuationConflict,
 	ThreadContinuationRepository,
 	ThreadContinuationRepositoryLive,
 	ThreadContinuationFailure,
-} from "../../modules/backend/src/persistence/thread-continuation-repository";
+} from "../../modules/backend/src/persistence/thread-continuation/repository";
 import {
 	ThreadContinuationLaunches,
 	ThreadPortableHandoffs,
 	ThreadRunContinuationState,
 } from "../../modules/backend/src/persistence/thread-continuation-schema";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const now = "2026-07-30T10:00:00.000Z";
@@ -55,7 +53,7 @@ const make_runtime = async () => {
 			Now: Effect.succeed(now),
 		}),
 	);
-	const base = Layer.mergeAll(database, metadata, NodeCrypto.layer);
+	const base = Layer.mergeAll(database, metadata, JournalNotifierLive, NodeCrypto.layer);
 	const runtime = ManagedRuntime.make(
 		Layer.mergeAll(base, ThreadContinuationRepositoryLive.pipe(Layer.provide(base))),
 	);
@@ -311,277 +309,6 @@ describe("thread continuation repository", () => {
 			expect(context.source_cut_journal_sequence).toBe(1);
 		}));
 
-	it("verifies hash, raw boundary, and native session before storing a private compaction", () =>
-		with_runtime(async (runtime) => {
-			await runtime.runPromise(
-				Seed({
-					include_target_event: false,
-					source_engine_id: "claude",
-					source_native_resume_json: JSON.stringify({
-						native_thread_id: "source-native",
-					}),
-					source_native_thread_id: "source-native",
-				}),
-			);
-			const database = await database_from(runtime);
-			const repository = await repository_from(runtime);
-			const frame = {
-				compactMetadata: {
-					providerField: "preserved",
-					trigger: "auto" as const,
-				},
-				providerTopLevelField: { version: 2 },
-				subtype: "compact_boundary" as const,
-				type: "system" as const,
-				uuid: "boundary-1",
-			};
-			await runtime.runPromise(
-				database.client.insert(OrchestrationRawObservations).values({
-					engine_id: "claude",
-					frame_json: JSON.stringify(frame),
-					native_id: "boundary-1",
-					native_method: "system.compact_boundary",
-					observation_id: "observation-1",
-					run_id: "run-1",
-					sequence: 1,
-					transport: "ndjson",
-				}),
-			);
-			await runtime.runPromise(
-				Effect.gen(function* () {
-					yield* database.client.insert(OrchestrationRuns).values({
-						agent_id: "agent-other",
-						created_at: now,
-						engine_id: "claude",
-						native_thread_id: "source-native",
-						run_id: "run-other",
-						status: "completed",
-						thread_id: "thread-1",
-						updated_at: now,
-						working_directory: "C:/work",
-					});
-					yield* InsertJournalEvent("event-other", "run-other", 2);
-					yield* InsertJournalEvent("event-2", "run-2", 3);
-					yield* InsertJournalEvent("event-1-late", "run-1", 4);
-				}),
-			);
-			const observation = {
-				_tag: "compaction",
-				artisan_run_id: "run-1",
-				observation_id: "observation-1",
-				raw: {
-					engine_id: "claude",
-					frame,
-					native_id: "boundary-1",
-					native_method: "system.compact_boundary",
-					transport: "ndjson",
-				},
-				sequence: 1,
-				state: "completed",
-			} satisfies EngineObservation;
-			await runtime.runPromise(repository.RecordObservationMetadata(observation));
-
-			const summary = "Provider summary\r\nwith normalized newlines";
-			const summary_sha256 = createHash("sha256")
-				.update(summary.replaceAll("\r\n", "\n"))
-				.digest("hex");
-			const valid = {
-				boundary_id: "boundary-1",
-				method: "claude_post_compact" as const,
-				observation_id: "observation-1",
-				source_native_thread_id: "source-native",
-				summary,
-				summary_sha256,
-				trigger: "auto" as const,
-			};
-			await expect_failure_code(
-				runtime.runPromise(
-					repository.RecordNativeCompaction("run-1", {
-						...valid,
-						summary_sha256: "0".repeat(64),
-					}),
-				),
-				"native_compaction_hash_mismatch",
-			);
-			await runtime.runPromise(
-				database.client.run(
-					"UPDATE orchestration_raw_observations SET native_method = 'wrong-method' WHERE observation_id = 'observation-1'",
-				),
-			);
-			await expect_failure_code(
-				runtime.runPromise(repository.RecordNativeCompaction("run-1", valid)),
-				"native_compaction_raw_mismatch",
-			);
-			await runtime.runPromise(
-				database.client.run(
-					"UPDATE orchestration_raw_observations SET native_method = 'system.compact_boundary' WHERE observation_id = 'observation-1'",
-				),
-			);
-			await expect_failure_code(
-				runtime.runPromise(
-					repository.RecordNativeCompaction("run-1", {
-						...valid,
-						source_native_thread_id: "wrong-native-session",
-					}),
-				),
-				"native_compaction_unverified",
-			);
-
-			await runtime.runPromise(repository.RecordNativeCompaction("run-1", valid));
-			await runtime.runPromise(
-				database.client.insert(ThreadRunContinuationState).values({
-					created_at: now,
-					engine_id: "claude",
-					last_observation_sequence: 1,
-					native_compaction_boundary_journal_sequence: 2,
-					native_compaction_json: JSON.stringify({
-						...valid,
-						boundary_id: "other-boundary",
-						observation_id: "other-observation",
-					}),
-					native_compaction_observation_id: "other-observation",
-					run_id: "run-other",
-					thread_id: "thread-1",
-					updated_at: now,
-				}),
-			);
-			const state = (
-				await runtime.runPromise(database.client.select().from(ThreadRunContinuationState))
-			).find((candidate) => candidate.run_id === "run-1");
-			expect(JSON.parse(state!.native_compaction_json!)).toEqual(valid);
-			expect(JSON.parse(frame ? JSON.stringify(frame) : "{}")).not.toHaveProperty("summary");
-			const context = await runtime.runPromise(repository.ReadContext("run-2"));
-			expect(Option.isSome(context.native_compaction)).toBe(true);
-			await runtime.runPromise(
-				database.client.update(ThreadRunContinuationState).set({
-					native_compaction_json: JSON.stringify({
-						...valid,
-						summary: "tampered persisted summary",
-					}),
-				}),
-			);
-			const tampered_context = await runtime.runPromise(repository.ReadContext("run-2"));
-			expect(Option.isNone(tampered_context.native_compaction)).toBe(true);
-			await runtime.runPromise(
-				database.client
-					.update(ThreadRunContinuationState)
-					.set({ native_compaction_json: JSON.stringify(valid) }),
-			);
-
-			await runtime.runPromise(
-				Effect.gen(function* () {
-					yield* database.client.run(
-						"UPDATE orchestration_runs SET status = 'completed', native_thread_id = 'source-native', native_resume_json = '{\"native_thread_id\":\"source-native\"}' WHERE run_id = 'run-2'",
-					);
-					yield* database.client.insert(ThreadRunContinuationState).values({
-						created_at: now,
-						engine_id: "claude",
-						last_observation_sequence: 2,
-						run_id: "run-2",
-						thread_id: "thread-1",
-						updated_at: now,
-					});
-					yield* database.client.insert(OrchestrationRuns).values({
-						agent_id: "agent-1",
-						created_at: now,
-						engine_id: "codex",
-						run_id: "run-3",
-						status: "queued",
-						thread_id: "thread-1",
-						updated_at: now,
-						working_directory: "C:/work",
-					});
-					yield* database.client.insert(OrchestrationMessages).values({
-						agent_id: "agent-1",
-						command_id: "command-3",
-						created_at: now,
-						delivery: "start",
-						message_id: "message-3",
-						run_id: "run-3",
-						text: "switch after another turn",
-						thread_id: "thread-1",
-					});
-					yield* database.client.insert(OrchestrationOutbox).values({
-						agent_id: "agent-1",
-						command_id: "command-3",
-						created_at: now,
-						kind: "start",
-						payload_json: "{}",
-						run_id: "run-3",
-						status: "dispatching",
-						thread_id: "thread-1",
-						updated_at: now,
-					});
-					yield* InsertJournalEvent("event-3", "run-3", 5);
-				}),
-			);
-			const later_context = await runtime.runPromise(repository.ReadContext("run-3"));
-			expect(Option.getOrThrow(later_context.source).run_id).toBe("run-2");
-			expect(Option.getOrThrow(later_context.native_compaction).value).toMatchObject({
-				boundary_id: "boundary-1",
-				summary,
-			});
-			const cross_engine_checkpoint = make_checkpoint({
-				method: "claude_post_compact",
-				source: {
-					cut: {
-						thread_id: "thread-1",
-						through_journal_sequence: 3,
-						through_observation_sequence: 2,
-						through_run_id: "run-2",
-					},
-					engine_id: "claude",
-				},
-				summary,
-				tail: [{ role: "assistant", text: "run-2 tail" }],
-			});
-			const claude_lineage = {
-				boundary_id: "boundary-1",
-				kind: "claude" as const,
-				observation_id: "observation-1",
-				source_native_thread_id: "source-native",
-				through_run_id: "run-1",
-			};
-			await expect_failure_code(
-				runtime.runPromise(
-					repository.PrepareLaunch("run-3", {
-						_tag: "portable",
-						checkpoint: make_checkpoint({
-							method: "claude_post_compact",
-							source: cross_engine_checkpoint.source,
-							summary: "tampered checkpoint summary",
-							tail: cross_engine_checkpoint.tail,
-						}),
-						handoff_id: "handoff-tampered",
-						lineage: claude_lineage,
-						request_id: "command-3",
-						source_run_id: "run-2",
-					}),
-				),
-				"portable_lineage_mismatch",
-			);
-			expect(
-				await runtime.runPromise(
-					repository.PrepareLaunch("run-3", {
-						_tag: "portable",
-						checkpoint: cross_engine_checkpoint,
-						handoff_id: "handoff-cross-engine",
-						lineage: claude_lineage,
-						request_id: "command-3",
-						source_run_id: "run-2",
-					}),
-				),
-			).toBe("prepared");
-
-			await runtime.runPromise(
-				database.client.run(
-					"UPDATE orchestration_runs SET native_thread_id = 'different-session' WHERE run_id = 'run-2'",
-				),
-			);
-			const different_session = await runtime.runPromise(repository.ReadContext("run-3"));
-			expect(Option.isNone(different_session.native_compaction)).toBe(true);
-		}));
-
 	it("persists the exact portable checkpoint and makes replay idempotent but conflicting replay fail", () =>
 		with_runtime(async (runtime) => {
 			await runtime.runPromise(
@@ -604,16 +331,29 @@ describe("thread continuation repository", () => {
 				}),
 			);
 			const repository = await repository_from(runtime);
-			const checkpoint = make_checkpoint();
+			const checkpoint = make_checkpoint({ method: "compaction_model_summary" });
 			const launch = {
 				_tag: "portable" as const,
 				checkpoint,
 				handoff_id: "handoff-1",
-				lineage: { kind: "canonical" as const },
+				lineage: {
+					compactor_engine_id: "engine-a",
+					compactor_model_id: "source-model",
+					kind: "compactor" as const,
+				},
 				request_id: "command-2",
 				source_run_id: "run-1",
 				target_model_id: "target-model",
 			};
+			await expect_failure_code(
+				runtime.runPromise(
+					repository.PrepareLaunch("run-2", {
+						...launch,
+						lineage: { kind: "canonical" as const },
+					}),
+				),
+				"portable_checkpoint_cut_mismatch",
+			);
 			expect(await runtime.runPromise(repository.PrepareLaunch("run-2", launch))).toBe(
 				"prepared",
 			);
@@ -625,6 +365,7 @@ describe("thread continuation repository", () => {
 			).find((candidate) => candidate.target_run_id === "run-2");
 			expect(handoff).toMatchObject({
 				content_sha256: checkpoint.sha256,
+				method: "compaction_model_summary",
 				omitted_entries: checkpoint.omitted_entries,
 				provider_lineage_json: JSON.stringify(launch.lineage),
 				summary: checkpoint.summary,
@@ -633,7 +374,10 @@ describe("thread continuation repository", () => {
 				through_observation_sequence: 7,
 			});
 
-			const changed_checkpoint = make_checkpoint({ summary: "Different valid summary" });
+			const changed_checkpoint = make_checkpoint({
+				method: "compaction_model_summary",
+				summary: "Different valid summary",
+			});
 			await expect(
 				runtime.runPromise(
 					repository.PrepareLaunch("run-2", {
@@ -830,7 +574,7 @@ describe("thread continuation repository", () => {
 			);
 		}));
 
-	it("reads later logical runs after a same-run compaction boundary despite journal interleaving", () =>
+	it("reads later logical runs in journal order despite interleaving", () =>
 		with_runtime(async (runtime) => {
 			await runtime.runPromise(Seed());
 			const database = await database_from(runtime);
@@ -892,17 +636,13 @@ describe("thread continuation repository", () => {
 				await runtime.runPromise(database.client.select().from(JournalEvents))
 			).find((event) => event.event_id === "run-1-answer")!;
 			expect(run_2_context.source_cut_journal_sequence).toBe(run_1_answer.sequence);
-			const run_1_user = (
-				await runtime.runPromise(database.client.select().from(JournalEvents))
-			).find((event) => event.event_id === "run-1-user")!;
-			const history = await runtime.runPromise(
-				repository.ReadCanonicalHistory("run-3", {
-					through_journal_sequence: run_1_user.sequence,
-					through_run_id: "run-1",
-				}),
-			);
-			expect(history.total_entries).toBe(2);
+			const history = await runtime.runPromise(repository.ReadCanonicalHistory("run-3"));
+			expect(history.total_entries).toBe(3);
 			expect(history.entries).toEqual([
+				expect.objectContaining({
+					role: "user",
+					run_id: "run-1",
+				}),
 				expect.objectContaining({
 					role: "assistant",
 					run_id: "run-1",

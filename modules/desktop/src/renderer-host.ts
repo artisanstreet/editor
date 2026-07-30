@@ -53,9 +53,9 @@ export const DecodeHandoffOutput = (stdout: string) =>
 		for (const line of stdout.split(/\r?\n/)) {
 			const candidate = line.trim();
 			if (!candidate.startsWith("{")) continue;
-			const parsed = yield* Effect.try(() => JSON.parse(candidate) as unknown).pipe(
-				Effect.option,
-			);
+			const parsed = yield* Schema.decodeUnknownEffect(Schema.UnknownFromJsonString)(
+				candidate,
+			).pipe(Effect.option);
 			if (Option.isNone(parsed)) continue;
 			const decoded = yield* Schema.decodeUnknownEffect(ForgeHandoff)(parsed.value).pipe(
 				Effect.option,

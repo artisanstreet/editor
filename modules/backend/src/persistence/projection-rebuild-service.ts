@@ -22,7 +22,7 @@ import {
 	WorkspaceChangeDiffs,
 	WorkspaceChangeOperations,
 	WorkspaceChanges,
-} from "./schema";
+} from "./tables";
 import { thread_activity_kind_from_event } from "../threads/internal/thread-activity";
 
 /**
@@ -309,13 +309,16 @@ export const ProjectionRebuildServiceLive = Layer.effect(
 					}
 					streams.set(event.stream_id, event.stream_sequence);
 
-					const payload_json = yield* Effect.try({
-						try: () => JSON.parse(event.payload_json) as unknown,
-						catch: () =>
-							new ProjectionRebuildInvariantError({
-								message: `Journal event ${event.event_id} contains invalid JSON.`,
-							}),
-					});
+					const payload_json = yield* Schema.decodeUnknownEffect(
+						Schema.UnknownFromJsonString,
+					)(event.payload_json).pipe(
+						Effect.mapError(
+							() =>
+								new ProjectionRebuildInvariantError({
+									message: `Journal event ${event.event_id} contains invalid JSON.`,
+								}),
+						),
+					);
 					const payload = yield* Schema.decodeUnknownEffect(EventPayload, {
 						onExcessProperty: "error",
 					})(payload_json).pipe(

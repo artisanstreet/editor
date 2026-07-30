@@ -1,4 +1,4 @@
-import { Effect } from "effect";
+import { Effect, Fiber } from "effect";
 import { describe, expect, it } from "vitest";
 
 import type { ThreadListQueryEnvelope } from "@artisan/protocol";
@@ -41,5 +41,48 @@ describe("client request coordinator", () => {
 			expect(result.second.cause.toString()).toContain("The transport send failed.");
 			expect(result.second.cause.toString()).not.toContain("request id is already active");
 		}
+	});
+
+	it("fails queued and later requests once the connection parks, and carries them again on resume", async () => {
+		const parked = client_error(
+			"connection",
+			"Forge is unreachable.",
+			new Error("reconnect budget spent"),
+			true,
+		);
+		const program = Effect.gen(function* () {
+			const sent: Array<string> = [];
+			const coordinator = yield* make_client_request_coordinator(4, (envelope) =>
+				Effect.sync(() => {
+					sent.push(envelope.message_id);
+				}),
+			);
+
+			/** A request with no session in place waits to be retried on reconnect. */
+			const queued = yield* Effect.forkScoped(coordinator.Request(request));
+			yield* Effect.yieldNow;
+			yield* coordinator.Park(parked);
+			const queued_exit = yield* Effect.exit(Fiber.join(queued));
+			const while_parked = yield* Effect.exit(
+				coordinator.Request({ ...request, message_id: "message_while_parked" }),
+			);
+
+			yield* coordinator.Resume;
+			yield* Effect.forkScoped(
+				coordinator.Request({ ...request, message_id: "message_after_resume" }),
+			);
+			yield* Effect.yieldNow;
+
+			return { queued_exit, sent, while_parked };
+		}).pipe(Effect.scoped);
+		const result = await Effect.runPromise(program);
+
+		expect(result.queued_exit._tag).toBe("Failure");
+		expect(result.while_parked._tag).toBe("Failure");
+		if (result.while_parked._tag === "Failure") {
+			expect(result.while_parked.cause.toString()).toContain("Forge is unreachable.");
+		}
+		/** A resumed coordinator accepts and sends again rather than staying poisoned. */
+		expect(result.sent).toContain("message_after_resume");
 	});
 });

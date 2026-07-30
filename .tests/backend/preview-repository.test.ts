@@ -11,11 +11,11 @@ import { EventEnvelope, EventPayload } from "@artisan/protocol";
 import {
 	ValidateLocalPreviewUrl,
 	ValidatePreviewRegistrationPort,
-} from "../../modules/backend/src/preview/preview-repository";
+} from "../../modules/backend/src/preview/repository";
 import {
 	PreviewRepository,
 	PreviewRepositoryLive,
-} from "../../modules/backend/src/preview/preview-repository";
+} from "../../modules/backend/src/preview/repository";
 import { Database, make_database_layer } from "../../modules/backend/src/persistence/database";
 import { JournalNotifierLive } from "../../modules/backend/src/persistence/journal-notifier";
 import {
@@ -30,8 +30,8 @@ import {
 	PreviewTargets,
 	ThreadErasureClaims,
 	Threads,
-} from "../../modules/backend/src/persistence/schema";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+} from "../../modules/backend/src/persistence/tables";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const directories: Array<string> = [];

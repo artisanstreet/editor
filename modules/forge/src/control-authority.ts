@@ -18,14 +18,11 @@ const SessionStore = Schema.Struct({
 	version: Schema.Literal(1),
 });
 
-const decode_session_store = Schema.decodeUnknownEffect(SessionStore);
-
 const hash_session = (session: string) => createHash("sha256").update(session).digest("hex");
 
 const LoadSessions = (path: string, now: number) =>
 	Effect.tryPromise(() => readFile(path, "utf8")).pipe(
-		Effect.flatMap((encoded) => Effect.try(() => JSON.parse(encoded) as unknown)),
-		Effect.flatMap((decoded) => decode_session_store(decoded)),
+		Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(SessionStore))),
 		Effect.map(
 			(store) =>
 				new Map(

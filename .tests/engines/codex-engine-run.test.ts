@@ -13,7 +13,7 @@ import {
 	make_codex_engine_layer,
 	type EngineObservation,
 } from "@artisan/engines";
-import { MakeCodexAppServerEventBuffer } from "../../modules/engines/src/codex/internal/codex-app-server-event-buffer";
+import { MakeCodexAppServerEventBuffer } from "../../modules/engines/src/codex/internal/app-server-event-buffer";
 
 const fixture_path = fileURLToPath(new URL("./fixtures/fake-app-server.ts", import.meta.url));
 const original_pid_file = process.env.FAKE_APP_SERVER_PID_FILE;
@@ -91,94 +91,23 @@ async function wait_for_process_exit(pid: number) {
 }
 
 describe("Codex engine run", () => {
-	it("exports a settled ephemeral fork and validates explicit native model continuation", async () => {
+	it("validates explicit native model continuation", async () => {
 		process.env.FAKE_APP_SERVER_SCENARIO = "continuation";
 
 		const result = await Effect.runPromise(
 			Effect.scoped(
 				Effect.gen(function* () {
 					const engine = yield* CodexEngine;
-					const compatibility = yield* engine.CheckNativeContinuation!({
+
+					return yield* engine.CheckNativeContinuation!({
 						resume_token: { native_thread_id: "thread-source" },
 						target_model: "gpt-5-mini",
 					});
-					const exported = yield* engine.ExportContinuation!({
-						artisan_run_id: "export-run",
-						output_schema: { type: "object" },
-						prompt: "Write the handoff.",
-						settled_native_turn_id: "turn-settled",
-						source_model: "gpt-5",
-						source_resume_token: { native_thread_id: "thread-source" },
-						working_directory: "C:\\workspace",
-					});
-
-					return { compatibility, exported };
 				}),
 			).pipe(Effect.provide(make_layer())),
 		);
 
-		expect(result.compatibility).toEqual({ state: "compatible" });
-		expect(result.exported).toMatchObject({
-			export_native_item_id: "export-message",
-			export_native_thread_id: "thread-export",
-			method: "codex_fork_summary",
-			source_native_turn_id: "turn-settled",
-		});
-	});
-
-	it.each([
-		"continuation-fork-rejected",
-		"continuation-failed",
-		"continuation-interrupted",
-		"continuation-missing-message",
-		"continuation-duplicate-message",
-		"continuation-commentary-message",
-		"continuation-timeout",
-		"continuation-server-request",
-		"continuation-tool",
-		"continuation-generic-tool-pre-response",
-	])("fails closed when continuation export is %s", async (scenario) => {
-		process.env.FAKE_APP_SERVER_SCENARIO = scenario;
-
-		await expect(
-			Effect.runPromise(
-				Effect.scoped(
-					Effect.gen(function* () {
-						const engine = yield* CodexEngine;
-
-						return yield* engine.ExportContinuation!({
-							artisan_run_id: "export-failure",
-							output_schema: { type: "object" },
-							prompt: "Write the handoff.",
-							settled_native_turn_id: "turn-settled",
-							source_resume_token: { native_thread_id: "thread-source" },
-							working_directory: "C:\\workspace",
-						});
-					}),
-				).pipe(Effect.provide(make_layer({ request_timeout_ms: 50 } as never))),
-			),
-		).rejects.toBeDefined();
-	});
-
-	it("replays export notifications received before turn/start responds", async () => {
-		process.env.FAKE_APP_SERVER_SCENARIO = "continuation-pre-response";
-		const output = await Effect.runPromise(
-			Effect.scoped(
-				Effect.gen(function* () {
-					const engine = yield* CodexEngine;
-
-					return yield* engine.ExportContinuation!({
-						artisan_run_id: "pre",
-						output_schema: {},
-						prompt: "handoff",
-						settled_native_turn_id: "turn-settled",
-						source_resume_token: { native_thread_id: "thread-source" },
-						working_directory: "C:\\workspace",
-					});
-				}),
-			).pipe(Effect.provide(make_layer())),
-		);
-		expect(output.message).toContain("handoff");
+		expect(result).toEqual({ state: "compatible" });
 	});
 
 	it("rejects a target model absent from the current Codex catalog", async () => {
@@ -248,25 +177,6 @@ describe("Codex engine run", () => {
 		},
 	);
 
-	it("ignores lifecycle notifications from another export thread", async () => {
-		process.env.FAKE_APP_SERVER_SCENARIO = "continuation-foreign-thread";
-		const output = await Effect.runPromise(
-			Effect.scoped(
-				Effect.gen(function* () {
-					const engine = yield* CodexEngine;
-					return yield* engine.ExportContinuation!({
-						artisan_run_id: "foreign-thread",
-						output_schema: {},
-						prompt: "handoff",
-						settled_native_turn_id: "turn-settled",
-						source_resume_token: { native_thread_id: "thread-source" },
-						working_directory: "C:\\workspace",
-					});
-				}),
-			).pipe(Effect.provide(make_layer())),
-		);
-		expect(output.message).toContain("handoff");
-	});
 	it("starts a real child, preserves ordered raw provenance, and produces one terminal", async () => {
 		process.env.FAKE_APP_SERVER_SCENARIO = "complete";
 

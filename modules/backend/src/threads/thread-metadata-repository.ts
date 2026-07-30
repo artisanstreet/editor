@@ -23,7 +23,7 @@ import {
 	ThreadErasureClaims,
 	Threads,
 	ThreadTombstones,
-} from "../persistence/schema";
+} from "../persistence/tables";
 import {
 	CommandIdConflict,
 	JournalInvariantError,
@@ -31,7 +31,7 @@ import {
 	type JournalStoreError,
 } from "../persistence/journal-store";
 import { JournalNotifier } from "../persistence/journal-notifier";
-import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import { RuntimeMetadata } from "../runtime/metadata";
 import { DecodeThreadProjection } from "./internal/thread-projection";
 
 type ThreadMetadataCommand = Extract<
@@ -209,10 +209,10 @@ const DecodeJson = <A>(
 	schema: Schema.ConstraintDecoder<A, never>,
 	context: string,
 ) =>
-	Effect.try({
-		catch: () => new JournalInvariantError({ message: `${context} JSON is malformed` }),
-		try: () => JSON.parse(value) as unknown,
-	}).pipe(
+	Schema.decodeUnknownEffect(Schema.UnknownFromJsonString)(value).pipe(
+		Effect.mapError(
+			() => new JournalInvariantError({ message: `${context} JSON is malformed` }),
+		),
 		Effect.flatMap(
 			Schema.decodeUnknownEffect(schema, {
 				onExcessProperty: "error",
@@ -609,6 +609,10 @@ export const ThreadMetadataRepositoryLive = Layer.effect(
 								thread_id: operation.thread_id,
 							})
 							.returning({ journal_sequence: JournalEvents.sequence });
+						if (event_row === undefined)
+							return yield* new JournalInvariantError({
+								message: `Metadata event ${event_id} returned no inserted row`,
+							});
 
 						return {
 							_tag: "Accepted" as const,
@@ -616,7 +620,7 @@ export const ThreadMetadataRepositoryLive = Layer.effect(
 								...(operation.agent_id ? { agent_id: operation.agent_id } : {}),
 								causation_id: operation.event_causation_id,
 								correlation_id: operation.message_id,
-								journal_sequence: event_row!.journal_sequence,
+								journal_sequence: event_row.journal_sequence,
 								kind: "event" as const,
 								message_id: event_id,
 								origin: "backend" as const,

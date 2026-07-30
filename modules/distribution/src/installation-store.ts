@@ -63,11 +63,9 @@ export const make_installation_store_layer = (installation_root: string) =>
 			const Inspect = () =>
 				file_system.readFileString(manifest_path).pipe(
 					Effect.flatMap((content) =>
-						Effect.try({
-							try: () => JSON.parse(content) as unknown,
-							catch: (cause) => cause,
-						}).pipe(
-							Effect.flatMap(Schema.decodeUnknownEffect(InstallationManifest)),
+						Schema.decodeUnknownEffect(Schema.fromJsonString(InstallationManifest))(
+							content,
+						).pipe(
 							Effect.match({
 								onFailure: (cause): InstallationState => ({
 									_tag: "Malformed",

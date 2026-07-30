@@ -1,29 +1,46 @@
-<script lang="ts">
+<script lang="ts" effect>
 	import type { ConversationItem } from "@artisan/protocol";
 	import ChevronRight from "@tabler/icons-svelte/icons/chevron-right";
+	import { Effect, Fiber, Queue } from "effect";
+	import { untrack } from "svelte";
 	import type { Snippet } from "svelte";
 	import { thinking_word_for } from "$lib/conversation/activity-status";
 	import { ShimmerText } from "$lib/components/ui/shimmer-text";
-	import { EngineMarkClass, EngineMarkFor } from "$lib/engine/presentation";
+	import ConversationStatus from "./conversation-status.sv";
 
 	let {
-		activity_label,
-		engine_id,
+		has_live_detail = false,
 		item,
 		details,
 		duration_kind,
+		transition,
 	}: {
-		activity_label?: string;
-		/** Names the engine whose mark spins while this session works. */
-		engine_id?: string;
+		/**
+		 * True while some detail item is visibly working — a running command or
+		 * streaming text. The latest live item is then the status, so the
+		 * session adds no line of its own; the thinking word covers only the
+		 * genuinely quiet stretches.
+		 */
+		has_live_detail?: boolean;
 		item: Extract<ConversationItem, { type: "work_session" }>;
 		details?: Snippet;
 		duration_kind?: "thought" | "worked";
+		/** The engine handoff that started this run, shown at the header's far end. */
+		transition?: Extract<ConversationItem, { type: "model_transition" }>;
 	} = $props();
 	/** Failed work opens by default: its explanation must not hide behind a click. */
-	let open = $state(item.status === "failed" || item.status === "cancelled");
-	let details_element = $state<HTMLDivElement>();
+	let open = $state(untrack(() => item.status === "failed" || item.status === "cancelled"));
+	let user_chose_disclosure = $state(false);
+	let previous_status = untrack(() => item.status);
 	let has_visible_details = $state(false);
+	let has_live_status_detail = $state(false);
+	/** The settled label's measured width — where the divider starts its growth. */
+	let label_width = $state(0);
+	type DetailObservation =
+		| { readonly _tag: "Observe"; readonly element: HTMLDivElement; readonly id: number }
+		| { readonly _tag: "Release"; readonly id: number };
+	const detail_observations = yield* Queue.unbounded<DetailObservation>();
+	let next_observation_id = 0;
 
 	const FormatDuration = (started_at: string, ended_at: string) => {
 		const total_seconds = Math.max(
@@ -43,14 +60,20 @@
 			.join(" ");
 	};
 
+	/**
+	 * Captured at mount on purpose: a session that was already settled when it
+	 * mounted is history and renders its header still. Only a session observed
+	 * working here earns the settle entrance when its header replaces the word.
+	 */
+	const mounted_working = untrack(() => item.ended_at === undefined);
+
 	const is_failed = $derived(item.status === "failed");
 	const is_cancelled = $derived(item.status === "cancelled");
-	const engine_mark = $derived(EngineMarkFor(engine_id));
 	/** One word for this session's whole life, chosen from its own identity. */
 	const thinking_word = $derived(thinking_word_for(item.id));
 	const label = $derived(
 		item.ended_at === undefined
-			? (activity_label ?? thinking_word)
+			? thinking_word
 			: is_failed
 				? `Failed after ${FormatDuration(item.started_at, item.ended_at)}`
 				: is_cancelled
@@ -60,22 +83,62 @@
 	const is_working = $derived(item.ended_at === undefined);
 	const can_collapse = $derived(!is_working && has_visible_details);
 
-	/** Snippets are opaque; observe their rendered trace rather than treating their presence as content. */
+	/**
+	 * A failure observed live opens once. After the user touches disclosure,
+	 * later projection refreshes must not fight their explicit choice.
+	 */
 	$effect(() => {
-		if (details_element === undefined) {
-			has_visible_details = false;
-			return;
-		}
-
-		const UpdateVisibleDetails = () => {
-			has_visible_details = details_element?.childElementCount > 0;
-		};
-		const observer = new MutationObserver(UpdateVisibleDetails);
-		observer.observe(details_element, { childList: true, subtree: true });
-		UpdateVisibleDetails();
-
-		return () => observer.disconnect();
+		const status = item.status;
+		const became_unsuccessful =
+			previous_status === "running" && (status === "failed" || status === "cancelled");
+		if (became_unsuccessful && !user_chose_disclosure) open = true;
+		previous_status = status;
 	});
+
+	const ObserveDetails = (element: HTMLDivElement) =>
+		Effect.acquireRelease(
+			Effect.sync(() => {
+				const update_visible_details = () => {
+					has_visible_details = element.childElementCount > 0;
+					has_live_status_detail =
+						element.querySelector('[data-live-work-detail="true"]') !== null;
+				};
+				const observer = new MutationObserver(update_visible_details);
+				observer.observe(element, { childList: true, subtree: true });
+				update_visible_details();
+				return observer;
+			}),
+			(observer) =>
+				Effect.sync(() => {
+					observer.disconnect();
+					has_visible_details = false;
+					has_live_status_detail = false;
+				}),
+		).pipe(Effect.andThen(Effect.never));
+
+	yield* Effect.gen(function* () {
+		const observations = new Map<number, Fiber.Fiber<never>>();
+		while (true) {
+			const command = yield* Queue.take(detail_observations);
+			if (command._tag === "Observe") {
+				const fiber = yield* ObserveDetails(command.element).pipe(Effect.forkScoped);
+				observations.set(command.id, fiber);
+				continue;
+			}
+			const fiber = observations.get(command.id);
+			if (fiber !== undefined) {
+				observations.delete(command.id);
+				yield* Fiber.interrupt(fiber);
+			}
+		}
+	}).pipe(Effect.forkScoped);
+
+	/** Snippets are opaque; observe their rendered trace rather than treating their presence as content. */
+	const observe_details = (element: HTMLDivElement) => {
+		const id = next_observation_id++;
+		Queue.offerUnsafe(detail_observations, { _tag: "Observe", element, id });
+		return () => Queue.offerUnsafe(detail_observations, { _tag: "Release", id });
+	};
 </script>
 
 <section
@@ -85,63 +148,135 @@
 	data-has-header={can_collapse ? "true" : undefined}
 	aria-label={`${label}: ${item.title}`}
 >
+	<!--
+		The handoff has no header to sit in while the session is working, so it
+		holds its own line until the settled header adopts it at the far end.
+	-->
+	{#if is_working && transition !== undefined}
+		<div class="pb-2">
+			<ConversationStatus item={transition} size="base" />
+		</div>
+	{/if}
+
 	{#if can_collapse}
-		<button
-			class="t-acc-head flex w-full cursor-pointer items-center gap-1 border-b border-border pb-2 text-left"
-			type="button"
-			aria-expanded={open}
-			onclick={() => (open = !open)}
+		<div
+			class={`t-settle-underline relative flex w-full items-center justify-between gap-3 pb-2 ${mounted_working ? "t-status-settle" : ""}`}
+			style:--settle-underline-from={`${label_width}px`}
 		>
-			<span class={is_failed ? "text-destructive" : ""}>{label}</span>
-			<ChevronRight
-				class={`size-4 transition-transform duration-250 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${open ? "rotate-90" : ""}`}
-				aria-hidden="true"
-			/>
-		</button>
-	{:else}
-		{#if is_working}
-			{@const EngineIcon = engine_mark.icon}
-			<div
-				class="flex w-fit items-center gap-2 py-0.5"
-				role="status"
-				aria-label={activity_label ?? "Artisan is working"}
+			<button
+				class="t-acc-head flex min-w-0 cursor-pointer items-center gap-1 text-left"
+				type="button"
+				aria-expanded={open}
+				onclick={() => {
+					user_chose_disclosure = true;
+					open = !open;
+				}}
 			>
-				<span class="engine-working-mark inline-flex shrink-0" aria-hidden="true">
-					<EngineIcon class={EngineMarkClass(engine_mark)} />
+				<span
+					class={`inline-block ${is_failed ? "text-destructive" : ""}`}
+					bind:clientWidth={label_width}
+				>
+					{label}
 				</span>
-				<ShimmerText class="text-base" aria-hidden="true">{label}</ShimmerText>
-			</div>
-		{:else}
-			<div class="flex w-full items-center gap-1 border-b border-border pb-2">
-				<span class={is_failed ? "text-destructive" : ""}>{label}</span>
-			</div>
-		{/if}
+				<ChevronRight
+					class={`size-4 transition-transform duration-250 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${open ? "rotate-90" : ""}`}
+					aria-hidden="true"
+				/>
+			</button>
+			{#if transition !== undefined}
+				<ConversationStatus item={transition} size="base" />
+			{/if}
+		</div>
+	{:else if !is_working}
+		<div
+			class={`t-settle-underline relative flex w-full items-center justify-between gap-3 pb-2 ${mounted_working ? "t-status-settle" : ""}`}
+			style:--settle-underline-from={`${label_width}px`}
+		>
+			<span
+				class={`inline-block ${is_failed ? "text-destructive" : ""}`}
+				bind:clientWidth={label_width}
+			>
+				{label}
+			</span>
+			{#if transition !== undefined}
+				<ConversationStatus item={transition} size="base" />
+			{/if}
+		</div>
 	{/if}
 
 	{#if details !== undefined}
 		<div class="t-acc-panel" hidden={!is_working && !has_visible_details}>
-			<div class="t-acc-panel-inner" bind:this={details_element}>
+			<div class="t-acc-panel-inner" use:observe_details>
 				{@render details()}
 			</div>
+		</div>
+	{/if}
+
+	<!--
+		The status line lives at the end of the flow, never pinned above it: it is
+		the latest thing happening, and it yields the moment a live detail — a
+		running command, streaming text — becomes the latest thing instead.
+	-->
+	{#if is_working && !has_live_detail && !has_live_status_detail}
+		<div
+			class={`t-status-enter flex w-fit items-center pb-0.5 ${has_visible_details ? "pt-5" : "pt-0.5"}`}
+			role="status"
+			aria-label="Artisan is working"
+		>
+			<ShimmerText class="text-base text-muted-foreground" aria-hidden="true">
+				{label}
+			</ShimmerText>
 		</div>
 	{/if}
 </section>
 
 <style>
 	/**
-	 * The provider mark spins while its engine works, so the running engine is
-	 * legible at a glance instead of a generic Artisan sprite.
+	 * The text-swap entrance in CSS alone: transition directives stall this
+	 * tree under the experimental async renderer, so entrances play as mount
+	 * animations and exits stay instant.
 	 */
-	.engine-working-mark {
-		animation: engine-working-spin 1400ms linear infinite;
+	.t-status-enter {
+		animation: status-swap-enter var(--text-swap-dur) var(--ease-in-out) both;
 	}
 
-	@keyframes engine-working-spin {
+	/** The settled header holds one swap beat, reading as the word's replacement. */
+	.t-status-settle {
+		animation: status-swap-enter var(--text-swap-dur) var(--ease-in-out) var(--text-swap-dur)
+			backwards;
+	}
+
+	@keyframes status-swap-enter {
 		from {
-			transform: rotate(0deg);
+			opacity: 0;
+			transform: translateY(var(--text-swap-translate-y));
+			filter: blur(var(--text-swap-blur));
 		}
-		to {
-			transform: rotate(360deg);
+	}
+
+	/**
+	 * The divider is a pseudo-element rather than a border so its extent can
+	 * animate. On settle it starts under the label's measured width and grows
+	 * to the edge once the header's own entrance has landed.
+	 */
+	.t-settle-underline::after {
+		content: "";
+		position: absolute;
+		bottom: 0;
+		left: 0;
+		height: 1px;
+		width: 100%;
+		background: var(--border);
+	}
+
+	.t-status-settle.t-settle-underline::after {
+		animation: settle-underline-grow var(--duration-fast) var(--ease-smooth-out)
+			calc(var(--text-swap-dur) * 2) both;
+	}
+
+	@keyframes settle-underline-grow {
+		from {
+			width: var(--settle-underline-from, 0px);
 		}
 	}
 
@@ -174,7 +309,9 @@
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.engine-working-mark {
+		.t-status-enter,
+		.t-status-settle,
+		.t-status-settle.t-settle-underline::after {
 			animation: none !important;
 		}
 

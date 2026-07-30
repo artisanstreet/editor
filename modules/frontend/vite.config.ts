@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { Schema } from "effect";
 
 import adapter from "@sveltejs/adapter-static";
 import tailwindcss from "@tailwindcss/vite";
@@ -25,6 +26,9 @@ const ForgeDevelopmentOrigin = process.env.ARTISAN_FORGE_DEV_ORIGIN ?? "http://1
 
 /** Fixed so `ae open --origin` can deliver the pairing fragment deterministically. */
 const FrontendDevelopmentPort = Number(process.env.ARTISAN_FRONTEND_DEV_PORT ?? "4849");
+const DevelopmentSecrets = Schema.Struct({
+	auth_token: Schema.optional(Schema.String),
+});
 
 /**
  * The development pairing secret. The dev runner passes it explicitly; when
@@ -36,15 +40,46 @@ const development_auth_token = (): string | undefined => {
 	const explicit = process.env.ARTISAN_DEV_AUTH_TOKEN;
 	if (explicit !== undefined && explicit.length >= 32) return explicit;
 	try {
-		const secrets = JSON.parse(
+		const secrets = Schema.decodeUnknownSync(Schema.fromJsonString(DevelopmentSecrets))(
 			readFileSync(WorkspaceSource("../../.dist/dev/forge-home/secrets.json"), "utf8"),
-		) as { readonly auth_token?: unknown };
-		return typeof secrets.auth_token === "string" && secrets.auth_token.length >= 32
+		);
+		return secrets.auth_token !== undefined && secrets.auth_token.length >= 32
 			? secrets.auth_token
 			: undefined;
 	} catch {
 		return undefined;
 	}
+};
+
+/**
+ * Replaces development-only surfaces with a stub in a production build.
+ *
+ * A `dev` guard changes what renders, not what ships: Svelte compiles both
+ * branches, so the page's markup and its scripted conversations would travel in
+ * the bundle regardless. Stubbing the modules themselves is what makes the
+ * exclusion real, and the emulator test asserts the result rather than trusting
+ * the guard.
+ */
+const development_only_surfaces = () => {
+	const stubbed = [
+		{
+			source: "export const emulator_scripts = [];",
+			suffix: "/lib/conversation/emulator-scripts.ts",
+		},
+		{
+			source: "<!-- development-only surface -->",
+			suffix: "/routes/debug/emulator/+page.sv",
+		},
+	];
+
+	return {
+		enforce: "pre" as const,
+		load(id: string) {
+			const normalized = id.split("?")[0]?.replaceAll("\\", "/") ?? "";
+			return stubbed.find((entry) => normalized.endsWith(entry.suffix))?.source;
+		},
+		name: "artisan-development-only-surfaces",
+	};
 };
 
 /**
@@ -161,6 +196,7 @@ export default defineConfig({
 		strictPort: true,
 	},
 	plugins: [
+		...(process.env.NODE_ENV === "production" ? [development_only_surfaces()] : []),
 		development_pairing(),
 		compose(
 			[

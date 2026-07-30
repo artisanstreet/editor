@@ -32,6 +32,11 @@
 	--banner-error: oklch(0.577 0.245 27.325);
 	--banner-warning: oklch(0.681 0.162 75.834);
 	--banner-success: oklch(0.527 0.154 150.069);
+	/**
+	 * A star reads as gold, not as a warning. It is deeper on light surfaces so
+	 * the fill keeps its weight against white.
+	 */
+	--favorite: oklch(0.706 0.153 78.5);
 	--border: oklch(0.92 0.004 286.32);
 	--input: oklch(0.92 0.004 286.32);
 	--ring: oklch(0.705 0.015 286.067);
@@ -87,6 +92,9 @@
 	--duration-medium: 350ms;
 	--ease-in-out: ease-in-out;
 	--ease-smooth-out: cubic-bezier(0.22, 1, 0.36, 1);
+	--text-swap-dur: 150ms;
+	--text-swap-translate-y: 4px;
+	--text-swap-blur: 2px;
 	--acc-expand: 250ms;
 	--acc-collapse: 250ms;
 	--acc-chevron: 250ms;
@@ -137,6 +145,7 @@
 	--banner-error: oklch(0.704 0.191 22.216);
 	--banner-warning: oklch(0.795 0.184 86.047);
 	--banner-success: oklch(0.723 0.219 149.579);
+	--favorite: oklch(0.823 0.158 82.5);
 	--border: oklch(1 0 0 / 10%);
 	--input: oklch(1 0 0 / 15%);
 	--ring: oklch(0.552 0.016 285.938);
@@ -159,6 +168,7 @@
 	--color-input: var(--input);
 	--color-border: var(--border);
 	--color-destructive: var(--destructive);
+	--color-favorite: var(--favorite);
 	--color-accent-foreground: var(--accent-foreground);
 	--color-accent: var(--accent);
 	--color-muted-foreground: var(--muted-foreground);
@@ -224,15 +234,38 @@
 	--radius-4xl: calc(var(--radius) * 2.6);
 }
 
+:root {
+	--shadow-inset:
+		inset 0px 1px 1px -0.5px rgba(0, 0, 0, 0.06), inset 0px 3px 3px -1.5px rgba(0, 0, 0, 0.06),
+		inset 0px 6px 6px -3px rgba(0, 0, 0, 0.06), inset 0 -0.5px rgba(255, 255, 255, 0.08),
+		inset 0 0 0 0.5px oklch(from var(--highlight) l c h / 8%);
+}
+
 @utility inset-shadow {
 	position: relative;
 	isolation: isolate;
-	box-shadow:
-		inset 0px 1px 1px -0.5px rgba(0, 0, 0, 0.06),
-		inset 0px 3px 3px -1.5px rgba(0, 0, 0, 0.06),
-		inset 0px 6px 6px -3px rgba(0, 0, 0, 0.06),
-		inset 0 -0.5px rgba(255, 255, 255, 0.08),
-		inset 0 0 0 0.5px oklch(from var(--highlight) l c h / 8%);
+	box-shadow: var(--shadow-inset);
+}
+
+/**
+ * The `inset-shadow` layers are tuned for dark chrome and vanish over bright
+ * artwork. Same shadow shape, artwork strength — for surfaces that carry their
+ * own image or gradient (the composer's send button, seeded avatars). The
+ * shadow lists also live in variables: a child layer always paints over its
+ * parent's inset shadow, so surfaces that stack layers inside the element
+ * (the send button's arming reveal) repaint them on an overlay above.
+ */
+:root {
+	--shadow-inset-artwork:
+		inset 0px 1px 1px -0.5px rgba(0, 0, 0, 0.3), inset 0px 3px 3px -1.5px rgba(0, 0, 0, 0.26),
+		inset 0px 6px 6px -3px rgba(0, 0, 0, 0.22), inset 0 -0.5px rgba(255, 255, 255, 0.5),
+		inset 0 0 0 0.5px oklch(from var(--highlight) l c h / 35%);
+}
+
+@utility inset-shadow-artwork {
+	position: relative;
+	isolation: isolate;
+	box-shadow: var(--shadow-inset-artwork);
 }
 
 @utility card {

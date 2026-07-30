@@ -12,13 +12,16 @@ export * from "./guidance";
 export * from "./host-identity";
 export * from "./git";
 export * from "./model-behaviour";
+export * from "./model-favorites";
 
 export * from "./marketplace";
 export * from "./orchestration-groups";
 export * from "./preview";
 export * from "./project";
 export * from "./runtime-catalog";
+export * from "./session-defaults";
 export * from "./project-directory";
+export * from "./repository";
 export * from "./snowflake-id";
 export * from "./stream";
 export * from "./surfaces";

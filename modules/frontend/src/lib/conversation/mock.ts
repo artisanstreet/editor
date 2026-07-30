@@ -108,7 +108,7 @@ const fixture_turns = [
 			CommandActivity(
 				'rg -n "transaction|publish|snapshot" modules/backend/src/conversation',
 			),
-			CommandActivity("Get-Content -Raw modules/backend/src/conversation/projection.ts"),
+			CommandActivity("Get-Content -Raw modules/backend/src/conversation/projection-api.ts"),
 			CommandActivity("Get-Content -Raw modules/backend/src/conversation/repository.ts"),
 			CommandActivity("pnpm exec vitest run .tests/backend/conversation-projection.test.ts"),
 			CommandActivity("pnpm exec vitest run .tests/transport/artisan-client.test.ts"),

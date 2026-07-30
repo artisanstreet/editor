@@ -14,7 +14,7 @@ import {
 	GitCommandExecutor,
 	make_git_command_executor_layer,
 	make_node_git_command_executor_layer,
-} from "../../modules/backend/src/git/git-command-executor";
+} from "../../modules/backend/src/git/executor";
 
 const roots: Array<string> = [];
 

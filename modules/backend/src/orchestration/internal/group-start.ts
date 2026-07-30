@@ -12,7 +12,7 @@ import {
 	OrchestrationGroups,
 	OrchestrationJoins,
 	Threads,
-} from "../../persistence/schema";
+} from "../../persistence/tables";
 import {
 	AgentGraphInvalid,
 	AgentGraphNotFound,
@@ -139,7 +139,12 @@ export function make_group_start(
 							: waiting_for_dependency
 								? "blocked"
 								: "queued";
-						const agent_id = allocated.assignment_agents.get(assignment.assignment_id)!;
+						const agent_id = allocated.assignment_agents.get(assignment.assignment_id);
+						const role = allocated.assignment_roles.get(assignment.assignment_id);
+						if (agent_id === undefined || role === undefined)
+							return yield* new AgentGraphInvalid({
+								message: `Assignment ${assignment.assignment_id} has no allocated agent identity`,
+							});
 
 						yield* transaction.insert(Assignments).values({
 							active_run_id: run_id,
@@ -156,7 +161,7 @@ export function make_group_start(
 							parent_node_id: assignment.parent_node_id,
 							permission_policy_json: JSON.stringify(assignment.permission_policy),
 							profile: assignment.profile,
-							role: allocated.assignment_roles.get(assignment.assignment_id)!,
+							role,
 							scope_json: JSON.stringify(assignment.scope),
 							state: initial_state,
 							summary_contract: assignment.summary_contract,
@@ -274,6 +279,11 @@ export function make_group_start(
 					];
 
 					for (const assignment of payload.assignments) {
+						const agent_id = allocated.assignment_agents.get(assignment.assignment_id);
+						if (agent_id === undefined)
+							return yield* new AgentGraphInvalid({
+								message: `Assignment ${assignment.assignment_id} has no allocated agent identity`,
+							});
 						const waiting_for_join = join_blocked_assignment_ids.has(
 							assignment.assignment_id,
 						);
@@ -293,9 +303,7 @@ export function make_group_start(
 
 						events.push(
 							yield* ledger.append_event(transaction, {
-								agent_id: allocated.assignment_agents.get(
-									assignment.assignment_id,
-								)!,
+								agent_id,
 								causation_id: command.message_id,
 								correlation_id: command.message_id,
 								group_id: payload.group_id,
@@ -313,7 +321,12 @@ export function make_group_start(
 						);
 					}
 
-					const journal_sequence = events.at(-1)!.journal_sequence;
+					const latest_event = events.at(-1);
+					if (latest_event === undefined)
+						return yield* new AgentGraphInvalid({
+							message: `Group ${payload.group_id} produced no lifecycle events`,
+						});
+					const journal_sequence = latest_event.journal_sequence;
 
 					yield* transaction.insert(OrchestrationGraphCommands).values({
 						action: payload.type,

@@ -5,7 +5,7 @@ import {
 	ParseGitNumstat,
 	ParseGitStatus,
 	ParseGitWorktrees,
-} from "../../modules/backend/src/git/git-parsers";
+} from "../../modules/backend/src/git/parsers";
 
 const encoder = new TextEncoder();
 const oid = "1".repeat(40);

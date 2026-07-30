@@ -54,6 +54,23 @@ describe("session policy run metadata", () => {
 		expect(supervised.model).toBe("claude-opus-5");
 	});
 
+	it("carries harness options the coarse axes cannot express", () => {
+		const trusted = MakeSessionPolicyRunMetadata(
+			policy_for({ engine_id: "claude", model: "claude-opus-5", permission: "trusted" }),
+		);
+		const unrestricted = MakeSessionPolicyRunMetadata(
+			policy_for({
+				engine_id: "claude",
+				model: "claude-opus-5",
+				permission: "unrestricted",
+				permission_mode: "never",
+			}),
+		);
+
+		expect(trusted.provider_options?.["claude.permission_mode"]).toBe("acceptEdits");
+		expect(unrestricted.provider_options?.["claude.permission_mode"]).toBe("bypassPermissions");
+	});
+
 	it("lets assignment permissions narrow but never widen a Claude policy", () => {
 		const narrowed = MakeSessionPolicyRunMetadata(
 			policy_for({ engine_id: "claude", model: "claude-opus-5" }),

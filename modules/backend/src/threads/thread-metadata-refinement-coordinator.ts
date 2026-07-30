@@ -295,7 +295,9 @@ export const ThreadMetadataRefinementCoordinatorLive = Layer.effect(
 			yield* worker.WaitForIdle;
 			yield* Effect.forEach(submitted_triggers, VerifyRefined);
 
-			const journal_sequence = events.at(-1)!.journal_sequence;
+			const latest_event = events.at(-1);
+			if (latest_event === undefined) return 0;
+			const journal_sequence = latest_event.journal_sequence;
 
 			yield* Ref.set(state, { contexts, journal_sequence });
 

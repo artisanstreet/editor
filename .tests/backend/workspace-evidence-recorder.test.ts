@@ -22,7 +22,7 @@ import {
 	JournalStore,
 	JournalStoreLive,
 } from "../../modules/backend/src/persistence/journal-store";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const evidence_idempotency_migration = "20260713083812_workspace-evidence-idempotency";

@@ -4,7 +4,7 @@ import {
 	normalize_claude_event,
 	read_claude_stream_message_id,
 	type ClaudeNormalizationInput,
-} from "../../modules/engines/src/claude/claude-normalizer";
+} from "../../modules/engines/src/claude/normalizer";
 import {
 	claude_assistant_text_frame,
 	claude_content_block_start_frame,
@@ -62,6 +62,7 @@ describe("claude stream-json normalization", () => {
 
 		expect(observation).toMatchObject({
 			_tag: "compaction",
+			compaction_id: "boundary-1",
 			raw: {
 				native_id: "boundary-1",
 				native_method: "system.compact_boundary",

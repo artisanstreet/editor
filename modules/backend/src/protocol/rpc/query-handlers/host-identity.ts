@@ -7,7 +7,7 @@ import type {
 } from "@artisan/protocol";
 
 import { HostIdentityService } from "../../../runtime/host-identity";
-import { RuntimeMetadata } from "../../../runtime/runtime-metadata";
+import { RuntimeMetadata } from "../../../runtime/metadata";
 
 export const MakeHostIdentityQueryHandler = Effect.gen(function* () {
 	const host_identity = yield* HostIdentityService;

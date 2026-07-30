@@ -12,9 +12,9 @@ import {
 } from "@artisan/protocol";
 
 import { Database, type DatabaseClient } from "./database";
-import { EventStreams, JournalCommands, JournalEvents, Projects, Threads } from "./schema";
+import { EventStreams, JournalCommands, JournalEvents, Projects, Threads } from "./tables";
 import { JournalNotifier } from "./journal-notifier";
-import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import { RuntimeMetadata } from "../runtime/metadata";
 import { ApplyJournalEvent } from "../conversation/index.ts";
 import { RecordThreadActivity } from "../threads/internal/thread-activity";
 import { is_settings_scope_id } from "../settings/internal-scope";
@@ -115,12 +115,16 @@ export const AppendJournalEventInTransaction = (
 				thread_id: input.thread_id,
 			})
 			.returning({ journal_sequence: JournalEvents.sequence });
+		if (inserted === undefined)
+			return yield* new JournalInvariantError({
+				message: `Journal append for event ${event_id} returned no inserted row`,
+			});
 
 		const event = {
 			...(input.agent_id ? { agent_id: input.agent_id } : {}),
 			causation_id: input.causation_id,
 			correlation_id: input.correlation_id,
-			journal_sequence: inserted!.journal_sequence,
+			journal_sequence: inserted.journal_sequence,
 			kind: "event" as const,
 			message_id: event_id,
 			origin: "backend" as const,
@@ -267,13 +271,14 @@ const DecodeReplayCursor = (value: unknown) =>
 	);
 
 const ParsePersistedJson = (json: string, context: string) =>
-	Effect.try({
-		try: () => JSON.parse(json) as unknown,
-		catch: () =>
-			new JournalInvariantError({
-				message: `${context} contains invalid JSON`,
-			}),
-	});
+	Schema.decodeUnknownEffect(Schema.UnknownFromJsonString)(json).pipe(
+		Effect.mapError(
+			() =>
+				new JournalInvariantError({
+					message: `${context} contains invalid JSON`,
+				}),
+		),
+	);
 
 const ReconstructEventEnvelope = (event: {
 	readonly agent_id: string | null;
@@ -839,11 +844,15 @@ export const JournalStoreLive = Layer.effect(
 									thread_id: command.thread_id,
 								})
 								.returning({ sequence: JournalEvents.sequence });
+							if (inserted_event === undefined)
+								return yield* new JournalInvariantError({
+									message: `Thread creation event ${event_id} returned no inserted row`,
+								});
 
 							return {
 								...(command.agent_id ? { agent_id: command.agent_id } : {}),
 								event_id,
-								journal_sequence: inserted_event!.sequence,
+								journal_sequence: inserted_event.sequence,
 								occurred_at,
 								payload: event_payload,
 								...(command.raw_origin ? { raw_origin: command.raw_origin } : {}),

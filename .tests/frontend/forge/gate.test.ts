@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 
-import { ArtisanClientError } from "../../../modules/transport/src/client-contract";
+import { ArtisanClientError } from "../../../modules/transport/src/client";
 import {
 	BeginForgeHydration,
 	CompleteForgeHydration,
+	DismissForgeGate,
 	FailForgeHydration,
+	ForgeShellIsBlocked,
+	ForgeShellIsMounted,
 	InitialForgeGateModel,
 	ObserveForgeConnection,
 	PresentForgeGate,
@@ -73,10 +76,66 @@ describe("ForgeGate", () => {
 
 		expect(PresentForgeGate(failed)).toEqual({
 			description: "Catalog unavailable",
+			dismissible: true,
 			retry: "hydration",
 			show_start: false,
 			title: "Could not load your workspace",
 			tone: "error",
 		});
+	});
+
+	it("offers dismissal only once a failure has settled", () => {
+		const connecting = InitialForgeGateModel;
+		const hydrating = BeginForgeHydration(connecting);
+		const exhausted = ObserveForgeConnection(connecting, {
+			attempts: 5,
+			error: ConnectionError,
+			phase: "exhausted",
+		});
+
+		expect(PresentForgeGate(connecting).dismissible).toBe(false);
+		expect(PresentForgeGate(hydrating).dismissible).toBe(false);
+		expect(PresentForgeGate(exhausted).dismissible).toBe(true);
+		expect(DismissForgeGate(connecting)).toBe(connecting);
+		expect(DismissForgeGate(hydrating)).toBe(hydrating);
+		expect(DismissForgeGate(exhausted).dismissed).toBe(true);
+	});
+
+	it("hands the disconnected shell over when the gate is dismissed", () => {
+		const exhausted = ObserveForgeConnection(InitialForgeGateModel, {
+			attempts: 5,
+			error: ConnectionError,
+			phase: "exhausted",
+		});
+		const dismissed = DismissForgeGate(exhausted);
+
+		expect(ForgeShellIsMounted(exhausted)).toBe(false);
+		expect(ForgeShellIsBlocked(exhausted)).toBe(true);
+		expect(ForgeShellIsMounted(dismissed)).toBe(true);
+		expect(ForgeShellIsBlocked(dismissed)).toBe(false);
+	});
+
+	it("re-arms the gate for the next outage once a hydration succeeds", () => {
+		const dismissed = DismissForgeGate(
+			ObserveForgeConnection(InitialForgeGateModel, {
+				attempts: 5,
+				error: ConnectionError,
+				phase: "exhausted",
+			}),
+		);
+		const hydrating = ObserveForgeConnection(dismissed, { phase: "ready" });
+		const ready = CompleteForgeHydration(hydrating, hydrating.hydration_generation);
+		const offline_again = ObserveForgeConnection(ready, {
+			attempts: 5,
+			error: ConnectionError,
+			phase: "exhausted",
+		});
+
+		/** The dismissal outlives the reconnect so the shell never flashes back to the gate. */
+		expect(hydrating.dismissed).toBe(true);
+		expect(ForgeShellIsBlocked(hydrating)).toBe(false);
+		expect(ready.dismissed).toBe(false);
+		expect(offline_again.dismissed).toBe(false);
+		expect(ForgeShellIsBlocked(offline_again)).toBe(true);
 	});
 });

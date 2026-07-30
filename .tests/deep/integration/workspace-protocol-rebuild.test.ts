@@ -26,8 +26,8 @@ import {
 import { make_fake_engine } from "../../engines/harness/fake-engine";
 
 import { Database } from "../../../modules/backend/src/persistence/database";
-import { OrchestrationRuns } from "../../../modules/backend/src/persistence/schema";
-import { RuntimeMetadata } from "../../../modules/backend/src/runtime/runtime-metadata";
+import { OrchestrationRuns } from "../../../modules/backend/src/persistence/tables";
+import { RuntimeMetadata } from "../../../modules/backend/src/runtime/metadata";
 import { MakeNodeTestWorkspaceBoundedRegularFileStoreRegistryLayer } from "../../backend/bounded-regular-file-store-harness";
 import { make_transport_test_harness_with_protocol_server } from "../../transport/message-channel-harness";
 
@@ -369,11 +369,26 @@ describe("deep public-protocol workspace integration", () => {
 		expect(first_engine_cleanup_count.value).toBe(1);
 
 		const second_engine_cleanup_count = { value: 0 };
+		const second_engine_open_inputs: Array<EngineOpenInput> = [];
+		const second_fake_engine = make_fake_engine({
+			engine_id: "fake_engine",
+			on_cleanup: () => {
+				second_engine_cleanup_count.value += 1;
+			},
+		});
+		const recovering_engine = {
+			...second_fake_engine,
+			Open: (input: EngineOpenInput) =>
+				Effect.sync(() => second_engine_open_inputs.push(input)).pipe(
+					Effect.andThen(second_fake_engine.Open(input)),
+				),
+		} satisfies Engine;
 		const second_runtime = MakeRuntime(
 			database_path,
 			root,
 			"deep_second",
 			second_engine_cleanup_count,
+			recovering_engine,
 		);
 
 		try {
@@ -412,7 +427,18 @@ describe("deep public-protocol workspace integration", () => {
 			await second_runtime.dispose();
 		}
 
-		expect(second_engine_cleanup_count.value).toBe(0);
+		expect(second_engine_open_inputs).toMatchObject([
+			{
+				_tag: "resume",
+				resume_token: { native_thread_id: expect.any(String) },
+				working_directory: root.replaceAll("\\", "/"),
+			},
+		]);
+		/**
+		 * Restart recovery owns a newly opened scoped Engine run. Runtime disposal
+		 * must therefore release it exactly once, just like the original run.
+		 */
+		expect(second_engine_cleanup_count.value).toBe(1);
 		await rm(directory, { force: true, recursive: true });
 		temporary_directories.splice(temporary_directories.indexOf(directory), 1);
 		await expect(access(directory)).rejects.toThrow();

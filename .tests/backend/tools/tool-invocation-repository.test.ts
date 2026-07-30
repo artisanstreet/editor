@@ -10,8 +10,8 @@ import { afterEach, describe, expect, it } from "vitest";
 
 import { make_database_layer, Database } from "../../../modules/backend/src/persistence/database";
 import { JournalNotifierLive } from "../../../modules/backend/src/persistence/journal-notifier";
-import { JournalEvents, Threads } from "../../../modules/backend/src/persistence/schema";
-import { RuntimeMetadata } from "../../../modules/backend/src/runtime/runtime-metadata";
+import { JournalEvents, Threads } from "../../../modules/backend/src/persistence/tables";
+import { RuntimeMetadata } from "../../../modules/backend/src/runtime/metadata";
 import {
 	ToolInvocationConflict,
 	ToolInvocationRepository,

@@ -1,5 +1,5 @@
 import { NodeCrypto, NodeFileSystem, NodePath } from "@effect/platform-node-shared";
-import { Context, Data, Effect, FileSystem, Layer, Schema } from "effect";
+import { Context, Crypto, Data, Effect, FileSystem, Layer, Path, Ref, Schema } from "effect";
 
 import { Identifier } from "@artisan/protocol";
 
@@ -66,6 +66,27 @@ export class WorkspaceFilesystemRegistry extends Context.Service<
 			WorkspaceFilesystemNotFoundError
 		>;
 		readonly ListWorkspaceIds: Effect.Effect<ReadonlyArray<string>>;
+		/**
+		 * Adds one workspace root after construction. Projects are attached while
+		 * Forge runs, so the set of workspaces cannot be known when this layer is
+		 * built. Re-registering the same workspace at the same canonical root is a
+		 * no-op, which is what lets a startup replay run over an already-bound
+		 * catalog without failing.
+		 */
+		readonly Register: (
+			registration: unknown,
+		) => Effect.Effect<{ readonly workspace_id: string }, WorkspaceFilesystemRegistrationError>;
+		/**
+		 * Replaces the complete registry from an authoritative snapshot. Entries
+		 * that cannot be prepared are omitted, which also revokes any older
+		 * capability held under the same workspace id.
+		 */
+		readonly Reconcile: (
+			registrations: ReadonlyArray<unknown>,
+		) => Effect.Effect<
+			ReadonlyArray<WorkspaceFilesystemRegistration>,
+			WorkspaceFilesystemRegistrationError
+		>;
 	}
 >()("Artisan/WorkspaceFilesystemRegistry") {}
 
@@ -81,101 +102,212 @@ function authorization_error(workspace_id: string) {
 	return new WorkspaceFilesystemAuthorizationError({ workspace_id });
 }
 
-function BuildWorkspaceFilesystemRegistry(registrations: ReadonlyArray<unknown>) {
+interface RegisteredWorkspace {
+	readonly canonical_root: string;
+	readonly filesystem: WorkspaceFilesystem;
+}
+
+/**
+ * Validates one root and produces its confined capability. Every rule the
+ * eager builder enforced lives here so a runtime registration is held to the
+ * same standard as a composed one: the shape decodes, the root exists, and it
+ * is a directory.
+ */
+function PrepareWorkspaceRegistration(registration: unknown) {
 	return Effect.gen(function* () {
-		const decoded = yield* Effect.forEach(registrations, (registration) =>
-			Schema.decodeUnknownEffect(WorkspaceFilesystemRegistration, {
-				onExcessProperty: "error",
-			})(registration).pipe(
-				Effect.mapError((cause) =>
-					registration_error("Workspace filesystem registration is invalid", cause),
+		const decoded = yield* Schema.decodeUnknownEffect(WorkspaceFilesystemRegistration, {
+			onExcessProperty: "error",
+		})(registration).pipe(
+			Effect.mapError((cause) =>
+				registration_error("Workspace filesystem registration is invalid", cause),
+			),
+		);
+
+		const filesystem = yield* make_node_filesystem({
+			root: decoded.root,
+			...(decoded.watch_capacity === undefined
+				? {}
+				: { watch_capacity: decoded.watch_capacity }),
+		}).pipe(
+			Effect.mapError((cause) =>
+				registration_error(
+					"Workspace filesystem root could not be registered",
+					cause,
+					decoded.workspace_id,
 				),
 			),
 		);
-		const workspace_ids = decoded.map((registration) => registration.workspace_id);
 
-		if (new Set(workspace_ids).size !== workspace_ids.length) {
+		const entry = yield* filesystem
+			.Stat(".")
+			.pipe(
+				Effect.mapError((cause) =>
+					registration_error(
+						"Workspace filesystem root could not be registered",
+						cause,
+						decoded.workspace_id,
+					),
+				),
+			);
+
+		if (entry.kind !== "directory") {
 			return yield* Effect.fail(
-				registration_error("Workspace filesystem registration IDs must be unique"),
+				registration_error(
+					"Workspace filesystem root must be a directory",
+					undefined,
+					decoded.workspace_id,
+				),
 			);
 		}
 
-		const filesystems = yield* Effect.forEach(decoded, (registration) =>
-			make_node_filesystem({
-				root: registration.root,
-				...(registration.watch_capacity === undefined
-					? {}
-					: { watch_capacity: registration.watch_capacity }),
-			}).pipe(
-				Effect.flatMap((filesystem) =>
-					filesystem
-						.Stat(".")
-						.pipe(
-							Effect.flatMap((entry) =>
-								entry.kind === "directory"
-									? Effect.succeed(filesystem)
-									: Effect.fail(
-											registration_error(
-												"Workspace filesystem root must be a directory",
-												undefined,
-												registration.workspace_id,
-											),
-										),
-							),
-						),
-				),
-				Effect.mapError((cause) =>
-					cause instanceof WorkspaceFilesystemRegistrationError
-						? cause
-						: registration_error(
-								"Workspace filesystem root could not be registered",
-								cause,
-								registration.workspace_id,
-							),
-				),
-				Effect.map((filesystem) => ({
-					filesystem,
-					workspace_id: registration.workspace_id,
-				})),
-			),
-		);
-		const roots = yield* Effect.forEach(filesystems, ({ filesystem, workspace_id }) =>
-			filesystem.Resolve(".").pipe(
-				Effect.map((root) => ({ root, workspace_id })),
+		const canonical_root = yield* filesystem
+			.Resolve(".")
+			.pipe(
 				Effect.mapError((cause) =>
 					registration_error(
 						"Workspace filesystem root could not be canonicalized",
 						cause,
-						workspace_id,
+						decoded.workspace_id,
 					),
 				),
-			),
-		);
-
-		if (new Set(roots.map((entry) => entry.root)).size !== roots.length) {
-			return yield* Effect.fail(
-				registration_error("Workspace filesystem roots must be canonically unique"),
 			);
-		}
 
-		const canonical_roots = new Map(
-			roots.map(({ root, workspace_id }) => [workspace_id, root]),
-		);
-		const by_workspace_id = new Map(
-			filesystems.map(({ filesystem, workspace_id }) => {
-				const { Resolve: _, ...workspace_filesystem } = filesystem;
+		const { Resolve: _resolve, ...workspace_filesystem } = filesystem;
 
-				return [workspace_id, workspace_filesystem] as const;
-			}),
-		);
-		const ListWorkspaceIds = Effect.succeed([...by_workspace_id.keys()].toSorted());
-		const Get = (workspace_id: string) => {
-			const filesystem = by_workspace_id.get(workspace_id);
-
-			return filesystem === undefined
-				? Effect.fail(new WorkspaceFilesystemNotFoundError({ workspace_id }))
-				: Effect.succeed({ filesystem, workspace_id });
+		return {
+			canonical_root,
+			filesystem: workspace_filesystem,
+			workspace_id: decoded.workspace_id,
 		};
+	});
+}
+
+function BuildWorkspaceFilesystemRegistry(registrations: ReadonlyArray<unknown>) {
+	return Effect.gen(function* () {
+		const state = yield* Ref.make<ReadonlyMap<string, RegisteredWorkspace>>(new Map());
+		/**
+		 * The layer supplies the platform capabilities once; capturing them here
+		 * keeps `Register` callable from services that hold no platform context of
+		 * their own, such as the project binding.
+		 */
+		const platform = yield* Effect.context<Crypto.Crypto | FileSystem.FileSystem | Path.Path>();
+
+		/**
+		 * Two workspaces may not share a canonical root: the pair would be
+		 * indistinguishable to `Authorize`, which proves authority by comparing a
+		 * working directory against exactly one root.
+		 */
+		const Register = (registration: unknown) =>
+			Effect.gen(function* () {
+				const prepared = yield* PrepareWorkspaceRegistration(registration);
+				const current = yield* Ref.get(state);
+				const existing = current.get(prepared.workspace_id);
+
+				if (existing !== undefined && existing.canonical_root === prepared.canonical_root)
+					return { workspace_id: prepared.workspace_id };
+
+				if (existing !== undefined) {
+					return yield* Effect.fail(
+						registration_error(
+							"Workspace filesystem is already registered at a different root",
+							undefined,
+							prepared.workspace_id,
+						),
+					);
+				}
+
+				const aliased = [...current.values()].some(
+					(entry) => entry.canonical_root === prepared.canonical_root,
+				);
+
+				if (aliased) {
+					return yield* Effect.fail(
+						registration_error(
+							"Workspace filesystem roots must be canonically unique",
+							undefined,
+							prepared.workspace_id,
+						),
+					);
+				}
+
+				yield* Ref.update(state, (latest) =>
+					new Map(latest).set(prepared.workspace_id, {
+						canonical_root: prepared.canonical_root,
+						filesystem: prepared.filesystem,
+					}),
+				);
+
+				return { workspace_id: prepared.workspace_id };
+			}).pipe(Effect.provide(platform));
+
+		yield* Effect.forEach(registrations, Register, { discard: true });
+
+		const Reconcile = (next_registrations: ReadonlyArray<unknown>) =>
+			Effect.gen(function* () {
+				const attempts = yield* Effect.forEach(
+					next_registrations,
+					(registration) =>
+						PrepareWorkspaceRegistration(registration).pipe(Effect.result),
+					{ concurrency: 1 },
+				);
+				const prepared = attempts.flatMap((attempt) =>
+					attempt._tag === "Success" ? [attempt.success] : [],
+				);
+				yield* Effect.forEach(
+					attempts,
+					(attempt) =>
+						attempt._tag === "Failure"
+							? Effect.logWarning("Project workspace could not be bound", {
+									cause: attempt.failure,
+									project_id: attempt.failure.workspace_id,
+								})
+							: Effect.void,
+					{ discard: true },
+				);
+				const next = new Map<string, RegisteredWorkspace>();
+				const accepted: Array<WorkspaceFilesystemRegistration> = [];
+
+				for (const workspace of prepared) {
+					const aliased = [...next.values()].some(
+						(entry) => entry.canonical_root === workspace.canonical_root,
+					);
+					if (next.has(workspace.workspace_id) || aliased) {
+						yield* Effect.logWarning(
+							"Duplicate project workspace authority was omitted from the snapshot",
+							{ workspace_id: workspace.workspace_id },
+						);
+						continue;
+					}
+					next.set(workspace.workspace_id, {
+						canonical_root: workspace.canonical_root,
+						filesystem: workspace.filesystem,
+					});
+					accepted.push({
+						root: workspace.canonical_root,
+						workspace_id: workspace.workspace_id,
+					});
+				}
+
+				yield* Ref.set(state, next);
+
+				return accepted;
+			}).pipe(Effect.provide(platform));
+
+		const ListWorkspaceIds = Ref.get(state).pipe(
+			Effect.map((current) => [...current.keys()].toSorted()),
+		);
+
+		const Get = (workspace_id: string) =>
+			Ref.get(state).pipe(
+				Effect.flatMap((current) => {
+					const registered = current.get(workspace_id);
+
+					return registered === undefined
+						? Effect.fail(new WorkspaceFilesystemNotFoundError({ workspace_id }))
+						: Effect.succeed({ filesystem: registered.filesystem, workspace_id });
+				}),
+			);
+
 		const file_system = yield* FileSystem.FileSystem;
 		const Authorize = (input: WorkspaceFilesystemAuthorization) =>
 			Schema.decodeUnknownEffect(WorkspaceFilesystemAuthorization, {
@@ -184,8 +316,13 @@ function BuildWorkspaceFilesystemRegistry(registrations: ReadonlyArray<unknown>)
 				Effect.mapError(() => authorization_error(input.workspace_id)),
 				Effect.flatMap((authorization) =>
 					Effect.gen(function* () {
-						const authorized = yield* Get(authorization.workspace_id);
-						const canonical_root = canonical_roots.get(authorization.workspace_id)!;
+						const current = yield* Ref.get(state);
+						const registered = current.get(authorization.workspace_id);
+						if (registered === undefined) {
+							return yield* Effect.fail(
+								authorization_error(authorization.workspace_id),
+							);
+						}
 						const working_directory = yield* file_system
 							.realPath(authorization.working_directory)
 							.pipe(
@@ -201,22 +338,28 @@ function BuildWorkspaceFilesystemRegistry(registrations: ReadonlyArray<unknown>)
 								),
 							);
 
-						if (entry.type !== "Directory" || working_directory !== canonical_root) {
+						if (
+							entry.type !== "Directory" ||
+							working_directory !== registered.canonical_root
+						) {
 							return yield* Effect.fail(
 								authorization_error(authorization.workspace_id),
 							);
 						}
 
-						return authorized;
+						return {
+							filesystem: registered.filesystem,
+							workspace_id: authorization.workspace_id,
+						};
 					}),
 				),
 			);
 
-		return { Authorize, Get, ListWorkspaceIds };
+		return { Authorize, Get, ListWorkspaceIds, Reconcile, Register };
 	});
 }
 
-/** Builds immutable backend-owned workspace filesystem capabilities from registered roots. */
+/** Builds backend-owned workspace filesystem capabilities, seeded and extended at runtime. */
 export function make_node_workspace_filesystem_registry_layer(
 	registrations: ReadonlyArray<unknown>,
 ) {

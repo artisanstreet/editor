@@ -16,7 +16,7 @@ import {
 	JournalEvents,
 	OrchestrationGroups,
 	ThreadErasureClaims,
-} from "../../persistence/schema";
+} from "../../persistence/tables";
 import {
 	AgentGraphNotFound,
 	normalize_graph_error,

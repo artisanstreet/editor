@@ -74,5 +74,8 @@ export const SelectReleaseArtifact = ({
 	const candidates = release.artifacts.filter((artifact) => matches_target(artifact, target));
 	if (candidates.length === 0) return Result.fail({ _tag: "UnsupportedTarget", target });
 	if (candidates.length > 1) return Result.fail({ _tag: "AmbiguousTarget", target });
-	return Result.succeed(candidates[0]!);
+	const [candidate] = candidates;
+	return candidate === undefined
+		? Result.fail({ _tag: "UnsupportedTarget", target })
+		: Result.succeed(candidate);
 };

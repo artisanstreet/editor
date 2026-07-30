@@ -1,4 +1,5 @@
-<script lang="ts">
+<script lang="ts" effect>
+	import { Effect, Fiber, Queue } from "effect";
 	import MarkdownContent from "$lib/components/markdown/content.sv";
 	import { ShimmerText } from "$lib/components/ui/shimmer-text";
 	import { user_message_style_config } from "$lib/conversation-style-config";
@@ -32,6 +33,11 @@
 	let image_viewer_open = $state(false);
 	let viewed_image = $state<ResolvedImageAttachment | undefined>();
 	let image_group_visible = $state(false);
+	type VisibilityCommand =
+		| { readonly _tag: "Observe"; readonly id: number; readonly node: HTMLElement }
+		| { readonly _tag: "Release"; readonly id: number };
+	const visibility_commands = yield* Queue.unbounded<VisibilityCommand>();
+	let next_visibility_id = 0;
 	const resolved_images = $derived.by((): ReadonlyArray<ResolvedImageAttachment> => {
 		if (item.type !== "user_message") return [];
 		return (item.attachments ?? []).flatMap((attachment) => {
@@ -45,50 +51,76 @@
 		image_viewer_open = true;
 	};
 
-	const observe_image_visibility = (node: HTMLElement) => {
-		if (item.type !== "user_message" || item.attachments === undefined) return;
-		const attachments = item.attachments;
-		const update_visibility = (visible: boolean) => {
-			image_group_visible = visible;
-			if (visible || !image_viewer_open) onimagevisibilitychange?.(attachments, visible);
-		};
-		if (!("IntersectionObserver" in globalThis)) {
-			let frame = 0;
-			const measure = () => {
-				cancelAnimationFrame(frame);
-				frame = requestAnimationFrame(() => {
-					const bounds = node.getBoundingClientRect();
-					update_visibility(
-						bounds.bottom >= -160 && bounds.top <= globalThis.innerHeight + 160,
-					);
-				});
-			};
-			globalThis.addEventListener("resize", measure);
-			globalThis.addEventListener("scroll", measure, true);
-			measure();
-			return {
-				destroy: () => {
-					cancelAnimationFrame(frame);
-					globalThis.removeEventListener("resize", measure);
-					globalThis.removeEventListener("scroll", measure, true);
+	const ObserveImageVisibility = (node: HTMLElement) =>
+		Effect.acquireRelease(
+			Effect.sync(() => {
+				if (item.type !== "user_message" || item.attachments === undefined) return;
+				const attachments = item.attachments;
+				const update_visibility = (visible: boolean) => {
+					image_group_visible = visible;
+					if (visible || !image_viewer_open) {
+						onimagevisibilitychange?.(attachments, visible);
+					}
+				};
+				if (!("IntersectionObserver" in globalThis)) {
+					let frame = 0;
+					const measure = () => {
+						cancelAnimationFrame(frame);
+						frame = requestAnimationFrame(() => {
+							const bounds = node.getBoundingClientRect();
+							update_visibility(
+								bounds.bottom >= -160 &&
+									bounds.top <= globalThis.innerHeight + 160,
+							);
+						});
+					};
+					globalThis.addEventListener("resize", measure);
+					globalThis.addEventListener("scroll", measure, true);
+					measure();
+					return () => {
+						cancelAnimationFrame(frame);
+						globalThis.removeEventListener("resize", measure);
+						globalThis.removeEventListener("scroll", measure, true);
+						onimagevisibilitychange?.(attachments, false);
+					};
+				}
+				const observer = new IntersectionObserver(
+					(entries) => {
+						const visible = entries.some((entry) => entry.isIntersecting);
+						update_visibility(visible);
+					},
+					{ rootMargin: "160px 0px" },
+				);
+				observer.observe(node);
+				return () => {
+					observer.disconnect();
 					onimagevisibilitychange?.(attachments, false);
-				},
-			};
+				};
+			}),
+			(release) => Effect.sync(() => release?.()),
+		).pipe(Effect.andThen(Effect.never));
+
+	yield* Effect.gen(function* () {
+		const observations = new Map<number, Fiber.Fiber<never>>();
+		while (true) {
+			const command = yield* Queue.take(visibility_commands);
+			if (command._tag === "Observe") {
+				const fiber = yield* ObserveImageVisibility(command.node).pipe(Effect.forkScoped);
+				observations.set(command.id, fiber);
+				continue;
+			}
+			const fiber = observations.get(command.id);
+			if (fiber !== undefined) {
+				observations.delete(command.id);
+				yield* Fiber.interrupt(fiber);
+			}
 		}
-		const observer = new IntersectionObserver(
-			(entries) => {
-				const visible = entries.some((entry) => entry.isIntersecting);
-				update_visibility(visible);
-			},
-			{ rootMargin: "160px 0px" },
-		);
-		observer.observe(node);
-		return {
-			destroy: () => {
-				observer.disconnect();
-				onimagevisibilitychange?.(attachments, false);
-			},
-		};
+	}).pipe(Effect.forkScoped);
+
+	const observe_image_visibility = (node: HTMLElement) => {
+		const id = next_visibility_id++;
+		Queue.offerUnsafe(visibility_commands, { _tag: "Observe", id, node });
+		return () => Queue.offerUnsafe(visibility_commands, { _tag: "Release", id });
 	};
 </script>
 

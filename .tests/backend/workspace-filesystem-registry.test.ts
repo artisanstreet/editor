@@ -134,7 +134,7 @@ describe("WorkspaceFilesystemRegistry", () => {
 		);
 
 		expect(failure).toMatchObject({
-			_tag: "WorkspaceFilesystemNotFoundError",
+			_tag: "WorkspaceFilesystemAuthorizationError",
 			workspace_id: "missing",
 		});
 	});

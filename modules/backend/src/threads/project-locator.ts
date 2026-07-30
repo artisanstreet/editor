@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { basename, dirname, isAbsolute, normalize, resolve } from "node:path";
 
@@ -6,9 +5,10 @@ import { Context, Data, Effect, Layer, Option } from "effect";
 
 import type { ProjectRef } from "@artisan/protocol";
 import { ProcessRunner, type ProcessRunnerResult } from "../git/process-runner";
+import { ProjectIdentityRegistry } from "../projects/project-identity-registry";
 
 /** Identifies the ProjectLocator operation that could not complete. */
-export type ProjectLocatorOperation = "discover" | "normalize";
+export type ProjectLocatorOperation = "discover" | "identify" | "normalize";
 
 /** Identifies whether project ownership came from Git or a directory fallback. */
 export type ProjectLocationSource = "directory" | "git_root";
@@ -48,14 +48,6 @@ function normalize_path(path: string) {
 	const normalized_path = normalize(resolve(path)).replaceAll("\\", "/");
 
 	return normalized_path.replace(/(?<!^[A-Za-z]:)\/$/, "");
-}
-
-function project_ref(root_path: string): ProjectRef {
-	const normalized_root_path = normalize_path(root_path);
-	const display_name = basename(normalized_root_path) || normalized_root_path;
-	const project_id = `project_${createHash("sha256").update(normalized_root_path).digest("hex")}`;
-
-	return { display_name, project_id, root_path: normalized_root_path };
 }
 
 function parse_git_root(result: ProcessRunnerResult, location: string) {
@@ -164,6 +156,31 @@ export function make_node_project_locator_layer() {
 		ProjectLocator,
 		Effect.gen(function* () {
 			const process_runner = yield* ProcessRunner;
+			const identities = yield* ProjectIdentityRegistry;
+
+			/**
+			 * The id is minted state, not a hash of the path: the registry
+			 * allocates a Snowflake on first sight and answers from storage
+			 * forever after, so the same root always resolves to the same id.
+			 */
+			const MakeProjectRef = (
+				location: string,
+				root_path: string,
+			): Effect.Effect<ProjectRef, ProjectLocatorError> =>
+				Effect.gen(function* () {
+					const normalized_root_path = normalize_path(root_path);
+					const display_name = basename(normalized_root_path) || normalized_root_path;
+					const project_id = yield* identities
+						.Resolve(normalized_root_path)
+						.pipe(
+							Effect.mapError((cause) =>
+								project_locator_error(location, "identify", cause),
+							),
+						);
+
+					return { display_name, project_id, root_path: normalized_root_path };
+				});
+
 			const Locate = (location: string) =>
 				Effect.gen(function* () {
 					const directory_path = yield* ResolveLocation(location);
@@ -185,7 +202,7 @@ export function make_node_project_locator_layer() {
 						: directory_path;
 
 					return Option.some({
-						project: project_ref(root_path),
+						project: yield* MakeProjectRef(location, root_path),
 						source: Option.isSome(git_root) ? "git_root" : "directory",
 					} satisfies ProjectLocation);
 				});

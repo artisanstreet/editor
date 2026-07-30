@@ -3,7 +3,7 @@ import { Effect, Schema } from "effect";
 
 import type { EventEnvelope, OrchestrationLifecycleState } from "@artisan/protocol";
 
-import { Assignments, OrchestrationGroups, OrchestrationJoins } from "../../persistence/schema";
+import { Assignments, OrchestrationGroups, OrchestrationJoins } from "../../persistence/tables";
 import { AgentGraphInvalid, AgentGraphNotFound } from "../agent-graph-model";
 import {
 	is_terminal_state,

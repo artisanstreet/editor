@@ -10,20 +10,23 @@ describe("Barekey docs shell reset", () => {
 		const layout = Read("modules/frontend/src/routes/+layout.sv");
 		const panel = Read("modules/frontend/src/routes/components/sectioned-panel.sv");
 
-		expect(layout).toContain("<SectionedPanel {sidebar} {primary}");
-		expect(layout).toContain("{#snippet sidebar()}");
+		expect(layout).toContain("<SectionedPanel");
+		/** The layout owns route-derived state; the panel is handed the result. */
+		expect(layout).toContain("{surface}");
 		expect(layout).toContain("{#snippet primary()}");
 		expect(layout).toContain("{@render children()}");
 		expect(layout).toContain("client.ListProjects");
 		expect(layout).toContain("client.ListThreads");
-		expect(layout).toContain("{#if forge_gate.has_hydrated_shell}");
+		expect(layout).toContain("{#if ForgeShellIsMounted(forge_gate)}");
 		expect(layout).toContain("<ForgeShellPreview />");
 		expect(layout).toContain("<ForgeConnectionOverlay");
-		expect(layout).toContain('inert={forge_gate.state.phase !== "ready"}');
+		expect(layout).toContain("inert={ForgeShellIsBlocked(forge_gate)}");
+		expect(layout).toContain("ondismiss={DismissGate}");
 		expect(layout).not.toContain("<ForgeConnectionBanner");
 		expect(panel).toContain("primary: Snippet");
 		expect(panel).toContain("secondary?: Snippet");
-		expect(panel).toContain("sidebar: Snippet");
+		/** The rail is the entire sidebar; no flyout snippet travels through the panel. */
+		expect(panel).not.toContain("sidebar: Snippet");
 	});
 
 	it("gates Forge loading and disconnection with a centered blurred overlay", () => {
@@ -41,21 +44,34 @@ describe("Barekey docs shell reset", () => {
 		expect(overlay).toContain("ForgeStartLaunchUrl");
 		expect(overlay).toContain("retry_connection");
 		expect(overlay).toContain("retry_hydration");
+		/** A settled failure can be closed, leaving the disconnected shell browsable. */
+		expect(overlay).toContain("{#if presentation.dismissible}");
+		expect(overlay).toContain('aria-label="Dismiss and browse the disconnected client"');
+		expect(overlay).toContain("onclick={ondismiss}");
+		expect(overlay).toContain('event.key !== "Escape"');
 		expect(preview).toContain("bg-linear-to-b from-surface-125 to-surface-75 p-1 card");
 	});
 
-	it("mounts the inspector only for concrete thread routes and keeps controls in the composer", () => {
+	it("mounts the inspector for the workspace in view and keeps controls in the composer", () => {
 		const layout = Read("modules/frontend/src/routes/+layout.sv");
 		const thread = Read("modules/frontend/src/routes/threads/[id]/+page.sv");
 		const thread_route = Read("modules/frontend/src/routes/threads/[id]/thread-route.sv");
 		const thread_panel = Read("modules/frontend/src/routes/components/thread-panel.sv");
 		const thread_workspace = Read("modules/frontend/src/routes/components/thread-workspace.sv");
 		const composer = Read("modules/frontend/src/routes/components/thread-composer.sv");
-		const model_selector = Read("modules/frontend/src/routes/components/model-selector.sv");
+		const model_selector = Read(
+			"modules/frontend/src/routes/components/model-selector/view.sv",
+		);
+		const policy_controls = Read(
+			"modules/frontend/src/routes/components/model-selector/policy-controls.sv",
+		);
 
-		expect(layout).toContain("/^\\/threads\\/[^/]+\\/?$/");
+		expect(layout).toContain("/^\\/threads(?:\\/[^/]+)?\\/?$/");
 		expect(layout).toContain("<ThreadPanel />");
-		expect(layout).toContain("secondary={is_thread ? secondary : undefined}");
+		/** The same column also carries the editor's files; the thread is one of two. */
+		expect(layout).toContain(
+			'secondary={surface === "editor" ? editor_files : is_thread ? secondary : undefined}',
+		);
 		expect(thread).toContain("Thread · Artisan Editor");
 		expect(thread).toContain("{#key thread_id}");
 		expect(thread).toContain("<ThreadRoute {thread_id} />");
@@ -77,18 +93,18 @@ describe("Barekey docs shell reset", () => {
 			'grok: { accent: "#6b7280", icon: SvglGrokLogo, monochrome: true }',
 		);
 		expect(model_selector).toContain("service_tier");
-		expect(model_selector).toContain(
-			'const composer_controls: ReadonlyArray<ComposerControl> = ["model"];',
-		);
+		expect(model_selector).toContain("<PolicyControls");
+		expect(policy_controls).toContain("oncontext");
+		expect(policy_controls).toContain("onpermission");
+		expect(policy_controls).toContain("onspeed");
+		expect(policy_controls).toContain("onthinking");
 		expect(model_selector).not.toContain("workflow_mode");
 		expect(model_selector).not.toContain("Toggle workflow mode");
 		expect(model_selector).not.toMatch(/>Build<|>Plan</);
 		expect(composer).not.toContain('aria-label="Add images"');
 		expect(composer).toContain('"Stop current run"');
 		expect(composer).toContain("PlayerStopFilled");
-		expect(composer).toContain(
-			"composer-send inset-shadow rounded-[calc(var(--composer-radius)-0.5rem)] text-white",
-		);
+		expect(composer).toContain("composer-send rounded-[calc(var(--composer-radius)-0.5rem)]");
 		expect(composer).not.toContain("card-glass");
 		expect(composer).not.toContain("bg-white/50");
 		/**
@@ -159,8 +175,9 @@ describe("Barekey docs shell reset", () => {
 		const message = Read("modules/frontend/src/routes/components/conversation-message.sv");
 
 		expect(workspace).toContain("bind:viewportRef={viewport}");
-		expect(workspace).toContain("const PositionLoadedThread = async () =>");
-		expect(workspace).toContain("await tick();");
+		expect(workspace).toContain("const PositionLoadedThread = Effect.gen(function* ()");
+		expect(workspace).toContain("Effect.tryPromise(() => tick())");
+		expect(workspace).toContain("Effect.forkScoped");
 		expect(workspace).toContain("ConversationBottomScrollTop(");
 		expect(workspace).toContain("ConversationUserMessageWithSourceReference(");
 		expect(workspace).toContain("ConversationEndSpaceHeight(");
@@ -171,7 +188,7 @@ describe("Barekey docs shell reset", () => {
 		expect(message).toContain("data-conversation-item-id={item.id}");
 	});
 
-	it("renders active work with the running engine's spinning mark and one shimmering word", () => {
+	it("renders active work as one muted shimmering word trailing the flow", () => {
 		const work_session = Read(
 			"modules/frontend/src/routes/components/conversation-work-session.sv",
 		);
@@ -182,48 +199,100 @@ describe("Barekey docs shell reset", () => {
 		);
 		expect(work_session).toContain("{#if can_collapse}");
 		expect(work_session).toContain("<button");
-		expect(work_session).toContain("{:else}");
+		expect(work_session).toContain("{:else if !is_working}");
 		expect(work_session).toContain('role="status"');
 		/**
-		 * The generic sprite and the two-second verb carousel are gone: the
-		 * provider mark spins and one word, derived from the session's own
-		 * identity, shimmers for the session's whole life.
+		 * The generic sprite, the verb carousel, and the engine mark are gone.
+		 * The muted thinking word trails the flow instead of pinning above it,
+		 * and it renders only while no detail below is live — a running command
+		 * or streaming text is its own status.
 		 */
 		expect(work_session).not.toContain("artisan-working-sprite");
 		expect(work_session).not.toContain('Effect.sleep("2 seconds")');
 		expect(work_session).not.toContain("thinking_word_index");
 		expect(work_session).toContain("thinking_word_for(item.id)");
-		expect(work_session).toContain("EngineMarkFor(engine_id)");
-		expect(work_session).toContain("animation: engine-working-spin");
-		expect(work_session).toContain("<ShimmerText");
+		expect(work_session).not.toContain("EngineMarkFor");
+		expect(work_session).not.toContain("engine-working-spin");
 		expect(work_session).toContain(
-			'class="flex w-full items-center gap-1 border-b border-border pb-2"',
+			"{#if is_working && !has_live_detail && !has_live_status_detail}",
 		);
-		expect(work_session).toContain('class="flex w-fit items-center gap-2 py-0.5"');
+		expect(work_session).toContain('<ShimmerText class="text-base text-muted-foreground"');
 		expect(work_session).toContain(
-			'<span class={is_failed ? "text-destructive" : ""}>{label}</span>',
+			"t-settle-underline relative flex w-full items-center justify-between gap-3 pb-2",
 		);
+		/** Entrances are CSS mount animations: directives stall the async tree. */
+		expect(work_session).not.toMatch(/\s(?:in|out|transition):[A-Za-z]/);
+		expect(work_session).toContain("@keyframes status-swap-enter");
+		/** The divider grows from the measured label width out to the edge. */
+		expect(work_session).toContain("bind:clientWidth={label_width}");
+		expect(work_session).toContain("@keyframes settle-underline-grow");
+		expect(work_session).toContain('is_failed ? "text-destructive" : ""');
 		expect(work_session).toContain("hidden={!is_working && !has_visible_details}");
-		expect(workspace).toContain("latest_active_activity_label(block.details)");
-		expect(workspace).toContain("engine_id={policy?.engine_id}");
+		expect(workspace).toContain("has_live_detail={conversation_work_is_live(block.details)}");
+		expect(workspace).not.toContain("engine_id={policy?.engine_id}");
 	});
 
-	it("matches the Barekey docs inset sidebar and circular toggle", () => {
+	it("keeps the rail as the entire sidebar with logo, command, surface, and marketplace controls", () => {
 		const panel = Read("modules/frontend/src/routes/components/sectioned-panel.sv");
-		const provider = Read("modules/frontend/src/lib/components/ui/sidebar/sidebar-provider.sv");
+		const sidebar_styles = Read("modules/frontend/src/lib/styles/sidebar.css");
 
-		expect(panel).toContain(
-			'style="--sidebar-width: 16rem; --sidebar-width-icon: 2.5rem; min-height: 0;"',
+		/**
+		 * The rail is the whole sidebar now: no expanded panel behind it, so
+		 * nothing toggles and none of the shadcn sidebar machinery remains.
+		 */
+		expect(panel).not.toContain("Sidebar.Root");
+		expect(panel).not.toContain("Sidebar.Trigger");
+		expect(panel).not.toContain("<LayoutSidebar");
+		expect(sidebar_styles).not.toContain('[data-slot="sidebar"]');
+		expect(sidebar_styles).not.toContain(".t-rail-control");
+		/**
+		 * The rail's controls share one vertical housing: the brand mark, the
+		 * command menu, the surface cycle, and the marketplace all belong to this
+		 * edge, so they read as a pill rather than as circles that happen to align.
+		 */
+		expect(panel).toContain("rounded-full bg-surface-125 py-1 card");
+		/** The Barekey mark replaces the toggle and doubles as the home link. */
+		expect(panel).toContain("$lib/assets/barekey/logo-40.png");
+		expect(panel).toContain("docs-sidebar-logo-mark");
+		expect(panel).toMatch(/<a\s+href="\/"/);
+		/** The command menu takes over the navigation the flyout used to carry. */
+		expect(panel).toContain('aria-label="Open command menu"');
+		expect(panel).toContain("<CommandMenu bind:open={command_open} {threads} />");
+		expect(panel).toContain('aria-label="Marketplace"');
+		expect(panel).toContain("<ShoppingBag");
+		/**
+		 * The surface cycle is its own group under the pill, shown only while a
+		 * workspace is open for the editor, and it reveals through the
+		 * transitions.dev panel reveal rather than mounting and unmounting.
+		 */
+		expect(panel).toContain('data-state={surface === "editor" ? "b" : "a"}');
+		expect(panel).toContain('<span class="t-icon" data-icon="a">');
+		expect(panel).toContain('<span class="t-icon" data-icon="b">');
+		expect(panel).toContain("<Code");
+		expect(panel).toContain("<MessageCircle");
+		expect(panel).toContain("aria-label={`Switch to ${next.label}`}");
+		expect(panel).toContain("data-open={workspace_open}");
+		expect(panel).toContain("inert={!workspace_open}");
+		expect(panel).toContain("t-panel-slide");
+		expect(sidebar_styles).toContain('.t-panel-slide[data-open="true"]');
+		expect(sidebar_styles).toMatch(
+			/@media \(prefers-reduced-motion: reduce\) \{\s*\n\t\.t-panel-slide,\s*\n\t\.t-panel-slide-x \{/,
 		);
-		expect(panel).toContain('<Sidebar.Root variant="inset" collapsible="icon">');
-		expect(panel).toContain("absolute right-0 top-2 hidden size-10");
-		expect(panel).toContain("rounded-full bg-surface-125 card");
-		expect(panel).toContain("<LayoutSidebar");
-		expect(provider.indexOf("const sidebar = set_sidebar")).toBeLessThan(
-			provider.indexOf("yield* Queue.unbounded"),
-		);
-		expect(provider).toContain("Queue.offerUnsafe(");
-		expect(provider).not.toContain(".unsafeOffer(");
+		/**
+		 * The workspace is what the current route is inside — the open thread's
+		 * project, the draft's chosen project, or the editor's own `?workspace=` —
+		 * never a fallback to "some attached project". Cycling carries that
+		 * workspace into the editor URL and returns to the exact page it left.
+		 */
+		const layout = Read("modules/frontend/src/routes/+layout.sv");
+		const identity = Read("modules/frontend/src/lib/editor/workspace-identity.ts");
+		expect(layout).toContain("EditorWorkspaceId(page.url)");
+		expect(layout).toContain("ResolveThreadRoute(threads, route_id)");
+		expect(layout).toContain("$draft_thread_project?.project_id");
+		expect(layout).toContain("workspace_id={active_workspace_id}");
+		expect(identity).not.toContain("projects[0]");
+		expect(panel).toContain("EditorRoutePath(workspace_id)");
+		expect(panel).toContain("goto(threads_return_path)");
 	});
 
 	it("uses the Barekey docs gradient card surface for page content", () => {
@@ -237,48 +306,44 @@ describe("Barekey docs shell reset", () => {
 		expect(global_styles).toContain('--font-sans: "Artisan Neo", sans-serif;');
 	});
 
-	it("keeps the copied docs identity and the draft-thread quick link in the sidebar", () => {
-		const sidebar = Read("modules/frontend/src/routes/components/artisan-sidebar.sv");
+	it("carries thread navigation and the draft-thread quick link in the command menu", () => {
+		const menu = Read("modules/frontend/src/routes/components/command-menu.sv");
 		const home = Read("modules/frontend/src/routes/+page.sv");
 
-		expect(sidebar).toContain("$lib/assets/barekey/logo-40.png");
-		expect(sidebar).toContain('class="size-5 shrink-0 invert dark:invert-0"');
-		expect(sidebar).toContain('<span class="font-logo">Artisan Editor</span>');
-		expect(sidebar).toContain(
-			'<Sidebar.Header class="h-14 justify-center pl-6 pr-14 lg:pl-2">',
-		);
+		expect(menu).toContain("<CommandDialog");
+		expect(menu).toContain("event.metaKey || event.ctrlKey");
 		/**
-		 * New thread is a plain link into the draft route: no dropdown, no
-		 * project picking, and no durable thread creation from the sidebar.
+		 * New thread is a plain jump into the draft route: no dropdown, no
+		 * project picking, and no durable thread creation from the menu.
 		 */
-		expect(sidebar).toContain('href="/threads/new"');
-		expect(sidebar).toContain('variant="ghost"');
-		expect(sidebar).toContain(">New thread</span>");
-		expect(sidebar).not.toContain("DropdownMenu");
-		expect(sidebar).not.toContain("client.CreateThread");
-		expect(sidebar).not.toContain("client.ListProjectDirectories");
-		expect(sidebar).not.toContain("client.SelectProjectDirectory");
-		expect(sidebar).not.toContain('type: "thread.create"');
-		expect(sidebar).not.toContain('type: "thread.project.assign"');
-		expect(sidebar).not.toContain("artisanDesktop");
-		expect(sidebar).not.toContain("<Sidebar.GroupLabel>Threads</Sidebar.GroupLabel>");
-		expect(sidebar).toContain("ProjectScopedThreadGroups(threads)");
-		expect(sidebar).toContain("<Sidebar.MenuSub");
-		expect(sidebar).toContain("<Sidebar.MenuSubButton");
-		expect(sidebar).toContain('project?.display_name ?? "Unassigned"');
-		expect(sidebar).toContain("ThreadRoutePath(thread.thread_id)");
-		expect(sidebar).toContain("client.SubscribeThreadList");
-		expect(sidebar).toContain("ApplyRootThreadListUpdate");
-		expect(sidebar).toContain(
-			"isActive={page.url.pathname === ThreadRoutePath(thread.thread_id)}",
-		);
-		expect(home).toContain('href="/threads/new"');
+		/**
+		 * The draft lives at `/threads`, not `/threads/new`, so no thread whose
+		 * route id happens to be "new" can ever be shadowed by the draft route.
+		 */
+		expect(menu).toContain('Navigate("/threads")');
+		expect(menu).not.toContain("/threads/new");
+		expect(menu).toContain("<span>New thread</span>");
+		expect(menu).not.toContain("client.CreateThread");
+		expect(menu).not.toContain("client.ListProjectDirectories");
+		expect(menu).not.toContain("client.SelectProjectDirectory");
+		expect(menu).not.toContain('type: "thread.create"');
+		expect(menu).not.toContain('type: "thread.project.assign"');
+		expect(menu).not.toContain("artisanDesktop");
+		expect(menu).toContain("ProjectScopedThreadGroups(threads)");
+		expect(menu).toContain('project?.display_name ?? "Unassigned"');
+		expect(menu).toContain("ThreadRoutePath(thread.thread_id)");
+		/** The layout owns the live list; the menu only renders what it is handed. */
+		const layout = Read("modules/frontend/src/routes/+layout.sv");
+		expect(layout).toContain("client.SubscribeThreadList");
+		expect(layout).toContain("ApplyRootThreadListUpdate");
+		expect(menu).not.toContain("ArtisanClient");
+		expect(home).toContain('href="/threads"');
 		expect(home).toContain(">New thread</span>");
 		expect(home).not.toMatch(/WelcomePage|ThreadWorkspace|SettingsPage|LiveWorkspaceStore/);
 	});
 
 	it("materializes the durable thread only at the draft's first send", () => {
-		const draft = Read("modules/frontend/src/routes/threads/new/+page.sv");
+		const draft = Read("modules/frontend/src/routes/threads/+page.sv");
 		const route = Read("modules/frontend/src/routes/threads/[id]/thread-route.sv");
 
 		expect(draft).toContain("client.CreateThread");
@@ -289,6 +354,13 @@ describe("Barekey docs shell reset", () => {
 		expect(draft).toContain("draft_thread_policy.set({");
 		expect(draft).toContain("client.UpdateThreadSessionPolicy({ policy, thread_id })");
 		expect(draft).toContain("created_thread_id ??");
+		/**
+		 * The draft is reachable with no Forge behind it: projects fall back to
+		 * an empty list, the manifest comes from the compiled catalog, and the
+		 * composer refuses to send because nothing is runnable.
+		 */
+		expect(draft).toContain("WithOfflineRuntimeCatalog(client.GetRuntimeCatalog)");
+		expect(draft).toContain("Effect.catch(() => Effect.succeed({ projects: [] }))");
 		expect(route).toContain("get(pending_first_submission)");
 		expect(route).toContain("pending_first_submission.set(undefined)");
 		expect(route).toContain("SendMessage(pending.submission)");
@@ -297,7 +369,10 @@ describe("Barekey docs shell reset", () => {
 	it("locks engine switching only during an active run and routes it through policy", () => {
 		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.sv");
 		const composer = Read("modules/frontend/src/routes/components/thread-composer.sv");
-		const selector = Read("modules/frontend/src/routes/components/model-selector.sv");
+		const selector = Read("modules/frontend/src/routes/components/model-selector/view.sv");
+		const engine_section = Read(
+			"modules/frontend/src/routes/components/model-selector/engine-section.sv",
+		);
 
 		expect(workspace).toContain("const engine_locked = $derived(run_active);");
 		expect(workspace).not.toContain("run_active || snapshot.items.length > 0");
@@ -305,8 +380,41 @@ describe("Barekey docs shell reset", () => {
 			"<ModelSelector {disabled} {engine_locked} {policy} {onpolicychange} />",
 		);
 		expect(selector).toContain("engine_id: model.engine,");
-		expect(selector).toContain("engine_locked && engine.id !== selected_engine.id");
-		expect(selector).toContain("finish the active run before switching engines");
+		expect(selector).toContain("<EngineSection");
+		expect(engine_section).toContain("engine_locked && engine.id !== selected_engine.id");
+		expect(engine_section).toContain("finish the active run before switching engines");
+	});
+
+	it("stars models from the picker and floats favorites to the top of their engine", () => {
+		const selector = Read("modules/frontend/src/routes/components/model-selector/view.sv");
+		const selection = Read("modules/frontend/src/lib/engine/model-selection.ts");
+		const model_list = Read(
+			"modules/frontend/src/routes/components/model-selector/model-list.sv",
+		);
+
+		/** Forge owns the set, so every client opens the picker to the same order. */
+		expect(selector).toContain("client.GetModelFavorites");
+		expect(selector).toContain("client.UpdateModelFavorite");
+		/** Favorites sort within the active engine, never across engine tabs. */
+		expect(selection).toContain("models.filter((model) => model.engine === engine)");
+		expect(selection).toContain("favorites.indexOf(left.id) - favorites.indexOf(right.id)");
+		/** A muted outline until starred; gold is what starring earns. */
+		expect(model_list).toContain('import Star from "@tabler/icons-svelte/icons/star"');
+		expect(model_list).toContain(
+			'import StarFilled from "@tabler/icons-svelte/icons/star-filled"',
+		);
+		expect(model_list).toContain("aria-pressed={favorited}");
+		expect(model_list).toContain("self-center");
+		expect(model_list).toContain('<Star class="size-4" aria-hidden="true" />');
+		expect(model_list).toContain('<StarFilled class="size-4 text-favorite"');
+		expect(model_list).not.toContain("text-favorite/");
+		/** A star reads as gold, and the theme carries a value for each mode. */
+		const global_styles = Read("modules/frontend/src/lib/styles/global.css");
+		expect(global_styles).toContain("--color-favorite: var(--favorite);");
+		expect(global_styles.match(/^\t--favorite: oklch/gm)?.length ?? 0).toBe(2);
+		/** Nothing can be starred with no Forge to record it. */
+		expect(selector).toContain("IsOfflineRuntimeCatalog(runtime_catalog)");
+		expect(model_list).toContain("{#if favorites_available}");
 	});
 
 	it("surfaces the thread's project at the top of the thread panel and assigns it there", () => {
@@ -318,10 +426,19 @@ describe("Barekey docs shell reset", () => {
 		expect(panel).toContain('type: "thread.project.assign"');
 		expect(panel).toContain("client.ListProjectDirectories");
 		expect(panel).toContain("client.SelectProjectDirectory");
-		expect(panel).toContain("<Dialog.Title>Select a project</Dialog.Title>");
+		/** Projects already in use are picked from the header select... */
+		expect(panel).toContain("onValueChange={RequestProject}");
+		expect(panel).toContain("value={candidate.project_id}");
+		expect(panel).toContain("value={BROWSE_VALUE}");
+		/** ...which wears the same glass-and-hover-pill dropdown as the composer selects. */
+		expect(panel).toContain("<DropdownHoverSurface");
+		expect(panel).toContain("{@attach FollowHighlight(move_hover)}");
+		/** ...and the dialog is now only the folder browser that starts a new one. */
+		expect(panel).toContain("<Dialog.Title>Choose a folder</Dialog.Title>");
 		/** On the draft route the same picker edits the client-side draft project. */
 		expect(panel).toContain("draft_thread_project.set(candidate)");
-		expect(panel).toContain('page.url.pathname === "/threads/new"');
+		/** Draft-ness follows the absent route id rather than a hardcoded path. */
+		expect(panel).toContain("const is_draft = $derived(route_id === undefined);");
 	});
 
 	it("retains the complete Barekey style foundation", () => {

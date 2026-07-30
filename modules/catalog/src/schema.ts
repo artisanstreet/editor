@@ -81,6 +81,8 @@ export const ThinkingCapability = Schema.Union([
 export type ThinkingCapability = typeof ThinkingCapability.Type;
 
 export const ContextWindowOption = Schema.Struct({
+	/** What the window buys and what it costs, in the picker's own words. */
+	description: Schema.NonEmptyString,
 	id: Schema.NonEmptyString,
 	label: Schema.NonEmptyString,
 	/** Appended verbatim to the native model id; empty for the base window. */

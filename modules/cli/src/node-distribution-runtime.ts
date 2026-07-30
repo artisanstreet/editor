@@ -198,13 +198,11 @@ export const make_node_distribution_runtime_layer = (
 							const configuration = yield* file_system
 								.readFileString(config_path)
 								.pipe(
-									Effect.flatMap((encoded) =>
-										Effect.try({
-											try: () => JSON.parse(encoded) as unknown,
-											catch: (cause) => cause,
-										}),
+									Effect.flatMap(
+										Schema.decodeUnknownEffect(
+											Schema.fromJsonString(ForgeInstanceConfig),
+										),
 									),
-									Effect.flatMap(Schema.decodeUnknownEffect(ForgeInstanceConfig)),
 								);
 							data_roots.push(configuration.data_root);
 						}

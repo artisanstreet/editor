@@ -37,9 +37,11 @@ type NonMessageCommandPayload = CommandEnvelope["payload"] & {
 	readonly type: Exclude<CommandEnvelope["payload"]["type"], "thread.send_message">;
 };
 
+export type AuthoritativePayload = NonMessageCommandPayload | AuthoritativeThreadSendMessageCommand;
+
 /** Internal command shape used after Forge has resolved message authority. */
 export type AuthoritativeCommandEnvelope = Omit<CommandEnvelope, "payload"> & {
-	readonly payload: NonMessageCommandPayload | AuthoritativeThreadSendMessageCommand;
+	readonly payload: AuthoritativePayload;
 };
 
 export type InboundOrAuthoritativeCommandEnvelope = CommandEnvelope | AuthoritativeCommandEnvelope;

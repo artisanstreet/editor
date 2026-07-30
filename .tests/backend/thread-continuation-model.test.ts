@@ -3,12 +3,17 @@ import { describe, expect, it } from "vitest";
 
 import {
 	CanonicalTranscriptEntry,
+	compaction_summary_template,
+	compaction_transcript_maximum_bytes,
 	PortableCheckpoint,
 	portable_checkpoint_summary_maximum_bytes,
 	portable_checkpoint_tail_entry_maximum_bytes,
 	portable_checkpoint_tail_maximum_entries,
+	render_compaction_prompt,
 	render_portable_checkpoint_prompt,
 	select_portable_checkpoint_content,
+	serialize_compaction_transcript,
+	split_portable_checkpoint_entries,
 	utf8_byte_length,
 } from "../../modules/backend/src/orchestration/thread-continuation-model";
 
@@ -81,16 +86,108 @@ describe("thread continuation model", () => {
 		expect(first.tail.map((value) => value.text)).toEqual(entries.map((value) => value.text));
 	});
 
-	it("uses the repository-selected native post-boundary tail", () => {
+	it("uses the validated model summary while keeping the newest tail verbatim", () => {
 		const result = select_portable_checkpoint_content({
 			canonical_entries: [entry(12, "user", "after compact")],
-			native_summary: {
-				summary: "Validated provider compaction summary.",
+			model_summary: {
+				summary: "Validated compaction model summary.",
 			},
 		});
 
-		expect(result.source).toBe("native_summary");
+		expect(result.source).toBe("model_summary");
+		expect(result.summary).toBe("Validated compaction model summary.");
 		expect(result.tail).toEqual([{ role: "user", text: "after compact" }]);
+	});
+
+	it("splits ordered entries into a summarizable head and a bounded newest tail", () => {
+		const small = [
+			entry(3, "user", "third"),
+			entry(1, "user", "first"),
+			entry(2, "assistant", "second"),
+		];
+		const all_retained = split_portable_checkpoint_entries(small);
+		expect(all_retained.head).toEqual([]);
+		expect(all_retained.tail).toEqual([
+			{ role: "user", text: "first" },
+			{ role: "assistant", text: "second" },
+			{ role: "user", text: "third" },
+		]);
+
+		const large = Array.from({ length: 5 }, (_, index) =>
+			entry(5 - index, index % 2 === 0 ? "user" : "assistant", "x".repeat(32 * 1024)),
+		);
+		const split = split_portable_checkpoint_entries(large);
+		expect(split.tail).toHaveLength(3);
+		expect(split.head.map((value) => value.logical_sequence)).toEqual([1, 2]);
+		expect(split.head.length + split.tail.length).toBe(large.length);
+	});
+
+	it("serializes the compaction transcript with role markers and blank-line joins", () => {
+		const transcript = serialize_compaction_transcript([
+			entry(2, "assistant", "second"),
+			entry(1, "user", "first"),
+		]);
+
+		expect(transcript.omitted_entries).toBe(0);
+		expect(transcript.text).toBe("[user]\nfirst\n\n[assistant]\nsecond\n");
+	});
+
+	it("bounds each transcript entry and drops the oldest beyond the total budget", () => {
+		const truncated = serialize_compaction_transcript([entry(1, "user", "y".repeat(40_000))]);
+		expect(truncated.omitted_entries).toBe(0);
+		expect(truncated.text).toContain("\n[entry truncated]");
+		expect(utf8_byte_length(truncated.text)).toBeLessThanOrEqual(
+			portable_checkpoint_tail_entry_maximum_bytes + 8,
+		);
+
+		const entry_text = (index: number) =>
+			`entry-${String(index).padStart(2, "0")}:${"x".repeat(32_750)}`;
+		const entries = Array.from({ length: 20 }, (_, index) =>
+			entry(index + 1, "user", entry_text(index + 1)),
+		);
+		const transcript = serialize_compaction_transcript([...entries].reverse());
+		const kept = transcript.text.match(/\[user\]\n/g)?.length ?? 0;
+
+		expect(transcript.omitted_entries).toBeGreaterThan(0);
+		expect(transcript.omitted_entries + kept).toBe(entries.length);
+		expect(utf8_byte_length(transcript.text)).toBeLessThanOrEqual(
+			compaction_transcript_maximum_bytes + kept,
+		);
+		expect(transcript.text).toContain("entry-20:");
+		expect(transcript.text).not.toContain("entry-01:");
+		expect(transcript.text.indexOf("entry-19:")).toBeLessThan(
+			transcript.text.indexOf("entry-20:"),
+		);
+	});
+
+	it("renders the compaction prompt with untrusted delimiters and the anchored template", () => {
+		const prompt = render_compaction_prompt({
+			omitted_entries: 0,
+			transcript: "[user]\nDo the work.\n",
+		});
+
+		expect(prompt).toContain("--- BEGIN UNTRUSTED CONVERSATION TRANSCRIPT ---");
+		expect(prompt).toContain("--- END UNTRUSTED CONVERSATION TRANSCRIPT ---");
+		expect(prompt).toContain(`<template>\n${compaction_summary_template}\n</template>`);
+		expect(prompt).not.toContain("omitted for size");
+		for (const section of [
+			"## Objective",
+			"## Important Details",
+			"## Work State",
+			"### Completed",
+			"### Active",
+			"### Blocked",
+			"## Next Move",
+			"## Relevant Files",
+		])
+			expect(compaction_summary_template).toContain(section);
+
+		expect(
+			render_compaction_prompt({ omitted_entries: 1, transcript: "[user]\nx\n" }),
+		).toContain("1 earlier transcript entry was omitted for size.");
+		expect(
+			render_compaction_prompt({ omitted_entries: 3, transcript: "[user]\nx\n" }),
+		).toContain("3 earlier transcript entries were omitted for size.");
 	});
 
 	it("reports exact omissions and retains the true first objective from bounded history", () => {

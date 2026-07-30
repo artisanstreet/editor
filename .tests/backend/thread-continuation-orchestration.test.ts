@@ -1,17 +1,15 @@
-import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Effect, Option, Stream } from "effect";
+import { Effect, Stream } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { AgentOrchestrator, make_backend_runtime, ThreadErasure } from "@artisan/backend";
 import type {
 	Engine,
 	EngineCapabilities,
-	EngineContinuationExportInput,
 	EngineNativeContinuationInput,
 	EngineObservation,
 	EngineOpenInput,
@@ -24,7 +22,7 @@ import type { AuthoritativeCommandEnvelope } from "../../modules/backend/src/per
 import {
 	OrchestrationRuns,
 	ThreadErasureClaims,
-} from "../../modules/backend/src/persistence/schema";
+} from "../../modules/backend/src/persistence/tables";
 import {
 	ThreadContinuationLaunches,
 	ThreadPortableHandoffs,
@@ -56,15 +54,11 @@ const command = <const Payload extends AuthoritativeCommandEnvelope["payload"]>(
 	thread_id,
 });
 
-const capabilities = (engine_id: "claude" | "codex"): EngineCapabilities => ({
+const capabilities = (): EngineCapabilities => ({
 	approval: { state: "supported" },
 	auth: { state: "supported" },
 	cancel: { state: "supported" },
 	close: { state: "supported" },
-	continuation_export:
-		engine_id === "codex"
-			? { state: "supported" }
-			: { reason: "Claude uses PostCompact capture", state: "unsupported" },
 	events: { state: "supported" },
 	global_guidance: { state: "supported" },
 	model_selection: { state: "supported" },
@@ -80,7 +74,6 @@ const capabilities = (engine_id: "claude" | "codex"): EngineCapabilities => ({
 });
 
 interface EngineInstrumentation {
-	readonly exports: Array<EngineContinuationExportInput>;
 	readonly native_checks: Array<EngineNativeContinuationInput>;
 	readonly open_inputs: Array<EngineOpenInput>;
 }
@@ -93,7 +86,6 @@ const make_engine = (
 	} = {},
 ): { readonly engine: Engine; readonly instrumentation: EngineInstrumentation } => {
 	const instrumentation: EngineInstrumentation = {
-		exports: [],
 		native_checks: [],
 		open_inputs: [],
 	};
@@ -109,7 +101,6 @@ const make_engine = (
 			const turn_id = `${engine_id}-turn:${input.artisan_run_id}`;
 			const boundary_id = `claude-boundary:${input.artisan_run_id}`;
 			const compaction_observation_id = `${input.artisan_run_id}:compaction`;
-			const summary = "Claude compacted objective, durable decisions, and verification.";
 			const observations: Array<EngineObservation> = [];
 			let sequence = 0;
 			if (engine_id === "claude") {
@@ -139,9 +130,7 @@ const make_engine = (
 					artisan_run_id: input.artisan_run_id,
 					item_id: `${engine_id}-item:${input.artisan_run_id}`,
 					message:
-						engine_id === "claude"
-							? "Claude post-compaction answer."
-							: "Codex settled answer.",
+						engine_id === "claude" ? "Claude settled answer." : "Codex settled answer.",
 					observation_id: `${input.artisan_run_id}:message`,
 					phase: "final",
 					raw: { engine_id, frame: "message", transport: "test" },
@@ -176,23 +165,6 @@ const make_engine = (
 				artisan_run_id: input.artisan_run_id,
 				Closed: Effect.succeed("completed" as const),
 				Events: events,
-				...(engine_id === "claude"
-					? {
-							NativeCompaction: Effect.succeed(
-								Option.some({
-									boundary_id,
-									method: "claude_post_compact" as const,
-									observation_id: compaction_observation_id,
-									source_native_thread_id: native_thread_id,
-									summary,
-									summary_sha256: createHash("sha256")
-										.update(summary)
-										.digest("hex"),
-									trigger: "auto" as const,
-								}),
-							),
-						}
-					: {}),
 				native_thread_id,
 				resume_token: { native_thread_id },
 				Send: () => Effect.void,
@@ -206,31 +178,11 @@ const make_engine = (
 				return { state: "compatible" as const };
 			}),
 		Descriptor: {
-			capabilities: capabilities(engine_id),
+			capabilities: capabilities(),
 			display_name: `Deterministic ${engine_id}`,
 			id: engine_id,
 			transport: "test",
 		},
-		...(engine_id === "codex"
-			? {
-					ExportContinuation: (input: EngineContinuationExportInput) =>
-						Effect.sync(() => {
-							instrumentation.exports.push(input);
-							return {
-								export_native_item_id: `export-item:${input.artisan_run_id}`,
-								export_native_thread_id: `export-thread:${input.artisan_run_id}`,
-								export_native_turn_id: `export-turn:${input.artisan_run_id}`,
-								message: JSON.stringify({
-									summary:
-										"Codex exported objective, durable decisions, and verification.",
-								}),
-								method: "codex_fork_summary" as const,
-								source_native_thread_id: input.source_resume_token.native_thread_id,
-								source_native_turn_id: input.settled_native_turn_id,
-							};
-						}),
-				}
-			: {}),
 		Open,
 		Probe: () => Effect.die("Probe is not used by continuation integration tests"),
 	} satisfies Engine;
@@ -376,9 +328,7 @@ describe("thread continuation orchestration", () => {
 			if (codex_input._tag !== "start") throw new Error("Expected portable Codex start");
 			expect(codex_input.initial_content?.[0]).toMatchObject({
 				type: "text",
-				text: expect.stringContaining(
-					"Claude compacted objective, durable decisions, and verification.",
-				),
+				text: expect.stringContaining("Claude settled answer."),
 			});
 			expect(codex_input.initial_content?.slice(1)).toEqual([
 				{ text: "Current text before image.", type: "text" },
@@ -406,13 +356,9 @@ describe("thread continuation orchestration", () => {
 			expect(portable_claude_input._tag).toBe("start");
 			if (portable_claude_input._tag !== "start")
 				throw new Error("Expected portable Claude start");
-			expect(portable_claude_input.initial_text).toContain(
-				"Codex exported objective, durable decisions, and verification.",
-			);
+			expect(portable_claude_input.initial_text).toContain("Codex settled answer.");
 			expect(portable_claude_input.initial_text).toContain("Continue on Claude.");
 			expect(JSON.stringify(portable_claude_input)).not.toContain("codex-native:");
-			expect(JSON.stringify(portable_claude_input)).not.toContain("export-thread:");
-			expect(codex.instrumentation.exports).toHaveLength(1);
 
 			const handoffs_before_native = await runtime.runPromise(
 				database.client.select().from(ThreadPortableHandoffs),
@@ -421,20 +367,7 @@ describe("thread continuation orchestration", () => {
 			const lineages = handoffs_before_native.map((handoff) =>
 				JSON.parse(handoff.provider_lineage_json),
 			);
-			expect(lineages).toEqual(
-				expect.arrayContaining([
-					expect.objectContaining({
-						boundary_id: expect.stringContaining("claude-boundary:"),
-						kind: "claude",
-						source_native_thread_id: expect.stringContaining("claude-native:"),
-					}),
-					expect.objectContaining({
-						export_native_thread_id: expect.stringContaining("export-thread:"),
-						kind: "codex",
-						source_native_thread_id: expect.stringContaining("codex-native:"),
-					}),
-				]),
-			);
+			expect(lineages).toEqual([{ kind: "canonical" }, { kind: "canonical" }]);
 
 			await runtime.runPromise(
 				set_policy(orchestrator, "claude", "claude-opus-5", "policy_4"),
@@ -472,15 +405,6 @@ describe("thread continuation orchestration", () => {
 				await runtime.runPromise(database.client.select().from(ThreadPortableHandoffs)),
 			).toHaveLength(2);
 
-			await wait_for(async () => {
-				const states = await runtime.runPromise(
-					database.client.select().from(ThreadRunContinuationState),
-				);
-				return states.some(
-					(state) =>
-						state.run_id === fourth.run_id && state.native_compaction_json !== null,
-				);
-			});
 			await runtime.runPromise(
 				database.client
 					.insert(ThreadErasureClaims)

@@ -20,19 +20,19 @@ import {
 	ThreadTombstones,
 	WorkspaceChangeOperations,
 	WorkspaceMutationPayloads,
-} from "../../modules/backend/src/persistence/schema";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+} from "../../modules/backend/src/persistence/tables";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 import { ThreadErasure, ThreadErasureLive } from "../../modules/backend/src/threads/thread-erasure";
 import { ThreadResourceQuiescer } from "../../modules/backend/src/threads/thread-resource-quiescer";
 import {
 	WorkspaceChangeRepository,
 	WorkspaceChangeRepositoryLive,
-} from "../../modules/backend/src/workspace/workspace-change-repository";
+} from "../../modules/backend/src/workspace/changes/repository";
 import {
 	WorkspaceMutationPayloadStore,
 	WorkspaceMutationPayloadStoreLive,
 	type WorkspaceMutationPayloadStageInput,
-} from "../../modules/backend/src/workspace/workspace-mutation-payload-store";
+} from "../../modules/backend/src/workspace/mutations/payloads";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];

@@ -1,8 +1,18 @@
-<script lang="ts">
-	import { onMount } from "svelte";
+<script lang="ts" effect>
+	import { Effect, Fiber, Queue } from "effect";
 
-export type CalendarActivity = {
+	import { EngineMarkClass, UsageSlicePresentationFor } from "$lib/engine/presentation";
+
+	/** One engine and model's share of a day's tokens; absent ids mark unattributed work. */
+	export type CalendarActivityEngine = {
+		engine_id?: string;
+		model_id?: string;
+		tokens: number;
+	};
+
+	export type CalendarActivity = {
 		date: string;
+		engines: ReadonlyArray<CalendarActivityEngine>;
 		tokens: number;
 	};
 
@@ -31,6 +41,15 @@ export type CalendarActivity = {
 	let grid_top = 0;
 	let column_count = 0;
 	let row_count = 0;
+	type CalendarObservation =
+		| {
+				readonly _tag: "Observe";
+				readonly host: HTMLDivElement;
+				readonly id: number;
+		  }
+		| { readonly _tag: "Release"; readonly id: number };
+	const calendar_observations = yield* Queue.unbounded<CalendarObservation>();
+	let next_observation_id = 0;
 
 	const parse_date = (value: string) => new Date(`${value}T12:00:00`);
 	const date_key = (date: Date) => {
@@ -47,6 +66,9 @@ export type CalendarActivity = {
 	};
 
 	const token_label = (tokens: number) => new Intl.NumberFormat("en", { notation: "compact" }).format(tokens);
+	const donut_circumference = 2 * Math.PI * 6;
+	const engine_share = (activity: CalendarActivity, slice: CalendarActivityEngine) =>
+		activity.tokens === 0 ? 0 : slice.tokens / activity.tokens;
 
 	const draw = () => {
 		if (!canvas || !host || activities.length === 0) return;
@@ -84,12 +106,15 @@ export type CalendarActivity = {
 				const offset = row * column_count + column;
 				const date = add_days(end, -offset);
 				const in_range = offset < activities.length;
-				const activity = in_range ? (activity_by_date.get(date_key(date)) ?? { date: date_key(date), tokens: 0 }) : { date: date_key(date), tokens: 0 };
+				const activity = in_range
+					? (activity_by_date.get(date_key(date)) ?? { date: date_key(date), engines: [], tokens: 0 })
+					: { date: date_key(date), engines: [], tokens: 0 };
 				const intensity = activity.tokens === 0 ? 0 : Math.max(1, Math.ceil(Math.sqrt(activity.tokens / max_tokens) * 4));
 				const x = grid_left + column * step;
 				const y = grid_top + row * step;
 
-				context.fillStyle = activity_colors[intensity] ?? activity_colors.at(-1)!;
+				context.fillStyle =
+					activity_colors[intensity] ?? activity_colors.at(-1) ?? "transparent";
 				context.beginPath();
 				context.roundRect(x, y, cell_size, cell_size, Math.min(2, cell_size / 3));
 				context.fill();
@@ -118,23 +143,58 @@ export type CalendarActivity = {
 	/** Redraws when activities arrive asynchronously, not only on mount and resize. */
 	$effect(draw);
 
-	onMount(() => {
-		const resize_observer = new ResizeObserver(draw);
-		const theme_observer = new MutationObserver(draw);
-		resize_observer.observe(host);
-		theme_observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "style"] });
-		draw();
+	const ObserveCalendar = (observed_host: HTMLDivElement) =>
+		Effect.acquireRelease(
+			Effect.sync(() => {
+				const resize_observer = new ResizeObserver(draw);
+				const theme_observer = new MutationObserver(draw);
+				resize_observer.observe(observed_host);
+				theme_observer.observe(document.documentElement, {
+					attributes: true,
+					attributeFilter: ["class", "style"],
+				});
+				draw();
+				return { resize_observer, theme_observer };
+			}),
+			({ resize_observer, theme_observer }) =>
+				Effect.sync(() => {
+					resize_observer.disconnect();
+					theme_observer.disconnect();
+				}),
+		).pipe(Effect.andThen(Effect.never));
 
-		return () => {
-			resize_observer.disconnect();
-			theme_observer.disconnect();
-		};
-	});
+	yield* Effect.gen(function* () {
+		const observations = new Map<number, Fiber.Fiber<never>>();
+		while (true) {
+			const command = yield* Queue.take(calendar_observations);
+			if (command._tag === "Observe") {
+				const fiber = yield* ObserveCalendar(command.host).pipe(Effect.forkScoped);
+				observations.set(command.id, fiber);
+				continue;
+			}
+			const fiber = observations.get(command.id);
+			if (fiber !== undefined) {
+				observations.delete(command.id);
+				yield* Fiber.interrupt(fiber);
+			}
+		}
+	}).pipe(Effect.forkScoped);
+
+	const observe_calendar = () => {
+		const id = next_observation_id++;
+		Queue.offerUnsafe(calendar_observations, {
+			_tag: "Observe",
+			host,
+			id,
+		});
+		return () => Queue.offerUnsafe(calendar_observations, { _tag: "Release", id });
+	};
 </script>
 
 <div bind:this={host} class="relative min-h-0 w-full flex-1">
 	<canvas
 		bind:this={canvas}
+		use:observe_calendar
 		class="block"
 		aria-label="Recent daily token activity"
 		onpointerleave={() => (hovered = undefined)}
@@ -143,12 +203,48 @@ export type CalendarActivity = {
 
 	{#if hovered}
 		<div
-			class="pointer-events-none absolute z-20 w-max min-w-28 -translate-x-1/2 -translate-y-full rounded-md border border-border bg-popover px-2.5 py-2 text-xs shadow-md"
+			class="pointer-events-none absolute z-20 w-max min-w-44 -translate-x-1/2 -translate-y-full animate-in fade-in zoom-in-95 overflow-hidden rounded-lg border border-border bg-popover text-xs shadow-lg motion-reduce:animate-none"
 			style:left={`${tooltip_x}px`}
 			style:top={`${tooltip_y - 8}px`}
 		>
-			<p class="font-medium text-foreground">{token_label(hovered.tokens)} tokens</p>
-			<p class="whitespace-nowrap text-muted-foreground">{parse_date(hovered.date).toLocaleDateString("en", { dateStyle: "medium" })}</p>
+			<div class="flex items-baseline justify-between gap-6 px-3 py-2">
+				<p class="font-semibold text-foreground">
+					{token_label(hovered.tokens)}
+					<span class="font-normal text-muted-foreground">tokens</span>
+				</p>
+				<p class="whitespace-nowrap text-muted-foreground">
+					{parse_date(hovered.date).toLocaleDateString("en", { dateStyle: "medium" })}
+				</p>
+			</div>
+			{#if hovered.engines.length > 0}
+				<ul class="flex flex-col gap-2 border-t border-border px-3 py-2.5">
+					{#each hovered.engines as slice (`${slice.engine_id ?? ""} ${slice.model_id ?? ""}`)}
+						{@const presentation = UsageSlicePresentationFor(slice.engine_id, slice.model_id)}
+						{@const mark = presentation.mark}
+						{@const MarkIcon = mark.icon}
+						<li class="flex items-center gap-2">
+							<MarkIcon class={EngineMarkClass(mark, "size-3.5")} />
+							<span class="font-medium text-foreground">{presentation.label}</span>
+							<span class="ml-auto flex items-center gap-1.5 pl-4">
+								<svg viewBox="0 0 16 16" class="size-4 -rotate-90" aria-hidden="true">
+									<circle cx="8" cy="8" r="6" fill="none" stroke="var(--muted)" stroke-width="3" />
+									<circle
+										cx="8"
+										cy="8"
+										r="6"
+										fill="none"
+										stroke={mark.accent}
+										stroke-width="3"
+										stroke-linecap="round"
+										stroke-dasharray={`${engine_share(hovered, slice) * donut_circumference} ${donut_circumference}`}
+									/>
+								</svg>
+								<span class="tabular-nums text-muted-foreground">{token_label(slice.tokens)}</span>
+							</span>
+						</li>
+					{/each}
+				</ul>
+			{/if}
 		</div>
 	{/if}
 </div>

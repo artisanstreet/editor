@@ -218,11 +218,11 @@ export const make_github_release_source_layer = (repository_input: unknown) =>
 							`${base_url}/release-manifest.sig`,
 							MaximumManifestBytes,
 						);
-						const signature_value = yield* Effect.try({
-							try: () =>
-								JSON.parse(new TextDecoder().decode(signature.bytes)) as unknown,
-							catch: (cause) => new ReleaseSourceFailure({ cause }),
-						});
+						const signature_value = yield* Schema.decodeUnknownEffect(
+							Schema.UnknownFromJsonString,
+						)(new TextDecoder().decode(signature.bytes)).pipe(
+							Effect.mapError((cause) => new ReleaseSourceFailure({ cause })),
+						);
 						return {
 							manifest: manifest.bytes,
 							signature: signature_value,
@@ -823,10 +823,7 @@ export const make_node_installation_health_layer = (
 	);
 
 const DecodeJsonOutput = (output: string) =>
-	Effect.try({
-		try: () => JSON.parse(output) as unknown,
-		catch: (cause) => cause,
-	});
+	Schema.decodeUnknownEffect(Schema.UnknownFromJsonString)(output);
 
 /** Coordinates the home's single Forge instance across an atomic version switch. */
 export const make_node_forge_update_lifecycle_layer = (

@@ -38,7 +38,7 @@ const browser_endpoint = (socket: BrowserWebSocket): WebSocketEndpoint => ({
 		return () => socket.removeEventListener("error", callback);
 	},
 	add_message_listener: (listener) => {
-		const callback = (event: Event) => listener((event as unknown as { data: unknown }).data);
+		const callback = (event: Event) => listener("data" in event ? event.data : undefined);
 		socket.addEventListener("message", callback);
 
 		return () => socket.removeEventListener("message", callback);

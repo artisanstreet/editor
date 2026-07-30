@@ -68,13 +68,9 @@ export const make_installed_release_configuration_store_layer = (installation_ro
 			const Inspect = () =>
 				file_system.readFileString(configuration_path).pipe(
 					Effect.flatMap((content) =>
-						Effect.try({
-							try: () => JSON.parse(content) as unknown,
-							catch: (cause) => cause,
-						}).pipe(
-							Effect.flatMap(
-								Schema.decodeUnknownEffect(InstalledReleaseConfiguration),
-							),
+						Schema.decodeUnknownEffect(
+							Schema.fromJsonString(InstalledReleaseConfiguration),
+						)(content).pipe(
 							Effect.match({
 								onFailure: (cause): InstalledReleaseConfigurationState => ({
 									_tag: "Malformed",

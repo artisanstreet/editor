@@ -15,7 +15,7 @@ import {
 	Assignments,
 	OrchestrationGraphCommands,
 	OrchestrationGroups,
-} from "../../persistence/schema";
+} from "../../persistence/tables";
 import {
 	AgentGraphInvalid,
 	normalize_graph_error,

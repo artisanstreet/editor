@@ -4,35 +4,96 @@
 	import "$lib/styles/artisan-compatibility.css";
 
 	import { page } from "$app/state";
+	import type { ThreadListItem } from "@artisan/protocol";
 	import {
 		ArtisanClient,
 		type ArtisanConnectionState,
+		type ThreadListUpdate,
 	} from "@artisan/transport/client";
-	import { Effect, Stream } from "effect";
+	import { Effect, Option, Stream } from "effect";
 	import { ModeWatcher } from "mode-watcher";
 	import { onMount } from "svelte";
 	import { Toaster } from "svelte-sonner";
 	import {
 		BeginForgeHydration,
 		CompleteForgeHydration,
+		DismissForgeGate,
 		FailForgeHydration,
+		ForgeShellIsBlocked,
+		ForgeShellIsMounted,
 		InitialForgeGateModel,
 		ObserveForgeConnection,
 	} from "$lib/forge/gate";
+	import { RunAuthoritativeSubscription } from "$lib/conversation/subscription";
+	import { EditorWorkspaceId } from "$lib/editor/workspace-identity";
+	import { draft_thread_project } from "$lib/root/draft-thread";
+	import {
+		ApplyRootThreadListUpdate,
+		ResolveThreadRoute,
+	} from "$lib/root/thread-navigation";
 	import { ForgeHttpUrl } from "$lib/runtime/forge-endpoint";
 	import { AttemptDevelopmentSelfPair } from "$lib/runtime/pairing";
-	import ArtisanSidebar from "./components/artisan-sidebar.sv";
 	import DevInstanceBadge from "./components/dev-instance-badge.sv";
 	import ForgeConnectionOverlay from "./components/forge-connection-overlay.sv";
 	import ForgeShellPreview from "./components/forge-shell-preview.sv";
+	import EditorFilePanel from "./components/editor-file-panel.sv";
 	import SectionedPanel from "./components/sectioned-panel.sv";
 	import ThreadPanel from "./components/thread-panel.sv";
 
 	let { children } = $props();
 	let desktop_runtime = $state(false);
 	let forge_gate = $state.raw(InitialForgeGateModel);
-	const is_thread = $derived(/^\/threads\/[^/]+\/?$/.test(page.url.pathname));
+	let threads = $state.raw<ReadonlyArray<ThreadListItem>>([]);
+	/** The draft route and concrete threads both own the inspector panel. */
+	const is_thread = $derived(/^\/threads(?:\/[^/]+)?\/?$/.test(page.url.pathname));
+	/**
+	 * The layout owns route-derived state and hands it down: read inside the panel
+	 * itself, the same derivation went stale after a client-side navigation.
+	 */
+	const surface = $derived(page.url.pathname.startsWith("/editor") ? "editor" : "threads");
+	/**
+	 * The workspace the current route is actually inside, or nothing. The open
+	 * thread names its project, the draft names the project picked for it, and
+	 * the editor names its own `?workspace=` — there is no fallback to "some
+	 * attached project", so on routes outside any workspace this stays closed.
+	 */
+	const active_workspace_id = $derived.by(() => {
+		if (surface === "editor") return EditorWorkspaceId(page.url);
+		const route_id = page.params.id;
+		if (route_id !== undefined)
+			return Option.getOrUndefined(ResolveThreadRoute(threads, route_id))?.primary_project
+				?.project_id;
+		if (is_thread) return $draft_thread_project?.project_id;
+		return undefined;
+	});
 	const client = yield* ArtisanClient;
+
+	const ApplyThreadListUpdate = (update: ThreadListUpdate) =>
+		Effect.sync(() => {
+			threads = ApplyRootThreadListUpdate(threads, update);
+		});
+
+	const RefreshThreads = client.ListThreads.pipe(
+		Effect.map((next_threads) => ({
+			journal_sequence: 0,
+			threads: next_threads,
+			type: "snapshot" as const,
+		})),
+		Effect.flatMap(ApplyThreadListUpdate),
+	);
+
+	/**
+	 * The shell mounts before Forge is necessarily reachable, and the
+	 * subscription below re-runs this same refresh on every recovery attempt.
+	 * A failed first load is therefore expected and already answered.
+	 */
+	yield* RefreshThreads.pipe(Effect.ignore);
+
+	yield* RunAuthoritativeSubscription(
+		client.SubscribeThreadList,
+		ApplyThreadListUpdate,
+		RefreshThreads,
+	).pipe(Effect.forkScoped);
 
 	const HydrateForge = (generation: number): Effect.Effect<void> =>
 		Effect.all([client.GetRuntimeCatalog, client.ListProjects, client.ListThreads], {
@@ -70,6 +131,16 @@
 					: Effect.void,
 			),
 		);
+
+	/**
+	 * Dismissing the gate hands the shell over in its disconnected state so the
+	 * interface itself can be read and exercised. Reconnection keeps running
+	 * underneath, and every surface resubscribes on its own backoff, so the
+	 * workspace fills in the moment Forge returns.
+	 */
+	const DismissGate = () => {
+		forge_gate = DismissForgeGate(forge_gate);
+	};
 
 	const RetryHydration = Effect.sync(() => {
 		forge_gate = BeginForgeHydration(forge_gate);
@@ -126,16 +197,21 @@
 <Toaster position="top-center" />
 <DevInstanceBadge />
 
-{#snippet sidebar()}
-	<ArtisanSidebar />
-{/snippet}
-
 {#snippet primary()}
 	{@render children()}
 {/snippet}
 
 {#snippet secondary()}
 	<ThreadPanel />
+{/snippet}
+
+<!--
+	The editor's file tree takes the same column the thread inspector uses: one
+	surface belongs to whatever workspace is open, rather than each surface
+	inventing its own place to put things.
+-->
+{#snippet editor_files()}
+	<EditorFilePanel />
 {/snippet}
 
 <div class="flex h-dvh min-h-0 flex-col bg-background">
@@ -149,16 +225,23 @@
 	<div class="relative min-h-0 flex-1">
 		<div
 			class="h-full"
-			inert={forge_gate.state.phase !== "ready"}
+			inert={ForgeShellIsBlocked(forge_gate)}
 		>
-			{#if forge_gate.has_hydrated_shell}
-				<SectionedPanel {sidebar} {primary} secondary={is_thread ? secondary : undefined} />
+			{#if ForgeShellIsMounted(forge_gate)}
+				<SectionedPanel
+					{primary}
+					{surface}
+					{threads}
+					workspace_id={active_workspace_id}
+					secondary={surface === "editor" ? editor_files : is_thread ? secondary : undefined}
+				/>
 			{:else}
 				<ForgeShellPreview />
 			{/if}
 		</div>
 		<ForgeConnectionOverlay
 			model={forge_gate}
+			ondismiss={DismissGate}
 			retry_connection={client.RetryConnection}
 			retry_hydration={RetryHydration}
 		/>

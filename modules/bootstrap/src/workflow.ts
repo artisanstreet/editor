@@ -134,16 +134,19 @@ export const RunBootstrap = (input: unknown) =>
 					stdout: status.stdout,
 					stdout_truncated: true,
 				});
-			const raw_status = yield* Effect.try({
-				try: () => JSON.parse(status.stdout) as unknown,
-				catch: (cause) =>
-					new PermanentAeStatusInvalid({
-						cause,
-						permanent_ae_path: handoff.permanent_ae_path,
-						stdout: status.stdout,
-						stdout_truncated: false,
-					}),
-			});
+			const raw_status = yield* Schema.decodeUnknownEffect(Schema.UnknownFromJsonString)(
+				status.stdout,
+			).pipe(
+				Effect.mapError(
+					(cause) =>
+						new PermanentAeStatusInvalid({
+							cause,
+							permanent_ae_path: handoff.permanent_ae_path,
+							stdout: status.stdout,
+							stdout_truncated: false,
+						}),
+				),
+			);
 			yield* Schema.decodeUnknownEffect(ForgeRunningStatus)(raw_status).pipe(
 				Effect.mapError(
 					(cause) =>

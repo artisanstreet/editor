@@ -16,7 +16,7 @@ import {
 } from "@artisan/backend";
 import { JournalStore } from "../../modules/backend/src/persistence/journal-store";
 import { ThreadReadModel } from "../../modules/backend/src/persistence/thread-read-model";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 

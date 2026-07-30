@@ -8,22 +8,22 @@ import type { ContentIdentity } from "@artisan/protocol";
 
 import { BoundedRegularFileStore } from "../../modules/backend/src/filesystem/bounded-regular-file-store";
 import { WorkspaceBoundedRegularFileStoreRegistry } from "../../modules/backend/src/filesystem/workspace-bounded-regular-file-store-registry";
-import { WorkspaceChangeRepository } from "../../modules/backend/src/workspace/workspace-change-repository";
-import { WorkspaceChangeDiffService } from "../../modules/backend/src/workspace/workspace-change-diff-service";
-import { WorkspaceEvidenceRecorder } from "../../modules/backend/src/workspace/workspace-evidence-recorder";
+import { WorkspaceChangeRepository } from "../../modules/backend/src/workspace/changes/repository";
+import { WorkspaceChangeDiffService } from "../../modules/backend/src/workspace/changes/diff";
+import { WorkspaceEvidenceRecorder } from "../../modules/backend/src/workspace/evidence";
 import {
 	WorkspaceFileService,
 	WorkspaceFileServiceError,
 	WorkspaceFileServiceLive,
 	type WorkspaceFileReviewInput,
 	type WorkspaceFileRollbackInput,
-} from "../../modules/backend/src/workspace/workspace-file-service";
-import { WorkspaceMutationAuthority } from "../../modules/backend/src/workspace/workspace-mutation-authority";
+} from "../../modules/backend/src/workspace/files/service";
+import { WorkspaceMutationAuthority } from "../../modules/backend/src/workspace/mutations/authority";
 import {
 	WorkspaceMutationPayloadStore,
 	WorkspaceMutationPayloadStoreUnavailable,
-} from "../../modules/backend/src/workspace/workspace-mutation-payload-store";
-import { WorkspaceSnapshotStore } from "../../modules/backend/src/workspace/workspace-snapshot-store";
+} from "../../modules/backend/src/workspace/mutations/payloads";
+import { WorkspaceSnapshotStore } from "../../modules/backend/src/workspace/snapshot-store";
 
 const encoder = new TextEncoder();
 const now = "2026-07-12T12:00:00.000Z";

@@ -201,6 +201,7 @@ describe("standalone Artisan Forge process", () => {
 				ARTISAN_ALLOWED_ORIGINS: "http://127.0.0.1",
 				ARTISAN_AUTH_TOKEN: token,
 				ARTISAN_DATABASE_PATH: join(root, "artisan.db"),
+				ARTISAN_FORGE_DEVELOPMENT: "1",
 				ARTISAN_LISTEN_HOST: "127.0.0.1",
 				ARTISAN_LISTEN_PORT: "0",
 				ARTISAN_MIGRATIONS_PATH: resolve(".dist/forge/migrations"),
@@ -459,7 +460,7 @@ describe("standalone Artisan Forge process", () => {
 			);
 			expect(project).toMatchObject({
 				display_name: repository_name,
-				project_id: expect.stringMatching(/^project_[a-f0-9]{64}$/),
+				project_id: expect.stringMatching(/^[1-9]\d*$/),
 			});
 			expect(project.root_path).toBeTruthy();
 

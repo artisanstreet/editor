@@ -32,7 +32,7 @@ import {
 } from "@artisan/backend";
 
 import { Database } from "../../modules/backend/src/persistence/database";
-import { OrchestrationRawObservations } from "../../modules/backend/src/persistence/schema";
+import { OrchestrationRawObservations } from "../../modules/backend/src/persistence/tables";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];

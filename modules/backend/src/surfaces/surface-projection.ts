@@ -6,7 +6,9 @@ import { eq } from "drizzle-orm";
 import type { EngineObservation } from "@artisan/engines";
 import { SurfaceItem } from "@artisan/protocol";
 
-import { SurfaceItems, SurfaceUsageTotals } from "../persistence/schema";
+import type { DatabaseClient } from "../persistence/database";
+import { SurfaceItems, SurfaceUsageTotals } from "../persistence/tables";
+import { SurfaceInvariantFailed } from "./contracts";
 import { SurfaceFromEngineObservation } from "./engine-observation";
 
 const IsSafeRawIdentifier = (value: string) =>
@@ -55,7 +57,7 @@ const DecodeOpaqueSurfaceProjection = (
 
 /** Persists one safe surface and optional usage total in the raw-observation transaction. */
 export const PersistSurfaceProjection = (
-	transaction: any,
+	transaction: DatabaseClient,
 	observation: EngineObservation,
 	input: {
 		readonly thread_id: string;
@@ -128,4 +130,11 @@ export const PersistSurfaceProjection = (
 				target: SurfaceUsageTotals.run_id,
 				set: { input_tokens, output_tokens, updated_at: input.occurred_at },
 			});
-	}).pipe(Effect.orDie) as Effect.Effect<void, never>;
+	}).pipe(
+		Effect.mapError(
+			() =>
+				new SurfaceInvariantFailed({
+					message: `Surface projection ${observation.observation_id} could not be persisted`,
+				}),
+		),
+	);

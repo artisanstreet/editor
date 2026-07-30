@@ -200,17 +200,30 @@ export const make_node_forge_launcher_layer = Layer.effect(
 				// Build an argv-only Effect process command for traceability; spawn supplies
 				// the platform-specific detached/file-descriptor controls below.
 				void ChildProcess.make(artifact.executable_path, [artifact.host_entry_path]);
-				const child = spawn(artifact.executable_path, [artifact.host_entry_path], {
-					detached: !foreground,
-					env,
-					stdio: foreground ? "inherit" : ["ignore", log!.fd, log!.fd],
-					windowsHide: !foreground,
-				});
 				if (!foreground) {
+					if (log === undefined)
+						return yield* Effect.fail(
+							new ForgeLifecycleError({
+								cause: new Error("Detached Forge log was not opened"),
+								code: "timeout",
+							}),
+						);
+					const child = spawn(artifact.executable_path, [artifact.host_entry_path], {
+						detached: true,
+						env,
+						stdio: ["ignore", log.fd, log.fd],
+						windowsHide: true,
+					});
 					child.unref();
-					yield* Effect.promise(() => log!.close());
+					yield* Effect.promise(() => log.close());
 					return;
 				}
+				const child = spawn(artifact.executable_path, [artifact.host_entry_path], {
+					detached: false,
+					env,
+					stdio: "inherit",
+					windowsHide: false,
+				});
 				yield* Effect.callback<void, ForgeLifecycleError>((resume) => {
 					const on_error = (cause: Error) =>
 						resume(Effect.fail(new ForgeLifecycleError({ cause, code: "timeout" })));

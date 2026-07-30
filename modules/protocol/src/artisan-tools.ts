@@ -369,6 +369,17 @@ export type ArtisanToolWorkspaceFileTarget = typeof ArtisanToolWorkspaceFileTarg
 /** Requests a bounded, content-free recursive workspace path projection for editor discovery. */
 export const WorkspaceFileDiscoveryQuery = Schema.Struct({
 	after_path: Schema.optional(WorkspacePath),
+	/**
+	 * How many levels below the prefix to walk. A file tree opens one level at a
+	 * time, and an unbounded walk of a real repository spends its whole page on
+	 * whichever subtree sorts first. Absent means the walk is bounded only by
+	 * `limit`.
+	 */
+	depth: Schema.optional(
+		PositiveInt.check(
+			Schema.isLessThanOrEqualTo(64, { message: "Expected at most 64 levels" }),
+		),
+	),
 	limit: Schema.optional(
 		PositiveInt.check(
 			Schema.isLessThanOrEqualTo(1_000, { message: "Expected at most 1,000 paths" }),

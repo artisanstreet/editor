@@ -8,6 +8,7 @@ import {
 } from "@selemondev/svgl-svelte";
 import QuestionMark from "@tabler/icons-svelte/icons/question-mark";
 import type { Component } from "svelte";
+import { model_manifest } from "@artisan/catalog";
 
 /** Presents one engine's provider mark. @since 0.7.0 */
 export interface EngineMark {
@@ -40,6 +41,22 @@ const unknown_engine_mark: EngineMark = {
 export const EngineMarkFor = (engine_id: string | undefined): EngineMark =>
 	(engine_id === undefined ? undefined : engine_marks[engine_id]) ?? unknown_engine_mark;
 
+const engine_names: Readonly<Record<string, string>> = {
+	claude: "Claude",
+	codex: "Codex",
+	cursor: "Cursor",
+	grok: "Grok",
+};
+
+/**
+ * Names an engine without a round trip to the backend descriptor; an unknown
+ * id wears its capitalized id and an absent id reads as unattributed work.
+ */
+export const EngineDisplayName = (engine_id: string | undefined): string => {
+	if (engine_id === undefined) return "Other";
+	return engine_names[engine_id] ?? engine_id.charAt(0).toUpperCase() + engine_id.slice(1);
+};
+
 /**
  * Marks for the lab that made a model, distinct from the engine serving it:
  * a Cursor-hosted GPT model carries the OpenAI mark, not the Cursor cube.
@@ -63,4 +80,35 @@ export const ProviderMarkFor = (provider_id: string | undefined): EngineMark =>
 export const EngineMarkClass = (mark: EngineMark, size = "size-5") => {
 	const color = mark.muted === true ? " text-muted-foreground" : "";
 	return mark.monochrome ? `${size} shrink-0 dark:invert${color}` : `${size} shrink-0${color}`;
+};
+
+/** Presents one usage slice: the model's catalog name and its lab's mark. */
+export interface UsageSlicePresentation {
+	readonly label: string;
+	readonly mark: EngineMark;
+}
+
+/**
+ * Resolves how a usage slice reads and which mark it wears. A catalog model
+ * shows its name under its lab's mark (a Cursor-hosted GPT model wears the
+ * OpenAI mark); a model the catalog no longer lists shows its raw id; a slice
+ * without a model falls back to the engine's own name and mark.
+ */
+export const UsageSlicePresentationFor = (
+	engine_id: string | undefined,
+	model_id: string | undefined,
+): UsageSlicePresentation => {
+	const model =
+		model_id === undefined
+			? undefined
+			: model_manifest.models.find(
+					(candidate) =>
+						candidate.native_model_id === model_id &&
+						(engine_id === undefined || candidate.harness === engine_id),
+				);
+	if (model !== undefined) return { label: model.name, mark: ProviderMarkFor(model.provider) };
+	return {
+		label: model_id ?? EngineDisplayName(engine_id),
+		mark: EngineMarkFor(engine_id),
+	};
 };

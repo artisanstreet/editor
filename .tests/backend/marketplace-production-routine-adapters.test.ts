@@ -20,12 +20,12 @@ import {
 	make_local_routine_installer_layer,
 	make_local_routine_source_inspector_layer,
 	make_npx_skills_process_adapter_layer,
-} from "../../modules/backend/src/marketplace/routines/production-routine-adapters";
+} from "../../modules/backend/src/marketplace/routines/production-adapters";
 import {
 	NpxSkillsAdapter,
 	RoutineInstaller,
 	RoutineSourceInspector,
-} from "../../modules/backend/src/marketplace/routines/routine-adapters";
+} from "../../modules/backend/src/marketplace/routines/adapters";
 
 const roots: Array<string> = [];
 const TemporaryRoot = async () => {

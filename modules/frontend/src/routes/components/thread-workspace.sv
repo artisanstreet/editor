@@ -1,15 +1,15 @@
-<script lang="ts">
+<script lang="ts" effect>
 	import type {
 		ConversationSnapshot,
 		ImageAttachmentReference,
 		ThreadSessionPolicy,
 	} from "@artisan/protocol";
-	import { Effect, Option } from "effect";
-	import { onDestroy, onMount, tick } from "svelte";
+	import { Effect, Option, Queue } from "effect";
+	import { tick } from "svelte";
 	import type { ComposerSubmission } from "$lib/composer/image-attachments";
 	import type { ThreadMessageSubmissionOutcome } from "$lib/thread-interaction/commands";
 	import { ScrollArea } from "$lib/components/ui/scroll-area";
-	import { latest_active_activity_label } from "$lib/conversation/activity-status";
+	import { conversation_work_is_live } from "$lib/conversation/activity-status";
 	import {
 		ConversationAlignedScrollTop,
 		ConversationBaseEndSpacePixels,
@@ -146,15 +146,16 @@
 	let anchored_user_item_id = $state<string | undefined>();
 	let anchor_layout_frame = 0;
 	let smooth_anchor_pending = false;
-	let destroyed = false;
+	const anchor_layout_requests = yield* Queue.dropping<boolean>(1);
+	const position_requests = yield* Queue.dropping<void>(1);
 
 	const FindConversationItem = (item_id: string) =>
 		[...(viewport?.querySelectorAll<HTMLElement>("[data-conversation-item-id]") ?? [])]
 			.find((element) => element.dataset.conversationItemId === item_id);
 
-	const UpdateAnchorLayout = async (smooth: boolean) => {
-		await tick();
-		if (destroyed || viewport === null || end_space === null) return;
+	const UpdateAnchorLayout = (smooth: boolean) => Effect.gen(function* () {
+		yield* Effect.tryPromise(() => tick()).pipe(Effect.ignore);
+		if (viewport === null || end_space === null) return;
 		const item_id = anchored_user_item_id;
 		if (item_id === undefined) return;
 		const item = FindConversationItem(item_id);
@@ -169,9 +170,9 @@
 		);
 		if (next_end_space_height !== end_space_height) {
 			end_space_height = next_end_space_height;
-			await tick();
+			yield* Effect.tryPromise(() => tick()).pipe(Effect.ignore);
 		}
-		if (destroyed || !smooth || viewport === null) return;
+		if (!smooth || viewport === null) return;
 
 		const current_item = FindConversationItem(item_id);
 		if (current_item === undefined) return;
@@ -185,18 +186,23 @@
 				current_item.getBoundingClientRect().top,
 			),
 		});
-	};
+	});
 
 	const ScheduleAnchorLayout = (smooth = false) => {
-		if (anchored_user_item_id === undefined || destroyed) return;
+		if (anchored_user_item_id === undefined) return;
 		smooth_anchor_pending ||= smooth;
 		cancelAnimationFrame(anchor_layout_frame);
 		anchor_layout_frame = requestAnimationFrame(() => {
 			const should_smooth = smooth_anchor_pending;
 			smooth_anchor_pending = false;
-			void UpdateAnchorLayout(should_smooth);
+			Queue.offerUnsafe(anchor_layout_requests, should_smooth);
 		});
 	};
+	yield* Queue.take(anchor_layout_requests).pipe(
+		Effect.flatMap(UpdateAnchorLayout),
+		Effect.forever,
+		Effect.forkScoped,
+	);
 
 	const SubmitMessage = (submission: ComposerSubmission) => {
 		const submit = onsubmit;
@@ -217,22 +223,24 @@
 		);
 	};
 
-	const PositionLoadedThread = async () => {
-		await tick();
-		if (destroyed || viewport === null) return;
+	const PositionLoadedThread = Effect.gen(function* () {
+		yield* Effect.tryPromise(() => tick()).pipe(Effect.ignore);
+		if (viewport === null) return;
 		viewport.scrollTop = ConversationBottomScrollTop(
 			viewport.scrollHeight,
 			viewport.clientHeight,
 		);
-	};
-
-	onMount(() => {
-		void PositionLoadedThread();
 	});
+	yield* Queue.take(position_requests).pipe(
+		Effect.flatMap(() => PositionLoadedThread),
+		Effect.forever,
+		Effect.forkScoped,
+	);
+	yield* Effect.addFinalizer(() => Effect.sync(() => cancelAnimationFrame(anchor_layout_frame)));
 
-	onDestroy(() => {
-		destroyed = true;
-		cancelAnimationFrame(anchor_layout_frame);
+	$effect(() => {
+		if (viewport === null) return;
+		Queue.offerUnsafe(position_requests, undefined);
 	});
 
 	$effect(() => {
@@ -294,16 +302,17 @@
 									/>
 								{:else if block.type === "work_group"}
 									<ConversationWorkSession
-										activity_label={latest_active_activity_label(block.details)}
 										duration_kind={block.duration_kind}
-										engine_id={policy?.engine_id}
+										has_live_detail={conversation_work_is_live(block.details)}
 										item={block.session}
+										transition={block.transition}
 									>
 										{#snippet details()}
 											<ConversationTrace
 												failed={block.session.status === "failed" ||
 													block.session.status === "cancelled"}
 												items={block.details}
+												work_active={block.session.ended_at === undefined}
 											/>
 										{/snippet}
 									</ConversationWorkSession>

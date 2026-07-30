@@ -146,6 +146,7 @@ export interface AgentGraphRepositoryShape {
 		instance_id: string,
 		native_thread_id: string,
 		resume_token: unknown,
+		model_id?: string,
 	) => Effect.Effect<AgentRunActivation, AgentGraphError>;
 	readonly FailRunStart: (
 		run_id: string,

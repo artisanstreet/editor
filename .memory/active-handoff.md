@@ -25,87 +25,91 @@ Last updated: 2026-07-30. Branch continuity only. Durable verified status is in
 - A portable target always starts fresh. Compatible same-engine resume is
   version/model gated and carries the new ordered request content explicitly.
 
-## Active Milestone: Portable Compaction / Engine Switching
+## Active Thermonuclear Remediation
 
-- Canonical design and reverse engineering are in
-  `docs/research/portable-engine-handoff.md`.
-- Codex CLI 0.145.0 exposes no plaintext native compaction summary. Cross-engine
-  export uses an exact settled ephemeral `thread/fork` and one constrained,
-  no-tool structured summary turn. Invalid/unavailable export falls back to the
-  canonical transcript at the fixed cut.
-- Claude Code 2.1.220 exposes `compact_summary` through official `PostCompact`.
-  An invocation-scoped plugin records the pre-append transcript identity and
-  offset; a private receiver pairs it with the immediately following
-  `compact_boundary`/`isCompactSummary` records.
-- Codex and Claude native continuation require an explicit target model and an
-  exact version-tested adapter decision. Codex also verifies the target through
-  bounded `model/list` pagination.
-
-## Completed Implementation
-
-- Engine contracts expose native compatibility, portable export, ordered
-  `next_content`, and private native-compaction results.
-- Codex export is version gated, model probed, strictly correlated, bounded,
-  pagination aware, and rejects tool/request activity. Resume sends exact
-  ordered text/image input.
-- Claude capture is private and summary-free publicly. It confines paths to the
-  real Claude project root, verifies descriptor identity, bounds bytes/time,
-  rejects symlinks/replacements/malformed input, waits the full race window for
-  conflicts, treats duplicate delivery idempotently, and selects the latest
-  valid compaction by transcript offset. The packaged helper cleans temp files.
-- `thread-continuation-model.ts` owns checkpoint bounds, hashing, canonical
-  fallback, logical post-boundary tail, and multimodal-safe injection.
-- `ThreadContinuationService` chooses fresh/native/Claude-summary/Codex-export/
-  canonical paths and persists immutable private lineage.
-- Separate continuation tables/migration avoid absorbing dirty shared
-  `schema.ts` WIP. Persistence pins exact journal cuts, verifies private
-  compactions, prepares/opens/binds/fails atomically, serializes neighboring
-  launches, reconciles cold-start stranding, and obeys erasure fences.
-- Orchestration prepares before open, strips summary material from public
-  observations, records native compaction privately after close, binds native
-  identity atomically, wakes queued dispatch, and performs cold recovery once.
-- Thread erasure deletes all continuation state. Forge packages the Claude hook
-  helper as `claude-post-compact-hook.js`.
-- End-to-end migrated-SQLite tests prove Claude → Codex, Codex → Claude,
-  compatible Claude model resume, ordered multimodal input, private lineage,
-  erasure, and three rapid serialized Codex launches.
-- Canonical history is schema-decoded and bounded in SQL, ordered by same-agent
-  logical run starts rather than the globally interleaved journal. Exact counts,
-  earliest objectives, source cuts, and native-summary boundaries remain
-  correct when the next request is queued before the prior run settles.
-- Claude boundary UUID and trigger must agree across stream, transcript, hook,
-  raw provenance, persisted state, and launch validation. Persisted summary
-  hashes are recomputed on read and launch; tampering falls back canonically.
-- The live model selector permits engine changes after a run settles and keeps
-  other providers disabled only while a run is active. The existing durable
-  session-policy update then drives the next run through continuation.
+- Sol-light workers own non-overlapping slices; the coordinator owns architecture,
+  integration, independent review, full validation, status, and direct-master
+  milestone commits. Existing dirty WIP remains user-owned and uncommitted.
+- An early scoped-format mistake traversed 792 files; no shared dirty work was
+  reverted. Review unowned formatting deltas before staging.
+- Correctness/security: workspace authority revokes on detach/root change and
+  subscribes before its initial snapshot; Claude compaction uses safe no-tools
+  flags. Deterministic race and focused suites pass.
+- Effect/SER: browser/helper lifecycles are scoped. Dropdown highlights use a
+  component-owned SER queue/fiber worker with no manual scope/runSync boundary;
+  frontend/lifecycle suites and production build pass.
+- Protocol schemas are a 17-line facade over nine modules; subscriptions are
+  eight scoped modules (largest 230). Project/session/runtime/routine/capability/
+  control/tool/preview handlers are scoped modules. Live-event delivery stays
+  typed, exact settings constructors replace casts, and uniform handler
+  construction replaces the dependency bundle. Server/ready dispatch/mutations
+  are 664/292/398 lines; the final protocol review fixes pass 70 focused tests.
+- Orchestration is 916/345/856-line repository/acceptance/transaction dispatch;
+  29 atomicity/continuation/structure tests pass.
+- Transport public contract is 563/586 lines; the 1,559-line prefixed fixture is
+  replaced by seven contextual modules (largest 526). The supported `client.ts`
+  facade now targets `client-api/`, eliminating its file/directory collision.
+  The live client is a
+  379-line lifecycle composer over ten scoped domain API modules, each below
+  500 lines. Subscription coordination is now a 45-line composer acquiring
+  options, identity/trace, protocol send, and error reporting through Context
+  Services/Layers over contextual ingress/registry/typed-delivery modules
+  (largest 648), with unsafe projection double casts removed; 30 focused tests pass.
+- Git and workspace now have contextual names and all files below 1,000. Git
+  verification passes 77+35 tests; workspace passes 56 after independent codec
+  and non-null cleanup.
+- Routines is a 34-line composer over scoped modules (largest 506); 93 tests
+  pass. Capabilities are below 1,000 after lifecycle/invocation/drift extraction
+  and pass 39 tests. Catalog is a 30-line decoded composer (30 tests).
+- Continuation persistence is a 19-line composer over modules at most 416 lines;
+  independent structure/repository/service/compactor rerun passes 25 tests.
+- Preview is contextual and bounded; its repository persistence boundary now
+  uses Schema JSON decoding and typed missing-row failures, with 8 independent
+  safety/structure tests passing.
+- Codex is contextual and below 1,000 after executable/probe extraction; 98
+  tests pass and missing fallback executables again use EngineProcessError.
+  Guidance is 634/455 service/provider-sync with 53 tests. Persistence schema is
+  a 12-line facade over 12 modules, preserving 66 table exports (89 tests).
+- Conversation projection is an 11-line facade over modules at most 263 lines;
+  persistence decoding is Schema-based and 16 independent tests pass.
+- Filesystem replacement is 696/644-line service/replacement with a scoped
+  construction context; 62 focused tests pass after typed path narrowing.
+- Terminal is contextual and split into files at most 698 lines; production has
+  no raw JSON or non-null assertions and 14 focused tests pass.
+- Platform boundaries across bootstrap, CLI, Forge, desktop, and distribution
+  now use Effect Schema and typed narrowing; 81 focused tests pass and a source
+  guard bans raw JSON/non-null assertions in the 17 remediated files.
+- Engine JSONL/auth/usage boundaries now use Effect Schema and typed capture
+  narrowing; 56 tests pass, one is skipped, and a source guard is present.
+- Journal/thread/orchestration persistence boundaries are Schema-decoded with
+  typed invariant failures (101 tests). A second 18-file backend sweep removes
+  remaining unsafe assertions/JSON across tools, workspace, Git, graph, preview,
+  guidance, routines, and favorites with 187 tests passing.
+- Model behaviour/favorites now use contextual filenames and Schema-decoded
+  config/probe/graph boundaries; 83 focused tests pass.
+- The protocol `control.ts`/`control/` ESM collision is removed via the
+  `control-contract/` path; its regression guard and crash fixture pass 18 tests.
+- A repository-wide source-quality guard enforces the 1,000-line ceiling,
+  contextual filenames, no raw JSON/non-null assertions, and SER ownership.
+- All reviewed positional bundles, double casts, `Effect.orDie` conversions,
+  and basename collisions are removed; both final thermos verdicts are clean.
+  Sander authorized the integrated milestone. Commit staging explicitly excludes
+  the protected page, personal config, and five unrelated migrations; direct
+  master commit/push is in progress.
 
 ## Verification
 
-- Final independent P0-P3 review is clean after resolving logical-run lineage,
-  summary integrity, boundary-trigger, forward-compatible raw-frame, mailbox
-  overflow, and content-only resume findings.
-- `pnpm run check` passes. The final 14-file provider/continuation/packaging
-  matrix passes 140 tests with 1 explicit skip. Native formatting/clippy and 45
-  Rust tests pass.
-- `pnpm run lint` and the production frontend build pass with pre-existing WIP
-  warnings. Full Vitest reaches 1,837 passes and 7 skips; 10 failures are in
-  unrelated dirty catalog/frontend/Forge/workspace-rebuild WIP.
-- Aggregate `pnpm run validate` stops at four unrelated dirty formatting files:
-  `.tests/frontend/activity-status.test.ts`,
-  `.tests/frontend/shell-source-layout.test.ts`,
-  `modules/backend/src/threads/project-locator.ts`, and
-  `modules/frontend/src/lib/styles/global.css`.
-- The engine-unlock regression, root TypeScript check, and production frontend
-  build pass. No live preview was attached and repository rules prohibit
-  starting a development server without an explicit request.
-- The engine-unlock milestone is verified; no implementation work remains.
+- `pnpm run validate` is green: format, zero-warning lint, TypeScript, production
+  build, 292 Vitest files/1,959 tests (7 skips), native format/clippy, and 45 Rust
+  tests. The global guard and both final thermos reviews are clean.
+- No development server was started.
 
 ## Dirty-Tree Integration Notes
 
 - Task-owned new files are the continuation model/service/repository/schema,
-  migration `20260730121130_chilly_tarot`, Claude capture/helper, and focused
-  continuation/package tests.
+  compactor service and its test, migrations `20260730121130_chilly_tarot` and
+  `20260730161038_silky_stingray`, and focused continuation tests. The Claude
+  capture/helper files and their capture/packaging tests are deleted (staged).
 - Shared dirty files include `agent-orchestrator.ts`, `backend-runtime.ts`,
   backend `index.ts`, `forge.vite.config.ts`, provider adapters/tests, and other
   Sander WIP. Isolate task hunks when committing; do not absorb unrelated work.

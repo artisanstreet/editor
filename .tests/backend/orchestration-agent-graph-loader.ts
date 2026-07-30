@@ -6,17 +6,37 @@ export async function resolve(specifier: string, context: object, next_resolve: 
 	try {
 		return await next_resolve(specifier, context);
 	} catch (error) {
-		const is_missing_module =
+		const error_code =
 			typeof error === "object" &&
 			error !== null &&
 			"code" in error &&
-			error.code === "ERR_MODULE_NOT_FOUND";
+			typeof error.code === "string"
+				? error.code
+				: undefined;
 		const is_relative = specifier.startsWith(".") || specifier.startsWith("file:");
 
-		if (!is_missing_module || !is_relative) {
+		if (!is_relative) {
 			throw error;
 		}
 
-		return next_resolve(`${specifier}.ts`, context);
+		if (error_code === "ERR_MODULE_NOT_FOUND") return next_resolve(`${specifier}.ts`, context);
+		if (error_code === "ERR_UNSUPPORTED_DIR_IMPORT") {
+			try {
+				return await next_resolve(`${specifier}.ts`, context);
+			} catch (file_error) {
+				const file_error_code =
+					typeof file_error === "object" &&
+					file_error !== null &&
+					"code" in file_error &&
+					typeof file_error.code === "string"
+						? file_error.code
+						: undefined;
+				if (file_error_code === "ERR_MODULE_NOT_FOUND")
+					return next_resolve(`${specifier}/index.ts`, context);
+				throw file_error;
+			}
+		}
+
+		throw error;
 	}
 }

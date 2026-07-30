@@ -10,7 +10,7 @@ import {
 	GitCommandExecutor,
 	type GitCommandInput,
 	type GitCommandResult,
-} from "../../modules/backend/src/git/git-command-executor";
+} from "../../modules/backend/src/git/executor";
 import {
 	make_workspace_git_registry_layer,
 	WorkspaceGitRegistry,

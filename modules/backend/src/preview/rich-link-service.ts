@@ -299,7 +299,16 @@ export function make_rich_link_metadata_layer(options: RichLinkMetadataOptions =
 						);
 					}
 
-					return addresses[0]!;
+					const address = addresses.at(0);
+					if (address === undefined)
+						return yield* Effect.fail(
+							metadata_error(
+								url.href,
+								"blocked_address",
+								new Error("DNS returned no addresses"),
+							),
+						);
+					return address;
 				});
 
 			const request = (url: URL, max_bytes: number, accept: string) =>

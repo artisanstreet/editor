@@ -81,9 +81,12 @@ describe("Forge boundary", () => {
 		});
 
 		const health = await fetch(new URL("/healthz", host.endpoint));
-		/** Static hosting is on in this composition, so health marks development. */
+		/**
+		 * Static hosting no longer implies development: the marker is stated by
+		 * whoever launched the instance, and this composition states nothing.
+		 */
 		expect(await health.json()).toEqual({
-			development: true,
+			development: false,
 			service: "artisan-forge",
 			status: "ready",
 			version: 1,

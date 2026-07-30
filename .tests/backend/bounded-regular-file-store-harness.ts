@@ -103,6 +103,8 @@ const MakeRegistry = (
 				return Effect.succeed({ reader, workspace_id });
 			},
 			ListWorkspaceIds: Effect.succeed([...by_workspace.keys()].toSorted()),
+			/** The harness is immutable and reports its already-composed authority. */
+			Reconcile: () => Effect.succeed([...by_workspace.keys()].toSorted()),
 		} satisfies typeof WorkspaceBoundedRegularFileStoreRegistry.Service;
 	});
 

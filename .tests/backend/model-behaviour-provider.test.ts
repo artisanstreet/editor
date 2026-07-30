@@ -9,12 +9,12 @@ import {
 	ModelBehaviourConfigFiles,
 	make_model_behaviour_config_files_layer,
 	type ModelBehaviourConfigFileHooks,
-} from "../../modules/backend/src/model-behaviour/model-behaviour-config-files";
+} from "../../modules/backend/src/model-behaviour/config-files";
 import {
 	make_codex_model_behaviour_provider,
 	type ModelBehaviourProviderObservation,
-} from "../../modules/backend/src/model-behaviour/model-behaviour-provider";
-import { make_codex_auto_compaction_mapping } from "../../modules/backend/src/model-behaviour/model-behaviour-registry";
+} from "../../modules/backend/src/model-behaviour/provider";
+import { make_codex_auto_compaction_mapping } from "../../modules/backend/src/model-behaviour/registry";
 
 const roots: Array<string> = [];
 

@@ -4,9 +4,18 @@
 	let {
 		children,
 		class: class_name = "",
+		flat = false,
 	}: {
 		children: Snippet<[{ move_hover: (event: Event) => void }]>;
 		class?: string;
+		/**
+		 * Skips the content wrapper's stacking context so the pill can travel
+		 * across sibling card housings: static housing backgrounds then paint
+		 * under the pill while positioned controls paint above it. Flat
+		 * consumers must give their hoverable controls `position: relative`
+		 * and keep housings free of transforms and filters at rest.
+		 */
+		flat?: boolean;
 	} = $props();
 
 	let surface = $state<HTMLElement>();
@@ -23,6 +32,26 @@
 		visible = false;
 	};
 
+	/**
+	 * Layout offsets rather than client rects: a dropdown measured while its
+	 * content is still playing the zoom-and-slide entry animation would bake
+	 * that transform into the pill and then visibly slide itself straight.
+	 * offsetLeft/offsetTop ignore transforms, so the first read is already final.
+	 */
+	const offset_within_surface = (target: HTMLElement) => {
+		let left_offset = 0;
+		let node: HTMLElement | null = target;
+		let top_offset = 0;
+
+		while (node !== null && node !== surface) {
+			left_offset += node.offsetLeft;
+			top_offset += node.offsetTop;
+			node = node.offsetParent instanceof HTMLElement ? node.offsetParent : null;
+		}
+
+		return { left: left_offset, top: top_offset };
+	};
+
 	const move_hover = (event: Event) => {
 		if (!(event.currentTarget instanceof HTMLElement) || !surface) return;
 		if (event.type === "focus") {
@@ -32,15 +61,15 @@
 			}
 		}
 
-		const surface_rect = surface.getBoundingClientRect();
-		const target_rect = event.currentTarget.getBoundingClientRect();
+		const target = event.currentTarget;
+		const offset = offset_within_surface(target);
 
 		animated = visible;
-		height = target_rect.height;
-		left = target_rect.left - surface_rect.left;
-		top = target_rect.top - surface_rect.top;
+		height = target.offsetHeight;
+		left = offset.left;
+		top = offset.top;
 		visible = true;
-		width = target_rect.width;
+		width = target.offsetWidth;
 	};
 </script>
 
@@ -57,7 +86,7 @@
 		aria-hidden="true"
 		style={`--docs-sidebar-hover-x: ${left}px; --docs-sidebar-hover-y: ${top}px; --docs-sidebar-hover-width: ${width}px; --docs-sidebar-hover-height: ${height}px;`}
 	></div>
-	<div class="relative z-1">
+	<div class={flat ? "" : "relative z-1"}>
 		{@render children({ move_hover })}
 	</div>
 </div>

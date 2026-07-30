@@ -11,12 +11,18 @@
 		strength = "quiet",
 		use_card = true,
 		use_rays = true,
+		use_material = true,
 		...rest_props
 	}: WithElementRef<HTMLAttributes<HTMLDivElement>> & {
 		children: Snippet;
 		strength?: "quiet" | "strong";
 		use_card?: boolean;
 		use_rays?: boolean;
+		/**
+		 * Off leaves the surface unglazed: the rays still light it, but the frosted
+		 * material belongs to a nested surface instead of covering the whole card.
+		 */
+		use_material?: boolean;
 	} = $props();
 </script>
 
@@ -35,8 +41,10 @@
 			<PaperGodRays />
 		</div>
 	{/if}
-	<div aria-hidden="true" class="shader-glass-material"></div>
-	<div aria-hidden="true" class="shader-glass-highlight"></div>
+	{#if use_material}
+		<div aria-hidden="true" class="shader-glass-material"></div>
+		<div aria-hidden="true" class="shader-glass-highlight"></div>
+	{/if}
 	<div class="relative z-10 size-full">
 		{@render children()}
 	</div>

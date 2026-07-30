@@ -6,7 +6,7 @@ import {
 	type ProtocolErrorDetail,
 } from "@artisan/protocol";
 
-import type { ArtisanClientError } from "../client-contract";
+import type { ArtisanClientError } from "../client-api/service";
 import {
 	client_error,
 	protocol_client_error,
@@ -24,6 +24,13 @@ interface PendingRequest {
 interface RequestState {
 	readonly disposed: boolean;
 	readonly ignored_correlations: ReadonlySet<string>;
+	/**
+	 * Set once the connection has spent its reconnect budget. A request holds
+	 * only for as long as something will carry it: while a session is merely
+	 * missing it waits to be retried on reconnect, but a parked connection has
+	 * nothing left to retry with, so waiting becomes waiting forever.
+	 */
+	readonly parked: ArtisanClientError | undefined;
 	readonly pending: ReadonlyMap<string, PendingRequest>;
 }
 
@@ -31,6 +38,7 @@ type RequestRegistration =
 	| { readonly _tag: "Conflict" }
 	| { readonly _tag: "Disposed" }
 	| { readonly _tag: "Overflow" }
+	| { readonly _tag: "Parked"; readonly error: ArtisanClientError }
 	| { readonly _tag: "Registered" };
 
 type PendingMatch =
@@ -41,6 +49,8 @@ type PendingMatch =
 /** Owns exact request envelopes until one durable or correlated result completes. */
 export interface ClientRequestCoordinator {
 	readonly Dispose: (error: ArtisanClientError) => Effect.Effect<void>;
+	/** Fails everything in flight once the connection stops trying to reconnect. */
+	readonly Park: (error: ArtisanClientError) => Effect.Effect<void>;
 	readonly Reject: (
 		correlation_id: string,
 		detail: ProtocolErrorDetail,
@@ -50,6 +60,8 @@ export interface ClientRequestCoordinator {
 	) => Effect.Effect<ControlRpcSuccessFor<Request>, ArtisanClientError>;
 	readonly ResetConnection: Effect.Effect<void>;
 	readonly Resolve: (envelope: PendingResultEnvelope) => Effect.Effect<void, ArtisanClientError>;
+	/** Lifts the parked state when a session carries requests again. */
+	readonly Resume: Effect.Effect<void>;
 	readonly Retry: Effect.Effect<void, ArtisanClientError>;
 }
 
@@ -62,6 +74,7 @@ export const make_client_request_coordinator = (
 		const state = yield* Ref.make<RequestState>({
 			disposed: false,
 			ignored_correlations: new Set(),
+			parked: undefined,
 			pending: new Map(),
 		});
 
@@ -69,6 +82,10 @@ export const make_client_request_coordinator = (
 			Ref.modify<RequestState, RequestRegistration>(state, (current) => {
 				if (current.disposed) {
 					return [{ _tag: "Disposed" }, current];
+				}
+
+				if (current.parked !== undefined) {
+					return [{ _tag: "Parked", error: current.parked }, current];
 				}
 
 				if (
@@ -126,6 +143,8 @@ export const make_client_request_coordinator = (
 								new Error("client disposed"),
 							),
 						);
+					case "Parked":
+						return yield* Effect.fail(registration.error);
 					case "Conflict":
 						return yield* Effect.fail(
 							client_error(
@@ -275,11 +294,29 @@ export const make_client_request_coordinator = (
 			),
 		);
 
+		const park = (error: ArtisanClientError) =>
+			Effect.gen(function* () {
+				const current = yield* Ref.getAndUpdate(state, (value) => ({
+					...value,
+					parked: error,
+					pending: new Map<string, PendingRequest>(),
+				}));
+
+				yield* Effect.forEach(
+					current.pending.values(),
+					(pending) => Deferred.fail(pending.deferred, error),
+					{ discard: true },
+				);
+			});
+
+		const resume = Ref.update(state, (current) => ({ ...current, parked: undefined }));
+
 		const dispose = (error: ArtisanClientError) =>
 			Effect.gen(function* () {
 				const current = yield* Ref.getAndSet(state, {
 					disposed: true,
 					ignored_correlations: new Set<string>(),
+					parked: undefined,
 					pending: new Map(),
 				});
 
@@ -292,10 +329,12 @@ export const make_client_request_coordinator = (
 
 		return {
 			Dispose: dispose,
+			Park: park,
 			Reject: reject,
 			Request: request,
 			ResetConnection: reset_connection,
 			Resolve: resolve,
+			Resume: resume,
 			Retry: retry,
 		} satisfies ClientRequestCoordinator;
 	});

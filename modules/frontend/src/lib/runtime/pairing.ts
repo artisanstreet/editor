@@ -21,6 +21,13 @@ export interface BrowserPairingLocation {
 	readonly search: string;
 }
 
+export interface BrowserNavigationHost {
+	readonly history: {
+		readonly replaceState: (data: null, unused: string, url: string) => void;
+	};
+	readonly location: BrowserPairingLocation;
+}
+
 export class BrowserPairingExchange extends Context.Service<
 	BrowserPairingExchange,
 	{
@@ -57,25 +64,22 @@ export class BrowserNavigation extends Context.Service<
 	}
 >()("Artisan/BrowserNavigation") {}
 
-export const BrowserNavigationLive = Layer.sync(BrowserNavigation, () => {
-	const browser = globalThis as unknown as {
-		readonly history: { replaceState: (data: null, unused: string, url: string) => void };
-		readonly location: BrowserPairingLocation;
-	};
-	const Location = Effect.sync(() => ({
-		hash: browser.location.hash,
-		pathname: browser.location.pathname,
-		protocol: browser.location.protocol,
-		search: browser.location.search,
-	}));
-	const ReplaceUrl = (url: string) =>
-		Effect.try({
-			catch: PairingFailure,
-			try: () => browser.history.replaceState(null, "", url),
-		});
+export const MakeBrowserNavigationLive = (browser: BrowserNavigationHost) =>
+	Layer.sync(BrowserNavigation, () => {
+		const Location = Effect.sync(() => ({
+			hash: browser.location.hash,
+			pathname: browser.location.pathname,
+			protocol: browser.location.protocol,
+			search: browser.location.search,
+		}));
+		const ReplaceUrl = (url: string) =>
+			Effect.try({
+				catch: PairingFailure,
+				try: () => browser.history.replaceState(null, "", url),
+			});
 
-	return BrowserNavigation.of({ Location, ReplaceUrl });
-});
+		return BrowserNavigation.of({ Location, ReplaceUrl });
+	});
 
 /**
  * Exactly two launch grammars exist: the browser flow's `#pair=<code>` and the

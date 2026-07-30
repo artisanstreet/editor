@@ -5,7 +5,7 @@ import type { CommandEnvelope } from "@artisan/protocol";
 
 import { Database } from "../../persistence/database";
 import { JournalNotifier } from "../../persistence/journal-notifier";
-import { RuntimeMetadata } from "../../runtime/runtime-metadata";
+import { RuntimeMetadata } from "../../runtime/metadata";
 import {
 	AgentGraphInvalid,
 	type AgentGraphCommand,
@@ -112,16 +112,19 @@ export function control_action(payload: AgentGraphCommand): AgentGraphControlAct
 }
 
 export function title_case_role(role: string) {
-	return role.length === 0 ? "Agent" : `${role[0]!.toUpperCase()}${role.slice(1)}`;
+	const first_character = role.at(0);
+	return first_character === undefined
+		? "Agent"
+		: `${first_character.toUpperCase()}${role.slice(1)}`;
 }
 
 export const visible_name_maximum = 64;
 
 const has_control_character = (value: string) =>
 	[...value].some((character) => {
-		const code = character.codePointAt(0)!;
+		const code = character.codePointAt(0);
 
-		return code <= 31 || code === 127 || (code >= 128 && code <= 159);
+		return code !== undefined && (code <= 31 || code === 127 || (code >= 128 && code <= 159));
 	});
 
 export function normalize_visible_label(

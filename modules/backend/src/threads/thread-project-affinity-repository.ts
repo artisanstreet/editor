@@ -33,8 +33,8 @@ import {
 	ThreadProjectAffinityEvidence,
 	Threads,
 	ThreadTombstones,
-} from "../persistence/schema";
-import { RuntimeMetadata } from "../runtime/runtime-metadata";
+} from "../persistence/tables";
+import { RuntimeMetadata } from "../runtime/metadata";
 import { DecodeThreadProjection } from "./internal/thread-projection";
 import {
 	decide_project_affinity,
@@ -196,10 +196,10 @@ const DecodeJson = <A>(
 	schema: Schema.ConstraintDecoder<A, never>,
 	context: string,
 ) =>
-	Effect.try({
-		catch: () => new JournalInvariantError({ message: `${context} JSON is malformed` }),
-		try: () => JSON.parse(value) as unknown,
-	}).pipe(
+	Schema.decodeUnknownEffect(Schema.UnknownFromJsonString)(value).pipe(
+		Effect.mapError(
+			() => new JournalInvariantError({ message: `${context} JSON is malformed` }),
+		),
 		Effect.flatMap(
 			Schema.decodeUnknownEffect(schema, {
 				onExcessProperty: "error",
@@ -303,11 +303,13 @@ const BuildAutomaticProjection = (
 	const primary_project = decision.primary_project ?? current.primary_project;
 	const suggested_project = decision.rehome_suggestion?.project;
 	const rehome_suggestion =
-		suggested_project && suggested_project.project_id !== primary_project?.project_id
+		suggested_project &&
+		decision.rehome_suggestion !== undefined &&
+		suggested_project.project_id !== primary_project?.project_id
 			? {
 					basis_affinity_version: current.affinity_version + 1,
 					project: suggested_project,
-					score: decision.rehome_suggestion!.score,
+					score: decision.rehome_suggestion.score,
 				}
 			: undefined;
 	const primary_changed = primary_project?.project_id !== current.primary_project?.project_id;
@@ -449,12 +451,16 @@ export const ThreadProjectAffinityRepositoryLive = Layer.effect(
 						thread_id: input.thread_id,
 					})
 					.returning({ journal_sequence: JournalEvents.sequence });
+				if (inserted === undefined)
+					return yield* new JournalInvariantError({
+						message: `Affinity event ${event_id} returned no inserted row`,
+					});
 
 				return {
 					...(input.agent_id ? { agent_id: input.agent_id } : {}),
 					causation_id: input.causation_id,
 					correlation_id: input.correlation_id,
-					journal_sequence: inserted!.journal_sequence,
+					journal_sequence: inserted.journal_sequence,
 					kind: "event" as const,
 					message_id: event_id,
 					origin: "backend" as const,

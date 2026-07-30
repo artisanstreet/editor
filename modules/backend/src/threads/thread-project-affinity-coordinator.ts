@@ -231,7 +231,9 @@ export const ThreadProjectAffinityCoordinatorLive = Layer.effect(
 			}
 
 			yield* Effect.forEach(events, ObserveEvent);
-			yield* Ref.set(journal_sequence, events.at(-1)!.journal_sequence);
+			const latest_event = events.at(-1);
+			if (latest_event === undefined) return 0;
+			yield* Ref.set(journal_sequence, latest_event.journal_sequence);
 
 			return events.length;
 		});

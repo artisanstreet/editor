@@ -19,7 +19,7 @@ import {
 import { Database } from "../../modules/backend/src/persistence/database";
 import { ProjectCatalog } from "../../modules/backend/src/projects/project-catalog";
 import { JournalStore } from "../../modules/backend/src/persistence/journal-store";
-import { ThreadProjectAffinityEvidence } from "../../modules/backend/src/persistence/schema";
+import { ThreadProjectAffinityEvidence } from "../../modules/backend/src/persistence/tables";
 import { ThreadReadModel } from "../../modules/backend/src/persistence/thread-read-model";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));

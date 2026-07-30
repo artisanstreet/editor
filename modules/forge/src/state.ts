@@ -74,11 +74,8 @@ export const RemoveForgeState = (path: string, instance_id: string) =>
 			try: () => readFile(path, "utf8"),
 			catch: (cause) => StateFailure(path, "read", cause),
 		});
-		const existing = yield* Schema.decodeUnknownEffect(ForgeState)(
-			yield* Effect.try({
-				try: () => JSON.parse(encoded),
-				catch: (cause) => StateFailure(path, "read", cause),
-			}),
+		const existing = yield* Schema.decodeUnknownEffect(Schema.fromJsonString(ForgeState))(
+			encoded,
 		).pipe(Effect.mapError((cause) => StateFailure(path, "read", cause)));
 		if (existing.instance_id !== instance_id) return;
 		yield* Effect.tryPromise({

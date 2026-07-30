@@ -2,8 +2,8 @@ import { Context, Data, Effect, Layer } from "effect";
 
 import { AgentGraphOrchestrator } from "../orchestration/agent-graph-orchestrator";
 import { AgentOrchestrator } from "../orchestration/agent-orchestrator";
-import { TerminalSessionService } from "../terminal/terminal-sessions";
-import { PreviewCoordinator } from "../preview/preview-coordinator";
+import { TerminalSessionService } from "../terminal/sessions";
+import { PreviewCoordinator } from "../preview/coordinator";
 
 /** Wraps a failure to stop live resources before durable thread erasure. */
 export class ThreadResourceQuiescenceFailure extends Data.TaggedError(

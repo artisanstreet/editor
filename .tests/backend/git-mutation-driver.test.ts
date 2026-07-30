@@ -1,11 +1,11 @@
 import { Effect, Layer } from "effect";
 import { describe, expect, it } from "vitest";
 
-import { type GitCommandResult } from "../../modules/backend/src/git/git-command-executor";
+import { type GitCommandResult } from "../../modules/backend/src/git/executor";
 import {
 	GitMutationDriver,
 	GitMutationDriverLive,
-} from "../../modules/backend/src/git/git-mutation-driver";
+} from "../../modules/backend/src/git/mutation-driver";
 import {
 	type WorkspaceGitCommandInput,
 	WorkspaceGitRegistry,

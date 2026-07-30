@@ -307,12 +307,30 @@ export const IsoDate = Schema.String.check(
 export type IsoDate = typeof IsoDate.Type;
 
 /**
+ * Token spend one engine and model contributed to a day. A usage row whose run
+ * is no longer known (erased threads) is reported without an engine id rather
+ * than being dropped, so slices always sum to the day's totals. `model_id` is
+ * the catalog model resolved at dispatch; it is absent for runs recorded
+ * before model collection began.
+ */
+export const SurfaceUsageDailyEngineSlice = Schema.Struct({
+	engine_id: Schema.optional(Identifier),
+	input_tokens: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+	model_id: Schema.optional(Identifier),
+	output_tokens: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+});
+export type SurfaceUsageDailyEngineSlice = typeof SurfaceUsageDailyEngineSlice.Type;
+
+/**
  * Token spend for one UTC day. Unlike `SurfaceUsageAggregate`, the totals are
  * required: a provider that reports no metric simply does not contribute, so an
  * absent day and a zero day are both expressed as zero rather than as unknown.
+ * `engines` splits the same totals by the engine that spent them, in
+ * descending total-token order.
  */
 export const SurfaceUsageDailyBucket = Schema.Struct({
 	date: IsoDate,
+	engines: Schema.Array(SurfaceUsageDailyEngineSlice),
 	input_tokens: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
 	output_tokens: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
 });

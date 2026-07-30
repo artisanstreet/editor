@@ -20,8 +20,8 @@ import {
 	OrchestrationCoordinators,
 	OrchestrationGroups,
 	OrchestrationRuns,
-} from "../../modules/backend/src/persistence/schema";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+} from "../../modules/backend/src/persistence/tables";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 import { make_transport_test_harness_with_protocol_server } from "./message-channel-harness";
 import { MakeNodeTestWorkspaceBoundedRegularFileStoreRegistryLayer } from "../backend/bounded-regular-file-store-harness";
 

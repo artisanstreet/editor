@@ -135,10 +135,8 @@ export const RunDetachedCleanup = (input: unknown) =>
 	}).pipe(Effect.provide(PlatformLive));
 
 const DecodeCleanupPlan = (encoded: string) =>
-	Effect.try({
-		try: () => JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as unknown,
-		catch: (cause) => cause,
-	}).pipe(
+	Effect.sync(() => Buffer.from(encoded, "base64url").toString("utf8")).pipe(
+		Effect.flatMap(Schema.decodeUnknownEffect(Schema.UnknownFromJsonString)),
 		Effect.flatMap(Schema.decodeUnknownEffect(NpmCleanupPlan)),
 		Effect.mapError(
 			(cause) =>

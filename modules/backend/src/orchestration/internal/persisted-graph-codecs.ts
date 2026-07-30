@@ -30,7 +30,7 @@ import {
 	OrchestrationGraphEdges,
 	OrchestrationGroups,
 	OrchestrationJoins,
-} from "../../persistence/schema";
+} from "../../persistence/tables";
 import { AgentGraphInvalid, AgentGraphNotFound } from "../agent-graph-model";
 import type { GraphContext, GraphTransaction } from "./graph-context";
 
@@ -52,10 +52,11 @@ export interface PersistedGraphCodecs {
 /** Owns JSON boundaries and projection reconstruction for persisted graph rows. */
 export function make_persisted_graph_codecs(_context: GraphContext): PersistedGraphCodecs {
 	const parse_json = (json: string, context: string) =>
-		Effect.try({
-			try: () => JSON.parse(json) as unknown,
-			catch: () => new AgentGraphInvalid({ message: `${context} contains invalid JSON` }),
-		});
+		Schema.decodeUnknownEffect(Schema.UnknownFromJsonString)(json).pipe(
+			Effect.mapError(
+				() => new AgentGraphInvalid({ message: `${context} contains invalid JSON` }),
+			),
+		);
 
 	const decode_json = <A, I, R>(schema: Schema.Codec<A, I, R>, json: string, context: string) =>
 		parse_json(json, context).pipe(

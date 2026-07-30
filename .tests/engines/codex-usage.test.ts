@@ -10,11 +10,11 @@ import {
 	MakeCodexUsage,
 	map_codex_rate_limits_to_quota_windows,
 	type CodexRateLimitsReadResult,
-} from "../../modules/engines/src/codex/codex-usage";
-import { CodexProcessFactory } from "../../modules/engines/src/codex/codex-process";
+} from "../../modules/engines/src/codex/usage";
+import { CodexProcessFactory } from "../../modules/engines/src/codex/process";
 
 const never_spawn_factory: typeof CodexProcessFactory.Service = {
-	Spawn: () => Effect.die("codex-usage must not spawn Codex without saved credentials"),
+	Spawn: () => Effect.die("usage must not spawn Codex without saved credentials"),
 };
 
 describe("map_codex_rate_limits_to_quota_windows", () => {
@@ -130,7 +130,7 @@ describe("MakeCodexUsage authentication precheck", () => {
 	let codex_home: string;
 
 	beforeEach(async () => {
-		codex_home = await mkdtemp(join(tmpdir(), "artisan-codex-usage-"));
+		codex_home = await mkdtemp(join(tmpdir(), "artisan-usage-"));
 	});
 
 	afterEach(async () => {

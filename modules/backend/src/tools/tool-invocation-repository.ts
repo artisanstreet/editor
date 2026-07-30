@@ -32,8 +32,8 @@ import {
 	JournalEvents,
 	ThreadErasureClaims,
 	Threads,
-} from "../persistence/schema";
-import { RuntimeMetadata } from "../runtime/runtime-metadata";
+} from "../persistence/tables";
+import { RuntimeMetadata } from "../runtime/metadata";
 import { RecordThreadActivity } from "../threads/internal/thread-activity";
 
 const request_fingerprint = Schema.String.check(Schema.isPattern(/^[a-f0-9]{64}$/));
@@ -160,10 +160,8 @@ export class ToolInvocationRepository extends Context.Service<
 >()("Artisan/ToolInvocationRepository") {}
 
 const ParseJson = (json: string, schema: Schema.Codec<any, any>, context: string) =>
-	Effect.try({
-		try: () => JSON.parse(json) as unknown,
-		catch: (cause) => new ToolInvocationRepositoryFailure({ cause }),
-	}).pipe(
+	Schema.decodeUnknownEffect(Schema.UnknownFromJsonString)(json).pipe(
+		Effect.mapError((cause) => new ToolInvocationRepositoryFailure({ cause })),
 		Effect.flatMap(Schema.decodeUnknownEffect(schema, { onExcessProperty: "error" })),
 		Effect.mapError((cause) =>
 			cause instanceof ToolInvocationRepositoryFailure
@@ -312,7 +310,11 @@ export const ToolInvocationRepositoryLive = Layer.effect(
 						thread_id: invocation.thread_id,
 					})
 					.returning({ sequence: JournalEvents.sequence });
-				return event!.sequence;
+				if (event === undefined)
+					return yield* new ToolInvocationRepositoryFailure({
+						cause: new Error(`Tool event ${event_id} returned no inserted row`),
+					});
+				return event.sequence;
 			});
 
 		const ValidateBegin = (input: typeof BeginInput.Type) =>

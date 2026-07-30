@@ -3,7 +3,7 @@ import { Data, Effect, Schema } from "effect";
 
 import { AutoCompactionTriggerTokens, type ModelBehaviourValue } from "@artisan/protocol";
 
-import { hash_model_behaviour_value } from "./model-behaviour-value";
+import { hash_model_behaviour_value } from "./value";
 
 /** Names the only Codex config key owned by the initial Model Behaviour registry. */
 export const codex_auto_compaction_native_key = "model_auto_compact_token_limit";

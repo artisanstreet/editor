@@ -19,7 +19,6 @@ function make_engine(id: string): Engine {
 				auth: { state: "unsupported" },
 				cancel: { state: "unsupported" },
 				close: { state: "unsupported" },
-				continuation_export: { state: "unsupported" },
 				events: { state: "unsupported" },
 				global_guidance: { state: "unsupported" },
 				model_selection: { state: "unsupported" },

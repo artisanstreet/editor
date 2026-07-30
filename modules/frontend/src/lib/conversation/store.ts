@@ -18,6 +18,7 @@ type ConversationWorkSession = Extract<ConversationItem, { type: "work_session" 
 type ConversationChangeSet = Extract<ConversationItem, { type: "change_set" }>;
 type ConversationFileChange = Extract<ConversationItem, { type: "file_change" }>;
 type ConversationAssistantMessage = Extract<ConversationItem, { type: "assistant_message" }>;
+type ConversationModelTransition = Extract<ConversationItem, { type: "model_transition" }>;
 
 export type ConversationRenderBlock =
 	| {
@@ -38,6 +39,8 @@ export type ConversationRenderBlock =
 			readonly duration_kind: "thought" | "worked";
 			readonly id: string;
 			readonly session: ConversationWorkSession;
+			/** The engine handoff that started this run, shown in the session header. */
+			readonly transition?: ConversationModelTransition;
 			readonly turn_id: string;
 			readonly type: "work_group";
 	  }
@@ -187,6 +190,7 @@ export const MakeConversationRenderBlocks = (
 	const details_by_turn = new Map<string, Array<ConversationItem>>();
 	const change_sets_by_turn = new Map<string, Array<ConversationChangeSet>>();
 	const files_by_turn = new Map<string, Array<ConversationFileChange>>();
+	const transition_by_turn = new Map<string, ConversationModelTransition>();
 	const concrete_work_turns = new Set<string>();
 	const final_message_by_turn = new Map<string, ConversationAssistantMessage>();
 	const turns_by_id = new Map(
@@ -210,6 +214,8 @@ export const MakeConversationRenderBlocks = (
 			const files = files_by_turn.get(group_key) ?? [];
 			files.push(item);
 			files_by_turn.set(group_key, files);
+		} else if (item.type === "model_transition" && !transition_by_turn.has(group_key)) {
+			transition_by_turn.set(group_key, item);
 		}
 		if (item.type === "assistant_message" && item.phase === "final" && item.text.length > 0) {
 			final_message_by_turn.set(group_key, item);
@@ -220,7 +226,8 @@ export const MakeConversationRenderBlocks = (
 		[...sessions_by_turn.entries()].flatMap(([group_key, sessions]) => {
 			const canonical = legacy_work.canonical_sessions.get(group_key);
 			if (canonical !== undefined) return [[group_key, canonical] as const];
-			return sessions.length === 1 ? [[group_key, sessions[0]!] as const] : [];
+			const only_session = sessions.length === 1 ? sessions.at(0) : undefined;
+			return only_session === undefined ? [] : [[group_key, only_session] as const];
 		}),
 	);
 
@@ -291,15 +298,28 @@ export const MakeConversationRenderBlocks = (
 			const group_key = ConversationRenderKey(item, legacy_work.turn_aliases);
 			if (item_is_change(item)) return [];
 			if (ItemIsWorkDetail(item, group_key)) return [];
+			/**
+			 * A run's engine handoff renders inside its work session header, not
+			 * as a standalone timeline row. It stays standalone only when its
+			 * turn produced no session to host it.
+			 */
+			if (
+				item.type === "model_transition" &&
+				transition_by_turn.get(group_key) === item &&
+				work_session_by_turn.has(group_key)
+			)
+				return [];
 			if (item.type === "work_session") {
 				const session = work_session_by_turn.get(group_key);
 				if (session === undefined || session.id !== item.id) return [];
+				const transition = transition_by_turn.get(group_key);
 				return [
 					{
 						details: details_by_turn.get(group_key) ?? [],
 						duration_kind: concrete_work_turns.has(group_key) ? "worked" : "thought",
 						id: `work:${item.id}`,
 						session,
+						...(transition === undefined ? {} : { transition }),
 						turn_id: group_key,
 						type: "work_group",
 					},

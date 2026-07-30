@@ -133,6 +133,7 @@ export class OrchestrationRepository extends Context.Service<
 			run_id: string,
 			native_thread_id: string,
 			resume_token: unknown,
+			model_id?: string,
 		) => Effect.Effect<void, OrchestrationError>;
 		readonly RecordObservation: (
 			observation: EngineObservation,

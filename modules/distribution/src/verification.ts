@@ -145,12 +145,9 @@ export const ReleaseVerificationLive = Layer.effect(
 							new ReleaseVerificationError({ code: "invalid_signature" }),
 						);
 
-					const manifest = yield* Effect.try({
-						try: () => JSON.parse(new TextDecoder().decode(raw_manifest)) as unknown,
-						catch: (cause) =>
-							new ReleaseVerificationError({ cause, code: "invalid_manifest" }),
-					}).pipe(
-						Effect.flatMap(Schema.decodeUnknownEffect(ReleaseManifest)),
+					const manifest = yield* Schema.decodeUnknownEffect(
+						Schema.fromJsonString(ReleaseManifest),
+					)(new TextDecoder().decode(raw_manifest)).pipe(
 						Effect.mapError((cause) =>
 							cause instanceof ReleaseVerificationError
 								? cause

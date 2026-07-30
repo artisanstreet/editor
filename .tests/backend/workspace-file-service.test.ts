@@ -8,27 +8,27 @@ import type { ContentIdentity } from "@artisan/protocol";
 
 import { BoundedRegularFileStore } from "../../modules/backend/src/filesystem/bounded-regular-file-store";
 import { WorkspaceBoundedRegularFileStoreRegistry } from "../../modules/backend/src/filesystem/workspace-bounded-regular-file-store-registry";
-import { WorkspaceChangeRepository } from "../../modules/backend/src/workspace/workspace-change-repository";
+import { WorkspaceChangeRepository } from "../../modules/backend/src/workspace/changes/repository";
 import {
 	WorkspaceChangeDiffLimit,
 	WorkspaceChangeDiffService,
-} from "../../modules/backend/src/workspace/workspace-change-diff-service";
-import { WorkspaceEvidenceRecorder } from "../../modules/backend/src/workspace/workspace-evidence-recorder";
+} from "../../modules/backend/src/workspace/changes/diff";
+import { WorkspaceEvidenceRecorder } from "../../modules/backend/src/workspace/evidence";
 import {
 	WorkspaceFileService,
 	WorkspaceFileServiceError,
 	WorkspaceFileServiceLive,
 	type WorkspaceFileReplaceInput,
-} from "../../modules/backend/src/workspace/workspace-file-service";
+} from "../../modules/backend/src/workspace/files/service";
 import {
 	WorkspaceMutationAuthority,
 	WorkspaceMutationAuthorityConflict,
-} from "../../modules/backend/src/workspace/workspace-mutation-authority";
+} from "../../modules/backend/src/workspace/mutations/authority";
 import {
 	WorkspaceMutationPayloadStore,
 	WorkspaceMutationPayloadStoreUnavailable,
-} from "../../modules/backend/src/workspace/workspace-mutation-payload-store";
-import { WorkspaceSnapshotStore } from "../../modules/backend/src/workspace/workspace-snapshot-store";
+} from "../../modules/backend/src/workspace/mutations/payloads";
+import { WorkspaceSnapshotStore } from "../../modules/backend/src/workspace/snapshot-store";
 
 const encoder = new TextEncoder();
 const now = "2026-07-12T12:00:00.000Z";
@@ -379,7 +379,15 @@ describe("WorkspaceFileService", () => {
 		}
 	});
 
-	it("conceals malformed UTF-8 read failures", async () => {
+	/**
+	 * Read failures used to collapse into one reason so nothing about a file's
+	 * bytes was disclosed. The editor made that untenable: a person browsing
+	 * their own workspace opens a database and is told only that "the workspace
+	 * operation could not be completed", which reads as a broken editor. The
+	 * caller already sees the path in their own file tree, so naming the reason
+	 * discloses nothing they cannot observe directly.
+	 */
+	it("reports malformed UTF-8 as a not-text read failure", async () => {
 		const harness = make_runtime({ bytes: new Uint8Array([0xc3, 0x28]) });
 
 		try {
@@ -390,7 +398,7 @@ describe("WorkspaceFileService", () => {
 					),
 				),
 			).rejects.toEqual(
-				new WorkspaceFileServiceError({ operation: "read", reason: "failed" }),
+				new WorkspaceFileServiceError({ operation: "read", reason: "not_text" }),
 			);
 		} finally {
 			await harness.runtime.dispose();

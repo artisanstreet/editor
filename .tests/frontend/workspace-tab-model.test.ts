@@ -22,7 +22,7 @@ import {
 	type WorkspaceFileReference,
 	type WorkspaceState,
 	type WorkspaceTab,
-} from "../../modules/frontend/src/lib/workspace/workspace-tab-model";
+} from "../../modules/frontend/src/lib/workspace/tab-model";
 
 const FileA: WorkspaceFileReference = {
 	id: "a",

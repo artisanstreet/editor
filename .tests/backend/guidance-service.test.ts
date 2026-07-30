@@ -7,11 +7,11 @@ import { Effect, Layer, ManagedRuntime } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 import { MakeSnowflakeIdLive } from "@artisan/protocol";
 
-import { GlobalGuidanceRepositoryLive } from "../../modules/backend/src/guidance/guidance-repository";
+import { GlobalGuidanceRepositoryLive } from "../../modules/backend/src/guidance/repository";
 import {
 	GlobalGuidanceService,
 	make_global_guidance_service_layer,
-} from "../../modules/backend/src/guidance/guidance-service";
+} from "../../modules/backend/src/guidance/service";
 import {
 	GuidanceProviderRegistry,
 	guidance_hash,
@@ -30,14 +30,14 @@ import {
 import { make_database_layer } from "../../modules/backend/src/persistence/database";
 import { JournalNotifierLive } from "../../modules/backend/src/persistence/journal-notifier";
 import { JournalStoreLive } from "../../modules/backend/src/persistence/journal-store";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 import { Database } from "../../modules/backend/src/persistence/database";
 import {
 	GlobalGuidanceCanonical,
 	GlobalGuidanceProviderSync,
 	JournalCommands,
 	JournalEvents,
-} from "../../modules/backend/src/persistence/schema";
+} from "../../modules/backend/src/persistence/tables";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];

@@ -23,7 +23,13 @@ const stage_forge_runtime = () => ({
 		const native_runtime_root = resolve(forge_root, "native-runtime");
 		const frontend_source = resolve(import.meta.dirname, ".dist/frontend");
 		const migrations_source = resolve(import.meta.dirname, "modules/backend/drizzle");
-		if (!existsSync(frontend_source)) {
+		/**
+		 * The development watch-build serves its frontend from Vite, so it needs
+		 * no staged copy. A release build stages one and still refuses to produce
+		 * a Forge that would answer page requests with nothing.
+		 */
+		const stage_frontend = existsSync(frontend_source);
+		if (!stage_frontend && process.env.ARTISAN_FORGE_WATCH !== "1") {
 			throw new Error("Build the static frontend before Artisan Forge");
 		}
 		const node_pty_source = resolve(
@@ -66,7 +72,7 @@ const stage_forge_runtime = () => ({
 		for (const path of ["index.js", "package.json", "win32_x64"]) {
 			stage(resolve(koffi_native_source, path), resolve(koffi_native_destination, path));
 		}
-		stage(frontend_source, resolve(forge_root, "frontend"));
+		if (stage_frontend) stage(frontend_source, resolve(forge_root, "frontend"));
 		stage(migrations_source, resolve(forge_root, "migrations"));
 		/**
 		 * Engine subprocess brokers require ordinary Node semantics. Keep this
@@ -113,10 +119,6 @@ export default defineConfig({
 		rollupOptions: {
 			input: {
 				ae: resolve(import.meta.dirname, "modules/cli/src/entry.ts"),
-				"claude-post-compact-hook": resolve(
-					import.meta.dirname,
-					"modules/engines/src/claude/claude-post-compact-hook.ts",
-				),
 				host: resolve(import.meta.dirname, "modules/forge/src/entry.ts"),
 				"windows-process-host": resolve(
 					import.meta.dirname,

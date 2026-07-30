@@ -10,7 +10,7 @@ import {
 } from "@artisan/protocol";
 
 import { JournalInvariantError } from "../../persistence/journal-store";
-import { Threads } from "../../persistence/schema";
+import { Threads } from "../../persistence/tables";
 
 const DecodeJson = <A>(
 	thread_id: string,
@@ -18,13 +18,13 @@ const DecodeJson = <A>(
 	json: string,
 	schema: Schema.ConstraintDecoder<A, never>,
 ) =>
-	Effect.try({
-		catch: () =>
-			new JournalInvariantError({
-				message: `Thread ${thread_id} ${field} JSON is malformed`,
-			}),
-		try: () => JSON.parse(json) as unknown,
-	}).pipe(
+	Schema.decodeUnknownEffect(Schema.UnknownFromJsonString)(json).pipe(
+		Effect.mapError(
+			() =>
+				new JournalInvariantError({
+					message: `Thread ${thread_id} ${field} JSON is malformed`,
+				}),
+		),
 		Effect.flatMap(
 			Schema.decodeUnknownEffect(schema, {
 				onExcessProperty: "error",

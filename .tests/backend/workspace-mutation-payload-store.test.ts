@@ -21,14 +21,14 @@ import {
 	WorkspaceChangeOperations,
 	WorkspaceChanges,
 	WorkspaceMutationPayloads,
-} from "../../modules/backend/src/persistence/schema";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+} from "../../modules/backend/src/persistence/tables";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 import {
 	WorkspaceMutationPayloadStore,
 	WorkspaceMutationPayloadStoreLive,
 	type WorkspaceMutationPayloadResumeInput,
 	type WorkspaceMutationPayloadStageInput,
-} from "../../modules/backend/src/workspace/workspace-mutation-payload-store";
+} from "../../modules/backend/src/workspace/mutations/payloads";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];

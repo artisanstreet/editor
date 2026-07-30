@@ -96,13 +96,15 @@ describe("Cursor account model catalog", () => {
 
 		expect(Schema.decodeUnknownSync(ModelManifest)(merged)).toEqual(merged);
 		expect(
-			merged.models.filter((model) => model.native_model_id === "composer-2.5"),
+			merged.models.filter(
+				(model) => model.harness === "cursor" && model.native_model_id === "composer-2.5",
+			),
 		).toHaveLength(1);
 		expect(
 			merged.models
-				.filter((model) => model.harness === "cursor")
+				.filter((model) => model.id.startsWith("cursor-account-"))
 				.map((model) => model.native_model_id),
-		).toEqual(["composer-2.5", "auto", "cursor-grok-4.5", "gpt-5.6-sol-medium", "kimi-k2.5"]);
+		).toEqual(["gpt-5.6-sol-medium", "kimi-k2.5"]);
 		expect(merged.providers.map((provider) => provider.id)).toContain("moonshot");
 		expect(
 			merged.models.find((model) => model.id === "cursor-auto")?.disabled?.reason,
@@ -129,8 +131,8 @@ describe("Cursor account model catalog", () => {
 			second.models
 				.filter((model) => model.id.startsWith("cursor-account-"))
 				.map((model) => model.native_model_id),
-		).toEqual(["gemini-3.1-pro"]);
-		expect(second.providers.map((provider) => provider.id)).not.toContain("moonshot");
+		).toEqual([]);
+		expect(second.providers.map((provider) => provider.id)).toContain("moonshot");
 		expect(third.models).toEqual(second.models);
 		expect(third.providers).toEqual(second.providers);
 		expect(third.revision).toBe(second.revision);

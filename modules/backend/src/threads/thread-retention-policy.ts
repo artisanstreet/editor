@@ -19,7 +19,7 @@ import {
 	JournalCommands,
 	JournalEvents,
 	ThreadRetentionPolicies,
-} from "../persistence/schema";
+} from "../persistence/tables";
 import {
 	CommandIdConflict,
 	JournalInvariantError,
@@ -28,7 +28,7 @@ import {
 	type JournalStoreError,
 } from "../persistence/journal-store";
 import { JournalNotifier } from "../persistence/journal-notifier";
-import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import { RuntimeMetadata } from "../runtime/metadata";
 
 /** Returns one durable retention-policy update and its canonical event. */
 export interface ThreadRetentionPolicyAcceptance {
@@ -239,11 +239,15 @@ export const ThreadRetentionPolicyServiceLive = Layer.effect(
 								thread_id: command.thread_id,
 							})
 							.returning({ journal_sequence: JournalEvents.sequence });
+						if (event_row === undefined)
+							return yield* new JournalInvariantError({
+								message: `Retention event ${event_id} returned no inserted row`,
+							});
 						const event: EventEnvelope = {
 							...(command.agent_id ? { agent_id: command.agent_id } : {}),
 							causation_id: command.message_id,
 							correlation_id: command.message_id,
-							journal_sequence: event_row!.journal_sequence,
+							journal_sequence: event_row.journal_sequence,
 							kind: "event",
 							message_id: event_id,
 							origin: "backend",

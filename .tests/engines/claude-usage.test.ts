@@ -12,7 +12,7 @@ import {
 	map_claude_account_usage,
 	parse_claude_cli_usage_windows,
 	type ClaudeUsageFetch,
-} from "../../modules/engines/src/claude/claude-usage";
+} from "../../modules/engines/src/claude/usage";
 
 const decode = (body: unknown) => Schema.decodeUnknownSync(ClaudeUsageResponseSchema)(body);
 
@@ -55,7 +55,7 @@ function stub_claude_cli_factory(
 
 /** Fails the test if `Spawn` is ever called; proves a 401 never reaches the CLI fallback. */
 const never_spawn_factory: typeof EngineProcessFactory.Service = {
-	Spawn: () => Effect.die("claude-usage must not spawn the CLI on a 401"),
+	Spawn: () => Effect.die("usage must not spawn the CLI on a 401"),
 };
 
 async function write_claude_credentials(config_dir: string): Promise<void> {
@@ -170,7 +170,7 @@ describe("Claude usage mapping", () => {
 
 describe("Claude usage credentials resolution", () => {
 	it("reports unauthenticated, without a network call, when no credentials file exists", async () => {
-		const dir = await mkdtemp(join(tmpdir(), "artisan-claude-usage-"));
+		const dir = await mkdtemp(join(tmpdir(), "artisan-usage-"));
 		created_dirs.push(dir);
 
 		const usage = await Effect.runPromise(MakeClaudeUsage({ claude_config_dir: dir }));
@@ -237,7 +237,7 @@ describe("Claude usage CLI fallback", () => {
 	});
 
 	it("falls back to the CLI on a 429 and reports its parsed windows as authenticated", async () => {
-		dir = await mkdtemp(join(tmpdir(), "artisan-claude-usage-"));
+		dir = await mkdtemp(join(tmpdir(), "artisan-usage-"));
 		await write_claude_credentials(dir);
 
 		const usage = await Effect.runPromise(
@@ -261,7 +261,7 @@ describe("Claude usage CLI fallback", () => {
 	});
 
 	it("fails with the original endpoint error when the CLI fallback also reports no windows", async () => {
-		dir = await mkdtemp(join(tmpdir(), "artisan-claude-usage-"));
+		dir = await mkdtemp(join(tmpdir(), "artisan-usage-"));
 		await write_claude_credentials(dir);
 
 		const exit = await Effect.runPromiseExit(
@@ -278,7 +278,7 @@ describe("Claude usage CLI fallback", () => {
 	});
 
 	it("never spawns the CLI on a 401; reports unauthenticated instead", async () => {
-		dir = await mkdtemp(join(tmpdir(), "artisan-claude-usage-"));
+		dir = await mkdtemp(join(tmpdir(), "artisan-usage-"));
 		await write_claude_credentials(dir);
 
 		const usage = await Effect.runPromise(
@@ -296,7 +296,7 @@ describe("Claude usage CLI fallback", () => {
 	});
 
 	it("never spawns the CLI when credentials are missing", async () => {
-		dir = await mkdtemp(join(tmpdir(), "artisan-claude-usage-"));
+		dir = await mkdtemp(join(tmpdir(), "artisan-usage-"));
 
 		const usage = await Effect.runPromise(
 			MakeClaudeUsage({ claude_config_dir: dir, factory: never_spawn_factory }),

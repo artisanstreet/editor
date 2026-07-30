@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import { extname, resolve, sep } from "node:path";
 import { timingSafeEqual } from "node:crypto";
 
-import { Data, Effect, Exit, FiberSet, Option, Scope } from "effect";
+import { Data, Effect, Exit, FiberSet, Option, Schema, Scope } from "effect";
 
 import type { ForgeControlAuthorityShape } from "./control-authority";
 import type { ForgeConfig } from "./config";
@@ -124,10 +124,11 @@ const ReadJson = (request: IncomingMessage) =>
 		const on_end = () => {
 			cleanup();
 			resume(
-				Effect.try({
-					try: () => JSON.parse(Buffer.concat(chunks).toString("utf8")) as unknown,
-					catch: (cause) => new Error("Invalid Forge control JSON", { cause }),
-				}),
+				Schema.decodeUnknownEffect(Schema.UnknownFromJsonString)(
+					Buffer.concat(chunks).toString("utf8"),
+				).pipe(
+					Effect.mapError((cause) => new Error("Invalid Forge control JSON", { cause })),
+				),
 			);
 		};
 		const on_error = (cause: Error) => {
@@ -346,15 +347,17 @@ export function start_forge_http(
 				/**
 				 * The development marker is unauthenticated on purpose: the
 				 * renderer reads it before pairing so it can label a development
-				 * instance, and the listener is loopback-only. Only development
-				 * Forges serve the SPA, so static hosting is the marker; nothing
-				 * that identifies the data root or the machine belongs here.
+				 * instance, and the listener is loopback-only. Development
+				 * tooling states the marker explicitly rather than it being
+				 * inferred from static hosting, so a development Forge that
+				 * serves no SPA still identifies itself; nothing that identifies
+				 * the data root or the machine belongs here.
 				 */
 				respond_json(
 					response,
 					200,
 					{
-						development: config.static_frontend_root !== undefined,
+						development: config.development === true,
 						service: "artisan-forge",
 						status: "ready",
 						version: 1,

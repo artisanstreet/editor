@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { basename, join, normalize, resolve } from "node:path";
@@ -17,6 +16,7 @@ import {
 	type ProcessRunnerInput,
 	type ProcessRunnerResult,
 } from "../../modules/backend/src/git/process-runner";
+import { ProjectIdentityRegistry } from "../../modules/backend/src/projects/project-identity-registry";
 
 const roots: Array<string> = [];
 
@@ -54,12 +54,26 @@ function process_result(
 	};
 }
 
+/**
+ * A deterministic registry stand-in: real ids are minted Snowflakes, so the
+ * locator tests only assert that the id is whatever the registry answered for
+ * the normalized root, not any particular shape.
+ */
+const identity_registry_layer = Layer.succeed(ProjectIdentityRegistry, {
+	Resolve: (root_path: string) => Effect.succeed(`id:${root_path}`),
+});
+
+function expected_project_id(root_path: string) {
+	return `id:${root_path}`;
+}
+
 function make_locator(
 	run: (input: ProcessRunnerInput) => Effect.Effect<ProcessRunnerResult, ProcessRunnerError>,
 ) {
 	const process_runner_layer = Layer.succeed(ProcessRunner, { Run: run });
 	const project_locator_layer = make_node_project_locator_layer().pipe(
 		Layer.provide(process_runner_layer),
+		Layer.provide(identity_registry_layer),
 	);
 
 	return Effect.runPromise(
@@ -95,7 +109,7 @@ describe("ProjectLocator", () => {
 		expect(Option.getOrThrow(project)).toEqual({
 			project: {
 				display_name: basename(root_path),
-				project_id: `project_${createHash("sha256").update(root_path).digest("hex")}`,
+				project_id: expected_project_id(root_path),
 				root_path,
 			},
 			source: "git_root",

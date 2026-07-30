@@ -3,7 +3,7 @@ import { Effect } from "effect";
 
 import type { EventEnvelope, RawOrigin } from "@artisan/protocol";
 
-import { AgentRuns, Assignments } from "../../persistence/schema";
+import { AgentRuns, Assignments } from "../../persistence/tables";
 import type { GraphContext, GraphTransaction } from "./graph-context";
 import type { GraphAdvancement } from "./graph-advancement";
 import type { GraphLedger } from "./graph-ledger";

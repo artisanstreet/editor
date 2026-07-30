@@ -11,7 +11,7 @@ import {
 	ArtisanClientError,
 	type ArtisanClientErrorCode,
 	type ArtisanClientOptions,
-} from "../client-contract";
+} from "../client-api/service";
 import type { MessagePortConnection } from "../connector";
 import type { MessagePortError } from "../message-port";
 

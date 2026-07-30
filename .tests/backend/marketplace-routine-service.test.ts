@@ -14,18 +14,18 @@ import {
 	RoutineMirrorRegistry,
 	NpxSkillsAdapter,
 	RoutineSourceInspector,
-} from "../../modules/backend/src/marketplace/routines/routine-adapters";
+} from "../../modules/backend/src/marketplace/routines/adapters";
 import {
 	RoutineRepository,
 	RoutineRepositoryLive,
-} from "../../modules/backend/src/marketplace/routines/routine-repository";
+} from "../../modules/backend/src/marketplace/routines/repository";
 import {
 	RoutineService,
 	RoutineServiceLive,
-} from "../../modules/backend/src/marketplace/routines/routine-service";
+} from "../../modules/backend/src/marketplace/routines/service";
 import { make_database_layer } from "../../modules/backend/src/persistence/database";
 import { JournalNotifierLive } from "../../modules/backend/src/persistence/journal-notifier";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const directories: Array<string> = [];

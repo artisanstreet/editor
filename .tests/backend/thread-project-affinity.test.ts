@@ -14,9 +14,9 @@ import {
 	JournalEvents,
 	ThreadProjectAffinityEvidence,
 	Threads,
-} from "../../modules/backend/src/persistence/schema";
+} from "../../modules/backend/src/persistence/tables";
 import { ThreadReadModel } from "../../modules/backend/src/persistence/thread-read-model";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 import { ProjectCatalog } from "../../modules/backend/src/projects/project-catalog";
 import {
 	ThreadProjectAffinityRepository,

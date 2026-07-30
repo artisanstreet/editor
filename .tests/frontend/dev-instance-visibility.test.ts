@@ -46,8 +46,8 @@ describe("development instance visibility", () => {
 		const badge = Read("modules/frontend/src/routes/components/dev-instance-badge.sv");
 
 		expect(layout).toContain("<DevInstanceBadge />");
-		expect(badge).toContain('fetch(ForgeHttpUrl("/health")');
-		expect(badge).toContain("IsDevelopmentInstance(");
+		expect(badge).toContain("DiscoverForgeHealth");
+		expect(badge).toContain("Effect.forkScoped");
 		expect(badge).toContain("DevMarkedTitle(document.title)");
 		expect(badge).toContain("new MutationObserver(");
 		expect(badge).toContain("observer.disconnect()");

@@ -14,7 +14,6 @@
 		TooltipProvider,
 		TooltipTrigger,
 	} from "$lib/components/ui/tooltip";
-	import send_gradient from "$lib/assets/composer/send-gradient.svg";
 	import { BannerService } from "$lib/banner/service";
 	import {
 		MakeSubmitGate,
@@ -31,14 +30,18 @@
 		type ComposerImageAttachment,
 		type ComposerSubmission,
 	} from "$lib/composer/image-attachments";
+	import {
+		IsOfflineRuntimeCatalog,
+		WithOfflineRuntimeCatalog,
+	} from "$lib/runtime/offline-catalog";
 	import ImageViewer from "./image-viewer.sv";
-	import ModelSelector from "./model-selector.sv";
+	import ModelSelector from "./model-selector/view.sv";
 	import ShaderGlassSurface from "./shader-glass-surface.sv";
 
 	const snowflake_id = yield* SnowflakeId;
 	const banner = yield* BannerService;
 	const client = yield* ArtisanClient;
-	const runtime_catalog = yield* client.GetRuntimeCatalog;
+	const runtime_catalog = yield* WithOfflineRuntimeCatalog(client.GetRuntimeCatalog);
 
 	let {
 		disabled = false,
@@ -60,8 +63,14 @@
 		run_active?: boolean;
 	} = $props();
 
-	/** Catalog models without a registered engine can be picked but never run. */
-	const preview_engine_reason = $derived.by(() => {
+	/**
+	 * Sending needs a live engine behind it. Without Forge there is no session
+	 * to run at all, and within a connected catalog a model whose harness is
+	 * unregistered can still be picked and read but never run.
+	 */
+	const send_blocked_reason = $derived.by(() => {
+		if (IsOfflineRuntimeCatalog(runtime_catalog))
+			return "Forge is offline — reconnect to send";
 		const engine_id = policy?.engine_id;
 		if (engine_id === undefined) return undefined;
 		if (runtime_catalog.runnable_harness_ids.includes(engine_id)) return undefined;
@@ -80,6 +89,18 @@
 	let viewed_attachment = $state<ComposerImageAttachment | undefined>();
 	let placeholder = $state(MakeComposerPlaceholderState());
 	const submit_gate: SubmitGate = yield* MakeSubmitGate;
+
+	/**
+	 * Everything a send needs, in one place: the button's disabled state and
+	 * its arming visual (white → gradient reveal) must flip together.
+	 */
+	const send_ready = $derived(
+		!disabled &&
+			!submitting &&
+			send_blocked_reason === undefined &&
+			(draft.trim().length > 0 || attachments.size > 0) &&
+			onsubmit !== undefined,
+	);
 
 	type EditorDocument = {
 		readonly text: string;
@@ -442,16 +463,12 @@
 									<Button
 										variant="ghost"
 										size="icon"
-										class="composer-send inset-shadow rounded-[calc(var(--composer-radius)-0.5rem)] text-white hover:text-white disabled:text-white"
-										style={`--composer-send-image: url("${send_gradient}")`}
+										class="composer-send rounded-[calc(var(--composer-radius)-0.5rem)]"
 										aria-label={run_active ? "Stop current run" : "Send message"}
+										data-ready={run_active || send_ready}
 										disabled={run_active
 											? disabled || cancelling || onabort === undefined
-											: disabled ||
-												submitting ||
-												preview_engine_reason !== undefined ||
-												(draft.trim().length === 0 && attachments.size === 0) ||
-												onsubmit === undefined}
+											: !send_ready}
 										onclick={yield* ActivatePrimaryAction}
 									>
 										<span class="t-icon-swap size-4" data-state={run_active ? "b" : "a"} aria-hidden="true">
@@ -462,8 +479,8 @@
 								</span>
 							{/snippet}
 						</TooltipTrigger>
-						{#if preview_engine_reason !== undefined && !run_active}
-							<TooltipContent>{preview_engine_reason}</TooltipContent>
+						{#if send_blocked_reason !== undefined && !run_active}
+							<TooltipContent>{send_blocked_reason}</TooltipContent>
 						{/if}
 					</Tooltip>
 				</TooltipProvider>
@@ -517,41 +534,55 @@
 	}
 
 	/**
-	 * The gradient is an opaque background image, so a hover background-color
-	 * would paint underneath it and never show. Hover and active read as
-	 * brightness on the artwork itself instead.
+	 * The button rests bare — no well, no outline — while a send is
+	 * impossible; only the muted arrow marks the spot. The face lives on
+	 * ::before as a bright surface gradient a step below white and arms by
+	 * growing a clip-path circle from the center. Children always paint over
+	 * their parent's inset shadow, so the shadow is repainted on ::after
+	 * above both layers, appearing only once the face arms.
 	 */
 	:global(.composer-send) {
-		background-image: var(--composer-send-image);
-		background-size: cover;
-		background-position: center;
+		position: relative;
+		background: transparent;
 		transition: filter var(--duration-quick) var(--ease-in-out);
 	}
-	:global(.composer-send:hover:not(:disabled)) { filter: brightness(1.12); }
-	:global(.composer-send:active:not(:disabled)) { filter: brightness(0.94); }
-	:global(.composer-send:disabled) { filter: saturate(0.55) brightness(0.75); }
-
-	/**
-	 * The inset-shadow utility is tuned for dark chrome; its 6% layers vanish
-	 * over the bright gradient artwork. Same shadow shape, artwork strength.
-	 */
-	:global(.composer-send.inset-shadow) {
-		box-shadow:
-			inset 0px 1px 1px -0.5px rgba(0, 0, 0, 0.3),
-			inset 0px 3px 3px -1.5px rgba(0, 0, 0, 0.26),
-			inset 0px 6px 6px -3px rgba(0, 0, 0, 0.22),
-			inset 0 -0.5px rgba(255, 255, 255, 0.5),
-			inset 0 0 0 0.5px oklch(from var(--highlight) l c h / 35%);
+	:global(.composer-send)::before {
+		content: "";
+		position: absolute;
+		inset: 0;
+		border-radius: inherit;
+		background: linear-gradient(to bottom, var(--surface-25), var(--surface-100));
+		clip-path: circle(0% at 50% 50%);
+		transition: clip-path var(--duration-quick) var(--ease-smooth-out);
+		will-change: clip-path;
 	}
+	:global(.composer-send[data-ready="true"])::before {
+		clip-path: circle(75% at 50% 50%);
+		transition-duration: var(--duration-fast);
+	}
+	:global(.composer-send)::after {
+		content: "";
+		position: absolute;
+		inset: 0;
+		border-radius: inherit;
+		pointer-events: none;
+		box-shadow: none;
+		transition: box-shadow var(--duration-quick) var(--ease-smooth-out);
+	}
+	:global(.composer-send[data-ready="true"])::after {
+		box-shadow: var(--shadow-inset-artwork);
+		transition-duration: var(--duration-fast);
+	}
+	:global(.composer-send:hover:not(:disabled)) { filter: brightness(0.96); }
+	:global(.composer-send:active:not(:disabled)) { filter: brightness(0.9); }
+	:global(.composer-send[data-ready="true"]:disabled) { filter: brightness(0.8); }
 
-	/**
-	 * Full-white glyph + blend instead of opacity: the icon SVG is layered, so
-	 * opacity double-exposes where paths overlap. Overlay lets the artwork
-	 * light the glyph; isolation on inset-shadow keeps the blend inside the
-	 * button.
-	 */
 	:global(.composer-send .t-icon-swap) {
-		mix-blend-mode: overlay;
+		color: #a1a1aa;
+		transition: color var(--duration-quick) var(--ease-in-out);
+	}
+	:global(.composer-send[data-ready="true"] .t-icon-swap) {
+		color: #18181b;
 	}
 
 	:global(.t-resize) {
@@ -588,6 +619,8 @@
 		:global(.t-resize),
 		:global(.t-icon-swap) .t-icon,
 		:global(.composer-send),
+		:global(.composer-send)::before,
+		:global(.composer-send)::after,
 		.composer-attachment-tray,
 		.composer-attachment-tray-content,
 		.composer-attachment-preview,

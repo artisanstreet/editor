@@ -92,10 +92,6 @@ function make_capabilities(
 		auth: capability("supported"),
 		cancel: command_capability_state("cancel"),
 		close: command_capability_state("close"),
-		continuation_export: capability(
-			"unsupported",
-			"Scenarios do not model portable continuation export",
-		),
 		events: capability("supported"),
 		global_guidance: capability("supported"),
 		model_selection: capability("supported"),

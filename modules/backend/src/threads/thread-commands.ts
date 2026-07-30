@@ -8,12 +8,14 @@ import type {
 } from "@artisan/protocol";
 
 import { JournalStore, type JournalStoreError } from "../persistence/journal-store";
-import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import { RuntimeMetadata } from "../runtime/metadata";
 import { ThreadMetadataRepository, type ThreadMetadataError } from "./thread-metadata-repository";
 import {
 	ThreadProjectAffinityRepository,
 	type ThreadProjectAffinityError,
 } from "./thread-project-affinity-repository";
+import { ModelFavoritesService } from "../model-favorites/service";
+import { SessionDefaultsService } from "../settings/session-defaults-service";
 import { ThreadRetentionPolicyService } from "./thread-retention-policy";
 
 export class ThreadCommands extends Context.Service<
@@ -26,6 +28,12 @@ export class ThreadCommands extends Context.Service<
 			command: CommandEnvelope,
 		) => Effect.Effect<ReadonlyArray<OutboundEnvelope>, ThreadMetadataError>;
 		readonly HandleRetentionPolicy: (
+			command: CommandEnvelope,
+		) => Effect.Effect<ReadonlyArray<OutboundEnvelope>, JournalStoreError>;
+		readonly HandleModelFavorite: (
+			command: CommandEnvelope,
+		) => Effect.Effect<ReadonlyArray<OutboundEnvelope>, JournalStoreError>;
+		readonly HandleSessionDefaults: (
 			command: CommandEnvelope,
 		) => Effect.Effect<ReadonlyArray<OutboundEnvelope>, JournalStoreError>;
 		readonly HandleProjectAffinity: (
@@ -45,6 +53,8 @@ export const ThreadCommandsLive = Layer.effect(
 		const repository = yield* ThreadMetadataRepository;
 		const project_affinity = yield* ThreadProjectAffinityRepository;
 		const retention_policy = yield* ThreadRetentionPolicyService;
+		const model_favorites = yield* ModelFavoritesService;
+		const session_defaults = yield* SessionDefaultsService;
 
 		const MakeOutput = (
 			command: CommandEnvelope,
@@ -134,6 +144,22 @@ export const ThreadCommandsLive = Layer.effect(
 						MakeOutput(command, accepted.status, accepted.event),
 					),
 				);
+		const HandleModelFavorite = (command: CommandEnvelope) =>
+			model_favorites
+				.Update(command)
+				.pipe(
+					Effect.flatMap((accepted) =>
+						MakeOutput(command, accepted.status, accepted.event),
+					),
+				);
+		const HandleSessionDefaults = (command: CommandEnvelope) =>
+			session_defaults
+				.Update(command)
+				.pipe(
+					Effect.flatMap((accepted) =>
+						MakeOutput(command, accepted.status, accepted.event),
+					),
+				);
 		const HandleProjectAffinity = (command: CommandEnvelope) =>
 			project_affinity
 				.Accept(command)
@@ -143,6 +169,13 @@ export const ThreadCommandsLive = Layer.effect(
 					),
 				);
 
-		return { HandleCreate, HandleMetadata, HandleProjectAffinity, HandleRetentionPolicy };
+		return {
+			HandleCreate,
+			HandleMetadata,
+			HandleModelFavorite,
+			HandleSessionDefaults,
+			HandleProjectAffinity,
+			HandleRetentionPolicy,
+		};
 	}),
 );

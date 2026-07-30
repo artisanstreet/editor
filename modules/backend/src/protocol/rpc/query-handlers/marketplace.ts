@@ -26,15 +26,15 @@ import type {
 	SecretReference,
 } from "@artisan/protocol";
 
-import { GlobalGuidanceService } from "../../../guidance/guidance-service";
-import { CapabilityRepository } from "../../../marketplace/capabilities/capability-repository";
+import { GlobalGuidanceService } from "../../../guidance/service";
+import { CapabilityRepository } from "../../../marketplace/capabilities/repository";
 import {
 	CapabilityOAuthLifecycle,
 	CapabilityService,
-} from "../../../marketplace/capabilities/capability-service";
-import { RoutineService } from "../../../marketplace/routines/routine-service";
-import { ModelBehaviourService } from "../../../model-behaviour/model-behaviour-service";
-import { RuntimeMetadata } from "../../../runtime/runtime-metadata";
+} from "../../../marketplace/capabilities/service";
+import { RoutineService } from "../../../marketplace/routines/service";
+import { ModelBehaviourService } from "../../../model-behaviour/service";
+import { RuntimeMetadata } from "../../../runtime/metadata";
 
 export type MarketplaceQueryEnvelope =
 	| CapabilityConnectPreviewEnvelope

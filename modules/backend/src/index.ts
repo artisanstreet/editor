@@ -6,7 +6,7 @@ export {
 	WorkspaceChangeDiffServiceLive,
 	WorkspaceChangeDiffUnavailable,
 	type WorkspaceChangeDiffServiceError,
-} from "./workspace/workspace-change-diff-service";
+} from "./workspace/changes/diff";
 export {
 	DecodeProtocolConnectionOptions,
 	DefaultProtocolConnectionOptions,
@@ -14,10 +14,10 @@ export {
 	type ProtocolConnectionOptions,
 	ProtocolConfigurationError,
 	ProtocolConnectionOptionsSchema,
-} from "./protocol/protocol-connection";
-export { ProtocolRouter } from "./protocol/protocol-router";
-export { SurfaceService, SurfaceServiceLive } from "./surfaces/surface-service";
-export { ProtocolServer } from "./protocol/protocol-server";
+} from "./protocol/connection";
+export { ProtocolRouter } from "./protocol/router";
+export { SurfaceService, SurfaceServiceLive } from "./surfaces/service";
+export { ProtocolServer } from "./protocol/server";
 export { ExecuteTool, ExecuteToolLive } from "./tools/tool-handlers";
 export {
 	ToolControlPlane,
@@ -29,7 +29,7 @@ export {
 	WorkspaceFileDiscovery,
 	WorkspaceFileDiscoveryError,
 	WorkspaceFileDiscoveryLive,
-} from "./workspace/workspace-file-discovery";
+} from "./workspace/files/discovery";
 export {
 	ProjectionRebuildBusy,
 	ProjectionRebuildFailure,
@@ -49,7 +49,7 @@ export {
 	type GlobalGuidanceMutationTrace,
 	type GlobalGuidanceServiceError,
 	type GlobalGuidanceServiceOptions,
-} from "./guidance/guidance-service";
+} from "./guidance/service";
 export {
 	EmptyGuidanceProviderRegistryLive,
 	GuidanceProviderRegistry,
@@ -87,7 +87,7 @@ export {
 	type ModelBehaviourConfigFileReplaceOptions,
 	type ModelBehaviourConfigFileReplaceResult,
 	type ModelBehaviourConfigFileSnapshot,
-} from "./model-behaviour/model-behaviour-config-files";
+} from "./model-behaviour/config-files";
 export {
 	EmptyModelBehaviourProviderRegistryLive,
 	make_codex_model_behaviour_provider,
@@ -102,7 +102,7 @@ export {
 	type ModelBehaviourProviderApplyResult,
 	type ModelBehaviourProviderErrorCode,
 	type ModelBehaviourProviderObservation,
-} from "./model-behaviour/model-behaviour-provider";
+} from "./model-behaviour/provider";
 export {
 	BuildModelBehaviourCapabilities,
 	make_codex_auto_compaction_mapping,
@@ -112,7 +112,7 @@ export {
 	ModelBehaviourCapabilityRegistry,
 	ModelBehaviourRegistryError,
 	type ModelBehaviourProviderMapping,
-} from "./model-behaviour/model-behaviour-registry";
+} from "./model-behaviour/registry";
 export {
 	model_behaviour_thread_id,
 	ModelBehaviourRepository,
@@ -125,7 +125,7 @@ export {
 	type ModelBehaviourProviderCommit,
 	type ModelBehaviourReadResult,
 	type ModelBehaviourRepositoryError,
-} from "./model-behaviour/model-behaviour-repository";
+} from "./model-behaviour/repository";
 export {
 	ModelBehaviourConflict,
 	ModelBehaviourInvariantError,
@@ -134,8 +134,8 @@ export {
 	type ModelBehaviourMutationResult,
 	type ModelBehaviourMutationTrace,
 	type ModelBehaviourServiceError,
-} from "./model-behaviour/model-behaviour-service";
-export { hash_model_behaviour_value } from "./model-behaviour/model-behaviour-value";
+} from "./model-behaviour/service";
+export { hash_model_behaviour_value } from "./model-behaviour/value";
 export { ThreadErasure, ThreadErasureFailure } from "./threads/thread-erasure";
 export {
 	ThreadRetention,
@@ -186,6 +186,11 @@ export {
 	type ProjectLocatorOperation,
 } from "./threads/project-locator";
 export {
+	ProjectIdentityRegistry,
+	ProjectIdentityRegistryError,
+	ProjectIdentityRegistryLive,
+} from "./projects/project-identity-registry";
+export {
 	make_project_directory_service_layer,
 	ProjectDirectoryError,
 	ProjectDirectoryService,
@@ -215,7 +220,7 @@ export {
 	type WorkspaceEvidenceAcceptance,
 	type WorkspaceEvidenceRecorderError,
 	type WorkspaceEvidenceTrace,
-} from "./workspace/workspace-evidence-recorder";
+} from "./workspace/evidence";
 export {
 	WorkspaceFileService,
 	WorkspaceFileServiceError,
@@ -223,7 +228,7 @@ export {
 	type WorkspaceFileReviewInput,
 	type WorkspaceFileRollbackInput,
 	type WorkspaceFileReplaceInput,
-} from "./workspace/workspace-file-service";
+} from "./workspace/files/service";
 export {
 	WorkspaceChangeIdConflict,
 	WorkspaceChangeRepository,
@@ -239,7 +244,7 @@ export {
 	type WorkspaceChangeReconciliation,
 	type WorkspaceChangeRepositoryError,
 	type ReconcileWorkspaceChange,
-} from "./workspace/workspace-change-repository";
+} from "./workspace/changes/repository";
 export {
 	WorkspaceSnapshotStore,
 	WorkspaceSnapshotStoreConflict,
@@ -253,7 +258,7 @@ export {
 	type WorkspaceSnapshotResumeInput,
 	type WorkspaceSnapshotStageInput,
 	type WorkspaceSnapshotStoreError,
-} from "./workspace/workspace-snapshot-store";
+} from "./workspace/snapshot-store";
 export {
 	WorkspaceMutationPayloadStore,
 	WorkspaceMutationPayloadStoreConflict,
@@ -266,7 +271,7 @@ export {
 	type WorkspaceMutationPayloadResumeInput,
 	type WorkspaceMutationPayloadStageInput,
 	type WorkspaceMutationPayloadStoreError,
-} from "./workspace/workspace-mutation-payload-store";
+} from "./workspace/mutations/payloads";
 export {
 	make_node_workspace_filesystem_registry_layer,
 	WorkspaceFilesystemAuthorizationError,
@@ -292,7 +297,7 @@ export {
 	type WorkspaceMutationClaimRollback,
 	type WorkspaceMutationRollbackAdmission,
 	type WorkspaceMutationRollbackSource,
-} from "./workspace/workspace-mutation-authority";
+} from "./workspace/mutations/authority";
 export {
 	make_private_file_permissions_layer,
 	PosixPrivateFilePermissionsSnapshot,
@@ -310,12 +315,22 @@ export {
 } from "./model-behaviour/private-file-permissions";
 export { AgentOrchestrator } from "./orchestration/agent-orchestrator";
 export {
+	compaction_summary_template,
 	encode_portable_checkpoint_content,
 	PortableCheckpoint,
+	render_compaction_prompt,
 	render_portable_checkpoint_context,
 	render_portable_checkpoint_prompt,
 	select_portable_checkpoint_content,
+	serialize_compaction_transcript,
+	split_portable_checkpoint_entries,
 } from "./orchestration/thread-continuation-model";
+export {
+	ThreadContinuationCompactor,
+	ThreadContinuationCompactorLive,
+	type ThreadCompactionRequest,
+	type ThreadCompactionSummary,
+} from "./orchestration/thread-continuation-compactor";
 export {
 	ThreadContinuationService,
 	ThreadContinuationServiceFailure,
@@ -331,7 +346,7 @@ export {
 	type ContinuationLaunch,
 	type ThreadContinuationContext,
 	type ThreadContinuationLaunchState,
-} from "./persistence/thread-continuation-repository";
+} from "./persistence/thread-continuation/repository";
 export {
 	AgentGraphOrchestrator,
 	AgentGraphOrchestratorLive,
@@ -356,8 +371,10 @@ export {
 	type ReplaceRegularFileOptions,
 	type ReplaceRegularFileResult,
 } from "./filesystem/bounded-regular-file-store";
+export { BindProjectWorkspaces, ProjectWorkspaceBindingLive } from "./workspace/projects";
 export {
 	EmptyWorkspaceBoundedRegularFileStoreRegistryLive,
+	NodeWorkspaceBoundedRegularFileStoreRegistryLive,
 	WorkspaceBoundedRegularFileStoreAuthorizationError,
 	WorkspaceBoundedRegularFileStoreNotFoundError,
 	WorkspaceBoundedRegularFileStoreRegistry,
@@ -394,14 +411,14 @@ export {
 	type GitCommandOutput,
 	type GitCommandResult,
 	NodeGitCommandExecutorLive,
-} from "./git/git-command-executor";
+} from "./git/executor";
 export {
 	GitMutationDriver,
 	GitMutationDriverError,
 	GitMutationDriverLive,
 	type GitMutationDriverOperation,
 	type GitMutationRequest,
-} from "./git/git-mutation-driver";
+} from "./git/mutation-driver";
 export {
 	GitReadError,
 	GitReadService,
@@ -409,7 +426,7 @@ export {
 	make_git_read_service_layer,
 	type GitReadOperation,
 	type GitReadServiceOptions,
-} from "./git/git-read-service";
+} from "./git/read-service";
 export {
 	GitRepository,
 	GitRepositoryConflict,
@@ -426,13 +443,13 @@ export {
 	type GitRepositoryError,
 	type GitRepositoryRecovery,
 	type GitWorkspaceCommit,
-} from "./git/git-repository";
+} from "./git/repository";
 export {
 	GitService,
 	GitServiceError,
 	GitServiceLive,
 	type GitServiceOperation,
-} from "./git/git-service";
+} from "./git/service";
 export {
 	make_node_workspace_git_registry_layer,
 	make_workspace_git_registry_layer,
@@ -475,12 +492,12 @@ export {
 	type PreviewTargetRegistration,
 	type PreviewTargetSource,
 	type PreviewTargetState,
-} from "./preview/preview-target";
+} from "./preview/target";
 export {
 	PreviewCoordinator,
 	PreviewCoordinatorLive,
 	type PreviewCoordinatorError,
-} from "./preview/preview-coordinator";
+} from "./preview/coordinator";
 export {
 	PreviewExternalBrowser,
 	PreviewInspection,
@@ -491,7 +508,7 @@ export {
 	make_preview_inspection_layer,
 	type PreviewInspectionConnectorHandle,
 	type PreviewInspectionConnectorOpen,
-} from "./preview/preview-runtime";
+} from "./preview/runtime";
 export {
 	NodePreviewHealthProbeLive,
 	make_node_preview_health_probe_layer,
@@ -500,7 +517,7 @@ export {
 	make_preview_target_layer,
 	PreviewTargetClockLive,
 	type PreviewTargetOptions,
-} from "./preview/preview-target-service";
+} from "./preview/target-service";
 export {
 	RichLinkAssetStore,
 	RichLinkAssetStoreError,
@@ -543,7 +560,7 @@ export {
 	NodePtyTerminalDriverLive,
 	make_node_pty_terminal_driver_layer,
 	type NodePtyTerminalDriverOptions,
-} from "./terminal/node-pty-terminal-driver";
+} from "./terminal/node-pty-driver";
 export {
 	TerminalDriver,
 	TerminalDriverError,
@@ -551,23 +568,23 @@ export {
 	type TerminalDriverHandle,
 	type TerminalDriverOpenInput,
 	type TerminalDriverOperation,
-} from "./terminal/terminal-driver";
+} from "./terminal/driver";
 export {
 	TerminalSessionService,
 	TerminalSessionServiceLive,
 	type TerminalCommandAcceptance,
 	type TerminalSessionError,
-} from "./terminal/terminal-sessions";
+} from "./terminal/sessions";
+export { TerminalRepository } from "./terminal/contract";
 export {
 	TerminalCommandConflict,
 	TerminalInvariantError,
 	TerminalNotActive,
 	TerminalNotFound,
 	TerminalPersistenceFailure,
-	TerminalRepository,
-	TerminalRepositoryLive,
 	type TerminalRepositoryError,
-} from "./terminal/terminal-repository";
+} from "./terminal/model";
+export { TerminalRepositoryLive } from "./terminal/repository";
 export {
 	EmptySecretStoreLive,
 	SecretStore,
@@ -619,14 +636,16 @@ export {
 	CapabilityRepository,
 	CapabilityRepositoryError,
 	CapabilityRepositoryLive,
-} from "./marketplace/capabilities/capability-repository";
+} from "./marketplace/capabilities/repository";
 export {
-	CapabilityOAuthLifecycle,
-	CapabilityOAuthLifecycleLive,
 	CapabilityService,
 	CapabilityServiceError,
 	CapabilityServiceLive,
-} from "./marketplace/capabilities/capability-service";
+} from "./marketplace/capabilities/service";
+export {
+	CapabilityOAuthLifecycle,
+	CapabilityOAuthLifecycleLive,
+} from "./marketplace/capabilities/oauth-lifecycle";
 export {
 	CapabilityMirrorService,
 	CapabilityMirrorServiceLive,
@@ -645,17 +664,17 @@ export {
 	type RoutineInspection,
 	type RoutineInstallReceipt,
 	type RoutineMirrorAdapter,
-} from "./marketplace/routines/routine-adapters";
+} from "./marketplace/routines/adapters";
 export {
 	RoutineRepository,
 	RoutineRepositoryError,
 	RoutineRepositoryLive,
-} from "./marketplace/routines/routine-repository";
+} from "./marketplace/routines/repository";
 export {
 	RoutineService,
 	RoutineServiceError,
 	RoutineServiceLive,
-} from "./marketplace/routines/routine-service";
+} from "./marketplace/routines/service";
 export {
 	DeterministicRoutineInstallerTestLive,
 	make_local_routine_installer_layer,
@@ -663,7 +682,7 @@ export {
 	make_npx_skills_process_adapter_layer,
 	type LocalRoutineInspectorOptions,
 	type NpxSkillsProcessOptions,
-} from "./marketplace/routines/production-routine-adapters";
+} from "./marketplace/routines/production-adapters";
 export {
 	make_backend_layer,
 	make_backend_runtime,

@@ -2,12 +2,9 @@ import { NodeCrypto, NodeFileSystem } from "@effect/platform-node-shared";
 import { Effect, Layer, Option } from "effect";
 
 import { Git, GitError, type GitOperation } from "./git";
-import {
-	make_node_git_command_executor_layer,
-	type GitCommandExecutorOptions,
-} from "./git-command-executor";
-import { GitReadService, make_git_read_service_layer } from "./git-read-service";
-import { type GitHead } from "./git-model";
+import { make_node_git_command_executor_layer, type GitCommandExecutorOptions } from "./executor";
+import { GitReadService, make_git_read_service_layer } from "./read-service";
+import { type GitHead } from "./model";
 import { type NodeProcessRunnerOptions } from "./node-process-runner";
 import { make_workspace_git_registry_layer } from "./workspace-git-registry";
 

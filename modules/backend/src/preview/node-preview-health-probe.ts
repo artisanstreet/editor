@@ -8,8 +8,8 @@ import {
 	PreviewHealthProbeError,
 	type PreviewHealthProbeResult,
 	type PreviewTargetRecord,
-} from "./preview-target";
-import { is_valid_loopback_preview_url } from "./preview-runtime";
+} from "./target";
+import { is_valid_loopback_preview_url } from "./runtime";
 
 const maximum_response_bytes = 8 * 1024;
 const default_timeout_ms = 3_000;

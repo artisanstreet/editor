@@ -14,25 +14,25 @@ import type {
 } from "@artisan/protocol";
 
 import { GuidanceFileStoreFailure } from "../../../guidance/file-store";
-import { global_guidance_thread_id } from "../../../guidance/guidance-repository";
+import { global_guidance_thread_id } from "../../../guidance/repository";
 import {
 	GlobalGuidanceConflict,
 	GlobalGuidanceInvariantError,
 	GlobalGuidanceService,
-} from "../../../guidance/guidance-service";
-import { model_behaviour_thread_id } from "../../../model-behaviour/model-behaviour-repository";
+} from "../../../guidance/service";
+import { model_behaviour_thread_id } from "../../../model-behaviour/repository";
 import {
 	ModelBehaviourConflict,
 	ModelBehaviourInvariantError,
 	ModelBehaviourService,
-} from "../../../model-behaviour/model-behaviour-service";
+} from "../../../model-behaviour/service";
 import {
 	CommandIdConflict,
 	JournalInvariantError,
 	JournalStore,
 	JournalStoreFailure,
 } from "../../../persistence/journal-store";
-import { RuntimeMetadata } from "../../../runtime/runtime-metadata";
+import { RuntimeMetadata } from "../../../runtime/metadata";
 
 export type SettingsMutationEnvelope =
 	| GlobalGuidanceDriftResolutionEnvelope

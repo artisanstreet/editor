@@ -72,6 +72,7 @@ export const StartForgeFromEnvironment = Effect.gen(function* () {
 			...(process.env.ARTISAN_AUTH_TOKEN === undefined
 				? {}
 				: { auth_token: process.env.ARTISAN_AUTH_TOKEN }),
+			...(process.env.ARTISAN_FORGE_DEVELOPMENT === "1" ? { development: true } : {}),
 			...(process.env.ARTISAN_STATIC_FRONTEND_ROOT === undefined
 				? {}
 				: {

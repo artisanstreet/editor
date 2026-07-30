@@ -106,11 +106,9 @@ export const make_activation_layer = (installation_root: string) =>
 			const ReadActive = () =>
 				file_system.readFileString(layout.current).pipe(
 					Effect.flatMap((content) =>
-						Effect.try({
-							try: () => JSON.parse(content) as unknown,
-							catch: (cause) => cause,
-						}).pipe(
-							Effect.flatMap(Schema.decodeUnknownEffect(ActiveVersionPointer)),
+						Schema.decodeUnknownEffect(Schema.fromJsonString(ActiveVersionPointer))(
+							content,
+						).pipe(
 							Effect.match({
 								onFailure: (cause): ActiveVersionState => ({
 									_tag: "Malformed",

@@ -55,7 +55,7 @@ import {
 	WorkspaceChangeSnapshots,
 	WorkspaceMutationAuthorities,
 	WorkspaceMutationPayloads,
-} from "../persistence/schema";
+} from "../persistence/tables";
 import { ThreadResourceQuiescer } from "./thread-resource-quiescer";
 
 /** Wraps an unexpected claim, resource-quiescence, or durable erasure failure. */
@@ -536,6 +536,12 @@ export const ThreadErasureLive = Layer.effect(
 								thread_id,
 							})
 							.returning({ journal_sequence: JournalEvents.sequence });
+						if (erasure_event === undefined)
+							return yield* new ThreadErasureFailure({
+								cause: new Error(
+									`Thread erasure event ${erasure_id} returned no inserted row`,
+								),
+							});
 
 						yield* transaction
 							.insert(ThreadTombstones)
@@ -546,7 +552,7 @@ export const ThreadErasureLive = Layer.effect(
 							.delete(ThreadErasureClaims)
 							.where(eq(ThreadErasureClaims.thread_id, thread_id));
 
-						return erasure_event!.journal_sequence;
+						return erasure_event.journal_sequence;
 					}),
 				);
 				const journal_sequence = yield* RetrySqliteWrite(ErasureTransaction);

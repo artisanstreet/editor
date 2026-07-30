@@ -2,7 +2,7 @@ import { Context, Effect, Layer } from "effect";
 
 import { Database } from "../persistence/database";
 import { JournalNotifier } from "../persistence/journal-notifier";
-import { RuntimeMetadata } from "../runtime/runtime-metadata";
+import { RuntimeMetadata } from "../runtime/metadata";
 import { make_assignment_commands } from "./internal/assignment-commands";
 import { make_control_commands } from "./internal/control-commands";
 import { make_dependency_evaluation } from "./internal/dependency-evaluation";

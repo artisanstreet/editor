@@ -2,7 +2,7 @@ import { eq } from "drizzle-orm";
 import { Effect } from "effect";
 
 import type { DatabaseClient } from "./database";
-import { ThreadErasureClaims, Threads, ThreadTombstones } from "./schema";
+import { ThreadErasureClaims, Threads, ThreadTombstones } from "./tables";
 
 /**
  * The one thread-liveness invariant: a thread accepts durable writes only when

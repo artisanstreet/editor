@@ -14,21 +14,21 @@ import {
 	JournalEvents,
 	MarketplaceCapabilityArtifacts,
 	MarketplaceCapabilityOperations,
-} from "../../modules/backend/src/persistence/schema";
+} from "../../modules/backend/src/persistence/tables";
 import {
 	CapabilityRepository,
 	CapabilityRepositoryLive,
-} from "../../modules/backend/src/marketplace/capabilities/capability-repository";
+} from "../../modules/backend/src/marketplace/capabilities/repository";
 import {
 	CapabilityService,
 	CapabilityOAuthLifecycle,
 	CapabilityOAuthLifecycleLive,
 	CapabilityServiceLive,
-} from "../../modules/backend/src/marketplace/capabilities/capability-service";
+} from "../../modules/backend/src/marketplace/capabilities/service";
 
 import { CapabilityTransportRegistry } from "../../modules/backend/src/marketplace/capabilities/mcp-transport";
 import { McpTransportError } from "../../modules/backend/src/marketplace/capabilities/mcp-transport";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 import {
 	make_oauth_layer,
 	OAuthError,

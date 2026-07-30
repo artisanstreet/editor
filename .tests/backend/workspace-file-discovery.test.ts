@@ -3,13 +3,14 @@ import { describe, expect, it } from "vitest";
 
 import {
 	WorkspaceFilesystemNotFoundError,
+	WorkspaceFilesystemRegistrationError,
 	WorkspaceFilesystemRegistry,
 	type WorkspaceFilesystem,
 } from "../../modules/backend/src/filesystem/workspace-filesystem-registry";
 import {
 	WorkspaceFileDiscovery,
 	WorkspaceFileDiscoveryLive,
-} from "../../modules/backend/src/workspace/workspace-file-discovery";
+} from "../../modules/backend/src/workspace/files/discovery";
 
 const filesystem = {
 	List: (path = ".") =>
@@ -72,6 +73,12 @@ const registry = Layer.succeed(WorkspaceFilesystemRegistry, {
 			? Effect.succeed({ filesystem, workspace_id })
 			: Effect.fail(new WorkspaceFilesystemNotFoundError({ workspace_id })),
 	ListWorkspaceIds: Effect.succeed(["workspace"]),
+	Reconcile: () => Effect.succeed([]),
+	/** Discovery never registers; the fake refuses rather than pretending to. */
+	Register: () =>
+		Effect.fail(
+			new WorkspaceFilesystemRegistrationError({ message: "registration is not under test" }),
+		),
 });
 
 describe("WorkspaceFileDiscovery", () => {
@@ -116,6 +123,13 @@ describe("WorkspaceFileDiscovery", () => {
 			Get: (workspace_id: string) =>
 				Effect.succeed({ filesystem: bounded_filesystem, workspace_id }),
 			ListWorkspaceIds: Effect.succeed(["workspace"]),
+			Reconcile: () => Effect.succeed([]),
+			Register: () =>
+				Effect.fail(
+					new WorkspaceFilesystemRegistrationError({
+						message: "registration is not under test",
+					}),
+				),
 		});
 		const service = await Effect.runPromise(
 			Effect.service(WorkspaceFileDiscovery).pipe(

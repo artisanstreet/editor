@@ -94,7 +94,6 @@ export interface DevPaths {
 	readonly forge_bundle: string;
 	readonly forge_home: string;
 	readonly forge_runtime: string;
-	readonly frontend_static: string;
 	readonly logs_root: string;
 	readonly repository_root: string;
 	readonly secrets: string;
@@ -115,7 +114,6 @@ export const derive_dev_paths = (repository_root: string, offset = 0): DevPaths 
 		forge_bundle: join(forge_runtime, "host.js"),
 		forge_home: join(development, "forge-home"),
 		forge_runtime,
-		frontend_static: join(repository_root, ".dist", "frontend"),
 		logs_root: join(development, "logs"),
 		repository_root,
 		secrets: join(development, "forge-home", "secrets.json"),
@@ -133,13 +131,14 @@ export const make_forge_environment = (
 ): Readonly<Record<string, string>> => ({
 	ARTISAN_AUTH_TOKEN: auth_token,
 	ARTISAN_DATABASE_PATH: join(paths.data_root, "artisan.sqlite"),
+	/** Stated outright: the marker is no longer inferred from static hosting. */
+	ARTISAN_FORGE_DEVELOPMENT: "1",
 	ARTISAN_FORGE_LOG_PATH: join(paths.forge_home, "forge.log"),
 	ARTISAN_FORGE_STATE_PATH: join(paths.forge_home, "state.json"),
 	ARTISAN_HOME: paths.forge_home,
 	ARTISAN_LISTEN_PORT: String(instance.forge_port),
 	ARTISAN_MIGRATIONS_PATH: join(paths.forge_runtime, "migrations"),
 	ARTISAN_NATIVE_RUNTIME: join(paths.forge_runtime, "native-runtime"),
-	ARTISAN_STATIC_FRONTEND_ROOT: join(paths.forge_runtime, "frontend"),
 	/**
 	 * Engine adapters spawn through the staged process host; without this the
 	 * host path resolves relative to the bundled chunk and does not exist.
@@ -175,7 +174,13 @@ export const write_dev_config = (paths: DevPaths, instance: DevInstance): void =
 			listen_host: "127.0.0.1",
 			listen_port: instance.forge_port,
 			mode: "local",
-			serve_frontend: true,
+			/**
+			 * The development Forge serves the API and the WebSocket only. Vite
+			 * serves the frontend, so hosting a second, separately built copy on
+			 * the Forge origin would only offer a stale UI on a port where
+			 * same-origin self-pairing does not exist.
+			 */
+			serve_frontend: false,
 			version: 1,
 		})}\n`,
 	);
@@ -312,20 +317,6 @@ if (runner_is_entry) {
 		mkdirSync(paths.data_root, { recursive: true });
 	};
 
-	const ensure_frontend_static = async () => {
-		if (existsSync(paths.frontend_static)) return;
-		log("building the static frontend once (required by the Forge watch-build)");
-		const build = spawnSync("pnpm", ["--filter", "@artisan/frontend", "run", "build"], {
-			cwd: repository_root,
-			shell: true,
-			stdio: "inherit",
-		});
-		if (build.status !== 0) {
-			console.error("[dev] the initial frontend build failed");
-			process.exit(1);
-		}
-	};
-
 	let forge_lane: Lane | undefined;
 	const start_forge = () => {
 		const child = spawn(process.execPath, [paths.forge_bundle], {
@@ -402,17 +393,41 @@ if (runner_is_entry) {
 		}
 	};
 
+	/**
+	 * Opens the Vite origin with a pairing fragment once both servers answer.
+	 *
+	 * In-page self-pairing only runs after the gate exhausts its retries, so a
+	 * cold start would otherwise sit on the remedy screen for the length of the
+	 * retry budget. Opening a pre-paired tab also settles which origin is the
+	 * development UI: the Forge origin serves no frontend at all.
+	 */
+	const open_paired_browser = async () => {
+		for (let attempt = 0; attempt < 120 && !shutting_down; attempt += 1) {
+			if (
+				(await probe(`${instance.forge_origin}/health`)) &&
+				(await probe(instance.web_origin))
+			) {
+				const url = await mint_pair_url();
+				if (url === undefined) break;
+				log(`opening ${instance.web_origin} (paired)`);
+				if (process.platform === "win32") {
+					spawnSync("cmd", ["/c", "start", "", url], { stdio: "ignore" });
+				}
+				return;
+			}
+			await sleep(1_000);
+		}
+		if (!shutting_down) {
+			log(`could not open a paired browser; open ${instance.web_origin} and it self-pairs`);
+		}
+	};
+
 	const doctor = async () => {
 		const checks: Array<readonly [name: string, passed: boolean, detail: string]> = [];
 		checks.push([
 			"node",
 			Number(process.versions.node.split(".")[0]) >= 22,
 			`v${process.versions.node}`,
-		]);
-		checks.push([
-			"frontend static build",
-			existsSync(paths.frontend_static),
-			paths.frontend_static,
 		]);
 		checks.push(["forge bundle", existsSync(paths.forge_bundle), paths.forge_bundle]);
 		checks.push(["secrets", existsSync(paths.secrets), paths.secrets]);
@@ -473,7 +488,6 @@ if (runner_is_entry) {
 		log(`frontend ${instance.web_origin}  (self-pairing enabled)`);
 
 		if (mode === "dev" || mode === "forge") {
-			await ensure_frontend_static();
 			spawn_pnpm(
 				"build",
 				["exec", "vite", "build", "--watch", "--config", "forge.vite.config.ts"],
@@ -487,6 +501,7 @@ if (runner_is_entry) {
 				ARTISAN_FORGE_DEV_ORIGIN: instance.forge_origin,
 				ARTISAN_FRONTEND_DEV_PORT: String(instance.web_port),
 			});
+			void open_paired_browser();
 		}
 	};
 

@@ -21,7 +21,7 @@ import {
 } from "@artisan/backend";
 import { make_transport_test_harness_with_protocol_server } from "./message-channel-harness";
 import { Database } from "../../modules/backend/src/persistence/database";
-import { ThreadErasureClaims } from "../../modules/backend/src/persistence/schema";
+import { ThreadErasureClaims } from "../../modules/backend/src/persistence/tables";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const directories: string[] = [];

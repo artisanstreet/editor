@@ -1,6 +1,6 @@
 import { Cause, Deferred, Effect, Option, Queue, Ref, Scope, Stream } from "effect";
 
-import type { ArtisanClientError } from "../client-contract";
+import type { ArtisanClientError } from "../client-api/service";
 import type { MessagePortStreamFrame, TransportStreamFrame } from "../wire";
 import {
 	client_error,

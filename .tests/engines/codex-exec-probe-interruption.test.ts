@@ -1,8 +1,8 @@
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 
-import { ProbeCodexExecVersion } from "../../modules/engines/src/codex/internal/codex-exec-probe";
-import type { CodexProcessFactory } from "../../modules/engines/src/codex/codex-process";
+import { ProbeCodexExecVersion } from "../../modules/engines/src/codex/internal/exec-probe";
+import type { CodexProcessFactory } from "../../modules/engines/src/codex/process";
 
 describe("Codex exec probe interruption", () => {
 	it("returns both async iterators and closes the process when the Effect timeout wins", async () => {

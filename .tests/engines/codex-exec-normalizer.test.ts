@@ -1,9 +1,41 @@
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 
-import { NormaliseCodexExecEvent } from "../../modules/engines/src/codex/codex-exec-normalizer";
+import { NormaliseCodexExecEvent } from "../../modules/engines/src/codex/exec-normalizer";
 
 describe("Codex exec normalizer usage", () => {
+	it("keeps context-compaction start and completion on one native lifecycle identity", async () => {
+		const normalize = (frame_sequence: number, type: "item.started" | "item.completed") =>
+			Effect.runPromise(
+				NormaliseCodexExecEvent({
+					artisan_run_id: "run_1",
+					frame_sequence,
+					payload: {
+						item: { id: "compact-1", type: "context_compaction" },
+						type,
+					},
+					raw_frame_base64: "e30=",
+					turn_id: "turn_1",
+				}),
+			);
+
+		const [[started], [completed]] = await Promise.all([
+			normalize(1, "item.started"),
+			normalize(2, "item.completed"),
+		]);
+
+		expect(started).toMatchObject({
+			_tag: "compaction",
+			compaction_id: "compact-1",
+			state: "started",
+		});
+		expect(completed).toMatchObject({
+			_tag: "compaction",
+			compaction_id: "compact-1",
+			state: "completed",
+		});
+	});
+
 	it("keeps completed agent messages unspecified when exec supplies no phase", async () => {
 		const observations = await Effect.runPromise(
 			NormaliseCodexExecEvent({

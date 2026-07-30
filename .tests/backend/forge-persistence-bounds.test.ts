@@ -23,7 +23,7 @@ import {
 	ConversationTurns,
 	EventStreams,
 	Threads,
-} from "../../modules/backend/src/persistence/schema";
+} from "../../modules/backend/src/persistence/tables";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const directories: string[] = [];

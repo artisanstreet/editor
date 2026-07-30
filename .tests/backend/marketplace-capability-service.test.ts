@@ -13,11 +13,11 @@ import { JournalNotifierLive } from "../../modules/backend/src/persistence/journ
 import {
 	CapabilityRepository,
 	CapabilityRepositoryLive,
-} from "../../modules/backend/src/marketplace/capabilities/capability-repository";
+} from "../../modules/backend/src/marketplace/capabilities/repository";
 import {
 	CapabilityService,
 	CapabilityServiceLive,
-} from "../../modules/backend/src/marketplace/capabilities/capability-service";
+} from "../../modules/backend/src/marketplace/capabilities/service";
 import {
 	CapabilityTransportRegistry,
 	make_capability_transport_registry_layer,
@@ -27,7 +27,7 @@ import {
 	CapabilityMirrorServiceLive,
 	CapabilityProviderMirror,
 } from "../../modules/backend/src/marketplace/capabilities/provider-mirrors";
-import { RuntimeMetadata } from "../../modules/backend/src/runtime/runtime-metadata";
+import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 
 const DriftFingerprint = (capability_id: string, observed_revision: string) =>
 	createHash("sha256")
