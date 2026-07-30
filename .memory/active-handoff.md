@@ -6,11 +6,11 @@ Last updated: 2026-07-30. Branch continuity only. Durable verified status is in
 ## Working State
 
 - Repository `C:\Users\sander\Desktop\artisan-editor`; direct `master`,
-  tracking `origin/master`. Portable continuation is committed/pushed through
-  `1479292b`; the settled-thread selector unlock is pushed through `4f6d32f`.
-- Extensive pre-existing Sander WIP is present. Preserve it and stage only
-  task-owned content. `modules/frontend/src/routes/threads/+page.sv` is
-  pre-staged user work and must remain staged but uncommitted.
+  tracking `origin/master`. The authorized integrated thermonuclear milestone
+  is `9414199b` and its complete validation is recorded below.
+- Protected user work remains: `modules/frontend/src/routes/threads/+page.sv`
+  stays staged but uncommitted; `.mcp.json` and five unrelated migration
+  directories stay untracked.
 - Production Engines are Codex CLI and Claude Code CLI.
 
 ## Invariants
@@ -93,9 +93,8 @@ Last updated: 2026-07-30. Branch continuity only. Durable verified status is in
   contextual filenames, no raw JSON/non-null assertions, and SER ownership.
 - All reviewed positional bundles, double casts, `Effect.orDie` conversions,
   and basename collisions are removed; both final thermos verdicts are clean.
-  Sander authorized the integrated milestone. Commit staging explicitly excludes
-  the protected page, personal config, and five unrelated migrations; direct
-  master commit/push is in progress.
+  Commit `9414199b` contains the authorized integrated tree and excludes every
+  protected path.
 
 ## Verification
 
