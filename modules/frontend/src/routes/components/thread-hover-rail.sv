@@ -6,7 +6,7 @@
 		FormatRecentThreadTime,
 		SortRecentThreads,
 		ThreadRouteId,
-		ThreadRoutePath,
+		ThreadRoutePathFor,
 	} from "$lib/root/thread-navigation";
 
 	let {
@@ -27,7 +27,7 @@
 	let now_ms = $state(Date.now());
 
 	const recent_threads = $derived(SortRecentThreads(threads));
-	const active_route_id = $derived(page.params.id);
+	const active_route_id = $derived(page.params.thread ?? page.params.id);
 
 	const Reveal = () => {
 		if (!open) now_ms = Date.now();
@@ -85,7 +85,7 @@
 				{@const is_active = ThreadRouteId(thread.thread_id) === active_route_id}
 				<div class="border-b border-border last:border-b-0">
 					<a
-						href={ThreadRoutePath(thread.thread_id)}
+						href={ThreadRoutePathFor(thread)}
 						class={`block text-sm font-medium outline-none transition-colors duration-(--duration-fast) ease-in-out focus-visible:text-foreground-extra motion-reduce:transition-none ${is_active ? "text-foreground" : "text-muted-foreground hover:text-foreground-extra"}`}
 						aria-current={is_active ? "page" : undefined}
 					>

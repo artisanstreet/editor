@@ -38,16 +38,25 @@ describe("editor shell", () => {
 		);
 		expect(layout).toContain("{#snippet editor_files()}");
 		expect(layout).toContain("<EditorFilePanel />");
-		expect(layout).toContain("/^\\/threads(?:\\/[^/]+)?\\/?$/");
+		expect(layout).toContain("/^\\/t\\/[^/]+\\/[^/]+\\/?$/");
 	});
 
 	it("drives the editor session from the URL so a deep link restores it", () => {
-		const route = Read("modules/frontend/src/routes/editor/+page.sv");
+		const route = Read("modules/frontend/src/routes/e/[workspace]/[thread]/+page.sv");
+		const gate = Read(
+			"modules/frontend/src/routes/e/[workspace]/[thread]/editor-route-gate.sv",
+		);
 
-		expect(route).toContain('page.url.searchParams.get("file")');
-		expect(route).toContain("client.ReadWorkspaceFile");
-		expect(route).toContain("editor.Activate");
-		expect(route).toContain("<EditorSurface");
+		expect(route).toContain("<EditorRouteGate {workspace_id} {thread_id} />");
+		expect(route).toContain("page.params.thread");
+		expect(gate).toContain('page.url.searchParams.get("file")');
+		expect(gate).toContain("EditorRouteTargetForThread(");
+		expect(gate).toContain("client.SubscribeThreadList");
+		expect(gate).toContain("ThreadRouteHasWorkspace(thread, workspace_id)");
+		expect(gate).toContain("active_thread = undefined");
+		expect(gate).toContain(
+			"EditorRoute workspace_id={active_thread.primary_project.project_id}",
+		);
 		/** Saving and the strip that carried it are gone for now, not merely hidden. */
 		expect(route).not.toContain("ReplaceWorkspaceFile({");
 		expect(route).not.toContain("editor.Save");
@@ -59,7 +68,7 @@ describe("editor shell", () => {
 	 * corner message while the previously opened document stays on screen.
 	 */
 	it("replaces the surface with a stated reason when a file cannot open", () => {
-		const route = Read("modules/frontend/src/routes/editor/+page.sv");
+		const route = Read("modules/frontend/src/routes/components/editor-route.sv");
 
 		expect(route).toContain("open_failures");
 		expect(route).toContain("This file can&rsquo;t be displayed");

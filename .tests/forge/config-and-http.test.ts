@@ -93,10 +93,10 @@ describe("Forge boundary", () => {
 		});
 		const asset = await fetch(host.endpoint);
 		expect(await asset.text()).toBe("<main>Artisan</main>");
-		const deep_link = await fetch(new URL("/threads/thread_1", host.endpoint));
+		const deep_link = await fetch(new URL("/t/workspace_1/thread_1", host.endpoint));
 		expect(deep_link.status).toBe(200);
 		expect(await deep_link.text()).toBe("<main>Artisan</main>");
-		const deep_link_head = await fetch(new URL("/threads/thread_1", host.endpoint), {
+		const deep_link_head = await fetch(new URL("/t/workspace_1/thread_1", host.endpoint), {
 			method: "HEAD",
 		});
 		expect(deep_link_head.status).toBe(200);

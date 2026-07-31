@@ -34,7 +34,7 @@ describe("persisted conversation image attachments", () => {
 	});
 
 	it("loads thread-scoped bytes once and revokes every object URL with the route scope", () => {
-		const route = ReadSource("modules/frontend/src/routes/threads/[id]/thread-route.sv");
+		const route = ReadSource("modules/frontend/src/routes/components/thread-route.sv");
 
 		expect(route).toContain("client.GetMessageImageAttachment({");
 		expect(route).toContain("requested_image_ids.has(attachment.id)");

@@ -90,7 +90,7 @@ describe("static hosting production gate", () => {
 		});
 
 		expect((await fetch(host.endpoint)).status).toBe(404);
-		expect((await fetch(new URL("/threads/12345", host.endpoint))).status).toBe(404);
+		expect((await fetch(new URL("/t/workspace_1/12345", host.endpoint))).status).toBe(404);
 		expect((await fetch(new URL("/index.html", host.endpoint))).status).toBe(404);
 
 		const health = await fetch(new URL("/health", host.endpoint));

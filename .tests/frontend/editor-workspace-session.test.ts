@@ -8,7 +8,11 @@ import {
 	WorkspaceEntriesByParent,
 	workspace_tree_root,
 } from "../../modules/frontend/src/lib/editor/workspace-session";
-import { EditorWorkspaceId } from "../../modules/frontend/src/lib/editor/workspace-identity";
+import {
+	EditorRoutePath,
+	EditorRouteTargetForThread,
+	EditorWorkspaceId,
+} from "../../modules/frontend/src/lib/editor/workspace-identity";
 
 const entry = (
 	path: string,
@@ -136,12 +140,48 @@ describe("editor workspace session", () => {
 	});
 
 	/**
-	 * The URL is the only source of a workspace: without `?workspace=` there is
-	 * no fallback to "some attached project", so a route outside any workspace
-	 * never opens the editor into one by accident.
+	 * The canonical editor identity is fully path-scoped. Query parameters can
+	 * select a file, but can never select the workspace or thread.
 	 */
-	it("resolves the workspace from the URL and nothing else", () => {
-		expect(EditorWorkspaceId(new URL("https://forge/editor?workspace=other"))).toBe("other");
-		expect(EditorWorkspaceId(new URL("https://forge/editor"))).toBeUndefined();
+	it("resolves the workspace and thread from canonical editor path parameters", () => {
+		expect(EditorWorkspaceId("project one")).toBe("project one");
+		expect(EditorWorkspaceId(undefined)).toBeUndefined();
+		expect(EditorRoutePath("project one", "thread_1", "src/a.ts")).toBe(
+			"/e/project%20one/1?file=src%2Fa.ts",
+		);
+	});
+
+	it("recanonicalizes editor targets after reassignment and exits on detach", () => {
+		const assigned = {
+			primary_project: {
+				display_name: "Project one",
+				project_id: "project_1",
+				root_path: "C:\\projects\\one",
+			},
+			thread_id: "thread_1",
+		};
+
+		expect(EditorRouteTargetForThread(assigned, "src/a.ts")).toEqual({
+			path: "/e/project_1/1?file=src%2Fa.ts",
+			type: "editor",
+			workspace_id: "project_1",
+		});
+		expect(
+			EditorRouteTargetForThread({
+				...assigned,
+				primary_project: {
+					...assigned.primary_project,
+					project_id: "project_2",
+				},
+			}),
+		).toEqual({
+			path: "/e/project_2/1",
+			type: "editor",
+			workspace_id: "project_2",
+		});
+		expect(EditorRouteTargetForThread({ ...assigned, primary_project: undefined })).toEqual({
+			path: "/t/_/1",
+			type: "thread",
+		});
 	});
 });

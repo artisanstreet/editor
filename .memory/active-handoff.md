@@ -1,15 +1,17 @@
 # Active Branch Handoff
 
-Last updated: 2026-07-30. Branch continuity only. Durable verified status is in
+Last updated: 2026-07-31. Branch continuity only. Durable verified status is in
 [`docs/status/backend-completion-matrix.md`](../docs/status/backend-completion-matrix.md).
 
 ## Working State
 
 - Repository `C:\Users\sander\Desktop\artisan-editor`; direct `master`,
   tracking `origin/master`. Thermonuclear remediation is committed through
-  clean-checkout repair `45fa22bb`; push/status recording remains.
+  clean-checkout repair `45fa22bb`; canonical route restoration is the current
+  verified integration milestone.
 - Protected user work remains: `modules/frontend/src/routes/threads/+page.sv`
-  stays staged but uncommitted and `.mcp.json` stays untracked.
+  stays staged but uncommitted and `.mcp.json` stays untracked. One unstaged
+  canonical-route adaptation remains on top of that protected page.
 - Production Engines are Codex CLI and Claude Code CLI.
 
 ## Invariants
@@ -24,72 +26,18 @@ Last updated: 2026-07-30. Branch continuity only. Durable verified status is in
 - A portable target always starts fresh. Compatible same-engine resume is
   version/model gated and carries the new ordered request content explicitly.
 
-## Active Thermonuclear Remediation
+## Active Work
 
-- Sol-light workers owned non-overlapping slices; the coordinator owns
-  architecture, integration, review, full validation, status, and direct-master commits.
-- Correctness/security: workspace authority revokes on detach/root change and
-  subscribes before its initial snapshot; Claude compaction uses safe no-tools
-  flags. Deterministic race and focused suites pass.
-- Effect/SER: browser/helper lifecycles are scoped. Dropdown highlights use a
-  component-owned SER queue/fiber worker with no manual scope/runSync boundary;
-  frontend/lifecycle suites and production build pass.
-- Protocol schemas are a 17-line facade over nine modules; subscriptions are
-  eight scoped modules (largest 230). Project/session/runtime/routine/capability/
-  control/tool/preview handlers are scoped modules. Live-event delivery stays
-  typed, exact settings constructors replace casts, and uniform handler
-  construction replaces the dependency bundle. Server/ready dispatch/mutations
-  are 664/292/398 lines; the final protocol review fixes pass 70 focused tests.
-- Orchestration is 916/345/856-line repository/acceptance/transaction dispatch;
-  29 atomicity/continuation/structure tests pass.
-- Transport public contract is 563/586 lines; the 1,559-line prefixed fixture is
-  replaced by seven contextual modules (largest 526). The supported `client.ts`
-  facade targets `client-api/`, eliminating its collision. The live client is a
-  379-line lifecycle composer over ten scoped domain API modules, each below
-  500 lines. Subscription coordination is now a 45-line composer acquiring
-  options, identity/trace, protocol send, and error reporting through Context
-  Services/Layers over contextual ingress/registry/typed-delivery modules
-  (largest 648), with unsafe projection double casts removed; 30 focused tests pass.
-- Git and workspace now have contextual names and all files below 1,000. Git
-  verification passes 77+35 tests; workspace passes 56 after independent codec
-  and non-null cleanup.
-- Routines is a 34-line composer over scoped modules (largest 506); 93 tests
-  pass. Capabilities are below 1,000 after lifecycle/invocation/drift extraction
-  and pass 39 tests. Catalog is a 30-line decoded composer (30 tests).
-- Continuation persistence is a 19-line composer over modules at most 416 lines;
-  independent structure/repository/service/compactor rerun passes 25 tests.
-- Preview is contextual and bounded; its repository persistence boundary now
-  uses Schema JSON decoding and typed missing-row failures, with 8 independent
-  safety/structure tests passing.
-- Codex is contextual and below 1,000 after executable/probe extraction; 98
-  tests pass and missing fallback executables again use EngineProcessError.
-  Guidance is 634/455 service/provider-sync with 53 tests. Persistence schema is
-  a 12-line facade over 12 modules, preserving 66 table exports (89 tests).
-- Conversation projection is an 11-line facade over modules at most 263 lines;
-  persistence decoding is Schema-based and 16 independent tests pass.
-- Filesystem replacement is 696/644-line service/replacement with a scoped
-  construction context; 62 focused tests pass after typed path narrowing.
-- Terminal is contextual and split into files at most 698 lines; production has
-  no raw JSON or non-null assertions and 14 focused tests pass.
-- Platform boundaries across bootstrap, CLI, Forge, desktop, and distribution
-  now use Effect Schema and typed narrowing; 81 focused tests pass and a source
-  guard bans raw JSON/non-null assertions in the 17 remediated files.
-- Engine JSONL/auth/usage boundaries now use Effect Schema and typed capture
-  narrowing; 56 tests pass, one is skipped, and a source guard is present.
-- Journal/thread/orchestration persistence boundaries are Schema-decoded with
-  typed invariant failures (101 tests). A second 18-file backend sweep removes
-  remaining unsafe assertions/JSON across tools, workspace, Git, graph, preview,
-  guidance, routines, and favorites with 187 tests passing.
-- Model behaviour/favorites now use contextual filenames and Schema-decoded
-  config/probe/graph boundaries; 83 focused tests pass.
-- The protocol `control.ts`/`control/` ESM collision is removed via the
-  `control-contract/` path; its regression guard and crash fixture pass 18 tests.
-- A repository-wide guard enforces the 1,000-line ceiling, contextual filenames,
-  no raw JSON/non-null assertions, and SER ownership.
-- All reviewed positional bundles, double casts, `Effect.orDie` conversions,
-  and basename collisions are removed; both final thermos verdicts are clean.
-  Commits `9414199b` and `45fa22bb` contain the authorized integrated tree and
-  reproducibility repair; the protected page and personal config remain excluded.
+- Canonical product routes are `/t/:workspace/:thread` for conversations and
+  `/e/:workspace/:thread` for editing; editor file identity remains in `?file=`.
+  Workspace and historical thread IDs are encoded/canonicalized centrally.
+- The editor route subscribes to the authoritative thread list. Reassignment
+  unmounts the old editor before moving to the new workspace route; detach moves
+  to `/t/_/:thread`, so stale file reads cannot retain revoked workspace scope.
+- `/threads/:id` and `/editor?workspace=...` remain compatibility entry points;
+  the protected `/threads` draft remains the pre-creation route.
+- Thermonuclear remediation and clean-checkout repair are committed as
+  `9414199b` and `45fa22bb`; final independent reviews were clean.
 
 ## Verification
 
@@ -98,6 +46,10 @@ Last updated: 2026-07-30. Branch continuity only. Durable verified status is in
   frontend and isolated Forge builds, 292 Vitest files/1,958 tests (7 skips),
   native format/clippy, and 45 Rust tests.
 - The repair reviewer, global source guard, and both final thermos reviews are clean.
+- Route-focused navigation, editor, pairing, desktop, and Forge suites pass 65
+  tests. Final route-milestone `pnpm run validate` is green: formatting,
+  zero-warning lint, TypeScript, production frontend and Forge builds, 292
+  Vitest files/1,960 tests (7 skips), native format/clippy, and 45 Rust tests.
 - No development server was started.
 
 ## Dirty-Tree Integration Notes
@@ -112,6 +64,8 @@ Last updated: 2026-07-30. Branch continuity only. Durable verified status is in
 ## Product Continuity
 
 - One Forge per Artisan home owns config, secrets, state, log, and data.
+- Workspace/thread identity is encoded into both primary surface URLs; Forge
+  remains authoritative when a thread is reassigned, detached, or removed.
 - Installed renderer is sandboxed at `artisan://app`; Forge does not host the
   SPA. `ae open --handoff` performs one-time loopback pairing.
 - Codex app-server/exec fallback and Claude stream-json are production adapters.

@@ -8,6 +8,7 @@ import {
 	ProjectScopedThreadGroups,
 	ResolveThreadRoute,
 	ThreadRouteId,
+	ThreadRouteHasWorkspace,
 	ThreadRoutePath,
 } from "../../modules/frontend/src/lib/root/thread-navigation";
 
@@ -45,15 +46,28 @@ const MakeThread = (
 });
 
 describe("root thread navigation", () => {
-	it("uses bare Snowflakes in public routes and resolves historical prefixed records", () => {
+	it("uses encoded workspace and bare Snowflake segments in canonical thread routes", () => {
 		const legacy = MakeThread("thread_13913946054463488", "2026-07-27T00:00:00.000Z");
 		const current = MakeThread("13913946054463489", "2026-07-27T00:00:01.000Z");
+		const workspace_id = "project / one";
 
 		expect(ThreadRouteId(legacy.thread_id)).toBe("13913946054463488");
-		expect(ThreadRoutePath(legacy.thread_id)).toBe("/threads/13913946054463488");
-		expect(ThreadRoutePath(current.thread_id)).toBe("/threads/13913946054463489");
+		expect(ThreadRoutePath(workspace_id, legacy.thread_id)).toBe(
+			"/t/project%20%2F%20one/13913946054463488",
+		);
+		expect(ThreadRoutePath(workspace_id, current.thread_id)).toBe(
+			"/t/project%20%2F%20one/13913946054463489",
+		);
+		expect(ThreadRoutePath(undefined, current.thread_id)).toBe("/t/_/13913946054463489");
 		expect(Option.getOrThrow(ResolveThreadRoute([legacy], "13913946054463488"))).toBe(legacy);
 		expect(Option.getOrThrow(ResolveThreadRoute([current], current.thread_id))).toBe(current);
+	});
+
+	it("rejects a route workspace that disagrees with the authoritative thread project", () => {
+		const thread = MakeThread("thread_1", "2026-07-27T00:00:00.000Z", "project_1");
+
+		expect(ThreadRouteHasWorkspace(thread, "project_1")).toBe(true);
+		expect(ThreadRouteHasWorkspace(thread, "project_2")).toBe(false);
 	});
 
 	it("keeps the authoritative stream sorted and replaces an upsert by id", () => {

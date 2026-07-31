@@ -1,4 +1,6 @@
 <script lang="ts" effect>
+	import { goto } from "$app/navigation";
+	import { page } from "$app/state";
 	import { onDestroy, untrack } from "svelte";
 	import type {
 		ImageAttachmentReference,
@@ -28,12 +30,19 @@
 	import type { ComposerSubmission } from "$lib/composer/image-attachments";
 	import { BannerService } from "$lib/banner/service";
 	import { pending_first_submission } from "$lib/root/draft-thread";
-	import { ResolveThreadRoute } from "$lib/root/thread-navigation";
+	import {
+		ResolveThreadRoute,
+		ThreadRoutePathFor,
+	} from "$lib/root/thread-navigation";
 	import { Effect, Exit, Option, Queue, Scope, Stream } from "effect";
 	import { get } from "svelte/store";
-	import ThreadWorkspace from "../../components/thread-workspace.sv";
+	import ThreadWorkspace from "./thread-workspace.sv";
 
-	let { thread_id: route_thread_id }: { readonly thread_id: string } = $props();
+	let {
+		thread_id: route_thread_id,
+	}: {
+		readonly thread_id: string;
+	} = $props();
 	const route_id = untrack(() => route_thread_id);
 
 	const client = yield* ArtisanClient;
@@ -76,6 +85,19 @@
 		},
 	);
 	const thread_id = initial_thread.thread_id;
+	const CanonicalizeThreadPath = (candidate: ThreadListItem) => {
+		const canonical_path = ThreadRoutePathFor(candidate);
+		return page.url.pathname === canonical_path
+			? Effect.void
+			: Effect.promise(() =>
+					goto(canonical_path, {
+						keepFocus: true,
+						noScroll: true,
+						replaceState: true,
+					}),
+				);
+	};
+	yield* CanonicalizeThreadPath(initial_thread);
 	let session = $state.raw<ThreadSessionSnapshot | undefined>(
 		yield* client.GetThreadSession(thread_id),
 	);
@@ -199,6 +221,7 @@
 		]);
 		session = next_session;
 		thread = threads.find((candidate) => candidate.thread_id === thread_id);
+		if (thread !== undefined) yield* CanonicalizeThreadPath(thread);
 		work = Option.getOrUndefined(next_work);
 	});
 

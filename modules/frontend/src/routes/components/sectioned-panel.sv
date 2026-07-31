@@ -1,6 +1,5 @@
 <script lang="ts">
 	import { goto } from "$app/navigation";
-	import { page } from "$app/state";
 	import type { Snippet } from "svelte";
 	import type { ThreadListItem } from "@artisan/protocol";
 	import Code from "@tabler/icons-svelte/icons/code";
@@ -11,6 +10,7 @@
 	import barekey_logo from "$lib/assets/barekey/logo-40.png";
 	import logo_gradient from "$lib/assets/barekey/logo-gradient.svg";
 	import { EditorRoutePath } from "$lib/editor/workspace-identity";
+	import { ThreadRoutePath } from "$lib/root/thread-navigation";
 	import CommandMenu from "./command-menu.sv";
 	import DropdownHoverSurface from "./dropdown-hover-surface.sv";
 	import SidebarIdentity from "./sidebar-identity.sv";
@@ -38,6 +38,7 @@
 		primary,
 		secondary,
 		surface,
+		thread_id,
 		threads,
 		workspace_id,
 	}: {
@@ -45,30 +46,23 @@
 		secondary?: Snippet;
 		/** Which workspace surface is on screen, owned by the layout. */
 		surface: "editor" | "threads";
+		/** The durable thread shared by both workspace surfaces. */
+		thread_id: string | undefined;
 		/** The live thread list, owned by the layout and shared with the command menu. */
 		threads: ReadonlyArray<ThreadListItem>;
 		/** The workspace the current route is inside, resolved by the layout. */
 		workspace_id: string | undefined;
 	} = $props();
 
-	const workspace_open = $derived(workspace_id !== undefined);
-
-	/**
-	 * Cycling is a round trip, not a navigation: the editor opens for the
-	 * workspace you are already in, and leaving it returns to the exact page
-	 * you left — never to a fresh draft you didn't ask for.
-	 */
-	let threads_return_path = $state("/threads");
-	$effect(() => {
-		if (surface === "threads") threads_return_path = page.url.pathname + page.url.search;
-	});
+	const workspace_open = $derived(workspace_id !== undefined && thread_id !== undefined);
 
 	const CycleSurface = () => {
-		if (surface === "editor") {
-			void goto(threads_return_path);
-			return;
-		}
-		if (workspace_id !== undefined) void goto(EditorRoutePath(workspace_id));
+		if (workspace_id === undefined || thread_id === undefined) return;
+		void goto(
+			surface === "editor"
+				? ThreadRoutePath(workspace_id, thread_id)
+				: EditorRoutePath(workspace_id, thread_id),
+		);
 	};
 </script>
 

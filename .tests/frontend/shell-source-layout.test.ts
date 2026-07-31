@@ -54,8 +54,8 @@ describe("Barekey docs shell reset", () => {
 
 	it("mounts the inspector for the workspace in view and keeps controls in the composer", () => {
 		const layout = Read("modules/frontend/src/routes/+layout.sv");
-		const thread = Read("modules/frontend/src/routes/threads/[id]/+page.sv");
-		const thread_route = Read("modules/frontend/src/routes/threads/[id]/thread-route.sv");
+		const thread = Read("modules/frontend/src/routes/t/[workspace]/[thread]/+page.sv");
+		const thread_route = Read("modules/frontend/src/routes/components/thread-route.sv");
 		const thread_panel = Read("modules/frontend/src/routes/components/thread-panel.sv");
 		const thread_workspace = Read("modules/frontend/src/routes/components/thread-workspace.sv");
 		const composer = Read("modules/frontend/src/routes/components/thread-composer.sv");
@@ -66,14 +66,14 @@ describe("Barekey docs shell reset", () => {
 			"modules/frontend/src/routes/components/model-selector/policy-controls.sv",
 		);
 
-		expect(layout).toContain("/^\\/threads(?:\\/[^/]+)?\\/?$/");
+		expect(layout).toContain("/^\\/t\\/[^/]+\\/[^/]+\\/?$/");
 		expect(layout).toContain("<ThreadPanel />");
 		/** The same column also carries the editor's files; the thread is one of two. */
 		expect(layout).toContain(
 			'secondary={surface === "editor" ? editor_files : is_thread ? secondary : undefined}',
 		);
 		expect(thread).toContain("Thread · Artisan Editor");
-		expect(thread).toContain("{#key thread_id}");
+		expect(thread).toContain("{#key `${page.params.workspace}:${thread_id}`}");
 		expect(thread).toContain("<ThreadRoute {thread_id} />");
 		expect(thread_route).toContain("<ThreadWorkspace");
 		expect(thread_panel).not.toContain("<ModelSelector");
@@ -130,8 +130,8 @@ describe("Barekey docs shell reset", () => {
 	});
 
 	it("owns conversation subscriptions and snapshots by route identity", () => {
-		const route = Read("modules/frontend/src/routes/threads/[id]/+page.sv");
-		const controller = Read("modules/frontend/src/routes/threads/[id]/thread-route.sv");
+		const route = Read("modules/frontend/src/routes/t/[workspace]/[thread]/+page.sv");
+		const controller = Read("modules/frontend/src/routes/components/thread-route.sv");
 		const interaction = Read("modules/frontend/src/lib/thread-interaction/commands.ts");
 		const accepted_command = interaction.indexOf("const result = yield* command;");
 		const accepted_reconciliation = interaction.indexOf(
@@ -144,10 +144,11 @@ describe("Barekey docs shell reset", () => {
 			sender_reconciliation,
 		);
 
-		expect(route).toContain("const thread_id = $derived(page.params.id)");
-		expect(route).toContain("{#key thread_id}");
-		expect(route).toContain("goto(canonical_path");
-		expect(route).toContain("replaceState: true");
+		expect(route).toContain("const thread_id = $derived(page.params.thread)");
+		expect(route).toContain("page.params.workspace");
+		expect(route).toContain("{#key `${page.params.workspace}:${thread_id}`}");
+		expect(controller).toContain("goto(canonical_path");
+		expect(controller).toContain("replaceState: true");
 		expect(controller).toContain("const thread_scope = yield* Scope.make()");
 		expect(controller).toContain("ResolveThreadRoute(threads, route_id)");
 		expect(controller).toContain("Scope.close(thread_scope, Exit.void)");
@@ -280,19 +281,21 @@ describe("Barekey docs shell reset", () => {
 		);
 		/**
 		 * The workspace is what the current route is inside — the open thread's
-		 * project, the draft's chosen project, or the editor's own `?workspace=` —
+		 * project, the draft's chosen project, or the editor's own path workspace —
 		 * never a fallback to "some attached project". Cycling carries that
 		 * workspace into the editor URL and returns to the exact page it left.
 		 */
 		const layout = Read("modules/frontend/src/routes/+layout.sv");
 		const identity = Read("modules/frontend/src/lib/editor/workspace-identity.ts");
-		expect(layout).toContain("EditorWorkspaceId(page.url)");
-		expect(layout).toContain("ResolveThreadRoute(threads, route_id)");
+		expect(layout).toContain(
+			'EditorWorkspaceId(page.url.searchParams.get("workspace") ?? undefined)',
+		);
+		expect(layout).toContain("ResolveThreadRoute(threads, active_route_thread_id)");
 		expect(layout).toContain("$draft_thread_project?.project_id");
 		expect(layout).toContain("workspace_id={active_workspace_id}");
 		expect(identity).not.toContain("projects[0]");
-		expect(panel).toContain("EditorRoutePath(workspace_id)");
-		expect(panel).toContain("goto(threads_return_path)");
+		expect(panel).toContain("EditorRoutePath(");
+		expect(panel).toContain("ThreadRoutePath(workspace_id, thread_id)");
 	});
 
 	it("uses the Barekey docs gradient card surface for page content", () => {
@@ -331,7 +334,7 @@ describe("Barekey docs shell reset", () => {
 		expect(menu).not.toContain("artisanDesktop");
 		expect(menu).toContain("ProjectScopedThreadGroups(threads)");
 		expect(menu).toContain('project?.display_name ?? "Unassigned"');
-		expect(menu).toContain("ThreadRoutePath(thread.thread_id)");
+		expect(menu).toContain("ThreadRoutePathFor(thread)");
 		/** The layout owns the live list; the menu only renders what it is handed. */
 		const layout = Read("modules/frontend/src/routes/+layout.sv");
 		expect(layout).toContain("client.SubscribeThreadList");

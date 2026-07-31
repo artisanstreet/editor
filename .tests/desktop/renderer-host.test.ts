@@ -72,7 +72,7 @@ describe("desktop renderer host", () => {
 		expect(await shell.text()).toBe("<main>Artisan</main>");
 
 		/** Client-side routes reload into the shell exactly like the dev Forge's SPA fallback. */
-		const deep_route = await serve("artisan://app/threads/12345");
+		const deep_route = await serve("artisan://app/t/workspace_1/12345");
 		expect(deep_route.status).toBe(200);
 		expect(await deep_route.text()).toBe("<main>Artisan</main>");
 

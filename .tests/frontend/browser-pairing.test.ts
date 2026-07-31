@@ -12,7 +12,7 @@ import {
 
 const location = (hash: string, protocol = "http:") => ({
 	hash,
-	pathname: "/threads/thread_1",
+	pathname: "/t/workspace_1/thread_1",
 	protocol,
 	search: "?view=full",
 });
@@ -57,7 +57,7 @@ describe("browser pairing bootstrap", () => {
 		const program = Effect.gen(function* () {
 			const navigation = yield* BrowserNavigation;
 			expect(yield* navigation.Location).toEqual(location("#pair=secret"));
-			yield* navigation.ReplaceUrl("/threads/1");
+			yield* navigation.ReplaceUrl("/t/workspace_1/1");
 		}).pipe(
 			Effect.provide(
 				MakeBrowserNavigationLive({
@@ -72,7 +72,7 @@ describe("browser pairing bootstrap", () => {
 		);
 
 		await Effect.runPromise(program);
-		expect(replacements).toEqual(["/threads/1"]);
+		expect(replacements).toEqual(["/t/workspace_1/1"]);
 	});
 
 	it("proxies the same-origin pairing exchange in browser development", () => {
@@ -129,7 +129,7 @@ describe("browser pairing bootstrap", () => {
 		);
 
 		expect(requests).toEqual([{ code: "one time/code" }]);
-		expect(replacements).toEqual(["/threads/thread_1?view=full"]);
+		expect(replacements).toEqual(["/t/workspace_1/thread_1?view=full"]);
 	});
 
 	it("does not exchange or replace when there is no fragment", async () => {
@@ -163,7 +163,7 @@ describe("browser pairing bootstrap", () => {
 			),
 		);
 		expect(app_requests).toEqual([{ code: "editor code" }]);
-		expect(app_replacements).toEqual(["/threads/thread_1?view=full"]);
+		expect(app_replacements).toEqual(["/t/workspace_1/thread_1?view=full"]);
 
 		/**
 		 * A crafted link to a Forge-served HTTP page must not be able to point

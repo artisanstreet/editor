@@ -3,6 +3,7 @@ import type { ThreadListUpdate } from "@artisan/transport/client";
 import { Option } from "effect";
 
 const legacy_thread_prefix = "thread_";
+const detached_workspace_route_id = "_";
 
 /** Removes the historical domain prefix from the public thread route segment. */
 export const ThreadRouteId = (thread_id: string) => {
@@ -13,9 +14,29 @@ export const ThreadRouteId = (thread_id: string) => {
 	return route_id.length > 0 ? route_id : thread_id;
 };
 
-/** Builds the canonical public URL for both current and historical thread identities. */
-export const ThreadRoutePath = (thread_id: string) =>
-	`/threads/${encodeURIComponent(ThreadRouteId(thread_id))}`;
+/** Maps a missing project to the reserved URL segment used by detached historical threads. */
+export const ThreadWorkspaceRouteId = (workspace_id: string | undefined) =>
+	workspace_id === undefined ? detached_workspace_route_id : workspace_id;
+
+/** Restores the domain workspace identity represented by one thread-route segment. */
+export const ThreadWorkspaceId = (route_workspace_id: string) =>
+	route_workspace_id === detached_workspace_route_id ? undefined : route_workspace_id;
+
+/** Builds the canonical workspace-scoped URL for current and historical thread identities. */
+export const ThreadRoutePath = (workspace_id: string | undefined, thread_id: string) =>
+	`/t/${encodeURIComponent(ThreadWorkspaceRouteId(workspace_id))}/${encodeURIComponent(
+		ThreadRouteId(thread_id),
+	)}`;
+
+/** Builds a canonical URL directly from the authoritative thread-list projection. */
+export const ThreadRoutePathFor = (thread: Pick<ThreadListItem, "primary_project" | "thread_id">) =>
+	ThreadRoutePath(thread.primary_project?.project_id, thread.thread_id);
+
+/** Rejects a route workspace that disagrees with the thread's authoritative project. */
+export const ThreadRouteHasWorkspace = (
+	thread: Pick<ThreadListItem, "primary_project">,
+	route_workspace_id: string,
+) => ThreadWorkspaceRouteId(thread.primary_project?.project_id) === route_workspace_id;
 
 /**
  * Resolves canonical bare route IDs while retaining access to historical
