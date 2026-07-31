@@ -22,6 +22,7 @@
 		TooltipTrigger,
 	} from "$lib/components/ui/tooltip";
 	import UsageWindowTooltip from "./usage-window-tooltip.sv";
+	import ShaderGlassSurface from "./shader-glass-surface.sv";
 	import { EngineMarkClass, EngineMarkFor } from "$lib/engine/presentation";
 	import { GradientAvatarSvg } from "$lib/identity/gradient-avatar";
 	import { model_manifest } from "@artisan/catalog";
@@ -32,6 +33,7 @@
 		ResetPartsFor,
 		RunUpFrom,
 	} from "$lib/identity/usage-window-motion";
+	import { weekly_reset_duration } from "$lib/identity/weekly-reset";
 
 	type UsageState =
 		| { readonly status: "idle" }
@@ -337,7 +339,12 @@
 		</Avatar>
 	</DropdownMenuTrigger>
 
-	<DropdownMenuContent side="top" align="start" class="w-auto min-w-64 max-w-88">
+	<DropdownMenuContent
+		side="top"
+		align="start"
+		class="w-auto min-w-64 max-w-88 bg-transparent! p-0! shadow-none! ring-0!"
+	>
+		<ShaderGlassSurface class="w-full rounded-2xl">
 		<div class="flex min-w-0 flex-row items-center gap-3 px-3 py-4">
 			<Avatar class="size-8 inset-shadow-artwork">
 				{#if avatar_svg === undefined}
@@ -375,10 +382,14 @@
 		{:else}
 			<TooltipProvider delayDuration={0}>
 			<div class="flex flex-col gap-2.5 px-1 py-1">
-				{#each authenticated_engines as engine (engine.engine_id)}
+				{#each authenticated_engines as engine, engine_index (engine.engine_id)}
 					{@const mark = EngineMarkFor(engine.engine_id)}
 					{@const MarkIcon = mark.icon}
 					{@const groups = GroupWindows(engine.windows)}
+					{@const weekly_reset = weekly_reset_duration(engine.windows, checked_at_ms)}
+					{#if engine_index > 0}
+						<DropdownMenuSeparator class="my-1" />
+					{/if}
 					<div class="flex flex-col gap-1.5 px-2 py-1">
 						<div class="flex items-center justify-between gap-2">
 							<div class="flex min-w-0 items-center gap-2">
@@ -428,12 +439,20 @@
 								{/each}
 							</div>
 						{/if}
+						{#if weekly_reset !== undefined}
+							<span class="mt-1 text-xs text-muted-foreground">
+								resets in <span class="text-foreground">{weekly_reset}</span>.
+							</span>
+						{/if}
 					</div>
 				{/each}
 
-				{#each unavailable_engines as engine (engine.engine_id)}
+				{#each unavailable_engines as engine, engine_index (engine.engine_id)}
 					{@const mark = EngineMarkFor(engine.engine_id)}
 					{@const MarkIcon = mark.icon}
+					{#if authenticated_engines.length > 0 || engine_index > 0}
+						<DropdownMenuSeparator class="my-1" />
+					{/if}
 					<div class="flex flex-col gap-1 px-2 py-1">
 						<div class="flex items-center gap-2">
 							<MarkIcon class={EngineMarkClass(mark, "size-4")} />
@@ -456,6 +475,7 @@
 			<Settings class="size-4 shrink-0 text-muted-foreground" />
 			Settings
 		</DropdownMenuItem>
+		</ShaderGlassSurface>
 	</DropdownMenuContent>
 </DropdownMenu>
 

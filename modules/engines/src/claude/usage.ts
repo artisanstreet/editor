@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
-import { Cause, Effect, Option, Schema } from "effect";
+import { Cause, DateTime, Effect, Option, Schema } from "effect";
 
 import {
 	type EngineAccountUsage,
@@ -302,6 +302,23 @@ const CLAUDE_CLI_SESSION_LINE = /^Current session:\s*(\d+)%\s*used\b/;
 const CLAUDE_CLI_WEEKLY_ALL_LINE = /^Current week \(all models\):\s*(\d+)%\s*used\b/;
 /** Matches `Current week (<Label>): N% used` for any other per-model weekly bucket. */
 const CLAUDE_CLI_WEEKLY_LABELED_LINE = /^Current week \(([^)]+)\):\s*(\d+)%\s*used\b/;
+/** Captures the English wall-clock reset clause emitted by Claude Code. */
+const CLAUDE_CLI_RESET_CLAUSE =
+	/\bresets\s+([a-z]+)\s+(\d{1,2}),\s+(\d{1,2})(?::(\d{2}))?\s*(am|pm)\s*\(([^)]+)\)\s*$/i;
+const CLAUDE_CLI_MONTHS: Readonly<Record<string, number>> = {
+	apr: 4,
+	aug: 8,
+	dec: 12,
+	feb: 2,
+	jan: 1,
+	jul: 7,
+	jun: 6,
+	mar: 3,
+	may: 5,
+	nov: 11,
+	oct: 10,
+	sep: 9,
+};
 
 /** Turns a provider-supplied label into a stable, lowercase, hyphenated id fragment. */
 function slugify_claude_cli_label(label: string): string {
@@ -312,15 +329,72 @@ function slugify_claude_cli_label(label: string): string {
 		.replace(/^-+|-+$/g, "");
 }
 
+/** Converts Claude's wall-clock reset clause to a real instant through Effect's IANA-zone support. */
+function parse_claude_cli_reset_at(line: string, at_ms: number): string | undefined {
+	const matched = CLAUDE_CLI_RESET_CLAUSE.exec(line);
+	const month_name = matched?.at(1);
+	const day_text = matched?.at(2);
+	const hour_text = matched?.at(3);
+	const minute_text = matched?.at(4);
+	const meridiem = matched?.at(5)?.toLowerCase();
+	const time_zone = matched?.at(6);
+	if (
+		month_name === undefined ||
+		day_text === undefined ||
+		hour_text === undefined ||
+		meridiem === undefined ||
+		time_zone === undefined
+	)
+		return undefined;
+
+	const month = CLAUDE_CLI_MONTHS[month_name.slice(0, 3).toLowerCase()];
+	const day = Number(day_text);
+	const twelve_hour = Number(hour_text);
+	const minute = Number(minute_text ?? "0");
+	if (
+		month === undefined ||
+		day < 1 ||
+		day > 31 ||
+		twelve_hour < 1 ||
+		twelve_hour > 12 ||
+		minute < 0 ||
+		minute > 59
+	)
+		return undefined;
+
+	const current = DateTime.makeZoned(at_ms, { timeZone: time_zone });
+	if (Option.isNone(current)) return undefined;
+	const current_parts = DateTime.toParts(current.value);
+	/** A weekly reset can cross Dec → Jan, but cannot otherwise belong to next year. */
+	const year = current_parts.year + (current_parts.month === 12 && month === 1 ? 1 : 0);
+	const hour = (twelve_hour % 12) + (meridiem === "pm" ? 12 : 0);
+	const reset = DateTime.makeZoned(
+		{ day, hour, millisecond: 0, minute, month, second: 0, year },
+		{ adjustForTimeZone: true, timeZone: time_zone },
+	);
+	if (Option.isNone(reset)) return undefined;
+	const reset_parts = DateTime.toParts(reset.value);
+	if (
+		reset_parts.year !== year ||
+		reset_parts.month !== month ||
+		reset_parts.day !== day ||
+		reset_parts.hour !== hour ||
+		reset_parts.minute !== minute
+	)
+		return undefined;
+
+	return new Date(DateTime.toEpochMillis(reset.value)).toISOString();
+}
+
 /**
  * Parses the plain-text `result` of the CLI's `/usage` slash command into
  * canonical quota windows. Pure and side-effect free so it can be unit tested
  * without spawning the CLI. Ignores every line that is not one of the two
- * recognized `Current session:`/`Current week (...)` prefixes, including the
- * trailing `resets ...` clause (locale/timezone formatted, not parsed here)
- * and the behavioral-breakdown lines that follow. An empty or wholly
- * unrecognized result yields an empty array, which the caller treats as a
- * failed fallback.
+ * recognized `Current session:`/`Current week (...)` prefixes and converts an
+ * English reset clause with a valid IANA zone to `resets_at`. Localized or
+ * malformed clauses are omitted without discarding the usage window. An empty
+ * or wholly unrecognized result yields an empty array, which the caller treats
+ * as a failed fallback.
  *
  * @since 0.6.0
  * @param result_text - The CLI's `/usage` result text, verbatim.
@@ -328,6 +402,7 @@ function slugify_claude_cli_label(label: string): string {
  */
 export function parse_claude_cli_usage_windows(
 	result_text: string,
+	at_ms = Date.now(),
 ): ReadonlyArray<EngineQuotaWindow> {
 	const windows: Array<EngineQuotaWindow> = [];
 
@@ -337,11 +412,13 @@ export function parse_claude_cli_usage_windows(
 		const session_match = CLAUDE_CLI_SESSION_LINE.exec(line);
 		const session_percent = session_match?.at(1);
 		if (session_percent !== undefined) {
+			const resets_at = parse_claude_cli_reset_at(line, at_ms);
 			windows.push({
 				id: "five_hour",
 				kind: "session",
 				percent_used: clamp_percent(Number(session_percent)),
 				window_minutes: 300,
+				...(resets_at === undefined ? {} : { resets_at }),
 			});
 			continue;
 		}
@@ -349,11 +426,13 @@ export function parse_claude_cli_usage_windows(
 		const weekly_all_match = CLAUDE_CLI_WEEKLY_ALL_LINE.exec(line);
 		const weekly_all_percent = weekly_all_match?.at(1);
 		if (weekly_all_percent !== undefined) {
+			const resets_at = parse_claude_cli_reset_at(line, at_ms);
 			windows.push({
 				id: "seven_day",
 				kind: "weekly",
 				percent_used: clamp_percent(Number(weekly_all_percent)),
 				window_minutes: 10_080,
+				...(resets_at === undefined ? {} : { resets_at }),
 			});
 			continue;
 		}
@@ -362,12 +441,14 @@ export function parse_claude_cli_usage_windows(
 		const label = weekly_labeled_match?.at(1);
 		const weekly_labeled_percent = weekly_labeled_match?.at(2);
 		if (label !== undefined && weekly_labeled_percent !== undefined) {
+			const resets_at = parse_claude_cli_reset_at(line, at_ms);
 			windows.push({
 				id: `seven_day:${slugify_claude_cli_label(label)}`,
 				kind: "weekly",
 				label,
 				percent_used: clamp_percent(Number(weekly_labeled_percent)),
 				window_minutes: 10_080,
+				...(resets_at === undefined ? {} : { resets_at }),
 			});
 		}
 	}

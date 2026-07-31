@@ -186,6 +186,7 @@ describe("Claude usage credentials resolution", () => {
 });
 
 describe("parse_claude_cli_usage_windows", () => {
+	const at_ms = Date.parse("2026-07-28T12:00:00.000Z");
 	const sample_result = [
 		"You are currently using your subscription to power your Claude Code usage",
 		"",
@@ -199,23 +200,67 @@ describe("parse_claude_cli_usage_windows", () => {
 	].join("\n");
 
 	it("maps the three recognized lines to windows, ignoring junk and behavioral lines", () => {
-		expect(parse_claude_cli_usage_windows(sample_result)).toEqual([
-			{ id: "five_hour", kind: "session", percent_used: 17, window_minutes: 300 },
-			{ id: "seven_day", kind: "weekly", percent_used: 3, window_minutes: 10_080 },
+		expect(parse_claude_cli_usage_windows(sample_result, at_ms)).toEqual([
+			{
+				id: "five_hour",
+				kind: "session",
+				percent_used: 17,
+				resets_at: "2026-07-29T05:50:00.000Z",
+				window_minutes: 300,
+			},
+			{
+				id: "seven_day",
+				kind: "weekly",
+				percent_used: 3,
+				resets_at: "2026-08-04T22:00:00.000Z",
+				window_minutes: 10_080,
+			},
 			{
 				id: "seven_day:fable",
 				kind: "weekly",
 				label: "Fable",
 				percent_used: 5,
+				resets_at: "2026-08-04T22:00:00.000Z",
 				window_minutes: 10_080,
 			},
 		]);
 	});
 
-	it("omits resets_at entirely, since the reset clause is locale/timezone text, not a timestamp", () => {
-		for (const window of parse_claude_cli_usage_windows(sample_result)) {
-			expect(window).not.toHaveProperty("resets_at");
-		}
+	it("omits reset timestamps when the clause is malformed or its IANA zone is invalid", () => {
+		const invalid_zone = parse_claude_cli_usage_windows(
+			"Current week (all models): 3% used · resets Aug 5, 12am (Not/AZone)",
+			at_ms,
+		);
+		const impossible_date = parse_claude_cli_usage_windows(
+			"Current week (all models): 3% used · resets Feb 30, 12am (Europe/Oslo)",
+			at_ms,
+		);
+
+		expect(invalid_zone).toEqual([
+			{ id: "seven_day", kind: "weekly", percent_used: 3, window_minutes: 10_080 },
+		]);
+		expect(impossible_date).toEqual([
+			{ id: "seven_day", kind: "weekly", percent_used: 3, window_minutes: 10_080 },
+		]);
+	});
+
+	it("resolves Dec-to-Jan and leap-year resets while rejecting DST-gap wall times", () => {
+		const year_rollover = parse_claude_cli_usage_windows(
+			"Current week (all models): 3% used · resets Jan 2, 12am (Europe/Oslo)",
+			Date.parse("2026-12-29T12:00:00.000Z"),
+		);
+		const leap_day = parse_claude_cli_usage_windows(
+			"Current week (all models): 3% used · resets Feb 29, 12am (Europe/Oslo)",
+			Date.parse("2028-02-22T12:00:00.000Z"),
+		);
+		const dst_gap = parse_claude_cli_usage_windows(
+			"Current week (all models): 3% used · resets Mar 29, 2:30am (Europe/Oslo)",
+			Date.parse("2026-03-25T12:00:00.000Z"),
+		);
+
+		expect(year_rollover.at(0)?.resets_at).toBe("2027-01-01T23:00:00.000Z");
+		expect(leap_day.at(0)?.resets_at).toBe("2028-02-28T23:00:00.000Z");
+		expect(dst_gap.at(0)).not.toHaveProperty("resets_at");
 	});
 
 	it("clamps out-of-range percentages", () => {
@@ -244,8 +289,7 @@ describe("Claude usage CLI fallback", () => {
 			MakeClaudeUsage({
 				claude_config_dir: dir,
 				factory: stub_claude_cli_factory(
-					"Current session: 17% used · resets Jul 29, 7:50am (Europe/Oslo)\n" +
-						"Current week (all models): 3% used · resets Aug 5, 12am (Europe/Oslo)",
+					"Current session: 17% used\n" + "Current week (all models): 3% used",
 				),
 				fetch: stub_fetch({ ok: false, status: 429 }),
 			}),
