@@ -23,6 +23,14 @@ const permission_option = (harness_id: string, option_id: string) =>
 const native_permission_mode = (harness_id: string, option_id: string) =>
 	permission_option(harness_id, option_id)?.native_value ?? "default";
 
+type PermissionEditScope = "none" | "workspace" | "host";
+
+const permission_scope_order: Readonly<Record<PermissionEditScope, number>> = {
+	none: 0,
+	workspace: 1,
+	host: 2,
+};
+
 /**
  * Resolves the catalog's default model for a harness when policy and request
  * both leave it unset. A run must receive Artisan's catalog default
@@ -66,15 +74,42 @@ export const MakeSessionPolicyRunMetadata = (
 	 */
 	const chosen_permission = SessionPolicyPermission(policy);
 	const chosen = permission_option(policy.engine_id, chosen_permission);
-	const policy_writes =
+	const policy_edit_scope: PermissionEditScope =
 		chosen === undefined
 			? policy.sandbox_mode === "workspace_write"
-			: chosen.edit_scope !== "none";
-	const write_access = policy_writes && (requested_permissions?.write_access ?? true);
+				? "workspace"
+				: "none"
+			: chosen.edit_scope;
+	/**
+	 * Existing canonical callers that request writes mean workspace writes.
+	 * Host access must be explicit, and assignment policy can only narrow the
+	 * user's catalog choice.
+	 */
+	const requested_edit_scope: PermissionEditScope =
+		requested_permissions === undefined
+			? policy_edit_scope
+			: requested_permissions.write_access
+				? (requested_permissions.edit_scope ?? "workspace")
+				: "none";
+	const narrowed_edit_scope =
+		permission_scope_order[requested_edit_scope] < permission_scope_order[policy_edit_scope]
+			? requested_edit_scope
+			: policy_edit_scope;
+	/**
+	 * Codex's host-wide sandbox mode also removes network isolation. A caller
+	 * that narrows network access therefore narrows filesystem access back to
+	 * the workspace boundary as well.
+	 */
+	const edit_scope: PermissionEditScope =
+		narrowed_edit_scope === "host" && requested_permissions?.network_access === false
+			? "workspace"
+			: narrowed_edit_scope;
+	const write_access = edit_scope !== "none";
 	const network_access =
-		write_access &&
-		policy.web_search_enabled &&
-		(requested_permissions?.network_access ?? true);
+		edit_scope === "host" ||
+		(write_access &&
+			policy.web_search_enabled &&
+			(requested_permissions?.network_access ?? true));
 	const policy_approval: EnginePermissionPolicy["approval"] = (
 		chosen === undefined
 			? policy.permission_mode === "never"
@@ -83,9 +118,11 @@ export const MakeSessionPolicyRunMetadata = (
 		? "never"
 		: "on_request";
 	const approval: EnginePermissionPolicy["approval"] =
-		policy_approval === "never" || requested_permissions?.approval === "never"
-			? "never"
-			: "on_request";
+		requested_permissions === undefined
+			? policy_approval
+			: policy_approval === "on_request" || requested_permissions.approval !== "never"
+				? "on_request"
+				: "never";
 	/**
 	 * The context-window choice travels as a native model-id suffix (for
 	 * example Claude Code's `[1m]`), so the engine sees one composed id.
@@ -124,7 +161,12 @@ export const MakeSessionPolicyRunMetadata = (
 
 	return {
 		...model_metadata,
-		permission_policy: { approval, network_access, write_access },
+		permission_policy: {
+			approval,
+			...(edit_scope === "host" ? { edit_scope } : {}),
+			network_access,
+			write_access,
+		},
 		provider_options: {
 			"codex.reasoning_effort": policy.reasoning_effort,
 			"codex.service_tier": policy.service_tier ?? "standard",

@@ -30,6 +30,71 @@ describe("session policy run metadata", () => {
 		});
 	});
 
+	it("keeps auto approval sandboxed while mapping Full access to host scope", () => {
+		const auto_approve = MakeSessionPolicyRunMetadata(
+			policy_for({ permission: "autonomous", permission_mode: "never" }),
+		);
+		const full_access = MakeSessionPolicyRunMetadata(
+			policy_for({ permission: "unrestricted", permission_mode: "never" }),
+		);
+		const narrowed_assignment = MakeSessionPolicyRunMetadata(
+			policy_for({ permission: "unrestricted", permission_mode: "never" }),
+			{
+				permission_policy: {
+					approval: "never",
+					network_access: false,
+					write_access: true,
+				},
+			},
+		);
+		const approval_narrowed_assignment = MakeSessionPolicyRunMetadata(
+			policy_for({ permission: "unrestricted", permission_mode: "never" }),
+			{
+				permission_policy: {
+					approval: "on_request",
+					edit_scope: "host",
+					network_access: true,
+					write_access: true,
+				},
+			},
+		);
+		const approval_widening_attempt = MakeSessionPolicyRunMetadata(policy_for(), {
+			permission_policy: {
+				approval: "never",
+				network_access: false,
+				write_access: true,
+			},
+		});
+
+		expect(auto_approve.permission_policy).toEqual({
+			approval: "never",
+			network_access: false,
+			write_access: true,
+		});
+		expect(full_access.permission_policy).toEqual({
+			approval: "never",
+			edit_scope: "host",
+			network_access: true,
+			write_access: true,
+		});
+		expect(narrowed_assignment.permission_policy).toEqual({
+			approval: "never",
+			network_access: false,
+			write_access: true,
+		});
+		expect(approval_narrowed_assignment.permission_policy).toEqual({
+			approval: "on_request",
+			edit_scope: "host",
+			network_access: true,
+			write_access: true,
+		});
+		expect(approval_widening_attempt.permission_policy).toEqual({
+			approval: "on_request",
+			network_access: false,
+			write_access: true,
+		});
+	});
+
 	it("translates the neutral outcome into Claude's native permission mode", () => {
 		const supervised = MakeSessionPolicyRunMetadata(
 			policy_for({ engine_id: "claude", model: "claude-opus-5" }),

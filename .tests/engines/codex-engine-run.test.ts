@@ -348,6 +348,54 @@ describe("Codex engine run", () => {
 		}
 	});
 
+	it("sends Full access through the app-server transport as danger-full-access", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "artisan-codex-full-access-"));
+		const request_path = join(directory, "thread-requests.jsonl");
+
+		process.env.FAKE_APP_SERVER_REQUEST_FILE = request_path;
+		process.env.FAKE_APP_SERVER_SCENARIO = "complete";
+
+		try {
+			await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const engine = yield* CodexEngine;
+						const run = yield* engine.Open({
+							_tag: "start",
+							artisan_run_id: "full-access-start",
+							initial_text: "Create a sibling repository.",
+							permission_policy: {
+								approval: "never",
+								edit_scope: "host",
+								network_access: true,
+								write_access: true,
+							},
+							working_directory: "C:\\workspace",
+						});
+
+						yield* run.Events.pipe(Stream.runDrain);
+					}),
+				).pipe(Effect.provide(make_layer({ transport_selection: "app_server_only" }))),
+			);
+
+			const requests = (await readFile(request_path, "utf8"))
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+
+			expect(requests[0]).toEqual({
+				method: "thread/start",
+				params: {
+					approvalPolicy: "never",
+					cwd: "C:\\workspace",
+					sandbox: "danger-full-access",
+				},
+			});
+		} finally {
+			await rm(directory, { force: true, recursive: true });
+		}
+	});
+
 	it.each([
 		{
 			label: "approval always",

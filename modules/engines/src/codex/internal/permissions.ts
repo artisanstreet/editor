@@ -7,7 +7,7 @@ import {
 } from "../../engine";
 
 type CodexApprovalPolicy = "never" | "on-request";
-type CodexSandbox = "read-only" | "workspace-write";
+type CodexSandbox = "danger-full-access" | "read-only" | "workspace-write";
 type CodexTransport = "app-server" | "exec";
 
 interface CodexPermissionSettings {
@@ -123,7 +123,27 @@ function ResolveCodexPermissions(input: EngineOpenInput, transport: CodexTranspo
 			return yield* FailConfiguration("permission_policy.write_access", policy.write_access);
 		}
 
+		if (
+			policy.edit_scope !== undefined &&
+			!new Set(["workspace", "host"]).has(policy.edit_scope)
+		) {
+			return yield* FailConfiguration("permission_policy.edit_scope", policy.edit_scope);
+		}
+
+		if (!policy.write_access && policy.edit_scope !== undefined) {
+			return yield* FailConfiguration("permission_policy.edit_scope", policy.edit_scope);
+		}
+
 		if (policy.network_access && !policy.write_access) {
+			return yield* FailConfiguration(
+				"permission_policy.network_access",
+				policy.network_access,
+			);
+		}
+
+		const edit_scope = policy.edit_scope ?? "workspace";
+
+		if (edit_scope === "host" && !policy.network_access) {
 			return yield* FailConfiguration(
 				"permission_policy.network_access",
 				policy.network_access,
@@ -133,8 +153,14 @@ function ResolveCodexPermissions(input: EngineOpenInput, transport: CodexTranspo
 		const permissions: CodexPermissionSettings = {
 			approval_policy: policy.approval === "on_request" ? "on-request" : "never",
 			...(exec_profile === undefined ? {} : { exec_profile }),
-			...(policy.write_access ? { network_access: policy.network_access } : {}),
-			sandbox: policy.write_access ? "workspace-write" : "read-only",
+			...(policy.write_access && edit_scope === "workspace"
+				? { network_access: policy.network_access }
+				: {}),
+			sandbox: policy.write_access
+				? edit_scope === "host"
+					? "danger-full-access"
+					: "workspace-write"
+				: "read-only",
 			skip_git_repo_check: skip_git_repo_check === true,
 		};
 

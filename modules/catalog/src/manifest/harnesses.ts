@@ -42,6 +42,17 @@ export const harnesses = [
 					native_value: "workspace-write-no-prompts",
 					safety_boundary: "sandbox",
 				}),
+				permission({
+					approval_behavior: "none",
+					availability: "dynamic",
+					description:
+						"Remove Codex's local sandbox and approval prompts, granting access beyond the workspace and to the network; administrator policy may forbid this mode.",
+					edit_scope: "host",
+					id: "unrestricted",
+					label: "Full access",
+					native_value: "danger-full-access",
+					safety_boundary: "bypassed",
+				}),
 			],
 		},
 	},

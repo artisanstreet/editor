@@ -147,3 +147,14 @@ directory automatically and refuse ambiguous multi-profile homes with an
 actionable error. `/health` replaced the `profile` field with
 `development: boolean` (true iff the instance serves the frontend), which now
 drives the dev badge and `[Dev]` title.
+
+On 2026-07-31, the permission catalog was re-audited against the current native
+provider vocabularies. Codex now distinguishes workspace-confined
+`Auto approve` from explicit `Full access`: the latter carries host edit scope
+and launches app-server and exec with approval policy `never` plus
+`danger-full-access`. Assignment policy can narrow filesystem, network, and
+approval authority but cannot widen its parent. Claude, Grok, and Cursor retain
+their already-correct native catalog mappings. Final mixed-tree
+`pnpm run validate` is green: formatting, zero-warning lint, TypeScript,
+production frontend and Forge builds, 293 Vitest files/1,971 tests (7 skips),
+native format/clippy, and 45 Rust tests.

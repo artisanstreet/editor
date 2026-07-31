@@ -355,6 +355,7 @@ describe("model catalog", () => {
 				["restricted", "read-only"],
 				["supervised", "workspace-write"],
 				["autonomous", "workspace-write-no-prompts"],
+				["unrestricted", "danger-full-access"],
 			],
 			grok: [
 				["supervised", "ask"],

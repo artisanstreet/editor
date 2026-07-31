@@ -46,6 +46,11 @@ export interface EngineDescriptor {
 /** Defines provider-neutral approval and runtime access requested for one run. @since 0.3.0 */
 export interface EnginePermissionPolicy {
 	readonly approval: "never" | "on_request" | "always";
+	/**
+	 * Widens writable filesystem access beyond the workspace when explicitly
+	 * set. Omitted writable policies retain the historical workspace boundary.
+	 */
+	readonly edit_scope?: "workspace" | "host";
 	readonly network_access: boolean;
 	readonly write_access: boolean;
 }
