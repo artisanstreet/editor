@@ -121,8 +121,8 @@ On 2026-07-31, workspace-scoped surface identity was restored: canonical
 conversation URLs use `/t/:workspace/:thread`, canonical editor URLs use
 `/e/:workspace/:thread`, and optional editor file identity remains in `?file=`.
 Historical prefixed thread IDs canonicalize to bare segments, detached threads
-use the reserved `_` workspace segment, and the old `/threads/:id` and
-`/editor?workspace=...` paths remain compatibility entry points. The editor
+use the reserved `_` workspace segment, and these are the sole thread and editor
+URL contracts; `/threads` is only the pre-creation draft route. The editor
 subscribes to authoritative thread metadata, unmounting before reassignment or
 detach navigation so revoked workspace authority cannot survive in stale file
 reads.

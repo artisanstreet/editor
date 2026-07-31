@@ -25,7 +25,6 @@
 		ObserveForgeConnection,
 	} from "$lib/forge/gate";
 	import { RunAuthoritativeSubscription } from "$lib/conversation/subscription";
-	import { EditorWorkspaceId } from "$lib/editor/workspace-identity";
 	import { draft_thread_project } from "$lib/root/draft-thread";
 	import {
 		ApplyRootThreadListUpdate,
@@ -44,21 +43,20 @@
 	let desktop_runtime = $state(false);
 	let forge_gate = $state.raw(InitialForgeGateModel);
 	let threads = $state.raw<ReadonlyArray<ThreadListItem>>([]);
-	/** The draft, compatibility entry point, and canonical thread route own the inspector. */
+	/** Only a canonical conversation route owns the transcript proximity rail. */
+	const is_thread_route = $derived(
+		/^\/t\/[^/]+\/[^/]+\/?$/.test(page.url.pathname),
+	);
+	/** The draft and canonical thread route own the inspector. */
 	const is_thread = $derived(
-		/^\/t\/[^/]+\/[^/]+\/?$/.test(page.url.pathname) ||
-			/^\/threads(?:\/[^/]+)?\/?$/.test(page.url.pathname),
+		is_thread_route || /^\/threads\/?$/.test(page.url.pathname),
 	);
 	/**
 	 * The layout owns route-derived state and hands it down: read inside the panel
 	 * itself, the same derivation went stale after a client-side navigation.
 	 */
-	const surface = $derived(
-		page.url.pathname.startsWith("/e/") || page.url.pathname.startsWith("/editor")
-			? "editor"
-			: "threads",
-	);
-	const active_route_thread_id = $derived(page.params.thread ?? page.params.id);
+	const surface = $derived(page.url.pathname.startsWith("/e/") ? "editor" : "threads");
+	const active_route_thread_id = $derived(page.params.thread);
 	const active_thread = $derived(
 		active_route_thread_id === undefined
 			? undefined
@@ -66,14 +64,12 @@
 	);
 	/**
 	 * The workspace the current route is actually inside, or nothing. The open
-	 * thread names its project, the draft names the project picked for it, and
-	 * the editor names its own `?workspace=` — there is no fallback to "some
-	 * attached project", so on routes outside any workspace this stays closed.
+	 * thread names its project and the draft names the project picked for it.
+	 * There is no fallback to a route-asserted or arbitrary attached project, so
+	 * routes outside an authoritative workspace keep the surface switch closed.
 	 */
 	const active_workspace_id = $derived.by(() => {
 		if (active_thread !== undefined) return active_thread.primary_project?.project_id;
-		if (surface === "editor")
-			return EditorWorkspaceId(page.url.searchParams.get("workspace") ?? undefined);
 		if (is_thread) return $draft_thread_project?.project_id;
 		return undefined;
 	});
@@ -243,6 +239,7 @@
 					{primary}
 					{surface}
 					{threads}
+					show_thread_hover_rail={is_thread_route}
 					thread_id={active_thread?.thread_id}
 					workspace_id={active_workspace_id}
 					secondary={surface === "editor" ? editor_files : is_thread ? secondary : undefined}

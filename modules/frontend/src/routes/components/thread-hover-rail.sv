@@ -27,7 +27,7 @@
 	let now_ms = $state(Date.now());
 
 	const recent_threads = $derived(SortRecentThreads(threads));
-	const active_route_id = $derived(page.params.thread ?? page.params.id);
+	const active_route_id = $derived(page.params.thread);
 
 	const Reveal = () => {
 		if (!open) now_ms = Date.now();

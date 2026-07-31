@@ -84,7 +84,7 @@
 	let panel_state: PanelState = $state("closed");
 	let close_fiber: Fiber.Fiber<void> | undefined;
 
-	const route_id = $derived(page.params.thread ?? page.params.id);
+	const route_id = $derived(page.params.thread);
 	/**
 	 * The panel mounts on the draft route and on concrete threads alike, and
 	 * only the latter carries a route id. A draft has no durable thread yet, so

@@ -11,7 +11,6 @@ import {
 import {
 	EditorRoutePath,
 	EditorRouteTargetForThread,
-	EditorWorkspaceId,
 } from "../../modules/frontend/src/lib/editor/workspace-identity";
 
 const entry = (
@@ -143,9 +142,7 @@ describe("editor workspace session", () => {
 	 * The canonical editor identity is fully path-scoped. Query parameters can
 	 * select a file, but can never select the workspace or thread.
 	 */
-	it("resolves the workspace and thread from canonical editor path parameters", () => {
-		expect(EditorWorkspaceId("project one")).toBe("project one");
-		expect(EditorWorkspaceId(undefined)).toBeUndefined();
+	it("builds the editor URL from canonical workspace and thread path parameters", () => {
 		expect(EditorRoutePath("project one", "thread_1", "src/a.ts")).toBe(
 			"/e/project%20one/1?file=src%2Fa.ts",
 		);

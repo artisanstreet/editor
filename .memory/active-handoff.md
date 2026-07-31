@@ -7,8 +7,8 @@ Last updated: 2026-07-31. Branch continuity only. Durable verified status is in
 
 - Repository `C:\Users\sander\Desktop\artisan-editor`; direct `master`,
   tracking `origin/master`. Thermonuclear remediation is committed through
-  clean-checkout repair `45fa22bb`; canonical route restoration is the current
-  verified integration milestone.
+  clean-checkout repair `45fa22bb`; canonical route restoration `923fb65f` and
+  unreleased compatibility-route removal are the current verified milestones.
 - Protected user work remains: `modules/frontend/src/routes/threads/+page.sv`
   stays staged but uncommitted and `.mcp.json` stays untracked. One unstaged
   canonical-route adaptation remains on top of that protected page.
@@ -34,8 +34,12 @@ Last updated: 2026-07-31. Branch continuity only. Durable verified status is in
 - The editor route subscribes to the authoritative thread list. Reassignment
   unmounts the old editor before moving to the new workspace route; detach moves
   to `/t/_/:thread`, so stale file reads cannot retain revoked workspace scope.
-- `/threads/:id` and `/editor?workspace=...` remain compatibility entry points;
-  the protected `/threads` draft remains the pre-creation route.
+- No compatibility thread/editor URLs exist: `/t/:workspace/:thread` and
+  `/e/:workspace/:thread` are the sole product contracts. The protected
+  `/threads` page remains only as the pre-creation draft route.
+- The transcript proximity hover rail mounts only on
+  `/t/:workspace/:thread`; root, settings, draft, and editor routes never
+  instantiate it.
 - Thermonuclear remediation and clean-checkout repair are committed as
   `9414199b` and `45fa22bb`; final independent reviews were clean.
 
@@ -50,6 +54,14 @@ Last updated: 2026-07-31. Branch continuity only. Durable verified status is in
   tests. Final route-milestone `pnpm run validate` is green: formatting,
   zero-warning lint, TypeScript, production frontend and Forge builds, 292
   Vitest files/1,960 tests (7 skips), native format/clippy, and 45 Rust tests.
+- The unreleased compatibility-route removal suite passes 4 files/38 tests;
+  TypeScript, zero-warning lint, formatting, and the production frontend build
+  are green. Scoped frozen-install clean-clone `pnpm run validate` is green:
+  292 Vitest files/1,961 tests (7 skips), production frontend and Forge builds,
+  native format/clippy, and 45 Rust tests. Mixed-tree validation failed only on
+  an unrelated non-null assertion in the untracked settings page.
+- Hover-rail regression: focused tests (3), TypeScript, frontend lint/build, and
+  formatting pass; live DOM counts are 0 on `/` and `/settings`, 1 on `/t/:/:`.
 - No development server was started.
 
 ## Dirty-Tree Integration Notes

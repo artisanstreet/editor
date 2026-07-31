@@ -281,15 +281,14 @@ describe("Barekey docs shell reset", () => {
 		);
 		/**
 		 * The workspace is what the current route is inside — the open thread's
-		 * project, the draft's chosen project, or the editor's own path workspace —
-		 * never a fallback to "some attached project". Cycling carries that
-		 * workspace into the editor URL and returns to the exact page it left.
+		 * authoritative project or the draft's chosen project — never a route
+		 * assertion or "some attached project". Cycling carries that workspace
+		 * into the editor URL and returns to the exact thread it left.
 		 */
 		const layout = Read("modules/frontend/src/routes/+layout.sv");
 		const identity = Read("modules/frontend/src/lib/editor/workspace-identity.ts");
-		expect(layout).toContain(
-			'EditorWorkspaceId(page.url.searchParams.get("workspace") ?? undefined)',
-		);
+		expect(layout).not.toContain('searchParams.get("workspace")');
+		expect(layout).toContain("active_thread.primary_project?.project_id");
 		expect(layout).toContain("ResolveThreadRoute(threads, active_route_thread_id)");
 		expect(layout).toContain("$draft_thread_project?.project_id");
 		expect(layout).toContain("workspace_id={active_workspace_id}");

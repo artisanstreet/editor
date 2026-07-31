@@ -3,11 +3,7 @@
 	import { page } from "$app/state";
 	import { Effect, Queue } from "effect";
 	import { ArtisanClient } from "@artisan/transport/client";
-	import {
-		EditorRoutePath,
-		EditorWorkspaceId,
-		LegacyEditorRoutePath,
-	} from "$lib/editor/workspace-identity";
+	import { EditorRoutePath } from "$lib/editor/workspace-identity";
 	import {
 		MergeWorkspaceEntries,
 		WorkspaceEntriesByParent,
@@ -31,11 +27,7 @@
 	let failure = $state<string | undefined>(undefined);
 
 	const active_file = $derived(page.url.searchParams.get("file") ?? undefined);
-	const workspace_id = $derived(
-		EditorWorkspaceId(
-			page.params.workspace ?? page.url.searchParams.get("workspace") ?? undefined,
-		),
-	);
+	const workspace_id = $derived(page.params.workspace);
 	const thread_id = $derived(page.params.thread);
 
 	/**
@@ -105,12 +97,8 @@
 					{expanded}
 					onopen={(path) => {
 						/* The link carries the workspace: a refresh or share re-opens the same one. */
-						if (workspace_id === undefined) return;
-						void goto(
-							thread_id === undefined
-								? LegacyEditorRoutePath(workspace_id, path)
-								: EditorRoutePath(workspace_id, thread_id, path),
-						);
+						if (workspace_id === undefined || thread_id === undefined) return;
+						void goto(EditorRoutePath(workspace_id, thread_id, path));
 					}}
 					ontoggle={ToggleDirectory}
 				/>

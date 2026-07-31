@@ -63,6 +63,21 @@ describe("editor shell", () => {
 		expect(route).not.toContain("Save file");
 	});
 
+	it("exposes no unscoped or thread-only compatibility routes", () => {
+		const layout = Read("modules/frontend/src/routes/+layout.sv");
+		const identity = Read("modules/frontend/src/lib/editor/workspace-identity.ts");
+
+		expect(existsSync(resolve("modules/frontend/src/routes/editor/+page.sv"))).toBe(false);
+		expect(existsSync(resolve("modules/frontend/src/routes/threads/[id]/+page.sv"))).toBe(
+			false,
+		);
+		expect(layout).not.toContain("page.params.id");
+		expect(layout).not.toContain('startsWith("/editor")');
+		expect(layout).not.toContain('searchParams.get("workspace")');
+		expect(identity).not.toContain("LegacyEditorRoutePath");
+		expect(identity).not.toContain('"/editor?workspace="');
+	});
+
 	/**
 	 * A file that cannot be read must replace the surface, not sit behind a
 	 * corner message while the previously opened document stays on screen.
