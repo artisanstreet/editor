@@ -3,7 +3,7 @@
 	import PlayerStopFilled from "@tabler/icons-svelte/icons/player-stop-filled";
 	import X from "@tabler/icons-svelte/icons/x";
 	import { onDestroy } from "svelte";
-	import { Effect } from "effect";
+	import { Effect, Stream } from "effect";
 	import { SnowflakeId } from "@artisan/protocol";
 	import type { ThreadSessionPolicy } from "@artisan/protocol";
 	import { ArtisanClient } from "@artisan/transport/client";
@@ -32,7 +32,8 @@
 	} from "$lib/composer/image-attachments";
 	import {
 		IsOfflineRuntimeCatalog,
-		WithOfflineRuntimeCatalog,
+		OfflineRuntimeCatalog,
+		RuntimeCatalogChanges,
 	} from "$lib/runtime/offline-catalog";
 	import ImageViewer from "./image-viewer.sv";
 	import ModelSelector from "./model-selector/view.sv";
@@ -41,7 +42,15 @@
 	const snowflake_id = yield* SnowflakeId;
 	const banner = yield* BannerService;
 	const client = yield* ArtisanClient;
-	const runtime_catalog = yield* WithOfflineRuntimeCatalog(client.GetRuntimeCatalog);
+	let runtime_catalog = $state.raw(OfflineRuntimeCatalog);
+	yield* RuntimeCatalogChanges.pipe(
+		Stream.runForEach((catalog) =>
+			Effect.sync(() => {
+				runtime_catalog = catalog;
+			}),
+		),
+		Effect.forkScoped,
+	);
 
 	let {
 		disabled = false,

@@ -1,7 +1,7 @@
 <script lang="ts" effect>
 	import Selector from "@tabler/icons-svelte/icons/selector";
 	import Tool from "@tabler/icons-svelte/icons/tool";
-	import { Effect, Queue } from "effect";
+	import { Effect, Queue, Stream } from "effect";
 	import {
 		SessionPolicyPermission,
 		type ThreadSessionPolicy,
@@ -10,7 +10,8 @@
 	import { EngineMarkFor } from "$lib/engine/presentation";
 	import {
 		IsOfflineRuntimeCatalog,
-		WithOfflineRuntimeCatalog,
+		OfflineRuntimeCatalog,
+		RuntimeCatalogChanges,
 	} from "$lib/runtime/offline-catalog";
 
 	import { Popover, PopoverContent, PopoverTrigger } from "$lib/components/ui/popover";
@@ -30,6 +31,10 @@
 		ModelsFromCatalog,
 		OrderModels,
 		PermissionsForModel,
+		permission_for_harness,
+		permission_policy_for_harness,
+		permission_reconciliation_for_harness,
+		policy_fields_for_permission,
 		type ContextWindowChoice,
 		type EngineChoice,
 		type HarnessId,
@@ -55,22 +60,35 @@
 	} = $props();
 
 	const client = yield* ArtisanClient;
-	const runtime_catalog = yield* WithOfflineRuntimeCatalog(client.GetRuntimeCatalog);
-	const model_manifest = runtime_catalog.manifest;
-	const engines: ReadonlyArray<EngineChoice> = model_manifest.harnesses.map((harness) => ({
-		id: harness.id,
-		name: harness.label,
-		...EngineMarkFor(harness.id),
-	}));
+	let runtime_catalog = $state.raw(OfflineRuntimeCatalog);
+	yield* RuntimeCatalogChanges.pipe(
+		Stream.runForEach((catalog) =>
+			Effect.sync(() => {
+				runtime_catalog = catalog;
+			}),
+		),
+		Effect.forkScoped,
+	);
+	const model_manifest = $derived(runtime_catalog.manifest);
+	const engines: ReadonlyArray<EngineChoice> = $derived(
+		model_manifest.harnesses.map((harness) => ({
+			id: harness.id,
+			name: harness.label,
+			...EngineMarkFor(harness.id),
+		})),
+	);
 
-	const models = ModelsFromCatalog(runtime_catalog);
+	const models = $derived(ModelsFromCatalog(runtime_catalog));
+	const initial_models = ModelsFromCatalog(OfflineRuntimeCatalog);
 	let open = $state(false);
 	let previewed_model_id = $state<string | undefined>(undefined);
 	let thinking_level = $state<ThinkingLevel>("medium");
 	let speed_option_id = $state("standard");
-	let active_engine = $state<HarnessId>(models[0]?.engine ?? "codex");
+	let active_engine = $state<HarnessId>(initial_models[0]?.engine ?? "codex");
 	let permission_mode = $state("supervised");
-	let selected_model_id = $state(runtime_catalog.default_model_id ?? models[0]?.id ?? "");
+	let selected_model_id = $state(
+		OfflineRuntimeCatalog.default_model_id ?? initial_models[0]?.id ?? "",
+	);
 	let picker_surface = $state<HTMLElement | null>(null);
 	/**
 	 * Forge owns the starred set, so every client opens the picker to the same
@@ -78,7 +96,7 @@
 	 * favorite is a nicety, and the picker must not wait on it to render.
 	 */
 	let favorite_ids = $state.raw<ReadonlyArray<string>>([]);
-	const favorites_available = !IsOfflineRuntimeCatalog(runtime_catalog);
+	const favorites_available = $derived(!IsOfflineRuntimeCatalog(runtime_catalog));
 
 	const favorite_requests = yield* Queue.unbounded<ModelFavoriteRequest>();
 	const defaults_requests = yield* Queue.unbounded<Parameters<typeof client.UpdateSessionDefaults>[0]>();
@@ -143,9 +161,11 @@
 	 * compacts with its own current model.
 	 */
 	let compaction_model_id = $state<string | undefined>(undefined);
-	const compaction_available = !IsOfflineRuntimeCatalog(runtime_catalog);
+	const compaction_available = $derived(!IsOfflineRuntimeCatalog(runtime_catalog));
 	const thread_model_compaction_value = "__thread_model__";
-	const compaction_models = models.filter((model) => model.definition.disabled === undefined);
+	const compaction_models = $derived(
+		models.filter((model) => model.definition.disabled === undefined),
+	);
 	const compaction_model = $derived(
 		compaction_models.find((model) => model.id === compaction_model_id),
 	);
@@ -267,28 +287,18 @@
 		 * keeps the current option only when that engine publishes it and
 		 * otherwise falls back to the engine's own default.
 		 */
-		const target_permissions = model_manifest.harnesses.find(
-			(harness) => harness.id === model.engine,
-		)?.permissions;
-		const target_permission =
-			target_permissions?.options.find((option) => option.id === permission_mode) ??
-			target_permissions?.options.find((option) => option.id === target_permissions.default) ??
-			target_permissions?.options[0];
+		const target_permission = permission_for_harness(
+			runtime_catalog,
+			model.engine,
+			permission_mode,
+		);
 		if (target_permission !== undefined) permission_mode = target_permission.id;
 		if (!disabled && policy !== undefined && onpolicychange !== undefined) {
 			/** A different model invalidates the previous context-window suffix. */
 			const { context_window: _reset, ...rest } = policy;
 			const next: ThreadSessionPolicy = {
 				...rest,
-				...(target_permission === undefined
-					? {}
-					: {
-							permission: target_permission.id,
-							permission_mode:
-								target_permission.approval_behavior === "none" ? "never" : "on_request",
-							sandbox_mode:
-								target_permission.edit_scope === "none" ? "read_only" : "workspace_write",
-						}),
+				...policy_fields_for_permission(target_permission),
 				...(context_suffix === "" ? {} : { context_window: context_suffix }),
 				engine_id: model.engine,
 				model: model.definition.native_model_id,
@@ -354,11 +364,7 @@
 	 */
 	const select_permission = (option: PermissionOption) => {
 		permission_mode = option.id;
-		PatchPolicy({
-			permission: option.id,
-			permission_mode: option.approval_behavior === "none" ? "never" : "on_request",
-			sandbox_mode: option.edit_scope === "none" ? "read_only" : "workspace_write",
-		});
+		PatchPolicy(policy_fields_for_permission(option));
 	};
 
 	/**
@@ -396,8 +402,27 @@
 
 	$effect(() => {
 		const options = selected_permission_options;
-		if (options.length > 0 && !options.some((option) => option.id === permission_mode)) {
-			permission_mode = selected_harness?.permissions.default ?? options[0]?.id ?? "";
+		if (options.length > 0) {
+			const engine = selected_model?.engine ?? "codex";
+			const resolved =
+				policy === undefined
+					? {
+							...permission_policy_for_harness(
+								runtime_catalog,
+								engine,
+								permission_mode,
+							),
+							needs_update: false,
+						}
+					: permission_reconciliation_for_harness(runtime_catalog, engine, policy);
+			if (permission_mode !== resolved.fields.permission) {
+				permission_mode = resolved.fields.permission;
+			}
+			if (policy !== undefined && onpolicychange !== undefined && resolved.needs_update) {
+				const next = { ...policy, ...resolved.fields };
+				RememberDefaults(next);
+				onpolicychange(next);
+			}
 		}
 	});
 </script>

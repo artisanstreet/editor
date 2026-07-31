@@ -1,10 +1,13 @@
-import { describe, expect, it } from "vitest";
-import { Effect, Schema } from "effect";
+import { describe, expect, it } from "@effect/vitest";
+import { Effect, Ref, Schema, Stream } from "effect";
+import { ArtisanClient, ArtisanClientError } from "@artisan/transport/client";
 
 import { RuntimeCatalog } from "../../modules/protocol/src/runtime-catalog";
+import { FixtureArtisanClientService } from "../../modules/frontend/src/lib/runtime/fixtures/client";
 import {
 	IsOfflineRuntimeCatalog,
 	OfflineRuntimeCatalog,
+	RuntimeCatalogChanges,
 	WithOfflineRuntimeCatalog,
 } from "../../modules/frontend/src/lib/runtime/offline-catalog";
 
@@ -42,4 +45,62 @@ describe("offline runtime catalog", () => {
 			}),
 		).toBe(false);
 	});
+
+	it.effect("replaces an offline mount snapshot after Forge reconnects", () =>
+		Effect.gen(function* () {
+			const attempts = yield* Ref.make(0);
+			const connected: RuntimeCatalog = {
+				manifest: OfflineRuntimeCatalog.manifest,
+				runnable_harness_ids: ["codex"],
+			};
+			const disconnected = new ArtisanClientError({
+				cause: new Error("socket closed"),
+				code: "connection",
+				message: "Transport bootstrap failed.",
+				protocol_code: "transport.connection",
+				retryable: true,
+			});
+			const client = {
+				...FixtureArtisanClientService,
+				ConnectionChanges: Stream.succeed({ phase: "ready" as const }),
+				ConnectionState: Effect.succeed({ phase: "reconnecting" as const }),
+				GetRuntimeCatalog: Ref.updateAndGet(attempts, (count) => count + 1).pipe(
+					Effect.flatMap((attempt) =>
+						attempt === 1 ? Effect.fail(disconnected) : Effect.succeed(connected),
+					),
+				),
+			} satisfies typeof ArtisanClient.Service;
+
+			const catalogs = yield* RuntimeCatalogChanges.pipe(
+				Stream.take(2),
+				Stream.runCollect,
+				Effect.provideService(ArtisanClient, client),
+			);
+
+			expect(catalogs).toEqual([OfflineRuntimeCatalog, connected]);
+		}),
+	);
+
+	it.effect("returns to the offline sentinel when a live Forge disconnects", () =>
+		Effect.gen(function* () {
+			const connected: RuntimeCatalog = {
+				manifest: OfflineRuntimeCatalog.manifest,
+				runnable_harness_ids: ["codex"],
+			};
+			const client = {
+				...FixtureArtisanClientService,
+				ConnectionChanges: Stream.succeed({ phase: "reconnecting" as const }),
+				ConnectionState: Effect.succeed({ phase: "ready" as const }),
+				GetRuntimeCatalog: Effect.succeed(connected),
+			} satisfies typeof ArtisanClient.Service;
+
+			const catalogs = yield* RuntimeCatalogChanges.pipe(
+				Stream.take(2),
+				Stream.runCollect,
+				Effect.provideService(ArtisanClient, client),
+			);
+
+			expect(catalogs).toEqual([connected, OfflineRuntimeCatalog]);
+		}),
+	);
 });
