@@ -4,6 +4,7 @@
 	import { Effect, Queue, Stream } from "effect";
 	import {
 		SessionPolicyPermission,
+		type RuntimeCatalog,
 		type ThreadSessionPolicy,
 	} from "@artisan/protocol";
 	import { ArtisanClient } from "@artisan/transport/client";
@@ -11,7 +12,6 @@
 	import {
 		IsOfflineRuntimeCatalog,
 		OfflineRuntimeCatalog,
-		RuntimeCatalogChanges,
 	} from "$lib/runtime/offline-catalog";
 
 	import { Popover, PopoverContent, PopoverTrigger } from "$lib/components/ui/popover";
@@ -51,24 +51,17 @@
 		engine_locked = false,
 		onpolicychange,
 		policy,
+		runtime_catalog,
 	}: {
 		disabled?: boolean;
 		/** Prevents a provider change while the current run is still in flight. */
 		engine_locked?: boolean;
 		onpolicychange?: (policy: ThreadSessionPolicy) => void;
 		policy?: ThreadSessionPolicy;
+		runtime_catalog: RuntimeCatalog;
 	} = $props();
 
 	const client = yield* ArtisanClient;
-	let runtime_catalog = $state.raw(OfflineRuntimeCatalog);
-	yield* RuntimeCatalogChanges.pipe(
-		Stream.runForEach((catalog) =>
-			Effect.sync(() => {
-				runtime_catalog = catalog;
-			}),
-		),
-		Effect.forkScoped,
-	);
 	const model_manifest = $derived(runtime_catalog.manifest);
 	const engines: ReadonlyArray<EngineChoice> = $derived(
 		model_manifest.harnesses.map((harness) => ({
@@ -97,6 +90,14 @@
 	 */
 	let favorite_ids = $state.raw<ReadonlyArray<string>>([]);
 	const favorites_available = $derived(!IsOfflineRuntimeCatalog(runtime_catalog));
+	const RefreshFavorites = client.GetModelFavorites.pipe(
+		Effect.flatMap((snapshot) =>
+			Effect.sync(() => {
+				favorite_ids = snapshot.model_ids;
+			}),
+		),
+		Effect.ignore,
+	);
 
 	const favorite_requests = yield* Queue.unbounded<ModelFavoriteRequest>();
 	const defaults_requests = yield* Queue.unbounded<Parameters<typeof client.UpdateSessionDefaults>[0]>();
@@ -116,22 +117,8 @@
 
 	const HandleFavoriteRequest = (request: ModelFavoriteRequest) =>
 		client.UpdateModelFavorite(request).pipe(
-			Effect.andThen(client.GetModelFavorites),
-			Effect.flatMap((snapshot) =>
-				Effect.sync(() => {
-					favorite_ids = snapshot.model_ids;
-				}),
-			),
-			Effect.catch(() =>
-				client.GetModelFavorites.pipe(
-					Effect.flatMap((snapshot) =>
-						Effect.sync(() => {
-							favorite_ids = snapshot.model_ids;
-						}),
-					),
-					Effect.ignore,
-				),
-			),
+			Effect.andThen(RefreshFavorites),
+			Effect.catch(() => RefreshFavorites),
 		);
 
 	yield* Queue.take(favorite_requests).pipe(
@@ -146,13 +133,15 @@
 		Effect.forkScoped,
 	);
 
-	yield* client.GetModelFavorites.pipe(
-		Effect.flatMap((snapshot) =>
-			Effect.sync(() => {
-				favorite_ids = snapshot.model_ids;
-			}),
-		),
-		Effect.ignore,
+	/**
+	 * The replayed ready state hydrates once at mount; a real reconnect refreshes
+	 * once more without clearing the last known set while Forge is unavailable.
+	 */
+	yield* client.ConnectionChanges.pipe(
+		Stream.changesWith((left, right) => left.phase === right.phase),
+		Stream.filter((state) => state.phase === "ready"),
+		Stream.runForEach(() => RefreshFavorites),
+		Effect.forkScoped,
 	);
 
 	/**

@@ -1,6 +1,5 @@
 <script lang="ts">
 	import Star from "@tabler/icons-svelte/icons/star";
-	import StarFilled from "@tabler/icons-svelte/icons/star-filled";
 	import { EngineMarkClass, ProviderMarkFor } from "$lib/engine/presentation";
 	import DropdownHoverSurface from "../dropdown-hover-surface.sv";
 	import type { ModelChoice } from "$lib/engine/model-selection";
@@ -73,24 +72,21 @@
 										{/if}
 									</span>
 								</button>
-								{#if favorites_available}
-									<button
-										type="button"
-										{disabled}
-										class="mr-1 grid size-7 shrink-0 place-items-center self-center rounded-full text-muted-foreground transition-colors duration-(--duration-fast) ease-in-out hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-45 motion-reduce:transition-none"
-										aria-pressed={favorited}
-										aria-label={favorited
-											? `Unfavorite ${model.name}`
-											: `Favorite ${model.name}`}
-										onclick={() => onfavorite(model.id, !favorited)}
-									>
-										{#if favorited}
-											<StarFilled class="size-4 text-favorite" aria-hidden="true" />
-										{:else}
-											<Star class="size-4" aria-hidden="true" />
-										{/if}
-									</button>
-								{/if}
+								<button
+									type="button"
+									disabled={disabled || !favorites_available}
+									class="mr-1 grid size-7 shrink-0 place-items-center self-center rounded-full text-muted-foreground transition-colors duration-(--duration-fast) ease-in-out hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-45 motion-reduce:transition-none"
+									aria-pressed={favorited}
+									aria-label={favorited
+										? `Unfavorite ${model.name}`
+										: `Favorite ${model.name}`}
+									onclick={() => onfavorite(model.id, !favorited)}
+								>
+									<Star
+										class={favorited ? "size-4 fill-current text-favorite" : "size-4"}
+										aria-hidden="true"
+									/>
+								</button>
 							</div>
 						</td>
 					</tr>

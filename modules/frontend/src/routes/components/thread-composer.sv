@@ -463,7 +463,13 @@
 			</div>
 
 			<div class="flex items-center justify-between gap-2">
-				<ModelSelector {disabled} {engine_locked} {policy} {onpolicychange} />
+				<ModelSelector
+					{disabled}
+					{engine_locked}
+					{onpolicychange}
+					{policy}
+					{runtime_catalog}
+				/>
 				<TooltipProvider delayDuration={0}>
 					<Tooltip>
 						<TooltipTrigger>

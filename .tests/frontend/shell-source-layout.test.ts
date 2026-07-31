@@ -357,9 +357,9 @@ describe("Barekey docs shell reset", () => {
 
 		expect(workspace).toContain("const engine_locked = $derived(run_active);");
 		expect(workspace).not.toContain("run_active || snapshot.items.length > 0");
-		expect(composer).toContain(
-			"<ModelSelector {disabled} {engine_locked} {policy} {onpolicychange} />",
-		);
+		expect(composer).toContain("<ModelSelector");
+		expect(composer).toContain("{engine_locked}");
+		expect(composer).toContain("{runtime_catalog}");
 		expect(selector).toContain("engine_id: model.engine,");
 		expect(selector).toContain("<EngineSection");
 		expect(engine_section).toContain("engine_locked && engine.id !== selected_engine.id");
@@ -372,30 +372,34 @@ describe("Barekey docs shell reset", () => {
 		const model_list = Read(
 			"modules/frontend/src/routes/components/model-selector/model-list.sv",
 		);
+		const composer = Read("modules/frontend/src/routes/components/thread-composer.sv");
 
 		/** Forge owns the set, so every client opens the picker to the same order. */
 		expect(selector).toContain("client.GetModelFavorites");
 		expect(selector).toContain("client.UpdateModelFavorite");
+		expect(selector).toContain("client.ConnectionChanges");
+		/** The composer owns the one catalog stream and shares its current value. */
+		expect(selector).not.toContain("RuntimeCatalogChanges");
+		expect(composer).toContain("RuntimeCatalogChanges");
+		expect(composer).toContain("{runtime_catalog}");
 		/** Favorites sort within the active engine, never across engine tabs. */
 		expect(selection).toContain("models.filter((model) => model.engine === engine)");
 		expect(selection).toContain("favorites.indexOf(left.id) - favorites.indexOf(right.id)");
-		/** A muted outline until starred; gold is what starring earns. */
+		/** One stable SVG stays mounted; gold fill is what starring earns. */
 		expect(model_list).toContain('import Star from "@tabler/icons-svelte/icons/star"');
-		expect(model_list).toContain(
-			'import StarFilled from "@tabler/icons-svelte/icons/star-filled"',
-		);
+		expect(model_list).not.toContain("StarFilled");
 		expect(model_list).toContain("aria-pressed={favorited}");
 		expect(model_list).toContain("self-center");
-		expect(model_list).toContain('<Star class="size-4" aria-hidden="true" />');
-		expect(model_list).toContain('<StarFilled class="size-4 text-favorite"');
+		expect(model_list).toContain('favorited ? "size-4 fill-current text-favorite" : "size-4"');
 		expect(model_list).not.toContain("text-favorite/");
 		/** A star reads as gold, and the theme carries a value for each mode. */
 		const global_styles = Read("modules/frontend/src/lib/styles/global.css");
 		expect(global_styles).toContain("--color-favorite: var(--favorite);");
 		expect(global_styles.match(/^\t--favorite: oklch/gm)?.length ?? 0).toBe(2);
-		/** Nothing can be starred with no Forge to record it. */
+		/** The stable control stays mounted but cannot be used without Forge. */
 		expect(selector).toContain("IsOfflineRuntimeCatalog(runtime_catalog)");
-		expect(model_list).toContain("{#if favorites_available}");
+		expect(model_list).toContain("disabled={disabled || !favorites_available}");
+		expect(model_list).not.toContain("{#if favorites_available}");
 	});
 
 	it("surfaces the thread's project at the top of the thread panel and assigns it there", () => {
