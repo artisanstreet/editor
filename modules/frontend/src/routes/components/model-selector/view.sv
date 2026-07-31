@@ -2,6 +2,7 @@
 	import Selector from "@tabler/icons-svelte/icons/selector";
 	import Tool from "@tabler/icons-svelte/icons/tool";
 	import { Effect, Queue, Stream } from "effect";
+	import { untrack } from "svelte";
 	import {
 		SessionPolicyPermission,
 		type RuntimeCatalog,
@@ -373,8 +374,11 @@
 				candidate.definition.native_model_id === policy.model ||
 				(policy.model === undefined && candidate.id === runtime_catalog.default_model_id),
 		);
-		if (model !== undefined) selected_model_id = model.id;
-		if (model !== undefined) active_engine = model.engine;
+		/** A catalog refresh must not snap an exploratory provider tab back. */
+		if (model !== undefined && model.id !== untrack(() => selected_model_id)) {
+			selected_model_id = model.id;
+			active_engine = model.engine;
+		}
 		thinking_level = ThinkingLevelFromPolicy(policy.reasoning_effort);
 		permission_mode = PermissionModeFromPolicy(policy);
 		const speed_option =

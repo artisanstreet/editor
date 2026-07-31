@@ -361,6 +361,7 @@ describe("Barekey docs shell reset", () => {
 		expect(composer).toContain("{engine_locked}");
 		expect(composer).toContain("{runtime_catalog}");
 		expect(selector).toContain("engine_id: model.engine,");
+		expect(selector).toContain("model.id !== untrack(() => selected_model_id)");
 		expect(selector).toContain("<EngineSection");
 		expect(engine_section).toContain("engine_locked && engine.id !== selected_engine.id");
 		expect(engine_section).toContain("finish the active run before switching engines");
