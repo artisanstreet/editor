@@ -40,6 +40,8 @@ Last updated: 2026-07-31. Branch continuity only. Durable verified status is in
 - The transcript proximity hover rail mounts only on
   `/t/:workspace/:thread`; root, settings, draft, and editor routes never
   instantiate it.
+- Canonical thread pages derive `<thread title> › Artisan Editor` from the
+  authoritative live thread item, so title refinements update browser chrome.
 - Thermonuclear remediation and clean-checkout repair are committed as
   `9414199b` and `45fa22bb`; final independent reviews were clean.
 
@@ -62,6 +64,12 @@ Last updated: 2026-07-31. Branch continuity only. Durable verified status is in
   an unrelated non-null assertion in the untracked settings page.
 - Hover-rail regression: focused tests (3), TypeScript, frontend lint/build, and
   formatting pass; live DOM counts are 0 on `/` and `/settings`, 1 on `/t/:/:`.
+- Dynamic thread-title regression: 13 focused tests, TypeScript, zero-warning
+  lint, formatting, and the production frontend build pass. Mixed-tree
+  aggregate validation failed only on an unrelated non-null assertion in the
+  untracked settings page. Scoped clean-clone `pnpm run validate` is green:
+  292 Vitest files/1,961 tests (7 skips), production frontend and Forge builds,
+  native format/clippy, and 45 Rust tests.
 - No development server was started.
 
 ## Dirty-Tree Integration Notes

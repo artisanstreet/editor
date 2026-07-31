@@ -411,6 +411,10 @@
 	}
 </script>
 
+<svelte:head>
+	<title>{thread?.title ?? "Thread"} › Artisan Editor</title>
+</svelte:head>
+
 <ThreadWorkspace
 	{image_sources}
 	onabort={CancelRun}

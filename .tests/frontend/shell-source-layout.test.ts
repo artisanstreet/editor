@@ -72,9 +72,12 @@ describe("Barekey docs shell reset", () => {
 		expect(layout).toContain(
 			'secondary={surface === "editor" ? editor_files : is_thread ? secondary : undefined}',
 		);
-		expect(thread).toContain("Thread · Artisan Editor");
+		expect(thread).not.toContain("<svelte:head>");
 		expect(thread).toContain("{#key `${page.params.workspace}:${thread_id}`}");
 		expect(thread).toContain("<ThreadRoute {thread_id} />");
+		expect(thread_route).toContain(
+			'<title>{thread?.title ?? "Thread"} › Artisan Editor</title>',
+		);
 		expect(thread_route).toContain("<ThreadWorkspace");
 		expect(thread_panel).not.toContain("<ModelSelector");
 		expect(composer).toContain("<ModelSelector");

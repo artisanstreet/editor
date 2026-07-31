@@ -5,8 +5,6 @@
 	const thread_id = $derived(page.params.thread);
 </script>
 
-<svelte:head><title>Thread · Artisan Editor</title></svelte:head>
-
 {#key `${page.params.workspace}:${thread_id}`}
 	<ThreadRoute {thread_id} />
 {/key}
