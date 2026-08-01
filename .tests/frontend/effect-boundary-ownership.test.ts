@@ -13,8 +13,8 @@ describe("frontend Effect boundary ownership", () => {
 
 		expect(source).toContain('<script lang="ts" effect>');
 		expect(source).toContain("Effect.acquireRelease");
-		expect(source).toContain("Effect.forkScoped");
-		expect(source).toContain("Queue.unbounded");
+		expect(source).toContain("MakeScopedAttachmentRunner");
+		expect(source).not.toContain("Queue.unbounded");
 		expect(source).not.toContain("onMount(");
 		expect(source).not.toMatch(/Effect\.run(?:Fork|Promise|Sync)/);
 	});

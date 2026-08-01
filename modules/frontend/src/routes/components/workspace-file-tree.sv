@@ -1,4 +1,5 @@
-<script lang="ts">
+<script lang="ts" effect>
+	import type { Effect } from "effect";
 	import ChevronRight from "@tabler/icons-svelte/icons/chevron-right";
 	import Folder from "@tabler/icons-svelte/icons/folder";
 	import FolderOpen from "@tabler/icons-svelte/icons/folder-open";
@@ -29,8 +30,8 @@
 		readonly children_by_path: ReadonlyMap<string, ReadonlyArray<WorkspaceTreeEntry>>;
 		readonly depth?: number;
 		readonly expanded: ReadonlySet<string>;
-		readonly onopen: (path: string) => void;
-		readonly ontoggle: (path: string) => void;
+		readonly onopen: (path: string) => Effect.Effect<void>;
+		readonly ontoggle: (path: string) => Effect.Effect<void>;
 		readonly parent?: string;
 	} = $props();
 
@@ -47,7 +48,7 @@
 			class="flex w-full min-w-0 items-center gap-1.5 rounded-lg py-1 pr-2 text-left text-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none"
 			style={indent(0)}
 			aria-expanded={is_expanded}
-			onclick={() => ontoggle(entry.path)}
+			onclick={yield* ontoggle(entry.path)}
 		>
 			<ChevronRight
 				class={`size-3.5 shrink-0 transition-transform duration-(--duration-fast) ease-in-out motion-reduce:transition-none ${
@@ -82,7 +83,7 @@
 			class="flex w-full min-w-0 items-center gap-1.5 rounded-lg py-1 pr-2 text-left text-sm text-muted-foreground transition-colors hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none aria-current:text-foreground"
 			style={indent(0.75)}
 			aria-current={entry.path === active_path ? "true" : undefined}
-			onclick={() => onopen(entry.path)}
+			onclick={yield* onopen(entry.path)}
 		>
 			<img
 				src={resolve_file_icon(entry.path)}

@@ -1,6 +1,6 @@
 # Active Branch Handoff
 
-Last updated: 2026-07-31. Branch continuity only. Durable verified status is in
+Last updated: 2026-08-01. Branch continuity only. Durable verified status is in
 [`docs/status/backend-completion-matrix.md`](../docs/status/backend-completion-matrix.md).
 
 ## Working State
@@ -8,11 +8,13 @@ Last updated: 2026-07-31. Branch continuity only. Durable verified status is in
 - Repository `C:\Users\sander\Desktop\artisan-editor`; direct `master`,
   tracking `origin/master`. Thermonuclear remediation is committed through
   clean-checkout repair `45fa22bb`; canonical route restoration `923fb65f` and
-  unreleased compatibility-route removal are the current verified milestones.
-- Protected user work remains: `modules/frontend/src/routes/threads/+page.sv`
-  stays staged but uncommitted and `.mcp.json` stays untracked. One unstaged
-  canonical-route adaptation remains on top of that protected page.
-- Production Engines are Codex CLI and Claude Code CLI.
+  unreleased compatibility-route removal remain verified. Permission repair
+  `fc9182b0`, reconnect `3738bc64`, favorite stability `75c58c0`, provider
+  selection `d4a2807b`, and provider usage `12543d3` are pushed and verified.
+- Protected user work: `.mcp.json` stays untracked. The concurrently authored
+  host-suspend/engine-inactivity slice is validated but remains outside this
+  frontend commit. Sander explicitly removed `routes/threads/+page.sv` after
+  folding its draft flow into `routes/+page.sv`.
 
 ## Invariants
 
@@ -35,8 +37,11 @@ Last updated: 2026-07-31. Branch continuity only. Durable verified status is in
   unmounts the old editor before moving to the new workspace route; detach moves
   to `/t/_/:thread`, so stale file reads cannot retain revoked workspace scope.
 - No compatibility thread/editor URLs exist: `/t/:workspace/:thread` and
-  `/e/:workspace/:thread` are the sole product contracts. The protected
-  `/threads` page remains only as the pre-creation draft route.
+  `/e/:workspace/:thread` are the sole product contracts. The root page `/` is
+  the pre-creation draft route: it hosts the activity grid, recent threads,
+  and the draft composer whose first send creates the thread. The dedicated
+  `/threads` route is removed; the command menu's "New thread" navigates to
+  `/`, and the layout treats `/` as a thread surface for the inspector panel.
 - The transcript proximity hover rail mounts only on
   `/t/:workspace/:thread`; root, settings, draft, and editor routes never
   instantiate it.
@@ -44,34 +49,54 @@ Last updated: 2026-07-31. Branch continuity only. Durable verified status is in
   authoritative live thread item, so title refinements update browser chrome.
 - Thermonuclear remediation and clean-checkout repair are committed as
   `9414199b` and `45fa22bb`; final independent reviews were clean.
+- Both frontend review passes reject the uncommitted root-draft/settings/context
+  milestone; see [`frontend-ser-thermonuclear-review-2026-07-31.md`](../docs/status/frontend-ser-thermonuclear-review-2026-07-31.md):
+  C-01–C-09 record correctness/accessibility failures; Q-01–Q-11 record the
+  non-generator Effect dialect, fragmented controllers, duplicate/non-atomic
+  settings flows, and repository-wide SER baseline violations. The active goal
+  is to fix every finding, including nits, enforce the repository-wide SER
+  source gate, independently re-review, validate, commit, and push to `master`.
+- Second remediation wave is integrated: draft first-send owns a stable command
+  ID, atomic claim/retry, accepted-only completion, and created-state locks;
+  route usage has owner-aware leases; model policy coalesces current intent and
+  reconciles authoritative results; image visibility cancels keyed fetch work.
+  Shared lifecycle machinery replaced five duplicated queue/fiber controllers;
+  FileReader and clipboard failures are tagged. Behavioral controller-race and
+  delayed-cancellation tests are green.
+- Quality decomposition is integrated: fixture command/query domains, sidebar
+  usage, composer, thread panel, and workspace-tab state are split below the
+  pressure thresholds. `SessionDefaultsController` is now the sole live owner
+  of catalog/default/favorite/compaction state; policy writes coalesce and only
+  remember authoritative reconciliation. `RouteNavigation` is the sole typed
+  SvelteKit `goto` boundary, and the editor file tree uses direct SER callbacks.
+  No application source retains the superseded catalog stream or raw `goto`.
+- The SER gate fails closed on every Effect member outside a yielded generator
+  or sanctioned pipe operator and audits direct capability programs plus exact
+  synchronous queue ingress. Browser DOM, object URLs, and callback-owned
+  lifecycle work use typed shared boundaries. `svelte-effect-runtime` 4.2.1
+  supplies the transformed `yield* ... is not iterable` callback fix. All C/Q
+  and hostile follow-up findings are independently closed.
+- The final hostile pass found seven race/truthfulness defects plus literal
+  editor-boundary/gate gaps. All are repaired: model fields patch atomically;
+  stale defaults, route, and folder reads cannot publish; overlapping draft
+  claims wait; retention becomes visibly unverified; fallback speed uses the
+  selected model; editor host calls are yielded/tagged. Frozen-tree review
+  also closed policy-retry and hidden-image publication races, then hardened
+  browser-global detection against uncatalogued APIs and lexical decoys.
+- Context-window usage flows engine → surface storage → composer gauge;
+  migration `20260731100810_panoramic_power_man` adds its aggregate columns.
+  `drizzle.config.ts` correctly targets `persistence/tables.ts`; the previously
+  generated drop-everything migration was caught, deleted, and never applied.
 
 ## Verification
 
-- `pnpm run validate` is green in the integration checkout and a frozen-install
-  clean clone of `45fa22bb`: format, zero-warning lint, TypeScript, production
-  frontend and isolated Forge builds, 292 Vitest files/1,958 tests (7 skips),
-  native format/clippy, and 45 Rust tests.
-- The repair reviewer, global source guard, and both final thermos reviews are clean.
-- Route-focused navigation, editor, pairing, desktop, and Forge suites pass 65
-  tests. Final route-milestone `pnpm run validate` is green: formatting,
-  zero-warning lint, TypeScript, production frontend and Forge builds, 292
-  Vitest files/1,960 tests (7 skips), native format/clippy, and 45 Rust tests.
-- The unreleased compatibility-route removal suite passes 4 files/38 tests;
-  TypeScript, zero-warning lint, formatting, and the production frontend build
-  are green. Scoped frozen-install clean-clone `pnpm run validate` is green:
-  292 Vitest files/1,961 tests (7 skips), production frontend and Forge builds,
-  native format/clippy, and 45 Rust tests. Mixed-tree validation failed only on
-  an unrelated non-null assertion in the untracked settings page.
-- Hover-rail regression: focused tests (3), TypeScript, frontend lint/build, and
-  formatting pass; live DOM counts are 0 on `/` and `/settings`, 1 on `/t/:/:`.
-- Dynamic thread-title regression: 13 focused tests, TypeScript, zero-warning
-  lint, formatting, and the production frontend build pass. Mixed-tree
-  aggregate validation failed only on an unrelated non-null assertion in the
-  untracked settings page. Scoped clean-clone `pnpm run validate` is green:
-  292 Vitest files/1,961 tests (7 skips), production frontend and Forge builds,
-  native format/clippy, and 45 Rust tests.
-- No development server was started.
-
+- Focused remediation/controller/lifecycle tests, adversarial interleavings,
+  component integrity, and the expanded SER gate are green. The complete
+  frontend suite passes 63 files/357 tests. On SER 4.2.1, production build,
+  TypeScript, format, zero-warning lint, and diff checks pass. Three independent
+  frozen-tree reviewers are closed. `pnpm run validate` passes 313 Vitest files,
+  2,067 tests with 7 skips, both production builds, native format/clippy, and 45
+  Rust tests. The frontend SER milestone is the current committed `master` HEAD.
 ## Dirty-Tree Integration Notes
 
 - The five prerequisite Drizzle migrations through `20260730110447` are now

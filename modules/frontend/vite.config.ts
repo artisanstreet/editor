@@ -70,6 +70,10 @@ const development_only_surfaces = () => {
 			source: "<!-- development-only surface -->",
 			suffix: "/routes/debug/emulator/+page.sv",
 		},
+		{
+			source: "<!-- development-only surface -->",
+			suffix: "/routes/debug/overlay/+page.sv",
+		},
 	];
 
 	return {
@@ -228,6 +232,17 @@ export default defineConfig({
 				svelte_config: "direct",
 			},
 		),
+		/**
+		 * Tailwind 4's build plugin is deliberately `enforce: "pre"`, but its
+		 * transform filter accepts CSS (including Svelte style virtual modules)
+		 * only. SER 4.2.1 reports every pre-transform plugin and cannot express
+		 * that filter, so its ordering notice is a conservative false positive:
+		 * Tailwind cannot parse a `.sv` module before `effect()` lowers it.
+		 *
+		 * Keep this separate from the composed Svelte-transform chain. Removing
+		 * Tailwind's priority would change its documented CSS pipeline merely to
+		 * silence a warning; the focused SER gate asserts this exception instead.
+		 */
 		tailwindcss(),
 	],
 });

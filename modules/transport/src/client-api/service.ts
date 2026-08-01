@@ -147,6 +147,8 @@ import type {
 import type {
 	Project,
 	ProjectCatalogSnapshot,
+	ProjectDirectoryCreateInput,
+	ProjectDirectoryEntry,
 	ProjectDirectoryList,
 	ProjectDirectoryListInput,
 	ProjectDirectorySelectInput,
@@ -268,6 +270,9 @@ export class ArtisanClient extends Context.Service<
 		readonly SelectProjectDirectory: (
 			input: ProjectDirectorySelectInput,
 		) => Effect.Effect<Project, ArtisanClientError>;
+		readonly CreateProjectDirectory: (
+			input: ProjectDirectoryCreateInput,
+		) => Effect.Effect<ProjectDirectoryEntry, ArtisanClientError>;
 		readonly ListPreviewTargets: (
 			input?: PreviewTargetListQuery,
 		) => Effect.Effect<ReadonlyArray<PreviewTarget>, ArtisanClientError>;

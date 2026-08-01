@@ -116,11 +116,18 @@ const ToolUseSchema = Schema.Struct({
 	input: Schema.Unknown,
 });
 const ThinkingSchema = Schema.Struct({ type: Schema.Literal("thinking"), thinking: Schema.String });
+const UsageSchema = Schema.Struct({
+	cache_creation_input_tokens: Schema.optional(TokenCount),
+	cache_read_input_tokens: Schema.optional(TokenCount),
+	input_tokens: Schema.optional(TokenCount),
+	output_tokens: Schema.optional(TokenCount),
+});
 const AssistantSchema = Schema.Struct({
 	type: Schema.Literal("assistant"),
 	message: Schema.Struct({
 		content: Schema.Array(Schema.Unknown),
 		id: Schema.optional(Schema.String),
+		usage: Schema.optional(UsageSchema),
 	}),
 	error: Schema.optional(Schema.String),
 });
@@ -137,10 +144,6 @@ const ToolResultSchema = Schema.Struct({
 const UserSchema = Schema.Struct({
 	type: Schema.Literal("user"),
 	message: Schema.Struct({ content: Schema.Array(Schema.Unknown) }),
-});
-const UsageSchema = Schema.Struct({
-	input_tokens: Schema.optional(TokenCount),
-	output_tokens: Schema.optional(TokenCount),
 });
 const ResultSchema = Schema.Struct({
 	type: Schema.Literal("result"),
@@ -284,8 +287,35 @@ function usage_observation(
 		...make_base(input, "result.usage"),
 		_tag: "usage",
 		basis: "cumulative",
+		...(usage.cache_read_input_tokens === undefined
+			? {}
+			: { cached_input_tokens: usage.cache_read_input_tokens }),
 		...(usage.input_tokens === undefined ? {} : { input_tokens: usage.input_tokens }),
 		...(usage.output_tokens === undefined ? {} : { output_tokens: usage.output_tokens }),
+		turn_id: input.turn_id,
+	};
+}
+
+/**
+ * Measures the tokens occupying Claude's context window from one assistant
+ * frame's per-response usage: the response's input plus the cache reads and
+ * writes that carried the prior conversation. The terminal `result.usage` is
+ * unsuitable for this gauge because it accumulates input across every model
+ * call in the turn, re-counting the context each call resent.
+ */
+function context_usage_observation(
+	input: ClaudeNormalizationInput,
+	usage: Schema.Schema.Type<typeof UsageSchema>,
+): EngineUsageObservation | undefined {
+	if (usage.input_tokens === undefined) return undefined;
+	return {
+		...make_base(input, "assistant.usage", "usage"),
+		_tag: "usage",
+		basis: "cumulative",
+		context_tokens:
+			usage.input_tokens +
+			(usage.cache_creation_input_tokens ?? 0) +
+			(usage.cache_read_input_tokens ?? 0),
 		turn_id: input.turn_id,
 	};
 }
@@ -490,6 +520,10 @@ export function normalize_claude_event(
 			observations.unshift(
 				reasoning_summary_completed_observation(input, assistant.message.id),
 			);
+		if (assistant.message.usage !== undefined) {
+			const context_usage = context_usage_observation(input, assistant.message.usage);
+			if (context_usage !== undefined) observations.push(context_usage);
+		}
 		if (observations.length > 0) return observations;
 		if (assistant.error !== undefined) return [native_action(input, assistant.error)];
 		return [native_action(input, "Assistant event without public content")];

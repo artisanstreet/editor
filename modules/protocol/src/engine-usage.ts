@@ -41,6 +41,8 @@ export type EngineUsageAuthentication = typeof EngineUsageAuthentication.Type;
  * `failure` explains an authenticated account whose usage fetch failed.
  */
 export const EngineUsageReport = Schema.Struct({
+	/** The provider account's email when the engine's transport discloses one. */
+	account_email: Schema.optional(Schema.String.check(Schema.isMinLength(1))),
 	authentication: EngineUsageAuthentication,
 	display_name: Schema.String.check(Schema.isMinLength(1)),
 	engine_id: Schema.String.check(Schema.isMinLength(1)),

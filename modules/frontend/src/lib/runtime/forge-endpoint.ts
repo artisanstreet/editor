@@ -1,21 +1,46 @@
-/**
- * The renderer normally talks to the Forge that served it, strictly
- * same-origin. The installed editor is the one exception: Electron loads this
- * bundle from the `artisan://app` scheme and hands the home's loopback
- * Forge endpoint over in the pairing fragment. That endpoint is adopted here —
- * validated, session-scoped, never durable — and every Forge-facing URL is
- * built through it so the rest of the client stays origin-agnostic.
- */
+import { Context, Data, Effect, Layer } from "effect";
+
+/** Browser-storage failures stay typed at the renderer capability boundary. */
+export class ForgeEndpointStorageError extends Data.TaggedError("ForgeEndpointStorageError")<{
+	readonly cause: unknown;
+}> {}
 
 const storage_key = "artisan.forge-endpoint";
 
+export class ForgeEndpointStore extends Context.Service<
+	ForgeEndpointStore,
+	{
+		readonly Read: Effect.Effect<string | undefined, ForgeEndpointStorageError>;
+		readonly Write: (endpoint: string) => Effect.Effect<void, ForgeEndpointStorageError>;
+	}
+>()("Artisan/ForgeEndpointStore") {}
+
 /**
- * Adoption is restricted to non-HTTP(S) pages. A web page served by a Forge
- * must never be redirectable to a sibling loopback port through a crafted
- * fragment, because loopback cookies are host-scoped rather than port-scoped;
- * the app scheme cannot be loaded by a browser, so gating on the page protocol
- * removes the redirection surface entirely.
+ * Browser session storage is an I/O capability. Privacy modes may deny it, in
+ * which case endpoint adoption remains memoryless rather than throwing across
+ * component work.
  */
+export const ForgeEndpointStoreLive = Layer.effect(
+	ForgeEndpointStore,
+	Effect.gen(function* () {
+		const Read = Effect.gen(function* () {
+			return yield* Effect.try({
+				try: () => globalThis.sessionStorage?.getItem(storage_key) ?? undefined,
+				catch: (cause) => new ForgeEndpointStorageError({ cause }),
+			});
+		});
+		const Write = (endpoint: string) =>
+			Effect.gen(function* () {
+				yield* Effect.try({
+					try: () => globalThis.sessionStorage?.setItem(storage_key, endpoint),
+					catch: (cause) => new ForgeEndpointStorageError({ cause }),
+				});
+			});
+
+		return ForgeEndpointStore.of({ Read, Write });
+	}),
+);
+
 const endpoint_bearing_page = (page_protocol: string) =>
 	page_protocol !== "http:" && page_protocol !== "https:";
 
@@ -43,39 +68,35 @@ export const DecodeLoopbackForgeEndpoint = (candidate: unknown): string | undefi
 	}
 };
 
-const session_store = (): Pick<Storage, "getItem" | "removeItem" | "setItem"> | undefined => {
-	try {
-		return (globalThis as { readonly sessionStorage?: Storage }).sessionStorage;
-	} catch {
-		/** Storage access can throw in privacy modes; the endpoint just stays unset. */
-		return undefined;
-	}
-};
-
-/**
- * Remembers a validated endpoint for the lifetime of this window session, so
- * an in-window reload of the editor keeps talking to the same Forge after the
- * one-time fragment has been consumed. The endpoint is not a secret and no
- * credential is ever stored beside it.
- */
-export const AdoptForgeEndpoint = (candidate: string, page_protocol: string): boolean => {
-	if (!endpoint_bearing_page(page_protocol)) return false;
-	const endpoint = DecodeLoopbackForgeEndpoint(candidate);
-	if (endpoint === undefined) return false;
-	session_store()?.setItem(storage_key, endpoint);
-	return true;
-};
+/** Adopts a validated loopback endpoint for this browser session. */
+export const AdoptForgeEndpoint = (candidate: string, page_protocol: string) =>
+	Effect.gen(function* () {
+		if (!endpoint_bearing_page(page_protocol)) return false;
+		const endpoint = DecodeLoopbackForgeEndpoint(candidate);
+		if (endpoint === undefined) return false;
+		const store = yield* ForgeEndpointStore;
+		yield* store
+			.Write(endpoint)
+			.pipe(Effect.catchTag("ForgeEndpointStorageError", () => Effect.gen(function* () {})));
+		return true;
+	});
 
 /** The adopted loopback Forge origin, or undefined on ordinary same-origin pages. */
-export const ResolveForgeEndpoint = (): string | undefined => {
-	const stored = session_store()?.getItem(storage_key);
-	return stored === null || stored === undefined
-		? undefined
-		: DecodeLoopbackForgeEndpoint(stored);
-};
+export const ResolveForgeEndpoint = Effect.gen(function* () {
+	const store = yield* ForgeEndpointStore;
+	const stored = yield* store.Read.pipe(
+		Effect.catchTag("ForgeEndpointStorageError", () =>
+			Effect.gen(function* () {
+				return undefined;
+			}),
+		),
+	);
+	return stored === undefined ? undefined : DecodeLoopbackForgeEndpoint(stored);
+});
 
 /** Builds a Forge HTTP URL: absolute against the adopted endpoint, else same-origin relative. */
-export const ForgeHttpUrl = (path: string): string => {
-	const endpoint = ResolveForgeEndpoint();
-	return endpoint === undefined ? path : `${endpoint}${path}`;
-};
+export const ForgeHttpUrl = (path: string) =>
+	Effect.gen(function* () {
+		const endpoint = yield* ResolveForgeEndpoint;
+		return endpoint === undefined ? path : `${endpoint}${path}`;
+	});

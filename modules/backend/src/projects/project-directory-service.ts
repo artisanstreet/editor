@@ -1,9 +1,12 @@
 import { Context, Data, Effect, FileSystem, Layer, Option, Path, Ref } from "effect";
 
 import type {
+	ProjectDirectoryCreateInput,
 	ProjectDirectoryEntry,
 	ProjectDirectoryList,
 	ProjectDirectoryListInput,
+	ProjectDirectoryPlace,
+	ProjectDirectoryPlaceKind,
 	ProjectDirectorySelectInput,
 	ProjectRef,
 } from "@artisan/protocol";
@@ -11,15 +14,38 @@ import { SnowflakeId } from "@artisan/protocol";
 import { ProjectLocator } from "../threads/project-locator";
 
 const maximum_directories = 256;
+const maximum_files = 256;
+
+/** The standard user folders offered as picker shortcuts, in presentation order. */
+const known_places: ReadonlyArray<{
+	readonly folder_name: string | undefined;
+	readonly place: ProjectDirectoryPlaceKind;
+}> = [
+	{ folder_name: undefined, place: "home" },
+	{ folder_name: "Desktop", place: "desktop" },
+	{ folder_name: "Documents", place: "documents" },
+	{ folder_name: "Downloads", place: "downloads" },
+	{ folder_name: "Pictures", place: "pictures" },
+	{ folder_name: "Music", place: "music" },
+	{ folder_name: "Videos", place: "videos" },
+];
 
 export class ProjectDirectoryError extends Data.TaggedError("ProjectDirectoryError")<{
 	readonly cause?: unknown;
-	readonly code: "invalid_directory" | "list_failed" | "project_not_found";
+	readonly code:
+		| "create_failed"
+		| "invalid_directory"
+		| "invalid_name"
+		| "list_failed"
+		| "project_not_found";
 }> {}
 
 export class ProjectDirectoryService extends Context.Service<
 	ProjectDirectoryService,
 	{
+		readonly Create: (
+			input: ProjectDirectoryCreateInput,
+		) => Effect.Effect<ProjectDirectoryEntry, ProjectDirectoryError>;
 		readonly List: (
 			input: ProjectDirectoryListInput,
 		) => Effect.Effect<ProjectDirectoryList, ProjectDirectoryError>;
@@ -28,6 +54,18 @@ export class ProjectDirectoryService extends Context.Service<
 		) => Effect.Effect<ProjectRef, ProjectDirectoryError>;
 	}
 >()("Artisan/ProjectDirectoryService") {}
+
+/**
+ * One plain path segment: no separators, no traversal, no control characters,
+ * and none of the characters Windows refuses in file names.
+ */
+const valid_directory_name = (name: string) =>
+	name === name.trim() &&
+	name.length <= 128 &&
+	name !== "." &&
+	name !== ".." &&
+	// eslint-disable-next-line no-control-regex -- rejects raw control characters in names
+	!/[\\/:*?"<>|\u0000-\u001f]/.test(name);
 
 interface KnownDirectory {
 	readonly canonical_path: string;
@@ -39,8 +77,16 @@ function inside(path_service: Path.Path, root: string, candidate: string) {
 	return relative === "" || (!relative.startsWith("..") && !path_service.isAbsolute(relative));
 }
 
-/** Builds a stateful browser-safe directory service over explicitly allowed server roots. */
-export function make_project_directory_service_layer(allowed_roots: ReadonlyArray<string>) {
+/**
+ * Builds a stateful browser-safe directory service over explicitly allowed
+ * server roots. When the home directory is named, its standard user folders
+ * (Desktop, Documents, Downloads, …) surface as picker shortcuts — still
+ * bounded by the allowed roots like every other listing.
+ */
+export function make_project_directory_service_layer(
+	allowed_roots: ReadonlyArray<string>,
+	home_directory?: string,
+) {
 	return Layer.effect(
 		ProjectDirectoryService,
 		Effect.gen(function* () {
@@ -97,6 +143,38 @@ export function make_project_directory_service_layer(allowed_roots: ReadonlyArra
 				}),
 			);
 
+			/**
+			 * Resolved once at construction: the shortcuts are stable for the
+			 * process lifetime, and every one of them must land inside an
+			 * allowed root to be offered at all.
+			 */
+			const places = yield* Effect.gen(function* () {
+				if (home_directory === undefined) return [];
+				const resolved = yield* Effect.forEach(known_places, (candidate) =>
+					Effect.gen(function* () {
+						const target =
+							candidate.folder_name === undefined
+								? home_directory
+								: path_service.join(home_directory, candidate.folder_name);
+						const canonical_path = yield* file_system.realPath(target);
+						const metadata = yield* file_system.stat(canonical_path);
+						const root_path = roots.find((root) =>
+							inside(path_service, root, canonical_path),
+						);
+						if (metadata.type !== "Directory" || root_path === undefined) {
+							return Option.none<ProjectDirectoryPlace>();
+						}
+						const directory_id = yield* Register({ canonical_path, root_path });
+						return Option.some({
+							directory_id,
+							display_name: candidate.folder_name ?? "Home",
+							place: candidate.place,
+						} satisfies ProjectDirectoryPlace);
+					}).pipe(Effect.catch(() => Effect.succeed(Option.none()))),
+				);
+				return resolved.flatMap((place) => (Option.isSome(place) ? [place.value] : []));
+			});
+
 			const ResolveKnown = (directory_id: string) =>
 				Effect.gen(function* () {
 					const known = (yield* Ref.get(by_id)).get(directory_id);
@@ -124,22 +202,43 @@ export function make_project_directory_service_layer(allowed_roots: ReadonlyArra
 					),
 				);
 
-			const ChildEntries = (parent_directory_id: string) =>
+			type ChildListing = {
+				readonly directories: ReadonlyArray<ProjectDirectoryEntry>;
+				readonly files: ReadonlyArray<string>;
+			};
+
+			const ChildEntries = (
+				parent_directory_id: string,
+			): Effect.Effect<ChildListing, unknown> =>
 				Effect.gen(function* () {
 					const parent = yield* ResolveKnown(parent_directory_id);
+					/**
+					 * The scan is bounded before any stat runs: each name costs a
+					 * filesystem probe, and a pathological directory must not turn
+					 * one listing into thousands of them.
+					 */
 					const names = (yield* file_system.readDirectory(parent.canonical_path))
 						.toSorted((left, right) => left.localeCompare(right))
-						.slice(0, maximum_directories);
+						.slice(0, maximum_directories + maximum_files);
 					const entries = yield* Effect.forEach(names, (name) =>
 						Effect.gen(function* () {
 							const candidate = path_service.join(parent.canonical_path, name);
 							const canonical_path = yield* file_system.realPath(candidate);
 							const metadata = yield* file_system.stat(canonical_path);
+							if (metadata.type === "File") {
+								return Option.some({ name, type: "file" as const });
+							}
 							if (
 								metadata.type !== "Directory" ||
 								!inside(path_service, parent.root_path, canonical_path)
 							) {
-								return Option.none<ProjectDirectoryEntry>();
+								return Option.none<
+									| { readonly name: string; readonly type: "file" }
+									| {
+											readonly entry: ProjectDirectoryEntry;
+											readonly type: "directory";
+									  }
+								>();
 							}
 							const directory_id = yield* Register({
 								canonical_path,
@@ -147,24 +246,77 @@ export function make_project_directory_service_layer(allowed_roots: ReadonlyArra
 							});
 							const children = yield* file_system.readDirectory(canonical_path);
 							return Option.some({
-								directory_id,
-								display_name: name,
-								has_children: children.length > 0,
-								kind: "directory",
-							} satisfies ProjectDirectoryEntry);
+								entry: {
+									directory_id,
+									display_name: name,
+									has_children: children.length > 0,
+									kind: "directory",
+								} satisfies ProjectDirectoryEntry,
+								type: "directory" as const,
+							});
 						}).pipe(Effect.catch(() => Effect.succeed(Option.none()))),
 					);
-					return entries.flatMap((entry) => (Option.isSome(entry) ? [entry.value] : []));
+					const listed = entries.flatMap((entry) =>
+						Option.isSome(entry) ? [entry.value] : [],
+					);
+					return {
+						directories: listed
+							.flatMap((item) => (item.type === "directory" ? [item.entry] : []))
+							.slice(0, maximum_directories),
+						files: listed
+							.flatMap((item) => (item.type === "file" ? [item.name] : []))
+							.slice(0, maximum_files),
+					};
 				});
 
 			return {
+				Create: (input) =>
+					Effect.gen(function* () {
+						if (!valid_directory_name(input.name)) {
+							return yield* Effect.fail(
+								new ProjectDirectoryError({ code: "invalid_name" }),
+							);
+						}
+						const parent = yield* ResolveKnown(input.parent_directory_id);
+						const target = path_service.join(parent.canonical_path, input.name);
+						/** Non-recursive on purpose: an existing folder is a caller error, not a no-op. */
+						yield* file_system.makeDirectory(target);
+						const canonical_path = yield* file_system.realPath(target);
+						if (!inside(path_service, parent.root_path, canonical_path)) {
+							return yield* Effect.fail(
+								new ProjectDirectoryError({ code: "invalid_directory" }),
+							);
+						}
+						const directory_id = yield* Register({
+							canonical_path,
+							root_path: parent.root_path,
+						});
+						return {
+							directory_id,
+							display_name: input.name,
+							has_children: false,
+							kind: "directory",
+						} satisfies ProjectDirectoryEntry;
+					}).pipe(
+						Effect.mapError((cause) =>
+							cause instanceof ProjectDirectoryError
+								? cause
+								: new ProjectDirectoryError({ cause, code: "create_failed" }),
+						),
+					),
 				List: (input) =>
 					(input.parent_directory_id === undefined
-						? RootEntries
+						? RootEntries.pipe(
+								Effect.map(
+									(directories): ChildListing => ({ directories, files: [] }),
+								),
+							)
 						: ChildEntries(input.parent_directory_id)
 					).pipe(
-						Effect.map((directories) => ({
-							directories,
+						Effect.map((listing) => ({
+							directories: listing.directories,
+							files: listing.files,
+							places,
 							...(input.parent_directory_id === undefined
 								? {}
 								: { parent_directory_id: input.parent_directory_id }),

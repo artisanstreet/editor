@@ -1,9 +1,8 @@
 <script lang="ts" effect>
 	import { page } from "$app/state";
 	import FileOff from "@tabler/icons-svelte/icons/file-off";
-	import { Effect, Queue } from "effect";
+	import { Effect } from "effect";
 	import { ArtisanClient } from "@artisan/transport/client";
-	import { MakeEditorSurfaceMount } from "$lib/editor/mount";
 	import { EditorFileKeyForFile, EditorService } from "$lib/editor/service";
 	import { EditorFileFromRead } from "$lib/editor/workspace-session";
 	import EditorSurface from "$lib/components/editor/surface.sv";
@@ -41,8 +40,6 @@
 		active_path === undefined ? undefined : open_failures.get(active_path),
 	);
 
-	const mount = MakeEditorSurfaceMount(editor);
-
 	const OpenPath = (path: string) =>
 		Effect.gen(function* () {
 			if (workspace_id === undefined) return;
@@ -58,26 +55,20 @@
 			);
 		}).pipe(
 			Effect.catch((error) =>
-				Effect.sync(() => {
+				Effect.gen(function* () {
 					open_failures = new Map(open_failures).set(path, error.message);
 				}),
 			),
 		);
 
-	const open_requests = yield* Queue.dropping<string>(1);
-	yield* Queue.take(open_requests).pipe(
-		Effect.flatMap(OpenPath),
-		Effect.forever,
-		Effect.forkScoped,
-	);
-
-	/** The URL is the source of truth, so opening happens as a reaction to it. */
-	$effect(() => {
-		const path = active_path;
-		if (path === undefined || workspace_id === undefined) return;
-		if (open_files.some((file) => file.path === path)) return;
-		Queue.offerUnsafe(open_requests, path);
-	});
+	/** The URL is reactive input, so SER interrupts a stale open before starting its replacement. */
+	if (
+		active_path !== undefined &&
+		workspace_id !== undefined &&
+		!open_files.some((file) => file.path === active_path)
+	) {
+		yield* OpenPath(active_path);
+	}
 </script>
 
 <svelte:head>
@@ -111,6 +102,6 @@
 			</div>
 		</div>
 	{:else}
-		<EditorSurface {mount} label={active_path} />
+		<EditorSurface label={active_path} />
 	{/if}
 </div>

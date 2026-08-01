@@ -30,6 +30,8 @@ import { ModelFavoritesSnapshot } from "../model-favorites";
 import { Project, ProjectCatalogSnapshot, ProjectDetachInput } from "../project";
 
 import {
+	ProjectDirectoryCreateInput,
+	ProjectDirectoryEntry,
 	ProjectDirectoryList,
 	ProjectDirectoryListInput,
 	ProjectDirectorySelectInput,
@@ -134,6 +136,23 @@ export const ProjectDirectorySelectResultEnvelope = Schema.Struct({
 	payload: Project,
 });
 export type ProjectDirectorySelectResultEnvelope = typeof ProjectDirectorySelectResultEnvelope.Type;
+
+/** Creates a named directory inside an already-listed parent directory. */
+export const ProjectDirectoryCreateEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("project.directory.create"),
+	payload: ProjectDirectoryCreateInput,
+});
+export type ProjectDirectoryCreateEnvelope = typeof ProjectDirectoryCreateEnvelope.Type;
+
+/** Returns the created directory as a browsable entry. */
+export const ProjectDirectoryCreateResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("project.directory.create.result"),
+	payload: ProjectDirectoryEntry,
+});
+export type ProjectDirectoryCreateResultEnvelope = typeof ProjectDirectoryCreateResultEnvelope.Type;
 
 /** Requests the complete authoritative project catalog owned by Forge. */
 export const ProjectListQueryEnvelope = Schema.Struct({

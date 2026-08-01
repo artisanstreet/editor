@@ -63,9 +63,11 @@ export const fixture_project_head_committed_at = new Date(
 ).toISOString();
 
 export const fixture_project = {
+	attached_at: fixture_timestamp,
 	display_name: "Artisan Editor",
 	project_id: "project-artisan-editor",
 	root_path: "C:\\Users\\Sander\\Desktop\\artisan-editor",
+	updated_at: fixture_timestamp,
 } as const;
 
 export const fixture_artisan_client_data = {

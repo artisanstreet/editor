@@ -35,11 +35,11 @@ export const FixtureFailure = (message: string) =>
 
 export const FixtureReceipt = (command_id: string, journal_sequence = 48) =>
 	Effect.gen(function* () {
-		return yield* Effect.succeed({
+		return {
 			command_id,
 			journal_sequence,
 			status: "accepted" as const,
-		});
+		};
 	});
 
 export const FixturePreviewTarget = (input: PreviewTargetGetQuery) =>

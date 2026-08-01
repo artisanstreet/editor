@@ -160,25 +160,20 @@ const surface_extensions = (options: EditorSurfaceOptions, document_uri: string)
  * compartment is what allows the swap afterwards without rebuilding state and
  * losing the cursor.
  */
-const InstallLanguage = (document: CodeMirrorDocument) => {
-	const language = EditorLanguageForPath(document.uri);
-	return LoadEditorLanguage(language).pipe(
-		Effect.option,
-		Effect.flatMap((loaded) =>
-			Effect.sync(() => {
-				const support = Option.getOrUndefined(Option.flatten(loaded));
-				if (support === undefined || document.disposed()) return;
-				const effects = document.language_compartment.reconfigure(support);
-				const view = document.view();
-				if (view !== undefined) {
-					view.dispatch({ effects });
-					return;
-				}
-				document.take_state(document.state().update({ effects }).state);
-			}),
-		),
-	);
-};
+const InstallLanguage = (document: CodeMirrorDocument) =>
+	Effect.gen(function* () {
+		const language = EditorLanguageForPath(document.uri);
+		const loaded = yield* LoadEditorLanguage(language).pipe(Effect.option);
+		const support = Option.getOrUndefined(Option.flatten(loaded));
+		if (support === undefined || document.disposed()) return;
+		const effects = document.language_compartment.reconfigure(support);
+		const view = document.view();
+		if (view !== undefined) {
+			view.dispatch({ effects });
+			return;
+		}
+		document.take_state(document.state().update({ effects }).state);
+	});
 
 const make_document = (input: {
 	readonly language: string;
@@ -306,7 +301,10 @@ const make_surface = (host: object, options: EditorSurfaceOptions = {}): EditorS
 export const BrowserCodeMirrorAdapter: EditorAdapter = {
 	create_document: make_document,
 	create_surface: make_surface,
-	install_language: (document) => InstallLanguage(document as CodeMirrorDocument),
+	install_language: (document) =>
+		Effect.gen(function* () {
+			yield* InstallLanguage(document as CodeMirrorDocument);
+		}),
 	set_markers: (document, _owner, diagnostics) => {
 		const target = document as CodeMirrorDocument;
 		const mapped = to_codemirror_diagnostics(target.state(), diagnostics);

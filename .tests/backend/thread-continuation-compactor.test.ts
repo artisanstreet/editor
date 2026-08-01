@@ -109,7 +109,15 @@ const engine = (
 	Probe: () => Effect.die("Probe is outside compactor tests"),
 });
 
-const make_layer = (engines: ReadonlyArray<Engine>, compaction_model_id?: string) => {
+const make_layer = (
+	engines: ReadonlyArray<Engine>,
+	compaction_model?: string,
+	model_defaults: ReadonlyArray<{
+		readonly context_window?: string;
+		readonly model_id: string;
+		readonly reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max";
+	}> = [],
+) => {
 	let next_id = 0;
 	const dependencies = Layer.mergeAll(
 		make_engine_registry_layer(engines).pipe(Layer.orDie),
@@ -123,8 +131,8 @@ const make_layer = (engines: ReadonlyArray<Engine>, compaction_model_id?: string
 		),
 		Layer.succeed(SessionDefaultsService, {
 			Read: Effect.succeed({
-				...(compaction_model_id === undefined ? {} : { compaction_model_id }),
-				models: [],
+				...(compaction_model === undefined ? {} : { compaction_model }),
+				models: model_defaults,
 				permission: "supervised",
 			}),
 			Update: () => Effect.die("Update is outside compactor tests"),
@@ -177,7 +185,7 @@ describe("thread continuation compactor", () => {
 		expect(opens).toEqual([]);
 	});
 
-	it("summarizes the head through one constrained source-engine turn", async () => {
+	it("summarizes the head on the harness's fast compaction default", async () => {
 		const opens: Array<EngineOpenInput> = [];
 		const layer = make_layer([
 			engine("claude", opens, {
@@ -199,14 +207,14 @@ describe("thread continuation compactor", () => {
 		const result = await summarize(layer, request({ omitted_head_entries: 2 }));
 
 		expect(Option.getOrThrow(result)).toEqual({
-			compactor: { engine_id: "claude", model_id: "claude-sonnet-5" },
+			compactor: { engine_id: "claude", model_id: "claude-haiku-4-5" },
 			summary: "## Objective\n- Ship the release plan.",
 		});
 		expect(opens).toHaveLength(1);
 		const open = opens[0]!;
 		expect(open._tag).toBe("start");
 		if (open._tag !== "start") return;
-		expect(open.model).toBe("claude-sonnet-5");
+		expect(open.model).toBe("claude-haiku-4-5");
 		expect(open.working_directory).toBe("C:\\workspace");
 		expect(open.provider_options).toEqual({
 			"claude.disable_tools": true,
@@ -251,7 +259,7 @@ describe("thread continuation compactor", () => {
 		expect(open._tag).toBe("start");
 		if (open._tag !== "start") return;
 		expect(open.model).toBe("gpt-5.6-sol");
-		expect(open.provider_options).toBeUndefined();
+		expect(open.provider_options).toEqual({ "codex.reasoning_effort": "low" });
 		expect(open.permission_policy).toEqual({
 			approval: "never",
 			network_access: false,
@@ -259,7 +267,7 @@ describe("thread continuation compactor", () => {
 		});
 	});
 
-	it("falls back to the source engine when the configured model is not a catalog id", async () => {
+	it("uses the harness compaction default when the configured model is not a catalog id", async () => {
 		const claude_opens: Array<EngineOpenInput> = [];
 		const codex_opens: Array<EngineOpenInput> = [];
 		const layer = make_layer(
@@ -281,11 +289,109 @@ describe("thread continuation compactor", () => {
 		const result = await summarize(layer, request());
 
 		expect(Option.getOrThrow(result)).toEqual({
-			compactor: { engine_id: "claude", model_id: "claude-sonnet-5" },
+			compactor: { engine_id: "claude", model_id: "claude-haiku-4-5" },
 			summary: "Source summary.",
 		});
 		expect(codex_opens).toEqual([]);
 		expect(claude_opens).toHaveLength(1);
+	});
+
+	it("honors an explicit pick's saved effort and context defaults", async () => {
+		const codex_opens: Array<EngineOpenInput> = [];
+		const layer = make_layer(
+			[
+				engine("codex", codex_opens, {
+					observations: [
+						{
+							_tag: "agent_message_completed",
+							message: "Configured summary.",
+							phase: "final",
+						},
+					],
+				}),
+			],
+			"codex-sol",
+			[{ context_window: "[long]", model_id: "codex-sol", reasoning_effort: "high" }],
+		);
+
+		const result = await summarize(layer, request());
+
+		expect(Option.isSome(result)).toBe(true);
+		expect(codex_opens).toHaveLength(1);
+		const open = codex_opens[0]!;
+		expect(open._tag).toBe("start");
+		if (open._tag !== "start") return;
+		expect(open.model).toBe("gpt-5.6-sol[long]");
+		expect(open.provider_options).toEqual({ "codex.reasoning_effort": "high" });
+	});
+
+	it("summarizes with the thread's own model when the selection is inherited", async () => {
+		const claude_opens: Array<EngineOpenInput> = [];
+		const codex_opens: Array<EngineOpenInput> = [];
+		const layer = make_layer(
+			[
+				engine("claude", claude_opens, {
+					observations: [
+						{
+							_tag: "agent_message_completed",
+							message: "Inherited summary.",
+							phase: "final",
+						},
+					],
+				}),
+				engine("codex", codex_opens),
+			],
+			"inherited",
+		);
+
+		const result = await summarize(layer, request());
+
+		expect(Option.getOrThrow(result)).toEqual({
+			compactor: { engine_id: "claude", model_id: "claude-sonnet-5" },
+			summary: "Inherited summary.",
+		});
+		expect(codex_opens).toEqual([]);
+		expect(claude_opens).toHaveLength(1);
+		const open = claude_opens[0]!;
+		expect(open._tag).toBe("start");
+		if (open._tag !== "start") return;
+		expect(open.model).toBe("claude-sonnet-5");
+	});
+
+	it("falls back to the source model when the harness has no compaction default", async () => {
+		const opens: Array<EngineOpenInput> = [];
+		const layer = make_layer([
+			engine("mystery", opens, {
+				observations: [
+					{
+						_tag: "agent_message_completed",
+						message: "Source summary.",
+						phase: "final",
+					},
+				],
+			}),
+		]);
+
+		const result = await summarize(
+			layer,
+			request({ source: { engine_id: "mystery", model_id: "mystery-1" } }),
+		);
+
+		expect(Option.getOrThrow(result)).toEqual({
+			compactor: { engine_id: "mystery", model_id: "mystery-1" },
+			summary: "Source summary.",
+		});
+		expect(opens).toHaveLength(1);
+		const open = opens[0]!;
+		expect(open._tag).toBe("start");
+		if (open._tag !== "start") return;
+		expect(open.model).toBe("mystery-1");
+		expect(open.provider_options).toBeUndefined();
+		expect(open.permission_policy).toEqual({
+			approval: "never",
+			network_access: false,
+			write_access: false,
+		});
 	});
 
 	it("returns none when the compaction turn does not complete", async () => {

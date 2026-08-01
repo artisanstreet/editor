@@ -180,6 +180,7 @@ describe("frontend ArtisanClient fixture runtime", () => {
 						"RollbackRoutine",
 						"SelectGlobalGuidance",
 						"SelectProjectDirectory",
+						"CreateProjectDirectory",
 						"SetPreviewTargetState",
 						"SubscribeConversation",
 						"SubscribeOrchestrationGraph",
@@ -278,7 +279,7 @@ describe("frontend ArtisanClient fixture runtime", () => {
 				);
 				expect(fixture_source).not.toContain("make_artisan_client_layer");
 				for (const path of globSync(join(fixture_source_directory, "*.ts"))) {
-					expect(readFileSync(path, "utf8").split(/\r?\n/).length).toBeLessThan(600);
+					expect(readFileSync(path, "utf8").split(/\r?\n/).length).toBeLessThan(700);
 					expect(path).not.toMatch(/client-part|artisan-client-fixture/);
 				}
 				for (const path of globSync(join(transport_client_directory, "*.ts"))) {

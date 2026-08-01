@@ -1,5 +1,7 @@
-<script lang="ts">
+<script lang="ts" effect>
 	import Star from "@tabler/icons-svelte/icons/star";
+	import { Effect } from "effect";
+	import type { Snippet } from "svelte";
 	import { EngineMarkClass, ProviderMarkFor } from "$lib/engine/presentation";
 	import DropdownHoverSurface from "../dropdown-hover-surface.sv";
 	import type { ModelChoice } from "$lib/engine/model-selection";
@@ -8,6 +10,7 @@
 		disabled,
 		favorite_ids,
 		favorites_available,
+		leading,
 		models,
 		onfavorite,
 		onpreview,
@@ -17,18 +20,36 @@
 		disabled: boolean;
 		favorite_ids: ReadonlyArray<string>;
 		favorites_available: boolean;
+		/** Rows rendered above every model, inside the shared hover surface. */
+		leading?: Snippet<[{ move_hover: (event: Event) => void }]>;
 		models: ReadonlyArray<ModelChoice>;
-		onfavorite: (model_id: string, favorite: boolean) => void;
-		onpreview: (model_id: string) => void;
-		onselect: (model: ModelChoice) => void;
+		onfavorite: (model_id: string, favorite: boolean) => Effect.Effect<void>;
+		onpreview: (model_id: string) => Effect.Effect<void>;
+		onselect: (model: ModelChoice) => Effect.Effect<void>;
 		selected_model_id: string;
 	} = $props();
+
+	const MoveHover = (move_hover: (event: Event) => void, event: Event) =>
+		Effect.gen(function* () {
+			move_hover(event);
+		});
+
+	const PreviewModel = (
+		model_id: string,
+		move_hover: (event: Event) => void,
+		event: Event,
+	) =>
+		Effect.gen(function* () {
+			move_hover(event);
+			yield* onpreview(model_id);
+		});
 </script>
 
 <DropdownHoverSurface
 	class="pr-2 [--docs-sidebar-hover-radius:calc(var(--radius-3xl)-0.5rem)]"
 >
 	{#snippet children({ move_hover })}
+		{@render leading?.({ move_hover })}
 		<!-- Fixed layout keeps long names inside the scroll box instead of widening the table. -->
 		<table
 			class="w-full table-fixed border-separate border-spacing-y-0.5"
@@ -44,12 +65,9 @@
 							<div
 								role="presentation"
 								class="mr-2 flex min-w-0 items-center gap-1"
-								onpointerenter={(event) => {
-									move_hover(event);
-									onpreview(model.id);
-								}}
-								onpointermove={move_hover}
-								onfocusin={move_hover}
+								onpointerenter={yield* PreviewModel(model.id, move_hover, event)}
+								onpointermove={yield* MoveHover(move_hover, event)}
+								onfocusin={yield* MoveHover(move_hover, event)}
 							>
 								<button
 									type="button"
@@ -57,7 +75,7 @@
 									title={model.definition.disabled?.reason}
 									class="flex min-w-0 grow items-center gap-2 rounded-[calc(var(--radius-3xl)-0.5rem)] px-2.5 py-1.5 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-45"
 									aria-current={model.id === selected_model_id ? "true" : undefined}
-									onclick={() => onselect(model)}
+									onclick={yield* onselect(model)}
 								>
 									<LabIcon class={EngineMarkClass(lab_mark, "size-5")} />
 									<span class="flex min-w-0 flex-col space-y-0">
@@ -80,7 +98,7 @@
 									aria-label={favorited
 										? `Unfavorite ${model.name}`
 										: `Favorite ${model.name}`}
-									onclick={() => onfavorite(model.id, !favorited)}
+									onclick={yield* onfavorite(model.id, !favorited)}
 								>
 									<Star
 										class={favorited ? "size-4 fill-current text-favorite" : "size-4"}

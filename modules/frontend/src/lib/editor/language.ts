@@ -35,7 +35,10 @@ export class EditorLanguageLoadError extends Data.TaggedError("EditorLanguageLoa
 	readonly language: EditorLanguageId;
 }> {}
 
-const Import = <A>(load: () => Promise<A>) => Effect.tryPromise(load);
+const Import = <A>(load: () => Promise<A>) =>
+	Effect.gen(function* () {
+		return yield* Effect.tryPromise(load);
+	});
 const grammars: Readonly<
 	Record<Exclude<EditorLanguageId, "plaintext">, Effect.Effect<LanguageSupport, unknown>>
 > = {
@@ -140,9 +143,10 @@ export const EditorLanguageIsHighlighted = (language: EditorLanguageId) => langu
 export const LoadEditorLanguage = (
 	language: EditorLanguageId,
 ): Effect.Effect<Option.Option<LanguageSupport>, EditorLanguageLoadError> =>
-	language === "plaintext"
-		? Effect.succeed(Option.none())
-		: grammars[language].pipe(
-				Effect.mapError((cause) => new EditorLanguageLoadError({ cause, language })),
-				Effect.map(Option.some),
-			);
+	Effect.gen(function* () {
+		if (language === "plaintext") return Option.none();
+		const support = yield* grammars[language].pipe(
+			Effect.mapError((cause) => new EditorLanguageLoadError({ cause, language })),
+		);
+		return Option.some(support);
+	});

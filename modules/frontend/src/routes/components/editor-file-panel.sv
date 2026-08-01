@@ -1,8 +1,8 @@
 <script lang="ts" effect>
-	import { goto } from "$app/navigation";
 	import { page } from "$app/state";
-	import { Effect, Queue } from "effect";
+	import { Effect } from "effect";
 	import { ArtisanClient } from "@artisan/transport/client";
+	import { RouteNavigation } from "$lib/browser/route-navigation";
 	import { EditorRoutePath } from "$lib/editor/workspace-identity";
 	import {
 		MergeWorkspaceEntries,
@@ -22,9 +22,11 @@
 	 */
 
 	const client = yield* ArtisanClient;
+	const navigation = yield* RouteNavigation;
 	let tree = $state.raw<ReadonlyMap<string, ReadonlyArray<WorkspaceTreeEntry>>>(new Map());
 	let expanded = $state.raw<ReadonlySet<string>>(new Set());
 	let failure = $state<string | undefined>(undefined);
+	let directory_requests = $state.raw<ReadonlyArray<string>>([workspace_tree_root]);
 
 	const active_file = $derived(page.url.searchParams.get("file") ?? undefined);
 	const workspace_id = $derived(page.params.workspace);
@@ -51,31 +53,35 @@
 			failure = undefined;
 		}).pipe(
 			Effect.catch((error) =>
-				Effect.sync(() => {
+				Effect.gen(function* () {
 					failure = error.message;
 				}),
 			),
 		);
 
-	const directory_requests = yield* Queue.unbounded<string>();
-	yield* Queue.take(directory_requests).pipe(
-		Effect.flatMap(LoadDirectory),
-		Effect.forever,
-		Effect.forkScoped,
-	);
+	if (directory_requests.length > 0) {
+		const [parent, ...remaining] = directory_requests;
+		directory_requests = remaining;
+		yield* LoadDirectory(parent);
+	}
 
-	const ToggleDirectory = (path: string) => {
-		const next = new Set(expanded);
-		if (next.has(path)) next.delete(path);
-		else {
-			next.add(path);
-			if (!tree.has(path)) Queue.offerUnsafe(directory_requests, path);
-		}
-		expanded = next;
-	};
+	const ToggleDirectory = (path: string) =>
+		Effect.gen(function* () {
+			const next = new Set(expanded);
+			if (next.has(path)) next.delete(path);
+			else {
+				next.add(path);
+				if (!tree.has(path)) directory_requests = [...directory_requests, path];
+			}
+			expanded = next;
+		});
 
-	/** The root listing is fetched once, when the panel mounts with the editor. */
-	yield* Effect.forkScoped(LoadDirectory(workspace_tree_root));
+	const OpenFile = (path: string) =>
+		Effect.gen(function* () {
+			if (workspace_id === undefined || thread_id === undefined) return;
+			yield* navigation.Navigate(EditorRoutePath(workspace_id, thread_id, path));
+		});
+
 </script>
 
 <div class="flex h-full min-h-0 flex-col gap-2 p-3">
@@ -95,11 +101,7 @@
 					active_path={active_file}
 					children_by_path={tree}
 					{expanded}
-					onopen={(path) => {
-						/* The link carries the workspace: a refresh or share re-opens the same one. */
-						if (workspace_id === undefined || thread_id === undefined) return;
-						void goto(EditorRoutePath(workspace_id, thread_id, path));
-					}}
+					onopen={OpenFile}
 					ontoggle={ToggleDirectory}
 				/>
 			</div>

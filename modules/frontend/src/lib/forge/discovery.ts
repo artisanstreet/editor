@@ -28,8 +28,9 @@ const FetchJson = <S extends Schema.ConstraintDecoder<unknown>>(
 	schema: S,
 ) =>
 	Effect.gen(function* () {
+		const url = yield* ForgeHttpUrl(path);
 		const response = yield* Effect.tryPromise({
-			try: () => fetch(ForgeHttpUrl(path), { cache: "no-store" }),
+			try: () => fetch(url, { cache: "no-store" }),
 			catch: (cause) => new ForgeDiscoveryError({ cause, operation }),
 		});
 		if (!response.ok)
@@ -48,15 +49,23 @@ const FetchJson = <S extends Schema.ConstraintDecoder<unknown>>(
 	});
 
 /** A bounded probe which remains interruptible when its component scope closes. */
-export const DiscoverForgeHealth = FetchJson("health", "/health", ForgeHealth).pipe(
-	Effect.retry(Schedule.max([Schedule.recurs(4), Schedule.spaced("1500 millis")])),
-	Effect.option,
-);
+export const DiscoverForgeHealth = Effect.gen(function* () {
+	return yield* FetchJson("health", "/health", ForgeHealth).pipe(
+		Effect.retry(Schedule.max([Schedule.recurs(4), Schedule.spaced("1500 millis")])),
+		Effect.option,
+	);
+});
 
-export const DiscoverOtherForges = FetchJson("instances", "/api/instances", ForgeInstances).pipe(
-	Effect.map((listing) => listing.instances.filter((instance) => !instance.self)),
-	Effect.catch(() => Effect.succeed([] as ReadonlyArray<ReachableForge>)),
-);
+export const DiscoverOtherForges = Effect.gen(function* () {
+	return yield* FetchJson("instances", "/api/instances", ForgeInstances).pipe(
+		Effect.map((listing) => listing.instances.filter((instance) => !instance.self)),
+		Effect.catch(() =>
+			Effect.gen(function* () {
+				return [] as ReadonlyArray<ReachableForge>;
+			}),
+		),
+	);
+});
 
 export const DiscoverForge = Effect.gen(function* () {
 	const health = yield* DiscoverForgeHealth;

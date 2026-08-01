@@ -43,14 +43,17 @@ The summarizer is `ThreadContinuationCompactor`
 an Effect Service that never fails a switch: its absence of a result selects
 the mechanical fallback.
 
-- **Model selection.** The Forge session default `compaction_model_id` names a
-  catalog model by its unique catalog id. When set and enabled, that model's
-  harness runs the compaction turn. When unset or unknown, the source thread's
-  own engine and model summarize their own history — the OpenCode default. The
-  selector's model picker exposes this as the "Compaction model" control
-  (default "Thread model"); the durable patch travels through the ordinary
-  `session.defaults.update` command, where an explicit `null` clears the
-  override.
+- **Model selection.** The Forge session default `compaction_model` selects the
+  summarizer. Absent means **Curated**: the source harness's cost-effective
+  catalog default (`compaction_default_model_id` in the manifest: GPT 5.6 Luna
+  at low effort for Codex, Claude Haiku 4.5 for Claude, Composer 2.5 for
+  Cursor and Grok Build), with a harness lacking one falling back to the
+  thread's own model. `"inherited"` means the thread's own current model
+  summarizes — the OpenCode default. Any other value names one explicit
+  catalog model by its unique id. The `/settings` page exposes all three
+  through the standard engine-tab model picker (default "Curated"); the
+  durable patch travels through the ordinary `session.defaults.update`
+  command, where an explicit `null` restores Curated.
 - **The turn.** One fresh `start` run on the chosen engine: read-only
   constrained metadata (Claude: `claude.permission_mode: "default"`; others: a
   `never`-approval, no-write, no-network permission policy), a single user

@@ -27,8 +27,11 @@
 		onimagevisibilitychange?: (
 			attachments: ReadonlyArray<ImageAttachmentReference>,
 			visible: boolean,
-		) => void;
-		onquestion?: (question_id: string, answer: string) => void;
+		) => Effect.Effect<void>;
+		onquestion?: (
+			question_id: string,
+			answer: string,
+		) => Effect.Effect<void, { readonly message: string }>;
 		trailing?: Snippet;
 	} = $props();
 </script>

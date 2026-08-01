@@ -1,7 +1,9 @@
-<script lang="ts">
+<script lang="ts" effect>
 	import { page } from "$app/state";
 	import type { ThreadListItem } from "@artisan/protocol";
 	import MessageCircle from "@tabler/icons-svelte/icons/message-circle";
+	import { Effect } from "effect";
+	import { RunBrowserDom } from "$lib/browser/dom";
 	import {
 		FormatRecentThreadTime,
 		SortRecentThreads,
@@ -29,13 +31,15 @@
 	const recent_threads = $derived(SortRecentThreads(threads));
 	const active_route_id = $derived(page.params.thread);
 
-	const Reveal = () => {
+	const Reveal = () =>
+		Effect.gen(function* () {
 		if (!open) now_ms = Date.now();
 		open = true;
-	};
-	const Conceal = () => {
+		});
+	const Conceal = () =>
+		Effect.gen(function* () {
 		open = false;
-	};
+		});
 
 	/**
 	 * The whole band the list occupies is the trigger, yet it must never block
@@ -43,21 +47,22 @@
 	 * proximity is read from the window's pointer position instead. The open
 	 * panel re-enables its own pointer events for scrolling and clicking.
 	 */
-	const TrackPointer = (event: PointerEvent) => {
+	const TrackPointer = (event: PointerEvent) =>
+		Effect.gen(function* () {
 		if (zone_element === undefined) return;
-		const rect = zone_element.getBoundingClientRect();
+		const rect = yield* RunBrowserDom(() => zone_element.getBoundingClientRect());
 		const inside =
 			event.clientX >= rect.left &&
 			event.clientX <= rect.right &&
 			event.clientY >= rect.top &&
 			event.clientY <= rect.bottom;
-		if (inside) Reveal();
-		else if (open) Conceal();
-	};
+		if (inside) yield* Reveal();
+		else if (open) yield* Conceal();
+		});
 
 </script>
 
-<svelte:window onpointermove={TrackPointer} />
+<svelte:window onpointermove={yield* TrackPointer(event)} />
 
 <!--
 	The dead margin left of the transcript is the trigger surface itself: resting
@@ -69,8 +74,8 @@
 	bind:this={zone_element}
 	class="pointer-events-none absolute inset-y-0 left-0 z-10 hidden w-80 xl:block"
 	role="presentation"
-	onfocusin={Reveal}
-	onfocusout={Conceal}
+	onfocusin={yield* Reveal()}
+	onfocusout={yield* Conceal()}
 >
 	<div
 		class="t-panel-slide-x absolute inset-0 flex flex-col justify-center py-8 pl-12 pr-2"

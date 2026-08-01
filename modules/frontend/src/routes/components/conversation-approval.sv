@@ -42,16 +42,13 @@
 			submitted_decision = approved;
 			yield* onapproval(item.interaction_id, approved).pipe(
 				Effect.catch((error) =>
-					Effect.all([
-						Effect.sync(() => {
-							submitted_decision = undefined;
-						}),
-						banner.error("Could not respond to approval", {
+					Effect.gen(function* () {
+						submitted_decision = undefined;
+						yield* banner.error("Could not respond to approval", {
 							description: error.message,
-						}),
-					]),
+						});
+					}),
 				),
-				Effect.asVoid,
 			);
 		});
 </script>

@@ -111,8 +111,10 @@ const FileB: EditorWorkspaceFile = {
 	workspace_id: "workspace-one",
 };
 
-const Scoped = <A>(fake: FakeSurfaceAdapter, program: Effect.Effect<A, never, EditorService>) =>
-	Effect.runPromise(Effect.scoped(program).pipe(Effect.provide(MakeEditorLayer(fake.adapter))));
+const Scoped = <A, Error>(
+	fake: FakeSurfaceAdapter,
+	program: Effect.Effect<A, Error, EditorService>,
+) => Effect.runPromise(Effect.scoped(program).pipe(Effect.provide(MakeEditorLayer(fake.adapter))));
 
 describe("editor service", () => {
 	it("keeps global editor URI and model identities distinct across workspaces", async () => {

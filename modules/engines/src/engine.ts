@@ -391,6 +391,19 @@ export interface EngineUsageObservation extends EngineObservationBase {
 	readonly _tag: "usage";
 	/** States whether counts add to prior observations or replace a provider-reported total. */
 	readonly basis: "delta" | "cumulative" | "unknown";
+	readonly cached_input_tokens?: number;
+	/**
+	 * Tokens occupying the model's context window when the provider measured
+	 * this observation. A point-in-time gauge, never additive: a newer report
+	 * replaces an older one regardless of `basis`.
+	 */
+	readonly context_tokens?: number;
+	/**
+	 * The provider-reported usable context window in tokens, when the wire
+	 * discloses one. Providers may already subtract reserved headroom, so this
+	 * is the denominator for `context_tokens`, not the raw model limit.
+	 */
+	readonly context_window_tokens?: number;
 	readonly input_tokens?: number;
 	readonly output_tokens?: number;
 	readonly turn_id?: string;
@@ -648,6 +661,8 @@ export interface EngineQuotaWindow {
  * @since 0.6.0
  */
 export interface EngineAccountUsage {
+	/** The provider account's email when the transport discloses one. */
+	readonly account_email?: string;
 	readonly authentication: EngineAuthReadiness;
 	readonly windows: ReadonlyArray<EngineQuotaWindow>;
 }

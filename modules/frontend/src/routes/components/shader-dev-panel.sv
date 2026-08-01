@@ -1,5 +1,6 @@
 <script lang="ts" effect>
 	import { Effect, Fiber, Queue } from "effect";
+	import { RunBrowserDom } from "$lib/browser/dom";
 	import { Button } from "$lib/components/ui/button";
 	import { NativeSelect, NativeSelectOption } from "$lib/components/ui/native-select";
 	import { ScrollArea } from "$lib/components/ui/scroll-area";
@@ -40,21 +41,27 @@
 		readonly wireframes: boolean;
 	};
 	const debug_options = yield* Queue.unbounded<DebugOptions>();
+	const debug_draws = yield* Queue.unbounded<void>();
 
-	const RemoveDebugOverlay = () => {
-		if (debug_overlay_frame !== undefined) {
-			cancelAnimationFrame(debug_overlay_frame);
-			debug_overlay_frame = undefined;
-		}
-		debug_overlay?.remove();
-		debug_overlay = undefined;
-	};
+	const RemoveDebugOverlay = () =>
+		Effect.gen(function* () {
+			yield* RunBrowserDom(() => {
+				if (debug_overlay_frame !== undefined) {
+					cancelAnimationFrame(debug_overlay_frame);
+					debug_overlay_frame = undefined;
+				}
+				debug_overlay?.remove();
+				debug_overlay = undefined;
+			});
+		});
 
-	const DrawDebugOverlay = () => {
+	const DrawDebugOverlay = () =>
+		Effect.gen(function* () {
+			yield* RunBrowserDom(() => {
 		if (!show_wireframes && !show_padding_guides) {
 			debug_overlay?.remove();
 			debug_overlay = undefined;
-			debug_overlay_frame = requestAnimationFrame(DrawDebugOverlay);
+			debug_overlay_frame = requestAnimationFrame(() => Queue.offerUnsafe(debug_draws, undefined));
 			return;
 		}
 
@@ -78,7 +85,7 @@
 		if (context === null) {
 			debug_overlay?.remove();
 			debug_overlay = undefined;
-			debug_overlay_frame = requestAnimationFrame(DrawDebugOverlay);
+			debug_overlay_frame = requestAnimationFrame(() => Queue.offerUnsafe(debug_draws, undefined));
 			return;
 		}
 
@@ -158,18 +165,31 @@
 			}
 		}
 
-		debug_overlay_frame = requestAnimationFrame(DrawDebugOverlay);
-	};
+			debug_overlay_frame = requestAnimationFrame(() => Queue.offerUnsafe(debug_draws, undefined));
+			});
+		});
 
-	const RunDebugOverlay = Effect.acquireRelease(
-		Effect.sync(() => {
-			debug_overlay_frame = requestAnimationFrame(DrawDebugOverlay);
+	yield* Effect.gen(function* () {
+		while (true) {
+			yield* Queue.take(debug_draws);
+			yield* DrawDebugOverlay();
+		}
+	}).pipe(Effect.forkScoped);
+
+	const RunDebugOverlay = Effect.gen(function* () {
+		yield* Effect.acquireRelease(
+			Effect.gen(function* () {
+				yield* RunBrowserDom(() => {
+					debug_overlay_frame = requestAnimationFrame(() => Queue.offerUnsafe(debug_draws, undefined));
+				});
 		}),
 		() =>
-			Effect.sync(() => {
-				RemoveDebugOverlay();
+			Effect.gen(function* () {
+				yield* RemoveDebugOverlay();
 			}),
-	).pipe(Effect.andThen(Effect.never));
+		);
+		yield* Effect.never;
+	});
 
 	yield* Effect.gen(function* () {
 		let overlay: Fiber.Fiber<never> | undefined;
@@ -179,9 +199,8 @@
 				yield* Fiber.interrupt(overlay);
 				overlay = undefined;
 			}
-			document.documentElement.classList.toggle(
-				"debug-text-box-trim",
-				options.text_box_trim,
+			yield* RunBrowserDom(() =>
+				document.documentElement.classList.toggle("debug-text-box-trim", options.text_box_trim),
 			);
 			if (options.padding_guides || options.wireframes) {
 				overlay = yield* RunDebugOverlay.pipe(Effect.forkScoped);
@@ -189,69 +208,91 @@
 		}
 	}).pipe(
 		Effect.ensuring(
-			Effect.sync(() => {
-				document.documentElement.classList.remove("debug-text-box-trim");
+			Effect.gen(function* () {
+				yield* RunBrowserDom(() => document.documentElement.classList.remove("debug-text-box-trim"));
 			}),
 		),
 		Effect.forkScoped,
 	);
 
-	const UpdateDebugOptions = (patch: Partial<DebugOptions>) => {
+	const UpdateDebugOptions = (patch: Partial<DebugOptions>) =>
+		Effect.gen(function* () {
 		show_padding_guides = patch.padding_guides ?? show_padding_guides;
 		show_text_box_trim = patch.text_box_trim ?? show_text_box_trim;
 		show_wireframes = patch.wireframes ?? show_wireframes;
-		Queue.offerUnsafe(debug_options, {
+		yield* Queue.offer(debug_options, {
 			padding_guides: show_padding_guides,
 			text_box_trim: show_text_box_trim,
 			wireframes: show_wireframes,
 		});
-	};
+		});
 
 	const set_number = (key: NumberKey, value: string) =>
-		update_shader_config({ [key]: Number(value) });
-	const set_color = (key: ColorKey, value: string) => {
+		Effect.gen(function* () {
+			update_shader_config({ [key]: Number(value) });
+		});
+	const set_color = (key: ColorKey, value: string) =>
+		Effect.gen(function* () {
 		const token = surface_tokens.find((candidate) => candidate === value);
 		if (token !== undefined) update_shader_config({ [key]: token });
-	};
+		});
 	const set_user_message_color = (
 		key: Exclude<keyof UserMessageStyleConfig, "use_card">,
 		value: string,
-	) => {
+	) =>
+		Effect.gen(function* () {
 		const token = surface_tokens.find((candidate) => candidate === value);
 		if (token !== undefined) update_user_message_style_config({ [key]: token });
-	};
+		});
 	const set_changed_files_color = (
 		key: Exclude<keyof ChangedFilesStyleConfig, "use_card">,
 		value: string,
-	) => {
+	) =>
+		Effect.gen(function* () {
 		const token = surface_tokens.find((candidate) => candidate === value);
 		if (token !== undefined) update_changed_files_style_config({ [key]: token });
-	};
-	const reset_controls = () => {
+		});
+	const reset_controls = () =>
+		Effect.gen(function* () {
 		reset_shader_config();
 		reset_user_message_style_config();
 		reset_changed_files_style_config();
 		show_padding_guides = false;
 		show_text_box_trim = false;
 		show_wireframes = false;
-		UpdateDebugOptions({
+		yield* UpdateDebugOptions({
 			padding_guides: false,
 			text_box_trim: false,
 			wireframes: false,
 		});
 		conversation_diagnostics_enabled.set(false);
-	};
+		});
+
+	const UpdateUserMessageCard = (use_card: boolean) =>
+		Effect.gen(function* () {
+			update_user_message_style_config({ use_card });
+		});
+
+	const UpdateChangedFilesCard = (use_card: boolean) =>
+		Effect.gen(function* () {
+			update_changed_files_style_config({ use_card });
+		});
+
+	const UpdateDiagnostics = (enabled: boolean) =>
+		Effect.gen(function* () {
+			conversation_diagnostics_enabled.set(enabled);
+		});
 
 </script>
 
-{#snippet color_control(label: string, key: ColorKey, value: SurfaceToken)}
+{#snippet color_control(label, key, value)}
 	<label class="grid grid-cols-[5.5rem_minmax(0,1fr)] items-center gap-2 text-xs">
 		<span class="text-muted-foreground">{label}</span>
 		<NativeSelect
 			size="sm"
 			class="w-full"
 			value={value}
-			onchange={(event) => set_color(key, event.currentTarget.value)}
+			onchange={yield* set_color(key, event.currentTarget.value)}
 			aria-label={label}
 		>
 			{#each surface_tokens as token}
@@ -261,14 +302,14 @@
 	</label>
 {/snippet}
 
-{#snippet changed_files_color_control(label: string, key: Exclude<keyof ChangedFilesStyleConfig, "use_card">, value: SurfaceToken)}
+{#snippet changed_files_color_control(label, key, value)}
 	<label class="grid grid-cols-[5.5rem_minmax(0,1fr)] items-center gap-2 text-xs">
 		<span class="text-muted-foreground">{label}</span>
 		<NativeSelect
 			size="sm"
 			class="w-full"
 			{value}
-			onchange={(event) => set_changed_files_color(key, event.currentTarget.value)}
+			onchange={yield* set_changed_files_color(key, event.currentTarget.value)}
 			aria-label={label}
 		>
 			{#each surface_tokens as token}
@@ -278,14 +319,14 @@
 	</label>
 {/snippet}
 
-{#snippet user_message_color_control(label: string, key: Exclude<keyof UserMessageStyleConfig, "use_card">, value: SurfaceToken)}
+{#snippet user_message_color_control(label, key, value)}
 	<label class="grid grid-cols-[5.5rem_minmax(0,1fr)] items-center gap-2 text-xs">
 		<span class="text-muted-foreground">{label}</span>
 		<NativeSelect
 			size="sm"
 			class="w-full"
 			{value}
-			onchange={(event) => set_user_message_color(key, event.currentTarget.value)}
+			onchange={yield* set_user_message_color(key, event.currentTarget.value)}
 			aria-label={label}
 		>
 			{#each surface_tokens as token}
@@ -295,7 +336,7 @@
 	</label>
 {/snippet}
 
-{#snippet number_control(label: string, key: NumberKey, value: number, min: number, max: number, step: number)}
+{#snippet number_control(label, key, value, min, max, step)}
 	<label class="grid gap-1.5 text-xs">
 		<span class="flex items-center justify-between gap-2">
 			<span class="text-muted-foreground">{label}</span>
@@ -307,7 +348,7 @@
 			{max}
 			{step}
 			value={value}
-			oninput={(event) => set_number(key, event.currentTarget.value)}
+			oninput={yield* set_number(key, event.currentTarget.value)}
 			class="shader-range w-full accent-foreground"
 		/>
 	</label>
@@ -319,7 +360,7 @@
 			<h2 class="text-sm font-medium">God Rays</h2>
 			<p class="text-xs text-muted-foreground">Development controls</p>
 		</div>
-		<Button variant="ghost" size="xs" onclick={reset_controls}>Reset</Button>
+		<Button variant="ghost" size="xs" onclick={yield* reset_controls()}>Reset</Button>
 	</div>
 
 	<ScrollArea class="min-h-0 flex-1 rounded-2xl bg-surface-950 card" scrollbarYClasses="w-1">
@@ -344,10 +385,7 @@
 					<input
 						type="checkbox"
 						checked={$user_message_style_config.use_card}
-						onchange={(event) =>
-							update_user_message_style_config({
-								use_card: event.currentTarget.checked,
-							})}
+						onchange={yield* UpdateUserMessageCard(event.currentTarget.checked)}
 						class="size-4 accent-foreground"
 					/>
 				</label>
@@ -362,10 +400,7 @@
 					<input
 						type="checkbox"
 						checked={$changed_files_style_config.use_card}
-						onchange={(event) =>
-							update_changed_files_style_config({
-								use_card: event.currentTarget.checked,
-							})}
+						onchange={yield* UpdateChangedFilesCard(event.currentTarget.checked)}
 						class="size-4 accent-foreground"
 					/>
 				</label>
@@ -378,8 +413,7 @@
 					<input
 						type="checkbox"
 						checked={$conversation_diagnostics_enabled}
-						onchange={(event) =>
-							conversation_diagnostics_enabled.set(event.currentTarget.checked)}
+						onchange={yield* UpdateDiagnostics(event.currentTarget.checked)}
 						class="size-4 accent-foreground"
 					/>
 				</label>
@@ -388,8 +422,7 @@
 					<input
 						type="checkbox"
 						checked={show_wireframes}
-						onchange={(event) =>
-							UpdateDebugOptions({ wireframes: event.currentTarget.checked })}
+						onchange={yield* UpdateDebugOptions({ wireframes: event.currentTarget.checked })}
 						class="size-4 accent-foreground"
 					/>
 				</label>
@@ -398,8 +431,7 @@
 					<input
 						type="checkbox"
 						checked={show_padding_guides}
-						onchange={(event) =>
-							UpdateDebugOptions({ padding_guides: event.currentTarget.checked })}
+						onchange={yield* UpdateDebugOptions({ padding_guides: event.currentTarget.checked })}
 						class="size-4 accent-foreground"
 					/>
 				</label>
@@ -408,8 +440,7 @@
 					<input
 						type="checkbox"
 						checked={show_text_box_trim}
-						onchange={(event) =>
-							UpdateDebugOptions({ text_box_trim: event.currentTarget.checked })}
+						onchange={yield* UpdateDebugOptions({ text_box_trim: event.currentTarget.checked })}
 						class="size-4 accent-foreground"
 					/>
 				</label>

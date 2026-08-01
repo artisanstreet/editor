@@ -1,6 +1,8 @@
-<script lang="ts">
+<script lang="ts" effect>
 	import type { ConversationItem } from "@artisan/protocol";
 	import BrandVisualStudio from "@tabler/icons-svelte/icons/brand-visual-studio";
+	import { Effect } from "effect";
+	import { WriteClipboardText } from "$lib/browser/clipboard";
 	import * as ContextMenu from "$lib/components/ui/context-menu";
 	import { format_compact_diff_count } from "$lib/conversation/diff-stat";
 	import { resolve_file_icon } from "$lib/conversation/file-icon";
@@ -34,12 +36,22 @@
 				};
 	};
 
-	const copy_path = (path: string) => {
-		void navigator.clipboard.writeText(path);
-	};
+	let copy_failed = $state(false);
+
+	const CopyPath = (path: string) =>
+		Effect.gen(function* () {
+			copy_failed = false;
+			yield* WriteClipboardText(path).pipe(
+				Effect.catchTag("ClipboardWriteError", () =>
+					Effect.gen(function* () {
+						copy_failed = true;
+					}),
+				),
+			);
+		});
 </script>
 
-{#snippet diff_stat(additions: number, deletions: number, label: string)}
+{#snippet diff_stat(additions, deletions, label)}
 	<span
 		role="group"
 		aria-label={label}
@@ -117,7 +129,7 @@
 								</ContextMenu.SubContent>
 							</ContextMenu.Sub>
 							<ContextMenu.Separator />
-							<ContextMenu.Item onclick={() => copy_path(file.path)}>
+							<ContextMenu.Item onclick={yield* CopyPath(file.path)}>
 								Copy path
 							</ContextMenu.Item>
 							<ContextMenu.Item>Copy file contents</ContextMenu.Item>
@@ -127,6 +139,9 @@
 				</li>
 			{/each}
 		</ul>
+	{/if}
+	{#if copy_failed}
+		<p class="text-sm text-destructive" role="status">Couldn't copy the path. Try again.</p>
 	{/if}
 </section>
 

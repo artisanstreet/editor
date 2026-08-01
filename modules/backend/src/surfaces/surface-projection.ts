@@ -114,8 +114,20 @@ export const PersistSurfaceProjection = (
 			if (observation.basis === "delta") return add(prior_value, next);
 			return next === undefined ? (prior_value ?? null) : null;
 		};
+		/** Context gauges are point-in-time snapshots: the newest report wins regardless of basis. */
+		const next_gauge = (prior_value: number | null | undefined, next: number | undefined) =>
+			next ?? prior_value ?? null;
 		const input_tokens = next_total(prior?.input_tokens, observation.input_tokens);
 		const output_tokens = next_total(prior?.output_tokens, observation.output_tokens);
+		const cached_input_tokens = next_total(
+			prior?.cached_input_tokens,
+			observation.cached_input_tokens,
+		);
+		const context_tokens = next_gauge(prior?.context_tokens, observation.context_tokens);
+		const context_window_tokens = next_gauge(
+			prior?.context_window_tokens,
+			observation.context_window_tokens,
+		);
 		yield* transaction
 			.insert(SurfaceUsageTotals)
 			.values({
@@ -124,11 +136,21 @@ export const PersistSurfaceProjection = (
 				assignment_id: input.assignment_id ?? null,
 				input_tokens,
 				output_tokens,
+				cached_input_tokens,
+				context_tokens,
+				context_window_tokens,
 				updated_at: input.occurred_at,
 			})
 			.onConflictDoUpdate({
 				target: SurfaceUsageTotals.run_id,
-				set: { input_tokens, output_tokens, updated_at: input.occurred_at },
+				set: {
+					input_tokens,
+					output_tokens,
+					cached_input_tokens,
+					context_tokens,
+					context_window_tokens,
+					updated_at: input.occurred_at,
+				},
 			});
 	}).pipe(
 		Effect.mapError(

@@ -3,7 +3,7 @@ import { MakeSnowflakeIdLive } from "@artisan/protocol";
 import { Effect, Exit, Layer, Scope } from "effect";
 import * as KeyValueStore from "effect/unstable/persistence/KeyValueStore";
 
-import { ResolveForgeEndpoint } from "./forge-endpoint";
+import { ForgeEndpointStoreLive, ResolveForgeEndpoint } from "./forge-endpoint";
 import {
 	BootstrapBrowserPairing,
 	MakeBrowserNavigationLive,
@@ -48,19 +48,22 @@ const ArtisanClientRuntimeLive = Layer.unwrap(
 							history: renderer_window.history,
 							location: renderer_window.location,
 						}),
-						BrowserPairingExchangeLive.pipe(
-							/**
-							 * The app-scheme renderer pairs cross-origin against the
-							 * adopted loopback Forge, so its session cookie only
-							 * exists when the exchange carries credentials. On a
-							 * same-origin page this is identical to the default.
-							 */
-							Layer.provide(
-								BrowserHttpClient.layerFetch.pipe(
-									Layer.provide(
-										Layer.succeed(BrowserHttpClient.RequestInit, {
-											credentials: "include",
-										}),
+						Layer.merge(
+							ForgeEndpointStoreLive,
+							BrowserPairingExchangeLive.pipe(
+								/**
+								 * The app-scheme renderer pairs cross-origin against the
+								 * adopted loopback Forge, so its session cookie only
+								 * exists when the exchange carries credentials. On a
+								 * same-origin page this is identical to the default.
+								 */
+								Layer.provide(
+									BrowserHttpClient.layerFetch.pipe(
+										Layer.provide(
+											Layer.succeed(BrowserHttpClient.RequestInit, {
+												credentials: "include",
+											}),
+										),
 									),
 								),
 							),
@@ -77,7 +80,9 @@ const ArtisanClientRuntimeLive = Layer.unwrap(
 				};
 			}
 		).env;
-		const forge_endpoint = ResolveForgeEndpoint();
+		const forge_endpoint = yield* ResolveForgeEndpoint.pipe(
+			Effect.provide(ForgeEndpointStoreLive),
+		);
 		const target = ResolveWebSocketRuntimeTarget({
 			...(environment?.VITE_ARTISAN_FORGE_WS_URL === undefined
 				? {}
@@ -102,7 +107,16 @@ const SnowflakeIdRuntimeLive = MakeSnowflakeIdLive(3).pipe(Layer.orDie);
  */
 export const FrontendComponentScopeLive = Layer.effect(
 	Scope.Scope,
-	Effect.acquireRelease(Scope.make(), (scope) => Scope.close(scope, Exit.void)),
+	Effect.gen(function* () {
+		const AcquireComponentScope = Effect.gen(function* () {
+			return yield* Scope.make();
+		});
+		return yield* Effect.acquireRelease(AcquireComponentScope, (scope) =>
+			Effect.gen(function* () {
+				yield* Scope.close(scope, Exit.void);
+			}),
+		);
+	}),
 );
 
 /** Production runtime composition. Fixture clients are never included here. */
@@ -111,4 +125,5 @@ export const FrontendRuntimeLive = Layer.mergeAll(
 	ArtisanClientRuntimeLive,
 	SnowflakeIdRuntimeLive,
 	FrontendComponentScopeLive,
+	ForgeEndpointStoreLive,
 );

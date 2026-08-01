@@ -282,6 +282,12 @@ export const GatewayDefinition = Schema.Struct({
 export type GatewayDefinition = typeof GatewayDefinition.Type;
 
 export const HarnessDefinition = Schema.Struct({
+	/**
+	 * The catalog model that writes handoff compaction summaries for threads on
+	 * this harness when no explicit compaction model is configured: fast and
+	 * cheap, because the summary format is fixed and the transcript is bounded.
+	 */
+	compaction_default_model_id: Schema.optional(Schema.String),
 	id: HarnessId,
 	gateways: Schema.Array(GatewayDefinition),
 	label: Schema.String,

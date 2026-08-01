@@ -1,4 +1,4 @@
-import { Cause, Context, Effect, Exit, Layer, Option, Ref, Scope } from "effect";
+import { Cause, Context, Data, Effect, Exit, Layer, Option, Ref, Scope } from "effect";
 
 import type {
 	EditorAdapter,
@@ -42,6 +42,12 @@ export type EditorSaveOutcome =
 export interface EditorAttachOptions {
 	readonly on_change?: () => void;
 }
+
+/** A browser editor adapter rejected one narrowly bounded host operation. */
+export class EditorAdapterFailure extends Data.TaggedError("EditorAdapterFailure")<{
+	readonly cause: unknown;
+	readonly message: string;
+}> {}
 
 export interface EditorSessionState {
 	readonly active_file_key: Option.Option<string>;
@@ -92,22 +98,30 @@ export const EditorUriForFile = (file: Pick<EditorWorkspaceFile, "id" | "path" |
 export class EditorService extends Context.Service<
 	EditorService,
 	{
-		readonly Activate: (file: EditorWorkspaceFile) => Effect.Effect<EditorActivateOutcome>;
-		readonly Attach: (host: object, options?: EditorAttachOptions) => Effect.Effect<void>;
-		readonly Close: (file: EditorFileReference) => Effect.Effect<void>;
-		readonly Current: Effect.Effect<EditorSessionState>;
-		readonly Detach: Effect.Effect<void>;
-		readonly Dispose: Effect.Effect<void>;
+		readonly Activate: (
+			file: EditorWorkspaceFile,
+		) => Effect.Effect<EditorActivateOutcome, EditorAdapterFailure>;
+		readonly Attach: (
+			host: object,
+			options?: EditorAttachOptions,
+		) => Effect.Effect<void, EditorAdapterFailure>;
+		readonly Close: (file: EditorFileReference) => Effect.Effect<void, EditorAdapterFailure>;
+		readonly Current: Effect.Effect<EditorSessionState, EditorAdapterFailure>;
+		readonly Detach: Effect.Effect<void, EditorAdapterFailure>;
+		readonly Dispose: Effect.Effect<void, EditorAdapterFailure>;
 		readonly Mark: (
 			file: EditorFileReference,
 			diagnostics: ReadonlyArray<EditorDiagnostic>,
-		) => Effect.Effect<void>;
+		) => Effect.Effect<void, EditorAdapterFailure>;
 		readonly Save: (
 			file: EditorFileReference,
 			expected_revision: string,
 			persist: (input: EditorWorkspaceFile) => Effect.Effect<EditorSaveOutcome>,
-		) => Effect.Effect<EditorSaveOutcome>;
-		readonly Update: (file: EditorFileReference, content: string) => Effect.Effect<void>;
+		) => Effect.Effect<EditorSaveOutcome, EditorAdapterFailure>;
+		readonly Update: (
+			file: EditorFileReference,
+			content: string,
+		) => Effect.Effect<void, EditorAdapterFailure>;
 	}
 >()("Artisan/EditorService") {}
 
@@ -117,6 +131,21 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 		Effect.gen(function* () {
 			const scope = yield* Scope.Scope;
 			const state = yield* Ref.make<InternalState>(EmptyState);
+			/** Every mutable adapter boundary is lazy, yielded, and tagged. */
+			const RunAdapter = <Value>(operation: () => Value) =>
+				Effect.gen(function* () {
+					return yield* Effect.try({
+						catch: (cause) =>
+							new EditorAdapterFailure({
+								cause,
+								message:
+									cause instanceof Error
+										? cause.message
+										: "Editor adapter operation failed.",
+							}),
+						try: operation,
+					});
+				});
 
 			/**
 			 * Adapter disposal callbacks are external browser code. Attempt every
@@ -124,37 +153,51 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 			 * one strand later documents or surfaces.
 			 */
 			const ReleaseAll = (
-				releases: ReadonlyArray<Effect.Effect<void>>,
-			): Effect.Effect<void> =>
-				Effect.forEach(releases, Effect.exit).pipe(
-					Effect.flatMap((exits) => {
-						const [first_failure, ...remaining_failures] = exits.filter(Exit.isFailure);
-						if (first_failure === undefined) return Effect.void;
-						return Effect.failCause(
-							remaining_failures.reduce(
-								(cause, exit) => Cause.combine(cause, exit.cause),
-								first_failure.cause,
-							),
-						);
-					}),
-				);
+				releases: ReadonlyArray<Effect.Effect<void, EditorAdapterFailure>>,
+			): Effect.Effect<void, EditorAdapterFailure> =>
+				Effect.gen(function* () {
+					const exits = yield* Effect.forEach(releases, (release) =>
+						Effect.gen(function* () {
+							return yield* Effect.exit(release);
+						}),
+					);
+					const [first_failure, ...remaining_failures] = exits.filter(Exit.isFailure);
+					if (first_failure === undefined) return;
+					return yield* Effect.failCause(
+						remaining_failures.reduce(
+							(cause, exit) => Cause.combine(cause, exit.cause),
+							first_failure.cause,
+						),
+					);
+				});
 
 			const ReleaseDocument = (managed: OpenDocument) =>
-				ReleaseAll([
-					Effect.sync(() => adapter.set_markers(managed.document, "artisan", [])),
-					Effect.sync(() => managed.document.dispose()),
+				Effect.gen(function* () {
+					yield* ReleaseAll([
+						RunAdapter(() => adapter.set_markers(managed.document, "artisan", [])),
+						RunAdapter(() => managed.document.dispose()),
+					]);
+				});
+
+			const SaveViewState = (surface: EditorSurface) =>
+				Effect.gen(function* () {
+					return yield* RunAdapter(() => surface.save_view_state());
+				});
+
+			const Dispose = Effect.gen(function* () {
+				const current = yield* Ref.modify(
+					state,
+					(current) => [current, EmptyState] as const,
+				);
+				yield* ReleaseAll([
+					RunAdapter(() => Option.getOrUndefined(current.surface)?.dispose()).pipe(
+						Effect.asVoid,
+					),
+					...Array.from(current.documents.values(), ReleaseDocument),
 				]);
+			});
 
-			const Dispose = Ref.modify(state, (current) => [current, EmptyState] as const).pipe(
-				Effect.flatMap((current) =>
-					ReleaseAll([
-						Effect.sync(() => Option.getOrUndefined(current.surface)?.dispose()),
-						...Array.from(current.documents.values(), ReleaseDocument),
-					]),
-				),
-			);
-
-			yield* Scope.addFinalizer(scope, Effect.ignore(Dispose));
+			yield* Scope.addFinalizer(scope, Dispose.pipe(Effect.ignore));
 
 			const Attach = (host: object, options?: EditorAttachOptions) =>
 				Effect.gen(function* () {
@@ -162,9 +205,11 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 					const active_key = Option.getOrUndefined(current.active_file_key);
 					const active =
 						active_key === undefined ? undefined : current.documents.get(active_key);
-					const view_state = yield* Effect.sync(() =>
-						Option.getOrUndefined(current.surface)?.save_view_state(),
-					);
+					const previous_surface = Option.getOrUndefined(current.surface);
+					const view_state =
+						previous_surface === undefined
+							? undefined
+							: yield* SaveViewState(previous_surface);
 					const documents = new Map(current.documents);
 					if (
 						active_key !== undefined &&
@@ -176,12 +221,10 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 							view_state: Option.some(view_state),
 						});
 					}
-					yield* Effect.sync(() => Option.getOrUndefined(current.surface)?.dispose());
+					yield* RunAdapter(() => previous_surface?.dispose()).pipe(Effect.asVoid);
 					yield* Ref.set(state, { ...current, surface: Option.none(), documents });
-					const surface = yield* Effect.sync(() =>
-						adapter.create_surface(host, {
-							on_change: () => options?.on_change?.(),
-						}),
+					const surface = yield* RunAdapter(() =>
+						adapter.create_surface(host, { on_change: () => options?.on_change?.() }),
 					);
 					const latest = yield* Ref.get(state);
 					const latest_active_key = Option.getOrUndefined(latest.active_file_key);
@@ -189,15 +232,13 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 						latest_active_key === undefined
 							? undefined
 							: latest.documents.get(latest_active_key);
-					yield* Effect.sync(() => {
-						surface.set_document(latest_active?.document);
-						const latest_view_state =
-							latest_active === undefined
-								? undefined
-								: Option.getOrUndefined(latest_active.view_state);
-						if (latest_view_state !== undefined)
-							surface.restore_view_state(latest_view_state);
-					});
+					yield* RunAdapter(() => surface.set_document(latest_active?.document));
+					const latest_view_state =
+						latest_active === undefined
+							? undefined
+							: Option.getOrUndefined(latest_active.view_state);
+					if (latest_view_state !== undefined)
+						yield* RunAdapter(() => surface.restore_view_state(latest_view_state));
 					yield* Ref.set(state, { ...latest, surface: Option.some(surface) });
 				});
 
@@ -208,14 +249,12 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 				const active_key = Option.getOrUndefined(current.active_file_key);
 				const active =
 					active_key === undefined ? undefined : current.documents.get(active_key);
-				const view_state = yield* Effect.sync(() => surface.save_view_state()).pipe(
-					Effect.catchCause(() => Effect.succeed(undefined)),
-				);
+				const view_state = yield* SaveViewState(surface);
 				const documents = new Map(current.documents);
 				if (active_key !== undefined && active !== undefined && view_state !== undefined)
 					documents.set(active_key, { ...active, view_state: Option.some(view_state) });
 				yield* Ref.set(state, { ...current, surface: Option.none(), documents });
-				yield* Effect.sync(() => surface.dispose());
+				yield* RunAdapter(() => surface.dispose());
 			});
 
 			const Activate = (file: EditorWorkspaceFile) =>
@@ -226,7 +265,8 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 					const documents = new Map(current.documents);
 					const is_dirty =
 						existing !== undefined &&
-						existing.document.get_value() !== existing.file.content;
+						(yield* RunAdapter(() => existing.document.get_value())) !==
+							existing.file.content;
 					const outcome: EditorActivateOutcome =
 						existing !== undefined &&
 						existing.file.revision !== file.revision &&
@@ -237,35 +277,34 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 									incoming_file: file,
 								}
 							: { _tag: "Activated", file };
-					const managed =
-						existing === undefined
-							? {
-									diagnostics: [] as ReadonlyArray<EditorDiagnostic>,
-									file,
-									document: yield* Effect.sync(() =>
-										adapter.create_document({
-											language: EditorLanguageForPath(
-												file.path,
-												file.language,
-											),
-											uri: EditorUriForFile(file),
-											value: file.content,
-										}),
-									),
-									view_state: Option.none<EditorViewState>(),
-								}
-							: existing.file.revision === file.revision || is_dirty
-								? existing
-								: yield* Effect.sync(() => {
-										existing.document.set_value(file.content);
-										adapter.set_markers(existing.document, "artisan", []);
-										return {
-											diagnostics: [] as ReadonlyArray<EditorDiagnostic>,
-											file,
-											document: existing.document,
-											view_state: Option.none<EditorViewState>(),
-										};
-									});
+					let managed: OpenDocument;
+					if (existing === undefined) {
+						managed = {
+							diagnostics: [] as ReadonlyArray<EditorDiagnostic>,
+							file,
+							document: yield* RunAdapter(() =>
+								adapter.create_document({
+									language: EditorLanguageForPath(file.path, file.language),
+									uri: EditorUriForFile(file),
+									value: file.content,
+								}),
+							),
+							view_state: Option.none<EditorViewState>(),
+						};
+					} else if (existing.file.revision === file.revision || is_dirty) {
+						managed = existing;
+					} else {
+						yield* RunAdapter(() => existing.document.set_value(file.content));
+						yield* RunAdapter(() =>
+							adapter.set_markers(existing.document, "artisan", []),
+						);
+						managed = {
+							diagnostics: [] as ReadonlyArray<EditorDiagnostic>,
+							file,
+							document: existing.document,
+							view_state: Option.none<EditorViewState>(),
+						};
+					}
 					if (existing === undefined && adapter.install_language !== undefined) {
 						yield* adapter
 							.install_language(managed.document)
@@ -277,7 +316,7 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 						const previous = Option.getOrUndefined(current.active_file_key);
 						if (previous !== undefined && previous !== file_key) {
 							const previous_managed = current.documents.get(previous);
-							const view_state = surface.save_view_state();
+							const view_state = yield* SaveViewState(surface);
 							if (previous_managed !== undefined && view_state !== undefined) {
 								documents.set(previous, {
 									...previous_managed,
@@ -285,10 +324,10 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 								});
 							}
 						}
-						surface.set_document(managed.document);
+						yield* RunAdapter(() => surface.set_document(managed.document));
 						const view_state = Option.getOrUndefined(managed.view_state);
 						if (view_state !== undefined) {
-							surface.restore_view_state(view_state);
+							yield* RunAdapter(() => surface.restore_view_state(view_state));
 						}
 					}
 
@@ -306,7 +345,7 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 					const current = yield* Ref.get(state);
 					const managed = current.documents.get(EditorFileKeyForFile(file));
 					if (managed === undefined) return;
-					yield* Effect.sync(() => managed.document.set_value(content));
+					yield* RunAdapter(() => managed.document.set_value(content));
 				});
 
 			const Mark = (
@@ -318,7 +357,7 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 					const file_key = EditorFileKeyForFile(file);
 					const managed = current.documents.get(file_key);
 					if (managed === undefined) return;
-					yield* Effect.sync(() =>
+					yield* RunAdapter(() =>
 						adapter.set_markers(managed.document, "artisan", diagnostics),
 					);
 					const documents = new Map(current.documents);
@@ -352,7 +391,7 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 
 					const persisted_file = {
 						...managed.file,
-						content: managed.document.get_value(),
+						content: yield* RunAdapter(() => managed.document.get_value()),
 					};
 					const outcome = yield* persist(persisted_file);
 					if (outcome._tag === "Saved" || outcome._tag === "Unchanged") {
@@ -400,26 +439,39 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 					if (closed === undefined) return;
 					yield* ReleaseAll([
 						...(closed.is_active
-							? [Effect.sync(() => closed.surface?.set_document(undefined))]
+							? [
+									RunAdapter(() => closed.surface?.set_document(undefined)).pipe(
+										Effect.asVoid,
+									),
+								]
 							: []),
 						ReleaseDocument(closed.open_document),
 					]);
 				});
 
-			const Current = Ref.get(state).pipe(
-				Effect.map((current) => ({
+			const Current = Effect.gen(function* () {
+				const current = yield* Ref.get(state);
+				const document_states = yield* Effect.forEach(
+					[...current.documents.entries()],
+					([file_key, managed]) =>
+						Effect.gen(function* () {
+							return [
+								file_key,
+								(yield* RunAdapter(() => managed.document.get_value())) !==
+									managed.file.content,
+							] as const;
+						}),
+				);
+				return {
 					active_file_key: current.active_file_key,
 					dirty_file_keys: new Set(
-						[...current.documents.entries()]
-							.filter(
-								([, managed]) =>
-									managed.document.get_value() !== managed.file.content,
-							)
-							.map(([file_id]) => file_id),
+						document_states
+							.filter(([, is_dirty]) => is_dirty)
+							.map(([file_key]) => file_key),
 					),
 					open_file_keys: new Set(current.documents.keys()),
-				})),
-			);
+				};
+			});
 
 			return EditorService.of({
 				Activate,

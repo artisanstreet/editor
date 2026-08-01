@@ -6,7 +6,9 @@ class AuthoritativeSubscriptionLost extends Data.TaggedError("AuthoritativeSubsc
 
 const AuthoritativeSubscriptionRetrySchedule = Schedule.exponential("100 millis").pipe(
 	Schedule.modifyDelay(({ duration }) =>
-		Effect.succeed(Duration.min(duration, Duration.seconds(5))),
+		Effect.gen(function* () {
+			return Duration.min(duration, Duration.seconds(5));
+		}),
 	),
 );
 
@@ -21,27 +23,35 @@ export const RunAuthoritativeSubscription = <Update, SubscribeError, StreamError
 	subscribe: Effect.Effect<Stream.Stream<Update, StreamError>, SubscribeError, Scope.Scope>,
 	on_update: (update: Update) => Effect.Effect<void>,
 	on_recover: Effect.Effect<void>,
-) => {
-	const Attempt = Effect.scoped(
-		subscribe.pipe(
-			Effect.flatMap((updates) =>
-				Stream.runForEach(updates, on_update).pipe(
-					Effect.flatMap(() =>
-						Effect.fail(
-							new AuthoritativeSubscriptionLost({
-								message: "Authoritative subscription ended unexpectedly.",
+) =>
+	Effect.gen(function* () {
+		const Attempt = Effect.gen(function* () {
+			yield* Effect.scoped(
+				Effect.gen(function* () {
+					const updates = yield* subscribe;
+					yield* Stream.runForEach(updates, on_update);
+					return yield* Effect.fail(
+						new AuthoritativeSubscriptionLost({
+							message: "Authoritative subscription ended unexpectedly.",
+						}),
+					);
+				}),
+			);
+		}).pipe(
+			Effect.tapError(() =>
+				Effect.gen(function* () {
+					yield* on_recover.pipe(
+						Effect.catch(() =>
+							Effect.gen(function* () {
+								return;
 							}),
 						),
-					),
-				),
+					);
+				}),
 			),
-		),
-	).pipe(Effect.tapError(() => on_recover.pipe(Effect.catch(() => Effect.void))));
+		);
 
-	return Attempt.pipe(
-		Effect.retry({ schedule: AuthoritativeSubscriptionRetrySchedule }),
-		Effect.asVoid,
-	);
-};
+		yield* Attempt.pipe(Effect.retry({ schedule: AuthoritativeSubscriptionRetrySchedule }));
+	});
 
 export const RunConversationSubscription = RunAuthoritativeSubscription;

@@ -33,6 +33,43 @@ const NormalizeSurfaceFailure = (error: unknown, operation: string) =>
 		? error
 		: new SurfaceInvariantFailed({ message: `${operation} failed` });
 
+/**
+ * Folds decoded usage rows into one aggregate payload. Token counts sum
+ * across the scope's runs and stay unknown when any run's count is unknown;
+ * the context gauges carry over from the most recently updated run because a
+ * context window belongs to one live session and summing several is
+ * meaningless.
+ */
+const aggregate_usage_fields = (
+	scope: "run" | "assignment" | "group",
+	scope_id: string,
+	usage: ReadonlyArray<SurfaceUsage>,
+) => {
+	const sum = (values: ReadonlyArray<number | undefined>) =>
+		values.length === 0 || values.some((value) => value === undefined)
+			? undefined
+			: (values as ReadonlyArray<number>).reduce((left, right) => left + right, 0);
+	const latest = usage.reduce<SurfaceUsage | undefined>(
+		(newest, row) =>
+			newest === undefined || newest.updated_at <= row.updated_at ? row : newest,
+		undefined,
+	);
+	const input_tokens = sum(usage.map((row) => row.input_tokens));
+	const output_tokens = sum(usage.map((row) => row.output_tokens));
+	const cached_input_tokens = sum(usage.map((row) => row.cached_input_tokens));
+	return {
+		scope,
+		scope_id,
+		...(input_tokens === undefined ? {} : { input_tokens }),
+		...(output_tokens === undefined ? {} : { output_tokens }),
+		...(cached_input_tokens === undefined ? {} : { cached_input_tokens }),
+		...(latest?.context_tokens === undefined ? {} : { context_tokens: latest.context_tokens }),
+		...(latest?.context_window_tokens === undefined
+			? {}
+			: { context_window_tokens: latest.context_window_tokens }),
+	};
+};
+
 export const SurfaceServiceLive = Layer.effect(
 	SurfaceService,
 	Effect.gen(function* () {
@@ -90,6 +127,13 @@ export const SurfaceServiceLive = Layer.effect(
 				...(row.assignment_id ? { assignment_id: row.assignment_id } : {}),
 				...(row.input_tokens === null ? {} : { input_tokens: row.input_tokens }),
 				...(row.output_tokens === null ? {} : { output_tokens: row.output_tokens }),
+				...(row.cached_input_tokens === null
+					? {}
+					: { cached_input_tokens: row.cached_input_tokens }),
+				...(row.context_tokens === null ? {} : { context_tokens: row.context_tokens }),
+				...(row.context_window_tokens === null
+					? {}
+					: { context_window_tokens: row.context_window_tokens }),
 				updated_at: row.updated_at,
 			}).pipe(
 				Effect.mapError(
@@ -157,25 +201,9 @@ export const SurfaceServiceLive = Layer.effect(
 				)
 				.pipe(
 					Effect.flatMap((rows) => Effect.forEach(rows, DecodeSurfaceUsage)),
-					Effect.map((usage) => {
-						const sum = (values: ReadonlyArray<number | undefined>) => {
-							return values.length === 0 ||
-								values.some((value) => value === undefined)
-								? undefined
-								: (values as ReadonlyArray<number>).reduce(
-										(left, right) => left + right,
-										0,
-									);
-						};
-						const input_tokens = sum(usage.map((row) => row.input_tokens));
-						const output_tokens = sum(usage.map((row) => row.output_tokens));
-						return {
-							scope: input.scope,
-							scope_id: input.scope_id,
-							...(input_tokens === undefined ? {} : { input_tokens }),
-							...(output_tokens === undefined ? {} : { output_tokens }),
-						};
-					}),
+					Effect.map((usage) =>
+						aggregate_usage_fields(input.scope, input.scope_id, usage),
+					),
 					Effect.flatMap(Schema.decodeUnknownEffect(SurfaceUsageAggregate)),
 					Effect.mapError((error) =>
 						error instanceof SurfaceInvariantFailed
@@ -202,23 +230,9 @@ export const SurfaceServiceLive = Layer.effect(
 									: eq(SurfaceUsageTotals.group_id, input.scope_id),
 						);
 					const usage = yield* Effect.forEach(rows, DecodeSurfaceUsage);
-					const sum = (values: ReadonlyArray<number | undefined>) =>
-						values.length === 0 || values.some((value) => value === undefined)
-							? undefined
-							: (values as ReadonlyArray<number>).reduce(
-									(left, right) => left + right,
-									0,
-								);
-					const aggregate = yield* Schema.decodeUnknownEffect(SurfaceUsageAggregate)({
-						scope: input.scope,
-						scope_id: input.scope_id,
-						...(sum(usage.map((row) => row.input_tokens)) === undefined
-							? {}
-							: { input_tokens: sum(usage.map((row) => row.input_tokens)) }),
-						...(sum(usage.map((row) => row.output_tokens)) === undefined
-							? {}
-							: { output_tokens: sum(usage.map((row) => row.output_tokens)) }),
-					}).pipe(
+					const aggregate = yield* Schema.decodeUnknownEffect(SurfaceUsageAggregate)(
+						aggregate_usage_fields(input.scope, input.scope_id, usage),
+					).pipe(
 						Effect.mapError(
 							() =>
 								new SurfaceInvariantFailed({

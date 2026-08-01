@@ -181,6 +181,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 
 			const query_api = yield* MakeClientApi(MakeQueryApi, connection, requests, runtime);
 			const {
+				create_project_directory,
 				create_thread,
 				detach_project,
 				get_engine_usage,
@@ -287,6 +288,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				DetachProject: detach_project,
 				ListProjectDirectories: list_project_directories,
 				SelectProjectDirectory: select_project_directory,
+				CreateProjectDirectory: create_project_directory,
 				ListPreviewTargets: preview_api.list_preview_targets,
 				ListRoutines: routine_api.list_routines,
 				ListCapabilities: capability_api.list_capabilities,

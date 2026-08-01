@@ -5,6 +5,7 @@ import {
 	OutboundControlEnvelope,
 	type ProjectDetachEnvelope,
 	type ProjectDiffQueryEnvelope,
+	type ProjectDirectoryCreateEnvelope,
 	type ProjectDirectoryListQueryEnvelope,
 	type ProjectDirectorySelectEnvelope,
 	type ProjectListQueryEnvelope,
@@ -24,6 +25,7 @@ import type { ReadyState } from "../../connection-state";
 export type ProjectQueryEnvelope =
 	| ProjectDetachEnvelope
 	| ProjectDiffQueryEnvelope
+	| ProjectDirectoryCreateEnvelope
 	| ProjectDirectoryListQueryEnvelope
 	| ProjectDirectorySelectEnvelope
 	| ProjectListQueryEnvelope
@@ -121,6 +123,21 @@ export const MakeProjectQueryHandler = Effect.gen(function* () {
 						current,
 						"project_directory.invalid",
 						"The selected server directory is unavailable.",
+						false,
+					),
+				),
+			),
+		"project.directory.create": (query: ProjectDirectoryCreateEnvelope, current: ReadyState) =>
+			directories.Create(query.payload).pipe(
+				Effect.flatMap((payload) =>
+					Respond(query, { kind: "project.directory.create.result", payload }),
+				),
+				Effect.catchCause(() =>
+					Recover(
+						query,
+						current,
+						"project_directory.create_failed",
+						"The folder could not be created there.",
 						false,
 					),
 				),
@@ -282,6 +299,8 @@ export const MakeProjectQueryHandler = Effect.gen(function* () {
 				return handlers["project.directory.list.query"](query, current);
 			case "project.directory.select":
 				return handlers["project.directory.select"](query, current);
+			case "project.directory.create":
+				return handlers["project.directory.create"](query, current);
 			case "project.list.query":
 				return handlers["project.list.query"](query, current);
 			case "project.repository.query":

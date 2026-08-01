@@ -1,10 +1,12 @@
 <script lang="ts" effect>
 	import type { ConversationItem } from "@artisan/protocol";
 	import ChevronRight from "@tabler/icons-svelte/icons/chevron-right";
-	import { Effect, Fiber, Queue } from "effect";
+	import { Effect } from "effect";
 	import { untrack } from "svelte";
 	import type { Snippet } from "svelte";
 	import { thinking_word_for } from "$lib/conversation/activity-status";
+	import { MakeScopedAttachmentRunner } from "$lib/lifecycle/scoped-attachment-runner";
+	import { RunBrowserDom } from "$lib/browser/dom";
 	import { ShimmerText } from "$lib/components/ui/shimmer-text";
 	import ConversationStatus from "./conversation-status.sv";
 
@@ -37,10 +39,8 @@
 	/** The settled label's measured width — where the divider starts its growth. */
 	let label_width = $state(0);
 	type DetailObservation =
-		| { readonly _tag: "Observe"; readonly element: HTMLDivElement; readonly id: number }
-		| { readonly _tag: "Release"; readonly id: number };
-	const detail_observations = yield* Queue.unbounded<DetailObservation>();
-	let next_observation_id = 0;
+		| { readonly _tag: "Observe"; readonly element: HTMLDivElement; readonly refresh_key: string }
+		| { readonly _tag: "Refresh"; readonly element: HTMLDivElement };
 
 	const FormatDuration = (started_at: string, ended_at: string) => {
 		const total_seconds = Math.max(
@@ -87,58 +87,72 @@
 	 * A failure observed live opens once. After the user touches disclosure,
 	 * later projection refreshes must not fight their explicit choice.
 	 */
-	$effect(() => {
-		const status = item.status;
+	const ReconcileStatus = (status: typeof item.status) =>
+		Effect.gen(function* () {
 		const became_unsuccessful =
 			previous_status === "running" && (status === "failed" || status === "cancelled");
 		if (became_unsuccessful && !user_chose_disclosure) open = true;
 		previous_status = status;
-	});
+		});
+	yield* ReconcileStatus(item.status);
 
-	const ObserveDetails = (element: HTMLDivElement) =>
-		Effect.acquireRelease(
-			Effect.sync(() => {
-				const update_visible_details = () => {
-					has_visible_details = element.childElementCount > 0;
-					has_live_status_detail =
-						element.querySelector('[data-live-work-detail="true"]') !== null;
-				};
-				const observer = new MutationObserver(update_visible_details);
-				observer.observe(element, { childList: true, subtree: true });
-				update_visible_details();
+	const RefreshDetails = (element: HTMLDivElement) =>
+		Effect.gen(function* () {
+			const details = yield* RunBrowserDom(() => ({
+				has_live_status_detail: element.querySelector('[data-live-work-detail="true"]') !== null,
+				has_visible_details: element.childElementCount > 0,
+			}));
+			has_visible_details = details.has_visible_details;
+			has_live_status_detail = details.has_live_status_detail;
+		});
+
+	const ObserveDetails = (element: HTMLDivElement, refresh_key: string) =>
+		Effect.gen(function* () {
+			return yield* Effect.acquireRelease(
+			Effect.gen(function* () {
+				const observer = yield* RunBrowserDom(() => {
+					const observer = new MutationObserver(() => detail_runner.ReplaceUnsafe(refresh_key, { _tag: "Refresh", element }));
+					observer.observe(element, { childList: true, subtree: true });
+					return observer;
+				});
+				detail_runner.ReplaceUnsafe(refresh_key, { _tag: "Refresh", element });
 				return observer;
 			}),
 			(observer) =>
-				Effect.sync(() => {
-					observer.disconnect();
+				Effect.gen(function* () {
+					yield* RunBrowserDom(() => observer.disconnect());
 					has_visible_details = false;
 					has_live_status_detail = false;
 				}),
-		).pipe(Effect.andThen(Effect.never));
+			);
+		});
 
-	yield* Effect.gen(function* () {
-		const observations = new Map<number, Fiber.Fiber<never>>();
-		while (true) {
-			const command = yield* Queue.take(detail_observations);
-			if (command._tag === "Observe") {
-				const fiber = yield* ObserveDetails(command.element).pipe(Effect.forkScoped);
-				observations.set(command.id, fiber);
-				continue;
+	const RunDetailObservation = (observation: DetailObservation) =>
+		Effect.gen(function* () {
+			if (observation._tag === "Refresh") {
+				yield* RefreshDetails(observation.element);
+				return;
 			}
-			const fiber = observations.get(command.id);
-			if (fiber !== undefined) {
-				observations.delete(command.id);
-				yield* Fiber.interrupt(fiber);
-			}
-		}
-	}).pipe(Effect.forkScoped);
+			yield* ObserveDetails(observation.element, observation.refresh_key);
+			yield* Effect.never;
+		});
+
+	const detail_runner = yield* MakeScopedAttachmentRunner(RunDetailObservation);
 
 	/** Snippets are opaque; observe their rendered trace rather than treating their presence as content. */
 	const observe_details = (element: HTMLDivElement) => {
-		const id = next_observation_id++;
-		Queue.offerUnsafe(detail_observations, { _tag: "Observe", element, id });
-		return () => Queue.offerUnsafe(detail_observations, { _tag: "Release", id });
+		return detail_runner.Attachment({
+			_tag: "Observe",
+			element,
+			refresh_key: `details-refresh:${crypto.randomUUID()}`,
+		});
 	};
+
+	const ToggleDisclosure = () =>
+		Effect.gen(function* () {
+			user_chose_disclosure = true;
+			open = !open;
+		});
 </script>
 
 <section
@@ -167,10 +181,7 @@
 				class="t-acc-head flex min-w-0 cursor-pointer items-center gap-1 text-left"
 				type="button"
 				aria-expanded={open}
-				onclick={() => {
-					user_chose_disclosure = true;
-					open = !open;
-				}}
+				onclick={yield* ToggleDisclosure()}
 			>
 				<span
 					class={`inline-block ${is_failed ? "text-destructive" : ""}`}

@@ -42,15 +42,17 @@ export interface SubmitGate {
 	readonly Release: Effect.Effect<void>;
 }
 
-export const MakeSubmitGate = Ref.make(false).pipe(
-	Effect.map(
-		(state) =>
-			({
-				Acquire: Ref.modify(state, (locked) => [!locked, true] as const),
-				Release: Ref.set(state, false),
-			}) satisfies SubmitGate,
-	),
-);
+export const MakeSubmitGate = Effect.gen(function* () {
+	const state = yield* Ref.make(false);
+	return {
+		Acquire: Effect.gen(function* () {
+			return yield* Ref.modify(state, (locked) => [!locked, true] as const);
+		}),
+		Release: Effect.gen(function* () {
+			yield* Ref.set(state, false);
+		}),
+	} satisfies SubmitGate;
+});
 
 const AcceptedProjectionRetrySchedule = Schedule.spaced("50 millis").pipe(
 	Schedule.upTo({ duration: "1 second", times: 8 }),
@@ -66,19 +68,21 @@ export const ObserveAcceptedProjection = <Projection, QueryError, QueryRequireme
 	query: Effect.Effect<Projection, QueryError, QueryRequirements>,
 	is_observed: (projection: Projection) => boolean,
 ) =>
-	query.pipe(
-		Effect.filterOrFail(
-			is_observed,
-			() =>
-				new AcceptedProjectionPending({
-					message: "The accepted command is not projected yet.",
-				}),
-		),
-		Effect.retry({ schedule: AcceptedProjectionRetrySchedule }),
-		Effect.option,
-		Effect.timeoutOption("1 second"),
-		Effect.map(Option.flatten),
-	);
+	Effect.gen(function* () {
+		return yield* query.pipe(
+			Effect.filterOrFail(
+				is_observed,
+				() =>
+					new AcceptedProjectionPending({
+						message: "The accepted command is not projected yet.",
+					}),
+			),
+			Effect.retry({ schedule: AcceptedProjectionRetrySchedule }),
+			Effect.option,
+			Effect.timeoutOption("1 second"),
+			Effect.map(Option.flatten),
+		);
+	});
 
 /**
  * A command receipt is the irreversible submit boundary. Refreshing projections

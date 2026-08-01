@@ -1,6 +1,7 @@
 import { Context, Effect, Layer, Option, Schema, Stream } from "effect";
 
 import { model_manifest } from "@artisan/catalog";
+import { inherited_compaction_model } from "@artisan/protocol";
 import { EngineRegistry, type EngineObservation, type EngineRunMetadata } from "@artisan/engines";
 
 import { SessionDefaultsService } from "../settings/session-defaults-service";
@@ -54,27 +55,65 @@ export class ThreadContinuationCompactor extends Context.Service<
  * compaction model when it names an enabled catalog entry by its unique
  * catalog id, otherwise the source thread's own engine and model.
  */
-const resolve_compactor = (
-	configured_model_id: string | undefined,
-	source: ThreadCompactionRequest["source"],
-) => {
-	const configured =
-		configured_model_id === undefined
-			? undefined
-			: model_manifest.models.find(
-					(model) => model.id === configured_model_id && model.disabled === undefined,
-				);
+const enabled_catalog_model = (model_id: string | undefined) =>
+	model_id === undefined
+		? undefined
+		: model_manifest.models.find(
+				(model) => model.id === model_id && model.disabled === undefined,
+			);
 
-	return configured === undefined
-		? {
-				engine_id: source.engine_id,
-				...(source.model_id === undefined ? {} : { model_id: source.model_id }),
-			}
-		: { engine_id: configured.harness, model_id: configured.native_model_id };
+type ResolvedCompactor = {
+	/** Present only for an explicit pick, whose saved model defaults apply. */
+	readonly catalog_id?: string;
+	readonly engine_id: string;
+	readonly model_id?: string;
 };
 
-/** Claude compaction disables its tool surface and all user customizations at the CLI boundary. */
-const compactor_run_metadata = (engine_id: string): EngineRunMetadata =>
+const source_compactor = (source: ThreadCompactionRequest["source"]): ResolvedCompactor => ({
+	engine_id: source.engine_id,
+	...(source.model_id === undefined ? {} : { model_id: source.model_id }),
+});
+
+const resolve_compactor = (
+	selection: string | undefined,
+	source: ThreadCompactionRequest["source"],
+): ResolvedCompactor => {
+	/** Inherited deliberately summarizes with the thread's own model. */
+	if (selection === inherited_compaction_model) return source_compactor(source);
+
+	/**
+	 * An explicit catalog pick wins; otherwise the curated per-harness default
+	 * summarizes, and only a harness without one falls back to the thread's
+	 * own model.
+	 */
+	const explicit = enabled_catalog_model(selection);
+	const chosen =
+		explicit ??
+		enabled_catalog_model(
+			model_manifest.harnesses.find((harness) => harness.id === source.engine_id)
+				?.compaction_default_model_id,
+		);
+
+	return chosen === undefined
+		? source_compactor(source)
+		: {
+				...(explicit === undefined ? {} : { catalog_id: explicit.id }),
+				engine_id: chosen.harness,
+				model_id: chosen.native_model_id,
+			};
+};
+
+/**
+ * Claude compaction disables its tool surface and all user customizations at
+ * the CLI boundary. Codex additionally summarizes at low reasoning effort by
+ * default — the template is fixed and the transcript bounded, so extra
+ * thinking buys latency, not fidelity — unless an explicitly picked compactor
+ * carries its own saved effort default.
+ */
+const compactor_run_metadata = (
+	engine_id: string,
+	reasoning_effort: string | undefined,
+): EngineRunMetadata =>
 	engine_id === "claude"
 		? {
 				provider_options: {
@@ -89,6 +128,13 @@ const compactor_run_metadata = (engine_id: string): EngineRunMetadata =>
 					network_access: false,
 					write_access: false,
 				},
+				...(engine_id === "codex"
+					? {
+							provider_options: {
+								"codex.reasoning_effort": reasoning_effort ?? "low",
+							},
+						}
+					: {}),
 			};
 
 /** A pending question or approval can only hang a print-mode turn; abort it. */
@@ -108,17 +154,31 @@ export const ThreadContinuationCompactorLive = Layer.effect(
 				Effect.gen(function* () {
 					const defaults = yield* settings.Read.pipe(Effect.option);
 					const compactor = resolve_compactor(
-						Option.isSome(defaults) ? defaults.value.compaction_model_id : undefined,
+						Option.isSome(defaults) ? defaults.value.compaction_model : undefined,
 						request.source,
 					);
+					/** An explicit pick honors its durable per-model defaults. */
+					const saved_defaults =
+						compactor.catalog_id === undefined || Option.isNone(defaults)
+							? undefined
+							: defaults.value.models.find(
+									(model) => model.model_id === compactor.catalog_id,
+								);
 					const engine = yield* engines.Get(compactor.engine_id);
 					const artisan_run_id = yield* metadata.MakeId("compaction");
 					const run = yield* engine.Open({
 						_tag: "start",
 						artisan_run_id,
 						initial_text: prompt,
-						...(compactor.model_id === undefined ? {} : { model: compactor.model_id }),
-						...compactor_run_metadata(compactor.engine_id),
+						...(compactor.model_id === undefined
+							? {}
+							: {
+									model: `${compactor.model_id}${saved_defaults?.context_window ?? ""}`,
+								}),
+						...compactor_run_metadata(
+							compactor.engine_id,
+							saved_defaults?.reasoning_effort,
+						),
 						working_directory: request.working_directory,
 					});
 					const message = yield* Stream.runFoldEffect(
@@ -139,7 +199,17 @@ export const ThreadContinuationCompactorLive = Layer.effect(
 
 					return Schema.decodeUnknownOption(PortableCheckpointSummary)(
 						message.trim(),
-					).pipe(Option.map((summary) => ({ compactor, summary })));
+					).pipe(
+						Option.map((summary) => ({
+							compactor: {
+								engine_id: compactor.engine_id,
+								...(compactor.model_id === undefined
+									? {}
+									: { model_id: compactor.model_id }),
+							},
+							summary,
+						})),
+					);
 				}),
 			);
 

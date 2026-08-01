@@ -9,11 +9,11 @@ export const weekly_reset_duration = (
 	windows: ReadonlyArray<EngineUsageWindow>,
 	at_ms: number,
 ): string | undefined => {
-	const weekly_windows = windows.filter((window) => window.kind === "weekly");
+	const weekly_windows = windows.filter((usage_window) => usage_window.kind === "weekly");
 	if (weekly_windows.length === 0) return undefined;
 
-	const future_resets = weekly_windows.map((window) =>
-		window.resets_at === undefined ? Number.NaN : Date.parse(window.resets_at),
+	const future_resets = weekly_windows.map((usage_window) =>
+		usage_window.resets_at === undefined ? Number.NaN : Date.parse(usage_window.resets_at),
 	);
 	if (future_resets.some((reset_at_ms) => !Number.isFinite(reset_at_ms) || reset_at_ms <= at_ms))
 		return undefined;

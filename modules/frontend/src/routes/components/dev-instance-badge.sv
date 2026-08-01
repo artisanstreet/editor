@@ -1,7 +1,9 @@
 <script lang="ts" effect>
-	import { Effect, Option } from "effect";
+	import { Effect, Option, Queue } from "effect";
 
 	import { DiscoverForgeHealth } from "$lib/forge/discovery";
+	import { RunBrowserDom } from "$lib/browser/dom";
+	import { MakeScopedAttachmentRunner } from "$lib/lifecycle/scoped-attachment-runner";
 	import { DevMarkedTitle } from "$lib/root/dev-instance";
 
 	/**
@@ -16,14 +18,12 @@
 	 */
 	let development = $state(false);
 
-	yield* DiscoverForgeHealth.pipe(
-		Effect.flatMap((health) =>
-			Effect.sync(() => {
-				development = Option.getOrUndefined(health)?.development === true;
-			}),
-		),
-		Effect.forkScoped,
-	);
+	const LoadDevelopment = Effect.gen(function* () {
+		const health = yield* DiscoverForgeHealth;
+		development = Option.getOrUndefined(health)?.development === true;
+	});
+
+	yield* LoadDevelopment.pipe(Effect.forkScoped);
 
 	/**
 	 * Routes own their titles through `svelte:head`, so navigation rewrites the
@@ -32,17 +32,44 @@
 	 * known to face a development Forge; the idempotent prefix cannot loop with
 	 * its own mutations.
 	 */
-	$effect(() => {
-		if (!development) return;
-
-		const Mark = () => {
-			const marked = DevMarkedTitle(document.title);
-			if (document.title !== marked) document.title = marked;
-		};
-
-		Mark();
-		const observer = new MutationObserver(Mark);
-		observer.observe(document.head, { characterData: true, childList: true, subtree: true });
-		return () => observer.disconnect();
+	const title_observers = yield* MakeScopedAttachmentRunner(() =>
+		Effect.gen(function* () {
+			const marks = yield* Queue.unbounded<void>();
+			const MarkTitle = Effect.gen(function* () {
+				yield* RunBrowserDom(() => {
+					const marked = DevMarkedTitle(document.title);
+					if (document.title !== marked) document.title = marked;
+				});
+			});
+			yield* Effect.gen(function* () {
+				while (true) {
+					yield* Queue.take(marks);
+					yield* MarkTitle;
+				}
+			}).pipe(Effect.forkScoped);
+			yield* Queue.offer(marks, undefined);
+			yield* Effect.acquireRelease(
+				Effect.gen(function* () {
+					return yield* RunBrowserDom(() => {
+						const observer = new MutationObserver(() => Queue.offerUnsafe(marks, undefined));
+						observer.observe(document.head, { characterData: true, childList: true, subtree: true });
+						return observer;
+					});
+				}),
+				(observer) =>
+					Effect.gen(function* () {
+						yield* RunBrowserDom(() => observer.disconnect());
+					}),
+			);
+			yield* Effect.never;
+		}),
+	);
+	const SyncTitleObserver = Effect.gen(function* () {
+		if (development) {
+			yield* title_observers.Replace("development-title", undefined);
+			return;
+		}
+		yield* title_observers.Release("development-title");
 	});
+	yield* SyncTitleObserver;
 </script>

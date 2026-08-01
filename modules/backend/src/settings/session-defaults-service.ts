@@ -147,7 +147,7 @@ export const SessionDefaultsServiceLive = Layer.effect(
 
 				return {
 					...(shared?.compaction_model_id
-						? { compaction_model_id: shared.compaction_model_id }
+						? { compaction_model: shared.compaction_model_id }
 						: {}),
 					...(shared?.last_model_id ? { last_model_id: shared.last_model_id } : {}),
 					models: models.map(ModelRow),
@@ -214,7 +214,7 @@ export const SessionDefaultsServiceLive = Layer.effect(
 						if (
 							payload.permission !== undefined ||
 							payload.last_model_id !== undefined ||
-							payload.compaction_model_id !== undefined
+							payload.compaction_model !== undefined
 						) {
 							const [current] = yield* transaction
 								.select({
@@ -225,11 +225,11 @@ export const SessionDefaultsServiceLive = Layer.effect(
 								.from(SessionDefaults)
 								.where(eq(SessionDefaults.defaults_id, defaults_row_id))
 								.limit(1);
-							/** An explicit `null` clears the compaction override. */
+							/** An explicit `null` restores the curated default. */
 							const compaction_model_id =
-								payload.compaction_model_id === undefined
+								payload.compaction_model === undefined
 									? (current?.compaction_model_id ?? null)
-									: payload.compaction_model_id;
+									: payload.compaction_model;
 							const shared = {
 								compaction_model_id,
 								last_model_id:
@@ -250,18 +250,35 @@ export const SessionDefaultsServiceLive = Layer.effect(
 
 						if (payload.model !== undefined) {
 							const model = payload.model;
+							const [current] = yield* transaction
+								.select({
+									context_window: SessionModelDefaults.context_window,
+									reasoning_effort: SessionModelDefaults.reasoning_effort,
+								})
+								.from(SessionModelDefaults)
+								.where(eq(SessionModelDefaults.model_id, model.model_id))
+								.limit(1);
+							/** Model fields are independently patchable, just like shared defaults. */
+							const context_window =
+								model.context_window === undefined
+									? (current?.context_window ?? null)
+									: model.context_window;
+							const reasoning_effort =
+								model.reasoning_effort === undefined
+									? (current?.reasoning_effort ?? null)
+									: model.reasoning_effort;
 							yield* transaction
 								.insert(SessionModelDefaults)
 								.values({
-									context_window: model.context_window ?? null,
+									context_window,
 									model_id: model.model_id,
-									reasoning_effort: model.reasoning_effort ?? null,
+									reasoning_effort,
 									updated_at: accepted_at,
 								})
 								.onConflictDoUpdate({
 									set: {
-										context_window: model.context_window ?? null,
-										reasoning_effort: model.reasoning_effort ?? null,
+										context_window,
+										reasoning_effort,
 										updated_at: accepted_at,
 									},
 									target: SessionModelDefaults.model_id,

@@ -2,11 +2,14 @@
 	import type {
 		ConversationSnapshot,
 		ImageAttachmentReference,
+		SurfaceUsageAggregate,
 		ThreadSessionPolicy,
 	} from "@artisan/protocol";
 	import { Effect, Option, Queue } from "effect";
 	import { tick } from "svelte";
 	import type { ComposerSubmission } from "$lib/composer/image-attachments";
+	import { MakeScopedAttachmentRunner } from "$lib/lifecycle/scoped-attachment-runner";
+	import { RunBrowserDom } from "$lib/browser/dom";
 	import type { ThreadMessageSubmissionOutcome } from "$lib/thread-interaction/commands";
 	import { ScrollArea } from "$lib/components/ui/scroll-area";
 	import { conversation_work_is_live } from "$lib/conversation/activity-status";
@@ -30,6 +33,7 @@
 	import ThreadComposer from "./thread-composer.sv";
 
 	let {
+		context_usage,
 		disabled = false,
 		image_sources,
 		onabort,
@@ -42,6 +46,7 @@
 		run_active = false,
 		snapshot,
 	}: {
+		context_usage?: SurfaceUsageAggregate;
 		disabled?: boolean;
 		image_sources?: ReadonlyMap<string, string>;
 		onabort?: () => Effect.Effect<unknown, { readonly message: string }>;
@@ -49,12 +54,17 @@
 			approval_id: string,
 			approved: boolean,
 		) => Effect.Effect<void, { readonly message: string }>;
-		onpolicychange?: (policy: ThreadSessionPolicy) => void;
-		onquestion?: (question_id: string, answer: string) => void;
+		onpolicychange?: (
+			policy: ThreadSessionPolicy,
+		) => Effect.Effect<ThreadSessionPolicy, { readonly message: string }>;
+		onquestion?: (
+			question_id: string,
+			answer: string,
+		) => Effect.Effect<void, { readonly message: string }>;
 		onimagevisibilitychange?: (
 			attachments: ReadonlyArray<ImageAttachmentReference>,
 			visible: boolean,
-		) => void;
+		) => Effect.Effect<void>;
 		onsubmit?: (
 			submission: ComposerSubmission,
 		) => Effect.Effect<
@@ -146,104 +156,122 @@
 	let anchored_user_item_id = $state<string | undefined>();
 	let anchor_layout_frame = 0;
 	let smooth_anchor_pending = false;
-	const anchor_layout_requests = yield* Queue.dropping<boolean>(1);
-	const position_requests = yield* Queue.dropping<void>(1);
+	let anchor_layout_revision = $state(0);
+	let anchor_layout_smooth = $state(false);
+	const anchor_layout_requests = yield* Queue.unbounded<
+		| { readonly _tag: "request"; readonly smooth: boolean }
+		| { readonly _tag: "flush"; readonly smooth: boolean }
+	>();
 
 	const FindConversationItem = (item_id: string) =>
-		[...(viewport?.querySelectorAll<HTMLElement>("[data-conversation-item-id]") ?? [])]
-			.find((element) => element.dataset.conversationItemId === item_id);
+		Effect.gen(function* () {
+			return yield* RunBrowserDom(() =>
+				[...(viewport?.querySelectorAll<HTMLElement>("[data-conversation-item-id]") ?? [])]
+					.find((element) => element.dataset.conversationItemId === item_id),
+			);
+		});
 
 	const UpdateAnchorLayout = (smooth: boolean) => Effect.gen(function* () {
-		yield* Effect.tryPromise(() => tick()).pipe(Effect.ignore);
+		yield* Effect.promise(() => tick());
 		if (viewport === null || end_space === null) return;
 		const item_id = anchored_user_item_id;
 		if (item_id === undefined) return;
-		const item = FindConversationItem(item_id);
+		const item = yield* FindConversationItem(item_id);
 		if (item === undefined) return;
 
-		const item_bounds = item.getBoundingClientRect();
-		const end_space_bounds = end_space.getBoundingClientRect();
+		const { end_space_bounds, item_bounds, viewport_height } = yield* RunBrowserDom(() => ({
+			end_space_bounds: end_space.getBoundingClientRect(),
+			item_bounds: item.getBoundingClientRect(),
+			viewport_height: viewport.clientHeight,
+		}));
 		const next_end_space_height = ConversationEndSpaceHeight(
-			viewport.clientHeight,
+			viewport_height,
 			item_bounds.top,
 			end_space_bounds.top,
 		);
 		if (next_end_space_height !== end_space_height) {
 			end_space_height = next_end_space_height;
-			yield* Effect.tryPromise(() => tick()).pipe(Effect.ignore);
+			yield* Effect.promise(() => tick());
 		}
 		if (!smooth || viewport === null) return;
 
-		const current_item = FindConversationItem(item_id);
+		const current_item = yield* FindConversationItem(item_id);
 		if (current_item === undefined) return;
-		viewport.scrollTo({
-			behavior: globalThis.matchMedia("(prefers-reduced-motion: reduce)").matches
-				? "auto"
-				: "smooth",
-			top: ConversationAlignedScrollTop(
-				viewport.scrollTop,
-				viewport.getBoundingClientRect().top,
-				current_item.getBoundingClientRect().top,
-			),
+		yield* RunBrowserDom(() => {
+			viewport.scrollTo({
+				behavior: globalThis.matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth",
+				top: ConversationAlignedScrollTop(
+					viewport.scrollTop,
+					viewport.getBoundingClientRect().top,
+					current_item.getBoundingClientRect().top,
+				),
+			});
 		});
 	});
 
-	const ScheduleAnchorLayout = (smooth = false) => {
-		if (anchored_user_item_id === undefined) return;
-		smooth_anchor_pending ||= smooth;
-		cancelAnimationFrame(anchor_layout_frame);
-		anchor_layout_frame = requestAnimationFrame(() => {
-			const should_smooth = smooth_anchor_pending;
-			smooth_anchor_pending = false;
-			Queue.offerUnsafe(anchor_layout_requests, should_smooth);
-		});
-	};
-	yield* Queue.take(anchor_layout_requests).pipe(
-		Effect.flatMap(UpdateAnchorLayout),
-		Effect.forever,
-		Effect.forkScoped,
-	);
+	const ScheduleAnchorLayout = Effect.gen(function* () {
+		while (true) {
+			const request = yield* Queue.take(anchor_layout_requests);
+			if (request._tag === "flush") {
+				anchor_layout_smooth = request.smooth;
+				anchor_layout_revision += 1;
+				continue;
+			}
+			if (anchored_user_item_id === undefined) continue;
+			smooth_anchor_pending ||= request.smooth;
+			yield* RunBrowserDom(() => {
+				cancelAnimationFrame(anchor_layout_frame);
+				anchor_layout_frame = requestAnimationFrame(() => {
+					Queue.offerUnsafe(anchor_layout_requests, { _tag: "flush", smooth: smooth_anchor_pending });
+					smooth_anchor_pending = false;
+					anchor_layout_revision += 1;
+				});
+			});
+		}
+	});
+	yield* ScheduleAnchorLayout.pipe(Effect.forkScoped);
+	/** Visual geometry only: rAF coalesces observer churn before SER reruns this fiber. */
+	if (anchor_layout_revision > 0) yield* UpdateAnchorLayout(anchor_layout_smooth);
 
-	const SubmitMessage = (submission: ComposerSubmission) => {
+	const SubmitMessage = (submission: ComposerSubmission) =>
+		Effect.gen(function* () {
 		const submit = onsubmit;
-		if (submit === undefined) return Effect.void;
+		if (submit === undefined) return;
 		pending_user_message_reference = undefined;
-		const ClearPendingUserMessage = Effect.sync(() => {
+		const ClearPendingUserMessage = Effect.gen(function* () {
 			pending_user_message_reference = undefined;
 		});
 
-		return submit(submission).pipe(
+		yield* submit(submission).pipe(
 			Effect.tap((outcome) =>
-				Effect.sync(() => {
+				Effect.gen(function* () {
 					pending_user_message_reference =
 						outcome.user_message_reference;
 				}),
 			),
-			Effect.tapError(() => ClearPendingUserMessage),
+			Effect.tapError(() =>
+				Effect.gen(function* () {
+					yield* ClearPendingUserMessage;
+				}),
+			),
 		);
-	};
+		});
 
 	const PositionLoadedThread = Effect.gen(function* () {
-		yield* Effect.tryPromise(() => tick()).pipe(Effect.ignore);
+		yield* Effect.promise(() => tick());
 		if (viewport === null) return;
-		viewport.scrollTop = ConversationBottomScrollTop(
-			viewport.scrollHeight,
-			viewport.clientHeight,
-		);
+		yield* RunBrowserDom(() => {
+			viewport.scrollTop = ConversationBottomScrollTop(viewport.scrollHeight, viewport.clientHeight);
+		});
 	});
-	yield* Queue.take(position_requests).pipe(
-		Effect.flatMap(() => PositionLoadedThread),
-		Effect.forever,
-		Effect.forkScoped,
+	if (viewport !== null) yield* PositionLoadedThread;
+	yield* Effect.addFinalizer(() =>
+		Effect.gen(function* () {
+			yield* RunBrowserDom(() => cancelAnimationFrame(anchor_layout_frame));
+		}),
 	);
-	yield* Effect.addFinalizer(() => Effect.sync(() => cancelAnimationFrame(anchor_layout_frame)));
 
-	$effect(() => {
-		if (viewport === null) return;
-		Queue.offerUnsafe(position_requests, undefined);
-	});
-
-	$effect(() => {
+	const ReconcileAnchor = Effect.gen(function* () {
 		const current_items = snapshot.items;
 		const source_reference = pending_user_message_reference;
 		if (source_reference !== undefined) {
@@ -256,28 +284,50 @@
 			if (item_id !== undefined) {
 				pending_user_message_reference = undefined;
 				anchored_user_item_id = item_id;
-				ScheduleAnchorLayout(true);
+				yield* Queue.offer(anchor_layout_requests, { _tag: "request", smooth: true });
 				return;
 			}
 		}
 		if (anchored_user_item_id !== undefined) {
-			ScheduleAnchorLayout();
+			yield* Queue.offer(anchor_layout_requests, { _tag: "request", smooth: false });
 		}
 	});
+	if (viewport !== null) yield* ReconcileAnchor;
 
-	$effect(() => {
-		if (
-			transcript_content === null ||
-			viewport === null ||
-			!("ResizeObserver" in globalThis)
-		)
+	const transcript_size_observers = yield* MakeScopedAttachmentRunner(
+		({ content, current_viewport }: { content: HTMLElement; current_viewport: HTMLElement }) =>
+			Effect.gen(function* () {
+				yield* Effect.acquireRelease(
+					Effect.gen(function* () {
+						return yield* RunBrowserDom(() => {
+							const observer = new ResizeObserver(() => Queue.offerUnsafe(anchor_layout_requests, { _tag: "request", smooth: false }));
+							observer.observe(content);
+							observer.observe(current_viewport);
+							return observer;
+						});
+					}),
+					(observer) =>
+						Effect.gen(function* () {
+							yield* RunBrowserDom(() => observer.disconnect());
+						}),
+				);
+				yield* Effect.never;
+			}),
+	);
+	const SyncTranscriptSizeObserver = Effect.gen(function* () {
+		const content = transcript_content;
+		const current_viewport = viewport;
+		const supports_resize_observer = yield* RunBrowserDom(() => "ResizeObserver" in globalThis);
+		if (content === null || current_viewport === null || !supports_resize_observer) {
+			yield* transcript_size_observers.Release("transcript-size");
 			return;
-		const observer = new ResizeObserver(() => ScheduleAnchorLayout());
-		observer.observe(transcript_content);
-		observer.observe(viewport);
-
-		return () => observer.disconnect();
+		}
+		yield* transcript_size_observers.Replace("transcript-size", {
+			content,
+			current_viewport,
+		});
 	});
+	yield* SyncTranscriptSizeObserver;
 </script>
 
 <main class="relative h-full min-h-0 overflow-hidden" aria-label="Thread workspace">
@@ -345,6 +395,7 @@
 	</ScrollArea>
 
 	<ThreadComposer
+		{context_usage}
 		{disabled}
 		{engine_locked}
 		{onabort}

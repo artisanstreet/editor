@@ -1,7 +1,6 @@
 import { model_manifest } from "@artisan/catalog";
 import type { RuntimeCatalog } from "@artisan/protocol";
-import { ArtisanClient } from "@artisan/transport/client";
-import { Effect, Stream } from "effect";
+import { Effect } from "effect";
 
 /**
  * Forge owns the runtime catalog, but the manifest inside it is static
@@ -31,31 +30,12 @@ export const IsOfflineRuntimeCatalog = (catalog: RuntimeCatalog): boolean =>
 export const WithOfflineRuntimeCatalog = <E, R>(
 	catalog: Effect.Effect<RuntimeCatalog, E, R>,
 ): Effect.Effect<RuntimeCatalog, never, R> =>
-	catalog.pipe(Effect.catch(() => Effect.succeed(OfflineRuntimeCatalog)));
-
-/**
- * Emits the catalog available at mount, switches to the offline sentinel while
- * Forge is disconnected, and replaces it on every successful connection. The
- * replay-backed connection stream already includes the current state, so each
- * real phase transition produces at most one catalog query. A failed
- * ready-state refresh emits nothing, preserving the preceding state.
- *
- * The client remains an Effect service dependency rather than being threaded
- * through component helpers as an ordinary parameter.
- */
-export const RuntimeCatalogChanges: Stream.Stream<RuntimeCatalog, never, ArtisanClient> =
-	Stream.unwrap(
-		Effect.gen(function* () {
-			const client = yield* ArtisanClient;
-			return client.ConnectionChanges.pipe(
-				Stream.changesWith((left, right) => left.phase === right.phase),
-				Stream.mapEffect((state) =>
-					state.phase === "ready"
-						? client.GetRuntimeCatalog.pipe(Effect.result)
-						: Effect.succeed(OfflineRuntimeCatalog).pipe(Effect.result),
-				),
-				Stream.filterMap((catalog) => catalog),
-				Stream.changesWith((left, right) => left === right),
-			);
-		}),
+	Effect.gen(function* () {
+		return yield* catalog;
+	}).pipe(
+		Effect.catch(() =>
+			Effect.gen(function* () {
+				return OfflineRuntimeCatalog;
+			}),
+		),
 	);

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Effect, Option } from "effect";
 
 import { DiscoverForge, DiscoverForgeHealth } from "../../modules/frontend/src/lib/forge/discovery";
+import { ForgeEndpointStoreLive } from "../../modules/frontend/src/lib/runtime/forge-endpoint";
 
 afterEach(() => {
 	vi.unstubAllGlobals();
@@ -29,7 +30,9 @@ describe("Forge discovery", () => {
 				),
 		);
 
-		const discovered = await Effect.runPromise(DiscoverForge);
+		const discovered = await Effect.runPromise(
+			DiscoverForge.pipe(Effect.provide(ForgeEndpointStoreLive)),
+		);
 		expect(Option.getOrThrow(discovered.health).development).toBe(true);
 		expect(discovered.others.map((instance) => instance.endpoint)).toEqual([
 			"http://127.0.0.1:4200",
@@ -46,7 +49,9 @@ describe("Forge discovery", () => {
 				),
 		);
 
-		const health = await Effect.runPromise(DiscoverForgeHealth);
+		const health = await Effect.runPromise(
+			DiscoverForgeHealth.pipe(Effect.provide(ForgeEndpointStoreLive)),
+		);
 		expect(Option.isNone(health)).toBe(true);
 	});
 });

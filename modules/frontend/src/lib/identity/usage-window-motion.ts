@@ -70,37 +70,46 @@ const CubicBezier = (x1: number, y1: number, x2: number, y2: number) => {
 const CUBIC_BEZIER_ARGUMENTS = /cubic-bezier\(([^)]+)\)/;
 
 /** `--ease-smooth-out` — the token whose documented usage is "position change". */
-export const MotionEasing = (): ((t: number) => number) => {
-	const fallback = CubicBezier(0.22, 1, 0.36, 1);
-	if (typeof window === "undefined") return fallback;
+export const MotionEasing = () =>
+	Effect.gen(function* () {
+		const fallback = CubicBezier(0.22, 1, 0.36, 1);
+		const token = yield* RunBrowserDom(() => {
+			if (typeof window === "undefined") return undefined;
+			return getComputedStyle(document.documentElement)
+				.getPropertyValue("--ease-smooth-out")
+				.trim();
+		});
+		if (token === undefined) return fallback;
 
-	const token = getComputedStyle(document.documentElement)
-		.getPropertyValue("--ease-smooth-out")
-		.trim();
-	const matched = CUBIC_BEZIER_ARGUMENTS.exec(token);
-	if (matched === null) return fallback;
+		const matched = CUBIC_BEZIER_ARGUMENTS.exec(token);
+		if (matched === null) return fallback;
 
-	const source = matched[1];
-	if (source === undefined) return fallback;
-	const points = source.split(",").map((part) => Number.parseFloat(part.trim()));
-	if (points.length !== 4 || points.some((point) => Number.isNaN(point))) return fallback;
-	const [x1, y1, x2, y2] = points;
-	if (x1 === undefined || y1 === undefined || x2 === undefined || y2 === undefined) {
-		return fallback;
-	}
-	return CubicBezier(x1, y1, x2, y2);
-};
+		const source = matched[1];
+		if (source === undefined) return fallback;
+		const points = source.split(",").map((part) => Number.parseFloat(part.trim()));
+		if (points.length !== 4 || points.some((point) => Number.isNaN(point))) return fallback;
+		const [x1, y1, x2, y2] = points;
+		if (x1 === undefined || y1 === undefined || x2 === undefined || y2 === undefined) {
+			return fallback;
+		}
+		return CubicBezier(x1, y1, x2, y2);
+	});
 
 /** Reads `--duration-fast` so the tween stays in step with the CSS motion scale. */
-export const MotionDuration = (): number => {
-	if (typeof window === "undefined") return 0;
-	if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return 0;
+export const MotionDuration = () =>
+	Effect.gen(function* () {
+		const token = yield* RunBrowserDom(() => {
+			if (typeof window === "undefined") return undefined;
+			if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return "";
+			return getComputedStyle(document.documentElement)
+				.getPropertyValue("--duration-fast")
+				.trim();
+		});
+		if (token === undefined || token === "") return 0;
 
-	const token = getComputedStyle(document.documentElement)
-		.getPropertyValue("--duration-fast")
-		.trim();
-	const parsed = Number.parseFloat(token);
-
-	if (Number.isNaN(parsed)) return 250;
-	return token.endsWith("ms") ? parsed : parsed * 1000;
-};
+		const parsed = Number.parseFloat(token);
+		if (Number.isNaN(parsed)) return 250;
+		return token.endsWith("ms") ? parsed : parsed * 1000;
+	});
+import { Effect } from "effect";
+import { RunBrowserDom } from "$lib/browser/dom";

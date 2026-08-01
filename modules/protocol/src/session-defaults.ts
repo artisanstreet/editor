@@ -17,6 +17,9 @@ import { Identifier } from "./common";
 
 const session_defaults_maximum_models = 512;
 
+/** Selects the thread's own current model as its compaction summarizer. */
+export const inherited_compaction_model = "inherited";
+
 /** Records the controls one model was last configured with. */
 export const SessionModelDefaults = Schema.Struct({
 	/** The native context-window suffix, absent for the model's base window. */
@@ -27,13 +30,29 @@ export const SessionModelDefaults = Schema.Struct({
 
 export type SessionModelDefaults = typeof SessionModelDefaults.Type;
 
+/**
+ * Patches one model's defaults. An omitted field is left unchanged; `null`
+ * explicitly clears the saved override and restores the catalog default.
+ */
+export const SessionModelDefaultsUpdate = Schema.Struct({
+	context_window: Schema.optional(Schema.NullOr(Schema.NonEmptyString)),
+	model_id: Schema.NonEmptyString,
+	reasoning_effort: Schema.optional(
+		Schema.NullOr(Schema.Literals(["low", "medium", "high", "xhigh", "max"])),
+	),
+});
+
+export type SessionModelDefaultsUpdate = typeof SessionModelDefaultsUpdate.Type;
+
 /** Projects every default a draft reads when it opens. */
 export const SessionDefaults = Schema.Struct({
 	/**
-	 * The catalog model that generates handoff compaction summaries. Absent
-	 * means each thread compacts with its own current model.
+	 * How handoff compaction picks its summarizer. Absent means Curated: each
+	 * harness's cost-effective catalog default. `"inherited"` summarizes with
+	 * the thread's current model. Any other value names one explicit catalog
+	 * model by its unique catalog id.
 	 */
-	compaction_model_id: Schema.optional(Schema.NonEmptyString),
+	compaction_model: Schema.optional(Schema.NonEmptyString),
 	/** The model most recently chosen in any composer. */
 	last_model_id: Schema.optional(Schema.NonEmptyString),
 	models: Schema.Array(SessionModelDefaults).check(
@@ -53,10 +72,10 @@ export type SessionDefaults = typeof SessionDefaults.Type;
  * @since 0.8.0
  */
 export const SessionDefaultsUpdateInput = Schema.Struct({
-	/** `null` clears the override so threads compact with their own model. */
-	compaction_model_id: Schema.optional(Schema.NullOr(Schema.NonEmptyString)),
+	/** `null` restores Curated: each harness's cost-effective catalog default. */
+	compaction_model: Schema.optional(Schema.NullOr(Schema.NonEmptyString)),
 	last_model_id: Schema.optional(Schema.NonEmptyString),
-	model: Schema.optional(SessionModelDefaults),
+	model: Schema.optional(SessionModelDefaultsUpdate),
 	permission: Schema.optional(Identifier),
 });
 

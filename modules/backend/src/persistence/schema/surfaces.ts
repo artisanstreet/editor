@@ -26,12 +26,19 @@ export const SurfaceItems = sqliteTable(
 	],
 );
 
-/** Optional provider-neutral token totals; null means unavailable, never zero-by-invention. */
+/**
+ * Optional provider-neutral token totals; null means unavailable, never
+ * zero-by-invention. `context_tokens` and `context_window_tokens` are the
+ * latest reported context-window gauges rather than accumulating totals.
+ */
 export const SurfaceUsageTotals = sqliteTable("surface_usage_totals", {
 	run_id: text("run_id").primaryKey(),
 	group_id: text("group_id"),
 	assignment_id: text("assignment_id"),
 	input_tokens: integer("input_tokens"),
 	output_tokens: integer("output_tokens"),
+	cached_input_tokens: integer("cached_input_tokens"),
+	context_tokens: integer("context_tokens"),
+	context_window_tokens: integer("context_window_tokens"),
 	updated_at: text("updated_at").notNull(),
 });

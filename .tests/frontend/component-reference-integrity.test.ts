@@ -30,7 +30,8 @@ export const RenderedComponents = (source: string): ReadonlyArray<string> => [
 /**
  * A name is in scope when a script mentions it or the template declares it
  * inline: `{@const MarkIcon = …}` is how this codebase resolves a component
- * chosen per row.
+ * chosen per row, while snippet parameters may receive component values from
+ * their caller.
  */
 export const ComponentsInScope = (source: string): ReadonlySet<string> => {
 	const scripts = scripts_of(source);
@@ -40,9 +41,14 @@ export const ComponentsInScope = (source: string): ReadonlySet<string> => {
 	const snippets = [...source.matchAll(/\{#snippet\s+([A-Za-z_][A-Za-z0-9_]*)/gu)].map(
 		(match) => match[1]!,
 	);
+	const snippet_parameters = [
+		...template_of(source).matchAll(/\{#snippet\s+[A-Za-z_][A-Za-z0-9_]*\s*\(([^)]*)\)/gu),
+	].flatMap((match) =>
+		[...match[1]!.matchAll(/\b([A-Z][A-Za-z0-9]*)\b/gu)].map((parameter) => parameter[1]!),
+	);
 	const named = [...scripts.matchAll(/\b([A-Z][A-Za-z0-9]*)\b/gu)].map((match) => match[1]!);
 
-	return new Set([...inline, ...snippets, ...named]);
+	return new Set([...inline, ...snippets, ...snippet_parameters, ...named]);
 };
 
 describe("component reference integrity", () => {
@@ -84,6 +90,18 @@ describe("component reference integrity", () => {
 
 		expect(RenderedComponents(source)).toEqual(["Kept", "Removed"]);
 		expect(ComponentsInScope(source).has("Kept")).toBe(true);
+		expect(ComponentsInScope(source).has("Removed")).toBe(false);
+	});
+
+	it("accepts a component supplied as a snippet parameter without hiding dangling tags", () => {
+		const source = [
+			"{#snippet control(Icon)}",
+			"\t<Icon />",
+			"\t<Removed />",
+			"{/snippet}",
+		].join("\n");
+
+		expect(ComponentsInScope(source).has("Icon")).toBe(true);
 		expect(ComponentsInScope(source).has("Removed")).toBe(false);
 	});
 });

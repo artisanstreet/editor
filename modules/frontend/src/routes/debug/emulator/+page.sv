@@ -4,6 +4,8 @@
 	import PlayerTrackNext from "@tabler/icons-svelte/icons/player-track-next";
 	import PlayerTrackPrev from "@tabler/icons-svelte/icons/player-track-prev";
 	import { Effect } from "effect";
+	import { BannerService } from "$lib/banner/service";
+	import { WriteClipboardText } from "$lib/browser/clipboard";
 	import { Button } from "$lib/components/ui/button";
 	import {
 		Select,
@@ -20,6 +22,7 @@
 
 	let script_id = $state(emulator_scripts[0]?.id ?? "");
 	let step = $state(0);
+	const banner = yield* BannerService;
 
 	const script = $derived(
 		emulator_scripts.find((candidate) => candidate.id === script_id) ?? emulator_scripts[0],
@@ -31,6 +34,21 @@
 	const snapshot = $derived(rebuilt !== undefined && "items" in rebuilt ? rebuilt : undefined);
 	const failure = $derived(rebuilt !== undefined && "error" in rebuilt ? rebuilt.error : undefined);
 
+	const SelectScript = (next_script_id: string) =>
+		Effect.gen(function* () {
+			script_id = next_script_id;
+		});
+	const PreviousStep = Effect.gen(function* () {
+		step = position - 1;
+	});
+	const NextStep = Effect.gen(function* () {
+		step = position + 1;
+	});
+	const UpdateStep = (event: Event & { currentTarget: HTMLInputElement }) =>
+		Effect.gen(function* () {
+			step = Number(event.currentTarget.value);
+		});
+
 	/**
 	 * The clipboard payload is the whole reproduction: which shape, which step,
 	 * and the exact snapshot the renderer was handed. A screenshot of a wrong
@@ -38,9 +56,8 @@
 	 */
 	const CopyStep = Effect.gen(function* () {
 		if (script === undefined) return;
-		yield* Effect.tryPromise(() =>
-			navigator.clipboard.writeText(
-				JSON.stringify(
+		yield* WriteClipboardText(
+			JSON.stringify(
 				{
 					script: script.id,
 					snapshot,
@@ -50,9 +67,16 @@
 				},
 				undefined,
 				2,
-				),
 			),
-		).pipe(Effect.ignore);
+		).pipe(
+			Effect.catchTag("ClipboardWriteError", () =>
+				Effect.gen(function* () {
+					yield* banner.error("Could not copy emulator step", {
+						description: "Copy the reproduction payload manually instead.",
+					});
+				}),
+			),
+		);
 	});
 </script>
 
@@ -81,7 +105,7 @@
 		-->
 		<header class="flex shrink-0 flex-col gap-3 border-b border-border p-4">
 			<div class="flex flex-wrap items-center gap-3">
-				<Select type="single" bind:value={script_id}>
+				<Select type="single" value={script_id} onValueChange={yield* SelectScript(event)}>
 					<SelectTrigger class="w-72" aria-label="Emulator script">
 						{script.title}
 					</SelectTrigger>
@@ -100,7 +124,7 @@
 						size="icon"
 						aria-label="Previous step"
 						disabled={position === 0}
-						onclick={() => (step = position - 1)}
+						onclick={yield* PreviousStep}
 					>
 						<PlayerTrackPrev />
 					</Button>
@@ -109,7 +133,7 @@
 						size="icon"
 						aria-label="Next step"
 						disabled={position >= total}
-						onclick={() => (step = position + 1)}
+						onclick={yield* NextStep}
 					>
 						<PlayerTrackNext />
 					</Button>
@@ -134,7 +158,7 @@
 					step="1"
 					value={position}
 					class="w-full accent-(--banner-info)"
-					oninput={(event) => (step = Number(event.currentTarget.value))}
+					oninput={yield* UpdateStep(event)}
 				/>
 			</label>
 

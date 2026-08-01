@@ -1,6 +1,6 @@
 import { join } from "node:path";
 
-import { Effect, FileSystem, Schema } from "effect";
+import { Effect, FileSystem, Option, Schema } from "effect";
 
 import {
 	type EngineAccountUsage,
@@ -11,6 +11,7 @@ import {
 	EngineProtocolError,
 } from "../engine";
 import { CodexAppServerResponseError } from "./protocol";
+import { CodexAccountReadSchema } from "./probe";
 import {
 	open_codex_app_server_session,
 	type CodexAppServerSessionFailure,
@@ -275,7 +276,23 @@ export function MakeCodexUsage(
 			),
 		);
 
+		/** Best-effort: the account email is presentation, never a gate. */
+		const account = yield* session.Request("account/read", {}).pipe(
+			Effect.flatMap((response) =>
+				Schema.decodeUnknownEffect(CodexAccountReadSchema, {
+					onExcessProperty: "preserve",
+				})(response.result),
+			),
+			Effect.option,
+		);
+		const account_email = Option.match(account, {
+			onNone: () => undefined,
+			onSome: (read) =>
+				read.account?.type === "chatgpt" ? (read.account.email ?? undefined) : undefined,
+		});
+
 		return {
+			...(account_email === undefined ? {} : { account_email }),
 			authentication: { state: "authenticated" as const },
 			windows: map_codex_rate_limits_to_quota_windows(decoded),
 		} satisfies EngineAccountUsage;

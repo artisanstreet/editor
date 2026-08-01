@@ -268,9 +268,16 @@ export const SurfaceListQuery = Schema.Struct({
 });
 export type SurfaceListQuery = typeof SurfaceListQuery.Type;
 
-/** Optional token totals faithfully reported by a provider. */
+/**
+ * Optional token totals faithfully reported by a provider. `context_tokens`
+ * and `context_window_tokens` are point-in-time gauges — the latest provider
+ * report of how full the model's context window is — not accumulating totals.
+ */
 export const SurfaceUsage = Schema.Struct({
 	assignment_id: Schema.optional(Identifier),
+	cached_input_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+	context_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+	context_window_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
 	group_id: Schema.optional(Identifier),
 	input_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
 	output_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
@@ -279,10 +286,19 @@ export const SurfaceUsage = Schema.Struct({
 });
 export type SurfaceUsage = typeof SurfaceUsage.Type;
 
-/** Aggregate token totals for one run, assignment, or group; omitted metrics remain unknown. */
+/**
+ * Aggregate token totals for one run, assignment, or group; omitted metrics
+ * remain unknown. Token counts sum across the scope's runs; the context
+ * gauges are carried from the scope's most recently updated run because a
+ * context window belongs to one live session and summing several is
+ * meaningless.
+ */
 export const SurfaceUsageAggregate = Schema.Struct({
 	scope: Schema.Literals(["run", "assignment", "group"]),
 	scope_id: Identifier,
+	cached_input_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+	context_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+	context_window_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
 	input_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
 	output_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
 });

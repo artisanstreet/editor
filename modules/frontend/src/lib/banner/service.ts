@@ -82,7 +82,9 @@ export class BannerService extends Context.Service<
 
 export const BannerReporterNoopLive = Layer.succeed(
 	BannerReporter,
-	BannerReporter.of({ Report: () => Effect.void }),
+	BannerReporter.of({
+		Report: () => Effect.gen(function* () {}),
+	}),
 );
 
 export const BannerServiceLive = Layer.effect(
@@ -91,41 +93,59 @@ export const BannerServiceLive = Layer.effect(
 		const presenter = yield* BannerPresenter;
 		const reporter = yield* BannerReporter;
 		const actions = yield* Queue.unbounded<BannerExecutableAction>();
-		yield* Queue.take(actions).pipe(
-			Effect.flatMap((action) => action.Execute.pipe(Effect.exit, Effect.asVoid)),
-			Effect.forever,
-			Effect.forkScoped,
-		);
+		/** The presenter callback is a foreign UI ingress; this scoped queue serializes only banner actions. */
+		const PresentActions = Effect.gen(function* () {
+			while (true) {
+				const action = yield* Queue.take(actions);
+				yield* action.Execute.pipe(Effect.exit, Effect.asVoid);
+			}
+		});
+		yield* PresentActions.pipe(Effect.forkScoped);
 		const on_action = (action: BannerExecutableAction) => {
 			Queue.offerUnsafe(actions, action);
 		};
 
-		const Show = (severity: BannerSeverity, title: string, options?: BannerOptions) => {
-			const event: BannerEvent = { severity, title, ...options };
-			const { actions: event_actions, ...report_fields } = event;
-			const redacted_report_event: BannerReportEvent = {
-				...report_fields,
-				...(event_actions === undefined
-					? {}
-					: {
-							actions: event_actions.map(({ icon, id, label }) => ({
-								...(icon === undefined ? {} : { icon }),
-								id,
-								label,
-							})),
-						}),
-			};
-			return presenter
-				.Show(event, on_action)
-				.pipe(Effect.andThen(reporter.Report(redacted_report_event).pipe(Effect.ignore)));
-		};
+		const Show = (severity: BannerSeverity, title: string, options?: BannerOptions) =>
+			Effect.gen(function* () {
+				const event: BannerEvent = { severity, title, ...options };
+				const { actions: event_actions, ...report_fields } = event;
+				const redacted_report_event: BannerReportEvent = {
+					...report_fields,
+					...(event_actions === undefined
+						? {}
+						: {
+								actions: event_actions.map(({ icon, id, label }) => ({
+									...(icon === undefined ? {} : { icon }),
+									id,
+									label,
+								})),
+							}),
+				};
+				yield* presenter.Show(event, on_action);
+				yield* reporter.Report(redacted_report_event).pipe(Effect.ignore);
+			});
 
 		return BannerService.of({
-			dismiss: presenter.Dismiss,
-			error: (title, options) => Show("error", title, options),
-			warning: (title, options) => Show("warning", title, options),
-			info: (title, options) => Show("info", title, options),
-			success: (title, options) => Show("success", title, options),
+			dismiss: (id) =>
+				Effect.gen(function* () {
+					yield* presenter.Dismiss(id);
+				}),
+			error: (title, options) =>
+				Effect.gen(function* () {
+					yield* Show("error", title, options);
+				}),
+			warning: (title, options) =>
+				Effect.gen(function* () {
+					yield* Show("warning", title, options);
+				}),
+			info: (title, options) =>
+				Effect.gen(function* () {
+					yield* Show("info", title, options);
+				}),
+			success: (title, options) =>
+				Effect.gen(function* () {
+					yield* Show("success", title, options);
+				}),
 		});
 	}),
 );

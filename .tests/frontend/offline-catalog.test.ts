@@ -1,13 +1,10 @@
 import { describe, expect, it } from "@effect/vitest";
-import { Effect, Ref, Schema, Stream } from "effect";
-import { ArtisanClient } from "@artisan/transport/client";
+import { Effect, Schema } from "effect";
 
 import { RuntimeCatalog } from "../../modules/protocol/src/runtime-catalog";
-import { FixtureArtisanClientService } from "../../modules/frontend/src/lib/runtime/fixtures/client";
 import {
 	IsOfflineRuntimeCatalog,
 	OfflineRuntimeCatalog,
-	RuntimeCatalogChanges,
 	WithOfflineRuntimeCatalog,
 } from "../../modules/frontend/src/lib/runtime/offline-catalog";
 
@@ -45,91 +42,4 @@ describe("offline runtime catalog", () => {
 			}),
 		).toBe(false);
 	});
-
-	it.effect("queries once from the replayed ready connection state", () =>
-		Effect.gen(function* () {
-			const attempts = yield* Ref.make(0);
-			const connected: RuntimeCatalog = {
-				manifest: OfflineRuntimeCatalog.manifest,
-				runnable_harness_ids: ["codex"],
-			};
-			const client = {
-				...FixtureArtisanClientService,
-				ConnectionChanges: Stream.fromIterable([
-					{ phase: "ready" as const },
-					{ phase: "ready" as const },
-				]),
-				GetRuntimeCatalog: Ref.update(attempts, (count) => count + 1).pipe(
-					Effect.as(connected),
-				),
-			} satisfies typeof ArtisanClient.Service;
-
-			const catalogs = yield* RuntimeCatalogChanges.pipe(
-				Stream.runCollect,
-				Effect.provideService(ArtisanClient, client),
-			);
-
-			expect(catalogs).toEqual([connected]);
-			expect(yield* Ref.get(attempts)).toBe(1);
-		}),
-	);
-
-	it.effect("refreshes once per real reconnect without duplicating phase work", () =>
-		Effect.gen(function* () {
-			const attempts = yield* Ref.make(0);
-			const connected: RuntimeCatalog = {
-				manifest: OfflineRuntimeCatalog.manifest,
-				runnable_harness_ids: ["codex"],
-			};
-			const client = {
-				...FixtureArtisanClientService,
-				ConnectionChanges: Stream.fromIterable([
-					{ phase: "ready" as const },
-					{ phase: "reconnecting" as const },
-					{ phase: "reconnecting" as const },
-					{ phase: "ready" as const },
-				]),
-				GetRuntimeCatalog: Ref.update(attempts, (count) => count + 1).pipe(
-					Effect.as(connected),
-				),
-			} satisfies typeof ArtisanClient.Service;
-
-			const catalogs = yield* RuntimeCatalogChanges.pipe(
-				Stream.runCollect,
-				Effect.provideService(ArtisanClient, client),
-			);
-
-			expect(catalogs).toEqual([connected, OfflineRuntimeCatalog, connected]);
-			expect(yield* Ref.get(attempts)).toBe(2);
-		}),
-	);
-
-	it.effect("stays offline without querying until the connection becomes ready", () =>
-		Effect.gen(function* () {
-			const attempts = yield* Ref.make(0);
-			const connected: RuntimeCatalog = {
-				manifest: OfflineRuntimeCatalog.manifest,
-				runnable_harness_ids: ["codex"],
-			};
-			const client = {
-				...FixtureArtisanClientService,
-				ConnectionChanges: Stream.fromIterable([
-					{ phase: "connecting" as const },
-					{ phase: "reconnecting" as const },
-					{ phase: "ready" as const },
-				]),
-				GetRuntimeCatalog: Ref.update(attempts, (count) => count + 1).pipe(
-					Effect.as(connected),
-				),
-			} satisfies typeof ArtisanClient.Service;
-
-			const catalogs = yield* RuntimeCatalogChanges.pipe(
-				Stream.runCollect,
-				Effect.provideService(ArtisanClient, client),
-			);
-
-			expect(catalogs).toEqual([OfflineRuntimeCatalog, connected]);
-			expect(yield* Ref.get(attempts)).toBe(1);
-		}),
-	);
 });

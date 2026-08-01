@@ -9,6 +9,7 @@ import {
 	permission_reconciliation_for_harness,
 	policy_fields_for_permission,
 } from "../../modules/frontend/src/lib/engine/model-selection";
+import { ApplyPolicyPatch } from "../../modules/frontend/src/routes/components/model-selector/presentation";
 
 const catalog = {
 	manifest: model_manifest,
@@ -16,6 +17,29 @@ const catalog = {
 } satisfies RuntimeCatalog;
 
 describe("model permission selection", () => {
+	it("coalesces rapid reasoning, speed, and model intents from the latest desired policy", () => {
+		const initial: ThreadSessionPolicy = {
+			engine_id: "codex",
+			model: "gpt-5.6-codex",
+			permission: "supervised",
+			permission_mode: "on_request",
+			reasoning_effort: "medium",
+			sandbox_mode: "workspace_write",
+			service_tier: "standard",
+			strict_clarification: false,
+			web_search_enabled: false,
+		};
+		const reasoning = ApplyPolicyPatch(initial, { reasoning_effort: "high" });
+		const speed = ApplyPolicyPatch(reasoning, { service_tier: "priority" });
+		const model = ApplyPolicyPatch(speed, { engine_id: "claude", model: "claude-opus-4-1" });
+
+		expect(model).toMatchObject({
+			engine_id: "claude",
+			model: "claude-opus-4-1",
+			reasoning_effort: "high",
+			service_tier: "priority",
+		});
+	});
 	it("restores Full access with its no-prompt compatibility axes", () => {
 		const option = permission_for_harness(catalog, "codex", "unrestricted");
 

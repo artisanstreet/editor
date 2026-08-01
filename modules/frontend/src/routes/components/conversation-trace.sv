@@ -1,4 +1,4 @@
-<script lang="ts">
+<script lang="ts" effect>
 	import { GetConversationActivityPresentation, type ConversationItem } from "@artisan/protocol";
 	import AlertTriangle from "@tabler/icons-svelte/icons/alert-triangle";
 	import Bug from "@tabler/icons-svelte/icons/bug";
@@ -6,6 +6,7 @@
 	import Tool from "@tabler/icons-svelte/icons/tool";
 	import WorldSearch from "@tabler/icons-svelte/icons/world-search";
 	import ChevronRight from "@tabler/icons-svelte/icons/chevron-right";
+	import { Effect } from "effect";
 	import { conversation_activity_is_live } from "$lib/conversation/activity-status";
 	import { conversation_diagnostics_enabled } from "$lib/conversation/diagnostics";
 	import { ShimmerText } from "$lib/components/ui/shimmer-text";
@@ -45,9 +46,10 @@
 	const LiveActivity = (activities: ReadonlyArray<ConversationActivityItem>) =>
 		work_active ? activities.findLast(conversation_activity_is_live) : undefined;
 
-	const ToggleGroup = (id: string) => {
+	const ToggleGroup = (id: string) =>
+		Effect.gen(function* () {
 		open_groups[id] = !open_groups[id];
-	};
+		});
 </script>
 
 {#if segments.length > 0}
@@ -67,7 +69,7 @@
 						type="button"
 						class="trace-acc-head flex w-fit cursor-pointer items-center gap-2 py-0.5 text-base text-muted-foreground transition-colors duration-150 hover:text-foreground motion-reduce:transition-none"
 						aria-expanded={open}
-						onclick={() => ToggleGroup(segment.id)}
+						onclick={yield* ToggleGroup(segment.id)}
 					>
 						<Terminal2 class="size-4" aria-hidden="true" />
 						{#if live !== undefined}
@@ -115,7 +117,7 @@
 						type="button"
 						class={`trace-acc-head flex w-fit cursor-pointer items-center gap-2 py-0.5 text-base transition-colors duration-150 motion-reduce:transition-none ${failed ? "text-destructive hover:text-destructive" : "text-muted-foreground hover:text-foreground"}`}
 						aria-expanded={open}
-						onclick={() => ToggleGroup(segment.id)}
+						onclick={yield* ToggleGroup(segment.id)}
 					>
 						{#if failed}
 							<AlertTriangle class="size-4" aria-hidden="true" />

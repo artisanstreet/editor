@@ -395,6 +395,12 @@ export function NormaliseCodexExecEvent(
 										...make_base(input, type, "usage"),
 										_tag: "usage" as const,
 										basis: "delta",
+										...(value.usage.cached_input_tokens === undefined
+											? {}
+											: {
+													cached_input_tokens:
+														value.usage.cached_input_tokens,
+												}),
 										...(value.usage.input_tokens === undefined
 											? {}
 											: { input_tokens: value.usage.input_tokens }),

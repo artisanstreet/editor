@@ -1,8 +1,8 @@
-<script lang="ts">
-	import { goto } from "$app/navigation";
+<script lang="ts" effect>
+	import { Effect } from "effect";
 	import type { Snippet } from "svelte";
 	import type { ThreadListItem } from "@artisan/protocol";
-	import Code from "@tabler/icons-svelte/icons/code";
+	import CodeIcon from "@tabler/icons-svelte/icons/code";
 	import Command from "@tabler/icons-svelte/icons/command";
 	import MessageCircle from "@tabler/icons-svelte/icons/message-circle";
 	import ShoppingBag from "@tabler/icons-svelte/icons/shopping-bag";
@@ -10,6 +10,7 @@
 	import barekey_logo from "$lib/assets/barekey/logo-40.png";
 	import logo_gradient from "$lib/assets/barekey/logo-gradient.svg";
 	import { EditorRoutePath } from "$lib/editor/workspace-identity";
+	import { RouteNavigation } from "$lib/browser/route-navigation";
 	import { ThreadRoutePath } from "$lib/root/thread-navigation";
 	import CommandMenu from "./command-menu.sv";
 	import DropdownHoverSurface from "./dropdown-hover-surface.sv";
@@ -24,7 +25,7 @@
 	 */
 	const surfaces = [
 		{ icon: MessageCircle, id: "threads", label: "Threads" },
-		{ icon: Code, id: "editor", label: "Editor" },
+		{ icon: CodeIcon, id: "editor", label: "Editor" },
 	] as const;
 
 	const current_index = $derived(surface === "editor" ? 1 : 0);
@@ -37,6 +38,7 @@
 	let {
 		primary,
 		secondary,
+		show_thread_hover_rail,
 		surface,
 		thread_id,
 		threads,
@@ -44,6 +46,8 @@
 	}: {
 		primary: Snippet;
 		secondary?: Snippet;
+		/** Whether the canonical conversation route owns the transcript proximity rail. */
+		show_thread_hover_rail: boolean;
 		/** Which workspace surface is on screen, owned by the layout. */
 		surface: "editor" | "threads";
 		/** The durable thread shared by both workspace surfaces. */
@@ -55,15 +59,17 @@
 	} = $props();
 
 	const workspace_open = $derived(workspace_id !== undefined && thread_id !== undefined);
+	const navigation = yield* RouteNavigation;
 
-	const CycleSurface = () => {
-		if (workspace_id === undefined || thread_id === undefined) return;
-		void goto(
-			surface === "editor"
-				? ThreadRoutePath(workspace_id, thread_id)
-				: EditorRoutePath(workspace_id, thread_id),
-		);
-	};
+	const CycleSurface = () =>
+		Effect.gen(function* () {
+			if (workspace_id === undefined || thread_id === undefined) return;
+			yield* navigation.Navigate(
+				surface === "editor"
+					? ThreadRoutePath(workspace_id, thread_id)
+					: EditorRoutePath(workspace_id, thread_id),
+			);
+		});
 </script>
 
 <div class="flex h-full min-h-0 flex-row">
@@ -120,9 +126,9 @@
 									onpointerenter={move_hover}
 									onpointermove={move_hover}
 									onfocusin={move_hover}
-									onclick={() => {
+									onclick={yield* Effect.gen(function* () {
 										command_open = true;
-									}}
+									})}
 								>
 									<Command
 										class="size-4 text-muted-foreground transition-colors duration-(--duration-fast) ease-in-out group-hover/command-menu:text-foreground motion-reduce:transition-none"
@@ -165,7 +171,7 @@
 									onpointerenter={move_hover}
 									onpointermove={move_hover}
 									onfocusin={move_hover}
-									onclick={CycleSurface}
+									onclick={yield* CycleSurface()}
 								>
 									<!--
 										The icon names where the press goes, not where you already
@@ -178,7 +184,7 @@
 										aria-hidden="true"
 									>
 										<span class="t-icon" data-icon="a">
-											<Code
+											<CodeIcon
 												class="size-4 text-muted-foreground transition-colors duration-(--duration-fast) ease-in-out group-hover/surface-cycle:text-foreground motion-reduce:transition-none"
 											/>
 										</span>
@@ -217,7 +223,7 @@
 					for every thread; it only exists on the threads surface, where
 					that margin is real.
 				-->
-				{#if surface === "threads" && threads.length > 0}
+				{#if show_thread_hover_rail && threads.length > 0}
 					<ThreadHoverRail {threads} />
 				{/if}
 			</section>

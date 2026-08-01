@@ -210,10 +210,12 @@ const PrivateReasoningDeltaSchema = Schema.Struct({
 const UsageSchema = Schema.Struct({
 	threadId: Schema.String,
 	tokenUsage: Schema.Struct({
+		modelContextWindow: Schema.optional(Schema.NullOr(TokenCount)),
 		total: Schema.Struct({
 			cachedInputTokens: Schema.optional(TokenCount),
 			inputTokens: Schema.optional(TokenCount),
 			outputTokens: Schema.optional(TokenCount),
+			totalTokens: Schema.optional(TokenCount),
 		}),
 	}),
 	turnId: Schema.String,
@@ -447,6 +449,15 @@ export function normalise_codex_notification(
 					...base,
 					_tag: "usage",
 					basis: "cumulative",
+					...(value.tokenUsage.total.cachedInputTokens === undefined
+						? {}
+						: { cached_input_tokens: value.tokenUsage.total.cachedInputTokens }),
+					...(value.tokenUsage.total.totalTokens === undefined
+						? {}
+						: { context_tokens: value.tokenUsage.total.totalTokens }),
+					...(value.tokenUsage.modelContextWindow == null
+						? {}
+						: { context_window_tokens: value.tokenUsage.modelContextWindow }),
 					...(value.tokenUsage.total.inputTokens === undefined
 						? {}
 						: { input_tokens: value.tokenUsage.total.inputTokens }),

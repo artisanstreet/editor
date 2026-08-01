@@ -1,5 +1,6 @@
 <script lang="ts" effect>
 	import Copy from "@tabler/icons-svelte/icons/copy";
+	import { WriteClipboardText } from "$lib/browser/clipboard";
 	import { Button } from "$lib/components/ui/button";
 	import { format_relative_age } from "$lib/conversation/relative-time";
 	import { Clock, Effect } from "effect";
@@ -13,18 +14,28 @@
 	} = $props();
 
 	let now = $state(yield* Clock.currentTimeMillis);
+	let copy_message = $state("");
 	const age = $derived(format_relative_age(now, settled_at));
 
-	yield* Effect.forever(
-		Effect.gen(function* () {
+	const KeepClockCurrent = Effect.gen(function* () {
+		while (true) {
 			yield* Effect.sleep("1 second");
 			now = yield* Clock.currentTimeMillis;
-		}),
-	);
+		}
+	});
 
-	const copy_response = () => {
-		void navigator.clipboard.writeText(text);
-	};
+	const CopyResponse = Effect.gen(function* () {
+		copy_message = "";
+		yield* WriteClipboardText(text).pipe(
+			Effect.catchTag("ClipboardWriteError", () =>
+				Effect.gen(function* () {
+					copy_message = "Couldn't copy response. Try again.";
+				}),
+			),
+		);
+	});
+
+	yield* KeepClockCurrent;
 </script>
 
 <footer
@@ -37,9 +48,12 @@
 		class="text-muted-foreground"
 		aria-label="Copy response"
 		title="Copy response"
-		onclick={copy_response}
+		onclick={yield* CopyResponse}
 	>
 		<Copy class="size-4" />
 	</Button>
+	{#if copy_message.length > 0}
+		<span class="text-destructive" role="status">{copy_message}</span>
+	{/if}
 	<time datetime={settled_at}>{age}</time>
 </footer>

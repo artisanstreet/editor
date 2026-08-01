@@ -1,9 +1,9 @@
 <script lang="ts" effect>
-	import { goto } from "$app/navigation";
 	import { page } from "$app/state";
-	import { onDestroy, untrack } from "svelte";
+	import { untrack } from "svelte";
 	import type {
 		ImageAttachmentReference,
+		SurfaceUsageAggregate,
 		ThreadListItem,
 		ThreadSessionPolicy,
 		ThreadSessionSnapshot,
@@ -22,6 +22,7 @@
 	} from "$lib/conversation/subscription";
 	import {
 		BuildThreadMessageCommand,
+		MakeSubmitGate,
 		ObserveAcceptedProjection,
 		SubmitDurableCommand,
 		ThreadInteractionError,
@@ -29,13 +30,25 @@
 	import { ConversationUserMessageWithSourceReference } from "$lib/conversation/scroll-position";
 	import type { ComposerSubmission } from "$lib/composer/image-attachments";
 	import { BannerService } from "$lib/banner/service";
-	import { pending_first_submission } from "$lib/root/draft-thread";
+	import { RouteNavigation } from "$lib/browser/route-navigation";
+	import {
+		RunUsageController,
+		type RunUsageState,
+	} from "$lib/context-usage/run-usage-controller";
+	import {
+		DraftThreadController,
+		type DraftSubmissionClaim,
+	} from "$lib/root/draft-thread";
+	import { MakeLatestRequestGate } from "$lib/lifecycle/latest-request-gate";
+	import {
+		CreateBrowserObjectUrl,
+		ReleaseBrowserObjectUrl,
+	} from "$lib/browser/object-url";
 	import {
 		ResolveThreadRoute,
 		ThreadRoutePathFor,
 	} from "$lib/root/thread-navigation";
-	import { Effect, Exit, Option, Queue, Scope, Stream } from "effect";
-	import { get } from "svelte/store";
+	import { Effect, Exit, Option, Scope, Semaphore, Stream } from "effect";
 	import ThreadWorkspace from "./thread-workspace.sv";
 
 	let {
@@ -47,28 +60,15 @@
 
 	const client = yield* ArtisanClient;
 	const banner = yield* BannerService;
-	const frontend_scope = yield* Scope.Scope;
+	const navigation = yield* RouteNavigation;
+	const draft_thread = yield* DraftThreadController;
+	const run_usage = yield* RunUsageController;
+	const run_usage_lease = yield* run_usage.Acquire(undefined);
 	const thread_scope = yield* Scope.make();
-	type ThreadAction =
-		| { readonly _tag: "Run"; readonly effect: Effect.Effect<void> }
-		| { readonly _tag: "Stop" };
-	const action_queue = yield* Queue.unbounded<ThreadAction>();
-	const Dispatch = (effect: Effect.Effect<void>) => {
-		Queue.offerUnsafe(action_queue, { _tag: "Run", effect });
-	};
-	onDestroy(() => Queue.offerUnsafe(action_queue, { _tag: "Stop" }));
-	yield* Effect.forkIn(
+	yield* Effect.addFinalizer(() =>
 		Effect.gen(function* () {
-			while (true) {
-				const action = yield* Queue.take(action_queue);
-				if (action._tag === "Stop") {
-					yield* Scope.close(thread_scope, Exit.void);
-					return;
-				}
-				yield* Effect.forkIn(action.effect, thread_scope);
-			}
+			yield* Scope.close(thread_scope, Exit.void);
 		}),
-		frontend_scope,
 	);
 
 	const threads = yield* client.ListThreads;
@@ -76,27 +76,30 @@
 		ResolveThreadRoute(threads, route_id),
 		{
 			onNone: () =>
-				Effect.fail(
+				Effect.gen(function* () {
+					return yield* Effect.fail(
 					new ThreadInteractionError({
 						message: `Thread ${route_id} does not exist.`,
 					}),
-				),
-			onSome: Effect.succeed,
+					);
+				}),
+			onSome: (candidate) =>
+				Effect.gen(function* () {
+					return candidate;
+				}),
 		},
 	);
 	const thread_id = initial_thread.thread_id;
-	const CanonicalizeThreadPath = (candidate: ThreadListItem) => {
-		const canonical_path = ThreadRoutePathFor(candidate);
-		return page.url.pathname === canonical_path
-			? Effect.void
-			: Effect.promise(() =>
-					goto(canonical_path, {
-						keepFocus: true,
-						noScroll: true,
-						replaceState: true,
-					}),
-				);
-	};
+	const CanonicalizeThreadPath = (candidate: ThreadListItem) =>
+		Effect.gen(function* () {
+			const canonical_path = ThreadRoutePathFor(candidate);
+			if (page.url.pathname === canonical_path) return;
+			yield* navigation.Navigate(canonical_path, {
+					keepFocus: true,
+					noScroll: true,
+					replaceState: true,
+				});
+		});
 	yield* CanonicalizeThreadPath(initial_thread);
 	let session = $state.raw<ThreadSessionSnapshot | undefined>(
 		yield* client.GetThreadSession(thread_id),
@@ -108,6 +111,17 @@
 	const run_active = $derived(
 		work?.status === "running" || work?.status === "waiting",
 	);
+	let context_usage = $state.raw<SurfaceUsageAggregate | undefined>(undefined);
+	const ApplyRunUsage = (state: RunUsageState) =>
+		Effect.gen(function* () {
+			context_usage = state._tag === "Ready" ? state.aggregate : undefined;
+		});
+	yield* run_usage.Changes.pipe(
+		Stream.runForEach(ApplyRunUsage),
+		Effect.forkScoped,
+	);
+	yield* run_usage_lease.Select(work?.run_id);
+	yield* Effect.addFinalizer(run_usage_lease.Release);
 	const initial_snapshot = yield* client.GetConversation({ thread_id });
 	if (initial_snapshot.thread_id !== thread_id) {
 		yield* Effect.fail(
@@ -124,26 +138,18 @@
 	const visible_image_ids = new Set<string>();
 	const image_load_attempts = new Map<string, number>();
 
-	const ReleaseImageAttachment = (attachment_id: string) => {
-		const source = image_sources.get(attachment_id);
-		if (source === undefined) return;
-		URL.revokeObjectURL(source);
-		const next_sources = new Map(image_sources);
-		next_sources.delete(attachment_id);
-		image_sources = next_sources;
-	};
+	const ReleaseImageAttachment = (attachment_id: string) =>
+		Effect.gen(function* () {
+			const source = image_sources.get(attachment_id);
+			if (source === undefined) return;
+			yield* ReleaseBrowserObjectUrl(source).pipe(Effect.ignore);
+			const next_sources = new Map(image_sources);
+			next_sources.delete(attachment_id);
+			image_sources = next_sources;
+		});
 
-	const RequestImageAttachment = (attachment: ImageAttachmentReference) => {
-		if (
-			image_sources.has(attachment.id) ||
-			requested_image_ids.has(attachment.id)
-		)
-			return;
-		requested_image_ids.add(attachment.id);
-		const attempt = (image_load_attempts.get(attachment.id) ?? 0) + 1;
-		image_load_attempts.set(attachment.id, attempt);
-
-		const LoadImageAttachment = Effect.gen(function* () {
+	const LoadImageAttachment = (attachment: ImageAttachmentReference, attempt: number) =>
+		Effect.gen(function* () {
 			const result = yield* client.GetMessageImageAttachment({
 				attachment_id: attachment.id,
 				thread_id,
@@ -154,13 +160,19 @@
 			}
 
 			const bytes = Uint8Array.from(result.value.bytes);
-			const source = URL.createObjectURL(
-				new Blob([bytes], { type: result.value.media_type }),
-			);
+			const source = yield* CreateBrowserObjectUrl(bytes, result.value.media_type);
 			yield* Scope.addFinalizer(
 				thread_scope,
-				Effect.sync(() => URL.revokeObjectURL(source)),
+				Effect.gen(function* () {
+					yield* ReleaseBrowserObjectUrl(source).pipe(Effect.ignore);
+				}),
 			);
+			if (!visible_image_ids.has(attachment.id)) {
+				requested_image_ids.delete(attachment.id);
+				image_load_attempts.delete(attachment.id);
+				yield* ReleaseBrowserObjectUrl(source).pipe(Effect.ignore);
+				return;
+			}
 			image_sources = new Map(image_sources).set(attachment.id, source);
 			image_load_attempts.delete(attachment.id);
 			requested_image_ids.delete(attachment.id);
@@ -174,38 +186,49 @@
 					yield* Effect.sleep(attempt * 500);
 					requested_image_ids.delete(attachment.id);
 					if (!visible_image_ids.has(attachment.id)) return;
-					RequestImageAttachment(attachment);
+					yield* RequestImageAttachment(attachment);
 				}),
 			),
 		);
 
-		Dispatch(LoadImageAttachment);
-	};
+	const RequestImageAttachment = (attachment: ImageAttachmentReference) =>
+		Effect.gen(function* () {
+			if (
+				image_sources.has(attachment.id) ||
+				requested_image_ids.has(attachment.id)
+			)
+				return;
+			requested_image_ids.add(attachment.id);
+			const attempt = (image_load_attempts.get(attachment.id) ?? 0) + 1;
+			image_load_attempts.set(attachment.id, attempt);
+
+			yield* LoadImageAttachment(attachment, attempt);
+		});
 
 	const UpdateImageAttachmentVisibility = (
 		attachments: ReadonlyArray<ImageAttachmentReference>,
 		visible: boolean,
-	) => {
+	) =>
+		Effect.gen(function* () {
 		for (const attachment of attachments) {
 			if (visible) {
 				visible_image_ids.add(attachment.id);
-				RequestImageAttachment(attachment);
+				yield* RequestImageAttachment(attachment);
 			} else {
 				visible_image_ids.delete(attachment.id);
 				image_load_attempts.delete(attachment.id);
-				ReleaseImageAttachment(attachment.id);
+				yield* ReleaseImageAttachment(attachment.id);
 			}
 		}
-	};
+		});
 
 	const ReplaceSnapshot = (next: typeof snapshot) =>
-		!CanReplaceConversationSnapshot(snapshot, next)
-			? Effect.void
-			: Effect.sync(() => {
-					const initialized = MakeConversationViewState(next);
-					snapshot = next;
-					view_state = initialized._tag === "applied" ? initialized.state : undefined;
-				});
+		Effect.gen(function* () {
+			if (!CanReplaceConversationSnapshot(snapshot, next)) return;
+			const initialized = MakeConversationViewState(next);
+			snapshot = next;
+			view_state = initialized._tag === "applied" ? initialized.state : undefined;
+		});
 
 	yield* ReplaceSnapshot(snapshot);
 
@@ -213,19 +236,34 @@
 		yield* ReplaceSnapshot(yield* client.GetConversation({ thread_id }));
 	});
 
+	/**
+	 * Reads may complete out of order because conversation patches, command
+	 * receipts, and recovery all refresh this context. A request is allowed to
+	 * read concurrently, but only the newest request may commit its
+	 * session/thread/run tuple and select a usage lease.
+	 */
+	const interaction_refresh_requests = yield* MakeLatestRequestGate;
+	const interaction_refresh_commit = yield* Semaphore.make(1);
 	const RefreshInteractionContext = Effect.gen(function* () {
+		const generation = yield* interaction_refresh_requests.Begin;
 		const [next_session, threads, next_work] = yield* Effect.all([
 			client.GetThreadSession(thread_id),
 			client.ListThreads,
 			client.GetThreadWork(thread_id),
 		]);
-		session = next_session;
-		thread = threads.find((candidate) => candidate.thread_id === thread_id);
-		if (thread !== undefined) yield* CanonicalizeThreadPath(thread);
-		work = Option.getOrUndefined(next_work);
+		yield* interaction_refresh_commit.withPermit(
+			Effect.gen(function* () {
+				if (!(yield* interaction_refresh_requests.IsCurrent(generation))) return;
+				session = next_session;
+				thread = threads.find((candidate) => candidate.thread_id === thread_id);
+				if (thread !== undefined) yield* CanonicalizeThreadPath(thread);
+				work = Option.getOrUndefined(next_work);
+				yield* run_usage_lease.Select(work?.run_id);
+			}),
+		);
 	});
 
-	const SendMessage = (submission: ComposerSubmission) =>
+	const SendMessage = (submission: ComposerSubmission, command_id?: string) =>
 		Effect.gen(function* () {
 			if (session === undefined) {
 				return yield* Effect.fail(
@@ -238,7 +276,7 @@
 			const expects_user_message =
 				result.command.payload.type === "thread.send_message";
 			const ReconcileAcceptedUserMessage = (command_id: string) =>
-				Effect.suspend(() => {
+				Effect.gen(function* () {
 					const has_accepted_user_message = (candidate: typeof snapshot) =>
 						Option.isSome(
 							ConversationUserMessageWithSourceReference(
@@ -247,19 +285,13 @@
 							),
 						);
 					if (!expects_user_message || has_accepted_user_message(snapshot)) {
-						return Effect.void;
+						return;
 					}
-					return ObserveAcceptedProjection(
+					const observed = yield* ObserveAcceptedProjection(
 						client.GetConversation({ thread_id }),
 						has_accepted_user_message,
-					).pipe(
-						Effect.flatMap(
-							Option.match({
-								onNone: () => Effect.void,
-								onSome: ReplaceSnapshot,
-							}),
-						),
 					);
+					if (Option.isSome(observed)) yield* ReplaceSnapshot(observed.value);
 				});
 
 			/**
@@ -269,8 +301,11 @@
 			 * Later assistant patches remain stream-driven through `ApplyUpdate`.
 			 */
 			const receipt = yield* SubmitDurableCommand(
-				client.Command(result.command),
-				(receipt) => ReconcileAcceptedUserMessage(receipt.command_id),
+				client.Command({ ...result.command, ...(command_id === undefined ? {} : { command_id }) }),
+				(receipt) =>
+					Effect.gen(function* () {
+						yield* ReconcileAcceptedUserMessage(receipt.command_id);
+					}),
 			);
 			yield* Effect.forkIn(
 				RefreshInteractionContext.pipe(Effect.ignore),
@@ -286,90 +321,109 @@
 
 	const UpdateSessionPolicy = (policy: ThreadSessionPolicy) =>
 		Effect.gen(function* () {
-			yield* client.UpdateThreadSessionPolicy({ policy, thread_id });
+			const authoritative_policy = yield* Effect.gen(function* () {
+				yield* client.UpdateThreadSessionPolicy({ policy, thread_id });
+				const refreshed = yield* client.GetThreadSession(thread_id);
+				session = refreshed;
+				return refreshed.policy;
+			}).pipe(
+				Effect.catch((error) =>
+					Effect.gen(function* () {
+						const reconciled = yield* client.GetThreadSession(thread_id).pipe(Effect.option);
+						if (Option.isSome(reconciled)) {
+							session = reconciled.value;
+							return reconciled.value.policy;
+						}
+						return yield* Effect.fail(error);
+					}),
+				),
+			);
+			yield* RefreshInteractionContext;
+			return authoritative_policy;
+		});
+
+	const PersistSessionPolicy = (policy: ThreadSessionPolicy) =>
+		Effect.gen(function* () {
+			return yield* UpdateSessionPolicy(policy);
+		});
+
+	const RespondApproval = (approval_id: string, approved: boolean) =>
+		Effect.gen(function* () {
+			yield* client.Command({
+				payload: { approval_id, approved, type: "run.respond_approval" },
+				thread_id,
+			});
 			yield* RefreshInteractionContext;
 		});
 
-	const PersistSessionPolicy = (policy: ThreadSessionPolicy) => {
-		Dispatch(UpdateSessionPolicy(policy).pipe(Effect.catch(() => Effect.void)));
-	};
-
-	const RespondApproval = (approval_id: string, approved: boolean) =>
-		client
-			.Command({
-				payload: { approval_id, approved, type: "run.respond_approval" },
-				thread_id,
-			})
-			.pipe(Effect.andThen(RefreshInteractionContext));
-
 	const CancelRun = () =>
-		client
-			.Command({ payload: { type: "run.cancel" }, thread_id })
-			.pipe(Effect.andThen(RefreshInteractionContext), Effect.asVoid);
+		Effect.gen(function* () {
+			yield* client.Command({ payload: { type: "run.cancel" }, thread_id });
+			yield* RefreshInteractionContext;
+		});
 
 	const RunCommand = (payload: {
 		readonly type: "run.respond_question";
 		readonly answers: Record<string, [string, ...string[]]>;
-	}) => {
-		Dispatch(
-			client.Command({ payload, thread_id }).pipe(
-				Effect.andThen(RefreshInteractionContext),
-				Effect.catch(() => Effect.void),
-			),
-		);
-	};
+	}) =>
+		Effect.gen(function* () {
+			yield* client.Command({ payload, thread_id });
+			yield* RefreshInteractionContext;
+		});
 
-	const RefreshAuthoritativeThread = Effect.all(
-		[Resync, RefreshInteractionContext],
-		{ concurrency: "unbounded", discard: true },
-	);
+	const RefreshAuthoritativeThread = Effect.gen(function* () {
+		yield* Resync;
+		yield* RefreshInteractionContext;
+	});
 
 	const ApplyUpdate = (update: ConversationUpdate) =>
-		update.type === "snapshot"
-			? ReplaceSnapshot(update.snapshot)
-			: Effect.gen(function* () {
-					for (let attempt = 0; attempt < 2; attempt += 1) {
-						if (
-							update.batch.thread_id !== thread_id ||
-							update.batch.conversation_id !== conversation_id
-						) {
-							yield* Resync;
-							return;
-						}
-						if (view_state === undefined) yield* Resync;
+		Effect.gen(function* () {
+			if (update.type === "snapshot") {
+				yield* ReplaceSnapshot(update.snapshot);
+				return;
+			}
+			for (let attempt = 0; attempt < 2; attempt += 1) {
+				if (
+					update.batch.thread_id !== thread_id ||
+					update.batch.conversation_id !== conversation_id
+				) {
+					yield* Resync;
+					return;
+				}
+				if (view_state === undefined) yield* Resync;
 
-						if (snapshot.last_patch_sequence >= update.batch.to_sequence) return;
-						const applicable = update.batch.patches.filter(
-							(patch) => patch.sequence > snapshot.last_patch_sequence,
-						);
-						if (
-							view_state === undefined ||
-							applicable[0]?.sequence !== snapshot.last_patch_sequence + 1
-						) {
-							yield* Resync;
-							continue;
-						}
+				if (snapshot.last_patch_sequence >= update.batch.to_sequence) return;
+				const applicable = update.batch.patches.filter(
+					(patch) => patch.sequence > snapshot.last_patch_sequence,
+				);
+				if (
+					view_state === undefined ||
+					applicable[0]?.sequence !== snapshot.last_patch_sequence + 1
+				) {
+					yield* Resync;
+					continue;
+				}
 
-						let failed = false;
-						for (const patch of applicable) {
-							const result = ApplyConversationViewPatch(view_state, patch);
-							if (result._tag === "resync_required" || result._tag === "invariant_error") {
-								failed = true;
-								break;
-							}
-							view_state = result.state;
-						}
-						if (
-							failed ||
-							view_state.rebuild.snapshot.last_patch_sequence !== update.batch.to_sequence
-						) {
-							yield* Resync;
-							continue;
-						}
-						snapshot = view_state.rebuild.snapshot;
-						return;
+				let failed = false;
+				for (const patch of applicable) {
+					const result = ApplyConversationViewPatch(view_state, patch);
+					if (result._tag === "resync_required" || result._tag === "invariant_error") {
+						failed = true;
+						break;
 					}
-				});
+					view_state = result.state;
+				}
+				if (
+					failed ||
+					view_state.rebuild.snapshot.last_patch_sequence !== update.batch.to_sequence
+				) {
+					yield* Resync;
+					continue;
+				}
+				snapshot = view_state.rebuild.snapshot;
+				return;
+			}
+		});
 
 	yield* Effect.forkIn(
 		RunConversationSubscription(
@@ -381,33 +435,91 @@
 	);
 	yield* Effect.forkIn(
 		RunAuthoritativeSubscription(
-			Effect.succeed(
-				client.Events.pipe(
+			Effect.gen(function* () {
+				return client.Events.pipe(
 					Stream.filter((event) => event.thread_id === thread_id),
 					Stream.debounce("50 millis"),
-				),
-			),
-			() => RefreshAuthoritativeThread,
+				);
+			}),
+			() =>
+				Effect.gen(function* () {
+					yield* RefreshAuthoritativeThread;
+				}),
 			RefreshAuthoritativeThread,
 		),
 		thread_scope,
 	);
 
+	const RespondQuestion = (question_id: string, answer: string) =>
+		Effect.gen(function* () {
+			yield* RunCommand({
+				answers: { [question_id]: [answer] },
+				type: "run.respond_question",
+			}).pipe(
+				Effect.catch((error) =>
+					Effect.gen(function* () {
+						yield* banner.error("Could not answer question", {
+							description: error.message,
+						});
+						return yield* Effect.fail(error);
+					}),
+				),
+			);
+		});
+
 	/**
 	 * A thread reached from the draft route was created by its first submission;
 	 * send that message through the normal durable pipeline exactly once.
 	 */
-	const pending = get(pending_first_submission);
-	if (pending?.thread_id === thread_id) {
-		pending_first_submission.set(undefined);
-		Dispatch(
-			SendMessage(pending.submission).pipe(
-				Effect.asVoid,
-				Effect.catch((error) =>
-					banner.error("Could not send message", { description: error.message }),
-				),
+	let pending_first_submission = $state.raw<DraftSubmissionClaim | undefined>(undefined);
+	let pending_first_submission_error = $state<string | undefined>(undefined);
+	let first_submission_attempting = $state(false);
+	let first_submission_blocked = $state(false);
+	const first_submission_gate = yield* MakeSubmitGate;
+	const ClaimPendingFirstSubmission = Effect.gen(function* () {
+		pending_first_submission = yield* draft_thread.AwaitPendingSubmissionClaim(thread_id);
+		first_submission_blocked = pending_first_submission !== undefined;
+	});
+	const DeliverPendingFirstSubmission = Effect.gen(function* () {
+		if (pending_first_submission === undefined) yield* ClaimPendingFirstSubmission;
+		const claimed = pending_first_submission;
+		if (claimed === undefined) return;
+		yield* SendMessage(claimed.submission, claimed.command_id);
+		yield* claimed.Complete;
+		pending_first_submission = undefined;
+		first_submission_blocked = false;
+	});
+	const RetryPendingFirstSubmission = Effect.gen(function* () {
+		if (!(yield* first_submission_gate.Acquire)) return;
+		first_submission_attempting = true;
+		pending_first_submission_error = undefined;
+		yield* DeliverPendingFirstSubmission.pipe(
+			Effect.catch((error) =>
+				Effect.gen(function* () {
+					pending_first_submission_error = error.message;
+					const claimed = pending_first_submission;
+					if (claimed !== undefined) yield* claimed.Release;
+					pending_first_submission = undefined;
+					yield* banner.error("Could not send message", { description: error.message });
+				}),
+			),
+			Effect.ensuring(
+				Effect.gen(function* () {
+					first_submission_attempting = false;
+					yield* first_submission_gate.Release;
+				}),
 			),
 		);
+	});
+	yield* ClaimPendingFirstSubmission;
+	yield* Effect.addFinalizer(() =>
+		Effect.gen(function* () {
+			const claimed = pending_first_submission;
+			if (claimed !== undefined) yield* claimed.Release;
+		}),
+	);
+	if (pending_first_submission !== undefined) {
+		yield* RetryPendingFirstSubmission;
 	}
 </script>
 
@@ -416,19 +528,33 @@
 </svelte:head>
 
 <ThreadWorkspace
+	{context_usage}
 	{image_sources}
 	onabort={CancelRun}
 	{snapshot}
-	disabled={session === undefined}
+	disabled={session === undefined || first_submission_blocked}
 	onapproval={RespondApproval}
-	onquestion={(question_id, answer) =>
-		RunCommand({
-			answers: { [question_id]: [answer] },
-			type: "run.respond_question",
-		})}
+	onquestion={RespondQuestion}
 	onimagevisibilitychange={UpdateImageAttachmentVisibility}
 	onpolicychange={PersistSessionPolicy}
 	onsubmit={SendMessage}
 	policy={session?.policy}
 	{run_active}
 />
+
+{#if first_submission_blocked}
+	<div class="fixed inset-x-0 bottom-6 z-30 mx-auto flex w-fit items-center gap-3 rounded-lg border border-destructive/40 bg-background px-4 py-3 shadow-lg" role="alert">
+		<span>
+			{pending_first_submission_error === undefined
+				? "The first message is being delivered. It must finish before another message can be sent."
+				: "The first message was not accepted. Retry it before sending another message."}
+		</span>
+		<button
+			type="button"
+			disabled={first_submission_attempting}
+			onclick={yield* RetryPendingFirstSubmission}
+		>
+			{first_submission_attempting ? "Retrying first message…" : "Retry first message"}
+		</button>
+	</div>
+{/if}

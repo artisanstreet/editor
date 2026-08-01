@@ -1,11 +1,11 @@
 <script lang="ts" effect>
-	import { goto } from "$app/navigation";
 	import { page } from "$app/state";
 	import { untrack } from "svelte";
 	import { Effect, Option } from "effect";
 	import type { ThreadListItem } from "@artisan/protocol";
 	import { ArtisanClient, type ThreadListUpdate } from "@artisan/transport/client";
 	import { RunAuthoritativeSubscription } from "$lib/conversation/subscription";
+	import { RouteNavigation } from "$lib/browser/route-navigation";
 	import { EditorRouteTargetForThread } from "$lib/editor/workspace-identity";
 	import {
 		ApplyRootThreadListUpdate,
@@ -25,6 +25,7 @@
 	const workspace_id = untrack(() => route_workspace_id);
 
 	const client = yield* ArtisanClient;
+	const navigation = yield* RouteNavigation;
 	let threads = $state.raw<ReadonlyArray<ThreadListItem>>(yield* client.ListThreads);
 	let active_thread = $state.raw<ThreadListItem | undefined>();
 
@@ -37,13 +38,11 @@
 		const thread = Option.getOrUndefined(ResolveThreadRoute(threads, route_id));
 		if (thread === undefined) {
 			active_thread = undefined;
-			yield* Effect.promise(() =>
-				goto("/", {
+			yield* navigation.Navigate("/", {
 					keepFocus: true,
 					noScroll: true,
 					replaceState: true,
-				}),
-			);
+				});
 			return;
 		}
 
@@ -57,13 +56,11 @@
 			`${page.url.pathname}${page.url.search}` === target.path;
 		if (!route_matches) {
 			active_thread = undefined;
-			yield* Effect.promise(() =>
-				goto(target.path, {
+			yield* navigation.Navigate(target.path, {
 					keepFocus: true,
 					noScroll: true,
 					replaceState: true,
-				}),
-			);
+				});
 			return;
 		}
 
@@ -71,18 +68,19 @@
 	});
 
 	const ApplyThreadListUpdate = (update: ThreadListUpdate) =>
-		Effect.sync(() => {
+		Effect.gen(function* () {
 			threads = ApplyRootThreadListUpdate(threads, update);
-		}).pipe(Effect.andThen(ReconcileRoute));
+			yield* ReconcileRoute;
+		});
 
-	const RefreshThreads = client.ListThreads.pipe(
-		Effect.map((next_threads) => ({
+	const RefreshThreads = Effect.gen(function* () {
+		const next_threads = yield* client.ListThreads;
+		yield* ApplyThreadListUpdate({
 			journal_sequence: 0,
 			threads: next_threads,
 			type: "snapshot" as const,
-		})),
-		Effect.flatMap(ApplyThreadListUpdate),
-	);
+		});
+	});
 
 	yield* ReconcileRoute;
 	yield* RunAuthoritativeSubscription(

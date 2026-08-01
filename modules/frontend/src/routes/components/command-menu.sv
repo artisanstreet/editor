@@ -1,5 +1,5 @@
-<script lang="ts">
-	import { goto } from "$app/navigation";
+
+<script lang="ts" effect>
 	import Edit from "@tabler/icons-svelte/icons/edit";
 	import MessageCircle from "@tabler/icons-svelte/icons/message-circle";
 	import Settings from "@tabler/icons-svelte/icons/settings";
@@ -16,6 +16,8 @@
 		ProjectScopedThreadGroups,
 		ThreadRoutePathFor,
 	} from "$lib/root/thread-navigation";
+	import { Effect } from "effect";
+	import { RunBrowserDom } from "$lib/browser/dom";
 
 	let {
 		open = $bindable(false),
@@ -28,20 +30,17 @@
 
 	const project_thread_groups = $derived(ProjectScopedThreadGroups(threads));
 
-	/** Selecting closes the dialog first so the destination never renders behind it. */
-	const Navigate = (path: string) => {
-		open = false;
-		void goto(path);
-	};
+	const ToggleCommandMenu = (event: KeyboardEvent) =>
+		Effect.gen(function* () {
+			if (event.key !== "k" || (!event.metaKey && !event.ctrlKey)) return;
+			yield* RunBrowserDom(() => event.preventDefault());
+			open = !open;
+		});
+
 </script>
 
 <svelte:window
-	onkeydown={(event) => {
-		if (event.key === "k" && (event.metaKey || event.ctrlKey)) {
-			event.preventDefault();
-			open = !open;
-		}
-	}}
+	onkeydown={yield* ToggleCommandMenu(event)}
 />
 
 <CommandDialog bind:open title="Command menu" description="Search threads and actions">
@@ -51,16 +50,14 @@
 
 		<CommandGroup heading="Actions">
 			<!--
-				New thread is a plain jump into the bare draft route: no dropdown,
+				New thread is a plain jump to the root draft: no dropdown,
 				no project picking, and no durable thread creation from the menu.
 			-->
-			<CommandItem onSelect={() => Navigate("/threads")}>
-				<Edit />
-				<span>New thread</span>
+			<CommandItem>
+				<a href="/" class="flex grow items-center gap-2"><Edit /><span>New thread</span></a>
 			</CommandItem>
-			<CommandItem onSelect={() => Navigate("/settings")}>
-				<Settings />
-				<span>Open settings</span>
+			<CommandItem>
+				<a href="/settings/models" class="flex grow items-center gap-2"><Settings /><span>Open settings</span></a>
 			</CommandItem>
 		</CommandGroup>
 
@@ -70,10 +67,8 @@
 				{#each group.threads as thread (thread.thread_id)}
 					<CommandItem
 						value={`${thread.title} ${thread.thread_id}`}
-						onSelect={() => Navigate(ThreadRoutePathFor(thread))}
 					>
-						<MessageCircle />
-						<span class="truncate">{thread.title}</span>
+						<a href={ThreadRoutePathFor(thread)} class="flex min-w-0 grow items-center gap-2"><MessageCircle /><span class="truncate">{thread.title}</span></a>
 					</CommandItem>
 				{/each}
 			</CommandGroup>

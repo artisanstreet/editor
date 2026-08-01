@@ -1,4 +1,6 @@
-import { Effect, Fiber, Queue } from "effect";
+import { Effect, Queue } from "effect";
+import { RunBrowserDom } from "$lib/browser/dom";
+import { MakeScopedAttachmentRunner } from "$lib/lifecycle/scoped-attachment-runner";
 
 /**
  * How long after a highlight lands the pill keeps verifying its geometry. Long
@@ -23,88 +25,115 @@ const SETTLE_MS = 250;
  * @returns A Svelte attachment for the highlighted item.
  */
 const AcquireHighlight = (move_hover: (event: Event) => void, node: HTMLElement) =>
-	Effect.acquireRelease(
-		Effect.sync(() => {
-			/** The geometry the pill currently sits on; `undefined` until first revealed. */
-			let applied: string | undefined = undefined;
-			let deadline = 0;
-			/** A scheduled frame, or 0 when the watch is idle. */
-			let frame = 0;
-			/** The previous frame's reading, used to detect that layout has stopped moving. */
-			let sampled: string | undefined = undefined;
+	Effect.gen(function* () {
+		return yield* Effect.acquireRelease(
+			Effect.gen(function* () {
+				/** The geometry the pill currently sits on; `undefined` until first revealed. */
+				let applied: string | undefined = undefined;
+				let deadline = 0;
+				/** A scheduled frame, or 0 when the watch is idle. */
+				let frame = 0;
+				/** The previous frame's reading, used to detect that layout has stopped moving. */
+				let sampled: string | undefined = undefined;
+				const commands = yield* Queue.unbounded<"highlighted" | "settle" | "watch">();
 
-			const Geometry = () =>
-				`${node.offsetTop}:${node.offsetLeft}:${node.offsetWidth}:${node.offsetHeight}`;
+				const Geometry = () =>
+					Effect.gen(function* () {
+						return yield* RunBrowserDom(
+							() =>
+								`${node.offsetTop}:${node.offsetLeft}:${node.offsetWidth}:${node.offsetHeight}`,
+						);
+					});
 
-			const Apply = (geometry: string) => {
-				applied = geometry;
-				const event = new Event("highlight");
-				Object.defineProperty(event, "currentTarget", { value: node });
-				move_hover(event);
-			};
+				const Apply = (geometry: string) =>
+					Effect.gen(function* () {
+						applied = geometry;
+						yield* RunBrowserDom(() => {
+							const event = new Event("highlight");
+							Object.defineProperty(event, "currentTarget", { value: node });
+							move_hover(event);
+						});
+					});
 
-			const Settle = () => {
-				if (node.dataset.highlighted !== undefined) {
-					const geometry = Geometry();
-					/**
-					 * Before the first reveal, wait for two frames to agree — a pill
-					 * revealed mid-layout keeps the half-built size it read. Afterwards,
-					 * follow any change, since the row has already proven itself settled.
-					 */
-					const settled =
-						applied === undefined ? geometry === sampled : geometry !== applied;
-					if (settled) Apply(geometry);
-					sampled = geometry;
-				}
+				const Settle = () =>
+					Effect.gen(function* () {
+						if (node.dataset.highlighted !== undefined) {
+							const geometry = yield* Geometry();
+							/**
+							 * Before the first reveal, wait for two frames to agree — a pill
+							 * revealed mid-layout keeps the half-built size it read. Afterwards,
+							 * follow any change, since the row has already proven itself settled.
+							 */
+							const settled =
+								applied === undefined ? geometry === sampled : geometry !== applied;
+							if (settled) yield* Apply(geometry);
+							sampled = geometry;
+						}
 
-				frame = performance.now() < deadline ? requestAnimationFrame(Settle) : 0;
-			};
+						frame = yield* RunBrowserDom(() =>
+							performance.now() < deadline
+								? requestAnimationFrame(() => Queue.offerUnsafe(commands, "settle"))
+								: 0,
+						);
+					});
 
-			const Watch = () => {
-				deadline = performance.now() + SETTLE_MS;
-				if (frame === 0) frame = requestAnimationFrame(Settle);
-			};
+				const Watch = () =>
+					Effect.gen(function* () {
+						yield* RunBrowserDom(() => {
+							deadline = performance.now() + SETTLE_MS;
+							if (frame === 0)
+								frame = requestAnimationFrame(() =>
+									Queue.offerUnsafe(commands, "settle"),
+								);
+						});
+					});
 
-			const Highlighted = () => {
-				if (node.dataset.highlighted === undefined) return;
-				/** A highlight arriving after the first reveal lands on settled layout. */
-				if (applied !== undefined) Apply(Geometry());
-				Watch();
-			};
+				const Highlighted = () =>
+					Effect.gen(function* () {
+						if (node.dataset.highlighted === undefined) return;
+						/** A highlight arriving after the first reveal lands on settled layout. */
+						if (applied !== undefined) yield* Apply(yield* Geometry());
+						yield* Watch();
+					});
 
-			Watch();
+				yield* Effect.gen(function* () {
+					while (true) {
+						const command = yield* Queue.take(commands);
+						if (command === "highlighted") yield* Highlighted();
+						else if (command === "settle") yield* Settle();
+						else yield* Watch();
+					}
+				}).pipe(Effect.forkScoped);
+				yield* Watch();
 
-			const highlight_observer = new MutationObserver(Highlighted);
-			/**
-			 * Border box, not the default content box: the pill is sized from
-			 * `offsetHeight`, so a padding change has to count as a resize here.
-			 */
-			const size_observer = new ResizeObserver(Watch);
+				const { highlight_observer, size_observer } = yield* RunBrowserDom(() => {
+					const highlight_observer = new MutationObserver(() =>
+						Queue.offerUnsafe(commands, "highlighted"),
+					);
+					/** Border box tracks padding because the pill is sized from offsetHeight. */
+					const size_observer = new ResizeObserver(() =>
+						Queue.offerUnsafe(commands, "watch"),
+					);
+					highlight_observer.observe(node, {
+						attributeFilter: ["data-highlighted"],
+						attributes: true,
+					});
+					size_observer.observe(node, { box: "border-box" });
+					return { highlight_observer, size_observer };
+				});
 
-			highlight_observer.observe(node, {
-				attributeFilter: ["data-highlighted"],
-				attributes: true,
-			});
-			size_observer.observe(node, { box: "border-box" });
-
-			return { frame: () => frame, highlight_observer, size_observer };
-		}),
-		(resource) =>
-			Effect.sync(() => {
-				cancelAnimationFrame(resource.frame());
-				resource.highlight_observer.disconnect();
-				resource.size_observer.disconnect();
+				return { frame: () => frame, highlight_observer, size_observer };
 			}),
-	);
-
-type HighlightCommand =
-	| {
-			readonly _tag: "Attach";
-			readonly id: number;
-			readonly move_hover: (event: Event) => void;
-			readonly node: HTMLElement;
-	  }
-	| { readonly _tag: "Release"; readonly id: number };
+			(resource) =>
+				Effect.gen(function* () {
+					yield* RunBrowserDom(() => {
+						cancelAnimationFrame(resource.frame());
+						resource.highlight_observer.disconnect();
+						resource.size_observer.disconnect();
+					});
+				}),
+		);
+	});
 
 /**
  * Creates a component-scoped Svelte attachment factory. A single structured
@@ -112,37 +141,20 @@ type HighlightCommand =
  * submits attach/release commands and never creates or runs an Effect scope.
  */
 export const MakeFollowHighlight = Effect.gen(function* () {
-	const commands = yield* Queue.unbounded<HighlightCommand>();
-	let next_id = 0;
+	const highlight_runner = yield* MakeScopedAttachmentRunner(
+		({
+			move_hover,
+			node,
+		}: {
+			readonly move_hover: (event: Event) => void;
+			readonly node: HTMLElement;
+		}) =>
+			Effect.gen(function* () {
+				yield* AcquireHighlight(move_hover, node);
+				yield* Effect.never;
+			}),
+	);
 
-	yield* Effect.gen(function* () {
-		const highlights = new Map<number, Fiber.Fiber<never>>();
-
-		while (true) {
-			const command = yield* Queue.take(commands);
-			if (command._tag === "Attach") {
-				const fiber = yield* AcquireHighlight(command.move_hover, command.node).pipe(
-					Effect.andThen(Effect.never),
-					Effect.forkScoped,
-				);
-				highlights.set(command.id, fiber);
-				continue;
-			}
-
-			const fiber = highlights.get(command.id);
-			if (fiber !== undefined) {
-				highlights.delete(command.id);
-				yield* Fiber.interrupt(fiber);
-			}
-		}
-	}).pipe(Effect.forkScoped);
-
-	return (move_hover: (event: Event) => void) => (node: HTMLElement) => {
-		const id = next_id++;
-		Queue.offerUnsafe(commands, { _tag: "Attach", id, move_hover, node });
-
-		return () => {
-			Queue.offerUnsafe(commands, { _tag: "Release", id });
-		};
-	};
+	return (move_hover: (event: Event) => void) => (node: HTMLElement) =>
+		highlight_runner.Attachment({ move_hover, node });
 });

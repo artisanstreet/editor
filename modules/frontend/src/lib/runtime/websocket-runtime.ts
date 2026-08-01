@@ -103,11 +103,13 @@ const make_websocket_connector_runtime_layer = (
 const UnavailableWebSocketConnectorLive = Layer.succeed(
 	MessagePortConnector,
 	MessagePortConnector.of({
-		Connect: Effect.fail(
-			new MessagePortConnectorError({
-				cause: new Error("Artisan Forge WebSocket endpoint is unavailable."),
-			}),
-		),
+		Connect: Effect.gen(function* () {
+			return yield* Effect.fail(
+				new MessagePortConnectorError({
+					cause: new Error("Artisan Forge WebSocket endpoint is unavailable."),
+				}),
+			);
+		}),
 	}),
 );
 

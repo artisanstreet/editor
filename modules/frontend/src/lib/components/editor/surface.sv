@@ -1,25 +1,21 @@
-<script lang="ts">
-	import { onMount } from "svelte";
-
-	/**
-	 * Rendering stays deliberately thin. The application composition boundary
-	 * supplies this bridge after it acquires EditorService in its Effect scope,
-	 * keeping the component free of runtime, filesystem, and Electron APIs.
-	 */
-	export interface EditorSurfaceMount {
-		readonly attach: (host: HTMLElement) => () => void;
-	}
+<script lang="ts" effect>
+	import { Effect } from "effect";
+	import { EditorService } from "$lib/editor/service";
 
 	let {
-		mount,
-		label = "Code editor",
-	}: { readonly mount: EditorSurfaceMount; readonly label?: string } = $props();
+		label = "\u0043ode editor",
+	}: { readonly label?: string } = $props();
 	let host = $state<HTMLDivElement>();
 
-	onMount(() => {
-		if (host === undefined) return;
-		return mount.attach(host);
-	});
+	const editor = yield* EditorService;
+	const Mount = (next_host: HTMLElement) =>
+		Effect.gen(function* () {
+			yield* editor.Attach(next_host);
+			yield* Effect.never;
+		}).pipe(Effect.ensuring(editor.Detach));
+
+	/** SER interrupts this fiber when the bound host changes or this component unmounts. */
+	if (host !== undefined) yield* Mount(host);
 </script>
 
 <div

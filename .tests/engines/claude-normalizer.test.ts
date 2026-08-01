@@ -94,6 +94,58 @@ describe("Claude normalization", () => {
 		]);
 	});
 
+	it("maps result cache reads without folding them into the context gauge", () => {
+		const [usage] = normalize_claude_event(
+			input({
+				type: "result",
+				subtype: "success",
+				usage: {
+					cache_creation_input_tokens: 8_689,
+					cache_read_input_tokens: 21_360,
+					input_tokens: 10,
+					output_tokens: 290,
+				},
+			}),
+		);
+
+		expect(usage).toMatchObject({
+			_tag: "usage",
+			basis: "cumulative",
+			cached_input_tokens: 21_360,
+			input_tokens: 10,
+			output_tokens: 290,
+		});
+		expect(usage).not.toHaveProperty("context_tokens");
+	});
+
+	it("measures the context window from an assistant frame's per-response usage", () => {
+		const events = normalize_claude_event(
+			input({
+				type: "assistant",
+				message: {
+					content: [{ type: "text", text: "reply" }],
+					id: "msg_01",
+					usage: {
+						cache_creation_input_tokens: 8_689,
+						cache_read_input_tokens: 21_360,
+						input_tokens: 10,
+						output_tokens: 290,
+					},
+				},
+			}),
+		);
+
+		expect(events).toEqual([
+			expect.objectContaining({ _tag: "agent_message_completed", item_id: "msg_01" }),
+			expect.objectContaining({
+				_tag: "usage",
+				basis: "cumulative",
+				context_tokens: 30_059,
+				observation_id: "run:claude:1:usage",
+			}),
+		]);
+	});
+
 	it("maps file/search/tool families and correlates tool results", () => {
 		expect(
 			normalize_claude_event(

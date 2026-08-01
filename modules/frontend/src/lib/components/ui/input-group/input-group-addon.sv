@@ -19,7 +19,10 @@
 	export type InputGroupAddonAlign = VariantProps<typeof inputGroupAddonVariants>["align"];
 </script>
 
-<script lang="ts">
+
+<script lang="ts" effect>
+	import { Effect } from "effect";
+	import { RunBrowserDom } from "$lib/browser/dom";
 	import { cn, type WithElementRef } from "$lib/utils.js";
 	import type { HTMLAttributes } from "svelte/elements";
 
@@ -32,6 +35,16 @@
 	}: WithElementRef<HTMLAttributes<HTMLDivElement>> & {
 		align?: InputGroupAddonAlign;
 	} = $props();
+
+	const FocusSiblingInput = (event: MouseEvent & { currentTarget: HTMLDivElement }) =>
+		Effect.gen(function* () {
+			const target = yield* RunBrowserDom(() => event.target);
+			const clicked_button = yield* RunBrowserDom(
+				() => target instanceof HTMLElement && target.closest("button") !== null,
+			);
+			if (clicked_button) return;
+			yield* RunBrowserDom(() => event.currentTarget.parentElement?.querySelector("input")?.focus());
+		});
 </script>
 
 <div
@@ -40,12 +53,7 @@
 	data-slot="input-group-addon"
 	data-align={align}
 	class={cn(inputGroupAddonVariants({ align }), className)}
-	onclick={(e) => {
-		if ((e.target as HTMLElement).closest("button")) {
-			return;
-		}
-		e.currentTarget.parentElement?.querySelector("input")?.focus();
-	}}
+	onclick={yield* FocusSiblingInput(event)}
 	{...restProps}
 >
 	{@render children?.()}

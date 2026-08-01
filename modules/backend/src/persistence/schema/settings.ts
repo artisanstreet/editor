@@ -15,6 +15,11 @@ export const ModelFavorites = sqliteTable("model_favorites", {
  * workspace, which does not change because the model did.
  */
 export const SessionDefaults = sqliteTable("session_defaults", {
+	/**
+	 * The protocol's `compaction_model` selection: `"inherited"` or a catalog
+	 * model id. NULL means the curated per-harness default. The column keeps
+	 * its original name to avoid a rename-only migration.
+	 */
 	compaction_model_id: text("compaction_model_id"),
 	defaults_id: integer("defaults_id").primaryKey(),
 	last_model_id: text("last_model_id"),

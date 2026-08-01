@@ -1,8 +1,8 @@
 # Artisan Editor Completion Matrix
 
-Scope: the V1 prototype described by [`artisan-editor-v1.md`](../prds/artisan-editor-v1.md), including the backend, desktop shell, renderer, and release harness. Status is verified implementation status as of 2026-07-26, not design intent. The prototype began Codex-only; the Claude Code CLI adapter was revived on 2026-07-28, retiring that boundary. Embedded browsers/WebViews and broad Git mutation commands remain deliberately outside this prototype rather than incomplete hidden scope.
+Scope: the V1 prototype described by [`artisan-editor-v1.md`](../prds/artisan-editor-v1.md), including the backend, desktop shell, renderer, and release harness. Status is verified implementation status as of 2026-08-01, not design intent. The prototype began Codex-only; the Claude Code CLI adapter was revived on 2026-07-28, retiring that boundary. Embedded browsers/WebViews and broad Git mutation commands remain deliberately outside this prototype rather than incomplete hidden scope.
 
-Verification snapshot: on 2026-07-30, `pnpm run validate` passed from both the integration checkout and an independently installed clean clone of `45fa22bb`: formatting, zero-warning lint, root TypeScript, static production frontend and isolated Forge builds, 292 Vitest files with 1,958 passing tests plus 7 explicit skips, native formatting/clippy, and 45 Rust tests. Release-only packaging gates were not rerun.
+Verification snapshot: on 2026-08-01, `pnpm run validate` passed formatting, zero-warning lint, root TypeScript, static production frontend and isolated Forge builds, 313 Vitest files with 2,067 passing tests plus 7 explicit skips, native formatting/clippy, and 45 Rust tests. Release-only packaging gates were not rerun.
 
 On 2026-07-27, the Windows distribution artifact, hermetic lifecycle, and real
 isolated packaged-bootstrap gates passed alongside root TypeScript. This
@@ -122,7 +122,8 @@ conversation URLs use `/t/:workspace/:thread`, canonical editor URLs use
 `/e/:workspace/:thread`, and optional editor file identity remains in `?file=`.
 Historical prefixed thread IDs canonicalize to bare segments, detached threads
 use the reserved `_` workspace segment, and these are the sole thread and editor
-URL contracts; `/threads` is only the pre-creation draft route. The editor
+URL contracts; the root page `/` is the pre-creation draft route (the former
+`/threads` draft page was folded into it and removed). The editor
 subscribes to authoritative thread metadata, unmounting before reassignment or
 detach navigation so revoked workspace authority cannot survive in stale file
 reads.
@@ -158,3 +159,11 @@ their already-correct native catalog mappings. Final mixed-tree
 `pnpm run validate` is green: formatting, zero-warning lint, TypeScript,
 production frontend and Forge builds, 293 Vitest files/1,971 tests (7 skips),
 native format/clippy, and 45 Rust tests.
+
+On 2026-08-01, the frontend SER thermonuclear remediation closed C-01–C-09,
+Q-01–Q-11, and every hostile follow-up finding. `svelte-effect-runtime` 4.2.1
+fixes transformed callback iteration, canonical controllers own draft/defaults/
+usage lifecycles, durable actions reconcile authoritatively, browser and editor
+host work use typed yielded boundaries, and a repository-wide lexical source
+gate enforces the literal generator dialect. Three independent frozen-tree
+reviews closed before the full validation snapshot recorded above.

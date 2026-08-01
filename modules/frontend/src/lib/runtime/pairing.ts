@@ -1,8 +1,8 @@
-import { Context, Data, Effect, Layer, Schema } from "effect";
+import { Context, Data, Effect, Layer, Option, Schema } from "effect";
 import * as HttpBody from "effect/unstable/http/HttpBody";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 
-import { AdoptForgeEndpoint, ForgeHttpUrl } from "./forge-endpoint";
+import { AdoptForgeEndpoint, ForgeEndpointStoreLive, ForgeHttpUrl } from "./forge-endpoint";
 
 const PairingHash = Schema.String;
 
@@ -47,10 +47,15 @@ export const BrowserPairingExchangeLive = Layer.effect(
 			 * own `/api/pair`, while the app-scheme renderer targets the adopted
 			 * loopback Forge endpoint delivered in the launch fragment.
 			 */
-			client.post(ForgeHttpUrl("/api/pair"), { body: HttpBody.jsonUnsafe(request) }).pipe(
-				Effect.map((response) => response.status >= 200 && response.status < 300),
-				Effect.mapError(PairingFailure),
-			);
+			Effect.gen(function* () {
+				const url = yield* ForgeHttpUrl("/api/pair").pipe(
+					Effect.provide(ForgeEndpointStoreLive),
+				);
+				const response = yield* client.post(url, {
+					body: HttpBody.jsonUnsafe(request),
+				});
+				return response.status >= 200 && response.status < 300;
+			}).pipe(Effect.mapError(PairingFailure));
 
 		return BrowserPairingExchange.of({ Pair });
 	}),
@@ -65,21 +70,28 @@ export class BrowserNavigation extends Context.Service<
 >()("Artisan/BrowserNavigation") {}
 
 export const MakeBrowserNavigationLive = (browser: BrowserNavigationHost) =>
-	Layer.sync(BrowserNavigation, () => {
-		const Location = Effect.sync(() => ({
-			hash: browser.location.hash,
-			pathname: browser.location.pathname,
-			protocol: browser.location.protocol,
-			search: browser.location.search,
-		}));
-		const ReplaceUrl = (url: string) =>
-			Effect.try({
-				catch: PairingFailure,
-				try: () => browser.history.replaceState(null, "", url),
+	Layer.effect(
+		BrowserNavigation,
+		Effect.gen(function* () {
+			const Location = Effect.gen(function* () {
+				return {
+					hash: browser.location.hash,
+					pathname: browser.location.pathname,
+					protocol: browser.location.protocol,
+					search: browser.location.search,
+				};
 			});
+			const ReplaceUrl = (url: string) =>
+				Effect.gen(function* () {
+					yield* Effect.try({
+						catch: PairingFailure,
+						try: () => browser.history.replaceState(null, "", url),
+					});
+				});
 
-		return BrowserNavigation.of({ Location, ReplaceUrl });
-	});
+			return BrowserNavigation.of({ Location, ReplaceUrl });
+		}),
+	);
 
 /**
  * Exactly two launch grammars exist: the browser flow's `#pair=<code>` and the
@@ -92,9 +104,11 @@ const pair_hash = /^#pair=([^&=]+)(?:&forge=([^&=]+))?$/;
 const PairingFailure = () => new BrowserPairingFailure();
 
 const DecodeFragmentComponent = (encoded: string) =>
-	Effect.try({
-		catch: PairingFailure,
-		try: () => decodeURIComponent(encoded),
+	Effect.gen(function* () {
+		return yield* Effect.try({
+			catch: PairingFailure,
+			try: () => decodeURIComponent(encoded),
+		});
 	});
 
 const DecodePairingCode = (hash: unknown, page_protocol: string) =>
@@ -115,7 +129,12 @@ const DecodePairingCode = (hash: unknown, page_protocol: string) =>
 			 * host-scoped session cookie — to a sibling loopback port.
 			 */
 			const endpoint = yield* DecodeFragmentComponent(matched[2]);
-			if (!AdoptForgeEndpoint(endpoint, page_protocol)) return undefined;
+			if (
+				!(yield* AdoptForgeEndpoint(endpoint, page_protocol).pipe(
+					Effect.provide(ForgeEndpointStoreLive),
+				))
+			)
+				return undefined;
 		}
 		const code = yield* DecodeFragmentComponent(encoded_code);
 
@@ -134,20 +153,24 @@ const DevelopmentPairingCode = Schema.Struct({ code: PairingCode });
  * side effects. Callers gate on `import.meta.env.DEV` so production bundles
  * drop the path entirely.
  */
-export const AttemptDevelopmentSelfPair: Effect.Effect<boolean> = Effect.tryPromise(async () => {
-	const minted = await fetch("/api/dev/pair-code", {
-		cache: "no-store",
-		method: "POST",
+export const AttemptDevelopmentSelfPair: Effect.Effect<boolean> = Effect.gen(function* () {
+	const client = Option.getOrUndefined(yield* Effect.serviceOption(HttpClient.HttpClient));
+	if (client === undefined) return false;
+	const minted = yield* client.post("/api/dev/pair-code");
+	if (minted.status < 200 || minted.status >= 300) return false;
+	const raw_code = yield* minted.json;
+	const decoded = yield* Schema.decodeUnknownEffect(DevelopmentPairingCode)(raw_code);
+	const paired = yield* client.post("/api/pair", {
+		body: HttpBody.jsonUnsafe({ code: decoded.code }),
 	});
-	if (!minted.ok) return false;
-	const decoded = Schema.decodeUnknownSync(DevelopmentPairingCode)(await minted.json());
-	const paired = await fetch("/api/pair", {
-		body: JSON.stringify({ code: decoded.code }),
-		headers: { "content-type": "application/json" },
-		method: "POST",
-	});
-	return paired.ok;
-}).pipe(Effect.catch(() => Effect.succeed(false)));
+	return paired.status >= 200 && paired.status < 300;
+}).pipe(
+	Effect.catch(() =>
+		Effect.gen(function* () {
+			return false;
+		}),
+	),
+);
 
 /**
  * Exchanges exactly one URL-fragment pairing capability for a same-origin session

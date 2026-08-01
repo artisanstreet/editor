@@ -99,6 +99,9 @@ function FetchUsageOutcome(engine: Engine): Effect.Effect<UsageOutcome> {
 			onSuccess: (account_usage): UsageOutcome => ({
 				ok: true,
 				report: {
+					...(account_usage.account_email === undefined
+						? {}
+						: { account_email: account_usage.account_email }),
 					authentication: account_usage.authentication.state,
 					display_name: engine.Descriptor.display_name,
 					engine_id: engine.Descriptor.id,

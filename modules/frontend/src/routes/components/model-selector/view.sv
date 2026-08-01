@@ -1,7 +1,7 @@
 <script lang="ts" effect>
 	import Selector from "@tabler/icons-svelte/icons/selector";
 	import Tool from "@tabler/icons-svelte/icons/tool";
-	import { Effect, Queue, Stream } from "effect";
+	import { Effect, Stream } from "effect";
 	import { untrack } from "svelte";
 	import {
 		SessionPolicyPermission,
@@ -9,7 +9,12 @@
 		type ThreadSessionPolicy,
 	} from "@artisan/protocol";
 	import { ArtisanClient } from "@artisan/transport/client";
+	import { BannerService } from "$lib/banner/service";
 	import { EngineMarkFor } from "$lib/engine/presentation";
+	import {
+		SessionDefaultsController,
+		type SessionDefaultsState,
+	} from "$lib/settings/session-defaults-controller";
 	import {
 		IsOfflineRuntimeCatalog,
 		OfflineRuntimeCatalog,
@@ -24,9 +29,12 @@
 		TooltipTrigger,
 	} from "$lib/components/ui/tooltip";
 	import ShaderGlassSurface from "../shader-glass-surface.sv";
-	import CompactionControl from "./compaction-control.sv";
 	import EngineSection from "./engine-section.sv";
 	import ModelList from "./model-list.sv";
+	import {
+		MakeModelPolicyController,
+		type PolicyFlushResult,
+	} from "./policy-controller";
 	import PolicyControls from "./policy-controls.sv";
 	import {
 		ModelsFromCatalog,
@@ -57,13 +65,19 @@
 		disabled?: boolean;
 		/** Prevents a provider change while the current run is still in flight. */
 		engine_locked?: boolean;
-		onpolicychange?: (policy: ThreadSessionPolicy) => void;
+		onpolicychange?: (
+			policy: ThreadSessionPolicy,
+		) => Effect.Effect<ThreadSessionPolicy, { readonly message: string }>;
 		policy?: ThreadSessionPolicy;
 		runtime_catalog: RuntimeCatalog;
 	} = $props();
 
 	const client = yield* ArtisanClient;
-	const model_manifest = $derived(runtime_catalog.manifest);
+	const banner = yield* BannerService;
+	const defaults_controller = yield* SessionDefaultsController;
+	let defaults_state = $state.raw<SessionDefaultsState | undefined>(undefined);
+	const effective_catalog = $derived(defaults_state?.catalog ?? runtime_catalog);
+	const model_manifest = $derived(effective_catalog.manifest);
 	const engines: ReadonlyArray<EngineChoice> = $derived(
 		model_manifest.harnesses.map((harness) => ({
 			id: harness.id,
@@ -72,7 +86,7 @@
 		})),
 	);
 
-	const models = $derived(ModelsFromCatalog(runtime_catalog));
+	const models = $derived(ModelsFromCatalog(effective_catalog));
 	const initial_models = ModelsFromCatalog(OfflineRuntimeCatalog);
 	let open = $state(false);
 	let previewed_model_id = $state<string | undefined>(undefined);
@@ -83,54 +97,71 @@
 	let selected_model_id = $state(
 		OfflineRuntimeCatalog.default_model_id ?? initial_models[0]?.id ?? "",
 	);
-	let picker_surface = $state<HTMLElement | null>(null);
 	/**
 	 * Forge owns the starred set, so every client opens the picker to the same
 	 * order. It is read as its own statement rather than an awaited binding: a
 	 * favorite is a nicety, and the picker must not wait on it to render.
 	 */
 	let favorite_ids = $state.raw<ReadonlyArray<string>>([]);
-	const favorites_available = $derived(!IsOfflineRuntimeCatalog(runtime_catalog));
-	const RefreshFavorites = client.GetModelFavorites.pipe(
-		Effect.flatMap((snapshot) =>
-			Effect.sync(() => {
-				favorite_ids = snapshot.model_ids;
-			}),
-		),
-		Effect.ignore,
+	const favorites_available = $derived(
+		defaults_state?.available ?? !IsOfflineRuntimeCatalog(effective_catalog),
 	);
+	const policy_controller = yield* MakeModelPolicyController;
+	let displayed_policy = $state.raw<ThreadSessionPolicy | undefined>(undefined);
+	const RefreshFavorites = Effect.gen(function* () {
+		const snapshot = yield* defaults_controller.Refresh;
+		defaults_state = snapshot;
+		favorite_ids = snapshot.favorite_ids;
+		return snapshot;
+	});
 
-	const favorite_requests = yield* Queue.unbounded<ModelFavoriteRequest>();
-	const defaults_requests = yield* Queue.unbounded<Parameters<typeof client.UpdateSessionDefaults>[0]>();
-
-	const RequestFavorite = (model_id: string, favorite: boolean) => {
-		if (disabled || !favorites_available) return;
-		/**
-		 * The star fills under the pointer and Forge confirms afterwards. A
-		 * failed write puts the previous set back, so the picker never keeps a
-		 * star that was not durably recorded.
-		 */
-		favorite_ids = favorite
-			? [...favorite_ids.filter((id) => id !== model_id), model_id]
-			: favorite_ids.filter((id) => id !== model_id);
-		Queue.offerUnsafe(favorite_requests, { favorite, model_id });
-	};
-
-	const HandleFavoriteRequest = (request: ModelFavoriteRequest) =>
-		client.UpdateModelFavorite(request).pipe(
-			Effect.andThen(RefreshFavorites),
-			Effect.catch(() => RefreshFavorites),
+	const PersistFavorite = (request: ModelFavoriteRequest) =>
+		Effect.gen(function* () {
+			const snapshot = yield* defaults_controller.SetFavorite(
+				request.model_id,
+				request.favorite,
+			);
+			favorite_ids = snapshot.favorite_ids;
+		}).pipe(
+			Effect.catch((error) =>
+				Effect.gen(function* () {
+					yield* banner.error("Could not update model favorite", {
+						description: error.message,
+					});
+					const snapshot = yield* RefreshFavorites.pipe(
+						Effect.catch(() =>
+							Effect.gen(function* () {
+								return yield* defaults_controller.Current;
+							}),
+						),
+					);
+					favorite_ids = snapshot.favorite_ids;
+				}),
+			),
 		);
 
-	yield* Queue.take(favorite_requests).pipe(
-		Effect.flatMap(HandleFavoriteRequest),
-		Effect.forever,
-		Effect.forkScoped,
-	);
-	yield* Queue.take(defaults_requests).pipe(
-		Effect.flatMap((request) => client.UpdateSessionDefaults(request)),
-		Effect.ignore,
-		Effect.forever,
+	const RequestFavorite = (model_id: string, favorite: boolean) =>
+		Effect.gen(function* () {
+			if (disabled || !favorites_available) return;
+			favorite_ids = favorite
+				? [...favorite_ids.filter((id) => id !== model_id), model_id]
+				: favorite_ids.filter((id) => id !== model_id);
+			yield* PersistFavorite({ favorite, model_id });
+		});
+
+	const PreviewModel = (model_id: string) =>
+		Effect.gen(function* () {
+			previewed_model_id = model_id;
+		});
+
+	const ApplyDefaultsChange = (snapshot: SessionDefaultsState) =>
+		Effect.gen(function* () {
+			defaults_state = snapshot;
+			favorite_ids = snapshot.favorite_ids;
+		});
+
+	yield* defaults_controller.Changes.pipe(
+		Stream.runForEach(ApplyDefaultsChange),
 		Effect.forkScoped,
 	);
 
@@ -141,40 +172,19 @@
 	yield* client.ConnectionChanges.pipe(
 		Stream.changesWith((left, right) => left.phase === right.phase),
 		Stream.filter((state) => state.phase === "ready"),
-		Stream.runForEach(() => RefreshFavorites),
-		Effect.forkScoped,
-	);
-
-	/**
-	 * Forge-owned choice of which catalog model writes handoff compaction
-	 * summaries when a thread changes engine or model. Absent means each thread
-	 * compacts with its own current model.
-	 */
-	let compaction_model_id = $state<string | undefined>(undefined);
-	const compaction_available = $derived(!IsOfflineRuntimeCatalog(runtime_catalog));
-	const thread_model_compaction_value = "__thread_model__";
-	const compaction_models = $derived(
-		models.filter((model) => model.definition.disabled === undefined),
-	);
-	const compaction_model = $derived(
-		compaction_models.find((model) => model.id === compaction_model_id),
-	);
-
-	yield* client.GetSessionDefaults.pipe(
-		Effect.flatMap((defaults) =>
-			Effect.sync(() => {
-				compaction_model_id = defaults.compaction_model_id;
+		Stream.runForEach(() =>
+			Effect.gen(function* () {
+				yield* RefreshFavorites;
 			}),
 		),
-		Effect.ignore,
+		Effect.forkScoped,
 	);
-
-	/** Fire-and-forget like every other saved preference; the pick never waits. */
-	const select_compaction_model = (value: string) => {
-		const next = value === thread_model_compaction_value ? undefined : value;
-		compaction_model_id = next;
-		Queue.offerUnsafe(defaults_requests, { compaction_model_id: next ?? null });
-	};
+	yield* RefreshFavorites.pipe(
+		Effect.catch(() =>
+			Effect.gen(function* () {
+			}),
+		),
+	);
 
 	const ThinkingLevelFromPolicy = (
 		effort: ThreadSessionPolicy["reasoning_effort"],
@@ -188,37 +198,58 @@
 	 * Persists the Forge-owned half of a policy change. Permission is shared
 	 * across every model and engine; effort and context belong to the model that
 	 * was configured, because their option sets differ per model. The write is
-	 * fire-and-forget: a preference that fails to save must never block the pick
-	 * the user just made.
+	 * deliberately secondary to the thread's authoritative policy: failure is
+	 * reported, but it cannot roll back a thread policy Forge already accepted.
 	 */
-	const RememberDefaults = (next: ThreadSessionPolicy) => {
-		const model_id = models.find(
-			(candidate) => candidate.definition.native_model_id === next.model,
-		)?.id;
+	const RememberDefaults = (next: ThreadSessionPolicy) =>
+		Effect.gen(function* () {
+			yield* defaults_controller.RememberPolicyDefaults(next).pipe(
+				Effect.catch((error) =>
+					Effect.gen(function* () {
+						yield* banner.error("Could not save model defaults", {
+							description: error.message,
+						});
+					}),
+				),
+			);
+		});
 
-		Queue.offerUnsafe(defaults_requests, {
-					...(next.model === undefined ? {} : { last_model_id: next.model }),
-					...(model_id === undefined
-						? {}
-						: {
-								model: {
-									...(next.context_window === undefined
-										? {}
-										: { context_window: next.context_window }),
-									model_id,
-									reasoning_effort: next.reasoning_effort,
-								},
-							}),
-					permission: SessionPolicyPermission(next),
-				});
-	};
+	const PersistPolicy = (desired: ThreadSessionPolicy) =>
+		Effect.gen(function* () {
+			const persist = onpolicychange;
+			if (persist === undefined) {
+				return yield* Effect.fail({ message: "Thread policy persistence is unavailable" });
+			}
+			return yield* persist(desired);
+		});
 
-	const PatchPolicy = (patch: Partial<ThreadSessionPolicy>) => {
-		if (disabled || policy === undefined || onpolicychange === undefined) return;
-		const next = { ...policy, ...patch };
-		RememberDefaults(next);
-		onpolicychange(next);
-	};
+	const FlushPolicy = Effect.gen(function* () {
+		const result = yield* policy_controller.Flush(PersistPolicy).pipe(
+			Effect.catchTag("ModelPolicyMutationError", (error) =>
+				Effect.gen(function* () {
+					yield* banner.error("Could not update thread policy", {
+						description: error.message,
+					});
+					return {
+						confirmed: [],
+						current: yield* policy_controller.Current,
+					} satisfies PolicyFlushResult;
+				}),
+			),
+		);
+		displayed_policy = result.current;
+		for (const confirmed of result.confirmed) yield* RememberDefaults(confirmed);
+	});
+
+	const ReplacePolicy = (next: ThreadSessionPolicy) =>
+		Effect.gen(function* () {
+			displayed_policy = yield* policy_controller.Replace(next);
+		});
+
+	const PatchPolicy = (patch: Partial<ThreadSessionPolicy>) =>
+		Effect.gen(function* () {
+			displayed_policy = yield* policy_controller.Patch(patch);
+		});
 
 	/**
 	 * Favorites float to the top of the engine they belong to, in the order
@@ -244,49 +275,43 @@
 	const previewed_permissions = $derived(
 		previewed_model === undefined
 			? undefined
-			: PermissionsForModel(runtime_catalog, previewed_model),
+			: PermissionsForModel(effective_catalog, previewed_model),
 	);
 	/** The only way the whole selector disables: the thread session is not connected. */
 	const disabled_reason = $derived(
 		disabled ? "Unavailable until the thread's session is connected" : undefined,
 	);
 
-	/** Makes the model current without closing the popover; false when barred. */
-	const adopt_model = (model: ModelChoice, context_suffix = ""): boolean => {
-		if (model.definition.disabled !== undefined) {
-			return false;
-		}
-		if (engine_locked && model.engine !== selected_model?.engine) {
-			return false;
-		}
-		selected_model_id = model.id;
-		active_engine = model.engine;
-		if (model.definition.capabilities.thinking.availability === "supported") {
-			thinking_level = model.definition.capabilities.thinking.default;
-		}
-		const default_speed =
-			model.definition.capabilities.speed_options.find(
-				(option) => option.default && option.disabled === undefined,
-			) ??
-			model.definition.capabilities.speed_options.find(
-				(option) => option.disabled === undefined,
+	/** Makes the model current without flushing so inline controls coalesce with it. */
+	const AdoptModel = (model: ModelChoice, context_suffix = "") =>
+		Effect.gen(function* () {
+			if (model.definition.disabled !== undefined) return false;
+			if (engine_locked && model.engine !== selected_model?.engine) return false;
+
+			selected_model_id = model.id;
+			active_engine = model.engine;
+			if (model.definition.capabilities.thinking.availability === "supported") {
+				thinking_level = model.definition.capabilities.thinking.default;
+			}
+			const default_speed =
+				model.definition.capabilities.speed_options.find(
+					(option) => option.default && option.disabled === undefined,
+				) ??
+				model.definition.capabilities.speed_options.find(
+					(option) => option.disabled === undefined,
+				);
+			speed_option_id = default_speed?.id ?? "standard";
+			const target_permission = permission_for_harness(
+				effective_catalog,
+				model.engine,
+				permission_mode,
 			);
-		speed_option_id = default_speed?.id ?? "standard";
-		/**
-		 * Permission options are harness-scoped, so a move to another engine
-		 * keeps the current option only when that engine publishes it and
-		 * otherwise falls back to the engine's own default.
-		 */
-		const target_permission = permission_for_harness(
-			runtime_catalog,
-			model.engine,
-			permission_mode,
-		);
-		if (target_permission !== undefined) permission_mode = target_permission.id;
-		if (!disabled && policy !== undefined && onpolicychange !== undefined) {
-			/** A different model invalidates the previous context-window suffix. */
-			const { context_window: _reset, ...rest } = policy;
-			const next: ThreadSessionPolicy = {
+			if (target_permission !== undefined) permission_mode = target_permission.id;
+
+			const base_policy = yield* policy_controller.Current;
+			if (disabled || base_policy === undefined || onpolicychange === undefined) return true;
+			const { context_window: _reset, ...rest } = base_policy;
+			yield* ReplacePolicy({
 				...rest,
 				...policy_fields_for_permission(target_permission),
 				...(context_suffix === "" ? {} : { context_window: context_suffix }),
@@ -295,129 +320,107 @@
 				reasoning_effort:
 					model.definition.capabilities.thinking.availability === "supported"
 						? PolicyEffortFromThinking(model.definition.capabilities.thinking.default)
-						: policy.reasoning_effort,
+						: base_policy.reasoning_effort,
 				service_tier: default_speed?.native_value ?? "standard",
-			};
-			RememberDefaults(next);
-			onpolicychange(next);
-		}
-		return true;
-	};
+			});
+			return true;
+		});
 
-	const apply_model_context = (model: ModelChoice, option: ContextWindowChoice) => {
-		if (model.id !== selected_model_id) {
-			adopt_model(model, option.native_suffix);
-			return;
-		}
-		if (disabled || policy === undefined || onpolicychange === undefined) return;
-		const { context_window: _previous, ...rest } = policy;
-		const next: ThreadSessionPolicy =
-			option.native_suffix === ""
-				? rest
-				: { ...rest, context_window: option.native_suffix };
-		RememberDefaults(next);
-		onpolicychange(next);
-	};
-
-	const select_model = (model: ModelChoice) => {
-		if (adopt_model(model)) open = false;
-	};
-
-	const select_thinking_level = (level: ThinkingLevel) => {
-		thinking_level = level;
-		PatchPolicy({ reasoning_effort: PolicyEffortFromThinking(level) });
-	};
-
-	const select_speed = (option: SpeedOption) => {
-		if (option.disabled !== undefined) {
-			return;
-		}
-		speed_option_id = option.id;
-		PatchPolicy({ service_tier: option.native_value });
-	};
-
-	/** An inline chip pick adopts its model first, then applies the option. */
-	const apply_model_thinking = (model: ModelChoice, level: ThinkingLevel) => {
-		if (selected_model?.id !== model.id && !adopt_model(model)) return;
-		select_thinking_level(level);
-	};
-
-	const apply_model_speed = (model: ModelChoice, option: SpeedOption) => {
-		if (selected_model?.id !== model.id && !adopt_model(model)) return;
-		select_speed(option);
-	};
-
-	/**
-	 * The option id is the durable choice; the two coarse axes travel with it
-	 * for sandbox and tool gating and are derived from the catalog rather than
-	 * from the id, so options past the neutral three survive a round trip.
-	 */
-	const select_permission = (option: PermissionOption) => {
-		permission_mode = option.id;
-		PatchPolicy(policy_fields_for_permission(option));
-	};
-
-	/**
-	 * Permission belongs to the harness, not the model, but the pane's control
-	 * acts on the previewed model like every other one there: picking an option
-	 * for a model that is not current adopts that model first.
-	 */
-	const apply_model_permission = (model: ModelChoice, option: PermissionOption) => {
-		if (selected_model?.id !== model.id && !adopt_model(model)) return;
-		select_permission(option);
-	};
-
-	$effect(() => {
-		if (policy === undefined) return;
-		const model = models.find(
-			(candidate) =>
-				candidate.definition.native_model_id === policy.model ||
-				(policy.model === undefined && candidate.id === runtime_catalog.default_model_id),
-		);
-		/** A catalog refresh must not snap an exploratory provider tab back. */
-		if (model !== undefined && model.id !== untrack(() => selected_model_id)) {
-			selected_model_id = model.id;
-			active_engine = model.engine;
-		}
-		thinking_level = ThinkingLevelFromPolicy(policy.reasoning_effort);
-		permission_mode = PermissionModeFromPolicy(policy);
-		const speed_option =
-			model?.definition.capabilities.speed_options.find(
-				(option) => option.native_value === policy.service_tier,
-			) ?? model?.definition.capabilities.speed_options.find((option) => option.default);
-		speed_option_id = speed_option?.id ?? "standard";
-	});
-
-	/** A fresh open previews the selected model until a row is hovered. */
-	$effect(() => {
-		if (!open) previewed_model_id = undefined;
-	});
-
-	$effect(() => {
-		const options = selected_permission_options;
-		if (options.length > 0) {
-			const engine = selected_model?.engine ?? "codex";
-			const resolved =
-				policy === undefined
-					? {
-							...permission_policy_for_harness(
-								runtime_catalog,
-								engine,
-								permission_mode,
-							),
-							needs_update: false,
-						}
-					: permission_reconciliation_for_harness(runtime_catalog, engine, policy);
-			if (permission_mode !== resolved.fields.permission) {
-				permission_mode = resolved.fields.permission;
+	const ApplyModelContext = (model: ModelChoice, option: ContextWindowChoice) =>
+		Effect.gen(function* () {
+			if (model.id !== selected_model_id) {
+				if (yield* AdoptModel(model, option.native_suffix)) yield* FlushPolicy;
+				return;
 			}
-			if (policy !== undefined && onpolicychange !== undefined && resolved.needs_update) {
-				const next = { ...policy, ...resolved.fields };
-				RememberDefaults(next);
-				onpolicychange(next);
+			const base_policy = yield* policy_controller.Current;
+			if (disabled || base_policy === undefined || onpolicychange === undefined) return;
+			const { context_window: _previous, ...rest } = base_policy;
+			yield* ReplacePolicy(
+				option.native_suffix === "" ? rest : { ...rest, context_window: option.native_suffix },
+			);
+			yield* FlushPolicy;
+		});
+
+	const SelectModel = (model: ModelChoice) =>
+		Effect.gen(function* () {
+			if (!(yield* AdoptModel(model))) return;
+			open = false;
+			yield* FlushPolicy;
+		});
+
+	const ApplyModelThinking = (model: ModelChoice, level: ThinkingLevel) =>
+		Effect.gen(function* () {
+			if (selected_model?.id !== model.id && !(yield* AdoptModel(model))) return;
+			thinking_level = level;
+			yield* PatchPolicy({ reasoning_effort: PolicyEffortFromThinking(level) });
+			yield* FlushPolicy;
+		});
+
+	const ApplyModelSpeed = (model: ModelChoice, option: SpeedOption) =>
+		Effect.gen(function* () {
+			if (selected_model?.id !== model.id && !(yield* AdoptModel(model))) return;
+			if (option.disabled !== undefined) return;
+			speed_option_id = option.id;
+			yield* PatchPolicy({ service_tier: option.native_value });
+			yield* FlushPolicy;
+		});
+
+	const ApplyModelPermission = (model: ModelChoice, option: PermissionOption) =>
+		Effect.gen(function* () {
+			if (selected_model?.id !== model.id && !(yield* AdoptModel(model))) return;
+			permission_mode = option.id;
+			yield* PatchPolicy(policy_fields_for_permission(option));
+			yield* FlushPolicy;
+		});
+
+	const SyncAuthoritativePolicy = (next: ThreadSessionPolicy) =>
+		Effect.gen(function* () {
+			displayed_policy = yield* policy_controller.SetAuthoritative(next);
+			const current = displayed_policy ?? next;
+			const model = models.find(
+				(candidate) =>
+					candidate.definition.native_model_id === current.model ||
+					(current.model === undefined && candidate.id === effective_catalog.default_model_id),
+			);
+			if (model !== undefined && model.id !== untrack(() => selected_model_id)) {
+				selected_model_id = model.id;
+				active_engine = model.engine;
 			}
-		}
+			thinking_level = ThinkingLevelFromPolicy(current.reasoning_effort);
+			permission_mode = PermissionModeFromPolicy(current);
+			const speed_option =
+				model?.definition.capabilities.speed_options.find(
+					(option) => option.native_value === current.service_tier,
+				) ?? model?.definition.capabilities.speed_options.find((option) => option.default);
+			speed_option_id = speed_option?.id ?? "standard";
+		});
+
+	if (policy !== undefined) yield* SyncAuthoritativePolicy(policy);
+
+	const ResetPreview = Effect.gen(function* () {
+		previewed_model_id = undefined;
 	});
+	if (!open && previewed_model_id !== undefined) yield* ResetPreview;
+
+	const ReconcilePermission = Effect.gen(function* () {
+		if (selected_permission_options.length === 0) return;
+		const engine = selected_model?.engine ?? "codex";
+		const current = displayed_policy ?? policy;
+		const resolved =
+			current === undefined
+				? {
+						...permission_policy_for_harness(effective_catalog, engine, permission_mode),
+						needs_update: false,
+					}
+				: permission_reconciliation_for_harness(effective_catalog, engine, current);
+		if (permission_mode !== resolved.fields.permission) {
+			permission_mode = resolved.fields.permission;
+		}
+		if (current === undefined || onpolicychange === undefined || !resolved.needs_update) return;
+		const requested = yield* policy_controller.RequestRepair({ ...current, ...resolved.fields });
+		if (requested) yield* FlushPolicy;
+	});
+	if (selected_permission_options.length > 0) yield* ReconcilePermission;
 </script>
 
 <TooltipProvider delayDuration={0} ignoreNonKeyboardFocus>
@@ -452,22 +455,11 @@
 		</Tooltip>
 
 		<PopoverContent
-			bind:ref={picker_surface}
 			variant="bare"
 			align="end"
 			side="top"
 			sideOffset={8}
 			class="w-[min(30rem,calc(100vw-2rem))] rounded-3xl"
-			onOpenAutoFocus={(event) => {
-				/**
-				 * The default lands focus on the first engine tab, which is wrapped
-				 * in a tooltip trigger — so opening the picker announced whichever
-				 * engine happens to be first, locked or not. The panel itself takes
-				 * focus instead; Tab still walks into the tabs from there.
-				 */
-				event.preventDefault();
-				picker_surface?.focus();
-			}}
 		>
 			<ShaderGlassSurface strength="strong" class="w-full rounded-3xl">
 				<Tabs bind:value={active_engine} class="min-h-0 gap-2 p-2">
@@ -487,10 +479,8 @@
 							{favorites_available}
 							models={active_models}
 							onfavorite={RequestFavorite}
-							onpreview={(model_id) => {
-								previewed_model_id = model_id;
-							}}
-							onselect={select_model}
+							onpreview={PreviewModel}
+							onselect={SelectModel}
 							{selected_model_id}
 						/>
 					</div>
@@ -508,14 +498,14 @@
 								<PolicyControls
 									{disabled}
 									model={previewed_model}
-									oncontext={apply_model_context}
-									onpermission={apply_model_permission}
-									onspeed={apply_model_speed}
-									onthinking={apply_model_thinking}
+									oncontext={ApplyModelContext}
+									onpermission={ApplyModelPermission}
+									onspeed={ApplyModelSpeed}
+									onthinking={ApplyModelThinking}
 									{permission_mode}
 									permission_options={previewed_permissions?.options ?? []}
 									permission_default={previewed_permissions?.default}
-									{policy}
+									policy={displayed_policy ?? policy}
 									{selected_model_id}
 									{speed_option_id}
 									{thinking_level}
@@ -524,15 +514,6 @@
 						</div>
 					{/if}
 				</div>
-				{#if compaction_available}
-					<CompactionControl
-						{disabled}
-						model={compaction_model}
-						models={compaction_models}
-						onselect={select_compaction_model}
-						thread_model_value={thread_model_compaction_value}
-					/>
-				{/if}
 				</Tabs>
 			</ShaderGlassSurface>
 		</PopoverContent>

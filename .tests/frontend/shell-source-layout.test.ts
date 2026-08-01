@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
@@ -29,26 +29,39 @@ describe("Barekey docs shell reset", () => {
 		expect(panel).not.toContain("sidebar: Snippet");
 	});
 
-	it("gates Forge loading and disconnection with a centered blurred overlay", () => {
+	it("gates Forge loading and disconnection with the Artisan banner overlay", () => {
 		const overlay = Read("modules/frontend/src/routes/components/forge-connection-overlay.sv");
 		const preview = Read("modules/frontend/src/routes/components/forge-shell-preview.sv");
 
-		expect(overlay).toContain("absolute inset-0 z-50 grid place-items-center");
-		expect(overlay).toContain("backdrop-blur-md");
+		/** Opaque, full-cover, and centered: the banner is the whole scene. */
+		expect(overlay).toContain("absolute inset-0 z-50 flex");
+		expect(overlay).toContain("bg-background");
+		expect(overlay).not.toContain("backdrop-blur");
+		expect(overlay).toContain('aria-label="Artisan"');
+		/** Progress phases shimmer the banner; the reassurance line waits out 5s. */
+		expect(overlay).toContain("banner-shimmer");
+		expect(overlay).toContain("late-reassurance");
+		expect(overlay).toContain("This is taking more time than expected…");
+		/** Settled failures use the structured crash layout with real actions. */
+		expect(overlay).toContain("Artisan Editor ran into a problem and could not continue.");
+		expect(overlay).toContain("What happened?");
+		expect(overlay).toContain("What to do now");
 		expect(overlay).toContain('role={presentation.tone === "error" ? "alert" : "status"}');
 		expect(overlay).toContain("aria-live=");
 		expect(overlay).toContain('tabindex="-1"');
 		expect(overlay).toContain("document.activeElement");
 		expect(overlay).toContain('querySelector<HTMLElement>("a, button")');
-		expect(overlay).toContain("previous_focus.focus({ preventScroll: true })");
+		expect(overlay).toContain(
+			"yield* RunBrowserDom(() => previous_focus?.focus({ preventScroll: true }))",
+		);
 		expect(overlay).toContain("ForgeStartLaunchUrl");
 		expect(overlay).toContain("retry_connection");
 		expect(overlay).toContain("retry_hydration");
 		/** A settled failure can be closed, leaving the disconnected shell browsable. */
 		expect(overlay).toContain("{#if presentation.dismissible}");
 		expect(overlay).toContain('aria-label="Dismiss and browse the disconnected client"');
-		expect(overlay).toContain("onclick={ondismiss}");
-		expect(overlay).toContain('event.key !== "Escape"');
+		expect(overlay).toContain("onclick={yield* ondismiss}");
+		expect(overlay).toContain("onkeydown={yield* DismissOnEscape(event)}");
 		expect(preview).toContain("bg-linear-to-b from-surface-125 to-surface-75 p-1 card");
 	});
 
@@ -59,6 +72,9 @@ describe("Barekey docs shell reset", () => {
 		const thread_panel = Read("modules/frontend/src/routes/components/thread-panel.sv");
 		const thread_workspace = Read("modules/frontend/src/routes/components/thread-workspace.sv");
 		const composer = Read("modules/frontend/src/routes/components/thread-composer.sv");
+		const composer_controls = Read(
+			"modules/frontend/src/routes/components/composer/controls.sv",
+		);
 		const model_selector = Read(
 			"modules/frontend/src/routes/components/model-selector/view.sv",
 		);
@@ -80,8 +96,9 @@ describe("Barekey docs shell reset", () => {
 		);
 		expect(thread_route).toContain("<ThreadWorkspace");
 		expect(thread_panel).not.toContain("<ModelSelector");
-		expect(composer).toContain("<ModelSelector");
-		expect(composer).toContain("onpolicychange");
+		expect(composer).toContain("<ComposerControls");
+		expect(composer_controls).toContain("<ModelSelector");
+		expect(composer_controls).toContain("onpolicychange");
 		expect(model_selector).toContain('aria-label="Select model"');
 		/** Provider marks live in one shared module so every surface agrees. */
 		const engine_presentation = Read("modules/frontend/src/lib/engine/presentation.ts");
@@ -105,9 +122,11 @@ describe("Barekey docs shell reset", () => {
 		expect(model_selector).not.toContain("Toggle workflow mode");
 		expect(model_selector).not.toMatch(/>Build<|>Plan</);
 		expect(composer).not.toContain('aria-label="Add images"');
-		expect(composer).toContain('"Stop current run"');
-		expect(composer).toContain("PlayerStopFilled");
-		expect(composer).toContain("composer-send rounded-[calc(var(--composer-radius)-0.5rem)]");
+		expect(composer_controls).toContain('"Stop current run"');
+		expect(composer_controls).toContain("PlayerStopFilled");
+		expect(composer_controls).toContain(
+			"composer-send rounded-[calc(var(--composer-radius)-0.5rem)]",
+		);
 		expect(composer).not.toContain("card-glass");
 		expect(composer).not.toContain("bg-white/50");
 		/**
@@ -115,9 +134,9 @@ describe("Barekey docs shell reset", () => {
 		 * transition, so the reduced-motion guard is the stylesheet media query
 		 * that zeroes it rather than a per-icon utility class.
 		 */
-		expect(composer).toContain('data-state={run_active ? "b" : "a"}');
-		expect(composer).toContain("@media (prefers-reduced-motion: reduce)");
-		expect(composer).toMatch(
+		expect(composer_controls).toContain('data-state={run_active ? "b" : "a"}');
+		expect(composer_controls).toContain("@media (prefers-reduced-motion: reduce)");
+		expect(composer_controls).toMatch(
 			/@media \(prefers-reduced-motion: reduce\) \{[\s\S]*\.t-icon-swap\) \.t-icon,/,
 		);
 		expect(composer).toContain("yield* Cancel");
@@ -150,13 +169,14 @@ describe("Barekey docs shell reset", () => {
 		expect(route).toContain("const thread_id = $derived(page.params.thread)");
 		expect(route).toContain("page.params.workspace");
 		expect(route).toContain("{#key `${page.params.workspace}:${thread_id}`}");
-		expect(controller).toContain("goto(canonical_path");
+		expect(controller).toContain("navigation.Navigate(canonical_path");
 		expect(controller).toContain("replaceState: true");
 		expect(controller).toContain("const thread_scope = yield* Scope.make()");
 		expect(controller).toContain("ResolveThreadRoute(threads, route_id)");
 		expect(controller).toContain("Scope.close(thread_scope, Exit.void)");
-		expect(controller).toContain("Queue.offerUnsafe(action_queue");
-		expect(controller).not.toContain(".unsafeOffer(");
+		expect(controller).toContain("const draft_thread = yield* DraftThreadController");
+		expect(controller).toContain("AwaitPendingSubmissionClaim(thread_id)");
+		expect(controller).not.toContain("Queue.offerUnsafe(action_queue");
 		expect(controller).toContain("Effect.forkIn(");
 		expect(controller).toContain("RunAuthoritativeSubscription(");
 		expect(controller).toContain("client.Events.pipe(");
@@ -180,8 +200,8 @@ describe("Barekey docs shell reset", () => {
 
 		expect(workspace).toContain("bind:viewportRef={viewport}");
 		expect(workspace).toContain("const PositionLoadedThread = Effect.gen(function* ()");
-		expect(workspace).toContain("Effect.tryPromise(() => tick())");
-		expect(workspace).toContain("Effect.forkScoped");
+		expect(workspace).toContain("Effect.promise(() => tick())");
+		expect(workspace).toContain("if (anchor_layout_revision > 0) yield* UpdateAnchorLayout");
 		expect(workspace).toContain("ConversationBottomScrollTop(");
 		expect(workspace).toContain("ConversationUserMessageWithSourceReference(");
 		expect(workspace).toContain("ConversationEndSpaceHeight(");
@@ -293,7 +313,7 @@ describe("Barekey docs shell reset", () => {
 		expect(layout).not.toContain('searchParams.get("workspace")');
 		expect(layout).toContain("active_thread.primary_project?.project_id");
 		expect(layout).toContain("ResolveThreadRoute(threads, active_route_thread_id)");
-		expect(layout).toContain("$draft_thread_project?.project_id");
+		expect(layout).toContain("draft_state.project?.project_id");
 		expect(layout).toContain("workspace_id={active_workspace_id}");
 		expect(identity).not.toContain("projects[0]");
 		expect(panel).toContain("EditorRoutePath(");
@@ -316,17 +336,15 @@ describe("Barekey docs shell reset", () => {
 		const home = Read("modules/frontend/src/routes/+page.sv");
 
 		expect(menu).toContain("<CommandDialog");
-		expect(menu).toContain("event.metaKey || event.ctrlKey");
+		expect(menu).toContain("!event.metaKey && !event.ctrlKey");
+		expect(menu).toContain("onkeydown={yield* ToggleCommandMenu(event)}");
 		/**
-		 * New thread is a plain jump into the draft route: no dropdown, no
-		 * project picking, and no durable thread creation from the menu.
+		 * New thread is a plain jump to the root draft: no dropdown, no
+		 * project picking, and no durable thread creation from the menu. The
+		 * dedicated `/threads` draft route no longer exists.
 		 */
-		/**
-		 * The draft lives at `/threads`, not `/threads/new`, so no thread whose
-		 * route id happens to be "new" can ever be shadowed by the draft route.
-		 */
-		expect(menu).toContain('Navigate("/threads")');
-		expect(menu).not.toContain("/threads/new");
+		expect(menu).toContain('href="/"');
+		expect(menu).not.toContain('"/threads"');
 		expect(menu).toContain("<span>New thread</span>");
 		expect(menu).not.toContain("client.CreateThread");
 		expect(menu).not.toContain("client.ListProjectDirectories");
@@ -342,14 +360,24 @@ describe("Barekey docs shell reset", () => {
 		expect(layout).toContain("client.SubscribeThreadList");
 		expect(layout).toContain("ApplyRootThreadListUpdate");
 		expect(menu).not.toContain("ArtisanClient");
-		expect(home).toContain('href="/threads"');
-		expect(home).toContain(">New thread</span>");
+		/** The root page is the draft: the composer creates the thread on first send. */
+		expect(existsSync(resolve("modules/frontend/src/routes/threads/+page.sv"))).toBe(false);
+		expect(home).toContain("<ThreadComposer");
+		expect(home).toContain("SubmitFirstMessage");
+		expect(home).toContain("yield* draft_thread.Submit(submission)");
+		expect(home).toContain("seed_model?.capabilities.speed_options.find(");
+		expect(home).not.toContain("last_model?.capabilities.speed_options.find(");
+		expect(home).toContain(
+			"Navigate(ThreadRoutePath(created.project.project_id, created.thread_id))",
+		);
+		expect(home).not.toContain('"/threads"');
 		expect(home).not.toMatch(/WelcomePage|ThreadWorkspace|SettingsPage|LiveWorkspaceStore/);
 	});
 
 	it("locks engine switching only during an active run and routes it through policy", () => {
 		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.sv");
 		const composer = Read("modules/frontend/src/routes/components/thread-composer.sv");
+		const controls = Read("modules/frontend/src/routes/components/composer/controls.sv");
 		const selector = Read("modules/frontend/src/routes/components/model-selector/view.sv");
 		const engine_section = Read(
 			"modules/frontend/src/routes/components/model-selector/engine-section.sv",
@@ -357,9 +385,10 @@ describe("Barekey docs shell reset", () => {
 
 		expect(workspace).toContain("const engine_locked = $derived(run_active);");
 		expect(workspace).not.toContain("run_active || snapshot.items.length > 0");
-		expect(composer).toContain("<ModelSelector");
-		expect(composer).toContain("{engine_locked}");
-		expect(composer).toContain("{runtime_catalog}");
+		expect(composer).toContain("<ComposerControls");
+		expect(controls).toContain("<ModelSelector");
+		expect(controls).toContain("{engine_locked}");
+		expect(controls).toContain("{runtime_catalog}");
 		expect(selector).toContain("engine_id: model.engine,");
 		expect(selector).toContain("model.id !== untrack(() => selected_model_id)");
 		expect(selector).toContain("<EngineSection");
@@ -374,14 +403,20 @@ describe("Barekey docs shell reset", () => {
 			"modules/frontend/src/routes/components/model-selector/model-list.sv",
 		);
 		const composer = Read("modules/frontend/src/routes/components/thread-composer.sv");
+		const defaults_controller = Read(
+			"modules/frontend/src/lib/settings/session-defaults-controller.ts",
+		);
 
 		/** Forge owns the set, so every client opens the picker to the same order. */
-		expect(selector).toContain("client.GetModelFavorites");
-		expect(selector).toContain("client.UpdateModelFavorite");
+		expect(selector).toContain("defaults_controller.SetFavorite");
+		expect(defaults_controller).toContain("client.GetModelFavorites");
+		expect(defaults_controller).toContain("client.UpdateModelFavorite");
 		expect(selector).toContain("client.ConnectionChanges");
-		/** The composer owns the one catalog stream and shares its current value. */
+		/** The canonical defaults controller owns the catalog stream for every surface. */
 		expect(selector).not.toContain("RuntimeCatalogChanges");
-		expect(composer).toContain("RuntimeCatalogChanges");
+		expect(composer).not.toContain("RuntimeCatalogChanges");
+		expect(composer).toContain("yield* SessionDefaultsController");
+		expect(composer).toContain("defaults_controller.Changes");
 		expect(composer).toContain("{runtime_catalog}");
 		/** Favorites sort within the active engine, never across engine tabs. */
 		expect(selection).toContain("models.filter((model) => model.engine === engine)");
@@ -398,31 +433,50 @@ describe("Barekey docs shell reset", () => {
 		expect(global_styles).toContain("--color-favorite: var(--favorite);");
 		expect(global_styles.match(/^\t--favorite: oklch/gm)?.length ?? 0).toBe(2);
 		/** The stable control stays mounted but cannot be used without Forge. */
-		expect(selector).toContain("IsOfflineRuntimeCatalog(runtime_catalog)");
+		expect(selector).toContain(
+			"defaults_state?.available ?? !IsOfflineRuntimeCatalog(effective_catalog)",
+		);
 		expect(model_list).toContain("disabled={disabled || !favorites_available}");
 		expect(model_list).not.toContain("{#if favorites_available}");
 	});
 
 	it("surfaces the thread's project at the top of the thread panel and assigns it there", () => {
 		const panel = Read("modules/frontend/src/routes/components/thread-panel.sv");
+		const project_selector = Read(
+			"modules/frontend/src/routes/components/panel/project-selector.sv",
+		);
+		const picker = Read("modules/frontend/src/routes/components/project-folder-picker.sv");
 
-		expect(panel).toContain('aria-label="Thread project"');
-		expect(panel).toContain('{project?.display_name ?? "No project"}');
+		expect(panel).toContain("<ProjectSelector");
+		expect(project_selector).toContain('aria-label="Thread project"');
+		expect(project_selector).toContain('{project?.display_name ?? "No project"}');
 		expect(panel).toContain("ResolveThreadRoute(threads, route_id)");
 		expect(panel).toContain('type: "thread.project.assign"');
-		expect(panel).toContain("client.ListProjectDirectories");
-		expect(panel).toContain("client.SelectProjectDirectory");
 		/** Projects already in use are picked from the header select... */
-		expect(panel).toContain("onValueChange={RequestProject}");
-		expect(panel).toContain("value={candidate.project_id}");
-		expect(panel).toContain("value={BROWSE_VALUE}");
+		expect(project_selector).toContain("onValueChange={yield* onvaluechange(event)}");
+		expect(project_selector).toContain("value={candidate.project_id}");
+		expect(project_selector).toContain("value={BROWSE_VALUE}");
 		/** ...which wears the same glass-and-hover-pill dropdown as the composer selects. */
-		expect(panel).toContain("<DropdownHoverSurface");
-		expect(panel).toContain("{@attach FollowHighlight(move_hover)}");
-		/** ...and the dialog is now only the folder browser that starts a new one. */
-		expect(panel).toContain("<Dialog.Title>Choose a folder</Dialog.Title>");
+		expect(project_selector).toContain("<DropdownHoverSurface");
+		expect(project_selector).toContain("{@attach FollowHighlight(move_hover)}");
+		/** ...and browsing for a new folder is the picker component's whole job. */
+		expect(panel).toContain("<ProjectFolderPicker");
+		expect(picker).toContain("client.ListProjectDirectories");
+		expect(picker).toContain("yield* browse_requests.IsCurrent(request_epoch)");
+		expect(picker).toContain("yield* MakeLatestRequestGate");
+		expect(picker).toContain("const outcome = yield* Effect.result(");
+		expect(picker).toContain("client.SelectProjectDirectory");
+		expect(picker).toContain("<Dialog.Title>Choose a folder</Dialog.Title>");
+		/**
+		 * The picker is the familiar file-browser everywhere, Electron included:
+		 * places sidebar, breadcrumb path, search beside it, files for context.
+		 */
+		expect(picker).toContain('aria-label="Places"');
+		expect(picker).toContain('aria-label="Current folder path"');
+		expect(picker).toContain('aria-label="Search this folder"');
+		expect(picker).toContain("visible_files");
 		/** On the draft route the same picker edits the client-side draft project. */
-		expect(panel).toContain("draft_thread_project.set(candidate)");
+		expect(panel).toContain("yield* draft_thread.SelectProject(candidate)");
 		/** Draft-ness follows the absent route id rather than a hardcoded path. */
 		expect(panel).toContain("const is_draft = $derived(route_id === undefined);");
 	});

@@ -1,5 +1,6 @@
 <script lang="ts" effect>
-	import { Effect, Queue } from "effect";
+	import { Effect } from "effect";
+	import { RunBrowserDom } from "$lib/browser/dom";
 	import { TabsList, TabsTrigger } from "$lib/components/ui/tabs";
 	import { Tooltip, TooltipContent, TooltipTrigger } from "$lib/components/ui/tooltip";
 	import type { EngineChoice } from "$lib/engine/model-selection";
@@ -25,7 +26,7 @@
 	let indicator_left = $state(0);
 	let indicator_visible = $state(false);
 	let indicator_width = $state(0);
-	const position_requests = yield* Queue.sliding<boolean>(1);
+	let resize_revision = $state(0);
 
 	const PositionIndicator = (animate: boolean) =>
 		Effect.gen(function* () {
@@ -35,33 +36,30 @@
 			 */
 			yield* Effect.sleep("1 millis");
 			const current_surface = surface;
-			const active_tab = current_surface?.querySelector<HTMLElement>(
-				`[data-engine="${active_engine}"]`,
+			const active_tab = yield* RunBrowserDom(() =>
+				current_surface?.querySelector<HTMLElement>(`[data-engine="${active_engine}"]`),
 			);
 			if (active_tab === undefined || active_tab === null || current_surface === null) return;
 
-			const surface_rect = current_surface.getBoundingClientRect();
-			const tab_rect = active_tab.getBoundingClientRect();
+			const { surface_rect, tab_rect } = yield* RunBrowserDom(() => ({
+				surface_rect: current_surface.getBoundingClientRect(),
+				tab_rect: active_tab.getBoundingClientRect(),
+			}));
 			indicator_animated = animate && indicator_visible;
 			indicator_left = tab_rect.left - surface_rect.left;
 			indicator_visible = true;
 			indicator_width = tab_rect.width;
 		});
 
-	yield* Queue.take(position_requests).pipe(
-		Effect.flatMap(PositionIndicator),
-		Effect.forever,
-		Effect.forkScoped,
-	);
-
-	$effect(() => {
-		void active_engine;
-		void surface;
-		Queue.offerUnsafe(position_requests, true);
+	const Resize = Effect.gen(function* () {
+		resize_revision += 1;
 	});
+
+	/** SER reruns this scoped geometry program after a tab, surface, or resize change. */
+	yield* PositionIndicator(resize_revision === 0);
 </script>
 
-<svelte:window onresize={() => Queue.offerUnsafe(position_requests, false)} />
+<svelte:window onresize={yield* Resize} />
 
 <TabsList
 	bind:ref={surface}

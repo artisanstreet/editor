@@ -7,9 +7,12 @@ import { BannerPresenter } from "./service";
 export const SonnerBannerPresenterLive = Layer.succeed(
 	BannerPresenter,
 	BannerPresenter.of({
-		Dismiss: (id) => Effect.sync(() => toast.dismiss(id)),
+		Dismiss: (id) =>
+			Effect.gen(function* () {
+				toast.dismiss(id);
+			}),
 		Show: (event, on_action) =>
-			Effect.sync(() => {
+			Effect.gen(function* () {
 				toast.custom(BannerView, {
 					componentProps: { event, onaction: on_action },
 					...(event.duration_ms === undefined ? {} : { duration: event.duration_ms }),

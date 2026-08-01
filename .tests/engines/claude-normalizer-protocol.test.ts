@@ -124,6 +124,7 @@ describe("claude stream-json normalization", () => {
 				item_id: "msg_011CdVSx52pWZx8S1tJU7uoQ:reasoning",
 				turn_id: "claude:run_1:turn",
 			}),
+			expect.objectContaining({ _tag: "usage" }),
 		]);
 	});
 
@@ -142,6 +143,7 @@ describe("claude stream-json normalization", () => {
 				item_id: (delta as { item_id: string }).item_id,
 				turn_id: "claude:run_1:turn",
 			}),
+			expect.objectContaining({ _tag: "usage" }),
 		]);
 	});
 
@@ -156,12 +158,14 @@ describe("claude stream-json normalization", () => {
 				item_id: "msg_011CdVSx52pWZx8S1tJU7uoQ",
 				message: "I'm not sure what you'd like me to help with.",
 			}),
+			expect.objectContaining({ _tag: "usage" }),
 		]);
 	});
 
 	it("adds no reasoning completion when an assistant frame carries no thinking blocks", () => {
 		expect(normalize(claude_assistant_text_frame)).toEqual([
 			expect.objectContaining({ _tag: "agent_message_completed" }),
+			expect.objectContaining({ _tag: "usage", context_tokens: expect.any(Number) }),
 		]);
 	});
 

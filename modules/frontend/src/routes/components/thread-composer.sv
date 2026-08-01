@@ -1,20 +1,9 @@
 <script lang="ts" effect>
-	import ArrowUp from "@tabler/icons-svelte/icons/arrow-up";
-	import PlayerStopFilled from "@tabler/icons-svelte/icons/player-stop-filled";
-	import X from "@tabler/icons-svelte/icons/x";
-	import { onDestroy } from "svelte";
 	import { Effect, Stream } from "effect";
-	import { SnowflakeId } from "@artisan/protocol";
-	import type { ThreadSessionPolicy } from "@artisan/protocol";
-	import { ArtisanClient } from "@artisan/transport/client";
-	import { Button } from "$lib/components/ui/button";
-	import {
-		Tooltip,
-		TooltipContent,
-		TooltipProvider,
-		TooltipTrigger,
-	} from "$lib/components/ui/tooltip";
+	import type { SurfaceUsageAggregate, ThreadSessionPolicy } from "@artisan/protocol";
 	import { BannerService } from "$lib/banner/service";
+	import { RunBrowserDom } from "$lib/browser/dom";
+	import { ReleaseBrowserObjectUrl } from "$lib/browser/object-url";
 	import {
 		MakeSubmitGate,
 		type SubmitGate,
@@ -24,35 +13,48 @@
 		UpdateComposerPlaceholderState,
 	} from "$lib/composer-placeholder";
 	import {
-		IsSupportedImageMimeType,
 		MakeImageAttachmentParts,
 		ValidateImageAttachmentCandidates,
 		type ComposerImageAttachment,
 		type ComposerSubmission,
 	} from "$lib/composer/image-attachments";
+	import { ReadComposerImageFile } from "$lib/composer/attachment-reader";
 	import {
-		IsOfflineRuntimeCatalog,
-		OfflineRuntimeCatalog,
-		RuntimeCatalogChanges,
-	} from "$lib/runtime/offline-catalog";
+		ClearComposerEditor,
+		ComposerAttachmentIdAtEvent,
+		ComposerDropRange,
+		ComposerSelectedRange,
+		FocusComposerEditor,
+		FocusComposerRange,
+		InsertComposerAttachmentMarkers,
+		ReadComposerEditorDocument,
+		RemoveComposerAttachmentMarkers,
+		type ComposerEditorDocument,
+	} from "./composer/dom";
+	import {
+		SessionDefaultsController,
+		type SessionDefaultsState,
+	} from "$lib/settings/session-defaults-controller";
 	import ImageViewer from "./image-viewer.sv";
-	import ModelSelector from "./model-selector/view.sv";
 	import ShaderGlassSurface from "./shader-glass-surface.sv";
+	import AttachmentTray from "./composer/attachment-tray.sv";
+	import ComposerControls from "./composer/controls.sv";
 
-	const snowflake_id = yield* SnowflakeId;
 	const banner = yield* BannerService;
-	const client = yield* ArtisanClient;
-	let runtime_catalog = $state.raw(OfflineRuntimeCatalog);
-	yield* RuntimeCatalogChanges.pipe(
-		Stream.runForEach((catalog) =>
-			Effect.sync(() => {
-				runtime_catalog = catalog;
-			}),
-		),
+	const defaults_controller = yield* SessionDefaultsController;
+	let defaults_state = $state.raw<SessionDefaultsState>(yield* defaults_controller.Current);
+	const ApplyDefaults = (next: SessionDefaultsState) =>
+		Effect.gen(function* () {
+			defaults_state = next;
+		});
+	yield* defaults_controller.Changes.pipe(
+		Stream.runForEach(ApplyDefaults),
 		Effect.forkScoped,
 	);
+	const runtime_catalog = $derived(defaults_state.catalog);
 
 	let {
+		context_usage,
 		disabled = false,
 		engine_locked = false,
 		onabort,
@@ -61,10 +63,13 @@
 		policy,
 		run_active = false,
 	}: {
+		context_usage?: SurfaceUsageAggregate;
 		disabled?: boolean;
 		engine_locked?: boolean;
 		onabort?: () => Effect.Effect<unknown, { readonly message: string }>;
-		onpolicychange?: (policy: ThreadSessionPolicy) => void;
+		onpolicychange?: (
+			policy: ThreadSessionPolicy,
+		) => Effect.Effect<ThreadSessionPolicy, { readonly message: string }>;
 		onsubmit?: (
 			submission: ComposerSubmission,
 		) => Effect.Effect<unknown, { readonly message: string }>;
@@ -78,8 +83,7 @@
 	 * unregistered can still be picked and read but never run.
 	 */
 	const send_blocked_reason = $derived.by(() => {
-		if (IsOfflineRuntimeCatalog(runtime_catalog))
-			return "Forge is offline — reconnect to send";
+		if (!defaults_state.available) return "Forge is offline — reconnect to send";
 		const engine_id = policy?.engine_id;
 		if (engine_id === undefined) return undefined;
 		if (runtime_catalog.runnable_harness_ids.includes(engine_id)) return undefined;
@@ -88,6 +92,33 @@
 			engine_id;
 		return `${label} models are preview-only — this engine cannot run in Artisan yet`;
 	});
+
+	/**
+	 * The context-window denominator. A provider that discloses its usable
+	 * window on the wire (Codex) wins; otherwise the catalog's configured
+	 * context-window option for the thread's model stands in (Claude never
+	 * reports a window size). Models without the capability show no gauge.
+	 */
+	const context_window_tokens = $derived.by(() => {
+		if (context_usage?.context_window_tokens !== undefined)
+			return context_usage.context_window_tokens;
+		const capability = runtime_catalog.manifest.models.find(
+			(model) => model.native_model_id === policy?.model,
+		)?.capabilities.context_window;
+		if (capability === undefined) return undefined;
+		const option =
+			capability.options.find((candidate) =>
+				policy?.context_window === undefined
+					? candidate.native_suffix === ""
+					: candidate.native_suffix === policy.context_window,
+			) ?? capability.options.find((candidate) => candidate.id === capability.default);
+		return option?.tokens;
+	});
+	const context_percent = $derived(
+		context_usage?.context_tokens === undefined || context_window_tokens === undefined
+			? undefined
+			: Math.min(100, (context_usage.context_tokens / context_window_tokens) * 100),
+	);
 
 	let editor = $state<HTMLDivElement | null>(null);
 	let attachments = $state<ReadonlyMap<string, ComposerImageAttachment>>(new Map());
@@ -111,175 +142,71 @@
 			onsubmit !== undefined,
 	);
 
-	type EditorDocument = {
-		readonly text: string;
-		readonly tokens: ReadonlyArray<{ readonly id: string; readonly position: number }>;
-	};
-
-	const update_draft = (value: string, has_attachments = attachments.size > 0) => {
-		draft = value;
-		placeholder = UpdateComposerPlaceholderState(placeholder, has_attachments ? "\uFFFC" : value);
-	};
-
-	const read_editor_document = (): EditorDocument => {
-		if (editor === null) return { text: draft, tokens: [] };
-		let text = "";
-		const tokens: Array<{ id: string; position: number }> = [];
-		const visit = (node: Node) => {
-			if (node.nodeType === Node.TEXT_NODE) {
-				text += node.textContent?.replaceAll("\u200B", "") ?? "";
-				return;
-			}
-			if (!(node instanceof HTMLElement)) return;
-			const attachment_id = node.dataset.attachmentId;
-			if (attachment_id !== undefined) {
-				tokens.push({ id: attachment_id, position: text.length });
-				return;
-			}
-			if (node.tagName === "BR") {
-				text += "\n";
-				return;
-			}
-			for (const child of node.childNodes) visit(child);
-		};
-		for (const node of editor.childNodes) visit(node);
-		return { text, tokens };
-	};
-
-	const revoke_attachment = (attachment: ComposerImageAttachment | undefined) => {
-		if (attachment !== undefined) URL.revokeObjectURL(attachment.preview_url);
-	};
-
-	const sync_editor = () => {
-		const document = read_editor_document();
-		const present = new Set(document.tokens.map((token) => token.id));
-		const next = new Map<string, ComposerImageAttachment>();
-		for (const [id, attachment] of attachments) {
-			if (present.has(id)) next.set(id, attachment);
-			else {
-				if (viewed_attachment?.id === id) {
-					image_viewer_open = false;
-					viewed_attachment = undefined;
-				}
-				revoke_attachment(attachment);
-			}
-		}
-		attachments = next;
-		update_draft(document.text, next.size > 0);
-		return document;
-	};
-
-	const focus_range = (range: Range) => {
-		const selection = globalThis.getSelection();
-		if (selection === null) return;
-		selection.removeAllRanges();
-		selection.addRange(range);
-	};
-
-	const end_range = () => {
-		const range = document.createRange();
-		if (editor === null) return range;
-		range.selectNodeContents(editor);
-		range.collapse(false);
-		return range;
-	};
-
-	const selected_range = () => {
-		const selection = globalThis.getSelection();
-		if (
-			editor === null ||
-			selection === null ||
-			selection.rangeCount === 0 ||
-			!editor.contains(selection.getRangeAt(0).commonAncestorContainer)
-		)
-			return end_range();
-		return selection.getRangeAt(0).cloneRange();
-	};
-
-	const attachment_marker = (attachment: ComposerImageAttachment) => {
-		const marker = document.createElement("button");
-		marker.type = "button";
-		marker.contentEditable = "false";
-		marker.dataset.attachmentId = attachment.id;
-		marker.className = "composer-image-marker card";
-		marker.setAttribute("aria-label", `View attached image ${attachment.name}`);
-		marker.title = attachment.name;
-		const thumbnail = document.createElement("img");
-		thumbnail.alt = "";
-		thumbnail.src = attachment.preview_url;
-		marker.append(thumbnail);
-		return marker;
-	};
-
-	const insert_attachments = (
-		next_attachments: ReadonlyArray<ComposerImageAttachment>,
-		range = selected_range(),
-	) => {
-		if (editor === null || next_attachments.length === 0) return;
-		range.deleteContents();
-		const fragment = document.createDocumentFragment();
-		for (const attachment of next_attachments) {
-			fragment.append(attachment_marker(attachment), document.createTextNode("\u200B"));
-		}
-		const trailing_caret = document.createTextNode("");
-		fragment.append(trailing_caret);
-		range.insertNode(fragment);
-		const caret = document.createRange();
-		caret.setStart(trailing_caret, 0);
-		caret.collapse(true);
-		focus_range(caret);
-		sync_editor();
-	};
-
-	const remove_attachment = (attachment_id: string) => {
-		const attachment = attachments.get(attachment_id);
-		if (viewed_attachment?.id === attachment_id) image_viewer_open = false;
-		for (const marker of editor?.querySelectorAll<HTMLElement>("[data-attachment-id]") ?? []) {
-			if (marker.dataset.attachmentId === attachment_id) marker.remove();
-		}
-		revoke_attachment(attachment);
-		attachments = new Map([...attachments].filter(([id]) => id !== attachment_id));
-		sync_editor();
-		editor?.focus();
-	};
-
-	const view_attachment = (attachment: ComposerImageAttachment) => {
-		viewed_attachment = attachment;
-		image_viewer_open = true;
-	};
-
-	const ReadFile = (file: File) =>
+	const UpdateDraft = (value: string, has_attachments = attachments.size > 0) =>
 		Effect.gen(function* () {
-			const id = yield* snowflake_id.Make("attachment");
-			return yield* Effect.callback<ComposerImageAttachment, Error>((resume) => {
-				const reader = new FileReader();
-				reader.onerror = () =>
-					resume(Effect.fail(reader.error ?? new Error(`Could not read ${file.name}.`)));
-				reader.onload = () => {
-					const source = typeof reader.result === "string" ? reader.result : undefined;
-					const content_base64 = source?.slice(source.indexOf(",") + 1);
-					if (!content_base64 || !IsSupportedImageMimeType(file.type)) {
-						resume(Effect.fail(new Error(`Could not read ${file.name} as an image.`)));
-						return;
-					}
-					resume(Effect.succeed({
-						content_base64,
-						id,
-						mime_type: file.type,
-						name: file.name || "Image",
-						preview_url: URL.createObjectURL(file),
-						size_bytes: file.size,
-					}));
-				};
-				reader.readAsDataURL(file);
-
-				return Effect.sync(() => {
-					if (reader.readyState === FileReader.LOADING) reader.abort();
-				});
-			});
+			draft = value;
+			placeholder = UpdateComposerPlaceholderState(
+				placeholder,
+				has_attachments ? "\uFFFC" : value,
+			);
 		});
 
-	const AddFiles = (files: ReadonlyArray<File>, range = selected_range()) =>
+	const RevokeAttachment = (attachment: ComposerImageAttachment | undefined) =>
+		Effect.gen(function* () {
+			if (attachment !== undefined) {
+				yield* ReleaseBrowserObjectUrl(attachment.preview_url).pipe(Effect.ignore);
+			}
+		});
+
+	const SyncEditor = (): Effect.Effect<ComposerEditorDocument> =>
+		Effect.gen(function* () {
+			const document = yield* ReadComposerEditorDocument(editor, draft);
+			const present = new Set(document.tokens.map((token) => token.id));
+			const next = new Map<string, ComposerImageAttachment>();
+			for (const [id, attachment] of attachments) {
+				if (present.has(id)) next.set(id, attachment);
+				else {
+					if (viewed_attachment?.id === id) {
+						image_viewer_open = false;
+						viewed_attachment = undefined;
+					}
+					yield* RevokeAttachment(attachment);
+				}
+			}
+			attachments = next;
+			yield* UpdateDraft(document.text, next.size > 0);
+			return document;
+		});
+
+	const InsertAttachments = (
+		next_attachments: ReadonlyArray<ComposerImageAttachment>,
+		range: Range,
+	) =>
+		Effect.gen(function* () {
+			if (editor === null || next_attachments.length === 0) return;
+			const caret = yield* InsertComposerAttachmentMarkers(next_attachments, range);
+			yield* FocusComposerRange(caret);
+			yield* SyncEditor();
+		});
+
+	const RemoveAttachment = (attachment_id: string) =>
+		Effect.gen(function* () {
+			const attachment = attachments.get(attachment_id);
+			if (viewed_attachment?.id === attachment_id) image_viewer_open = false;
+			yield* RemoveComposerAttachmentMarkers(editor, attachment_id);
+			yield* RevokeAttachment(attachment);
+			attachments = new Map([...attachments].filter(([id]) => id !== attachment_id));
+			yield* SyncEditor();
+			yield* FocusComposerEditor(editor);
+		});
+
+	const ViewAttachment = (attachment: ComposerImageAttachment) =>
+		Effect.gen(function* () {
+			viewed_attachment = attachment;
+			image_viewer_open = true;
+		});
+
+	const AddFiles = (files: ReadonlyArray<File>, range?: Range) =>
 		Effect.gen(function* () {
 			if (disabled || submitting) return;
 			const validation = ValidateImageAttachmentCandidates(
@@ -291,29 +218,26 @@
 				return;
 			}
 			const loaded: Array<ComposerImageAttachment> = [];
-			yield* Effect.forEach(files, (file) =>
-				ReadFile(file).pipe(Effect.tap((attachment) => Effect.sync(() => loaded.push(attachment)))),
-			).pipe(
+			yield* Effect.gen(function* () {
+				for (const file of files) loaded.push(yield* ReadComposerImageFile(file));
+			}).pipe(
 				Effect.matchEffect({
 					onFailure: (cause) =>
 						Effect.gen(function* () {
-						for (const attachment of loaded) revoke_attachment(attachment);
-						yield* banner.error("Could not attach image", { description: cause.message });
-					}),
-					onSuccess: () => {
-						attachments = new Map([...attachments, ...loaded.map((attachment) => [attachment.id, attachment])]);
-						insert_attachments(loaded, range);
-					},
+							for (const attachment of loaded) yield* RevokeAttachment(attachment);
+							yield* banner.error("Could not attach image", { description: cause.message });
+						}),
+					onSuccess: () =>
+						Effect.gen(function* () {
+							attachments = new Map([...attachments, ...loaded.map((attachment) => [attachment.id, attachment])]);
+							yield* InsertAttachments(
+								loaded,
+								range ?? (yield* ComposerSelectedRange(editor)),
+							);
+						}),
 				}),
 			);
 		});
-
-	const reveal_placeholder = (node: HTMLElement) => {
-		node.classList.remove("is-shown");
-		void node.offsetHeight;
-		const frame = requestAnimationFrame(() => node.classList.add("is-shown"));
-		return { destroy: () => cancelAnimationFrame(frame) };
-	};
 
 	const character_delay = (index: number, length: number) => {
 		if (length <= 1) return 0;
@@ -322,7 +246,7 @@
 	};
 
 	const Submit = Effect.gen(function* () {
-		const document = sync_editor();
+		const document = yield* SyncEditor();
 		const text = document.text;
 		const attachment_parts = MakeImageAttachmentParts(attachments, document.tokens);
 		if (disabled || submitting || (text.length === 0 && attachment_parts.length === 0) || onsubmit === undefined)
@@ -330,18 +254,29 @@
 		if (!(yield* submit_gate.Acquire)) return;
 		submitting = true;
 
+		const CompleteSubmission = Effect.gen(function* () {
+			for (const attachment of attachments.values()) yield* RevokeAttachment(attachment);
+			attachments = new Map();
+			yield* ClearComposerEditor(editor);
+			yield* UpdateDraft("");
+		});
+		const ReleaseSubmission = Effect.gen(function* () {
+			yield* submit_gate.Release;
+			submitting = false;
+		});
+
 		yield* onsubmit({ attachments: attachment_parts, text }).pipe(
 			Effect.matchEffect({
 				onFailure: (error) =>
-					banner.error("Could not send message", { description: error.message }),
-				onSuccess: () => Effect.sync(() => {
-					for (const attachment of attachments.values()) revoke_attachment(attachment);
-					attachments = new Map();
-					editor?.replaceChildren();
-					update_draft("");
-				}),
+					Effect.gen(function* () {
+						yield* banner.error("Could not send message", { description: error.message });
+					}),
+				onSuccess: () =>
+					Effect.gen(function* () {
+						yield* CompleteSubmission;
+					}),
 			}),
-			Effect.ensuring(Effect.all([submit_gate.Release, Effect.sync(() => { submitting = false; })])),
+			Effect.ensuring(ReleaseSubmission),
 		);
 	});
 
@@ -350,14 +285,12 @@
 		cancelling = true;
 
 		yield* onabort().pipe(
-			Effect.matchEffect({
-				onFailure: (error) =>
-					Effect.gen(function* () {
-						cancelling = false;
-						yield* banner.error("Could not stop run", { description: error.message });
-					}),
-				onSuccess: () => Effect.void,
-			}),
+			Effect.catch((error) =>
+				Effect.gen(function* () {
+					cancelling = false;
+					yield* banner.error("Could not stop run", { description: error.message });
+				}),
+			),
 		);
 	});
 
@@ -372,41 +305,63 @@
 	const HandleComposerKey = (event: KeyboardEvent) =>
 		Effect.gen(function* () {
 			if (event.isComposing || event.key !== "Enter" || event.shiftKey) return;
-			event.preventDefault();
+			yield* RunBrowserDom(() => event.preventDefault());
 			yield* Submit;
 		});
 
-	const HandlePaste = (event: ClipboardEvent) => Effect.gen(function* () {
-		const files = [...(event.clipboardData?.files ?? [])].filter((file) => file.type.startsWith("image/"));
-		if (files.length === 0) return;
-		event.preventDefault();
-		yield* AddFiles(files);
+	const HandlePaste = (event: ClipboardEvent) =>
+		Effect.gen(function* () {
+			const files = [...(event.clipboardData?.files ?? [])].filter((file) => file.type.startsWith("image/"));
+			if (files.length === 0) return;
+			yield* RunBrowserDom(() => event.preventDefault());
+			yield* AddFiles(files);
+		});
+
+	const HandleDrop = (event: DragEvent) =>
+		Effect.gen(function* () {
+			const files = [...(event.dataTransfer?.files ?? [])].filter((file) =>
+				file.type.startsWith("image/"),
+			);
+			if (files.length === 0) return;
+			yield* RunBrowserDom(() => event.preventDefault());
+			const range =
+				(yield* ComposerDropRange(editor, event)) ??
+				(yield* ComposerSelectedRange(editor));
+			yield* AddFiles(files, range);
+		});
+
+	const HandleEditorClick = (event: MouseEvent) =>
+		Effect.gen(function* () {
+			const attachment_id = yield* ComposerAttachmentIdAtEvent(event);
+			if (attachment_id === undefined) return;
+			const attachment = attachments.get(attachment_id);
+			if (attachment !== undefined) yield* ViewAttachment(attachment);
+		});
+
+	const QueueEditorSync = Effect.gen(function* () {
+		yield* Effect.yieldNow;
+		yield* SyncEditor();
 	});
-
-	const HandleDrop = (event: DragEvent) => Effect.gen(function* () {
-		const files = [...(event.dataTransfer?.files ?? [])].filter((file) => file.type.startsWith("image/"));
-		if (files.length === 0) return;
-		event.preventDefault();
-		const point = document.caretRangeFromPoint?.(event.clientX, event.clientY);
-		yield* AddFiles(files, point !== null && point !== undefined && editor?.contains(point.commonAncestorContainer) ? point : selected_range());
+	const HandleDragOver = (event: DragEvent) =>
+		Effect.gen(function* () {
+			if ([...(event.dataTransfer?.types ?? [])].includes("Files")) {
+				yield* RunBrowserDom(() => event.preventDefault());
+			}
+		});
+	const ClearViewedAttachment = Effect.gen(function* () {
+		viewed_attachment = undefined;
 	});
-
-	const handle_editor_click = (event: MouseEvent) => {
-		const target = event.target;
-		if (!(target instanceof HTMLElement)) return;
-		const marker = target.closest<HTMLElement>("[data-attachment-id]");
-		if (marker?.dataset.attachmentId === undefined) return;
-		const attachment = attachments.get(marker.dataset.attachmentId);
-		if (attachment !== undefined) view_attachment(attachment);
-	};
-
-	onDestroy(() => {
-		for (const attachment of attachments.values()) revoke_attachment(attachment);
-	});
-
-	$effect(() => {
+	const ResetCancelling = Effect.gen(function* () {
 		if (!run_active) cancelling = false;
 	});
+
+	yield* Effect.addFinalizer(() =>
+		Effect.gen(function* () {
+			for (const attachment of attachments.values()) yield* RevokeAttachment(attachment);
+		}),
+	);
+
+	yield* ResetCancelling;
 </script>
 
 <div class="pointer-events-none absolute inset-x-0 bottom-0 z-20 px-4 pb-4 sm:px-6 sm:pb-6">
@@ -415,26 +370,13 @@
 		data-has-attachments={attachments.size > 0}
 	>
 		<div class="relative z-10 flex min-h-32 flex-col p-2">
-			<div class="composer-attachment-tray" aria-label="Attached images">
-				<div class="composer-attachment-tray-content">
-					{#each [...attachments.values()] as attachment (attachment.id)}
-						<div class="composer-attachment-preview card">
-							<button type="button" class="composer-attachment-preview-trigger" aria-label={`View ${attachment.name}`} onclick={() => view_attachment(attachment)}>
-								<img src={attachment.preview_url} alt={attachment.name} />
-							</button>
-							<Button variant="secondary" size="icon-sm" class="composer-attachment-remove" aria-label={`Remove ${attachment.name}`} onclick={() => remove_attachment(attachment.id)}>
-								<X class="size-3.5" />
-							</Button>
-						</div>
-					{/each}
-				</div>
-			</div>
+			<AttachmentTray {attachments} onremove={RemoveAttachment} onview={ViewAttachment} />
 
 			<div class="relative min-h-16 flex-1">
 				{#if placeholder.visible}
 					{#key placeholder.generation}
 						{@const characters = Array.from(placeholder.phrase)}
-						<div use:reveal_placeholder aria-hidden="true" class="placeholder-reveal pointer-events-none absolute inset-x-3 top-2 text-base text-muted-foreground">
+						<div aria-hidden="true" class="placeholder-reveal pointer-events-none absolute inset-x-3 top-2 text-base text-muted-foreground">
 							<span class="placeholder-reveal-line">
 								{#each characters as character, index}
 									<span class="placeholder-character" style={`--placeholder-delay: ${character_delay(index, characters.length)}ms`}>{character}</span>
@@ -452,54 +394,32 @@
 					aria-label="Message thread"
 					aria-multiline="true"
 					aria-disabled={disabled || submitting}
-					oninput={sync_editor}
+					oninput={yield* SyncEditor()}
 					onkeydown={yield* HandleComposerKey(event)}
-					onkeyup={() => queueMicrotask(sync_editor)}
+					onkeyup={yield* QueueEditorSync}
 					onpaste={yield* HandlePaste(event)}
-					ondragover={(event) => { if ([...(event.dataTransfer?.types ?? [])].includes("Files")) event.preventDefault(); }}
+					ondragover={yield* HandleDragOver(event)}
 					ondrop={yield* HandleDrop(event)}
-					onclick={handle_editor_click}
+					onclick={yield* HandleEditorClick(event)}
 				></div>
 			</div>
 
-			<div class="flex items-center justify-between gap-2">
-				<ModelSelector
-					{disabled}
-					{engine_locked}
-					{onpolicychange}
-					{policy}
-					{runtime_catalog}
-				/>
-				<TooltipProvider delayDuration={0}>
-					<Tooltip>
-						<TooltipTrigger>
-							{#snippet child({ props: tooltip_props })}
-								<span {...tooltip_props} class="flex has-[:disabled]:cursor-not-allowed">
-									<Button
-										variant="ghost"
-										size="icon"
-										class="composer-send rounded-[calc(var(--composer-radius)-0.5rem)]"
-										aria-label={run_active ? "Stop current run" : "Send message"}
-										data-ready={run_active || send_ready}
-										disabled={run_active
-											? disabled || cancelling || onabort === undefined
-											: !send_ready}
-										onclick={yield* ActivatePrimaryAction}
-									>
-										<span class="t-icon-swap size-4" data-state={run_active ? "b" : "a"} aria-hidden="true">
-											<span class="t-icon" data-icon="a"><ArrowUp class="size-4" /></span>
-											<span class="t-icon" data-icon="b"><PlayerStopFilled class="size-4" /></span>
-										</span>
-									</Button>
-								</span>
-							{/snippet}
-						</TooltipTrigger>
-						{#if send_blocked_reason !== undefined && !run_active}
-							<TooltipContent>{send_blocked_reason}</TooltipContent>
-						{/if}
-					</Tooltip>
-				</TooltipProvider>
-			</div>
+			<ComposerControls
+				abort_available={onabort !== undefined}
+				{cancelling}
+				{context_percent}
+				{context_usage}
+				{context_window_tokens}
+				{disabled}
+				{engine_locked}
+				{onpolicychange}
+				onprimaryaction={ActivatePrimaryAction}
+				{policy}
+				{run_active}
+				{runtime_catalog}
+				{send_blocked_reason}
+				{send_ready}
+			/>
 		</div>
 	</ShaderGlassSurface>
 </div>
@@ -508,96 +428,13 @@
 	bind:open={image_viewer_open}
 	source={viewed_attachment?.preview_url}
 	name={viewed_attachment?.name}
-	onclose={() => {
-		viewed_attachment = undefined;
-	}}
+	onclose={ClearViewedAttachment}
 />
 
 <style>
 	:global(:root) {
 		--resize-dur: 300ms;
 		--resize-ease: cubic-bezier(0.22, 1, 0.36, 1);
-		--icon-swap-dur: var(--duration-fast);
-		--icon-swap-blur: 2px;
-		--icon-swap-start-scale: 0.25;
-		--icon-swap-ease: var(--ease-in-out);
-	}
-
-	:global(.t-icon-swap) {
-		position: relative;
-		display: inline-grid;
-	}
-	:global(.t-icon-swap) .t-icon {
-		grid-area: 1 / 1;
-		transition:
-			opacity var(--icon-swap-dur) var(--icon-swap-ease),
-			filter var(--icon-swap-dur) var(--icon-swap-ease),
-			transform var(--icon-swap-dur) var(--icon-swap-ease);
-		will-change: opacity, filter, transform;
-	}
-	:global(.t-icon-swap[data-state="a"]) .t-icon[data-icon="a"],
-	:global(.t-icon-swap[data-state="b"]) .t-icon[data-icon="b"] {
-		opacity: 1;
-		filter: blur(0);
-		transform: scale(1);
-	}
-	:global(.t-icon-swap[data-state="a"]) .t-icon[data-icon="b"],
-	:global(.t-icon-swap[data-state="b"]) .t-icon[data-icon="a"] {
-		opacity: 0;
-		filter: blur(var(--icon-swap-blur));
-		transform: scale(var(--icon-swap-start-scale));
-	}
-
-	/**
-	 * The button rests bare — no well, no outline — while a send is
-	 * impossible; only the muted arrow marks the spot. The face lives on
-	 * ::before as a bright surface gradient a step below white and arms by
-	 * growing a clip-path circle from the center. Children always paint over
-	 * their parent's inset shadow, so the shadow is repainted on ::after
-	 * above both layers, appearing only once the face arms.
-	 */
-	:global(.composer-send) {
-		position: relative;
-		background: transparent;
-		transition: filter var(--duration-quick) var(--ease-in-out);
-	}
-	:global(.composer-send)::before {
-		content: "";
-		position: absolute;
-		inset: 0;
-		border-radius: inherit;
-		background: linear-gradient(to bottom, var(--surface-25), var(--surface-100));
-		clip-path: circle(0% at 50% 50%);
-		transition: clip-path var(--duration-quick) var(--ease-smooth-out);
-		will-change: clip-path;
-	}
-	:global(.composer-send[data-ready="true"])::before {
-		clip-path: circle(75% at 50% 50%);
-		transition-duration: var(--duration-fast);
-	}
-	:global(.composer-send)::after {
-		content: "";
-		position: absolute;
-		inset: 0;
-		border-radius: inherit;
-		pointer-events: none;
-		box-shadow: none;
-		transition: box-shadow var(--duration-quick) var(--ease-smooth-out);
-	}
-	:global(.composer-send[data-ready="true"])::after {
-		box-shadow: var(--shadow-inset-artwork);
-		transition-duration: var(--duration-fast);
-	}
-	:global(.composer-send:hover:not(:disabled)) { filter: brightness(0.96); }
-	:global(.composer-send:active:not(:disabled)) { filter: brightness(0.9); }
-	:global(.composer-send[data-ready="true"]:disabled) { filter: brightness(0.8); }
-
-	:global(.composer-send .t-icon-swap) {
-		color: #a1a1aa;
-		transition: color var(--duration-quick) var(--ease-in-out);
-	}
-	:global(.composer-send[data-ready="true"] .t-icon-swap) {
-		color: #18181b;
 	}
 
 	:global(.t-resize) {
@@ -612,33 +449,16 @@
 		--composer-resize-dur: var(--resize-dur);
 		--composer-resize-ease: var(--resize-ease);
 	}
-	.composer-attachment-tray { display: grid; grid-template-rows: 0fr; opacity: 0; transition: grid-template-rows var(--composer-resize-dur) var(--composer-resize-ease), opacity 150ms ease-out; }
-	:global(.thread-composer[data-has-attachments="true"]) .composer-attachment-tray { grid-template-rows: 1fr; opacity: 1; }
-	.composer-attachment-tray-content { min-height: 0; display: flex; gap: .5rem; overflow: hidden; padding: 0; transition: padding var(--composer-resize-dur) var(--composer-resize-ease); }
-	:global(.thread-composer[data-has-attachments="true"]) .composer-attachment-tray-content { padding: .25rem .25rem .5rem; }
-	.composer-attachment-preview { position: relative; width: 4.5rem; height: 4.5rem; flex: none; overflow: hidden; border-radius: .9rem; opacity: 0; transform: translateY(8px) scale(.96); transition: opacity 180ms var(--composer-resize-ease), transform var(--composer-resize-dur) var(--composer-resize-ease); }
-	:global(.thread-composer[data-has-attachments="true"]) .composer-attachment-preview { opacity: 1; transform: translateY(0) scale(1); }
-	.composer-attachment-preview-trigger { display: block; width: 100%; height: 100%; padding: 0; border: 0; background: transparent; cursor: pointer; }
-	.composer-attachment-preview-trigger:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
-	.composer-attachment-preview img { width: 100%; height: 100%; object-fit: cover; }
-	:global(.composer-attachment-remove) { position: absolute; top: .2rem; right: .2rem; min-width: 1.35rem; width: 1.35rem; height: 1.35rem; border-radius: 999px; background: rgb(255 255 255 / .92); color: #18181b; }
 	.composer-editor { white-space: pre-wrap; overflow-wrap: anywhere; cursor: text; }
 	.composer-editor:empty::before { content: ""; }
 	:global(.composer-image-marker) { display: inline-flex; width: 1rem; height: 1rem; margin: 0 .12rem; padding: 0; overflow: hidden; vertical-align: -.12rem; border: 0; border-radius: .22rem; cursor: pointer; background: #27272a; }
 	:global(.composer-image-marker:focus-visible) { outline: 2px solid var(--ring); outline-offset: 2px; }
 	:global(.composer-image-marker img) { width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
 	.placeholder-reveal-line { display: block; white-space: pre; }
-	.placeholder-character { display: inline-block; opacity: 0; transform: translateY(2px); transition: opacity 160ms cubic-bezier(.22,1,.36,1), transform 280ms cubic-bezier(.34,1.56,.64,1); transition-delay: var(--placeholder-delay); will-change: opacity, transform; }
-	.placeholder-reveal:global(.is-shown) .placeholder-character { opacity: 1; transform: translateY(0); }
+	.placeholder-character { display: inline-block; animation: placeholder-reveal-in 280ms cubic-bezier(.34,1.56,.64,1) var(--placeholder-delay) both; will-change: opacity, transform; }
+	@keyframes placeholder-reveal-in { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: translateY(0); } }
 	@media (prefers-reduced-motion: reduce) {
 		:global(.t-resize),
-		:global(.t-icon-swap) .t-icon,
-		:global(.composer-send),
-		:global(.composer-send)::before,
-		:global(.composer-send)::after,
-		.composer-attachment-tray,
-		.composer-attachment-tray-content,
-		.composer-attachment-preview,
 		.placeholder-character {
 			transition: none !important;
 			will-change: auto;

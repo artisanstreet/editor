@@ -1,7 +1,9 @@
 <script lang="ts" effect>
-	import { Effect, Fiber, Queue } from "effect";
+	import { Effect } from "effect";
 
+	import { RunBrowserDom } from "$lib/browser/dom";
 	import { EngineMarkClass, UsageSlicePresentationFor } from "$lib/engine/presentation";
+	import { MakeScopedAttachmentRunner } from "$lib/lifecycle/scoped-attachment-runner";
 
 	/** One engine and model's share of a day's tokens; absent ids mark unattributed work. */
 	export type CalendarActivityEngine = {
@@ -30,8 +32,8 @@
 	const CellGap = 2;
 
 	let { activities }: Props = $props();
-	let host: HTMLDivElement;
-	let canvas: HTMLCanvasElement;
+	let host: HTMLDivElement | undefined;
+	let canvas: HTMLCanvasElement | undefined;
 	let hovered = $state<CalendarCell | undefined>();
 	let tooltip_x = $state(0);
 	let tooltip_y = $state(0);
@@ -45,11 +47,9 @@
 		| {
 				readonly _tag: "Observe";
 				readonly host: HTMLDivElement;
-				readonly id: number;
-		  }
-		| { readonly _tag: "Release"; readonly id: number };
-	const calendar_observations = yield* Queue.unbounded<CalendarObservation>();
-	let next_observation_id = 0;
+				readonly draw_key: string;
+			  }
+		| { readonly _tag: "Draw" }
 
 	const parse_date = (value: string) => new Date(`${value}T12:00:00`);
 	const date_key = (date: Date) => {
@@ -70,18 +70,28 @@
 	const engine_share = (activity: CalendarActivity, slice: CalendarActivityEngine) =>
 		activity.tokens === 0 ? 0 : slice.tokens / activity.tokens;
 
-	const draw = () => {
-		if (!canvas || !host || activities.length === 0) return;
+	const Draw = (
+		observed_host: HTMLDivElement | undefined,
+		observed_canvas: HTMLCanvasElement | undefined,
+		next_activities: ReadonlyArray<CalendarActivity>,
+	) =>
+		Effect.gen(function* () {
+		if (observed_canvas === undefined || observed_host === undefined || next_activities.length === 0) return;
 
-		const context = canvas.getContext("2d");
+		const context = yield* RunBrowserDom(() => observed_canvas.getContext("2d"));
 		if (!context) return;
 
-		const styles = getComputedStyle(host);
-		const activity_colors = [5, 4, 3, 2, 1].map((level) => styles.getPropertyValue(`--chart-${level}`).trim());
-		const activity_by_date = new Map(activities.map((activity) => [activity.date, activity]));
-		const end = parse_date(activities.at(-1)?.date ?? "1970-01-01");
-		const width = host.clientWidth;
-		const height = host.clientHeight;
+		const { activity_colors, height, pixel_ratio, width } = yield* RunBrowserDom(() => {
+			const styles = getComputedStyle(observed_host);
+			return {
+				activity_colors: [5, 4, 3, 2, 1].map((level) => styles.getPropertyValue(`--chart-${level}`).trim()),
+				height: observed_host.clientHeight,
+				pixel_ratio: window.devicePixelRatio || 1,
+				width: observed_host.clientWidth,
+			};
+		});
+		const activity_by_date = new Map(next_activities.map((activity) => [activity.date, activity]));
+		const end = parse_date(next_activities.at(-1)?.date ?? "1970-01-01");
 		cell_size = Math.max(MinimumCellSize, Math.min(MaximumCellSize, Math.floor(height / 4) - CellGap));
 		const step = cell_size + CellGap;
 		column_count = Math.max(1, Math.floor((width + CellGap) / step));
@@ -90,22 +100,23 @@
 		const grid_height = row_count * step - CellGap;
 		grid_left = Math.max(0, Math.floor((width - grid_width) / 2));
 		grid_top = Math.max(0, Math.floor((height - grid_height) / 2));
-		const pixel_ratio = window.devicePixelRatio || 1;
-		const max_tokens = Math.max(1, ...activities.map((activity) => activity.tokens));
+		const max_tokens = Math.max(1, ...next_activities.map((activity) => activity.tokens));
 		const next_cells: CalendarCell[] = [];
 
-		canvas.width = Math.round(width * pixel_ratio);
-		canvas.height = Math.round(height * pixel_ratio);
-		canvas.style.width = `${width}px`;
-		canvas.style.height = `${height}px`;
-		context.scale(pixel_ratio, pixel_ratio);
-		context.clearRect(0, 0, width, height);
+		yield* RunBrowserDom(() => {
+			observed_canvas.width = Math.round(width * pixel_ratio);
+			observed_canvas.height = Math.round(height * pixel_ratio);
+			observed_canvas.style.width = `${width}px`;
+			observed_canvas.style.height = `${height}px`;
+			context.scale(pixel_ratio, pixel_ratio);
+			context.clearRect(0, 0, width, height);
+		});
 
 		for (let row = 0; row < row_count; row += 1) {
 			for (let column = 0; column < column_count; column += 1) {
 				const offset = row * column_count + column;
 				const date = add_days(end, -offset);
-				const in_range = offset < activities.length;
+				const in_range = offset < next_activities.length;
 				const activity = in_range
 					? (activity_by_date.get(date_key(date)) ?? { date: date_key(date), engines: [], tokens: 0 })
 					: { date: date_key(date), engines: [], tokens: 0 };
@@ -123,10 +134,11 @@
 		}
 
 		cells = next_cells;
-	};
+		});
 
-	const inspect_cell = (event: PointerEvent) => {
-		const bounds = canvas.getBoundingClientRect();
+	const InspectCell = (event: PointerEvent & { readonly currentTarget: HTMLCanvasElement }) =>
+		Effect.gen(function* () {
+		const bounds = yield* RunBrowserDom(() => event.currentTarget.getBoundingClientRect());
 		const step = cell_size + CellGap;
 		const x = event.clientX - bounds.left - grid_left;
 		const y = event.clientY - bounds.top - grid_top;
@@ -138,56 +150,59 @@
 		hovered = candidate && within_cell ? candidate : undefined;
 		tooltip_x = event.clientX - bounds.left;
 		tooltip_y = event.clientY - bounds.top;
-	};
+		});
 
-	/** Redraws when activities arrive asynchronously, not only on mount and resize. */
-	$effect(draw);
+	const ClearHoveredCell = () =>
+		Effect.gen(function* () {
+			hovered = undefined;
+		});
 
-	const ObserveCalendar = (observed_host: HTMLDivElement) =>
-		Effect.acquireRelease(
-			Effect.sync(() => {
-				const resize_observer = new ResizeObserver(draw);
-				const theme_observer = new MutationObserver(draw);
-				resize_observer.observe(observed_host);
-				theme_observer.observe(document.documentElement, {
-					attributes: true,
-					attributeFilter: ["class", "style"],
+	/** SER reruns this position when bindings or activities change. */
+	yield* Draw(host, canvas, activities);
+
+	const ObserveCalendar = (observed_host: HTMLDivElement, draw_key: string) =>
+		Effect.gen(function* () {
+			return yield* Effect.acquireRelease(
+			Effect.gen(function* () {
+				const request_draw = () => calendar_runner.ReplaceUnsafe(draw_key, { _tag: "Draw" });
+				const { resize_observer, theme_observer } = yield* RunBrowserDom(() => {
+					const resize_observer = new ResizeObserver(request_draw);
+					const theme_observer = new MutationObserver(request_draw);
+					resize_observer.observe(observed_host);
+					theme_observer.observe(document.documentElement, { attributes: true, attributeFilter: ["class", "style"] });
+					return { resize_observer, theme_observer };
 				});
-				draw();
+				request_draw();
 				return { resize_observer, theme_observer };
 			}),
 			({ resize_observer, theme_observer }) =>
-				Effect.sync(() => {
-					resize_observer.disconnect();
-					theme_observer.disconnect();
+				Effect.gen(function* () {
+					yield* RunBrowserDom(() => {
+						resize_observer.disconnect();
+						theme_observer.disconnect();
+					});
 				}),
-		).pipe(Effect.andThen(Effect.never));
+			);
+		});
 
-	yield* Effect.gen(function* () {
-		const observations = new Map<number, Fiber.Fiber<never>>();
-		while (true) {
-			const command = yield* Queue.take(calendar_observations);
-			if (command._tag === "Observe") {
-				const fiber = yield* ObserveCalendar(command.host).pipe(Effect.forkScoped);
-				observations.set(command.id, fiber);
-				continue;
+	const RunCalendarObservation = (observation: CalendarObservation) =>
+		Effect.gen(function* () {
+			if (observation._tag === "Draw") {
+				yield* Draw(host, canvas, activities);
+				return;
 			}
-			const fiber = observations.get(command.id);
-			if (fiber !== undefined) {
-				observations.delete(command.id);
-				yield* Fiber.interrupt(fiber);
-			}
-		}
-	}).pipe(Effect.forkScoped);
+			yield* ObserveCalendar(observation.host, observation.draw_key);
+			yield* Effect.never;
+		});
+
+	const calendar_runner = yield* MakeScopedAttachmentRunner(RunCalendarObservation);
 
 	const observe_calendar = () => {
-		const id = next_observation_id++;
-		Queue.offerUnsafe(calendar_observations, {
+		return calendar_runner.Attachment({
 			_tag: "Observe",
 			host,
-			id,
+			draw_key: `calendar-draw:${crypto.randomUUID()}`,
 		});
-		return () => Queue.offerUnsafe(calendar_observations, { _tag: "Release", id });
 	};
 </script>
 
@@ -197,8 +212,8 @@
 		use:observe_calendar
 		class="block"
 		aria-label="Recent daily token activity"
-		onpointerleave={() => (hovered = undefined)}
-		onpointermove={inspect_cell}
+		onpointerleave={yield* ClearHoveredCell()}
+		onpointermove={yield* InspectCell(event)}
 	></canvas>
 
 	{#if hovered}

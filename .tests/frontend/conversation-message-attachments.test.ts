@@ -23,9 +23,12 @@ describe("persisted conversation image attachments", () => {
 		expect(source).toContain("IntersectionObserver");
 		expect(source).toContain('{ rootMargin: "160px 0px" }');
 		expect(source).toContain('globalThis.addEventListener("scroll", measure, true)');
-		expect(source).toContain("if (visible || !image_viewer_open)");
-		expect(source).toContain("if (!image_group_visible");
-		expect(source).toContain("onimagevisibilitychange?.(attachments, false)");
+		expect(source).toContain(
+			"if ((work.visible || !image_viewer_open) && onimagevisibilitychange !== undefined)",
+		);
+		expect(source).toContain("if (\n\t\t\t\t!image_group_visible");
+		expect(source).toContain("yield* onimagevisibilitychange(item.attachments ?? [], false)");
+		expect(source).toContain("MakeScopedAttachmentRunner(RunImageVisibility)");
 		expect(source).not.toContain("/api/attachments/");
 		expect(source).not.toContain("border: 1px");
 		expect(source.indexOf('aria-label="Attached images"')).toBeLessThan(
@@ -35,16 +38,29 @@ describe("persisted conversation image attachments", () => {
 
 	it("loads thread-scoped bytes once and revokes every object URL with the route scope", () => {
 		const route = ReadSource("modules/frontend/src/routes/components/thread-route.sv");
+		const object_url = ReadSource("modules/frontend/src/lib/browser/object-url.ts");
 
 		expect(route).toContain("client.GetMessageImageAttachment({");
 		expect(route).toContain("requested_image_ids.has(attachment.id)");
-		expect(route).toContain("URL.createObjectURL(");
+		expect(route).toContain("CreateBrowserObjectUrl(bytes, result.value.media_type)");
 		expect(route).toContain("Scope.addFinalizer(");
-		expect(route).toContain("URL.revokeObjectURL(source)");
+		expect(route).toContain("ReleaseBrowserObjectUrl(source)");
 		expect(route).toContain("visible_image_ids.has(attachment.id)");
+		const after_finalizer = route.slice(route.indexOf("yield* Scope.addFinalizer("));
+		const before_publish = after_finalizer.slice(
+			0,
+			after_finalizer.indexOf("image_sources = new Map(image_sources).set"),
+		);
+		expect(before_publish).toContain("if (!visible_image_ids.has(attachment.id))");
+		expect(before_publish).toContain(
+			"yield* ReleaseBrowserObjectUrl(source).pipe(Effect.ignore)",
+		);
 		expect(route).toContain("attempt >= 3");
 		expect(route).toContain("Effect.sleep(attempt * 500)");
 		expect(route).toContain("image_load_attempts.delete(attachment.id)");
 		expect(route).toContain("onimagevisibilitychange={UpdateImageAttachmentVisibility}");
+		expect(object_url).toContain("Effect.try({");
+		expect(object_url).toContain("URL.createObjectURL(new Blob([bytes]");
+		expect(object_url).toContain("URL.revokeObjectURL(source)");
 	});
 });

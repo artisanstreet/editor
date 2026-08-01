@@ -3,6 +3,7 @@ import { permission } from "./options";
 
 export const harnesses = [
 	{
+		compaction_default_model_id: "codex-luna",
 		id: "codex",
 		gateways: [],
 		label: "Codex",
@@ -57,6 +58,7 @@ export const harnesses = [
 		},
 	},
 	{
+		compaction_default_model_id: "claude-haiku",
 		id: "claude",
 		gateways: [],
 		label: "Claude",
@@ -122,6 +124,7 @@ export const harnesses = [
 		},
 	},
 	{
+		compaction_default_model_id: "grok-composer-2-5",
 		id: "grok",
 		gateways: [],
 		label: "Grok Build",
@@ -164,6 +167,7 @@ export const harnesses = [
 		},
 	},
 	{
+		compaction_default_model_id: "cursor-composer-2-5",
 		id: "cursor",
 		gateways: [],
 		label: "Cursor Agent",

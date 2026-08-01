@@ -8,8 +8,9 @@ const selector_directory = resolve(selector_root, "model-selector");
 const selector_sources = [
 	resolve(selector_root, "model-selector", "view.sv"),
 	...readdirSync(selector_directory)
-		.filter((name) => name.endsWith(".sv"))
+		.filter((name) => name.endsWith(".sv") || name.endsWith(".ts"))
 		.map((name) => resolve(selector_directory, name)),
+	resolve("modules/frontend/src/lib/settings/session-defaults-controller.ts"),
 ];
 
 describe("frontend source quality", () => {
@@ -40,20 +41,39 @@ describe("frontend source quality", () => {
 		}
 	});
 
-	it("keeps scoped effects in the root and view ownership in focused components", () => {
+	it("keeps selector mutation and lifecycle work in focused generator controllers", () => {
 		const root = readFileSync(resolve(selector_root, "model-selector", "view.sv"), "utf8");
+		const policy_controller = readFileSync(
+			resolve(selector_directory, "policy-controller.ts"),
+			"utf8",
+		);
+		const defaults_controller = readFileSync(
+			resolve("modules/frontend/src/lib/settings/session-defaults-controller.ts"),
+			"utf8",
+		);
 
-		expect(root).toContain("Effect.forkScoped");
+		expect(root).toContain("const FlushPolicy = Effect.gen");
+		expect(root).toContain("policy_controller.Flush(PersistPolicy)");
+		expect(policy_controller).toContain("export const MakeModelPolicyController = Effect.gen");
+		expect(policy_controller).toContain(
+			"const FlushUnlocked = (persist: PolicyPersistence) =>",
+		);
+		expect(policy_controller).toContain("while (true)");
+		expect(defaults_controller).toContain(
+			"export const SessionDefaultsControllerLive = Layer.effect",
+		);
+		expect(defaults_controller).toContain("const SaveCompactionDefaults = (");
+		expect(defaults_controller).toContain("const SetFavorite = (");
 		expect(root).toContain("<EngineSection");
 		expect(root).toContain("<ModelList");
 		expect(root).toContain("<PolicyControls");
-		expect(root).toContain("<CompactionControl");
 
 		const engine_section = readFileSync(
 			resolve(selector_directory, "engine-section.sv"),
 			"utf8",
 		);
 		expect(engine_section).toContain('<script lang="ts" effect>');
-		expect(engine_section).toContain("Effect.forkScoped");
+		expect(engine_section).toContain("yield* PositionIndicator");
+		expect(engine_section).not.toMatch(/Effect\.run(?:Fork|Promise|Sync)/);
 	});
 });

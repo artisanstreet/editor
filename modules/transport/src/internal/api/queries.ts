@@ -11,6 +11,8 @@ import {
 	type ProjectDiffQueryEnvelope,
 	type ProjectDirectoryListInput,
 	type ProjectDirectoryListQueryEnvelope,
+	type ProjectDirectoryCreateEnvelope,
+	type ProjectDirectoryCreateInput,
 	type ProjectDirectorySelectEnvelope,
 	type ProjectDirectorySelectInput,
 	type ProjectListQueryEnvelope,
@@ -77,6 +79,18 @@ export const MakeQueryApi = Effect.gen(function* () {
 			return result.kind === "project.directory.select.result"
 				? result.payload
 				: yield* Effect.die("project directory select response narrowed incorrectly");
+		});
+	const create_project_directory = (input: ProjectDirectoryCreateInput) =>
+		Effect.gen(function* () {
+			const trace = yield* context.MakeTrace;
+			const result = yield* context.Request({
+				...trace,
+				kind: "project.directory.create",
+				payload: input,
+			} satisfies ProjectDirectoryCreateEnvelope);
+			return result.kind === "project.directory.create.result"
+				? result.payload
+				: yield* Effect.die("project directory create response narrowed incorrectly");
 		});
 	const list_projects = Effect.gen(function* () {
 		const trace = yield* context.MakeTrace;
@@ -197,6 +211,7 @@ export const MakeQueryApi = Effect.gen(function* () {
 		});
 
 	return {
+		create_project_directory,
 		create_thread,
 		detach_project,
 		get_engine_usage,

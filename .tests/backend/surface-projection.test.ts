@@ -184,6 +184,76 @@ describe("surface projection read model", () => {
 			await runtime.dispose();
 		}
 	});
+	it("treats context gauges as latest-wins snapshots across any basis", async () => {
+		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
+		const usage = (
+			observation_id: string,
+			basis: "cumulative" | "delta",
+			fields: Record<string, number>,
+		) =>
+			({
+				_tag: "usage",
+				artisan_run_id: "run_1",
+				observation_id,
+				sequence: Number(observation_id.at(-1)),
+				raw: { engine_id: "codex", frame: {}, transport: "test" },
+				basis,
+				...fields,
+			}) as any;
+		const attribution = {
+			thread_id: "thread_1",
+			run_id: "run_1",
+			agent_id: "agent_1",
+		};
+		try {
+			const total = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					yield* database.client.transaction((transaction) =>
+						Effect.gen(function* () {
+							yield* PersistSurfaceProjection(
+								transaction,
+								usage("usage_1", "cumulative", {
+									cached_input_tokens: 4,
+									context_tokens: 7_000,
+									context_window_tokens: 200_000,
+									input_tokens: 10,
+								}),
+								{ ...attribution, occurred_at: "2026-07-18T00:00:01.000Z" },
+							);
+							/** A later report without gauges must not erase the last-known ones. */
+							yield* PersistSurfaceProjection(
+								transaction,
+								usage("usage_2", "delta", {
+									cached_input_tokens: 2,
+									output_tokens: 3,
+								}),
+								{ ...attribution, occurred_at: "2026-07-18T00:00:02.000Z" },
+							);
+							yield* PersistSurfaceProjection(
+								transaction,
+								usage("usage_3", "cumulative", { context_tokens: 9_500 }),
+								{ ...attribution, occurred_at: "2026-07-18T00:00:03.000Z" },
+							);
+						}),
+					);
+					return yield* database.client.select().from(SurfaceUsageTotals);
+				}),
+			);
+			expect(total).toMatchObject([
+				{
+					run_id: "run_1",
+					cached_input_tokens: 6,
+					context_tokens: 9_500,
+					context_window_tokens: 200_000,
+					input_tokens: 10,
+					output_tokens: 3,
+				},
+			]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
 	it("does not interpret an unknown usage basis as a delta", async () => {
 		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
 		try {

@@ -1,5 +1,7 @@
 <script lang="ts" effect>
-	import { Effect, Fiber, Queue } from "effect";
+	import { Effect, Queue } from "effect";
+	import { RunBrowserDom } from "$lib/browser/dom";
+	import { MakeScopedAttachmentRunner } from "$lib/lifecycle/scoped-attachment-runner";
 	import { shader_config, type ShaderConfig, type SurfaceToken } from "$lib/shader-config";
 
 	const vertex_shader = `#version 300 es
@@ -129,173 +131,197 @@
 	`;
 
 	const AcquirePaperRays = (canvas: HTMLCanvasElement) =>
-		Effect.sync(() => {
-		const gl = canvas.getContext("webgl2", {
+		Effect.gen(function* () {
+		const gl = yield* RunBrowserDom(() => canvas.getContext("webgl2", {
 			alpha: true,
 			antialias: false,
 			powerPreference: "low-power",
-		});
+		}));
 		if (gl === null) return;
-		const releases: Array<() => void> = [];
-		const ReleaseResources = () => {
-			for (const release of releases.reverse()) release();
-		};
+		const releases: Array<Effect.Effect<void>> = [];
+		const ReleaseResources = () =>
+			Effect.gen(function* () {
+			for (const release of releases.reverse()) yield* release;
+			});
 
-		const CompileShader = (type: number, source: string) => {
-			const shader = gl.createShader(type);
-			if (shader === null) return null;
-			gl.shaderSource(shader, source);
-			gl.compileShader(shader);
-			if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
-				gl.deleteShader(shader);
-				return null;
-			}
-			return shader;
-		};
+		const CompileShader = (type: number, source: string) =>
+			Effect.gen(function* () {
+			return yield* RunBrowserDom(() => {
+				const shader = gl.createShader(type);
+				if (shader === null) return null;
+				gl.shaderSource(shader, source);
+				gl.compileShader(shader);
+				if (!gl.getShaderParameter(shader, gl.COMPILE_STATUS)) {
+					gl.deleteShader(shader);
+					return null;
+				}
+				return shader;
+			});
+			});
 
-		const vertex = CompileShader(gl.VERTEX_SHADER, vertex_shader);
-		const fragment = CompileShader(gl.FRAGMENT_SHADER, fragment_shader);
-		if (vertex !== null) releases.push(() => gl.deleteShader(vertex));
-		if (fragment !== null) releases.push(() => gl.deleteShader(fragment));
+		const vertex = yield* CompileShader(gl.VERTEX_SHADER, vertex_shader);
+		const fragment = yield* CompileShader(gl.FRAGMENT_SHADER, fragment_shader);
+		if (vertex !== null)
+			releases.push(
+				Effect.gen(function* () {
+					yield* RunBrowserDom(() => gl.deleteShader(vertex));
+				}),
+			);
+		if (fragment !== null)
+			releases.push(
+				Effect.gen(function* () {
+					yield* RunBrowserDom(() => gl.deleteShader(fragment));
+				}),
+			);
 		if (vertex === null || fragment === null) return ReleaseResources;
 
-		const program = gl.createProgram();
+		const program = yield* RunBrowserDom(() => gl.createProgram());
 		if (program === null) return ReleaseResources;
-		releases.push(() => gl.deleteProgram(program));
-		gl.attachShader(program, vertex);
-		gl.attachShader(program, fragment);
-		gl.linkProgram(program);
-		if (!gl.getProgramParameter(program, gl.LINK_STATUS)) return ReleaseResources;
-		gl.useProgram(program);
-
-		const buffer = gl.createBuffer();
-		if (buffer === null) return ReleaseResources;
-		releases.push(() => gl.deleteBuffer(buffer));
-		gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
-		gl.bufferData(
-			gl.ARRAY_BUFFER,
-			new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]),
-			gl.STATIC_DRAW,
+		releases.push(
+			Effect.gen(function* () {
+				yield* RunBrowserDom(() => gl.deleteProgram(program));
+			}),
 		);
-		const position = gl.getAttribLocation(program, "a_position");
-		gl.enableVertexAttribArray(position);
-		gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
+		const linked = yield* RunBrowserDom(() => {
+			gl.attachShader(program, vertex);
+			gl.attachShader(program, fragment);
+			gl.linkProgram(program);
+			return gl.getProgramParameter(program, gl.LINK_STATUS);
+		});
+		if (!linked) return ReleaseResources;
+		yield* RunBrowserDom(() => gl.useProgram(program));
 
-		const resolution = gl.getUniformLocation(program, "u_resolution");
-		const time = gl.getUniformLocation(program, "u_time");
-		const color_canvas = document.createElement("canvas");
-		color_canvas.width = 1;
-		color_canvas.height = 1;
-		const color_context = color_canvas.getContext("2d", { willReadFrequently: true });
+		const buffer = yield* RunBrowserDom(() => gl.createBuffer());
+		if (buffer === null) return ReleaseResources;
+		releases.push(
+			Effect.gen(function* () {
+				yield* RunBrowserDom(() => gl.deleteBuffer(buffer));
+			}),
+		);
+		const { color_context, resolution, time } = yield* RunBrowserDom(() => {
+			gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+			gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, -1, 1, 1, -1, 1, 1]), gl.STATIC_DRAW);
+			const position = gl.getAttribLocation(program, "a_position");
+			gl.enableVertexAttribArray(position);
+			gl.vertexAttribPointer(position, 2, gl.FLOAT, false, 0, 0);
+			const color_canvas = document.createElement("canvas");
+			color_canvas.width = 1;
+			color_canvas.height = 1;
+			return { color_context: color_canvas.getContext("2d", { willReadFrequently: true }), resolution: gl.getUniformLocation(program, "u_resolution"), time: gl.getUniformLocation(program, "u_time") };
+		});
 		const color_cache = new Map<SurfaceToken, readonly [number, number, number]>();
-		const ResolveSurface = (token: SurfaceToken): readonly [number, number, number] => {
+		const ResolveSurface = (token: SurfaceToken) =>
+			Effect.gen(function* () {
 			const cached = color_cache.get(token);
 			if (cached !== undefined) return cached;
-			if (color_context === null) return [0, 0, 0];
+			if (color_context === null) return [0, 0, 0] as const;
 
-			const value = getComputedStyle(document.documentElement)
-				.getPropertyValue(`--${token}`)
-				.trim();
-			color_context.clearRect(0, 0, 1, 1);
-			color_context.fillStyle = value;
-			color_context.fillRect(0, 0, 1, 1);
-			const pixel = color_context.getImageData(0, 0, 1, 1).data;
-			const color = [pixel[0] / 255, pixel[1] / 255, pixel[2] / 255] as const;
+			const color = yield* RunBrowserDom(() => {
+				const value = getComputedStyle(document.documentElement).getPropertyValue(`--${token}`).trim();
+				color_context.clearRect(0, 0, 1, 1);
+				color_context.fillStyle = value;
+				color_context.fillRect(0, 0, 1, 1);
+				const pixel = color_context.getImageData(0, 0, 1, 1).data;
+				return [pixel[0] / 255, pixel[1] / 255, pixel[2] / 255] as const;
+			});
 			color_cache.set(token, color);
 			return color;
-		};
+			});
 
-		const SetColor = (name: string, token: SurfaceToken, alpha: number) => {
-			const [red, green, blue] = ResolveSurface(token);
-			gl.uniform4f(gl.getUniformLocation(program, name), red, green, blue, alpha);
-		};
+		const SetColor = (name: string, token: SurfaceToken, alpha: number) =>
+			Effect.gen(function* () {
+			const [red, green, blue] = yield* ResolveSurface(token);
+			yield* RunBrowserDom(() => gl.uniform4f(gl.getUniformLocation(program, name), red, green, blue, alpha));
+			});
 
 		let current_config: ShaderConfig;
-		let render_once = () => {};
-		const ApplyConfig = (config: ShaderConfig) => {
+		const renders = yield* Queue.unbounded<
+			| { readonly _tag: "config"; readonly config: ShaderConfig }
+			| { readonly _tag: "render"; readonly now: number }
+		>();
+		const ApplyConfig = (config: ShaderConfig) =>
+			Effect.gen(function* () {
 			current_config = config;
-			gl.uniform1f(gl.getUniformLocation(program, "u_bloom"), config.bloom);
-			gl.uniform1f(gl.getUniformLocation(program, "u_intensity"), config.intensity);
-			gl.uniform1f(gl.getUniformLocation(program, "u_density"), config.density);
-			gl.uniform1f(gl.getUniformLocation(program, "u_spotty"), config.spotty);
-			gl.uniform1f(gl.getUniformLocation(program, "u_midSize"), config.mid_size);
-			gl.uniform1f(gl.getUniformLocation(program, "u_midIntensity"), config.mid_intensity);
-			gl.uniform1f(gl.getUniformLocation(program, "u_scale"), config.scale);
-			gl.uniform1f(gl.getUniformLocation(program, "u_rotation"), config.rotation);
-			gl.uniform1f(gl.getUniformLocation(program, "u_offsetX"), config.offset_x);
-			gl.uniform1f(gl.getUniformLocation(program, "u_offsetY"), config.offset_y);
-			SetColor("u_color1", config.color_1, 0.64);
-			SetColor("u_color2", config.color_2, 0.78);
-			SetColor("u_color3", config.color_3, 0.92);
-			SetColor("u_color4", config.color_4, 0.82);
-			SetColor("u_color5", config.color_5, 0.72);
-			SetColor("u_colorBack", config.color_back, config.back_opacity);
-			SetColor("u_colorBloom", config.color_bloom, 0.72);
-			render_once();
-		};
-		const unsubscribe = shader_config.subscribe(ApplyConfig);
+			yield* RunBrowserDom(() => {
+				gl.uniform1f(gl.getUniformLocation(program, "u_bloom"), config.bloom);
+				gl.uniform1f(gl.getUniformLocation(program, "u_intensity"), config.intensity);
+				gl.uniform1f(gl.getUniformLocation(program, "u_density"), config.density);
+				gl.uniform1f(gl.getUniformLocation(program, "u_spotty"), config.spotty);
+				gl.uniform1f(gl.getUniformLocation(program, "u_midSize"), config.mid_size);
+				gl.uniform1f(gl.getUniformLocation(program, "u_midIntensity"), config.mid_intensity);
+				gl.uniform1f(gl.getUniformLocation(program, "u_scale"), config.scale);
+				gl.uniform1f(gl.getUniformLocation(program, "u_rotation"), config.rotation);
+				gl.uniform1f(gl.getUniformLocation(program, "u_offsetX"), config.offset_x);
+				gl.uniform1f(gl.getUniformLocation(program, "u_offsetY"), config.offset_y);
+			});
+			yield* SetColor("u_color1", config.color_1, 0.64);
+			yield* SetColor("u_color2", config.color_2, 0.78);
+			yield* SetColor("u_color3", config.color_3, 0.92);
+			yield* SetColor("u_color4", config.color_4, 0.82);
+			yield* SetColor("u_color5", config.color_5, 0.72);
+			yield* SetColor("u_colorBack", config.color_back, config.back_opacity);
+			yield* SetColor("u_colorBloom", config.color_bloom, 0.72);
+			yield* RunBrowserDom(() => Queue.offerUnsafe(renders, { _tag: "render", now: performance.now() }));
+			});
+		const unsubscribe = shader_config.subscribe((config) =>
+			Queue.offerUnsafe(renders, { _tag: "config", config }),
+		);
 		releases.push(unsubscribe);
 
 		let frame_id = 0;
-		const reduced_motion = matchMedia("(prefers-reduced-motion: reduce)").matches;
-		const Render = (now: number) => {
-			const bounds = canvas.getBoundingClientRect();
-			const pixel_ratio = Math.min(devicePixelRatio, 1.25);
-			const width = Math.max(1, Math.round(bounds.width * pixel_ratio));
-			const height = Math.max(1, Math.round(bounds.height * pixel_ratio));
-			if (canvas.width !== width || canvas.height !== height) {
-				canvas.width = width;
-				canvas.height = height;
-				gl.viewport(0, 0, width, height);
+		const reduced_motion = yield* RunBrowserDom(() => matchMedia("(prefers-reduced-motion: reduce)").matches);
+		const Render = (now: number) =>
+			Effect.gen(function* () {
+			yield* RunBrowserDom(() => {
+				const bounds = canvas.getBoundingClientRect();
+				const pixel_ratio = Math.min(devicePixelRatio, 1.25);
+				const width = Math.max(1, Math.round(bounds.width * pixel_ratio));
+				const height = Math.max(1, Math.round(bounds.height * pixel_ratio));
+				if (canvas.width !== width || canvas.height !== height) {
+					canvas.width = width;
+					canvas.height = height;
+					gl.viewport(0, 0, width, height);
+				}
+				gl.uniform2f(resolution, width, height);
+				gl.uniform1f(time, reduced_motion ? 1.8 : now * 0.00012 * current_config.speed);
+				gl.clearColor(0, 0, 0, 0);
+				gl.clear(gl.COLOR_BUFFER_BIT);
+				gl.drawArrays(gl.TRIANGLES, 0, 6);
+				if (!reduced_motion) frame_id = requestAnimationFrame((next) => Queue.offerUnsafe(renders, { _tag: "render", now: next }));
+			});
+			});
+		yield* Effect.gen(function* () {
+			while (true) {
+				const command = yield* Queue.take(renders);
+				if (command._tag === "config") yield* ApplyConfig(command.config);
+				else yield* Render(command.now);
 			}
-			gl.uniform2f(resolution, width, height);
-			gl.uniform1f(time, reduced_motion ? 1.8 : now * 0.00012 * current_config.speed);
-			gl.clearColor(0, 0, 0, 0);
-			gl.clear(gl.COLOR_BUFFER_BIT);
-			gl.drawArrays(gl.TRIANGLES, 0, 6);
-			if (!reduced_motion) frame_id = requestAnimationFrame(Render);
-		};
-		render_once = () => Render(performance.now());
+		}).pipe(Effect.forkScoped);
 
-		frame_id = requestAnimationFrame(Render);
-		releases.push(() => cancelAnimationFrame(frame_id));
+		frame_id = yield* RunBrowserDom(() => requestAnimationFrame((now) => Queue.offerUnsafe(renders, { _tag: "render", now })));
+		releases.push(
+			Effect.gen(function* () {
+				yield* RunBrowserDom(() => cancelAnimationFrame(frame_id));
+			}),
+		);
 		return ReleaseResources;
 		});
 
 	const RunPaperRays = (canvas: HTMLCanvasElement) =>
-		Effect.acquireRelease(
-			AcquirePaperRays(canvas),
-			(release) => Effect.sync(() => release?.()),
-		).pipe(Effect.andThen(Effect.never));
+		Effect.gen(function* () {
+			yield* Effect.acquireRelease(
+				AcquirePaperRays(canvas),
+				(release) =>
+					Effect.gen(function* () {
+						if (release !== undefined) yield* release;
+					}),
+			);
+			yield* Effect.never;
+		});
 
-	type PaperRaysCommand =
-		| { readonly _tag: "Attach"; readonly id: number; readonly canvas: HTMLCanvasElement }
-		| { readonly _tag: "Release"; readonly id: number };
-	const paper_rays_commands = yield* Queue.unbounded<PaperRaysCommand>();
-	let next_paper_rays_id = 0;
+	const paper_rays_runner = yield* MakeScopedAttachmentRunner(RunPaperRays);
 
-	yield* Effect.gen(function* () {
-		const renderers = new Map<number, Fiber.Fiber<never>>();
-		while (true) {
-			const command = yield* Queue.take(paper_rays_commands);
-			if (command._tag === "Attach") {
-				const fiber = yield* RunPaperRays(command.canvas).pipe(Effect.forkScoped);
-				renderers.set(command.id, fiber);
-				continue;
-			}
-			const fiber = renderers.get(command.id);
-			if (fiber !== undefined) {
-				renderers.delete(command.id);
-				yield* Fiber.interrupt(fiber);
-			}
-		}
-	}).pipe(Effect.forkScoped);
-
-	const PaperRays = (canvas: HTMLCanvasElement) => {
-		const id = next_paper_rays_id++;
-		Queue.offerUnsafe(paper_rays_commands, { _tag: "Attach", canvas, id });
-		return () => Queue.offerUnsafe(paper_rays_commands, { _tag: "Release", id });
-	};
+	const PaperRays = (canvas: HTMLCanvasElement) => paper_rays_runner.Attachment(canvas);
 </script>
 
 <canvas aria-hidden="true" class="size-full" {@attach PaperRays}></canvas>

@@ -27,7 +27,10 @@ const { transform_svelte_effect } = (await import(
  * syntax errors. Parsing them here restores the check the stub removes: without
  * it, a malformed development page is discovered only by opening it.
  */
-const development_only_surfaces = ["modules/frontend/src/routes/debug/emulator/+page.sv"];
+const development_only_surfaces = [
+	"modules/frontend/src/routes/debug/emulator/+page.sv",
+	"modules/frontend/src/routes/debug/overlay/+page.sv",
+];
 
 describe("development-only surface compilation", () => {
 	for (const path of development_only_surfaces) {

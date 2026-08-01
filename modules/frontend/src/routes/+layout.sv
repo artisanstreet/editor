@@ -11,8 +11,8 @@
 		type ThreadListUpdate,
 	} from "@artisan/transport/client";
 	import { Effect, Option, Stream } from "effect";
+	import * as HttpClient from "effect/unstable/http/HttpClient";
 	import { ModeWatcher } from "mode-watcher";
-	import { onMount } from "svelte";
 	import { Toaster } from "svelte-sonner";
 	import {
 		BeginForgeHydration,
@@ -24,14 +24,19 @@
 		InitialForgeGateModel,
 		ObserveForgeConnection,
 	} from "$lib/forge/gate";
+	import { RunBrowserDom } from "$lib/browser/dom";
 	import { RunAuthoritativeSubscription } from "$lib/conversation/subscription";
-	import { draft_thread_project } from "$lib/root/draft-thread";
+	import {
+		DraftThreadController,
+		type DraftThreadState,
+	} from "$lib/root/draft-thread";
 	import {
 		ApplyRootThreadListUpdate,
 		ResolveThreadRoute,
 	} from "$lib/root/thread-navigation";
 	import { ForgeHttpUrl } from "$lib/runtime/forge-endpoint";
 	import { AttemptDevelopmentSelfPair } from "$lib/runtime/pairing";
+	import { SessionDefaultsController } from "$lib/settings/session-defaults-controller";
 	import DevInstanceBadge from "./components/dev-instance-badge.sv";
 	import ForgeConnectionOverlay from "./components/forge-connection-overlay.sv";
 	import ForgeShellPreview from "./components/forge-shell-preview.sv";
@@ -43,14 +48,22 @@
 	let desktop_runtime = $state(false);
 	let forge_gate = $state.raw(InitialForgeGateModel);
 	let threads = $state.raw<ReadonlyArray<ThreadListItem>>([]);
+	const draft_thread = yield* DraftThreadController;
+	let draft_state = $state.raw<DraftThreadState>(yield* draft_thread.Current);
+	const ApplyDraftState = (next: DraftThreadState) =>
+		Effect.gen(function* () {
+			draft_state = next;
+		});
+	yield* draft_thread.Changes.pipe(
+		Stream.runForEach(ApplyDraftState),
+		Effect.forkScoped,
+	);
 	/** Only a canonical conversation route owns the transcript proximity rail. */
 	const is_thread_route = $derived(
 		/^\/t\/[^/]+\/[^/]+\/?$/.test(page.url.pathname),
 	);
-	/** The draft and canonical thread route own the inspector. */
-	const is_thread = $derived(
-		is_thread_route || /^\/threads\/?$/.test(page.url.pathname),
-	);
+	/** The root draft and canonical thread route own the inspector. */
+	const is_thread = $derived(is_thread_route || page.url.pathname === "/");
 	/**
 	 * The layout owns route-derived state and hands it down: read inside the panel
 	 * itself, the same derivation went stale after a client-side navigation.
@@ -70,24 +83,27 @@
 	 */
 	const active_workspace_id = $derived.by(() => {
 		if (active_thread !== undefined) return active_thread.primary_project?.project_id;
-		if (is_thread) return $draft_thread_project?.project_id;
+		if (is_thread && draft_state._tag !== "Uninitialized") {
+			return draft_state.project?.project_id;
+		}
 		return undefined;
 	});
 	const client = yield* ArtisanClient;
+	const session_defaults = yield* SessionDefaultsController;
 
 	const ApplyThreadListUpdate = (update: ThreadListUpdate) =>
-		Effect.sync(() => {
+		Effect.gen(function* () {
 			threads = ApplyRootThreadListUpdate(threads, update);
 		});
 
-	const RefreshThreads = client.ListThreads.pipe(
-		Effect.map((next_threads) => ({
+	const RefreshThreads = Effect.gen(function* () {
+		const next_threads = yield* client.ListThreads;
+		yield* ApplyThreadListUpdate({
 			journal_sequence: 0,
 			threads: next_threads,
 			type: "snapshot" as const,
-		})),
-		Effect.flatMap(ApplyThreadListUpdate),
-	);
+		});
+	});
 
 	/**
 	 * The shell mounts before Forge is necessarily reachable, and the
@@ -103,20 +119,23 @@
 	).pipe(Effect.forkScoped);
 
 	const HydrateForge = (generation: number): Effect.Effect<void> =>
-		Effect.all([client.GetRuntimeCatalog, client.ListProjects, client.ListThreads], {
-			concurrency: "unbounded",
-			discard: true,
+		Effect.gen(function* () {
+			yield* Effect.all(
+				[session_defaults.Refresh, client.ListProjects, client.ListThreads],
+				{
+					concurrency: "unbounded",
+					discard: true,
+				},
+			);
+			const state = yield* client.ConnectionState;
+			if (state.phase === "ready") {
+				forge_gate = CompleteForgeHydration(forge_gate, generation);
+				return;
+			}
+			yield* ApplyConnectionState(state);
 		}).pipe(
-			Effect.andThen(client.ConnectionState),
-			Effect.flatMap((state) =>
-				state.phase === "ready"
-					? Effect.sync(() => {
-							forge_gate = CompleteForgeHydration(forge_gate, generation);
-						})
-					: ApplyConnectionState(state),
-			),
 			Effect.catch((error) =>
-				Effect.sync(() => {
+				Effect.gen(function* () {
 					forge_gate = FailForgeHydration(forge_gate, generation, error.message);
 				}),
 			),
@@ -125,19 +144,11 @@
 	const ApplyConnectionState = (
 		state: ArtisanConnectionState,
 	): Effect.Effect<void> =>
-		Effect.sync(() => {
+		Effect.gen(function* () {
 			forge_gate = ObserveForgeConnection(forge_gate, state);
-			return forge_gate;
-		}).pipe(
-			Effect.flatMap((model) =>
-				model.state.phase === "hydrating"
-					? HydrateForge(model.state.generation).pipe(
-							Effect.forkScoped,
-							Effect.asVoid,
-						)
-					: Effect.void,
-			),
-		);
+			if (forge_gate.state.phase !== "hydrating") return;
+			yield* HydrateForge(forge_gate.state.generation).pipe(Effect.forkScoped);
+		});
 
 	/**
 	 * Dismissing the gate hands the shell over in its disconnected state so the
@@ -145,14 +156,14 @@
 	 * underneath, and every surface resubscribes on its own backoff, so the
 	 * workspace fills in the moment Forge returns.
 	 */
-	const DismissGate = () => {
+	const DismissGate = Effect.gen(function* () {
 		forge_gate = DismissForgeGate(forge_gate);
-	};
+	});
 
-	const RetryHydration = Effect.sync(() => {
+	const RetryHydration = Effect.gen(function* () {
 		forge_gate = BeginForgeHydration(forge_gate);
-		return forge_gate.hydration_generation;
-	}).pipe(Effect.flatMap(HydrateForge));
+		yield* HydrateForge(forge_gate.hydration_generation);
+	});
 
 	yield* client.ConnectionChanges.pipe(
 		Stream.runForEach(ApplyConnectionState),
@@ -167,6 +178,7 @@
 	 * shown after a real attempt against a reachable Forge has failed.
 	 */
 	const AutoRecoverConnection = Effect.gen(function* () {
+		const http_client = yield* HttpClient.HttpClient;
 		let attempted = false;
 		while (true) {
 			yield* Effect.sleep("2 seconds");
@@ -175,11 +187,16 @@
 				continue;
 			}
 			if (attempted) continue;
-			const reachable = yield* Effect.tryPromise(() =>
-				fetch(ForgeHttpUrl("/health"), { cache: "no-store" }).then(
-					(response) => response.ok,
-				),
-			).pipe(Effect.catch(() => Effect.succeed(false)));
+			const reachable = yield* http_client
+				.get(yield* ForgeHttpUrl("/health"))
+				.pipe(
+					Effect.map((response) => response.status >= 200 && response.status < 300),
+					Effect.catch(() =>
+						Effect.gen(function* () {
+							return false;
+						}),
+					),
+				);
 			if (!reachable || forge_gate.state.phase !== "exhausted") continue;
 			/**
 			 * A reachable Forge with an exhausted connection is the unpaired
@@ -195,9 +212,9 @@
 	});
 	yield* AutoRecoverConnection.pipe(Effect.forkScoped);
 
-	onMount(() => {
-		desktop_runtime = navigator.userAgent.includes("Electron/");
-	});
+	desktop_runtime = yield* RunBrowserDom(
+		() => globalThis.navigator?.userAgent.includes("Electron/") ?? false,
+	);
 </script>
 
 <ModeWatcher defaultMode="dark" />

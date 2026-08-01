@@ -5,15 +5,14 @@ import { ArtisanClient } from "@artisan/transport/client";
 
 import type { FixtureArtisanClientData } from "./data";
 import * as FixtureData from "./data";
+import { FixtureProjectIdentityQueries } from "./project-identity-queries";
 import {
 	FixtureConversation,
 	FixtureFailure,
 	FixturePreviewTarget,
 	FixtureReceipt,
 	fixture_artisan_client_data,
-	fixture_engine_usage_session_reset_at,
 	fixture_project,
-	fixture_project_head_committed_at,
 	fixture_timestamp,
 } from "./support";
 
@@ -39,18 +38,18 @@ export const FixtureClientQueries = {
 			};
 		}),
 	ConnectionChanges: Stream.empty,
-	ConnectionState: Effect.succeed({ phase: "ready" as const }),
+	ConnectionState: Effect.gen(function* () {
+		return { phase: "ready" as const };
+	}),
 	Cursors: Effect.gen(function* () {
-		return yield* Effect.succeed(fixture_artisan_client_data.cursors);
+		return fixture_artisan_client_data.cursors;
 	}),
-	Dispose: Effect.gen(function* () {
-		return yield* Effect.void;
-	}),
+	Dispose: Effect.gen(function* () {}),
 	Errors: Stream.empty,
 	Events: Stream.fromIterable(fixture_artisan_client_data.events),
-	RetryConnection: Effect.void,
+	RetryConnection: Effect.gen(function* () {}),
 	GetGlobalGuidance: Effect.gen(function* () {
-		return yield* Effect.succeed(fixture_artisan_client_data.global_guidance);
+		return fixture_artisan_client_data.global_guidance;
 	}),
 	GetGitDiff: (input) =>
 		Effect.gen(function* () {
@@ -90,7 +89,7 @@ export const FixtureClientQueries = {
 			return fixture_artisan_client_data.git_workspace;
 		}),
 	GetModelBehaviour: Effect.gen(function* () {
-		return yield* Effect.succeed(fixture_artisan_client_data.model_behaviour);
+		return fixture_artisan_client_data.model_behaviour;
 	}),
 	GetPreviewAssetMetadata: (input) =>
 		Effect.gen(function* () {
@@ -100,10 +99,22 @@ export const FixtureClientQueries = {
 				? yield* FixtureFailure(`Unknown fixture preview asset: ${input.asset_id}`)
 				: asset;
 		}),
-	GetPreviewTarget: (input) => FixturePreviewTarget(input),
-	GetRoutineDetail: () => FixtureFailure("Marketplace routine fixtures are unavailable."),
-	GetCapabilityDetail: () => FixtureFailure("Marketplace capability fixtures are unavailable."),
-	GetCapabilityOAuthStatus: () => FixtureFailure("Marketplace OAuth fixtures are unavailable."),
+	GetPreviewTarget: (input) =>
+		Effect.gen(function* () {
+			return yield* FixturePreviewTarget(input);
+		}),
+	GetRoutineDetail: () =>
+		Effect.gen(function* () {
+			return yield* FixtureFailure("Marketplace routine fixtures are unavailable.");
+		}),
+	GetCapabilityDetail: () =>
+		Effect.gen(function* () {
+			return yield* FixtureFailure("Marketplace capability fixtures are unavailable.");
+		}),
+	GetCapabilityOAuthStatus: () =>
+		Effect.gen(function* () {
+			return yield* FixtureFailure("Marketplace OAuth fixtures are unavailable.");
+		}),
 	GetOrchestrationGraph: (group_id) =>
 		Effect.gen(function* () {
 			if (group_id !== fixture_artisan_client_data.orchestration_graph.group.group_id) {
@@ -112,8 +123,14 @@ export const FixtureClientQueries = {
 
 			return fixture_artisan_client_data.orchestration_graph;
 		}),
-	GetConversation: ({ thread_id }) => Effect.succeed(FixtureConversation(thread_id)),
-	GetMessageImageAttachment: () => Effect.succeed(Option.none()),
+	GetConversation: ({ thread_id }) =>
+		Effect.gen(function* () {
+			return FixtureConversation(thread_id);
+		}),
+	GetMessageImageAttachment: () =>
+		Effect.gen(function* () {
+			return Option.none();
+		}),
 	GetThreadTranscript: (input) =>
 		Effect.gen(function* () {
 			if (input.thread_id !== "thread-editor-shell")
@@ -141,51 +158,59 @@ export const FixtureClientQueries = {
 			};
 		}),
 	GetThreadSession: (thread_id) =>
-		Effect.succeed({
-			thread_id,
-			journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
-			auto_steer_enabled: true,
-			policy: {
-				engine_id: "codex" as const,
-				reasoning_effort: "medium" as const,
-				permission: "supervised",
-				permission_mode: "on_request" as const,
-				sandbox_mode: "workspace_write" as const,
-				service_tier: "standard" as const,
-				web_search_enabled: false,
-				strict_clarification: false,
-			},
-			latest_intake: {
-				message_id: "message-fixture",
-				risk: "low" as const,
-				resolution: "proceed" as const,
-			},
-			assumptions: [],
-			last_routing: {
-				type: "thread.message_routed" as const,
-				message_id: "message-fixture",
-				outcome: "queued" as const,
-				reason: "no_active_run" as const,
-				run_id: "run-editor-shell",
-			},
+		Effect.gen(function* () {
+			return {
+				thread_id,
+				journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+				auto_steer_enabled: true,
+				policy: {
+					engine_id: "codex" as const,
+					reasoning_effort: "medium" as const,
+					permission: "supervised",
+					permission_mode: "on_request" as const,
+					sandbox_mode: "workspace_write" as const,
+					service_tier: "standard" as const,
+					web_search_enabled: false,
+					strict_clarification: false,
+				},
+				latest_intake: {
+					message_id: "message-fixture",
+					risk: "low" as const,
+					resolution: "proceed" as const,
+				},
+				assumptions: [],
+				last_routing: {
+					type: "thread.message_routed" as const,
+					message_id: "message-fixture",
+					outcome: "queued" as const,
+					reason: "no_active_run" as const,
+					run_id: "run-editor-shell",
+				},
+			};
 		}),
 	ListSurfaceItems: (_input) =>
-		Effect.succeed({
-			items: [],
-			journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+		Effect.gen(function* () {
+			return {
+				items: [],
+				journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+			};
 		}),
 	GetSurfaceUsageAggregate: (input) =>
-		Effect.succeed({
-			aggregate: { scope: input.scope, scope_id: input.scope_id },
-			journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+		Effect.gen(function* () {
+			return {
+				aggregate: { scope: input.scope, scope_id: input.scope_id },
+				journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+			};
 		}),
 	GetSurfaceUsageDaily: (input) =>
-		Effect.succeed({
-			buckets: fixture_artisan_client_data.surface_usage_daily.slice(-input.day_count),
-			journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+		Effect.gen(function* () {
+			return {
+				buckets: fixture_artisan_client_data.surface_usage_daily.slice(-input.day_count),
+				journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+			};
 		}),
 	ListOrchestrationGroups: (thread_id, include_terminal) =>
-		Effect.sync(() => {
+		Effect.gen(function* () {
 			if (thread_id !== "thread-editor-shell")
 				return {
 					groups: [],
@@ -201,15 +226,13 @@ export const FixtureClientQueries = {
 			};
 		}),
 	GetThreadRetentionPolicy: Effect.gen(function* () {
-		return yield* Effect.succeed(fixture_artisan_client_data.thread_retention_policy);
+		return fixture_artisan_client_data.thread_retention_policy;
 	}),
 	GetThreadWork: (thread_id) =>
 		Effect.gen(function* () {
-			return yield* Effect.succeed(
-				thread_id === fixture_artisan_client_data.orchestration_graph.group.thread_id
-					? Option.some(fixture_artisan_client_data.thread_work)
-					: Option.none(),
-			);
+			return thread_id === fixture_artisan_client_data.orchestration_graph.group.thread_id
+				? Option.some(fixture_artisan_client_data.thread_work)
+				: Option.none();
 		}),
 	GetWorkspaceChangeDiff: (input) =>
 		Effect.gen(function* () {
@@ -225,7 +248,11 @@ export const FixtureClientQueries = {
 			return diff;
 		}),
 	GetWorkspaceLanguageCapabilities: () =>
-		FixtureFailure("Workspace language capabilities are unavailable in the frontend fixture."),
+		Effect.gen(function* () {
+			return yield* FixtureFailure(
+				"Workspace language capabilities are unavailable in the frontend fixture.",
+			);
+		}),
 	ListTerminals: (thread_id, workspace_id) =>
 		Effect.gen(function* () {
 			const terminals: Array<TerminalSession> = [];
@@ -236,215 +263,120 @@ export const FixtureClientQueries = {
 				}
 			}
 
-			return yield* Effect.succeed(terminals);
+			return terminals;
 		}),
 	ListThreads: Effect.gen(function* () {
-		return yield* Effect.succeed(fixture_artisan_client_data.threads);
+		return fixture_artisan_client_data.threads;
 	}),
-	ListProjects: Effect.succeed({
-		projects: [
-			{
-				...fixture_project,
-				attached_at: fixture_timestamp,
-				updated_at: fixture_timestamp,
-			},
-		],
+	ListProjects: Effect.gen(function* () {
+		return {
+			projects: [
+				{
+					...fixture_project,
+					attached_at: fixture_timestamp,
+					updated_at: fixture_timestamp,
+				},
+			],
+		};
 	}),
-	GetModelFavorites: Effect.succeed({ model_ids: ["codex-sol"] }),
+	GetModelFavorites: Effect.gen(function* () {
+		return { model_ids: ["codex-sol"] };
+	}),
 	UpdateModelFavorite: (input) =>
-		FixtureReceipt(input.command_id ?? `fixture-command-model-favorite-${input.model_id}`),
-	GetRuntimeCatalog: Effect.succeed({
-		default_model_id: "codex-sol",
-		manifest: {
-			...model_manifest,
-			harnesses: model_manifest.harnesses.filter((harness) => harness.id === "codex"),
-			models: model_manifest.models.filter((model) => model.harness === "codex"),
-			providers: model_manifest.providers.filter((provider) => provider.id === "openai"),
-		},
-		runnable_harness_ids: ["codex" as const],
-	}),
-	GetSessionDefaults: Effect.succeed({
-		last_model_id: "claude-sonnet-5",
-		models: [
-			{
-				context_window: "[1m]",
-				model_id: "claude-sonnet-5",
-				reasoning_effort: "high" as const,
+		Effect.gen(function* () {
+			return yield* FixtureReceipt(
+				input.command_id ?? `fixture-command-model-favorite-${input.model_id}`,
+			);
+		}),
+	GetRuntimeCatalog: Effect.gen(function* () {
+		return {
+			default_model_id: "codex-sol",
+			manifest: {
+				...model_manifest,
+				harnesses: model_manifest.harnesses.filter((harness) => harness.id === "codex"),
+				models: model_manifest.models.filter((model) => model.harness === "codex"),
+				providers: model_manifest.providers.filter((provider) => provider.id === "openai"),
 			},
-		],
-		permission: "supervised",
+			runnable_harness_ids: ["codex" as const],
+		};
+	}),
+	GetSessionDefaults: Effect.gen(function* () {
+		return {
+			last_model_id: "claude-sonnet-5",
+			models: [
+				{
+					context_window: "[1m]",
+					model_id: "claude-sonnet-5",
+					reasoning_effort: "high" as const,
+				},
+			],
+			permission: "supervised",
+		};
 	}),
 	UpdateSessionDefaults: () =>
-		Effect.succeed({
-			command_id: "command-session-defaults",
-			journal_sequence: 1,
-			status: "accepted" as const,
+		Effect.gen(function* () {
+			return {
+				command_id: "command-session-defaults",
+				journal_sequence: 1,
+				status: "accepted" as const,
+			};
 		}),
-	GetProjectRepositories: () =>
-		Effect.succeed({
-			repositories: [
-				{
-					project_id: fixture_project.project_id,
-					repository: {
-						branch: { name: "master", type: "attached" as const },
-						default_remote: "origin",
-						head: "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c",
-						remotes: [
-							{
-								host: "github" as const,
-								name: "origin",
-								url: "git@github.com:sandersonstabo/artisan-editor.git",
-								web_url: "https://github.com/sandersonstabo/artisan-editor",
-							},
-						],
-						state: "repository" as const,
-					},
-				},
-			],
+	...FixtureProjectIdentityQueries,
+	DetachProject: () =>
+		Effect.gen(function* () {
+			return { projects: [] };
 		}),
-	GetProjectDiffs: () =>
-		Effect.succeed({
-			diffs: [
-				{
-					diff: {
-						comparisons: [
-							{
-								ahead: 3,
-								behind: 1,
-								counts: {
-									binary_file_count: 0,
-									file_count: 12,
-									lines_added: 486,
-									lines_deleted: 121,
-								},
-								kind: "upstream" as const,
-								ref: "origin/feature",
-							},
-							{
-								ahead: 9,
-								behind: 4,
-								counts: {
-									binary_file_count: 1,
-									file_count: 34,
-									lines_added: 1_204,
-									lines_deleted: 388,
-								},
-								kind: "default_branch" as const,
-								ref: "origin/master",
-							},
-						],
-						head_committed_at: fixture_project_head_committed_at,
-						staged: {
-							binary_file_count: 0,
-							file_count: 3,
-							lines_added: 96,
-							lines_deleted: 12,
-						},
-						state: "repository" as const,
-						stash_count: 1,
-						truncated: false,
-						unstaged: {
-							binary_file_count: 0,
-							file_count: 4,
-							lines_added: 118,
-							lines_deleted: 26,
-						},
-						untracked_file_count: 2,
-						working: {
-							binary_file_count: 0,
-							file_count: 7,
-							lines_added: 214,
-							lines_deleted: 38,
-						},
-					},
-					project_id: fixture_project.project_id,
-				},
-			],
-		}),
-	GetHostIdentity: Effect.succeed({
-		display_name: "Sander Sonstabo",
-		hostname: "DESKTOP-FIXTURE",
-		platform: "win32" as const,
-		username: "sander",
-	}),
-	GetEngineUsage: (input) =>
-		Effect.succeed({
-			engines: [
-				{
-					authentication: "authenticated" as const,
-					display_name: "Claude",
-					engine_id: "claude",
-					windows: [
-						{
-							id: "session",
-							kind: "session" as const,
-							percent_used: 17,
-							resets_at: fixture_engine_usage_session_reset_at,
-						},
-						{
-							id: "claude_weekly",
-							kind: "weekly" as const,
-							percent_used: 3,
-						},
-						{
-							id: "claude_weekly_fable",
-							kind: "weekly" as const,
-							label: "Fable",
-							percent_used: 5,
-						},
-					],
-				},
-				{
-					authentication: "authenticated" as const,
-					display_name: "Codex",
-					engine_id: "codex",
-					windows: [
-						{
-							id: "codex",
-							kind: "weekly" as const,
-							percent_used: 12,
-						},
-						{
-							id: "codex_weekly_gpt_5_3_spark",
-							kind: "weekly" as const,
-							label: "GPT-5.3-Codex-Spark",
-							percent_used: 2,
-						},
-					],
-				},
-				{
-					authentication: "unauthenticated" as const,
-					display_name: "Grok",
-					engine_id: "grok",
-					windows: [],
-				},
-			].filter(
-				(report) => input?.engine_id === undefined || report.engine_id === input.engine_id,
-			),
-			fetched_at: fixture_timestamp,
-		}),
-	DetachProject: () => Effect.succeed({ projects: [] }),
 	ListProjectDirectories: () =>
-		FixtureFailure("Project directory browsing is unavailable in the frontend fixture."),
+		Effect.gen(function* () {
+			return yield* FixtureFailure(
+				"Project directory browsing is unavailable in the frontend fixture.",
+			);
+		}),
 	SelectProjectDirectory: () =>
-		FixtureFailure("Project directory selection is unavailable in the frontend fixture."),
+		Effect.gen(function* () {
+			return yield* FixtureFailure(
+				"Project directory selection is unavailable in the frontend fixture.",
+			);
+		}),
+	CreateProjectDirectory: () =>
+		Effect.gen(function* () {
+			return yield* FixtureFailure(
+				"Project directory creation is unavailable in the frontend fixture.",
+			);
+		}),
 	ListArtisanApprovals: () =>
-		FixtureFailure("Artisan approvals are unavailable in the frontend fixture."),
+		Effect.gen(function* () {
+			return yield* FixtureFailure(
+				"Artisan approvals are unavailable in the frontend fixture.",
+			);
+		}),
 	ListArtisanToolInvocations: () =>
-		FixtureFailure("Artisan tool invocations are unavailable in the frontend fixture."),
+		Effect.gen(function* () {
+			return yield* FixtureFailure(
+				"Artisan tool invocations are unavailable in the frontend fixture.",
+			);
+		}),
 	ListArtisanTools: () =>
-		FixtureFailure("Artisan tool registry is unavailable in the frontend fixture."),
+		Effect.gen(function* () {
+			return yield* FixtureFailure(
+				"Artisan tool registry is unavailable in the frontend fixture.",
+			);
+		}),
 	ListPreviewTargets: (input = {}) =>
 		Effect.gen(function* () {
-			yield* Effect.void;
-
 			return fixture_artisan_client_data.preview_targets.filter(
 				(target) =>
 					input.workspace_id === undefined || target.workspace_id === input.workspace_id,
 			);
 		}),
-	ListRoutines: () => FixtureFailure("Marketplace routine fixtures are unavailable."),
-	ListCapabilities: () => FixtureFailure("Marketplace capability fixtures are unavailable."),
+	ListRoutines: () =>
+		Effect.gen(function* () {
+			return yield* FixtureFailure("Marketplace routine fixtures are unavailable.");
+		}),
+	ListCapabilities: () =>
+		Effect.gen(function* () {
+			return yield* FixtureFailure("Marketplace capability fixtures are unavailable.");
+		}),
 } satisfies Pick<
 	typeof ArtisanClient.Service,
 	| "Command"
@@ -493,6 +425,7 @@ export const FixtureClientQueries = {
 	| "DetachProject"
 	| "ListProjectDirectories"
 	| "SelectProjectDirectory"
+	| "CreateProjectDirectory"
 	| "ListArtisanApprovals"
 	| "ListArtisanToolInvocations"
 	| "ListArtisanTools"

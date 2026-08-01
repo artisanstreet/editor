@@ -54,10 +54,14 @@ describe("conversation system status", () => {
 	it("owns the work-session observer in the SER component scope", () => {
 		const path = "modules/frontend/src/routes/components/conversation-work-session.sv";
 		const source = Read(path);
+		const runner = Read("modules/frontend/src/lib/lifecycle/scoped-attachment-runner.ts");
 
 		expect(source).toContain('<script lang="ts" effect>');
 		expect(source).toContain("Effect.acquireRelease");
-		expect(source).toContain("Effect.forkScoped");
-		expect(source).toContain("Queue.unbounded");
+		expect(source).toContain("MakeScopedAttachmentRunner(RunDetailObservation)");
+		expect(source).toContain("detail_runner.ReplaceUnsafe");
+		expect(runner).toContain("Effect.forkScoped");
+		expect(runner).toContain("Queue.unbounded");
+		expect(runner).toContain("Fiber.interrupt(previous)");
 	});
 });
