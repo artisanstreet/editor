@@ -11,6 +11,9 @@ Last updated: 2026-08-01. Branch continuity only. Durable verified status is in
   unreleased compatibility-route removal remain verified. Permission repair
   `fc9182b0`, reconnect `3738bc64`, favorite stability `75c58c0`, provider
   selection `d4a2807b`, and provider usage `12543d3` are pushed and verified.
+- Hosted GitHub Actions are disabled and `.github/workflows` is intentionally
+  absent while Artisan remains unpublished. Local `pnpm run validate` remains
+  the milestone gate; release tooling is retained for future publication.
 - Protected user work: `.mcp.json` stays untracked. The concurrently authored
   host-suspend/engine-inactivity slice is validated but remains outside this
   frontend commit. Sander explicitly removed `routes/threads/+page.sv` after
