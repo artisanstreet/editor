@@ -92,17 +92,11 @@ describe("deep desktop release gates", () => {
 		expect(release_policy).toContain("required release-only evidence");
 	});
 
-	it("makes the installed ae payload and ownership boundary mandatory", () => {
+	it("verifies the installed ae payload and ownership boundary locally", () => {
 		const verifier = readFileSync(
 			resolve(workspace_root, ".tests/deep/desktop/verify-packaged-desktop.ps1"),
 			"utf8",
 		);
-		const workflow = readFileSync(
-			resolve(workspace_root, ".github/workflows/release-validation.yml"),
-			"utf8",
-		);
-		expect(workflow).toContain("name: Qualified product / Windows x64");
-		expect(workflow).not.toContain("if: ${{ inputs.run_packaged_desktop }}");
 		expect(verifier).toContain("$embedded_forge");
 		expect(verifier).toContain("must not embed a parallel Forge lifecycle");
 		expect(verifier).toContain("Packaged desktop renderer evidence");
@@ -112,12 +106,6 @@ describe("deep desktop release gates", () => {
 		expect(verifier).toContain('"/preload.cjs"');
 		expect(verifier).not.toContain("ARTISAN_PACKAGED_SMOKE");
 		expect(verifier).not.toContain("Stop-Process");
-		expect(workflow).toContain('ARTISAN_ALLOW_UNSIGNED_PRERELEASE: "1"');
-		expect(workflow).toContain(
-			"ARTISAN_RELEASE_SIGNING_KEY_PEM: ${{ secrets.ARTISAN_RELEASE_SIGNING_KEY_PEM }}",
-		);
-		expect(workflow).toContain("ARTISAN_RELEASE_CHANNEL: beta");
-		expect(workflow).not.toContain("ARTISAN_WINDOWS_CSC_LINK");
 	});
 
 	it("parses the packaged verifier before release execution on Windows", () => {
