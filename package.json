@@ -6,8 +6,8 @@
 	"scripts": {
 		"check": "tsc --noEmit",
 		"check:frontend": "pnpm --filter @artisan/frontend run build",
-		"check:forge": "vite build --config forge.vite.config.ts --mode validation",
-		"build:desktop": "pnpm run check:frontend && vite build --config desktop.vite.config.ts && vite build --config forge.vite.config.ts",
+		"check:forge": "node .scripts/build/build-forge.ts validation",
+		"build:desktop": "pnpm run check:frontend && vite build --config desktop.vite.config.ts && node .scripts/build/build-forge.ts production",
 		"build:native": "cargo build --workspace --release",
 		"check:native": "cargo fmt --all -- --check && cargo clippy --workspace --all-targets -- -D warnings",
 		"desktop": "pnpm run build:desktop && electron .dist/desktop/main.js",
@@ -58,6 +58,7 @@
 		"es-module-lexer": "2.3.0",
 		"oxfmt": "0.58.0",
 		"oxlint": "1.73.0",
+		"rolldown": "1.1.5",
 		"typescript": "7.0.2",
 		"vite": "8.1.4",
 		"vitest": "4.1.10",

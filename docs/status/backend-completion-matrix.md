@@ -1,8 +1,8 @@
 # Artisan Editor Completion Matrix
 
-Scope: the V1 prototype described by [`artisan-editor-v1.md`](../prds/artisan-editor-v1.md), including the backend, desktop shell, renderer, and release harness. Status is verified implementation status as of 2026-08-01, not design intent. The prototype began Codex-only; the Claude Code CLI adapter was revived on 2026-07-28, retiring that boundary. Embedded browsers/WebViews and broad Git mutation commands remain deliberately outside this prototype rather than incomplete hidden scope.
+Scope: the V1 prototype described by [`artisan-editor-v1.md`](../prds/artisan-editor-v1.md), including the backend, desktop shell, renderer, and release harness. Status is verified implementation status as of 2026-08-02, not design intent. The prototype began Codex-only; the Claude Code CLI adapter was revived on 2026-07-28, retiring that boundary. Embedded browsers/WebViews and broad Git mutation commands remain deliberately outside this prototype rather than incomplete hidden scope.
 
-Verification snapshot: on 2026-08-01, `pnpm run validate` passed formatting, zero-warning lint, root TypeScript, static production frontend and isolated Forge builds, 313 Vitest files with 2,067 passing tests plus 7 explicit skips, native formatting/clippy, and 45 Rust tests. Release-only packaging gates were not rerun.
+Verification snapshot: on 2026-08-02, `pnpm run validate` passed formatting, zero-warning lint, root TypeScript, static production frontend and direct Rolldown Forge builds, 320 Vitest files with 2,190 passing tests plus 7 explicit skips, native formatting/clippy, and 45 Rust tests. Release-only packaging gates were not rerun.
 
 On 2026-07-27, the Windows distribution artifact, hermetic lifecycle, and real
 isolated packaged-bootstrap gates passed alongside root TypeScript. This

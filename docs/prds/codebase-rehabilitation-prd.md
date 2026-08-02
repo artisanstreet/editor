@@ -448,7 +448,7 @@ Windows acceptance must specifically prove that:
 - root `package.json` can launch the moved Forge development supervisor;
 - electron-builder resolves the moved `beforeBuild` hook;
 - NSIS resolves the moved `artisan-path.nsh` include; and
-- `forge.vite.config.ts` copies the moved `update-user-path.ps1` into the
+- `forge.rolldown.config.ts` copies the moved `update-user-path.ps1` into the
   packaged Forge output.
 
 Root build-tool configuration is a separate decision. Active files such as

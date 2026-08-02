@@ -8,7 +8,7 @@ const workspace_root = resolve(import.meta.dirname, "../../..");
 const frontend_root = resolve(workspace_root, "modules/frontend");
 const frontend_config = readFileSync(resolve(frontend_root, "vite.config.ts"), "utf8");
 const desktop_config = readFileSync(resolve(workspace_root, "desktop.vite.config.ts"), "utf8");
-const forge_config = readFileSync(resolve(workspace_root, "forge.vite.config.ts"), "utf8");
+const forge_config = readFileSync(resolve(workspace_root, "forge.rolldown.config.ts"), "utf8");
 const release_policy = readFileSync(
 	resolve(workspace_root, "docs/release/validation-policy.md"),
 	"utf8",

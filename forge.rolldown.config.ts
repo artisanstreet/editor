@@ -1,11 +1,17 @@
 import { cpSync, existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { defineConfig } from "vite";
+
+export type ForgeBuildMode = "production" | "validation";
+
+type ForgeRolldownOptions = {
+	readonly mode?: ForgeBuildMode;
+	readonly watch?: boolean;
+};
 
 /**
  * A staged file can be held open by a running development Forge on Windows.
- * The stage keeps the previous copy instead of failing the whole rebuild —
- * only a copy that leaves nothing staged at all is a real error.
+ * Keep the previously staged version when that happens so a successful bundle
+ * can still restart the daemon against a complete runtime.
  */
 const stage = (from: string, to: string) => {
 	try {
@@ -16,28 +22,24 @@ const stage = (from: string, to: string) => {
 	}
 };
 
-const stage_forge_runtime = (forge_root: string) => ({
+const StageForgeRuntime = (forge_root: string, watching: boolean) => ({
 	closeBundle: () => {
 		const native_runtime_root = resolve(forge_root, "native-runtime");
-		const frontend_source = resolve(import.meta.dirname, ".dist/frontend");
+		const frontend_source = resolve(import.meta.dirname, ".dist", "frontend");
 		const migrations_source = resolve(import.meta.dirname, "modules/backend/drizzle");
-		/**
-		 * The development watch-build serves its frontend from Vite, so it needs
-		 * no staged copy. A release build stages one and still refuses to produce
-		 * a Forge that would answer page requests with nothing.
-		 */
-		const stage_frontend = existsSync(frontend_source);
-		if (!stage_frontend && process.env.ARTISAN_FORGE_WATCH !== "1") {
+		const stage_frontend = !watching;
+		if (stage_frontend && !existsSync(frontend_source)) {
 			throw new Error("Build the static frontend before Artisan Forge");
 		}
 		const node_pty_source = resolve(
 			import.meta.dirname,
 			"modules/backend/node_modules/node-pty",
 		);
-		const koffi_source = resolve(
-			realpathSync(resolve(import.meta.dirname, "modules/engines/node_modules/koffi")),
+		const koffi_source = realpathSync(
+			resolve(import.meta.dirname, "modules/engines/node_modules/koffi"),
 		);
 		const koffi_native_source = resolve(koffi_source, "..", "@koromix", "koffi-win32-x64");
+
 		if (
 			!existsSync(node_pty_source) ||
 			!existsSync(koffi_source) ||
@@ -45,12 +47,14 @@ const stage_forge_runtime = (forge_root: string) => ({
 		) {
 			throw new Error("node-pty and Koffi are required to package Artisan Forge");
 		}
+
 		mkdirSync(forge_root, { recursive: true });
 		const node_pty_destination = resolve(native_runtime_root, "node-pty");
 		mkdirSync(node_pty_destination, { recursive: true });
 		for (const path of ["LICENSE", "package.json", "lib", "prebuilds/win32-x64"]) {
 			stage(resolve(node_pty_source, path), resolve(node_pty_destination, path));
 		}
+
 		const koffi_destination = resolve(native_runtime_root, "koffi");
 		mkdirSync(resolve(koffi_destination, "src", "koffi"), { recursive: true });
 		for (const path of [
@@ -61,6 +65,7 @@ const stage_forge_runtime = (forge_root: string) => ({
 		]) {
 			stage(resolve(koffi_source, path), resolve(koffi_destination, path));
 		}
+
 		const koffi_native_destination = resolve(
 			native_runtime_root,
 			"@koromix",
@@ -70,13 +75,9 @@ const stage_forge_runtime = (forge_root: string) => ({
 		for (const path of ["index.js", "package.json", "win32_x64"]) {
 			stage(resolve(koffi_native_source, path), resolve(koffi_native_destination, path));
 		}
+
 		if (stage_frontend) stage(frontend_source, resolve(forge_root, "frontend"));
 		stage(migrations_source, resolve(forge_root, "migrations"));
-		/**
-		 * Engine subprocess brokers require ordinary Node semantics. Keep this
-		 * runtime distinct from the branded daemon executable so headless and
-		 * packaged launches use the same explicit process boundary.
-		 */
 		for (const executable of ["Artisan Forge.exe", "node.exe"]) {
 			stage(process.execPath, resolve(forge_root, executable));
 		}
@@ -96,7 +97,13 @@ const stage_forge_runtime = (forge_root: string) => ({
 	name: "stage-artisan-forge-runtime",
 });
 
-export default defineConfig(({ mode }) => {
+/**
+ * Builds Forge as an ESM Node application. The watcher owns rebuilds; the
+ * development supervisor owns the clean stop/start of the daemon.
+ */
+export const CreateForgeRolldownConfig = (options: ForgeRolldownOptions = {}) => {
+	const mode = options.mode ?? "production";
+	const watching = options.watch ?? false;
 	const forge_root = resolve(
 		import.meta.dirname,
 		".dist",
@@ -104,7 +111,16 @@ export default defineConfig(({ mode }) => {
 	);
 
 	return {
-		plugins: [stage_forge_runtime(forge_root)],
+		input: {
+			ae: resolve(import.meta.dirname, "modules/cli/src/entry.ts"),
+			host: resolve(import.meta.dirname, "modules/forge/src/entry.ts"),
+			"windows-process-host": resolve(
+				import.meta.dirname,
+				"modules/engines/src/process/windows-process-host.ts",
+			),
+		},
+		platform: "node" as const,
+		plugins: [StageForgeRuntime(forge_root, watching)],
 		resolve: {
 			alias: {
 				"@artisan/forge": resolve(import.meta.dirname, "modules/forge/src/index.ts"),
@@ -112,28 +128,15 @@ export default defineConfig(({ mode }) => {
 				"node-pty": resolve(import.meta.dirname, "modules/desktop/src/node-pty-shim.ts"),
 			},
 		},
-		ssr: { noExternal: true },
-		build: {
-			/**
-			 * Watch builds must not empty the staged runtime: the running dev Forge
-			 * executes from it, and the native runtime may be locked on Windows.
-			 * Clean release builds keep the default empty-then-stage behavior.
-			 */
-			emptyOutDir: process.env.ARTISAN_FORGE_WATCH !== "1",
-			outDir: forge_root,
-			rollupOptions: {
-				input: {
-					ae: resolve(import.meta.dirname, "modules/cli/src/entry.ts"),
-					host: resolve(import.meta.dirname, "modules/forge/src/entry.ts"),
-					"windows-process-host": resolve(
-						import.meta.dirname,
-						"modules/engines/src/process/windows-process-host.ts",
-					),
-				},
-				output: { entryFileNames: "[name].js", format: "es" },
-			},
-			ssr: true,
-			target: "node22",
+		output: {
+			cleanDir: !watching,
+			dir: forge_root,
+			entryFileNames: "[name].js",
+			format: "es" as const,
 		},
+		tsconfig: true,
+		transform: { target: "node22" },
 	};
-});
+};
+
+export default CreateForgeRolldownConfig();
