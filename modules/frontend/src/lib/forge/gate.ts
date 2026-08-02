@@ -1,4 +1,34 @@
-import type { ArtisanConnectionState } from "@artisan/transport/client";
+import type {
+	ArtisanClientError,
+	ArtisanClientErrorCode,
+	ArtisanConnectionState,
+} from "@artisan/transport/client";
+import { Data } from "effect";
+
+import {
+	ArtisanErrorCode,
+	format_artisan_error,
+	type ArtisanErrorCode as ArtisanVisibleErrorCode,
+} from "../errors/artisan-error-code";
+
+export type ForgeHydrationOperation = "projects" | "session_defaults" | "threads";
+export type ForgePairingGuidance = "none" | "possible" | "required";
+
+export class ForgeHydrationFailure extends Data.TaggedError("ForgeHydrationFailure")<{
+	readonly error: ArtisanClientError;
+	readonly operation: ForgeHydrationOperation;
+}> {}
+
+export interface ForgeGateFailure {
+	readonly code: ArtisanVisibleErrorCode;
+	readonly diagnostics: {
+		readonly attempts?: number;
+		readonly client_code: ArtisanClientErrorCode;
+		readonly protocol_code?: string;
+		readonly retryable: boolean;
+	};
+	readonly message: string;
+}
 
 export type ForgeGatePhase =
 	| { readonly phase: "connecting" }
@@ -7,11 +37,11 @@ export type ForgeGatePhase =
 	| { readonly phase: "ready" }
 	| {
 			readonly attempts: number;
-			readonly error: string;
+			readonly failure: ForgeGateFailure;
 			readonly phase: "exhausted";
 	  }
 	| {
-			readonly error: string;
+			readonly failure: ForgeGateFailure;
 			readonly generation: number;
 			readonly phase: "hydration-failed";
 	  };
@@ -23,14 +53,68 @@ export interface ForgeGateModel {
 	readonly state: ForgeGatePhase;
 }
 
-export interface ForgeGatePresentation {
+interface ForgeGatePresentationBase {
 	readonly description: string;
 	readonly dismissible: boolean;
 	readonly retry: "connection" | "hydration" | undefined;
 	readonly show_start: boolean;
 	readonly title: string;
-	readonly tone: "error" | "progress";
 }
+
+export type ForgeGatePresentation =
+	| (ForgeGatePresentationBase & {
+			readonly failure: ForgeGateFailure;
+			readonly tone: "error";
+	  })
+	| (ForgeGatePresentationBase & {
+			readonly failure: undefined;
+			readonly tone: "progress";
+	  });
+
+const client_error_codes: Readonly<Record<ArtisanClientErrorCode, ArtisanVisibleErrorCode>> = {
+	configuration: ArtisanErrorCode.CLIENT_CONFIGURATION,
+	connection: ArtisanErrorCode.CONNECTION_UNAVAILABLE,
+	correlation_conflict: ArtisanErrorCode.CLIENT_STATE_FAILURE,
+	disposed: ArtisanErrorCode.CLIENT_DISPOSED,
+	event_overflow: ArtisanErrorCode.CLIENT_CAPACITY_EXCEEDED,
+	malformed: ArtisanErrorCode.TRANSPORT_MALFORMED,
+	protocol: ArtisanErrorCode.PROTOCOL_FAILURE,
+	request_overflow: ArtisanErrorCode.CLIENT_CAPACITY_EXCEEDED,
+	stream_closed: ArtisanErrorCode.CLIENT_STATE_FAILURE,
+	stream_gap: ArtisanErrorCode.CLIENT_STATE_FAILURE,
+	stream_not_found: ArtisanErrorCode.CLIENT_STATE_FAILURE,
+	stream_overflow: ArtisanErrorCode.CLIENT_CAPACITY_EXCEEDED,
+	subscription_overflow: ArtisanErrorCode.CLIENT_CAPACITY_EXCEEDED,
+};
+
+const pairing_protocol_codes = new Set(["invalid_pairing_code", "pairing_required"]);
+
+const hydration_error_codes: Readonly<Record<ForgeHydrationOperation, ArtisanVisibleErrorCode>> = {
+	projects: ArtisanErrorCode.HYDRATION_PROJECTS_FAILED,
+	session_defaults: ArtisanErrorCode.HYDRATION_SESSION_DEFAULTS_FAILED,
+	threads: ArtisanErrorCode.HYDRATION_THREADS_FAILED,
+};
+
+/** Maps every transport error to the stable safe code that Artisan presents. */
+export const ForgeVisibleErrorCode = (error: ArtisanClientError): ArtisanVisibleErrorCode =>
+	pairing_protocol_codes.has(error.protocol_code)
+		? ArtisanErrorCode.PAIRING_REQUIRED
+		: client_error_codes[error.code];
+
+const make_forge_gate_failure = (
+	code: ArtisanVisibleErrorCode,
+	error: ArtisanClientError,
+	attempts?: number,
+): ForgeGateFailure => ({
+	code,
+	diagnostics: {
+		...(attempts === undefined ? {} : { attempts }),
+		client_code: error.code,
+		...(error.protocol_code.length === 0 ? {} : { protocol_code: error.protocol_code }),
+		retryable: error.retryable,
+	},
+	message: format_artisan_error(code),
+});
 
 export const InitialForgeGateModel: ForgeGateModel = {
 	dismissed: false,
@@ -93,7 +177,11 @@ export const ObserveForgeConnection = (
 				...model,
 				state: {
 					attempts: state.attempts,
-					error: state.error.message,
+					failure: make_forge_gate_failure(
+						ForgeVisibleErrorCode(state.error),
+						state.error,
+						state.attempts,
+					),
 					phase: "exhausted",
 				},
 			};
@@ -113,12 +201,17 @@ export const CompleteForgeHydration = (model: ForgeGateModel, generation: number
 export const FailForgeHydration = (
 	model: ForgeGateModel,
 	generation: number,
-	error: string,
+	operation: ForgeHydrationOperation,
+	error: ArtisanClientError,
 ): ForgeGateModel =>
 	model.state.phase === "hydrating" && model.state.generation === generation
 		? {
 				...model,
-				state: { error, generation, phase: "hydration-failed" },
+				state: {
+					failure: make_forge_gate_failure(hydration_error_codes[operation], error),
+					generation,
+					phase: "hydration-failed",
+				},
 			}
 		: model;
 
@@ -129,6 +222,7 @@ export const PresentForgeGate = (model: ForgeGateModel): ForgeGatePresentation =
 			return {
 				description: "Establishing a secure local session.",
 				dismissible,
+				failure: undefined,
 				retry: undefined,
 				show_start: false,
 				title: "Connecting to Forge\u2026",
@@ -138,6 +232,7 @@ export const PresentForgeGate = (model: ForgeGateModel): ForgeGatePresentation =
 			return {
 				description: "Your workspace stays in place while the connection is restored.",
 				dismissible,
+				failure: undefined,
 				retry: undefined,
 				show_start: false,
 				title: "Reconnecting to Forge\u2026",
@@ -147,27 +242,32 @@ export const PresentForgeGate = (model: ForgeGateModel): ForgeGatePresentation =
 			return {
 				description: "Forge is syncing projects, threads, and runtime capabilities.",
 				dismissible,
+				failure: undefined,
 				retry: undefined,
 				show_start: false,
 				title: "Loading your workspace\u2026",
 				tone: "progress",
 			};
 		case "exhausted":
+			const is_connection_unavailable =
+				model.state.failure.code === ArtisanErrorCode.CONNECTION_UNAVAILABLE;
+
 			return {
-				description: "Start the installed local service, then reconnect.",
+				description: is_connection_unavailable
+					? "Start the installed local service, then reconnect."
+					: model.state.failure.message,
 				dismissible,
+				failure: model.state.failure,
 				retry: "connection",
-				show_start: true,
-				title: "Forge is offline",
+				show_start: is_connection_unavailable,
+				title: is_connection_unavailable ? "Forge is offline" : "Forge needs attention",
 				tone: "error",
 			};
 		case "hydration-failed":
 			return {
-				description:
-					model.state.error.length > 0
-						? model.state.error
-						: "Forge connected, but the workspace could not be loaded.",
+				description: model.state.failure.message,
 				dismissible,
+				failure: model.state.failure,
 				retry: "hydration",
 				show_start: false,
 				title: "Could not load your workspace",
@@ -177,10 +277,24 @@ export const PresentForgeGate = (model: ForgeGateModel): ForgeGatePresentation =
 			return {
 				description: "",
 				dismissible,
+				failure: undefined,
 				retry: undefined,
 				show_start: false,
 				title: "",
 				tone: "progress",
 			};
 	}
+};
+
+/** Distinguishes a proven pairing failure from a health-based recovery hint. */
+export const PresentForgePairingGuidance = (
+	presentation: ForgeGatePresentation,
+	origin_reachable: boolean,
+): ForgePairingGuidance => {
+	if (presentation.tone !== "error") return "none";
+	if (presentation.failure.code === ArtisanErrorCode.PAIRING_REQUIRED) return "required";
+
+	return presentation.failure.code === ArtisanErrorCode.CONNECTION_UNAVAILABLE && origin_reachable
+		? "possible"
+		: "none";
 };

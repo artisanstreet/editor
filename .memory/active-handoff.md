@@ -1,6 +1,6 @@
 # Active Branch Handoff
 
-Last updated: 2026-08-01. Branch continuity only. Durable verified status is in
+Last updated: 2026-08-02. Branch continuity only. Durable verified status is in
 [`docs/status/backend-completion-matrix.md`](../docs/status/backend-completion-matrix.md).
 
 ## Working State
@@ -33,6 +33,10 @@ Last updated: 2026-08-01. Branch continuity only. Durable verified status is in
 
 ## Active Work
 
+- The Forge fatal overlay now uses a finite user-visible error-code catalog. The
+  existing `ArtisanClientError` remains the transport source; the gate preserves
+  safe client/protocol diagnostics instead of collapsing failures to message
+  strings, and the ASCII mark aligns with the recovery copy.
 - Canonical product routes are `/t/:workspace/:thread` for conversations and
   `/e/:workspace/:thread` for editing; editor file identity remains in `?file=`.
   Workspace and historical thread IDs are encoded/canonicalized centrally.
@@ -93,6 +97,11 @@ Last updated: 2026-08-01. Branch continuity only. Durable verified status is in
 
 ## Verification
 
+- The Forge overlay/error-code slice passes 65 focused frontend tests,
+  TypeScript, targeted oxfmt/oxlint, `git diff --check`, the SER boundary scan,
+  and the frontend production build. The full `pnpm run validate` gate stops
+  before lint/tests on unrelated formatting drift in `modules/dev-tui` and
+  `pnpm-workspace.yaml`.
 - Focused remediation/controller/lifecycle tests, adversarial interleavings,
   component integrity, and the expanded SER gate are green. The complete
   frontend suite passes 63 files/357 tests. On SER 4.2.1, production build,

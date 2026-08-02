@@ -8,8 +8,10 @@
 	import { WriteClipboardText } from "$lib/browser/clipboard";
 	import { RunBrowserDom } from "$lib/browser/dom";
 	import { Button } from "$lib/components/ui/button";
+	import { ArtisanErrorCode } from "$lib/errors/artisan-error-code";
 	import {
 		PresentForgeGate,
+		PresentForgePairingGuidance,
 		type ForgeGateModel,
 	} from "$lib/forge/gate";
 	import { DiscoverForge, type ReachableForge } from "$lib/forge/discovery";
@@ -59,7 +61,9 @@
 	let origin_reachable = $state(false);
 	let other_instances = $state<ReadonlyArray<ReachableForge>>([]);
 	let pair_command_copied = $state(false);
-	const unpaired = $derived(presentation.tone === "error" && origin_reachable);
+	const pairing_guidance = $derived(
+		PresentForgePairingGuidance(presentation, origin_reachable),
+	);
 	const show_start = $derived(
 		presentation.show_start && !origin_reachable && !origin_development,
 	);
@@ -159,24 +163,32 @@
 				: "Connecting to Artisan Forge…",
 	);
 	const failure_happened = $derived.by(() => {
-		if (model.state.phase === "hydration-failed") {
-			return model.state.error.length > 0
-				? model.state.error
-				: "Artisan Forge connected, but your workspace could not be loaded.";
-		}
-		if (unpaired) {
+		if (presentation.tone !== "error") return "";
+		if (pairing_guidance === "required") {
 			return "Artisan Forge is running on this machine, but this browser holds no session for it.";
 		}
-		return "We couldn't reach Artisan Forge. The connection closed or never came up, and repeated attempts to get through didn't land.";
+		if (pairing_guidance === "possible") {
+			return "Artisan Forge is running, but this window could not open a local session. Its pairing may have expired.";
+		}
+
+		return presentation.failure.message;
 	});
 	const failure_remedy = $derived.by(() => {
+		if (presentation.tone !== "error") return "";
 		if (model.state.phase === "hydration-failed") {
 			return "This is usually temporary — retry loading. If it keeps happening, restart Artisan Forge and reconnect.";
 		}
-		if (unpaired) {
+		if (pairing_guidance === "required") {
 			return "Pair this browser from a terminal, then retry the connection:";
 		}
-		return "Start Artisan Forge and this screen gets out of your way — launch the installed app, or run “ae open” from a terminal. If it's already running, retry the connection.";
+		if (pairing_guidance === "possible") {
+			return "Try pairing this window again, then retry the connection. If that does not resolve it, keep the error code below when reporting the connection failure:";
+		}
+		if (presentation.failure.code === ArtisanErrorCode.CONNECTION_UNAVAILABLE) {
+			return "Start Artisan Forge and this screen gets out of your way — launch the installed app, or run “ae open” from a terminal. If it's already running, retry the connection.";
+		}
+
+		return "Retry the connection. If the same code returns, restart Artisan Editor and Forge together so their local state and versions agree.";
 	});
 </script>
 
@@ -199,7 +211,7 @@
 		<!-- Focused programmatically for screen readers; the ring would outline the whole scene. -->
 		<section
 			bind:this={status_element}
-			class="flex max-w-full flex-col items-center gap-10 outline-none"
+			class="flex w-full max-w-xl flex-col items-start gap-10 outline-none"
 			role={presentation.tone === "error" ? "alert" : "status"}
 			aria-busy={presentation.tone === "progress"}
 			aria-live={presentation.tone === "error" ? "assertive" : "polite"}
@@ -213,7 +225,7 @@
 				aria-label="Artisan">{banner}</pre>
 
 			{#if presentation.tone === "error"}
-				<div class="w-full max-w-xl">
+				<div class="w-full">
 					<p class="text-base font-medium text-destructive">
 						Artisan Editor ran into a problem and could not continue.
 					</p>
@@ -229,7 +241,7 @@
 							<p class="mt-1.5 text-sm leading-6 text-muted-foreground">
 								{failure_remedy}
 							</p>
-							{#if unpaired}
+							{#if pairing_guidance !== "none"}
 								<button
 									type="button"
 									class="mt-3 inline-flex items-center gap-2 rounded-lg bg-surface-100 px-3 py-1.5 font-mono text-xs text-foreground hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none dark:bg-surface-900"
@@ -268,6 +280,31 @@
 									Retry loading
 								</Button>
 							{/if}
+						</div>
+						<div
+							class="border-border/60 border-t pt-4 text-xs leading-5 text-muted-foreground"
+						>
+							<p>
+								<span class="font-medium">Error code</span>
+								<code class="ml-2 text-foreground">
+									{presentation.failure.code}
+								</code>
+							</p>
+							<p>
+								<span class="font-medium">Diagnostic</span>
+								<code class="ml-2">
+									{presentation.failure.diagnostics.client_code}
+									{#if presentation.failure.diagnostics.protocol_code !== undefined}
+										· {presentation.failure.diagnostics.protocol_code}
+									{/if}
+									{#if presentation.failure.diagnostics.attempts !== undefined}
+										· {presentation.failure.diagnostics.attempts}
+										{presentation.failure.diagnostics.attempts === 1
+											? "attempt"
+											: "attempts"}
+									{/if}
+								</code>
+							</p>
 						</div>
 						{#if other_instances.length > 0}
 							<div class="w-full">

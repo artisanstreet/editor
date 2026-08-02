@@ -1,10 +1,16 @@
 <script lang="ts" effect>
 	import { dev } from "$app/environment";
+	import { ArtisanClientError } from "@artisan/transport/client";
 	import PlayerTrackNext from "@tabler/icons-svelte/icons/player-track-next";
 	import PlayerTrackPrev from "@tabler/icons-svelte/icons/player-track-prev";
 	import { Effect } from "effect";
 	import { Button } from "$lib/components/ui/button";
-	import type { ForgeGateModel } from "$lib/forge/gate";
+	import {
+		BeginForgeHydration,
+		FailForgeHydration,
+		ObserveForgeConnection,
+		type ForgeGateModel,
+	} from "$lib/forge/gate";
 	import ForgeConnectionOverlay from "$/components/forge-connection-overlay.sv";
 
 	interface OverlayScenario {
@@ -13,7 +19,27 @@
 		readonly model: ForgeGateModel;
 	}
 
-	const base = { dismissed: false, has_hydrated_shell: false, hydration_generation: 0 };
+	const base: ForgeGateModel = {
+		dismissed: false,
+		has_hydrated_shell: false,
+		hydration_generation: 0,
+		state: { phase: "connecting" },
+	};
+	const connection_error = new ArtisanClientError({
+		cause: new Error("connection refused"),
+		code: "connection",
+		message: "WebSocket handshake failed: connection refused",
+		protocol_code: "transport.connection",
+		retryable: true,
+	});
+	const protocol_error = new ArtisanClientError({
+		cause: new Error("protocol version mismatch"),
+		code: "protocol",
+		message: "Artisan and Forge use incompatible protocol versions.",
+		protocol_code: "transport.version_mismatch",
+		retryable: false,
+	});
+	const hydration_base = BeginForgeHydration({ ...base, has_hydrated_shell: true });
 	/**
 	 * One entry per gate phase the real overlay can present, with
 	 * representative data. The "ready" phase is deliberately absent: it
@@ -44,38 +70,40 @@
 		{
 			id: "exhausted",
 			label: "Offline",
-			model: {
-				...base,
-				state: {
-					attempts: 6,
-					error: "WebSocket handshake failed: connection refused",
-					phase: "exhausted",
-				},
-			},
+			model: ObserveForgeConnection(base, {
+				attempts: 6,
+				error: connection_error,
+				phase: "exhausted",
+			}),
+		},
+		{
+			id: "protocol-failed",
+			label: "Protocol failed",
+			model: ObserveForgeConnection(base, {
+				attempts: 1,
+				error: protocol_error,
+				phase: "exhausted",
+			}),
 		},
 		{
 			id: "hydration-failed",
-			label: "Workspace failed",
-			model: {
-				...base,
-				has_hydrated_shell: true,
-				hydration_generation: 1,
-				state: {
-					error: "Thread list query timed out after 15 seconds.",
-					generation: 1,
-					phase: "hydration-failed",
-				},
-			},
+			label: "Threads failed",
+			model: FailForgeHydration(
+				hydration_base,
+				hydration_base.hydration_generation,
+				"threads",
+				protocol_error,
+			),
 		},
 		{
-			id: "hydration-failed-bare",
-			label: "Workspace failed · no detail",
-			model: {
-				...base,
-				has_hydrated_shell: true,
-				hydration_generation: 1,
-				state: { error: "", generation: 1, phase: "hydration-failed" },
-			},
+			id: "defaults-failed",
+			label: "Defaults failed",
+			model: FailForgeHydration(
+				hydration_base,
+				hydration_base.hydration_generation,
+				"session_defaults",
+				protocol_error,
+			),
 		},
 	];
 

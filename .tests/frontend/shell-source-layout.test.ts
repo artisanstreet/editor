@@ -33,11 +33,13 @@ describe("Barekey docs shell reset", () => {
 		const overlay = Read("modules/frontend/src/routes/components/forge-connection-overlay.sv");
 		const preview = Read("modules/frontend/src/routes/components/forge-shell-preview.sv");
 
-		/** Opaque, full-cover, and centered: the banner is the whole scene. */
+		/** Opaque and full-cover: the banner is the whole scene. */
 		expect(overlay).toContain("absolute inset-0 z-50 flex");
 		expect(overlay).toContain("bg-background");
 		expect(overlay).not.toContain("backdrop-blur");
 		expect(overlay).toContain('aria-label="Artisan"');
+		/** The mark and recovery copy share the same left edge. */
+		expect(overlay).toContain("w-full max-w-xl flex-col items-start");
 		/** Progress phases shimmer the banner; the reassurance line waits out 5s. */
 		expect(overlay).toContain("banner-shimmer");
 		expect(overlay).toContain("late-reassurance");
@@ -46,6 +48,10 @@ describe("Barekey docs shell reset", () => {
 		expect(overlay).toContain("Artisan Editor ran into a problem and could not continue.");
 		expect(overlay).toContain("What happened?");
 		expect(overlay).toContain("What to do now");
+		expect(overlay).toContain("Error code");
+		expect(overlay).toContain("PresentForgePairingGuidance");
+		expect(overlay).toContain("{presentation.failure.code}");
+		expect(overlay).toContain("presentation.failure.diagnostics.protocol_code");
 		expect(overlay).toContain('role={presentation.tone === "error" ? "alert" : "status"}');
 		expect(overlay).toContain("aria-live=");
 		expect(overlay).toContain('tabindex="-1"');

@@ -19,6 +19,7 @@
 		CompleteForgeHydration,
 		DismissForgeGate,
 		FailForgeHydration,
+		ForgeHydrationFailure,
 		ForgeShellIsBlocked,
 		ForgeShellIsMounted,
 		InitialForgeGateModel,
@@ -121,7 +122,24 @@
 	const HydrateForge = (generation: number): Effect.Effect<void> =>
 		Effect.gen(function* () {
 			yield* Effect.all(
-				[session_defaults.Refresh, client.ListProjects, client.ListThreads],
+				[
+					session_defaults.Refresh.pipe(
+						Effect.mapError(
+							(error) =>
+								new ForgeHydrationFailure({ error, operation: "session_defaults" }),
+						),
+					),
+					client.ListProjects.pipe(
+						Effect.mapError(
+							(error) => new ForgeHydrationFailure({ error, operation: "projects" }),
+						),
+					),
+					client.ListThreads.pipe(
+						Effect.mapError(
+							(error) => new ForgeHydrationFailure({ error, operation: "threads" }),
+						),
+					),
+				],
 				{
 					concurrency: "unbounded",
 					discard: true,
@@ -134,9 +152,9 @@
 			}
 			yield* ApplyConnectionState(state);
 		}).pipe(
-			Effect.catch((error) =>
+			Effect.catchTag("ForgeHydrationFailure", ({ error, operation }) =>
 				Effect.gen(function* () {
-					forge_gate = FailForgeHydration(forge_gate, generation, error.message);
+					forge_gate = FailForgeHydration(forge_gate, generation, operation, error);
 				}),
 			),
 		);
