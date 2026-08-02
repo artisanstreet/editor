@@ -48,10 +48,13 @@ describe("Barekey docs shell reset", () => {
 		expect(overlay).toContain("Artisan Editor ran into a problem and could not continue.");
 		expect(overlay).toContain("What happened?");
 		expect(overlay).toContain("What to do now");
-		expect(overlay).toContain("Error code");
 		expect(overlay).toContain("PresentForgePairingGuidance");
+		expect(overlay).toContain('class="font-mono text-xs text-muted-foreground"');
 		expect(overlay).toContain("{presentation.failure.code}");
-		expect(overlay).toContain("presentation.failure.diagnostics.protocol_code");
+		expect(overlay).not.toContain(">Error code<");
+		expect(overlay).not.toContain(">Diagnostic<");
+		expect(overlay).not.toContain("presentation.failure.diagnostics.protocol_code");
+		expect(overlay).not.toContain("presentation.failure.diagnostics.attempts");
 		expect(overlay).toContain('role={presentation.tone === "error" ? "alert" : "status"}');
 		expect(overlay).toContain("aria-live=");
 		expect(overlay).toContain('tabindex="-1"');

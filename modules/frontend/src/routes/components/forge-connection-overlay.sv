@@ -283,30 +283,10 @@
 								</Button>
 							{/if}
 						</div>
-						<div
-							class="border-border/60 border-t pt-4 text-xs leading-5 text-muted-foreground"
-						>
-							<p>
-								<span class="font-medium">Error code</span>
-								<code class="ml-2 text-foreground">
-									{presentation.failure.code}
-								</code>
-							</p>
-							<p>
-								<span class="font-medium">Diagnostic</span>
-								<code class="ml-2">
-									{presentation.failure.diagnostics.client_code}
-									{#if presentation.failure.diagnostics.protocol_code !== undefined}
-										· {presentation.failure.diagnostics.protocol_code}
-									{/if}
-									{#if presentation.failure.diagnostics.attempts !== undefined}
-										· {presentation.failure.diagnostics.attempts}
-										{presentation.failure.diagnostics.attempts === 1
-											? "attempt"
-											: "attempts"}
-									{/if}
-								</code>
-							</p>
+						<div class="border-border/60 border-t pt-4">
+							<code class="font-mono text-xs text-muted-foreground">
+								{presentation.failure.code}
+							</code>
 						</div>
 						{#if other_instances.length > 0}
 							<div class="w-full">
