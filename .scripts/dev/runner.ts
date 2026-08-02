@@ -21,14 +21,35 @@ import {
 	writeFileSync,
 } from "node:fs";
 import { createInterface } from "node:readline";
-import { join, resolve } from "node:path";
+import { createRequire } from "node:module";
+import { dirname, join, resolve } from "node:path";
+import type { Readable, Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
 
+import type {
+	DevLaneDefinition,
+	DevLaneId,
+	DevLaneStatus,
+	DevTuiEvent,
+} from "@artisan/dev-tui/model";
+
 export type RunnerMode = "dev" | "doctor" | "forge" | "pair" | "web";
+
+type ProcessLaneId = Exclude<DevLaneId, "runner">;
 
 const base_forge_port = 4848;
 const base_web_port = 4849;
 const max_instance_offset = 3000;
+const dependency_require = createRequire(import.meta.url);
+
+const resolve_bun_executable = (): string => {
+	const package_path = dependency_require.resolve("bun/package.json");
+	const manifest = JSON.parse(readFileSync(package_path, "utf8")) as {
+		readonly bin: { readonly bun: string };
+	};
+
+	return join(dirname(package_path), manifest.bin.bun);
+};
 
 export const parse_runner_mode = (value: string | undefined): RunnerMode | undefined => {
 	if (value === undefined || value === "dev") return "dev";
@@ -36,6 +57,17 @@ export const parse_runner_mode = (value: string | undefined): RunnerMode | undef
 		return value;
 	return undefined;
 };
+
+export const should_use_dev_tui = (input: {
+	readonly environment: Readonly<Record<string, string | undefined>>;
+	readonly stdin_is_tty: boolean | undefined;
+	readonly stdout_is_tty: boolean | undefined;
+}): boolean =>
+	input.stdin_is_tty === true &&
+	input.stdout_is_tty === true &&
+	input.environment.ARTISAN_DEV_TUI !== "0" &&
+	input.environment.CI === undefined &&
+	input.environment.TERM !== "dumb";
 
 /** Stable per-path offset so parallel worktrees get distinct, repeatable ports. */
 export const hash_instance_offset = (path: string): number => {
@@ -217,7 +249,12 @@ const sleep = (milliseconds: number) =>
 
 interface Lane {
 	readonly child: ChildProcess;
-	readonly name: string;
+	readonly name: ProcessLaneId;
+}
+
+interface DevDashboard {
+	readonly close: () => void;
+	readonly send: (event: DevTuiEvent) => boolean;
 }
 
 const script_entry = process.argv[1];
@@ -241,29 +278,152 @@ if (runner_is_entry) {
 
 	const lanes: Lane[] = [];
 	let shutting_down = false;
+	let dashboard: DevDashboard | undefined;
 
-	const log = (line: string) => console.log(`[dev] ${line}`);
+	const send_dashboard_event = (event: DevTuiEvent): boolean => dashboard?.send(event) ?? false;
 
-	const attach_lane = (name: string, child: ChildProcess): Lane => {
+	const log = (line: string, lane_id: DevLaneId = "runner") => {
+		if (send_dashboard_event({ lane_id, line, type: "log" })) return;
+
+		console.log(`[dev] ${line}`);
+	};
+
+	const set_lane_status = (lane_id: DevLaneId, status: DevLaneStatus) => {
+		send_dashboard_event({ lane_id, status, type: "status" });
+	};
+
+	const attach_lane = (name: ProcessLaneId, child: ChildProcess): Lane => {
 		register_shutdown();
 		mkdirSync(paths.logs_root, { recursive: true });
 		const file = createWriteStream(join(paths.logs_root, `${name}.log`), { flags: "a" });
+
+		set_lane_status(name, "starting");
+		child.once("spawn", () => set_lane_status(name, "running"));
+		child.once("error", () => set_lane_status(name, "failed"));
+
 		for (const stream of [child.stdout, child.stderr]) {
 			if (stream === null) continue;
 			createInterface({ input: stream }).on("line", (line) => {
-				console.log(`[${name}] ${line}`);
+				if (!send_dashboard_event({ lane_id: name, line, type: "log" })) {
+					console.log(`[${name}] ${line}`);
+				}
+				if (name === "web" && /Local:\s+http/u.test(line)) {
+					set_lane_status(name, "ready");
+				}
 				file.write(`${line}\n`);
 			});
 		}
 		child.on("exit", (code) => {
 			file.end();
+			set_lane_status(name, shutting_down || code === 0 ? "stopped" : "failed");
 			if (!shutting_down && code !== 0 && code !== null) {
-				log(`${name} exited with code ${code}`);
+				log(`${name} exited with code ${code}`, name);
 			}
 		});
 		const lane = { child, name };
 		lanes.push(lane);
 		return lane;
+	};
+
+	const start_dashboard = (lane_definitions: ReadonlyArray<DevLaneDefinition>) => {
+		let bun_executable: string;
+		let child: ChildProcess;
+
+		try {
+			bun_executable = resolve_bun_executable();
+			child = spawn(
+				bun_executable,
+				[join(repository_root, "modules", "dev-tui", "src", "entry.ts")],
+				{
+					cwd: repository_root,
+					env: process.env,
+					stdio: ["inherit", "inherit", "inherit", "pipe", "pipe"],
+					windowsHide: false,
+				},
+			);
+		} catch (cause) {
+			console.error(
+				`[dev] dashboard could not start: ${cause instanceof Error ? cause.message : String(cause)}`,
+			);
+
+			return undefined;
+		}
+		const event_stream = child.stdio[3] as Writable | null;
+		const command_stream = child.stdio[4] as Readable | null;
+		let active = event_stream !== null && command_stream !== null;
+		let closing = false;
+		let force_close_timeout: NodeJS.Timeout | undefined;
+
+		if (!active || event_stream === null || command_stream === null) {
+			child.kill();
+			return undefined;
+		}
+
+		const send = (event: DevTuiEvent): boolean => {
+			if (!active || event_stream.destroyed || event_stream.writableEnded) return false;
+
+			try {
+				event_stream.write(`${JSON.stringify(event)}\n`);
+				return true;
+			} catch {
+				active = false;
+				return false;
+			}
+		};
+
+		createInterface({ input: command_stream }).on("line", (line) => {
+			try {
+				const command = JSON.parse(line) as { readonly type?: unknown };
+
+				if (command.type === "shutdown") shutdown();
+			} catch {
+				/** A malformed display command is ignored; the supervisor keeps ownership. */
+			}
+		});
+		event_stream.once("error", () => {
+			active = false;
+		});
+		child.once("error", (cause) => {
+			active = false;
+			console.error(`[dev] dashboard could not start: ${cause.message}`);
+		});
+		child.once("exit", (code) => {
+			active = false;
+			if (force_close_timeout !== undefined) clearTimeout(force_close_timeout);
+			event_stream.destroy();
+			command_stream.destroy();
+			if (!closing && !shutting_down) {
+				console.error(
+					`[dev] dashboard exited with code ${code ?? "unknown"}; using plain logs`,
+				);
+			}
+		});
+
+		const control: DevDashboard = {
+			close: () => {
+				if (closing) return;
+				closing = true;
+				send({ type: "shutdown" });
+				event_stream.end();
+				force_close_timeout = setTimeout(() => {
+					event_stream.destroy();
+					command_stream.destroy();
+					if (child.pid !== undefined && child.exitCode === null) child.kill();
+				}, 2_000);
+				force_close_timeout.unref();
+			},
+			send,
+		};
+
+		control.send({
+			forge_origin: instance.forge_origin,
+			lanes: lane_definitions,
+			title: `Artisan dev · instance ${instance.offset}`,
+			type: "configure",
+			web_origin: instance.web_origin,
+		});
+
+		return control;
 	};
 
 	const kill_tree = (child: ChildProcess) => {
@@ -278,8 +438,9 @@ if (runner_is_entry) {
 	const shutdown = () => {
 		if (shutting_down) return;
 		shutting_down = true;
-		if (lanes.length === 0) return;
 		log("shutting down");
+		dashboard?.close();
+		if (lanes.length === 0) return;
 		for (const lane of lanes) kill_tree(lane.child);
 	};
 	/** Registered lazily: query modes must exit without teardown side effects. */
@@ -294,7 +455,7 @@ if (runner_is_entry) {
 
 	/** Arguments are static runner-owned strings, joined once for the shell. */
 	const spawn_pnpm = (
-		name: string,
+		name: ProcessLaneId,
 		pnpm_arguments: ReadonlyArray<string>,
 		extra_environment: Record<string, string> = {},
 	) =>
@@ -330,12 +491,14 @@ if (runner_is_entry) {
 			for (let attempt = 0; attempt < 120; attempt += 1) {
 				if (child.exitCode !== null) return;
 				if (await probe(`${instance.forge_origin}/health`)) {
-					log(`forge ready at ${instance.forge_origin}`);
+					set_lane_status("forge", "ready");
+					log(`forge ready at ${instance.forge_origin}`, "forge");
 					return;
 				}
 				await sleep(500);
 			}
-			log(`forge did not answer on ${instance.forge_origin}/health`);
+			set_lane_status("forge", "failed");
+			log(`forge did not answer on ${instance.forge_origin}/health`, "forge");
 		})();
 	};
 
@@ -347,7 +510,7 @@ if (runner_is_entry) {
 		try {
 			lane.child.disconnect();
 		} catch {
-			/* Already disconnected. */
+			/** Already disconnected. */
 		}
 		for (let waited = 0; waited < 5_000 && lane.child.exitCode === null; waited += 100) {
 			await sleep(100);
@@ -366,7 +529,8 @@ if (runner_is_entry) {
 			if (shutting_down || restarting) return;
 			restarting = true;
 			void (async () => {
-				log("forge bundle changed; restarting the Forge");
+				set_lane_status("forge", "starting");
+				log("forge bundle changed; restarting the Forge", "forge");
 				await stop_forge();
 				/** A failed rebuild may leave no bundle; wait for the next good one. */
 				while (!existsSync(paths.forge_bundle) && !shutting_down) {
@@ -409,7 +573,8 @@ if (runner_is_entry) {
 			) {
 				const url = await mint_pair_url();
 				if (url === undefined) break;
-				log(`opening ${instance.web_origin} (paired)`);
+				set_lane_status("web", "ready");
+				log(`opening ${instance.web_origin} (paired)`, "web");
 				if (process.platform === "win32") {
 					spawnSync("cmd", ["/c", "start", "", url], { stdio: "ignore" });
 				}
@@ -418,7 +583,10 @@ if (runner_is_entry) {
 			await sleep(1_000);
 		}
 		if (!shutting_down) {
-			log(`could not open a paired browser; open ${instance.web_origin} and it self-pairs`);
+			log(
+				`could not open a paired browser; open ${instance.web_origin} and it self-pairs`,
+				"web",
+			);
 		}
 	};
 
@@ -481,6 +649,31 @@ if (runner_is_entry) {
 				spawnSync("cmd", ["/c", "start", "", url], { stdio: "ignore" });
 			}
 			return;
+		}
+
+		if (
+			should_use_dev_tui({
+				environment: process.env,
+				stdin_is_tty: process.stdin.isTTY,
+				stdout_is_tty: process.stdout.isTTY,
+			})
+		) {
+			const lane_definitions: DevLaneDefinition[] = [
+				{ id: "runner", label: "Overview", status: "ready" },
+				...(mode === "dev" || mode === "forge"
+					? ([
+							{ id: "build", label: "Forge build", status: "waiting" },
+							{ id: "forge", label: "Forge", status: "waiting" },
+						] satisfies DevLaneDefinition[])
+					: []),
+				...(mode === "dev" || mode === "web"
+					? ([
+							{ id: "web", label: "Web", status: "waiting" },
+						] satisfies DevLaneDefinition[])
+					: []),
+			];
+
+			dashboard = start_dashboard(lane_definitions);
 		}
 
 		log(`instance offset ${instance.offset}`);

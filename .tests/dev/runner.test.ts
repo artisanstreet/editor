@@ -11,6 +11,7 @@ import {
 	hash_instance_offset,
 	make_forge_environment,
 	parse_runner_mode,
+	should_use_dev_tui,
 	write_dev_config,
 } from "../../.scripts/dev/runner";
 
@@ -35,6 +36,37 @@ describe("dev runner modes", () => {
 			expect(parse_runner_mode(mode)).toBe(mode);
 		}
 		expect(parse_runner_mode("bogus")).toBeUndefined();
+	});
+});
+
+describe("dev dashboard capability", () => {
+	it("uses the dashboard only in an interactive terminal", () => {
+		expect(
+			should_use_dev_tui({ environment: {}, stdin_is_tty: true, stdout_is_tty: true }),
+		).toBe(true);
+		expect(
+			should_use_dev_tui({ environment: {}, stdin_is_tty: false, stdout_is_tty: true }),
+		).toBe(false);
+		expect(
+			should_use_dev_tui({ environment: {}, stdin_is_tty: true, stdout_is_tty: false }),
+		).toBe(false);
+	});
+
+	it("honors CI and the explicit plain-log escape hatch", () => {
+		expect(
+			should_use_dev_tui({
+				environment: { CI: "1" },
+				stdin_is_tty: true,
+				stdout_is_tty: true,
+			}),
+		).toBe(false);
+		expect(
+			should_use_dev_tui({
+				environment: { ARTISAN_DEV_TUI: "0" },
+				stdin_is_tty: true,
+				stdout_is_tty: true,
+			}),
+		).toBe(false);
 	});
 });
 
