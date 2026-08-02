@@ -3,7 +3,6 @@ import {
 	ScrollBoxRenderable,
 	StyledText,
 	TextRenderable,
-	bg,
 	bold,
 	brightBlack,
 	brightBlue,
@@ -87,7 +86,7 @@ const format_sidebar = (state: DevTuiState): StyledText => {
 		const marker = selected ? "›" : " ";
 		const label = `${marker} ${index + 1}  ${lane.label}`;
 
-		chunks.push(selected ? bg("#1e293b")(brightCyan(bold(label))) : dim(label));
+		chunks.push(selected ? brightCyan(bold(label)) : dim(label));
 		chunks.push(status_styles[lane.status](`\n     ${status_labels[lane.status]}`));
 		if (index < state.lanes.length - 1) chunks.push(dim("\n\n"));
 	});
@@ -132,7 +131,6 @@ export const create_dev_tui = async (options: DevTuiOptions = {}): Promise<DevTu
 		id: "sidebar-text",
 	});
 	const sidebar = new BoxRenderable(renderer, {
-		backgroundColor: "#0f172a",
 		border: true,
 		borderColor: "#3b4252",
 		borderStyle: "rounded",
@@ -162,7 +160,6 @@ export const create_dev_tui = async (options: DevTuiOptions = {}): Promise<DevTu
 		width: "100%",
 	});
 	const content = new BoxRenderable(renderer, {
-		backgroundColor: "#0f172a",
 		border: true,
 		borderColor: "#3b4252",
 		borderStyle: "rounded",
@@ -188,7 +185,6 @@ export const create_dev_tui = async (options: DevTuiOptions = {}): Promise<DevTu
 		id: "footer",
 	});
 	const app = new BoxRenderable(renderer, {
-		backgroundColor: "#080b12",
 		flexDirection: "column",
 		gap: 1,
 		height: "100%",
