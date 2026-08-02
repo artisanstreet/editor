@@ -211,7 +211,9 @@
 		<!-- Focused programmatically for screen readers; the ring would outline the whole scene. -->
 		<section
 			bind:this={status_element}
-			class="flex w-full max-w-xl flex-col items-start gap-10 outline-none"
+			class={presentation.tone === "error"
+				? "flex w-full max-w-xl flex-col items-start gap-10 outline-none"
+				: "flex w-full max-w-xl flex-col items-center gap-10 outline-none"}
 			role={presentation.tone === "error" ? "alert" : "status"}
 			aria-busy={presentation.tone === "progress"}
 			aria-live={presentation.tone === "error" ? "assertive" : "polite"}
