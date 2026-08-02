@@ -7,13 +7,18 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
 	derive_dev_instance,
 	derive_dev_paths,
+	enqueue_dev_tui_event,
 	ensure_dev_secrets,
 	hash_instance_offset,
 	make_forge_environment,
+	make_dev_lane_definitions,
 	parse_runner_mode,
+	resolve_dev_tui_entry,
 	should_use_dev_tui,
 	write_dev_config,
 } from "../../.scripts/dev/runner";
+
+import type { DevTuiEvent } from "@artisan/dev-tui/model";
 
 const temporary_roots: string[] = [];
 const make_root = () => {
@@ -40,6 +45,14 @@ describe("dev runner modes", () => {
 });
 
 describe("dev dashboard capability", () => {
+	it("keeps the dashboard process rail focused on the two product surfaces", () => {
+		expect(make_dev_lane_definitions("dev").map((lane) => lane.label)).toEqual([
+			"Overview",
+			"Artisan Editor",
+			"Artisan Forge",
+		]);
+	});
+
 	it("uses the dashboard only in an interactive terminal", () => {
 		expect(
 			should_use_dev_tui({ environment: {}, stdin_is_tty: true, stdout_is_tty: true }),
@@ -67,6 +80,43 @@ describe("dev dashboard capability", () => {
 				stdout_is_tty: true,
 			}),
 		).toBe(false);
+		expect(
+			should_use_dev_tui({
+				environment: { TERM: "dumb" },
+				stdin_is_tty: true,
+				stdout_is_tty: true,
+			}),
+		).toBe(false);
+	});
+
+	it("resolves the Bun entry through the package export", () => {
+		expect(resolve_dev_tui_entry()).toMatch(/[\\/]modules[\\/]dev-tui[\\/]src[\\/]entry\.ts$/u);
+	});
+
+	it("bounds backpressured events while retaining control updates", () => {
+		const pending_events: DevTuiEvent[] = [
+			{ lane_id: "api", line: "stale", type: "log" },
+			{ lane_id: "api", status: "running", type: "status" },
+		];
+
+		enqueue_dev_tui_event(
+			pending_events,
+			{ lane_id: "api", status: "ready", type: "status" },
+			2,
+		);
+
+		expect(pending_events).toEqual([
+			{ lane_id: "api", status: "running", type: "status" },
+			{ lane_id: "api", status: "ready", type: "status" },
+		]);
+
+		enqueue_dev_tui_event(
+			pending_events,
+			{ lane_id: "api", line: "discarded", type: "log" },
+			2,
+		);
+
+		expect(pending_events).toHaveLength(2);
 	});
 });
 

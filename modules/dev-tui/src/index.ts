@@ -18,11 +18,10 @@ import {
 	yellow,
 } from "@opentui/core";
 
-import stripAnsi from "strip-ansi";
-
 import {
 	apply_dev_tui_event,
 	create_dev_tui_state,
+	sanitize_dev_log_line,
 	select_dev_tui_lane,
 	select_relative_dev_tui_lane,
 	type DevLaneStatus,
@@ -30,15 +29,16 @@ import {
 	type DevTuiState,
 } from "./model";
 
-export type {
+export type { DevTuiLane, DevTuiState } from "./model";
+export {
+	DevEndpoint,
 	DevLaneDefinition,
 	DevLaneId,
 	DevLaneStatus,
 	DevTuiEvent,
-	DevTuiLane,
-	DevTuiState,
+	is_dev_tui_event,
+	sanitize_dev_log_line,
 } from "./model";
-export { is_dev_tui_event } from "./model";
 
 export interface DevTui {
 	readonly destroy: () => void;
@@ -95,12 +95,7 @@ const format_sidebar = (state: DevTuiState): StyledText => {
 };
 
 const format_header = (state: DevTuiState): StyledText => {
-	const endpoints = [
-		state.forge_origin !== undefined && `Forge ${state.forge_origin}`,
-		state.web_origin !== undefined && `Web ${state.web_origin}`,
-	]
-		.filter(Boolean)
-		.join("   ");
+	const endpoints = state.endpoints.map((endpoint) => endpoint.label).join("   ");
 	const chunks = [brightCyan(bold(state.title))];
 
 	if (endpoints.length > 0) chunks.push(dim(`\n${endpoints}`));
@@ -111,6 +106,7 @@ const format_header = (state: DevTuiState): StyledText => {
 const selected_lane = (state: DevTuiState) =>
 	state.lanes.find((lane) => lane.id === state.selected_lane_id) ?? state.lanes[0];
 
+/** Creates the interactive development-process terminal dashboard. */
 export const create_dev_tui = async (options: DevTuiOptions = {}): Promise<DevTui> => {
 	const renderer =
 		options.renderer ??
@@ -121,7 +117,7 @@ export const create_dev_tui = async (options: DevTuiOptions = {}): Promise<DevTu
 			targetFps: 30,
 		}));
 	const header = new TextRenderable(renderer, {
-		content: new StyledText([brightCyan(bold("Artisan development"))]),
+		content: new StyledText([brightCyan(bold("Development"))]),
 		height: 2,
 		id: "header",
 	});
@@ -186,6 +182,7 @@ export const create_dev_tui = async (options: DevTuiOptions = {}): Promise<DevTu
 	});
 	const app = new BoxRenderable(renderer, {
 		flexDirection: "column",
+		flexGrow: 1,
 		gap: 1,
 		height: "100%",
 		id: "app",
@@ -259,9 +256,10 @@ export const create_dev_tui = async (options: DevTuiOptions = {}): Promise<DevTu
 		},
 		dispatch: (event) => {
 			if (destroyed || event.type === "shutdown") return;
+
 			const sanitized_event =
 				event.type === "log"
-					? { ...event, line: stripAnsi(event.line).replaceAll("\r", "") }
+					? { ...event, line: sanitize_dev_log_line(event.line) }
 					: event;
 
 			current_state = apply_dev_tui_event(current_state, sanitized_event);

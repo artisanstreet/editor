@@ -5,11 +5,11 @@ import { Effect, Schema } from "effect";
 
 import { create_dev_tui, is_dev_tui_event, type DevTui } from "./index";
 
-const event_input = createReadStream("artisan-dev-tui-events", {
+const event_input = createReadStream("dev-tui-events", {
 	autoClose: true,
 	fd: 3,
 });
-const command_output = createWriteStream("artisan-dev-tui-commands", {
+const command_output = createWriteStream("dev-tui-commands", {
 	autoClose: true,
 	fd: 4,
 });
@@ -49,8 +49,12 @@ const ConsumeEvents = (tui: DevTui) =>
 				}
 
 				tui.dispatch(event);
-			} catch (cause) {
-				finish(Effect.fail(cause instanceof Error ? cause : new Error(String(cause))));
+			} catch {
+				tui.dispatch({
+					lane_id: "runner",
+					line: "Ignored malformed dashboard event.",
+					type: "log",
+				});
 			}
 		});
 		lines.once("close", () => finish(Effect.void));

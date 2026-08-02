@@ -1,56 +1,11 @@
-export type DevLaneId = "build" | "forge" | "runner" | "web";
+import { Schema } from "effect";
 
-export type DevLaneStatus = "failed" | "ready" | "running" | "starting" | "stopped" | "waiting";
+import strip_ansi from "strip-ansi";
 
-export interface DevLaneDefinition {
-	readonly id: DevLaneId;
-	readonly label: string;
-	readonly status: DevLaneStatus;
-}
+export const DevLaneId = Schema.NonEmptyString;
+export type DevLaneId = typeof DevLaneId.Type;
 
-export interface DevTuiLane extends DevLaneDefinition {
-	readonly log_lines: ReadonlyArray<string>;
-}
-
-export interface DevTuiState {
-	readonly forge_origin: string | undefined;
-	readonly lanes: ReadonlyArray<DevTuiLane>;
-	readonly max_log_lines: number;
-	readonly selected_lane_id: DevLaneId;
-	readonly title: string;
-	readonly web_origin: string | undefined;
-}
-
-export type DevTuiEvent =
-	| {
-			readonly forge_origin?: string;
-			readonly lanes: ReadonlyArray<DevLaneDefinition>;
-			readonly title: string;
-			readonly type: "configure";
-			readonly web_origin?: string;
-	  }
-	| {
-			readonly lane_id: DevLaneId;
-			readonly line: string;
-			readonly type: "log";
-	  }
-	| {
-			readonly lane_id: DevLaneId;
-			readonly status: DevLaneStatus;
-			readonly type: "status";
-	  }
-	| {
-			readonly type: "shutdown";
-	  };
-
-const default_lane: DevLaneDefinition = {
-	id: "runner",
-	label: "Overview",
-	status: "starting",
-};
-
-const dev_lane_ids = new Set<DevLaneId>(["build", "forge", "runner", "web"]);
-const dev_lane_statuses = new Set<DevLaneStatus>([
+export const DevLaneStatus = Schema.Literals([
 	"failed",
 	"ready",
 	"running",
@@ -58,20 +13,75 @@ const dev_lane_statuses = new Set<DevLaneStatus>([
 	"stopped",
 	"waiting",
 ]);
+export type DevLaneStatus = typeof DevLaneStatus.Type;
+
+export const DevEndpoint = Schema.Struct({
+	label: Schema.NonEmptyString,
+	url: Schema.NonEmptyString,
+});
+export type DevEndpoint = typeof DevEndpoint.Type;
+
+export const DevLaneDefinition = Schema.Struct({
+	id: DevLaneId,
+	label: Schema.NonEmptyString,
+	status: DevLaneStatus,
+});
+export type DevLaneDefinition = typeof DevLaneDefinition.Type;
+
+export interface DevTuiLane extends DevLaneDefinition {
+	readonly log_lines: ReadonlyArray<string>;
+}
+
+export interface DevTuiState {
+	readonly endpoints: ReadonlyArray<DevEndpoint>;
+	readonly lanes: ReadonlyArray<DevTuiLane>;
+	readonly max_log_lines: number;
+	readonly selected_lane_id: DevLaneId;
+	readonly title: string;
+}
+
+export const DevTuiEvent = Schema.Union([
+	Schema.Struct({
+		endpoints: Schema.Array(DevEndpoint),
+		lanes: Schema.Array(DevLaneDefinition),
+		title: Schema.NonEmptyString,
+		type: Schema.Literal("configure"),
+	}),
+	Schema.Struct({
+		lane_id: DevLaneId,
+		line: Schema.String,
+		type: Schema.Literal("log"),
+	}),
+	Schema.Struct({
+		lane_id: DevLaneId,
+		status: DevLaneStatus,
+		type: Schema.Literal("status"),
+	}),
+	Schema.Struct({ type: Schema.Literal("shutdown") }),
+]).pipe(Schema.toTaggedUnion("type"));
+export type DevTuiEvent = typeof DevTuiEvent.Type;
+
+const default_lane: DevLaneDefinition = {
+	id: "runner",
+	label: "Overview",
+	status: "starting",
+};
 
 export const create_dev_tui_state = (
 	lanes: ReadonlyArray<DevLaneDefinition> = [default_lane],
 	max_log_lines = 1_000,
 ): DevTuiState => {
 	const configured_lanes = lanes.length === 0 ? [default_lane] : lanes;
+	const bounded_log_lines = Number.isFinite(max_log_lines)
+		? Math.max(1, Math.floor(max_log_lines))
+		: 1_000;
 
 	return {
-		forge_origin: undefined,
+		endpoints: [],
 		lanes: configured_lanes.map((lane) => ({ ...lane, log_lines: [] })),
-		max_log_lines,
+		max_log_lines: bounded_log_lines,
 		selected_lane_id: configured_lanes[0]?.id ?? default_lane.id,
-		title: "Artisan development",
-		web_origin: undefined,
+		title: "Development",
 	};
 };
 
@@ -102,14 +112,13 @@ export const apply_dev_tui_event = (state: DevTuiState, event: DevTuiEvent): Dev
 
 		return {
 			...state,
-			forge_origin: event.forge_origin,
+			endpoints: event.endpoints,
 			lanes: configured_lanes.map((lane) => ({
 				...lane,
 				log_lines: previous_lanes.get(lane.id)?.log_lines ?? [],
 			})),
 			selected_lane_id,
 			title: event.title,
-			web_origin: event.web_origin,
 		};
 	}
 
@@ -137,7 +146,10 @@ export const select_dev_tui_lane = (state: DevTuiState, lane_id: DevLaneId): Dev
 export const select_relative_dev_tui_lane = (state: DevTuiState, delta: number): DevTuiState => {
 	const current_index = state.lanes.findIndex((lane) => lane.id === state.selected_lane_id);
 	const lane_count = state.lanes.length;
-	const next_index = (current_index + delta + lane_count) % lane_count;
+
+	if (lane_count === 0) return state;
+
+	const next_index = (((current_index + delta) % lane_count) + lane_count) % lane_count;
 	const next_lane = state.lanes[next_index];
 
 	if (next_lane === undefined) return state;
@@ -145,40 +157,8 @@ export const select_relative_dev_tui_lane = (state: DevTuiState, delta: number):
 	return select_dev_tui_lane(state, next_lane.id);
 };
 
-const is_record = (value: unknown): value is Readonly<Record<string, unknown>> =>
-	typeof value === "object" && value !== null;
+/** Removes terminal formatting that must not be retained in dashboard log state. */
+export const sanitize_dev_log_line = (line: string): string =>
+	strip_ansi(line).replaceAll("\r", "");
 
-const is_lane_id = (value: unknown): value is DevLaneId =>
-	typeof value === "string" && dev_lane_ids.has(value as DevLaneId);
-
-const is_lane_status = (value: unknown): value is DevLaneStatus =>
-	typeof value === "string" && dev_lane_statuses.has(value as DevLaneStatus);
-
-const is_lane_definition = (value: unknown): value is DevLaneDefinition =>
-	is_record(value) &&
-	is_lane_id(value.id) &&
-	typeof value.label === "string" &&
-	is_lane_status(value.status);
-
-export const is_dev_tui_event = (value: unknown): value is DevTuiEvent => {
-	if (!is_record(value) || typeof value.type !== "string") return false;
-
-	if (value.type === "shutdown") return true;
-
-	if (value.type === "log") {
-		return is_lane_id(value.lane_id) && typeof value.line === "string";
-	}
-
-	if (value.type === "status") {
-		return is_lane_id(value.lane_id) && is_lane_status(value.status);
-	}
-
-	return (
-		value.type === "configure" &&
-		typeof value.title === "string" &&
-		Array.isArray(value.lanes) &&
-		value.lanes.every(is_lane_definition) &&
-		(value.forge_origin === undefined || typeof value.forge_origin === "string") &&
-		(value.web_origin === undefined || typeof value.web_origin === "string")
-	);
-};
+export const is_dev_tui_event = Schema.is(DevTuiEvent);
