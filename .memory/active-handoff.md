@@ -1,23 +1,18 @@
 # Active Branch Handoff
 
-Last updated: 2026-08-02. Branch continuity only. Durable verified status is in
+Last updated: 2026-08-04. Branch continuity only. Durable verified status is in
 [`docs/status/backend-completion-matrix.md`](../docs/status/backend-completion-matrix.md).
 
 ## Working State
 
-- Repository `C:\Users\sander\Desktop\artisan-editor`; direct `master`,
-  tracking `origin/master`. Thermonuclear remediation is committed through
-  clean-checkout repair `45fa22bb`; canonical route restoration `923fb65f` and
-  unreleased compatibility-route removal remain verified. Permission repair
-  `fc9182b0`, reconnect `3738bc64`, favorite stability `75c58c0`, provider
-  selection `d4a2807b`, and provider usage `12543d3` are pushed and verified.
+- Repository `C:\Users\sander\Desktop\artisan-editor`; direct `master`, tracking
+  `origin/master`. Automatic-title repair `a11152c3` is pushed.
 - Hosted GitHub Actions are disabled and `.github/workflows` is intentionally
   absent while Artisan remains unpublished. Local `pnpm run validate` remains
   the milestone gate; release tooling is retained for future publication.
-- Protected user work: `.mcp.json` stays untracked. The concurrently authored
-  host-suspend/engine-inactivity slice is validated but remains outside this
-  frontend commit. Sander explicitly removed `routes/threads/+page.sv` after
-  folding its draft flow into `routes/+page.sv`.
+- Protected user work: `.mcp.json` stays untracked. Concurrent host-suspend,
+  engine-inactivity, and frontend work remains outside scoped commits. Sander
+  folded the removed `routes/threads/+page.sv` draft flow into `routes/+page.sv`.
 
 ## Invariants
 
@@ -33,13 +28,52 @@ Last updated: 2026-08-02. Branch continuity only. Durable verified status is in
 
 ## Active Work
 
+- Interactive `pnpm dev`/`forge`/`web` modes keep the frontend on SvelteKit/Vite
+  and bundle Forge directly with Rolldown. The runner watches the Forge module
+  graph, closes completed bundles, cleanly restarts Forge only after successful
+  builds, and the TUI rail is `Overview` / `Artisan Editor` / `Artisan Forge`.
+  The reusable `@artisan/dev-tui` package remains on Bun while the supervisor
+  and Forge stay on Node. Non-TTY/CI runs retain prefixed plain logs.
 - The Forge fatal overlay now uses a finite user-visible error-code catalog. The
   existing `ArtisanClientError` remains the transport source; the gate preserves
-  safe client/protocol diagnostics instead of collapsing failures to message
-  strings, and the ASCII mark aligns with the recovery copy.
-- Canonical product routes are `/t/:workspace/:thread` for conversations and
-  `/e/:workspace/:thread` for editing; editor file identity remains in `?file=`.
-  Workspace and historical thread IDs are encoded/canonicalized centrally.
+  safe client/protocol diagnostics for classification while the visible footer
+  renders only the muted monospaced error code. The ASCII mark centers during
+  progress and aligns with the recovery copy for settled failures.
+- The composer model trigger has a `gap-2` logo/name gap and the rail's former
+  command button is now a `New thread` link to `/`; both remain uncommitted with
+  protected frontend work.
+- Transcript follow state is position-derived; local sends top-align their exact
+  projected item and an in-composer jump resumes the true tail. Thinking verbs
+  advance only after hiding for live detail, and duplicate file paths group with
+  conservative aggregate diff counts, including historical rows.
+- Conversation Markdown links resolve page names through Forge's strict public
+  contract; retained favicons render when available and a compact Tabler world
+  covers cold-start, missing, and broken assets without prose image margins.
+  Blob URLs are lifecycle-owned; non-HTTP(S) links never request metadata.
+- Unlocked thread titles synchronously follow the latest accepted queued or
+  steering user message; manual renames remain locked. Forge repairs historical
+  stale titles through narrow compatible evidence replay before serving a
+  browser, and projection rebuild derives the same durable title transition.
+- Claude stream-json correlates each result with its run-owned tool-use start,
+  preserving command/search names and settling file rows once with truthful
+  counts when provider metadata exists; ambiguous parallel results stay unknown.
+- Live-run forensics on `run_16502625692286976` confirmed a Luna turn failed
+  locally during a 349-frame command-output burst at the 256-item fail-fast
+  event buffer. Stable activity keys now settle old shimmer, trace liveness
+  reconciles with the run, long commands get overflow-only edge fading, context
+  copy uses immutable run/model provenance, and provider turn-start changes
+  `Waiting for Codex…` to the session's thinking verb. Bounded event-buffer
+  flow control now survives 600 slow-consumer events and 120 concurrent
+  producers; only a sustained 30s stall records a causal failure diagnostic.
+- Artisan presentation instructions stay in additive system fields, never user
+  text/public projection. Fences use Barekey-derived Shiki/GitHub cards with
+  filename chips, copy, line numbers, and `{1,3-5}` selected lines. Code cards
+  fill their available container while long lines scroll. Comark math and
+  Mermaid nodes now use local KaTeX/beautiful-mermaid renderers; untrusted math
+  is bounded/trust-disabled, structurally invalid/active SVG is rejected, remote
+  font imports are removed, and themes follow Artisan CSS variables. Rich nodes
+  settle after streaming and Mermaid loads in a separate SER-owned lazy chunk.
+  Raw HTML/directive styles stay inert and copy feedback is race-safe.
 - The editor route subscribes to the authoritative thread list. Reassignment
   unmounts the old editor before moving to the new workspace route; detach moves
   to `/t/_/:thread`, so stale file reads cannot retain revoked workspace scope.
@@ -47,49 +81,9 @@ Last updated: 2026-08-02. Branch continuity only. Durable verified status is in
   `/e/:workspace/:thread` are the sole product contracts. The root page `/` is
   the pre-creation draft route: it hosts the activity grid, recent threads,
   and the draft composer whose first send creates the thread. The dedicated
-  `/threads` route is removed; the command menu's "New thread" navigates to
-  `/`, and the layout treats `/` as a thread surface for the inspector panel.
-- The transcript proximity hover rail mounts only on
-  `/t/:workspace/:thread`; root, settings, draft, and editor routes never
-  instantiate it.
-- Canonical thread pages derive `<thread title> › Artisan Editor` from the
-  authoritative live thread item, so title refinements update browser chrome.
-- Thermonuclear remediation and clean-checkout repair are committed as
-  `9414199b` and `45fa22bb`; final independent reviews were clean.
-- Both frontend review passes reject the uncommitted root-draft/settings/context
-  milestone; see [`frontend-ser-thermonuclear-review-2026-07-31.md`](../docs/status/frontend-ser-thermonuclear-review-2026-07-31.md):
-  C-01–C-09 record correctness/accessibility failures; Q-01–Q-11 record the
-  non-generator Effect dialect, fragmented controllers, duplicate/non-atomic
-  settings flows, and repository-wide SER baseline violations. The active goal
-  is to fix every finding, including nits, enforce the repository-wide SER
-  source gate, independently re-review, validate, commit, and push to `master`.
-- Second remediation wave is integrated: draft first-send owns a stable command
-  ID, atomic claim/retry, accepted-only completion, and created-state locks;
-  route usage has owner-aware leases; model policy coalesces current intent and
-  reconciles authoritative results; image visibility cancels keyed fetch work.
-  Shared lifecycle machinery replaced five duplicated queue/fiber controllers;
-  FileReader and clipboard failures are tagged. Behavioral controller-race and
-  delayed-cancellation tests are green.
-- Quality decomposition is integrated: fixture command/query domains, sidebar
-  usage, composer, thread panel, and workspace-tab state are split below the
-  pressure thresholds. `SessionDefaultsController` is now the sole live owner
-  of catalog/default/favorite/compaction state; policy writes coalesce and only
-  remember authoritative reconciliation. `RouteNavigation` is the sole typed
-  SvelteKit `goto` boundary, and the editor file tree uses direct SER callbacks.
-  No application source retains the superseded catalog stream or raw `goto`.
-- The SER gate fails closed on every Effect member outside a yielded generator
-  or sanctioned pipe operator and audits direct capability programs plus exact
-  synchronous queue ingress. Browser DOM, object URLs, and callback-owned
-  lifecycle work use typed shared boundaries. `svelte-effect-runtime` 4.2.1
-  supplies the transformed `yield* ... is not iterable` callback fix. All C/Q
-  and hostile follow-up findings are independently closed.
-- The final hostile pass found seven race/truthfulness defects plus literal
-  editor-boundary/gate gaps. All are repaired: model fields patch atomically;
-  stale defaults, route, and folder reads cannot publish; overlapping draft
-  claims wait; retention becomes visibly unverified; fallback speed uses the
-  selected model; editor host calls are yielded/tagged. Frozen-tree review
-  also closed policy-retry and hidden-image publication races, then hardened
-  browser-global detection against uncatalogued APIs and lexical decoys.
+  `/threads` route is removed; the command menu and rail's "New thread" action
+  both navigate to `/`, and the layout treats `/` as a thread surface for the
+  inspector panel.
 - Context-window usage flows engine → surface storage → composer gauge;
   migration `20260731100810_panoramic_power_man` adds its aggregate columns.
   `drizzle.config.ts` correctly targets `persistence/tables.ts`; the previously
@@ -97,25 +91,19 @@ Last updated: 2026-08-02. Branch continuity only. Durable verified status is in
 
 ## Verification
 
-- The Forge overlay/error-code slice passes 65 focused frontend tests,
-  TypeScript, targeted oxfmt/oxlint, `git diff --check`, the SER boundary scan,
-  and the frontend production build. The full `pnpm run validate` gate stops
-  before lint/tests on unrelated formatting drift in `modules/dev-tui` and
-  `pnpm-workspace.yaml`.
-- Focused remediation/controller/lifecycle tests, adversarial interleavings,
-  component integrity, and the expanded SER gate are green. The complete
-  frontend suite passes 63 files/357 tests. On SER 4.2.1, production build,
-  TypeScript, format, zero-warning lint, and diff checks pass. Three independent
-  frozen-tree reviewers are closed. `pnpm run validate` passes 313 Vitest files,
-  2,067 tests with 7 skips, both production builds, native format/clippy, and 45
-  Rust tests. The frontend SER milestone is the current committed `master` HEAD.
+- `pnpm run validate` passes 334 Vitest files plus 3 skipped and 2,305 tests plus
+  7 skipped; both builds, TUI smoke, and all 45 native tests pass on the current
+  rich-Markdown milestone.
+- Rich-Markdown focused verification passes 15 tests across four files; the
+  renderer/SER regression set passes 35 tests. Live HMR confirms KaTeX, the
+  exact cylinder probe as a 672px Mermaid SVG without remote fonts, and a code
+  card filling its parent's content box. Independent re-review found no issue
+  after the lazy loader was converted to a tagged recoverable Effect failure.
+
 ## Dirty-Tree Integration Notes
 
-- The five prerequisite Drizzle migrations through `20260730110447` are now
-  committed. Their snapshots form the lineage merged by `20260730161038`; this
-  removes the dirty-checkout-only migration dependency.
-- Validation builds Forge once into `.dist/validation/forge`; release/watch keep
-  `.dist/forge`, so the gate cannot depend on or collide with a watched artifact.
+- Selector polish shares `model-selector/view.sv` and the shell source gate with
+  protected in-progress frontend work, so it remains uncommitted with that slice.
 - Protected page patch hash: `84cb787c1f2422da8c5fb5c41a00837151590e10`.
 
 ## Product Continuity

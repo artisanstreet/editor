@@ -1,4 +1,5 @@
 import { parse } from "@comark/svelte/parse";
+import { conversation_markdown_plugins } from "./highlighting";
 
 /**
  * The conversation markdown dialect. Assistant output is untrusted, so raw
@@ -11,4 +12,7 @@ export const conversation_parse_options = { html: false } as const;
 
 /** Parses conversation markdown exactly as the conversation renderer does. */
 export const parse_conversation_markdown = (markdown: string) =>
-	parse(markdown, conversation_parse_options);
+	parse(markdown, {
+		...conversation_parse_options,
+		plugins: [...conversation_markdown_plugins],
+	});

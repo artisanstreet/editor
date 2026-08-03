@@ -52,9 +52,9 @@
 }
 
 .prose.prose
-	> :where(:not(.docs-code-snippet, .docs-command-snippet, .docs-note-group)):not(
-		:where([class~="not-prose"], [class~="not-prose"] *)
-	) {
+	> :where(
+		:not(.docs-code-snippet, .docs-command-snippet, .docs-mermaid-diagram, .docs-note-group)
+	):not(:where([class~="not-prose"], [class~="not-prose"] *)) {
 	max-width: var(--docs-prose-max-inline-size, 74ch);
 }
 
