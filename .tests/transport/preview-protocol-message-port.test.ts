@@ -83,6 +83,98 @@ afterEach(async () =>
 );
 
 describe("preview public MessagePort protocol", () => {
+	it("returns rich-link metadata without leaking internal timestamp fields", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "artisan-preview-rich-link-"));
+		directories.push(directory);
+		const fetched_at_ms = Date.parse("2026-07-18T20:00:00.000Z");
+		const favicon_body = Uint8Array.of(137, 80, 78, 71, 13, 10, 26, 10);
+		const favicon_asset_id = "a".repeat(64);
+		const runtime = make_backend_runtime({
+			database_path: join(directory, "artisan.db"),
+			migrations_path,
+			preview_rich_links: Layer.mergeAll(
+				Layer.succeed(RichLinkAssetStore, {
+					Get: (asset_id) =>
+						Effect.succeed(
+							asset_id === favicon_asset_id
+								? Option.some({
+										asset_id,
+										body: favicon_body,
+										bytes: favicon_body.byteLength,
+										content_type: "image/png",
+									})
+								: Option.none(),
+						),
+					limits: { max_entries: 1, max_total_bytes: 1024 },
+					Put: () => Effect.die("unused fixture asset store"),
+				}),
+				Layer.succeed(RichLinkMetadata, {
+					Resolve: () =>
+						Effect.succeed({
+							cache: {
+								expires_at_ms: fetched_at_ms + 60_000,
+								status: "miss" as const,
+							},
+							favicon: Option.some({
+								asset_id: favicon_asset_id,
+								bytes: favicon_body.byteLength,
+								content_type: "image/png",
+								source: "document_icon" as const,
+								source_url: "https://example.com/favicon.png",
+							}),
+							fetched_at_ms,
+							final_url: "https://example.com/docs",
+							page_name: "Example documentation",
+							requested_url: "https://example.com/docs",
+							site_name: "Example",
+							title: Option.some("Document title"),
+						}),
+				}),
+			),
+		});
+		const server = await runtime.runPromise(ProtocolServer);
+		const harness = await make_transport_test_harness_with_protocol_server(server, {
+			binary_streams: { [`asset:${favicon_asset_id}`]: [favicon_body] },
+		});
+		try {
+			const result = await Effect.runPromise(
+				harness.client.ResolveRichLink({ url: "https://example.com/docs" }),
+			);
+
+			expect(result).toEqual({
+				cache: { expires_at: "2026-07-18T20:01:00.000Z", status: "miss" },
+				favicon: {
+					asset_id: favicon_asset_id,
+					bytes: favicon_body.byteLength,
+					content_type: "image/png",
+					source: "document_icon",
+					source_url: "https://example.com/favicon.png",
+				},
+				fetched_at: "2026-07-18T20:00:00.000Z",
+				final_url: "https://example.com/docs",
+				page_name: "Example documentation",
+				requested_url: "https://example.com/docs",
+				site_name: "Example",
+				title: "Document title",
+			});
+			expect(result).not.toHaveProperty("fetched_at_ms");
+			const chunks = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const stream = yield* harness.client.OpenAsset(
+							result.favicon?.asset_id ?? "",
+						);
+						return yield* stream.pipe(Stream.runCollect);
+					}),
+				),
+			);
+			expect([...chunks].flatMap((chunk) => [...chunk])).toEqual([...favicon_body]);
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	});
+
 	it("replays a failed launch envelope without reopening the browser", async () => {
 		const directory = await mkdtemp(join(tmpdir(), "artisan-preview-launch-failure-"));
 		directories.push(directory);

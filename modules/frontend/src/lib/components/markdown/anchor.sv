@@ -1,5 +1,7 @@
 <script lang="ts" effect>
+	import type { RichLinkFavicon } from "@artisan/protocol";
 	import { ArtisanClient } from "@artisan/transport/client";
+	import World from "@tabler/icons-svelte/icons/world";
 	import { Effect, Option, Stream } from "effect";
 	import type { Snippet } from "svelte";
 	import {
@@ -44,8 +46,10 @@
 
 	const client = yield* ArtisanClient;
 	let favicon_source = $state(Option.none<string>());
+	let resolved_title = $state(Option.none<string>());
+	let show_web_fallback = $state(false);
 	let owned_favicon_source: string | undefined;
-	let favicon_generation = 0;
+	let rich_link_generation = 0;
 	type FaviconAsset = {
 		readonly bytes: Uint8Array;
 		readonly content_type: string;
@@ -66,12 +70,8 @@
 		}),
 	);
 
-	const ResolveFaviconAsset = (url: string) =>
+	const ResolveFaviconAsset = (favicon: RichLinkFavicon) =>
 		Effect.gen(function* () {
-			const resolution = yield* client.ResolveRichLink({ url });
-			const favicon = resolution.favicon;
-			if (favicon === undefined) return Option.none<FaviconAsset>();
-
 			const asset = yield* client.OpenAsset(favicon.asset_id);
 			const bytes = yield* asset.pipe(
 				Stream.runFold(() => new Uint8Array(), append_asset_chunk),
@@ -80,46 +80,83 @@
 
 			return Option.some({ bytes, content_type: favicon.content_type });
 		});
+	const ResolveFaviconAssetForPresentation = (favicon: RichLinkFavicon) =>
+		Effect.gen(function* () {
+			const result = yield* ResolveFaviconAsset(favicon).pipe(
+				Effect.timeoutOption("2 seconds"),
+			);
+			return Option.flatten(result);
+		});
 
 	const PublishFaviconAsset = (url: string, generation: number, asset: FaviconAsset) =>
 		Effect.gen(function* () {
 			yield* Effect.uninterruptible(
 				Effect.gen(function* () {
 					const source = yield* CreateBrowserObjectUrl(asset.bytes, asset.content_type);
-					if (generation !== favicon_generation || rich_link_href !== url) {
+					if (generation !== rich_link_generation || rich_link_href !== url) {
 						yield* ReleaseBrowserObjectUrl(source).pipe(Effect.ignore);
 						return;
 					}
 					owned_favicon_source = source;
 					favicon_source = Option.some(source);
+					show_web_fallback = false;
 				}),
 			);
 		});
 
-	const RefreshFavicon = (url: string | undefined) =>
+	const RefreshRichLink = (url: string | undefined) =>
 		Effect.gen(function* () {
-			const generation = (favicon_generation += 1);
+			const generation = (rich_link_generation += 1);
 			yield* ReleaseOwnedFavicon;
+			resolved_title = Option.none();
+			show_web_fallback = url !== undefined;
 			if (url === undefined) return;
 
-			const resolved = yield* ResolveFaviconAsset(url).pipe(
-				Effect.catch(() =>
-					Effect.gen(function* () {
-						return Option.none<FaviconAsset>();
-					}),
-				),
-			);
-			if (Option.isSome(resolved)) yield* PublishFaviconAsset(url, generation, resolved.value);
+			const resolution = yield* client.ResolveRichLink({ url }).pipe(Effect.option);
+			if (generation !== rich_link_generation || rich_link_href !== url) return;
+			if (Option.isNone(resolution)) {
+				show_web_fallback = true;
+				return;
+			}
+
+			resolved_title = Option.some(resolution.value.page_name);
+			const favicon = resolution.value.favicon;
+			if (favicon === undefined) {
+				show_web_fallback = true;
+				return;
+			}
+
+			const asset = yield* ResolveFaviconAssetForPresentation(favicon);
+			if (generation !== rich_link_generation || rich_link_href !== url) return;
+			if (Option.isNone(asset)) {
+				show_web_fallback = true;
+				return;
+			}
+
+			yield* PublishFaviconAsset(url, generation, asset.value);
 		});
 
-	/** Link text renders immediately while the component-scoped favicon lookup runs. */
-	yield* RefreshFavicon(rich_link_href).pipe(Effect.forkScoped);
+	const HideFailedFavicon = (source: string) =>
+		Effect.gen(function* () {
+			if (owned_favicon_source !== source) return;
+			yield* ReleaseOwnedFavicon;
+			show_web_fallback = true;
+		});
+
+	/** Authored link text renders immediately while the resolved presentation loads. */
+	yield* RefreshRichLink(rich_link_href).pipe(Effect.forkScoped);
 </script>
 
 {#if safe_href === undefined}
 	{@render children?.()}
 {:else}
-	<a class="conversation-link" href={safe_href} target="_blank" rel="noopener noreferrer">
+	<a
+		class="conversation-link"
+		href={safe_href}
+		title={safe_href}
+		target="_blank"
+		rel="noopener noreferrer"
+	>
 		{#if Option.isSome(favicon_source)}
 			<img
 				class="conversation-link-favicon"
@@ -127,9 +164,18 @@
 				alt=""
 				aria-hidden="true"
 				draggable="false"
+				onerror={yield* HideFailedFavicon(favicon_source.value)}
 			/>
+		{:else if show_web_fallback}
+			<span class="conversation-link-web-fallback" aria-hidden="true">
+				<World size="1em" stroke={1.8} />
+			</span>
 		{/if}
-		{@render children?.()}
+		{#if Option.isSome(resolved_title)}
+			{resolved_title.value}
+		{:else}
+			{@render children?.()}
+		{/if}
 	</a>
 {/if}
 
@@ -138,9 +184,22 @@
 		display: inline-block;
 		width: 0.875em;
 		height: 0.875em;
-		margin-inline-end: 0.28em;
+		max-width: none;
+		margin-block: 0;
+		margin-inline: 0;
 		border-radius: 0.125rem;
 		object-fit: contain;
+		vertical-align: -0.075em;
+	}
+
+	.conversation-link-web-fallback {
+		display: inline-flex;
+		width: 0.875em;
+		height: 0.875em;
+		margin-block: 0;
+		margin-inline: 0;
+		align-items: center;
+		justify-content: center;
 		vertical-align: -0.075em;
 	}
 </style>

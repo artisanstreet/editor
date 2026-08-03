@@ -726,13 +726,16 @@ export const PreviewCoordinatorLive = Layer.effect(
 			ResolveRichLink: (url) =>
 				metadata.Resolve(url).pipe(
 					Effect.map((result) => ({
-						...result,
 						cache: {
 							expires_at: new Date(result.cache.expires_at_ms).toISOString(),
 							status: result.cache.status,
 						},
 						fetched_at: new Date(result.fetched_at_ms).toISOString(),
 						favicon: Option.getOrUndefined(result.favicon),
+						final_url: result.final_url,
+						page_name: result.page_name,
+						requested_url: result.requested_url,
+						site_name: result.site_name,
 						title: Option.getOrUndefined(result.title),
 					})),
 				),
