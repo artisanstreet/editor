@@ -524,11 +524,13 @@ describe("thread erasure replay", () => {
 				{ last_sequence: 3, stream_id: `thread:${result.kept_thread_id}` },
 			]);
 			expect(result.thread_snapshot.threads).toMatchObject([
-				{ thread_id: result.kept_thread_id, title: "Surviving thread" },
+				{ thread_id: result.kept_thread_id, title: "Surviving later event" },
 			]);
 			expect(result.fresh_subscription[1]).toMatchObject({
 				kind: "thread.list.snapshot",
-				payload: { threads: [{ thread_id: result.kept_thread_id }] },
+				payload: {
+					threads: [{ thread_id: result.kept_thread_id, title: "Surviving later event" }],
+				},
 			});
 			expect(
 				result.journal_commands.filter(

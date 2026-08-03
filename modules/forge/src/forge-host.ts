@@ -3,7 +3,11 @@ import { dirname, join } from "node:path";
 import { NodeFileSystem, NodePath } from "@effect/platform-node-shared";
 import { Clock, Effect, Exit, FileSystem, Layer, Path, Scope } from "effect";
 
-import { make_desktop_backend_layer, RichLinkAssetStoreLive } from "@artisan/backend";
+import {
+	make_desktop_backend_layer,
+	RichLinkAssetStoreLive,
+	ThreadMetadataRefinementCoordinator,
+} from "@artisan/backend";
 import {
 	ClaudeEngine,
 	CodexEngine,
@@ -42,6 +46,9 @@ const MakeForgeHost = (config: ForgeConfig, transport_binding: ForgeTransportBin
 		const lease = yield* AcquireForgeDatabaseLease(config.database_path);
 		void lease;
 		const protocol_server = yield* MessagePortTransportServer;
+		const metadata_refinement = yield* ThreadMetadataRefinementCoordinator;
+		/** Repair missed automatic metadata before the first browser can observe stale titles. */
+		yield* metadata_refinement.WaitForIdle;
 		const authority = yield* ForgeControlAuthority;
 		const http = yield* Effect.acquireRelease(start_forge_http(config, authority), (server) =>
 			server.Close.pipe(Effect.ignore),

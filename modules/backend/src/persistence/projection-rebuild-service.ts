@@ -23,7 +23,10 @@ import {
 	WorkspaceChangeOperations,
 	WorkspaceChanges,
 } from "./tables";
-import { thread_activity_kind_from_event } from "../threads/internal/thread-activity";
+import {
+	automatic_thread_title_from_event,
+	thread_activity_kind_from_event,
+} from "../threads/internal/thread-activity";
 
 /**
  * Effect's experimental EventLog owns a separate replicated SQL journal, identity,
@@ -410,6 +413,13 @@ export const ProjectionRebuildServiceLive = Layer.effect(
 					const activity_kind = thread_activity_kind_from_event(payload);
 					const active_thread = threads.get(event.thread_id);
 					if (activity_kind !== undefined && active_thread !== undefined) {
+						const automatic_title = automatic_thread_title_from_event(payload);
+						const updates_title =
+							automatic_title !== undefined &&
+							!active_thread.title_locked &&
+							(active_thread.title !== automatic_title ||
+								active_thread.title_source !== "automatic");
+
 						threads.set(event.thread_id, {
 							...active_thread,
 							activity_version: (active_thread.activity_version ?? 0) + 1,
@@ -422,6 +432,13 @@ export const ProjectionRebuildServiceLive = Layer.effect(
 								active_thread.updated_at > event.occurred_at
 									? active_thread.updated_at
 									: event.occurred_at,
+							...(updates_title
+								? {
+										metadata_version: (active_thread.metadata_version ?? 0) + 1,
+										title: automatic_title,
+										title_source: "automatic" as const,
+									}
+								: {}),
 						});
 					}
 				}

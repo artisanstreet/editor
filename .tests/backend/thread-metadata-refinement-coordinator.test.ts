@@ -12,10 +12,13 @@ import {
 	make_thread_metadata_refiner_test_layer,
 	ProtocolRouter,
 	ThreadMetadataRefinementCoordinator,
+	ThreadMetadataRefinerLive,
 	type ThreadMetadataRefinerInput,
 } from "@artisan/backend";
 
+import { Database } from "../../modules/backend/src/persistence/database";
 import { JournalStore } from "../../modules/backend/src/persistence/journal-store";
+import { EventStreams, JournalEvents } from "../../modules/backend/src/persistence/tables";
 import { ThreadReadModel } from "../../modules/backend/src/persistence/thread-read-model";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
@@ -260,6 +263,88 @@ describe("thread metadata refinement coordinator", () => {
 			expect(third_seen).toHaveLength(0);
 		} finally {
 			await third_runtime.dispose();
+		}
+	});
+
+	it("ignores unrelated and incompatible relevant history while refining later messages", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			thread_metadata_refiner: ThreadMetadataRefinerLive,
+		});
+
+		try {
+			const title = await runtime.runPromise(
+				Effect.gen(function* () {
+					const coordinator = yield* ThreadMetadataRefinementCoordinator;
+					const database = yield* Database;
+					const router = yield* ProtocolRouter;
+					const threads = yield* ThreadReadModel;
+
+					yield* router.Route(
+						make_command("create_after_legacy_history", {
+							title: "New thread",
+							type: "thread.create",
+						}),
+					);
+					yield* database.client.insert(JournalEvents).values([
+						{
+							causation_id: "legacy_unrelated_cause",
+							correlation_id: "legacy_unrelated_correlation",
+							event_id: "legacy_unrelated_event",
+							event_type: "legacy.unrelated",
+							occurred_at: "2026-07-11T14:00:01.000Z",
+							origin: "backend",
+							payload_json: JSON.stringify({ type: "legacy.unrelated" }),
+							schema_version: 1,
+							stream_id: "legacy:unrelated",
+							stream_sequence: 1,
+							thread_id: "settings/legacy",
+						},
+						{
+							causation_id: "legacy_malformed_cause",
+							correlation_id: "legacy_malformed_correlation",
+							event_id: "legacy_malformed_event",
+							event_type: "thread.message_queued",
+							occurred_at: "2026-07-11T14:00:02.000Z",
+							origin: "backend",
+							payload_json: JSON.stringify({ type: "thread.message_queued" }),
+							schema_version: 1,
+							stream_id: "legacy:malformed",
+							stream_sequence: 1,
+							thread_id: "settings/legacy",
+						},
+						{
+							causation_id: "historical_message_cause",
+							correlation_id: "historical_message_correlation",
+							event_id: "historical_message_event",
+							event_type: "thread.message_queued",
+							occurred_at: "2026-07-11T14:00:03.000Z",
+							origin: "backend",
+							payload_json: JSON.stringify({
+								message_id: "historical_message",
+								reason: "no_active_run",
+								text: "Newest accepted direction",
+								type: "thread.message_queued",
+								working_directory: "C:/workspace/artisan",
+							}),
+							schema_version: 1,
+							stream_id: "thread:thread_coordinator",
+							stream_sequence: 2,
+							thread_id: "thread_coordinator",
+						},
+					]);
+					yield* database.client.update(EventStreams).set({ last_sequence: 2 });
+					yield* coordinator.WaitForIdle;
+
+					return (yield* threads.Snapshot()).threads[0]!.title;
+				}),
+			);
+
+			expect(title).toBe("Newest accepted direction");
+		} finally {
+			await runtime.dispose();
 		}
 	});
 

@@ -11,6 +11,7 @@ import type { AuthoritativeCommandEnvelope } from "../../modules/backend/src/per
 import {
 	AgentOrchestrator,
 	make_backend_runtime,
+	ProjectionRebuildService,
 	ProtocolRouter,
 	ProtocolServer,
 } from "@artisan/backend";
@@ -157,6 +158,110 @@ describe("thread identity", () => {
 			expect(thread).not.toHaveProperty("rename_suggestion");
 		} finally {
 			await runtime.dispose();
+		}
+	});
+
+	it("uses the latest accepted user message as the unlocked durable title", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const journal = yield* JournalStore;
+					const rebuild = yield* ProjectionRebuildService;
+					const router = yield* ProtocolRouter;
+					const threads = yield* ThreadReadModel;
+
+					yield* router.Route(make_create_command());
+					yield* journal.AppendEvent({
+						causation_id: "first_title_cause",
+						correlation_id: "first_title_correlation",
+						payload: {
+							message_id: "first_title_message",
+							reason: "no_active_run",
+							text: "  First direction  ",
+							type: "thread.message_queued",
+							working_directory: "C:/workspace",
+						},
+						thread_id: "thread_1",
+					});
+					yield* journal.AppendEvent({
+						causation_id: "latest_title_cause",
+						correlation_id: "latest_title_correlation",
+						payload: {
+							message_id: "latest_title_message",
+							text: "Latest direction",
+							type: "thread.message_steering",
+							working_directory: "C:/workspace",
+						},
+						thread_id: "thread_1",
+					});
+
+					const before = (yield* threads.Snapshot()).threads[0]!;
+					const verification = yield* rebuild.Verify();
+					const rebuilt = yield* rebuild.Rebuild();
+					const after = (yield* threads.Snapshot()).threads[0]!;
+
+					return { after, before, rebuilt, verification };
+				}),
+			);
+
+			expect(result.before).toMatchObject({
+				activity_version: 2,
+				metadata_version: 2,
+				title: "Latest direction",
+				title_locked: false,
+				title_source: "automatic",
+			});
+			expect(result.verification.equivalent).toBe(true);
+			expect(result.rebuilt).toMatchObject({ equivalent: true, rebuilt: false });
+			expect(result.after).toEqual(result.before);
+		} finally {
+			await runtime.dispose();
+		}
+
+		const restarted = make_backend_runtime({ database_path, migrations_path });
+
+		try {
+			const thread = await restarted.runPromise(
+				Effect.gen(function* () {
+					const journal = yield* JournalStore;
+					const router = yield* ProtocolRouter;
+					const threads = yield* ThreadReadModel;
+
+					yield* router.Route(
+						make_thread_command("manual_title", {
+							title: "Pinned by the user",
+							type: "thread.rename",
+						}),
+					);
+					yield* journal.AppendEvent({
+						causation_id: "locked_title_cause",
+						correlation_id: "locked_title_correlation",
+						payload: {
+							message_id: "locked_title_message",
+							reason: "no_active_run",
+							text: "Must not replace the manual title",
+							type: "thread.message_queued",
+							working_directory: "C:/workspace",
+						},
+						thread_id: "thread_1",
+					});
+
+					return (yield* threads.Snapshot()).threads[0]!;
+				}),
+			);
+
+			expect(thread).toMatchObject({
+				activity_version: 4,
+				metadata_version: 3,
+				title: "Pinned by the user",
+				title_locked: true,
+				title_source: "manual",
+			});
+		} finally {
+			await restarted.dispose();
 		}
 	});
 
@@ -594,6 +699,8 @@ describe("thread identity", () => {
 				payload: {
 					last_activity_at: "2026-07-11T18:00:00.000Z",
 					thread_id: output.thread_id,
+					title: "Advance the live sidebar activity",
+					title_source: "automatic",
 				},
 			});
 		} finally {

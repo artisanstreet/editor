@@ -1,9 +1,22 @@
-import { Context, Data, Effect, Layer, Option, PubSub, Ref, Schedule, Semaphore } from "effect";
+import { and, asc, desc, gt, inArray, lte } from "drizzle-orm";
+import {
+	Context,
+	Data,
+	Effect,
+	Layer,
+	Option,
+	PubSub,
+	Ref,
+	Schedule,
+	Schema,
+	Semaphore,
+} from "effect";
 
-import type { EventEnvelope } from "@artisan/protocol";
+import { JournalSequence } from "@artisan/protocol";
 
+import { Database } from "../persistence/database";
 import { JournalNotifier } from "../persistence/journal-notifier";
-import { JournalStore, type JournalStoreError } from "../persistence/journal-store";
+import { JournalEvents } from "../persistence/tables";
 import { ThreadReadModel, type ThreadReadModelError } from "../persistence/thread-read-model";
 import { ThreadMetadataRefinementWorker } from "./thread-metadata-refinement-worker";
 import { ThreadMetadataRepository, type ThreadMetadataError } from "./thread-metadata-repository";
@@ -30,6 +43,49 @@ interface RefinementTrigger {
 	readonly trigger: ThreadMetadataRefinementTrigger;
 }
 
+const ThreadMetadataEvidencePayload = Schema.Union([
+	Schema.Struct({ type: Schema.Literal("thread.content_erased") }),
+	Schema.Struct({ type: Schema.Literal("thread.erased") }),
+	Schema.Struct({ text: Schema.NonEmptyString, type: Schema.Literal("thread.message_queued") }),
+	Schema.Struct({ text: Schema.NonEmptyString, type: Schema.Literal("thread.message_steering") }),
+	Schema.Struct({ state: Schema.NonEmptyString, type: Schema.Literal("run.lifecycle") }),
+	Schema.Struct({
+		action: Schema.NonEmptyString,
+		node_type: Schema.NonEmptyString,
+		state: Schema.NonEmptyString,
+		type: Schema.Literal("orchestration.graph.lifecycle"),
+	}),
+	Schema.Struct({
+		artifact: Schema.Struct({
+			kind: Schema.NonEmptyString,
+			label: Schema.NonEmptyString,
+			uri: Schema.optional(Schema.String),
+		}),
+		type: Schema.Literal("artifact.recorded"),
+	}),
+	Schema.Struct({ type: Schema.Literal("assistant.message_completed") }),
+]);
+
+type ThreadMetadataEvidencePayload = typeof ThreadMetadataEvidencePayload.Type;
+
+interface ThreadMetadataEvidence {
+	readonly journal_sequence: number;
+	readonly payload: ThreadMetadataEvidencePayload;
+	readonly source_event_id: string;
+	readonly thread_id: string;
+}
+
+const thread_metadata_evidence_types = [
+	"thread.content_erased",
+	"thread.erased",
+	"thread.message_queued",
+	"thread.message_steering",
+	"run.lifecycle",
+	"orchestration.graph.lifecycle",
+	"artifact.recorded",
+	"assistant.message_completed",
+] as const;
+
 interface ReducedEvent {
 	readonly context?: ThreadRefinementContext;
 	readonly erase_context: boolean;
@@ -44,10 +100,15 @@ export class ThreadMetadataRefinementPending extends Data.TaggedError(
 	readonly thread_id: string;
 }> {}
 
+/** Reports that the coordinator could not read its narrow journal evidence view. */
+export class ThreadMetadataRefinementReadFailure extends Data.TaggedError(
+	"ThreadMetadataRefinementReadFailure",
+)<{ readonly cause: unknown }> {}
+
 export type ThreadMetadataRefinementCoordinatorError =
-	| JournalStoreError
 	| ThreadMetadataError
 	| ThreadMetadataRefinementPending
+	| ThreadMetadataRefinementReadFailure
 	| ThreadReadModelError;
 
 /** Replays meaningful journal activity into the scoped latest-wins refinement worker. */
@@ -99,7 +160,10 @@ function trigger_from_run_state(state: string): ThreadMetadataRefinementTrigger 
 		: "run_started";
 }
 
-function reduce_event(event: EventEnvelope, current: ThreadRefinementContext): ReducedEvent {
+function reduce_event(
+	event: ThreadMetadataEvidence,
+	current: ThreadRefinementContext,
+): ReducedEvent {
 	const payload = event.payload;
 
 	if (payload.type === "thread.content_erased" || payload.type === "thread.erased") {
@@ -183,7 +247,7 @@ function reduce_event(event: EventEnvelope, current: ThreadRefinementContext): R
 export const ThreadMetadataRefinementCoordinatorLive = Layer.effect(
 	ThreadMetadataRefinementCoordinator,
 	Effect.gen(function* () {
-		const journal = yield* JournalStore;
+		const database = yield* Database;
 		const notifier = yield* JournalNotifier;
 		const read_model = yield* ThreadReadModel;
 		const repository = yield* ThreadMetadataRepository;
@@ -194,6 +258,110 @@ export const ThreadMetadataRefinementCoordinatorLive = Layer.effect(
 			contexts: new Map(),
 			journal_sequence: 0,
 		});
+
+		const DecodeEvidence = (row: {
+			readonly event_id: string;
+			readonly event_type: string;
+			readonly journal_sequence: number;
+			readonly payload_json: string;
+			readonly thread_id: string;
+		}) =>
+			Effect.gen(function* () {
+				const payload_json = Schema.decodeUnknownOption(Schema.UnknownFromJsonString)(
+					row.payload_json,
+				);
+				const payload = Option.flatMap(payload_json, (value) =>
+					Schema.decodeUnknownOption(ThreadMetadataEvidencePayload)(value),
+				);
+
+				if (Option.isNone(payload) || payload.value.type !== row.event_type) {
+					yield* Effect.logWarning("Skipping incompatible thread metadata evidence", {
+						event_id: row.event_id,
+						event_type: row.event_type,
+					});
+					return Option.none<ThreadMetadataEvidence>();
+				}
+
+				const journal_sequence = yield* Schema.decodeUnknownEffect(JournalSequence)(
+					row.journal_sequence,
+				).pipe(
+					Effect.mapError((cause) => new ThreadMetadataRefinementReadFailure({ cause })),
+				);
+
+				return Option.some({
+					journal_sequence,
+					payload: payload.value,
+					source_event_id: row.event_id,
+					thread_id: row.thread_id,
+				});
+			});
+
+		const ReadEvidence = (after_journal_sequence: number) =>
+			database.client
+				.transaction((transaction) =>
+					Effect.gen(function* () {
+						const [latest] = yield* transaction
+							.select({ journal_sequence: JournalEvents.sequence })
+							.from(JournalEvents)
+							.orderBy(desc(JournalEvents.sequence))
+							.limit(1);
+						const journal_sequence = latest?.journal_sequence ?? 0;
+
+						if (journal_sequence <= after_journal_sequence) {
+							return {
+								events: [] as ReadonlyArray<ThreadMetadataEvidence>,
+								journal_sequence,
+							};
+						}
+
+						const rows = yield* transaction
+							.select({
+								event_id: JournalEvents.event_id,
+								event_type: JournalEvents.event_type,
+								journal_sequence: JournalEvents.sequence,
+								payload_json: JournalEvents.payload_json,
+								thread_id: JournalEvents.thread_id,
+							})
+							.from(JournalEvents)
+							.where(
+								and(
+									gt(JournalEvents.sequence, after_journal_sequence),
+									lte(JournalEvents.sequence, journal_sequence),
+									inArray(
+										JournalEvents.event_type,
+										thread_metadata_evidence_types,
+									),
+								),
+							)
+							.orderBy(asc(JournalEvents.sequence));
+						const decoded = yield* Effect.forEach(rows, DecodeEvidence);
+
+						return {
+							events: decoded.filter(Option.isSome).map((event) => event.value),
+							journal_sequence,
+						};
+					}),
+				)
+				.pipe(
+					Effect.mapError((cause) =>
+						cause instanceof ThreadMetadataRefinementReadFailure
+							? cause
+							: new ThreadMetadataRefinementReadFailure({ cause }),
+					),
+				);
+		const ReadCurrentJournalSequence = database.client
+			.select({ journal_sequence: JournalEvents.sequence })
+			.from(JournalEvents)
+			.orderBy(desc(JournalEvents.sequence))
+			.limit(1)
+			.pipe(
+				Effect.flatMap(([latest]) =>
+					latest === undefined
+						? Effect.succeed(0)
+						: Schema.decodeUnknownEffect(JournalSequence)(latest.journal_sequence),
+				),
+				Effect.mapError((cause) => new ThreadMetadataRefinementReadFailure({ cause })),
+			);
 
 		const SubmitUntilAccepted = (request: ThreadMetadataRefinementRequest) =>
 			Effect.gen(function* () {
@@ -233,11 +401,10 @@ export const ThreadMetadataRefinementCoordinatorLive = Layer.effect(
 
 		const CatchUpUnlocked = Effect.gen(function* () {
 			const current = yield* Ref.get(state);
-			const events = yield* journal.ReadReplay({
-				after_journal_sequence: current.journal_sequence,
-			});
+			const evidence = yield* ReadEvidence(current.journal_sequence);
+			const events = evidence.events;
 
-			if (events.length === 0) {
+			if (evidence.journal_sequence === current.journal_sequence) {
 				return 0;
 			}
 
@@ -262,44 +429,59 @@ export const ThreadMetadataRefinementCoordinatorLive = Layer.effect(
 
 				if (reduced.trigger) {
 					latest_triggers.set(event.thread_id, {
-						source_event_id: event.message_id,
+						source_event_id: event.source_event_id,
 						thread_id: event.thread_id,
 						trigger: reduced.trigger,
 					});
 				}
 			}
 
-			const submitted_triggers: RefinementTrigger[] = [];
-
-			yield* Effect.forEach(latest_triggers.values(), (trigger) =>
+			const submissions = yield* Effect.forEach(latest_triggers.values(), (trigger) =>
 				Effect.gen(function* () {
 					const thread = yield* read_model.Lookup(trigger.thread_id);
 
 					if (Option.isNone(thread)) {
-						return;
+						return Option.none<{
+							readonly request: ThreadMetadataRefinementRequest;
+							readonly trigger: RefinementTrigger;
+						}>();
 					}
 
 					const context = contexts.get(trigger.thread_id) ?? empty_context();
 
-					yield* SubmitUntilAccepted({
-						...context,
-						projection: thread.value,
-						source_event_id: trigger.source_event_id,
-						thread_id: trigger.thread_id,
-						trigger: trigger.trigger,
+					return Option.some({
+						request: {
+							...context,
+							projection: thread.value,
+							source_event_id: trigger.source_event_id,
+							thread_id: trigger.thread_id,
+							trigger: trigger.trigger,
+						},
+						trigger,
 					});
-					submitted_triggers.push(trigger);
 				}),
 			);
+			const current_journal_sequence = yield* ReadCurrentJournalSequence;
+
+			/**
+			 * A newer append may have advanced both the title and metadata version after
+			 * this evidence snapshot. Retry from the old cursor instead of submitting a
+			 * stale context against that newer projection.
+			 */
+			if (current_journal_sequence !== evidence.journal_sequence) {
+				return 0;
+			}
+
+			const ready_submissions = submissions.filter(Option.isSome).map((item) => item.value);
+			yield* Effect.forEach(ready_submissions, ({ request }) => SubmitUntilAccepted(request));
 
 			yield* worker.WaitForIdle;
-			yield* Effect.forEach(submitted_triggers, VerifyRefined);
+			yield* Effect.forEach(ready_submissions, ({ trigger }) => VerifyRefined(trigger));
 
-			const latest_event = events.at(-1);
-			if (latest_event === undefined) return 0;
-			const journal_sequence = latest_event.journal_sequence;
-
-			yield* Ref.set(state, { contexts, journal_sequence });
+			yield* Ref.set(state, {
+				contexts,
+				journal_sequence: evidence.journal_sequence,
+			});
 
 			return events.length;
 		});
