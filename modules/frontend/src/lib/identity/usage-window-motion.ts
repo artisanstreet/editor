@@ -1,21 +1,3 @@
-/** The number and unit a reset instant reads as, split so the number alone can tween. */
-export interface ResetParts {
-	readonly amount: number;
-	readonly past: boolean;
-	readonly unit: string;
-}
-
-/** Renders a reset instant as the largest sensible unit (`7d`, `3h`, `20m`). */
-export const ResetPartsFor = (iso: string): ResetParts => {
-	const diff_ms = new Date(iso).getTime() - Date.now();
-	const abs_minutes = Math.round(Math.abs(diff_ms) / 60_000);
-	const past = diff_ms < 0;
-
-	if (abs_minutes < 60) return { amount: Math.max(1, abs_minutes), past, unit: "m" };
-	if (abs_minutes < 60 * 24) return { amount: Math.round(abs_minutes / 60), past, unit: "h" };
-	return { amount: Math.round(abs_minutes / (60 * 24)), past, unit: "d" };
-};
-
 /**
  * A quip, not a countdown: the first reading starts just short of its value and
  * settles onto it, so the number is legible the whole way rather than spinning

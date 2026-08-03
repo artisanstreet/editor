@@ -1,6 +1,6 @@
 <script lang="ts" effect>
 	import Settings from "@tabler/icons-svelte/icons/settings";
-	import { Effect, Option } from "effect";
+	import { Clock, Effect, Option } from "effect";
 	import type { EngineUsageSnapshot, HostIdentitySnapshot } from "@artisan/protocol";
 	import { ArtisanClient } from "@artisan/transport/client";
 	import { Avatar, AvatarFallback } from "$lib/components/ui/avatar";
@@ -15,7 +15,11 @@
 	import SidebarEngineUsage, { type SidebarUsageState } from "./sidebar-engine-usage.sv";
 	import { GradientAvatarSvg } from "$lib/identity/gradient-avatar";
 	import { model_manifest } from "@artisan/catalog";
-	import { EngineUsageCache, EngineUsageCacheBrowserLive } from "$lib/identity/usage-cache";
+	import {
+		EngineUsageCache,
+		EngineUsageCacheBrowserLive,
+		engine_usage_refresh_is_due,
+	} from "$lib/identity/usage-cache";
 
 	const client = yield* ArtisanClient;
 	const usage_cache = yield* EngineUsageCache.pipe(Effect.provide(EngineUsageCacheBrowserLive));
@@ -23,8 +27,6 @@
 	let identity = $state<HostIdentitySnapshot | undefined>(undefined);
 	let open = $state(false);
 	let usage_state = $state<SidebarUsageState>({ status: "idle" });
-	/** Guards the once-per-session fresh fetch; not template-reactive. */
-	let has_requested_fresh_usage = false;
 
 	const profile_name = $derived(identity?.display_name ?? identity?.username ?? identity?.hostname);
 	/** The machine, not the person: one host keeps one avatar whoever is signed in. */
@@ -117,8 +119,9 @@
 
 	const RequestUsage = () =>
 		Effect.gen(function* () {
-		if (has_requested_fresh_usage) return;
-		has_requested_fresh_usage = true;
+		const now_ms = yield* Clock.currentTimeMillis;
+		const snapshot = usage_state.status === "loaded" ? usage_state.snapshot : undefined;
+		if (!engine_usage_refresh_is_due(snapshot, now_ms)) return;
 		yield* RefreshUsage(false);
 		});
 

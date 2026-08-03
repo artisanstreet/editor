@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Option, Result } from "effect";
+import { Context, Duration, Effect, Layer, Option, Result } from "effect";
 import * as KeyValueStore from "effect/unstable/persistence/KeyValueStore";
 import { EngineUsageSnapshot } from "@artisan/protocol";
 
@@ -10,6 +10,23 @@ import { EngineUsageSnapshot } from "@artisan/protocol";
  * server-side.
  */
 export const EngineUsageCacheStorageKey = "artisan.engine-usage-cache";
+
+/** Mirrors Forge's provider-usage freshness boundary without duplicating a magic duration. */
+const engine_usage_refresh_window_ms = Duration.toMillis(Duration.minutes(3));
+
+/** A missing, invalid, or three-minute-old snapshot should be refreshed when the menu opens. */
+export const engine_usage_refresh_is_due = (
+	snapshot: EngineUsageSnapshot | undefined,
+	now_ms: number,
+): boolean => {
+	if (snapshot === undefined) return true;
+
+	const fetched_at_ms = Date.parse(snapshot.fetched_at);
+
+	return (
+		!Number.isFinite(fetched_at_ms) || now_ms - fetched_at_ms >= engine_usage_refresh_window_ms
+	);
+};
 
 export class EngineUsageCache extends Context.Service<
 	EngineUsageCache,

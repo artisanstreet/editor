@@ -15,7 +15,6 @@
 	import {
 		MotionDuration,
 		MotionEasing,
-		ResetPartsFor,
 		RunUpFrom,
 	} from "$lib/identity/usage-window-motion";
 	import { weekly_reset_duration } from "$lib/identity/weekly-reset";
@@ -65,9 +64,7 @@
 	const motion_easing = yield* MotionEasing();
 	const tween_options = { duration: motion_duration, easing: motion_easing };
 	const remaining_reading = new Tween(0, tween_options);
-	const reset_reading = new Tween(0, tween_options);
 	let has_read_a_window = false;
-	let last_reset_unit: string | undefined = undefined;
 	const window_reads = yield* MakeScopedAttachmentRunner((usage_window: EngineUsageWindow) =>
 		Effect.gen(function* () {
 			yield* ReadWindow(usage_window);
@@ -76,22 +73,12 @@
 	);
 	const ReadWindow = (usage_window: EngineUsageWindow) =>
 		Effect.gen(function* () {
-		const reset =
-			usage_window.resets_at === undefined
-				? undefined
-				: ResetPartsFor(usage_window.resets_at);
 		const remaining_target = Math.max(0, 100 - Math.round(usage_window.percent_used));
-		const reset_target = reset?.amount ?? 0;
 		if (!has_read_a_window) {
 			has_read_a_window = true;
 			remaining_reading.set(RunUpFrom(remaining_target), { duration: 0 });
-			reset_reading.set(RunUpFrom(reset_target), { duration: 0 });
-		} else if (reset?.unit !== last_reset_unit) {
-			reset_reading.set(RunUpFrom(reset_target), { duration: 0 });
 		}
-		last_reset_unit = reset?.unit;
 		remaining_reading.target = remaining_target;
-		reset_reading.target = reset_target;
 		});
 
 	const authenticated_engines = $derived(
@@ -131,13 +118,7 @@
 			{/snippet}
 		</TooltipTrigger>
 		<TooltipContent side="right" class="max-w-56">
-			<UsageWindowTooltip
-				amount={reset_reading.current}
-				remaining={remaining_reading.current}
-				reset={usage_entry.resets_at === undefined
-					? undefined
-					: ResetPartsFor(usage_entry.resets_at)}
-			/>
+			<UsageWindowTooltip remaining={remaining_reading.current} />
 		</TooltipContent>
 	</Tooltip>
 {/snippet}
