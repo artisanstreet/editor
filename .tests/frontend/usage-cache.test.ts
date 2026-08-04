@@ -60,7 +60,7 @@ describe("engine usage cache", () => {
 		expect(identity).toContain("const now_ms = yield* Clock.currentTimeMillis;");
 		expect(identity).toContain("if (!engine_usage_refresh_is_due(snapshot, now_ms)) return;");
 		expect(identity).toContain("if (open) {");
-		expect(identity).toContain("yield* RequestUsage;");
+		expect(identity).toContain("yield* RequestUsage();");
 		expect(identity).not.toContain("has_requested_fresh_usage");
 		expect(usage).toContain("<UsageWindowTooltip remaining={remaining_reading.current} />");
 		expect(usage).not.toContain("ResetPartsFor");

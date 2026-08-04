@@ -28,19 +28,17 @@ Last updated: 2026-08-04. Branch continuity only. Durable verified status is in
 
 ## Active Work
 
-- Interactive `pnpm dev`/`forge`/`web` modes keep Vite and Forge on isolated
-  loopback ports while runner-owned Portless aliases expose
-  `https://editor.localhost` and `https://forge.localhost`; linked worktrees use
-  Portless's native branch prefix. Forge remains the runner's direct IPC child,
-  stale aliases recover only when their exact port is free, and guarded aliases
-  are removed on shutdown. HTTP and WebSocket upgrades share the exact Host
-  policy. The runner watches the Forge graph and restarts it only after
-  successful builds; the TUI rail remains the three product surfaces.
+- Dev modes keep Vite and Forge on isolated loopback ports behind runner-owned
+  Portless aliases; linked worktrees use native branch prefixes. Guarded aliases,
+  exact Host policy, IPC ownership, rebuild restarts, and the TUI remain intact.
 - The Forge fatal overlay now uses a finite user-visible error-code catalog. The
   existing `ArtisanClientError` remains the transport source; the gate preserves
   safe client/protocol diagnostics for classification while the visible footer
   renders only the muted monospaced error code. The ASCII mark centers during
   progress and aligns with the recovery copy for settled failures.
+- Account-menu usage now invokes its SER refresh Effect on open; yielding the
+  function itself had left cold caches on skeletons forever. Full validation
+  passes; provider single-flight/backoff remains follow-up.
 - The composer model trigger has a `gap-2` logo/name gap and the rail's former
   command button is now a `New thread` link to `/`; both remain uncommitted with
   protected frontend work.
@@ -59,33 +57,19 @@ Last updated: 2026-08-04. Branch continuity only. Durable verified status is in
 - Claude stream-json correlates each result with its run-owned tool-use start,
   preserving command/search names and settling file rows once with truthful
   counts when provider metadata exists; ambiguous parallel results stay unknown.
-- Live-run forensics on `run_16502625692286976` confirmed a Luna turn failed
-  locally during a 349-frame command-output burst at the 256-item fail-fast
-  event buffer. Stable activity keys now settle old shimmer, trace liveness
-  reconciles with the run, long commands get overflow-only edge fading, context
-  copy uses immutable run/model provenance, and provider turn-start changes
-  `Waiting for Codex…` to the session's thinking verb. Bounded event-buffer
-  flow control now survives 600 slow-consumer events and 120 concurrent
-  producers; only a sustained 30s stall records a causal failure diagnostic.
-- Artisan presentation instructions stay in additive system fields, never user text.
-  Fences use Barekey-derived Shiki/GitHub cards with filename chips, copy, line
-  numbers, selected lines, full-width containers, and horizontal overflow. Comark
-  math and Mermaid use local KaTeX/beautiful-mermaid renderers with theme-legible
-  labels; untrusted math is bounded/trust-disabled and unsafe SVG is rejected.
-  Rich nodes settle after streaming and Mermaid loads in a SER-owned lazy chunk.
-  Streaming prose uses a bounded, correction-preemptible queue with single-use
-  animation generations; partial tokens wait, reduced motion resolves immediately,
-  and wrappers collapse after the final entrance. Raw HTML stays inert.
+- Live-run forensics fixed burst event-buffer failure, stale activity shimmer,
+  trace liveness, command overflow, immutable context provenance, and provider
+  turn-start wording. Flow control tolerates bursts and fails only after 30s.
+- Presentation instructions stay in additive system fields. Shiki code cards,
+  bounded KaTeX, sanitized Mermaid, inert HTML, and SER-owned lazy rendering are
+  implemented. Streaming prose uses a bounded correction-preemptible queue with
+  reduced-motion completion and single-use animation generations.
 - The editor route subscribes to the authoritative thread list. Reassignment
   unmounts the old editor before moving to the new workspace route; detach moves
   to `/t/_/:thread`, so stale file reads cannot retain revoked workspace scope.
-- No compatibility thread/editor URLs exist: `/t/:workspace/:thread` and
-  `/e/:workspace/:thread` are the sole product contracts. The root page `/` is
-  the pre-creation draft route: it hosts the activity grid, recent threads,
-  and the draft composer whose first send creates the thread. The dedicated
-  `/threads` route is removed; the command menu and rail's "New thread" action
-  both navigate to `/`, and the layout treats `/` as a thread surface for the
-  inspector panel.
+- `/t/:workspace/:thread` and `/e/:workspace/:thread` are the sole thread/editor
+  routes. `/` owns draft creation, activity, recents, and inspector behavior;
+  `/threads` is removed and all new-thread navigation targets `/`.
 - Context-window usage flows engine → surface storage → composer gauge;
   migration `20260731100810_panoramic_power_man` adds its aggregate columns.
   `drizzle.config.ts` correctly targets `persistence/tables.ts`; the previously

@@ -172,8 +172,7 @@
 
 	// Top-level SER work follows the reactive menu state without a Svelte effect bridge.
 	if (open) {
-		yield* RequestUsage;
-	}
+		yield* RequestUsage();	}
 </script>
 
 <DropdownMenu bind:open>
