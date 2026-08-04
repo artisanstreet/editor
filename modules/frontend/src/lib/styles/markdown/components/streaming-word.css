@@ -1,0 +1,30 @@
+.docs-stream-word {
+	display: inline-block;
+}
+
+.docs-stream-word-incoming {
+	animation: docs-stream-word-in var(--stagger-dur, 500ms)
+		var(--stagger-ease, cubic-bezier(0.22, 1, 0.36, 1)) both;
+	will-change: transform, opacity, filter;
+}
+
+@keyframes docs-stream-word-in {
+	from {
+		opacity: 0;
+		transform: translateY(0.3em);
+		filter: blur(var(--stagger-blur, 3px));
+	}
+
+	to {
+		opacity: 1;
+		transform: translateY(0);
+		filter: blur(0);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.docs-stream-word-incoming {
+		animation: none !important;
+		will-change: auto;
+	}
+}

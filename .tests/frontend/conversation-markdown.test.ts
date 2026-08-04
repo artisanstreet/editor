@@ -71,13 +71,31 @@ describe("conversation markdown rendering", () => {
 
 	it("uses the shared dialect, the prose foundation, and the streaming caret", () => {
 		const content = ReadSource("modules/frontend/src/lib/components/markdown/content.sv");
+		const stream_word = ReadSource(
+			"modules/frontend/src/lib/components/markdown/stream-word.sv",
+		);
+		const stream_word_styles = ReadSource(
+			"modules/frontend/src/lib/styles/markdown/components/streaming-word.css",
+		);
 
 		expect(content).toContain('import { conversation_parse_options } from "./parsing"');
 		expect(content).toContain("options={conversation_parse_options}");
 		expect(content).toContain('class="prose conversation-markdown"');
+		expect(content).toContain("Queue.sliding<StreamingWordsTarget>(1)");
+		expect(content).toContain('getPropertyValue("--stagger-dur")');
+		expect(content.match(/yield\* wait_for_streaming_word_delay_or_target/gu)).toHaveLength(2);
+		expect(content).not.toContain("yield* Effect.sleep(streaming_word_animation_duration)");
+		expect(content).toContain("markdown={revealed_text}");
+		expect(content).toContain("ProseStreamWord: StreamWord");
 		expect(content).toContain("caret");
 		expect(content).toContain("ProseA: Anchor");
 		expect(content).toContain("ProseImg: Image");
+		expect(content).not.toMatch(/setInterval|setTimeout|requestAnimationFrame/u);
+		expect(stream_word).toContain("untrack(() => incoming)");
+		expect(stream_word).toContain("onanimationend");
+		expect(stream_word_styles).toContain("@keyframes docs-stream-word-in");
+		expect(stream_word_styles).toContain("var(--stagger-dur, 500ms)");
+		expect(stream_word_styles).toContain("prefers-reduced-motion: reduce");
 	});
 
 	it("hardens links and never auto-fetches images from assistant markdown", () => {

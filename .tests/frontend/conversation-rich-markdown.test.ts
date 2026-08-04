@@ -160,11 +160,10 @@ describe("conversation rich Markdown", () => {
 		);
 
 		expect(content).toContain(
-			"streaming ? conversation_streaming_markdown_plugins : conversation_markdown_plugins",
+			"? conversation_streaming_markdown_plugins\n\t\t\t: conversation_markdown_plugins",
 		);
-		expect(highlighting).toContain(
-			"conversation_streaming_markdown_plugins = [conversation_highlight_plugin]",
-		);
+		expect(highlighting).toContain("create_conversation_streaming_markdown_plugins");
+		expect(content).toContain("create_conversation_streaming_words_plugin");
 		expect(mermaid_renderer).toContain("Effect.tryPromise");
 		expect(mermaid_renderer).toContain("MermaidRendererLoadFailure");
 		expect(mermaid_renderer).not.toContain("Effect.promise");

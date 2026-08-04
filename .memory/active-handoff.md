@@ -6,7 +6,7 @@ Last updated: 2026-08-04. Branch continuity only. Durable verified status is in
 ## Working State
 
 - Repository `C:\Users\sander\Desktop\artisan-editor`; direct `master`, tracking
-  `origin/master`. Automatic-title repair `a11152c3` is pushed.
+  `origin/master`. Verified milestones are committed and pushed directly.
 - Hosted GitHub Actions are disabled and `.github/workflows` is intentionally
   absent while Artisan remains unpublished. Local `pnpm run validate` remains
   the milestone gate; release tooling is retained for future publication.
@@ -65,16 +65,15 @@ Last updated: 2026-08-04. Branch continuity only. Durable verified status is in
   `Waiting for Codex…` to the session's thinking verb. Bounded event-buffer
   flow control now survives 600 slow-consumer events and 120 concurrent
   producers; only a sustained 30s stall records a causal failure diagnostic.
-- Artisan presentation instructions stay in additive system fields, never user
-  text/public projection. Fences use Barekey-derived Shiki/GitHub cards with
-  filename chips, copy, line numbers, and `{1,3-5}` selected lines. Code cards
-  fill their available container while long lines scroll. Comark math and
-  Mermaid nodes now use local KaTeX/beautiful-mermaid renderers; semantic card
-  surfaces keep diagram labels legible in either theme. Untrusted math
-  is bounded/trust-disabled, structurally invalid/active SVG is rejected, remote
-  font imports are removed, and themes follow Artisan CSS variables. Rich nodes
-  settle after streaming and Mermaid loads in a separate SER-owned lazy chunk.
-  Raw HTML/directive styles stay inert and copy feedback is race-safe.
+- Artisan presentation instructions stay in additive system fields, never user text.
+  Fences use Barekey-derived Shiki/GitHub cards with filename chips, copy, line
+  numbers, selected lines, full-width containers, and horizontal overflow. Comark
+  math and Mermaid use local KaTeX/beautiful-mermaid renderers with theme-legible
+  labels; untrusted math is bounded/trust-disabled and unsafe SVG is rejected.
+  Rich nodes settle after streaming and Mermaid loads in a SER-owned lazy chunk.
+  Streaming prose uses a bounded, correction-preemptible queue with single-use
+  animation generations; partial tokens wait, reduced motion resolves immediately,
+  and wrappers collapse after the final entrance. Raw HTML stays inert.
 - The editor route subscribes to the authoritative thread list. Reassignment
   unmounts the old editor before moving to the new workspace route; detach moves
   to `/t/_/:thread`, so stale file reads cannot retain revoked workspace scope.
@@ -92,14 +91,14 @@ Last updated: 2026-08-04. Branch continuity only. Durable verified status is in
 
 ## Verification
 
-- `pnpm run validate` passes 334 Vitest files plus 3 skipped and 2,305 tests plus
+- `pnpm run validate` passes 335 Vitest files plus 3 skipped and 2,315 tests plus
   7 skipped; both builds, TUI smoke, and all 45 native tests pass on the current
-  rich-Markdown milestone.
-- Rich-Markdown focused verification passes 15 tests across four files; the
-  renderer/SER regression set passes 35 tests. Live HMR confirms KaTeX, a
-  high-contrast 672px Mermaid cylinder probe without remote fonts, and a code
-  card filling its parent's content box. Independent re-review found no issue
-  after the lazy loader was converted to a tagged recoverable Effect failure.
+  streaming-word milestone.
+- Streaming-Markdown focused verification passes 22 tests; the renderer/SER
+  regression set passes 45. Production build and `tsc` pass. Live HMR confirms
+  adaptive entrances, single-use reparses, final-token release, wrapper collapse,
+  and compositor-hint cleanup. Independent race re-review found no remaining
+  issue; prior KaTeX, Mermaid, and full-width code-card probes remain verified.
 
 ## Dirty-Tree Integration Notes
 

@@ -18,6 +18,7 @@ import toml from "shiki/dist/langs/toml.mjs";
 import xml from "shiki/dist/langs/xml.mjs";
 import github_dark from "shiki/dist/themes/github-dark.mjs";
 import github_light from "shiki/dist/themes/github-light.mjs";
+import type { ComarkPlugin } from "comark";
 
 /**
  * Barekey's dual GitHub theme, adapted to Comark's renderer-safe AST plugin.
@@ -49,7 +50,9 @@ export const conversation_highlight_plugin = highlight({
 export const conversation_math_plugin = math();
 export const conversation_mermaid_plugin = mermaid();
 
-export const conversation_streaming_markdown_plugins = [conversation_highlight_plugin];
+export const create_conversation_streaming_markdown_plugins = (
+	streaming_words_plugin: ComarkPlugin,
+) => [conversation_highlight_plugin, streaming_words_plugin];
 export const conversation_markdown_plugins = [
 	conversation_math_plugin,
 	conversation_mermaid_plugin,
