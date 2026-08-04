@@ -69,7 +69,8 @@ Last updated: 2026-08-04. Branch continuity only. Durable verified status is in
   text/public projection. Fences use Barekey-derived Shiki/GitHub cards with
   filename chips, copy, line numbers, and `{1,3-5}` selected lines. Code cards
   fill their available container while long lines scroll. Comark math and
-  Mermaid nodes now use local KaTeX/beautiful-mermaid renderers; untrusted math
+  Mermaid nodes now use local KaTeX/beautiful-mermaid renderers; semantic card
+  surfaces keep diagram labels legible in either theme. Untrusted math
   is bounded/trust-disabled, structurally invalid/active SVG is rejected, remote
   font imports are removed, and themes follow Artisan CSS variables. Rich nodes
   settle after streaming and Mermaid loads in a separate SER-owned lazy chunk.
@@ -95,8 +96,8 @@ Last updated: 2026-08-04. Branch continuity only. Durable verified status is in
   7 skipped; both builds, TUI smoke, and all 45 native tests pass on the current
   rich-Markdown milestone.
 - Rich-Markdown focused verification passes 15 tests across four files; the
-  renderer/SER regression set passes 35 tests. Live HMR confirms KaTeX, the
-  exact cylinder probe as a 672px Mermaid SVG without remote fonts, and a code
+  renderer/SER regression set passes 35 tests. Live HMR confirms KaTeX, a
+  high-contrast 672px Mermaid cylinder probe without remote fonts, and a code
   card filling its parent's content box. Independent re-review found no issue
   after the lazy loader was converted to a tagged recoverable Effect failure.
 

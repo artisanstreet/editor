@@ -74,6 +74,8 @@ describe("conversation rich Markdown", () => {
 		expect(mermaid.status).toBe("rendered");
 		if (mermaid.status === "rendered") {
 			expect(mermaid.html).toContain("<svg");
+			expect(mermaid.html).toContain("--surface:var(--card)");
+			expect(mermaid.html).not.toContain("--surface:var(--surface-100)");
 			expect(mermaid.html).not.toContain("fonts.googleapis.com");
 		}
 		expect(ReadSource("modules/frontend/src/lib/components/markdown/content.sv")).toContain(

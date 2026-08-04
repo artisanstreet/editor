@@ -4,7 +4,7 @@ import { parseDocument } from "htmlparser2";
 const MAX_MERMAID_SOURCE_LENGTH = 32_768;
 const GOOGLE_FONT_IMPORT = "@import url('https://fonts.googleapis.com/";
 const ROOT_STYLE =
-	"--bg:var(--background);--fg:var(--foreground);--line:var(--muted-foreground);--accent:var(--foreground);--muted:var(--muted-foreground);--surface:var(--surface-100);--border:var(--border)";
+	"--bg:var(--background);--fg:var(--foreground);--line:var(--muted-foreground);--accent:var(--foreground);--muted:var(--muted-foreground);--surface:var(--card);--border:var(--border)";
 const SAFE_TAGS = new Set([
 	"circle",
 	"defs",
@@ -131,7 +131,7 @@ export const render_conversation_mermaid = (source: string): MermaidRenderResult
 			line: "var(--muted-foreground)",
 			muted: "var(--muted-foreground)",
 			padding: 24,
-			surface: "var(--surface-100)",
+			surface: "var(--card)",
 			transparent: true,
 		})
 			.split("\n")
