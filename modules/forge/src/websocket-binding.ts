@@ -6,6 +6,7 @@ import { WebSocket, WebSocketServer, type RawData } from "ws";
 import type { WebSocketEndpoint } from "@artisan/transport/websocket/protocol";
 import type { WebSocketPeer } from "@artisan/transport/websocket/server";
 
+import { ForgeHostAllowed } from "./host-policy";
 import type { ForgeTransportBindingInput, ForgeTransportHandle } from "./transport-binding";
 
 export class ForgeWebSocketFailure extends Data.TaggedError("ForgeWebSocketFailure")<{
@@ -119,6 +120,7 @@ export const BindForgeWebSocket = (
 					}
 					if (
 						!is_loopback(request.socket.remoteAddress) ||
+						!ForgeHostAllowed(request.headers.host, input.config) ||
 						!ForgeOriginAllowed(request, input)
 					) {
 						write_upgrade_rejection(socket, 403);

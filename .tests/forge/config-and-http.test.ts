@@ -39,6 +39,7 @@ describe("Forge boundary", () => {
 
 		expect(config.listen_host).toBe("127.0.0.1");
 		expect(config.listen_port).toBe(0);
+		expect(config.allowed_hostnames).toEqual([]);
 	});
 
 	it("rejects a second owner for the same durable database", async () => {
@@ -67,6 +68,7 @@ describe("Forge boundary", () => {
 		const host = await Effect.runPromise(
 			start_forge_http(
 				decode_forge_config({
+					allowed_hostnames: ["forge.localhost"],
 					database_path: join(directory, "artisan.sqlite"),
 					instance_id: test_instance_id,
 					migrations_path: join(directory, "migrations"),
@@ -132,6 +134,25 @@ describe("Forge boundary", () => {
 			});
 		expect(await rebound_status("/health")).toBe(403);
 		expect(await rebound_status("/api/instances")).toBe(403);
+		const portless_status = (pathname: string) =>
+			new Promise<number>((accept, reject) => {
+				const probe = http.request(
+					{
+						headers: { host: "forge.localhost" },
+						host: host.endpoint.hostname,
+						path: pathname,
+						port: host.endpoint.port,
+					},
+					(response) => {
+						response.resume();
+						accept(response.statusCode ?? 0);
+					},
+				);
+				probe.once("error", reject);
+				probe.end();
+			});
+		expect(await portless_status("/health")).toBe(200);
+		expect(await portless_status("/api/instances")).toBe(200);
 		expect((await fetch(new URL("/api/unknown", host.endpoint))).status).toBe(404);
 		expect((await fetch(new URL("/_app/unknown", host.endpoint))).status).toBe(404);
 		expect((await fetch(new URL("/_app/does-not-exist.js", host.endpoint))).status).toBe(404);

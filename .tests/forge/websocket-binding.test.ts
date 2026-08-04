@@ -1,5 +1,6 @@
 import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
+import type { IncomingMessage } from "node:http";
 import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -83,6 +84,67 @@ describe("Forge WebSocket binding lifecycle", () => {
 
 		expect(session_released).toBe(true);
 		expect(unhandled).toEqual([]);
+	});
+
+	it("enforces the exact Host policy on Portless WebSocket upgrades", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "artisan-forge-portless-websocket-"));
+		const authority_runtime = ManagedRuntime.make(make_forge_control_authority_layer());
+		const authority = await authority_runtime.runPromise(ForgeControlAuthority);
+		const config = decode_forge_config({
+			allowed_hostnames: ["forge.localhost"],
+			allowed_origins: ["https://editor.localhost"],
+			database_path: join(directory, "artisan.sqlite"),
+			instance_id: "portless-websocket-host-test",
+			migrations_path: join(directory, "migrations"),
+		});
+		const http = await Effect.runPromise(start_forge_http(config, authority));
+		const binding = await Effect.runPromise(
+			BindForgeWebSocket({
+				authority,
+				config,
+				http,
+				ServeWebSocket: () => Effect.never,
+			}),
+		);
+		closers.push(async () => {
+			await Effect.runPromise(binding.Close.pipe(Effect.ignore));
+			await Effect.runPromise(http.Close.pipe(Effect.ignore));
+			await authority_runtime.dispose();
+			await rm(directory, { force: true, recursive: true });
+		});
+
+		const session = await Effect.runPromise(
+			authority.ConsumePair(await Effect.runPromise(authority.RequestPair)),
+		);
+		const websocket_url = new URL(config.websocket_path, http.endpoint);
+		websocket_url.protocol = "ws:";
+		const cookie = `artisan_forge_session=${Option.getOrThrow(session)}`;
+
+		const rebound = new WebSocket(websocket_url, {
+			headers: {
+				cookie,
+				host: "attacker.invalid",
+				origin: "https://attacker.invalid",
+			},
+		});
+		const [, rejected_response] = (await once(rebound, "unexpected-response")) as [
+			unknown,
+			IncomingMessage,
+		];
+		rejected_response.resume();
+		expect(rejected_response.statusCode).toBe(403);
+
+		const valid = new WebSocket(websocket_url, {
+			headers: {
+				cookie,
+				host: "forge.localhost",
+				origin: "https://editor.localhost",
+			},
+		});
+		await once(valid, "open");
+		const closed = once(valid, "close");
+		valid.close();
+		await closed;
 	});
 
 	it("destroys a pending upgrade when session authorization is interrupted", async () => {

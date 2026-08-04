@@ -28,12 +28,14 @@ Last updated: 2026-08-04. Branch continuity only. Durable verified status is in
 
 ## Active Work
 
-- Interactive `pnpm dev`/`forge`/`web` modes keep the frontend on SvelteKit/Vite
-  and bundle Forge directly with Rolldown. The runner watches the Forge module
-  graph, closes completed bundles, cleanly restarts Forge only after successful
-  builds, and the TUI rail is `Overview` / `Artisan Editor` / `Artisan Forge`.
-  The reusable `@artisan/dev-tui` package remains on Bun while the supervisor
-  and Forge stay on Node. Non-TTY/CI runs retain prefixed plain logs.
+- Interactive `pnpm dev`/`forge`/`web` modes keep Vite and Forge on isolated
+  loopback ports while runner-owned Portless aliases expose
+  `https://editor.localhost` and `https://forge.localhost`; linked worktrees use
+  Portless's native branch prefix. Forge remains the runner's direct IPC child,
+  stale aliases recover only when their exact port is free, and guarded aliases
+  are removed on shutdown. HTTP and WebSocket upgrades share the exact Host
+  policy. The runner watches the Forge graph and restarts it only after
+  successful builds; the TUI rail remains the three product surfaces.
 - The Forge fatal overlay now uses a finite user-visible error-code catalog. The
   existing `ArtisanClientError` remains the transport source; the gate preserves
   safe client/protocol diagnostics for classification while the visible footer
@@ -91,14 +93,17 @@ Last updated: 2026-08-04. Branch continuity only. Durable verified status is in
 
 ## Verification
 
-- `pnpm run validate` passes 335 Vitest files plus 3 skipped and 2,315 tests plus
+- `pnpm run validate` passes 335 Vitest files plus 3 skipped and 2,322 tests plus
   7 skipped; both builds, TUI smoke, and all 45 native tests pass on the current
-  streaming-word milestone.
+  Portless runner milestone.
 - Streaming-Markdown focused verification passes 22 tests; the renderer/SER
   regression set passes 45. Production build and `tsc` pass. Live HMR confirms
   adaptive entrances, single-use reparses, final-token release, wrapper collapse,
   and compositor-hint cleanup. Independent race re-review found no remaining
   issue; prior KaTeX, Mermaid, and full-width code-card probes remain verified.
+- Portless runner verification: 36 focused tests, workspace `tsc`, frontend
+  production build, Forge validation build, scoped lint, and format check pass;
+  independent lifecycle/security re-review found no remaining issue.
 
 ## Dirty-Tree Integration Notes
 

@@ -12,9 +12,16 @@ import {
 	hash_instance_offset,
 	make_forge_environment,
 	make_dev_lane_definitions,
+	make_portless_base_names,
+	parse_portless_endpoint,
+	parse_portless_route_listing,
 	parse_runner_mode,
+	plan_portless_alias,
+	required_dev_node_major,
 	resolve_dev_tui_entry,
+	resolve_portless_entry,
 	should_use_dev_tui,
+	should_use_portless,
 	write_dev_config,
 } from "../../.scripts/dev/runner";
 
@@ -41,6 +48,78 @@ describe("dev runner modes", () => {
 			expect(parse_runner_mode(mode)).toBe(mode);
 		}
 		expect(parse_runner_mode("bogus")).toBeUndefined();
+	});
+
+	it("owns every public development entrypoint", () => {
+		const manifest = JSON.parse(readFileSync("package.json", "utf8")) as {
+			readonly devDependencies: Readonly<Record<string, string>>;
+			readonly scripts: Readonly<Record<string, string>>;
+		};
+
+		expect(manifest.scripts.dev).toBe("node .scripts/dev/runner.ts");
+		expect(manifest.scripts["dev:web"]).toBe("node .scripts/dev/runner.ts web");
+		expect(manifest.scripts["dev:forge"]).toBe("node .scripts/dev/runner.ts forge");
+		expect(manifest.scripts["dev:open"]).toBe("node .scripts/dev/runner.ts pair");
+		expect(manifest.scripts["dev:pair"]).toBe("node .scripts/dev/runner.ts pair");
+		expect(manifest.devDependencies.portless).toBe("0.15.5");
+	});
+});
+
+describe("Portless development routes", () => {
+	it("decodes the canonical routes and preserves Portless's worktree prefix", () => {
+		expect(parse_portless_endpoint("editor", "https://editor.localhost\n")).toEqual({
+			alias_name: "editor",
+			hostname: "editor.localhost",
+			origin: "https://editor.localhost",
+		});
+		expect(parse_portless_endpoint("forge", "https://fix-tools.forge.localhost\n")).toEqual({
+			alias_name: "fix-tools.forge",
+			hostname: "fix-tools.forge.localhost",
+			origin: "https://fix-tools.forge.localhost",
+		});
+	});
+
+	it("rejects a route that does not match Artisan's HTTPS localhost contract", () => {
+		expect(() => parse_portless_endpoint("editor", "http://editor.localhost")).toThrow();
+		expect(() => parse_portless_endpoint("editor", "https://attacker.invalid")).toThrow();
+		expect(() => parse_portless_endpoint("editor", "https://forge.localhost")).toThrow();
+	});
+
+	it("reserves distinct aliases for explicit instances and supports the Portless bypass", () => {
+		expect(make_portless_base_names(0, false)).toEqual({ forge: "forge", web: "editor" });
+		expect(make_portless_base_names(8, true)).toEqual({
+			forge: "forge-8",
+			web: "editor-8",
+		});
+		expect(should_use_portless({})).toBe(true);
+		for (const value of ["0", "false", "skip"]) {
+			expect(should_use_portless({ PORTLESS: value })).toBe(false);
+		}
+		expect(required_dev_node_major(true)).toBe(24);
+		expect(required_dev_node_major(false)).toBe(22);
+	});
+
+	it("recovers only a stale static alias for the same physical port", () => {
+		const routes = parse_portless_route_listing(`
+Active routes:
+
+  https://editor.localhost  ->  localhost:4849  (alias)
+  https://docs.localhost  ->  localhost:5173  (pid 42)
+`);
+		expect(routes).toEqual([
+			{ hostname: "editor.localhost", kind: "alias", port: 4849 },
+			{ hostname: "docs.localhost", kind: "process", port: 5173 },
+		]);
+		expect(plan_portless_alias(undefined, 4849, false)).toBe("register");
+		expect(plan_portless_alias(undefined, 4849, true)).toBe("conflict");
+		expect(plan_portless_alias(routes[0], 4849, false)).toBe("replace");
+		expect(plan_portless_alias(routes[0], 4849, true)).toBe("conflict");
+		expect(plan_portless_alias(routes[0], 6001, false)).toBe("conflict");
+		expect(plan_portless_alias(routes[1], 5173, false)).toBe("conflict");
+	});
+
+	it("resolves the pinned Portless CLI through its package manifest", () => {
+		expect(resolve_portless_entry()).toMatch(/[\\/]portless[\\/]dist[\\/]cli\.js$/u);
 	});
 });
 
@@ -246,9 +325,23 @@ describe("dev home interop", () => {
 				web_port: 4849,
 			},
 			"token-token-token-token-token-token",
+			{
+				forge: {
+					alias_name: "forge",
+					hostname: "forge.localhost",
+					origin: "https://forge.localhost",
+				},
+				web: {
+					alias_name: "editor",
+					hostname: "editor.localhost",
+					origin: "https://editor.localhost",
+				},
+			},
 		);
 
 		expect(environment.ARTISAN_LISTEN_PORT).toBe("4848");
+		expect(environment.ARTISAN_ALLOWED_HOSTNAMES).toBe("forge.localhost");
+		expect(environment.ARTISAN_ALLOWED_ORIGINS).toBe("https://editor.localhost");
 		expect(environment.ARTISAN_AUTH_TOKEN).toBe("token-token-token-token-token-token");
 		expect(environment.ARTISAN_DATABASE_PATH).toContain("browser-forge");
 		expect(environment.ARTISAN_MIGRATIONS_PATH).toContain("migrations");

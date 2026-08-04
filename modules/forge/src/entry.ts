@@ -62,6 +62,13 @@ export const StartForgeFromEnvironment = Effect.gen(function* () {
 				? Number(process.env.ARTISAN_LISTEN_PORT)
 				: 0,
 			migrations_path,
+			...(process.env.ARTISAN_ALLOWED_HOSTNAMES === undefined
+				? {}
+				: {
+						allowed_hostnames: process.env.ARTISAN_ALLOWED_HOSTNAMES.split(",")
+							.map((hostname) => hostname.trim().toLowerCase())
+							.filter(Boolean),
+					}),
 			...(process.env.ARTISAN_ALLOWED_ORIGINS === undefined
 				? {}
 				: {

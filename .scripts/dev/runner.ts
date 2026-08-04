@@ -19,10 +19,12 @@ import {
 } from "node:fs";
 import { createInterface } from "node:readline";
 import { createRequire } from "node:module";
+import { createConnection } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
-import { pathToFileURL } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
+import { Schema } from "effect";
 import { watch, type RolldownWatcher, type RolldownWatcherEvent } from "rolldown";
 
 import { CreateForgeRolldownConfig } from "../../forge.rolldown.config.ts";
@@ -53,6 +55,9 @@ const resolve_bun_executable = (): string => {
 
 	return join(dirname(package_path), manifest.bin.bun);
 };
+
+export const resolve_portless_entry = (): string =>
+	join(dirname(fileURLToPath(import.meta.resolve("portless"))), "cli.js");
 
 export const resolve_dev_tui_entry = (): string =>
 	dependency_require.resolve("@artisan/dev-tui/entry");
@@ -132,6 +137,104 @@ export interface DevInstance {
 	readonly web_port: number;
 }
 
+export interface DevSurfaceEndpoint {
+	/** Exact static route name passed to `portless alias`. */
+	readonly alias_name: string;
+	readonly hostname: string;
+	readonly origin: string;
+}
+
+export interface DevSurfaceEndpoints {
+	readonly forge: DevSurfaceEndpoint;
+	readonly web: DevSurfaceEndpoint;
+}
+
+export interface PortlessRouteRecord {
+	readonly hostname: string;
+	readonly kind: "alias" | "process";
+	readonly port: number;
+}
+
+export const should_use_portless = (
+	environment: Readonly<Record<string, string | undefined>>,
+): boolean =>
+	environment.PORTLESS !== "0" &&
+	environment.PORTLESS !== "false" &&
+	environment.PORTLESS !== "skip";
+
+export const required_dev_node_major = (portless_enabled: boolean): number =>
+	portless_enabled ? 24 : 22;
+
+/** Explicit instances in one checkout need unique aliases in addition to unique ports. */
+export const make_portless_base_names = (
+	offset: number,
+	has_explicit_instance: boolean,
+): Readonly<{ forge: string; web: string }> => ({
+	forge: has_explicit_instance ? `forge-${offset}` : "forge",
+	web: has_explicit_instance ? `editor-${offset}` : "editor",
+});
+
+/** Decodes the worktree-aware URL returned by `portless get`. */
+export const parse_portless_endpoint = (base_name: string, output: string): DevSurfaceEndpoint => {
+	const url = Schema.decodeUnknownSync(Schema.URLFromString)(output.trim());
+	if (url.protocol !== "https:" || !url.hostname.endsWith(".localhost")) {
+		throw new Error(`Portless returned an unexpected local URL: ${url.toString()}`);
+	}
+	const alias_name = url.hostname.slice(0, -".localhost".length);
+	if (alias_name !== base_name && !alias_name.endsWith(`.${base_name}`)) {
+		throw new Error(`Portless returned ${url.hostname} for the ${base_name} route`);
+	}
+
+	return { alias_name, hostname: url.hostname, origin: url.origin };
+};
+
+/** Parses the stable route rows from `portless list`; headings stay ignored. */
+export const parse_portless_route_listing = (output: string): PortlessRouteRecord[] =>
+	output.split(/\r?\n/u).flatMap((line): PortlessRouteRecord[] => {
+		const match = /^\s*(https?:\/\/\S+)\s+->\s+localhost:(\d+)\s+\((alias|pid \d+)\)\s*$/u.exec(
+			line,
+		);
+		if (match === null) return [];
+		const url = Schema.decodeUnknownSync(Schema.URLFromString)(match[1]);
+		const port = Number(match[2]);
+		if (!Number.isInteger(port) || port < 1 || port > 65_535) return [];
+		return [
+			{
+				hostname: url.hostname,
+				kind: match[3] === "alias" ? "alias" : "process",
+				port,
+			},
+		];
+	});
+
+export type PortlessAliasPlan = "conflict" | "register" | "replace";
+
+/** A dead static alias is recoverable only when it targets this exact instance port. */
+export const plan_portless_alias = (
+	existing: PortlessRouteRecord | undefined,
+	expected_port: number,
+	target_is_listening: boolean,
+): PortlessAliasPlan => {
+	if (existing === undefined) return target_is_listening ? "conflict" : "register";
+	if (existing.kind !== "alias" || existing.port !== expected_port || target_is_listening) {
+		return "conflict";
+	}
+	return "replace";
+};
+
+export const make_direct_dev_endpoints = (instance: DevInstance): DevSurfaceEndpoints => ({
+	forge: {
+		alias_name: "forge",
+		hostname: "127.0.0.1",
+		origin: instance.forge_origin,
+	},
+	web: {
+		alias_name: "editor",
+		hostname: "127.0.0.1",
+		origin: instance.web_origin,
+	},
+});
+
 /**
  * The main worktree keeps the well-known 4848/4849 pair; linked worktrees and
  * explicit instances derive an offset. Explicit port env vars win outright so
@@ -205,7 +308,10 @@ export const make_forge_environment = (
 	paths: DevPaths,
 	instance: DevInstance,
 	auth_token: string,
+	endpoints: DevSurfaceEndpoints,
 ): Readonly<Record<string, string>> => ({
+	ARTISAN_ALLOWED_HOSTNAMES: endpoints.forge.hostname,
+	ARTISAN_ALLOWED_ORIGINS: endpoints.web.origin,
 	ARTISAN_AUTH_TOKEN: auth_token,
 	ARTISAN_DATABASE_PATH: join(paths.data_root, "artisan.sqlite"),
 	/** Stated outright: the marker is no longer inferred from static hosting. */
@@ -314,6 +420,7 @@ if (runner_is_entry) {
 		repository_root,
 	});
 	const paths = derive_dev_paths(repository_root, instance.offset);
+	let endpoints = make_direct_dev_endpoints(instance);
 	const mode = parse_runner_mode(process.argv[2]);
 	if (mode === undefined) {
 		console.error(`Unknown development mode: ${process.argv[2]}`);
@@ -337,6 +444,142 @@ if (runner_is_entry) {
 
 	const set_lane_status = (lane_id: DevLaneId, status: DevLaneStatus) => {
 		send_dashboard_event({ lane_id, status, type: "status" });
+	};
+
+	const portless_enabled = should_use_portless(process.env);
+	const portless_environment = {
+		...process.env,
+		/** Artisan's development contract is the stable HTTPS `.localhost` pair. */
+		NO_COLOR: "1",
+		PORTLESS_HTTPS: "1",
+		PORTLESS_LAN: "0",
+		PORTLESS_TLD: "localhost",
+	};
+	let portless_entry: string | undefined;
+	const registered_portless_aliases: Array<{
+		readonly endpoint: DevSurfaceEndpoint;
+		readonly port: number;
+	}> = [];
+	const node_major = Number(process.versions.node.split(".")[0]);
+	const assert_dev_node_version = (): void => {
+		const required_major = required_dev_node_major(portless_enabled);
+		if (node_major >= required_major) return;
+		throw new Error(
+			portless_enabled
+				? `Portless requires Node ${required_major} or newer; upgrade Node or set PORTLESS=0`
+				: `Artisan development requires Node ${required_major} or newer`,
+		);
+	};
+	const run_portless = (arguments_: ReadonlyArray<string>, capture_output = false): string => {
+		portless_entry ??= resolve_portless_entry();
+		const result = spawnSync(process.execPath, [portless_entry, ...arguments_], {
+			cwd: repository_root,
+			encoding: "utf8",
+			env: portless_environment,
+			stdio: capture_output ? ["ignore", "pipe", "pipe"] : "inherit",
+			windowsHide: true,
+		});
+		if (result.error !== undefined) throw result.error;
+		if (result.status !== 0) {
+			const detail = capture_output ? result.stderr.trim() : "";
+			throw new Error(
+				`portless ${arguments_.join(" ")} failed${detail.length > 0 ? `: ${detail}` : ""}`,
+			);
+		}
+		return capture_output ? result.stdout.trim() : "";
+	};
+
+	const resolve_portless_endpoints = (): DevSurfaceEndpoints => {
+		const names = make_portless_base_names(
+			instance.offset,
+			process.env.ARTISAN_DEV_INSTANCE !== undefined,
+		);
+		return {
+			forge: parse_portless_endpoint(names.forge, run_portless(["get", names.forge], true)),
+			web: parse_portless_endpoint(names.web, run_portless(["get", names.web], true)),
+		};
+	};
+
+	const read_portless_routes = (): PortlessRouteRecord[] =>
+		parse_portless_route_listing(run_portless(["list"], true));
+
+	const loopback_port_is_listening = (port: number): Promise<boolean> =>
+		new Promise((accept) => {
+			const socket = createConnection({ host: "127.0.0.1", port });
+			let settled = false;
+			const settle = (listening: boolean) => {
+				if (settled) return;
+				settled = true;
+				socket.destroy();
+				accept(listening);
+			};
+			socket.setTimeout(500, () => settle(false));
+			socket.once("connect", () => settle(true));
+			socket.once("error", () => settle(false));
+		});
+
+	const register_portless_alias = async (
+		endpoint: DevSurfaceEndpoint,
+		port: number,
+	): Promise<void> => {
+		const existing = read_portless_routes().find(
+			(route) => route.hostname === endpoint.hostname,
+		);
+		const target_is_listening = await loopback_port_is_listening(port);
+		const plan = plan_portless_alias(existing, port, target_is_listening);
+		if (plan === "conflict") {
+			throw new Error(
+				existing === undefined
+					? `${endpoint.origin} cannot be registered because 127.0.0.1:${port} is already in use`
+					: `${endpoint.origin} is already registered to port ${existing.port} or its target is running`,
+			);
+		}
+		if (plan === "replace") {
+			run_portless(["alias", "--remove", endpoint.alias_name]);
+		}
+		run_portless(["alias", endpoint.alias_name, String(port)]);
+		registered_portless_aliases.push({ endpoint, port });
+	};
+
+	const unregister_portless_aliases = (): void => {
+		for (const registration of registered_portless_aliases.splice(0).reverse()) {
+			const { endpoint, port } = registration;
+			try {
+				const current = read_portless_routes().find(
+					(route) => route.hostname === endpoint.hostname,
+				);
+				if (current === undefined) continue;
+				if (current.kind !== "alias" || current.port !== port) {
+					console.error(
+						`[dev] leaving replacement Portless route ${endpoint.origin} untouched`,
+					);
+					continue;
+				}
+				run_portless(["alias", "--remove", endpoint.alias_name]);
+			} catch (cause) {
+				console.error(
+					`[dev] could not remove Portless alias ${endpoint.alias_name}: ${cause instanceof Error ? cause.message : String(cause)}`,
+				);
+			}
+		}
+	};
+
+	const setup_portless = async (): Promise<void> => {
+		if (!portless_enabled) return;
+		assert_dev_node_version();
+		run_portless(["proxy", "start"]);
+		endpoints = resolve_portless_endpoints();
+		try {
+			if (mode === "dev" || mode === "forge") {
+				await register_portless_alias(endpoints.forge, instance.forge_port);
+			}
+			if (mode === "dev" || mode === "web") {
+				await register_portless_alias(endpoints.web, instance.web_port);
+			}
+		} catch (cause) {
+			unregister_portless_aliases();
+			throw cause;
+		}
 	};
 
 	const attach_lane = (name: ProcessLaneId, child: ChildProcess): Lane => {
@@ -499,13 +742,13 @@ if (runner_is_entry) {
 			send,
 		};
 
-		const endpoints: ReadonlyArray<DevEndpoint> = [
-			{ label: `Artisan Editor ${instance.web_origin}`, url: instance.web_origin },
-			{ label: `Artisan Forge ${instance.forge_origin}`, url: instance.forge_origin },
+		const dashboard_endpoints: ReadonlyArray<DevEndpoint> = [
+			{ label: `Artisan Editor ${endpoints.web.origin}`, url: endpoints.web.origin },
+			{ label: `Artisan Forge ${endpoints.forge.origin}`, url: endpoints.forge.origin },
 		];
 
 		control.send({
-			endpoints,
+			endpoints: dashboard_endpoints,
 			lanes: lane_definitions,
 			title: `Artisan dev · instance ${instance.offset}`,
 			type: "configure",
@@ -534,6 +777,7 @@ if (runner_is_entry) {
 		log("shutting down");
 		shutting_down = true;
 		dashboard?.close();
+		unregister_portless_aliases();
 		const watcher = forge_watcher;
 		forge_watcher = undefined;
 		if (watcher !== undefined) void watcher.close().catch(() => undefined);
@@ -587,7 +831,10 @@ if (runner_is_entry) {
 		const child = spawn(process.execPath, [paths.forge_bundle], {
 			cwd: repository_root,
 			detached: process.platform !== "win32",
-			env: { ...process.env, ...make_forge_environment(paths, instance, auth_token) },
+			env: {
+				...process.env,
+				...make_forge_environment(paths, instance, auth_token, endpoints),
+			},
 			stdio: ["ignore", "pipe", "pipe", "ipc"],
 			windowsHide: true,
 		});
@@ -597,7 +844,7 @@ if (runner_is_entry) {
 				if (child.exitCode !== null) return;
 				if (await probe(`${instance.forge_origin}/health`)) {
 					set_lane_status("forge", "ready");
-					log(`forge ready at ${instance.forge_origin}`, "forge");
+					log(`forge ready at ${endpoints.forge.origin}`, "forge");
 					return;
 				}
 				await sleep(500);
@@ -723,7 +970,7 @@ if (runner_is_entry) {
 			if (!minted.ok) return undefined;
 			const body = (await minted.json()) as { readonly code?: unknown };
 			if (typeof body.code !== "string" || body.code.length === 0) return undefined;
-			return `${instance.web_origin}/#pair=${encodeURIComponent(body.code)}`;
+			return `${endpoints.web.origin}/#pair=${encodeURIComponent(body.code)}`;
 		} catch {
 			return undefined;
 		}
@@ -746,7 +993,7 @@ if (runner_is_entry) {
 				const url = await mint_pair_url();
 				if (url === undefined) break;
 				set_lane_status("web", "ready");
-				log(`opening ${instance.web_origin} (paired)`, "web");
+				log(`opening ${endpoints.web.origin} (paired)`, "web");
 				if (process.platform === "win32") {
 					spawnSync("cmd", ["/c", "start", "", url], { stdio: "ignore" });
 				}
@@ -756,7 +1003,7 @@ if (runner_is_entry) {
 		}
 		if (!shutting_down) {
 			log(
-				`could not open a paired browser; open ${instance.web_origin} and it self-pairs`,
+				`could not open a paired browser; open ${endpoints.web.origin} and it self-pairs`,
 				"web",
 			);
 		}
@@ -766,8 +1013,8 @@ if (runner_is_entry) {
 		const checks: Array<readonly [name: string, passed: boolean, detail: string]> = [];
 		checks.push([
 			"node",
-			Number(process.versions.node.split(".")[0]) >= 22,
-			`v${process.versions.node}`,
+			node_major >= required_dev_node_major(portless_enabled),
+			`v${process.versions.node} (requires ${required_dev_node_major(portless_enabled)}+)`,
 		]);
 		checks.push(["forge bundle", existsSync(paths.forge_bundle), paths.forge_bundle]);
 		checks.push(["secrets", existsSync(paths.secrets), paths.secrets]);
@@ -809,6 +1056,18 @@ if (runner_is_entry) {
 		}
 		prepare_dev_home();
 		if (mode === "pair") {
+			if (portless_enabled) {
+				try {
+					assert_dev_node_version();
+					endpoints = resolve_portless_endpoints();
+				} catch (cause) {
+					console.error(
+						`[dev] could not resolve Portless routes: ${cause instanceof Error ? cause.message : String(cause)}`,
+					);
+					process.exitCode = 1;
+					return;
+				}
+			}
 			const url = await mint_pair_url();
 			if (url === undefined) {
 				console.error(
@@ -824,6 +1083,16 @@ if (runner_is_entry) {
 		}
 
 		register_shutdown();
+		try {
+			await setup_portless();
+		} catch (cause) {
+			console.error(
+				`[dev] Portless setup failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+			);
+			shutdown();
+			process.exitCode = 1;
+			return;
+		}
 
 		if (
 			should_use_dev_tui({
@@ -836,8 +1105,8 @@ if (runner_is_entry) {
 		}
 
 		log(`instance offset ${instance.offset}`);
-		log(`forge    ${instance.forge_origin}`);
-		log(`frontend ${instance.web_origin}  (self-pairing enabled)`);
+		log(`forge    ${endpoints.forge.origin}`);
+		log(`frontend ${endpoints.web.origin}  (self-pairing enabled)`);
 
 		if (mode === "dev" || mode === "forge") {
 			start_forge_watcher();
@@ -847,6 +1116,7 @@ if (runner_is_entry) {
 				ARTISAN_DEV_AUTH_TOKEN: auth_token,
 				ARTISAN_FORGE_DEV_ORIGIN: instance.forge_origin,
 				ARTISAN_FRONTEND_DEV_PORT: String(instance.web_port),
+				ARTISAN_FRONTEND_PUBLIC_HOSTNAME: endpoints.web.hostname,
 			});
 			void open_paired_browser();
 		}

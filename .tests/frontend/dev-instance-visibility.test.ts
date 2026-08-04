@@ -61,10 +61,13 @@ describe("development instance visibility", () => {
 		);
 		expect(vite_config).toContain("strictPort: true");
 		expect(vite_config).toContain('host: "127.0.0.1"');
+		expect(vite_config).toContain("allowedHosts: [FrontendPublicHostname]");
+		expect(vite_config).toContain("ARTISAN_FRONTEND_PUBLIC_HOSTNAME");
 		expect(vite_config).toContain("port: FrontendDevelopmentPort");
 		expect(vite_config).toContain('"/api": {');
 		expect(vite_config).toContain("ws: true");
 		expect(vite_config).toContain('"/health": {');
+		expect(vite_config.match(/changeOrigin: true/g)).toHaveLength(2);
 		/**
 		 * The origin constant must feed only dev-server surfaces: the two proxy
 		 * targets and the development pairing middleware, all of which exist

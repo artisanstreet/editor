@@ -8,6 +8,7 @@ import { Data, Effect, Exit, FiberSet, Option, Schema, Scope } from "effect";
 
 import type { ForgeControlAuthorityShape } from "./control-authority";
 import type { ForgeConfig } from "./config";
+import { ForgeHostAllowed } from "./host-policy";
 import { ListForgeInstances } from "./instance-registry";
 
 export class ForgeHttpFailure extends Data.TaggedError("ForgeHttpFailure")<{
@@ -86,25 +87,6 @@ const app_cors_headers = (app_origin: string | undefined): Record<string, string
 				"access-control-allow-origin": app_origin,
 				vary: "origin",
 			};
-
-const loopback_host_names = new Set(["127.0.0.1", "localhost", "[::1]"]);
-
-/**
- * Defeats DNS rebinding: a page on an attacker hostname that resolves to
- * loopback reaches this listener with its own Host header and, for same-origin
- * GETs, no Origin header at all — passing the origin check. The listener only
- * ever binds loopback, so any other Host name is an impostor and control
- * surfaces refuse it before responding.
- */
-const host_allowed = (request: IncomingMessage) => {
-	const host = request.headers.host;
-	if (host === undefined) return false;
-	try {
-		return loopback_host_names.has(new URL(`http://${host}`).hostname.toLowerCase());
-	} catch {
-		return false;
-	}
-};
 
 const ReadJson = (request: IncomingMessage) =>
 	Effect.callback<unknown, Error>((resume) => {
@@ -338,7 +320,7 @@ export function start_forge_http(
 				(url.pathname === "/health" ||
 					url.pathname === "/healthz" ||
 					url.pathname.startsWith("/api/")) &&
-				!host_allowed(request)
+				!ForgeHostAllowed(request.headers.host, config)
 			) {
 				respond_json(response, 403, { error: "forbidden" });
 				return;

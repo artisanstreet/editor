@@ -19,13 +19,14 @@ const WorkspaceSource = (relative_path: string) =>
  * `vite dev` consumes and `vite build` never emits, so the production bundle
  * keeps resolving its Forge strictly same-origin. The HMR page itself stays
  * same-origin too: pairing, health, and the control/stream WebSocket all pass
- * through this loopback proxy, so no cross-origin allowance is needed on the
- * Forge side.
+ * through this loopback proxy. The runner admits only that exact public editor
+ * origin at the Forge boundary.
  */
 const ForgeDevelopmentOrigin = process.env.ARTISAN_FORGE_DEV_ORIGIN ?? "http://127.0.0.1:4848";
 
 /** Fixed so `ae open --origin` can deliver the pairing fragment deterministically. */
 const FrontendDevelopmentPort = Number(process.env.ARTISAN_FRONTEND_DEV_PORT ?? "4849");
+const FrontendPublicHostname = process.env.ARTISAN_FRONTEND_PUBLIC_HOSTNAME ?? "127.0.0.1";
 const DevelopmentSecrets = Schema.Struct({
 	auth_token: Schema.optional(Schema.String),
 });
@@ -169,14 +170,14 @@ export default defineConfig({
 		],
 	},
 	server: {
+		/** The runner supplies one exact Portless hostname; no wildcard is admitted. */
+		allowedHosts: [FrontendPublicHostname],
 		fs: {
 			allow: [WorkspaceSource("../..")],
 		},
 		/**
-		 * Bound to the explicit IPv4 loopback so the origin the pairing
-		 * capability lands on (`ae open --origin http://127.0.0.1:4849`) is
-		 * exactly the origin the listener answers; the default `localhost` can
-		 * resolve to `::1` only.
+		 * Bound to explicit IPv4 loopback; Portless owns the browser-facing
+		 * HTTPS listener and forwards only the runner's exact hostname here.
 		 */
 		host: "127.0.0.1",
 		port: FrontendDevelopmentPort,
@@ -184,16 +185,18 @@ export default defineConfig({
 			/**
 			 * The whole Forge API surface — pairing, instance listing, and the
 			 * `/api/ws` control/stream upgrade — forwards to the development
-			 * Forge. `Host` is deliberately not rewritten: the Forge compares the
-			 * browser's `Origin` against `Host`, so the untouched Vite loopback
-			 * pair passes its same-origin policy without any server-side change.
+			 * Forge. Rewriting `Host` to the private target keeps the proxy hop
+			 * loopback-only; the Forge separately admits the exact public editor
+			 * origin supplied by the runner.
 			 */
 			"/api": {
+				changeOrigin: true,
 				target: ForgeDevelopmentOrigin,
 				ws: true,
 			},
 			/** The dev-instance badge and connection gate probe Forge health. */
 			"/health": {
+				changeOrigin: true,
 				target: ForgeDevelopmentOrigin,
 			},
 		},

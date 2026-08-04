@@ -5,6 +5,8 @@ import { Schema } from "effect";
  * through SSH forwarding until the authenticated TLS listener exists.
  */
 export const ForgeConfigSchema = Schema.Struct({
+	/** Exact reverse-proxy hostnames that may reach the loopback listener. */
+	allowed_hostnames: Schema.Array(Schema.String),
 	allowed_origins: Schema.Array(Schema.String),
 	auth_token: Schema.optional(Schema.String.check(Schema.isMinLength(32))),
 	database_path: Schema.String,
@@ -33,6 +35,7 @@ export type ForgeConfig = typeof ForgeConfigSchema.Type;
 export type ForgeConfigInput = Readonly<{
 	readonly database_path: string;
 	readonly instance_id: string;
+	readonly allowed_hostnames?: ReadonlyArray<string>;
 	readonly allowed_origins?: ReadonlyArray<string>;
 	readonly auth_token?: string;
 	readonly development?: boolean;
@@ -47,6 +50,7 @@ export type ForgeConfigInput = Readonly<{
 export function decode_forge_config(input: ForgeConfigInput): ForgeConfig {
 	return Schema.decodeUnknownSync(ForgeConfigSchema)({
 		...input,
+		allowed_hostnames: input.allowed_hostnames ?? [],
 		allowed_origins: input.allowed_origins ?? ["artisan://app"],
 		listen_host: input.listen_host ?? "127.0.0.1",
 		listen_port: input.listen_port ?? 0,
