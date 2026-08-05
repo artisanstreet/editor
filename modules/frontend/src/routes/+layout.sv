@@ -46,6 +46,7 @@
 	import EditorFilePanel from "./components/editor-file-panel.sv";
 	import SectionedPanel from "./components/sectioned-panel.sv";
 	import ThreadPanel from "./components/thread-panel.sv";
+	import WorkspaceHeader from "./components/workspace-header.sv";
 
 	let { children } = $props();
 	let desktop_runtime = $state(false);
@@ -84,13 +85,12 @@
 	 * There is no fallback to a route-asserted or arbitrary attached project, so
 	 * routes outside an authoritative workspace keep the surface switch closed.
 	 */
-	const active_workspace_id = $derived.by(() => {
-		if (active_thread !== undefined) return active_thread.primary_project?.project_id;
-		if (is_thread && draft_state._tag !== "Uninitialized") {
-			return draft_state.project?.project_id;
-		}
+	const active_project = $derived.by(() => {
+		if (active_thread !== undefined) return active_thread.primary_project;
+		if (is_thread && draft_state._tag !== "Uninitialized") return draft_state.project;
 		return undefined;
 	});
+	const active_workspace_id = $derived(active_project?.project_id);
 	const client = yield* ArtisanClient;
 	const session_defaults = yield* SessionDefaultsController;
 
@@ -266,13 +266,24 @@
 	<EditorFilePanel />
 {/snippet}
 
+{#snippet workspace_header()}
+	<WorkspaceHeader project={active_project} />
+{/snippet}
+
 <div class="flex h-dvh min-h-0 flex-col bg-background">
 	{#if desktop_runtime}
+		<!--
+			The bundled shell hides the native titlebar, so this strip is the window
+			frame: it drags the window, the overlay controls float over its right
+			end, and the workspace identity sits centered where a title belongs.
+			Symmetric side insets keep that center honest under the controls.
+		-->
 		<div
-			aria-hidden="true"
-			class="h-10 shrink-0 bg-background"
+			class="flex h-10 shrink-0 items-center justify-center bg-background px-36"
 			style="-webkit-app-region: drag;"
-		></div>
+		>
+			{@render workspace_header()}
+		</div>
 	{/if}
 	<div class="relative min-h-0 flex-1">
 		<div
@@ -284,6 +295,7 @@
 					{primary}
 					{surface}
 					{threads}
+					header={desktop_runtime ? undefined : workspace_header}
 					show_thread_hover_rail={is_thread_route}
 					thread_id={active_thread?.thread_id}
 					workspace_id={active_workspace_id}

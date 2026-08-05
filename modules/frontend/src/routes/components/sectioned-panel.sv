@@ -43,6 +43,7 @@
 	let account_open = $state(false);
 
 	let {
+		header,
 		primary,
 		secondary,
 		show_thread_hover_rail,
@@ -51,6 +52,12 @@
 		threads,
 		workspace_id,
 	}: {
+		/**
+		 * The workspace identity band across the primary card's top. Web only:
+		 * the bundled shell carries the same identity in its window frame, so the
+		 * layout passes nothing there rather than naming the workspace twice.
+		 */
+		header?: Snippet;
 		primary: Snippet;
 		secondary?: Snippet;
 		/** Whether the canonical conversation route owns the transcript proximity rail. */
@@ -242,9 +249,16 @@
 			class="docs-responsive-surfaces flex h-full min-h-0 flex-row items-stretch justify-between gap-2 overflow-visible"
 		>
 			<section
-				class="relative min-h-0 min-w-0 flex-1 rounded-3xl bg-linear-to-b from-surface-125 to-surface-75 p-1 card dark:from-surface-900 dark:to-surface-925"
+				class="relative flex min-h-0 min-w-0 flex-1 flex-col rounded-3xl bg-linear-to-b from-surface-125 to-surface-75 p-1 card dark:from-surface-900 dark:to-surface-925"
 			>
-				{@render primary()}
+				{#if header}
+					<div class="flex h-10 shrink-0 items-center justify-center px-4">
+						{@render header()}
+					</div>
+				{/if}
+				<div class="min-h-0 flex-1">
+					{@render primary()}
+				</div>
 				<!--
 					The transcript's dead left margin doubles as a proximity reveal
 					for every thread; it only exists on the threads surface, where

@@ -4,11 +4,8 @@
 	import { RunBrowserDom } from "$lib/browser/dom";
 	import type { Project, ProjectRepository } from "@artisan/protocol";
 	import { ShortProjectPath } from "$lib/root/project-path";
-	import {
-		RepositoryLinkLabel,
-		RepositoryMarkClass,
-		RepositoryMarkFor,
-	} from "$lib/vcs/presentation";
+	import { RepositoryLinkLabel } from "$lib/vcs/labels";
+	import { RepositoryMarkClass, RepositoryMarkFor } from "$lib/vcs/presentation";
 
 	let {
 		project,

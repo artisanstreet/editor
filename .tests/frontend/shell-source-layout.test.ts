@@ -390,9 +390,10 @@ describe("Barekey docs shell reset", () => {
 		const layout = Read("modules/frontend/src/routes/+layout.sv");
 		const identity = Read("modules/frontend/src/lib/editor/workspace-identity.ts");
 		expect(layout).not.toContain('searchParams.get("workspace")');
-		expect(layout).toContain("active_thread.primary_project?.project_id");
+		expect(layout).toContain("return active_thread.primary_project;");
 		expect(layout).toContain("ResolveThreadRoute(threads, active_route_thread_id)");
-		expect(layout).toContain("draft_state.project?.project_id");
+		expect(layout).toContain("return draft_state.project;");
+		expect(layout).toContain("active_project?.project_id");
 		expect(layout).toContain("workspace_id={active_workspace_id}");
 		expect(identity).not.toContain("projects[0]");
 		expect(panel).toContain("EditorRoutePath(");

@@ -40,21 +40,3 @@ export const RepositoryMarkFor = (host: RepositoryHost | undefined): RepositoryM
 export const RepositoryMarkClass = (mark: RepositoryMark, size = "size-4") =>
 	mark.monochrome ? `${size} shrink-0 dark:invert` : `${size} shrink-0`;
 
-/**
- * Reduces a repository web URL to the repository's own name. The owner is
- * dropped: the row is already scoped to one project, so the name alone is what
- * distinguishes it, and it survives truncation in a narrow panel.
- *
- * @param web_url - An https page derived from a remote.
- * @returns The repository name, or the host when the URL carries no path.
- */
-export const RepositoryLinkLabel = (web_url: string): string => {
-	try {
-		const parsed = new URL(web_url);
-		const segments = parsed.pathname.split("/").filter((segment) => segment !== "");
-
-		return segments.at(-1) ?? parsed.hostname;
-	} catch {
-		return web_url;
-	}
-};
