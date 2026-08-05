@@ -30,6 +30,10 @@ pub struct InstallOptions {
     pub install_root: PathBuf,
     pub trust: TrustKey,
     pub run_setup: bool,
+    /// Whether this install may own the `artisan://` handler. A secondary
+    /// install beside an existing installation must leave the handler with
+    /// its current owner rather than fail on finding it taken.
+    pub register_protocol: bool,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -97,7 +101,11 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         if !bootstrap.is_file() {
             return Err(BootstrapError::MissingBootstrap(bootstrap));
         }
-        let protocol = prepare_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?;
+        let protocol = if options.register_protocol {
+            prepare_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?
+        } else {
+            None
+        };
         activate(
             &options.install_root,
             &existing_release,
@@ -106,7 +114,9 @@ pub async fn install(options: InstallOptions) -> Result<()> {
             &stable_ae,
             protocol.as_ref(),
         )?;
-        apply_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?;
+        if options.register_protocol {
+            apply_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?;
+        }
         invoke_ae(&existing_release, &["--version"])?;
         return Ok(());
     }
@@ -166,7 +176,11 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         if !bootstrap.is_file() {
             return Err(BootstrapError::MissingBootstrap(bootstrap));
         }
-        let protocol = prepare_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?;
+        let protocol = if options.register_protocol {
+            prepare_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?
+        } else {
+            None
+        };
         activate(
             &options.install_root,
             &release,
@@ -175,7 +189,9 @@ pub async fn install(options: InstallOptions) -> Result<()> {
             &stable_ae,
             protocol.as_ref(),
         )?;
-        apply_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?;
+        if options.register_protocol {
+            apply_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?;
+        }
         if options.run_setup && options.components.contains(&"cli") {
             invoke_ae(&release, &["setup"])?;
             invoke_ae(&release, &["start"])?;

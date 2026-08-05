@@ -64,6 +64,11 @@ struct Arguments {
     #[arg(long, global = true)]
     skip_setup: bool,
 
+    /// Leave the `artisan://` handler with its current owner. For a secondary
+    /// install beside an existing installation.
+    #[arg(long, global = true)]
+    skip_protocol: bool,
+
     /// Ask a detached helper to remove this temporary executable after exit.
     #[arg(long, global = true)]
     self_cleanup: bool,
@@ -137,6 +142,7 @@ async fn run() -> Result<()> {
         install_root: root,
         trust,
         run_setup: !arguments.skip_setup,
+        register_protocol: !arguments.skip_protocol,
     })
     .await?;
 
@@ -165,6 +171,7 @@ fn make_install_options(
         install_root,
         trust,
         run_setup,
+        register_protocol: !arguments.skip_protocol,
     }
 }
 
