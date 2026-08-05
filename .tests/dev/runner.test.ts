@@ -12,6 +12,7 @@ import {
 	hash_instance_offset,
 	make_forge_environment,
 	make_dev_lane_definitions,
+	make_portless_environment,
 	make_portless_base_names,
 	parse_portless_endpoint,
 	parse_portless_route_listing,
@@ -66,6 +67,18 @@ describe("dev runner modes", () => {
 });
 
 describe("Portless development routes", () => {
+	it("makes a standard Windows OpenSSL installation available to Portless", () => {
+		const environment = make_portless_environment({ Path: "C:\\existing", TEST: "1" });
+		const environment_path = environment.Path ?? environment.PATH ?? "";
+
+		if (process.platform === "win32" && environment_path.includes("OpenSSL-Win64\\bin")) {
+			expect(environment.OPENSSL_CONF).toMatch(/openssl\.(cfg|cnf)$/u);
+			expect(environment_path.startsWith("C:\\Program Files\\OpenSSL-Win64\\bin")).toBe(true);
+		} else {
+			expect(environment).toEqual({ Path: "C:\\existing", TEST: "1" });
+		}
+	});
+
 	it("decodes the canonical routes and preserves Portless's worktree prefix", () => {
 		expect(parse_portless_endpoint("editor", "https://editor.localhost\n")).toEqual({
 			alias_name: "editor",

@@ -20,7 +20,7 @@ import {
 import { createInterface } from "node:readline";
 import { createRequire } from "node:module";
 import { createConnection } from "node:net";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -46,6 +46,62 @@ const base_web_port = 4849;
 const max_instance_offset = 3000;
 const max_dashboard_pending_events = 1_000;
 const dependency_require = createRequire(import.meta.url);
+
+const windows_openssl_installations = [
+	join("C:", "Program Files", "OpenSSL-Win64"),
+	join("C:", "Program Files (x86)", "OpenSSL-Win32"),
+	join("C:", "Program Files", "OpenSSL"),
+] as const;
+
+/**
+ * Winget's OpenSSL installer may leave its executable outside the inherited
+ * PATH. Portless invokes `openssl` by name, so make the standard Windows
+ * installation discoverable for the child process without mutating the shell.
+ */
+export const make_portless_environment = (
+	environment: Readonly<Record<string, string | undefined>>,
+): Readonly<Record<string, string>> => {
+	const inherited_path = environment.Path ?? environment.PATH ?? "";
+	if (process.platform !== "win32") {
+		return Object.fromEntries(
+			Object.entries(environment).filter(
+				(entry): entry is [string, string] => entry[1] !== undefined,
+			),
+		);
+	}
+
+	const installation = windows_openssl_installations.find((root) =>
+		existsSync(join(root, "bin", "openssl.exe")),
+	);
+	if (installation === undefined) {
+		return Object.fromEntries(
+			Object.entries(environment).filter(
+				(entry): entry is [string, string] => entry[1] !== undefined,
+			),
+		);
+	}
+
+	const openssl_bin = join(installation, "bin");
+	const openssl_config = [
+		join(openssl_bin, "openssl.cnf"),
+		join(openssl_bin, "openssl.cfg"),
+		join(installation, "openssl.cnf"),
+	].find((candidate) => existsSync(candidate));
+	const path_key = environment.Path !== undefined ? "Path" : "PATH";
+	return {
+		...Object.fromEntries(
+			Object.entries(environment).filter(
+				(entry): entry is [string, string] => entry[1] !== undefined,
+			),
+		),
+		[path_key]: [openssl_bin, inherited_path]
+			.filter((value) => value.length > 0)
+			.join(delimiter),
+		...(environment.OPENSSL_CONF === undefined && openssl_config !== undefined
+			? { OPENSSL_CONF: openssl_config }
+			: {}),
+	};
+};
 
 const resolve_bun_executable = (): string => {
 	const package_path = dependency_require.resolve("bun/package.json");
@@ -447,14 +503,14 @@ if (runner_is_entry) {
 	};
 
 	const portless_enabled = should_use_portless(process.env);
-	const portless_environment = {
+	const portless_environment = make_portless_environment({
 		...process.env,
 		/** Artisan's development contract is the stable HTTPS `.localhost` pair. */
 		NO_COLOR: "1",
 		PORTLESS_HTTPS: "1",
 		PORTLESS_LAN: "0",
 		PORTLESS_TLD: "localhost",
-	};
+	});
 	let portless_entry: string | undefined;
 	const registered_portless_aliases: Array<{
 		readonly endpoint: DevSurfaceEndpoint;

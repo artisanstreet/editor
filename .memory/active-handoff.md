@@ -1,6 +1,6 @@
 # Active Branch Handoff
 
-Last updated: 2026-08-04. Branch continuity only. Durable verified status is in
+Last updated: 2026-08-05. Branch continuity only. Durable verified status is in
 [`docs/status/backend-completion-matrix.md`](../docs/status/backend-completion-matrix.md).
 
 ## Working State
@@ -88,6 +88,11 @@ Last updated: 2026-08-04. Branch continuity only. Durable verified status is in
 - Portless runner verification: 36 focused tests, workspace `tsc`, frontend
   production build, Forge validation build, scoped lint, and format check pass;
   independent lifecycle/security re-review found no remaining issue.
+- Windows dev runner now discovers standard Shining Light OpenSSL installs for
+  Portless, including the executable PATH and `openssl.cfg` configuration;
+  focused runner tests pass. The current dirty tree remains protected user
+  work. Repository-wide `tsc` still reports the pre-existing WebSocket client
+  type mismatch in `modules/transport/src/websocket/client.ts`.
 
 ## Dirty-Tree Integration Notes
 
