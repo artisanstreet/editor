@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, or } from "drizzle-orm";
+import { and, desc, eq, inArray, notInArray, or } from "drizzle-orm";
 import { Effect, Layer, Schema } from "effect";
 
 import {
@@ -43,7 +43,7 @@ import {
 	OrchestrationRuns,
 } from "../tables";
 import { RuntimeMetadata } from "../../runtime/metadata";
-import { ApplyEngineObservation } from "../../conversation/index.ts";
+import { ApplyEngineObservation, CancelPendingInteractions } from "../../conversation/index.ts";
 import type { IntakeAssessment } from "../../orchestration/intake-policy";
 import { PersistSurfaceProjection } from "../../surfaces/surface-projection";
 import { MakeCommandAcceptor } from "./acceptance";
@@ -816,6 +816,60 @@ export const OrchestrationRepositoryLive = Layer.effect(
 				const recovery = yield* database.client.transaction((transaction) =>
 					Effect.gen(function* () {
 						const updated_at = yield* metadata.Now;
+
+						/**
+						 * Heals interactions that predate terminal-run release: a
+						 * requested approval whose run already ended can never be
+						 * answered, and leaving it requested lets stale responses
+						 * enter the outbox with no run to deliver them to.
+						 */
+						const released = yield* transaction
+							.update(OrchestrationInteractions)
+							.set({ state: "cancelled", updated_at })
+							.where(
+								and(
+									eq(OrchestrationInteractions.state, "requested"),
+									inArray(
+										OrchestrationInteractions.run_id,
+										transaction
+											.select({ run_id: OrchestrationRuns.run_id })
+											.from(OrchestrationRuns)
+											.where(
+												notInArray(OrchestrationRuns.status, [
+													"queued",
+													"running",
+													"waiting",
+													"interrupted",
+												]),
+											),
+									),
+								),
+							)
+							.returning({ run_id: OrchestrationInteractions.run_id });
+
+						for (const released_run_id of new Set(
+							released.map((interaction) => interaction.run_id),
+						)) {
+							const [released_run] = yield* transaction
+								.select({ thread_id: OrchestrationRuns.thread_id })
+								.from(OrchestrationRuns)
+								.where(eq(OrchestrationRuns.run_id, released_run_id))
+								.limit(1);
+
+							if (!released_run) continue;
+
+							yield* CancelPendingInteractions(
+								transaction,
+								{
+									occurred_at: updated_at,
+									run_id: released_run_id,
+									thread_id: released_run.thread_id,
+								},
+								`run:${released_run_id}`,
+								`recovery:${released_run_id}`,
+							);
+						}
+
 						const stranded = yield* transaction
 							.select({ run_id: OrchestrationOutbox.run_id })
 							.from(OrchestrationOutbox)

@@ -11,6 +11,7 @@ import type { CommandEnvelope } from "@artisan/protocol";
 import type { AuthoritativeCommandEnvelope } from "../../modules/backend/src/persistence/orchestration/message-command";
 import { make_backend_runtime, ThreadErasure } from "@artisan/backend";
 
+import { ConversationReadModel } from "../../modules/backend/src/conversation";
 import { OrchestrationRepository } from "../../modules/backend/src/persistence/orchestration/repository";
 import type { IntakeAssessment } from "../../modules/backend/src/orchestration/intake-policy";
 import {
@@ -726,6 +727,80 @@ describe("orchestration repository hardening", () => {
 				{ interaction_id: "approval_1", state: "cancelled" },
 			]);
 			expect(late_response._tag).toBe("Failure");
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("heals interactions left requested by a run that terminated before release existed", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			migrations_path,
+		});
+
+		try {
+			await runtime.runPromise(SetupThread("thread_1"));
+			const started = await runtime.runPromise(
+				Accept(
+					make_command("start_1", "thread_1", {
+						engine_id: "engine_1",
+						text: "Start",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			await runtime.runPromise(
+				Effect.gen(function* () {
+					const repository = yield* OrchestrationRepository;
+
+					yield* repository.RecordObservation({
+						_tag: "approval",
+						approval_id: "approval_1",
+						artisan_run_id: started.run_id,
+						description: "Run the build",
+						observation_id: "approval_requested",
+						raw: { engine_id: "engine_1", frame: null, transport: "fixture" },
+						request: { command: "pnpm build", kind: "command" },
+						sequence: 1,
+						state: "requested",
+					});
+				}),
+			);
+			/** A pre-release database: the only run ended without touching its interactions. */
+			await runtime.runPromise(
+				Read((database) => database.update(OrchestrationRuns).set({ status: "cancelled" })),
+			);
+			await runtime.runPromise(
+				Effect.gen(function* () {
+					const repository = yield* OrchestrationRepository;
+
+					yield* repository.ClaimNativeRecoveries();
+				}),
+			);
+			const [interactions, availability] = await runtime.runPromise(
+				Effect.all([
+					Read((database) => database.select().from(OrchestrationInteractions)),
+					Effect.gen(function* () {
+						const read_model = yield* ConversationReadModel;
+
+						return yield* read_model.ReadSnapshot("thread_1");
+					}),
+				]),
+			);
+
+			expect(interactions).toMatchObject([
+				{ interaction_id: "approval_1", state: "cancelled" },
+			]);
+			expect(availability.status).toBe("available");
+			if (availability.status !== "available") return;
+			expect(
+				availability.snapshot.items.find((item) => item.type === "approval"),
+			).toMatchObject({
+				interaction_id: "approval_1",
+				resolution: "Cancelled",
+				state: "cancelled",
+			});
 		} finally {
 			await runtime.dispose();
 		}
