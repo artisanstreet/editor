@@ -51,6 +51,144 @@ const Delta = (observation_id: string, sequence: number, delta: string): EngineO
 	}) as EngineObservation;
 
 describe("conversation projection", () => {
+	it("merges terminal, tool, and search lifecycle frames onto their provider activity", async () => {
+		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
+		try {
+			const availability = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const read_model = yield* ConversationReadModel;
+					yield* database.client.insert(Threads).values({
+						created_at: "2026-07-24T00:00:00.000Z",
+						last_activity_at: "2026-07-24T00:00:00.000Z",
+						thread_id: "thread_1",
+						title: "Conversation",
+						updated_at: "2026-07-24T00:00:00.000Z",
+					});
+					const context = {
+						occurred_at: "2026-07-24T00:00:01.000Z",
+						run_id: "run_1",
+						thread_id: "thread_1",
+					};
+					const observations: ReadonlyArray<EngineObservation> = [
+						{
+							_tag: "turn_state",
+							artisan_run_id: "run_1",
+							observation_id: "turn_started",
+							raw: { engine_id: "codex", frame: {}, transport: "test" },
+							sequence: 0,
+							state: "started",
+							turn_id: "provider_turn_1",
+						},
+						{
+							_tag: "terminal_activity",
+							activity_id: "terminal_1",
+							artisan_run_id: "run_1",
+							command: "pnpm install",
+							observation_id: "terminal_started",
+							raw: { engine_id: "codex", frame: {}, transport: "test" },
+							sequence: 1,
+							state: "started",
+						},
+						{
+							_tag: "terminal_activity",
+							activity_id: "terminal_1",
+							artisan_run_id: "run_1",
+							observation_id: "terminal_output",
+							output: "resolved dependencies",
+							raw: { engine_id: "codex", frame: {}, transport: "test" },
+							sequence: 2,
+							state: "output",
+						},
+						{
+							_tag: "terminal_activity",
+							activity_id: "terminal_1",
+							artisan_run_id: "run_1",
+							exit_code: 0,
+							observation_id: "terminal_completed",
+							raw: { engine_id: "codex", frame: {}, transport: "test" },
+							sequence: 3,
+							state: "completed",
+						},
+						{
+							_tag: "tool",
+							action: "started",
+							artisan_run_id: "run_1",
+							detail: "src/app.ts",
+							observation_id: "tool_started",
+							raw: { engine_id: "codex", frame: {}, transport: "test" },
+							sequence: 4,
+							tool_id: "tool_1",
+							tool_name: "Read file",
+						},
+						{
+							_tag: "tool",
+							action: "completed",
+							artisan_run_id: "run_1",
+							observation_id: "tool_completed",
+							raw: { engine_id: "codex", frame: {}, transport: "test" },
+							sequence: 5,
+							tool_id: "tool_1",
+							tool_name: "Read file",
+						},
+						{
+							_tag: "search",
+							artisan_run_id: "run_1",
+							observation_id: "search_started",
+							query: "Effect Layer",
+							raw: { engine_id: "codex", frame: {}, transport: "test" },
+							search_id: "search_1",
+							sequence: 6,
+							state: "started",
+						},
+						{
+							_tag: "search",
+							artisan_run_id: "run_1",
+							observation_id: "search_completed",
+							query: "Effect Layer",
+							raw: { engine_id: "codex", frame: {}, transport: "test" },
+							search_id: "search_1",
+							sequence: 7,
+							state: "completed",
+						},
+					];
+					yield* database.client.transaction((transaction) =>
+						Effect.forEach(observations, (observation) =>
+							ApplyEngineObservation(transaction, observation, context),
+						),
+					);
+					return yield* read_model.ReadSnapshot("thread_1");
+				}),
+			);
+
+			expect(availability.status).toBe("available");
+			if (availability.status !== "available") return;
+			const activities = availability.snapshot.items.filter(
+				(item) => item.type === "activity",
+			);
+			expect(activities).toHaveLength(3);
+			expect(activities).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						detail: "pnpm install",
+						id: "activity:terminal_1",
+						status: "completed",
+					}),
+					expect.objectContaining({ id: "activity:tool_1", status: "completed" }),
+					expect.objectContaining({ id: "activity:search_1", status: "completed" }),
+				]),
+			);
+			expect(
+				availability.snapshot.items.find((item) => item.type === "work_session"),
+			).toMatchObject({
+				responded_at: "2026-07-24T00:00:01.000Z",
+				type: "work_session",
+			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("reads exact image bytes only for the attachment's owning thread", async () => {
 		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
 		try {
@@ -242,6 +380,18 @@ describe("conversation projection", () => {
 			expect(result.snapshot.snapshot.items.map((item) => item.type)).toEqual(
 				expect.arrayContaining(["work_session", "change_set", "file_change"]),
 			);
+			/**
+			 * A mutation earns a live trace row beside its held-back change items,
+			 * or every edit is invisible for the length of the run.
+			 */
+			expect(
+				result.snapshot.snapshot.items.find((item) => item.id === "activity:observation_5"),
+			).toMatchObject({
+				detail: "src/app.ts",
+				kind: "file_edit",
+				label: "Edited file",
+				type: "activity",
+			});
 			expect(result.patches.map((patch) => patch.type)).toContain("item_append");
 			expect(result.patches.map((patch) => patch.sequence)).toEqual(
 				result.patches.map((_, index) => index + 1),

@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+import { conversation_body_text_limit } from "@artisan/protocol";
+
 export class ConversationProjectionError extends Error {
 	readonly _tag = "ConversationProjectionError";
 }
@@ -41,6 +43,13 @@ export const source_refs = (
 ];
 
 export const text = (value: string) => value.slice(0, 4_096);
+
+/**
+ * Bounds a message body rather than a label. Cutting a reply at label length
+ * ends the turn mid-sentence with nothing saying it was cut, so bodies keep the
+ * far wider protocol bound.
+ */
+export const body_text = (value: string) => value.slice(0, conversation_body_text_limit);
 
 export const optional_text = (value: string | undefined) => {
 	const normalized = value?.trim();

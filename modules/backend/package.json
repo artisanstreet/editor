@@ -9,7 +9,7 @@
 		"@artisan/catalog": "workspace:*",
 		"@artisan/engines": "workspace:*",
 		"@artisan/protocol": "workspace:*",
-		"@decimalturn/toml-patch": "2.0.0",
+		"@decimalturn/toml-patch": "3.0.1",
 		"@effect/platform-node-shared": "4.0.0-beta.97",
 		"@effect/sql-sqlite-node": "4.0.0-beta.97",
 		"diff": "9.0.0",

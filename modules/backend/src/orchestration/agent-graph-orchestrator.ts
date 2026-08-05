@@ -13,6 +13,7 @@ import { GlobalGuidanceService } from "../guidance/service";
 import { RuntimeMetadata } from "../runtime/metadata";
 import { MakeThreadDispatchFence } from "../threads/internal/thread-dispatch-fence";
 import { OrchestrationRepository } from "../persistence/orchestration/repository";
+import { ProductInstructions } from "./product-instructions";
 import {
 	AgentGraphRepository,
 	type AcceptedAgentGraphCommand,
@@ -70,6 +71,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 	Effect.gen(function* () {
 		const engines = yield* EngineRegistry;
 		const guidance = yield* GlobalGuidanceService;
+		const product_instructions = yield* ProductInstructions;
 		const metadata = yield* RuntimeMetadata;
 		const session_policies = yield* OrchestrationRepository;
 		const repository = yield* AgentGraphRepository;
@@ -201,6 +203,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 				let transferred = false;
 
 				return yield* Effect.gen(function* () {
+					const resolved_product_instructions = yield* product_instructions.Resolve;
 					const opened = yield* engine.value
 						.Open({
 							_tag: "start",
@@ -208,6 +211,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 							...(Option.isSome(resolved_guidance.value)
 								? { global_guidance: resolved_guidance.value.value }
 								: {}),
+							product_instructions: resolved_product_instructions,
 							initial_text: [
 								work.instructions,
 								`Expected result: ${work.expected_result}`,

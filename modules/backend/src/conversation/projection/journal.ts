@@ -3,7 +3,7 @@ import { Effect } from "effect";
 import type { EventEnvelope } from "@artisan/protocol";
 
 import type { DatabaseClient } from "../../persistence/database";
-import { item_base, lifecycle, source_refs, text, turn_base } from "./domain";
+import { body_text, item_base, lifecycle, source_refs, turn_base } from "./domain";
 import { Admit, EnsureThread, UpsertItem, UpsertTurn } from "./entities";
 
 /** Applies journal facts which are canonical user-visible conversation input. */
@@ -37,17 +37,24 @@ export const ApplyJournalEvent = (transaction: DatabaseClient, event: EventEnvel
 			});
 
 		if (payload.type === "thread.model_transition") {
+			const transition_state = payload.state ?? "completed";
 			yield* UpsertItem(
 				transaction,
 				event.thread_id,
 				{
+					/**
+					 * Keyed on the run being handed to, not on the event: the start and
+					 * the landing are two events describing one handoff, and the second
+					 * has to complete the item the first opened rather than add a row.
+					 */
 					...item_base(
-						`model-transition:${event.message_id}`,
+						`model-transition:${run_id}`,
 						`run:${run_id}`,
 						context,
-						"completed",
+						transition_state === "started" ? "active" : "completed",
 						event.message_id,
 					),
+					state: transition_state,
 					continuation: payload.continuation,
 					source_engine_id: payload.source.engine_id,
 					...(payload.source.model_id === undefined
@@ -122,7 +129,7 @@ export const ApplyJournalEvent = (transaction: DatabaseClient, event: EventEnvel
 				...(payload.attachments === undefined ? {} : { attachments: payload.attachments }),
 				...(payload.content === undefined ? {} : { content: payload.content }),
 				type: "user_message",
-				text: text(payload.text) || "Message",
+				text: body_text(payload.text) || "Message",
 				source_refs: event_source_refs(payload.message_id),
 			},
 			source,

@@ -38,6 +38,8 @@ import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const now = "2026-07-30T10:00:00.000Z";
 
+let minted = 0;
+
 const make_runtime = async () => {
 	const directory = await mkdtemp(join(tmpdir(), "artisan-model-transition-"));
 	const database = make_database_layer({
@@ -48,7 +50,8 @@ const make_runtime = async () => {
 		RuntimeMetadata,
 		RuntimeMetadata.of({
 			instance_id: "backend-test",
-			MakeId: (prefix) => Effect.succeed(`${prefix}-test`),
+			/** Distinct per call: one handoff appends two events, and both need their own id. */
+			MakeId: (prefix) => Effect.sync(() => `${prefix}-test-${(minted += 1)}`),
 			Now: Effect.succeed(now),
 		}),
 	);
@@ -217,9 +220,14 @@ describe("thread model transition journal projection", () => {
 					target_run_id: "run-2",
 				}),
 			);
+			/** The handoff opens and lands; the landing is what the item settles on. */
 			const [event] = (
 				await runtime.runPromise(database.client.select().from(JournalEvents))
-			).filter((candidate) => candidate.event_type === "thread.model_transition");
+			).filter(
+				(candidate) =>
+					candidate.event_type === "thread.model_transition" &&
+					JSON.parse(candidate.payload_json).state === "completed",
+			);
 			expect(event).toMatchObject({
 				causation_id: "command-2",
 				correlation_id: "command-2",
@@ -230,6 +238,7 @@ describe("thread model transition journal projection", () => {
 			expect(JSON.parse(event!.payload_json)).toEqual({
 				continuation: "native",
 				source: { engine_id: "claude", model_id: "claude-sonnet" },
+				state: "completed",
 				target: { engine_id: "claude", model_id: "target-model" },
 				type: "thread.model_transition",
 			});
@@ -240,26 +249,34 @@ describe("thread model transition journal projection", () => {
 				continuation: "native",
 				source_engine_id: "claude",
 				source_model_id: "claude-sonnet",
+				state: "completed",
 				target_engine_id: "claude",
 				target_model_id: "target-model",
 				type: "model_transition",
 			});
-			const replay_event = Schema.decodeUnknownSync(EventEnvelope)({
-				causation_id: event!.causation_id,
-				correlation_id: event!.correlation_id,
-				journal_sequence: event!.sequence,
-				kind: "event",
-				message_id: event!.event_id,
-				origin: "backend",
-				payload: JSON.parse(event!.payload_json),
-				protocol_version: 1,
-				run_id: event!.run_id!,
-				schema_version: 1,
-				sequence: event!.stream_sequence,
-				sent_at: event!.occurred_at,
-				stream_id: event!.stream_id,
-				thread_id: event!.thread_id,
-			});
+			/** One handoff is two events, so a faithful rebuild replays both in order. */
+			const replay_events = (
+				await runtime.runPromise(database.client.select().from(JournalEvents))
+			)
+				.filter((candidate) => candidate.event_type === "thread.model_transition")
+				.map((candidate) =>
+					Schema.decodeUnknownSync(EventEnvelope)({
+						causation_id: candidate.causation_id,
+						correlation_id: candidate.correlation_id,
+						journal_sequence: candidate.sequence,
+						kind: "event",
+						message_id: candidate.event_id,
+						origin: "backend",
+						payload: JSON.parse(candidate.payload_json),
+						protocol_version: 1,
+						run_id: candidate.run_id!,
+						schema_version: 1,
+						sequence: candidate.stream_sequence,
+						sent_at: candidate.occurred_at,
+						stream_id: candidate.stream_id,
+						thread_id: candidate.thread_id,
+					}),
+				);
 
 			await runtime.runPromise(
 				database.client.transaction((transaction) =>
@@ -269,11 +286,13 @@ describe("thread model transition journal projection", () => {
 						yield* transaction.delete(ConversationItems);
 						yield* transaction.delete(ConversationTurns);
 						yield* transaction.delete(ConversationThreads);
-						yield* ApplyJournalEvent(transaction, replay_event) as Effect.Effect<
-							void,
-							never,
-							never
-						>;
+						for (const replay_event of replay_events) {
+							yield* ApplyJournalEvent(transaction, replay_event) as Effect.Effect<
+								void,
+								never,
+								never
+							>;
+						}
 					}),
 				),
 			);
@@ -400,6 +419,140 @@ describe("thread model transition journal projection", () => {
 					(event) => event.event_type === "thread.model_transition",
 				),
 			).toEqual([]);
+		}));
+
+	/**
+	 * A handoff takes time: the next engine has to accept the thread before it
+	 * can answer. Both ends are announced so the thread can say it is changing
+	 * hands rather than looking like the new model is already thinking.
+	 */
+	it("announces the handoff opening and completes the same item when it lands", () =>
+		with_runtime(async (runtime) => {
+			await runtime.runPromise(Seed({ engine_id: "codex", model_id: "gpt-5" }));
+			const { database, repository } = await services(runtime);
+			await runtime.runPromise(
+				Effect.gen(function* () {
+					yield* database.client.insert(ThreadContinuationLaunches).values({
+						created_at: now,
+						handoff_id: "handoff-2",
+						request_id: "command-2",
+						source_kind: "portable",
+						source_run_id: "run-1",
+						state: "prepared",
+						target_engine_id: "codex",
+						target_model_id: "gpt-5",
+						target_run_id: "run-2",
+						thread_id: "thread-1",
+						updated_at: now,
+					});
+					yield* repository.MarkOpening("run-2");
+				}),
+			);
+			const opening = (
+				await runtime.runPromise(database.client.select().from(JournalEvents))
+			).filter((event) => event.event_type === "thread.model_transition");
+
+			expect(opening).toHaveLength(1);
+			expect(JSON.parse(opening[0]!.payload_json)).toMatchObject({ state: "started" });
+
+			await runtime.runPromise(
+				repository.BindTarget({
+					command_id: "command-2",
+					model_id: "gpt-5",
+					native_thread_id: "target-native",
+					resume_token: { native_thread_id: "target-native" },
+					target_run_id: "run-2",
+				}),
+			);
+			const both = (
+				await runtime.runPromise(database.client.select().from(JournalEvents))
+			).filter((event) => event.event_type === "thread.model_transition");
+
+			expect(both.map((event) => JSON.parse(event.payload_json).state)).toEqual([
+				"started",
+				"completed",
+			]);
+			/** One handoff, one row: the landing completes what the opening announced. */
+			const items = (
+				await runtime.runPromise(database.client.select().from(ConversationItems))
+			).filter((item) => item.item_id.startsWith("model-transition:"));
+
+			expect(items).toHaveLength(1);
+		}));
+
+	/**
+	 * A run started on its engine's default keeps no model id. Treating that
+	 * silence as a different model announced a switch nobody made.
+	 */
+	it("does not append a transition when the source never recorded its model", () =>
+		with_runtime(async (runtime) => {
+			await runtime.runPromise(Seed({ engine_id: "claude", model_id: "claude-sonnet" }));
+			const { database, repository } = await services(runtime);
+			await runtime.runPromise(
+				Effect.gen(function* () {
+					yield* database.client.run(
+						"UPDATE orchestration_runs SET model_id = NULL WHERE run_id = 'run-1'",
+					);
+					yield* repository.PrepareLaunch("run-2", {
+						_tag: "native",
+						request_id: "command-2",
+						source_run_id: "run-1",
+						target_model_id: "claude-sonnet",
+					});
+					yield* repository.MarkOpening("run-2");
+					yield* repository.BindTarget({
+						command_id: "command-2",
+						model_id: "claude-sonnet",
+						native_thread_id: "target-native",
+						resume_token: { native_thread_id: "target-native" },
+						target_run_id: "run-2",
+					});
+				}),
+			);
+			expect(
+				(await runtime.runPromise(database.client.select().from(JournalEvents))).filter(
+					(event) => event.event_type === "thread.model_transition",
+				),
+			).toEqual([]);
+		}));
+
+	/** An engine swap is still a change, even when the model it came from is unknown. */
+	it("appends a transition for an engine change the source model cannot describe", () =>
+		with_runtime(async (runtime) => {
+			await runtime.runPromise(Seed({ engine_id: "codex", model_id: "gpt-5-codex" }));
+			const { database, repository } = await services(runtime);
+			await runtime.runPromise(
+				Effect.gen(function* () {
+					yield* database.client.run(
+						"UPDATE orchestration_runs SET model_id = NULL WHERE run_id = 'run-1'",
+					);
+					yield* database.client.insert(ThreadContinuationLaunches).values({
+						created_at: now,
+						handoff_id: "handoff-2",
+						request_id: "command-2",
+						source_kind: "portable",
+						source_run_id: "run-1",
+						state: "opening",
+						target_engine_id: "codex",
+						target_model_id: "gpt-5-codex",
+						target_run_id: "run-2",
+						thread_id: "thread-1",
+						updated_at: now,
+					});
+					yield* repository.BindTarget({
+						command_id: "command-2",
+						model_id: "gpt-5-codex",
+						native_thread_id: "target-native",
+						resume_token: { native_thread_id: "target-native" },
+						target_run_id: "run-2",
+					});
+				}),
+			);
+			expect(
+				(await runtime.runPromise(database.client.select().from(JournalEvents))).filter(
+					(event) => event.event_type === "thread.model_transition",
+				),
+			).toHaveLength(1);
 		}));
 
 	it("does not append a transition for a fresh launch", () =>

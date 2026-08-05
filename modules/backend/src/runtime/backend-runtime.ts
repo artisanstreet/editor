@@ -13,8 +13,10 @@ import { MakeSnowflakeIdLive } from "@artisan/protocol";
 
 import { AgentGraphOrchestratorLive } from "../orchestration/agent-graph-orchestrator";
 import { AgentGraphRepositoryLive } from "../orchestration/agent-graph-repository";
+import { HostSuspendMonitorLive } from "../host/suspend-monitor";
 import { AgentOrchestratorLive } from "../orchestration/agent-orchestrator";
 import { IntakePolicyLive } from "../orchestration/intake-policy";
+import { ProductInstructionsLive } from "../orchestration/product-instructions";
 import { ThreadContinuationCompactorLive } from "../orchestration/thread-continuation-compactor";
 import { ThreadContinuationServiceLive } from "../orchestration/thread-continuation-service";
 import { SurfaceServiceLive } from "../surfaces/service";
@@ -119,6 +121,13 @@ import {
 	GuidanceProviderRegistry,
 	make_platform_guidance_provider_registry_layer,
 } from "../guidance/provider-mirrors";
+import { ConfigFileStoreLive } from "../harness-config/file-store";
+import {
+	EmptyHarnessConfigRegistryLive,
+	HarnessConfigRegistry,
+	MakeHarnessConfigRegistryLayer,
+} from "../harness-config/keys";
+import { HarnessConfigLive } from "../harness-config/service";
 import { make_codex_model_behaviour_probe_layer } from "../model-behaviour/codex-probe";
 import { ModelBehaviourConfigFilesLive } from "../model-behaviour/config-files";
 import {
@@ -211,6 +220,7 @@ export interface BackendOptions {
 	readonly guidance_provider_registry?: Layer.Layer<GuidanceProviderRegistry>;
 	readonly git_service?: Layer.Layer<GitService>;
 	readonly migrations_path: string;
+	readonly harness_config_registry?: Layer.Layer<HarnessConfigRegistry>;
 	readonly model_behaviour_provider_registry?: Layer.Layer<
 		ModelBehaviourProviderRegistry,
 		ModelBehaviourRegistryError
@@ -260,9 +270,18 @@ export interface DesktopModelBehaviourOptions {
 	readonly home_directory?: string;
 }
 
+/** Configures where declared harness config keys are written on this desktop. */
+export interface DesktopHarnessConfigOptions {
+	readonly backups_directory?: string;
+	readonly claude_home?: string;
+	readonly codex_home?: string;
+	readonly home_directory?: string;
+}
+
 /** Extends the portable backend options with desktop provider-path discovery. */
 export interface DesktopBackendOptions extends BackendOptions {
 	readonly guidance_platform?: DesktopGuidanceOptions;
+	readonly harness_config_platform?: DesktopHarnessConfigOptions;
 	readonly model_behaviour_platform?: DesktopModelBehaviourOptions;
 	/** Explicit installed `npx skills` argv; omitted means discovery fails closed. */
 	readonly npx_skills_process?: NpxSkillsProcessOptions;
@@ -386,6 +405,15 @@ export function make_backend_layer(options: BackendOptions) {
 		),
 		Layer.provideMerge(infrastructure),
 	);
+	/**
+	 * Harness config writing fails closed: without a registry supplying real
+	 * targets, every declared key resolves to an unavailable harness and no
+	 * provider file can be touched.
+	 */
+	const harness_config = HarnessConfigLive.pipe(
+		Layer.provideMerge(options.harness_config_registry ?? EmptyHarnessConfigRegistryLive),
+		Layer.provideMerge(ConfigFileStoreLive),
+	);
 	const session_defaults = SessionDefaultsServiceLive.pipe(Layer.provideMerge(persistence));
 	const continuation_compactor = ThreadContinuationCompactorLive.pipe(
 		Layer.provideMerge(session_defaults),
@@ -405,6 +433,8 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(engine_registry),
 		Layer.provideMerge(guidance),
 		Layer.provideMerge(IntakePolicyLive),
+		Layer.provideMerge(HostSuspendMonitorLive),
+		Layer.provideMerge(ProductInstructionsLive),
 	);
 	const graph_persistence = AgentGraphRepositoryLive.pipe(Layer.provideMerge(infrastructure));
 	const graph = AgentGraphOrchestratorLive.pipe(
@@ -413,6 +443,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(engine_registry),
 		Layer.provideMerge(infrastructure),
 		Layer.provideMerge(guidance),
+		Layer.provideMerge(ProductInstructionsLive),
 	);
 	const thread_metadata = ThreadMetadataRepositoryLive.pipe(Layer.provideMerge(infrastructure));
 	const metadata_refinement =
@@ -458,6 +489,7 @@ export function make_backend_layer(options: BackendOptions) {
 							runtime_config.home_directory,
 							runtime_config.current_directory,
 						],
+						runtime_config.home_directory,
 					),
 				),
 				Effect.provide(NodeFileSystem.layer),
@@ -648,6 +680,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(guidance),
 		Layer.provideMerge(git),
 		Layer.provideMerge(model_behaviour),
+		Layer.provideMerge(harness_config),
 		Layer.provideMerge(workspace_files),
 		Layer.provideMerge(workspace_changes),
 		Layer.provideMerge(workspace_diffs),
@@ -688,6 +721,40 @@ function make_desktop_guidance_registry(options: DesktopBackendOptions) {
 				codex_agents_path: join(runtime_config.codex_home, "AGENTS.md"),
 				codex_override_path: join(runtime_config.codex_home, "AGENTS.override.md"),
 			}).pipe(Layer.provide(GuidanceFileStoreLive)),
+		),
+	);
+}
+
+/**
+ * Declares the harness config documents this installation may edit.
+ *
+ * Only harnesses listed here are writable. Claude's target is declared even
+ * though no key currently maps to it, so adding one is a registry edit rather
+ * than a path-resolution change.
+ */
+function make_desktop_harness_config_registry(options: DesktopBackendOptions) {
+	const backups_directory =
+		options.harness_config_platform?.backups_directory ??
+		join(dirname(options.database_path), "harness-config", "backups");
+
+	return ResolveBackendRuntimeConfiguration(options.harness_config_platform).pipe(
+		Effect.map((runtime_config) =>
+			MakeHarnessConfigRegistryLayer({
+				targets: [
+					{
+						backups_directory,
+						format: "toml",
+						harness_id: "codex",
+						path: join(runtime_config.codex_home, "config.toml"),
+					},
+					{
+						backups_directory,
+						format: "json",
+						harness_id: "claude",
+						path: join(runtime_config.claude_home, "settings.json"),
+					},
+				],
+			}).pipe(Layer.orDie),
 		),
 	);
 }
@@ -747,9 +814,13 @@ export function make_desktop_backend_layer(options: DesktopBackendOptions) {
 			const model_behaviour_provider_registry =
 				options.model_behaviour_provider_registry ??
 				(yield* make_desktop_model_behaviour_registry(options));
+			const harness_config_registry =
+				options.harness_config_registry ??
+				(yield* make_desktop_harness_config_registry(options));
 
 			return make_backend_layer({
 				...options,
+				harness_config_registry,
 				capability_transport_registry:
 					options.capability_transport_registry ?? production_capability_transports,
 				routine_source_inspector:

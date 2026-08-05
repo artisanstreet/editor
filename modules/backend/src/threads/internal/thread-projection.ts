@@ -39,7 +39,20 @@ const DecodeJson = <A>(
 	);
 
 /** Decodes one complete persisted thread row into the canonical sidebar projection. */
-export const DecodeThreadProjection = (thread: typeof Threads.$inferSelect) =>
+/**
+ * The launch policy lives with the thread's coordinator, not the thread row, so
+ * callers that can cheaply join it pass it in. Callers that cannot simply omit
+ * it: a list item without an engine is an ordinary state, not an error.
+ */
+export interface ThreadCoordinatorLaunch {
+	readonly engine_id: string;
+	readonly policy_model: string | null;
+}
+
+export const DecodeThreadProjection = (
+	thread: typeof Threads.$inferSelect,
+	launch?: ThreadCoordinatorLaunch | undefined,
+) =>
 	Effect.gen(function* () {
 		const linked_projects = yield* DecodeJson(
 			thread.thread_id,
@@ -96,6 +109,8 @@ export const DecodeThreadProjection = (thread: typeof Threads.$inferSelect) =>
 			title_locked: thread.title_locked,
 			title_source: thread.title_source,
 			updated_at: thread.updated_at,
+			...(launch === undefined ? {} : { engine_id: launch.engine_id }),
+			...(launch?.policy_model == null ? {} : { model_id: launch.policy_model }),
 			...(thread.archived_at === null ? {} : { archived_at: thread.archived_at }),
 			...(thread.current_goal === null ? {} : { current_goal: thread.current_goal }),
 			...(primary_project === undefined ? {} : { primary_project }),

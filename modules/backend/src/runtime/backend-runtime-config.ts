@@ -7,11 +7,13 @@ export class BackendRuntimeConfigurationError extends Data.TaggedError(
 }> {}
 
 export interface BackendRuntimePlatformOptions {
+	readonly claude_home?: string;
 	readonly codex_home?: string;
 	readonly home_directory?: string;
 }
 
 export interface BackendRuntimeConfiguration {
+	readonly claude_home: string;
 	readonly codex_home: string;
 	readonly current_directory: string;
 	readonly home_directory: string;
@@ -29,6 +31,7 @@ export const ResolveBackendRuntimeConfiguration = (options: BackendRuntimePlatfo
 			OptionalConfig("HOME"),
 		]);
 		const configured_codex_home = yield* OptionalConfig("CODEX_HOME");
+		const configured_claude_home = yield* OptionalConfig("CLAUDE_CONFIG_DIR");
 		const home_directory =
 			options.home_directory ??
 			Option.getOrUndefined(configured_user_profile) ??
@@ -43,7 +46,18 @@ export const ResolveBackendRuntimeConfiguration = (options: BackendRuntimePlatfo
 		const current_directory = path.resolve(".");
 		yield* file_system.exists(current_directory);
 
+		/**
+		 * An explicitly supplied home directory pins every harness path beneath
+		 * it, so an ambient `CODEX_HOME` or `CLAUDE_CONFIG_DIR` cannot pull a
+		 * test or a sandboxed runtime back out to the real user profile.
+		 */
 		return {
+			claude_home:
+				options.claude_home ??
+				(options.home_directory === undefined
+					? Option.getOrUndefined(configured_claude_home)
+					: undefined) ??
+				path.join(home_directory, ".claude"),
 			codex_home:
 				options.codex_home ??
 				(options.home_directory === undefined

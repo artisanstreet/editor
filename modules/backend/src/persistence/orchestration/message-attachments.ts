@@ -1,7 +1,11 @@
 import { inArray } from "drizzle-orm";
 import { Effect } from "effect";
 
-import { type CommandPayload, type ImageAttachmentReference } from "@artisan/protocol";
+import {
+	MaximumImageAttachmentTotalBytes,
+	type CommandPayload,
+	type ImageAttachmentReference,
+} from "@artisan/protocol";
 
 import type { DatabaseClient } from "../database";
 import { MessageImageAttachments } from "../tables";
@@ -97,7 +101,9 @@ export const ValidateImageAttachments = (
 		tokens.add(token);
 		total_bytes += attachment.bytes.byteLength;
 	}
-	if (total_bytes > 8 * 1024 * 1024) throw new Error("Message images may total at most 8 MiB");
+	if (total_bytes > MaximumImageAttachmentTotalBytes) {
+		throw new Error("Message images may total at most 12 MiB");
+	}
 	for (const part of payload.content ?? []) {
 		const token =
 			part.type === "image"

@@ -58,6 +58,7 @@ export const MakeReadyEnvelopeDispatch = Effect.gen(function* () {
 		HandleSurfaceListQuery,
 		HandleSurfaceUsageDailyQuery,
 		HandleSurfaceUsageQuery,
+		HandleThreadUsageSeriesQuery,
 		HandleTerminalListQuery,
 		HandleToolApprovalQuery,
 		HandleToolInvocationQuery,
@@ -263,6 +264,8 @@ export const MakeReadyEnvelopeDispatch = Effect.gen(function* () {
 				return HandleSurfaceListQuery(envelope, current);
 			case "surface.usage.aggregate.query":
 				return HandleSurfaceUsageQuery(envelope, current);
+			case "thread.usage.series.query":
+				return HandleThreadUsageSeriesQuery(envelope, current);
 			case "surface.usage.daily.query":
 				return HandleSurfaceUsageDailyQuery(envelope, current);
 			case "host.identity.query":

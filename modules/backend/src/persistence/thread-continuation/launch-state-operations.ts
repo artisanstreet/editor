@@ -30,6 +30,41 @@ export const MakeLaunchStateOperations = Effect.gen(function* () {
 	const notifier = yield* JournalNotifier;
 	const metadata = yield* RuntimeMetadata;
 	const Fail = (code: string) => new ThreadContinuationFailure({ code });
+
+	/**
+	 * Whether this launch is a handoff worth announcing.
+	 *
+	 * A run started on its engine's default records no model id, so an unknown
+	 * side is not evidence of a change: comparing it to a named model would
+	 * announce a switch the user never made. Only two models we can both name,
+	 * and that genuinely differ, count — an engine swap always does.
+	 */
+	const transition_endpoints = (
+		source: { readonly engine_id: string; readonly model_id: string | null } | undefined,
+		target: { readonly engine_id: string; readonly model_id: string | null },
+		source_kind: string,
+	) => {
+		if (source === undefined) return undefined;
+		if (source_kind !== "native" && source_kind !== "portable") return undefined;
+
+		const model_changed =
+			source.model_id != null &&
+			target.model_id != null &&
+			source.model_id !== target.model_id;
+		if (source.engine_id === target.engine_id && !model_changed) return undefined;
+
+		return {
+			continuation: source_kind,
+			source: {
+				engine_id: source.engine_id,
+				...(source.model_id === null ? {} : { model_id: source.model_id }),
+			},
+			target: {
+				engine_id: target.engine_id,
+				...(target.model_id === null ? {} : { model_id: target.model_id }),
+			},
+		} as const;
+	};
 	const EnsureLiveThread = (transaction: typeof database.client, thread_id: string) =>
 		Effect.gen(function* () {
 			const [[thread], [claim], [tombstone]] = yield* Effect.all([
@@ -52,7 +87,7 @@ export const MakeLaunchStateOperations = Effect.gen(function* () {
 	const MarkOpening = (target_run_id: string) =>
 		Effect.gen(function* () {
 			const updated_at = yield* metadata.Now;
-			yield* database.client.transaction((transaction) =>
+			const opening_event = yield* database.client.transaction((transaction) =>
 				Effect.gen(function* () {
 					const [launch] = yield* transaction
 						.select()
@@ -98,8 +133,51 @@ export const MakeLaunchStateOperations = Effect.gen(function* () {
 						.returning();
 					if (changed.length !== 1)
 						return yield* Effect.fail(Fail("launch_not_prepared"));
+
+					/**
+					 * The handoff opens here and lands at bind. Announcing the start is
+					 * what lets the thread say it is changing hands, instead of looking
+					 * idle or, worse, looking like the next model already thinks.
+					 */
+					const [source] =
+						launch.source_run_id === null
+							? []
+							: yield* transaction
+									.select({
+										engine_id: OrchestrationRuns.engine_id,
+										model_id: OrchestrationRuns.model_id,
+									})
+									.from(OrchestrationRuns)
+									.where(eq(OrchestrationRuns.run_id, launch.source_run_id))
+									.limit(1);
+					const endpoints = transition_endpoints(
+						source,
+						{
+							engine_id: run.engine_id,
+							model_id: launch.target_model_id ?? run.model_id,
+						},
+						launch.source_kind,
+					);
+
+					return endpoints === undefined
+						? undefined
+						: yield* AppendJournalEventInTransaction(transaction, metadata, {
+								agent_id: run.agent_id,
+								causation_id: launch.request_id,
+								correlation_id: launch.request_id,
+								idempotency_key: `thread-model-transition-started:${target_run_id}`,
+								payload: {
+									...endpoints,
+									state: "started",
+									type: "thread.model_transition",
+								},
+								run_id: target_run_id,
+								thread_id: launch.thread_id,
+							});
 				}),
 			);
+			if (opening_event !== undefined)
+				yield* notifier.Publish(opening_event.journal_sequence);
 		}).pipe(
 			Effect.mapError((cause) =>
 				cause instanceof ThreadContinuationFailure ? cause : Fail("launch_opening_failed"),
@@ -278,36 +356,27 @@ export const MakeLaunchStateOperations = Effect.gen(function* () {
 						.returning();
 					if (!updated_outbox) return yield* Effect.fail(Fail("outbox_bind_failed"));
 					const target_model_id = input.model_id ?? target.model_id;
+					const endpoints = transition_endpoints(
+						source,
+						{ engine_id: target.engine_id, model_id: target_model_id },
+						launch.source_kind,
+					);
 					const emitted_transition =
-						source !== undefined &&
-						(launch.source_kind === "native" || launch.source_kind === "portable") &&
-						(source.engine_id !== target.engine_id ||
-							source.model_id !== target_model_id)
-							? yield* AppendJournalEventInTransaction(transaction, metadata, {
+						endpoints === undefined
+							? undefined
+							: yield* AppendJournalEventInTransaction(transaction, metadata, {
 									agent_id: target.agent_id,
 									causation_id: input.command_id,
 									correlation_id: input.command_id,
-									idempotency_key: `thread-model-transition:${target.run_id}`,
+									idempotency_key: `thread-model-transition-completed:${target.run_id}`,
 									payload: {
-										continuation: launch.source_kind,
-										source: {
-											engine_id: source.engine_id,
-											...(source.model_id === null
-												? {}
-												: { model_id: source.model_id }),
-										},
-										target: {
-											engine_id: target.engine_id,
-											...(target_model_id === null
-												? {}
-												: { model_id: target_model_id }),
-										},
+										...endpoints,
+										state: "completed",
 										type: "thread.model_transition",
 									},
 									run_id: target.run_id,
 									thread_id: target.thread_id,
-								})
-							: undefined;
+								});
 					return emitted_transition;
 				}),
 			);

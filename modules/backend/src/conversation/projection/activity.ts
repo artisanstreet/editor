@@ -55,6 +55,39 @@ export const ApplyActivityObservation = (
 			return Effect.gen(function* () {
 				const file_id = `file:${observation.observation_id}`;
 				const change_set_id = `change-set:${observation.observation_id}`;
+				/**
+				 * A mutation also earns a trace row, alongside the change items it
+				 * has always produced. Those change items are the turn's summary and
+				 * the renderer holds them back until the turn settles — correct for
+				 * a summary, but it made every edit invisible for the length of the
+				 * run: the agent narrated "writing the store first" over a trace
+				 * showing nothing, which reads as a dropped call. The row is what
+				 * exists now; the card remains what the turn amounted to.
+				 */
+				yield* UpsertItem(
+					transaction,
+					input.thread_id,
+					{
+						...item_base(
+							`activity:${observation.observation_id}`,
+							turn_id,
+							input,
+							"completed",
+							observation.observation_id,
+						),
+						kind: observation.action === "deleted" ? "file_delete" : "file_edit",
+						label:
+							observation.action === "created"
+								? "Created file"
+								: observation.action === "deleted"
+									? "Deleted file"
+									: "Edited file",
+						status: "completed",
+						detail: text(observation.path) || "Unknown file",
+						type: "activity",
+					},
+					source,
+				);
 				yield* UpsertItem(
 					transaction,
 					input.thread_id,
@@ -86,7 +119,20 @@ export const ApplyActivityObservation = (
 							observation.observation_id,
 						),
 						change_set_id,
-						diff: { kind: "unavailable" },
+						/**
+						 * Counted only when the engine reported both sides of its own
+						 * patch. Absent counts stay unavailable rather than rendering
+						 * as a confident zero.
+						 */
+						diff:
+							observation.lines_added === undefined ||
+							observation.lines_deleted === undefined
+								? { kind: "unavailable" }
+								: {
+										additions: observation.lines_added,
+										deletions: observation.lines_deleted,
+										kind: "known",
+									},
 						operation: observation.action,
 						path: text(observation.path) || "Unknown file",
 						type: "file_change",
@@ -96,13 +142,43 @@ export const ApplyActivityObservation = (
 			});
 		case "terminal_activity":
 		case "tool":
-		case "search":
+		case "search": {
+			/**
+			 * Keyed on the provider's own id for the work rather than on the frame.
+			 * Start, output, and completion arrive as separate observations, so
+			 * keying on the frame turns one command into a row per output chunk —
+			 * rows that carry nothing to name them and never reach a terminal
+			 * status, which leaves the group they sit in shimmering as though it
+			 * were still working. An engine that discloses no id for a search
+			 * falls back to the frame's and keeps that flaw.
+			 */
+			const activity_key =
+				observation._tag === "terminal_activity"
+					? observation.activity_id
+					: observation._tag === "tool"
+						? observation.tool_id
+						: (observation.search_id ?? observation.observation_id);
+			/**
+			 * What the row did, in its own words: the command a terminal ran, the
+			 * query a search asked, the arguments a tool was given. Without it every
+			 * row of a kind renders as the same word. It rides the frame that starts
+			 * the work, and the output and completion frames that follow merge onto
+			 * the row that frame already named. A search that discloses no query
+			 * keeps its label rather than showing an empty one.
+			 */
+			const activity_detail =
+				observation._tag === "terminal_activity"
+					? optional_text(observation.command)
+					: observation._tag === "search"
+						? optional_text(observation.query)
+						: optional_text(observation.detail);
+
 			return UpsertItem(
 				transaction,
 				input.thread_id,
 				{
 					...item_base(
-						`activity:${observation.observation_id}`,
+						`activity:${activity_key}`,
 						turn_id,
 						input,
 						observation._tag === "tool" && observation.action === "failed"
@@ -122,16 +198,24 @@ export const ApplyActivityObservation = (
 						observation._tag === "tool"
 							? lifecycle(observation.action)
 							: lifecycle(observation.state),
-					...(observation._tag === "tool" && observation.detail
-						? { detail: text(observation.detail) }
-						: {}),
+					...(activity_detail === undefined ? {} : { detail: activity_detail }),
 				},
 				source,
 			);
+		}
 		case "native_action":
 		case "protocol_diagnostic":
 		case "process_diagnostic":
 		case "usage":
+			/**
+			 * A frame the adapter could not read is not something the run did, so
+			 * it earns no row. Raw provenance already holds the frame verbatim for
+			 * anyone debugging the adapter; a transcript row only teaches a reader
+			 * to distrust a run that was fine.
+			 */
+			if (observation._tag === "native_action" && observation.diagnostic === true) {
+				return Effect.void;
+			}
 			return UpsertItem(
 				transaction,
 				input.thread_id,

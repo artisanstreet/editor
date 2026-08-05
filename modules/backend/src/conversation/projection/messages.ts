@@ -1,12 +1,12 @@
 import { Effect } from "effect";
 import { eq } from "drizzle-orm";
 
-import { ConversationItem } from "@artisan/protocol";
+import { ConversationItem, conversation_body_text_limit } from "@artisan/protocol";
 
 import type { DatabaseClient } from "../../persistence/database";
 import { ConversationItems } from "../../persistence/tables";
 import type { ConversationObservationContext } from "./domain";
-import { text } from "./domain";
+import { body_text } from "./domain";
 import { Decode, DecodeJson, Emit, UpsertItem } from "./entities";
 
 /** Appends a provider delta to its stable item while retaining one renderer entity. */
@@ -43,7 +43,7 @@ export const AppendText = (
 					...(input.agent_id === undefined ? {} : { agent_id: input.agent_id }),
 					run_id: input.run_id,
 					type,
-					text: text(value),
+					text: body_text(value),
 					...(type === "assistant_message" ? { phase: phase ?? "unspecified" } : {}),
 				},
 				source,
@@ -58,7 +58,10 @@ export const AppendText = (
 			prior.lifecycle !== "streaming"
 		)
 			return prior;
-		const delta = text(value).slice(0, Math.max(0, 4_096 - prior.text.length));
+		const delta = body_text(value).slice(
+			0,
+			Math.max(0, conversation_body_text_limit - prior.text.length),
+		);
 		const revision = prior.revision + 1;
 		const entity = yield* Decode(
 			ConversationItem,

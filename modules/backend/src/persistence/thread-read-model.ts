@@ -5,7 +5,7 @@ import { JournalSequence, type ThreadListItem } from "@artisan/protocol";
 
 import { DecodeThreadProjection } from "../threads/internal/thread-projection";
 import { Database } from "./database";
-import { JournalEvents, Threads } from "./tables";
+import { JournalEvents, OrchestrationCoordinators, Threads } from "./tables";
 import { JournalInvariantError } from "./journal-store";
 
 export class ThreadReadModelFailure extends Data.TaggedError("ThreadReadModelFailure")<{
@@ -64,16 +64,24 @@ export const ThreadReadModelLive = Layer.effect(
 	ThreadReadModel,
 	Effect.gen(function* () {
 		const database = yield* Database;
+		/** One coordinator per thread, so the launch policy joins one-to-one. */
 		const Lookup = (thread_id: string) =>
 			database.client
 				.select()
 				.from(Threads)
+				.leftJoin(
+					OrchestrationCoordinators,
+					eq(OrchestrationCoordinators.thread_id, Threads.thread_id),
+				)
 				.where(eq(Threads.thread_id, thread_id))
 				.limit(1)
 				.pipe(
-					Effect.flatMap(([thread]) =>
-						thread
-							? DecodeThreadProjection(thread).pipe(Effect.map(Option.some))
+					Effect.flatMap(([row]) =>
+						row
+							? DecodeThreadProjection(
+									row.threads,
+									row.orchestration_coordinators ?? undefined,
+								).pipe(Effect.map(Option.some))
 							: Effect.succeed(Option.none()),
 					),
 					Effect.mapError(normalize_thread_read_model_error),
@@ -86,6 +94,10 @@ export const ThreadReadModelLive = Layer.effect(
 						const thread_rows = yield* transaction
 							.select()
 							.from(Threads)
+							.leftJoin(
+								OrchestrationCoordinators,
+								eq(OrchestrationCoordinators.thread_id, Threads.thread_id),
+							)
 							.orderBy(asc(Threads.created_at), asc(Threads.thread_id));
 						const [watermark] = yield* transaction
 							.select({ journal_sequence: JournalEvents.sequence })
@@ -95,7 +107,12 @@ export const ThreadReadModelLive = Layer.effect(
 						const journal_sequence = watermark
 							? yield* DecodePersistedJournalSequence(watermark.journal_sequence)
 							: 0;
-						const threads = yield* Effect.forEach(thread_rows, DecodeThreadProjection);
+						const threads = yield* Effect.forEach(thread_rows, (row) =>
+							DecodeThreadProjection(
+								row.threads,
+								row.orchestration_coordinators ?? undefined,
+							),
+						);
 
 						return { journal_sequence, threads };
 					}),

@@ -1,4 +1,16 @@
-import { Cause, Context, Deferred, Effect, Exit, Layer, Option, Ref, Scope, Stream } from "effect";
+import {
+	Cause,
+	Context,
+	Deferred,
+	Effect,
+	Exit,
+	Layer,
+	Option,
+	PubSub,
+	Ref,
+	Scope,
+	Stream,
+} from "effect";
 
 import {
 	EngineRegistry,
@@ -26,8 +38,10 @@ import type {
 	InboundOrAuthoritativeCommandEnvelope,
 } from "../persistence/orchestration/message-command";
 import { GlobalGuidanceService } from "../guidance/service";
+import { HostSuspendMonitor } from "../host/suspend-monitor";
 import { MakeThreadDispatchFence } from "../threads/internal/thread-dispatch-fence";
 import { IntakePolicy } from "./intake-policy";
+import { ProductInstructions } from "./product-instructions";
 import {
 	render_portable_checkpoint_context,
 	render_portable_checkpoint_prompt,
@@ -209,10 +223,13 @@ export const AgentOrchestratorLive = Layer.effect(
 	Effect.gen(function* () {
 		const engines = yield* EngineRegistry;
 		const guidance = yield* GlobalGuidanceService;
+		const product_instructions = yield* ProductInstructions;
 		const intake_policy = yield* IntakePolicy;
 		const repository = yield* OrchestrationRepository;
 		const continuation = yield* ThreadContinuationService;
 		const continuation_repository = yield* ThreadContinuationRepository;
+		const suspend_monitor = yield* HostSuspendMonitor;
+		const host_resumes = yield* suspend_monitor.Subscribe;
 		const service_scope = yield* Scope.make();
 		const live_runs = yield* Ref.make(new Map<string, LiveRun>());
 		const dispatch_state = yield* Ref.make<DispatchState>("idle");
@@ -456,6 +473,7 @@ export const AgentOrchestratorLive = Layer.effect(
 				}
 
 				const run_scope = yield* Scope.make();
+				const resolved_product_instructions = yield* product_instructions.Resolve;
 				const open_input = MakeEngineOpenInput(
 					work as PendingWork & {
 						readonly payload: AuthoritativeThreadSendMessageCommand;
@@ -467,7 +485,7 @@ export const AgentOrchestratorLive = Layer.effect(
 						: undefined,
 				);
 				const open_exit = yield* engine
-					.Open(open_input)
+					.Open({ ...open_input, product_instructions: resolved_product_instructions })
 					.pipe(
 						Scope.provide(run_scope),
 						Effect.timeoutOption(engine_open_timeout_ms),
@@ -587,6 +605,7 @@ export const AgentOrchestratorLive = Layer.effect(
 				}
 
 				const run_scope = yield* Scope.make();
+				const resolved_product_instructions = yield* product_instructions.Resolve;
 				const run = yield* engine
 					.Open({
 						_tag: "resume",
@@ -594,6 +613,7 @@ export const AgentOrchestratorLive = Layer.effect(
 						...(Option.isSome(resolved_guidance.value)
 							? { global_guidance: resolved_guidance.value.value }
 							: {}),
+						product_instructions: resolved_product_instructions,
 						...MakeSessionPolicyRunMetadata(policy),
 						resume_token: work.resume_token,
 						working_directory: work.working_directory,
@@ -914,6 +934,26 @@ export const AgentOrchestratorLive = Layer.effect(
 		const QuiesceThread = (thread_id: string) =>
 			dispatch_fence.Quiesce(thread_id, QuiesceLiveRuns(thread_id));
 
+		/**
+		 * A host suspend can silently cost the process the timers that drive
+		 * queued work, so a resume re-reads what is pending from the database
+		 * rather than trusting whatever this process was holding when the
+		 * machine went away. Runs that were already in flight settle on their
+		 * own through the engines' inactivity deadlines, which do not count
+		 * suspended time against a run.
+		 */
+		const WatchHostResumes = Effect.gen(function* () {
+			while (true) {
+				const resume = yield* PubSub.take(host_resumes);
+
+				yield* Effect.logInfo("Re-driving dispatch after a host suspend", {
+					suspended_ms: resume.suspended_ms,
+				});
+				yield* WakeDispatcher;
+			}
+		});
+
+		yield* Effect.forkIn(WatchHostResumes, service_scope);
 		yield* Recover;
 
 		return { Handle, HandleInbound, QuiesceThread, Recover };

@@ -89,6 +89,49 @@ export {
 	type ModelBehaviourConfigFileSnapshot,
 } from "./model-behaviour/config-files";
 export {
+	ConfigDocumentError,
+	DeleteConfigValue,
+	ReadConfigValue,
+	SetConfigValue,
+	type ConfigDocumentFormat,
+	type ConfigKeyPath,
+} from "./harness-config/document";
+export {
+	ConfigFileStore,
+	ConfigFileStoreLive,
+	make_config_file_store_layer,
+	make_config_file_store_platform_layer,
+	type ConfigFileHooks,
+	type ConfigFileReplaceOptions,
+	type ConfigFileReplaceResult,
+	type ConfigFileSnapshot,
+} from "./harness-config/file-store";
+export {
+	CodexAutoCompactionTriggerTokens,
+	CodexRequestUserInput,
+	DeclaredHarnessConfigKeys,
+	EmptyHarnessConfigRegistryLive,
+	harness_config_key_id,
+	HarnessConfigRegistry,
+	HarnessConfigRegistryError,
+	MakeHarnessConfigRegistryLayer,
+	type HarnessConfigKey,
+	type HarnessConfigKeyIdentity,
+	type HarnessConfigTarget,
+} from "./harness-config/keys";
+export {
+	HarnessConfig,
+	HarnessConfigDecodeError,
+	HarnessConfigLive,
+	HarnessConfigUnavailable,
+	HarnessConfigUndeclaredKey,
+	type HarnessConfigChange,
+	type HarnessConfigError,
+	type HarnessConfigOutcome,
+	type HarnessConfigReading,
+	type HarnessConfigWriteOptions,
+} from "./harness-config/service";
+export {
 	EmptyModelBehaviourProviderRegistryLive,
 	make_codex_model_behaviour_provider,
 	make_desktop_model_behaviour_provider_registry_layer,
@@ -314,6 +357,7 @@ export {
 	type PrivateFilePermissionsSnapshot,
 } from "./model-behaviour/private-file-permissions";
 export { AgentOrchestrator } from "./orchestration/agent-orchestrator";
+export { ProductInstructions, ProductInstructionsLive } from "./orchestration/product-instructions";
 export {
 	compaction_summary_template,
 	encode_portable_checkpoint_content,

@@ -5,6 +5,7 @@ import {
 	SurfaceUsage,
 	SurfaceUsageAggregate,
 	SurfaceUsageDailySnapshot,
+	ThreadUsageSeries,
 } from "@artisan/protocol";
 
 /** Reports corrupt persisted surface state without converting a read into a defect. */
@@ -51,6 +52,10 @@ export class SurfaceService extends Context.Service<
 			input: { readonly scope: "run" | "assignment" | "group"; readonly scope_id: string },
 			run_id: string | undefined,
 		) => Effect.Effect<boolean, SurfaceInvariantFailed>;
+		/** The per-turn token series for one thread's current context window. */
+		readonly UsageSeries: (input: {
+			readonly thread_id: string;
+		}) => Effect.Effect<typeof ThreadUsageSeries.Type, SurfaceInvariantFailed>;
 		readonly UsageScopeThread: (input: {
 			readonly scope: "run" | "assignment" | "group";
 			readonly scope_id: string;

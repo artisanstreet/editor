@@ -278,6 +278,8 @@ export const MakeCommandDispatcher = Effect.gen(function* () {
 					agent_id: resolved_agent_id,
 					created_at: accepted_at,
 					engine_id: pending.engine_id,
+					/** The model this run launches with, so what answered stays knowable later. */
+					model_id: coordinator?.policy_model ?? null,
 					native_resume_json: null,
 					native_thread_id: null,
 					run_id,
@@ -599,6 +601,8 @@ export const MakeCommandDispatcher = Effect.gen(function* () {
 					agent_id,
 					created_at: accepted_at,
 					engine_id,
+					/** The model this run launches with, so what answered stays knowable later. */
+					model_id: coordinator?.policy_model ?? null,
 					native_resume_json: null,
 					native_thread_id: null,
 					run_id,

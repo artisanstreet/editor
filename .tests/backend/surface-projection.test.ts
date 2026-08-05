@@ -540,6 +540,155 @@ describe("surface projection read model", () => {
 		}
 	});
 
+	it("attributes the latest context gauge to its immutable reporting run", async () => {
+		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
+		try {
+			const aggregate = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const surfaces = yield* SurfaceService;
+					yield* database.client.insert(OrchestrationRuns).values({
+						agent_id: "agent_luna",
+						created_at: "2026-08-03T00:00:00.000Z",
+						engine_id: "codex",
+						model_id: "gpt-5.6-luna",
+						run_id: "run_luna",
+						status: "running",
+						thread_id: "thread_policy_now_sol",
+						updated_at: "2026-08-03T00:00:00.000Z",
+						working_directory: "C:\\workspace",
+					});
+					yield* database.client.insert(SurfaceUsageTotals).values({
+						context_tokens: 128_000,
+						context_window_tokens: 258_400,
+						run_id: "run_luna",
+						updated_at: "2026-08-03T00:00:01.000Z",
+					});
+					return yield* surfaces.AggregateUsage({ scope: "run", scope_id: "run_luna" });
+				}),
+			);
+
+			expect(aggregate.context_origin).toEqual({
+				engine_id: "codex",
+				model_id: "gpt-5.6-luna",
+				run_id: "run_luna",
+			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("resolves context provenance for agent-run aggregates and snapshots", async () => {
+		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const surfaces = yield* SurfaceService;
+					yield* database.client.insert(AgentRuns).values({
+						agent_id: "agent_context",
+						assignment_id: "assignment_context",
+						attempt: 1,
+						created_at: "2026-08-03T00:00:00.000Z",
+						dispatch_status: "active",
+						engine_id: "codex",
+						group_id: "group_context",
+						last_observation_sequence: 1,
+						model_id: "gpt-5.6-luna",
+						profile: "default",
+						run_id: "run_agent_luna",
+						state: "active",
+						updated_at: "2026-08-03T00:00:00.000Z",
+					});
+					yield* database.client.insert(SurfaceUsageTotals).values({
+						context_tokens: 64_000,
+						context_window_tokens: 258_400,
+						run_id: "run_agent_luna",
+						updated_at: "2026-08-03T00:00:01.000Z",
+					});
+					return yield* Effect.all({
+						aggregate: surfaces.AggregateUsage({
+							scope: "run",
+							scope_id: "run_agent_luna",
+						}),
+						snapshot: surfaces.AggregateUsageSnapshot({
+							scope: "run",
+							scope_id: "run_agent_luna",
+						}),
+					});
+				}),
+			);
+
+			const origin = {
+				engine_id: "codex",
+				model_id: "gpt-5.6-luna",
+				run_id: "run_agent_luna",
+			};
+			expect(result.aggregate.context_origin).toEqual(origin);
+			expect(result.snapshot.aggregate.context_origin).toEqual(origin);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("keeps the newest chart runs while choosing the window by latest report", async () => {
+		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
+		try {
+			const series = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const surfaces = yield* SurfaceService;
+					const items = Array.from({ length: 513 }, (_, index) => ({
+						category: "usage",
+						kind: "usage",
+						observation_id: `series-observation-${index.toString().padStart(3, "0")}`,
+						occurred_at: "2026-08-03T00:00:00.000Z",
+						run_id: `series-run-${index.toString().padStart(3, "0")}`,
+						sequence: index + 1,
+						summary_json: "{}",
+						surface_id: `series-surface-${index.toString().padStart(3, "0")}`,
+						thread_id: "thread_long_series",
+					}));
+					yield* database.client.transaction((transaction) =>
+						Effect.gen(function* () {
+							for (let offset = 0; offset < items.length; offset += 50) {
+								yield* transaction
+									.insert(SurfaceItems)
+									.values(items.slice(offset, offset + 50));
+							}
+						}),
+					);
+					yield* database.client.insert(SurfaceUsageTotals).values([
+						{
+							context_window_tokens: 999_000,
+							run_id: "series-run-000",
+							updated_at: "2026-08-03T00:00:03.000Z",
+						},
+						{
+							input_tokens: 1,
+							run_id: "series-run-511",
+							updated_at: "2026-08-03T00:00:04.000Z",
+						},
+						{
+							context_window_tokens: 258_400,
+							run_id: "series-run-512",
+							updated_at: "2026-08-03T00:00:02.000Z",
+						},
+					]);
+					return yield* surfaces.UsageSeries({ thread_id: "thread_long_series" });
+				}),
+			);
+
+			expect(series.context_window_tokens).toBe(999_000);
+			expect(series.points).toMatchObject([
+				{ ordinal: 1, run_id: "series-run-511" },
+				{ ordinal: 2, run_id: "series-run-512" },
+			]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("rolls run totals into ordered UTC day buckets and drops rows outside the window", async () => {
 		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
 		try {

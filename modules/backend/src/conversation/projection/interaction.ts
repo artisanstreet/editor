@@ -26,8 +26,14 @@ export const ApplyInteractionObservation = (
 				transaction,
 				input.thread_id,
 				{
+					/**
+					 * One plan per run, revised in place. A plan is republished whole
+					 * every time a step changes, and keying on the frame that carried
+					 * the revision would stack a fresh copy of the list beneath the
+					 * last one for every step the agent ticks off.
+					 */
 					...item_base(
-						`plan:${observation.observation_id}`,
+						`plan:${turn_id}`,
 						turn_id,
 						input,
 						"active",

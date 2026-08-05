@@ -1,11 +1,12 @@
 import { Clock, Effect, Layer, Schema } from "effect";
-import { and, asc, desc, eq, gte, inArray, lte } from "drizzle-orm";
+import { and, asc, desc, eq, gt, gte, inArray, isNotNull, lte } from "drizzle-orm";
 
 import {
 	SurfaceItem,
 	SurfaceUsage,
 	SurfaceUsageAggregate,
 	SurfaceUsageDailySnapshot,
+	ThreadUsageSeries,
 } from "@artisan/protocol";
 
 import { Database } from "../persistence/database";
@@ -67,6 +68,9 @@ const aggregate_usage_fields = (
 		...(latest?.context_window_tokens === undefined
 			? {}
 			: { context_window_tokens: latest.context_window_tokens }),
+		...(latest?.context_tokens === undefined && latest?.context_window_tokens === undefined
+			? {}
+			: { context_run_id: latest?.run_id }),
 	};
 };
 
@@ -74,6 +78,40 @@ export const SurfaceServiceLive = Layer.effect(
 	SurfaceService,
 	Effect.gen(function* () {
 		const database = yield* Database;
+		const DecodeAggregateUsage = (
+			input: { readonly scope: "run" | "assignment" | "group"; readonly scope_id: string },
+			usage: ReadonlyArray<SurfaceUsage>,
+			LookupRun: (
+				run_id: string,
+			) => Effect.Effect<
+				{ readonly engine_id: string; readonly model_id: string | null } | undefined,
+				unknown
+			>,
+		) =>
+			Effect.gen(function* () {
+				const fields = aggregate_usage_fields(input.scope, input.scope_id, usage);
+				const { context_run_id, ...aggregate } = fields;
+				const origin =
+					context_run_id === undefined ? undefined : yield* LookupRun(context_run_id);
+				return yield* Schema.decodeUnknownEffect(SurfaceUsageAggregate)({
+					...aggregate,
+					...(context_run_id === undefined
+						? {}
+						: {
+								context_origin: {
+									run_id: context_run_id,
+									...(origin === undefined
+										? {}
+										: {
+												engine_id: origin.engine_id,
+												...(origin.model_id === null
+													? {}
+													: { model_id: origin.model_id }),
+											}),
+								},
+							}),
+				});
+			});
 		const DecodeSurfaceItem = (row: typeof SurfaceItems.$inferSelect) =>
 			Effect.gen(function* () {
 				const raw_origin =
@@ -185,6 +223,150 @@ export const SurfaceServiceLive = Layer.effect(
 							: undefined,
 				)
 				.pipe(Effect.flatMap((rows) => Effect.forEach(rows, DecodeSurfaceUsage)));
+		/**
+		 * The per-turn token series for one thread's current context window.
+		 *
+		 * Cut at the most recent compaction: a compaction replaces the history
+		 * with a summary, so turns before it no longer occupy the window and
+		 * charting across the boundary would draw one fill over two unrelated
+		 * windows. Runs are ordered by when the thread first observed them, which
+		 * is the order they consumed the window in.
+		 */
+		const UsageSeries = (input: { readonly thread_id: string }) =>
+			database.client
+				.transaction((transaction) =>
+					Effect.gen(function* () {
+						const [boundary] = yield* transaction
+							.select({ projection_order: SurfaceItems.projection_order })
+							.from(SurfaceItems)
+							.where(
+								and(
+									eq(SurfaceItems.thread_id, input.thread_id),
+									eq(SurfaceItems.kind, "compaction"),
+								),
+							)
+							.orderBy(desc(SurfaceItems.projection_order))
+							.limit(1);
+						const rows = yield* transaction
+							.select({
+								projection_order: SurfaceItems.projection_order,
+								run_id: SurfaceItems.run_id,
+							})
+							.from(SurfaceItems)
+							.where(
+								and(
+									eq(SurfaceItems.thread_id, input.thread_id),
+									...(boundary === undefined
+										? []
+										: [
+												gt(
+													SurfaceItems.projection_order,
+													boundary.projection_order,
+												),
+											]),
+								),
+							)
+							.orderBy(asc(SurfaceItems.projection_order));
+
+						/** First sighting wins, so a run keeps the position it started at. */
+						const ordered_run_ids: Array<string> = [];
+						const seen = new Set<string>();
+						for (const row of rows) {
+							if (seen.has(row.run_id)) continue;
+							seen.add(row.run_id);
+							ordered_run_ids.push(row.run_id);
+						}
+						if (ordered_run_ids.length === 0) {
+							return {
+								compacted: boundary !== undefined,
+								points: [],
+								thread_id: input.thread_id,
+							};
+						}
+
+						/** Keep the newest chart runs when a long thread exceeds the UI cap. */
+						const selected_run_ids = ordered_run_ids.slice(-512);
+						const totals = yield* transaction
+							.select()
+							.from(SurfaceUsageTotals)
+							.where(inArray(SurfaceUsageTotals.run_id, selected_run_ids));
+						const by_run = new Map(totals.map((row) => [row.run_id, row] as const));
+
+						const points = selected_run_ids
+							.map((run_id) => by_run.get(run_id))
+							.filter((row) => row !== undefined)
+							.map((row, index) => ({
+								...(row.cached_input_tokens === null
+									? {}
+									: { cached_input_tokens: row.cached_input_tokens }),
+								...(row.context_tokens === null
+									? {}
+									: { context_tokens: row.context_tokens }),
+								...(row.input_tokens === null
+									? {}
+									: { input_tokens: row.input_tokens }),
+								ordinal: index + 1,
+								...(row.output_tokens === null
+									? {}
+									: { output_tokens: row.output_tokens }),
+								run_id: row.run_id,
+								updated_at: row.updated_at,
+							}));
+
+						/**
+						 * Gauge freshness is independent of chart truncation and first-sighting
+						 * order. Joining back to the current compaction segment lets the newest
+						 * report win even when its run is outside the 512 rendered points.
+						 */
+						const [latest_report] = yield* transaction
+							.select({
+								context_window_tokens: SurfaceUsageTotals.context_window_tokens,
+							})
+							.from(SurfaceUsageTotals)
+							.innerJoin(
+								SurfaceItems,
+								eq(SurfaceItems.run_id, SurfaceUsageTotals.run_id),
+							)
+							.where(
+								and(
+									eq(SurfaceItems.thread_id, input.thread_id),
+									isNotNull(SurfaceUsageTotals.context_window_tokens),
+									...(boundary === undefined
+										? []
+										: [
+												gt(
+													SurfaceItems.projection_order,
+													boundary.projection_order,
+												),
+											]),
+								),
+							)
+							.orderBy(
+								desc(SurfaceUsageTotals.updated_at),
+								desc(SurfaceUsageTotals.run_id),
+							)
+							.limit(1);
+						const window_tokens = latest_report?.context_window_tokens ?? undefined;
+
+						return {
+							compacted: boundary !== undefined,
+							...(window_tokens === undefined
+								? {}
+								: { context_window_tokens: window_tokens }),
+							points,
+							thread_id: input.thread_id,
+						};
+					}),
+				)
+				.pipe(
+					Effect.flatMap(Schema.decodeUnknownEffect(ThreadUsageSeries)),
+					Effect.mapError(
+						() =>
+							new SurfaceInvariantFailed({
+								message: `Usage series for ${input.thread_id} does not match its schema`,
+							}),
+					),
+				);
 		const AggregateUsage = (input: {
 			readonly scope: "run" | "assignment" | "group";
 			readonly scope_id: string;
@@ -201,10 +383,30 @@ export const SurfaceServiceLive = Layer.effect(
 				)
 				.pipe(
 					Effect.flatMap((rows) => Effect.forEach(rows, DecodeSurfaceUsage)),
-					Effect.map((usage) =>
-						aggregate_usage_fields(input.scope, input.scope_id, usage),
+					Effect.flatMap((usage) =>
+						DecodeAggregateUsage(input, usage, (run_id) =>
+							Effect.gen(function* () {
+								const [thread_run] = yield* database.client
+									.select({
+										engine_id: OrchestrationRuns.engine_id,
+										model_id: OrchestrationRuns.model_id,
+									})
+									.from(OrchestrationRuns)
+									.where(eq(OrchestrationRuns.run_id, run_id))
+									.limit(1);
+								if (thread_run !== undefined) return thread_run;
+								const [agent_run] = yield* database.client
+									.select({
+										engine_id: AgentRuns.engine_id,
+										model_id: AgentRuns.model_id,
+									})
+									.from(AgentRuns)
+									.where(eq(AgentRuns.run_id, run_id))
+									.limit(1);
+								return agent_run;
+							}),
+						),
 					),
-					Effect.flatMap(Schema.decodeUnknownEffect(SurfaceUsageAggregate)),
 					Effect.mapError((error) =>
 						error instanceof SurfaceInvariantFailed
 							? error
@@ -230,8 +432,27 @@ export const SurfaceServiceLive = Layer.effect(
 									: eq(SurfaceUsageTotals.group_id, input.scope_id),
 						);
 					const usage = yield* Effect.forEach(rows, DecodeSurfaceUsage);
-					const aggregate = yield* Schema.decodeUnknownEffect(SurfaceUsageAggregate)(
-						aggregate_usage_fields(input.scope, input.scope_id, usage),
+					const aggregate = yield* DecodeAggregateUsage(input, usage, (run_id) =>
+						Effect.gen(function* () {
+							const [thread_run] = yield* transaction
+								.select({
+									engine_id: OrchestrationRuns.engine_id,
+									model_id: OrchestrationRuns.model_id,
+								})
+								.from(OrchestrationRuns)
+								.where(eq(OrchestrationRuns.run_id, run_id))
+								.limit(1);
+							if (thread_run !== undefined) return thread_run;
+							const [agent_run] = yield* transaction
+								.select({
+									engine_id: AgentRuns.engine_id,
+									model_id: AgentRuns.model_id,
+								})
+								.from(AgentRuns)
+								.where(eq(AgentRuns.run_id, run_id))
+								.limit(1);
+							return agent_run;
+						}),
 					).pipe(
 						Effect.mapError(
 							() =>
@@ -444,6 +665,12 @@ export const SurfaceServiceLive = Layer.effect(
 			Usage: (input) =>
 				Usage(input).pipe(
 					Effect.mapError((error) => NormalizeSurfaceFailure(error, "Surface usage")),
+				),
+			UsageSeries: (input) =>
+				UsageSeries(input).pipe(
+					Effect.mapError((error) =>
+						NormalizeSurfaceFailure(error, "Surface usage series"),
+					),
 				),
 			AggregateUsage: (input) =>
 				AggregateUsage(input).pipe(

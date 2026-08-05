@@ -5,7 +5,7 @@ import type { EngineObservation } from "@artisan/engines";
 import type { DatabaseClient } from "../../persistence/database";
 import { ApplyActivityObservation } from "./activity";
 import type { ConversationObservationContext } from "./domain";
-import { item_base, lifecycle, text, turn_base } from "./domain";
+import { body_text, item_base, lifecycle, turn_base } from "./domain";
 import { Admit, EnsureThread, UpsertItem, UpsertTurn } from "./entities";
 import { ApplyInteractionObservation } from "./interaction";
 import { AppendText, CompleteReasoningSummary } from "./messages";
@@ -62,7 +62,7 @@ export const ApplyEngineObservation = (
 							observation.observation_id,
 						),
 						type: "assistant_message",
-						text: text(observation.message),
+						text: body_text(observation.message),
 						phase: observation.phase,
 					},
 					source,
@@ -107,6 +107,9 @@ export const ApplyEngineObservation = (
 						observation.state === "cancelled" ||
 						observation.state === "failed"
 							? { ended_at: input.occurred_at }
+							: {}),
+						...(observation.state === "started" || observation.state === "waiting"
+							? { responded_at: input.occurred_at }
 							: {}),
 						started_at: input.occurred_at,
 						status: lifecycle(observation.state),

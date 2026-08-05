@@ -8,6 +8,7 @@ import type {
 	OrchestrationGroupListQueryEnvelope,
 	SurfaceListQueryEnvelope,
 	SurfaceUsageAggregateQueryEnvelope,
+	ThreadUsageSeriesQueryEnvelope,
 	SurfaceUsageDailyQueryEnvelope,
 	TerminalListQueryEnvelope,
 } from "@artisan/protocol";
@@ -156,6 +157,38 @@ export const MakeControlPlaneHandlers = Effect.gen(function* () {
 					),
 				),
 			);
+
+	const HandleThreadUsageSeriesQuery = (
+		query: ThreadUsageSeriesQueryEnvelope,
+		current: ReadyState,
+	) =>
+		surfaces.UsageSeries(query.payload).pipe(
+			Effect.flatMap((series) =>
+				Effect.gen(function* () {
+					const message_id = yield* metadata.MakeId("message");
+					const sent_at = yield* metadata.Now;
+					yield* Enqueue({
+						correlation_id: query.message_id,
+						kind: "thread.usage.series.query.result",
+						message_id,
+						origin: "backend",
+						payload: series,
+						protocol_version: 1,
+						schema_version: 1,
+						sent_at,
+					});
+				}),
+			),
+			Effect.catch(() =>
+				EnqueueError(
+					current,
+					"projection.unavailable",
+					"The thread usage series could not be read.",
+					true,
+					query.message_id,
+				),
+			),
+		);
 
 	const HandleSurfaceUsageQuery = (
 		query: SurfaceUsageAggregateQueryEnvelope,
@@ -314,6 +347,7 @@ export const MakeControlPlaneHandlers = Effect.gen(function* () {
 		HandleSurfaceListQuery,
 		HandleSurfaceUsageDailyQuery,
 		HandleSurfaceUsageQuery,
+		HandleThreadUsageSeriesQuery,
 		HandleTerminalListQuery,
 		HandleToolApprovalQuery,
 		HandleToolInvocationQuery,
