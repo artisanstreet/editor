@@ -7,7 +7,7 @@ import { ApplyActivityObservation } from "./activity";
 import type { ConversationObservationContext } from "./domain";
 import { body_text, item_base, lifecycle, turn_base } from "./domain";
 import { Admit, EnsureThread, UpsertItem, UpsertTurn } from "./entities";
-import { ApplyInteractionObservation } from "./interaction";
+import { ApplyInteractionObservation, CancelPendingInteractions } from "./interaction";
 import { AppendText, CompleteReasoningSummary } from "./messages";
 
 /** Applies one normalized engine observation in the caller's transaction. */
@@ -119,7 +119,19 @@ export const ApplyEngineObservation = (
 					source,
 				);
 			case "run_state":
+				return yield* UpsertTurn(
+					transaction,
+					input.thread_id,
+					turn_base(turn_id, input, observation.state, observation.observation_id),
+					source,
+				);
 			case "run_terminal":
+				yield* CancelPendingInteractions(
+					transaction,
+					input,
+					turn_id,
+					observation.observation_id,
+				);
 				return yield* UpsertTurn(
 					transaction,
 					input.thread_id,

@@ -701,6 +701,26 @@ export const OrchestrationRepositoryLive = Layer.effect(
 								);
 						}
 
+						if (observation._tag === "run_terminal") {
+							const updated_at = yield* metadata.Now;
+
+							/**
+							 * A terminal run can never answer its pending interactions.
+							 * Releasing them lets a late approval response fail command
+							 * dispatch as stale instead of queueing an outbox delivery
+							 * that nothing will ever pick up.
+							 */
+							yield* transaction
+								.update(OrchestrationInteractions)
+								.set({ state: "cancelled", updated_at })
+								.where(
+									and(
+										eq(OrchestrationInteractions.run_id, run.run_id),
+										eq(OrchestrationInteractions.state, "requested"),
+									),
+								);
+						}
+
 						if (observation._tag === "approval" || observation._tag === "question") {
 							const interaction_id =
 								observation._tag === "approval"

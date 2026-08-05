@@ -1,16 +1,71 @@
+import { and, eq } from "drizzle-orm";
 import { Effect } from "effect";
 
 import type { EngineObservation } from "@artisan/engines";
+import { ConversationItem } from "@artisan/protocol";
 
 import type { DatabaseClient } from "../../persistence/database";
+import { ConversationItems } from "../../persistence/tables";
 import type { ConversationObservationContext } from "./domain";
-import { compaction_item_id, item_base, optional_text, text } from "./domain";
-import { UpsertItem } from "./entities";
+import { compaction_item_id, item_base, optional_text, source_refs, text } from "./domain";
+import { DecodeJson, UpsertItem } from "./entities";
 
 type InteractionObservation = Extract<
 	EngineObservation,
 	{ _tag: "approval" | "compaction" | "plan" | "question" | "retry" }
 >;
+
+/**
+ * A run that reached a terminal state can never answer its pending
+ * interactions, so every approval or question still requested when the run
+ * ends resolves to cancelled instead of holding the conversation open forever.
+ */
+export const CancelPendingInteractions = (
+	transaction: DatabaseClient,
+	input: ConversationObservationContext,
+	turn_id: string,
+	reference: string,
+) =>
+	Effect.gen(function* () {
+		const rows = yield* transaction
+			.select()
+			.from(ConversationItems)
+			.where(
+				and(
+					eq(ConversationItems.thread_id, input.thread_id),
+					eq(ConversationItems.turn_id, turn_id),
+				),
+			);
+		const source = { observed_at: input.occurred_at };
+
+		for (const row of rows) {
+			const prior = yield* DecodeJson(
+				ConversationItem,
+				row.entity_json,
+				"stored conversation item",
+			);
+			if (
+				(prior.type !== "approval" && prior.type !== "question") ||
+				prior.state !== "requested"
+			)
+				continue;
+			yield* UpsertItem(
+				transaction,
+				input.thread_id,
+				{
+					id: prior.id,
+					type: prior.type,
+					lifecycle: "cancelled",
+					resolution: "Cancelled",
+					resolved_at: input.occurred_at,
+					source_refs: source_refs(reference, { provider: "engine" }),
+					state: "cancelled",
+					updated_at: input.occurred_at,
+				},
+				source,
+			);
+		}
+	});
 
 export const ApplyInteractionObservation = (
 	transaction: DatabaseClient,

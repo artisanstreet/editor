@@ -663,6 +663,80 @@ describe("conversation projection", () => {
 		}
 	});
 
+	it("cancels a still-requested approval when the run reaches a terminal state", async () => {
+		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
+		try {
+			const availability = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const read_model = yield* ConversationReadModel;
+					yield* database.client.insert(Threads).values({
+						created_at: "2026-07-24T00:00:00.000Z",
+						last_activity_at: "2026-07-24T00:00:00.000Z",
+						thread_id: "thread_1",
+						title: "Conversation",
+						updated_at: "2026-07-24T00:00:00.000Z",
+					});
+					yield* database.client.transaction((transaction) =>
+						Effect.gen(function* () {
+							const context = {
+								occurred_at: "2026-07-24T00:00:01.000Z",
+								run_id: "run_1",
+								thread_id: "thread_1",
+							};
+							yield* ApplyEngineObservation(
+								transaction,
+								{
+									_tag: "approval",
+									approval_id: "pending_response_id",
+									artisan_run_id: "run_1",
+									description: "Run the build",
+									observation_id: "approval_requested",
+									raw: { engine_id: "codex", frame: {}, transport: "test" },
+									request: {
+										command: "pnpm build",
+										kind: "command",
+										reason: "Run the build",
+									},
+									sequence: 1,
+									state: "requested",
+								},
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
+							yield* ApplyEngineObservation(
+								transaction,
+								{
+									_tag: "run_terminal",
+									artisan_run_id: "run_1",
+									observation_id: "run_cancelled",
+									raw: { engine_id: "codex", frame: {}, transport: "test" },
+									sequence: 2,
+									state: "cancelled",
+								},
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
+						}),
+					);
+					return yield* read_model.ReadSnapshot("thread_1");
+				}),
+			);
+
+			expect(availability.status).toBe("available");
+			if (availability.status !== "available") return;
+			expect(
+				availability.snapshot.items.find((item) => item.type === "approval"),
+			).toMatchObject({
+				interaction_id: "pending_response_id",
+				lifecycle: "cancelled",
+				resolution: "Cancelled",
+				state: "cancelled",
+				type: "approval",
+			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("completes a reasoning summary streamed by delta and emits an item_lifecycle patch", async () => {
 		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
 		try {

@@ -19,6 +19,7 @@ import {
 	MessageImageAttachments,
 	OrchestrationOutbox,
 	OrchestrationIntake,
+	OrchestrationInteractions,
 	OrchestrationRawObservations,
 	OrchestrationRuns,
 	Projects,
@@ -660,6 +661,71 @@ describe("orchestration repository hardening", () => {
 				{ run_id: first.run_id, status: "completed" },
 				{ run_id: accepted.run_id, status: "queued" },
 			]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("releases requested interactions when the run terminates and rejects late responses", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			migrations_path,
+		});
+
+		try {
+			await runtime.runPromise(SetupThread("thread_1"));
+			const started = await runtime.runPromise(
+				Accept(
+					make_command("start_1", "thread_1", {
+						engine_id: "engine_1",
+						text: "Start",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			await runtime.runPromise(
+				Effect.gen(function* () {
+					const repository = yield* OrchestrationRepository;
+
+					yield* repository.RecordObservation({
+						_tag: "approval",
+						approval_id: "approval_1",
+						artisan_run_id: started.run_id,
+						description: "Run the build",
+						observation_id: "approval_requested",
+						raw: { engine_id: "engine_1", frame: null, transport: "fixture" },
+						request: { command: "pnpm build", kind: "command" },
+						sequence: 1,
+						state: "requested",
+					});
+					yield* repository.RecordObservation({
+						_tag: "run_terminal",
+						artisan_run_id: started.run_id,
+						observation_id: "run_cancelled",
+						raw: { engine_id: "engine_1", frame: null, transport: "fixture" },
+						sequence: 2,
+						state: "cancelled",
+					});
+				}),
+			);
+			const interactions = await runtime.runPromise(
+				Read((database) => database.select().from(OrchestrationInteractions)),
+			);
+			const late_response = await runtime.runPromiseExit(
+				Accept(
+					make_command("respond_1", "thread_1", {
+						approval_id: "approval_1",
+						approved: true,
+						type: "run.respond_approval",
+					}),
+				),
+			);
+
+			expect(interactions).toMatchObject([
+				{ interaction_id: "approval_1", state: "cancelled" },
+			]);
+			expect(late_response._tag).toBe("Failure");
 		} finally {
 			await runtime.dispose();
 		}
