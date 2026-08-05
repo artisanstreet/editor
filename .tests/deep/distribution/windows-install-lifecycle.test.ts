@@ -12,7 +12,7 @@ import {
 	PermanentAe,
 	RunBootstrap,
 	type BootstrapInvocation,
-} from "../../../modules/bootstrap/src";
+} from "../../../modules/installer/src";
 import {
 	DistributionIntegrationPlan,
 	DistributionOperations,
@@ -63,7 +63,7 @@ const MakeRelease = (version: string): ReleaseManifest => ({
 	editor_forge_compatibility_version: version,
 	channel: "stable",
 	signing_identity: { algorithm: "ed25519", key_id: "release-key" },
-	minimum_bootstrap_version: "0.1.0",
+	minimum_installer_version: "0.1.0",
 	minimum_cli_version: "0.1.0",
 	artifacts: [
 		{

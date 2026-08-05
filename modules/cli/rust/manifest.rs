@@ -20,7 +20,7 @@ impl InstallationManifest {
                  The repo development Forge runs without one (`pnpm run dev:forge`, then \
                  `pnpm run dev:open` or `dev:pair`); to exercise the installed flow in \
                  development, create the sandboxed installation with \
-                 `pnpm run dev:ae-bootstrap -- install`",
+                 `pnpm run dev:ae-installer -- install`",
                 path.display()
             )));
         }
@@ -58,12 +58,12 @@ impl InstallationManifest {
         directory.join("artisan-editor")
     }
 
-    pub fn bootstrap_executable(&self) -> PathBuf {
+    pub fn installer_executable(&self) -> PathBuf {
         let directory = self.version_root().join("bin");
         #[cfg(target_os = "windows")]
-        return directory.join("artisan-bootstrap.exe");
+        return directory.join("ae-installer.exe");
         #[cfg(not(target_os = "windows"))]
-        directory.join("artisan-bootstrap")
+        directory.join("ae-installer")
     }
 }
 
@@ -80,6 +80,6 @@ mod tests {
         let message = error.to_string();
         assert!(message.contains("no installation manifest"), "{message}");
         assert!(message.contains("pnpm run dev:forge"), "{message}");
-        assert!(message.contains("dev:ae-bootstrap -- install"), "{message}");
+        assert!(message.contains("dev:ae-installer -- install"), "{message}");
     }
 }

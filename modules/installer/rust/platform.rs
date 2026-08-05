@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use crate::error::{BootstrapError, Result};
+use crate::error::{InstallerError, Result};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Platform {
@@ -14,12 +14,12 @@ impl Platform {
             "windows" => "windows",
             "macos" => "macos",
             "linux" => "linux",
-            other => return Err(BootstrapError::UnsupportedPlatform(other.to_owned())),
+            other => return Err(InstallerError::UnsupportedPlatform(other.to_owned())),
         };
         let arch = match std::env::consts::ARCH {
             "x86_64" => "x64",
             "aarch64" => "arm64",
-            other => return Err(BootstrapError::UnsupportedPlatform(other.to_owned())),
+            other => return Err(InstallerError::UnsupportedPlatform(other.to_owned())),
         };
         Ok(Self { os, arch })
     }
@@ -56,10 +56,10 @@ pub fn forbid_default_install_root(root: &std::path::Path) -> Result<()> {
     if !is_same_or_inside(root, &installed) {
         return Ok(());
     }
-    Err(BootstrapError::DebugBuildGuard(format!(
-        "this debug bootstrap build refuses to operate on the installed Artisan root at {}; \
+    Err(InstallerError::DebugBuildGuard(format!(
+        "this debug installer build refuses to operate on the installed Artisan root at {}; \
          pass --install-root (or set ARTISAN_INSTALL_ROOT) to a sandbox such as \
-         <repo>/.dist/dev/install-root, for example via `pnpm run dev:ae-bootstrap`",
+         <repo>/.dist/dev/install-root, for example via `pnpm run dev:ae-installer`",
         installed.display()
     )))
 }
@@ -110,12 +110,12 @@ mod tests {
     #[test]
     fn debug_builds_require_a_sandboxed_install_root() {
         use super::forbid_default_install_root;
-        use crate::error::BootstrapError;
+        use crate::error::InstallerError;
 
         let installed = Platform::default_install_root();
         assert!(matches!(
             forbid_default_install_root(&installed),
-            Err(BootstrapError::DebugBuildGuard(message))
+            Err(InstallerError::DebugBuildGuard(message))
                 if message.contains("ARTISAN_INSTALL_ROOT")
         ));
         assert!(forbid_default_install_root(&installed.join("versions")).is_err());

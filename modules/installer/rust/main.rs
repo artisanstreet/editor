@@ -9,7 +9,7 @@ mod platform;
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
-use error::{BootstrapError, Result};
+use error::{InstallerError, Result};
 use install::{InstallOptions, diagnose, install, repair, uninstall};
 use manifest::TrustKey;
 use platform::Platform;
@@ -49,7 +49,7 @@ struct Arguments {
     signature_url: Option<Url>,
 
     /// Ed25519 public key as 32-byte hexadecimal. Overrides embedded release trust.
-    #[arg(long, env = "ARTISAN_BOOTSTRAP_PUBLIC_KEY", global = true)]
+    #[arg(long, env = "ARTISAN_INSTALLER_PUBLIC_KEY", global = true)]
     public_key: Option<String>,
 
     /// Components to install. Defaults to Editor, Forge, and the permanent ae CLI.
@@ -94,7 +94,7 @@ enum Operation {
 #[tokio::main]
 async fn main() {
     if let Err(error) = run().await {
-        eprintln!("artisan bootstrap failed: {error}");
+        eprintln!("ae installer failed: {error}");
         std::process::exit(1);
     }
 }
@@ -176,15 +176,15 @@ fn make_install_options(
 }
 
 fn schedule_self_cleanup() -> Result<()> {
-    let executable = std::env::current_exe().map_err(BootstrapError::CurrentExecutable)?;
+    let executable = std::env::current_exe().map_err(InstallerError::CurrentExecutable)?;
     let temporary_root = std::env::temp_dir()
         .canonicalize()
-        .map_err(BootstrapError::TemporaryDirectory)?;
+        .map_err(InstallerError::TemporaryDirectory)?;
     let executable = executable
         .canonicalize()
-        .map_err(BootstrapError::CurrentExecutable)?;
+        .map_err(InstallerError::CurrentExecutable)?;
     if !executable.starts_with(&temporary_root) {
-        return Err(BootstrapError::UnsafeSelfCleanup(executable));
+        return Err(InstallerError::UnsafeSelfCleanup(executable));
     }
 
     #[cfg(windows)]
@@ -201,7 +201,7 @@ fn schedule_self_cleanup() -> Result<()> {
             .env("ARTISAN_BOOTSTRAP_DELETE", &executable)
             .creation_flags(DETACHED_PROCESS)
             .spawn()
-            .map_err(BootstrapError::CleanupHelper)?;
+            .map_err(InstallerError::CleanupHelper)?;
     }
     #[cfg(unix)]
     {
@@ -209,13 +209,13 @@ fn schedule_self_cleanup() -> Result<()> {
             .args([
                 "-c",
                 "sleep 1; rm -f -- \"$1\"",
-                "artisan-bootstrap-cleanup",
+                "ae-installer-cleanup",
                 executable
                     .to_str()
-                    .ok_or_else(|| BootstrapError::NonUtf8Path(executable.clone()))?,
+                    .ok_or_else(|| InstallerError::NonUtf8Path(executable.clone()))?,
             ])
             .spawn()
-            .map_err(BootstrapError::CleanupHelper)?;
+            .map_err(InstallerError::CleanupHelper)?;
     }
     Ok(())
 }
@@ -228,20 +228,16 @@ mod tests {
 
     #[test]
     fn permanent_cli_maintenance_argument_order_is_supported() {
-        let arguments = Arguments::try_parse_from([
-            "artisan-bootstrap",
-            "update",
-            "--install-root",
-            "/tmp/artisan",
-        ])
-        .expect("maintenance invocation");
+        let arguments =
+            Arguments::try_parse_from(["ae-installer", "update", "--install-root", "/tmp/artisan"])
+                .expect("maintenance invocation");
         assert!(matches!(arguments.operation, Some(Operation::Update)));
     }
 
     #[test]
     fn data_removal_is_explicit() {
         let arguments =
-            Arguments::try_parse_from(["artisan-bootstrap", "uninstall"]).expect("uninstall");
+            Arguments::try_parse_from(["ae-installer", "uninstall"]).expect("uninstall");
         assert!(matches!(
             arguments.operation,
             Some(Operation::Uninstall { remove_data: false })
@@ -250,8 +246,7 @@ mod tests {
 
     #[test]
     fn diagnostic_operation_is_available_to_permanent_ae() {
-        let arguments =
-            Arguments::try_parse_from(["artisan-bootstrap", "diagnose"]).expect("diagnose");
+        let arguments = Arguments::try_parse_from(["ae-installer", "diagnose"]).expect("diagnose");
         assert!(matches!(arguments.operation, Some(Operation::Diagnose)));
     }
 }

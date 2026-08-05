@@ -16,5 +16,5 @@ $env:ARTISAN_HOME = $install_root
 # a scalar over a native command splits it into characters.
 $forwarded = @(if ($args.Count -gt 0 -and $args[0] -eq "--") { $args | Select-Object -Skip 1 } else { $args })
 
-& cargo run -p artisan-bootstrap -- @forwarded
+& cargo run -p ae-installer -- @forwarded
 exit $LASTEXITCODE

@@ -1,6 +1,6 @@
 [package]
-name = "artisan-bootstrap"
-description = "Disposable native installer bootstrap for Artisan Editor"
+name = "ae-installer"
+description = "Standalone cross-platform installer and manager for Artisan Editor"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -8,7 +8,7 @@ rust-version.workspace = true
 version.workspace = true
 
 [[bin]]
-name = "artisan-bootstrap"
+name = "ae-installer"
 path = "rust/main.rs"
 
 [dependencies]

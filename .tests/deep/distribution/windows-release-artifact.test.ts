@@ -57,7 +57,7 @@ describe("Windows distribution release artifact", () => {
 		const root = await TemporaryRoot();
 		const editor_root = join(root, "editor");
 		const forge_root = join(root, "forge");
-		const native_bootstrap_path = join(root, "artisan-bootstrap.exe");
+		const native_installer_path = join(root, "ae-installer.exe");
 		const native_cli_path = join(root, "ae.exe");
 		await Promise.all([
 			mkdir(join(editor_root, "resources", "artisan-forge"), { recursive: true }),
@@ -70,7 +70,7 @@ describe("Windows distribution release artifact", () => {
 			writeFile(join(forge_root, "Artisan Forge.exe"), "forge"),
 			writeFile(join(forge_root, "ae.js"), "cli"),
 			writeFile(join(forge_root, "node.exe"), "node"),
-			writeFile(native_bootstrap_path, "native bootstrap"),
+			writeFile(native_installer_path, "native bootstrap"),
 			writeFile(native_cli_path, "native ae"),
 		]);
 		const keys = generateKeyPairSync("ed25519");
@@ -86,9 +86,9 @@ describe("Windows distribution release artifact", () => {
 			editor_root,
 			forge_root,
 			key_id: "test-key",
-			minimum_bootstrap_version: "0.1.0",
+			minimum_installer_version: "0.1.0",
 			minimum_cli_version: "0.1.0",
-			native_bootstrap_path,
+			native_installer_path,
 			native_cli_path,
 			private_key_pem,
 			product_version: "0.1.0",
@@ -116,9 +116,9 @@ describe("Windows distribution release artifact", () => {
 		expect(first_archive).toEqual(second_archive);
 		const archive = ReadStoredZip(first_archive);
 		expect([...archive.keys()]).toEqual([
+			"bin/ae-installer.exe",
 			"bin/ae.cmd",
 			"bin/ae.exe",
-			"bin/artisan-bootstrap.exe",
 			"editor/Artisan Editor.exe",
 			"editor/resources/app.asar",
 			"forge/ae.js",

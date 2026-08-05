@@ -69,7 +69,7 @@ const MakeRelease = (artifact: ReleaseArtifact): ReleaseManifest => ({
 	editor_forge_compatibility_version: "0.2.0",
 	channel: "stable",
 	signing_identity: { algorithm: "ed25519", key_id: "test-key" },
-	minimum_bootstrap_version: "0.1.0",
+	minimum_installer_version: "0.1.0",
 	minimum_cli_version: "0.1.0",
 	artifacts: [artifact],
 });

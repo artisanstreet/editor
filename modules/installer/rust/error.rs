@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
-pub enum BootstrapError {
+pub enum InstallerError {
     #[error("unsupported platform: {0}")]
     UnsupportedPlatform(String),
     #[cfg(unix)]
@@ -23,8 +23,8 @@ pub enum BootstrapError {
     InvalidRelease(String),
     #[error("release contains no artifact for component {component} on {target}")]
     MissingArtifact { component: String, target: String },
-    #[error("bootstrap {current} cannot install a release requiring bootstrap {minimum}")]
-    BootstrapTooOld { current: String, minimum: String },
+    #[error("installer {current} cannot install a release requiring installer {minimum}")]
+    InstallerTooOld { current: String, minimum: String },
     #[error("artifact request failed for {url}: {source}")]
     ArtifactRequest {
         url: url::Url,
@@ -52,9 +52,9 @@ pub enum BootstrapError {
     #[error("permanent ae executable is missing at {0}")]
     MissingCli(PathBuf),
     #[error(
-        "installer lifecycle binary is missing at {0}; release archives must contain bin/artisan-bootstrap (bin/artisan-bootstrap.exe on Windows)"
+        "installer lifecycle binary is missing at {0}; release archives must contain bin/ae-installer (bin/ae-installer.exe on Windows)"
     )]
-    MissingBootstrap(PathBuf),
+    MissingInstaller(PathBuf),
     #[error("installation state is invalid: {0}")]
     InvalidInstallation(String),
     #[error("development build guard: {0}")]
@@ -65,7 +65,7 @@ pub enum BootstrapError {
     CurrentExecutable(#[source] std::io::Error),
     #[error("could not resolve temporary directory: {0}")]
     TemporaryDirectory(#[source] std::io::Error),
-    #[error("refusing to delete a bootstrap outside the temporary directory: {0}")]
+    #[error("refusing to delete an installer outside the temporary directory: {0}")]
     UnsafeSelfCleanup(PathBuf),
     #[cfg(unix)]
     #[error("path is not valid UTF-8: {0}")]
@@ -74,9 +74,9 @@ pub enum BootstrapError {
     CleanupHelper(#[source] std::io::Error),
 }
 
-pub type Result<T> = std::result::Result<T, BootstrapError>;
+pub type Result<T> = std::result::Result<T, InstallerError>;
 
-pub fn io(path: impl Into<PathBuf>) -> impl FnOnce(std::io::Error) -> BootstrapError {
+pub fn io(path: impl Into<PathBuf>) -> impl FnOnce(std::io::Error) -> InstallerError {
     let path = path.into();
-    move |source| BootstrapError::FileSystem { path, source }
+    move |source| InstallerError::FileSystem { path, source }
 }

@@ -28,10 +28,10 @@ if ($env:ARTISAN_INSTALL_TEST_MODE -eq "1" -and $env:ARTISAN_INSTALL_TEST_ARCH) 
 $target = switch ($architecture) {
 	"x64" { "windows-x64" }
 	"arm64" { "windows-arm64" }
-	default { throw "Artisan does not provide a Windows bootstrap for architecture '$architecture'." }
+	default { throw "Artisan does not provide a Windows installer for architecture '$architecture'." }
 }
 
-$asset = "artisan-bootstrap-$target.exe"
+$asset = "ae-installer-$target.exe"
 $release_path = if ($version -eq "latest") { "latest/download" } else { "download/$version" }
 $release_base = "https://github.com/$repository/releases/$release_path"
 $asset_uri = "$release_base/$asset"
@@ -51,26 +51,26 @@ if ($env:ARTISAN_INSTALL_TEST_MODE -eq "1" -and $env:ARTISAN_INSTALL_TEST_RESOLV
 	exit 0
 }
 
-$temporary_root = Join-Path ([System.IO.Path]::GetTempPath()) ("artisan-bootstrap-" + [guid]::NewGuid().ToString("N"))
-$bootstrap_path = Join-Path $temporary_root $asset
-$checksum_path = "$bootstrap_path.sha256"
+$temporary_root = Join-Path ([System.IO.Path]::GetTempPath()) ("ae-installer-" + [guid]::NewGuid().ToString("N"))
+$installer_path = Join-Path $temporary_root $asset
+$checksum_path = "$installer_path.sha256"
 
 try {
 	[System.IO.Directory]::CreateDirectory($temporary_root) | Out-Null
-	Invoke-WebRequest -UseBasicParsing -MaximumRedirection 5 -Uri $asset_uri -OutFile $bootstrap_path
+	Invoke-WebRequest -UseBasicParsing -MaximumRedirection 5 -Uri $asset_uri -OutFile $installer_path
 	Invoke-WebRequest -UseBasicParsing -MaximumRedirection 5 -Uri $checksum_uri -OutFile $checksum_path
 
 	$checksum_text = [System.IO.File]::ReadAllText($checksum_path).Trim()
 	if ($checksum_text -notmatch "^(?<digest>[A-Fa-f0-9]{64})(?:\s+\*?[^\s]+)?$") {
-		throw "The Artisan bootstrap checksum sidecar is malformed."
+		throw "The Artisan installer checksum sidecar is malformed."
 	}
 	$expected_digest = $Matches.digest.ToLowerInvariant()
-	$actual_digest = (Get-FileHash -LiteralPath $bootstrap_path -Algorithm SHA256).Hash.ToLowerInvariant()
+	$actual_digest = (Get-FileHash -LiteralPath $installer_path -Algorithm SHA256).Hash.ToLowerInvariant()
 	if ($expected_digest -cne $actual_digest) {
 		throw "The Artisan bootstrap failed SHA-256 verification."
 	}
 
-	& $bootstrap_path --manifest-url $manifest_uri --signature-url $signature_uri @BootstrapArguments
+	& $installer_path --manifest-url $manifest_uri --signature-url $signature_uri @BootstrapArguments
 	if ($LASTEXITCODE -ne 0) {
 		throw "The Artisan bootstrap exited with code $LASTEXITCODE."
 	}

@@ -30,7 +30,7 @@ const manifest = {
 	channel: "stable",
 	editor_forge_compatibility_version: "1.0.0",
 	format_version: 1,
-	minimum_bootstrap_version: "1.0.0",
+	minimum_installer_version: "1.0.0",
 	minimum_cli_version: "1.0.0",
 	product_version: "1.0.0",
 	signing_identity: { algorithm: "ed25519", key_id },

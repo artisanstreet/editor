@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-    error::{BootstrapError, Result, io},
+    error::{InstallerError, Result, io},
     platform::Platform,
 };
 
@@ -21,7 +21,7 @@ pub struct OwnedIntegration {
 
 pub fn protocol_command(stable_ae: &Path) -> Result<String> {
     let executable = stable_ae.to_str().ok_or_else(|| {
-        BootstrapError::InvalidInstallation(
+        InstallerError::InvalidInstallation(
             "permanent ae path cannot be represented in the protocol command".to_owned(),
         )
     })?;
@@ -37,7 +37,7 @@ pub fn expected_protocol(stable_ae: &Path) -> Result<OwnedIntegration> {
         path: stable_ae
             .to_str()
             .ok_or_else(|| {
-                BootstrapError::InvalidInstallation(
+                InstallerError::InvalidInstallation(
                     "permanent ae path cannot be recorded for protocol ownership".to_owned(),
                 )
             })?
@@ -118,7 +118,7 @@ pub fn verify_protocol(
             || read_windows_protocol_at(PROTOCOL_REGISTRY_SUBKEY, PROTOCOL_REGISTRY_PATH)?
                 != Some(ProtocolSnapshot::expected(&expected_command))
         {
-            return Err(BootstrapError::InvalidInstallation(
+            return Err(InstallerError::InvalidInstallation(
                 "artisan:// protocol integration is missing or has drifted; run `ae doctor --fix`"
                     .to_owned(),
             ));
@@ -278,7 +278,7 @@ fn plan_windows_protocol_at(
         {
             Ok(ProtocolPlan::Write(expected))
         }
-        Some(_) => Err(BootstrapError::InvalidInstallation(
+        Some(_) => Err(InstallerError::InvalidInstallation(
             "artisan:// is registered to another application; preserving the existing handler"
                 .to_owned(),
         )),

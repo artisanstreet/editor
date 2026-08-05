@@ -14,7 +14,7 @@ import {
 	RunBootstrap,
 	type BootstrapInvocation,
 	type NpmCleanupPlan,
-} from "../../modules/bootstrap/src";
+} from "../../modules/installer/src";
 import {
 	InstallationStore,
 	type InstallationState,
@@ -321,7 +321,7 @@ describe("disposable bootstrap", () => {
 
 	it("ships an ae bin without an npm postinstall hook", async () => {
 		const package_json = JSON.parse(
-			await readFile("modules/bootstrap/package.json", "utf8"),
+			await readFile("modules/installer/package.json", "utf8"),
 		) as {
 			readonly bin?: Record<string, string>;
 			readonly dependencies?: Record<string, string>;

@@ -9,6 +9,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "ae-installer"
+version = "0.2.2"
+dependencies = [
+ "base64",
+ "chrono",
+ "clap",
+ "ed25519-dalek",
+ "hex",
+ "reqwest",
+ "semver",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "url",
+ "winreg",
+ "zip",
+ "zstd",
+]
+
+[[package]]
 name = "android_system_properties"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -74,30 +98,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
 dependencies = [
  "derive_arbitrary",
-]
-
-[[package]]
-name = "artisan-bootstrap"
-version = "0.2.2"
-dependencies = [
- "base64",
- "chrono",
- "clap",
- "ed25519-dalek",
- "hex",
- "reqwest",
- "semver",
- "serde",
- "serde_json",
- "sha2",
- "tar",
- "tempfile",
- "thiserror",
- "tokio",
- "url",
- "winreg",
- "zip",
- "zstd",
 ]
 
 [[package]]

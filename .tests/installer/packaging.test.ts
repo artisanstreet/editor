@@ -7,7 +7,7 @@ import { describe, expect, it } from "vitest";
 import { build } from "vite";
 
 const ExecFile = promisify(execFile);
-const bootstrap_root = resolve("modules/bootstrap");
+const bootstrap_root = resolve("modules/installer");
 
 describe("published bootstrap artifact", () => {
 	it("builds a self-contained bundle without optional cloud or workspace runtime imports", async () => {

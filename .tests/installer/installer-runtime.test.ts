@@ -5,16 +5,16 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { Effect } from "effect";
 
-import { BootstrapInstaller } from "../../modules/bootstrap/src/contract";
+import { BootstrapInstaller } from "../../modules/installer/src/contract";
 import {
 	EnsureInstalledReleaseConfiguration,
 	LoadBuiltInReleaseConfiguration,
 	make_node_bootstrap_installer_layer,
-} from "../../modules/bootstrap/src/installer-runtime";
+} from "../../modules/installer/src/installer-runtime";
 
 describe("bootstrap installer runtime", () => {
 	it("fails without publication trust before mutating the installation root", async () => {
-		const root = await mkdtemp(join(tmpdir(), "artisan-bootstrap-installer-"));
+		const root = await mkdtemp(join(tmpdir(), "ae-installer-"));
 		try {
 			const layer = make_node_bootstrap_installer_layer({ ARTISAN_HOME: root });
 			await expect(
@@ -40,7 +40,7 @@ describe("bootstrap installer runtime", () => {
 	});
 
 	it("persists public trust for resume from a new shell without release environment", async () => {
-		const root = await mkdtemp(join(tmpdir(), "artisan-bootstrap-installer-"));
+		const root = await mkdtemp(join(tmpdir(), "ae-installer-"));
 		const environment = {
 			ARTISAN_HOME: root,
 			ARTISAN_RELEASE_KEY_ID: "release-key",
@@ -64,7 +64,7 @@ describe("bootstrap installer runtime", () => {
 	});
 
 	it("seeds official built-in release trust with an otherwise empty environment", async () => {
-		const root = await mkdtemp(join(tmpdir(), "artisan-bootstrap-installer-"));
+		const root = await mkdtemp(join(tmpdir(), "ae-installer-"));
 		const public_key = Buffer.from([1, 2, 3]).toString("base64");
 		try {
 			const built_in = LoadBuiltInReleaseConfiguration({
@@ -92,7 +92,7 @@ describe("bootstrap installer runtime", () => {
 	});
 
 	it("does not replace corrupt installed trust with environment input", async () => {
-		const root = await mkdtemp(join(tmpdir(), "artisan-bootstrap-installer-"));
+		const root = await mkdtemp(join(tmpdir(), "ae-installer-"));
 		const path = join(root, "distribution.json");
 		try {
 			await writeFile(path, "{broken");

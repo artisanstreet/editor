@@ -16,7 +16,7 @@
 use std::{collections::BTreeMap, fs::File, path::Path};
 
 use crate::{
-    error::{BootstrapError, Result, io},
+    error::{InstallerError, Result, io},
     install::hash_file,
 };
 
@@ -38,7 +38,7 @@ pub fn write_manifest(root: &Path) -> Result<()> {
             "files": files,
         }),
     )
-    .map_err(BootstrapError::InvalidPayload)?;
+    .map_err(InstallerError::InvalidPayload)?;
     file.sync_all().map_err(io(&path))?;
     Ok(())
 }
@@ -48,7 +48,7 @@ fn collect(directory: &Path, prefix: &str, files: &mut BTreeMap<String, String>)
         let entry = entry.map_err(io(directory))?;
         let path = entry.path();
         let name = entry.file_name().into_string().map_err(|name| {
-            BootstrapError::Archive(format!("payload name is not Unicode: {name:?}"))
+            InstallerError::Archive(format!("payload name is not Unicode: {name:?}"))
         })?;
         let relative = if prefix.is_empty() {
             name
@@ -64,7 +64,7 @@ fn collect(directory: &Path, prefix: &str, files: &mut BTreeMap<String, String>)
             }
         } else {
             // The archive extractor admits only regular files and directories.
-            return Err(BootstrapError::Archive(format!(
+            return Err(InstallerError::Archive(format!(
                 "payload entry is neither file nor directory: {relative}"
             )));
         }

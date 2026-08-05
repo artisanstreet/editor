@@ -33,14 +33,14 @@ if ($errors.Count -ne 0) {
 }
 
 $x64 = Resolve-Transport "x64"
-if ($x64.target -ne "windows-x64" -or $x64.asset -ne "artisan-bootstrap-windows-x64.exe") {
+if ($x64.target -ne "windows-x64" -or $x64.asset -ne "ae-installer-windows-x64.exe") {
 	throw "Windows x64 selection is incorrect."
 }
 $arm64 = Resolve-Transport "arm64" "v1.2.3"
 if ($arm64.target -ne "windows-arm64") {
 	throw "Windows arm64 selection is incorrect."
 }
-if ($arm64.asset_uri -ne "https://github.com/sandersonstabo/artisan-editor/releases/download/v1.2.3/artisan-bootstrap-windows-arm64.exe") {
+if ($arm64.asset_uri -ne "https://github.com/sandersonstabo/artisan-editor/releases/download/v1.2.3/ae-installer-windows-arm64.exe") {
 	throw "Pinned Windows release URL is incorrect."
 }
 if ($arm64.checksum_uri -ne "$($arm64.asset_uri).sha256") {

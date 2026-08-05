@@ -12,7 +12,7 @@ const valid_manifest = {
 	editor_forge_compatibility_version: "0.2.0",
 	channel: "stable",
 	signing_identity: { key_id: "artisan-release-2026", algorithm: "ed25519" },
-	minimum_bootstrap_version: "0.1.0",
+	minimum_installer_version: "0.1.0",
 	minimum_cli_version: "0.1.0",
 	artifacts: [
 		{

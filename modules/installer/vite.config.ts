@@ -14,7 +14,7 @@ const ProductionTrust = () => {
 			: readFileSync(process.env.ARTISAN_RELEASE_SIGNING_KEY_FILE, "utf8"));
 	if (!key_id || !private_key_pem)
 		throw new Error(
-			"Production bootstrap requires ARTISAN_RELEASE_SIGNING_KEY_ID and a signing private key",
+			"Production installer requires ARTISAN_RELEASE_SIGNING_KEY_ID and a signing private key",
 		);
 	return {
 		key_id,
@@ -34,7 +34,7 @@ export default defineConfig(({ mode }) => {
 		},
 		plugins: [
 			{
-				name: "artisan-bootstrap-executable",
+				name: "ae-installer-executable",
 				closeBundle: () => chmod(resolve(import.meta.dirname, ".dist", "entry.js"), 0o755),
 			},
 		],

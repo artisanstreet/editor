@@ -13,7 +13,7 @@ import {
 	ResolveNpmExecutable,
 	ResolveNpmPrefix,
 	type NpmCleanupPlan,
-} from "../../modules/bootstrap/src";
+} from "../../modules/installer/src";
 
 describe("bootstrap Node runtime", () => {
 	it("resolves the product root independently of a project", () => {

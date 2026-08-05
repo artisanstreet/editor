@@ -12,7 +12,7 @@ use url::Url;
 
 use crate::{
     archive,
-    error::{BootstrapError, Result, io},
+    error::{InstallerError, Result, io},
     integrations::{
         OwnedIntegration, apply_protocol, prepare_protocol, remove_protocol, verify_protocol,
     },
@@ -51,11 +51,11 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         .https_only(!loopback_manifest)
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()
-        .map_err(BootstrapError::ManifestRequest)?;
+        .map_err(InstallerError::ManifestRequest)?;
     let artifact_base_url = options
         .manifest_url
         .join("./")
-        .map_err(|error| BootstrapError::InvalidTrustKey(error.to_string()))?;
+        .map_err(|error| InstallerError::InvalidTrustKey(error.to_string()))?;
     let manifest = fetch(
         &client,
         options.manifest_url.clone(),
@@ -64,24 +64,24 @@ pub async fn install(options: InstallOptions) -> Result<()> {
     )
     .await?;
     let current_version = semver::Version::parse(env!("CARGO_PKG_VERSION"))
-        .map_err(|error| BootstrapError::InvalidTrustKey(error.to_string()))?;
-    let minimum_version = semver::Version::parse(&manifest.minimum_bootstrap_version)
-        .map_err(|error| BootstrapError::InvalidTrustKey(error.to_string()))?;
+        .map_err(|error| InstallerError::InvalidTrustKey(error.to_string()))?;
+    let minimum_version = semver::Version::parse(&manifest.minimum_installer_version)
+        .map_err(|error| InstallerError::InvalidTrustKey(error.to_string()))?;
     if current_version < minimum_version {
-        return Err(BootstrapError::BootstrapTooOld {
+        return Err(InstallerError::InstallerTooOld {
             current: current_version.to_string(),
             minimum: minimum_version.to_string(),
         });
     }
     let product_version = semver::Version::parse(&manifest.product_version)
-        .map_err(|error| BootstrapError::InvalidRelease(error.to_string()))?;
+        .map_err(|error| InstallerError::InvalidRelease(error.to_string()))?;
     let compatibility_version =
         semver::Version::parse(&manifest.editor_forge_compatibility_version)
-            .map_err(|error| BootstrapError::InvalidRelease(error.to_string()))?;
+            .map_err(|error| InstallerError::InvalidRelease(error.to_string()))?;
     let minimum_cli_version = semver::Version::parse(&manifest.minimum_cli_version)
-        .map_err(|error| BootstrapError::InvalidRelease(error.to_string()))?;
+        .map_err(|error| InstallerError::InvalidRelease(error.to_string()))?;
     if product_version != compatibility_version || product_version < minimum_cli_version {
-        return Err(BootstrapError::InvalidRelease(
+        return Err(InstallerError::InvalidRelease(
             "product, Editor/Forge compatibility, and minimum CLI versions disagree".to_owned(),
         ));
     }
@@ -94,12 +94,12 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         let stable_ae = install_stable_cli(&options.install_root, &existing_release)?;
         let existing_protocol = read_existing_protocol(&options.install_root)?;
         let bootstrap = existing_release.join("bin").join(if cfg!(windows) {
-            "artisan-bootstrap.exe"
+            "ae-installer.exe"
         } else {
-            "artisan-bootstrap"
+            "ae-installer"
         });
         if !bootstrap.is_file() {
-            return Err(BootstrapError::MissingBootstrap(bootstrap));
+            return Err(InstallerError::MissingInstaller(bootstrap));
         }
         let protocol = if options.register_protocol {
             prepare_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?
@@ -126,7 +126,7 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         std::process::id()
     ));
     if stage.exists() {
-        return Err(BootstrapError::ExistingRelease(manifest.product_version));
+        return Err(InstallerError::ExistingRelease(manifest.product_version));
     }
     std::fs::create_dir(&stage).map_err(io(&stage))?;
 
@@ -140,13 +140,13 @@ pub async fn install(options: InstallOptions) -> Result<()> {
                     && (options.platform.os != "linux"
                         || artifact.libc.as_deref() == Some(platform_libc()))
             })
-            .ok_or_else(|| BootstrapError::MissingArtifact {
+            .ok_or_else(|| InstallerError::MissingArtifact {
                 component: options.components.join(","),
                 target: options.platform.target(),
             })?;
         let artifact_url = artifact_base_url
             .join(&artifact.file_name)
-            .map_err(|error| BootstrapError::InvalidTrustKey(error.to_string()))?;
+            .map_err(|error| InstallerError::InvalidTrustKey(error.to_string()))?;
         install_artifact(&client, artifact, artifact_url, &stage).await?;
         prune_unselected_components(&stage, &options.components)?;
         // The tree is final: record per-file digests so `ae doctor` can
@@ -158,7 +158,7 @@ pub async fn install(options: InstallOptions) -> Result<()> {
             .join("versions")
             .join(&manifest.product_version);
         if release.exists() {
-            return Err(BootstrapError::ExistingRelease(
+            return Err(InstallerError::ExistingRelease(
                 manifest.product_version.clone(),
             ));
         }
@@ -169,12 +169,12 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         let stable_ae = install_stable_cli(&options.install_root, &release)?;
         let existing_protocol = read_existing_protocol(&options.install_root)?;
         let bootstrap = release.join("bin").join(if cfg!(windows) {
-            "artisan-bootstrap.exe"
+            "ae-installer.exe"
         } else {
-            "artisan-bootstrap"
+            "ae-installer"
         });
         if !bootstrap.is_file() {
-            return Err(BootstrapError::MissingBootstrap(bootstrap));
+            return Err(InstallerError::MissingInstaller(bootstrap));
         }
         let protocol = if options.register_protocol {
             prepare_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?
@@ -214,7 +214,7 @@ async fn install_artifact(
     stage: &Path,
 ) -> Result<()> {
     if artifact.size == 0 || artifact.size > ABSOLUTE_ARTIFACT_LIMIT {
-        return Err(BootstrapError::ArtifactTooLarge {
+        return Err(InstallerError::ArtifactTooLarge {
             url: artifact_url.clone(),
         });
     }
@@ -223,7 +223,7 @@ async fn install_artifact(
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
-        .map_err(|source| BootstrapError::ArtifactRequest {
+        .map_err(|source| InstallerError::ArtifactRequest {
             url: artifact_url.clone(),
             source,
         })?;
@@ -231,7 +231,7 @@ async fn install_artifact(
         .content_length()
         .is_some_and(|size| size > artifact.size)
     {
-        return Err(BootstrapError::ArtifactTooLarge {
+        return Err(InstallerError::ArtifactTooLarge {
             url: artifact_url.clone(),
         });
     }
@@ -244,14 +244,14 @@ async fn install_artifact(
         response
             .chunk()
             .await
-            .map_err(|source| BootstrapError::ArtifactRequest {
+            .map_err(|source| InstallerError::ArtifactRequest {
                 url: artifact_url.clone(),
                 source,
             })?
     {
         downloaded = downloaded.saturating_add(chunk.len() as u64);
         if downloaded > artifact.size {
-            return Err(BootstrapError::ArtifactTooLarge {
+            return Err(InstallerError::ArtifactTooLarge {
                 url: artifact_url.clone(),
             });
         }
@@ -259,7 +259,7 @@ async fn install_artifact(
         file.write_all(&chunk).map_err(io(&download))?;
     }
     if downloaded != artifact.size {
-        return Err(BootstrapError::ArtifactSizeMismatch {
+        return Err(InstallerError::ArtifactSizeMismatch {
             expected: artifact.size,
             actual: downloaded,
         });
@@ -267,7 +267,7 @@ async fn install_artifact(
     file.sync_all().map_err(io(&download))?;
     let digest = hex::encode(hasher.finalize());
     if !digest.eq_ignore_ascii_case(&artifact.sha256) {
-        return Err(BootstrapError::ChecksumMismatch(artifact_url));
+        return Err(InstallerError::ChecksumMismatch(artifact_url));
     }
     archive::extract(&download, artifact.format, stage, &artifact.archive_entries)?;
     std::fs::remove_file(&download).map_err(io(&download))?;
@@ -321,12 +321,12 @@ fn activate(
                 "ae"
             }))?,
         })
-        .map_err(BootstrapError::InvalidPayload)?,
+        .map_err(InstallerError::InvalidPayload)?,
     )]);
     if let Some(protocol) = protocol {
         integrations.insert(
             "protocol".to_owned(),
-            serde_json::to_value(protocol).map_err(BootstrapError::InvalidPayload)?,
+            serde_json::to_value(protocol).map_err(InstallerError::InvalidPayload)?,
         );
     }
     let contents = serde_json::json!({
@@ -361,7 +361,7 @@ fn activate(
     });
     let mut file = File::create(&next).map_err(io(&next))?;
     serde_json::to_writer(&mut file, &contents)
-        .map_err(|error| BootstrapError::Archive(error.to_string()))?;
+        .map_err(|error| InstallerError::Archive(error.to_string()))?;
     file.sync_all().map_err(io(&next))?;
     let previous = root.join(".installation.json.previous");
     if previous.exists() {
@@ -387,7 +387,7 @@ fn install_stable_cli(root: &Path, release: &Path) -> Result<PathBuf> {
         .join("bin")
         .join(if cfg!(windows) { "ae.exe" } else { "ae" });
     if !source.is_file() {
-        return Err(BootstrapError::MissingCli(source));
+        return Err(InstallerError::MissingCli(source));
     }
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).map_err(io(&bin))?;
@@ -432,7 +432,7 @@ fn schedule_stable_cli_replacement(source: &Path, destination: &Path) -> Result<
         .env("ARTISAN_AE_DESTINATION", destination)
         .creation_flags(DETACHED_PROCESS)
         .spawn()
-        .map_err(BootstrapError::CleanupHelper)?;
+        .map_err(InstallerError::CleanupHelper)?;
     Ok(())
 }
 
@@ -485,7 +485,7 @@ fn integrate_path(bin: &Path) -> Result<()> {
         );
         return Ok(());
     }
-    let home = std::env::var_os("HOME").ok_or(BootstrapError::MissingHome)?;
+    let home = std::env::var_os("HOME").ok_or(InstallerError::MissingHome)?;
     let command_bin = PathBuf::from(home).join(".local").join("bin");
     std::fs::create_dir_all(&command_bin).map_err(io(&command_bin))?;
     let link = command_bin.join("ae");
@@ -494,7 +494,7 @@ fn integrate_path(bin: &Path) -> Result<()> {
         if std::fs::read_link(&link).ok().as_deref() == Some(target.as_path()) {
             return Ok(());
         }
-        return Err(BootstrapError::InvalidInstallation(format!(
+        return Err(InstallerError::InvalidInstallation(format!(
             "refusing to replace existing command at {}",
             link.display()
         )));
@@ -537,16 +537,16 @@ pub fn repair(root: &Path) -> Result<()> {
     validate_state_root(root, &state)?;
     let release = root.join("versions").join(&state.active_version);
     let bootstrap = release.join("bin").join(if cfg!(windows) {
-        "artisan-bootstrap.exe"
+        "ae-installer.exe"
     } else {
-        "artisan-bootstrap"
+        "ae-installer"
     });
     if !bootstrap.is_file() {
-        return Err(BootstrapError::MissingBootstrap(bootstrap));
+        return Err(InstallerError::MissingInstaller(bootstrap));
     }
     let stable = install_stable_cli(root, &release)?;
     if stable != state.permanent_ae_path {
-        return Err(BootstrapError::InvalidInstallation(
+        return Err(InstallerError::InvalidInstallation(
             "permanent ae path is outside the bootstrap-owned layout".to_owned(),
         ));
     }
@@ -575,7 +575,7 @@ pub fn diagnose(root: &Path) -> Result<()> {
         .join("bin")
         .join(if cfg!(windows) { "ae.exe" } else { "ae" });
     if stable != state.permanent_ae_path || !stable.is_file() {
-        return Err(BootstrapError::InvalidInstallation(
+        return Err(InstallerError::InvalidInstallation(
             "permanent ae path is missing or outside the bootstrap-owned layout".to_owned(),
         ));
     }
@@ -591,7 +591,7 @@ fn invoke_ae_diagnostic(release: &Path, arguments: &[&str]) -> Result<()> {
         .join("bin")
         .join(if cfg!(windows) { "ae.exe" } else { "ae" });
     if !executable.is_file() {
-        return Err(BootstrapError::MissingCli(executable));
+        return Err(InstallerError::MissingCli(executable));
     }
     // Doctor reports Forge-instance problems independently. Repair owns the
     // installation invariants above and must not recurse through `--fix`.
@@ -678,7 +678,7 @@ fn remove_path_integration(bin: &Path) -> Result<()> {
         );
         return Ok(());
     }
-    let home = std::env::var_os("HOME").ok_or(BootstrapError::MissingHome)?;
+    let home = std::env::var_os("HOME").ok_or(InstallerError::MissingHome)?;
     let link = PathBuf::from(home).join(".local").join("bin").join("ae");
     if link.symlink_metadata().is_ok()
         && std::fs::read_link(&link).ok().as_deref() == Some(bin.join("ae").as_path())
@@ -691,7 +691,7 @@ fn remove_path_integration(bin: &Path) -> Result<()> {
 fn read_installed_state(root: &Path) -> Result<InstalledState> {
     let path = root.join("installation.json");
     let bytes = std::fs::read(&path).map_err(io(&path))?;
-    serde_json::from_slice(&bytes).map_err(BootstrapError::InvalidPayload)
+    serde_json::from_slice(&bytes).map_err(InstallerError::InvalidPayload)
 }
 
 fn read_existing_protocol(root: &Path) -> Result<Option<OwnedIntegration>> {
@@ -707,21 +707,21 @@ fn persist_protocol_record(root: &Path, protocol: &OwnedIntegration) -> Result<(
     let next = root.join(".installation.json.protocol");
     let bytes = std::fs::read(&current).map_err(io(&current))?;
     let mut document: serde_json::Value =
-        serde_json::from_slice(&bytes).map_err(BootstrapError::InvalidPayload)?;
+        serde_json::from_slice(&bytes).map_err(InstallerError::InvalidPayload)?;
     let integrations = document
         .get_mut("integrations")
         .and_then(serde_json::Value::as_object_mut)
         .ok_or_else(|| {
-            BootstrapError::InvalidInstallation(
+            InstallerError::InvalidInstallation(
                 "installation manifest integrations are missing".to_owned(),
             )
         })?;
     integrations.insert(
         "protocol".to_owned(),
-        serde_json::to_value(protocol).map_err(BootstrapError::InvalidPayload)?,
+        serde_json::to_value(protocol).map_err(InstallerError::InvalidPayload)?,
     );
     let mut file = File::create(&next).map_err(io(&next))?;
-    serde_json::to_writer(&mut file, &document).map_err(BootstrapError::InvalidPayload)?;
+    serde_json::to_writer(&mut file, &document).map_err(InstallerError::InvalidPayload)?;
     file.sync_all().map_err(io(&next))?;
 
     let previous = root.join(".installation.json.protocol.previous");
@@ -738,7 +738,7 @@ fn persist_protocol_record(root: &Path, protocol: &OwnedIntegration) -> Result<(
 
 fn validate_state_root(root: &Path, state: &InstalledState) -> Result<()> {
     if state.activation_state != "active" || state.install_root != root {
-        return Err(BootstrapError::InvalidInstallation(
+        return Err(InstallerError::InvalidInstallation(
             "installation manifest does not own the requested root".to_owned(),
         ));
     }
@@ -747,7 +747,7 @@ fn validate_state_root(root: &Path, state: &InstalledState) -> Result<()> {
 
 fn remove_path_in_root(root: &Path, path: &Path) -> Result<()> {
     if !path.starts_with(root) || path == root {
-        return Err(BootstrapError::InvalidInstallation(
+        return Err(InstallerError::InvalidInstallation(
             "refusing removal outside the installation root".to_owned(),
         ));
     }
@@ -777,7 +777,7 @@ fn schedule_installation_cleanup(root: &Path, remove_data: bool) -> Result<()> {
         command
             .creation_flags(DETACHED_PROCESS)
             .spawn()
-            .map_err(BootstrapError::CleanupHelper)?;
+            .map_err(InstallerError::CleanupHelper)?;
     }
     #[cfg(unix)]
     {
@@ -790,7 +790,7 @@ fn schedule_installation_cleanup(root: &Path, remove_data: bool) -> Result<()> {
             .args(["-c", "sleep 1; rm -rf -- \"$1\"", "artisan-uninstall"])
             .arg(target)
             .spawn()
-            .map_err(BootstrapError::CleanupHelper)?;
+            .map_err(InstallerError::CleanupHelper)?;
     }
     Ok(())
 }
@@ -800,14 +800,14 @@ fn invoke_ae(release: &Path, arguments: &[&str]) -> Result<()> {
         .join("bin")
         .join(if cfg!(windows) { "ae.exe" } else { "ae" });
     if !executable.is_file() {
-        return Err(BootstrapError::MissingCli(executable));
+        return Err(InstallerError::MissingCli(executable));
     }
     let status = std::process::Command::new(&executable)
         .args(arguments)
         .status()
         .map_err(io(&executable))?;
     if !status.success() {
-        return Err(BootstrapError::CliFailed {
+        return Err(InstallerError::CliFailed {
             command: arguments.join(" "),
             status: status.to_string(),
         });
@@ -838,9 +838,9 @@ mod tests {
         let root = tempdir().expect("temp");
         let release = root.path().join("versions").join("1.2.3");
         let expected = release.join("bin").join(if cfg!(windows) {
-            "artisan-bootstrap.exe"
+            "ae-installer.exe"
         } else {
-            "artisan-bootstrap"
+            "ae-installer"
         });
         assert!(expected.starts_with(root.path().join("versions")));
     }

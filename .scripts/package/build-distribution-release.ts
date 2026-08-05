@@ -13,9 +13,9 @@ const DistributionReleaseInput = Schema.Struct({
 	editor_root: Schema.NonEmptyString,
 	forge_root: Schema.NonEmptyString,
 	key_id: Schema.NonEmptyString,
-	minimum_bootstrap_version: Schema.NonEmptyString,
+	minimum_installer_version: Schema.NonEmptyString,
 	minimum_cli_version: Schema.NonEmptyString,
-	native_bootstrap_path: Schema.optional(Schema.NonEmptyString),
+	native_installer_path: Schema.optional(Schema.NonEmptyString),
 	native_cli_path: Schema.optional(Schema.NonEmptyString),
 	output_root: Schema.NonEmptyString,
 	private_key_pem: Schema.NonEmptyString,
@@ -230,7 +230,7 @@ export const BuildWindowsDistributionRelease = (input: DistributionReleaseInput)
 			CollectFiles(configuration.forge_root, "forge"),
 			Effect.tryPromise({
 				try: async () => {
-					if (!configuration.native_cli_path || !configuration.native_bootstrap_path)
+					if (!configuration.native_cli_path || !configuration.native_installer_path)
 						return [] as Array<ArchiveEntry>;
 					return [
 						{
@@ -238,8 +238,8 @@ export const BuildWindowsDistributionRelease = (input: DistributionReleaseInput)
 							path: "bin/ae.exe",
 						},
 						{
-							bytes: await readFile(configuration.native_bootstrap_path),
-							path: "bin/artisan-bootstrap.exe",
+							bytes: await readFile(configuration.native_installer_path),
+							path: "bin/ae-installer.exe",
 						},
 					];
 				},
@@ -258,8 +258,8 @@ export const BuildWindowsDistributionRelease = (input: DistributionReleaseInput)
 			!entries.some((entry) => entry.path === "forge/ae.js") ||
 			(configuration.native_cli_path !== undefined &&
 				!entries.some((entry) => entry.path === "bin/ae.exe")) ||
-			(configuration.native_bootstrap_path !== undefined &&
-				!entries.some((entry) => entry.path === "bin/artisan-bootstrap.exe"))
+			(configuration.native_installer_path !== undefined &&
+				!entries.some((entry) => entry.path === "bin/ae-installer.exe"))
 		)
 			return yield* Effect.fail(
 				new DistributionReleaseBuildError({
@@ -297,7 +297,7 @@ export const BuildWindowsDistributionRelease = (input: DistributionReleaseInput)
 			channel: configuration.channel,
 			editor_forge_compatibility_version: configuration.product_version,
 			format_version: 1,
-			minimum_bootstrap_version: configuration.minimum_bootstrap_version,
+			minimum_installer_version: configuration.minimum_installer_version,
 			minimum_cli_version: configuration.minimum_cli_version,
 			product_version: configuration.product_version,
 			signing_identity: {
@@ -424,9 +424,9 @@ export const BuildWindowsDistributionReleaseFromEnvironment = (environment: Node
 			editor_root: resolve(".dist/electron-release/win-unpacked"),
 			forge_root: resolve(".dist/forge"),
 			key_id: environment.ARTISAN_RELEASE_SIGNING_KEY_ID ?? "",
-			minimum_bootstrap_version: environment.ARTISAN_MINIMUM_BOOTSTRAP_VERSION ?? "0.1.0",
+			minimum_installer_version: environment.ARTISAN_MINIMUM_INSTALLER_VERSION ?? "0.1.0",
 			minimum_cli_version: environment.ARTISAN_MINIMUM_CLI_VERSION ?? "0.1.0",
-			native_bootstrap_path: resolve("target/release/artisan-bootstrap.exe"),
+			native_installer_path: resolve("target/release/ae-installer.exe"),
 			native_cli_path: resolve("target/release/ae.exe"),
 			output_root: resolve(".dist/distribution-release"),
 			private_key_pem,

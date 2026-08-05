@@ -143,7 +143,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 data_root.as_deref(),
                 serve_frontend,
             )?;
-            delegate_bootstrap(&layout, "repair", false)?;
+            delegate_installer(&layout, "repair", false)?;
             println!("Configured Forge");
             Ok(())
         }
@@ -170,13 +170,13 @@ pub fn run(cli: Cli) -> Result<()> {
             };
             open(&layout, origin.as_deref(), flow)
         }
-        Commands::Update => delegate_bootstrap(&layout, "update", false),
+        Commands::Update => delegate_installer(&layout, "update", false),
         Commands::Uninstall { remove_data } => {
             match stop(&layout) {
                 Ok(()) | Err(CliError::NotRunning | CliError::MissingInstance) => {}
                 Err(error) => return Err(error),
             }
-            delegate_bootstrap(&layout, "uninstall", remove_data)
+            delegate_installer(&layout, "uninstall", remove_data)
         }
     }
 }
@@ -266,11 +266,11 @@ fn follow_log(mut file: File, mut offset: u64) -> Result<()> {
 
 fn doctor(layout: &Layout, fix: bool, json: bool) -> Result<()> {
     if fix {
-        delegate_bootstrap(layout, "repair", false)?;
+        delegate_installer(layout, "repair", false)?;
     }
     let installation = InstallationManifest::load(&layout.manifest);
     let protocol = if installation.is_ok() {
-        delegate_bootstrap(layout, "diagnose", false)
+        delegate_installer(layout, "diagnose", false)
     } else {
         Err(CliError::Installation(
             "protocol health is unavailable without a valid installation".to_owned(),
@@ -531,9 +531,9 @@ fn launch_url(url: &str) -> Result<()> {
     }
 }
 
-fn delegate_bootstrap(layout: &Layout, operation: &str, remove_data: bool) -> Result<()> {
+fn delegate_installer(layout: &Layout, operation: &str, remove_data: bool) -> Result<()> {
     let manifest = require_installation(layout)?;
-    let bootstrap = manifest.bootstrap_executable();
+    let bootstrap = manifest.installer_executable();
     if !bootstrap.is_file() {
         return Err(CliError::Installation(format!(
             "installer lifecycle binary is missing at {}; reinstall Artisan",

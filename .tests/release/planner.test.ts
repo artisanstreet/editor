@@ -31,8 +31,8 @@ describe("release planner", () => {
 		expect(plan.candidate_artifact).toBe(`artisan-candidate-0.1.0-beta.1-${commit}-42`);
 		expect(plan.assets).toEqual([
 			"artisan-0.1.0-beta.1-windows-x64.zip",
-			"artisan-bootstrap-windows-x64.exe",
-			"artisan-bootstrap-windows-x64.exe.sha256",
+			"ae-installer-windows-x64.exe",
+			"ae-installer-windows-x64.exe.sha256",
 			"release-manifest.json",
 			"release-manifest.sig",
 		]);

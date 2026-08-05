@@ -52,11 +52,11 @@ export const SelectReleaseArtifact = ({
 	bootstrap_version,
 	cli_version,
 }: ArtifactSelectionRequest): Result.Result<ReleaseArtifact, ArtifactSelectionError> => {
-	if (CompareSemanticVersions(bootstrap_version, release.minimum_bootstrap_version) < 0) {
+	if (CompareSemanticVersions(bootstrap_version, release.minimum_installer_version) < 0) {
 		return Result.fail({
 			_tag: "BootstrapVersionUnsupported",
 			installed_version: bootstrap_version,
-			minimum_version: release.minimum_bootstrap_version,
+			minimum_version: release.minimum_installer_version,
 		});
 	}
 

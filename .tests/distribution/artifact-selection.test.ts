@@ -18,7 +18,7 @@ const release = Schema.decodeUnknownSync(ReleaseManifestSchema)({
 	editor_forge_compatibility_version: "1.2.0",
 	channel: "stable",
 	signing_identity: { key_id: "release", algorithm: "ed25519" },
-	minimum_bootstrap_version: "0.4.0",
+	minimum_installer_version: "0.4.0",
 	minimum_cli_version: "1.0.0",
 	artifacts: [
 		{

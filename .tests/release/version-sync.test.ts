@@ -25,6 +25,6 @@ describe("workspace version sync", () => {
 
 		expect(cargo_version).toBeDefined();
 		expect(await read_json_version("package.json")).toBe(cargo_version);
-		expect(await read_json_version("modules/bootstrap/package.json")).toBe(cargo_version);
+		expect(await read_json_version("modules/installer/package.json")).toBe(cargo_version);
 	});
 });

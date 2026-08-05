@@ -15,7 +15,7 @@
 		"dev:doctor": "node .scripts/dev/runner.ts doctor",
 		"dev:web": "node .scripts/dev/runner.ts web",
 		"dev:ae": "powershell -NoProfile -ExecutionPolicy Bypass -File .scripts/dev/run-dev-ae.ps1",
-		"dev:ae-bootstrap": "powershell -NoProfile -ExecutionPolicy Bypass -File .scripts/dev/run-dev-ae-bootstrap.ps1",
+		"dev:ae-installer": "powershell -NoProfile -ExecutionPolicy Bypass -File .scripts/dev/run-dev-ae-installer.ps1",
 		"dev:forge": "node .scripts/dev/runner.ts forge",
 		"dev:open": "node .scripts/dev/runner.ts pair",
 		"dev:pair": "node .scripts/dev/runner.ts pair",

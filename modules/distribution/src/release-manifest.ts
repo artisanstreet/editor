@@ -57,7 +57,7 @@ export const ReleaseManifest = Schema.Struct({
 	editor_forge_compatibility_version: SemanticVersion,
 	channel: ReleaseChannel,
 	signing_identity: SigningIdentity,
-	minimum_bootstrap_version: SemanticVersion,
+	minimum_installer_version: SemanticVersion,
 	minimum_cli_version: SemanticVersion,
 	artifacts: Schema.NonEmptyArray(ReleaseArtifact).check(Schema.isMaxLength(64)),
 });

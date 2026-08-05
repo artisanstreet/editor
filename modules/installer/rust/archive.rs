@@ -6,7 +6,7 @@ use std::{
 };
 
 use crate::{
-    error::{BootstrapError, Result, io},
+    error::{InstallerError, Result, io},
     manifest::ArchiveFormat,
 };
 
@@ -21,7 +21,7 @@ pub fn extract(
     declared_entries: &[String],
 ) -> Result<()> {
     if declared_entries.is_empty() || declared_entries.len() > MAX_ARCHIVE_ENTRIES {
-        return Err(BootstrapError::UnsafeArchiveEntry(
+        return Err(InstallerError::UnsafeArchiveEntry(
             "signed archive entry list is empty or exceeds its bound".to_owned(),
         ));
     }
@@ -35,7 +35,7 @@ pub fn extract(
         ArchiveFormat::TarZstd => {
             let file = File::open(archive).map_err(io(archive))?;
             let decoder = zstd::Decoder::new(file)
-                .map_err(|error| BootstrapError::Archive(error.to_string()))?;
+                .map_err(|error| InstallerError::Archive(error.to_string()))?;
             extract_tar(decoder, destination, declared_entries)
         }
     }
@@ -55,9 +55,9 @@ fn extract_zip<R: Read + Seek>(
 ) -> Result<()> {
     let mut extracted = HashSet::new();
     let mut archive =
-        zip::ZipArchive::new(reader).map_err(|error| BootstrapError::Archive(error.to_string()))?;
+        zip::ZipArchive::new(reader).map_err(|error| InstallerError::Archive(error.to_string()))?;
     if archive.len() > MAX_ARCHIVE_ENTRIES {
-        return Err(BootstrapError::UnsafeArchiveEntry(
+        return Err(InstallerError::UnsafeArchiveEntry(
             "ZIP contains too many entries".to_owned(),
         ));
     }
@@ -65,20 +65,20 @@ fn extract_zip<R: Read + Seek>(
     for index in 0..archive.len() {
         let mut entry = archive
             .by_index(index)
-            .map_err(|error| BootstrapError::Archive(error.to_string()))?;
+            .map_err(|error| InstallerError::Archive(error.to_string()))?;
         let enclosed = entry
             .enclosed_name()
-            .ok_or_else(|| BootstrapError::UnsafeArchiveEntry(entry.name().to_owned()))?
+            .ok_or_else(|| InstallerError::UnsafeArchiveEntry(entry.name().to_owned()))?
             .clone();
         if !safe_relative(&enclosed) || entry.is_symlink() {
-            return Err(BootstrapError::UnsafeArchiveEntry(entry.name().to_owned()));
+            return Err(InstallerError::UnsafeArchiveEntry(entry.name().to_owned()));
         }
         if entry.size() > MAX_ENTRY_BYTES {
-            return Err(BootstrapError::UnsafeArchiveEntry(entry.name().to_owned()));
+            return Err(InstallerError::UnsafeArchiveEntry(entry.name().to_owned()));
         }
         expanded = expanded.saturating_add(entry.size());
         if expanded > MAX_EXPANDED_BYTES {
-            return Err(BootstrapError::UnsafeArchiveEntry(
+            return Err(InstallerError::UnsafeArchiveEntry(
                 "ZIP expanded size exceeds its bound".to_owned(),
             ));
         }
@@ -88,10 +88,10 @@ fn extract_zip<R: Read + Seek>(
                 .iter()
                 .any(|path| Path::new(path) == enclosed)
         {
-            return Err(BootstrapError::UnsafeArchiveEntry(entry.name().to_owned()));
+            return Err(InstallerError::UnsafeArchiveEntry(entry.name().to_owned()));
         }
         if !entry.is_dir() && !extracted.insert(enclosed) {
-            return Err(BootstrapError::UnsafeArchiveEntry(entry.name().to_owned()));
+            return Err(InstallerError::UnsafeArchiveEntry(entry.name().to_owned()));
         }
         if entry.is_dir() {
             std::fs::create_dir_all(&output).map_err(io(&output))?;
@@ -114,38 +114,38 @@ fn extract_tar<R: Read>(reader: R, destination: &Path, declared_entries: &[Strin
     let mut expanded = 0_u64;
     for entry in archive
         .entries()
-        .map_err(|error| BootstrapError::Archive(error.to_string()))?
+        .map_err(|error| InstallerError::Archive(error.to_string()))?
     {
-        let mut entry = entry.map_err(|error| BootstrapError::Archive(error.to_string()))?;
+        let mut entry = entry.map_err(|error| InstallerError::Archive(error.to_string()))?;
         entry_count += 1;
         if entry_count > MAX_ARCHIVE_ENTRIES {
-            return Err(BootstrapError::UnsafeArchiveEntry(
+            return Err(InstallerError::UnsafeArchiveEntry(
                 "tar archive contains too many entries".to_owned(),
             ));
         }
         let size = entry
             .header()
             .size()
-            .map_err(|error| BootstrapError::Archive(error.to_string()))?;
+            .map_err(|error| InstallerError::Archive(error.to_string()))?;
         if size > MAX_ENTRY_BYTES {
-            return Err(BootstrapError::UnsafeArchiveEntry(
+            return Err(InstallerError::UnsafeArchiveEntry(
                 "tar entry exceeds its bound".to_owned(),
             ));
         }
         expanded = expanded.saturating_add(size);
         if expanded > MAX_EXPANDED_BYTES {
-            return Err(BootstrapError::UnsafeArchiveEntry(
+            return Err(InstallerError::UnsafeArchiveEntry(
                 "tar expanded size exceeds its bound".to_owned(),
             ));
         }
         let path = entry
             .path()
-            .map_err(|error| BootstrapError::Archive(error.to_string()))?
+            .map_err(|error| InstallerError::Archive(error.to_string()))?
             .into_owned();
         if !safe_relative(&path)
             || !(entry.header().entry_type().is_file() || entry.header().entry_type().is_dir())
         {
-            return Err(BootstrapError::UnsafeArchiveEntry(
+            return Err(InstallerError::UnsafeArchiveEntry(
                 path.display().to_string(),
             ));
         }
@@ -155,12 +155,12 @@ fn extract_tar<R: Read>(reader: R, destination: &Path, declared_entries: &[Strin
                 .iter()
                 .any(|declared| Path::new(declared) == path)
         {
-            return Err(BootstrapError::UnsafeArchiveEntry(
+            return Err(InstallerError::UnsafeArchiveEntry(
                 path.display().to_string(),
             ));
         }
         if entry.header().entry_type().is_file() && !extracted.insert(path.clone()) {
-            return Err(BootstrapError::UnsafeArchiveEntry(
+            return Err(InstallerError::UnsafeArchiveEntry(
                 path.display().to_string(),
             ));
         }
@@ -186,7 +186,7 @@ fn ensure_declared_entries(
             .iter()
             .any(|path| !extracted.contains(Path::new(path)))
     {
-        return Err(BootstrapError::UnsafeArchiveEntry(
+        return Err(InstallerError::UnsafeArchiveEntry(
             "archive entries do not exactly match the signed manifest".to_owned(),
         ));
     }

@@ -5,8 +5,8 @@ import { describe, expect, it } from "vitest";
 
 const workspace_root = resolve(import.meta.dirname, "../..");
 const platform_boundary_files = [
-	"modules/bootstrap/src/workflow.ts",
-	"modules/bootstrap/src/node-runtime.ts",
+	"modules/installer/src/workflow.ts",
+	"modules/installer/src/node-runtime.ts",
 	"modules/cli/src/node-instance-store.ts",
 	"modules/cli/src/node-distribution-runtime.ts",
 	"modules/cli/src/node-launcher.ts",
