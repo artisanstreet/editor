@@ -6,7 +6,7 @@ import type { DatabaseClient } from "../../persistence/database";
 import { ApplyActivityObservation } from "./activity";
 import type { ConversationObservationContext } from "./domain";
 import { body_text, item_base, lifecycle, turn_base } from "./domain";
-import { Admit, EnsureThread, UpsertItem, UpsertTurn } from "./entities";
+import { Admit, EnsureThread, EnsureTurn, UpsertItem, UpsertTurn } from "./entities";
 import { ApplyInteractionObservation, CancelPendingInteractions } from "./interaction";
 import { AppendText, CompleteReasoningSummary } from "./messages";
 
@@ -29,7 +29,10 @@ export const ApplyEngineObservation = (
 		/** One Artisan run is exactly one renderer turn. */
 		const turn_id = `run:${input.run_id}`;
 		const source = { observed_at: input.occurred_at };
-		yield* UpsertTurn(
+		const is_body_delta =
+			observation._tag === "agent_message_delta" ||
+			observation._tag === "reasoning_summary_delta";
+		yield* (is_body_delta ? EnsureTurn : UpsertTurn)(
 			transaction,
 			input.thread_id,
 			turn_base(turn_id, input, "active", observation.observation_id),

@@ -114,6 +114,14 @@
 	font-display: swap;
 }
 
+@font-face {
+	font-family: "Sigurd Variable";
+	src: url("../assets/fonts/sigurd/sigurd-variable.otf") format("opentype");
+	font-weight: 100 900;
+	font-style: normal;
+	font-display: swap;
+}
+
 :root {
 	--font-heading: "Geist", sans-serif;
 	--font-logo: "Cal Sans", sans-serif;

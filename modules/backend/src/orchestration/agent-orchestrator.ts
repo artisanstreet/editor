@@ -41,6 +41,7 @@ import { GlobalGuidanceService } from "../guidance/service";
 import { HostSuspendMonitor } from "../host/suspend-monitor";
 import { MakeThreadDispatchFence } from "../threads/internal/thread-dispatch-fence";
 import { IntakePolicy } from "./intake-policy";
+import { MakeObservationPersistence } from "./observation-persistence";
 import { ProductInstructions } from "./product-instructions";
 import {
 	render_portable_checkpoint_context,
@@ -322,26 +323,24 @@ export const AgentOrchestratorLive = Layer.effect(
 				});
 			});
 
+		const observation_persistence = MakeObservationPersistence({
+			continuation_repository,
+			repository,
+		});
+
 		const ObserveRun = (work: Pick<PendingWork, "run_id">, live: LiveRun) =>
-			Stream.runForEach(live.run.Events, (observation) => {
-				const public_observation = PublicObservation(observation);
-				return repository.RecordObservation(public_observation).pipe(
-					Effect.andThen(
-						continuation_repository.RecordObservationMetadata(public_observation),
-					),
-					Effect.asVoid,
-					Effect.catchCause((cause) =>
-						Effect.sync(() => {
-							console.error("Artisan continuation observation metadata failed", {
-								failure_kind: Cause.hasInterruptsOnly(cause)
-									? "interrupted"
-									: "persistence",
-								run_id: work.run_id,
-							});
-						}),
-					),
-				);
-			}).pipe(
+			live.run.Events.pipe(
+				/**
+				 * Streaming engines emit per-token deltas far faster than one
+				 * transaction per observation can commit. A small window keeps the
+				 * write path ahead of the notification stream while staying
+				 * invisible next to render cadence.
+				 */
+				Stream.groupedWithin(64, "25 millis"),
+				Stream.runForEach((observations) =>
+					observation_persistence.PersistBatch(work, observations.map(PublicObservation)),
+				),
+			).pipe(
 				Effect.andThen(live.run.Closed),
 				Effect.asVoid,
 				Effect.catchCause((cause) =>

@@ -244,6 +244,80 @@ describe("Codex app-server session", () => {
 		expect(finalized).toBe(true);
 	});
 
+	it("sheds lossy delta notifications on ingress overflow without failing the session", async () => {
+		const result = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const session = yield* make_session({
+						notification_capacity: 1,
+						notification_ingress_capacity: 2,
+					});
+					const diagnostic_fiber = yield* Stream.runCollect(
+						session.Diagnostics.pipe(
+							Stream.filter((diagnostic) => diagnostic.message.includes("shedding")),
+							Stream.take(1),
+						),
+					).pipe(Effect.forkChild);
+					const response = yield* session.Request("scenario/lossyNotificationFlood", {
+						count: 100,
+					});
+					const follow_up = yield* session.Request("scenario/inspect", {});
+
+					return {
+						diagnostics: [...(yield* Fiber.join(diagnostic_fiber))],
+						follow_up,
+						response,
+					};
+				}).pipe(Effect.provide(CodexProcessFactoryLive)),
+			),
+		);
+
+		expect(result.response.result).toEqual({ count: 100 });
+		expect(result.follow_up.result).toMatchObject({ received: expect.any(Array) });
+		expect(result.diagnostics).toMatchObject([
+			{
+				level: "warning",
+				message:
+					"Codex notification ingress reached capacity 2; shedding lossy notifications",
+				source: "stdout",
+			},
+		]);
+	});
+
+	it("reports recovery once ingress accepts a frame after shedding", async () => {
+		const result = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const session = yield* make_session({
+						notification_capacity: 1,
+						notification_ingress_capacity: 2,
+					});
+					const recovery_fiber = yield* Stream.runCollect(
+						session.Diagnostics.pipe(
+							Stream.filter((diagnostic) => diagnostic.message.includes("recovered")),
+							Stream.take(1),
+						),
+					).pipe(Effect.forkChild);
+
+					yield* session.Request("scenario/lossyNotificationFlood", { count: 10 });
+					/** Draining buffered notifications frees ingress capacity again. */
+					yield* Stream.runCollect(session.Notifications.pipe(Stream.take(2)));
+					yield* session.Request("scenario/additiveNotification", {});
+
+					return { diagnostics: [...(yield* Fiber.join(recovery_fiber))] };
+				}).pipe(Effect.provide(CodexProcessFactoryLive)),
+			),
+		);
+
+		expect(result.diagnostics).toMatchObject([
+			{
+				level: "warning",
+				message: expect.stringMatching(/recovered after shedding \d+ lossy notifications/),
+				source: "stdout",
+			},
+		]);
+	});
+
 	it("fails the session explicitly when lossless notification ingress overflows", async () => {
 		const result = await Effect.runPromise(
 			Effect.scoped(

@@ -4,6 +4,7 @@ import {
 	apply_dev_tui_event,
 	create_dev_tui_state,
 	is_dev_tui_event,
+	parse_dev_log_line,
 	sanitize_dev_log_line,
 	select_relative_dev_tui_lane,
 } from "@artisan/dev-tui/model";
@@ -13,6 +14,10 @@ const lanes = [
 	{ id: "database", label: "Database", status: "waiting" },
 	{ id: "web", label: "Web", status: "starting" },
 ] as const;
+
+/** Built from char codes so no raw control bytes live in this source file. */
+const esc = String.fromCharCode(27);
+const bel = String.fromCharCode(7);
 
 describe("development dashboard state", () => {
 	it("accepts generic lanes and endpoint metadata", () => {
@@ -39,10 +44,9 @@ describe("development dashboard state", () => {
 			});
 		}
 
-		expect(state.lanes.find((lane) => lane.id === "database")?.log_lines).toEqual([
-			"second",
-			"third",
-		]);
+		const log_lines = state.lanes.find((lane) => lane.id === "database")?.log_lines;
+
+		expect(log_lines?.map((line) => line.text)).toEqual(["second", "third"]);
 	});
 
 	it("wraps process selection in both directions", () => {
@@ -68,10 +72,58 @@ describe("development dashboard state", () => {
 		const database = ready.lanes.find((lane) => lane.id === "database");
 
 		expect(database?.status).toBe("ready");
-		expect(database?.log_lines).toEqual(["listening"]);
+		expect(database?.log_lines.map((line) => line.text)).toEqual(["listening"]);
 	});
 
 	it("strips terminal controls before retaining log lines", () => {
 		expect(sanitize_dev_log_line("\u001B[32mReady\u001B[0m\r")).toBe("Ready");
+	});
+
+	it("parses SGR sequences into styled chunks", () => {
+		const parsed = parse_dev_log_line(`${esc}[32mready${esc}[39m in ${esc}[1m120${esc}[22m ms`);
+
+		expect(parsed.line.text).toBe("ready in 120 ms");
+		expect(parsed.line.chunks).toEqual([
+			{ style: { foreground: "#22c55e" }, text: "ready" },
+			{ style: {}, text: " in " },
+			{ style: { bold: true }, text: "120" },
+			{ style: {}, text: " ms" },
+		]);
+	});
+
+	it("resolves 256-color and truecolor sequences", () => {
+		expect(parse_dev_log_line(`${esc}[38;5;208mx`).line.chunks).toEqual([
+			{ style: { foreground: "#ff8700" }, text: "x" },
+		]);
+		expect(parse_dev_log_line(`${esc}[38;2;1;2;3mx`).line.chunks).toEqual([
+			{ style: { foreground: "#010203" }, text: "x" },
+		]);
+	});
+
+	it("carries an unclosed style into following lines of the same lane", () => {
+		let state = create_dev_tui_state(lanes);
+
+		for (const line of [`${esc}[36mfirst`, `second${esc}[0m plain`]) {
+			state = apply_dev_tui_event(state, { lane_id: "database", line, type: "log" });
+		}
+
+		const database = state.lanes.find((lane) => lane.id === "database");
+
+		expect(database?.log_lines[0]?.chunks).toEqual([
+			{ style: { foreground: "#06b6d4" }, text: "first" },
+		]);
+		expect(database?.log_lines[1]?.chunks).toEqual([
+			{ style: { foreground: "#06b6d4" }, text: "second" },
+			{ style: {}, text: " plain" },
+		]);
+	});
+
+	it("drops non-SGR terminal sequences and carriage returns", () => {
+		const parsed = parse_dev_log_line(
+			`${esc}]8;;https://example.com${bel}label${esc}]8;;${bel} ${esc}[2Jdone\r`,
+		);
+
+		expect(parsed.line.text).toBe("label done");
+		expect(parsed.line.chunks).toEqual([{ style: {}, text: "label done" }]);
 	});
 });

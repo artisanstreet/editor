@@ -1,15 +1,21 @@
 <script lang="ts" effect>
 	import { page } from "$app/state";
 	import FileOff from "@tabler/icons-svelte/icons/file-off";
-	import { Effect } from "effect";
+	import { Clock, Effect, Schedule } from "effect";
+	import type { WorkspaceChange } from "@artisan/protocol";
 	import { ArtisanClient } from "@artisan/transport/client";
+	import { resolve_file_icon } from "$lib/conversation/file-icon";
 	import { EditorFileKeyForFile, EditorService } from "$lib/editor/service";
+	import { EditorRoutePath } from "$lib/editor/workspace-identity";
 	import { EditorFileFromRead } from "$lib/editor/workspace-session";
+	import { FormatRecentThreadTime } from "$lib/root/thread-navigation";
 	import EditorSurface from "$lib/components/editor/surface.sv";
 
 	let {
+		thread_id,
 		workspace_id,
 	}: {
+		readonly thread_id: string | undefined;
 		readonly workspace_id: string | undefined;
 	} = $props();
 
@@ -69,6 +75,46 @@
 	) {
 		yield* OpenPath(active_path);
 	}
+
+	/**
+	 * The empty state shows the files this thread's runs actually touched,
+	 * newest first — the applied-change records already carry path and time.
+	 * Loaded like the workspace header: retried through the transport cold
+	 * start, then given up quietly; a missing table is not worth a banner.
+	 */
+	let recent_changes = $state.raw<ReadonlyArray<WorkspaceChange>>([]);
+	const now_ms = yield* Clock.currentTimeMillis;
+	const ColdStartRetrySchedule = Schedule.exponential("100 millis").pipe(
+		Schedule.upTo({ duration: "5 seconds" }),
+	);
+	const most_recent_per_path = (
+		changes: ReadonlyArray<WorkspaceChange>,
+	): ReadonlyArray<WorkspaceChange> => {
+		const seen = new Set<string>();
+		const unique: Array<WorkspaceChange> = [];
+
+		for (const change of changes) {
+			if (seen.has(change.path)) continue;
+			seen.add(change.path);
+			unique.push(change);
+			if (unique.length === 8) break;
+		}
+
+		return unique;
+	};
+	const LoadRecentChanges = Effect.gen(function* () {
+		if (thread_id === undefined || workspace_id === undefined) return;
+		const result = yield* client
+			.ListWorkspaceChanges({ thread_id, workspace_id })
+			.pipe(Effect.retry({ schedule: ColdStartRetrySchedule }));
+		recent_changes = most_recent_per_path(result.changes);
+	}).pipe(Effect.ignore);
+	yield* LoadRecentChanges.pipe(Effect.forkScoped);
+
+	const route_workspace = $derived(page.params.workspace);
+	const route_thread = $derived(page.params.thread);
+	const file_name = (path: string) => path.split(/[\\/]/u).at(-1) ?? path;
+	const file_parent = (path: string) => path.split(/[\\/]/u).slice(0, -1).join("/");
 </script>
 
 <svelte:head>
@@ -82,8 +128,58 @@
 			<p class="text-sm text-muted-foreground">Open a workspace to start editing.</p>
 		</div>
 	{:else if active_path === undefined}
-		<div class="flex min-h-0 flex-1 items-center justify-center">
-			<p class="text-sm text-muted-foreground">Select a file to start editing.</p>
+		<div class="flex min-h-0 flex-1 items-center justify-center p-6">
+			{#if recent_changes.length === 0 || route_workspace === undefined || route_thread === undefined}
+				<p class="text-sm text-muted-foreground">Select a file to start editing.</p>
+			{:else}
+				<div class="w-full max-w-md min-w-0">
+					<p class="mb-2 text-xs font-medium text-muted-foreground">Recently changed files</p>
+					<div class="recent-files-scroll docs-scroll-fade max-h-[calc(12rem+3px)] min-w-0 overflow-y-auto">
+						<div class="mr-3">
+							<table
+								class="w-full table-fixed border-collapse text-left"
+								aria-label="Recently changed files"
+							>
+								<thead class="sr-only">
+									<tr><th>File</th><th>Changed</th></tr>
+								</thead>
+								<tbody>
+									{#each recent_changes as change (change.change_id)}
+										<tr class="group border-b border-border last:border-b-0">
+											<td class="min-w-0 p-0">
+												<a
+													href={EditorRoutePath(route_workspace, route_thread, change.path)}
+													class="flex min-w-0 items-center gap-2 py-3 font-medium text-foreground outline-none transition-colors duration-(--duration-fast) ease-in-out group-hover:text-foreground-extra group-focus-within:text-foreground-extra motion-reduce:transition-none"
+												>
+													<img
+														src={resolve_file_icon(change.path)}
+														alt=""
+														aria-hidden="true"
+														class="size-4 shrink-0"
+													/>
+													<span class="shrink-0">{file_name(change.path)}</span>
+													{#if file_parent(change.path) !== ""}
+														<span class="min-w-0 truncate text-xs font-normal text-muted-foreground">
+															{file_parent(change.path)}
+														</span>
+													{/if}
+												</a>
+											</td>
+											<td
+												class="w-28 p-0 pl-4 text-right text-xs text-muted-foreground transition-colors duration-(--duration-fast) ease-in-out group-hover:text-foreground-extra group-focus-within:text-foreground-extra motion-reduce:transition-none"
+											>
+												<span class="whitespace-nowrap">
+													{FormatRecentThreadTime(change.updated_at, now_ms)}
+												</span>
+											</td>
+										</tr>
+									{/each}
+								</tbody>
+							</table>
+						</div>
+					</div>
+				</div>
+			{/if}
 		</div>
 	{:else if active_failure !== undefined}
 		<!--
@@ -105,3 +201,11 @@
 		<EditorSurface label={active_path} />
 	{/if}
 </div>
+
+<style>
+	/** The model picker's scrollbar: thin, muted, and holding its own gutter. */
+	.recent-files-scroll {
+		scrollbar-width: thin;
+		scrollbar-color: var(--surface-500) transparent;
+	}
+</style>

@@ -7,6 +7,7 @@
 
 	import { WriteClipboardText } from "$lib/browser/clipboard";
 	import { RunBrowserDom } from "$lib/browser/dom";
+	import ArtisanLogo from "$lib/components/artisan-logo.sv";
 	import { Button } from "$lib/components/ui/button";
 	import { ArtisanErrorCode } from "$lib/errors/artisan-error-code";
 	import {
@@ -27,16 +28,6 @@
 		retry_connection: Effect.Effect<void>;
 		retry_hydration: Effect.Effect<void>;
 	} = $props();
-
-	const banner = `
-   █████████              █████     ███
-  ███▒▒▒▒▒███            ▒▒███     ▒▒▒
- ▒███    ▒███  ████████  ███████   ████   █████   ██████   ████████
- ▒███████████ ▒▒███▒▒███▒▒▒███▒   ▒▒███  ███▒▒   ▒▒▒▒▒███ ▒▒███▒▒███
- ▒███▒▒▒▒▒███  ▒███ ▒▒▒   ▒███     ▒███ ▒▒█████   ███████  ▒███ ▒███
- ▒███    ▒███  ▒███       ▒███ ███ ▒███  ▒▒▒▒███ ███▒▒███  ▒███ ▒███
- █████   █████ █████      ▒▒█████  █████ ██████ ▒▒████████ ████ █████
-▒▒▒▒▒   ▒▒▒▒▒ ▒▒▒▒▒        ▒▒▒▒▒  ▒▒▒▒▒ ▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒ ▒▒▒▒ ▒▒▒▒▒`;
 
 	const presentation = $derived(PresentForgeGate(model));
 	const is_visible = $derived(model.state.phase !== "ready" && !model.dismissed);
@@ -209,22 +200,32 @@
 			</button>
 		{/if}
 		<!-- Focused programmatically for screen readers; the ring would outline the whole scene. -->
+		<!--
+			Error scenes mirror the transcript prose column (max-w-3xl px-6) so the
+			mark sits where content lives; pure loading scenes center the mark.
+		-->
 		<section
 			bind:this={status_element}
 			class={presentation.tone === "error"
-				? "flex w-full max-w-xl flex-col items-start gap-10 outline-none"
-				: "flex w-full max-w-xl flex-col items-center gap-10 outline-none"}
+				? "flex w-full max-w-3xl flex-col items-start gap-10 px-6 outline-none"
+				: "flex w-full max-w-3xl flex-col items-center gap-10 px-6 outline-none"}
 			role={presentation.tone === "error" ? "alert" : "status"}
 			aria-busy={presentation.tone === "progress"}
 			aria-live={presentation.tone === "error" ? "assertive" : "polite"}
 			tabindex="-1"
 		>
-			<pre
-				class={presentation.tone === "progress"
-					? "banner-art banner-shimmer max-w-full overflow-hidden select-none"
-					: "banner-art max-w-full overflow-hidden text-foreground select-none"}
-				data-text={banner}
-				aria-label="Artisan">{banner}</pre>
+			{#if presentation.tone === "progress"}
+				<div class="logo-shimmer relative select-none">
+					<ArtisanLogo size={64} />
+					<div class="logo-shimmer-overlay" aria-hidden="true">
+						<ArtisanLogo size={64} />
+					</div>
+				</div>
+			{:else}
+				<div class="text-foreground select-none">
+					<ArtisanLogo size={64} />
+				</div>
+			{/if}
 
 			{#if presentation.tone === "error"}
 				<div class="w-full">
@@ -327,25 +328,18 @@
 {/if}
 
 <style>
-	.banner-art {
-		font-size: clamp(0.2rem, 0.5vw, 0.45rem);
-		line-height: 1.2;
-	}
-
 	/*
 	 * Background activity: the transitions.dev shimmer-text construction. The
-	 * base glyphs render dimmed and constant; a ::before duplicate (via
-	 * data-text) clips a sweeping highlight band onto the same glyphs, so
+	 * base wordmark renders dimmed and constant; an absolutely positioned
+	 * duplicate clips a sweeping highlight band onto the same glyphs, so
 	 * contrast never drops. Pure CSS because transition directives deadlock
 	 * the async renderer.
 	 */
-	.banner-shimmer {
-		position: relative;
+	.logo-shimmer {
 		color: var(--muted-foreground);
 	}
 
-	.banner-shimmer::before {
-		content: attr(data-text);
+	.logo-shimmer-overlay {
 		position: absolute;
 		inset: 0;
 		pointer-events: none;
@@ -401,11 +395,11 @@
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.banner-shimmer::before {
+		.logo-shimmer-overlay {
 			animation: none !important;
 		}
 
-		.banner-shimmer {
+		.logo-shimmer {
 			color: var(--foreground);
 		}
 

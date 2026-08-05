@@ -738,6 +738,26 @@ function handle_request(request: FixtureRecord) {
 		return;
 	}
 
+	if (request.method === "scenario/lossyNotificationFlood") {
+		const count = request.params.count;
+
+		for (let index = 0; index < count; index += 1) {
+			write_frame({
+				method: "item/agentMessage/delta",
+				params: {
+					delta: `delta-${index}`,
+					itemId: "message-1",
+					threadId: "thread-1",
+					turnId: "turn-1",
+				},
+			});
+		}
+
+		respond(request.id, { count });
+
+		return;
+	}
+
 	if (request.method === "scenario/malformedThenNotificationFlood") {
 		process.stdout.write("not json\n");
 		const count = request.params.count;

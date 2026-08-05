@@ -15,6 +15,7 @@ import { ConversationReadModel } from "../../modules/backend/src/conversation";
 import { OrchestrationRepository } from "../../modules/backend/src/persistence/orchestration/repository";
 import type { IntakeAssessment } from "../../modules/backend/src/orchestration/intake-policy";
 import {
+	ConversationItems,
 	JournalCommands,
 	JournalEvents,
 	MessageImageAttachments,
@@ -289,6 +290,93 @@ describe("orchestration repository hardening", () => {
 					thread_id: "thread_1",
 				}),
 			]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("persists a streamed delta batch in one call with the same durable record", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			migrations_path,
+		});
+		try {
+			await runtime.runPromise(SetupThread("thread_1"));
+			const accepted = await runtime.runPromise(
+				Accept(
+					make_command("send_1", "thread_1", {
+						engine_id: "engine_1",
+						text: "Start",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			const delta = (observation_id: string, sequence: number, text: string) =>
+				({
+					_tag: "agent_message_delta",
+					artisan_run_id: accepted.run_id,
+					delta: text,
+					item_id: "assistant_1",
+					observation_id,
+					phase: "unspecified",
+					raw: {
+						engine_id: "engine_1",
+						frame: { text },
+						transport: "fixture",
+					},
+					sequence,
+					turn_id: "turn_1",
+				}) satisfies EngineObservation;
+			const events = await runtime.runPromise(
+				Effect.gen(function* () {
+					const repository = yield* OrchestrationRepository;
+
+					return yield* repository.RecordObservations([
+						delta("delta_1", 1, "Hello"),
+						delta("delta_2", 2, ", "),
+						delta("delta_3", 3, "world"),
+						{
+							_tag: "agent_message_completed",
+							artisan_run_id: accepted.run_id,
+							item_id: "assistant_1",
+							message: "Hello, world",
+							observation_id: "completed_1",
+							phase: "final",
+							raw: {
+								engine_id: "engine_1",
+								frame: { text: "Hello, world" },
+								transport: "fixture",
+							},
+							sequence: 4,
+							turn_id: "turn_1",
+						},
+					]);
+				}),
+			);
+			const [raw, items] = await runtime.runPromise(
+				Effect.all([
+					Read((database) => database.select().from(OrchestrationRawObservations)),
+					Read((database) => database.select().from(ConversationItems)),
+				]),
+			);
+			const assistant_item = items.find((item) => item.item_id === "assistant_1");
+			const assistant_entity = JSON.parse(assistant_item?.entity_json ?? "{}");
+
+			expect(events).toMatchObject([
+				{ payload: { text: "Hello, world", type: "assistant.message_completed" } },
+			]);
+			expect(raw.map((row) => row.observation_id)).toEqual([
+				"delta_1",
+				"delta_2",
+				"delta_3",
+				"completed_1",
+			]);
+			expect(assistant_entity).toMatchObject({
+				lifecycle: "completed",
+				text: "Hello, world",
+				type: "assistant_message",
+			});
 		} finally {
 			await runtime.dispose();
 		}

@@ -139,6 +139,7 @@ function make_test_layer(input: {
 		},
 		ReconcileStranded: () => Effect.succeed([]),
 		RecordObservationMetadata: () => Effect.void,
+		RecordObservationsMetadata: () => Effect.void,
 	});
 	const compactor = ThreadContinuationCompactor.of({
 		Summarize: (request) =>

@@ -1,10 +1,11 @@
 <script lang="ts" effect>
 	import Folder from "@tabler/icons-svelte/icons/folder";
+	import FolderSymlink from "@tabler/icons-svelte/icons/folder-symlink";
 	import GitBranch from "@tabler/icons-svelte/icons/git-branch";
 	import { Effect, Schedule } from "effect";
 	import type { Project, ProjectRepository } from "@artisan/protocol";
 	import { ArtisanClient } from "@artisan/transport/client";
-	import { RepositoryQualifiedLabel } from "$lib/vcs/labels";
+	import { RepositoryLinkLabel, RepositoryQualifiedLabel } from "$lib/vcs/labels";
 	import { RepositoryMarkClass, RepositoryMarkFor } from "$lib/vcs/presentation";
 
 	let {
@@ -71,10 +72,15 @@
 			<span class="truncate">
 				{repository.branch.type === "detached" ? "detached HEAD" : repository.branch.name}
 			</span>
-			{#if remote?.web_url !== undefined}
-				<!-- The remote names the repository; this names the checkout working it. -->
+			{#if remote?.web_url !== undefined && RepositoryLinkLabel(remote.web_url).toLowerCase() !== project.display_name.toLowerCase()}
+				<!--
+					The remote names the repository; this names the checkout working it.
+					A folder named like the repository is the default clone and says
+					nothing twice, so only diverging checkouts (worktrees, renamed
+					clones) earn the segment — marked as a linked tree, not a folder.
+				-->
 				<span class="shrink-0">in</span>
-				<Folder class="size-3.5 shrink-0" />
+				<FolderSymlink class="size-3.5 shrink-0" />
 				<span class="truncate">{project.display_name}</span>
 			{/if}
 		</span>

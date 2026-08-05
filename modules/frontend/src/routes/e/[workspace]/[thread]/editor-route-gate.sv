@@ -91,5 +91,8 @@
 </script>
 
 {#if active_thread?.primary_project !== undefined}
-	<EditorRoute workspace_id={active_thread.primary_project.project_id} />
+	<EditorRoute
+		thread_id={active_thread.thread_id}
+		workspace_id={active_thread.primary_project.project_id}
+	/>
 {/if}

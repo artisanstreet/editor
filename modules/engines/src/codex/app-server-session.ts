@@ -56,6 +56,24 @@ export interface CodexAppServerHandshakeInput {
 	readonly client_version: string;
 }
 
+/**
+ * Streaming notifications whose complete counterpart supersedes them: the
+ * final item carries the full text or outcome, so dropping one of these under
+ * ingress overload loses a moment of live rendering, never durable state.
+ * Every other method keeps the lossless guarantee and still fails the session
+ * on overflow.
+ *
+ * @since 0.7.0
+ */
+export const codex_lossy_notification_methods: ReadonlySet<string> = new Set([
+	"item/agentMessage/delta",
+	"item/commandExecution/outputDelta",
+	"item/fileChange/outputDelta",
+	"item/mcpToolCall/progress",
+	"item/reasoning/summaryTextDelta",
+	"item/reasoning/textDelta",
+]);
+
 /** Preserves a server notification or server-initiated request in receive order. @since 0.3.0 */
 export interface CodexAppServerNotification {
 	readonly frame_sequence: number;
@@ -196,8 +214,9 @@ export function open_codex_app_server_session(
 	const notification_capacity = options.notification_capacity ?? 128;
 	/**
 	 * The ingress queue isolates stdout framing and JSON-RPC response correlation
-	 * from a temporarily slow notification consumer. It remains bounded; overload
-	 * is still reported explicitly by EnqueueNotification.
+	 * from a temporarily slow notification consumer. It remains bounded; on
+	 * overload EnqueueNotification sheds lossy streaming frames and fails the
+	 * session only for lossless methods.
 	 */
 	const notification_ingress_capacity = options.notification_ingress_capacity ?? 1_024;
 	const request_timeout_ms = options.request_timeout_ms ?? 10_000;
@@ -236,6 +255,8 @@ export function open_codex_app_server_session(
 			next_request_id: 0,
 			pending: new Map(),
 		});
+		/** Lossy notifications dropped since ingress last accepted a frame. */
+		const shed_lossy = yield* Ref.make(0);
 		const write_lock = yield* Semaphore.make(1);
 
 		const OfferDiagnostic = (diagnostic: CodexAppServerDiagnostic) =>
@@ -372,6 +393,40 @@ export function open_codex_app_server_session(
 				const accepted = yield* Queue.offer(notification_ingress, notification);
 
 				if (accepted) {
+					const shed = yield* Ref.modify(shed_lossy, (count) => [count, 0] as const);
+
+					if (shed > 0) {
+						yield* EmitDiagnostic({
+							frame_sequence: notification.frame_sequence,
+							level: "warning",
+							message: `Codex notification ingress recovered after shedding ${shed} lossy notifications`,
+							source: "stdout",
+						});
+					}
+
+					return;
+				}
+
+				/**
+				 * A full ingress sheds lossy streaming frames instead of failing the
+				 * session: their completed items supersede them, so the run keeps its
+				 * durable record while a temporarily slow consumer catches up.
+				 */
+				if (codex_lossy_notification_methods.has(notification.method)) {
+					const shed = yield* Ref.modify(
+						shed_lossy,
+						(count) => [count + 1, count + 1] as const,
+					);
+
+					if (shed === 1) {
+						yield* EmitDiagnostic({
+							frame_sequence: notification.frame_sequence,
+							level: "warning",
+							message: `Codex notification ingress reached capacity ${notification_ingress_capacity}; shedding lossy notifications`,
+							source: "stdout",
+						});
+					}
+
 					return;
 				}
 
