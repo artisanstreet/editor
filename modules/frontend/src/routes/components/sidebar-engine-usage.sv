@@ -11,7 +11,7 @@
 		TooltipProvider,
 		TooltipTrigger,
 	} from "$lib/components/ui/tooltip";
-	import { EngineMarkClass, EngineMarkFor } from "$lib/engine/presentation";
+	import { EngineDisplayName, EngineMarkClass, EngineMarkFor } from "$lib/engine/presentation";
 	import {
 		MotionDuration,
 		MotionEasing,
@@ -107,6 +107,28 @@
 				)
 			: [],
 	);
+	/**
+	 * Engines still fetching their first report. Reports merge in as each
+	 * provider answers, so a slow provider — Claude's usage endpoint takes
+	 * seconds where Codex answers instantly — was simply absent until it
+	 * landed, which read as the engine not being picked up at all. A named
+	 * skeleton says the truth instead: recognised, first reading pending.
+	 * An engine that already has a report keeps painting that report while
+	 * it refreshes; this covers only the never-loaded gap.
+	 */
+	const pending_engines = $derived(
+		usage_state.status === "loaded"
+			? [...refreshing_engines]
+					.filter(
+						(engine_id) =>
+							usage_state.status === "loaded" &&
+							!usage_state.snapshot.engines.some(
+								(engine) => engine.engine_id === engine_id,
+							),
+					)
+					.toSorted()
+			: [],
+	);
 </script>
 
 {#snippet usage_window(usage_entry, accent)}
@@ -160,7 +182,7 @@
 	</div>
 {:else if usage_state.status === "error"}
 	<p class="px-3 py-2.5 text-xs text-muted-foreground">Usage is unavailable right now.</p>
-{:else if authenticated_engines.length === 0 && unavailable_engines.length === 0}
+{:else if authenticated_engines.length === 0 && unavailable_engines.length === 0 && pending_engines.length === 0}
 	<p class="px-3 py-2.5 text-xs text-muted-foreground">No engine accounts connected.</p>
 {:else}
 	<TooltipProvider delayDuration={0}>
@@ -208,10 +230,44 @@
 				</div>
 			{/each}
 
+			<!--
+				The engine's real mark and name over skeleton meters: the identity is
+				known the moment the fan-out starts, and only the reading is pending.
+				An anonymous shimmer here would say "something may exist", which is
+				exactly the doubt this section exists to remove.
+			-->
+			{#each pending_engines as engine_id, pending_index (engine_id)}
+				{@const mark = EngineMarkFor(engine_id)}
+				{@const MarkIcon = mark.icon}
+				{#if authenticated_engines.length > 0 || pending_index > 0}<DropdownMenuSeparator class="my-1" />{/if}
+				<div
+					class="flex flex-col gap-1.5 px-2 py-1"
+					aria-label={`${EngineDisplayName(engine_id)} usage loading`}
+				>
+					<div class="flex items-center justify-between gap-2">
+						<div class="flex min-w-0 items-center gap-2">
+							<MarkIcon class={EngineMarkClass(mark, "size-4")} />
+							<span class="truncate text-xs font-medium text-foreground">
+								{EngineDisplayName(engine_id)}
+							</span>
+						</div>
+						<FadeArc class="size-3.5 shrink-0 text-muted-foreground" />
+					</div>
+					<div class="flex flex-col gap-1.5">
+						<Skeleton class="h-3 w-24" />
+						<Skeleton class="h-1.5 w-full" />
+						<Skeleton class="h-3 w-16" />
+						<Skeleton class="h-1.5 w-full" />
+					</div>
+				</div>
+			{/each}
+
 			{#each unavailable_engines as engine, engine_index (engine.engine_id)}
 				{@const mark = EngineMarkFor(engine.engine_id)}
 				{@const MarkIcon = mark.icon}
-				{#if authenticated_engines.length > 0 || engine_index > 0}<DropdownMenuSeparator class="my-1" />{/if}
+				{#if authenticated_engines.length > 0 || pending_engines.length > 0 || engine_index > 0}<DropdownMenuSeparator
+						class="my-1"
+					/>{/if}
 				<div class="flex flex-col gap-1 px-2 py-1">
 					<div class="flex items-center gap-2">
 						<MarkIcon class={EngineMarkClass(mark, "size-4")} />

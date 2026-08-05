@@ -20,6 +20,26 @@ describe("sidebar identity and thread rail regressions", () => {
 		expect(identity).not.toMatch(/\bEffect\.fork\(/);
 	});
 
+	/**
+	 * Reports merge in as each provider answers, so a slow provider was simply
+	 * absent until its first report landed — Claude read as not picked up while
+	 * Codex painted instantly. An engine still fetching its first report shows
+	 * its real mark and name over skeleton meters instead of nothing.
+	 */
+	it("names an engine awaiting its first usage report over a skeleton", () => {
+		const usage = read("modules/frontend/src/routes/components/sidebar-engine-usage.sv");
+
+		expect(usage).toContain("const pending_engines = $derived(");
+		expect(usage).toContain("{#each pending_engines as engine_id, pending_index (engine_id)}");
+		expect(usage).toContain("usage loading");
+		/** The identity is real even while the reading is pending. */
+		expect(usage).toContain("{EngineDisplayName(engine_id)}");
+		/** A menu with only pending engines must not claim nothing is connected. */
+		expect(usage).toContain(
+			"authenticated_engines.length === 0 && unavailable_engines.length === 0 && pending_engines.length === 0",
+		);
+	});
+
 	it("shows the latest trustworthy weekly reset on each shader-glass provider menu", () => {
 		const identity = read("modules/frontend/src/routes/components/sidebar-identity.sv");
 		const usage = read("modules/frontend/src/routes/components/sidebar-engine-usage.sv");
