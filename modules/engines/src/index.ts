@@ -2,6 +2,7 @@ export * from "./engine";
 export * from "./registry";
 export * from "./process/process";
 export * from "./process/jsonl";
+export * from "./patch/unified-diff";
 export * from "./claude/engine";
 export * from "./claude/jsonl";
 export * from "./claude/normalizer";

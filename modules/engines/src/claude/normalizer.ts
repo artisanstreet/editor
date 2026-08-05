@@ -1,6 +1,7 @@
 import { Option, Schema } from "effect";
 
 import { TokenCount } from "../engine";
+import { CountPatchHunkLines, CountWrittenLines } from "../patch/unified-diff";
 
 import type {
 	EngineAgentMessageCompletedObservation,
@@ -23,6 +24,13 @@ export interface ClaudeNormalizationInput {
 	readonly frame_sequence: number;
 	readonly payload: unknown;
 	readonly raw_frame_base64: string;
+	/**
+	 * The tool uses earlier assistant frames announced for this run. The CLI
+	 * sends their results later in a user frame with only `tool_use_id`, so the
+	 * run owner supplies this decoded correlation instead of guessing a tool
+	 * family from result content.
+	 */
+	readonly tool_uses?: ReadonlyMap<string, ClaudeToolUse>;
 	/**
 	 * The native message id most recently announced by `message_start`. Delta
 	 * frames never carry it themselves, so the caller threads it through to keep
@@ -115,6 +123,8 @@ const ToolUseSchema = Schema.Struct({
 	name: Schema.String,
 	input: Schema.Unknown,
 });
+/** A schema-decoded Claude tool invocation retained by the run that owns it. @since 0.7.0 */
+export type ClaudeToolUse = Schema.Schema.Type<typeof ToolUseSchema>;
 const ThinkingSchema = Schema.Struct({ type: Schema.Literal("thinking"), thinking: Schema.String });
 const UsageSchema = Schema.Struct({
 	cache_creation_input_tokens: Schema.optional(TokenCount),
@@ -141,9 +151,25 @@ const ToolResultSchema = Schema.Struct({
 	is_error: Schema.optional(Schema.Boolean),
 	content: Schema.Unknown,
 });
+/**
+ * The applied-edit report the CLI attaches to the turn that carries a tool
+ * result. An update states its patch; a create states what it wrote and that
+ * nothing stood there before, so both sides are counted from the engine's own
+ * account of the edit rather than from the workspace.
+ */
+const ToolUseResultSchema = Schema.Struct({
+	content: Schema.optional(Schema.String),
+	filePath: Schema.optional(Schema.String),
+	originalFile: Schema.optional(Schema.NullOr(Schema.String)),
+	structuredPatch: Schema.optional(
+		Schema.Array(Schema.Struct({ lines: Schema.Array(Schema.String) })),
+	),
+	type: Schema.optional(Schema.String),
+});
 const UserSchema = Schema.Struct({
 	type: Schema.Literal("user"),
 	message: Schema.Struct({ content: Schema.Array(Schema.Unknown) }),
+	tool_use_result: Schema.optional(Schema.Unknown),
 });
 const ResultSchema = Schema.Struct({
 	type: Schema.Literal("result"),
@@ -225,6 +251,23 @@ export function read_claude_stream_message_id(payload: unknown): string | undefi
 }
 
 /**
+ * Reads every tool invocation from one settled assistant frame. The process
+ * adapter owns the resulting map for exactly one run; this normalizer only
+ * consumes it when the later result frame needs the invocation's semantics.
+ *
+ * @since 0.7.0
+ */
+export function read_claude_tool_uses(payload: unknown): ReadonlyArray<ClaudeToolUse> {
+	const assistant = decode(AssistantSchema, payload);
+	if (assistant === undefined) return [];
+
+	return assistant.message.content.flatMap((item) => {
+		const tool = decode(ToolUseSchema, item);
+		return tool === undefined ? [] : [tool];
+	});
+}
+
+/**
  * Names the frames that exist purely for CLI bookkeeping. Every frame is
  * already retained verbatim as raw provenance, so re-emitting these as
  * canonical observations would only bury real diagnostics in noise.
@@ -263,6 +306,112 @@ function make_base(input: ClaudeNormalizationInput, native_method: string, suffi
 		raw,
 		sequence: 0,
 	};
+}
+
+/**
+ * Emits the one completed file change a successful tool result proves. The
+ * frame's ordinary observation id remains source-unique: tool use ids are
+ * provider lifecycle identities, not ledger admission ids.
+ */
+function applied_file_change(
+	input: ClaudeNormalizationInput,
+	applied: Schema.Schema.Type<typeof ToolUseResultSchema> | undefined,
+	tool: ClaudeToolUse,
+): EngineFileObservation | undefined {
+	if (applied?.filePath === undefined) return undefined;
+	if (applied.type !== "create" && applied.type !== "update") return undefined;
+
+	const counts =
+		applied.structuredPatch !== undefined && applied.structuredPatch.length > 0
+			? CountPatchHunkLines(applied.structuredPatch)
+			: applied.content === undefined
+				? undefined
+				: CountWrittenLines(applied.content, applied.originalFile ?? undefined);
+
+	return {
+		...make_base(input, "user.tool_result", tool.id),
+		_tag: "file",
+		action: applied.type === "create" ? "created" : "modified",
+		...(counts === undefined ? {} : counts),
+		path: applied.filePath,
+	} satisfies EngineFileObservation;
+}
+
+/**
+ * Completes a file tool even when Claude omitted its applied-edit metadata.
+ *
+ * The edit's own arguments are that patch. An edit names the block it replaced
+ * and the block it wrote, so counting those reads the change the engine applied
+ * from the request rather than inventing one — the same rule the applied-metadata
+ * path follows, from the only other place the same fact is stated. Without a
+ * replaced block there is nothing honest to count: a write discloses what it
+ * wrote and never what stood there before, and half a count renders as a
+ * confident zero.
+ */
+function correlated_file_change(
+	input: ClaudeNormalizationInput,
+	tool: ClaudeToolUse,
+): EngineFileObservation {
+	const input_value = tool_input(tool);
+	const counts =
+		input_value?.new_string === undefined
+			? undefined
+			: CountWrittenLines(input_value.new_string, input_value.old_string);
+
+	return {
+		...make_base(input, "user.tool_result", tool.id),
+		_tag: "file",
+		action: "modified",
+		...(counts === undefined ? {} : counts),
+		path: input_value?.file_path ?? input_value?.path ?? "unknown",
+	} satisfies EngineFileObservation;
+}
+
+/** A failed file mutation has no completed file report, but must stay named. */
+function failed_file_tool_observation(
+	input: ClaudeNormalizationInput,
+	tool: ClaudeToolUse,
+): EngineToolObservation {
+	const input_value = tool_input(tool);
+	const detail = input_value?.file_path ?? input_value?.path;
+
+	return {
+		...make_base(input, "user.tool_result", tool.id),
+		_tag: "tool",
+		action: "failed",
+		...(detail === undefined ? {} : { detail }),
+		tool_id: tool.id,
+		tool_name: tool.name,
+	} satisfies EngineToolObservation;
+}
+
+/**
+ * Identifies which file result one outer applied-edit report can enrich. A
+ * Claude user frame may settle several parallel tools while exposing only one
+ * `tool_use_result`; applying that singleton to every file result fabricates
+ * duplicate paths and counts. A sole file result is unambiguous. With several,
+ * the report is used only when its path names exactly one correlated request.
+ */
+function applied_file_tool_id(
+	applied: Schema.Schema.Type<typeof ToolUseResultSchema> | undefined,
+	results: ReadonlyArray<Schema.Schema.Type<typeof ToolResultSchema> | undefined>,
+	tool_uses: ReadonlyMap<string, ClaudeToolUse> | undefined,
+): string | undefined {
+	if (applied?.filePath === undefined || tool_uses === undefined) return undefined;
+	if (applied.type !== "create" && applied.type !== "update") return undefined;
+
+	const file_tools = results.flatMap((result) => {
+		if (result === undefined) return [];
+		const tool = tool_uses.get(result.tool_use_id);
+		return tool === undefined || !is_file_tool(tool) ? [] : [tool];
+	});
+	if (file_tools.length === 1) return file_tools[0]?.id;
+
+	const path_matches = file_tools.filter((tool) => {
+		const input_value = tool_input(tool);
+		return (input_value?.file_path ?? input_value?.path) === applied.filePath;
+	});
+	return path_matches.length === 1 ? path_matches[0]?.id : undefined;
 }
 
 function native_action(input: ClaudeNormalizationInput, detail: string) {
@@ -339,56 +488,143 @@ function reasoning_summary_completed_observation(
 	};
 }
 
-function tool_observation(
-	input: ClaudeNormalizationInput,
-	tool: Schema.Schema.Type<typeof ToolUseSchema>,
-	action: EngineToolObservation["action"] = "started",
-): EngineObservation {
-	const input_value = decode(
+function tool_input(tool: ClaudeToolUse) {
+	return decode(
 		Schema.Struct({
+			args: Schema.optional(Schema.String),
 			command: Schema.optional(Schema.String),
+			description: Schema.optional(Schema.String),
 			file_path: Schema.optional(Schema.String),
+			new_string: Schema.optional(Schema.String),
+			notebook_path: Schema.optional(Schema.String),
+			old_string: Schema.optional(Schema.String),
 			path: Schema.optional(Schema.String),
+			pattern: Schema.optional(Schema.String),
 			query: Schema.optional(Schema.String),
 			url: Schema.optional(Schema.String),
 		}),
 		tool.input,
 	);
+}
+
+/**
+ * What a tool row says it did, taken from the one argument that identifies the
+ * call: the file a read opened, the pattern a search matched, the task a
+ * subagent was given.
+ *
+ * Every row of a kind otherwise renders as the same word, which is what a fixed
+ * string saying the input lives in raw provenance amounted to — a sentence about
+ * the adapter's bookkeeping standing where the work should be. When a call
+ * genuinely discloses nothing identifying, this returns nothing and the row
+ * keeps its normalized label instead of describing the absence.
+ *
+ * Ordered by how much each argument narrows the call down: a grep's pattern says
+ * more than the directory it ran in, and a fetch's URL more than its prompt.
+ */
+function tool_detail(tool: ClaudeToolUse): string | undefined {
+	const value = tool_input(tool);
+	if (value === undefined) return undefined;
+
+	const candidate =
+		value.command ??
+		value.file_path ??
+		value.notebook_path ??
+		value.pattern ??
+		value.query ??
+		value.url ??
+		value.description ??
+		value.path ??
+		value.args;
+	const detail = candidate?.trim();
+
+	return detail === undefined || detail.length === 0 ? undefined : detail;
+}
+
+function is_file_tool(tool: ClaudeToolUse) {
+	return ["Edit", "Write", "NotebookEdit"].includes(tool.name);
+}
+
+/**
+ * Reading a file is file work, not anonymous tool work. Routed to the file
+ * semantics so the row carries the path it opened and a chain of them counts
+ * itself as files read rather than as tools used.
+ */
+function is_file_read_tool(tool: ClaudeToolUse) {
+	return tool.name === "Read" || tool.name === "NotebookRead";
+}
+
+function tool_observation(
+	input: ClaudeNormalizationInput,
+	tool: ClaudeToolUse,
+	action: EngineToolObservation["action"] = "started",
+): EngineObservation | undefined {
+	const input_value = tool_input(tool);
 	const name = tool.name;
 
-	if (name === "Bash") {
+	/**
+	 * Both shells, not just Bash: the Windows harness runs commands through a
+	 * `PowerShell` tool, and matching only Bash sent every one of those to the
+	 * generic tool shape — a chain of commands reading "Used 2 tools" with the
+	 * command text riding along as an anonymous detail.
+	 */
+	if (name === "Bash" || name === "PowerShell") {
 		return {
-			...make_base(input, "assistant.tool_use"),
+			...make_base(input, "assistant.tool_use", tool.id),
 			_tag: "terminal_activity",
 			activity_id: tool.id,
 			...(input_value?.command === undefined ? {} : { command: input_value.command }),
-			state: action === "completed" ? "completed" : "started",
+			state:
+				action === "failed" ? "failed" : action === "completed" ? "completed" : "started",
 		} satisfies EngineTerminalActivityObservation;
 	}
 
-	if (["Edit", "Write", "NotebookEdit"].includes(name)) {
-		return {
-			...make_base(input, "assistant.tool_use"),
-			_tag: "file",
-			action: "modified",
-			path: input_value?.file_path ?? input_value?.path ?? "unknown",
-		} satisfies EngineFileObservation;
+	if (is_file_tool(tool)) {
+		/**
+		 * A file observation is completed by definition in the public projection.
+		 * Do not admit a count-less request here: it would persist as applied and
+		 * block the later result frame that contains the actual patch counts.
+		 */
+		return undefined;
+	}
+
+	/**
+	 * Same rule for a read: the projection keys a read row off the observation
+	 * that reported it, so emitting one on the request and again on the result
+	 * would leave two rows for one read. The result frame is the one that proves
+	 * it happened. A failure keeps the ordinary tool shape, which is what carries
+	 * a failed state at all.
+	 */
+	if (is_file_read_tool(tool)) {
+		const path = input_value?.file_path ?? input_value?.notebook_path;
+		if (path !== undefined && path.length > 0 && action !== "failed") {
+			if (action === "started") return undefined;
+
+			return {
+				...make_base(input, "user.tool_result", tool.id),
+				_tag: "file",
+				action: "read",
+				path,
+			} satisfies EngineFileObservation;
+		}
 	}
 
 	if (["WebSearch", "WebFetch"].includes(name)) {
 		return {
-			...make_base(input, "assistant.tool_use"),
+			...make_base(input, "assistant.tool_use", tool.id),
 			_tag: "search",
 			query: input_value?.query ?? input_value?.url ?? "",
+			search_id: tool.id,
 			state: action === "started" ? "started" : "completed",
 		} satisfies EngineSearchObservation;
 	}
 
+	const detail = tool_detail(tool);
+
 	return {
-		...make_base(input, "assistant.tool_use"),
+		...make_base(input, "assistant.tool_use", tool.id),
 		_tag: "tool",
 		action,
-		detail: "Claude tool input retained in raw provenance",
+		...(detail === undefined ? {} : { detail }),
 		tool_id: tool.id,
 		tool_name: name,
 	} satisfies EngineToolObservation;
@@ -482,6 +718,9 @@ export function normalize_claude_event(
 	if (assistant !== undefined) {
 		const text_parts: Array<string> = [];
 		const observations: Array<EngineObservation> = [];
+		const has_tool_use = assistant.message.content.some(
+			(item) => decode(ToolUseSchema, item) !== undefined,
+		);
 		const has_thinking = assistant.message.content.some(
 			(item) => decode(ThinkingSchema, item) !== undefined,
 		);
@@ -489,7 +728,10 @@ export function normalize_claude_event(
 			const text = decode(TextSchema, item);
 			const tool = decode(ToolUseSchema, item);
 			if (text !== undefined) text_parts.push(text.text);
-			if (tool !== undefined) observations.push(tool_observation(input, tool));
+			if (tool !== undefined) {
+				const observation = tool_observation(input, tool);
+				if (observation !== undefined) observations.push(observation);
+			}
 			if (decode(ThinkingSchema, item) !== undefined) return;
 			if (
 				text === undefined &&
@@ -525,25 +767,56 @@ export function normalize_claude_event(
 			if (context_usage !== undefined) observations.push(context_usage);
 		}
 		if (observations.length > 0) return observations;
+		if (has_tool_use) return [];
 		if (assistant.error !== undefined) return [native_action(input, assistant.error)];
 		return [native_action(input, "Assistant event without public content")];
 	}
 
 	const user = decode(UserSchema, input.payload);
-	if (user !== undefined)
-		return user.message.content.map((item, index) => {
-			const result = decode(ToolResultSchema, item);
-			return result === undefined
-				? native_action(input, `Malformed user content at index ${index}`)
-				: ({
-						...make_base(input, "user.tool_result", result.tool_use_id),
-						_tag: "tool",
-						action: result.is_error === true ? "failed" : "completed",
-						detail: "Tool result content retained in raw provenance",
-						tool_id: result.tool_use_id,
-						tool_name: "claude-tool",
-					} satisfies EngineToolObservation);
+	if (user !== undefined) {
+		const applied = decode(ToolUseResultSchema, user.tool_use_result);
+		const results = user.message.content.map((item) => decode(ToolResultSchema, item));
+		const applied_tool_id = applied_file_tool_id(applied, results, input.tool_uses);
+
+		return results.map((result, index) => {
+			if (result === undefined)
+				return native_action(input, `Malformed user content at index ${index}`);
+
+			const tool = input.tool_uses?.get(result.tool_use_id);
+			if (tool !== undefined) {
+				if (is_file_tool(tool)) {
+					if (result.is_error === true) return failed_file_tool_observation(input, tool);
+
+					const file_change =
+						result.tool_use_id === applied_tool_id
+							? applied_file_change(input, applied, tool)
+							: undefined;
+					return file_change ?? correlated_file_change(input, tool);
+				}
+
+				const observation = tool_observation(
+					input,
+					tool,
+					result.is_error === true ? "failed" : "completed",
+				);
+				if (observation !== undefined) return observation;
+			}
+
+			/**
+			 * A result whose request never reached this adapter. Nothing about the
+			 * call is known beyond that it ended, so the row carries no detail and
+			 * keeps its normalized label — a fixed sentence about where the content
+			 * was kept described the adapter, not the run.
+			 */
+			return {
+				...make_base(input, "user.tool_result", result.tool_use_id),
+				_tag: "tool",
+				action: result.is_error === true ? "failed" : "completed",
+				tool_id: result.tool_use_id,
+				tool_name: "claude-tool",
+			} satisfies EngineToolObservation;
 		});
+	}
 
 	const result = decode(ResultSchema, input.payload);
 	if (result !== undefined) {

@@ -83,10 +83,17 @@ export interface EngineGlobalGuidance {
 	readonly source_file: string;
 }
 
+/** Carries product-owned instructions separately from global guidance and user content. */
+export interface EngineProductInstructions {
+	readonly content: string;
+	readonly source: string;
+}
+
 /** Supplies the caller-owned context shared by started and resumed runs. @since 0.2.0 */
 export interface EngineRunContext extends EngineRunMetadata {
 	readonly artisan_run_id: string;
 	readonly global_guidance?: EngineGlobalGuidance;
+	readonly product_instructions?: EngineProductInstructions;
 	readonly working_directory: string;
 }
 
@@ -119,6 +126,38 @@ export function ValidateEngineGlobalGuidance(
 				}),
 			);
 }
+
+/** Validates product-owned instructions before an adapter contacts its provider. */
+export const ValidateEngineProductInstructions = (
+	engine_id: string,
+	product_instructions: EngineProductInstructions | undefined,
+): Effect.Effect<void, EngineConfigurationError> => {
+	if (product_instructions === undefined) return Effect.void;
+
+	if (
+		typeof product_instructions.content !== "string" ||
+		product_instructions.content.trim().length === 0
+	) {
+		return Effect.fail(
+			new EngineConfigurationError({
+				engine_id,
+				option: "product_instructions.content",
+				value: product_instructions.content,
+			}),
+		);
+	}
+
+	return typeof product_instructions.source !== "string" ||
+		product_instructions.source.trim().length === 0
+		? Effect.fail(
+				new EngineConfigurationError({
+					engine_id,
+					option: "product_instructions.source",
+					value: product_instructions.source,
+				}),
+			)
+		: Effect.void;
+};
 
 /** Carries provider-owned state that can reopen a run without inventing a checkpoint. @since 0.2.0 */
 export interface EngineResumeToken {
@@ -296,6 +335,16 @@ export interface EngineToolObservation extends EngineObservationBase {
 export interface EngineFileObservation extends EngineObservationBase {
 	readonly _tag: "file";
 	readonly action: "created" | "modified" | "deleted" | "read";
+	/**
+	 * The lines this run's own patch added and removed, when the engine reported
+	 * enough to count them. Counted from the applied patch rather than the working
+	 * tree: a diff of the tree cannot say which run made which change, and it
+	 * needs a repository that a workspace may not have. Absent means uncounted,
+	 * never zero — a renderer must distinguish "no change" from "not reported".
+	 * @since 0.3.0
+	 */
+	readonly lines_added?: number;
+	readonly lines_deleted?: number;
 	readonly path: string;
 }
 
@@ -304,6 +353,15 @@ export interface EngineSearchObservation extends EngineObservationBase {
 	readonly _tag: "search";
 	readonly query: string;
 	readonly result_count?: number;
+	/**
+	 * The provider's own id for this search, when it has one. A search is
+	 * reported at least twice — once starting, once finished — and without an id
+	 * of its own each report is only identifiable by the frame that carried it,
+	 * which makes one search look like several and leaves the first of them
+	 * running forever.
+	 * @since 0.3.0
+	 */
+	readonly search_id?: string;
 	readonly state: "started" | "completed";
 }
 
@@ -312,6 +370,14 @@ export interface EngineNativeActionObservation extends EngineObservationBase {
 	readonly _tag: "native_action";
 	readonly action: string;
 	readonly detail?: string;
+	/**
+	 * Marks a frame the adapter could not interpret rather than something the
+	 * provider did. Providers add frames faster than adapters model them, so
+	 * this is ordinary drift, not a fault — the frame is already kept verbatim
+	 * in raw provenance, and a reader has no use for a second copy of it in the
+	 * transcript. @since 0.7.0
+	 */
+	readonly diagnostic?: boolean;
 }
 
 /** Describes the provider-neutral action bound to an approval. @since 0.3.0 */

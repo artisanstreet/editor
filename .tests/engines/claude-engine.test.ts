@@ -138,6 +138,38 @@ describe("Claude Code engine", () => {
 		}
 	});
 
+	it("keeps a Bash result on the tool-use lifecycle it started", async () => {
+		const engine = await get_engine();
+		const events = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const run = yield* engine.Open(open_input());
+					return yield* run.Events.pipe(Stream.runCollect);
+				}),
+			),
+		);
+		const bash = events.filter(
+			(event) => event._tag === "terminal_activity" && event.activity_id === "tool-1",
+		);
+
+		expect(bash).toEqual([
+			expect.objectContaining({
+				_tag: "terminal_activity",
+				activity_id: "tool-1",
+				command: "printf ok",
+				state: "started",
+			}),
+			expect.objectContaining({
+				_tag: "terminal_activity",
+				activity_id: "tool-1",
+				command: "printf ok",
+				state: "completed",
+			}),
+		]);
+		expect(new Set(bash.map((event) => event.observation_id)).size).toBe(2);
+		expect(events).not.toContainEqual(expect.objectContaining({ tool_name: "claude-tool" }));
+	});
+
 	it("resumes with the supplied session identity", async () => {
 		const engine = await get_engine();
 		const native_thread_id = await Effect.runPromise(
@@ -595,7 +627,7 @@ describe("Claude Code engine", () => {
 
 	it("supports cancel and close with exact-one terminals", async () => {
 		process.env.FAKE_CLAUDE_SCENARIO = "timeout";
-		const engine = await get_engine({ timeout_ms: 250 });
+		const engine = await get_engine({ inactivity_ms: 250 });
 		const events = await Effect.runPromise(
 			Effect.scoped(
 				Effect.gen(function* () {

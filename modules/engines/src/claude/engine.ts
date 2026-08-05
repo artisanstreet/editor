@@ -36,9 +36,11 @@ import {
 	EngineUnsupportedCommandError,
 	EngineUnsupportedOperationError,
 	ValidateEngineGlobalGuidance,
+	ValidateEngineProductInstructions,
 } from "../engine";
 import { EngineProcessFactory, type EngineProcessSpawnInput } from "../process/process";
 import { MakeEngineEventBuffer } from "../process/event-buffer";
+import { WatchEngineInactivity } from "../process/inactivity-deadline";
 import {
 	ClaudeJsonlFramer,
 	ClaudeJsonlMalformedLineError,
@@ -52,6 +54,8 @@ import {
 	normalize_claude_event,
 	read_claude_session_id,
 	read_claude_stream_message_id,
+	read_claude_tool_uses,
+	type ClaudeToolUse,
 } from "./normalizer";
 
 /** Declares the deliberately limited, truthful Claude Code capability surface. @since 0.6.0 */
@@ -111,10 +115,11 @@ export interface ClaudeEngineOptions {
 	readonly event_capacity?: number;
 	readonly executable?: string;
 	readonly executable_args?: ReadonlyArray<string>;
+	/** Silence that settles a run as stalled; every observation re-arms it. */
+	readonly inactivity_ms?: number;
 	readonly max_frame_bytes?: number;
 	readonly max_stderr_bytes?: number;
 	readonly max_stdout_bytes?: number;
-	readonly timeout_ms?: number;
 	readonly version_timeout_ms?: number;
 }
 
@@ -123,10 +128,10 @@ interface ClaudeConfiguredOptions {
 	readonly event_capacity: number;
 	readonly executable: string;
 	readonly executable_args: ReadonlyArray<string>;
+	readonly inactivity_ms: number;
 	readonly max_frame_bytes: number;
 	readonly max_stderr_bytes: number;
 	readonly max_stdout_bytes: number;
-	readonly timeout_ms: number;
 	readonly version_timeout_ms: number;
 }
 
@@ -154,10 +159,16 @@ export const claude_permission_modes = [
 const defaults = {
 	event_capacity: 256,
 	executable: "claude",
+	/**
+	 * Ten minutes of silence, not of running. A tool call can legitimately
+	 * occupy the CLI without emitting anything, so the window has to clear the
+	 * longest plausible quiet stretch; beyond it the stream is treated as dead
+	 * rather than slow.
+	 */
+	inactivity_ms: 10 * 60 * 1_000,
 	max_frame_bytes: 1_048_576,
 	max_stderr_bytes: 1_048_576,
 	max_stdout_bytes: 16 * 1_024 * 1_024,
-	timeout_ms: 10 * 60 * 1_000,
 	version_timeout_ms: 15_000,
 	auth_timeout_ms: 15_000,
 } as const;
@@ -170,10 +181,10 @@ function fail_configuration(option: string, value: unknown) {
 function validate_positive(options: ClaudeEngineOptions) {
 	const values = {
 		event_capacity: options.event_capacity ?? defaults.event_capacity,
+		inactivity_ms: options.inactivity_ms ?? defaults.inactivity_ms,
 		max_frame_bytes: options.max_frame_bytes ?? defaults.max_frame_bytes,
 		max_stderr_bytes: options.max_stderr_bytes ?? defaults.max_stderr_bytes,
 		max_stdout_bytes: options.max_stdout_bytes ?? defaults.max_stdout_bytes,
-		timeout_ms: options.timeout_ms ?? defaults.timeout_ms,
 		version_timeout_ms: options.version_timeout_ms ?? defaults.version_timeout_ms,
 		auth_timeout_ms: options.auth_timeout_ms ?? defaults.auth_timeout_ms,
 	};
@@ -237,11 +248,13 @@ function validate_provider_options(input: EngineOpenInput) {
 	}
 
 	return ValidateEngineGlobalGuidance("claude", input.global_guidance).pipe(
+		Effect.andThen(ValidateEngineProductInstructions("claude", input.product_instructions)),
 		Effect.andThen(
 			input.global_guidance === undefined
 				? Effect.succeed({
 						disable_tools: disable_tools === true,
 						permission_mode,
+						product_instructions: input.product_instructions?.content,
 						prompt_file,
 						safe_mode: safe_mode === true,
 					})
@@ -261,7 +274,7 @@ function make_spawn_input(
 	session_id: string,
 ) {
 	return Effect.gen(function* () {
-		const { disable_tools, permission_mode, prompt_file, safe_mode } =
+		const { disable_tools, permission_mode, product_instructions, prompt_file, safe_mode } =
 			yield* validate_provider_options(input);
 		const args = [
 			...options.executable_args,
@@ -278,6 +291,9 @@ function make_spawn_input(
 			...(input._tag === "start" ? ["--session-id", session_id] : []),
 			...(input.model === undefined ? [] : ["--model", input.model]),
 			...(permission_mode === undefined ? [] : ["--permission-mode", permission_mode]),
+			...(product_instructions === undefined
+				? []
+				: ["--append-system-prompt", product_instructions]),
 			...(prompt_file === undefined ? [] : ["--append-system-prompt-file", prompt_file]),
 		];
 
@@ -515,6 +531,12 @@ function open_run(
 			init_seen: false,
 			/** The message id announced by the newest `message_start` frame. */
 			stream_message_id: undefined as string | undefined,
+			/**
+			 * Native tool uses are run-owned stream state. Claude emits results in
+			 * later user frames with only a tool-use id, so this maps those results
+			 * back onto the exact canonical family their assistant frame started.
+			 */
+			tool_uses: new Map<string, ClaudeToolUse>() as ReadonlyMap<string, ClaudeToolUse>,
 		});
 		const stdout_drained = yield* Deferred.make<void>();
 		const stderr_drained = yield* Deferred.make<void>();
@@ -598,11 +620,24 @@ function open_run(
 				 */
 				const announced_message_id = read_claude_stream_message_id(decode.payload);
 				const stream_message_id = announced_message_id ?? current_state.stream_message_id;
+				const announced_tools = read_claude_tool_uses(decode.payload);
+				const tool_uses: ReadonlyMap<string, ClaudeToolUse> =
+					announced_tools.length === 0
+						? current_state.tool_uses
+						: new Map<string, ClaudeToolUse>([
+								...current_state.tool_uses,
+								...announced_tools.map((tool): readonly [string, ClaudeToolUse] => [
+									tool.id,
+									tool,
+								]),
+							]);
 				if (announced_message_id !== undefined)
 					yield* Ref.update(state, (current) => ({
 						...current,
 						stream_message_id: announced_message_id,
 					}));
+				if (announced_tools.length > 0)
+					yield* Ref.update(state, (current) => ({ ...current, tool_uses }));
 				yield* Effect.forEach(
 					normalize_claude_event({
 						artisan_run_id: input.artisan_run_id,
@@ -610,6 +645,7 @@ function open_run(
 						payload: decode.payload,
 						raw_frame_base64: decode.raw_frame_base64,
 						...(stream_message_id === undefined ? {} : { stream_message_id }),
+						tool_uses,
 						turn_id: `claude:${input.artisan_run_id}:turn`,
 					}),
 					event_buffer.Emit,
@@ -732,26 +768,27 @@ function open_run(
 			),
 			Effect.catch(() => event_buffer.Finish("failed")),
 		);
-		const watch_timeout = Effect.raceFirst(
-			event_buffer.Closed.pipe(Effect.asVoid),
-			Effect.sleep(options.timeout_ms).pipe(
-				Effect.andThen(
-					event_buffer.Emit(
-						make_diagnostic(
-							input,
-							`Claude timed out after ${options.timeout_ms}ms`,
-							{ timeout_ms: options.timeout_ms },
-							"error",
-						),
+		const watch_inactivity = WatchEngineInactivity({
+			Activity: event_buffer.Activity,
+			Closed: event_buffer.Closed,
+			/** The CLI is spawned per run, so it owes output for the whole run. */
+			Expecting: Effect.succeed(true),
+			inactivity_ms: options.inactivity_ms,
+			OnStall: event_buffer
+				.Emit(
+					make_diagnostic(
+						input,
+						`Claude produced no output for ${options.inactivity_ms}ms and is treated as stalled`,
+						{ inactivity_ms: options.inactivity_ms },
+						"error",
 					),
-				),
-				Effect.andThen(event_buffer.Finish("failed")),
-			),
-		);
+				)
+				.pipe(Effect.andThen(event_buffer.Finish("failed"))),
+		});
 		yield* Effect.forkScoped(pump_stdout).pipe(Scope.provide(run_scope));
 		yield* Effect.forkScoped(pump_stderr).pipe(Scope.provide(run_scope));
 		yield* Effect.forkScoped(watch_exit).pipe(Scope.provide(run_scope));
-		yield* Effect.forkScoped(watch_timeout).pipe(Scope.provide(run_scope));
+		yield* Effect.forkScoped(watch_inactivity).pipe(Scope.provide(run_scope));
 		yield* Scope.addFinalizer(run_scope, event_buffer.Finish("closed").pipe(Effect.ignore));
 
 		const command_lock = yield* Semaphore.make(1);

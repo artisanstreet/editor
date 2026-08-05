@@ -1,10 +1,14 @@
 import { describe, expect, it } from "vitest";
 
-import { classify_claude_semantic_failure, normalize_claude_event } from "@artisan/engines";
+import {
+	classify_claude_semantic_failure,
+	normalize_claude_event,
+	read_claude_tool_uses,
+} from "@artisan/engines";
 
-const input = (payload: unknown) => ({
+const input = (payload: unknown, frame_sequence = 1) => ({
 	artisan_run_id: "run",
-	frame_sequence: 1,
+	frame_sequence,
 	payload,
 	raw_frame_base64: "eA==",
 	turn_id: "turn",
@@ -146,47 +150,272 @@ describe("Claude normalization", () => {
 		]);
 	});
 
-	it("maps file/search/tool families and correlates tool results", () => {
-		expect(
-			normalize_claude_event(
+	/**
+	 * A fixed sentence saying the input lives in raw provenance described the
+	 * adapter's bookkeeping where the work should be, and rendered every row of a
+	 * kind as the same line. The one argument that identifies the call goes there
+	 * instead, and a call that discloses nothing identifying carries no detail at
+	 * all so the row keeps its normalized label.
+	 */
+	it("details a tool row with the argument that identifies the call", () => {
+		const tool_details = (name: string, tool_input: Record<string, unknown>) => {
+			const observation = normalize_claude_event(
 				input({
 					type: "assistant",
 					message: {
-						content: [
-							{
-								type: "tool_use",
-								id: "e",
-								name: "Edit",
-								input: { file_path: "a.ts" },
-							},
-							{
-								type: "tool_use",
-								id: "w",
-								name: "WebSearch",
-								input: { query: "docs" },
-							},
-							{ type: "tool_use", id: "m", name: "mcp__server__tool", input: {} },
-						],
+						content: [{ type: "tool_use", id: "call", name, input: tool_input }],
 					},
 				}),
-			),
-		).toEqual(
-			expect.arrayContaining([
-				expect.objectContaining({ _tag: "file", path: "a.ts" }),
-				expect.objectContaining({ _tag: "search", query: "docs" }),
-				expect.objectContaining({ _tag: "tool", tool_name: "mcp__server__tool" }),
-			]),
+			).find((event) => event._tag === "tool");
+
+			return observation?._tag === "tool" ? observation.detail : undefined;
+		};
+
+		expect(tool_details("Grep", { pattern: "conversation_reply", path: "modules" })).toBe(
+			"conversation_reply",
 		);
+		expect(tool_details("Task", { description: "Audit the scroll code" })).toBe(
+			"Audit the scroll code",
+		);
+		expect(tool_details("Glob", { path: "modules/frontend" })).toBe("modules/frontend");
+		expect(tool_details("TodoWrite", { todos: [] })).toBeUndefined();
+		expect(tool_details("mcp__server__tool", { pattern: "   " })).toBeUndefined();
+	});
+
+	/**
+	 * Reading a file is file work. Routed to the file semantics, the row carries
+	 * the path it opened and a chain of reads counts itself as files read. Only
+	 * the result frame emits it: the projection keys a read row off the
+	 * observation that reported it, so emitting on the request too would leave
+	 * two rows for one read.
+	 */
+	it("normalizes a file read to file semantics, once, on its result", () => {
+		const assistant = {
+			type: "assistant",
+			message: {
+				content: [
+					{
+						type: "tool_use",
+						id: "read",
+						name: "Read",
+						input: { file_path: "modules/frontend/src/lib/conversation/trace.ts" },
+					},
+				],
+			},
+		};
+		const tool_uses = new Map(read_claude_tool_uses(assistant).map((tool) => [tool.id, tool]));
+
+		expect(normalize_claude_event(input(assistant))).toEqual([]);
 		expect(
-			normalize_claude_event(
-				input({
+			normalize_claude_event({
+				...input(
+					{
+						type: "user",
+						message: {
+							content: [{ type: "tool_result", tool_use_id: "read", content: "ok" }],
+						},
+					},
+					2,
+				),
+				tool_uses,
+			}),
+		).toEqual([
+			expect.objectContaining({
+				_tag: "file",
+				action: "read",
+				path: "modules/frontend/src/lib/conversation/trace.ts",
+			}),
+		]);
+	});
+
+	/** A failed read still needs the shape that can carry a failed state. */
+	it("keeps a failed read as a tool failure naming the file", () => {
+		const assistant = {
+			type: "assistant",
+			message: {
+				content: [
+					{
+						type: "tool_use",
+						id: "read",
+						name: "Read",
+						input: { file_path: "missing.ts" },
+					},
+				],
+			},
+		};
+		const tool_uses = new Map(read_claude_tool_uses(assistant).map((tool) => [tool.id, tool]));
+
+		expect(
+			normalize_claude_event({
+				...input(
+					{
+						type: "user",
+						message: {
+							content: [
+								{
+									type: "tool_result",
+									tool_use_id: "read",
+									content: "no such file",
+									is_error: true,
+								},
+							],
+						},
+					},
+					2,
+				),
+				tool_uses,
+			}),
+		).toEqual([
+			expect.objectContaining({ _tag: "tool", action: "failed", detail: "missing.ts" }),
+		]);
+	});
+
+	/**
+	 * The Windows harness runs commands through a `PowerShell` tool. Matching
+	 * only Bash sent those to the generic tool shape, so a chain of commands
+	 * read "Used 2 tools" with the command text as an anonymous detail.
+	 */
+	it("normalizes PowerShell commands as terminal activity like Bash", () => {
+		const observations = normalize_claude_event(
+			input({
+				type: "assistant",
+				message: {
+					content: [
+						{
+							type: "tool_use",
+							id: "pwsh",
+							name: "PowerShell",
+							input: {
+								command: "Remove-Item modules/library/src/lib/mock-library.ts",
+							},
+						},
+					],
+				},
+			}),
+		);
+
+		expect(observations).toEqual([
+			expect.objectContaining({
+				_tag: "terminal_activity",
+				activity_id: "pwsh",
+				command: "Remove-Item modules/library/src/lib/mock-library.ts",
+			}),
+		]);
+	});
+
+	it("keeps Bash, search, and named-tool result semantics from their tool uses", () => {
+		const assistant = {
+			type: "assistant",
+			message: {
+				content: [
+					{ type: "tool_use", id: "bash", name: "Bash", input: { command: "pwd" } },
+					{ type: "tool_use", id: "search", name: "WebSearch", input: { query: "docs" } },
+					{ type: "tool_use", id: "named", name: "mcp__server__tool", input: {} },
+				],
+			},
+		};
+		const tool_uses = new Map(read_claude_tool_uses(assistant).map((tool) => [tool.id, tool]));
+		const started = normalize_claude_event(input(assistant));
+		const completed = normalize_claude_event({
+			...input(
+				{
 					type: "user",
 					message: {
-						content: [{ type: "tool_result", tool_use_id: "e", content: "ok" }],
+						content: [
+							{ type: "tool_result", tool_use_id: "bash", content: "ok" },
+							{ type: "tool_result", tool_use_id: "search", content: "ok" },
+							{ type: "tool_result", tool_use_id: "named", content: "ok" },
+						],
 					},
-				}),
+				},
+				2,
 			),
-		).toEqual([expect.objectContaining({ _tag: "tool", tool_id: "e", action: "completed" })]);
+			tool_uses,
+		});
+
+		expect(started).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					_tag: "terminal_activity",
+					activity_id: "bash",
+					command: "pwd",
+				}),
+				expect.objectContaining({ _tag: "search", search_id: "search", query: "docs" }),
+				expect.objectContaining({
+					_tag: "tool",
+					tool_id: "named",
+					tool_name: "mcp__server__tool",
+				}),
+			]),
+		);
+		expect(completed).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					_tag: "terminal_activity",
+					activity_id: "bash",
+					command: "pwd",
+					state: "completed",
+				}),
+				expect.objectContaining({
+					_tag: "search",
+					search_id: "search",
+					query: "docs",
+					state: "completed",
+				}),
+				expect.objectContaining({
+					_tag: "tool",
+					tool_id: "named",
+					tool_name: "mcp__server__tool",
+					action: "completed",
+				}),
+			]),
+		);
+		expect(completed).not.toContainEqual(expect.objectContaining({ tool_name: "claude-tool" }));
+		expect(completed.map((event) => event.observation_id)).toEqual([
+			"run:claude:2:bash",
+			"run:claude:2:search",
+			"run:claude:2:named",
+		]);
+	});
+
+	it("settles a correlated named tool as failed without replacing its name or detail", () => {
+		const assistant = {
+			type: "assistant",
+			message: {
+				content: [{ type: "tool_use", id: "named", name: "mcp__server__tool", input: {} }],
+			},
+		};
+		const tool_uses = new Map(read_claude_tool_uses(assistant).map((tool) => [tool.id, tool]));
+		const [started] = normalize_claude_event(input(assistant));
+		const [failed] = normalize_claude_event({
+			...input(
+				{
+					type: "user",
+					message: {
+						content: [
+							{
+								type: "tool_result",
+								tool_use_id: "named",
+								is_error: true,
+								content: "no",
+							},
+						],
+					},
+				},
+				2,
+			),
+			tool_uses,
+		});
+
+		expect(failed).toMatchObject({
+			_tag: "tool",
+			tool_id: "named",
+			tool_name: "mcp__server__tool",
+			action: "failed",
+		});
+		if (started?._tag !== "tool" || failed?._tag !== "tool")
+			throw new Error("Named tool must remain a tool observation across its lifecycle");
+		expect(failed?.detail).toBe(started?.detail);
 	});
 
 	it("treats assistant errors and every non-success result as semantic failure", () => {
@@ -208,5 +437,230 @@ describe("Claude normalization", () => {
 				detail: "Claude API retry progress",
 			}),
 		]);
+	});
+
+	/**
+	 * The payload shape here is the one the CLI emits in `stream-json`: the
+	 * applied-edit report rides the user frame as `tool_use_result`, not the
+	 * `toolUseResult` spelling the on-disk transcript uses.
+	 */
+	it("counts a created file from the write the engine reported applying", () => {
+		const assistant = {
+			type: "assistant",
+			message: {
+				content: [
+					{
+						type: "tool_use",
+						id: "tool-1",
+						name: "Write",
+						input: { file_path: "C:\\repo\\README.md" },
+					},
+				],
+			},
+		};
+		const tool_uses = new Map(read_claude_tool_uses(assistant).map((tool) => [tool.id, tool]));
+		const events = normalize_claude_event({
+			...input(
+				{
+					type: "user",
+					message: {
+						content: [
+							{
+								type: "tool_result",
+								tool_use_id: "tool-1",
+								content: "File created successfully",
+							},
+						],
+					},
+					tool_use_result: {
+						type: "create",
+						filePath: "C:\\repo\\README.md",
+						content: "a\nb\nc",
+						structuredPatch: [],
+						originalFile: null,
+					},
+				},
+				2,
+			),
+			tool_uses,
+		});
+
+		expect(events).toEqual([
+			expect.objectContaining({
+				_tag: "file",
+				action: "created",
+				lines_added: 3,
+				lines_deleted: 0,
+				path: "C:\\repo\\README.md",
+			}),
+		]);
+	});
+
+	it("counts an edited file from its structured patch, not from the block it replaced", () => {
+		const assistant = {
+			type: "assistant",
+			message: {
+				content: [
+					{
+						type: "tool_use",
+						id: "tool-2",
+						name: "Edit",
+						input: { file_path: "C:\\repo\\app.ts" },
+					},
+				],
+			},
+		};
+		const tool_uses = new Map(read_claude_tool_uses(assistant).map((tool) => [tool.id, tool]));
+		const events = normalize_claude_event({
+			...input(
+				{
+					type: "user",
+					message: {
+						content: [
+							{ type: "tool_result", tool_use_id: "tool-2", content: "Updated" },
+						],
+					},
+					tool_use_result: {
+						type: "update",
+						filePath: "C:\\repo\\app.ts",
+						content: "irrelevant",
+						structuredPatch: [
+							{ lines: [" kept", "-gone", "+added", " kept"] },
+							{ lines: ["+one more"] },
+						],
+						originalFile: "kept\ngone\nkept",
+					},
+				},
+				2,
+			),
+			tool_uses,
+		});
+
+		expect(events).toEqual([
+			expect.objectContaining({
+				_tag: "file",
+				action: "modified",
+				lines_added: 2,
+				lines_deleted: 1,
+			}),
+		]);
+	});
+
+	it("applies one outer edit report only to its uniquely matching parallel file result", () => {
+		const assistant = {
+			type: "assistant",
+			message: {
+				content: [
+					{
+						type: "tool_use",
+						id: "tool-a",
+						name: "Edit",
+						input: { file_path: "C:\\repo\\a.ts" },
+					},
+					{
+						type: "tool_use",
+						id: "tool-b",
+						name: "Edit",
+						input: { file_path: "C:\\repo\\b.ts" },
+					},
+				],
+			},
+		};
+		const tool_uses = new Map(read_claude_tool_uses(assistant).map((tool) => [tool.id, tool]));
+		const events = normalize_claude_event({
+			...input(
+				{
+					type: "user",
+					message: {
+						content: [
+							{ type: "tool_result", tool_use_id: "tool-a", content: "Updated" },
+							{ type: "tool_result", tool_use_id: "tool-b", content: "Updated" },
+						],
+					},
+					tool_use_result: {
+						type: "update",
+						filePath: "C:\\repo\\b.ts",
+						structuredPatch: [{ lines: ["-old", "+new"] }],
+					},
+				},
+				2,
+			),
+			tool_uses,
+		});
+
+		expect(events).toEqual([
+			expect.objectContaining({
+				_tag: "file",
+				path: "C:\\repo\\a.ts",
+			}),
+			expect.objectContaining({
+				_tag: "file",
+				lines_added: 1,
+				lines_deleted: 1,
+				path: "C:\\repo\\b.ts",
+			}),
+		]);
+		expect(events[0]).not.toHaveProperty("lines_added");
+		expect(events[0]).not.toHaveProperty("lines_deleted");
+	});
+
+	it("waits for the applied report before admitting a file change, then falls back to its path", () => {
+		const assistant = {
+			type: "assistant",
+			message: {
+				content: [
+					{
+						type: "tool_use",
+						id: "tool-3",
+						name: "Write",
+						input: { file_path: "C:\\repo\\new.ts" },
+					},
+				],
+			},
+		};
+		const tool_uses = new Map(read_claude_tool_uses(assistant).map((tool) => [tool.id, tool]));
+		const announced = normalize_claude_event(input(assistant));
+		const [completed] = normalize_claude_event({
+			...input(
+				{
+					type: "user",
+					message: {
+						content: [
+							{
+								type: "tool_result",
+								tool_use_id: "tool-3",
+								content: "File created successfully",
+							},
+						],
+					},
+					tool_use_result: { type: "text" },
+				},
+				2,
+			),
+			tool_uses,
+		});
+
+		expect(announced).toEqual([]);
+		expect(completed).toMatchObject({
+			_tag: "file",
+			path: "C:\\repo\\new.ts",
+			observation_id: "run:claude:2:tool-3",
+		});
+		expect(completed).not.toHaveProperty("lines_added");
+		expect(completed).not.toHaveProperty("lines_deleted");
+	});
+
+	it("leaves a tool result that reports no edit as a tool observation", () => {
+		expect(
+			normalize_claude_event(
+				input({
+					type: "user",
+					message: {
+						content: [{ type: "tool_result", tool_use_id: "tool-4", content: "ok" }],
+					},
+					tool_use_result: { type: "text" },
+				}),
+			),
+		).toEqual([expect.objectContaining({ _tag: "tool", tool_id: "tool-4" })]);
 	});
 });
