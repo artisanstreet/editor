@@ -1,6 +1,7 @@
 <script lang="ts">
 	import type { Snippet } from "svelte";
 	import type { HTMLAttributes } from "svelte/elements";
+	import { shader_enabled } from "$lib/appearance-config";
 	import { cn, type WithElementRef } from "$lib/utils";
 	import PaperGodRays from "./paper-god-rays.sv";
 
@@ -36,7 +37,12 @@
 	data-strength={strength}
 	{...rest_props}
 >
-	{#if use_rays}
+	<!--
+		The preference gates the light, never the glass: with the shader off the
+		surface keeps its material, highlight, and card so the layout and contrast
+		are unchanged and only the animation stops.
+	-->
+	{#if use_rays && $shader_enabled}
 		<div aria-hidden="true" class="pointer-events-none absolute inset-0 z-0 overflow-hidden">
 			<PaperGodRays />
 		</div>

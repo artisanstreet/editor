@@ -36,6 +36,8 @@
 		ResolveThreadRoute,
 	} from "$lib/root/thread-navigation";
 	import { ForgeHttpUrl } from "$lib/runtime/forge-endpoint";
+	import { shader_enabled } from "$lib/appearance-config";
+	import { AppearancePreferences } from "$lib/runtime/appearance-preferences";
 	import { AttemptDevelopmentSelfPair } from "$lib/runtime/pairing";
 	import { SessionDefaultsController } from "$lib/settings/session-defaults-controller";
 	import DevInstanceBadge from "./components/dev-instance-badge.sv";
@@ -91,6 +93,14 @@
 	});
 	const client = yield* ArtisanClient;
 	const session_defaults = yield* SessionDefaultsController;
+
+	/**
+	 * Read once for the whole shell: every glass surface reads the store while
+	 * rendering, so the stored preference has to reach it here rather than when
+	 * the settings screen happens to be opened.
+	 */
+	const appearance = yield* AppearancePreferences;
+	shader_enabled.set((yield* appearance.Load).shader_enabled);
 
 	const ApplyThreadListUpdate = (update: ThreadListUpdate) =>
 		Effect.gen(function* () {

@@ -1,5 +1,4 @@
 <script lang="ts" effect>
-	import MessageCircle from "@tabler/icons-svelte/icons/message-circle";
 	import { Clock, Effect, Stream } from "effect";
 	import type {
 		SurfaceUsageDailyBucket,
@@ -11,6 +10,7 @@
 		type CalendarActivity,
 	} from "$lib/components/activity/vertical-calendar-activity-grid.sv";
 	import { BannerService } from "$lib/banner/service";
+	import { EngineMarkClass, UsageSlicePresentationFor } from "$lib/engine/presentation";
 	import { RouteNavigation } from "$lib/browser/route-navigation";
 	import type { ComposerSubmission } from "$lib/composer/image-attachments";
 	import { RunAuthoritativeSubscription } from "$lib/conversation/subscription";
@@ -237,9 +237,17 @@
 			yield* Navigate(ThreadRoutePath(created.project.project_id, created.thread_id));
 		});
 
+	/**
+	 * The picker persists a policy and waits to be told what was actually applied,
+	 * then remembers that as the session default. A draft has no server to answer
+	 * with authority, so what it stored is the answer — returning nothing put an
+	 * `undefined` into the confirmed set and the defaults write read straight
+	 * through it.
+	 */
 	const UpdateDraftPolicy = (policy: ThreadSessionPolicy) =>
 		Effect.gen(function* () {
 			yield* draft_thread.UpdatePolicy(policy);
+			return policy;
 		});
 
 	const RetryDraftNavigation = Effect.gen(function* () {
@@ -268,21 +276,33 @@
 					technique — so it never overlays the timestamps.
 				-->
 				<div class="thread-scroll docs-scroll-fade max-h-[calc(12rem+3px)] min-w-0 overflow-y-auto">
-					<div class="mr-1">
+					<!--
+						The inset sits on the whole list, not on the rows: the divider is
+						the row's own bottom border, and a margin on a table row is
+						ignored, so insetting rows alone would slide the timestamps left
+						and leave the rules under the scrollbar.
+					-->
+					<div class="mr-3">
 					<table class="w-full table-fixed border-collapse text-left" aria-label="Recent threads">
 							<thead class="sr-only">
 								<tr><th>Thread</th><th>Last used</th></tr>
 							</thead>
 							<tbody>
 							{#each threads as thread (thread.thread_id)}
+								{@const thread_mark = UsageSlicePresentationFor(thread.engine_id, thread.model_id).mark}
+								{@const ThreadMark = thread_mark.icon}
 									<tr class="group border-b border-border last:border-b-0">
 										<td class="min-w-0 p-0">
 											<a
 												href={ThreadRoutePathFor(thread)}
 												class="flex min-w-0 items-center gap-2 py-3 font-medium text-foreground outline-none transition-colors duration-(--duration-fast) ease-in-out group-hover:text-foreground-extra group-focus-within:text-foreground-extra motion-reduce:transition-none"
 											>
-												<MessageCircle
-													class="size-4 shrink-0 text-muted-foreground transition-colors duration-(--duration-fast) ease-in-out group-hover:text-foreground-extra group-focus-within:text-foreground-extra motion-reduce:transition-none"
+												<!--
+													A thread wears what it runs on. Until it has an engine its mark is the
+													neutral glyph, which is honest: nothing has answered in it yet.
+												-->
+												<ThreadMark
+													class={EngineMarkClass(thread_mark, "size-4 shrink-0 text-muted-foreground transition-colors duration-(--duration-fast) ease-in-out group-hover:text-foreground-extra group-focus-within:text-foreground-extra motion-reduce:transition-none")}
 												/>
 												<span class="min-w-0 truncate">{thread.title}</span>
 											</a>

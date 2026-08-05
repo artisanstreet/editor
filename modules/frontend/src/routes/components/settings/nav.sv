@@ -47,6 +47,11 @@
 			href: "/settings/threads",
 			label: "Threads",
 		},
+		{
+			anchors: [{ hash: "glass", label: "Glass" }],
+			href: "/settings/appearance",
+			label: "Appearance",
+		},
 	];
 	const engines = $derived(runtime_catalog.manifest.harnesses.map((harness) => ({
 		anchors: [

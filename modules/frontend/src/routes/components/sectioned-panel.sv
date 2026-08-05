@@ -1,16 +1,17 @@
 <script lang="ts" effect>
-	import { Effect } from "effect";
+	import { Effect, Stream } from "effect";
 	import type { Snippet } from "svelte";
 	import type { ThreadListItem } from "@artisan/protocol";
 	import CodeIcon from "@tabler/icons-svelte/icons/code";
-	import Command from "@tabler/icons-svelte/icons/command";
 	import MessageCircle from "@tabler/icons-svelte/icons/message-circle";
+	import MessagePlus from "@tabler/icons-svelte/icons/message-plus";
 	import ShoppingBag from "@tabler/icons-svelte/icons/shopping-bag";
 
 	import barekey_logo from "$lib/assets/barekey/logo-40.png";
 	import logo_gradient from "$lib/assets/barekey/logo-gradient.svg";
 	import { EditorRoutePath } from "$lib/editor/workspace-identity";
 	import { RouteNavigation } from "$lib/browser/route-navigation";
+	import { ImageInspectionStore } from "$lib/images/inspection-store";
 	import { ThreadRoutePath } from "$lib/root/thread-navigation";
 	import CommandMenu from "./command-menu.sv";
 	import DropdownHoverSurface from "./dropdown-hover-surface.sv";
@@ -34,6 +35,12 @@
 	);
 
 	let command_open = $state(false);
+	/**
+	 * The account menu opens upward across the transcript's left margin, which is
+	 * exactly the band the thread rail reads proximity from. Held here because
+	 * the two live on opposite sides of the layout and neither owns the other.
+	 */
+	let account_open = $state(false);
 
 	let {
 		primary,
@@ -61,6 +68,15 @@
 	const workspace_open = $derived(workspace_id !== undefined && thread_id !== undefined);
 	const navigation = yield* RouteNavigation;
 
+	/** The rail must not creep in over a full-screen image. */
+	const inspection = yield* ImageInspectionStore;
+	let inspecting_image = $state(yield* inspection.Current);
+	const ApplyInspection = (open: boolean) =>
+		Effect.gen(function* () {
+			inspecting_image = open;
+		});
+	yield* inspection.Changes.pipe(Stream.runForEach(ApplyInspection), Effect.forkScoped);
+
 	const CycleSurface = () =>
 		Effect.gen(function* () {
 			if (workspace_id === undefined || thread_id === undefined) return;
@@ -76,8 +92,13 @@
 	<!--
 		The rail is the entire sidebar: no expanded panel behind it, so nothing
 		here toggles. Thread navigation lives in the command menu instead.
+
+		It renders at every width. Hiding it below a breakpoint is left over from
+		when this was a real collapsing sidebar with a drawer to fall back on;
+		there is no drawer now, so hiding it took the home link, the command menu,
+		and the account with it and left the app with no navigation at all.
 	-->
-	<div class="relative hidden h-[calc(100%-1rem)] w-14 shrink-0 lg:block">
+	<div class="relative block h-[calc(100%-1rem)] w-14 shrink-0">
 		<div class="absolute inset-x-0 top-2 flex flex-col items-center">
 			<!--
 				One flat hover surface spans both housings, so the pill is shared:
@@ -91,8 +112,8 @@
 				{#snippet children({ move_hover })}
 					<div class="flex flex-col items-center gap-2">
 						<!--
-							One pill for what is always there: the brand mark, the command
-							menu, and the marketplace belong to this edge unconditionally,
+							One pill for what is always there: the brand mark, the new-thread
+							action, and the marketplace belong to this edge unconditionally,
 							so they share a housing rather than each floating on their own.
 						-->
 						<div class="w-10 rounded-full bg-surface-125 py-1 card dark:bg-surface-900">
@@ -117,23 +138,29 @@
 									></span>
 								</a>
 
-								<span aria-hidden="true" class="h-px w-full shrink-0 bg-border"></span>
+								<!--
+								Two hairlines, not one: the background-coloured line above the
+								border reads as a cut through the rail rather than a line drawn
+								on it. Height is literal so the pair stays 1px + 1px whatever
+								the root font size is.
+							-->
+							<span
+								aria-hidden="true"
+								class="h-[2px] w-full shrink-0 border-t border-background bg-border"
+							></span>
 
-								<button
-									type="button"
-									aria-label="Open command menu"
-									class="group/command-menu relative flex size-8 items-center justify-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
+								<a
+									href="/"
+									aria-label="New thread"
+									class="group/new-thread relative flex size-8 items-center justify-center rounded-full outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
 									onpointerenter={move_hover}
 									onpointermove={move_hover}
 									onfocusin={move_hover}
-									onclick={yield* Effect.gen(function* () {
-										command_open = true;
-									})}
 								>
-									<Command
-										class="size-4 text-muted-foreground transition-colors duration-(--duration-fast) ease-in-out group-hover/command-menu:text-foreground motion-reduce:transition-none"
+									<MessagePlus
+										class="size-4 text-muted-foreground transition-colors duration-(--duration-fast) ease-in-out group-hover/new-thread:text-foreground motion-reduce:transition-none"
 									/>
-								</button>
+								</a>
 
 								<button
 									type="button"
@@ -203,12 +230,12 @@
 		</div>
 
 		<div class="absolute inset-x-0 bottom-2 flex justify-center">
-			<SidebarIdentity />
+			<SidebarIdentity bind:open={account_open} />
 		</div>
 	</div>
 
 	<main
-		class="min-h-full min-w-0 w-0 flex-1 p-2 lg:h-[calc(100%-1rem)] lg:min-h-0 lg:max-h-[calc(100%-1rem)] lg:pl-0"
+		class="h-[calc(100%-1rem)] min-h-0 max-h-[calc(100%-1rem)] min-w-0 w-0 flex-1 p-2 pl-0"
 		style="padding-bottom: max(0.5rem, env(safe-area-inset-bottom));"
 	>
 		<div
@@ -224,7 +251,7 @@
 					that margin is real.
 				-->
 				{#if show_thread_hover_rail && threads.length > 0}
-					<ThreadHoverRail {threads} />
+					<ThreadHoverRail suppressed={account_open || inspecting_image} {threads} />
 				{/if}
 			</section>
 

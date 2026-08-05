@@ -6,8 +6,9 @@
 	import { Effect, Stream } from "effect";
 	import type { SessionDefaults } from "@artisan/protocol";
 	import { BannerService } from "$lib/banner/service";
+	import { MakeFollowHighlight } from "$lib/components/dropdown-highlight";
 	import barekey_logo from "$lib/assets/barekey/logo-40.png";
-	import { EngineMarkFor } from "$lib/engine/presentation";
+	import { EngineMarkClass, EngineMarkFor } from "$lib/engine/presentation";
 	import {
 		CompactionSelectionFromDefaults,
 		SessionDefaultsController,
@@ -16,23 +17,28 @@
 	} from "$lib/settings/session-defaults-controller";
 	import {
 		ModelsFromCatalog,
+		OrderModels,
+		thinking_level_labels,
 		type EngineChoice,
 		type HarnessId,
 		type ModelChoice,
 		type PermissionOption,
 	} from "$lib/engine/model-selection";
 	import { Popover, PopoverContent, PopoverTrigger } from "$lib/components/ui/popover";
+	import { Select, SelectContent, SelectItem, SelectTrigger } from "$lib/components/ui/select";
 	import { Tabs } from "$lib/components/ui/tabs";
+	import DropdownHoverSurface from "../dropdown-hover-surface.sv";
 	import EngineSection from "../model-selector/engine-section.sv";
+	import ModelList from "../model-selector/model-list.sv";
 	import {
 		ContextForDefaults,
-		ModelsForEngine,
 		PermissionsForSelection,
 		ThinkingForDefaults,
 	} from "../model-selector/presentation";
 	import ShaderGlassSurface from "../shader-glass-surface.sv";
 
 	const banner = yield* BannerService;
+	const FollowHighlight = yield* MakeFollowHighlight;
 	const defaults_controller = yield* SessionDefaultsController;
 	const initial = yield* defaults_controller.Refresh.pipe(
 		Effect.catch((error) =>
@@ -99,7 +105,33 @@
 		engines.find((engine) => engine.id === active_engine) ??
 			engines[0] ?? { icon: Tool, id: "codex", monochrome: true, name: "Unavailable" },
 	);
-	const active_models = $derived(ModelsForEngine(models, active_engine));
+	/**
+	 * Forge owns the starred set and both pickers read it from the same snapshot,
+	 * so a model starred in the composer opens starred here and in the same
+	 * order.
+	 */
+	const favorite_ids = $derived(defaults_state.favorite_ids);
+	const active_models = $derived(OrderModels(models, active_engine, favorite_ids));
+
+	const RequestFavorite = (model_id: string, favorite: boolean) =>
+		Effect.gen(function* () {
+			if (!forge_available) return;
+			yield* defaults_controller.SetFavorite(model_id, favorite).pipe(
+				Effect.catch((error) =>
+					Effect.gen(function* () {
+						yield* banner.error("Could not update model favorite", {
+							description: error.message,
+						});
+					}),
+				),
+			);
+		});
+
+	const PreviewModelId = (model_id: string) =>
+		Effect.gen(function* () {
+			previewed_model_id = model_id;
+			previewed_mode = undefined;
+		});
 	const previewed_model = $derived(
 		models.find((model) => model.id === previewed_model_id) ?? compaction_model,
 	);
@@ -204,47 +236,76 @@
 			previewed_mode = undefined;
 		});
 
+	/**
+	 * The highlight is a single pill that travels between rows, so every row
+	 * hands the pointer to it before doing its own work — the same contract the
+	 * composer's model list uses.
+	 */
+	const MoveHover = (move_hover: (event: Event) => void, event: Event) =>
+		Effect.gen(function* () {
+			move_hover(event);
+		});
+
+	const HoverMode = (
+		mode: "curated" | "inherited",
+		move_hover: (event: Event) => void,
+		event: Event,
+	) =>
+		Effect.gen(function* () {
+			move_hover(event);
+			yield* PreviewMode(mode);
+		});
+
 	const PreviewMode = (mode: "curated" | "inherited") =>
 		Effect.gen(function* () {
 			previewed_mode = mode;
 			previewed_model_id = undefined;
 		});
 
-	const UpdateThinking = (event: Event) =>
+	/**
+	 * The chosen value arrives as an argument, never off the event: a SER handler
+	 * runs after its event has finished dispatching, by which time
+	 * `event.currentTarget` is null and every one of these reads returned early.
+	 */
+	const UpdateThinking = (value: string) =>
 		Effect.gen(function* () {
-			if (!(event.currentTarget instanceof HTMLSelectElement) || previewed_model === undefined) return;
+			if (previewed_model === undefined) return;
 			const capability = previewed_model.definition.capabilities.thinking;
 			if (capability.availability !== "supported") return;
-			const level = capability.options.find((option) => option.id === event.currentTarget.value)?.id;
+			const level = capability.options.find((option) => option.id === value)?.id;
 			if (level === undefined) return;
 			yield* SaveDefaults(
 				{ _tag: "Explicit", model_id: previewed_model.id },
-				{ model: {
-					model_id: previewed_model.id,
-					reasoning_effort: level === "light" ? "low" : level,
-				} },
+				{
+					model: {
+						model_id: previewed_model.id,
+						reasoning_effort: level === "light" ? "low" : level,
+					},
+				},
 			);
 		});
 
-	const UpdateContext = (event: Event) =>
+	const UpdateContext = (value: string) =>
 		Effect.gen(function* () {
-			if (!(event.currentTarget instanceof HTMLSelectElement) || previewed_model === undefined) return;
+			if (previewed_model === undefined) return;
 			const context = previewed_model.definition.capabilities.context_window;
-			const option = context?.options.find((candidate) => candidate.id === event.currentTarget.value);
+			const option = context?.options.find((candidate) => candidate.id === value);
 			if (option === undefined) return;
 			yield* SaveDefaults(
 				{ _tag: "Explicit", model_id: previewed_model.id },
-				{ model: {
-					...(option.native_suffix === "" ? {} : { context_window: option.native_suffix }),
-					model_id: previewed_model.id,
-				} },
+				{
+					model: {
+						...(option.native_suffix === "" ? {} : { context_window: option.native_suffix }),
+						model_id: previewed_model.id,
+					},
+				},
 			);
 		});
 
-	const UpdatePermission = (event: Event) =>
+	const UpdatePermission = (value: string) =>
 		Effect.gen(function* () {
-			if (!(event.currentTarget instanceof HTMLSelectElement) || previewed_model === undefined) return;
-			const option = previewed_permissions.find((candidate) => candidate.id === event.currentTarget.value);
+			if (previewed_model === undefined) return;
+			const option = previewed_permissions.find((candidate) => candidate.id === value);
 			if (option === undefined) return;
 			yield* SaveDefaults(
 				{ _tag: "Explicit", model_id: previewed_model.id },
@@ -263,23 +324,71 @@
 	<span aria-hidden="true" class="{size_class} shrink-0" style={barekey_mark_style}></span>
 {/snippet}
 
-{#snippet mode_row(input)}
-	<button
-		type="button"
-		disabled={!forge_available}
-		aria-current={input.active ? "true" : undefined}
-		class="flex w-full min-w-0 items-center gap-2 rounded-xl px-2.5 py-1.5 text-left text-sm focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-45"
-		onpointerenter={yield* PreviewMode(input.mode)}
-		onclick={yield* SelectSelection(
-			input.mode === "curated" ? { _tag: "Curated" } : { _tag: "Inherited" },
-		)}
+{#snippet mode_row(input, move_hover)}
+	<div
+		role="presentation"
+		class="mr-2 flex min-w-0 items-center gap-1"
+		onpointerenter={yield* HoverMode(input.mode, move_hover, event)}
+		onpointermove={yield* MoveHover(move_hover, event)}
+		onfocusin={yield* MoveHover(move_hover, event)}
 	>
-		{@render barekey_mark("size-5")}
-		<span class="flex min-w-0 flex-col">
-			<span class="truncate font-semibold text-foreground">{input.name}</span>
-			<span class="truncate text-xs text-muted-foreground">{input.lab}</span>
-		</span>
-	</button>
+		<button
+			type="button"
+			disabled={!forge_available}
+			aria-current={input.active ? "true" : undefined}
+			class="flex min-w-0 grow items-center gap-2 rounded-[calc(var(--radius-3xl)-0.5rem)] px-2.5 py-1.5 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-45"
+			onclick={yield* SelectSelection(
+				input.mode === "curated" ? { _tag: "Curated" } : { _tag: "Inherited" },
+			)}
+		>
+			{@render barekey_mark("size-5")}
+			<span class="flex min-w-0 flex-col space-y-0">
+				<span class="truncate text-sm font-semibold text-foreground">{input.name}</span>
+				<span class="truncate text-xs text-muted-foreground">{input.lab}</span>
+			</span>
+		</button>
+	</div>
+{/snippet}
+
+<!--
+	A settings control wears the same well as the composer's policy row: a
+	gradient card holding a bare trigger, opening onto glass.
+-->
+{#snippet policy_select(label, value, options, onchoose)}
+	<label class="flex min-w-0 flex-col gap-1 text-xs text-muted-foreground">
+		{label}
+		<Select type="single" {value} onValueChange={yield* onchoose(event)} disabled={!forge_available}>
+			<div
+				class="card min-w-0 rounded-md bg-linear-to-b from-surface-225 to-surface-200 dark:from-surface-800 dark:to-surface-925"
+			>
+				<SelectTrigger
+					size="sm"
+					class="h-6 w-full border-transparent bg-transparent px-2 text-xs shadow-none data-[size=sm]:h-6 dark:bg-transparent dark:hover:bg-transparent dark:hover:text-foreground"
+				>
+					<span class="truncate">
+						{options.find((option) => option.id === value)?.label ?? label}
+					</span>
+				</SelectTrigger>
+			</div>
+			<SelectContent class="rounded-2xl border-transparent bg-transparent p-0 shadow-none">
+				<ShaderGlassSurface strength="strong" class="rounded-2xl p-1">
+					<DropdownHoverSurface class="[--docs-sidebar-hover-radius:var(--radius-xl)]">
+						{#snippet children({ move_hover })}
+							{#each options as option (option.id)}
+								<SelectItem
+									value={option.id}
+									class="focus:bg-transparent! data-highlighted:bg-transparent! data-highlighted:text-foreground!"
+									{@attach FollowHighlight(move_hover)}
+								>
+									{option.label}
+								</SelectItem>
+							{/each}
+						{/snippet}
+					</DropdownHoverSurface>
+				</ShaderGlassSurface>
+			</SelectContent>
+		</Select>
+	</label>
 {/snippet}
 
 {#snippet compaction_model_picker()}
@@ -302,48 +411,105 @@
 				<Tabs bind:value={active_engine} class="min-h-0 gap-2 p-2">
 					<EngineSection {active_engine} disabled={!forge_available} engine_locked={false} {engines} selected_engine={active_engine_choice} />
 					<div class="flex min-w-0 gap-2">
-						<div class="docs-scroll-fade h-56 min-w-0 grow overflow-y-auto rounded-xl [scrollbar-width:thin]">
-							<div class="flex flex-col gap-0.5 p-1.5">
-								{@render mode_row({ active: !inherited && compaction_model === undefined, lab: "Artisan", mode: "curated", name: "Curated" })}
-								{@render mode_row({ active: inherited, lab: "Thread model", mode: "inherited", name: "Inherited" })}
-								{#each active_models as model (model.id)}
-									<button type="button" disabled={!forge_available || model.definition.disabled !== undefined} aria-current={model.id === compaction_model?.id ? "true" : undefined} class="flex min-w-0 items-center gap-2 rounded-xl px-2.5 py-1.5 text-left focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-45" onpointerenter={yield* PreviewModel(model)} onclick={yield* SelectModel(model)}>
-										<span class="min-w-0 truncate text-sm font-semibold text-foreground">{model.name}</span>
-										<span class="ml-auto shrink-0 text-xs text-muted-foreground">{model.lab}</span>
-									</button>
-								{/each}
-							</div>
+						<div
+							class="model-scroll docs-scroll-fade h-48 min-w-0 grow overflow-y-auto rounded-xl [scrollbar-width:thin]"
+						>
+							<ModelList
+								disabled={!forge_available}
+								{favorite_ids}
+								favorites_available={forge_available}
+								models={active_models}
+								onfavorite={RequestFavorite}
+								onpreview={PreviewModelId}
+								onselect={SelectModel}
+								selected_model_id={compaction_model?.id ?? ""}
+							>
+								{#snippet leading({ move_hover })}
+									{@render mode_row(
+										{
+											active: !inherited && compaction_model === undefined,
+											lab: "Artisan",
+											mode: "curated",
+											name: "Curated",
+										},
+										move_hover,
+									)}
+									{@render mode_row(
+										{ active: inherited, lab: "Thread model", mode: "inherited", name: "Inherited" },
+										move_hover,
+									)}
+								{/snippet}
+							</ModelList>
 						</div>
-						<div class="h-56 w-56 shrink-0 overflow-y-auto p-2.5">
+						<div class="h-48 w-56 shrink-0">
+							<div class="flex h-full flex-col justify-between gap-2 overflow-y-auto p-2.5">
 							{#if previewed_pane === "curated"}
-								<p class="text-xs text-muted-foreground">A curated, cost-effective model for each engine.</p>
-								{#each curated_rows as row (row.engine.id)}<p class="mt-1 text-xs text-muted-foreground">{row.engine.name} — {row.model_name}</p>{/each}
+								<div class="flex min-w-0 flex-col gap-3">
+									<span class="text-pretty text-xs text-muted-foreground">
+										A curated, cost-effective model for each engine.
+									</span>
+									<!-- Each engine wears its own mark, and the model it resolves to is the answer, so it carries the foreground. -->
+									<div class="flex min-w-0 flex-col gap-1">
+										{#each curated_rows as row (row.engine.id)}
+											{@const EngineIcon = row.engine.icon}
+											<span class="flex min-w-0 items-center gap-1.5 text-xs text-muted-foreground">
+												<EngineIcon class={EngineMarkClass(row.engine, "size-3.5")} />
+												<span class="shrink-0">{row.engine.name} —</span>
+												<span class="min-w-0 truncate text-foreground">{row.model_name}</span>
+											</span>
+										{/each}
+									</div>
+								</div>
 							{:else if previewed_pane === "inherited"}
-								<p class="text-xs text-muted-foreground">The thread's current model writes its own hand-off summary.</p>
+								<span class="text-pretty text-xs text-muted-foreground">
+									The thread's current model writes its own hand-off summary.
+								</span>
 							{:else if previewed_model !== undefined}
-								<p class="text-sm font-semibold text-foreground">{previewed_model.name}</p>
-								{#if previewed_model.definition.capabilities.thinking.availability === "supported"}
-									<label class="mt-3 block text-xs text-muted-foreground">Reasoning
-						<select class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-foreground" value={ThinkingForDefaults(defaults, previewed_model)} onchange={yield* UpdateThinking(event)}>
-											{#each previewed_model.definition.capabilities.thinking.options as option (option.id)}<option value={option.id}>{option.id}</option>{/each}
-										</select>
-									</label>
-								{/if}
-								{#if ContextForDefaults(defaults, previewed_model) !== undefined}
-									<label class="mt-3 block text-xs text-muted-foreground">Context window
-						<select class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-foreground" value={ContextForDefaults(defaults, previewed_model)?.id} onchange={yield* UpdateContext(event)}>
-											{#each previewed_model.definition.capabilities.context_window?.options ?? [] as option (option.id)}<option value={option.id}>{option.label}</option>{/each}
-										</select>
-									</label>
-								{/if}
-								{#if previewed_permissions.length > 1}
-									<label class="mt-3 block text-xs text-muted-foreground">Permission
-										<select class="mt-1 w-full rounded-md border border-input bg-background px-2 py-1 text-foreground" value={defaults.permission} onchange={yield* UpdatePermission(event)}>
-											{#each previewed_permissions as option (option.id)}<option value={option.id}>{option.label}</option>{/each}
-										</select>
-									</label>
-								{/if}
+								<div class="flex min-w-0 flex-col gap-1">
+									<span class="truncate text-sm font-semibold text-foreground">
+										{previewed_model.name}
+									</span>
+									{#if previewed_model.definition.description !== undefined}
+										<span class="text-pretty text-xs text-muted-foreground">
+											{previewed_model.definition.description}
+										</span>
+									{/if}
+								</div>
+								<div class="flex flex-col gap-1.5">
+									{#if previewed_model.definition.capabilities.thinking.availability === "supported"}
+										{@render policy_select(
+											"Reasoning",
+											ThinkingForDefaults(defaults, previewed_model) ?? "",
+											previewed_model.definition.capabilities.thinking.availability === "supported"
+												? previewed_model.definition.capabilities.thinking.options.map((option) => ({
+														id: option.id,
+														label: thinking_level_labels[option.id] ?? option.id,
+													}))
+												: [],
+											UpdateThinking,
+										)}
+									{/if}
+									{#if ContextForDefaults(defaults, previewed_model) !== undefined}
+										{@render policy_select(
+											"Context window",
+											ContextForDefaults(defaults, previewed_model)?.id ?? "",
+											(previewed_model.definition.capabilities.context_window?.options ?? []).map(
+												(option) => ({ id: option.id, label: option.label }),
+											),
+											UpdateContext,
+										)}
+									{/if}
+									{#if previewed_permissions.length > 1}
+										{@render policy_select(
+											"Permission",
+											defaults.permission,
+											previewed_permissions.map((option) => ({ id: option.id, label: option.label })),
+											UpdatePermission,
+										)}
+									{/if}
+								</div>
 							{/if}
+							</div>
 						</div>
 					</div>
 				</Tabs>
