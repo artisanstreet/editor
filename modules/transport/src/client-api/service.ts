@@ -42,6 +42,8 @@ import type {
 	ThreadWorkItem,
 	RuntimeCatalog,
 	HostIdentitySnapshot,
+	ThreadUsageSeries,
+	ThreadUsageSeriesQuery,
 	EngineUsageQuery,
 	EngineUsageSnapshot,
 	ProjectDiffQueryResult,
@@ -248,6 +250,13 @@ export class ArtisanClient extends Context.Service<
 		readonly GetEngineUsage: (
 			input?: EngineUsageQuery,
 		) => Effect.Effect<EngineUsageSnapshot, ArtisanClientError>;
+		/**
+		 * Reads one thread's per-turn token series for the context window it is
+		 * currently in. Cut at the last compaction rather than spanning the thread.
+		 */
+		readonly GetThreadUsageSeries: (
+			input: ThreadUsageSeriesQuery,
+		) => Effect.Effect<ThreadUsageSeries, ArtisanClientError>;
 		/** Reads repository identity for the named projects, or all of them when empty. */
 		/** Reads the defaults a new draft inherits; Forge owns them, not the browser. */
 		readonly GetSessionDefaults: Effect.Effect<SessionDefaults, ArtisanClientError>;

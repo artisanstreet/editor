@@ -39,8 +39,11 @@ import {
 	protocol_client_error,
 	type ActiveClientSession,
 	type AwaitActive,
+	RequestDelivered,
+	RequestHeld,
 	type FrontendTrace,
 	type SendCurrent,
+	type SendRequest,
 } from "./client-common";
 import type { ClientRequestCoordinator } from "./client-request-coordinator";
 import type { ClientStreamChannel } from "./client-stream-channel";
@@ -71,6 +74,7 @@ export interface ClientConnectionLifecycle {
 	readonly MakeTrace: Effect.Effect<FrontendTrace>;
 	readonly RetryConnection: Effect.Effect<void>;
 	readonly SendCurrent: SendCurrent;
+	readonly SendRequest: SendRequest;
 	readonly Start: (handlers: ClientConnectionHandlers) => Effect.Effect<void, never, Scope.Scope>;
 }
 
@@ -137,15 +141,19 @@ export const make_client_connection_lifecycle = (
 				),
 			);
 
-		const send_current = (envelope: InboundControlEnvelope) =>
+		const send_request = (envelope: InboundControlEnvelope) =>
 			Ref.get(state).pipe(
 				Effect.flatMap((current) =>
 					Option.match(current.active, {
-						onNone: () => Effect.void,
-						onSome: (active) => send_active(active, envelope),
+						onNone: () => Effect.succeed(RequestHeld),
+						onSome: (active) =>
+							send_active(active, envelope).pipe(Effect.as(RequestDelivered)),
 					}),
 				),
 			);
+
+		const send_current = (envelope: InboundControlEnvelope) =>
+			send_request(envelope).pipe(Effect.asVoid);
 
 		const await_active = Effect.gen(function* () {
 			while (true) {
@@ -763,6 +771,7 @@ export const make_client_connection_lifecycle = (
 			MakeTrace: make_trace,
 			RetryConnection: retry_connection,
 			SendCurrent: send_current,
+			SendRequest: send_request,
 			Start: start,
 		} satisfies ClientConnectionLifecycle;
 	});

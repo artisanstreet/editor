@@ -28,6 +28,21 @@ export type SendCurrent = (
 	envelope: InboundControlEnvelope,
 ) => Effect.Effect<void, ArtisanClientError>;
 
+/**
+ * Whether a live session actually carried an envelope onto the wire. A held
+ * envelope waits for the next session to resend it, so nothing on the backend
+ * has seen the request it describes and no result will ever correlate to it.
+ */
+export type RequestDelivery = { readonly _tag: "Delivered" } | { readonly _tag: "Held" };
+
+export const RequestDelivered: RequestDelivery = { _tag: "Delivered" };
+export const RequestHeld: RequestDelivery = { _tag: "Held" };
+
+/** Sends one already-built envelope and reports whether a session carried it. */
+export type SendRequest = (
+	envelope: InboundControlEnvelope,
+) => Effect.Effect<RequestDelivery, ArtisanClientError>;
+
 /** Waits for the current negotiated session without exposing connection state. */
 export type AwaitActive = Effect.Effect<ActiveClientSession, ArtisanClientError>;
 

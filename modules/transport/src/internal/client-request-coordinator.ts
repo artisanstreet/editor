@@ -10,13 +10,22 @@ import type { ArtisanClientError } from "../client-api/service";
 import {
 	client_error,
 	protocol_client_error,
+	RequestDelivered,
 	type PendingRequestEnvelope,
 	type PendingResultEnvelope,
-	type SendCurrent,
+	type RequestDelivery,
+	type SendRequest,
 } from "./client-common";
 
 interface PendingRequest {
 	readonly deferred: Deferred.Deferred<PendingResultEnvelope, ArtisanClientError>;
+	/**
+	 * Whether a session may already hold this envelope, and so whether the
+	 * backend still owes an answer to it. It starts pessimistic so a caller
+	 * interrupted mid-flight never forgets a correlation the wire has, and is
+	 * corrected whenever a send reports which of the two actually happened.
+	 */
+	readonly delivery: RequestDelivery;
 	readonly envelope: PendingRequestEnvelope;
 	readonly accepts: (envelope: PendingResultEnvelope) => boolean;
 }
@@ -68,7 +77,7 @@ export interface ClientRequestCoordinator {
 /** Builds the exact-envelope retry and correlation coordinator. */
 export const make_client_request_coordinator = (
 	max_pending_requests: number,
-	send_current: SendCurrent,
+	send_request: SendRequest,
 ) =>
 	Effect.gen(function* () {
 		const state = yield* Ref.make<RequestState>({
@@ -110,9 +119,41 @@ export const make_client_request_coordinator = (
 					},
 				];
 			});
-		const unregister_failed_send = (request: PendingRequest) =>
+
+		/**
+		 * The registration this caller still owns, if it owns one. A request
+		 * already resolved, rejected, parked, or disposed has handed its slot
+		 * back, so a late interrupt must neither evict whatever holds it now nor
+		 * resurrect a correlation that has already been accounted for.
+		 */
+		const held_by = (current: RequestState, request: PendingRequest) => {
+			const found = current.pending.get(request.envelope.message_id);
+
+			return found?.deferred === request.deferred ? found : undefined;
+		};
+
+		/** Records what a send turned out to be, for this caller's registration only. */
+		const record_delivery = (request: PendingRequest, delivery: RequestDelivery) =>
 			Ref.update(state, (current) => {
-				if (current.pending.get(request.envelope.message_id) !== request) {
+				const found = held_by(current, request);
+
+				if (found === undefined) {
+					return current;
+				}
+
+				return {
+					...current,
+					pending: new Map(current.pending).set(request.envelope.message_id, {
+						...found,
+						delivery,
+					}),
+				};
+			});
+
+		/** Drops a request nothing will answer, leaving its id free to be reused. */
+		const forget = (request: PendingRequest) =>
+			Ref.update(state, (current) => {
+				if (held_by(current, request) === undefined) {
 					return current;
 				}
 
@@ -123,6 +164,37 @@ export const make_client_request_coordinator = (
 				return { ...current, pending };
 			});
 
+		/**
+		 * Releases the slot a caller claimed once that caller stops waiting for
+		 * its result. A delivered envelope leaves its correlation behind so the
+		 * answer the backend still owes is discarded rather than mistaken for a
+		 * later caller's; an envelope no session ever carried is forgotten
+		 * outright, because nothing will ever answer it and remembering it would
+		 * spend capacity guarding against a result that cannot arrive.
+		 */
+		const abandon = (request: PendingRequest) =>
+			Ref.update(state, (current) => {
+				const found = held_by(current, request);
+
+				if (found === undefined) {
+					return current;
+				}
+
+				const pending = new Map(current.pending);
+
+				pending.delete(request.envelope.message_id);
+
+				if (found.delivery._tag === "Held") {
+					return { ...current, pending };
+				}
+
+				const ignored_correlations = new Set(current.ignored_correlations);
+
+				ignored_correlations.add(request.envelope.message_id);
+
+				return { ...current, ignored_correlations, pending };
+			});
+
 		const request = <Request extends PendingRequestEnvelope>(envelope: Request) =>
 			Effect.gen(function* () {
 				const deferred = yield* Deferred.make<PendingResultEnvelope, ArtisanClientError>();
@@ -130,6 +202,7 @@ export const make_client_request_coordinator = (
 				const pending = {
 					accepts: Schema.is(rpc.successSchema),
 					deferred,
+					delivery: RequestDelivered,
 					envelope,
 				};
 				const registration = yield* register(pending);
@@ -162,28 +235,24 @@ export const make_client_request_coordinator = (
 							),
 						);
 					case "Registered":
-						yield* send_current(envelope).pipe(
-							Effect.tapError(() => unregister_failed_send(pending)),
-						);
+						/**
+						 * The send and the wait are one interruptible region: a
+						 * registration that outlives its caller unreleased is a
+						 * slot nothing can ever reclaim. A failed send is the one
+						 * exit that forgets outright — it tears its session down
+						 * with the envelope, so no answer can follow it.
+						 */
+						return (yield* send_request(envelope).pipe(
+							Effect.tapError(() => forget(pending)),
+							Effect.onInterrupt(() => abandon(pending)),
+							Effect.tap((delivery) => record_delivery(pending, delivery)),
+							Effect.andThen(
+								Deferred.await(deferred).pipe(
+									Effect.onInterrupt(() => abandon(pending)),
+								),
+							),
+						)) as ControlRpcSuccessFor<Request>;
 				}
-
-				return (yield* Deferred.await(deferred).pipe(
-					Effect.onInterrupt(() =>
-						Ref.update(state, (current) => {
-							const pending_requests = new Map(current.pending);
-							const ignored_correlations = new Set(current.ignored_correlations);
-
-							pending_requests.delete(envelope.message_id);
-							ignored_correlations.add(envelope.message_id);
-
-							return {
-								...current,
-								ignored_correlations,
-								pending: pending_requests,
-							};
-						}),
-					),
-				)) as ControlRpcSuccessFor<Request>;
 			});
 
 		const resolve = (envelope: PendingResultEnvelope) =>
@@ -284,20 +353,35 @@ export const make_client_request_coordinator = (
 			ignored_correlations: new Set<string>(),
 		}));
 
+		/**
+		 * A held request becomes an answered one here, so each resend reports
+		 * back: a caller that walks away afterwards must remember the
+		 * correlation this session finally carried for it.
+		 */
 		const retry = Ref.get(state).pipe(
 			Effect.flatMap((current) =>
 				Effect.forEach(
 					current.pending.values(),
-					(pending) => send_current(pending.envelope),
+					(pending) =>
+						send_request(pending.envelope).pipe(
+							Effect.flatMap((delivery) => record_delivery(pending, delivery)),
+						),
 					{ discard: true },
 				),
 			),
 		);
 
+		/**
+		 * The session that owed those answers is gone and no later one will
+		 * deliver them, so the correlations abandoned under it are dropped
+		 * alongside the requests still waiting: holding either would spend
+		 * capacity guarding against results that can no longer arrive.
+		 */
 		const park = (error: ArtisanClientError) =>
 			Effect.gen(function* () {
 				const current = yield* Ref.getAndUpdate(state, (value) => ({
 					...value,
+					ignored_correlations: new Set<string>(),
 					parked: error,
 					pending: new Map<string, PendingRequest>(),
 				}));

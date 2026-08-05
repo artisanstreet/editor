@@ -73,7 +73,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				});
 			const requests = yield* make_client_request_coordinator(
 				options.max_pending_requests,
-				connection.SendCurrent,
+				connection.SendRequest,
 			);
 			const subscription_layer = Layer.mergeAll(
 				Layer.succeed(SubscriptionOptions, {
@@ -184,6 +184,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				create_project_directory,
 				create_thread,
 				detach_project,
+				get_thread_usage_series,
 				get_engine_usage,
 				get_host_identity,
 				get_project_diffs,
@@ -280,6 +281,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				ListProjects: list_projects,
 				GetRuntimeCatalog: get_runtime_catalog,
 				GetHostIdentity: get_host_identity,
+				GetThreadUsageSeries: get_thread_usage_series,
 				GetEngineUsage: get_engine_usage,
 				GetProjectDiffs: get_project_diffs,
 				GetProjectRepositories: get_project_repositories,

@@ -4,6 +4,8 @@ import {
 	type ArtisanApprovalListQueryEnvelope,
 	type ArtisanToolInvocationListQueryEnvelope,
 	type ArtisanToolRegistryListQueryEnvelope,
+	type ThreadUsageSeriesQuery,
+	type ThreadUsageSeriesQueryEnvelope,
 	type EngineUsageQuery,
 	type EngineUsageQueryEnvelope,
 	type HostIdentityQueryEnvelope,
@@ -161,6 +163,18 @@ export const MakeQueryApi = Effect.gen(function* () {
 				? result.payload
 				: yield* Effect.die("engine usage response narrowed incorrectly");
 		});
+	const get_thread_usage_series = (input: ThreadUsageSeriesQuery) =>
+		Effect.gen(function* () {
+			const trace = yield* context.MakeTrace;
+			const result = yield* context.Request({
+				...trace,
+				kind: "thread.usage.series.query",
+				payload: input,
+			} satisfies ThreadUsageSeriesQueryEnvelope);
+			return result.kind === "thread.usage.series.query.result"
+				? result.payload
+				: yield* Effect.die("thread usage series response narrowed incorrectly");
+		});
 	const detach_project = (project_id: string) =>
 		Effect.gen(function* () {
 			const trace = yield* context.MakeTrace;
@@ -214,6 +228,7 @@ export const MakeQueryApi = Effect.gen(function* () {
 		create_project_directory,
 		create_thread,
 		detach_project,
+		get_thread_usage_series,
 		get_engine_usage,
 		get_host_identity,
 		get_project_diffs,
