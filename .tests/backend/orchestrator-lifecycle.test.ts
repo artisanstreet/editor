@@ -311,6 +311,7 @@ describe("agent orchestrator lifecycle supervision", () => {
 			expect(failed_snapshot.snapshot.turns.at(-1)?.lifecycle).toBe("failed");
 			expect(failed_snapshot.snapshot.items).toContainEqual(
 				expect.objectContaining({
+					severity: "error",
 					summary: "Engine startup failed before the native session became ready.",
 					type: "native_event",
 				}),

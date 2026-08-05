@@ -182,13 +182,14 @@ describe("conversation trace", () => {
 		expect(chains).toEqual([["activity_1"], ["activity_2", "activity_3"]]);
 	});
 
-	it("groups every diagnostic behind one disclosure when enabled", () => {
+	it("groups diagnostics by severity when enabled, loudest disclosure first", () => {
 		const segments = make_conversation_trace_segments(
 			[
+				/** A row persisted before severities existed decodes as quiet info. */
 				item({
 					...base,
-					id: "diagnostic_1",
-					summary: "Provider warning",
+					id: "diagnostic_legacy",
+					summary: "Usage update",
 					type: "native_event",
 				}),
 				item({
@@ -202,9 +203,18 @@ describe("conversation trace", () => {
 				}),
 				item({
 					...base,
-					id: "diagnostic_2",
+					id: "diagnostic_warning",
 					ordinal: 3,
-					summary: "Usage update",
+					severity: "warning",
+					summary: "Provider warning",
+					type: "native_event",
+				}),
+				item({
+					...base,
+					id: "diagnostic_error",
+					ordinal: 4,
+					severity: "error",
+					summary: "Provider failure",
 					type: "native_event",
 				}),
 			],
@@ -213,10 +223,21 @@ describe("conversation trace", () => {
 
 		expect(segments.filter((segment) => segment.type === "diagnostic_group")).toEqual([
 			expect.objectContaining({
-				items: [
-					expect.objectContaining({ id: "diagnostic_1" }),
-					expect.objectContaining({ id: "diagnostic_2" }),
-				],
+				id: "diagnostics:error",
+				items: [expect.objectContaining({ id: "diagnostic_error" })],
+				severity: "error",
+				type: "diagnostic_group",
+			}),
+			expect.objectContaining({
+				id: "diagnostics:warning",
+				items: [expect.objectContaining({ id: "diagnostic_warning" })],
+				severity: "warning",
+				type: "diagnostic_group",
+			}),
+			expect.objectContaining({
+				id: "diagnostics:info",
+				items: [expect.objectContaining({ id: "diagnostic_legacy" })],
+				severity: "info",
 				type: "diagnostic_group",
 			}),
 		]);
@@ -226,6 +247,7 @@ describe("conversation trace", () => {
 		const failure_diagnostic = item({
 			...base,
 			id: "diagnostic_failure",
+			severity: "error",
 			summary:
 				"Engine startup failed before the native session became ready (EngineConfigurationError).",
 			type: "native_event",
@@ -238,6 +260,7 @@ describe("conversation trace", () => {
 		expect(surfaced).toEqual([
 			expect.objectContaining({
 				items: [expect.objectContaining({ id: "diagnostic_failure" })],
+				severity: "error",
 				type: "diagnostic_group",
 			}),
 		]);
@@ -261,8 +284,10 @@ describe("conversation trace", () => {
 		expect(work_session).toContain('is_failed ? "text-destructive" : ""');
 		expect(trace).toContain("make_conversation_trace_segments(");
 		expect(trace).toContain("$conversation_diagnostics_enabled,");
-		expect(trace).toContain(">Failure details</span>");
-		expect(trace).toContain('role={failed ? "alert" : undefined}');
-		expect(workspace).toContain('failed={block.session.status === "failed" ||');
+		expect(trace).toContain('label: "Failures",');
+		expect(trace).toContain('failed && segment.severity === "error"');
+		expect(trace).toContain('role={alerting ? "alert" : undefined}');
+		/** Cancellation is the user's own act; only failed work re-skins the trace. */
+		expect(workspace).toContain('failed={block.session.status === "failed"}');
 	});
 });

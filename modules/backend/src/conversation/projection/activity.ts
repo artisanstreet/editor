@@ -228,6 +228,15 @@ export const ApplyActivityObservation = (
 						observation.observation_id,
 					),
 					type: "native_event",
+					/**
+					 * Diagnostics keep the level the engine reported; usage reports and
+					 * native actions are quiet provenance, never something to raise.
+					 */
+					severity:
+						observation._tag === "protocol_diagnostic" ||
+						observation._tag === "process_diagnostic"
+							? observation.level
+							: "info",
 					summary:
 						observation._tag === "native_action"
 							? (optional_text(observation.detail) ??

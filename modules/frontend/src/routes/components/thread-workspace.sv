@@ -608,9 +608,9 @@
 										transition={block.transition}
 									>
 										{#snippet details()}
+											<!-- Cancellation is the user's own act, not a failure the trace must explain. -->
 											<ConversationTrace
-												failed={block.session.status === "failed" ||
-													block.session.status === "cancelled"}
+												failed={block.session.status === "failed"}
 												items={block.details}
 												work_active={block.session.ended_at === undefined && session_active}
 											/>

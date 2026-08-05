@@ -468,6 +468,20 @@ export const emulator_scripts: ReadonlyArray<EmulatorScript> = [
 				type: "native_event",
 			}),
 			item({
+				id: "diagnostics_native_warning",
+				severity: "warning",
+				summary: "Provider retried a dropped stream frame",
+				turn_id: "turn_diagnostics",
+				type: "native_event",
+			}),
+			item({
+				id: "diagnostics_native_error",
+				severity: "error",
+				summary: "Provider closed the stream before the turn settled",
+				turn_id: "turn_diagnostics",
+				type: "native_event",
+			}),
+			item({
 				id: "diagnostics_answer",
 				phase: "final",
 				text: "Continuing from the compacted context.",

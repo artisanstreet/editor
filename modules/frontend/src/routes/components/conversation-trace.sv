@@ -8,6 +8,7 @@
 	} from "@artisan/protocol";
 	import AlertTriangle from "@tabler/icons-svelte/icons/alert-triangle";
 	import Bug from "@tabler/icons-svelte/icons/bug";
+	import CircleX from "@tabler/icons-svelte/icons/circle-x";
 	import FilePencil from "@tabler/icons-svelte/icons/file-pencil";
 	import FileText from "@tabler/icons-svelte/icons/file-text";
 	import FileX from "@tabler/icons-svelte/icons/file-x";
@@ -171,6 +172,32 @@
 		Effect.gen(function* () {
 		open_groups[id] = !open_groups[id];
 		});
+
+	/**
+	 * One voice per severity tier. Failures are the only tier allowed to read as
+	 * an error: warnings carry the caution tone and quiet diagnostics stay muted,
+	 * so a wall of usage reports can never impersonate a failure again.
+	 */
+	const severity_presentation = {
+		error: {
+			head: "text-destructive hover:text-destructive",
+			icon: CircleX,
+			label: "Failures",
+			row: "text-destructive",
+		},
+		warning: {
+			head: "text-warning hover:text-warning",
+			icon: AlertTriangle,
+			label: "Warnings",
+			row: "text-warning",
+		},
+		info: {
+			head: "text-muted-foreground hover:text-foreground",
+			icon: Bug,
+			label: "Diagnostics",
+			row: "text-muted-foreground",
+		},
+	} as const;
 </script>
 
 {#if segments.length > 0}
@@ -256,26 +283,25 @@
 					</div>
 				</div>
 			{:else}
-				{@const open = open_groups[segment.id] ?? failed}
+				{@const presentation = severity_presentation[segment.severity]}
+				{@const SeverityIcon = presentation.icon}
+				{@const alerting = failed && segment.severity === "error"}
+				<!-- Only failures of a failed run open themselves; every other tier waits to be asked. -->
+				{@const open = open_groups[segment.id] ?? alerting}
 				<div
 					class="trace-acc flex flex-col"
 					data-open={open}
 					data-state={open ? "open" : "closed"}
-					role={failed ? "alert" : undefined}
+					role={alerting ? "alert" : undefined}
 				>
 					<button
 						type="button"
-						class={`trace-acc-head flex w-fit cursor-pointer items-center gap-2 py-0.5 text-base transition-colors duration-150 motion-reduce:transition-none ${failed ? "text-destructive hover:text-destructive" : "text-muted-foreground hover:text-foreground"}`}
+						class={`trace-acc-head flex w-fit cursor-pointer items-center gap-2 py-0.5 text-base transition-colors duration-150 motion-reduce:transition-none ${presentation.head}`}
 						aria-expanded={open}
 						onclick={yield* ToggleGroup(segment.id)}
 					>
-						{#if failed}
-							<AlertTriangle class="size-4" aria-hidden="true" />
-							<span>Failure details</span>
-						{:else}
-							<Bug class="size-4" aria-hidden="true" />
-							<span>Diagnostics</span>
-						{/if}
+						<SeverityIcon class="size-4" aria-hidden="true" />
+						<span>{presentation.label}</span>
 						<span class="trace-acc-chevron flex">
 							<ChevronRight class="size-3.5" aria-hidden="true" />
 						</span>
@@ -285,13 +311,9 @@
 						<div class="trace-acc-panel-inner flex flex-col gap-1 pt-1">
 							{#each segment.items as diagnostic (diagnostic.id)}
 								<div
-									class={`flex min-w-0 items-start gap-2 py-0.5 text-sm ${failed ? "text-destructive" : "text-muted-foreground"}`}
+									class={`flex min-w-0 items-start gap-2 py-0.5 text-sm ${presentation.row}`}
 								>
-									{#if failed}
-										<AlertTriangle class="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-									{:else}
-										<Bug class="mt-0.5 size-4 shrink-0" aria-hidden="true" />
-									{/if}
+									<SeverityIcon class="mt-0.5 size-4 shrink-0" aria-hidden="true" />
 									<span class="min-w-0 break-words">{diagnostic.summary}</span>
 								</div>
 							{/each}

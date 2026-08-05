@@ -2,6 +2,14 @@ import type { ConversationItem } from "@artisan/protocol";
 
 export type ConversationActivityItem = Extract<ConversationItem, { type: "activity" }>;
 export type ConversationDiagnosticItem = Extract<ConversationItem, { type: "native_event" }>;
+export type ConversationDiagnosticSeverity = ConversationDiagnosticItem["severity"];
+
+/** Loudest first, so a reader meets what went wrong before what merely happened. */
+export const conversation_diagnostic_severities: ReadonlyArray<ConversationDiagnosticSeverity> = [
+	"error",
+	"warning",
+	"info",
+];
 
 export type ConversationTraceSegment =
 	| {
@@ -12,6 +20,7 @@ export type ConversationTraceSegment =
 	| {
 			readonly id: string;
 			readonly items: ReadonlyArray<ConversationDiagnosticItem>;
+			readonly severity: ConversationDiagnosticSeverity;
 			readonly type: "diagnostic_group";
 	  }
 	| {
@@ -51,7 +60,8 @@ const item_renders_nothing = (item: ConversationItem): boolean =>
 
 /**
  * Builds one deterministic work trace. Diagnostics never decide whether reasoning
- * is visible and collapse into one disclosure at their first observed position.
+ * is visible and collapse into one disclosure per severity — failures, then
+ * warnings, then quiet diagnostics — at their first observed position.
  *
  * `failure_visible` overrides the diagnostics preference: when the surrounding
  * work failed, its diagnostics are the explanation and must never be silenced
@@ -101,11 +111,18 @@ export const make_conversation_trace_segments = (
 	for (const item of items) {
 		if (item.type === "native_event") {
 			if (diagnostics_visible && !diagnostics_inserted) {
-				segments.push({
-					id: `diagnostics:${item.id}`,
-					items: diagnostics,
-					type: "diagnostic_group",
-				});
+				for (const severity of conversation_diagnostic_severities) {
+					const grouped = diagnostics.filter(
+						(diagnostic) => diagnostic.severity === severity,
+					);
+					if (grouped.length === 0) continue;
+					segments.push({
+						id: `diagnostics:${severity}`,
+						items: grouped,
+						severity,
+						type: "diagnostic_group",
+					});
+				}
 				diagnostics_inserted = true;
 			}
 			continue;

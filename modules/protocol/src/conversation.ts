@@ -244,6 +244,19 @@ export const ConversationItem = Schema.Union([
 	}),
 	Schema.Struct({
 		...ConversationItemFields,
+		/**
+		 * How loudly the renderer may present the event: an error is a failure the
+		 * reader must see, a warning is worth noticing, and info is quiet
+		 * provenance such as usage reports.
+		 *
+		 * Defaulted on decode rather than required: rows written before this field
+		 * existed carry no severity, and the only honest fallback for an unknown
+		 * row is the quiet tier.
+		 */
+		severity: Schema.Literals(["error", "warning", "info"]).pipe(
+			Schema.optional,
+			Schema.withDecodingDefault(Effect.succeed("info")),
+		),
 		summary: ConversationSafeText,
 		type: Schema.Literal("native_event"),
 	}),

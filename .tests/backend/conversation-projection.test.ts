@@ -943,10 +943,10 @@ describe("conversation projection", () => {
 			);
 			expect(
 				native_events.find((item) => item.id === "native:observation_native_detail"),
-			).toMatchObject({ summary: "Provider quota narrowed to safe mode" });
+			).toMatchObject({ severity: "info", summary: "Provider quota narrowed to safe mode" });
 			expect(
 				native_events.find((item) => item.id === "native:observation_native_no_detail"),
-			).toMatchObject({ summary: "claude_event" });
+			).toMatchObject({ severity: "info", summary: "claude_event" });
 			const overlong_item = native_events.find(
 				(item) => item.id === "native:observation_native_overlong",
 			);

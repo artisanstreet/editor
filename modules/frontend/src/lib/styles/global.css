@@ -216,6 +216,7 @@
 	--color-input: var(--input);
 	--color-border: var(--border);
 	--color-destructive: var(--destructive);
+	--color-warning: var(--banner-warning);
 	--color-favorite: var(--favorite);
 	--color-accent-foreground: var(--accent-foreground);
 	--color-accent: var(--accent);
