@@ -88,16 +88,24 @@
 	a pointer anywhere in the band the list occupies reveals every thread, and
 	leaving lets it fade away. Panel reveal (transitions.dev) on the X axis
 	carries the fade — slide, opacity, and cross-blur both ways.
+
+	The band is the margin, not a fixed width: the transcript column is a
+	centered 48rem, so half of what remains is all the space that truly exists,
+	and a wider band would paint rows over the thread itself. It may borrow
+	1rem of the column's own inner padding and never grows past its old 20rem.
+	The band is a container so the paddings and the timestamp can answer to the
+	room it actually got rather than to the window.
 -->
 <div
 	bind:this={zone_element}
-	class="pointer-events-none absolute inset-y-0 left-0 z-10 hidden w-80 xl:block"
+	class="@container pointer-events-none absolute inset-y-0 left-0 z-10 hidden w-[clamp(0rem,calc((100%_-_48rem)/2_+_1rem),20rem)] xl:block"
 	role="presentation"
 	onfocusin={yield* Reveal()}
 	onfocusout={yield* Conceal()}
 >
+	<!-- Below 9rem of band a row is only its mark; nothing legible is lost by not revealing at all. -->
 	<div
-		class="t-panel-slide-x absolute inset-0 flex flex-col justify-center py-8 pl-12 pr-2"
+		class="t-panel-slide-x absolute inset-0 hidden flex-col justify-center py-8 pr-2 pl-[clamp(0.75rem,15cqw,3rem)] @min-[9rem]:flex"
 		style="--panel-translate-x: -16px"
 		data-open={open}
 		aria-label="All threads"
@@ -118,8 +126,9 @@
 						<span class="flex min-w-0 items-center gap-2 py-2.5 pr-2">
 							<!-- The rail names the same thing the list does: what the thread runs on. -->
 							<ThreadMark class={EngineMarkClass(thread_mark, "size-4 shrink-0")} />
-							<span class="min-w-0 flex-1 truncate">{thread.title}</span>
-							<span class="whitespace-nowrap text-xs text-muted-foreground">
+							<!-- A title that meets its edge blanks out through a mask, the transcript-fade treatment, instead of hitting an ellipsis. -->
+							<span class="min-w-0 flex-1 overflow-hidden whitespace-nowrap mask-r-from-85%">{thread.title}</span>
+							<span class="whitespace-nowrap text-xs text-muted-foreground @max-[13rem]:hidden">
 								{FormatRecentThreadTime(thread.last_activity_at, now_ms)}
 							</span>
 						</span>
