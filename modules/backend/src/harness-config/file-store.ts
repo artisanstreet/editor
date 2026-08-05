@@ -28,32 +28,37 @@ import {
 } from "./private-file-permissions";
 
 /** Reports a failed config-file read. */
-export class ModelBehaviourConfigFileReadError extends Data.TaggedError(
-	"ModelBehaviourConfigFileReadError",
-)<{ readonly cause: unknown; readonly path: string }> {}
+export class ConfigFileReadError extends Data.TaggedError("ConfigFileReadError")<{
+	readonly cause: unknown;
+	readonly path: string;
+}> {}
 
 /** Reports a failed deterministic backup operation. */
-export class ModelBehaviourConfigFileBackupError extends Data.TaggedError(
-	"ModelBehaviourConfigFileBackupError",
-)<{ readonly cause: unknown; readonly path: string }> {}
+export class ConfigFileBackupError extends Data.TaggedError("ConfigFileBackupError")<{
+	readonly cause: unknown;
+	readonly path: string;
+}> {}
 
 /** Reports a failed conditional publication. */
-export class ModelBehaviourConfigFileReplaceError extends Data.TaggedError(
-	"ModelBehaviourConfigFileReplaceError",
-)<{ readonly cause: unknown; readonly path: string }> {}
+export class ConfigFileReplaceError extends Data.TaggedError("ConfigFileReplaceError")<{
+	readonly cause: unknown;
+	readonly path: string;
+}> {}
 
 /** Reports a failed restoration after publication failure. */
-export class ModelBehaviourConfigFileRestoreError extends Data.TaggedError(
-	"ModelBehaviourConfigFileRestoreError",
-)<{ readonly cause: unknown; readonly path: string }> {}
+export class ConfigFileRestoreError extends Data.TaggedError("ConfigFileRestoreError")<{
+	readonly cause: unknown;
+	readonly path: string;
+}> {}
 
 /** Reports a failed target-file write. */
-export class ModelBehaviourConfigFileWriteError extends Data.TaggedError(
-	"ModelBehaviourConfigFileWriteError",
-)<{ readonly cause: unknown; readonly path: string }> {}
+export class ConfigFileWriteError extends Data.TaggedError("ConfigFileWriteError")<{
+	readonly cause: unknown;
+	readonly path: string;
+}> {}
 
 /** Describes the exact bytes currently stored in one config file. */
-export interface ModelBehaviourConfigFileSnapshot {
+export interface ConfigFileSnapshot {
 	readonly content: string;
 	readonly content_hash: string;
 	readonly modified_at: string;
@@ -61,7 +66,7 @@ export interface ModelBehaviourConfigFileSnapshot {
 }
 
 /** Supplies the inputs for a create-if-absent or conditional replacement. */
-export interface ModelBehaviourConfigFileReplaceOptions {
+export interface ConfigFileReplaceOptions {
 	readonly backups_directory: string;
 	readonly backup_name: string;
 	readonly content: string;
@@ -70,8 +75,8 @@ export interface ModelBehaviourConfigFileReplaceOptions {
 }
 
 /** Describes a successful or rejected conditional config-file publication. */
-export type ModelBehaviourConfigFileReplaceResult =
-	| ({ readonly _tag: "Written" } & ModelBehaviourConfigFileSnapshot & {
+export type ConfigFileReplaceResult =
+	| ({ readonly _tag: "Written" } & ConfigFileSnapshot & {
 				readonly backup_path?: string;
 			})
 	| {
@@ -84,7 +89,7 @@ export type ModelBehaviourConfigFileReplaceResult =
 	  };
 
 /** Provides deterministic publication-failure points for focused tests. */
-export interface ModelBehaviourConfigFileHooks {
+export interface ConfigFileHooks {
 	readonly after_claim?: (path: string) => Promise<void>;
 	readonly after_private_truncate?: (path: string) => Promise<void>;
 	readonly before_backup?: (path: string) => Promise<void>;
@@ -96,26 +101,23 @@ export interface ModelBehaviourConfigFileHooks {
 }
 
 /** Provides ephemeral, byte-exact config-file reconciliation operations. */
-export class ModelBehaviourConfigFiles extends Context.Service<
-	ModelBehaviourConfigFiles,
+export class ConfigFileStore extends Context.Service<
+	ConfigFileStore,
 	{
 		readonly Read: (
 			path: string,
-		) => Effect.Effect<
-			Option.Option<ModelBehaviourConfigFileSnapshot>,
-			ModelBehaviourConfigFileReadError
-		>;
+		) => Effect.Effect<Option.Option<ConfigFileSnapshot>, ConfigFileReadError>;
 		readonly ReplaceAtomic: (
-			options: ModelBehaviourConfigFileReplaceOptions,
+			options: ConfigFileReplaceOptions,
 		) => Effect.Effect<
-			ModelBehaviourConfigFileReplaceResult,
-			| ModelBehaviourConfigFileBackupError
-			| ModelBehaviourConfigFileReplaceError
-			| ModelBehaviourConfigFileRestoreError
-			| ModelBehaviourConfigFileWriteError
+			ConfigFileReplaceResult,
+			| ConfigFileBackupError
+			| ConfigFileReplaceError
+			| ConfigFileRestoreError
+			| ConfigFileWriteError
 		>;
 	}
->()("Artisan/ModelBehaviourConfigFiles") {}
+>()("Artisan/HarnessConfigFileStore") {}
 
 type FileIdentity = PrivateFileIdentity;
 
@@ -123,12 +125,12 @@ type PrivateWriteResult =
 	| { readonly _tag: "Occupied" }
 	| {
 			readonly _tag: "WriteFailed";
-			readonly cause: ModelBehaviourConfigFileWriteError;
+			readonly cause: ConfigFileWriteError;
 			readonly identity: FileIdentity;
 	  }
 	| { readonly _tag: "Written"; readonly identity: FileIdentity };
 
-interface InternalSnapshot extends ModelBehaviourConfigFileSnapshot {
+interface InternalSnapshot extends ConfigFileSnapshot {
 	readonly bytes: Uint8Array;
 	readonly identity: FileIdentity;
 }
@@ -206,7 +208,7 @@ function ReadSnapshot(file_system: FileSystem.FileSystem, path: string) {
 		Effect.catch((cause) =>
 			is_platform_reason(cause, "NotFound")
 				? Effect.succeed(undefined)
-				: Effect.fail(new ModelBehaviourConfigFileReadError({ cause, path })),
+				: Effect.fail(new ConfigFileReadError({ cause, path })),
 		),
 	);
 }
@@ -262,7 +264,7 @@ function WritePrivateExclusive(
 		if (Result.isFailure(written)) {
 			return {
 				_tag: "WriteFailed",
-				cause: new ModelBehaviourConfigFileWriteError({ cause: written.failure, path }),
+				cause: new ConfigFileWriteError({ cause: written.failure, path }),
 				identity: created.value,
 			} satisfies PrivateWriteResult;
 		}
@@ -270,7 +272,7 @@ function WritePrivateExclusive(
 		return written.success
 			? ({ _tag: "Written", identity: created.value } satisfies PrivateWriteResult)
 			: ({ _tag: "Occupied" } satisfies PrivateWriteResult);
-	}).pipe(Effect.mapError((cause) => new ModelBehaviourConfigFileWriteError({ cause, path })));
+	}).pipe(Effect.mapError((cause) => new ConfigFileWriteError({ cause, path })));
 }
 
 function WritePermissionsSnapshot(
@@ -283,11 +285,11 @@ function WritePermissionsSnapshot(
 
 	return Effect.gen(function* () {
 		const identity = yield* WritePrivateExclusive(file_system, permissions, path, bytes).pipe(
-			Effect.mapError((cause) => new ModelBehaviourConfigFileBackupError({ cause, path })),
+			Effect.mapError((cause) => new ConfigFileBackupError({ cause, path })),
 		);
 
 		if (identity._tag !== "Written") {
-			return yield* new ModelBehaviourConfigFileBackupError({
+			return yield* new ConfigFileBackupError({
 				cause:
 					identity._tag === "WriteFailed"
 						? identity.cause
@@ -310,7 +312,7 @@ function ReadPermissionsSnapshot(file_system: FileSystem.FileSystem, path: strin
 				? new PosixPrivateFilePermissionsSnapshot({ mode: snapshot.mode })
 				: new WindowsPrivateFilePermissionsSnapshot({ sddl: snapshot.sddl }),
 		),
-		Effect.mapError((cause) => new ModelBehaviourConfigFileBackupError({ cause, path })),
+		Effect.mapError((cause) => new ConfigFileBackupError({ cause, path })),
 	);
 }
 
@@ -330,14 +332,10 @@ function RestoreOriginal(
 
 		const restored = yield* permissions
 			.RestoreOwned(target, backup.identity, permissions_snapshot)
-			.pipe(
-				Effect.mapError(
-					(cause) => new ModelBehaviourConfigFileRestoreError({ cause, path: target }),
-				),
-			);
+			.pipe(Effect.mapError((cause) => new ConfigFileRestoreError({ cause, path: target })));
 
 		if (!restored) {
-			return yield* new ModelBehaviourConfigFileRestoreError({
+			return yield* new ConfigFileRestoreError({
 				cause: new Error("The restored target changed before permissions were applied"),
 				path: target,
 			});
@@ -362,7 +360,7 @@ function EraseOwned(file_system: FileSystem.FileSystem, path: string, identity: 
 
 			return true;
 		}),
-	).pipe(Effect.mapError((cause) => new ModelBehaviourConfigFileRestoreError({ cause, path })));
+	).pipe(Effect.mapError((cause) => new ConfigFileRestoreError({ cause, path })));
 }
 
 function OverwriteOwned(
@@ -386,14 +384,14 @@ function OverwriteOwned(
 
 			return true;
 		}),
-	).pipe(Effect.mapError((cause) => new ModelBehaviourConfigFileRestoreError({ cause, path })));
+	).pipe(Effect.mapError((cause) => new ConfigFileRestoreError({ cause, path })));
 }
 
 function RestrictBackupOrRestore(input: {
 	readonly backup: InternalSnapshot;
 	readonly backup_path: string;
 	readonly file_system: FileSystem.FileSystem;
-	readonly hooks: ModelBehaviourConfigFileHooks;
+	readonly hooks: ConfigFileHooks;
 	readonly permissions: PrivateFilePermissions["Service"];
 	readonly permissions_snapshot: PrivateFilePermissionsSnapshot;
 	readonly target: string;
@@ -407,7 +405,7 @@ function RestrictBackupOrRestore(input: {
 		);
 
 		if (!restricted) {
-			return yield* new ModelBehaviourConfigFileBackupError({
+			return yield* new ConfigFileBackupError({
 				cause: new Error("The backup changed before permissions were applied"),
 				path: input.backup_path,
 			});
@@ -425,7 +423,7 @@ function RestrictBackupOrRestore(input: {
 			).pipe(
 				Effect.flatMap(() =>
 					Effect.fail(
-						new ModelBehaviourConfigFileBackupError({
+						new ConfigFileBackupError({
 							cause,
 							path: input.backup_path,
 						}),
@@ -438,7 +436,7 @@ function RestrictBackupOrRestore(input: {
 
 function ApplyTargetPermissions(input: {
 	readonly file_system: FileSystem.FileSystem;
-	readonly hooks: ModelBehaviourConfigFileHooks;
+	readonly hooks: ConfigFileHooks;
 	readonly identity: FileIdentity;
 	readonly permissions: PrivateFilePermissions["Service"];
 	readonly permissions_snapshot?: PrivateFilePermissionsSnapshot;
@@ -463,7 +461,7 @@ function RestoreLink(file_system: FileSystem.FileSystem, source: string, target:
 		Effect.catch((cause) =>
 			is_platform_reason(cause, "AlreadyExists")
 				? Effect.succeed(false)
-				: Effect.fail(new ModelBehaviourConfigFileRestoreError({ cause, path: target })),
+				: Effect.fail(new ConfigFileRestoreError({ cause, path: target })),
 		),
 	);
 }
@@ -480,9 +478,7 @@ function MoveToBackup(
 			Effect.catch((cause) =>
 				is_platform_reason(cause, "NotFound")
 					? Effect.succeed(false)
-					: Effect.fail(
-							new ModelBehaviourConfigFileBackupError({ cause, path: backup_path }),
-						),
+					: Effect.fail(new ConfigFileBackupError({ cause, path: backup_path })),
 			),
 		);
 
@@ -491,13 +487,11 @@ function MoveToBackup(
 		}
 
 		const snapshot = yield* ReadSnapshot(file_system, backup_path).pipe(
-			Effect.mapError(
-				(cause) => new ModelBehaviourConfigFileBackupError({ cause, path: backup_path }),
-			),
+			Effect.mapError((cause) => new ConfigFileBackupError({ cause, path: backup_path })),
 		);
 
 		if (snapshot === undefined) {
-			return yield* new ModelBehaviourConfigFileBackupError({
+			return yield* new ConfigFileBackupError({
 				cause: new Error("The moved backup disappeared"),
 				path: backup_path,
 			});
@@ -530,7 +524,7 @@ function FindRecoveryBackup(
 				is_platform_reason(cause, "NotFound")
 					? Effect.succeed([])
 					: Effect.fail(
-							new ModelBehaviourConfigFileBackupError({
+							new ConfigFileBackupError({
 								cause,
 								path: backups_directory,
 							}),
@@ -546,9 +540,7 @@ function FindRecoveryBackup(
 
 				return ReadSnapshot(file_system, path).pipe(
 					Effect.map((snapshot) => ({ path, snapshot })),
-					Effect.mapError(
-						(cause) => new ModelBehaviourConfigFileBackupError({ cause, path }),
-					),
+					Effect.mapError((cause) => new ConfigFileBackupError({ cause, path })),
 				);
 			},
 		);
@@ -572,7 +564,7 @@ function FindRecoveryBackup(
 		}
 
 		if (candidates.some((candidate) => candidate.snapshot !== undefined)) {
-			return yield* new ModelBehaviourConfigFileBackupError({
+			return yield* new ConfigFileBackupError({
 				cause: new Error("The operation backup contains different bytes"),
 				path: backups_directory,
 			});
@@ -589,7 +581,7 @@ function RollbackPublication(input: {
 		readonly snapshot: InternalSnapshot;
 	};
 	readonly file_system: FileSystem.FileSystem;
-	readonly hooks: ModelBehaviourConfigFileHooks;
+	readonly hooks: ConfigFileHooks;
 	readonly permissions: PrivateFilePermissions["Service"];
 	readonly replacement_identity: FileIdentity;
 	readonly target: string;
@@ -607,8 +599,7 @@ function RollbackPublication(input: {
 			.RestrictOwned(input.target, input.replacement_identity)
 			.pipe(
 				Effect.mapError(
-					(cause) =>
-						new ModelBehaviourConfigFileRestoreError({ cause, path: input.target }),
+					(cause) => new ConfigFileRestoreError({ cause, path: input.target }),
 				),
 			);
 
@@ -635,19 +626,16 @@ function RollbackPublication(input: {
 			)
 			.pipe(
 				Effect.mapError(
-					(cause) =>
-						new ModelBehaviourConfigFileRestoreError({ cause, path: input.target }),
+					(cause) => new ConfigFileRestoreError({ cause, path: input.target }),
 				),
 			);
 	});
 }
 
 /** Builds the platform-independent config-file service over Effect capabilities. */
-export function make_model_behaviour_config_files_platform_layer(
-	hooks: ModelBehaviourConfigFileHooks = {},
-) {
+export function make_config_file_store_platform_layer(hooks: ConfigFileHooks = {}) {
 	return Layer.effect(
-		ModelBehaviourConfigFiles,
+		ConfigFileStore,
 		Effect.gen(function* () {
 			const file_system = yield* FileSystem.FileSystem;
 			const path_service = yield* Path.Path;
@@ -674,7 +662,7 @@ export function make_model_behaviour_config_files_platform_layer(
 						yield* permissions.RestrictDirectory(options.backups_directory).pipe(
 							Effect.mapError(
 								(cause) =>
-									new ModelBehaviourConfigFileBackupError({
+									new ConfigFileBackupError({
 										cause,
 										path: options.backups_directory,
 									}),
@@ -716,7 +704,7 @@ export function make_model_behaviour_config_files_platform_layer(
 						);
 
 						if (staged._tag === "Occupied") {
-							return yield* new ModelBehaviourConfigFileWriteError({
+							return yield* new ConfigFileWriteError({
 								cause: new Error(
 									"The private staged replacement path was already occupied",
 								),
@@ -749,7 +737,7 @@ export function make_model_behaviour_config_files_platform_layer(
 							source_permissions = yield* permissions.Capture(target).pipe(
 								Effect.mapError(
 									(cause) =>
-										new ModelBehaviourConfigFileBackupError({
+										new ConfigFileBackupError({
 											cause,
 											path: target,
 										}),
@@ -816,7 +804,7 @@ export function make_model_behaviour_config_files_platform_layer(
 								is_platform_reason(cause, "AlreadyExists")
 									? Effect.succeed(false)
 									: Effect.fail(
-											new ModelBehaviourConfigFileWriteError({
+											new ConfigFileWriteError({
 												cause,
 												path: target,
 											}),
@@ -867,7 +855,7 @@ export function make_model_behaviour_config_files_platform_layer(
 								target,
 							});
 
-							return yield* new ModelBehaviourConfigFileReplaceError({
+							return yield* new ConfigFileReplaceError({
 								cause: target_permissions.failure,
 								path: target,
 							});
@@ -897,7 +885,7 @@ export function make_model_behaviour_config_files_platform_layer(
 								target,
 							});
 
-							return yield* new ModelBehaviourConfigFileReplaceError({
+							return yield* new ConfigFileReplaceError({
 								cause: Cause.squash(after_replace.cause),
 								path: target,
 							});
@@ -917,15 +905,15 @@ export function make_model_behaviour_config_files_platform_layer(
 					}).pipe(
 						Effect.mapError((cause) => {
 							if (
-								cause instanceof ModelBehaviourConfigFileBackupError ||
-								cause instanceof ModelBehaviourConfigFileReplaceError ||
-								cause instanceof ModelBehaviourConfigFileRestoreError ||
-								cause instanceof ModelBehaviourConfigFileWriteError
+								cause instanceof ConfigFileBackupError ||
+								cause instanceof ConfigFileReplaceError ||
+								cause instanceof ConfigFileRestoreError ||
+								cause instanceof ConfigFileWriteError
 							) {
 								return cause;
 							}
 
-							return new ModelBehaviourConfigFileReplaceError({
+							return new ConfigFileReplaceError({
 								cause,
 								path: options.path,
 							});
@@ -937,7 +925,7 @@ export function make_model_behaviour_config_files_platform_layer(
 }
 
 /** Builds the Node-backed config-file service for desktop composition and integration tests. */
-export function make_model_behaviour_config_files_layer(hooks: ModelBehaviourConfigFileHooks = {}) {
+export function make_config_file_store_layer(hooks: ConfigFileHooks = {}) {
 	const node_platform = NodeChildProcessSpawner.layer.pipe(
 		Layer.provideMerge(NodeFileSystem.layer),
 		Layer.provideMerge(NodePath.layer),
@@ -947,11 +935,11 @@ export function make_model_behaviour_config_files_layer(hooks: ModelBehaviourCon
 	});
 	const permissions = make_private_file_permissions_layer.pipe(Layer.provide(platform));
 
-	return make_model_behaviour_config_files_platform_layer(hooks).pipe(
+	return make_config_file_store_platform_layer(hooks).pipe(
 		Layer.provide(permissions),
 		Layer.provide(node_platform),
 	);
 }
 
 /** Provides the default live Node config-file service. */
-export const ModelBehaviourConfigFilesLive = make_model_behaviour_config_files_layer();
+export const ConfigFileStoreLive = make_config_file_store_layer();
