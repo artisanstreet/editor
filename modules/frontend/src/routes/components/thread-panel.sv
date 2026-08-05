@@ -336,21 +336,29 @@
 <ProjectFolderPicker bind:open={picker_open} onselect={AssignProject} />
 
 <div class="relative flex h-full min-h-0 flex-col p-4">
-	<ProjectSelector
-		active_repository={active_repository}
-		assigning={assigning}
-		bind:diff_detail_open
-		disabled={assigning || (!is_draft && thread === undefined) || draft_state._tag === "Created"}
-		existing_projects={existing_projects}
-		lip_animate={lip_animate}
-		onclose={CloseDiffDetailSoon}
-		keep_open={KeepDiffDetailOpen}
-		onopenchange={RequestProjectList}
-		onvaluechange={RequestProject}
-		{project}
-		read_at_ms={read_at_ms}
-		{reportable}
-		{repositories}
-	/>
+	<!--
+		The workspace header already names a pinned thread's repository and
+		branch, so repeating it here would say the same thing twice. The card
+		stays only where it still does work: picking a project for a draft, or
+		pinning a thread that has none yet.
+	-->
+	{#if is_draft || project === undefined}
+		<ProjectSelector
+			active_repository={active_repository}
+			assigning={assigning}
+			bind:diff_detail_open
+			disabled={assigning || (!is_draft && thread === undefined) || draft_state._tag === "Created"}
+			existing_projects={existing_projects}
+			lip_animate={lip_animate}
+			onclose={CloseDiffDetailSoon}
+			keep_open={KeepDiffDetailOpen}
+			onopenchange={RequestProjectList}
+			onvaluechange={RequestProject}
+			{project}
+			read_at_ms={read_at_ms}
+			{reportable}
+			{repositories}
+		/>
+	{/if}
 	<ShaderSettings />
 </div>
