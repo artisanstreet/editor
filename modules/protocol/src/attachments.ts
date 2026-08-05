@@ -10,9 +10,22 @@ export const ImageMediaType = Schema.Literals([
 ]);
 export type ImageMediaType = typeof ImageMediaType.Type;
 
+/**
+ * One message's images travel inside a single control frame, so the Forge
+ * socket's 16 MiB payload ceiling is what actually bounds them. These budgets
+ * keep a full batch comfortably beneath it while leaving a screenshot-sized
+ * allowance per image, and they are the sole definition: composer intake,
+ * command validation, and durable acceptance all read them from here.
+ */
+export const MaximumImageAttachmentCount = 10;
+export const MaximumImageAttachmentBytes = 5 * 1024 * 1024;
+export const MaximumImageAttachmentTotalBytes = 12 * 1024 * 1024;
+
 export const ImageAttachmentBytes = Schema.Uint8Array.check(
 	Schema.makeFilter<Uint8Array>((bytes) =>
-		bytes.byteLength <= 5 * 1024 * 1024 ? undefined : "Expected an image no larger than 5 MiB",
+		bytes.byteLength <= MaximumImageAttachmentBytes
+			? undefined
+			: "Expected an image no larger than 5 MiB",
 	),
 );
 

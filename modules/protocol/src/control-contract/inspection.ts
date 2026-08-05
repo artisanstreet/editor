@@ -4,6 +4,7 @@ import { Identifier } from "../common";
 
 import { ConversationQuery, ConversationSnapshot } from "../conversation";
 
+import { ThreadUsageSeries, ThreadUsageSeriesQuery } from "../thread-usage-series";
 import { EngineUsageQuery, EngineUsageSnapshot } from "../engine-usage";
 
 import { HostIdentitySnapshot } from "../host-identity";
@@ -481,3 +482,18 @@ export const EngineUsageQueryResultEnvelope = Schema.Struct({
 	payload: EngineUsageSnapshot,
 });
 export type EngineUsageQueryResultEnvelope = typeof EngineUsageQueryResultEnvelope.Type;
+
+/** Requests the per-turn token series for one thread's current context window. */
+export const ThreadUsageSeriesQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("thread.usage.series.query"),
+	payload: ThreadUsageSeriesQuery,
+});
+export type ThreadUsageSeriesQueryEnvelope = typeof ThreadUsageSeriesQueryEnvelope.Type;
+export const ThreadUsageSeriesQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("thread.usage.series.query.result"),
+	payload: ThreadUsageSeries,
+});
+export type ThreadUsageSeriesQueryResultEnvelope = typeof ThreadUsageSeriesQueryResultEnvelope.Type;

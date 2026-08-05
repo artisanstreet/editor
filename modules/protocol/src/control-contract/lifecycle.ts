@@ -632,6 +632,13 @@ export type ThreadModelTransitionEndpoint = typeof ThreadModelTransitionEndpoint
 export const ThreadModelTransitionEvent = Schema.Struct({
 	continuation: Schema.Literals(["native", "portable"]),
 	source: ThreadModelTransitionEndpoint,
+	/**
+	 * Where the handoff has got to. A transfer is not instant — the next engine
+	 * has to accept the thread before it can answer — so the renderer is told
+	 * when it begins as well as when it lands. Absent on events written before
+	 * the handoff was observable, which are all of them completed.
+	 */
+	state: Schema.optional(Schema.Literals(["started", "completed"])),
 	target: ThreadModelTransitionEndpoint,
 	type: Schema.Literal("thread.model_transition"),
 });

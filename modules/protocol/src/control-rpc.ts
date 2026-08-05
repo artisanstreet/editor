@@ -272,6 +272,11 @@ export const ControlRpcGroup = RpcGroup.make(
 		Control.EngineUsageQueryResultEnvelope,
 	),
 	ControlRpc(
+		"thread.usage.series.query",
+		Control.ThreadUsageSeriesQueryEnvelope,
+		Control.ThreadUsageSeriesQueryResultEnvelope,
+	),
+	ControlRpc(
 		"terminal.list.query",
 		Control.TerminalListQueryEnvelope,
 		Control.TerminalListQueryResultEnvelope,

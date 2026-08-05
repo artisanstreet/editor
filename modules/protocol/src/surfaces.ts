@@ -297,6 +297,18 @@ export const SurfaceUsageAggregate = Schema.Struct({
 	scope: Schema.Literals(["run", "assignment", "group"]),
 	scope_id: Identifier,
 	cached_input_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
+	/**
+	 * Immutable identity of the run that reported this aggregate's latest
+	 * context-window gauge. The model is intentionally run provenance, not the
+	 * mutable policy that may be selected for a later launch.
+	 */
+	context_origin: Schema.optional(
+		Schema.Struct({
+			engine_id: Schema.optional(Identifier),
+			model_id: Schema.optional(Schema.NonEmptyString),
+			run_id: Identifier,
+		}),
+	),
 	context_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),
 	context_window_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThan(0))),
 	input_tokens: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(0))),

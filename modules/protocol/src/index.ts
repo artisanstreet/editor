@@ -6,6 +6,7 @@ export * from "./conversation";
 export * from "./conversation-activity";
 export * from "./control";
 export * from "./control-rpc";
+export * from "./thread-usage-series";
 export * from "./engine-usage";
 export * from "./forge-launch-request";
 export * from "./guidance";

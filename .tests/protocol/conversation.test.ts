@@ -6,6 +6,7 @@ import {
 	ConversationItem,
 	ConversationPatch,
 	ConversationSnapshot,
+	conversation_body_text_limit,
 	InitializeConversation,
 	RebuildConversation,
 } from "@artisan/protocol";
@@ -104,6 +105,7 @@ describe("canonical conversation protocol", () => {
 												continuation: "portable",
 												source_engine_id: "claude",
 												source_model_id: "claude-sonnet",
+												state: "completed",
 												target_engine_id: "codex",
 												target_model_id: "gpt-5",
 											}
@@ -138,6 +140,38 @@ describe("canonical conversation protocol", () => {
 			).toMatchObject({ type });
 		}
 		expect(() => decode_item({ ...assistant, type: "header" })).toThrow();
+	});
+
+	/**
+	 * A label cut at 4096 characters is still a label. A reply cut there ends
+	 * mid-sentence and the turn reads as answered, so bodies carry their own
+	 * bound while every label-sized field keeps the narrow one.
+	 */
+	it("lets a message body outgrow the label bound and still bounds it", () => {
+		const decode_item = Schema.decodeUnknownSync(ConversationItem);
+		const long_reply = "word ".repeat(2_000);
+
+		expect(long_reply.length).toBeGreaterThan(4_096);
+		expect(long_reply.length).toBeLessThanOrEqual(conversation_body_text_limit);
+		expect(decode_item({ ...assistant, text: long_reply })).toMatchObject({
+			text: long_reply,
+		});
+		expect(
+			decode_item({ ...assistant, text: "x".repeat(conversation_body_text_limit) }),
+		).toMatchObject({ lifecycle: "streaming" });
+		expect(() =>
+			decode_item({ ...assistant, text: "x".repeat(conversation_body_text_limit + 1) }),
+		).toThrow();
+		expect(() =>
+			decode_item({
+				...assistant,
+				kind: "tool_activity",
+				label: "x".repeat(4_097),
+				status: "completed",
+				text: undefined,
+				type: "activity",
+			}),
+		).toThrow();
 	});
 
 	it("decodes legacy assistant messages without a disclosed phase as unspecified", () => {

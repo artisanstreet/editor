@@ -86,6 +86,13 @@ export const ThreadListItem = Schema.Struct({
 	archived_at: Schema.optional(IsoDateTime),
 	created_at: IsoDateTime,
 	current_goal: Schema.optional(Schema.NonEmptyString),
+	/**
+	 * The engine and model the thread's coordinator currently launches with, so
+	 * a list can show what a thread is on without opening it. Absent until the
+	 * thread has a coordinator, which it gains with its first message.
+	 */
+	engine_id: Schema.optional(Identifier),
+	model_id: Schema.optional(Schema.NonEmptyString),
 	last_activity_at: IsoDateTime,
 	live_status: Schema.NonEmptyString,
 	metadata_version: StreamSequence,

@@ -35,8 +35,34 @@ export const ConversationText = Schema.String.check(
 	),
 );
 
+/**
+ * What a message body may hold, as opposed to the label-sized bound above.
+ *
+ * A label truncated at 4096 characters is still a label; a reply truncated there
+ * stops mid-sentence and the turn ends looking answered, which is the one
+ * failure a transcript must never present as a completed thought. The bound
+ * stays finite because every delta rewrites the whole stored entity, and 64 KiB
+ * clears any reply a provider can produce in one turn.
+ */
+export const conversation_body_text_limit = 65_536;
+
+export const ConversationBodyText = Schema.String.check(
+	Schema.makeFilter<string>((value) =>
+		value.length <= conversation_body_text_limit
+			? undefined
+			: `Expected at most ${conversation_body_text_limit} characters`,
+	),
+);
+
 /** Bounds a renderer-visible, non-empty label or message. */
 export const ConversationSafeText = ConversationText.check(
+	Schema.makeFilter<string>((value) =>
+		value.length > 0 ? undefined : "Expected at least one character",
+	),
+);
+
+/** Bounds a renderer-visible, non-empty message body. */
+export const ConversationSafeBodyText = ConversationBodyText.check(
 	Schema.makeFilter<string>((value) =>
 		value.length > 0 ? undefined : "Expected at least one character",
 	),
@@ -103,7 +129,7 @@ export const ConversationItem = Schema.Union([
 		attachments: Schema.optional(Schema.Array(ImageAttachmentReference)),
 		content: Schema.optional(Schema.Array(UserMessageContentPart)),
 		...ConversationItemFields,
-		text: ConversationSafeText,
+		text: ConversationSafeBodyText,
 		type: Schema.Literal("user_message"),
 	}),
 	Schema.Struct({
@@ -112,17 +138,19 @@ export const ConversationItem = Schema.Union([
 			Schema.optional,
 			Schema.withDecodingDefault(Effect.succeed("unspecified")),
 		),
-		text: ConversationText,
+		text: ConversationBodyText,
 		type: Schema.Literal("assistant_message"),
 	}),
 	Schema.Struct({
 		...ConversationItemFields,
-		text: ConversationText,
+		text: ConversationBodyText,
 		type: Schema.Literal("reasoning_summary"),
 	}),
 	Schema.Struct({
 		...ConversationItemFields,
 		ended_at: Schema.optional(IsoDateTime),
+		/** When the provider accepted the turn and began producing run activity. */
+		responded_at: Schema.optional(IsoDateTime),
 		started_at: IsoDateTime,
 		status: ConversationLifecycle,
 		title: ConversationSafeText,
@@ -224,6 +252,20 @@ export const ConversationItem = Schema.Union([
 		continuation: Schema.Literals(["native", "portable"]),
 		source_engine_id: Identifier,
 		source_model_id: Schema.optional(Schema.NonEmptyString),
+		/**
+		 * Whether the handoff is still in flight or the next engine has taken the
+		 * thread.
+		 *
+		 * Defaulted on decode rather than required: rows written before this field
+		 * existed carry no `state`, and a required key would fail the decode of
+		 * every stored item — which fails the whole snapshot read, not just the
+		 * handoff row. A legacy row was only ever written once the transition had
+		 * landed, which is the same fallback the journal projection applies.
+		 */
+		state: Schema.Literals(["started", "completed"]).pipe(
+			Schema.optional,
+			Schema.withDecodingDefault(Effect.succeed("completed")),
+		),
 		target_engine_id: Identifier,
 		target_model_id: Schema.optional(Schema.NonEmptyString),
 		type: Schema.Literal("model_transition"),

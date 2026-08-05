@@ -1,4 +1,8 @@
-import { ImageAttachmentUpload, UserMessageInputContentPart } from "../attachments";
+import {
+	ImageAttachmentUpload,
+	MaximumImageAttachmentCount,
+	UserMessageInputContentPart,
+} from "../attachments";
 
 import { Identifier, IsoDateTime, PositiveInt } from "../common";
 
@@ -32,7 +36,9 @@ const EnvironmentVariableName = Schema.String.check(
 
 /** Queues user text for a thread or steers its active capable run. */
 export const ThreadSendMessageCommand = Schema.Struct({
-	attachments: Schema.optional(Schema.Array(ImageAttachmentUpload).check(Schema.isMaxLength(4))),
+	attachments: Schema.optional(
+		Schema.Array(ImageAttachmentUpload).check(Schema.isMaxLength(MaximumImageAttachmentCount)),
+	),
 	content: Schema.optional(Schema.Array(UserMessageInputContentPart)),
 	type: Schema.Literal("thread.send_message"),
 	engine_id: Identifier,
