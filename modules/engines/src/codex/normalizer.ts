@@ -1,6 +1,7 @@
 import { Effect, Schema } from "effect";
 
 import { TokenCount } from "../engine";
+import { CountFileChangeLines } from "../patch/unified-diff";
 
 import type {
 	EngineAgentMessageCompletedObservation,
@@ -161,6 +162,16 @@ const SubagentItemSchema = Schema.Struct({
 	kind: Schema.Unknown,
 	type: Schema.Literal("subAgentActivity"),
 });
+/**
+ * Items Codex reports but Artisan renders from its own stream: reasoning
+ * arrives as summary deltas, and the user's own message is already in the
+ * transcript that produced this turn. Modelled so their envelopes decode —
+ * an unmodelled item type fails the whole frame, not just itself.
+ */
+const OpaqueItemSchema = Schema.Struct({
+	id: Schema.String,
+	type: Schema.Literals(["reasoning", "userMessage"]),
+});
 const ContextCompactionItemSchema = Schema.Struct({
 	id: Schema.String,
 	type: Schema.Literal("contextCompaction"),
@@ -176,6 +187,7 @@ const ItemEnvelopeSchema = Schema.Struct({
 		WebSearchItemSchema,
 		SubagentItemSchema,
 		ContextCompactionItemSchema,
+		OpaqueItemSchema,
 	]),
 	threadId: Schema.String,
 	turnId: Schema.String,
@@ -210,6 +222,16 @@ const PrivateReasoningDeltaSchema = Schema.Struct({
 const UsageSchema = Schema.Struct({
 	threadId: Schema.String,
 	tokenUsage: Schema.Struct({
+		/**
+		 * The most recent request on its own. Every turn resends the conversation,
+		 * so this is what occupies the window right now, while `total` keeps adding
+		 * each resend to the one before it.
+		 */
+		last: Schema.optional(
+			Schema.Struct({
+				totalTokens: Schema.optional(TokenCount),
+			}),
+		),
 		modelContextWindow: Schema.optional(Schema.NullOr(TokenCount)),
 		total: Schema.Struct({
 			cachedInputTokens: Schema.optional(TokenCount),
@@ -292,12 +314,14 @@ function make_base(input: CodexNormalizationInput, suffix?: string) {
 function native_action(
 	input: CodexNormalizationInput,
 	detail?: string,
+	diagnostic = false,
 ): EngineNativeActionObservation {
 	return {
 		...make_base(input),
 		_tag: "native_action",
 		action: input.method,
 		...(detail ? { detail } : {}),
+		...(diagnostic ? { diagnostic: true } : {}),
 		sequence: 0,
 	};
 }
@@ -309,7 +333,9 @@ function decode_known<S extends Schema.Constraint>(
 ): Effect.Effect<ReadonlyArray<EngineObservation>, never, S["DecodingServices"]> {
 	return Schema.decodeUnknownEffect(schema, { onExcessProperty: "preserve" })(input.payload).pipe(
 		Effect.map(map),
-		Effect.catch(() => Effect.succeed([native_action(input, "Malformed known Codex payload")])),
+		Effect.catch(() =>
+			Effect.succeed([native_action(input, "Malformed known Codex payload", true)]),
+		),
 	);
 }
 
@@ -399,8 +425,12 @@ export function normalise_codex_notification(
 				} satisfies EngineReasoningSummaryDeltaObservation,
 			]);
 		case "item/reasoning/textDelta":
+			/**
+			 * Private reasoning is never surfaced. The row exists to account for the
+			 * frame, so it says what happened rather than where the text was kept.
+			 */
 			return decode_known(input, PrivateReasoningDeltaSchema, () => [
-				native_action(input, "Private reasoning text retained only in raw provenance"),
+				native_action(input, "Reasoning privately"),
 			]);
 		case "turn/plan/updated":
 			return decode_known(input, PlanSchema, (value) => [
@@ -443,6 +473,15 @@ export function normalise_codex_notification(
 					tool_name: "mcp",
 				} satisfies EngineToolObservation,
 			]);
+		/**
+		 * Provider bookkeeping with no canonical observation: rate-limit windows
+		 * are read through the usage surface, and MCP and remote-control status
+		 * belong to the harness rather than to this run.
+		 */
+		case "account/rateLimits/updated":
+		case "mcpServer/startupStatus/updated":
+		case "remoteControl/status/changed":
+			return Effect.succeed([native_action(input)]);
 		case "thread/tokenUsage/updated":
 			return decode_known(input, UsageSchema, (value) => [
 				{
@@ -452,9 +491,16 @@ export function normalise_codex_notification(
 					...(value.tokenUsage.total.cachedInputTokens === undefined
 						? {}
 						: { cached_input_tokens: value.tokenUsage.total.cachedInputTokens }),
-					...(value.tokenUsage.total.totalTokens === undefined
+					/**
+					 * The window gauge measures the last request, never the running
+					 * total: a resent conversation is counted again in `total` every
+					 * turn, so a short thread would report a window several times
+					 * fuller than anything the model was actually sent. Without a
+					 * last-request reading the gauge stays unknown rather than wrong.
+					 */
+					...(value.tokenUsage.last?.totalTokens === undefined
 						? {}
-						: { context_tokens: value.tokenUsage.total.totalTokens }),
+						: { context_tokens: value.tokenUsage.last.totalTokens }),
 					...(value.tokenUsage.modelContextWindow == null
 						? {}
 						: { context_window_tokens: value.tokenUsage.modelContextWindow }),
@@ -622,21 +668,38 @@ export function normalise_codex_notification(
 							return [native_action(input, `File change ${value.item.status}`)];
 						}
 
-						return value.item.changes.map(
-							(change, index) =>
-								({
-									...make_base(input, `file:${index}`),
-									_tag: "file" as const,
-									action:
-										change.kind.type === "add"
-											? ("created" as const)
-											: change.kind.type === "delete"
-												? ("deleted" as const)
-												: ("modified" as const),
-									path: change.path,
-									sequence: 0,
-								}) satisfies EngineFileObservation,
-						);
+						return value.item.changes.map((change, index) => {
+							const action =
+								change.kind.type === "add"
+									? ("created" as const)
+									: change.kind.type === "delete"
+										? ("deleted" as const)
+										: ("modified" as const);
+							/**
+							 * Codex reports a created file as its own content rather
+							 * than as a patch, so the payload is only sometimes a diff.
+							 * Absent counts stay absent rather than becoming zero.
+							 */
+							const counts = CountFileChangeLines(action, change.diff);
+
+							return {
+								...make_base(input, `file:${index}`),
+								_tag: "file" as const,
+								action,
+								...(counts === undefined ? {} : counts),
+								path: change.path,
+								sequence: 0,
+							} satisfies EngineFileObservation;
+						});
+					case "reasoning":
+					case "userMessage":
+						/** Carried by their own streams; the envelope only needs to decode. */
+						return [
+							native_action(
+								input,
+								`Item ${value.item.type} ${started ? "started" : "completed"}`,
+							),
+						];
 					case "mcpToolCall":
 					case "dynamicToolCall":
 						return [
@@ -662,6 +725,7 @@ export function normalise_codex_notification(
 								...base,
 								_tag: "search",
 								query: value.item.query,
+								search_id: value.item.id,
 								sequence: 0,
 								state: started ? "started" : "completed",
 							} satisfies EngineSearchObservation,
@@ -685,6 +749,6 @@ export function normalise_codex_notification(
 		case "thread/closed":
 			return Effect.succeed([native_action(input, "Native Codex thread closed")]);
 		default:
-			return Effect.succeed([native_action(input, "Unknown Codex method")]);
+			return Effect.succeed([native_action(input, "Unknown Codex method", true)]);
 	}
 }

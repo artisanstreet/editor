@@ -77,10 +77,11 @@ export interface CodexExecEngineOptions {
 	readonly fallback_reason: string;
 	readonly file_system: FileSystem.FileSystem;
 	readonly factory: typeof CodexProcessFactory.Service;
+	/** Silence that settles a run as stalled; every observation re-arms it. */
+	readonly inactivity_ms: number;
 	readonly max_frame_bytes: number;
 	readonly max_stderr_bytes: number;
 	readonly max_stdout_bytes: number;
-	readonly timeout_ms: number;
 	readonly version_timeout_ms: number;
 }
 
@@ -130,10 +131,10 @@ export function make_codex_exec_engine(options: CodexExecEngineOptions): Engine 
 						fallback_reason: options.fallback_reason,
 						file_system: options.file_system,
 						factory: options.factory,
+						inactivity_ms: options.inactivity_ms,
 						max_frame_bytes: options.max_frame_bytes,
 						max_stderr_bytes: options.max_stderr_bytes,
 						max_stdout_bytes: options.max_stdout_bytes,
-						timeout_ms: options.timeout_ms,
 					},
 					input,
 				),

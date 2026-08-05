@@ -4,6 +4,7 @@ import {
 	type EngineOpenInput,
 	EngineConfigurationError,
 	ValidateEngineGlobalGuidance,
+	ValidateEngineProductInstructions,
 } from "../../engine";
 
 type CodexApprovalPolicy = "never" | "on-request";
@@ -31,6 +32,23 @@ function FailConfiguration(option: string, value: unknown) {
 
 function toml_string(value: string) {
 	return JSON.stringify(value);
+}
+
+function make_developer_instructions(input: EngineOpenInput) {
+	if (input.product_instructions === undefined) return input.global_guidance?.content;
+	if (input.global_guidance === undefined) return input.product_instructions.content;
+
+	return [
+		"## User global guidance",
+		"",
+		input.global_guidance.content,
+		"",
+		"## Artisan product instructions",
+		"",
+		input.product_instructions.content,
+		"",
+		"The Artisan product instructions describe the active presentation surface and take precedence over conflicting output-format guidance above.",
+	].join("\n");
 }
 
 function ResolveCodexPermissions(input: EngineOpenInput, transport: CodexTransport) {
@@ -171,52 +189,64 @@ function ResolveCodexPermissions(input: EngineOpenInput, transport: CodexTranspo
 /** Builds app-server thread fields from Artisan's canonical permission policy. */
 export function MakeCodexAppServerThreadOptions(input: EngineOpenInput) {
 	return ValidateEngineGlobalGuidance("codex", input.global_guidance).pipe(
+		Effect.andThen(ValidateEngineProductInstructions("codex", input.product_instructions)),
 		Effect.andThen(ResolveCodexPermissions(input, "app-server")),
-		Effect.map((permissions) => ({
-			...(permissions.approval_policy === undefined
-				? {}
-				: { approvalPolicy: permissions.approval_policy }),
-			cwd: input.working_directory,
-			...(input.global_guidance === undefined
-				? {}
-				: { developerInstructions: input.global_guidance.content }),
-			...(input.model === undefined ? {} : { model: input.model }),
-			...(input.provider_options?.["codex.service_tier"] === "fast"
-				? { serviceTier: "fast" }
-				: {}),
-			...(permissions.network_access === undefined
-				? {}
-				: {
-						config: {
-							sandbox_workspace_write: {
-								network_access: permissions.network_access,
+		Effect.map((permissions) => {
+			const developer_instructions = make_developer_instructions(input);
+
+			return {
+				...(permissions.approval_policy === undefined
+					? {}
+					: { approvalPolicy: permissions.approval_policy }),
+				cwd: input.working_directory,
+				...(developer_instructions === undefined
+					? {}
+					: { developerInstructions: developer_instructions }),
+				...(input.model === undefined ? {} : { model: input.model }),
+				...(input.provider_options?.["codex.service_tier"] === "fast"
+					? { serviceTier: "fast" }
+					: {}),
+				...(permissions.network_access === undefined
+					? {}
+					: {
+							config: {
+								sandbox_workspace_write: {
+									network_access: permissions.network_access,
+								},
 							},
-						},
-					}),
-			...(permissions.sandbox === undefined ? {} : { sandbox: permissions.sandbox }),
-			...(input.provider_options?.["codex.reasoning_effort"] === undefined
-				? {}
-				: {
-						config: {
-							...(permissions.network_access === undefined
-								? {}
-								: {
-										sandbox_workspace_write: {
-											network_access: permissions.network_access,
-										},
-									}),
-							model_reasoning_effort:
-								input.provider_options["codex.reasoning_effort"],
-						},
-					}),
-		})),
+						}),
+				...(permissions.sandbox === undefined ? {} : { sandbox: permissions.sandbox }),
+				...(input.provider_options?.["codex.reasoning_effort"] === undefined
+					? {}
+					: {
+							config: {
+								...(permissions.network_access === undefined
+									? {}
+									: {
+											sandbox_workspace_write: {
+												network_access: permissions.network_access,
+											},
+										}),
+								model_reasoning_effort:
+									input.provider_options["codex.reasoning_effort"],
+							},
+						}),
+			};
+		}),
 	);
 }
 
 /** Builds Codex exec permission and provider-option argv without a shell. */
 export function MakeCodexExecPermissionArgs(input: EngineOpenInput) {
-	return ResolveCodexPermissions(input, "exec").pipe(
+	return ValidateEngineProductInstructions("codex", input.product_instructions).pipe(
+		Effect.andThen(ResolveCodexPermissions(input, "exec")),
 		Effect.map((permissions) => [
+			...(input.product_instructions === undefined
+				? []
+				: [
+						"-c",
+						`developer_instructions=${toml_string(input.product_instructions.content)}`,
+					]),
 			...(permissions.approval_policy === undefined
 				? []
 				: ["-c", `approval_policy=${toml_string(permissions.approval_policy)}`]),

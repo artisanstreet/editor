@@ -34,6 +34,7 @@ import {
 	EngineRunClosedError,
 	EngineUnavailableError,
 } from "../engine";
+import { WatchEngineInactivity } from "../process/inactivity-deadline";
 import { normalise_codex_notification } from "./normalizer";
 import { make_codex_exec_engine } from "./exec-engine";
 import {
@@ -104,6 +105,8 @@ export const CodexEngineDescriptor: EngineDescriptor = {
 
 /** Configures the Codex executable, transport buffers, and non-billable probe deadlines. @since 0.3.0 */
 export interface CodexEngineOptions {
+	/** Silence during an active turn that settles it as stalled. */
+	readonly app_server_inactivity_ms?: number;
 	readonly app_server_max_frame_bytes?: number;
 	readonly executable_args?: ReadonlyArray<string>;
 	readonly event_capacity?: number;
@@ -111,7 +114,8 @@ export interface CodexEngineOptions {
 	readonly exec_max_frame_bytes?: number;
 	readonly exec_max_stderr_bytes?: number;
 	readonly exec_max_stdout_bytes?: number;
-	readonly exec_timeout_ms?: number;
+	/** Silence that settles an exec run as stalled; every observation re-arms it. */
+	readonly exec_inactivity_ms?: number;
 	readonly initialize_timeout_ms?: number;
 	readonly request_timeout_ms?: number;
 	readonly transport_selection?: "app_server_only" | "prefer_app_server_with_exec_fallback";
@@ -274,6 +278,11 @@ function make_codex_app_server_engine(
 	const executable = options.executable ?? resolve_codex_executable();
 	const event_capacity = options.event_capacity ?? 256;
 	const executable_args = options.executable_args ?? [];
+	/**
+	 * Never shorter than the total budget this replaced, so no run that used to
+	 * complete can start failing for silence it was previously allowed.
+	 */
+	const app_server_inactivity_ms = options.app_server_inactivity_ms ?? 30 * 60 * 1_000;
 	const request_timeout_ms = options.request_timeout_ms ?? 10_000;
 	const initialize_timeout_ms = options.initialize_timeout_ms ?? request_timeout_ms;
 	const version_timeout_ms = options.version_timeout_ms ?? 5_000;
@@ -508,8 +517,33 @@ function make_codex_app_server_engine(
 				}));
 			}
 
+			/**
+			 * The app-server session outlives any single turn, so only a turn
+			 * already in flight owes output. An idle session between turns is
+			 * silent by design and must never be settled for it.
+			 */
+			const WatchInactivity = WatchEngineInactivity({
+				Activity: event_buffer.Activity,
+				Closed: event_buffer.Closed,
+				Expecting: Ref.get(state).pipe(
+					Effect.map((current) => current.active_turn_id !== undefined),
+				),
+				inactivity_ms: app_server_inactivity_ms,
+				OnStall: Emit(
+					map_diagnostic(
+						{
+							level: "error",
+							message: `Codex produced no output for ${app_server_inactivity_ms}ms and the turn is treated as stalled`,
+							source: "process",
+						},
+						input.artisan_run_id,
+					),
+				).pipe(Effect.andThen(Finish("failed"))),
+			});
+
 			yield* Effect.forkScoped(PumpNotifications).pipe(Scope.provide(run_scope));
 			yield* Effect.forkScoped(PumpDiagnostics).pipe(Scope.provide(run_scope));
+			yield* Effect.forkScoped(WatchInactivity).pipe(Scope.provide(run_scope));
 			yield* Scope.addFinalizer(run_scope, Finish("closed"));
 
 			const RememberCommand = (command_id: string, intent: string) =>
@@ -874,10 +908,10 @@ export function make_codex_engine_layer(
 					fallback_reason: codex_selection_failure_reason(probe),
 					file_system,
 					factory,
+					inactivity_ms: options.exec_inactivity_ms ?? 30 * 60 * 1_000,
 					max_frame_bytes: options.exec_max_frame_bytes ?? 256 * 1_024,
 					max_stderr_bytes: options.exec_max_stderr_bytes ?? 1_024 * 1_024,
 					max_stdout_bytes: options.exec_max_stdout_bytes ?? 8 * 1_024 * 1_024,
-					timeout_ms: options.exec_timeout_ms ?? 30 * 60 * 1_000,
 					version_timeout_ms: options.version_timeout_ms ?? 5_000,
 				}),
 				Usage,

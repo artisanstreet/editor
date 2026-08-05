@@ -148,11 +148,9 @@ describe("Codex exec normalizer usage", () => {
 			}),
 		);
 
+		/** Where the text was kept describes the adapter; the row says what happened. */
 		expect(observations).toEqual([
-			expect.objectContaining({
-				_tag: "native_action",
-				detail: "Reasoning started; text retained only in raw provenance",
-			}),
+			expect.objectContaining({ _tag: "native_action", detail: "Reasoning started" }),
 		]);
 	});
 

@@ -194,7 +194,12 @@ export function open_codex_app_server_session(
 	const diagnostic_capacity = options.diagnostic_capacity ?? 128;
 	const max_frame_bytes = options.max_frame_bytes ?? 8 * 1_024 * 1_024;
 	const notification_capacity = options.notification_capacity ?? 128;
-	const notification_ingress_capacity = options.notification_ingress_capacity ?? 128;
+	/**
+	 * The ingress queue isolates stdout framing and JSON-RPC response correlation
+	 * from a temporarily slow notification consumer. It remains bounded; overload
+	 * is still reported explicitly by EnqueueNotification.
+	 */
+	const notification_ingress_capacity = options.notification_ingress_capacity ?? 1_024;
 	const request_timeout_ms = options.request_timeout_ms ?? 10_000;
 
 	return Effect.gen(function* () {
@@ -209,7 +214,8 @@ export function open_codex_app_server_session(
 
 		const factory = yield* CodexProcessFactory;
 		const handle = yield* factory.Spawn(options.spawn);
-		const diagnostics = yield* Queue.dropping<CodexAppServerDiagnostic, Cause.Done>(
+		/** New causal failures displace stale diagnostics when the bounded queue is full. */
+		const diagnostics = yield* Queue.sliding<CodexAppServerDiagnostic, Cause.Done>(
 			diagnostic_capacity,
 		);
 		const notification_ingress = yield* Queue.dropping<CodexAppServerNotification, Cause.Done>(

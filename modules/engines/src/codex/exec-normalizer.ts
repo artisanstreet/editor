@@ -1,6 +1,7 @@
 import { Effect, Schema } from "effect";
 
 import { TokenCount } from "../engine";
+import { CountFileChangeLines } from "../patch/unified-diff";
 
 import {
 	type EngineObservation,
@@ -95,6 +96,8 @@ const file_change_schema = Schema.Struct({
 	item: Schema.Struct({
 		changes: Schema.Array(
 			Schema.Struct({
+				/** Present on the versions that report it; its absence leaves the change uncounted. */
+				diff: Schema.optional(Schema.String),
 				kind: Schema.String,
 				path: Schema.String,
 			}),
@@ -185,12 +188,14 @@ function native_action(
 	input: CodexExecNormalizationInput,
 	type: string,
 	detail?: string,
+	diagnostic = false,
 ): EngineNativeActionObservation {
 	return {
 		...make_base(input, type),
 		_tag: "native_action",
 		action: type,
 		...(detail === undefined ? {} : { detail }),
+		...(diagnostic ? { diagnostic: true } : {}),
 	};
 }
 
@@ -203,7 +208,7 @@ function DecodeKnown<S extends Schema.Constraint>(
 	return Schema.decodeUnknownEffect(schema, { onExcessProperty: "preserve" })(input.payload).pipe(
 		Effect.map(map),
 		Effect.catch(() =>
-			Effect.succeed([native_action(input, type, "Malformed known Codex exec event")]),
+			Effect.succeed([native_action(input, type, "Malformed known Codex exec event", true)]),
 		),
 	);
 }
@@ -255,13 +260,11 @@ function NormaliseItem(input: CodexExecNormalizationInput, type: string, item_ty
 								turn_id: input.turn_id,
 							} satisfies EngineReasoningSummaryCompletedObservation,
 						]
-					: [
-							native_action(
-								input,
-								type,
-								`Reasoning ${action}; text retained only in raw provenance`,
-							),
-						],
+					: /**
+						 * Where the text was kept is a fact about the adapter. What a
+						 * reader can use is that the model started reasoning here.
+						 */
+						[native_action(input, type, `Reasoning ${action}`)],
 			);
 		case "command_execution":
 			return DecodeKnown(input, type, command_schema, (value) => [
@@ -291,20 +294,30 @@ function NormaliseItem(input: CodexExecNormalizationInput, type: string, item_ty
 			return DecodeKnown(input, type, file_change_schema, (value) =>
 				value.type !== "item.completed"
 					? [native_action(input, type, `File change ${action}`)]
-					: value.item.changes.map(
-							(change, index) =>
-								({
-									...make_base(input, type, `file:${index}`),
-									_tag: "file",
-									action:
-										change.kind === "add" || change.kind === "create"
-											? "created"
-											: change.kind === "delete"
-												? "deleted"
-												: "modified",
-									path: change.path,
-								}) satisfies EngineFileObservation,
-						),
+					: value.item.changes.map((change, index) => {
+							const action =
+								change.kind === "add" || change.kind === "create"
+									? ("created" as const)
+									: change.kind === "delete"
+										? ("deleted" as const)
+										: ("modified" as const);
+							/**
+							 * A created file arrives as its own content rather than as
+							 * a patch, so the payload is only sometimes a diff.
+							 */
+							const counts =
+								change.diff === undefined
+									? undefined
+									: CountFileChangeLines(action, change.diff);
+
+							return {
+								...make_base(input, type, `file:${index}`),
+								_tag: "file",
+								action,
+								...(counts === undefined ? {} : counts),
+								path: change.path,
+							} satisfies EngineFileObservation;
+						}),
 			);
 		case "web_search":
 			return DecodeKnown(input, type, search_schema, (value) => [
@@ -312,6 +325,7 @@ function NormaliseItem(input: CodexExecNormalizationInput, type: string, item_ty
 					...make_base(input, type),
 					_tag: "search",
 					query: value.item.query,
+					search_id: value.item.id,
 					state: value.type === "item.completed" ? "completed" : "started",
 				} satisfies EngineSearchObservation,
 			]);
@@ -438,7 +452,12 @@ export function NormaliseCodexExecEvent(
 						Effect.flatMap((value) => NormaliseItem(input, type, value.item.type)),
 						Effect.catch(() =>
 							Effect.succeed([
-								native_action(input, type, "Malformed known Codex exec event"),
+								native_action(
+									input,
+									type,
+									"Malformed known Codex exec event",
+									true,
+								),
 							]),
 						),
 					);

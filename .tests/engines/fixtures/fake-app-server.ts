@@ -665,9 +665,16 @@ function handle_request(request: FixtureRecord) {
 
 		if (process.env.FAKE_APP_SERVER_SCENARIO === "event-flood") {
 			setTimeout(() => {
-				for (let index = 0; index < 32; index += 1) {
+				for (let index = 0; index < 600; index += 1) {
 					write_frame({ method: "fixture/event", params: { index } });
 				}
+				write_frame({
+					method: "turn/completed",
+					params: {
+						threadId: request.params.threadId,
+						turn: make_turn(active_turn_id, "completed"),
+					},
+				});
 			}, 5);
 		}
 
@@ -720,6 +727,19 @@ function handle_request(request: FixtureRecord) {
 	}
 
 	if (request.method === "scenario/notificationFlood") {
+		const count = request.params.count;
+
+		for (let index = 0; index < count; index += 1) {
+			write_frame({ method: "test/notification", params: { index } });
+		}
+
+		respond(request.id, { count });
+
+		return;
+	}
+
+	if (request.method === "scenario/malformedThenNotificationFlood") {
+		process.stdout.write("not json\n");
 		const count = request.params.count;
 
 		for (let index = 0; index < count; index += 1) {

@@ -10,7 +10,6 @@ import {
 	type EngineObservation,
 	type EngineOpenInput,
 	type EngineRun,
-	type EngineRunTerminalState,
 	EngineCommandIdConflictError,
 	EngineConfigurationError,
 	EngineProcessError,
@@ -29,6 +28,7 @@ import {
 	CodexJsonlOversizedLineError,
 	type CodexJsonlDecode,
 } from "../jsonl";
+import { WatchEngineInactivity } from "../../process/inactivity-deadline";
 import type { CodexProcessFactory } from "../process";
 import { MakeCodexExecSpawn } from "./exec-argv";
 import { codex_exec_protocol_version, codex_exec_transport } from "./exec-contract";
@@ -46,7 +46,8 @@ export interface CodexExecRunOptions {
 	readonly max_frame_bytes: number;
 	readonly max_stderr_bytes: number;
 	readonly max_stdout_bytes: number;
-	readonly timeout_ms: number;
+	/** Silence that settles a run as stalled; every observation re-arms it. */
+	readonly inactivity_ms: number;
 }
 
 interface ExecProcessState {
@@ -55,18 +56,6 @@ interface ExecProcessState {
 	readonly semantic_outcome: CodexExecSemanticOutcome;
 	readonly stderr_bytes: number;
 	readonly stdout_bytes: number;
-}
-
-/** Cancels a pending exec deadline as soon as any terminal state is observed. */
-export function WatchCodexExecTimeout<E, R>(
-	Closed: Effect.Effect<EngineRunTerminalState>,
-	timeout_ms: number,
-	OnTimeout: Effect.Effect<void, E, R>,
-) {
-	return Effect.raceFirst(
-		Closed.pipe(Effect.asVoid),
-		Effect.sleep(timeout_ms).pipe(Effect.andThen(OnTimeout)),
-	);
 }
 
 function command_intent(command: EngineCommand) {
@@ -113,7 +102,7 @@ export function OpenCodexExecRun(
 		yield* ValidatePositiveOption("exec_max_frame_bytes", options.max_frame_bytes);
 		yield* ValidatePositiveOption("exec_max_stderr_bytes", options.max_stderr_bytes);
 		yield* ValidatePositiveOption("exec_max_stdout_bytes", options.max_stdout_bytes);
-		yield* ValidatePositiveOption("exec_timeout_ms", options.timeout_ms);
+		yield* ValidatePositiveOption("exec_inactivity_ms", options.inactivity_ms);
 
 		const run_scope = yield* Effect.acquireRelease(Scope.make(), (scope) =>
 			Scope.close(scope, Exit.succeed(undefined)),
@@ -372,21 +361,23 @@ export function OpenCodexExecRun(
 				.pipe(Effect.ignore);
 			yield* event_buffer.Finish("failed");
 		}).pipe(Effect.catch(() => event_buffer.Finish("failed")));
-		const OnTimeout = event_buffer
-			.Emit(
-				make_diagnostic(
-					input.artisan_run_id,
-					`Codex exec timed out after ${options.timeout_ms}ms`,
-					"error",
-					{ timeout_ms: options.timeout_ms },
-				),
-			)
-			.pipe(Effect.andThen(event_buffer.Finish("failed")));
-		const WatchTimeout = WatchCodexExecTimeout(
-			event_buffer.Closed,
-			options.timeout_ms,
-			OnTimeout,
-		);
+		const WatchInactivity = WatchEngineInactivity({
+			Activity: event_buffer.Activity,
+			Closed: event_buffer.Closed,
+			/** `codex exec` is spawned per run, so it owes output for the whole run. */
+			Expecting: Effect.succeed(true),
+			inactivity_ms: options.inactivity_ms,
+			OnStall: event_buffer
+				.Emit(
+					make_diagnostic(
+						input.artisan_run_id,
+						`Codex exec produced no output for ${options.inactivity_ms}ms and is treated as stalled`,
+						"error",
+						{ inactivity_ms: options.inactivity_ms },
+					),
+				)
+				.pipe(Effect.andThen(event_buffer.Finish("failed"))),
+		});
 
 		yield* event_buffer.Emit(
 			make_diagnostic(
@@ -403,7 +394,7 @@ export function OpenCodexExecRun(
 		yield* Effect.forkScoped(PumpStdout).pipe(Scope.provide(run_scope));
 		yield* Effect.forkScoped(PumpStderr).pipe(Scope.provide(run_scope));
 		yield* Effect.forkScoped(WatchExit).pipe(Scope.provide(run_scope));
-		yield* Effect.forkScoped(WatchTimeout).pipe(Scope.provide(run_scope));
+		yield* Effect.forkScoped(WatchInactivity).pipe(Scope.provide(run_scope));
 		yield* Scope.addFinalizer(run_scope, event_buffer.Finish("closed"));
 
 		if (input._tag === "start") {

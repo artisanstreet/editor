@@ -814,7 +814,7 @@ describe("Codex engine run", () => {
 		expect(terminals(result.events)).toEqual([expect.objectContaining({ state: "failed" })]);
 	});
 
-	it("fails explicitly when the canonical event consumer falls behind", async () => {
+	it("completes a 600-event burst with a deliberately slow canonical consumer", async () => {
 		process.env.FAKE_APP_SERVER_SCENARIO = "event-flood";
 
 		const result = await Effect.runPromise(
@@ -827,16 +827,20 @@ describe("Codex engine run", () => {
 						initial_text: "Flood",
 						working_directory: "C:\\workspace",
 					});
+					const events = yield* run.Events.pipe(
+						Stream.mapEffect((event) => Effect.sleep(1).pipe(Effect.as(event))),
+						Stream.runCollect,
+					);
 					const terminal = yield* run.Closed;
-					const events = yield* run.Events.pipe(Stream.runCollect);
 
 					return { events: [...events], terminal };
 				}),
 			).pipe(Effect.provide(make_layer({ event_capacity: 4 }))),
 		);
 
-		expect(result.terminal).toBe("failed");
-		expect(terminals(result.events)).toEqual([expect.objectContaining({ state: "failed" })]);
+		expect(result.terminal).toBe("completed");
+		expect(result.events.filter((event) => event._tag === "native_action")).toHaveLength(600);
+		expect(terminals(result.events)).toEqual([expect.objectContaining({ state: "completed" })]);
 	});
 
 	it.each([

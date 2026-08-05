@@ -20,7 +20,7 @@ import {
 } from "@artisan/engines";
 import { make_codex_exec_engine } from "../../modules/engines/src/codex/exec-engine";
 import { MakeCodexExecEventBuffer } from "../../modules/engines/src/codex/internal/exec-event-buffer";
-import { WatchCodexExecTimeout } from "../../modules/engines/src/codex/internal/exec-run";
+import { WatchEngineInactivity } from "../../modules/engines/src/process/inactivity-deadline";
 
 const fixture_path = fileURLToPath(new URL("./fixtures/fake-app-server.ts", import.meta.url));
 const transcript_path = fileURLToPath(
@@ -286,16 +286,18 @@ describe("Codex exec fallback", () => {
 		15_000,
 	);
 
-	it("cancels its run timeout after a normal terminal observation", async () => {
-		const timed_out = await Effect.runPromise(
+	it("cancels its inactivity deadline after a normal terminal observation", async () => {
+		const stalled = await Effect.runPromise(
 			Effect.gen(function* () {
 				const closed = yield* Deferred.make<"completed">();
 				const fired = yield* Ref.make(false);
-				const watcher = yield* WatchCodexExecTimeout(
-					Deferred.await(closed),
-					60_000,
-					Ref.set(fired, true),
-				).pipe(Effect.forkChild);
+				const watcher = yield* WatchEngineInactivity({
+					Activity: Effect.succeed(0),
+					Closed: Deferred.await(closed),
+					Expecting: Effect.succeed(true),
+					inactivity_ms: 60_000,
+					OnStall: Ref.set(fired, true),
+				}).pipe(Effect.forkChild);
 
 				yield* Deferred.succeed(closed, "completed");
 				yield* TestClock.adjust(60_000);
@@ -305,7 +307,7 @@ describe("Codex exec fallback", () => {
 			}).pipe(Effect.provide(TestClock.layer())),
 		);
 
-		expect(timed_out).toBe(false);
+		expect(stalled).toBe(false);
 	});
 
 	it.each([
@@ -386,7 +388,7 @@ describe("Codex exec fallback", () => {
 		["stdout-overflow", { exec_max_stdout_bytes: 128 }, "failed", "stdout exceeded 128 bytes"],
 		["stderr-overflow", { exec_max_stderr_bytes: 128 }, "failed", "stderr exceeded 128 bytes"],
 		["nonzero", {}, "failed", "exited with code 17"],
-		["hang", { exec_timeout_ms: 40 }, "failed", "timed out after 40ms"],
+		["hang", { exec_inactivity_ms: 40 }, "failed", "produced no output for 40ms"],
 	] as const)(
 		"handles bounded exec lifecycle scenario %s",
 		async (scenario, options, terminal_state, diagnostic_text) => {
@@ -416,6 +418,7 @@ describe("Codex exec fallback", () => {
 				);
 			}
 		},
+		30_000,
 	);
 
 	it.each([
@@ -448,10 +451,10 @@ describe("Codex exec fallback", () => {
 		},
 	);
 
-	it("fails boundedly under observation backpressure with exactly one terminal", async () => {
+	it("backpressures a tiny observation buffer without losing the terminal", async () => {
 		const result = await collect_exec_events("transcript", { event_capacity: 1 });
 
-		expect(terminals(result.events)).toEqual([expect.objectContaining({ state: "failed" })]);
+		expect(terminals(result.events)).toEqual([expect.objectContaining({ state: "completed" })]);
 	});
 
 	it("retains fragmented unknown events and stderr byte-for-byte", async () => {
@@ -760,10 +763,10 @@ describe("Codex exec fallback", () => {
 					return Effect.die("spawned");
 				},
 			},
+			inactivity_ms: 1_000,
 			max_frame_bytes: 1_024,
 			max_stderr_bytes: 1_024,
 			max_stdout_bytes: 1_024,
-			timeout_ms: 1_000,
 			version_timeout_ms: 1_000,
 		});
 		const result = await Effect.runPromise(

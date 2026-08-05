@@ -176,6 +176,20 @@ describe("Codex app-server session", () => {
 		expect(response.result).toEqual({ count: 8 });
 	});
 
+	it("correlates a response behind a 600-notification burst without consuming notifications", async () => {
+		const response = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const session = yield* make_session({ notification_capacity: 1 });
+
+					return yield* session.Request("scenario/notificationFlood", { count: 600 });
+				}).pipe(Effect.provide(CodexProcessFactoryLive)),
+			),
+		);
+
+		expect(response.result).toEqual({ count: 600 });
+	});
+
 	it("accepts additive metadata on otherwise valid JSON-RPC envelopes", async () => {
 		const result = await Effect.runPromise(
 			Effect.scoped(
@@ -264,7 +278,49 @@ describe("Codex app-server session", () => {
 			_tag: "CodexAppServerNotificationOverflowError",
 			capacity: 2,
 		});
-		expect(result.diagnostics).toMatchObject([{ level: "error", source: "stdout" }]);
+		expect(result.diagnostics).toMatchObject([
+			{
+				level: "error",
+				message: "Codex notification ingress exceeded capacity 2",
+				source: "stdout",
+			},
+		]);
+	});
+
+	it("retains the ingress failure when prior diagnostics filled the queue", async () => {
+		const result = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const session = yield* make_session({
+						diagnostic_capacity: 1,
+						notification_capacity: 1,
+						notification_ingress_capacity: 2,
+					});
+					const request_exit = yield* session
+						.Request("scenario/malformedThenNotificationFlood", { count: 100 })
+						.pipe(Effect.exit);
+					return {
+						diagnostics: yield* Stream.runCollect(session.Diagnostics),
+						request_exit,
+					};
+				}).pipe(Effect.provide(CodexProcessFactoryLive)),
+			),
+		);
+		const error = Exit.isFailure(result.request_exit)
+			? Cause.squash(result.request_exit.cause)
+			: undefined;
+
+		expect(error).toMatchObject({
+			_tag: "CodexAppServerNotificationOverflowError",
+			capacity: 2,
+		});
+		expect(result.diagnostics).toMatchObject([
+			{
+				level: "error",
+				message: "Codex notification ingress exceeded capacity 2",
+				source: "stdout",
+			},
+		]);
 	});
 
 	it("recovers after malformed JSONL and sequences every complete frame", async () => {

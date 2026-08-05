@@ -103,6 +103,59 @@ describe("Codex normalizer", () => {
 		});
 	});
 
+	/**
+	 * Every turn resends the conversation, so the running total counts the same
+	 * prefix once per turn. Gauging the window from it reports a short thread as
+	 * most of the way full; only the last request describes what is in there.
+	 */
+	it("gauges the window from the last request while billing counts stay cumulative", async () => {
+		const [usage] = await Effect.runPromise(
+			normalise("thread/tokenUsage/updated", {
+				threadId: "thread-1",
+				tokenUsage: {
+					last: {
+						cachedInputTokens: 29_000,
+						inputTokens: 34_000,
+						outputTokens: 900,
+						totalTokens: 34_900,
+					},
+					modelContextWindow: 258_400,
+					total: {
+						cachedInputTokens: 129_536,
+						inputTokens: 148_722,
+						outputTokens: 1_013,
+						totalTokens: 149_735,
+					},
+				},
+				turnId: "turn-1",
+			}),
+		);
+
+		expect(usage).toMatchObject({
+			cached_input_tokens: 129_536,
+			context_tokens: 34_900,
+			context_window_tokens: 258_400,
+			input_tokens: 148_722,
+			output_tokens: 1_013,
+		});
+	});
+
+	it("leaves the window unknown when no last request is reported", async () => {
+		const [usage] = await Effect.runPromise(
+			normalise("thread/tokenUsage/updated", {
+				threadId: "thread-1",
+				tokenUsage: {
+					modelContextWindow: 258_400,
+					total: { inputTokens: 148_722, outputTokens: 1_013, totalTokens: 149_735 },
+				},
+				turnId: "turn-1",
+			}),
+		);
+
+		expect(usage).not.toHaveProperty("context_tokens");
+		expect(usage).toMatchObject({ input_tokens: 148_722 });
+	});
+
 	it("expands multi-question and multi-file frames into uniquely identified observations", async () => {
 		const [questions, files] = await Effect.runPromise(
 			Effect.all([
@@ -305,7 +358,7 @@ describe("Codex normalizer", () => {
 			},
 			{
 				_tag: "native_action",
-				detail: "Private reasoning text retained only in raw provenance",
+				detail: "Reasoning privately",
 			},
 			{ _tag: "search", state: "started" },
 			{ _tag: "search", state: "completed" },
