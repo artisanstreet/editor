@@ -153,7 +153,21 @@ function map_claude_limit(limit: ClaudeUsageLimit): EngineQuotaWindow | undefine
  */
 function map_claude_quota_windows(response: ClaudeUsageResponse): ReadonlyArray<EngineQuotaWindow> {
 	const limits = response.limits ?? [];
-	if (limits.length > 0) return limits.flatMap((limit) => map_claude_limit(limit) ?? []);
+	/**
+	 * One window per id, first sighting wins. The provider has repeated a
+	 * bucket across response sections, and a repeated id is not cosmetic
+	 * downstream: a keyed renderer throws on it, taking every engine section
+	 * after this one down with it.
+	 */
+	if (limits.length > 0) {
+		const seen = new Set<string>();
+		return limits.flatMap((limit) => {
+			const window = map_claude_limit(limit);
+			if (window === undefined || seen.has(window.id)) return [];
+			seen.add(window.id);
+			return [window];
+		});
+	}
 
 	const windows: Array<EngineQuotaWindow> = [];
 	const five_hour = response.five_hour;
@@ -405,6 +419,17 @@ export function parse_claude_cli_usage_windows(
 	at_ms = Date.now(),
 ): ReadonlyArray<EngineQuotaWindow> {
 	const windows: Array<EngineQuotaWindow> = [];
+	/**
+	 * The CLI repeats a window's line across layouts — a summary block and a
+	 * detail block both carry the weekly row. A window id must appear once in
+	 * the report, so the first sighting wins and repeats are dropped.
+	 */
+	const seen = new Set<string>();
+	const push_window = (window: EngineQuotaWindow) => {
+		if (seen.has(window.id)) return;
+		seen.add(window.id);
+		windows.push(window);
+	};
 
 	for (const raw_line of result_text.split("\n")) {
 		const line = raw_line.trim();
@@ -413,7 +438,7 @@ export function parse_claude_cli_usage_windows(
 		const session_percent = session_match?.at(1);
 		if (session_percent !== undefined) {
 			const resets_at = parse_claude_cli_reset_at(line, at_ms);
-			windows.push({
+			push_window({
 				id: "five_hour",
 				kind: "session",
 				percent_used: clamp_percent(Number(session_percent)),
@@ -427,7 +452,7 @@ export function parse_claude_cli_usage_windows(
 		const weekly_all_percent = weekly_all_match?.at(1);
 		if (weekly_all_percent !== undefined) {
 			const resets_at = parse_claude_cli_reset_at(line, at_ms);
-			windows.push({
+			push_window({
 				id: "seven_day",
 				kind: "weekly",
 				percent_used: clamp_percent(Number(weekly_all_percent)),
@@ -442,7 +467,7 @@ export function parse_claude_cli_usage_windows(
 		const weekly_labeled_percent = weekly_labeled_match?.at(2);
 		if (label !== undefined && weekly_labeled_percent !== undefined) {
 			const resets_at = parse_claude_cli_reset_at(line, at_ms);
-			windows.push({
+			push_window({
 				id: `seven_day:${slugify_claude_cli_label(label)}`,
 				kind: "weekly",
 				label,

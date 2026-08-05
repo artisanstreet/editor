@@ -56,10 +56,21 @@
 	const LitFraction = (percent_used: number): number =>
 		Math.floor((Math.min(100, Math.max(0, percent_used)) / 100) * usage_segments) /
 		usage_segments;
-	const GroupWindows = (windows: ReadonlyArray<EngineUsageWindow>) => ({
-		extended: windows.filter((usage_window) => usage_window.kind !== "session"),
-		session: windows.filter((usage_window) => usage_window.kind === "session"),
-	});
+	/**
+	 * Deduplicated by id before the keyed eachs below. The protocol does not
+	 * forbid a provider reporting the same bucket twice — Claude's CLI repeats
+	 * its weekly line in some layouts — and a duplicate key does not degrade,
+	 * it throws, killing every engine section after the one that repeated.
+	 */
+	const GroupWindows = (windows: ReadonlyArray<EngineUsageWindow>) => {
+		const unique = [
+			...new Map(windows.map((usage_window) => [usage_window.id, usage_window])).values(),
+		];
+		return {
+			extended: unique.filter((usage_window) => usage_window.kind !== "session"),
+			session: unique.filter((usage_window) => usage_window.kind === "session"),
+		};
+	};
 
 	const motion_duration = yield* MotionDuration();
 	const motion_easing = yield* MotionEasing();

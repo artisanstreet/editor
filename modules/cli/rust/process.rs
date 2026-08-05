@@ -115,8 +115,13 @@ const fn node_name() -> &'static str {
 fn detach(command: &mut Command) {
     use std::os::windows::process::CommandExt;
     const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    command.creation_flags(CREATE_NEW_PROCESS_GROUP | DETACHED_PROCESS);
+    // A hidden console rather than none (`DETACHED_PROCESS`). The Forge runs
+    // console children constantly — git for every project reading, PowerShell
+    // for file ACLs — and a child of a console-less parent allocates its own
+    // visible console, which flashed a terminal window over the editor per
+    // call. Children inherit this hidden console instead, so nothing paints.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    command.creation_flags(CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW);
 }
 
 #[cfg(not(target_os = "windows"))]

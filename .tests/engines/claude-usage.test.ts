@@ -226,6 +226,26 @@ describe("parse_claude_cli_usage_windows", () => {
 		]);
 	});
 
+	/**
+	 * The CLI repeats a window's line across layouts. A repeated id is not
+	 * cosmetic downstream — a keyed renderer throws on it and takes every
+	 * engine section after this one down with it — so first sighting wins.
+	 */
+	it("reports each window id once when the CLI repeats its lines", () => {
+		const repeated = parse_claude_cli_usage_windows(
+			[
+				"Current session: 17% used",
+				"Current week (all models): 3% used",
+				"Current session: 17% used",
+				"Current week (all models): 4% used",
+			].join("\n"),
+			at_ms,
+		);
+
+		expect(repeated.map((window) => window.id)).toEqual(["five_hour", "seven_day"]);
+		expect(repeated[1]?.percent_used).toBe(3);
+	});
+
 	it("omits reset timestamps when the clause is malformed or its IANA zone is invalid", () => {
 		const invalid_zone = parse_claude_cli_usage_windows(
 			"Current week (all models): 3% used · resets Aug 5, 12am (Not/AZone)",
