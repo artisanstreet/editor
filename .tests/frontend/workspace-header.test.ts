@@ -44,6 +44,10 @@ describe("workspace header", () => {
 		expect(header).toContain('repository.branch.type === "detached"');
 		expect(header).toContain("{project.display_name}");
 		expect(header).toContain('<span class="shrink-0">in</span>');
+		/** The open thread closes the line after a slash, as the one foreground segment. */
+		expect(header).toContain('<span class="shrink-0">/</span>');
+		expect(header).toContain('text-foreground">{thread_title}</span>');
+		expect(layout).toContain("thread_title={active_thread?.title}");
 		/** The remote link must escape the titlebar drag region to stay clickable. */
 		expect(header).toContain("[-webkit-app-region:no-drag]");
 	});

@@ -9,9 +9,12 @@
 
 	let {
 		project,
+		thread_title,
 	}: {
 		/** The workspace the open route is inside; the header renders nothing without one. */
 		project: Project | undefined;
+		/** The open thread's own name, closing the line as its foreground subject. */
+		thread_title?: string;
 	} = $props();
 
 	const client = yield* ArtisanClient;
@@ -43,11 +46,11 @@
 </script>
 
 {#if project !== undefined}
-	{#if repository !== undefined && repository.state === "repository"}
-		{@const remote = repository.remotes.find(
-			(candidate) => candidate.name === repository.default_remote,
-		)}
-		<span class="flex min-w-0 items-center gap-1.5 text-sm text-muted-foreground">
+	<span class="flex min-w-0 items-center gap-1.5 text-sm text-muted-foreground">
+		{#if repository !== undefined && repository.state === "repository"}
+			{@const remote = repository.remotes.find(
+				(candidate) => candidate.name === repository.default_remote,
+			)}
 			{#if remote?.web_url !== undefined}
 				{@const mark = RepositoryMarkFor(remote.host)}
 				{@const MarkIcon = mark.icon}
@@ -77,11 +80,14 @@
 				<Folder class="size-3.5 shrink-0" />
 				<span class="truncate">{project.display_name}</span>
 			{/if}
-		</span>
-	{:else}
-		<span class="flex min-w-0 items-center gap-1.5 text-sm text-muted-foreground">
+		{:else}
 			<Folder class="size-3.5 shrink-0" />
 			<span class="truncate">{project.display_name}</span>
-		</span>
-	{/if}
+		{/if}
+		{#if thread_title !== undefined}
+			<!-- The line reads workspace, then subject: everything before the slash is where, this is what. -->
+			<span class="shrink-0">/</span>
+			<span class="min-w-0 truncate text-foreground">{thread_title}</span>
+		{/if}
+	</span>
 {/if}

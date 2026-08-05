@@ -275,7 +275,7 @@
 {/snippet}
 
 {#snippet workspace_header()}
-	<WorkspaceHeader project={header_project} />
+	<WorkspaceHeader project={header_project} thread_title={active_thread?.title} />
 {/snippet}
 
 <div class="flex h-dvh min-h-0 flex-col bg-background" data-prose-width={$prose_width}>

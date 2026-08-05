@@ -1,7 +1,8 @@
 <script lang="ts" effect>
 	import { page } from "$app/state";
-	import { Effect } from "effect";
+	import { Effect, Option, Schedule } from "effect";
 	import { ArtisanClient } from "@artisan/transport/client";
+	import { Skeleton } from "$lib/components/ui/skeleton";
 	import { RouteNavigation } from "$lib/browser/route-navigation";
 	import { EditorRoutePath } from "$lib/editor/workspace-identity";
 	import {
@@ -37,19 +38,44 @@
 	 * any size therefore costs one small listing to mount, and each folder costs
 	 * one more the first time it is opened.
 	 */
+	/** The panel mounts with the shell, so the first listing rides out the transport cold start. */
+	const ColdStartRetrySchedule = Schedule.exponential("100 millis").pipe(
+		Schedule.upTo({ duration: "5 seconds" }),
+	);
+
 	const LoadDirectory = (parent: string) =>
 		Effect.gen(function* () {
 			if (workspace_id === undefined) {
 				failure = "Open a workspace to browse its files.";
 				return;
 			}
-			const discovered = yield* client.ListWorkspaceFiles({
-				depth: 1,
-				limit: 1_000,
-				workspace_id,
-				...(parent === workspace_tree_root ? {} : { prefix: parent }),
-			});
-			tree = MergeWorkspaceEntries(tree, WorkspaceEntriesByParent(discovered.entries), parent);
+			/**
+			 * Bounded, because this effect runs at the component's top level: a
+			 * Forge that never answers would otherwise leave a fiber pending for
+			 * the life of the route, and the async renderer refuses to navigate
+			 * away from work it still considers unfinished — one dropped reply
+			 * froze every later route change until the page was reloaded.
+			 */
+			const discovered = yield* client
+				.ListWorkspaceFiles({
+					depth: 1,
+					limit: 1_000,
+					workspace_id,
+					...(parent === workspace_tree_root ? {} : { prefix: parent }),
+				})
+				.pipe(
+					Effect.retry({ schedule: ColdStartRetrySchedule }),
+					Effect.timeoutOption("10 seconds"),
+				);
+			if (Option.isNone(discovered)) {
+				failure = "The file listing did not answer. Retry once Forge is reachable.";
+				return;
+			}
+			tree = MergeWorkspaceEntries(
+				tree,
+				WorkspaceEntriesByParent(discovered.value.entries),
+				parent,
+			);
 			failure = undefined;
 		}).pipe(
 			Effect.catch((error) =>
@@ -59,10 +85,16 @@
 			),
 		);
 
+	/**
+	 * The queue is a reactive input of this yield site, so it must only be
+	 * written after the load completes: popping it first invalidates the site
+	 * mid-flight, SER interrupts the request, and the rerun sees an empty queue
+	 * — the tree then never loads.
+	 */
 	if (directory_requests.length > 0) {
 		const [parent, ...remaining] = directory_requests;
-		directory_requests = remaining;
 		yield* LoadDirectory(parent);
+		directory_requests = remaining;
 	}
 
 	const ToggleDirectory = (path: string) =>
@@ -92,7 +124,14 @@
 		{#if failure !== undefined}
 			<p class="px-1 text-xs text-muted-foreground">{failure}</p>
 		{:else if !tree.has(workspace_tree_root)}
-			<p class="px-1 text-xs text-muted-foreground">Loading files…</p>
+			<div class="flex flex-col gap-2.5 px-1 pt-1" aria-label="Loading files" role="status">
+				<Skeleton class="h-4 w-3/4" />
+				<Skeleton class="h-4 w-1/2" />
+				<Skeleton class="h-4 w-2/3" />
+				<Skeleton class="h-4 w-3/5" />
+				<Skeleton class="h-4 w-2/5" />
+				<Skeleton class="h-4 w-1/2" />
+			</div>
 		{:else if (tree.get(workspace_tree_root) ?? []).length === 0}
 			<p class="px-1 text-xs text-muted-foreground">This project has no files.</p>
 		{:else}
