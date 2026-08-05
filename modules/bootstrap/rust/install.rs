@@ -34,8 +34,17 @@ pub struct InstallOptions {
 
 #[allow(clippy::too_many_lines)]
 pub async fn install(options: InstallOptions) -> Result<()> {
+    // Plain HTTP is permitted only from this machine's own loopback, which
+    // cannot be intercepted off-host. A locally built, locally signed release
+    // is installed by serving its output directory on 127.0.0.1; every remote
+    // manifest still requires TLS, and the signature check applies to both.
+    let loopback_manifest = options.manifest_url.host().is_some_and(|host| match host {
+        url::Host::Ipv4(address) => address.is_loopback(),
+        url::Host::Ipv6(address) => address.is_loopback(),
+        url::Host::Domain(domain) => domain == "localhost",
+    });
     let client = reqwest::Client::builder()
-        .https_only(true)
+        .https_only(!loopback_manifest)
         .redirect(reqwest::redirect::Policy::limited(5))
         .build()
         .map_err(BootstrapError::ManifestRequest)?;
