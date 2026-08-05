@@ -39,6 +39,16 @@ export const SessionModelDefaults = sqliteTable("session_model_defaults", {
 	updated_at: text("updated_at").notNull(),
 });
 
+/**
+ * Stores one row per engine the user switched off. Row-per-engine like the
+ * favorites table: disabling one engine never rewrites the others, and a
+ * harness added to the catalog later arrives enabled by simple absence.
+ */
+export const DisabledEngines = sqliteTable("disabled_engines", {
+	engine_id: text("engine_id").primaryKey(),
+	disabled_at: text("disabled_at").notNull(),
+});
+
 /** Stores only content-free metadata for the one canonical global guidance file. */
 export const GlobalGuidanceCanonical = sqliteTable("global_guidance_canonical", {
 	canonical_id: integer("canonical_id").primaryKey(),

@@ -1,6 +1,6 @@
 <script lang="ts" effect>
 	import Settings from "@tabler/icons-svelte/icons/settings";
-	import { Clock, Effect, Option } from "effect";
+	import { Clock, Effect, Option, Stream } from "effect";
 	import type { EngineUsageSnapshot, HostIdentitySnapshot } from "@artisan/protocol";
 	import { ArtisanClient } from "@artisan/transport/client";
 	import { Avatar, AvatarFallback } from "$lib/components/ui/avatar";
@@ -16,6 +16,7 @@
 	import ShaderGlassSurface from "./shader-glass-surface.sv";
 	import SidebarEngineUsage, { type SidebarUsageState } from "./sidebar-engine-usage.sv";
 	import { GradientAvatarSvg } from "$lib/identity/gradient-avatar";
+	import { SessionDefaultsController } from "$lib/settings/session-defaults-controller";
 	import { model_manifest } from "@artisan/catalog";
 	import {
 		EngineUsageCache,
@@ -54,12 +55,31 @@
 	let refreshing_engines = $state<ReadonlySet<string>>(new Set());
 	const is_refreshing = $derived(refreshing_engines.size > 0);
 
+	const defaults_controller = yield* SessionDefaultsController;
+	let disabled_engine_ids = $state.raw<ReadonlyArray<string>>(
+		(yield* defaults_controller.Current).defaults.disabled_engines ?? [],
+	);
+	yield* defaults_controller.Changes.pipe(
+		Stream.runForEach((next) =>
+			Effect.gen(function* () {
+				disabled_engine_ids = next.defaults.disabled_engines ?? [];
+			}),
+		),
+		Effect.forkScoped,
+	);
+
 	/**
-	 * Every harness the catalog knows. Engines without a usage surface answer
-	 * with an empty report at protocol speed, so over-asking costs nothing and
-	 * keeps this list free of a second round trip to discover engine ids.
+	 * Every harness the catalog knows, minus the ones the user switched off.
+	 * A disabled engine is not represented anywhere — asking its provider for
+	 * usage would resurrect it as a pending skeleton in this very menu.
+	 * Engines without a usage surface answer with an empty report at protocol
+	 * speed, so over-asking the enabled set costs nothing.
 	 */
-	const usage_engine_ids = model_manifest.harnesses.map((harness) => harness.id);
+	const usage_engine_ids = $derived(
+		model_manifest.harnesses
+			.map((harness) => harness.id)
+			.filter((engine_id) => !disabled_engine_ids.includes(engine_id)),
+	);
 
 	/** Upserts one engine's reports so each provider paints as soon as it answers. */
 	const MergeReports = (incoming: EngineUsageSnapshot) =>
@@ -243,6 +263,7 @@
 		<SidebarEngineUsage
 			{checked_at_ms}
 			{checked_label}
+			hidden_engine_ids={disabled_engine_ids}
 			{is_refreshing}
 			onrefresh={RefreshUsage(true)}
 			{refreshing_engines}

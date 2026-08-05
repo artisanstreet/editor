@@ -62,6 +62,14 @@ export class SessionDefaultsController extends Context.Service<
 		readonly SaveCompactionDefaults: (
 			input: SaveCompactionDefaultsInput,
 		) => Effect.Effect<SessionDefaultsState, ArtisanClientError>;
+		/**
+		 * Switches one engine's availability. Disabled engines are represented
+		 * nowhere — selectors, usage reads, and settings treat them as absent.
+		 */
+		readonly SetEngineEnabled: (
+			engine_id: string,
+			enabled: boolean,
+		) => Effect.Effect<SessionDefaultsState, ArtisanClientError>;
 		readonly SetFavorite: (
 			model_id: string,
 			favorite: boolean,
@@ -119,6 +127,11 @@ export const SessionDefaultsControllerLive = Layer.effect(
 				return yield* mutation_lock.withPermit(SaveDefaultsUnlocked(update));
 			});
 
+		const SetEngineEnabled = (engine_id: string, enabled: boolean) =>
+			Effect.gen(function* () {
+				return yield* SaveDefaults({ engine: { enabled, engine_id } });
+			});
+
 		const SetFavorite = (model_id: string, favorite: boolean) =>
 			Effect.gen(function* () {
 				return yield* mutation_lock.withPermit(
@@ -171,6 +184,7 @@ export const SessionDefaultsControllerLive = Layer.effect(
 			Refresh,
 			RememberPolicyDefaults,
 			SaveCompactionDefaults,
+			SetEngineEnabled,
 			SetFavorite,
 		});
 	}),

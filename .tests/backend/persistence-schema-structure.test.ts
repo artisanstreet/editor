@@ -20,6 +20,7 @@ const expected_tables = [
 	"ConversationSources",
 	"ConversationThreads",
 	"ConversationTurns",
+	"DisabledEngines",
 	"EventStreams",
 	"GitMutationOperations",
 	"GitWorkspaceProjections",

@@ -79,15 +79,29 @@
 	let defaults_state = $state.raw<SessionDefaultsState | undefined>(undefined);
 	const effective_catalog = $derived(defaults_state?.catalog ?? runtime_catalog);
 	const model_manifest = $derived(effective_catalog.manifest);
+	/**
+	 * The blanket availability switch, honoured at the selector: a disabled
+	 * engine's section and models are not represented at all, rather than
+	 * shown greyed — the switch means "this engine does not exist here".
+	 */
+	const disabled_engines = $derived(
+		new Set(defaults_state?.defaults.disabled_engines ?? []),
+	);
 	const engines: ReadonlyArray<EngineChoice> = $derived(
-		model_manifest.harnesses.map((harness) => ({
-			id: harness.id,
-			name: harness.label,
-			...EngineMarkFor(harness.id),
-		})),
+		model_manifest.harnesses
+			.filter((harness) => !disabled_engines.has(harness.id))
+			.map((harness) => ({
+				id: harness.id,
+				name: harness.label,
+				...EngineMarkFor(harness.id),
+			})),
 	);
 
-	const models = $derived(ModelsFromCatalog(effective_catalog));
+	const models = $derived(
+		ModelsFromCatalog(effective_catalog).filter(
+			(model) => !disabled_engines.has(model.engine),
+		),
+	);
 	const initial_models = ModelsFromCatalog(OfflineRuntimeCatalog);
 	let open = $state(false);
 	let previewed_model_id = $state<string | undefined>(undefined);

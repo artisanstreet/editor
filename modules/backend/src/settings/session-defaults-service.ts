@@ -21,6 +21,7 @@ const initial_permission = "supervised";
 
 import { Database } from "../persistence/database";
 import {
+	DisabledEngines,
 	EventStreams,
 	JournalCommands,
 	JournalEvents,
@@ -144,8 +145,15 @@ export const SessionDefaultsServiceLive = Layer.effect(
 					})
 					.from(SessionModelDefaults)
 					.orderBy(asc(SessionModelDefaults.model_id));
+				const disabled = yield* client
+					.select({ engine_id: DisabledEngines.engine_id })
+					.from(DisabledEngines)
+					.orderBy(asc(DisabledEngines.engine_id));
 
 				return {
+					...(disabled.length > 0
+						? { disabled_engines: disabled.map((row) => row.engine_id) }
+						: {}),
 					...(shared?.compaction_model_id
 						? { compaction_model: shared.compaction_model_id }
 						: {}),
@@ -246,6 +254,27 @@ export const SessionDefaultsServiceLive = Layer.effect(
 									set: shared,
 									target: SessionDefaults.defaults_id,
 								});
+						}
+
+						/**
+						 * Availability is row-per-engine like the favorites: switching
+						 * one engine never touches another's row, and re-enabling is a
+						 * plain delete rather than a rewritten set.
+						 */
+						if (payload.engine !== undefined) {
+							if (payload.engine.enabled) {
+								yield* transaction
+									.delete(DisabledEngines)
+									.where(eq(DisabledEngines.engine_id, payload.engine.engine_id));
+							} else {
+								yield* transaction
+									.insert(DisabledEngines)
+									.values({
+										disabled_at: accepted_at,
+										engine_id: payload.engine.engine_id,
+									})
+									.onConflictDoNothing();
+							}
 						}
 
 						if (payload.model !== undefined) {

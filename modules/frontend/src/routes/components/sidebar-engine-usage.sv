@@ -35,6 +35,7 @@
 		onrefresh,
 		refreshing_engines,
 		usage_state,
+		hidden_engine_ids,
 	}: {
 		readonly checked_at_ms: number;
 		readonly checked_label?: string;
@@ -42,6 +43,12 @@
 		readonly onrefresh: Effect.Effect<void>;
 		readonly refreshing_engines: ReadonlySet<string>;
 		readonly usage_state: SidebarUsageState;
+		/**
+		 * Engines the user switched off. A cached snapshot can still carry their
+		 * last report, and a switched-off engine must not be resurrected by its
+		 * own cache entry.
+		 */
+		readonly hidden_engine_ids?: ReadonlyArray<string>;
 	} = $props();
 
 	const window_kind_labels: Readonly<Record<EngineUsageWindow["kind"], string>> = {
@@ -93,19 +100,20 @@
 		remaining_reading.target = remaining_target;
 		});
 
-	const authenticated_engines = $derived(
+	const visible_engines = $derived(
 		usage_state.status === "loaded"
 			? usage_state.snapshot.engines.filter(
-					(engine) => engine.authentication === "authenticated",
+					(engine) => !(hidden_engine_ids ?? []).includes(engine.engine_id),
 				)
 			: [],
 	);
+	const authenticated_engines = $derived(
+		visible_engines.filter((engine) => engine.authentication === "authenticated"),
+	);
 	const unavailable_engines = $derived(
-		usage_state.status === "loaded"
-			? usage_state.snapshot.engines.filter(
-					(engine) => engine.authentication === "unknown" && engine.failure !== undefined,
-				)
-			: [],
+		visible_engines.filter(
+			(engine) => engine.authentication === "unknown" && engine.failure !== undefined,
+		),
 	);
 	/**
 	 * Engines still fetching their first report. Reports merge in as each

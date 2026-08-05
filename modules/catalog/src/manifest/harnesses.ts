@@ -170,7 +170,7 @@ export const harnesses = [
 		compaction_default_model_id: "cursor-composer-2-5",
 		id: "cursor",
 		gateways: [],
-		label: "Cursor Agent",
+		label: "Cursor",
 		permissions: {
 			default: "supervised",
 			options: [

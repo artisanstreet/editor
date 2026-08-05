@@ -11,6 +11,8 @@
 	} from "$lib/settings/session-defaults-controller";
 	import { Badge } from "$lib/components/ui/badge";
 	import { Skeleton } from "$lib/components/ui/skeleton";
+	import { Switch } from "$lib/components/ui/switch";
+	import Row from "./row.sv";
 
 	let { engine_id }: { engine_id: string } = $props();
 
@@ -39,6 +41,32 @@
 	const harness = $derived(
 		runtime_catalog.manifest.harnesses.find((candidate) => candidate.id === engine_id),
 	);
+	/**
+	 * The blanket switch. Off means this engine is not represented as available
+	 * anywhere — no selector section, no usage read, no models — until it is
+	 * switched back on. Everything below the switch exists only while it is on.
+	 */
+	const engine_enabled = $derived(
+		!(defaults_state.defaults.disabled_engines ?? []).includes(engine_id),
+	);
+	let availability_saving = $state(false);
+
+	const ToggleAvailability = (enabled: boolean) =>
+		Effect.gen(function* () {
+			if (availability_saving) return;
+			availability_saving = true;
+			yield* defaults_controller.SetEngineEnabled(engine_id, enabled).pipe(
+				Effect.catch(() =>
+					Effect.gen(function* () {
+					}),
+				),
+				Effect.ensuring(
+					Effect.gen(function* () {
+						availability_saving = false;
+					}),
+				),
+			);
+		});
 	const engine_mark = $derived(EngineMarkFor(engine_id));
 	const engine_models = $derived(catalog_models.filter((model) => model.engine === engine_id));
 	const compaction_default = $derived(
@@ -74,8 +102,23 @@
 		yield* LoadUsage(true);
 	});
 
-	/** `engine_id` is a reactive input: navigating between engine pages refetches. */
-	yield* LoadUsage(false);
+	/**
+	 * `engine_id` and the availability switch are reactive inputs: navigating
+	 * between engine pages refetches, and flipping the switch on fetches the
+	 * first reading for the sections that just appeared — which paint their
+	 * skeletons immediately while it loads. A switched-off engine is never
+	 * asked for anything.
+	 */
+	const LoadInitialUsage = (page_engine_id: string, enabled: boolean) =>
+		Effect.gen(function* () {
+			if (!enabled) {
+				usage = undefined;
+				usage_loaded = false;
+				return;
+			}
+			yield* LoadUsage(false);
+		});
+	yield* LoadInitialUsage(engine_id, engine_enabled);
 
 	/** Only paint a report that belongs to the page being viewed. */
 	const current_usage = $derived(usage?.engine_id === engine_id ? usage : undefined);
@@ -110,9 +153,30 @@
 		{harness.label}
 	</h1>
 	<p class="mt-1 text-sm text-muted-foreground">
-		Account, catalog, and permission surface for the {harness.label} engine.
+		Availability, account, and models for the {harness.label} engine.
 	</p>
 
+	<section class="mt-8" aria-labelledby="availability">
+		<div
+			class="card rounded-xl bg-linear-to-b from-surface-225 to-surface-200 dark:from-surface-800 dark:to-surface-925"
+		>
+			<Row
+				title={`Enable ${harness.label}`}
+				description="Whether this engine is represented as available at all. Off, its models leave the model picker and its account is never asked for usage."
+			>
+				{#snippet control()}
+					<Switch
+						checked={engine_enabled}
+						disabled={availability_saving}
+						aria-label={`Enable ${harness.label}`}
+						onclick={yield* ToggleAvailability(!engine_enabled)}
+					/>
+				{/snippet}
+			</Row>
+		</div>
+	</section>
+
+	{#if engine_enabled}
 	<section class="mt-10" aria-labelledby="account">
 		<div class="flex items-center justify-between gap-4">
 			<h2 id="account" class="scroll-mt-6 text-sm font-medium text-foreground">Account</h2>
@@ -244,30 +308,17 @@
 		</div>
 	</section>
 
-	<section class="mt-10" aria-labelledby="permissions">
-		<h2 id="permissions" class="scroll-mt-6 text-sm font-medium text-foreground">
-			Permissions
-		</h2>
-		<div
-			class="card mt-3 rounded-xl bg-linear-to-b from-surface-225 to-surface-200 dark:from-surface-800 dark:to-surface-925"
-		>
-			<div class="flex flex-col divide-y divide-border/40">
-				{#each harness.permissions.options as option (option.id)}
-					<div class="flex items-center justify-between gap-4 px-4 py-2.5">
-						<span class="flex min-w-0 flex-col">
-							<span class="truncate text-sm text-foreground">{option.label}</span>
-							<span class="text-pretty text-xs text-muted-foreground">
-								{option.description}
-							</span>
-						</span>
-						{#if option.id === harness.permissions.default}
-							<Badge variant="outline">Default</Badge>
-						{/if}
-					</div>
-				{/each}
-			</div>
-		</div>
-	</section>
+	{:else}
+		<!--
+			Nothing below the switch while it is off: painting a dimmed account and
+			model list would say "present but broken", and the switch's whole claim
+			is that this engine is absent.
+		-->
+		<p class="mt-8 text-sm text-muted-foreground">
+			{harness.label} is switched off. Its models are hidden everywhere until it is
+			enabled again.
+		</p>
+	{/if}
 {/if}
 
 <style>

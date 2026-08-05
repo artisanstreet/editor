@@ -53,6 +53,16 @@ export const SessionDefaults = Schema.Struct({
 	 * model by its unique catalog id.
 	 */
 	compaction_model: Schema.optional(Schema.NonEmptyString),
+	/**
+	 * Engines the user has switched off entirely. A disabled engine's models
+	 * are not represented as available anywhere — selectors, usage reads, and
+	 * settings all treat it as absent until it is switched back on. Stored as
+	 * the disabled set rather than the enabled set so a newly added harness
+	 * arrives enabled instead of silently missing.
+	 */
+	disabled_engines: Schema.optional(
+		Schema.Array(Identifier).check(Schema.isMaxLength(32)),
+	),
 	/** The model most recently chosen in any composer. */
 	last_model_id: Schema.optional(Schema.NonEmptyString),
 	models: Schema.Array(SessionModelDefaults).check(
@@ -74,6 +84,13 @@ export type SessionDefaults = typeof SessionDefaults.Type;
 export const SessionDefaultsUpdateInput = Schema.Struct({
 	/** `null` restores Curated: each harness's cost-effective catalog default. */
 	compaction_model: Schema.optional(Schema.NullOr(Schema.NonEmptyString)),
+	/** Switches one engine's availability without restating the others. */
+	engine: Schema.optional(
+		Schema.Struct({
+			enabled: Schema.Boolean,
+			engine_id: Identifier,
+		}),
+	),
 	last_model_id: Schema.optional(Schema.NonEmptyString),
 	model: Schema.optional(SessionModelDefaultsUpdate),
 	permission: Schema.optional(Identifier),
