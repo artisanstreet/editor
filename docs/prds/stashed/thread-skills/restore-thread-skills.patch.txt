@@ -1,0 +1,1386 @@
+diff -ruN skills-after/.tests/backend/conversation-skill-projection.test.ts skills-before/.tests/backend/conversation-skill-projection.test.ts
+--- skills-after/.tests/backend/conversation-skill-projection.test.ts	1970-01-01 01:00:00.000000000 +0100
++++ skills-before/.tests/backend/conversation-skill-projection.test.ts	2026-08-05 14:45:08.175873200 +0200
+@@ -0,0 +1,149 @@
++import { mkdtemp, rm } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++import { fileURLToPath } from "node:url";
++
++import { Effect } from "effect";
++import { afterEach, describe, expect, it } from "vitest";
++
++import { make_backend_runtime } from "@artisan/backend";
++import type { EngineObservation } from "@artisan/engines";
++
++import {
++	ApplyEngineObservation,
++	ConversationReadModel,
++} from "../../modules/backend/src/conversation";
++import { Database } from "../../modules/backend/src/persistence/database";
++import { Threads } from "../../modules/backend/src/persistence/tables";
++
++const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
++const directories: string[] = [];
++
++const MakePath = async () => {
++	const directory = await mkdtemp(join(tmpdir(), "artisan-skill-projection-"));
++	directories.push(directory);
++	return join(directory, "artisan.db");
++};
++
++afterEach(async () => {
++	await Promise.all(
++		directories.splice(0).map((directory) => rm(directory, { force: true, recursive: true })),
++	);
++});
++
++const Skill = (
++	observation_id: string,
++	sequence: number,
++	skill_name: string,
++	detail?: string,
++): EngineObservation =>
++	({
++		_tag: "skill",
++		artisan_run_id: "run_1",
++		...(detail === undefined ? {} : { detail }),
++		invocation_id: `toolu_${sequence}`,
++		observation_id,
++		raw: { engine_id: "claude", frame: {}, transport: "test" },
++		sequence,
++		skill_name,
++		state: "started",
++	}) as EngineObservation;
++
++describe("skill projection round trip", () => {
++	it("stores a skill load and reads the snapshot back without failing the projection", async () => {
++		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
++		try {
++			const result = await runtime.runPromise(
++				Effect.gen(function* () {
++					const database = yield* Database;
++					const read_model = yield* ConversationReadModel;
++					yield* database.client.insert(Threads).values({
++						created_at: "2026-08-01T00:00:00.000Z",
++						last_activity_at: "2026-08-01T00:00:00.000Z",
++						thread_id: "thread_1",
++						title: "Conversation",
++						updated_at: "2026-08-01T00:00:00.000Z",
++					});
++					yield* database.client.transaction((transaction) =>
++						Effect.gen(function* () {
++							const context = {
++								occurred_at: "2026-08-01T00:00:01.000Z",
++								run_id: "run_1",
++								thread_id: "thread_1",
++							};
++							yield* ApplyEngineObservation(
++								transaction,
++								Skill("observation_1", 1, "transitions-dev", "review"),
++								context,
++							) as Effect.Effect<unknown, unknown, never>;
++							/** A second load of the same skill must be its own row. */
++							yield* ApplyEngineObservation(
++								transaction,
++								Skill("observation_2", 2, "transitions-dev"),
++								context,
++							) as Effect.Effect<unknown, unknown, never>;
++						}),
++					);
++					return yield* read_model.ReadSnapshot("thread_1");
++				}),
++			);
++
++			expect(result.status).toBe("available");
++			if (result.status !== "available") return;
++			const skills = result.snapshot.items.filter(
++				(item) => item.type === "activity" && item.kind === "skill",
++			);
++			expect(skills).toHaveLength(2);
++			expect(skills[0]).toMatchObject({
++				detail: "review",
++				kind: "skill",
++				label: "transitions-dev",
++				type: "activity",
++			});
++		} finally {
++			await runtime.dispose();
++		}
++	});
++
++	it("survives a skill load that discloses no arguments", async () => {
++		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
++		try {
++			const result = await runtime.runPromise(
++				Effect.gen(function* () {
++					const database = yield* Database;
++					const read_model = yield* ConversationReadModel;
++					yield* database.client.insert(Threads).values({
++						created_at: "2026-08-01T00:00:00.000Z",
++						last_activity_at: "2026-08-01T00:00:00.000Z",
++						thread_id: "thread_2",
++						title: "Conversation",
++						updated_at: "2026-08-01T00:00:00.000Z",
++					});
++					yield* database.client.transaction(
++						(transaction) =>
++							ApplyEngineObservation(
++								transaction,
++								Skill("observation_3", 1, "sanders-skill", ""),
++								{
++									occurred_at: "2026-08-01T00:00:01.000Z",
++									run_id: "run_1",
++									thread_id: "thread_2",
++								},
++							) as Effect.Effect<unknown, unknown, never>,
++					);
++					return yield* read_model.ReadSnapshot("thread_2");
++				}),
++			);
++
++			expect(result.status).toBe("available");
++			if (result.status !== "available") return;
++			expect(
++				result.snapshot.items.filter(
++					(item) => item.type === "activity" && item.kind === "skill",
++				),
++			).toHaveLength(1);
++		} finally {
++			await runtime.dispose();
++		}
++	});
++});
+diff -ruN skills-after/.tests/engines/claude-skills.test.ts skills-before/.tests/engines/claude-skills.test.ts
+--- skills-after/.tests/engines/claude-skills.test.ts	1970-01-01 01:00:00.000000000 +0100
++++ skills-before/.tests/engines/claude-skills.test.ts	2026-08-05 14:45:08.229872400 +0200
+@@ -0,0 +1,221 @@
++import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
++import { tmpdir } from "node:os";
++import { join } from "node:path";
++
++import { Effect } from "effect";
++import { afterAll, beforeAll, describe, expect, it } from "vitest";
++
++import {
++	always_loaded_skill_names,
++	normalize_claude_event,
++	parse_skill_frontmatter,
++	ReadClaudeSkillCatalog,
++} from "@artisan/engines";
++
++const input = (payload: unknown) => ({
++	artisan_run_id: "run",
++	frame_sequence: 1,
++	payload,
++	raw_frame_base64: "eA==",
++	turn_id: "turn",
++});
++
++describe("Claude skill observation", () => {
++	it("reports the skill's own name rather than the tool that loaded it", () => {
++		const events = normalize_claude_event(
++			input({
++				type: "assistant",
++				message: {
++					content: [
++						{
++							type: "tool_use",
++							id: "toolu_1",
++							name: "Skill",
++							input: { skill: "transitions-dev", args: "review" },
++						},
++					],
++				},
++			}),
++		);
++
++		expect(events).toEqual(
++			expect.arrayContaining([
++				expect.objectContaining({
++					_tag: "skill",
++					detail: "review",
++					invocation_id: "toolu_1",
++					skill_name: "transitions-dev",
++					state: "started",
++				}),
++			]),
++		);
++		/** It must not also land as a generic tool row, or the card would double count. */
++		expect(events.filter((event) => event._tag === "tool")).toHaveLength(0);
++	});
++
++	it("falls back to a generic tool when the frame names no skill", () => {
++		const events = normalize_claude_event(
++			input({
++				type: "assistant",
++				message: {
++					content: [{ type: "tool_use", id: "toolu_2", name: "Skill", input: {} }],
++				},
++			}),
++		);
++
++		expect(events).toEqual(
++			expect.arrayContaining([expect.objectContaining({ _tag: "tool", tool_name: "Skill" })]),
++		);
++		expect(events.filter((event) => event._tag === "skill")).toHaveLength(0);
++	});
++});
++
++describe("Claude skill frontmatter", () => {
++	it("reads the two scalar keys and ignores nested mappings", () => {
++		expect(
++			parse_skill_frontmatter(
++				[
++					"---",
++					"name: transitions-dev",
++					"description: CSS transitions.",
++					"---",
++					"# Body",
++				].join("\n"),
++			),
++		).toEqual({ description: "CSS transitions.", name: "transitions-dev" });
++		expect(parse_skill_frontmatter("# No frontmatter")).toEqual({});
++		expect(parse_skill_frontmatter("---\nunterminated: true\n")).toEqual({});
++		expect(
++			parse_skill_frontmatter(
++				["---", "metadata:", "  description: nested", "name: outer", "---"].join("\n"),
++			),
++		).toEqual({ name: "outer" });
++	});
++});
++
++describe("Claude always-loaded hook detection", () => {
++	it("names skills a session hook cats, on either path separator", () => {
++		const names = always_loaded_skill_names({
++			hooks: {
++				SessionStart: [
++					{
++						hooks: [
++							{
++								command: "cat ~/.claude/skills/sanders-skill/SKILL.md",
++								type: "command",
++							},
++						],
++					},
++				],
++				UserPromptSubmit: [
++					{ hooks: [{ command: "type C:\\x\\skills\\house-style\\SKILL.md" }] },
++				],
++				/** A tool-scoped hook is not unconditional, so it must not be claimed. */
++				PreToolUse: [{ hooks: [{ command: "cat ~/.claude/skills/not-always/SKILL.md" }] }],
++			},
++		});
++
++		expect([...names].toSorted()).toEqual(["house-style", "sanders-skill"]);
++	});
++
++	it("claims nothing from a hook that touches no skill", () => {
++		expect(
++			always_loaded_skill_names({
++				hooks: { SessionStart: [{ hooks: [{ command: "echo hello" }] }] },
++			}).size,
++		).toBe(0);
++		expect(always_loaded_skill_names(undefined).size).toBe(0);
++	});
++});
++
++describe("Claude skill catalog", () => {
++	let config_dir = "";
++
++	beforeAll(async () => {
++		config_dir = await mkdtemp(join(tmpdir(), "artisan-skills-"));
++		await mkdir(join(config_dir, "skills", "transitions-dev"), { recursive: true });
++		await writeFile(
++			join(config_dir, "skills", "transitions-dev", "SKILL.md"),
++			"---\nname: transitions-dev\ndescription: CSS transitions.\n---\nbody\n",
++			"utf8",
++		);
++		await mkdir(join(config_dir, "skills", "sanders-skill"), { recursive: true });
++		await writeFile(
++			join(config_dir, "skills", "sanders-skill", "SKILL.md"),
++			"---\nname: sanders-skill\ndescription: Standards.\n---\nbody\n",
++			"utf8",
++		);
++		await writeFile(
++			join(config_dir, "settings.json"),
++			JSON.stringify({
++				hooks: {
++					SessionStart: [
++						{
++							hooks: [
++								{
++									command: `cat ${config_dir}/skills/sanders-skill/SKILL.md`,
++									type: "command",
++								},
++							],
++						},
++					],
++				},
++			}),
++			"utf8",
++		);
++	});
++
++	afterAll(async () => {
++		if (config_dir !== "") await rm(config_dir, { force: true, recursive: true });
++	});
++
++	it("marks only the hook-injected skill as always loaded", async () => {
++		const catalog = await Effect.runPromise(
++			ReadClaudeSkillCatalog({ claude_config_dir: config_dir }),
++		);
++
++		expect(catalog.skills.map((skill) => skill.name)).toEqual([
++			"sanders-skill",
++			"transitions-dev",
++		]);
++		expect(catalog.skills.find((skill) => skill.name === "sanders-skill")).toEqual({
++			always_loaded: true,
++			description: "Standards.",
++			name: "sanders-skill",
++			source: "user",
++		});
++		expect(
++			catalog.skills.find((skill) => skill.name === "transitions-dev")?.always_loaded,
++		).toBe(false);
++	});
++
++	it("reports a hook-named skill that has no directory of its own", async () => {
++		const orphan_dir = await mkdtemp(join(tmpdir(), "artisan-skills-orphan-"));
++		await writeFile(
++			join(orphan_dir, "settings.json"),
++			JSON.stringify({
++				hooks: {
++					SessionStart: [
++						{ hooks: [{ command: "cat /elsewhere/skills/ghost/SKILL.md" }] },
++					],
++				},
++			}),
++			"utf8",
++		);
++
++		const catalog = await Effect.runPromise(
++			ReadClaudeSkillCatalog({ claude_config_dir: orphan_dir }),
++		);
++
++		expect(catalog.skills).toEqual([{ always_loaded: true, name: "ghost", source: "unknown" }]);
++		await rm(orphan_dir, { force: true, recursive: true });
++	});
++
++	it("degrades to an empty catalog rather than failing on a missing config dir", async () => {
++		const catalog = await Effect.runPromise(
++			ReadClaudeSkillCatalog({ claude_config_dir: join(tmpdir(), "artisan-skills-absent") }),
++		);
++
++		expect(catalog.skills).toEqual([]);
++	});
++});
+diff -ruN skills-after/.tests/frontend/frontend-fixture-runtime.test.ts skills-before/.tests/frontend/frontend-fixture-runtime.test.ts
+--- skills-after/.tests/frontend/frontend-fixture-runtime.test.ts	2026-08-05 14:57:48.219083300 +0200
++++ skills-before/.tests/frontend/frontend-fixture-runtime.test.ts	2026-08-05 14:57:42.697979400 +0200
+@@ -92,6 +92,7 @@
+ 						"DisconnectCapability",
+ 						"EnableCapability",
+ 						"EnableRoutine",
++						"GetEngineSkills",
+ 						"GetEngineUsage",
+ 						"GetGlobalGuidance",
+ 						"GetGitDiff",
+diff -ruN skills-after/modules/backend/src/conversation/projection/activity.ts skills-before/modules/backend/src/conversation/projection/activity.ts
+--- skills-after/modules/backend/src/conversation/projection/activity.ts	2026-08-05 14:48:42.121842300 +0200
++++ skills-before/modules/backend/src/conversation/projection/activity.ts	2026-08-05 14:45:07.542964200 +0200
+@@ -16,6 +16,7 @@
+ 			| "process_diagnostic"
+ 			| "protocol_diagnostic"
+ 			| "search"
++			| "skill"
+ 			| "terminal_activity"
+ 			| "tool"
+ 			| "usage";
+@@ -107,6 +108,39 @@
+ 					source,
+ 				);
+ 			});
++		/**
++		 * Keyed on the invocation rather than the skill name: the same skill can
++		 * be loaded twice in one turn, and collapsing those onto one item would
++		 * lose the second load and let its lifecycle overwrite the first's.
++		 */
++		case "skill": {
++			const skill_detail = optional_text(observation.detail);
++
++			return UpsertItem(
++				transaction,
++				input.thread_id,
++				{
++					...item_base(
++						`activity:${observation.invocation_id}`,
++						turn_id,
++						input,
++						observation.state,
++						observation.observation_id,
++					),
++					kind: "skill",
++					label: text(observation.skill_name) || "Skill",
++					status: lifecycle(observation.state),
++					/**
++					 * Trimmed away rather than stored: a renderer-visible detail must
++					 * carry at least one character, and an engine that discloses empty
++					 * arguments would otherwise fail the whole projection write.
++					 */
++					...(skill_detail === undefined ? {} : { detail: skill_detail }),
++					type: "activity",
++				},
++				source,
++			);
++		}
+ 		case "terminal_activity":
+ 		case "tool":
+ 		case "search": {
+diff -ruN skills-after/modules/backend/src/conversation/projection/observation.ts skills-before/modules/backend/src/conversation/projection/observation.ts
+--- skills-after/modules/backend/src/conversation/projection/observation.ts	2026-08-05 14:48:42.197073100 +0200
++++ skills-before/modules/backend/src/conversation/projection/observation.ts	2026-08-05 14:45:07.602011500 +0200
+@@ -137,6 +137,7 @@
+ 			case "process_diagnostic":
+ 			case "protocol_diagnostic":
+ 			case "search":
++			case "skill":
+ 			case "terminal_activity":
+ 			case "tool":
+ 			case "usage":
+diff -ruN skills-after/modules/backend/src/protocol/rpc/query-handlers/engine-skills.ts skills-before/modules/backend/src/protocol/rpc/query-handlers/engine-skills.ts
+--- skills-after/modules/backend/src/protocol/rpc/query-handlers/engine-skills.ts	1970-01-01 01:00:00.000000000 +0100
++++ skills-before/modules/backend/src/protocol/rpc/query-handlers/engine-skills.ts	2026-08-05 14:45:08.118360700 +0200
+@@ -0,0 +1,126 @@
++import { Effect } from "effect";
++
++import type {
++	EngineSkillQueryEnvelope,
++	EngineSkillQueryResultEnvelope,
++	EngineSkillReport,
++	ProtocolErrorDetail,
++} from "@artisan/protocol";
++import { EngineRegistry, type Engine } from "@artisan/engines";
++
++import { RuntimeMetadata } from "../../../runtime/metadata";
++
++const max_skills_per_report = 128;
++const max_engines_per_catalog = 16;
++const skills_timeout = "5 seconds";
++
++/** Renders a short, secret-free human message for a failed catalog read. */
++function describe_skill_failure(cause: unknown): string {
++	if (cause === null || typeof cause !== "object" || !("_tag" in cause)) {
++		return "Skill catalog read failed.";
++	}
++
++	const tag = String((cause as { _tag: unknown })._tag);
++
++	if (tag === "TimeoutException" || tag === "TimeoutError") {
++		return "Skill catalog read timed out.";
++	}
++
++	const message = (cause as { message?: unknown }).message;
++
++	return typeof message === "string" && message.length > 0
++		? message
++		: `Skill catalog read failed (${tag}).`;
++}
++
++/**
++ * Reads one engine's catalog, absorbing failure into the report shape.
++ *
++ * Uncached, unlike usage: this is a local directory walk rather than a provider
++ * round trip, and a skill added or a hook edited between turns should show up on
++ * the next read rather than after a freshness window expires.
++ */
++function ReportSkills(engine: Engine): Effect.Effect<EngineSkillReport> {
++	const skills = engine.Skills;
++
++	if (skills === undefined) {
++		return Effect.succeed({
++			display_name: engine.Descriptor.display_name,
++			engine_id: engine.Descriptor.id,
++			skills: [],
++		});
++	}
++
++	return skills.pipe(
++		Effect.timeout(skills_timeout),
++		Effect.match({
++			onFailure: (cause): EngineSkillReport => ({
++				display_name: engine.Descriptor.display_name,
++				engine_id: engine.Descriptor.id,
++				failure: describe_skill_failure(cause),
++				skills: [],
++			}),
++			onSuccess: (catalog): EngineSkillReport => ({
++				display_name: engine.Descriptor.display_name,
++				engine_id: engine.Descriptor.id,
++				skills: catalog.skills.slice(0, max_skills_per_report),
++			}),
++		}),
++	);
++}
++
++export const MakeEngineSkillQueryHandler = Effect.gen(function* () {
++	const registry = yield* EngineRegistry;
++	const metadata = yield* RuntimeMetadata;
++
++	const Envelope = <Kind extends EngineSkillQueryResultEnvelope["kind"], Payload>(
++		query: EngineSkillQueryEnvelope,
++		kind: Kind,
++		payload: Payload,
++	) =>
++		Effect.gen(function* () {
++			const message_id = yield* metadata.MakeId("message");
++			const sent_at = yield* metadata.Now;
++
++			return {
++				correlation_id: query.message_id,
++				kind,
++				message_id,
++				origin: "backend" as const,
++				payload,
++				protocol_version: 1 as const,
++				schema_version: 1 as const,
++				sent_at,
++			};
++		});
++
++	const handlers = {
++		"engine.skill.query": (query: EngineSkillQueryEnvelope) =>
++			Effect.gen(function* () {
++				const engines = (yield* registry.List).filter(
++					(engine) =>
++						engine.Skills !== undefined &&
++						(query.payload.engine_id === undefined ||
++							engine.Descriptor.id === query.payload.engine_id),
++				);
++				const reports = yield* Effect.all(engines.map(ReportSkills), {
++					concurrency: "unbounded",
++				});
++				const fetched_at = yield* metadata.Now;
++
++				return yield* Envelope(query, "engine.skill.query.result", {
++					engines: reports.slice(0, max_engines_per_catalog),
++					fetched_at,
++				});
++			}),
++	};
++
++	return (
++		query: EngineSkillQueryEnvelope,
++	): Effect.Effect<EngineSkillQueryResultEnvelope, ProtocolErrorDetail> => {
++		switch (query.kind) {
++			case "engine.skill.query":
++				return handlers["engine.skill.query"](query);
++		}
++	};
++});
+diff -ruN skills-after/modules/backend/src/protocol/rpc/ready-dispatch.ts skills-before/modules/backend/src/protocol/rpc/ready-dispatch.ts
+--- skills-after/modules/backend/src/protocol/rpc/ready-dispatch.ts	2026-08-05 14:48:42.455029200 +0200
++++ skills-before/modules/backend/src/protocol/rpc/ready-dispatch.ts	2026-08-05 14:45:07.878334700 +0200
+@@ -14,6 +14,7 @@
+ import { MakeSettingsMutationHandler } from "./mutation-handlers/settings";
+ import { MakeToolMutationHandlers } from "./mutation-handlers/tools";
+ import { MakeControlPlaneHandlers } from "./query-handlers/control-plane";
++import { MakeEngineSkillQueryHandler } from "./query-handlers/engine-skills";
+ import { MakeEngineUsageQueryHandler } from "./query-handlers/engine-usage";
+ import { MakeHostIdentityQueryHandler } from "./query-handlers/host-identity";
+ import { MakeMarketplaceQueryHandler } from "./query-handlers/marketplace";
+@@ -28,6 +29,7 @@
+ 	ReadyHandlerFactory,
+ 	{
+ 		readonly Make: Effect.Effect<{
++			readonly engine_skills: Effect.Success<typeof MakeEngineSkillQueryHandler>;
+ 			readonly engine_usage: Effect.Success<typeof MakeEngineUsageQueryHandler>;
+ 			readonly host_identity: Effect.Success<typeof MakeHostIdentityQueryHandler>;
+ 			readonly marketplace: Effect.Success<typeof MakeMarketplaceQueryHandler>;
+@@ -44,6 +46,7 @@
+ 	const { DeliverLiveEvents, Enqueue, EnqueueError, state } = yield* ReadyConnectionRuntime;
+ 	const handlers = yield* (yield* ReadyHandlerFactory).Make;
+ 	const HandleSettingsMutation = handlers.settings;
++	const HandleEngineSkillQuery = handlers.engine_skills;
+ 	const HandleEngineUsageQuery = handlers.engine_usage;
+ 	const HandleHostIdentityQuery = handlers.host_identity;
+ 	const HandleMarketplaceQuery = handlers.marketplace;
+@@ -103,6 +106,7 @@
+ 	const HandleMarketplaceReadQuery = AdaptRpcHandler(HandleMarketplaceQuery);
+ 	const HandleHostIdentityReadQuery = AdaptRpcHandler(HandleHostIdentityQuery);
+ 	const HandleEngineUsageReadQuery = AdaptRpcHandler(HandleEngineUsageQuery);
++	const HandleEngineSkillReadQuery = AdaptRpcHandler(HandleEngineSkillQuery);
+ 	const HandleSettingsMutationResult = (envelope: Parameters<typeof HandleSettingsMutation>[0]) =>
+ 		Effect.gen(function* () {
+ 			const result = yield* HandleSettingsMutation(envelope);
+@@ -272,6 +276,8 @@
+ 				return HandleHostIdentityReadQuery(envelope, current);
+ 			case "engine.usage.query":
+ 				return HandleEngineUsageReadQuery(envelope, current);
++			case "engine.skill.query":
++				return HandleEngineSkillReadQuery(envelope, current);
+ 			case "subscribe":
+ 				return projection_subscriptions.HandleSubscribe(envelope, current);
+ 			case "unsubscribe":
+diff -ruN skills-after/modules/backend/src/protocol/server.ts skills-before/modules/backend/src/protocol/server.ts
+--- skills-after/modules/backend/src/protocol/server.ts	2026-08-05 14:48:42.503366700 +0200
++++ skills-before/modules/backend/src/protocol/server.ts	2026-08-05 14:45:07.942335200 +0200
+@@ -71,6 +71,7 @@
+ 	RecordToCursors,
+ } from "./connection-state";
+ import { MakeSettingsMutationHandler } from "./rpc/mutation-handlers/settings";
++import { MakeEngineSkillQueryHandler } from "./rpc/query-handlers/engine-skills";
+ import { MakeEngineUsageQueryHandler } from "./rpc/query-handlers/engine-usage";
+ import { MakeHostIdentityQueryHandler } from "./rpc/query-handlers/host-identity";
+ import { MakeMarketplaceQueryHandler } from "./rpc/query-handlers/marketplace";
+@@ -134,6 +135,7 @@
+ 			const capability_oauth = yield* CapabilityOAuthLifecycle;
+ 			const capability_mirrors = yield* CapabilityMirrorService;
+ 			const HandleSettingsMutation = yield* MakeSettingsMutationHandler;
++			const HandleEngineSkillQuery = yield* MakeEngineSkillQueryHandler;
+ 			const HandleEngineUsageQuery = yield* MakeEngineUsageQueryHandler;
+ 			const HandleHostIdentityQuery = yield* MakeHostIdentityQueryHandler;
+ 			const HandleMarketplaceQuery = yield* MakeMarketplaceQueryHandler;
+@@ -296,7 +298,8 @@
+ 					}),
+ 					Effect.provideService(ReadyHandlerFactory, {
+ 						Make: Effect.succeed({
+-								engine_usage: HandleEngineUsageQuery,
++							engine_skills: HandleEngineSkillQuery,
++							engine_usage: HandleEngineUsageQuery,
+ 							host_identity: HandleHostIdentityQuery,
+ 							marketplace: HandleMarketplaceQuery,
+ 							settings: HandleSettingsMutation,
+diff -ruN skills-after/modules/backend/src/surfaces/engine-observation.ts skills-before/modules/backend/src/surfaces/engine-observation.ts
+--- skills-after/modules/backend/src/surfaces/engine-observation.ts	2026-08-05 14:48:42.249875600 +0200
++++ skills-before/modules/backend/src/surfaces/engine-observation.ts	2026-08-05 14:45:07.653010300 +0200
+@@ -87,6 +87,14 @@
+ 				kind: "file_observation",
+ 				summary: summary("File", observation.action),
+ 			};
++		/** The skill's own name is public-safe: it is a package identifier, not run content. */
++		case "skill":
++			return {
++				...base,
++				category: "capability",
++				kind: "tool",
++				summary: summary(`Skill: ${observation.skill_name}`, observation.state),
++			};
+ 		case "search":
+ 			return {
+ 				...base,
+diff -ruN skills-after/modules/engines/src/claude/engine.ts skills-before/modules/engines/src/claude/engine.ts
+--- skills-after/modules/engines/src/claude/engine.ts	2026-08-05 14:48:41.949859600 +0200
++++ skills-before/modules/engines/src/claude/engine.ts	2026-08-05 14:47:31.762236900 +0200
+@@ -47,6 +47,7 @@
+ 	ClaudeJsonlOversizedLineError,
+ 	type ClaudeJsonlDecode,
+ } from "./jsonl";
++import { ReadClaudeSkillCatalog } from "./skills";
+ import { MakeClaudeUsage } from "./usage";
+ import {
+ 	classify_claude_semantic_failure,
+@@ -913,11 +914,21 @@
+ 				executable_args: configured.executable_args,
+ 				factory,
+ 			});
++			/**
++			 * Reads the same config dir `Usage` does, so an installation pointed
++			 * elsewhere reports the skills that installation would actually load.
++			 */
++			const Skills: Required<Engine>["Skills"] = ReadClaudeSkillCatalog(
++				configured.claude_config_dir === undefined
++					? {}
++					: { claude_config_dir: configured.claude_config_dir },
++			);
+ 			return {
+ 				CheckNativeContinuation,
+ 				Descriptor: ClaudeEngineDescriptor,
+ 				Open,
+ 				Probe,
++				Skills,
+ 				Usage,
+ 			};
+ 		}),
+diff -ruN skills-after/modules/engines/src/claude/normalizer.ts skills-before/modules/engines/src/claude/normalizer.ts
+--- skills-after/modules/engines/src/claude/normalizer.ts	2026-08-05 14:48:42.068806100 +0200
++++ skills-before/modules/engines/src/claude/normalizer.ts	2026-08-05 14:45:07.486963300 +0200
+@@ -13,6 +13,7 @@
+ 	EngineReasoningSummaryCompletedObservation,
+ 	EngineReasoningSummaryDeltaObservation,
+ 	EngineSearchObservation,
++	EngineSkillObservation,
+ 	EngineTerminalActivityObservation,
+ 	EngineToolObservation,
+ 	EngineUsageObservation,
+@@ -501,6 +502,7 @@
+ 			path: Schema.optional(Schema.String),
+ 			pattern: Schema.optional(Schema.String),
+ 			query: Schema.optional(Schema.String),
++			skill: Schema.optional(Schema.String),
+ 			url: Schema.optional(Schema.String),
+ 		}),
+ 		tool.input,
+@@ -561,6 +563,27 @@
+ 	const input_value = tool_input(tool);
+ 	const name = tool.name;
+ 
++	/**
++	 * A skill load is announced as an ordinary tool call, so the only thing that
++	 * separates it from any other tool is the name and the `skill` field naming
++	 * which one was loaded. Kept as its own observation because the skill's
++	 * identity is the fact a reader wants; "the Skill tool ran" is not.
++	 */
++	if (name === "Skill" && input_value?.skill !== undefined && input_value.skill.length > 0) {
++		/** Whitespace-only arguments are no arguments; an empty detail is not renderable. */
++		const skill_args = input_value.args?.trim();
++
++		return {
++			...make_base(input, "assistant.tool_use", tool.id),
++			_tag: "skill",
++			...(skill_args === undefined || skill_args.length === 0 ? {} : { detail: skill_args }),
++			invocation_id: tool.id,
++			skill_name: input_value.skill,
++			state:
++				action === "failed" ? "failed" : action === "completed" ? "completed" : "started",
++		} satisfies EngineSkillObservation;
++	}
++
+ 	if (name === "Bash") {
+ 		return {
+ 			...make_base(input, "assistant.tool_use", tool.id),
+diff -ruN skills-after/modules/engines/src/claude/skills.ts skills-before/modules/engines/src/claude/skills.ts
+--- skills-after/modules/engines/src/claude/skills.ts	1970-01-01 01:00:00.000000000 +0100
++++ skills-before/modules/engines/src/claude/skills.ts	2026-08-05 14:45:08.061849800 +0200
+@@ -0,0 +1,244 @@
++import { readdir, readFile } from "node:fs/promises";
++import { homedir } from "node:os";
++import { join } from "node:path";
++
++import { Effect, Option, Schema } from "effect";
++
++import type { EngineSkillCatalog, EngineSkillDescriptor, EngineSkillSource } from "../engine";
++
++/** Configures where the catalog reads from. Exists so tests can inject a fixture tree. @since 0.7.0 */
++export interface ClaudeSkillsOptions {
++	/**
++	 * Overrides Claude's config-dir resolution (normally env `CLAUDE_CONFIG_DIR`,
++	 * else `join(homedir(), ".claude")`), matching how `usage.ts` resolves it.
++	 */
++	readonly claude_config_dir?: string;
++	/** A project checkout whose `.claude/skills` are in scope, when one is pinned. */
++	readonly project_dir?: string;
++}
++
++/** Bounds the catalog so a pathological skills directory cannot flood a response. */
++const max_skills = 128;
++/**
++ * Frontmatter sits at the head of the file and the body can be very long, so
++ * only the head is read. Generous enough for a multi-line description.
++ */
++const max_frontmatter_bytes = 8_192;
++
++/**
++ * The hook events that inject text unconditionally. A skill reached this way is
++ * never chosen by the model, so it produces no invocation anywhere in the event
++ * stream — reading these is the only way to know it is in force.
++ */
++const always_loaded_hook_events = ["SessionStart", "UserPromptSubmit"] as const;
++
++const HookEntrySchema = Schema.Struct({
++	command: Schema.optional(Schema.String),
++	type: Schema.optional(Schema.String),
++});
++
++const HookMatcherSchema = Schema.Struct({
++	hooks: Schema.optional(Schema.Array(HookEntrySchema)),
++});
++
++const SettingsFileSchema = Schema.Struct({
++	hooks: Schema.optional(Schema.Record(Schema.String, Schema.Array(HookMatcherSchema))),
++});
++
++/**
++ * Recognises a skill referenced by path inside a hook command, on either
++ * separator. Deliberately narrow: it matches the canonical `<name>/SKILL.md`
++ * layout rather than trying to interpret an arbitrary shell command, so a hook
++ * doing something unrelated is never reported as a loaded skill.
++ */
++const skill_path_pattern = /skills[/\\]([A-Za-z0-9][A-Za-z0-9._-]*)[/\\]SKILL\.md/gi;
++
++/** Reads and JSON-decodes one settings file, treating every failure as "no settings". */
++const ReadSettings = (path: string): Effect.Effect<typeof SettingsFileSchema.Type | undefined> =>
++	Effect.tryPromise({
++		catch: () => "unreadable" as const,
++		try: () => readFile(path, "utf8"),
++	}).pipe(
++		Effect.map((text) =>
++			Option.getOrUndefined(
++				Schema.decodeUnknownOption(Schema.fromJsonString(SettingsFileSchema))(text),
++			),
++		),
++		Effect.catch(() => Effect.succeed(undefined)),
++	);
++
++/** Extracts every skill name a settings file's always-on hooks inject. */
++export function always_loaded_skill_names(
++	settings: typeof SettingsFileSchema.Type | undefined,
++): ReadonlySet<string> {
++	const names = new Set<string>();
++	if (settings?.hooks === undefined) return names;
++
++	for (const event of always_loaded_hook_events) {
++		for (const matcher of settings.hooks[event] ?? []) {
++			for (const hook of matcher.hooks ?? []) {
++				if (hook.command === undefined) continue;
++				/** `matchAll` needs a fresh lastIndex; the pattern is module-level and global. */
++				skill_path_pattern.lastIndex = 0;
++				for (const match of hook.command.matchAll(skill_path_pattern)) {
++					const name = match[1];
++					if (name !== undefined) names.add(name);
++				}
++			}
++		}
++	}
++
++	return names;
++}
++
++/**
++ * Pulls `name` and `description` out of a SKILL.md's YAML frontmatter.
++ *
++ * A hand-rolled reader rather than a YAML dependency: only two scalar keys are
++ * ever wanted, and a malformed or absent block must degrade to "no metadata"
++ * rather than fail the catalog.
++ */
++export function parse_skill_frontmatter(head: string): {
++	readonly description?: string;
++	readonly name?: string;
++} {
++	const normalized = head.replace(/\r\n/g, "\n");
++	if (!normalized.startsWith("---\n")) return {};
++	const closing = normalized.indexOf("\n---", 3);
++	if (closing === -1) return {};
++
++	const block = normalized.slice(4, closing);
++	const read_key = (key: string) => {
++		/** Only a top-level key counts: an indented line belongs to a nested mapping. */
++		const line = block.split("\n").find((candidate) => candidate.startsWith(`${key}:`));
++		if (line === undefined) return undefined;
++		const value = line
++			.slice(key.length + 1)
++			.trim()
++			.replace(/^["']|["']$/g, "");
++		return value.length > 0 ? value : undefined;
++	};
++
++	const description = read_key("description");
++	const name = read_key("name");
++
++	return {
++		...(description === undefined ? {} : { description }),
++		...(name === undefined ? {} : { name }),
++	};
++}
++
++/** Reads one skill directory's metadata, falling back to the directory name. */
++const ReadSkill = (
++	skills_dir: string,
++	directory_name: string,
++	source: EngineSkillSource,
++	always_loaded: ReadonlySet<string>,
++): Effect.Effect<EngineSkillDescriptor> =>
++	Effect.gen(function* () {
++		const head = yield* Effect.tryPromise({
++			catch: () => "unreadable" as const,
++			try: () => readFile(join(skills_dir, directory_name, "SKILL.md"), "utf8"),
++		}).pipe(
++			Effect.map((text) => text.slice(0, max_frontmatter_bytes)),
++			Effect.catch(() => Effect.succeed("")),
++		);
++		const frontmatter = parse_skill_frontmatter(head);
++		/**
++		 * The directory name wins over the frontmatter `name`. It is what the
++		 * `Skill` tool is invoked with and what a hook command spells, so matching
++		 * an observation or a hook against a frontmatter alias would silently miss.
++		 */
++		const name = directory_name;
++
++		return {
++			always_loaded: always_loaded.has(name),
++			...(frontmatter.description === undefined
++				? {}
++				: { description: frontmatter.description }),
++			name,
++			source,
++		} satisfies EngineSkillDescriptor;
++	});
++
++/** Lists the immediate subdirectories of a skills root, treating absence as empty. */
++const ListSkillDirectories = (skills_dir: string): Effect.Effect<ReadonlyArray<string>> =>
++	Effect.tryPromise({
++		catch: () => "unreadable" as const,
++		try: () => readdir(skills_dir, { withFileTypes: true }),
++	}).pipe(
++		Effect.map((entries) =>
++			entries.filter((entry) => entry.isDirectory()).map((entry) => entry.name),
++		),
++		Effect.catch(() => Effect.succeed<ReadonlyArray<string>>([])),
++	);
++
++export function resolve_claude_config_dir(options: ClaudeSkillsOptions): string {
++	return options.claude_config_dir ?? process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude");
++}
++
++/**
++ * Reports every skill this host's Claude installation can load.
++ *
++ * Two facts are merged: the skills present on disk, and the ones a session hook
++ * injects unconditionally. The second set is not a subset of the first — a hook
++ * can `cat` a SKILL.md that lives outside any skills root — so a hook-named
++ * skill with no directory is still reported rather than dropped.
++ *
++ * Every failure degrades to a smaller catalog rather than an error: an absent
++ * skills directory and an unreadable one are the same fact to a reader, and a
++ * missing catalog must never take a thread down with it.
++ */
++export const ReadClaudeSkillCatalog = (
++	options: ClaudeSkillsOptions = {},
++): Effect.Effect<EngineSkillCatalog> =>
++	Effect.gen(function* () {
++		const config_dir = resolve_claude_config_dir(options);
++		const user_settings = yield* ReadSettings(join(config_dir, "settings.json"));
++		const project_settings =
++			options.project_dir === undefined
++				? undefined
++				: yield* ReadSettings(join(options.project_dir, ".claude", "settings.json"));
++
++		const always_loaded = new Set([
++			...always_loaded_skill_names(user_settings),
++			...always_loaded_skill_names(project_settings),
++		]);
++
++		const roots: ReadonlyArray<{ dir: string; source: EngineSkillSource }> = [
++			{ dir: join(config_dir, "skills"), source: "user" },
++			...(options.project_dir === undefined
++				? []
++				: [
++						{
++							dir: join(options.project_dir, ".claude", "skills"),
++							source: "project" as const,
++						},
++					]),
++		];
++
++		const by_name = new Map<string, EngineSkillDescriptor>();
++
++		for (const root of roots) {
++			const directories = yield* ListSkillDirectories(root.dir);
++			const descriptors = yield* Effect.all(
++				directories
++					.slice(0, max_skills)
++					.map((directory) => ReadSkill(root.dir, directory, root.source, always_loaded)),
++				{ concurrency: "unbounded" },
++			);
++			/** A project skill shadows a user skill of the same name, as the harness resolves it. */
++			for (const descriptor of descriptors) by_name.set(descriptor.name, descriptor);
++		}
++
++		for (const name of always_loaded) {
++			if (by_name.has(name)) continue;
++			by_name.set(name, { always_loaded: true, name, source: "unknown" });
++		}
++
++		return {
++			skills: [...by_name.values()]
++				.sort((left, right) => left.name.localeCompare(right.name))
++				.slice(0, max_skills),
++		};
++	});
+diff -ruN skills-after/modules/engines/src/engine.ts skills-before/modules/engines/src/engine.ts
+--- skills-after/modules/engines/src/engine.ts	2026-08-05 14:48:42.007466300 +0200
++++ skills-before/modules/engines/src/engine.ts	2026-08-05 14:45:07.430448500 +0200
+@@ -348,6 +348,26 @@
+ 	readonly path: string;
+ }
+ 
++/**
++ * Reports a packaged instruction set the model chose to load mid-run.
++ *
++ * Distinct from a tool observation because the skill's own name is the fact
++ * worth keeping — the tool that loaded it is an implementation detail of the
++ * harness. Only model-initiated loads are observable here: a skill a hook
++ * injects into every session never crosses the event stream at all, which is
++ * why the catalog reports those separately.
++ *
++ * @since 0.7.0
++ */
++export interface EngineSkillObservation extends EngineObservationBase {
++	readonly _tag: "skill";
++	/** Invocation arguments the provider disclosed, when it disclosed any. */
++	readonly detail?: string;
++	readonly invocation_id: string;
++	readonly skill_name: string;
++	readonly state: "started" | "completed" | "failed";
++}
++
+ /** Reports a search operation performed during a run. @since 0.2.0 */
+ export interface EngineSearchObservation extends EngineObservationBase {
+ 	readonly _tag: "search";
+@@ -521,6 +541,7 @@
+ 	| EngineRunStateObservation
+ 	| EngineRunTerminalObservation
+ 	| EngineSearchObservation
++	| EngineSkillObservation
+ 	| EngineTerminalActivityObservation
+ 	| EngineToolObservation
+ 	| EngineTurnStateObservation
+@@ -733,6 +754,30 @@
+ 	readonly windows: ReadonlyArray<EngineQuotaWindow>;
+ }
+ 
++/** Names where a harness reads one skill from. Disclosure, not a navigable path. @since 0.7.0 */
++export type EngineSkillSource = "user" | "project" | "plugin" | "unknown";
++
++/**
++ * One packaged instruction set the harness can load.
++ *
++ * `always_loaded` marks the ones a session hook injects unconditionally. The
++ * model never chooses those, so they produce no invocation to observe — without
++ * this flag a reader would conclude they were never used.
++ *
++ * @since 0.7.0
++ */
++export interface EngineSkillDescriptor {
++	readonly always_loaded: boolean;
++	readonly description?: string;
++	readonly name: string;
++	readonly source: EngineSkillSource;
++}
++
++/** Reports the skills one harness can load, independent of any run. @since 0.7.0 */
++export interface EngineSkillCatalog {
++	readonly skills: ReadonlyArray<EngineSkillDescriptor>;
++}
++
+ /** Defines the dependency-free provider-neutral seam implemented by every engine adapter. @since 0.2.0 */
+ export interface Engine {
+ 	readonly Descriptor: EngineDescriptor;
+@@ -753,4 +798,11 @@
+ 	 * @since 0.6.0
+ 	 */
+ 	readonly Usage?: Effect.Effect<EngineAccountUsage, EngineFailure>;
++	/**
++	 * Reports the skills this harness can load. Absent on adapters with no skill
++	 * surface; like `Usage` the effect is non-billable and must not start a run.
++	 *
++	 * @since 0.7.0
++	 */
++	readonly Skills?: Effect.Effect<EngineSkillCatalog, EngineFailure>;
+ }
+diff -ruN skills-after/modules/engines/src/index.ts skills-before/modules/engines/src/index.ts
+--- skills-after/modules/engines/src/index.ts	2026-08-05 14:48:42.563722300 +0200
++++ skills-before/modules/engines/src/index.ts	2026-08-05 14:47:31.819426200 +0200
+@@ -6,6 +6,7 @@
+ export * from "./claude/engine";
+ export * from "./claude/jsonl";
+ export * from "./claude/normalizer";
++export * from "./claude/skills";
+ export * from "./codex/engine";
+ export * from "./codex/app-server-session";
+ export * from "./codex/jsonl";
+diff -ruN skills-after/modules/frontend/src/lib/runtime/fixtures/project-identity-queries.ts skills-before/modules/frontend/src/lib/runtime/fixtures/project-identity-queries.ts
+--- skills-after/modules/frontend/src/lib/runtime/fixtures/project-identity-queries.ts	2026-08-05 14:48:42.624202000 +0200
++++ skills-before/modules/frontend/src/lib/runtime/fixtures/project-identity-queries.ts	2026-08-05 14:48:16.341531700 +0200
+@@ -162,6 +162,41 @@
+ 				fetched_at: fixture_timestamp,
+ 			};
+ 		}),
++	GetEngineSkills: (input) =>
++		Effect.gen(function* () {
++			return {
++				engines: [
++					{
++						display_name: "Claude",
++						engine_id: "claude",
++						skills: [
++							{
++								always_loaded: true,
++								description:
++									"Persistent personal engineering and agent-workflow standards.",
++								name: "sanders-skill",
++								source: "user" as const,
++							},
++							{
++								always_loaded: false,
++								description: "Production-ready CSS transitions for web apps.",
++								name: "transitions-dev",
++								source: "user" as const,
++							},
++							{
++								always_loaded: false,
++								name: "thermo-nuclear-review",
++								source: "project" as const,
++							},
++						],
++					},
++				].filter(
++					(report) =>
++						input?.engine_id === undefined || report.engine_id === input.engine_id,
++				),
++				fetched_at: fixture_timestamp,
++			};
++		}),
+ 	GetThreadUsageSeries: (input) =>
+ 		Effect.gen(function* () {
+ 			return {
+@@ -223,5 +258,6 @@
+ 	| "GetProjectDiffs"
+ 	| "GetHostIdentity"
+ 	| "GetEngineUsage"
++	| "GetEngineSkills"
+ 	| "GetThreadUsageSeries"
+ >;
+diff -ruN skills-after/modules/frontend/src/lib/runtime/fixtures/queries.ts skills-before/modules/frontend/src/lib/runtime/fixtures/queries.ts
+--- skills-after/modules/frontend/src/lib/runtime/fixtures/queries.ts	2026-08-05 14:48:42.687198100 +0200
++++ skills-before/modules/frontend/src/lib/runtime/fixtures/queries.ts	2026-08-05 14:48:16.399631600 +0200
+@@ -422,6 +422,7 @@
+ 	| "GetProjectDiffs"
+ 	| "GetHostIdentity"
+ 	| "GetEngineUsage"
++	| "GetEngineSkills"
+ 	| "GetThreadUsageSeries"
+ 	| "DetachProject"
+ 	| "ListProjectDirectories"
+diff -ruN skills-after/modules/protocol/src/control-contract/inspection.ts skills-before/modules/protocol/src/control-contract/inspection.ts
+--- skills-after/modules/protocol/src/control-contract/inspection.ts	2026-08-05 14:48:42.299924000 +0200
++++ skills-before/modules/protocol/src/control-contract/inspection.ts	2026-08-05 14:45:07.704487800 +0200
+@@ -4,6 +4,7 @@
+ 
+ import { ConversationQuery, ConversationSnapshot } from "../conversation";
+ 
++import { EngineSkillCatalog, EngineSkillQuery } from "../engine-skills";
+ import { ThreadUsageSeries, ThreadUsageSeriesQuery } from "../thread-usage-series";
+ import { EngineUsageQuery, EngineUsageSnapshot } from "../engine-usage";
+ 
+@@ -483,6 +484,21 @@
+ });
+ export type EngineUsageQueryResultEnvelope = typeof EngineUsageQueryResultEnvelope.Type;
+ 
++/** Requests the skill catalog for every registered engine that exposes one. */
++export const EngineSkillQueryEnvelope = Schema.Struct({
++	...NegotiatedFrontendTraceMetadata,
++	kind: Schema.Literal("engine.skill.query"),
++	payload: EngineSkillQuery,
++});
++export type EngineSkillQueryEnvelope = typeof EngineSkillQueryEnvelope.Type;
++export const EngineSkillQueryResultEnvelope = Schema.Struct({
++	...NegotiatedBackendTraceMetadata,
++	correlation_id: Identifier,
++	kind: Schema.Literal("engine.skill.query.result"),
++	payload: EngineSkillCatalog,
++});
++export type EngineSkillQueryResultEnvelope = typeof EngineSkillQueryResultEnvelope.Type;
++
+ /** Requests the per-turn token series for one thread's current context window. */
+ export const ThreadUsageSeriesQueryEnvelope = Schema.Struct({
+ 	...NegotiatedFrontendTraceMetadata,
+diff -ruN skills-after/modules/protocol/src/control-contract/wire.ts skills-before/modules/protocol/src/control-contract/wire.ts
+--- skills-after/modules/protocol/src/control-contract/wire.ts	2026-08-05 14:48:42.736751500 +0200
++++ skills-before/modules/protocol/src/control-contract/wire.ts	2026-08-05 14:46:13.881947700 +0200
+@@ -1,6 +1,8 @@
+ import {
+ 	ConversationQueryEnvelope,
+ 	ConversationQueryResultEnvelope,
++	EngineSkillQueryEnvelope,
++	EngineSkillQueryResultEnvelope,
+ 	ThreadUsageSeriesQueryEnvelope,
+ 	ThreadUsageSeriesQueryResultEnvelope,
+ 	EngineUsageQueryEnvelope,
+@@ -338,6 +340,7 @@
+ 	SessionDefaultsQueryEnvelope,
+ 	SessionDefaultsUpdateEnvelope,
+ 	EngineUsageQueryEnvelope,
++	EngineSkillQueryEnvelope,
+ 	ThreadUsageSeriesQueryEnvelope,
+ 	SubscribeEnvelope,
+ 	UnsubscribeEnvelope,
+@@ -416,6 +419,7 @@
+ 	ProjectDiffQueryResultEnvelope,
+ 	SessionDefaultsQueryResultEnvelope,
+ 	EngineUsageQueryResultEnvelope,
++	EngineSkillQueryResultEnvelope,
+ 	ThreadUsageSeriesQueryResultEnvelope,
+ 	SubscriptionStartedEnvelope,
+ 	SubscriptionStoppedEnvelope,
+diff -ruN skills-after/modules/protocol/src/control-rpc.ts skills-before/modules/protocol/src/control-rpc.ts
+--- skills-after/modules/protocol/src/control-rpc.ts	2026-08-05 14:48:42.348924100 +0200
++++ skills-before/modules/protocol/src/control-rpc.ts	2026-08-05 14:45:07.756491900 +0200
+@@ -272,6 +272,11 @@
+ 		Control.EngineUsageQueryResultEnvelope,
+ 	),
+ 	ControlRpc(
++		"engine.skill.query",
++		Control.EngineSkillQueryEnvelope,
++		Control.EngineSkillQueryResultEnvelope,
++	),
++	ControlRpc(
+ 		"thread.usage.series.query",
+ 		Control.ThreadUsageSeriesQueryEnvelope,
+ 		Control.ThreadUsageSeriesQueryResultEnvelope,
+diff -ruN skills-after/modules/protocol/src/engine-skills.ts skills-before/modules/protocol/src/engine-skills.ts
+--- skills-after/modules/protocol/src/engine-skills.ts	1970-01-01 01:00:00.000000000 +0100
++++ skills-before/modules/protocol/src/engine-skills.ts	2026-08-05 14:45:08.007845800 +0200
+@@ -0,0 +1,56 @@
++import { Schema } from "effect";
++
++import { Identifier, IsoDateTime } from "./common";
++
++/**
++ * Names where a harness reads one skill from. Disclosure only — a client shows
++ * the scope, it never resolves a path from it.
++ */
++export const EngineSkillSource = Schema.Literals(["user", "project", "plugin", "unknown"]);
++
++export type EngineSkillSource = typeof EngineSkillSource.Type;
++
++/**
++ * Projects one skill a harness can load.
++ *
++ * `always_loaded` marks a skill a session hook injects unconditionally. Those
++ * are never chosen by the model and so never appear as an invocation in a
++ * thread; without the flag a client would render them as "never used" rather
++ * than "in force for every turn".
++ */
++export const EngineSkillDescriptor = Schema.Struct({
++	always_loaded: Schema.Boolean,
++	description: Schema.optional(Schema.String.check(Schema.isMinLength(1))),
++	name: Schema.String.check(Schema.isMinLength(1)),
++	source: EngineSkillSource,
++});
++
++export type EngineSkillDescriptor = typeof EngineSkillDescriptor.Type;
++
++/** Projects one engine's skill catalog, or the reason it could not be read. */
++export const EngineSkillReport = Schema.Struct({
++	display_name: Schema.String.check(Schema.isMinLength(1)),
++	engine_id: Schema.String.check(Schema.isMinLength(1)),
++	failure: Schema.optional(Schema.String.check(Schema.isMinLength(1))),
++	skills: Schema.Array(EngineSkillDescriptor).check(Schema.isMaxLength(128)),
++});
++
++export type EngineSkillReport = typeof EngineSkillReport.Type;
++
++/**
++ * Requests the skill catalog. `engine_id` narrows the read to one engine;
++ * absent, every registered engine with a skill surface reports.
++ */
++export const EngineSkillQuery = Schema.Struct({
++	engine_id: Schema.optional(Identifier),
++});
++
++export type EngineSkillQuery = typeof EngineSkillQuery.Type;
++
++/** Carries the skill catalogs for the registered engines that expose one. */
++export const EngineSkillCatalog = Schema.Struct({
++	engines: Schema.Array(EngineSkillReport).check(Schema.isMaxLength(16)),
++	fetched_at: IsoDateTime,
++});
++
++export type EngineSkillCatalog = typeof EngineSkillCatalog.Type;
+diff -ruN skills-after/modules/protocol/src/index.ts skills-before/modules/protocol/src/index.ts
+--- skills-after/modules/protocol/src/index.ts	2026-08-05 14:48:42.403767600 +0200
++++ skills-before/modules/protocol/src/index.ts	2026-08-05 14:45:07.815000100 +0200
+@@ -6,6 +6,7 @@
+ export * from "./conversation-activity";
+ export * from "./control";
+ export * from "./control-rpc";
++export * from "./engine-skills";
+ export * from "./thread-usage-series";
+ export * from "./engine-usage";
+ export * from "./forge-launch-request";
+diff -ruN skills-after/modules/transport/src/client-api/service.ts skills-before/modules/transport/src/client-api/service.ts
+--- skills-after/modules/transport/src/client-api/service.ts	2026-08-05 14:48:42.793297900 +0200
++++ skills-before/modules/transport/src/client-api/service.ts	2026-08-05 14:47:31.874576200 +0200
+@@ -42,6 +42,8 @@
+ 	ThreadWorkItem,
+ 	RuntimeCatalog,
+ 	HostIdentitySnapshot,
++	EngineSkillCatalog,
++	EngineSkillQuery,
+ 	ThreadUsageSeries,
+ 	ThreadUsageSeriesQuery,
+ 	EngineUsageQuery,
+@@ -251,6 +253,13 @@
+ 			input?: EngineUsageQuery,
+ 		) => Effect.Effect<EngineUsageSnapshot, ArtisanClientError>;
+ 		/**
++		 * Reads the skills each engine can load, including the ones a session hook
++		 * injects unconditionally — those never surface as a run observation.
++		 */
++		readonly GetEngineSkills: (
++			input?: EngineSkillQuery,
++		) => Effect.Effect<EngineSkillCatalog, ArtisanClientError>;
++		/**
+ 		 * Reads one thread's per-turn token series for the context window it is
+ 		 * currently in. Cut at the last compaction rather than spanning the thread.
+ 		 */
+diff -ruN skills-after/modules/transport/src/internal/api/queries.ts skills-before/modules/transport/src/internal/api/queries.ts
+--- skills-after/modules/transport/src/internal/api/queries.ts	2026-08-05 14:48:42.853358000 +0200
++++ skills-before/modules/transport/src/internal/api/queries.ts	2026-08-05 14:47:31.927625600 +0200
+@@ -4,6 +4,8 @@
+ 	type ArtisanApprovalListQueryEnvelope,
+ 	type ArtisanToolInvocationListQueryEnvelope,
+ 	type ArtisanToolRegistryListQueryEnvelope,
++	type EngineSkillQuery,
++	type EngineSkillQueryEnvelope,
+ 	type ThreadUsageSeriesQuery,
+ 	type ThreadUsageSeriesQueryEnvelope,
+ 	type EngineUsageQuery,
+@@ -163,6 +165,18 @@
+ 				? result.payload
+ 				: yield* Effect.die("engine usage response narrowed incorrectly");
+ 		});
++	const get_engine_skills = (input?: EngineSkillQuery) =>
++		Effect.gen(function* () {
++			const trace = yield* context.MakeTrace;
++			const result = yield* context.Request({
++				...trace,
++				kind: "engine.skill.query",
++				payload: input ?? {},
++			} satisfies EngineSkillQueryEnvelope);
++			return result.kind === "engine.skill.query.result"
++				? result.payload
++				: yield* Effect.die("engine skill response narrowed incorrectly");
++		});
+ 	const get_thread_usage_series = (input: ThreadUsageSeriesQuery) =>
+ 		Effect.gen(function* () {
+ 			const trace = yield* context.MakeTrace;
+@@ -228,6 +242,7 @@
+ 		create_project_directory,
+ 		create_thread,
+ 		detach_project,
++		get_engine_skills,
+ 		get_thread_usage_series,
+ 		get_engine_usage,
+ 		get_host_identity,
+diff -ruN skills-after/modules/transport/src/internal/client-service.ts skills-before/modules/transport/src/internal/client-service.ts
+--- skills-after/modules/transport/src/internal/client-service.ts	2026-08-05 14:48:42.913967400 +0200
++++ skills-before/modules/transport/src/internal/client-service.ts	2026-08-05 14:47:55.775939300 +0200
+@@ -184,6 +184,7 @@
+ 				create_project_directory,
+ 				create_thread,
+ 				detach_project,
++				get_engine_skills,
+ 				get_thread_usage_series,
+ 				get_engine_usage,
+ 				get_host_identity,
+@@ -281,6 +282,7 @@
+ 				ListProjects: list_projects,
+ 				GetRuntimeCatalog: get_runtime_catalog,
+ 				GetHostIdentity: get_host_identity,
++				GetEngineSkills: get_engine_skills,
+ 				GetThreadUsageSeries: get_thread_usage_series,
+ 				GetEngineUsage: get_engine_usage,
+ 				GetProjectDiffs: get_project_diffs,
