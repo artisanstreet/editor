@@ -552,13 +552,19 @@ pub fn repair(root: &Path) -> Result<()> {
     }
     let platform = Platform::detect()?;
     let existing_protocol = state.integrations.protocol.as_ref();
-    let protocol = prepare_protocol(&platform, &stable, existing_protocol)?;
-    if protocol.as_ref() != state.integrations.protocol.as_ref()
-        && let Some(protocol) = protocol.as_ref()
-    {
-        persist_protocol_record(root, protocol)?;
+    // An installation with no recorded protocol ownership was installed with
+    // `--skip-protocol` beside a primary installation. Repairing it must not
+    // adopt the handler the primary owns — finding it registered elsewhere is
+    // this installation's healthy state, not damage to fix.
+    if existing_protocol.is_some() {
+        let protocol = prepare_protocol(&platform, &stable, existing_protocol)?;
+        if protocol.as_ref() != state.integrations.protocol.as_ref()
+            && let Some(protocol) = protocol.as_ref()
+        {
+            persist_protocol_record(root, protocol)?;
+        }
+        apply_protocol(&platform, &stable, existing_protocol)?;
     }
-    apply_protocol(&platform, &stable, existing_protocol)?;
     invoke_ae_diagnostic(&release, &["doctor"])
 }
 

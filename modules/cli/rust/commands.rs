@@ -444,12 +444,23 @@ fn launch_editor(layout: &Layout) -> Result<()> {
             editor.display()
         )));
     }
-    Command::new(&editor)
+    let mut command = Command::new(&editor);
+    command
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(io("start Artisan editor"))?;
+        .stderr(Stdio::null());
+    // The managed layout deliberately ships no `ae` shim inside the editor's
+    // own resources, so the editor's handoff would resolve a path that does
+    // not exist there. This launcher is the one process that knows where the
+    // installation's `ae` actually is, so it says so explicitly.
+    if let Some(permanent_ae) = manifest.permanent_ae_path.as_ref() {
+        command.env("ARTISAN_AE_COMMAND", permanent_ae);
+    }
+    // This CLI itself runs under Node when invoked through the packaged
+    // launcher scripts; the editor it starts must never inherit that, or
+    // Electron degrades to a bare Node process that exits without a window.
+    command.env_remove("ELECTRON_RUN_AS_NODE");
+    command.spawn().map_err(io("start Artisan editor"))?;
     Ok(())
 }
 
