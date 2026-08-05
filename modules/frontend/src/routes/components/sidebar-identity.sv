@@ -11,6 +11,8 @@
 		DropdownMenuSeparator,
 		DropdownMenuTrigger,
 	} from "$lib/components/ui/dropdown-menu";
+	import { MakeFollowHighlight } from "$lib/components/dropdown-highlight";
+	import DropdownHoverSurface from "./dropdown-hover-surface.sv";
 	import ShaderGlassSurface from "./shader-glass-surface.sv";
 	import SidebarEngineUsage, { type SidebarUsageState } from "./sidebar-engine-usage.sv";
 	import { GradientAvatarSvg } from "$lib/identity/gradient-avatar";
@@ -23,9 +25,19 @@
 
 	const client = yield* ArtisanClient;
 	const usage_cache = yield* EngineUsageCache.pipe(Effect.provide(EngineUsageCacheBrowserLive));
+	const FollowHighlight = yield* MakeFollowHighlight;
+
+	let {
+		open = $bindable(false),
+	}: {
+		/**
+		 * Mirrored out because the menu paints over the transcript's left margin:
+		 * surfaces that read proximity there need to know they are covered.
+		 */
+		open?: boolean;
+	} = $props();
 
 	let identity = $state<HostIdentitySnapshot | undefined>(undefined);
-	let open = $state(false);
 	let usage_state = $state<SidebarUsageState>({ status: "idle" });
 
 	const profile_name = $derived(identity?.display_name ?? identity?.username ?? identity?.hostname);
@@ -172,7 +184,8 @@
 
 	// Top-level SER work follows the reactive menu state without a Svelte effect bridge.
 	if (open) {
-		yield* RequestUsage();	}
+		yield* RequestUsage();
+	}
 </script>
 
 <DropdownMenu bind:open>
@@ -238,12 +251,26 @@
 
 		<DropdownMenuSeparator />
 
-		<DropdownMenuItem>
-			<a href="/settings" class="flex w-full items-center gap-2">
-				<Settings class="size-4 shrink-0 text-muted-foreground" />
-				Settings
-			</a>
-		</DropdownMenuItem>
+		<!--
+			Inset like every other section of this menu, and lit by the same
+			travelling pill the app's other dropdowns use rather than the item's own
+			block highlight.
+		-->
+		<div class="p-1">
+			<DropdownHoverSurface class="[--docs-sidebar-hover-radius:var(--radius-xl)]">
+				{#snippet children({ move_hover })}
+					<DropdownMenuItem
+						class="rounded-xl focus:bg-transparent! data-highlighted:bg-transparent! data-highlighted:text-foreground!"
+						{@attach FollowHighlight(move_hover)}
+					>
+						<a href="/settings" class="flex w-full items-center gap-2">
+							<Settings class="size-4 shrink-0 text-muted-foreground" />
+							Settings
+						</a>
+					</DropdownMenuItem>
+				{/snippet}
+			</DropdownHoverSurface>
+		</div>
 		</ShaderGlassSurface>
 	</DropdownMenuContent>
 </DropdownMenu>

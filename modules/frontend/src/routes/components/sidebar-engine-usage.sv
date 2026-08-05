@@ -19,6 +19,7 @@
 	} from "$lib/identity/usage-window-motion";
 	import { weekly_reset_duration } from "$lib/identity/weekly-reset";
 	import { MakeScopedAttachmentRunner } from "$lib/lifecycle/scoped-attachment-runner";
+	import ShaderGlassSurface from "./shader-glass-surface.sv";
 	import UsageWindowTooltip from "./usage-window-tooltip.sv";
 
 	export type SidebarUsageState =
@@ -117,8 +118,24 @@
 				</span>
 			{/snippet}
 		</TooltipTrigger>
-		<TooltipContent side="right" class="max-w-56">
-			<UsageWindowTooltip remaining={remaining_reading.current} />
+		<!--
+			The same glass every other floating surface wears, so a reading that
+			opens beside the menu belongs to it. The tooltip's own solid fill,
+			padding and ring are stripped so the surface is the only thing painted;
+			the caret goes with them, since a rotated square of solid fill cannot
+			continue glass.
+		-->
+		<TooltipContent
+			arrow={false}
+			side="right"
+			sideOffset={8}
+			class="block max-w-56 rounded-2xl bg-transparent! p-0! text-foreground! shadow-none! ring-0!"
+		>
+			<ShaderGlassSurface class="w-full rounded-2xl" use_rays={false}>
+				<span class="block px-3 py-2 text-xs text-muted-foreground">
+					<UsageWindowTooltip remaining={remaining_reading.current} />
+				</span>
+			</ShaderGlassSurface>
 		</TooltipContent>
 	</Tooltip>
 {/snippet}
@@ -136,7 +153,7 @@
 	<p class="px-3 py-2.5 text-xs text-muted-foreground">No engine accounts connected.</p>
 {:else}
 	<TooltipProvider delayDuration={0}>
-		<div class="flex flex-col gap-2.5 px-1 py-1">
+		<div class="flex flex-col px-1 py-1">
 			{#each authenticated_engines as engine, engine_index (engine.engine_id)}
 				{@const mark = EngineMarkFor(engine.engine_id)}
 				{@const MarkIcon = mark.icon}
@@ -175,7 +192,7 @@
 						</div>
 					{/if}
 					{#if weekly_reset !== undefined}
-						<span class="mt-1 text-xs text-muted-foreground">Your weekly limit resets in <span class="text-foreground">{weekly_reset}</span>.</span>
+						<span class="mt-2 text-xs text-muted-foreground">Your weekly limit resets in <span class="text-foreground">{weekly_reset}</span>.</span>
 					{/if}
 				</div>
 			{/each}

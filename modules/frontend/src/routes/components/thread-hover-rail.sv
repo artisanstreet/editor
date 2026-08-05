@@ -1,8 +1,8 @@
 <script lang="ts" effect>
 	import { page } from "$app/state";
 	import type { ThreadListItem } from "@artisan/protocol";
-	import MessageCircle from "@tabler/icons-svelte/icons/message-circle";
 	import { Effect } from "effect";
+	import { EngineMarkClass, UsageSlicePresentationFor } from "$lib/engine/presentation";
 	import { RunBrowserDom } from "$lib/browser/dom";
 	import {
 		FormatRecentThreadTime,
@@ -12,8 +12,15 @@
 	} from "$lib/root/thread-navigation";
 
 	let {
+		suppressed = false,
 		threads,
 	}: {
+		/**
+		 * Set while another surface owns the pointer — an open menu that paints
+		 * over this band means a pointer resting here is aimed at that menu, not
+		 * at the rail, so proximity stops counting as the gesture.
+		 */
+		suppressed?: boolean;
 		/** The live thread list, owned by the layout. */
 		threads: ReadonlyArray<ThreadListItem>;
 	} = $props();
@@ -23,7 +30,9 @@
 	 * is the gesture. Tab focus into a link reveals it the same way, so the
 	 * list stays reachable without a pointer.
 	 */
-	let open = $state(false);
+	let near = $state(false);
+	/** Suppression wins over proximity, so an overlapping menu hides the rail at once. */
+	const open = $derived(near && !suppressed);
 	let zone_element = $state<HTMLDivElement>();
 	/** Captured on each reveal so relative times never sit stale on screen. */
 	let now_ms = $state(Date.now());
@@ -33,12 +42,13 @@
 
 	const Reveal = () =>
 		Effect.gen(function* () {
-		if (!open) now_ms = Date.now();
-		open = true;
+		if (suppressed) return;
+		if (!near) now_ms = Date.now();
+		near = true;
 		});
 	const Conceal = () =>
 		Effect.gen(function* () {
-		open = false;
+		near = false;
 		});
 
 	/**
@@ -50,6 +60,15 @@
 	const TrackPointer = (event: PointerEvent) =>
 		Effect.gen(function* () {
 		if (zone_element === undefined) return;
+		/**
+		 * Proximity is dropped rather than frozen while suppressed: a pointer
+		 * parked on the menu must not have banked a reveal that fires the
+		 * instant the menu closes. Moving again inside the band re-reveals.
+		 */
+		if (suppressed) {
+			yield* Conceal();
+			return;
+		}
 		const rect = yield* RunBrowserDom(() => zone_element.getBoundingClientRect());
 		const inside =
 			event.clientX >= rect.left &&
@@ -57,7 +76,7 @@
 			event.clientY >= rect.top &&
 			event.clientY <= rect.bottom;
 		if (inside) yield* Reveal();
-		else if (open) yield* Conceal();
+		else if (near) yield* Conceal();
 		});
 
 </script>
@@ -88,6 +107,8 @@
 		>
 			{#each recent_threads as thread (thread.thread_id)}
 				{@const is_active = ThreadRouteId(thread.thread_id) === active_route_id}
+				{@const thread_mark = UsageSlicePresentationFor(thread.engine_id, thread.model_id).mark}
+				{@const ThreadMark = thread_mark.icon}
 				<div class="border-b border-border last:border-b-0">
 					<a
 						href={ThreadRoutePathFor(thread)}
@@ -95,7 +116,8 @@
 						aria-current={is_active ? "page" : undefined}
 					>
 						<span class="flex min-w-0 items-center gap-2 py-2.5 pr-2">
-							<MessageCircle class="size-4 shrink-0" />
+							<!-- The rail names the same thing the list does: what the thread runs on. -->
+							<ThreadMark class={EngineMarkClass(thread_mark, "size-4 shrink-0")} />
 							<span class="min-w-0 flex-1 truncate">{thread.title}</span>
 							<span class="whitespace-nowrap text-xs text-muted-foreground">
 								{FormatRecentThreadTime(thread.last_activity_at, now_ms)}

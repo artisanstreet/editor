@@ -10,7 +10,7 @@
 	} from "@artisan/protocol";
 	import { ArtisanClient } from "@artisan/transport/client";
 	import { BannerService } from "$lib/banner/service";
-	import { EngineMarkFor } from "$lib/engine/presentation";
+	import { EngineMarkClass, EngineMarkFor, ProviderMarkFor } from "$lib/engine/presentation";
 	import {
 		SessionDefaultsController,
 		type SessionDefaultsState,
@@ -51,6 +51,7 @@
 		type PermissionOption,
 		type SpeedOption,
 		type ThinkingLevel,
+		thinking_level_labels,
 	} from "$lib/engine/model-selection";
 
 	type ModelFavoriteRequest = { readonly favorite: boolean; readonly model_id: string };
@@ -261,6 +262,21 @@
 		return OrderModels(models, active_engine, favorite_ids);
 	});
 	const selected_model = $derived(models.find((model) => model.id === selected_model_id) ?? models[0]);
+	/**
+	 * The speed only earns a word when it is not the model's own default: every
+	 * model would otherwise trail a "Standard" that says nothing.
+	 */
+	const trigger_speed_label = $derived.by(() => {
+		const speeds = selected_model?.definition.capabilities.speed_options ?? [];
+		const selected = speeds.find((option) => option.id === speed_option_id);
+		if (selected === undefined || selected.default) return undefined;
+		return selected.label;
+	});
+	const selected_thinking_level = $derived(
+		selected_model?.definition.capabilities.thinking.availability === "supported"
+			? thinking_level
+			: undefined,
+	);
 	const selected_engine = $derived(
 		engines.find((engine) => engine.id === selected_model?.engine) ??
 			engines[0] ?? { id: "codex", icon: Tool, monochrome: true, name: "Unavailable" },
@@ -430,21 +446,28 @@
 			<TooltipTrigger>
 				{#snippet child({ props: tooltip_props })}
 					<span {...tooltip_props} class="flex min-w-0 has-[:disabled]:cursor-not-allowed">
-						<PopoverTrigger
+					<PopoverTrigger
 							aria-label="Select model"
 							disabled={disabled}
-							class="flex h-6 shrink-0 items-center gap-2 rounded-[calc(var(--radius-3xl)-1rem)] bg-transparent px-2 text-left text-foreground outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset disabled:pointer-events-none"
+							class="model-trigger group/model-trigger flex h-8 shrink-0 items-center gap-2 rounded-[calc(var(--radius-3xl)-1rem)] bg-transparent px-2 text-left text-foreground outline-none transition-colors focus-visible:ring-[3px] focus-visible:ring-ring/50 focus-visible:ring-inset disabled:pointer-events-none"
 						>
-							{@const SelectedIcon = selected_engine.icon}
-							<SelectedIcon
-								class={selected_engine.monochrome
-									? "size-4 shrink-0 dark:invert"
-									: "size-4 shrink-0"}
-							/>
-							<span class="whitespace-nowrap text-sm text-foreground">
-								{selected_model?.name ?? "No models"}
+							{@const trigger_mark = ProviderMarkFor(selected_model?.definition.provider)}
+							{@const TriggerMark = trigger_mark.icon}
+							<span class="flex min-w-0 items-center gap-2">
+								<TriggerMark class={EngineMarkClass(trigger_mark, "size-4")} />
+								<span class="flex min-w-0 items-center gap-1 whitespace-nowrap text-sm">
+									<span class="text-foreground">{selected_model?.name ?? "No models"}</span>
+									{#if selected_thinking_level !== undefined}
+										<span class="text-muted-foreground">
+											{thinking_level_labels[selected_thinking_level]}
+										</span>
+									{/if}
+									{#if trigger_speed_label !== undefined}
+										<span class="text-muted-foreground">{trigger_speed_label}</span>
+									{/if}
+								</span>
 							</span>
-							<Selector class="pointer-events-none size-3.5 shrink-0 text-muted-foreground" />
+							<Selector class="model-trigger-chevron pointer-events-none size-3.5 shrink-0" />
 						</PopoverTrigger>
 					</span>
 				{/snippet}
@@ -454,14 +477,22 @@
 			{/if}
 		</Tooltip>
 
+		<!--
+			Anchored to the trigger's leading edge, not its trailing one: the label
+			changes width as the model, effort and speed change, so an end-aligned
+			card slid sideways every time a value was picked.
+		-->
 		<PopoverContent
 			variant="bare"
-			align="end"
+			align="start"
 			side="top"
 			sideOffset={8}
-			class="w-[min(30rem,calc(100vw-2rem))] rounded-3xl"
+			class="t-dropdown w-[min(30rem,calc(100vw-2rem))] rounded-3xl animate-none!"
 		>
-			<ShaderGlassSurface strength="strong" class="w-full rounded-3xl">
+			<ShaderGlassSurface
+				strength="strong"
+				class="t-resize t-resize-auto w-full rounded-3xl"
+			>
 				<Tabs bind:value={active_engine} class="min-h-0 gap-2 p-2">
 				<EngineSection
 					{active_engine}

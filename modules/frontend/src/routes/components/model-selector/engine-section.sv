@@ -28,16 +28,28 @@
 	let indicator_width = $state(0);
 	let resize_revision = $state(0);
 
-	const PositionIndicator = (animate: boolean) =>
+	/** Where the light was last placed, so only a genuine tab change travels. */
+	let lit_engine: EngineChoice["id"] | undefined = undefined;
+
+	/**
+	 * Takes its inputs as arguments rather than closing over them: SER collects
+	 * the identifiers of the yielded expression, so anything read only inside
+	 * this body would never rerun the program. `_revision` carries no meaning of
+	 * its own and exists to make a resize one of those inputs.
+	 */
+	const PositionIndicator = (
+		engine: EngineChoice["id"],
+		current_surface: HTMLElement | null,
+		_revision: number,
+	) =>
 		Effect.gen(function* () {
 			/**
 			 * Yield one browser task so the tab primitive has committed its new
 			 * active state and geometry before measuring it.
 			 */
 			yield* Effect.sleep("1 millis");
-			const current_surface = surface;
 			const active_tab = yield* RunBrowserDom(() =>
-				current_surface?.querySelector<HTMLElement>(`[data-engine="${active_engine}"]`),
+				current_surface?.querySelector<HTMLElement>(`[data-engine="${engine}"]`),
 			);
 			if (active_tab === undefined || active_tab === null || current_surface === null) return;
 
@@ -45,7 +57,9 @@
 				surface_rect: current_surface.getBoundingClientRect(),
 				tab_rect: active_tab.getBoundingClientRect(),
 			}));
-			indicator_animated = animate && indicator_visible;
+			/** A resize re-measures in place; only a move between tabs is worth animating. */
+			indicator_animated = indicator_visible && lit_engine !== engine;
+			lit_engine = engine;
 			indicator_left = tab_rect.left - surface_rect.left;
 			indicator_visible = true;
 			indicator_width = tab_rect.width;
@@ -56,7 +70,7 @@
 	});
 
 	/** SER reruns this scoped geometry program after a tab, surface, or resize change. */
-	yield* PositionIndicator(resize_revision === 0);
+	yield* PositionIndicator(active_engine, surface, resize_revision);
 </script>
 
 <svelte:window onresize={yield* Resize} />

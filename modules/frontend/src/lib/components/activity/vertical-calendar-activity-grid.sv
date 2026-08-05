@@ -136,9 +136,17 @@
 		cells = next_cells;
 		});
 
-	const InspectCell = (event: PointerEvent & { readonly currentTarget: HTMLCanvasElement }) =>
+	/**
+	 * The canvas comes from the binding, not from `event.currentTarget`: this
+	 * effect starts after the pointer event has finished dispatching, and
+	 * `currentTarget` is null by then — on every single pointermove. Client
+	 * coordinates survive the dispatch, so only the element has to be recovered.
+	 */
+	const InspectCell = (event: PointerEvent) =>
 		Effect.gen(function* () {
-		const bounds = yield* RunBrowserDom(() => event.currentTarget.getBoundingClientRect());
+		const surface = canvas;
+		if (surface === undefined) return;
+		const bounds = yield* RunBrowserDom(() => surface.getBoundingClientRect());
 		const step = cell_size + CellGap;
 		const x = event.clientX - bounds.left - grid_left;
 		const y = event.clientY - bounds.top - grid_top;

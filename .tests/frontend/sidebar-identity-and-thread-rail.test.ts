@@ -107,6 +107,8 @@ describe("sidebar identity and thread rail regressions", () => {
 		expect(usage).toContain("weekly_reset_duration(engine.windows, checked_at_ms)");
 		expect(identity).toContain('<ShaderGlassSurface class="w-full rounded-2xl">');
 		expect(identity).toContain("bg-transparent! p-0! shadow-none! ring-0!");
+		expect(usage).toContain('<div class="flex flex-col px-1 py-1">');
+		expect(usage).not.toContain("flex flex-col gap-2.5 px-1 py-1");
 		expect(usage).toContain('<DropdownMenuSeparator class="my-1" />');
 		expect(usage).toContain(
 			'Your weekly limit resets in <span class="text-foreground">{weekly_reset}</span>.',
@@ -136,6 +138,24 @@ describe("sidebar identity and thread rail regressions", () => {
 		expect(rail).not.toContain("t-avatar");
 		expect(styles).not.toContain("--avatar-");
 		expect(styles).not.toContain(".t-avatar");
+	});
+
+	it("stands the proximity rail down while the account menu covers its band", () => {
+		const identity = read("modules/frontend/src/routes/components/sidebar-identity.sv");
+		const panel = read("modules/frontend/src/routes/components/sectioned-panel.sv");
+		const rail = read("modules/frontend/src/routes/components/thread-hover-rail.sv");
+
+		expect(identity).toContain("open = $bindable(false)");
+		expect(identity).not.toContain("let open = $state(false);");
+		expect(panel).toContain("<SidebarIdentity bind:open={account_open} />");
+		expect(panel).toContain(
+			"<ThreadHoverRail suppressed={account_open || inspecting_image} {threads} />",
+		);
+		expect(rail).toContain("suppressed = false,");
+		expect(rail).toContain("const open = $derived(near && !suppressed);");
+		// Suppression drops proximity outright, so closing the menu cannot fire a banked reveal.
+		expect(rail).toMatch(/if \(suppressed\) \{\s*yield\* Conceal\(\);\s*return;\s*\}/);
+		expect(rail).toContain("if (suppressed) return;");
 	});
 
 	it("mounts the thread hover rail only on canonical conversation routes", () => {

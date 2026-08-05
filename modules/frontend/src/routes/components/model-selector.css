@@ -2,3 +2,8 @@
 	scrollbar-width: thin;
 	scrollbar-color: var(--surface-500) transparent;
 }
+
+/** The trailing selector glyph remains secondary in every interaction state. */
+.model-trigger-chevron {
+	color: var(--muted-foreground);
+}
