@@ -49,7 +49,7 @@ describe("conversation trace", () => {
 		expect(segments).toEqual([expect.objectContaining({ id: "reasoning_1", type: "item" })]);
 	});
 
-	it("keeps live reasoning visible after concrete work starts and retires it on completion", () => {
+	it("keeps reasoning visible for the whole live run and retires it once work settles", () => {
 		const activity = item({
 			...base,
 			id: "activity_1",
@@ -78,11 +78,108 @@ describe("conversation trace", () => {
 			expect.objectContaining({ id: "reasoning_1", type: "item" }),
 		]);
 
-		const completed = make_conversation_trace_segments(
+		/**
+		 * A provider closes the reasoning item when the assistant message carrying
+		 * it ends — mid-run whenever more tool calls follow. Thinking the reader is
+		 * still reading must not vanish underneath them while the run continues.
+		 */
+		const completed_mid_run = make_conversation_trace_segments(
 			[activity, reasoning("completed")],
 			false,
+			false,
+			true,
 		);
-		expect(completed).toEqual([expect.objectContaining({ type: "activity_group" })]);
+		expect(completed_mid_run).toEqual([
+			expect.objectContaining({ type: "activity_group" }),
+			expect.objectContaining({ id: "reasoning_1", type: "item" }),
+		]);
+
+		const settled = make_conversation_trace_segments([activity, reasoning("completed")], false);
+		expect(settled).toEqual([expect.objectContaining({ type: "activity_group" })]);
+	});
+
+	/**
+	 * A streamed item exists from its first delta. Before its first character it
+	 * renders nothing, and any segment ends the run of activities around it — so
+	 * an invisible item both left a blank in the trace and split one continuous
+	 * tool chain into two headers.
+	 */
+	it("gives no segment to a streamed item that has yet to render anything", () => {
+		const activity = (id: string, ordinal: number) =>
+			item({
+				...base,
+				id,
+				kind: "terminal_activity",
+				label: "Ran a command",
+				ordinal,
+				status: "completed",
+				type: "activity",
+			});
+		const empty_reasoning = item({
+			...base,
+			id: "reasoning_empty",
+			lifecycle: "streaming",
+			ordinal: 2,
+			text: "   ",
+			type: "reasoning_summary",
+		});
+
+		const segments = make_conversation_trace_segments(
+			[activity("activity_1", 1), empty_reasoning, activity("activity_2", 3)],
+			false,
+			false,
+			true,
+		);
+
+		expect(segments).toEqual([
+			expect.objectContaining({ id: "activities:activity_1", type: "activity_group" }),
+		]);
+	});
+
+	/**
+	 * Adjacency is the whole rule. Something the agent actually said between two
+	 * batches is a real seam in the run, and folding work from both sides of it
+	 * into one header would claim a continuity the run did not have.
+	 */
+	it("chains adjacent activities and lets anything the agent said start a new one", () => {
+		const activity = (id: string, kind: string, ordinal: number) =>
+			item({
+				...base,
+				id,
+				kind,
+				label: "Provider activity",
+				ordinal,
+				status: "completed",
+				type: "activity",
+			});
+		const reasoning = item({
+			...base,
+			id: "reasoning_1",
+			lifecycle: "streaming",
+			ordinal: 2,
+			text: "Deciding what to read next",
+			type: "reasoning_summary",
+		});
+
+		const segments = make_conversation_trace_segments(
+			[
+				activity("activity_1", "terminal_activity", 1),
+				reasoning,
+				activity("activity_2", "terminal_activity", 3),
+				activity("activity_3", "search", 4),
+			],
+			false,
+		);
+
+		expect(segments.map((segment) => segment.type)).toEqual([
+			"activity_group",
+			"item",
+			"activity_group",
+		]);
+		const chains = segments.flatMap((segment) =>
+			segment.type === "activity_group" ? [segment.items.map((entry) => entry.id)] : [],
+		);
+		expect(chains).toEqual([["activity_1"], ["activity_2", "activity_3"]]);
 	});
 
 	it("groups every diagnostic behind one disclosure when enabled", () => {
@@ -162,9 +259,8 @@ describe("conversation trace", () => {
 			"if (became_unsuccessful && !user_chose_disclosure) open = true;",
 		);
 		expect(work_session).toContain('is_failed ? "text-destructive" : ""');
-		expect(trace).toContain(
-			"make_conversation_trace_segments(items, $conversation_diagnostics_enabled, failed)",
-		);
+		expect(trace).toContain("make_conversation_trace_segments(");
+		expect(trace).toContain("$conversation_diagnostics_enabled,");
 		expect(trace).toContain(">Failure details</span>");
 		expect(trace).toContain('role={failed ? "alert" : undefined}');
 		expect(workspace).toContain('failed={block.session.status === "failed" ||');

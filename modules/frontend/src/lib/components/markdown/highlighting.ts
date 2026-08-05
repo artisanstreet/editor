@@ -50,9 +50,24 @@ export const conversation_highlight_plugin = highlight({
 export const conversation_math_plugin = math();
 export const conversation_mermaid_plugin = mermaid();
 
+/**
+ * Streaming carries no highlighter.
+ *
+ * Shiki tokenizes synchronously on the main thread, and the reveal reparses the
+ * whole message on every word it commits — every 40ms when calm and every 12ms
+ * while catching up. Highlighting from that set therefore re-tokenized every
+ * code block in the message once per word: work that grows with the message and
+ * repeats a thousand times over one reply, all of it blocking. It reads as the
+ * UI locking up for seconds at the end of a long answer, which is exactly when
+ * the document is largest and the last blocks are waiting to paint.
+ *
+ * Code streams unhighlighted and gains its colour in one pass when the message
+ * settles, which is also the first moment a fenced block is guaranteed complete
+ * enough to tokenize as the language it claims.
+ */
 export const create_conversation_streaming_markdown_plugins = (
 	streaming_words_plugin: ComarkPlugin,
-) => [conversation_highlight_plugin, streaming_words_plugin];
+) => [streaming_words_plugin];
 export const conversation_markdown_plugins = [
 	conversation_math_plugin,
 	conversation_mermaid_plugin,

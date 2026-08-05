@@ -6,10 +6,12 @@
 
 	let {
 		attachments,
+		bumped,
 		onremove,
 		onview,
 	}: {
 		attachments: ReadonlyMap<string, ComposerImageAttachment>;
+		bumped: ReadonlySet<string>;
 		onremove: (attachment_id: string) => Effect.Effect<void>;
 		onview: (attachment: ComposerImageAttachment) => Effect.Effect<void>;
 	} = $props();
@@ -18,7 +20,7 @@
 <div class="composer-attachment-tray" aria-label="Attached images">
 	<div class="composer-attachment-tray-content">
 		{#each [...attachments.values()] as attachment (attachment.id)}
-			<div class="composer-attachment-preview card">
+			<div class="composer-attachment-preview card" data-bump={bumped.has(attachment.id)}>
 				<button
 					type="button"
 					class="composer-attachment-preview-trigger"
@@ -51,6 +53,13 @@
 	.composer-attachment-preview-trigger { display: block; width: 100%; height: 100%; padding: 0; border: 0; background: transparent; cursor: pointer; }
 	.composer-attachment-preview-trigger:focus-visible { outline: 2px solid var(--ring); outline-offset: -2px; }
 	.composer-attachment-preview img { width: 100%; height: 100%; object-fit: cover; }
+
+	/* A re-paste is answered by shaking the image already attached. */
+	.composer-attachment-preview[data-bump="true"] {
+		--favorite-rustle-tilt: 4deg;
+		--favorite-rustle-pop: 1.07;
+		animation: t-rustle var(--favorite-rustle) var(--favorite-rustle-ease);
+	}
 	:global(.composer-attachment-remove) { position: absolute; top: .2rem; right: .2rem; min-width: 1.35rem; width: 1.35rem; height: 1.35rem; border-radius: 999px; background: rgb(255 255 255 / .92); color: #18181b; }
 
 	@media (prefers-reduced-motion: reduce) {
@@ -59,6 +68,10 @@
 		.composer-attachment-preview {
 			transition: none !important;
 			will-change: auto;
+		}
+
+		.composer-attachment-preview[data-bump="true"] {
+			animation: none !important;
 		}
 	}
 </style>

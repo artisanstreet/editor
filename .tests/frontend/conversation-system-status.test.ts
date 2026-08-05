@@ -36,9 +36,8 @@ describe("conversation system status", () => {
 			'data-live-work-detail={item.state === "started" ? "true" : undefined}',
 		);
 		expect(work_session).toContain(`querySelector('[data-live-work-detail="true"]') !== null`);
-		expect(work_session).toContain(
-			"{#if is_working && !has_live_detail && !has_live_status_detail}",
-		);
+		expect(work_session).toContain("is_working && !has_live_reply && !has_live_status_detail");
+		expect(work_session).toContain("{#if renders_status_line}");
 		expect(shimmer).toContain("@media (prefers-reduced-motion: reduce)");
 		expect(shimmer).toContain("animation: none !important");
 	});
@@ -47,8 +46,11 @@ describe("conversation system status", () => {
 		const trace = Read("modules/frontend/src/routes/components/conversation-trace.sv");
 		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.sv");
 
-		expect(trace).toContain("work_active ? activities.findLast");
-		expect(workspace).toContain("work_active={block.session.ended_at === undefined}");
+		expect(trace).toContain("work_active && activities.some(conversation_activity_is_live)");
+		expect(workspace).toContain("conversation_work_session_is_active(");
+		expect(workspace).toContain(
+			"work_active={block.session.ended_at === undefined && session_active}",
+		);
 	});
 
 	it("owns the work-session observer in the SER component scope", () => {

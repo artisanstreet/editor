@@ -164,6 +164,17 @@ describe("conversation rich Markdown", () => {
 		);
 		expect(highlighting).toContain("create_conversation_streaming_markdown_plugins");
 		expect(content).toContain("create_conversation_streaming_words_plugin");
+		/**
+		 * The highlighter is deferred with them. Shiki tokenizes synchronously,
+		 * and the reveal reparses the whole message once per revealed word, so
+		 * highlighting from the streaming set re-tokenized every code block a
+		 * thousand times over one reply — blocking work that grows with the
+		 * message and peaks exactly when its last blocks are waiting to paint.
+		 */
+		expect(highlighting).toContain(") => [streaming_words_plugin];");
+		expect(highlighting).toContain(
+			"conversation_math_plugin,\n\tconversation_mermaid_plugin,\n\tconversation_highlight_plugin,",
+		);
 		expect(mermaid_renderer).toContain("Effect.tryPromise");
 		expect(mermaid_renderer).toContain("MermaidRendererLoadFailure");
 		expect(mermaid_renderer).not.toContain("Effect.promise");

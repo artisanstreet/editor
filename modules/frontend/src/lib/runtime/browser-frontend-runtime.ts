@@ -6,6 +6,7 @@ import { RouteNavigationLive } from "../browser/route-navigation";
 import { BrowserCodeMirrorAdapter } from "../editor/codemirror-adapter";
 import { MakeEditorLayer } from "../editor/service";
 import { RunUsageControllerLive } from "../context-usage/run-usage-controller";
+import { ImageInspectionStoreLive } from "../images/inspection-store";
 import { DraftThreadControllerLive } from "../root/draft-thread";
 import { SessionDefaultsControllerLive } from "../settings/session-defaults-controller";
 import { FrontendRuntimeLive } from "./frontend-runtime";
@@ -13,6 +14,7 @@ import { FrontendRuntimeLive } from "./frontend-runtime";
 /** Controllers consume the one production client supplied by the base runtime. */
 const FrontendControllersLive = Layer.mergeAll(
 	DraftThreadControllerLive,
+	ImageInspectionStoreLive,
 	RunUsageControllerLive,
 	SessionDefaultsControllerLive,
 ).pipe(Layer.provide(FrontendRuntimeLive));

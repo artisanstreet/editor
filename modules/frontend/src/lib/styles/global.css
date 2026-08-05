@@ -95,6 +95,14 @@
 	--text-swap-dur: 150ms;
 	--text-swap-translate-y: 4px;
 	--text-swap-blur: 2px;
+	/**
+	 * A streamed word's own entrance, kept under the sidebar stagger it used to
+	 * borrow. This one runs per word rather than per list item, so its duration
+	 * decides how much of the message tail is in motion at once.
+	 */
+	--stream-word-dur: 320ms;
+	--stream-word-rise: 0.3em;
+	--stream-word-blur: 3px;
 	--acc-expand: 250ms;
 	--acc-collapse: 250ms;
 	--acc-chevron: 250ms;
@@ -120,6 +128,46 @@
 	--check-ease-rotate: cubic-bezier(0.22, 1, 0.36, 1);
 	--check-ease-bob: cubic-bezier(0.34, 1.35, 0.64, 1);
 	--check-ease-path: cubic-bezier(0.22, 1, 0.36, 1);
+	--favorite-rustle: 350ms;
+	--favorite-rustle-ease: cubic-bezier(0.34, 1.96, 0.64, 1);
+	--favorite-rustle-tilt: 10deg;
+	--favorite-rustle-pop: 1.18;
+	/* transitions.dev — menu dropdown */
+	--dropdown-open-dur: 250ms;
+	--dropdown-close-dur: 150ms;
+	--dropdown-pre-scale: 0.97;
+	--dropdown-closing-scale: 0.99;
+	--dropdown-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/*
+ * The favourite rustle, shared. Tilt and pop are tokens so a surface larger
+ * than an icon can dial the motion down to its own scale instead of redefining
+ * it — the timing, easing, and shape stay identical everywhere it appears. The
+ * defaults reproduce the favourite star exactly (1.18 → 1.06 → 1.02).
+ */
+@keyframes t-rustle {
+	0% {
+		transform: rotate(0deg) scale(1);
+	}
+
+	25% {
+		transform: rotate(calc(var(--favorite-rustle-tilt) * -1)) scale(var(--favorite-rustle-pop));
+	}
+
+	55% {
+		transform: rotate(var(--favorite-rustle-tilt))
+			scale(calc(1 + (var(--favorite-rustle-pop) - 1) * 0.33));
+	}
+
+	80% {
+		transform: rotate(calc(var(--favorite-rustle-tilt) * -0.4))
+			scale(calc(1 + (var(--favorite-rustle-pop) - 1) * 0.11));
+	}
+
+	100% {
+		transform: rotate(0deg) scale(1);
+	}
 }
 
 .dark {
@@ -318,6 +366,52 @@
 		0 4px 8px rgba(0, 0, 0, 0.06),
 		0 0 0 0.5px color-mix(in oklab, var(--card-color) 20%, transparent),
 		0 1px 6px -4px #000;
+}
+
+/**
+ * Hides a scroll container's scrollbar without disabling scrolling.
+ *
+ * Two call sites already asked for this class and it was never defined, so an
+ * `overflow-x-auto` row was free to reserve a scrollbar gutter — which steals
+ * height from the bottom of the box and pushes its contents off the centre line
+ * its neighbours are aligned to.
+ */
+/**
+ * The transitions.dev text swap: a label that replaces itself rises, sharpens
+ * and fades in. Played by remounting the span on a `{#key}`, so one mechanism
+ * covers both a label changing its wording and a label changing its content.
+ */
+@keyframes text-swap-in {
+	from {
+		opacity: 0;
+		transform: translateY(var(--text-swap-translate-y));
+		filter: blur(var(--text-swap-blur));
+	}
+
+	to {
+		opacity: 1;
+		transform: translateY(0);
+		filter: blur(0);
+	}
+}
+
+@utility t-text-swap-in {
+	animation: text-swap-in var(--text-swap-dur) var(--ease-smooth-out);
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.t-text-swap-in {
+		animation: none;
+	}
+}
+
+@utility no-scrollbar {
+	scrollbar-width: none;
+	-ms-overflow-style: none;
+
+	&::-webkit-scrollbar {
+		display: none;
+	}
 }
 
 @utility card-warning {
@@ -532,4 +626,146 @@
 .banner-action > svg {
 	width: 0.875rem;
 	height: 0.875rem;
+}
+
+/*
+ * Composer surface. These rules are app-wide by nature: the surface class is
+ * rendered by a child component and the inline image markers are built
+ * imperatively, so neither carries a component scope for a scoped rule to
+ * match. The composer's own scoped rules stay in the component.
+ */
+:root {
+	--resize-dur: 300ms;
+	--resize-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.t-resize {
+	transition:
+		width var(--resize-dur) var(--resize-ease),
+		height var(--resize-dur) var(--resize-ease);
+	will-change: width, height;
+}
+
+.thread-composer {
+	--composer-radius: calc(var(--radius-3xl) - 0.375rem);
+	--composer-resize-dur: var(--resize-dur);
+	--composer-resize-ease: var(--resize-ease);
+}
+.composer-image-marker {
+	display: inline-flex;
+	width: 1rem;
+	height: 1rem;
+	margin: 0 0.12rem;
+	padding: 0;
+	overflow: hidden;
+	vertical-align: -0.12rem;
+	border: 0;
+	border-radius: 0.22rem;
+	cursor: pointer;
+	background: #27272a;
+}
+.composer-image-marker:focus-visible {
+	outline: 2px solid var(--ring);
+	outline-offset: 2px;
+}
+.composer-image-marker img {
+	width: 100%;
+	height: 100%;
+	object-fit: cover;
+	pointer-events: none;
+}
+
+/* A re-paste shakes the marker of the image already attached. */
+.composer-image-marker[data-bump="true"] {
+	--favorite-rustle-tilt: 6deg;
+	--favorite-rustle-pop: 1.12;
+	animation: t-rustle var(--favorite-rustle) var(--favorite-rustle-ease);
+}
+/*
+ * The rustle is the favourite animation at a scale that suits a panel: the same
+ * keyframes and easing, with the tilt and pop dialled down so the composer
+ * acknowledges the paste instead of shaking itself.
+ */
+.thread-composer[data-rustle="true"] .composer-editor,
+.thread-composer[data-rustle="true"] .composer-attachment-tray-content {
+	animation: t-rustle var(--favorite-rustle) var(--favorite-rustle-ease);
+}
+
+.thread-composer[data-rustle="true"] .composer-editor {
+	--favorite-rustle-tilt: 0.3deg;
+	--favorite-rustle-pop: 1.008;
+}
+
+.thread-composer[data-rustle="true"] .composer-attachment-tray-content {
+	--favorite-rustle-tilt: 0.7deg;
+	--favorite-rustle-pop: 1.03;
+	transform-origin: left center;
+}
+@media (prefers-reduced-motion: reduce) {
+	.t-resize {
+		transition: none !important;
+		will-change: auto;
+	}
+
+	/* The rustle is pure delight; the settle carries meaning, so it stays. */
+	.thread-composer[data-rustle="true"] .composer-editor,
+	.thread-composer[data-rustle="true"] .composer-attachment-tray-content,
+	.composer-image-marker[data-bump="true"] {
+		animation: none !important;
+	}
+}
+
+/*
+ * transitions.dev — menu dropdown, driven by the popover primitive's own
+ * `data-state` rather than the snippet's is-open/is-closing classes: bits-ui
+ * already owns mount, unmount, and the transform origin, and duplicating that
+ * in JS would fight it.
+ *
+ * Qualified by the popover attribute because `.t-dropdown` is also worn by the
+ * shader panel, which orchestrates the same motion through its own scoped
+ * classes. Two elements, two mechanisms, one name — the qualifier keeps this
+ * block off the one it does not drive.
+ */
+.t-dropdown[data-popover-content] {
+	transform: scale(var(--dropdown-pre-scale));
+	opacity: 0;
+	transition:
+		transform var(--dropdown-open-dur) var(--dropdown-ease),
+		opacity var(--dropdown-open-dur) var(--dropdown-ease);
+}
+
+/*
+ * Open is scaleless and hint-free on purpose. A transform — `scale(1)` counts —
+ * or a `will-change` naming one makes this element a backdrop root, and the
+ * glass inside it then has nothing behind it to sample and paints flat. The
+ * card only carries a transform while it is actually moving, exactly as the
+ * primitive's own keyframes did.
+ */
+.t-dropdown[data-popover-content][data-state="open"] {
+	transform: none;
+	opacity: 1;
+}
+
+.t-dropdown[data-popover-content][data-state="closed"] {
+	transform: scale(var(--dropdown-closing-scale));
+	opacity: 0;
+	transition:
+		transform var(--dropdown-close-dur) var(--dropdown-ease),
+		opacity var(--dropdown-close-dur) var(--dropdown-ease);
+}
+
+/*
+ * The picker grows when a model's detail pane appears. `interpolate-size` is
+ * what lets the height tween to `auto` instead of snapping; without it the card
+ * resize has nothing to interpolate towards.
+ */
+.t-resize-auto {
+	interpolate-size: allow-keywords;
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.t-dropdown[data-popover-content],
+	.t-resize-auto {
+		transition: none !important;
+	}
 }

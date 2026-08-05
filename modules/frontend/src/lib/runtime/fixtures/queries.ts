@@ -422,6 +422,7 @@ export const FixtureClientQueries = {
 	| "GetProjectDiffs"
 	| "GetHostIdentity"
 	| "GetEngineUsage"
+	| "GetThreadUsageSeries"
 	| "DetachProject"
 	| "ListProjectDirectories"
 	| "SelectProjectDirectory"

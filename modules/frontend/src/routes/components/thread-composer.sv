@@ -1,9 +1,15 @@
 <script lang="ts" effect>
+	import ChevronDown from "@tabler/icons-svelte/icons/chevron-down";
+	import { tick } from "svelte";
 	import { Effect, Stream } from "effect";
 	import type { SurfaceUsageAggregate, ThreadSessionPolicy } from "@artisan/protocol";
 	import { BannerService } from "$lib/banner/service";
-	import { RunBrowserDom } from "$lib/browser/dom";
 	import { ReleaseBrowserObjectUrl } from "$lib/browser/object-url";
+	import { Button } from "$lib/components/ui/button";
+	import {
+		MakeComposerGestureIntake,
+		type ComposerGesture,
+	} from "$lib/composer/gesture-intake";
 	import {
 		MakeSubmitGate,
 		type SubmitGate,
@@ -14,11 +20,10 @@
 	} from "$lib/composer-placeholder";
 	import {
 		MakeImageAttachmentParts,
-		ValidateImageAttachmentCandidates,
 		type ComposerImageAttachment,
 		type ComposerSubmission,
 	} from "$lib/composer/image-attachments";
-	import { ReadComposerImageFile } from "$lib/composer/attachment-reader";
+	import { MakeComposerAttachmentIntake } from "$lib/composer/attachment-intake";
 	import {
 		ClearComposerEditor,
 		ComposerAttachmentIdAtEvent,
@@ -27,6 +32,7 @@
 		FocusComposerEditor,
 		FocusComposerRange,
 		InsertComposerAttachmentMarkers,
+		MarkComposerAttachmentBumps,
 		ReadComposerEditorDocument,
 		RemoveComposerAttachmentMarkers,
 		type ComposerEditorDocument,
@@ -58,15 +64,18 @@
 		disabled = false,
 		engine_locked = false,
 		onabort,
+		onjumptolatest,
 		onpolicychange,
 		onsubmit,
 		policy,
 		run_active = false,
+		show_jump_to_latest = false,
 	}: {
 		context_usage?: SurfaceUsageAggregate;
 		disabled?: boolean;
 		engine_locked?: boolean;
 		onabort?: () => Effect.Effect<unknown, { readonly message: string }>;
+		onjumptolatest?: Effect.Effect<void>;
 		onpolicychange?: (
 			policy: ThreadSessionPolicy,
 		) => Effect.Effect<ThreadSessionPolicy, { readonly message: string }>;
@@ -75,7 +84,12 @@
 		) => Effect.Effect<unknown, { readonly message: string }>;
 		policy?: ThreadSessionPolicy;
 		run_active?: boolean;
+		show_jump_to_latest?: boolean;
 	} = $props();
+
+	const JumpToLatest = Effect.gen(function* () {
+		if (onjumptolatest !== undefined) yield* onjumptolatest;
+	});
 
 	/**
 	 * Sending needs a live engine behind it. Without Forge there is no session
@@ -122,6 +136,9 @@
 
 	let editor = $state<HTMLDivElement | null>(null);
 	let attachments = $state<ReadonlyMap<string, ComposerImageAttachment>>(new Map());
+	let rustling = $state(false);
+	let bumped = $state.raw<ReadonlySet<string>>(new Set());
+	let bump_generation = 0;
 	let cancelling = $state(false);
 	let draft = $state("");
 	let image_viewer_open = $state(false);
@@ -129,6 +146,15 @@
 	let viewed_attachment = $state<ComposerImageAttachment | undefined>();
 	let placeholder = $state(MakeComposerPlaceholderState());
 	const submit_gate: SubmitGate = yield* MakeSubmitGate;
+
+	/**
+	 * An image has no bytes for the few milliseconds it is being encoded. That is
+	 * far too short to disarm the send button over — flipping it would read as a
+	 * glitch — so arming ignores it and the submit itself declines instead.
+	 */
+	const attachments_ready = $derived(
+		[...attachments.values()].every((attachment) => attachment.ready),
+	);
 
 	/**
 	 * Everything a send needs, in one place: the button's disabled state and
@@ -141,6 +167,40 @@
 			(draft.trim().length > 0 || attachments.size > 0) &&
 			onsubmit !== undefined,
 	);
+
+	/**
+	 * Replays the favourite rustle on the composer whenever images land. The flag
+	 * drops for a frame first so a second paste restarts the animation instead of
+	 * joining one already running.
+	 */
+	const StartRustle = Effect.gen(function* () {
+		rustling = false;
+		yield* Effect.promise(() => tick());
+		rustling = true;
+	});
+	const EndRustle = Effect.gen(function* () {
+		rustling = false;
+	});
+
+	/**
+	 * Shakes the attachments a re-paste was answered by. The flag drops for a
+	 * frame first so spamming the same image shakes it every time rather than
+	 * once, and the generation makes the newest bump own the reset.
+	 */
+	const BumpAttachments = (ids: ReadonlyArray<string>) =>
+		Effect.gen(function* () {
+			const generation = (bump_generation += 1);
+			bumped = new Set();
+			yield* MarkComposerAttachmentBumps(editor, []);
+			yield* Effect.promise(() => tick());
+			if (generation !== bump_generation) return;
+			bumped = new Set(ids);
+			yield* MarkComposerAttachmentBumps(editor, ids);
+			yield* Effect.sleep("420 millis");
+			if (generation !== bump_generation) return;
+			bumped = new Set();
+			yield* MarkComposerAttachmentBumps(editor, []);
+		});
 
 	const UpdateDraft = (value: string, has_attachments = attachments.size > 0) =>
 		Effect.gen(function* () {
@@ -206,38 +266,48 @@
 			image_viewer_open = true;
 		});
 
-	const AddFiles = (files: ReadonlyArray<File>, range?: Range) =>
+	/** Replaces one attachment in place, leaving its marker and position alone. */
+	const SettleAttachment = (settled: ComposerImageAttachment) =>
 		Effect.gen(function* () {
-			if (disabled || submitting) return;
-			const validation = ValidateImageAttachmentCandidates(
-				[...attachments.values()],
-				files.map((file) => ({ name: file.name, size_bytes: file.size, type: file.type })),
-			);
-			if (validation !== undefined) {
-				yield* banner.error("Could not attach image", { description: validation });
-				return;
-			}
-			const loaded: Array<ComposerImageAttachment> = [];
-			yield* Effect.gen(function* () {
-				for (const file of files) loaded.push(yield* ReadComposerImageFile(file));
-			}).pipe(
-				Effect.matchEffect({
-					onFailure: (cause) =>
-						Effect.gen(function* () {
-							for (const attachment of loaded) yield* RevokeAttachment(attachment);
-							yield* banner.error("Could not attach image", { description: cause.message });
-						}),
-					onSuccess: () =>
-						Effect.gen(function* () {
-							attachments = new Map([...attachments, ...loaded.map((attachment) => [attachment.id, attachment])]);
-							yield* InsertAttachments(
-								loaded,
-								range ?? (yield* ComposerSelectedRange(editor)),
-							);
-						}),
-				}),
-			);
+			if (!attachments.has(settled.id)) return;
+			attachments = new Map(attachments).set(settled.id, settled);
 		});
+
+	const DropAttachment = (attachment: ComposerImageAttachment) =>
+		Effect.gen(function* () {
+			yield* RemoveComposerAttachmentMarkers(editor, attachment.id);
+			yield* RevokeAttachment(attachment);
+			attachments = new Map([...attachments].filter(([id]) => id !== attachment.id));
+		});
+
+	/**
+	 * Placing an image is its own ordered job — validate, recognise a re-paste,
+	 * show, encode, settle — so it lives beside the other composer intake. What
+	 * stays here is the part only the component can do: its state and its motion.
+	 */
+	const intake = MakeComposerAttachmentIntake({
+		Attachments: () => attachments,
+		Blocked: () => disabled || submitting,
+		Bump: BumpAttachments,
+		EngineId: () => policy?.engine_id,
+		Present: (added, range) =>
+			Effect.gen(function* () {
+				attachments = new Map([
+					...attachments,
+					...added.map((attachment) => [attachment.id, attachment] as const),
+				]);
+				yield* InsertAttachments(added, range ?? (yield* ComposerSelectedRange(editor)));
+				yield* StartRustle;
+			}),
+		Remove: DropAttachment,
+		Report: (description) =>
+			Effect.gen(function* () {
+				yield* banner.error("Could not attach image", { description });
+			}),
+		Revoke: RevokeAttachment,
+		Settle: SettleAttachment,
+	});
+	const AddFiles = intake.AddFiles;
 
 	const character_delay = (index: number, length: number) => {
 		if (length <= 1) return 0;
@@ -249,6 +319,8 @@
 		const document = yield* SyncEditor();
 		const text = document.text;
 		const attachment_parts = MakeImageAttachmentParts(attachments, document.tokens);
+		/** Silently declined rather than refused: the encode finishes in a moment. */
+		if (!attachments_ready) return;
 		if (disabled || submitting || (text.length === 0 && attachment_parts.length === 0) || onsubmit === undefined)
 			return;
 		if (!(yield* submit_gate.Acquire)) return;
@@ -302,33 +374,30 @@
 		yield* Submit;
 	});
 
-	const HandleComposerKey = (event: KeyboardEvent) =>
+	/**
+	 * Paste, drop, and Enter settle their DOM contract inside the event's own
+	 * dispatch, which a SER event effect is already too late for, so the intake
+	 * owns their synchronous half. Everything effectful about them lands here,
+	 * one gesture at a time, so a send can never overtake the attachment it was
+	 * typed under.
+	 */
+	const RunComposerGesture = (gesture: ComposerGesture) =>
 		Effect.gen(function* () {
-			if (event.isComposing || event.key !== "Enter" || event.shiftKey) return;
-			yield* RunBrowserDom(() => event.preventDefault());
-			yield* Submit;
-		});
-
-	const HandlePaste = (event: ClipboardEvent) =>
-		Effect.gen(function* () {
-			const files = [...(event.clipboardData?.files ?? [])].filter((file) => file.type.startsWith("image/"));
-			if (files.length === 0) return;
-			yield* RunBrowserDom(() => event.preventDefault());
-			yield* AddFiles(files);
-		});
-
-	const HandleDrop = (event: DragEvent) =>
-		Effect.gen(function* () {
-			const files = [...(event.dataTransfer?.files ?? [])].filter((file) =>
-				file.type.startsWith("image/"),
-			);
-			if (files.length === 0) return;
-			yield* RunBrowserDom(() => event.preventDefault());
+			if (gesture._tag === "submit") {
+				yield* Submit;
+				return;
+			}
+			if (gesture.point === undefined) {
+				yield* AddFiles(gesture.files);
+				return;
+			}
 			const range =
-				(yield* ComposerDropRange(editor, event)) ??
+				(yield* ComposerDropRange(editor, gesture.point)) ??
 				(yield* ComposerSelectedRange(editor));
-			yield* AddFiles(files, range);
+			yield* AddFiles(gesture.files, range);
 		});
+
+	const gestures = yield* MakeComposerGestureIntake(RunComposerGesture);
 
 	const HandleEditorClick = (event: MouseEvent) =>
 		Effect.gen(function* () {
@@ -342,12 +411,6 @@
 		yield* Effect.yieldNow;
 		yield* SyncEditor();
 	});
-	const HandleDragOver = (event: DragEvent) =>
-		Effect.gen(function* () {
-			if ([...(event.dataTransfer?.types ?? [])].includes("Files")) {
-				yield* RunBrowserDom(() => event.preventDefault());
-			}
-		});
 	const ClearViewedAttachment = Effect.gen(function* () {
 		viewed_attachment = undefined;
 	});
@@ -364,13 +427,27 @@
 	yield* ResetCancelling;
 </script>
 
-<div class="pointer-events-none absolute inset-x-0 bottom-0 z-20 px-4 pb-4 sm:px-6 sm:pb-6">
+<div class="pointer-events-none absolute inset-x-0 bottom-0 z-20 flex flex-col items-center gap-2 px-4 pb-4 sm:px-6 sm:pb-6">
+	{#if show_jump_to_latest && onjumptolatest !== undefined}
+		<Button
+			variant="outline"
+			size="icon-sm"
+			class="pointer-events-auto rounded-full bg-surface-100/90 text-muted-foreground shadow-lg backdrop-blur-xl hover:text-foreground"
+			aria-label="Jump to latest"
+			title="Jump to latest"
+			onclick={yield* JumpToLatest}
+		>
+			<ChevronDown class="size-4" aria-hidden="true" />
+		</Button>
+	{/if}
 	<ShaderGlassSurface
 		class="t-resize thread-composer pointer-events-auto mx-auto w-full max-w-3xl rounded-(--composer-radius)"
 		data-has-attachments={attachments.size > 0}
+		data-rustle={rustling}
+		onanimationend={yield* EndRustle}
 	>
 		<div class="relative z-10 flex min-h-32 flex-col p-2">
-			<AttachmentTray {attachments} onremove={RemoveAttachment} onview={ViewAttachment} />
+			<AttachmentTray {attachments} {bumped} onremove={RemoveAttachment} onview={ViewAttachment} />
 
 			<div class="relative min-h-16 flex-1">
 				{#if placeholder.visible}
@@ -395,11 +472,11 @@
 					aria-multiline="true"
 					aria-disabled={disabled || submitting}
 					oninput={yield* SyncEditor()}
-					onkeydown={yield* HandleComposerKey(event)}
+					onkeydown={gestures.SubmitKey}
 					onkeyup={yield* QueueEditorSync}
-					onpaste={yield* HandlePaste(event)}
-					ondragover={yield* HandleDragOver(event)}
-					ondrop={yield* HandleDrop(event)}
+					onpaste={gestures.Paste}
+					ondragover={gestures.AcceptFileDrag}
+					ondrop={gestures.Drop}
 					onclick={yield* HandleEditorClick(event)}
 				></div>
 			</div>
@@ -432,33 +509,37 @@
 />
 
 <style>
-	:global(:root) {
-		--resize-dur: 300ms;
-		--resize-ease: cubic-bezier(0.22, 1, 0.36, 1);
+	.composer-editor {
+		white-space: pre-wrap;
+		overflow-wrap: anywhere;
+		cursor: text;
+	}
+	.composer-editor:empty::before {
+		content: "";
+	}
+	.placeholder-reveal-line {
+		display: block;
+		white-space: pre;
+	}
+	.placeholder-character {
+		display: inline-block;
+		animation: placeholder-reveal-in 280ms cubic-bezier(0.34, 1.56, 0.64, 1)
+			var(--placeholder-delay) both;
+		will-change: opacity, transform;
 	}
 
-	:global(.t-resize) {
-		transition:
-			width var(--resize-dur) var(--resize-ease),
-			height var(--resize-dur) var(--resize-ease);
-		will-change: width, height;
+	@keyframes placeholder-reveal-in {
+		from {
+			opacity: 0;
+			transform: translateY(2px);
+		}
+		to {
+			opacity: 1;
+			transform: translateY(0);
+		}
 	}
 
-	:global(.thread-composer) {
-		--composer-radius: calc(var(--radius-3xl) - 0.375rem);
-		--composer-resize-dur: var(--resize-dur);
-		--composer-resize-ease: var(--resize-ease);
-	}
-	.composer-editor { white-space: pre-wrap; overflow-wrap: anywhere; cursor: text; }
-	.composer-editor:empty::before { content: ""; }
-	:global(.composer-image-marker) { display: inline-flex; width: 1rem; height: 1rem; margin: 0 .12rem; padding: 0; overflow: hidden; vertical-align: -.12rem; border: 0; border-radius: .22rem; cursor: pointer; background: #27272a; }
-	:global(.composer-image-marker:focus-visible) { outline: 2px solid var(--ring); outline-offset: 2px; }
-	:global(.composer-image-marker img) { width: 100%; height: 100%; object-fit: cover; pointer-events: none; }
-	.placeholder-reveal-line { display: block; white-space: pre; }
-	.placeholder-character { display: inline-block; animation: placeholder-reveal-in 280ms cubic-bezier(.34,1.56,.64,1) var(--placeholder-delay) both; will-change: opacity, transform; }
-	@keyframes placeholder-reveal-in { from { opacity: 0; transform: translateY(2px); } to { opacity: 1; transform: translateY(0); } }
 	@media (prefers-reduced-motion: reduce) {
-		:global(.t-resize),
 		.placeholder-character {
 			transition: none !important;
 			will-change: auto;

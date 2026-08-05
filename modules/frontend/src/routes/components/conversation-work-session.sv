@@ -4,29 +4,47 @@
 	import { Effect } from "effect";
 	import { untrack } from "svelte";
 	import type { Snippet } from "svelte";
-	import { thinking_word_for } from "$lib/conversation/activity-status";
+	import {
+		active_work_label_for,
+		thinking_word_for,
+	} from "$lib/conversation/activity-status";
+	import { EngineDisplayName } from "$lib/engine/presentation";
 	import { MakeScopedAttachmentRunner } from "$lib/lifecycle/scoped-attachment-runner";
 	import { RunBrowserDom } from "$lib/browser/dom";
 	import { ShimmerText } from "$lib/components/ui/shimmer-text";
 	import ConversationStatus from "./conversation-status.sv";
 
 	let {
-		has_live_detail = false,
+		engine_id,
+		has_live_reply = false,
 		item,
 		details,
 		duration_kind,
+		run_active = false,
 		transition,
 	}: {
 		/**
-		 * True while some detail item is visibly working — a running command or
-		 * streaming text. The latest live item is then the status, so the
-		 * session adds no line of its own; the thinking word covers only the
-		 * genuinely quiet stretches.
+		 * Who the request is out to. Known only from the thread's policy — the
+		 * work item itself is engine-neutral — so an unattributed session simply
+		 * keeps its thinking word.
 		 */
-		has_live_detail?: boolean;
+		engine_id?: string;
+		/**
+		 * True while the assistant's prose is streaming below with something on
+		 * screen. A reply is its own status, so the session adds no line of its
+		 * own while one arrives. Tools and reasoning are deliberately not replies:
+		 * the word holds across the whole chain rather than blinking through it.
+		 */
+		has_live_reply?: boolean;
 		item: Extract<ConversationItem, { type: "work_session" }>;
 		details?: Snippet;
 		duration_kind?: "thought" | "worked";
+		/**
+		 * Whether this session owns the thread's live run. The authority on that is
+		 * the durable work item plus run identity, not this session's own lifecycle,
+		 * which a killed run can leave unterminated.
+		 */
+		run_active?: boolean;
 		/** The engine handoff that started this run, shown at the header's far end. */
 		transition?: Extract<ConversationItem, { type: "model_transition" }>;
 	} = $props();
@@ -36,6 +54,9 @@
 	let previous_status = untrack(() => item.status);
 	let has_visible_details = $state(false);
 	let has_live_status_detail = $state(false);
+	let status_line_was_visible = $state(false);
+	let status_line_has_appeared = $state(false);
+	let thinking_visibility_generation = $state(0);
 	/** The settled label's measured width — where the divider starts its growth. */
 	let label_width = $state(0);
 	type DetailObservation =
@@ -69,18 +90,51 @@
 
 	const is_failed = $derived(item.status === "failed");
 	const is_cancelled = $derived(item.status === "cancelled");
-	/** One word for this session's whole life, chosen from its own identity. */
-	const thinking_word = $derived(thinking_word_for(item.id));
+	/** One word per mounted quiet-status epoch, never a live carousel. */
+	const thinking_word = $derived(thinking_word_for(item.id, thinking_visibility_generation));
+	/**
+	 * A run can die without ever emitting its terminal lifecycle event — a Forge
+	 * restart takes the engine process with it — which leaves this item with no
+	 * `ended_at` and the transcript claiming to think forever. The durable work
+	 * item is the authority on whether anything is still running, so when it
+	 * says nothing is, the session settles on when it last changed.
+	 */
+	const ended_at = $derived(item.ended_at ?? (run_active ? undefined : item.updated_at));
 	const label = $derived(
-		item.ended_at === undefined
+		ended_at === undefined
 			? thinking_word
 			: is_failed
-				? `Failed after ${FormatDuration(item.started_at, item.ended_at)}`
+				? `Failed after ${FormatDuration(item.started_at, ended_at)}`
 				: is_cancelled
-					? `Cancelled after ${FormatDuration(item.started_at, item.ended_at)}`
-					: `${duration_kind === "worked" ? "Worked" : "Thought"} for ${FormatDuration(item.started_at, item.ended_at)}`,
+					? `Cancelled after ${FormatDuration(item.started_at, ended_at)}`
+					: `${duration_kind === "worked" ? "Worked" : "Thought"} for ${FormatDuration(item.started_at, ended_at)}`,
 	);
-	const is_working = $derived(item.ended_at === undefined);
+	const is_working = $derived(ended_at === undefined);
+	/** A handoff run is answered by the engine it handed off to, not the one it left. */
+	const responding_engine = $derived(transition?.target_engine_id ?? engine_id);
+	/** Unattributed work keeps its verb rather than reading "Waiting for Other". */
+	const responding_name = $derived(
+		responding_engine === undefined ? undefined : EngineDisplayName(responding_engine),
+	);
+	/**
+	 * `responded_at` is set by the provider turn-start observation. Visible work
+	 * remains a compatibility fallback for snapshots projected before that field
+	 * existed, and also proves a response if a provider omits turn-start.
+	 */
+	const provider_responded = $derived(item.responded_at !== undefined || has_visible_details);
+	const renders_status_line = $derived(
+		is_working && !has_live_reply && !has_live_status_detail,
+	);
+	const status_label = $derived(
+		is_working
+			? active_work_label_for(
+					item.id,
+					responding_name,
+					provider_responded,
+					thinking_visibility_generation,
+				)
+			: label,
+	);
 	const can_collapse = $derived(!is_working && has_visible_details);
 
 	/**
@@ -95,6 +149,21 @@
 		previous_status = status;
 		});
 	yield* ReconcileStatus(item.status);
+
+	/**
+	 * A quiet-status line earns a new word only after it was actually removed
+	 * from the render tree for live detail. This reactive Effect is rerun by SER
+	 * when the derived render condition changes; it never schedules a timer.
+	 */
+	const ReconcileThinkingVisibility = (status_line_visible: boolean) =>
+		Effect.gen(function* () {
+			if (status_line_visible && !status_line_was_visible) {
+				if (status_line_has_appeared) thinking_visibility_generation += 1;
+				status_line_has_appeared = true;
+			}
+			status_line_was_visible = status_line_visible;
+		});
+	yield* ReconcileThinkingVisibility(renders_status_line);
 
 	const RefreshDetails = (element: HTMLDivElement) =>
 		Effect.gen(function* () {
@@ -160,7 +229,7 @@
 	data-open={is_working || can_collapse ? is_working || open : undefined}
 	data-state={is_working || can_collapse ? (is_working || open ? "open" : "closed") : undefined}
 	data-has-header={can_collapse ? "true" : undefined}
-	aria-label={`${label}: ${item.title}`}
+	aria-label={`${is_working ? status_label : label}: ${item.title}`}
 >
 	<!--
 		The handoff has no header to sit in while the session is working, so it
@@ -189,8 +258,9 @@
 				>
 					{label}
 				</span>
+				<!-- The chevron belongs to the label, so it carries the label's tone. -->
 				<ChevronRight
-					class={`size-4 transition-transform duration-250 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${open ? "rotate-90" : ""}`}
+					class={`size-4 transition-transform duration-250 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${open ? "rotate-90" : ""} ${is_failed ? "text-destructive" : ""}`}
 					aria-hidden="true"
 				/>
 			</button>
@@ -225,17 +295,18 @@
 
 	<!--
 		The status line lives at the end of the flow, never pinned above it: it is
-		the latest thing happening, and it yields the moment a live detail — a
-		running command, streaming text — becomes the latest thing instead.
+		the latest thing happening, and it yields once the reply itself becomes the
+		latest thing instead. Tools and reasoning running above it do not displace
+		it — the word is what carries the reader across the whole chain.
 	-->
-	{#if is_working && !has_live_detail && !has_live_status_detail}
+	{#if renders_status_line}
 		<div
 			class={`t-status-enter flex w-fit items-center pb-0.5 ${has_visible_details ? "pt-5" : "pt-0.5"}`}
 			role="status"
-			aria-label="Artisan is working"
+			aria-label={status_label}
 		>
 			<ShimmerText class="text-base text-muted-foreground" aria-hidden="true">
-				{label}
+				{status_label}
 			</ShimmerText>
 		</div>
 	{/if}

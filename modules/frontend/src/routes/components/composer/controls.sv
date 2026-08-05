@@ -14,7 +14,9 @@
 		TooltipProvider,
 		TooltipTrigger,
 	} from "$lib/components/ui/tooltip";
-	import ContextUsageRing from "../context-usage-ring.sv";
+	import { ContextUsageAutoCompactionPercent } from "$lib/context-usage/auto-compaction";
+	import { ContextUsageModelName } from "$lib/context-usage/model-name";
+	import ContextUsageGauge from "../context-usage-gauge.sv";
 	import ModelSelector from "../model-selector/view.sv";
 
 	let {
@@ -50,35 +52,66 @@
 		send_blocked_reason?: string;
 		send_ready: boolean;
 	} = $props();
+
+	/** All three are needed to state a reading; any one missing means no gauge at all. */
+	const has_context_reading = $derived(
+		context_usage?.context_tokens !== undefined &&
+			context_window_tokens !== undefined &&
+			context_percent !== undefined,
+	);
+	/**
+	 * Where the reporting run's engine begins compacting, which the gauge's red
+	 * leg runs up to. The selector policy only describes a subsequent launch and
+	 * must not reinterpret already-reported telemetry.
+	 */
+	const compaction_percent = $derived(
+		ContextUsageAutoCompactionPercent(context_usage, context_window_tokens ?? 0),
+	);
+	/** The gauge names the immutable reporting run, never the next-launch policy. */
+	const context_model_name = $derived(
+		context_usage === undefined ? undefined : ContextUsageModelName(context_usage, runtime_catalog),
+	);
 </script>
 
 <div class="flex items-center justify-between gap-2">
-	<ModelSelector
-		{disabled}
-		{engine_locked}
-		{onpolicychange}
-		{policy}
-		{runtime_catalog}
-	/>
-	<div class="flex items-center gap-3">
-		{#if context_usage?.context_tokens !== undefined && context_window_tokens !== undefined && context_percent !== undefined}
-			<ContextUsageRing
-				cached_input_tokens={context_usage.cached_input_tokens}
-				context_tokens={context_usage.context_tokens}
-				input_tokens={context_usage.input_tokens}
-				output_tokens={context_usage.output_tokens}
+	<!--
+		The gauge stands beside the model whose window it measures, not inside the
+		picker and not beside the send button, where it sat next to an action it
+		says nothing about. Its own control again, so it carries its own tooltip.
+	-->
+	<div class="flex min-w-0 items-center gap-0.5">
+		<ModelSelector
+			{disabled}
+			{engine_locked}
+			{onpolicychange}
+			{policy}
+			{runtime_catalog}
+		/>
+		{#if has_context_reading && context_percent !== undefined && context_usage !== undefined && context_window_tokens !== undefined}
+			<ContextUsageGauge
+				{compaction_percent}
+				model_name={context_model_name}
 				percent={context_percent}
+				usage={context_usage}
 				window_tokens={context_window_tokens}
 			/>
 		{/if}
+	</div>
+	<div class="flex items-center">
 		<TooltipProvider delayDuration={0}>
 			<Tooltip>
 				<TooltipTrigger>
 					{#snippet child({ props: tooltip_props })}
 						<span {...tooltip_props} class="flex has-[:disabled]:cursor-not-allowed">
+							<!--
+								Sized to match the model picker rather than to the icon
+								button default: the two sit on one row at opposite ends,
+								so a height mismatch between them reads as the row being
+								crooked. Same box, same inset, one bar.
+							-->
 							<Button
 								variant="ghost"
-								size="icon"
+								size="icon-sm"
 								class="composer-send rounded-[calc(var(--composer-radius)-0.5rem)]"
 								aria-label={run_active ? "Stop current run" : "Send message"}
 								data-ready={run_active || send_ready}

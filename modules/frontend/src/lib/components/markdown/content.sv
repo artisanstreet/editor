@@ -95,18 +95,18 @@
 				continue;
 			}
 
+			/**
+			 * Commit the word, then pace. Racing the delay against the next
+			 * transport target instead threw the computed word away every time a
+			 * delta beat the tier delay — which, mid-stream, is nearly always — so
+			 * the reveal only advanced once the provider paused. Corrections are
+			 * still honoured at the top of the next tick, one stagger beat later.
+			 */
 			const backlog = count_pending_streaming_words(current_text, target);
-			const delay_outcome = yield* wait_for_streaming_word_delay_or_target(
-				streaming_word_targets,
-				get_streaming_word_delay(backlog),
-			);
-			if (delay_outcome._tag === "Target") {
-				target = delay_outcome.target;
-				continue;
-			}
 			current_text = next_text;
 			pending_animation_generation = ++animation_generation;
 			revealed_text = next_text;
+			yield* Effect.sleep(get_streaming_word_delay(backlog));
 		}
 	});
 	/** The component scope interrupts the reveal worker when its message unmounts. */
@@ -134,13 +134,12 @@
 
 <!-- Rich nodes settle once at turn completion; partial math and Mermaid remain literal/code. -->
 <Comark
-	class="prose conversation-markdown"
+	class={`prose conversation-markdown ${presentation_streaming ? "conversation-markdown-streaming" : ""}`}
 	markdown={revealed_text}
 	options={conversation_parse_options}
 	plugins={active_plugins}
 	{components}
 	streaming={presentation_streaming}
-	caret
 />
 
 <style>
@@ -151,5 +150,20 @@
 	:global(.comark-content.conversation-markdown.prose) {
 		--tw-prose-body: var(--foreground);
 		color: var(--foreground);
+	}
+
+	/**
+	 * `text-wrap: pretty` and `balance` re-break lines that are already on
+	 * screen: every appended word lets the browser reconsider the tail of the
+	 * block, so settled words slide between lines while the newest one is still
+	 * animating in. Growing text has no stable tail to optimise, so streaming
+	 * blocks take plain greedy wrapping, where appending never moves a word that
+	 * has already landed. The typographic pass returns when the text settles.
+	 */
+	:global(
+		.conversation-markdown.conversation-markdown-streaming
+			:is(p, li, blockquote, h1, h2, h3, h4, h5, h6)
+	) {
+		text-wrap: wrap;
 	}
 </style>

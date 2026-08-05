@@ -20,11 +20,34 @@ export type ConversationTraceSegment =
 			readonly type: "item";
 	  };
 
-const is_active_reasoning = (
+/**
+ * Which reasoning summaries the trace shows.
+ *
+ * Completion is the wrong retirement signal on its own: a provider closes the
+ * reasoning item when the assistant message carrying it ends, which is mid-run
+ * whenever tool calls follow, so keying on it deleted thinking the reader was
+ * still reading while the same run kept working. The owning work session is the
+ * honest boundary — reasoning stands for as long as that work runs, and the
+ * whole set retires together once it settles.
+ */
+const reasoning_is_visible = (
 	item: ConversationItem,
+	work_active: boolean,
 ): item is Extract<ConversationItem, { type: "reasoning_summary" }> =>
 	item.type === "reasoning_summary" &&
-	(item.lifecycle === "active" || item.lifecycle === "streaming");
+	(work_active || item.lifecycle === "active" || item.lifecycle === "streaming");
+
+/**
+ * Whether a text item has anything for the reader to see.
+ *
+ * A streamed item exists from its first delta, so between that delta and the
+ * first character it is a segment that renders nothing: an invisible gap in the
+ * trace, and — because any segment ends the run of activities around it — a seam
+ * that split one tool chain into two.
+ */
+const item_renders_nothing = (item: ConversationItem): boolean =>
+	(item.type === "assistant_message" || item.type === "reasoning_summary") &&
+	item.text.trim().length === 0;
 
 /**
  * Builds one deterministic work trace. Diagnostics never decide whether reasoning
@@ -33,25 +56,44 @@ const is_active_reasoning = (
  * `failure_visible` overrides the diagnostics preference: when the surrounding
  * work failed, its diagnostics are the explanation and must never be silenced
  * by a developer toggle.
+ *
+ * `work_active` is the owning session's liveness, which alone decides whether
+ * already-settled reasoning still belongs on screen.
+ *
+ * Activities chain while they are adjacent, and anything the agent actually said
+ * starts a new one. Splitting had looked over-eager only because an item that
+ * rendered nothing still counted as something between them; with those gone, a
+ * seam in the trace means the agent genuinely spoke mid-run, and collapsing work
+ * from either side of that into one header would claim a continuity the run did
+ * not have.
  */
 export const make_conversation_trace_segments = (
 	items: ReadonlyArray<ConversationItem>,
 	diagnostics_enabled: boolean,
 	failure_visible = false,
+	work_active = false,
 ): ReadonlyArray<ConversationTraceSegment> => {
 	const diagnostics_visible = diagnostics_enabled || failure_visible;
 	const diagnostics = items.filter(
 		(item): item is ConversationDiagnosticItem => item.type === "native_event",
 	);
 	const concrete_items = items.filter(
-		(item) => item.type !== "reasoning_summary" && item.type !== "native_event",
+		(item) =>
+			item.type !== "reasoning_summary" &&
+			item.type !== "native_event" &&
+			!item_renders_nothing(item),
 	);
 	/**
-	 * Reasoning stays visible while it is live even after concrete work starts,
-	 * so streamed thinking never vanishes mid-run; completed summaries retire.
+	 * Reasoning stays visible alongside the concrete work of its own run, so
+	 * streamed thinking never vanishes mid-run; a settled run retires it.
 	 */
 	const visible_item_ids = new Set(
-		[...concrete_items, ...items.filter(is_active_reasoning)].map((item) => item.id),
+		[
+			...concrete_items,
+			...items.filter(
+				(item) => reasoning_is_visible(item, work_active) && !item_renders_nothing(item),
+			),
+		].map((item) => item.id),
 	);
 	const segments: Array<ConversationTraceSegment> = [];
 	let diagnostics_inserted = false;

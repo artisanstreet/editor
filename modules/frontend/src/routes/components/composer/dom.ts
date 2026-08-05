@@ -1,6 +1,7 @@
 import { Effect } from "effect";
 
 import { RunBrowserDom } from "$lib/browser/dom";
+import type { ComposerDropPoint } from "$lib/composer/gesture-intake";
 import type { ComposerImageAttachment } from "$lib/composer/image-attachments";
 
 export type ComposerEditorDocument = {
@@ -108,6 +109,22 @@ export const InsertComposerAttachmentMarkers = (
 		});
 	});
 
+/** Shakes the inline markers whose attachment answered a re-paste. */
+export const MarkComposerAttachmentBumps = (
+	editor: HTMLDivElement | null,
+	attachment_ids: ReadonlyArray<string>,
+) =>
+	Effect.gen(function* () {
+		yield* RunBrowserDom(() => {
+			for (const marker of editor?.querySelectorAll<HTMLElement>("[data-attachment-id]") ??
+				[]) {
+				const id = marker.dataset.attachmentId ?? "";
+				if (attachment_ids.includes(id)) marker.dataset.bump = "true";
+				else delete marker.dataset.bump;
+			}
+		});
+	});
+
 export const RemoveComposerAttachmentMarkers = (
 	editor: HTMLDivElement | null,
 	attachment_id: string,
@@ -131,10 +148,10 @@ export const ClearComposerEditor = (editor: HTMLDivElement | null) =>
 		yield* RunBrowserDom(() => editor?.replaceChildren());
 	});
 
-export const ComposerDropRange = (editor: HTMLDivElement | null, event: DragEvent) =>
+export const ComposerDropRange = (editor: HTMLDivElement | null, at: ComposerDropPoint) =>
 	Effect.gen(function* () {
 		return yield* RunBrowserDom(() => {
-			const point = document.caretRangeFromPoint?.(event.clientX, event.clientY);
+			const point = document.caretRangeFromPoint?.(at.x, at.y);
 			return point !== null &&
 				point !== undefined &&
 				editor?.contains(point.commonAncestorContainer)

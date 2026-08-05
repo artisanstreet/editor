@@ -11,10 +11,19 @@
 		sideOffset = 0,
 		side = "top",
 		children,
+		arrow = true,
 		arrowClasses,
 		portalProps,
 		...restProps
 	}: TooltipPrimitive.ContentProps & {
+		/**
+		 * The caret is a rotated square painted in the solid tooltip fill, so it
+		 * can only follow a solid tooltip. A surface with its own material — glass,
+		 * a gradient, anything layered — has no way to continue into it, and
+		 * stacking a second element to fake the join reads as exactly that. Such
+		 * surfaces opt out and point with position alone.
+		 */
+		arrow?: boolean;
 		arrowClasses?: string;
 		portalProps?: WithoutChildrenOrChild<ComponentProps<typeof TooltipPortal>>;
 	} = $props();
@@ -33,7 +42,8 @@
 		{...restProps}
 	>
 		{@render children?.()}
-		<TooltipPrimitive.Arrow>
+		{#if arrow}
+			<TooltipPrimitive.Arrow>
 			{#snippet child({ props })}
 				<div
 					class={cn(
@@ -47,6 +57,7 @@
 					{...props}
 				></div>
 			{/snippet}
-		</TooltipPrimitive.Arrow>
+			</TooltipPrimitive.Arrow>
+		{/if}
 	</TooltipPrimitive.Content>
 </TooltipPortal>

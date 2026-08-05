@@ -6,6 +6,7 @@ import {
 	ConversationBaseEndSpacePixels,
 	ConversationBottomScrollTop,
 	ConversationEndSpaceHeight,
+	ConversationIsFollowing,
 	ConversationUserMessageIds,
 	ConversationUserMessageWithSourceReference,
 	NewestConversationUserMessage,
@@ -66,6 +67,14 @@ describe("conversation scroll position", () => {
 	it("positions initial navigation at the bottom without animation state", () => {
 		expect(ConversationBottomScrollTop(1_600, 900)).toBe(700);
 		expect(ConversationBottomScrollTop(600, 900)).toBe(0);
+	});
+
+	it("stops following as soon as the reader leaves the live-tail zone", () => {
+		expect(ConversationIsFollowing(1_400, 2_000, 600)).toBe(true);
+		expect(ConversationIsFollowing(1_398.5, 2_000, 600)).toBe(true);
+		/** The tail zone is wide enough that one frame of streamed growth stays inside it. */
+		expect(ConversationIsFollowing(1_390, 2_000, 600)).toBe(true);
+		expect(ConversationIsFollowing(1_300, 2_000, 600)).toBe(false);
 	});
 
 	it("aligns a sent turn to the top inset and creates only the missing end space", () => {

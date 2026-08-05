@@ -2,6 +2,7 @@ import {
 	ApplyConversationPatch,
 	InitializeConversation,
 	type ConversationItem,
+	type ConversationLifecycle,
 	type ConversationPatch,
 	type ConversationRebuildState,
 	type ConversationSnapshot,
@@ -175,6 +176,13 @@ const ConversationRenderKey = (
  * Commentary stays in its source ordinal between activity blocks; only final
  * assistant replies remain independently visible.
  */
+/** Turn outcomes that mean no further work will land in the turn. */
+const settled_turn_lifecycles: ReadonlySet<ConversationLifecycle> = new Set([
+	"completed",
+	"failed",
+	"cancelled",
+]);
+
 export const MakeConversationRenderBlocks = (
 	state: ConversationViewState,
 ): ReadonlyArray<ConversationRenderBlock> => {
@@ -342,7 +350,20 @@ export const MakeConversationRenderBlocks = (
 			return [block];
 		}
 		const trailing_blocks: Array<ConversationRenderBlock> = [block];
-		if (files.length > 0 || change_sets.length > 0) {
+		const final_message = final_message_by_turn.get(turn_id);
+		const turn =
+			final_message === undefined
+				? turns_by_id.get(turn_id)
+				: (turns_by_id.get(final_message.turn_id) ?? turns_by_id.get(turn_id));
+		/**
+		 * Held back until the turn settles. A change set is a summary of what the
+		 * turn did, and a summary that appears while the turn is still working
+		 * keeps growing under the reader — and reads as a finished result when it
+		 * is not one. Any terminal outcome qualifies, not just success: a
+		 * cancelled run still changed the files it changed.
+		 */
+		const turn_settled = turn !== undefined && settled_turn_lifecycles.has(turn.lifecycle);
+		if (turn_settled && (files.length > 0 || change_sets.length > 0)) {
 			trailing_blocks.push({
 				change_sets,
 				files,
@@ -351,11 +372,6 @@ export const MakeConversationRenderBlocks = (
 				type: "changes",
 			});
 		}
-		const final_message = final_message_by_turn.get(turn_id);
-		const turn =
-			final_message === undefined
-				? turns_by_id.get(turn_id)
-				: (turns_by_id.get(final_message.turn_id) ?? turns_by_id.get(turn_id));
 		if (turn?.lifecycle === "completed" && final_message?.lifecycle === "completed") {
 			trailing_blocks.push({
 				id: `footer:${turn_id}`,

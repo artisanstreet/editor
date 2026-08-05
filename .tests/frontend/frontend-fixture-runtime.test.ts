@@ -116,6 +116,7 @@ describe("frontend ArtisanClient fixture runtime", () => {
 						"GetSurfaceUsageDaily",
 						"GetThreadSession",
 						"GetThreadTranscript",
+						"GetThreadUsageSeries",
 						"GetThreadRetentionPolicy",
 						"GetThreadWork",
 						"GetWorkspaceChangeDiff",

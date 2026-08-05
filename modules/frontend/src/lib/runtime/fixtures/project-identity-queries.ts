@@ -162,7 +162,66 @@ export const FixtureProjectIdentityQueries = {
 				fetched_at: fixture_timestamp,
 			};
 		}),
+	GetThreadUsageSeries: (input) =>
+		Effect.gen(function* () {
+			return {
+				compacted: false,
+				context_window_tokens: 258_400,
+				points: [
+					{
+						cached_input_tokens: 0,
+						context_tokens: 4_100,
+						input_tokens: 4_100,
+						ordinal: 1,
+						output_tokens: 320,
+						run_id: "run_1",
+						updated_at: fixture_timestamp,
+					},
+					{
+						cached_input_tokens: 3_900,
+						context_tokens: 9_800,
+						input_tokens: 5_600,
+						ordinal: 2,
+						output_tokens: 780,
+						run_id: "run_2",
+						updated_at: fixture_timestamp,
+					},
+					{
+						cached_input_tokens: 9_100,
+						context_tokens: 16_400,
+						input_tokens: 6_900,
+						ordinal: 3,
+						output_tokens: 1_240,
+						run_id: "run_3",
+						updated_at: fixture_timestamp,
+					},
+					{
+						cached_input_tokens: 15_200,
+						context_tokens: 22_900,
+						input_tokens: 7_400,
+						ordinal: 4,
+						output_tokens: 640,
+						run_id: "run_4",
+						updated_at: fixture_timestamp,
+					},
+					{
+						cached_input_tokens: 21_600,
+						context_tokens: 27_400,
+						input_tokens: 5_800,
+						ordinal: 5,
+						output_tokens: 724,
+						run_id: "run_5",
+						updated_at: fixture_timestamp,
+					},
+				],
+				thread_id: input.thread_id,
+			};
+		}),
 } satisfies Pick<
 	typeof ArtisanClient.Service,
-	"GetProjectRepositories" | "GetProjectDiffs" | "GetHostIdentity" | "GetEngineUsage"
+	| "GetProjectRepositories"
+	| "GetProjectDiffs"
+	| "GetHostIdentity"
+	| "GetEngineUsage"
+	| "GetThreadUsageSeries"
 >;

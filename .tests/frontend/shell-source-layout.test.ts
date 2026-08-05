@@ -87,6 +87,9 @@ describe("Barekey docs shell reset", () => {
 		const model_selector = Read(
 			"modules/frontend/src/routes/components/model-selector/view.sv",
 		);
+		const model_selector_styles = Read(
+			"modules/frontend/src/routes/components/model-selector.css",
+		);
 		const policy_controls = Read(
 			"modules/frontend/src/routes/components/model-selector/policy-controls.sv",
 		);
@@ -109,6 +112,56 @@ describe("Barekey docs shell reset", () => {
 		expect(composer_controls).toContain("<ModelSelector");
 		expect(composer_controls).toContain("onpolicychange");
 		expect(model_selector).toContain('aria-label="Select model"');
+		/**
+		 * The trigger reads as the model's own row does: its lab mark, its name,
+		 * its supported effort, and its speed only when that is not the default.
+		 */
+		expect(model_selector).toContain('class="flex min-w-0 items-center gap-2"');
+		expect(model_selector).toContain(
+			"{@const trigger_mark = ProviderMarkFor(selected_model?.definition.provider)}",
+		);
+		expect(model_selector).toContain(
+			'<TriggerMark class={EngineMarkClass(trigger_mark, "size-4")} />',
+		);
+		expect(model_selector).toContain("{trigger_speed_label}");
+		expect(model_selector).toContain(
+			"if (selected === undefined || selected.default) return undefined;",
+		);
+		expect(model_selector).not.toContain("BoltFilled");
+
+		/**
+		 * That label changes width as the model, effort, and speed change. Anchored
+		 * to the trigger's trailing edge, the picker slid sideways on every pick, so
+		 * the anchor is the leading edge, which does not move.
+		 */
+		expect(model_selector).toContain('align="start"');
+		expect(model_selector).not.toContain('align="end"');
+		/**
+		 * Open and close are the transitions.dev dropdown, driven by the popover's
+		 * own `data-state`; the primitive's stock keyframes are turned off so the
+		 * two do not animate the same element at once.
+		 */
+		expect(model_selector).toContain("t-dropdown");
+		expect(model_selector).toContain("animate-none!");
+		expect(model_selector).toContain("t-resize t-resize-auto");
+		expect(model_selector).toContain('thinking.availability === "supported"');
+		expect(model_selector).toContain("thinking_level_labels[selected_thinking_level]");
+		expect(model_selector).toContain('class="text-muted-foreground"');
+		expect(model_selector_styles).toContain("color: var(--muted-foreground)");
+
+		/**
+		 * The shader panel wears `.t-dropdown` too and orchestrates it through its
+		 * own scoped classes, so the popover's copy stays qualified by the popover
+		 * attribute rather than claiming the bare class for everyone.
+		 */
+		const styles = Read("modules/frontend/src/lib/styles/global.css");
+
+		expect(styles).toContain('.t-dropdown[data-popover-content][data-state="open"]');
+		expect(styles).toContain('.t-dropdown[data-popover-content][data-state="closed"]');
+		expect(styles).not.toMatch(/^\.t-dropdown \{/mu);
+		expect(styles).toContain("interpolate-size: allow-keywords;");
+		expect(styles).toContain("@media (prefers-reduced-motion: reduce)");
+		expect(model_selector_styles).not.toContain(".model-trigger:hover .model-trigger-chevron");
 		/** Provider marks live in one shared module so every surface agrees. */
 		const engine_presentation = Read("modules/frontend/src/lib/engine/presentation.ts");
 		expect(model_selector).toContain("EngineMarkFor(harness.id)");
@@ -237,18 +290,20 @@ describe("Barekey docs shell reset", () => {
 		/**
 		 * The generic sprite, the verb carousel, and the engine mark are gone.
 		 * The muted thinking word trails the flow instead of pinning above it,
-		 * and it renders only while no detail below is live — a running command
-		 * or streaming text is its own status.
+		 * and it holds across a whole tool chain — only the streamed reply below
+		 * it is its own status.
 		 */
 		expect(work_session).not.toContain("artisan-working-sprite");
 		expect(work_session).not.toContain('Effect.sleep("2 seconds")');
 		expect(work_session).not.toContain("thinking_word_index");
-		expect(work_session).toContain("thinking_word_for(item.id)");
+		expect(work_session).toContain(
+			"thinking_word_for(item.id, thinking_visibility_generation)",
+		);
+		expect(work_session).toContain("ReconcileThinkingVisibility(renders_status_line)");
 		expect(work_session).not.toContain("EngineMarkFor");
 		expect(work_session).not.toContain("engine-working-spin");
-		expect(work_session).toContain(
-			"{#if is_working && !has_live_detail && !has_live_status_detail}",
-		);
+		expect(work_session).toContain("is_working && !has_live_reply && !has_live_status_detail");
+		expect(work_session).toContain("{#if renders_status_line}");
 		expect(work_session).toContain('<ShimmerText class="text-base text-muted-foreground"');
 		expect(work_session).toContain(
 			"t-settle-underline relative flex w-full items-center justify-between gap-3 pb-2",
@@ -261,11 +316,24 @@ describe("Barekey docs shell reset", () => {
 		expect(work_session).toContain("@keyframes settle-underline-grow");
 		expect(work_session).toContain('is_failed ? "text-destructive" : ""');
 		expect(work_session).toContain("hidden={!is_working && !has_visible_details}");
-		expect(workspace).toContain("has_live_detail={conversation_work_is_live(block.details)}");
-		expect(workspace).not.toContain("engine_id={policy?.engine_id}");
+		expect(workspace).toContain("has_live_reply={conversation_reply_is_live(block.details)}");
+		/**
+		 * The engine came back as a word, never as a mark. Before anything has
+		 * come back there is no thought to name, so the status says which side the
+		 * wait is on; the provider's turn-start swaps it to the session's own word,
+		 * even when the resulting thought remains private.
+		 * The icon and the spinner stay gone.
+		 */
+		expect(workspace).toContain("engine_id={policy?.engine_id}");
+		expect(work_session).toContain("? active_work_label_for(");
+		expect(work_session).toContain("thinking_visibility_generation,");
+		expect(work_session).toContain("item.responded_at !== undefined || has_visible_details");
+		expect(work_session).toContain("is_working ? status_label : label");
+		/** A handoff run is answered by the engine it handed off to. */
+		expect(work_session).toContain("$derived(transition?.target_engine_id ?? engine_id)");
 	});
 
-	it("keeps the rail as the entire sidebar with logo, command, surface, and marketplace controls", () => {
+	it("keeps the rail as the entire sidebar with logo, new-thread, surface, and marketplace controls", () => {
 		const panel = Read("modules/frontend/src/routes/components/sectioned-panel.sv");
 		const sidebar_styles = Read("modules/frontend/src/lib/styles/sidebar.css");
 
@@ -280,7 +348,7 @@ describe("Barekey docs shell reset", () => {
 		expect(sidebar_styles).not.toContain(".t-rail-control");
 		/**
 		 * The rail's controls share one vertical housing: the brand mark, the
-		 * command menu, the surface cycle, and the marketplace all belong to this
+		 * new-thread action, the surface cycle, and the marketplace all belong to this
 		 * edge, so they read as a pill rather than as circles that happen to align.
 		 */
 		expect(panel).toContain("rounded-full bg-surface-125 py-1 card");
@@ -288,8 +356,10 @@ describe("Barekey docs shell reset", () => {
 		expect(panel).toContain("$lib/assets/barekey/logo-40.png");
 		expect(panel).toContain("docs-sidebar-logo-mark");
 		expect(panel).toMatch(/<a\s+href="\/"/);
-		/** The command menu takes over the navigation the flyout used to carry. */
-		expect(panel).toContain('aria-label="Open command menu"');
+		/** The rail's first action starts a fresh draft conversation. */
+		expect(panel).toContain('aria-label="New thread"');
+		expect(panel).toContain('href="/"');
+		expect(panel).toContain("<MessagePlus");
 		expect(panel).toContain("<CommandMenu bind:open={command_open} {threads} />");
 		expect(panel).toContain('aria-label="Marketplace"');
 		expect(panel).toContain("<ShoppingBag");

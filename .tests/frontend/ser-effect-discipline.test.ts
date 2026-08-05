@@ -38,6 +38,10 @@ const typed_browser_boundary_modules = new Set([
 	"modules/frontend/src/lib/browser/dom.ts",
 	"modules/frontend/src/lib/browser/object-url.ts",
 	"modules/frontend/src/lib/composer/attachment-reader.ts",
+	/** Owns the gestures whose DOM contract expires with their own dispatch. */
+	"modules/frontend/src/lib/composer/gesture-intake.ts",
+	/** Owns the canvas decode/re-encode that shrinks a pasted image. */
+	"modules/frontend/src/lib/composer/image-encoding.ts",
 	"modules/frontend/src/lib/editor/codemirror-adapter.ts",
 	"modules/frontend/src/lib/runtime/forge-endpoint.ts",
 ]);
@@ -250,6 +254,7 @@ const BrowserHostViolations = (path: string, source: string): ReadonlyArray<stri
 const unsafe_queue_ingress = new Map<string, number>([
 	["modules/frontend/src/lib/banner/service.ts", 1],
 	["modules/frontend/src/lib/components/dropdown-highlight.ts", 4],
+	["modules/frontend/src/lib/composer/gesture-intake.ts", 3],
 	["modules/frontend/src/lib/lifecycle/scoped-attachment-runner.ts", 3],
 	["modules/frontend/src/routes/components/paper-god-rays.sv", 4],
 	["modules/frontend/src/routes/components/dev-instance-badge.sv", 1],

@@ -9,6 +9,7 @@
 		ThreadSessionSnapshot,
 		ThreadWorkItem,
 	} from "@artisan/protocol";
+	import type { ConversationPatch } from "@artisan/protocol";
 	import { ArtisanClient, type ConversationUpdate } from "@artisan/transport/client";
 	import {
 		ApplyConversationViewPatch,
@@ -371,6 +372,12 @@
 			yield* RefreshInteractionContext;
 		});
 
+	/** Turn outcomes after which no further work lands, whatever the outcome. */
+	const settled_lifecycles = new Set(["completed", "failed", "cancelled"]);
+	const PatchSettlesTurn = (patch: ConversationPatch) =>
+		(patch.type === "turn_lifecycle" && settled_lifecycles.has(patch.lifecycle)) ||
+		(patch.type === "turn_upsert" && settled_lifecycles.has(patch.turn.lifecycle));
+
 	const RefreshAuthoritativeThread = Effect.gen(function* () {
 		yield* Resync;
 		yield* RefreshInteractionContext;
@@ -421,6 +428,14 @@
 					continue;
 				}
 				snapshot = view_state.rebuild.snapshot;
+				/**
+				 * A run reaching a terminal state is only ever announced through the
+				 * projection. Without re-reading the durable work item here the
+				 * transcript shows the turn as finished while `work` still reports
+				 * it running — which leaves the composer stuck offering to stop a
+				 * run that already ended.
+				 */
+				if (applicable.some(PatchSettlesTurn)) yield* RefreshInteractionContext;
 				return;
 			}
 		});
@@ -528,6 +543,7 @@
 </svelte:head>
 
 <ThreadWorkspace
+	active_run_id={work?.run_id}
 	{context_usage}
 	{image_sources}
 	onabort={CancelRun}

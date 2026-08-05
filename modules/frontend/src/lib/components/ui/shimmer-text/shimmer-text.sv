@@ -51,6 +51,7 @@
 	import { cn, type WithElementRef } from "$lib/utils.js";
 
 	let {
+		active = true,
 		ref = $bindable(null),
 		children,
 		class: class_name,
@@ -61,6 +62,13 @@
 		variant = "default",
 		...rest_props
 	}: WithElementRef<HTMLSpanAttributes> & {
+		/**
+		 * Whether the sweep is running. A caller whose text shimmers only some of
+		 * the time must be able to say so here rather than swapping this component
+		 * for a plain span: that swap replaces the subtree, and any entrance the
+		 * text inside it owns replays from nothing on every toggle.
+		 */
+		active?: boolean;
 		children?: Snippet;
 		delay?: number;
 		duration?: number;
@@ -76,7 +84,12 @@
 <span
 	bind:this={ref}
 	data-slot="shimmer-text"
-	class={cn("t-shimmer-text inline-block", variant_classes[variant], class_name)}
+	class={cn(
+		"inline-block",
+		active && "t-shimmer-text",
+		variant_classes[variant],
+		class_name,
+	)}
 	style={shimmer_style}
 	{...rest_props}
 >

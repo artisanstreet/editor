@@ -5,6 +5,7 @@
 	import { WriteClipboardText } from "$lib/browser/clipboard";
 	import * as ContextMenu from "$lib/components/ui/context-menu";
 	import { format_compact_diff_count } from "$lib/conversation/diff-stat";
+	import { group_file_changes } from "$lib/conversation/file-change-groups";
 	import { resolve_file_icon } from "$lib/conversation/file-icon";
 	import { changed_files_style_config } from "$lib/conversation-style-config";
 
@@ -19,9 +20,11 @@
 		files: ReadonlyArray<FileChange>;
 	} = $props();
 
+	const grouped_files = $derived(group_file_changes(files));
+
 	const file_count = $derived(
-		files.length > 0
-			? files.length
+		grouped_files.length > 0
+			? grouped_files.length
 			: change_sets.reduce((count, change_set) => count + change_set.file_count, 0),
 	);
 
@@ -57,17 +60,16 @@
 		aria-label={label}
 		class="ml-auto inline-flex shrink-0 items-center justify-end gap-2 font-mono text-xs leading-4 tabular-nums"
 	>
-		<span
-			aria-hidden="true"
-			class="inline-grid grid-cols-[1ch_4ch] gap-x-px text-left text-green-500"
-		>
+		<!--
+			Content-sized, so the counts end flush with the row's right edge. A fixed
+			numeric column reserved room for a width the count rarely uses, which left
+			the pair floating short of the edge everything else in the card aligns to.
+		-->
+		<span aria-hidden="true" class="inline-grid grid-cols-[1ch_auto] gap-x-px text-green-500">
 			<span>+</span>
 			<span>{format_compact_diff_count(additions)}</span>
 		</span>
-		<span
-			aria-hidden="true"
-			class="inline-grid grid-cols-[1ch_4ch] gap-x-px text-left text-destructive"
-		>
+		<span aria-hidden="true" class="inline-grid grid-cols-[1ch_auto] gap-x-px text-destructive">
 			<span>-</span>
 			<span>{format_compact_diff_count(deletions)}</span>
 		</span>
@@ -84,14 +86,15 @@
 		Edited {file_count} {file_count === 1 ? "file" : "files"}
 	</p>
 
-	{#if files.length > 0}
+	{#if grouped_files.length > 0}
 		<ul>
-			{#each files as file (file.id)}
+			{#each grouped_files as file (file.id)}
 				{@const parts = path_parts(file.path)}
 				<li>
 					<ContextMenu.Root>
 						<ContextMenu.Trigger
-							class="group/file-row flex w-full items-center justify-between gap-4 py-1.5 text-left"
+							data-operation={file.operation}
+							class="file-row group/file-row flex w-full items-center justify-between gap-4 px-2 py-1.5 text-left"
 						>
 							<span class="flex min-w-0 items-center gap-2">
 								<img
@@ -153,6 +156,16 @@
 			var(--changed-files-to)
 		);
 	}
+
+	/**
+	 * Every row reads the same, whatever the operation was.
+	 *
+	 * A created file used to wear a filled, ringed, shadowed card in the diff
+	 * green. At the scale of one row that stopped reading as "this file is new"
+	 * and read as a coloured slab laid over the path — the loudest thing in a card
+	 * whose subject is the paths. The operation is already carried by the counts
+	 * beside each row, which is enough.
+	 */
 
 	.file-row-directory {
 		transition: color var(--duration-quick) var(--ease-in-out);

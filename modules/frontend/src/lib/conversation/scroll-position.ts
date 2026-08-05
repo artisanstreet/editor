@@ -45,6 +45,36 @@ export const ConversationUserMessageWithSourceReference = (
 export const ConversationBottomScrollTop = (scroll_height: number, viewport_height: number) =>
 	Math.max(0, scroll_height - viewport_height);
 
+/**
+ * How close to the bottom still counts as following the transcript.
+ *
+ * This decides when the transcript may move the reader, so it is bounded on
+ * both sides. Too generous and auto-scroll fights you: scroll up a little to
+ * reread something and it drags you back. Too tight and streaming breaks it —
+ * content grows between the frame that measures and the frame that corrects, so
+ * a reader who never moved reads as several pixels adrift and following silently
+ * switches off for the rest of the turn.
+ *
+ * Roughly two lines of prose is the band that satisfies both: wider than any
+ * slip one frame of growth can open, and far narrower than the smallest
+ * deliberate scroll a wheel notch or a drag produces.
+ */
+export const ConversationFollowTolerance = (viewport_height: number) =>
+	Math.max(64, viewport_height * 0.06);
+
+/**
+ * Whether the reader is parked at the bottom and so wants new content followed.
+ *
+ * Derived from position rather than tracked as a mode, which is what keeps it
+ * honest: a programmatic scroll that parks the reader elsewhere turns following
+ * off by consequence, with no separate state to keep in sync.
+ */
+export const ConversationIsFollowing = (
+	scroll_top: number,
+	scroll_height: number,
+	viewport_height: number,
+) => scroll_height - viewport_height - scroll_top < ConversationFollowTolerance(viewport_height);
+
 /** Aligns a turn to the viewport's top inset in scroll-content coordinates. */
 export const ConversationAlignedScrollTop = (
 	current_scroll_top: number,

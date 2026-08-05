@@ -2,17 +2,31 @@
 	display: inline-block;
 }
 
+/**
+ * A revealed word rises out of a blur, as before — but on its own duration.
+ *
+ * This entrance runs once per word, and the reveal commits a word every 40ms
+ * when calm and every 12ms while catching up. Borrowing the 500ms sidebar
+ * stagger, which is sized for a handful of list items, therefore left a dozen
+ * words mid-flight at rest and past thirty under load: most of the visible tail
+ * of the message in motion at once, each on its own compositing layer. A
+ * duration short enough to finish within a few words keeps the wave — several
+ * words always arriving — without putting the whole tail in it.
+ *
+ * No paint hint: the animation begins the frame the word mounts, so there is
+ * nothing to promote in advance, and the hint only holds the layer open
+ * afterwards.
+ */
 .docs-stream-word-incoming {
-	animation: docs-stream-word-in var(--stagger-dur, 500ms)
+	animation: docs-stream-word-in var(--stream-word-dur, 320ms)
 		var(--stagger-ease, cubic-bezier(0.22, 1, 0.36, 1)) both;
-	will-change: transform, opacity, filter;
 }
 
 @keyframes docs-stream-word-in {
 	from {
 		opacity: 0;
-		transform: translateY(0.3em);
-		filter: blur(var(--stagger-blur, 3px));
+		transform: translateY(var(--stream-word-rise, 0.3em));
+		filter: blur(var(--stream-word-blur, 3px));
 	}
 
 	to {
@@ -25,6 +39,5 @@
 @media (prefers-reduced-motion: reduce) {
 	.docs-stream-word-incoming {
 		animation: none !important;
-		will-change: auto;
 	}
 }

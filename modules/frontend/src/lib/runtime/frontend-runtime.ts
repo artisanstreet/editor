@@ -3,6 +3,7 @@ import { MakeSnowflakeIdLive } from "@artisan/protocol";
 import { Effect, Exit, Layer, Scope } from "effect";
 import * as KeyValueStore from "effect/unstable/persistence/KeyValueStore";
 
+import { AppearancePreferencesLive } from "./appearance-preferences";
 import { ForgeEndpointStoreLive, ResolveForgeEndpoint } from "./forge-endpoint";
 import {
 	BootstrapBrowserPairing,
@@ -20,6 +21,16 @@ export const RecoverKeyValueStore = Layer.catchCause(() => KeyValueStore.layerMe
 const ShellPresentationPreferencesRuntimeLive = Layer.provide(
 	ShellPresentationPreferencesLive,
 	KeyValueStore.layerMemory,
+);
+
+/**
+ * Backed by real storage rather than memory: a preference a reader sets in
+ * settings has to survive the reload that follows it, and a browser that
+ * refuses storage falls back to memory instead of failing the runtime.
+ */
+const AppearancePreferencesRuntimeLive = Layer.provide(
+	AppearancePreferencesLive,
+	KeyValueStore.layerStorage(() => localStorage).pipe(RecoverKeyValueStore),
 );
 
 const ArtisanClientRuntimeLive = Layer.unwrap(
@@ -121,6 +132,7 @@ export const FrontendComponentScopeLive = Layer.effect(
 
 /** Production runtime composition. Fixture clients are never included here. */
 export const FrontendRuntimeLive = Layer.mergeAll(
+	AppearancePreferencesRuntimeLive,
 	ShellPresentationPreferencesRuntimeLive,
 	ArtisanClientRuntimeLive,
 	SnowflakeIdRuntimeLive,
