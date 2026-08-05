@@ -26,7 +26,7 @@ describe("context-usage SER remediation", () => {
 	it("keeps a failed first-message handoff pending and exposes gauge detail to keyboards", () => {
 		const root = Read("modules/frontend/src/routes/+page.sv");
 		const route = Read("modules/frontend/src/routes/components/thread-route.sv");
-		const ring = Read("modules/frontend/src/routes/components/context-usage-ring.sv");
+		const gauge = Read("modules/frontend/src/routes/components/context-usage-gauge.sv");
 
 		const retry_start = root.indexOf("const RetryDraftNavigation = Effect.gen");
 		const retry_program = root.slice(retry_start, root.indexOf("</script>", retry_start));
@@ -45,8 +45,15 @@ describe("context-usage SER remediation", () => {
 			route.indexOf("yield* SendMessage(claimed.submission, claimed.command_id)"),
 		);
 		expect(route).toContain("first_submission_blocked");
-		expect(ring).toContain("<button");
-		expect(ring).toContain('aria-describedby="context-usage-details"');
-		expect(ring).toContain('id="context-usage-details" class="sr-only"');
+		/**
+		 * The gauge stands beside the picker as its own control, so the reading
+		 * hangs off its own focusable trigger. The description must exist whether
+		 * or not the tooltip is open — tooltip content is not rendered until it
+		 * is shown, which would leave a focused trigger announcing nothing.
+		 */
+		expect(gauge).toContain("<button");
+		expect(gauge).toContain('aria-describedby="context-usage-details"');
+		expect(gauge).toContain('id="context-usage-details" class="sr-only"');
+		expect(gauge).toContain("{description}");
 	});
 });
