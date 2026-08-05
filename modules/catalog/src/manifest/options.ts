@@ -219,13 +219,25 @@ export const exceptional = (id: ThinkingOption["id"], native_value: string) =>
 		native_value,
 	});
 
-/** Claude Code selects the long-context variant via a native model-id suffix. */
+/**
+ * Claude Code selects the long-context variant via a native model-id suffix.
+ *
+ * Extended is the default because on Claude 5 it is free: from Opus 4.6 onward
+ * the full 1M window bills at the standard per-token rate, so a 900K prompt
+ * costs the same per token as a 9K one. The premium that made 200K the prudent
+ * default — $10/$37.50 per million past 200K on Opus 4.6 — no longer applies.
+ * With no price to weigh against it, holding a session to a fifth of its window
+ * only buys earlier compaction, and compaction is lossy.
+ *
+ * @see https://docs.anthropic.com/en/docs/about-claude/pricing
+ * @see https://www.anthropic.com/news/claude-opus-5
+ */
 export const anthropic_context_window = Schema.decodeUnknownSync(ContextWindowCapability)({
 	availability: "configurable",
-	default: "standard",
+	default: "extended",
 	options: [
 		{
-			description: "The default window. The session compacts once it fills.",
+			description: "A fifth of the window. The session compacts once it fills.",
 			id: "standard",
 			label: "200K",
 			native_suffix: "",
