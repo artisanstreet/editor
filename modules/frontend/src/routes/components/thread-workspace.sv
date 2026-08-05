@@ -579,7 +579,7 @@
 		class="thread-transcript h-full min-h-0"
 		scrollbarYClasses="hidden"
 	>
-		<div bind:this={transcript_content} class="mx-auto w-full max-w-3xl px-6 pt-10">
+		<div bind:this={transcript_content} class="mx-auto w-full max-w-(--prose-width) px-6 pt-10">
 			<div class="flex flex-col gap-8">
 				{#if view._tag === "applied"}
 					{#each render_groups as render_group (render_group.turn_id)}

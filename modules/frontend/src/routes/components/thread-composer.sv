@@ -441,7 +441,7 @@
 		</Button>
 	{/if}
 	<ShaderGlassSurface
-		class="t-resize thread-composer pointer-events-auto mx-auto w-full max-w-3xl rounded-(--composer-radius)"
+		class="t-resize thread-composer pointer-events-auto mx-auto w-full max-w-(--prose-width) rounded-(--composer-radius)"
 		data-has-attachments={attachments.size > 0}
 		data-rustle={rustling}
 		onanimationend={yield* EndRustle}

@@ -35,12 +35,15 @@ describe("workspace header", () => {
 
 		expect(layout).toContain("-webkit-app-region: drag;");
 		expect(layout).toContain("{@render workspace_header()}");
-		expect(layout).toContain("header={desktop_runtime ? undefined : workspace_header}");
+		expect(layout).toContain("header={desktop_runtime || header_project === undefined");
+		/** Only a durable thread titles itself; the root draft renders no identity. */
+		expect(layout).toContain("active_thread?.primary_project);");
 		expect(panel).toContain("{@render header()}");
-		/** A repository names its remote and branch; a plain folder keeps the folder mark. */
+		/** A repository names its remote, branch, and checkout; a plain folder keeps the folder mark. */
 		expect(header).toContain("RepositoryQualifiedLabel(remote.web_url)");
 		expect(header).toContain('repository.branch.type === "detached"');
 		expect(header).toContain("{project.display_name}");
+		expect(header).toContain('<span class="shrink-0">in</span>');
 		/** The remote link must escape the titlebar drag region to stay clickable. */
 		expect(header).toContain("[-webkit-app-region:no-drag]");
 	});

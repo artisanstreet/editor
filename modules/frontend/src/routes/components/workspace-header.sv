@@ -71,6 +71,12 @@
 			<span class="truncate">
 				{repository.branch.type === "detached" ? "detached HEAD" : repository.branch.name}
 			</span>
+			{#if remote?.web_url !== undefined}
+				<!-- The remote names the repository; this names the checkout working it. -->
+				<span class="shrink-0">in</span>
+				<Folder class="size-3.5 shrink-0" />
+				<span class="truncate">{project.display_name}</span>
+			{/if}
 		</span>
 	{:else}
 		<span class="flex min-w-0 items-center gap-1.5 text-sm text-muted-foreground">

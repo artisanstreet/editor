@@ -42,7 +42,7 @@
 		});
 </script>
 
-<Card size="sm" class="max-w-2xl py-3">
+<Card size="sm" class="max-w-(--prose-body-width) py-3">
 	<CardContent class="space-y-3">
 		<Badge variant="outline">{label}</Badge>
 		<p class="whitespace-pre-wrap text-base leading-7">{text}</p>

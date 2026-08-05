@@ -36,7 +36,7 @@
 		ResolveThreadRoute,
 	} from "$lib/root/thread-navigation";
 	import { ForgeHttpUrl } from "$lib/runtime/forge-endpoint";
-	import { shader_enabled } from "$lib/appearance-config";
+	import { prose_width, shader_enabled } from "$lib/appearance-config";
 	import { AppearancePreferences } from "$lib/runtime/appearance-preferences";
 	import { AttemptDevelopmentSelfPair } from "$lib/runtime/pairing";
 	import { SessionDefaultsController } from "$lib/settings/session-defaults-controller";
@@ -91,6 +91,12 @@
 		return undefined;
 	});
 	const active_workspace_id = $derived(active_project?.project_id);
+	/**
+	 * Only a durable thread titles itself with its workspace. The root draft
+	 * also knows a picked project, but nothing exists there yet to title — a
+	 * header on `/` would name a folder above an empty composer.
+	 */
+	const header_project = $derived(active_thread?.primary_project);
 	const client = yield* ArtisanClient;
 	const session_defaults = yield* SessionDefaultsController;
 
@@ -100,7 +106,9 @@
 	 * the settings screen happens to be opened.
 	 */
 	const appearance = yield* AppearancePreferences;
-	shader_enabled.set((yield* appearance.Load).shader_enabled);
+	const stored_appearance = yield* appearance.Load;
+	shader_enabled.set(stored_appearance.shader_enabled);
+	prose_width.set(stored_appearance.prose_width ?? "balanced");
 
 	const ApplyThreadListUpdate = (update: ThreadListUpdate) =>
 		Effect.gen(function* () {
@@ -267,22 +275,38 @@
 {/snippet}
 
 {#snippet workspace_header()}
-	<WorkspaceHeader project={active_project} />
+	<WorkspaceHeader project={header_project} />
 {/snippet}
 
-<div class="flex h-dvh min-h-0 flex-col bg-background">
+<div class="flex h-dvh min-h-0 flex-col bg-background" data-prose-width={$prose_width}>
 	{#if desktop_runtime}
 		<!--
 			The bundled shell hides the native titlebar, so this strip is the window
-			frame: it drags the window, the overlay controls float over its right
-			end, and the workspace identity sits centered where a title belongs.
-			Symmetric side insets keep that center honest under the controls.
+			frame: it drags the window and the overlay controls float over its right
+			end. The identity is not centered in the frame — it sits on the left
+			edge of the transcript's prose column, so the title and the text it
+			titles share one margin. The spacers replay the shell row underneath:
+			sidebar rail, primary card inset, then the inspector column and the
+			gaps around it whenever a workspace inspector is open.
 		-->
 		<div
-			class="flex h-10 shrink-0 items-center justify-center bg-background px-36"
+			class="flex h-10 shrink-0 items-stretch bg-background"
 			style="-webkit-app-region: drag;"
 		>
-			{@render workspace_header()}
+			<div class="w-14 shrink-0" aria-hidden="true"></div>
+			<div class="flex min-w-0 flex-1 items-center px-1">
+				<div class="mx-auto flex w-full min-w-0 max-w-(--prose-width) items-center px-6">
+					{@render workspace_header()}
+				</div>
+			</div>
+			{#if surface === "editor" || is_thread}
+				<div
+					class="w-[calc(clamp(16rem,25vw,350px)+1rem)] shrink-0"
+					aria-hidden="true"
+				></div>
+			{:else}
+				<div class="w-2 shrink-0" aria-hidden="true"></div>
+			{/if}
 		</div>
 	{/if}
 	<div class="relative min-h-0 flex-1">
@@ -295,7 +319,9 @@
 					{primary}
 					{surface}
 					{threads}
-					header={desktop_runtime ? undefined : workspace_header}
+					header={desktop_runtime || header_project === undefined
+						? undefined
+						: workspace_header}
 					show_thread_hover_rail={is_thread_route}
 					thread_id={active_thread?.thread_id}
 					workspace_id={active_workspace_id}

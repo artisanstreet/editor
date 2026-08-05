@@ -252,8 +252,13 @@
 				class="relative flex min-h-0 min-w-0 flex-1 flex-col rounded-3xl bg-linear-to-b from-surface-125 to-surface-75 p-1 card dark:from-surface-900 dark:to-surface-925"
 			>
 				{#if header}
-					<div class="flex h-10 shrink-0 items-center justify-center px-4">
-						{@render header()}
+					<!-- The identity sits on the prose column's own left edge, sharing the transcript's margin. -->
+					<div class="flex h-10 shrink-0 items-center">
+						<div
+							class="mx-auto flex w-full min-w-0 max-w-(--prose-width) items-center px-6"
+						>
+							{@render header()}
+						</div>
 					</div>
 				{/if}
 				<div class="min-h-0 flex-1">

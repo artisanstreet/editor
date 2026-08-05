@@ -10,3 +10,16 @@ import { writable } from "svelte/store";
  * even before the stored preference has been read.
  */
 export const shader_enabled = writable(true);
+
+/**
+ * How wide the reading column runs. The names describe the feel, not pixels;
+ * the widths they resolve to live with the other design tokens in global.css.
+ */
+export type ProseWidth = "tight" | "balanced" | "loose";
+
+/**
+ * The chosen prose width, defaulting to the width the transcript was designed
+ * at. Same shape as `shader_enabled`: the durable value lives in
+ * `AppearancePreferences`; this store is what the shell paints from.
+ */
+export const prose_width = writable<ProseWidth>("balanced");

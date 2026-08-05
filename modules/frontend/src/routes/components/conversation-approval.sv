@@ -55,7 +55,7 @@
 
 {#if item.state === "requested"}
 	<section
-		class="card max-w-2xl rounded-2xl p-4"
+		class="card max-w-(--prose-body-width) rounded-2xl p-4"
 		aria-busy={submitted_decision !== undefined}
 		aria-labelledby={title_id}
 	>
@@ -122,7 +122,7 @@
 	</section>
 {:else}
 	<div
-		class="flex max-w-2xl items-center gap-2 text-sm text-muted-foreground"
+		class="flex max-w-(--prose-body-width) items-center gap-2 text-sm text-muted-foreground"
 		role="status"
 	>
 		{#if item.state === "approved"}

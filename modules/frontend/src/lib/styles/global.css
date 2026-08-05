@@ -283,6 +283,25 @@
 	--radius-4xl: calc(var(--radius) * 2.6);
 }
 
+/**
+ * The reading column. Balanced is the width the transcript was designed at —
+ * the old hardcoded max-w-3xl — and message bodies keep their 6rem inset from
+ * the column at every width, so the ratio of text to margin holds as the
+ * column moves. The shell sets the attribute from the appearance preference.
+ */
+:root {
+	--prose-width: 48rem;
+	--prose-body-width: calc(var(--prose-width) - 6rem);
+}
+
+[data-prose-width="tight"] {
+	--prose-width: 42rem;
+}
+
+[data-prose-width="loose"] {
+	--prose-width: 56rem;
+}
+
 :root {
 	--shadow-inset:
 		inset 0px 1px 1px -0.5px rgba(0, 0, 0, 0.06), inset 0px 3px 3px -1.5px rgba(0, 0, 0, 0.06),

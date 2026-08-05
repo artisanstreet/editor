@@ -9,6 +9,12 @@ export const AppearanceState = Schema.Struct({
 	 * should see the surface as it was drawn.
 	 */
 	shader_enabled: Schema.Boolean,
+	/**
+	 * How wide the reading column runs. Optional so a value stored before this
+	 * field existed keeps its shader preference instead of being repaired away
+	 * wholesale; readers fall back to "balanced" when it is absent.
+	 */
+	prose_width: Schema.optional(Schema.Literals(["tight", "balanced", "loose"])),
 });
 
 export type AppearanceState = typeof AppearanceState.Type;
@@ -16,6 +22,7 @@ export type AppearanceState = typeof AppearanceState.Type;
 export const DefaultAppearanceState: AppearanceState = {
 	version: 1,
 	shader_enabled: true,
+	prose_width: "balanced",
 };
 
 export const AppearancePreferencesStorageKey = "artisan.appearance";
