@@ -1,0 +1,18 @@
+diff --git a/dist/util/functions.d.ts b/dist/util/functions.d.ts
+index f5195fa57b614cb5d9904e9037842f59a87e59c8..669d3e083602a50bd81dfa0d042a62546556d38a 100644
+--- a/dist/util/functions.d.ts
++++ b/dist/util/functions.d.ts
+@@ -1,4 +1,3 @@
+-/// <reference lib="dom" />
+ export declare function cloneObject<T extends object>(object: Readonly<T>): T;
+ export declare function cloneObject<T extends object>(object: T): T;
+ export declare function createDataView(bin: ArrayBuffer | ArrayBufferView, byteOffset?: number, byteLength?: number): DataView;
+diff --git a/dist/util/functions.js b/dist/util/functions.js
+index bcff68f274e0fa45b9c59b45eb5141ee4172cb47..15f26af3a0d7f5c3ac1cfe2e9fc05b96dd2f2a85 100644
+--- a/dist/util/functions.js
++++ b/dist/util/functions.js
+@@ -1,4 +1,3 @@
+-/// <reference lib='dom' />
+ import ImageDosHeader from '../format/ImageDosHeader.js';
+ export function cloneObject(object) {
+     var r = {};

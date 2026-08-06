@@ -4,6 +4,9 @@ settings:
   autoInstallPeers: true
   excludeLinksFromLockfile: false
 
+patchedDependencies:
+  pe-library@2.0.1: b049779d946037c1b4152f85f84e4ccf48ebbf848c4540871d3cfbead73a2b15
+
 importers:
 
   .:
@@ -6870,7 +6873,7 @@ snapshots:
 
   pe-library@0.4.1: {}
 
-  pe-library@2.0.1: {}
+  pe-library@2.0.1(patch_hash=b049779d946037c1b4152f85f84e4ccf48ebbf848c4540871d3cfbead73a2b15): {}
 
   pend@1.2.0: {}
 
@@ -7004,7 +7007,7 @@ snapshots:
 
   resedit@3.0.2:
     dependencies:
-      pe-library: 2.0.1
+      pe-library: 2.0.1(patch_hash=b049779d946037c1b4152f85f84e4ccf48ebbf848c4540871d3cfbead73a2b15)
 
   resolve-alpn@1.2.1: {}
 
