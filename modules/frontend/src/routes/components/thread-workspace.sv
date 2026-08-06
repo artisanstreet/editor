@@ -280,16 +280,40 @@
 		const item = yield* FindConversationItem(item_id);
 		if (item === undefined) return;
 
-		const { end_space_bounds, item_bounds, viewport_height } = yield* RunBrowserDom(() => ({
-			end_space_bounds: end_space.getBoundingClientRect(),
-			item_bounds: item.getBoundingClientRect(),
-			viewport_height: viewport.clientHeight,
-		}));
+		const { end_space_bounds, item_bounds, viewport_height, viewport_scroll_top, viewport_top } =
+			yield* RunBrowserDom(() => ({
+				end_space_bounds: end_space.getBoundingClientRect(),
+				item_bounds: item.getBoundingClientRect(),
+				viewport_height: viewport.clientHeight,
+				viewport_scroll_top: viewport.scrollTop,
+				viewport_top: viewport.getBoundingClientRect().top,
+			}));
 		const next_end_space_height = ConversationEndSpaceHeight(
 			viewport_height,
 			item_bounds.top,
 			end_space_bounds.top,
 		);
+		/**
+		 * The reserved space bottoming out is the designed handoff from the
+		 * anchored reading position to following the tail — but the follow pin is
+		 * gated on `following`, which anchoring switched off, so the handoff must
+		 * re-arm it here. Only a reader still parked where the anchor put them is
+		 * handed over; anyone who scrolled away chose their own position. In a
+		 * short viewport this is the difference between the tail staying visible
+		 * and the run growing below the fold while the transcript looks frozen.
+		 */
+		if (
+			next_end_space_height <= ConversationBaseEndSpacePixels &&
+			end_space_height > ConversationBaseEndSpacePixels &&
+			!following &&
+			!anchor_scroll_active &&
+			Math.abs(
+				ConversationAlignedScrollTop(viewport_scroll_top, viewport_top, item_bounds.top) -
+					viewport_scroll_top,
+			) <= 32
+		) {
+			following = true;
+		}
 		if (next_end_space_height !== end_space_height) {
 			end_space_height = next_end_space_height;
 			yield* Effect.promise(() => tick());

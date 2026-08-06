@@ -363,7 +363,7 @@ describe("activity group header", () => {
 		const trace = read("modules/frontend/src/routes/components/conversation-trace.sv");
 
 		expect(trace).toContain("trace-command-label min-w-0 flex-1 font-mono text-sm");
-		expect(trace).toContain('class="trace-acc-chevron flex shrink-0"');
+		expect(trace).toContain('class="trace-acc-chevron -ml-1 flex shrink-0"');
 		expect(trace).toContain('class="trace-acc-head flex w-fit max-w-full');
 		expect(trace).toContain("-webkit-mask-image: linear-gradient(");
 		expect(trace).toContain("mask-image: linear-gradient(");
