@@ -37,7 +37,10 @@ describe("Barekey docs shell reset", () => {
 		expect(overlay).toContain("absolute inset-0 z-50 flex");
 		expect(overlay).toContain("bg-background");
 		expect(overlay).not.toContain("backdrop-blur");
-		expect(overlay).toContain('aria-label="Artisan"');
+		/** The mark is the Sigurd wordmark component, which owns its own img semantics. */
+		expect(overlay).toContain("<ArtisanLogo");
+		const logo = Read("modules/frontend/src/lib/components/artisan-logo.sv");
+		expect(logo).toContain('aria-label="Artisan"');
 		/** The mark and recovery copy share the same left edge. */
 		expect(overlay).toContain("w-full max-w-xl flex-col items-start");
 		/** Progress phases shimmer the banner; the reassurance line waits out 5s. */

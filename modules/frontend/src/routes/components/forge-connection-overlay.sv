@@ -7,6 +7,7 @@
 
 	import { WriteClipboardText } from "$lib/browser/clipboard";
 	import { RunBrowserDom } from "$lib/browser/dom";
+	import ArtisanLogo from "$lib/components/artisan-logo.sv";
 	import { Button } from "$lib/components/ui/button";
 	import { ArtisanErrorCode } from "$lib/errors/artisan-error-code";
 	import {
@@ -27,16 +28,6 @@
 		retry_connection: Effect.Effect<void>;
 		retry_hydration: Effect.Effect<void>;
 	} = $props();
-
-	const banner = `
-   █████████              █████     ███
-  ███▒▒▒▒▒███            ▒▒███     ▒▒▒
- ▒███    ▒███  ████████  ███████   ████   █████   ██████   ████████
- ▒███████████ ▒▒███▒▒███▒▒▒███▒   ▒▒███  ███▒▒   ▒▒▒▒▒███ ▒▒███▒▒███
- ▒███▒▒▒▒▒███  ▒███ ▒▒▒   ▒███     ▒███ ▒▒█████   ███████  ▒███ ▒███
- ▒███    ▒███  ▒███       ▒███ ███ ▒███  ▒▒▒▒███ ███▒▒███  ▒███ ▒███
- █████   █████ █████      ▒▒█████  █████ ██████ ▒▒████████ ████ █████
-▒▒▒▒▒   ▒▒▒▒▒ ▒▒▒▒▒        ▒▒▒▒▒  ▒▒▒▒▒ ▒▒▒▒▒▒   ▒▒▒▒▒▒▒▒ ▒▒▒▒ ▒▒▒▒▒`;
 
 	const presentation = $derived(PresentForgeGate(model));
 	const is_visible = $derived(model.state.phase !== "ready" && !model.dismissed);
@@ -219,12 +210,25 @@
 			aria-live={presentation.tone === "error" ? "assertive" : "polite"}
 			tabindex="-1"
 		>
-			<pre
-				class={presentation.tone === "progress"
-					? "banner-art banner-shimmer max-w-full overflow-hidden select-none"
-					: "banner-art max-w-full overflow-hidden text-foreground select-none"}
-				data-text={banner}
-				aria-label="Artisan">{banner}</pre>
+			{#if presentation.tone === "progress"}
+				<!--
+					The transitions.dev shimmer-text construction on the wordmark: the
+					base mark renders dimmed and constant, and an aria-hidden clone —
+					the same component, so the glyphs align exactly — clips a sweeping
+					highlight band onto the same letters, so contrast never drops.
+					Pure CSS because transition directives deadlock the async renderer.
+				-->
+				<div class="logo-progress relative text-muted-foreground select-none">
+					<ArtisanLogo />
+					<div class="banner-shimmer absolute inset-0" aria-hidden="true">
+						<ArtisanLogo />
+					</div>
+				</div>
+			{:else}
+				<div class="text-foreground select-none">
+					<ArtisanLogo />
+				</div>
+			{/if}
 
 			{#if presentation.tone === "error"}
 				<div class="w-full">
@@ -327,27 +331,12 @@
 {/if}
 
 <style>
-	.banner-art {
-		font-size: clamp(0.2rem, 0.5vw, 0.45rem);
-		line-height: 1.2;
-	}
-
 	/*
-	 * Background activity: the transitions.dev shimmer-text construction. The
-	 * base glyphs render dimmed and constant; a ::before duplicate (via
-	 * data-text) clips a sweeping highlight band onto the same glyphs, so
-	 * contrast never drops. Pure CSS because transition directives deadlock
-	 * the async renderer.
+	 * The sweeping highlight, painted only through the clone's own letterforms:
+	 * the gradient is the clone's background, clipped to its text, while the
+	 * glyph color itself stays transparent.
 	 */
 	.banner-shimmer {
-		position: relative;
-		color: var(--muted-foreground);
-	}
-
-	.banner-shimmer::before {
-		content: attr(data-text);
-		position: absolute;
-		inset: 0;
 		pointer-events: none;
 		background-image: linear-gradient(
 			90deg,
@@ -401,11 +390,12 @@
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.banner-shimmer::before {
-			animation: none !important;
+		/* The sweep goes; the base mark lifts to full contrast in its place. */
+		.banner-shimmer {
+			display: none;
 		}
 
-		.banner-shimmer {
+		.logo-progress {
 			color: var(--foreground);
 		}
 
