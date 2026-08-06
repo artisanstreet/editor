@@ -2,7 +2,6 @@ import { and, desc, eq, inArray, notInArray, or } from "drizzle-orm";
 import { Effect, Layer, Schema } from "effect";
 
 import {
-	EventPayload,
 	ThreadSessionPolicy,
 	type CommandEnvelope,
 	type EventEnvelope,
@@ -10,10 +9,10 @@ import {
 	type ThreadSessionSnapshot,
 	type ThreadWorkItem,
 } from "@artisan/protocol";
-import type { EngineObservation } from "@artisan/engines";
 
 import { Database } from "../database";
 import { AppendJournalEventInTransaction } from "../journal-store";
+import { make_observation_recording } from "./observation-recording";
 import { make_outbox_operations } from "./outbox";
 import {
 	OrchestrationCommandConflict,
@@ -39,13 +38,11 @@ import {
 	OrchestrationIntake,
 	OrchestrationMessages,
 	OrchestrationOutbox,
-	OrchestrationRawObservations,
 	OrchestrationRuns,
 } from "../tables";
 import { RuntimeMetadata } from "../../runtime/metadata";
-import { ApplyEngineObservation, CancelPendingInteractions } from "../../conversation/index.ts";
+import { CancelPendingInteractions } from "../../conversation/index.ts";
 import type { IntakeAssessment } from "../../orchestration/intake-policy";
-import { PersistSurfaceProjection } from "../../surfaces/surface-projection";
 import { MakeCommandAcceptor } from "./acceptance";
 
 export {
@@ -74,26 +71,6 @@ function normalize_error(error: unknown): OrchestrationError {
 function is_active_status(status: string): status is "running" | "waiting" {
 	return status === "running" || status === "waiting";
 }
-
-function is_projectable_status(status: string): status is "queued" | "running" | "waiting" {
-	return status === "queued" || is_active_status(status);
-}
-
-const question_answers = (
-	observation: Extract<EngineObservation, { readonly _tag: "question" }>,
-) => {
-	const first_answer = observation.answers?.at(0);
-	return first_answer === undefined
-		? {}
-		: {
-				answers: {
-					[observation.question_id]: [
-						first_answer,
-						...(observation.answers?.slice(1) ?? []),
-					] satisfies readonly [string, ...string[]],
-				},
-			};
-};
 
 export const OrchestrationRepositoryLive = Layer.effect(
 	OrchestrationRepository,
@@ -570,246 +547,11 @@ export const OrchestrationRepositoryLive = Layer.effect(
 				return result;
 			}).pipe(Effect.mapError(normalize_error));
 
-		const RecordObservation = (observation: EngineObservation) =>
-			Effect.gen(function* () {
-				const frame_json = JSON.stringify(observation.raw.frame) ?? "null";
-				/**
-				 * UTF-8 JSON can reconstruct an identical raw frame byte-for-byte. Retaining
-				 * its base64 twin duplicates the full payload, but base64 stays for binary or
-				 * otherwise non-identical native frames where it is the exact record.
-				 */
-				const raw_frame_base64 =
-					observation.raw.raw_frame_base64 !== undefined &&
-					Buffer.from(frame_json, "utf8").toString("base64") ===
-						observation.raw.raw_frame_base64
-						? null
-						: (observation.raw.raw_frame_base64 ?? null);
-				const result = yield* database.client.transaction((transaction) =>
-					Effect.gen(function* () {
-						const inserted_observation = yield* transaction
-							.insert(OrchestrationRawObservations)
-							.values({
-								engine_id: observation.raw.engine_id,
-								frame_json,
-								native_id:
-									observation.raw.native_id === undefined
-										? null
-										: String(observation.raw.native_id),
-								native_method: observation.raw.native_method ?? null,
-								observation_id: observation.observation_id,
-								protocol_version: observation.raw.protocol_version ?? null,
-								raw_frame_base64,
-								run_id: observation.artisan_run_id,
-								sequence: observation.sequence,
-								transport: observation.raw.transport,
-							})
-							.onConflictDoNothing()
-							.returning({
-								observation_id: OrchestrationRawObservations.observation_id,
-							});
-
-						if (inserted_observation.length === 0) {
-							return [];
-						}
-
-						const [run] = yield* transaction
-							.select()
-							.from(OrchestrationRuns)
-							.where(eq(OrchestrationRuns.run_id, observation.artisan_run_id))
-							.limit(1);
-
-						if (!run || !is_projectable_status(run.status)) {
-							return [];
-						}
-						const projected_at = yield* metadata.Now;
-						yield* PersistSurfaceProjection(transaction, observation, {
-							agent_id: run.agent_id,
-							occurred_at: projected_at,
-							run_id: run.run_id,
-							thread_id: run.thread_id,
-						});
-						yield* ApplyEngineObservation(transaction, observation, {
-							agent_id: run.agent_id,
-							occurred_at: projected_at,
-							run_id: run.run_id,
-							thread_id: run.thread_id,
-						}) as Effect.Effect<unknown, unknown, never>;
-
-						const payload =
-							observation._tag === "agent_message_completed"
-								? ({
-										message_id: observation.observation_id,
-										text: observation.message,
-										type: "assistant.message_completed",
-									} satisfies EventPayload)
-								: observation._tag === "approval"
-									? ({
-											approval_id: observation.approval_id,
-											...(observation.approved === undefined
-												? {}
-												: { approved: observation.approved }),
-											description: observation.description,
-											state: observation.state,
-											type: "interaction.approval",
-										} satisfies EventPayload)
-									: observation._tag === "question"
-										? ({
-												...question_answers(observation),
-												question_id: observation.question_id,
-												state: observation.state,
-												text: observation.text,
-												type: "interaction.question",
-											} satisfies EventPayload)
-										: observation._tag === "run_state"
-											? ({
-													state:
-														observation.state === "waiting"
-															? "waiting"
-															: "running",
-													type: "run.lifecycle",
-													working_directory: run.working_directory,
-												} satisfies EventPayload)
-											: observation._tag === "run_terminal"
-												? ({
-														state: observation.state,
-														type: "run.lifecycle",
-														working_directory: run.working_directory,
-													} satisfies EventPayload)
-												: undefined;
-
-						if (!payload) {
-							return [];
-						}
-
-						const status = payload.type === "run.lifecycle" ? payload.state : undefined;
-
-						if (status) {
-							const updated_at = yield* metadata.Now;
-
-							yield* transaction
-								.update(OrchestrationRuns)
-								.set({ status, updated_at })
-								.where(
-									and(
-										eq(OrchestrationRuns.run_id, run.run_id),
-										inArray(OrchestrationRuns.status, [
-											"queued",
-											"running",
-											"waiting",
-										]),
-									),
-								);
-						}
-
-						if (observation._tag === "run_terminal") {
-							const updated_at = yield* metadata.Now;
-
-							/**
-							 * A terminal run can never answer its pending interactions.
-							 * Releasing them lets a late approval response fail command
-							 * dispatch as stale instead of queueing an outbox delivery
-							 * that nothing will ever pick up.
-							 */
-							yield* transaction
-								.update(OrchestrationInteractions)
-								.set({ state: "cancelled", updated_at })
-								.where(
-									and(
-										eq(OrchestrationInteractions.run_id, run.run_id),
-										eq(OrchestrationInteractions.state, "requested"),
-									),
-								);
-						}
-
-						if (observation._tag === "approval" || observation._tag === "question") {
-							const interaction_id =
-								observation._tag === "approval"
-									? observation.approval_id
-									: observation.question_id;
-							const description =
-								observation._tag === "approval"
-									? observation.description
-									: observation.text;
-							const state = observation.state;
-							const updated_at = yield* metadata.Now;
-
-							if (state === "requested") {
-								const [existing_interaction] = yield* transaction
-									.select({
-										interaction_id: OrchestrationInteractions.interaction_id,
-									})
-									.from(OrchestrationInteractions)
-									.where(
-										and(
-											eq(
-												OrchestrationInteractions.interaction_id,
-												interaction_id,
-											),
-											eq(OrchestrationInteractions.kind, observation._tag),
-											eq(OrchestrationInteractions.run_id, run.run_id),
-										),
-									)
-									.limit(1);
-
-								if (!existing_interaction) {
-									yield* transaction.insert(OrchestrationInteractions).values({
-										created_at: updated_at,
-										description,
-										interaction_id,
-										kind: observation._tag,
-										run_id: run.run_id,
-										state,
-										updated_at,
-									});
-								}
-							} else {
-								const resolved = yield* transaction
-									.update(OrchestrationInteractions)
-									.set({ state, updated_at })
-									.where(
-										and(
-											eq(
-												OrchestrationInteractions.interaction_id,
-												interaction_id,
-											),
-											eq(OrchestrationInteractions.kind, observation._tag),
-											eq(OrchestrationInteractions.run_id, run.run_id),
-											eq(OrchestrationInteractions.state, "requested"),
-										),
-									)
-									.returning({
-										interaction_id: OrchestrationInteractions.interaction_id,
-									});
-
-								if (resolved.length === 0) {
-									return [];
-								}
-							}
-						}
-
-						return [
-							yield* AppendEvent(transaction, {
-								agent_id: run.agent_id,
-								causation_id: observation.observation_id,
-								correlation_id: run.run_id,
-								payload,
-								raw_origin: {
-									provider: observation.raw.engine_id,
-									reference: String(
-										observation.raw.native_id ?? observation.observation_id,
-									),
-								},
-								run_id: run.run_id,
-								thread_id: run.thread_id,
-							}),
-						];
-					}),
-				);
-
-				yield* notifier.Publish(result.at(-1)?.journal_sequence ?? 0);
-
-				return result;
-			}).pipe(Effect.mapError(normalize_error));
+		const { RecordObservation, RecordObservations } = make_observation_recording(
+			database.client,
+			metadata,
+			notifier,
+		);
 
 		const ClaimNativeRecoveries = () =>
 			Effect.gen(function* () {
@@ -996,6 +738,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 			MarkRunResumed,
 			PersistNativeRun,
 			RecordObservation,
+			RecordObservations,
 		};
 	}),
 );

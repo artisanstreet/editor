@@ -121,6 +121,28 @@ export const Admit = (
 		.returning({ source_id: ConversationSources.source_id })
 		.pipe(Effect.map((rows) => rows.length > 0));
 
+/**
+ * Guarantees the turn row exists without the read-decode-compare cost of a
+ * full upsert. Streamed deltas never change a turn's lifecycle, run, or
+ * agent, so any lifecycle refresh is deferred to the next non-delta
+ * observation on the same turn.
+ */
+export const EnsureTurn = (
+	transaction: DatabaseClient,
+	thread_id: string,
+	turn: ProjectionEntityInput,
+	source: { observed_at: string; journal_sequence?: number },
+) =>
+	Effect.gen(function* () {
+		const rows = yield* transaction
+			.select({ turn_id: ConversationTurns.turn_id })
+			.from(ConversationTurns)
+			.where(eq(ConversationTurns.turn_id, turn.id))
+			.limit(1);
+		if (rows.length > 0) return;
+		yield* UpsertTurn(transaction, thread_id, turn, source);
+	});
+
 export const UpsertTurn = (
 	transaction: DatabaseClient,
 	thread_id: string,

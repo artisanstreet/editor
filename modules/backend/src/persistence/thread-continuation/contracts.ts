@@ -124,6 +124,9 @@ export class ThreadContinuationRepository extends Context.Service<
 		readonly RecordObservationMetadata: (
 			observation: EngineObservation,
 		) => Effect.Effect<void, ContinuationError>;
+		readonly RecordObservationsMetadata: (
+			observations: ReadonlyArray<EngineObservation>,
+		) => Effect.Effect<void, ContinuationError>;
 		readonly PrepareLaunch: (
 			target_run_id: string,
 			launch: ContinuationLaunch,

@@ -138,5 +138,8 @@ export class OrchestrationRepository extends Context.Service<
 		readonly RecordObservation: (
 			observation: EngineObservation,
 		) => Effect.Effect<ReadonlyArray<EventEnvelope>, OrchestrationError>;
+		readonly RecordObservations: (
+			observations: ReadonlyArray<EngineObservation>,
+		) => Effect.Effect<ReadonlyArray<EventEnvelope>, OrchestrationError>;
 	}
 >()("Artisan/OrchestrationRepository") {}

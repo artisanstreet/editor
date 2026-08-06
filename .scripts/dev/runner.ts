@@ -652,10 +652,10 @@ if (runner_is_entry) {
 			createInterface({ input: stream }).on("line", (line) => {
 				const sanitized_line = sanitize_dev_log_line(line);
 
-				if (!send_dashboard_event({ lane_id: name, line: sanitized_line, type: "log" })) {
+				if (!send_dashboard_event({ lane_id: name, line, type: "log" })) {
 					console.log(`[${name}] ${line}`);
 				}
-				if (name === "web" && /Local:\s+http/u.test(line)) {
+				if (name === "web" && /Local:\s+http/u.test(sanitized_line)) {
 					set_lane_status(name, "ready");
 				}
 				file.write(`${sanitized_line}\n`);
@@ -1173,6 +1173,8 @@ if (runner_is_entry) {
 				ARTISAN_FORGE_DEV_ORIGIN: instance.forge_origin,
 				ARTISAN_FRONTEND_DEV_PORT: String(instance.web_port),
 				ARTISAN_FRONTEND_PUBLIC_HOSTNAME: endpoints.web.hostname,
+				/** Vite sees a pipe, not a TTY; the dashboard renders the colors. */
+				FORCE_COLOR: "1",
 			});
 			void open_paired_browser();
 		}

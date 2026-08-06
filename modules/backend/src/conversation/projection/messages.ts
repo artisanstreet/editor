@@ -1,4 +1,4 @@
-import { Effect } from "effect";
+import { Effect, Schema } from "effect";
 import { eq } from "drizzle-orm";
 
 import { ConversationItem, conversation_body_text_limit } from "@artisan/protocol";
@@ -6,8 +6,24 @@ import { ConversationItem, conversation_body_text_limit } from "@artisan/protoco
 import type { DatabaseClient } from "../../persistence/database";
 import { ConversationItems } from "../../persistence/tables";
 import type { ConversationObservationContext } from "./domain";
-import { body_text } from "./domain";
+import { body_text, ConversationProjectionError } from "./domain";
 import { Decode, DecodeJson, Emit, UpsertItem } from "./entities";
+
+/** Stored entities stay opaque on the hot path; only consumed fields are decoded. */
+const StoredEntityJson = Schema.Record(Schema.String, Schema.Unknown);
+
+/** The only fields the append hot path reads from a streaming item. */
+const StreamingBodyFields = Schema.Struct({
+	lifecycle: Schema.String,
+	revision: Schema.Number,
+	text: Schema.String,
+	type: Schema.String,
+});
+
+const DecodeStreamingBodyFields = (stored: Record<string, unknown>) =>
+	Schema.decodeUnknownEffect(StreamingBodyFields)(stored).pipe(
+		Effect.mapError(() => new ConversationProjectionError("Invalid stored conversation item")),
+	);
 
 /** Appends a provider delta to its stable item while retaining one renderer entity. */
 export const AppendText = (
@@ -48,34 +64,38 @@ export const AppendText = (
 				},
 				source,
 			);
-		const prior = yield* DecodeJson(
-			ConversationItem,
+		/**
+		 * The stored entity was schema-validated when it was written, so the
+		 * per-delta path re-validates only the fields the append consumes and
+		 * carries the rest opaquely. The item is fully re-decoded once, at
+		 * completion, instead of twice per streamed delta.
+		 */
+		const stored = yield* DecodeJson(
+			StoredEntityJson,
 			existing.entity_json,
 			"stored conversation item",
 		);
+		const fields = yield* DecodeStreamingBodyFields(stored);
 		if (
-			(prior.type !== "assistant_message" && prior.type !== "reasoning_summary") ||
-			prior.lifecycle !== "streaming"
+			(fields.type !== "assistant_message" && fields.type !== "reasoning_summary") ||
+			fields.lifecycle !== "streaming"
 		)
-			return prior;
+			return;
 		const delta = body_text(value).slice(
 			0,
-			Math.max(0, conversation_body_text_limit - prior.text.length),
+			Math.max(0, conversation_body_text_limit - fields.text.length),
 		);
-		const revision = prior.revision + 1;
-		const entity = yield* Decode(
-			ConversationItem,
-			{
-				...prior,
-				text: prior.text + delta,
-				revision,
-				updated_at: input.occurred_at,
-			},
-			"appended conversation item",
-		);
+		const revision = fields.revision + 1;
 		yield* transaction
 			.update(ConversationItems)
-			.set({ entity_json: JSON.stringify(entity) })
+			.set({
+				entity_json: JSON.stringify({
+					...stored,
+					revision,
+					text: fields.text + delta,
+					updated_at: input.occurred_at,
+				}),
+			})
 			.where(eq(ConversationItems.item_id, item_id));
 		yield* Emit(transaction, thread_id, input.occurred_at, {
 			type: "item_append",
@@ -83,7 +103,6 @@ export const AppendText = (
 			text: delta,
 			revision,
 		});
-		return entity;
 	});
 
 /**

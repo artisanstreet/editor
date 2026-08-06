@@ -10,7 +10,9 @@ import {
 	brightGreen,
 	brightRed,
 	createCliRenderer,
+	createTextAttributes,
 	dim,
+	parseColor,
 	type CliRenderer,
 	type KeyEvent,
 	type StylableInput,
@@ -21,15 +23,16 @@ import {
 import {
 	apply_dev_tui_event,
 	create_dev_tui_state,
-	sanitize_dev_log_line,
 	select_dev_tui_lane,
 	select_relative_dev_tui_lane,
 	type DevLaneStatus,
+	type DevLogChunk,
+	type DevLogLine,
 	type DevTuiEvent,
 	type DevTuiState,
 } from "./model";
 
-export type { DevTuiLane, DevTuiState } from "./model";
+export type { DevLogChunk, DevLogLine, DevLogStyle, DevTuiLane, DevTuiState } from "./model";
 export {
 	DevEndpoint,
 	DevLaneDefinition,
@@ -99,6 +102,35 @@ const format_header = (state: DevTuiState): StyledText => {
 	const chunks = [brightCyan(bold(state.title))];
 
 	if (endpoints.length > 0) chunks.push(dim(`\n${endpoints}`));
+
+	return new StyledText(chunks);
+};
+
+const to_text_chunk = (chunk: DevLogChunk): TextChunk => {
+	const text_chunk: TextChunk = { __isChunk: true, text: chunk.text };
+	const attributes = createTextAttributes({
+		bold: chunk.style.bold ?? false,
+		dim: chunk.style.dim ?? false,
+		inverse: chunk.style.inverse ?? false,
+		italic: chunk.style.italic ?? false,
+		strikethrough: chunk.style.strikethrough ?? false,
+		underline: chunk.style.underline ?? false,
+	});
+
+	if (attributes !== 0) text_chunk.attributes = attributes;
+	if (chunk.style.foreground !== undefined) text_chunk.fg = parseColor(chunk.style.foreground);
+	if (chunk.style.background !== undefined) text_chunk.bg = parseColor(chunk.style.background);
+
+	return text_chunk;
+};
+
+const format_log = (lines: ReadonlyArray<DevLogLine>): StyledText => {
+	const chunks: TextChunk[] = [];
+
+	lines.forEach((line, index) => {
+		if (index > 0) chunks.push({ __isChunk: true, text: "\n" });
+		for (const chunk of line.chunks) chunks.push(to_text_chunk(chunk));
+	});
 
 	return new StyledText(chunks);
 };
@@ -210,7 +242,7 @@ export const create_dev_tui = async (options: DevTuiOptions = {}): Promise<DevTu
 		sidebar_text.content = format_sidebar(current_state);
 		content.title = lane === undefined ? " Logs " : ` ${lane.label} · ${lane.status} `;
 		content.borderColor = lane === undefined ? "#475569" : status_border_colors[lane.status];
-		log_text.content = lines.length === 0 ? "Waiting for output…" : lines.join("\n");
+		log_text.content = lines.length === 0 ? "Waiting for output…" : format_log(lines);
 		renderer.requestRender();
 	};
 
@@ -256,13 +288,7 @@ export const create_dev_tui = async (options: DevTuiOptions = {}): Promise<DevTu
 		},
 		dispatch: (event) => {
 			if (destroyed || event.type === "shutdown") return;
-
-			const sanitized_event =
-				event.type === "log"
-					? { ...event, line: sanitize_dev_log_line(event.line) }
-					: event;
-
-			current_state = apply_dev_tui_event(current_state, sanitized_event);
+			current_state = apply_dev_tui_event(current_state, event);
 			render();
 		},
 		state: () => current_state,
