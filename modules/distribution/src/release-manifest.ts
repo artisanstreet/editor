@@ -16,10 +16,11 @@ export type ArtifactArchiveFormat = typeof ArtifactArchiveFormat.Type;
 
 /** Product artifacts are downloaded into bootstrap memory before verification. */
 // The complete Windows x64 compatibility release currently compresses to
-// roughly 587 MiB because it contains Electron, Forge's Node runtime, native
-// terminal bindings, and the offline frontend. Keep a finite transport bound
-// with enough headroom for that measured artifact.
-export const MaximumArtifactBytes = 768 * 1024 * 1024;
+// roughly 866 MiB: Electron, Forge's Node runtime, native terminal bindings,
+// the offline frontend, and the Claude Agent SDK's native CLI. Keep a finite
+// transport bound with headroom for that measured artifact; the installer's
+// own absolute ceiling remains 2 GiB.
+export const MaximumArtifactBytes = 1280 * 1024 * 1024;
 
 /** Bounds both manifest decoding and the ZIP central-directory work set. */
 export const MaximumArchiveEntries = 16_384;
