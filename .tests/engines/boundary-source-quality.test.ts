@@ -4,7 +4,8 @@ import { describe, expect, it } from "vitest";
 
 const boundary_sources = [
 	"modules/engines/src/process/jsonl.ts",
-	"modules/engines/src/claude/engine.ts",
+	"modules/engines/src/claude/probe.ts",
+	"modules/engines/src/claude/sdk-engine.ts",
 	"modules/engines/src/claude/usage.ts",
 	"modules/engines/src/codex/usage.ts",
 ] as const;

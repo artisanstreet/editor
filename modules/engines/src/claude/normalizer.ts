@@ -37,6 +37,14 @@ export interface ClaudeNormalizationInput {
 	 * a streamed message and its completion on one conversation item.
 	 */
 	readonly stream_message_id?: string;
+	/**
+	 * Transport provenance for the run owner delivering these frames. The frame
+	 * shapes are identical across the stream-json CLI and the Agent SDK, so the
+	 * caller names the wire it actually used; absent values keep the historical
+	 * CLI strings.
+	 */
+	readonly protocol_version?: string;
+	readonly transport?: string;
 	readonly turn_id: string;
 }
 
@@ -293,9 +301,9 @@ function make_base(input: ClaudeNormalizationInput, native_method: string, suffi
 		frame: input.payload,
 		frame_sequence: input.frame_sequence,
 		native_method,
-		protocol_version: "claude-stream-json-v1",
+		protocol_version: input.protocol_version ?? "claude-stream-json-v1",
 		raw_frame_base64: input.raw_frame_base64,
-		transport: "claude-cli-stream-json",
+		transport: input.transport ?? "claude-cli-stream-json",
 	};
 
 	return {

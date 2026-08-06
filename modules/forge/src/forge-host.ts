@@ -10,6 +10,7 @@ import {
 } from "@artisan/backend";
 import {
 	ClaudeEngine,
+	ClaudeQueryClientLive,
 	CodexEngine,
 	CodexProcessFactoryLive,
 	make_claude_engine_layer,
@@ -105,6 +106,7 @@ const MakeForgeHost = (config: ForgeConfig, transport_binding: ForgeTransportBin
 const MakeForgeRuntime = (config: ForgeConfig) => {
 	const engine_layer = Layer.mergeAll(make_codex_engine_layer(), make_claude_engine_layer()).pipe(
 		Layer.provide(CodexProcessFactoryLive),
+		Layer.provide(ClaudeQueryClientLive),
 	);
 	const backend_layer = Layer.unwrap(
 		Effect.gen(function* () {

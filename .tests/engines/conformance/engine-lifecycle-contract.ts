@@ -75,7 +75,7 @@ export async function assert_engine_lifecycle_contract(
 		expect(result.native_thread_id.length).toBeGreaterThan(0);
 	}
 
-	if (engine.Descriptor.capabilities.steer.state === "supported") {
+	if (engine.Descriptor.capabilities.steer.state !== "unsupported") {
 		expect(Exit.isSuccess(result.first)).toBe(true);
 		expect(Exit.isSuccess(result.duplicate)).toBe(true);
 		expect(error_from(result.conflict)).toMatchObject({

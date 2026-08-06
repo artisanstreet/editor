@@ -14,6 +14,7 @@ import {
 	make_codex_engine_layer,
 } from "@artisan/engines";
 
+import { make_fake_claude_query } from "../fixtures/fake-claude-query";
 import { make_fake_engine } from "../harness/fake-engine";
 import { make_transcript_sequence_replay } from "../harness/transcript-process";
 import { EngineOpenScenarios } from "../scenarios/engine-scenarios";
@@ -62,19 +63,30 @@ describe("Shared Engine lifecycle contract", () => {
 	it("includes Claude's provider-neutral capability declaration", () => {
 		expect(ClaudeEngineDescriptor.id).toBe("claude");
 		expect(ClaudeEngineDescriptor.capabilities.events.state).toBe("supported");
-		expect(ClaudeEngineDescriptor.capabilities.steer.state).toBe("unsupported");
+		expect(ClaudeEngineDescriptor.capabilities.steer.state).toBe("experimental");
+		expect(ClaudeEngineDescriptor.capabilities.approval.state).toBe("supported");
 	});
 
-	it("passes through the Claude Code process adapter", async () => {
-		process.env.FAKE_CLAUDE_SCENARIO = "conformance";
-
+	it("passes through the Claude Agent SDK adapter", async () => {
+		const fake = make_fake_claude_query((session) => {
+			session.emit({
+				type: "system",
+				subtype: "init",
+				cwd: process.cwd(),
+				session_id: session.session_id(),
+				tools: ["Task", "Bash", "Edit"],
+				model: "claude-haiku-4-5",
+				permissionMode: "default",
+				uuid: "3f0d9f4a-2c3d-4b0e-9f70-5f6f2f9a1b22",
+			} as never);
+		});
 		const engine = await Effect.runPromise(
 			ClaudeEngine.pipe(
 				Effect.provide(
 					make_claude_engine_layer({
 						executable: process.execPath,
 						executable_args: [claude_fixture_path],
-					}).pipe(Layer.provide(EngineProcessFactoryLive)),
+					}).pipe(Layer.provide(EngineProcessFactoryLive), Layer.provide(fake.layer)),
 				),
 			),
 		);

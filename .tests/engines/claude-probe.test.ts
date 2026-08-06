@@ -5,6 +5,8 @@ import { Effect, Layer } from "effect";
 
 import { ClaudeEngine, EngineProcessFactoryLive, make_claude_engine_layer } from "@artisan/engines";
 
+import { make_unstartable_claude_query } from "./fixtures/fake-claude-query";
+
 const executable = fileURLToPath(new URL("./fixtures/fake-claude.ts", import.meta.url));
 const original = process.env.FAKE_CLAUDE_SCENARIO;
 
@@ -21,7 +23,10 @@ function engine(options: Record<string, unknown> = {}) {
 					executable: process.execPath,
 					executable_args: [executable],
 					...options,
-				}).pipe(Layer.provide(EngineProcessFactoryLive)),
+				}).pipe(
+					Layer.provide(EngineProcessFactoryLive),
+					Layer.provide(make_unstartable_claude_query()),
+				),
 			),
 		),
 	);
