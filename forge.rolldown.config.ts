@@ -1,5 +1,6 @@
-import { cpSync, existsSync, mkdirSync, realpathSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
+import { NtExecutable, NtExecutableResource, Resource } from "resedit";
 
 export type ForgeBuildMode = "production" | "validation";
 
@@ -20,6 +21,36 @@ const stage = (from: string, to: string) => {
 		if (!existsSync(to)) throw error;
 		console.warn(`[forge-build] kept the staged copy of ${to} (source copy blocked)`);
 	}
+};
+
+/**
+ * Task Manager lists a process by the FileDescription in its executable's
+ * version resource, so the staged Node copy must carry Artisan branding or
+ * the Forge shows up as "Node.js JavaScript Runtime". Rewriting the resource
+ * invalidates Node's Authenticode signature; release signing, once it exists,
+ * must re-sign this file afterwards.
+ */
+const brand_forge_executable = (executable_path: string, product_version: string) => {
+	const executable = NtExecutable.from(readFileSync(executable_path), { ignoreCert: true });
+	const resources = NtExecutableResource.from(executable);
+	const version_info = Resource.VersionInfo.fromEntries(resources.entries)[0];
+	if (version_info === undefined) {
+		throw new Error("the staged Node executable carries no version resource");
+	}
+	for (const language of version_info.getAllLanguagesForStringValues()) {
+		version_info.setStringValues(language, {
+			CompanyName: "Barekey",
+			FileDescription: "Artisan Forge",
+			InternalName: "Artisan Forge",
+			OriginalFilename: "Artisan Forge.exe",
+			ProductName: "Artisan",
+		});
+	}
+	version_info.setFileVersion(product_version);
+	version_info.setProductVersion(product_version);
+	version_info.outputToResourceEntries(resources.entries);
+	resources.outputResource(executable);
+	writeFileSync(executable_path, Buffer.from(executable.generate()));
 };
 
 const StageForgeRuntime = (forge_root: string, watching: boolean) => ({
@@ -80,6 +111,16 @@ const StageForgeRuntime = (forge_root: string, watching: boolean) => ({
 		stage(migrations_source, resolve(forge_root, "migrations"));
 		for (const executable of ["Artisan Forge.exe", "node.exe"]) {
 			stage(process.execPath, resolve(forge_root, executable));
+		}
+		if (!watching && process.platform === "win32") {
+			const workspace = JSON.parse(
+				readFileSync(resolve(import.meta.dirname, "package.json"), "utf8"),
+			) as { version: string };
+			try {
+				brand_forge_executable(resolve(forge_root, "Artisan Forge.exe"), workspace.version);
+			} catch (error) {
+				console.warn(`[forge-build] kept the unbranded Artisan Forge.exe (${error})`);
+			}
 		}
 		stage(
 			resolve(import.meta.dirname, ".scripts", "package", "update-user-path.ps1"),
