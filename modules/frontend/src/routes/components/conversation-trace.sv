@@ -10,6 +10,7 @@
 	import Bug from "@tabler/icons-svelte/icons/bug";
 	import CircleX from "@tabler/icons-svelte/icons/circle-x";
 	import FilePencil from "@tabler/icons-svelte/icons/file-pencil";
+	import FileSearch from "@tabler/icons-svelte/icons/file-search";
 	import FileText from "@tabler/icons-svelte/icons/file-text";
 	import FileX from "@tabler/icons-svelte/icons/file-x";
 	import ListDetails from "@tabler/icons-svelte/icons/list-details";
@@ -146,7 +147,8 @@
 		if (category === "file_read") return FileText;
 		if (category === "file_edit") return FilePencil;
 		if (category === "file_delete") return FileX;
-		if (category === "file_search" || category === "web_search") return WorldSearch;
+		if (category === "file_search") return FileSearch;
+		if (category === "web_search") return WorldSearch;
 		return Tool;
 	};
 
@@ -236,14 +238,15 @@
 							with nothing after it.
 						-->
 						<!--
-							Muted whether or not it shimmers. ShimmerText's own variant paints
-							`text-foreground`, so a class that only arrives while live left a
-							settled chain reading at full contrast — louder than the prose it
-							sits between, for a line that is a summary of finished work.
+							Inherit, never a color of its own. ShimmerText's variant paints
+							`text-foreground`, which pinned the label while the button's
+							hover recolored only the icon and chevron around it; inheriting
+							keeps the whole header muted at rest and lifts it as one word on
+							hover.
 						-->
 						<ShimmerText
 							active={live}
-							class="trace-head-label min-w-0 flex-1 truncate text-muted-foreground"
+							class="trace-head-label min-w-0 flex-1 truncate text-inherit"
 						>
 							{#each clauses as clause (clause.category)}
 								<span
@@ -252,7 +255,8 @@
 								>
 							{/each}
 						</ShimmerText>
-						<span class="trace-acc-chevron flex shrink-0">
+						<!-- The chevron belongs to the label: gap-1 from it, like the work-session header. -->
+						<span class="trace-acc-chevron -ml-1 flex shrink-0">
 							<ChevronRight class="size-3.5" aria-hidden="true" />
 						</span>
 					</button>
@@ -302,7 +306,7 @@
 					>
 						<SeverityIcon class="size-4" aria-hidden="true" />
 						<span>{presentation.label}</span>
-						<span class="trace-acc-chevron flex">
+						<span class="trace-acc-chevron -ml-1 flex">
 							<ChevronRight class="size-3.5" aria-hidden="true" />
 						</span>
 					</button>

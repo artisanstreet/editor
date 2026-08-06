@@ -1,3 +1,4 @@
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 import { NodeFileSystem, NodePath } from "@effect/platform-node-shared";
@@ -103,11 +104,33 @@ const MakeForgeHost = (config: ForgeConfig, transport_binding: ForgeTransportBin
 		};
 	}).pipe(Effect.onError(() => Effect.logError("Artisan Forge host acquisition failed")));
 
+/**
+ * The launcher stages the Agent SDK's native Claude CLI beside the other
+ * native runtime pieces; the bundled SDK cannot resolve its optional platform
+ * package from inside the Forge bundle, so the staged binary is handed to the
+ * engine explicitly. Absent staging — bare source runs — the installed
+ * `claude` on PATH keeps serving probe and runs exactly as before.
+ */
+const resolve_staged_claude_cli = () => {
+	const native_runtime = process.env.ARTISAN_NATIVE_RUNTIME;
+	if (native_runtime === undefined) return undefined;
+	const staged = join(native_runtime, "claude-agent-sdk", "claude.exe");
+	return existsSync(staged) ? staged : undefined;
+};
+
 const MakeForgeRuntime = (config: ForgeConfig) => {
-	const engine_layer = Layer.mergeAll(make_codex_engine_layer(), make_claude_engine_layer()).pipe(
-		Layer.provide(CodexProcessFactoryLive),
-		Layer.provide(ClaudeQueryClientLive),
-	);
+	const staged_claude_cli = resolve_staged_claude_cli();
+	const engine_layer = Layer.mergeAll(
+		make_codex_engine_layer(),
+		make_claude_engine_layer(
+			staged_claude_cli === undefined
+				? {}
+				: {
+						executable: staged_claude_cli,
+						path_to_claude_code_executable: staged_claude_cli,
+					},
+		),
+	).pipe(Layer.provide(CodexProcessFactoryLive), Layer.provide(ClaudeQueryClientLive));
 	const backend_layer = Layer.unwrap(
 		Effect.gen(function* () {
 			const codex_engine = yield* CodexEngine;
