@@ -28,8 +28,7 @@ minimumReleaseAgeExclude:
   - "@koromix/koffi-win32-ia32@3.1.1"
   - "@koromix/koffi-win32-x64@3.1.1"
   - koffi@3.1.1
-  - svelte-effect-runtime@4.2.1
+  - svelte-effect-runtime@4.2.3
   - "@decimalturn/toml-patch@3.0.1"
 patchedDependencies:
   pe-library@2.0.1: patches/pe-library@2.0.1.patch
-  svelte-effect-runtime@4.2.1: patches/svelte-effect-runtime@4.2.1.patch

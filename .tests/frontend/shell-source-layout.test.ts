@@ -7,8 +7,8 @@ const Read = (path: string) => readFileSync(resolve(path), "utf8");
 
 describe("Barekey docs shell reset", () => {
 	it("lets the layout compose page surfaces through snippets", () => {
-		const layout = Read("modules/frontend/src/routes/+layout.sv");
-		const panel = Read("modules/frontend/src/routes/components/sectioned-panel.sv");
+		const layout = Read("modules/frontend/src/routes/+layout.svelte");
+		const panel = Read("modules/frontend/src/routes/components/sectioned-panel.svelte");
 
 		expect(layout).toContain("<SectionedPanel");
 		/** The layout owns route-derived state; the panel is handed the result. */
@@ -30,8 +30,10 @@ describe("Barekey docs shell reset", () => {
 	});
 
 	it("gates Forge loading and disconnection with the Artisan banner overlay", () => {
-		const overlay = Read("modules/frontend/src/routes/components/forge-connection-overlay.sv");
-		const preview = Read("modules/frontend/src/routes/components/forge-shell-preview.sv");
+		const overlay = Read(
+			"modules/frontend/src/routes/components/forge-connection-overlay.svelte",
+		);
+		const preview = Read("modules/frontend/src/routes/components/forge-shell-preview.svelte");
 
 		/** Opaque and full-cover: the banner is the whole scene. */
 		expect(overlay).toContain("absolute inset-0 z-50 flex");
@@ -39,7 +41,7 @@ describe("Barekey docs shell reset", () => {
 		expect(overlay).not.toContain("backdrop-blur");
 		/** The mark is the Sigurd wordmark component, which owns its own img semantics. */
 		expect(overlay).toContain("<ArtisanLogo");
-		const logo = Read("modules/frontend/src/lib/components/artisan-logo.sv");
+		const logo = Read("modules/frontend/src/lib/components/artisan-logo.svelte");
 		expect(logo).toContain('aria-label="Artisan"');
 		/** The mark and recovery copy share the same left edge. */
 		expect(overlay).toContain("w-full max-w-xl flex-col items-start");
@@ -78,23 +80,25 @@ describe("Barekey docs shell reset", () => {
 	});
 
 	it("mounts the inspector for the workspace in view and keeps controls in the composer", () => {
-		const layout = Read("modules/frontend/src/routes/+layout.sv");
-		const thread = Read("modules/frontend/src/routes/t/[workspace]/[thread]/+page.sv");
-		const thread_route = Read("modules/frontend/src/routes/components/thread-route.sv");
-		const thread_panel = Read("modules/frontend/src/routes/components/thread-panel.sv");
-		const thread_workspace = Read("modules/frontend/src/routes/components/thread-workspace.sv");
-		const composer = Read("modules/frontend/src/routes/components/thread-composer.sv");
+		const layout = Read("modules/frontend/src/routes/+layout.svelte");
+		const thread = Read("modules/frontend/src/routes/t/[workspace]/[thread]/+page.svelte");
+		const thread_route = Read("modules/frontend/src/routes/components/thread-route.svelte");
+		const thread_panel = Read("modules/frontend/src/routes/components/thread-panel.svelte");
+		const thread_workspace = Read(
+			"modules/frontend/src/routes/components/thread-workspace.svelte",
+		);
+		const composer = Read("modules/frontend/src/routes/components/thread-composer.svelte");
 		const composer_controls = Read(
-			"modules/frontend/src/routes/components/composer/controls.sv",
+			"modules/frontend/src/routes/components/composer/controls.svelte",
 		);
 		const model_selector = Read(
-			"modules/frontend/src/routes/components/model-selector/view.sv",
+			"modules/frontend/src/routes/components/model-selector/view.svelte",
 		);
 		const model_selector_styles = Read(
 			"modules/frontend/src/routes/components/model-selector.css",
 		);
 		const policy_controls = Read(
-			"modules/frontend/src/routes/components/model-selector/policy-controls.sv",
+			"modules/frontend/src/routes/components/model-selector/policy-controls.svelte",
 		);
 
 		expect(layout).toContain("/^\\/t\\/[^/]+\\/[^/]+\\/?$/");
@@ -217,8 +221,8 @@ describe("Barekey docs shell reset", () => {
 	});
 
 	it("owns conversation subscriptions and snapshots by route identity", () => {
-		const route = Read("modules/frontend/src/routes/t/[workspace]/[thread]/+page.sv");
-		const controller = Read("modules/frontend/src/routes/components/thread-route.sv");
+		const route = Read("modules/frontend/src/routes/t/[workspace]/[thread]/+page.svelte");
+		const controller = Read("modules/frontend/src/routes/components/thread-route.svelte");
 		const interaction = Read("modules/frontend/src/lib/thread-interaction/commands.ts");
 		const accepted_command = interaction.indexOf("const result = yield* command;");
 		const accepted_reconciliation = interaction.indexOf(
@@ -260,8 +264,8 @@ describe("Barekey docs shell reset", () => {
 	});
 
 	it("positions loaded threads at the bottom and promotes a local turn to the top inset", () => {
-		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.sv");
-		const message = Read("modules/frontend/src/routes/components/conversation-message.sv");
+		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.svelte");
+		const message = Read("modules/frontend/src/routes/components/conversation-message.svelte");
 
 		expect(workspace).toContain("bind:viewportRef={viewport}");
 		expect(workspace).toContain("const PositionLoadedThread = Effect.gen(function* ()");
@@ -279,9 +283,9 @@ describe("Barekey docs shell reset", () => {
 
 	it("renders active work as one muted shimmering word trailing the flow", () => {
 		const work_session = Read(
-			"modules/frontend/src/routes/components/conversation-work-session.sv",
+			"modules/frontend/src/routes/components/conversation-work-session.svelte",
 		);
-		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.sv");
+		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.svelte");
 
 		expect(work_session).toContain(
 			"const can_collapse = $derived(!is_working && has_visible_details);",
@@ -337,7 +341,7 @@ describe("Barekey docs shell reset", () => {
 	});
 
 	it("keeps the rail as the entire sidebar with logo, new-thread, surface, and marketplace controls", () => {
-		const panel = Read("modules/frontend/src/routes/components/sectioned-panel.sv");
+		const panel = Read("modules/frontend/src/routes/components/sectioned-panel.svelte");
 		const sidebar_styles = Read("modules/frontend/src/lib/styles/sidebar.css");
 
 		/**
@@ -390,7 +394,7 @@ describe("Barekey docs shell reset", () => {
 		 * assertion or "some attached project". Cycling carries that workspace
 		 * into the editor URL and returns to the exact thread it left.
 		 */
-		const layout = Read("modules/frontend/src/routes/+layout.sv");
+		const layout = Read("modules/frontend/src/routes/+layout.svelte");
 		const identity = Read("modules/frontend/src/lib/editor/workspace-identity.ts");
 		expect(layout).not.toContain('searchParams.get("workspace")');
 		expect(layout).toContain("return active_thread.primary_project;");
@@ -404,7 +408,7 @@ describe("Barekey docs shell reset", () => {
 	});
 
 	it("uses the Barekey docs gradient card surface for page content", () => {
-		const panel = Read("modules/frontend/src/routes/components/sectioned-panel.sv");
+		const panel = Read("modules/frontend/src/routes/components/sectioned-panel.svelte");
 		const global_styles = Read("modules/frontend/src/lib/styles/global.css");
 
 		expect(panel).toContain(
@@ -415,8 +419,8 @@ describe("Barekey docs shell reset", () => {
 	});
 
 	it("carries thread navigation and the draft-thread quick link in the command menu", () => {
-		const menu = Read("modules/frontend/src/routes/components/command-menu.sv");
-		const home = Read("modules/frontend/src/routes/+page.sv");
+		const menu = Read("modules/frontend/src/routes/components/command-menu.svelte");
+		const home = Read("modules/frontend/src/routes/+page.svelte");
 
 		expect(menu).toContain("<CommandDialog");
 		expect(menu).toContain("!event.metaKey && !event.ctrlKey");
@@ -439,12 +443,12 @@ describe("Barekey docs shell reset", () => {
 		expect(menu).toContain('project?.display_name ?? "Unassigned"');
 		expect(menu).toContain("ThreadRoutePathFor(thread)");
 		/** The layout owns the live list; the menu only renders what it is handed. */
-		const layout = Read("modules/frontend/src/routes/+layout.sv");
+		const layout = Read("modules/frontend/src/routes/+layout.svelte");
 		expect(layout).toContain("client.SubscribeThreadList");
 		expect(layout).toContain("ApplyRootThreadListUpdate");
 		expect(menu).not.toContain("ArtisanClient");
 		/** The root page is the draft: the composer creates the thread on first send. */
-		expect(existsSync(resolve("modules/frontend/src/routes/threads/+page.sv"))).toBe(false);
+		expect(existsSync(resolve("modules/frontend/src/routes/threads/+page.svelte"))).toBe(false);
 		expect(home).toContain("<ThreadComposer");
 		expect(home).toContain("SubmitFirstMessage");
 		expect(home).toContain("yield* draft_thread.Submit(submission)");
@@ -458,12 +462,12 @@ describe("Barekey docs shell reset", () => {
 	});
 
 	it("locks engine switching only during an active run and routes it through policy", () => {
-		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.sv");
-		const composer = Read("modules/frontend/src/routes/components/thread-composer.sv");
-		const controls = Read("modules/frontend/src/routes/components/composer/controls.sv");
-		const selector = Read("modules/frontend/src/routes/components/model-selector/view.sv");
+		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.svelte");
+		const composer = Read("modules/frontend/src/routes/components/thread-composer.svelte");
+		const controls = Read("modules/frontend/src/routes/components/composer/controls.svelte");
+		const selector = Read("modules/frontend/src/routes/components/model-selector/view.svelte");
 		const engine_section = Read(
-			"modules/frontend/src/routes/components/model-selector/engine-section.sv",
+			"modules/frontend/src/routes/components/model-selector/engine-section.svelte",
 		);
 
 		expect(workspace).toContain("const engine_locked = $derived(run_active);");
@@ -480,12 +484,12 @@ describe("Barekey docs shell reset", () => {
 	});
 
 	it("stars models from the picker and floats favorites to the top of their engine", () => {
-		const selector = Read("modules/frontend/src/routes/components/model-selector/view.sv");
+		const selector = Read("modules/frontend/src/routes/components/model-selector/view.svelte");
 		const selection = Read("modules/frontend/src/lib/engine/model-selection.ts");
 		const model_list = Read(
-			"modules/frontend/src/routes/components/model-selector/model-list.sv",
+			"modules/frontend/src/routes/components/model-selector/model-list.svelte",
 		);
-		const composer = Read("modules/frontend/src/routes/components/thread-composer.sv");
+		const composer = Read("modules/frontend/src/routes/components/thread-composer.svelte");
 		const defaults_controller = Read(
 			"modules/frontend/src/lib/settings/session-defaults-controller.ts",
 		);
@@ -524,11 +528,11 @@ describe("Barekey docs shell reset", () => {
 	});
 
 	it("surfaces the thread's project at the top of the thread panel and assigns it there", () => {
-		const panel = Read("modules/frontend/src/routes/components/thread-panel.sv");
+		const panel = Read("modules/frontend/src/routes/components/thread-panel.svelte");
 		const project_selector = Read(
-			"modules/frontend/src/routes/components/panel/project-selector.sv",
+			"modules/frontend/src/routes/components/panel/project-selector.svelte",
 		);
-		const picker = Read("modules/frontend/src/routes/components/project-folder-picker.sv");
+		const picker = Read("modules/frontend/src/routes/components/project-folder-picker.svelte");
 
 		expect(panel).toContain("<ProjectSelector");
 		expect(project_selector).toContain('aria-label="Thread project"');

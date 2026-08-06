@@ -1,10 +1,10 @@
-import Root from "./card.sv";
-import Content from "./card-content.sv";
-import Description from "./card-description.sv";
-import Footer from "./card-footer.sv";
-import Header from "./card-header.sv";
-import Title from "./card-title.sv";
-import Action from "./card-action.sv";
+import Root from "./card.svelte";
+import Content from "./card-content.svelte";
+import Description from "./card-description.svelte";
+import Footer from "./card-footer.svelte";
+import Header from "./card-header.svelte";
+import Title from "./card-title.svelte";
+import Action from "./card-action.svelte";
 
 export {
 	Root,

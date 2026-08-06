@@ -8,7 +8,7 @@ const workspace = resolve(import.meta.dirname, "../..");
 const frontend_root = resolve(workspace, "modules/frontend");
 const original_working_directory = process.cwd();
 const source = readFileSync(
-	resolve(workspace, "modules/frontend/src/lib/components/markdown/code-snippet.sv"),
+	resolve(workspace, "modules/frontend/src/lib/components/markdown/code-snippet.svelte"),
 	"utf8",
 );
 const strip_ssr_markers = (html: string) => html.replaceAll(/<!--.*?-->/gu, "");
@@ -17,7 +17,7 @@ let frontend_vite: ViteDevServer;
 
 const RenderCodeSnippet = async (props: Record<string, unknown>) => {
 	const [{ default: CodeSnippet }, svelte, server] = await Promise.all([
-		frontend_vite.ssrLoadModule("/src/lib/components/markdown/code-snippet.sv"),
+		frontend_vite.ssrLoadModule("/src/lib/components/markdown/code-snippet.svelte"),
 		frontend_vite.ssrLoadModule("svelte"),
 		frontend_vite.ssrLoadModule("svelte/server"),
 	]);

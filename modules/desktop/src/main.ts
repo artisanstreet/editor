@@ -23,9 +23,13 @@ const renderer_partition = "artisan-renderer";
  * Protocol access; setting the variable at launch is the only way in, and an
  * unset variable leaves no debugging listener at all.
  */
-const remote_debugging_port = process.env.ARTISAN_EDITOR_REMOTE_DEBUGGING_PORT;
-if (remote_debugging_port !== undefined && /^\d{2,5}$/.test(remote_debugging_port)) {
-	app.commandLine.appendSwitch("remote-debugging-port", remote_debugging_port);
+const remote_debugging_port = Number(process.env.ARTISAN_EDITOR_REMOTE_DEBUGGING_PORT ?? "");
+if (
+	Number.isInteger(remote_debugging_port) &&
+	remote_debugging_port >= 1 &&
+	remote_debugging_port <= 65_535
+) {
+	app.commandLine.appendSwitch("remote-debugging-port", String(remote_debugging_port));
 	app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
 }
 

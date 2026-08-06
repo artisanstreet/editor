@@ -268,13 +268,17 @@ describe("conversation trace", () => {
 
 	it("renders failed work as an unmissable failure in the workspace", () => {
 		const work_session = ReadSource(
-			"modules/frontend/src/routes/components/conversation-work-session.sv",
+			"modules/frontend/src/routes/components/conversation-work-session.svelte",
 		);
-		const trace = ReadSource("modules/frontend/src/routes/components/conversation-trace.sv");
-		const workspace = ReadSource("modules/frontend/src/routes/components/thread-workspace.sv");
+		const trace = ReadSource(
+			"modules/frontend/src/routes/components/conversation-trace.svelte",
+		);
+		const workspace = ReadSource(
+			"modules/frontend/src/routes/components/thread-workspace.svelte",
+		);
 
 		expect(work_session).toContain("`Failed after ${FormatDuration(");
-		expect(work_session).toContain("`Cancelled after ${FormatDuration(");
+		expect(work_session).toContain("`Stopped after ${FormatDuration(");
 		expect(work_session).toContain(
 			'previous_status === "running" && (status === "failed" || status === "cancelled")',
 		);

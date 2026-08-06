@@ -10,7 +10,7 @@ const ReadSource = (path: string) => readFileSync(resolve(path), "utf8");
 
 describe("conversation link presentation", () => {
 	it("renders resolved page titles with retained favicon assets", () => {
-		const anchor = ReadSource("modules/frontend/src/lib/components/markdown/anchor.sv");
+		const anchor = ReadSource("modules/frontend/src/lib/components/markdown/anchor.svelte");
 		const links = ReadSource("modules/frontend/src/lib/styles/prose/links.css");
 
 		expect(anchor).toContain('<script lang="ts" effect>');
@@ -42,7 +42,7 @@ describe("conversation link presentation", () => {
 	});
 
 	it("resolves favicon metadata only for absolute HTTP(S) destinations", () => {
-		const anchor = ReadSource("modules/frontend/src/lib/components/markdown/anchor.sv");
+		const anchor = ReadSource("modules/frontend/src/lib/components/markdown/anchor.svelte");
 
 		expect(Option.getOrUndefined(rich_link_metadata_url("https://example.com/docs"))).toBe(
 			"https://example.com/docs",

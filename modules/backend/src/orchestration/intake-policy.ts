@@ -20,57 +20,18 @@ export class IntakePolicy extends Context.Service<
 	}
 >()("Artisan/IntakePolicy") {}
 
-const ambiguous_request = /\b(it|that|this|something|whatever)\b/i;
-const high_risk_request =
-	/\b(delete|drop\s+table|reset\s+--hard|production|deploy|publish|payment|credential|secret)\b/i;
-const material_request = /\b(migrate|database|security|permission|overwrite|remove|release)\b/i;
-
 /**
- * Conservative local policy for the Codex-only prototype. It deliberately does
- * not add a second provider integration; callers can replace this Layer with a
- * richer policy while preserving the durable assessment contract.
+ * The local policy never parks a message: keyword sniffing cannot judge the
+ * risk of prose ("remove the emulator" is a feature request, not an
+ * operation), and a wrong "question" resolution silently swallows the send.
+ * Risk triage that can actually read the request replaces this Layer while
+ * preserving the durable assessment contract.
  */
 export const IntakePolicyLive = Layer.succeed(IntakePolicy, {
-	Assess: (text) =>
-		Effect.sync(() => {
-			const normalized = text.trim();
-
-			if (/^(help|fix|implement)$/i.test(normalized)) {
-				return {
-					risk: "underspecified" as const,
-					resolution: "question" as const,
-					assumptions: [],
-					question: "What outcome, scope, and constraints should Artisan use?",
-				};
-			}
-
-			if (high_risk_request.test(normalized)) {
-				return {
-					risk: "high" as const,
-					resolution: "question" as const,
-					assumptions: [],
-					question:
-						"This request may have high-impact consequences. Please confirm the intended scope.",
-				};
-			}
-
-			if (material_request.test(normalized)) {
-				return {
-					risk: "material" as const,
-					resolution: "question" as const,
-					assumptions: [],
-					question: "Which exact scope and safeguards should Artisan apply?",
-				};
-			}
-
-			return ambiguous_request.test(normalized)
-				? {
-						risk: "low" as const,
-						resolution: "proceed" as const,
-						assumptions: [
-							"Proceeding with the current thread context for the ambiguous reference.",
-						],
-					}
-				: { risk: "low" as const, resolution: "proceed" as const, assumptions: [] };
+	Assess: () =>
+		Effect.succeed({
+			risk: "low" as const,
+			resolution: "proceed" as const,
+			assumptions: [],
 		}),
 });

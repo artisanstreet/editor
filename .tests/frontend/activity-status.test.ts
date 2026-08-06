@@ -6,10 +6,11 @@ import {
 	artisan_thinking_words,
 	conversation_activity_is_live,
 	conversation_reply_is_live,
-	conversation_work_session_is_active,
 	thinking_word_at,
 	thinking_word_for,
 	waiting_label_for,
+	work_session_run_authority,
+	work_session_settlement,
 } from "../../modules/frontend/src/lib/conversation/activity-status";
 
 const activity = (
@@ -206,13 +207,132 @@ describe("the wait before an engine answers", () => {
 	});
 });
 
-describe("durable work-session liveness", () => {
-	it("activates only the session that owns the current run", () => {
-		expect(conversation_work_session_is_active("run_old", "run_current", true)).toBe(false);
-		expect(conversation_work_session_is_active("run_current", "run_current", true)).toBe(true);
-		expect(conversation_work_session_is_active(undefined, "run_current", true)).toBe(false);
-		expect(conversation_work_session_is_active("run_current", "run_current", false)).toBe(
-			false,
-		);
+describe("when a session's header may claim a duration", () => {
+	const updated_at = "2026-07-27T10:00:05.000Z";
+
+	/**
+	 * The send gap and the live run: while the durable authority holds the run,
+	 * nothing may settle. Settling in the gap flashed "Thought for 0s" over
+	 * what is really the wait for the provider.
+	 */
+	it("keeps waiting while the authority holds the run", () => {
+		for (const run_authority of ["pending", "active"] as const) {
+			for (const provider_responded of [false, true]) {
+				expect(
+					work_session_settlement({
+						ended_at: undefined,
+						provider_responded,
+						run_authority,
+						updated_at,
+					}),
+				).toBeUndefined();
+			}
+		}
+	});
+
+	/** A run that died after responding still deserves its ordinary header. */
+	it("settles an orphaned responded session on its last change", () => {
+		expect(
+			work_session_settlement({
+				ended_at: undefined,
+				provider_responded: true,
+				run_authority: "settled",
+				updated_at,
+			}),
+		).toEqual({ ended_at: updated_at, presumed_failed: false });
+	});
+
+	/**
+	 * A run that died before its first byte, with its terminal event lost, must
+	 * not wait forever: the response never came, so the header is a failure.
+	 */
+	it("settles a run that died unanswered as a presumed failure", () => {
+		expect(
+			work_session_settlement({
+				ended_at: undefined,
+				provider_responded: false,
+				run_authority: "settled",
+				updated_at,
+			}),
+		).toEqual({ ended_at: updated_at, presumed_failed: true });
+	});
+
+	it("always honors a genuine terminal end", () => {
+		const ended_at = "2026-07-27T10:00:09.000Z";
+
+		expect(
+			work_session_settlement({
+				ended_at,
+				provider_responded: false,
+				run_authority: "active",
+				updated_at,
+			}),
+		).toEqual({ ended_at, presumed_failed: false });
+	});
+});
+
+describe("durable run authority", () => {
+	it("maps the owning work item's status onto the session", () => {
+		const owning = (
+			status: Parameters<typeof work_session_run_authority>[0]["active_run_status"],
+		) =>
+			work_session_run_authority({
+				active_run_id: "run_current",
+				active_run_status: status,
+				newest_session_run_id: "run_current",
+				session_run_id: "run_current",
+			});
+
+		expect(owning("queued")).toBe("pending");
+		expect(owning("running")).toBe("active");
+		expect(owning("waiting")).toBe("active");
+		expect(owning("interrupted")).toBe("settled");
+		expect(owning("completed")).toBe("settled");
+		expect(owning("cancelled")).toBe("settled");
+		expect(owning(undefined)).toBe("settled");
+	});
+
+	/**
+	 * The work item refreshes on its own channel and may not describe a session
+	 * this new yet — including the very first message of a thread, where no
+	 * work item exists at all. Presuming death there would flash a failure
+	 * over every freshly sent message.
+	 */
+	it("keeps the transcript's newest session pending while the work item catches up", () => {
+		expect(
+			work_session_run_authority({
+				active_run_id: "run_previous",
+				active_run_status: "completed",
+				newest_session_run_id: "run_new",
+				session_run_id: "run_new",
+			}),
+		).toBe("pending");
+		expect(
+			work_session_run_authority({
+				active_run_id: undefined,
+				active_run_status: undefined,
+				newest_session_run_id: "run_first",
+				session_run_id: "run_first",
+			}),
+		).toBe("pending");
+	});
+
+	it("settles history the work item no longer describes", () => {
+		expect(
+			work_session_run_authority({
+				active_run_id: "run_current",
+				active_run_status: "running",
+				newest_session_run_id: "run_current",
+				session_run_id: "run_old",
+			}),
+		).toBe("settled");
+		expect(
+			work_session_run_authority({
+				active_run_id: "run_current",
+				active_run_status: "running",
+				newest_session_run_id: "run_current",
+				session_run_id: undefined,
+			}),
+		).toBe("settled");
 	});
 });

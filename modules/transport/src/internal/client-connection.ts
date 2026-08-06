@@ -1,6 +1,7 @@
 import {
 	Cause,
 	Deferred,
+	Duration,
 	Effect,
 	Fiber,
 	Option,
@@ -45,6 +46,7 @@ import {
 	type SendCurrent,
 	type SendRequest,
 } from "./client-common";
+import { describe_diagnostic_cause, type ClientDiagnostics } from "./client-diagnostics";
 import type { ClientRequestCoordinator } from "./client-request-coordinator";
 import type { ClientStreamChannel } from "./client-stream-channel";
 import type { ClientSubscriptionCoordinator } from "./subscriptions/contract";
@@ -81,7 +83,8 @@ export interface ClientConnectionLifecycle {
 /** Builds client connection state without starting its reconnect supervisor. */
 export const make_client_connection_lifecycle = (
 	reconnect_delay_ms: number,
-	reconnect_attempts = 5,
+	reconnect_attempts: number,
+	diagnostics: ClientDiagnostics,
 ) =>
 	Effect.gen(function* () {
 		const connector = yield* MessagePortConnector;
@@ -100,6 +103,13 @@ export const make_client_connection_lifecycle = (
 		const ever_connected = yield* Ref.make(false);
 		const initial_retry_gate = yield* Deferred.make<void>();
 		const retry_gate = yield* Ref.make(initial_retry_gate);
+		/**
+		 * Per-attempt journal context. The supervisor runs attempts strictly one
+		 * after another, so single Refs cannot be raced by concurrent sessions.
+		 */
+		const attempt_counter = yield* Ref.make(0);
+		const attempt_started_at = yield* Ref.make("");
+		const attempt_reached_ready = yield* Ref.make(false);
 
 		const SetConnectionState = (next: ArtisanConnectionState) =>
 			SubscriptionRef.set(connection_state, next);
@@ -107,6 +117,7 @@ export const make_client_connection_lifecycle = (
 		const retry_connection = Effect.gen(function* () {
 			const current = yield* SubscriptionRef.get(connection_state);
 			if (current.phase !== "exhausted") return;
+			yield* diagnostics.Record({ kind: "supervisor.retry_released" });
 			yield* Ref.get(retry_gate).pipe(
 				Effect.flatMap((gate) => Deferred.succeed(gate, undefined)),
 			);
@@ -209,6 +220,7 @@ export const make_client_connection_lifecycle = (
 				return;
 			}
 
+			yield* diagnostics.Record({ kind: "client.disposed" });
 			yield* Deferred.succeed(current.connection_signal, undefined);
 			yield* Deferred.succeed(disposed_signal, undefined);
 			yield* Ref.get(retry_gate).pipe(
@@ -501,6 +513,21 @@ export const make_client_connection_lifecycle = (
 
 			const run_session = Effect.scoped(
 				Effect.gen(function* () {
+					const ordinal = yield* Ref.updateAndGet(attempt_counter, (count) => count + 1);
+					yield* Ref.set(attempt_started_at, yield* runtime.Now);
+					yield* Ref.set(attempt_reached_ready, false);
+					yield* diagnostics.Record({ kind: "session.attempt", ordinal });
+					/**
+					 * Connection-scoped subscription state (stream ids, expected
+					 * sequences, readiness gates) must die with the attempt no
+					 * matter how it ends. An attempt that failed mid-readiness once
+					 * left partially-started subscriptions behind, and the next
+					 * resume's resubscribe was then judged a duplicate — a
+					 * deterministic `correlation_conflict` that poisoned every
+					 * later attempt. The scope finalizer is the one teardown every
+					 * exit path shares.
+					 */
+					yield* Effect.addFinalizer(() => handlers.subscriptions.ResetConnection);
 					const ports = yield* connector.Connect.pipe(
 						Effect.mapError((cause) =>
 							client_error(
@@ -567,6 +594,13 @@ export const make_client_connection_lifecycle = (
 						sent_at: trace.sent_at,
 					};
 
+					yield* diagnostics.Record({
+						connection_id: control_ready.connection_id,
+						event_cursor_count: Object.keys(resume.event_cursors).length,
+						journal_sequence: resume.last_journal_sequence,
+						kind: "session.negotiating",
+						resume_mode: connected_before_attempt ? "resume" : "fresh",
+					});
 					yield* ports.control_port
 						.Send({
 							connection_id: control_ready.connection_id,
@@ -662,6 +696,17 @@ export const make_client_connection_lifecycle = (
 					yield* handlers.requests.Retry;
 					yield* SetConnectionState({ phase: "ready" });
 					yield* Ref.set(ever_connected, true);
+					yield* Ref.set(attempt_reached_ready, true);
+					const ready_at = yield* runtime.Now;
+					const negotiation_started_at = yield* Ref.get(attempt_started_at);
+					yield* diagnostics.Record({
+						connection_id: active.connection_id,
+						kind: "session.ready",
+						negotiation_ms: Math.max(
+							0,
+							Date.parse(ready_at) - Date.parse(negotiation_started_at),
+						),
+					});
 					const session_exit = yield* Effect.exit(Fiber.join(session_fiber));
 					const next_signal = yield* Deferred.make<void>();
 
@@ -676,7 +721,6 @@ export const make_client_connection_lifecycle = (
 							: current,
 					);
 					yield* handlers.streams.Disconnect(active.connection_id);
-					yield* handlers.subscriptions.ResetConnection;
 
 					const failure =
 						session_exit._tag === "Failure"
@@ -697,6 +741,50 @@ export const make_client_connection_lifecycle = (
 				}),
 			);
 
+			/**
+			 * Every way an attempt can die — bootstrap, negotiation, or a live
+			 * session dropping — funnels through this one journal entry, so the
+			 * history shows each ending's real code rather than only the final
+			 * error the supervisor gave up with.
+			 */
+			const observed_session = run_session.pipe(
+				Effect.tapError((error) =>
+					Effect.gen(function* () {
+						const ended_at = yield* runtime.Now;
+						const started_at = yield* Ref.get(attempt_started_at);
+						const reached_ready = yield* Ref.get(attempt_reached_ready);
+
+						yield* diagnostics.Record({
+							code: error.code,
+							detail: describe_diagnostic_cause(error.cause),
+							kind: "session.ended",
+							lifetime_ms: Math.max(0, Date.parse(ended_at) - Date.parse(started_at)),
+							message: error.message,
+							protocol_code: error.protocol_code,
+							reached_ready,
+						});
+
+						/**
+						 * A state-integrity failure means the client's durable
+						 * resume position diverged from the backend journal or the
+						 * subscription registry; resuming with the same state would
+						 * replay into the identical failure on every future
+						 * attempt, making retries — including the overlay's manual
+						 * one — useless. Dropping the resume state converts a
+						 * poisoned loop into one fresh re-bootstrap.
+						 */
+						if (error.code === "stream_gap" || error.code === "correlation_conflict") {
+							yield* handlers.subscriptions.DropResumeState;
+							yield* Ref.set(ever_connected, false);
+							yield* diagnostics.Record({
+								code: error.code,
+								kind: "session.resume_dropped",
+							});
+						}
+					}),
+				),
+			);
+
 			const supervisor = Effect.gen(function* () {
 				while (true) {
 					const current = yield* Ref.get(state);
@@ -707,15 +795,42 @@ export const make_client_connection_lifecycle = (
 
 					const retry_schedule = Schedule.exponential(
 						`${reconnect_delay_ms} millis`,
-					).pipe(Schedule.jittered, Schedule.upTo({ times: reconnect_attempts - 1 }));
+					).pipe(
+						Schedule.modifyDelay(({ duration }) =>
+							Effect.succeed(
+								Duration.min(duration, Duration.millis(reconnect_delay_ms * 16)),
+							),
+						),
+						Schedule.jittered,
+						Schedule.upTo({ times: reconnect_attempts - 1 }),
+					);
 					const session = yield* Effect.exit(
 						Effect.gen(function* () {
 							const connected = yield* Ref.get(ever_connected);
 							yield* SetConnectionState({
 								phase: connected ? "reconnecting" : "connecting",
 							});
-							return yield* run_session;
-						}).pipe(Effect.retry(retry_schedule)),
+							return yield* observed_session;
+						}).pipe(
+							/**
+							 * A session that reached ready proved the transport
+							 * works; its eventual death must not spend the
+							 * reconnect budget, or a page's tolerance for routine
+							 * backend restarts becomes a lifetime quota that any
+							 * long-lived page eventually exhausts. Converting the
+							 * death to success recycles the outer loop with a
+							 * fresh schedule, so the budget only ever counts
+							 * consecutive attempts that never became ready.
+							 */
+							Effect.catch((error) =>
+								Ref.get(attempt_reached_ready).pipe(
+									Effect.flatMap((reached_ready) =>
+										reached_ready ? Effect.void : Effect.fail(error),
+									),
+								),
+							),
+							Effect.retry(retry_schedule),
+						),
 					);
 					const after = yield* Ref.get(state);
 
@@ -724,6 +839,11 @@ export const make_client_connection_lifecycle = (
 					}
 
 					if (session._tag === "Success") {
+						/**
+						 * Pace the recycle so a backend that dies straight after
+						 * every ready cannot drive a zero-delay reconnect loop.
+						 */
+						yield* Effect.sleep(`${reconnect_delay_ms} millis`);
 						continue;
 					}
 
@@ -747,6 +867,13 @@ export const make_client_connection_lifecycle = (
 					 * renderer finish rendering.
 					 */
 					yield* handlers.requests.Park(error);
+					yield* diagnostics.Record({
+						attempts: reconnect_attempts,
+						code: error.code,
+						kind: "supervisor.exhausted",
+						message: error.message,
+						protocol_code: error.protocol_code,
+					});
 					yield* SetConnectionState({
 						attempts: reconnect_attempts,
 						error,

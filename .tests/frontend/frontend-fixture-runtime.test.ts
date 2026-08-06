@@ -75,6 +75,8 @@ describe("frontend ArtisanClient fixture runtime", () => {
 						"ConnectionChanges",
 						"ConnectionState",
 						"Cursors",
+						"DiagnosticEvents",
+						"Diagnostics",
 						"Dispose",
 						"Errors",
 						"Events",

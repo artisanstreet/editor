@@ -12,6 +12,7 @@ import {
 import { TransportRuntime } from "../transport-runtime";
 import { client_error, validate_client_options } from "./client-common";
 import { make_client_connection_lifecycle } from "./client-connection";
+import { make_client_diagnostics } from "./client-diagnostics";
 import { make_client_request_coordinator } from "./client-request-coordinator";
 import { make_client_stream_channel } from "./client-stream-channel";
 import { MakeClientApi } from "./api/context";
@@ -34,6 +35,7 @@ import {
 
 export function make_artisan_client_layer(input_options: ArtisanClientOptions = {}) {
 	const options: Required<ArtisanClientOptions> = {
+		diagnostic_capacity: input_options.diagnostic_capacity ?? 256,
 		error_capacity: input_options.error_capacity ?? 64,
 		event_capacity: input_options.event_capacity ?? 256,
 		max_pending_requests: input_options.max_pending_requests ?? 128,
@@ -62,15 +64,29 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				Queue.shutdown,
 			);
 			const disposed = yield* Ref.make(false);
+			const diagnostics = yield* make_client_diagnostics(
+				options.diagnostic_capacity,
+				runtime,
+			);
 			const connection = yield* make_client_connection_lifecycle(
 				options.reconnect_delay_ms,
 				options.reconnect_attempts,
+				diagnostics,
 			);
 
 			const publish_error = (error: ArtisanClientError) =>
 				Effect.sync(() => {
 					Queue.offerUnsafe(errors, error);
-				});
+				}).pipe(
+					Effect.andThen(
+						diagnostics.Record({
+							code: error.code,
+							kind: "error.published",
+							message: error.message,
+							protocol_code: error.protocol_code,
+						}),
+					),
+				);
 			const requests = yield* make_client_request_coordinator(
 				options.max_pending_requests,
 				connection.SendRequest,
@@ -128,6 +144,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						}
 
 						yield* Queue.end(errors);
+						yield* diagnostics.Shutdown;
 					}),
 				);
 
@@ -242,6 +259,8 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				ConnectionChanges: connection.ConnectionChanges,
 				ConnectionState: connection.ConnectionState,
 				Cursors: subscriptions.Cursors,
+				DiagnosticEvents: diagnostics.Changes,
+				Diagnostics: diagnostics.Snapshot,
 				Dispose: shutdown(Option.none()),
 				Errors: Stream.fromQueue(errors),
 				Events: subscriptions.Events,

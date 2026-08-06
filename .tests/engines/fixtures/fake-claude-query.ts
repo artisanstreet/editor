@@ -110,7 +110,15 @@ export function make_fake_claude_query(script: SessionScript): FakeClaudeQuery {
 				end();
 			});
 			queueMicrotask(() => {
-				void Promise.resolve(script(session)).catch(() => undefined);
+				void Promise.resolve(script(session)).catch((cause: unknown) => {
+					/**
+					 * A failing script must terminate the stream, or the engine
+					 * waits on a session that will never speak again and the test
+					 * times out instead of failing on its assertions.
+					 */
+					console.error("fake Claude session script failed", cause);
+					end();
+				});
 			});
 
 			async function* generate(): AsyncGenerator<SDKMessage, void> {

@@ -26,7 +26,7 @@ describe("engine availability", () => {
 	});
 
 	it("leads each engine page with the switch and hides the rest while off", () => {
-		const page = read("modules/frontend/src/routes/components/settings/engine.sv");
+		const page = read("modules/frontend/src/routes/components/settings/engine.svelte");
 
 		expect(page).toContain("const engine_enabled = $derived(");
 		expect(page).toContain("ToggleAvailability(!engine_enabled)");
@@ -40,9 +40,9 @@ describe("engine availability", () => {
 	});
 
 	it("removes a disabled engine from the selector and the usage fan-out", () => {
-		const selector = read("modules/frontend/src/routes/components/model-selector/view.sv");
-		const identity = read("modules/frontend/src/routes/components/sidebar-identity.sv");
-		const usage = read("modules/frontend/src/routes/components/sidebar-engine-usage.sv");
+		const selector = read("modules/frontend/src/routes/components/model-selector/view.svelte");
+		const identity = read("modules/frontend/src/routes/components/sidebar-identity.svelte");
+		const usage = read("modules/frontend/src/routes/components/sidebar-engine-usage.svelte");
 
 		expect(selector).toContain("!disabled_engines.has(harness.id)");
 		expect(selector).toContain("!disabled_engines.has(model.engine)");

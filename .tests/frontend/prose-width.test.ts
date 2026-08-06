@@ -31,10 +31,16 @@ describe("prose width", () => {
 		expect(tokens).toContain('[data-prose-width="loose"]');
 
 		for (const [path, expected] of [
-			["modules/frontend/src/routes/components/thread-workspace.sv", "max-w-(--prose-width)"],
-			["modules/frontend/src/routes/components/thread-composer.sv", "max-w-(--prose-width)"],
 			[
-				"modules/frontend/src/routes/components/conversation-message.sv",
+				"modules/frontend/src/routes/components/thread-workspace.svelte",
+				"max-w-(--prose-width)",
+			],
+			[
+				"modules/frontend/src/routes/components/thread-composer.svelte",
+				"max-w-(--prose-width)",
+			],
+			[
+				"modules/frontend/src/routes/components/conversation-message.svelte",
 				"max-w-(--prose-body-width)",
 			],
 		] as const) {
@@ -43,18 +49,21 @@ describe("prose width", () => {
 	});
 
 	/**
-	 * The workspace identity is left-aligned onto the prose column's own edge —
-	 * in the desktop window frame and the web card band alike — so retuning the
-	 * width in settings moves the title and the text it titles together.
+	 * The workspace identity anchors to the primary card's own left edge on both
+	 * surfaces — not the prose column's, whose title floats unexplained in a
+	 * wide window. The stored width preference still reaches the shell as the
+	 * data attribute the prose tokens read, and stays tunable from settings.
 	 */
-	it("anchors the workspace header to the prose column on both surfaces", () => {
-		const layout = ReadSource("modules/frontend/src/routes/+layout.sv");
-		const panel = ReadSource("modules/frontend/src/routes/components/sectioned-panel.sv");
-		const settings = ReadSource("modules/frontend/src/routes/components/settings/appearance.sv");
+	it("anchors the workspace header to the card edge while prose stays tunable", () => {
+		const layout = ReadSource("modules/frontend/src/routes/+layout.svelte");
+		const panel = ReadSource("modules/frontend/src/routes/components/sectioned-panel.svelte");
+		const settings = ReadSource(
+			"modules/frontend/src/routes/components/settings/appearance.svelte",
+		);
 
 		expect(layout).toContain("data-prose-width={$prose_width}");
-		expect(layout).toContain("max-w-(--prose-width)");
-		expect(panel).toContain("max-w-(--prose-width)");
+		expect(layout).toContain("the primary card's left edge");
+		expect(panel).toContain("the card's left edge");
 		expect(settings).toContain("SelectProseWidth");
 	});
 });

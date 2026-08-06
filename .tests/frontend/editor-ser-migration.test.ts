@@ -7,8 +7,8 @@ const EditorEffectPaths = [
 	"modules/frontend/src/lib/editor/codemirror-adapter.ts",
 	"modules/frontend/src/lib/editor/language.ts",
 	"modules/frontend/src/lib/editor/service.ts",
-	"modules/frontend/src/routes/components/editor-file-panel.sv",
-	"modules/frontend/src/routes/e/[workspace]/[thread]/editor-route-gate.sv",
+	"modules/frontend/src/routes/components/editor-file-panel.svelte",
+	"modules/frontend/src/routes/e/[workspace]/[thread]/editor-route-gate.svelte",
 ] as const;
 
 const ForbiddenWorkflowConstruction =
@@ -36,7 +36,7 @@ describe("editor SER migration", () => {
 
 	it("models file-tree work as reactive state instead of an unsafe event executor", async () => {
 		const source = await ReadSource(
-			"modules/frontend/src/routes/components/editor-file-panel.sv",
+			"modules/frontend/src/routes/components/editor-file-panel.svelte",
 		);
 
 		expect(source).toContain("let directory_requests = $state.raw");

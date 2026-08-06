@@ -129,13 +129,13 @@ describe("emulator production gate", () => {
 		const config = readFileSync(resolve(workspace, "modules/frontend/vite.config.ts"), "utf8");
 
 		expect(config).toContain("development_only_surfaces");
-		expect(config).toContain("/routes/debug/emulator/+page.sv");
+		expect(config).toContain("/routes/debug/emulator/+page.svelte");
 		expect(config).toContain("/lib/conversation/emulator-scripts.ts");
 	});
 
 	it("guards the page body on the development flag", () => {
 		const page = readFileSync(
-			resolve(workspace, "modules/frontend/src/routes/debug/emulator/+page.sv"),
+			resolve(workspace, "modules/frontend/src/routes/debug/emulator/+page.svelte"),
 			"utf8",
 		);
 

@@ -4,13 +4,13 @@ import { describe, expect, it } from "vitest";
 const ReadSource = (path: string) => readFile(new URL(`../../${path}`, import.meta.url), "utf8");
 
 const ComponentPaths = [
-	"modules/frontend/src/routes/components/conversation-message.sv",
-	"modules/frontend/src/routes/components/shader-dev-panel.sv",
-	"modules/frontend/src/routes/components/paper-god-rays.sv",
+	"modules/frontend/src/routes/components/conversation-message.svelte",
+	"modules/frontend/src/routes/components/shader-dev-panel.svelte",
+	"modules/frontend/src/routes/components/paper-god-rays.svelte",
 ] as const;
 
 const DropdownCallerPaths = [
-	"modules/frontend/src/routes/components/panel/project-selector.sv",
+	"modules/frontend/src/routes/components/panel/project-selector.svelte",
 ] as const;
 
 describe("frontend browser lifecycle ownership", () => {
@@ -51,8 +51,12 @@ describe("frontend browser lifecycle ownership", () => {
 	);
 
 	it("mounts the editor through SER's component scope rather than a hand-run fiber", async () => {
-		const surface = await ReadSource("modules/frontend/src/lib/components/editor/surface.sv");
-		const route = await ReadSource("modules/frontend/src/routes/components/editor-route.sv");
+		const surface = await ReadSource(
+			"modules/frontend/src/lib/components/editor/surface.svelte",
+		);
+		const route = await ReadSource(
+			"modules/frontend/src/routes/components/editor-route.svelte",
+		);
 		const hooks = await ReadSource("modules/frontend/src/hooks.client.ts");
 
 		expect(surface).toContain('<script lang="ts" effect>');
@@ -69,7 +73,7 @@ describe("frontend browser lifecycle ownership", () => {
 	});
 
 	it("keeps shell recovery in SER effects without browser Promise execution", async () => {
-		const layout = await ReadSource("modules/frontend/src/routes/+layout.sv");
+		const layout = await ReadSource("modules/frontend/src/routes/+layout.svelte");
 		const pairing = await ReadSource("modules/frontend/src/lib/runtime/pairing.ts");
 
 		expect(layout).toContain("const http_client = yield* HttpClient.HttpClient;");

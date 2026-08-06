@@ -47,7 +47,7 @@ const fixture_turns = [
 			CommandActivity("Get-Content -Raw modules/protocol/src/conversation.ts"),
 			CommandActivity("Get-Content -Raw modules/frontend/src/lib/conversation/store.ts"),
 			CommandActivity(
-				"Get-Content -Raw modules/frontend/src/routes/components/thread-workspace.sv",
+				"Get-Content -Raw modules/frontend/src/routes/components/thread-workspace.svelte",
 			),
 			SearchActivity("streaming model tool-call event lifecycle"),
 			ToolActivity("github/fetch_file", "Fetched the upstream streaming event reference"),
@@ -153,12 +153,12 @@ const changed_files = [
 	{
 		additions: 32,
 		deletions: 6,
-		path: "modules/frontend/src/routes/components/thread-workspace.sv",
+		path: "modules/frontend/src/routes/components/thread-workspace.svelte",
 	},
 	{
 		additions: 127,
 		deletions: 0,
-		path: "modules/frontend/src/routes/components/conversation-changes-card.sv",
+		path: "modules/frontend/src/routes/components/conversation-changes-card.svelte",
 	},
 	{
 		additions: 5,

@@ -44,6 +44,10 @@ export const FixtureClientQueries = {
 	Cursors: Effect.gen(function* () {
 		return fixture_artisan_client_data.cursors;
 	}),
+	DiagnosticEvents: Stream.empty,
+	Diagnostics: Effect.gen(function* () {
+		return { dropped: 0, events: [] };
+	}),
 	Dispose: Effect.gen(function* () {}),
 	Errors: Stream.empty,
 	Events: Stream.fromIterable(fixture_artisan_client_data.events),
@@ -384,6 +388,8 @@ export const FixtureClientQueries = {
 	| "ConnectionChanges"
 	| "ConnectionState"
 	| "Cursors"
+	| "DiagnosticEvents"
+	| "Diagnostics"
 	| "Dispose"
 	| "Errors"
 	| "Events"

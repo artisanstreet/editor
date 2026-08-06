@@ -66,7 +66,7 @@ describe("thread interaction commands", () => {
 			_tag: "ready",
 			command: {
 				payload: {
-					answers: { answer: ["C:/workspace"] },
+					answers: { "question-1": ["C:/workspace"] },
 					question_id: "question-1",
 					type: "intake.respond_question",
 				},

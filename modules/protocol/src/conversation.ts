@@ -1,5 +1,7 @@
 import { Effect, Schema } from "effect";
 
+import { ArtisanErrorCode } from "@artisan/catalog";
+
 import { Identifier, IsoDateTime, JournalSequence, SchemaVersion } from "./common";
 import { ImageAttachmentReference, UserMessageContentPart } from "./attachments";
 
@@ -67,6 +69,22 @@ export const ConversationSafeBodyText = ConversationBodyText.check(
 		value.length > 0 ? undefined : "Expected at least one character",
 	),
 );
+
+/**
+ * An engine failure in Artisan's custody: a stable `AE-*` code the renderer
+ * resolves against the error catalog, with the provider's own code and
+ * message riding along as evidence. The code is the durable artifact — a
+ * future docs page is keyed on it — so the renderer must tolerate codes it
+ * does not recognize and fall back to the catalog's unknown definition.
+ */
+export const ConversationErrorRef = Schema.Struct({
+	code: ArtisanErrorCode,
+	detail: Schema.optional(ConversationSafeText),
+	provider_code: Schema.optional(ConversationSafeText),
+	/** When a limit-class failure clears, so the card can say so. */
+	resets_at: Schema.optional(IsoDateTime),
+});
+export type ConversationErrorRef = typeof ConversationErrorRef.Type;
 
 /** Attributes a renderer-safe entity to durable or provider-origin evidence. */
 export const ConversationSourceRef = Schema.Struct({
@@ -253,6 +271,13 @@ export const ConversationItem = Schema.Union([
 		 * existed carry no severity, and the only honest fallback for an unknown
 		 * row is the quiet tier.
 		 */
+		/**
+		 * The failure in Artisan custody, when this event reports one. Optional
+		 * rather than required for the same reason as `severity`: rows written
+		 * before the error system existed must still decode, and they simply
+		 * render as the plain diagnostics they always were.
+		 */
+		error: Schema.optional(ConversationErrorRef),
 		severity: Schema.Literals(["error", "warning", "info"]).pipe(
 			Schema.optional,
 			Schema.withDecodingDefault(Effect.succeed("info")),

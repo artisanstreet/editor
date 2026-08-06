@@ -13,6 +13,18 @@ export const MakeEventIngress = Effect.gen(function* () {
 		})),
 	);
 
+	/**
+	 * Forgets the applied resume position. Used when the position itself has
+	 * been implicated in a session failure: resuming with the same cursors
+	 * would replay into the identical divergence on every future attempt,
+	 * while a fresh bootstrap replays from scratch and heals.
+	 */
+	const drop_cursors = Ref.update(state, (current) => ({
+		...current,
+		event_cursors: {},
+		last_journal_sequence: 0,
+	}));
+
 	const apply_event = (event: EventEnvelope) =>
 		Ref.modify<SubscriptionState, EventApplication>(state, (current) => {
 			const stream_sequence = current.event_cursors[event.stream_id] ?? 0;
@@ -133,5 +145,6 @@ export const MakeEventIngress = Effect.gen(function* () {
 		ApplyEvent: apply_event,
 		ApplyReplayComplete: apply_replay_complete,
 		Cursors: cursors,
+		DropCursors: drop_cursors,
 	};
 });

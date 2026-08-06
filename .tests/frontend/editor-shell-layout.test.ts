@@ -7,9 +7,9 @@ const Read = (path: string) => readFileSync(resolve(path), "utf8");
 
 describe("editor shell", () => {
 	it("keeps the file tree out of the command menu and in the inspector column", () => {
-		const menu = Read("modules/frontend/src/routes/components/command-menu.sv");
-		const panel = Read("modules/frontend/src/routes/components/sectioned-panel.sv");
-		const files = Read("modules/frontend/src/routes/components/editor-file-panel.sv");
+		const menu = Read("modules/frontend/src/routes/components/command-menu.svelte");
+		const panel = Read("modules/frontend/src/routes/components/sectioned-panel.svelte");
+		const files = Read("modules/frontend/src/routes/components/editor-file-panel.svelte");
 
 		/**
 		 * The surface follows the route rather than a tab strip, and the tree is
@@ -31,7 +31,7 @@ describe("editor shell", () => {
 	 * routes that own neither.
 	 */
 	it("gives the inspector column to the editor's files and to thread routes", () => {
-		const layout = Read("modules/frontend/src/routes/+layout.sv");
+		const layout = Read("modules/frontend/src/routes/+layout.svelte");
 
 		expect(layout).toContain(
 			'secondary={surface === "editor" ? editor_files : is_thread ? secondary : undefined}',
@@ -42,9 +42,9 @@ describe("editor shell", () => {
 	});
 
 	it("drives the editor session from the URL so a deep link restores it", () => {
-		const route = Read("modules/frontend/src/routes/e/[workspace]/[thread]/+page.sv");
+		const route = Read("modules/frontend/src/routes/e/[workspace]/[thread]/+page.svelte");
 		const gate = Read(
-			"modules/frontend/src/routes/e/[workspace]/[thread]/editor-route-gate.sv",
+			"modules/frontend/src/routes/e/[workspace]/[thread]/editor-route-gate.svelte",
 		);
 
 		expect(route).toContain("<EditorRouteGate {workspace_id} {thread_id} />");
@@ -64,11 +64,11 @@ describe("editor shell", () => {
 	});
 
 	it("exposes no unscoped or thread-only compatibility routes", () => {
-		const layout = Read("modules/frontend/src/routes/+layout.sv");
+		const layout = Read("modules/frontend/src/routes/+layout.svelte");
 		const identity = Read("modules/frontend/src/lib/editor/workspace-identity.ts");
 
-		expect(existsSync(resolve("modules/frontend/src/routes/editor/+page.sv"))).toBe(false);
-		expect(existsSync(resolve("modules/frontend/src/routes/threads/[id]/+page.sv"))).toBe(
+		expect(existsSync(resolve("modules/frontend/src/routes/editor/+page.svelte"))).toBe(false);
+		expect(existsSync(resolve("modules/frontend/src/routes/threads/[id]/+page.svelte"))).toBe(
 			false,
 		);
 		expect(layout).not.toContain("page.params.id");
@@ -83,7 +83,7 @@ describe("editor shell", () => {
 	 * corner message while the previously opened document stays on screen.
 	 */
 	it("replaces the surface with a stated reason when a file cannot open", () => {
-		const route = Read("modules/frontend/src/routes/components/editor-route.sv");
+		const route = Read("modules/frontend/src/routes/components/editor-route.svelte");
 
 		expect(route).toContain("open_failures");
 		expect(route).toContain("This file can&rsquo;t be displayed");

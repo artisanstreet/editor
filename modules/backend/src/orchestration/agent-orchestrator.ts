@@ -12,9 +12,11 @@ import {
 	Stream,
 } from "effect";
 
+import { artisan_error_codes } from "@artisan/catalog";
 import {
 	EngineRegistry,
 	type EngineCommand,
+	type EngineErrorRef,
 	type EngineGlobalGuidance,
 	type EngineObservation,
 	type EngineOpenInput,
@@ -160,11 +162,13 @@ const MakeEngineOpenInput = (
 
 interface StartFailure {
 	readonly diagnostic?: string;
+	/** The failure in Artisan custody, when the cause could be classified. */
+	readonly error_ref?: EngineErrorRef;
 	readonly kind: StartFailureKind;
 	readonly message: string;
 }
 
-function tagged_failure_name(cause: Cause.Cause<unknown>) {
+function tagged_failure(cause: Cause.Cause<unknown>) {
 	const failure = Cause.findErrorOption(cause);
 
 	if (Option.isNone(failure)) {
@@ -176,12 +180,32 @@ function tagged_failure_name(cause: Cause.Cause<unknown>) {
 		value === null ||
 		typeof value !== "object" ||
 		!("_tag" in value) ||
-		typeof value._tag !== "string"
+		typeof value._tag !== "string" ||
+		!/^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(value._tag)
 	) {
 		return undefined;
 	}
 
-	return /^[A-Za-z][A-Za-z0-9_.-]{0,63}$/.test(value._tag) ? value._tag : undefined;
+	/**
+	 * The engine's own message names the actual cause — a probe's stderr, an
+	 * auth reason — so the settled failure must carry it; the tag alone reads
+	 * as an internal fault and sends whoever hits it hunting the wrong layer.
+	 */
+	const message =
+		"message" in value && typeof value.message === "string"
+			? value.message.replaceAll(/\s+/gu, " ").trim().slice(0, 256)
+			: "";
+	/** An adapter that classified its own failure hands the code over verbatim. */
+	const artisan_code =
+		"artisan_code" in value && typeof value.artisan_code === "string"
+			? value.artisan_code
+			: undefined;
+
+	return {
+		artisan_code,
+		detail: message.length === 0 ? undefined : message,
+		name: value._tag,
+	};
 }
 
 function start_failure_from_cause(cause: Cause.Cause<unknown>): StartFailure {
@@ -192,15 +216,29 @@ function start_failure_from_cause(cause: Cause.Cause<unknown>): StartFailure {
 		};
 	}
 
-	const failure_name = tagged_failure_name(cause);
+	const failure = tagged_failure(cause);
 
 	return {
 		diagnostic: Cause.pretty(cause),
+		error_ref: {
+			/**
+			 * The adapter's own classification wins — it knows an auth-gated
+			 * probe from a missing binary. Without one, the tag still separates
+			 * "the engine said it is unavailable" from every other startup death.
+			 */
+			artisan_code:
+				failure?.artisan_code ??
+				(failure?.name === "EngineUnavailableError"
+					? artisan_error_codes.engine_unavailable
+					: artisan_error_codes.engine_start_failed),
+			...(failure?.detail === undefined ? {} : { detail: failure.detail }),
+			...(failure?.name === undefined ? {} : { provider_code: failure.name }),
+		},
 		kind: "engine_error",
 		message:
-			failure_name === undefined
+			failure === undefined
 				? "Engine startup failed before the native session became ready."
-				: `Engine startup failed before the native session became ready (${failure_name}).`,
+				: `Engine startup failed before the native session became ready (${failure.name}${failure.detail === undefined ? "" : `: ${failure.detail}`}).`,
 	};
 }
 
@@ -280,6 +318,9 @@ export const AgentOrchestratorLive = Layer.effect(
 					.RecordObservation({
 						_tag: "process_diagnostic",
 						artisan_run_id: work.run_id,
+						...(failure.error_ref === undefined
+							? {}
+							: { error_ref: failure.error_ref }),
 						level: "error",
 						message: failure.message,
 						observation_id: `open_diagnostic:${work.command_id}`,
@@ -502,6 +543,7 @@ export const AgentOrchestratorLive = Layer.effect(
 				if (Option.isNone(run)) {
 					yield* Scope.close(run_scope, Exit.succeed(undefined));
 					yield* MarkStartFailure(work, {
+						error_ref: { artisan_code: artisan_error_codes.engine_start_timeout },
 						kind: "timeout",
 						message: `Engine startup timed out after ${engine_open_timeout_ms / 1_000} seconds.`,
 					});
@@ -677,6 +719,43 @@ export const AgentOrchestratorLive = Layer.effect(
 				if (!live) {
 					if (work.kind === "steer") {
 						yield* repository.FallbackSteering(work.command_id, "rejected");
+
+						return;
+					}
+
+					/**
+					 * A cancel aimed at a run this process is not driving is the user
+					 * stopping a run that only the durable record still believes in —
+					 * its engine died without a terminal event. There is nothing to
+					 * deliver to, so the stop itself is the terminal: record the
+					 * cancelled outcome durably rather than dropping the command as
+					 * undeliverable and leaving the run wedged forever. Recording is
+					 * idempotent against runs that already settled — the observation
+					 * is dropped once the run left its projectable statuses.
+					 */
+					const finalized =
+						work.payload.type === "run.cancel"
+							? yield* repository
+									.RecordObservation({
+										_tag: "run_terminal",
+										artisan_run_id: work.run_id,
+										observation_id: `cancel_fallback:${work.command_id}`,
+										raw: {
+											engine_id: work.engine_id,
+											frame: "cancel_without_live_run",
+											transport: "backend",
+										},
+										sequence: 0,
+										state: "cancelled",
+									})
+									.pipe(
+										Effect.as(true),
+										Effect.catch(() => Effect.succeed(false)),
+									)
+							: false;
+
+					if (finalized) {
+						yield* repository.CompleteOutbox(work.command_id);
 					} else {
 						yield* repository.MarkOutboxUndeliverable(work.command_id);
 					}

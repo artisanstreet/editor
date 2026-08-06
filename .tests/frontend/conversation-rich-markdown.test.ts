@@ -33,8 +33,8 @@ describe("conversation rich Markdown", () => {
 			{ parse_conversation_markdown },
 			server,
 		] = await Promise.all([
-			frontend_vite.ssrLoadModule("/src/lib/components/markdown/math-expression.sv"),
-			frontend_vite.ssrLoadModule("/src/lib/components/markdown/mermaid-diagram.sv"),
+			frontend_vite.ssrLoadModule("/src/lib/components/markdown/math-expression.svelte"),
+			frontend_vite.ssrLoadModule("/src/lib/components/markdown/mermaid-diagram.svelte"),
 			frontend_vite.ssrLoadModule("/src/lib/components/markdown/parsing.ts"),
 			frontend_vite.ssrLoadModule("svelte/server"),
 		]);
@@ -78,10 +78,10 @@ describe("conversation rich Markdown", () => {
 			expect(mermaid.html).not.toContain("--surface:var(--surface-100)");
 			expect(mermaid.html).not.toContain("fonts.googleapis.com");
 		}
-		expect(ReadSource("modules/frontend/src/lib/components/markdown/content.sv")).toContain(
+		expect(ReadSource("modules/frontend/src/lib/components/markdown/content.svelte")).toContain(
 			"ProseMath: MathExpression",
 		);
-		expect(ReadSource("modules/frontend/src/lib/components/markdown/content.sv")).toContain(
+		expect(ReadSource("modules/frontend/src/lib/components/markdown/content.svelte")).toContain(
 			"ProseMermaid: MermaidDiagram",
 		);
 	});
@@ -151,12 +151,12 @@ describe("conversation rich Markdown", () => {
 	});
 
 	it("defers unstable math and Mermaid until a streaming turn completes", () => {
-		const content = ReadSource("modules/frontend/src/lib/components/markdown/content.sv");
+		const content = ReadSource("modules/frontend/src/lib/components/markdown/content.svelte");
 		const highlighting = ReadSource(
 			"modules/frontend/src/lib/components/markdown/highlighting.ts",
 		);
 		const mermaid_renderer = ReadSource(
-			"modules/frontend/src/lib/components/markdown/mermaid-renderer.sv",
+			"modules/frontend/src/lib/components/markdown/mermaid-renderer.svelte",
 		);
 
 		expect(content).toContain(

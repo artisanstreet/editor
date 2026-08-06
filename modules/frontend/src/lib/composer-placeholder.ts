@@ -24,6 +24,13 @@ export interface ComposerPlaceholderState {
 	readonly visible: boolean;
 }
 
+/** Staggers the reveal: early characters land quickly, the tail drifts in. */
+export const ComposerPlaceholderCharacterDelay = (index: number, length: number) => {
+	if (length <= 1) return 0;
+	const progress = index / (length - 1);
+	return Math.round(((1 - Math.exp(-5 * progress)) / (1 - Math.exp(-5))) * (length - 1) * 20);
+};
+
 export const PickComposerPlaceholder = (
 	previous: string | undefined,
 	random: () => number = Math.random,

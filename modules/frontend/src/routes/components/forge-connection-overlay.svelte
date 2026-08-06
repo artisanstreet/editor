@@ -1,0 +1,493 @@
+<script lang="ts" effect>
+	import { ForgeStartLaunchUrl } from "@artisan/protocol";
+	import type { TransportDiagnosticsSnapshot } from "@artisan/transport/client";
+	import PlayerPlay from "@tabler/icons-svelte/icons/player-play";
+	import Refresh from "@tabler/icons-svelte/icons/refresh";
+	import X from "@tabler/icons-svelte/icons/x";
+	import { Effect, Option } from "effect";
+
+	import { WriteClipboardText } from "$lib/browser/clipboard";
+	import { RunBrowserDom } from "$lib/browser/dom";
+	import ArtisanLogo from "$lib/components/artisan-logo.svelte";
+	import { Button } from "$lib/components/ui/button";
+	import { ArtisanErrorCode } from "$lib/errors/artisan-error-code";
+	import {
+		FormatTransportDiagnostic,
+		FormatTransportDiagnosticsDump,
+		FormatTransportEventTime,
+		TransportDiagnosticIsFailure,
+	} from "$lib/forge/diagnostics";
+	import {
+		PresentForgeGate,
+		PresentForgePairingGuidance,
+		type ForgeGateModel,
+	} from "$lib/forge/gate";
+	import { DiscoverForge, type ReachableForge } from "$lib/forge/discovery";
+
+	let {
+		model,
+		ondismiss,
+		read_diagnostics,
+		retry_connection,
+		retry_hydration,
+	}: {
+		model: ForgeGateModel;
+		ondismiss: Effect.Effect<void>;
+		read_diagnostics: Effect.Effect<TransportDiagnosticsSnapshot>;
+		retry_connection: Effect.Effect<void>;
+		retry_hydration: Effect.Effect<void>;
+	} = $props();
+
+	const presentation = $derived(PresentForgeGate(model));
+	const is_visible = $derived(model.state.phase !== "ready" && !model.dismissed);
+
+	const DismissOnEscape = (event: KeyboardEvent) =>
+		Effect.gen(function* () {
+		if (!is_visible || !presentation.dismissible || event.key !== "Escape") return;
+		yield* RunBrowserDom(() => event.preventDefault());
+		yield* ondismiss;
+		});
+
+	/**
+	 * `artisan://forge/start` is an OS-global protocol handler, so it can only
+	 * ever boot the installed Forge. And a reachable /health while the
+	 * transport fails means the server is fine but this browser holds no
+	 * session — offering "Start" there would misdiagnose a pairing problem as
+	 * an outage, so the gate switches to pairing guidance instead. A
+	 * development origin is never bootable through the handler either, so a
+	 * `development: true` health latches the start affordance off.
+	 */
+	let origin_development = $state(false);
+	let origin_reachable = $state(false);
+	let other_instances = $state<ReadonlyArray<ReachableForge>>([]);
+	let pair_command_copied = $state(false);
+	const pairing_guidance = $derived(
+		PresentForgePairingGuidance(presentation, origin_reachable),
+	);
+	const show_start = $derived(
+		presentation.show_start && !origin_reachable && !origin_development,
+	);
+	const pair_command = "ae open";
+	let pair_command_copy_failed = $state(false);
+
+	const CopyPairCommand = Effect.gen(function* () {
+		pair_command_copy_failed = false;
+		yield* WriteClipboardText(pair_command);
+		pair_command_copied = true;
+		yield* Effect.sleep("1500 millis");
+		pair_command_copied = false;
+	}).pipe(
+		Effect.catchTag("ClipboardWriteError", () =>
+			Effect.gen(function* () {
+				pair_command_copied = false;
+				pair_command_copy_failed = true;
+			}),
+		),
+	);
+
+	const ClearDiscovery = Effect.gen(function* () {
+		origin_reachable = false;
+		origin_development = false;
+		other_instances = [];
+	});
+
+	/**
+	 * The journal is read when the failure surfaces, so the list shows what the
+	 * transport did leading up to this outage rather than a live ticker. The
+	 * copy action re-reads, and captures the full journal, not the visible tail.
+	 */
+	let journal = $state<TransportDiagnosticsSnapshot>({ dropped: 0, events: [] });
+	const recent_journal = $derived(journal.events.slice(-8));
+	let journal_copied = $state(false);
+	let journal_copy_failed = $state(false);
+	const CopyTransportJournal = Effect.gen(function* () {
+		journal_copy_failed = false;
+		yield* WriteClipboardText(FormatTransportDiagnosticsDump(yield* read_diagnostics));
+		journal_copied = true;
+		yield* Effect.sleep("1500 millis");
+		journal_copied = false;
+	}).pipe(
+		Effect.catchTag("ClipboardWriteError", () =>
+			Effect.gen(function* () {
+				journal_copied = false;
+				journal_copy_failed = true;
+			}),
+		),
+	);
+	const LoadDiscovery = Effect.gen(function* () {
+		const { health, others } = yield* DiscoverForge;
+		const reachable_health = Option.getOrUndefined(health);
+		origin_reachable = reachable_health !== undefined;
+		origin_development = reachable_health?.development === true;
+		other_instances = others;
+	}).pipe(
+		Effect.catch(() =>
+			Effect.gen(function* () {
+				yield* ClearDiscovery;
+			}),
+		),
+	);
+
+	// Top-level SER work re-runs when the gate's reactive visibility changes.
+	if (is_visible && presentation.tone === "error") {
+		yield* LoadDiscovery;
+		journal = yield* read_diagnostics;
+	} else {
+		yield* ClearDiscovery;
+	}
+	let previous_focus: HTMLElement | null = null;
+	let recovery_actions = $state<HTMLDivElement | null>(null);
+	let status_element = $state<HTMLElement | null>(null);
+	let was_visible = false;
+
+	/**
+	 * Focus returns to wherever it came from whether the gate closed because
+	 * Forge arrived or because the user dismissed it, so this tracks the
+	 * overlay's own visibility rather than the connection phase.
+	 */
+	const ManageOverlayFocus = Effect.gen(function* () {
+		if (!is_visible) {
+			const can_restore_focus = yield* RunBrowserDom(
+				() => previous_focus?.isConnected === true,
+			);
+			if (was_visible && can_restore_focus) {
+				yield* RunBrowserDom(() => previous_focus?.focus({ preventScroll: true }));
+			}
+			previous_focus = null;
+			was_visible = false;
+			return;
+		}
+
+		if (!was_visible) {
+			previous_focus = yield* RunBrowserDom(() => {
+				const active_element = document.activeElement;
+				return active_element instanceof HTMLElement && active_element !== document.body
+					? active_element
+					: null;
+			});
+			was_visible = true;
+		}
+
+		const focus_target = yield* RunBrowserDom(() =>
+			presentation.tone === "error"
+				? recovery_actions?.querySelector<HTMLElement>("a, button")
+				: status_element,
+		);
+		yield* RunBrowserDom(() =>
+			(focus_target ?? status_element)?.focus({ preventScroll: true }),
+		);
+	});
+	yield* ManageOverlayFocus;
+
+	/** The quiet line that fades in when a progress phase overstays 5 seconds. */
+	const progress_detail = $derived(
+		model.state.phase === "reconnecting"
+			? "Connection dropped — getting you back…"
+			: model.state.phase === "hydrating"
+				? "Loading your workspace…"
+				: "Connecting to Artisan Forge…",
+	);
+	const failure_happened = $derived.by(() => {
+		if (presentation.tone !== "error") return "";
+		if (pairing_guidance === "required") {
+			return "Artisan Forge is running on this machine, but this browser holds no session for it.";
+		}
+		if (pairing_guidance === "possible") {
+			return "Artisan Forge is running, but this window could not open a local session. Its pairing may have expired.";
+		}
+
+		return presentation.failure.message;
+	});
+	const failure_remedy = $derived.by(() => {
+		if (presentation.tone !== "error") return "";
+		if (model.state.phase === "hydration-failed") {
+			return "This is usually temporary — retry loading. If it keeps happening, restart Artisan Forge and reconnect.";
+		}
+		if (pairing_guidance === "required") {
+			return "Pair this browser from a terminal, then retry the connection:";
+		}
+		if (pairing_guidance === "possible") {
+			return "Try pairing this window again, then retry the connection. If that does not resolve it, keep the error code below when reporting the connection failure:";
+		}
+		if (presentation.failure.code === ArtisanErrorCode.CONNECTION_UNAVAILABLE) {
+			return "Start Artisan Forge and this screen gets out of your way — launch the installed app, or run “ae open” from a terminal. If it's already running, retry the connection.";
+		}
+
+		return "Retry the connection. If the same code returns, restart Artisan Editor and Forge together so their local state and versions agree.";
+	});
+	/**
+	 * The visible code alone names four different transport failures; the raw
+	 * client and protocol codes are what actually distinguish an occurrence
+	 * when it is reported, so they ride along on the same line.
+	 */
+	const failure_code_line = $derived.by(() => {
+		if (presentation.tone !== "error") return "";
+		const diagnostics = presentation.failure.diagnostics;
+		const protocol =
+			diagnostics.protocol_code === undefined ? "" : `/${diagnostics.protocol_code}`;
+		const attempts =
+			diagnostics.attempts === undefined ? "" : ` · ${diagnostics.attempts} attempts`;
+
+		return `${presentation.failure.code} · ${diagnostics.client_code}${protocol}${attempts}`;
+	});
+</script>
+
+<svelte:window onkeydown={yield* DismissOnEscape(event)} />
+
+{#if is_visible}
+	<div
+		class="absolute inset-0 z-50 flex flex-col items-center justify-center gap-10 overflow-y-auto bg-background px-6"
+	>
+		{#if presentation.dismissible}
+			<button
+				type="button"
+				class="absolute top-4 right-4 grid size-9 place-items-center rounded-full text-muted-foreground transition-colors duration-(--duration-fast) ease-in-out hover:bg-surface-100 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none motion-reduce:transition-none dark:hover:bg-surface-900"
+				aria-label="Dismiss and browse the disconnected client"
+				onclick={yield* ondismiss}
+			>
+				<X class="size-4" aria-hidden="true" />
+			</button>
+		{/if}
+		<!-- Focused programmatically for screen readers; the ring would outline the whole scene. -->
+		<section
+			bind:this={status_element}
+			class={presentation.tone === "error"
+				? "flex w-full max-w-xl flex-col items-start gap-10 outline-none"
+				: "flex w-full max-w-xl flex-col items-center gap-10 outline-none"}
+			role={presentation.tone === "error" ? "alert" : "status"}
+			aria-busy={presentation.tone === "progress"}
+			aria-live={presentation.tone === "error" ? "assertive" : "polite"}
+			tabindex="-1"
+		>
+			{#if presentation.tone === "progress"}
+				<!--
+					The transitions.dev shimmer-text construction on the wordmark: the
+					base mark renders dimmed and constant, and an aria-hidden clone —
+					the same component, so the glyphs align exactly — clips a sweeping
+					highlight band onto the same letters, so contrast never drops.
+					Pure CSS because transition directives deadlock the async renderer.
+				-->
+				<div class="logo-progress relative text-muted-foreground select-none">
+					<ArtisanLogo />
+					<div class="banner-shimmer absolute inset-0" aria-hidden="true">
+						<ArtisanLogo />
+					</div>
+				</div>
+			{:else}
+				<div class="text-foreground select-none">
+					<ArtisanLogo />
+				</div>
+			{/if}
+
+			{#if presentation.tone === "error"}
+				<div class="w-full">
+					<p class="text-base font-medium text-destructive">
+						Artisan Editor ran into a problem and could not continue.
+					</p>
+					<div class="mt-8 flex flex-col gap-8">
+						<div>
+							<p class="font-semibold text-foreground">What happened?</p>
+							<p class="mt-1.5 text-sm leading-6 text-muted-foreground">
+								{failure_happened}
+							</p>
+						</div>
+						<div>
+							<p class="font-semibold text-foreground">What to do now</p>
+							<p class="mt-1.5 text-sm leading-6 text-muted-foreground">
+								{failure_remedy}
+							</p>
+							{#if pairing_guidance !== "none"}
+								<button
+									type="button"
+									class="mt-3 inline-flex items-center gap-2 rounded-lg bg-surface-100 px-3 py-1.5 font-mono text-xs text-foreground hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none dark:bg-surface-900"
+					onclick={yield* CopyPairCommand}
+								>
+									<span>{pair_command}</span>
+									<span class="text-muted-foreground">
+										{pair_command_copied ? "copied" : "copy"}
+									</span>
+								</button>
+								{#if pair_command_copy_failed}
+									<p class="mt-2 text-sm text-destructive" role="status">
+										Couldn't copy the command. Select it and copy manually.
+									</p>
+								{/if}
+							{/if}
+						</div>
+						<div bind:this={recovery_actions} class="flex flex-wrap gap-2">
+							{#if show_start}
+								<Button href={ForgeStartLaunchUrl}>
+									<PlayerPlay aria-hidden="true" />
+									Start Artisan Forge
+								</Button>
+							{/if}
+							{#if presentation.retry === "connection"}
+								<Button
+									variant={show_start ? "outline" : "default"}
+									onclick={yield* retry_connection}
+								>
+									<Refresh aria-hidden="true" />
+									Retry connection
+								</Button>
+							{:else if presentation.retry === "hydration"}
+								<Button onclick={yield* retry_hydration}>
+									<Refresh aria-hidden="true" />
+									Retry loading
+								</Button>
+							{/if}
+						</div>
+						<div class="border-border/60 border-t pt-4">
+							<code class="font-mono text-xs text-muted-foreground">
+								{failure_code_line}
+							</code>
+						</div>
+						{#if recent_journal.length > 0}
+							<div class="w-full">
+								<div class="flex items-baseline justify-between gap-3">
+									<p
+										class="text-xs font-medium tracking-wide text-muted-foreground uppercase"
+									>
+										Recent transport activity
+									</p>
+									<button
+										type="button"
+										class="rounded-md px-2 py-1 font-mono text-xs text-muted-foreground hover:bg-surface-100 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none dark:hover:bg-surface-900"
+										onclick={yield* CopyTransportJournal}
+									>
+										{journal_copied ? "copied" : "copy full journal"}
+									</button>
+								</div>
+								{#if journal_copy_failed}
+									<p class="mt-1 text-sm text-destructive" role="status">
+										Couldn't copy the journal to the clipboard.
+									</p>
+								{/if}
+								<ul class="mt-2 flex flex-col gap-1 font-mono text-xs">
+									{#each recent_journal as entry, entry_index (entry_index)}
+										<li
+											class={TransportDiagnosticIsFailure(entry)
+												? "text-destructive/90"
+												: "text-muted-foreground"}
+										>
+											<span class="opacity-60">
+												{FormatTransportEventTime(entry)}
+											</span>
+											{FormatTransportDiagnostic(entry)}
+										</li>
+									{/each}
+								</ul>
+							</div>
+						{/if}
+						{#if other_instances.length > 0}
+							<div class="w-full">
+								<p
+									class="text-xs font-medium tracking-wide text-muted-foreground uppercase"
+								>
+									Other Forge instances on this machine
+								</p>
+								<ul class="mt-2 flex flex-col gap-1.5">
+									{#each other_instances as instance (instance.endpoint)}
+										<li>
+											<a
+												href={instance.endpoint}
+												class="flex items-baseline justify-between gap-3 rounded-xl bg-surface-100 px-3 py-2 text-sm text-foreground hover:bg-muted focus-visible:ring-2 focus-visible:ring-ring/50 focus-visible:outline-none dark:bg-surface-900"
+											>
+												<span class="truncate font-medium">
+													{instance.endpoint}
+												</span>
+											</a>
+										</li>
+									{/each}
+								</ul>
+							</div>
+						{/if}
+					</div>
+				</div>
+			{:else}
+				<!-- Keyed so re-entering a progress phase restarts the 5s intent delay. -->
+				{#key model.state.phase}
+					<p class="late-reassurance text-sm text-muted-foreground">
+						<span class="font-medium">This is taking more time than expected…</span>
+						{progress_detail}
+					</p>
+				{/key}
+			{/if}
+		</section>
+	</div>
+{/if}
+
+<style>
+	/*
+	 * The sweeping highlight, painted only through the clone's own letterforms:
+	 * the gradient is the clone's background, clipped to its text, while the
+	 * glyph color itself stays transparent.
+	 */
+	.banner-shimmer {
+		pointer-events: none;
+		background-image: linear-gradient(
+			90deg,
+			transparent 0%,
+			transparent 40%,
+			var(--foreground) 50%,
+			transparent 60%,
+			transparent 100%
+		);
+		background-size: 400% 100%;
+		background-repeat: no-repeat;
+		-webkit-background-clip: text;
+		background-clip: text;
+		color: transparent;
+		-webkit-text-fill-color: transparent;
+		animation: t-shimmer 2000ms linear infinite;
+	}
+
+	@keyframes t-shimmer {
+		0% {
+			background-position: 100% 0;
+		}
+
+		100% {
+			background-position: 0% 0;
+		}
+	}
+
+	/*
+	 * The reassurance line holds off for 5s of intent delay, then rises in
+	 * with the texts-reveal treatment (fade + rise + blur settle).
+	 */
+	.late-reassurance {
+		opacity: 0;
+		animation: reassurance-in var(--duration-very-slow, 500ms) var(--ease-in-out, ease-in-out)
+			5s forwards;
+	}
+
+	@keyframes reassurance-in {
+		from {
+			opacity: 0;
+			transform: translateY(0.25rem);
+			filter: blur(2px);
+		}
+
+		to {
+			opacity: 1;
+			transform: translateY(0);
+			filter: blur(0);
+		}
+	}
+
+	@media (prefers-reduced-motion: reduce) {
+		/* The sweep goes; the base mark lifts to full contrast in its place. */
+		.banner-shimmer {
+			display: none;
+		}
+
+		.logo-progress {
+			color: var(--foreground);
+		}
+
+		/* The intent delay stays; only the motion goes. */
+		.late-reassurance {
+			animation: reassurance-in 0s linear 5s forwards;
+		}
+	}
+</style>

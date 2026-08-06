@@ -8,10 +8,10 @@ const Read = (path: string) => readFileSync(resolve(workspace, path), "utf8");
 
 const ClipboardBoundary = "modules/frontend/src/lib/browser/clipboard.ts";
 const Components = [
-	"modules/frontend/src/routes/components/conversation-changes-card.sv",
-	"modules/frontend/src/routes/components/conversation-turn-footer.sv",
-	"modules/frontend/src/routes/components/forge-connection-overlay.sv",
-	"modules/frontend/src/routes/debug/emulator/+page.sv",
+	"modules/frontend/src/routes/components/conversation-changes-card.svelte",
+	"modules/frontend/src/routes/components/conversation-turn-footer.svelte",
+	"modules/frontend/src/routes/components/forge-connection-overlay.svelte",
+	"modules/frontend/src/routes/debug/emulator/+page.svelte",
 ] as const;
 
 describe("browser clipboard boundary", () => {

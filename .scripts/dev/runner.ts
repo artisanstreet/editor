@@ -1173,8 +1173,12 @@ if (runner_is_entry) {
 				ARTISAN_FORGE_DEV_ORIGIN: instance.forge_origin,
 				ARTISAN_FRONTEND_DEV_PORT: String(instance.web_port),
 				ARTISAN_FRONTEND_PUBLIC_HOSTNAME: endpoints.web.hostname,
-				/** Vite sees a pipe, not a TTY; the dashboard renders the colors. */
-				FORCE_COLOR: "1",
+				/**
+				 * Vite sees a pipe, not a TTY; the dashboard renders the colors.
+				 * Without a dashboard the raw lines go to plain logs, where forced
+				 * escape sequences are only noise.
+				 */
+				...(dashboard === undefined ? {} : { FORCE_COLOR: "1" }),
 			});
 			void open_paired_browser();
 		}

@@ -101,6 +101,8 @@ export function cursors_to_record(
 /** Validates all client limits before any scoped fibers or queues are acquired. */
 export function validate_client_options(options: Required<ArtisanClientOptions>) {
 	return (
+		Number.isSafeInteger(options.diagnostic_capacity) &&
+		options.diagnostic_capacity > 0 &&
 		Number.isSafeInteger(options.error_capacity) &&
 		options.error_capacity > 0 &&
 		Number.isSafeInteger(options.event_capacity) &&

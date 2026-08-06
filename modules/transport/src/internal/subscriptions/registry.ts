@@ -344,13 +344,22 @@ export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
 
 	const start_subscription = (subscription: ProjectionSubscription) =>
 		Effect.gen(function* () {
-			const inserted = yield* Ref.modify(
+			/**
+			 * The insert and the sender read are one atomic step against the
+			 * replay's own snapshot-and-install: a subscription either lands in
+			 * the replay's snapshot (and is sent by it), or observes the
+			 * installed session sender (and sends itself). Reading them apart
+			 * would let one subscribe go out twice on a single connection.
+			 */
+			const registered = yield* Ref.modify(
 				state,
-				(current): readonly [boolean, SubscriptionState] =>
+				(
+					current,
+				): readonly [Option.Option<Option.Option<SendCurrent>>, SubscriptionState] =>
 					current.disposed
-						? [false, current]
+						? [Option.none(), current]
 						: [
-								true,
+								Option.some(current.session_send),
 								{
 									...current,
 									subscriptions: new Map(current.subscriptions).set(
@@ -361,7 +370,7 @@ export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
 							],
 			);
 
-			if (!inserted) {
+			if (Option.isNone(registered)) {
 				return yield* Effect.fail(
 					client_error(
 						"disposed",
@@ -372,7 +381,7 @@ export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
 			}
 
 			yield* Effect.addFinalizer(() => remove(subscription.envelope.subscription_id));
-			yield* send_current(subscription.envelope);
+			yield* Option.getOrElse(registered.value, () => send_current)(subscription.envelope);
 			yield* Deferred.await(subscription.started).pipe(
 				Effect.onInterrupt(() => remove(subscription.envelope.subscription_id)),
 			);
@@ -440,18 +449,34 @@ export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
 			{ group_id, type: "orchestration.graph" },
 			(parts) => ({ _tag: "orchestration.graph", ...parts }),
 		);
+	/**
+	 * Rolls every subscription back to its pre-connection shape so the next
+	 * session's resubscribe is answered against clean state. A still-pending
+	 * `started` is preserved — its subscriber blocks awaiting that exact
+	 * deferred, and only the replacement session's answer can release it —
+	 * while a completed one must be replaced so `AwaitReady` gates on the new
+	 * session's answers instead of passing through last session's.
+	 */
 	const reset_connection = Effect.gen(function* () {
 		const current = yield* Ref.get(state);
-		const starts = yield* Effect.forEach([...current.subscriptions.entries()], ([id]) =>
-			Deferred.make<void, ArtisanClientError>().pipe(
-				Effect.map((started) => [id, started] as const),
-			),
+		const starts = yield* Effect.forEach(
+			[...current.subscriptions.entries()],
+			([id, subscription]) =>
+				Deferred.isDone(subscription.started).pipe(
+					Effect.flatMap((done) =>
+						done
+							? Deferred.make<void, ArtisanClientError>()
+							: Effect.succeed(subscription.started),
+					),
+					Effect.map((started) => [id, started] as const),
+				),
 		);
 		const by_id = new Map(starts);
 
 		yield* Ref.update(state, (latest) => ({
 			...latest,
 			ignored_correlations: new Set<string>(),
+			session_send: Option.none<SendCurrent>(),
 			subscriptions: new Map(
 				[...latest.subscriptions].map(
 					([id, subscription]) =>
@@ -492,7 +517,11 @@ export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
 			state,
 			(current): readonly [ReadonlyArray<ProjectionSubscription>, SubscriptionState] => [
 				[...current.subscriptions.values()],
-				{ ...current, ignored_correlations: new Set<string>() },
+				{
+					...current,
+					ignored_correlations: new Set<string>(),
+					session_send: Option.some(send),
+				},
 			],
 		).pipe(
 			Effect.flatMap((subscriptions) =>
@@ -565,6 +594,7 @@ export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
 		AwaitReady: await_ready,
 		Cursors: ingress.Cursors,
 		Dispose: dispose,
+		DropResumeState: ingress.DropCursors,
 		Events: Stream.scoped(
 			Stream.unwrap(
 				Effect.gen(function* () {

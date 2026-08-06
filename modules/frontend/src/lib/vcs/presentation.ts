@@ -39,4 +39,3 @@ export const RepositoryMarkFor = (host: RepositoryHost | undefined): RepositoryM
 /** Names the Tailwind classes that size a host mark and keep it theme-correct. */
 export const RepositoryMarkClass = (mark: RepositoryMark, size = "size-4") =>
 	mark.monochrome ? `${size} shrink-0 dark:invert` : `${size} shrink-0`;
-

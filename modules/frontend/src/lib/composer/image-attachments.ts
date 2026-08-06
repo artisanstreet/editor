@@ -1,3 +1,5 @@
+import type { Effect } from "effect";
+
 import {
 	MaximumImageAttachmentBytes,
 	MaximumImageAttachmentCount,
@@ -52,6 +54,11 @@ export interface ComposerSubmission {
 	readonly attachments: ReadonlyArray<ComposerImageAttachmentPart>;
 	readonly text: string;
 }
+
+/** How a composed submission leaves the composer, whatever receives it. */
+export type ComposerSubmissionHandler = (
+	submission: ComposerSubmission,
+) => Effect.Effect<unknown, { readonly message: string }>;
 
 export interface ImageAttachmentCandidate {
 	readonly name: string;

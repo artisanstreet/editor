@@ -4,7 +4,7 @@ import { extname, join, relative, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const frontend_source = resolve("modules/frontend/src");
-const source_extensions = new Set([".js", ".mjs", ".sv", ".svelte", ".ts"]);
+const source_extensions = new Set([".js", ".mjs", ".svelte", ".svelte", ".ts"]);
 const forbidden_specifiers = [
 	"@artisan/backend",
 	"@artisan/engines",

@@ -64,12 +64,13 @@ export interface TransportTestHarness {
 	readonly erase_thread: (thread_id: string) => Effect.Effect<void>;
 	readonly protocol_snapshot: () => FakeProtocolSnapshot;
 	readonly server: typeof MessagePortTransportServer.Service;
+	readonly wipe_journal: Effect.Effect<void>;
 }
 
 /** Owns the real MessageChannel stack around a supplied protocol server. */
 export type ProtocolTransportTestHarness = Omit<
 	TransportTestHarness,
-	"erase_thread" | "protocol_snapshot"
+	"erase_thread" | "protocol_snapshot" | "wipe_journal"
 >;
 
 function close_native_session(session: NativeSession) {
@@ -283,6 +284,7 @@ export async function make_transport_test_harness(
 		...harness,
 		erase_thread: fake_protocol.EraseThread,
 		protocol_snapshot: fake_protocol.snapshot,
+		wipe_journal: fake_protocol.WipeJournal,
 	};
 }
 

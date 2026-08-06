@@ -42,8 +42,14 @@ export const ContextForDefaults = (
 	const context = model.definition.capabilities.context_window;
 	if (context === undefined) return undefined;
 	const saved = defaults.models.find((entry) => entry.model_id === model.id)?.context_window;
+	/**
+	 * No saved suffix means the harness resolves the bare model id, which is
+	 * the capability's default option — not the suffix-less one.
+	 */
 	return (
-		context.options.find((option) => option.native_suffix === (saved ?? "")) ??
+		(saved === undefined
+			? undefined
+			: context.options.find((option) => option.native_suffix === saved)) ??
 		context.options.find((option) => option.id === context.default) ??
 		context.options[0]
 	);

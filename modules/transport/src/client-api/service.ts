@@ -144,6 +144,8 @@ import type {
 	ThreadListUpdate,
 	ThreadSessionUpdate,
 	ThreadTranscriptUpdate,
+	TransportDiagnosticEvent,
+	TransportDiagnosticsSnapshot,
 	WorkspaceConflictListUpdate,
 } from "./contract";
 import type {
@@ -167,6 +169,10 @@ export class ArtisanClient extends Context.Service<
 		readonly Cursors: Effect.Effect<ArtisanClientCursors>;
 		readonly ConnectionChanges: Stream.Stream<ArtisanConnectionState>;
 		readonly ConnectionState: Effect.Effect<ArtisanConnectionState>;
+		/** The bounded journal of everything the transport has done so far. */
+		readonly Diagnostics: Effect.Effect<TransportDiagnosticsSnapshot>;
+		/** Live feed of journal entries as they are recorded. */
+		readonly DiagnosticEvents: Stream.Stream<TransportDiagnosticEvent>;
 		readonly Dispose: Effect.Effect<void>;
 		readonly Errors: Stream.Stream<ArtisanClientError>;
 		readonly Events: Stream.Stream<EventEnvelope, ArtisanClientError>;

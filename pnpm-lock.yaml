@@ -6,7 +6,6 @@ settings:
 
 patchedDependencies:
   pe-library@2.0.1: b049779d946037c1b4152f85f84e4ccf48ebbf848c4540871d3cfbead73a2b15
-  svelte-effect-runtime@4.2.1: 5445a423f1f8160d29eb6eaba8468f828f3ede4eef25ad6345213f2b1253f0bb
 
 importers:
 
@@ -231,6 +230,9 @@ importers:
       '@anthropic-ai/claude-agent-sdk':
         specifier: 0.3.222
         version: 0.3.222(@anthropic-ai/sdk@0.115.0(zod@4.4.3))(@modelcontextprotocol/sdk@1.30.0(zod@4.4.3))(zod@4.4.3)
+      '@artisan/catalog':
+        specifier: workspace:*
+        version: link:../catalog
       '@effect/platform-node-shared':
         specifier: 4.0.0-beta.97
         version: 4.0.0-beta.97(effect@4.0.0-beta.97)
@@ -386,8 +388,8 @@ importers:
         specifier: 4.3.1
         version: 4.3.1
       svelte-effect-runtime:
-        specifier: 4.2.1
-        version: 4.2.1(patch_hash=5445a423f1f8160d29eb6eaba8468f828f3ede4eef25ad6345213f2b1253f0bb)(@sveltejs/kit@2.69.2(@sveltejs/vite-plugin-svelte@7.2.0(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))(svelte@5.56.4)(typescript@6.0.3)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))(@sveltejs/vite-plugin-svelte@7.2.0(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))(effect@4.0.0-beta.97)(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0))
+        specifier: 4.2.3
+        version: 4.2.3(@sveltejs/kit@2.69.2(@sveltejs/vite-plugin-svelte@7.2.0(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))(svelte@5.56.4)(typescript@6.0.3)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))(@sveltejs/vite-plugin-svelte@7.2.0(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))(effect@4.0.0-beta.97)(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0))
       svelte-sonner:
         specifier: 1.1.1
         version: 1.1.1(svelte@5.56.4)
@@ -435,9 +437,6 @@ importers:
         specifier: 1.0.1
         version: 1.0.1(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0))
       svelte-plugin-composer:
-        specifier: 1.0.1
-        version: 1.0.1(@sveltejs/kit@2.69.2(@sveltejs/vite-plugin-svelte@7.2.0(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))(svelte@5.56.4)(typescript@6.0.3)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0))
-      svelte-sv-extension:
         specifier: 1.0.1
         version: 1.0.1(@sveltejs/kit@2.69.2(@sveltejs/vite-plugin-svelte@7.2.0(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))(svelte@5.56.4)(typescript@6.0.3)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0))
       tailwind-merge:
@@ -3777,8 +3776,8 @@ packages:
       svelte: ^5.0.0
       vite: ^7.0.0 || ^8.0.0
 
-  svelte-effect-runtime@4.2.1:
-    resolution: {integrity: sha512-rbmHeU6PGEKTsL0Sf3fj0DXT4SdpVqTG57fZrz5tdDOmBlU8Op2fx08ShQ9s+xE/bFbKruyiLFU0nsR/Ykxusg==}
+  svelte-effect-runtime@4.2.3:
+    resolution: {integrity: sha512-myZkQmwRwgrQV9EohqfWloet03TJQsJOPpLFduBBamrYB/N0tQfZj6xa0K2tFQuZFdHTIOG+85frShoe1lGsKw==}
     engines: {node: ^22.12.0 || >=24.0.0}
     peerDependencies:
       '@sveltejs/kit': ^2.69.0 || ^3.0.0-next.0
@@ -3806,15 +3805,6 @@ packages:
     resolution: {integrity: sha512-5cd3p7wa4cq0NsqslMwdlPb7x1JglEZ/GKrLePWNr5bCxR1nagAVrY01FRFrXfUGs41miLt3C327+8XJo5BzZw==}
     peerDependencies:
       svelte: ^5.0.0
-
-  svelte-sv-extension@1.0.1:
-    resolution: {integrity: sha512-f1vzXi6/Wkl49L85lF1tlqmIQIJ5ov22ROSVIICB4Wd6kczrVB5DIxRnOHkdFeQ4b9yYO3VX5YewqqgM2lEPQQ==}
-    engines: {node: ^22.12.0 || >=24.0.0}
-    hasBin: true
-    peerDependencies:
-      '@sveltejs/kit': ^2.0.0 || ^3.0.0-next.0
-      svelte: ^5.0.0
-      vite: ^8.0.0
 
   svelte-toolbelt@0.10.6:
     resolution: {integrity: sha512-YWuX+RE+CnWYx09yseAe4ZVMM7e7GRFZM6OYWpBKOb++s+SQ8RBIMMe+Bs/CznBMc0QPLjr+vDBxTAkozXsFXQ==}
@@ -7291,7 +7281,7 @@ snapshots:
       typescript: 6.0.3
       vite: 8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)
 
-  svelte-effect-runtime@4.2.1(patch_hash=5445a423f1f8160d29eb6eaba8468f828f3ede4eef25ad6345213f2b1253f0bb)(@sveltejs/kit@2.69.2(@sveltejs/vite-plugin-svelte@7.2.0(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))(svelte@5.56.4)(typescript@6.0.3)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))(@sveltejs/vite-plugin-svelte@7.2.0(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))(effect@4.0.0-beta.97)(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)):
+  svelte-effect-runtime@4.2.3(@sveltejs/kit@2.69.2(@sveltejs/vite-plugin-svelte@7.2.0(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))(svelte@5.56.4)(typescript@6.0.3)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))(@sveltejs/vite-plugin-svelte@7.2.0(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))(effect@4.0.0-beta.97)(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)):
     dependencies:
       '@sveltejs/kit': 2.69.2(@sveltejs/vite-plugin-svelte@7.2.0(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))(svelte@5.56.4)(typescript@6.0.3)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0))
       '@sveltejs/vite-plugin-svelte': 7.2.0(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0))
@@ -7318,13 +7308,6 @@ snapshots:
     dependencies:
       runed: 0.28.0(svelte@5.56.4)
       svelte: 5.56.4
-
-  svelte-sv-extension@1.0.1(@sveltejs/kit@2.69.2(@sveltejs/vite-plugin-svelte@7.2.0(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))(svelte@5.56.4)(typescript@6.0.3)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)):
-    dependencies:
-      '@sveltejs/kit': 2.69.2(@sveltejs/vite-plugin-svelte@7.2.0(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))(svelte@5.56.4)(typescript@6.0.3)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0))
-      jsonc-parser: 3.3.1
-      svelte: 5.56.4
-      vite: 8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)
 
   svelte-toolbelt@0.10.6(@sveltejs/kit@2.69.2(@sveltejs/vite-plugin-svelte@7.2.0(svelte@5.56.4)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))(svelte@5.56.4)(typescript@6.0.3)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))(svelte@5.56.4):
     dependencies:

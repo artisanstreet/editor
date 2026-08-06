@@ -35,7 +35,7 @@ describe("conversation code-fence info strings", () => {
 	});
 
 	it("maps highlighted pre nodes into the Barekey code-snippet presentation", () => {
-		const content = ReadSource("modules/frontend/src/lib/components/markdown/content.sv");
+		const content = ReadSource("modules/frontend/src/lib/components/markdown/content.svelte");
 		const styles = ReadSource(
 			"modules/frontend/src/lib/styles/markdown/components/code-snippet.css",
 		);

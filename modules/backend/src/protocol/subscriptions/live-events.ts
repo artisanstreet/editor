@@ -34,23 +34,27 @@ export const MakeLiveEventDelivery = Effect.gen(function* () {
 			);
 			let thread_patch = DirectThreadListPatch(event);
 
-			if (has_thread_list && event.payload.type === "thread.created") {
-				const thread = yield* thread_read_model.Lookup(event.thread_id);
-				thread_patch = Option.match(thread, {
-					onNone: () => undefined,
-					onSome: (item) => ({ _tag: "Upsert" as const, thread: item }),
-				});
-			}
-
+			/**
+			 * Every upsert is re-read from the thread read model rather than
+			 * trusted from the event. Emitters build their embedded items without
+			 * the coordinator join, so a rename or affinity event would otherwise
+			 * strip the engine the list already showed; the read model is the one
+			 * place that joins the launch policy in. The policy event is a trigger
+			 * of its own because applying it is what first creates the coordinator
+			 * — the moment a new thread's engine becomes knowable at all.
+			 */
 			if (
 				has_thread_list &&
-				!thread_patch &&
-				thread_activity_kind_from_event(event.payload) !== undefined
+				thread_patch?._tag !== "Remove" &&
+				(thread_patch !== undefined ||
+					event.payload.type === "thread.session_policy.updated" ||
+					thread_activity_kind_from_event(event.payload) !== undefined)
 			) {
+				const embedded = thread_patch;
 				const thread = yield* thread_read_model.Lookup(event.thread_id);
 
 				thread_patch = Option.match(thread, {
-					onNone: () => undefined,
+					onNone: () => embedded,
 					onSome: (item) => ({ _tag: "Upsert" as const, thread: item }),
 				});
 			}

@@ -19,9 +19,9 @@ describe("editor language selection", () => {
 		expect(EditorLanguageForPath("pnpm-workspace.yaml")).toBe("yaml");
 	});
 
-	/** Svelte files are HTML-shaped, and this repo writes them with the `.sv` extension. */
+	/** Svelte files are HTML-shaped, and this repo writes them with the `.svelte` extension. */
 	it("maps both Svelte extensions onto the HTML grammar", () => {
-		expect(EditorLanguageForPath("routes/+page.sv")).toBe("html");
+		expect(EditorLanguageForPath("routes/+page.svelte")).toBe("html");
 		expect(EditorLanguageForPath("routes/+page.svelte")).toBe("html");
 	});
 

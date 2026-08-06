@@ -5,6 +5,7 @@ import { SonnerBannerPresenterLive } from "../banner/sonner-presenter";
 import { RouteNavigationLive } from "../browser/route-navigation";
 import { BrowserCodeMirrorAdapter } from "../editor/codemirror-adapter";
 import { MakeEditorLayer } from "../editor/service";
+import { ComposerDraftStoreLive } from "../composer/draft-store";
 import { RunUsageControllerLive } from "../context-usage/run-usage-controller";
 import { ImageInspectionStoreLive } from "../images/inspection-store";
 import { DraftThreadControllerLive } from "../root/draft-thread";
@@ -13,6 +14,7 @@ import { FrontendRuntimeLive } from "./frontend-runtime";
 
 /** Controllers consume the one production client supplied by the base runtime. */
 const FrontendControllersLive = Layer.mergeAll(
+	ComposerDraftStoreLive,
 	DraftThreadControllerLive,
 	ImageInspectionStoreLive,
 	RunUsageControllerLive,

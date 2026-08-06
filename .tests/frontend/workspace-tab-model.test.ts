@@ -40,9 +40,9 @@ const FileB: WorkspaceFileReference = {
 
 const FileC: WorkspaceFileReference = {
 	id: "c",
-	name: "gamma.sv",
+	name: "gamma.svelte",
 	language: "Svelte",
-	path: "modules/gamma.sv",
+	path: "modules/gamma.svelte",
 };
 
 const FileD: WorkspaceFileReference = {

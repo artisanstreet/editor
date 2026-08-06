@@ -119,11 +119,13 @@ export const make_websocket_client_runtime_layer = (
 	create_socket?: (url: string) => BrowserWebSocket,
 ) =>
 	/**
-	 * Fail fast on an unreachable Forge: three quick attempts, then surface the
-	 * gate's recovery controls. A loopback refusal is immediate, so waiting out
-	 * a long exponential ladder only delays the Start/Retry affordances.
+	 * The budget counts only consecutive attempts that never reached ready, so
+	 * it can afford to outlast a routine Forge restart: eight attempts on a
+	 * capped exponential ladder cover roughly fifteen seconds of outage before
+	 * the gate's recovery controls surface. A loopback refusal is immediate,
+	 * so a never-reachable Forge still fails fast enough to matter.
 	 */
-	make_artisan_client_layer({ reconnect_attempts: 3, reconnect_delay_ms: 250 }).pipe(
+	make_artisan_client_layer({ reconnect_attempts: 8, reconnect_delay_ms: 250 }).pipe(
 		Layer.provideMerge(
 			target._tag === "websocket"
 				? make_websocket_connector_runtime_layer(target.url, create_socket)

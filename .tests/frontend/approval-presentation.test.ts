@@ -114,7 +114,7 @@ describe("approval presentation", () => {
 
 	it("keeps the opaque response handle out of DOM identity and gates duplicate decisions", () => {
 		const source = readFileSync(
-			resolve("modules/frontend/src/routes/components/conversation-approval.sv"),
+			resolve("modules/frontend/src/routes/components/conversation-approval.svelte"),
 			"utf8",
 		);
 

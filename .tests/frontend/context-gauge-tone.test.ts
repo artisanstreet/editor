@@ -128,7 +128,7 @@ describe("auto-compaction point", () => {
 
 describe("context gauge rendering", () => {
 	it("carries a semantic tone of its own rather than the trigger's currentColor", () => {
-		const ring = read("modules/frontend/src/routes/components/context-usage-ring.sv");
+		const ring = read("modules/frontend/src/routes/components/context-usage-ring.svelte");
 		const selector_css = read("modules/frontend/src/routes/components/model-selector.css");
 
 		expect(ring).toContain("--gauge-warn");
@@ -150,8 +150,10 @@ describe("context gauge rendering", () => {
 	 * reached. The caret opt-out goes with it: this primitive draws none.
 	 */
 	it("wears the same glass as the account menu on a surface that can be entered", () => {
-		const gauge = read("modules/frontend/src/routes/components/context-usage-gauge.sv");
-		const tooltip = read("modules/frontend/src/lib/components/ui/tooltip/tooltip-content.sv");
+		const gauge = read("modules/frontend/src/routes/components/context-usage-gauge.svelte");
+		const tooltip = read(
+			"modules/frontend/src/lib/components/ui/tooltip/tooltip-content.svelte",
+		);
 
 		expect(gauge).toContain("<ShaderGlassSurface");
 		expect(gauge).toContain("LinkPreview.Content");
@@ -166,9 +168,9 @@ describe("context gauge rendering", () => {
 	});
 
 	it("names the model on the card and claims no breakdown the wire never sent", () => {
-		const details = read("modules/frontend/src/routes/components/context-usage-details.sv");
-		const controls = read("modules/frontend/src/routes/components/composer/controls.sv");
-		const selector = read("modules/frontend/src/routes/components/model-selector/view.sv");
+		const details = read("modules/frontend/src/routes/components/context-usage-details.svelte");
+		const controls = read("modules/frontend/src/routes/components/composer/controls.svelte");
+		const selector = read("modules/frontend/src/routes/components/model-selector/view.svelte");
 
 		expect(details).toContain(">Context Window<");
 		expect(details).toContain("The context window for");

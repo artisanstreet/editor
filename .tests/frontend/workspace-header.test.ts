@@ -29,9 +29,9 @@ describe("workspace header", () => {
 	 * the bundled desktop shell, and as the primary card's top band on the web.
 	 */
 	it("mounts in the desktop window frame and in the web content card, never both", () => {
-		const layout = ReadSource("modules/frontend/src/routes/+layout.sv");
-		const panel = ReadSource("modules/frontend/src/routes/components/sectioned-panel.sv");
-		const header = ReadSource("modules/frontend/src/routes/components/workspace-header.sv");
+		const layout = ReadSource("modules/frontend/src/routes/+layout.svelte");
+		const panel = ReadSource("modules/frontend/src/routes/components/sectioned-panel.svelte");
+		const header = ReadSource("modules/frontend/src/routes/components/workspace-header.svelte");
 
 		expect(layout).toContain("-webkit-app-region: drag;");
 		expect(layout).toContain("{@render workspace_header()}");

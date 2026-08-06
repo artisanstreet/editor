@@ -9,6 +9,7 @@ import {
 	ResolveThreadRoute,
 	ThreadRouteId,
 	ThreadRouteHasWorkspace,
+	ThreadRouteOwnsTarget,
 	ThreadRoutePath,
 } from "../../modules/frontend/src/lib/root/thread-navigation";
 
@@ -149,5 +150,48 @@ describe("root thread navigation", () => {
 		const now = Date.parse("2026-07-25T12:00:00.000Z");
 		expect(FormatRecentThreadTime("2026-07-25T11:58:00.000Z", now)).toBe("2 min ago");
 		expect(FormatRecentThreadTime("2026-07-24T12:00:00.000Z", now)).toBe("Yesterday");
+	});
+});
+
+describe("thread route ownership", () => {
+	const conversation_owner = {
+		route_id: "/t/[workspace]/[thread]",
+		thread_route_id: "111",
+	};
+
+	it("owns the target when surface and thread both match", () => {
+		expect(
+			ThreadRouteOwnsTarget(conversation_owner, {
+				route_id: "/t/[workspace]/[thread]",
+				thread_param: "111",
+			}),
+		).toBe(true);
+	});
+
+	it("rejects another thread on the same surface", () => {
+		expect(
+			ThreadRouteOwnsTarget(conversation_owner, {
+				route_id: "/t/[workspace]/[thread]",
+				thread_param: "222",
+			}),
+		).toBe(false);
+	});
+
+	it("rejects the other surface of the same thread", () => {
+		expect(
+			ThreadRouteOwnsTarget(conversation_owner, {
+				route_id: "/e/[workspace]/[thread]",
+				thread_param: "111",
+			}),
+		).toBe(false);
+	});
+
+	it("rejects a navigation heading to a route without a thread", () => {
+		expect(
+			ThreadRouteOwnsTarget(conversation_owner, {
+				route_id: "/settings",
+				thread_param: undefined,
+			}),
+		).toBe(false);
 	});
 });

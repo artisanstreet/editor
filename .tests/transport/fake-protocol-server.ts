@@ -88,6 +88,12 @@ export interface FakeProtocolOptions {
 	readonly duplicate_query_result?: boolean;
 	readonly heartbeat_after_welcome?: boolean;
 	readonly query_delay_ms?: number;
+	/**
+	 * Delays `subscription.started` per subscription type, so a test can hold a
+	 * connection in its readiness window while other subscriptions have
+	 * already started — the exact shape of a mid-readiness death.
+	 */
+	readonly subscription_started_delay_ms?: Readonly<Record<string, number>>;
 }
 
 /** Exposes immutable observations from the durable fake protocol server. */
@@ -126,6 +132,11 @@ export interface FakeProtocolHarness {
 	readonly EraseThread: (thread_id: string) => Effect.Effect<void>;
 	readonly layer: Layer.Layer<ProtocolServer>;
 	readonly snapshot: () => FakeProtocolSnapshot;
+	/**
+	 * Discards the durable journal, simulating a backend whose history a
+	 * resuming client is now ahead of — the poisoned-resume scenario.
+	 */
+	readonly WipeJournal: Effect.Effect<void>;
 }
 
 function ordered_cursors(events: ReadonlyArray<EventEnvelope>): ReadonlyArray<StreamCursor> {
@@ -1310,6 +1321,25 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 
 				active_subscriptions += 1;
 
+				/**
+				 * A configured delay detaches the answer so the connection keeps
+				 * serving other envelopes while this subscription's start is
+				 * outstanding. A killed connection shuts its outbound queue, so
+				 * a late answer dies quietly instead of leaking.
+				 */
+				const answer = (envelopes: ReadonlyArray<OutboundControlEnvelope>) => {
+					const delay = options.subscription_started_delay_ms?.[subscribe.payload.type];
+					const deliver = Effect.forEach(envelopes, enqueue, { discard: true });
+
+					return delay === undefined
+						? deliver
+						: Effect.sleep(`${delay} millis`).pipe(
+								Effect.andThen(deliver),
+								Effect.forkDetach,
+								Effect.asVoid,
+							);
+				};
+
 				if (subscribe.payload.type === "orchestration.graph") {
 					const graph = get_graph(subscribe.payload.group_id);
 					const stream_id = `projection:orchestration.graph:${subscribe.payload.group_id}:${subscribe.subscription_id}`;
@@ -1320,22 +1350,24 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 						sequence: 0,
 						stream_id,
 					});
-					yield* enqueue({
-						...backend_trace(),
-						correlation_id: subscribe.message_id,
-						kind: "subscription.started",
-						payload: { stream_id },
-						subscription_id: subscribe.subscription_id,
-					});
-					yield* enqueue({
-						...backend_trace(),
-						journal_sequence: graph.journal_sequence,
-						kind: "orchestration.graph.snapshot",
-						payload: { graph },
-						sequence: 0,
-						stream_id,
-						subscription_id: subscribe.subscription_id,
-					});
+					yield* answer([
+						{
+							...backend_trace(),
+							correlation_id: subscribe.message_id,
+							kind: "subscription.started",
+							payload: { stream_id },
+							subscription_id: subscribe.subscription_id,
+						},
+						{
+							...backend_trace(),
+							journal_sequence: graph.journal_sequence,
+							kind: "orchestration.graph.snapshot",
+							payload: { graph },
+							sequence: 0,
+							stream_id,
+							subscription_id: subscribe.subscription_id,
+						},
+					]);
 
 					return;
 				}
@@ -1347,22 +1379,25 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 					sequence: 0,
 					stream_id,
 				});
-				yield* enqueue({
-					...backend_trace(),
-					correlation_id: subscribe.message_id,
-					kind: "subscription.started",
-					payload: { stream_id },
-					subscription_id: subscribe.subscription_id,
-				});
-				yield* enqueue({
-					...backend_trace(),
-					journal_sequence: events.at(-1)?.journal_sequence ?? baseline_journal_sequence,
-					kind: "thread.list.snapshot",
-					payload: { threads: [...threads.values()] },
-					sequence: 0,
-					stream_id,
-					subscription_id: subscribe.subscription_id,
-				});
+				yield* answer([
+					{
+						...backend_trace(),
+						correlation_id: subscribe.message_id,
+						kind: "subscription.started",
+						payload: { stream_id },
+						subscription_id: subscribe.subscription_id,
+					},
+					{
+						...backend_trace(),
+						journal_sequence:
+							events.at(-1)?.journal_sequence ?? baseline_journal_sequence,
+						kind: "thread.list.snapshot",
+						payload: { threads: [...threads.values()] },
+						sequence: 0,
+						stream_id,
+						subscription_id: subscribe.subscription_id,
+					},
+				]);
 			});
 
 		const handle = (input: InboundControlEnvelope) =>
@@ -1626,6 +1661,9 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 				{ discard: true },
 			);
 		});
+	const WipeJournal = Effect.sync(() => {
+		events.length = 0;
+	});
 	const snapshot = (): FakeProtocolSnapshot => ({
 		acknowledgements: [...acknowledgements],
 		active_connections,
@@ -1663,5 +1701,5 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 		subscriptions: [...subscription_attempts],
 	});
 
-	return { EraseThread, layer, snapshot };
+	return { EraseThread, layer, snapshot, WipeJournal };
 }

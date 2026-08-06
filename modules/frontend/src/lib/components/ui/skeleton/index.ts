@@ -1,4 +1,4 @@
-import Root from "./skeleton.sv";
+import Root from "./skeleton.svelte";
 
 export {
 	Root,

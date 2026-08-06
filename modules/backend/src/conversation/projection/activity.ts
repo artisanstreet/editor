@@ -187,7 +187,15 @@ export const ApplyActivityObservation = (
 						observation.observation_id,
 					),
 					type: "activity",
-					kind: observation._tag,
+					/**
+					 * A search names where it looked: the bare kind reads as a web
+					 * search downstream, so a workspace-scoped one must say so or a
+					 * grep chain counts itself as web searches.
+					 */
+					kind:
+						observation._tag === "search" && observation.scope === "workspace"
+							? "workspace_search"
+							: observation._tag,
 					label:
 						observation._tag === "tool"
 							? text(observation.tool_name) || "Tool"
@@ -216,6 +224,19 @@ export const ApplyActivityObservation = (
 			if (observation._tag === "native_action" && observation.diagnostic === true) {
 				return Effect.void;
 			}
+			/**
+			 * A classified failure travels in Artisan custody: the adapter minted
+			 * an `AE-*` code at the boundary, and the item carries it so the
+			 * renderer resolves identity from the error catalog rather than from
+			 * whatever prose the provider produced.
+			 */
+			const error_ref =
+				observation._tag === "native_action" ||
+				observation._tag === "process_diagnostic"
+					? observation.error_ref
+					: undefined;
+			const error_detail = optional_text(error_ref?.detail);
+			const error_provider_code = optional_text(error_ref?.provider_code);
 			return UpsertItem(
 				transaction,
 				input.thread_id,
@@ -228,15 +249,32 @@ export const ApplyActivityObservation = (
 						observation.observation_id,
 					),
 					type: "native_event",
+					...(error_ref === undefined
+						? {}
+						: {
+								error: {
+									code: error_ref.artisan_code,
+									...(error_detail === undefined ? {} : { detail: error_detail }),
+									...(error_provider_code === undefined
+										? {}
+										: { provider_code: error_provider_code }),
+									...(error_ref.resets_at === undefined
+										? {}
+										: { resets_at: error_ref.resets_at }),
+								},
+							}),
 					/**
 					 * Diagnostics keep the level the engine reported; usage reports and
-					 * native actions are quiet provenance, never something to raise.
+					 * native actions are quiet provenance — unless the action carries a
+					 * classified failure, which is exactly the thing a reader must see.
 					 */
 					severity:
 						observation._tag === "protocol_diagnostic" ||
 						observation._tag === "process_diagnostic"
 							? observation.level
-							: "info",
+							: error_ref === undefined
+								? "info"
+								: "error",
 					summary:
 						observation._tag === "native_action"
 							? (optional_text(observation.detail) ??

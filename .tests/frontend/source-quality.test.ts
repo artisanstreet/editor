@@ -6,9 +6,9 @@ import { describe, expect, it } from "vitest";
 const selector_root = resolve("modules/frontend/src/routes/components");
 const selector_directory = resolve(selector_root, "model-selector");
 const selector_sources = [
-	resolve(selector_root, "model-selector", "view.sv"),
+	resolve(selector_root, "model-selector", "view.svelte"),
 	...readdirSync(selector_directory)
-		.filter((name) => name.endsWith(".sv") || name.endsWith(".ts"))
+		.filter((name) => name.endsWith(".svelte") || name.endsWith(".ts"))
 		.map((name) => resolve(selector_directory, name)),
 	resolve("modules/frontend/src/lib/settings/session-defaults-controller.ts"),
 ];
@@ -42,7 +42,7 @@ describe("frontend source quality", () => {
 	});
 
 	it("keeps selector mutation and lifecycle work in focused generator controllers", () => {
-		const root = readFileSync(resolve(selector_root, "model-selector", "view.sv"), "utf8");
+		const root = readFileSync(resolve(selector_root, "model-selector", "view.svelte"), "utf8");
 		const policy_controller = readFileSync(
 			resolve(selector_directory, "policy-controller.ts"),
 			"utf8",
@@ -69,7 +69,7 @@ describe("frontend source quality", () => {
 		expect(root).toContain("<PolicyControls");
 
 		const engine_section = readFileSync(
-			resolve(selector_directory, "engine-section.sv"),
+			resolve(selector_directory, "engine-section.svelte"),
 			"utf8",
 		);
 		expect(engine_section).toContain('<script lang="ts" effect>');

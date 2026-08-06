@@ -8,7 +8,7 @@ const Read = (path: string) => readFileSync(resolve(path), "utf8");
 describe("context-usage SER remediation", () => {
 	it("owns run usage through the authoritative subscription controller", () => {
 		const controller = Read("modules/frontend/src/lib/context-usage/run-usage-controller.ts");
-		const route = Read("modules/frontend/src/routes/components/thread-route.sv");
+		const route = Read("modules/frontend/src/routes/components/thread-route.svelte");
 
 		expect(controller).toContain("SubscribeSurfaceUsageAggregate");
 		expect(controller).toContain("RunAuthoritativeSubscription");
@@ -24,9 +24,9 @@ describe("context-usage SER remediation", () => {
 	});
 
 	it("keeps a failed first-message handoff pending and exposes gauge detail to keyboards", () => {
-		const root = Read("modules/frontend/src/routes/+page.sv");
-		const route = Read("modules/frontend/src/routes/components/thread-route.sv");
-		const gauge = Read("modules/frontend/src/routes/components/context-usage-gauge.sv");
+		const root = Read("modules/frontend/src/routes/+page.svelte");
+		const route = Read("modules/frontend/src/routes/components/thread-route.svelte");
+		const gauge = Read("modules/frontend/src/routes/components/context-usage-gauge.svelte");
 
 		const retry_start = root.indexOf("const RetryDraftNavigation = Effect.gen");
 		const retry_program = root.slice(retry_start, root.indexOf("</script>", retry_start));

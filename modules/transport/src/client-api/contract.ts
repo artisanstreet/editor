@@ -525,10 +525,17 @@ export type WorkspaceConflictListUpdate = {
 
 /** Configures bounded client queues, reconnect timing, and request concurrency. */
 export interface ArtisanClientOptions {
+	readonly diagnostic_capacity?: number;
 	readonly error_capacity?: number;
 	readonly event_capacity?: number;
 	readonly max_pending_requests?: number;
+	/**
+	 * Bounds *consecutive* attempts that fail before reaching ready. A session
+	 * that becomes ready restores the full budget when it eventually dies, so
+	 * only a backend that stays unreachable can exhaust the connection.
+	 */
 	readonly reconnect_attempts?: number;
+	/** Base backoff between failed attempts; growth is capped at 16× the base. */
 	readonly reconnect_delay_ms?: number;
 	readonly stream_capacity?: number;
 	readonly subscription_capacity?: number;
@@ -543,6 +550,80 @@ export type ArtisanConnectionState =
 			readonly error: ArtisanClientError;
 			readonly phase: "exhausted";
 	  };
+
+/**
+ * One structured entry in the client's connection journal. Every connection
+ * attempt, negotiation, session death, and published error is recorded here so
+ * an intermittent transport failure names its own cause after the fact instead
+ * of surfacing only as the last error a reconnect supervisor happened to keep.
+ */
+export type TransportDiagnosticEvent =
+	| {
+			readonly at: string;
+			readonly kind: "session.attempt";
+			/** Counts every attempt over the client's lifetime, healthy or not. */
+			readonly ordinal: number;
+	  }
+	| {
+			readonly at: string;
+			readonly connection_id: string;
+			readonly event_cursor_count: number;
+			readonly journal_sequence: number;
+			readonly kind: "session.negotiating";
+			readonly resume_mode: "fresh" | "resume";
+	  }
+	| {
+			readonly at: string;
+			readonly connection_id: string;
+			readonly kind: "session.ready";
+			readonly negotiation_ms: number;
+	  }
+	| {
+			readonly at: string;
+			readonly code: ArtisanClientErrorCode;
+			/** Compact rendering of the failure cause, for humans reading a dump. */
+			readonly detail: string;
+			readonly kind: "session.ended";
+			readonly lifetime_ms: number;
+			readonly message: string;
+			readonly protocol_code: string;
+			/** Distinguishes a died session from an attempt that never negotiated. */
+			readonly reached_ready: boolean;
+	  }
+	| {
+			readonly at: string;
+			readonly code: ArtisanClientErrorCode;
+			/**
+			 * The session died of a state-integrity failure, so the durable
+			 * resume position was dropped and the next attempt bootstraps fresh
+			 * instead of resuming into the same divergence forever.
+			 */
+			readonly kind: "session.resume_dropped";
+	  }
+	| {
+			readonly at: string;
+			readonly attempts: number;
+			readonly code: ArtisanClientErrorCode;
+			readonly kind: "supervisor.exhausted";
+			readonly message: string;
+			readonly protocol_code: string;
+	  }
+	| { readonly at: string; readonly kind: "supervisor.retry_released" }
+	| {
+			readonly at: string;
+			readonly code: ArtisanClientErrorCode;
+			readonly kind: "error.published";
+			readonly message: string;
+			readonly protocol_code: string;
+	  }
+	| { readonly at: string; readonly kind: "client.disposed" };
+
+/** The bounded journal of recent transport events, oldest first. */
+export interface TransportDiagnosticsSnapshot {
+	/** How many older events the bounded journal has already evicted. */
+	readonly dropped: number;
+	readonly events: ReadonlyArray<TransportDiagnosticEvent>;
+}
 
 /**
  * Provides typed frontend operations while hiding protocol envelopes and cursors.

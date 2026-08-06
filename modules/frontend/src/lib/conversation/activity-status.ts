@@ -1,5 +1,5 @@
 import raw_thinking_words from "@artisan/data/activity-status/thinking-words.json";
-import type { ConversationItem, ConversationLifecycle } from "@artisan/protocol";
+import type { ConversationItem, ConversationLifecycle, ThreadWorkItem } from "@artisan/protocol";
 import { Schema } from "effect";
 
 const ThinkingWordVocabulary = Schema.NonEmptyArray(Schema.NonEmptyString);
@@ -70,15 +70,81 @@ export const active_work_label_for = (
 			thinking_word_for(seed, thinking_visibility_generation));
 
 /**
- * Reconciles one projected session against the durable run that is live now.
- * A thread-global boolean is insufficient: an older orphaned session would
- * otherwise become live again whenever a later turn starts.
+ * The durable coordinator's verdict on the run behind one work session — the
+ * input a session header needs before it may claim an end.
+ *
+ * - `pending`: the run is expected to produce work it has not started yet.
+ * - `active`: the durable work item says the run is running or waiting.
+ * - `settled`: the authority holds nothing live for this run. Whatever the
+ *   transcript still claims, the run is over.
  */
-export const conversation_work_session_is_active = (
-	session_run_id: string | undefined,
-	active_run_id: string | undefined,
-	thread_run_active: boolean,
-): boolean => thread_run_active && session_run_id !== undefined && session_run_id === active_run_id;
+export type WorkSessionRunAuthority = "pending" | "active" | "settled";
+
+/**
+ * Reconciles one projected session against the durable work item, which is the
+ * authority on what is running. A thread-global boolean is insufficient twice
+ * over: an older orphaned session would become live again whenever a later
+ * turn starts, and the send gap — where the new session reaches the transcript
+ * before the durable work item catches up — would read as a dead run.
+ *
+ * The mismatch branch resolves that gap: a session the work item does not
+ * describe is settled history, unless it is the transcript's newest session —
+ * then the authority simply has not caught up with a session this new (the
+ * work item is created and refreshed on its own channel), and presuming death
+ * there would flash a failure over every freshly sent message.
+ */
+export const work_session_run_authority = (input: {
+	readonly session_run_id: string | undefined;
+	readonly active_run_id: string | undefined;
+	readonly active_run_status: ThreadWorkItem["status"] | undefined;
+	readonly newest_session_run_id: string | undefined;
+}): WorkSessionRunAuthority => {
+	if (input.session_run_id === undefined) return "settled";
+	if (input.session_run_id !== input.active_run_id) {
+		return input.session_run_id === input.newest_session_run_id ? "pending" : "settled";
+	}
+	return input.active_run_status === "queued"
+		? "pending"
+		: input.active_run_status === "running" || input.active_run_status === "waiting"
+			? "active"
+			: "settled";
+};
+
+/** The instant a session's header presents as its end, and on whose word. */
+export interface WorkSessionSettlement {
+	readonly ended_at: string;
+	/**
+	 * True when the run died before the provider ever answered: there is no
+	 * terminal event and nothing to show for the wait, so the only honest
+	 * header is a failure. A dead run that did respond keeps its ordinary
+	 * header — its work is real; the loss is only the terminal event.
+	 */
+	readonly presumed_failed: boolean;
+}
+
+/**
+ * Resolves whether a session's header may present an end — the only source a
+ * duration header can be formatted from.
+ *
+ * A genuine terminal `ended_at` always settles the session. Without one, the
+ * durable authority decides: while it holds the run as pending or active the
+ * session keeps waiting, so the send gap can never flash a fabricated
+ * "Thought for 0s". Once the authority has nothing live for the run, the
+ * session settles on when it last changed — as a presumed failure when the
+ * provider never responded, because a run that died before its first byte
+ * did fail, and a waiting line that never resolves would claim otherwise.
+ */
+export const work_session_settlement = (input: {
+	readonly ended_at: string | undefined;
+	readonly updated_at: string;
+	readonly run_authority: WorkSessionRunAuthority;
+	readonly provider_responded: boolean;
+}): WorkSessionSettlement | undefined =>
+	input.ended_at !== undefined
+		? { ended_at: input.ended_at, presumed_failed: false }
+		: input.run_authority !== "settled"
+			? undefined
+			: { ended_at: input.updated_at, presumed_failed: !input.provider_responded };
 
 const live_lifecycles: ReadonlySet<ConversationLifecycle> = new Set([
 	"pending",

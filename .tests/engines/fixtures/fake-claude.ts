@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 
 type FixtureEvent = Record<string, unknown>;
 
@@ -33,6 +33,16 @@ if (args.includes("--version")) {
 	} else if (scenario === "auth-unsupported") {
 		process.stderr.write("unknown command\n");
 		process.exit(1);
+	} else if (scenario === "auth-heals") {
+		// Logged out on the first probe, healed afterwards; the invocation file
+		// recorded this spawn above, so its auth count includes the current one.
+		const auth_spawns = invocation_file
+			? readFileSync(invocation_file, "utf8")
+					.split("\n")
+					.filter((line) => line.includes('"auth"')).length
+			: 0;
+		process.stdout.write(`${JSON.stringify({ loggedIn: auth_spawns >= 2 })}\n`);
+		process.exit(0);
 	} else {
 		process.stdout.write(`${JSON.stringify({ loggedIn: scenario !== "auth-unauth" })}\n`);
 		process.exit(0);

@@ -8,24 +8,24 @@ const workspace = resolve(import.meta.dirname, "../..");
 const source_root = resolve(workspace, "modules/frontend/src");
 const vite_config_path = resolve(workspace, "modules/frontend/vite.config.ts");
 const browser_dom_sources = [
-	"modules/frontend/src/routes/components/project-folder-picker.sv",
-	"modules/frontend/src/routes/components/command-menu.sv",
-	"modules/frontend/src/routes/components/forge-connection-overlay.sv",
-	"modules/frontend/src/routes/components/conversation-prompt.sv",
-	"modules/frontend/src/routes/settings/+layout.sv",
-	"modules/frontend/src/routes/components/panel/repository-line.sv",
-	"modules/frontend/src/routes/components/panel/project-selector.sv",
-	"modules/frontend/src/lib/components/ui/input-group/input-group-addon.sv",
+	"modules/frontend/src/routes/components/project-folder-picker.svelte",
+	"modules/frontend/src/routes/components/command-menu.svelte",
+	"modules/frontend/src/routes/components/forge-connection-overlay.svelte",
+	"modules/frontend/src/routes/components/conversation-prompt.svelte",
+	"modules/frontend/src/routes/settings/+layout.svelte",
+	"modules/frontend/src/routes/components/panel/repository-line.svelte",
+	"modules/frontend/src/routes/components/panel/project-selector.svelte",
+	"modules/frontend/src/lib/components/ui/input-group/input-group-addon.svelte",
 	"modules/frontend/src/lib/components/dropdown-highlight.ts",
-	"modules/frontend/src/lib/components/activity/vertical-calendar-activity-grid.sv",
-	"modules/frontend/src/routes/components/conversation-message.sv",
-	"modules/frontend/src/routes/components/conversation-work-session.sv",
-	"modules/frontend/src/routes/components/dev-instance-badge.sv",
-	"modules/frontend/src/routes/components/model-selector/engine-section.sv",
-	"modules/frontend/src/routes/components/paper-god-rays.sv",
-	"modules/frontend/src/routes/components/shader-dev-panel.sv",
-	"modules/frontend/src/routes/components/thread-hover-rail.sv",
-	"modules/frontend/src/routes/components/thread-workspace.sv",
+	"modules/frontend/src/lib/components/activity/vertical-calendar-activity-grid.svelte",
+	"modules/frontend/src/routes/components/conversation-message.svelte",
+	"modules/frontend/src/routes/components/conversation-work-session.svelte",
+	"modules/frontend/src/routes/components/dev-instance-badge.svelte",
+	"modules/frontend/src/routes/components/model-selector/engine-section.svelte",
+	"modules/frontend/src/routes/components/paper-god-rays.svelte",
+	"modules/frontend/src/routes/components/shader-dev-panel.svelte",
+	"modules/frontend/src/routes/components/thread-hover-rail.svelte",
+	"modules/frontend/src/routes/components/thread-workspace.svelte",
 ] as const;
 
 /**
@@ -256,10 +256,10 @@ const unsafe_queue_ingress = new Map<string, number>([
 	["modules/frontend/src/lib/components/dropdown-highlight.ts", 4],
 	["modules/frontend/src/lib/composer/gesture-intake.ts", 3],
 	["modules/frontend/src/lib/lifecycle/scoped-attachment-runner.ts", 3],
-	["modules/frontend/src/routes/components/paper-god-rays.sv", 4],
-	["modules/frontend/src/routes/components/dev-instance-badge.sv", 1],
-	["modules/frontend/src/routes/components/shader-dev-panel.sv", 4],
-	["modules/frontend/src/routes/components/thread-workspace.sv", 2],
+	["modules/frontend/src/routes/components/paper-god-rays.svelte", 4],
+	["modules/frontend/src/routes/components/dev-instance-badge.svelte", 1],
+	["modules/frontend/src/routes/components/shader-dev-panel.svelte", 4],
+	["modules/frontend/src/routes/components/thread-workspace.svelte", 2],
 ]);
 
 const UnsafeQueueViolations = (path: string, source: string): ReadonlyArray<string> => {
@@ -335,7 +335,7 @@ describe("Svelte Effect Runtime source discipline", () => {
 		]);
 		expect(
 			UnsafeQueueViolations(
-				"modules/frontend/src/routes/components/example.sv",
+				"modules/frontend/src/routes/components/example.svelte",
 				"Queue.offerUnsafe(queue, value)",
 			),
 		).toEqual(["unapproved Queue.offerUnsafe ingress (1)"]);
@@ -353,55 +353,55 @@ describe("Svelte Effect Runtime source discipline", () => {
 	it("fails closed for browser host operations outside an explicit boundary", () => {
 		expect(
 			BrowserHostViolations(
-				"modules/frontend/src/routes/components/example.sv",
+				"modules/frontend/src/routes/components/example.svelte",
 				"const Focus = () => element.focus();",
 			),
 		).toEqual([
-			"modules/frontend/src/routes/components/example.sv:1: browser host operation outside a typed boundary: .focus(",
+			"modules/frontend/src/routes/components/example.svelte:1: browser host operation outside a typed boundary: .focus(",
 		]);
 		expect(
 			BrowserHostViolations(
-				"modules/frontend/src/routes/components/example.sv",
+				"modules/frontend/src/routes/components/example.svelte",
 				"const Focus = () => RunBrowserDom(() => element.focus());",
 			),
 		).toEqual([]);
 		expect(
 			BrowserHostViolations(
-				"modules/frontend/src/routes/components/example.sv",
+				"modules/frontend/src/routes/components/example.svelte",
 				"const Frame = Effect.callback(() => requestAnimationFrame(callback));",
 			),
 		).toEqual([]);
 		expect(
 			BrowserHostViolations(
-				"modules/frontend/src/routes/components/example.sv",
+				"modules/frontend/src/routes/components/example.svelte",
 				"const Copy = () => navigator.clipboard.writeText(value);",
 			),
 		).toEqual([
-			"modules/frontend/src/routes/components/example.sv:1: browser host operation outside a typed boundary: navigator.",
+			"modules/frontend/src/routes/components/example.svelte:1: browser host operation outside a typed boundary: navigator.",
 		]);
 		expect(
 			BrowserHostViolations(
-				"modules/frontend/src/routes/components/example.sv",
+				"modules/frontend/src/routes/components/example.svelte",
 				"const Select = () => document.getSelection();",
 			),
 		).toEqual([
-			"modules/frontend/src/routes/components/example.sv:1: browser host operation outside a typed boundary: document.",
+			"modules/frontend/src/routes/components/example.svelte:1: browser host operation outside a typed boundary: document.",
 		]);
 		expect(
 			BrowserHostViolations(
-				"modules/frontend/src/routes/components/example.sv",
+				"modules/frontend/src/routes/components/example.svelte",
 				"// RunBrowserDom(() => (\nconst Copy = () => navigator.clipboard.writeText(value);",
 			),
 		).toEqual([
-			"modules/frontend/src/routes/components/example.sv:2: browser host operation outside a typed boundary: navigator.",
+			"modules/frontend/src/routes/components/example.svelte:2: browser host operation outside a typed boundary: navigator.",
 		]);
 		expect(
 			BrowserHostViolations(
-				"modules/frontend/src/routes/components/example.sv",
+				"modules/frontend/src/routes/components/example.svelte",
 				'const decoy = "RunBrowserDom(() => (";\nwindow.location.assign(path);',
 			),
 		).toEqual([
-			"modules/frontend/src/routes/components/example.sv:2: browser host operation outside a typed boundary: window.",
+			"modules/frontend/src/routes/components/example.svelte:2: browser host operation outside a typed boundary: window.",
 		]);
 		expect(
 			BrowserHostViolations(

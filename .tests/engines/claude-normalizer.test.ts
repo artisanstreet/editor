@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 
+import { artisan_error_codes } from "@artisan/catalog";
 import {
 	classify_claude_semantic_failure,
 	normalize_claude_event,
@@ -151,6 +152,75 @@ describe("Claude normalization", () => {
 	});
 
 	/**
+	 * The Agent SDK (and the current CLI) spell the boundary's metadata
+	 * `compact_metadata`; a schema demanding `compactMetadata` silently dropped
+	 * every compaction as "Unknown Claude event type: system". The boundary is
+	 * the one event that says the window's history was replaced, so it must
+	 * always land as a canonical compaction observation.
+	 */
+	it("captures an SDK compact boundary as a compaction observation", () => {
+		const events = normalize_claude_event(
+			input({
+				type: "system",
+				subtype: "compact_boundary",
+				uuid: "boundary-1",
+				session_id: "session",
+				compact_metadata: { trigger: "auto", pre_tokens: 342_765 },
+			}),
+		);
+
+		expect(events).toEqual([
+			expect.objectContaining({
+				_tag: "compaction",
+				compaction_id: "boundary-1",
+				state: "completed",
+			}),
+		]);
+	});
+
+	it("resets the context gauge from the boundary's post-compaction measurement", () => {
+		const events = normalize_claude_event(
+			input({
+				type: "system",
+				subtype: "compact_boundary",
+				uuid: "boundary-2",
+				session_id: "session",
+				compact_metadata: { trigger: "auto", pre_tokens: 342_765, post_tokens: 38_120 },
+			}),
+		);
+
+		expect(events).toEqual([
+			expect.objectContaining({ _tag: "compaction", compaction_id: "boundary-2" }),
+			expect.objectContaining({
+				_tag: "usage",
+				basis: "cumulative",
+				context_tokens: 38_120,
+			}),
+		]);
+	});
+
+	/** Recognition must not hinge on metadata internals the protocol may reshape. */
+	it("captures a compact boundary whose metadata is missing or differently spelled", () => {
+		const bare = normalize_claude_event(
+			input({ type: "system", subtype: "compact_boundary", uuid: "boundary-3" }),
+		);
+		const camel = normalize_claude_event(
+			input({
+				type: "system",
+				subtype: "compact_boundary",
+				uuid: "boundary-4",
+				compactMetadata: { trigger: "manual", post_tokens: 12 },
+			}),
+		);
+
+		expect(bare).toEqual([expect.objectContaining({ _tag: "compaction" })]);
+		expect(camel).toEqual([
+			expect.objectContaining({ _tag: "compaction" }),
+			expect.objectContaining({ _tag: "usage", context_tokens: 12 }),
+		]);
+	});
+
+	/**
 	 * A fixed sentence saying the input lives in raw provenance described the
 	 * adapter's bookkeeping where the work should be, and rendered every row of a
 	 * kind as the same line. The one argument that identifies the call goes there
@@ -171,15 +241,40 @@ describe("Claude normalization", () => {
 			return observation?._tag === "tool" ? observation.detail : undefined;
 		};
 
-		expect(tool_details("Grep", { pattern: "conversation_reply", path: "modules" })).toBe(
-			"conversation_reply",
-		);
 		expect(tool_details("Task", { description: "Audit the scroll code" })).toBe(
 			"Audit the scroll code",
 		);
-		expect(tool_details("Glob", { path: "modules/frontend" })).toBe("modules/frontend");
 		expect(tool_details("TodoWrite", { todos: [] })).toBeUndefined();
 		expect(tool_details("mcp__server__tool", { pattern: "   " })).toBeUndefined();
+	});
+
+	/**
+	 * Grep and Glob are searches of the workspace, not anonymous tool work. The
+	 * search shape is what lets a chain of them count itself as files searched,
+	 * and the workspace scope is what keeps them from reading as web searches.
+	 */
+	it("normalizes Grep and Glob to workspace-scoped searches", () => {
+		const search = (name: string, tool_input: Record<string, unknown>) =>
+			normalize_claude_event(
+				input({
+					type: "assistant",
+					message: {
+						content: [{ type: "tool_use", id: "call", name, input: tool_input }],
+					},
+				}),
+			).find((event) => event._tag === "search");
+
+		expect(search("Grep", { pattern: "conversation_reply", path: "modules" })).toEqual(
+			expect.objectContaining({
+				query: "conversation_reply",
+				scope: "workspace",
+				search_id: "call",
+				state: "started",
+			}),
+		);
+		expect(search("Glob", { path: "modules/frontend" })).toEqual(
+			expect.objectContaining({ query: "modules/frontend", scope: "workspace" }),
+		);
 	});
 
 	/**
@@ -428,6 +523,108 @@ describe("Claude normalization", () => {
 		expect(classify_claude_semantic_failure({ type: "result", subtype: "success" })).toBe(
 			false,
 		);
+	});
+
+	it("transfers a typed assistant error into Artisan custody even alongside prose", () => {
+		const events = normalize_claude_event(
+			input({
+				type: "assistant",
+				error: "authentication_failed",
+				message: {
+					content: [{ type: "text", text: "Failed to authenticate: OAuth expired" }],
+				},
+			}),
+		);
+
+		expect(events).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ _tag: "agent_message_completed" }),
+				expect.objectContaining({
+					_tag: "native_action",
+					detail: "Claude assistant error: authentication_failed",
+					error_ref: {
+						artisan_code: artisan_error_codes.provider_auth_failed,
+						provider_code: "authentication_failed",
+					},
+				}),
+			]),
+		);
+	});
+
+	it("maps a provider code minted after this adapter to the unknown Artisan code", () => {
+		expect(
+			normalize_claude_event(
+				input({
+					type: "assistant",
+					error: "brand_new_failure",
+					message: { content: [] },
+				}),
+			),
+		).toEqual([
+			expect.objectContaining({
+				_tag: "native_action",
+				error_ref: expect.objectContaining({
+					artisan_code: artisan_error_codes.unknown,
+					provider_code: "brand_new_failure",
+				}),
+			}),
+		]);
+	});
+
+	it("keeps the failed result classification alongside the usage it rides with", () => {
+		const events = normalize_claude_event(
+			input({
+				type: "result",
+				subtype: "error_max_turns",
+				is_error: true,
+				usage: { input_tokens: 1, output_tokens: 2 },
+			}),
+		);
+
+		expect(events).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({ _tag: "usage" }),
+				expect.objectContaining({
+					_tag: "native_action",
+					error_ref: expect.objectContaining({
+						artisan_code: artisan_error_codes.run_turn_limit,
+						provider_code: "error_max_turns",
+					}),
+				}),
+			]),
+		);
+	});
+
+	it("classifies a rejected rate limit with its reset instant and leaves warnings quiet", () => {
+		const resets_at_seconds = 1_786_075_592;
+
+		expect(
+			normalize_claude_event(
+				input({
+					type: "rate_limit_event",
+					rate_limit_info: { status: "rejected", resetsAt: resets_at_seconds },
+				}),
+			),
+		).toEqual([
+			expect.objectContaining({
+				_tag: "native_action",
+				error_ref: expect.objectContaining({
+					artisan_code: artisan_error_codes.usage_limit_reached,
+					resets_at: new Date(resets_at_seconds * 1_000).toISOString(),
+				}),
+			}),
+		]);
+
+		const warning = normalize_claude_event(
+			input({
+				type: "rate_limit_event",
+				rate_limit_info: { status: "allowed_warning" },
+			}),
+		)[0];
+		expect(warning).toMatchObject({ _tag: "native_action" });
+		expect(
+			warning !== undefined && "error_ref" in warning ? warning.error_ref : undefined,
+		).toBeUndefined();
 	});
 
 	it("retains API retry progress as a native action instead of a canonical retry", () => {

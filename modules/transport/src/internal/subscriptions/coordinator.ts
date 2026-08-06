@@ -1,4 +1,4 @@
-import { Effect, Ref } from "effect";
+import { Effect, Option, Ref } from "effect";
 
 import { client_error } from "../client-common";
 import {
@@ -28,6 +28,7 @@ export const make_client_subscription_coordinator = Effect.gen(function* () {
 		event_terminal: { _tag: "active" },
 		ignored_correlations: new Set(),
 		last_journal_sequence: 0,
+		session_send: Option.none(),
 		subscriptions: new Map(),
 	});
 	return yield* MakeClientSubscriptionCoordinator.pipe(

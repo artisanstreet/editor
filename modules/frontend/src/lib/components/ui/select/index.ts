@@ -1,14 +1,14 @@
-import Root from "./select.sv";
-import Group from "./select-group.sv";
-import Label from "./select-label.sv";
-import Item from "./select-item.sv";
-import Content from "./select-content.sv";
-import Trigger from "./select-trigger.sv";
-import Separator from "./select-separator.sv";
-import ScrollDownButton from "./select-scroll-down-button.sv";
-import ScrollUpButton from "./select-scroll-up-button.sv";
-import GroupHeading from "./select-group-heading.sv";
-import Portal from "./select-portal.sv";
+import Root from "./select.svelte";
+import Group from "./select-group.svelte";
+import Label from "./select-label.svelte";
+import Item from "./select-item.svelte";
+import Content from "./select-content.svelte";
+import Trigger from "./select-trigger.svelte";
+import Separator from "./select-separator.svelte";
+import ScrollDownButton from "./select-scroll-down-button.svelte";
+import ScrollUpButton from "./select-scroll-up-button.svelte";
+import GroupHeading from "./select-group-heading.svelte";
+import Portal from "./select-portal.svelte";
 
 export {
 	Root,

@@ -317,7 +317,9 @@ export function make_observation_recording(
 				}),
 			);
 
-			yield* notifier.Publish(result.at(-1)?.journal_sequence ?? 0);
+			/** Delta-only batches commit no journal event; nothing woke up. */
+			const latest_event = result.at(-1);
+			if (latest_event !== undefined) yield* notifier.Publish(latest_event.journal_sequence);
 
 			return result;
 		}).pipe(Effect.mapError(normalize_error));

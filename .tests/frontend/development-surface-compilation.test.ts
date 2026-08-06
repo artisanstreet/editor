@@ -28,8 +28,8 @@ const { transform_svelte_effect } = (await import(
  * it, a malformed development page is discovered only by opening it.
  */
 const development_only_surfaces = [
-	"modules/frontend/src/routes/debug/emulator/+page.sv",
-	"modules/frontend/src/routes/debug/overlay/+page.sv",
+	"modules/frontend/src/routes/debug/emulator/+page.svelte",
+	"modules/frontend/src/routes/debug/overlay/+page.svelte",
 ];
 
 describe("development-only surface compilation", () => {
@@ -45,7 +45,7 @@ describe("development-only surface compilation", () => {
 	/** The list is only useful while it names every stubbed surface. */
 	it("covers every surface the build stubs", () => {
 		const config = readFileSync(resolve(workspace, "modules/frontend/vite.config.ts"), "utf8");
-		const stubbed = [...config.matchAll(/suffix: "([^"]+\.sv)"/gu)].map((match) => match[1]);
+		const stubbed = [...config.matchAll(/suffix: "([^"]+.svelte)"/gu)].map((match) => match[1]);
 
 		expect(stubbed.length).toBeGreaterThan(0);
 		for (const suffix of stubbed) {

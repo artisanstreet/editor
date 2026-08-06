@@ -58,11 +58,11 @@ describe("conversation markdown dialect", () => {
 describe("conversation markdown rendering", () => {
 	it("renders assistant messages through the markdown renderer with lifecycle-driven streaming", () => {
 		const message = ReadSource(
-			"modules/frontend/src/routes/components/conversation-message.sv",
+			"modules/frontend/src/routes/components/conversation-message.svelte",
 		);
 
 		expect(message).toContain(
-			'import MarkdownContent from "$lib/components/markdown/content.sv"',
+			'import MarkdownContent from "$lib/components/markdown/content.svelte"',
 		);
 		expect(message).toContain(
 			'<MarkdownContent streaming={item.lifecycle === "streaming"} text={item.text} />',
@@ -70,9 +70,9 @@ describe("conversation markdown rendering", () => {
 	});
 
 	it("uses the shared dialect and the prose foundation without a streaming caret", () => {
-		const content = ReadSource("modules/frontend/src/lib/components/markdown/content.sv");
+		const content = ReadSource("modules/frontend/src/lib/components/markdown/content.svelte");
 		const stream_word = ReadSource(
-			"modules/frontend/src/lib/components/markdown/stream-word.sv",
+			"modules/frontend/src/lib/components/markdown/stream-word.svelte",
 		);
 		const stream_word_styles = ReadSource(
 			"modules/frontend/src/lib/styles/markdown/components/streaming-word.css",
@@ -120,8 +120,8 @@ describe("conversation markdown rendering", () => {
 	});
 
 	it("hardens links and never auto-fetches images from assistant markdown", () => {
-		const anchor = ReadSource("modules/frontend/src/lib/components/markdown/anchor.sv");
-		const image = ReadSource("modules/frontend/src/lib/components/markdown/image.sv");
+		const anchor = ReadSource("modules/frontend/src/lib/components/markdown/anchor.svelte");
+		const image = ReadSource("modules/frontend/src/lib/components/markdown/image.svelte");
 
 		expect(anchor).toContain('rel="noopener noreferrer"');
 		expect(anchor).toContain('target="_blank"');

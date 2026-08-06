@@ -1,15 +1,15 @@
-import Root from "./alert-dialog.sv";
-import Portal from "./alert-dialog-portal.sv";
-import Trigger from "./alert-dialog-trigger.sv";
-import Title from "./alert-dialog-title.sv";
-import Action from "./alert-dialog-action.sv";
-import Cancel from "./alert-dialog-cancel.sv";
-import Footer from "./alert-dialog-footer.sv";
-import Header from "./alert-dialog-header.sv";
-import Overlay from "./alert-dialog-overlay.sv";
-import Content from "./alert-dialog-content.sv";
-import Description from "./alert-dialog-description.sv";
-import Media from "./alert-dialog-media.sv";
+import Root from "./alert-dialog.svelte";
+import Portal from "./alert-dialog-portal.svelte";
+import Trigger from "./alert-dialog-trigger.svelte";
+import Title from "./alert-dialog-title.svelte";
+import Action from "./alert-dialog-action.svelte";
+import Cancel from "./alert-dialog-cancel.svelte";
+import Footer from "./alert-dialog-footer.svelte";
+import Header from "./alert-dialog-header.svelte";
+import Overlay from "./alert-dialog-overlay.svelte";
+import Content from "./alert-dialog-content.svelte";
+import Description from "./alert-dialog-description.svelte";
+import Media from "./alert-dialog-media.svelte";
 
 export {
 	Root,

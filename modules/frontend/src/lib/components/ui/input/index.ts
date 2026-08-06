@@ -1,4 +1,4 @@
-import Root from "./input.sv";
+import Root from "./input.svelte";
 
 export {
 	Root,

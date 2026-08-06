@@ -10,7 +10,7 @@ const read = (path: string) => readFileSync(resolve(path), "utf8");
 
 describe("sidebar identity and thread rail regressions", () => {
 	it("fans provider usage reads out through Effect concurrency without a component queue", () => {
-		const identity = read("modules/frontend/src/routes/components/sidebar-identity.sv");
+		const identity = read("modules/frontend/src/routes/components/sidebar-identity.svelte");
 
 		expect(Effect.forkScoped).toBeTypeOf("function");
 		expect(identity).toContain("Effect.forEach(");
@@ -21,28 +21,34 @@ describe("sidebar identity and thread rail regressions", () => {
 	});
 
 	/**
-	 * Reports merge in as each provider answers, so a slow provider was simply
-	 * absent until its first report landed — Claude read as not picked up while
-	 * Codex painted instantly. An engine still fetching its first report shows
-	 * its real mark and name over skeleton meters instead of nothing.
+	 * The enabled engine set is known from the catalog before any provider
+	 * answers, so the menu paints one named row per enabled engine from the
+	 * first frame — skeleton meters until that engine's first report lands —
+	 * in stable catalog order, instead of an anonymous skeleton that later
+	 * re-resolves into named sections in provider-answer order. The fan-out
+	 * itself starts at mount, so an open usually shows readings straight away.
 	 */
-	it("names an engine awaiting its first usage report over a skeleton", () => {
-		const usage = read("modules/frontend/src/routes/components/sidebar-engine-usage.sv");
+	it("renders every enabled engine as a named row from the first frame", () => {
+		const identity = read("modules/frontend/src/routes/components/sidebar-identity.svelte");
+		const usage = read("modules/frontend/src/routes/components/sidebar-engine-usage.svelte");
 
-		expect(usage).toContain("const pending_engines = $derived(");
-		expect(usage).toContain("{#each pending_engines as engine_id, pending_index (engine_id)}");
+		expect(identity).toContain("The fan-out starts at mount, not at first open");
+		expect(identity).toContain("engine_ids={usage_engine_ids}");
+		expect(usage).toContain("const engine_rows = $derived(");
+		/** Catalog order keys the rows; answer order never reshuffles them. */
+		expect(usage).toContain("{#each engine_rows as row, row_index (row.engine_id)}");
+		expect(usage).toContain('{:else if row.kind === "pending"}');
 		expect(usage).toContain("usage loading");
 		/** The identity is real even while the reading is pending. */
-		expect(usage).toContain("{EngineDisplayName(engine_id)}");
-		/** A menu with only pending engines must not claim nothing is connected. */
-		expect(usage).toContain(
-			"authenticated_engines.length === 0 && unavailable_engines.length === 0 && pending_engines.length === 0",
-		);
+		expect(usage).toContain("{EngineDisplayName(row.engine_id)}");
+		/** A menu with only pending rows must not claim nothing is connected. */
+		expect(usage).toContain("engine_rows.length === 0");
+		expect(usage).toContain('{#if usage_state.status === "loaded"}');
 	});
 
 	it("shows the latest trustworthy weekly reset on each shader-glass provider menu", () => {
-		const identity = read("modules/frontend/src/routes/components/sidebar-identity.sv");
-		const usage = read("modules/frontend/src/routes/components/sidebar-engine-usage.sv");
+		const identity = read("modules/frontend/src/routes/components/sidebar-identity.svelte");
+		const usage = read("modules/frontend/src/routes/components/sidebar-engine-usage.svelte");
 		const now = Date.parse("2026-07-31T12:00:00.000Z");
 
 		expect(
@@ -137,7 +143,7 @@ describe("sidebar identity and thread rail regressions", () => {
 
 	it("yields sidebar motion token reads through the browser DOM boundary", () => {
 		const motion = read("modules/frontend/src/lib/identity/usage-window-motion.ts");
-		const usage = read("modules/frontend/src/routes/components/sidebar-engine-usage.sv");
+		const usage = read("modules/frontend/src/routes/components/sidebar-engine-usage.svelte");
 
 		expect(motion).toContain('import { RunBrowserDom } from "$lib/browser/dom"');
 		expect(motion).toContain("export const MotionEasing = () =>");
@@ -148,7 +154,7 @@ describe("sidebar identity and thread rail regressions", () => {
 	});
 
 	it("keeps thread-list rows stationary while retaining proximity reveal", () => {
-		const rail = read("modules/frontend/src/routes/components/thread-hover-rail.sv");
+		const rail = read("modules/frontend/src/routes/components/thread-hover-rail.svelte");
 		const styles = read("modules/frontend/src/lib/styles/sidebar.css");
 
 		expect(rail).toContain("<svelte:window onpointermove={yield* TrackPointer(event)} />");
@@ -161,9 +167,9 @@ describe("sidebar identity and thread rail regressions", () => {
 	});
 
 	it("stands the proximity rail down while the account menu covers its band", () => {
-		const identity = read("modules/frontend/src/routes/components/sidebar-identity.sv");
-		const panel = read("modules/frontend/src/routes/components/sectioned-panel.sv");
-		const rail = read("modules/frontend/src/routes/components/thread-hover-rail.sv");
+		const identity = read("modules/frontend/src/routes/components/sidebar-identity.svelte");
+		const panel = read("modules/frontend/src/routes/components/sectioned-panel.svelte");
+		const rail = read("modules/frontend/src/routes/components/thread-hover-rail.svelte");
 
 		expect(identity).toContain("open = $bindable(false)");
 		expect(identity).not.toContain("let open = $state(false);");
@@ -179,8 +185,8 @@ describe("sidebar identity and thread rail regressions", () => {
 	});
 
 	it("mounts the thread hover rail only on canonical conversation routes", () => {
-		const layout = read("modules/frontend/src/routes/+layout.sv");
-		const panel = read("modules/frontend/src/routes/components/sectioned-panel.sv");
+		const layout = read("modules/frontend/src/routes/+layout.svelte");
+		const panel = read("modules/frontend/src/routes/components/sectioned-panel.svelte");
 
 		expect(layout).toContain("const is_thread_route = $derived(");
 		expect(layout).toContain("show_thread_hover_rail={is_thread_route}");

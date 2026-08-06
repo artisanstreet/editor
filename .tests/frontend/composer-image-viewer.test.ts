@@ -7,17 +7,21 @@ const ReadSource = (path: string) =>
 
 describe("composer image viewer", () => {
 	it("keeps orchestration below the component pressure limit", () => {
-		const composer = ReadSource("modules/frontend/src/routes/components/thread-composer.sv");
+		const composer = ReadSource(
+			"modules/frontend/src/routes/components/thread-composer.svelte",
+		);
 
 		expect(composer.split(/\r?\n/u).length).toBeLessThanOrEqual(560);
 	});
 
 	it("uses the shared card treatment for both image entry points without custom borders", () => {
-		const composer = ReadSource("modules/frontend/src/routes/components/thread-composer.sv");
+		const composer = ReadSource(
+			"modules/frontend/src/routes/components/thread-composer.svelte",
+		);
 		const composer_dom = ReadSource("modules/frontend/src/routes/components/composer/dom.ts");
 		const styles = ReadSource("modules/frontend/src/lib/styles/global.css");
 		const tray = ReadSource(
-			"modules/frontend/src/routes/components/composer/attachment-tray.sv",
+			"modules/frontend/src/routes/components/composer/attachment-tray.svelte",
 		);
 
 		expect(tray).toContain('class="composer-attachment-preview card"');
@@ -34,9 +38,11 @@ describe("composer image viewer", () => {
 	 * no disarming of the send button — a submit that lands early just declines.
 	 */
 	it("shows a pasted image immediately and declines an early send silently", () => {
-		const composer = ReadSource("modules/frontend/src/routes/components/thread-composer.sv");
+		const composer = ReadSource(
+			"modules/frontend/src/routes/components/thread-composer.svelte",
+		);
 		const tray = ReadSource(
-			"modules/frontend/src/routes/components/composer/attachment-tray.sv",
+			"modules/frontend/src/routes/components/composer/attachment-tray.svelte",
 		);
 		const styles = ReadSource("modules/frontend/src/lib/styles/global.css");
 
@@ -51,9 +57,11 @@ describe("composer image viewer", () => {
 
 	/** A re-paste is refused before it is shown, and answers by shaking the original. */
 	it("shakes the attached image instead of adding a duplicate", () => {
-		const composer = ReadSource("modules/frontend/src/routes/components/thread-composer.sv");
+		const composer = ReadSource(
+			"modules/frontend/src/routes/components/thread-composer.svelte",
+		);
 		const tray = ReadSource(
-			"modules/frontend/src/routes/components/composer/attachment-tray.sv",
+			"modules/frontend/src/routes/components/composer/attachment-tray.svelte",
 		);
 		const styles = ReadSource("modules/frontend/src/lib/styles/global.css");
 
@@ -63,7 +71,7 @@ describe("composer image viewer", () => {
 		expect(intake).toContain("yield* surface.Bump(repasted)");
 		/** The re-paste is refused before anything is presented. */
 		expect(intake.indexOf("repasted.push")).toBeLessThan(intake.indexOf("surface.Present("));
-		expect(composer).toContain("Bump: BumpAttachments,");
+		expect(composer).toContain("Bump: motion.BumpAttachments,");
 		expect(tray).toContain("data-bump={bumped.has(attachment.id)}");
 		expect(tray).toContain('.composer-attachment-preview[data-bump="true"]');
 		expect(styles).toContain('.composer-image-marker[data-bump="true"]');
@@ -71,8 +79,8 @@ describe("composer image viewer", () => {
 
 	/** Everything except the image dismisses the viewer, and the rail stands down. */
 	it("closes the image viewer from anywhere but the image", () => {
-		const viewer = ReadSource("modules/frontend/src/routes/components/image-viewer.sv");
-		const panel = ReadSource("modules/frontend/src/routes/components/sectioned-panel.sv");
+		const viewer = ReadSource("modules/frontend/src/routes/components/image-viewer.svelte");
+		const panel = ReadSource("modules/frontend/src/routes/components/sectioned-panel.svelte");
 
 		/** The dialog fills the viewport, so dismissal is owned here, not by the primitive. */
 		expect(viewer).toContain('class="absolute inset-0 cursor-default"');
@@ -87,9 +95,11 @@ describe("composer image viewer", () => {
 	});
 
 	it("opens previews rather than removing an inline attachment marker", () => {
-		const composer = ReadSource("modules/frontend/src/routes/components/thread-composer.sv");
+		const composer = ReadSource(
+			"modules/frontend/src/routes/components/thread-composer.svelte",
+		);
 		const tray = ReadSource(
-			"modules/frontend/src/routes/components/composer/attachment-tray.sv",
+			"modules/frontend/src/routes/components/composer/attachment-tray.svelte",
 		);
 
 		expect(composer).toContain("const ViewAttachment = (attachment: ComposerImageAttachment)");
@@ -100,7 +110,7 @@ describe("composer image viewer", () => {
 	});
 
 	it("uses an accessible blurred dialog that never upscales the image", () => {
-		const viewer = ReadSource("modules/frontend/src/routes/components/image-viewer.sv");
+		const viewer = ReadSource("modules/frontend/src/routes/components/image-viewer.svelte");
 
 		expect(viewer).toContain("DialogPrimitive.Root bind:open");
 		expect(viewer).toContain("supports-backdrop-filter:backdrop-blur-md");
@@ -114,7 +124,9 @@ describe("composer image viewer", () => {
 	});
 
 	it("releases a viewed image before its URL can be revoked by keyboard deletion", () => {
-		const composer = ReadSource("modules/frontend/src/routes/components/thread-composer.sv");
+		const composer = ReadSource(
+			"modules/frontend/src/routes/components/thread-composer.svelte",
+		);
 
 		expect(composer).toContain("if (viewed_attachment?.id === attachment_id)");
 		expect(composer).toContain("viewed_attachment = undefined;");
@@ -122,7 +134,9 @@ describe("composer image viewer", () => {
 	});
 
 	it("yields every mutable browser boundary through the shared DOM adapter", () => {
-		const composer = ReadSource("modules/frontend/src/routes/components/thread-composer.sv");
+		const composer = ReadSource(
+			"modules/frontend/src/routes/components/thread-composer.svelte",
+		);
 		const composer_dom = ReadSource("modules/frontend/src/routes/components/composer/dom.ts");
 
 		expect(composer).toContain('from "./composer/dom"');
@@ -145,7 +159,9 @@ describe("composer image viewer", () => {
 	 * by the intake, never `yield*` sites.
 	 */
 	it("captures expiring gesture state synchronously instead of inside an effect", () => {
-		const composer = ReadSource("modules/frontend/src/routes/components/thread-composer.sv");
+		const composer = ReadSource(
+			"modules/frontend/src/routes/components/thread-composer.svelte",
+		);
 		const intake = ReadSource("modules/frontend/src/lib/composer/gesture-intake.ts");
 
 		for (const handler of [

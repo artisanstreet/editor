@@ -9,7 +9,6 @@ import { effect } from "svelte-effect-runtime";
 import { href } from "svelte-auto-href";
 import { ts } from "svelte-global-typescript";
 import { compose, kit } from "svelte-plugin-composer";
-import { sv } from "svelte-sv-extension";
 
 const WorkspaceSource = (relative_path: string) =>
 	fileURLToPath(new URL(relative_path, import.meta.url));
@@ -69,11 +68,11 @@ const development_only_surfaces = () => {
 		},
 		{
 			source: "<!-- development-only surface -->",
-			suffix: "/routes/debug/emulator/+page.sv",
+			suffix: "/routes/debug/emulator/+page.svelte",
 		},
 		{
 			source: "<!-- development-only surface -->",
-			suffix: "/routes/debug/overlay/+page.sv",
+			suffix: "/routes/debug/overlay/+page.svelte",
 		},
 	];
 
@@ -208,7 +207,6 @@ export default defineConfig({
 		compose(
 			[
 				effect(),
-				sv(),
 				ts(),
 				href(),
 				kit({
@@ -238,9 +236,9 @@ export default defineConfig({
 		/**
 		 * Tailwind 4's build plugin is deliberately `enforce: "pre"`, but its
 		 * transform filter accepts CSS (including Svelte style virtual modules)
-		 * only. SER 4.2.1 reports every pre-transform plugin and cannot express
+		 * only. SER reports every pre-transform plugin and cannot express
 		 * that filter, so its ordering notice is a conservative false positive:
-		 * Tailwind cannot parse a `.sv` module before `effect()` lowers it.
+		 * Tailwind cannot parse a `.svelte` module before `effect()` lowers it.
 		 *
 		 * Keep this separate from the composed Svelte-transform chain. Removing
 		 * Tailwind's priority would change its documented CSS pipeline merely to

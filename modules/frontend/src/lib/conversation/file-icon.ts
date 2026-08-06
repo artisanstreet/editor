@@ -11,7 +11,7 @@ const FileAssociations = Schema.Record(Schema.NonEmptyString, Schema.Array(Schem
 const fallback_file_associations = {
 	"typescript-test": [".test.ts", ".spec.ts"],
 	typescript: [".ts"],
-	svelte: [".sv", ".svelte"],
+	svelte: [".svelte"],
 } as const;
 
 const file_icons: Readonly<Record<string, string>> = {

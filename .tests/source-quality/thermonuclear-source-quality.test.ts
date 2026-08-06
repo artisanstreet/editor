@@ -16,7 +16,7 @@ const ProductionSources = (directory: string): ReadonlyArray<string> =>
 		if (statSync(path).isDirectory()) {
 			return generated_directories.has(entry) ? [] : ProductionSources(path);
 		}
-		return [".ts", ".sv", ".svelte"].includes(extname(path)) ? [path] : [];
+		return [".ts", ".svelte", ".svelte"].includes(extname(path)) ? [path] : [];
 	});
 
 const sources = ProductionSources(modules_root);
@@ -80,7 +80,7 @@ describe("thermonuclear production source quality", () => {
 
 	it("uses SER for Svelte modules that import Effect at runtime", () => {
 		for (const path of sources.filter((candidate) =>
-			[".sv", ".svelte"].includes(extname(candidate)),
+			[".svelte", ".svelte"].includes(extname(candidate)),
 		)) {
 			const source = Source(path);
 			const runtime_effect_import = [

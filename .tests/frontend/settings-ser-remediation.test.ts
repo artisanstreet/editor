@@ -8,7 +8,7 @@ const ReadSettings = (name: string) =>
 
 describe("settings SER remediation", () => {
 	it("keeps retention reconciliation and validation in direct generator programs", () => {
-		const source = ReadSettings("threads.sv");
+		const source = ReadSettings("threads.svelte");
 
 		expect(source).toContain("const SavePolicy = (next: ThreadRetentionPolicy) =>");
 		expect(source).toContain("Effect.gen(function* ()");
@@ -27,7 +27,7 @@ describe("settings SER remediation", () => {
 	});
 
 	it("uses one direct defaults write for each compaction action", () => {
-		const source = ReadSettings("compaction-model.sv");
+		const source = ReadSettings("compaction-model.svelte");
 
 		expect(source).toContain("const SaveDefaults =");
 		expect(source).toContain("yield* defaults_controller.SaveCompactionDefaults");
@@ -41,10 +41,10 @@ describe("settings SER remediation", () => {
 	});
 
 	it("derives settings catalog, availability, favorites, and defaults from controller changes", () => {
-		const compaction = ReadSettings("compaction-model.sv");
-		const engine = ReadSettings("engine.sv");
-		const models = ReadSettings("models.sv");
-		const nav = ReadSettings("nav.sv");
+		const compaction = ReadSettings("compaction-model.svelte");
+		const engine = ReadSettings("engine.svelte");
+		const models = ReadSettings("models.svelte");
+		const nav = ReadSettings("nav.svelte");
 
 		for (const source of [compaction, engine, models, nav]) {
 			expect(source).toContain("yield* SessionDefaultsController");
@@ -60,10 +60,10 @@ describe("settings SER remediation", () => {
 	});
 
 	it("removes settings command-bus queues and mount-time redirect control flow", () => {
-		const models = ReadSettings("models.sv");
-		const engine = ReadSettings("engine.sv");
+		const models = ReadSettings("models.svelte");
+		const engine = ReadSettings("engine.svelte");
 		const entry = readFileSync(
-			resolve("modules/frontend/src/routes/settings/+page.sv"),
+			resolve("modules/frontend/src/routes/settings/+page.svelte"),
 			"utf8",
 		);
 

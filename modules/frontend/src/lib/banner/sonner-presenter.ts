@@ -1,7 +1,7 @@
 import { Effect, Layer } from "effect";
 import { toast } from "svelte-sonner";
 
-import BannerView from "./view.sv";
+import BannerView from "./view.svelte";
 import { BannerPresenter } from "./service";
 
 export const SonnerBannerPresenterLive = Layer.succeed(

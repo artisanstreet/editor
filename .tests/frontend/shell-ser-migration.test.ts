@@ -9,10 +9,10 @@ const shell_sources = [
 	"modules/frontend/src/lib/banner/service.ts",
 	"modules/frontend/src/lib/banner/sonner-presenter.ts",
 	"modules/frontend/src/lib/forge/discovery.ts",
-	"modules/frontend/src/routes/components/forge-connection-overlay.sv",
-	"modules/frontend/src/routes/components/dev-instance-badge.sv",
-	"modules/frontend/src/routes/components/sidebar-identity.sv",
-	"modules/frontend/src/routes/components/command-menu.sv",
+	"modules/frontend/src/routes/components/forge-connection-overlay.svelte",
+	"modules/frontend/src/routes/components/dev-instance-badge.svelte",
+	"modules/frontend/src/routes/components/sidebar-identity.svelte",
+	"modules/frontend/src/routes/components/command-menu.svelte",
 ].map(Read);
 
 describe("shell SER migration", () => {
@@ -32,9 +32,11 @@ describe("shell SER migration", () => {
 	});
 
 	it("uses native navigation and top-level SER discovery", () => {
-		const overlay = Read("modules/frontend/src/routes/components/forge-connection-overlay.sv");
-		const command_menu = Read("modules/frontend/src/routes/components/command-menu.sv");
-		const sidebar = Read("modules/frontend/src/routes/components/sidebar-identity.sv");
+		const overlay = Read(
+			"modules/frontend/src/routes/components/forge-connection-overlay.svelte",
+		);
+		const command_menu = Read("modules/frontend/src/routes/components/command-menu.svelte");
+		const sidebar = Read("modules/frontend/src/routes/components/sidebar-identity.svelte");
 		expect(overlay).toContain('if (is_visible && presentation.tone === "error")');
 		expect(command_menu).not.toContain("goto(");
 		expect(sidebar).not.toContain("goto(");

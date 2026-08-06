@@ -7,7 +7,9 @@ const ReadSource = (path: string) =>
 
 describe("persisted conversation image attachments", () => {
 	it("accepts caller-owned resolved image sources and renders only resolved attachments", () => {
-		const source = ReadSource("modules/frontend/src/routes/components/conversation-message.sv");
+		const source = ReadSource(
+			"modules/frontend/src/routes/components/conversation-message.svelte",
+		);
 
 		expect(source).toContain("image_sources?: ReadonlyMap<string, string>");
 		expect(source).toContain("const source = image_sources?.get(attachment.id);");
@@ -15,7 +17,9 @@ describe("persisted conversation image attachments", () => {
 	});
 
 	it("groups compact card thumbnails with the user message and reuses their source in the viewer", () => {
-		const source = ReadSource("modules/frontend/src/routes/components/conversation-message.sv");
+		const source = ReadSource(
+			"modules/frontend/src/routes/components/conversation-message.svelte",
+		);
 
 		expect(source).toContain('class="card conversation-image-thumbnail"');
 		expect(source).toContain("aria-label={`View ${image.attachment.name}`}");
@@ -37,7 +41,7 @@ describe("persisted conversation image attachments", () => {
 	});
 
 	it("loads thread-scoped bytes once and revokes every object URL with the route scope", () => {
-		const route = ReadSource("modules/frontend/src/routes/components/thread-route.sv");
+		const route = ReadSource("modules/frontend/src/routes/components/thread-route.svelte");
 		const object_url = ReadSource("modules/frontend/src/lib/browser/object-url.ts");
 
 		expect(route).toContain("client.GetMessageImageAttachment({");

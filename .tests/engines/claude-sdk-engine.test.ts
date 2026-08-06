@@ -1,3 +1,6 @@
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, it } from "vitest";
@@ -305,6 +308,7 @@ describe("Claude Agent SDK engine", () => {
 						provider_options: {},
 						permission_policy: {
 							approval: "never",
+							edit_scope: "host",
 							network_access: true,
 							write_access: true,
 						},
@@ -684,6 +688,57 @@ describe("Claude Agent SDK engine", () => {
 				(event) => event._tag === "process_diagnostic" && event.message.includes("stalled"),
 			),
 		).toBe(true);
+	});
+
+	const with_invocation_file = async (body: (invocation_file: string) => Promise<void>) => {
+		const directory = mkdtempSync(join(tmpdir(), "fake-claude-invocations-"));
+		process.env.FAKE_CLAUDE_INVOCATION_FILE = join(directory, "invocations.jsonl");
+		try {
+			await body(process.env.FAKE_CLAUDE_INVOCATION_FILE);
+		} finally {
+			delete process.env.FAKE_CLAUDE_INVOCATION_FILE;
+			rmSync(directory, { force: true, recursive: true });
+		}
+	};
+
+	const count_auth_probes = (invocation_file: string) =>
+		readFileSync(invocation_file, "utf8")
+			.split("\n")
+			.filter((line) => line.includes('"auth"')).length;
+
+	it("re-probes a not-ready auth verdict before refusing to start", async () => {
+		await with_invocation_file(async (invocation_file) => {
+			process.env.FAKE_CLAUDE_SCENARIO = "auth-unauth";
+			const engine = await get_engine(make_fake_claude_query(completed_script), {
+				auth_retry_attempts: 2,
+				auth_retry_delay_ms: 1,
+			});
+			const exit = await Effect.runPromiseExit(Effect.scoped(engine.Open(open_input())));
+
+			expect(failure_from(exit)).toMatchObject({ _tag: "EngineUnavailableError" });
+			expect(count_auth_probes(invocation_file)).toBe(3);
+		});
+	});
+
+	it("starts the run once a re-probe sees the credential store heal", async () => {
+		await with_invocation_file(async (invocation_file) => {
+			process.env.FAKE_CLAUDE_SCENARIO = "auth-heals";
+			const engine = await get_engine(make_fake_claude_query(completed_script), {
+				auth_retry_attempts: 2,
+				auth_retry_delay_ms: 25,
+			});
+			const events = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const run = yield* engine.Open(open_input());
+						return yield* run.Events.pipe(Stream.runCollect);
+					}),
+				),
+			);
+
+			expect([...events].at(-1)).toMatchObject({ _tag: "run_terminal", state: "completed" });
+			expect(count_auth_probes(invocation_file)).toBe(2);
+		});
 	});
 
 	it("version-tests native continuation and permits target-model changes only on 2.1.220", async () => {

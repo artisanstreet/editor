@@ -45,7 +45,7 @@ describe("context usage model name", () => {
 		const details = readFileSync(
 			resolve(
 				import.meta.dirname,
-				"../../modules/frontend/src/routes/components/context-usage-details.sv",
+				"../../modules/frontend/src/routes/components/context-usage-details.svelte",
 			),
 			"utf8",
 		);

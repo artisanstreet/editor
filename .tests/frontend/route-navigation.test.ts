@@ -4,11 +4,11 @@ import { describe, expect, it } from "vitest";
 const ReadSource = (path: string) => readFile(new URL(`../../${path}`, import.meta.url), "utf8");
 
 const RouteConsumers = [
-	"modules/frontend/src/routes/+page.sv",
-	"modules/frontend/src/routes/components/thread-route.sv",
-	"modules/frontend/src/routes/components/sectioned-panel.sv",
-	"modules/frontend/src/routes/components/editor-file-panel.sv",
-	"modules/frontend/src/routes/e/[workspace]/[thread]/editor-route-gate.sv",
+	"modules/frontend/src/routes/+page.svelte",
+	"modules/frontend/src/routes/components/thread-route.svelte",
+	"modules/frontend/src/routes/components/sectioned-panel.svelte",
+	"modules/frontend/src/routes/components/editor-file-panel.svelte",
+	"modules/frontend/src/routes/e/[workspace]/[thread]/editor-route-gate.svelte",
 ] as const;
 
 describe("route navigation", () => {
@@ -37,7 +37,7 @@ describe("route navigation", () => {
 
 	it("runs file-tree callbacks as direct SER event effects", async () => {
 		const source = await ReadSource(
-			"modules/frontend/src/routes/components/workspace-file-tree.sv",
+			"modules/frontend/src/routes/components/workspace-file-tree.svelte",
 		);
 
 		expect(source).toContain('<script lang="ts" effect>');

@@ -11,7 +11,7 @@ import {
 
 const Read = (path: string) => readFileSync(resolve(path), "utf8");
 
-const text_extensions = new Set([".css", ".html", ".js", ".json", ".sv", ".svelte", ".ts"]);
+const text_extensions = new Set([".css", ".html", ".js", ".json", ".svelte", ".svelte", ".ts"]);
 
 const ReadTextTree = (
 	root: string,
@@ -42,8 +42,8 @@ describe("development instance visibility", () => {
 	});
 
 	it("wires the badge into the shell and the marker into route-owned titles", () => {
-		const layout = Read("modules/frontend/src/routes/+layout.sv");
-		const badge = Read("modules/frontend/src/routes/components/dev-instance-badge.sv");
+		const layout = Read("modules/frontend/src/routes/+layout.svelte");
+		const badge = Read("modules/frontend/src/routes/components/dev-instance-badge.svelte");
 
 		expect(layout).toContain("<DevInstanceBadge />");
 		expect(badge).toContain("DiscoverForgeHealth");

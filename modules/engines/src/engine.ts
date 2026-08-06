@@ -354,6 +354,14 @@ export interface EngineSearchObservation extends EngineObservationBase {
 	readonly query: string;
 	readonly result_count?: number;
 	/**
+	 * Where the search looked. A workspace search is file work and counts
+	 * itself as "searched files"; a web search reads as "searched the web".
+	 * Absent means web — the only scope this observation reported before the
+	 * field existed, kept as the default so existing emitters stay honest.
+	 * @since 0.8.0
+	 */
+	readonly scope?: "workspace" | "web";
+	/**
 	 * The provider's own id for this search, when it has one. A search is
 	 * reported at least twice — once starting, once finished — and without an id
 	 * of its own each report is only identifiable by the frame that carried it,
@@ -363,6 +371,20 @@ export interface EngineSearchObservation extends EngineObservationBase {
 	 */
 	readonly search_id?: string;
 	readonly state: "started" | "completed";
+}
+
+/**
+ * Transfers a provider failure into Artisan's custody: the adapter translates
+ * the provider's typed signal into a stable `AE-*` code at the boundary, so
+ * everything downstream reasons in Artisan's error vocabulary while the
+ * provider's own code and message ride along as evidence. @since 0.9.0
+ */
+export interface EngineErrorRef {
+	readonly artisan_code: string;
+	readonly detail?: string;
+	readonly provider_code?: string;
+	/** When a limit-class failure clears, as an ISO timestamp the UI can show. */
+	readonly resets_at?: string;
 }
 
 /** Reports a provider-native action that has no canonical tool equivalent. @since 0.2.0 */
@@ -378,6 +400,8 @@ export interface EngineNativeActionObservation extends EngineObservationBase {
 	 * transcript. @since 0.7.0
 	 */
 	readonly diagnostic?: boolean;
+	/** Present when the action reports a failure the adapter classified. @since 0.9.0 */
+	readonly error_ref?: EngineErrorRef;
 }
 
 /** Describes the provider-neutral action bound to an approval. @since 0.3.0 */
@@ -501,6 +525,8 @@ export interface EngineProcessDiagnosticObservation extends EngineObservationBas
 	readonly _tag: "process_diagnostic";
 	readonly level: "info" | "warning" | "error";
 	readonly message: string;
+	/** Present when the diagnostic reports a failure the host classified. @since 0.9.0 */
+	readonly error_ref?: EngineErrorRef;
 }
 
 /** Defines the ordered, provider-neutral event stream emitted by a run. @since 0.2.0 */
@@ -574,6 +600,13 @@ export type EngineCommand =
 export class EngineUnavailableError extends Data.TaggedError("EngineUnavailableError")<{
 	readonly engine_id: string;
 	readonly message: string;
+	/**
+	 * The Artisan error code for why the engine is unavailable, when the
+	 * adapter can classify it — an auth-gated probe knows it failed on
+	 * sign-in, not on some generic startup fault. Consumers that settle the
+	 * failure into the transcript prefer this over their own guess. @since 0.9.0
+	 */
+	readonly artisan_code?: string;
 }> {}
 
 /** Represents a capability deliberately absent from an adapter. @since 0.2.0 */

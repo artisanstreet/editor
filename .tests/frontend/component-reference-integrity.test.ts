@@ -52,7 +52,7 @@ export const ComponentsInScope = (source: string): ReadonlySet<string> => {
 };
 
 describe("component reference integrity", () => {
-	const files = globSync(`${source_root}/**/*.sv`, { cwd: workspace });
+	const files = globSync(`${source_root}/**/*.svelte`, { cwd: workspace });
 
 	it("finds components to check", () => {
 		expect(files.length).toBeGreaterThan(20);
@@ -81,7 +81,7 @@ describe("component reference integrity", () => {
 	it("reports a component that is rendered but never imported", () => {
 		const source = [
 			'<script lang="ts">',
-			'\timport Kept from "./kept.sv";',
+			'\timport Kept from "./kept.svelte";',
 			"</script>",
 			"",
 			"<Kept />",

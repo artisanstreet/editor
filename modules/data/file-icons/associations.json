@@ -1,5 +1,5 @@
 {
 	"typescript-test": [".test.ts", ".spec.ts"],
 	"typescript": [".ts"],
-	"svelte": [".sv", ".svelte"]
+	"svelte": [".svelte"]
 }

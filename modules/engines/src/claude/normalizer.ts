@@ -2,11 +2,18 @@ import { Option, Schema } from "effect";
 
 import { TokenCount } from "../engine";
 import { CountPatchHunkLines, CountWrittenLines } from "../patch/unified-diff";
+import {
+	classify_claude_assistant_error,
+	classify_claude_rate_limit,
+	classify_claude_result_failure,
+	classify_claude_terminal_failure,
+} from "./errors";
 
 import type {
 	EngineAgentMessageCompletedObservation,
 	EngineAgentMessageDeltaObservation,
 	EngineCompactionObservation,
+	EngineErrorRef,
 	EngineFileObservation,
 	EngineObservation,
 	EngineRawProvenance,
@@ -59,13 +66,25 @@ const RetrySchema = Schema.Struct({
 	type: Schema.Literal("system"),
 	subtype: Schema.Literal("api_retry"),
 });
+/**
+ * Kept deliberately loose: the boundary itself is the fact worth capturing,
+ * and requiring any particular metadata internals is what silently dropped
+ * every compaction before — the schema demanded `compactMetadata` while both
+ * the Agent SDK and the current CLI spell it `compact_metadata`.
+ */
+const CompactionMetadataSchema = Schema.Struct({
+	trigger: Schema.optional(Schema.String),
+	pre_tokens: Schema.optional(TokenCount),
+	/** The tokens the summarized history occupies after the boundary. */
+	post_tokens: Schema.optional(TokenCount),
+});
 const CompactBoundarySchema = Schema.Struct({
 	type: Schema.Literal("system"),
 	subtype: Schema.Literal("compact_boundary"),
-	uuid: Schema.NonEmptyString,
-	compactMetadata: Schema.Struct({
-		trigger: Schema.Literals(["manual", "auto"]),
-	}),
+	uuid: Schema.optional(Schema.NonEmptyString),
+	compact_metadata: Schema.optional(CompactionMetadataSchema),
+	/** The spelling one earlier protocol revision documented. */
+	compactMetadata: Schema.optional(CompactionMetadataSchema),
 });
 /** Names the `system` bookkeeping subtypes the CLI emits around every turn. */
 const SystemSubtypeSchema = Schema.Struct({
@@ -122,7 +141,10 @@ const OpaqueContentDeltaSchema = Schema.Struct({
 });
 const RateLimitSchema = Schema.Struct({
 	type: Schema.Literal("rate_limit_event"),
-	rate_limit_info: Schema.Struct({ status: Schema.optional(Schema.String) }),
+	rate_limit_info: Schema.Struct({
+		status: Schema.optional(Schema.String),
+		resetsAt: Schema.optional(Schema.Number),
+	}),
 });
 const TextSchema = Schema.Struct({ type: Schema.Literal("text"), text: Schema.String });
 const ToolUseSchema = Schema.Struct({
@@ -422,12 +444,17 @@ function applied_file_tool_id(
 	return path_matches.length === 1 ? path_matches[0]?.id : undefined;
 }
 
-function native_action(input: ClaudeNormalizationInput, detail: string) {
+function native_action(
+	input: ClaudeNormalizationInput,
+	detail: string,
+	error_ref?: EngineErrorRef,
+) {
 	return {
 		...make_base(input, "unknown"),
 		_tag: "native_action",
 		action: "claude_event",
 		detail,
+		...(error_ref === undefined ? {} : { error_ref }),
 	} satisfies EngineObservation;
 }
 
@@ -621,6 +648,25 @@ function tool_observation(
 			...make_base(input, "assistant.tool_use", tool.id),
 			_tag: "search",
 			query: input_value?.query ?? input_value?.url ?? "",
+			scope: "web",
+			search_id: tool.id,
+			state: action === "started" ? "started" : "completed",
+		} satisfies EngineSearchObservation;
+	}
+
+	/**
+	 * Grep and Glob are searches of the workspace, not anonymous tool work.
+	 * Routed to the search semantics with their scope so a chain of them
+	 * counts itself as files searched rather than tools used, with each row
+	 * carrying the pattern it matched.
+	 */
+	if (name === "Grep" || name === "Glob") {
+		return {
+			...make_base(input, "assistant.tool_use", tool.id),
+			_tag: "search",
+			/** The pattern names the search; a call without one at least names where it looked. */
+			query: input_value?.pattern ?? input_value?.path ?? "",
+			scope: "workspace",
 			search_id: tool.id,
 			state: action === "started" ? "started" : "completed",
 		} satisfies EngineSearchObservation;
@@ -661,19 +707,39 @@ export function normalize_claude_event(
 	const compact_boundary = decode(CompactBoundarySchema, input.payload);
 	if (compact_boundary !== undefined) {
 		const base = make_base(input, "system.compact_boundary", "compact_boundary");
-		return [
+		const metadata = compact_boundary.compact_metadata ?? compact_boundary.compactMetadata;
+		const observations: Array<EngineObservation> = [
 			{
 				...base,
 				_tag: "compaction",
-				compaction_id: compact_boundary.uuid,
+				...(compact_boundary.uuid === undefined
+					? {}
+					: { compaction_id: compact_boundary.uuid }),
 				raw: {
 					...base.raw,
-					native_id: compact_boundary.uuid,
-					native_method: "system.compact_boundary",
+					...(compact_boundary.uuid === undefined
+						? {}
+						: { native_id: compact_boundary.uuid }),
 				},
 				state: "completed",
 			} satisfies EngineCompactionObservation,
 		];
+		/**
+		 * A compaction rewrites what occupies the window, so the boundary's own
+		 * post-compaction measurement resets the context gauge immediately
+		 * instead of leaving the pre-compaction reading standing until the next
+		 * assistant response happens to report.
+		 */
+		if (metadata?.post_tokens !== undefined) {
+			observations.push({
+				...make_base(input, "system.compact_boundary", "compact_usage"),
+				_tag: "usage",
+				basis: "cumulative",
+				context_tokens: metadata.post_tokens,
+				turn_id: input.turn_id,
+			} satisfies EngineUsageObservation);
+		}
+		return observations;
 	}
 
 	/** Bookkeeping frames stay in raw provenance only. */
@@ -719,6 +785,14 @@ export function normalize_claude_event(
 					native_action(
 						input,
 						`Claude rate limit ${rate_limit.rate_limit_info.status ?? "status unknown"}`,
+						/**
+						 * Only an outright rejection is a failure in Artisan custody;
+						 * a warning is provenance the reader may notice, not an error
+						 * card.
+						 */
+						rate_limit.rate_limit_info.status === "rejected"
+							? classify_claude_rate_limit(rate_limit.rate_limit_info.resetsAt)
+							: undefined,
 					),
 				];
 
@@ -774,9 +848,22 @@ export function normalize_claude_event(
 			const context_usage = context_usage_observation(input, assistant.message.usage);
 			if (context_usage !== undefined) observations.push(context_usage);
 		}
+		/**
+		 * The typed per-message error must survive even when the frame also
+		 * carries prose or usage — the human-readable failure text is a message,
+		 * but the classification is what Artisan takes custody of, and the old
+		 * early returns silently dropped it whenever anything else decoded.
+		 */
+		if (assistant.error !== undefined)
+			observations.push(
+				native_action(
+					input,
+					`Claude assistant error: ${assistant.error}`,
+					classify_claude_assistant_error(assistant.error),
+				),
+			);
 		if (observations.length > 0) return observations;
 		if (has_tool_use) return [];
-		if (assistant.error !== undefined) return [native_action(input, assistant.error)];
 		return [native_action(input, "Assistant event without public content")];
 	}
 
@@ -837,15 +924,21 @@ export function normalize_claude_event(
 					"Claude permission denial retained without approval semantics",
 				),
 			);
+		/**
+		 * A failed result frame usually also carries usage; the failure must not
+		 * lose to it. The classified action is what settles the run's error card,
+		 * so it rides alongside whatever else the frame reported.
+		 */
+		if (result.subtype !== "success" || result.is_error === true)
+			observations.push(
+				native_action(
+					input,
+					`Claude result failure: ${result.subtype}`,
+					classify_claude_result_failure(result.subtype),
+				),
+			);
 		if (observations.length > 0) return observations;
-		return [
-			native_action(
-				input,
-				result.subtype === "success"
-					? "Claude result"
-					: `Claude result failure: ${result.subtype}`,
-			),
-		];
+		return [native_action(input, "Claude result")];
 	}
 
 	/**
@@ -870,6 +963,7 @@ export function normalize_claude_event(
 				native_action(
 					input,
 					`Claude run failed: ${terminal.stop_reason ?? "no stop reason reported"}`,
+					classify_claude_terminal_failure(terminal.stop_reason ?? undefined),
 				),
 			);
 		return observations;

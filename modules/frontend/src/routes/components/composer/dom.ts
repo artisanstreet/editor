@@ -83,9 +83,8 @@ export const InsertComposerAttachmentMarkers = (
 ) =>
 	Effect.gen(function* () {
 		return yield* RunBrowserDom(() => {
-			range.deleteContents();
-			const fragment = document.createDocumentFragment();
-			for (const attachment of next_attachments) {
+			/** Shared with `WriteComposerEditorDocument`, which restores the same markers. */
+			const make_attachment_marker = (attachment: ComposerImageAttachment) => {
 				const marker = document.createElement("button");
 				marker.type = "button";
 				marker.contentEditable = "false";
@@ -97,7 +96,15 @@ export const InsertComposerAttachmentMarkers = (
 				thumbnail.alt = "";
 				thumbnail.src = attachment.preview_url;
 				marker.append(thumbnail);
-				fragment.append(marker, document.createTextNode("\u200B"));
+				return marker;
+			};
+			range.deleteContents();
+			const fragment = document.createDocumentFragment();
+			for (const attachment of next_attachments) {
+				fragment.append(
+					make_attachment_marker(attachment),
+					document.createTextNode("\u200B"),
+				);
 			}
 			const trailing_caret = document.createTextNode("");
 			fragment.append(trailing_caret);
@@ -146,6 +153,56 @@ export const FocusComposerEditor = (editor: HTMLDivElement | null) =>
 export const ClearComposerEditor = (editor: HTMLDivElement | null) =>
 	Effect.gen(function* () {
 		yield* RunBrowserDom(() => editor?.replaceChildren());
+	});
+
+/**
+ * Replaces the editor content with a restored draft document: text with the
+ * attachment markers reinserted at their token positions. Text nodes round-trip
+ * through `ReadComposerEditorDocument` unchanged because the editor renders
+ * `white-space: pre-wrap`, and marker positions round-trip because the zero
+ * width spaces after markers are excluded from the read text.
+ */
+export const WriteComposerEditorDocument = (
+	editor: HTMLDivElement | null,
+	text: string,
+	tokens: ReadonlyArray<{ readonly id: string; readonly position: number }>,
+	attachments: ReadonlyMap<string, ComposerImageAttachment>,
+) =>
+	Effect.gen(function* () {
+		yield* RunBrowserDom(() => {
+			if (editor === null) return;
+			/** The same marker `InsertComposerAttachmentMarkers` builds for a live paste. */
+			const make_attachment_marker = (attachment: ComposerImageAttachment) => {
+				const marker = document.createElement("button");
+				marker.type = "button";
+				marker.contentEditable = "false";
+				marker.dataset.attachmentId = attachment.id;
+				marker.className = "composer-image-marker card";
+				marker.setAttribute("aria-label", `View attached image ${attachment.name}`);
+				marker.title = attachment.name;
+				const thumbnail = document.createElement("img");
+				thumbnail.alt = "";
+				thumbnail.src = attachment.preview_url;
+				marker.append(thumbnail);
+				return marker;
+			};
+			const fragment = document.createDocumentFragment();
+			let cursor = 0;
+			for (const token of tokens) {
+				const attachment = attachments.get(token.id);
+				if (attachment === undefined) continue;
+				const position = Math.max(cursor, Math.min(text.length, token.position));
+				if (position > cursor) {
+					fragment.append(document.createTextNode(text.slice(cursor, position)));
+				}
+				fragment.append(make_attachment_marker(attachment), document.createTextNode("​"));
+				cursor = position;
+			}
+			if (cursor < text.length) {
+				fragment.append(document.createTextNode(text.slice(cursor)));
+			}
+			editor.replaceChildren(fragment);
+		});
 	});
 
 export const ComposerDropRange = (editor: HTMLDivElement | null, at: ComposerDropPoint) =>

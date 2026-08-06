@@ -60,7 +60,9 @@ export const ThreadSessionPolicy = Schema.Struct({
 	model: Schema.optional(Schema.NonEmptyString),
 	/**
 	 * The native context-window suffix appended to the model id (for example
-	 * Claude Code's `[1m]`). Absent means the model's base window.
+	 * Claude Code's `[1m]`). Absent means the harness resolves the bare model
+	 * id itself, which lands on the catalog capability's default option — for
+	 * Claude 5 that is the extended window, not the 200K base one.
 	 */
 	context_window: Schema.optional(Schema.NonEmptyString),
 	reasoning_effort: Schema.Literals(["low", "medium", "high", "xhigh", "max"]),

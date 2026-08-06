@@ -10,10 +10,10 @@ const ReadBrowser = (path: string) =>
 
 describe("thread and model SER migration", () => {
 	it("routes policy changes through an Effect-valued controller callback", () => {
-		const route = ReadComponent("thread-route.sv");
-		const workspace = ReadComponent("thread-workspace.sv");
-		const composer = ReadComponent("thread-composer.sv");
-		const selector = ReadComponent("model-selector/view.sv");
+		const route = ReadComponent("thread-route.svelte");
+		const workspace = ReadComponent("thread-workspace.svelte");
+		const composer = ReadComponent("thread-composer.svelte");
+		const selector = ReadComponent("model-selector/view.svelte");
 
 		for (const source of [workspace, composer, selector]) {
 			expect(source).toContain("onpolicychange?: (");
@@ -28,10 +28,10 @@ describe("thread and model SER migration", () => {
 
 	it("keeps synchronous lifecycle ingress behind yielded queue workers", () => {
 		for (const path of [
-			"thread-composer.sv",
-			"thread-route.sv",
-			"model-selector/view.sv",
-			"model-selector/engine-section.sv",
+			"thread-composer.svelte",
+			"thread-route.svelte",
+			"model-selector/view.svelte",
+			"model-selector/engine-section.svelte",
 		]) {
 			const source = ReadComponent(path);
 			expect(source).not.toContain("Queue.offerUnsafe");
@@ -39,18 +39,18 @@ describe("thread and model SER migration", () => {
 			expect(source).not.toContain("Effect.flatMap");
 			expect(source).not.toContain("Effect.andThen");
 		}
-		const workspace = ReadComponent("thread-workspace.sv");
+		const workspace = ReadComponent("thread-workspace.svelte");
 		expect(workspace).toContain("yield* Queue.take(anchor_layout_requests)");
 		expect(workspace).toContain("Queue.offerUnsafe(anchor_layout_requests");
 		expect(workspace).not.toContain("Effect.sync");
 		expect(workspace).not.toContain("Effect.flatMap");
 		expect(workspace).not.toContain("Effect.andThen");
-		expect(ReadComponent("thread-route.sv")).not.toContain("onDestroy(");
+		expect(ReadComponent("thread-route.svelte")).not.toContain("onDestroy(");
 	});
 
 	it("keeps image visibility and first-submission completion inside yielded generators", () => {
-		const route = ReadComponent("thread-route.sv");
-		const workspace = ReadComponent("thread-workspace.sv");
+		const route = ReadComponent("thread-route.svelte");
+		const workspace = ReadComponent("thread-workspace.svelte");
 
 		expect(route).toContain("const UpdateImageAttachmentVisibility =");
 		expect(route).toContain("yield* RequestImageAttachment(attachment)");
@@ -61,7 +61,7 @@ describe("thread and model SER migration", () => {
 	});
 
 	it("commits only the latest interaction refresh and waits for a competing draft claim", () => {
-		const route = ReadComponent("thread-route.sv");
+		const route = ReadComponent("thread-route.svelte");
 
 		expect(route).toContain(
 			'import { MakeLatestRequestGate } from "$lib/lifecycle/latest-request-gate"',

@@ -138,7 +138,8 @@ export const BuildThreadMessageCommand = (
 			_tag: "ready",
 			command: {
 				payload: {
-					answers: { answer: [trimmed] },
+					/** Dispatch resolves the answer by looking it up under the question's own id. */
+					answers: { [pending_question.question_id]: [trimmed] },
 					question_id: pending_question.question_id,
 					type: "intake.respond_question",
 				},

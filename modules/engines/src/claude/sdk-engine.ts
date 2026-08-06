@@ -1,6 +1,8 @@
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
 
+import { artisan_error_codes } from "@artisan/catalog";
+
 import type {
 	CanUseTool,
 	Options,
@@ -9,7 +11,18 @@ import type {
 	SDKMessage,
 	SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
-import { Context, Effect, Encoding, Exit, Layer, Ref, Scope, Semaphore, Stream } from "effect";
+import {
+	Context,
+	Duration,
+	Effect,
+	Encoding,
+	Exit,
+	Layer,
+	Ref,
+	Scope,
+	Semaphore,
+	Stream,
+} from "effect";
 
 import {
 	type Engine,
@@ -111,6 +124,16 @@ export const ClaudeEngineDescriptor: EngineDescriptor = {
 
 /** Configures the Claude engine's probe bounds and SDK runtime overrides. @since 0.8.0 */
 export interface ClaudeEngineOptions {
+	/**
+	 * Re-probes after a not-ready auth verdict this many times before a run
+	 * refuses to start; zero disables the retries. Claude's shared credential
+	 * store expires machine-wide every few hours, and only a fresh CLI spawn
+	 * can re-mint it, so a brief bounded retry rides out the refresh race
+	 * instead of failing the run on a verdict that heals within seconds.
+	 */
+	readonly auth_retry_attempts?: number;
+	/** First re-probe delay; each subsequent retry doubles it. */
+	readonly auth_retry_delay_ms?: number;
 	readonly auth_timeout_ms?: number;
 	/** Overrides Claude's config-dir resolution used by `Usage` (normally env `CLAUDE_CONFIG_DIR`, else `~/.claude`). */
 	readonly claude_config_dir?: string;
@@ -128,6 +151,8 @@ export interface ClaudeEngineOptions {
 }
 
 interface ClaudeConfiguredOptions {
+	readonly auth_retry_attempts: number;
+	readonly auth_retry_delay_ms: number;
 	readonly auth_timeout_ms: number;
 	readonly event_capacity: number;
 	readonly executable: string;
@@ -160,16 +185,17 @@ const defaults = {
 	event_capacity: 256,
 	executable: "claude",
 	/**
-	 * Ten minutes of silence, not of running. A tool call can legitimately
-	 * occupy the runtime without emitting anything, so the window has to clear
-	 * the longest plausible quiet stretch; beyond it the stream is treated as
-	 * dead rather than slow.
+	 * Ten minutes of silence, not of running: a tool call can legitimately
+	 * occupy the runtime without emitting anything, so the window clears the
+	 * longest plausible quiet stretch before the stream counts as dead.
 	 */
 	inactivity_ms: 10 * 60 * 1_000,
 	max_stderr_bytes: 1_048_576,
 	max_stdout_bytes: 16 * 1_024 * 1_024,
 	version_timeout_ms: 15_000,
 	auth_timeout_ms: 15_000,
+	auth_retry_attempts: 2,
+	auth_retry_delay_ms: 1_000,
 } as const;
 
 function fail_configuration(option: string, value: unknown) {
@@ -184,15 +210,21 @@ function validate_positive(options: ClaudeEngineOptions) {
 		max_stdout_bytes: options.max_stdout_bytes ?? defaults.max_stdout_bytes,
 		version_timeout_ms: options.version_timeout_ms ?? defaults.version_timeout_ms,
 		auth_timeout_ms: options.auth_timeout_ms ?? defaults.auth_timeout_ms,
+		auth_retry_delay_ms: options.auth_retry_delay_ms ?? defaults.auth_retry_delay_ms,
 	};
 
 	const invalid = Object.entries(values).find(
 		([, value]) => !Number.isSafeInteger(value) || value <= 0,
 	);
 
-	return invalid === undefined
-		? Effect.succeed(values)
-		: fail_configuration(invalid[0], invalid[1]);
+	if (invalid !== undefined) return fail_configuration(invalid[0], invalid[1]);
+
+	// Zero is a meaningful retry count — it disables the re-probe entirely.
+	const auth_retry_attempts = options.auth_retry_attempts ?? defaults.auth_retry_attempts;
+
+	return !Number.isSafeInteger(auth_retry_attempts) || auth_retry_attempts < 0
+		? fail_configuration("auth_retry_attempts", auth_retry_attempts)
+		: Effect.succeed({ ...values, auth_retry_attempts });
 }
 
 interface ClaudeResolvedRunOptions {
@@ -274,7 +306,8 @@ function validate_provider_options(
 
 		if (policy === undefined) {
 			return {
-				allow_dangerously_skip_permissions: false,
+				/** The SDK refuses to start bypass runs without the explicit opt-in. */
+				allow_dangerously_skip_permissions: permission_mode === "bypassPermissions",
 				disable_tools: disable_tools === true,
 				permission_mode: permission_mode as ClaudeResolvedRunOptions["permission_mode"],
 				product_instructions: input.product_instructions?.content,
@@ -301,6 +334,15 @@ function validate_provider_options(
 			policy.edit_scope !== undefined &&
 			!new Set(["workspace", "host"]).has(policy.edit_scope)
 		) {
+			return yield* fail_configuration("permission_policy.edit_scope", policy.edit_scope);
+		}
+		/**
+		 * Bypassing permissions grants host-wide access outright — nothing
+		 * prompts, nothing sandboxes. A "never ask" policy scoped narrower than
+		 * the host would be a promise this transport cannot keep, so it is
+		 * refused rather than silently widened.
+		 */
+		if (policy.approval === "never" && policy.edit_scope !== "host") {
 			return yield* fail_configuration("permission_policy.edit_scope", policy.edit_scope);
 		}
 
@@ -467,7 +509,19 @@ function open_run(
 		const input_channel = make_push_channel<SDKUserMessage>();
 		const approval_channel = make_push_channel<ClaudeApprovalAnnouncement>();
 		const stderr_channel = make_push_channel<string>();
-		const pending_approvals = new Map<string, (result: PermissionResult) => void>();
+		/**
+		 * The resolution observation must restate what was approved: consumers
+		 * persist it as the settled record of the request, so the original
+		 * command or file-change detail rides along with the resolver.
+		 */
+		const pending_approvals = new Map<
+			string,
+			{
+				readonly description: string;
+				readonly request: EngineApprovalRequest;
+				readonly resolve: (result: PermissionResult) => void;
+			}
+		>();
 		let approval_counter = 0;
 
 		const can_use_tool: CanUseTool = (tool_name, tool_input, context) => {
@@ -477,7 +531,7 @@ function open_run(
 			const description = context.title ?? `Claude Code requests permission for ${tool_name}`;
 
 			return new Promise<PermissionResult>((resolve) => {
-				pending_approvals.set(approval_id, resolve);
+				pending_approvals.set(approval_id, { description, request, resolve });
 				context.signal.addEventListener("abort", () => {
 					if (pending_approvals.delete(approval_id)) {
 						resolve({
@@ -550,8 +604,8 @@ function open_run(
 
 		let query_handle: Query | undefined;
 		const close_query = Effect.sync(() => {
-			for (const resolve of pending_approvals.values()) {
-				resolve({ behavior: "deny", message: "The Artisan run is closing" });
+			for (const pending of pending_approvals.values()) {
+				pending.resolve({ behavior: "deny", message: "The Artisan run is closing" });
 			}
 			pending_approvals.clear();
 			input_channel.end();
@@ -821,8 +875,8 @@ function open_run(
 						);
 					}
 					if (command._tag === "respond_approval") {
-						const resolve = pending_approvals.get(command.approval_id);
-						if (resolve === undefined) {
+						const pending = pending_approvals.get(command.approval_id);
+						if (pending === undefined) {
 							return yield* Effect.fail(
 								new EngineCommandTargetError({
 									artisan_run_id: input.artisan_run_id,
@@ -838,7 +892,7 @@ function open_run(
 							approval_id: command.approval_id,
 							approved: command.approved,
 							artisan_run_id: input.artisan_run_id,
-							description: "Artisan resolved the permission request",
+							description: pending.description,
 							observation_id: `${input.artisan_run_id}:claude:${command.approval_id}:resolved`,
 							raw: {
 								engine_id: "claude",
@@ -849,13 +903,13 @@ function open_run(
 								protocol_version: claude_protocol_version,
 								transport: claude_transport,
 							},
-							request: { kind: "action" },
+							request: pending.request,
 							sequence: 0,
 							state: "resolved",
 						});
 						pending_approvals.delete(command.approval_id);
 						return yield* Effect.sync(() =>
-							resolve(
+							pending.resolve(
 								command.approved
 									? { behavior: "allow" }
 									: {
@@ -927,10 +981,38 @@ export function make_claude_engine_layer(
 				Effect.gen(function* () {
 					yield* validate_positive(configured);
 					yield* validate_provider_options(input);
-					const probe = yield* Probe({});
+					/**
+					 * Claude exposes no explicit token-refresh command; a fresh
+					 * CLI spawn re-reading the shared credential store is the
+					 * only re-mint trigger Artisan owns. When the store is
+					 * mid-expiry — typically the machine-wide refresh race at
+					 * the access token's boundary — a not-ready verdict heals
+					 * within seconds, so re-probe briefly before refusing.
+					 */
+					let probe = yield* Probe({});
+					for (
+						let attempt = 0;
+						!probe.ready && attempt < configured.auth_retry_attempts;
+						attempt += 1
+					) {
+						yield* Effect.sleep(
+							Duration.millis(configured.auth_retry_delay_ms * 2 ** attempt),
+						);
+						probe = yield* Probe({});
+					}
 					if (!probe.ready)
 						yield* Effect.fail(
 							new EngineUnavailableError({
+								/**
+								 * A clean "not signed in" verdict is a user task; an
+								 * unknown verdict is the credential store misbehaving —
+								 * the machine-wide refresh race — which heals on its
+								 * own and reads very differently on the error card.
+								 */
+								artisan_code:
+									probe.authentication.state === "unauthenticated"
+										? artisan_error_codes.engine_not_signed_in
+										: artisan_error_codes.provider_auth_failed,
 								engine_id: "claude",
 								message:
 									probe.authentication.reason ??

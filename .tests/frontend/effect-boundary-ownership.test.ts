@@ -6,8 +6,8 @@ const Read = (path: string) => readFileSync(path, "utf8");
 
 describe("frontend Effect boundary ownership", () => {
 	it.each([
-		"modules/frontend/src/routes/components/conversation-work-session.sv",
-		"modules/frontend/src/lib/components/activity/vertical-calendar-activity-grid.sv",
+		"modules/frontend/src/routes/components/conversation-work-session.svelte",
+		"modules/frontend/src/lib/components/activity/vertical-calendar-activity-grid.svelte",
 	])("%s owns observers in the component scope", (path) => {
 		const source = Read(path);
 

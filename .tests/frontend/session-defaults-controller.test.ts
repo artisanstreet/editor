@@ -15,13 +15,13 @@ import {
 describe("session defaults controller", () => {
 	it("is the single application owner for catalog and session-default hydration", () => {
 		const paths = [
-			"modules/frontend/src/routes/+layout.sv",
-			"modules/frontend/src/routes/+page.sv",
-			"modules/frontend/src/routes/components/thread-composer.sv",
-			"modules/frontend/src/routes/components/settings/engine.sv",
-			"modules/frontend/src/routes/components/settings/nav.sv",
-			"modules/frontend/src/routes/components/settings/models.sv",
-			"modules/frontend/src/routes/components/settings/compaction-model.sv",
+			"modules/frontend/src/routes/+layout.svelte",
+			"modules/frontend/src/routes/+page.svelte",
+			"modules/frontend/src/routes/components/thread-composer.svelte",
+			"modules/frontend/src/routes/components/settings/engine.svelte",
+			"modules/frontend/src/routes/components/settings/nav.svelte",
+			"modules/frontend/src/routes/components/settings/models.svelte",
+			"modules/frontend/src/routes/components/settings/compaction-model.svelte",
 		];
 
 		for (const path of paths) {

@@ -39,6 +39,27 @@ export const ThreadRouteHasWorkspace = (
 ) => ThreadWorkspaceRouteId(thread.primary_project?.project_id) === route_workspace_id;
 
 /**
+ * Whether a route instance still owns the navigation target — the rendered
+ * page when idle, the navigation in flight otherwise. The async renderer keeps
+ * an outgoing route scope alive until its replacement finishes rendering, and
+ * background activity keeps running that scope's subscriptions; a navigation
+ * issued from it would yank the user back to the thread — or the surface — it
+ * belongs to and cancel the navigation they actually asked for. Only the
+ * instance whose surface (route id) and thread the target points at may steer
+ * the URL.
+ */
+export const ThreadRouteOwnsTarget = (
+	owner: {
+		readonly route_id: string | null;
+		readonly thread_route_id: string;
+	},
+	target: {
+		readonly route_id: string | null | undefined;
+		readonly thread_param: string | undefined;
+	},
+): boolean => target.route_id === owner.route_id && target.thread_param === owner.thread_route_id;
+
+/**
  * Resolves canonical bare route IDs while retaining access to historical
  * `thread_` records. Exact current identities win if both forms ever coexist.
  */

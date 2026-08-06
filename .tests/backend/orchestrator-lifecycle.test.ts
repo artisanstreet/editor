@@ -37,6 +37,8 @@ interface Instrumentation {
 
 interface EngineOptions {
 	readonly die_open_attempts?: number;
+	/** Ends the run's event stream immediately without a terminal observation. */
+	readonly end_without_terminal?: boolean;
 	readonly fail_open?: boolean;
 	readonly fail_resume?: boolean;
 	readonly fail_send?: boolean;
@@ -93,12 +95,16 @@ function make_engine(options: EngineOptions = {}): {
 			const observations: ReadonlyArray<EngineObservation> = [];
 			const run: EngineRun = {
 				artisan_run_id: input.artisan_run_id,
-				Closed: Effect.never,
+				Closed: options.end_without_terminal
+					? Effect.succeed("closed" as const)
+					: Effect.never,
 				Events: Stream.unwrap(
 					Effect.sync(() => {
 						events_consumed += 1;
 
-						return Stream.concat(Stream.fromIterable(observations), Stream.never);
+						return options.end_without_terminal
+							? Stream.fromIterable(observations)
+							: Stream.concat(Stream.fromIterable(observations), Stream.never);
 					}),
 				),
 				native_thread_id: `native:${input.artisan_run_id}`,
@@ -543,6 +549,80 @@ describe("agent orchestrator lifecycle supervision", () => {
 			expect(failed_send.instrumentation.commands).toHaveLength(0);
 		} finally {
 			await send_runtime.dispose();
+		}
+	});
+
+	/**
+	 * A run whose engine died without a terminal observation leaves the durable
+	 * record claiming the run is still running while no live run exists to
+	 * deliver commands to. The user's stop is the terminal for such a run: the
+	 * cancel must finalize it as cancelled instead of dropping as undeliverable
+	 * and leaving the run wedged forever.
+	 */
+	it("finalizes a cancel aimed at a run with no live engine", async () => {
+		const database_path = await make_database_path();
+		const vanished = make_engine({ end_without_terminal: true });
+		const runtime = make_backend_runtime({
+			database_path,
+			engines: [vanished.engine],
+			migrations_path,
+		});
+
+		try {
+			const connection = await open_connection(runtime);
+			await runtime.runPromise(
+				connection.Receive(
+					make_command("start_then_vanish", {
+						engine_id: "instrumented",
+						text: "start",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			await expect
+				.poll(() => vanished.instrumentation.scopes_closed(), { timeout: 2_000 })
+				.toBe(1);
+
+			await runtime.runPromise(
+				connection.Receive(make_command("stop_vanished", { type: "run.cancel" })),
+			);
+
+			const read_snapshot = () =>
+				runtime.runPromise(
+					Effect.gen(function* () {
+						const conversations = yield* ConversationReadModel;
+
+						return yield* conversations.ReadSnapshot("thread_1");
+					}),
+				);
+			await expect
+				.poll(
+					async () => {
+						const result = await read_snapshot();
+
+						return result.status === "available"
+							? result.snapshot.items.find((item) => item.type === "work_session")
+									?.lifecycle
+							: undefined;
+					},
+					{ timeout: 2_000 },
+				)
+				.toBe("cancelled");
+
+			const result = await read_snapshot();
+			if (result.status !== "available") {
+				throw new Error("Expected a durable conversation snapshot");
+			}
+			const session = result.snapshot.items.find((item) => item.type === "work_session");
+			expect(session).toMatchObject({ status: "cancelled" });
+			expect(
+				session !== undefined && "ended_at" in session ? session.ended_at : undefined,
+			).toBeDefined();
+			/** Nothing was alive to deliver to; the stop settled durably instead. */
+			expect(vanished.instrumentation.commands).toHaveLength(0);
+		} finally {
+			await runtime.dispose();
 		}
 	});
 });

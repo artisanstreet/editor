@@ -95,7 +95,7 @@ describe("browser pairing bootstrap", () => {
 			"utf8",
 		);
 		const layout = readFileSync(
-			new URL("../../modules/frontend/src/routes/+layout.sv", import.meta.url),
+			new URL("../../modules/frontend/src/routes/+layout.svelte", import.meta.url),
 			"utf8",
 		);
 

@@ -5,8 +5,8 @@ const Read = (path: string) => readFileSync(path, "utf8");
 
 describe("thread jump-to-latest affordance", () => {
 	it("appears only after live-tail following stops and resumes the bottom contract", () => {
-		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.sv");
-		const composer = Read("modules/frontend/src/routes/components/thread-composer.sv");
+		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.svelte");
+		const composer = Read("modules/frontend/src/routes/components/thread-composer.svelte");
 
 		expect(workspace).toContain("show_jump_to_latest={!following && !anchor_scroll_active}");
 		expect(workspace).toContain("anchored_user_item_id = undefined;");
@@ -20,7 +20,7 @@ describe("thread jump-to-latest affordance", () => {
 	});
 
 	it("keeps accepted sends on the existing top-alignment path", () => {
-		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.sv");
+		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.svelte");
 
 		expect(workspace).toContain("outcome.user_message_reference !== undefined");
 		expect(workspace).toContain("ConversationUserMessageWithSourceReference");

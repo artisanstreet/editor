@@ -2,6 +2,7 @@ import type { Cause, Deferred, Option, Queue } from "effect";
 
 import type { EventEnvelope, OutboundControlEnvelope, SubscribeEnvelope } from "@artisan/protocol";
 
+import type { SendCurrent } from "../client-common";
 import type {
 	ArtisanClientCursors,
 	ArtisanClientError,
@@ -107,6 +108,15 @@ export interface SubscriptionState {
 	readonly event_terminal: EventTerminal;
 	readonly ignored_correlations: ReadonlySet<string>;
 	readonly last_journal_sequence: number;
+	/**
+	 * The sender bound to the session currently replaying subscriptions, held
+	 * from the replay until the session's state is reset. A subscription
+	 * created inside that window must go out through it: the general current-
+	 * connection path holds envelopes until the session is fully ready, and
+	 * the replay's snapshot has already been taken — so without this sender
+	 * the subscribe would never leave the client at all.
+	 */
+	readonly session_send: Option.Option<SendCurrent>;
 	readonly subscriptions: ReadonlyMap<string, ProjectionSubscription>;
 }
 

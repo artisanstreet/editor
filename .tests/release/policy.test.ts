@@ -18,9 +18,7 @@ describe("release policy", () => {
 
 	it("matches landing transport asset names exactly", () => {
 		expect(transport_asset_names("1.2.3")).toContain("ae-installer-windows-x64.exe");
-		expect(transport_asset_names("1.2.3")).toContain(
-			"ae-installer-windows-x64.exe.sha256",
-		);
+		expect(transport_asset_names("1.2.3")).toContain("ae-installer-windows-x64.exe.sha256");
 		expect(transport_asset_names("1.2.3")).toContain("release-manifest.json");
 		expect(transport_asset_names("1.2.3")).toContain("release-manifest.sig");
 	});

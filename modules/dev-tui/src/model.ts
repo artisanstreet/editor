@@ -193,7 +193,15 @@ const apply_sgr_parameters = (style: DevLogStyle, parameters: string): DevLogSty
 					codes[index + 4] ?? 0,
 				);
 				index += 4;
-			} else break;
+			} else {
+				/**
+				 * An unrecognized extended-color mode invalidates this selector
+				 * only; the codes after it are ordinary SGR parameters that still
+				 * deserve to apply. Skipping just the mode keeps a malformed color
+				 * from cancelling the rest of the line's styling.
+				 */
+				index += 1;
+			}
 		}
 	}
 

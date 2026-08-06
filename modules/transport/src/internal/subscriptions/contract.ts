@@ -36,6 +36,8 @@ export interface ClientSubscriptionCoordinator {
 	readonly AwaitReady: Effect.Effect<void, ArtisanClientError>;
 	readonly Cursors: Effect.Effect<ArtisanClientCursors>;
 	readonly Dispose: (error: Option.Option<ArtisanClientError>) => Effect.Effect<void>;
+	/** Forgets applied resume cursors so the next session bootstraps fresh. */
+	readonly DropResumeState: Effect.Effect<void>;
 	readonly Events: Stream.Stream<EventEnvelope, ArtisanClientError>;
 	readonly HandleStarted: (
 		envelope: Extract<OutboundControlEnvelope, { kind: "subscription.started" }>,

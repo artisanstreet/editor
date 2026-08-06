@@ -53,9 +53,9 @@ describe("engine usage cache", () => {
 
 	it("keeps menu-open refresh wiring and tooltip content narrowly scoped", () => {
 		const read = (path: string) => readFileSync(resolve(path), "utf8");
-		const identity = read("modules/frontend/src/routes/components/sidebar-identity.sv");
-		const usage = read("modules/frontend/src/routes/components/sidebar-engine-usage.sv");
-		const tooltip = read("modules/frontend/src/routes/components/usage-window-tooltip.sv");
+		const identity = read("modules/frontend/src/routes/components/sidebar-identity.svelte");
+		const usage = read("modules/frontend/src/routes/components/sidebar-engine-usage.svelte");
+		const tooltip = read("modules/frontend/src/routes/components/usage-window-tooltip.svelte");
 
 		expect(identity).toContain("const now_ms = yield* Clock.currentTimeMillis;");
 		expect(identity).toContain("if (!engine_usage_refresh_is_due(snapshot, now_ms)) return;");
