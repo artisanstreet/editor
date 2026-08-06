@@ -1,0 +1,22 @@
+diff --git a/.dist/chunks/dispatcher-B6ZRUsjN.js b/.dist/chunks/dispatcher-B6ZRUsjN.js
+index 26f5e4faf9d45693f438bcbcbf9a3f81c412c55b..a5d08b41a2845f72ea9f105ff0ec8d1b6af9fde9 100644
+--- a/.dist/chunks/dispatcher-B6ZRUsjN.js
++++ b/.dist/chunks/dispatcher-B6ZRUsjN.js
+@@ -282,8 +282,15 @@ var Dispatcher = class Dispatcher {
+ 		this.#subscribe_value_cells();
+ 		const cell = this.#value_cells.get(cache_key);
+ 		if (old_key !== void 0 && old_key !== cache_key) {
+-			const old_fiber = this.#interrupt_cached_fiber(old_key);
+-			this.#clear_pending_value_cell(old_key, old_fiber);
++			this.#interrupt_cached_fiber(old_key);
++			/**
++			* Superseded cells must go immediately, settled or pending: a markup
++			* yield whose dependencies change on every streamed patch otherwise
++			* accumulates one settled cell per patch for the life of the
++			* component, and the unmount sweep never runs for a component that
++			* lives as long as the session.
++			*/
++			this.#delete_value_cell(old_key);
+ 		}
+ 		this.#value_ids.set(cache_id, cache_key);
+ 		if (this.#should_start_value_fiber(cache_key, cell)) this.#start_value_fiber(cache_key, options);
