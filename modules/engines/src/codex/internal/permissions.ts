@@ -9,29 +9,17 @@ import {
 
 type CodexApprovalPolicy = "never" | "on-request";
 type CodexSandbox = "danger-full-access" | "read-only" | "workspace-write";
-type CodexTransport = "app-server" | "exec";
 
 interface CodexPermissionSettings {
 	readonly approval_policy?: CodexApprovalPolicy;
-	readonly exec_profile?: string;
 	readonly network_access?: boolean;
 	readonly sandbox?: CodexSandbox;
-	readonly skip_git_repo_check: boolean;
 }
 
-const allowed_provider_options = new Set([
-	"codex.exec.profile",
-	"codex.exec.skip_git_repo_check",
-	"codex.reasoning_effort",
-	"codex.service_tier",
-]);
+const allowed_provider_options = new Set(["codex.reasoning_effort", "codex.service_tier"]);
 
 function FailConfiguration(option: string, value: unknown) {
 	return Effect.fail(new EngineConfigurationError({ engine_id: "codex", option, value }));
-}
-
-function toml_string(value: string) {
-	return JSON.stringify(value);
 }
 
 function make_developer_instructions(input: EngineOpenInput) {
@@ -51,7 +39,7 @@ function make_developer_instructions(input: EngineOpenInput) {
 	].join("\n");
 }
 
-function ResolveCodexPermissions(input: EngineOpenInput, transport: CodexTransport) {
+function ResolveCodexPermissions(input: EngineOpenInput) {
 	return Effect.gen(function* () {
 		const provider_options = input.provider_options ?? {};
 		const unknown_option = Object.keys(provider_options).find(
@@ -65,24 +53,9 @@ function ResolveCodexPermissions(input: EngineOpenInput, transport: CodexTranspo
 			);
 		}
 
-		const exec_profile = provider_options["codex.exec.profile"];
-		const skip_git_repo_check = provider_options["codex.exec.skip_git_repo_check"];
 		const reasoning_effort = provider_options["codex.reasoning_effort"];
 		const service_tier = provider_options["codex.service_tier"];
 
-		if (
-			exec_profile !== undefined &&
-			(typeof exec_profile !== "string" || exec_profile.length === 0)
-		) {
-			return yield* FailConfiguration("provider_options.codex.exec.profile", exec_profile);
-		}
-
-		if (skip_git_repo_check !== undefined && typeof skip_git_repo_check !== "boolean") {
-			return yield* FailConfiguration(
-				"provider_options.codex.exec.skip_git_repo_check",
-				skip_git_repo_check,
-			);
-		}
 		if (
 			reasoning_effort !== undefined &&
 			(typeof reasoning_effort !== "string" ||
@@ -99,25 +72,11 @@ function ResolveCodexPermissions(input: EngineOpenInput, transport: CodexTranspo
 		) {
 			return yield* FailConfiguration("provider_options.codex.service_tier", service_tier);
 		}
-		if (
-			transport === "app-server" &&
-			(exec_profile !== undefined || skip_git_repo_check !== undefined)
-		) {
-			const option =
-				exec_profile !== undefined
-					? "codex.exec.profile"
-					: "codex.exec.skip_git_repo_check";
-
-			return yield* FailConfiguration(`provider_options.${option}`, provider_options[option]);
-		}
 
 		const policy = input.permission_policy;
 
 		if (policy === undefined) {
-			const permissions: CodexPermissionSettings = {
-				...(exec_profile === undefined ? {} : { exec_profile }),
-				skip_git_repo_check: skip_git_repo_check === true,
-			};
+			const permissions: CodexPermissionSettings = {};
 
 			return permissions;
 		}
@@ -170,7 +129,6 @@ function ResolveCodexPermissions(input: EngineOpenInput, transport: CodexTranspo
 
 		const permissions: CodexPermissionSettings = {
 			approval_policy: policy.approval === "on_request" ? "on-request" : "never",
-			...(exec_profile === undefined ? {} : { exec_profile }),
 			...(policy.write_access && edit_scope === "workspace"
 				? { network_access: policy.network_access }
 				: {}),
@@ -179,7 +137,6 @@ function ResolveCodexPermissions(input: EngineOpenInput, transport: CodexTranspo
 					? "danger-full-access"
 					: "workspace-write"
 				: "read-only",
-			skip_git_repo_check: skip_git_repo_check === true,
 		};
 
 		return permissions;
@@ -190,7 +147,7 @@ function ResolveCodexPermissions(input: EngineOpenInput, transport: CodexTranspo
 export function MakeCodexAppServerThreadOptions(input: EngineOpenInput) {
 	return ValidateEngineGlobalGuidance("codex", input.global_guidance).pipe(
 		Effect.andThen(ValidateEngineProductInstructions("codex", input.product_instructions)),
-		Effect.andThen(ResolveCodexPermissions(input, "app-server")),
+		Effect.andThen(ResolveCodexPermissions(input)),
 		Effect.map((permissions) => {
 			const developer_instructions = make_developer_instructions(input);
 
@@ -236,37 +193,3 @@ export function MakeCodexAppServerThreadOptions(input: EngineOpenInput) {
 	);
 }
 
-/** Builds Codex exec permission and provider-option argv without a shell. */
-export function MakeCodexExecPermissionArgs(input: EngineOpenInput) {
-	return ValidateEngineProductInstructions("codex", input.product_instructions).pipe(
-		Effect.andThen(ResolveCodexPermissions(input, "exec")),
-		Effect.map((permissions) => [
-			...(input.product_instructions === undefined
-				? []
-				: [
-						"-c",
-						`developer_instructions=${toml_string(input.product_instructions.content)}`,
-					]),
-			...(permissions.approval_policy === undefined
-				? []
-				: ["-c", `approval_policy=${toml_string(permissions.approval_policy)}`]),
-			...(permissions.network_access === undefined
-				? []
-				: [
-						"-c",
-						`sandbox_workspace_write.network_access=${String(permissions.network_access)}`,
-					]),
-			...(input.provider_options?.["codex.reasoning_effort"] === undefined
-				? []
-				: [
-						"-c",
-						`model_reasoning_effort=${toml_string(input.provider_options["codex.reasoning_effort"] as string)}`,
-					]),
-			...(permissions.exec_profile === undefined
-				? []
-				: ["--profile", permissions.exec_profile]),
-			...(permissions.sandbox === undefined ? [] : ["--sandbox", permissions.sandbox]),
-			...(permissions.skip_git_repo_check ? ["--skip-git-repo-check"] : []),
-		]),
-	);
-}

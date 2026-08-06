@@ -30,7 +30,6 @@ function make_layer(options: { readonly initialize_timeout_ms?: number } = {}) {
 		executable_args: [fixture_path],
 		initialize_timeout_ms: options.initialize_timeout_ms ?? 5_000,
 		request_timeout_ms: 5_000,
-		transport_selection: "app_server_only",
 	}).pipe(Layer.provide(CodexProcessFactoryLive));
 }
 

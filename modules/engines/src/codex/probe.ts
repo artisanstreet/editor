@@ -1,4 +1,4 @@
-import { Cause, Effect, Exit, Schema, Scope } from "effect";
+import { Effect, Schema, Scope } from "effect";
 
 import {
 	type EngineDescriptor,
@@ -207,29 +207,6 @@ export interface CodexProbeOptions {
 	>;
 	readonly version_timeout_ms: number;
 }
-
-/** Describes why startup selection moved from app-server to exec. */
-export const codex_selection_failure_reason = (exit: Exit.Exit<EngineProbe, EngineFailure>) => {
-	if (Exit.isSuccess(exit)) {
-		return exit.value.authentication.reason ?? "Codex app-server authentication is unavailable";
-	}
-
-	const error = Cause.squash(exit.cause);
-
-	if (error instanceof EngineProbeTimeoutError) {
-		return `Codex app-server ${error.phase} probe timed out after ${error.timeout_ms}ms`;
-	}
-	if (error instanceof EngineProcessError) {
-		return `Codex app-server process ${error.operation} failed during startup readiness`;
-	}
-	if (error instanceof EngineProtocolError || error instanceof EngineUnavailableError) {
-		return error.message.trim().length > 0
-			? error.message
-			: `Codex app-server ${error._tag} during startup readiness`;
-	}
-
-	return "Codex app-server startup readiness failed before run creation";
-};
 
 /** Builds the bounded, non-billable readiness and continuation checks. */
 export const MakeCodexProbe = (options: CodexProbeOptions) => {

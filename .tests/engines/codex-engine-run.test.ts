@@ -43,14 +43,12 @@ afterEach(() => {
 function make_layer(
 	options: {
 		readonly event_capacity?: number;
-		readonly transport_selection?: "app_server_only" | "prefer_app_server_with_exec_fallback";
 	} = {},
 ) {
 	return make_codex_engine_layer({
 		...options,
 		executable: process.execPath,
 		executable_args: [fixture_path],
-		transport_selection: options.transport_selection ?? "app_server_only",
 	}).pipe(Layer.provide(CodexProcessFactoryLive));
 }
 
@@ -283,7 +281,7 @@ describe("Codex engine run", () => {
 						});
 						yield* resumed.Events.pipe(Stream.runDrain);
 					}),
-				).pipe(Effect.provide(make_layer({ transport_selection: "app_server_only" }))),
+				).pipe(Effect.provide(make_layer())),
 			);
 
 			const requests = (await readFile(request_path, "utf8"))
@@ -375,7 +373,7 @@ describe("Codex engine run", () => {
 
 						yield* run.Events.pipe(Stream.runDrain);
 					}),
-				).pipe(Effect.provide(make_layer({ transport_selection: "app_server_only" }))),
+				).pipe(Effect.provide(make_layer())),
 			);
 
 			const requests = (await readFile(request_path, "utf8"))
@@ -465,7 +463,7 @@ describe("Codex engine run", () => {
 							})
 							.pipe(Effect.exit);
 					}),
-				).pipe(Effect.provide(make_layer({ transport_selection: "app_server_only" }))),
+				).pipe(Effect.provide(make_layer())),
 			);
 			const failure = Exit.isFailure(opened) ? Cause.squash(opened.cause) : undefined;
 

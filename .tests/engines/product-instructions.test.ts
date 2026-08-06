@@ -14,7 +14,6 @@ import {
 	make_claude_engine_layer,
 	make_codex_engine_layer,
 } from "@artisan/engines";
-import { MakeCodexExecSpawn } from "../../modules/engines/src/codex/internal/exec-argv";
 import { MakeCodexAppServerThreadOptions } from "../../modules/engines/src/codex/internal/permissions";
 
 const app_server_fixture = fileURLToPath(new URL("./fixtures/fake-app-server.ts", import.meta.url));
@@ -57,7 +56,6 @@ describe("engine product instructions", () => {
 					make_codex_engine_layer({
 						executable: process.execPath,
 						executable_args: [app_server_fixture],
-						transport_selection: "app_server_only",
 					}).pipe(Layer.provide(factory)),
 				),
 			),
@@ -104,44 +102,6 @@ describe("engine product instructions", () => {
 		);
 
 		expect(options.developerInstructions).toBe("Keep the repository tidy.");
-	});
-
-	it("adds Codex exec developer_instructions as one TOML configuration pair", async () => {
-		const spawn = await Effect.runPromise(
-			MakeCodexExecSpawn({ ...start_input, product_instructions }, "codex", [
-				"--provider-wrapper",
-			]),
-		);
-		const configuration_index = spawn.args.indexOf(
-			'developer_instructions="Follow Artisan product policy."',
-		);
-
-		expect(spawn.args.slice(configuration_index - 1, configuration_index + 1)).toEqual([
-			"-c",
-			'developer_instructions="Follow Artisan product policy."',
-		]);
-		expect(spawn.args).not.toContain(start_input.initial_text);
-		expect(spawn.args.at(-1)).toBe("-");
-	});
-
-	it("rejects blank product source while building Codex exec argv", async () => {
-		const result = await Effect.runPromise(
-			Effect.exit(
-				MakeCodexExecSpawn(
-					{
-						...start_input,
-						product_instructions: { ...product_instructions, source: " " },
-					},
-					"codex",
-					[],
-				),
-			),
-		);
-
-		expect(failure_from(result)).toMatchObject({
-			_tag: "EngineConfigurationError",
-			option: "product_instructions.source",
-		});
 	});
 
 	it("rejects blank product instructions before Claude starts a process", async () => {

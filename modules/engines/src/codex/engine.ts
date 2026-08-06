@@ -36,7 +36,6 @@ import {
 } from "../engine";
 import { WatchEngineInactivity } from "../process/inactivity-deadline";
 import { normalise_codex_notification } from "./normalizer";
-import { make_codex_exec_engine } from "./exec-engine";
 import {
 	open_codex_app_server_session,
 	type CodexAppServerDiagnostic,
@@ -52,7 +51,7 @@ import {
 	ResolveCodexExecutable,
 	resolve_codex_executable,
 } from "./executable";
-import { CodexAccountReadSchema, codex_selection_failure_reason, MakeCodexProbe } from "./probe";
+import { CodexAccountReadSchema, MakeCodexProbe } from "./probe";
 import { MakeCodexAppServerEventBuffer } from "./internal/app-server-event-buffer";
 import { MakeCodexAppServerThreadOptions } from "./internal/permissions";
 
@@ -111,14 +110,8 @@ export interface CodexEngineOptions {
 	readonly executable_args?: ReadonlyArray<string>;
 	readonly event_capacity?: number;
 	readonly executable?: string;
-	readonly exec_max_frame_bytes?: number;
-	readonly exec_max_stderr_bytes?: number;
-	readonly exec_max_stdout_bytes?: number;
-	/** Silence that settles an exec run as stalled; every observation re-arms it. */
-	readonly exec_inactivity_ms?: number;
 	readonly initialize_timeout_ms?: number;
 	readonly request_timeout_ms?: number;
-	readonly transport_selection?: "app_server_only" | "prefer_app_server_with_exec_fallback";
 	readonly version_timeout_ms?: number;
 }
 
@@ -880,42 +873,13 @@ export function make_codex_engine_layer(
 				file_system,
 				request_timeout_ms: options.request_timeout_ms ?? 10_000,
 			});
-			const app_server_engine: Engine = {
+			return {
 				...make_codex_app_server_engine(factory, {
 					...options,
 					executable,
 				}),
 				Usage,
-			};
-
-			if (options.transport_selection === "app_server_only") {
-				return app_server_engine;
-			}
-
-			const probe = yield* app_server_engine
-				.Probe({ client_name: "artisan-transport-selection", client_version: "0.3.0" })
-				.pipe(Effect.exit);
-
-			if (Exit.isSuccess(probe) && probe.value.ready) {
-				return app_server_engine;
-			}
-
-			return {
-				...make_codex_exec_engine({
-					event_capacity: options.event_capacity ?? 256,
-					executable,
-					executable_args: options.executable_args ?? [],
-					fallback_reason: codex_selection_failure_reason(probe),
-					file_system,
-					factory,
-					inactivity_ms: options.exec_inactivity_ms ?? 30 * 60 * 1_000,
-					max_frame_bytes: options.exec_max_frame_bytes ?? 256 * 1_024,
-					max_stderr_bytes: options.exec_max_stderr_bytes ?? 1_024 * 1_024,
-					max_stdout_bytes: options.exec_max_stdout_bytes ?? 8 * 1_024 * 1_024,
-					version_timeout_ms: options.version_timeout_ms ?? 5_000,
-				}),
-				Usage,
-			};
+			} satisfies Engine;
 		}),
 	).pipe(
 		Layer.provideMerge(NodeFileSystem.layer),

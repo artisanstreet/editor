@@ -2,10 +2,7 @@ import { describe, expect, it } from "vitest";
 import { Effect } from "effect";
 
 import type { EngineOpenInput } from "@artisan/engines";
-import {
-	MakeCodexAppServerThreadOptions,
-	MakeCodexExecPermissionArgs,
-} from "../../modules/engines/src/codex/internal/permissions";
+import { MakeCodexAppServerThreadOptions } from "../../modules/engines/src/codex/internal/permissions";
 
 const full_access_input = {
 	_tag: "start",
@@ -21,18 +18,16 @@ const full_access_input = {
 } satisfies EngineOpenInput;
 
 describe("Codex permission mapping", () => {
-	it("maps host scope to danger-full-access for app-server and exec", async () => {
+	it("maps host scope to danger-full-access for app-server", async () => {
 		const app_server = await Effect.runPromise(
 			MakeCodexAppServerThreadOptions(full_access_input),
 		);
-		const exec = await Effect.runPromise(MakeCodexExecPermissionArgs(full_access_input));
 
 		expect(app_server).toEqual({
 			approvalPolicy: "never",
 			cwd: "C:\\workspace",
 			sandbox: "danger-full-access",
 		});
-		expect(exec).toEqual(["-c", 'approval_policy="never"', "--sandbox", "danger-full-access"]);
 	});
 
 	it("rejects host scope when network isolation is still requested", async () => {

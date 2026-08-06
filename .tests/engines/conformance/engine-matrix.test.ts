@@ -95,7 +95,6 @@ describe("Shared Engine lifecycle contract", () => {
 					make_codex_engine_layer({
 						executable: process.execPath,
 						executable_args: [fixture_path],
-						transport_selection: "app_server_only",
 					}).pipe(Layer.provide(CodexProcessFactoryLive)),
 				),
 			),
@@ -125,7 +124,6 @@ describe("Shared Engine lifecycle contract", () => {
 					make_codex_engine_layer({
 						executable: process.execPath,
 						executable_args: [fixture_path],
-						transport_selection: "app_server_only",
 					}).pipe(Layer.provide(replay.Layer)),
 				),
 			),

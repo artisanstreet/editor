@@ -46,27 +46,36 @@ const thread_resume_params = new Set([
 	"threadId",
 ]);
 
+/**
+ * Records argv and piped stdin for the process-host launcher tests. The exec
+ * transport itself is gone; this branch only proves the Windows cmd launcher
+ * delivers metacharacter-bearing argv and stdin bytes verbatim.
+ */
 if (process.argv.includes("exec")) {
-	const { run_fake_codex_exec } = await import("./fake-codex-exec.ts");
+	if (process.env.FAKE_CODEX_EXEC_INVOCATION_FILE) {
+		appendFileSync(
+			process.env.FAKE_CODEX_EXEC_INVOCATION_FILE,
+			`${JSON.stringify(process.argv.slice(2))}\n`,
+		);
+	}
 
-	await run_fake_codex_exec();
+	if (process.argv.includes("-") && process.env.FAKE_CODEX_EXEC_STDIN_FILE) {
+		const chunks: Buffer[] = [];
 
-	if (
-		["hang", "hang-ignore-term", "stderr-overflow"].includes(
-			process.env.FAKE_CODEX_EXEC_SCENARIO ?? "",
-		)
-	) {
-		await new Promise(() => {});
+		for await (const chunk of process.stdin) {
+			chunks.push(chunk as Buffer);
+		}
+
+		writeFileSync(process.env.FAKE_CODEX_EXEC_STDIN_FILE, Buffer.concat(chunks));
 	}
 
 	process.exit(0);
 }
 
 if (process.argv.includes("--version")) {
-	const version_scenarios = [
-		process.env.FAKE_APP_SERVER_SCENARIO,
-		process.env.FAKE_CODEX_EXEC_SCENARIO,
-	].filter((scenario): scenario is string => scenario !== undefined);
+	const version_scenarios = [process.env.FAKE_APP_SERVER_SCENARIO].filter(
+		(scenario): scenario is string => scenario !== undefined,
+	);
 
 	if (version_scenarios.includes("version-fragmented")) {
 		process.stdout.write("codex-cli 0.");
@@ -98,16 +107,6 @@ if (process.argv.includes("--version")) {
 	if (version_scenarios.includes("version-stderr-overflow")) {
 		await new Promise((resolve) => process.stderr.write("x".repeat(64 * 1_024 + 1), resolve));
 		process.exit(0);
-	}
-
-	if (process.env.FAKE_CODEX_EXEC_SCENARIO === "version-timeout") {
-		setInterval(() => {}, 1_000);
-		await new Promise(() => {});
-	}
-
-	if (process.env.FAKE_CODEX_EXEC_SCENARIO === "version-nonzero") {
-		process.stderr.write("version probe rejected\n");
-		process.exit(19);
 	}
 
 	process.stdout.write("codex-cli 0.142.5\n");
