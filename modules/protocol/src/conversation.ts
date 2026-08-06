@@ -356,9 +356,18 @@ export const ConversationPatchBatch = Schema.Struct({
 });
 export type ConversationPatchBatch = typeof ConversationPatchBatch.Type;
 
-/** Reducer-owned replay state. It is intentionally separate from the renderer snapshot. */
+/**
+ * Reducer-owned replay state. It is intentionally separate from the renderer
+ * snapshot.
+ *
+ * `applied_patch_ids` is owned by the reducer chain and mutated in place: a
+ * long run applies tens of thousands of patches, and copying the full id set
+ * per patch made every streamed word cost the whole run's history in
+ * allocation. Consumers hold only the newest state; a retained older state
+ * shares the same growing set.
+ */
 export interface ConversationRebuildState {
-	readonly applied_patch_ids: ReadonlySet<string>;
+	readonly applied_patch_ids: Set<string>;
 	readonly snapshot: ConversationSnapshot;
 }
 
@@ -477,12 +486,25 @@ export const ApplyConversationPatch = (
 	}
 	const turns = [...state.snapshot.turns];
 	const items = [...state.snapshot.items];
-	const turn_index = new Map(turns.map((turn, index) => [turn.id, index]));
-	const item_index = new Map(items.map((item, index) => [item.id, index]));
-	const turn_ids = new Set(turn_index.keys());
-	const item_ids = new Set(item_index.keys());
+	/**
+	 * Index collections are built only for the upsert branches that validate
+	 * references across the whole conversation. The streaming branches — one
+	 * text delta or lifecycle step per patch, hundreds per turn — locate their
+	 * single entity by scan and allocate nothing.
+	 */
+	const make_indexes = () => {
+		const turn_index = new Map(turns.map((turn, index) => [turn.id, index]));
+		const item_index = new Map(items.map((item, index) => [item.id, index]));
+		return {
+			item_ids: new Set(item_index.keys()),
+			item_index,
+			turn_ids: new Set(turn_index.keys()),
+			turn_index,
+		};
+	};
 
 	if (patch.type === "turn_upsert") {
+		const { item_ids, turn_ids, turn_index } = make_indexes();
 		const existing_index = turn_index.get(patch.turn.id);
 		if (existing_index === undefined) {
 			if ([...turns, ...items].some((entity) => entity.ordinal === patch.turn.ordinal))
@@ -515,6 +537,7 @@ export const ApplyConversationPatch = (
 			turns[existing_index] = patch.turn;
 		}
 	} else if (patch.type === "item_upsert") {
+		const { item_ids, item_index, turn_ids } = make_indexes();
 		const existing_index = item_index.get(patch.item.id);
 		if (existing_index === undefined) {
 			if ([...turns, ...items].some((entity) => entity.ordinal === patch.item.ordinal))
@@ -551,8 +574,8 @@ export const ApplyConversationPatch = (
 			items[existing_index] = patch.item;
 		}
 	} else if (patch.type === "item_append") {
-		const existing_index = item_index.get(patch.item_id);
-		if (existing_index === undefined)
+		const existing_index = items.findIndex((item) => item.id === patch.item_id);
+		if (existing_index === -1)
 			return invariant_error("missing_item", `Unknown item ${patch.item_id}`);
 		const existing = items[existing_index];
 		if (existing === undefined)
@@ -572,8 +595,8 @@ export const ApplyConversationPatch = (
 			text: existing.text + patch.text,
 		};
 	} else if (patch.type === "item_lifecycle") {
-		const existing_index = item_index.get(patch.item_id);
-		if (existing_index === undefined)
+		const existing_index = items.findIndex((item) => item.id === patch.item_id);
+		if (existing_index === -1)
 			return invariant_error("missing_item", `Unknown item ${patch.item_id}`);
 		const existing = items[existing_index];
 		if (existing === undefined)
@@ -593,8 +616,8 @@ export const ApplyConversationPatch = (
 			revision: patch.revision,
 		};
 	} else if (patch.type === "turn_lifecycle") {
-		const existing_index = turn_index.get(patch.turn_id);
-		if (existing_index === undefined)
+		const existing_index = turns.findIndex((turn) => turn.id === patch.turn_id);
+		if (existing_index === -1)
 			return invariant_error("missing_turn", `Unknown turn ${patch.turn_id}`);
 		const existing = turns[existing_index];
 		if (existing === undefined)
@@ -614,10 +637,11 @@ export const ApplyConversationPatch = (
 			revision: patch.revision,
 		};
 	}
+	state.applied_patch_ids.add(patch.patch_id);
 	return {
 		_tag: "applied",
 		state: {
-			applied_patch_ids: new Set([...state.applied_patch_ids, patch.patch_id]),
+			applied_patch_ids: state.applied_patch_ids,
 			snapshot: { ...state.snapshot, items, last_patch_sequence: patch.sequence, turns },
 		},
 	};

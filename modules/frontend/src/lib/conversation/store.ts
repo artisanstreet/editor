@@ -82,11 +82,24 @@ export const CanReplaceConversationSnapshot = (
 const MakeViewState = (
 	rebuild: ConversationRebuildState,
 	phase: ConversationViewState["phase"] = "ready",
+	previous?: ConversationViewState,
 ): ConversationViewState => {
 	const items_by_id = new Map(rebuild.snapshot.items.map((item) => [item.id, item]));
-	const ordered_item_ids = [...items_by_id.values()]
-		.sort((left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id))
-		.map((item) => item.id);
+	/**
+	 * Items are never removed and their ordinals are immutable, so an
+	 * unchanged count means an unchanged order: a streamed delta replaces an
+	 * item's text, never its position. Reusing the previous ordering skips a
+	 * full sort on the hottest patch path.
+	 */
+	const ordered_item_ids =
+		previous !== undefined && previous.ordered_item_ids.length === items_by_id.size
+			? previous.ordered_item_ids
+			: [...items_by_id.values()]
+					.sort(
+						(left, right) =>
+							left.ordinal - right.ordinal || left.id.localeCompare(right.id),
+					)
+					.map((item) => item.id);
 
 	return { items_by_id, ordered_item_ids, phase, rebuild };
 };
@@ -401,10 +414,10 @@ export const ApplyConversationViewPatch = (
 
 	const result = ApplyConversationPatch(state.rebuild, patch);
 	if (result._tag === "applied" || result._tag === "duplicate") {
-		return { _tag: result._tag, state: MakeViewState(result.state) };
+		return { _tag: result._tag, state: MakeViewState(result.state, "ready", state) };
 	}
 	if (result.error.code === "patch_gap") {
-		const resync_state = MakeViewState(state.rebuild, "resync_required");
+		const resync_state = MakeViewState(state.rebuild, "resync_required", state);
 		return {
 			_tag: "resync_required",
 			expected_sequence: state.rebuild.snapshot.last_patch_sequence + 1,

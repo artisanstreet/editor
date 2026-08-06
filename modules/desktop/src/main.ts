@@ -17,6 +17,18 @@ import {
 
 const renderer_partition = "artisan-renderer";
 
+/**
+ * Loopback-only diagnosis hatch. The renderer has no IPC surface, so a memory
+ * or rendering investigation on an installed build needs Chrome DevTools
+ * Protocol access; setting the variable at launch is the only way in, and an
+ * unset variable leaves no debugging listener at all.
+ */
+const remote_debugging_port = process.env.ARTISAN_EDITOR_REMOTE_DEBUGGING_PORT;
+if (remote_debugging_port !== undefined && /^\d{2,5}$/.test(remote_debugging_port)) {
+	app.commandLine.appendSwitch("remote-debugging-port", remote_debugging_port);
+	app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1");
+}
+
 /** Registration must precede app ready for `artisan://app` to be a real origin. */
 protocol.registerSchemesAsPrivileged([
 	{
