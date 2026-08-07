@@ -6,7 +6,7 @@ export const xai_models = [
 		id: "grok-4-5",
 		name: "Grok 4.5",
 		native_model_id: "grok-4.5",
-		description: "SpaceXAI's new frontier model.",
+		description: "SpaceXAI's frontier model; fast and token-efficient for coding and agents.",
 		harness: "grok",
 		provider: "xai",
 		routing: { kind: "default" },

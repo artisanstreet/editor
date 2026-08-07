@@ -58,7 +58,8 @@ export const cursor_other_models = [
 		id: "cursor-kimi-k3",
 		name: "Kimi K3",
 		native_model_id: "kimi-k3",
-		description: "Open-weight frontier model for long agentic engineering sessions.",
+		description:
+			"Open-weight frontier model; leads open models on long autonomous engineering work.",
 		harness: "cursor",
 		provider: "moonshot",
 		routing: { kind: "default" },
@@ -85,7 +86,8 @@ export const cursor_other_models = [
 		id: "cursor-glm-5-2",
 		name: "GLM 5.2",
 		native_model_id: "glm-5.2",
-		description: "Z.ai's flagship model for reasoning, coding, and long-horizon agentic work.",
+		description:
+			"Z.ai's cost-efficient model for bounded coding, terminal work, and algorithmic reasoning.",
 		harness: "cursor",
 		provider: "zai",
 		routing: { kind: "default" },
