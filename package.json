@@ -45,6 +45,7 @@
 		"@artisan/forge": "workspace:*",
 		"@artisan/protocol": "workspace:*",
 		"@artisan/transport": "workspace:*",
+		"@artisanstreet/runner": "git+https://github.com/sandersonstabo/runner.git#5b48d0d4cbddb310853aa8a413a7569cac850893",
 		"@effect/platform-node-shared": "4.0.0-beta.97",
 		"@effect/vitest": "4.0.0-beta.97",
 		"@electron/asar": "3.4.1",

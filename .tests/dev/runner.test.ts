@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, it } from "vitest";
+import { Effect } from "effect";
 
 import {
 	derive_dev_instance,
@@ -12,6 +13,10 @@ import {
 	hash_instance_offset,
 	make_forge_environment,
 	make_dev_lane_definitions,
+	make_artisan_runner_adapter_environment,
+	make_artisan_runner_options,
+	make_artisan_runner_process,
+	make_dashboard_dev_endpoints,
 	make_portless_environment,
 	make_portless_base_names,
 	parse_portless_endpoint,
@@ -22,7 +27,9 @@ import {
 	resolve_dev_tui_entry,
 	resolve_portless_entry,
 	should_use_dev_tui,
+	should_wrap_artisan_runner,
 	should_use_portless,
+	route_artisan_runner_output,
 	write_dev_config,
 } from "../../.scripts/dev/runner";
 
@@ -63,6 +70,147 @@ describe("dev runner modes", () => {
 		expect(manifest.scripts["dev:open"]).toBe("node .scripts/dev/runner.ts pair");
 		expect(manifest.scripts["dev:pair"]).toBe("node .scripts/dev/runner.ts pair");
 		expect(manifest.devDependencies.portless).toBe("0.15.5");
+	});
+});
+
+describe("Effect runner adapter", () => {
+	it("wraps only ordinary development modes and never recurses into its marked adapter", () => {
+		for (const mode of ["dev", "forge", "web"] as const) {
+			expect(should_wrap_artisan_runner({ environment: {}, mode })).toBe(true);
+		}
+		for (const mode of ["doctor", "pair"] as const) {
+			expect(should_wrap_artisan_runner({ environment: {}, mode })).toBe(false);
+		}
+		expect(
+			should_wrap_artisan_runner({
+				environment: { ARTISAN_DEV_RUNNER_ADAPTER: "1" },
+				mode: "dev",
+			}),
+		).toBe(false);
+	});
+
+	it("marks the adapter and disables only its legacy dashboard", () => {
+		expect(
+			make_artisan_runner_adapter_environment({
+				ARTISAN_DEV_TUI: "1",
+				CUSTOM: "retained",
+			}),
+		).toEqual({
+			ARTISAN_DEV_RUNNER_ADAPTER: "1",
+			ARTISAN_DEV_TUI: "0",
+			CUSTOM: "retained",
+		});
+	});
+
+	it("routes raw adapter lines to the public lanes and exposes readiness", async () => {
+		await expect(
+			Effect.runPromise(
+				route_artisan_runner_output({
+					line: "[web] \u001B[32mLocal: http://127.0.0.1:4849\u001B[0m",
+					process_id: "runner",
+					stream: "stdout",
+				}),
+			),
+		).resolves.toEqual([
+			{
+				lane_id: "web",
+				line: "\u001B[32mLocal: http://127.0.0.1:4849\u001B[0m",
+				status: "ready",
+			},
+		]);
+		await expect(
+			Effect.runPromise(
+				route_artisan_runner_output({
+					line: "[forge] forge ready at https://forge.localhost",
+					process_id: "runner",
+					stream: "stderr",
+				}),
+			),
+		).resolves.toEqual([
+			{
+				lane_id: "forge",
+				line: "forge ready at https://forge.localhost",
+				status: "ready",
+			},
+		]);
+	});
+
+	it("supplies exact Artisan lanes and honors the plain-log escape hatch", () => {
+		const instance = {
+			forge_origin: "http://127.0.0.1:4848",
+			forge_port: 4848,
+			offset: 0,
+			web_origin: "http://127.0.0.1:4849",
+			web_port: 4849,
+		};
+		const endpoints = {
+			forge: {
+				alias_name: "forge",
+				hostname: "forge.localhost",
+				origin: "https://forge.localhost",
+			},
+			web: {
+				alias_name: "editor",
+				hostname: "editor.localhost",
+				origin: "https://editor.localhost",
+			},
+		};
+		const options = make_artisan_runner_options("dev", instance, endpoints, {});
+		expect(options.dashboard).toBe("auto");
+		expect(options.lanes).toEqual([
+			{ id: "runner", name: "Overview", status: "ready" },
+			{ id: "web", name: "Artisan Editor", status: "waiting" },
+			{ id: "forge", name: "Artisan Forge", status: "waiting" },
+		]);
+		expect(make_artisan_runner_process("runner.ts", "dev", {}).lane_ids).toEqual([
+			"runner",
+			"web",
+			"forge",
+		]);
+		expect(make_artisan_runner_process("runner.ts", "web", {}).lane_ids).toEqual([
+			"runner",
+			"web",
+		]);
+		expect(make_artisan_runner_process("runner.ts", "forge", {}).lane_ids).toEqual([
+			"runner",
+			"forge",
+		]);
+		expect(
+			make_artisan_runner_options("web", instance, endpoints, { ARTISAN_DEV_TUI: "0" })
+				.dashboard,
+		).toBe("never");
+	});
+
+	it("uses declarative HTTPS Portless endpoints for the outer dashboard", () => {
+		const instance = {
+			forge_origin: "http://127.0.0.1:4864",
+			forge_port: 4864,
+			offset: 8,
+			web_origin: "http://127.0.0.1:4865",
+			web_port: 4865,
+		};
+		expect(make_dashboard_dev_endpoints(instance, {})).toEqual({
+			forge: {
+				alias_name: "forge",
+				hostname: "forge.localhost",
+				origin: "https://forge.localhost",
+			},
+			web: {
+				alias_name: "editor",
+				hostname: "editor.localhost",
+				origin: "https://editor.localhost",
+			},
+		});
+		expect(make_dashboard_dev_endpoints(instance, { ARTISAN_DEV_INSTANCE: "8" })).toMatchObject(
+			{
+				forge: { origin: "https://forge-8.localhost" },
+				web: { origin: "https://editor-8.localhost" },
+			},
+		);
+		expect(make_dashboard_dev_endpoints(instance, { PORTLESS: "0" })).toMatchObject({
+			forge: { origin: "http://127.0.0.1:4864" },
+			web: { origin: "http://127.0.0.1:4865" },
+		});
 	});
 });
 

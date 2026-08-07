@@ -24,7 +24,10 @@ import { delimiter, dirname, join, resolve } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
-import { Schema } from "effect";
+import { NodeRuntime } from "@effect/platform-node-shared";
+import { Runner } from "@artisanstreet/runner";
+import { Effect, Schema } from "effect";
+import { ChildProcess as RunnerChildProcess } from "effect/unstable/process";
 import { watch, type RolldownWatcher, type RolldownWatcherEvent } from "rolldown";
 
 import { CreateForgeRolldownConfig } from "../../forge.rolldown.config.ts";
@@ -46,6 +49,7 @@ const base_web_port = 4849;
 const max_instance_offset = 3000;
 const max_dashboard_pending_events = 1_000;
 const dependency_require = createRequire(import.meta.url);
+const artisan_runner_adapter_environment = "ARTISAN_DEV_RUNNER_ADAPTER";
 
 const windows_openssl_installations = [
 	join("C:", "Program Files", "OpenSSL-Win64"),
@@ -150,6 +154,44 @@ export const parse_runner_mode = (value: string | undefined): RunnerMode | undef
 	return undefined;
 };
 
+/** The outer runner launches this script once; the marked child remains the Artisan adapter. */
+export const should_wrap_artisan_runner = (input: {
+	readonly environment: Readonly<Record<string, string | undefined>>;
+	readonly mode: RunnerMode | undefined;
+}): boolean =>
+	input.environment[artisan_runner_adapter_environment] !== "1" &&
+	(input.mode === "dev" || input.mode === "forge" || input.mode === "web");
+
+/** Forces the legacy adapter to emit lane-addressable plain output, never another dashboard. */
+export const make_artisan_runner_adapter_environment = (
+	environment: Readonly<Record<string, string | undefined>>,
+): Readonly<Record<string, string | undefined>> => ({
+	...environment,
+	ARTISAN_DEV_TUI: "0",
+	[artisan_runner_adapter_environment]: "1",
+});
+
+export const route_artisan_runner_output = (
+	output: Runner.ProcessOutput,
+): Effect.Effect<ReadonlyArray<Runner.RoutedOutput>> => {
+	const match = /^\[(runner|web|forge)\]\s?(.*)$/u.exec(output.line);
+	const lane_id = match?.[1] ?? "runner";
+	const line = match?.[2] ?? output.line;
+	const status =
+		(lane_id === "web" && /Local:\s+http/u.test(line)) ||
+		(lane_id === "forge" && /^forge ready at\b/iu.test(line))
+			? "ready"
+			: undefined;
+
+	return Effect.succeed([
+		{
+			lane_id,
+			line,
+			...(status === undefined ? {} : { status }),
+		},
+	]);
+};
+
 export const make_dev_lane_definitions = (mode: RunnerMode): DevLaneDefinition[] => [
 	{ id: "runner", label: "Overview", status: "ready" },
 	...(mode === "dev" || mode === "web"
@@ -163,6 +205,58 @@ export const make_dev_lane_definitions = (mode: RunnerMode): DevLaneDefinition[]
 			] satisfies DevLaneDefinition[])
 		: []),
 ];
+
+export const make_artisan_runner_options = (
+	mode: Extract<RunnerMode, "dev" | "forge" | "web">,
+	instance: DevInstance,
+	endpoints: DevSurfaceEndpoints,
+	environment: Readonly<Record<string, string | undefined>>,
+): Runner.Options => ({
+	dashboard: environment.ARTISAN_DEV_TUI === "0" ? "never" : "auto",
+	endpoints: [
+		...(mode === "dev" || mode === "web"
+			? [{ label: `Artisan Editor ${endpoints.web.origin}`, url: endpoints.web.origin }]
+			: []),
+		...(mode === "dev" || mode === "forge"
+			? [{ label: `Artisan Forge ${endpoints.forge.origin}`, url: endpoints.forge.origin }]
+			: []),
+	],
+	lanes: make_dev_lane_definitions(mode).map((lane) => ({
+		id: lane.id,
+		name: lane.label,
+		status: lane.status,
+	})),
+	title: `Artisan dev · instance ${instance.offset}`,
+});
+
+export const make_artisan_runner_process = (
+	script_path: string,
+	mode: Extract<RunnerMode, "dev" | "forge" | "web">,
+	environment: Readonly<Record<string, string | undefined>>,
+): Runner.Process => ({
+	command: RunnerChildProcess.make(process.execPath, [script_path, mode], {
+		env: make_artisan_runner_adapter_environment(environment),
+		extendEnv: false,
+	}),
+	id: "runner",
+	lane_ids: make_dev_lane_definitions(mode).map((lane) => lane.id),
+	name: "Artisan development",
+	readiness: Runner.Readiness.manual(),
+	route_output: route_artisan_runner_output,
+});
+
+const MakeArtisanRunner = (
+	script_path: string,
+	mode: Extract<RunnerMode, "dev" | "forge" | "web">,
+	instance: DevInstance,
+	endpoints: DevSurfaceEndpoints,
+) =>
+	Effect.gen(function* () {
+		yield* Runner.make(
+			[make_artisan_runner_process(script_path, mode, process.env)],
+			make_artisan_runner_options(mode, instance, endpoints, process.env),
+		);
+	});
 
 export const should_use_dev_tui = (input: {
 	readonly environment: Readonly<Record<string, string | undefined>>;
@@ -290,6 +384,28 @@ export const make_direct_dev_endpoints = (instance: DevInstance): DevSurfaceEndp
 		origin: instance.web_origin,
 	},
 });
+
+/**
+ * Runner needs its links before it spawns the legacy adapter. Keep this purely
+ * declarative: the adapter still registers and verifies Portless routes itself.
+ */
+export const make_dashboard_dev_endpoints = (
+	instance: DevInstance,
+	environment: Readonly<Record<string, string | undefined>>,
+): DevSurfaceEndpoints => {
+	if (!should_use_portless(environment)) return make_direct_dev_endpoints(instance);
+
+	const names = make_portless_base_names(
+		instance.offset,
+		environment.ARTISAN_DEV_INSTANCE !== undefined,
+	);
+	const endpoint = (alias_name: string): DevSurfaceEndpoint => ({
+		alias_name,
+		hostname: `${alias_name}.localhost`,
+		origin: `https://${alias_name}.localhost`,
+	});
+	return { forge: endpoint(names.forge), web: endpoint(names.web) };
+};
 
 /**
  * The main worktree keeps the well-known 4848/4849 pair; linked worktrees and
@@ -477,712 +593,734 @@ if (runner_is_entry) {
 	});
 	const paths = derive_dev_paths(repository_root, instance.offset);
 	let endpoints = make_direct_dev_endpoints(instance);
+	const dashboard_endpoints = make_dashboard_dev_endpoints(instance, process.env);
 	const mode = parse_runner_mode(process.argv[2]);
 	if (mode === undefined) {
 		console.error(`Unknown development mode: ${process.argv[2]}`);
 		console.error("Usage: pnpm dev [dev|forge|web|pair|doctor]");
 		process.exit(1);
 	}
-
-	const lanes: Lane[] = [];
-	let shutting_down = false;
-	let dashboard: DevDashboard | undefined;
-
-	const send_dashboard_event = (event: DevTuiEvent): boolean => dashboard?.send(event) ?? false;
-
-	const log = (line: string, lane_id: DevLaneId = "runner") => {
-		const sanitized_line = sanitize_dev_log_line(line);
-
-		if (send_dashboard_event({ lane_id, line: sanitized_line, type: "log" })) return;
-
-		console.log(`[dev] ${line}`);
-	};
-
-	const set_lane_status = (lane_id: DevLaneId, status: DevLaneStatus) => {
-		send_dashboard_event({ lane_id, status, type: "status" });
-	};
-
-	const portless_enabled = should_use_portless(process.env);
-	const portless_environment = make_portless_environment({
-		...process.env,
-		/** Artisan's development contract is the stable HTTPS `.localhost` pair. */
-		NO_COLOR: "1",
-		PORTLESS_HTTPS: "1",
-		PORTLESS_LAN: "0",
-		PORTLESS_TLD: "localhost",
-	});
-	let portless_entry: string | undefined;
-	const registered_portless_aliases: Array<{
-		readonly endpoint: DevSurfaceEndpoint;
-		readonly port: number;
-	}> = [];
-	const node_major = Number(process.versions.node.split(".")[0]);
-	const assert_dev_node_version = (): void => {
-		const required_major = required_dev_node_major(portless_enabled);
-		if (node_major >= required_major) return;
-		throw new Error(
-			portless_enabled
-				? `Portless requires Node ${required_major} or newer; upgrade Node or set PORTLESS=0`
-				: `Artisan development requires Node ${required_major} or newer`,
+	if (should_wrap_artisan_runner({ environment: process.env, mode })) {
+		const interactive_mode = mode as Extract<RunnerMode, "dev" | "forge" | "web">;
+		NodeRuntime.runMain(
+			MakeArtisanRunner(
+				resolve(script_entry ?? "runner.ts"),
+				interactive_mode,
+				instance,
+				dashboard_endpoints,
+			),
 		);
-	};
-	const run_portless = (arguments_: ReadonlyArray<string>, capture_output = false): string => {
-		portless_entry ??= resolve_portless_entry();
-		const result = spawnSync(process.execPath, [portless_entry, ...arguments_], {
-			cwd: repository_root,
-			encoding: "utf8",
-			env: portless_environment,
-			stdio: capture_output ? ["ignore", "pipe", "pipe"] : "inherit",
-			windowsHide: true,
-		});
-		if (result.error !== undefined) throw result.error;
-		if (result.status !== 0) {
-			const detail = capture_output ? result.stderr.trim() : "";
-			throw new Error(
-				`portless ${arguments_.join(" ")} failed${detail.length > 0 ? `: ${detail}` : ""}`,
-			);
-		}
-		return capture_output ? result.stdout.trim() : "";
-	};
+	} else {
+		const lanes: Lane[] = [];
+		let shutting_down = false;
+		let dashboard: DevDashboard | undefined;
 
-	const resolve_portless_endpoints = (): DevSurfaceEndpoints => {
-		const names = make_portless_base_names(
-			instance.offset,
-			process.env.ARTISAN_DEV_INSTANCE !== undefined,
-		);
-		return {
-			forge: parse_portless_endpoint(names.forge, run_portless(["get", names.forge], true)),
-			web: parse_portless_endpoint(names.web, run_portless(["get", names.web], true)),
+		const send_dashboard_event = (event: DevTuiEvent): boolean =>
+			dashboard?.send(event) ?? false;
+
+		const log = (line: string, lane_id: DevLaneId = "runner") => {
+			const sanitized_line = sanitize_dev_log_line(line);
+
+			if (send_dashboard_event({ lane_id, line: sanitized_line, type: "log" })) return;
+
+			console.log(`[${lane_id}] ${line}`);
 		};
-	};
 
-	const read_portless_routes = (): PortlessRouteRecord[] =>
-		parse_portless_route_listing(run_portless(["list"], true));
+		const set_lane_status = (lane_id: DevLaneId, status: DevLaneStatus) => {
+			send_dashboard_event({ lane_id, status, type: "status" });
+		};
 
-	const loopback_port_is_listening = (port: number): Promise<boolean> =>
-		new Promise((accept) => {
-			const socket = createConnection({ host: "127.0.0.1", port });
-			let settled = false;
-			const settle = (listening: boolean) => {
-				if (settled) return;
-				settled = true;
-				socket.destroy();
-				accept(listening);
-			};
-			socket.setTimeout(500, () => settle(false));
-			socket.once("connect", () => settle(true));
-			socket.once("error", () => settle(false));
+		const portless_enabled = should_use_portless(process.env);
+		const portless_environment = make_portless_environment({
+			...process.env,
+			/** Artisan's development contract is the stable HTTPS `.localhost` pair. */
+			NO_COLOR: "1",
+			PORTLESS_HTTPS: "1",
+			PORTLESS_LAN: "0",
+			PORTLESS_TLD: "localhost",
 		});
-
-	const register_portless_alias = async (
-		endpoint: DevSurfaceEndpoint,
-		port: number,
-	): Promise<void> => {
-		const existing = read_portless_routes().find(
-			(route) => route.hostname === endpoint.hostname,
-		);
-		const target_is_listening = await loopback_port_is_listening(port);
-		const plan = plan_portless_alias(existing, port, target_is_listening);
-		if (plan === "conflict") {
+		let portless_entry: string | undefined;
+		const registered_portless_aliases: Array<{
+			readonly endpoint: DevSurfaceEndpoint;
+			readonly port: number;
+		}> = [];
+		const node_major = Number(process.versions.node.split(".")[0]);
+		const assert_dev_node_version = (): void => {
+			const required_major = required_dev_node_major(portless_enabled);
+			if (node_major >= required_major) return;
 			throw new Error(
-				existing === undefined
-					? `${endpoint.origin} cannot be registered because 127.0.0.1:${port} is already in use`
-					: `${endpoint.origin} is already registered to port ${existing.port} or its target is running`,
+				portless_enabled
+					? `Portless requires Node ${required_major} or newer; upgrade Node or set PORTLESS=0`
+					: `Artisan development requires Node ${required_major} or newer`,
 			);
-		}
-		if (plan === "replace") {
-			run_portless(["alias", "--remove", endpoint.alias_name]);
-		}
-		run_portless(["alias", endpoint.alias_name, String(port)]);
-		registered_portless_aliases.push({ endpoint, port });
-	};
-
-	const unregister_portless_aliases = (): void => {
-		for (const registration of registered_portless_aliases.splice(0).reverse()) {
-			const { endpoint, port } = registration;
-			try {
-				const current = read_portless_routes().find(
-					(route) => route.hostname === endpoint.hostname,
+		};
+		const run_portless = (
+			arguments_: ReadonlyArray<string>,
+			capture_output = false,
+		): string => {
+			portless_entry ??= resolve_portless_entry();
+			const result = spawnSync(process.execPath, [portless_entry, ...arguments_], {
+				cwd: repository_root,
+				encoding: "utf8",
+				env: portless_environment,
+				stdio: capture_output ? ["ignore", "pipe", "pipe"] : "inherit",
+				windowsHide: true,
+			});
+			if (result.error !== undefined) throw result.error;
+			if (result.status !== 0) {
+				const detail = capture_output ? result.stderr.trim() : "";
+				throw new Error(
+					`portless ${arguments_.join(" ")} failed${detail.length > 0 ? `: ${detail}` : ""}`,
 				);
-				if (current === undefined) continue;
-				if (current.kind !== "alias" || current.port !== port) {
-					console.error(
-						`[dev] leaving replacement Portless route ${endpoint.origin} untouched`,
-					);
-					continue;
-				}
+			}
+			return capture_output ? result.stdout.trim() : "";
+		};
+
+		const resolve_portless_endpoints = (): DevSurfaceEndpoints => {
+			const names = make_portless_base_names(
+				instance.offset,
+				process.env.ARTISAN_DEV_INSTANCE !== undefined,
+			);
+			return {
+				forge: parse_portless_endpoint(
+					names.forge,
+					run_portless(["get", names.forge], true),
+				),
+				web: parse_portless_endpoint(names.web, run_portless(["get", names.web], true)),
+			};
+		};
+
+		const read_portless_routes = (): PortlessRouteRecord[] =>
+			parse_portless_route_listing(run_portless(["list"], true));
+
+		const loopback_port_is_listening = (port: number): Promise<boolean> =>
+			new Promise((accept) => {
+				const socket = createConnection({ host: "127.0.0.1", port });
+				let settled = false;
+				const settle = (listening: boolean) => {
+					if (settled) return;
+					settled = true;
+					socket.destroy();
+					accept(listening);
+				};
+				socket.setTimeout(500, () => settle(false));
+				socket.once("connect", () => settle(true));
+				socket.once("error", () => settle(false));
+			});
+
+		const register_portless_alias = async (
+			endpoint: DevSurfaceEndpoint,
+			port: number,
+		): Promise<void> => {
+			const existing = read_portless_routes().find(
+				(route) => route.hostname === endpoint.hostname,
+			);
+			const target_is_listening = await loopback_port_is_listening(port);
+			const plan = plan_portless_alias(existing, port, target_is_listening);
+			if (plan === "conflict") {
+				throw new Error(
+					existing === undefined
+						? `${endpoint.origin} cannot be registered because 127.0.0.1:${port} is already in use`
+						: `${endpoint.origin} is already registered to port ${existing.port} or its target is running`,
+				);
+			}
+			if (plan === "replace") {
 				run_portless(["alias", "--remove", endpoint.alias_name]);
+			}
+			run_portless(["alias", endpoint.alias_name, String(port)]);
+			registered_portless_aliases.push({ endpoint, port });
+		};
+
+		const unregister_portless_aliases = (): void => {
+			for (const registration of registered_portless_aliases.splice(0).reverse()) {
+				const { endpoint, port } = registration;
+				try {
+					const current = read_portless_routes().find(
+						(route) => route.hostname === endpoint.hostname,
+					);
+					if (current === undefined) continue;
+					if (current.kind !== "alias" || current.port !== port) {
+						console.error(
+							`[dev] leaving replacement Portless route ${endpoint.origin} untouched`,
+						);
+						continue;
+					}
+					run_portless(["alias", "--remove", endpoint.alias_name]);
+				} catch (cause) {
+					console.error(
+						`[dev] could not remove Portless alias ${endpoint.alias_name}: ${cause instanceof Error ? cause.message : String(cause)}`,
+					);
+				}
+			}
+		};
+
+		const setup_portless = async (): Promise<void> => {
+			if (!portless_enabled) return;
+			assert_dev_node_version();
+			run_portless(["proxy", "start"]);
+			endpoints = resolve_portless_endpoints();
+			try {
+				if (mode === "dev" || mode === "forge") {
+					await register_portless_alias(endpoints.forge, instance.forge_port);
+				}
+				if (mode === "dev" || mode === "web") {
+					await register_portless_alias(endpoints.web, instance.web_port);
+				}
+			} catch (cause) {
+				unregister_portless_aliases();
+				throw cause;
+			}
+		};
+
+		const attach_lane = (name: ProcessLaneId, child: ChildProcess): Lane => {
+			register_shutdown();
+			mkdirSync(paths.logs_root, { recursive: true });
+			const file = createWriteStream(join(paths.logs_root, `${name}.log`), { flags: "a" });
+
+			set_lane_status(name, "starting");
+			child.once("spawn", () => set_lane_status(name, "running"));
+			child.once("error", () => set_lane_status(name, "failed"));
+
+			for (const stream of [child.stdout, child.stderr]) {
+				if (stream === null) continue;
+				createInterface({ input: stream }).on("line", (line) => {
+					const sanitized_line = sanitize_dev_log_line(line);
+
+					if (!send_dashboard_event({ lane_id: name, line, type: "log" })) {
+						console.log(`[${name}] ${line}`);
+					}
+					if (name === "web" && /Local:\s+http/u.test(sanitized_line)) {
+						set_lane_status(name, "ready");
+					}
+					file.write(`${sanitized_line}\n`);
+				});
+			}
+			child.on("exit", (code) => {
+				file.end();
+				set_lane_status(name, shutting_down || code === 0 ? "stopped" : "failed");
+				if (!shutting_down && code !== 0 && code !== null) {
+					log(`${name} exited with code ${code}`, name);
+				}
+			});
+			const lane = { child, name };
+			lanes.push(lane);
+			return lane;
+		};
+
+		const start_dashboard = (lane_definitions: ReadonlyArray<DevLaneDefinition>) => {
+			let bun_executable: string;
+			let dashboard_entry: string;
+			let child: ChildProcess;
+
+			try {
+				bun_executable = resolve_bun_executable();
+				dashboard_entry = resolve_dev_tui_entry();
+				child = spawn(bun_executable, [dashboard_entry], {
+					cwd: repository_root,
+					env: process.env,
+					stdio: ["inherit", "inherit", "inherit", "pipe", "pipe"],
+					windowsHide: false,
+				});
 			} catch (cause) {
 				console.error(
-					`[dev] could not remove Portless alias ${endpoint.alias_name}: ${cause instanceof Error ? cause.message : String(cause)}`,
+					`[dev] dashboard could not start: ${cause instanceof Error ? cause.message : String(cause)}`,
 				);
+
+				return undefined;
 			}
-		}
-	};
+			const event_stream = child.stdio[3] as Writable | null;
+			const command_stream = child.stdio[4] as Readable | null;
+			let active = event_stream !== null && command_stream !== null;
+			let backpressured = false;
+			let closing = false;
+			let force_close_timeout: NodeJS.Timeout | undefined;
+			const pending_events: DevTuiEvent[] = [];
 
-	const setup_portless = async (): Promise<void> => {
-		if (!portless_enabled) return;
-		assert_dev_node_version();
-		run_portless(["proxy", "start"]);
-		endpoints = resolve_portless_endpoints();
-		try {
-			if (mode === "dev" || mode === "forge") {
-				await register_portless_alias(endpoints.forge, instance.forge_port);
+			if (!active || event_stream === null || command_stream === null) {
+				child.kill();
+				return undefined;
 			}
-			if (mode === "dev" || mode === "web") {
-				await register_portless_alias(endpoints.web, instance.web_port);
-			}
-		} catch (cause) {
-			unregister_portless_aliases();
-			throw cause;
-		}
-	};
 
-	const attach_lane = (name: ProcessLaneId, child: ChildProcess): Lane => {
-		register_shutdown();
-		mkdirSync(paths.logs_root, { recursive: true });
-		const file = createWriteStream(join(paths.logs_root, `${name}.log`), { flags: "a" });
+			const write_event = (event: DevTuiEvent): boolean =>
+				event_stream.write(`${JSON.stringify(event)}\n`);
 
-		set_lane_status(name, "starting");
-		child.once("spawn", () => set_lane_status(name, "running"));
-		child.once("error", () => set_lane_status(name, "failed"));
+			const flush_pending_events = (): void => {
+				backpressured = false;
 
-		for (const stream of [child.stdout, child.stderr]) {
-			if (stream === null) continue;
-			createInterface({ input: stream }).on("line", (line) => {
-				const sanitized_line = sanitize_dev_log_line(line);
+				try {
+					while (active && pending_events.length > 0) {
+						const event = pending_events.shift();
 
-				if (!send_dashboard_event({ lane_id: name, line, type: "log" })) {
-					console.log(`[${name}] ${line}`);
+						if (event === undefined) return;
+						if (write_event(event)) continue;
+
+						backpressured = true;
+						return;
+					}
+				} catch {
+					active = false;
 				}
-				if (name === "web" && /Local:\s+http/u.test(sanitized_line)) {
-					set_lane_status(name, "ready");
+			};
+
+			const send = (event: DevTuiEvent): boolean => {
+				if (!active || event_stream.destroyed || event_stream.writableEnded) return false;
+
+				if (backpressured) {
+					enqueue_dev_tui_event(pending_events, event);
+					return true;
 				}
-				file.write(`${sanitized_line}\n`);
+
+				try {
+					backpressured = !write_event(event);
+					return true;
+				} catch {
+					active = false;
+					return false;
+				}
+			};
+
+			createInterface({ input: command_stream }).on("line", (line) => {
+				try {
+					const command = JSON.parse(line) as { readonly type?: unknown };
+
+					if (command.type === "shutdown") shutdown();
+				} catch {
+					/** A malformed display command is ignored; the supervisor keeps ownership. */
+				}
 			});
-		}
-		child.on("exit", (code) => {
-			file.end();
-			set_lane_status(name, shutting_down || code === 0 ? "stopped" : "failed");
-			if (!shutting_down && code !== 0 && code !== null) {
-				log(`${name} exited with code ${code}`, name);
-			}
-		});
-		const lane = { child, name };
-		lanes.push(lane);
-		return lane;
-	};
-
-	const start_dashboard = (lane_definitions: ReadonlyArray<DevLaneDefinition>) => {
-		let bun_executable: string;
-		let dashboard_entry: string;
-		let child: ChildProcess;
-
-		try {
-			bun_executable = resolve_bun_executable();
-			dashboard_entry = resolve_dev_tui_entry();
-			child = spawn(bun_executable, [dashboard_entry], {
-				cwd: repository_root,
-				env: process.env,
-				stdio: ["inherit", "inherit", "inherit", "pipe", "pipe"],
-				windowsHide: false,
-			});
-		} catch (cause) {
-			console.error(
-				`[dev] dashboard could not start: ${cause instanceof Error ? cause.message : String(cause)}`,
-			);
-
-			return undefined;
-		}
-		const event_stream = child.stdio[3] as Writable | null;
-		const command_stream = child.stdio[4] as Readable | null;
-		let active = event_stream !== null && command_stream !== null;
-		let backpressured = false;
-		let closing = false;
-		let force_close_timeout: NodeJS.Timeout | undefined;
-		const pending_events: DevTuiEvent[] = [];
-
-		if (!active || event_stream === null || command_stream === null) {
-			child.kill();
-			return undefined;
-		}
-
-		const write_event = (event: DevTuiEvent): boolean =>
-			event_stream.write(`${JSON.stringify(event)}\n`);
-
-		const flush_pending_events = (): void => {
-			backpressured = false;
-
-			try {
-				while (active && pending_events.length > 0) {
-					const event = pending_events.shift();
-
-					if (event === undefined) return;
-					if (write_event(event)) continue;
-
-					backpressured = true;
-					return;
-				}
-			} catch {
-				active = false;
-			}
-		};
-
-		const send = (event: DevTuiEvent): boolean => {
-			if (!active || event_stream.destroyed || event_stream.writableEnded) return false;
-
-			if (backpressured) {
-				enqueue_dev_tui_event(pending_events, event);
-				return true;
-			}
-
-			try {
-				backpressured = !write_event(event);
-				return true;
-			} catch {
-				active = false;
-				return false;
-			}
-		};
-
-		createInterface({ input: command_stream }).on("line", (line) => {
-			try {
-				const command = JSON.parse(line) as { readonly type?: unknown };
-
-				if (command.type === "shutdown") shutdown();
-			} catch {
-				/** A malformed display command is ignored; the supervisor keeps ownership. */
-			}
-		});
-		event_stream.once("error", () => {
-			active = false;
-			pending_events.length = 0;
-		});
-		event_stream.on("drain", flush_pending_events);
-		child.once("error", (cause) => {
-			active = false;
-			pending_events.length = 0;
-			console.error(`[dev] dashboard could not start: ${cause.message}`);
-		});
-		child.once("exit", (code) => {
-			active = false;
-			pending_events.length = 0;
-			if (force_close_timeout !== undefined) clearTimeout(force_close_timeout);
-			event_stream.destroy();
-			command_stream.destroy();
-			if (!closing && !shutting_down) {
-				console.error(
-					`[dev] dashboard exited with code ${code ?? "unknown"}; using plain logs`,
-				);
-			}
-		});
-
-		const control: DevDashboard = {
-			close: () => {
-				if (closing) return;
-				closing = true;
+			event_stream.once("error", () => {
 				active = false;
 				pending_events.length = 0;
-
-				if (!event_stream.destroyed && !event_stream.writableEnded) {
-					event_stream.end(`${JSON.stringify({ type: "shutdown" })}\n`);
+			});
+			event_stream.on("drain", flush_pending_events);
+			child.once("error", (cause) => {
+				active = false;
+				pending_events.length = 0;
+				console.error(`[dev] dashboard could not start: ${cause.message}`);
+			});
+			child.once("exit", (code) => {
+				active = false;
+				pending_events.length = 0;
+				if (force_close_timeout !== undefined) clearTimeout(force_close_timeout);
+				event_stream.destroy();
+				command_stream.destroy();
+				if (!closing && !shutting_down) {
+					console.error(
+						`[dev] dashboard exited with code ${code ?? "unknown"}; using plain logs`,
+					);
 				}
+			});
 
-				force_close_timeout = setTimeout(() => {
-					event_stream.destroy();
-					command_stream.destroy();
-					if (child.pid !== undefined && child.exitCode === null) child.kill();
-				}, 2_000);
-				force_close_timeout.unref();
-			},
-			send,
+			const control: DevDashboard = {
+				close: () => {
+					if (closing) return;
+					closing = true;
+					active = false;
+					pending_events.length = 0;
+
+					if (!event_stream.destroyed && !event_stream.writableEnded) {
+						event_stream.end(`${JSON.stringify({ type: "shutdown" })}\n`);
+					}
+
+					force_close_timeout = setTimeout(() => {
+						event_stream.destroy();
+						command_stream.destroy();
+						if (child.pid !== undefined && child.exitCode === null) child.kill();
+					}, 2_000);
+					force_close_timeout.unref();
+				},
+				send,
+			};
+
+			const dashboard_endpoints: ReadonlyArray<DevEndpoint> = [
+				{ label: `Artisan Editor ${endpoints.web.origin}`, url: endpoints.web.origin },
+				{ label: `Artisan Forge ${endpoints.forge.origin}`, url: endpoints.forge.origin },
+			];
+
+			control.send({
+				endpoints: dashboard_endpoints,
+				lanes: lane_definitions,
+				title: `Artisan dev · instance ${instance.offset}`,
+				type: "configure",
+			});
+
+			return control;
 		};
 
-		const dashboard_endpoints: ReadonlyArray<DevEndpoint> = [
-			{ label: `Artisan Editor ${endpoints.web.origin}`, url: endpoints.web.origin },
-			{ label: `Artisan Forge ${endpoints.forge.origin}`, url: endpoints.forge.origin },
-		];
+		const kill_tree = (child: ChildProcess) => {
+			if (child.pid === undefined || child.exitCode !== null) return;
 
-		control.send({
-			endpoints: dashboard_endpoints,
-			lanes: lane_definitions,
-			title: `Artisan dev · instance ${instance.offset}`,
-			type: "configure",
-		});
+			if (process.platform === "win32") {
+				spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
+				return;
+			}
 
-		return control;
-	};
+			try {
+				process.kill(-child.pid, "SIGTERM");
+			} catch {
+				child.kill("SIGTERM");
+			}
+		};
 
-	const kill_tree = (child: ChildProcess) => {
-		if (child.pid === undefined || child.exitCode !== null) return;
+		const shutdown = () => {
+			if (shutting_down) return;
+			log("shutting down");
+			shutting_down = true;
+			dashboard?.close();
+			unregister_portless_aliases();
+			const watcher = forge_watcher;
+			forge_watcher = undefined;
+			if (watcher !== undefined) void watcher.close().catch(() => undefined);
+			if (lanes.length === 0) return;
+			for (const lane of lanes) kill_tree(lane.child);
+		};
+		/** Registered lazily: query modes must exit without teardown side effects. */
+		let shutdown_registered = false;
+		const register_shutdown = () => {
+			if (shutdown_registered) return;
+			shutdown_registered = true;
+			process.once("SIGINT", shutdown);
+			process.once("SIGTERM", shutdown);
+			process.once("exit", shutdown);
+		};
 
-		if (process.platform === "win32") {
-			spawnSync("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore" });
-			return;
-		}
+		/** Arguments are static runner-owned strings, joined once for the shell. */
+		const spawn_pnpm = (
+			name: ProcessLaneId,
+			pnpm_arguments: ReadonlyArray<string>,
+			extra_environment: Record<string, string> = {},
+		) =>
+			attach_lane(
+				name,
+				spawn(`pnpm ${pnpm_arguments.join(" ")}`, {
+					cwd: repository_root,
+					detached: process.platform !== "win32",
+					env: { ...process.env, ...extra_environment },
+					shell: true,
+					stdio: ["ignore", "pipe", "pipe"],
+					windowsHide: true,
+				}),
+			);
 
-		try {
-			process.kill(-child.pid, "SIGTERM");
-		} catch {
-			child.kill("SIGTERM");
-		}
-	};
+		/** Doctor stays read-only; every run mode prepares the home first. */
+		let auth_token = "";
+		const prepare_dev_home = () => {
+			auth_token = ensure_dev_secrets(paths);
+			write_dev_config(paths, instance);
+			mkdirSync(paths.data_root, { recursive: true });
+		};
 
-	const shutdown = () => {
-		if (shutting_down) return;
-		log("shutting down");
-		shutting_down = true;
-		dashboard?.close();
-		unregister_portless_aliases();
-		const watcher = forge_watcher;
-		forge_watcher = undefined;
-		if (watcher !== undefined) void watcher.close().catch(() => undefined);
-		if (lanes.length === 0) return;
-		for (const lane of lanes) kill_tree(lane.child);
-	};
-	/** Registered lazily: query modes must exit without teardown side effects. */
-	let shutdown_registered = false;
-	const register_shutdown = () => {
-		if (shutdown_registered) return;
-		shutdown_registered = true;
-		process.once("SIGINT", shutdown);
-		process.once("SIGTERM", shutdown);
-		process.once("exit", shutdown);
-	};
-
-	/** Arguments are static runner-owned strings, joined once for the shell. */
-	const spawn_pnpm = (
-		name: ProcessLaneId,
-		pnpm_arguments: ReadonlyArray<string>,
-		extra_environment: Record<string, string> = {},
-	) =>
-		attach_lane(
-			name,
-			spawn(`pnpm ${pnpm_arguments.join(" ")}`, {
+		let forge_lane: Lane | undefined;
+		let forge_watcher: RolldownWatcher | undefined;
+		let forge_build_generation = 0;
+		let applied_forge_build_generation = 0;
+		let restarting_forge = false;
+		let forge_build_finalization_failed = false;
+		let forge_bundle_finalization = Promise.resolve();
+		const start_forge = () => {
+			const child = spawn(process.execPath, [paths.forge_bundle], {
 				cwd: repository_root,
 				detached: process.platform !== "win32",
-				env: { ...process.env, ...extra_environment },
-				shell: true,
-				stdio: ["ignore", "pipe", "pipe"],
+				env: {
+					...process.env,
+					...make_forge_environment(paths, instance, auth_token, endpoints),
+				},
+				stdio: ["ignore", "pipe", "pipe", "ipc"],
 				windowsHide: true,
-			}),
-		);
+			});
+			forge_lane = attach_lane("forge", child);
+			void (async () => {
+				for (let attempt = 0; attempt < 120; attempt += 1) {
+					if (child.exitCode !== null) return;
+					if (await probe(`${instance.forge_origin}/health`)) {
+						set_lane_status("forge", "ready");
+						log(`forge ready at ${endpoints.forge.origin}`, "forge");
+						return;
+					}
+					await sleep(500);
+				}
+				set_lane_status("forge", "failed");
+				log(`forge did not answer on ${instance.forge_origin}/health`, "forge");
+			})();
+		};
 
-	/** Doctor stays read-only; every run mode prepares the home first. */
-	let auth_token = "";
-	const prepare_dev_home = () => {
-		auth_token = ensure_dev_secrets(paths);
-		write_dev_config(paths, instance);
-		mkdirSync(paths.data_root, { recursive: true });
-	};
+		/** The Forge honors parent disconnect as a shutdown request; force-kill is the fallback. */
+		const stop_forge = async () => {
+			const lane = forge_lane;
+			forge_lane = undefined;
+			if (lane === undefined || lane.child.exitCode !== null) return;
+			try {
+				lane.child.disconnect();
+			} catch {
+				/** Already disconnected. */
+			}
+			for (let waited = 0; waited < 5_000 && lane.child.exitCode === null; waited += 100) {
+				await sleep(100);
+			}
+			kill_tree(lane.child);
+		};
 
-	let forge_lane: Lane | undefined;
-	let forge_watcher: RolldownWatcher | undefined;
-	let forge_build_generation = 0;
-	let applied_forge_build_generation = 0;
-	let restarting_forge = false;
-	let forge_build_finalization_failed = false;
-	let forge_bundle_finalization = Promise.resolve();
-	const start_forge = () => {
-		const child = spawn(process.execPath, [paths.forge_bundle], {
-			cwd: repository_root,
-			detached: process.platform !== "win32",
-			env: {
-				...process.env,
-				...make_forge_environment(paths, instance, auth_token, endpoints),
-			},
-			stdio: ["ignore", "pipe", "pipe", "ipc"],
-			windowsHide: true,
-		});
-		forge_lane = attach_lane("forge", child);
-		void (async () => {
-			for (let attempt = 0; attempt < 120; attempt += 1) {
-				if (child.exitCode !== null) return;
-				if (await probe(`${instance.forge_origin}/health`)) {
-					set_lane_status("forge", "ready");
-					log(`forge ready at ${endpoints.forge.origin}`, "forge");
+		const restart_forge_after_build = async () => {
+			if (
+				shutting_down ||
+				restarting_forge ||
+				forge_build_generation === applied_forge_build_generation
+			)
+				return;
+
+			restarting_forge = true;
+			try {
+				if (!existsSync(paths.forge_bundle)) {
+					set_lane_status("forge", "failed");
+					log(`Forge bundle is missing: ${paths.forge_bundle}`, "forge");
 					return;
 				}
-				await sleep(500);
+
+				set_lane_status("forge", "starting");
+				if (forge_lane !== undefined) {
+					log("Forge bundle changed; restarting Artisan Forge", "forge");
+					await stop_forge();
+				}
+				if (!shutting_down) {
+					start_forge();
+					applied_forge_build_generation = forge_build_generation;
+				}
+			} finally {
+				restarting_forge = false;
+				if (!shutting_down && forge_build_generation !== applied_forge_build_generation)
+					void restart_forge_after_build();
 			}
-			set_lane_status("forge", "failed");
-			log(`forge did not answer on ${instance.forge_origin}/health`, "forge");
-		})();
-	};
+		};
 
-	/** The Forge honors parent disconnect as a shutdown request; force-kill is the fallback. */
-	const stop_forge = async () => {
-		const lane = forge_lane;
-		forge_lane = undefined;
-		if (lane === undefined || lane.child.exitCode !== null) return;
-		try {
-			lane.child.disconnect();
-		} catch {
-			/** Already disconnected. */
-		}
-		for (let waited = 0; waited < 5_000 && lane.child.exitCode === null; waited += 100) {
-			await sleep(100);
-		}
-		kill_tree(lane.child);
-	};
-
-	const restart_forge_after_build = async () => {
-		if (
-			shutting_down ||
-			restarting_forge ||
-			forge_build_generation === applied_forge_build_generation
-		)
-			return;
-
-		restarting_forge = true;
-		try {
-			if (!existsSync(paths.forge_bundle)) {
-				set_lane_status("forge", "failed");
-				log(`Forge bundle is missing: ${paths.forge_bundle}`, "forge");
-				return;
-			}
-
-			set_lane_status("forge", "starting");
-			if (forge_lane !== undefined) {
-				log("Forge bundle changed; restarting Artisan Forge", "forge");
-				await stop_forge();
-			}
-			if (!shutting_down) {
-				start_forge();
-				applied_forge_build_generation = forge_build_generation;
-			}
-		} finally {
-			restarting_forge = false;
-			if (!shutting_down && forge_build_generation !== applied_forge_build_generation)
-				void restart_forge_after_build();
-		}
-	};
-
-	const start_forge_watcher = () => {
-		try {
-			forge_watcher = watch(CreateForgeRolldownConfig({ watch: true }));
-		} catch (cause) {
-			set_lane_status("forge", "failed");
-			log(
-				`Forge watcher could not start: ${cause instanceof Error ? cause.message : String(cause)}`,
-				"forge",
-			);
-			return;
-		}
-
-		forge_watcher.on("event", async (event: RolldownWatcherEvent) => {
-			if (event.code === "START") {
-				forge_build_finalization_failed = false;
-				log("building Artisan Forge", "forge");
-				return;
-			}
-
-			if (event.code === "BUNDLE_END") {
-				forge_bundle_finalization = event.result.close().then(
-					() => log(`Forge bundle ready in ${event.duration}ms`, "forge"),
-					(cause: unknown) => {
-						forge_build_finalization_failed = true;
-						set_lane_status("forge", "failed");
-						log(
-							`Forge bundle finalization failed: ${cause instanceof Error ? cause.message : String(cause)}`,
-							"forge",
-						);
-					},
-				);
-				await forge_bundle_finalization;
-				return;
-			}
-
-			if (event.code === "ERROR") {
-				forge_build_finalization_failed = true;
+		const start_forge_watcher = () => {
+			try {
+				forge_watcher = watch(CreateForgeRolldownConfig({ watch: true }));
+			} catch (cause) {
 				set_lane_status("forge", "failed");
 				log(
-					`Forge bundle failed: ${event.error instanceof Error ? event.error.message : String(event.error)}`,
+					`Forge watcher could not start: ${cause instanceof Error ? cause.message : String(cause)}`,
 					"forge",
 				);
-				try {
-					await event.result.close();
-				} catch {
-					/** Preserve the original build error. */
-				}
 				return;
 			}
 
-			if (event.code === "END") {
-				await forge_bundle_finalization;
-				if (forge_build_finalization_failed) return;
-				forge_build_generation += 1;
-				void restart_forge_after_build();
-			}
-		});
-	};
+			forge_watcher.on("event", async (event: RolldownWatcherEvent) => {
+				if (event.code === "START") {
+					forge_build_finalization_failed = false;
+					log("building Artisan Forge", "forge");
+					return;
+				}
 
-	const mint_pair_url = async (): Promise<string | undefined> => {
-		try {
-			const minted = await fetch(`${instance.forge_origin}/api/pair/request`, {
-				headers: { authorization: `Bearer ${auth_token}`, connection: "close" },
-				method: "POST",
+				if (event.code === "BUNDLE_END") {
+					forge_bundle_finalization = event.result.close().then(
+						() => log(`Forge bundle ready in ${event.duration}ms`, "forge"),
+						(cause: unknown) => {
+							forge_build_finalization_failed = true;
+							set_lane_status("forge", "failed");
+							log(
+								`Forge bundle finalization failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+								"forge",
+							);
+						},
+					);
+					await forge_bundle_finalization;
+					return;
+				}
+
+				if (event.code === "ERROR") {
+					forge_build_finalization_failed = true;
+					set_lane_status("forge", "failed");
+					log(
+						`Forge bundle failed: ${event.error instanceof Error ? event.error.message : String(event.error)}`,
+						"forge",
+					);
+					try {
+						await event.result.close();
+					} catch {
+						/** Preserve the original build error. */
+					}
+					return;
+				}
+
+				if (event.code === "END") {
+					await forge_bundle_finalization;
+					if (forge_build_finalization_failed) return;
+					forge_build_generation += 1;
+					void restart_forge_after_build();
+				}
 			});
-			if (!minted.ok) return undefined;
-			const body = (await minted.json()) as { readonly code?: unknown };
-			if (typeof body.code !== "string" || body.code.length === 0) return undefined;
-			return `${endpoints.web.origin}/#pair=${encodeURIComponent(body.code)}`;
-		} catch {
-			return undefined;
-		}
-	};
+		};
 
-	/**
-	 * Opens the Vite origin with a pairing fragment once both servers answer.
-	 *
-	 * In-page self-pairing only runs after the gate exhausts its retries, so a
-	 * cold start would otherwise sit on the remedy screen for the length of the
-	 * retry budget. Opening a pre-paired tab also settles which origin is the
-	 * development UI: the Forge origin serves no frontend at all.
-	 */
-	const open_paired_browser = async () => {
-		for (let attempt = 0; attempt < 120 && !shutting_down; attempt += 1) {
-			if (
-				(await probe(`${instance.forge_origin}/health`)) &&
-				(await probe(instance.web_origin))
-			) {
+		const mint_pair_url = async (): Promise<string | undefined> => {
+			try {
+				const minted = await fetch(`${instance.forge_origin}/api/pair/request`, {
+					headers: { authorization: `Bearer ${auth_token}`, connection: "close" },
+					method: "POST",
+				});
+				if (!minted.ok) return undefined;
+				const body = (await minted.json()) as { readonly code?: unknown };
+				if (typeof body.code !== "string" || body.code.length === 0) return undefined;
+				return `${endpoints.web.origin}/#pair=${encodeURIComponent(body.code)}`;
+			} catch {
+				return undefined;
+			}
+		};
+
+		/**
+		 * Opens the Vite origin with a pairing fragment once both servers answer.
+		 *
+		 * In-page self-pairing only runs after the gate exhausts its retries, so a
+		 * cold start would otherwise sit on the remedy screen for the length of the
+		 * retry budget. Opening a pre-paired tab also settles which origin is the
+		 * development UI: the Forge origin serves no frontend at all.
+		 */
+		const open_paired_browser = async () => {
+			for (let attempt = 0; attempt < 120 && !shutting_down; attempt += 1) {
+				if (
+					(await probe(`${instance.forge_origin}/health`)) &&
+					(await probe(instance.web_origin))
+				) {
+					const url = await mint_pair_url();
+					if (url === undefined) break;
+					set_lane_status("web", "ready");
+					log(`opening ${endpoints.web.origin} (paired)`, "web");
+					if (process.platform === "win32") {
+						spawnSync("cmd", ["/c", "start", "", url], { stdio: "ignore" });
+					}
+					return;
+				}
+				await sleep(1_000);
+			}
+			if (!shutting_down) {
+				log(
+					`could not open a paired browser; open ${endpoints.web.origin} and it self-pairs`,
+					"web",
+				);
+			}
+		};
+
+		const doctor = async () => {
+			const checks: Array<readonly [name: string, passed: boolean, detail: string]> = [];
+			checks.push([
+				"node",
+				node_major >= required_dev_node_major(portless_enabled),
+				`v${process.versions.node} (requires ${required_dev_node_major(portless_enabled)}+)`,
+			]);
+			checks.push(["forge bundle", existsSync(paths.forge_bundle), paths.forge_bundle]);
+			checks.push(["secrets", existsSync(paths.secrets), paths.secrets]);
+			const forge_healthy = await probe(`${instance.forge_origin}/health`);
+			checks.push(["forge health", forge_healthy, `${instance.forge_origin}/health`]);
+			const web_healthy = await probe(instance.web_origin);
+			checks.push(["web dev server", web_healthy, instance.web_origin]);
+			const state_path = join(paths.forge_home, "state.json");
+			if (existsSync(state_path)) {
+				const state = JSON.parse(readFileSync(state_path, "utf8")) as {
+					readonly pid?: number;
+				};
+				let alive = false;
+				if (typeof state.pid === "number") {
+					try {
+						process.kill(state.pid, 0);
+						alive = true;
+					} catch {
+						alive = false;
+					}
+				}
+				checks.push([
+					"forge state pid",
+					alive || !forge_healthy,
+					`pid ${state.pid ?? "unknown"} ${alive ? "alive" : "not running (stale state.json)"}`,
+				]);
+			}
+			for (const [name, passed, detail] of checks) {
+				console.log(`${passed ? "PASS" : "FAIL"}  ${name.padEnd(22)} ${detail}`);
+			}
+			/** Let the loop drain naturally: process.exit here races undici sockets on Windows. */
+			process.exitCode = checks.every(([, passed]) => passed) ? 0 : 1;
+		};
+
+		const main = async () => {
+			if (mode === "doctor") {
+				await doctor();
+				return;
+			}
+			prepare_dev_home();
+			if (mode === "pair") {
+				if (portless_enabled) {
+					try {
+						assert_dev_node_version();
+						endpoints = resolve_portless_endpoints();
+					} catch (cause) {
+						console.error(
+							`[dev] could not resolve Portless routes: ${cause instanceof Error ? cause.message : String(cause)}`,
+						);
+						process.exitCode = 1;
+						return;
+					}
+				}
 				const url = await mint_pair_url();
-				if (url === undefined) break;
-				set_lane_status("web", "ready");
-				log(`opening ${endpoints.web.origin} (paired)`, "web");
+				if (url === undefined) {
+					console.error(
+						`[dev] could not mint a pairing code from ${instance.forge_origin}; is the Forge running?`,
+					);
+					process.exit(1);
+				}
+				console.log(url);
 				if (process.platform === "win32") {
 					spawnSync("cmd", ["/c", "start", "", url], { stdio: "ignore" });
 				}
 				return;
 			}
-			await sleep(1_000);
-		}
-		if (!shutting_down) {
-			log(
-				`could not open a paired browser; open ${endpoints.web.origin} and it self-pairs`,
-				"web",
-			);
-		}
-	};
 
-	const doctor = async () => {
-		const checks: Array<readonly [name: string, passed: boolean, detail: string]> = [];
-		checks.push([
-			"node",
-			node_major >= required_dev_node_major(portless_enabled),
-			`v${process.versions.node} (requires ${required_dev_node_major(portless_enabled)}+)`,
-		]);
-		checks.push(["forge bundle", existsSync(paths.forge_bundle), paths.forge_bundle]);
-		checks.push(["secrets", existsSync(paths.secrets), paths.secrets]);
-		const forge_healthy = await probe(`${instance.forge_origin}/health`);
-		checks.push(["forge health", forge_healthy, `${instance.forge_origin}/health`]);
-		const web_healthy = await probe(instance.web_origin);
-		checks.push(["web dev server", web_healthy, instance.web_origin]);
-		const state_path = join(paths.forge_home, "state.json");
-		if (existsSync(state_path)) {
-			const state = JSON.parse(readFileSync(state_path, "utf8")) as {
-				readonly pid?: number;
-			};
-			let alive = false;
-			if (typeof state.pid === "number") {
-				try {
-					process.kill(state.pid, 0);
-					alive = true;
-				} catch {
-					alive = false;
-				}
-			}
-			checks.push([
-				"forge state pid",
-				alive || !forge_healthy,
-				`pid ${state.pid ?? "unknown"} ${alive ? "alive" : "not running (stale state.json)"}`,
-			]);
-		}
-		for (const [name, passed, detail] of checks) {
-			console.log(`${passed ? "PASS" : "FAIL"}  ${name.padEnd(22)} ${detail}`);
-		}
-		/** Let the loop drain naturally: process.exit here races undici sockets on Windows. */
-		process.exitCode = checks.every(([, passed]) => passed) ? 0 : 1;
-	};
-
-	const main = async () => {
-		if (mode === "doctor") {
-			await doctor();
-			return;
-		}
-		prepare_dev_home();
-		if (mode === "pair") {
-			if (portless_enabled) {
-				try {
-					assert_dev_node_version();
-					endpoints = resolve_portless_endpoints();
-				} catch (cause) {
-					console.error(
-						`[dev] could not resolve Portless routes: ${cause instanceof Error ? cause.message : String(cause)}`,
-					);
-					process.exitCode = 1;
-					return;
-				}
-			}
-			const url = await mint_pair_url();
-			if (url === undefined) {
+			register_shutdown();
+			try {
+				await setup_portless();
+			} catch (cause) {
 				console.error(
-					`[dev] could not mint a pairing code from ${instance.forge_origin}; is the Forge running?`,
+					`[dev] Portless setup failed: ${cause instanceof Error ? cause.message : String(cause)}`,
 				);
-				process.exit(1);
+				shutdown();
+				process.exitCode = 1;
+				return;
 			}
-			console.log(url);
-			if (process.platform === "win32") {
-				spawnSync("cmd", ["/c", "start", "", url], { stdio: "ignore" });
+
+			if (
+				should_use_dev_tui({
+					environment: process.env,
+					stdin_is_tty: process.stdin.isTTY,
+					stdout_is_tty: process.stdout.isTTY,
+				})
+			) {
+				dashboard = start_dashboard(make_dev_lane_definitions(mode));
 			}
-			return;
-		}
 
-		register_shutdown();
-		try {
-			await setup_portless();
-		} catch (cause) {
-			console.error(
-				`[dev] Portless setup failed: ${cause instanceof Error ? cause.message : String(cause)}`,
-			);
-			shutdown();
-			process.exitCode = 1;
-			return;
-		}
+			log(`instance offset ${instance.offset}`);
+			log(`forge    ${endpoints.forge.origin}`);
+			log(`frontend ${endpoints.web.origin}  (self-pairing enabled)`);
 
-		if (
-			should_use_dev_tui({
-				environment: process.env,
-				stdin_is_tty: process.stdin.isTTY,
-				stdout_is_tty: process.stdout.isTTY,
-			})
-		) {
-			dashboard = start_dashboard(make_dev_lane_definitions(mode));
-		}
+			if (mode === "dev" || mode === "forge") {
+				start_forge_watcher();
+			}
+			if (mode === "dev" || mode === "web") {
+				spawn_pnpm("web", ["--filter", "@artisan/frontend", "run", "dev"], {
+					ARTISAN_DEV_AUTH_TOKEN: auth_token,
+					ARTISAN_FORGE_DEV_ORIGIN: instance.forge_origin,
+					ARTISAN_FRONTEND_DEV_PORT: String(instance.web_port),
+					ARTISAN_FRONTEND_PUBLIC_HOSTNAME: endpoints.web.hostname,
+					/**
+					 * Vite sees a pipe, not a TTY; the dashboard renders the colors.
+					 * Without a dashboard the raw lines go to plain logs, where forced
+					 * escape sequences are only noise.
+					 */
+					...(dashboard === undefined &&
+					process.env[artisan_runner_adapter_environment] !== "1"
+						? {}
+						: { FORCE_COLOR: "1" }),
+				});
+				void open_paired_browser();
+			}
+		};
 
-		log(`instance offset ${instance.offset}`);
-		log(`forge    ${endpoints.forge.origin}`);
-		log(`frontend ${endpoints.web.origin}  (self-pairing enabled)`);
-
-		if (mode === "dev" || mode === "forge") {
-			start_forge_watcher();
-		}
-		if (mode === "dev" || mode === "web") {
-			spawn_pnpm("web", ["--filter", "@artisan/frontend", "run", "dev"], {
-				ARTISAN_DEV_AUTH_TOKEN: auth_token,
-				ARTISAN_FORGE_DEV_ORIGIN: instance.forge_origin,
-				ARTISAN_FRONTEND_DEV_PORT: String(instance.web_port),
-				ARTISAN_FRONTEND_PUBLIC_HOSTNAME: endpoints.web.hostname,
-				/**
-				 * Vite sees a pipe, not a TTY; the dashboard renders the colors.
-				 * Without a dashboard the raw lines go to plain logs, where forced
-				 * escape sequences are only noise.
-				 */
-				...(dashboard === undefined ? {} : { FORCE_COLOR: "1" }),
-			});
-			void open_paired_browser();
-		}
-	};
-
-	void main();
+		void main();
+	}
 }
