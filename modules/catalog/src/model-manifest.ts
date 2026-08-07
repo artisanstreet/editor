@@ -15,7 +15,7 @@ import { xai_models } from "./manifest/xai";
 export { thinking_level_labels };
 
 export const model_manifest = Schema.decodeUnknownSync(ModelManifest)({
-	revision: "2026-08-07.1",
+	revision: "2026-08-07.2",
 	providers,
 	harnesses,
 	models: [

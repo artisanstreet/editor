@@ -58,7 +58,7 @@ export const cursor_core_models = [
 	},
 	{
 		id: "cursor-grok-4-5",
-		name: "Cursor Grok 4.5",
+		name: "Grok 4.5",
 		native_model_id: "cursor-grok-4.5",
 		description:
 			"Jointly trained by Cursor and SpaceXAI for long-running coding and knowledge work.",
@@ -77,8 +77,8 @@ export const cursor_core_models = [
 				],
 			},
 			speed_options: [
-				cursor_grok_standard_speed("Cursor Grok 4.5"),
-				cursor_grok_fast_speed("Cursor Grok 4.5"),
+				cursor_grok_standard_speed("Grok 4.5"),
+				cursor_grok_fast_speed("Grok 4.5"),
 			],
 			image_input: false,
 			local_tools: true,
