@@ -4,6 +4,9 @@ import { describe, expect, it } from "vitest";
 import {
 	ComposerDraftStore,
 	ComposerDraftStoreLive,
+	MaximumRetainedComposerDraftBytes,
+	MaximumRetainedComposerDrafts,
+	SelectComposerDraftAttachmentsToRelease,
 	type ComposerDraft,
 } from "../../modules/frontend/src/lib/composer/draft-store";
 import type { ComposerImageAttachment } from "../../modules/frontend/src/lib/composer/image-attachments";
@@ -85,5 +88,71 @@ describe("composer draft store", () => {
 		);
 
 		expect(Option.getOrThrow(restored).attachments).toHaveLength(1);
+	});
+
+	it("refreshes a read draft's LRU position before evicting the next inactive draft", async () => {
+		const files = Array.from({ length: MaximumRetainedComposerDrafts + 2 }, (_, index) =>
+			MakeDraft(`draft-${index}`),
+		);
+		const retained = await RunStore(
+			Effect.gen(function* () {
+				const store = yield* ComposerDraftStore;
+				for (const [index, draft] of files.slice(0, -1).entries()) {
+					yield* store.Write(`thread-${index}`, draft);
+				}
+				yield* store.Read("thread-1");
+				yield* store.Write(`thread-${MaximumRetainedComposerDrafts + 1}`, files.at(-1)!);
+				return yield* Effect.all(
+					Array.from({ length: MaximumRetainedComposerDrafts + 2 }, (_, index) =>
+						store.Read(`thread-${index}`),
+					),
+				);
+			}),
+		);
+
+		expect(Option.isNone(retained[0]!)).toBe(true);
+		expect(Option.isSome(retained[1]!)).toBe(true);
+		expect(Option.isNone(retained[2]!)).toBe(true);
+	});
+
+	it("evicts inactive drafts when their conservative retained-byte estimate exceeds the budget", async () => {
+		const large_text = "x".repeat(Math.floor(MaximumRetainedComposerDraftBytes / 2) + 1);
+		const outcome = await RunStore(
+			Effect.gen(function* () {
+				const store = yield* ComposerDraftStore;
+				const first = yield* store.Write("thread-a", MakeDraft(large_text));
+				const second = yield* store.Write("thread-b", MakeDraft(large_text));
+				return { first, second, retained: yield* store.Read("thread-a") };
+			}),
+		);
+
+		expect(outcome.first.evicted).toEqual([]);
+		expect(outcome.second.evicted.map((draft) => draft.text)).toEqual([large_text]);
+		expect(Option.isNone(outcome.retained)).toBe(true);
+	});
+
+	it("protects the just-written oversized draft when no inactive draft can satisfy the budget", async () => {
+		const oversized = MakeDraft("x".repeat(MaximumRetainedComposerDraftBytes + 1));
+		const retained = await RunStore(
+			Effect.gen(function* () {
+				const store = yield* ComposerDraftStore;
+				const outcome = yield* store.Write("thread-a", oversized);
+				return { outcome, draft: yield* store.Read("thread-a") };
+			}),
+		);
+
+		expect(retained.outcome.evicted).toEqual([]);
+		expect(Option.getOrThrow(retained.draft)).toEqual(oversized);
+	});
+
+	it("selects each evicted attachment once without selecting an active attachment", () => {
+		const active_attachment = MakeAttachment("active");
+		const duplicate = MakeAttachment("evicted");
+		const selected = SelectComposerDraftAttachmentsToRelease(
+			[MakeDraft("old-a", [duplicate, active_attachment]), MakeDraft("old-b", [duplicate])],
+			new Set([active_attachment.id]),
+		);
+
+		expect(selected.map((attachment) => attachment.id)).toEqual(["evicted"]);
 	});
 });

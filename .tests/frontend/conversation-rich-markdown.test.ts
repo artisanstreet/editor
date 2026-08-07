@@ -35,7 +35,7 @@ describe("conversation rich Markdown", () => {
 		] = await Promise.all([
 			frontend_vite.ssrLoadModule("/src/lib/components/markdown/math-expression.svelte"),
 			frontend_vite.ssrLoadModule("/src/lib/components/markdown/mermaid-diagram.svelte"),
-			frontend_vite.ssrLoadModule("/src/lib/components/markdown/parsing.ts"),
+			frontend_vite.ssrLoadModule("/src/lib/components/markdown/test-parsing.ts"),
 			frontend_vite.ssrLoadModule("svelte/server"),
 		]);
 		const markdown = [
@@ -65,10 +65,12 @@ describe("conversation rich Markdown", () => {
 
 		expect(JSON.stringify(tree.nodes)).toContain('"math"');
 		expect(JSON.stringify(tree.nodes)).toContain('"mermaid"');
-		expect(inline_math).toContain('class="docs-math-inline"');
-		expect(inline_math).toContain('class="katex"');
-		expect(block_math).toContain('class="docs-math-block not-prose"');
-		expect(block_math).toContain('class="katex-display"');
+		expect(inline_math).toContain('class="docs-math-fallback"');
+		expect(inline_math).toContain('aria-busy="true"');
+		expect(inline_math).toContain("E = mc^2");
+		expect(block_math).toContain('class="docs-math-fallback not-prose"');
+		expect(block_math).toContain("<pre");
+		expect(block_math).toContain(String.raw`\sum_i x_i`);
 		expect(mermaid_boundary).toContain('data-render-status="loading"');
 		expect(mermaid_boundary).toContain("graph LR");
 		expect(mermaid.status).toBe("rendered");
@@ -155,12 +157,22 @@ describe("conversation rich Markdown", () => {
 		const highlighting = ReadSource(
 			"modules/frontend/src/lib/components/markdown/highlighting.ts",
 		);
+		const settled_highlighting = ReadSource(
+			"modules/frontend/src/lib/components/markdown/settled-highlighting.ts",
+		);
 		const mermaid_renderer = ReadSource(
 			"modules/frontend/src/lib/components/markdown/mermaid-renderer.svelte",
 		);
+		const math_expression = ReadSource(
+			"modules/frontend/src/lib/components/markdown/math-expression.svelte",
+		);
+		const math_renderer = ReadSource(
+			"modules/frontend/src/lib/components/markdown/math-renderer.svelte",
+		);
+		const global_markdown_styles = ReadSource("modules/frontend/src/lib/styles/markdown.css");
 
 		expect(content).toContain(
-			"? conversation_streaming_markdown_plugins\n\t\t\t: conversation_markdown_plugins",
+			"? conversation_streaming_markdown_plugins\n\t\t\t: settled_markdown_plugins",
 		);
 		expect(highlighting).toContain("create_conversation_streaming_markdown_plugins");
 		expect(content).toContain("create_conversation_streaming_words_plugin");
@@ -172,12 +184,75 @@ describe("conversation rich Markdown", () => {
 		 * message and peaks exactly when its last blocks are waiting to paint.
 		 */
 		expect(highlighting).toContain(") => [streaming_words_plugin];");
-		expect(highlighting).toContain(
-			"conversation_math_plugin,\n\tconversation_mermaid_plugin,\n\tconversation_highlight_plugin,",
+		expect(content).toContain("yield* LoadConversationSettledMarkdownPlugins(");
+		expect(highlighting).toContain('try: () => import("./settled-highlighting")');
+		expect(highlighting).not.toContain('from "shiki/');
+		expect(settled_highlighting).toContain('from "shiki/');
+		expect(settled_highlighting).not.toMatch(/import\s+\w+\s+from\s+"shiki\/dist\/langs\//u);
+		expect(settled_highlighting).toContain("registerDefaultLanguages: false");
+		expect(settled_highlighting).toContain(
+			'javascript: () => import("shiki/dist/langs/javascript.mjs")',
 		);
+		expect(math_expression).not.toContain('from "./math-rendering"');
+		expect(math_renderer).toContain('try: () => import("./math-rendering")');
+		expect(math_renderer).toContain('try: () => import("katex/dist/katex.min.css")');
+		expect(math_renderer).toContain("MathRendererLoadFailure");
+		expect(global_markdown_styles).not.toContain("katex");
 		expect(mermaid_renderer).toContain("Effect.tryPromise");
 		expect(mermaid_renderer).toContain("MermaidRendererLoadFailure");
 		expect(mermaid_renderer).not.toContain("Effect.promise");
+	});
+
+	it("selects only requested known fence grammars before loading settled Shiki", async () => {
+		const { RequestedConversationFenceLanguages } = await frontend_vite.ssrLoadModule(
+			"/src/lib/components/markdown/highlighting.ts",
+		);
+
+		expect(RequestedConversationFenceLanguages("```ts\nconst answer = 42\n```")).toEqual([
+			"typescript",
+		]);
+		expect(
+			RequestedConversationFenceLanguages(
+				"```typescript[src/lib/editor.ts]{1}\nexport {}\n```",
+			),
+		).toEqual(["typescript"]);
+		expect(RequestedConversationFenceLanguages("```unknown-language\nplain text\n```")).toEqual(
+			[],
+		);
+	});
+
+	it("registers every grammar when different messages settle concurrently", async () => {
+		const [
+			effect_module,
+			{ LoadConversationSettledMarkdownPlugins },
+			{ parse },
+			{ resetHighlighter },
+		] = await Promise.all([
+			frontend_vite.ssrLoadModule("effect"),
+			frontend_vite.ssrLoadModule("/src/lib/components/markdown/settled-highlighting.ts"),
+			frontend_vite.ssrLoadModule("@comark/svelte/parse"),
+			frontend_vite.ssrLoadModule("comark/plugins/highlight"),
+		]);
+		const { Effect } = effect_module;
+		resetHighlighter();
+		const [typescript_plugins, python_plugins] = await Effect.runPromise(
+			Effect.all(
+				[
+					LoadConversationSettledMarkdownPlugins(["typescript"]),
+					LoadConversationSettledMarkdownPlugins(["python"]),
+				] as const,
+				{ concurrency: "unbounded" },
+			),
+		);
+		const [typescript_tree, python_tree] = await Promise.all([
+			parse("```typescript\nconst answer: number = 42\n```", {
+				plugins: typescript_plugins,
+			}),
+			parse("```python\nanswer: int = 42\n```", { plugins: python_plugins }),
+		]);
+
+		expect(JSON.stringify(typescript_tree.nodes)).toContain('"span"');
+		expect(JSON.stringify(python_tree.nodes)).toContain('"span"');
 	});
 
 	it("makes code cards fill the available transcript width without wrapping long code", () => {

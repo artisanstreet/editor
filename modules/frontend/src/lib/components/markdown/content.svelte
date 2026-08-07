@@ -8,7 +8,7 @@
 	import Image from "./image.svelte";
 	import {
 		create_conversation_streaming_markdown_plugins,
-		conversation_markdown_plugins,
+		LoadConversationSettledMarkdownPlugins,
 	} from "./highlighting";
 	import MathExpression from "./math-expression.svelte";
 	import MermaidDiagram from "./mermaid-diagram.svelte";
@@ -116,10 +116,18 @@
 	const presentation_streaming = $derived(
 		streaming || revealed_text !== text || !presentation_settled,
 	);
+	/**
+	 * The direct SER yield owns the optional Shiki import. Its input is empty
+	 * until the reveal is genuinely settled, so streaming and prose-only turns
+	 * never evaluate the heavyweight highlighter module.
+	 */
+	const settled_markdown_plugins = yield* LoadConversationSettledMarkdownPlugins(
+		presentation_streaming ? "" : revealed_text,
+	);
 	const active_plugins = $derived(
 		presentation_streaming
 			? conversation_streaming_markdown_plugins
-			: conversation_markdown_plugins,
+			: settled_markdown_plugins,
 	);
 
 	const components = {

@@ -231,8 +231,7 @@ export const ApplyActivityObservation = (
 			 * whatever prose the provider produced.
 			 */
 			const error_ref =
-				observation._tag === "native_action" ||
-				observation._tag === "process_diagnostic"
+				observation._tag === "native_action" || observation._tag === "process_diagnostic"
 					? observation.error_ref
 					: undefined;
 			const error_detail = optional_text(error_ref?.detail);

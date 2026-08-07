@@ -3,7 +3,7 @@ import { resolve } from "node:path";
 
 import { describe, expect, it } from "vitest";
 
-import { parse_conversation_markdown } from "../../modules/frontend/src/lib/components/markdown/parsing";
+import { parse_conversation_markdown } from "../../modules/frontend/src/lib/components/markdown/test-parsing";
 
 const ReadSource = (path: string) =>
 	readFileSync(resolve(import.meta.dirname, "../..", path), "utf8");

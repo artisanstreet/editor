@@ -50,6 +50,7 @@ describe("desktop packaging configuration", () => {
 
 		expect(config).toContain("output: .dist/electron-release");
 		expect(config).toContain("app: .dist/desktop");
+		expect(config).toContain("electronLanguages: en-US");
 		expect(config).toContain("- main.js");
 		expect(config).toContain("- frontend/**");
 		expect(config).not.toContain("preload.cjs");

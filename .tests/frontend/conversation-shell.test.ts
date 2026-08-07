@@ -56,6 +56,36 @@ describe("transcript auto-follow", () => {
 });
 
 describe("turn settlement", () => {
+	it("reuses the route's canonical conversation view instead of rebuilding it in the renderer", () => {
+		const route = read("modules/frontend/src/routes/components/thread-route.svelte");
+		const workspace = read("modules/frontend/src/routes/components/thread-workspace.svelte");
+
+		expect(route).toContain("let view_state = $state.raw<ConversationViewState | undefined>()");
+		expect(route).toContain("conversation_view_state={view_state}");
+		expect(workspace).toContain("conversation_view_state?: ConversationViewState");
+		expect(workspace).toContain("MakeConversationRenderWindow(");
+		expect(workspace).not.toContain("MakeConversationViewState(snapshot)");
+	});
+
+	it("mounts a bounded recent turn window and preserves position when paging backward", () => {
+		const workspace = read("modules/frontend/src/routes/components/thread-workspace.svelte");
+
+		expect(workspace).toContain("const ConversationTurnPageSize = 24;");
+		expect(workspace).toContain("older_render_group_count += ConversationTurnPageSize;");
+		expect(workspace).toContain("let loading_older_turns = $state(false);");
+		expect(workspace).toContain("if (loading_older_turns) return;");
+		expect(workspace).toContain("disabled={loading_older_turns}");
+		expect(workspace).toContain("Effect.ensuring(");
+		expect(workspace).toContain("MakeConversationRenderWindow(");
+		expect(workspace).toContain(
+			"{#each visible_render_groups as render_group (render_group.turn_id)}",
+		);
+		expect(workspace).toContain("Show earlier turns ({hidden_render_group_count})");
+		expect(workspace).toContain(
+			"current_viewport.scrollTop += current_viewport.scrollHeight - previous_scroll_height",
+		);
+	});
+
 	/**
 	 * A run reaching a terminal state is only announced through the projection.
 	 * Without re-reading the durable work item the transcript shows the turn

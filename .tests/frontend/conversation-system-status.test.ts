@@ -66,4 +66,22 @@ describe("conversation system status", () => {
 		expect(runner).toContain("Queue.unbounded");
 		expect(runner).toContain("Fiber.interrupt(previous)");
 	});
+
+	it("does not retain settled trace DOM behind a closed disclosure", () => {
+		const session = Read(
+			"modules/frontend/src/routes/components/conversation-work-session.svelte",
+		);
+		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.svelte");
+
+		expect(workspace).toContain("has_details={block.details.length > 0}");
+		expect(session).toContain("has_details = false");
+		expect(session).toContain("$state(untrack(() => has_details))");
+		expect(session).toContain("{#if details !== undefined && (is_working || open)}");
+		expect(session).toContain("has_visible_details = has_details;");
+		expect(session).toContain("const ReconcileClosedDetails");
+		expect(session).toContain("yield* ReconcileClosedDetails(has_details, open, is_working);");
+		expect(session).toContain(
+			"if (!working && !disclosure_open) has_visible_details = details_available;",
+		);
+	});
 });

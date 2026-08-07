@@ -163,7 +163,8 @@ const definitions: ReadonlyArray<ArtisanErrorDefinition> = [
 		code: artisan_error_codes.run_failed,
 		docs_slug: "run-failed",
 		retryable: true,
-		summary: "The run failed while executing. The engine's own account is in the details below.",
+		summary:
+			"The run failed while executing. The engine's own account is in the details below.",
 		title: "Run failed",
 	},
 	{
@@ -216,9 +217,7 @@ const definitions_by_code = new Map(definitions.map((definition) => [definition.
 export const lookup_artisan_error = (code: string): ArtisanErrorDefinition => {
 	const known = definitions_by_code.get(code);
 	if (known !== undefined) return known;
-	const unknown = definitions_by_code.get(
-		artisan_error_codes.unknown,
-	) as ArtisanErrorDefinition;
+	const unknown = definitions_by_code.get(artisan_error_codes.unknown) as ArtisanErrorDefinition;
 	return artisan_error_code_pattern.test(code) ? { ...unknown, code } : unknown;
 };
 

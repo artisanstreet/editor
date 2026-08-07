@@ -385,16 +385,49 @@ export type ConversationPatchBatch = typeof ConversationPatchBatch.Type;
  * Reducer-owned replay state. It is intentionally separate from the renderer
  * snapshot.
  *
- * `applied_patch_ids` is owned by the reducer chain and mutated in place: a
- * long run applies tens of thousands of patches, and copying the full id set
- * per patch made every streamed word cost the whole run's history in
- * allocation. Consumers hold only the newest state; a retained older state
- * shares the same growing set.
+ * The collections and indexes are owned by one linear reducer chain and mutate
+ * in place. A long run applies tens of thousands of patches, so copying every
+ * entity array or rebuilding every lookup index per streamed word made the
+ * allocation cost grow with transcript history. Consumers must advance with
+ * the returned state; retained older states share the chain and are rejected
+ * before they can apply a delayed competing patch.
  */
+interface ConversationReducerChain {
+	readonly item_ids: Set<string>;
+	readonly item_index: Map<string, number>;
+	readonly items: Array<ConversationItem>;
+	last_patch_sequence: number;
+	readonly ordinals: Set<number>;
+	readonly turn_ids: Set<string>;
+	readonly turn_index: Map<string, number>;
+	readonly turns: Array<ConversationTurn>;
+}
+
 export interface ConversationRebuildState {
 	readonly applied_patch_ids: Set<string>;
+	/**
+	 * Internal linear-chain owner. Optional only for legacy resync placeholders;
+	 * normal initialization always creates it. Never reuse an older state after
+	 * an accepted patch.
+	 */
+	readonly reducer?: ConversationReducerChain;
 	readonly snapshot: ConversationSnapshot;
 }
+
+/**
+ * Recent exact-replay window for streamed patch IDs. Four thousand ninety-six
+ * entries cover a long burst of token patches without retaining one identifier
+ * per token for the lifetime of an open conversation.
+ */
+export const conversation_patch_dedupe_window = 4_096;
+
+/** Records one accepted patch with O(1) insertion-order eviction. */
+const remember_applied_patch_id = (patch_ids: Set<string>, patch_id: string) => {
+	patch_ids.add(patch_id);
+	if (patch_ids.size <= conversation_patch_dedupe_window) return;
+	const oldest = patch_ids.values().next().value;
+	if (oldest !== undefined) patch_ids.delete(oldest);
+};
 
 export type ConversationInvariantError =
 	| {
@@ -470,6 +503,25 @@ const validate_references = (
 	}
 };
 
+/** Takes ownership of snapshot collections once, with indexes maintained by accepted upserts. */
+const make_reducer = (snapshot: ConversationSnapshot): ConversationReducerChain => {
+	const turns = [...snapshot.turns];
+	const items = [...snapshot.items];
+	return {
+		item_ids: new Set(items.map((item) => item.id)),
+		item_index: new Map(items.map((item, index) => [item.id, index])),
+		items,
+		last_patch_sequence: snapshot.last_patch_sequence,
+		ordinals: new Set([
+			...turns.map((turn) => turn.ordinal),
+			...items.map((item) => item.ordinal),
+		]),
+		turn_ids: new Set(turns.map((turn) => turn.id)),
+		turn_index: new Map(turns.map((turn, index) => [turn.id, index])),
+		turns,
+	};
+};
+
 /** Creates reducer state after validating the snapshot's internal graph. */
 export const InitializeConversation = (snapshot: ConversationSnapshot): ConversationPatchResult => {
 	const turn_ids = new Set(snapshot.turns.map((turn) => turn.id));
@@ -494,7 +546,15 @@ export const InitializeConversation = (snapshot: ConversationSnapshot): Conversa
 		const validation = validate_references(turn, item_ids, turn_ids);
 		if (validation !== undefined) return validation;
 	}
-	return { _tag: "applied", state: { applied_patch_ids: new Set(), snapshot } };
+	const reducer = make_reducer(snapshot);
+	return {
+		_tag: "applied",
+		state: {
+			applied_patch_ids: new Set(),
+			reducer,
+			snapshot: { ...snapshot, items: reducer.items, turns: reducer.turns },
+		},
+	};
 };
 
 /** Applies one patch deterministically, preserving stable identity and stream ordering. */
@@ -502,44 +562,37 @@ export const ApplyConversationPatch = (
 	state: ConversationRebuildState,
 	patch: ConversationPatch,
 ): ConversationPatchResult => {
-	if (state.applied_patch_ids.has(patch.patch_id)) return { _tag: "duplicate", state };
-	if (patch.sequence !== state.snapshot.last_patch_sequence + 1) {
+	const reducer = state.reducer ?? make_reducer(state.snapshot);
+	/** A stale branch shares collections but not the chain cursor, so never let it mutate newer data. */
+	if (reducer.last_patch_sequence !== state.snapshot.last_patch_sequence) {
 		return invariant_error(
 			"patch_gap",
-			`Expected patch sequence ${state.snapshot.last_patch_sequence + 1}, received ${patch.sequence}`,
+			"Conversation reducer state is stale; continue from the latest accepted state",
 		);
 	}
-	const turns = [...state.snapshot.turns];
-	const items = [...state.snapshot.items];
-	/**
-	 * Index collections are built only for the upsert branches that validate
-	 * references across the whole conversation. The streaming branches — one
-	 * text delta or lifecycle step per patch, hundreds per turn — locate their
-	 * single entity by scan and allocate nothing.
-	 */
-	const make_indexes = () => {
-		const turn_index = new Map(turns.map((turn, index) => [turn.id, index]));
-		const item_index = new Map(items.map((item, index) => [item.id, index]));
-		return {
-			item_ids: new Set(item_index.keys()),
-			item_index,
-			turn_ids: new Set(turn_index.keys()),
-			turn_index,
-		};
-	};
+	if (state.applied_patch_ids.has(patch.patch_id)) return { _tag: "duplicate", state };
+	if (patch.sequence !== reducer.last_patch_sequence + 1) {
+		return invariant_error(
+			"patch_gap",
+			`Expected patch sequence ${reducer.last_patch_sequence + 1}, received ${patch.sequence}`,
+		);
+	}
+	const { items, turns } = reducer;
 
 	if (patch.type === "turn_upsert") {
-		const { item_ids, turn_ids, turn_index } = make_indexes();
-		const existing_index = turn_index.get(patch.turn.id);
+		const existing_index = reducer.turn_index.get(patch.turn.id);
 		if (existing_index === undefined) {
-			if ([...turns, ...items].some((entity) => entity.ordinal === patch.turn.ordinal))
+			if (reducer.ordinals.has(patch.turn.ordinal))
 				return invariant_error(
 					"duplicate_ordinal",
 					`Duplicate ordinal ${patch.turn.ordinal}`,
 				);
-			const validation = validate_references(patch.turn, item_ids, turn_ids);
+			const validation = validate_references(patch.turn, reducer.item_ids, reducer.turn_ids);
 			if (validation !== undefined) return validation;
 			turns.push(patch.turn);
+			reducer.turn_ids.add(patch.turn.id);
+			reducer.turn_index.set(patch.turn.id, turns.length - 1);
+			reducer.ordinals.add(patch.turn.ordinal);
 		} else {
 			const existing = turns[existing_index];
 			if (existing === undefined)
@@ -557,24 +610,26 @@ export const ApplyConversationPatch = (
 					"invalid_lifecycle_transition",
 					"Illegal turn lifecycle transition",
 				);
-			const validation = validate_references(patch.turn, item_ids, turn_ids);
+			const validation = validate_references(patch.turn, reducer.item_ids, reducer.turn_ids);
 			if (validation !== undefined) return validation;
 			turns[existing_index] = patch.turn;
 		}
 	} else if (patch.type === "item_upsert") {
-		const { item_ids, item_index, turn_ids } = make_indexes();
-		const existing_index = item_index.get(patch.item.id);
+		const existing_index = reducer.item_index.get(patch.item.id);
 		if (existing_index === undefined) {
-			if ([...turns, ...items].some((entity) => entity.ordinal === patch.item.ordinal))
+			if (reducer.ordinals.has(patch.item.ordinal))
 				return invariant_error(
 					"duplicate_ordinal",
 					`Duplicate ordinal ${patch.item.ordinal}`,
 				);
-			if (!turn_ids.has(patch.item.turn_id))
+			if (!reducer.turn_ids.has(patch.item.turn_id))
 				return invariant_error("invalid_turn", `Unknown turn ${patch.item.turn_id}`);
-			const validation = validate_references(patch.item, item_ids, turn_ids);
+			const validation = validate_references(patch.item, reducer.item_ids, reducer.turn_ids);
 			if (validation !== undefined) return validation;
 			items.push(patch.item);
+			reducer.item_ids.add(patch.item.id);
+			reducer.item_index.set(patch.item.id, items.length - 1);
+			reducer.ordinals.add(patch.item.ordinal);
 		} else {
 			const existing = items[existing_index];
 			if (existing === undefined)
@@ -594,13 +649,13 @@ export const ApplyConversationPatch = (
 					"invalid_lifecycle_transition",
 					"Illegal item lifecycle transition",
 				);
-			const validation = validate_references(patch.item, item_ids, turn_ids);
+			const validation = validate_references(patch.item, reducer.item_ids, reducer.turn_ids);
 			if (validation !== undefined) return validation;
 			items[existing_index] = patch.item;
 		}
 	} else if (patch.type === "item_append") {
-		const existing_index = items.findIndex((item) => item.id === patch.item_id);
-		if (existing_index === -1)
+		const existing_index = reducer.item_index.get(patch.item_id);
+		if (existing_index === undefined)
 			return invariant_error("missing_item", `Unknown item ${patch.item_id}`);
 		const existing = items[existing_index];
 		if (existing === undefined)
@@ -620,8 +675,8 @@ export const ApplyConversationPatch = (
 			text: existing.text + patch.text,
 		};
 	} else if (patch.type === "item_lifecycle") {
-		const existing_index = items.findIndex((item) => item.id === patch.item_id);
-		if (existing_index === -1)
+		const existing_index = reducer.item_index.get(patch.item_id);
+		if (existing_index === undefined)
 			return invariant_error("missing_item", `Unknown item ${patch.item_id}`);
 		const existing = items[existing_index];
 		if (existing === undefined)
@@ -641,8 +696,8 @@ export const ApplyConversationPatch = (
 			revision: patch.revision,
 		};
 	} else if (patch.type === "turn_lifecycle") {
-		const existing_index = turns.findIndex((turn) => turn.id === patch.turn_id);
-		if (existing_index === -1)
+		const existing_index = reducer.turn_index.get(patch.turn_id);
+		if (existing_index === undefined)
 			return invariant_error("missing_turn", `Unknown turn ${patch.turn_id}`);
 		const existing = turns[existing_index];
 		if (existing === undefined)
@@ -662,11 +717,13 @@ export const ApplyConversationPatch = (
 			revision: patch.revision,
 		};
 	}
-	state.applied_patch_ids.add(patch.patch_id);
+	remember_applied_patch_id(state.applied_patch_ids, patch.patch_id);
+	reducer.last_patch_sequence = patch.sequence;
 	return {
 		_tag: "applied",
 		state: {
 			applied_patch_ids: state.applied_patch_ids,
+			reducer,
 			snapshot: { ...state.snapshot, items, last_patch_sequence: patch.sequence, turns },
 		},
 	};

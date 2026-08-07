@@ -19,6 +19,7 @@
 	let {
 		engine_id,
 		has_live_reply = false,
+		has_details = false,
 		item,
 		details,
 		duration_kind,
@@ -38,6 +39,8 @@
 		 * the word holds across the whole chain rather than blinking through it.
 		 */
 		has_live_reply?: boolean;
+		/** Settled traces stay unmounted until disclosure, so the header needs this hint. */
+		has_details?: boolean;
 		item: Extract<ConversationItem, { type: "work_session" }>;
 		details?: Snippet;
 		duration_kind?: "thought" | "worked";
@@ -55,7 +58,7 @@
 	let open = $state(untrack(() => item.status === "failed" || item.status === "cancelled"));
 	let user_chose_disclosure = $state(false);
 	let previous_status = untrack(() => item.status);
-	let has_visible_details = $state(false);
+	let has_visible_details = $state(untrack(() => has_details));
 	let has_live_status_detail = $state(false);
 	let status_line_was_visible = $state(false);
 	let status_line_has_appeared = $state(false);
@@ -158,10 +161,11 @@
 	 */
 	const ReconcileStatus = (status: typeof item.status) =>
 		Effect.gen(function* () {
-		const became_unsuccessful =
-			previous_status === "running" && (status === "failed" || status === "cancelled");
-		if (became_unsuccessful && !user_chose_disclosure) open = true;
-		previous_status = status;
+			const became_unsuccessful =
+				previous_status === "running" &&
+				(status === "failed" || status === "cancelled");
+			if (became_unsuccessful && !user_chose_disclosure) open = true;
+			previous_status = status;
 		});
 	yield* ReconcileStatus(item.status);
 
@@ -179,6 +183,22 @@
 			status_line_was_visible = status_line_visible;
 		});
 	yield* ReconcileThinkingVisibility(renders_status_line);
+
+	/**
+	 * A settled trace can receive its last detail after the session itself. While
+	 * closed its DOM is intentionally absent, so no observer exists to discover
+	 * that arrival; reconcile the cheap renderer hint instead. An open panel
+	 * remains observer-owned, preserving the user's disclosure choice.
+	 */
+	const ReconcileClosedDetails = (
+		details_available: boolean,
+		disclosure_open: boolean,
+		working: boolean,
+	) =>
+		Effect.gen(function* () {
+			if (!working && !disclosure_open) has_visible_details = details_available;
+		});
+	yield* ReconcileClosedDetails(has_details, open, is_working);
 
 	const RefreshDetails = (element: HTMLDivElement) =>
 		Effect.gen(function* () {
@@ -205,7 +225,7 @@
 			(observer) =>
 				Effect.gen(function* () {
 					yield* RunBrowserDom(() => observer.disconnect());
-					has_visible_details = false;
+					has_visible_details = has_details;
 					has_live_status_detail = false;
 				}),
 			);
@@ -300,7 +320,7 @@
 		</div>
 	{/if}
 
-	{#if details !== undefined}
+	{#if details !== undefined && (is_working || open)}
 		<div class="t-acc-panel" hidden={!is_working && !has_visible_details}>
 			<div class="t-acc-panel-inner" use:observe_details>
 				{@render details()}

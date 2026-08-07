@@ -40,20 +40,34 @@ describe("persisted conversation image attachments", () => {
 		);
 	});
 
-	it("loads thread-scoped bytes once and revokes every object URL with the route scope", () => {
+	it("owns image request cancellation and replaces object URLs without leaks", () => {
 		const route = ReadSource("modules/frontend/src/routes/components/thread-route.svelte");
 		const object_url = ReadSource("modules/frontend/src/lib/browser/object-url.ts");
 
 		expect(route).toContain("client.GetMessageImageAttachment({");
 		expect(route).toContain("requested_image_ids.has(attachment.id)");
+		expect(route).toContain("const ClearImageLoadState = (attachment_id: string)");
+		expect(route).toContain("Effect.ensuring(ClearImageLoadState(attachment.id))");
 		expect(route).toContain("CreateBrowserObjectUrl(bytes, result.value.media_type)");
-		expect(route).toContain("Scope.addFinalizer(");
+		expect(route).toContain(
+			"const PublishImageAttachment = (attachment_id: string, source: string)",
+		);
+		expect(route).toContain("const previous_source = image_sources.get(attachment_id);");
+		expect(route).toContain(
+			"yield* ReleaseBrowserObjectUrl(previous_source).pipe(Effect.ignore)",
+		);
+		expect(route).toContain("const ReleaseAllImageAttachments = Effect.gen(function* ()");
+		expect(route).toContain("yield* Scope.close(thread_scope, Exit.void);");
+		expect(route).toContain("yield* ReleaseAllImageAttachments;");
+		expect(route).not.toContain("yield* Scope.addFinalizer(\n\t\t\t\tthread_scope");
 		expect(route).toContain("ReleaseBrowserObjectUrl(source)");
 		expect(route).toContain("visible_image_ids.has(attachment.id)");
-		const after_finalizer = route.slice(route.indexOf("yield* Scope.addFinalizer("));
-		const before_publish = after_finalizer.slice(
+		const after_source = route.slice(
+			route.indexOf("const source = yield* CreateBrowserObjectUrl"),
+		);
+		const before_publish = after_source.slice(
 			0,
-			after_finalizer.indexOf("image_sources = new Map(image_sources).set"),
+			after_source.indexOf("image_sources = new Map(image_sources).set"),
 		);
 		expect(before_publish).toContain("if (!visible_image_ids.has(attachment.id))");
 		expect(before_publish).toContain(
@@ -61,7 +75,11 @@ describe("persisted conversation image attachments", () => {
 		);
 		expect(route).toContain("attempt >= 3");
 		expect(route).toContain("Effect.sleep(attempt * 500)");
-		expect(route).toContain("image_load_attempts.delete(attachment.id)");
+		expect(route).toContain("image_load_attempts.delete(attachment_id)");
+		expect(route).toContain("requested_image_ids.delete(attachment.id);");
+		expect(route).toContain(
+			"yield* ClearImageLoadState(attachment.id);\n\t\t\t\tyield* ReleaseImageAttachment(attachment.id);",
+		);
 		expect(route).toContain("onimagevisibilitychange={UpdateImageAttachmentVisibility}");
 		expect(object_url).toContain("Effect.try({");
 		expect(object_url).toContain("URL.createObjectURL(new Blob([bytes]");

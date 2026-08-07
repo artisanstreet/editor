@@ -1,7 +1,11 @@
 import { Effect, Option } from "effect";
 
-import { ComposerDraftStore, type ComposerDraft } from "$lib/composer/draft-store";
-import type { ComposerImageAttachment } from "$lib/composer/image-attachments";
+import {
+	ComposerDraftStore,
+	SelectComposerDraftAttachmentsToRelease,
+	type ComposerDraft,
+} from "../../../lib/composer/draft-store";
+import type { ComposerImageAttachment } from "../../../lib/composer/image-attachments";
 import { ReadComposerEditorDocument, WriteComposerEditorDocument } from "./dom";
 
 /**
@@ -35,11 +39,22 @@ export const MakeComposerDraftSession = (options: {
 				options.Editor(),
 				options.DraftText(),
 			);
-			yield* store.Write(draft_key, {
+			const written = yield* store.Write(draft_key, {
 				attachments: [...options.Attachments().values()],
 				text: editor_document.text,
 				tokens: editor_document.tokens,
 			});
+			/**
+			 * Store eviction transfers ownership back through this live composer
+			 * boundary. Do not revoke an attachment still owned by the just-written
+			 * draft, and collapse duplicate historical references to one release.
+			 */
+			for (const attachment of SelectComposerDraftAttachmentsToRelease(
+				written.evicted,
+				new Set(options.Attachments().keys()),
+			)) {
+				yield* options.Revoke(attachment);
+			}
 		});
 
 		const Restore = (target: HTMLDivElement | null) =>

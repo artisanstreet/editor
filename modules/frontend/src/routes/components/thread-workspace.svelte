@@ -7,12 +7,13 @@
 		ThreadWorkItem,
 	} from "@artisan/protocol";
 	import { Effect, Option, Queue } from "effect";
-	import { tick } from "svelte";
+	import { tick, untrack } from "svelte";
 	import type { ComposerSubmission } from "$lib/composer/image-attachments";
 	import { MakeScopedAttachmentRunner } from "$lib/lifecycle/scoped-attachment-runner";
 	import { RunBrowserDom } from "$lib/browser/dom";
 	import type { ThreadMessageSubmissionOutcome } from "$lib/thread-interaction/commands";
 	import { ScrollArea } from "$lib/components/ui/scroll-area";
+	import { Button } from "$lib/components/ui/button";
 	import {
 		conversation_reply_is_live,
 		work_session_run_authority,
@@ -26,9 +27,9 @@
 		ConversationUserMessageWithSourceReference,
 	} from "$lib/conversation/scroll-position";
 	import {
-		MakeConversationRenderBlocks,
-		MakeConversationViewState,
+		MakeConversationRenderWindow,
 		type ConversationRenderBlock,
+		type ConversationViewState,
 	} from "$lib/conversation/store";
 	import ConversationChangesCard from "./conversation-changes-card.svelte";
 	import ConversationItem from "./conversation-item.svelte";
@@ -41,6 +42,7 @@
 		active_run_id,
 		active_run_status,
 		context_usage,
+		conversation_view_state,
 		disabled = false,
 		image_sources,
 		onabort,
@@ -58,6 +60,7 @@
 		/** The durable work item's status for `active_run_id`, when one exists. */
 		active_run_status?: ThreadWorkItem["status"];
 		context_usage?: SurfaceUsageAggregate;
+		conversation_view_state?: ConversationViewState;
 		disabled?: boolean;
 		image_sources?: ReadonlyMap<string, string>;
 		onabort?: () => Effect.Effect<unknown, { readonly message: string }>;
@@ -89,7 +92,6 @@
 		run_active?: boolean;
 		snapshot: ConversationSnapshot;
 	} = $props();
-	const view = $derived(MakeConversationViewState(snapshot));
 	/** A settled thread may switch engines; only an in-flight run owns the current engine. */
 	const engine_locked = $derived(run_active);
 	type ConversationItemBlock = Extract<ConversationRenderBlock, { type: "item" }>;
@@ -137,11 +139,19 @@
 		});
 	};
 
-	const render_blocks = $derived(
-		view._tag === "applied"
-			? fold_resolved_approvals_into_work(MakeConversationRenderBlocks(view.state))
-			: [],
+	const ConversationTurnPageSize = 24;
+	let older_render_group_count = $state(0);
+	let loading_older_turns = $state(false);
+	const render_window = $derived(
+		conversation_view_state === undefined
+			? { blocks: [], hidden_group_count: 0 }
+			: MakeConversationRenderWindow(
+					conversation_view_state,
+					ConversationTurnPageSize,
+					older_render_group_count,
+				),
 	);
+	const render_blocks = $derived(fold_resolved_approvals_into_work(render_window.blocks));
 	/**
 	 * The transcript's freshest session, which the durable work item may not
 	 * describe yet: run authority treats exactly that one as pending rather
@@ -151,7 +161,7 @@
 		snapshot.items.findLast((item) => item.type === "work_session")?.run_id,
 	);
 
-	const render_groups = $derived.by(() => {
+	const visible_render_groups = $derived.by(() => {
 		const groups = new Map<
 			string,
 			{ blocks: Array<ConversationRenderBlock>; turn_id: string }
@@ -168,6 +178,31 @@
 		}
 
 		return [...groups.values()];
+	});
+	const hidden_render_group_count = $derived(render_window.hidden_group_count);
+
+	const ShowEarlierTurns = Effect.gen(function* () {
+		if (loading_older_turns) return;
+		loading_older_turns = true;
+		yield* Effect.gen(function* () {
+			const current_viewport = viewport;
+			const previous_scroll_height =
+				current_viewport === null
+					? undefined
+					: yield* RunBrowserDom(() => current_viewport.scrollHeight);
+			older_render_group_count += ConversationTurnPageSize;
+			if (current_viewport === null || previous_scroll_height === undefined) return;
+			yield* Effect.promise(() => tick());
+			yield* RunBrowserDom(() => {
+				current_viewport.scrollTop += current_viewport.scrollHeight - previous_scroll_height;
+			});
+		}).pipe(
+			Effect.ensuring(
+				Effect.gen(function* () {
+					loading_older_turns = false;
+				}),
+			),
+		);
 	});
 
 	let viewport = $state<HTMLElement | null>(null);
@@ -624,8 +659,20 @@
 	>
 		<div bind:this={transcript_content} class="mx-auto w-full max-w-(--prose-width) px-6 pt-10">
 			<div class="flex flex-col gap-8">
-				{#if view._tag === "applied"}
-					{#each render_groups as render_group (render_group.turn_id)}
+				{#if conversation_view_state !== undefined}
+					{#if hidden_render_group_count > 0}
+						<div class="flex justify-center pb-2">
+							<Button
+								variant="ghost"
+								size="sm"
+								disabled={loading_older_turns}
+								onclick={yield* ShowEarlierTurns}
+							>
+								Show earlier turns ({hidden_render_group_count})
+							</Button>
+						</div>
+					{/if}
+					{#each visible_render_groups as render_group (render_group.turn_id)}
 						<section class="turn-hover-region group/turn relative flex flex-col gap-8">
 							{#each render_group.blocks as block (block.id)}
 								{#if block.type === "item"}
@@ -646,6 +693,7 @@
 									<ConversationWorkSession
 										duration_kind={block.duration_kind}
 										engine_id={policy?.engine_id}
+										has_details={block.details.length > 0}
 										has_live_reply={conversation_reply_is_live(block.details)}
 										item={block.session}
 										run_authority={session_authority}

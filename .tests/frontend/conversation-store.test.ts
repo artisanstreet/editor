@@ -1,10 +1,11 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { Schema } from "effect";
 import { ConversationPatch, ConversationSnapshot } from "@artisan/protocol";
 import {
 	ApplyConversationViewPatch,
 	CanReplaceConversationSnapshot,
 	MakeConversationRenderBlocks,
+	MakeConversationRenderWindow,
 	MakeConversationViewState,
 } from "../../modules/frontend/src/lib/conversation/store";
 import { MakeMockConversation } from "../../modules/frontend/src/lib/conversation/mock";
@@ -50,6 +51,57 @@ const snapshot = Schema.decodeUnknownSync(ConversationSnapshot)({
 const patch = (value: unknown) => Schema.decodeUnknownSync(ConversationPatch)(value);
 
 describe("conversation view store", () => {
+	it("projects an exact, bounded newest-group window from large history", () => {
+		const large_snapshot = Schema.decodeUnknownSync(ConversationSnapshot)({
+			conversation_id: "conversation-window",
+			items: Array.from({ length: 100 }, (_, index) => ({
+				created_at: "2026-07-24T12:00:00.000Z",
+				id: `item-window-${index}`,
+				lifecycle: "completed",
+				ordinal: index * 2 + 1,
+				phase: "final",
+				references: [],
+				revision: 0,
+				source_refs: [],
+				text: `Message ${index}`,
+				turn_id: `turn-window-${index}`,
+				type: "assistant_message",
+				updated_at: "2026-07-24T12:00:00.000Z",
+			})),
+			journal_sequence: 0,
+			last_patch_sequence: 0,
+			schema_version: 1,
+			thread_id: "thread-window",
+			turns: Array.from({ length: 100 }, (_, index) => ({
+				created_at: "2026-07-24T12:00:00.000Z",
+				id: `turn-window-${index}`,
+				lifecycle: "completed",
+				ordinal: index * 2,
+				references: [],
+				revision: 0,
+				source_refs: [],
+				type: "turn",
+				updated_at: "2026-07-24T12:00:00.000Z",
+			})),
+			updated_at: "2026-07-24T12:00:00.000Z",
+		});
+		const initialized = MakeConversationViewState(large_snapshot);
+		if (initialized._tag !== "applied") throw new Error("fixture must initialize");
+
+		const newest = MakeConversationRenderWindow(initialized.state, 24);
+		expect(newest.hidden_group_count).toBe(76);
+		expect(newest.blocks).toHaveLength(48);
+		expect([...new Set(newest.blocks.map((block) => block.turn_id))]).toEqual(
+			Array.from({ length: 24 }, (_, index) => `turn-window-${index + 76}`),
+		);
+
+		const paged = MakeConversationRenderWindow(initialized.state, 24, 24);
+		expect(paged.hidden_group_count).toBe(52);
+		expect(paged.blocks).toHaveLength(96);
+		expect(paged.blocks.at(0)).toMatchObject({ turn_id: "turn-window-52" });
+		expect(paged.blocks.at(-1)).toMatchObject({ turn_id: "turn-window-99" });
+	});
+
 	it("preserves item identity while keeping ordinal ordering", () => {
 		const initial = MakeConversationViewState(snapshot);
 		if (initial._tag !== "applied") throw new Error("fixture must initialize");
@@ -83,9 +135,164 @@ describe("conversation view store", () => {
 		expect(result.state.ordered_item_ids).toEqual(["item-a", "item-b"]);
 	});
 
+	it("refreshes the newest cached group for streamed item and turn patches", () => {
+		const initial = MakeConversationViewState(snapshot);
+		if (initial._tag !== "applied") throw new Error("fixture must initialize");
+		const appended = ApplyConversationViewPatch(
+			initial.state,
+			patch({
+				item_id: "item-a",
+				patch_id: "window-append",
+				revision: 1,
+				sequence: 1,
+				text: " world",
+				type: "item_append",
+			}),
+		);
+		if (appended._tag !== "applied") throw new Error("append must apply");
+		expect(MakeConversationRenderWindow(appended.state, 24).blocks).toEqual([
+			expect.objectContaining({ item: expect.objectContaining({ text: "Hello world" }) }),
+		]);
+		const completed = ApplyConversationViewPatch(
+			appended.state,
+			patch({
+				lifecycle: "completed",
+				patch_id: "window-turn-complete",
+				revision: 1,
+				sequence: 2,
+				turn_id: "turn-a",
+				type: "turn_lifecycle",
+			}),
+		);
+		if (completed._tag !== "applied") throw new Error("turn completion must apply");
+		expect(MakeConversationRenderWindow(completed.state, 24).blocks).toHaveLength(1);
+	});
+
+	it("patches a growing active work group without sorting or regenerating its historical details", () => {
+		const detail_count = 512;
+		const active_snapshot = Schema.decodeUnknownSync(ConversationSnapshot)({
+			conversation_id: "conversation-active-group",
+			items: [
+				{
+					created_at: "2026-07-24T12:00:00.000Z",
+					ended_at: undefined,
+					id: "work-session",
+					lifecycle: "streaming",
+					ordinal: 1,
+					references: [],
+					revision: 0,
+					responded_at: undefined,
+					run_id: "run-active-group",
+					source_refs: [],
+					started_at: "2026-07-24T12:00:00.000Z",
+					status: "streaming",
+					title: "Working",
+					turn_id: "turn-active-group",
+					type: "work_session",
+					updated_at: "2026-07-24T12:00:00.000Z",
+				},
+				...Array.from({ length: detail_count }, (_, index) => ({
+					created_at: "2026-07-24T12:00:00.000Z",
+					id: `activity-${index}`,
+					kind: "tool",
+					label: `Activity ${index}`,
+					lifecycle: "streaming",
+					ordinal: index + 2,
+					references: [],
+					revision: 0,
+					source_refs: [],
+					status: "streaming",
+					turn_id: "turn-active-group",
+					type: "activity",
+					updated_at: "2026-07-24T12:00:00.000Z",
+				})),
+				{
+					created_at: "2026-07-24T12:00:00.000Z",
+					id: "streaming-message",
+					lifecycle: "streaming",
+					ordinal: detail_count + 2,
+					phase: "unspecified",
+					references: [],
+					revision: 0,
+					source_refs: [],
+					text: "",
+					turn_id: "turn-active-group",
+					type: "assistant_message",
+					updated_at: "2026-07-24T12:00:00.000Z",
+				},
+			],
+			journal_sequence: 0,
+			last_patch_sequence: 0,
+			schema_version: 1,
+			thread_id: "thread-active-group",
+			turns: [
+				{
+					created_at: "2026-07-24T12:00:00.000Z",
+					id: "turn-active-group",
+					lifecycle: "streaming",
+					ordinal: 0,
+					references: [],
+					revision: 0,
+					source_refs: [],
+					type: "turn",
+					updated_at: "2026-07-24T12:00:00.000Z",
+				},
+			],
+			updated_at: "2026-07-24T12:00:00.000Z",
+		});
+		const initialized = MakeConversationViewState(active_snapshot);
+		if (initialized._tag !== "applied") throw new Error("fixture must initialize");
+		const sort = vi.spyOn(Array.prototype, "sort");
+		let state = initialized.state;
+		for (let sequence = 1; sequence <= 64; sequence += 1) {
+			const result = ApplyConversationViewPatch(
+				state,
+				patch({
+					item_id: "streaming-message",
+					patch_id: `active-group-append-${sequence}`,
+					revision: sequence,
+					sequence,
+					text: ".",
+					type: "item_append",
+				}),
+			);
+			if (result._tag !== "applied") throw new Error("append must apply");
+			state = result.state;
+		}
+		const lifecycle = ApplyConversationViewPatch(
+			state,
+			patch({
+				item_id: "streaming-message",
+				lifecycle: "active",
+				patch_id: "active-group-lifecycle",
+				revision: 65,
+				sequence: 65,
+				type: "item_lifecycle",
+			}),
+		);
+		expect(sort).not.toHaveBeenCalled();
+		sort.mockRestore();
+		if (lifecycle._tag !== "applied") throw new Error("lifecycle must apply");
+		const work_group = MakeConversationRenderWindow(lifecycle.state, 24).blocks.find(
+			(block) => block.type === "work_group",
+		);
+		expect(work_group).toMatchObject({
+			details: expect.arrayContaining([
+				expect.objectContaining({ id: "activity-0" }),
+				expect.objectContaining({
+					id: "streaming-message",
+					lifecycle: "active",
+					text: ".".repeat(64),
+				}),
+			]),
+		});
+	});
+
 	it("appends and completes the same streaming message", () => {
 		const initial = MakeConversationViewState(snapshot);
 		if (initial._tag !== "applied") throw new Error("fixture must initialize");
+		const items_by_id = initial.state.items_by_id;
+		const ordered_item_ids = initial.state.ordered_item_ids;
 		const appended = ApplyConversationViewPatch(
 			initial.state,
 			patch({
@@ -98,6 +305,10 @@ describe("conversation view store", () => {
 			}),
 		);
 		if (appended._tag !== "applied") throw new Error("append must apply");
+		expect(appended.state).not.toBe(initial.state);
+		expect(appended.state.items_by_id).toBe(items_by_id);
+		expect(appended.state.ordered_item_ids).toBe(ordered_item_ids);
+		expect(initial.state.items_by_id.get("item-a")).toMatchObject({ text: "Hello world" });
 		const completed = ApplyConversationViewPatch(
 			appended.state,
 			patch({
@@ -111,10 +322,162 @@ describe("conversation view store", () => {
 		);
 		expect(completed._tag).toBe("applied");
 		if (completed._tag !== "applied") return;
+		expect(completed.state.items_by_id).toBe(items_by_id);
+		expect(completed.state.ordered_item_ids).toBe(ordered_item_ids);
 		expect(completed.state.items_by_id.get("item-a")).toMatchObject({
 			text: "Hello world",
 			lifecycle: "completed",
 		});
+	});
+
+	it("inserts a new item by ordinal while preserving the existing item index", () => {
+		const initial = MakeConversationViewState(
+			Schema.decodeUnknownSync(ConversationSnapshot)({
+				...snapshot,
+				items: [
+					{ ...snapshot.items[0]!, ordinal: 3 },
+					{
+						...snapshot.items[0]!,
+						id: "item-c",
+						ordinal: 5,
+						text: "Later",
+					},
+				],
+			}),
+		);
+		if (initial._tag !== "applied") throw new Error("fixture must initialize");
+		const items_by_id = initial.state.items_by_id;
+		const result = ApplyConversationViewPatch(
+			initial.state,
+			patch({
+				patch_id: "patch-middle-upsert",
+				sequence: 1,
+				item: {
+					created_at: "2026-07-24T12:00:00.000Z",
+					id: "item-b",
+					lifecycle: "completed",
+					ordinal: 4,
+					references: [],
+					revision: 0,
+					source_refs: [],
+					kind: "read",
+					label: "Read",
+					status: "completed",
+					turn_id: "turn-a",
+					type: "activity",
+					updated_at: "2026-07-24T12:00:00.000Z",
+				},
+				type: "item_upsert",
+			}),
+		);
+
+		expect(result._tag).toBe("applied");
+		if (result._tag !== "applied") return;
+		expect(result.state.items_by_id).toBe(items_by_id);
+		expect(result.state.ordered_item_ids).toEqual(["item-a", "item-b", "item-c"]);
+	});
+
+	it("establishes a new render group without disturbing existing group order", () => {
+		const initial = MakeConversationViewState(snapshot);
+		if (initial._tag !== "applied") throw new Error("fixture must initialize");
+		const with_turn = ApplyConversationViewPatch(
+			initial.state,
+			patch({
+				patch_id: "patch-new-turn",
+				sequence: 1,
+				turn: {
+					created_at: "2026-07-24T12:00:01.000Z",
+					id: "turn-b",
+					lifecycle: "streaming",
+					ordinal: 2,
+					references: [],
+					revision: 0,
+					source_refs: [],
+					type: "turn",
+					updated_at: "2026-07-24T12:00:01.000Z",
+				},
+				type: "turn_upsert",
+			}),
+		);
+		if (with_turn._tag !== "applied") throw new Error("turn must apply");
+		const with_item = ApplyConversationViewPatch(
+			with_turn.state,
+			patch({
+				item: {
+					created_at: "2026-07-24T12:00:01.000Z",
+					id: "item-b",
+					lifecycle: "streaming",
+					ordinal: 3,
+					phase: "unspecified",
+					references: [],
+					revision: 0,
+					source_refs: [],
+					text: "Later",
+					turn_id: "turn-b",
+					type: "assistant_message",
+					updated_at: "2026-07-24T12:00:01.000Z",
+				},
+				patch_id: "patch-new-item",
+				sequence: 2,
+				type: "item_upsert",
+			}),
+		);
+		if (with_item._tag !== "applied") throw new Error("item must apply");
+
+		expect(
+			MakeConversationRenderWindow(with_item.state, 24).blocks.map((block) => block.turn_id),
+		).toEqual(["turn-a", "turn-b"]);
+	});
+
+	it("keeps renderer item collections unchanged for turn patches and duplicate or invalid patches", () => {
+		const initial = MakeConversationViewState(snapshot);
+		if (initial._tag !== "applied") throw new Error("fixture must initialize");
+		const items_by_id = initial.state.items_by_id;
+		const ordered_item_ids = initial.state.ordered_item_ids;
+		const applied = ApplyConversationViewPatch(
+			initial.state,
+			patch({
+				patch_id: "patch-turn-lifecycle",
+				sequence: 1,
+				lifecycle: "active",
+				revision: 1,
+				turn_id: "turn-a",
+				type: "turn_lifecycle",
+			}),
+		);
+		if (applied._tag !== "applied") throw new Error("turn patch must apply");
+		expect(applied.state.items_by_id).toBe(items_by_id);
+		expect(applied.state.ordered_item_ids).toBe(ordered_item_ids);
+
+		const duplicate = ApplyConversationViewPatch(
+			applied.state,
+			patch({
+				patch_id: "patch-turn-lifecycle",
+				sequence: 2,
+				lifecycle: "completed",
+				revision: 2,
+				turn_id: "turn-a",
+				type: "turn_lifecycle",
+			}),
+		);
+		expect(duplicate).toMatchObject({ _tag: "duplicate", state: applied.state });
+		expect(applied.state.items_by_id).toBe(items_by_id);
+		expect(applied.state.ordered_item_ids).toBe(ordered_item_ids);
+
+		const invalid = ApplyConversationViewPatch(
+			applied.state,
+			patch({
+				patch_id: "patch-invalid-item-lifecycle",
+				sequence: 2,
+				item_id: "item-a",
+				lifecycle: "completed",
+				revision: 0,
+				type: "item_lifecycle",
+			}),
+		);
+		expect(invalid._tag).toBe("invariant_error");
+		expect(applied.state.items_by_id).toBe(items_by_id);
+		expect(applied.state.items_by_id.get("item-a")).toMatchObject({ revision: 0 });
 	});
 
 	it("rejects a delayed resync snapshot after the live projection has advanced", () => {

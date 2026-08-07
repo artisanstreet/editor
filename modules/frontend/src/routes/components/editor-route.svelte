@@ -32,7 +32,12 @@
 	const client = yield* ArtisanClient;
 	const editor = yield* EditorService;
 
-	let open_files = $state.raw<ReadonlyArray<{ path: string; revision: string }>>([]);
+	/**
+	 * Mirrors the editor service's bounded resident set by path. The service owns
+	 * eviction; this route only keeps enough identity to re-read a clean document
+	 * after it falls out of the LRU.
+	 */
+	let retained_file_keys = $state.raw<ReadonlyMap<string, string>>(new Map());
 	/**
 	 * Why each path could not be opened, kept per path rather than as one
 	 * message. A file that cannot be read is a property of that file, and the
@@ -42,7 +47,6 @@
 	let open_failures = $state.raw<ReadonlyMap<string, string>>(new Map());
 
 	const active_path = $derived(page.url.searchParams.get("file") ?? undefined);
-	const active_file = $derived(open_files.find((file) => file.path === active_path));
 	const active_failure = $derived(
 		active_path === undefined ? undefined : open_failures.get(active_path),
 	);
@@ -53,10 +57,14 @@
 			const read = yield* client.ReadWorkspaceFile({ path, workspace_id });
 			const file = EditorFileFromRead(read);
 			yield* editor.Activate(file);
-			open_files = [
-				...open_files.filter((candidate) => candidate.path !== path),
-				{ path, revision: file.revision },
-			];
+			const session = yield* editor.Current;
+			const next_retained_file_keys = new Map(
+				[...retained_file_keys].filter(([, file_key]) =>
+					session.open_file_keys.has(file_key),
+				),
+			);
+			next_retained_file_keys.set(path, EditorFileKeyForFile(file));
+			retained_file_keys = next_retained_file_keys;
 			open_failures = new Map(
 				[...open_failures].filter(([failed_path]) => failed_path !== path),
 			);
@@ -72,7 +80,7 @@
 	if (
 		active_path !== undefined &&
 		workspace_id !== undefined &&
-		!open_files.some((file) => file.path === active_path)
+		!retained_file_keys.has(active_path)
 	) {
 		yield* OpenPath(active_path);
 	}

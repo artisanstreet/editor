@@ -40,4 +40,56 @@ describe("scoped attachment runner", () => {
 		expect(cancelled).toEqual(["visible"]);
 		expect(completed).toEqual(["hidden"]);
 	});
+
+	it("coalesces a synchronous same-key storm to its newest command", async () => {
+		const runs: number[] = [];
+
+		await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const runner = yield* MakeScopedAttachmentRunner((input: number) =>
+						Effect.gen(function* () {
+							yield* Effect.void;
+							runs.push(input);
+						}),
+					);
+
+					for (let input = 0; input < 10_000; input += 1)
+						runner.ReplaceUnsafe("observer:one", input);
+					yield* Effect.sleep("10 millis");
+				}),
+			),
+		);
+
+		expect(runs).toEqual([9_999]);
+	});
+
+	it("keeps distinct keys and lets the newest release or run win per key", async () => {
+		const runs: string[] = [];
+
+		await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const runner = yield* MakeScopedAttachmentRunner((input: string) =>
+						Effect.gen(function* () {
+							yield* Effect.void;
+							runs.push(input);
+						}),
+					);
+
+					runner.ReplaceUnsafe("first", "discarded");
+					yield* runner.Release("first");
+					runner.ReplaceUnsafe("second", "retained");
+					runner.ReplaceUnsafe("third", "before-release");
+					yield* runner.Release("third");
+					runner.ReplaceUnsafe("third", "after-release");
+					yield* Effect.sleep("10 millis");
+				}),
+			),
+		);
+
+		expect(runs).toEqual(expect.arrayContaining(["retained", "after-release"]));
+		expect(runs).not.toContain("discarded");
+		expect(runs).not.toContain("before-release");
+	});
 });

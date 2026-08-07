@@ -77,7 +77,7 @@ describe("conversation code snippet", () => {
 
 	it("discards directive styles from Comark's actual parsed fence attributes", async () => {
 		const { parse_conversation_markdown } = await frontend_vite.ssrLoadModule(
-			"/src/lib/components/markdown/parsing.ts",
+			"/src/lib/components/markdown/test-parsing.ts",
 		);
 		const tree = await parse_conversation_markdown(
 			[

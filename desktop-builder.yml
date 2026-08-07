@@ -4,6 +4,10 @@ directories:
     app: .dist/desktop
     output: .dist/electron-release
 electronDist: node_modules/electron/dist
+# Artisan's product copy and hidden native menu are English-only today. Shipping
+# every Chromium locale adds roughly 47 MiB to the unpacked editor without
+# changing renderer capability; add locales here when product localization lands.
+electronLanguages: en-US
 files:
     - main.js
     - package.json

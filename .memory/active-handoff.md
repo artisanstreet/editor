@@ -1,15 +1,12 @@
 # Active Branch Handoff
 
-Last updated: 2026-08-05. Branch continuity only. Durable verified status is in
+Last updated: 2026-08-07. Branch continuity only. Durable verified status is in
 [`docs/status/backend-completion-matrix.md`](../docs/status/backend-completion-matrix.md).
 
 ## Working State
 
 - Repository `C:\Users\sander\Desktop\artisan-editor`; direct `master`, tracking
   `origin/master`. Verified milestones are committed and pushed directly.
-- Hosted GitHub Actions are disabled and `.github/workflows` is intentionally
-  absent while Artisan remains unpublished. Local `pnpm run validate` remains
-  the milestone gate; release tooling is retained for future publication.
 - Protected user work: `.mcp.json` stays untracked. Concurrent host-suspend,
   engine-inactivity, and frontend work remains outside scoped commits. Sander
   folded the removed `routes/threads/+page.sv` draft flow into `routes/+page.sv`.
@@ -36,9 +33,17 @@ Last updated: 2026-08-05. Branch continuity only. Durable verified status is in
   safe client/protocol diagnostics for classification while the visible footer
   renders only the muted monospaced error code. The ASCII mark centers during
   progress and aligns with the recovery copy for settled failures.
-- Account-menu usage now invokes its SER refresh Effect on open; yielding the
-  function itself had left cold caches on skeletons forever. Full validation
-  passes; provider single-flight/backoff remains follow-up.
+- Performance stays on verified SER 4.2.3; no SER-owned leak is evidenced. The
+  prior live installed baseline was 585/525 MiB working/private bytes. An
+  isolated packaged cold launch is 392.6/292.0 MiB with a 12.5 MiB JS heap;
+  Forge was unavailable there, so this is not a live-thread comparison.
+- Clean CodeMirror documents, inactive drafts, transcript DOM, patch IDs, image
+  URLs/retries, attachment backlogs, and WebGL frames are bounded. Streamed
+  reducer and render-slot updates do not scan or regroup history; settled trace
+  DOM is lazy. Shiki grammars, KaTeX, and Mermaid load only on demand.
+- The `/t` route closure fell from ~3.06 MiB/666 KiB gzip to 1.48 MiB/463 KiB.
+  The package fell from 359.6 to 309.71 MiB and ASAR from 12.33 to 8.54 MiB;
+  only `en-US` ships and the Sigurd wordmark is a verified 18.8 KiB subset.
 - The composer model trigger has a `gap-2` logo/name gap and the rail's former
   command button is now a `New thread` link to `/`; both remain uncommitted with
   protected frontend work.
@@ -77,9 +82,10 @@ Last updated: 2026-08-05. Branch continuity only. Durable verified status is in
 
 ## Verification
 
-- `pnpm run validate` passes 335 Vitest files plus 3 skipped and 2,322 tests plus
-  7 skipped; both builds, TUI smoke, and all 45 native tests pass on the current
-  Portless runner milestone.
+- The last clean milestone remains 335 Vitest files/2,322 tests. Current
+  mixed-tree validation passes format, lint, root TypeScript, frontend/Forge
+  builds, and 2,381 tests; five unrelated concurrent-work assertions remain in
+  editor layout/SER, AgentOrchestrator size, and engines public-surface suites.
 - Streaming-Markdown focused verification passes 22 tests; the renderer/SER
   regression set passes 45. Production build and `tsc` pass. Live HMR confirms
   adaptive entrances, single-use reparses, final-token release, wrapper collapse,
@@ -88,11 +94,10 @@ Last updated: 2026-08-05. Branch continuity only. Durable verified status is in
 - Portless runner verification: 36 focused tests, workspace `tsc`, frontend
   production build, Forge validation build, scoped lint, and format check pass;
   independent lifecycle/security re-review found no remaining issue.
-- Windows dev runner now discovers standard Shining Light OpenSSL installs for
-  Portless, including the executable PATH and `openssl.cfg` configuration;
-  focused runner tests pass. The current dirty tree remains protected user
-  work. Repository-wide `tsc` still reports the pre-existing WebSocket client
-  type mismatch in `modules/transport/src/websocket/client.ts`.
+- Performance/SER regression coverage passes 134 tests. Desktop packaging and
+  package verification pass; 53 native tests pass. Native format/clippy remain
+  blocked only by protected installer formatting and its two in-progress
+  excessive-bool findings.
 
 ## Dirty-Tree Integration Notes
 

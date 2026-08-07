@@ -7,6 +7,7 @@ import {
 	ConversationPatch,
 	ConversationSnapshot,
 	conversation_body_text_limit,
+	conversation_patch_dedupe_window,
 	InitializeConversation,
 	RebuildConversation,
 } from "@artisan/protocol";
@@ -262,6 +263,116 @@ describe("canonical conversation protocol", () => {
 		if (completed_patch === undefined) throw new Error("Expected a completed patch");
 		expect(ApplyConversationPatch(result.state, completed_patch)).toMatchObject({
 			_tag: "duplicate",
+		});
+	});
+
+	it("keeps large transcript collections indexed in one reducer chain for streamed deltas", () => {
+		const large_snapshot = Schema.decodeUnknownSync(ConversationSnapshot)({
+			...snapshot,
+			items: Array.from({ length: 2_000 }, (_, index) => ({
+				...assistant,
+				id: `item_${index}`,
+				ordinal: index + 1,
+			})),
+			turns: [{ ...turn, ordinal: 0 }],
+		});
+		const initialized = InitializeConversation(large_snapshot);
+		if (initialized._tag !== "applied") throw new Error("Expected a valid large snapshot");
+		const original_items = initialized.state.snapshot.items;
+		const original_turns = initialized.state.snapshot.turns;
+		const untouched_item = original_items[0];
+		const appended = ApplyConversationPatch(
+			initialized.state,
+			decode_patch({
+				item_id: "item_1999",
+				patch_id: "large-append",
+				revision: 1,
+				sequence: 1,
+				text: "delta",
+				type: "item_append",
+			}),
+		);
+		if (appended._tag !== "applied") throw new Error("Expected a streamed append");
+
+		expect(appended.state.snapshot.items).toBe(original_items);
+		expect(appended.state.snapshot.turns).toBe(original_turns);
+		expect(appended.state.snapshot.items[0]).toBe(untouched_item);
+		expect(appended.state.snapshot.items[1999]).toMatchObject({ text: "delta" });
+		expect(appended.state.reducer).toBe(initialized.state.reducer);
+
+		/** A delayed duplicate or competing patch must not return or mutate the stale state. */
+		expect(
+			ApplyConversationPatch(
+				initialized.state,
+				decode_patch({
+					item_id: "item_1999",
+					patch_id: "large-append",
+					revision: 1,
+					sequence: 1,
+					text: "delta",
+					type: "item_append",
+				}),
+			),
+		).toMatchObject({ _tag: "invariant_error", error: { code: "patch_gap" } });
+		expect(
+			ApplyConversationPatch(
+				initialized.state,
+				decode_patch({
+					item_id: "item_1999",
+					patch_id: "stale-append",
+					revision: 2,
+					sequence: 1,
+					text: " must not land",
+					type: "item_append",
+				}),
+			),
+		).toMatchObject({ _tag: "invariant_error", error: { code: "patch_gap" } });
+		expect(appended.state.snapshot.items[1999]).toMatchObject({ text: "delta" });
+	});
+
+	it("bounds patch replay IDs while forcing an evicted replay through resync", () => {
+		const initialized = InitializeConversation(
+			Schema.decodeUnknownSync(ConversationSnapshot)(snapshot),
+		);
+		if (initialized._tag !== "applied") throw new Error("Expected a valid snapshot");
+		let state = initialized.state;
+		const first_patch = decode_patch({
+			item: assistant,
+			patch_id: "window-1",
+			sequence: 1,
+			type: "item_upsert",
+		});
+		let newest_patch = first_patch;
+
+		for (let sequence = 1; sequence <= conversation_patch_dedupe_window + 1; sequence += 1) {
+			const patch =
+				sequence === 1
+					? first_patch
+					: decode_patch({
+							item_id: "item_1",
+							patch_id: `window-${sequence}`,
+							revision: sequence - 1,
+							sequence,
+							text: "x",
+							type: "item_append",
+						});
+			const applied = ApplyConversationPatch(state, patch);
+			if (applied._tag !== "applied") throw new Error("Expected a contiguous patch");
+			state = applied.state;
+			newest_patch = patch;
+		}
+
+		expect(state.applied_patch_ids.size).toBe(conversation_patch_dedupe_window);
+		expect(ApplyConversationPatch(state, newest_patch)).toMatchObject({ _tag: "duplicate" });
+		const before_old_replay = state.snapshot;
+		expect(ApplyConversationPatch(state, first_patch)).toMatchObject({
+			_tag: "invariant_error",
+			error: { code: "patch_gap" },
+		});
+		expect(state.snapshot).toBe(before_old_replay);
+		expect(state.snapshot.items[0]).toMatchObject({
+			revision: conversation_patch_dedupe_window,
+			text: "x".repeat(conversation_patch_dedupe_window),
 		});
 	});
 

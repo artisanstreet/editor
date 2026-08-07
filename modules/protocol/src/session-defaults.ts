@@ -60,9 +60,7 @@ export const SessionDefaults = Schema.Struct({
 	 * the disabled set rather than the enabled set so a newly added harness
 	 * arrives enabled instead of silently missing.
 	 */
-	disabled_engines: Schema.optional(
-		Schema.Array(Identifier).check(Schema.isMaxLength(32)),
-	),
+	disabled_engines: Schema.optional(Schema.Array(Identifier).check(Schema.isMaxLength(32))),
 	/** The model most recently chosen in any composer. */
 	last_model_id: Schema.optional(Schema.NonEmptyString),
 	models: Schema.Array(SessionModelDefaults).check(

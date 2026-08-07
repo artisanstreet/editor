@@ -84,6 +84,14 @@ const EmptyState: InternalState = {
 	active_file_key: Option.none(),
 };
 
+/**
+ * The editor service is runtime-long-lived, so inactive clean documents need a
+ * bounded resident set. Dirty documents and the active document are always
+ * protected; a large protected working set is preferable to losing edits.
+ */
+const MaximumRetainedDocuments = 8;
+const MaximumRetainedDocumentCharacters = 4 * 1024 * 1024;
+
 /** Encodes every runtime workspace boundary into the in-memory document identity. */
 export const EditorFileKeyForFile = (file: EditorFileReference) =>
 	`${encodeURIComponent(file.workspace_id)}:${encodeURIComponent(file.id)}`;
@@ -182,6 +190,46 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 			const SaveViewState = (surface: EditorSurface) =>
 				Effect.gen(function* () {
 					return yield* RunAdapter(() => surface.save_view_state());
+				});
+
+			/**
+			 * Map insertion order is the document LRU: activating a document moves it
+			 * to the end, and the first clean inactive entry is evicted first. Reading
+			 * each value here also makes the character budget reflect unsaved changes.
+			 */
+			const EvictInactiveCleanDocuments = (
+				documents: ReadonlyMap<string, OpenDocument>,
+				active_file_key: string,
+			) =>
+				Effect.gen(function* () {
+					const protected_keys = new Set<string>([active_file_key]);
+					const character_counts = new Map<string, number>();
+					let retained_characters = 0;
+
+					for (const [file_key, managed] of documents) {
+						const value = yield* RunAdapter(() => managed.document.get_value());
+						character_counts.set(file_key, value.length);
+						retained_characters += value.length;
+						if (value !== managed.file.content) protected_keys.add(file_key);
+					}
+
+					const retained = new Map(documents);
+					const evicted: Array<OpenDocument> = [];
+					while (
+						retained.size > MaximumRetainedDocuments ||
+						retained_characters > MaximumRetainedDocumentCharacters
+					) {
+						const candidate = [...retained].find(
+							([file_key]) => !protected_keys.has(file_key),
+						);
+						if (candidate === undefined) break;
+						const [file_key, managed] = candidate;
+						retained.delete(file_key);
+						retained_characters -= character_counts.get(file_key) ?? 0;
+						evicted.push(managed);
+					}
+
+					return { documents: retained, evicted };
 				});
 
 			const Dispose = Effect.gen(function* () {
@@ -331,12 +379,16 @@ export const MakeEditorLayer = (adapter: EditorAdapter) =>
 						}
 					}
 
+					/** Delete before set so activation is a recency touch even for an existing document. */
+					documents.delete(file_key);
 					documents.set(file_key, managed);
+					const retained = yield* EvictInactiveCleanDocuments(documents, file_key);
 					yield* Ref.set(state, {
 						...current,
 						active_file_key: Option.some(file_key),
-						documents,
+						documents: retained.documents,
 					});
+					yield* ReleaseAll(retained.evicted.map(ReleaseDocument));
 					return outcome;
 				});
 

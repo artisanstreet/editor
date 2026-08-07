@@ -111,6 +111,18 @@ const FileB: EditorWorkspaceFile = {
 	workspace_id: "workspace-one",
 };
 
+const MakeFile = (
+	index: number,
+	content = `export const file_${index} = ${index};`,
+): EditorWorkspaceFile => ({
+	content,
+	id: `file-${index}`,
+	language: "typescript",
+	path: `src/file-${index}.ts`,
+	revision: "v1",
+	workspace_id: "workspace-one",
+});
+
 const Scoped = <A, Error>(
 	fake: FakeSurfaceAdapter,
 	program: Effect.Effect<A, Error, EditorService>,
@@ -334,6 +346,77 @@ describe("editor service", () => {
 		expect(fake.surfaces[0]!.disposed).toBe(true);
 		expect(Option.isNone(outcome.state.active_file_key)).toBe(true);
 		expect(outcome.state.open_file_keys).toHaveLength(0);
+	});
+
+	it("evicts and disposes the oldest clean inactive document when the resident set exceeds its limit", async () => {
+		const fake = new FakeSurfaceAdapter();
+		const files = Array.from({ length: 9 }, (_, index) => MakeFile(index));
+		const outcome = await Scoped(
+			fake,
+			Effect.gen(function* () {
+				const service = yield* EditorService;
+				for (const file of files) yield* service.Activate(file);
+				return {
+					disposed: fake.documents.map((document) => document.disposed),
+					state: yield* service.Current,
+				};
+			}),
+		);
+
+		expect(outcome.disposed[0]).toBe(true);
+		expect(outcome.disposed[1]).toBe(false);
+		expect(fake.markers.get(EditorUriForFile(files[0]!))).toEqual([]);
+		expect(outcome.state.open_file_keys).not.toContain(EditorFileKeyForFile(files[0]!));
+		expect(outcome.state.open_file_keys).toHaveLength(8);
+	});
+
+	it("retains dirty inactive documents even when protected documents exceed the resident limit", async () => {
+		const fake = new FakeSurfaceAdapter();
+		const files = Array.from({ length: 9 }, (_, index) => MakeFile(index));
+		const outcome = await Scoped(
+			fake,
+			Effect.gen(function* () {
+				const service = yield* EditorService;
+				for (const file of files) {
+					yield* service.Activate(file);
+					yield* service.Update(file, `${file.content}\n// unsaved`);
+				}
+				return {
+					disposed: fake.documents.map((document) => document.disposed),
+					state: yield* service.Current,
+				};
+			}),
+		);
+
+		expect(outcome.state.open_file_keys).toHaveLength(9);
+		expect(outcome.state.dirty_file_keys).toEqual(new Set(files.map(EditorFileKeyForFile)));
+		expect(outcome.disposed.every((disposed) => !disposed)).toBe(true);
+	});
+
+	it("refreshes a reactivated document's LRU position before the next eviction", async () => {
+		const fake = new FakeSurfaceAdapter();
+		const files = Array.from({ length: 10 }, (_, index) => MakeFile(index));
+		const outcome = await Scoped(
+			fake,
+			Effect.gen(function* () {
+				const service = yield* EditorService;
+				for (const file of files.slice(0, 9)) yield* service.Activate(file);
+				yield* service.Activate(files[1]!);
+				yield* service.Activate(files[9]!);
+				return {
+					disposed: fake.documents.map((document) => document.disposed),
+					state: yield* service.Current,
+				};
+			}),
+		);
+
+		expect(outcome.disposed[1]).toBe(false);
+		expect(outcome.disposed[2]).toBe(true);
+		expect([...outcome.state.open_file_keys]).toEqual([
+			...files.slice(3, 9).map(EditorFileKeyForFile),
+			EditorFileKeyForFile(files[1]!),
+			EditorFileKeyForFile(files[9]!),
+		]);
 	});
 
 	it("attempts all close and scope releases when individual adapter callbacks throw", async () => {

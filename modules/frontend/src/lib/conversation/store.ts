@@ -6,12 +6,14 @@ import {
 	type ConversationPatch,
 	type ConversationRebuildState,
 	type ConversationSnapshot,
+	type ConversationTurn,
 } from "@artisan/protocol";
 
 export interface ConversationViewState {
 	readonly items_by_id: ReadonlyMap<string, ConversationItem>;
 	readonly ordered_item_ids: ReadonlyArray<string>;
 	readonly phase: "ready" | "resync_required";
+	readonly projection: ConversationRenderProjection;
 	readonly rebuild: ConversationRebuildState;
 }
 
@@ -53,6 +55,31 @@ export type ConversationRenderBlock =
 			readonly type: "turn_footer";
 	  };
 
+interface ConversationRenderGroup {
+	readonly blocks: ReadonlyArray<ConversationRenderBlock>;
+	readonly item_locations: ReadonlyMap<string, ConversationRenderItemLocation>;
+	readonly source_turn_ids: ReadonlySet<string>;
+	readonly turn_id: string;
+}
+
+/** Locates a source item within its already-rendered group without regrouping it. */
+type ConversationRenderItemLocation =
+	| { readonly block_index: number; readonly type: "item" }
+	| { readonly block_index: number; readonly detail_index: number; readonly type: "work_detail" };
+
+interface ConversationRenderProjection {
+	readonly groups_by_id: Map<string, ConversationRenderGroup>;
+	readonly group_id_by_turn: Map<string, string>;
+	readonly item_ids_by_turn: Map<string, ReadonlyArray<string>>;
+	readonly ordered_group_ids: ReadonlyArray<string>;
+	readonly turns_by_id: Map<string, ConversationTurn>;
+}
+
+export interface ConversationRenderWindow {
+	readonly blocks: ReadonlyArray<ConversationRenderBlock>;
+	readonly hidden_group_count: number;
+}
+
 export type ConversationViewPatchResult =
 	| { readonly _tag: "applied" | "duplicate"; readonly state: ConversationViewState }
 	| {
@@ -82,26 +109,143 @@ export const CanReplaceConversationSnapshot = (
 const MakeViewState = (
 	rebuild: ConversationRebuildState,
 	phase: ConversationViewState["phase"] = "ready",
-	previous?: ConversationViewState,
 ): ConversationViewState => {
 	const items_by_id = new Map(rebuild.snapshot.items.map((item) => [item.id, item]));
-	/**
-	 * Items are never removed and their ordinals are immutable, so an
-	 * unchanged count means an unchanged order: a streamed delta replaces an
-	 * item's text, never its position. Reusing the previous ordering skips a
-	 * full sort on the hottest patch path.
-	 */
-	const ordered_item_ids =
-		previous !== undefined && previous.ordered_item_ids.length === items_by_id.size
-			? previous.ordered_item_ids
-			: [...items_by_id.values()]
-					.sort(
-						(left, right) =>
-							left.ordinal - right.ordinal || left.id.localeCompare(right.id),
-					)
-					.map((item) => item.id);
+	const ordered_item_ids = [...items_by_id.values()]
+		.sort((left, right) => left.ordinal - right.ordinal || left.id.localeCompare(right.id))
+		.map((item) => item.id);
 
-	return { items_by_id, ordered_item_ids, phase, rebuild };
+	const state = {
+		items_by_id,
+		ordered_item_ids,
+		phase,
+		rebuild,
+	} satisfies Omit<ConversationViewState, "projection">;
+	return { ...state, projection: MakeConversationRenderProjection(state) };
+};
+
+const CompareConversationItemOrder = (left: ConversationItem, right: ConversationItem) =>
+	left.ordinal - right.ordinal || left.id.localeCompare(right.id);
+
+/** Inserts a new item without re-sorting the entire history for an out-of-order replay. */
+const InsertOrderedItemId = (
+	ordered_item_ids: ReadonlyArray<string>,
+	items_by_id: ReadonlyMap<string, ConversationItem>,
+	item: ConversationItem,
+): ReadonlyArray<string> => {
+	const tail_id = ordered_item_ids.at(-1);
+	const tail = tail_id === undefined ? undefined : items_by_id.get(tail_id);
+	if (tail === undefined || CompareConversationItemOrder(tail, item) < 0)
+		return [...ordered_item_ids, item.id];
+
+	let start = 0;
+	let end = ordered_item_ids.length;
+	while (start < end) {
+		const middle = Math.floor((start + end) / 2);
+		const middle_id = ordered_item_ids[middle];
+		const middle_item = middle_id === undefined ? undefined : items_by_id.get(middle_id);
+		if (middle_item === undefined || CompareConversationItemOrder(middle_item, item) < 0)
+			start = middle + 1;
+		else end = middle;
+	}
+	return [...ordered_item_ids.slice(0, start), item.id, ...ordered_item_ids.slice(start)];
+};
+
+/** Protocol validation permits append patches only for these two text-bearing item kinds. */
+const AppendConversationItemText = (
+	item: ConversationItem,
+	text: string,
+	revision: number,
+): ConversationItem => {
+	if (item.type !== "assistant_message" && item.type !== "reasoning_summary") return item;
+	return { ...item, revision, text: item.text + text };
+};
+
+/**
+ * `ConversationRebuildState` already deliberately shares its applied patch set
+ * across reducer states. The renderer index follows the same reducer-chain
+ * ownership: only the newest state is observable, and an applied item patch
+ * mutates the shared map entry after the protocol reducer accepts it. This
+ * avoids copying the whole transcript map once per streamed token while the
+ * returned state object still gives Svelte a fresh reactive value.
+ */
+const ApplyViewCollections = (
+	state: ConversationViewState,
+	rebuild: ConversationRebuildState,
+	patch: ConversationPatch,
+): ConversationViewState => {
+	const items_by_id = state.items_by_id as Map<string, ConversationItem>;
+	const projection = state.projection;
+	if (patch.type === "turn_upsert" || patch.type === "turn_lifecycle") {
+		const turn_id = patch.type === "turn_upsert" ? patch.turn.id : patch.turn_id;
+		let turn: ConversationTurn;
+		if (patch.type === "turn_upsert") turn = patch.turn;
+		else {
+			const previous_turn = projection.turns_by_id.get(turn_id);
+			if (previous_turn === undefined) return MakeViewState(rebuild);
+			turn = {
+				...previous_turn,
+				lifecycle: patch.lifecycle,
+				revision: patch.revision,
+			};
+		}
+		projection.turns_by_id.set(turn_id, turn);
+		const group_id = projection.group_id_by_turn.get(turn_id);
+		const next = { ...state, rebuild };
+		if (group_id !== undefined) RefreshConversationRenderGroup(next, group_id);
+		return next;
+	}
+
+	const previous =
+		patch.type === "item_upsert"
+			? items_by_id.get(patch.item.id)
+			: items_by_id.get(patch.item_id);
+	let item: ConversationItem;
+	if (patch.type === "item_upsert") item = patch.item;
+	else {
+		if (previous === undefined) return MakeViewState(rebuild);
+		item =
+			patch.type === "item_append"
+				? AppendConversationItemText(previous, patch.text, patch.revision)
+				: { ...previous, lifecycle: patch.lifecycle, revision: patch.revision };
+	}
+	items_by_id.set(item.id, item);
+	const ordered_item_ids =
+		patch.type === "item_upsert" && previous === undefined
+			? InsertOrderedItemId(state.ordered_item_ids, items_by_id, item)
+			: state.ordered_item_ids;
+	const existing_group_id = projection.group_id_by_turn.get(item.turn_id);
+	if (patch.type === "item_upsert" && previous === undefined) {
+		const ids = projection.item_ids_by_turn.get(item.turn_id) ?? [];
+		projection.item_ids_by_turn.set(item.turn_id, InsertOrderedItemId(ids, items_by_id, item));
+	}
+	const next = {
+		...state,
+		rebuild,
+		ordered_item_ids,
+	};
+	if (
+		patch.type !== "item_upsert" &&
+		previous !== undefined &&
+		UpdateNonStructuralRenderItem(next, item, previous, patch)
+	) {
+		return next;
+	}
+	/**
+	 * A legacy session can merge source turns, while the first item for a turn
+	 * establishes its globally ordered group. Both are rare structural changes;
+	 * rebuild the projection so aliases and replay ordering remain canonical.
+	 */
+	if (
+		patch.type === "item_upsert" &&
+		(item.type === "work_session" ||
+			(previous === undefined && existing_group_id === undefined))
+	) {
+		return { ...next, projection: MakeConversationRenderProjection(next) };
+	}
+	const group_id = existing_group_id ?? item.turn_id;
+	RefreshConversationRenderGroup(next, group_id);
+	return next;
 };
 
 /** Normalizes a validated snapshot into identity-keyed, ordinal-ordered renderer state. */
@@ -122,6 +266,13 @@ const MakeEmptyConversationViewState = (snapshot: ConversationSnapshot): Convers
 	items_by_id: new Map(),
 	ordered_item_ids: [],
 	phase: "resync_required",
+	projection: {
+		groups_by_id: new Map(),
+		group_id_by_turn: new Map(),
+		item_ids_by_turn: new Map(),
+		ordered_group_ids: [],
+		turns_by_id: new Map(),
+	},
 	rebuild: { applied_patch_ids: new Set(), snapshot },
 });
 
@@ -196,12 +347,10 @@ const settled_turn_lifecycles: ReadonlySet<ConversationLifecycle> = new Set([
 	"cancelled",
 ]);
 
-export const MakeConversationRenderBlocks = (
-	state: ConversationViewState,
+const MakeConversationRenderBlocksForItems = (
+	ordered_items: ReadonlyArray<ConversationItem>,
+	turns: ReadonlyArray<ConversationRebuildState["snapshot"]["turns"][number]>,
 ): ReadonlyArray<ConversationRenderBlock> => {
-	const ordered_items = state.ordered_item_ids
-		.map((item_id) => state.items_by_id.get(item_id))
-		.filter((item): item is ConversationItem => item !== undefined);
 	const legacy_work = MakeLegacyWorkAliases(
 		ordered_items.filter(
 			(item): item is ConversationWorkSession => item.type === "work_session",
@@ -214,9 +363,7 @@ export const MakeConversationRenderBlocks = (
 	const transition_by_turn = new Map<string, ConversationModelTransition>();
 	const concrete_work_turns = new Set<string>();
 	const final_message_by_turn = new Map<string, ConversationAssistantMessage>();
-	const turns_by_id = new Map(
-		state.rebuild.snapshot.turns.map((turn) => [turn.id, turn] as const),
-	);
+	const turns_by_id = new Map(turns.map((turn) => [turn.id, turn] as const));
 
 	for (const item of ordered_items) {
 		const group_key = ConversationRenderKey(item, legacy_work.turn_aliases);
@@ -398,6 +545,204 @@ export const MakeConversationRenderBlocks = (
 	});
 };
 
+/** Retained full projection for non-virtual consumers and semantic regression tests. */
+export const MakeConversationRenderBlocks = (
+	state: ConversationViewState,
+): ReadonlyArray<ConversationRenderBlock> =>
+	MakeConversationRenderBlocksForItems(
+		state.ordered_item_ids
+			.map((item_id) => state.items_by_id.get(item_id))
+			.filter((item): item is ConversationItem => item !== undefined),
+		state.rebuild.snapshot.turns,
+	);
+
+/** Builds durable, state-owned group indexes once for a snapshot replacement. */
+const MakeConversationRenderGroup = (
+	blocks: ReadonlyArray<ConversationRenderBlock>,
+	source_turn_ids: ReadonlySet<string>,
+	turn_id: string,
+): ConversationRenderGroup => {
+	const item_locations = new Map<string, ConversationRenderItemLocation>();
+	for (const [block_index, block] of blocks.entries()) {
+		if (block.type === "item") {
+			item_locations.set(block.item.id, { block_index, type: "item" });
+			continue;
+		}
+		if (block.type !== "work_group") continue;
+		for (const [detail_index, detail] of block.details.entries())
+			item_locations.set(detail.id, { block_index, detail_index, type: "work_detail" });
+	}
+	return { blocks, item_locations, source_turn_ids, turn_id };
+};
+
+const MakeConversationRenderProjection = (
+	state: Omit<ConversationViewState, "projection">,
+): ConversationRenderProjection => {
+	const ordered_items = state.ordered_item_ids
+		.map((item_id) => state.items_by_id.get(item_id))
+		.filter((item): item is ConversationItem => item !== undefined);
+	const legacy_work = MakeLegacyWorkAliases(
+		ordered_items.filter(
+			(item): item is ConversationWorkSession => item.type === "work_session",
+		),
+	);
+	const group_id_by_turn = new Map<string, string>();
+	const item_ids_by_turn = new Map<string, ReadonlyArray<string>>();
+	const source_turn_ids_by_group = new Map<string, Set<string>>();
+	for (const item of ordered_items) {
+		const group_id = ConversationRenderKey(item, legacy_work.turn_aliases);
+		group_id_by_turn.set(item.turn_id, group_id);
+		const source_turn_ids = source_turn_ids_by_group.get(group_id) ?? new Set<string>();
+		source_turn_ids.add(item.turn_id);
+		source_turn_ids_by_group.set(group_id, source_turn_ids);
+		const ids = item_ids_by_turn.get(item.turn_id);
+		if (ids === undefined) item_ids_by_turn.set(item.turn_id, [item.id]);
+		else (ids as Array<string>).push(item.id);
+	}
+	const blocks_by_group_id = new Map<string, Array<ConversationRenderBlock>>();
+	const ordered_group_ids: Array<string> = [];
+	for (const block of MakeConversationRenderBlocksForItems(
+		ordered_items,
+		state.rebuild.snapshot.turns,
+	)) {
+		const blocks = blocks_by_group_id.get(block.turn_id);
+		if (blocks === undefined) {
+			blocks_by_group_id.set(block.turn_id, [block]);
+			ordered_group_ids.push(block.turn_id);
+		} else blocks.push(block);
+	}
+	const groups_by_id = new Map(
+		[...blocks_by_group_id.entries()].map(([turn_id, blocks]) => [
+			turn_id,
+			MakeConversationRenderGroup(
+				blocks,
+				source_turn_ids_by_group.get(turn_id) ?? new Set(),
+				turn_id,
+			),
+		]),
+	);
+	return {
+		groups_by_id,
+		group_id_by_turn,
+		item_ids_by_turn,
+		ordered_group_ids,
+		turns_by_id: new Map(state.rebuild.snapshot.turns.map((turn) => [turn.id, turn])),
+	};
+};
+
+/**
+ * Replaces an item in its existing render slot. Append and lifecycle patches
+ * cannot change grouping except at final-message/footer boundaries; those
+ * structural cases intentionally fall through to the canonical rebuild below.
+ */
+const UpdateNonStructuralRenderItem = (
+	state: ConversationViewState,
+	item: ConversationItem,
+	previous: ConversationItem,
+	patch: Exclude<ConversationPatch, { readonly type: "item_upsert" }>,
+): boolean => {
+	if (
+		patch.type === "item_append" &&
+		item.type !== "assistant_message" &&
+		item.type !== "reasoning_summary"
+	)
+		return false;
+	if (item.type !== previous.type) return false;
+	const group_id = state.projection.group_id_by_turn.get(item.turn_id);
+	const group = group_id === undefined ? undefined : state.projection.groups_by_id.get(group_id);
+	if (group === undefined) return false;
+	if (
+		patch.type === "item_append" &&
+		item.type === "assistant_message" &&
+		previous.type === "assistant_message" &&
+		item.phase === "final" &&
+		previous.text.length === 0
+	)
+		return false;
+	if (
+		patch.type === "item_lifecycle" &&
+		item.type === "assistant_message" &&
+		([...group.source_turn_ids].some((turn_id) => {
+			const lifecycle = state.projection.turns_by_id.get(turn_id)?.lifecycle;
+			return lifecycle !== undefined && settled_turn_lifecycles.has(lifecycle);
+		}) ||
+			group.blocks.some(
+				(block) => block.type === "work_group" && block.session.lifecycle === "completed",
+			))
+	)
+		return false;
+	const location = group.item_locations.get(item.id);
+	if (location === undefined) return false;
+	const blocks = [...group.blocks];
+	const block = blocks[location.block_index];
+	if (block === undefined) return false;
+	if (location.type === "item" && block.type === "item") {
+		blocks[location.block_index] = { ...block, item };
+	} else if (location.type === "work_detail" && block.type === "work_group") {
+		/** The reducer chain owns historical detail entries; replace only this message slot. */
+		const details = block.details as Array<ConversationItem>;
+		if (details[location.detail_index] === undefined) return false;
+		details[location.detail_index] = item;
+		blocks[location.block_index] = { ...block, details };
+	} else return false;
+	state.projection.groups_by_id.set(group.turn_id, { ...group, blocks });
+	return true;
+};
+
+/**
+ * Returns the newest group window plus any explicitly paged older groups. The
+ * cache is updated only for the patched group, so streamed words never regroup
+ * historical turns or allocate historical block arrays.
+ */
+export const MakeConversationRenderWindow = (
+	state: ConversationViewState,
+	group_limit: number,
+	older_group_count = 0,
+): ConversationRenderWindow => {
+	const visible_count = Math.max(1, group_limit) + Math.max(0, older_group_count);
+	const start = Math.max(0, state.projection.ordered_group_ids.length - visible_count);
+	const group_ids = state.projection.ordered_group_ids.slice(start);
+	return {
+		blocks: group_ids.flatMap(
+			(group_id) => state.projection.groups_by_id.get(group_id)?.blocks ?? [],
+		),
+		hidden_group_count: start,
+	};
+};
+
+/** Rebuilds one cached render group from its indexed source turns only. */
+const RefreshConversationRenderGroup = (state: ConversationViewState, group_id: string): void => {
+	const projection = state.projection;
+	const previous = projection.groups_by_id.get(group_id);
+	const source_turn_ids =
+		previous?.source_turn_ids ??
+		new Set(
+			[...projection.group_id_by_turn.entries()]
+				.filter(([, candidate]) => candidate === group_id)
+				.map(([turn_id]) => turn_id),
+		);
+	const items = [...source_turn_ids]
+		.flatMap((turn_id) => projection.item_ids_by_turn.get(turn_id) ?? [])
+		.map((item_id) => state.items_by_id.get(item_id))
+		.filter((item): item is ConversationItem => item !== undefined)
+		.sort(CompareConversationItemOrder);
+	const turns = [...source_turn_ids]
+		.map((turn_id) => projection.turns_by_id.get(turn_id))
+		.filter((turn): turn is ConversationTurn => turn !== undefined);
+	const blocks = MakeConversationRenderBlocksForItems(items, turns);
+	if (blocks.length === 0) {
+		projection.groups_by_id.delete(group_id);
+		return;
+	}
+	projection.groups_by_id.set(
+		group_id,
+		MakeConversationRenderGroup(blocks, source_turn_ids, group_id),
+	);
+	if (!projection.ordered_group_ids.includes(group_id)) {
+		(projection.ordered_group_ids as Array<string>).push(group_id);
+	}
+};
+
 /** Applies only contiguous protocol patches. A gap leaves the prior view intact and requests resync. */
 export const ApplyConversationViewPatch = (
 	state: ConversationViewState,
@@ -414,10 +759,16 @@ export const ApplyConversationViewPatch = (
 
 	const result = ApplyConversationPatch(state.rebuild, patch);
 	if (result._tag === "applied" || result._tag === "duplicate") {
-		return { _tag: result._tag, state: MakeViewState(result.state, "ready", state) };
+		return {
+			_tag: result._tag,
+			state:
+				result._tag === "applied"
+					? ApplyViewCollections(state, result.state, patch)
+					: state,
+		};
 	}
 	if (result.error.code === "patch_gap") {
-		const resync_state = MakeViewState(state.rebuild, "resync_required", state);
+		const resync_state = { ...state, phase: "resync_required" as const };
 		return {
 			_tag: "resync_required",
 			expected_sequence: state.rebuild.snapshot.last_patch_sequence + 1,

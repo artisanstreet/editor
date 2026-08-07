@@ -234,11 +234,14 @@
 			yield* RunBrowserDom(() => gl.uniform4f(gl.getUniformLocation(program, name), red, green, blue, alpha));
 			});
 
-		let current_config: ShaderConfig;
-		const renders = yield* Queue.unbounded<
-			| { readonly _tag: "config"; readonly config: ShaderConfig }
-			| { readonly _tag: "render"; readonly now: number }
-		>();
+		let current_config: ShaderConfig | undefined;
+		let pending_config: ShaderConfig | undefined;
+		/**
+		 * Rendering is a latest-state concern: a backgrounded window or a busy GPU
+		 * must never accumulate a frame backlog. Every ingress overwrites the stale
+		 * signal, while `pending_config` preserves the newest slider state.
+		 */
+		const renders = yield* Queue.sliding<{ readonly immediate: boolean; readonly now: number }>(1);
 		const ApplyConfig = (config: ShaderConfig) =>
 			Effect.gen(function* () {
 			current_config = config;
@@ -261,17 +264,81 @@
 			yield* SetColor("u_color5", config.color_5, 0.72);
 			yield* SetColor("u_colorBack", config.color_back, config.back_opacity);
 			yield* SetColor("u_colorBloom", config.color_bloom, 0.72);
-			yield* RunBrowserDom(() => Queue.offerUnsafe(renders, { _tag: "render", now: performance.now() }));
 			});
 		const unsubscribe = shader_config.subscribe((config) =>
-			Queue.offerUnsafe(renders, { _tag: "config", config }),
+			(pending_config = config, Queue.offerUnsafe(renders, { immediate: true, now: performance.now() })),
 		);
 		releases.push(unsubscribe);
 
-		let frame_id = 0;
+		let frame_id: number | undefined;
 		const reduced_motion = yield* RunBrowserDom(() => matchMedia("(prefers-reduced-motion: reduce)").matches);
-		const Render = (now: number) =>
+		let document_visible = yield* RunBrowserDom(() => !document.hidden);
+		let canvas_visible = false;
+		const CanRender = () => document_visible && canvas_visible;
+		const observer = yield* RunBrowserDom(() => {
+			const OnVisibilityChange = () => {
+				document_visible = !document.hidden;
+				if (!CanRender() && frame_id !== undefined) {
+					cancelAnimationFrame(frame_id);
+					frame_id = undefined;
+				}
+				if (CanRender()) Queue.offerUnsafe(renders, { immediate: true, now: performance.now() });
+			};
+			document.addEventListener("visibilitychange", OnVisibilityChange);
+			if (!("IntersectionObserver" in globalThis)) {
+				canvas_visible = true;
+				return { OnVisibilityChange };
+			}
+			const observer = new IntersectionObserver((entries) => {
+				canvas_visible = entries.some((entry) => entry.isIntersecting);
+				if (!CanRender() && frame_id !== undefined) {
+					cancelAnimationFrame(frame_id);
+					frame_id = undefined;
+				}
+				if (CanRender()) Queue.offerUnsafe(renders, { immediate: true, now: performance.now() });
+			});
+			observer.observe(canvas);
+			return { OnVisibilityChange, observer };
+		});
+		releases.push(
 			Effect.gen(function* () {
+				yield* RunBrowserDom(() => {
+					document.removeEventListener("visibilitychange", observer.OnVisibilityChange);
+					observer.observer?.disconnect();
+					if (frame_id !== undefined) cancelAnimationFrame(frame_id);
+				});
+			}),
+		);
+		let last_animation_frame: number | undefined;
+		const RequestAnimationFrame = () =>
+			Effect.gen(function* () {
+				yield* RunBrowserDom(() => {
+					if (!reduced_motion && CanRender() && frame_id === undefined)
+						frame_id = requestAnimationFrame((next) => {
+							frame_id = undefined;
+							Queue.offerUnsafe(renders, { immediate: false, now: next });
+						});
+				});
+			});
+		const Render = ({ immediate, now }: { readonly immediate: boolean; readonly now: number }) =>
+			Effect.gen(function* () {
+			if (!CanRender()) return;
+			const next_config = pending_config;
+			if (next_config !== undefined) {
+				pending_config = undefined;
+				yield* ApplyConfig(next_config);
+			}
+			if (current_config === undefined) return;
+			const render_immediately = immediate || next_config !== undefined;
+			if (
+				!reduced_motion &&
+				!render_immediately &&
+				last_animation_frame !== undefined &&
+				now - last_animation_frame < 1_000 / 30
+			) {
+				yield* RequestAnimationFrame();
+				return;
+			}
 			yield* RunBrowserDom(() => {
 				const bounds = canvas.getBoundingClientRect();
 				const pixel_ratio = Math.min(devicePixelRatio, 1.25);
@@ -287,23 +354,20 @@
 				gl.clearColor(0, 0, 0, 0);
 				gl.clear(gl.COLOR_BUFFER_BIT);
 				gl.drawArrays(gl.TRIANGLES, 0, 6);
-				if (!reduced_motion) frame_id = requestAnimationFrame((next) => Queue.offerUnsafe(renders, { _tag: "render", now: next }));
+				last_animation_frame = now;
 			});
+			yield* RequestAnimationFrame();
 			});
 		yield* Effect.gen(function* () {
 			while (true) {
-				const command = yield* Queue.take(renders);
-				if (command._tag === "config") yield* ApplyConfig(command.config);
-				else yield* Render(command.now);
+				yield* Render(yield* Queue.take(renders));
 			}
 		}).pipe(Effect.forkScoped);
 
-		frame_id = yield* RunBrowserDom(() => requestAnimationFrame((now) => Queue.offerUnsafe(renders, { _tag: "render", now })));
-		releases.push(
-			Effect.gen(function* () {
-				yield* RunBrowserDom(() => cancelAnimationFrame(frame_id));
-			}),
-		);
+		yield* Queue.offer(renders, {
+			immediate: true,
+			now: yield* RunBrowserDom(() => performance.now()),
+		});
 		return ReleaseResources;
 		});
 

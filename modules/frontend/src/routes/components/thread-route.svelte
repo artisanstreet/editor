@@ -70,11 +70,6 @@
 	const run_usage = yield* RunUsageController;
 	const run_usage_lease = yield* run_usage.Acquire(undefined);
 	const thread_scope = yield* Scope.make();
-	yield* Effect.addFinalizer(() =>
-		Effect.gen(function* () {
-			yield* Scope.close(thread_scope, Exit.void);
-		}),
-	);
 
 	const threads = yield* client.ListThreads;
 	const initial_thread = yield* Option.match(
@@ -160,11 +155,22 @@
 	}
 	const conversation_id = initial_snapshot.conversation_id;
 	let snapshot = $state.raw(initial_snapshot);
-	let view_state: ConversationViewState | undefined;
+	/**
+	 * The route already maintains the canonical identity map while applying live
+	 * patches. Keep it reactive and hand the same structure to the renderer
+	 * instead of rebuilding a second full-history map for every streamed patch.
+	 */
+	let view_state = $state.raw<ConversationViewState | undefined>();
 	let image_sources = $state.raw<ReadonlyMap<string, string>>(new Map());
 	const requested_image_ids = new Set<string>();
 	const visible_image_ids = new Set<string>();
 	const image_load_attempts = new Map<string, number>();
+	/** The request gate must never outlive the fiber that claimed it. */
+	const ClearImageLoadState = (attachment_id: string) =>
+		Effect.gen(function* () {
+			requested_image_ids.delete(attachment_id);
+			image_load_attempts.delete(attachment_id);
+		});
 
 	const ReleaseImageAttachment = (attachment_id: string) =>
 		Effect.gen(function* () {
@@ -175,6 +181,34 @@
 			next_sources.delete(attachment_id);
 			image_sources = next_sources;
 		});
+	/** Replacing a URL transfers ownership and promptly releases the superseded blob. */
+	const PublishImageAttachment = (attachment_id: string, source: string) =>
+		Effect.gen(function* () {
+			const previous_source = image_sources.get(attachment_id);
+			image_sources = new Map(image_sources).set(attachment_id, source);
+			if (previous_source !== undefined && previous_source !== source) {
+				yield* ReleaseBrowserObjectUrl(previous_source).pipe(Effect.ignore);
+			}
+		});
+	/**
+	 * One route finalizer owns the currently retained URLs. Per-image finalizers
+	 * accumulated one closure for every attachment ever viewed even after its URL
+	 * had already been revoked on invisibility.
+	 */
+	const ReleaseAllImageAttachments = Effect.gen(function* () {
+		const sources = [...image_sources.values()];
+		image_sources = new Map();
+		for (const source of sources) {
+			yield* ReleaseBrowserObjectUrl(source).pipe(Effect.ignore);
+		}
+	});
+	yield* Effect.addFinalizer(() =>
+		Effect.gen(function* () {
+			/** Interrupt attachment loads before releasing the URLs they published. */
+			yield* Scope.close(thread_scope, Exit.void);
+			yield* ReleaseAllImageAttachments;
+		}),
+	);
 
 	const LoadImageAttachment = (attachment: ImageAttachmentReference, attempt: number) =>
 		Effect.gen(function* () {
@@ -183,40 +217,40 @@
 				thread_id,
 			});
 			if (Option.isNone(result) || !visible_image_ids.has(attachment.id)) {
-				requested_image_ids.delete(attachment.id);
+				yield* ClearImageLoadState(attachment.id);
 				return;
 			}
 
-			const bytes = Uint8Array.from(result.value.bytes);
-			const source = yield* CreateBrowserObjectUrl(bytes, result.value.media_type);
-			yield* Scope.addFinalizer(
-				thread_scope,
-				Effect.gen(function* () {
+			yield* Effect.gen(function* () {
+				const bytes = Uint8Array.from(result.value.bytes);
+				const source = yield* CreateBrowserObjectUrl(bytes, result.value.media_type);
+				if (!visible_image_ids.has(attachment.id)) {
+					yield* ClearImageLoadState(attachment.id);
 					yield* ReleaseBrowserObjectUrl(source).pipe(Effect.ignore);
-				}),
-			);
-			if (!visible_image_ids.has(attachment.id)) {
-				requested_image_ids.delete(attachment.id);
-				image_load_attempts.delete(attachment.id);
-				yield* ReleaseBrowserObjectUrl(source).pipe(Effect.ignore);
-				return;
-			}
-			image_sources = new Map(image_sources).set(attachment.id, source);
-			image_load_attempts.delete(attachment.id);
-			requested_image_ids.delete(attachment.id);
+					return;
+				}
+				yield* PublishImageAttachment(attachment.id, source);
+				yield* ClearImageLoadState(attachment.id);
+			}).pipe(Effect.uninterruptible);
 		}).pipe(
 			Effect.catch(() =>
 				Effect.gen(function* () {
 					if (!visible_image_ids.has(attachment.id) || attempt >= 3) {
-						requested_image_ids.delete(attachment.id);
+						yield* ClearImageLoadState(attachment.id);
 						return;
 					}
 					yield* Effect.sleep(attempt * 500);
+					/** Let the next attempt increment the retained retry count. */
 					requested_image_ids.delete(attachment.id);
-					if (!visible_image_ids.has(attachment.id)) return;
+					if (!visible_image_ids.has(attachment.id)) {
+						yield* ClearImageLoadState(attachment.id);
+						return;
+					}
 					yield* RequestImageAttachment(attachment);
 				}),
 			),
+			/** Interruption is not an Effect failure, so cleanup belongs in a finalizer. */
+			Effect.ensuring(ClearImageLoadState(attachment.id)),
 		);
 
 	const RequestImageAttachment = (attachment: ImageAttachmentReference) =>
@@ -244,7 +278,7 @@
 				yield* RequestImageAttachment(attachment);
 			} else {
 				visible_image_ids.delete(attachment.id);
-				image_load_attempts.delete(attachment.id);
+				yield* ClearImageLoadState(attachment.id);
 				yield* ReleaseImageAttachment(attachment.id);
 			}
 		}
@@ -611,6 +645,7 @@
 	active_run_id={work?.run_id}
 	active_run_status={work?.status}
 	{context_usage}
+	conversation_view_state={view_state}
 	{image_sources}
 	onabort={CancelRun}
 	{snapshot}

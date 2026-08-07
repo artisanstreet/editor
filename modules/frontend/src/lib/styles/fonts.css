@@ -1,46 +1,6 @@
 @reference "./global.css";
 
 @font-face {
-	font-family: "PP Neue Montreal";
-	src: url("../assets/fonts/neue-montreal/pp-neue-montreal-hairline.otf") format("opentype");
-	font-weight: 100;
-	font-style: normal;
-	font-display: swap;
-}
-
-@font-face {
-	font-family: "PP Neue Montreal";
-	src: url("../assets/fonts/neue-montreal/pp-neue-montreal-light.otf") format("opentype");
-	font-weight: 300;
-	font-style: normal;
-	font-display: swap;
-}
-
-@font-face {
-	font-family: "PP Neue Montreal";
-	src: url("../assets/fonts/neue-montreal/pp-neue-montreal-regular.otf") format("opentype");
-	font-weight: 400;
-	font-style: normal;
-	font-display: swap;
-}
-
-@font-face {
-	font-family: "PP Neue Montreal";
-	src: url("../assets/fonts/neue-montreal/pp-neue-montreal-semibold.otf") format("opentype");
-	font-weight: 600;
-	font-style: normal;
-	font-display: swap;
-}
-
-@font-face {
-	font-family: "PP Neue Montreal";
-	src: url("../assets/fonts/neue-montreal/pp-neue-montreal-extrabold.otf") format("opentype");
-	font-weight: 800;
-	font-style: normal;
-	font-display: swap;
-}
-
-@font-face {
 	font-family: "Geist";
 	src: url("../assets/fonts/geist/geist-wght.woff2") format("woff2");
 	font-weight: 100 900;
@@ -73,51 +33,9 @@
 }
 
 @font-face {
-	font-family: "Artisan Neo Edge";
-	src: url("../assets/fonts/artisan-neo/variants/artisan-neo-edge-variable.woff2") format("woff2");
-	font-weight: 100 900;
-	font-style: normal;
-	font-display: swap;
-}
-
-@font-face {
-	font-family: "Artisan Neo Soft";
-	src: url("../assets/fonts/artisan-neo/variants/artisan-neo-soft-variable.woff2") format("woff2");
-	font-weight: 100 900;
-	font-style: normal;
-	font-display: swap;
-}
-
-@font-face {
-	font-family: "Artisan Neo Round";
-	src: url("../assets/fonts/artisan-neo/variants/artisan-neo-round-variable.woff2")
-		format("woff2");
-	font-weight: 100 900;
-	font-style: normal;
-	font-display: swap;
-}
-
-@font-face {
-	font-family: "Artisan Neo Grotesk";
-	src: url("../assets/fonts/artisan-neo/variants/artisan-neo-grotesk-variable.woff2")
-		format("woff2");
-	font-weight: 100 900;
-	font-style: normal;
-	font-display: swap;
-}
-
-@font-face {
-	font-family: "Artisan Neo Wink";
-	src: url("../assets/fonts/artisan-neo/variants/artisan-neo-wink-variable.woff2") format("woff2");
-	font-weight: 100 900;
-	font-style: normal;
-	font-display: swap;
-}
-
-@font-face {
 	font-family: "Sigurd Variable";
-	src: url("../assets/fonts/sigurd/sigurd-variable.otf") format("opentype");
-	font-weight: 100 900;
+	src: url("../assets/fonts/sigurd/sigurd-artisan.woff2") format("woff2");
+	font-weight: 300 900;
 	font-style: normal;
 	font-display: swap;
 }

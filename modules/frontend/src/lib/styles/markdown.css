@@ -1,4 +1,3 @@
-@import "katex/dist/katex.min.css";
 @import "./markdown/components/code-snippet.css";
 @import "./markdown/components/command-snippet.css";
 @import "./markdown/components/math.css";
