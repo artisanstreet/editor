@@ -1,6 +1,9 @@
 import { build } from "rolldown";
 
-import { CreateForgeRolldownConfig, type ForgeBuildMode } from "../../forge.rolldown.config.ts";
+import {
+	CreateForgeRolldownConfig,
+	type ForgeBuildMode,
+} from "../../.config/forge.rolldown.config.ts";
 import { BuildForgeSea } from "./build-forge-sea.ts";
 
 const requested_mode = process.argv[2];

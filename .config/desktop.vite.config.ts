@@ -3,7 +3,8 @@ import { join, resolve } from "node:path";
 
 import { defineConfig } from "vite";
 
-const desktop_root = resolve(import.meta.dirname, ".dist", "desktop");
+const workspace_root = resolve(import.meta.dirname, "..");
+const desktop_root = resolve(workspace_root, ".dist", "desktop");
 
 /**
  * The static frontend ships with a same-origin-only CSP for the Forge-served
@@ -29,7 +30,7 @@ const patch_editor_csp = (frontend_root: string) => {
 		const document = readFileSync(path, "utf8");
 		if (!document.includes(browser_connect_src)) {
 			throw new Error(
-				`The frontend CSP no longer declares \`${browser_connect_src}\`; update the editor staging patch in desktop.vite.config.ts: ${path}`,
+				`The frontend CSP no longer declares \`${browser_connect_src}\`; update the editor staging patch in .config/desktop.vite.config.ts: ${path}`,
 			);
 		}
 		writeFileSync(path, document.replaceAll(browser_connect_src, editor_connect_src));
@@ -43,7 +44,7 @@ const patch_editor_csp = (frontend_root: string) => {
  */
 const stage_desktop_payload = () => ({
 	closeBundle: () => {
-		const frontend_source = resolve(import.meta.dirname, ".dist", "frontend");
+		const frontend_source = resolve(workspace_root, ".dist", "frontend");
 		if (!existsSync(frontend_source)) {
 			throw new Error("Build the static frontend before the Artisan editor payload");
 		}
@@ -102,7 +103,7 @@ export default defineConfig({
 		outDir: ".dist/desktop",
 		rollupOptions: {
 			external: ["electron"],
-			input: resolve(import.meta.dirname, "modules/desktop/src/main.ts"),
+			input: resolve(workspace_root, "modules/desktop/src/main.ts"),
 			output: { entryFileNames: "[name].js", format: "es" },
 		},
 		ssr: true,

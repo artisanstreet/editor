@@ -151,12 +151,13 @@ The root currently contains:
 - historical frontend and agent-engine notes;
 - design-language research;
 - a very large append-only `MEMORY.md`;
-- active formatter and editor configuration; and
-- active script/config entrypoints.
+- active formatter configuration under `.config/`; and
+- minimal tool-discovery entrypoints.
 
-`.gitignore`, `.gitattributes`, `.editorconfig`, `.oxfmtignore`, and
-`.oxfmtrc.json` are normal, active repository metadata. They are not cleanup
-targets merely because they appear at root.
+`.gitignore` and `.gitattributes` remain active root metadata. Explicitly
+addressable formatter, test, database, bundler, and desktop-builder
+configuration lives under `.config/` so the root only carries files that tools
+must discover there.
 
 ### Native bounded file-store
 
@@ -429,8 +430,6 @@ Initial mapping:
 | Current path                        | Target area              |
 | ----------------------------------- | ------------------------ |
 | `scripts/electron-before-build.cjs` | `.scripts/build/`        |
-| `scripts/start-browser-forge.ps1`   | `.scripts/dev/`          |
-| `scripts/update-user-path.ps1`      | `.scripts/package/`      |
 | `build/nsis/artisan-path.nsh`       | `.scripts/package/nsis/` |
 
 The NSIS include is hand-maintained installer source, not generated build
@@ -439,7 +438,7 @@ output. It must move with its `desktop-builder.yml` reference.
 Module-private build and verification scripts may stay next to the module they
 own. In particular, native-addon scripts are not root script clutter.
 
-Every move must update `package.json`, `desktop-builder.yml`, tests, and internal
+Every move must update `package.json`, desktop-builder configuration, tests, and internal
 references in one change. Prefer TypeScript for new or substantially rewritten
 Node scripts; a mechanical move does not require an unrelated language rewrite.
 
@@ -448,13 +447,11 @@ Windows acceptance must specifically prove that:
 - root `package.json` can launch the moved Forge development supervisor;
 - electron-builder resolves the moved `beforeBuild` hook;
 - NSIS resolves the moved `artisan-path.nsh` include; and
-- `forge.rolldown.config.ts` copies the moved `update-user-path.ps1` into the
-  packaged Forge output.
+- Forge packaging contains only runtime payloads with an active consumer.
 
-Root build-tool configuration is a separate decision. Active files such as
-Vite, TypeScript, Vitest, formatter, editor, package-manager, and desktop-builder
-configuration may remain at root when their tools expect or conventionally
-discover them there.
+Root build-tool configuration is a separate decision. Configuration stays at
+root only when a tool expects or conventionally discovers it there; configs
+with explicit path flags belong under `.config/`.
 
 ## Requirement 5: Remove the Dormant Native Bounded Store
 

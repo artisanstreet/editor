@@ -13,7 +13,10 @@ import { resolve } from "node:path";
 import { build } from "rolldown";
 import { Schema } from "effect";
 
-import { BrandForgeExecutable, CreateForgeSeaRolldownConfig } from "../../forge.rolldown.config.ts";
+import {
+	BrandForgeExecutable,
+	CreateForgeSeaRolldownConfig,
+} from "../../.config/forge.rolldown.config.ts";
 import { WindowsProcessHostModeArgument } from "../../modules/engines/src/process/windows-process-host-mode.ts";
 import {
 	ForgeSeaRuntimeSmokeModeArgument,

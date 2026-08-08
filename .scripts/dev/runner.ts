@@ -30,7 +30,7 @@ import { Effect, Schema } from "effect";
 import { ChildProcess as RunnerChildProcess } from "effect/unstable/process";
 import { watch, type RolldownWatcher, type RolldownWatcherEvent } from "rolldown";
 
-import { CreateForgeRolldownConfig } from "../../forge.rolldown.config.ts";
+import { CreateForgeRolldownConfig } from "../../.config/forge.rolldown.config.ts";
 import {
 	sanitize_dev_log_line,
 	type DevEndpoint,

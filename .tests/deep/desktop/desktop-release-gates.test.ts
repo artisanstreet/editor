@@ -1,14 +1,19 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { spawnSync } from "node:child_process";
 
 import { describe, expect, it } from "vitest";
 
 const workspace_root = resolve(import.meta.dirname, "../../..");
 const frontend_root = resolve(workspace_root, "modules/frontend");
 const frontend_config = readFileSync(resolve(frontend_root, "vite.config.ts"), "utf8");
-const desktop_config = readFileSync(resolve(workspace_root, "desktop.vite.config.ts"), "utf8");
-const forge_config = readFileSync(resolve(workspace_root, "forge.rolldown.config.ts"), "utf8");
+const desktop_config = readFileSync(
+	resolve(workspace_root, ".config/desktop.vite.config.ts"),
+	"utf8",
+);
+const forge_config = readFileSync(
+	resolve(workspace_root, ".config/forge.rolldown.config.ts"),
+	"utf8",
+);
 const release_policy = readFileSync(
 	resolve(workspace_root, "docs/release/validation-policy.md"),
 	"utf8",
@@ -17,7 +22,7 @@ const release_policy = readFileSync(
 const known_electron_package_files = [
 	"electron-builder.yml",
 	"electron-builder.yaml",
-	"desktop-builder.yml",
+	".config/desktop-builder.yml",
 	"electron-forge.config.ts",
 	"forge.config.ts",
 	"package.json",
@@ -74,8 +79,10 @@ describe("deep desktop release gates", () => {
 		expect(forge_config).toContain("koffi-win32-x64");
 		expect(forge_config).toContain('"ae.cmd"');
 		expect(forge_config).toContain("ARTISAN_NATIVE_RUNTIME=%~dp0native-runtime");
-		expect(forge_config).toContain('"update-user-path.ps1"');
-		const builder = readFileSync(resolve(workspace_root, "desktop-builder.yml"), "utf8");
+		const builder = readFileSync(
+			resolve(workspace_root, ".config/desktop-builder.yml"),
+			"utf8",
+		);
 		expect(builder).toContain("- dir");
 		expect(builder).toContain("- frontend/**");
 		expect(builder).not.toContain("nsis");
@@ -94,10 +101,10 @@ describe("deep desktop release gates", () => {
 
 	it("verifies the installed ae payload and ownership boundary locally", () => {
 		const verifier = readFileSync(
-			resolve(workspace_root, ".tests/deep/desktop/verify-packaged-desktop.ps1"),
+			resolve(workspace_root, ".tests/deep/desktop/verify-packaged-desktop.ts"),
 			"utf8",
 		);
-		expect(verifier).toContain("$embedded_forge");
+		expect(verifier).toContain("embedded_forge");
 		expect(verifier).toContain("must not embed a parallel Forge lifecycle");
 		expect(verifier).toContain("Packaged desktop renderer evidence");
 		/** The verifier now proves the honest renderer shape, not a launcher-only ASAR. */
@@ -106,27 +113,5 @@ describe("deep desktop release gates", () => {
 		expect(verifier).toContain('"/preload.cjs"');
 		expect(verifier).not.toContain("ARTISAN_PACKAGED_SMOKE");
 		expect(verifier).not.toContain("Stop-Process");
-	});
-
-	it("parses the packaged verifier before release execution on Windows", () => {
-		if (process.platform !== "win32") return;
-		const verifier_path = resolve(
-			workspace_root,
-			".tests/deep/desktop/verify-packaged-desktop.ps1",
-		);
-		const parsed = spawnSync(
-			"powershell",
-			[
-				"-NoProfile",
-				"-Command",
-				"$tokens=$null; $errors=$null; [System.Management.Automation.Language.Parser]::ParseFile($env:ARTISAN_PS_PARSE_TARGET,[ref]$tokens,[ref]$errors) | Out-Null; if ($errors.Count -ne 0) { throw ($errors | Out-String) }",
-			],
-			{
-				encoding: "utf8",
-				env: { ...process.env, ARTISAN_PS_PARSE_TARGET: verifier_path },
-			},
-		);
-
-		expect(parsed.status, `${parsed.stdout}\n${parsed.stderr}`).toBe(0);
 	});
 });

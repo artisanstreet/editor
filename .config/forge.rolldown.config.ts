@@ -2,6 +2,8 @@ import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSyn
 import { resolve } from "node:path";
 import { NtExecutable, NtExecutableResource, Resource } from "resedit";
 
+const workspace_root = resolve(import.meta.dirname, "..");
+
 export type ForgeBuildMode = "production" | "validation";
 
 type ForgeRolldownOptions = {
@@ -60,17 +62,14 @@ const StageForgeRuntime = (
 	closeBundle: () => {
 		const { stage_frontend, watching } = options;
 		const native_runtime_root = resolve(forge_root, "native-runtime");
-		const frontend_source = resolve(import.meta.dirname, ".dist", "frontend");
-		const migrations_source = resolve(import.meta.dirname, "modules/backend/drizzle");
+		const frontend_source = resolve(workspace_root, ".dist", "frontend");
+		const migrations_source = resolve(workspace_root, "modules/backend/drizzle");
 		if (stage_frontend && !existsSync(frontend_source)) {
 			throw new Error("Build the static frontend before Artisan Forge");
 		}
-		const node_pty_source = resolve(
-			import.meta.dirname,
-			"modules/backend/node_modules/node-pty",
-		);
+		const node_pty_source = resolve(workspace_root, "modules/backend/node_modules/node-pty");
 		const koffi_source = realpathSync(
-			resolve(import.meta.dirname, "modules/engines/node_modules/koffi"),
+			resolve(workspace_root, "modules/engines/node_modules/koffi"),
 		);
 		const koffi_native_source = resolve(koffi_source, "..", "@koromix", "koffi-win32-x64");
 		/**
@@ -80,10 +79,7 @@ const StageForgeRuntime = (
 		 * `ARTISAN_NATIVE_RUNTIME` at run time.
 		 */
 		const agent_sdk_source = realpathSync(
-			resolve(
-				import.meta.dirname,
-				"modules/engines/node_modules/@anthropic-ai/claude-agent-sdk",
-			),
+			resolve(workspace_root, "modules/engines/node_modules/@anthropic-ai/claude-agent-sdk"),
 		);
 		const claude_cli_source = resolve(
 			agent_sdk_source,
@@ -142,7 +138,7 @@ const StageForgeRuntime = (
 		}
 		if (!watching && process.platform === "win32") {
 			const workspace = JSON.parse(
-				readFileSync(resolve(import.meta.dirname, "package.json"), "utf8"),
+				readFileSync(resolve(workspace_root, "package.json"), "utf8"),
 			) as { version: string };
 			try {
 				BrandForgeExecutable(resolve(forge_root, "Artisan Forge.exe"), workspace.version);
@@ -150,10 +146,6 @@ const StageForgeRuntime = (
 				console.warn(`[forge-build] kept the unbranded Artisan Forge.exe (${error})`);
 			}
 		}
-		stage(
-			resolve(import.meta.dirname, ".scripts", "package", "update-user-path.ps1"),
-			resolve(forge_root, "update-user-path.ps1"),
-		);
 		writeFileSync(
 			resolve(forge_root, "package.json"),
 			JSON.stringify({ private: true, type: "module" }),
@@ -167,9 +159,9 @@ const StageForgeRuntime = (
 });
 
 const ForgeAliases = {
-	"@artisan/forge": resolve(import.meta.dirname, "modules/forge/src/index.ts"),
-	koffi: resolve(import.meta.dirname, "modules/desktop/src/koffi-shim.ts"),
-	"node-pty": resolve(import.meta.dirname, "modules/desktop/src/node-pty-shim.ts"),
+	"@artisan/forge": resolve(workspace_root, "modules/forge/src/index.ts"),
+	koffi: resolve(workspace_root, "modules/desktop/src/koffi-shim.ts"),
+	"node-pty": resolve(workspace_root, "modules/desktop/src/node-pty-shim.ts"),
 };
 
 /**
@@ -180,17 +172,17 @@ export const CreateForgeRolldownConfig = (options: ForgeRolldownOptions = {}) =>
 	const mode = options.mode ?? "production";
 	const watching = options.watch ?? false;
 	const forge_root = resolve(
-		import.meta.dirname,
+		workspace_root,
 		".dist",
 		mode === "validation" ? "validation/forge" : "forge",
 	);
 
 	return {
 		input: {
-			ae: resolve(import.meta.dirname, "modules/cli/src/entry.ts"),
-			host: resolve(import.meta.dirname, "modules/forge/src/host-entry.ts"),
+			ae: resolve(workspace_root, "modules/cli/src/entry.ts"),
+			host: resolve(workspace_root, "modules/forge/src/host-entry.ts"),
 			"windows-process-host": resolve(
-				import.meta.dirname,
+				workspace_root,
 				"modules/engines/src/process/windows-process-host-entry.ts",
 			),
 		},
@@ -200,7 +192,7 @@ export const CreateForgeRolldownConfig = (options: ForgeRolldownOptions = {}) =>
 				stage_frontend:
 					!watching &&
 					(mode === "production" ||
-						existsSync(resolve(import.meta.dirname, ".dist", "frontend"))),
+						existsSync(resolve(workspace_root, ".dist", "frontend"))),
 				watching,
 			}),
 		],
@@ -220,13 +212,13 @@ export const CreateForgeRolldownConfig = (options: ForgeRolldownOptions = {}) =>
 
 /** Builds the one CommonJS payload supported by Node 24's SEA embedder. */
 export const CreateForgeSeaRolldownConfig = () => ({
-	input: resolve(import.meta.dirname, "modules/forge/src/executable-entry.ts"),
+	input: resolve(workspace_root, "modules/forge/src/executable-entry.ts"),
 	platform: "node" as const,
 	resolve: { alias: ForgeAliases },
 	output: {
 		cleanDir: true,
 		codeSplitting: false,
-		dir: resolve(import.meta.dirname, ".dist", "forge-sea-build"),
+		dir: resolve(workspace_root, ".dist", "forge-sea-build"),
 		entryFileNames: "forge-main.cjs",
 		format: "cjs" as const,
 	},

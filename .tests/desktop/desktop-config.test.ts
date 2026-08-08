@@ -41,12 +41,12 @@ describe("desktop packaging configuration", () => {
 	});
 
 	it("packages a sandboxed renderer host without any privileged bridge", () => {
-		const config = readFileSync(new URL("desktop-builder.yml", root), "utf8");
+		const config = readFileSync(new URL(".config/desktop-builder.yml", root), "utf8");
 		const package_manifest = JSON.parse(
 			readFileSync(new URL("package.json", root), "utf8"),
 		) as { readonly scripts?: Record<string, string> };
 		const main = readFileSync(new URL("modules/desktop/src/main.ts", root), "utf8");
-		const vite_config = readFileSync(new URL("desktop.vite.config.ts", root), "utf8");
+		const vite_config = readFileSync(new URL(".config/desktop.vite.config.ts", root), "utf8");
 
 		expect(config).toContain("output: .dist/electron-release");
 		expect(config).toContain("app: .dist/desktop");

@@ -178,8 +178,8 @@ describe("static hosting production gate", () => {
 				serving_scripts.push(entry.name);
 			}
 		}
-		/** The browser development Forge is the only composition that opts into hosting. */
-		expect(serving_scripts).toEqual(["start-browser-forge.ps1"]);
+		/** Vite owns development hosting; repository scripts do not opt Forge into it. */
+		expect(serving_scripts).toEqual([]);
 
 		const rust_cli = await readFile(
 			resolve(import.meta.dirname, "../../modules/cli/rust/commands.rs"),
