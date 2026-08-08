@@ -68,8 +68,6 @@ describe("Windows distribution release artifact", () => {
 			writeFile(join(editor_root, "resources", "app.asar"), "asar"),
 			writeFile(join(editor_root, "resources", "artisan-forge", "duplicate.txt"), "excluded"),
 			writeFile(join(forge_root, "Artisan Forge.exe"), "forge"),
-			writeFile(join(forge_root, "ae.js"), "cli"),
-			writeFile(join(forge_root, "node.exe"), "node"),
 			writeFile(native_installer_path, "native bootstrap"),
 			writeFile(native_cli_path, "native ae"),
 		]);
@@ -121,9 +119,7 @@ describe("Windows distribution release artifact", () => {
 			"bin/ae.exe",
 			"editor/Artisan Editor.exe",
 			"editor/resources/app.asar",
-			"forge/ae.js",
 			"forge/Artisan Forge.exe",
-			"forge/node.exe",
 		]);
 		expect([...archive.keys()]).toEqual(first.archive_entries);
 		expect([...archive.keys()].some((path) => path.includes("duplicate"))).toBe(false);
@@ -150,6 +146,51 @@ describe("Windows distribution release artifact", () => {
 		expect(manifest.artifacts[0]?.archive_entries).toEqual(first.archive_entries);
 		expect(manifest.artifacts[0]?.architecture).toBe("x64");
 		expect(manifest.artifacts[0]?.byte_size).toBe(first_archive.byteLength);
+	});
+
+	it.each([
+		"ae.js",
+		"diagnostics.txt",
+		"host.js",
+		"node.exe",
+		"windows-process-host.js",
+		"native-runtime/native.node",
+	])("rejects every extra Forge payload entry %s", async (legacy_entry) => {
+		const root = await TemporaryRoot();
+		const editor_root = join(root, "editor");
+		const forge_root = join(root, "forge");
+		await Promise.all([
+			mkdir(join(editor_root, "resources"), { recursive: true }),
+			mkdir(join(forge_root, "native-runtime"), { recursive: true }),
+		]);
+		await Promise.all([
+			writeFile(join(editor_root, "Artisan Editor.exe"), "editor"),
+			writeFile(join(editor_root, "resources", "app.asar"), "asar"),
+			writeFile(join(forge_root, "Artisan Forge.exe"), "sea"),
+			writeFile(join(forge_root, legacy_entry), "legacy"),
+		]);
+		const keys = generateKeyPairSync("ed25519");
+		const private_key_pem = keys.privateKey.export({ format: "pem", type: "pkcs8" }).toString();
+
+		await expect(
+			Effect.runPromise(
+				BuildWindowsDistributionRelease({
+					architecture: "x64",
+					channel: "stable",
+					editor_root,
+					forge_root,
+					key_id: "test-key",
+					minimum_installer_version: "0.1.0",
+					minimum_cli_version: "0.1.0",
+					output_root: join(root, "release"),
+					private_key_pem,
+					product_version: "0.1.0",
+				}),
+			),
+		).rejects.toMatchObject({
+			_tag: "DistributionReleaseBuildError",
+			code: "input",
+		});
 	});
 
 	it("rejects unsupported Windows arm64 before reading signing secrets", async () => {

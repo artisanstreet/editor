@@ -1,4 +1,3 @@
-import { NodeRuntime } from "@effect/platform-node-shared";
 import cross_spawn from "cross-spawn";
 import { Data, Deferred, Effect, Queue, Schema } from "effect";
 
@@ -63,7 +62,7 @@ const exit_code = (code: number | null, signal: NodeJS.Signals | null) => {
 	return 1;
 };
 
-const HostProgram = Effect.scoped(
+export const WindowsProcessHostProgram = Effect.scoped(
 	Effect.gen(function* () {
 		const messages = yield* Queue.unbounded<unknown>();
 		const disconnected = yield* Deferred.make<void>();
@@ -249,6 +248,3 @@ const HostProgram = Effect.scoped(
 		),
 	),
 );
-
-/** The helper executable has exactly one Effect runtime boundary. */
-NodeRuntime.runMain(HostProgram);

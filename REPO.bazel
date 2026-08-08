@@ -1,0 +1,5 @@
+# pnpm's mutable installation tree must never become Bazel package input.
+ignore_directories([
+    "**/node_modules",
+    "**/.pnpm-store",
+])

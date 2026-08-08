@@ -28,8 +28,7 @@ pub fn start(
     }
     let executable = manifest.forge_executable();
     let forge_root = manifest.version_root().join("forge");
-    let native_runtime = forge_root.join("native-runtime");
-    let host_entry = forge_root.join("host.js");
+    let legacy_host_entry = forge_root.join("host.js");
     if !executable.is_file() {
         return Err(CliError::Installation(format!(
             "Forge binary is missing at {}",
@@ -43,11 +42,18 @@ pub fn start(
         .open(&paths.log)
         .map_err(io("open Forge log"))?;
     let mut command = Command::new(executable);
-    if host_entry.is_file() {
-        command.arg(&host_entry);
+    let legacy_launcher = legacy_host_entry.is_file();
+    if legacy_launcher {
+        command.arg(&legacy_host_entry);
     }
-    configure_forge_environment(&mut command, paths, config, secrets, &forge_root);
-    configure_native_runtime(&mut command, &native_runtime);
+    configure_forge_environment(
+        &mut command,
+        paths,
+        config,
+        secrets,
+        &forge_root,
+        legacy_launcher,
+    );
     if foreground {
         let status = command.status().map_err(io("start Forge"))?;
         if !status.success() {
@@ -70,6 +76,7 @@ fn configure_forge_environment(
     config: &InstanceConfig,
     secrets: &Secrets,
     forge_root: &Path,
+    legacy_launcher: bool,
 ) {
     command
         .env("ARTISAN_AUTH_TOKEN", &secrets.auth_token)
@@ -77,17 +84,14 @@ fn configure_forge_environment(
             "ARTISAN_DATABASE_PATH",
             config.data_root.join("artisan.sqlite"),
         )
-        .env("ARTISAN_MIGRATIONS_PATH", forge_root.join("migrations"))
-        .env("ARTISAN_NODE_EXECUTABLE", forge_root.join(node_name()))
-        .env(
-            "ARTISAN_WINDOWS_PROCESS_HOST",
-            forge_root.join("windows-process-host.js"),
-        )
         .env("CODEX_SQLITE_HOME", config.data_root.join("codex-sqlite"))
         .env("ARTISAN_FORGE_STATE_PATH", &paths.state)
         .env("ARTISAN_FORGE_LOG_PATH", &paths.log)
         .env("ARTISAN_LISTEN_HOST", &config.listen_host)
         .env("ARTISAN_LISTEN_PORT", config.listen_port.to_string());
+    if legacy_launcher {
+        configure_legacy_node_launcher(command, forge_root);
+    }
     // Web hosting is a development capability. Without the flag, Forge
     // exposes only its health and control/WS surfaces and SPA routes 404.
     if config.serve_frontend {
@@ -95,10 +99,19 @@ fn configure_forge_environment(
     }
 }
 
-fn configure_native_runtime(command: &mut Command, native_runtime: &Path) {
+/// Supports installations from before Forge became a self-contained Node SEA.
+/// New release payloads deliberately omit this entire loose Node runtime shape.
+fn configure_legacy_node_launcher(command: &mut Command, forge_root: &Path) {
+    let native_runtime = forge_root.join("native-runtime");
     command
-        .env("ARTISAN_NATIVE_RUNTIME", native_runtime)
-        .env("NODE_PATH", native_runtime);
+        .env("ARTISAN_MIGRATIONS_PATH", forge_root.join("migrations"))
+        .env("ARTISAN_NODE_EXECUTABLE", forge_root.join(node_name()))
+        .env(
+            "ARTISAN_WINDOWS_PROCESS_HOST",
+            forge_root.join("windows-process-host.js"),
+        )
+        .env("ARTISAN_NATIVE_RUNTIME", &native_runtime)
+        .env("NODE_PATH", &native_runtime);
 }
 
 #[cfg(target_os = "windows")]
@@ -171,10 +184,7 @@ mod tests {
         path::{Path, PathBuf},
     };
 
-    use super::{
-        Command, InstanceConfig, InstancePaths, Secrets, configure_forge_environment,
-        configure_native_runtime,
-    };
+    use super::{Command, InstanceConfig, InstancePaths, Secrets, configure_forge_environment};
     use crate::instance::ForgeMode;
 
     fn test_instance(serve_frontend: bool) -> (InstancePaths, InstanceConfig, Secrets) {
@@ -209,7 +219,7 @@ mod tests {
         let forge_root = Path::new("C:/Artisan/versions/1.0.0/forge");
         let (paths, config, secrets) = test_instance(false);
         let mut command = Command::new("forge");
-        configure_forge_environment(&mut command, &paths, &config, &secrets, forge_root);
+        configure_forge_environment(&mut command, &paths, &config, &secrets, forge_root, false);
         assert!(
             command
                 .get_envs()
@@ -218,7 +228,7 @@ mod tests {
 
         let (paths, config, secrets) = test_instance(true);
         let mut serving = Command::new("forge");
-        configure_forge_environment(&mut serving, &paths, &config, &secrets, forge_root);
+        configure_forge_environment(&mut serving, &paths, &config, &secrets, forge_root, false);
         assert!(serving.get_envs().any(|(key, value)| {
             key == OsStr::new("ARTISAN_STATIC_FRONTEND_ROOT")
                 && value.is_some_and(|path| Path::new(path).ends_with("frontend"))
@@ -226,11 +236,33 @@ mod tests {
     }
 
     #[test]
-    fn exposes_packaged_native_modules_to_forge_node_resolution() {
-        let native_runtime = Path::new("C:/Artisan/forge/native-runtime");
+    fn sea_launch_environment_has_no_loose_node_runtime_dependencies() {
         let mut command = Command::new("forge");
+        let forge_root = Path::new("C:/Artisan/forge");
+        let (paths, config, secrets) = test_instance(false);
 
-        configure_native_runtime(&mut command, native_runtime);
+        configure_forge_environment(&mut command, &paths, &config, &secrets, forge_root, false);
+
+        let environment = command.get_envs().collect::<Vec<_>>();
+        for name in [
+            "ARTISAN_MIGRATIONS_PATH",
+            "ARTISAN_NATIVE_RUNTIME",
+            "ARTISAN_NODE_EXECUTABLE",
+            "ARTISAN_WINDOWS_PROCESS_HOST",
+            "NODE_PATH",
+        ] {
+            assert!(environment.iter().all(|(key, _)| *key != OsStr::new(name)));
+        }
+    }
+
+    #[test]
+    fn legacy_host_installations_keep_their_node_launcher_environment() {
+        let mut command = Command::new("forge");
+        let forge_root = Path::new("C:/Artisan/forge");
+        let native_runtime = forge_root.join("native-runtime");
+        let (paths, config, secrets) = test_instance(false);
+
+        configure_forge_environment(&mut command, &paths, &config, &secrets, forge_root, true);
 
         let environment = command.get_envs().collect::<Vec<_>>();
         for name in ["ARTISAN_NATIVE_RUNTIME", "NODE_PATH"] {

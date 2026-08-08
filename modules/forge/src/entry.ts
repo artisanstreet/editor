@@ -1,9 +1,5 @@
-import { fileURLToPath } from "node:url";
-import { resolve } from "node:path";
-
-import { NodeRuntime } from "@effect/platform-node-shared";
-import { MakeSnowflakeIdLive, SnowflakeId } from "@artisan/protocol";
-import { Clock, Console, Effect, Layer, Schema } from "effect";
+import { SnowflakeId } from "@artisan/protocol";
+import { Clock, Console, Effect, Schema } from "effect";
 
 import { decode_forge_config } from "./config";
 import { StartForge } from "./forge-host";
@@ -134,9 +130,3 @@ export const StartForgeFromEnvironment = Effect.gen(function* () {
 		}),
 	),
 );
-
-if (process.argv[1] !== undefined && fileURLToPath(import.meta.url) === resolve(process.argv[1])) {
-	NodeRuntime.runMain(
-		StartForgeFromEnvironment.pipe(Effect.provide(MakeSnowflakeIdLive(3).pipe(Layer.orDie))),
-	);
-}

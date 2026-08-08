@@ -30,7 +30,7 @@ const stage = (from: string, to: string) => {
  * invalidates Node's Authenticode signature; release signing, once it exists,
  * must re-sign this file afterwards.
  */
-const brand_forge_executable = (executable_path: string, product_version: string) => {
+export const BrandForgeExecutable = (executable_path: string, product_version: string) => {
 	const executable = NtExecutable.from(readFileSync(executable_path), { ignoreCert: true });
 	const resources = NtExecutableResource.from(executable);
 	const version_info = Resource.VersionInfo.fromEntries(resources.entries)[0];
@@ -53,12 +53,15 @@ const brand_forge_executable = (executable_path: string, product_version: string
 	writeFileSync(executable_path, Buffer.from(executable.generate()));
 };
 
-const StageForgeRuntime = (forge_root: string, watching: boolean) => ({
+const StageForgeRuntime = (
+	forge_root: string,
+	options: { readonly stage_frontend: boolean; readonly watching: boolean },
+) => ({
 	closeBundle: () => {
+		const { stage_frontend, watching } = options;
 		const native_runtime_root = resolve(forge_root, "native-runtime");
 		const frontend_source = resolve(import.meta.dirname, ".dist", "frontend");
 		const migrations_source = resolve(import.meta.dirname, "modules/backend/drizzle");
-		const stage_frontend = !watching;
 		if (stage_frontend && !existsSync(frontend_source)) {
 			throw new Error("Build the static frontend before Artisan Forge");
 		}
@@ -142,7 +145,7 @@ const StageForgeRuntime = (forge_root: string, watching: boolean) => ({
 				readFileSync(resolve(import.meta.dirname, "package.json"), "utf8"),
 			) as { version: string };
 			try {
-				brand_forge_executable(resolve(forge_root, "Artisan Forge.exe"), workspace.version);
+				BrandForgeExecutable(resolve(forge_root, "Artisan Forge.exe"), workspace.version);
 			} catch (error) {
 				console.warn(`[forge-build] kept the unbranded Artisan Forge.exe (${error})`);
 			}
@@ -163,6 +166,12 @@ const StageForgeRuntime = (forge_root: string, watching: boolean) => ({
 	name: "stage-artisan-forge-runtime",
 });
 
+const ForgeAliases = {
+	"@artisan/forge": resolve(import.meta.dirname, "modules/forge/src/index.ts"),
+	koffi: resolve(import.meta.dirname, "modules/desktop/src/koffi-shim.ts"),
+	"node-pty": resolve(import.meta.dirname, "modules/desktop/src/node-pty-shim.ts"),
+};
+
 /**
  * Builds Forge as an ESM Node application. The watcher owns rebuilds; the
  * development supervisor owns the clean stop/start of the daemon.
@@ -179,20 +188,24 @@ export const CreateForgeRolldownConfig = (options: ForgeRolldownOptions = {}) =>
 	return {
 		input: {
 			ae: resolve(import.meta.dirname, "modules/cli/src/entry.ts"),
-			host: resolve(import.meta.dirname, "modules/forge/src/entry.ts"),
+			host: resolve(import.meta.dirname, "modules/forge/src/host-entry.ts"),
 			"windows-process-host": resolve(
 				import.meta.dirname,
-				"modules/engines/src/process/windows-process-host.ts",
+				"modules/engines/src/process/windows-process-host-entry.ts",
 			),
 		},
 		platform: "node" as const,
-		plugins: [StageForgeRuntime(forge_root, watching)],
+		plugins: [
+			StageForgeRuntime(forge_root, {
+				stage_frontend:
+					!watching &&
+					(mode === "production" ||
+						existsSync(resolve(import.meta.dirname, ".dist", "frontend"))),
+				watching,
+			}),
+		],
 		resolve: {
-			alias: {
-				"@artisan/forge": resolve(import.meta.dirname, "modules/forge/src/index.ts"),
-				koffi: resolve(import.meta.dirname, "modules/desktop/src/koffi-shim.ts"),
-				"node-pty": resolve(import.meta.dirname, "modules/desktop/src/node-pty-shim.ts"),
-			},
+			alias: ForgeAliases,
 		},
 		output: {
 			cleanDir: !watching,
@@ -204,5 +217,21 @@ export const CreateForgeRolldownConfig = (options: ForgeRolldownOptions = {}) =>
 		transform: { target: "node22" },
 	};
 };
+
+/** Builds the one CommonJS payload supported by Node 24's SEA embedder. */
+export const CreateForgeSeaRolldownConfig = () => ({
+	input: resolve(import.meta.dirname, "modules/forge/src/executable-entry.ts"),
+	platform: "node" as const,
+	resolve: { alias: ForgeAliases },
+	output: {
+		cleanDir: true,
+		codeSplitting: false,
+		dir: resolve(import.meta.dirname, ".dist", "forge-sea-build"),
+		entryFileNames: "forge-main.cjs",
+		format: "cjs" as const,
+	},
+	tsconfig: true,
+	transform: { target: "node24" },
+});
 
 export default CreateForgeRolldownConfig();

@@ -1,0 +1,73 @@
+load("@npm//:defs.bzl", "npm_link_all_packages")
+load("//tools/bazel:defs.bzl", "pnpm_script")
+
+package(default_visibility = ["//visibility:public"])
+
+# Materialize the lockfile-translated package layout in the action output tree.
+npm_link_all_packages(name = "node_modules")
+
+pnpm_script(
+    name = "check",
+    script = "check",
+)
+
+pnpm_script(
+    name = "check_frontend",
+    script = "check:frontend",
+)
+
+pnpm_script(
+    name = "check_forge",
+    script = "check:forge",
+    workspace_packages = [
+        "backend",
+        "catalog",
+        "cli",
+        "desktop",
+        "distribution",
+        "engines",
+        "forge",
+        "protocol",
+        "transport",
+    ],
+)
+
+pnpm_script(
+    name = "forge_sea",
+    publish = [".dist/forge/Artisan Forge.exe"],
+    script = "build:forge:sea",
+    workspace_packages = [
+        "backend",
+        "catalog",
+        "desktop",
+        "engines",
+        "forge",
+        "protocol",
+        "transport",
+    ],
+)
+
+pnpm_script(
+    name = "test",
+    script = "test:bazel",
+    # Integration tests intentionally exercise the host Git and PowerShell.
+    use_host_path = True,
+)
+
+# The existing native gate invokes the host Cargo toolchain. It stays a local
+# parity target until the Rust graph owns that toolchain and its dependencies.
+pnpm_script(
+    name = "check_native",
+    script = "check:native",
+    use_default_shell_env = True,
+    tags = ["local", "requires-host-cargo"],
+)
+
+filegroup(
+    name = "verify",
+    srcs = [
+        ":check",
+        ":test",
+        ":check_native",
+    ],
+)

@@ -1,0 +1,58 @@
+diff --git a/lib/private/patch.bzl b/lib/private/patch.bzl
+index e4b34f4..f49c9db 100644
+--- a/lib/private/patch.bzl
++++ b/lib/private/patch.bzl
+@@ -97,9 +97,12 @@ def patch(ctx, patches = None, patch_cmds = None, patch_cmds_win = None, patch_t
+         patch_tool = ctx.attr.patch_tool
+     if not patch_tool:
+         patch_tool = "patch"
+-        native_patch = True
+-    else:
+-        native_patch = False
++    # rules_js passes the literal default tool even when no custom patch tool
++    # was configured. Treat it as native on Windows so repository patches do
++    # not require a globally configured Bash action shell.
++    native_patch = not patch_tool or (
++        repo_utils.is_windows(ctx) and patch_tool == "patch"
++    )
+ 
+     if patch_args == None and hasattr(ctx.attr, "patch_args"):
+         patch_args = ctx.attr.patch_args
+@@ -118,13 +121,34 @@ def patch(ctx, patches = None, patch_cmds = None, patch_cmds_win = None, patch_t
+     ctx.delete(ctx.path(_REMOTE_PATCH_DIR))
+ 
+     # Apply local patches
+-    if native_patch and _use_native_patch(patch_args) and not patch_directory:
++    if patches and native_patch and _use_native_patch(patch_args):
+         if patch_args:
+             strip = int(patch_args[-1][2:])
+         else:
+             strip = 0
+-        for patchfile in patches:
+-            ctx.patch(patchfile, strip)
++        if patch_directory and strip == 1:
++            # repository_ctx.patch has no working-directory parameter. Rewrite
++            # ordinary git patch headers so the native implementation can apply
++            # them from the repository root instead of shelling out to Bash.
++            prefix = patch_directory.rstrip("/") + "/"
++            for index, patchfile in enumerate(patches):
++                rewritten = ctx.read(patchfile)
++                rewritten = rewritten.replace(
++                    "--- a/",
++                    "--- " + prefix,
++                ).replace(
++                    "+++ b/",
++                    "+++ " + prefix,
++                )
++                rewritten_path = ".tmp_native_patch_{}.patch".format(index)
++                ctx.file(rewritten_path, rewritten)
++                ctx.patch(rewritten_path, 0)
++                ctx.delete(rewritten_path)
++        elif not patch_directory:
++            for patchfile in patches:
++                ctx.patch(patchfile, strip)
++        else:
++            fail("Native patching with a working directory requires -p1")
+     else:
+         for patchfile in patches:
+             command = "{patchtool} {patch_args} < {patchfile}".format(

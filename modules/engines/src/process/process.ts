@@ -1,5 +1,6 @@
 import { type ChildProcess, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { isSea } from "node:sea";
 import { fileURLToPath } from "node:url";
 
 import * as NodeFileSystem from "@effect/platform-node-shared/NodeFileSystem";
@@ -13,6 +14,7 @@ import {
 	type WindowsJob,
 	type WindowsJobCandidate,
 } from "./windows-job";
+import { WindowsProcessHostModeArgument } from "./windows-process-host-mode";
 
 /** Describes the terminal state reported by a spawned child process. @since 0.4.0 */
 export interface EngineProcessExit {
@@ -55,6 +57,7 @@ export interface EngineProcessEnvironmentService {
 	readonly node_executable: string;
 	readonly platform: NodeJS.Platform;
 	readonly MakeClaimToken: Effect.Effect<string>;
+	readonly windows_process_host_args: ReadonlyArray<string>;
 	readonly windows_process_host_path: string;
 }
 
@@ -67,6 +70,7 @@ export interface EngineProcessRuntime {
 	readonly environment: NodeJS.ProcessEnv;
 	readonly exec_path: string;
 	readonly is_electron: boolean;
+	readonly is_sea: boolean;
 	readonly platform: NodeJS.Platform;
 }
 
@@ -75,11 +79,23 @@ export const MakeEngineProcessEnvironmentLayer = (runtime: EngineProcessRuntime)
 	Layer.effect(
 		EngineProcessEnvironment,
 		Effect.gen(function* () {
+			if (runtime.is_sea) {
+				return {
+					environment: { ...runtime.environment },
+					is_electron: runtime.is_electron,
+					node_executable: runtime.exec_path,
+					platform: runtime.platform,
+					MakeClaimToken: Effect.sync(randomUUID),
+					windows_process_host_args: [WindowsProcessHostModeArgument],
+					windows_process_host_path: runtime.exec_path,
+				};
+			}
+
 			const file_system = yield* FileSystem.FileSystem;
 			const configured_path = runtime.environment.ARTISAN_WINDOWS_PROCESS_HOST?.trim();
 			const built_path = fileURLToPath(new URL("./windows-process-host.js", import.meta.url));
 			const source_path = fileURLToPath(
-				new URL("./windows-process-host.ts", import.meta.url),
+				new URL("./windows-process-host-entry.ts", import.meta.url),
 			);
 			const built_exists =
 				configured_path === undefined || configured_path.length === 0
@@ -89,18 +105,21 @@ export const MakeEngineProcessEnvironmentLayer = (runtime: EngineProcessRuntime)
 						)
 					: false;
 
+			const windows_process_host_path =
+				configured_path && configured_path.length > 0
+					? configured_path
+					: built_exists
+						? built_path
+						: source_path;
+
 			return {
 				environment: { ...runtime.environment },
 				is_electron: runtime.is_electron,
 				node_executable: runtime.environment.ARTISAN_NODE_EXECUTABLE ?? runtime.exec_path,
 				platform: runtime.platform,
 				MakeClaimToken: Effect.sync(randomUUID),
-				windows_process_host_path:
-					configured_path && configured_path.length > 0
-						? configured_path
-						: built_exists
-							? built_path
-							: source_path,
+				windows_process_host_args: [windows_process_host_path],
+				windows_process_host_path,
 			};
 		}),
 	);
@@ -112,6 +131,7 @@ export const EngineProcessEnvironmentLive = Layer.unwrap(
 			environment: { ...process.env },
 			exec_path: process.execPath,
 			is_electron: process.versions.electron !== undefined,
+			is_sea: isSea(),
 			platform: process.platform,
 		}),
 	),
@@ -257,7 +277,7 @@ function SpawnWindowsProcess(
 	return Effect.callback<OwnedEngineProcess, EngineProcessError>((resume) => {
 		const spawned_child = cross_spawn(
 			environment.node_executable,
-			[environment.windows_process_host_path],
+			[...environment.windows_process_host_args],
 			{
 				detached: true,
 				env: {

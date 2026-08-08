@@ -1,0 +1,28 @@
+# Bzlmod is the only external-dependency mechanism for this repository.
+common --enable_bzlmod
+
+# Keep lockfile translation read-only in normal builds. A deliberate sync is
+# required when dependency metadata changes (`--lockfile_mode=update`).
+common --lockfile_mode=error
+common --repo_env=ASPECT_RULES_JS_FROZEN_PNPM_LOCK=1
+
+# Avoid rescanning the complete translated package tree between local commands.
+common --watchfs
+common --experimental_windows_watchfs
+
+# Script-parity actions receive only explicitly declared environment values.
+build --incompatible_strict_action_env
+build --action_env=CI=1
+build --action_env=NO_UPDATE_NOTIFIER=1
+# Node's pnpm lifecycle runner derives the absolute Windows command interpreter
+# path from this one allowlisted OS capability; the value is part of action keys.
+build --action_env=SYSTEMROOT
+# `//:check_native` is the documented local-only exception until Bazel owns the
+# Rust toolchain. These are ignored by strict pnpm actions and inherited only by
+# the target that sets `use_default_shell_env = True`.
+build --action_env=PATH
+build --action_env=HOME
+build --action_env=USERPROFILE
+build --action_env=CARGO_HOME
+build --action_env=RUSTUP_HOME
+test --test_output=errors

@@ -16,6 +16,7 @@ const RuntimeLayer = (environment: NodeJS.ProcessEnv = {}) =>
 		environment,
 		exec_path: "fallback-node",
 		is_electron: false,
+		is_sea: false,
 		platform: process.platform,
 	}).pipe(Layer.provide(NodeFileSystem.layer));
 
@@ -48,6 +49,7 @@ describe("Engine process environment", () => {
 		);
 
 		expect(service.node_executable).toBe("configured-node");
+		expect(service.windows_process_host_args).toEqual(["C:\\Artisan\\host.js"]);
 		expect(service.windows_process_host_path).toBe("C:\\Artisan\\host.js");
 		expect(service.environment).toEqual({
 			ARTISAN_NODE_EXECUTABLE: "configured-node",
@@ -62,6 +64,33 @@ describe("Engine process environment", () => {
 		);
 
 		expect(service.node_executable).toBe("fallback-node");
+		expect(service.windows_process_host_path).toMatch(
+			/windows-process-host-(?:entry\.ts|entry\.js)$/u,
+		);
+	});
+
+	it("uses the SEA executable as its embedded Windows process host", async () => {
+		const service = await Effect.runPromise(
+			EngineProcessEnvironment.pipe(
+				Effect.provide(
+					MakeEngineProcessEnvironmentLayer({
+						environment: {
+							ARTISAN_NODE_EXECUTABLE: "legacy-node",
+							ARTISAN_WINDOWS_PROCESS_HOST: "C:\\Artisan\\legacy-host.js",
+						},
+						exec_path: "Artisan Forge.exe",
+						is_electron: false,
+						is_sea: true,
+						platform: "win32",
+					}).pipe(Layer.provide(NodeFileSystem.layer)),
+				),
+			),
+		);
+
+		expect(service.node_executable).toBe("Artisan Forge.exe");
+		expect(service.windows_process_host_args).toEqual([
+			"--artisan-internal-windows-process-host",
+		]);
 	});
 
 	it.skipIf(process.platform === "win32")(

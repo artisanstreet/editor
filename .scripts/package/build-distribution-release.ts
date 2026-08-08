@@ -216,6 +216,16 @@ const CanonicalJson = (value: unknown) => `${JSON.stringify(value)}\n`;
 
 const PermanentAe = text_encoder.encode(["@echo off", '"%~dp0ae.exe" %*', ""].join("\r\n"));
 
+const ValidateForgeSeaPayload = (entries: ReadonlyArray<ArchiveEntry>) => {
+	const forge_entries = entries.filter((entry) => entry.path.startsWith("forge/"));
+	if (forge_entries.length !== 1 || forge_entries[0]?.path !== "forge/Artisan Forge.exe")
+		throw new Error(
+			`Forge SEA payload must contain only forge/Artisan Forge.exe; received: ${forge_entries
+				.map((entry) => entry.path)
+				.join(", ")}`,
+		);
+};
+
 export const BuildWindowsDistributionRelease = (input: DistributionReleaseInput) =>
 	Effect.gen(function* () {
 		const configuration = yield* Schema.decodeUnknownEffect(DistributionReleaseInput)(
@@ -252,10 +262,13 @@ export const BuildWindowsDistributionRelease = (input: DistributionReleaseInput)
 			...native_entries,
 			{ bytes: PermanentAe, path: "bin/ae.cmd" },
 		].sort((left, right) => left.path.localeCompare(right.path));
+		yield* Effect.try({
+			try: () => ValidateForgeSeaPayload(entries),
+			catch: (cause) => new DistributionReleaseBuildError({ cause, code: "input" }),
+		});
 		if (
 			!entries.some((entry) => entry.path === "editor/Artisan Editor.exe") ||
 			!entries.some((entry) => entry.path === "forge/Artisan Forge.exe") ||
-			!entries.some((entry) => entry.path === "forge/ae.js") ||
 			(configuration.native_cli_path !== undefined &&
 				!entries.some((entry) => entry.path === "bin/ae.exe")) ||
 			(configuration.native_installer_path !== undefined &&

@@ -23,6 +23,11 @@ Last updated: 2026-08-08. Branch continuity only. Durable verified status is in
 
 ## Active Work
 
+- Bazel 9.2/Bzlmod pins Node 24.18/pnpm 11.7, rejects lock drift, and uses an
+  explicit-environment TypeScript runner. Forge is one CommonJS Node SEA with
+  137 verified assets, fail-closed/concurrency-safe materialization, and atomic
+  last-good publishing. Rust launches it with legacy compatibility; releases
+  require exactly the SEA.
 - The shared development supervisor is now the private Effect-native package
   `@artisanstreet/runner` at `C:\Users\sander\Desktop\runner`, pinned at
   `5b48d0d4`. `Runner.make(...)` is a closed `Effect<never, Runner.Error>`;
@@ -36,8 +41,6 @@ Last updated: 2026-08-08. Branch continuity only. Durable verified status is in
   safe client/protocol diagnostics for classification while the visible footer
   renders only the muted monospaced error code. The ASCII mark centers during
   progress and aligns with the recovery copy for settled failures.
-- Installed 0.2.15 heap captures remain evidence of the 4.2.3 SER leak, not the
-  4.2.4 candidate; no Artisan workaround was added.
 - Installed 0.2.16 exposed suspend recovery exhaustion. A latched recovery epoch
   and scoped browser clock-gap monitor now recover after wake without reloading.
 - Clean CodeMirror documents, inactive drafts, transcript DOM, patch IDs, image
@@ -46,9 +49,6 @@ Last updated: 2026-08-08. Branch continuity only. Durable verified status is in
   activity projection is linear (no repeated array copies), hidden diagnostics
   are not collected, and settled trace DOM stays lazy. Shiki grammars, KaTeX,
   and Mermaid load only on demand.
-- The `/t` route closure fell from ~3.06 MiB/666 KiB gzip to 1.48 MiB/463 KiB.
-  The package fell from 359.6 to 309.71 MiB and ASAR from 12.33 to 8.54 MiB;
-  only `en-US` ships and the Sigurd wordmark is a verified 18.8 KiB subset.
 - The thread proximity rail now uses projected engine/model/live status, gives
   working and ordinary rows separate bounded scroll regions with a conditional
   `gap-4`, and exposes DEV-only ×20 stress sliders. It remains uncommitted with
@@ -67,16 +67,16 @@ Last updated: 2026-08-08. Branch continuity only. Durable verified status is in
 - `/t/:workspace/:thread` and `/e/:workspace/:thread` are the sole thread/editor
   routes. `/` owns draft creation, activity, recents, and inspector behavior;
   `/threads` is removed and all new-thread navigation targets `/`.
-- Context-window usage flows engine → surface storage → composer gauge;
-  migration `20260731100810_panoramic_power_man` adds its aggregate columns.
-  `drizzle.config.ts` correctly targets `persistence/tables.ts`; the previously
-  generated drop-everything migration was caught, deleted, and never applied.
 
 ## Verification
 
-- `pnpm run validate` is green: format, zero-warning lint, root TypeScript,
-  production frontend/Forge builds, 348 Vitest files plus 3 skipped, 2,446
-  tests plus 7 skipped, dev-TUI smoke, native format/clippy, and 53 Rust tests.
+- The exact staged tree passes 137-asset/native/CLI/migration/process-host SEA
+  smoke, `//:forge_sea`, TypeScript, frontend, Forge, and native checks. Its nine
+  milestone files pass 30 tests (one skipped); Forge emits only the 386,274,304-byte
+  executable. Full `//:test` reports seven existing baseline assertions outside
+  this slice.
+- The integrated protected worktree passes `//:verify` and `pnpm run validate`:
+  356 Vitest files/2,488 tests plus Bun and 54 Rust tests.
 - Streaming-Markdown focused verification passes 22 tests; the renderer/SER
   regression set passes 45. Production build and `tsc` pass. Live HMR confirms
   adaptive entrances, single-use reparses, final-token release, wrapper collapse,

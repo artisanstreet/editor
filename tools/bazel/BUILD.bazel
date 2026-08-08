@@ -1,0 +1,5 @@
+exports_files([
+    "bazel-lib-windows-native-patch.patch",
+    "defs.bzl",
+    "run-pnpm-script.ts",
+])

@@ -2,6 +2,8 @@ export * from "./engine";
 export * from "./registry";
 export * from "./process/process";
 export * from "./process/jsonl";
+export { WindowsProcessHostProgram } from "./process/windows-process-host";
+export { WindowsProcessHostModeArgument } from "./process/windows-process-host-mode";
 export * from "./patch/unified-diff";
 export * from "./claude/normalizer";
 export * from "./claude/probe";

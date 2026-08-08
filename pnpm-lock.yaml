@@ -47,6 +47,9 @@ importers:
       '@artisanstreet/runner':
         specifier: git+https://github.com/sandersonstabo/runner.git#5b48d0d4cbddb310853aa8a413a7569cac850893
         version: git+https://github.com/sandersonstabo/runner.git#5b48d0d4cbddb310853aa8a413a7569cac850893(@effect/platform-node-shared@4.0.0-beta.97(effect@4.0.0-beta.97))(effect@4.0.0-beta.97)(typescript@7.0.2)(web-tree-sitter@0.25.10)
+      '@bazel/bazelisk':
+        specifier: 1.28.1
+        version: 1.28.1
       '@effect/platform-node-shared':
         specifier: 4.0.0-beta.97
         version: 4.0.0-beta.97(effect@4.0.0-beta.97)
@@ -65,6 +68,9 @@ importers:
       '@types/yazl':
         specifier: ^3.3.1
         version: 3.3.1
+      '@vitest/runner':
+        specifier: 4.1.10
+        version: 4.1.10
       artisan-editor:
         specifier: workspace:*
         version: link:modules/installer
@@ -95,6 +101,9 @@ importers:
       portless:
         specifier: 0.15.5
         version: 0.15.5
+      postject:
+        specifier: 1.0.0-alpha.6
+        version: 1.0.0-alpha.6
       resedit:
         specifier: ^3.0.2
         version: 3.0.2
@@ -574,6 +583,10 @@ packages:
   '@babel/runtime@7.29.7':
     resolution: {integrity: sha512-Nq8OhGWiZIZGV6hLHoyAKLLcJihP/xFeBMGJoUrxTX2psI8dCifzLhZISFb+VWS3wFMRDmCGw5R+dOySCqPLhw==}
     engines: {node: '>=6.9.0'}
+
+  '@bazel/bazelisk@1.28.1':
+    resolution: {integrity: sha512-K21x83NXOtd0yb2qzjMES3UV4xEWZ1q1vnXFhADA1u7IoiMVQkJAVQRK3oZ5txpnrGafY15HS+YYr2nmsEP4Tg==}
+    hasBin: true
 
   '@codemirror/autocomplete@6.20.3':
     resolution: {integrity: sha512-tlosUqb+3BbxCxZdu4tKeRghPFC+QM7q4X5YhKV2eCmPG+1r2F3f4AaSz5sCrFqUtX4Jh20VFTKecl16MgiV9g==}
@@ -4319,6 +4332,8 @@ snapshots:
 
   '@babel/runtime@7.29.7': {}
 
+  '@bazel/bazelisk@1.28.1': {}
+
   '@codemirror/autocomplete@6.20.3':
     dependencies:
       '@codemirror/language': 6.12.4
@@ -5913,8 +5928,7 @@ snapshots:
 
   commander@8.3.0: {}
 
-  commander@9.5.0:
-    optional: true
+  commander@9.5.0: {}
 
   compare-version@0.1.2: {}
 
@@ -7027,7 +7041,6 @@ snapshots:
   postject@1.0.0-alpha.6:
     dependencies:
       commander: 9.5.0
-    optional: true
 
   proc-log@6.1.0: {}
 
