@@ -3,6 +3,7 @@
 	import { Badge } from "$lib/components/ui/badge";
 	import { ShimmerText } from "$lib/components/ui/shimmer-text";
 	import { EngineMarkClass, EngineMarkFor } from "$lib/engine/presentation";
+	import { model_transition_presentation } from "$lib/conversation/presentation";
 	import { model_manifest } from "@artisan/catalog";
 	import type { ConversationItem } from "@artisan/protocol";
 	import type { Snippet } from "svelte";
@@ -54,6 +55,8 @@
 	{@const SourceIcon = source_mark.icon}
 	{@const TargetIcon = target_mark.icon}
 	{@const handing_over = item.state === "started"}
+	{@const presentation = model_transition_presentation(item.state, item.source_model_id)}
+	{#if presentation !== "pending_source"}
 	<div
 		class={timeline_status_class}
 		data-conversation-status="model-transition"
@@ -65,7 +68,7 @@
 			<ShimmerText class="text-muted-foreground" delay={0} duration={2.4}>
 				{source_model_name === undefined ? "Changing to" : "Changing"}
 			</ShimmerText>
-		{:else if source_model_name === undefined}
+		{:else if presentation === "target_only"}
 			<!-- Nothing to name on the way out, so the line states where the thread arrived. -->
 			<span>Changed to</span>
 		{:else}
@@ -84,6 +87,7 @@
 		</span>
 		{#if trailing !== undefined}{@render trailing()}{/if}
 	</div>
+	{/if}
 {:else if item.type === "compaction"}
 	<div
 		class={timeline_status_class}

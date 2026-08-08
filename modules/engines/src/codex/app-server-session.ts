@@ -17,7 +17,6 @@ import { EngineProcessError } from "../engine";
 import {
 	CodexAppServerClosedError,
 	CodexAppServerConfigurationError,
-	CodexAppServerNotificationOverflowError,
 	CodexAppServerProtocolError,
 	CodexAppServerRequestTimeoutError,
 	CodexAppServerResponseError,
@@ -28,6 +27,7 @@ import {
 	type CodexRequestId,
 	DecodeCodexInboundEnvelope,
 	DecodeCodexInitializeResponse,
+	codex_opt_out_notification_methods,
 	make_codex_initialize_request,
 	make_codex_server_response,
 } from "./protocol";
@@ -45,7 +45,7 @@ export interface CodexAppServerSessionOptions {
 	readonly diagnostic_capacity?: number;
 	readonly max_frame_bytes?: number;
 	readonly notification_capacity?: number;
-	readonly notification_ingress_capacity?: number;
+	readonly notification_ingress_warning_threshold?: number;
 	readonly request_timeout_ms?: number;
 	readonly spawn: CodexProcessSpawnInput;
 }
@@ -56,23 +56,9 @@ export interface CodexAppServerHandshakeInput {
 	readonly client_version: string;
 }
 
-/**
- * Streaming notifications whose complete counterpart supersedes them: the
- * final item carries the full text or outcome, so dropping one of these under
- * ingress overload loses a moment of live rendering, never durable state.
- * Every other method keeps the lossless guarantee and still fails the session
- * on overflow.
- *
- * @since 0.7.0
- */
-export const codex_lossy_notification_methods: ReadonlySet<string> = new Set([
-	"item/agentMessage/delta",
-	"item/commandExecution/outputDelta",
-	"item/fileChange/outputDelta",
-	"item/mcpToolCall/progress",
-	"item/reasoning/summaryTextDelta",
-	"item/reasoning/textDelta",
-]);
+const codex_opt_out_notification_method_set: ReadonlySet<string> = new Set(
+	codex_opt_out_notification_methods,
+);
 
 /** Preserves a server notification or server-initiated request in receive order. @since 0.3.0 */
 export interface CodexAppServerNotification {
@@ -97,7 +83,6 @@ export interface CodexAppServerDiagnostic {
 export type CodexAppServerSessionFailure =
 	| CodexAppServerClosedError
 	| CodexAppServerConfigurationError
-	| CodexAppServerNotificationOverflowError
 	| CodexAppServerProtocolError
 	| CodexAppServerRequestTimeoutError
 	| CodexAppServerResponseError
@@ -202,23 +187,24 @@ function ValidatePositiveOption(option: string, value: number) {
  * @param options - Spawn input plus bounded buffer capacities and request deadline.
  * @returns A live app-server session backed by exactly one child process.
  */
-export function open_codex_app_server_session(
+export const open_codex_app_server_session = (
 	options: CodexAppServerSessionOptions,
 ): Effect.Effect<
 	CodexAppServerSession,
 	CodexAppServerConfigurationError | EngineProcessError,
 	CodexProcessFactory | Scope.Scope
-> {
+> => {
 	const diagnostic_capacity = options.diagnostic_capacity ?? 128;
 	const max_frame_bytes = options.max_frame_bytes ?? 8 * 1_024 * 1_024;
 	const notification_capacity = options.notification_capacity ?? 128;
 	/**
 	 * The ingress queue isolates stdout framing and JSON-RPC response correlation
-	 * from a temporarily slow notification consumer. It remains bounded; on
-	 * overload EnqueueNotification sheds lossy streaming frames and fails the
-	 * session only for lossless methods.
+	 * from a temporarily slow notification consumer. It is intentionally
+	 * unbounded: connection-level notification bursts must not terminate an
+	 * active run or discard its lifecycle frames.
 	 */
-	const notification_ingress_capacity = options.notification_ingress_capacity ?? 1_024;
+	const notification_ingress_warning_threshold =
+		options.notification_ingress_warning_threshold ?? 1_024;
 	const request_timeout_ms = options.request_timeout_ms ?? 10_000;
 
 	return Effect.gen(function* () {
@@ -226,8 +212,8 @@ export function open_codex_app_server_session(
 		yield* ValidatePositiveOption("max_frame_bytes", max_frame_bytes);
 		yield* ValidatePositiveOption("notification_capacity", notification_capacity);
 		yield* ValidatePositiveOption(
-			"notification_ingress_capacity",
-			notification_ingress_capacity,
+			"notification_ingress_warning_threshold",
+			notification_ingress_warning_threshold,
 		);
 		yield* ValidatePositiveOption("request_timeout_ms", request_timeout_ms);
 
@@ -237,9 +223,10 @@ export function open_codex_app_server_session(
 		const diagnostics = yield* Queue.sliding<CodexAppServerDiagnostic, Cause.Done>(
 			diagnostic_capacity,
 		);
-		const notification_ingress = yield* Queue.dropping<CodexAppServerNotification, Cause.Done>(
-			notification_ingress_capacity,
-		);
+		const notification_ingress = yield* Queue.unbounded<
+			CodexAppServerNotification,
+			Cause.Done
+		>();
 		const notifications = yield* Queue.bounded<CodexAppServerNotification, Cause.Done>(
 			notification_capacity,
 		);
@@ -255,8 +242,8 @@ export function open_codex_app_server_session(
 			next_request_id: 0,
 			pending: new Map(),
 		});
-		/** Lossy notifications dropped since ingress last accepted a frame. */
-		const shed_lossy = yield* Ref.make(0);
+		const notification_ingress_warned = yield* Ref.make(false);
+		const notification_ingress_monitor_lock = yield* Semaphore.make(1);
 		const write_lock = yield* Semaphore.make(1);
 
 		const OfferDiagnostic = (diagnostic: CodexAppServerDiagnostic) =>
@@ -388,62 +375,45 @@ export function open_codex_app_server_session(
 
 				yield* Deferred.succeed(request.deferred, response);
 			});
+		const is_opted_out_bookkeeping_notification = (notification: CodexAppServerNotification) =>
+			notification.id === undefined &&
+			codex_opt_out_notification_method_set.has(notification.method);
 		const EnqueueNotification = (notification: CodexAppServerNotification) =>
 			Effect.gen(function* () {
-				const accepted = yield* Queue.offer(notification_ingress, notification);
-
-				if (accepted) {
-					const shed = yield* Ref.modify(shed_lossy, (count) => [count, 0] as const);
-
-					if (shed > 0) {
-						yield* EmitDiagnostic({
-							frame_sequence: notification.frame_sequence,
-							level: "warning",
-							message: `Codex notification ingress recovered after shedding ${shed} lossy notifications`,
-							source: "stdout",
-						});
-					}
-
-					return;
-				}
-
 				/**
-				 * A full ingress sheds lossy streaming frames instead of failing the
-				 * session: their completed items supersede them, so the run keeps its
-				 * durable record while a temporarily slow consumer catches up.
+				 * These exact notification methods were disabled at initialize time and
+				 * have no Artisan run projection. A noncompliant older server must not
+				 * let them crowd out a completion or an interaction request. Requests
+				 * with ids remain lossless even when they reuse a method name.
 				 */
-				if (codex_lossy_notification_methods.has(notification.method)) {
-					const shed = yield* Ref.modify(
-						shed_lossy,
-						(count) => [count + 1, count + 1] as const,
-					);
-
-					if (shed === 1) {
-						yield* EmitDiagnostic({
-							frame_sequence: notification.frame_sequence,
-							level: "warning",
-							message: `Codex notification ingress reached capacity ${notification_ingress_capacity}; shedding lossy notifications`,
-							source: "stdout",
-						});
-					}
-
+				if (is_opted_out_bookkeeping_notification(notification)) {
 					return;
 				}
 
-				const overflow = new CodexAppServerNotificationOverflowError({
-					capacity: notification_ingress_capacity,
-				});
-				const did_finish = yield* Finish(overflow, {
-					frame_sequence: notification.frame_sequence,
-					level: "error",
-					message: `Codex notification ingress exceeded capacity ${notification_ingress_capacity}`,
-					raw_frame_base64: notification.raw_frame_base64,
-					source: "stdout",
-				});
+				yield* Semaphore.withPermit(notification_ingress_monitor_lock)(
+					Effect.gen(function* () {
+						yield* Queue.offer(notification_ingress, notification);
+						const depth = yield* Queue.size(notification_ingress);
+						const reached_warning = yield* Ref.modify(
+							notification_ingress_warned,
+							(warned) => {
+								const next_warned =
+									warned || depth > notification_ingress_warning_threshold;
 
-				if (did_finish) {
-					yield* Close;
-				}
+								return [!warned && next_warned, next_warned] as const;
+							},
+						);
+
+						if (reached_warning) {
+							yield* EmitDiagnostic({
+								frame_sequence: notification.frame_sequence,
+								level: "warning",
+								message: `Codex notification ingress exceeded warning threshold ${notification_ingress_warning_threshold}; retaining notifications`,
+								source: "stdout",
+							});
+						}
+					}),
+				);
 			});
 		const ProcessFrame = (frame: CodexJsonlFrame, frame_sequence: number) =>
 			Effect.gen(function* () {
@@ -537,7 +507,33 @@ export function open_codex_app_server_session(
 		);
 		const DeliverNotifications = Stream.fromQueue(notification_ingress).pipe(
 			Stream.runForEach((notification) =>
-				Queue.offer(notifications, notification).pipe(Effect.asVoid),
+				Effect.gen(function* () {
+					yield* Semaphore.withPermit(notification_ingress_monitor_lock)(
+						Effect.gen(function* () {
+							const depth = yield* Queue.size(notification_ingress);
+							const recovered = yield* Ref.modify(
+								notification_ingress_warned,
+								(warned) => {
+									const next_warned =
+										warned && depth > notification_ingress_warning_threshold;
+
+									return [warned && !next_warned, next_warned] as const;
+								},
+							);
+
+							if (recovered) {
+								yield* EmitDiagnostic({
+									frame_sequence: notification.frame_sequence,
+									level: "info",
+									message: `Codex notification ingress recovered at or below warning threshold ${notification_ingress_warning_threshold}`,
+									source: "stdout",
+								});
+							}
+						}),
+					);
+
+					yield* Queue.offer(notifications, notification).pipe(Effect.asVoid);
+				}),
 			),
 			Effect.ensuring(Queue.end(notifications)),
 		);
@@ -713,4 +709,4 @@ export function open_codex_app_server_session(
 			Respond,
 		};
 	});
-}
+};

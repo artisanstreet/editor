@@ -162,6 +162,10 @@ export const BeginForgeHydration = (model: ForgeGateModel): ForgeGateModel => {
 	};
 };
 
+/** A hydration result may mutate shell state only while its own generation still owns the gate. */
+export const IsCurrentForgeHydration = (model: ForgeGateModel, generation: number): boolean =>
+	model.state.phase === "hydrating" && model.state.generation === generation;
+
 export const ObserveForgeConnection = (
 	model: ForgeGateModel,
 	state: ArtisanConnectionState,
@@ -189,7 +193,7 @@ export const ObserveForgeConnection = (
 };
 
 export const CompleteForgeHydration = (model: ForgeGateModel, generation: number): ForgeGateModel =>
-	model.state.phase === "hydrating" && model.state.generation === generation
+	IsCurrentForgeHydration(model, generation)
 		? {
 				...model,
 				dismissed: false,
@@ -204,7 +208,7 @@ export const FailForgeHydration = (
 	operation: ForgeHydrationOperation,
 	error: ArtisanClientError,
 ): ForgeGateModel =>
-	model.state.phase === "hydrating" && model.state.generation === generation
+	IsCurrentForgeHydration(model, generation)
 		? {
 				...model,
 				state: {

@@ -197,6 +197,15 @@ describe("activity group header", () => {
 		expect(trace).not.toMatch(/\s(?:in|out|transition):[a-z]/);
 	});
 
+	/** A started handoff must not make a target-only claim until its source is durable. */
+	it("delegates pending handoff wording to the pure transition presentation", () => {
+		const status = read("modules/frontend/src/routes/components/conversation-status.svelte");
+
+		expect(status).toContain("model_transition_presentation(item.state, item.source_model_id)");
+		expect(status).toContain('{#if presentation !== "pending_source"}');
+		expect(status).toContain('{:else if presentation === "target_only"}');
+	});
+
 	it("fades only overflowing command text, leaving its icon and chevron outside the mask", () => {
 		const trace = read("modules/frontend/src/routes/components/conversation-trace.svelte");
 

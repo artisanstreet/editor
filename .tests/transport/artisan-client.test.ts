@@ -1104,7 +1104,7 @@ describe("ArtisanClient over MessagePorts", () => {
 		}
 	});
 
-	it("fails the client before ACKing an event that cannot enter a stalled Events observer", async () => {
+	it("slides a stalled Events observer without holding durable ingress or other observers", async () => {
 		const harness = await make_transport_test_harness({
 			client: { event_capacity: 1 },
 		});
@@ -1115,17 +1115,22 @@ describe("ArtisanClient over MessagePorts", () => {
 					Effect.gen(function* () {
 						const hold = yield* Deferred.make<void>();
 						const started = yield* Deferred.make<void>();
-						const error = yield* harness.client.Errors.pipe(
-							Stream.take(1),
+						let first = true;
+						const held_observer = yield* harness.client.Events.pipe(
+							Stream.take(2),
+							Stream.tap(() => {
+								if (!first) return Effect.void;
+								first = false;
+								return Deferred.succeed(started, undefined).pipe(
+									Effect.andThen(Deferred.await(hold)),
+								);
+							}),
 							Stream.runCollect,
 							Effect.forkScoped,
 						);
-						const observer = yield* harness.client.Events.pipe(
-							Stream.runForEach(() =>
-								Deferred.succeed(started, undefined).pipe(
-									Effect.andThen(Deferred.await(hold)),
-								),
-							),
+						const fast_observer = yield* harness.client.Events.pipe(
+							Stream.take(4),
+							Stream.runCollect,
 							Effect.forkScoped,
 						);
 						yield* Effect.yieldNow;
@@ -1133,32 +1138,73 @@ describe("ArtisanClient over MessagePorts", () => {
 						yield* harness.client.CreateThread({ title: "Queued event 1" });
 						yield* Deferred.await(started).pipe(Effect.timeout("1 second"));
 
-						let attempted_events = 1;
-						for (const index of [2, 3, 4, 5, 6, 7, 8]) {
-							if (error.pollUnsafe() !== undefined) break;
-
-							attempted_events = index;
+						for (const index of [2, 3, 4]) {
 							yield* harness.client
 								.CreateThread({ title: `Queued event ${index}` })
-								.pipe(Effect.timeout("1 second"), Effect.exit);
+								.pipe(Effect.timeout("1 second"));
 							yield* Effect.yieldNow;
 						}
+						yield* Effect.promise(() =>
+							wait_for(
+								() => harness.protocol_snapshot().acknowledgements.length === 4,
+							),
+						);
+						const threads = yield* harness.client.ListThreads.pipe(
+							Effect.timeout("1 second"),
+						);
+						const projection = yield* harness.client.SubscribeThreadList;
+						const projection_snapshot = yield* projection.pipe(
+							Stream.take(1),
+							Stream.runCollect,
+							Effect.timeout("1 second"),
+						);
 						yield* Deferred.succeed(hold, undefined);
 
+						const held_events = yield* Fiber.join(held_observer).pipe(
+							Effect.timeout("1 second"),
+						);
+						const fast_events = yield* Fiber.join(fast_observer).pipe(
+							Effect.timeout("1 second"),
+						);
+						const new_observer = yield* harness.client.Events.pipe(
+							Stream.take(1),
+							Stream.runCollect,
+							Effect.forkScoped,
+						);
+						yield* Effect.yieldNow;
+						const follow_up = yield* harness.client.CreateThread({
+							title: "Observer follow-up",
+						});
+
 						return {
-							attempted_events,
-							error: yield* Fiber.join(error),
-							observer_error: yield* Fiber.join(observer).pipe(Effect.flip),
+							fast_events,
+							held_events,
+							new_events: yield* Fiber.join(new_observer).pipe(
+								Effect.timeout("1 second"),
+							),
+							projection_snapshot,
+							threads,
+							follow_up_id: follow_up.thread_id,
 						};
 					}),
 				),
 			);
 
-			expect(output.error).toMatchObject([{ code: "event_overflow" }]);
-			expect(output.observer_error).toMatchObject({ code: "event_overflow" });
-			expect(harness.protocol_snapshot().acknowledgements.length).toBeLessThan(
-				output.attempted_events,
-			);
+			await wait_for(() => harness.protocol_snapshot().acknowledgements.length === 5);
+			expect(harness.protocol_snapshot().acknowledgements).toHaveLength(5);
+			expect(output.threads).toHaveLength(4);
+			expect([...output.projection_snapshot]).toMatchObject([
+				{ threads: expect.arrayContaining([expect.any(Object)]) },
+			]);
+			expect([...output.fast_events]).toHaveLength(4);
+			expect([...output.held_events]).toMatchObject([
+				{ journal_sequence: 1 },
+				{ journal_sequence: 4 },
+			]);
+			expect([...output.new_events]).toMatchObject([
+				{ journal_sequence: 5, thread_id: output.follow_up_id },
+			]);
+			expect(harness.connector_snapshot().connections).toBe(1);
 		} finally {
 			await harness.dispose();
 		}

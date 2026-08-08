@@ -600,7 +600,7 @@ export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
 				Effect.gen(function* () {
 					const observer_id = yield* make_id("event_observer");
 					const observer = yield* Effect.acquireRelease(
-						Queue.dropping<EventEnvelope, ArtisanClientError | Cause.Done<void>>(
+						Queue.sliding<EventEnvelope, ArtisanClientError | Cause.Done<void>>(
 							event_capacity,
 						),
 						Queue.shutdown,

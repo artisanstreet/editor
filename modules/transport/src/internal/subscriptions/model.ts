@@ -128,13 +128,7 @@ export type EventTerminal =
 export type EventApplication =
 	| { readonly _tag: "Applied"; readonly cursors: ArtisanClientCursors }
 	| { readonly _tag: "Duplicate" }
-	| { readonly _tag: "Gap" }
-	| {
-			readonly _tag: "Overflow";
-			readonly observers: ReadonlyArray<
-				Queue.Queue<EventEnvelope, ArtisanClientError | Cause.Done<void>>
-			>;
-	  };
+	| { readonly _tag: "Gap" };
 
 export type SubscriptionDelivery =
 	| { readonly _tag: "Delivered" }

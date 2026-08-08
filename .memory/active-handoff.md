@@ -1,15 +1,13 @@
 # Active Branch Handoff
 
-Last updated: 2026-08-07. Branch continuity only. Durable verified status is in
+Last updated: 2026-08-08. Branch continuity only. Durable verified status is in
 [`docs/status/backend-completion-matrix.md`](../docs/status/backend-completion-matrix.md).
 
 ## Working State
 
-- Repository `C:\Users\sander\Desktop\artisan-editor`; direct `master`, tracking
-  `origin/master`. Verified milestones are committed and pushed directly.
-- Protected user work: `.mcp.json` stays untracked. Concurrent host-suspend,
-  engine-inactivity, and frontend work remains outside scoped commits. Sander
-  folded the removed `routes/threads/+page.sv` draft flow into `routes/+page.sv`.
+- Repository `C:\Users\sander\Desktop\artisan-editor`; direct `master` → `origin/master`.
+- Protected `.mcp.json` stays untracked; unrelated engine-inactivity and
+  frontend work remains outside the regression milestone.
 
 ## Invariants
 
@@ -25,6 +23,11 @@ Last updated: 2026-08-07. Branch continuity only. Durable verified status is in
 
 ## Active Work
 
+- The shared development supervisor is now the private Effect-native package
+  `@artisanstreet/runner` at `C:\Users\sander\Desktop\runner`, pinned at
+  `5b48d0d4`. `Runner.make(...)` is a closed `Effect<never, Runner.Error>`;
+  scoped supervision, readiness, routing, and the Artisan-colored Bun/OpenTUI
+  worker are internally provided. Artisan and VSX now consume the same package.
 - Dev modes keep Vite and Forge on isolated loopback ports behind runner-owned
   Portless aliases; linked worktrees use native branch prefixes. Guarded aliases,
   exact Host policy, IPC ownership, rebuild restarts, and the TUI remain intact.
@@ -33,42 +36,31 @@ Last updated: 2026-08-07. Branch continuity only. Durable verified status is in
   safe client/protocol diagnostics for classification while the visible footer
   renders only the muted monospaced error code. The ASCII mark centers during
   progress and aligns with the recovery copy for settled failures.
-- Performance stays on verified SER 4.2.3; no SER-owned leak is evidenced. The
-  prior live installed baseline was 585/525 MiB working/private bytes. An
-  isolated packaged cold launch is 392.6/292.0 MiB with a 12.5 MiB JS heap;
-  Forge was unavailable there, so this is not a live-thread comparison.
+- Installed 0.2.15 heap captures remain evidence of the 4.2.3 SER leak, not the
+  4.2.4 candidate; no Artisan workaround was added.
+- Installed 0.2.16 exposed suspend recovery exhaustion. A latched recovery epoch
+  and scoped browser clock-gap monitor now recover after wake without reloading.
 - Clean CodeMirror documents, inactive drafts, transcript DOM, patch IDs, image
   URLs/retries, attachment backlogs, and WebGL frames are bounded. Streamed
-  reducer and render-slot updates do not scan or regroup history; settled trace
-  DOM is lazy. Shiki grammars, KaTeX, and Mermaid load only on demand.
+  reducer and render-slot updates do not scan or regroup history. Adjacent trace
+  activity projection is linear (no repeated array copies), hidden diagnostics
+  are not collected, and settled trace DOM stays lazy. Shiki grammars, KaTeX,
+  and Mermaid load only on demand.
 - The `/t` route closure fell from ~3.06 MiB/666 KiB gzip to 1.48 MiB/463 KiB.
   The package fell from 359.6 to 309.71 MiB and ASAR from 12.33 to 8.54 MiB;
   only `en-US` ships and the Sigurd wordmark is a verified 18.8 KiB subset.
-- The composer model trigger has a `gap-2` logo/name gap and the rail's former
-  command button is now a `New thread` link to `/`; both remain uncommitted with
-  protected frontend work.
-- Transcript follow state is position-derived; local sends top-align their exact
-  projected item and an in-composer jump resumes the true tail. Thinking verbs
-  advance only after hiding for live detail, and duplicate file paths group with
-  conservative aggregate diff counts, including historical rows.
-- Conversation Markdown links resolve page names through Forge's strict public
-  contract; retained favicons render when available and a compact Tabler world
-  covers cold-start, missing, and broken assets without prose image margins.
-  Blob URLs are lifecycle-owned; non-HTTP(S) links never request metadata.
-- Unlocked thread titles synchronously follow the latest accepted queued or
-  steering user message; manual renames remain locked. Forge repairs historical
-  stale titles through narrow compatible evidence replay before serving a
-  browser, and projection rebuild derives the same durable title transition.
-- Claude stream-json correlates each result with its run-owned tool-use start,
-  preserving command/search names and settling file rows once with truthful
-  counts when provider metadata exists; ambiguous parallel results stay unknown.
-- Live-run forensics fixed burst event-buffer failure, stale activity shimmer,
-  trace liveness, command overflow, immutable context provenance, and provider
-  turn-start wording. Flow control tolerates bursts and fails only after 30s.
-- Presentation instructions stay in additive system fields. Shiki code cards,
-  bounded KaTeX, sanitized Mermaid, inert HTML, and SER-owned lazy rendering are
-  implemented. Streaming prose uses a bounded correction-preemptible queue with
-  reduced-motion completion and single-use animation generations.
+- The thread proximity rail now uses projected engine/model/live status, gives
+  working and ordinary rows separate bounded scroll regions with a conditional
+  `gap-4`, and exposes DEV-only ×20 stress sliders. It remains uncommitted with
+  the protected frontend layout slice.
+- The 2026-08-08 regression repair makes Forge-owned active work outrank local
+  rail settlement, applies only the current hydration's thread snapshot before
+  opening the shell, lets active disclosures close without dropping their live
+  detail tree, and keeps every rail region interactive. Started model-transition
+  wording waits for its source. Optional event observers coalesce independently.
+- Codex app-server notification ingress is unbounded by design. `1,024` is a
+  warning/recovery threshold only; exact unused bookkeeping methods are opted
+  out, while every run/lifecycle notification and correlated response is kept.
 - The editor route subscribes to the authoritative thread list. Reassignment
   unmounts the old editor before moving to the new workspace route; detach moves
   to `/t/_/:thread`, so stale file reads cannot retain revoked workspace scope.
@@ -82,22 +74,29 @@ Last updated: 2026-08-07. Branch continuity only. Durable verified status is in
 
 ## Verification
 
-- The last clean milestone remains 335 Vitest files/2,322 tests. Current
-  mixed-tree validation passes format, lint, root TypeScript, frontend/Forge
-  builds, and 2,381 tests; five unrelated concurrent-work assertions remain in
-  editor layout/SER, AgentOrchestrator size, and engines public-surface suites.
+- `pnpm run validate` is green: format, zero-warning lint, root TypeScript,
+  production frontend/Forge builds, 348 Vitest files plus 3 skipped, 2,446
+  tests plus 7 skipped, dev-TUI smoke, native format/clippy, and 53 Rust tests.
 - Streaming-Markdown focused verification passes 22 tests; the renderer/SER
   regression set passes 45. Production build and `tsc` pass. Live HMR confirms
   adaptive entrances, single-use reparses, final-token release, wrapper collapse,
   and compositor-hint cleanup. Independent race re-review found no remaining
   issue; prior KaTeX, Mermaid, and full-width code-card probes remain verified.
-- Portless runner verification: 36 focused tests, workspace `tsc`, frontend
-  production build, Forge validation build, scoped lint, and format check pass;
-  independent lifecycle/security re-review found no remaining issue.
-- Performance/SER regression coverage passes 134 tests. Desktop packaging and
-  package verification pass; 53 native tests pass. Native format/clippy remain
-  blocked only by protected installer formatting and its two in-progress
-  excessive-bool findings.
+- Local SER 4.2.4 passes 805 tests, five browser cases (32 real PubSub reruns),
+  type/format/lint, build/pack, and packed SvelteKit/Playwright smoke. SHA-256:
+  `43F069599DA65BEDF589271813F8B8361619A7CF8203C4BBDE9848A4BB4BF42C`.
+- Current editor/composer/layout retention suites pass. CodeMirror keeps an
+  8-document/4 MiB hot cap; composer ingress and anchor wake state are bounded.
+  The thread rail passes 24 focused tests and its production SER/Vite build.
+- The core regression matrix passes 10 files/145 tests. Post-review disclosure,
+  rail, and generation-guard verification passes 4 files/56 tests. Independent
+  engine/transport review found no issue (2 files/47 tests); frontend review's
+  two interaction findings are fixed and covered. Production frontend builds.
+- The local 4.2.4 candidate passes 20 focused files/113 tests across SER,
+  transport recovery, retention, trace, and store behavior. Trace/store alone
+  pass 28 tests including a 4,096-activity chain and legacy diagnostics.
+  Frontend/Electron package build, packaged verifier, aggregate format, lint,
+  and focused tests pass; current root and frontend TypeScript checks pass.
 
 ## Dirty-Tree Integration Notes
 

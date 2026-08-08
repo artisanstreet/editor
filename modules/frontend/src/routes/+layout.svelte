@@ -23,6 +23,7 @@
 		ForgeShellIsBlocked,
 		ForgeShellIsMounted,
 		InitialForgeGateModel,
+		IsCurrentForgeHydration,
 		ObserveForgeConnection,
 	} from "$lib/forge/gate";
 	import { RunBrowserDom } from "$lib/browser/dom";
@@ -141,7 +142,7 @@
 
 	const HydrateForge = (generation: number): Effect.Effect<void> =>
 		Effect.gen(function* () {
-			yield* Effect.all(
+			const [, , next_threads] = yield* Effect.all(
 				[
 					session_defaults.Refresh.pipe(
 						Effect.mapError(
@@ -162,11 +163,16 @@
 				],
 				{
 					concurrency: "unbounded",
-					discard: true,
 				},
 			);
 			const state = yield* client.ConnectionState;
 			if (state.phase === "ready") {
+				if (!IsCurrentForgeHydration(forge_gate, generation)) return;
+				yield* ApplyThreadListUpdate({
+					journal_sequence: 0,
+					threads: next_threads,
+					type: "snapshot" as const,
+				});
 				forge_gate = CompleteForgeHydration(forge_gate, generation);
 				return;
 			}

@@ -5,7 +5,7 @@ import { SubscriptionContext } from "./context";
 import type { EventApplication, SubscriptionState } from "./model";
 
 export const MakeEventIngress = Effect.gen(function* () {
-	const { overflow_error, state } = yield* SubscriptionContext;
+	const { state } = yield* SubscriptionContext;
 	const cursors = Ref.get(state).pipe(
 		Effect.map((current) => ({
 			event_cursors: record_to_cursors(current.event_cursors),
@@ -45,17 +45,11 @@ export const MakeEventIngress = Effect.gen(function* () {
 			}
 
 			/**
-			 * Events are an optional hot observation stream. A missing observer must
-			 * not retain the durable journal forever or make transport liveness depend
-			 * on a renderer-only consumer. A slow active observer still fails closed.
+			 * Events are optional hot observations. Each observer has its own sliding
+			 * queue, so renderer speed can never hold the durable journal cursor or
+			 * its ACK hostage. A stalled observer keeps the newest useful fact.
 			 */
 			const observers = [...current.event_observers.values()];
-			if (observers.some((observer) => Queue.isFullUnsafe(observer))) {
-				return [
-					{ _tag: "Overflow", observers },
-					{ ...current, event_terminal: { _tag: "failed", error: overflow_error } },
-				];
-			}
 			for (const observer of observers) Queue.offerUnsafe(observer, event);
 
 			const event_cursors = {
@@ -93,13 +87,6 @@ export const MakeEventIngress = Effect.gen(function* () {
 								true,
 							),
 						);
-					case "Overflow": {
-						return Effect.forEach(
-							outcome.observers,
-							(observer) => Queue.fail(observer, overflow_error),
-							{ discard: true },
-						).pipe(Effect.andThen(Effect.fail(overflow_error)));
-					}
 				}
 			}),
 		);

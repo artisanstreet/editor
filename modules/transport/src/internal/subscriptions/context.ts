@@ -50,7 +50,6 @@ export interface SubscriptionContextShape {
 	readonly event_capacity: number;
 	readonly make_id: (prefix: string) => Effect.Effect<string>;
 	readonly make_trace: MakeTrace;
-	readonly overflow_error: ArtisanClientError;
 	readonly publish_error: (error: ArtisanClientError) => Effect.Effect<void>;
 	readonly send_current: SendCurrent;
 	readonly state: Ref.Ref<SubscriptionState>;

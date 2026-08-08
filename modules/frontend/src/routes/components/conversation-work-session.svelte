@@ -11,6 +11,7 @@
 		type WorkSessionRunAuthority,
 	} from "$lib/conversation/activity-status";
 	import { EngineDisplayName } from "$lib/engine/presentation";
+	import { work_session_disclosure } from "$lib/conversation/presentation";
 	import { MakeScopedAttachmentRunner } from "$lib/lifecycle/scoped-attachment-runner";
 	import { RunBrowserDom } from "$lib/browser/dom";
 	import { ShimmerText } from "$lib/components/ui/shimmer-text";
@@ -54,8 +55,15 @@
 		/** The engine handoff that started this run, shown at the header's far end. */
 		transition?: Extract<ConversationItem, { type: "model_transition" }>;
 	} = $props();
-	/** Failed work opens by default: its explanation must not hide behind a click. */
-	let open = $state(untrack(() => item.status === "failed" || item.status === "cancelled"));
+	/** Live work and unsuccessful settlements open by default; the reader remains in control. */
+	let open = $state(
+		untrack(
+			() =>
+				item.ended_at === undefined ||
+				item.status === "failed" ||
+				item.status === "cancelled",
+		),
+	);
 	let user_chose_disclosure = $state(false);
 	let previous_status = untrack(() => item.status);
 	let has_visible_details = $state(untrack(() => has_details));
@@ -153,7 +161,14 @@
 				)
 			: label,
 	);
-	const can_collapse = $derived(!is_working && has_visible_details);
+	const disclosure = $derived(
+		work_session_disclosure({
+			details_defined: details !== undefined,
+			has_visible_details,
+			open,
+			working: is_working,
+		}),
+	);
 
 	/**
 	 * A failure observed live opens once. After the user touches disclosure,
@@ -261,9 +276,9 @@
 
 <section
 	class="t-acc w-full text-base text-muted-foreground"
-	data-open={is_working || can_collapse ? is_working || open : undefined}
-	data-state={is_working || can_collapse ? (is_working || open ? "open" : "closed") : undefined}
-	data-has-header={can_collapse ? "true" : undefined}
+	data-open={disclosure.data_open}
+	data-state={disclosure.data_state}
+	data-has-header={disclosure.can_collapse ? "true" : undefined}
 	aria-label={`${is_working ? status_label : label}: ${item.title}`}
 >
 	<!--
@@ -276,7 +291,7 @@
 		</div>
 	{/if}
 
-	{#if can_collapse}
+	{#if disclosure.can_collapse}
 		<div
 			class={`t-settle-underline relative flex w-full items-center justify-between gap-3 pb-2 ${mounted_working ? "t-status-settle" : ""}`}
 			style:--settle-underline-from={`${label_width}px`}
@@ -320,8 +335,8 @@
 		</div>
 	{/if}
 
-	{#if details !== undefined && (is_working || open)}
-		<div class="t-acc-panel" hidden={!is_working && !has_visible_details}>
+	{#if disclosure.details_mounted && details !== undefined}
+		<div class="t-acc-panel" hidden={disclosure.details_hidden}>
 			<div class="t-acc-panel-inner" use:observe_details>
 				{@render details()}
 			</div>

@@ -3,7 +3,7 @@
 	"chunks": [
 		{
 			"at_ms": 0,
-			"chunk_base64": "eyJpZCI6MSwibWV0aG9kIjoiaW5pdGlhbGl6ZSIsInBhcmFtcyI6eyJjYXBhYmlsaXRpZXMiOnsiZXhwZXJpbWVudGFsQXBpIjpmYWxzZSwicmVxdWVzdEF0dGVzdGF0aW9uIjpmYWxzZX0sImNsaWVudEluZm8iOnsibmFtZSI6InRyYW5zY3JpcHQtdGVzdCIsInZlcnNpb24iOiIwLjMuMCJ9fX0K",
+			"chunk_base64": "eyJpZCI6MSwibWV0aG9kIjoiaW5pdGlhbGl6ZSIsInBhcmFtcyI6eyJjYXBhYmlsaXRpZXMiOnsiZXhwZXJpbWVudGFsQXBpIjpmYWxzZSwib3B0T3V0Tm90aWZpY2F0aW9uTWV0aG9kcyI6WyJhY2NvdW50L3JhdGVMaW1pdHMvdXBkYXRlZCIsIm1jcFNlcnZlci9zdGFydHVwU3RhdHVzL3VwZGF0ZWQiLCJyZW1vdGVDb250cm9sL3N0YXR1cy9jaGFuZ2VkIl0sInJlcXVlc3RBdHRlc3RhdGlvbiI6ZmFsc2V9LCJjbGllbnRJbmZvIjp7Im5hbWUiOiJ0cmFuc2NyaXB0LXRlc3QiLCJ2ZXJzaW9uIjoiMC4zLjAifX19Cg==",
 			"stream": "stdin"
 		},
 		{

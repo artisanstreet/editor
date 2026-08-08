@@ -287,10 +287,9 @@ describe("Barekey docs shell reset", () => {
 		);
 		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.svelte");
 
-		expect(work_session).toContain(
-			"const can_collapse = $derived(!is_working && has_visible_details);",
-		);
-		expect(work_session).toContain("{#if can_collapse}");
+		expect(work_session).toContain("work_session_disclosure({");
+		expect(work_session).toContain("{#if disclosure.can_collapse}");
+		expect(work_session).toContain("disclosure.details_mounted && details !== undefined");
 		expect(work_session).toContain("<button");
 		expect(work_session).toContain("{:else if !is_working}");
 		expect(work_session).toContain('role="status"');
@@ -322,7 +321,7 @@ describe("Barekey docs shell reset", () => {
 		expect(work_session).toContain("bind:clientWidth={label_width}");
 		expect(work_session).toContain("@keyframes settle-underline-grow");
 		expect(work_session).toContain('is_failed ? "text-destructive" : ""');
-		expect(work_session).toContain("hidden={!is_working && !has_visible_details}");
+		expect(work_session).toContain("hidden={disclosure.details_hidden}");
 		expect(workspace).toContain("has_live_reply={conversation_reply_is_live(block.details)}");
 		/**
 		 * The engine came back as a word, never as a mark. Before anything has
@@ -446,6 +445,11 @@ describe("Barekey docs shell reset", () => {
 		const layout = Read("modules/frontend/src/routes/+layout.svelte");
 		expect(layout).toContain("client.SubscribeThreadList");
 		expect(layout).toContain("ApplyRootThreadListUpdate");
+		/** Only the current hydration applies its successful read before opening the shell. */
+		expect(layout).toContain("const [, , next_threads] = yield* Effect.all(");
+		expect(layout).toContain("if (!IsCurrentForgeHydration(forge_gate, generation)) return;");
+		expect(layout).toContain("threads: next_threads,");
+		expect(layout).toContain('type: "snapshot" as const,');
 		expect(menu).not.toContain("ArtisanClient");
 		/** The root page is the draft: the composer creates the thread on first send. */
 		expect(existsSync(resolve("modules/frontend/src/routes/threads/+page.svelte"))).toBe(false);

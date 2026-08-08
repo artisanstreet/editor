@@ -54,8 +54,6 @@ const MapSessionFailure = <A, R>(
 						return `Codex app-server closed: ${error.reason}`;
 					case "CodexAppServerConfigurationError":
 						return `Invalid Codex app-server option ${error.option}: ${error.value}`;
-					case "CodexAppServerNotificationOverflowError":
-						return `Codex notification ingress exceeded capacity ${error.capacity}`;
 					case "CodexAppServerProtocolError":
 					case "CodexAppServerSerializationError":
 						return error.message;

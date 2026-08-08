@@ -153,3 +153,179 @@ export const FormatRecentThreadTime = (value: string, now_ms: number) => {
 	if (elapsed_seconds < 172_800) return "Yesterday";
 	return `${Math.floor(elapsed_seconds / 86_400)} days ago`;
 };
+
+/** Built-in settled statuses that no longer need the always-visible rail group. */
+export const RestingThreadStatuses: ReadonlySet<string> = new Set(["Complete", "Idle"]);
+
+/** Waiting and attention states remain pinned because they still require the user. */
+export const ThreadIsWorking = (thread: ThreadListItem) =>
+	!RestingThreadStatuses.has(thread.live_status);
+
+/**
+ * The status a run reports after failing — it means the run errored, not that
+ * the thread is waiting on you.
+ *
+ * Two strings, because it is sticky: `live_status` is only rewritten by the
+ * next refinement trigger on that thread, so rows that failed under the old
+ * wording keep it until something runs there again.
+ */
+export const FailedStatus = "Failed to complete";
+const LegacyFailedStatus = "Needs attention";
+
+export const IsFailedStatus = (status: string) =>
+	status === FailedStatus || status === LegacyFailedStatus;
+
+export const ThreadFailed = (thread: ThreadListItem) => IsFailedStatus(thread.live_status);
+
+/** A running or waiting Forge-owned run cannot be dismissed by local rail state. */
+export const ThreadHasActiveWork = (thread: ThreadListItem) =>
+	ThreadIsWorking(thread) && !ThreadFailed(thread);
+
+/**
+ * The non-resting threads, freshest first. Work, waits, and attention states
+ * should not need summoning, so the rail lifts them into its pinned group.
+ */
+export const WorkingThreads = (threads: ReadonlyArray<ThreadListItem>) =>
+	SortRecentThreads(threads).filter(ThreadIsWorking);
+
+export type ThreadRailDisplayEntry = {
+	readonly render_id: string;
+	readonly thread: ThreadListItem;
+};
+
+/**
+ * Gives the development stress controls stable render identities without
+ * inventing navigable thread identities or mutating the authoritative list.
+ */
+export const ThreadRailDisplayEntries = (
+	threads: ReadonlyArray<ThreadListItem>,
+	multiplier: number,
+): ReadonlyArray<ThreadRailDisplayEntry> => {
+	const copy_count = Number.isFinite(multiplier)
+		? Math.min(20, Math.max(1, Math.trunc(multiplier)))
+		: 1;
+
+	return threads.flatMap((thread) =>
+		Array.from({ length: copy_count }, (_, copy_index) => ({
+			render_id: `${thread.thread_id}:${copy_index}`,
+			thread,
+		})),
+	);
+};
+
+/**
+ * Unread threads first, each group still freshest-first.
+ *
+ * Partitioned rather than weighted into the sort key: a thread that settles
+ * while the list is on screen should cross the whole list to the top, and a
+ * comparator that mixed unread-ness with recency would only nudge it. Same
+ * shape the model picker uses to float favourites above their engine.
+ */
+export const SortUnreadFirst = (
+	threads: ReadonlyArray<ThreadListItem>,
+	unread: ReadonlySet<string>,
+) => {
+	const ordered = SortRecentThreads(threads);
+	const pending = ordered.filter((thread) => unread.has(thread.thread_id));
+	return pending.length === 0
+		? ordered
+		: [...pending, ...ordered.filter((thread) => !unread.has(thread.thread_id))];
+};
+
+/**
+ * The threads the reader has already dealt with, keyed by the activity stamp
+ * each carried when that happened — sent down to the list by hand, or simply
+ * opened and read.
+ *
+ * Stamped rather than flagged so the dismissal expires by itself: new activity
+ * on a settled thread is a new reason to look at it, and it should climb back
+ * into the pinned group without the reader having to undo anything. It is also
+ * why this is a map and not a set — the identity alone would mute the thread
+ * for good.
+ */
+export type SettledThreadStamps = ReadonlyMap<string, string>;
+
+export const NoSettledThreads: SettledThreadStamps = new Map<string, string>();
+
+export const ThreadSettled = (thread: ThreadListItem, settled: SettledThreadStamps) =>
+	settled.get(thread.thread_id) === thread.last_activity_at;
+
+/**
+ * The stamped entry that settles one thread until it next has something to say.
+ *
+ * Returns the map it was handed when that stamp is already recorded: the open
+ * thread re-settles itself against every activity it reports, and minting a
+ * fresh map each time would rebuild both rail groups for a decision that has
+ * not changed.
+ */
+export const SettleThreadStamp = (
+	settled: SettledThreadStamps,
+	thread_id: string,
+	last_activity_at: string,
+): SettledThreadStamps =>
+	settled.get(thread_id) === last_activity_at
+		? settled
+		: new Map(settled).set(thread_id, last_activity_at);
+
+export const SettleThread = (
+	settled: SettledThreadStamps,
+	thread: ThreadListItem,
+): SettledThreadStamps =>
+	ThreadHasActiveWork(thread)
+		? settled
+		: SettleThreadStamp(settled, thread.thread_id, thread.last_activity_at);
+
+/**
+ * What the pinned group holds: anything running, plus anything that finished
+ * and has not been opened since — minus whatever the reader has settled.
+ *
+ * A thread does not drop to the list the moment its run ends — that is exactly
+ * when the reader has a reason to look at it, and a row that leaves the pinned
+ * group on completion is a row that vanishes from where the eye was resting.
+ * It stays until it has been read, and anything it says afterwards puts it
+ * back by outrunning the stamp that settled it.
+ */
+export const PinnedThreads = (
+	threads: ReadonlyArray<ThreadListItem>,
+	unread: ReadonlySet<string>,
+	settled: SettledThreadStamps = NoSettledThreads,
+) =>
+	SortRecentThreads(threads).filter(
+		(thread) =>
+			/** A local read/dismissal stamp never outranks Forge's live run authority. */
+			ThreadHasActiveWork(thread) ||
+			(!ThreadSettled(thread, settled) &&
+				(unread.has(thread.thread_id) || ThreadFailed(thread))),
+	);
+
+/** Everything the pinned group is not already showing. */
+export const SettledThreads = (
+	threads: ReadonlyArray<ThreadListItem>,
+	unread: ReadonlySet<string>,
+	settled: SettledThreadStamps = NoSettledThreads,
+) =>
+	SortRecentThreads(threads).filter(
+		(thread) =>
+			!ThreadHasActiveWork(thread) &&
+			(ThreadSettled(thread, settled) ||
+				(!unread.has(thread.thread_id) && !ThreadFailed(thread))),
+	);
+
+/**
+ * The status a thread reports while it is stopped on a question.
+ *
+ * Matched as a value rather than inferred, so the rail lights up the moment the
+ * projection emits it: `ThreadMetadataRefiner` derives `live_status` from run
+ * triggers only — started, completed, failed — and has no trigger for a run
+ * that paused to ask. Until one exists this is unreachable, and the shape of
+ * the fix is a trigger there, not a guess here.
+ */
+export const AwaitingAnswerStatus = "Waiting for answer";
+
+export const ThreadIsAwaitingAnswer = (thread: ThreadListItem) =>
+	thread.live_status === AwaitingAnswerStatus;
+
+/** The status a run reports after finishing cleanly. */
+export const CompleteStatus = "Complete";
+
+export const ThreadCompleted = (thread: ThreadListItem) => thread.live_status === CompleteStatus;

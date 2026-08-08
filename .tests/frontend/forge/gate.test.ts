@@ -10,6 +10,7 @@ import {
 	ForgeShellIsBlocked,
 	ForgeShellIsMounted,
 	InitialForgeGateModel,
+	IsCurrentForgeHydration,
 	ObserveForgeConnection,
 	PresentForgeGate,
 	PresentForgePairingGuidance,
@@ -61,6 +62,8 @@ describe("ForgeGate", () => {
 		const first = BeginForgeHydration(InitialForgeGateModel);
 		const second = BeginForgeHydration(first);
 
+		expect(IsCurrentForgeHydration(second, 1)).toBe(false);
+		expect(IsCurrentForgeHydration(second, 2)).toBe(true);
 		expect(CompleteForgeHydration(second, 1)).toBe(second);
 		expect(FailForgeHydration(second, 1, "threads", ConnectionError)).toBe(second);
 		expect(CompleteForgeHydration(second, 2)).toMatchObject({

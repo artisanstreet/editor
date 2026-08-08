@@ -245,6 +245,24 @@ function handle_request(request: FixtureRecord) {
 			return;
 		}
 
+		if (process.env.FAKE_APP_SERVER_SCENARIO === "startup-status-flood") {
+			for (let index = 0; index < 1_200; index += 1) {
+				write_frame({
+					method:
+						index % 3 === 0
+							? "account/rateLimits/updated"
+							: index % 3 === 1
+								? "mcpServer/startupStatus/updated"
+								: "remoteControl/status/changed",
+					params: { index },
+				});
+			}
+			write_frame({
+				method: "turn/completed",
+				params: { threadId: "thread-1", turn: make_turn("turn-1", "completed") },
+			});
+		}
+
 		const frame = {
 			id: request.id,
 			result: {
@@ -757,6 +775,29 @@ function handle_request(request: FixtureRecord) {
 		return;
 	}
 
+	if (request.method === "scenario/lossyThenCriticalNotificationFlood") {
+		const count = request.params.count;
+
+		for (let index = 0; index < count; index += 1) {
+			write_frame({
+				method: "item/agentMessage/delta",
+				params: {
+					delta: `delta-${index}`,
+					itemId: "message-1",
+					threadId: "thread-1",
+					turnId: "turn-1",
+				},
+			});
+		}
+		write_frame({
+			method: "turn/completed",
+			params: { threadId: "thread-1", turn: make_turn("turn-1", "completed") },
+		});
+		respond(request.id, { count });
+
+		return;
+	}
+
 	if (request.method === "scenario/malformedThenNotificationFlood") {
 		process.stdout.write("not json\n");
 		const count = request.params.count;
@@ -837,6 +878,14 @@ function handle_request(request: FixtureRecord) {
 	if (request.method === "scenario/inspect") {
 		respond(request.id, {
 			received: received.map((entry) => ({ id: entry.id, method: entry.method })),
+		});
+
+		return;
+	}
+
+	if (request.method === "scenario/inspectInitialize") {
+		respond(request.id, {
+			initialize: received.find((entry) => entry.method === "initialize"),
 		});
 
 		return;

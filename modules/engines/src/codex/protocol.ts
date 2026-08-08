@@ -9,6 +9,19 @@ export const CodexTransportMetadata = {
 	transport: "stdio-jsonl",
 } as const;
 
+/**
+ * Notifications Artisan deliberately does not project into a run. Opting out
+ * at the native boundary prevents app-scoped MCP and remote-control churn from
+ * occupying the bounded run transport before a consumer is attached.
+ *
+ * @since 0.7.0
+ */
+export const codex_opt_out_notification_methods = [
+	"account/rateLimits/updated",
+	"mcpServer/startupStatus/updated",
+	"remoteControl/status/changed",
+] as const;
+
 /** Describes the JSON-RPC request identifier used by Codex app-server. @since 0.1.0 */
 export const CodexRequestId = Schema.Union([Schema.Int, Schema.String]);
 
@@ -225,14 +238,7 @@ export class CodexAppServerRequestTimeoutError extends Data.TaggedError(
 
 /** Reports a session closing before a pending request received its response. @since 0.3.0 */
 export class CodexAppServerClosedError extends Data.TaggedError("CodexAppServerClosedError")<{
-	readonly reason: "closed" | "exited" | "notification_overflow" | "reader_failed";
-}> {}
-
-/** Reports terminal lossless-notification ingress exhaustion. @since 0.3.0 */
-export class CodexAppServerNotificationOverflowError extends Data.TaggedError(
-	"CodexAppServerNotificationOverflowError",
-)<{
-	readonly capacity: number;
+	readonly reason: "closed" | "exited" | "reader_failed";
 }> {}
 
 /** Reports an outbound value that cannot be represented faithfully as JSON. @since 0.3.0 */
@@ -313,6 +319,7 @@ export function make_codex_initialize_request(
 		params: {
 			capabilities: {
 				experimentalApi: false,
+				optOutNotificationMethods: [...codex_opt_out_notification_methods],
 				requestAttestation: false,
 			},
 			clientInfo: {

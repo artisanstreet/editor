@@ -1,6 +1,5 @@
 import { Effect, Option, Ref } from "effect";
 
-import { client_error } from "../client-common";
 import {
 	SubscriptionContext,
 	SubscriptionErrorReporter,
@@ -16,11 +15,6 @@ export const make_client_subscription_coordinator = Effect.gen(function* () {
 	const { make_id, make_trace } = yield* SubscriptionIdentity;
 	const { send_current } = yield* SubscriptionProtocol;
 	const { publish_error } = yield* SubscriptionErrorReporter;
-	const overflow_error = client_error(
-		"event_overflow",
-		"The frontend event queue overflowed before the event was applied.",
-		new Error("event delivery queue overflow"),
-	);
 	const state = yield* Ref.make<SubscriptionState>({
 		disposed: false,
 		event_observers: new Map(),
@@ -36,7 +30,6 @@ export const make_client_subscription_coordinator = Effect.gen(function* () {
 			event_capacity,
 			make_id,
 			make_trace,
-			overflow_error,
 			publish_error,
 			send_current,
 			state,
