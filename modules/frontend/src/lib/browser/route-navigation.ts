@@ -1,34 +1,36 @@
-import { goto, type GotoOptions } from "$app/navigation";
-import { Context, Data, Effect, Layer } from "effect";
+import { Context, Data, Effect } from "effect";
 
 /** A SvelteKit navigation could not be completed. */
 export class RouteNavigationFailure extends Data.TaggedError("RouteNavigationFailure")<{
 	readonly cause: unknown;
 }> {}
 
-/** Browser navigation is a capability so routed components only describe it. */
+/**
+ * The navigation options the app actually asks for, declared here rather than
+ * imported from `$app/navigation`. Each is a `goto` option the adapter passes
+ * straight through; naming them is what keeps this module free of SvelteKit
+ * and so importable from a test.
+ */
+export interface RouteNavigationOptions {
+	readonly keepFocus?: boolean;
+	readonly noScroll?: boolean;
+	readonly replaceState?: boolean;
+}
+
+/**
+ * Browser navigation is a capability so routed components only describe it.
+ *
+ * The capability is declared apart from its adapter for the same reason the
+ * banner presenter is: consumers — and the tests that drive them — need the
+ * tag without `$app/navigation`, which resolves only inside a built SvelteKit
+ * app and so cannot be reached from the workspace test runner.
+ */
 export class RouteNavigation extends Context.Service<
 	RouteNavigation,
 	{
 		readonly Navigate: (
 			path: string | URL,
-			options?: GotoOptions,
+			options?: RouteNavigationOptions,
 		) => Effect.Effect<void, RouteNavigationFailure>;
 	}
 >()("Artisan/RouteNavigation") {}
-
-/** The only browser adapter for SvelteKit's imperative `goto` API. */
-export const RouteNavigationLive = Layer.effect(
-	RouteNavigation,
-	Effect.gen(function* () {
-		const Navigate = (path: string | URL, options?: GotoOptions) =>
-			Effect.gen(function* () {
-				yield* Effect.tryPromise({
-					try: () => goto(path, options),
-					catch: (cause) => new RouteNavigationFailure({ cause }),
-				});
-			});
-
-		return RouteNavigation.of({ Navigate });
-	}),
-);

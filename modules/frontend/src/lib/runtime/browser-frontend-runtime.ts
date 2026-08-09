@@ -2,7 +2,7 @@ import { Layer } from "effect";
 
 import { BannerReporterNoopLive, BannerServiceLive } from "../banner/service";
 import { SonnerBannerPresenterLive } from "../banner/sonner-presenter";
-import { RouteNavigationLive } from "../browser/route-navigation";
+import { RouteNavigationLive } from "../browser/route-navigation-live";
 import { BrowserCodeMirrorAdapter } from "../editor/codemirror-adapter";
 import { MakeEditorLayer } from "../editor/service";
 import { ComposerDraftStoreLive } from "../composer/draft-store";

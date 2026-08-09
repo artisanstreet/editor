@@ -14,15 +14,33 @@ const RouteConsumers = [
 describe("route navigation", () => {
 	it("centralizes SvelteKit navigation behind a typed browser service", async () => {
 		const source = await ReadSource("modules/frontend/src/lib/browser/route-navigation.ts");
+		const adapter = await ReadSource(
+			"modules/frontend/src/lib/browser/route-navigation-live.ts",
+		);
 		const runtime = await ReadSource(
 			"modules/frontend/src/lib/runtime/browser-frontend-runtime.ts",
 		);
 
 		expect(source).toContain("Context.Service<");
 		expect(source).toContain('Data.TaggedError("RouteNavigationFailure")');
-		expect(source).toContain("Effect.gen(function* ()");
-		expect(source).toContain("Effect.tryPromise({");
+		expect(adapter).toContain("Effect.gen(function* ()");
+		expect(adapter).toContain("Effect.tryPromise({");
 		expect(runtime).toContain("RouteNavigationLive,");
+	});
+
+	/**
+	 * The capability has to stay importable outside a built SvelteKit app: the
+	 * notification service depends on it, and its test provides a double.
+	 */
+	it("keeps the capability free of SvelteKit so tests can provide a double", async () => {
+		const source = await ReadSource("modules/frontend/src/lib/browser/route-navigation.ts");
+		const adapter = await ReadSource(
+			"modules/frontend/src/lib/browser/route-navigation-live.ts",
+		);
+
+		expect(source).not.toMatch(/^\s*import\b.*\$app\/navigation/mu);
+		expect(source).toContain("interface RouteNavigationOptions");
+		expect(adapter).toContain('import { goto } from "$app/navigation"');
 	});
 
 	it("keeps routed components on the capability instead of importing goto", async () => {
