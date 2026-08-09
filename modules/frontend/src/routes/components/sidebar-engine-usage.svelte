@@ -17,6 +17,10 @@
 	} from "$lib/components/ui/tooltip";
 	import { EngineDisplayName, EngineMarkClass, EngineMarkFor } from "$lib/engine/presentation";
 	import {
+		usage_meter_segments,
+		usage_segment_fraction,
+	} from "$lib/identity/usage-meter";
+	import {
 		MotionDuration,
 		MotionEasing,
 		RunUpFrom,
@@ -36,7 +40,6 @@
 		checked_at_ms,
 		checked_label,
 		engine_ids,
-		is_refreshing,
 		onrefresh,
 		refreshing_engines,
 		usage_state,
@@ -51,8 +54,8 @@
 		 * row from the first frame and fills in place.
 		 */
 		readonly engine_ids: ReadonlyArray<string>;
-		readonly is_refreshing: boolean;
-		readonly onrefresh: Effect.Effect<void>;
+		/** Called from the row's direct SER event site with that provider's id. */
+		readonly onrefresh: (engine_id: string) => Effect.Effect<void>;
 		readonly refreshing_engines: ReadonlySet<string>;
 		readonly usage_state: SidebarUsageState;
 		/**
@@ -69,12 +72,8 @@
 		unknown: "Usage",
 		weekly: "Weekly",
 	};
-	const usage_segments = 14;
 	const WindowLabel = (usage_window: EngineUsageWindow): string =>
 		usage_window.label ?? window_kind_labels[usage_window.kind];
-	const LitFraction = (percent_used: number): number =>
-		Math.floor((Math.min(100, Math.max(0, percent_used)) / 100) * usage_segments) /
-		usage_segments;
 	/**
 	 * Deduplicated by id before the keyed eachs below. The protocol does not
 	 * forbid a provider reporting the same bucket twice — Claude's CLI repeats
@@ -172,7 +171,7 @@
 					</span>
 					<span
 						class="t-usage-meter h-2 w-18 min-w-18 shrink-0"
-						style={`--meter-accent: ${accent}; --meter-lit: ${LitFraction(usage_entry.percent_used) * 100}%; --meter-ticks: ${usage_segments}`}
+						style={`--meter-accent: ${accent}; --meter-lit: ${usage_segment_fraction(usage_entry.percent_used) * 100}%; --meter-ticks: ${usage_meter_segments}`}
 					></span>
 				</span>
 			{/snippet}
@@ -240,8 +239,8 @@
 									type="button"
 									class="t-checked shrink-0 text-xs outline-none focus-visible:ring-2 focus-visible:ring-ring/50"
 									data-loading={engine_refreshing}
-									disabled={is_refreshing}
-									onclick={yield* onrefresh}
+									disabled={engine_refreshing}
+									onclick={yield* onrefresh(engine.engine_id)}
 								>
 									<span class="t-checked-reading whitespace-nowrap text-muted-foreground">{checked_label}</span>
 									<span class="t-checked-action whitespace-nowrap text-foreground" aria-hidden="true">Refresh</span>

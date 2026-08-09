@@ -1,6 +1,6 @@
 # Active Branch Handoff
 
-Last updated: 2026-08-08. Branch continuity only. Durable verified status is in
+Last updated: 2026-08-09. Branch continuity only. Durable verified status is in
 [`docs/status/backend-completion-matrix.md`](../docs/status/backend-completion-matrix.md).
 
 ## Working State
@@ -53,6 +53,9 @@ Last updated: 2026-08-08. Branch continuity only. Durable verified status is in
   working and ordinary rows separate bounded scroll regions with a conditional
   `gap-4`, and exposes DEV-only ×20 stress sliders. It remains uncommitted with
   the protected frontend layout slice.
+- Codex 0.145.0 usage is schema-correct. Its generation-owned meter/row-refresh
+  repair passes 13 tests, TypeScript, lint/format, SER build, and review; full
+  validation reached 7 unrelated dirty frontend source assertions after both builds.
 - The 2026-08-08 regression repair makes Forge-owned active work outrank local
   rail settlement, applies only the current hydration's thread snapshot before
   opening the shell, lets active disclosures close without dropping their live

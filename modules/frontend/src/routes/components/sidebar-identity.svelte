@@ -23,6 +23,7 @@
 		EngineUsageCacheBrowserLive,
 		engine_usage_refresh_is_due,
 	} from "$lib/identity/usage-cache";
+	import { MakeEngineUsageRefreshController } from "$lib/identity/usage-refresh-controller";
 
 	const client = yield* ArtisanClient;
 	const usage_cache = yield* EngineUsageCache.pipe(Effect.provide(EngineUsageCacheBrowserLive));
@@ -52,8 +53,16 @@
 		identity !== undefined && profile_name !== undefined && identity.hostname !== profile_name,
 	);
 	/** Engines with a fetch in flight; each header shows its own arc while listed here. */
-	let refreshing_engines = $state<ReadonlySet<string>>(new Set());
-	const is_refreshing = $derived(refreshing_engines.size > 0);
+	const refresh_controller = yield* MakeEngineUsageRefreshController;
+	let refreshing_engines = $state.raw<ReadonlySet<string>>(yield* refresh_controller.Current);
+	yield* refresh_controller.Changes.pipe(
+		Stream.runForEach((next) =>
+			Effect.gen(function* () {
+				refreshing_engines = next;
+			}),
+		),
+		Effect.forkScoped,
+	);
 
 	const defaults_controller = yield* SessionDefaultsController;
 	let disabled_engine_ids = $state.raw<ReadonlyArray<string>>(
@@ -105,26 +114,20 @@
 				Effect.gen(function* () {
 				}),
 			),
-			Effect.ensuring(
-				Effect.gen(function* () {
-					const remaining = new Set(refreshing_engines);
-					remaining.delete(engine_id);
-					refreshing_engines = remaining;
-					if (remaining.size > 0) return;
-					/** The fan-out has drained: settle the cache, or the error state when nothing ever loaded. */
-					if (usage_state.status === "loaded") {
-						yield* usage_cache.Save(usage_state.snapshot).pipe(
-							Effect.catch(() =>
-								Effect.gen(function* () {
-								}),
-							),
-						);
-					} else if (usage_state.status === "loading") {
-						usage_state = { status: "error" };
-					}
-				}),
-			),
 		);
+	/** Runs once after the last overlapping provider refresh has released its claim. */
+	const SettleUsage = Effect.gen(function* () {
+		if (usage_state.status === "loaded") {
+			yield* usage_cache.Save(usage_state.snapshot).pipe(
+				Effect.catch(() =>
+					Effect.gen(function* () {
+					}),
+				),
+			);
+		} else if (usage_state.status === "loading") {
+			usage_state = { status: "error" };
+		}
+	});
 
 	/**
 	 * Fans one fetch out per engine; the manual control, the mount prefetch,
@@ -134,21 +137,19 @@
 	 * backend-cached reports. Results merge in as each provider answers rather
 	 * than waiting for the slowest one.
 	 */
-	const RefreshUsage = (force: boolean) =>
+	const RefreshUsage = (force: boolean, requested_engine_ids = usage_engine_ids) =>
 		Effect.gen(function* () {
-		if (usage_state.status === "loading" || is_refreshing) return;
+		if (requested_engine_ids.every((engine_id) => refreshing_engines.has(engine_id))) return;
 
-		refreshing_engines = new Set(usage_engine_ids);
 		if (usage_state.status !== "loaded") usage_state = { status: "loading" };
-		yield* Effect.forEach(
-			usage_engine_ids,
-			(engine_id) =>
-				Effect.gen(function* () {
-					yield* FetchEngineUsage(engine_id, force);
-				}),
-			{ concurrency: "unbounded", discard: true },
+		yield* refresh_controller.Refresh(
+			requested_engine_ids,
+			(engine_id) => FetchEngineUsage(engine_id, force),
+			SettleUsage,
 		);
 		});
+	/** A row refresh is deliberately scoped to its provider; background freshness still fans out. */
+	const RefreshEngineUsage = (engine_id: string) => RefreshUsage(true, [engine_id]);
 
 	const RequestUsage = () =>
 		Effect.gen(function* () {
@@ -273,8 +274,7 @@
 			{checked_label}
 			engine_ids={usage_engine_ids}
 			hidden_engine_ids={disabled_engine_ids}
-			{is_refreshing}
-			onrefresh={RefreshUsage(true)}
+			onrefresh={RefreshEngineUsage}
 			{refreshing_engines}
 			{usage_state}
 		/>

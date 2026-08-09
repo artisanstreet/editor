@@ -11,13 +11,16 @@ const read = (path: string) => readFileSync(resolve(path), "utf8");
 describe("sidebar identity and thread rail regressions", () => {
 	it("fans provider usage reads out through Effect concurrency without a component queue", () => {
 		const identity = read("modules/frontend/src/routes/components/sidebar-identity.svelte");
+		const refresh_controller = read(
+			"modules/frontend/src/lib/identity/usage-refresh-controller.ts",
+		);
 
 		expect(Effect.forkScoped).toBeTypeOf("function");
-		expect(identity).toContain("Effect.forEach(");
-		expect(identity).toContain('{ concurrency: "unbounded", discard: true }');
-		expect(identity).toContain("FetchEngineUsage(engine_id, force)");
-		expect(identity).not.toContain("Queue.unbounded");
-		expect(identity).not.toMatch(/\bEffect\.fork\(/);
+		expect(identity).toContain("refresh_controller.Refresh(");
+		expect(refresh_controller).toContain("Effect.forEach(");
+		expect(refresh_controller).toContain('{ concurrency: "unbounded", discard: true }');
+		expect(refresh_controller).not.toContain("Queue.unbounded");
+		expect(refresh_controller).not.toMatch(/\bEffect\.fork\(/);
 	});
 
 	/**
