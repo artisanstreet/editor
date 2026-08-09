@@ -106,6 +106,9 @@ const RunVersionProbe = (
 	Effect.gen(function* () {
 		const handle = yield* factory.Spawn(spawn_input);
 
+		/** A version probe is one-shot; unlike an app-server session, it must observe EOF. */
+		yield* handle.EndInput;
+
 		return yield* Effect.all(
 			[
 				ReadBoundedStream(handle.Stdout, "stdout", 64 * 1_024),

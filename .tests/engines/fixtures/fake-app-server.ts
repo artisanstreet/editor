@@ -76,41 +76,51 @@ if (process.argv.includes("--version")) {
 	const version_scenarios = [process.env.FAKE_APP_SERVER_SCENARIO].filter(
 		(scenario): scenario is string => scenario !== undefined,
 	);
+	const waits_for_stdin_eof = version_scenarios.includes("version-stdin-eof");
 
-	if (version_scenarios.includes("version-fragmented")) {
-		process.stdout.write("codex-cli 0.");
-		await new Promise((resolve) => setImmediate(resolve));
-		process.stdout.write("142.5\n");
+	if (waits_for_stdin_eof) {
+		process.stdin.once("end", () => process.stdout.write("codex-cli 0.142.5\n"));
+		process.stdin.resume();
+	} else {
+		if (version_scenarios.includes("version-fragmented")) {
+			process.stdout.write("codex-cli 0.");
+			await new Promise((resolve) => setImmediate(resolve));
+			process.stdout.write("142.5\n");
+			process.exit(0);
+		}
+
+		if (version_scenarios.includes("version-newer")) {
+			process.stdout.write("codex-cli 0.146.0-alpha.3.1\n");
+			process.exit(0);
+		}
+
+		if (version_scenarios.some((scenario) => scenario.startsWith("continuation"))) {
+			process.stdout.write("codex-cli 0.145.0\n");
+			process.exit(0);
+		}
+
+		if (version_scenarios.includes("version-older")) {
+			process.stdout.write("codex-cli 0.142.4\n");
+			process.exit(0);
+		}
+
+		if (version_scenarios.includes("version-stdout-overflow")) {
+			await new Promise((resolve) =>
+				process.stdout.write("x".repeat(64 * 1_024 + 1), resolve),
+			);
+			process.exit(0);
+		}
+
+		if (version_scenarios.includes("version-stderr-overflow")) {
+			await new Promise((resolve) =>
+				process.stderr.write("x".repeat(64 * 1_024 + 1), resolve),
+			);
+			process.exit(0);
+		}
+
+		process.stdout.write("codex-cli 0.142.5\n");
 		process.exit(0);
 	}
-
-	if (version_scenarios.includes("version-newer")) {
-		process.stdout.write("codex-cli 0.146.0-alpha.3.1\n");
-		process.exit(0);
-	}
-
-	if (version_scenarios.some((scenario) => scenario.startsWith("continuation"))) {
-		process.stdout.write("codex-cli 0.145.0\n");
-		process.exit(0);
-	}
-
-	if (version_scenarios.includes("version-older")) {
-		process.stdout.write("codex-cli 0.142.4\n");
-		process.exit(0);
-	}
-
-	if (version_scenarios.includes("version-stdout-overflow")) {
-		await new Promise((resolve) => process.stdout.write("x".repeat(64 * 1_024 + 1), resolve));
-		process.exit(0);
-	}
-
-	if (version_scenarios.includes("version-stderr-overflow")) {
-		await new Promise((resolve) => process.stderr.write("x".repeat(64 * 1_024 + 1), resolve));
-		process.exit(0);
-	}
-
-	process.stdout.write("codex-cli 0.142.5\n");
-	process.exit(0);
 }
 
 if (process.env.FAKE_APP_SERVER_PID_FILE) {

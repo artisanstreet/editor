@@ -23,7 +23,9 @@ afterEach(() => {
 	process.env.FAKE_APP_SERVER_SCENARIO = original_scenario;
 });
 
-function make_layer(options: { readonly initialize_timeout_ms?: number } = {}) {
+function make_layer(
+	options: { readonly initialize_timeout_ms?: number; readonly version_timeout_ms?: number } = {},
+) {
 	return make_codex_engine_layer({
 		...options,
 		executable: process.execPath,
@@ -79,6 +81,20 @@ describe("Codex engine probe", () => {
 
 				return yield* engine.Probe({});
 			}).pipe(Effect.provide(make_layer())),
+		);
+
+		expect(probe.version).toBe("0.142.5");
+	});
+
+	it("closes version-probe stdin before waiting for its output", async () => {
+		process.env.FAKE_APP_SERVER_SCENARIO = "version-stdin-eof";
+
+		const probe = await Effect.runPromise(
+			Effect.gen(function* () {
+				const engine = yield* CodexEngine;
+
+				return yield* engine.Probe({});
+			}).pipe(Effect.provide(make_layer({ version_timeout_ms: 4_000 }))),
 		);
 
 		expect(probe.version).toBe("0.142.5");
