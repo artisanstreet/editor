@@ -4,7 +4,7 @@
 	import "$lib/styles/artisan-compatibility.css";
 
 	import { page } from "$app/state";
-	import type { ThreadListItem } from "@artisan/protocol";
+	import type { EventEnvelope, ThreadListItem } from "@artisan/protocol";
 	import {
 		ArtisanClient,
 		type ArtisanConnectionState,
@@ -29,6 +29,8 @@
 	import { RunBrowserDom } from "$lib/browser/dom";
 	import { RunAuthoritativeSubscription } from "$lib/conversation/subscription";
 	import { LogTransportDiagnostic } from "$lib/forge/diagnostics";
+	import { IsNotifiableEvent } from "$lib/notifications/events";
+	import { SystemNotifications } from "$lib/notifications/service";
 	import {
 		DraftThreadController,
 		type DraftThreadState,
@@ -36,6 +38,7 @@
 	import {
 		ApplyRootThreadListUpdate,
 		ResolveThreadRoute,
+		ThreadRoutePathFor,
 	} from "$lib/root/thread-navigation";
 	import { ForgeHttpUrl } from "$lib/runtime/forge-endpoint";
 	import { prose_width, shader_enabled } from "$lib/appearance-config";
@@ -223,6 +226,51 @@
 		Stream.runForEach(LogTransportDiagnostic),
 		Effect.forkScoped,
 	);
+
+	/**
+	 * Host notifications belong to the shell, not to the thread route: the
+	 * entire point of one is the thread the reader is *not* looking at. Both
+	 * surfaces run this same subscription — the desktop shell is a sandboxed
+	 * page with no IPC of its own, so it reaches the operating system's
+	 * notification centre exactly the way a paired browser tab does.
+	 */
+	const notifications = yield* SystemNotifications;
+	const NotifyForEvent = (envelope: EventEnvelope) =>
+		Effect.gen(function* () {
+			const thread = threads.find(
+				(candidate) => candidate.thread_id === envelope.thread_id,
+			);
+			const focused = yield* RunBrowserDom(
+				() => document.hasFocus() && document.visibilityState === "visible",
+			).pipe(
+				Effect.catch(() =>
+					Effect.gen(function* () {
+						return false;
+					}),
+				),
+			);
+			yield* notifications.Handle(envelope, {
+				active_thread_id: active_thread?.thread_id,
+				focused,
+				/**
+				 * A thread whose projection has not landed yet still deserves the
+				 * notification; clicking it opens the workspace rather than nothing.
+				 */
+				route_path: thread === undefined ? "/" : ThreadRoutePathFor(thread),
+				thread_title: thread?.title,
+			});
+		});
+
+	/** Nothing to resynchronize: a notification missed while the socket was down is past. */
+	const NoNotificationRecovery = Effect.gen(function* () {});
+
+	yield* RunAuthoritativeSubscription(
+		Effect.gen(function* () {
+			return client.Events.pipe(Stream.filter(IsNotifiableEvent));
+		}),
+		NotifyForEvent,
+		NoNotificationRecovery,
+	).pipe(Effect.forkScoped);
 
 	/**
 	 * The transport parks after its reconnect budget, which a Forge restart

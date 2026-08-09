@@ -52,6 +52,11 @@
 			href: "/settings/appearance",
 			label: "Appearance",
 		},
+		{
+			anchors: [{ hash: "system", label: "System" }],
+			href: "/settings/notifications",
+			label: "Notifications",
+		},
 	];
 	const engines = $derived(runtime_catalog.manifest.harnesses.map((harness) => ({
 		anchors: [

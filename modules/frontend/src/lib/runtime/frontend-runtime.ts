@@ -3,6 +3,7 @@ import { MakeSnowflakeIdLive } from "@artisan/protocol";
 import { Effect, Exit, Layer, Scope } from "effect";
 import * as KeyValueStore from "effect/unstable/persistence/KeyValueStore";
 
+import { NotificationPreferencesLive } from "../notifications/preferences";
 import { AppearancePreferencesLive } from "./appearance-preferences";
 import { ForgeEndpointStoreLive, ResolveForgeEndpoint } from "./forge-endpoint";
 import {
@@ -30,6 +31,16 @@ const ShellPresentationPreferencesRuntimeLive = Layer.provide(
  */
 const AppearancePreferencesRuntimeLive = Layer.provide(
 	AppearancePreferencesLive,
+	KeyValueStore.layerStorage(() => localStorage).pipe(RecoverKeyValueStore),
+);
+
+/**
+ * Durable for the same reason appearance is: a reader who asks to be notified
+ * has answered a permission prompt to do it, and asking again after every
+ * reload would be the worst possible way to spend that gesture.
+ */
+const NotificationPreferencesRuntimeLive = Layer.provide(
+	NotificationPreferencesLive,
 	KeyValueStore.layerStorage(() => localStorage).pipe(RecoverKeyValueStore),
 );
 
@@ -133,6 +144,7 @@ export const FrontendComponentScopeLive = Layer.effect(
 /** Production runtime composition. Fixture clients are never included here. */
 export const FrontendRuntimeLive = Layer.mergeAll(
 	AppearancePreferencesRuntimeLive,
+	NotificationPreferencesRuntimeLive,
 	ShellPresentationPreferencesRuntimeLive,
 	ArtisanClientRuntimeLive,
 	SnowflakeIdRuntimeLive,
