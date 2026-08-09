@@ -5,6 +5,27 @@ type FileChange = Extract<ConversationItem, { type: "file_change" }>;
 const is_windows_path = (path: string): boolean =>
 	/^[A-Za-z]:[\\/]/.test(path) || path.includes("\\");
 
+/** Produces an all-or-nothing diff total for the visible file rows. */
+export const aggregate_file_change_diff = (
+	files: ReadonlyArray<FileChange>,
+): FileChange["diff"] => {
+	if (files.length === 0 || !files.every((file) => file.diff.kind === "known")) {
+		return { kind: "unavailable" };
+	}
+
+	return {
+		additions: files.reduce(
+			(total, file) => total + (file.diff.kind === "known" ? file.diff.additions : 0),
+			0,
+		),
+		deletions: files.reduce(
+			(total, file) => total + (file.diff.kind === "known" ? file.diff.deletions : 0),
+			0,
+		),
+		kind: "known",
+	};
+};
+
 /** Produces the presentation identity used to collapse repeated file changes. */
 export const canonical_file_change_path = (path: string): string => {
 	if (!is_windows_path(path)) return path;
@@ -22,21 +43,7 @@ const merge_file_changes = (entries: ReadonlyArray<FileChange>): FileChange => {
 		throw new Error("Cannot merge an empty file-change group");
 	}
 
-	const diff = entries.every((entry) => entry.diff.kind === "known")
-		? {
-				additions: entries.reduce(
-					(total, entry) =>
-						total + (entry.diff.kind === "known" ? entry.diff.additions : 0),
-					0,
-				),
-				deletions: entries.reduce(
-					(total, entry) =>
-						total + (entry.diff.kind === "known" ? entry.diff.deletions : 0),
-					0,
-				),
-				kind: "known" as const,
-			}
-		: { kind: "unavailable" as const };
+	const diff = aggregate_file_change_diff(entries);
 
 	const operation =
 		latest.operation === "modified" && entries.some((entry) => entry.operation === "created")

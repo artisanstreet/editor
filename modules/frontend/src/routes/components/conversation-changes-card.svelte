@@ -5,7 +5,10 @@
 	import { WriteClipboardText } from "$lib/browser/clipboard";
 	import * as ContextMenu from "$lib/components/ui/context-menu";
 	import { format_compact_diff_count } from "$lib/conversation/diff-stat";
-	import { group_file_changes } from "$lib/conversation/file-change-groups";
+	import {
+		aggregate_file_change_diff,
+		group_file_changes,
+	} from "$lib/conversation/file-change-groups";
 	import { resolve_file_icon } from "$lib/conversation/file-icon";
 	import { changed_files_style_config } from "$lib/conversation-style-config";
 
@@ -21,6 +24,7 @@
 	} = $props();
 
 	const grouped_files = $derived(group_file_changes(files));
+	const aggregate_diff = $derived(aggregate_file_change_diff(grouped_files));
 
 	const file_count = $derived(
 		grouped_files.length > 0
@@ -77,14 +81,21 @@
 {/snippet}
 
 <section
-	class="changed-files-card flex w-full flex-col gap-4 overflow-hidden rounded-2xl p-4"
+	class="changed-files-card flex w-full flex-col gap-1.5 overflow-hidden rounded-2xl p-4"
 	class:card={$changed_files_style_config.use_card}
 	style:--changed-files-from={`var(--${$changed_files_style_config.from})`}
 	style:--changed-files-to={`var(--${$changed_files_style_config.to})`}
 >
-	<p class="font-semibold">
-		Edited {file_count} {file_count === 1 ? "file" : "files"}
-	</p>
+	<header class="flex items-center justify-between gap-4">
+		<p class="font-semibold">Edited {file_count} {file_count === 1 ? "file" : "files"}</p>
+		{#if aggregate_diff.kind === "known"}
+			{@render diff_stat(
+				aggregate_diff.additions,
+				aggregate_diff.deletions,
+				`${aggregate_diff.additions} additions, ${aggregate_diff.deletions} deletions`,
+			)}
+		{/if}
+	</header>
 
 	{#if grouped_files.length > 0}
 		<ul>
@@ -94,7 +105,7 @@
 					<ContextMenu.Root>
 						<ContextMenu.Trigger
 							data-operation={file.operation}
-							class="file-row group/file-row flex w-full items-center justify-between gap-4 px-2 py-1.5 text-left"
+							class="file-row group/file-row flex w-full items-center justify-between gap-4 py-1.5 text-left"
 						>
 							<span class="flex min-w-0 items-center gap-2">
 								<img

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import type { ConversationItem } from "@artisan/protocol";
 
 import {
+	aggregate_file_change_diff,
 	canonical_file_change_path,
 	group_file_changes,
 } from "../../modules/frontend/src/lib/conversation/file-change-groups";
@@ -82,6 +83,46 @@ describe("file-change presentation grouping", () => {
 		]);
 
 		expect(grouped[0]?.diff).toEqual({ kind: "unavailable" });
+	});
+
+	it("aggregates grouped file counts only when every visible file has known data", () => {
+		const grouped = group_file_changes([
+			file_change("file-1", "src/file.ts", "modified", {
+				additions: 2,
+				deletions: 1,
+				kind: "known",
+			}),
+			file_change("file-2", "src/file.ts", "modified", {
+				additions: 3,
+				deletions: 4,
+				kind: "known",
+			}),
+			file_change("file-3", "src/readme.md", "modified", {
+				additions: 5,
+				deletions: 0,
+				kind: "known",
+			}),
+		]);
+
+		expect(aggregate_file_change_diff(grouped)).toEqual({
+			additions: 10,
+			deletions: 5,
+			kind: "known",
+		});
+	});
+
+	it("keeps the aggregate unavailable when any visible file lacks diff data", () => {
+		expect(aggregate_file_change_diff([])).toEqual({ kind: "unavailable" });
+		expect(
+			aggregate_file_change_diff([
+				file_change("file-1", "src/file.ts", "modified", {
+					additions: 2,
+					deletions: 1,
+					kind: "known",
+				}),
+				file_change("file-2", "src/readme.md", "modified", { kind: "unavailable" }),
+			]),
+		).toEqual({ kind: "unavailable" });
 	});
 
 	it("uses the latest meaningful operation when the group does not end in a modification", () => {
