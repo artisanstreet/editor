@@ -130,7 +130,7 @@
 		}
 	`;
 
-	const AcquirePaperRays = (canvas: HTMLCanvasElement) =>
+	const AcquirePaperRays = (canvas: HTMLCanvasElement, RestorePaperRays: () => void) =>
 		Effect.gen(function* () {
 		const gl = yield* RunBrowserDom(() => canvas.getContext("webgl2", {
 			alpha: true,
@@ -143,6 +143,36 @@
 			Effect.gen(function* () {
 			for (const release of releases.reverse()) yield* release;
 			});
+		let frame_id: number | undefined;
+		let context_lost = false;
+		const context_events = yield* RunBrowserDom(() => {
+			const OnContextLost = (event: WebGLContextEvent) => {
+				/**
+				 * Chromium may retain a corrupt compositor image after GPU context loss.
+				 * Hide that image synchronously so the ordinary glass material remains,
+				 * and opt into restoration so every invalidated GL resource can be rebuilt.
+				 */
+				event["preventDefault"]();
+				context_lost = true;
+				canvas.style.visibility = "hidden";
+				if (frame_id !== undefined) {
+					cancelAnimationFrame(frame_id);
+					frame_id = undefined;
+				}
+			};
+			const OnContextRestored = () => RestorePaperRays();
+			canvas.addEventListener("webglcontextlost", OnContextLost);
+			canvas.addEventListener("webglcontextrestored", OnContextRestored);
+			return { OnContextLost, OnContextRestored };
+		});
+		releases.push(
+			Effect.gen(function* () {
+				yield* RunBrowserDom(() => {
+					canvas.removeEventListener("webglcontextlost", context_events.OnContextLost);
+					canvas.removeEventListener("webglcontextrestored", context_events.OnContextRestored);
+				});
+			}),
+		);
 
 		const CompileShader = (type: number, source: string) =>
 			Effect.gen(function* () {
@@ -270,11 +300,10 @@
 		);
 		releases.push(unsubscribe);
 
-		let frame_id: number | undefined;
 		const reduced_motion = yield* RunBrowserDom(() => matchMedia("(prefers-reduced-motion: reduce)").matches);
 		let document_visible = yield* RunBrowserDom(() => !document.hidden);
 		let canvas_visible = false;
-		const CanRender = () => document_visible && canvas_visible;
+		const CanRender = () => document_visible && canvas_visible && !context_lost;
 		const observer = yield* RunBrowserDom(() => {
 			const OnVisibilityChange = () => {
 				document_visible = !document.hidden;
@@ -322,7 +351,8 @@
 			});
 		const Render = ({ immediate, now }: { readonly immediate: boolean; readonly now: number }) =>
 			Effect.gen(function* () {
-			if (!CanRender()) return;
+			const context_is_lost = yield* RunBrowserDom(() => gl.isContextLost());
+			if (!CanRender() || context_is_lost) return;
 			const next_config = pending_config;
 			if (next_config !== undefined) {
 				pending_config = undefined;
@@ -354,6 +384,7 @@
 				gl.clearColor(0, 0, 0, 0);
 				gl.clear(gl.COLOR_BUFFER_BIT);
 				gl.drawArrays(gl.TRIANGLES, 0, 6);
+				canvas.style.visibility = "";
 				last_animation_frame = now;
 			});
 			yield* RequestAnimationFrame();
@@ -373,14 +404,22 @@
 
 	const RunPaperRays = (canvas: HTMLCanvasElement) =>
 		Effect.gen(function* () {
-			yield* Effect.acquireRelease(
-				AcquirePaperRays(canvas),
-				(release) =>
+			const restorations = yield* Queue.sliding<void>(1);
+			const RestorePaperRays = () => Queue.offerUnsafe(restorations, undefined);
+			while (true) {
+				yield* Effect.scoped(
 					Effect.gen(function* () {
-						if (release !== undefined) yield* release;
+						yield* Effect.acquireRelease(
+							AcquirePaperRays(canvas, RestorePaperRays),
+							(release) =>
+								Effect.gen(function* () {
+									if (release !== undefined) yield* release;
+								}),
+						);
+						yield* Queue.take(restorations);
 					}),
-			);
-			yield* Effect.never;
+				);
+			}
 		});
 
 	const paper_rays_runner = yield* MakeScopedAttachmentRunner(RunPaperRays);
