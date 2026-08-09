@@ -256,6 +256,8 @@ const unsafe_queue_ingress = new Map<string, number>([
 	["modules/frontend/src/lib/components/dropdown-highlight.ts", 4],
 	["modules/frontend/src/lib/composer/gesture-intake.ts", 3],
 	["modules/frontend/src/lib/lifecycle/scoped-attachment-runner.ts", 3],
+	/** The host invokes a notification's click handler on its own callback. */
+	["modules/frontend/src/lib/notifications/service.ts", 1],
 	["modules/frontend/src/routes/components/paper-god-rays.svelte", 4],
 	["modules/frontend/src/routes/components/dev-instance-badge.svelte", 1],
 	["modules/frontend/src/routes/components/shader-dev-panel.svelte", 4],
