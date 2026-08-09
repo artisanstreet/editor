@@ -351,7 +351,7 @@
 	-->
 	{#if renders_status_line}
 		<div
-			class={`t-status-enter flex w-fit items-center pb-0.5 ${has_visible_details ? "pt-5" : "pt-0.5"}`}
+			class={`t-status-enter flex w-fit items-center pb-0.5 ${has_visible_details ? "pt-5" : "pt-2"}`}
 			role="status"
 			aria-label={status_label}
 		>
@@ -432,7 +432,7 @@
 	}
 
 	.t-acc[data-has-header="true"][data-open="true"] .t-acc-panel-inner {
-		padding-top: 1rem;
+		padding-top: 0.5rem;
 	}
 
 	.t-acc[data-open="true"] .t-acc-panel-inner {

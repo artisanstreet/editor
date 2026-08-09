@@ -310,6 +310,16 @@ describe("Barekey docs shell reset", () => {
 		expect(work_session).not.toContain("engine-working-spin");
 		expect(work_session).toContain("is_working && !has_live_reply && !has_live_status_detail");
 		expect(work_session).toContain("{#if renders_status_line}");
+		/**
+		 * The opening wait stands where the trace's first line will, with matching
+		 * `pb-2` / `pt-2` rhythm on either side of the header divider. The engine's
+		 * first message then replaces that line without shifting the layout.
+		 */
+		const panel_gap_matches_header =
+			work_session.includes("group-data-[open=true]/session-acc:pt-2") ||
+			work_session.includes("padding-top: 0.5rem;");
+		expect(panel_gap_matches_header).toBe(true);
+		expect(work_session).toContain('has_visible_details ? "pt-5" : "pt-2"');
 		expect(work_session).toContain('<ShimmerText class="text-base text-muted-foreground"');
 		expect(work_session).toContain(
 			"t-settle-underline relative flex w-full items-center justify-between gap-3 pb-2",
