@@ -15,7 +15,66 @@ import {
 	type ForgeHandoff,
 } from "./renderer-host";
 
-const renderer_partition = "artisan-renderer";
+const renderer_partition = "persist:artisan-renderer";
+const windows_app_user_model_id = "com.usebarekey.artisan-editor";
+const windows_toast_activator_clsid = "{A7D8D3E7-9DE2-4C09-8D4B-4E490C20D3A4}";
+
+/** Windows toast delivery is keyed to the installed product identity. */
+if (process.platform === "win32") {
+	app.setAppUserModelId(windows_app_user_model_id);
+	app.setToastActivatorCLSID(windows_toast_activator_clsid);
+}
+
+/**
+ * Repairs launchers written before Artisan carried Windows toast identity.
+ * The installer owns shortcut creation; the desktop host only upgrades the
+ * existing Start Menu link in place so an installed update works immediately.
+ */
+const RepairWindowsNotificationShortcut = Effect.gen(function* () {
+	if (process.platform !== "win32" || !app.isPackaged) return;
+
+	const shortcut_path = join(
+		app.getPath("appData"),
+		"Microsoft",
+		"Windows",
+		"Start Menu",
+		"Programs",
+		"Artisan Editor.lnk",
+	);
+
+	yield* Effect.try({
+		try: () => {
+			const current = shell.readShortcutLink(shortcut_path);
+			if (
+				current.appUserModelId === windows_app_user_model_id &&
+				current.toastActivatorClsid?.toUpperCase() ===
+					windows_toast_activator_clsid.toUpperCase()
+			) {
+				return;
+			}
+
+			const updated = shell.writeShortcutLink(shortcut_path, "update", {
+				...current,
+				appUserModelId: windows_app_user_model_id,
+				toastActivatorClsid: windows_toast_activator_clsid,
+			});
+			if (!updated) throw new Error("Electron declined the shortcut update");
+		},
+		catch: (cause) => cause,
+	}).pipe(
+		Effect.catch((cause) =>
+			Effect.sync(() =>
+				console.error(
+					JSON.stringify({
+						kind: "artisan:desktop-notification-shortcut",
+						message: String(cause),
+						ok: false,
+					}),
+				),
+			),
+		),
+	);
+});
 
 /**
  * Loopback-only diagnosis hatch. The renderer has no IPC surface, so a memory
@@ -107,6 +166,7 @@ export const StartDesktop = Effect.gen(function* () {
 		try: () => app.whenReady(),
 		catch: (cause) => cause,
 	});
+	yield* RepairWindowsNotificationShortcut;
 	const paths = resolve_desktop_paths({
 		...(process.env.ARTISAN_AE_COMMAND === undefined
 			? {}
@@ -115,11 +175,7 @@ export const StartDesktop = Effect.gen(function* () {
 		resources_path: process.resourcesPath,
 	});
 	const frontend_root = normalize(join(import.meta.dirname, "frontend"));
-	/**
-	 * A non-persistent partition keeps the Forge session cookie in memory, so
-	 * no credential outlives the window and every launch performs a fresh
-	 * one-time pairing exchange.
-	 */
+	/** Local renderer state survives restarts; short-lived Forge cookies do not. */
 	const renderer_session = session.fromPartition(renderer_partition);
 	renderer_session.protocol.handle(app_scheme, (request) =>
 		Effect.runPromise(ServeRendererAsset(frontend_root, request.url)),
@@ -173,6 +229,11 @@ export const StartDesktop = Effect.gen(function* () {
 	 * one-time capability instead of spawning a second window.
 	 */
 	const LoadRenderer = Effect.gen(function* () {
+		/** Pairing capabilities are one-time, so never carry an old Forge cookie into a handoff. */
+		yield* Effect.tryPromise({
+			try: () => renderer_session.clearStorageData({ storages: ["cookies"] }),
+			catch: (cause) => cause,
+		});
 		const handoff = yield* ObtainHandoff;
 		yield* Effect.tryPromise({
 			try: () => editor_window.loadURL(renderer_url(handoff)),

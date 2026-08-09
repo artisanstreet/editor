@@ -77,6 +77,41 @@ describe("desktop packaging configuration", () => {
 		expect(main).toContain("sandbox: true");
 		expect(main).not.toContain("preload:");
 		expect(main).not.toContain("ipcMain");
+		/** Renderer drafts persist, while every pairing begins without a Forge cookie. */
+		expect(main).toContain('const renderer_partition = "persist:artisan-renderer"');
+		expect(main).toContain("partition: renderer_partition");
+		expect(main).toContain('clearStorageData({ storages: ["cookies"] })');
+		expect(main.match(/clearStorageData\(/g)).toHaveLength(1);
+		expect(main).not.toContain("clearStorageData()");
+		expect(main.indexOf('clearStorageData({ storages: ["cookies"] })')).toBeLessThan(
+			main.indexOf("const handoff = yield* ObtainHandoff"),
+		);
+		expect(main.indexOf('clearStorageData({ storages: ["cookies"] })')).toBeLessThan(
+			main.indexOf("editor_window.loadURL(renderer_url(handoff))"),
+		);
+		expect(main).toContain('const windows_app_user_model_id = "com.usebarekey.artisan-editor"');
+		expect(main).toContain(
+			'const windows_toast_activator_clsid = "{A7D8D3E7-9DE2-4C09-8D4B-4E490C20D3A4}"',
+		);
+		expect(main).toContain("app.setAppUserModelId(windows_app_user_model_id)");
+		expect(main).toContain("app.setToastActivatorCLSID(windows_toast_activator_clsid)");
+		expect(main.indexOf("app.setAppUserModelId(windows_app_user_model_id)")).toBeLessThan(
+			main.indexOf("app.whenReady"),
+		);
+		expect(
+			main.indexOf("app.setToastActivatorCLSID(windows_toast_activator_clsid)"),
+		).toBeLessThan(main.indexOf("app.whenReady"));
+		expect(main).toContain('process.platform === "win32"');
+		expect(main).toContain('app.getPath("appData")');
+		expect(main).toContain('"Artisan Editor.lnk"');
+		expect(main).toContain("shell.readShortcutLink(shortcut_path)");
+		expect(main).toContain('shell.writeShortcutLink(shortcut_path, "update"');
+		expect(main).toContain("...current");
+		expect(main).toContain("appUserModelId: windows_app_user_model_id");
+		expect(main).toContain("toastActivatorClsid: windows_toast_activator_clsid");
+		expect(main.indexOf("yield* RepairWindowsNotificationShortcut")).toBeLessThan(
+			main.indexOf("new BrowserWindow"),
+		);
 		/** Pairing stays `ae`-owned: the editor only runs the hidden one-time handoff. */
 		expect(main).toContain('"open", "--handoff"');
 		expect(main).not.toContain("ARTISAN_AUTH_TOKEN");
