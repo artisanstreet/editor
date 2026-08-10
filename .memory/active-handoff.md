@@ -5,7 +5,7 @@ Last updated: 2026-08-10. Branch continuity only; durable verified status is in 
 ## Working State
 
 - Repository `C:\Users\sander\Desktop\artisan-editor`; direct `master` → `origin/master`.
-- Provider-boundary milestone `d36057be` is pushed; local/remote `master` match.
+- Release repair milestone `332684a0` is pushed; local/remote `master` match.
 - Root cleanup is isolated from unrelated work still present in the checkout.
 
 ## Invariants
@@ -24,7 +24,7 @@ Last updated: 2026-08-10. Branch continuity only; durable verified status is in 
 
 ## Active Work
 
-- Lifecycle milestone `810e07b4` is pushed. Its release follow-up recovers a
+- Lifecycle base `810e07b4` and release repair `332684a0` are pushed. The repair recovers a
   missing-state Forge, discards cards for dead PIDs before network probes, and
   makes installer retirement target each authenticated superseded PID exactly.
 - New-thread spaces, pinned model controls, hidden scrollbars, and clear inactive
