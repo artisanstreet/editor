@@ -5,7 +5,7 @@ Last updated: 2026-08-10. Branch continuity only; durable verified status is in 
 ## Working State
 
 - Repository `C:\Users\sander\Desktop\artisan-editor`; direct `master` → `origin/master`.
-- Release repair `332684a0` is pushed. The pairing-race follow-up is verified in installed 0.2.35.
+- Release repair `332684a0` and pairing fix `c360ac9a` are pushed; installed 0.2.35 is verified.
 - Root cleanup is isolated from unrelated work still present in the checkout.
 
 ## Invariants
@@ -24,7 +24,7 @@ Last updated: 2026-08-10. Branch continuity only; durable verified status is in 
 
 ## Active Work
 
-- Lifecycle base `810e07b4` and repair `332684a0` are pushed. The follow-up gives every
+- Lifecycle base `810e07b4`, repair `332684a0`, and pairing fix `c360ac9a` are pushed. The latest gives every
   completed renderer handoff a fresh public navigation marker, so cold Forge startup
   reboots the frontend runtime without moving its one-time capability out of the fragment.
 - New-thread spaces, pinned model controls, hidden scrollbars, and clear inactive
