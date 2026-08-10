@@ -248,6 +248,8 @@ export interface EngineRawProvenance {
 /** Supplies the provider-neutral fields present on every observation. @since 0.2.0 */
 export interface EngineObservationBase {
 	readonly artisan_run_id: string;
+	/** Provider thread that emitted this observation when the native protocol exposes one. */
+	readonly native_thread_id?: string;
 	readonly observation_id: string;
 	readonly raw: EngineRawProvenance;
 	readonly sequence: number;
@@ -264,6 +266,200 @@ export interface EngineTurnStateObservation extends EngineObservationBase {
 	readonly _tag: "turn_state";
 	readonly state: "started" | "waiting" | "completed" | "cancelled" | "failed";
 	readonly turn_id: string;
+}
+
+/** Reports observable provider-native subagent activity without making it the owner run. @since 0.10.0 */
+export interface EngineSubagentObservation extends EngineObservationBase {
+	readonly _tag: "subagent";
+	readonly agent_native_thread_id: string;
+	readonly parent_native_thread_id: string;
+	readonly activity?: string;
+	readonly agent_path?: string;
+	readonly state: "discovered" | "running" | "waiting" | "completed" | "failed" | "interrupted";
+	readonly turn_id?: string;
+}
+
+/** Public, provider-neutral content emitted by one native subagent. */
+const AssistantMessagePhaseSchema = Schema.Union([
+	Schema.Literal("commentary"),
+	Schema.Literal("final"),
+	Schema.Literal("unspecified"),
+]);
+const TerminalChannelSchema = Schema.Union([Schema.Literal("stdout"), Schema.Literal("stderr")]);
+const TerminalActivityStateSchema = Schema.Union([
+	Schema.Literal("started"),
+	Schema.Literal("output"),
+	Schema.Literal("completed"),
+	Schema.Literal("failed"),
+]);
+const ToolActionSchema = Schema.Union([
+	Schema.Literal("started"),
+	Schema.Literal("progress"),
+	Schema.Literal("completed"),
+	Schema.Literal("failed"),
+]);
+const FileActionSchema = Schema.Union([
+	Schema.Literal("created"),
+	Schema.Literal("modified"),
+	Schema.Literal("deleted"),
+	Schema.Literal("read"),
+]);
+const SearchScopeSchema = Schema.Union([Schema.Literal("workspace"), Schema.Literal("web")]);
+const SearchStateSchema = Schema.Union([Schema.Literal("started"), Schema.Literal("completed")]);
+export const EngineSubagentTranscriptContent = Schema.Union([
+	Schema.Struct({
+		_tag: Schema.Literal("agent_message_delta"),
+		delta: Schema.String,
+		item_id: Schema.String,
+		phase: AssistantMessagePhaseSchema,
+	}),
+	Schema.Struct({
+		_tag: Schema.Literal("agent_message_completed"),
+		item_id: Schema.String,
+		message: Schema.String,
+		phase: AssistantMessagePhaseSchema,
+	}),
+	Schema.Struct({
+		_tag: Schema.Literal("reasoning_summary_delta"),
+		delta: Schema.String,
+		item_id: Schema.String,
+		summary_index: Schema.Int,
+	}),
+	Schema.Struct({ _tag: Schema.Literal("reasoning_summary_completed"), item_id: Schema.String }),
+	Schema.Struct({
+		_tag: Schema.Literal("terminal_activity"),
+		activity_id: Schema.String,
+		channel: Schema.optional(TerminalChannelSchema),
+		command: Schema.optional(Schema.String),
+		exit_code: Schema.optional(Schema.Int),
+		output: Schema.optional(Schema.String),
+		state: TerminalActivityStateSchema,
+	}),
+	Schema.Struct({
+		_tag: Schema.Literal("tool"),
+		action: ToolActionSchema,
+		detail: Schema.optional(Schema.String),
+		tool_id: Schema.String,
+		tool_name: Schema.String,
+	}),
+	Schema.Struct({
+		_tag: Schema.Literal("file"),
+		action: FileActionSchema,
+		lines_added: Schema.optional(Schema.Int),
+		lines_deleted: Schema.optional(Schema.Int),
+		path: Schema.String,
+	}),
+	Schema.Struct({
+		_tag: Schema.Literal("search"),
+		query: Schema.String,
+		result_count: Schema.optional(Schema.Int),
+		scope: Schema.optional(SearchScopeSchema),
+		search_id: Schema.optional(Schema.String),
+		state: SearchStateSchema,
+	}),
+]);
+export type EngineSubagentTranscriptContent = typeof EngineSubagentTranscriptContent.Type;
+
+/** Keeps child transcript provenance separate from the root conversation. */
+export interface EngineSubagentTranscriptObservation extends EngineObservationBase {
+	readonly _tag: "subagent_transcript";
+	readonly agent_native_thread_id: string;
+	readonly content: EngineSubagentTranscriptContent;
+	readonly parent_native_thread_id: string;
+}
+
+/** Converts renderer-safe ordinary content into an isolated native-child event. */
+export function MakeEngineSubagentTranscriptObservation(input: {
+	readonly agent_native_thread_id: string;
+	readonly observation: EngineObservation;
+	readonly parent_native_thread_id: string;
+}): EngineSubagentTranscriptObservation | undefined {
+	const { observation } = input;
+	const content: EngineSubagentTranscriptContent | undefined = (() => {
+		switch (observation._tag) {
+			case "agent_message_delta":
+				return {
+					_tag: observation._tag,
+					delta: observation.delta,
+					item_id: observation.item_id,
+					phase: observation.phase,
+				};
+			case "agent_message_completed":
+				return {
+					_tag: observation._tag,
+					item_id: observation.item_id,
+					message: observation.message,
+					phase: observation.phase,
+				};
+			case "reasoning_summary_delta":
+				return {
+					_tag: observation._tag,
+					delta: observation.delta,
+					item_id: observation.item_id,
+					summary_index: observation.summary_index,
+				};
+			case "reasoning_summary_completed":
+				return { _tag: observation._tag, item_id: observation.item_id };
+			case "terminal_activity":
+				return {
+					_tag: observation._tag,
+					activity_id: observation.activity_id,
+					...(observation.channel === undefined ? {} : { channel: observation.channel }),
+					...(observation.command === undefined ? {} : { command: observation.command }),
+					...(observation.exit_code === undefined
+						? {}
+						: { exit_code: observation.exit_code }),
+					...(observation.output === undefined ? {} : { output: observation.output }),
+					state: observation.state,
+				};
+			case "tool":
+				return {
+					_tag: observation._tag,
+					action: observation.action,
+					...(observation.detail === undefined ? {} : { detail: observation.detail }),
+					tool_id: observation.tool_id,
+					tool_name: observation.tool_name,
+				};
+			case "file":
+				return {
+					_tag: observation._tag,
+					action: observation.action,
+					...(observation.lines_added === undefined
+						? {}
+						: { lines_added: observation.lines_added }),
+					...(observation.lines_deleted === undefined
+						? {}
+						: { lines_deleted: observation.lines_deleted }),
+					path: observation.path,
+				};
+			case "search":
+				return {
+					_tag: observation._tag,
+					query: observation.query,
+					...(observation.result_count === undefined
+						? {}
+						: { result_count: observation.result_count }),
+					...(observation.scope === undefined ? {} : { scope: observation.scope }),
+					...(observation.search_id === undefined
+						? {}
+						: { search_id: observation.search_id }),
+					state: observation.state,
+				};
+			default:
+				return undefined;
+		}
+	})();
+	if (content === undefined) return undefined;
+	return {
+		_tag: "subagent_transcript",
+		agent_native_thread_id: input.agent_native_thread_id,
+		artisan_run_id: observation.artisan_run_id,
+		content,
+		observation_id: `${observation.observation_id}:subagent-transcript`,
+		parent_native_thread_id: input.parent_native_thread_id,
+		raw: observation.raw,
+		sequence: observation.raw.frame_sequence ?? observation.sequence,
+	};
 }
 
 /** Streams a partial agent-authored message. @since 0.2.0 */
@@ -547,6 +743,8 @@ export type EngineObservation =
 	| EngineRunStateObservation
 	| EngineRunTerminalObservation
 	| EngineSearchObservation
+	| EngineSubagentObservation
+	| EngineSubagentTranscriptObservation
 	| EngineTerminalActivityObservation
 	| EngineToolObservation
 	| EngineTurnStateObservation

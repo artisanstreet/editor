@@ -3,9 +3,11 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it, afterEach } from "vitest";
 import { Effect, Layer } from "effect";
 
-import { ClaudeEngine, EngineProcessFactoryLive, make_claude_engine_layer } from "@artisan/engines";
-
-import { make_unstartable_claude_query } from "./fixtures/fake-claude-query";
+import { EngineProcessFactoryLive } from "../../modules/engines/src/process/process";
+import {
+	ClaudeCliEngine,
+	make_claude_cli_engine_layer,
+} from "../../modules/engines/src/claude/cli-engine";
 
 const executable = fileURLToPath(new URL("./fixtures/fake-claude.ts", import.meta.url));
 const original = process.env.FAKE_CLAUDE_SCENARIO;
@@ -17,16 +19,14 @@ afterEach(() => {
 
 function engine(options: Record<string, unknown> = {}) {
 	return Effect.runPromise(
-		ClaudeEngine.pipe(
+		ClaudeCliEngine.pipe(
 			Effect.provide(
-				make_claude_engine_layer({
+				make_claude_cli_engine_layer({
 					executable: process.execPath,
 					executable_args: [executable],
+					auth_retry_attempts: 0,
 					...options,
-				}).pipe(
-					Layer.provide(EngineProcessFactoryLive),
-					Layer.provide(make_unstartable_claude_query()),
-				),
+				}).pipe(Layer.provide(EngineProcessFactoryLive)),
 			),
 		),
 	);

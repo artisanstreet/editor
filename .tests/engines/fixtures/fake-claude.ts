@@ -3,6 +3,9 @@ import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 
 type FixtureEvent = Record<string, unknown>;
 
+const is_record = (value: unknown): value is Record<string, unknown> =>
+	typeof value === "object" && value !== null && !Array.isArray(value);
+
 const args = process.argv.slice(2);
 const scenario = process.env.FAKE_CLAUDE_SCENARIO ?? "transcript";
 const invocation_file = process.env.FAKE_CLAUDE_INVOCATION_FILE;
@@ -24,7 +27,7 @@ if (args.includes("--version")) {
 		process.stdout.write(`${version}\n`);
 		process.exit(0);
 	}
-} else if (args[0] === "auth" && args[1] === "status") {
+} else if (args.includes("auth") && args.includes("status")) {
 	if (scenario === "auth-timeout") {
 		setInterval(() => undefined, 1_000);
 	} else if (scenario === "auth-bounds") {
@@ -33,7 +36,7 @@ if (args.includes("--version")) {
 	} else if (scenario === "auth-unsupported") {
 		process.stderr.write("unknown command\n");
 		process.exit(1);
-	} else if (scenario === "auth-heals") {
+	} else if (scenario.endsWith("auth-heals")) {
 		// Logged out on the first probe, healed afterwards; the invocation file
 		// recorded this spawn above, so its auth count includes the current one.
 		const auth_spawns = invocation_file
@@ -50,10 +53,191 @@ if (args.includes("--version")) {
 } else {
 	const decoder = new TextDecoder();
 	let input = "";
+	let interactive_buffer = "";
+	const interactive_messages: Array<FixtureEvent> = [];
+	let interactive_started = false;
+	let interactive_approved = false;
+	let interactive_finished = false;
+	let immediate_finished = false;
+	const write = (event: FixtureEvent) => process.stdout.write(`${JSON.stringify(event)}\n`);
+	const interactive_session = () => {
+		const session_index = args.indexOf("--session-id");
+		const resume_index = args.indexOf("--resume");
+		return session_index >= 0 ? args[session_index + 1] : args[resume_index + 1];
+	};
+	const interactive = () => {
+		const session_id = interactive_session();
+		if (!interactive_started) {
+			interactive_started = true;
+			write({ type: "system", subtype: "init", session_id, model: "fake", tools: [] });
+			write({
+				type: "control_request",
+				request_id: "permission-1",
+				request: {
+					subtype: "can_use_tool",
+					tool_name: "Bash",
+					input: { command: "echo safe" },
+					title: "Approve fake Bash",
+				},
+			});
+			return;
+		}
+		const response = interactive_messages.find((line) => line.type === "control_response");
+		if (response && !interactive_approved) {
+			const envelope = response.response;
+			const result = is_record(envelope) ? envelope.response : undefined;
+			const expected_behavior = scenario === "interactive-deny" ? "deny" : "allow";
+			if (
+				!is_record(envelope) ||
+				envelope.subtype !== "success" ||
+				envelope.request_id !== "permission-1" ||
+				!is_record(result) ||
+				result.behavior !== expected_behavior
+			) {
+				write({
+					type: "result",
+					subtype: "error_during_execution",
+					is_error: true,
+					session_id,
+					errors: ["invalid control_response envelope"],
+				});
+				interactive_finished = true;
+				setTimeout(() => process.exit(0), 10);
+				return;
+			}
+			interactive_approved = true;
+			return;
+		}
+		if (
+			!interactive_finished &&
+			interactive_approved &&
+			interactive_messages.filter((line) => line.type === "user").length >= 2
+		) {
+			interactive_finished = true;
+			write({
+				type: "assistant",
+				session_id,
+				message: {
+					content: [
+						{
+							type: "tool_use",
+							id: "task-tool",
+							name: "Task",
+							input: { prompt: "child" },
+						},
+					],
+				},
+			});
+			write({
+				type: "system",
+				subtype: "task_started",
+				session_id,
+				task_id: "child-task",
+				tool_use_id: "task-tool",
+				subagent_type: "general-purpose",
+				description: "child",
+			});
+			write({
+				type: "assistant",
+				session_id: "child-task",
+				parent_tool_use_id: "task-tool",
+				message: { content: [{ type: "text", text: "child reply" }] },
+			});
+			write({
+				type: "result",
+				subtype: "success",
+				session_id,
+				usage: { input_tokens: 1, output_tokens: 1 },
+			});
+			setTimeout(() => process.exit(0), 10);
+		}
+	};
+	const immediate = () => {
+		if (immediate_finished) return;
+		immediate_finished = true;
+		const session_id = interactive_session();
+		const scenario_suffix = scenario.slice("immediate-".length);
+		if (scenario_suffix === "inactivity") {
+			setInterval(() => undefined, 1_000);
+			return;
+		}
+		if (scenario_suffix === "cancel-tree") {
+			if (grandchild_file === undefined)
+				throw new Error("cancel-tree requires a grandchild pid file");
+			const child = spawn(process.execPath, ["-e", "setInterval(() => undefined, 1000)"], {
+				stdio: "ignore",
+				windowsHide: true,
+			});
+			writeFileSync(
+				grandchild_file,
+				JSON.stringify({ grandchild_pid: child.pid, provider_pid: process.pid }),
+			);
+			write({ type: "system", subtype: "init", session_id, model: "fake", tools: [] });
+			setInterval(() => undefined, 1_000);
+			return;
+		}
+		if (scenario_suffix === "stderr-bounds") process.stderr.write("x".repeat(10_000));
+		if (scenario_suffix === "malformed") process.stdout.write("not-json\n");
+		if (scenario_suffix === "oversized")
+			process.stdout.write(
+				`${JSON.stringify({ type: "future", payload: "x".repeat(5_000) })}\n`,
+			);
+		if (scenario_suffix !== "missing-init")
+			write({
+				type: "system",
+				subtype: "init",
+				session_id: scenario_suffix === "mismatch" ? "wrong-session" : session_id,
+				model: "fake",
+				tools: [],
+			});
+		if (scenario_suffix === "semantic-failure")
+			write({
+				type: "result",
+				subtype: "error_during_execution",
+				is_error: true,
+				session_id,
+				errors: ["sanitized failure"],
+			});
+		else if (scenario_suffix !== "missing-result")
+			write({
+				type: "result",
+				subtype: "success",
+				session_id,
+				usage: { input_tokens: 1, output_tokens: 1 },
+			});
+		setTimeout(() => process.exit(scenario_suffix === "nonzero" ? 7 : 0), 10);
+	};
+	if (scenario === "immediate-empty-resume") setImmediate(immediate);
 	process.stdin.on("data", (chunk) => {
-		input += typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
+		const decoded = typeof chunk === "string" ? chunk : decoder.decode(chunk, { stream: true });
+		input += decoded;
+		if (invocation_file)
+			appendFileSync(invocation_file, `${JSON.stringify({ stdin_chunk: decoded })}\n`);
+		if (scenario === "interactive" || scenario === "interactive-deny") {
+			interactive_buffer += decoded;
+			for (;;) {
+				const line_end = interactive_buffer.indexOf("\n");
+				if (line_end < 0) break;
+				const line = interactive_buffer.slice(0, line_end);
+				interactive_buffer = interactive_buffer.slice(line_end + 1);
+				if (line) interactive_messages.push(JSON.parse(line) as FixtureEvent);
+			}
+			interactive();
+		}
+		if (scenario.startsWith("immediate-")) immediate();
 	});
 	process.stdin.on("end", () => {
+		if (scenario === "interactive" || scenario === "interactive-deny") {
+			if (invocation_file)
+				appendFileSync(invocation_file, `${JSON.stringify({ stdin: input })}\n`);
+			process.exit(0);
+			return;
+		}
+		if (scenario.startsWith("immediate-")) {
+			if (invocation_file)
+				appendFileSync(invocation_file, `${JSON.stringify({ stdin: input })}\n`);
+			return;
+		}
 		if (invocation_file)
 			appendFileSync(invocation_file, `${JSON.stringify({ stdin: input })}\n`);
 		if (scenario === "timeout") {

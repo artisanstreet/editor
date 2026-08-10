@@ -1,23 +1,18 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { Cause, Effect, Exit, Layer, Stream } from "effect";
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 
-import {
-	ClaudeEngine,
-	CodexEngine,
-	EngineProcessFactory,
-	EngineProcessFactoryLive,
-	make_claude_engine_layer,
-	make_codex_engine_layer,
-} from "@artisan/engines";
-import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { CodexEngine, EngineProcessFactory, make_codex_engine_layer } from "@artisan/engines";
 import { MakeCodexAppServerThreadOptions } from "../../modules/engines/src/codex/internal/permissions";
+import { EngineProcessFactoryLive } from "../../modules/engines/src/process/process";
 import {
-	make_fake_claude_query,
-	make_unstartable_claude_query,
-	type FakeClaudeSession,
-} from "./fixtures/fake-claude-query";
+	ClaudeCliEngine,
+	make_claude_cli_engine_layer,
+} from "../../modules/engines/src/claude/cli-engine";
 
 const app_server_fixture = fileURLToPath(new URL("./fixtures/fake-app-server.ts", import.meta.url));
 const claude_fixture = fileURLToPath(new URL("./fixtures/fake-claude.ts", import.meta.url));
@@ -33,6 +28,16 @@ const product_instructions = {
 	content: "Follow Artisan product policy.",
 	source: "artisan-product",
 };
+const original_claude_scenario = process.env.FAKE_CLAUDE_SCENARIO;
+const original_claude_invocation_file = process.env.FAKE_CLAUDE_INVOCATION_FILE;
+
+afterEach(() => {
+	if (original_claude_scenario === undefined) delete process.env.FAKE_CLAUDE_SCENARIO;
+	else process.env.FAKE_CLAUDE_SCENARIO = original_claude_scenario;
+	if (original_claude_invocation_file === undefined)
+		delete process.env.FAKE_CLAUDE_INVOCATION_FILE;
+	else process.env.FAKE_CLAUDE_INVOCATION_FILE = original_claude_invocation_file;
+});
 
 function failure_from<A>(exit: Exit.Exit<A, unknown>) {
 	return Exit.isFailure(exit) ? Cause.squash(exit.cause) : undefined;
@@ -110,13 +115,8 @@ describe("engine product instructions", () => {
 			},
 		});
 		const engine = await Effect.runPromise(
-			ClaudeEngine.pipe(
-				Effect.provide(
-					make_claude_engine_layer().pipe(
-						Layer.provide(factory),
-						Layer.provide(make_unstartable_claude_query()),
-					),
-				),
+			ClaudeCliEngine.pipe(
+				Effect.provide(make_claude_cli_engine_layer().pipe(Layer.provide(factory))),
 			),
 		);
 		const result = await Effect.runPromise(
@@ -137,81 +137,87 @@ describe("engine product instructions", () => {
 		expect(spawn_count).toBe(0);
 	});
 
-	it("appends one Claude system prompt on start and resume without changing user text", async () => {
-		const fake = make_fake_claude_query((session: FakeClaudeSession) => {
-			session.emit({
-				type: "system",
-				subtype: "init",
-				cwd: process.cwd(),
-				session_id: session.session_id(),
-				tools: [],
-				model: "claude-haiku-4-5",
-				permissionMode: "default",
-				uuid: "3f0d9f4a-2c3d-4b0e-9f70-5f6f2f9a1b22",
-			} as unknown as SDKMessage);
-			session.emit({
-				type: "result",
-				subtype: "success",
-				is_error: false,
-				num_turns: 1,
-				session_id: session.session_id(),
-				uuid: "3d8a2f5c-0b47-4a3e-9a3e-6c2f6f4d5a01",
-			} as unknown as SDKMessage);
-		});
+	it("appends one Claude CLI system prompt on start and resume without changing user text", async () => {
+		const directory = await mkdtemp(join(tmpdir(), "artisan-claude-product-"));
+		const invocation_file = join(directory, "invocations.jsonl");
+		process.env.FAKE_CLAUDE_SCENARIO = "immediate-result";
+		process.env.FAKE_CLAUDE_INVOCATION_FILE = invocation_file;
 		const engine = await Effect.runPromise(
-			ClaudeEngine.pipe(
+			ClaudeCliEngine.pipe(
 				Effect.provide(
-					make_claude_engine_layer({
+					make_claude_cli_engine_layer({
 						executable: process.execPath,
 						executable_args: [claude_fixture],
-					}).pipe(Layer.provide(EngineProcessFactoryLive), Layer.provide(fake.layer)),
+					}).pipe(Layer.provide(EngineProcessFactoryLive)),
 				),
 			),
 		);
-		for (const input of [
-			{
-				...start_input,
-				product_instructions,
-				provider_options: {
-					"claude.append_system_prompt_file": "C:\\workspace\\CLAUDE.md",
+		try {
+			for (const input of [
+				{
+					...start_input,
+					product_instructions,
+					provider_options: {
+						"claude.append_system_prompt_file": "C:\\workspace\\CLAUDE.md",
+					},
 				},
-			},
-			{
-				_tag: "resume" as const,
-				artisan_run_id: "product-instructions-resume",
-				next_text: "Keep this resume text exact.",
-				product_instructions,
-				provider_options: {
-					"claude.append_system_prompt_file": "C:\\workspace\\CLAUDE.md",
+				{
+					_tag: "resume" as const,
+					artisan_run_id: "product-instructions-resume",
+					next_text: "Keep this resume text exact.",
+					product_instructions,
+					provider_options: {
+						"claude.append_system_prompt_file": "C:\\workspace\\CLAUDE.md",
+					},
+					resume_token: { native_thread_id: "session" },
+					working_directory: process.cwd(),
 				},
-				resume_token: { native_thread_id: "session" },
-				working_directory: process.cwd(),
-			},
-		]) {
-			await Effect.runPromise(
-				Effect.scoped(
-					Effect.gen(function* () {
-						const run = yield* engine.Open(input);
-						yield* run.Events.pipe(Stream.runDrain);
-					}),
-				),
-			);
-		}
+			]) {
+				await Effect.runPromise(
+					Effect.scoped(
+						Effect.gen(function* () {
+							const run = yield* engine.Open(input);
+							yield* run.Events.pipe(Stream.runDrain);
+						}),
+					),
+				);
+			}
 
-		expect(fake.sessions).toHaveLength(2);
-		for (const session of fake.sessions) {
-			expect(session.options?.systemPrompt).toEqual({
-				append: "Follow Artisan product policy.",
-				preset: "claude_code",
-				type: "preset",
-			});
-			expect(session.options?.extraArgs).toEqual({
-				"append-system-prompt-file": "C:\\workspace\\CLAUDE.md",
-			});
+			const records = (await readFile(invocation_file, "utf8"))
+				.trim()
+				.split("\n")
+				.map(
+					(line) =>
+						JSON.parse(line) as { args?: ReadonlyArray<string>; stdin_chunk?: string },
+				);
+			const runs = records.filter((record) => record.args?.includes("-p"));
+			expect(runs).toHaveLength(2);
+			for (const run of runs) {
+				expect(run.args).toEqual(
+					expect.arrayContaining([
+						"-p",
+						"--output-format",
+						"stream-json",
+						"--input-format",
+						"stream-json",
+						"--append-system-prompt-file",
+						"C:\\workspace\\CLAUDE.md",
+						"--append-system-prompt",
+						"Follow Artisan product policy.",
+					]),
+				);
+			}
+			expect(runs[0]?.args).toEqual(expect.arrayContaining(["--session-id"]));
+			expect(runs[1]?.args).toEqual(expect.arrayContaining(["--resume", "session"]));
+			const user_messages = records
+				.flatMap((record) => (record.stdin_chunk === undefined ? [] : [record.stdin_chunk]))
+				.map((chunk) => JSON.parse(chunk) as { message: { content: string } });
+			expect(user_messages.map((message) => message.message.content)).toEqual([
+				"Preserve this user text exactly.",
+				"Keep this resume text exact.",
+			]);
+		} finally {
+			await rm(directory, { force: true, recursive: true });
 		}
-		expect(fake.sessions[0]?.received[0]?.message.content).toBe(
-			"Preserve this user text exactly.",
-		);
-		expect(fake.sessions[1]?.received[0]?.message.content).toBe("Keep this resume text exact.");
 	});
 });

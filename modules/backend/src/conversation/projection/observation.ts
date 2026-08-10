@@ -17,6 +17,11 @@ export const ApplyEngineObservation = (
 	input: ConversationObservationContext,
 ) =>
 	Effect.gen(function* () {
+		/** Native child lifecycle is not part of the root conversation transcript. */
+		if (observation._tag === "subagent" || observation._tag === "subagent_transcript") {
+			return;
+		}
+
 		yield* EnsureThread(transaction, input.thread_id, input.occurred_at);
 		const admitted = yield* Admit(
 			transaction,

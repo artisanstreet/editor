@@ -4,17 +4,14 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
 import { Effect, Layer, Schema } from "effect";
 
-import {
-	ClaudeEngine,
-	ClaudeEngineDescriptor,
-	CodexEngine,
-	CodexProcessFactoryLive,
-	EngineProcessFactoryLive,
-	make_claude_engine_layer,
-	make_codex_engine_layer,
-} from "@artisan/engines";
+import { CodexEngine, CodexProcessFactoryLive, make_codex_engine_layer } from "@artisan/engines";
 
-import { make_fake_claude_query } from "../fixtures/fake-claude-query";
+import { ClaudeEngineDescriptor } from "../../../modules/engines/src/claude/descriptor";
+import {
+	ClaudeCliEngine,
+	make_claude_cli_engine_layer,
+} from "../../../modules/engines/src/claude/cli-engine";
+import { EngineProcessFactoryLive } from "../../../modules/engines/src/process/process";
 import { make_fake_engine } from "../harness/fake-engine";
 import { make_transcript_sequence_replay } from "../harness/transcript-process";
 import { EngineOpenScenarios } from "../scenarios/engine-scenarios";
@@ -67,26 +64,15 @@ describe("Shared Engine lifecycle contract", () => {
 		expect(ClaudeEngineDescriptor.capabilities.approval.state).toBe("supported");
 	});
 
-	it("passes through the Claude Agent SDK adapter", async () => {
-		const fake = make_fake_claude_query((session) => {
-			session.emit({
-				type: "system",
-				subtype: "init",
-				cwd: process.cwd(),
-				session_id: session.session_id(),
-				tools: ["Task", "Bash", "Edit"],
-				model: "claude-haiku-4-5",
-				permissionMode: "default",
-				uuid: "3f0d9f4a-2c3d-4b0e-9f70-5f6f2f9a1b22",
-			} as never);
-		});
+	it("passes through the Claude CLI process adapter", async () => {
+		process.env.FAKE_CLAUDE_SCENARIO = "interactive";
 		const engine = await Effect.runPromise(
-			ClaudeEngine.pipe(
+			ClaudeCliEngine.pipe(
 				Effect.provide(
-					make_claude_engine_layer({
+					make_claude_cli_engine_layer({
 						executable: process.execPath,
 						executable_args: [claude_fixture_path],
-					}).pipe(Layer.provide(EngineProcessFactoryLive), Layer.provide(fake.layer)),
+					}).pipe(Layer.provide(EngineProcessFactoryLive)),
 				),
 			),
 		);

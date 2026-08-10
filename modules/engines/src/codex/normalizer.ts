@@ -20,6 +20,7 @@ import type {
 	EngineRetryObservation,
 	EngineRunStateObservation,
 	EngineSearchObservation,
+	EngineSubagentObservation,
 	EngineTerminalActivityObservation,
 	EngineToolObservation,
 	EngineTurnStateObservation,
@@ -156,12 +157,26 @@ const WebSearchItemSchema = Schema.Struct({
 	type: Schema.Literal("webSearch"),
 });
 const SubagentItemSchema = Schema.Struct({
-	agentPath: Schema.String,
+	agentPath: Schema.optional(Schema.String),
 	agentThreadId: Schema.String,
 	id: Schema.String,
-	kind: Schema.Unknown,
+	kind: Schema.optional(Schema.Unknown),
 	type: Schema.Literal("subAgentActivity"),
 });
+const CollabAgentToolCallItemSchema = Schema.Struct({
+	agentsStates: Schema.Record(Schema.String, Schema.Unknown),
+	id: Schema.String,
+	receiverThreadIds: Schema.Array(Schema.String),
+	senderThreadId: Schema.String,
+	status: Schema.Literals(["completed", "failed", "inProgress"]),
+	tool: Schema.String,
+	type: Schema.Literal("collabAgentToolCall"),
+});
+type CollabAgentToolCallItem = Schema.Schema.Type<typeof CollabAgentToolCallItemSchema>;
+
+function is_collab_agent_tool_call_item(item: unknown): item is CollabAgentToolCallItem {
+	return Schema.is(CollabAgentToolCallItemSchema)(item);
+}
 /**
  * Items Codex reports but Artisan renders from its own stream: reasoning
  * arrives as summary deltas, and the user's own message is already in the
@@ -186,6 +201,7 @@ const ItemEnvelopeSchema = Schema.Struct({
 		DynamicToolItemSchema,
 		WebSearchItemSchema,
 		SubagentItemSchema,
+		CollabAgentToolCallItemSchema,
 		ContextCompactionItemSchema,
 		OpaqueItemSchema,
 	]),
@@ -301,9 +317,22 @@ function make_raw(input: CodexNormalizationInput): EngineRawProvenance {
 	};
 }
 
+function native_thread_id_from_payload(payload: unknown): string | undefined {
+	if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+		return undefined;
+	}
+
+	const thread_id = (payload as Readonly<Record<string, unknown>>).threadId;
+
+	return typeof thread_id === "string" ? thread_id : undefined;
+}
+
 function make_base(input: CodexNormalizationInput, suffix?: string) {
+	const native_thread_id = native_thread_id_from_payload(input.payload);
+
 	return {
 		artisan_run_id: input.artisan_run_id,
+		...(native_thread_id === undefined ? {} : { native_thread_id }),
 		observation_id: [input.artisan_run_id, "native", String(input.frame_sequence), suffix]
 			.filter((part) => part !== undefined)
 			.join(":"),
@@ -732,8 +761,44 @@ export function normalise_codex_notification(
 						];
 					case "subAgentActivity":
 						return [
-							native_action(input, `Subagent activity: ${value.item.agentThreadId}`),
+							{
+								...base,
+								_tag: "subagent",
+								agent_native_thread_id: value.item.agentThreadId,
+								parent_native_thread_id: value.threadId,
+								...(typeof value.item.kind === "string"
+									? { activity: value.item.kind }
+									: {}),
+								...(value.item.agentPath === undefined
+									? {}
+									: { agent_path: value.item.agentPath }),
+								sequence: 0,
+								state: "discovered",
+								turn_id: value.turnId,
+							} satisfies EngineSubagentObservation,
 						];
+					case "collabAgentToolCall":
+						const collab_item = value.item;
+
+						if (!is_collab_agent_tool_call_item(collab_item)) {
+							return [
+								native_action(input, "Malformed Codex collaboration item", true),
+							];
+						}
+
+						return collab_item.receiverThreadIds.map(
+							(agent_native_thread_id) =>
+								({
+									...make_base(input, `subagent:${agent_native_thread_id}`),
+									_tag: "subagent" as const,
+									agent_native_thread_id,
+									activity: collab_item.tool,
+									parent_native_thread_id: collab_item.senderThreadId,
+									sequence: 0,
+									state: "discovered" as const,
+									turn_id: value.turnId,
+								}) satisfies EngineSubagentObservation,
+						);
 					case "contextCompaction":
 						return [
 							{

@@ -741,6 +741,108 @@ describe("Codex engine run", () => {
 		]);
 	});
 
+	it("keeps the root turn open while a native subagent completes", async () => {
+		process.env.FAKE_APP_SERVER_SCENARIO = "subagent-lifecycle";
+
+		const result = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const engine = yield* CodexEngine;
+					const child_completed = yield* Deferred.make<void>();
+					const run = yield* engine.Open({
+						_tag: "start",
+						artisan_run_id: "run-subagent-lifecycle",
+						initial_text: "Delegate then continue",
+						working_directory: "C:\\workspace",
+					});
+					const events_fiber = yield* run.Events.pipe(
+						Stream.tap((event) =>
+							event._tag === "subagent" &&
+							event.agent_native_thread_id === "thread-child" &&
+							event.state === "completed"
+								? Deferred.succeed(child_completed, undefined).pipe(Effect.ignore)
+								: Effect.void,
+						),
+						Stream.runCollect,
+						Effect.forkChild,
+					);
+
+					yield* Deferred.await(child_completed);
+					const steer = yield* run
+						.Send({ _tag: "steer", command_id: "root-still-active", text: "Continue" })
+						.pipe(Effect.exit);
+
+					return { events: [...(yield* Fiber.join(events_fiber))], steer };
+				}),
+			).pipe(Effect.provide(make_layer())),
+		);
+
+		expect(Exit.isSuccess(result.steer)).toBe(true);
+		expect(result.events).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					_tag: "subagent",
+					agent_native_thread_id: "thread-child",
+					agent_path: "/root/reviewer",
+					parent_native_thread_id: "thread-started",
+					state: "discovered",
+				}),
+				expect.objectContaining({
+					_tag: "subagent",
+					agent_native_thread_id: "thread-child",
+					state: "running",
+					turn_id: "turn-child",
+				}),
+				expect.objectContaining({
+					_tag: "subagent",
+					agent_native_thread_id: "thread-child",
+					state: "completed",
+					turn_id: "turn-child",
+				}),
+				expect.objectContaining({
+					_tag: "subagent",
+					agent_native_thread_id: "thread-grandchild",
+					agent_path: "/root/reviewer/checker",
+					parent_native_thread_id: "thread-child",
+					state: "discovered",
+				}),
+				expect.objectContaining({
+					_tag: "subagent",
+					agent_native_thread_id: "thread-grandchild",
+					state: "interrupted",
+				}),
+				expect.objectContaining({ _tag: "agent_message_delta", delta: "Root continued" }),
+			]),
+		);
+		expect(
+			result.events.filter(
+				(event) =>
+					event._tag === "agent_message_completed" &&
+					event.message === "Child-only result",
+			),
+		).toEqual([]);
+		expect(result.events).toEqual(
+			expect.arrayContaining([
+				expect.objectContaining({
+					_tag: "subagent_transcript",
+					agent_native_thread_id: "thread-child",
+					content: expect.objectContaining({
+						_tag: "agent_message_completed",
+						message: "Child-only result",
+					}),
+					parent_native_thread_id: "thread-started",
+				}),
+			]),
+		);
+		const child_transcript = result.events.find(
+			(event) =>
+				event._tag === "subagent_transcript" &&
+				event.agent_native_thread_id === "thread-child",
+		);
+		expect(child_transcript?.sequence).toBeGreaterThan(0);
+		expect(terminals(result.events)).toEqual([expect.objectContaining({ state: "completed" })]);
+	});
+
 	it("records a command id before an ambiguous provider failure", async () => {
 		process.env.FAKE_APP_SERVER_SCENARIO = "steer-failure";
 

@@ -72,32 +72,12 @@ const StageForgeRuntime = (
 			resolve(workspace_root, "modules/engines/node_modules/koffi"),
 		);
 		const koffi_native_source = resolve(koffi_source, "..", "@koromix", "koffi-win32-x64");
-		/**
-		 * The bundled Agent SDK cannot resolve its optional platform package from
-		 * inside the Forge bundle, so the native Claude CLI is staged beside the
-		 * other native runtime pieces and reached through
-		 * `ARTISAN_NATIVE_RUNTIME` at run time.
-		 */
-		const agent_sdk_source = realpathSync(
-			resolve(workspace_root, "modules/engines/node_modules/@anthropic-ai/claude-agent-sdk"),
-		);
-		const claude_cli_source = resolve(
-			agent_sdk_source,
-			"..",
-			"claude-agent-sdk-win32-x64",
-			"claude.exe",
-		);
-
 		if (
 			!existsSync(node_pty_source) ||
 			!existsSync(koffi_source) ||
-			!existsSync(koffi_native_source) ||
-			!existsSync(claude_cli_source)
-		) {
-			throw new Error(
-				"node-pty, Koffi, and the Claude Agent SDK native CLI are required to package Artisan Forge",
-			);
-		}
+			!existsSync(koffi_native_source)
+		)
+			throw new Error("node-pty and Koffi are required to package Artisan Forge");
 
 		mkdirSync(forge_root, { recursive: true });
 		const node_pty_destination = resolve(native_runtime_root, "node-pty");
@@ -126,10 +106,6 @@ const StageForgeRuntime = (
 		for (const path of ["index.js", "package.json", "win32_x64"]) {
 			stage(resolve(koffi_native_source, path), resolve(koffi_native_destination, path));
 		}
-
-		const claude_cli_destination = resolve(native_runtime_root, "claude-agent-sdk");
-		mkdirSync(claude_cli_destination, { recursive: true });
-		stage(claude_cli_source, resolve(claude_cli_destination, "claude.exe"));
 
 		if (stage_frontend) stage(frontend_source, resolve(forge_root, "frontend"));
 		stage(migrations_source, resolve(forge_root, "migrations"));

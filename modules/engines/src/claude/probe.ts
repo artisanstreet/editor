@@ -52,8 +52,8 @@ function read_bounded(stream: AsyncIterable<Uint8Array>, max_bytes: number) {
 
 /**
  * Probes the installed Claude Code CLI for version and saved-session auth
- * without starting a billable run. The probe deliberately targets the CLI's
- * shared credential store, which the Agent SDK runtime reads as well.
+ * without starting a billable run. Both readiness checks stay behind the same
+ * external executable boundary used for actual Claude runs.
  *
  * @since 0.8.0
  * @param factory - The process factory used for the two bounded CLI spawns.

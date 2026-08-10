@@ -19,6 +19,11 @@ import { make_sea_asset_materializer_layer, SeaAssetMaterializer } from "./sea/m
 
 const SeaManifestAssetId = "artisan-sea-manifest";
 
+const HasProviderPayload = (relative_path: string) => {
+	const path = relative_path.toLowerCase();
+	return path.includes("anthropic") || path.includes("claude") || path.includes("provider");
+};
+
 class ForgeSeaBootstrapFailure extends Data.TaggedError("ForgeSeaBootstrapFailure")<{
 	readonly cause: unknown;
 	readonly operation: "environment" | "manifest" | "native-runtime";
@@ -30,6 +35,16 @@ const DecodeManifest = (bytes: Uint8Array) =>
 	).pipe(
 		Effect.mapError((cause) => new ForgeSeaBootstrapFailure({ cause, operation: "manifest" })),
 	);
+
+const VerifyNoProviderPayloads = (manifest: SeaAssetManifest) =>
+	manifest.assets.some((asset) => HasProviderPayload(asset.relative_path))
+		? Effect.fail(
+				new ForgeSeaBootstrapFailure({
+					cause: "Forge SEA assets must not contain provider payloads",
+					operation: "manifest",
+				}),
+			)
+		: Effect.succeed(false as const);
 
 const PrepareSeaRuntime = Effect.gen(function* () {
 	const source = yield* SeaAssetSource;
@@ -73,11 +88,13 @@ const SeaSmokeProgram = Effect.gen(function* () {
 			Effect.flatMap(DecodeManifest),
 			Effect.flatMap(Schema.decodeUnknownEffect(SeaAssetManifest)),
 		);
+	const provider_payloads = yield* VerifyNoProviderPayloads(manifest);
 
 	yield* Console.log(
 		JSON.stringify({
 			assets: manifest.assets.length,
 			manifest_version: manifest.version,
+			provider_payloads,
 			sea: isSea(),
 		}),
 	);
@@ -85,6 +102,14 @@ const SeaSmokeProgram = Effect.gen(function* () {
 
 const SeaRuntimeSmokeProgram = Effect.gen(function* () {
 	yield* PrepareSeaRuntime;
+	const source = yield* SeaAssetSource;
+	const manifest = yield* source
+		.Read(SeaManifestAssetId)
+		.pipe(
+			Effect.flatMap(DecodeManifest),
+			Effect.flatMap(Schema.decodeUnknownEffect(SeaAssetManifest)),
+		);
+	const provider_payloads = yield* VerifyNoProviderPayloads(manifest);
 	const file_system = yield* FileSystem.FileSystem;
 	const native_runtime = process.env.ARTISAN_NATIVE_RUNTIME;
 	const migrations = process.env.ARTISAN_MIGRATIONS_PATH;
@@ -109,13 +134,6 @@ const SeaRuntimeSmokeProgram = Effect.gen(function* () {
 		},
 		catch: (cause) => new ForgeSeaBootstrapFailure({ cause, operation: "native-runtime" }),
 	});
-	const claude_cli = yield* file_system
-		.exists(resolve(native_runtime, "claude-agent-sdk", "claude.exe"))
-		.pipe(
-			Effect.mapError(
-				(cause) => new ForgeSeaBootstrapFailure({ cause, operation: "native-runtime" }),
-			),
-		);
 	const migration_files = yield* file_system
 		.readDirectory(migrations, { recursive: true })
 		.pipe(
@@ -123,18 +141,18 @@ const SeaRuntimeSmokeProgram = Effect.gen(function* () {
 				(cause) => new ForgeSeaBootstrapFailure({ cause, operation: "native-runtime" }),
 			),
 		);
-	if (!claude_cli || !migration_files.some((path) => path.endsWith(".sql"))) {
+	if (!migration_files.some((path) => path.endsWith(".sql"))) {
 		return yield* new ForgeSeaBootstrapFailure({
-			cause: "The extracted Claude CLI or migrations are missing",
+			cause: "The extracted migrations are missing",
 			operation: "native-runtime",
 		});
 	}
 	yield* Console.log(
 		JSON.stringify({
-			claude_cli: true,
 			koffi: loaded.koffi,
 			migrations: migration_files.filter((path) => path.endsWith(".sql")).length,
 			node_pty: loaded.node_pty,
+			provider_payloads,
 			runtime: true,
 			sea: isSea(),
 		}),

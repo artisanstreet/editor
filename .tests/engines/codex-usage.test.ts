@@ -1,21 +1,39 @@
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
-import { NodeFileSystem } from "@effect/platform-node-shared";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { Effect, FileSystem } from "effect";
+import { afterEach, describe, expect, it } from "vitest";
+import { Effect, Exit } from "effect";
 
 import {
 	MakeCodexUsage,
 	map_codex_rate_limits_to_quota_windows,
 	type CodexRateLimitsReadResult,
 } from "../../modules/engines/src/codex/usage";
-import { CodexProcessFactory } from "../../modules/engines/src/codex/process";
+import {
+	CodexProcessFactory,
+	CodexProcessFactoryLive,
+} from "../../modules/engines/src/codex/process";
 
-const never_spawn_factory: typeof CodexProcessFactory.Service = {
-	Spawn: () => Effect.die("usage must not spawn Codex without saved credentials"),
-};
+const fixture_path = fileURLToPath(new URL("./fixtures/fake-app-server.ts", import.meta.url));
+const original_scenario = process.env.FAKE_APP_SERVER_SCENARIO;
+
+afterEach(() => {
+	if (original_scenario === undefined) delete process.env.FAKE_APP_SERVER_SCENARIO;
+	else process.env.FAKE_APP_SERVER_SCENARIO = original_scenario;
+});
+
+const MakeUsage = (factory: typeof CodexProcessFactory.Service) =>
+	MakeCodexUsage({
+		executable: process.execPath,
+		executable_args: [fixture_path],
+		factory,
+	});
+
+const Usage = () =>
+	Effect.gen(function* () {
+		const factory = yield* CodexProcessFactory;
+
+		return yield* MakeUsage(factory);
+	});
 
 describe("map_codex_rate_limits_to_quota_windows", () => {
 	it("maps every bucket in rateLimitsByLimitId, one window per non-null slot", () => {
@@ -126,68 +144,73 @@ describe("map_codex_rate_limits_to_quota_windows", () => {
 	});
 });
 
-describe("MakeCodexUsage authentication precheck", () => {
-	let codex_home: string;
+describe("MakeCodexUsage ACP account usage", () => {
+	it("does no work until execution, then asks the configured app-server without a filesystem service", async () => {
+		let spawns = 0;
+		const factory: typeof CodexProcessFactory.Service = {
+			Spawn: () =>
+				Effect.sync(() => {
+					spawns += 1;
+				}).pipe(Effect.andThen(Effect.die("stop after proving execution is lazy"))),
+		};
+		const usage = MakeUsage(factory);
 
-	beforeEach(async () => {
-		codex_home = await mkdtemp(join(tmpdir(), "artisan-usage-"));
+		expect(spawns).toBe(0);
+		await Effect.runPromise(Effect.exit(usage));
+		expect(spawns).toBe(1);
 	});
 
-	afterEach(async () => {
-		await rm(codex_home, { force: true, recursive: true });
-	});
-
-	it("reports unauthenticated without spawning when auth.json is missing", async () => {
+	it("reads authenticated account and rate limits through app-server with no auth file", async () => {
 		const usage = await Effect.runPromise(
-			Effect.gen(function* () {
-				const file_system = yield* FileSystem.FileSystem;
-
-				return yield* MakeCodexUsage({
-					codex_home,
-					executable: process.execPath,
-					executable_args: ["--this-flag-must-never-run"],
-					factory: never_spawn_factory,
-					file_system,
-				});
-			}).pipe(Effect.provide(NodeFileSystem.layer)),
+			Usage().pipe(Effect.provide(CodexProcessFactoryLive)),
 		);
 
 		expect(usage).toEqual({
-			authentication: {
-				reason: "Codex CLI has no saved ChatGPT session or API key",
-				state: "unauthenticated",
-			},
+			account_email: "fake@example.com",
+			authentication: { state: "authenticated" },
+			windows: [
+				{
+					id: "codex:primary",
+					kind: "session",
+					label: "Codex",
+					percent_used: 25,
+					resets_at: new Date(1_800_000_000 * 1_000).toISOString(),
+					window_minutes: 300,
+				},
+			],
+		});
+	});
+
+	it("maps ACP account and login responses to unauthenticated usage", async () => {
+		process.env.FAKE_APP_SERVER_SCENARIO = "usage-account-unauthenticated";
+		const account = await Effect.runPromise(
+			Usage().pipe(Effect.provide(CodexProcessFactoryLive)),
+		);
+		expect(account).toMatchObject({
+			authentication: { reason: "OpenAI authentication required", state: "unauthenticated" },
+			windows: [],
+		});
+
+		process.env.FAKE_APP_SERVER_SCENARIO = "usage-login-required";
+		const login = await Effect.runPromise(
+			Usage().pipe(Effect.provide(CodexProcessFactoryLive)),
+		);
+		expect(login).toMatchObject({
+			authentication: { reason: "Not logged in to Codex", state: "unauthenticated" },
 			windows: [],
 		});
 	});
 
-	it("reports unauthenticated without spawning when tokens and OPENAI_API_KEY are both null", async () => {
-		await writeFile(
-			join(codex_home, "auth.json"),
-			JSON.stringify({
-				OPENAI_API_KEY: null,
-				auth_mode: "chatgpt",
-				last_refresh: null,
-				tokens: null,
-			}),
-			"utf8",
-		);
+	it.each(["usage-rate-limit-failure", "usage-rate-limit-malformed"])(
+		"fails truthfully for %s ACP failures",
+		async (scenario) => {
+			process.env.FAKE_APP_SERVER_SCENARIO = scenario;
+			const result = await Effect.runPromise(
+				Effect.exit(Usage().pipe(Effect.provide(CodexProcessFactoryLive))),
+			);
 
-		const usage = await Effect.runPromise(
-			Effect.gen(function* () {
-				const file_system = yield* FileSystem.FileSystem;
-
-				return yield* MakeCodexUsage({
-					codex_home,
-					executable: process.execPath,
-					executable_args: ["--this-flag-must-never-run"],
-					factory: never_spawn_factory,
-					file_system,
-				});
-			}).pipe(Effect.provide(NodeFileSystem.layer)),
-		);
-
-		expect(usage.authentication.state).toBe("unauthenticated");
-		expect(usage.windows).toEqual([]);
-	});
+			expect(Exit.isFailure(result)).toBe(true);
+			expect(JSON.stringify(result)).toContain("EngineProtocolError");
+		},
+	);
 });

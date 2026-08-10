@@ -1,4 +1,4 @@
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync, spawn, type Serializable } from "node:child_process";
 import {
 	cpSync,
 	existsSync,
@@ -39,17 +39,32 @@ const executable_path = resolve(staging_root, "Artisan Forge.exe");
 const manifest_asset_id = "artisan-sea-manifest";
 const sea_sentinel = "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2";
 
+export const provider_sdk_bundle_markers = [
+	"@anthropic-ai/claude-agent-sdk",
+	"@anthropic-ai/sdk",
+	"@openai/codex-sdk",
+] as const;
+
+/** Rejects provider package code while allowing Artisan's provider-neutral adapter vocabulary. */
+export const AssertForgeBundleHasNoProviderSdk = (bundle: Uint8Array) => {
+	const source = new TextDecoder().decode(bundle);
+	const matches = provider_sdk_bundle_markers.filter((marker) => source.includes(marker));
+	if (matches.length > 0)
+		throw new Error(`Forge bundle contains provider SDK package code: ${matches.join(", ")}`);
+};
+
 const SeaSmokeReport = Schema.Struct({
 	assets: Schema.Int.check(Schema.isGreaterThan(0)),
 	manifest_version: Schema.Literal(1),
+	provider_payloads: Schema.Literal(false),
 	sea: Schema.Literal(true),
 });
 
 const SeaRuntimeSmokeReport = Schema.Struct({
-	claude_cli: Schema.Literal(true),
 	koffi: Schema.Literal(true),
 	migrations: Schema.Int.check(Schema.isGreaterThan(0)),
 	node_pty: Schema.Literal(true),
+	provider_payloads: Schema.Literal(false),
 	runtime: Schema.Literal(true),
 	sea: Schema.Literal(true),
 });
@@ -87,7 +102,7 @@ const SmokeWindowsProcessHost = (executable: string, environment: NodeJS.Process
 				reject(cause);
 			}
 		};
-		const Send = (message: unknown) =>
+		const Send = (message: Serializable) =>
 			child.send(message, (cause) => {
 				if (cause) Finish(cause);
 			});
@@ -169,6 +184,7 @@ export const BuildForgeSea = async () => {
 		throw new Error("Artisan Forge SEA production builds currently require Windows x64");
 
 	await build(CreateForgeSeaRolldownConfig());
+	AssertForgeBundleHasNoProviderSdk(readFileSync(bundle_path));
 	const artifacts = GenerateSeaBuildArtifacts({
 		assets: CollectForgeSeaAssets(workspace_root),
 		main_path: bundle_path,

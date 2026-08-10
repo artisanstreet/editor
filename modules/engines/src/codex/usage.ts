@@ -1,6 +1,4 @@
-import { join } from "node:path";
-
-import { Effect, FileSystem, Option, Schema } from "effect";
+import { Effect, Schema } from "effect";
 
 import {
 	type EngineAccountUsage,
@@ -133,36 +131,6 @@ export function map_codex_rate_limits_to_quota_windows(
 	return windows;
 }
 
-/** Describes the minimal Codex `auth.json` fields needed to gate a spawn. @since 0.6.0 */
-const CodexAuthFile = Schema.Struct({
-	OPENAI_API_KEY: Schema.optional(Schema.Unknown),
-	tokens: Schema.optional(Schema.Unknown),
-});
-
-/**
- * Reads `<codex_home>/auth.json` and reports whether Codex has a saved
- * ChatGPT session or API key, without ever exposing token values. Any read,
- * parse, or decode failure (including a missing file) is treated as absent
- * credentials so callers can skip spawning Codex entirely.
- */
-function HasCodexCredentials(file_system: FileSystem.FileSystem, codex_home: string) {
-	const auth_path = join(codex_home, "auth.json");
-
-	return file_system.readFileString(auth_path).pipe(
-		Effect.flatMap(
-			Schema.decodeUnknownEffect(Schema.fromJsonString(CodexAuthFile), {
-				onExcessProperty: "preserve",
-			}),
-		),
-		Effect.map((auth) =>
-			auth.tokens !== undefined && auth.tokens !== null
-				? true
-				: auth.OPENAI_API_KEY !== undefined && auth.OPENAI_API_KEY !== null,
-		),
-		Effect.catch(() => Effect.succeed(false)),
-	);
-}
-
 /** Recognizes provider error messages that report a missing or invalid login. */
 const CODEX_LOGIN_ERROR_MESSAGE_PATTERN =
 	/not\s+logged\s+in|log[\s-]?in\s+required|please\s+(sign|log)[\s-]?in|unauthenticated|not\s+authenticated|no\s+active\s+account|authentication\s+required/i;
@@ -200,27 +168,23 @@ function map_codex_usage_session_failure(
 
 /** Configures one non-billable Codex account-usage read. @since 0.6.0 */
 export interface CodexUsageOptions {
-	/** Resolved Codex home directory holding `auth.json`. */
-	readonly codex_home: string;
 	readonly executable: string;
 	readonly executable_args: ReadonlyArray<string>;
 	readonly factory: typeof CodexProcessFactory.Service;
-	readonly file_system: FileSystem.FileSystem;
 	/** Caps the whole spawn-handshake-request sequence; defaults to 15 seconds. */
 	readonly overall_timeout_ms?: number;
 	readonly request_timeout_ms?: number;
 }
 
 /**
- * Builds the Codex adapter's `Engine.Usage` effect. Checks `auth.json` first
- * and returns an unauthenticated result without spawning when Codex has
- * neither a saved ChatGPT session nor an API key. Otherwise spawns
- * `codex app-server`, performs the initialize/initialized handshake, and
- * reads `account/rateLimits/read`, always reaping the process through a
- * scope and bounding the whole operation with a timeout.
+ * Builds the Codex adapter's `Engine.Usage` effect through the configured
+ * `codex app-server --stdio` ACP surface. The provider's account and
+ * rate-limit responses are the sole authentication authority; no private
+ * credential file is read. The process is always reaped through a scope and
+ * the complete request sequence is bounded by a timeout.
  *
  * @since 0.6.0
- * @param options - Executable, transport factory, and resolved Codex home.
+ * @param options - Configured executable and transport factory.
  * @returns A non-billable effect reporting authentication and quota windows.
  */
 export function MakeCodexUsage(
@@ -241,6 +205,53 @@ export function MakeCodexUsage(
 		yield* session
 			.Handshake({ client_name: "artisan-usage", client_version: "0.6.0" })
 			.pipe(Effect.mapError(map_codex_usage_session_failure));
+
+		const account_outcome = yield* session.Request("account/read", {}).pipe(
+			Effect.map((response) => ({ _tag: "ok" as const, response })),
+			Effect.catch((failure) =>
+				failure instanceof CodexAppServerResponseError &&
+				is_codex_login_error_message(failure.error.message)
+					? Effect.succeed({
+							_tag: "unauthenticated" as const,
+							reason: failure.error.message,
+						})
+					: Effect.fail(map_codex_usage_session_failure(failure)),
+			),
+		);
+
+		if (account_outcome._tag === "unauthenticated") {
+			return {
+				authentication: {
+					reason: account_outcome.reason,
+					state: "unauthenticated" as const,
+				},
+				windows: [],
+			} satisfies EngineAccountUsage;
+		}
+
+		const account = yield* Schema.decodeUnknownEffect(CodexAccountReadSchema, {
+			onExcessProperty: "preserve",
+		})(account_outcome.response.result).pipe(
+			Effect.mapError(
+				() =>
+					new EngineProtocolError({
+						engine_id: "codex",
+						message: "Codex account/read returned an invalid result",
+					}),
+			),
+		);
+
+		if (account.account === null) {
+			return {
+				authentication: {
+					reason: account.requiresOpenaiAuth
+						? "OpenAI authentication required"
+						: "No ChatGPT or API-key account is active",
+					state: "unauthenticated" as const,
+				},
+				windows: [],
+			} satisfies EngineAccountUsage;
+		}
 
 		const outcome = yield* session.Request("account/rateLimits/read", {}).pipe(
 			Effect.map((response) => ({ _tag: "ok" as const, response })),
@@ -274,20 +285,8 @@ export function MakeCodexUsage(
 			),
 		);
 
-		/** Best-effort: the account email is presentation, never a gate. */
-		const account = yield* session.Request("account/read", {}).pipe(
-			Effect.flatMap((response) =>
-				Schema.decodeUnknownEffect(CodexAccountReadSchema, {
-					onExcessProperty: "preserve",
-				})(response.result),
-			),
-			Effect.option,
-		);
-		const account_email = Option.match(account, {
-			onNone: () => undefined,
-			onSome: (read) =>
-				read.account?.type === "chatgpt" ? (read.account.email ?? undefined) : undefined,
-		});
+		const account_email =
+			account.account.type === "chatgpt" ? (account.account.email ?? undefined) : undefined;
 
 		return {
 			...(account_email === undefined ? {} : { account_email }),
@@ -296,32 +295,18 @@ export function MakeCodexUsage(
 		} satisfies EngineAccountUsage;
 	});
 
-	return Effect.gen(function* () {
-		const has_credentials = yield* HasCodexCredentials(options.file_system, options.codex_home);
-
-		if (!has_credentials) {
-			return {
-				authentication: {
-					reason: "Codex CLI has no saved ChatGPT session or API key",
-					state: "unauthenticated" as const,
-				},
-				windows: [],
-			} satisfies EngineAccountUsage;
-		}
-
-		return yield* Effect.scoped(RunRateLimitsRead).pipe(
-			Effect.timeoutOrElse({
-				duration: overall_timeout_ms,
-				orElse: () =>
-					Effect.fail(
-						new EngineProcessError({
-							cause: new Error(
-								`Codex account usage timed out after ${overall_timeout_ms}ms`,
-							),
-							operation: "read",
-						}),
-					),
-			}),
-		);
-	});
+	return Effect.scoped(RunRateLimitsRead).pipe(
+		Effect.timeoutOrElse({
+			duration: overall_timeout_ms,
+			orElse: () =>
+				Effect.fail(
+					new EngineProcessError({
+						cause: new Error(
+							`Codex account usage timed out after ${overall_timeout_ms}ms`,
+						),
+						operation: "read",
+					}),
+				),
+		}),
+	);
 }

@@ -123,6 +123,20 @@ export const SurfaceFromEngineObservation = (
 				kind: "engine_native_action",
 				summary: summary("Engine action"),
 			};
+		case "subagent":
+			return {
+				...base,
+				category: "work",
+				kind: "run",
+				summary: summary("Subagent", observation.state),
+			};
+		case "subagent_transcript":
+			return {
+				...base,
+				category: "work",
+				kind: "message",
+				summary: summary("Subagent transcript"),
+			};
 		case "usage":
 			return {
 				...base,

@@ -59,13 +59,6 @@ export const CollectForgeSeaAssets = (
 	const node_pty_root = resolve(workspace_root, "modules/backend/node_modules/node-pty");
 	const koffi_root = realpathSync(resolve(workspace_root, "modules/engines/node_modules/koffi"));
 	const koffi_native_root = resolve(dirname(koffi_root), "@koromix/koffi-win32-x64");
-	const agent_sdk_root = realpathSync(
-		resolve(workspace_root, "modules/engines/node_modules/@anthropic-ai/claude-agent-sdk"),
-	);
-	const claude_cli_path = resolve(
-		dirname(agent_sdk_root),
-		"claude-agent-sdk-win32-x64/claude.exe",
-	);
 	const assets = [
 		...ExactAssets(node_pty_root, "native-runtime/node_modules/node-pty", [
 			"LICENSE",
@@ -91,7 +84,6 @@ export const CollectForgeSeaAssets = (
 			resolve(koffi_native_root, "win32_x64"),
 			"native-runtime/node_modules/@koromix/koffi-win32-x64/win32_x64",
 		),
-		MakeAsset(claude_cli_path, "native-runtime/node_modules/claude-agent-sdk/claude.exe"),
 		...TreeAssets(resolve(workspace_root, "modules/backend/drizzle"), "migrations"),
 	].sort((left, right) => left.relative_path.localeCompare(right.relative_path));
 

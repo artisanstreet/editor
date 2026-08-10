@@ -1,36 +1,33 @@
 # Agent Engine IO Research
 
-Last updated: 2026-07-18
+Last updated: 2026-08-10
 
-Status: historical engine-I/O research. Claude Code capture notes below are
-deferred and no Claude execution adapter ships during prototyping. Codex CLI is
-the sole production Engine; the provider-neutral seam and fake harness remain.
+Status: active provider-I/O architecture. Forge and Editor ship only
+Artisan-owned runtime code. Provider executables, authentication state, and
+protocol implementations remain external and are reached through CLI or ACP
+subprocess adapters.
 
-> Everything below that describes a Claude adapter, command, architecture, or
-> “v1” recommendation is an archived 2026-07-06 proposal, not a current product
-> requirement. It is retained only as research input for a possible future
-> adapter decision.
+This note records how Artisan captures input/output from Codex CLI and Claude
+Code CLI without linking or embedding either provider's SDK or executable.
 
-This note captures the original research into how Artisan Editor could capture
-input/output from Codex CLI and Claude Code CLI.
+## Active Summary
 
-## Historical Summary (Claude Proposal Superseded)
-
-The original research recommended avoiding interactive terminal TUI scraping.
-Both candidates exposed more structured paths that fit Artisan's engine adapter
-module better.
+Interactive terminal TUI scraping is not used. Both production providers expose
+structured subprocess protocols that fit Artisan's provider-neutral Engine seam.
 
 - Codex v1 preferred path: spawn `codex app-server` over stdio and speak its
   JSONL JSON-RPC protocol.
 - Codex fallback path: use `codex exec --json` for one-shot or automation-style
   runs.
-- Superseded Claude proposal: spawn `claude -p` in print mode with
+- Claude path: spawn the user's `claude -p` in print mode with
   `--output-format stream-json --verbose`, parse stdout as streamed JSON, and
   keep stderr as raw diagnostics.
-- The proposal preferred the installed Claude Code CLI over the Claude Code SDK
-  for subscription-backed local auth. No Claude path currently ships.
+- Provider usage/authentication is requested through those same external
+  surfaces: Codex ACP account methods and Claude's `/usage` command.
+- Provider packages and executables are forbidden from product manifests, Forge
+  SEA assets, and the bundled JavaScript source graph.
 
-## Superseded Multi-Engine Capture Sketch (Historical)
+## Multi-Engine Capture
 
 ```mermaid
 flowchart TB
@@ -139,9 +136,9 @@ Limitations:
   be made less awful with `--no-alt-screen`, but it is still screen scraping,
   not a stable interface.
 
-## Claude Code CLI Capture (Deferred Historical Research)
+## Claude Code CLI Capture
 
-### Historical proposal: print mode stream JSON
+### Production path: bidirectional stream JSON
 
 Run Claude Code as a child process in print mode:
 
@@ -149,17 +146,17 @@ Run Claude Code as a child process in print mode:
 claude -p --output-format stream-json --verbose "summarize this repo"
 ```
 
-Capture strategy:
+Production capture strategy:
 
 - Spawn with `stdin`, `stdout`, and `stderr` piped.
 - Parse `stdout` as streamed JSON messages.
 - Preserve `stderr` as raw diagnostics.
 - Use `--include-partial-messages` when token-level assistant deltas matter.
 - Use `--include-hook-events` when hook lifecycle events should be visible.
-- Use `--input-format stream-json` plus `--replay-user-messages` for a
-  stream-oriented adapter that acknowledges user messages on stdout.
-- Use `--session-id`, `--resume`, or `--continue` when mapping Artisan threads
-  to Claude Code sessions.
+- Use `--input-format stream-json`, keep stdin open through the run, and answer
+  `control_request` permission frames with correlated `control_response` frames.
+- Use `--session-id` for new Artisan runs and `--resume` for compatible native
+  continuation.
 - Use `--json-schema` for validated final structured output when needed.
 
 Useful command shapes:
@@ -176,7 +173,7 @@ claude -p --output-format stream-json --verbose --include-partial-messages "expl
 claude -p --input-format stream-json --output-format stream-json --verbose --replay-user-messages
 ```
 
-Why this path was originally proposed:
+Why this is the product boundary:
 
 - It keeps the product on the user's installed Claude Code CLI and local auth
   setup.
@@ -185,7 +182,7 @@ Why this path was originally proposed:
 - It gives a structured stream without using the Agent SDK as the product
   integration surface.
 
-### Historical proposal: avoid the Claude Agent SDK as the primary path
+### Provider SDK exclusion
 
 Claude's Agent SDK is technically attractive because it exposes typed async
 messages, streaming input, permissions, hooks, tools, sessions, and
@@ -193,18 +190,18 @@ interruptions. However, it points the product toward API-key-style integration
 and vendor-controlled auth rules instead of the user's already-installed CLI and
 subscription workflow.
 
-That conflicted with Artisan's original positioning: use the user's existing CLI
-and subscription auth instead of forcing API billing. The archived proposal
-therefore favored a CLI subprocess over the Agent SDK. It is not an active
-implementation requirement.
+That conflicts with Artisan's product boundary: use the user's existing CLI and
+subscription auth while keeping provider code and memory outside Forge/Editor.
+The SDK adapter and packaged native CLI were therefore removed. Source, package,
+SEA-manifest, and built-bundle gates reject their reintroduction.
 
-### Historical Claude auth proposal
+### Claude authentication and usage
 
-The proposed Claude adapter would have behaved like a terminal orchestrator
-launching a local developer tool. The user would have installed and
-authenticated Claude Code; Artisan would have discovered the executable,
-launched it with structured output flags, captured stdout/stderr, and translated
-events.
+The user installs and authenticates Claude Code. Artisan discovers the
+executable, launches it with structured input/output flags, captures bounded
+stdout/stderr, and translates schema-decoded events. Usage is fetched lazily by
+spawning `claude -p /usage --output-format json`; Artisan does not read Claude's
+private credential files or call Anthropic's private usage endpoint.
 
 Do not build v1 around direct Anthropic API billing just to satisfy the shape of
 the SDK. That would erase one of Artisan's main product advantages over API-rate
@@ -212,8 +209,8 @@ coding tools.
 
 ## Canonical Event Mapping
 
-The original research proposed mapping both candidate engines into this minimal
-event set. The current implementation applies this direction to Codex only:
+Both production adapters map their native frames into the provider-neutral
+Engine observations represented by this minimal event set:
 
 - `agent.run.started`
 - `agent.run.completed`

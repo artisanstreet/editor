@@ -21,9 +21,9 @@ describe("SEA build artifacts", () => {
 						source_path: "z-source",
 					},
 					{
-						asset_id: "claude-cli.win32-x64",
+						asset_id: "artisan-process-host.win32-x64",
 						executable: true,
-						relative_path: "claude-agent-sdk/claude.exe",
+						relative_path: "artisan-runtime/process-host.exe",
 						source_path: "a-source",
 					},
 				],
@@ -34,7 +34,7 @@ describe("SEA build artifacts", () => {
 		);
 
 		expect(first.asset_manifest.assets.map((asset) => asset.asset_id)).toEqual([
-			"claude-cli.win32-x64",
+			"artisan-process-host.win32-x64",
 			"node-pty.win32-x64",
 		]);
 		expect(first.asset_manifest.assets[0]).toMatchObject({
@@ -43,7 +43,7 @@ describe("SEA build artifacts", () => {
 			sha256: Sha256("a"),
 		});
 		expect(first.sea_config.assets).toEqual({
-			"claude-cli.win32-x64": "a-source",
+			"artisan-process-host.win32-x64": "a-source",
 			"node-pty.win32-x64": "z-source",
 		});
 		expect(first.sea_config_json).toContain('"useCodeCache": false');

@@ -294,6 +294,12 @@ function handle_request(request: FixtureRecord) {
 	}
 
 	if (request.method === "account/read") {
+		if (process.env.FAKE_APP_SERVER_SCENARIO === "usage-account-unauthenticated") {
+			respond(request.id, { account: null, requiresOpenaiAuth: true });
+
+			return;
+		}
+
 		if (process.env.FAKE_APP_SERVER_SCENARIO === "bedrock") {
 			respond(request.id, {
 				account: { credentialSource: "codexManaged", type: "amazonBedrock" },
@@ -306,6 +312,47 @@ function handle_request(request: FixtureRecord) {
 		respond(request.id, {
 			account: { email: "fake@example.com", planType: "plus", type: "chatgpt" },
 			requiresOpenaiAuth: false,
+		});
+
+		return;
+	}
+
+	if (request.method === "account/rateLimits/read") {
+		if (process.env.FAKE_APP_SERVER_SCENARIO === "usage-login-required") {
+			write_frame({
+				error: { code: -32001, message: "Not logged in to Codex" },
+				id: request.id,
+			});
+
+			return;
+		}
+		if (process.env.FAKE_APP_SERVER_SCENARIO === "usage-rate-limit-failure") {
+			write_frame({
+				error: { code: -32002, message: "rate-limit service unavailable" },
+				id: request.id,
+			});
+
+			return;
+		}
+		if (process.env.FAKE_APP_SERVER_SCENARIO === "usage-rate-limit-malformed") {
+			respond(request.id, { rateLimits: "invalid" });
+
+			return;
+		}
+
+		respond(request.id, {
+			rateLimitsByLimitId: {
+				codex: {
+					limitId: "codex",
+					limitName: "Codex",
+					primary: {
+						resetsAt: 1_800_000_000,
+						usedPercent: 25,
+						windowDurationMins: 300,
+					},
+					secondary: null,
+				},
+			},
 		});
 
 		return;
@@ -621,6 +668,73 @@ function handle_request(request: FixtureRecord) {
 			}, 5);
 		}
 
+		if (process.env.FAKE_APP_SERVER_SCENARIO === "subagent-lifecycle") {
+			const root_thread_id = request.params.threadId;
+			const root_turn_id = active_turn_id;
+			const child_thread_id = "thread-child";
+			const child_turn_id = "turn-child";
+
+			setTimeout(() => {
+				write_frame({
+					method: "item/started",
+					params: {
+						item: {
+							agentPath: "/root/reviewer",
+							agentThreadId: child_thread_id,
+							id: "subagent-1",
+							kind: "started",
+							type: "subAgentActivity",
+						},
+						threadId: root_thread_id,
+						turnId: root_turn_id,
+					},
+				});
+				write_frame({
+					method: "turn/started",
+					params: { threadId: child_thread_id, turn: make_turn(child_turn_id) },
+				});
+				write_frame({
+					method: "item/started",
+					params: {
+						item: {
+							agentPath: "/root/reviewer/checker",
+							agentThreadId: "thread-grandchild",
+							id: "subagent-2",
+							kind: "started",
+							type: "subAgentActivity",
+						},
+						threadId: child_thread_id,
+						turnId: child_turn_id,
+					},
+				});
+				write_frame({
+					method: "item/completed",
+					params: {
+						item: {
+							id: "child-message",
+							memoryCitation: null,
+							phase: "final",
+							text: "Child-only result",
+							type: "agentMessage",
+						},
+						threadId: child_thread_id,
+						turnId: child_turn_id,
+					},
+				});
+				write_frame({
+					method: "turn/completed",
+					params: {
+						threadId: child_thread_id,
+						turn: make_turn(child_turn_id, "completed"),
+					},
+				});
+				write_frame({
+					method: "thread/closed",
+					params: { threadId: "thread-grandchild" },
+				});
+			}, 5);
+		}
+
 		if (process.env.FAKE_APP_SERVER_SCENARIO === "requests") {
 			setTimeout(() => {
 				write_frame({
@@ -726,6 +840,25 @@ function handle_request(request: FixtureRecord) {
 		}
 
 		respond(request.id, { turn: { id: active_turn_id } });
+
+		if (process.env.FAKE_APP_SERVER_SCENARIO === "subagent-lifecycle") {
+			write_frame({
+				method: "item/agentMessage/delta",
+				params: {
+					delta: "Root continued",
+					itemId: "root-message",
+					threadId: request.params.threadId,
+					turnId: active_turn_id,
+				},
+			});
+			write_frame({
+				method: "turn/completed",
+				params: {
+					threadId: request.params.threadId,
+					turn: make_turn(active_turn_id, "completed"),
+				},
+			});
+		}
 
 		return;
 	}

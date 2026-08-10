@@ -5,17 +5,97 @@ import {
 	classify_claude_semantic_failure,
 	normalize_claude_event,
 	read_claude_tool_uses,
+	type ClaudeNormalizationInput,
 } from "@artisan/engines";
 
-const input = (payload: unknown, frame_sequence = 1) => ({
-	artisan_run_id: "run",
-	frame_sequence,
-	payload,
-	raw_frame_base64: "eA==",
-	turn_id: "turn",
-});
+const input = (
+	payload: unknown,
+	frame_sequence = 1,
+	overrides: Partial<ClaudeNormalizationInput> = {},
+) =>
+	({
+		artisan_run_id: "run",
+		frame_sequence,
+		native_thread_id: "claude-session",
+		payload,
+		raw_frame_base64: "eA==",
+		turn_id: "turn",
+		...overrides,
+	}) satisfies ClaudeNormalizationInput;
 
 describe("Claude normalization", () => {
+	it("maps CLI task lifecycle states to one native subagent identity", () => {
+		const normalize_task = (payload: unknown, frame_sequence: number) =>
+			normalize_claude_event(
+				input(payload, frame_sequence, { native_subagent_task: true }),
+			)[0];
+
+		expect(
+			normalize_task(
+				{
+					type: "system",
+					subtype: "task_started",
+					task_id: "task-1",
+					description: "Inspect code",
+					subagent_type: "Explore",
+				},
+				1,
+			),
+		).toMatchObject({
+			_tag: "subagent",
+			agent_native_thread_id: "task-1",
+			native_thread_id: "claude-session",
+			parent_native_thread_id: "claude-session",
+			agent_path: "Explore",
+			state: "running",
+		});
+		expect(
+			normalize_task(
+				{
+					type: "system",
+					subtype: "task_updated",
+					task_id: "task-1",
+					patch: { status: "paused", description: "Awaiting result" },
+				},
+				2,
+			),
+		).toMatchObject({ _tag: "subagent", state: "waiting", activity: "Awaiting result" });
+		expect(
+			normalize_task(
+				{
+					type: "system",
+					subtype: "task_notification",
+					task_id: "task-1",
+					status: "stopped",
+					summary: "Cancelled",
+				},
+				3,
+			),
+		).toMatchObject({ _tag: "subagent", state: "interrupted", activity: "Cancelled" });
+	});
+
+	it("does not project an unclassified CLI background task as a subagent", () => {
+		for (const payload of [
+			{
+				type: "system",
+				subtype: "task_started",
+				task_id: "background-shell",
+				tool_use_id: "bash-tool",
+				task_type: "shell",
+				description: "Run the build",
+			},
+			{
+				type: "system",
+				subtype: "task_notification",
+				task_id: "background-shell",
+				status: "completed",
+				summary: "Build complete",
+			},
+		]) {
+			expect(normalize_claude_event(input(payload))).toEqual([]);
+		}
+	});
+
 	it("aggregates public text, hides thinking, and maps Bash", () => {
 		const events = normalize_claude_event(
 			input({
@@ -152,13 +232,13 @@ describe("Claude normalization", () => {
 	});
 
 	/**
-	 * The Agent SDK (and the current CLI) spell the boundary's metadata
+	 * The current CLI spells the boundary's metadata
 	 * `compact_metadata`; a schema demanding `compactMetadata` silently dropped
 	 * every compaction as "Unknown Claude event type: system". The boundary is
 	 * the one event that says the window's history was replaced, so it must
 	 * always land as a canonical compaction observation.
 	 */
-	it("captures an SDK compact boundary as a compaction observation", () => {
+	it("captures a CLI compact boundary as a compaction observation", () => {
 		const events = normalize_claude_event(
 			input({
 				type: "system",

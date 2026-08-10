@@ -30,6 +30,7 @@ const normalize = (payload: unknown, overrides: Partial<ClaudeNormalizationInput
 	normalize_claude_event({
 		artisan_run_id: "run_1",
 		frame_sequence: 1,
+		native_thread_id: "claude-session",
 		payload,
 		raw_frame_base64: "",
 		turn_id: "claude:run_1:turn",

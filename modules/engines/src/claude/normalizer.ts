@@ -8,6 +8,17 @@ import {
 	classify_claude_result_failure,
 	classify_claude_terminal_failure,
 } from "./errors";
+import {
+	normalize_claude_task_lifecycle,
+	type ClaudeTaskNormalizationInput,
+} from "./task-lifecycle";
+
+export {
+	has_claude_subagent_lifecycle_hint,
+	read_claude_task_id,
+	read_claude_task_started,
+} from "./task-lifecycle";
+export type { ClaudeTaskStarted } from "./task-lifecycle";
 
 import type {
 	EngineAgentMessageCompletedObservation,
@@ -26,11 +37,7 @@ import type {
 } from "../engine";
 
 /** Supplies one decoded Claude stream-json event to the canonical normalizer. @since 0.6.0 */
-export interface ClaudeNormalizationInput {
-	readonly artisan_run_id: string;
-	readonly frame_sequence: number;
-	readonly payload: unknown;
-	readonly raw_frame_base64: string;
+export interface ClaudeNormalizationInput extends ClaudeTaskNormalizationInput {
 	/**
 	 * The tool uses earlier assistant frames announced for this run. The CLI
 	 * sends their results later in a user frame with only `tool_use_id`, so the
@@ -44,14 +51,6 @@ export interface ClaudeNormalizationInput {
 	 * a streamed message and its completion on one conversation item.
 	 */
 	readonly stream_message_id?: string;
-	/**
-	 * Transport provenance for the run owner delivering these frames. The frame
-	 * shapes are identical across the stream-json CLI and the Agent SDK, so the
-	 * caller names the wire it actually used; absent values keep the historical
-	 * CLI strings.
-	 */
-	readonly protocol_version?: string;
-	readonly transport?: string;
 	readonly turn_id: string;
 }
 
@@ -69,8 +68,8 @@ const RetrySchema = Schema.Struct({
 /**
  * Kept deliberately loose: the boundary itself is the fact worth capturing,
  * and requiring any particular metadata internals is what silently dropped
- * every compaction before — the schema demanded `compactMetadata` while both
- * the Agent SDK and the current CLI spell it `compact_metadata`.
+ * every compaction before — the schema demanded `compactMetadata` while the
+ * current CLI stream spells it `compact_metadata`.
  */
 const CompactionMetadataSchema = Schema.Struct({
 	trigger: Schema.optional(Schema.String),
@@ -330,6 +329,7 @@ function make_base(input: ClaudeNormalizationInput, native_method: string, suffi
 
 	return {
 		artisan_run_id: input.artisan_run_id,
+		native_thread_id: input.native_thread_id,
 		observation_id: [input.artisan_run_id, "claude", String(input.frame_sequence), suffix]
 			.filter((part) => part !== undefined)
 			.join(":"),
@@ -741,6 +741,9 @@ export function normalize_claude_event(
 		}
 		return observations;
 	}
+
+	const task_lifecycle = normalize_claude_task_lifecycle(input);
+	if (task_lifecycle !== undefined) return task_lifecycle;
 
 	/** Bookkeeping frames stay in raw provenance only. */
 	const system_frame = decode(SystemSubtypeSchema, input.payload);

@@ -1,4 +1,4 @@
-import { isAbsolute, join } from "node:path";
+import { isAbsolute } from "node:path";
 import { NodeFileSystem } from "@effect/platform-node-shared";
 
 import {
@@ -36,6 +36,7 @@ import {
 } from "../engine";
 import { WatchEngineInactivity } from "../process/inactivity-deadline";
 import { normalise_codex_notification } from "./normalizer";
+import { NormalizeCodexChildObservation } from "./child-observation";
 import {
 	open_codex_app_server_session,
 	type CodexAppServerDiagnostic,
@@ -94,7 +95,7 @@ export const CodexEngineDescriptor: EngineDescriptor = {
 		steer: { state: "supported" },
 		subagents: {
 			state: "experimental",
-			reason: "Subagent and collaboration activity remains provider-native.",
+			reason: "Native child discovery and lifecycle are canonicalized without owning the root turn.",
 		},
 	},
 	display_name: "Codex",
@@ -120,9 +121,29 @@ export class CodexEngine extends Context.Service<CodexEngine, Engine>()("Artisan
 
 interface CodexRunState {
 	readonly active_turn_id: string | undefined;
+	readonly root_native_thread_id: string | undefined;
 	readonly approvals: ReadonlyMap<string, PendingApproval>;
 	readonly command_intents: ReadonlyMap<string, string>;
 	readonly questions: ReadonlyMap<string, PendingQuestion>;
+}
+
+function native_thread_id_from_payload(payload: unknown): string | undefined {
+	if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return undefined;
+
+	const record = payload as Readonly<Record<string, unknown>>;
+
+	if (typeof record.threadId === "string") return record.threadId;
+	if (
+		typeof record.thread === "object" &&
+		record.thread !== null &&
+		!Array.isArray(record.thread)
+	) {
+		const thread = record.thread as Readonly<Record<string, unknown>>;
+
+		return typeof thread.id === "string" ? thread.id : undefined;
+	}
+
+	return undefined;
 }
 
 interface PendingApproval {
@@ -310,6 +331,7 @@ function make_codex_app_server_engine(
 			const command_lock = yield* Semaphore.make(1);
 			const state = yield* Ref.make<CodexRunState>({
 				active_turn_id: undefined,
+				root_native_thread_id: undefined,
 				approvals: new Map(),
 				command_intents: new Map(),
 				questions: new Map(),
@@ -381,6 +403,18 @@ function make_codex_app_server_engine(
 						yield* Finish(terminal);
 					}
 				});
+			const ProcessChildObservation = (
+				observation: EngineObservation,
+				child_native_thread_id: string,
+				parent_native_thread_id: string,
+			) => {
+				const child = NormalizeCodexChildObservation({
+					child_native_thread_id,
+					observation,
+					parent_native_thread_id,
+				});
+				return child === undefined ? Effect.void : Emit(child);
+			};
 			const PumpNotifications = session.Notifications.pipe(
 				Stream.runForEach((notification) =>
 					Semaphore.withPermit(command_lock)(
@@ -395,13 +429,30 @@ function make_codex_app_server_engine(
 							transport: CodexTransportMetadata.transport,
 						}).pipe(
 							Effect.flatMap((observations) =>
-								Effect.forEach(observations, ProcessObservation).pipe(
-									Effect.andThen(
-										notification.method === "thread/closed"
-											? Finish("closed")
-											: Effect.void,
-									),
-								),
+								Effect.gen(function* () {
+									const current = yield* Ref.get(state);
+									const native_thread_id = native_thread_id_from_payload(
+										notification.params,
+									);
+									const is_child =
+										current.root_native_thread_id !== undefined &&
+										native_thread_id !== undefined &&
+										native_thread_id !== current.root_native_thread_id;
+
+									yield* Effect.forEach(observations, (observation) =>
+										is_child
+											? ProcessChildObservation(
+													observation,
+													native_thread_id,
+													current.root_native_thread_id,
+												)
+											: ProcessObservation(observation),
+									);
+
+									if (notification.method === "thread/closed" && !is_child) {
+										yield* Finish("closed");
+									}
+								}),
 							),
 						),
 					),
@@ -468,6 +519,10 @@ function make_codex_app_server_engine(
 			const resumed_active_turn = [...(thread.thread.turns ?? [])]
 				.reverse()
 				.find((turn) => turn.status === "inProgress");
+			yield* Ref.update(state, (current) => ({
+				...current,
+				root_native_thread_id: thread.thread.id,
+			}));
 
 			if (resumed_active_turn) {
 				yield* Ref.update(state, (current) => ({
@@ -857,18 +912,10 @@ export function make_codex_engine_layer(
 						});
 					}),
 			};
-			const codex_home =
-				make_codex_process_environment(
-					{},
-					runtime_environment.inherited_environment,
-					runtime_environment.user_profile,
-				).CODEX_HOME ?? join(runtime_environment.user_profile, ".codex");
 			const Usage = MakeCodexUsage({
-				codex_home,
 				executable,
 				executable_args: options.executable_args ?? [],
 				factory,
-				file_system,
 				request_timeout_ms: options.request_timeout_ms ?? 10_000,
 			});
 			return {

@@ -34,6 +34,64 @@ function normalise(
 }
 
 describe("Codex normalizer", () => {
+	it("normalizes provider-native subagent discovery without leaking it as an action", async () => {
+		const [observation] = await Effect.runPromise(
+			normalise("item/started", {
+				item: {
+					agentPath: "/root/reviewer",
+					agentThreadId: "thread-child",
+					id: "subagent-1",
+					kind: "started",
+					type: "subAgentActivity",
+				},
+				threadId: "thread-root",
+				turnId: "turn-root",
+			}),
+		);
+
+		expect(observation).toMatchObject({
+			_tag: "subagent",
+			agent_native_thread_id: "thread-child",
+			agent_path: "/root/reviewer",
+			activity: "started",
+			parent_native_thread_id: "thread-root",
+			state: "discovered",
+			turn_id: "turn-root",
+		});
+	});
+
+	it("normalizes current collaboration tool recipients as native subagents", async () => {
+		const observations = await Effect.runPromise(
+			normalise("item/started", {
+				item: {
+					agentsStates: {},
+					id: "collab-1",
+					receiverThreadIds: ["thread-child-a", "thread-child-b"],
+					senderThreadId: "thread-root",
+					status: "inProgress",
+					tool: "spawn_agent",
+					type: "collabAgentToolCall",
+				},
+				threadId: "thread-root",
+				turnId: "turn-root",
+			}),
+		);
+
+		expect(observations).toMatchObject([
+			{
+				_tag: "subagent",
+				agent_native_thread_id: "thread-child-a",
+				activity: "spawn_agent",
+				parent_native_thread_id: "thread-root",
+				state: "discovered",
+			},
+			{
+				_tag: "subagent",
+				agent_native_thread_id: "thread-child-b",
+			},
+		]);
+	});
+
 	it("retains completion-only compaction notifications without fabricating an identity", async () => {
 		const [observation] = await Effect.runPromise(
 			normalise("thread/compacted", { threadId: "thread-1", turnId: "turn-1" }),
@@ -90,6 +148,7 @@ describe("Codex normalizer", () => {
 			frame_sequence: 1,
 			raw_frame_base64: "e30=",
 		});
+		expect(flattened[0]).toMatchObject({ native_thread_id: "thread-1" });
 		expect(flattened[1]).toMatchObject({
 			entries: [{ id: "turn-1:plan:0", status: "in_progress", text: "Inspect" }],
 		});
