@@ -5,7 +5,7 @@ Last updated: 2026-08-10. Branch continuity only; durable verified status is in 
 ## Working State
 
 - Repository `C:\Users\sander\Desktop\artisan-editor`; direct `master` → `origin/master`.
-- Forge lifecycle `810e07b4` is pushed; local/remote `master` match and 0.2.27 runs.
+- Provider-boundary milestone `d36057be` is pushed; local/remote `master` match.
 - Root cleanup is isolated from unrelated work still present in the checkout.
 
 ## Invariants
