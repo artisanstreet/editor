@@ -32,7 +32,7 @@ Last updated: 2026-08-10. Branch continuity only; durable verified status is in 
 - Working rows keep a bounded assistant preview separate from lifecycle; marquee code is bare muted monospace.
 - Tool configuration lives under `.config/`; only Windows installer transport/test remain PowerShell.
 - A latched recovery epoch and browser clock-gap monitor recover after suspend without reloading.
-- Streaming repair remains for prose finalization/late mounts. Waiting slice `5551929d` is pushed and passes focused tests/review/lint/type/build/native. Full gate has unrelated scrollbar format, two stale participant-window assertions, and two persistent Claude CLI timeouts.
+- Streaming repair remains for prose finalization/late mounts. Waiting slice `5551929d` is pushed and passes 89 focused tests/review/lint/type/build/native. Full gate has unrelated scrollbar format, two stale participant-window assertions, and two persistent Claude CLI timeouts.
 - Open work-session body/header spacing matches; real trace status retains `gap-5`.
 - Changed-file rows/header now share an edge, the all-known aggregate sits at
   right, and the gap matches row `py-1.5`. Opt-in thread notifications are
