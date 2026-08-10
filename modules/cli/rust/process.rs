@@ -1,9 +1,11 @@
 use std::{
+    collections::HashSet,
     fs::{self, OpenOptions},
+    io::Read,
     path::Path,
     process::{Command, Stdio},
     thread,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 use crate::{
@@ -17,6 +19,10 @@ use crate::{
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
 const SHUTDOWN_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const INSTANCE_REGISTRY_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+const INSTANCE_REGISTRY_CARD_LIMIT: usize = 256;
+const PROCESS_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(1);
+const PROCESS_SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(10);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StartResult {
@@ -50,10 +56,7 @@ pub fn start_until(
     foreground: bool,
     health_deadline: Instant,
 ) -> Result<StartResult> {
-    if let Ok(state) = crate::instance::read_json::<State>(&paths.state)
-        && http::status_until(&state.endpoint, &secrets.auth_token, health_deadline)
-            .is_ok_and(|status| status.instance_id == state.instance_id && status.pid == state.pid)
-    {
+    if live_state_until(paths, secrets, None, health_deadline)?.is_some() {
         return Ok(StartResult::AlreadyRunning);
     }
     if !foreground {
@@ -206,47 +209,31 @@ pub fn stop_with_instance_id(
     expected_instance_id: Option<&str>,
 ) -> Result<()> {
     let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
-    let state_metadata = match fs::symlink_metadata(&paths.state) {
-        Ok(metadata) => metadata,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return match expected_instance_id {
-                Some(_) => Ok(()),
-                None => Err(CliError::NotRunning),
-            };
-        }
-        Err(source) => {
-            return Err(CliError::Io {
-                context: "inspect Forge state",
-                source,
-            });
-        }
-    };
-    if state_metadata.file_type().is_symlink() || !state_metadata.is_file() {
-        return Err(CliError::UnsafePath(paths.state.clone()));
-    }
-    let state: State = crate::instance::read_json(&paths.state)?;
-    if !should_stop_instance(expected_instance_id, &state.instance_id) {
-        return Ok(());
-    }
-    if let Some(expected_instance_id) = expected_instance_id {
-        let Ok(status) = http::status_until(
-            &state.endpoint,
-            &secrets.auth_token,
-            probe_deadline(deadline, SHUTDOWN_PROBE_TIMEOUT),
-        ) else {
-            // The process may have exited or a replacement may now own this
-            // endpoint. Exact cleanup treats either race as a no-op.
-            return Ok(());
+    let Some(state) =
+        live_state_selected_until(paths, secrets, expected_instance_id, None, deadline)?
+    else {
+        return match expected_instance_id {
+            Some(_) => Ok(()),
+            None => Err(CliError::NotRunning),
         };
-        if status.instance_id != expected_instance_id {
-            return Ok(());
-        }
-        if crate::instance::read_json::<State>(&paths.state)
-            .map_or(true, |current| current.instance_id != expected_instance_id)
-        {
-            return Ok(());
-        }
-    }
+    };
+    stop_state(&state, secrets, deadline)
+}
+
+/// Stops only the authenticated Forge whose process identity the installer
+/// discovered. A bare stop could otherwise shut down a newer replacement
+/// while leaving the superseded process alive.
+pub fn stop_with_pid(paths: &InstancePaths, secrets: &Secrets, expected_pid: u32) -> Result<()> {
+    let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
+    let Some(state) =
+        live_state_selected_until(paths, secrets, None, Some(expected_pid), deadline)?
+    else {
+        return Err(CliError::NotRunning);
+    };
+    stop_state(&state, secrets, deadline)
+}
+
+fn stop_state(state: &State, secrets: &Secrets, deadline: Instant) -> Result<()> {
     http::request_until(
         &state.endpoint,
         "/api/control/shutdown",
@@ -255,13 +242,12 @@ pub fn stop_with_instance_id(
         deadline,
     )?;
     while Instant::now() < deadline {
-        if http::status_until(
+        let status = http::status_until(
             &state.endpoint,
             &secrets.auth_token,
             probe_deadline(deadline, SHUTDOWN_PROBE_TIMEOUT),
-        )
-        .is_err()
-        {
+        );
+        if !status.is_ok_and(|status| state_matches_status(state, &status)) {
             return Ok(());
         }
         sleep_until(deadline, SHUTDOWN_POLL_INTERVAL);
@@ -269,6 +255,249 @@ pub fn stop_with_instance_id(
     Err(CliError::Control(
         "Forge accepted shutdown but remained reachable".into(),
     ))
+}
+
+/// Resolves this home's live Forge through its mutable state first, then the
+/// machine registry card the Forge itself owns. The native `ae` binary is the
+/// lifecycle boundary even when `state.json` was lost: Effect's filesystem and
+/// process services live inside Forge's Node runtime and cannot repair the
+/// permanent Rust CLI that must start it on a clean machine.
+pub fn live_state_until(
+    paths: &InstancePaths,
+    secrets: &Secrets,
+    expected_instance_id: Option<&str>,
+    deadline: Instant,
+) -> Result<Option<State>> {
+    live_state_selected_until(paths, secrets, expected_instance_id, None, deadline)
+}
+
+fn live_state_selected_until(
+    paths: &InstancePaths,
+    secrets: &Secrets,
+    expected_instance_id: Option<&str>,
+    expected_pid: Option<u32>,
+    deadline: Instant,
+) -> Result<Option<State>> {
+    if let Some(state) = primary_state(paths)?
+        && should_stop_instance(expected_instance_id, &state.instance_id)
+        && expected_pid.is_none_or(|pid| pid == state.pid)
+        && state_is_live(&state, secrets, deadline)
+    {
+        return Ok(Some(state));
+    }
+
+    for state in registered_states(paths, expected_instance_id, expected_pid, deadline)? {
+        if state_is_live(&state, secrets, deadline) {
+            return Ok(Some(state));
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+    }
+    Ok(None)
+}
+
+fn primary_state(paths: &InstancePaths) -> Result<Option<State>> {
+    let metadata = match fs::symlink_metadata(&paths.state) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(source) => {
+            return Err(CliError::Io {
+                context: "inspect Forge state",
+                source,
+            });
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(CliError::UnsafePath(paths.state.clone()));
+    }
+    Ok(crate::instance::read_json::<State>(&paths.state).ok())
+}
+
+fn registered_states(
+    paths: &InstancePaths,
+    expected_instance_id: Option<&str>,
+    expected_pid: Option<u32>,
+    deadline: Instant,
+) -> Result<Vec<State>> {
+    let root = paths
+        .state
+        .parent()
+        .ok_or_else(|| CliError::UnsafePath(paths.state.clone()))?;
+    let registry = root.join("instances");
+    let metadata = match fs::symlink_metadata(&registry) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(source) => {
+            return Err(CliError::Io {
+                context: "inspect Forge instance registry",
+                source,
+            });
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(CliError::UnsafePath(registry));
+    }
+    let live_pids = live_process_ids(probe_deadline(deadline, PROCESS_SNAPSHOT_TIMEOUT));
+
+    if let Some(instance_id) = expected_instance_id {
+        if !safe_instance_id(instance_id) {
+            return Ok(Vec::new());
+        }
+        return Ok(
+            read_registered_state(&registry.join(format!("{instance_id}.json")))
+                .filter(|state| {
+                    state.instance_id == instance_id
+                        && expected_pid.is_none_or(|pid| pid == state.pid)
+                        && process_is_alive(live_pids.as_ref(), state.pid)
+                })
+                .into_iter()
+                .collect(),
+        );
+    }
+
+    let mut cards = fs::read_dir(&registry)
+        .map_err(|source| CliError::Io {
+            context: "enumerate Forge instance registry",
+            source,
+        })?
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| {
+            let file_type = entry.file_type().ok()?;
+            if file_type.is_symlink() || !file_type.is_file() {
+                return None;
+            }
+            let path = entry.path();
+            if path.extension().is_none_or(|extension| extension != "json") {
+                return None;
+            }
+            let modified = entry
+                .metadata()
+                .and_then(|metadata| metadata.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            Some((modified, path))
+        })
+        .collect::<Vec<_>>();
+    cards.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.0));
+    cards.truncate(INSTANCE_REGISTRY_CARD_LIMIT);
+
+    Ok(cards
+        .into_iter()
+        .filter_map(|(_, path)| {
+            let file_name = path.file_stem()?.to_str()?;
+            let state = read_registered_state(&path)?;
+            (state.instance_id == file_name
+                && expected_pid.is_none_or(|pid| pid == state.pid)
+                && process_is_alive(live_pids.as_ref(), state.pid))
+            .then_some(state)
+        })
+        .collect())
+}
+
+fn read_registered_state(path: &Path) -> Option<State> {
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return None;
+    }
+    crate::instance::read_json(path).ok()
+}
+
+fn state_is_live(state: &State, secrets: &Secrets, deadline: Instant) -> bool {
+    http::status_until(
+        &state.endpoint,
+        &secrets.auth_token,
+        probe_deadline(deadline, INSTANCE_REGISTRY_PROBE_TIMEOUT),
+    )
+    .is_ok_and(|status| state_matches_status(state, &status))
+}
+
+fn state_matches_status(state: &State, status: &http::StatusResponse) -> bool {
+    status.instance_id == state.instance_id && status.pid == state.pid
+}
+
+fn process_is_alive(live_pids: Option<&HashSet<u32>>, pid: u32) -> bool {
+    pid != 0 && live_pids.is_none_or(|pids| pids.contains(&pid))
+}
+
+#[cfg(target_os = "windows")]
+fn live_process_ids(deadline: Instant) -> Option<HashSet<u32>> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut command = Command::new("tasklist.exe");
+    command
+        .args(["/FO", "CSV", "/NH"])
+        .creation_flags(CREATE_NO_WINDOW);
+    command_stdout_until(&mut command, deadline)
+        .map(|stdout| parse_windows_process_ids(&String::from_utf8_lossy(&stdout)))
+}
+
+#[cfg(target_os = "windows")]
+fn parse_windows_process_ids(output: &str) -> HashSet<u32> {
+    output
+        .lines()
+        .filter_map(|line| line.split("\",\"").nth(1)?.parse().ok())
+        .collect()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn live_process_ids(deadline: Instant) -> Option<HashSet<u32>> {
+    let mut command = Command::new("ps");
+    command.args(["-e", "-o", "pid="]);
+    command_stdout_until(&mut command, deadline).map(|stdout| {
+        String::from_utf8_lossy(&stdout)
+            .lines()
+            .filter_map(|line| line.trim().parse().ok())
+            .collect()
+    })
+}
+
+/// Runs the safe OS process-list helper without allowing it to outlive the
+/// caller's monotonic lifecycle budget. Stdout is drained concurrently so a
+/// large process table cannot fill the pipe and prevent the child from exiting.
+fn command_stdout_until(command: &mut Command, deadline: Instant) -> Option<Vec<u8>> {
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let mut child = command.spawn().ok()?;
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
+    };
+    let mut reader = Some(thread::spawn(move || {
+        let mut bytes = Vec::new();
+        stdout.read_to_end(&mut bytes).map(|_| bytes)
+    }));
+
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => {
+                let bytes = reader.take()?.join().ok()?.ok()?;
+                return status.success().then_some(bytes);
+            }
+            Ok(None) if Instant::now() < deadline => {
+                sleep_until(deadline, PROCESS_SNAPSHOT_POLL_INTERVAL);
+            }
+            Ok(None) | Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                if let Some(reader) = reader.take() {
+                    let _ = reader.join();
+                }
+                return None;
+            }
+        }
+    }
+}
+
+fn safe_instance_id(instance_id: &str) -> bool {
+    !instance_id.is_empty()
+        && instance_id.len() <= 128
+        && instance_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
 fn probe_deadline(deadline: Instant, probe_timeout: Duration) -> Instant {
@@ -289,14 +518,18 @@ fn should_stop_instance(expected_instance_id: Option<&str>, actual_instance_id: 
 mod tests {
     use std::{
         ffi::OsStr,
+        fs,
+        io::{Read, Write},
+        net::TcpListener,
         path::{Path, PathBuf},
+        thread,
         time::{Duration, Instant},
     };
 
     use super::{
         Command, InstanceConfig, InstancePaths, SHUTDOWN_POLL_INTERVAL, SHUTDOWN_PROBE_TIMEOUT,
         SHUTDOWN_TIMEOUT, Secrets, background_start_can_continue, configure_forge_environment,
-        should_stop_instance,
+        live_state_selected_until, registered_states, should_stop_instance,
     };
     use crate::instance::ForgeMode;
 
@@ -407,5 +640,119 @@ mod tests {
             now + Duration::from_millis(1)
         ));
         assert!(!background_start_can_continue(now, now));
+    }
+
+    #[test]
+    fn registry_cards_are_bounded_named_and_newest_first() {
+        let live_pid = std::process::id();
+        let root = std::env::temp_dir().join(format!(
+            "artisan-cli-registry-test-{}-{}",
+            std::process::id(),
+            line!()
+        ));
+        let registry = root.join("instances");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&registry).unwrap();
+        fs::write(
+            registry.join("forge_valid.json"),
+            format!(
+                r#"{{"endpoint":"http://127.0.0.1:4848/","instance_id":"forge_valid","pid":{live_pid}}}"#
+            ),
+        )
+        .unwrap();
+        fs::write(
+            registry.join("forge_wrong_name.json"),
+            format!(
+                r#"{{"endpoint":"http://127.0.0.1:4849/","instance_id":"forge_other","pid":{live_pid}}}"#
+            ),
+        )
+        .unwrap();
+        fs::write(
+            registry.join("forge_dead.json"),
+            br#"{"endpoint":"http://127.0.0.1:4850/","instance_id":"forge_dead","pid":2147483647}"#,
+        )
+        .unwrap();
+        fs::write(registry.join("not-json.txt"), b"ignored").unwrap();
+        let paths = InstancePaths {
+            config: root.join("config.json"),
+            secrets: root.join("secrets.json"),
+            state: root.join("state.json"),
+            log: root.join("forge.log"),
+        };
+
+        let deadline = || Instant::now() + Duration::from_secs(2);
+        let states = registered_states(&paths, None, None, deadline()).unwrap();
+        assert_eq!(states.len(), 1);
+        assert_eq!(states[0].instance_id, "forge_valid");
+        assert_eq!(
+            registered_states(&paths, Some("forge_valid"), Some(live_pid), deadline(),)
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            registered_states(&paths, Some("../escape"), None, deadline())
+                .unwrap()
+                .is_empty()
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn missing_primary_state_recovers_only_an_authenticated_exact_pid_card() {
+        let live_pid = std::process::id();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let read = connection.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.contains("GET /api/control/status"));
+            assert!(request.contains("Authorization: Bearer registry-token"));
+            let body = format!(r#"{{"instance_id":"forge_recovered","pid":{live_pid}}}"#);
+            connection
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+        });
+        let root = tempfile::tempdir().unwrap();
+        let registry = root.path().join("instances");
+        fs::create_dir(&registry).unwrap();
+        fs::write(
+            registry.join("forge_recovered.json"),
+            format!(
+                r#"{{"endpoint":"http://127.0.0.1:{port}/","instance_id":"forge_recovered","pid":{live_pid}}}"#
+            ),
+        )
+        .unwrap();
+        let paths = InstancePaths {
+            config: root.path().join("config.json"),
+            secrets: root.path().join("secrets.json"),
+            state: root.path().join("state.json"),
+            log: root.path().join("forge.log"),
+        };
+        let secrets = Secrets {
+            auth_token: "registry-token".into(),
+            version: 1,
+        };
+
+        let state = live_state_selected_until(
+            &paths,
+            &secrets,
+            None,
+            Some(live_pid),
+            Instant::now() + Duration::from_secs(2),
+        )
+        .unwrap()
+        .expect("authenticated registry state");
+        assert_eq!(state.instance_id, "forge_recovered");
+        assert_eq!(state.pid, live_pid);
+        server.join().unwrap();
     }
 }

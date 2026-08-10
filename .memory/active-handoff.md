@@ -24,8 +24,9 @@ Last updated: 2026-08-10. Branch continuity only; durable verified status is in 
 
 ## Active Work
 
-- Lifecycle milestone `810e07b4` passes 39 Rust/16 desktop tests, package, and review;
-  full tests hit 3 unrelated assertions after 2,555 passes/7 skips. It is pushed.
+- Lifecycle milestone `810e07b4` is pushed. Its release follow-up recovers a
+  missing-state Forge, discards cards for dead PIDs before network probes, and
+  makes installer retirement target each authenticated superseded PID exactly.
 - New-thread spaces, pinned model controls, hidden scrollbars, and clear inactive
   scroll fades are implemented without disabling containers.
 - Working rows keep a bounded assistant preview separate from lifecycle; marquee code is bare muted monospace.
@@ -77,8 +78,13 @@ Last updated: 2026-08-10. Branch continuity only; durable verified status is in 
 
 ## Verification
 
-- Waiting/status and native-subagent clusters pass their focused suites, build,
-  type, lint/SER, migration, erasure, and independent-review gates.
+- Release replay installed healthy 0.2.33 after orphan/dead-card recovery.
+  Cold `ae open` returns in 697 ms; close stops Forge in 237 ms and Electron in
+  1.33 s, leaving no Artisan process. The inherited-pipe repair and delayed
+  overflow rejection pass 10/10 desktop tests and independent review. Package/
+  distribution verifiers and 22 focused tests pass; both shortcuts target stable
+  `ae` and the active icon. Full validation reaches 3 protected dirty-frontend
+  assertions after format/lint/type/build; native fmt/clippy and 73 tests pass.
 - Assistant preview/status passes 6 files/46 tests plus production frontend.
 - Provider CLI/ACP milestone passes 14 files/112 tests, TypeScript, Forge checks,
   and a real 105,915,904-byte candidate SEA with zero provider assets/SDK markers;

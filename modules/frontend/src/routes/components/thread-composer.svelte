@@ -181,19 +181,20 @@
 	 * and these accessors close over state that changes on every keystroke. A
 	 * stable reference keeps the session from being recreated mid-typing.
 	 */
-	const draft_session_options = {
-		draft_key,
-		Attachments: () => attachments,
-		DraftText: () => draft,
-		Editor: () => editor,
-		Restored: (text: string, revived: ReadonlyMap<string, ComposerImageAttachment>) =>
-			Effect.gen(function* () {
-				attachments = revived;
-				yield* UpdateDraft(text, revived.size > 0);
-			}),
-		Revoke: RevokeAttachment,
-	};
-	const drafts = yield* MakeComposerDraftSession(draft_session_options);
+	const make_draft_session = () =>
+		MakeComposerDraftSession({
+			draft_key,
+			Attachments: () => attachments,
+			DraftText: () => draft,
+			Editor: () => editor,
+			Restored: (text: string, revived: ReadonlyMap<string, ComposerImageAttachment>) =>
+				Effect.gen(function* () {
+					attachments = revived;
+					yield* UpdateDraft(text, revived.size > 0);
+				}),
+			Revoke: RevokeAttachment,
+		});
+	const drafts = yield* make_draft_session();
 
 	const SyncEditor = (): Effect.Effect<ComposerEditorDocument> =>
 		Effect.gen(function* () {

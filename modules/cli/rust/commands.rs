@@ -62,8 +62,12 @@ pub enum Commands {
     },
     Stop {
         /// Stop only this exact Forge instance. Intended for editor cleanup.
-        #[arg(long, hide = true)]
+        #[arg(long, hide = true, conflicts_with = "pid")]
         instance_id: Option<String>,
+        /// Stop only the authenticated Forge with this process identity.
+        /// Intended for installer retirement.
+        #[arg(long, hide = true, conflicts_with = "instance_id")]
+        pid: Option<u32>,
     },
     Restart {
         #[arg(long)]
@@ -160,7 +164,10 @@ pub fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Commands::Start { foreground } => start(&layout, foreground).map(|_| ()),
-        Commands::Stop { instance_id } => stop(&layout, instance_id.as_deref()),
+        Commands::Stop { instance_id, pid } => match pid {
+            Some(pid) => stop_pid(&layout, pid),
+            None => stop(&layout, instance_id.as_deref()),
+        },
         Commands::Restart { foreground } => {
             let _ = stop(&layout, None);
             start(&layout, foreground).map(|_| ())
@@ -208,6 +215,11 @@ fn start(layout: &Layout, foreground: bool) -> Result<process::StartResult> {
 fn stop(layout: &Layout, instance_id: Option<&str>) -> Result<()> {
     let (paths, _, secrets) = instance::load(layout)?;
     process::stop_with_instance_id(&paths, &secrets, instance_id)
+}
+
+fn stop_pid(layout: &Layout, pid: u32) -> Result<()> {
+    let (paths, _, secrets) = instance::load(layout)?;
+    process::stop_with_pid(&paths, &secrets, pid)
 }
 
 fn autostart(disable: bool) -> Result<()> {
@@ -478,10 +490,13 @@ fn hidden_schtasks(
 
 fn status(layout: &Layout, json: bool) -> Result<()> {
     let (paths, _, secrets) = instance::load(layout)?;
-    let state = instance::read_json::<State>(&paths.state).ok();
-    let running = state
-        .as_ref()
-        .is_some_and(|state| http::healthy(&state.endpoint, &secrets.auth_token));
+    let running = process::live_state_until(
+        &paths,
+        &secrets,
+        None,
+        std::time::Instant::now() + Duration::from_secs(2),
+    )?
+    .is_some();
     if json {
         println!(
             "{}",
@@ -652,18 +667,18 @@ fn ready_state(layout: &Layout) -> Result<ReadyState> {
     // An already-healthy Forge needs no launch, so opening against one works
     // even in homes without an installation manifest (the repo development
     // Forge runs from `.dist/forge`, started by its own CLI).
-    if let Ok(candidate) = instance::read_json::<State>(&paths.state)
-        && state_is_ready(&candidate, &secrets.auth_token, probe_deadline(deadline))
+    if let Some(candidate) =
+        process::live_state_until(&paths, &secrets, None, probe_deadline(deadline))?
     {
         return Ok(ReadyState {
             state: candidate,
             owned_instance_id: None,
         });
     }
-    let start_result = start_until(layout, false, probe_deadline(deadline))?;
+    let start_result = start_until(layout, false, deadline)?;
     while std::time::Instant::now() < deadline {
-        if let Ok(candidate) = instance::read_json::<State>(&paths.state)
-            && state_is_ready(&candidate, &secrets.auth_token, probe_deadline(deadline))
+        if let Some(candidate) =
+            process::live_state_until(&paths, &secrets, None, probe_deadline(deadline))?
         {
             return Ok(ReadyState {
                 owned_instance_id: owned_instance_id(start_result, &candidate),
@@ -690,11 +705,6 @@ fn start_until(
         foreground,
         health_deadline,
     )
-}
-
-fn state_is_ready(state: &State, auth_token: &str, deadline: std::time::Instant) -> bool {
-    http::status_until(&state.endpoint, auth_token, deadline)
-        .is_ok_and(|status| status.instance_id == state.instance_id && status.pid == state.pid)
 }
 
 fn probe_deadline(deadline: std::time::Instant) -> std::time::Instant {
@@ -990,12 +1000,30 @@ mod tests {
         let exact_stop = Cli::try_parse_from(["ae", "stop", "--instance-id", "forge-1"]).unwrap();
         assert!(matches!(
             exact_stop.command,
-            Some(Commands::Stop { instance_id: Some(id) }) if id == "forge-1"
+            Some(Commands::Stop {
+                instance_id: Some(id),
+                pid: None,
+            }) if id == "forge-1"
         ));
+        let pid_stop = Cli::try_parse_from(["ae", "stop", "--pid", "6172"]).unwrap();
+        assert!(matches!(
+            pid_stop.command,
+            Some(Commands::Stop {
+                instance_id: None,
+                pid: Some(6172),
+            })
+        ));
+        assert!(
+            Cli::try_parse_from(["ae", "stop", "--instance-id", "forge-1", "--pid", "6172",])
+                .is_err()
+        );
         let ordinary_stop = Cli::try_parse_from(["ae", "stop"]).unwrap();
         assert!(matches!(
             ordinary_stop.command,
-            Some(Commands::Stop { instance_id: None })
+            Some(Commands::Stop {
+                instance_id: None,
+                pid: None,
+            })
         ));
         let disable = Cli::try_parse_from(["ae", "autostart", "--disable"]).unwrap();
         assert!(matches!(

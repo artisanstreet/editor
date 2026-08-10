@@ -282,3 +282,14 @@ started at 13:04, before the local 4.2.4 candidate existed. Across its three
 captures, FiberRuntime instances grew 1,942→26,015→73,474 and PubSub
 subscriptions/cursors 1,862→25,929→73,348. This confirms continued published
 4.2.3 leakage; it does not test or contradict the local candidate.
+
+On 2026-08-10, the Windows release lifecycle replay installed and activated
+0.2.33 end to end. Missing mutable state recovers from bounded authenticated
+registry cards, installer retirement addresses each exact superseded PID, setup
+leaves launch ownership to Editor, and maintenance updates restore only a Forge
+that was already running. A cold `ae open` returned in 697 ms while Electron
+showed its loader and completed the hidden handoff independently; closing the
+window stopped the exact Editor-owned Forge in 237 ms and the complete Electron
+tree in 1.33 seconds, leaving no Artisan process. Windows autostart remains an
+explicit current-user, limited `ONLOGON` scheduled task rather than an elevated
+machine-wide service.

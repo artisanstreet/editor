@@ -229,6 +229,14 @@ const main = async () => {
 			`${server.origin}/release-manifest.json`,
 			"--public-key",
 			public_key_hex,
+			/**
+			 * Unattended, and with the installer free to retire whatever is
+			 * still running a superseded version — otherwise Electron's
+			 * single-instance lock hands the freshly built release straight
+			 * back to the old window. A Forge that will not stop still fails
+			 * the build rather than losing its work; that needs --force.
+			 */
+			"--yes",
 		]);
 	} finally {
 		server.close();

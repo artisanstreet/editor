@@ -65,6 +65,8 @@ const stage_desktop_payload = () => ({
 		writeFileSync(
 			resolve(desktop_root, "package.json"),
 			JSON.stringify({
+				author: "Barekey",
+				description: "Artisan Editor",
 				main: "./main.js",
 				name: "artisan-editor-desktop",
 				packageManager: "npm@11.4.2",

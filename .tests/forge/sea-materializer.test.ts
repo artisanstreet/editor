@@ -20,7 +20,7 @@ const make_source = (assets: ReadonlyMap<string, Uint8Array>, reads: Array<strin
 		SeaAssetSource,
 		SeaAssetSource.of({
 			Read: (asset_id) =>
-				Effect.gen(function* () {
+				Effect.sync(() => {
 					reads.push(asset_id);
 					const bytes = assets.get(asset_id);
 					return bytes ?? new Uint8Array();

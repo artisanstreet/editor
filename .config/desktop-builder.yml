@@ -2,6 +2,7 @@ appId: com.usebarekey.artisan-editor
 productName: Artisan Editor
 directories:
     app: .dist/desktop
+    buildResources: modules/frontend/src/lib/assets/barekey
     output: .dist/electron-release
 electronDist: node_modules/electron/dist
 # Artisan's product copy and hidden native menu are English-only today. Shipping
@@ -22,5 +23,8 @@ protocols:
       schemes:
           - artisan
 win:
+    # electron-builder rasterizes the existing 720px Artisan/Barekey SVG into
+    # the multi-resolution Windows ICO resource during packaging.
+    icon: logo-gradient.svg
     target:
         - dir

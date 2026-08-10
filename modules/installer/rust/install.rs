@@ -18,9 +18,25 @@ use crate::{
     },
     manifest::{Artifact, TrustKey, fetch},
     platform::Platform,
+    processes::{Retirement, RetirementPolicy, retire_superseded},
+    shortcuts,
 };
 
 const ABSOLUTE_ARTIFACT_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
+/// First install configures and verifies Forge, but deliberately leaves launch
+/// to the editor's background handoff. That gives the window exact ownership
+/// of the process it caused and lets normal window close stop that Forge. An
+/// explicit autostart task remains independently owned by `ae setup --autostart`.
+const FIRST_RUN_CONFIGURATION_COMMANDS: [&[&str]; 3] = [&["setup"], &["doctor"], &["status"]];
+
+pub struct InstallIntegrationOptions {
+    /// Whether this install may own the `artisan://` handler. A secondary
+    /// install beside an existing installation must leave the handler with
+    /// its current owner rather than fail on finding it taken.
+    pub register_protocol: bool,
+    /// Whether this install owns the desktop and Start Menu launchers.
+    pub register_shortcuts: bool,
+}
 
 pub struct InstallOptions {
     pub manifest_url: Url,
@@ -30,10 +46,10 @@ pub struct InstallOptions {
     pub install_root: PathBuf,
     pub trust: TrustKey,
     pub run_setup: bool,
-    /// Whether this install may own the `artisan://` handler. A secondary
-    /// install beside an existing installation must leave the handler with
-    /// its current owner rather than fail on finding it taken.
-    pub register_protocol: bool,
+    pub integrations: InstallIntegrationOptions,
+    /// `None` leaves superseded editor and Forge processes running. A policy
+    /// retires them and controls whether a stuck Forge may be ended.
+    pub retirement: Option<RetirementPolicy>,
 }
 
 #[allow(clippy::too_many_lines)]
@@ -101,11 +117,12 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         if !bootstrap.is_file() {
             return Err(InstallerError::MissingInstaller(bootstrap));
         }
-        let protocol = if options.register_protocol {
+        let protocol = if options.integrations.register_protocol {
             prepare_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?
         } else {
             None
         };
+        let launchers = planned_shortcuts(&options, &stable_ae, &existing_release);
         activate(
             &options.install_root,
             &existing_release,
@@ -113,10 +130,14 @@ pub async fn install(options: InstallOptions) -> Result<()> {
             &options,
             &stable_ae,
             protocol.as_ref(),
+            &shortcut_records(&launchers)?,
         )?;
-        if options.register_protocol {
+        if options.integrations.register_protocol {
             apply_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?;
         }
+        shortcuts::apply(&launchers)?;
+        let retirement = retire_for(&options, &existing_release, &stable_ae)?;
+        restore_retired_forge(&options, &existing_release, retirement)?;
         invoke_ae(&existing_release, &["--version"])?;
         return Ok(());
     }
@@ -176,11 +197,12 @@ pub async fn install(options: InstallOptions) -> Result<()> {
         if !bootstrap.is_file() {
             return Err(InstallerError::MissingInstaller(bootstrap));
         }
-        let protocol = if options.register_protocol {
+        let protocol = if options.integrations.register_protocol {
             prepare_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?
         } else {
             None
         };
+        let launchers = planned_shortcuts(&options, &stable_ae, &release);
         activate(
             &options.install_root,
             &release,
@@ -188,15 +210,19 @@ pub async fn install(options: InstallOptions) -> Result<()> {
             &options,
             &stable_ae,
             protocol.as_ref(),
+            &shortcut_records(&launchers)?,
         )?;
-        if options.register_protocol {
+        if options.integrations.register_protocol {
             apply_protocol(&options.platform, &stable_ae, existing_protocol.as_ref())?;
         }
+        shortcuts::apply(&launchers)?;
+        let retirement = retire_for(&options, &release, &stable_ae)?;
         if options.run_setup && options.components.contains(&"cli") {
-            invoke_ae(&release, &["setup"])?;
-            invoke_ae(&release, &["start"])?;
-            invoke_ae(&release, &["doctor"])?;
-            invoke_ae(&release, &["status"])?;
+            for arguments in FIRST_RUN_CONFIGURATION_COMMANDS {
+                invoke_ae(&release, arguments)?;
+            }
+        } else {
+            restore_retired_forge(&options, &release, retirement)?;
         }
         Ok(())
     }
@@ -300,6 +326,72 @@ struct Components {
     forge: bool,
 }
 
+/// The launchers this run owns, or none when the caller opted out.
+fn planned_shortcuts(
+    options: &InstallOptions,
+    stable_ae: &Path,
+    release: &Path,
+) -> Vec<shortcuts::ShortcutTarget> {
+    if options.integrations.register_shortcuts {
+        shortcuts::targets(&options.platform, stable_ae, release)
+    } else {
+        Vec::new()
+    }
+}
+
+fn shortcut_records(targets: &[shortcuts::ShortcutTarget]) -> Result<Vec<OwnedIntegration>> {
+    targets
+        .iter()
+        .map(shortcuts::ShortcutTarget::owned)
+        .collect()
+}
+
+/// Frees the newly activated release from whatever is still running the old
+/// one. Deliberately last: a failure here leaves a correctly activated
+/// installation that simply needs its old window closed, rather than an app
+/// closed for an update that then failed.
+fn retire_for(options: &InstallOptions, release: &Path, stable_ae: &Path) -> Result<Retirement> {
+    let Some(policy) = options.retirement else {
+        return Ok(Retirement::default());
+    };
+
+    let retirement = retire_superseded(&options.install_root, release, stable_ae, policy)?;
+    if !retirement.is_empty() {
+        println!(
+            "retired superseded instances: {} editor, {} forge",
+            retirement.editors_closed, retirement.forges_stopped
+        );
+    }
+    Ok(retirement)
+}
+
+/// A maintenance update has no editor launch after the installer returns, so
+/// preserve a Forge that was running before the update by starting the newly
+/// activated version. Setup-driven installs deliberately skip this: their
+/// caller opens the editor, whose background handoff must own the Forge it
+/// starts so window close can stop that exact process.
+fn restore_retired_forge(
+    options: &InstallOptions,
+    release: &Path,
+    retirement: Retirement,
+) -> Result<()> {
+    if should_restore_retired_forge(options.run_setup, &options.components, retirement) {
+        invoke_ae(release, &["start"])?;
+    }
+    Ok(())
+}
+
+fn should_restore_retired_forge(
+    run_setup: bool,
+    components: &[&str],
+    retirement: Retirement,
+) -> bool {
+    !run_setup
+        && retirement.forges_stopped > 0
+        && components.contains(&"cli")
+        && components.contains(&"forge")
+}
+
 fn activate(
     root: &Path,
     release: &Path,
@@ -307,6 +399,7 @@ fn activate(
     options: &InstallOptions,
     stable_ae: &Path,
     protocol: Option<&OwnedIntegration>,
+    launchers: &[OwnedIntegration],
 ) -> Result<()> {
     let next = root.join(".installation.json.tmp");
     let current = root.join("installation.json");
@@ -327,6 +420,12 @@ fn activate(
         integrations.insert(
             "protocol".to_owned(),
             serde_json::to_value(protocol).map_err(InstallerError::InvalidPayload)?,
+        );
+    }
+    if !launchers.is_empty() {
+        integrations.insert(
+            "shortcuts".to_owned(),
+            serde_json::to_value(launchers).map_err(InstallerError::InvalidPayload)?,
         );
     }
     let contents = serde_json::json!({
@@ -530,6 +629,10 @@ struct InstalledState {
 struct InstalledIntegrations {
     ae_path: Option<OwnedIntegration>,
     protocol: Option<OwnedIntegration>,
+    /// Absent in installations predating installer-owned launchers, which is
+    /// why removal and repair both treat an empty record as "not ours".
+    #[serde(default)]
+    shortcuts: Vec<OwnedIntegration>,
 }
 
 pub fn repair(root: &Path) -> Result<()> {
@@ -564,6 +667,15 @@ pub fn repair(root: &Path) -> Result<()> {
             persist_protocol_record(root, protocol)?;
         }
         apply_protocol(&platform, &stable, existing_protocol)?;
+    }
+    // Launchers are rewritten rather than merely checked: their icon is taken
+    // from the versioned editor executable, so every update leaves the
+    // previous release's path behind in an otherwise healthy shortcut.
+    let launchers = shortcuts::targets(&platform, &stable, &release);
+    if !state.integrations.shortcuts.is_empty() || !launchers.is_empty() {
+        let records = shortcut_records(&launchers)?;
+        shortcuts::apply(&launchers)?;
+        persist_shortcut_records(root, &records)?;
     }
     invoke_ae_diagnostic(&release, &["doctor"])
 }
@@ -611,6 +723,14 @@ pub fn uninstall(root: &Path, remove_data: bool) -> Result<()> {
         &Platform::detect()?,
         &state.permanent_ae_path,
         state.integrations.protocol.as_ref(),
+    )?;
+    shortcuts::remove(
+        &shortcuts::targets(
+            &Platform::detect()?,
+            &state.permanent_ae_path,
+            &root.join("versions").join(&state.active_version),
+        ),
+        &state.integrations.shortcuts,
     )?;
     if let Some(integration) = state.integrations.ae_path {
         let path = Path::new(&integration.path);
@@ -736,6 +856,43 @@ fn persist_protocol_record(root: &Path, protocol: &OwnedIntegration) -> Result<(
     std::fs::remove_file(&previous).map_err(io(&previous))
 }
 
+/// Records the launchers a repair just rewrote, through the same
+/// write-and-swap the protocol record uses so an interrupted repair never
+/// leaves the manifest half-written.
+fn persist_shortcut_records(root: &Path, launchers: &[OwnedIntegration]) -> Result<()> {
+    let current = root.join("installation.json");
+    let next = root.join(".installation.json.shortcuts");
+    let bytes = std::fs::read(&current).map_err(io(&current))?;
+    let mut document: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(InstallerError::InvalidPayload)?;
+    let integrations = document
+        .get_mut("integrations")
+        .and_then(serde_json::Value::as_object_mut)
+        .ok_or_else(|| {
+            InstallerError::InvalidInstallation(
+                "installation manifest integrations are missing".to_owned(),
+            )
+        })?;
+    integrations.insert(
+        "shortcuts".to_owned(),
+        serde_json::to_value(launchers).map_err(InstallerError::InvalidPayload)?,
+    );
+    let mut file = File::create(&next).map_err(io(&next))?;
+    serde_json::to_writer(&mut file, &document).map_err(InstallerError::InvalidPayload)?;
+    file.sync_all().map_err(io(&next))?;
+
+    let previous = root.join(".installation.json.shortcuts.previous");
+    if previous.exists() {
+        std::fs::remove_file(&previous).map_err(io(&previous))?;
+    }
+    std::fs::rename(&current, &previous).map_err(io(&current))?;
+    if let Err(source) = std::fs::rename(&next, &current) {
+        let _ = std::fs::rename(&previous, &current);
+        return Err(io(&current)(source));
+    }
+    std::fs::remove_file(&previous).map_err(io(&previous))
+}
+
 fn validate_state_root(root: &Path, state: &InstalledState) -> Result<()> {
     if state.activation_state != "active" || state.install_root != root {
         return Err(InstallerError::InvalidInstallation(
@@ -843,6 +1000,42 @@ mod tests {
             "ae-installer"
         });
         assert!(expected.starts_with(root.path().join("versions")));
+    }
+
+    #[test]
+    fn first_install_leaves_forge_launch_to_the_editor_handoff() {
+        assert_eq!(super::FIRST_RUN_CONFIGURATION_COMMANDS[0], ["setup"]);
+        assert!(
+            super::FIRST_RUN_CONFIGURATION_COMMANDS
+                .iter()
+                .flat_map(|arguments| arguments.iter())
+                .all(|argument| *argument != "start")
+        );
+        assert!(!super::should_restore_retired_forge(
+            true,
+            &["editor", "forge", "cli"],
+            super::Retirement {
+                editors_closed: 1,
+                forges_stopped: 1,
+            },
+        ));
+    }
+
+    #[test]
+    fn maintenance_update_restores_a_previously_running_forge() {
+        assert!(super::should_restore_retired_forge(
+            false,
+            &["editor", "forge", "cli"],
+            super::Retirement {
+                editors_closed: 0,
+                forges_stopped: 1,
+            },
+        ));
+        assert!(!super::should_restore_retired_forge(
+            false,
+            &["editor", "forge", "cli"],
+            super::Retirement::default(),
+        ));
     }
 
     #[cfg(windows)]

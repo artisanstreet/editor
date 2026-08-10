@@ -57,6 +57,7 @@ pub enum InstallerError {
     MissingInstaller(PathBuf),
     #[error("installation state is invalid: {0}")]
     InvalidInstallation(String),
+    #[cfg(debug_assertions)]
     #[error("development build guard: {0}")]
     DebugBuildGuard(String),
     #[error("permanent ae {command} failed with status {status}")]

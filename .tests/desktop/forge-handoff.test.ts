@@ -1,4 +1,8 @@
-import { Deferred, Effect, Fiber, Layer } from "effect";
+import type { ChildProcess } from "node:child_process";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
+
+import { Deferred, Effect, Exit, Fiber, Layer } from "effect";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -6,8 +10,10 @@ import {
 	DesktopRenderer,
 	ForgeHandoffProcess,
 	handoff_cleanup_timeout,
+	handoff_exit_drain_delay_ms,
 	IsWindowsCommandScript,
 	make_desktop_forge_lifecycle_layer,
+	make_node_forge_handoff_process_layer_with,
 	owned_stop_cleanup_timeout,
 	OwnedForgeStopArguments,
 } from "../../modules/desktop/src/forge-handoff";
@@ -215,6 +221,88 @@ describe("desktop Forge handoff lifecycle", () => {
 		expect(stops).toEqual(["forge_owner-1"]);
 	});
 
+	it("stops known ownership without waiting for paired navigation to settle", async () => {
+		const navigation_started = await Effect.runPromise(Deferred.make<void>());
+		const stops: Array<string> = [];
+		const lifecycle = await MakeLifecycle(
+			ForgeHandoffProcess.of({
+				Request: () =>
+					Effect.succeed({
+						endpoint: "http://127.0.0.1:52985/",
+						owned_instance_id: "forge_owner-1",
+						pair_code: "one-time",
+						version: 1,
+					}),
+				StopOwned: (_path, instance_id) => Effect.sync(() => stops.push(instance_id)),
+			}),
+			DesktopRenderer.of({
+				ClearCookies: () => Effect.void,
+				LoadUrl: () =>
+					Deferred.succeed(navigation_started, undefined).pipe(
+						Effect.andThen(Effect.never),
+					),
+			}),
+		);
+
+		await Effect.runPromise(
+			Effect.gen(function* () {
+				const reconnect = yield* lifecycle
+					.Reconnect()
+					.pipe(Effect.forkChild({ startImmediately: true }));
+				yield* Deferred.await(navigation_started);
+				yield* lifecycle.Cleanup().pipe(Effect.timeout("1 second"));
+				yield* Fiber.interrupt(reconnect);
+			}),
+		);
+		expect(stops).toEqual(["forge_owner-1"]);
+	});
+
+	it("completes from CLI exit without waiting for the inherited stdout pipe to close", async () => {
+		const stdout = new PassThrough();
+		const child = Object.assign(new EventEmitter(), {
+			kill: () => true,
+			stdout,
+		}) as unknown as ChildProcess;
+		const layer = make_node_forge_handoff_process_layer_with(() => {
+			queueMicrotask(() => {
+				stdout.write(
+					'{"endpoint":"http://127.0.0.1:52985/","owned_instance_id":"forge_owner-1","pair_code":"one-time","version":1}\n',
+				);
+				child.emit("exit", 0, null);
+			});
+			return child;
+		});
+		const process = await Effect.runPromise(ForgeHandoffProcess.pipe(Effect.provide(layer)));
+
+		const handoff = await Effect.runPromise(
+			process.Request("C:/Artisan/ae.exe").pipe(Effect.timeout("1 second")),
+		);
+		expect(handoff.owned_instance_id).toBe("forge_owner-1");
+		expect(stdout.closed).toBe(false);
+	});
+
+	it("rejects stdout that crosses its bound during the post-exit drain", async () => {
+		const stdout = new PassThrough();
+		const child = Object.assign(new EventEmitter(), {
+			kill: () => true,
+			stdout,
+		}) as unknown as ChildProcess;
+		const layer = make_node_forge_handoff_process_layer_with(() => {
+			queueMicrotask(() => {
+				stdout.write(
+					'{"endpoint":"http://127.0.0.1:52985/","owned_instance_id":"forge_owner-1","pair_code":"one-time","version":1}\n',
+				);
+				child.emit("exit", 0, null);
+				setTimeout(() => stdout.write("x".repeat(64 * 1024)), 10);
+			});
+			return child;
+		});
+		const process = await Effect.runPromise(ForgeHandoffProcess.pipe(Effect.provide(layer)));
+
+		const exit = await Effect.runPromiseExit(process.Request("C:/Artisan/ae.exe"));
+		expect(Exit.isFailure(exit)).toBe(true);
+	});
+
 	it("uses a shell only for explicit Windows command-script compatibility", () => {
 		expect(IsWindowsCommandScript("C:/Artisan/ae.exe")).toBe(false);
 		expect(IsWindowsCommandScript("/usr/local/bin/ae")).toBe(false);
@@ -228,6 +316,7 @@ describe("desktop Forge handoff lifecycle", () => {
 	});
 
 	it("keeps cleanup budgets above the prior five-second quit cutoff", () => {
+		expect(handoff_exit_drain_delay_ms).toBeLessThan(1_000);
 		expect(handoff_cleanup_timeout).toBe("25 seconds");
 		expect(owned_stop_cleanup_timeout).toBe("30 seconds");
 	});

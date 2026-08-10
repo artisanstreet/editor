@@ -3,10 +3,18 @@ import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 
 import { GenerateSeaBuildArtifacts } from "../../.scripts/build/sea/config";
+import { CreateForgeSeaRolldownConfig } from "../../.config/forge.rolldown.config";
 
 const Sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
 
 describe("SEA build artifacts", () => {
+	it("uses Node's process environment without retaining browser import.meta.env in CommonJS", () => {
+		expect(CreateForgeSeaRolldownConfig().transform).toMatchObject({
+			define: { "import.meta.env": "{}" },
+			target: "node24",
+		});
+	});
+
 	it("sorts SEA keys and emits reproducible config and manifest JSON", () => {
 		const bytes = new Map([
 			["z-source", Buffer.from("z")],

@@ -199,7 +199,16 @@ export const CreateForgeSeaRolldownConfig = () => ({
 		format: "cjs" as const,
 	},
 	tsconfig: true,
-	transform: { target: "node24" },
+	transform: {
+		/**
+		 * The SEA payload is CommonJS under Node, where `import.meta` has no
+		 * environment object. Effect's default ConfigProvider merges that browser
+		 * convenience with `process.env`; replacing only its `env` member keeps
+		 * the Node environment intact and makes the CJS boundary explicit.
+		 */
+		define: { "import.meta.env": "{}" },
+		target: "node24",
+	},
 });
 
 export default CreateForgeRolldownConfig();

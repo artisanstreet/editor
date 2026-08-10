@@ -5,14 +5,17 @@ mod integrations;
 mod manifest;
 mod payload;
 mod platform;
+mod processes;
+mod shortcuts;
 
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use error::{InstallerError, Result};
-use install::{InstallOptions, diagnose, install, repair, uninstall};
+use install::{InstallIntegrationOptions, InstallOptions, diagnose, install, repair, uninstall};
 use manifest::TrustKey;
 use platform::Platform;
+use processes::RetirementPolicy;
 use url::Url;
 
 const DEFAULT_MANIFEST: &str = "https://github.com/sandersonstabo/artisan-editor/releases/latest/download/release-manifest.json";
@@ -34,6 +37,48 @@ impl Component {
     }
 }
 
+#[derive(Args, Debug)]
+struct AutomationArguments {
+    /// Answer every prompt with its safe default. Never implies a destructive
+    /// action: ending a Forge that will not stop still requires `--force`.
+    #[arg(long, short = 'y', global = true)]
+    yes: bool,
+
+    /// Ask a detached helper to remove this temporary executable after exit.
+    #[arg(long, global = true)]
+    self_cleanup: bool,
+}
+
+#[derive(Args, Debug)]
+struct IntegrationArguments {
+    /// Leave the desktop and Start Menu launchers alone. For a secondary
+    /// install that must not claim the user's shortcuts.
+    #[arg(long, global = true)]
+    skip_shortcuts: bool,
+
+    /// Leave the `artisan://` handler with its current owner. For a secondary
+    /// install beside an existing installation.
+    #[arg(long, global = true)]
+    skip_protocol: bool,
+}
+
+#[derive(Args, Debug)]
+struct ActivationArguments {
+    /// Permit ending a Forge that did not stop when asked. Whatever it was
+    /// running is lost.
+    #[arg(long, global = true)]
+    force: bool,
+
+    /// Leave editor and Forge processes from superseded versions running. The
+    /// activated release will not load until they are closed by hand.
+    #[arg(long, global = true)]
+    skip_retire: bool,
+
+    /// Do not invoke permanent ae setup/doctor/status after activation.
+    #[arg(long, global = true)]
+    skip_setup: bool,
+}
+
 #[derive(Debug, Parser)]
 #[command(version, about)]
 struct Arguments {
@@ -52,26 +97,23 @@ struct Arguments {
     #[arg(long, env = "ARTISAN_INSTALLER_PUBLIC_KEY", global = true)]
     public_key: Option<String>,
 
-    /// Components to install. Defaults to Editor, Forge, and the permanent ae CLI.
-    #[arg(long, value_enum, global = true)]
+    /// Components to install, comma separated or repeated. Defaults to Editor,
+    /// Forge, and the permanent ae CLI.
+    #[arg(long, value_enum, value_delimiter = ',', global = true)]
     component: Vec<Component>,
+
+    #[command(flatten)]
+    automation: AutomationArguments,
+
+    #[command(flatten)]
+    integrations: IntegrationArguments,
+
+    #[command(flatten)]
+    activation: ActivationArguments,
 
     /// Per-user installation root.
     #[arg(long, env = "ARTISAN_INSTALL_ROOT", global = true)]
     install_root: Option<PathBuf>,
-
-    /// Do not invoke permanent ae setup/doctor/status after activation.
-    #[arg(long, global = true)]
-    skip_setup: bool,
-
-    /// Leave the `artisan://` handler with its current owner. For a secondary
-    /// install beside an existing installation.
-    #[arg(long, global = true)]
-    skip_protocol: bool,
-
-    /// Ask a detached helper to remove this temporary executable after exit.
-    #[arg(long, global = true)]
-    self_cleanup: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -141,12 +183,18 @@ async fn run() -> Result<()> {
         components,
         install_root: root,
         trust,
-        run_setup: !arguments.skip_setup,
-        register_protocol: !arguments.skip_protocol,
+        run_setup: !arguments.activation.skip_setup,
+        integrations: InstallIntegrationOptions {
+            register_protocol: !arguments.integrations.skip_protocol,
+            register_shortcuts: !arguments.integrations.skip_shortcuts,
+        },
+        retirement: (!arguments.activation.skip_retire).then_some(RetirementPolicy {
+            force: arguments.activation.force,
+        }),
     })
     .await?;
 
-    if arguments.self_cleanup {
+    if arguments.automation.self_cleanup {
         schedule_self_cleanup()?;
     }
     Ok(())
@@ -171,7 +219,13 @@ fn make_install_options(
         install_root,
         trust,
         run_setup,
-        register_protocol: !arguments.skip_protocol,
+        integrations: InstallIntegrationOptions {
+            register_protocol: !arguments.integrations.skip_protocol,
+            register_shortcuts: !arguments.integrations.skip_shortcuts,
+        },
+        retirement: (!arguments.activation.skip_retire).then_some(RetirementPolicy {
+            force: arguments.activation.force,
+        }),
     }
 }
 
@@ -242,6 +296,32 @@ mod tests {
             arguments.operation,
             Some(Operation::Uninstall { remove_data: false })
         ));
+    }
+
+    /// One spelling for component selection, comma separated or repeated,
+    /// rather than a second flag meaning the same thing.
+    #[test]
+    fn components_accept_a_comma_separated_list() {
+        let arguments =
+            Arguments::try_parse_from(["ae-installer", "update", "--component", "editor,forge"])
+                .expect("component list");
+        let selected: Vec<&str> = arguments
+            .component
+            .iter()
+            .map(super::Component::as_str)
+            .collect();
+        assert_eq!(selected, vec!["editor", "forge"]);
+    }
+
+    /// `--yes` answers prompts; it must never imply the destructive path.
+    #[test]
+    fn unattended_runs_do_not_imply_force() {
+        let arguments = Arguments::try_parse_from(["ae-installer", "update", "--yes"])
+            .expect("unattended update");
+        assert!(arguments.automation.yes);
+        assert!(!arguments.activation.force);
+        assert!(!arguments.activation.skip_retire);
+        assert!(!arguments.integrations.skip_shortcuts);
     }
 
     #[test]
