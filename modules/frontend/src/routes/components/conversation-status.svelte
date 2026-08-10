@@ -6,6 +6,7 @@
 	import { model_transition_presentation } from "$lib/conversation/presentation";
 	import { model_manifest } from "@artisan/catalog";
 	import type { ConversationItem } from "@artisan/protocol";
+	import ArrowsMinimize from "@tabler/icons-svelte/icons/arrows-minimize";
 	import type { Snippet } from "svelte";
 
 	let {
@@ -28,7 +29,7 @@
 	}
 
 	const timeline_status_class = $derived(
-		`flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 py-0.5 ${size === "base" ? "text-base" : "text-sm"} text-muted-foreground`,
+		`flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 py-0.5 ${item.type === "compaction" || size === "base" ? "text-base" : "text-sm"} text-muted-foreground`,
 	);
 	const engine_name_for = (engine_id: string) =>
 		engine_id.charAt(0).toUpperCase() + engine_id.slice(1);
@@ -100,6 +101,7 @@
 				? "Compaction failed"
 				: "Compacted"}
 	>
+		<ArrowsMinimize class="size-4 shrink-0" aria-hidden="true" />
 		{#if item.state === "started"}
 			<ShimmerText
 				class="text-muted-foreground"
