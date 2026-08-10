@@ -333,6 +333,9 @@ describe("Barekey docs shell reset", () => {
 		expect(work_session).toContain('is_failed ? "text-destructive" : ""');
 		expect(work_session).toContain("hidden={disclosure.details_hidden}");
 		expect(workspace).toContain("has_live_reply={conversation_reply_is_live(block.details)}");
+		expect(workspace).toContain(
+			"waiting_for_activity={conversation_has_live_activity(block.details)}",
+		);
 		/**
 		 * The engine came back as a word, never as a mark. Before anything has
 		 * come back there is no thought to name, so the status says which side the
@@ -341,8 +344,9 @@ describe("Barekey docs shell reset", () => {
 		 * The icon and the spinner stay gone.
 		 */
 		expect(workspace).toContain("engine_id={policy?.engine_id}");
-		expect(work_session).toContain("? active_work_label_for(");
+		expect(work_session).toContain("? active_work_label_for({");
 		expect(work_session).toContain("thinking_visibility_generation,");
+		expect(work_session).toContain("waiting_for_activity,");
 		expect(work_session).toContain("item.responded_at !== undefined || has_visible_details");
 		expect(work_session).toContain("is_working ? status_label : label");
 		/** A handoff run is answered by the engine it handed off to. */

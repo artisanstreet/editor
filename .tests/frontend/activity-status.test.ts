@@ -5,6 +5,7 @@ import {
 	active_work_label_for,
 	artisan_thinking_words,
 	conversation_activity_is_live,
+	conversation_has_live_activity,
 	conversation_reply_is_live,
 	thinking_word_at,
 	thinking_word_for,
@@ -166,6 +167,19 @@ describe("Artisan thinking vocabulary", () => {
 
 		expect(conversation_activity_is_live(ghost)).toBe(false);
 	});
+
+	it("follows canonical activity start and terminal events without polling", () => {
+		expect(conversation_has_live_activity([activity("activity-1", "terminal", "active")])).toBe(
+			true,
+		);
+		expect(conversation_has_live_activity([activity("activity-1", "tool", "active")])).toBe(
+			true,
+		);
+		expect(
+			conversation_has_live_activity([activity("activity-1", "terminal", "completed")]),
+		).toBe(false);
+		expect(conversation_has_live_activity([reasoning("streaming")])).toBe(false);
+	});
 });
 
 describe("the wait before an engine answers", () => {
@@ -187,23 +201,71 @@ describe("the wait before an engine answers", () => {
 	it("switches to the session's thinking verb once the provider starts the turn", () => {
 		const session_id = "work:run:run_responded";
 
-		expect(active_work_label_for(session_id, "Codex", false)).toBe(
-			"Waiting for Codex to respond…",
-		);
-		expect(active_work_label_for(session_id, "Codex", true)).toBe(
-			thinking_word_for(session_id),
-		);
+		expect(
+			active_work_label_for({
+				engine_name: "Codex",
+				provider_responded: false,
+				seed: session_id,
+				waiting_for_activity: false,
+			}),
+		).toBe("Waiting for Codex to respond…");
+		expect(
+			active_work_label_for({
+				engine_name: "Codex",
+				provider_responded: true,
+				seed: session_id,
+				waiting_for_activity: false,
+			}),
+		).toBe(thinking_word_for(session_id));
+	});
+
+	it("shows Waiting only while a provider-started activity remains live", () => {
+		const session_id = "work:run:run_activity_wait";
+		const label = (waiting_for_activity: boolean) =>
+			active_work_label_for({
+				engine_name: "Codex",
+				provider_responded: true,
+				seed: session_id,
+				waiting_for_activity,
+			});
+
+		expect(label(false)).toBe(thinking_word_for(session_id));
+		expect(label(true)).toBe("Waiting");
+		expect(label(false)).toBe(thinking_word_for(session_id));
+	});
+
+	it("lets an activity start establish the wait before other provider detail arrives", () => {
+		expect(
+			active_work_label_for({
+				engine_name: "Codex",
+				provider_responded: false,
+				seed: "work:run:run_not_responded",
+				waiting_for_activity: true,
+			}),
+		).toBe("Waiting");
 	});
 
 	it("applies visibility generations only after the waiting phase becomes thinking", () => {
 		const session_id = "work:run:run_visibility_epoch";
 
-		expect(active_work_label_for(session_id, "Codex", false, 1)).toBe(
-			"Waiting for Codex to respond…",
-		);
-		expect(active_work_label_for(session_id, "Codex", true, 1)).toBe(
-			thinking_word_for(session_id, 1),
-		);
+		expect(
+			active_work_label_for({
+				engine_name: "Codex",
+				provider_responded: false,
+				seed: session_id,
+				thinking_visibility_generation: 1,
+				waiting_for_activity: false,
+			}),
+		).toBe("Waiting for Codex to respond…");
+		expect(
+			active_work_label_for({
+				engine_name: "Codex",
+				provider_responded: true,
+				seed: session_id,
+				thinking_visibility_generation: 1,
+				waiting_for_activity: false,
+			}),
+		).toBe(thinking_word_for(session_id, 1));
 	});
 });
 

@@ -54,20 +54,26 @@ export const thinking_word_for = (seed: string, visibility_generation = 0): stri
 };
 
 /**
- * Names the two genuinely different quiet phases of a live turn. Before the
- * provider accepts it, the request is waiting; after that, an intentionally
- * content-free thinking verb can describe private work without exposing it.
+ * Names the genuinely different quiet phases of a live turn. A provider-started
+ * external activity means the model is waiting for that operation. Before the
+ * provider accepts the turn, the request is waiting on the provider. Otherwise,
+ * an intentionally content-free thinking verb can describe private work without
+ * exposing it.
  */
-export const active_work_label_for = (
-	seed: string,
-	engine_name: string | undefined,
-	provider_responded: boolean,
-	thinking_visibility_generation = 0,
-): string =>
-	provider_responded
-		? thinking_word_for(seed, thinking_visibility_generation)
-		: (waiting_label_for(engine_name) ??
-			thinking_word_for(seed, thinking_visibility_generation));
+export const active_work_label_for = (input: {
+	readonly engine_name: string | undefined;
+	readonly provider_responded: boolean;
+	readonly seed: string;
+	readonly thinking_visibility_generation?: number;
+	/** True while a provider-started command or tool has not emitted its terminal item event. */
+	readonly waiting_for_activity: boolean;
+}): string =>
+	input.waiting_for_activity
+		? "Waiting"
+		: !input.provider_responded
+			? (waiting_label_for(input.engine_name) ??
+				thinking_word_for(input.seed, input.thinking_visibility_generation))
+			: thinking_word_for(input.seed, input.thinking_visibility_generation);
 
 /**
  * The durable coordinator's verdict on the run behind one work session — the
@@ -161,6 +167,14 @@ const live_lifecycles: ReadonlySet<ConversationLifecycle> = new Set([
 export const conversation_activity_is_live = (
 	activity: Extract<ConversationItem, { type: "activity" }>,
 ): boolean => live_lifecycles.has(activity.lifecycle) && live_lifecycles.has(activity.status);
+
+/**
+ * True between a canonical activity's provider-started and terminal events.
+ * The activity item is patched in place, so this flips without polling when a
+ * command, tool, search, or other external operation starts or completes.
+ */
+export const conversation_has_live_activity = (items: ReadonlyArray<ConversationItem>): boolean =>
+	items.some((item) => item.type === "activity" && conversation_activity_is_live(item));
 
 /**
  * True while the assistant's own prose is arriving and has something to show.

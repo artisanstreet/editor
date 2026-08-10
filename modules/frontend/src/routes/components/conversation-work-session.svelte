@@ -26,6 +26,7 @@
 		duration_kind,
 		run_authority = "settled",
 		transition,
+		waiting_for_activity = false,
 	}: {
 		/**
 		 * Who the request is out to. Known only from the thread's policy — the
@@ -54,6 +55,8 @@
 		run_authority?: WorkSessionRunAuthority;
 		/** The engine handoff that started this run, shown at the header's far end. */
 		transition?: Extract<ConversationItem, { type: "model_transition" }>;
+		/** True between canonical activity start and terminal events for this turn. */
+		waiting_for_activity?: boolean;
 	} = $props();
 	/** Live work and unsuccessful settlements open by default; the reader remains in control. */
 	let open = $state(
@@ -153,12 +156,13 @@
 	);
 	const status_label = $derived(
 		is_working
-			? active_work_label_for(
-					item.id,
-					responding_name,
+			? active_work_label_for({
+					engine_name: responding_name,
 					provider_responded,
+					seed: item.id,
 					thinking_visibility_generation,
-				)
+					waiting_for_activity,
+				})
 			: label,
 	);
 	const disclosure = $derived(
