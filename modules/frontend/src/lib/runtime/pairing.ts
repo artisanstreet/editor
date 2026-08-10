@@ -1,3 +1,4 @@
+import { desktop_handoff_navigation_parameter } from "@artisan/protocol";
 import { Context, Data, Effect, Layer, Option, Schema } from "effect";
 import * as HttpBody from "effect/unstable/http/HttpBody";
 import * as HttpClient from "effect/unstable/http/HttpClient";
@@ -103,6 +104,17 @@ const pair_hash = /^#pair=([^&=]+)(?:&forge=([^&=]+))?$/;
 
 const PairingFailure = () => new BrowserPairingFailure();
 
+/** Removes only Electron's document-navigation marker after pairing succeeds. */
+const pairing_return_url = (location: BrowserPairingLocation) => {
+	if (location.protocol !== "artisan:") {
+		return `${location.pathname}${location.search}`;
+	}
+	const parameters = new URLSearchParams(location.search);
+	parameters.delete(desktop_handoff_navigation_parameter);
+	const search = parameters.toString();
+	return `${location.pathname}${search.length === 0 ? "" : `?${search}`}`;
+};
+
 const DecodeFragmentComponent = (encoded: string) =>
 	Effect.gen(function* () {
 		return yield* Effect.try({
@@ -196,5 +208,5 @@ export const BootstrapBrowserPairing: Effect.Effect<
 		ok: paired,
 	}).pipe(Effect.mapError(PairingFailure));
 	if (!decoded_response.ok) return yield* Effect.fail(PairingFailure());
-	yield* navigation.ReplaceUrl(`${location.pathname}${location.search}`);
+	yield* navigation.ReplaceUrl(pairing_return_url(location));
 });

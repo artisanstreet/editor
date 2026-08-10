@@ -5,7 +5,7 @@ Last updated: 2026-08-10. Branch continuity only; durable verified status is in 
 ## Working State
 
 - Repository `C:\Users\sander\Desktop\artisan-editor`; direct `master` → `origin/master`.
-- Release repair milestone `332684a0` is pushed; local/remote `master` match.
+- Release repair `332684a0` is pushed. The pairing-race follow-up is verified in installed 0.2.35.
 - Root cleanup is isolated from unrelated work still present in the checkout.
 
 ## Invariants
@@ -24,9 +24,9 @@ Last updated: 2026-08-10. Branch continuity only; durable verified status is in 
 
 ## Active Work
 
-- Lifecycle base `810e07b4` and release repair `332684a0` are pushed. The repair recovers a
-  missing-state Forge, discards cards for dead PIDs before network probes, and
-  makes installer retirement target each authenticated superseded PID exactly.
+- Lifecycle base `810e07b4` and repair `332684a0` are pushed. The follow-up gives every
+  completed renderer handoff a fresh public navigation marker, so cold Forge startup
+  reboots the frontend runtime without moving its one-time capability out of the fragment.
 - New-thread spaces, pinned model controls, hidden scrollbars, and clear inactive
   scroll fades are implemented without disabling containers.
 - Working rows keep a bounded assistant preview separate from lifecycle; marquee code is bare muted monospace.
@@ -78,13 +78,12 @@ Last updated: 2026-08-10. Branch continuity only; durable verified status is in 
 
 ## Verification
 
-- Release replay installed healthy 0.2.33 after orphan/dead-card recovery.
-  Cold `ae open` returns in 697 ms; close stops Forge in 237 ms and Electron in
-  1.33 s, leaving no Artisan process. The inherited-pipe repair and delayed
-  overflow rejection pass 10/10 desktop tests and independent review. Package/
-  distribution verifiers and 22 focused tests pass; both shortcuts target stable
-  `ae` and the active icon. Full validation reaches 3 protected dirty-frontend
-  assertions after format/lint/type/build; native fmt/clippy and 73 tests pass.
+- Installed 0.2.35 cold `ae open` returns in 781 ms, leaves no `ae`, and connects
+  Editor to Forge 3.41 s later; close still removes both in 1.34 s. Desktop/release
+  gates pass 9 files/58 tests, both Windows artifact verifiers, TypeScript, frontend,
+  and independent review. Full validation again reaches only 3 protected dirty-
+  frontend assertions after format/lint/type/build; native fmt/clippy, 73 Rust tests,
+  and the dev-TUI smoke pass separately.
 - Assistant preview/status passes 6 files/46 tests plus production frontend.
 - Provider CLI/ACP milestone passes 14 files/112 tests, TypeScript, Forge checks,
   and a real 105,915,904-byte candidate SEA with zero provider assets/SDK markers;

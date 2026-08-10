@@ -7,7 +7,8 @@ import {
 	DesktopLauncherError,
 	DecodeHandoffOutput,
 	ForgeHandoff,
-	renderer_url,
+	renderer_handoff_url,
+	renderer_loader_url,
 } from "./renderer-host";
 
 const max_handoff_stdout_bytes = 64 * 1024;
@@ -216,6 +217,7 @@ export class DesktopRenderer extends Context.Service<
 
 interface HandoffState {
 	readonly in_flight: Option.Option<Deferred.Deferred<ForgeHandoff, DesktopLauncherError>>;
+	readonly next_navigation_id: number;
 	readonly owned_instance_id: Option.Option<string>;
 	readonly reconnect_in_flight: Option.Option<Deferred.Deferred<void>>;
 }
@@ -238,6 +240,7 @@ export const make_desktop_forge_lifecycle_layer = (ae_command_path: string) =>
 			const renderer = yield* DesktopRenderer;
 			const state = yield* SynchronizedRef.make<HandoffState>({
 				in_flight: Option.none(),
+				next_navigation_id: 1,
 				owned_instance_id: Option.none(),
 				reconnect_in_flight: Option.none(),
 			});
@@ -287,7 +290,13 @@ export const make_desktop_forge_lifecycle_layer = (ae_command_path: string) =>
 			const RequestAndNavigate = () =>
 				RequestHandoff().pipe(
 					Effect.flatMap((handoff) =>
-						renderer.LoadUrl(renderer_url(Option.some(handoff))),
+						SynchronizedRef.modify(state, (current) => [
+							renderer_handoff_url(handoff, current.next_navigation_id),
+							{
+								...current,
+								next_navigation_id: current.next_navigation_id + 1,
+							},
+						]).pipe(Effect.flatMap(renderer.LoadUrl)),
 					),
 					Effect.catch((cause) =>
 						Effect.sync(() =>
@@ -363,7 +372,7 @@ export const make_desktop_forge_lifecycle_layer = (ae_command_path: string) =>
 				Start: () =>
 					Effect.gen(function* () {
 						yield* renderer.ClearCookies();
-						yield* renderer.LoadUrl(renderer_url(Option.none()));
+						yield* renderer.LoadUrl(renderer_loader_url);
 					}),
 			});
 		}),

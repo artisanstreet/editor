@@ -10,11 +10,11 @@ import {
 	MakeBrowserNavigationLive,
 } from "../../modules/frontend/src/lib/runtime/pairing";
 
-const location = (hash: string, protocol = "http:") => ({
+const location = (hash: string, protocol = "http:", search = "?view=full") => ({
 	hash,
 	pathname: "/t/workspace_1/thread_1",
 	protocol,
-	search: "?view=full",
+	search,
 });
 
 const RunPairing = (
@@ -23,6 +23,7 @@ const RunPairing = (
 	requests: Array<{ readonly code: string }>,
 	replacements: string[],
 	protocol = "http:",
+	search = "?view=full",
 ) =>
 	BootstrapBrowserPairing.pipe(
 		Effect.provide(
@@ -30,7 +31,7 @@ const RunPairing = (
 				Layer.succeed(
 					BrowserNavigation,
 					BrowserNavigation.of({
-						Location: Effect.succeed(location(hash, protocol)),
+						Location: Effect.succeed(location(hash, protocol, search)),
 						ReplaceUrl: (url) =>
 							Effect.sync(() => {
 								replacements.push(url);
@@ -174,6 +175,22 @@ describe("browser pairing bootstrap", () => {
 			RunPairing("#pair=secret&forge=http%3A%2F%2F127.0.0.1%3A4949", true, web_requests, []),
 		);
 		expect(web_requests).toEqual([]);
+	});
+
+	it("removes only the editor's document-navigation marker after pairing", async () => {
+		const replacements: string[] = [];
+		await Effect.runPromise(
+			RunPairing(
+				"#pair=secret&forge=http%3A%2F%2F127.0.0.1%3A4949",
+				true,
+				[],
+				replacements,
+				"artisan:",
+				"?view=full&artisan-handoff=42&panel=details",
+			),
+		);
+
+		expect(replacements).toEqual(["/t/workspace_1/thread_1?view=full&panel=details"]);
 	});
 
 	it("rejects a non-loopback forge endpoint even on the app scheme", async () => {

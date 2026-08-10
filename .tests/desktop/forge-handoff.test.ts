@@ -86,7 +86,38 @@ describe("desktop Forge handoff lifecycle", () => {
 			"clear-cookies",
 			"artisan://app/",
 			"handoff",
-			"artisan://app/#pair=one-time&forge=http%3A%2F%2F127.0.0.1%3A52985%2F",
+			"artisan://app/?artisan-handoff=1#pair=one-time&forge=http%3A%2F%2F127.0.0.1%3A52985%2F",
+		]);
+	});
+
+	it("uses a fresh document-navigation marker for every completed handoff", async () => {
+		let requests = 0;
+		const paired_urls: string[] = [];
+		const lifecycle = await MakeLifecycle(
+			ForgeHandoffProcess.of({
+				Request: () =>
+					Effect.sync(() => {
+						requests += 1;
+						return {
+							endpoint: "http://127.0.0.1:52985/",
+							pair_code: `one-time-${String(requests)}`,
+							version: 1 as const,
+						};
+					}),
+				StopOwned: () => Effect.void,
+			}),
+			DesktopRenderer.of({
+				ClearCookies: () => Effect.void,
+				LoadUrl: (url) => Effect.sync(() => paired_urls.push(url)),
+			}),
+		);
+
+		await Effect.runPromise(lifecycle.Reconnect());
+		await Effect.runPromise(lifecycle.Reconnect());
+
+		expect(paired_urls).toEqual([
+			"artisan://app/?artisan-handoff=1#pair=one-time-1&forge=http%3A%2F%2F127.0.0.1%3A52985%2F",
+			"artisan://app/?artisan-handoff=2#pair=one-time-2&forge=http%3A%2F%2F127.0.0.1%3A52985%2F",
 		]);
 	});
 

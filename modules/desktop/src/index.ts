@@ -13,7 +13,8 @@ export {
 	DecodeHandoffOutput,
 	DesktopLauncherError,
 	ForgeHandoff,
-	renderer_url,
+	renderer_handoff_url,
+	renderer_loader_url,
 	ServeRendererAsset,
 } from "./renderer-host";
 export {

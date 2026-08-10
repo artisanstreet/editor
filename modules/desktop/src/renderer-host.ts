@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize, sep } from "node:path";
 
+import { desktop_handoff_navigation_parameter } from "@artisan/protocol";
 import { Data, Effect, Option, Schema } from "effect";
 
 export class DesktopLauncherError extends Data.TaggedError("DesktopLauncherError")<{
@@ -117,12 +118,13 @@ export const ServeRendererAsset = (frontend_root: string, request_url: string) =
 		});
 	});
 
+export const renderer_loader_url = `${app_scheme}://${app_host}/`;
+
 /**
- * The launch URL carries the one-time pairing capability and the home's
- * loopback Forge endpoint in the fragment, which never reaches any network
- * request; the renderer consumes and strips it exactly once.
+ * The query marker deliberately changes for every handoff so Chromium performs
+ * a document navigation rather than an in-page hash navigation. Its value is
+ * public sequencing only; the one-time pairing capability and loopback Forge
+ * endpoint remain fragment-confined and never enter a network request.
  */
-export const renderer_url = (handoff: Option.Option<ForgeHandoff>) =>
-	Option.isSome(handoff)
-		? `${app_scheme}://${app_host}/#pair=${encodeURIComponent(handoff.value.pair_code)}&forge=${encodeURIComponent(handoff.value.endpoint)}`
-		: `${app_scheme}://${app_host}/`;
+export const renderer_handoff_url = (handoff: ForgeHandoff, navigation_id: number) =>
+	`${app_scheme}://${app_host}/?${desktop_handoff_navigation_parameter}=${encodeURIComponent(String(navigation_id))}#pair=${encodeURIComponent(handoff.pair_code)}&forge=${encodeURIComponent(handoff.endpoint)}`;

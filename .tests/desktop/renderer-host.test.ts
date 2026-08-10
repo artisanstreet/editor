@@ -2,12 +2,13 @@ import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { Effect, Exit, Option } from "effect";
+import { Effect, Exit } from "effect";
 import { describe, expect, it } from "vitest";
 
 import {
 	DecodeHandoffOutput,
-	renderer_url,
+	renderer_handoff_url,
+	renderer_loader_url,
 	ServeRendererAsset,
 } from "../../modules/desktop/src/renderer-host";
 
@@ -68,17 +69,21 @@ describe("desktop renderer host", () => {
 		}
 	});
 
-	it("builds a fragment-only launch URL that never leaves the app origin", () => {
-		expect(
-			renderer_url(
-				Option.some({
-					endpoint: "http://127.0.0.1:52985/",
-					pair_code: "code with spaces",
-					version: 1,
-				}),
-			),
-		).toBe("artisan://app/#pair=code%20with%20spaces&forge=http%3A%2F%2F127.0.0.1%3A52985%2F");
-		expect(renderer_url(Option.none())).toBe("artisan://app/");
+	it("forces a document navigation while keeping pairing material in the fragment", () => {
+		const url = renderer_handoff_url(
+			{
+				endpoint: "http://127.0.0.1:52985/",
+				pair_code: "code with spaces",
+				version: 1,
+			},
+			7,
+		);
+		const [request_url, fragment] = url.split("#");
+		expect(request_url).toBe("artisan://app/?artisan-handoff=7");
+		expect(request_url).not.toContain("code%20with%20spaces");
+		expect(request_url).not.toContain("52985");
+		expect(fragment).toBe("pair=code%20with%20spaces&forge=http%3A%2F%2F127.0.0.1%3A52985%2F");
+		expect(renderer_loader_url).toBe("artisan://app/");
 	});
 
 	it("serves bundled assets with an index fallback confined to the payload", async () => {
