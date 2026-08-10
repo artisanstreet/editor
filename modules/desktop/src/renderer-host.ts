@@ -43,6 +43,9 @@ const LoopbackForgeEndpoint = Schema.String.check(
  */
 export const ForgeHandoff = Schema.Struct({
 	endpoint: LoopbackForgeEndpoint,
+	owned_instance_id: Schema.optional(
+		Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{1,128}$/), Schema.isMaxLength(128)),
+	),
 	pair_code: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(256)),
 	version: Schema.Literal(1),
 });

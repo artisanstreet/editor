@@ -83,12 +83,9 @@ describe("desktop packaging configuration", () => {
 		expect(main).toContain('clearStorageData({ storages: ["cookies"] })');
 		expect(main.match(/clearStorageData\(/g)).toHaveLength(1);
 		expect(main).not.toContain("clearStorageData()");
-		expect(main.indexOf('clearStorageData({ storages: ["cookies"] })')).toBeLessThan(
-			main.indexOf("const handoff = yield* ObtainHandoff"),
-		);
-		expect(main.indexOf('clearStorageData({ storages: ["cookies"] })')).toBeLessThan(
-			main.indexOf("editor_window.loadURL(renderer_url(handoff))"),
-		);
+		expect(main).toContain("desktop_lifecycle.Start()");
+		expect(main).toContain("desktop_lifecycle.Reconnect()");
+		expect(main).toContain('app.on("before-quit"');
 		expect(main).toContain('const windows_app_user_model_id = "com.usebarekey.artisan-editor"');
 		expect(main).toContain(
 			'const windows_toast_activator_clsid = "{A7D8D3E7-9DE2-4C09-8D4B-4E490C20D3A4}"',
@@ -113,7 +110,7 @@ describe("desktop packaging configuration", () => {
 			main.indexOf("new BrowserWindow"),
 		);
 		/** Pairing stays `ae`-owned: the editor only runs the hidden one-time handoff. */
-		expect(main).toContain('"open", "--handoff"');
+		expect(main).toContain("make_node_forge_handoff_process_layer");
 		expect(main).not.toContain("ARTISAN_AUTH_TOKEN");
 		expect(main).not.toContain("ARTISAN_DATABASE_PATH");
 	});

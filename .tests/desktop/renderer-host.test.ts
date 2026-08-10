@@ -28,6 +28,29 @@ describe("desktop renderer host", () => {
 		});
 	});
 
+	it("accepts legacy handoffs and constrains optional editor ownership", async () => {
+		const legacy = await Effect.runPromise(
+			DecodeHandoffOutput(
+				'{"endpoint":"http://127.0.0.1:52985/","pair_code":"one-time","version":1}',
+			),
+		);
+		expect(legacy.owned_instance_id).toBeUndefined();
+
+		const current = await Effect.runPromise(
+			DecodeHandoffOutput(
+				'{"endpoint":"http://127.0.0.1:52985/","owned_instance_id":"forge_owner-1","pair_code":"one-time","version":1}',
+			),
+		);
+		expect(current.owned_instance_id).toBe("forge_owner-1");
+
+		const exit = await Effect.runPromiseExit(
+			DecodeHandoffOutput(
+				'{"endpoint":"http://127.0.0.1:52985/","owned_instance_id":"forge&stop","pair_code":"one-time","version":1}',
+			),
+		);
+		expect(Exit.isFailure(exit)).toBe(true);
+	});
+
 	it("rejects non-loopback, credentialed, and portless handoff endpoints", async () => {
 		for (const endpoint of [
 			"http://attacker.example:80/",

@@ -1,19 +1,16 @@
-import { spawn } from "node:child_process";
 import { join, normalize } from "node:path";
 
 import { BrowserWindow, app, protocol, session, shell } from "electron";
-import { Effect } from "effect";
+import { Effect, Layer } from "effect";
 
-import { resolve_desktop_paths } from "./paths";
 import {
-	app_host,
-	app_scheme,
-	DecodeHandoffOutput,
-	DesktopLauncherError,
-	renderer_url,
-	ServeRendererAsset,
-	type ForgeHandoff,
-} from "./renderer-host";
+	DesktopForgeLifecycle,
+	DesktopRenderer,
+	make_desktop_forge_lifecycle_layer,
+	make_node_forge_handoff_process_layer,
+} from "./forge-handoff";
+import { resolve_desktop_paths } from "./paths";
+import { app_host, app_scheme, ServeRendererAsset } from "./renderer-host";
 
 const renderer_partition = "persist:artisan-renderer";
 const windows_app_user_model_id = "com.usebarekey.artisan-editor";
@@ -101,60 +98,10 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 /**
- * Obtains `{endpoint, pair_code}` from the installed `ae`, which owns Forge
- * lifecycle and pairing for the home's single instance. The capability travels
- * only through this process's stdout pipe — never argv, disk, or a browser
- * navigation.
- */
-const RequestForgeHandoff = (ae_command_path: string) =>
-	Effect.callback<ForgeHandoff, DesktopLauncherError>((resume) => {
-		const child = spawn(ae_command_path, ["open", "--handoff"], {
-			shell: process.platform === "win32",
-			stdio: ["ignore", "pipe", "ignore"],
-			windowsHide: true,
-		});
-		let stdout = "";
-		let settled = false;
-		const complete = (result: Effect.Effect<ForgeHandoff, DesktopLauncherError>) => {
-			if (settled) return;
-			settled = true;
-			child.off("error", on_error);
-			child.off("exit", on_exit);
-			resume(result);
-		};
-		const on_error = (cause: Error) =>
-			complete(Effect.fail(new DesktopLauncherError({ cause, reason: "handoff_failed" })));
-		const on_exit = (exit_code: number | null) =>
-			complete(
-				exit_code === 0
-					? DecodeHandoffOutput(stdout)
-					: Effect.fail(
-							new DesktopLauncherError({
-								cause: new Error(`ae open --handoff exited ${String(exit_code)}`),
-								reason: "handoff_failed",
-							}),
-						),
-			);
-		child.stdout?.setEncoding("utf8");
-		child.stdout?.on("data", (chunk: string) => {
-			if (stdout.length < 64 * 1024) stdout += chunk;
-		});
-		child.once("error", on_error);
-		child.once("exit", on_exit);
-
-		return Effect.sync(() => {
-			settled = true;
-			child.off("error", on_error);
-			child.off("exit", on_exit);
-			child.kill();
-		});
-	});
-
-/**
- * The installed editor is a windowed renderer host and nothing more: `ae`
- * owns Forge lifecycle and pairing; the renderer talks to Forge over plain
- * HTTP/WS exactly like a paired browser. There is no preload and no IPC
- * surface — the window is sandboxed with context isolation on.
+ * The installed editor remains a thin renderer host: `ae` owns Forge launch,
+ * pairing, and exact-instance shutdown, while Electron retains only the lease
+ * for a Forge this window caused `ae` to spawn. The renderer talks over plain
+ * HTTP/WS like a paired browser; there is no preload or IPC surface.
  */
 export const StartDesktop = Effect.gen(function* () {
 	if (!app.requestSingleInstanceLock()) {
@@ -179,21 +126,6 @@ export const StartDesktop = Effect.gen(function* () {
 	const renderer_session = session.fromPartition(renderer_partition);
 	renderer_session.protocol.handle(app_scheme, (request) =>
 		Effect.runPromise(ServeRendererAsset(frontend_root, request.url)),
-	);
-
-	const ObtainHandoff = Effect.suspend(() => RequestForgeHandoff(paths.ae_command_path)).pipe(
-		Effect.tapCause((cause) =>
-			Effect.sync(() =>
-				console.error(
-					JSON.stringify({
-						kind: "artisan:desktop-handoff",
-						message: String(cause),
-						ok: false,
-					}),
-				),
-			),
-		),
-		Effect.option,
 	);
 
 	const editor_window = new BrowserWindow({
@@ -223,32 +155,47 @@ export const StartDesktop = Effect.gen(function* () {
 		if (!url.startsWith(`${app_scheme}://${app_host}/`)) event.preventDefault();
 	});
 
-	/**
-	 * `artisan://forge/start` and repeated `ae open` invocations land here via
-	 * the single-instance lock: the running editor re-pairs with a fresh
-	 * one-time capability instead of spawning a second window.
-	 */
-	const LoadRenderer = Effect.gen(function* () {
-		/** Pairing capabilities are one-time, so never carry an old Forge cookie into a handoff. */
-		yield* Effect.tryPromise({
-			try: () => renderer_session.clearStorageData({ storages: ["cookies"] }),
-			catch: (cause) => cause,
-		});
-		const handoff = yield* ObtainHandoff;
-		yield* Effect.tryPromise({
-			try: () => editor_window.loadURL(renderer_url(handoff)),
-			catch: (cause) => cause,
+	const renderer = DesktopRenderer.of({
+		ClearCookies: () =>
+			Effect.tryPromise({
+				try: () => renderer_session.clearStorageData({ storages: ["cookies"] }),
+				catch: (cause) => cause,
+			}),
+		LoadUrl: (url) =>
+			Effect.tryPromise({
+				try: () => editor_window.loadURL(url),
+				catch: (cause) => cause,
+			}),
+	});
+	const desktop_lifecycle = yield* DesktopForgeLifecycle.pipe(
+		Effect.provide(make_desktop_forge_lifecycle_layer(paths.ae_command_path)),
+		Effect.provide(Layer.succeed(DesktopRenderer, renderer)),
+		Effect.provide(make_node_forge_handoff_process_layer),
+	);
+	let cleanup: Promise<void> | undefined;
+	const Cleanup = () => (cleanup ??= Effect.runPromise(desktop_lifecycle.Cleanup()));
+	let quitting = false;
+	app.on("before-quit", (event) => {
+		if (quitting) return;
+		event.preventDefault();
+		void Cleanup().finally(() => {
+			quitting = true;
+			app.quit();
 		});
 	});
 	app.on("second-instance", () => {
 		if (editor_window.isMinimized()) editor_window.restore();
 		editor_window.focus();
 		/** A repeated `ae open` re-pairs the running editor with a fresh capability. */
-		void Effect.runPromise(LoadRenderer).catch(() => undefined);
+		void Effect.runPromise(desktop_lifecycle.Reconnect());
 	});
-	app.on("window-all-closed", () => app.quit());
+	app.on("window-all-closed", () => {
+		app.quit();
+	});
 
-	yield* LoadRenderer;
+	yield* desktop_lifecycle.Start();
+	/** The visible connection loader is already navigating while ae pairs in the background. */
+	void Effect.runPromise(desktop_lifecycle.Reconnect());
 });
 
 /** The sole Desktop Effect runtime bootstrap. */

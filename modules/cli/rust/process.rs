@@ -3,7 +3,7 @@ use std::{
     path::Path,
     process::{Command, Stdio},
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -14,17 +14,50 @@ use crate::{
     manifest::InstallationManifest,
 };
 
+const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(15);
+const SHUTDOWN_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
+const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum StartResult {
+    AlreadyRunning,
+    Spawned { pid: u32 },
+    ForegroundExited,
+}
+
 pub fn start(
     manifest: &InstallationManifest,
     paths: &InstancePaths,
     config: &InstanceConfig,
     secrets: &Secrets,
     foreground: bool,
-) -> Result<()> {
+) -> Result<StartResult> {
+    start_until(
+        manifest,
+        paths,
+        config,
+        secrets,
+        foreground,
+        Instant::now() + Duration::from_secs(5),
+    )
+}
+
+pub fn start_until(
+    manifest: &InstallationManifest,
+    paths: &InstancePaths,
+    config: &InstanceConfig,
+    secrets: &Secrets,
+    foreground: bool,
+    health_deadline: Instant,
+) -> Result<StartResult> {
     if let Ok(state) = crate::instance::read_json::<State>(&paths.state)
-        && http::healthy(&state.endpoint, &secrets.auth_token)
+        && http::status_until(&state.endpoint, &secrets.auth_token, health_deadline)
+            .is_ok_and(|status| status.instance_id == state.instance_id && status.pid == state.pid)
     {
-        return Ok(());
+        return Ok(StartResult::AlreadyRunning);
+    }
+    if !foreground {
+        ensure_background_start_deadline(health_deadline)?;
     }
     let executable = manifest.forge_executable();
     let forge_root = manifest.version_root().join("forge");
@@ -56,8 +89,10 @@ pub fn start(
     );
     if foreground {
         let status = command.status().map_err(io("start Forge"))?;
-        if !status.success() {
-            return Err(CliError::Control(format!("Forge exited with {status}")));
+        if status.success() {
+            Ok(StartResult::ForegroundExited)
+        } else {
+            Err(CliError::Control(format!("Forge exited with {status}")))
         }
     } else {
         command
@@ -65,9 +100,24 @@ pub fn start(
             .stdout(Stdio::from(log.try_clone().map_err(io("clone Forge log"))?))
             .stderr(Stdio::from(log));
         detach(&mut command);
-        command.spawn().map_err(io("start Forge"))?;
+        ensure_background_start_deadline(health_deadline)?;
+        let child = command.spawn().map_err(io("start Forge"))?;
+        Ok(StartResult::Spawned { pid: child.id() })
     }
-    Ok(())
+}
+
+fn ensure_background_start_deadline(deadline: Instant) -> Result<()> {
+    if background_start_can_continue(Instant::now(), deadline) {
+        Ok(())
+    } else {
+        Err(CliError::Control(
+            "Forge start timed out before background launch".into(),
+        ))
+    }
+}
+
+fn background_start_can_continue(now: Instant, deadline: Instant) -> bool {
+    now < deadline
 }
 
 fn configure_forge_environment(
@@ -144,10 +194,25 @@ fn detach(_: &mut Command) {
 }
 
 pub fn stop(paths: &InstancePaths, secrets: &Secrets) -> Result<()> {
+    stop_with_instance_id(paths, secrets, None)
+}
+
+/// Stops Forge only when the state still belongs to `expected_instance_id`.
+/// An editor-owned cleanup must never shut down a replacement Forge, so a
+/// missing or changed state is intentionally a successful no-op.
+pub fn stop_with_instance_id(
+    paths: &InstancePaths,
+    secrets: &Secrets,
+    expected_instance_id: Option<&str>,
+) -> Result<()> {
+    let deadline = Instant::now() + SHUTDOWN_TIMEOUT;
     let state_metadata = match fs::symlink_metadata(&paths.state) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Err(CliError::NotRunning);
+            return match expected_instance_id {
+                Some(_) => Ok(()),
+                None => Err(CliError::NotRunning),
+            };
         }
         Err(source) => {
             return Err(CliError::Io {
@@ -160,21 +225,64 @@ pub fn stop(paths: &InstancePaths, secrets: &Secrets) -> Result<()> {
         return Err(CliError::UnsafePath(paths.state.clone()));
     }
     let state: State = crate::instance::read_json(&paths.state)?;
-    http::request(
+    if !should_stop_instance(expected_instance_id, &state.instance_id) {
+        return Ok(());
+    }
+    if let Some(expected_instance_id) = expected_instance_id {
+        let Ok(status) = http::status_until(
+            &state.endpoint,
+            &secrets.auth_token,
+            probe_deadline(deadline, SHUTDOWN_PROBE_TIMEOUT),
+        ) else {
+            // The process may have exited or a replacement may now own this
+            // endpoint. Exact cleanup treats either race as a no-op.
+            return Ok(());
+        };
+        if status.instance_id != expected_instance_id {
+            return Ok(());
+        }
+        if crate::instance::read_json::<State>(&paths.state)
+            .map_or(true, |current| current.instance_id != expected_instance_id)
+        {
+            return Ok(());
+        }
+    }
+    http::request_until(
         &state.endpoint,
         "/api/control/shutdown",
         &secrets.auth_token,
         "POST",
+        deadline,
     )?;
-    for _ in 0..50 {
-        if !http::healthy(&state.endpoint, &secrets.auth_token) {
+    while Instant::now() < deadline {
+        if http::status_until(
+            &state.endpoint,
+            &secrets.auth_token,
+            probe_deadline(deadline, SHUTDOWN_PROBE_TIMEOUT),
+        )
+        .is_err()
+        {
             return Ok(());
         }
-        thread::sleep(Duration::from_millis(100));
+        sleep_until(deadline, SHUTDOWN_POLL_INTERVAL);
     }
     Err(CliError::Control(
         "Forge accepted shutdown but remained reachable".into(),
     ))
+}
+
+fn probe_deadline(deadline: Instant, probe_timeout: Duration) -> Instant {
+    deadline.min(Instant::now() + probe_timeout)
+}
+
+fn sleep_until(deadline: Instant, interval: Duration) {
+    if let Some(remaining) = deadline.checked_duration_since(Instant::now()) {
+        thread::sleep(interval.min(remaining));
+    }
+}
+
+fn should_stop_instance(expected_instance_id: Option<&str>, actual_instance_id: &str) -> bool {
+    expected_instance_id.is_none_or(|expected| expected == actual_instance_id)
 }
 
 #[cfg(test)]
@@ -182,9 +290,14 @@ mod tests {
     use std::{
         ffi::OsStr,
         path::{Path, PathBuf},
+        time::{Duration, Instant},
     };
 
-    use super::{Command, InstanceConfig, InstancePaths, Secrets, configure_forge_environment};
+    use super::{
+        Command, InstanceConfig, InstancePaths, SHUTDOWN_POLL_INTERVAL, SHUTDOWN_PROBE_TIMEOUT,
+        SHUTDOWN_TIMEOUT, Secrets, background_start_can_continue, configure_forge_environment,
+        should_stop_instance,
+    };
     use crate::instance::ForgeMode;
 
     fn test_instance(serve_frontend: bool) -> (InstancePaths, InstanceConfig, Secrets) {
@@ -270,5 +383,29 @@ mod tests {
                 *key == OsStr::new(name) && value.as_deref() == Some(native_runtime.as_os_str())
             }));
         }
+    }
+
+    #[test]
+    fn exact_stop_decision_is_a_noop_for_a_replaced_instance() {
+        assert!(should_stop_instance(None, "current"));
+        assert!(should_stop_instance(Some("current"), "current"));
+        assert!(!should_stop_instance(Some("editor-owned"), "replacement"));
+    }
+
+    #[test]
+    fn shutdown_has_one_global_budget_below_the_desktop_timeout() {
+        assert!(SHUTDOWN_TIMEOUT <= Duration::from_secs(20));
+        assert!(SHUTDOWN_PROBE_TIMEOUT < SHUTDOWN_TIMEOUT);
+        assert!(SHUTDOWN_POLL_INTERVAL < SHUTDOWN_TIMEOUT);
+    }
+
+    #[test]
+    fn background_start_never_continues_at_or_after_its_deadline() {
+        let now = Instant::now();
+        assert!(background_start_can_continue(
+            now,
+            now + Duration::from_millis(1)
+        ));
+        assert!(!background_start_can_continue(now, now));
     }
 }

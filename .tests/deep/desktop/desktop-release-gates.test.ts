@@ -59,6 +59,10 @@ describe("deep desktop release gates", () => {
 
 	it("packages a sandboxed renderer host around the ae-managed Forge", () => {
 		const main = readFileSync(resolve(workspace_root, "modules/desktop/src/main.ts"), "utf8");
+		const lifecycle = readFileSync(
+			resolve(workspace_root, "modules/desktop/src/forge-handoff.ts"),
+			"utf8",
+		);
 
 		expect(has_electron_packaging_configuration()).toBe(true);
 		/** The editor renders the bundled frontend and pairs through `ae`'s one-time handoff. */
@@ -68,9 +72,14 @@ describe("deep desktop release gates", () => {
 		expect(main).toContain("sandbox: true");
 		expect(main).not.toContain("preload:");
 		expect(main).not.toContain("ipcMain");
-		expect(main).toContain('"open", "--handoff"');
+		expect(main).toContain("make_node_forge_handoff_process_layer");
+		expect(lifecycle).toContain('["open", "--handoff"]');
+		expect(lifecycle).toContain("OwnedForgeStopArguments(instance_id)");
+		expect(lifecycle).toContain("windowsHide: true");
 		expect(main).not.toContain("ARTISAN_AUTH_TOKEN");
 		expect(main).not.toContain("ARTISAN_DATABASE_PATH");
+		expect(lifecycle).not.toContain("ARTISAN_AUTH_TOKEN");
+		expect(lifecycle).not.toContain("ARTISAN_DATABASE_PATH");
 		expect(desktop_config).not.toContain("koffi-win32-x64");
 		expect(desktop_config).toContain("ssr: { noExternal: true }");
 		/** The editor stages its own frontend copy with the loopback CSP variant. */

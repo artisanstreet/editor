@@ -21,7 +21,11 @@ use crate::{
 
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
 const MAX_FOLLOW_BYTES: u64 = 64 * 1024;
+const FORGE_READY_TIMEOUT: Duration = Duration::from_secs(15);
+const FORGE_READY_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+const FORGE_READY_INTERVAL: Duration = Duration::from_millis(100);
 const FORGE_START_LAUNCH_URL: &str = "artisan://forge/start";
+const AUTOSTART_TASK_NAME: &str = "Artisan Forge";
 
 #[derive(Debug, Parser)]
 #[command(name = "ae", version, about = "Artisan Editor and Forge")]
@@ -56,7 +60,11 @@ pub enum Commands {
         #[arg(long)]
         foreground: bool,
     },
-    Stop,
+    Stop {
+        /// Stop only this exact Forge instance. Intended for editor cleanup.
+        #[arg(long, hide = true)]
+        instance_id: Option<String>,
+    },
     Restart {
         #[arg(long)]
         foreground: bool,
@@ -89,6 +97,12 @@ pub enum Commands {
         /// launching anything.
         #[arg(long, hide = true)]
         handoff: bool,
+    },
+    /// Inspect or disable the current-user Forge logon task.
+    Autostart {
+        /// Remove the current-user Forge logon task.
+        #[arg(long)]
+        disable: bool,
     },
     Update,
     Uninstall {
@@ -130,11 +144,6 @@ pub fn run(cli: Cli) -> Result<()> {
             serve_frontend,
         } => {
             require_installation(&layout)?;
-            if autostart {
-                return Err(CliError::Unsupported(
-                    "`ae setup --autostart` is not available in the Rust CLI yet".into(),
-                ));
-            }
             let data_root = data_root.as_deref().map(validate_data_root).transpose()?;
             instance::setup(
                 &layout,
@@ -144,14 +153,17 @@ pub fn run(cli: Cli) -> Result<()> {
                 serve_frontend,
             )?;
             delegate_installer(&layout, "repair", false)?;
+            if autostart {
+                enable_autostart(&layout)?;
+            }
             println!("Configured Forge");
             Ok(())
         }
-        Commands::Start { foreground } => start(&layout, foreground),
-        Commands::Stop => stop(&layout),
+        Commands::Start { foreground } => start(&layout, foreground).map(|_| ()),
+        Commands::Stop { instance_id } => stop(&layout, instance_id.as_deref()),
         Commands::Restart { foreground } => {
-            let _ = stop(&layout);
-            start(&layout, foreground)
+            let _ = stop(&layout, None);
+            start(&layout, foreground).map(|_| ())
         }
         Commands::Status { json } => status(&layout, json),
         Commands::Logs { lines, follow } => logs(&layout, lines, follow),
@@ -170,12 +182,14 @@ pub fn run(cli: Cli) -> Result<()> {
             };
             open(&layout, origin.as_deref(), flow)
         }
+        Commands::Autostart { disable } => autostart(disable),
         Commands::Update => delegate_installer(&layout, "update", false),
         Commands::Uninstall { remove_data } => {
-            match stop(&layout) {
+            match stop(&layout, None) {
                 Ok(()) | Err(CliError::NotRunning | CliError::MissingInstance) => {}
                 Err(error) => return Err(error),
             }
+            disable_autostart_if_supported()?;
             delegate_installer(&layout, "uninstall", remove_data)
         }
     }
@@ -185,15 +199,281 @@ fn require_installation(layout: &Layout) -> Result<InstallationManifest> {
     InstallationManifest::load(&layout.manifest)
 }
 
-fn start(layout: &Layout, foreground: bool) -> Result<()> {
+fn start(layout: &Layout, foreground: bool) -> Result<process::StartResult> {
     let manifest = require_installation(layout)?;
     let (paths, config, secrets) = instance::load(layout)?;
     process::start(&manifest, &paths, &config, &secrets, foreground)
 }
 
-fn stop(layout: &Layout) -> Result<()> {
+fn stop(layout: &Layout, instance_id: Option<&str>) -> Result<()> {
     let (paths, _, secrets) = instance::load(layout)?;
-    process::stop(&paths, &secrets)
+    process::stop_with_instance_id(&paths, &secrets, instance_id)
+}
+
+fn autostart(disable: bool) -> Result<()> {
+    if disable {
+        disable_autostart()?;
+        println!("disabled");
+    } else {
+        println!(
+            "{}",
+            if autostart_enabled()? {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+    }
+    Ok(())
+}
+
+fn enable_autostart(layout: &Layout) -> Result<()> {
+    let manifest = require_installation(layout)?;
+    let permanent_ae = manifest.permanent_ae_path.as_deref().ok_or_else(|| {
+        CliError::Installation(
+            "the installation has no permanent ae launcher path; run `ae doctor --fix` before enabling autostart"
+                .into(),
+        )
+    })?;
+    let launcher = stable_launcher_kind(permanent_ae).ok_or_else(|| {
+        CliError::Installation(format!(
+            "the permanent ae launcher at {} must be an absolute ae.exe, ae.cmd, or ae.bat file; run `ae doctor --fix` before enabling autostart",
+            permanent_ae.display()
+        ))
+    })?;
+    if !permanent_ae.is_absolute() || !permanent_ae.is_file() {
+        return Err(CliError::Installation(format!(
+            "the permanent ae launcher is unavailable at {}; run `ae doctor --fix` before enabling autostart",
+            permanent_ae.display()
+        )));
+    }
+    let action = scheduled_task_action(
+        permanent_ae,
+        launcher,
+        match launcher {
+            StableLauncher::Executable => None,
+            StableLauncher::CommandScript => Some(trusted_windows_command_processor()?),
+        },
+    )?;
+    create_autostart_task(&action)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum StableLauncher {
+    Executable,
+    CommandScript,
+}
+
+fn stable_launcher_kind(path: &Path) -> Option<StableLauncher> {
+    match path.file_name()?.to_str()? {
+        name if name.eq_ignore_ascii_case("ae.exe") => Some(StableLauncher::Executable),
+        name if name.eq_ignore_ascii_case("ae.cmd") || name.eq_ignore_ascii_case("ae.bat") => {
+            Some(StableLauncher::CommandScript)
+        }
+        _ => None,
+    }
+}
+
+fn scheduled_task_action(
+    permanent_ae: &Path,
+    launcher: StableLauncher,
+    command_processor: Option<PathBuf>,
+) -> Result<String> {
+    match launcher {
+        StableLauncher::Executable => Ok(format!("\"{}\" start", permanent_ae.display())),
+        StableLauncher::CommandScript => {
+            let command_processor = command_processor.ok_or_else(|| {
+                CliError::Installation(
+                    "no trusted Windows command processor is available for the permanent ae script"
+                        .into(),
+                )
+            })?;
+            reject_cmd_metacharacters(permanent_ae)?;
+            reject_cmd_metacharacters(&command_processor)?;
+            Ok(format!(
+                "\"{}\" /d /s /c \"\"{}\" start\"",
+                command_processor.display(),
+                permanent_ae.display()
+            ))
+        }
+    }
+}
+
+fn reject_cmd_metacharacters(path: &Path) -> Result<()> {
+    let path = path.to_str().ok_or_else(|| {
+        CliError::Installation("the permanent ae script path is not valid Unicode".into())
+    })?;
+    if path.chars().any(|character| {
+        matches!(
+            character,
+            '%' | '!' | '^' | '&' | '|' | '<' | '>' | '(' | ')' | '"' | '\r' | '\n'
+        )
+    }) {
+        return Err(CliError::Installation(
+            "the permanent ae script path contains characters unsafe for Windows cmd.exe".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn trusted_windows_command_processor() -> Result<PathBuf> {
+    let system_root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| {
+            CliError::Installation(
+                "Windows SystemRoot is unavailable; cannot safely schedule the permanent ae script"
+                    .into(),
+            )
+        })?;
+    let command_processor = system_root.join("System32").join("cmd.exe");
+    if !command_processor.is_file() {
+        return Err(CliError::Installation(format!(
+            "trusted Windows command processor is unavailable at {}; run `ae doctor --fix`",
+            command_processor.display()
+        )));
+    }
+    Ok(command_processor)
+}
+
+#[cfg(not(target_os = "windows"))]
+fn trusted_windows_command_processor() -> Result<PathBuf> {
+    Err(CliError::Unsupported(
+        "Forge autostart uses Windows Task Scheduler and is unavailable on this platform".into(),
+    ))
+}
+
+fn scheduled_task_create_args(action: &str) -> Vec<String> {
+    vec![
+        "/Create".into(),
+        "/TN".into(),
+        AUTOSTART_TASK_NAME.into(),
+        "/TR".into(),
+        action.into(),
+        "/SC".into(),
+        "ONLOGON".into(),
+        "/RL".into(),
+        "LIMITED".into(),
+        "/F".into(),
+    ]
+}
+
+#[cfg(target_os = "windows")]
+fn create_autostart_task(action: &str) -> Result<()> {
+    let status = hidden_schtasks(
+        &scheduled_task_create_args(action),
+        "create Forge autostart task",
+    )?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(CliError::Control(format!(
+            "could not create current-user Forge autostart task ({status})"
+        )))
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn create_autostart_task(_: &str) -> Result<()> {
+    Err(CliError::Unsupported(
+        "Forge autostart uses Windows Task Scheduler and is unavailable on this platform".into(),
+    ))
+}
+
+fn disable_autostart_if_supported() -> Result<()> {
+    #[cfg(target_os = "windows")]
+    return disable_autostart();
+    #[cfg(not(target_os = "windows"))]
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+fn disable_autostart() -> Result<()> {
+    let query_status = hidden_schtasks(
+        &["/Query".into(), "/TN".into(), AUTOSTART_TASK_NAME.into()],
+        "inspect Forge autostart task before removal",
+    )?;
+    if matches!(
+        scheduled_task_deletion(query_status.success(), true),
+        ScheduledTaskDeletion::AlreadyAbsent
+    ) {
+        return Ok(());
+    }
+    let delete_status = hidden_schtasks(
+        &[
+            "/Delete".into(),
+            "/TN".into(),
+            AUTOSTART_TASK_NAME.into(),
+            "/F".into(),
+        ],
+        "remove Forge autostart task",
+    )?;
+    match scheduled_task_deletion(true, delete_status.success()) {
+        ScheduledTaskDeletion::Deleted => Ok(()),
+        ScheduledTaskDeletion::AlreadyAbsent => unreachable!("task existence was checked first"),
+        ScheduledTaskDeletion::Failed => Err(CliError::Control(format!(
+            "could not remove current-user Forge autostart task ({delete_status})"
+        ))),
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScheduledTaskDeletion {
+    AlreadyAbsent,
+    Deleted,
+    Failed,
+}
+
+/// Converts scheduler exit outcomes into idempotent removal semantics without
+/// running a real task operation in unit tests.
+fn scheduled_task_deletion(task_exists: bool, delete_succeeded: bool) -> ScheduledTaskDeletion {
+    match (task_exists, delete_succeeded) {
+        (false, _) => ScheduledTaskDeletion::AlreadyAbsent,
+        (true, true) => ScheduledTaskDeletion::Deleted,
+        (true, false) => ScheduledTaskDeletion::Failed,
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn disable_autostart() -> Result<()> {
+    Err(CliError::Unsupported(
+        "Forge autostart uses Windows Task Scheduler and is unavailable on this platform".into(),
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn autostart_enabled() -> Result<bool> {
+    let status = hidden_schtasks(
+        &["/Query".into(), "/TN".into(), AUTOSTART_TASK_NAME.into()],
+        "inspect Forge autostart task",
+    )?;
+    Ok(status.success())
+}
+
+#[cfg(not(target_os = "windows"))]
+fn autostart_enabled() -> Result<bool> {
+    Err(CliError::Unsupported(
+        "Forge autostart uses Windows Task Scheduler and is unavailable on this platform".into(),
+    ))
+}
+
+#[cfg(target_os = "windows")]
+fn hidden_schtasks(
+    arguments: &[String],
+    context: &'static str,
+) -> Result<std::process::ExitStatus> {
+    use std::os::windows::process::CommandExt;
+
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    Command::new("schtasks.exe")
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map_err(io(context))
 }
 
 fn status(layout: &Layout, json: bool) -> Result<()> {
@@ -360,26 +640,71 @@ fn handle_protocol(layout: &Layout, url: &str) -> Result<()> {
     open(layout, None, OpenFlow::Editor)
 }
 
-fn ready_state(layout: &Layout) -> Result<State> {
+#[derive(Clone, Debug)]
+struct ReadyState {
+    state: State,
+    owned_instance_id: Option<String>,
+}
+
+fn ready_state(layout: &Layout) -> Result<ReadyState> {
+    let deadline = std::time::Instant::now() + FORGE_READY_TIMEOUT;
     let (paths, _, secrets) = instance::load(layout)?;
     // An already-healthy Forge needs no launch, so opening against one works
     // even in homes without an installation manifest (the repo development
     // Forge runs from `.dist/forge`, started by its own CLI).
     if let Ok(candidate) = instance::read_json::<State>(&paths.state)
-        && http::healthy(&candidate.endpoint, &secrets.auth_token)
+        && state_is_ready(&candidate, &secrets.auth_token, probe_deadline(deadline))
     {
-        return Ok(candidate);
+        return Ok(ReadyState {
+            state: candidate,
+            owned_instance_id: None,
+        });
     }
-    start(layout, false)?;
-    for _ in 0..50 {
+    let start_result = start_until(layout, false, probe_deadline(deadline))?;
+    while std::time::Instant::now() < deadline {
         if let Ok(candidate) = instance::read_json::<State>(&paths.state)
-            && http::healthy(&candidate.endpoint, &secrets.auth_token)
+            && state_is_ready(&candidate, &secrets.auth_token, probe_deadline(deadline))
         {
-            return Ok(candidate);
+            return Ok(ReadyState {
+                owned_instance_id: owned_instance_id(start_result, &candidate),
+                state: candidate,
+            });
         }
-        thread::sleep(Duration::from_millis(100));
+        sleep_until(deadline, FORGE_READY_INTERVAL);
     }
     Err(CliError::Control("Forge did not become ready".into()))
+}
+
+fn start_until(
+    layout: &Layout,
+    foreground: bool,
+    health_deadline: std::time::Instant,
+) -> Result<process::StartResult> {
+    let manifest = require_installation(layout)?;
+    let (paths, config, secrets) = instance::load(layout)?;
+    process::start_until(
+        &manifest,
+        &paths,
+        &config,
+        &secrets,
+        foreground,
+        health_deadline,
+    )
+}
+
+fn state_is_ready(state: &State, auth_token: &str, deadline: std::time::Instant) -> bool {
+    http::status_until(&state.endpoint, auth_token, deadline)
+        .is_ok_and(|status| status.instance_id == state.instance_id && status.pid == state.pid)
+}
+
+fn probe_deadline(deadline: std::time::Instant) -> std::time::Instant {
+    deadline.min(std::time::Instant::now() + FORGE_READY_PROBE_TIMEOUT)
+}
+
+fn sleep_until(deadline: std::time::Instant, interval: Duration) {
+    if let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) {
+        thread::sleep(interval.min(remaining));
+    }
 }
 
 fn mint_pair_code(layout: &Layout, state: &State) -> Result<String> {
@@ -398,38 +723,97 @@ fn mint_pair_code(layout: &Layout, state: &State) -> Result<String> {
 }
 
 fn open(layout: &Layout, origin: Option<&str>, flow: OpenFlow) -> Result<()> {
-    let state = ready_state(layout)?;
     // A home without an installation has no editor payload to launch; the
     // paired browser against the (already running) Forge is the only
     // renderer there, so the default flow degrades to it instead of failing.
-    let flow = if matches!(flow, OpenFlow::Editor) && !layout.manifest.is_file() {
+    let flow = resolved_open_flow(flow, layout.manifest.is_file());
+    if matches!(flow, OpenFlow::Browser) && !layout.manifest.is_file() {
         eprintln!("no installation in this Artisan home; opening the paired browser instead");
+    }
+    if open_flow_requires_ready(flow) {
+        let ready = ready_state(layout)?;
+        open_ready(layout, origin, flow, &ready)
+    } else {
+        // The editor starts its own background handoff. Do not wait for Forge
+        // here: a cold Forge must never delay a visible editor window.
+        launch_editor(layout)
+    }
+}
+
+fn resolved_open_flow(flow: OpenFlow, has_installation: bool) -> OpenFlow {
+    if matches!(flow, OpenFlow::Editor) && !has_installation {
         OpenFlow::Browser
     } else {
         flow
-    };
+    }
+}
+
+fn open_flow_requires_ready(flow: OpenFlow) -> bool {
+    !matches!(flow, OpenFlow::Editor)
+}
+
+fn open_ready(
+    layout: &Layout,
+    origin: Option<&str>,
+    flow: OpenFlow,
+    ready: &ReadyState,
+) -> Result<()> {
     match flow {
         OpenFlow::Editor => launch_editor(layout),
         OpenFlow::Browser => {
-            let code = mint_pair_code(layout, &state)?;
-            let origin = resolve_browser_origin(origin, &state.endpoint)?;
+            let code = mint_pair_code(layout, &ready.state)?;
+            let origin = resolve_browser_origin(origin, &ready.state.endpoint)?;
             launch_url(&format!("{origin}/#pair={code}"))
         }
         OpenFlow::Handoff => {
-            let code = mint_pair_code(layout, &state)?;
+            let code = match mint_pair_code(layout, &ready.state) {
+                Ok(code) => code,
+                Err(error) => {
+                    cleanup_failed_handoff(layout, ready);
+                    return Err(error);
+                }
+            };
             // The capability is one-time and short-lived; stdout reaches only
             // the trusted local process that invoked this hidden mode.
-            println!(
-                "{}",
-                serde_json::json!({
-                    "endpoint": state.endpoint,
-                    "pair_code": code,
-                    "version": 1,
-                })
-            );
+            println!("{}", handoff_json(ready, &code));
             Ok(())
         }
     }
+}
+
+fn cleanup_failed_handoff(layout: &Layout, ready: &ReadyState) {
+    if let Some(instance_id) = handoff_cleanup_instance_id(ready) {
+        // Preserve the pairing error: cleanup is best-effort and exact, never
+        // an ordinary shutdown that could affect a replacement Forge.
+        let _ = stop(layout, Some(instance_id));
+    }
+}
+
+fn handoff_cleanup_instance_id(ready: &ReadyState) -> Option<&str> {
+    ready.owned_instance_id.as_deref()
+}
+
+fn owned_instance_id(start_result: process::StartResult, state: &State) -> Option<String> {
+    match start_result {
+        process::StartResult::Spawned { pid } if pid == state.pid => {
+            Some(state.instance_id.clone())
+        }
+        process::StartResult::AlreadyRunning
+        | process::StartResult::Spawned { .. }
+        | process::StartResult::ForegroundExited => None,
+    }
+}
+
+fn handoff_json(ready: &ReadyState, pair_code: &str) -> serde_json::Value {
+    let mut handoff = serde_json::json!({
+        "endpoint": ready.state.endpoint,
+        "pair_code": pair_code,
+        "version": 1,
+    });
+    if let Some(owned_instance_id) = &ready.owned_instance_id {
+        handoff["owned_instance_id"] = serde_json::Value::String(owned_instance_id.clone());
+    }
+    handoff
 }
 
 /// The installed editor renders the bundled frontend itself and performs its
@@ -599,6 +983,163 @@ mod tests {
             Cli::try_parse_from(["ae", "open", "--handoff", "--origin", "http://127.0.0.1:1"])
                 .is_err()
         );
+    }
+
+    #[test]
+    fn hidden_exact_stop_and_autostart_commands_parse_without_widening_stop() {
+        let exact_stop = Cli::try_parse_from(["ae", "stop", "--instance-id", "forge-1"]).unwrap();
+        assert!(matches!(
+            exact_stop.command,
+            Some(Commands::Stop { instance_id: Some(id) }) if id == "forge-1"
+        ));
+        let ordinary_stop = Cli::try_parse_from(["ae", "stop"]).unwrap();
+        assert!(matches!(
+            ordinary_stop.command,
+            Some(Commands::Stop { instance_id: None })
+        ));
+        let disable = Cli::try_parse_from(["ae", "autostart", "--disable"]).unwrap();
+        assert!(matches!(
+            disable.command,
+            Some(Commands::Autostart { disable: true })
+        ));
+    }
+
+    #[test]
+    fn installed_editor_flow_never_requires_forge_readiness_before_launch() {
+        assert_eq!(resolved_open_flow(OpenFlow::Editor, true), OpenFlow::Editor);
+        assert!(!open_flow_requires_ready(OpenFlow::Editor));
+        assert!(open_flow_requires_ready(OpenFlow::Browser));
+        assert!(open_flow_requires_ready(OpenFlow::Handoff));
+        // A development home has no editor payload, so it deliberately falls
+        // back to the browser flow that must pair with a ready Forge.
+        assert_eq!(
+            resolved_open_flow(OpenFlow::Editor, false),
+            OpenFlow::Browser
+        );
+    }
+
+    #[test]
+    fn handoff_ownership_is_emitted_only_for_the_spawned_ready_pid() {
+        let state = State {
+            endpoint: "http://127.0.0.1:4317".into(),
+            instance_id: "forge-owned".into(),
+            pid: 42,
+        };
+        assert_eq!(
+            owned_instance_id(process::StartResult::Spawned { pid: 42 }, &state),
+            Some("forge-owned".into())
+        );
+        assert_eq!(
+            owned_instance_id(process::StartResult::Spawned { pid: 7 }, &state),
+            None
+        );
+        let owned = ReadyState {
+            state: state.clone(),
+            owned_instance_id: Some("forge-owned".into()),
+        };
+        assert_eq!(
+            handoff_json(&owned, "pair")["owned_instance_id"],
+            "forge-owned"
+        );
+        let existing = ReadyState {
+            state,
+            owned_instance_id: None,
+        };
+        assert!(
+            handoff_json(&existing, "pair")
+                .get("owned_instance_id")
+                .is_none()
+        );
+        assert_eq!(handoff_cleanup_instance_id(&owned), Some("forge-owned"));
+        assert_eq!(handoff_cleanup_instance_id(&existing), None);
+    }
+
+    #[test]
+    fn scheduled_task_uses_a_fixed_limited_current_user_logon_argv() {
+        let action = scheduled_task_action(
+            Path::new(r"C:\Program Files\Artisan\ae.exe"),
+            StableLauncher::Executable,
+            None,
+        )
+        .unwrap();
+        let args = scheduled_task_create_args(&action);
+        assert_eq!(
+            args,
+            [
+                "/Create",
+                "/TN",
+                "Artisan Forge",
+                "/TR",
+                r#""C:\Program Files\Artisan\ae.exe" start"#,
+                "/SC",
+                "ONLOGON",
+                "/RL",
+                "LIMITED",
+                "/F",
+            ]
+        );
+    }
+
+    #[test]
+    fn scheduled_task_runs_stable_cmd_launchers_through_trusted_cmd() {
+        let action = scheduled_task_action(
+            Path::new(r"C:\Program Files\Artisan\bin\ae.cmd"),
+            StableLauncher::CommandScript,
+            Some(PathBuf::from(r"C:\Windows\System32\cmd.exe")),
+        )
+        .unwrap();
+        assert_eq!(
+            action,
+            r#""C:\Windows\System32\cmd.exe" /d /s /c ""C:\Program Files\Artisan\bin\ae.cmd" start""#
+        );
+        assert_eq!(
+            stable_launcher_kind(Path::new(r"C:\Program Files\Artisan\bin\ae.cmd")),
+            Some(StableLauncher::CommandScript)
+        );
+        assert_eq!(
+            stable_launcher_kind(Path::new(r"C:\Program Files\Artisan\bin\ae.bat")),
+            Some(StableLauncher::CommandScript)
+        );
+        assert_eq!(
+            stable_launcher_kind(Path::new(r"C:\Program Files\Artisan\bin\ae.ps1")),
+            None
+        );
+        for unsafe_character in ['%', '!', '^', '&', '|', '<', '>', '(', ')'] {
+            let path = PathBuf::from(format!(
+                r"C:\Program Files\Artisan{unsafe_character}Co\bin\ae.cmd"
+            ));
+            assert!(
+                scheduled_task_action(
+                    &path,
+                    StableLauncher::CommandScript,
+                    Some(PathBuf::from(r"C:\Windows\System32\cmd.exe")),
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn scheduled_task_removal_is_idempotent_without_hiding_delete_failures() {
+        assert_eq!(
+            scheduled_task_deletion(false, false),
+            ScheduledTaskDeletion::AlreadyAbsent
+        );
+        assert_eq!(
+            scheduled_task_deletion(true, true),
+            ScheduledTaskDeletion::Deleted
+        );
+        assert_eq!(
+            scheduled_task_deletion(true, false),
+            ScheduledTaskDeletion::Failed
+        );
+    }
+
+    #[test]
+    fn handoff_wait_budget_covers_the_renderer_cold_start_window() {
+        assert_eq!(FORGE_READY_TIMEOUT, Duration::from_secs(15));
+        assert!(FORGE_READY_PROBE_TIMEOUT < FORGE_READY_TIMEOUT);
+        assert!(FORGE_READY_INTERVAL < FORGE_READY_TIMEOUT);
     }
 
     #[test]

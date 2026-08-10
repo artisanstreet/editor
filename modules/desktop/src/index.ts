@@ -16,3 +16,14 @@ export {
 	renderer_url,
 	ServeRendererAsset,
 } from "./renderer-host";
+export {
+	DesktopForgeLifecycle,
+	DesktopRenderer,
+	ForgeHandoffProcess,
+	IsWindowsCommandScript,
+	make_desktop_forge_lifecycle_layer,
+	make_node_forge_handoff_process_layer,
+	OwnedForgeStopArguments,
+	handoff_cleanup_timeout,
+	owned_stop_cleanup_timeout,
+} from "./forge-handoff";
