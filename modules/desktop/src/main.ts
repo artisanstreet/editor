@@ -135,6 +135,7 @@ export const StartDesktop = Effect.gen(function* () {
 		minHeight: 480,
 		minWidth: 720,
 		show: false,
+		title: "Artisan Editor",
 		titleBarOverlay: { color: "#09090b", height: 40, symbolColor: "#9f9fa9" },
 		titleBarStyle: "hidden",
 		webPreferences: {
@@ -145,6 +146,7 @@ export const StartDesktop = Effect.gen(function* () {
 		},
 		width: 1440,
 	});
+	editor_window.on("page-title-updated", (event) => event.preventDefault());
 	editor_window.once("ready-to-show", () => editor_window.show());
 	/** The renderer never opens child windows; external links go to the OS browser. */
 	editor_window.webContents.setWindowOpenHandler(({ url }) => {

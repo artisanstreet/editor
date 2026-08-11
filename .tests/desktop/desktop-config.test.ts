@@ -75,6 +75,10 @@ describe("desktop packaging configuration", () => {
 		expect(main).toContain("contextIsolation: true");
 		expect(main).toContain("nodeIntegration: false");
 		expect(main).toContain("sandbox: true");
+		expect(main).toContain('title: "Artisan Editor"');
+		expect(main).toContain(
+			'editor_window.on("page-title-updated", (event) => event.preventDefault())',
+		);
 		expect(main).not.toContain("preload:");
 		expect(main).not.toContain("ipcMain");
 		/** Renderer drafts persist, while every pairing begins without a Forge cookie. */
