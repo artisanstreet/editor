@@ -39,6 +39,7 @@ type ThreadMetadataCommand = Extract<
 	{
 		readonly type:
 			| "thread.activity.record"
+			| "thread.attention.acknowledge"
 			| "thread.archive"
 			| "thread.metadata.refine"
 			| "thread.pin"
@@ -83,6 +84,9 @@ interface StoredThreadProjection {
 	readonly created_at: string;
 	readonly current_goal: string | null;
 	readonly last_activity_at: string;
+	readonly reader_activity_at: string;
+	readonly reader_acknowledged_activity_at: string;
+	readonly last_assistant_message: string | null;
 	readonly live_status: string;
 	readonly linked_projects: ReadonlyArray<ProjectRef>;
 	readonly metadata_version: number;
@@ -143,6 +147,7 @@ const DecodeThreadListItem = (input: StoredThreadProjection) => {
 	const {
 		archived_at,
 		current_goal,
+		last_assistant_message,
 		primary_project,
 		rename_suggestion,
 		rehome_suggestion,
@@ -155,6 +160,7 @@ const DecodeThreadListItem = (input: StoredThreadProjection) => {
 		...required,
 		...(archived_at === null ? {} : { archived_at }),
 		...(current_goal === null ? {} : { current_goal }),
+		...(last_assistant_message === null ? {} : { last_assistant_message }),
 		...(primary_project === null ? {} : { primary_project }),
 		...(rename_suggestion === null ? {} : { rename_suggestion }),
 		...(rehome_suggestion === null ? {} : { rehome_suggestion }),
@@ -195,6 +201,7 @@ function is_metadata_command(
 ): payload is ThreadMetadataCommand {
 	return (
 		payload.type === "thread.activity.record" ||
+		payload.type === "thread.attention.acknowledge" ||
 		payload.type === "thread.archive" ||
 		payload.type === "thread.metadata.refine" ||
 		payload.type === "thread.pin" ||
@@ -233,6 +240,32 @@ const MakeTransition = (
 	occurred_at: string,
 ) =>
 	Effect.gen(function* () {
+		if (payload.type === "thread.attention.acknowledge") {
+			if (payload.reader_activity_at > current.reader_activity_at) {
+				return yield* new JournalInvariantError({
+					message: `Thread ${current.thread_id} acknowledgement exceeds its reader activity cursor`,
+				});
+			}
+
+			const projection = yield* DecodeThreadListItem({
+				...current,
+				reader_acknowledged_activity_at: max_timestamp(
+					current.reader_acknowledged_activity_at,
+					payload.reader_activity_at,
+				),
+				updated_at: max_timestamp(current.updated_at, occurred_at),
+			});
+
+			return {
+				event_payload: {
+					change: "attention_acknowledged",
+					thread: projection,
+					type: "thread.metadata.updated",
+				} satisfies ThreadMetadataUpdatedEvent,
+				projection,
+			};
+		}
+
 		if (payload.type === "thread.metadata.refine") {
 			if (
 				payload.basis_activity_version !== current.activity_version ||
@@ -250,6 +283,8 @@ const MakeTransition = (
 			const projection = yield* DecodeThreadListItem({
 				...current,
 				current_goal: payload.current_goal ?? null,
+				last_assistant_message:
+					payload.last_assistant_message ?? current.last_assistant_message,
 				live_status: payload.live_status,
 				metadata_version: current.metadata_version + 1,
 				rename_suggestion: payload.rename_suggestion ?? null,
@@ -312,6 +347,7 @@ const MakeTransition = (
 						? null
 						: current.archived_at,
 			last_activity_at: max_timestamp(current.last_activity_at, occurred_at),
+			reader_activity_at: max_timestamp(current.reader_activity_at, occurred_at),
 			metadata_version: current.metadata_version + (changes_metadata ? 1 : 0),
 			pinned:
 				payload.type === "thread.pin"
@@ -516,6 +552,13 @@ export const ThreadMetadataRepositoryLive = Layer.effect(
 							affinity_version: current_projection.affinity_version,
 							archived_at: current_projection.archived_at ?? null,
 							current_goal: current_projection.current_goal ?? null,
+							reader_activity_at:
+								current_projection.reader_activity_at ?? current.reader_activity_at,
+							reader_acknowledged_activity_at:
+								current_projection.reader_acknowledged_activity_at ??
+								current.reader_acknowledged_activity_at,
+							last_assistant_message:
+								current_projection.last_assistant_message ?? null,
 							linked_projects: current_projection.linked_projects,
 							primary_project: current_projection.primary_project ?? null,
 							project_affinity_scores: current_projection.project_affinity_scores,
@@ -573,6 +616,11 @@ export const ThreadMetadataRepositoryLive = Layer.effect(
 									archived_at: projection.archived_at ?? null,
 									current_goal: projection.current_goal ?? null,
 									last_activity_at: projection.last_activity_at,
+									reader_activity_at: projection.reader_activity_at,
+									reader_acknowledged_activity_at:
+										projection.reader_acknowledged_activity_at,
+									last_assistant_message:
+										projection.last_assistant_message ?? null,
 									live_status: projection.live_status,
 									metadata_version: projection.metadata_version,
 									pinned: projection.pinned,

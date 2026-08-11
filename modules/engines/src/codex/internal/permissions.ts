@@ -59,7 +59,7 @@ function ResolveCodexPermissions(input: EngineOpenInput) {
 		if (
 			reasoning_effort !== undefined &&
 			(typeof reasoning_effort !== "string" ||
-				!new Set(["low", "medium", "high", "xhigh", "max"]).has(reasoning_effort))
+				!new Set(["low", "medium", "high", "xhigh", "max", "ultra"]).has(reasoning_effort))
 		) {
 			return yield* FailConfiguration(
 				"provider_options.codex.reasoning_effort",

@@ -301,8 +301,8 @@ describe("durable multi-agent graph", () => {
 			expect(new Set(workers.map(({ display_name }) => display_name)).size).toBe(3);
 			expect(workers.map(({ display_name }) => display_name)).toEqual([
 				"Bop",
-				"bop 2",
-				"Tester 2",
+				"Bop 2",
+				"Bop 3",
 			]);
 			expect(graph.assignments[1]).toMatchObject({
 				permission_policy: {

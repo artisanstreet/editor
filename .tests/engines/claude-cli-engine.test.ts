@@ -306,6 +306,7 @@ describe("Claude direct CLI transport", () => {
 					provider_options: {
 						"claude.append_system_prompt_file": "C:\\workspace\\CLAUDE.md",
 						"claude.disable_tools": true,
+						"claude.effort": "max",
 						"claude.permission_mode": "plan",
 						"claude.safe_mode": true,
 					},
@@ -338,6 +339,8 @@ describe("Claude direct CLI transport", () => {
 					"--tools",
 					"",
 					"--safe-mode",
+					"--effort",
+					"max",
 					"--append-system-prompt-file",
 					"C:\\workspace\\CLAUDE.md",
 					"--append-system-prompt",

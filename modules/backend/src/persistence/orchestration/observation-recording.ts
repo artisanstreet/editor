@@ -1,6 +1,4 @@
-import { Buffer } from "node:buffer";
-
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, lt, sql } from "drizzle-orm";
 import { Effect } from "effect";
 
 import { type EventEnvelope, type EventPayload } from "@artisan/protocol";
@@ -16,8 +14,10 @@ import {
 	type OrchestrationError,
 } from "./contracts";
 import {
+	NativeSubagentObservationInbox,
+	NativeSubagentTranscriptInbox,
+	ConversationSources,
 	OrchestrationInteractions,
-	OrchestrationRawObservations,
 	OrchestrationRuns,
 } from "../tables";
 import { RuntimeMetadata } from "../../runtime/metadata";
@@ -82,41 +82,7 @@ export function make_observation_recording(
 		observation: EngineObservation,
 	) =>
 		Effect.gen(function* () {
-			const frame_json = JSON.stringify(observation.raw.frame) ?? "null";
-			/**
-			 * UTF-8 JSON can reconstruct an identical raw frame byte-for-byte. Retaining
-			 * its base64 twin duplicates the full payload, but base64 stays for binary or
-			 * otherwise non-identical native frames where it is the exact record.
-			 */
-			const raw_frame_base64 =
-				observation.raw.raw_frame_base64 !== undefined &&
-				Buffer.from(frame_json, "utf8").toString("base64") ===
-					observation.raw.raw_frame_base64
-					? null
-					: (observation.raw.raw_frame_base64 ?? null);
-			const inserted_observation = yield* transaction
-				.insert(OrchestrationRawObservations)
-				.values({
-					engine_id: observation.raw.engine_id,
-					frame_json,
-					native_id:
-						observation.raw.native_id === undefined
-							? null
-							: String(observation.raw.native_id),
-					native_method: observation.raw.native_method ?? null,
-					observation_id: observation.observation_id,
-					protocol_version: observation.raw.protocol_version ?? null,
-					raw_frame_base64,
-					run_id: observation.artisan_run_id,
-					sequence: observation.sequence,
-					transport: observation.raw.transport,
-				})
-				.onConflictDoNothing()
-				.returning({
-					observation_id: OrchestrationRawObservations.observation_id,
-				});
-
-			if (inserted_observation.length === 0) {
+			if (observation._tag === "compaction" && observation.summary !== undefined) {
 				return [];
 			}
 
@@ -125,10 +91,64 @@ export function make_observation_recording(
 				.from(OrchestrationRuns)
 				.where(eq(OrchestrationRuns.run_id, observation.artisan_run_id))
 				.limit(1);
-
 			if (!run || !is_projectable_status(run.status)) {
 				return [];
 			}
+
+			/**
+			 * The run watermark is the durable idempotency receipt. Its initial value is
+			 * negative so a legitimate sequence-zero observation is admitted exactly once.
+			 */
+			const advanced = yield* transaction
+				.update(OrchestrationRuns)
+				.set({
+					last_observation_sequence: sql`max(${OrchestrationRuns.last_observation_sequence}, ${observation.sequence})`,
+				})
+				.where(
+					and(
+						eq(OrchestrationRuns.run_id, observation.artisan_run_id),
+						lt(OrchestrationRuns.last_observation_sequence, observation.sequence),
+					),
+				)
+				.returning({ run_id: OrchestrationRuns.run_id });
+			if (advanced.length === 0) return [];
+
+			if (observation._tag === "subagent") {
+				yield* transaction.insert(NativeSubagentObservationInbox).values({
+					activity: observation.activity ?? null,
+					agent_native_thread_id: observation.agent_native_thread_id,
+					agent_path: observation.agent_path ?? null,
+					created_at: yield* metadata.Now,
+					engine_id: observation.raw.engine_id,
+					native_id:
+						observation.raw.native_id === undefined
+							? null
+							: String(observation.raw.native_id),
+					observation_id: observation.observation_id,
+					parent_native_thread_id: observation.parent_native_thread_id,
+					processed_at: null,
+					root_run_id: observation.artisan_run_id,
+					sequence: observation.sequence,
+					state: observation.state,
+					turn_id: observation.turn_id ?? null,
+				});
+			}
+			if (observation._tag === "subagent_transcript") {
+				yield* transaction.insert(NativeSubagentTranscriptInbox).values({
+					agent_native_thread_id: observation.agent_native_thread_id,
+					content_json: JSON.stringify(observation.content),
+					created_at: yield* metadata.Now,
+					engine_id: observation.raw.engine_id,
+					observation_id: observation.observation_id,
+					parent_native_thread_id: observation.parent_native_thread_id,
+					processed_at: null,
+					root_run_id: observation.artisan_run_id,
+					sequence: observation.sequence,
+				});
+				/** Child content is replayed only with its resolved child run context. */
+				return [];
+			}
+
 			const projected_at = yield* metadata.Now;
 			yield* PersistSurfaceProjection(transaction, observation, {
 				agent_id: run.agent_id,
@@ -142,6 +162,11 @@ export function make_observation_recording(
 				run_id: run.run_id,
 				thread_id: run.thread_id,
 			}) as Effect.Effect<unknown, unknown, never>;
+			yield* transaction
+				.delete(ConversationSources)
+				.where(
+					eq(ConversationSources.source_id, `observation:${observation.observation_id}`),
+				);
 
 			const payload =
 				observation._tag === "agent_message_completed"

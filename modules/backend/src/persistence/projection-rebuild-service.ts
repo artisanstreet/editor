@@ -25,6 +25,7 @@ import {
 } from "./tables";
 import {
 	automatic_thread_title_from_event,
+	thread_activity_is_reader_visible,
 	thread_activity_kind_from_event,
 } from "../threads/internal/thread-activity";
 
@@ -134,6 +135,10 @@ const thread_row = (thread: ThreadListItem): RebuiltThread => ({
 	created_at: thread.created_at,
 	current_goal: thread.current_goal ?? null,
 	last_activity_at: thread.last_activity_at,
+	reader_activity_at: thread.reader_activity_at ?? thread.last_activity_at,
+	reader_acknowledged_activity_at:
+		thread.reader_acknowledged_activity_at ?? "1970-01-01T00:00:00.000Z",
+	last_assistant_message: thread.last_assistant_message ?? null,
 	linked_projects_json: JSON.stringify(thread.linked_projects),
 	live_status: thread.live_status,
 	metadata_version: thread.metadata_version,
@@ -158,6 +163,8 @@ const created_thread_row = (thread_id: string, title: string, occurred_at: strin
 		affinity_version: 0,
 		created_at: occurred_at,
 		last_activity_at: occurred_at,
+		reader_activity_at: occurred_at,
+		reader_acknowledged_activity_at: "1970-01-01T00:00:00.000Z",
 		live_status: "Idle",
 		metadata_version: 0,
 		pinned: false,
@@ -369,6 +376,25 @@ export const ProjectionRebuildServiceLive = Layer.effect(
 							}
 							threads.set(event.thread_id, thread_row(payload.thread));
 							break;
+						case "thread.attention.acknowledged": {
+							const thread = threads.get(event.thread_id);
+							if (erased_threads.has(event.thread_id) || thread === undefined) {
+								return yield* new ProjectionRebuildInvariantError({
+									message: `Thread ${event.thread_id} was acknowledged without a live creation.`,
+								});
+							}
+							const acknowledged_at =
+								thread.reader_acknowledged_activity_at ??
+								"1970-01-01T00:00:00.000Z";
+							threads.set(event.thread_id, {
+								...thread,
+								reader_acknowledged_activity_at:
+									acknowledged_at > payload.reader_activity_at
+										? acknowledged_at
+										: payload.reader_activity_at,
+							});
+							break;
+						}
 						case "thread.erased":
 							erased_threads.add(event.thread_id);
 							threads.delete(event.thread_id);
@@ -428,6 +454,15 @@ export const ProjectionRebuildServiceLive = Layer.effect(
 								event.occurred_at
 									? active_thread.last_activity_at
 									: event.occurred_at,
+							...(thread_activity_is_reader_visible(payload)
+								? {
+										reader_activity_at:
+											(active_thread.reader_activity_at ??
+												"1970-01-01T00:00:00.000Z") > event.occurred_at
+												? active_thread.reader_activity_at
+												: event.occurred_at,
+									}
+								: {}),
 							updated_at:
 								active_thread.updated_at > event.occurred_at
 									? active_thread.updated_at

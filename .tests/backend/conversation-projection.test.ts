@@ -473,6 +473,95 @@ describe("conversation projection", () => {
 		}
 	});
 
+	it("marks a streaming provider item at the acknowledged steering boundary", async () => {
+		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
+		try {
+			const availability = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const read_model = yield* ConversationReadModel;
+					yield* database.client.insert(Threads).values({
+						created_at: "2026-08-10T20:00:00.000Z",
+						last_activity_at: "2026-08-10T20:00:00.000Z",
+						thread_id: "thread_steering_boundary",
+						title: "Conversation",
+						updated_at: "2026-08-10T20:00:00.000Z",
+					});
+					const context = {
+						occurred_at: "2026-08-10T20:00:01.000Z",
+						run_id: "run_steering_boundary",
+						thread_id: "thread_steering_boundary",
+					};
+					const event = {
+						causation_id: "command_steer",
+						correlation_id: "command_steer",
+						journal_sequence: 1,
+						kind: "event",
+						message_id: "event_steer",
+						origin: "backend",
+						payload: {
+							message_id: "command_steer",
+							text: "Continue below this instruction",
+							type: "thread.message_steering",
+							working_directory: "C:\\workspace",
+						},
+						protocol_version: 1,
+						run_id: "run_steering_boundary",
+						schema_version: 1,
+						sent_at: "2026-08-10T20:00:02.000Z",
+						sequence: 1,
+						stream_id: "thread:thread_steering_boundary",
+						thread_id: "thread_steering_boundary",
+					} satisfies EventEnvelope;
+					yield* database.client.transaction((transaction) =>
+						Effect.gen(function* () {
+							yield* ApplyEngineObservation(
+								transaction,
+								Delta("before_steer", 1, "The prior response. "),
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
+							yield* ApplyJournalEvent(transaction, event) as Effect.Effect<
+								unknown,
+								unknown,
+								never
+							>;
+							yield* ApplyEngineObservation(
+								transaction,
+								{
+									_tag: "agent_message_completed",
+									artisan_run_id: "run_1",
+									item_id: "assistant_1",
+									message: "The prior response. Continued below the steer.",
+									observation_id: "after_steer_completion",
+									phase: "unspecified",
+									raw: { engine_id: "codex", frame: {}, transport: "test" },
+									sequence: 2,
+									turn_id: "turn_1",
+								},
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
+						}),
+					);
+					return yield* read_model.ReadSnapshot("thread_steering_boundary");
+				}),
+			);
+			expect(availability.status).toBe("available");
+			if (availability.status !== "available") return;
+			expect(availability.snapshot.items).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						id: "assistant_1",
+						steering_fragment_boundaries: [
+							{ after_item_id: "message:command_steer", text_offset: 20 },
+						],
+					}),
+				]),
+			);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("projects run lifecycle immediately so queued work is visible before the engine opens", async () => {
 		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
 		try {

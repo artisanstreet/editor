@@ -85,6 +85,8 @@ export const OrchestrationRuns = sqliteTable(
 		model_id: text("model_id"),
 		working_directory: text("working_directory").notNull(),
 		status: text("status").notNull(),
+		/** Durable monotonic receipt; full provider frames are never retained. */
+		last_observation_sequence: integer("last_observation_sequence").notNull().default(-1),
 		native_thread_id: text("native_thread_id"),
 		native_resume_json: text("native_resume_json"),
 		created_at: text("created_at").notNull(),
@@ -158,6 +160,66 @@ export const OrchestrationRawObservations = sqliteTable(
 	},
 	(table) => [
 		index("orchestration_raw_observations_run_sequence_index").on(table.run_id, table.sequence),
+	],
+);
+
+/**
+ * Durable handoff from canonical engine observation persistence to the
+ * provider-native orchestration projection. The observation and this inbox row
+ * commit together; graph adoption and `processed_at` commit together later.
+ */
+export const NativeSubagentObservationInbox = sqliteTable(
+	"native_subagent_observation_inbox",
+	{
+		observation_id: text("observation_id").primaryKey(),
+		root_run_id: text("root_run_id").notNull(),
+		engine_id: text("engine_id").notNull(),
+		agent_native_thread_id: text("agent_native_thread_id").notNull(),
+		parent_native_thread_id: text("parent_native_thread_id").notNull(),
+		state: text("state").notNull(),
+		sequence: integer("sequence").notNull(),
+		activity: text("activity"),
+		agent_path: text("agent_path"),
+		turn_id: text("turn_id"),
+		native_id: text("native_id"),
+		created_at: text("created_at").notNull(),
+		processed_at: text("processed_at"),
+	},
+	(table) => [
+		index("native_subagent_observation_inbox_pending_index").on(
+			table.processed_at,
+			table.root_run_id,
+			table.sequence,
+		),
+	],
+);
+
+/**
+ * Canonical child-thread observations wait here until the matching native
+ * lifecycle binding exists. Keeping their own inbox means a provider can emit
+ * a child's final message before (or after) its lifecycle frame without ever
+ * projecting it as root-run content.
+ */
+export const NativeSubagentTranscriptInbox = sqliteTable(
+	"native_subagent_transcript_inbox",
+	{
+		observation_id: text("observation_id").primaryKey(),
+		root_run_id: text("root_run_id").notNull(),
+		engine_id: text("engine_id").notNull(),
+		agent_native_thread_id: text("agent_native_thread_id").notNull(),
+		parent_native_thread_id: text("parent_native_thread_id").notNull(),
+		sequence: integer("sequence").notNull(),
+		content_json: text("content_json").notNull(),
+		created_at: text("created_at").notNull(),
+		processed_at: text("processed_at"),
+	},
+	(table) => [
+		index("native_subagent_transcript_inbox_pending_index").on(
+			table.processed_at,
+			table.root_run_id,
+			table.agent_native_thread_id,
+			table.sequence,
+		),
 	],
 );
 
@@ -258,6 +320,7 @@ export const AgentRuns = sqliteTable(
 		agent_id: text("agent_id").notNull(),
 		attempt: integer("attempt").notNull(),
 		engine_id: text("engine_id").notNull(),
+		execution_origin: text("execution_origin").notNull().default("artisan_dispatched"),
 		/** Catalog model resolved at dispatch; null until the run activates. */
 		model_id: text("model_id"),
 		profile: text("profile").notNull(),
@@ -278,6 +341,38 @@ export const AgentRuns = sqliteTable(
 		index("agent_runs_group_id_index").on(table.group_id),
 		index("agent_runs_dispatch_status_index").on(table.dispatch_status),
 		index("agent_runs_assignment_id_index").on(table.assignment_id),
+	],
+);
+
+/** Idempotent provider-native child identity bindings for one ordinary root run. */
+export const NativeSubagentBindings = sqliteTable(
+	"native_subagent_bindings",
+	{
+		binding_id: text("binding_id").primaryKey(),
+		engine_id: text("engine_id").notNull(),
+		root_run_id: text("root_run_id").notNull(),
+		group_id: text("group_id").notNull(),
+		parent_native_thread_id: text("parent_native_thread_id").notNull(),
+		agent_native_thread_id: text("agent_native_thread_id").notNull(),
+		agent_id: text("agent_id").notNull(),
+		assignment_id: text("assignment_id").notNull(),
+		run_id: text("run_id").notNull(),
+		agent_path: text("agent_path"),
+		activity: text("activity"),
+		turn_id: text("turn_id"),
+		state: text("state").notNull(),
+		raw_origin_json: text("raw_origin_json").notNull(),
+		created_at: text("created_at").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("native_subagent_bindings_identity_unique").on(
+			table.engine_id,
+			table.root_run_id,
+			table.agent_native_thread_id,
+		),
+		index("native_subagent_bindings_group_id_index").on(table.group_id),
+		index("native_subagent_bindings_root_run_id_index").on(table.root_run_id),
 	],
 );
 

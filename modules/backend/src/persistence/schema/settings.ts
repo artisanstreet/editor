@@ -15,6 +15,7 @@ export const ModelFavorites = sqliteTable("model_favorites", {
  * workspace, which does not change because the model did.
  */
 export const SessionDefaults = sqliteTable("session_defaults", {
+	agent_name_dataset: text("agent_name_dataset").notNull().default("norwegian"),
 	/**
 	 * The protocol's `compaction_model` selection: `"inherited"` or a catalog
 	 * model id. NULL means the curated per-harness default. The column keeps
@@ -28,14 +29,15 @@ export const SessionDefaults = sqliteTable("session_defaults", {
 });
 
 /**
- * Stores the controls each model was last configured with. A row per model
- * keeps effort and context window addressable by model id, because their option
- * sets differ and a shared value would be coerced onto models lacking it.
+ * Stores the controls each catalog model was last configured with. A row per model
+ * keeps effort, speed, and context window addressable by model id, because their
+ * option sets differ and a shared value would be coerced onto models lacking it.
  */
 export const SessionModelDefaults = sqliteTable("session_model_defaults", {
 	context_window: text("context_window"),
 	model_id: text("model_id").primaryKey(),
 	reasoning_effort: text("reasoning_effort"),
+	service_tier: text("service_tier"),
 	updated_at: text("updated_at").notNull(),
 });
 

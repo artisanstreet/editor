@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
 	GetConversationActivityCategory,
 	GetConversationActivityCountLabel,
+	GetConversationActivityGroupPresentation,
 	GetConversationActivityPresentation,
 } from "@artisan/protocol";
 
@@ -64,5 +65,33 @@ describe("conversation activity presentation", () => {
 		expect(GetConversationActivityCategory("file_delete")).toBe("file_delete");
 		expect(Counted("file_edit", 2)).toBe("edited 2 files");
 		expect(Counted("file_delete", 1)).toBe("deleted a file");
+	});
+
+	it("names one durable subagent and counts several distinct agents", () => {
+		expect(
+			GetConversationActivityGroupPresentation("subagent", [
+				{
+					kind: "subagent",
+					subagent: { agent_id: "agent-noodle", display_name: "Noodle" },
+				},
+			]),
+		).toEqual({ count: 1, label: "talked to Noodle" });
+
+		expect(
+			GetConversationActivityGroupPresentation("subagent", [
+				{
+					kind: "subagent",
+					subagent: { agent_id: "agent-noodle", display_name: "Noodle" },
+				},
+				{
+					kind: "subagent",
+					subagent: { agent_id: "agent-noodle", display_name: "Noodle" },
+				},
+				{
+					kind: "subagent",
+					subagent: { agent_id: "agent-sprocket", display_name: "Sprocket" },
+				},
+			]),
+		).toEqual({ count: 2, label: "talked to 2 subagents" });
 	});
 });

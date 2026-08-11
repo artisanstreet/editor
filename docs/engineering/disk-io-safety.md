@@ -34,17 +34,28 @@ The production composition enforces these invariants:
 - Forge-spawned Codex processes use a Forge-owned SQLite directory and inherit a
   warning-level runtime log filter instead of contending with the user's normal
   Codex SQLite store;
-- one Engine observation retains at most one full raw representation;
-- conversation patch replay is page-bounded rather than loading all historical
-  patches into one message;
+- raw Engine frames are transient; a monotonic run watermark is the durable
+  idempotency receipt, while text deltas are coalesced at render cadence and
+  disposable progress/diagnostic frames never reach SQLite;
+- conversation patches retain at most 256 rows per thread; a subscriber whose
+  cursor predates that window receives an authoritative snapshot;
+- normalized surface items retain at most 512 rows per thread and token usage
+  updates one aggregate row rather than appending surface history;
 - thread erasure removes the complete conversation projection, including
-  sources and patches;
+  sources, patches, inbox rows, bindings, and image attachments;
+- processed native observation/transcript inbox rows are consumed and deleted;
 - SQLite uses memory-backed temporary storage, a bounded retained journal, and
   an explicit WAL checkpoint policy;
 - detached Forge logs are truncated at startup and checked against the 4 MiB
   threshold once per second while running;
 - `ae logs --follow` reads only bounded appended ranges and recognizes rotation
   or truncation.
+
+Legacy databases are compacted logically by the forward migration without
+blocking startup on a multi-gigabyte `VACUUM`. After Forge is stopped,
+`pnpm run db:compact` performs an integrity-checked `VACUUM INTO` under Forge's
+exclusive database lease and atomically replaces the database, enabling
+incremental auto-vacuum for future reclamation.
 
 These safeguards are regression-tested. A future implementation must not weaken
 one of them merely because ordinary database or log file sizes appear small.

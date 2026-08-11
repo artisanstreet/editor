@@ -1,0 +1,1 @@
+ALTER TABLE `surface_usage_totals` ADD `last_observation_id` text DEFAULT '' NOT NULL;

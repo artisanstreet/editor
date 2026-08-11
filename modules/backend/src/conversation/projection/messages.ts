@@ -1,7 +1,11 @@
 import { Effect, Schema } from "effect";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
-import { ConversationItem, conversation_body_text_limit } from "@artisan/protocol";
+import {
+	ConversationItem,
+	conversation_body_text_limit,
+	conversation_maximum_steering_fragment_boundaries,
+} from "@artisan/protocol";
 
 import type { DatabaseClient } from "../../persistence/database";
 import { ConversationItems } from "../../persistence/tables";
@@ -24,6 +28,82 @@ const DecodeStreamingBodyFields = (stored: Record<string, unknown>) =>
 	Schema.decodeUnknownEffect(StreamingBodyFields)(stored).pipe(
 		Effect.mapError(() => new ConversationProjectionError("Invalid stored conversation item")),
 	);
+
+/**
+ * Records the exact streaming cut occupied when an acknowledged steer enters
+ * the canonical projection. Equal offsets replace their older anchor so two
+ * steers without a delta between them do not manufacture an empty fragment.
+ */
+export const MarkStreamingAssistantSteeringBoundaries = (
+	transaction: DatabaseClient,
+	thread_id: string,
+	run_id: string,
+	after_item_id: string,
+	occurred_at: string,
+) =>
+	Effect.gen(function* () {
+		const rows = yield* transaction
+			.select()
+			.from(ConversationItems)
+			.where(
+				and(
+					eq(ConversationItems.thread_id, thread_id),
+					eq(ConversationItems.turn_id, `run:${run_id}`),
+				),
+			);
+		yield* Effect.forEach(rows, (row) =>
+			Effect.gen(function* () {
+				const prior = yield* DecodeJson(
+					ConversationItem,
+					row.entity_json,
+					"stored conversation item",
+				);
+				if (
+					prior.type !== "assistant_message" ||
+					prior.run_id !== run_id ||
+					prior.lifecycle !== "streaming" ||
+					prior.phase === "commentary"
+				)
+					return;
+				const text_offset = prior.text.length;
+				const prior_boundaries = prior.steering_fragment_boundaries ?? [];
+				const boundaries = [
+					...prior_boundaries.filter((boundary) => boundary.text_offset !== text_offset),
+					{ after_item_id, text_offset },
+				]
+					.sort((left, right) => left.text_offset - right.text_offset)
+					.slice(-conversation_maximum_steering_fragment_boundaries);
+				if (
+					prior_boundaries.length === boundaries.length &&
+					prior_boundaries.every(
+						(boundary, index) =>
+							boundary.after_item_id === boundaries[index]?.after_item_id &&
+							boundary.text_offset === boundaries[index]?.text_offset,
+					)
+				)
+					return;
+				const revision = prior.revision + 1;
+				const entity = yield* Decode(
+					ConversationItem,
+					{
+						...prior,
+						revision,
+						steering_fragment_boundaries: boundaries,
+						updated_at: occurred_at,
+					},
+					"steering-fragment conversation item",
+				);
+				yield* transaction
+					.update(ConversationItems)
+					.set({ entity_json: JSON.stringify(entity) })
+					.where(eq(ConversationItems.item_id, entity.id));
+				yield* Emit(transaction, thread_id, occurred_at, {
+					type: "item_upsert",
+					item: entity,
+				});
+			}),
+		);
+	});
 
 /** Appends a provider delta to its stable item while retaining one renderer entity. */
 export const AppendText = (
@@ -150,4 +230,66 @@ export const CompleteReasoningSummary = (
 			revision,
 		});
 		return entity;
+	});
+
+/**
+ * A provider may terminate without emitting its item-level completion frame.
+ * Settle every streamed text body owned by the run's renderer turn so retained
+ * trailing text can become visible and the client never waits for another delta.
+ */
+export const SettleStreamingBodies = (
+	transaction: DatabaseClient,
+	thread_id: string,
+	turn_id: string,
+	terminal_state: "completed" | "cancelled" | "failed" | "closed",
+	occurred_at: string,
+) =>
+	Effect.gen(function* () {
+		const rows = yield* transaction
+			.select()
+			.from(ConversationItems)
+			.where(
+				and(
+					eq(ConversationItems.thread_id, thread_id),
+					eq(ConversationItems.turn_id, turn_id),
+				),
+			);
+		const terminal_lifecycle = terminal_state === "closed" ? "completed" : terminal_state;
+
+		yield* Effect.forEach(rows, (row) =>
+			Effect.gen(function* () {
+				const prior = yield* DecodeJson(
+					ConversationItem,
+					row.entity_json,
+					"stored conversation item",
+				);
+				if (
+					(prior.type !== "assistant_message" && prior.type !== "reasoning_summary") ||
+					prior.lifecycle !== "streaming"
+				)
+					return;
+
+				const revision = prior.revision + 1;
+				const entity = yield* Decode(
+					ConversationItem,
+					{
+						...prior,
+						lifecycle: terminal_lifecycle,
+						revision,
+						updated_at: occurred_at,
+					},
+					"settled streaming conversation item",
+				);
+				yield* transaction
+					.update(ConversationItems)
+					.set({ entity_json: JSON.stringify(entity) })
+					.where(eq(ConversationItems.item_id, entity.id));
+				yield* Emit(transaction, thread_id, occurred_at, {
+					type: "item_lifecycle",
+					item_id: entity.id,
+					lifecycle: terminal_lifecycle,
+					revision,
+				});
+			}),
+		);
 	});

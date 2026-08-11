@@ -4,6 +4,7 @@ import type { ProjectRef, ThreadListItem } from "@artisan/protocol";
 
 /** Identifies the lifecycle event that caused a metadata refinement request. */
 export type ThreadMetadataRefinementTrigger =
+	| "assistant_message"
 	| "user_message"
 	| "run_started"
 	| "run_completed"
@@ -13,6 +14,7 @@ export type ThreadMetadataRefinementTrigger =
 export interface ThreadMetadataRefinerInput {
 	readonly projection: ThreadListItem;
 	readonly trigger: ThreadMetadataRefinementTrigger;
+	readonly recent_assistant_text: ReadonlyArray<string>;
 	readonly recent_user_text: ReadonlyArray<string>;
 	readonly recent_activity: ReadonlyArray<string>;
 	readonly recent_files: ReadonlyArray<string>;
@@ -58,6 +60,7 @@ export const bound_thread_metadata_refiner_input = (
 	input: ThreadMetadataRefinerInput,
 ): ThreadMetadataRefinerInput => ({
 	...input,
+	recent_assistant_text: bound_context(input.recent_assistant_text),
 	recent_user_text: bound_context(input.recent_user_text),
 	recent_activity: bound_context(input.recent_activity),
 	recent_files: bound_context(input.recent_files),
@@ -67,17 +70,19 @@ export const bound_thread_metadata_refiner_input = (
 /** Provides a deterministic metadata proposal from the latest bounded evidence. */
 export const ThreadMetadataRefinerLive = Layer.succeed(ThreadMetadataRefiner, {
 	Refine: (raw_input) =>
-		Effect.sync(() => {
-			const input = bound_thread_metadata_refiner_input(raw_input);
+		Effect.gen(function* () {
+			const input = yield* Effect.succeed(bound_thread_metadata_refiner_input(raw_input));
 			const latest_text = input.recent_user_text.at(-1);
 			const latest_file = input.recent_files.at(-1);
 			const live_status =
-				input.trigger === "run_started"
+				input.trigger === "assistant_message" ||
+				input.trigger === "run_started" ||
+				input.trigger === "user_message"
 					? "Working"
 					: input.trigger === "run_completed"
 						? "Complete"
 						: input.trigger === "run_failed"
-							? "Needs attention"
+							? "Failed to complete"
 							: "Working";
 			const title = latest_text ?? latest_file ?? input.projection.title;
 			const refinement = {

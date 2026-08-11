@@ -25,6 +25,7 @@ import {
 	JournalCommands,
 	JournalEvents,
 	LegacyWorkspaceChangeProjections,
+	MessageImageAttachments,
 	OrchestrationArtifacts,
 	OrchestrationCoordinators,
 	OrchestrationGraphCommands,
@@ -34,6 +35,9 @@ import {
 	OrchestrationIntake,
 	OrchestrationJoins,
 	OrchestrationMessages,
+	NativeSubagentObservationInbox,
+	NativeSubagentBindings,
+	NativeSubagentTranscriptInbox,
 	OrchestrationOutbox,
 	OrchestrationRawObservations,
 	OrchestrationRuns,
@@ -344,6 +348,17 @@ export const ThreadErasureLive = Layer.effect(
 
 						if (run_ids.length > 0) {
 							yield* transaction
+								.delete(NativeSubagentBindings)
+								.where(inArray(NativeSubagentBindings.root_run_id, run_ids));
+							yield* transaction
+								.delete(NativeSubagentObservationInbox)
+								.where(
+									inArray(NativeSubagentObservationInbox.root_run_id, run_ids),
+								);
+							yield* transaction
+								.delete(NativeSubagentTranscriptInbox)
+								.where(inArray(NativeSubagentTranscriptInbox.root_run_id, run_ids));
+							yield* transaction
 								.delete(OrchestrationRawObservations)
 								.where(inArray(OrchestrationRawObservations.run_id, run_ids));
 							yield* transaction
@@ -491,6 +506,25 @@ export const ThreadErasureLive = Layer.effect(
 						yield* transaction
 							.delete(ConversationThreads)
 							.where(eq(ConversationThreads.thread_id, thread_id));
+						const delete_attachments = transaction
+							.delete(MessageImageAttachments)
+							.where(
+								exists(
+									transaction
+										.select({ message_id: JournalCommands.message_id })
+										.from(JournalCommands)
+										.where(
+											and(
+												eq(JournalCommands.thread_id, thread_id),
+												eq(
+													JournalCommands.message_id,
+													MessageImageAttachments.message_id,
+												),
+											),
+										),
+								),
+							);
+						yield* delete_attachments;
 						yield* transaction
 							.delete(JournalCommands)
 							.where(eq(JournalCommands.thread_id, thread_id));

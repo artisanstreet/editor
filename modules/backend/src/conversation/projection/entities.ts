@@ -1,5 +1,5 @@
 import { Effect, Schema } from "effect";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, lte, sql } from "drizzle-orm";
 
 import { ConversationItem, ConversationPatch, ConversationTurn } from "@artisan/protocol";
 
@@ -39,6 +39,9 @@ export interface ProjectionEntityInput {
 	readonly type: string;
 	readonly [key: string]: unknown;
 }
+
+/** Patches bridge a live subscription after its snapshot; they are not history. */
+export const conversation_patch_retention_limit = 256;
 
 export const EnsureThread = (transaction: DatabaseClient, thread_id: string, updated_at: string) =>
 	transaction
@@ -105,6 +108,17 @@ export const Emit = (
 			sequence,
 			patch_json: JSON.stringify(decoded),
 		});
+		yield* transaction
+			.delete(ConversationPatches)
+			.where(
+				and(
+					eq(ConversationPatches.thread_id, thread_id),
+					lte(
+						ConversationPatches.sequence,
+						sequence - conversation_patch_retention_limit,
+					),
+				),
+			);
 	});
 
 export const Admit = (

@@ -45,6 +45,40 @@ export const MakeConnectionConversationDelivery = Effect.gen(function* () {
 					if (patches.length === 0) break;
 					const final_patch = patches[patches.length - 1];
 					if (final_patch === undefined) break;
+					const first_patch = patches[0];
+					if (first_patch === undefined) break;
+					if (first_patch.sequence !== patch_sequence + 1) {
+						const availability = yield* conversation.ReadSnapshot(
+							subscription.thread_id,
+						);
+						if (availability.status !== "available") break;
+						const snapshot = availability.snapshot;
+						stream_sequence += 1;
+						yield* Enqueue({
+							journal_sequence: snapshot.journal_sequence,
+							kind: "conversation.snapshot",
+							message_id: yield* metadata.MakeId("message"),
+							origin: "backend",
+							payload: snapshot,
+							protocol_version: 1,
+							schema_version: 1,
+							sent_at: yield* metadata.Now,
+							sequence: stream_sequence,
+							stream_id: subscription.stream_id,
+							subscription_id,
+						});
+						patch_sequence = snapshot.last_patch_sequence;
+						subscriptions = {
+							...subscriptions,
+							[subscription_id]: {
+								...subscription,
+								journal_sequence: snapshot.journal_sequence,
+								patch_sequence,
+								sequence: stream_sequence,
+							},
+						};
+						break;
+					}
 
 					delivered_batches += 1;
 					stream_sequence += 1;

@@ -12,6 +12,7 @@ import {
 import {
 	AgentRuns,
 	Assignments,
+	ConversationSources,
 	OrchestrationArtifacts,
 	OrchestrationGroups,
 	ThreadErasureClaims,
@@ -25,7 +26,6 @@ import {
 } from "../agent-graph-model";
 import { is_terminal_state, terminal_state_from_engine, type GraphContext } from "./graph-context";
 import type { GraphLedger } from "./graph-ledger";
-import type { RawObservationLedger } from "./raw-observation-ledger";
 import type { RunTransitions } from "./run-transitions";
 import { PersistSurfaceProjection } from "../../surfaces/surface-projection";
 import { ApplyEngineObservation } from "../../conversation/index.ts";
@@ -63,7 +63,6 @@ export interface RunLifecycle {
 export function make_run_lifecycle(
 	context: GraphContext,
 	ledger: GraphLedger,
-	raw_observations: RawObservationLedger,
 	transitions: RunTransitions,
 ): RunLifecycle {
 	const { database, metadata } = context;
@@ -208,6 +207,9 @@ export function make_run_lifecycle(
 						attempt: updated_run.attempt,
 						created_at: updated_run.created_at,
 						engine_id: updated_run.engine_id,
+						execution_origin: updated_run.execution_origin as
+							| "artisan_dispatched"
+							| "provider_observed",
 						group_id: updated_run.group_id,
 						last_observation_sequence: updated_run.last_observation_sequence,
 						native_identity,
@@ -299,15 +301,6 @@ export function make_run_lifecycle(
 		Effect.gen(function* () {
 			const events = yield* database.client.transaction((transaction) =>
 				Effect.gen(function* () {
-					const inserted = yield* raw_observations.append_raw_observation(
-						transaction,
-						observation,
-					);
-
-					if (!inserted) {
-						return [];
-					}
-
 					const [run] = yield* transaction
 						.select()
 						.from(AgentRuns)
@@ -347,6 +340,14 @@ export function make_run_lifecycle(
 						run_id: run.run_id,
 						thread_id: group.thread_id,
 					}) as Effect.Effect<unknown, unknown, never>;
+					yield* transaction
+						.delete(ConversationSources)
+						.where(
+							eq(
+								ConversationSources.source_id,
+								`observation:${observation.observation_id}`,
+							),
+						);
 
 					const updated_at = yield* metadata.Now;
 					const advanced = yield* transaction

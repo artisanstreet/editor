@@ -41,6 +41,14 @@ export function make_database_layer(options: DatabaseOptions) {
 		Effect.gen(function* () {
 			const client = yield* SQLiteNodeDrizzle.makeWithDefaults();
 
+			const [schema_count] = yield* client.all<{ count: number }>(
+				"SELECT COUNT(*) AS count FROM sqlite_schema",
+			);
+			if ((schema_count?.count ?? 0) === 0) {
+				/** Enables bounded page reclamation before a fresh store has data to rewrite. */
+				yield* client.run("PRAGMA auto_vacuum = INCREMENTAL");
+				yield* client.run("VACUUM");
+			}
 			yield* migrate(client, {
 				migrationsFolder: options.migrations_path,
 			});
@@ -54,6 +62,8 @@ export function make_database_layer(options: DatabaseOptions) {
 			yield* client.run(
 				`PRAGMA wal_autocheckpoint = ${DatabaseDiskIoPolicy.wal_autocheckpoint_pages}`,
 			);
+			/** Reclaims a bounded number of already-free tail pages without a full VACUUM. */
+			yield* client.run("PRAGMA incremental_vacuum(1024)");
 
 			return { client };
 		}),

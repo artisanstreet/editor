@@ -5,6 +5,7 @@ import type { EventEnvelope } from "@artisan/protocol";
 import type { DatabaseClient } from "../../persistence/database";
 import { body_text, item_base, lifecycle, source_refs, turn_base } from "./domain";
 import { Admit, EnsureThread, UpsertItem, UpsertTurn } from "./entities";
+import { MarkStreamingAssistantSteeringBoundaries } from "./messages";
 
 /** Applies journal facts which are canonical user-visible conversation input. */
 export const ApplyJournalEvent = (transaction: DatabaseClient, event: EventEnvelope) =>
@@ -115,7 +116,7 @@ export const ApplyJournalEvent = (transaction: DatabaseClient, event: EventEnvel
 			},
 			source,
 		);
-		yield* UpsertItem(
+		const message = yield* UpsertItem(
 			transaction,
 			event.thread_id,
 			{
@@ -134,4 +135,13 @@ export const ApplyJournalEvent = (transaction: DatabaseClient, event: EventEnvel
 			},
 			source,
 		);
+		if (payload.type === "thread.message_steering" && event.run_id !== undefined) {
+			yield* MarkStreamingAssistantSteeringBoundaries(
+				transaction,
+				event.thread_id,
+				event.run_id,
+				message.id,
+				event.sent_at,
+			);
+		}
 	});

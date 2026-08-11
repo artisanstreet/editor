@@ -40,5 +40,6 @@ export const SurfaceUsageTotals = sqliteTable("surface_usage_totals", {
 	cached_input_tokens: integer("cached_input_tokens"),
 	context_tokens: integer("context_tokens"),
 	context_window_tokens: integer("context_window_tokens"),
+	last_observation_id: text("last_observation_id").notNull().default(""),
 	updated_at: text("updated_at").notNull(),
 });

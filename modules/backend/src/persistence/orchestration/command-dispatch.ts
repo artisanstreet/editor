@@ -699,29 +699,6 @@ export const MakeCommandDispatcher = Effect.gen(function* () {
 					text: payload.text,
 					thread_id: command.thread_id,
 				});
-				events.push(
-					yield* AppendEvent({
-						agent_id,
-						causation_id: command.message_id,
-						correlation_id: command.message_id,
-						payload: {
-							message_id: command.message_id,
-							...(payload.attachments === undefined
-								? {}
-								: { attachments: ImageAttachmentsFor(payload) }),
-							...(payload.content === undefined ? {} : { content: payload.content }),
-							...(payload.mentioned_projects === undefined
-								? {}
-								: { mentioned_projects: payload.mentioned_projects }),
-							text: payload.text,
-							type: "thread.message_steering",
-							working_directory: payload.working_directory,
-						},
-						...(command.raw_origin ? { raw_origin: command.raw_origin } : {}),
-						run_id,
-						thread_id: command.thread_id,
-					}),
-				);
 			}
 
 			if (payload.type === "run.respond_approval") {

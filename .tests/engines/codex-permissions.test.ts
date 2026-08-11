@@ -30,6 +30,19 @@ describe("Codex permission mapping", () => {
 		});
 	});
 
+	it("passes Ultra through to Codex's advertised app-server effort field", async () => {
+		const app_server = await Effect.runPromise(
+			MakeCodexAppServerThreadOptions({
+				...full_access_input,
+				provider_options: { "codex.reasoning_effort": "ultra" },
+			}),
+		);
+
+		expect(app_server).toMatchObject({
+			config: { model_reasoning_effort: "ultra" },
+		});
+	});
+
 	it("rejects host scope when network isolation is still requested", async () => {
 		await expect(
 			Effect.runPromise(

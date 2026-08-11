@@ -352,6 +352,7 @@ export function make_assignment_commands(
 					completed_at: null,
 					created_at: accepted_at,
 					dispatch_status: "queued",
+					execution_origin: "artisan_dispatched",
 					engine_id: assignment.engine_id,
 					group_id: assignment.group_id,
 					last_observation_sequence: 0,

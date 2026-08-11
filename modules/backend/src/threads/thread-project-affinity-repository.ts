@@ -259,6 +259,12 @@ const MakeProjection = (
 		created_at: current.created_at,
 		...(current.current_goal === undefined ? {} : { current_goal: current.current_goal }),
 		last_activity_at: current.last_activity_at,
+		...(current.reader_activity_at === undefined
+			? {}
+			: { reader_activity_at: current.reader_activity_at }),
+		...(current.last_assistant_message === undefined
+			? {}
+			: { last_assistant_message: current.last_assistant_message }),
 		linked_projects: [...values.linked_projects],
 		live_status: current.live_status,
 		metadata_version: current.metadata_version,

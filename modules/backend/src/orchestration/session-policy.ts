@@ -57,6 +57,24 @@ export const SessionPolicyResolvedModel = (
 ): string | undefined => policy.model ?? requested_model ?? catalog_default_model(policy.engine_id);
 
 /**
+ * Resolves a policy effort only when the selected catalog model publishes it.
+ * Models with native or unavailable thinking intentionally receive no effort
+ * option, even though the durable policy retains its last model-level choice.
+ */
+const catalog_native_effort = (
+	harness_id: string,
+	native_model_id: string | undefined,
+	reasoning_effort: ThreadSessionPolicy["reasoning_effort"],
+) => {
+	const thinking = model_manifest.models.find(
+		(model) => model.harness === harness_id && model.native_model_id === native_model_id,
+	)?.capabilities.thinking;
+	if (thinking?.availability !== "supported") return undefined;
+	return thinking.options.find((option) => option.native_value === reasoning_effort)
+		?.native_value;
+};
+
+/**
  * Resolves the executable-facing subset of durable session policy.
  *
  * Assignment permissions may narrow a user policy, but never widen it. This
@@ -139,6 +157,7 @@ export const MakeSessionPolicyRunMetadata = (
 	 * narrowed neutral outcome is translated through the catalog instead.
 	 */
 	if (policy.engine_id === "claude") {
+		const effort = catalog_native_effort("claude", resolved_model, policy.reasoning_effort);
 		/**
 		 * The chosen option survives verbatim unless an assignment narrowed a
 		 * boundary; only then does it collapse to the neutral option that
@@ -154,6 +173,7 @@ export const MakeSessionPolicyRunMetadata = (
 		return {
 			...model_metadata,
 			provider_options: {
+				...(effort === undefined ? {} : { "claude.effort": effort }),
 				"claude.permission_mode": native_permission_mode("claude", narrowed_option),
 			},
 		};

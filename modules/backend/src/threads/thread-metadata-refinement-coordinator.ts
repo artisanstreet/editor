@@ -1,4 +1,4 @@
-import { and, asc, desc, gt, inArray, lte } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, lte } from "drizzle-orm";
 import {
 	Context,
 	Data,
@@ -16,7 +16,7 @@ import { JournalSequence } from "@artisan/protocol";
 
 import { Database } from "../persistence/database";
 import { JournalNotifier } from "../persistence/journal-notifier";
-import { JournalEvents } from "../persistence/tables";
+import { JournalCommands, JournalEvents } from "../persistence/tables";
 import { ThreadReadModel, type ThreadReadModelError } from "../persistence/thread-read-model";
 import { ThreadMetadataRefinementWorker } from "./thread-metadata-refinement-worker";
 import { ThreadMetadataRepository, type ThreadMetadataError } from "./thread-metadata-repository";
@@ -27,6 +27,7 @@ import type {
 
 interface ThreadRefinementContext {
 	readonly recent_activity: ReadonlyArray<string>;
+	readonly recent_assistant_text: ReadonlyArray<string>;
 	readonly recent_artifacts: ReadonlyArray<string>;
 	readonly recent_files: ReadonlyArray<string>;
 	readonly recent_user_text: ReadonlyArray<string>;
@@ -63,7 +64,10 @@ const ThreadMetadataEvidencePayload = Schema.Union([
 		}),
 		type: Schema.Literal("artifact.recorded"),
 	}),
-	Schema.Struct({ type: Schema.Literal("assistant.message_completed") }),
+	Schema.Struct({
+		text: Schema.NonEmptyString,
+		type: Schema.Literal("assistant.message_completed"),
+	}),
 ]);
 
 type ThreadMetadataEvidencePayload = typeof ThreadMetadataEvidencePayload.Type;
@@ -83,6 +87,15 @@ const thread_metadata_evidence_types = [
 	"run.lifecycle",
 	"orchestration.graph.lifecycle",
 	"artifact.recorded",
+	"assistant.message_completed",
+] as const;
+
+/** Only these evidence kinds can require an automatic refinement on recovery. */
+const thread_metadata_trigger_types = [
+	"thread.message_queued",
+	"thread.message_steering",
+	"run.lifecycle",
+	"orchestration.graph.lifecycle",
 	"assistant.message_completed",
 ] as const;
 
@@ -138,6 +151,7 @@ function append_context(values: ReadonlyArray<string>, value: string) {
 function empty_context(): ThreadRefinementContext {
 	return {
 		recent_activity: [],
+		recent_assistant_text: [],
 		recent_artifacts: [],
 		recent_files: [],
 		recent_user_text: [],
@@ -193,7 +207,10 @@ function reduce_event(
 		};
 	}
 
-	if (payload.type === "orchestration.graph.lifecycle" && payload.node_type === "agent_run") {
+	if (
+		payload.type === "orchestration.graph.lifecycle" &&
+		payload.node_type === "orchestration_group"
+	) {
 		return {
 			context: {
 				...current,
@@ -235,8 +252,10 @@ function reduce_event(
 					current.recent_activity,
 					"Assistant response completed",
 				),
+				recent_assistant_text: append_context(current.recent_assistant_text, payload.text),
 			},
 			erase_context: false,
+			trigger: "assistant_message",
 		};
 	}
 
@@ -349,6 +368,47 @@ export const ThreadMetadataRefinementCoordinatorLive = Layer.effect(
 							: new ThreadMetadataRefinementReadFailure({ cause }),
 					),
 				);
+
+		/**
+		 * Startup does not rebuild an in-memory cursor from every historical event.
+		 * A source is recoverable precisely while the idempotent refinement command
+		 * for it is absent, so this query scales with unfinished work rather than
+		 * the lifetime of the journal.
+		 */
+		const ReadPendingRecoveryEvidence = (up_to_journal_sequence: number) =>
+			database.client
+				.select({
+					event_id: JournalEvents.event_id,
+					event_type: JournalEvents.event_type,
+					journal_sequence: JournalEvents.sequence,
+					payload_json: JournalEvents.payload_json,
+					thread_id: JournalEvents.thread_id,
+				})
+				.from(JournalEvents)
+				.leftJoin(
+					JournalCommands,
+					and(
+						eq(JournalCommands.thread_id, JournalEvents.thread_id),
+						eq(JournalCommands.causation_id, JournalEvents.event_id),
+						eq(JournalCommands.origin, "backend"),
+						eq(JournalCommands.payload_type, "thread.metadata.refine"),
+					),
+				)
+				.where(
+					and(
+						lte(JournalEvents.sequence, up_to_journal_sequence),
+						inArray(JournalEvents.event_type, thread_metadata_trigger_types),
+						isNull(JournalCommands.message_id),
+					),
+				)
+				.orderBy(asc(JournalEvents.sequence))
+				.pipe(
+					Effect.flatMap((rows) => Effect.forEach(rows, DecodeEvidence)),
+					Effect.map((decoded) =>
+						decoded.filter(Option.isSome).map((event) => event.value),
+					),
+					Effect.mapError((cause) => new ThreadMetadataRefinementReadFailure({ cause })),
+				);
 		const ReadCurrentJournalSequence = database.client
 			.select({ journal_sequence: JournalEvents.sequence })
 			.from(JournalEvents)
@@ -399,6 +459,78 @@ export const ThreadMetadataRefinementCoordinatorLive = Layer.effect(
 				});
 			});
 
+		const SubmitTriggers = (
+			contexts: ReadonlyMap<string, ThreadRefinementContext>,
+			triggers: Iterable<RefinementTrigger>,
+		) =>
+			Effect.gen(function* () {
+				const submissions = yield* Effect.forEach(triggers, (trigger) =>
+					Effect.gen(function* () {
+						const thread = yield* read_model.Lookup(trigger.thread_id);
+
+						if (Option.isNone(thread)) {
+							return Option.none<{
+								readonly request: ThreadMetadataRefinementRequest;
+								readonly trigger: RefinementTrigger;
+							}>();
+						}
+
+						return Option.some({
+							request: {
+								...(contexts.get(trigger.thread_id) ?? empty_context()),
+								projection: thread.value,
+								source_event_id: trigger.source_event_id,
+								thread_id: trigger.thread_id,
+								trigger: trigger.trigger,
+							},
+							trigger,
+						});
+					}),
+				);
+				const ready_submissions = submissions
+					.filter(Option.isSome)
+					.map((item) => item.value);
+				yield* Effect.forEach(ready_submissions, ({ request }) =>
+					SubmitUntilAccepted(request),
+				);
+				yield* worker.WaitForIdle;
+				yield* Effect.forEach(ready_submissions, ({ trigger }) => VerifyRefined(trigger));
+			});
+
+		const RecoverPending = (up_to_journal_sequence: number) =>
+			Effect.gen(function* () {
+				const events = yield* ReadPendingRecoveryEvidence(up_to_journal_sequence);
+				const contexts = new Map<string, ThreadRefinementContext>();
+				const latest_triggers = new Map<string, RefinementTrigger>();
+
+				for (const event of events) {
+					const reduced = reduce_event(
+						event,
+						contexts.get(event.thread_id) ?? empty_context(),
+					);
+
+					if (reduced.erase_context) {
+						contexts.delete(event.thread_id);
+						latest_triggers.delete(event.thread_id);
+						continue;
+					}
+
+					if (reduced.context) {
+						contexts.set(event.thread_id, reduced.context);
+					}
+
+					if (reduced.trigger) {
+						latest_triggers.set(event.thread_id, {
+							source_event_id: event.source_event_id,
+							thread_id: event.thread_id,
+							trigger: reduced.trigger,
+						});
+					}
+				}
+
+				yield* SubmitTriggers(contexts, latest_triggers.values());
+			});
+
 		const CatchUpUnlocked = Effect.gen(function* () {
 			const current = yield* Ref.get(state);
 			const evidence = yield* ReadEvidence(current.journal_sequence);
@@ -436,31 +568,6 @@ export const ThreadMetadataRefinementCoordinatorLive = Layer.effect(
 				}
 			}
 
-			const submissions = yield* Effect.forEach(latest_triggers.values(), (trigger) =>
-				Effect.gen(function* () {
-					const thread = yield* read_model.Lookup(trigger.thread_id);
-
-					if (Option.isNone(thread)) {
-						return Option.none<{
-							readonly request: ThreadMetadataRefinementRequest;
-							readonly trigger: RefinementTrigger;
-						}>();
-					}
-
-					const context = contexts.get(trigger.thread_id) ?? empty_context();
-
-					return Option.some({
-						request: {
-							...context,
-							projection: thread.value,
-							source_event_id: trigger.source_event_id,
-							thread_id: trigger.thread_id,
-							trigger: trigger.trigger,
-						},
-						trigger,
-					});
-				}),
-			);
 			const current_journal_sequence = yield* ReadCurrentJournalSequence;
 
 			/**
@@ -472,11 +579,7 @@ export const ThreadMetadataRefinementCoordinatorLive = Layer.effect(
 				return 0;
 			}
 
-			const ready_submissions = submissions.filter(Option.isSome).map((item) => item.value);
-			yield* Effect.forEach(ready_submissions, ({ request }) => SubmitUntilAccepted(request));
-
-			yield* worker.WaitForIdle;
-			yield* Effect.forEach(ready_submissions, ({ trigger }) => VerifyRefined(trigger));
+			yield* SubmitTriggers(contexts, latest_triggers.values());
 
 			yield* Ref.set(state, {
 				contexts,
@@ -490,7 +593,17 @@ export const ThreadMetadataRefinementCoordinatorLive = Layer.effect(
 		const CatchUpReliably = CatchUp.pipe(
 			Effect.retry({ schedule: Schedule.spaced("250 millis") }),
 		);
+		const startup_journal_sequence = yield* ReadCurrentJournalSequence;
+		yield* Ref.set(state, {
+			contexts: new Map(),
+			journal_sequence: startup_journal_sequence,
+		});
+		const RecoverPendingReliably = Semaphore.withPermit(lock)(
+			RecoverPending(startup_journal_sequence),
+		).pipe(Effect.retry({ schedule: Schedule.spaced("250 millis") }));
+
 		const Watch = Effect.gen(function* () {
+			yield* RecoverPendingReliably;
 			yield* CatchUpReliably;
 
 			while (true) {

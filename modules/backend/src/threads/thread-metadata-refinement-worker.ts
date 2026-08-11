@@ -39,17 +39,22 @@ interface WorkerState {
 const make_intent = (
 	request: ThreadMetadataRefinementRequest,
 	refinement: ThreadMetadataRefinement,
-): ThreadMetadataRefinementIntent => ({
-	operation_id: `metadata-refine:${request.source_event_id}`,
-	payload: {
-		...refinement,
-		basis_activity_version: request.projection.activity_version,
-		basis_metadata_version: request.projection.metadata_version,
-		type: "thread.metadata.refine",
-	},
-	source_event_id: request.source_event_id,
-	thread_id: request.thread_id,
-});
+): ThreadMetadataRefinementIntent => {
+	const last_assistant_message = request.recent_assistant_text.at(-1);
+
+	return {
+		operation_id: `metadata-refine:${request.source_event_id}`,
+		payload: {
+			...refinement,
+			basis_activity_version: request.projection.activity_version,
+			basis_metadata_version: request.projection.metadata_version,
+			...(last_assistant_message === undefined ? {} : { last_assistant_message }),
+			type: "thread.metadata.refine",
+		},
+		source_event_id: request.source_event_id,
+		thread_id: request.thread_id,
+	};
+};
 
 /** Creates a scoped, bounded, latest-wins refinement worker. */
 export const make_thread_metadata_refinement_worker_layer = (

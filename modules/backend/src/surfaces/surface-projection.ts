@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { Effect, Option, Schema } from "effect";
-import { eq } from "drizzle-orm";
+import { and, desc, eq, lte } from "drizzle-orm";
 
 import type { EngineObservation } from "@artisan/engines";
 import { SurfaceItem } from "@artisan/protocol";
@@ -13,6 +13,8 @@ import { SurfaceFromEngineObservation } from "./engine-observation";
 
 const IsSafeRawIdentifier = (value: string) =>
 	value.length > 0 && value.length <= 4_096 && /^\S+$/u.test(value) && !/[\p{Cc}]/u.test(value);
+
+export const surface_item_retention_limit = 512;
 
 /** Validates the public projection and replaces unsafe provider provenance with an opaque item. */
 const DecodeSurfaceProjection = (
@@ -69,6 +71,18 @@ export const PersistSurfaceProjection = (
 	},
 ) =>
 	Effect.gen(function* () {
+		if (
+			observation._tag === "agent_message_delta" ||
+			observation._tag === "reasoning_summary_delta" ||
+			(observation._tag === "subagent_transcript" &&
+				(observation.content._tag === "agent_message_delta" ||
+					observation.content._tag === "reasoning_summary_delta")) ||
+			(observation._tag === "terminal_activity" && observation.state === "output") ||
+			(observation._tag === "tool" && observation.action === "progress") ||
+			(observation._tag === "native_action" && observation.diagnostic === true)
+		) {
+			return;
+		}
 		const attribution = {
 			agent_id: input.agent_id,
 			run_id: input.run_id,
@@ -76,37 +90,65 @@ export const PersistSurfaceProjection = (
 			...(input.group_id ? { group_id: input.group_id } : {}),
 			...(input.assignment_id ? { assignment_id: input.assignment_id } : {}),
 		};
-		const decoded = yield* DecodeSurfaceProjection(observation, attribution, input.occurred_at);
-		const item =
-			decoded._tag === "Some"
-				? decoded.value
-				: yield* DecodeOpaqueSurfaceProjection(observation, attribution, input.occurred_at);
-		const inserted = yield* transaction
-			.insert(SurfaceItems)
-			.values({
-				surface_id: item.surface_id,
-				observation_id: observation.observation_id,
-				thread_id: input.thread_id,
-				run_id: input.run_id,
-				group_id: input.group_id ?? null,
-				assignment_id: input.assignment_id ?? null,
-				sequence: observation.sequence,
-				category: item.category,
-				kind: item.kind,
-				summary_json: JSON.stringify(item.summary),
-				raw_origin_json:
-					item.raw_origin === undefined ? null : JSON.stringify(item.raw_origin),
-				occurred_at: input.occurred_at,
-			})
-			.onConflictDoNothing()
-			.returning({ surface_id: SurfaceItems.surface_id });
-		if (inserted.length === 0) return;
-		if (observation._tag !== "usage") return;
+		if (observation._tag !== "usage") {
+			const decoded = yield* DecodeSurfaceProjection(
+				observation,
+				attribution,
+				input.occurred_at,
+			);
+			const item =
+				decoded._tag === "Some"
+					? decoded.value
+					: yield* DecodeOpaqueSurfaceProjection(
+							observation,
+							attribution,
+							input.occurred_at,
+						);
+			const inserted = yield* transaction
+				.insert(SurfaceItems)
+				.values({
+					surface_id: item.surface_id,
+					observation_id: observation.observation_id,
+					thread_id: input.thread_id,
+					run_id: input.run_id,
+					group_id: input.group_id ?? null,
+					assignment_id: input.assignment_id ?? null,
+					sequence: observation.sequence,
+					category: item.category,
+					kind: item.kind,
+					summary_json: JSON.stringify(item.summary),
+					raw_origin_json:
+						item.raw_origin === undefined ? null : JSON.stringify(item.raw_origin),
+					occurred_at: input.occurred_at,
+				})
+				.onConflictDoNothing()
+				.returning({ projection_order: SurfaceItems.projection_order });
+			if (inserted.length === 0) return;
+			const [retention_floor] = yield* transaction
+				.select({ projection_order: SurfaceItems.projection_order })
+				.from(SurfaceItems)
+				.where(eq(SurfaceItems.thread_id, input.thread_id))
+				.orderBy(desc(SurfaceItems.projection_order))
+				.limit(1)
+				.offset(surface_item_retention_limit);
+			if (retention_floor !== undefined) {
+				yield* transaction
+					.delete(SurfaceItems)
+					.where(
+						and(
+							eq(SurfaceItems.thread_id, input.thread_id),
+							lte(SurfaceItems.projection_order, retention_floor.projection_order),
+						),
+					);
+			}
+			return;
+		}
 		const [prior] = yield* transaction
 			.select()
 			.from(SurfaceUsageTotals)
 			.where(eq(SurfaceUsageTotals.run_id, input.run_id))
 			.limit(1);
+		if (prior?.last_observation_id === observation.observation_id) return;
 		const add = (prior_value: number | null | undefined, next: number | undefined) =>
 			next === undefined ? (prior_value ?? null) : (prior_value ?? 0) + next;
 		const next_total = (prior_value: number | null | undefined, next: number | undefined) => {
@@ -139,6 +181,7 @@ export const PersistSurfaceProjection = (
 				cached_input_tokens,
 				context_tokens,
 				context_window_tokens,
+				last_observation_id: observation.observation_id,
 				updated_at: input.occurred_at,
 			})
 			.onConflictDoUpdate({
@@ -149,6 +192,7 @@ export const PersistSurfaceProjection = (
 					cached_input_tokens,
 					context_tokens,
 					context_window_tokens,
+					last_observation_id: observation.observation_id,
 					updated_at: input.occurred_at,
 				},
 			});

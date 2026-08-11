@@ -11,11 +11,12 @@ import {
 	type OutboxKind,
 	type PendingWork,
 } from "./contracts";
-import { HydrateImageAttachments } from "./message-attachments";
+import { HydrateImageAttachments, ImageAttachmentsFor } from "./message-attachments";
 import { AuthoritativeThreadSendMessageCommand } from "./message-command";
-import { DecodePersistedJson, PersistedJsonValue } from "./storage-codec";
+import { DecodePersistedJson, PersistedJsonValue, PersistedRawOrigin } from "./storage-codec";
 import type { PendingWork as PendingWorkContract } from "./contracts";
 import {
+	JournalCommands,
 	OrchestrationMessages,
 	OrchestrationOutbox,
 	OrchestrationRuns,
@@ -57,6 +58,33 @@ const DecodePersistedPayload = (
 			});
 		}
 		return decoded as PersistedPayload;
+	});
+
+/** Decodes the exact Forge-owned message command that a steer outbox row represents. */
+export const ReadAuthoritativeSteeringPayload = (
+	database: DatabaseClient,
+	command_id: string,
+	payload_json: string,
+) =>
+	Effect.gen(function* () {
+		const persisted_payload = yield* DecodePersistedJson(PersistedJsonValue, payload_json);
+		const decoded_payload = yield* DecodePersistedPayload(persisted_payload);
+		if (decoded_payload.type !== "thread.send_message") {
+			return yield* new OrchestrationFailure({
+				cause: new Error("Steering outbox payload must be a thread message"),
+			});
+		}
+		const payload = yield* HydrateImageAttachments(database, decoded_payload);
+		const [command] = yield* database
+			.select({ raw_origin_json: JournalCommands.raw_origin_json })
+			.from(JournalCommands)
+			.where(eq(JournalCommands.message_id, command_id))
+			.limit(1);
+		const raw_origin = command?.raw_origin_json
+			? yield* DecodePersistedJson(PersistedRawOrigin, command.raw_origin_json)
+			: undefined;
+
+		return { payload, raw_origin };
 	});
 
 /** Owns the durable dispatch queue while leaving command acceptance in the repository. */
@@ -156,8 +184,36 @@ export const make_outbox_operations = (
 					) {
 						return [];
 					}
+					const { payload, raw_origin } = yield* ReadAuthoritativeSteeringPayload(
+						transaction,
+						command_id,
+						outbox.payload_json,
+					);
 
 					return [
+						yield* AppendJournalEventInTransaction(transaction, metadata, {
+							agent_id: message.agent_id,
+							causation_id: command_id,
+							correlation_id: command_id,
+							payload: {
+								message_id: message.message_id,
+								...(payload.attachments === undefined
+									? {}
+									: { attachments: ImageAttachmentsFor(payload) }),
+								...(payload.content === undefined
+									? {}
+									: { content: payload.content }),
+								...(payload.mentioned_projects === undefined
+									? {}
+									: { mentioned_projects: payload.mentioned_projects }),
+								text: payload.text,
+								type: "thread.message_steering",
+								working_directory: payload.working_directory,
+							},
+							...(raw_origin === undefined ? {} : { raw_origin }),
+							run_id: message.run_id,
+							thread_id: message.thread_id,
+						}),
 						yield* AppendJournalEventInTransaction(transaction, metadata, {
 							agent_id: message.agent_id,
 							causation_id: command_id,

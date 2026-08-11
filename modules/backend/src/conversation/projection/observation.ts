@@ -8,7 +8,7 @@ import type { ConversationObservationContext } from "./domain";
 import { body_text, item_base, lifecycle, turn_base } from "./domain";
 import { Admit, EnsureThread, EnsureTurn, UpsertItem, UpsertTurn } from "./entities";
 import { ApplyInteractionObservation, CancelPendingInteractions } from "./interaction";
-import { AppendText, CompleteReasoningSummary } from "./messages";
+import { AppendText, CompleteReasoningSummary, SettleStreamingBodies } from "./messages";
 
 /** Applies one normalized engine observation in the caller's transaction. */
 export const ApplyEngineObservation = (
@@ -17,10 +17,19 @@ export const ApplyEngineObservation = (
 	input: ConversationObservationContext,
 ) =>
 	Effect.gen(function* () {
-		/** Native child lifecycle is not part of the root conversation transcript. */
-		if (observation._tag === "subagent" || observation._tag === "subagent_transcript") {
+		/**
+		 * Native child-agent lifecycle belongs to the orchestration graph, not the
+		 * root conversation transcript. In particular, a child completion must not
+		 * settle or otherwise manufacture the parent renderer turn.
+		 */
+		if (observation._tag === "subagent" || observation._tag === "subagent_transcript") return;
+		if (
+			observation._tag === "usage" ||
+			(observation._tag === "terminal_activity" && observation.state === "output") ||
+			(observation._tag === "tool" && observation.action === "progress") ||
+			(observation._tag === "native_action" && observation.diagnostic === true)
+		)
 			return;
-		}
 
 		yield* EnsureThread(transaction, input.thread_id, input.occurred_at);
 		const admitted = yield* Admit(
@@ -140,6 +149,13 @@ export const ApplyEngineObservation = (
 					turn_id,
 					observation.observation_id,
 				);
+				yield* SettleStreamingBodies(
+					transaction,
+					input.thread_id,
+					turn_id,
+					observation.state,
+					input.occurred_at,
+				);
 				return yield* UpsertTurn(
 					transaction,
 					input.thread_id,
@@ -159,7 +175,6 @@ export const ApplyEngineObservation = (
 			case "search":
 			case "terminal_activity":
 			case "tool":
-			case "usage":
 				return yield* ApplyActivityObservation(transaction, observation, input, turn_id);
 		}
 	});

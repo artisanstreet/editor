@@ -16,6 +16,7 @@ export const thinking_level_labels = Schema.decodeUnknownSync(
 	high: "High",
 	xhigh: "Extra High",
 	max: "Max",
+	ultra: "Ultra",
 });
 
 export const unavailable = Schema.decodeUnknownSync(
@@ -210,13 +211,33 @@ export const permission = (input: PermissionOption) =>
 	Schema.decodeUnknownSync(PermissionOption)(input);
 
 export const standard = (id: ThinkingOption["id"], native_value: string) =>
-	Schema.decodeUnknownSync(ThinkingOption)({ economics: "standard", id, native_value });
+	Schema.decodeUnknownSync(ThinkingOption)({
+		economics: "standard",
+		id,
+		native_value,
+		presentation_group: "base",
+	});
 
 export const exceptional = (id: ThinkingOption["id"], native_value: string) =>
 	Schema.decodeUnknownSync(ThinkingOption)({
 		economics: "diminishing-returns",
 		id,
 		native_value,
+		presentation_group: "special",
+	});
+
+/**
+ * Codex Ultra coordinates parallel subagents at the harness level rather than
+ * selecting another step in the model's reasoning budget.
+ */
+export const harness_orchestration = (id: "ultra", native_value: string) =>
+	Schema.decodeUnknownSync(ThinkingOption)({
+		description:
+			"Ultra lets Codex coordinate multiple subagents in parallel and synthesize their results. It works best when complex work splits cleanly into independent tasks.",
+		economics: "harness-orchestration",
+		id,
+		native_value,
+		presentation_group: "special",
 	});
 
 /**

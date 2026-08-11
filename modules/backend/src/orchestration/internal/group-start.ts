@@ -94,11 +94,22 @@ export function make_group_start(
 					const created_at = yield* metadata.Now;
 					const coordinator_agent_id =
 						command.agent_id ?? (yield* metadata.MakeId("agent"));
+					const name_bank =
+						payload.name_bank ?? (yield* context.agent_name_catalog.Names);
+					const existing_agents = yield* transaction
+						.select({ display_name: AgentInstances.display_name })
+						.from(AgentInstances)
+						.innerJoin(
+							OrchestrationGroups,
+							eq(AgentInstances.group_id, OrchestrationGroups.group_id),
+						)
+						.where(eq(OrchestrationGroups.thread_id, command.thread_id));
 					const allocated = yield* topology.allocate_agent_instances(
 						payload.assignments,
 						payload.group_id,
 						coordinator_agent_id,
-						payload.name_bank ?? topology.default_name_bank,
+						name_bank,
+						existing_agents.map((agent) => agent.display_name),
 						created_at,
 					);
 					const join_blocked_assignment_ids = new Set(
@@ -176,6 +187,7 @@ export function make_group_start(
 							created_at,
 							dispatch_status: blocked ? "blocked" : "queued",
 							engine_id: assignment.engine_id,
+							execution_origin: "artisan_dispatched",
 							group_id: payload.group_id,
 							last_observation_sequence: 0,
 							native_resume_json: null,

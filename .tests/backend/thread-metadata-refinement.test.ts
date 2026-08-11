@@ -52,6 +52,7 @@ const request = (
 	source_event_id: `event_${thread_id}`,
 	thread_id,
 	trigger,
+	recent_assistant_text: [],
 	recent_user_text: ["Ship the metadata worker"],
 	recent_activity: ["User sent a message"],
 	recent_files: ["modules/backend/src/threads/thread-metadata-refiner.ts"],
@@ -155,6 +156,42 @@ describe("thread metadata refinement worker", () => {
 
 		expect(seen[0]!.recent_user_text).toHaveLength(8);
 		expect(seen[0]!.recent_user_text[0]).toBe("value_4");
+	});
+
+	it("bounds assistant previews before invoking the provider", async () => {
+		const seen: ThreadMetadataRefinerInput[] = [];
+		const values = Array.from(
+			{ length: 12 },
+			(_, index) => ` assistant_${index} ${"x".repeat(600)} `,
+		);
+		const accepted: ThreadMetadataRefinementIntent[] = [];
+		await Effect.runPromise(
+			Effect.gen(function* () {
+				const service = yield* ThreadMetadataRefinementWorker;
+				yield* service.Submit({
+					...request("thread_1"),
+					recent_assistant_text: values,
+				});
+				yield* service.WaitForIdle;
+			}).pipe(
+				Effect.provide(
+					make_test_layer(
+						(input) =>
+							Effect.sync(() => {
+								seen.push(input);
+								return { live_status: "Working" };
+							}),
+						accepted,
+					),
+				),
+			),
+		);
+
+		expect(seen[0]!.recent_assistant_text).toHaveLength(8);
+		expect(seen[0]!.recent_assistant_text[0]).toHaveLength(500);
+		expect(seen[0]!.recent_assistant_text[0]).toMatch(/^assistant_4 /u);
+		expect(accepted[0]!.payload.last_assistant_message).toHaveLength(500);
+		expect(accepted[0]!.payload.last_assistant_message).toMatch(/^assistant_11 /u);
 	});
 
 	it("isolates provider failures and continues with another thread", async () => {

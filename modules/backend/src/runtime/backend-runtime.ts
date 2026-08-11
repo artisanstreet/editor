@@ -12,6 +12,7 @@ import {
 import { MakeSnowflakeIdLive } from "@artisan/protocol";
 
 import { AgentGraphOrchestratorLive } from "../orchestration/agent-graph-orchestrator";
+import { AgentNameCatalogLive } from "../orchestration/agent-name-catalog";
 import { AgentGraphRepositoryLive } from "../orchestration/agent-graph-repository";
 import { HostSuspendMonitorLive } from "../host/suspend-monitor";
 import { AgentOrchestratorLive } from "../orchestration/agent-orchestrator";
@@ -427,7 +428,13 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(NodeCrypto.layer),
 		Layer.provideMerge(infrastructure),
 	);
+	const agent_name_catalog = AgentNameCatalogLive.pipe(Layer.provideMerge(session_defaults));
+	const graph_persistence = AgentGraphRepositoryLive.pipe(
+		Layer.provideMerge(agent_name_catalog),
+		Layer.provideMerge(infrastructure),
+	);
 	const orchestration = AgentOrchestratorLive.pipe(
+		Layer.provide(graph_persistence),
 		Layer.provideMerge(persistence),
 		Layer.provideMerge(continuation),
 		Layer.provideMerge(engine_registry),
@@ -436,7 +443,6 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(HostSuspendMonitorLive),
 		Layer.provideMerge(ProductInstructionsLive),
 	);
-	const graph_persistence = AgentGraphRepositoryLive.pipe(Layer.provideMerge(infrastructure));
 	const graph = AgentGraphOrchestratorLive.pipe(
 		Layer.provideMerge(graph_persistence),
 		Layer.provideMerge(persistence),

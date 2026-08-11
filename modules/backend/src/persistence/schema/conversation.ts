@@ -50,7 +50,6 @@ export const ConversationPatches = sqliteTable(
 			table.thread_id,
 			table.sequence,
 		),
-		index("conversation_patches_thread_index").on(table.thread_id, table.sequence),
 	],
 );
 

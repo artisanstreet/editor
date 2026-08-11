@@ -1,5 +1,11 @@
 import type { ModelDefinition } from "../schema";
-import { openai_fast_speed, openai_standard_speed, standard } from "./options";
+import {
+	exceptional,
+	harness_orchestration,
+	openai_fast_speed,
+	openai_standard_speed,
+	standard,
+} from "./options";
 
 export const openai_models = [
 	{
@@ -20,6 +26,8 @@ export const openai_models = [
 					standard("medium", "medium"),
 					standard("high", "high"),
 					standard("xhigh", "xhigh"),
+					exceptional("max", "max"),
+					harness_orchestration("ultra", "ultra"),
 				],
 			},
 			speed_options: [
@@ -50,6 +58,8 @@ export const openai_models = [
 					standard("medium", "medium"),
 					standard("high", "high"),
 					standard("xhigh", "xhigh"),
+					exceptional("max", "max"),
+					harness_orchestration("ultra", "ultra"),
 				],
 			},
 			speed_options: [
@@ -80,6 +90,8 @@ export const openai_models = [
 					standard("medium", "medium"),
 					standard("high", "high"),
 					standard("xhigh", "xhigh"),
+					exceptional("max", "max"),
+					harness_orchestration("ultra", "ultra"),
 				],
 			},
 			speed_options: [

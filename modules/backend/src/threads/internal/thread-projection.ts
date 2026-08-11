@@ -98,6 +98,8 @@ export const DecodeThreadProjection = (
 			affinity_version: thread.affinity_version,
 			created_at: thread.created_at,
 			last_activity_at: thread.last_activity_at,
+			reader_activity_at: thread.reader_activity_at,
+			reader_acknowledged_activity_at: thread.reader_acknowledged_activity_at,
 			linked_projects,
 			live_status: thread.live_status,
 			metadata_version: thread.metadata_version,
@@ -113,6 +115,9 @@ export const DecodeThreadProjection = (
 			...(launch?.policy_model == null ? {} : { model_id: launch.policy_model }),
 			...(thread.archived_at === null ? {} : { archived_at: thread.archived_at }),
 			...(thread.current_goal === null ? {} : { current_goal: thread.current_goal }),
+			...(thread.last_assistant_message === null
+				? {}
+				: { last_assistant_message: thread.last_assistant_message }),
 			...(primary_project === undefined ? {} : { primary_project }),
 			...(thread.rename_suggestion === null
 				? {}

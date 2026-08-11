@@ -3,13 +3,8 @@ import { Effect } from "effect";
 import type { AssignmentSpec } from "@artisan/protocol";
 
 import { AgentGraphInvalid, type AgentGraphCommand } from "../agent-graph-model";
-import {
-	default_agent_name_bank,
-	normalize_visible_label,
-	title_case_role,
-	visible_name_maximum,
-	type GraphContext,
-} from "./graph-context";
+import { normalize_visible_label, type GraphContext } from "./graph-context";
+import { ChooseAvailableAgentName } from "./agent-name-allocation";
 
 type StartGroupCommand = Extract<AgentGraphCommand, { readonly type: "orchestration.group.start" }>;
 
@@ -32,15 +27,15 @@ export interface GraphTopology {
 		group_id: string,
 		coordinator_agent_id: string,
 		name_bank: ReadonlyArray<string>,
+		existing_display_names: ReadonlyArray<string>,
 		created_at: string,
 	) => Effect.Effect<AllocatedAgentInstances, AgentGraphInvalid>;
 	readonly validate_topology: (
 		payload: StartGroupCommand,
 	) => Effect.Effect<void, AgentGraphInvalid>;
-	readonly default_name_bank: ReadonlyArray<string>;
 }
 
-/** Owns graph topology validation and deterministic visible identity allocation. */
+/** Owns graph topology validation and durable visible identity allocation. */
 export function make_graph_topology(context: GraphContext): GraphTopology {
 	const { metadata } = context;
 
@@ -239,14 +234,17 @@ export function make_graph_topology(context: GraphContext): GraphTopology {
 		group_id: string,
 		coordinator_agent_id: string,
 		name_bank: ReadonlyArray<string>,
+		existing_display_names: ReadonlyArray<string>,
 		created_at: string,
 	) =>
 		Effect.gen(function* () {
-			const used_names = new Set(["coordinator"]);
+			const used_names = new Set([
+				"coordinator",
+				...existing_display_names.map((display_name) => display_name.toLowerCase()),
+			]);
 			const instances = new Map<string, AllocatedAgentInstances["instances"][number]>();
 			const assignment_agents = new Map<string, string>();
 			const assignment_roles = new Map<string, string>();
-			const role_counts = new Map<string, number>();
 
 			instances.set(coordinator_agent_id, {
 				agent_id: coordinator_agent_id,
@@ -257,7 +255,7 @@ export function make_graph_topology(context: GraphContext): GraphTopology {
 				updated_at: created_at,
 			});
 
-			for (const [index, assignment] of assignments.entries()) {
+			for (const assignment of assignments) {
 				const agent_id = assignment.agent_id ?? (yield* metadata.MakeId("agent"));
 				const normalized_role = yield* normalize_visible_label(
 					assignment.role,
@@ -271,23 +269,17 @@ export function make_graph_topology(context: GraphContext): GraphTopology {
 					continue;
 				}
 
-				const role_name = title_case_role(normalized_role);
-				const role_count = (role_counts.get(role_name) ?? 1) + 1;
-				const preferred = yield* normalize_visible_label(
-					assignment.display_name ?? name_bank[index] ?? `${role_name} ${role_count}`,
-					`Assignment ${assignment.assignment_id} display name`,
-				);
-				let display_name = preferred;
-				let suffix = 2;
+				const candidates =
+					assignment.display_name === undefined
+						? name_bank
+						: [
+								yield* normalize_visible_label(
+									assignment.display_name,
+									`Assignment ${assignment.assignment_id} display name`,
+								),
+							];
+				const display_name = yield* ChooseAvailableAgentName(candidates, used_names);
 
-				while (used_names.has(display_name.toLowerCase())) {
-					const suffix_text = ` ${suffix}`;
-
-					display_name = `${preferred.slice(0, visible_name_maximum - suffix_text.length)}${suffix_text}`;
-					suffix += 1;
-				}
-
-				role_counts.set(role_name, role_count);
 				used_names.add(display_name.toLowerCase());
 				instances.set(agent_id, {
 					agent_id,
@@ -305,6 +297,5 @@ export function make_graph_topology(context: GraphContext): GraphTopology {
 	return {
 		allocate_agent_instances,
 		validate_topology,
-		default_name_bank: default_agent_name_bank,
 	};
 }

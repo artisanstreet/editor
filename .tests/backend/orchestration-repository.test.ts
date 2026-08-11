@@ -234,7 +234,7 @@ describe("orchestration repository hardening", () => {
 		}
 	});
 
-	it("projects an agent message delta while retaining its raw observation", async () => {
+	it("projects an agent message delta without retaining its raw frame", async () => {
 		const runtime = make_backend_runtime({
 			database_path: await make_database_path(),
 			migrations_path,
@@ -280,22 +280,14 @@ describe("orchestration repository hardening", () => {
 			);
 
 			expect(result).toEqual([]);
-			expect(raw).toEqual([expect.objectContaining({ observation_id: "delta_1" })]);
-			expect(surfaces).toEqual([
-				expect.objectContaining({
-					category: "work",
-					kind: "message",
-					observation_id: "delta_1",
-					run_id: accepted.run_id,
-					thread_id: "thread_1",
-				}),
-			]);
+			expect(raw).toEqual([]);
+			expect(surfaces).toEqual([]);
 		} finally {
 			await runtime.dispose();
 		}
 	});
 
-	it("persists a streamed delta batch in one call with the same durable record", async () => {
+	it("persists a streamed delta batch without duplicating provider frames", async () => {
 		const runtime = make_backend_runtime({
 			database_path: await make_database_path(),
 			migrations_path,
@@ -366,12 +358,7 @@ describe("orchestration repository hardening", () => {
 			expect(events).toMatchObject([
 				{ payload: { text: "Hello, world", type: "assistant.message_completed" } },
 			]);
-			expect(raw.map((row) => row.observation_id)).toEqual([
-				"delta_1",
-				"delta_2",
-				"delta_3",
-				"completed_1",
-			]);
+			expect(raw).toEqual([]);
 			expect(assistant_entity).toMatchObject({
 				lifecycle: "completed",
 				text: "Hello, world",
@@ -1236,7 +1223,7 @@ describe("orchestration repository hardening", () => {
 		}
 	});
 
-	it("durably records raw observations before filtering and keeps terminal runs closed", async () => {
+	it("uses the run watermark for duplicate filtering and keeps terminal runs closed", async () => {
 		const runtime = make_backend_runtime({
 			database_path: await make_database_path(),
 			migrations_path,
@@ -1303,17 +1290,9 @@ describe("orchestration repository hardening", () => {
 
 			expect(observations).toMatchObject({ duplicate: [], late: [] });
 			expect(observations.completed).toHaveLength(1);
-			expect(persisted).toEqual(
-				expect.arrayContaining([
-					expect.objectContaining({
-						frame_json: '{"type":"terminal","value":"complete"}',
-						native_id: "native-terminal",
-						raw_frame_base64: "AAEC/w==",
-						sequence: 2,
-					}),
-				]),
-			);
+			expect(persisted).toEqual([]);
 			expect(runs.find((entry) => entry.run_id === accepted.run_id)).toMatchObject({
+				last_observation_sequence: 2,
 				status: "completed",
 			});
 		} finally {

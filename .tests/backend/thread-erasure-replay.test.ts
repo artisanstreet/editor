@@ -27,6 +27,8 @@ import {
 	JournalCommands,
 	JournalEvents,
 	LegacyWorkspaceChangeProjections,
+	NativeSubagentBindings,
+	OrchestrationRuns,
 	ThreadErasureClaims,
 	WorkspaceChangeOperations,
 	WorkspaceChanges,
@@ -172,6 +174,39 @@ describe("thread erasure replay", () => {
 							return yield* Effect.die("Forge did not return the erased thread");
 						}
 						const erased_thread_id = erased_create_result.payload.thread_id;
+						yield* database.client.insert(OrchestrationRuns).values({
+							agent_id: "secret_native_root_agent",
+							created_at: now.value,
+							engine_id: "codex",
+							native_resume_json: null,
+							native_thread_id: "secret_native_root",
+							run_id: "secret_native_root_run",
+							status: "running",
+							thread_id: erased_thread_id,
+							updated_at: now.value,
+							working_directory: "C:/workspace/erased",
+						});
+						yield* database.client.insert(NativeSubagentBindings).values({
+							activity: "Private provider-native assignment",
+							agent_id: "secret_native_child_agent",
+							agent_native_thread_id: "secret_native_child",
+							agent_path: "/root/private-child",
+							assignment_id: "secret_native_assignment",
+							binding_id: "secret_native_binding",
+							created_at: now.value,
+							engine_id: "codex",
+							group_id: "secret_native_group",
+							parent_native_thread_id: "secret_native_root",
+							raw_origin_json: JSON.stringify({
+								provider: "codex",
+								reference: "private_provider_reference",
+							}),
+							root_run_id: "secret_native_root_run",
+							run_id: "secret_native_child_run",
+							state: "running",
+							turn_id: "secret_native_turn",
+							updated_at: now.value,
+						});
 
 						yield* live.Receive(make_create("create_kept", "Surviving thread"));
 						const created_kept = yield* take_outbound(live, 3);
@@ -376,6 +411,9 @@ describe("thread erasure replay", () => {
 							legacy_workspace_change_projections: yield* database.client
 								.select()
 								.from(LegacyWorkspaceChangeProjections),
+							native_subagent_bindings: yield* database.client
+								.select()
+								.from(NativeSubagentBindings),
 							kept_later,
 							kept_thread_id,
 							kept_run,
@@ -547,6 +585,7 @@ describe("thread erasure replay", () => {
 			expect(result.workspace_change_snapshots).toEqual([]);
 			expect(result.workspace_mutation_authorities).toEqual([]);
 			expect(result.legacy_workspace_change_projections).toEqual([]);
+			expect(result.native_subagent_bindings).toEqual([]);
 		} finally {
 			await runtime.dispose();
 		}

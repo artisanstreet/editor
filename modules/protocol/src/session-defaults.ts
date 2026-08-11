@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import { Effect, Schema } from "effect";
 
 import { Identifier } from "./common";
 
@@ -7,10 +7,10 @@ import { Identifier } from "./common";
  *
  * Split by what each setting is about. `permission` is a statement about how
  * much the agent may do in your workspace, so it is shared across every model
- * and engine and stored once. Reasoning effort and context window describe a
- * particular model — not every model offers `max`, and context suffixes are
- * native to their harness — so they are stored per model and never coerced onto
- * a model that cannot express them.
+ * and engine and stored once. Reasoning effort, speed tier, and context window
+ * describe a particular catalog model — not every model offers `max` or Fast,
+ * and context suffixes are native to their harness — so they are stored per
+ * model and never coerced onto a model that cannot express them.
  *
  * @since 0.8.0
  */
@@ -20,12 +20,31 @@ const session_defaults_maximum_models = 512;
 /** Selects the thread's own current model as its compaction summarizer. */
 export const inherited_compaction_model = "inherited";
 
-/** Records the controls one model was last configured with. */
+/** Stable public ids for the curated agent-name banks bundled by the data module. */
+export const AgentNameDatasetIds = ["norwegian", "playful"] as const;
+export type AgentNameDatasetId = (typeof AgentNameDatasetIds)[number];
+export const DefaultAgentNameDatasetId: AgentNameDatasetId = "norwegian";
+export const AgentNameDatasets = [
+	{ description: "Norwegian feminine given names.", id: "norwegian", label: "Norwegian" },
+	{ description: "The familiar playful Artisan names.", id: "playful", label: "Playful" },
+] as const;
+
+export const AgentNameDataset = Schema.Literals(AgentNameDatasetIds).pipe(
+	Schema.withDecodingDefault(Effect.succeed(DefaultAgentNameDatasetId)),
+);
+
+export type AgentNameDataset = typeof AgentNameDataset.Type;
+
+/** Records the controls one catalog model was last configured with. */
 export const SessionModelDefaults = Schema.Struct({
 	/** The native context-window suffix, absent for the model's base window. */
 	context_window: Schema.optional(Schema.NonEmptyString),
 	model_id: Schema.NonEmptyString,
-	reasoning_effort: Schema.optional(Schema.Literals(["low", "medium", "high", "xhigh", "max"])),
+	reasoning_effort: Schema.optional(
+		Schema.Literals(["low", "medium", "high", "xhigh", "max", "ultra"]),
+	),
+	/** The provider-native speed tier, absent when the model uses its catalog default. */
+	service_tier: Schema.optional(Schema.NonEmptyString),
 });
 
 export type SessionModelDefaults = typeof SessionModelDefaults.Type;
@@ -38,14 +57,17 @@ export const SessionModelDefaultsUpdate = Schema.Struct({
 	context_window: Schema.optional(Schema.NullOr(Schema.NonEmptyString)),
 	model_id: Schema.NonEmptyString,
 	reasoning_effort: Schema.optional(
-		Schema.NullOr(Schema.Literals(["low", "medium", "high", "xhigh", "max"])),
+		Schema.NullOr(Schema.Literals(["low", "medium", "high", "xhigh", "max", "ultra"])),
 	),
+	/** `null` restores the selected model's catalog speed tier. */
+	service_tier: Schema.optional(Schema.NullOr(Schema.NonEmptyString)),
 });
 
 export type SessionModelDefaultsUpdate = typeof SessionModelDefaultsUpdate.Type;
 
 /** Projects every default a draft reads when it opens. */
 export const SessionDefaults = Schema.Struct({
+	agent_name_dataset: Schema.optional(AgentNameDataset),
 	/**
 	 * How handoff compaction picks its summarizer. Absent means Curated: each
 	 * harness's cost-effective catalog default. `"inherited"` summarizes with
@@ -61,7 +83,7 @@ export const SessionDefaults = Schema.Struct({
 	 * arrives enabled instead of silently missing.
 	 */
 	disabled_engines: Schema.optional(Schema.Array(Identifier).check(Schema.isMaxLength(32))),
-	/** The model most recently chosen in any composer. */
+	/** The exact catalog model id most recently chosen, including its harness identity. */
 	last_model_id: Schema.optional(Schema.NonEmptyString),
 	models: Schema.Array(SessionModelDefaults).check(
 		Schema.isMaxLength(session_defaults_maximum_models),
@@ -80,6 +102,7 @@ export type SessionDefaults = typeof SessionDefaults.Type;
  * @since 0.8.0
  */
 export const SessionDefaultsUpdateInput = Schema.Struct({
+	agent_name_dataset: Schema.optional(AgentNameDataset),
 	/** `null` restores Curated: each harness's cost-effective catalog default. */
 	compaction_model: Schema.optional(Schema.NullOr(Schema.NonEmptyString)),
 	/** Switches one engine's availability without restating the others. */

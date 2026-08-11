@@ -8,11 +8,19 @@ export const ProviderId = Schema.NonEmptyString;
 export type ProviderId = typeof ProviderId.Type;
 
 /** Artisan's ordered presentation vocabulary. Adapters retain their native value separately. */
-export const ThinkingLevel = Schema.Literals(["light", "medium", "high", "xhigh", "max"]);
+export const ThinkingLevel = Schema.Literals(["light", "medium", "high", "xhigh", "max", "ultra"]);
 export type ThinkingLevel = typeof ThinkingLevel.Type;
 
-export const ThinkingEconomics = Schema.Literals(["standard", "diminishing-returns"]);
+export const ThinkingEconomics = Schema.Literals([
+	"standard",
+	"diminishing-returns",
+	"harness-orchestration",
+]);
 export type ThinkingEconomics = typeof ThinkingEconomics.Type;
+
+/** Presentation separates everyday model reasoning from intentionally costly special modes. */
+export const ThinkingPresentationGroup = Schema.Literals(["base", "special"]);
+export type ThinkingPresentationGroup = typeof ThinkingPresentationGroup.Type;
 
 export const thinking_level_order = Schema.decodeUnknownSync(Schema.Array(ThinkingLevel))([
 	"light",
@@ -20,14 +28,18 @@ export const thinking_level_order = Schema.decodeUnknownSync(Schema.Array(Thinki
 	"high",
 	"xhigh",
 	"max",
+	"ultra",
 ]);
 
 const thinking_rank = new Map(thinking_level_order.map((level, index) => [level, index]));
 
 export const ThinkingOption = Schema.Struct({
+	/** Optional picker caveat for modes whose behavior is not implied by rank. */
+	description: Schema.optional(Schema.NonEmptyString),
 	economics: ThinkingEconomics,
 	id: ThinkingLevel,
 	native_value: Schema.NonEmptyString,
+	presentation_group: ThinkingPresentationGroup,
 });
 export type ThinkingOption = typeof ThinkingOption.Type;
 

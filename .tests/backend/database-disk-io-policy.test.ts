@@ -29,6 +29,9 @@ describe("database disk I/O policy", () => {
 				const [cache_size] = yield* database.client.all<{ cache_size: number }>(
 					"PRAGMA cache_size",
 				);
+				const [auto_vacuum] = yield* database.client.all<{ auto_vacuum: number }>(
+					"PRAGMA auto_vacuum",
+				);
 				const [journal_size_limit] = yield* database.client.all<{
 					journal_size_limit: number;
 				}>("PRAGMA journal_size_limit");
@@ -43,6 +46,7 @@ describe("database disk I/O policy", () => {
 				}>("PRAGMA wal_autocheckpoint");
 
 				return {
+					auto_vacuum: auto_vacuum?.auto_vacuum,
 					cache_size: cache_size?.cache_size,
 					journal_size_limit: journal_size_limit?.journal_size_limit,
 					synchronous: synchronous?.synchronous,
@@ -61,6 +65,7 @@ describe("database disk I/O policy", () => {
 		);
 
 		expect(policy).toEqual({
+			auto_vacuum: 2,
 			cache_size: -DatabaseDiskIoPolicy.cache_size_kib,
 			journal_size_limit: DatabaseDiskIoPolicy.journal_size_limit_bytes,
 			synchronous: 1,

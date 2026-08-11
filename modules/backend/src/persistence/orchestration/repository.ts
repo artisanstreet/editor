@@ -13,7 +13,8 @@ import {
 import { Database } from "../database";
 import { AppendJournalEventInTransaction } from "../journal-store";
 import { make_observation_recording } from "./observation-recording";
-import { make_outbox_operations } from "./outbox";
+import { make_outbox_operations, ReadAuthoritativeSteeringPayload } from "./outbox";
+import { ImageAttachmentsFor } from "./message-attachments";
 import {
 	OrchestrationCommandConflict,
 	OrchestrationFailure,
@@ -448,6 +449,21 @@ export const OrchestrationRepositoryLive = Layer.effect(
 						) {
 							return [];
 						}
+						const [outbox] = yield* transaction
+							.select({ payload_json: OrchestrationOutbox.payload_json })
+							.from(OrchestrationOutbox)
+							.where(eq(OrchestrationOutbox.command_id, command_id))
+							.limit(1);
+						if (!outbox) {
+							return yield* new OrchestrationFailure({
+								cause: new Error(`Missing steering outbox ${command_id}`),
+							});
+						}
+						const { payload, raw_origin } = yield* ReadAuthoritativeSteeringPayload(
+							transaction,
+							command_id,
+							outbox.payload_json,
+						);
 
 						const [coordinator] = yield* transaction
 							.select()
@@ -480,7 +496,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 							status: "queued",
 							thread_id: message.thread_id,
 							updated_at,
-							working_directory: prior_run.working_directory,
+							working_directory: payload.working_directory,
 						});
 						yield* transaction
 							.update(OrchestrationMessages)
@@ -502,11 +518,21 @@ export const OrchestrationRepositoryLive = Layer.effect(
 								correlation_id: command_id,
 								payload: {
 									message_id: message.message_id,
+									...(payload.attachments === undefined
+										? {}
+										: { attachments: ImageAttachmentsFor(payload) }),
+									...(payload.content === undefined
+										? {}
+										: { content: payload.content }),
+									...(payload.mentioned_projects === undefined
+										? {}
+										: { mentioned_projects: payload.mentioned_projects }),
 									reason,
-									text: message.text,
+									text: payload.text,
 									type: "thread.message_queued",
-									working_directory: prior_run.working_directory,
+									working_directory: payload.working_directory,
 								},
+								...(raw_origin === undefined ? {} : { raw_origin }),
 								run_id,
 								thread_id: message.thread_id,
 							}),
@@ -531,7 +557,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 								payload: {
 									state: "queued",
 									type: "run.lifecycle",
-									working_directory: prior_run.working_directory,
+									working_directory: payload.working_directory,
 								},
 								run_id,
 								thread_id: message.thread_id,
@@ -613,18 +639,36 @@ export const OrchestrationRepositoryLive = Layer.effect(
 						}
 
 						const stranded = yield* transaction
-							.select({ run_id: OrchestrationOutbox.run_id })
+							.select({
+								command_id: OrchestrationOutbox.command_id,
+								kind: OrchestrationOutbox.kind,
+								run_id: OrchestrationOutbox.run_id,
+							})
 							.from(OrchestrationOutbox)
 							.where(eq(OrchestrationOutbox.status, "dispatching"));
 
-						if (stranded.length > 0) {
+						const stranded_steers = stranded.filter(
+							(outbox) => outbox.kind === "steer",
+						);
+						const stranded_non_steers = stranded.filter(
+							(outbox) => outbox.kind !== "steer",
+						);
+						if (stranded_non_steers.length > 0) {
 							yield* transaction
 								.update(OrchestrationOutbox)
 								.set({ status: "undeliverable", updated_at })
-								.where(eq(OrchestrationOutbox.status, "dispatching"));
+								.where(
+									inArray(
+										OrchestrationOutbox.command_id,
+										stranded_non_steers.map((outbox) => outbox.command_id),
+									),
+								);
 						}
 
 						const stranded_run_ids = stranded.map((outbox) => outbox.run_id);
+						const stranded_steer_run_ids = new Set(
+							stranded_steers.map((outbox) => outbox.run_id),
+						);
 						const live_runs = yield* transaction
 							.select()
 							.from(OrchestrationRuns)
@@ -664,6 +708,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 									thread_id: run.thread_id,
 								}),
 							);
+							if (stranded_steer_run_ids.has(run.run_id)) continue;
 
 							if (
 								!is_active_status(run.status) ||
@@ -695,13 +740,22 @@ export const OrchestrationRepositoryLive = Layer.effect(
 							}
 						}
 
-						return { events, recoverable };
+						return {
+							events,
+							recoverable,
+							stranded_steer_command_ids: stranded_steers.map(
+								(outbox) => outbox.command_id,
+							),
+						};
 					}),
 				);
 
 				const latest_event = recovery.events.at(-1);
 				if (latest_event !== undefined)
 					yield* notifier.Publish(latest_event.journal_sequence);
+				yield* Effect.forEach(recovery.stranded_steer_command_ids, (command_id) =>
+					FallbackSteering(command_id, "delivery_failed"),
+				);
 
 				return recovery.recoverable;
 			}).pipe(Effect.mapError(normalize_error));

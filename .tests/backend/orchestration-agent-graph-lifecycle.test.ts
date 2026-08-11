@@ -501,19 +501,7 @@ describe("multi-agent graph lifecycle", () => {
 			);
 
 			expect(ingestion).toEqual({ duplicate_ingestion: [], first_ingestion: [] });
-			expect(persisted_late).toEqual([
-				expect.objectContaining({
-					engine_id: "controlled",
-					frame_json: '{"kind":"late","state":"completed"}',
-					native_id: "native-late-99",
-					native_method: "thread.completed",
-					protocol_version: "2.1",
-					raw_frame_base64: "AQIDBA==",
-					run_id: old_run.run_id,
-					sequence: 99,
-					transport: "stdio-jsonl",
-				}),
-			]);
+			expect(persisted_late).toEqual([]);
 			expect(
 				after_late.assignments.find(
 					({ assignment_id }) => assignment_id === "assignment_a",

@@ -1,4 +1,4 @@
-import type { ConversationLifecycle } from "./conversation";
+import type { ConversationActivitySubagent, ConversationLifecycle } from "./conversation";
 
 export interface ConversationActivityPresentationInput {
 	readonly kind: string;
@@ -7,6 +7,18 @@ export interface ConversationActivityPresentationInput {
 }
 
 export interface ConversationActivityPresentation {
+	readonly label: string;
+}
+
+/** The subset of an activity row needed to describe one grouped trace clause. */
+export interface ConversationActivityGroupMember {
+	readonly kind: string;
+	readonly subagent?: ConversationActivitySubagent;
+}
+
+export interface ConversationActivityGroupPresentation {
+	readonly count: number;
+	/** Lowercase clause; the renderer capitalizes only the first clause in a chain. */
 	readonly label: string;
 }
 
@@ -181,9 +193,9 @@ const activity_copy: Record<ConversationActivityCategory, ActivityCopy> = {
 		failed: "Work failed",
 	},
 	subagent: {
-		active: "Working with a subagent",
-		completed: "Worked with a subagent",
-		counted: (count) => `worked with ${plural(count, "a subagent", "subagents")}`,
+		active: "Talking to a subagent",
+		completed: "Talked to a subagent",
+		counted: (count) => `talked to ${plural(count, "a subagent", "subagents")}`,
 		failed: "Subagent work failed",
 	},
 	test: {
@@ -217,6 +229,47 @@ export const GetConversationActivityCountLabel = (
 	category: ConversationActivityCategory,
 	count: number,
 ): string => activity_copy[category].counted(count);
+
+/**
+ * Describes one category inside an adjacent activity chain.
+ *
+ * Subagents are counted by durable Artisan identity rather than lifecycle rows.
+ * That keeps discovered → running → waiting → complete updates as one person,
+ * and lets the singular clause use the user-facing name without exposing a
+ * provider thread id.
+ */
+export const GetConversationActivityGroupPresentation = (
+	category: ConversationActivityCategory,
+	activities: ReadonlyArray<ConversationActivityGroupMember>,
+): ConversationActivityGroupPresentation => {
+	if (category !== "subagent") {
+		return {
+			count: activities.length,
+			label: GetConversationActivityCountLabel(category, activities.length),
+		};
+	}
+
+	const named_agents = new Map<string, string>();
+	let anonymous_count = 0;
+	for (const activity of activities) {
+		if (activity.subagent === undefined) {
+			anonymous_count += 1;
+			continue;
+		}
+		named_agents.set(activity.subagent.agent_id, activity.subagent.display_name);
+	}
+	const count = named_agents.size + anonymous_count;
+	const only_name =
+		count === 1 && anonymous_count === 0 ? named_agents.values().next().value : undefined;
+
+	return {
+		count,
+		label:
+			only_name === undefined
+				? GetConversationActivityCountLabel(category, count)
+				: `talked to ${only_name}`,
+	};
+};
 
 /**
  * Maps provider-neutral activity semantics to stable human copy.

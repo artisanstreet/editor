@@ -1,5 +1,5 @@
 import { asc, eq } from "drizzle-orm";
-import { Context, Effect, Layer } from "effect";
+import { Context, Effect, Layer, Schema } from "effect";
 
 import type {
 	CommandEnvelope,
@@ -7,6 +7,7 @@ import type {
 	SessionDefaults as SessionDefaultsSnapshot,
 	SessionDefaultsUpdatedEvent,
 } from "@artisan/protocol";
+import { AgentNameDataset, DefaultAgentNameDatasetId } from "@artisan/protocol";
 
 import { settings_scope_id, settings_stream_id } from "./internal-scope";
 
@@ -100,13 +101,15 @@ function normalize_error(error: unknown): JournalStoreError {
 	return new JournalStoreFailure({ cause: error });
 }
 
-const ReasoningEfforts = new Set(["low", "medium", "high", "xhigh", "max"]);
+const ReasoningEfforts = new Set(["low", "medium", "high", "xhigh", "max", "ultra"]);
+const is_service_tier = Schema.is(Schema.NonEmptyString);
 
-/** Rows are decoded defensively: an effort retired from the catalog is dropped. */
+/** Rows are decoded defensively: retired or malformed controls are dropped. */
 const ModelRow = (row: {
 	readonly context_window: string | null;
 	readonly model_id: string;
 	readonly reasoning_effort: string | null;
+	readonly service_tier: string | null;
 }) => ({
 	...(row.context_window === null ? {} : { context_window: row.context_window }),
 	model_id: row.model_id,
@@ -116,6 +119,9 @@ const ModelRow = (row: {
 				reasoning_effort:
 					row.reasoning_effort as SessionDefaultsSnapshot["models"][number]["reasoning_effort"],
 			}),
+	...(row.service_tier === null || !is_service_tier(row.service_tier)
+		? {}
+		: { service_tier: row.service_tier }),
 });
 
 export const SessionDefaultsServiceLive = Layer.effect(
@@ -130,6 +136,7 @@ export const SessionDefaultsServiceLive = Layer.effect(
 			Effect.gen(function* () {
 				const [shared] = yield* client
 					.select({
+						agent_name_dataset: SessionDefaults.agent_name_dataset,
 						compaction_model_id: SessionDefaults.compaction_model_id,
 						last_model_id: SessionDefaults.last_model_id,
 						permission: SessionDefaults.permission,
@@ -142,6 +149,7 @@ export const SessionDefaultsServiceLive = Layer.effect(
 						context_window: SessionModelDefaults.context_window,
 						model_id: SessionModelDefaults.model_id,
 						reasoning_effort: SessionModelDefaults.reasoning_effort,
+						service_tier: SessionModelDefaults.service_tier,
 					})
 					.from(SessionModelDefaults)
 					.orderBy(asc(SessionModelDefaults.model_id));
@@ -151,6 +159,9 @@ export const SessionDefaultsServiceLive = Layer.effect(
 					.orderBy(asc(DisabledEngines.engine_id));
 
 				return {
+					agent_name_dataset: yield* Schema.decodeUnknownEffect(AgentNameDataset)(
+						shared?.agent_name_dataset ?? DefaultAgentNameDatasetId,
+					),
 					...(disabled.length > 0
 						? { disabled_engines: disabled.map((row) => row.engine_id) }
 						: {}),
@@ -220,12 +231,14 @@ export const SessionDefaultsServiceLive = Layer.effect(
 						 * control cannot overwrite another client's change to the rest.
 						 */
 						if (
+							payload.agent_name_dataset !== undefined ||
 							payload.permission !== undefined ||
 							payload.last_model_id !== undefined ||
 							payload.compaction_model !== undefined
 						) {
 							const [current] = yield* transaction
 								.select({
+									agent_name_dataset: SessionDefaults.agent_name_dataset,
 									compaction_model_id: SessionDefaults.compaction_model_id,
 									last_model_id: SessionDefaults.last_model_id,
 									permission: SessionDefaults.permission,
@@ -239,6 +252,10 @@ export const SessionDefaultsServiceLive = Layer.effect(
 									? (current?.compaction_model_id ?? null)
 									: payload.compaction_model;
 							const shared = {
+								agent_name_dataset:
+									payload.agent_name_dataset ??
+									current?.agent_name_dataset ??
+									DefaultAgentNameDatasetId,
 								compaction_model_id,
 								last_model_id:
 									payload.last_model_id ?? current?.last_model_id ?? null,
@@ -283,6 +300,7 @@ export const SessionDefaultsServiceLive = Layer.effect(
 								.select({
 									context_window: SessionModelDefaults.context_window,
 									reasoning_effort: SessionModelDefaults.reasoning_effort,
+									service_tier: SessionModelDefaults.service_tier,
 								})
 								.from(SessionModelDefaults)
 								.where(eq(SessionModelDefaults.model_id, model.model_id))
@@ -296,18 +314,24 @@ export const SessionDefaultsServiceLive = Layer.effect(
 								model.reasoning_effort === undefined
 									? (current?.reasoning_effort ?? null)
 									: model.reasoning_effort;
+							const service_tier =
+								model.service_tier === undefined
+									? (current?.service_tier ?? null)
+									: model.service_tier;
 							yield* transaction
 								.insert(SessionModelDefaults)
 								.values({
 									context_window,
 									model_id: model.model_id,
 									reasoning_effort,
+									service_tier,
 									updated_at: accepted_at,
 								})
 								.onConflictDoUpdate({
 									set: {
 										context_window,
 										reasoning_effort,
+										service_tier,
 										updated_at: accepted_at,
 									},
 									target: SessionModelDefaults.model_id,

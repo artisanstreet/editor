@@ -57,6 +57,22 @@ describe("runtime catalog session policy validation", () => {
 		}).pipe(Effect.provide(catalog_layer)),
 	);
 
+	it.effect("accepts only the special efforts declared by the selected model", () =>
+		Effect.gen(function* () {
+			const catalog = yield* RuntimeCatalogService;
+			yield* catalog.ValidateThreadSessionPolicy(
+				policy_for("codex", { reasoning_effort: "ultra" }),
+			);
+			yield* catalog.ValidateThreadSessionPolicy(
+				policy_for("claude", { reasoning_effort: "max" }),
+			);
+			const unsupported = yield* catalog
+				.ValidateThreadSessionPolicy(policy_for("claude", { reasoning_effort: "ultra" }))
+				.pipe(Effect.flip);
+			expect(unsupported.field).toBe("reasoning_effort");
+		}).pipe(Effect.provide(catalog_layer)),
+	);
+
 	it.effect("matches permissions by the harness-neutral option id, not Codex vocabulary", () =>
 		Effect.gen(function* () {
 			const catalog = yield* RuntimeCatalogService;

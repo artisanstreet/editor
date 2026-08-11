@@ -128,6 +128,9 @@ importers:
       '@artisan/catalog':
         specifier: workspace:*
         version: link:../catalog
+      '@artisan/data':
+        specifier: workspace:*
+        version: link:../data
       '@artisan/engines':
         specifier: workspace:*
         version: link:../engines
@@ -236,9 +239,6 @@ importers:
 
   modules/engines:
     dependencies:
-      '@artisan/catalog':
-        specifier: workspace:*
-        version: link:../catalog
       '@effect/platform-node-shared':
         specifier: 4.0.0-beta.97
         version: 4.0.0-beta.97(effect@4.0.0-beta.97)

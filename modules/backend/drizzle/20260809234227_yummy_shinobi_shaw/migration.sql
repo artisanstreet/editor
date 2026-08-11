@@ -1,0 +1,1 @@
+ALTER TABLE `threads` ADD `last_assistant_message` text;

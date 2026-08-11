@@ -1,14 +1,8 @@
-import { and, eq, sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { Effect } from "effect";
 import type { EngineObservation } from "@artisan/engines";
 import { Database } from "../database";
-import {
-	OrchestrationRawObservations,
-	OrchestrationRuns,
-	ThreadErasureClaims,
-	ThreadTombstones,
-	Threads,
-} from "../tables";
+import { OrchestrationRuns, ThreadErasureClaims, ThreadTombstones, Threads } from "../tables";
 import { ThreadRunContinuationState } from "../thread-continuation-schema";
 import { RuntimeMetadata } from "../../runtime/metadata";
 import { ThreadContinuationFailure } from "./contracts";
@@ -48,35 +42,6 @@ export const MakeObservationOperations = Effect.gen(function* () {
 		updated_at: string,
 	) =>
 		Effect.gen(function* () {
-			const [raw] = yield* transaction
-				.select()
-				.from(OrchestrationRawObservations)
-				.where(
-					and(
-						eq(OrchestrationRawObservations.observation_id, observation.observation_id),
-						eq(OrchestrationRawObservations.run_id, observation.artisan_run_id),
-						eq(OrchestrationRawObservations.sequence, observation.sequence),
-					),
-				)
-				.limit(1);
-			if (!raw) return yield* Effect.fail(Fail("raw_observation_missing"));
-			const sequence_owners = yield* transaction
-				.select({
-					observation_id: OrchestrationRawObservations.observation_id,
-				})
-				.from(OrchestrationRawObservations)
-				.where(
-					and(
-						eq(OrchestrationRawObservations.run_id, observation.artisan_run_id),
-						eq(OrchestrationRawObservations.sequence, observation.sequence),
-					),
-				)
-				.limit(2);
-			if (
-				sequence_owners.length !== 1 ||
-				sequence_owners[0]?.observation_id !== observation.observation_id
-			)
-				return yield* Effect.fail(Fail("observation_sequence_conflict"));
 			if (observation._tag === "compaction" && observation.summary !== undefined)
 				return yield* Effect.fail(Fail("public_compaction_summary_rejected"));
 			const completed_turn =

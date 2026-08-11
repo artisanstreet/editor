@@ -54,7 +54,10 @@ export function thread_activity_kind_from_event(
 				: undefined;
 	}
 
-	if (payload.type === "orchestration.graph.lifecycle" && payload.node_type === "agent_run") {
+	if (
+		payload.type === "orchestration.graph.lifecycle" &&
+		(payload.node_type === "agent_run" || payload.node_type === "orchestration_group")
+	) {
 		if (payload.state === "failed") {
 			return "run_failed";
 		}
@@ -66,6 +69,15 @@ export function thread_activity_kind_from_event(
 
 	return undefined;
 }
+
+/**
+ * Activity can be retention-relevant without being exposed in the root
+ * transcript. Native worker lifecycle is the one such case: it keeps the
+ * thread recent, while only the aggregate group lifecycle is root-visible.
+ */
+export const thread_activity_is_reader_visible = (payload: EventPayload): boolean =>
+	thread_activity_kind_from_event(payload) !== undefined &&
+	!(payload.type === "orchestration.graph.lifecycle" && payload.node_type === "agent_run");
 
 /** Advances a thread's retention cursor inside the event append transaction. */
 export const RecordThreadActivity = (
@@ -103,6 +115,11 @@ export const RecordThreadActivity = (
 			.set({
 				activity_version: sql`${Threads.activity_version} + 1`,
 				last_activity_at: sql`max(${Threads.last_activity_at}, ${occurred_at})`,
+				...(thread_activity_is_reader_visible(payload)
+					? {
+							reader_activity_at: sql`max(${Threads.reader_activity_at}, ${occurred_at})`,
+						}
+					: {}),
 				...(updates_title
 					? {
 							metadata_version: sql`${Threads.metadata_version} + 1`,

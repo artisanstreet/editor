@@ -2,7 +2,11 @@ import type { ConversationItem } from "@artisan/protocol";
 
 export type ConversationActivityItem = Extract<ConversationItem, { type: "activity" }>;
 export type ConversationDiagnosticItem = Extract<ConversationItem, { type: "native_event" }>;
-export type ConversationDiagnosticSeverity = ConversationDiagnosticItem["severity"];
+export type ConversationReasoningItem = Extract<ConversationItem, { type: "reasoning_summary" }>;
+export type ConversationDiagnosticSeverity = Exclude<
+	ConversationDiagnosticItem["severity"],
+	undefined
+>;
 
 /** Loudest first, so a reader meets what went wrong before what merely happened. */
 export const conversation_diagnostic_severities: ReadonlyArray<ConversationDiagnosticSeverity> = [
@@ -25,9 +29,41 @@ export type ConversationTraceSegment =
 	  }
 	| {
 			readonly id: string;
+			readonly items: ReadonlyArray<ConversationReasoningItem>;
+			readonly type: "reasoning_group";
+	  }
+	| {
+			readonly id: string;
 			readonly item: ConversationItem;
 			readonly type: "item";
 	  };
+
+export type ConversationTraceRenderSegment = ConversationTraceSegment & {
+	/** Present reasoning closes in place before its last DOM is retired. */
+	readonly retirement: "present" | "retiring";
+};
+
+/**
+ * Activity groups are assembled privately before becoming readonly trace
+ * segments. Keeping their array mutable during one projection avoids copying
+ * the entire chain for every streamed activity update.
+ */
+type ConversationTraceActivityGroupBuilder = {
+	readonly id: string;
+	readonly items: Array<ConversationActivityItem>;
+	readonly type: "activity_group";
+};
+
+type ConversationTraceReasoningGroupBuilder = {
+	readonly id: string;
+	readonly items: Array<ConversationReasoningItem>;
+	readonly type: "reasoning_group";
+};
+
+type ConversationTraceSegmentBuilder =
+	| ConversationTraceActivityGroupBuilder
+	| ConversationTraceReasoningGroupBuilder
+	| Exclude<ConversationTraceSegment, { readonly type: "activity_group" | "reasoning_group" }>;
 
 /**
  * Which reasoning summaries the trace shows.
@@ -84,37 +120,31 @@ export const make_conversation_trace_segments = (
 	work_active = false,
 ): ReadonlyArray<ConversationTraceSegment> => {
 	const diagnostics_visible = diagnostics_enabled || failure_visible;
-	const diagnostics = items.filter(
-		(item): item is ConversationDiagnosticItem => item.type === "native_event",
-	);
-	const concrete_items = items.filter(
-		(item) =>
-			item.type !== "reasoning_summary" &&
-			item.type !== "native_event" &&
-			!item_renders_nothing(item),
-	);
-	/**
-	 * Reasoning stays visible alongside the concrete work of its own run, so
-	 * streamed thinking never vanishes mid-run; a settled run retires it.
-	 */
-	const visible_item_ids = new Set(
-		[
-			...concrete_items,
-			...items.filter(
-				(item) => reasoning_is_visible(item, work_active) && !item_renders_nothing(item),
-			),
-		].map((item) => item.id),
-	);
-	const segments: Array<ConversationTraceSegment> = [];
+	const diagnostics_by_severity = diagnostics_visible
+		? {
+				error: [] as Array<ConversationDiagnosticItem>,
+				info: [] as Array<ConversationDiagnosticItem>,
+				warning: [] as Array<ConversationDiagnosticItem>,
+			}
+		: undefined;
+
+	/** Do not retain or classify hidden native diagnostics at all. */
+	if (diagnostics_by_severity !== undefined) {
+		for (const item of items) {
+			if (item.type === "native_event" && item.severity !== undefined) {
+				diagnostics_by_severity[item.severity].push(item);
+			}
+		}
+	}
+
+	const segments: Array<ConversationTraceSegmentBuilder> = [];
 	let diagnostics_inserted = false;
 
 	for (const item of items) {
 		if (item.type === "native_event") {
 			if (diagnostics_visible && !diagnostics_inserted) {
 				for (const severity of conversation_diagnostic_severities) {
-					const grouped = diagnostics.filter(
-						(diagnostic) => diagnostic.severity === severity,
-					);
+					const grouped = diagnostics_by_severity?.[severity] ?? [];
 					if (grouped.length === 0) continue;
 					segments.push({
 						id: `diagnostics:${severity}`,
@@ -127,7 +157,25 @@ export const make_conversation_trace_segments = (
 			}
 			continue;
 		}
-		if (!visible_item_ids.has(item.id)) continue;
+		if (
+			item_renders_nothing(item) ||
+			(item.type === "reasoning_summary" && !reasoning_is_visible(item, work_active))
+		) {
+			continue;
+		}
+		if (item.type === "reasoning_summary") {
+			const previous = segments.at(-1);
+			if (previous?.type === "reasoning_group") {
+				previous.items.push(item);
+				continue;
+			}
+			segments.push({
+				id: `reasoning:${item.id}`,
+				items: [item],
+				type: "reasoning_group",
+			});
+			continue;
+		}
 		if (item.type !== "activity") {
 			segments.push({ id: item.id, item, type: "item" });
 			continue;
@@ -135,10 +183,7 @@ export const make_conversation_trace_segments = (
 
 		const previous = segments.at(-1);
 		if (previous?.type === "activity_group") {
-			segments[segments.length - 1] = {
-				...previous,
-				items: [...previous.items, item],
-			};
+			previous.items.push(item);
 			continue;
 		}
 
@@ -150,4 +195,41 @@ export const make_conversation_trace_segments = (
 	}
 
 	return segments;
+};
+
+/**
+ * Reconciles the durable trace projection with its short visual exit state.
+ *
+ * Reasoning normally disappears from the projection the instant its owning run
+ * settles. An open summary gets one extra render as `retiring`, preserving its
+ * prior position while the accordion closes; the transition-end handler then
+ * removes it. A summary the reader already closed needs no exit frame.
+ */
+export const reconcile_conversation_trace_render_segments = (
+	previous: ReadonlyArray<ConversationTraceRenderSegment>,
+	projected: ReadonlyArray<ConversationTraceSegment>,
+	closed_reasoning_ids: ReadonlySet<string>,
+): ReadonlyArray<ConversationTraceRenderSegment> => {
+	const projected_ids = new Set(projected.map((segment) => segment.id));
+	const reconciled: Array<ConversationTraceRenderSegment> = projected.map((segment) => ({
+		...segment,
+		retirement: "present" as const,
+	}));
+
+	for (const [index, segment] of previous.entries()) {
+		if (
+			projected_ids.has(segment.id) ||
+			segment.type !== "reasoning_group" ||
+			(segment.retirement === "present" && closed_reasoning_ids.has(segment.id))
+		) {
+			continue;
+		}
+
+		reconciled.splice(Math.min(index, reconciled.length), 0, {
+			...segment,
+			retirement: "retiring",
+		});
+	}
+
+	return reconciled;
 };

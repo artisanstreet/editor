@@ -15,8 +15,9 @@ describe("model catalog", () => {
 		expect(Schema.decodeUnknownSync(ModelManifest)(model_manifest)).toEqual(model_manifest);
 	});
 
-	it("uses xhigh as the canonical ID and Extra High as its label", () => {
+	it("uses xhigh and ultra as canonical IDs with product labels", () => {
 		expect(thinking_level_labels.xhigh).toBe("Extra High");
+		expect(thinking_level_labels.ultra).toBe("Ultra");
 		expect("extra-high" in thinking_level_labels).toBe(false);
 	});
 
@@ -31,24 +32,99 @@ describe("model catalog", () => {
 		}
 	});
 
-	it("keeps max exceptional and limited to documented Claude models", () => {
-		const models_with_max = model_manifest.models
-			.filter(
-				(model) =>
-					model.capabilities.thinking.availability === "supported" &&
-					model.capabilities.thinking.options.some((option) => option.id === "max"),
-			)
-			.map((model) => model.id);
+	it("groups base and special effort options in the catalog", () => {
+		for (const model of model_manifest.models) {
+			if (model.capabilities.thinking.availability !== "supported") {
+				continue;
+			}
+			for (const option of model.capabilities.thinking.options) {
+				expect(option.presentation_group).toBe(
+					option.id === "max" || option.id === "ultra" ? "special" : "base",
+				);
+			}
+		}
+	});
 
-		expect(models_with_max).toEqual([
-			"claude-fable",
-			"claude-opus",
-			"claude-sonnet",
-			"cursor-claude-fable-5",
-			"cursor-claude-opus-5",
-			"cursor-claude-sonnet-5",
-			"cursor-kimi-k3",
-			"cursor-glm-5-2",
+	it("exposes Max and Ultra for direct GPT 5.6 Codex models only", () => {
+		type PresentedModelOptions = [string, Array<[string, string]>];
+		const special_options = (
+			harness: "codex" | "claude" | "grok" | "cursor",
+		): Array<PresentedModelOptions> =>
+			model_manifest.models.flatMap((model): Array<PresentedModelOptions> => {
+				const thinking = model.capabilities.thinking;
+				if (model.harness !== harness || thinking.availability !== "supported") {
+					return [];
+				}
+				return [
+					[
+						model.id,
+						thinking.options
+							.filter((option) => option.presentation_group === "special")
+							.map((option): [string, string] => [option.id, option.native_value]),
+					],
+				];
+			});
+
+		expect(special_options("codex")).toEqual([
+			[
+				"codex-sol",
+				[
+					["max", "max"],
+					["ultra", "ultra"],
+				],
+			],
+			[
+				"codex-terra",
+				[
+					["max", "max"],
+					["ultra", "ultra"],
+				],
+			],
+			[
+				"codex-luna",
+				[
+					["max", "max"],
+					["ultra", "ultra"],
+				],
+			],
+			["codex-gpt-5-5", []],
+			["codex-gpt-5-4", []],
+			["codex-gpt-5-4-mini", []],
+			["codex-spark", []],
+		]);
+		expect(special_options("claude")).toEqual([
+			["claude-fable", [["max", "max"]]],
+			["claude-opus", [["max", "max"]]],
+			["claude-sonnet", [["max", "max"]]],
+		]);
+		expect(special_options("grok")).toEqual([["grok-4-5", []]]);
+		expect(special_options("cursor").filter(([, options]) => options.length > 0)).toEqual([
+			["cursor-claude-fable-5", [["max", "max"]]],
+			["cursor-claude-opus-5", [["max", "max"]]],
+			["cursor-claude-sonnet-5", [["max", "max"]]],
+			["cursor-kimi-k3", [["max", "max"]]],
+			["cursor-glm-5-2", [["max", "max"]]],
+		]);
+		expect(
+			special_options("cursor").find(([model_id]) => model_id === "cursor-gpt-5-6-sol"),
+		).toEqual(["cursor-gpt-5-6-sol", []]);
+
+		const sol_thinking = model_manifest.models.find((model) => model.id === "codex-sol")
+			?.capabilities.thinking;
+		if (sol_thinking?.availability !== "supported") {
+			throw new Error("GPT 5.6 Sol must expose supported thinking options");
+		}
+		expect(
+			sol_thinking.options.filter((option) => option.presentation_group === "special"),
+		).toMatchObject([
+			{ economics: "diminishing-returns", id: "max", presentation_group: "special" },
+			{
+				description:
+					"Ultra lets Codex coordinate multiple subagents in parallel and synthesize their results. It works best when complex work splits cleanly into independent tasks.",
+				economics: "harness-orchestration",
+				id: "ultra",
+				presentation_group: "special",
+			},
 		]);
 	});
 
@@ -107,8 +183,18 @@ describe("model catalog", () => {
 				availability: "supported",
 				default: "max",
 				options: [
-					{ economics: "standard", id: "high", native_value: "high" },
-					{ economics: "standard", id: "light", native_value: "low" },
+					{
+						economics: "standard",
+						id: "high",
+						native_value: "high",
+						presentation_group: "base",
+					},
+					{
+						economics: "standard",
+						id: "light",
+						native_value: "low",
+						presentation_group: "base",
+					},
 				],
 			}),
 		).toThrow();
@@ -119,8 +205,18 @@ describe("model catalog", () => {
 			availability: "supported",
 			default: "high",
 			options: [
-				{ economics: "standard", id: "light", native_value: "low" },
-				{ economics: "standard", id: "high", native_value: "high" },
+				{
+					economics: "standard",
+					id: "light",
+					native_value: "low",
+					presentation_group: "base",
+				},
+				{
+					economics: "standard",
+					id: "high",
+					native_value: "high",
+					presentation_group: "base",
+				},
 			],
 		});
 
@@ -151,8 +247,18 @@ describe("model catalog", () => {
 				availability: "supported",
 				default: "light",
 				options: [
-					{ economics: "standard", id: "light", native_value: "low" },
-					{ economics: "standard", id: "high", native_value: "low" },
+					{
+						economics: "standard",
+						id: "light",
+						native_value: "low",
+						presentation_group: "base",
+					},
+					{
+						economics: "standard",
+						id: "high",
+						native_value: "low",
+						presentation_group: "base",
+					},
 				],
 			}),
 		).toThrow();

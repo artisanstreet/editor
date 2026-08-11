@@ -44,6 +44,7 @@ import {
 	ThreadContentErasedEvent,
 	ThreadCreatedEvent,
 	ThreadErasedEvent,
+	ThreadAttentionAcknowledgedEvent,
 	ThreadMetadataUpdatedEvent,
 	ThreadProjectAffinityIgnoredEvent,
 	ThreadProjectAffinityUpdatedEvent,
@@ -475,6 +476,8 @@ export const AgentRun = Schema.Struct({
 	agent_id: Identifier,
 	attempt: PositiveInt,
 	engine_id: Identifier,
+	/** Whether Artisan dispatched this attempt or adopted provider-native work. */
+	execution_origin: Schema.Literals(["artisan_dispatched", "provider_observed"]),
 	profile: Schema.NonEmptyString,
 	state: OrchestrationLifecycleState,
 	native_thread_id: Schema.optional(Schema.NonEmptyString),
@@ -509,7 +512,7 @@ export const GraphEdge = Schema.Struct({
 	group_id: Identifier,
 	from_node_id: Identifier,
 	to_node_id: Identifier,
-	kind: Schema.Literals(["dependency", "result"]),
+	kind: Schema.Literals(["delegation", "dependency", "result"]),
 });
 
 export type GraphEdge = typeof GraphEdge.Type;
@@ -650,6 +653,7 @@ export const EventPayload = Schema.Union([
 	ThreadCreatedEvent,
 	ThreadContentErasedEvent,
 	ThreadErasedEvent,
+	ThreadAttentionAcknowledgedEvent,
 	ThreadMetadataUpdatedEvent,
 	ThreadRefinementIgnoredEvent,
 	ThreadProjectAffinityUpdatedEvent,

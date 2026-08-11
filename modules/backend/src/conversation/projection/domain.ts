@@ -9,6 +9,8 @@ export class ConversationProjectionError extends Error {
 export interface ConversationObservationContext {
 	readonly agent_id?: string;
 	readonly occurred_at: string;
+	/** Parent renderer turn for observations authored by a delegated worker. */
+	readonly parent_run_id?: string;
 	readonly run_id: string;
 	readonly thread_id: string;
 }
@@ -86,6 +88,7 @@ export const turn_base = (
 	references: [],
 	source_refs: source_refs(reference, { provider: "engine" }),
 	...(input.agent_id === undefined ? {} : { agent_id: input.agent_id }),
+	...(input.parent_run_id === undefined ? {} : { parent_id: `run:${input.parent_run_id}` }),
 	run_id: input.run_id,
 });
 

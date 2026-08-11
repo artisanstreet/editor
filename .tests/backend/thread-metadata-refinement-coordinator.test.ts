@@ -68,6 +68,214 @@ afterEach(async () => {
 });
 
 describe("thread metadata refinement coordinator", () => {
+	it("projects completed assistant prose without replacing lifecycle status", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			thread_metadata_refiner: ThreadMetadataRefinerLive,
+		});
+
+		try {
+			const snapshots = await runtime.runPromise(
+				Effect.gen(function* () {
+					const coordinator = yield* ThreadMetadataRefinementCoordinator;
+					const journal = yield* JournalStore;
+					const router = yield* ProtocolRouter;
+					const threads = yield* ThreadReadModel;
+
+					yield* router.Route(
+						make_command("create_assistant_preview", {
+							title: "Assistant preview",
+							type: "thread.create",
+						}),
+					);
+					yield* append_user_message(journal, "Inspect the repository", "preview");
+					const values = [
+						"The repository is a Svelte/TypeScript app using `svelte-effect-runtime`.",
+						"Complete",
+						"Waiting for answer",
+						"Failed to complete",
+					];
+					const projected = [];
+
+					for (const [index, text] of values.entries()) {
+						yield* journal.AppendEvent({
+							causation_id: `assistant_preview_cause_${index}`,
+							correlation_id: `assistant_preview_correlation_${index}`,
+							payload: {
+								message_id: `assistant_preview_message_${index}`,
+								text,
+								type: "assistant.message_completed",
+							},
+							thread_id: "thread_coordinator",
+						});
+						yield* coordinator.WaitForIdle;
+						projected.push((yield* threads.Snapshot()).threads[0]!);
+					}
+
+					return projected;
+				}),
+			);
+
+			expect(snapshots.map((thread) => thread.last_assistant_message)).toEqual([
+				"The repository is a Svelte/TypeScript app using `svelte-effect-runtime`.",
+				"Complete",
+				"Waiting for answer",
+				"Failed to complete",
+			]);
+			expect(snapshots.every((thread) => thread.live_status === "Working")).toBe(true);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("keeps the assistant preview through terminal and subsequent run transitions", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			thread_metadata_refiner: ThreadMetadataRefinerLive,
+		});
+
+		try {
+			const [completed, restarted] = await runtime.runPromise(
+				Effect.gen(function* () {
+					const coordinator = yield* ThreadMetadataRefinementCoordinator;
+					const journal = yield* JournalStore;
+					const router = yield* ProtocolRouter;
+					const threads = yield* ThreadReadModel;
+
+					yield* router.Route(
+						make_command("create_ordered_preview", {
+							title: "Ordered preview",
+							type: "thread.create",
+						}),
+					);
+					yield* journal.AppendEvent({
+						causation_id: "ordered_assistant_cause",
+						correlation_id: "ordered_assistant_correlation",
+						payload: {
+							message_id: "ordered_assistant_message",
+							text: "The durable preview survives lifecycle changes.",
+							type: "assistant.message_completed",
+						},
+						thread_id: "thread_coordinator",
+					});
+					yield* journal.AppendEvent({
+						causation_id: "ordered_complete_cause",
+						correlation_id: "ordered_complete_correlation",
+						payload: {
+							state: "completed",
+							type: "run.lifecycle",
+							working_directory: "C:/workspace/artisan",
+						},
+						run_id: "run_ordered",
+						thread_id: "thread_coordinator",
+					});
+					yield* coordinator.WaitForIdle;
+					const after_complete = (yield* threads.Snapshot()).threads[0]!;
+
+					yield* journal.AppendEvent({
+						causation_id: "ordered_restart_cause",
+						correlation_id: "ordered_restart_correlation",
+						payload: {
+							state: "running",
+							type: "run.lifecycle",
+							working_directory: "C:/workspace/artisan",
+						},
+						run_id: "run_ordered_restart",
+						thread_id: "thread_coordinator",
+					});
+					yield* coordinator.WaitForIdle;
+
+					return [after_complete, (yield* threads.Snapshot()).threads[0]!] as const;
+				}),
+			);
+
+			expect(completed).toMatchObject({
+				last_assistant_message: "The durable preview survives lifecycle changes.",
+				live_status: "Complete",
+			});
+			expect(restarted).toMatchObject({
+				last_assistant_message: "The durable preview survives lifecycle changes.",
+				live_status: "Working",
+			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("cold-replays assistant prose followed by a terminal lifecycle", async () => {
+		const database_path = await make_database_path();
+		const first_runtime = make_backend_runtime({ database_path, migrations_path });
+
+		try {
+			await first_runtime.runPromise(
+				Effect.gen(function* () {
+					const journal = yield* JournalStore;
+					const router = yield* ProtocolRouter;
+
+					yield* router.Route(
+						make_command("create_cold_preview", {
+							title: "Cold preview",
+							type: "thread.create",
+						}),
+					);
+					yield* journal.AppendEvent({
+						causation_id: "cold_assistant_cause",
+						correlation_id: "cold_assistant_correlation",
+						payload: {
+							message_id: "cold_assistant_message",
+							text: "Recovered assistant preview",
+							type: "assistant.message_completed",
+						},
+						thread_id: "thread_coordinator",
+					});
+					yield* journal.AppendEvent({
+						causation_id: "cold_complete_cause",
+						correlation_id: "cold_complete_correlation",
+						payload: {
+							state: "completed",
+							type: "run.lifecycle",
+							working_directory: "C:/workspace/artisan",
+						},
+						run_id: "run_cold",
+						thread_id: "thread_coordinator",
+					});
+				}),
+			);
+		} finally {
+			await first_runtime.dispose();
+		}
+
+		const second_runtime = make_backend_runtime({
+			database_path,
+			migrations_path,
+			thread_metadata_refiner: ThreadMetadataRefinerLive,
+		});
+
+		try {
+			const thread = await second_runtime.runPromise(
+				Effect.gen(function* () {
+					const coordinator = yield* ThreadMetadataRefinementCoordinator;
+					const threads = yield* ThreadReadModel;
+
+					yield* coordinator.WaitForIdle;
+
+					return (yield* threads.Snapshot()).threads[0]!;
+				}),
+			);
+
+			expect(thread).toMatchObject({
+				last_assistant_message: "Recovered assistant preview",
+				live_status: "Complete",
+			});
+		} finally {
+			await second_runtime.dispose();
+		}
+	});
+
 	it("uses the latest meaningful trigger with accumulated provider-neutral context", async () => {
 		const database_path = await make_database_path();
 		const seen: ThreadMetadataRefinerInput[] = [];

@@ -12,6 +12,7 @@ import { SessionDefaultsUpdateCommand } from "../session-defaults";
 
 import {
 	ThreadActivityRecordCommand,
+	ThreadAttentionAcknowledgeCommand,
 	ThreadArchiveCommand,
 	ThreadCreateCommand,
 	ThreadMetadataRefineCommand,
@@ -65,7 +66,7 @@ export const ThreadSessionPolicy = Schema.Struct({
 	 * Claude 5 that is the extended window, not the 200K base one.
 	 */
 	context_window: Schema.optional(Schema.NonEmptyString),
-	reasoning_effort: Schema.Literals(["low", "medium", "high", "xhigh", "max"]),
+	reasoning_effort: Schema.Literals(["low", "medium", "high", "xhigh", "max", "ultra"]),
 	/**
 	 * The harness-neutral permission option id from the catalog manifest, and
 	 * the authoritative permission choice. `permission_mode` and `sandbox_mode`
@@ -439,6 +440,7 @@ export const CommandPayload = Schema.Union([
 	ThreadProjectAssignCommand,
 	ThreadProjectUnlockCommand,
 	ThreadMetadataRefineCommand,
+	ThreadAttentionAcknowledgeCommand,
 	ThreadActivityRecordCommand,
 	ThreadPinCommand,
 	ThreadUnpinCommand,

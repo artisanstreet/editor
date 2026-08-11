@@ -14,6 +14,7 @@ import {
 	type EngineRun,
 } from "@artisan/engines";
 import type { EventEnvelope } from "@artisan/protocol";
+import { ConversationReadModel } from "../../modules/backend/src/conversation";
 import type { AuthoritativeCommandEnvelope } from "../../modules/backend/src/persistence/orchestration/message-command";
 import { JournalStore } from "../../modules/backend/src/persistence/journal-store";
 
@@ -30,6 +31,7 @@ function command<const Payload extends AuthoritativeCommandEnvelope["payload"]>(
 	message_id: string,
 	thread_id: string,
 	payload: Payload,
+	raw_origin?: { readonly provider: string; readonly reference: string },
 ): Omit<AuthoritativeCommandEnvelope, "payload"> & { readonly payload: Payload } {
 	return {
 		kind: "command",
@@ -37,6 +39,7 @@ function command<const Payload extends AuthoritativeCommandEnvelope["payload"]>(
 		origin: "frontend",
 		payload,
 		protocol_version: 1,
+		...(raw_origin === undefined ? {} : { raw_origin }),
 		schema_version: 1,
 		sent_at: "2026-07-18T20:00:00.000Z",
 		thread_id,
@@ -47,6 +50,7 @@ function make_engine(
 	id: string,
 	steer_state: "supported" | "unsupported" | "experimental" = "supported",
 	fail_steer = false,
+	steer_gate?: Deferred.Deferred<"released">,
 ) {
 	const commands: Array<EngineCommand> = [];
 	const opened: Array<string> = [];
@@ -88,6 +92,9 @@ function make_engine(
 					Send: (sent) =>
 						Effect.gen(function* () {
 							commands.push(sent);
+							if (sent._tag === "steer" && steer_gate !== undefined) {
+								yield* Deferred.await(steer_gate);
+							}
 							if (fail_steer && sent._tag === "steer") {
 								yield* Effect.fail(
 									new EngineProcessError({
@@ -280,6 +287,112 @@ describe("thread follow-up steering routing", () => {
 		}
 	});
 
+	it("projects a steering message only after its delivered outbox acknowledgement", async () => {
+		const steer_gate = await Effect.runPromise(Deferred.make<"released">());
+		const capable = make_engine("capable", "supported", false, steer_gate);
+		const context = await setup([capable.engine]);
+		let restarted: ReturnType<typeof make_backend_runtime> | undefined;
+		try {
+			await start(context, "capable");
+			await wait_for(() => capable.opened.length === 1);
+			const accepted = await follow_up(context, "capable", "blocked_follow_up");
+			expect(accepted.status).toBe("accepted");
+			expect(routed(accepted.events)).toBeUndefined();
+			await wait_for(() => capable.commands.length === 1);
+
+			const before_release_events = await context.runtime.runPromise(
+				context.journal.ReadCorrelatedEvents("blocked_follow_up"),
+			);
+			expect(before_release_events.map((event) => event.payload.type)).not.toContain(
+				"thread.message_steering",
+			);
+			const before_release_snapshot = await context.runtime.runPromise(
+				Effect.gen(function* () {
+					const conversations = yield* ConversationReadModel;
+					return yield* conversations.ReadSnapshot(context.thread_id);
+				}),
+			);
+			expect(before_release_snapshot).toMatchObject({ status: "available" });
+			if (before_release_snapshot.status !== "available") {
+				throw new Error("Expected a conversation snapshot");
+			}
+			expect(
+				before_release_snapshot.snapshot.items.filter(
+					(item) =>
+						item.type === "user_message" &&
+						item.source_refs.some(
+							(reference) => reference.reference === "blocked_follow_up",
+						),
+				),
+			).toHaveLength(0);
+
+			await Effect.runPromise(Deferred.succeed(steer_gate, "released"));
+			await wait_for(async () =>
+				(
+					await context.runtime.runPromise(
+						context.journal.ReadCorrelatedEvents("blocked_follow_up"),
+					)
+				).some((event) => event.payload.type === "thread.message_routed"),
+			);
+			const delivered_events = await context.runtime.runPromise(
+				context.journal.ReadCorrelatedEvents("blocked_follow_up"),
+			);
+			expect(
+				delivered_events
+					.map((event) => event.payload.type)
+					.filter(
+						(type) =>
+							type === "thread.message_steering" || type === "thread.message_routed",
+					),
+			).toEqual(["thread.message_steering", "thread.message_routed"]);
+			const delivered_snapshot = await context.runtime.runPromise(
+				Effect.gen(function* () {
+					const conversations = yield* ConversationReadModel;
+					return yield* conversations.ReadSnapshot(context.thread_id);
+				}),
+			);
+			expect(delivered_snapshot).toMatchObject({ status: "available" });
+			if (delivered_snapshot.status !== "available") {
+				throw new Error("Expected a conversation snapshot");
+			}
+			expect(
+				delivered_snapshot.snapshot.items.filter(
+					(item) =>
+						item.type === "user_message" &&
+						item.source_refs.some(
+							(reference) => reference.reference === "blocked_follow_up",
+						),
+				),
+			).toHaveLength(1);
+
+			const duplicate = await follow_up(context, "capable", "blocked_follow_up");
+			expect(duplicate.status).toBe("duplicate");
+			expect(capable.commands).toHaveLength(1);
+			await context.runtime.dispose();
+			restarted = make_backend_runtime({
+				database_path: context.database_path,
+				engines: [capable.engine],
+				migrations_path,
+			});
+			const restarted_orchestrator = await restarted.runPromise(AgentOrchestrator);
+			const replay = await restarted.runPromise(
+				restarted_orchestrator.Handle(
+					command("blocked_follow_up", context.thread_id, {
+						engine_id: "capable",
+						text: "Also include the verification evidence",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			expect(replay.status).toBe("duplicate");
+			expect(capable.commands).toHaveLength(1);
+		} finally {
+			if (restarted) await restarted.dispose();
+			else await context.runtime.dispose();
+		}
+	});
+
 	it("queues disabled, unsupported, experimental, and engine-mismatched follow-ups", async () => {
 		for (const scenario of [
 			{ state: "supported" as const, disable: true, requested: "active", reason: "disabled" },
@@ -374,7 +487,42 @@ describe("thread follow-up steering routing", () => {
 		try {
 			await start(context, "failing");
 			await wait_for(() => failing.opened.length === 1);
-			const accepted = await follow_up(context, "failing", "send_failure");
+			const accepted = await context.runtime.runPromise(
+				context.orchestrator.Handle(
+					command(
+						"send_failure",
+						context.thread_id,
+						{
+							attachments: [
+								{
+									bytes: new Uint8Array([
+										0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+									]),
+									id: "failure_attachment",
+									media_type: "image/png",
+									name: "evidence.png",
+								},
+							],
+							content: [
+								{ text: "Also include", type: "text" },
+								{ attachment_id: "failure_attachment", type: "image" },
+							],
+							engine_id: "failing",
+							mentioned_projects: [
+								{
+									display_name: "Evidence",
+									project_id: "project_evidence",
+									root_path: "C:/evidence",
+								},
+							],
+							text: "Also include the verification evidence",
+							type: "thread.send_message",
+							working_directory: "C:/evidence",
+						},
+						{ provider: "test-provider", reference: "test-reference" },
+					),
+				),
+			);
 			expect(routed(accepted.events)).toBeUndefined();
 			await wait_for(async () =>
 				(
@@ -393,10 +541,115 @@ describe("thread follow-up steering routing", () => {
 			expect(routed(events)).toMatchObject({ outcome: "queued", reason: "delivery_failed" });
 			expect(
 				events.find((event) => event.payload.type === "thread.message_queued")?.payload,
-			).toMatchObject({ reason: "delivery_failed" });
+			).toMatchObject({
+				attachments: [
+					{
+						id: "failure_attachment",
+						media_type: "image/png",
+						name: "evidence.png",
+						size_bytes: 8,
+					},
+				],
+				content: [
+					{ text: "Also include", type: "text" },
+					{ attachment_id: "failure_attachment", type: "image" },
+				],
+				mentioned_projects: [{ project_id: "project_evidence" }],
+				reason: "delivery_failed",
+				text: "Also include the verification evidence",
+				working_directory: "C:/evidence",
+			});
+			expect(
+				events.find((event) => event.payload.type === "thread.message_queued")?.raw_origin,
+			).toEqual({ provider: "test-provider", reference: "test-reference" });
 			expect(failing.commands).toHaveLength(1);
 		} finally {
 			await context.runtime.dispose();
+		}
+	});
+
+	it("recovers an uncertain dispatching steer as one queued fallback without redelivery", async () => {
+		const steer_gate = await Effect.runPromise(Deferred.make<"released">());
+		const capable = make_engine("capable", "supported", false, steer_gate);
+		const context = await setup([capable.engine]);
+		let restarted: ReturnType<typeof make_backend_runtime> | undefined;
+		try {
+			await start(context, "capable");
+			await wait_for(() => capable.opened.length === 1);
+			const pre_crash_run_id = capable.opened[0]!;
+			await follow_up(context, "capable", "crashed_steer");
+			await wait_for(() => capable.commands.length === 1);
+			expect(
+				await context.runtime.runPromise(
+					context.journal.ReadCorrelatedEvents("crashed_steer"),
+				),
+			).not.toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						payload: expect.objectContaining({ type: "thread.message_steering" }),
+					}),
+				]),
+			);
+			await context.runtime.dispose();
+			restarted = make_backend_runtime({
+				database_path: context.database_path,
+				engines: [capable.engine],
+				migrations_path,
+			});
+			const restarted_orchestrator = await restarted.runPromise(AgentOrchestrator);
+			await wait_for(async () =>
+				(
+					await restarted!.runPromise(
+						(
+							await restarted!.runPromise(JournalStore)
+						).ReadCorrelatedEvents("crashed_steer"),
+					)
+				).some(
+					(event) =>
+						event.payload.type === "thread.message_routed" &&
+						event.payload.reason === "delivery_failed",
+				),
+			);
+			await wait_for(() => capable.opened.length === 2);
+			const recovered_events = await restarted.runPromise(
+				(await restarted.runPromise(JournalStore)).ReadCorrelatedEvents("crashed_steer"),
+			);
+			expect(
+				recovered_events.filter((event) => event.payload.type === "thread.message_queued"),
+			).toHaveLength(1);
+			expect(
+				recovered_events.some((event) => event.payload.type === "thread.message_steering"),
+			).toBe(false);
+			expect(capable.opened).toHaveLength(2);
+			expect(capable.opened[1]).not.toBe(pre_crash_run_id);
+			expect(
+				capable.open_inputs.filter(
+					(input) => input._tag === "resume" && input.artisan_run_id === pre_crash_run_id,
+				),
+			).toHaveLength(0);
+			expect(
+				capable.open_inputs.filter(
+					(input) =>
+						input._tag === "start" &&
+						input.initial_text.includes("Also include the verification evidence"),
+				),
+			).toHaveLength(1);
+			expect(capable.commands).toHaveLength(1);
+			const duplicate = await restarted.runPromise(
+				restarted_orchestrator.Handle(
+					command("crashed_steer", context.thread_id, {
+						engine_id: "capable",
+						text: "Also include the verification evidence",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			expect(duplicate.status).toBe("duplicate");
+			expect(capable.commands).toHaveLength(1);
+		} finally {
+			if (restarted) await restarted.dispose();
+			else await context.runtime.dispose();
 		}
 	});
 });

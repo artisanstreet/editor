@@ -6,6 +6,7 @@ import type { CommandEnvelope } from "@artisan/protocol";
 import { Database } from "../../persistence/database";
 import { JournalNotifier } from "../../persistence/journal-notifier";
 import { RuntimeMetadata } from "../../runtime/metadata";
+import type { AgentNameCatalog } from "../agent-name-catalog";
 import {
 	AgentGraphInvalid,
 	type AgentGraphCommand,
@@ -18,6 +19,7 @@ export type GraphMetadata = Context.Service.Shape<typeof RuntimeMetadata>;
 export type GraphNotifier = Context.Service.Shape<typeof JournalNotifier>;
 
 export interface GraphContext {
+	readonly agent_name_catalog: Context.Service.Shape<typeof AgentNameCatalog>;
 	readonly database: GraphDatabase;
 	readonly metadata: GraphMetadata;
 	readonly notifier: GraphNotifier;
@@ -29,17 +31,6 @@ export interface GraphTransitionInput {
 	readonly group_id: string;
 	readonly thread_id: string;
 }
-
-export const default_agent_name_bank = [
-	"Sprocket",
-	"Biscuit",
-	"Noodle",
-	"Widget",
-	"Marmalade",
-	"Button",
-	"Doodle",
-	"Pip",
-] as const;
 
 const terminal_states = ["complete", "failed", "stopped"] as const;
 const unsafe_status_fragments = [

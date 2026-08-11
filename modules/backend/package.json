@@ -7,6 +7,7 @@
 	},
 	"dependencies": {
 		"@artisan/catalog": "workspace:*",
+		"@artisan/data": "workspace:*",
 		"@artisan/engines": "workspace:*",
 		"@artisan/protocol": "workspace:*",
 		"@decimalturn/toml-patch": "3.0.1",

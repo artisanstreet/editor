@@ -250,6 +250,9 @@ export function make_persisted_graph_codecs(_context: GraphContext): PersistedGr
 						...(row.completed_at ? { completed_at: row.completed_at } : {}),
 						created_at: row.created_at,
 						engine_id: row.engine_id,
+						execution_origin: row.execution_origin as
+							| "artisan_dispatched"
+							| "provider_observed",
 						group_id: row.group_id,
 						last_observation_sequence: row.last_observation_sequence,
 						...(native_identity ? { native_identity } : {}),

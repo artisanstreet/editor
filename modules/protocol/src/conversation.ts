@@ -30,6 +30,15 @@ export type ConversationAssistantMessagePhase = typeof ConversationAssistantMess
 
 const NonNegativeInt = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 
+export const conversation_maximum_steering_fragment_boundaries = 256;
+
+/** A durable cut in one provider message, anchored after an acknowledged user item. */
+export const ConversationSteeringFragmentBoundary = Schema.Struct({
+	after_item_id: Identifier,
+	text_offset: NonNegativeInt,
+});
+export type ConversationSteeringFragmentBoundary = typeof ConversationSteeringFragmentBoundary.Type;
+
 /** Bounds renderer-visible text while still allowing an initially empty streaming delta. */
 export const ConversationText = Schema.String.check(
 	Schema.makeFilter<string>((value) =>
@@ -117,6 +126,13 @@ export const ConversationTurn = Schema.Struct({
 });
 export type ConversationTurn = typeof ConversationTurn.Type;
 
+/** The Artisan-owned worker identity one conversation activity refers to. */
+export const ConversationActivitySubagent = Schema.Struct({
+	agent_id: Identifier,
+	display_name: ConversationSafeText,
+});
+export type ConversationActivitySubagent = typeof ConversationActivitySubagent.Type;
+
 const ConversationItemFields = {
 	...ConversationEntityBase.fields,
 	turn_id: Identifier,
@@ -156,6 +172,16 @@ export const ConversationItem = Schema.Union([
 			Schema.optional,
 			Schema.withDecodingDefault(Effect.succeed("unspecified")),
 		),
+		/**
+		 * Renderer-safe cuts recorded when a live run acknowledges a steer while
+		 * this provider item is still streaming. They keep later deltas below the
+		 * steer without fabricating a second provider item.
+		 */
+		steering_fragment_boundaries: Schema.optional(
+			Schema.Array(ConversationSteeringFragmentBoundary).check(
+				Schema.isMaxLength(conversation_maximum_steering_fragment_boundaries),
+			),
+		),
 		text: ConversationBodyText,
 		type: Schema.Literal("assistant_message"),
 	}),
@@ -181,6 +207,8 @@ export const ConversationItem = Schema.Union([
 		label: ConversationSafeText,
 		result_ref: Schema.optional(Identifier),
 		status: ConversationLifecycle,
+		/** Present only when this row describes delegation to one Artisan-owned worker. */
+		subagent: Schema.optional(ConversationActivitySubagent),
 		type: Schema.Literal("activity"),
 	}),
 	Schema.Struct({

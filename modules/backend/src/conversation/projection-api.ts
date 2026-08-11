@@ -1,3 +1,4 @@
+export { conversation_patch_retention_limit } from "./projection/entities";
 export {
 	ConversationProjectionError,
 	type ConversationObservationContext,

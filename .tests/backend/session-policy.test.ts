@@ -109,7 +109,9 @@ describe("session policy run metadata", () => {
 		/** The adapter rejects canonical policies, so none may be emitted. */
 		for (const metadata of [supervised, restricted, autonomous]) {
 			expect(metadata.permission_policy).toBeUndefined();
-			expect(Object.keys(metadata.provider_options ?? {})).toEqual([
+			expect(metadata.provider_options?.["claude.effort"]).toBe("medium");
+			expect(Object.keys(metadata.provider_options ?? {}).sort()).toEqual([
+				"claude.effort",
 				"claude.permission_mode",
 			]);
 		}
@@ -117,6 +119,32 @@ describe("session policy run metadata", () => {
 		expect(restricted.provider_options?.["claude.permission_mode"]).toBe("plan");
 		expect(autonomous.provider_options?.["claude.permission_mode"]).toBe("auto");
 		expect(supervised.model).toBe("claude-opus-5");
+	});
+
+	it("passes Claude's catalog-validated special effort to the native CLI boundary", () => {
+		const metadata = MakeSessionPolicyRunMetadata(
+			policy_for({
+				engine_id: "claude",
+				model: "claude-opus-5",
+				reasoning_effort: "max",
+			}),
+		);
+
+		expect(metadata.provider_options?.["claude.effort"]).toBe("max");
+	});
+
+	it("omits Claude's effort option when the selected catalog model does not support it", () => {
+		const metadata = MakeSessionPolicyRunMetadata(
+			policy_for({
+				engine_id: "claude",
+				model: "claude-haiku-4-5",
+				reasoning_effort: "medium",
+			}),
+		);
+
+		expect(metadata.provider_options).toEqual({
+			"claude.permission_mode": "default",
+		});
 	});
 
 	it("carries harness options the coarse axes cannot express", () => {

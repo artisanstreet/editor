@@ -3,6 +3,7 @@ import { Context, Effect, Layer } from "effect";
 import { Database } from "../persistence/database";
 import { JournalNotifier } from "../persistence/journal-notifier";
 import { RuntimeMetadata } from "../runtime/metadata";
+import { AgentNameCatalog } from "./agent-name-catalog";
 import { make_assignment_commands } from "./internal/assignment-commands";
 import { make_control_commands } from "./internal/control-commands";
 import { make_dependency_evaluation } from "./internal/dependency-evaluation";
@@ -12,8 +13,8 @@ import { make_graph_query } from "./internal/graph-query";
 import { make_graph_topology } from "./internal/graph-topology";
 import { make_group_start } from "./internal/group-start";
 import { make_join_evaluation } from "./internal/join-evaluation";
+import { make_native_subagents } from "./internal/native-subagents";
 import { make_persisted_graph_codecs } from "./internal/persisted-graph-codecs";
-import { make_raw_observation_ledger } from "./internal/raw-observation-ledger";
 import { make_run_lifecycle } from "./internal/run-lifecycle";
 import { make_run_transitions } from "./internal/run-transitions";
 import type { AgentGraphRepositoryShape } from "./agent-graph-model";
@@ -46,7 +47,8 @@ export const AgentGraphRepositoryLive = Layer.effect(
 		const database = yield* Database;
 		const metadata = yield* RuntimeMetadata;
 		const notifier = yield* JournalNotifier;
-		const context = { database, metadata, notifier };
+		const agent_name_catalog = yield* AgentNameCatalog;
+		const context = { agent_name_catalog, database, metadata, notifier };
 		const codecs = make_persisted_graph_codecs(context);
 		const ledger = make_graph_ledger(context, codecs);
 		const query = make_graph_query(context, codecs);
@@ -64,8 +66,8 @@ export const AgentGraphRepositoryLive = Layer.effect(
 			query,
 		);
 		const control_commands = make_control_commands(context, ledger, query);
-		const raw_observations = make_raw_observation_ledger();
-		const run_lifecycle = make_run_lifecycle(context, ledger, raw_observations, transitions);
+		const run_lifecycle = make_run_lifecycle(context, ledger, transitions);
+		const native_subagents = make_native_subagents(context, ledger);
 
 		return {
 			ActivateRun: run_lifecycle.activate_run,
@@ -82,6 +84,9 @@ export const AgentGraphRepositoryLive = Layer.effect(
 			RecordClosed: run_lifecycle.record_closed,
 			RecordHeartbeat: assignment_commands.record_heartbeat,
 			RecordObservation: run_lifecycle.record_observation,
+			RecordObservedSubagent: native_subagents.Record,
+			ReconcileObservedRoot: native_subagents.ReconcileRoot,
+			RecoverObservedSubagents: native_subagents.Recover,
 			Recover: run_lifecycle.recover,
 			RenameAgent: assignment_commands.rename_agent,
 			RetryAssignment: assignment_commands.retry_assignment,

@@ -1,0 +1,1 @@
+CREATE INDEX `journal_events_type_sequence_index` ON `journal_events` (`event_type`,`sequence`);

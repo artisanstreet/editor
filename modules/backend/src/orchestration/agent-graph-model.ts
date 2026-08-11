@@ -1,6 +1,11 @@
 import { Data, Effect } from "effect";
 
-import type { EngineObservation, EngineRunTerminalState } from "@artisan/engines";
+import type {
+	EngineObservation,
+	EngineRunTerminalState,
+	EngineSubagentObservation,
+	EngineSubagentTranscriptObservation,
+} from "@artisan/engines";
 import type {
 	AgentRun,
 	AssignmentControlEvent,
@@ -156,6 +161,11 @@ export interface AgentGraphRepositoryShape {
 	readonly RecordObservation: (
 		observation: EngineObservation,
 	) => Effect.Effect<ReadonlyArray<EventEnvelope>, AgentGraphError>;
+	readonly RecordObservedSubagent: (
+		observation: EngineSubagentObservation | EngineSubagentTranscriptObservation,
+	) => Effect.Effect<ReadonlyArray<EventEnvelope>, AgentGraphError>;
+	readonly ReconcileObservedRoot: (root_run_id: string) => Effect.Effect<void, AgentGraphError>;
+	readonly RecoverObservedSubagents: Effect.Effect<void, AgentGraphError>;
 	readonly RecordClosed: (
 		run_id: string,
 		state: EngineRunTerminalState,

@@ -217,9 +217,8 @@ export const ApplyActivityObservation = (
 		case "usage":
 			/**
 			 * A frame the adapter could not read is not something the run did, so
-			 * it earns no row. Raw provenance already holds the frame verbatim for
-			 * anyone debugging the adapter; a transcript row only teaches a reader
-			 * to distrust a run that was fine.
+			 * it earns no row. Provider diagnostics belong in bounded process logs;
+			 * retaining every unread frame in SQLite would recreate the write hazard.
 			 */
 			if (observation._tag === "native_action" && observation.diagnostic === true) {
 				return Effect.void;

@@ -74,6 +74,7 @@ export const JournalEvents = sqliteTable(
 			table.stream_sequence,
 		),
 		index("journal_events_correlation_id_index").on(table.correlation_id),
+		index("journal_events_type_sequence_index").on(table.event_type, table.sequence),
 	],
 );
 
@@ -86,8 +87,15 @@ export const Threads = sqliteTable(
 		title_locked: integer("title_locked", { mode: "boolean" }).notNull().default(false),
 		live_status: text("live_status").notNull().default("Idle"),
 		current_goal: text("current_goal"),
+		last_assistant_message: text("last_assistant_message"),
 		rename_suggestion: text("rename_suggestion"),
 		last_activity_at: text("last_activity_at").notNull().default("1970-01-01T00:00:00.000Z"),
+		reader_activity_at: text("reader_activity_at")
+			.notNull()
+			.default("1970-01-01T00:00:00.000Z"),
+		reader_acknowledged_activity_at: text("reader_acknowledged_activity_at")
+			.notNull()
+			.default("1970-01-01T00:00:00.000Z"),
 		activity_version: integer("activity_version").notNull().default(0),
 		metadata_version: integer("metadata_version").notNull().default(0),
 		affinity_version: integer("affinity_version").notNull().default(0),

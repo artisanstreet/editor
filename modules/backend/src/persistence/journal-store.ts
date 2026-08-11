@@ -802,6 +802,7 @@ export const JournalStoreLive = Layer.effect(
 								created_at: occurred_at,
 								current_goal: payload.title,
 								last_activity_at: occurred_at,
+								reader_activity_at: occurred_at,
 								live_status: "Idle",
 								metadata_version: 0,
 								pinned: false,

@@ -79,6 +79,13 @@ export const ThreadProjectRehomeSuggestion = Schema.Struct({
 
 export type ThreadProjectRehomeSuggestion = typeof ThreadProjectRehomeSuggestion.Type;
 
+/** Bounds the assistant prose copied into compact thread-list surfaces. */
+export const ThreadAssistantMessagePreviewMaximumLength = 500;
+
+export const ThreadAssistantMessagePreview = Schema.NonEmptyString.check(
+	Schema.isMaxLength(ThreadAssistantMessagePreviewMaximumLength),
+);
+
 /** Describes the durable thread projection sent to sidebar clients. */
 export const ThreadListItem = Schema.Struct({
 	activity_version: StreamSequence,
@@ -94,9 +101,24 @@ export const ThreadListItem = Schema.Struct({
 	engine_id: Schema.optional(Identifier),
 	model_id: Schema.optional(Schema.NonEmptyString),
 	last_activity_at: IsoDateTime,
+	last_assistant_message: Schema.optional(ThreadAssistantMessagePreview),
 	live_status: Schema.NonEmptyString,
 	metadata_version: StreamSequence,
 	pinned: Schema.Boolean,
+	/**
+	 * Newest activity exposed by the root thread surface. Hidden worker lifecycle
+	 * still advances retention recency through `last_activity_at`, but cannot make
+	 * the root conversation acknowledge content the reader never saw.
+	 *
+	 * Optional only for protocol compatibility with projections written before
+	 * the participant boundary existed; current Forge projections always emit it.
+	 */
+	reader_activity_at: Schema.optional(IsoDateTime),
+	/**
+	 * Root-visible activity through which the reader has durably acknowledged
+	 * the thread's attention request. Newer root activity deliberately repins it.
+	 */
+	reader_acknowledged_activity_at: Schema.optional(IsoDateTime),
 	primary_project: Schema.optional(ProjectRef),
 	project_affinity_scores: Schema.Array(ProjectAffinityScore),
 	project_locked: Schema.Boolean,
@@ -158,6 +180,7 @@ export const ThreadMetadataRefineCommand = Schema.Struct({
 	basis_activity_version: StreamSequence,
 	basis_metadata_version: StreamSequence,
 	current_goal: Schema.optional(Schema.NonEmptyString),
+	last_assistant_message: Schema.optional(ThreadAssistantMessagePreview),
 	live_status: Schema.NonEmptyString,
 	mentioned_projects: Schema.optional(Schema.Array(ProjectRef)),
 	rename_suggestion: Schema.optional(Schema.NonEmptyString),
@@ -174,6 +197,14 @@ export const ThreadActivityRecordCommand = Schema.Struct({
 });
 
 export type ThreadActivityRecordCommand = typeof ThreadActivityRecordCommand.Type;
+
+/** Acknowledges one observed root-visible activity cursor without rewriting history. */
+export const ThreadAttentionAcknowledgeCommand = Schema.Struct({
+	reader_activity_at: IsoDateTime,
+	type: Schema.Literal("thread.attention.acknowledge"),
+});
+
+export type ThreadAttentionAcknowledgeCommand = typeof ThreadAttentionAcknowledgeCommand.Type;
 
 /** Exempts a thread from automatic retention deletion. */
 export const ThreadPinCommand = Schema.Struct({ type: Schema.Literal("thread.pin") });
@@ -221,6 +252,7 @@ export const ThreadMetadataUpdatedEvent = Schema.Struct({
 	activity_kind: Schema.optional(ThreadActivityKind),
 	change: Schema.Literals([
 		"activity",
+		"attention_acknowledged",
 		"archive",
 		"metadata",
 		"pin",
@@ -234,6 +266,18 @@ export const ThreadMetadataUpdatedEvent = Schema.Struct({
 });
 
 export type ThreadMetadataUpdatedEvent = typeof ThreadMetadataUpdatedEvent.Type;
+
+/**
+ * Replays an acknowledgement cursor without restating the complete thread
+ * projection. Used by durable upgrades of projections written before readers
+ * could acknowledge attention.
+ */
+export const ThreadAttentionAcknowledgedEvent = Schema.Struct({
+	reader_activity_at: IsoDateTime,
+	type: Schema.Literal("thread.attention.acknowledged"),
+});
+
+export type ThreadAttentionAcknowledgedEvent = typeof ThreadAttentionAcknowledgedEvent.Type;
 
 /** Records an accepted refinement result that lost its projection-version race. */
 export const ThreadRefinementIgnoredEvent = Schema.Struct({

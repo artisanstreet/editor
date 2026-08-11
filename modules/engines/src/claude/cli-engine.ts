@@ -192,9 +192,12 @@ export const claude_permission_modes = [
 	"dontAsk",
 ] as const;
 
+const claude_effort_levels = ["low", "medium", "high", "xhigh", "max"] as const;
+
 interface ClaudeResolvedRunOptions {
 	readonly dangerous_bypass: boolean;
 	readonly disable_tools: boolean;
+	readonly effort: (typeof claude_effort_levels)[number] | undefined;
 	readonly permission_mode: (typeof claude_permission_modes)[number] | undefined;
 	readonly product_instructions: string | undefined;
 	readonly prompt_file: string | undefined;
@@ -230,6 +233,7 @@ const ResolveRunOptions = (
 ): Effect.Effect<ClaudeResolvedRunOptions, EngineFailure> => {
 	const options = input.provider_options ?? {};
 	const allowed = new Set([
+		"claude.effort",
 		"claude.permission_mode",
 		"claude.append_system_prompt_file",
 		"claude.disable_tools",
@@ -239,6 +243,13 @@ const ResolveRunOptions = (
 	if (unknown !== undefined)
 		return FailConfiguration(`provider_options.${unknown}`, options[unknown]);
 
+	const effort = options["claude.effort"];
+	if (
+		effort !== undefined &&
+		(typeof effort !== "string" ||
+			!(claude_effort_levels as ReadonlyArray<string>).includes(effort))
+	)
+		return FailConfiguration("provider_options.claude.effort", effort);
 	const permission_mode = options["claude.permission_mode"];
 	if (
 		permission_mode !== undefined &&
@@ -300,6 +311,7 @@ const ResolveRunOptions = (
 		return {
 			dangerous_bypass: policy?.approval === "never" || resolved_mode === "bypassPermissions",
 			disable_tools: disable_tools === true,
+			effort: effort as ClaudeResolvedRunOptions["effort"],
 			permission_mode:
 				policy !== undefined ||
 				resolved_mode === "default" ||
@@ -403,6 +415,7 @@ export const make_claude_engine_layer = (
 								: ["--permission-mode", resolved.permission_mode]),
 						...(resolved.disable_tools ? ["--tools", ""] : []),
 						...(resolved.safe_mode ? ["--safe-mode"] : []),
+						...(resolved.effort === undefined ? [] : ["--effort", resolved.effort]),
 						...(resolved.prompt_file === undefined
 							? []
 							: ["--append-system-prompt-file", resolved.prompt_file]),
