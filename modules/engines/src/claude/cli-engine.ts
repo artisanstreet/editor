@@ -875,11 +875,20 @@ export const make_claude_engine_layer = (
 						Send,
 					} satisfies EngineRun;
 				});
-			const Usage: Required<Engine>["Usage"] = MakeClaudeUsage({
-				executable: options.executable,
-				executable_args: options.executable_args,
-				factory,
-			});
+			const Usage: Required<Engine>["Usage"] = Probe({}).pipe(
+				Effect.flatMap((probe) =>
+					probe.authentication.state === "authenticated"
+						? MakeClaudeUsage({
+								executable: options.executable,
+								executable_args: options.executable_args,
+								factory,
+							})
+						: Effect.succeed({
+								authentication: probe.authentication,
+								windows: [],
+							}),
+				),
+			);
 			return {
 				CheckNativeContinuation: (request) =>
 					Probe({}).pipe(

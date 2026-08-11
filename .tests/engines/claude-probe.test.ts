@@ -46,6 +46,16 @@ describe("Claude readiness probe", () => {
 		expect(unsupported.ready).toBe(false);
 	});
 
+	it("does not misreport a signed-out account as a usage lookup failure", async () => {
+		process.env.FAKE_CLAUDE_SCENARIO = "auth-unauth";
+		const claude = await engine();
+
+		await expect(Effect.runPromise(claude.Usage!)).resolves.toEqual({
+			authentication: { state: "unauthenticated" },
+			windows: [],
+		});
+	});
+
 	it("fails missing binaries, nonzero version, bounds, and typed timeouts", async () => {
 		const missing = await Effect.runPromise(
 			Effect.exit((await engine({ executable: "missing-claude-binary" })).Probe({})),
