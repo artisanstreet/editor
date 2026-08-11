@@ -77,6 +77,9 @@ type DispatchState = "idle" | "running" | "pending";
 /** Bounds the complete multi-request native startup while exceeding Codex's nested request budgets. */
 const engine_open_timeout_ms = 60_000;
 
+/** Keeps a dead provider's native resume handshake from blocking Forge recovery. */
+const engine_resume_timeout_ms = 15_000;
+
 const InitialContent = (payload: AuthoritativeThreadSendMessageCommand) => {
 	if (payload.content === undefined) return undefined;
 	const attachments = new Map(
@@ -630,7 +633,7 @@ export const AgentOrchestratorLive = Layer.effect(
 				const run_scope = yield* MakeOwnedScope(work.run_id);
 				if (!run_scope) return;
 				const resolved_product_instructions = yield* product_instructions.Resolve;
-				const run = yield* engine
+				const resumed_run = yield* engine
 					.Open({
 						_tag: "resume",
 						artisan_run_id: work.run_id,
@@ -644,14 +647,16 @@ export const AgentOrchestratorLive = Layer.effect(
 					})
 					.pipe(
 						Scope.provide(run_scope),
-						Effect.catch(() => Effect.succeed(undefined)),
+						Effect.timeoutOption(engine_resume_timeout_ms),
+						Effect.catchCause(() => Effect.succeed(Option.none())),
 					);
 
-				if (!run) {
+				if (Option.isNone(resumed_run)) {
 					yield* CloseOwnedScope(work.run_id, run_scope);
 
 					return;
 				}
+				const run = resumed_run.value;
 
 				yield* admission_gate.withPermits(1)(
 					Effect.gen(function* () {
@@ -990,10 +995,13 @@ export const AgentOrchestratorLive = Layer.effect(
 				Effect.mapError((cause) => new OrchestrationFailure({ cause })),
 			);
 			const recoverable = yield* repository.ClaimNativeRecoveries();
-			yield* Effect.forEach(recoverable, ResumeRun, {
-				concurrency: "unbounded",
-				discard: true,
-			});
+			yield* Effect.forkIn(
+				Effect.forEach(recoverable, ResumeRun, {
+					concurrency: "unbounded",
+					discard: true,
+				}).pipe(Effect.catchCause(() => Effect.void)),
+				service_scope,
+			);
 			yield* WakeDispatcher;
 		});
 		const QuiesceLiveRuns = (thread_id: string) =>

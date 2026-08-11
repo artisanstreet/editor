@@ -43,6 +43,7 @@ interface EngineOptions {
 	readonly fail_resume?: boolean;
 	readonly fail_send?: boolean;
 	readonly open_delay?: number;
+	readonly stall_resume?: boolean;
 }
 
 function make_engine(options: EngineOptions = {}): {
@@ -81,6 +82,9 @@ function make_engine(options: EngineOptions = {}): {
 
 			opened += 1;
 			open_inputs.push(input);
+			if (options.stall_resume && input._tag === "resume") {
+				yield* Effect.never;
+			}
 
 			if (opened <= (options.die_open_attempts ?? 0)) {
 				yield* Effect.die("synthetic engine startup defect");
@@ -435,7 +439,94 @@ describe("agent orchestrator lifecycle supervision", () => {
 		}
 	});
 
-	it("fails closed when a native resume is rejected and never starts a replacement run", async () => {
+	it.each([
+		["is rejected", { fail_resume: true }],
+		["defects", { die_open_attempts: 1 }],
+	] as const)(
+		"fails closed when a native resume %s and never starts a replacement run",
+		async (_case, recovery_options) => {
+			const database_path = await make_database_path();
+			const initial = make_engine();
+			const initial_runtime = make_backend_runtime({
+				database_path,
+				engines: [initial.engine],
+				migrations_path,
+			});
+
+			try {
+				const connection = await open_connection(initial_runtime);
+				await initial_runtime.runPromise(
+					connection.Receive(
+						make_command("reject_resume", {
+							engine_id: "instrumented",
+							text: "Do not duplicate this run",
+							type: "thread.send_message",
+							working_directory: "C:/work",
+						}),
+					),
+				);
+				await expect
+					.poll(() => initial.instrumentation.opened(), { timeout: 2_000 })
+					.toBe(1);
+			} finally {
+				await initial_runtime.dispose();
+			}
+
+			const rejected = make_engine(recovery_options);
+			const rejected_runtime = make_backend_runtime({
+				database_path,
+				engines: [rejected.engine],
+				migrations_path,
+			});
+
+			try {
+				await rejected_runtime.runPromise(
+					Effect.gen(function* () {
+						yield* AgentOrchestrator;
+					}),
+				);
+				await expect
+					.poll(() => rejected.instrumentation.opened(), { timeout: 2_000 })
+					.toBe(1);
+				expect(rejected.instrumentation.open_inputs()[0]).toMatchObject({ _tag: "resume" });
+				const snapshot = await rejected_runtime.runPromise(
+					Effect.gen(function* () {
+						const conversations = yield* ConversationReadModel;
+
+						return yield* conversations.ReadSnapshot("thread_1");
+					}),
+				);
+				expect(snapshot.status).toBe("available");
+				if (snapshot.status !== "available") {
+					throw new Error("Expected a recovered conversation snapshot");
+				}
+				expect(snapshot.snapshot.turns.at(-1)?.lifecycle).toBe("failed");
+			} finally {
+				await rejected_runtime.dispose();
+			}
+
+			const later = make_engine();
+			const later_runtime = make_backend_runtime({
+				database_path,
+				engines: [later.engine],
+				migrations_path,
+			});
+
+			try {
+				await later_runtime.runPromise(
+					Effect.gen(function* () {
+						yield* AgentOrchestrator;
+					}),
+				);
+				await new Promise((resolve) => setTimeout(resolve, 50));
+				expect(later.instrumentation.opened()).toBe(0);
+			} finally {
+				await later_runtime.dispose();
+			}
+		},
+	);
+
+	it("boots with a settled thread while native resume is stalled", async () => {
 		const database_path = await make_database_path();
 		const initial = make_engine();
 		const initial_runtime = make_backend_runtime({
@@ -448,9 +539,9 @@ describe("agent orchestrator lifecycle supervision", () => {
 			const connection = await open_connection(initial_runtime);
 			await initial_runtime.runPromise(
 				connection.Receive(
-					make_command("reject_resume", {
+					make_command("stalled_resume", {
 						engine_id: "instrumented",
-						text: "Do not duplicate this run",
+						text: "Recover this native run without wedging Forge",
 						type: "thread.send_message",
 						working_directory: "C:/work",
 					}),
@@ -461,42 +552,32 @@ describe("agent orchestrator lifecycle supervision", () => {
 			await initial_runtime.dispose();
 		}
 
-		const rejected = make_engine({ fail_resume: true });
-		const rejected_runtime = make_backend_runtime({
+		const stalled = make_engine({ stall_resume: true });
+		const recovery_runtime = make_backend_runtime({
 			database_path,
-			engines: [rejected.engine],
+			engines: [stalled.engine],
 			migrations_path,
 		});
 
 		try {
-			await rejected_runtime.runPromise(
+			const started_at = Date.now();
+			const snapshot = await recovery_runtime.runPromise(
 				Effect.gen(function* () {
 					yield* AgentOrchestrator;
+					const conversations = yield* ConversationReadModel;
+
+					return yield* conversations.ReadSnapshot("thread_1");
 				}),
 			);
-			await expect.poll(() => rejected.instrumentation.opened(), { timeout: 2_000 }).toBe(1);
-			expect(rejected.instrumentation.open_inputs()[0]).toMatchObject({ _tag: "resume" });
+			expect(Date.now() - started_at).toBeLessThan(2_000);
+			expect(snapshot.status).toBe("available");
+			if (snapshot.status !== "available") {
+				throw new Error("Expected a recovered conversation snapshot");
+			}
+			expect(snapshot.snapshot.turns.at(-1)?.lifecycle).toBe("failed");
+			await expect.poll(() => stalled.instrumentation.opened(), { timeout: 2_000 }).toBe(1);
 		} finally {
-			await rejected_runtime.dispose();
-		}
-
-		const later = make_engine();
-		const later_runtime = make_backend_runtime({
-			database_path,
-			engines: [later.engine],
-			migrations_path,
-		});
-
-		try {
-			await later_runtime.runPromise(
-				Effect.gen(function* () {
-					yield* AgentOrchestrator;
-				}),
-			);
-			await new Promise((resolve) => setTimeout(resolve, 50));
-			expect(later.instrumentation.opened()).toBe(0);
-		} finally {
-			await later_runtime.dispose();
+			await recovery_runtime.dispose();
 		}
 	});
 
