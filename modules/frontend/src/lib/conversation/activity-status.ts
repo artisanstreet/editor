@@ -177,6 +177,42 @@ export const conversation_has_live_activity = (items: ReadonlyArray<Conversation
 	items.some((item) => item.type === "activity" && conversation_activity_is_live(item));
 
 /**
+ * True when the newest relevant detail is an external operation that remains
+ * live. A later model-text item proves the model is active again even if an
+ * earlier long-running command is still open; a still-later operation restores
+ * the wait. Ordinals are the durable cross-item order — timestamps and revisions
+ * are local to one item and cannot establish replay-safe recency.
+ */
+export const conversation_waiting_for_activity = (
+	items: ReadonlyArray<ConversationItem>,
+): boolean => {
+	let newest_live_activity_ordinal: number | undefined;
+	let newest_model_text_ordinal: number | undefined;
+
+	for (const item of items) {
+		if (item.type === "activity" && conversation_activity_is_live(item)) {
+			newest_live_activity_ordinal = Math.max(
+				newest_live_activity_ordinal ?? -1,
+				item.ordinal,
+			);
+			continue;
+		}
+		if (
+			(item.type === "assistant_message" || item.type === "reasoning_summary") &&
+			item.text.trim().length > 0
+		) {
+			newest_model_text_ordinal = Math.max(newest_model_text_ordinal ?? -1, item.ordinal);
+		}
+	}
+
+	return (
+		newest_live_activity_ordinal !== undefined &&
+		(newest_model_text_ordinal === undefined ||
+			newest_live_activity_ordinal > newest_model_text_ordinal)
+	);
+};
+
+/**
  * True while the assistant's own prose is arriving and has something to show.
  * A reply speaks for itself, so it takes over as the status.
  *

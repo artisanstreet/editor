@@ -15,8 +15,8 @@
 	import { ScrollArea } from "$lib/components/ui/scroll-area";
 	import { Button } from "$lib/components/ui/button";
 	import {
-		conversation_has_live_activity,
 		conversation_reply_is_live,
+		conversation_waiting_for_activity,
 		work_session_run_authority,
 	} from "$lib/conversation/activity-status";
 	import {
@@ -699,7 +699,7 @@
 										item={block.session}
 										run_authority={session_authority}
 										transition={block.transition}
-										waiting_for_activity={conversation_has_live_activity(block.details)}
+										waiting_for_activity={conversation_waiting_for_activity(block.details)}
 									>
 										{#snippet details()}
 											<!-- Stopping is the user's own act, not a failure the trace must explain. -->

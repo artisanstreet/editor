@@ -191,11 +191,13 @@ same canonical file path, keeps unknown aggregate counts unknown, top-aligns an
 accepted local message, exposes a recoverable jump-to-latest control after the
 reader leaves follow range, and changes a thinking verb only after its quiet
 status line leaves and re-enters the render tree. Provider-started command, tool,
-and search activity patches select `Waiting` for that operation, then their
-terminal patch restores the stable thinking verb without polling or a
-provider-specific UI path. The full validation snapshot above covers the earlier
-regressions; the waiting transition has focused cross-provider lifecycle and
-renderer coverage.
+and search activity patches select `Waiting` while that operation is the newest
+live detail. Newer assistant or reasoning text restores the stable thinking verb
+even when an earlier long-running activity remains open, and a subsequent live
+activity selects `Waiting` again. Terminal patches also restore the verb without
+polling or a provider-specific UI path when no other live operation still owns
+the wait. The full validation snapshot above covers the earlier regressions; the
+waiting transition has focused cross-provider lifecycle and renderer coverage.
 
 On 2026-08-09, canonical plan items moved out of transcript rendering into a
 conditional right-side Checklist that reuses the Working Threads glass, spacing,

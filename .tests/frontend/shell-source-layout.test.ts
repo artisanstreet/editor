@@ -334,7 +334,7 @@ describe("Barekey docs shell reset", () => {
 		expect(work_session).toContain("hidden={disclosure.details_hidden}");
 		expect(workspace).toContain("has_live_reply={conversation_reply_is_live(block.details)}");
 		expect(workspace).toContain(
-			"waiting_for_activity={conversation_has_live_activity(block.details)}",
+			"waiting_for_activity={conversation_waiting_for_activity(block.details)}",
 		);
 		/**
 		 * The engine came back as a word, never as a mark. Before anything has

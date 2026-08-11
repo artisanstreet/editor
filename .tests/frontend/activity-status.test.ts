@@ -7,6 +7,7 @@ import {
 	conversation_activity_is_live,
 	conversation_has_live_activity,
 	conversation_reply_is_live,
+	conversation_waiting_for_activity,
 	thinking_word_at,
 	thinking_word_for,
 	waiting_label_for,
@@ -179,6 +180,49 @@ describe("Artisan thinking vocabulary", () => {
 			conversation_has_live_activity([activity("activity-1", "terminal", "completed")]),
 		).toBe(false);
 		expect(conversation_has_live_activity([reasoning("streaming")])).toBe(false);
+	});
+
+	it("lets newer model text relieve a live activity wait", () => {
+		const live_activity = { ...activity("activity-2", "terminal", "active"), ordinal: 2 };
+		const later_reasoning = {
+			...reasoning("streaming", "Still waiting, nothing new."),
+			ordinal: 3,
+		};
+		const later_commentary = {
+			...message("completed", "The command is still running."),
+			ordinal: 4,
+			phase: "commentary" as const,
+		};
+
+		expect(conversation_waiting_for_activity([live_activity])).toBe(true);
+		expect(conversation_waiting_for_activity([live_activity, later_reasoning])).toBe(false);
+		expect(conversation_waiting_for_activity([live_activity, later_commentary])).toBe(false);
+	});
+
+	it("returns to Waiting when a newer external operation starts", () => {
+		const first_activity = { ...activity("activity-1", "terminal", "active"), ordinal: 1 };
+		const model_text = { ...reasoning("completed"), ordinal: 2 };
+		const next_activity = { ...activity("activity-3", "tool", "active"), ordinal: 3 };
+
+		expect(conversation_waiting_for_activity([first_activity, model_text, next_activity])).toBe(
+			true,
+		);
+	});
+
+	it("uses durable ordinals and ignores empty text when resolving the latest phase", () => {
+		const earlier_text = { ...reasoning("completed"), ordinal: 1 };
+		const live_activity = { ...activity("activity-2", "terminal", "active"), ordinal: 2 };
+		const empty_message = { ...message("streaming", "  \n "), ordinal: 3 };
+
+		expect(
+			conversation_waiting_for_activity([empty_message, live_activity, earlier_text]),
+		).toBe(true);
+		expect(
+			conversation_waiting_for_activity([
+				{ ...reasoning("streaming", "Fresh model text"), ordinal: 4 },
+				live_activity,
+			]),
+		).toBe(false);
 	});
 });
 
