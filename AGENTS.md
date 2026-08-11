@@ -44,7 +44,14 @@
 - These repository rules override `sanders-skill` branching and pull-request
   etiquette for Artisan Editor. Continue following its commit-quality,
   verification, and Git-safety requirements.
-- Use pnpm and the repository scripts. Run `pnpm run validate` before a milestone commit.
+- Use pnpm and the repository scripts. Run the smallest relevant focused gate
+  for ordinary work: `validate:frontend`, `validate:backend`, `validate:forge`,
+  `validate:transport`, `validate:desktop`, or `validate:native`.
+- Use `pnpm run test:focus -- .tests/<area>/<file>.test.ts` for an arbitrary
+  focused Vitest target. Ordinary milestone commits require the affected-area
+  gates, not the full repository aggregate.
+- Reserve `pnpm run validate` (or `validate:full`) for integration/release
+  validation or an explicitly requested full checkpoint.
 - Use `apply_patch` for manual file edits.
 - Do not start a development server unless explicitly requested.
 - Do not discard, reset, or revert dirty work that is not yours.
