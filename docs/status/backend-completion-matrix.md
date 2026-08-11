@@ -304,3 +304,15 @@ lingered, and the installed renderer established its Forge transport 3.41
 seconds later. Closing the window again removed both Editor and its exact-owned
 Forge. Focused desktop/release verification passed 9 files/58 tests plus both
 Windows artifact verifiers; independent review found no blocking issue.
+
+On 2026-08-11, installed 0.2.40 eliminated the desktop loader's impossible
+MessagePort retry loop and the CLI's stale-card process-table scan. Startup now
+serializes authenticated probespawnready ownership with a per-home native
+lock; four simultaneous cold handoffs produced one Forge. Against 99 stale
+registry cards, pre-spawn coordination completed in 273.39 ms, a cold handoff
+completed in 5.342 seconds (5.069 seconds was Forge boot), and ten warm handoffs
+measured 25.96-39.93 ms with a 30.21 ms median. The packaged renderer established
+its loopback Forge transport and clean close left no Artisan process. Focused
+pairing gates pass 44 UI tests and 44 CLI tests; the complete native area passes
+76 tests plus formatting and warning-denied Clippy. Independent review found no
+blocking issue.
