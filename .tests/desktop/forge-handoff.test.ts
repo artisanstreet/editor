@@ -17,7 +17,7 @@ import {
 	owned_stop_cleanup_timeout,
 	OwnedForgeStopArguments,
 } from "../../modules/desktop/src/forge-handoff";
-import type { ForgeHandoff } from "../../modules/desktop/src/renderer-host";
+import { type ForgeHandoff, renderer_loader_url } from "../../modules/desktop/src/renderer-host";
 
 const MakeLifecycle = (
 	process: ForgeHandoffProcess["Service"],
@@ -50,7 +50,7 @@ describe("desktop Forge handoff lifecycle", () => {
 				LoadUrl: (url) =>
 					Effect.sync(() => events.push(url)).pipe(
 						Effect.andThen(
-							url === "artisan://app/"
+							url === renderer_loader_url
 								? Deferred.await(loader_gate).pipe(
 										Effect.tap(() =>
 											Effect.sync(() => (loader_finished = true)),
@@ -65,13 +65,13 @@ describe("desktop Forge handoff lifecycle", () => {
 		const start = Effect.runPromise(lifecycle.Start());
 		await new Promise<void>((resolve) => setImmediate(resolve));
 		expect(loader_finished).toBe(false);
-		expect(events).toEqual(["clear-cookies", "artisan://app/"]);
+		expect(events).toEqual(["clear-cookies", renderer_loader_url]);
 		await Effect.runPromise(Deferred.succeed(loader_gate, undefined));
 		await start;
 		expect(loader_finished).toBe(true);
 		const pairing = Effect.runPromise(lifecycle.Reconnect());
 		await new Promise<void>((resolve) => setImmediate(resolve));
-		expect(events).toEqual(["clear-cookies", "artisan://app/", "handoff"]);
+		expect(events).toEqual(["clear-cookies", renderer_loader_url, "handoff"]);
 
 		await Effect.runPromise(
 			Deferred.succeed(gate, {
@@ -84,7 +84,7 @@ describe("desktop Forge handoff lifecycle", () => {
 		await pairing;
 		expect(events).toEqual([
 			"clear-cookies",
-			"artisan://app/",
+			renderer_loader_url,
 			"handoff",
 			"artisan://app/?artisan-handoff=1#pair=one-time&forge=http%3A%2F%2F127.0.0.1%3A52985%2F",
 		]);
@@ -141,7 +141,7 @@ describe("desktop Forge handoff lifecycle", () => {
 			DesktopRenderer.of({
 				ClearCookies: () => Effect.void,
 				LoadUrl: (url) =>
-					url === "artisan://app/"
+					url === renderer_loader_url
 						? Effect.void
 						: Effect.sync(() => paired_urls.push(url)).pipe(
 								Effect.andThen(Deferred.await(pair_navigation)),

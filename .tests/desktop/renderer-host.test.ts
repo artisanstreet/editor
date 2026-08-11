@@ -83,7 +83,7 @@ describe("desktop renderer host", () => {
 		expect(request_url).not.toContain("code%20with%20spaces");
 		expect(request_url).not.toContain("52985");
 		expect(fragment).toBe("pair=code%20with%20spaces&forge=http%3A%2F%2F127.0.0.1%3A52985%2F");
-		expect(renderer_loader_url).toBe("artisan://app/");
+		expect(renderer_loader_url).toBe("artisan://app/?artisan-loader=1");
 	});
 
 	it("serves bundled assets with an index fallback confined to the payload", async () => {

@@ -4,3 +4,6 @@
  * the URL fragment and never enter the custom-protocol request.
  */
 export const desktop_handoff_navigation_parameter = "artisan-handoff";
+
+/** Marks the temporary desktop document that exists only while Forge starts. */
+export const desktop_loader_navigation_parameter = "artisan-loader";

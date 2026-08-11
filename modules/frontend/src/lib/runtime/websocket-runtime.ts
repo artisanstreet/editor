@@ -2,6 +2,7 @@ import {
 	make_websocket_connector_layer,
 	type BrowserWebSocket,
 } from "@artisan/transport/websocket/client";
+import { desktop_loader_navigation_parameter } from "@artisan/protocol";
 import {
 	MessagePortConnector,
 	MessagePortConnectorError,
@@ -13,6 +14,7 @@ import { Effect, Layer } from "effect";
 export interface WebSocketRuntimeLocation {
 	readonly origin: string;
 	readonly protocol: string;
+	readonly search: string;
 }
 
 export interface WebSocketRuntimeTargetInput {
@@ -27,6 +29,7 @@ export interface WebSocketRuntimeTargetInput {
 }
 
 export type WebSocketRuntimeTarget =
+	| { readonly _tag: "pending" }
 	| { readonly _tag: "unavailable" }
 	| { readonly _tag: "websocket"; readonly url: string };
 
@@ -66,6 +69,10 @@ const BrowserWebSocketUrl = (location: WebSocketRuntimeLocation | undefined) => 
 	return url.toString();
 };
 
+const IsDesktopLoader = (location: WebSocketRuntimeLocation | undefined) =>
+	location?.protocol === "artisan:" &&
+	location.search === `?${desktop_loader_navigation_parameter}=1`;
+
 /**
  * Selects the browser's only real connection boundary. Development can opt into
  * an explicit endpoint; the installed editor supplies its adopted loopback
@@ -87,6 +94,7 @@ export const ResolveWebSocketRuntimeTarget = (
 
 	const browser_url = BrowserWebSocketUrl(input.location);
 	if (browser_url !== undefined) return { _tag: "websocket", url: browser_url };
+	if (IsDesktopLoader(input.location)) return { _tag: "pending" };
 
 	return { _tag: "unavailable" };
 };
@@ -113,11 +121,28 @@ const UnavailableWebSocketConnectorLive = Layer.succeed(
 	}),
 );
 
+/** The loader document is replaced by Electron; its runtime owns no network retry. */
+const PendingWebSocketConnectorLive = Layer.succeed(
+	MessagePortConnector,
+	MessagePortConnector.of({
+		Connect: Effect.gen(function* () {
+			return yield* Effect.never;
+		}),
+	}),
+);
+
 /** Provides the existing typed client and renderer lifecycle through a browser WebSocket. */
 export const make_websocket_client_runtime_layer = (
 	target: WebSocketRuntimeTarget,
 	create_socket?: (url: string) => BrowserWebSocket,
-) =>
+) => {
+	const connector_layer =
+		target._tag === "websocket"
+			? make_websocket_connector_runtime_layer(target.url, create_socket)
+			: target._tag === "pending"
+				? PendingWebSocketConnectorLive
+				: UnavailableWebSocketConnectorLive;
+
 	/**
 	 * The budget counts only consecutive attempts that never reached ready, so
 	 * it can afford to outlast a routine Forge restart: eight attempts on a
@@ -125,11 +150,8 @@ export const make_websocket_client_runtime_layer = (
 	 * the gate's recovery controls surface. A loopback refusal is immediate,
 	 * so a never-reachable Forge still fails fast enough to matter.
 	 */
-	make_artisan_client_layer({ reconnect_attempts: 8, reconnect_delay_ms: 250 }).pipe(
-		Layer.provideMerge(
-			target._tag === "websocket"
-				? make_websocket_connector_runtime_layer(target.url, create_socket)
-				: UnavailableWebSocketConnectorLive,
-		),
+	return make_artisan_client_layer({ reconnect_attempts: 8, reconnect_delay_ms: 250 }).pipe(
+		Layer.provideMerge(connector_layer),
 		Layer.provide(TransportRuntimeLive),
 	);
+};

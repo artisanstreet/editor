@@ -1,7 +1,10 @@
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize, sep } from "node:path";
 
-import { desktop_handoff_navigation_parameter } from "@artisan/protocol";
+import {
+	desktop_handoff_navigation_parameter,
+	desktop_loader_navigation_parameter,
+} from "@artisan/protocol";
 import { Data, Effect, Option, Schema } from "effect";
 
 export class DesktopLauncherError extends Data.TaggedError("DesktopLauncherError")<{
@@ -118,7 +121,7 @@ export const ServeRendererAsset = (frontend_root: string, request_url: string) =
 		});
 	});
 
-export const renderer_loader_url = `${app_scheme}://${app_host}/`;
+export const renderer_loader_url = `${app_scheme}://${app_host}/?${desktop_loader_navigation_parameter}=1`;
 
 /**
  * The query marker deliberately changes for every handoff so Chromium performs

@@ -1,12 +1,12 @@
 use std::{
-    collections::HashSet,
     fs::{self, OpenOptions},
-    io::Read,
     path::Path,
     process::{Command, Stdio},
     thread,
     time::{Duration, Instant, SystemTime},
 };
+
+use fs2::FileExt;
 
 use crate::{
     CliError, Result,
@@ -21,8 +21,11 @@ const SHUTDOWN_PROBE_TIMEOUT: Duration = Duration::from_secs(1);
 const SHUTDOWN_POLL_INTERVAL: Duration = Duration::from_millis(100);
 const INSTANCE_REGISTRY_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 const INSTANCE_REGISTRY_CARD_LIMIT: usize = 256;
-const PROCESS_SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(1);
-const PROCESS_SNAPSHOT_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const PRELAUNCH_DISCOVERY_TIMEOUT: Duration = Duration::from_millis(250);
+const PRELAUNCH_REGISTRY_CARD_LIMIT: usize = 1;
+const START_COORDINATION_POLL_INTERVAL: Duration = Duration::from_millis(10);
+const START_READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const START_READY_TIMEOUT: Duration = Duration::from_secs(15);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StartResult {
@@ -44,7 +47,7 @@ pub fn start(
         config,
         secrets,
         foreground,
-        Instant::now() + Duration::from_secs(5),
+        Instant::now() + START_READY_TIMEOUT,
     )
 }
 
@@ -56,12 +59,72 @@ pub fn start_until(
     foreground: bool,
     health_deadline: Instant,
 ) -> Result<StartResult> {
-    if live_state_until(paths, secrets, None, health_deadline)?.is_some() {
-        return Ok(StartResult::AlreadyRunning);
+    if foreground {
+        let discovery_deadline = prelaunch_discovery_deadline(Instant::now(), health_deadline);
+        if prelaunch_live_state_until(paths, secrets, discovery_deadline)?.is_some() {
+            return Ok(StartResult::AlreadyRunning);
+        }
+        return start_foreground(manifest, paths, config, secrets);
     }
-    if !foreground {
+
+    with_start_coordination(paths, health_deadline, || {
+        // Every background caller decides liveness while holding the home-local
+        // launch lease. A concurrent caller therefore re-probes after the first
+        // launch becomes ready instead of authorizing a second process.
+        let discovery_deadline = prelaunch_discovery_deadline(Instant::now(), health_deadline);
+        if prelaunch_live_state_until(paths, secrets, discovery_deadline)?.is_some() {
+            return Ok(StartResult::AlreadyRunning);
+        }
         ensure_background_start_deadline(health_deadline)?;
+        let pid = spawn_background_forge(manifest, paths, config, secrets)?;
+        wait_until_ready(paths, secrets, health_deadline)?;
+        Ok(StartResult::Spawned { pid })
+    })
+}
+
+fn start_foreground(
+    manifest: &InstallationManifest,
+    paths: &InstancePaths,
+    config: &InstanceConfig,
+    secrets: &Secrets,
+) -> Result<StartResult> {
+    let executable = manifest.forge_executable();
+    let forge_root = manifest.version_root().join("forge");
+    let legacy_host_entry = forge_root.join("host.js");
+    if !executable.is_file() {
+        return Err(CliError::Installation(format!(
+            "Forge binary is missing at {}",
+            executable.display()
+        )));
     }
+    fs::create_dir_all(&config.data_root).map_err(io("create Forge data directory"))?;
+    let mut command = Command::new(executable);
+    let legacy_launcher = legacy_host_entry.is_file();
+    if legacy_launcher {
+        command.arg(&legacy_host_entry);
+    }
+    configure_forge_environment(
+        &mut command,
+        paths,
+        config,
+        secrets,
+        &forge_root,
+        legacy_launcher,
+    );
+    let status = command.status().map_err(io("start Forge"))?;
+    if status.success() {
+        Ok(StartResult::ForegroundExited)
+    } else {
+        Err(CliError::Control(format!("Forge exited with {status}")))
+    }
+}
+
+fn spawn_background_forge(
+    manifest: &InstallationManifest,
+    paths: &InstancePaths,
+    config: &InstanceConfig,
+    secrets: &Secrets,
+) -> Result<u32> {
     let executable = manifest.forge_executable();
     let forge_root = manifest.version_root().join("forge");
     let legacy_host_entry = forge_root.join("host.js");
@@ -90,23 +153,98 @@ pub fn start_until(
         &forge_root,
         legacy_launcher,
     );
-    if foreground {
-        let status = command.status().map_err(io("start Forge"))?;
-        if status.success() {
-            Ok(StartResult::ForegroundExited)
-        } else {
-            Err(CliError::Control(format!("Forge exited with {status}")))
+    command
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(log.try_clone().map_err(io("clone Forge log"))?))
+        .stderr(Stdio::from(log));
+    detach(&mut command);
+    Ok(command.spawn().map_err(io("start Forge"))?.id())
+}
+
+fn wait_until_ready(paths: &InstancePaths, secrets: &Secrets, deadline: Instant) -> Result<()> {
+    while Instant::now() < deadline {
+        if live_state_until(
+            paths,
+            secrets,
+            None,
+            probe_deadline(deadline, INSTANCE_REGISTRY_PROBE_TIMEOUT),
+        )?
+        .is_some()
+        {
+            return Ok(());
         }
-    } else {
-        command
-            .stdin(Stdio::null())
-            .stdout(Stdio::from(log.try_clone().map_err(io("clone Forge log"))?))
-            .stderr(Stdio::from(log));
-        detach(&mut command);
-        ensure_background_start_deadline(health_deadline)?;
-        let child = command.spawn().map_err(io("start Forge"))?;
-        Ok(StartResult::Spawned { pid: child.id() })
+        sleep_until(deadline, START_READY_POLL_INTERVAL);
     }
+    Err(CliError::Control("Forge did not become ready".into()))
+}
+
+fn with_start_coordination<T>(
+    paths: &InstancePaths,
+    deadline: Instant,
+    operation: impl FnOnce() -> Result<T>,
+) -> Result<T> {
+    let root = paths
+        .state
+        .parent()
+        .ok_or_else(|| CliError::UnsafePath(paths.state.clone()))?;
+    let lock_path = root.join(".forge-start.lock");
+    match fs::symlink_metadata(&lock_path) {
+        Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_file() => {
+            return Err(CliError::UnsafePath(lock_path));
+        }
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(source) => {
+            return Err(CliError::Io {
+                context: "inspect Forge start lock",
+                source,
+            });
+        }
+    }
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let lock = options
+        .open(&lock_path)
+        .map_err(io("open Forge start lock"))?;
+    loop {
+        match FileExt::try_lock_exclusive(&lock) {
+            Ok(()) => break,
+            Err(error) if start_lock_is_contended(&error) && Instant::now() < deadline => {
+                sleep_until(deadline, START_COORDINATION_POLL_INTERVAL);
+            }
+            Err(error) if start_lock_is_contended(&error) => {
+                return Err(CliError::Control(
+                    "Forge start coordination timed out".into(),
+                ));
+            }
+            Err(source) => {
+                return Err(CliError::Io {
+                    context: "lock Forge start coordination",
+                    source,
+                });
+            }
+        }
+    }
+    operation()
+}
+
+fn start_lock_is_contended(error: &std::io::Error) -> bool {
+    if error.kind() == std::io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // fs2 preserves LockFileEx's ERROR_LOCK_VIOLATION instead of mapping it
+        // to WouldBlock on Windows.
+        error.raw_os_error() == Some(33)
+    }
+    #[cfg(not(target_os = "windows"))]
+    false
 }
 
 fn ensure_background_start_deadline(deadline: Instant) -> Result<()> {
@@ -121,6 +259,10 @@ fn ensure_background_start_deadline(deadline: Instant) -> Result<()> {
 
 fn background_start_can_continue(now: Instant, deadline: Instant) -> bool {
     now < deadline
+}
+
+fn prelaunch_discovery_deadline(now: Instant, health_deadline: Instant) -> Instant {
+    health_deadline.min(now + PRELAUNCH_DISCOVERY_TIMEOUT)
 }
 
 fn configure_forge_environment(
@@ -278,6 +420,39 @@ fn live_state_selected_until(
     expected_pid: Option<u32>,
     deadline: Instant,
 ) -> Result<Option<State>> {
+    live_state_selected_bounded_until(
+        paths,
+        secrets,
+        expected_instance_id,
+        expected_pid,
+        deadline,
+        INSTANCE_REGISTRY_CARD_LIMIT,
+    )
+}
+
+fn prelaunch_live_state_until(
+    paths: &InstancePaths,
+    secrets: &Secrets,
+    deadline: Instant,
+) -> Result<Option<State>> {
+    live_state_selected_bounded_until(
+        paths,
+        secrets,
+        None,
+        None,
+        deadline,
+        PRELAUNCH_REGISTRY_CARD_LIMIT,
+    )
+}
+
+fn live_state_selected_bounded_until(
+    paths: &InstancePaths,
+    secrets: &Secrets,
+    expected_instance_id: Option<&str>,
+    expected_pid: Option<u32>,
+    deadline: Instant,
+    registry_card_limit: usize,
+) -> Result<Option<State>> {
     if let Some(state) = primary_state(paths)?
         && should_stop_instance(expected_instance_id, &state.instance_id)
         && expected_pid.is_none_or(|pid| pid == state.pid)
@@ -286,7 +461,12 @@ fn live_state_selected_until(
         return Ok(Some(state));
     }
 
-    for state in registered_states(paths, expected_instance_id, expected_pid, deadline)? {
+    for state in registered_states_bounded(
+        paths,
+        expected_instance_id,
+        expected_pid,
+        registry_card_limit,
+    )? {
         if state_is_live(&state, secrets, deadline) {
             return Ok(Some(state));
         }
@@ -314,11 +494,28 @@ fn primary_state(paths: &InstancePaths) -> Result<Option<State>> {
     Ok(crate::instance::read_json::<State>(&paths.state).ok())
 }
 
+/// Registry cards are only discovery hints. PID snapshots are both slow and
+/// vulnerable to PID reuse; the authenticated status probe below is the sole
+/// authority for whether a card still names its exact Forge process.
+#[cfg(test)]
 fn registered_states(
     paths: &InstancePaths,
     expected_instance_id: Option<&str>,
     expected_pid: Option<u32>,
-    deadline: Instant,
+) -> Result<Vec<State>> {
+    registered_states_bounded(
+        paths,
+        expected_instance_id,
+        expected_pid,
+        INSTANCE_REGISTRY_CARD_LIMIT,
+    )
+}
+
+fn registered_states_bounded(
+    paths: &InstancePaths,
+    expected_instance_id: Option<&str>,
+    expected_pid: Option<u32>,
+    card_limit: usize,
 ) -> Result<Vec<State>> {
     let root = paths
         .state
@@ -338,8 +535,6 @@ fn registered_states(
     if metadata.file_type().is_symlink() || !metadata.is_dir() {
         return Err(CliError::UnsafePath(registry));
     }
-    let live_pids = live_process_ids(probe_deadline(deadline, PROCESS_SNAPSHOT_TIMEOUT));
-
     if let Some(instance_id) = expected_instance_id {
         if !safe_instance_id(instance_id) {
             return Ok(Vec::new());
@@ -349,7 +544,6 @@ fn registered_states(
                 .filter(|state| {
                     state.instance_id == instance_id
                         && expected_pid.is_none_or(|pid| pid == state.pid)
-                        && process_is_alive(live_pids.as_ref(), state.pid)
                 })
                 .into_iter()
                 .collect(),
@@ -379,17 +573,15 @@ fn registered_states(
         })
         .collect::<Vec<_>>();
     cards.sort_unstable_by_key(|entry| std::cmp::Reverse(entry.0));
-    cards.truncate(INSTANCE_REGISTRY_CARD_LIMIT);
+    cards.truncate(card_limit.min(INSTANCE_REGISTRY_CARD_LIMIT));
 
     Ok(cards
         .into_iter()
         .filter_map(|(_, path)| {
             let file_name = path.file_stem()?.to_str()?;
             let state = read_registered_state(&path)?;
-            (state.instance_id == file_name
-                && expected_pid.is_none_or(|pid| pid == state.pid)
-                && process_is_alive(live_pids.as_ref(), state.pid))
-            .then_some(state)
+            (state.instance_id == file_name && expected_pid.is_none_or(|pid| pid == state.pid))
+                .then_some(state)
         })
         .collect())
 }
@@ -413,83 +605,6 @@ fn state_is_live(state: &State, secrets: &Secrets, deadline: Instant) -> bool {
 
 fn state_matches_status(state: &State, status: &http::StatusResponse) -> bool {
     status.instance_id == state.instance_id && status.pid == state.pid
-}
-
-fn process_is_alive(live_pids: Option<&HashSet<u32>>, pid: u32) -> bool {
-    pid != 0 && live_pids.is_none_or(|pids| pids.contains(&pid))
-}
-
-#[cfg(target_os = "windows")]
-fn live_process_ids(deadline: Instant) -> Option<HashSet<u32>> {
-    use std::os::windows::process::CommandExt;
-
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    let mut command = Command::new("tasklist.exe");
-    command
-        .args(["/FO", "CSV", "/NH"])
-        .creation_flags(CREATE_NO_WINDOW);
-    command_stdout_until(&mut command, deadline)
-        .map(|stdout| parse_windows_process_ids(&String::from_utf8_lossy(&stdout)))
-}
-
-#[cfg(target_os = "windows")]
-fn parse_windows_process_ids(output: &str) -> HashSet<u32> {
-    output
-        .lines()
-        .filter_map(|line| line.split("\",\"").nth(1)?.parse().ok())
-        .collect()
-}
-
-#[cfg(not(target_os = "windows"))]
-fn live_process_ids(deadline: Instant) -> Option<HashSet<u32>> {
-    let mut command = Command::new("ps");
-    command.args(["-e", "-o", "pid="]);
-    command_stdout_until(&mut command, deadline).map(|stdout| {
-        String::from_utf8_lossy(&stdout)
-            .lines()
-            .filter_map(|line| line.trim().parse().ok())
-            .collect()
-    })
-}
-
-/// Runs the safe OS process-list helper without allowing it to outlive the
-/// caller's monotonic lifecycle budget. Stdout is drained concurrently so a
-/// large process table cannot fill the pipe and prevent the child from exiting.
-fn command_stdout_until(command: &mut Command, deadline: Instant) -> Option<Vec<u8>> {
-    command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
-    let mut child = command.spawn().ok()?;
-    let Some(mut stdout) = child.stdout.take() else {
-        let _ = child.kill();
-        let _ = child.wait();
-        return None;
-    };
-    let mut reader = Some(thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).map(|_| bytes)
-    }));
-
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                let bytes = reader.take()?.join().ok()?.ok()?;
-                return status.success().then_some(bytes);
-            }
-            Ok(None) if Instant::now() < deadline => {
-                sleep_until(deadline, PROCESS_SNAPSHOT_POLL_INTERVAL);
-            }
-            Ok(None) | Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                if let Some(reader) = reader.take() {
-                    let _ = reader.join();
-                }
-                return None;
-            }
-        }
-    }
 }
 
 fn safe_instance_id(instance_id: &str) -> bool {
@@ -522,6 +637,10 @@ mod tests {
         io::{Read, Write},
         net::TcpListener,
         path::{Path, PathBuf},
+        sync::{
+            Arc, Barrier,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+        },
         thread,
         time::{Duration, Instant},
     };
@@ -529,7 +648,8 @@ mod tests {
     use super::{
         Command, InstanceConfig, InstancePaths, SHUTDOWN_POLL_INTERVAL, SHUTDOWN_PROBE_TIMEOUT,
         SHUTDOWN_TIMEOUT, Secrets, background_start_can_continue, configure_forge_environment,
-        live_state_selected_until, registered_states, should_stop_instance,
+        live_state_selected_until, live_state_until, prelaunch_discovery_deadline,
+        registered_states, should_stop_instance, with_start_coordination,
     };
     use crate::instance::ForgeMode;
 
@@ -643,7 +763,114 @@ mod tests {
     }
 
     #[test]
-    fn registry_cards_are_bounded_named_and_newest_first() {
+    fn prelaunch_discovery_cannot_consume_the_readiness_budget() {
+        let now = Instant::now();
+        let readiness_deadline = now + Duration::from_secs(15);
+        assert_eq!(
+            prelaunch_discovery_deadline(now, readiness_deadline),
+            now + Duration::from_millis(250)
+        );
+    }
+
+    #[test]
+    fn prelaunch_discovery_accepts_an_authenticated_status_slower_than_the_old_cutoff() {
+        let live_pid = std::process::id();
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut connection, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let read = connection.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.contains("GET /api/control/status"));
+            assert!(request.contains("Authorization: Bearer delayed-token"));
+            thread::sleep(Duration::from_millis(150));
+            let body = format!(r#"{{"instance_id":"forge_delayed","pid":{live_pid}}}"#);
+            connection
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len()
+                    )
+                    .as_bytes(),
+                )
+                .unwrap();
+        });
+        let root = tempfile::tempdir().unwrap();
+        let paths = InstancePaths {
+            config: root.path().join("config.json"),
+            secrets: root.path().join("secrets.json"),
+            state: root.path().join("state.json"),
+            log: root.path().join("forge.log"),
+        };
+        fs::write(
+            &paths.state,
+            format!(
+                r#"{{"endpoint":"http://127.0.0.1:{port}/","instance_id":"forge_delayed","pid":{live_pid}}}"#
+            ),
+        )
+        .unwrap();
+        let secrets = Secrets {
+            auth_token: "delayed-token".into(),
+            version: 1,
+        };
+        let now = Instant::now();
+
+        let state = live_state_until(
+            &paths,
+            &secrets,
+            None,
+            prelaunch_discovery_deadline(now, now + Duration::from_secs(15)),
+        )
+        .unwrap()
+        .expect("delayed authenticated state");
+
+        assert_eq!(state.instance_id, "forge_delayed");
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn start_coordination_serializes_reprobe_before_one_spawn() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = InstancePaths {
+            config: root.path().join("config.json"),
+            secrets: root.path().join("secrets.json"),
+            state: root.path().join("state.json"),
+            log: root.path().join("forge.log"),
+        };
+        let ready = Arc::new(AtomicBool::new(false));
+        let spawn_count = Arc::new(AtomicUsize::new(0));
+        let start_gate = Arc::new(Barrier::new(3));
+        let mut workers = Vec::new();
+
+        for _ in 0..2 {
+            let paths = paths.clone();
+            let ready = Arc::clone(&ready);
+            let spawn_count = Arc::clone(&spawn_count);
+            let start_gate = Arc::clone(&start_gate);
+            workers.push(thread::spawn(move || {
+                start_gate.wait();
+                with_start_coordination(&paths, Instant::now() + Duration::from_secs(2), || {
+                    if !ready.load(Ordering::SeqCst) {
+                        thread::sleep(Duration::from_millis(50));
+                        spawn_count.fetch_add(1, Ordering::SeqCst);
+                        ready.store(true, Ordering::SeqCst);
+                    }
+                    Ok(())
+                })
+                .unwrap();
+            }));
+        }
+        start_gate.wait();
+        for worker in workers {
+            worker.join().unwrap();
+        }
+
+        assert_eq!(spawn_count.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn registry_cards_are_bounded_named_and_defer_liveness_to_authenticated_probes() {
         let live_pid = std::process::id();
         let root = std::env::temp_dir().join(format!(
             "artisan-cli-registry-test-{}-{}",
@@ -680,18 +907,23 @@ mod tests {
             log: root.join("forge.log"),
         };
 
-        let deadline = || Instant::now() + Duration::from_secs(2);
-        let states = registered_states(&paths, None, None, deadline()).unwrap();
-        assert_eq!(states.len(), 1);
-        assert_eq!(states[0].instance_id, "forge_valid");
+        let states = registered_states(&paths, None, None).unwrap();
+        let instance_ids = states
+            .iter()
+            .map(|state| state.instance_id.as_str())
+            .collect::<std::collections::HashSet<_>>();
         assert_eq!(
-            registered_states(&paths, Some("forge_valid"), Some(live_pid), deadline(),)
+            instance_ids,
+            std::collections::HashSet::from(["forge_valid", "forge_dead"])
+        );
+        assert_eq!(
+            registered_states(&paths, Some("forge_valid"), Some(live_pid))
                 .unwrap()
                 .len(),
             1
         );
         assert!(
-            registered_states(&paths, Some("../escape"), None, deadline())
+            registered_states(&paths, Some("../escape"), None)
                 .unwrap()
                 .is_empty()
         );

@@ -663,19 +663,22 @@ struct ReadyState {
 
 fn ready_state(layout: &Layout) -> Result<ReadyState> {
     let deadline = std::time::Instant::now() + FORGE_READY_TIMEOUT;
-    let (paths, _, secrets) = instance::load(layout)?;
     // An already-healthy Forge needs no launch, so opening against one works
     // even in homes without an installation manifest (the repo development
     // Forge runs from `.dist/forge`, started by its own CLI).
-    if let Some(candidate) =
-        process::live_state_until(&paths, &secrets, None, probe_deadline(deadline))?
-    {
-        return Ok(ReadyState {
-            state: candidate,
-            owned_instance_id: None,
-        });
+    if !layout.manifest.is_file() {
+        let (paths, _, secrets) = instance::load(layout)?;
+        if let Some(candidate) =
+            process::live_state_until(&paths, &secrets, None, probe_deadline(deadline))?
+        {
+            return Ok(ReadyState {
+                state: candidate,
+                owned_instance_id: None,
+            });
+        }
     }
     let start_result = start_until(layout, false, deadline)?;
+    let (paths, _, secrets) = instance::load(layout)?;
     while std::time::Instant::now() < deadline {
         if let Some(candidate) =
             process::live_state_until(&paths, &secrets, None, probe_deadline(deadline))?
