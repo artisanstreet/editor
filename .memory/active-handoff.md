@@ -1,11 +1,12 @@
 # Active Branch Handoff
 
-Last updated: 2026-08-10. Branch continuity only; durable verified status is in [`docs/status/backend-completion-matrix.md`](../docs/status/backend-completion-matrix.md).
+Last updated: 2026-08-11. Branch continuity only; durable verified status is in [`docs/status/backend-completion-matrix.md`](../docs/status/backend-completion-matrix.md).
 
 ## Working State
 
 - Repository `C:\Users\sander\Desktop\artisan-editor`; direct `master` → `origin/master`.
-- Release repair `332684a0` and pairing fix `c360ac9a` are pushed; installed 0.2.35 is verified.
+- Focused validation `48875b1c`, pairing `4f7e2a2c`, acceptance docs
+  `2f634890`, and bounded backend persistence `f48ce041` are pushed.
 - Root cleanup is isolated from unrelated work still present in the checkout.
 
 ## Invariants
@@ -24,82 +25,85 @@ Last updated: 2026-08-10. Branch continuity only; durable verified status is in 
 
 ## Active Work
 
-- Lifecycle base `810e07b4`, repair `332684a0`, and pairing fix `c360ac9a` are pushed. The latest gives every
-  completed renderer handoff a fresh public navigation marker, so cold Forge startup
-  reboots the frontend runtime without moving its one-time capability out of the fragment.
-- New-thread spaces, pinned model controls, hidden scrollbars, and clear inactive
-  scroll fades are implemented without disabling containers.
-- Working rows keep a bounded assistant preview separate from lifecycle; marquee code is bare muted monospace.
-- Tool configuration lives under `.config/`; only Windows installer transport/test remain PowerShell.
-- A latched recovery epoch and browser clock-gap monitor recover after suspend without reloading.
-- Streaming repair remains for prose finalization/late mounts. Waiting slice `5551929d` is pushed and passes 89 focused tests/review/lint/type/build/native. Full gate has unrelated scrollbar format, two stale participant-window assertions, and two persistent Claude CLI timeouts.
-- Open work-session body/header spacing matches; real trace status retains `gap-5`.
-- Changed-file rows/header now share an edge, the all-known aggregate sits at
-  right, and the gap matches row `py-1.5`. Opt-in thread notifications are
-  event-driven and persistent; Windows registers stable toast identity early,
-  repairs legacy Start Menu links in place, and the native installer carries
-  the same AUMID/CLSID for new/repair flows.
-- WebGL context-loss recovery now registers before shader allocation, hides a
-  corrupt canvas behind its glass material, and rebuilds every invalidated GL
-  resource after restoration.
-- The thread proximity rail now uses projected engine/model/live status, gives
-  working and ordinary rows separate bounded scroll regions with a conditional
-  `gap-4`, and exposes DEV-only ×20 stress sliders. Settled rows are newest-first
-  in elapsed-time groups: unlabeled today, Yesterday, Last 3 days, Last 7 days,
-  and a final Past month catch-all, with `gap-4` between groups. It remains
-  uncommitted with the protected frontend layout slice.
-- Codex 0.145.0 usage is schema-correct. Its generation-owned meter/row-refresh
-  repair passes 13 tests, TypeScript, lint/format, SER build, and review; full
-  validation reached 7 unrelated dirty frontend source assertions after both builds.
-- Provider runtime boundary: the SDK/package and embedded 266.1-MiB Claude CLI
-  are removed. Claude runs/usage use the external CLI; Codex usage/auth uses ACP
-  only. Exact candidate SEA is 105,915,904 bytes; the process matrix is green.
-- The 2026-08-08 regression repair makes Forge-owned active work outrank local
-  rail settlement, applies only the current hydration's thread snapshot before
-  opening the shell, lets active disclosures close without dropping their live
-  detail tree, and keeps every rail region interactive. Started model-transition
-  wording waits for its source. Optional event observers coalesce independently.
-- Codex and Claude preserve root ownership while native child/grandchild work
-  becomes provider-neutral `subagent` lifecycle and `subagent_transcript`
-  content. Root rendering now filters to parentless turns; worker inspection
-  filters by durable agent identity. Back/Escape restores root, while root traces
-  name one worker or count multiple. Generic Claude jobs stay excluded.
-- Individual child lifecycle no longer settles parent thread metadata; the
-  orchestration-group lifecycle is authoritative. Global activity still tracks
-  worker recency, while `reader_activity_at` advances only for root-visible
-  activity. Read acknowledgement also requires focused, visible reader attention.
-- The editor route subscribes to the authoritative thread list. Reassignment
-  unmounts the old editor before moving to the new workspace route; detach moves
-  to `/t/_/:thread`, so stale file reads cannot retain revoked workspace scope.
-- `/t/:workspace/:thread` and `/e/:workspace/:thread` are the sole thread/editor
-  routes. `/` owns draft creation, activity, recents, and inspector behavior;
-  `/threads` is removed and all new-thread navigation targets `/`.
+- Renderer banners/toaster and `svelte-sonner` are gone; host notifications remain.
+  Typography is `{ text, code }`, safely maps legacy records, and drops Lora.
+  Rich-link favicons win scoped prose margins; focused checks and review pass.
+- Effort menu groups GPT 5.6 Max/Ultra, Claude Max, and Grok none; Cursor Max Mode remains separate and Haiku has no flag. Ultra has a catalog-owned caveat tooltip, the group separator keeps equal insets, and speed accents stay on the outer model trigger rather than its policy dropdown.
+- Trace audit: Codex exposes summaries plus raw text (raw dropped); Fable's Artisan
+  `-p` path receives summaries but not raw; Grok has `thought`; Cursor suppresses it.
+  Adjacent summaries now share one auto-open verb/rail disclosure, close upward on
+  settlement, and unmount after transition. Fidelity remains unmodeled.
+- New-thread draft recovery stays hidden during normal navigation and appears only after a route failure.
+- Explicit New thread actions now discard only their target composer slot and
+  revision-reset the app-scoped draft controller. Reset/alignment share a lock,
+  and accepted first messages clear interruption-safely before navigation.
+- A quick Codex stop can reach `turn/interrupt` before `turn/started`. Forge then
+  records the cancel outbox row as `undeliverable`, and the live run continues.
+- Hidden scrollbar chrome and its five fake right-side gutters are removed app-wide;
+  scrolling, clear inactive fades, new-thread spaces, and pinned model controls remain intact.
+- The app-icon star is centered at 75% with its geometry, shadow stack, and gradient;
+  Windows injects a pre-rasterized seven-resolution ICO so packaging takes 6.99s.
+- Working rows prefer bounded assistant previews even when unread; lifecycle stays authoritative, marquee/prose code is bare muted monospace, and overflowing live previews use a readable 30-second cycle.
+- Jump-to-latest chrome follows the rail-aware prose column, not the whole card.
+- Storage repair is verified: raw frames became run watermarks, text is cadence-
+  batched, patches/surfaces retain 256/512 per thread, native inboxes are consumed,
+  erased threads delete images, and cold metadata recovery is background/indexed.
+  Migration compacts logically; `db:compact` safely reclaims the physical 4.17 GiB.
+  Backend/protocol/data prerequisites and status docs are pushed in `f48ce041`.
+- All settled work history mounts collapsed; terminal Checklists hide; paste bump is gone while
+  duplicate rejection remains. Review passes; protected shared work prevents staging.
+- Forge attention/replay, child cleanup, curated names, and terminal retention
+  pass focused tests, checks, and review.
+- Agent names allocate transactionally and uniformly without replacement; persisted
+  names never reroll, banks have no popularity weights, and collisions/restart replay pass.
+- Steering waits for successful Engine Send; failure restores the draft, crash recovery
+  queues once, and bounded contiguous cuts preserve single/multi-steer order. Review is clean.
+- Forge work outranks local rail settlement; only current hydration applies before
+  shell open. Active disclosures retain live detail, rail regions remain interactive,
+  model-transition wording waits for its source, and event observers coalesce.
+- Codex/Claude keep root ownership while native descendants become provider-neutral
+  subagent lifecycle/transcripts. Root filters parentless turns; inspection uses
+  durable identity, Back/Escape restores root, and generic Claude jobs stay excluded.
+- Child lifecycle advances only global recency; aggregate/root activity owns the
+  reader cursor. Unread Complete/failed outcomes stay Working with blue/red dots
+  until focused root reading or explicit Settle; active work and Idle stay unmarked.
 
 ## Verification
 
-- Installed 0.2.35 cold `ae open` returns in 781 ms, leaves no `ae`, and connects
-  Editor to Forge 3.41 s later; close still removes both in 1.34 s. Desktop/release
-  gates pass 9 files/58 tests, both Windows artifact verifiers, TypeScript, frontend,
-  and independent review. Full validation again reaches only 3 protected dirty-
-  frontend assertions after format/lint/type/build; native fmt/clippy, 73 Rust tests,
-  and the dev-TUI smoke pass separately.
-- Assistant preview/status passes 6 files/46 tests plus production frontend.
-- Provider CLI/ACP milestone passes 14 files/112 tests, TypeScript, Forge checks,
-  and a real 105,915,904-byte candidate SEA with zero provider assets/SDK markers;
-  independent review found no code blocker. Full validation clears format, lint,
-  typechecks, and both builds, then hits 3 unrelated dirty frontend assertions;
-  native checks and all 66 Rust tests pass separately.
+- Installed 0.2.40 established Editor→Forge loopback transport and closed cleanly.
+  Pairing passes UI 44, native 76, root types/builds, and independent review;
+  area gates reach only 6/1 protected frontend/desktop stale assertions.
+- Effort/speed follow-up passes 4 focused files/38 tests, scoped format/lint,
+  root TypeScript, the production frontend build, generated CSS inspection, and SER scans.
+- Disclosure correction passes 2 files/9 tests, format/lint, frontend and packaged
+  Electron builds, packaged verification, and bundled-predicate inspection. The
+  broader UI fix retains its earlier static/build/SER, native/73, and review gates.
+- New-thread lifecycle/default restoration passes 13 focused files/93 tests,
+  scoped format/lint/SER, root TypeScript, and the production frontend build.
+  Full validation passed its global pre-test gates, then its complete Vitest
+  phase stopped making progress and was ended after the exact process went idle.
+- Attention retention passes 6 files/42 tests, format/lint/SER, build, and review.
+- Steering acknowledgement passes 5 files/49 tests plus static/build/review;
+  delivery, fallback, and restart prove no early projection, old-run resume, or
+  duplicate replacement. Render order and same-item boundaries pass 52 integrated
+  tests plus frontend/Forge types, scoped checks/build, and final review.
+- Reasoning disclosure passes 12 focused tests, lint, client/SSR build, SER scans,
+  and final review. The aggregate frontend gate has five unrelated stale assertions.
+- Storage/native integration passed 43 focused tests, then the final optional-usage
+  regression passed after its exact-optional fix; backend format/lint and root types pass.
 
 ## Dirty-Tree Integration Notes
 
-- Native-subagent integration spans shared engine/backend/frontend files in the
-  mixed checkout. Transcript isolation and status/read repairs are verified but
-  uncommitted because staging those whole files would also publish unrelated
-  protected work.
-- Selector polish shares `model-selector/view.sv` and the shell source gate with
-  protected in-progress frontend work, so it remains uncommitted with that slice.
-- Assistant preview shares the protected rail/prose files; its migration follows
-  three untracked migrations and must not be published alone.
+- Native-subagent/name-allocation, storage retention, and backend status documentation
+  are committed in `f48ce041`; unrelated frontend presentation work remains dirty.
+- Selector/speed and new-thread default persistence share view, settings,
+  protocol/schema/service, route, migration, and source-gate files with protected
+  work, so the verified fix remains uncommitted.
+- Assistant preview and attention retention share protected rail/navigation,
+  protocol, and migration work; do not stage or publish those files alone.
+- Steering acknowledgement shares composer/route, projection/repository,
+  protocol/store/workspace, handoff, and status files with protected work; do
+  not stage those whole files.
 - Protected page patch hash: `84cb787c1f2422da8c5fb5c41a00837151590e10`.
 
 ## Product Continuity
@@ -109,8 +113,5 @@ Last updated: 2026-08-10. Branch continuity only; durable verified status is in 
   remains authoritative when a thread is reassigned, detached, or removed.
 - Installed renderer is sandboxed at `artisan://app`; Forge does not host the
   SPA. `ae open --handoff` performs one-time loopback pairing.
-- Codex app-server/exec fallback and the external Claude CLI are production adapters.
-  Native child lifecycle/roster, ordered transcript replay, approvals, and
-  read-only participant conversation inspection are supported.
 - Forge state and Codex SQLite are home scoped. `CODEX_HOME` is user global;
   Claude shares `~/.claude` because relocating config also moves credentials.
