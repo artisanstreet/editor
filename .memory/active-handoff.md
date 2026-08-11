@@ -5,8 +5,8 @@ Last updated: 2026-08-11. Branch continuity only; durable verified status is in 
 ## Working State
 
 - Repository `C:\Users\sander\Desktop\artisan-editor`; direct `master` → `origin/master`.
-- Focused validation `48875b1c`, pairing `4f7e2a2c`, acceptance docs
-  `2f634890`, and bounded backend persistence `f48ce041` are pushed.
+- Validation `48875b1c`, pairing `4f7e2a2c`, acceptance `2f634890`, and bounded
+  persistence `f48ce041` are pushed.
 - Root cleanup is isolated from unrelated work still present in the checkout.
 
 ## Invariants
@@ -89,8 +89,7 @@ Last updated: 2026-08-11. Branch continuity only; durable verified status is in 
   tests plus frontend/Forge types, scoped checks/build, and final review.
 - Reasoning disclosure passes 12 focused tests, lint, client/SSR build, SER scans,
   and final review. The aggregate frontend gate has five unrelated stale assertions.
-- Storage/native integration passed 43 focused tests, then the final optional-usage
-  regression passed after its exact-optional fix; backend format/lint and root types pass.
+- Storage/native integration passed 43 focused tests; backend checks and root types pass.
 
 ## Dirty-Tree Integration Notes
 
