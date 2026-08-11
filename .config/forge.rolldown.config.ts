@@ -1,8 +1,12 @@
 import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
-import { NtExecutable, NtExecutableResource, Resource } from "resedit";
+import { Data, NtExecutable, NtExecutableResource, Resource } from "resedit";
 
 const workspace_root = resolve(import.meta.dirname, "..");
+const forge_icon_path = resolve(
+	workspace_root,
+	"modules/frontend/src/lib/assets/barekey/artisan-forge-icon.ico",
+);
 
 export type ForgeBuildMode = "production" | "validation";
 
@@ -28,9 +32,10 @@ const stage = (from: string, to: string) => {
 /**
  * Task Manager lists a process by the FileDescription in its executable's
  * version resource, so the staged Node copy must carry Artisan branding or
- * the Forge shows up as "Node.js JavaScript Runtime". Rewriting the resource
- * invalidates Node's Authenticode signature; release signing, once it exists,
- * must re-sign this file afterwards.
+ * the Forge shows up as "Node.js JavaScript Runtime". The executable icon is
+ * replaced at the same resource boundary. Rewriting these resources invalidates
+ * Node's Authenticode signature; release signing, once it exists, must re-sign
+ * this file afterwards.
  */
 export const BrandForgeExecutable = (executable_path: string, product_version: string) => {
 	const executable = NtExecutable.from(readFileSync(executable_path), { ignoreCert: true });
@@ -51,6 +56,15 @@ export const BrandForgeExecutable = (executable_path: string, product_version: s
 	version_info.setFileVersion(product_version);
 	version_info.setProductVersion(product_version);
 	version_info.outputToResourceEntries(resources.entries);
+	const forge_icon = Data.IconFile.from(readFileSync(forge_icon_path));
+	for (const icon_group of Resource.IconGroupEntry.fromEntries(resources.entries)) {
+		Resource.IconGroupEntry.replaceIconsForResource(
+			resources.entries,
+			icon_group.id,
+			icon_group.lang,
+			forge_icon.icons.map((icon) => icon.data),
+		);
+	}
 	resources.outputResource(executable);
 	writeFileSync(executable_path, Buffer.from(executable.generate()));
 };

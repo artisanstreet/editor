@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="720" height="720" viewBox="0 0 720 720">
+	<defs>
+		<clipPath id="icon-shape">
+			<rect x="18" y="18" width="684" height="684" rx="154" />
+		</clipPath>
+		<filter id="plastic-card" x="-25%" y="-25%" width="150%" height="165%" color-interpolation-filters="sRGB">
+			<!-- Outer 0 1px 2px / 22%. -->
+			<feGaussianBlur in="SourceAlpha" stdDeviation="3.054" result="outer-near-blur" />
+			<feOffset in="outer-near-blur" dy="3.054" result="outer-near-offset" />
+			<feFlood flood-color="black" flood-opacity="0.22" result="outer-near-color" />
+			<feComposite in="outer-near-color" in2="outer-near-offset" operator="in" result="outer-near" />
+
+			<!-- Outer 0 8px 16px -6px / 38%. -->
+			<feMorphology in="SourceAlpha" operator="erode" radius="18.321" result="outer-mid-spread" />
+			<feGaussianBlur in="outer-mid-spread" stdDeviation="24.429" result="outer-mid-blur" />
+			<feOffset in="outer-mid-blur" dy="24.429" result="outer-mid-offset" />
+			<feFlood flood-color="black" flood-opacity="0.38" result="outer-mid-color" />
+			<feComposite in="outer-mid-color" in2="outer-mid-offset" operator="in" result="outer-mid" />
+
+			<!-- Outer 0 22px 44px -18px / 48%. -->
+			<feMorphology in="SourceAlpha" operator="erode" radius="54.964" result="outer-far-spread" />
+			<feGaussianBlur in="outer-far-spread" stdDeviation="67.179" result="outer-far-blur" />
+			<feOffset in="outer-far-blur" dy="67.179" result="outer-far-offset" />
+			<feFlood flood-color="black" flood-opacity="0.48" result="outer-far-color" />
+			<feComposite in="outer-far-color" in2="outer-far-offset" operator="in" result="outer-far" />
+
+			<!-- The inverse alpha is the source for clipped inset shadows. -->
+			<feFlood flood-color="white" result="filter-canvas" />
+			<feComposite in="filter-canvas" in2="SourceAlpha" operator="out" result="outside" />
+
+			<!-- Inset 0 10px 18px -10px white / 20%. -->
+			<feMorphology in="outside" operator="erode" radius="30.536" result="top-soft-spread" />
+			<feGaussianBlur in="top-soft-spread" stdDeviation="27.482" result="top-soft-blur" />
+			<feOffset in="top-soft-blur" dy="30.536" result="top-soft-offset" />
+			<feComposite in="top-soft-offset" in2="SourceAlpha" operator="in" result="top-soft-mask" />
+			<feFlood flood-color="white" flood-opacity="0.2" result="top-soft-color" />
+			<feComposite in="top-soft-color" in2="top-soft-mask" operator="in" result="top-soft" />
+
+			<!-- Inset 0 -10px 18px -10px black / 38%. -->
+			<feMorphology in="outside" operator="erode" radius="30.536" result="bottom-soft-spread" />
+			<feGaussianBlur in="bottom-soft-spread" stdDeviation="27.482" result="bottom-soft-blur" />
+			<feOffset in="bottom-soft-blur" dy="-30.536" result="bottom-soft-offset" />
+			<feComposite in="bottom-soft-offset" in2="SourceAlpha" operator="in" result="bottom-soft-mask" />
+			<feFlood flood-color="black" flood-opacity="0.38" result="bottom-soft-color" />
+			<feComposite in="bottom-soft-color" in2="bottom-soft-mask" operator="in" result="bottom-soft" />
+
+			<!-- The 1.5px top and bottom inset hairlines. -->
+			<feOffset in="outside" dy="4.58" result="top-line-offset" />
+			<feComposite in="top-line-offset" in2="SourceAlpha" operator="in" result="top-line-mask" />
+			<feFlood flood-color="white" flood-opacity="0.2" result="top-line-color" />
+			<feComposite in="top-line-color" in2="top-line-mask" operator="in" result="top-line" />
+			<feOffset in="outside" dy="-4.58" result="bottom-line-offset" />
+			<feComposite in="bottom-line-offset" in2="SourceAlpha" operator="in" result="bottom-line-mask" />
+			<feFlood flood-color="black" flood-opacity="0.28" result="bottom-line-color" />
+			<feComposite in="bottom-line-color" in2="bottom-line-mask" operator="in" result="bottom-line" />
+
+			<feMerge>
+				<feMergeNode in="outer-far" />
+				<feMergeNode in="outer-mid" />
+				<feMergeNode in="outer-near" />
+				<feMergeNode in="SourceGraphic" />
+				<feMergeNode in="top-soft" />
+				<feMergeNode in="bottom-soft" />
+				<feMergeNode in="top-line" />
+				<feMergeNode in="bottom-line" />
+			</feMerge>
+		</filter>
+		<mask id="star-rising-cutout" maskUnits="userSpaceOnUse" x="-50" y="-50" width="200" height="200">
+			<rect x="-50" y="-50" width="200" height="200" fill="white" />
+			<rect x="7.5" y="42" width="85" height="16" rx="3.5" fill="black" stroke="black" stroke-width="5.3125" transform="rotate(-30 50 50)" />
+		</mask>
+	</defs>
+	<g filter="url(#plastic-card)">
+		<g clip-path="url(#icon-shape)">
+			<image x="18" y="18" width="684" height="684" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHdpZHRoPSI3MjAiIGhlaWdodD0iNzIwIiB2aWV3Qm94PSIwIDAgNzIwIDcyMCI+PHJlY3Qgd2lkdGg9IjEwMCUiIGhlaWdodD0iMTAwJSIgZmlsbD0iIzFkNGVkOCIvPjxkZWZzPjxsaW5lYXJHcmFkaWVudCBpZD0iZ3JhZGllbnQtNyIgZ3JhZGllbnRVbml0cz0idXNlclNwYWNlT25Vc2UiIHgxPSIwJSIgeTE9IjAlIiB4Mj0iMCUiIHkyPSIxMDAlIj48c3RvcCBvZmZzZXQ9IjAlIiBzdG9wLWNvbG9yPSIjMWQ0ZWQ4Ii8+PHN0b3Agb2Zmc2V0PSIxMDAlIiBzdG9wLWNvbG9yPSIjMWQ0ZWQ4Ii8+PC9saW5lYXJHcmFkaWVudD48bGluZWFyR3JhZGllbnQgaWQ9ImdyYWRpZW50LTUiIGdyYWRpZW50VW5pdHM9InVzZXJTcGFjZU9uVXNlIiB4MT0iMCUiIHkxPSIwJSIgeDI9IjAlIiB5Mj0iMTAwJSI+PHN0b3Agb2Zmc2V0PSIwJSIgc3RvcC1jb2xvcj0iIzFkNGVkOCIvPjxzdG9wIG9mZnNldD0iMTAwJSIgc3RvcC1jb2xvcj0iIzkzYzVmZCIvPjwvbGluZWFyR3JhZGllbnQ+PGxpbmVhckdyYWRpZW50IGlkPSJncmFkaWVudC0xIiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgeDE9IjAlIiB5MT0iMCUiIHgyPSIwJSIgeTI9IjEwMCUiPjxzdG9wIG9mZnNldD0iMCUiIHN0b3AtY29sb3I9IiM5M2M1ZmQiLz48c3RvcCBvZmZzZXQ9IjEwMCUiIHN0b3AtY29sb3I9IiMyNTYzZWIiLz48L2xpbmVhckdyYWRpZW50PjxsaW5lYXJHcmFkaWVudCBpZD0iZ3JhZGllbnQtMiIgZ3JhZGllbnRVbml0cz0idXNlclNwYWNlT25Vc2UiIHgxPSIwJSIgeTE9IjAlIiB4Mj0iMCUiIHkyPSIxMDAlIj48c3RvcCBvZmZzZXQ9IjAlIiBzdG9wLWNvbG9yPSIjMjU2M2ViIi8+PHN0b3Agb2Zmc2V0PSIxMDAlIiBzdG9wLWNvbG9yPSIjZjlhOGQ0Ii8+PC9saW5lYXJHcmFkaWVudD48bGluZWFyR3JhZGllbnQgaWQ9ImdyYWRpZW50LTQiIGdyYWRpZW50VW5pdHM9InVzZXJTcGFjZU9uVXNlIiB4MT0iMCUiIHkxPSIwJSIgeDI9IjAlIiB5Mj0iMTAwJSI+PHN0b3Agb2Zmc2V0PSIwJSIgc3RvcC1jb2xvcj0iI2Y5YThkNCIvPjxzdG9wIG9mZnNldD0iMTAwJSIgc3RvcC1jb2xvcj0iI2E4NTVmNyIvPjwvbGluZWFyR3JhZGllbnQ+PGxpbmVhckdyYWRpZW50IGlkPSJncmFkaWVudC0zIiBncmFkaWVudFVuaXRzPSJ1c2VyU3BhY2VPblVzZSIgeDE9IjAlIiB5MT0iMCUiIHgyPSIwJSIgeTI9IjEwMCUiPjxzdG9wIG9mZnNldD0iMCUiIHN0b3AtY29sb3I9IiNhODU1ZjciLz48c3RvcCBvZmZzZXQ9IjEwMCUiIHN0b3AtY29sb3I9IiNmOTczMTYiLz48L2xpbmVhckdyYWRpZW50PjxsaW5lYXJHcmFkaWVudCBpZD0iZ3JhZGllbnQtNiIgZ3JhZGllbnRVbml0cz0idXNlclNwYWNlT25Vc2UiIHgxPSIwJSIgeTE9IjAlIiB4Mj0iMCUiIHkyPSIxMDAlIj48c3RvcCBvZmZzZXQ9IjAlIiBzdG9wLWNvbG9yPSIjZjk3MzE2Ii8+PHN0b3Agb2Zmc2V0PSIxMDAlIiBzdG9wLWNvbG9yPSIjZmVkN2FhIi8+PC9saW5lYXJHcmFkaWVudD48bGluZWFyR3JhZGllbnQgaWQ9ImdyYWRpZW50LTgiIGdyYWRpZW50VW5pdHM9InVzZXJTcGFjZU9uVXNlIiB4MT0iMCUiIHkxPSIwJSIgeDI9IjAlIiB5Mj0iMTAwJSI+PHN0b3Agb2Zmc2V0PSIwJSIgc3RvcC1jb2xvcj0iI2ZlZDdhYSIvPjxzdG9wIG9mZnNldD0iMTAwJSIgc3RvcC1jb2xvcj0iI2ZmZjdlZCIvPjwvbGluZWFyR3JhZGllbnQ+PGZpbHRlciBpZD0ic29mdC03IiB4PSItMjAlIiB5PSItMjAlIiB3aWR0aD0iMTQwJSIgaGVpZ2h0PSIxNDAlIj48ZmVHYXVzc2lhbkJsdXIgc3RkRGV2aWF0aW9uPSIzMCIvPjwvZmlsdGVyPjxmaWx0ZXIgaWQ9InNvZnQtNSIgeD0iLTIwJSIgeT0iLTIwJSIgd2lkdGg9IjE0MCUiIGhlaWdodD0iMTQwJSI+PGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iMzAiLz48L2ZpbHRlcj48ZmlsdGVyIGlkPSJzb2Z0LTEiIHg9Ii0yMCUiIHk9Ii0yMCUiIHdpZHRoPSIxNDAlIiBoZWlnaHQ9IjE0MCUiPjxmZUdhdXNzaWFuQmx1ciBzdGREZXZpYXRpb249IjMwIi8+PC9maWx0ZXI+PGZpbHRlciBpZD0ic29mdC0yIiB4PSItMjAlIiB5PSItMjAlIiB3aWR0aD0iMTQwJSIgaGVpZ2h0PSIxNDAlIj48ZmVHYXVzc2lhbkJsdXIgc3RkRGV2aWF0aW9uPSIzMCIvPjwvZmlsdGVyPjxmaWx0ZXIgaWQ9InNvZnQtNCIgeD0iLTIwJSIgeT0iLTIwJSIgd2lkdGg9IjE0MCUiIGhlaWdodD0iMTQwJSI+PGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iMzAiLz48L2ZpbHRlcj48ZmlsdGVyIGlkPSJzb2Z0LTMiIHg9Ii0yMCUiIHk9Ii0yMCUiIHdpZHRoPSIxNDAlIiBoZWlnaHQ9IjE0MCUiPjxmZUdhdXNzaWFuQmx1ciBzdGREZXZpYXRpb249IjMwIi8+PC9maWx0ZXI+PGZpbHRlciBpZD0ic29mdC02IiB4PSItMjAlIiB5PSItMjAlIiB3aWR0aD0iMTQwJSIgaGVpZ2h0PSIxNDAlIj48ZmVHYXVzc2lhbkJsdXIgc3RkRGV2aWF0aW9uPSIzMCIvPjwvZmlsdGVyPjxmaWx0ZXIgaWQ9InNvZnQtOCIgeD0iLTIwJSIgeT0iLTIwJSIgd2lkdGg9IjE0MCUiIGhlaWdodD0iMTQwJSI+PGZlR2F1c3NpYW5CbHVyIHN0ZERldmlhdGlvbj0iMzAiLz48L2ZpbHRlcj48L2RlZnM+PHBhdGggZD0iTSAtMTgwIDY1MCBMIDAgNjUwIEwgNzIwIDYyMCBMIDkwMCA2MjAgTCA5MDAgOTAwIEwgLTE4MCA5MDAgWiIgZmlsbD0idXJsKCNncmFkaWVudC03KSIgZmlsdGVyPSJ1cmwoI3NvZnQtNykiLz48cGF0aCBkPSJNIC0xODAgMCBMIDEwLjMyMjU4MDY0NTE2MTI5IDAgUSAzNjYuNDUxNjEyOTAzMjI1ODUgMTUyLjc1MjAxNjEyOTAzMjI2IDU0My4yMjU4MDY0NTE2MTI5IDc2LjM3NjAwODA2NDUxNjEzIFQgNzIwIDAgTCA5MDAgMCBMIDkwMCA5MDAgTCAtMTgwIDkwMCBaIiBmaWxsPSJ1cmwoI2dyYWRpZW50LTUpIiBmaWx0ZXI9InVybCgjc29mdC01KSIvPjxwYXRoIGQ9Ik0gLTE4MCAxNzguMDY0NTE2MTI5MDMyMTcgTCAwIDE3OC4wNjQ1MTYxMjkwMzIxNyBRIDE0NS44MDY0NTE2MTI5MDMyMyAyOTEuNDYxNjkzNTQ4Mzg3MTMgNDMyLjkwMzIyNTgwNjQ1MTYgMjI5LjI3OTIzMzg3MDk2Nzc0IFQgNzIwIDE2Ny4wOTY3NzQxOTM1NDgzNiBMIDkwMCAxNjcuMDk2Nzc0MTkzNTQ4MzYgTCA5MDAgOTAwIEwgLTE4MCA5MDAgWiIgZmlsbD0idXJsKCNncmFkaWVudC0xKSIgZmlsdGVyPSJ1cmwoI3NvZnQtMSkiLz48cGF0aCBkPSJNIC0xODAgNDg4Ljk2Nzc0MTkzNTQ4NCBMIDAgNDg4Ljk2Nzc0MTkzNTQ4NCBRIDM1MC4zMjI1ODA2NDUxNjEzIDI3OS44NDg3OTAzMjI1ODA3IDUyOC43MDk2Nzc0MTkzNTQ5IDMxNC4zNjQ5MTkzNTQ4Mzg4IFQgNzA3LjA5Njc3NDE5MzU0ODQgMzQ4Ljg4MTA0ODM4NzA5NjggTCA5MDAgMzQ4Ljg4MTA0ODM4NzA5NjggTCA5MDAgOTAwIEwgLTE4MCA5MDAgWiIgZmlsbD0idXJsKCNncmFkaWVudC0yKSIgZmlsdGVyPSJ1cmwoI3NvZnQtMikiLz48cGF0aCBkPSJNIC0xODAgNDgwIEwgMCA0ODAgTCA3MjAgNDUwIEwgOTAwIDQ1MCBMIDkwMCA5MDAgTCAtMTgwIDkwMCBaIiBmaWxsPSJ1cmwoI2dyYWRpZW50LTQpIiBmaWx0ZXI9InVybCgjc29mdC00KSIvPjxwYXRoIGQ9Ik0gLTE4MCA1NTIuNzQxOTM1NDgzODcwOSBMIDAgNTUyLjc0MTkzNTQ4Mzg3MDkgUSAyNjAuNjQ1MTYxMjkwMzIyNTYgMzgxLjEzOTExMjkwMzIyNTg1IDQ5MC4zMjI1ODA2NDUxNjEzIDQzNC40NDA1MjQxOTM1NDg0IFQgNzIwIDQ4Ny43NDE5MzU0ODM4NzA5IEwgOTAwIDQ4Ny43NDE5MzU0ODM4NzA5IEwgOTAwIDkwMCBMIC0xODAgOTAwIFoiIGZpbGw9InVybCgjZ3JhZGllbnQtMykiIGZpbHRlcj0idXJsKCNzb2Z0LTMpIi8+PHBhdGggZD0iTSAtMTgwIDY1Mi41ODA2NDUxNjEyOTA1IEwgMCA2NTIuNTgwNjQ1MTYxMjkwNSBRIDMzOC4wNjQ1MTYxMjkwMzIyNiA1MTEuNDYxNjkzNTQ4Mzg3MTMgNTI5LjAzMjI1ODA2NDUxNjEgNTY3LjAyMTE2OTM1NDgzODggVCA3MjAgNjIyLjU4MDY0NTE2MTI5MDQgTCA5MDAgNjIyLjU4MDY0NTE2MTI5MDQgTCA5MDAgOTAwIEwgLTE4MCA5MDAgWiIgZmlsbD0idXJsKCNncmFkaWVudC02KSIgZmlsdGVyPSJ1cmwoI3NvZnQtNikiLz48cGF0aCBkPSJNIC0xODAgNzIwIEwgMCA3MjAgUSAzNjcuMDk2Nzc0MTkzNTQ4MzYgNjQ3LjkxMzMwNjQ1MTYxMjkgNTQzLjU0ODM4NzA5Njc3NDEgNjY4Ljk1NjY1MzIyNTgwNjUgVCA3MjAgNjkwIEwgOTAwIDY5MCBMIDkwMCA5MDAgTCAtMTgwIDkwMCBaIiBmaWxsPSJ1cmwoI2dyYWRpZW50LTgpIiBmaWx0ZXI9InVybCgjc29mdC04KSIvPjwvc3ZnPg==" />
+		</g>
+	</g>
+	<!-- Inset 0 0 0 0.5px white / 20%. -->
+	<rect x="18.763" y="18.763" width="682.474" height="682.474" rx="153.237" fill="none" stroke="white" stroke-opacity="0.2" stroke-width="1.527" />
+	<g fill="white" transform="translate(120 216.45) scale(3)">
+		<path d="m149.6 8.4c-0.5-0.2-1.2-0.1-1.6-0.1h-87.3c-1 0-1.9 0.8-1.9 2v2.6h-11.9c-0.5-0.1-1.1 0.1-1 2.5-11.1-0.4-21.2-0.9-36.2-0.6-1.5 0.1-1.9 1.5-1 3 3.1 5.5 15.1 17.1 35.2 20.9 6.1 1.3 9.1 0.9 13.1 1.8 4.7 0.9 9.1 3.9 9.6 10.1s-3.3 15.1-17.3 19.9l-4.4 1.3c-1.6 0.5-2.6 1.8-2.6 3.6v9.3c0 1.1 0.8 2.7 2.4 2.7h20.2c0.9 0 1.5-0.2 1.9-0.4 3.4-1.4 8.7-3.5 17.1-3.5 10.2-0.1 15.7 2 18.5 3.3 1 0.6 1.6 0.6 2.3 0.6h19.2c1.8 0 2.3-1.3 2.3-2.5v-9.2c0-1.6-1-3.2-3.1-3.5-8.9-1.8-20.9-8.8-19.7-21.3 0.2-2 0.6-3.7 1.7-6 3.8-8 13.3-14.9 21.5-18.3 10-4.2 17.3-5.8 22.3-6.5 2.2-0.1 2.9-1.5 2.9-2.9v-6.5c0-1.3-0.7-2.1-1.6-2.4z" />
+	</g>
+</svg>
