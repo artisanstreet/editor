@@ -46,6 +46,7 @@ interface ControlledRun {
 
 function make_controlled_engine() {
 	const runs: Array<ControlledRun> = [];
+	const commands: Array<EngineCommand> = [];
 	let scopes_closed = 0;
 	const capability_names = [
 		"approval",
@@ -88,7 +89,7 @@ function make_controlled_engine() {
 				Events: Stream.fromQueue(queue),
 				native_thread_id: `native:${input.artisan_run_id}`,
 				resume_token: { native_thread_id: `native:${input.artisan_run_id}` },
-				Send: (_command: EngineCommand) => Effect.void,
+				Send: (command: EngineCommand) => Effect.sync(() => void commands.push(command)),
 			} satisfies EngineRun;
 		});
 
@@ -138,6 +139,7 @@ function make_controlled_engine() {
 		});
 
 	return {
+		commands,
 		Emit,
 		FindRun,
 		Finish,
@@ -754,6 +756,43 @@ describe("multi-agent graph lifecycle", () => {
 					sequence: 1,
 				}),
 			);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("cancels graph runs and rejects new graph commands while draining", async () => {
+		const database_path = await make_database_path();
+		const controlled = make_controlled_engine();
+		const runtime = make_backend_runtime({
+			database_path,
+			engines: [controlled.engine],
+			migrations_path,
+		});
+
+		try {
+			await create_thread(runtime);
+			await route(runtime, start_retry_group());
+			await wait_for_graph(runtime, (graph) =>
+				graph.agent_runs.every(({ state }) => state === "running"),
+			);
+
+			const orchestrator = await runtime.runPromise(AgentGraphOrchestrator);
+			await runtime.runPromise(orchestrator.DrainForShutdown);
+
+			expect(controlled.commands).toHaveLength(2);
+			expect(controlled.commands).toEqual(
+				expect.arrayContaining([
+					expect.objectContaining({
+						_tag: "cancel",
+						command_id: expect.stringMatching(/^shutdown:/),
+					}),
+				]),
+			);
+			expect(controlled.scopes_closed()).toBe(2);
+			await expect(
+				runtime.runPromise(orchestrator.Handle(start_with_join("require_all"))),
+			).rejects.toMatchObject({ _tag: "AgentGraphInvalid" });
 		} finally {
 			await runtime.dispose();
 		}

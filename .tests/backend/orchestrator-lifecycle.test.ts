@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { Effect, Exit, Scope, Stream } from "effect";
+import { Deferred, Effect, Exit, Scope, Stream } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { HelloEnvelope } from "@artisan/protocol";
@@ -90,21 +90,30 @@ function make_engine(options: EngineOptions = {}): {
 				yield* Effect.fail({ _tag: "open_failed" } as never);
 			}
 
-			yield* Effect.addFinalizer(() => Effect.sync(() => void (scopes_closed += 1)));
+			const closed = yield* Deferred.make<"closed">();
+			yield* Effect.addFinalizer(() =>
+				Effect.gen(function* () {
+					scopes_closed += 1;
+					yield* Deferred.succeed(closed, "closed");
+				}),
+			);
 
 			const observations: ReadonlyArray<EngineObservation> = [];
 			const run: EngineRun = {
 				artisan_run_id: input.artisan_run_id,
 				Closed: options.end_without_terminal
 					? Effect.succeed("closed" as const)
-					: Effect.never,
+					: Deferred.await(closed),
 				Events: Stream.unwrap(
 					Effect.sync(() => {
 						events_consumed += 1;
 
 						return options.end_without_terminal
 							? Stream.fromIterable(observations)
-							: Stream.concat(Stream.fromIterable(observations), Stream.never);
+							: Stream.concat(
+									Stream.fromIterable(observations),
+									Stream.fromEffect(Deferred.await(closed)).pipe(Stream.drain),
+								);
 					}),
 				),
 				native_thread_id: `native:${input.artisan_run_id}`,
@@ -621,6 +630,54 @@ describe("agent orchestrator lifecycle supervision", () => {
 			).toBeDefined();
 			/** Nothing was alive to deliver to; the stop settled durably instead. */
 			expect(vanished.instrumentation.commands).toHaveLength(0);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("cancels live work and rejects new intake while draining for shutdown", async () => {
+		const database_path = await make_database_path();
+		const instrumented = make_engine();
+		const runtime = make_backend_runtime({
+			database_path,
+			engines: [instrumented.engine],
+			migrations_path,
+		});
+
+		try {
+			const connection = await open_connection(runtime);
+			await runtime.runPromise(
+				connection.Receive(
+					make_command("shutdown_active", {
+						engine_id: "instrumented",
+						text: "start",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			await expect.poll(instrumented.instrumentation.opened).toBe(1);
+
+			const orchestrator = await runtime.runPromise(AgentOrchestrator);
+			await runtime.runPromise(orchestrator.DrainForShutdown);
+
+			expect(instrumented.instrumentation.commands).toContainEqual({
+				_tag: "cancel",
+				command_id: expect.stringMatching(/^shutdown:/),
+			});
+			expect(instrumented.instrumentation.scopes_closed()).toBe(1);
+			await expect(
+				runtime.runPromise(
+					orchestrator.Handle(
+						make_command("shutdown_rejected", {
+							engine_id: "instrumented",
+							text: "must not queue",
+							type: "thread.send_message",
+							working_directory: "C:/work",
+						}),
+					),
+				),
+			).rejects.toMatchObject({ _tag: "OrchestrationFailure" });
 		} finally {
 			await runtime.dispose();
 		}

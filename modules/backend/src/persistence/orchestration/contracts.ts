@@ -106,6 +106,9 @@ export class OrchestrationRepository extends Context.Service<
 			ReadonlyArray<RecoverableNativeRun>,
 			OrchestrationError
 		>;
+		readonly CancelInterruptedRun: (
+			run_id: string,
+		) => Effect.Effect<boolean, OrchestrationError>;
 		readonly FallbackSteering: (
 			command_id: string,
 			reason?: "delivery_failed" | "rejected",

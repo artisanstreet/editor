@@ -1,9 +1,11 @@
 import { dirname, join } from "node:path";
 
 import { NodeFileSystem, NodePath } from "@effect/platform-node-shared";
-import { Clock, Effect, Exit, FileSystem, Layer, Path, Scope } from "effect";
+import { Clock, Duration, Effect, Exit, FileSystem, Layer, Path, Scope } from "effect";
 
 import {
+	AgentGraphOrchestrator,
+	AgentOrchestrator,
 	make_desktop_backend_layer,
 	RichLinkAssetStoreLive,
 	ThreadMetadataRefinementCoordinator,
@@ -34,6 +36,32 @@ const ForgeWebSocketBinding: ForgeTransportBindingService = {
 	Bind: BindForgeWebSocket,
 };
 
+/** Leaves room for the native CLI's 15-second lifecycle deadline to observe exit. */
+const forge_shutdown_drain_timeout = "12 seconds";
+
+export interface ForgeShutdownResources {
+	readonly close_scope: Effect.Effect<void>;
+	readonly drains: ReadonlyArray<Effect.Effect<void>>;
+	readonly release_lease: Effect.Effect<void, unknown>;
+	readonly timeout?: Duration.Input;
+}
+
+/** Drains all runtime-owned work before releasing the hosting scope exactly once. */
+export const MakeForgeClose = ({
+	close_scope,
+	drains,
+	release_lease,
+	timeout = forge_shutdown_drain_timeout,
+}: ForgeShutdownResources) =>
+	Effect.cached(
+		Effect.all(drains, { concurrency: "unbounded", discard: true }).pipe(
+			Effect.timeout(timeout),
+			Effect.ignore,
+			Effect.ensuring(release_lease.pipe(Effect.ignore)),
+			Effect.ensuring(close_scope),
+		),
+	);
+
 export interface ForgeHandle {
 	readonly Close: Effect.Effect<void>;
 	readonly endpoint: URL;
@@ -46,6 +74,8 @@ const MakeForgeHost = (config: ForgeConfig, transport_binding: ForgeTransportBin
 		const lease = yield* AcquireForgeDatabaseLease(config.database_path);
 		void lease;
 		const protocol_server = yield* MessagePortTransportServer;
+		const orchestrator = yield* AgentOrchestrator;
+		const graph_orchestrator = yield* AgentGraphOrchestrator;
 		const metadata_refinement = yield* ThreadMetadataRefinementCoordinator;
 		/** Repair missed automatic metadata before the first browser can observe stale titles. */
 		yield* metadata_refinement.WaitForIdle;
@@ -95,6 +125,10 @@ const MakeForgeHost = (config: ForgeConfig, transport_binding: ForgeTransportBin
 		);
 
 		return {
+			DrainForShutdown: Effect.all(
+				[orchestrator.DrainForShutdown, graph_orchestrator.DrainForShutdown],
+				{ concurrency: "unbounded", discard: true },
+			),
 			endpoint: http.endpoint,
 			ReleaseLease: lease.Release,
 			RequestShutdown: authority.RequestShutdown,
@@ -157,13 +191,15 @@ export const StartForge = (
 			Effect.provide(runtime),
 			Effect.provideService(Scope.Scope, host_scope),
 		);
+		const Close = yield* MakeForgeClose({
+			close_scope: Scope.close(host_scope, Exit.void),
+			drains: [host.DrainForShutdown],
+			release_lease: host.ReleaseLease,
+		});
 		return {
 			endpoint: host.endpoint,
 			RequestShutdown: host.RequestShutdown,
 			ShutdownRequested: host.ShutdownRequested,
-			Close: host.ReleaseLease.pipe(
-				Effect.ignore,
-				Effect.ensuring(Scope.close(host_scope, Exit.void)),
-			),
+			Close,
 		} satisfies ForgeHandle;
 	}).pipe(Effect.provide(NodeFileSystem.layer), Effect.provide(NodePath.layer));

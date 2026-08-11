@@ -429,6 +429,41 @@ export const OrchestrationRepositoryLive = Layer.effect(
 				return events.length === 1;
 			}).pipe(Effect.mapError(normalize_error));
 
+		const CancelInterruptedRun = (run_id: string) =>
+			Effect.gen(function* () {
+				const event = yield* database.client.transaction((transaction) =>
+					Effect.gen(function* () {
+						const updated_at = yield* metadata.Now;
+						const [run] = yield* transaction
+							.update(OrchestrationRuns)
+							.set({ status: "cancelled", updated_at })
+							.where(
+								and(
+									eq(OrchestrationRuns.run_id, run_id),
+									eq(OrchestrationRuns.status, "interrupted"),
+								),
+							)
+							.returning();
+						if (!run) return undefined;
+						return yield* AppendEvent(transaction, {
+							agent_id: run.agent_id,
+							causation_id: `shutdown:${run_id}`,
+							correlation_id: run_id,
+							payload: {
+								state: "cancelled",
+								type: "run.lifecycle",
+								working_directory: run.working_directory,
+							},
+							run_id,
+							thread_id: run.thread_id,
+						});
+					}),
+				);
+				if (event === undefined) return false;
+				yield* notifier.Publish(event.journal_sequence);
+				return true;
+			}).pipe(Effect.mapError(normalize_error));
+
 		const FallbackSteering = (
 			command_id: string,
 			reason: "delivery_failed" | "rejected" = "rejected",
@@ -777,6 +812,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 		return {
 			Accept,
 			AcceptInbound,
+			CancelInterruptedRun,
 			ClaimOutbox,
 			ClaimNativeRecoveries,
 			CompleteOutbox,

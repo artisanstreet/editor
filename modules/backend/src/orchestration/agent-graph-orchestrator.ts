@@ -1,4 +1,15 @@
-import { Context, Deferred, Effect, Exit, Layer, Option, Ref, Scope, Stream } from "effect";
+import {
+	Context,
+	Deferred,
+	Effect,
+	Exit,
+	Layer,
+	Option,
+	Ref,
+	Scope,
+	Semaphore,
+	Stream,
+} from "effect";
 
 import { EngineRegistry, type EngineCommand, type EngineRun } from "@artisan/engines";
 import type {
@@ -57,6 +68,7 @@ export class AgentGraphOrchestrator extends Context.Service<
 			thread_id: string,
 			include_terminal: boolean,
 		) => Effect.Effect<OrchestrationGroupListSnapshot, AgentGraphError>;
+		readonly DrainForShutdown: Effect.Effect<void>;
 		readonly Recover: Effect.Effect<void, AgentGraphError>;
 		readonly QuiesceThread: (thread_id: string) => Effect.Effect<void>;
 	}
@@ -77,8 +89,45 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 		const repository = yield* AgentGraphRepository;
 		const service_scope = yield* Scope.make();
 		const live_runs = yield* Ref.make(new Map<string, LiveAgentRun>());
+		const shutdown_state = yield* Ref.make({
+			draining: false,
+			owned_scopes: new Map<string, Scope.Closeable>(),
+		});
+		const admission_gate = yield* Semaphore.make(1);
+		const drain_complete = yield* Deferred.make<void>();
 		const dispatch_state = yield* Ref.make<DispatchState>("idle");
 		const dispatch_fence = yield* MakeThreadDispatchFence;
+		const IsDraining = Ref.get(shutdown_state).pipe(Effect.map((state) => state.draining));
+		const MakeOwnedScope = (run_id: string) =>
+			Effect.gen(function* () {
+				const scope = yield* Scope.make();
+				const reserved = yield* Ref.modify(shutdown_state, (state) =>
+					state.draining
+						? ([false, state] as const)
+						: ([
+								true,
+								{
+									...state,
+									owned_scopes: new Map(state.owned_scopes).set(run_id, scope),
+								},
+							] as const),
+				);
+				if (!reserved) {
+					yield* Scope.close(scope, Exit.void);
+					return undefined;
+				}
+				return scope;
+			});
+		const CloseOwnedScope = (run_id: string, scope: Scope.Closeable) =>
+			Effect.gen(function* () {
+				yield* Ref.update(shutdown_state, (state) => {
+					if (state.owned_scopes.get(run_id) !== scope) return state;
+					const owned_scopes = new Map(state.owned_scopes);
+					owned_scopes.delete(run_id);
+					return { ...state, owned_scopes };
+				});
+				yield* Scope.close(scope, Exit.void);
+			});
 
 		const remove_live = (run_id: string, run_scope: Scope.Closeable) =>
 			Effect.gen(function* () {
@@ -97,12 +146,19 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 				});
 
 				if (removed) {
+					yield* Ref.update(shutdown_state, (state) => {
+						if (state.owned_scopes.get(run_id) !== run_scope) return state;
+						const owned_scopes = new Map(state.owned_scopes);
+						owned_scopes.delete(run_id);
+						return { ...state, owned_scopes };
+					});
 					yield* Scope.close(run_scope, Exit.void);
 				}
 			});
 
 		function wake_dispatcher(): Effect.Effect<void> {
 			return Effect.gen(function* () {
+				if (yield* IsDraining) return;
 				const start = yield* Ref.modify(dispatch_state, (state) =>
 					state === "idle" ? ([true, "running"] as const) : ([false, "pending"] as const),
 				);
@@ -154,6 +210,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 
 		const start_run_unfenced = (work: PendingAgentRun) =>
 			Effect.gen(function* () {
+				if (yield* IsDraining) return;
 				if ((yield* Ref.get(live_runs)).has(work.run_id)) {
 					return;
 				}
@@ -198,7 +255,8 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 					return;
 				}
 
-				const run_scope = yield* Scope.make();
+				const run_scope = yield* MakeOwnedScope(work.run_id);
+				if (!run_scope) return;
 				const run_model = SessionPolicyResolvedModel(policy, work.profile);
 				let transferred = false;
 
@@ -237,22 +295,36 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 
 					const run = opened.value;
 
-					return yield* Effect.gen(function* () {
-						yield* repository.ActivateRun(
-							work.run_id,
-							metadata.instance_id,
-							run.native_thread_id,
-							run.resume_token,
-							run_model,
-						);
-						yield* register_live(work, run, run_scope);
-						transferred = true;
-					}).pipe(Effect.uninterruptible);
+					return yield* admission_gate.withPermits(1)(
+						Effect.gen(function* () {
+							if (yield* IsDraining) {
+								yield* run
+									.Send({ _tag: "cancel", command_id: `shutdown:${work.run_id}` })
+									.pipe(Effect.catch(() => Effect.void));
+								yield* CloseOwnedScope(work.run_id, run_scope);
+								yield* fail_start(
+									work,
+									"The assignment was cancelled because Artisan is shutting down.",
+								);
+								return;
+							}
+
+							yield* repository.ActivateRun(
+								work.run_id,
+								metadata.instance_id,
+								run.native_thread_id,
+								run.resume_token,
+								run_model,
+							);
+							yield* register_live(work, run, run_scope);
+							transferred = true;
+						}).pipe(Effect.uninterruptible),
+					);
 				}).pipe(
 					Effect.catch((error) => fail_start(work, command_failure_message(error))),
 					Effect.ensuring(
 						Effect.suspend(() =>
-							transferred ? Effect.void : Scope.close(run_scope, Exit.void),
+							transferred ? Effect.void : CloseOwnedScope(work.run_id, run_scope),
 						),
 					),
 				);
@@ -304,6 +376,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 		};
 
 		const dispatch_pending = Effect.gen(function* () {
+			if (yield* IsDraining) return;
 			const pending = yield* repository.GetPendingRuns();
 			const live = yield* Ref.get(live_runs);
 			const selected = select_dispatchable(pending, live);
@@ -481,7 +554,7 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 				}
 			});
 
-		const handle = (command: CommandEnvelope) => {
+		const handle_active = (command: CommandEnvelope) => {
 			const payload = command.payload as AgentGraphCommand;
 
 			if (payload.type === "orchestration.group.start") {
@@ -507,10 +580,26 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 
 			return handle_control(command);
 		};
+		const handle = (command: CommandEnvelope) =>
+			admission_gate.withPermits(1)(
+				IsDraining.pipe(
+					Effect.flatMap((draining) =>
+						draining
+							? Effect.fail(
+									new AgentGraphInvalid({
+										message: "The orchestrator is draining for shutdown.",
+									}),
+								)
+							: handle_active(command),
+					),
+				),
+			);
 
-		const recover = repository
-			.Recover(metadata.instance_id)
-			.pipe(Effect.andThen(wake_dispatcher()));
+		const recover = Effect.gen(function* () {
+			if (yield* IsDraining) return;
+			yield* repository.Recover(metadata.instance_id);
+			yield* wake_dispatcher();
+		});
 		const QuiesceLiveRuns = (thread_id: string) =>
 			Effect.gen(function* () {
 				const runs = yield* Ref.modify(live_runs, (current) => {
@@ -537,24 +626,78 @@ export const AgentGraphOrchestratorLive = Layer.effect(
 			});
 		const QuiesceThread = (thread_id: string) =>
 			dispatch_fence.Quiesce(thread_id, QuiesceLiveRuns(thread_id));
-		const shutdown = Effect.gen(function* () {
-			const runs = [...(yield* Ref.get(live_runs)).values()];
-
-			yield* Effect.forEach(runs, (live) => Scope.close(live.scope, Exit.void), {
-				concurrency: "unbounded",
-				discard: true,
-			});
-			yield* Effect.forEach(runs, (live) => Deferred.await(live.done), {
-				concurrency: "unbounded",
-				discard: true,
-			});
-			yield* Scope.close(service_scope, Exit.void);
+		const DrainOwnedScopes = Effect.gen(function* () {
+			while (true) {
+				const scopes = [...(yield* Ref.get(shutdown_state)).owned_scopes.values()];
+				if (scopes.length === 0) return;
+				yield* Effect.forEach(
+					scopes,
+					(scope) => Scope.close(scope, Exit.void).pipe(Effect.catch(() => Effect.void)),
+					{ concurrency: "unbounded", discard: true },
+				);
+				yield* Effect.yieldNow;
+			}
 		});
+		/** Cancels live assignments and bounds provider shutdown observation. */
+		const DrainForShutdown = Effect.uninterruptibleMask((restore) =>
+			Effect.gen(function* () {
+				const owner = yield* admission_gate.withPermits(1)(
+					Ref.modify(shutdown_state, (state) =>
+						state.draining
+							? ([false, state] as const)
+							: ([true, { ...state, draining: true }] as const),
+					),
+				);
+				if (!owner) {
+					yield* restore(Deferred.await(drain_complete));
+					return;
+				}
 
-		yield* Effect.addFinalizer(() => shutdown);
+				const runs = [...(yield* Ref.get(live_runs)).values()];
+				const Cancel = (live: LiveAgentRun) =>
+					live.run
+						.Send({ _tag: "cancel", command_id: `shutdown:${live.run.artisan_run_id}` })
+						.pipe(
+							Effect.timeout("2 seconds"),
+							Effect.catch(() => Effect.void),
+						);
+				const AwaitDone = (live: LiveAgentRun) =>
+					Deferred.await(live.done).pipe(
+						Effect.timeout("2 seconds"),
+						Effect.catch(() => Effect.void),
+					);
+
+				yield* restore(
+					Effect.gen(function* () {
+						yield* Effect.forEach(runs, Cancel, {
+							concurrency: "unbounded",
+							discard: true,
+						});
+						yield* DrainOwnedScopes;
+						yield* Effect.forEach(runs, AwaitDone, {
+							concurrency: "unbounded",
+							discard: true,
+						});
+					}),
+				).pipe(Effect.ensuring(Deferred.succeed(drain_complete, undefined)));
+			}),
+		);
+
+		yield* Effect.addFinalizer(() =>
+			Effect.gen(function* () {
+				yield* Ref.update(shutdown_state, (state) => ({ ...state, draining: true }));
+				const scopes = [...(yield* Ref.get(shutdown_state)).owned_scopes.values()];
+				yield* Effect.forEach(scopes, (scope) => Scope.close(scope, Exit.void), {
+					concurrency: "unbounded",
+					discard: true,
+				});
+				yield* Scope.close(service_scope, Exit.void);
+			}),
+		);
 		yield* recover;
 
 		return {
+			DrainForShutdown,
 			GetGraph: repository.GetGraph,
 			ListGroups: repository.ListGroups,
 			ListGroupsSnapshot: repository.ListGroupsSnapshot,
