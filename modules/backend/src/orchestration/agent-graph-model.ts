@@ -166,6 +166,14 @@ export interface AgentGraphRepositoryShape {
 	) => Effect.Effect<ReadonlyArray<EventEnvelope>, AgentGraphError>;
 	readonly ReconcileObservedRoot: (root_run_id: string) => Effect.Effect<void, AgentGraphError>;
 	readonly RecoverObservedSubagents: Effect.Effect<void, AgentGraphError>;
+	/**
+	 * Replays durable provider-child evidence while a root native resume is opening.
+	 * Those roots remain provisionally graph-active until the resume either succeeds
+	 * or explicitly reconciles their observed children as stopped.
+	 */
+	readonly ReconcileObservedSubagentsExcept: (
+		provisional_root_run_ids: ReadonlySet<string>,
+	) => Effect.Effect<void, AgentGraphError>;
 	readonly RecordClosed: (
 		run_id: string,
 		state: EngineRunTerminalState,

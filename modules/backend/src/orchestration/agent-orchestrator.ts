@@ -595,10 +595,18 @@ export const AgentOrchestratorLive = Layer.effect(
 			});
 		const StartRun = (work: PendingWork) =>
 			dispatch_fence.Run(work.thread_id, StartRunUnfenced(work)).pipe(Effect.asVoid);
+		/** Provider-observed children have no dispatcher owner, so failed root resume settles them. */
+		const ReconcileFailedResume = (work: RecoverableNativeRun) =>
+			graph_repository
+				.ReconcileObservedRoot(work.run_id)
+				.pipe(Effect.catchCause(() => Effect.void));
 
 		const ResumeRunUnfenced = (work: RecoverableNativeRun) =>
 			Effect.gen(function* () {
-				if (yield* IsDraining) return;
+				if (yield* IsDraining) {
+					yield* ReconcileFailedResume(work);
+					return;
+				}
 				if ((yield* Ref.get(live_runs)).has(work.run_id)) {
 					return;
 				}
@@ -608,6 +616,7 @@ export const AgentOrchestratorLive = Layer.effect(
 					.pipe(Effect.catch(() => Effect.succeed(undefined)));
 
 				if (!engine || engine.Descriptor.capabilities.resume.state === "unsupported") {
+					yield* ReconcileFailedResume(work);
 					return;
 				}
 
@@ -616,6 +625,7 @@ export const AgentOrchestratorLive = Layer.effect(
 					!IsSessionPolicyEngine(policy, work.engine_id) &&
 					engine.Descriptor.transport !== "test"
 				) {
+					yield* ReconcileFailedResume(work);
 					return;
 				}
 
@@ -627,11 +637,15 @@ export const AgentOrchestratorLive = Layer.effect(
 					(Option.isSome(resolved_guidance.value) &&
 						engine.Descriptor.capabilities.global_guidance.state === "unsupported")
 				) {
+					yield* ReconcileFailedResume(work);
 					return;
 				}
 
 				const run_scope = yield* MakeOwnedScope(work.run_id);
-				if (!run_scope) return;
+				if (!run_scope) {
+					yield* ReconcileFailedResume(work);
+					return;
+				}
 				const resolved_product_instructions = yield* product_instructions.Resolve;
 				const resumed_run = yield* engine
 					.Open({
@@ -653,6 +667,7 @@ export const AgentOrchestratorLive = Layer.effect(
 
 				if (Option.isNone(resumed_run)) {
 					yield* CloseOwnedScope(work.run_id, run_scope);
+					yield* ReconcileFailedResume(work);
 
 					return;
 				}
@@ -666,6 +681,7 @@ export const AgentOrchestratorLive = Layer.effect(
 								.pipe(Effect.catch(() => Effect.void));
 							yield* CloseOwnedScope(work.run_id, run_scope);
 							yield* repository.CancelInterruptedRun(work.run_id).pipe(Effect.ignore);
+							yield* ReconcileFailedResume(work);
 							return;
 						}
 
@@ -688,6 +704,7 @@ export const AgentOrchestratorLive = Layer.effect(
 
 						if (!resumed) {
 							yield* CloseOwnedScope(work.run_id, run_scope);
+							yield* ReconcileFailedResume(work);
 							return;
 						}
 
@@ -708,7 +725,18 @@ export const AgentOrchestratorLive = Layer.effect(
 				);
 			});
 		const ResumeRun = (work: RecoverableNativeRun) =>
-			dispatch_fence.Run(work.thread_id, ResumeRunUnfenced(work)).pipe(Effect.asVoid);
+			dispatch_fence
+				.Run(
+					work.thread_id,
+					ResumeRunUnfenced(work).pipe(
+						Effect.catchCause((cause) =>
+							ReconcileFailedResume(work).pipe(
+								Effect.andThen(() => Effect.failCause(cause)),
+							),
+						),
+					),
+				)
+				.pipe(Effect.asVoid);
 
 		const SendToLiveRunUnfenced = (work: PendingWork) =>
 			Effect.gen(function* () {
@@ -991,10 +1019,24 @@ export const AgentOrchestratorLive = Layer.effect(
 			yield* continuation_repository
 				.ReconcileStranded()
 				.pipe(Effect.mapError((cause) => new OrchestrationFailure({ cause })));
+			/**
+			 * Drain durable provider-child inboxes before changing root ownership. An
+			 * observation may have committed immediately before the old Forge died;
+			 * replaying it after interruption would correctly reject it as late and
+			 * lose the child evidence needed by the cleanup pass below.
+			 */
 			yield* graph_repository.RecoverObservedSubagents.pipe(
 				Effect.mapError((cause) => new OrchestrationFailure({ cause })),
 			);
 			const recoverable = yield* repository.ClaimNativeRecoveries();
+			/**
+			 * Claim first so every root that cannot be resumed closes its observed
+			 * children. Only roots with an actual native resume token remain
+			 * provisionally graph-active until their bounded handshake settles.
+			 */
+			yield* graph_repository
+				.ReconcileObservedSubagentsExcept(new Set(recoverable.map((work) => work.run_id)))
+				.pipe(Effect.mapError((cause) => new OrchestrationFailure({ cause })));
 			yield* Effect.forkIn(
 				Effect.forEach(recoverable, ResumeRun, {
 					concurrency: "unbounded",

@@ -2,6 +2,7 @@ import { Context, Effect, Layer } from "effect";
 
 import { Database } from "../persistence/database";
 import { JournalNotifier } from "../persistence/journal-notifier";
+import { NativeSubagentBindings } from "../persistence/tables";
 import { RuntimeMetadata } from "../runtime/metadata";
 import { AgentNameCatalog } from "./agent-name-catalog";
 import { make_assignment_commands } from "./internal/assignment-commands";
@@ -87,6 +88,21 @@ export const AgentGraphRepositoryLive = Layer.effect(
 			RecordObservedSubagent: native_subagents.Record,
 			ReconcileObservedRoot: native_subagents.ReconcileRoot,
 			RecoverObservedSubagents: native_subagents.Recover,
+			ReconcileObservedSubagentsExcept: (provisional_root_run_ids) =>
+				database.client
+					.selectDistinct({ root_run_id: NativeSubagentBindings.root_run_id })
+					.from(NativeSubagentBindings)
+					.pipe(
+						Effect.flatMap((roots) =>
+							Effect.forEach(
+								roots.filter(
+									(root) => !provisional_root_run_ids.has(root.root_run_id),
+								),
+								(root) => native_subagents.ReconcileRoot(root.root_run_id),
+								{ discard: true },
+							),
+						),
+					),
 			Recover: run_lifecycle.recover,
 			RenameAgent: assignment_commands.rename_agent,
 			RetryAssignment: assignment_commands.retry_assignment,
