@@ -1300,6 +1300,90 @@ describe("orchestration repository hardening", () => {
 		}
 	});
 
+	it("settles a resumed run with no fresh provider observation without touching progressed work", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			migrations_path,
+		});
+		try {
+			await runtime.runPromise(SetupThread("thread_1"));
+			const accepted = await runtime.runPromise(
+				Accept(
+					make_command("resume_stalled", "thread_1", {
+						engine_id: "engine_1",
+						text: "Resume without an event stream",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const repository = yield* OrchestrationRepository;
+					yield* repository.MarkRunStarted(accepted.run_id);
+
+					return yield* repository.FailRecoveredRun(accepted.run_id, -1);
+				}),
+			);
+			const [runs, threads] = await runtime.runPromise(
+				Read((database) =>
+					Effect.all([
+						database.select().from(OrchestrationRuns),
+						database.select().from(Threads),
+					]),
+				),
+			);
+
+			expect(result).toBe(true);
+			expect(runs.find((run) => run.run_id === accepted.run_id)).toMatchObject({
+				status: "failed",
+			});
+			expect(threads.find((thread) => thread.thread_id === "thread_1")).toMatchObject({
+				live_status: "Failed to complete",
+			});
+
+			const progressed = await runtime.runPromise(
+				Accept(
+					make_command("resume_progressed", "thread_1", {
+						engine_id: "engine_1",
+						text: "Resume with a real provider observation",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			const protected_result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const repository = yield* OrchestrationRepository;
+					yield* repository.MarkRunStarted(progressed.run_id);
+					yield* repository.RecordObservation({
+						_tag: "agent_message_delta",
+						artisan_run_id: progressed.run_id,
+						delta: "Still alive",
+						item_id: "assistant_progress",
+						observation_id: "resume_progress",
+						phase: "unspecified",
+						raw: { engine_id: "engine_1", frame: null, transport: "fixture" },
+						sequence: 0,
+						turn_id: "turn_progress",
+					});
+
+					return yield* repository.FailRecoveredRun(progressed.run_id, -1);
+				}),
+			);
+			const protected_runs = await runtime.runPromise(
+				Read((database) => database.select().from(OrchestrationRuns)),
+			);
+
+			expect(protected_result).toBe(false);
+			expect(protected_runs.find((run) => run.run_id === progressed.run_id)).toMatchObject({
+				status: "running",
+			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("marks dispatching work undeliverable and interrupts its queued run on recovery", async () => {
 		const runtime = make_backend_runtime({
 			database_path: await make_database_path(),

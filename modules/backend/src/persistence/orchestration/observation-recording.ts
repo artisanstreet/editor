@@ -23,6 +23,7 @@ import {
 import { RuntimeMetadata } from "../../runtime/metadata";
 import { ApplyEngineObservation } from "../../conversation/index.ts";
 import { PersistSurfaceProjection } from "../../surfaces/surface-projection";
+import { ReconcileRootThreadLiveStatus } from "./thread-lifecycle-status";
 
 interface JournalNotifier {
 	readonly Publish: (journal_sequence: number) => Effect.Effect<void>;
@@ -226,6 +227,7 @@ export function make_observation_recording(
 							inArray(OrchestrationRuns.status, ["queued", "running", "waiting"]),
 						),
 					);
+				yield* ReconcileRootThreadLiveStatus(transaction, run.thread_id, updated_at);
 			}
 
 			if (observation._tag === "run_terminal") {

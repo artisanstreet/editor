@@ -45,6 +45,10 @@ import { RuntimeMetadata } from "../../runtime/metadata";
 import { CancelPendingInteractions } from "../../conversation/index.ts";
 import type { IntakeAssessment } from "../../orchestration/intake-policy";
 import { MakeCommandAcceptor } from "./acceptance";
+import {
+	ReconcileRootThreadLiveStatus,
+	ReconcileStaleRootThreadLiveStatuses,
+} from "./thread-lifecycle-status";
 
 export {
 	OrchestrationCommandConflict,
@@ -360,6 +364,11 @@ export const OrchestrationRepositoryLive = Layer.effect(
 						if (!run) {
 							return [];
 						}
+						yield* ReconcileRootThreadLiveStatus(
+							transaction,
+							run.thread_id,
+							updated_at,
+						);
 
 						return [
 							yield* AppendEvent(transaction, {
@@ -404,6 +413,11 @@ export const OrchestrationRepositoryLive = Layer.effect(
 						if (!run) {
 							return [];
 						}
+						yield* ReconcileRootThreadLiveStatus(
+							transaction,
+							run.thread_id,
+							updated_at,
+						);
 
 						return [
 							yield* AppendEvent(transaction, {
@@ -445,12 +459,63 @@ export const OrchestrationRepositoryLive = Layer.effect(
 							)
 							.returning();
 						if (!run) return undefined;
+						yield* ReconcileRootThreadLiveStatus(
+							transaction,
+							run.thread_id,
+							updated_at,
+						);
 						return yield* AppendEvent(transaction, {
 							agent_id: run.agent_id,
 							causation_id: `shutdown:${run_id}`,
 							correlation_id: run_id,
 							payload: {
 								state: "cancelled",
+								type: "run.lifecycle",
+								working_directory: run.working_directory,
+							},
+							run_id,
+							thread_id: run.thread_id,
+						});
+					}),
+				);
+				if (event === undefined) return false;
+				yield* notifier.Publish(event.journal_sequence);
+				return true;
+			}).pipe(Effect.mapError(normalize_error));
+
+		/** Fences a resumed transport that never demonstrates fresh provider progress. */
+		const FailRecoveredRun = (run_id: string, last_observation_sequence: number) =>
+			Effect.gen(function* () {
+				const event = yield* database.client.transaction((transaction) =>
+					Effect.gen(function* () {
+						const updated_at = yield* metadata.Now;
+						const [run] = yield* transaction
+							.update(OrchestrationRuns)
+							.set({ status: "failed", updated_at })
+							.where(
+								and(
+									eq(OrchestrationRuns.run_id, run_id),
+									eq(OrchestrationRuns.status, "running"),
+									eq(
+										OrchestrationRuns.last_observation_sequence,
+										last_observation_sequence,
+									),
+								),
+							)
+							.returning();
+						if (!run) return undefined;
+
+						yield* ReconcileRootThreadLiveStatus(
+							transaction,
+							run.thread_id,
+							updated_at,
+						);
+						return yield* AppendEvent(transaction, {
+							agent_id: run.agent_id,
+							causation_id: `resume_observation_timeout:${run_id}`,
+							correlation_id: run_id,
+							payload: {
+								state: "failed",
 								type: "run.lifecycle",
 								working_directory: run.working_directory,
 							},
@@ -729,6 +794,11 @@ export const OrchestrationRepositoryLive = Layer.effect(
 								.update(OrchestrationRuns)
 								.set({ status: "interrupted", updated_at })
 								.where(eq(OrchestrationRuns.run_id, run.run_id));
+							yield* ReconcileRootThreadLiveStatus(
+								transaction,
+								run.thread_id,
+								updated_at,
+							);
 							events.push(
 								yield* AppendEvent(transaction, {
 									agent_id: run.agent_id,
@@ -762,6 +832,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 								recoverable.push({
 									agent_id: run.agent_id,
 									engine_id: run.engine_id,
+									last_observation_sequence: run.last_observation_sequence,
 									resume_token: {
 										native_thread_id: decoded.native_thread_id,
 										...(decoded.opaque_checkpoint !== undefined
@@ -774,6 +845,8 @@ export const OrchestrationRepositoryLive = Layer.effect(
 								});
 							}
 						}
+
+						yield* ReconcileStaleRootThreadLiveStatuses(transaction, updated_at);
 
 						return {
 							events,
@@ -813,6 +886,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 			Accept,
 			AcceptInbound,
 			CancelInterruptedRun,
+			FailRecoveredRun,
 			ClaimOutbox,
 			ClaimNativeRecoveries,
 			CompleteOutbox,

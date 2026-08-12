@@ -79,6 +79,7 @@ const engine_open_timeout_ms = 60_000;
 
 /** Keeps a dead provider's native resume handshake from blocking Forge recovery. */
 const engine_resume_timeout_ms = 15_000;
+const engine_resume_observation_timeout_ms = 30_000;
 
 const InitialContent = (payload: AuthoritativeThreadSendMessageCommand) => {
 	if (payload.content === undefined) return undefined;
@@ -362,6 +363,28 @@ export const AgentOrchestratorLive = Layer.effect(
 						yield* RemoveLiveRun(work.run_id, live.scope);
 						yield* Effect.suspend(() => WakeDispatcher);
 					}),
+				),
+			);
+		/**
+		 * A successful native Open only proves that the provider accepted the
+		 * resume request. It does not prove its event stream is attached. After a
+		 * bounded observation window, compare the durable provider watermark with
+		 * its pre-resume value. Real persisted progress wins even if timeout and
+		 * observation settlement race.
+		 */
+		const WatchResumedRun = (work: RecoverableNativeRun, live: LiveRun) =>
+			Effect.sleep(engine_resume_observation_timeout_ms).pipe(
+				Effect.andThen(
+					repository.FailRecoveredRun(work.run_id, work.last_observation_sequence).pipe(
+						Effect.flatMap((failed) =>
+							failed
+								? Scope.close(live.scope, Exit.succeed(undefined)).pipe(
+										Effect.andThen(ReconcileFailedResume(work)),
+									)
+								: Effect.void,
+						),
+						Effect.catchCause(() => Effect.void),
+					),
 				),
 			);
 
@@ -720,6 +743,7 @@ export const AgentOrchestratorLive = Layer.effect(
 							new Map(runs).set(work.run_id, live),
 						);
 						yield* Effect.forkIn(ObserveRun(work, live), service_scope);
+						yield* Effect.forkIn(WatchResumedRun(work, live), service_scope);
 						if (yield* IsDraining) yield* DrainLiveRun(live);
 					}),
 				);

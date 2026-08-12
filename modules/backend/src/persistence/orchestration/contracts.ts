@@ -79,6 +79,7 @@ export interface PendingWork {
 export interface RecoverableNativeRun {
 	readonly agent_id: string;
 	readonly engine_id: string;
+	readonly last_observation_sequence: number;
 	readonly resume_token: EngineResumeToken;
 	readonly run_id: string;
 	readonly thread_id: string;
@@ -108,6 +109,10 @@ export class OrchestrationRepository extends Context.Service<
 		>;
 		readonly CancelInterruptedRun: (
 			run_id: string,
+		) => Effect.Effect<boolean, OrchestrationError>;
+		readonly FailRecoveredRun: (
+			run_id: string,
+			last_observation_sequence: number,
 		) => Effect.Effect<boolean, OrchestrationError>;
 		readonly FallbackSteering: (
 			command_id: string,
