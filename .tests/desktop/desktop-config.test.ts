@@ -81,6 +81,46 @@ describe("desktop packaging configuration", () => {
 		);
 		expect(main).not.toContain("preload:");
 		expect(main).not.toContain("ipcMain");
+		/** Freeze diagnosis remains opt-in and does not add a renderer bridge. */
+		expect(main).toContain("ARTISAN_EDITOR_REMOTE_DEBUGGING_PORT");
+		expect(main).toContain(
+			'app.commandLine.appendSwitch("remote-debugging-address", "127.0.0.1")',
+		);
+		expect(main).toContain("ARTISAN_EDITOR_RENDERER_DIAGNOSTICS");
+		expect(main).toContain("ARTISAN_DIAGNOSTICS_DIR");
+		expect(main).toContain("CreateRendererDiagnosticLog");
+		expect(main).toContain("ARTISAN_EDITOR_TRACE_FREEZES");
+		expect(main).toContain("contentTracing.startRecording");
+		expect(main).toContain("contentTracing.stopRecording");
+		expect(main).toContain('recording_mode: "record-continuously"');
+		expect(main).toContain("trace_buffer_size_in_kb");
+		expect(main).toContain("devtools.timeline");
+		expect(main).toContain("disabled-by-default-devtools.timeline.invalidationTracking");
+		expect(main).toContain("disabled-by-default-devtools.timeline.frame");
+		expect(main).toContain("disabled-by-default-devtools.timeline.stack");
+		expect(main).toContain("disabled-by-default-v8.cpu_profiler");
+		expect(main).toContain("disabled-by-default-v8.cpu_profiler.hires");
+		expect(main).toContain("contentTracing.getTraceBufferUsage()");
+		expect(main).toContain("trace-captured-late");
+		expect(main).toContain("trace-capture-coalesced");
+		expect(main).toContain("trace_capture_cooldown_ms");
+		expect(main).toContain("trace-capture-timeout");
+		expect(main).toContain("trace_capture_sequence");
+		/** The heartbeat deliberately uses normal renderer evaluation, not a debugger attachment. */
+		expect(main).toContain('executeJavaScript("void 0")');
+		expect(main).toContain("heartbeat-stalled");
+		expect(main).toContain("heartbeat-recovered");
+		expect(main).toContain('input.key !== "F9"');
+		expect(main).toContain("trace-capture-requested");
+		expect(main).not.toContain("debugger.attach(");
+		expect(main).toContain('editor_window.webContents.on("unresponsive"');
+		expect(main).toContain('editor_window.webContents.on("responsive"');
+		expect(main).toContain('editor_window.webContents.on("render-process-gone"');
+		expect(main).toContain("app.getAppMetrics()");
+		expect(main).toContain("process.getProcessMemoryInfo()");
+		expect(main).toContain("process-metrics");
+		expect(main).toContain("ARTISAN_EDITOR_OPEN_DEVTOOLS");
+		expect(main).toContain('openDevTools({ mode: "detach" })');
 		/** Renderer drafts persist, while every pairing begins without a Forge cookie. */
 		expect(main).toContain('const renderer_partition = "persist:artisan-renderer"');
 		expect(main).toContain("partition: renderer_partition");

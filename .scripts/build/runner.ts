@@ -43,7 +43,7 @@ const run = (
 			arguments_ === undefined
 				? spawn(command, {
 						cwd: repository_root,
-						env: process.env,
+						env: { ...process.env, ...environment },
 						shell: true,
 						stdio: "inherit",
 					})
@@ -203,7 +203,9 @@ const main = async () => {
 	log(`version   ${version}`);
 
 	await run("native build", "pnpm run build:native");
-	await run("desktop package", "pnpm run package:desktop");
+	await run("desktop package", "pnpm run package:desktop", undefined, {
+		ARTISAN_RELEASE_VERSION: version,
+	});
 
 	if (!existsSync(installer_executable)) {
 		throw new Error(`release ae-installer is missing at ${installer_executable}`);

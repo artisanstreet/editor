@@ -5,6 +5,10 @@ import { defineConfig } from "vite";
 
 const workspace_root = resolve(import.meta.dirname, "..");
 const desktop_root = resolve(workspace_root, ".dist", "desktop");
+const workspace = JSON.parse(readFileSync(resolve(workspace_root, "package.json"), "utf8")) as {
+	readonly version: string;
+};
+const desktop_version = process.env.ARTISAN_RELEASE_VERSION ?? workspace.version;
 
 /**
  * The static frontend ships with a same-origin-only CSP for the Forge-served
@@ -72,7 +76,7 @@ const stage_desktop_payload = () => ({
 				packageManager: "npm@11.4.2",
 				private: true,
 				type: "module",
-				version: "0.1.0",
+				version: desktop_version,
 			}),
 		);
 		writeFileSync(
@@ -83,11 +87,11 @@ const stage_desktop_payload = () => ({
 				packages: {
 					"": {
 						name: "artisan-editor-desktop",
-						version: "0.1.0",
+						version: desktop_version,
 					},
 				},
 				requires: true,
-				version: "0.1.0",
+				version: desktop_version,
 			}),
 		);
 	},

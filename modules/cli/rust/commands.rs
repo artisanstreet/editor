@@ -853,6 +853,13 @@ fn launch_editor(layout: &Layout) -> Result<()> {
     if let Some(permanent_ae) = manifest.permanent_ae_path.as_ref() {
         command.env("ARTISAN_AE_COMMAND", permanent_ae);
     }
+    let diagnostics_directory = layout.root.join("diagnostics");
+    command.env("ARTISAN_DIAGNOSTICS_DIR", &diagnostics_directory);
+    if diagnostics_directory.join("profiling-enabled").is_file() {
+        command
+            .env("ARTISAN_EDITOR_RENDERER_DIAGNOSTICS", "1")
+            .env("ARTISAN_EDITOR_TRACE_FREEZES", "1");
+    }
     // This CLI itself runs under Node when invoked through the packaged
     // launcher scripts; the editor it starts must never inherit that, or
     // Electron degrades to a bare Node process that exits without a window.

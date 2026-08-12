@@ -199,6 +199,9 @@ importers:
       '@artisan/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@effect/platform-node-shared':
+        specifier: 4.0.0-beta.97
+        version: 4.0.0-beta.97(effect@4.0.0-beta.97)
       effect:
         specifier: 4.0.0-beta.97
         version: 4.0.0-beta.97
