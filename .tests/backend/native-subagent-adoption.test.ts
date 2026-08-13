@@ -779,7 +779,7 @@ describe("provider-native subagent adoption", () => {
 			);
 			expect(settled.group.state).toBe("complete");
 			expect(settled.agent_runs.find((run) => run.run_id === child.run_id)).toMatchObject({
-				state: "stopped",
+				state: "complete",
 			});
 			const settled_worker_names = settled.agent_instances
 				.filter((agent) => agent.role === "worker")
@@ -810,8 +810,8 @@ describe("provider-native subagent adoption", () => {
 			expect(
 				after_late_discovery.inbox.find(
 					(observation) => observation.observation_id === "child-c-late",
-				)?.processed_at,
-			).not.toBeNull();
+				),
+			).toBeUndefined();
 		} finally {
 			await runtime.dispose();
 		}

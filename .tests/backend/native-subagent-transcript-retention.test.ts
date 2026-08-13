@@ -16,7 +16,12 @@ import { AgentGraphRepository, make_backend_runtime } from "@artisan/backend";
 import { Database } from "../../modules/backend/src/persistence/database";
 import { OrchestrationRepository } from "../../modules/backend/src/persistence/orchestration/repository";
 import {
+	AgentRuns,
+	Assignments,
+	ConversationItems,
 	ConversationSources,
+	NativeSubagentBindings,
+	NativeSubagentObservationInbox,
 	NativeSubagentTranscriptInbox,
 	OrchestrationRuns,
 } from "../../modules/backend/src/persistence/tables";
@@ -101,6 +106,42 @@ afterEach(async () => {
 });
 
 describe("native subagent transcript retention", () => {
+	it("never adopts a root-native identity as a provider child", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await MakePath(),
+			engines: [],
+			migrations_path,
+		});
+
+		try {
+			await runtime.runPromise(InsertRoot);
+			const persisted = await runtime.runPromise(
+				Effect.gen(function* () {
+					const repository = yield* OrchestrationRepository;
+					const graph = yield* AgentGraphRepository;
+					const database = yield* Database;
+					const malformed = {
+						...ChildLifecycle(),
+						agent_native_thread_id: "native-root",
+						observation_id: "root-as-child",
+						parent_native_thread_id: "unexpected-parent",
+					};
+					yield* repository.RecordObservation(malformed);
+					yield* graph.RecordObservedSubagent(malformed);
+					return yield* Effect.all({
+						bindings: database.client.select().from(NativeSubagentBindings),
+						inbox: database.client.select().from(NativeSubagentObservationInbox),
+					});
+				}),
+			);
+
+			expect(persisted.bindings).toEqual([]);
+			expect(persisted.inbox).toEqual([]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
 	it("deletes a transcript in the same transaction as its durable projection", async () => {
 		const runtime = make_backend_runtime({
 			database_path: await MakePath(),
@@ -150,7 +191,7 @@ describe("native subagent transcript retention", () => {
 					const repository = yield* OrchestrationRepository;
 					const graph = yield* AgentGraphRepository;
 					const database = yield* Database;
-					yield* repository.RecordObservation(RootTerminal());
+					yield* repository.RecordObservation({ ...RootTerminal(), sequence: 3 });
 					yield* repository.RecordObservation(Transcript("late-transcript"));
 					yield* graph.RecoverObservedSubagents;
 					return yield* database.client.select().from(NativeSubagentTranscriptInbox);
@@ -158,6 +199,62 @@ describe("native subagent transcript retention", () => {
 			);
 
 			expect(remaining).toEqual([]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("projects a known child's natural terminal evidence after the root settles", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await MakePath(),
+			engines: [],
+			migrations_path,
+		});
+
+		try {
+			await runtime.runPromise(InsertRoot);
+			const persisted = await runtime.runPromise(
+				Effect.gen(function* () {
+					const repository = yield* OrchestrationRepository;
+					const graph = yield* AgentGraphRepository;
+					const database = yield* Database;
+					const child_running = ChildLifecycle();
+					yield* repository.RecordObservation(child_running);
+					yield* graph.RecordObservedSubagent(child_running);
+					yield* repository.RecordObservation(RootTerminal());
+					yield* graph.ReconcileObservedRoot("root-run");
+					const child_completed = {
+						...child_running,
+						observation_id: "child-completed",
+						sequence: 4,
+						state: "completed" as const,
+					};
+					yield* repository.RecordObservation(child_completed);
+					yield* graph.RecordObservedSubagent(child_completed);
+					const transcript = Transcript("late-known-transcript");
+					yield* repository.RecordObservation({ ...transcript, sequence: 5 });
+					yield* graph.RecordObservedSubagent({ ...transcript, sequence: 5 });
+					return yield* Effect.all({
+						assignments: database.client.select().from(Assignments),
+						bindings: database.client.select().from(NativeSubagentBindings),
+						inbox: database.client.select().from(NativeSubagentTranscriptInbox),
+						items: database.client.select().from(ConversationItems),
+						runs: database.client.select().from(AgentRuns),
+					});
+				}),
+			);
+
+			expect(persisted.bindings[0]).toMatchObject({ state: "complete" });
+			expect(persisted.runs[0]).toMatchObject({ state: "complete" });
+			expect(persisted.assignments[0]).toMatchObject({ state: "complete" });
+			expect(persisted.inbox).toEqual([]);
+			const child_prose = persisted.items.find((item) => item.item_id === "child-message");
+			expect(child_prose).toBeDefined();
+			expect(JSON.parse(child_prose!.entity_json)).toMatchObject({
+				agent_id: persisted.bindings[0]!.agent_id,
+				text: "Child prose",
+				turn_id: `run:${persisted.bindings[0]!.run_id}`,
+			});
 		} finally {
 			await runtime.dispose();
 		}

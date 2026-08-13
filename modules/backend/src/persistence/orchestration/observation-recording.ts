@@ -15,6 +15,7 @@ import {
 } from "./contracts";
 import {
 	NativeSubagentObservationInbox,
+	NativeSubagentBindings,
 	NativeSubagentTranscriptInbox,
 	ConversationSources,
 	OrchestrationInteractions,
@@ -92,7 +93,40 @@ export function make_observation_recording(
 				.from(OrchestrationRuns)
 				.where(eq(OrchestrationRuns.run_id, observation.artisan_run_id))
 				.limit(1);
-			if (!run || !is_projectable_status(run.status)) {
+			if (!run) {
+				return [];
+			}
+			const is_native_child_evidence =
+				observation._tag === "subagent" || observation._tag === "subagent_transcript";
+			if (
+				is_native_child_evidence &&
+				observation.agent_native_thread_id === run.native_thread_id
+			) {
+				/** A root-native identity is never a provider-native child, even if malformed data says so. */
+				return [];
+			}
+			const [existing_native_binding] = is_native_child_evidence
+				? yield* transaction
+						.select({ binding_id: NativeSubagentBindings.binding_id })
+						.from(NativeSubagentBindings)
+						.where(
+							and(
+								eq(NativeSubagentBindings.engine_id, observation.raw.engine_id),
+								eq(NativeSubagentBindings.root_run_id, observation.artisan_run_id),
+								eq(
+									NativeSubagentBindings.agent_native_thread_id,
+									observation.agent_native_thread_id,
+								),
+							),
+						)
+						.limit(1)
+				: [];
+			/**
+			 * Providers may flush an already-bound child's terminal lifecycle and
+			 * transcript frames after the root settles. Admit only that proven child
+			 * evidence; a terminal root still rejects unknown child discovery.
+			 */
+			if (!is_projectable_status(run.status) && existing_native_binding === undefined) {
 				return [];
 			}
 

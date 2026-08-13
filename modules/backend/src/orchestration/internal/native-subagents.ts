@@ -469,9 +469,8 @@ export function make_native_subagents(context: GraphContext, ledger: GraphLedger
 						.limit(1);
 					// Leave the inbox row pending if its root has not become visible yet.
 					if (!root) return [] as ReadonlyArray<EventEnvelope>;
-
-					const now = yield* context.metadata.Now;
-					if (!["queued", "running", "waiting"].includes(root.status)) {
+					if (observation.agent_native_thread_id === root.native_thread_id) {
+						/** A malformed provider child record must not adopt the root as a worker. */
 						yield* transaction
 							.delete(NativeSubagentObservationInbox)
 							.where(
@@ -485,6 +484,8 @@ export function make_native_subagents(context: GraphContext, ledger: GraphLedger
 							);
 						return [] as ReadonlyArray<EventEnvelope>;
 					}
+
+					const now = yield* context.metadata.Now;
 					const heartbeat = yield* heartbeat_for(observation.activity, now);
 					const raw_origin = raw_origin_for(observation);
 					const next_state = state_from_native(observation.state);
@@ -514,6 +515,15 @@ export function make_native_subagents(context: GraphContext, ledger: GraphLedger
 							),
 						)
 						.limit(1);
+					const root_active = ["queued", "running", "waiting"].includes(root.status);
+					const preserves_terminal_evidence =
+						existing !== undefined &&
+						is_terminal_state(next_state) &&
+						observation.state !== "interrupted";
+					if (!root_active && !preserves_terminal_evidence) {
+						yield* MarkProcessed;
+						return [] as ReadonlyArray<EventEnvelope>;
+					}
 
 					if (existing) {
 						const [existing_run] = yield* transaction
@@ -523,8 +533,13 @@ export function make_native_subagents(context: GraphContext, ledger: GraphLedger
 							.from(AgentRuns)
 							.where(eq(AgentRuns.run_id, existing.run_id))
 							.limit(1);
+						const restores_natural_terminal_completion =
+							existing.state === "stopped" &&
+							is_terminal_state(next_state) &&
+							observation.state !== "interrupted";
 						if (
-							is_terminal_state(existing.state) ||
+							(!restores_natural_terminal_completion &&
+								is_terminal_state(existing.state)) ||
 							(existing_run !== undefined &&
 								existing_run.last_observation_sequence >= observation.sequence)
 						) {
