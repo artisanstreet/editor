@@ -1,4 +1,5 @@
 mod archive;
+mod background_process;
 mod error;
 mod install;
 mod integrations;
@@ -243,9 +244,7 @@ fn schedule_self_cleanup() -> Result<()> {
 
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        std::process::Command::new("cmd.exe")
+        background_process::detached_background_command("cmd.exe")
             .args([
                 "/d",
                 "/s",
@@ -253,7 +252,6 @@ fn schedule_self_cleanup() -> Result<()> {
                 "ping 127.0.0.1 -n 3 > nul & del /f /q \"%ARTISAN_BOOTSTRAP_DELETE%\"",
             ])
             .env("ARTISAN_BOOTSTRAP_DELETE", &executable)
-            .creation_flags(DETACHED_PROCESS)
             .spawn()
             .map_err(InstallerError::CleanupHelper)?;
     }

@@ -31,4 +31,5 @@ minimumReleaseAgeExclude:
     - svelte-effect-runtime@4.2.3
     - "@decimalturn/toml-patch@3.0.1"
 patchedDependencies:
+    "@effect/platform-node-shared@4.0.0-beta.97": patches/@effect__platform-node-shared@4.0.0-beta.97.patch
     pe-library@2.0.1: patches/pe-library@2.0.1.patch

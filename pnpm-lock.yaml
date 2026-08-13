@@ -5,6 +5,7 @@ settings:
   excludeLinksFromLockfile: false
 
 patchedDependencies:
+  '@effect/platform-node-shared@4.0.0-beta.97': 1a508eacc42841b80c9d6cdaa527ed19176c68ad4784c3ebf4c4a2c56a70928e
   pe-library@2.0.1: b049779d946037c1b4152f85f84e4ccf48ebbf848c4540871d3cfbead73a2b15
 
 importers:
@@ -43,13 +44,13 @@ importers:
         version: link:modules/transport
       '@artisanstreet/runner':
         specifier: git+https://github.com/sandersonstabo/runner.git#5b48d0d4cbddb310853aa8a413a7569cac850893
-        version: git+https://github.com/sandersonstabo/runner.git#5b48d0d4cbddb310853aa8a413a7569cac850893(@effect/platform-node-shared@4.0.0-beta.97(effect@4.0.0-beta.97))(effect@4.0.0-beta.97)(typescript@7.0.2)(web-tree-sitter@0.25.10)
+        version: git+https://github.com/sandersonstabo/runner.git#5b48d0d4cbddb310853aa8a413a7569cac850893(@effect/platform-node-shared@4.0.0-beta.97(patch_hash=1a508eacc42841b80c9d6cdaa527ed19176c68ad4784c3ebf4c4a2c56a70928e)(effect@4.0.0-beta.97))(effect@4.0.0-beta.97)(typescript@7.0.2)(web-tree-sitter@0.25.10)
       '@bazel/bazelisk':
         specifier: 1.28.1
         version: 1.28.1
       '@effect/platform-node-shared':
         specifier: 4.0.0-beta.97
-        version: 4.0.0-beta.97(effect@4.0.0-beta.97)
+        version: 4.0.0-beta.97(patch_hash=1a508eacc42841b80c9d6cdaa527ed19176c68ad4784c3ebf4c4a2c56a70928e)(effect@4.0.0-beta.97)
       '@effect/vitest':
         specifier: 4.0.0-beta.97
         version: 4.0.0-beta.97(effect@4.0.0-beta.97)(vitest@4.1.10(@types/node@26.1.1)(vite@8.1.4(@types/node@26.1.1)(jiti@2.7.0)(yaml@2.9.0)))
@@ -142,7 +143,7 @@ importers:
         version: 3.0.1
       '@effect/platform-node-shared':
         specifier: 4.0.0-beta.97
-        version: 4.0.0-beta.97(effect@4.0.0-beta.97)
+        version: 4.0.0-beta.97(patch_hash=1a508eacc42841b80c9d6cdaa527ed19176c68ad4784c3ebf4c4a2c56a70928e)(effect@4.0.0-beta.97)
       '@effect/sql-sqlite-node':
         specifier: 4.0.0-beta.97
         version: 4.0.0-beta.97(effect@4.0.0-beta.97)
@@ -187,7 +188,7 @@ importers:
         version: link:../protocol
       '@effect/platform-node-shared':
         specifier: 4.0.0-beta.97
-        version: 4.0.0-beta.97(effect@4.0.0-beta.97)
+        version: 4.0.0-beta.97(patch_hash=1a508eacc42841b80c9d6cdaa527ed19176c68ad4784c3ebf4c4a2c56a70928e)(effect@4.0.0-beta.97)
       effect:
         specifier: 4.0.0-beta.97
         version: 4.0.0-beta.97
@@ -201,7 +202,7 @@ importers:
         version: link:../protocol
       '@effect/platform-node-shared':
         specifier: 4.0.0-beta.97
-        version: 4.0.0-beta.97(effect@4.0.0-beta.97)
+        version: 4.0.0-beta.97(patch_hash=1a508eacc42841b80c9d6cdaa527ed19176c68ad4784c3ebf4c4a2c56a70928e)(effect@4.0.0-beta.97)
       effect:
         specifier: 4.0.0-beta.97
         version: 4.0.0-beta.97
@@ -244,7 +245,7 @@ importers:
     dependencies:
       '@effect/platform-node-shared':
         specifier: 4.0.0-beta.97
-        version: 4.0.0-beta.97(effect@4.0.0-beta.97)
+        version: 4.0.0-beta.97(patch_hash=1a508eacc42841b80c9d6cdaa527ed19176c68ad4784c3ebf4c4a2c56a70928e)(effect@4.0.0-beta.97)
       cross-spawn:
         specifier: 7.0.6
         version: 7.0.6
@@ -275,7 +276,7 @@ importers:
         version: link:../transport
       '@effect/platform-node-shared':
         specifier: 4.0.0-beta.97
-        version: 4.0.0-beta.97(effect@4.0.0-beta.97)
+        version: 4.0.0-beta.97(patch_hash=1a508eacc42841b80c9d6cdaa527ed19176c68ad4784c3ebf4c4a2c56a70928e)(effect@4.0.0-beta.97)
       '@types/ws':
         specifier: 8.18.1
         version: 8.18.1
@@ -477,7 +478,7 @@ importers:
         version: link:../distribution
       '@effect/platform-node-shared':
         specifier: 4.0.0-beta.97
-        version: 4.0.0-beta.97(effect@4.0.0-beta.97)
+        version: 4.0.0-beta.97(patch_hash=1a508eacc42841b80c9d6cdaa527ed19176c68ad4784c3ebf4c4a2c56a70928e)(effect@4.0.0-beta.97)
       effect:
         specifier: 4.0.0-beta.97
         version: 4.0.0-beta.97
@@ -3930,9 +3931,9 @@ packages:
 
 snapshots:
 
-  '@artisanstreet/runner@git+https://github.com/sandersonstabo/runner.git#5b48d0d4cbddb310853aa8a413a7569cac850893(@effect/platform-node-shared@4.0.0-beta.97(effect@4.0.0-beta.97))(effect@4.0.0-beta.97)(typescript@7.0.2)(web-tree-sitter@0.25.10)':
+  '@artisanstreet/runner@git+https://github.com/sandersonstabo/runner.git#5b48d0d4cbddb310853aa8a413a7569cac850893(@effect/platform-node-shared@4.0.0-beta.97(patch_hash=1a508eacc42841b80c9d6cdaa527ed19176c68ad4784c3ebf4c4a2c56a70928e)(effect@4.0.0-beta.97))(effect@4.0.0-beta.97)(typescript@7.0.2)(web-tree-sitter@0.25.10)':
     dependencies:
-      '@effect/platform-node-shared': 4.0.0-beta.97(effect@4.0.0-beta.97)
+      '@effect/platform-node-shared': 4.0.0-beta.97(patch_hash=1a508eacc42841b80c9d6cdaa527ed19176c68ad4784c3ebf4c4a2c56a70928e)(effect@4.0.0-beta.97)
       '@opentui/core': 0.5.1(typescript@7.0.2)(web-tree-sitter@0.25.10)
       bun: 1.3.14
       effect: 4.0.0-beta.97
@@ -4101,7 +4102,7 @@ snapshots:
       effect: 4.0.0-beta.97
       multipasta: 0.2.8
 
-  '@effect/platform-node-shared@4.0.0-beta.97(effect@4.0.0-beta.97)':
+  '@effect/platform-node-shared@4.0.0-beta.97(patch_hash=1a508eacc42841b80c9d6cdaa527ed19176c68ad4784c3ebf4c4a2c56a70928e)(effect@4.0.0-beta.97)':
     dependencies:
       '@types/ws': 8.18.1
       effect: 4.0.0-beta.97

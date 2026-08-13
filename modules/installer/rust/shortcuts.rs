@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use sha2::{Digest, Sha256};
 
 use crate::{
+    background_process::background_command,
     error::{InstallerError, Result},
     integrations::OwnedIntegration,
     platform::Platform,
@@ -141,8 +142,6 @@ const fn start_menu_directory() -> Option<PathBuf> {
 
 #[cfg(windows)]
 fn write(target: &ShortcutTarget) -> Result<()> {
-    use std::process::Command;
-
     if cfg!(debug_assertions) {
         eprintln!(
             "development build guard: leaving the shortcut at {} untouched",
@@ -154,7 +153,7 @@ fn write(target: &ShortcutTarget) -> Result<()> {
         std::fs::create_dir_all(parent).map_err(crate::error::io(parent))?;
     }
     let script = shortcut_script(target);
-    let status = Command::new("powershell.exe")
+    let status = background_command("powershell.exe")
         .args([
             "-NoProfile",
             "-ExecutionPolicy",

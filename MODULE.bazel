@@ -27,12 +27,15 @@ pnpm.pnpm(pnpm_version_from = "//:package.json")
 use_repo(pnpm, "pnpm")
 
 # The pnpm lockfile remains the source of truth for every JavaScript package,
-# including workspace links and the repository-owned pe-library patch.
+# including workspace links and repository-owned dependency patches.
 npm = use_extension("@aspect_rules_js//npm:extensions.bzl", "npm")
 npm.npm_translate_lock(
     name = "npm",
     pnpm_lock = "//:pnpm-lock.yaml",
-    data = ["//:patches/pe-library@2.0.1.patch"],
+    data = [
+        "//:patches/@effect__platform-node-shared@4.0.0-beta.97.patch",
+        "//:patches/pe-library@2.0.1.patch",
+    ],
     run_lifecycle_hooks = False,
 )
 # SvelteKit reads its synthetic `$env` Markdown descriptions while generating

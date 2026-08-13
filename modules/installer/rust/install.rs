@@ -12,6 +12,7 @@ use url::Url;
 
 use crate::{
     archive,
+    background_process::{background_command, detached_background_command},
     error::{InstallerError, Result, io},
     integrations::{
         OwnedIntegration, apply_protocol, prepare_protocol, remove_protocol, verify_protocol,
@@ -518,9 +519,7 @@ fn install_stable_cli(root: &Path, release: &Path) -> Result<PathBuf> {
 
 #[cfg(windows)]
 fn schedule_stable_cli_replacement(source: &Path, destination: &Path) -> Result<()> {
-    use std::os::windows::process::CommandExt;
-    const DETACHED_PROCESS: u32 = 0x0000_0008;
-    std::process::Command::new("cmd.exe")
+    detached_background_command("cmd.exe")
         .args([
             "/d",
             "/s",
@@ -529,7 +528,6 @@ fn schedule_stable_cli_replacement(source: &Path, destination: &Path) -> Result<
         ])
         .env("ARTISAN_AE_SOURCE", source)
         .env("ARTISAN_AE_DESTINATION", destination)
-        .creation_flags(DETACHED_PROCESS)
         .spawn()
         .map_err(InstallerError::CleanupHelper)?;
     Ok(())
@@ -707,7 +705,7 @@ fn invoke_ae_diagnostic(release: &Path, arguments: &[&str]) -> Result<()> {
     }
     // Doctor reports Forge-instance problems independently. Repair owns the
     // installation invariants above and must not recurse through `--fix`.
-    let _status = std::process::Command::new(&executable)
+    let _status = background_command(&executable)
         .args(arguments)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -920,9 +918,7 @@ fn schedule_installation_cleanup(root: &Path, remove_data: bool) -> Result<()> {
     let versions = root.join("versions");
     #[cfg(windows)]
     {
-        use std::os::windows::process::CommandExt;
-        const DETACHED_PROCESS: u32 = 0x0000_0008;
-        let mut command = std::process::Command::new("cmd.exe");
+        let mut command = detached_background_command("cmd.exe");
         let script = if remove_data {
             "ping 127.0.0.1 -n 3 > nul & rmdir /s /q \"%ARTISAN_ROOT%\""
         } else {
@@ -931,10 +927,7 @@ fn schedule_installation_cleanup(root: &Path, remove_data: bool) -> Result<()> {
         command.args(["/d", "/s", "/c", script]);
         command.env("ARTISAN_VERSIONS", versions);
         command.env("ARTISAN_ROOT", root);
-        command
-            .creation_flags(DETACHED_PROCESS)
-            .spawn()
-            .map_err(InstallerError::CleanupHelper)?;
+        command.spawn().map_err(InstallerError::CleanupHelper)?;
     }
     #[cfg(unix)]
     {
@@ -959,7 +952,7 @@ fn invoke_ae(release: &Path, arguments: &[&str]) -> Result<()> {
     if !executable.is_file() {
         return Err(InstallerError::MissingCli(executable));
     }
-    let status = std::process::Command::new(&executable)
+    let status = background_command(&executable)
         .args(arguments)
         .status()
         .map_err(io(&executable))?;

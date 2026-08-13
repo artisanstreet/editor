@@ -58,9 +58,10 @@ const SpawnDesktopProcess: DesktopProcessSpawner = (command, arguments_, options
 	spawn(command, [...arguments_], options);
 
 /**
- * Effect's ChildProcess API models the streams and detached lifecycle we use
- * elsewhere, but beta.97 has no Node `windowsHide` equivalent. This narrow
- * adapter keeps that Windows-only no-terminal control at the OS boundary.
+ * Effect's ChildProcess API models the streams and detached lifecycle used
+ * elsewhere, but beta.97 has no per-command `windowsHide` option. This direct
+ * boundary keeps the same no-console contract as Artisan's patched Effect
+ * Node process layer.
  */
 export const make_node_forge_handoff_process_layer_with = (spawn_process: DesktopProcessSpawner) =>
 	Layer.succeed(

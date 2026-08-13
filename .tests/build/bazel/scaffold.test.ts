@@ -26,6 +26,7 @@ describe("Bazel scaffold", () => {
 		const patch = Read("tools/bazel/bazel-lib-windows-native-patch.patch");
 
 		expect(module).toContain('pnpm_lock = "//:pnpm-lock.yaml"');
+		expect(module).toContain('"//:patches/@effect__platform-node-shared@4.0.0-beta.97.patch"');
 		expect(module).toContain('"//:patches/pe-library@2.0.1.patch"');
 		expect(module).toContain("run_lifecycle_hooks = False");
 		expect(module).toContain('package = "@sveltejs/kit"');

@@ -1,11 +1,13 @@
 use std::{
     path::{Path, PathBuf},
-    process::Command,
     thread::sleep,
     time::{Duration, Instant},
 };
 
-use crate::error::{InstallerError, Result};
+use crate::{
+    background_process::background_command,
+    error::{InstallerError, Result},
+};
 
 /// How long a gracefully-asked process is given before it is judged stuck.
 const GRACEFUL_WINDOW: Duration = Duration::from_secs(20);
@@ -105,7 +107,7 @@ pub fn retire_superseded(
         // capture its diagnostic because process identity below is the final
         // authority for whether retirement actually completed.
         for process in &forges {
-            let _ = Command::new(stable_ae)
+            let _ = background_command(stable_ae)
                 .args(exact_stop_arguments(process.pid))
                 .output();
         }
@@ -204,7 +206,7 @@ fn discover(versions_root: &Path) -> Result<Vec<RunningProcess>> {
          ForEach-Object {{ \"$($_.ProcessId)|$($_.ExecutablePath)\" }}",
         versions_root.display().to_string().replace('\'', "''")
     );
-    let output = Command::new("powershell.exe")
+    let output = background_command("powershell.exe")
         .args([
             "-NoProfile",
             "-ExecutionPolicy",
@@ -220,7 +222,7 @@ fn discover(versions_root: &Path) -> Result<Vec<RunningProcess>> {
 
 #[cfg(not(windows))]
 fn discover(versions_root: &Path) -> Result<Vec<RunningProcess>> {
-    let output = Command::new("ps")
+    let output = background_command("ps")
         .args(["-eo", "pid=,args="])
         .output()
         .map_err(InstallerError::CleanupHelper)?;
@@ -261,11 +263,11 @@ fn parse_discovery(output: &str) -> Vec<RunningProcess> {
 /// Asks a process to close its window and exit of its own accord.
 fn request_close(pid: u32) {
     #[cfg(windows)]
-    let _ = Command::new("taskkill")
+    let _ = background_command("taskkill")
         .args(["/PID", &pid.to_string()])
         .output();
     #[cfg(not(windows))]
-    let _ = Command::new("kill")
+    let _ = background_command("kill")
         .args(["-TERM", &pid.to_string()])
         .output();
 }
@@ -273,11 +275,11 @@ fn request_close(pid: u32) {
 /// Ends a process that would not leave on its own.
 fn terminate(pid: u32) {
     #[cfg(windows)]
-    let _ = Command::new("taskkill")
+    let _ = background_command("taskkill")
         .args(["/PID", &pid.to_string(), "/T", "/F"])
         .output();
     #[cfg(not(windows))]
-    let _ = Command::new("kill")
+    let _ = background_command("kill")
         .args(["-KILL", &pid.to_string()])
         .output();
 }
