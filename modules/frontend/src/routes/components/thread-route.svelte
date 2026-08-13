@@ -646,6 +646,7 @@
 	onpolicychange={PersistSessionPolicy}
 	onsubmit={SendMessage}
 	policy={session?.policy}
+	project_root_path={thread?.primary_project?.root_path}
 	{run_active}
 />
 

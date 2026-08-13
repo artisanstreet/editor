@@ -382,7 +382,12 @@
 					</button>
 
 					<div class="trace-acc-panel">
-						<div class="trace-acc-panel-inner flex flex-col gap-1 pt-1">
+						<div class="trace-acc-panel-inner pt-1">
+							<div class="relative flex flex-col gap-1 pl-6">
+								<div
+									aria-hidden="true"
+									class="pointer-events-none absolute inset-y-0 left-0 w-4 after:absolute after:inset-y-0 after:left-1/2 after:w-[2px] after:bg-border/60"
+								></div>
 							{#each segment.items as activity (activity.id)}
 								{@const ActivityIcon = CategoryIcon(
 									GetConversationActivityCategory(activity.kind),
@@ -403,6 +408,7 @@
 									{/if}
 								</div>
 							{/each}
+							</div>
 						</div>
 					</div>
 				</div>

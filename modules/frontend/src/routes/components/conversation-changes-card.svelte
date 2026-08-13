@@ -7,6 +7,7 @@
 	import { format_compact_diff_count } from "$lib/conversation/diff-stat";
 	import {
 		aggregate_file_change_diff,
+		display_file_change_path,
 		group_file_changes,
 	} from "$lib/conversation/file-change-groups";
 	import { resolve_file_icon } from "$lib/conversation/file-icon";
@@ -18,9 +19,11 @@
 	let {
 		change_sets,
 		files,
+		project_root_path,
 	}: {
 		change_sets: ReadonlyArray<ChangeSet>;
 		files: ReadonlyArray<FileChange>;
+		project_root_path?: string;
 	} = $props();
 
 	const grouped_files = $derived(group_file_changes(files));
@@ -100,7 +103,7 @@
 	{#if grouped_files.length > 0}
 		<ul>
 			{#each grouped_files as file (file.id)}
-				{@const parts = path_parts(file.path)}
+				{@const parts = path_parts(display_file_change_path(file.path, project_root_path))}
 				<li>
 					<ContextMenu.Root>
 						<ContextMenu.Trigger

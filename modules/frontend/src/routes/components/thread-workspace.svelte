@@ -54,6 +54,7 @@
 		onimagevisibilitychange,
 		onsubmit,
 		policy,
+		project_root_path,
 		run_active = false,
 		snapshot,
 	}: {
@@ -90,6 +91,7 @@
 			{ readonly message: string }
 		>;
 		policy?: ThreadSessionPolicy;
+		project_root_path?: string;
 		run_active?: boolean;
 		snapshot: ConversationSnapshot;
 	} = $props();
@@ -715,6 +717,7 @@
 									<ConversationChangesCard
 										change_sets={block.change_sets}
 										files={block.files}
+										{project_root_path}
 									/>
 								{:else}
 									<ConversationTurnFooter

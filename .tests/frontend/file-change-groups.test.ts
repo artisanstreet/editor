@@ -4,6 +4,7 @@ import type { ConversationItem } from "@artisan/protocol";
 import {
 	aggregate_file_change_diff,
 	canonical_file_change_path,
+	display_file_change_path,
 	group_file_changes,
 } from "../../modules/frontend/src/lib/conversation/file-change-groups";
 
@@ -32,6 +33,82 @@ const file_change = (
 });
 
 describe("file-change presentation grouping", () => {
+	it("starts Windows file labels at the project folder with native separators", () => {
+		expect(
+			display_file_change_path(
+				"C:\\Users\\sander\\Desktop\\svelte-effect-runtime\\modules\\runtime.ts",
+				"C:\\Users\\sander\\Desktop\\svelte-effect-runtime",
+			),
+		).toBe("svelte-effect-runtime\\modules\\runtime.ts");
+		expect(
+			display_file_change_path(
+				"c:/users/SANDER/desktop/SVELTE-EFFECT-RUNTIME/package.json",
+				"C:\\Users\\sander\\Desktop\\svelte-effect-runtime\\",
+			),
+		).toBe("svelte-effect-runtime\\package.json");
+	});
+
+	it("starts macOS and Linux file labels at the project folder with slash separators", () => {
+		expect(
+			display_file_change_path(
+				"/Users/sander/code/artisan-editor/modules/frontend/package.json",
+				"/Users/sander/code/artisan-editor",
+			),
+		).toBe("artisan-editor/modules/frontend/package.json");
+		expect(
+			display_file_change_path(
+				"/home/sander/code/artisan-editor/README.md",
+				"/home/sander/code/artisan-editor/",
+			),
+		).toBe("artisan-editor/README.md");
+	});
+
+	it("prefixes project-relative paths and keeps outside or unknown paths truthful", () => {
+		expect(
+			display_file_change_path(
+				"C:\\projects\\artisan-tools\\readme.md",
+				"C:\\projects\\artisan",
+			),
+		).toBe("C:\\projects\\artisan-tools\\readme.md");
+		expect(display_file_change_path("src/file.ts", "C:\\projects\\artisan")).toBe(
+			"artisan\\src\\file.ts",
+		);
+		expect(display_file_change_path("./src/file.ts", "/projects/artisan")).toBe(
+			"artisan/src/file.ts",
+		);
+		expect(display_file_change_path("../other/file.ts", "/projects/artisan")).toBe(
+			"../other/file.ts",
+		);
+		expect(display_file_change_path("src/../readme.md", "/projects/artisan")).toBe(
+			"artisan/readme.md",
+		);
+		expect(display_file_change_path("src/../../outside.ts", "/projects/artisan")).toBe(
+			"src/../../outside.ts",
+		);
+		expect(display_file_change_path("src\\..\\..\\outside.ts", "C:\\projects\\artisan")).toBe(
+			"src\\..\\..\\outside.ts",
+		);
+		expect(
+			display_file_change_path(
+				"C:\\projects\\artisan\\src\\..\\..\\outside.ts",
+				"C:\\projects\\artisan",
+			),
+		).toBe("C:\\projects\\artisan\\src\\..\\..\\outside.ts");
+		expect(
+			display_file_change_path("/projects/artisan/src/../../outside.ts", "/projects/artisan"),
+		).toBe("/projects/artisan/src/../../outside.ts");
+		expect(display_file_change_path("/projects/artisan/readme.md")).toBe(
+			"/projects/artisan/readme.md",
+		);
+	});
+
+	it("uses the project folder itself when the paths are equal", () => {
+		expect(display_file_change_path("C:\\projects\\artisan", "c:\\projects\\artisan\\")).toBe(
+			"artisan",
+		);
+		expect(display_file_change_path("/projects/artisan", "/projects/artisan")).toBe("artisan");
+	});
+
 	it("canonicalizes Windows paths case-insensitively and normalizes separators", () => {
 		expect(
 			canonical_file_change_path(
