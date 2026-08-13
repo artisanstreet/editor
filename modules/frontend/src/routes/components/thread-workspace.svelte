@@ -20,6 +20,10 @@
 		work_session_run_authority,
 	} from "$lib/conversation/activity-status";
 	import {
+		group_conversation_trace_blocks,
+		type ConversationTraceRenderBlock,
+	} from "$lib/conversation/trace";
+	import {
 		ConversationAlignedScrollTop,
 		ConversationBaseEndSpacePixels,
 		ConversationBottomScrollTop,
@@ -154,7 +158,11 @@
 					older_render_group_count,
 				),
 	);
-	const render_blocks = $derived(fold_resolved_approvals_into_work(render_window.blocks));
+	const render_blocks = $derived(
+		group_conversation_trace_blocks(
+			fold_resolved_approvals_into_work(render_window.blocks),
+		),
+	);
 	/**
 	 * The transcript's freshest session, which the durable work item may not
 	 * describe yet: run authority treats exactly that one as pending rather
@@ -167,7 +175,7 @@
 	const visible_render_groups = $derived.by(() => {
 		const groups = new Map<
 			string,
-			{ blocks: Array<ConversationRenderBlock>; turn_id: string }
+			{ blocks: Array<ConversationTraceRenderBlock>; turn_id: string }
 		>();
 
 		for (const block of render_blocks) {
@@ -678,7 +686,14 @@
 					{#each visible_render_groups as render_group (render_group.turn_id)}
 						<section class="turn-hover-region group/turn relative flex flex-col gap-8">
 							{#each render_group.blocks as block (block.id)}
-								{#if block.type === "item"}
+								{#if block.type === "trace_group"}
+									<!--
+										Post-steer trace material keeps the same policy boundary: activity
+										stays collapsible, while diagnostics remain hidden unless the trace
+										explicitly exposes them.
+									-->
+									<ConversationTrace items={block.items} work_active={run_active} />
+								{:else if block.type === "item"}
 									<ConversationItem
 										{image_sources}
 										item={block.item}

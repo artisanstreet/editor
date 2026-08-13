@@ -1,4 +1,5 @@
 import type { ConversationItem } from "@artisan/protocol";
+import type { ConversationRenderBlock } from "./store";
 
 export type ConversationActivityItem = Extract<ConversationItem, { type: "activity" }>;
 export type ConversationDiagnosticItem = Extract<ConversationItem, { type: "native_event" }>;
@@ -41,6 +42,62 @@ export type ConversationTraceSegment =
 export type ConversationTraceRenderSegment = ConversationTraceSegment & {
 	/** Present reasoning closes in place before its last DOM is retired. */
 	readonly retirement: "present" | "retiring";
+};
+
+export type ConversationTraceRenderBlock =
+	| ConversationRenderBlock
+	| {
+			readonly id: string;
+			readonly items: ReadonlyArray<ConversationActivityItem | ConversationDiagnosticItem>;
+			readonly turn_id: string;
+			readonly type: "trace_group";
+	  };
+
+type ConversationTraceRenderBlockBuilder =
+	| Exclude<ConversationTraceRenderBlock, { readonly type: "trace_group" }>
+	| {
+			readonly id: string;
+			readonly items: Array<ConversationActivityItem | ConversationDiagnosticItem>;
+			readonly turn_id: string;
+			readonly type: "trace_group";
+	  };
+
+/**
+ * Coalesces trace-only timeline blocks before the component boundary.
+ *
+ * Steering keeps later work below the user's message by lifting it out of the
+ * original work disclosure. Those items are still one contiguous tool chain;
+ * rendering each block through its own trace would erase that adjacency.
+ */
+export const group_conversation_trace_blocks = (
+	blocks: ReadonlyArray<ConversationRenderBlock>,
+): ReadonlyArray<ConversationTraceRenderBlock> => {
+	const grouped: Array<ConversationTraceRenderBlockBuilder> = [];
+
+	for (const block of blocks) {
+		if (
+			block.type !== "item" ||
+			(block.item.type !== "activity" && block.item.type !== "native_event")
+		) {
+			grouped.push(block);
+			continue;
+		}
+
+		const previous = grouped.at(-1);
+		if (previous?.type === "trace_group" && previous.turn_id === block.turn_id) {
+			previous.items.push(block.item);
+			continue;
+		}
+
+		grouped.push({
+			id: JSON.stringify(["trace", block.id]),
+			items: [block.item],
+			turn_id: block.turn_id,
+			type: "trace_group",
+		});
+	}
+
+	return grouped;
 };
 
 /**

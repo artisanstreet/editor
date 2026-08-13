@@ -5,7 +5,10 @@ import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
 
 import { ConversationItem } from "@artisan/protocol";
-import { make_conversation_trace_segments } from "../../modules/frontend/src/lib/conversation/trace";
+import {
+	group_conversation_trace_blocks,
+	make_conversation_trace_segments,
+} from "../../modules/frontend/src/lib/conversation/trace";
 
 const ReadSource = (path: string) =>
 	readFileSync(resolve(import.meta.dirname, "../..", path), "utf8");
@@ -25,6 +28,70 @@ const base = {
 const item = (value: unknown) => Schema.decodeUnknownSync(ConversationItem)(value);
 
 describe("conversation trace", () => {
+	it("keeps contiguous post-steer trace blocks in one tool chain", () => {
+		const activity = (id: string, ordinal: number) =>
+			item({
+				...base,
+				id,
+				kind: "terminal_activity",
+				label: "Ran a command",
+				ordinal,
+				status: "completed",
+				type: "activity",
+			});
+		const boundary = (
+			id: string,
+			ordinal: number,
+			type: "assistant_message" | "user_message",
+		) =>
+			item({
+				...base,
+				id,
+				ordinal,
+				...(type === "assistant_message" ? { phase: "commentary" as const } : {}),
+				text: id,
+				turn_id: type === "user_message" ? "turn:user:steer" : base.turn_id,
+				type,
+			});
+		const as_block = (entry: ConversationItem) => ({
+			id: entry.id,
+			item: entry,
+			turn_id: entry.turn_id,
+			type: "item" as const,
+		});
+		const grouped = group_conversation_trace_blocks([
+			as_block(boundary("message_steer", 1, "user_message")),
+			as_block(activity("activity_1", 2)),
+			as_block(activity("activity_2", 3)),
+			as_block(boundary("assistant_boundary", 4, "assistant_message")),
+			as_block(activity("activity_3", 5)),
+			as_block(activity("activity_4", 6)),
+		]);
+
+		expect(grouped.map((block) => block.type)).toEqual([
+			"item",
+			"trace_group",
+			"item",
+			"trace_group",
+		]);
+		expect(
+			grouped.flatMap((block) =>
+				block.type === "trace_group" ? [block.items.map((entry) => entry.id)] : [],
+			),
+		).toEqual([
+			["activity_1", "activity_2"],
+			["activity_3", "activity_4"],
+		]);
+		const workspace = ReadSource(
+			"modules/frontend/src/routes/components/thread-workspace.svelte",
+		);
+		expect(workspace).toContain("group_conversation_trace_blocks(");
+		expect(workspace).toContain(
+			"<ConversationTrace items={block.items} work_active={run_active} />",
+		);
+		expect(workspace).not.toContain("<ConversationTrace items={[block.item]}");
+	});
+
 	it("hides diagnostics by default without suppressing active reasoning", () => {
 		const segments = make_conversation_trace_segments(
 			[
