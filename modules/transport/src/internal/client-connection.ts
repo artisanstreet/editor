@@ -80,6 +80,9 @@ export interface ClientConnectionLifecycle {
 	readonly Start: (handlers: ClientConnectionHandlers) => Effect.Effect<void, never, Scope.Scope>;
 }
 
+/** Bounds one pre-ready connection establishment without limiting a live session. */
+const client_establishment_timeout_ms = 10_000;
+
 /** Builds client connection state without starting its reconnect supervisor. */
 export const make_client_connection_lifecycle = (
 	reconnect_delay_ms: number,
@@ -528,162 +531,186 @@ export const make_client_connection_lifecycle = (
 					 * exit path shares.
 					 */
 					yield* Effect.addFinalizer(() => handlers.subscriptions.ResetConnection);
-					const ports = yield* connector.Connect.pipe(
-						Effect.mapError((cause) =>
-							client_error(
-								"connection",
-								"A fresh MessagePort pair could not be opened.",
-								cause,
-								true,
-							),
-						),
-					);
-					const attempt_id = yield* runtime.MakeId("connection_attempt");
-					const control_hello: TransportHelloFrame = {
-						attempt_id,
-						channel: "control",
-						kind: "transport.hello",
-						session_id,
-						transport_version: SupportedTransportVersions[0],
-					};
-					const stream_hello: TransportHelloFrame = {
-						...control_hello,
-						channel: "stream",
-					};
-
-					yield* Effect.all(
-						[
-							ports.control_port.Send(control_hello),
-							ports.stream_port.Send(stream_hello),
-						],
-						{ concurrency: "unbounded", discard: true },
-					).pipe(Effect.mapError(map_port_error));
-
-					const raw_ready = yield* Effect.all(
-						[ports.control_port.Receive, ports.stream_port.Receive],
-						{ concurrency: "unbounded" },
-					).pipe(Effect.mapError(map_port_error));
-					const control_ready = yield* decode_ready(raw_ready[0], control_hello);
-					const stream_ready = yield* decode_ready(raw_ready[1], stream_hello);
-
-					if (control_ready.connection_id !== stream_ready.connection_id) {
-						return yield* Effect.fail(
-							client_error(
-								"connection",
-								"Control and stream ports were not paired to one connection.",
-								new Error("transport connection id mismatch"),
-								true,
+					const established = yield* Effect.gen(function* () {
+						const ports = yield* connector.Connect.pipe(
+							Effect.mapError((cause) =>
+								client_error(
+									"connection",
+									"A fresh MessagePort pair could not be opened.",
+									cause,
+									true,
+								),
 							),
 						);
-					}
-
-					const resume = yield* handlers.subscriptions.ResumeCursors;
-					const connected_before_attempt = yield* Ref.get(ever_connected);
-					const trace = yield* make_trace;
-					const hello: HelloEnvelope = {
-						kind: "hello",
-						message_id: trace.message_id,
-						origin: "frontend",
-						payload: {
-							event_cursors: resume.event_cursors,
-							last_journal_sequence: resume.last_journal_sequence,
-							resume_mode: connected_before_attempt ? "resume" : "fresh",
-							supported_protocol_versions: [...SupportedProtocolVersions],
-						},
-						schema_version: 1,
-						sent_at: trace.sent_at,
-					};
-
-					yield* diagnostics.Record({
-						connection_id: control_ready.connection_id,
-						event_cursor_count: Object.keys(resume.event_cursors).length,
-						journal_sequence: resume.last_journal_sequence,
-						kind: "session.negotiating",
-						resume_mode: connected_before_attempt ? "resume" : "fresh",
-					});
-					yield* ports.control_port
-						.Send({
-							connection_id: control_ready.connection_id,
-							kind: "transport.control",
-							payload: hello,
+						const attempt_id = yield* runtime.MakeId("connection_attempt");
+						const control_hello: TransportHelloFrame = {
+							attempt_id,
+							channel: "control",
+							kind: "transport.hello",
+							session_id,
 							transport_version: SupportedTransportVersions[0],
-						} satisfies TransportControlFrame)
-						.pipe(Effect.mapError(map_port_error));
+						};
+						const stream_hello: TransportHelloFrame = {
+							...control_hello,
+							channel: "stream",
+						};
 
-					const welcome = yield* ports.control_port.Receive.pipe(
-						Effect.mapError(map_port_error),
-						Effect.flatMap((raw) => decode_control(raw, control_ready.connection_id)),
-					);
+						yield* Effect.all(
+							[
+								ports.control_port.Send(control_hello),
+								ports.stream_port.Send(stream_hello),
+							],
+							{ concurrency: "unbounded", discard: true },
+						).pipe(Effect.mapError(map_port_error));
 
-					if (welcome.kind !== "welcome" || welcome.correlation_id !== hello.message_id) {
-						return yield* Effect.fail(
-							client_error(
-								"connection",
-								"The backend did not complete protocol negotiation.",
-								new Error("welcome correlation mismatch"),
-								true,
+						const raw_ready = yield* Effect.all(
+							[ports.control_port.Receive, ports.stream_port.Receive],
+							{ concurrency: "unbounded" },
+						).pipe(Effect.mapError(map_port_error));
+						const control_ready = yield* decode_ready(raw_ready[0], control_hello);
+						const stream_ready = yield* decode_ready(raw_ready[1], stream_hello);
+
+						if (control_ready.connection_id !== stream_ready.connection_id) {
+							return yield* Effect.fail(
+								client_error(
+									"connection",
+									"Control and stream ports were not paired to one connection.",
+									new Error("transport connection id mismatch"),
+									true,
+								),
+							);
+						}
+
+						const resume = yield* handlers.subscriptions.ResumeCursors;
+						const connected_before_attempt = yield* Ref.get(ever_connected);
+						const trace = yield* make_trace;
+						const hello: HelloEnvelope = {
+							kind: "hello",
+							message_id: trace.message_id,
+							origin: "frontend",
+							payload: {
+								event_cursors: resume.event_cursors,
+								last_journal_sequence: resume.last_journal_sequence,
+								resume_mode: connected_before_attempt ? "resume" : "fresh",
+								supported_protocol_versions: [...SupportedProtocolVersions],
+							},
+							schema_version: 1,
+							sent_at: trace.sent_at,
+						};
+
+						yield* diagnostics.Record({
+							connection_id: control_ready.connection_id,
+							event_cursor_count: Object.keys(resume.event_cursors).length,
+							journal_sequence: resume.last_journal_sequence,
+							kind: "session.negotiating",
+							resume_mode: connected_before_attempt ? "resume" : "fresh",
+						});
+						yield* ports.control_port
+							.Send({
+								connection_id: control_ready.connection_id,
+								kind: "transport.control",
+								payload: hello,
+								transport_version: SupportedTransportVersions[0],
+							} satisfies TransportControlFrame)
+							.pipe(Effect.mapError(map_port_error));
+
+						const welcome = yield* ports.control_port.Receive.pipe(
+							Effect.mapError(map_port_error),
+							Effect.flatMap((raw) =>
+								decode_control(raw, control_ready.connection_id),
 							),
 						);
-					}
 
-					const active: ActiveClientSession = {
-						connection_id: control_ready.connection_id,
-						ports,
-						protocol_connection_id: welcome.payload.connection_id,
-						stream_ticket: welcome.payload.stream_ticket,
-					};
-					yield* handlers.requests.ResetConnection;
-					yield* handlers.subscriptions.Retry((envelope) =>
-						send_active(active, envelope),
-					);
+						if (
+							welcome.kind !== "welcome" ||
+							welcome.correlation_id !== hello.message_id
+						) {
+							return yield* Effect.fail(
+								client_error(
+									"connection",
+									"The backend did not complete protocol negotiation.",
+									new Error("welcome correlation mismatch"),
+									true,
+								),
+							);
+						}
 
-					const control_loop = Effect.forever(
-						ports.control_port.Receive.pipe(
-							Effect.mapError(map_port_error),
-							Effect.flatMap((raw) => decode_control(raw, active.connection_id)),
-							Effect.flatMap((envelope) => handle_control(active, envelope)),
-						),
-					);
-					const stream_loop = Effect.forever(
-						ports.stream_port.Receive.pipe(
-							Effect.mapError(map_port_error),
-							Effect.flatMap((raw) => decode_stream(raw, active.connection_id)),
-							Effect.flatMap((frame) =>
-								frame.kind === "stream.bind"
-									? Effect.fail(
-											client_error(
-												"malformed",
-												"The backend sent a client-only stream bind frame.",
-												new Error("unexpected stream.bind"),
-											),
-										)
-									: handlers.streams.Handle(active, frame),
+						const active: ActiveClientSession = {
+							connection_id: control_ready.connection_id,
+							ports,
+							protocol_connection_id: welcome.payload.connection_id,
+							stream_ticket: welcome.payload.stream_ticket,
+						};
+						yield* handlers.requests.ResetConnection;
+						yield* handlers.subscriptions.Retry((envelope) =>
+							send_active(active, envelope),
+						);
+
+						const control_loop = Effect.forever(
+							ports.control_port.Receive.pipe(
+								Effect.mapError(map_port_error),
+								Effect.flatMap((raw) => decode_control(raw, active.connection_id)),
+								Effect.flatMap((envelope) => handle_control(active, envelope)),
 							),
-						),
-					);
-					const session = Effect.raceAllFirst([
-						control_loop,
-						stream_loop,
-						ports.control_port.Closed,
-						ports.stream_port.Closed,
-						Deferred.await(disposed_signal),
-					]);
-					const session_fiber = yield* Effect.forkScoped(session);
-					yield* Effect.raceFirst(
-						handlers.subscriptions.AwaitReady,
-						Fiber.join(session_fiber).pipe(
-							Effect.andThen(
-								Effect.fail(
-									client_error(
-										"connection",
-										"The transport session ended before subscriptions were established.",
-										new Error("subscription reconnect readiness interrupted"),
-										true,
+						);
+						const stream_loop = Effect.forever(
+							ports.stream_port.Receive.pipe(
+								Effect.mapError(map_port_error),
+								Effect.flatMap((raw) => decode_stream(raw, active.connection_id)),
+								Effect.flatMap((frame) =>
+									frame.kind === "stream.bind"
+										? Effect.fail(
+												client_error(
+													"malformed",
+													"The backend sent a client-only stream bind frame.",
+													new Error("unexpected stream.bind"),
+												),
+											)
+										: handlers.streams.Handle(active, frame),
+								),
+							),
+						);
+						const session = Effect.raceAllFirst([
+							control_loop,
+							stream_loop,
+							ports.control_port.Closed,
+							ports.stream_port.Closed,
+							Deferred.await(disposed_signal),
+						]);
+						const session_fiber = yield* Effect.forkScoped(session);
+						yield* Effect.raceFirst(
+							handlers.subscriptions.AwaitReady,
+							Fiber.join(session_fiber).pipe(
+								Effect.andThen(
+									Effect.fail(
+										client_error(
+											"connection",
+											"The transport session ended before subscriptions were established.",
+											new Error(
+												"subscription reconnect readiness interrupted",
+											),
+											true,
+										),
 									),
 								),
 							),
-						),
+						);
+						return { active, session_fiber };
+					}).pipe(
+						Effect.timeoutOrElse({
+							duration: client_establishment_timeout_ms,
+							orElse: () =>
+								Effect.fail(
+									client_error(
+										"connection",
+										"The connection did not become ready before its establishment deadline.",
+										new Error("connection establishment timed out"),
+										true,
+									),
+								),
+						}),
 					);
+					const { active, session_fiber } = established;
 					const previous_signal = yield* Ref.modify(
 						state,
 						(current): readonly [Deferred.Deferred<void>, ConnectionState] => [
