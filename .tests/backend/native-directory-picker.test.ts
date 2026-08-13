@@ -1,5 +1,6 @@
 import { Clock, Effect, Exit, Fiber, Layer, Sink, Stream } from "effect";
 import { TestClock } from "effect/testing";
+import { spawnSync } from "node:child_process";
 import {
 	ChildProcessSpawner,
 	ExitCode,
@@ -17,6 +18,7 @@ import {
 import {
 	DecodeNativeDirectoryPickerResult,
 	MakeWindowsNativeDirectoryPickerCommand,
+	MakeWindowsNativeDirectoryPickerProbeCommand,
 	make_native_directory_picker_layer,
 } from "../../modules/backend/src/projects/node-native-directory-picker";
 
@@ -75,10 +77,32 @@ describe("NativeDirectoryPicker", () => {
 			"Hidden",
 			"-EncodedCommand",
 		]);
-		expect(Buffer.from(command.args.at(-1) ?? "", "base64").toString("utf16le")).toContain(
-			"FolderBrowserDialog",
-		);
+		const script = Buffer.from(command.args.at(-1) ?? "", "base64").toString("utf16le");
+		expect(script).toContain("IFileDialog");
+		expect(script).toContain("PickFolders");
+		expect(script).not.toContain("FolderBrowserDialog");
+		expect(script).not.toContain("AutoUpgradeEnabled");
 	});
+
+	it.runIf(process.platform === "win32")(
+		"compiles and instantiates the Windows native common-item dialog",
+		() => {
+			const command = MakeWindowsNativeDirectoryPickerProbeCommand();
+			const result = spawnSync(command.command, [...command.args], {
+				encoding: "utf8",
+				shell: false,
+				timeout: 15_000,
+				windowsHide: true,
+			});
+
+			expect({
+				error: result.error,
+				status: result.status,
+				stderr: result.stderr,
+			}).toEqual({ error: undefined, status: 0, stderr: "" });
+			expect(JSON.parse(result.stdout)).toEqual({ kind: "ready" });
+		},
+	);
 
 	it("decodes only the selected and cancelled picker protocol", async () => {
 		await expect(

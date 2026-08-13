@@ -69,26 +69,156 @@ const Capture = <E, R>(
 		),
 	);
 
-const windows_picker_script = [
+/**
+ * Windows PowerShell runs on .NET Framework, whose WinForms folder dialog does
+ * not expose `AutoUpgradeEnabled`. Use the Windows common-item dialog directly
+ * so the host gets the Explorer-native folder chooser on every supported build.
+ */
+const windows_native_picker_type = String.raw`
+using System;
+using System.Runtime.InteropServices;
+
+namespace Artisan
+{
+	[ComImport]
+	[Guid("42f85136-db7e-439c-85f1-e4075d135fc8")]
+	[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+	internal interface IFileDialog
+	{
+		[PreserveSig]
+		int Show(IntPtr parent);
+		void SetFileTypes(uint count, IntPtr filters);
+		void SetFileTypeIndex(uint index);
+		void GetFileTypeIndex(out uint index);
+		void Advise(IntPtr events, out uint cookie);
+		void Unadvise(uint cookie);
+		void SetOptions(uint options);
+		void GetOptions(out uint options);
+		void SetDefaultFolder(IntPtr item);
+		void SetFolder(IntPtr item);
+		void GetFolder(out IntPtr item);
+		void GetCurrentSelection(out IntPtr item);
+		void SetFileName([MarshalAs(UnmanagedType.LPWStr)] string name);
+		void GetFileName(out IntPtr name);
+		void SetTitle([MarshalAs(UnmanagedType.LPWStr)] string title);
+		void SetOkButtonLabel([MarshalAs(UnmanagedType.LPWStr)] string label);
+		void SetFileNameLabel([MarshalAs(UnmanagedType.LPWStr)] string label);
+		void GetResult(out IShellItem item);
+		void AddPlace(IntPtr item, int alignment);
+		void SetDefaultExtension([MarshalAs(UnmanagedType.LPWStr)] string extension);
+		void Close(int result);
+		void SetClientGuid(ref Guid guid);
+		void ClearClientData();
+		void SetFilter(IntPtr filter);
+	}
+
+	[ComImport]
+	[Guid("43826d1e-e718-42ee-bc55-a1e261c37bfe")]
+	[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+	internal interface IShellItem
+	{
+		void BindToHandler(IntPtr context, ref Guid handler, ref Guid target, out IntPtr result);
+		void GetParent(out IShellItem parent);
+		void GetDisplayName(uint nameType, out IntPtr name);
+		void GetAttributes(uint mask, out uint attributes);
+		void Compare(IShellItem other, uint hint, out int order);
+	}
+
+	public static class NativeDirectoryPicker
+	{
+		private const uint PickFolders = 0x00000020;
+		private const uint ForceFileSystem = 0x00000040;
+		private const uint PathMustExist = 0x00000800;
+		private const uint FileSystemPath = 0x80058000;
+		private const int Cancelled = unchecked((int)0x800704C7);
+		private static readonly Guid FileOpenDialog = new Guid("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7");
+
+		private static IFileDialog Create()
+		{
+			Type dialogType = Type.GetTypeFromCLSID(FileOpenDialog, true);
+			return (IFileDialog)Activator.CreateInstance(dialogType);
+		}
+
+		public static void Probe()
+		{
+			IFileDialog dialog = Create();
+			try
+			{
+				uint options;
+				dialog.GetOptions(out options);
+			}
+			finally
+			{
+				Marshal.FinalReleaseComObject(dialog);
+			}
+		}
+
+		public static string Pick()
+		{
+			IFileDialog dialog = Create();
+			IShellItem result = null;
+			IntPtr pathPointer = IntPtr.Zero;
+			try
+			{
+				uint options;
+				dialog.GetOptions(out options);
+				dialog.SetOptions(options | PickFolders | ForceFileSystem | PathMustExist);
+				dialog.SetTitle("Select a project folder to attach to Artisan");
+				dialog.SetOkButtonLabel("Select folder");
+
+				int shown = dialog.Show(IntPtr.Zero);
+				if (shown == Cancelled)
+				{
+					return null;
+				}
+				Marshal.ThrowExceptionForHR(shown);
+
+				dialog.GetResult(out result);
+				result.GetDisplayName(FileSystemPath, out pathPointer);
+				return Marshal.PtrToStringUni(pathPointer);
+			}
+			finally
+			{
+				if (pathPointer != IntPtr.Zero)
+				{
+					Marshal.FreeCoTaskMem(pathPointer);
+				}
+				if (result != null)
+				{
+					Marshal.FinalReleaseComObject(result);
+				}
+				Marshal.FinalReleaseComObject(dialog);
+			}
+		}
+	}
+}
+`;
+
+const windows_picker_preamble = [
 	"$ErrorActionPreference = 'Stop'",
 	"$ProgressPreference = 'SilentlyContinue'",
-	"Add-Type -AssemblyName System.Windows.Forms",
-	"$dialog = New-Object System.Windows.Forms.FolderBrowserDialog",
-	"try {",
-	"  $dialog.AutoUpgradeEnabled = $true",
-	"  $dialog.Description = 'Select a project folder to attach to Artisan'",
-	"  if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK -and -not [String]::IsNullOrWhiteSpace($dialog.SelectedPath)) {",
-	"    [Console]::Out.Write(([pscustomobject]@{kind='selected';path=$dialog.SelectedPath}|ConvertTo-Json -Compress))",
-	"  } else {",
-	'    [Console]::Out.Write(\'{"kind":"cancelled"}\')',
-	"  }",
-	"} finally {",
-	"  $dialog.Dispose()",
+	`Add-Type -TypeDefinition @'
+${windows_native_picker_type}
+'@`,
+];
+
+const windows_picker_script = [
+	...windows_picker_preamble,
+	"$path = [Artisan.NativeDirectoryPicker]::Pick()",
+	"if ([String]::IsNullOrWhiteSpace($path)) {",
+	'  [Console]::Out.Write(\'{"kind":"cancelled"}\')',
+	"} else {",
+	"  [Console]::Out.Write(([pscustomobject]@{kind='selected';path=$path}|ConvertTo-Json -Compress))",
 	"}",
 ].join("\n");
 
-/** Creates the fixed, argument-only PowerShell command for the Windows picker. */
-export const MakeWindowsNativeDirectoryPickerCommand = () =>
+const windows_picker_probe_script = [
+	...windows_picker_preamble,
+	"[Artisan.NativeDirectoryPicker]::Probe()",
+	'  [Console]::Out.Write(\'{"kind":"ready"}\')',
+].join("\n");
+
+const MakeWindowsPowerShellCommand = (script: string) =>
 	ChildProcess.make(
 		"powershell.exe",
 		[
@@ -99,7 +229,7 @@ export const MakeWindowsNativeDirectoryPickerCommand = () =>
 			"-WindowStyle",
 			"Hidden",
 			"-EncodedCommand",
-			Buffer.from(windows_picker_script, "utf16le").toString("base64"),
+			Buffer.from(script, "utf16le").toString("base64"),
 		],
 		{
 			forceKillAfter: "1 second",
@@ -109,6 +239,14 @@ export const MakeWindowsNativeDirectoryPickerCommand = () =>
 			stdout: "pipe",
 		},
 	);
+
+/** Creates the fixed, argument-only PowerShell command for the Windows picker. */
+export const MakeWindowsNativeDirectoryPickerCommand = () =>
+	MakeWindowsPowerShellCommand(windows_picker_script);
+
+/** Compiles and instantiates the same native COM boundary without showing UI. */
+export const MakeWindowsNativeDirectoryPickerProbeCommand = () =>
+	MakeWindowsPowerShellCommand(windows_picker_probe_script);
 
 /** Validates the picker protocol at its single process-output boundary. */
 export const DecodeNativeDirectoryPickerResult = (stdout: Uint8Array) =>

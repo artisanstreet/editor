@@ -132,6 +132,7 @@
 			const project = yield* client.SelectProjectDirectory({ directory_id });
 			yield* onselect(project);
 			open = false;
+			return true;
 		}).pipe(
 			Effect.ensuring(
 				Effect.gen(function* () {
@@ -141,6 +142,7 @@
 			Effect.catch((error) =>
 				Effect.gen(function* () {
 					yield* banner.error("Could not select folder", { description: error.message });
+					return false;
 				}),
 			),
 		);
@@ -199,6 +201,31 @@
 			yield* CreateFolder();
 		});
 
+	const PickNativeDirectory = Effect.gen(function* () {
+		selecting = true;
+		const picked = yield* client.PickProjectDirectory.pipe(
+			Effect.catch(() =>
+				Effect.gen(function* () {
+					return undefined;
+				}),
+			),
+		);
+		selecting = false;
+		if (picked === undefined) return false;
+		if (picked.status === "cancelled") {
+			open = false;
+			return true;
+		}
+
+		return yield* SelectDirectory(picked.directory.directory_id);
+	}).pipe(
+		Effect.ensuring(
+			Effect.gen(function* () {
+				selecting = false;
+			}),
+		),
+	);
+
 	/** Reveal starts at the roots on every open, with stale state cleared first. */
 	const InitializeOpenPicker = (is_open: boolean) =>
 		Effect.gen(function* () {
@@ -208,7 +235,10 @@
 			search = "";
 			highlighted_id = undefined;
 			naming_folder = false;
-			yield* Browse([]);
+			const handled = yield* PickNativeDirectory;
+			if (!handled && open) {
+				yield* Browse([]);
+			}
 		});
 	yield* InitializeOpenPicker(open);
 
