@@ -239,6 +239,18 @@ export {
 	ProjectDirectoryService,
 } from "./projects/project-directory-service";
 export {
+	NativeDirectoryPicker,
+	NativeDirectoryPickerError,
+	NativeDirectoryPickerUnavailable,
+	type NativeDirectoryPickerResult,
+} from "./projects/native-directory-picker";
+export {
+	DecodeNativeDirectoryPickerResult,
+	MakeWindowsNativeDirectoryPickerCommand,
+	make_native_directory_picker_layer,
+	make_node_native_directory_picker_layer,
+} from "./projects/node-native-directory-picker";
+export {
 	ThreadProjectAffinityEvidenceInput,
 	ThreadProjectAffinityNotFound,
 	ThreadProjectAffinityRepository,

@@ -135,6 +135,7 @@ describe("frontend ArtisanClient fixture runtime", () => {
 						"DetachProject",
 						"ListPreviewTargets",
 						"ListProjectDirectories",
+						"PickProjectDirectory",
 						"ListRoutines",
 						"ListCapabilities",
 						"ImportNpxSkills",

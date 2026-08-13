@@ -76,6 +76,11 @@ import {
 	make_project_directory_service_layer,
 	ProjectDirectoryService,
 } from "../projects/project-directory-service";
+import {
+	NativeDirectoryPicker,
+	NativeDirectoryPickerUnavailable,
+} from "../projects/native-directory-picker";
+import { make_node_native_directory_picker_layer } from "../projects/node-native-directory-picker";
 import { ProjectCatalogLive } from "../projects/project-catalog";
 import {
 	ProjectIdentityRegistry,
@@ -236,6 +241,7 @@ export interface BackendOptions {
 	readonly project_locator?: Layer.Layer<ProjectLocator, never, ProjectIdentityRegistry>;
 	readonly project_directory_roots?: ReadonlyArray<string>;
 	readonly project_directory_service?: Layer.Layer<ProjectDirectoryService>;
+	readonly native_directory_picker?: Layer.Layer<NativeDirectoryPicker>;
 	readonly retention_clock?: Layer.Layer<ThreadRetentionClock>;
 	readonly retention_scheduler?: Layer.Layer<ThreadRetentionScheduler>;
 	readonly routine_installer?: Layer.Layer<RoutineInstaller>;
@@ -476,6 +482,8 @@ export function make_backend_layer(options: BackendOptions) {
 		options.project_locator ??
 		make_node_project_locator_layer().pipe(Layer.provideMerge(NodeProcessRunnerLive))
 	).pipe(Layer.provide(project_identities));
+	const native_directory_picker =
+		options.native_directory_picker ?? NativeDirectoryPickerUnavailable;
 	const project_affinity_coordination =
 		options.project_locator === undefined
 			? ThreadProjectAffinityCoordinatorDisabled
@@ -503,6 +511,7 @@ export function make_backend_layer(options: BackendOptions) {
 			),
 		).pipe(
 			Layer.provideMerge(project_locator),
+			Layer.provideMerge(native_directory_picker),
 			Layer.provideMerge(NodeFileSystem.layer),
 			Layer.provideMerge(NodePath.layer),
 			Layer.provideMerge(infrastructure),
@@ -826,6 +835,9 @@ export function make_desktop_backend_layer(options: DesktopBackendOptions) {
 
 			return make_backend_layer({
 				...options,
+				native_directory_picker:
+					options.native_directory_picker ??
+					make_node_native_directory_picker_layer(process.platform),
 				harness_config_registry,
 				capability_transport_registry:
 					options.capability_transport_registry ?? production_capability_transports,

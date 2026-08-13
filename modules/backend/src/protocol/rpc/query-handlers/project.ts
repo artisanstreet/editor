@@ -7,6 +7,7 @@ import {
 	type ProjectDiffQueryEnvelope,
 	type ProjectDirectoryCreateEnvelope,
 	type ProjectDirectoryListQueryEnvelope,
+	type ProjectDirectoryPickEnvelope,
 	type ProjectDirectorySelectEnvelope,
 	type ProjectListQueryEnvelope,
 	type ProjectRepositoryQueryEnvelope,
@@ -27,6 +28,7 @@ export type ProjectQueryEnvelope =
 	| ProjectDiffQueryEnvelope
 	| ProjectDirectoryCreateEnvelope
 	| ProjectDirectoryListQueryEnvelope
+	| ProjectDirectoryPickEnvelope
 	| ProjectDirectorySelectEnvelope
 	| ProjectListQueryEnvelope
 	| ProjectRepositoryQueryEnvelope
@@ -107,6 +109,21 @@ export const MakeProjectQueryHandler = Effect.gen(function* () {
 						current,
 						"project_directory.unavailable",
 						"The server directory listing could not be read.",
+						true,
+					),
+				),
+			),
+		"project.directory.pick": (query: ProjectDirectoryPickEnvelope, current: ReadyState) =>
+			directories.Pick.pipe(
+				Effect.flatMap((payload) =>
+					Respond(query, { kind: "project.directory.pick.result", payload }),
+				),
+				Effect.catchCause(() =>
+					Recover(
+						query,
+						current,
+						"project_directory.native_picker_unavailable",
+						"The operating-system folder picker is currently unavailable.",
 						true,
 					),
 				),
@@ -297,6 +314,8 @@ export const MakeProjectQueryHandler = Effect.gen(function* () {
 		switch (query.kind) {
 			case "project.directory.list.query":
 				return handlers["project.directory.list.query"](query, current);
+			case "project.directory.pick":
+				return handlers["project.directory.pick"](query, current);
 			case "project.directory.select":
 				return handlers["project.directory.select"](query, current);
 			case "project.directory.create":

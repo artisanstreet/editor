@@ -155,6 +155,7 @@ import type {
 	ProjectDirectoryEntry,
 	ProjectDirectoryList,
 	ProjectDirectoryListInput,
+	ProjectDirectoryPickResult,
 	ProjectDirectorySelectInput,
 } from "@artisan/protocol";
 
@@ -282,6 +283,10 @@ export class ArtisanClient extends Context.Service<
 		readonly ListProjectDirectories: (
 			input?: ProjectDirectoryListInput,
 		) => Effect.Effect<ProjectDirectoryList, ArtisanClientError>;
+		readonly PickProjectDirectory: Effect.Effect<
+			ProjectDirectoryPickResult,
+			ArtisanClientError
+		>;
 		readonly SelectProjectDirectory: (
 			input: ProjectDirectorySelectInput,
 		) => Effect.Effect<Project, ArtisanClientError>;

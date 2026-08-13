@@ -49,6 +49,21 @@ export const ProjectDirectoryList = Schema.Struct({
 });
 export type ProjectDirectoryList = typeof ProjectDirectoryList.Type;
 
+/**
+ * The outcome of one Forge-owned operating-system folder dialog.
+ *
+ * A selected folder is represented only by the opaque directory identity
+ * Forge minted for it. Host path data never crosses this boundary.
+ */
+export const ProjectDirectoryPickResult = Schema.Union([
+	Schema.Struct({ status: Schema.Literal("cancelled") }),
+	Schema.Struct({
+		directory: ProjectDirectoryEntry,
+		status: Schema.Literal("selected"),
+	}),
+]);
+export type ProjectDirectoryPickResult = typeof ProjectDirectoryPickResult.Type;
+
 export const ProjectDirectorySelectInput = Schema.Struct({
 	directory_id: ProjectDirectoryId,
 });

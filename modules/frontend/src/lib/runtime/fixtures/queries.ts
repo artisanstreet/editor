@@ -336,6 +336,11 @@ export const FixtureClientQueries = {
 				"Project directory browsing is unavailable in the frontend fixture.",
 			);
 		}),
+	PickProjectDirectory: Effect.gen(function* () {
+		return yield* FixtureFailure(
+			"The native project directory picker is unavailable in the frontend fixture.",
+		);
+	}),
 	SelectProjectDirectory: () =>
 		Effect.gen(function* () {
 			return yield* FixtureFailure(
@@ -431,6 +436,7 @@ export const FixtureClientQueries = {
 	| "GetThreadUsageSeries"
 	| "DetachProject"
 	| "ListProjectDirectories"
+	| "PickProjectDirectory"
 	| "SelectProjectDirectory"
 	| "CreateProjectDirectory"
 	| "ListArtisanApprovals"

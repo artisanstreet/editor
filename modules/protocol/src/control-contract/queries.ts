@@ -34,6 +34,7 @@ import {
 	ProjectDirectoryEntry,
 	ProjectDirectoryList,
 	ProjectDirectoryListInput,
+	ProjectDirectoryPickResult,
 	ProjectDirectorySelectInput,
 } from "../project-directory";
 
@@ -119,6 +120,23 @@ export const ProjectDirectoryListQueryResultEnvelope = Schema.Struct({
 });
 export type ProjectDirectoryListQueryResultEnvelope =
 	typeof ProjectDirectoryListQueryResultEnvelope.Type;
+
+/** Opens Forge's operating-system folder dialog; the client supplies no path. */
+export const ProjectDirectoryPickEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("project.directory.pick"),
+	payload: Schema.Struct({}),
+});
+export type ProjectDirectoryPickEnvelope = typeof ProjectDirectoryPickEnvelope.Type;
+
+/** Returns cancellation or one Forge-minted opaque directory identity. */
+export const ProjectDirectoryPickResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("project.directory.pick.result"),
+	payload: ProjectDirectoryPickResult,
+});
+export type ProjectDirectoryPickResultEnvelope = typeof ProjectDirectoryPickResultEnvelope.Type;
 
 /** Resolves an opaque directory id to a canonical project reference. */
 export const ProjectDirectorySelectEnvelope = Schema.Struct({

@@ -5,6 +5,7 @@ import type {
 	ProjectDirectoryEntry,
 	ProjectDirectoryList,
 	ProjectDirectoryListInput,
+	ProjectDirectoryPickResult,
 	ProjectDirectoryPlace,
 	ProjectDirectoryPlaceKind,
 	ProjectDirectorySelectInput,
@@ -12,6 +13,7 @@ import type {
 } from "@artisan/protocol";
 import { SnowflakeId } from "@artisan/protocol";
 import { ProjectLocator } from "../threads/project-locator";
+import { NativeDirectoryPicker } from "./native-directory-picker";
 
 const maximum_directories = 256;
 const maximum_files = 256;
@@ -37,6 +39,7 @@ export class ProjectDirectoryError extends Data.TaggedError("ProjectDirectoryErr
 		| "invalid_directory"
 		| "invalid_name"
 		| "list_failed"
+		| "pick_failed"
 		| "project_not_found";
 }> {}
 
@@ -49,6 +52,7 @@ export class ProjectDirectoryService extends Context.Service<
 		readonly List: (
 			input: ProjectDirectoryListInput,
 		) => Effect.Effect<ProjectDirectoryList, ProjectDirectoryError>;
+		readonly Pick: Effect.Effect<ProjectDirectoryPickResult, ProjectDirectoryError>;
 		readonly Select: (
 			input: ProjectDirectorySelectInput,
 		) => Effect.Effect<ProjectRef, ProjectDirectoryError>;
@@ -94,6 +98,7 @@ export function make_project_directory_service_layer(
 			const file_system = yield* FileSystem.FileSystem;
 			const path_service = yield* Path.Path;
 			const locator = yield* ProjectLocator;
+			const native_picker = yield* NativeDirectoryPicker;
 			const by_id = yield* Ref.make(new Map<string, KnownDirectory>());
 			const by_path = yield* Ref.make(new Map<string, string>());
 
@@ -327,6 +332,41 @@ export function make_project_directory_service_layer(
 								: new ProjectDirectoryError({ cause, code: "list_failed" }),
 						),
 					),
+				Pick: Effect.gen(function* () {
+					const picked = yield* native_picker.Pick();
+					if (picked.kind === "cancelled") {
+						return { status: "cancelled" } as const;
+					}
+
+					const canonical_path = yield* file_system.realPath(picked.path);
+					const metadata = yield* file_system.stat(canonical_path);
+					if (metadata.type !== "Directory") {
+						return yield* Effect.fail(
+							new ProjectDirectoryError({ code: "invalid_directory" }),
+						);
+					}
+
+					const directory_id = yield* Register({
+						canonical_path,
+						root_path: canonical_path,
+					});
+					return {
+						directory: {
+							directory_id,
+							display_name:
+								path_service.basename(canonical_path) || "Selected folder",
+							has_children: true,
+							kind: "root",
+						},
+						status: "selected",
+					} as const;
+				}).pipe(
+					Effect.mapError((cause) =>
+						cause instanceof ProjectDirectoryError
+							? cause
+							: new ProjectDirectoryError({ cause, code: "pick_failed" }),
+					),
+				),
 				Select: (input) =>
 					Effect.gen(function* () {
 						const selected = yield* ResolveKnown(input.directory_id);

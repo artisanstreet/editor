@@ -213,6 +213,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				list_project_directories,
 				list_projects,
 				list_threads,
+				pick_project_directory,
 				select_project_directory,
 			} = query_api;
 
@@ -308,6 +309,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				UpdateSessionDefaults: thread_operations_api.update_session_defaults,
 				DetachProject: detach_project,
 				ListProjectDirectories: list_project_directories,
+				PickProjectDirectory: pick_project_directory,
 				SelectProjectDirectory: select_project_directory,
 				CreateProjectDirectory: create_project_directory,
 				ListPreviewTargets: preview_api.list_preview_targets,

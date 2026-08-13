@@ -202,6 +202,11 @@ export const ControlRpcGroup = RpcGroup.make(
 		Control.ProjectDirectoryListQueryResultEnvelope,
 	),
 	ControlRpc(
+		"project.directory.pick",
+		Control.ProjectDirectoryPickEnvelope,
+		Control.ProjectDirectoryPickResultEnvelope,
+	),
+	ControlRpc(
 		"project.directory.select",
 		Control.ProjectDirectorySelectEnvelope,
 		Control.ProjectDirectorySelectResultEnvelope,

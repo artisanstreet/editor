@@ -1,6 +1,6 @@
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, parse } from "node:path";
 
 import { NodeFileSystem, NodePath } from "@effect/platform-node-shared";
 import { Effect, Layer, Option } from "effect";
@@ -10,6 +10,7 @@ import {
 	make_project_directory_service_layer,
 	ProjectDirectoryService,
 } from "../../modules/backend/src/projects/project-directory-service";
+import { NativeDirectoryPicker } from "../../modules/backend/src/projects/native-directory-picker";
 import { MakeSnowflakeIdLive } from "@artisan/protocol";
 import { ProjectLocator } from "../../modules/backend/src/threads/project-locator";
 
@@ -21,7 +22,15 @@ async function make_root(label: string) {
 	return fs.realpath(root);
 }
 
-function make_service(root: string, home_directory?: string) {
+function make_service(
+	root: string,
+	home_directory?: string,
+	picked:
+		| { readonly kind: "cancelled" }
+		| { readonly kind: "selected"; readonly path: string } = {
+		kind: "cancelled",
+	},
+) {
 	const locator = Layer.succeed(ProjectLocator, {
 		Locate: (location: string) =>
 			Effect.succeed(
@@ -37,6 +46,9 @@ function make_service(root: string, home_directory?: string) {
 	});
 	const layer = make_project_directory_service_layer([root], home_directory).pipe(
 		Layer.provideMerge(locator),
+		Layer.provideMerge(
+			Layer.succeed(NativeDirectoryPicker, { Pick: () => Effect.succeed(picked) }),
+		),
 		Layer.provideMerge(MakeSnowflakeIdLive(37).pipe(Layer.orDie)),
 		Layer.provideMerge(NodeFileSystem.layer),
 		Layer.provideMerge(NodePath.layer),
@@ -70,6 +82,48 @@ describe("ProjectDirectoryService", () => {
 			service.Select({ directory_id: children.directories[0]!.directory_id }),
 		);
 		expect(project).toMatchObject({ display_name: "workspace", project_id: "project_test" });
+	});
+
+	it("registers a native selection as a new opaque root and never returns its path", async () => {
+		const root = await make_root("project-native-base");
+		const selected = await make_root("project-native-selected");
+		const service = await make_service(root, undefined, { kind: "selected", path: selected });
+
+		const picked = await Effect.runPromise(service.Pick);
+		expect(picked).toMatchObject({
+			directory: { display_name: basename(selected), kind: "root" },
+			status: "selected",
+		});
+		expect(JSON.stringify(picked)).not.toContain(selected);
+
+		if (picked.status !== "selected") throw new Error("expected selected directory");
+		const project = await Effect.runPromise(
+			service.Select({ directory_id: picked.directory.directory_id }),
+		);
+		expect(project.root_path).toBe(selected.replaceAll("\\", "/"));
+	});
+
+	it("preserves native-picker cancellation without registering a directory", async () => {
+		const root = await make_root("project-native-cancelled");
+		const service = await make_service(root);
+
+		await expect(Effect.runPromise(service.Pick)).resolves.toEqual({ status: "cancelled" });
+	});
+
+	it("does not disclose a selected filesystem root through its display label", async () => {
+		const root = await make_root("project-native-volume-base");
+		const volume_root = parse(root).root;
+		const service = await make_service(root, undefined, {
+			kind: "selected",
+			path: volume_root,
+		});
+
+		const picked = await Effect.runPromise(service.Pick);
+		expect(picked).toMatchObject({
+			directory: { display_name: "Selected folder", kind: "root" },
+			status: "selected",
+		});
+		expect(JSON.stringify(picked)).not.toContain(volume_root);
 	});
 
 	it("lists plain file names beside directories without making them selectable", async () => {

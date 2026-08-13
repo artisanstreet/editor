@@ -136,6 +136,7 @@ export const MakeReadyEnvelopeDispatch = Effect.gen(function* () {
 			case "thread.session.query":
 				return HandleThreadReadQuery(envelope, current);
 			case "project.directory.list.query":
+			case "project.directory.pick":
 			case "project.directory.select":
 			case "project.directory.create":
 			case "project.list.query":
