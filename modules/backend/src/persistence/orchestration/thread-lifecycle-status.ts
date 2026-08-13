@@ -1,13 +1,41 @@
-import { desc, eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { Effect } from "effect";
 
 import type { DatabaseClient } from "../database";
-import { OrchestrationRuns, Threads } from "../tables";
+import { OrchestrationCoordinators, OrchestrationRuns, Threads } from "../tables";
 
 const active_statuses = new Set(["queued", "running", "waiting"]);
 
 const live_status_from_terminal_run = (status: string) =>
 	status === "failed" ? "Failed to complete" : "Complete";
+
+/** Reads the presentation status derived from the coordinator's exact root run. */
+export const ReadRootThreadLiveStatus = (transaction: DatabaseClient, thread_id: string) =>
+	Effect.gen(function* () {
+		const [coordinator] = yield* transaction
+			.select({ active_run_id: OrchestrationCoordinators.active_run_id })
+			.from(OrchestrationCoordinators)
+			.where(eq(OrchestrationCoordinators.thread_id, thread_id))
+			.limit(1);
+		const [run] = coordinator?.active_run_id
+			? yield* transaction
+					.select({ status: OrchestrationRuns.status })
+					.from(OrchestrationRuns)
+					.where(
+						and(
+							eq(OrchestrationRuns.run_id, coordinator.active_run_id),
+							eq(OrchestrationRuns.thread_id, thread_id),
+						),
+					)
+					.limit(1)
+			: [];
+
+		return active_statuses.has(run?.status ?? "")
+			? "Working"
+			: run
+				? live_status_from_terminal_run(run.status)
+				: "Idle";
+	});
 
 /**
  * Rebuilds one thread's ephemeral label from durable root-run authority.
@@ -30,16 +58,7 @@ export const ReconcileRootThreadLiveStatus = (
 			.limit(1);
 		if (!thread) return;
 
-		const runs = yield* transaction
-			.select({ run_id: OrchestrationRuns.run_id, status: OrchestrationRuns.status })
-			.from(OrchestrationRuns)
-			.where(eq(OrchestrationRuns.thread_id, thread_id))
-			.orderBy(desc(OrchestrationRuns.updated_at), desc(OrchestrationRuns.run_id));
-		const live_status = active_statuses.has(runs[0]?.status ?? "")
-			? "Working"
-			: runs[0]
-				? live_status_from_terminal_run(runs[0].status)
-				: "Idle";
+		const live_status = yield* ReadRootThreadLiveStatus(transaction, thread_id);
 
 		if (thread.live_status === live_status) return;
 
@@ -49,16 +68,10 @@ export const ReconcileRootThreadLiveStatus = (
 			.where(eq(Threads.thread_id, thread_id));
 	});
 
-/** Repairs all legacy Working projections after root ownership is recovered. */
-export const ReconcileStaleRootThreadLiveStatuses = (
-	transaction: DatabaseClient,
-	updated_at: string,
-) =>
+/** Rebuilds every legacy projection after root ownership is recovered. */
+export const ReconcileRootThreadLiveStatuses = (transaction: DatabaseClient, updated_at: string) =>
 	Effect.gen(function* () {
-		const threads = yield* transaction
-			.select({ thread_id: Threads.thread_id })
-			.from(Threads)
-			.where(eq(Threads.live_status, "Working"));
+		const threads = yield* transaction.select({ thread_id: Threads.thread_id }).from(Threads);
 
 		yield* Effect.forEach(threads, (thread) =>
 			ReconcileRootThreadLiveStatus(transaction, thread.thread_id, updated_at),

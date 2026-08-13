@@ -55,7 +55,7 @@ describe("thread metadata subagent isolation", () => {
 			thread_metadata_refiner: make_thread_metadata_refiner_test_layer((input) =>
 				Effect.sync(() => {
 					seen.push(input.trigger);
-					return { live_status: `Refined ${input.trigger}` };
+					return { current_goal: `Refined ${input.trigger}` };
 				}),
 			),
 		});
@@ -129,7 +129,7 @@ describe("thread metadata subagent isolation", () => {
 				}),
 			);
 
-			expect(states.before_child.live_status).toBe("Refined user_message");
+			expect(states.before_child.live_status).toBe("Idle");
 			expect(states.after_child.live_status).toBe(states.before_child.live_status);
 			expect(states.after_child.last_activity_at).not.toBe(
 				states.before_child.last_activity_at,
@@ -137,7 +137,7 @@ describe("thread metadata subagent isolation", () => {
 			expect(states.after_child.reader_activity_at).toBe(
 				states.before_child.reader_activity_at,
 			);
-			expect(states.after_group.live_status).toBe("Refined run_completed");
+			expect(states.after_group.live_status).toBe("Idle");
 			expect(states.after_group.reader_activity_at).not.toBe(
 				states.after_child.reader_activity_at,
 			);

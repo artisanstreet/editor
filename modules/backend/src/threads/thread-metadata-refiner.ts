@@ -30,7 +30,6 @@ export interface ThreadMetadataRefinementRequest extends ThreadMetadataRefinerIn
 /** Describes the metadata fields an automatic refinement may change. */
 export interface ThreadMetadataRefinement {
 	readonly current_goal?: string;
-	readonly live_status: string;
 	readonly mentioned_projects?: ReadonlyArray<ProjectRef>;
 	readonly rename_suggestion?: string;
 	readonly title?: string;
@@ -74,16 +73,6 @@ export const ThreadMetadataRefinerLive = Layer.succeed(ThreadMetadataRefiner, {
 			const input = yield* Effect.succeed(bound_thread_metadata_refiner_input(raw_input));
 			const latest_text = input.recent_user_text.at(-1);
 			const latest_file = input.recent_files.at(-1);
-			const live_status =
-				input.trigger === "assistant_message" ||
-				input.trigger === "run_started" ||
-				input.trigger === "user_message"
-					? "Working"
-					: input.trigger === "run_completed"
-						? "Complete"
-						: input.trigger === "run_failed"
-							? "Failed to complete"
-							: "Working";
 			const title = latest_text ?? latest_file ?? input.projection.title;
 			const refinement = {
 				...(latest_text
@@ -91,7 +80,6 @@ export const ThreadMetadataRefinerLive = Layer.succeed(ThreadMetadataRefiner, {
 					: input.projection.current_goal
 						? { current_goal: input.projection.current_goal }
 						: {}),
-				live_status,
 				rename_suggestion: title,
 				...(input.projection.title_locked ? {} : { title }),
 			};

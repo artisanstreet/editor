@@ -124,13 +124,13 @@ describe("thread metadata refinement coordinator", () => {
 				"Waiting for answer",
 				"Failed to complete",
 			]);
-			expect(snapshots.every((thread) => thread.live_status === "Working")).toBe(true);
+			expect(snapshots.every((thread) => thread.live_status === "Idle")).toBe(true);
 		} finally {
 			await runtime.dispose();
 		}
 	});
 
-	it("keeps the assistant preview through terminal and subsequent run transitions", async () => {
+	it("keeps the assistant preview without projecting lifecycle from metadata events", async () => {
 		const database_path = await make_database_path();
 		const runtime = make_backend_runtime({
 			database_path,
@@ -195,11 +195,11 @@ describe("thread metadata refinement coordinator", () => {
 
 			expect(completed).toMatchObject({
 				last_assistant_message: "The durable preview survives lifecycle changes.",
-				live_status: "Complete",
+				live_status: "Idle",
 			});
 			expect(restarted).toMatchObject({
 				last_assistant_message: "The durable preview survives lifecycle changes.",
-				live_status: "Working",
+				live_status: "Idle",
 			});
 		} finally {
 			await runtime.dispose();
@@ -269,7 +269,7 @@ describe("thread metadata refinement coordinator", () => {
 
 			expect(thread).toMatchObject({
 				last_assistant_message: "Recovered assistant preview",
-				live_status: "Complete",
+				live_status: "Idle",
 			});
 		} finally {
 			await second_runtime.dispose();
@@ -286,7 +286,6 @@ describe("thread metadata refinement coordinator", () => {
 
 				return {
 					current_goal: latest_text,
-					live_status: `Refined ${input.trigger}`,
 					rename_suggestion: `Refined ${latest_text}`,
 					title: `Refined ${latest_text}`,
 				};
@@ -421,7 +420,6 @@ describe("thread metadata refinement coordinator", () => {
 
 					return {
 						current_goal: latest_text,
-						live_status: "Recovered",
 						title: "Recovered thread title",
 					};
 				}),
@@ -454,7 +452,7 @@ describe("thread metadata refinement coordinator", () => {
 				Effect.sync(() => {
 					third_seen.push(input);
 
-					return { live_status: "Should not run" };
+					return {};
 				}),
 			),
 		});
@@ -569,7 +567,6 @@ describe("thread metadata refinement coordinator", () => {
 					return attempts === 1
 						? Effect.fail(new Error("temporary refiner failure"))
 						: Effect.succeed({
-								live_status: "Recovered",
 								title: "Recovered after retry",
 							});
 				}),

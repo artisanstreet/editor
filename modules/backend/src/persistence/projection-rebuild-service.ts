@@ -9,6 +9,7 @@ import {
 } from "@artisan/protocol";
 
 import { Database } from "./database";
+import { ReadRootThreadLiveStatus } from "./orchestration/thread-lifecycle-status";
 import { RetrySqliteWrite } from "./sqlite-write-retry";
 import {
 	EventStreams,
@@ -491,14 +492,22 @@ export const ProjectionRebuildServiceLive = Layer.effect(
 					}
 				}
 
+				const rebuilt_threads = yield* Effect.forEach(
+					[...threads.values()].sort((left, right) =>
+						left.thread_id.localeCompare(right.thread_id),
+					),
+					(thread) =>
+						ReadRootThreadLiveStatus(transaction, thread.thread_id).pipe(
+							Effect.map((live_status) => ({ ...thread, live_status })),
+						),
+				);
+
 				return {
 					git_workspaces: [...git_workspaces.values()].sort((left, right) =>
 						left.workspace_id.localeCompare(right.workspace_id),
 					),
 					journal_sequence: events.at(-1)?.sequence ?? 0,
-					threads: [...threads.values()].sort((left, right) =>
-						left.thread_id.localeCompare(right.thread_id),
-					),
+					threads: rebuilt_threads,
 					workspace_changes: [...workspace_changes.values()].sort((left, right) =>
 						left.change_id.localeCompare(right.change_id),
 					),

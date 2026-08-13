@@ -81,6 +81,35 @@ const make_test_layer = (
 };
 
 describe("thread metadata refinement worker", () => {
+	it("drops undeclared provider fields before building a refinement intent", async () => {
+		const accepted: ThreadMetadataRefinementIntent[] = [];
+
+		await Effect.runPromise(
+			Effect.gen(function* () {
+				const service = yield* ThreadMetadataRefinementWorker;
+
+				yield* service.Submit(
+					request("thread_content", projection("thread_content"), "run_started"),
+				);
+				yield* service.WaitForIdle;
+			}).pipe(
+				Effect.provide(
+					make_test_layer(
+						() =>
+							Effect.succeed({
+								live_status: "Working",
+								title: "Content title",
+							} as unknown as ThreadMetadataRefinement),
+						accepted,
+					),
+				),
+			),
+		);
+
+		expect(accepted[0]!.payload).toMatchObject({ title: "Content title" });
+		expect(accepted[0]!.payload).not.toHaveProperty("live_status");
+	});
+
 	it("does not propose a title for a manually locked projection", async () => {
 		const locked = {
 			...projection("thread_1"),
@@ -111,10 +140,7 @@ describe("thread metadata refinement worker", () => {
 				yield* service.WaitForIdle;
 			}).pipe(
 				Effect.provide(
-					make_test_layer(
-						(input) => Effect.succeed({ live_status: input.trigger }),
-						accepted,
-					),
+					make_test_layer((input) => Effect.succeed({ title: input.trigger }), accepted),
 				),
 			),
 		);
@@ -127,7 +153,7 @@ describe("thread metadata refinement worker", () => {
 		expect(accepted[0]!.payload).toMatchObject({
 			basis_activity_version: 9,
 			basis_metadata_version: 4,
-			live_status: "run_completed",
+			title: "run_completed",
 		});
 	});
 
@@ -146,7 +172,7 @@ describe("thread metadata refinement worker", () => {
 						(input) =>
 							Effect.sync(() => {
 								seen.push(input);
-								return { live_status: "Working" };
+								return {};
 							}),
 						accepted,
 					),
@@ -179,7 +205,7 @@ describe("thread metadata refinement worker", () => {
 						(input) =>
 							Effect.sync(() => {
 								seen.push(input);
-								return { live_status: "Working" };
+								return {};
 							}),
 						accepted,
 					),
@@ -211,7 +237,6 @@ describe("thread metadata refinement worker", () => {
 								? Effect.fail(new Error("provider unavailable"))
 								: Effect.succeed({
 										current_goal: "New goal",
-										live_status: "Complete",
 									}),
 						accepted,
 					),
@@ -240,7 +265,7 @@ describe("thread metadata refinement worker", () => {
 						(input) =>
 							input.projection.thread_id === "thread_1"
 								? Effect.die("provider defect")
-								: Effect.succeed({ live_status: "Recovered" }),
+								: Effect.succeed({ current_goal: "Recovered" }),
 						accepted,
 					),
 				),
@@ -258,7 +283,7 @@ describe("thread metadata refinement worker", () => {
 			() =>
 				Effect.sync(() => {
 					calls.increment();
-					return { live_status: "Working" };
+					return {};
 				}),
 			accepted,
 		);

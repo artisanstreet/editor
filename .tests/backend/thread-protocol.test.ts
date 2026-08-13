@@ -65,7 +65,6 @@ describe("thread protocol", () => {
 			basis_activity_version: 4,
 			basis_metadata_version: 2,
 			current_goal: "Purge expired thread content",
-			live_status: "Reviewing retention boundaries...",
 			rename_suggestion: "Durable thread retention",
 			title: "Thread retention boundary",
 			type: "thread.metadata.refine",

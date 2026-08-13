@@ -46,8 +46,8 @@ import { CancelPendingInteractions } from "../../conversation/index.ts";
 import type { IntakeAssessment } from "../../orchestration/intake-policy";
 import { MakeCommandAcceptor } from "./acceptance";
 import {
+	ReconcileRootThreadLiveStatuses,
 	ReconcileRootThreadLiveStatus,
-	ReconcileStaleRootThreadLiveStatuses,
 } from "./thread-lifecycle-status";
 
 export {
@@ -610,6 +610,11 @@ export const OrchestrationRepositoryLive = Layer.effect(
 							.update(OrchestrationCoordinators)
 							.set({ active_run_id: run_id, updated_at })
 							.where(eq(OrchestrationCoordinators.thread_id, message.thread_id));
+						yield* ReconcileRootThreadLiveStatus(
+							transaction,
+							message.thread_id,
+							updated_at,
+						);
 
 						return [
 							yield* AppendEvent(transaction, {
@@ -846,7 +851,7 @@ export const OrchestrationRepositoryLive = Layer.effect(
 							}
 						}
 
-						yield* ReconcileStaleRootThreadLiveStatuses(transaction, updated_at);
+						yield* ReconcileRootThreadLiveStatuses(transaction, updated_at);
 
 						return {
 							events,

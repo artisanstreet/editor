@@ -285,7 +285,6 @@ const MakeTransition = (
 				current_goal: payload.current_goal ?? null,
 				last_assistant_message:
 					payload.last_assistant_message ?? current.last_assistant_message,
-				live_status: payload.live_status,
 				metadata_version: current.metadata_version + 1,
 				rename_suggestion: payload.rename_suggestion ?? null,
 				title:
@@ -621,7 +620,6 @@ export const ThreadMetadataRepositoryLive = Layer.effect(
 										projection.reader_acknowledged_activity_at,
 									last_assistant_message:
 										projection.last_assistant_message ?? null,
-									live_status: projection.live_status,
 									metadata_version: projection.metadata_version,
 									pinned: projection.pinned,
 									rename_suggestion: projection.rename_suggestion ?? null,

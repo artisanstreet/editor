@@ -66,7 +66,6 @@ function make_refinement(
 			basis_activity_version: 0,
 			basis_metadata_version: 0,
 			current_goal: "Ship automatic thread metadata",
-			live_status: "Refining thread identity",
 			...(mentioned_projects === undefined ? {} : { mentioned_projects }),
 			rename_suggestion: "Automatic metadata refinement",
 			title: "Build automatic metadata refinement",

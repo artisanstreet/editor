@@ -45,10 +45,19 @@ const make_intent = (
 	return {
 		operation_id: `metadata-refine:${request.source_event_id}`,
 		payload: {
-			...refinement,
 			basis_activity_version: request.projection.activity_version,
 			basis_metadata_version: request.projection.metadata_version,
+			...(refinement.current_goal === undefined
+				? {}
+				: { current_goal: refinement.current_goal }),
 			...(last_assistant_message === undefined ? {} : { last_assistant_message }),
+			...(refinement.mentioned_projects === undefined
+				? {}
+				: { mentioned_projects: refinement.mentioned_projects }),
+			...(refinement.rename_suggestion === undefined
+				? {}
+				: { rename_suggestion: refinement.rename_suggestion }),
+			...(refinement.title === undefined ? {} : { title: refinement.title }),
 			type: "thread.metadata.refine",
 		},
 		source_event_id: request.source_event_id,

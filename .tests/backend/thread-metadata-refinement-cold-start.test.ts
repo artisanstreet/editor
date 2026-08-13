@@ -71,7 +71,7 @@ describe("thread metadata refinement cold start", () => {
 			migrations_path,
 			thread_metadata_refiner: make_thread_metadata_refiner_test_layer(() =>
 				Effect.succeed({
-					live_status: "Recovered",
+					current_goal: "Recovered",
 				}),
 			),
 		});
@@ -118,7 +118,7 @@ describe("thread metadata refinement cold start", () => {
 					recovered.push(input);
 
 					return {
-						live_status: "Recovered",
+						current_goal: "Recovered",
 					};
 				}),
 			),

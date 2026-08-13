@@ -29,6 +29,7 @@ import {
 	PersistedMentionedProjects,
 	PersistedRawOrigin,
 } from "./storage-codec";
+import { ReconcileRootThreadLiveStatus } from "./thread-lifecycle-status";
 
 const is_active_status = (status: string): status is "running" | "waiting" =>
 	status === "running" || status === "waiting";
@@ -288,6 +289,7 @@ export const MakeCommandDispatcher = Effect.gen(function* () {
 					updated_at: accepted_at,
 					working_directory: pending.working_directory,
 				});
+				yield* ReconcileRootThreadLiveStatus(transaction, command.thread_id, accepted_at);
 				yield* transaction.insert(OrchestrationMessages).values({
 					agent_id: resolved_agent_id,
 					command_id: command.message_id,
@@ -615,6 +617,7 @@ export const MakeCommandDispatcher = Effect.gen(function* () {
 					.update(OrchestrationCoordinators)
 					.set({ active_run_id: run_id, engine_id, updated_at: accepted_at })
 					.where(eq(OrchestrationCoordinators.thread_id, command.thread_id));
+				yield* ReconcileRootThreadLiveStatus(transaction, command.thread_id, accepted_at);
 				yield* transaction.insert(OrchestrationMessages).values({
 					agent_id,
 					command_id: command.message_id,

@@ -20,6 +20,8 @@ import {
 	JournalEvents,
 	JournalCommands,
 	LegacyWorkspaceChangeProjections,
+	OrchestrationCoordinators,
+	OrchestrationRuns,
 	ProjectionRebuildLocks,
 	Threads,
 	WorkspaceChangeDiffs,
@@ -287,6 +289,52 @@ describe("ProjectionRebuildService", () => {
 			});
 			expect(result.stored_change?.path).toBe(change.path);
 			expect(result.diffs).toHaveLength(1);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("derives rebuilt thread status from root-run authority instead of stale events", async () => {
+		const runtime = make_runtime(await make_database_path());
+
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const rebuild = yield* ProjectionRebuildService;
+					yield* Seed(database);
+					yield* database.client.insert(OrchestrationRuns).values({
+						agent_id: "agent_1",
+						created_at: timestamp,
+						engine_id: "engine_1",
+						last_observation_sequence: 1,
+						run_id: "run_authority",
+						status: "completed",
+						thread_id: thread.thread_id,
+						updated_at: timestamp,
+						working_directory: "C:/workspace",
+					});
+					yield* database.client.insert(OrchestrationCoordinators).values({
+						active_run_id: "run_authority",
+						agent_id: "agent_1",
+						created_at: timestamp,
+						display_name: "Primary coordinator",
+						engine_id: "engine_1",
+						role: "primary",
+						thread_id: thread.thread_id,
+						updated_at: timestamp,
+					});
+					yield* database.client.update(Threads).set({ live_status: "Working" });
+
+					const repaired = yield* rebuild.Rebuild();
+					const [stored] = yield* database.client.select().from(Threads);
+
+					return { repaired, stored };
+				}),
+			);
+
+			expect(result.repaired).toMatchObject({ equivalent: true, rebuilt: true });
+			expect(result.stored).toMatchObject({ live_status: "Complete" });
 		} finally {
 			await runtime.dispose();
 		}

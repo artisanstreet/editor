@@ -1848,12 +1848,11 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			project_locator: make_project_locator_layer(),
 			runtime_metadata: make_metadata_layer(now),
 			thread_metadata_refiner: make_thread_metadata_refiner_test_layer((input) =>
-				Effect.succeed({
-					live_status: "Working",
-					...(input.recent_user_text.at(-1)?.includes("Beta repository")
+				Effect.succeed(
+					input.recent_user_text.at(-1)?.includes("Beta repository")
 						? { mentioned_projects: [ProjectBeta] }
-						: {}),
-				}),
+						: {},
+				),
 			),
 		});
 		const protocol_server = await runtime.runPromise(ProtocolServer);

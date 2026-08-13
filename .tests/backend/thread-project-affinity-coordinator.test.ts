@@ -276,12 +276,11 @@ describe("thread project affinity coordinator", () => {
 			migrations_path,
 			project_locator: make_locator_layer(),
 			thread_metadata_refiner: make_thread_metadata_refiner_test_layer((input) =>
-				Effect.succeed({
-					live_status: "Working",
-					...(input.recent_user_text.at(-1)?.includes("selected repository")
+				Effect.succeed(
+					input.recent_user_text.at(-1)?.includes("selected repository")
 						? { mentioned_projects: [ProjectBeta] }
-						: {}),
-				}),
+						: {},
+				),
 			),
 		});
 

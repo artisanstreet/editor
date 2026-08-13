@@ -139,9 +139,13 @@ describe("orchestration repository hardening", () => {
 			const attachments = await runtime.runPromise(
 				Read((database) => database.select().from(MessageImageAttachments)),
 			);
+			const [thread] = await runtime.runPromise(
+				Read((database) => database.select().from(Threads)),
+			);
 
 			expect(accepted.status).toBe("accepted");
 			expect(attachments).toEqual([]);
+			expect(thread).toMatchObject({ live_status: "Working" });
 		} finally {
 			await runtime.dispose();
 		}
@@ -730,6 +734,9 @@ describe("orchestration repository hardening", () => {
 			const runs = await runtime.runPromise(
 				Read((database) => database.select().from(OrchestrationRuns)),
 			);
+			const [thread] = await runtime.runPromise(
+				Read((database) => database.select().from(Threads)),
+			);
 
 			expect(accepted.run_id).not.toBe(first.run_id);
 			expect(duplicate).toMatchObject({ run_id: accepted.run_id, status: "duplicate" });
@@ -737,6 +744,7 @@ describe("orchestration repository hardening", () => {
 				{ run_id: first.run_id, status: "completed" },
 				{ run_id: accepted.run_id, status: "queued" },
 			]);
+			expect(thread).toMatchObject({ live_status: "Working" });
 		} finally {
 			await runtime.dispose();
 		}
@@ -1379,6 +1387,65 @@ describe("orchestration repository hardening", () => {
 			expect(protected_runs.find((run) => run.run_id === progressed.run_id)).toMatchObject({
 				status: "running",
 			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("repairs a stale projection repeatedly from the exact active root run", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			migrations_path,
+		});
+
+		try {
+			await runtime.runPromise(SetupThread("thread_1"));
+			const accepted = await runtime.runPromise(
+				Accept(
+					make_command("repair_status", "thread_1", {
+						engine_id: "engine_1",
+						text: "Finish before repair",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const repository = yield* OrchestrationRepository;
+
+					yield* repository.RecordObservation({
+						_tag: "run_terminal",
+						artisan_run_id: accepted.run_id,
+						observation_id: "repair_terminal",
+						raw: { engine_id: "engine_1", frame: null, transport: "fixture" },
+						sequence: 0,
+						state: "completed",
+					});
+					yield* database.client.insert(OrchestrationRuns).values({
+						agent_id: "agent_historical",
+						created_at: "2026-07-10T09:00:00.000Z",
+						engine_id: "engine_1",
+						last_observation_sequence: 0,
+						run_id: "run_historical_failed",
+						status: "failed",
+						thread_id: "thread_1",
+						updated_at: "2099-01-01T00:00:00.000Z",
+						working_directory: "C:/work",
+					});
+
+					for (const attempt of [1, 2]) {
+						yield* database.client.update(Threads).set({ live_status: "Working" });
+						yield* repository.MarkInterrupted();
+						const [thread] = yield* database.client
+							.select({ live_status: Threads.live_status })
+							.from(Threads);
+
+						expect(thread?.live_status, `repair attempt ${attempt}`).toBe("Complete");
+					}
+				}),
+			);
 		} finally {
 			await runtime.dispose();
 		}

@@ -181,7 +181,6 @@ export const ThreadMetadataRefineCommand = Schema.Struct({
 	basis_metadata_version: StreamSequence,
 	current_goal: Schema.optional(Schema.NonEmptyString),
 	last_assistant_message: Schema.optional(ThreadAssistantMessagePreview),
-	live_status: Schema.NonEmptyString,
 	mentioned_projects: Schema.optional(Schema.Array(ProjectRef)),
 	rename_suggestion: Schema.optional(Schema.NonEmptyString),
 	title: Schema.optional(Schema.NonEmptyString),
