@@ -213,7 +213,8 @@ describe("Barekey docs shell reset", () => {
 		expect(thread_route).toContain('work?.status === "waiting"');
 		expect(thread_route).toContain('payload: { type: "run.cancel" }');
 		expect(thread_route).toContain("onabort={CancelRun}");
-		expect(thread_route).toContain("RefreshAuthoritativeThread");
+		expect(thread_route).not.toContain("RefreshAuthoritativeThread");
+		expect(thread_route).toContain("RefreshInteractionContext");
 		expect(thread_workspace).toContain("fold_resolved_approvals_into_work");
 		expect(thread_workspace).toContain('block.item.type === "approval"');
 		expect(thread_workspace).toContain('block.item.state !== "requested"');
@@ -229,7 +230,7 @@ describe("Barekey docs shell reset", () => {
 			"yield* after_acceptance(result).pipe(Effect.ignore);",
 			accepted_command,
 		);
-		const sender_reconciliation = controller.indexOf("ObserveAcceptedProjection(");
+		const sender_reconciliation = controller.indexOf("AwaitAcceptedProjection(");
 		const interaction_refresh = controller.indexOf(
 			"RefreshInteractionContext.pipe(Effect.ignore)",
 			sender_reconciliation,
@@ -241,7 +242,8 @@ describe("Barekey docs shell reset", () => {
 		expect(controller).toContain("navigation.Navigate(canonical_path");
 		expect(controller).toContain("replaceState: true");
 		expect(controller).toContain("const thread_scope = yield* Scope.make()");
-		expect(controller).toContain("ResolveThreadRoute(threads, route_id)");
+		expect(controller).toContain("client.GetThreadOpen(route_id)");
+		expect(controller).not.toContain("ResolveThreadRoute(threads, route_id)");
 		expect(controller).toContain("Scope.close(thread_scope, Exit.void)");
 		expect(controller).toContain("const draft_thread = yield* DraftThreadController");
 		expect(controller).toContain("AwaitPendingSubmissionClaim(thread_id)");

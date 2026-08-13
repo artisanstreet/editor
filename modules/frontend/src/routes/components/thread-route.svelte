@@ -22,9 +22,9 @@
 		RunConversationSubscription,
 	} from "$lib/conversation/subscription";
 	import {
+		AwaitAcceptedProjection,
 		BuildThreadMessageCommand,
 		MakeSubmitGate,
-		ObserveAcceptedProjection,
 		SubmitDurableCommand,
 		ThreadInteractionError,
 	} from "$lib/thread-interaction/commands";
@@ -47,7 +47,7 @@
 	} from "$lib/browser/object-url";
 	import { ComposerDraftStore } from "$lib/composer/draft-store";
 	import {
-		ResolveThreadRoute,
+		ThreadRouteId,
 		ThreadRouteOwnsTarget,
 		ThreadRoutePath,
 		ThreadRoutePathFor,
@@ -71,25 +71,16 @@
 	const run_usage_lease = yield* run_usage.Acquire(undefined);
 	const thread_scope = yield* Scope.make();
 
-	const threads = yield* client.ListThreads;
-	const initial_thread = yield* Option.match(
-		ResolveThreadRoute(threads, route_id),
-		{
-			onNone: () =>
-				Effect.gen(function* () {
-					return yield* Effect.fail(
-					new ThreadInteractionError({
-						message: `Thread ${route_id} does not exist.`,
-					}),
-					);
-				}),
-			onSome: (candidate) =>
-				Effect.gen(function* () {
-					return candidate;
-				}),
-		},
-	);
+	const thread_open = yield* client.GetThreadOpen(route_id);
+	const initial_thread = thread_open.thread;
 	const thread_id = initial_thread.thread_id;
+	if (thread_id !== route_id && ThreadRouteId(thread_id) !== route_id) {
+		yield* Effect.fail(
+			new ThreadInteractionError({
+				message: `Thread open belongs to ${thread_id}, not ${route_id}.`,
+			}),
+		);
+	}
 	/**
 	 * Subscription fibers from this route can still be settling while the user
 	 * has already moved to another thread — or to the editor surface of this
@@ -124,13 +115,9 @@
 				});
 		});
 	yield* CanonicalizeThreadPath(initial_thread);
-	let session = $state.raw<ThreadSessionSnapshot | undefined>(
-		yield* client.GetThreadSession(thread_id),
-	);
+	let session = $state.raw<ThreadSessionSnapshot | undefined>(thread_open.session);
 	let thread = $state.raw<ThreadListItem | undefined>(initial_thread);
-	let work = $state.raw<ThreadWorkItem | undefined>(
-		Option.getOrUndefined(yield* client.GetThreadWork(thread_id)),
-	);
+	let work = $state.raw<ThreadWorkItem | undefined>(thread_open.work);
 	const run_active = $derived(
 		work?.status === "running" || work?.status === "waiting",
 	);
@@ -145,7 +132,7 @@
 	);
 	yield* run_usage_lease.Select(work?.run_id);
 	yield* Effect.addFinalizer(run_usage_lease.Release);
-	const initial_snapshot = yield* client.GetConversation({ thread_id });
+	const initial_snapshot = thread_open.conversation;
 	if (initial_snapshot.thread_id !== thread_id) {
 		yield* Effect.fail(
 			new ThreadInteractionError({
@@ -155,6 +142,10 @@
 	}
 	const conversation_id = initial_snapshot.conversation_id;
 	let snapshot = $state.raw(initial_snapshot);
+	/** The accepted-turn waiter rereads this route-owned projection on each retry. */
+	const CurrentSnapshot = Effect.gen(function* () {
+		return snapshot;
+	});
 	/**
 	 * The route already maintains the canonical identity map while applying live
 	 * patches. Keep it reactive and hand the same structure to the renderer
@@ -349,11 +340,11 @@
 					if (!expects_user_message || has_accepted_user_message(snapshot)) {
 						return;
 					}
-					const observed = yield* ObserveAcceptedProjection(
-						client.GetConversation({ thread_id }),
+					const observed = yield* AwaitAcceptedProjection(
+						CurrentSnapshot,
 						has_accepted_user_message,
 					);
-					if (Option.isSome(observed)) yield* ReplaceSnapshot(observed.value);
+					yield* ReplaceSnapshot(observed);
 				});
 
 			/**
@@ -477,11 +468,6 @@
 		(patch.type === "turn_lifecycle" && settled_lifecycles.has(patch.lifecycle)) ||
 		(patch.type === "turn_upsert" && settled_lifecycles.has(patch.turn.lifecycle));
 
-	const RefreshAuthoritativeThread = Effect.gen(function* () {
-		yield* Resync;
-		yield* RefreshInteractionContext;
-	});
-
 	const ApplyUpdate = (update: ConversationUpdate) =>
 		Effect.gen(function* () {
 			if (update.type === "snapshot") {
@@ -541,7 +527,10 @@
 
 	yield* Effect.forkIn(
 		RunConversationSubscription(
-			client.SubscribeConversation(thread_id),
+			client.SubscribeConversation(thread_id, {
+				conversation_id,
+				last_patch_sequence: snapshot.last_patch_sequence,
+			}),
 			ApplyUpdate,
 			Resync,
 		),
@@ -557,9 +546,9 @@
 			}),
 			() =>
 				Effect.gen(function* () {
-					yield* RefreshAuthoritativeThread;
+					yield* RefreshInteractionContext;
 				}),
-			RefreshAuthoritativeThread,
+			RefreshInteractionContext,
 		),
 		thread_scope,
 	);

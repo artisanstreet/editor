@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import { Deferred, Effect, Fiber, Option, Ref } from "effect";
 
 import {
+	AwaitAcceptedProjection,
 	BuildThreadMessageCommand,
 	MakeSubmitGate,
 	ObserveAcceptedProjection,
@@ -150,6 +151,34 @@ describe("thread interaction commands", () => {
 
 		expect(Option.getOrUndefined(observed)).toEqual({ attempt: 3, visible: true });
 		expect(attempts).toBe(3);
+	});
+
+	it("keeps waiting for the acknowledgement projection after durable acceptance", async () => {
+		const output = await Effect.runPromise(
+			Effect.gen(function* () {
+				const visible = yield* Deferred.make<void>();
+				const attempts = yield* Ref.make(0);
+				const waiting = yield* AwaitAcceptedProjection(
+					Ref.updateAndGet(attempts, (count) => count + 1).pipe(
+						Effect.flatMap((attempt) =>
+							Deferred.poll(visible).pipe(
+								Effect.map((acknowledged) => ({ acknowledged, attempt })),
+							),
+						),
+					),
+					(projection) => Option.isSome(projection.acknowledged),
+				).pipe(Effect.forkChild({ startImmediately: true }));
+				yield* Effect.sleep("120 millis");
+				const before_acknowledgement = waiting.pollUnsafe();
+				yield* Deferred.succeed(visible, undefined);
+				const projection = yield* Fiber.join(waiting);
+
+				return { before_acknowledgement, projection };
+			}),
+		);
+
+		expect(output.before_acknowledgement).toBeUndefined();
+		expect(output.projection.attempt).toBeGreaterThan(1);
 	});
 
 	it("keeps an accepted command successful after bounded projection exhaustion", async () => {
