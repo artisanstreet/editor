@@ -21,6 +21,12 @@ export class ConnectionProjectionRuntime extends Context.Service<
 			subscription: ProjectionSubscription,
 			MakeSnapshot: (metadata: ProjectionMetadata) => OutboundControlEnvelope,
 		) => Effect.Effect<ReadyState>;
+		readonly StartWithoutSnapshot: (
+			correlation_id: string,
+			subscription_id: string,
+			current: ReadyState,
+			subscription: ProjectionSubscription,
+		) => Effect.Effect<ReadyState>;
 	}
 >()("Artisan/ConnectionProjectionRuntime") {}
 
@@ -65,6 +71,31 @@ export const MakeConnectionProjectionRuntime = Effect.gen(function* () {
 
 			return registered;
 		});
+	const StartWithoutSnapshot = (
+		correlation_id: string,
+		subscription_id: string,
+		current: ReadyState,
+		subscription: ProjectionSubscription,
+	) =>
+		Effect.gen(function* () {
+			const registered = {
+				...current,
+				subscriptions: { ...current.subscriptions, [subscription_id]: subscription },
+			} satisfies ReadyState;
+			yield* Ref.set(state, registered);
+			yield* Enqueue({
+				correlation_id,
+				kind: "subscription.started",
+				message_id: yield* metadata.MakeId("message"),
+				origin: "backend",
+				payload: { stream_id: subscription.stream_id },
+				protocol_version: 1,
+				schema_version: 1,
+				sent_at: yield* metadata.Now,
+				subscription_id,
+			});
+			return registered;
+		});
 
-	return ConnectionProjectionRuntime.of({ Start });
+	return ConnectionProjectionRuntime.of({ Start, StartWithoutSnapshot });
 });

@@ -237,6 +237,11 @@ export const ControlRpcGroup = RpcGroup.make(
 		Control.ThreadSessionQueryResultEnvelope,
 	),
 	ControlRpc(
+		"thread.open.query",
+		Control.ThreadOpenQueryEnvelope,
+		Control.ThreadOpenQueryResultEnvelope,
+	),
+	ControlRpc(
 		"surface.list.query",
 		Control.SurfaceListQueryEnvelope,
 		Control.SurfaceListQueryResultEnvelope,

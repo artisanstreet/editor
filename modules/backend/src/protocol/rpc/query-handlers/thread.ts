@@ -18,6 +18,8 @@ import type {
 	ThreadTranscriptQueryResultEnvelope,
 	ThreadWorkQueryEnvelope,
 	ThreadWorkQueryResultEnvelope,
+	ThreadOpenQueryEnvelope,
+	ThreadOpenQueryResultEnvelope,
 } from "@artisan/protocol";
 
 import { ConversationReadModel } from "../../../conversation/index.ts";
@@ -36,7 +38,8 @@ export type ThreadQueryEnvelope =
 	| ThreadRetentionQueryEnvelope
 	| ThreadSessionQueryEnvelope
 	| ThreadTranscriptQueryEnvelope
-	| ThreadWorkQueryEnvelope;
+	| ThreadWorkQueryEnvelope
+	| ThreadOpenQueryEnvelope;
 
 export type ThreadQueryResultEnvelope =
 	| ConversationQueryResultEnvelope
@@ -46,7 +49,8 @@ export type ThreadQueryResultEnvelope =
 	| ThreadRetentionQueryResultEnvelope
 	| ThreadSessionQueryResultEnvelope
 	| ThreadTranscriptQueryResultEnvelope
-	| ThreadWorkQueryResultEnvelope;
+	| ThreadWorkQueryResultEnvelope
+	| ThreadOpenQueryResultEnvelope;
 
 const ProjectionUnavailable = (message: string): ProtocolErrorDetail => ({
 	code: "projection.unavailable",
@@ -179,6 +183,43 @@ export const MakeThreadQueryHandler = Effect.gen(function* () {
 					ProjectionUnavailable("The thread work projection could not be read."),
 				),
 			),
+		"thread.open.query": (query: ThreadOpenQueryEnvelope) =>
+			Effect.gen(function* () {
+				const exact_thread = yield* thread_read_model.Lookup(query.payload.thread_id);
+				const thread = Option.isSome(exact_thread)
+					? exact_thread
+					: query.payload.thread_id.startsWith("thread_")
+						? Option.none()
+						: yield* thread_read_model.Lookup(`thread_${query.payload.thread_id}`);
+				if (Option.isNone(thread)) {
+					return yield* Effect.fail(
+						ProjectionUnavailable("The thread projection is unavailable."),
+					);
+				}
+				const [session, work, availability] = yield* Effect.all(
+					[
+						orchestration.GetSession(thread.value.thread_id),
+						orchestration.GetWork(thread.value.thread_id),
+						conversation_read_model.ReadSnapshot(thread.value.thread_id),
+					],
+					{ concurrency: "unbounded" },
+				);
+				if (availability.status !== "available") {
+					return yield* Effect.fail(
+						ProjectionUnavailable("The thread projection is unavailable."),
+					);
+				}
+				return yield* Envelope(query, "thread.open.query.result", {
+					conversation: availability.snapshot,
+					session,
+					thread: thread.value,
+					...(work ? { work } : {}),
+				});
+			}).pipe(
+				Effect.mapError(() =>
+					ProjectionUnavailable("The thread projection could not be read."),
+				),
+			),
 	};
 
 	return (
@@ -201,6 +242,8 @@ export const MakeThreadQueryHandler = Effect.gen(function* () {
 				return handlers["thread.transcript.query"](query);
 			case "thread.work.query":
 				return handlers["thread.work.query"](query);
+			case "thread.open.query":
+				return handlers["thread.open.query"](query);
 		}
 	};
 });

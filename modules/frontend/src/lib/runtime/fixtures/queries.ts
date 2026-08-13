@@ -131,6 +131,49 @@ export const FixtureClientQueries = {
 		Effect.gen(function* () {
 			return FixtureConversation(thread_id);
 		}),
+	GetThreadOpen: (thread_id) =>
+		Effect.gen(function* () {
+			const thread = fixture_artisan_client_data.threads.find(
+				(candidate) => candidate.thread_id === thread_id,
+			);
+			if (thread === undefined)
+				return yield* FixtureFailure(`Unknown fixture thread: ${thread_id}`);
+			return {
+				conversation: FixtureConversation(thread_id),
+				session: {
+					thread_id,
+					journal_sequence: fixture_artisan_client_data.cursors.last_journal_sequence,
+					auto_steer_enabled: true,
+					policy: {
+						engine_id: "codex" as const,
+						reasoning_effort: "medium" as const,
+						permission: "supervised",
+						permission_mode: "on_request" as const,
+						sandbox_mode: "workspace_write" as const,
+						service_tier: "standard" as const,
+						web_search_enabled: false,
+						strict_clarification: false,
+					},
+					latest_intake: {
+						message_id: "message-fixture",
+						risk: "low" as const,
+						resolution: "proceed" as const,
+					},
+					assumptions: [],
+					last_routing: {
+						type: "thread.message_routed" as const,
+						message_id: "message-fixture",
+						outcome: "queued" as const,
+						reason: "no_active_run" as const,
+						run_id: "run-editor-shell",
+					},
+				},
+				thread,
+				...(thread_id === fixture_artisan_client_data.orchestration_graph.group.thread_id
+					? { work: fixture_artisan_client_data.thread_work }
+					: {}),
+			};
+		}),
 	GetMessageImageAttachment: () =>
 		Effect.gen(function* () {
 			return Option.none();
@@ -410,6 +453,7 @@ export const FixtureClientQueries = {
 	| "GetCapabilityOAuthStatus"
 	| "GetOrchestrationGraph"
 	| "GetConversation"
+	| "GetThreadOpen"
 	| "GetMessageImageAttachment"
 	| "GetThreadTranscript"
 	| "GetThreadSession"

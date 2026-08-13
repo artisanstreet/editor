@@ -22,6 +22,7 @@ import type {
 	ConversationUpdate,
 } from "../../client-api/service";
 import { client_error, protocol_client_error, type SendCurrent } from "../client-common";
+import { advance_conversation_cursor } from "./conversation-cursor";
 import { SubscriptionContext } from "./context";
 import { MakeEventIngress } from "./ingress";
 import type { ClientSubscriptionCoordinator } from "./contract";
@@ -229,7 +230,10 @@ export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
 				];
 			}
 
-			const updated = { ...subscription, expected_sequence: envelope.sequence };
+			const updated = advance_conversation_cursor(
+				{ ...subscription, expected_sequence: envelope.sequence },
+				envelope,
+			);
 
 			return [
 				{ _tag: "Delivered" },
@@ -500,10 +504,13 @@ export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
 			{ type: "thread.transcript", thread_id },
 			(parts) => ({ _tag: "thread.transcript", ...parts }),
 		);
-	const subscribe_conversation = (thread_id: string) =>
+	const subscribe_conversation = (
+		thread_id: string,
+		cursor?: import("@artisan/protocol").ConversationSubscriptionCursor,
+	) =>
 		subscribe_projection<ConversationUpdate, ConversationSubscription>(
 			"conversation_subscription",
-			{ type: "conversation", thread_id },
+			{ type: "conversation", thread_id, ...(cursor ? { cursor } : {}) },
 			(parts) => ({ _tag: "conversation", ...parts }),
 		);
 	const subscribe_orchestration_groups = (thread_id: string, include_terminal: boolean) =>

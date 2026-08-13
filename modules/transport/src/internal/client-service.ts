@@ -267,6 +267,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				Events: subscriptions.Events,
 				RetryConnection: connection.RetryConnection,
 				GetConversation: thread_operations_api.get_conversation,
+				GetThreadOpen: thread_operations_api.get_thread_open,
 				GetMessageImageAttachment: thread_operations_api.get_message_image_attachment,
 				GetOrchestrationGraph: thread_operations_api.get_orchestration_graph,
 				GetThreadTranscript: thread_operations_api.get_thread_transcript,

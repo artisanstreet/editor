@@ -32,6 +32,55 @@ export const MakeConversationProjectionHandler = Effect.gen(function* () {
 			const thread_id = subscribe.payload.thread_id;
 
 			if (subscribe.payload.type === "conversation") {
+				const cursor = subscribe.payload.cursor;
+				if (cursor) {
+					const cursor_handled = yield* conversation.ReadCursor(thread_id).pipe(
+						Effect.flatMap((head) => {
+							if (
+								head.status !== "available" ||
+								head.conversation_id !== cursor.conversation_id ||
+								cursor.last_patch_sequence > head.last_patch_sequence
+							)
+								return Effect.succeed(false);
+							const stream_id = `projection:conversation:${thread_id}:${subscription_id}`;
+							const subscription: ConversationProjectionSubscription = {
+								_tag: "conversation",
+								thread_id,
+								journal_sequence: current.delivered_journal_sequence,
+								patch_sequence: cursor.last_patch_sequence,
+								sequence: -1,
+								stream_id,
+							};
+							return runtime
+								.StartWithoutSnapshot(
+									correlation_id,
+									subscription_id,
+									current,
+									subscription,
+								)
+								.pipe(
+									Effect.flatMap((registered) =>
+										EnqueuePatches(registered).pipe(
+											Effect.flatMap((subscriptions) =>
+												Ref.set(state, { ...registered, subscriptions }),
+											),
+										),
+									),
+									Effect.as(true),
+								);
+						}),
+						Effect.catch(() =>
+							EnqueueError(
+								current,
+								"projection.unavailable",
+								"The conversation projection could not be read.",
+								true,
+								correlation_id,
+							).pipe(Effect.as(true)),
+						),
+					);
+					if (cursor_handled) return;
+				}
 				yield* conversation.ReadSnapshot(thread_id).pipe(
 					Effect.flatMap((availability) => {
 						if (availability.status !== "available")

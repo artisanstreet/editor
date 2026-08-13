@@ -6,6 +6,7 @@ import type {
 	ProtocolErrorDetail,
 	SurfaceListQuery,
 	SurfaceUsageAggregateQuery,
+	ConversationSubscriptionCursor,
 } from "@artisan/protocol";
 
 import type {
@@ -76,6 +77,7 @@ export interface ClientSubscriptionCoordinator {
 	>;
 	readonly SubscribeConversation: (
 		thread_id: string,
+		cursor?: ConversationSubscriptionCursor,
 	) => Effect.Effect<
 		Stream.Stream<ConversationUpdate, ArtisanClientError>,
 		ArtisanClientError,

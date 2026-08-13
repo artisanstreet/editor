@@ -57,6 +57,7 @@ import {
 	SurfaceUsageTotals,
 	SurfaceItems,
 } from "../../modules/backend/src/persistence/tables";
+import { ConversationReadModel } from "../../modules/backend/src/conversation";
 import { RuntimeMetadata } from "../../modules/backend/src/runtime/metadata";
 
 import {
@@ -1067,23 +1068,51 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 		}
 	});
 
-	it("queries and streams durable canonical conversation patches through real MessagePorts", async () => {
+	it("opens a thread once and resumes conversation patches across a real reconnect", async () => {
 		const database_path = await make_database_path();
 		const runtime = make_backend_runtime({ database_path, migrations_path });
 		const protocol_server = await runtime.runPromise(ProtocolServer);
 		const journal = await runtime.runPromise(JournalStore);
-		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server, {
+			client: { reconnect_delay_ms: 5 },
+		});
 		try {
 			const created_thread_conversation = await Effect.runPromise(
 				harness.client.CreateThread({ title: "Conversation" }),
 			);
-			const updates = await Effect.runPromise(
+			const route_id = created_thread_conversation.thread_id.replace(/^thread_/, "");
+			const thread_open = await Effect.runPromise(harness.client.GetThreadOpen(route_id));
+			const invalid_cursor_update = await Effect.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
 						const stream = yield* harness.client.SubscribeConversation(
 							created_thread_conversation.thread_id,
+							{
+								conversation_id: "conversation:another_thread",
+								last_patch_sequence: 0,
+							},
+						);
+						return yield* stream.pipe(Stream.take(1), Stream.runHead);
+					}),
+				),
+			);
+			const updates = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const first_patch = yield* Deferred.make<void>();
+						const stream = yield* harness.client.SubscribeConversation(
+							created_thread_conversation.thread_id,
+							{
+								conversation_id: thread_open.conversation.conversation_id,
+								last_patch_sequence: thread_open.conversation.last_patch_sequence,
+							},
 						);
 						const fiber = yield* stream.pipe(
+							Stream.tap((update) =>
+								update.type === "patch" && update.batch.to_sequence === 2
+									? Deferred.succeed(first_patch, undefined).pipe(Effect.asVoid)
+									: Effect.void,
+							),
 							Stream.take(2),
 							Stream.runCollect,
 							Effect.forkScoped,
@@ -1100,6 +1129,27 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 							},
 							thread_id: created_thread_conversation.thread_id,
 						});
+						yield* Deferred.await(first_patch);
+						const connections = harness.connector_snapshot().connections;
+						harness.close_current_connection();
+						yield* Effect.promise(() =>
+							wait_for(() => harness.connector_snapshot().connections > connections),
+						);
+						while ((yield* harness.client.ConnectionState).phase !== "ready") {
+							yield* Effect.sleep("5 millis");
+						}
+						yield* journal.AppendEvent({
+							causation_id: "conversation_message_after_reconnect",
+							correlation_id: "conversation_message_after_reconnect",
+							payload: {
+								message_id: "conversation_message_after_reconnect",
+								reason: "no_active_run",
+								text: "Delivered after reconnect.",
+								type: "thread.message_queued",
+								working_directory: "C:\\workspace",
+							},
+							thread_id: created_thread_conversation.thread_id,
+						});
 						return [...(yield* Fiber.join(fiber))];
 					}),
 				),
@@ -1109,11 +1159,23 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 					thread_id: created_thread_conversation.thread_id,
 				}),
 			);
-			expect(updates[0]).toMatchObject({
+			expect(thread_open).toMatchObject({
+				conversation: {
+					items: [],
+					last_patch_sequence: 0,
+					thread_id: created_thread_conversation.thread_id,
+				},
+				session: { thread_id: created_thread_conversation.thread_id },
+				thread: {
+					thread_id: created_thread_conversation.thread_id,
+					title: "Conversation",
+				},
+			});
+			expect(Option.getOrThrow(invalid_cursor_update)).toMatchObject({
 				snapshot: { items: [], last_patch_sequence: 0 },
 				type: "snapshot",
 			});
-			expect(updates[1]).toMatchObject({
+			expect(updates[0]).toMatchObject({
 				batch: {
 					from_sequence: 1,
 					patches: [
@@ -1124,15 +1186,79 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 				},
 				type: "patch",
 			});
+			expect(updates[1]).toMatchObject({
+				batch: {
+					from_sequence: 3,
+					patches: [
+						{ type: "turn_upsert" },
+						{ item: { text: "Delivered after reconnect.", type: "user_message" } },
+					],
+					to_sequence: 4,
+				},
+				type: "patch",
+			});
+			expect(updates).toHaveLength(2);
 			expect(queried).toMatchObject({
-				items: [{ text: "Canonical user message.", type: "user_message" }],
-				last_patch_sequence: 2,
+				items: [
+					{ text: "Canonical user message.", type: "user_message" },
+					{ text: "Delivered after reconnect.", type: "user_message" },
+				],
+				last_patch_sequence: 4,
 			});
 		} finally {
 			await harness.dispose();
 			await runtime.dispose();
 		}
-	});
+	}, 30_000);
+
+	it("keeps fresh-snapshot reconnect behavior for conversation callers without a cursor", async () => {
+		const database_path = await make_database_path();
+		const runtime = make_backend_runtime({ database_path, migrations_path });
+		const protocol_server = await runtime.runPromise(ProtocolServer);
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server, {
+			client: { reconnect_delay_ms: 5 },
+		});
+		try {
+			const created = await Effect.runPromise(
+				harness.client.CreateThread({ title: "Conversation snapshot reconnect" }),
+			);
+			const updates = await Effect.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						const initial_snapshot = yield* Deferred.make<void>();
+						const stream = yield* harness.client.SubscribeConversation(
+							created.thread_id,
+						);
+						const fiber = yield* stream.pipe(
+							Stream.tap((update) =>
+								update.type === "snapshot"
+									? Deferred.succeed(initial_snapshot, undefined).pipe(
+											Effect.asVoid,
+										)
+									: Effect.void,
+							),
+							Stream.take(2),
+							Stream.runCollect,
+							Effect.forkScoped,
+						);
+						yield* Deferred.await(initial_snapshot);
+						const connections = harness.connector_snapshot().connections;
+						harness.close_current_connection();
+						yield* Effect.promise(() =>
+							wait_for(() => harness.connector_snapshot().connections > connections),
+						);
+						return [...(yield* Fiber.join(fiber))];
+					}),
+				),
+			);
+
+			expect(updates).toHaveLength(2);
+			expect(updates.every((update) => update.type === "snapshot")).toBe(true);
+		} finally {
+			await harness.dispose();
+			await runtime.dispose();
+		}
+	}, 30_000);
 
 	it("reads a thread-owned message image attachment through the typed client", async () => {
 		const database_path = await make_database_path();
@@ -1339,6 +1465,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 		const protocol_server = await runtime.runPromise(ProtocolServer);
 		const journal = await runtime.runPromise(JournalStore);
 		const erasure = await runtime.runPromise(ThreadErasure);
+		const conversations = await runtime.runPromise(ConversationReadModel);
 		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
 		try {
 			const created_thread_transcript_erased = await Effect.runPromise(
@@ -1356,7 +1483,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 					thread_id: created_thread_transcript_erased.thread_id,
 				}),
 			);
-			const updates = await Effect.runPromise(
+			const result = await Effect.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
 						const stream = yield* harness.client.SubscribeThreadTranscript(
@@ -1376,11 +1503,17 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 							"2026-07-19T00:00:00.000Z",
 							"2026-07-19T00:00:00.000Z",
 						);
-						return [...(yield* Fiber.join(fiber))];
+						return {
+							cursor: yield* conversations.ReadCursor(
+								created_thread_transcript_erased.thread_id,
+							),
+							updates: [...(yield* Fiber.join(fiber))],
+						};
 					}),
 				),
 			);
-			expect(updates).toMatchObject([
+			expect(result.cursor).toEqual({ status: "erased" });
+			expect(result.updates).toMatchObject([
 				{
 					type: "snapshot",
 					transcript: {

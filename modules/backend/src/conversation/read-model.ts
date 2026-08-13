@@ -1,5 +1,7 @@
-import { Context, Data, Effect, Layer, Option } from "effect";
+import { Context, Data, Effect, Layer, Option, Schema } from "effect";
 import { and, desc, eq } from "drizzle-orm";
+
+import { ConversationSubscriptionCursor } from "@artisan/protocol";
 
 import type {
 	ConversationPatch,
@@ -15,6 +17,7 @@ import {
 	MessageImageAttachments,
 	ThreadTombstones,
 	Threads,
+	ConversationThreads,
 } from "../persistence/tables";
 import { ReadConversationPatches, ReadConversationSnapshot } from "./projection-api";
 
@@ -27,6 +30,14 @@ export type ConversationAvailability =
 	| { readonly status: "erased"; readonly journal_sequence: number }
 	| { readonly status: "unavailable"; readonly journal_sequence: number };
 
+export type ConversationCursorAvailability =
+	| {
+			readonly status: "available";
+			readonly conversation_id: string;
+			readonly last_patch_sequence: number;
+	  }
+	| { readonly status: "erased" | "unavailable" };
+
 export class ConversationReadModel extends Context.Service<
 	ConversationReadModel,
 	{
@@ -37,6 +48,9 @@ export class ConversationReadModel extends Context.Service<
 			thread_id: string,
 			after_sequence: number,
 		) => Effect.Effect<ReadonlyArray<ConversationPatch>, ConversationReadModelFailure>;
+		readonly ReadCursor: (
+			thread_id: string,
+		) => Effect.Effect<ConversationCursorAvailability, ConversationReadModelFailure>;
 		readonly ReadImageAttachment: (
 			query: MessageImageAttachmentQuery,
 		) => Effect.Effect<Option.Option<MessageImageAttachment>, ConversationReadModelFailure>;
@@ -107,6 +121,42 @@ export const ConversationReadModelLive = Layer.effect(
 				.pipe(
 					Effect.mapError((cause) => new ConversationReadModelFailure({ cause })),
 				) as any;
+		const ReadCursor = (
+			thread_id: string,
+		): Effect.Effect<ConversationCursorAvailability, ConversationReadModelFailure> =>
+			database.client
+				.transaction((transaction) =>
+					Effect.gen(function* () {
+						const [erased] = yield* transaction
+							.select({ thread_id: ThreadTombstones.thread_id })
+							.from(ThreadTombstones)
+							.where(eq(ThreadTombstones.thread_id, thread_id))
+							.limit(1);
+						if (erased) return { status: "erased" as const };
+						const [head] = yield* transaction
+							.select({
+								last_patch_sequence: ConversationThreads.last_patch_sequence,
+							})
+							.from(Threads)
+							.leftJoin(
+								ConversationThreads,
+								eq(ConversationThreads.thread_id, Threads.thread_id),
+							)
+							.where(eq(Threads.thread_id, thread_id))
+							.limit(1);
+						if (!head) return { status: "unavailable" as const };
+						const cursor = yield* Schema.decodeUnknownEffect(
+							ConversationSubscriptionCursor,
+						)({
+							conversation_id: `conversation:${thread_id}`,
+							last_patch_sequence: head.last_patch_sequence ?? 0,
+						});
+						return { ...cursor, status: "available" as const };
+					}),
+				)
+				.pipe(
+					Effect.mapError((cause) => new ConversationReadModelFailure({ cause })),
+				) as any;
 		const ReadImageAttachment = (
 			query: MessageImageAttachmentQuery,
 		): Effect.Effect<Option.Option<MessageImageAttachment>, ConversationReadModelFailure> =>
@@ -148,6 +198,6 @@ export const ConversationReadModelLive = Layer.effect(
 						),
 				)
 				.pipe(Effect.mapError((cause) => new ConversationReadModelFailure({ cause })));
-		return { ReadImageAttachment, ReadPatches, ReadSnapshot };
+		return { ReadCursor, ReadImageAttachment, ReadPatches, ReadSnapshot };
 	}),
 );

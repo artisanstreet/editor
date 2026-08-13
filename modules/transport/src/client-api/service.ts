@@ -9,7 +9,9 @@ import type {
 	CapabilityOAuthTokenStatus,
 	CapabilityRegistrySnapshot,
 	ConversationQuery,
+	ConversationSubscriptionCursor,
 	ConversationSnapshot,
+	ThreadOpenSnapshot,
 	MessageImageAttachment,
 	MessageImageAttachmentQuery,
 	EventEnvelope,
@@ -184,6 +186,9 @@ export class ArtisanClient extends Context.Service<
 		readonly GetConversation: (
 			input: ConversationQuery,
 		) => Effect.Effect<ConversationSnapshot, ArtisanClientError>;
+		readonly GetThreadOpen: (
+			thread_id: string,
+		) => Effect.Effect<ThreadOpenSnapshot, ArtisanClientError>;
 		readonly GetMessageImageAttachment: (
 			input: MessageImageAttachmentQuery,
 		) => Effect.Effect<Option.Option<MessageImageAttachment>, ArtisanClientError>;
@@ -369,6 +374,7 @@ export class ArtisanClient extends Context.Service<
 		>;
 		readonly SubscribeConversation: (
 			thread_id: string,
+			cursor?: ConversationSubscriptionCursor,
 		) => Effect.Effect<
 			Stream.Stream<ConversationUpdate, ArtisanClientError>,
 			ArtisanClientError,

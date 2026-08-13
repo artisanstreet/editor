@@ -1,6 +1,10 @@
 import { Identifier, JournalSequence, StreamCursor, StreamSequence } from "../common";
 
-import { ConversationPatchBatch, ConversationSnapshot } from "../conversation";
+import {
+	ConversationPatchBatch,
+	ConversationSnapshot,
+	ConversationSubscriptionCursor,
+} from "../conversation";
 
 import { OrchestrationGroupListSnapshot } from "../orchestration-groups";
 
@@ -34,7 +38,11 @@ export const SubscribeEnvelope = Schema.Struct({
 		Schema.Struct({ type: Schema.Literal("thread.list") }),
 		Schema.Struct({ type: Schema.Literal("orchestration.graph"), group_id: Identifier }),
 		Schema.Struct({ type: Schema.Literal("thread.transcript"), thread_id: Identifier }),
-		Schema.Struct({ type: Schema.Literal("conversation"), thread_id: Identifier }),
+		Schema.Struct({
+			type: Schema.Literal("conversation"),
+			thread_id: Identifier,
+			cursor: Schema.optional(ConversationSubscriptionCursor),
+		}),
 		Schema.Struct({
 			type: Schema.Literal("orchestration.group.list"),
 			thread_id: Identifier,

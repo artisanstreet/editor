@@ -297,7 +297,7 @@ export const FixtureClientCommands = {
 			},
 		]);
 	}),
-	SubscribeConversation: (thread_id) =>
+	SubscribeConversation: (thread_id, _cursor?) =>
 		Effect.gen(function* () {
 			return Stream.fromIterable([
 				{

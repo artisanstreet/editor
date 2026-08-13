@@ -130,6 +130,7 @@ export const MakeReadyEnvelopeDispatch = Effect.gen(function* () {
 			case "model.favorites.query":
 			case "thread.retention.query":
 			case "thread.work.query":
+			case "thread.open.query":
 			case "thread.transcript.query":
 			case "conversation.query":
 			case "message.image_attachment.query":

@@ -352,6 +352,13 @@ export const ConversationSnapshot = Schema.Struct({
 });
 export type ConversationSnapshot = typeof ConversationSnapshot.Type;
 
+/** A validated renderer cursor used to resume a conversation subscription without a snapshot. */
+export const ConversationSubscriptionCursor = Schema.Struct({
+	conversation_id: Identifier,
+	last_patch_sequence: NonNegativeInt,
+});
+export type ConversationSubscriptionCursor = typeof ConversationSubscriptionCursor.Type;
+
 /** Requests the current canonical conversation projection for one thread. */
 export const ConversationQuery = Schema.Struct({
 	thread_id: Identifier,

@@ -112,6 +112,7 @@ describe("frontend ArtisanClient fixture runtime", () => {
 						"GetCapabilityDetail",
 						"GetCapabilityOAuthStatus",
 						"GetConversation",
+						"GetThreadOpen",
 						"GetOrchestrationGraph",
 						"GetRuntimeCatalog",
 						"GetSurfaceUsageAggregate",
@@ -307,6 +308,7 @@ describe("frontend ArtisanClient fixture runtime", () => {
 		it.effect("exposes deterministic session and canonical surface projections", () =>
 			Effect.gen(function* () {
 				const client = yield* ArtisanClient;
+				const thread_open = yield* client.GetThreadOpen("thread-editor-shell");
 				const session = yield* client.GetThreadSession("thread-editor-shell");
 				const surfaces = yield* client.ListSurfaceItems({
 					thread_id: "thread-editor-shell",
@@ -328,6 +330,11 @@ describe("frontend ArtisanClient fixture runtime", () => {
 					auto_steer_enabled: true,
 					latest_intake: { resolution: "proceed", risk: "low" },
 					thread_id: "thread-editor-shell",
+				});
+				expect(thread_open).toMatchObject({
+					conversation: { thread_id: "thread-editor-shell" },
+					thread: { thread_id: "thread-editor-shell" },
+					work: { run_id: "run-editor-shell" },
 				});
 				expect(surfaces).toMatchObject({ items: [], journal_sequence: 48 });
 				expect(usage).toMatchObject({

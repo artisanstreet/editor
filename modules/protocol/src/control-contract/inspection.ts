@@ -3,6 +3,7 @@ import { MessageImageAttachmentQuery, MessageImageAttachmentQueryResult } from "
 import { Identifier } from "../common";
 
 import { ConversationQuery, ConversationSnapshot } from "../conversation";
+import { ThreadListItem } from "../thread";
 
 import { ThreadUsageSeries, ThreadUsageSeriesQuery } from "../thread-usage-series";
 import { EngineUsageQuery, EngineUsageSnapshot } from "../engine-usage";
@@ -98,6 +99,30 @@ export const ThreadWorkQueryResultEnvelope = Schema.Struct({
 });
 
 export type ThreadWorkQueryResultEnvelope = typeof ThreadWorkQueryResultEnvelope.Type;
+
+/** The authoritative, single-round-trip state required to open a thread. */
+export const ThreadOpenSnapshot = Schema.Struct({
+	conversation: ConversationSnapshot,
+	session: ThreadSessionSnapshot,
+	thread: ThreadListItem,
+	work: Schema.optional(ThreadWorkItem),
+});
+export type ThreadOpenSnapshot = typeof ThreadOpenSnapshot.Type;
+
+export const ThreadOpenQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("thread.open.query"),
+	payload: Schema.Struct({ thread_id: Identifier }),
+});
+export type ThreadOpenQueryEnvelope = typeof ThreadOpenQueryEnvelope.Type;
+
+export const ThreadOpenQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("thread.open.query.result"),
+	payload: ThreadOpenSnapshot,
+});
+export type ThreadOpenQueryResultEnvelope = typeof ThreadOpenQueryResultEnvelope.Type;
 
 /** Requests terminal metadata for one thread workspace. */
 export const TerminalListQueryEnvelope = Schema.Struct({

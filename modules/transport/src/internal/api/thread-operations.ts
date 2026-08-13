@@ -20,6 +20,7 @@ import {
 	type ThreadSessionQueryEnvelope,
 	type ThreadTranscriptQueryEnvelope,
 	type ThreadWorkQueryEnvelope,
+	type ThreadOpenQueryEnvelope,
 } from "@artisan/protocol";
 
 import type {
@@ -260,6 +261,19 @@ export const MakeThreadOperationsApi = Effect.gen(function* () {
 				? result.payload
 				: yield* Effect.die("conversation response narrowed incorrectly");
 		});
+	const get_thread_open = (thread_id: string) =>
+		Effect.gen(function* () {
+			const trace = yield* context.MakeTrace;
+			const envelope: ThreadOpenQueryEnvelope = {
+				...trace,
+				kind: "thread.open.query",
+				payload: { thread_id },
+			};
+			const result = yield* context.Request(envelope);
+			return result.kind === "thread.open.query.result"
+				? result.payload
+				: yield* Effect.die("thread open response narrowed incorrectly");
+		});
 
 	const get_message_image_attachment = (
 		input: import("@artisan/protocol").MessageImageAttachmentQuery,
@@ -371,6 +385,7 @@ export const MakeThreadOperationsApi = Effect.gen(function* () {
 
 	return {
 		get_conversation,
+		get_thread_open,
 		get_message_image_attachment,
 		get_orchestration_graph,
 		get_model_favorites,
