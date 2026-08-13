@@ -49,6 +49,19 @@ describe("sidebar identity and thread rail regressions", () => {
 		expect(usage).toContain('{#if usage_state.status === "loaded"}');
 	});
 
+	it("keeps unavailable provider errors out of the provider header", () => {
+		const usage = read("modules/frontend/src/routes/components/sidebar-engine-usage.svelte");
+		const unavailable_row = usage.slice(usage.lastIndexOf("{:else}"));
+
+		expect(unavailable_row).toContain(
+			'<span class="truncate text-xs font-medium text-foreground">{engine.display_name}</span>',
+		);
+		expect(unavailable_row).toContain(
+			'{engine.failure ?? "Usage is unavailable right now."}',
+		);
+		expect(unavailable_row).not.toContain("— usage unavailable");
+	});
+
 	it("shows the latest trustworthy weekly reset on each shader-glass provider menu", () => {
 		const identity = read("modules/frontend/src/routes/components/sidebar-identity.svelte");
 		const usage = read("modules/frontend/src/routes/components/sidebar-engine-usage.svelte");

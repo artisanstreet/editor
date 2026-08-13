@@ -294,9 +294,11 @@
 					<div class="flex flex-col gap-1 px-2 py-1">
 						<div class="flex items-center gap-2">
 							<MarkIcon class={EngineMarkClass(mark, "size-4")} />
-							<span class="truncate text-xs text-muted-foreground">{engine.display_name} — usage unavailable</span>
+							<span class="truncate text-xs font-medium text-foreground">{engine.display_name}</span>
 						</div>
-						{#if engine.failure !== undefined}<p class="text-xs text-muted-foreground/70">{engine.failure}</p>{/if}
+						<p class="pl-6 text-xs text-muted-foreground">
+							{engine.failure ?? "Usage is unavailable right now."}
+						</p>
 					</div>
 				{/if}
 			{/each}
