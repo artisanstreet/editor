@@ -330,7 +330,7 @@
 		class="mr-2 flex min-w-0 items-center gap-1"
 		onpointerenter={yield* HoverMode(input.mode, move_hover, event)}
 		onpointermove={yield* MoveHover(move_hover, event)}
-		onfocusin={yield* MoveHover(move_hover, event)}
+		onfocusin={yield* HoverMode(input.mode, move_hover, event)}
 	>
 		<button
 			type="button"

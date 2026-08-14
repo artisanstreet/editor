@@ -35,6 +35,9 @@ describe("settings SER remediation", () => {
 		expect(source).toContain("const UpdateThinking =");
 		expect(source).toContain("const UpdateContext =");
 		expect(source).toContain("const UpdatePermission =");
+		expect(source).toContain(
+			"onfocusin={yield* HoverMode(input.mode, move_hover, event)}",
+		);
 		expect(source).not.toContain("Queue.offerUnsafe");
 		expect(source).not.toContain("PolicyControls");
 		expect(source).not.toContain("SpeedOption");
