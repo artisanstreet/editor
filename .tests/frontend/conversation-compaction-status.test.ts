@@ -10,23 +10,28 @@ const status = readFileSync(
 );
 
 describe("conversation compaction status", () => {
-	it("uses transcript typography and a stable compaction mark", () => {
-		expect(status).toContain('item.type === "compaction" || size === "base"');
+	it("renders compaction as a full-width chapter divider", () => {
+		expect(status).toContain('import { Separator } from "$lib/components/ui/separator"');
 		expect(status).toContain(
-			'import ArrowsMinimize from "@tabler/icons-svelte/icons/arrows-minimize"',
+			'class="flex w-full min-w-0 flex-row items-center gap-4 py-0.5 text-base text-muted-foreground"',
 		);
-		expect(status).toContain('<ArrowsMinimize class="size-4 shrink-0" aria-hidden="true" />');
+		expect(
+			status.match(/<Separator class="min-w-0 flex-1" aria-hidden="true" \/>/gu),
+		).toHaveLength(2);
+		expect(status).not.toContain("ArrowsMinimize");
 	});
 
-	it("shimmers the verb only while compaction is active", () => {
+	it("keeps one label mounted and stops its shimmer after compaction", () => {
 		const compaction = status.slice(
 			status.indexOf('{:else if item.type === "compaction"}'),
 			status.indexOf('{:else if item.type === "native_event"}'),
 		);
 
-		expect(compaction).toMatch(
-			/\{#if item\.state === "started"\}[\s\S]*?<ShimmerText[\s\S]*?Compacting[\s\S]*?\{:else if item\.state === "failed"\}[\s\S]*?<span class="text-destructive">Compaction failed<\/span>[\s\S]*?\{:else\}[\s\S]*?<span>Compacted<\/span>/u,
-		);
 		expect(compaction.match(/<ShimmerText/gu)).toHaveLength(1);
+		expect(compaction).toContain('active={item.state === "started"}');
+		expect(compaction).toContain('? "shrink-0 text-destructive"');
+		expect(compaction).toContain('? "Compacting"');
+		expect(compaction).toContain('? "Compaction failed"');
+		expect(compaction).toContain(': "Compacted"');
 	});
 });

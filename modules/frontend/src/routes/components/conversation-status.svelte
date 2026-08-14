@@ -2,11 +2,11 @@
 	import { BannerService } from "$lib/banner/service";
 	import { Badge } from "$lib/components/ui/badge";
 	import { ShimmerText } from "$lib/components/ui/shimmer-text";
+	import { Separator } from "$lib/components/ui/separator";
 	import { EngineMarkClass, EngineMarkFor } from "$lib/engine/presentation";
 	import { model_transition_presentation } from "$lib/conversation/presentation";
 	import { model_manifest } from "@artisan/catalog";
 	import type { ConversationItem } from "@artisan/protocol";
-	import ArrowsMinimize from "@tabler/icons-svelte/icons/arrows-minimize";
 	import type { Snippet } from "svelte";
 
 	let {
@@ -29,7 +29,7 @@
 	}
 
 	const timeline_status_class = $derived(
-		`flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 py-0.5 ${item.type === "compaction" || size === "base" ? "text-base" : "text-sm"} text-muted-foreground`,
+		`flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-1 py-0.5 ${size === "base" ? "text-base" : "text-sm"} text-muted-foreground`,
 	);
 	const engine_name_for = (engine_id: string) =>
 		engine_id.charAt(0).toUpperCase() + engine_id.slice(1);
@@ -91,7 +91,7 @@
 	{/if}
 {:else if item.type === "compaction"}
 	<div
-		class={timeline_status_class}
+		class="flex w-full min-w-0 flex-row items-center gap-4 py-0.5 text-base text-muted-foreground"
 		data-conversation-status="compaction"
 		data-live-work-detail={item.state === "started" ? "true" : undefined}
 		role={item.state === "started" ? "status" : undefined}
@@ -101,22 +101,26 @@
 				? "Compaction failed"
 				: "Compacted"}
 	>
-		<ArrowsMinimize class="size-4 shrink-0" aria-hidden="true" />
-		{#if item.state === "started"}
+		<Separator class="min-w-0 flex-1" aria-hidden="true" />
+		<span class="flex shrink-0 items-center gap-1.5">
 			<ShimmerText
-				class="text-muted-foreground"
+				active={item.state === "started"}
+				class={item.state === "failed"
+					? "shrink-0 text-destructive"
+					: "shrink-0 text-muted-foreground"}
 				delay={0}
 				duration={2.4}
 				aria-hidden="true"
 			>
-				Compacting
+				{item.state === "started"
+					? "Compacting"
+					: item.state === "failed"
+						? "Compaction failed"
+						: "Compacted"}
 			</ShimmerText>
-		{:else if item.state === "failed"}
-			<span class="text-destructive">Compaction failed</span>
-		{:else}
-			<span>Compacted</span>
-		{/if}
-		{#if trailing !== undefined}{@render trailing()}{/if}
+			{#if trailing !== undefined}{@render trailing()}{/if}
+		</span>
+		<Separator class="min-w-0 flex-1" aria-hidden="true" />
 	</div>
 {:else if item.type === "native_event"}
 	<div class={timeline_status_class}>

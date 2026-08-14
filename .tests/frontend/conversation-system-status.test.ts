@@ -30,10 +30,11 @@ describe("conversation system status", () => {
 			"modules/frontend/src/lib/components/ui/shimmer-text/shimmer-text.svelte",
 		);
 
-		expect(status).toContain('{#if item.state === "started"}');
+		expect(status).toContain('active={item.state === "started"}');
 		expect(status).toContain("<ShimmerText");
 		expect(status).toContain("Compacting");
-		expect(status).toContain("<span>Compacted</span>");
+		expect(status).toContain(': "Compacted"');
+		expect(status).toContain('import { Separator } from "$lib/components/ui/separator"');
 		expect(status).toContain(
 			'data-live-work-detail={item.state === "started" ? "true" : undefined}',
 		);
