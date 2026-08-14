@@ -15,6 +15,12 @@ import { AgentGraphOrchestratorLive } from "../orchestration/agent-graph-orchest
 import { AgentNameCatalogLive } from "../orchestration/agent-name-catalog";
 import { AgentGraphRepositoryLive } from "../orchestration/agent-graph-repository";
 import { HostSuspendMonitorLive } from "../host/suspend-monitor";
+import {
+	MakeSystemWakeLockLayer,
+	SystemWakeLockDisabled,
+	type SystemWakeLockBackend,
+} from "../host/wake-lock";
+import { make_platform_wake_lock_backend_layer } from "../host/wake-lock-platform";
 import { AgentOrchestratorLive } from "../orchestration/agent-orchestrator";
 import { IntakePolicyLive } from "../orchestration/intake-policy";
 import { ProductInstructionsLive } from "../orchestration/product-instructions";
@@ -252,6 +258,8 @@ export interface BackendOptions {
 	readonly secret_store?: Layer.Layer<SecretStore>;
 	readonly terminal_driver?: Layer.Layer<TerminalDriver>;
 	readonly thread_metadata_refiner?: Layer.Layer<ThreadMetadataRefiner>;
+	/** Platform power-assertion seam; omitted means the wake lock stays inert. */
+	readonly wake_lock_backend?: Layer.Layer<SystemWakeLockBackend>;
 	readonly thread_resource_quiescer?: Layer.Layer<ThreadResourceQuiescer>;
 	readonly workspace_filesystem_registry?: Layer.Layer<
 		WorkspaceFilesystemRegistry,
@@ -684,6 +692,18 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(commands),
 		Layer.provideMerge(terminals),
 	);
+	/**
+	 * Derived from durable run and queue state, so it composes against the
+	 * shared database and journal notifier rather than any orchestration
+	 * service: work someone else's instance queued still holds this host awake.
+	 */
+	const wake_lock =
+		options.wake_lock_backend === undefined
+			? SystemWakeLockDisabled
+			: MakeSystemWakeLockLayer().pipe(
+					Layer.provideMerge(options.wake_lock_backend),
+					Layer.provideMerge(infrastructure),
+				);
 	const surfaces = SurfaceServiceLive.pipe(Layer.provideMerge(infrastructure));
 
 	const protocol_foundation = make_protocol_server_layer(protocol_options).pipe(
@@ -724,7 +744,7 @@ export function make_backend_layer(options: BackendOptions) {
 	 * persistence, and the registries own capabilities, so the binding between
 	 * them is the composition's job.
 	 */
-	return Layer.mergeAll(protocol, projection_rebuild, ProjectWorkspaceBindingLive).pipe(
+	return Layer.mergeAll(protocol, projection_rebuild, ProjectWorkspaceBindingLive, wake_lock).pipe(
 		Layer.provideMerge(options.preview_health_probe ?? NodePreviewHealthProbeLive),
 		Layer.provideMerge(workspace_evidence),
 		Layer.provideMerge(workspace_authority),
@@ -875,6 +895,9 @@ export function make_desktop_backend_layer(options: DesktopBackendOptions) {
 					make_node_project_locator_layer().pipe(Layer.provide(NodeProcessRunnerLive)),
 				thread_metadata_refiner:
 					options.thread_metadata_refiner ?? ThreadMetadataRefinerLive,
+				wake_lock_backend:
+					options.wake_lock_backend ??
+					make_platform_wake_lock_backend_layer(process.platform),
 			});
 		}).pipe(Effect.provide(NodeFileSystem.layer), Effect.provide(NodePath.layer)),
 	);
