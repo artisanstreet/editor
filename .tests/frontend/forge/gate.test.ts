@@ -7,6 +7,7 @@ import {
 	CompleteForgeHydration,
 	DismissForgeGate,
 	FailForgeHydration,
+	ForgeGateIsVisible,
 	ForgeShellIsBlocked,
 	ForgeShellIsMounted,
 	InitialForgeGateModel,
@@ -40,7 +41,15 @@ describe("ForgeGate", () => {
 	it("keeps the hydrated shell mounted through reconnects and failures", () => {
 		const hydrating = BeginForgeHydration(InitialForgeGateModel);
 		const ready = CompleteForgeHydration(hydrating, hydrating.hydration_generation);
+		const connecting = ObserveForgeConnection(ready, { phase: "connecting" });
 		const reconnecting = ObserveForgeConnection(ready, { phase: "reconnecting" });
+		const rehydrating = ObserveForgeConnection(reconnecting, { phase: "ready" });
+		const rehydration_failed = FailForgeHydration(
+			rehydrating,
+			rehydrating.hydration_generation,
+			"threads",
+			ConnectionError,
+		);
 		const exhausted = ObserveForgeConnection(reconnecting, {
 			attempts: 5,
 			error: ConnectionError,
@@ -50,6 +59,17 @@ describe("ForgeGate", () => {
 		expect(ready.has_hydrated_shell).toBe(true);
 		expect(reconnecting.has_hydrated_shell).toBe(true);
 		expect(exhausted.has_hydrated_shell).toBe(true);
+		expect(ForgeGateIsVisible(connecting)).toBe(false);
+		expect(ForgeShellIsBlocked(connecting)).toBe(false);
+		expect(ForgeGateIsVisible(reconnecting)).toBe(false);
+		expect(ForgeShellIsBlocked(reconnecting)).toBe(false);
+		expect(ForgeGateIsVisible(rehydrating)).toBe(false);
+		expect(ForgeShellIsBlocked(rehydrating)).toBe(false);
+		expect(ForgeGateIsVisible(rehydration_failed)).toBe(true);
+		expect(ForgeShellIsBlocked(rehydration_failed)).toBe(true);
+		expect(PresentForgeGate(rehydration_failed).retry).toBe("hydration");
+		expect(ForgeGateIsVisible(exhausted)).toBe(true);
+		expect(ForgeShellIsBlocked(exhausted)).toBe(true);
 		expect(PresentForgeGate(exhausted)).toMatchObject({
 			retry: "connection",
 			show_start: true,
@@ -231,6 +251,10 @@ describe("ForgeGate", () => {
 
 		expect(PresentForgeGate(connecting).dismissible).toBe(false);
 		expect(PresentForgeGate(hydrating).dismissible).toBe(false);
+		expect(ForgeGateIsVisible(connecting)).toBe(true);
+		expect(ForgeShellIsBlocked(connecting)).toBe(true);
+		expect(ForgeGateIsVisible(hydrating)).toBe(true);
+		expect(ForgeShellIsBlocked(hydrating)).toBe(true);
 		expect(PresentForgeGate(exhausted).dismissible).toBe(true);
 		expect(DismissForgeGate(connecting)).toBe(connecting);
 		expect(DismissForgeGate(hydrating)).toBe(hydrating);

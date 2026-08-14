@@ -18,6 +18,7 @@
 		TransportDiagnosticIsFailure,
 	} from "$lib/forge/diagnostics";
 	import {
+		ForgeGateIsVisible,
 		PresentForgeGate,
 		PresentForgePairingGuidance,
 		type ForgeGateModel,
@@ -39,7 +40,7 @@
 	} = $props();
 
 	const presentation = $derived(PresentForgeGate(model));
-	const is_visible = $derived(model.state.phase !== "ready" && !model.dismissed);
+	const is_visible = $derived(ForgeGateIsVisible(model));
 
 	const DismissOnEscape = (event: KeyboardEvent) =>
 		Effect.gen(function* () {

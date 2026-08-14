@@ -149,9 +149,18 @@ export const DismissForgeGate = (model: ForgeGateModel): ForgeGateModel =>
 export const ForgeShellIsMounted = (model: ForgeGateModel): boolean =>
 	model.has_hydrated_shell || model.dismissed;
 
+/**
+ * Transient reconnect and rehydration work stays behind a shell that has
+ * already proved it can render. First hydration and settled failures still
+ * need the gate because they have no usable live surface or require a remedy.
+ */
+export const ForgeGateIsVisible = (model: ForgeGateModel): boolean =>
+	!model.dismissed &&
+	model.state.phase !== "ready" &&
+	(!model.has_hydrated_shell || IsForgeGateDismissible(model));
+
 /** Input stays blocked while the gate is on screen, and only while it is. */
-export const ForgeShellIsBlocked = (model: ForgeGateModel): boolean =>
-	model.state.phase !== "ready" && !model.dismissed;
+export const ForgeShellIsBlocked = (model: ForgeGateModel): boolean => ForgeGateIsVisible(model);
 
 export const BeginForgeHydration = (model: ForgeGateModel): ForgeGateModel => {
 	const generation = model.hydration_generation + 1;
