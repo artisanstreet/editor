@@ -3,6 +3,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 
 import { Deferred, Effect, Exit, Fiber, Layer } from "effect";
+import { TestClock } from "effect/testing";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -11,13 +12,21 @@ import {
 	ForgeHandoffProcess,
 	handoff_cleanup_timeout,
 	handoff_exit_drain_delay_ms,
+	handoff_navigation_timeout,
+	handoff_recovery_navigation_timeout,
+	handoff_timeout,
 	IsWindowsCommandScript,
 	make_desktop_forge_lifecycle_layer,
 	make_node_forge_handoff_process_layer_with,
 	owned_stop_cleanup_timeout,
 	OwnedForgeStopArguments,
 } from "../../modules/desktop/src/forge-handoff";
-import { type ForgeHandoff, renderer_loader_url } from "../../modules/desktop/src/renderer-host";
+import {
+	DesktopLauncherError,
+	type ForgeHandoff,
+	renderer_handoff_failure_url,
+	renderer_loader_url,
+} from "../../modules/desktop/src/renderer-host";
 
 const MakeLifecycle = (
 	process: ForgeHandoffProcess["Service"],
@@ -198,6 +207,131 @@ describe("desktop Forge handoff lifecycle", () => {
 		expect(requests).toBe(2);
 	});
 
+	it("replaces the loader with the safe recovery document when the handoff fails", async () => {
+		const urls: Array<string> = [];
+		const lifecycle = await MakeLifecycle(
+			ForgeHandoffProcess.of({
+				Request: () =>
+					Effect.fail(
+						new DesktopLauncherError({
+							cause: new Error("C:/private/artisan/ae.exe is unavailable"),
+							reason: "handoff_failed",
+						}),
+					),
+				StopOwned: () => Effect.void,
+			}),
+			DesktopRenderer.of({
+				ClearCookies: () => Effect.void,
+				LoadUrl: (url) => Effect.sync(() => urls.push(url)),
+			}),
+		);
+
+		await Effect.runPromise(lifecycle.Reconnect());
+		expect(urls).toEqual([renderer_handoff_failure_url]);
+	});
+
+	it("times out a stalled handoff and opens the recovery document", async () => {
+		const urls: Array<string> = [];
+		await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const lifecycle = yield* Effect.promise(() =>
+						MakeLifecycle(
+							ForgeHandoffProcess.of({
+								Request: () => Effect.never,
+								StopOwned: () => Effect.void,
+							}),
+							DesktopRenderer.of({
+								ClearCookies: () => Effect.void,
+								LoadUrl: (url) => Effect.sync(() => urls.push(url)),
+							}),
+						),
+					);
+					const reconnect = yield* lifecycle.Reconnect().pipe(Effect.forkScoped);
+					yield* Effect.yieldNow;
+					expect(urls).toEqual([]);
+					yield* TestClock.adjust(handoff_timeout);
+					yield* Fiber.join(reconnect);
+					expect(urls).toEqual([renderer_handoff_failure_url]);
+				}),
+			).pipe(Effect.provide(TestClock.layer())),
+		);
+	});
+
+	it("bounds a stalled recovery navigation after an immediate handoff failure", async () => {
+		const urls: Array<string> = [];
+		await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const lifecycle = yield* Effect.promise(() =>
+						MakeLifecycle(
+							ForgeHandoffProcess.of({
+								Request: () =>
+									Effect.fail(
+										new DesktopLauncherError({ reason: "handoff_failed" }),
+									),
+								StopOwned: () => Effect.void,
+							}),
+							DesktopRenderer.of({
+								ClearCookies: () => Effect.void,
+								LoadUrl: (url) =>
+									Effect.sync(() => urls.push(url)).pipe(
+										Effect.andThen(Effect.never),
+									),
+							}),
+						),
+					);
+					const reconnect = yield* lifecycle.Reconnect().pipe(Effect.forkScoped);
+					yield* Effect.yieldNow;
+					expect(urls).toEqual([renderer_handoff_failure_url]);
+					yield* TestClock.adjust(handoff_recovery_navigation_timeout);
+					yield* Fiber.join(reconnect);
+				}),
+			).pipe(Effect.provide(TestClock.layer())),
+		);
+	});
+
+	it("falls back from a stalled paired navigation and settles the reconnect", async () => {
+		const urls: Array<string> = [];
+		await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const lifecycle = yield* Effect.promise(() =>
+						MakeLifecycle(
+							ForgeHandoffProcess.of({
+								Request: () =>
+									Effect.succeed({
+										endpoint: "http://127.0.0.1:52985/",
+										pair_code: "one-time",
+										version: 1,
+									}),
+								StopOwned: () => Effect.void,
+							}),
+							DesktopRenderer.of({
+								ClearCookies: () => Effect.void,
+								LoadUrl: (url) =>
+									Effect.sync(() => urls.push(url)).pipe(
+										Effect.andThen(
+											url === renderer_handoff_failure_url
+												? Effect.void
+												: Effect.never,
+										),
+									),
+							}),
+						),
+					);
+					const reconnect = yield* lifecycle.Reconnect().pipe(Effect.forkScoped);
+					yield* Effect.yieldNow;
+					expect(urls).toHaveLength(1);
+					expect(urls[0]).toContain("artisan-handoff=1");
+					yield* TestClock.adjust(handoff_navigation_timeout);
+					yield* Fiber.join(reconnect);
+					expect(urls).toEqual([urls[0], renderer_handoff_failure_url]);
+				}),
+			).pipe(Effect.provide(TestClock.layer())),
+		);
+	});
+
 	it("shares an in-flight handoff with quit cleanup and stops only its exact owned instance", async () => {
 		const gate = await Effect.runPromise(Deferred.make<ForgeHandoff>());
 		const stops: Array<string> = [];
@@ -348,7 +482,10 @@ describe("desktop Forge handoff lifecycle", () => {
 
 	it("keeps cleanup budgets above the prior five-second quit cutoff", () => {
 		expect(handoff_exit_drain_delay_ms).toBeLessThan(1_000);
-		expect(handoff_cleanup_timeout).toBe("25 seconds");
+		expect(handoff_timeout).toBe("40 seconds");
+		expect(handoff_navigation_timeout).toBe("5 seconds");
+		expect(handoff_recovery_navigation_timeout).toBe("5 seconds");
+		expect(handoff_cleanup_timeout).toBe("50 seconds");
 		expect(owned_stop_cleanup_timeout).toBe("30 seconds");
 	});
 });

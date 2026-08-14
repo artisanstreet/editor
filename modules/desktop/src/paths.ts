@@ -1,4 +1,4 @@
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 
 export interface ResolvedDesktopPaths {
 	readonly ae_command_path: string;
@@ -7,6 +7,7 @@ export interface ResolvedDesktopPaths {
 /** Resolves all mutable and packaged locations explicitly rather than from CWD. */
 export const resolve_desktop_paths = (input: {
 	readonly ae_command_override?: string;
+	readonly executable_path: string;
 	readonly is_packaged?: boolean;
 	readonly resources_path: string;
 }): ResolvedDesktopPaths => {
@@ -17,6 +18,8 @@ export const resolve_desktop_paths = (input: {
 	return {
 		ae_command_path:
 			managed_ae ??
-			(input.is_packaged ? join(input.resources_path, "artisan-forge", "ae.cmd") : "ae"),
+			(input.is_packaged
+				? join(dirname(dirname(dirname(dirname(input.executable_path)))), "bin", "ae.exe")
+				: "ae"),
 	};
 };

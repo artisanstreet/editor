@@ -10,6 +10,7 @@ describe("desktop packaging configuration", () => {
 	it("uses explicit mutable and packaged paths", () => {
 		expect(
 			resolve_desktop_paths({
+				executable_path: "C:/artisan/editor",
 				resources_path: "C:/resources",
 			}),
 		).toMatchObject({
@@ -20,11 +21,13 @@ describe("desktop packaging configuration", () => {
 	it("resolves the packaged daemon independently from the Electron application archive", () => {
 		expect(
 			resolve_desktop_paths({
+				executable_path:
+					"C:\\Users\\test\\AppData\\Local\\Artisan\\versions\\0.2.61\\editor\\Artisan Editor.exe",
 				is_packaged: true,
 				resources_path: "C:/resources",
 			}),
 		).toMatchObject({
-			ae_command_path: "C:\\resources\\artisan-forge\\ae.cmd",
+			ae_command_path: "C:\\Users\\test\\AppData\\Local\\Artisan\\bin\\ae.exe",
 		});
 	});
 
@@ -32,6 +35,8 @@ describe("desktop packaging configuration", () => {
 		expect(
 			resolve_desktop_paths({
 				ae_command_override: "C:\\Users\\test\\AppData\\Local\\Artisan\\bin\\ae.cmd",
+				executable_path:
+					"C:\\Users\\test\\AppData\\Local\\Artisan\\versions\\0.2.61\\editor\\Artisan Editor.exe",
 				is_packaged: true,
 				resources_path: "C:/resources",
 			}),
@@ -147,17 +152,8 @@ describe("desktop packaging configuration", () => {
 		expect(
 			main.indexOf("app.setToastActivatorCLSID(windows_toast_activator_clsid)"),
 		).toBeLessThan(main.indexOf("app.whenReady"));
-		expect(main).toContain('process.platform === "win32"');
-		expect(main).toContain('app.getPath("appData")');
-		expect(main).toContain('"Artisan Editor.lnk"');
-		expect(main).toContain("shell.readShortcutLink(shortcut_path)");
-		expect(main).toContain('shell.writeShortcutLink(shortcut_path, "update"');
-		expect(main).toContain("...current");
-		expect(main).toContain("appUserModelId: windows_app_user_model_id");
-		expect(main).toContain("toastActivatorClsid: windows_toast_activator_clsid");
-		expect(main.indexOf("yield* RepairWindowsNotificationShortcut")).toBeLessThan(
-			main.indexOf("new BrowserWindow"),
-		);
+		expect(main).not.toContain("readShortcutLink");
+		expect(main).not.toContain("writeShortcutLink");
 		/** Pairing stays `ae`-owned: the editor only runs the hidden one-time handoff. */
 		expect(main).toContain("make_node_forge_handoff_process_layer");
 		expect(main).not.toContain("ARTISAN_AUTH_TOKEN");

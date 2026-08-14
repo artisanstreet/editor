@@ -27,57 +27,6 @@ if (process.platform === "win32") {
 }
 
 /**
- * Repairs launchers written before Artisan carried Windows toast identity.
- * The installer owns shortcut creation; the desktop host only upgrades the
- * existing Start Menu link in place so an installed update works immediately.
- */
-const RepairWindowsNotificationShortcut = Effect.gen(function* () {
-	if (process.platform !== "win32" || !app.isPackaged) return;
-
-	const shortcut_path = join(
-		app.getPath("appData"),
-		"Microsoft",
-		"Windows",
-		"Start Menu",
-		"Programs",
-		"Artisan Editor.lnk",
-	);
-
-	yield* Effect.try({
-		try: () => {
-			const current = shell.readShortcutLink(shortcut_path);
-			if (
-				current.appUserModelId === windows_app_user_model_id &&
-				current.toastActivatorClsid?.toUpperCase() ===
-					windows_toast_activator_clsid.toUpperCase()
-			) {
-				return;
-			}
-
-			const updated = shell.writeShortcutLink(shortcut_path, "update", {
-				...current,
-				appUserModelId: windows_app_user_model_id,
-				toastActivatorClsid: windows_toast_activator_clsid,
-			});
-			if (!updated) throw new Error("Electron declined the shortcut update");
-		},
-		catch: (cause) => cause,
-	}).pipe(
-		Effect.catch((cause) =>
-			Effect.sync(() =>
-				console.error(
-					JSON.stringify({
-						kind: "artisan:desktop-notification-shortcut",
-						message: String(cause),
-						ok: false,
-					}),
-				),
-			),
-		),
-	);
-});
-
-/**
  * Loopback-only diagnosis hatch. The renderer has no IPC surface, so a memory
  * or rendering investigation on an installed build needs Chrome DevTools
  * Protocol access; setting the variable at launch is the only way in, and an
@@ -149,12 +98,12 @@ export const StartDesktop = Effect.gen(function* () {
 		try: () => app.whenReady(),
 		catch: (cause) => cause,
 	});
-	yield* RepairWindowsNotificationShortcut;
 	const paths = resolve_desktop_paths({
 		...(process.env.ARTISAN_AE_COMMAND === undefined
 			? {}
 			: { ae_command_override: process.env.ARTISAN_AE_COMMAND }),
 		is_packaged: app.isPackaged,
+		executable_path: process.execPath,
 		resources_path: process.resourcesPath,
 	});
 	const frontend_root = normalize(join(import.meta.dirname, "frontend"));

@@ -4,6 +4,17 @@ Scope: the V1 prototype described by [`artisan-editor-v1.md`](../prds/artisan-ed
 
 Verification snapshot: on 2026-08-10, the integrated worktree's `pnpm run validate` passed formatting, lint, root TypeScript, static production frontend and Forge builds, 374 passing Vitest files plus 3 skipped files, 2,571 passing tests plus 6 explicit skips, the dev-TUI Bun smoke test, native formatting/clippy, and 73 Rust tests. The exact staged Bazel milestone passed `//:forge_sea`, TypeScript, frontend, Forge, native, and 30 focused tests with one skip; the release target emitted only the 386,274,304-byte `Artisan Forge.exe`. Full staged `//:test` reached Vitest but reported seven existing baseline assertions outside this slice.
 
+On 2026-08-15, installed cold boot was repaired and replayed through 0.2.63. Electron no
+longer rewrites the installer-owned Start Menu shortcut, and a directly launched packaged
+Editor derives the stable installation `bin/ae.exe` instead of an absent resource script.
+Native readiness now allows 30 seconds for the observed 20-second SEA/state cold start;
+the desktop handoff allows 40 seconds, both paired and recovery navigations are bounded at
+five seconds, and failure replaces the temporary loader with a safe retry document. Both
+installed shortcuts retained `ae.exe open`; Forge became ready after 20.54 seconds and the
+first Editor handoff established loopback transport after 20.03 seconds without a second
+open command. `validate:desktop` passes 46 tests, `validate:native` passes 33 installer plus
+45 CLI tests, and independent lifecycle/path/security review is clean.
+
 Artisan-owned presentation instructions are resolved through an immutable Effect
 Service for every ordinary, recovered, and graph engine run. Codex app-server
 and exec fallback plus Claude start/resume receive the guidance through their

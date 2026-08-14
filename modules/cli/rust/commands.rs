@@ -21,7 +21,9 @@ use crate::{
 
 const MAX_LOG_BYTES: u64 = 1024 * 1024;
 const MAX_FOLLOW_BYTES: u64 = 64 * 1024;
-const FORGE_READY_TIMEOUT: Duration = Duration::from_secs(15);
+// A cold installed Forge can take more than 20 seconds to initialize its SEA
+// runtime and durable state; leave enough time for the first editor handoff.
+const FORGE_READY_TIMEOUT: Duration = Duration::from_secs(30);
 const FORGE_READY_PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 const FORGE_READY_INTERVAL: Duration = Duration::from_millis(100);
 const FORGE_START_LAUNCH_URL: &str = "artisan://forge/start";
@@ -1175,7 +1177,7 @@ mod tests {
 
     #[test]
     fn handoff_wait_budget_covers_the_renderer_cold_start_window() {
-        assert_eq!(FORGE_READY_TIMEOUT, Duration::from_secs(15));
+        assert_eq!(FORGE_READY_TIMEOUT, Duration::from_secs(30));
         assert!(FORGE_READY_PROBE_TIMEOUT < FORGE_READY_TIMEOUT);
         assert!(FORGE_READY_INTERVAL < FORGE_READY_TIMEOUT);
     }

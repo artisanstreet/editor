@@ -8,6 +8,11 @@ Last updated: 2026-08-11. Branch continuity only; durable verified status is in 
 - Validation `48875b1c`, pairing `4f7e2a2c`, acceptance `2f634890`, and bounded
   persistence `f48ce041` are pushed.
 - Root cleanup is isolated from unrelated work still present in the checkout.
+- Installed cold boot is fixed and verified in active/finalized 0.2.63: Electron no longer
+  rewrites installer shortcuts, direct Editor launch derives stable `bin/ae.exe`, and native /
+  desktop / paired-recovery / cleanup budgets are 30 / 40 / 5 / 50 seconds. Both shortcuts
+  remain `ae.exe open`; first cold Forge ready and Editor transport arrived in 20.54 / 20.03
+  seconds without a second open. Desktop 46, native 78, `ae status`, and review pass.
 
 ## Invariants
 

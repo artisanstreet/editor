@@ -25,7 +25,9 @@ const PRELAUNCH_DISCOVERY_TIMEOUT: Duration = Duration::from_millis(250);
 const PRELAUNCH_REGISTRY_CARD_LIMIT: usize = 1;
 const START_COORDINATION_POLL_INTERVAL: Duration = Duration::from_millis(10);
 const START_READY_POLL_INTERVAL: Duration = Duration::from_millis(100);
-const START_READY_TIMEOUT: Duration = Duration::from_secs(15);
+// Keep `ae start` aligned with `ae open --handoff`: a cold Forge may need up
+// to 30 seconds before its authenticated state becomes ready.
+const START_READY_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum StartResult {
@@ -647,9 +649,10 @@ mod tests {
 
     use super::{
         Command, InstanceConfig, InstancePaths, SHUTDOWN_POLL_INTERVAL, SHUTDOWN_PROBE_TIMEOUT,
-        SHUTDOWN_TIMEOUT, Secrets, background_start_can_continue, configure_forge_environment,
-        live_state_selected_until, live_state_until, prelaunch_discovery_deadline,
-        registered_states, should_stop_instance, with_start_coordination,
+        SHUTDOWN_TIMEOUT, START_READY_POLL_INTERVAL, START_READY_TIMEOUT, Secrets,
+        background_start_can_continue, configure_forge_environment, live_state_selected_until,
+        live_state_until, prelaunch_discovery_deadline, registered_states, should_stop_instance,
+        with_start_coordination,
     };
     use crate::instance::ForgeMode;
 
@@ -750,6 +753,12 @@ mod tests {
         assert!(SHUTDOWN_TIMEOUT <= Duration::from_secs(20));
         assert!(SHUTDOWN_PROBE_TIMEOUT < SHUTDOWN_TIMEOUT);
         assert!(SHUTDOWN_POLL_INTERVAL < SHUTDOWN_TIMEOUT);
+    }
+
+    #[test]
+    fn default_background_start_allows_the_installed_cold_start_budget() {
+        assert_eq!(START_READY_TIMEOUT, Duration::from_secs(30));
+        assert!(START_READY_POLL_INTERVAL < START_READY_TIMEOUT);
     }
 
     #[test]

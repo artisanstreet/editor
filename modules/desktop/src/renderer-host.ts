@@ -124,6 +124,13 @@ export const ServeRendererAsset = (frontend_root: string, request_url: string) =
 export const renderer_loader_url = `${app_scheme}://${app_host}/?${desktop_loader_navigation_parameter}=1`;
 
 /**
+ * A handoff failure must replace the temporary loader with a normal app-scheme
+ * document. Without a pairing endpoint, the existing renderer transport
+ * deliberately resolves this page as unavailable and presents its retry UI.
+ */
+export const renderer_handoff_failure_url = `${app_scheme}://${app_host}/?artisan-handoff-failed=1`;
+
+/**
  * The query marker deliberately changes for every handoff so Chromium performs
  * a document navigation rather than an in-page hash navigation. Its value is
  * public sequencing only; the one-time pairing capability and loopback Forge

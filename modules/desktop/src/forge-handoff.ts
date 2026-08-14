@@ -7,6 +7,7 @@ import {
 	DesktopLauncherError,
 	DecodeHandoffOutput,
 	ForgeHandoff,
+	renderer_handoff_failure_url,
 	renderer_handoff_url,
 	renderer_loader_url,
 } from "./renderer-host";
@@ -16,8 +17,17 @@ const max_handoff_stdout_bytes = 64 * 1024;
 /** Lets the CLI's final pipe write reach Node without waiting for inherited handles to close. */
 export const handoff_exit_drain_delay_ms = 100;
 
-/** Forge may use 15 seconds of readiness plus a five-second pair request before ownership returns. */
-export const handoff_cleanup_timeout = "25 seconds";
+/** Cleanup permits the 40s CLI handoff and up to two bounded document navigations. */
+export const handoff_cleanup_timeout = "50 seconds";
+
+/** Covers 30s Forge readiness, its pair request, and scheduling margin. */
+export const handoff_timeout = "40 seconds";
+
+/** A successful paired document navigation may not hold the reconnect latch indefinitely. */
+export const handoff_navigation_timeout = "5 seconds";
+
+/** The recovery document may not hold the shared reconnect latch indefinitely. */
+export const handoff_recovery_navigation_timeout = "5 seconds";
 
 /** Exact stop includes Forge's authenticated shutdown and process-exit wait. */
 export const owned_stop_cleanup_timeout = "30 seconds";
@@ -260,9 +270,17 @@ export const make_desktop_forge_lifecycle_layer = (ae_command_path: string) =>
 						);
 						if (!selected.start)
 							return yield* restore(Deferred.await(selected.deferred));
-						const exit = yield* restore(process.Request(ae_command_path)).pipe(
-							Effect.exit,
-						);
+						const exit = yield* restore(
+							process.Request(ae_command_path).pipe(
+								Effect.timeoutOrElse({
+									duration: handoff_timeout,
+									orElse: () =>
+										Effect.fail(
+											new DesktopLauncherError({ reason: "handoff_failed" }),
+										),
+								}),
+							),
+						).pipe(Effect.exit);
 						if (Exit.isFailure(exit)) {
 							yield* Deferred.complete(selected.deferred, exit);
 							yield* SynchronizedRef.update(state, (current) => ({
@@ -297,16 +315,40 @@ export const make_desktop_forge_lifecycle_layer = (ae_command_path: string) =>
 								...current,
 								next_navigation_id: current.next_navigation_id + 1,
 							},
-						]).pipe(Effect.flatMap(renderer.LoadUrl)),
+						]).pipe(
+							Effect.flatMap((url) =>
+								renderer.LoadUrl(url).pipe(
+									Effect.timeoutOrElse({
+										duration: handoff_navigation_timeout,
+										orElse: () =>
+											Effect.fail(
+												new DesktopLauncherError({
+													reason: "handoff_failed",
+												}),
+											),
+									}),
+								),
+							),
+						),
 					),
-					Effect.catch((cause) =>
-						Effect.sync(() =>
-							console.error(
-								JSON.stringify({
-									kind: "artisan:desktop-handoff",
-									message: String(cause),
-									ok: false,
-								}),
+					Effect.catch(() =>
+						renderer.LoadUrl(renderer_handoff_failure_url).pipe(
+							Effect.timeoutOrElse({
+								duration: handoff_recovery_navigation_timeout,
+								orElse: () => Effect.void,
+							}),
+							Effect.catch(() => Effect.void),
+							Effect.andThen(
+								Effect.sync(() =>
+									console.error(
+										JSON.stringify({
+											kind: "artisan:desktop-handoff",
+											message:
+												"Forge handoff failed; recovery navigation requested.",
+											ok: false,
+										}),
+									),
+								),
 							),
 						),
 					),

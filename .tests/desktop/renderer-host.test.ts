@@ -7,6 +7,7 @@ import { describe, expect, it } from "vitest";
 
 import {
 	DecodeHandoffOutput,
+	renderer_handoff_failure_url,
 	renderer_handoff_url,
 	renderer_loader_url,
 	ServeRendererAsset,
@@ -84,6 +85,9 @@ describe("desktop renderer host", () => {
 		expect(request_url).not.toContain("52985");
 		expect(fragment).toBe("pair=code%20with%20spaces&forge=http%3A%2F%2F127.0.0.1%3A52985%2F");
 		expect(renderer_loader_url).toBe("artisan://app/?artisan-loader=1");
+		expect(renderer_handoff_failure_url).toBe("artisan://app/?artisan-handoff-failed=1");
+		expect(renderer_handoff_failure_url).not.toContain("pair");
+		expect(renderer_handoff_failure_url).not.toContain("127.0.0.1");
 	});
 
 	it("serves bundled assets with an index fallback confined to the payload", async () => {
