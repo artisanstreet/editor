@@ -1519,11 +1519,12 @@ describe("orchestration repository hardening", () => {
 					return yield* repository.FailRecoveredRun(accepted.run_id, -1);
 				}),
 			);
-			const [runs, threads] = await runtime.runPromise(
+			const [runs, threads, events] = await runtime.runPromise(
 				Read((database) =>
 					Effect.all([
 						database.select().from(OrchestrationRuns),
 						database.select().from(Threads),
+						database.select().from(JournalEvents),
 					]),
 				),
 			);
@@ -1534,6 +1535,19 @@ describe("orchestration repository hardening", () => {
 			});
 			expect(threads.find((thread) => thread.thread_id === "thread_1")).toMatchObject({
 				live_status: "Failed to complete",
+			});
+			expect(
+				events
+					.filter((event) => event.run_id === accepted.run_id)
+					.map((event) => JSON.parse(event.payload_json))
+					.find(
+						(payload) => payload.type === "run.lifecycle" && payload.state === "failed",
+					),
+			).toMatchObject({
+				failure: {
+					code: "AE-RUN-301",
+					detail: "The session resumed but made no provider progress before the recovery check expired.",
+				},
 			});
 
 			const progressed = await runtime.runPromise(

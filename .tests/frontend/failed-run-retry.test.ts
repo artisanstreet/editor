@@ -37,4 +37,21 @@ describe("failed root run retry", () => {
 			'retrying ? "Retrying…" : retry_failed ? "Retry again" : "Retry"',
 		);
 	});
+
+	it("keeps a safe failure explanation visible outside collapsed details", () => {
+		const workspace = Read("modules/frontend/src/routes/components/thread-workspace.svelte");
+		const session = Read(
+			"modules/frontend/src/routes/components/conversation-work-session.svelte",
+		);
+
+		expect(session).toContain(
+			'import ConversationErrorCard from "./conversation-error-card.svelte";',
+		);
+		expect(session).toContain("<ConversationErrorCard error={failure} />");
+		expect(session).toContain("code: artisan_error_codes.run_failed,");
+		expect(session).toContain("No detailed reason was recorded for this failed run.");
+		expect(session).toContain("{@render details(is_failed)}");
+		expect(workspace).toContain("{#snippet details(session_failed: boolean)}");
+		expect(workspace).toContain("failed={session_failed}");
+	});
 });

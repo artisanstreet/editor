@@ -5,7 +5,7 @@ import type { EngineObservation } from "@artisan/engines";
 import type { DatabaseClient } from "../../persistence/database";
 import { ApplyActivityObservation } from "./activity";
 import type { ConversationObservationContext } from "./domain";
-import { body_text, item_base, lifecycle, turn_base } from "./domain";
+import { body_text, item_base, lifecycle, terminal_failure, turn_base } from "./domain";
 import { Admit, EnsureThread, EnsureTurn, UpsertItem, UpsertTurn } from "./entities";
 import { ApplyInteractionObservation, CancelPendingInteractions } from "./interaction";
 import { AppendText, CompleteReasoningSummary, SettleStreamingBodies } from "./messages";
@@ -27,7 +27,7 @@ export const ApplyEngineObservation = (
 			observation._tag === "usage" ||
 			(observation._tag === "terminal_activity" && observation.state === "output") ||
 			(observation._tag === "tool" && observation.action === "progress") ||
-			(observation._tag === "native_action" && observation.diagnostic === true)
+			(observation._tag === "native_action" && observation.error_ref === undefined)
 		)
 			return;
 
@@ -160,10 +160,36 @@ export const ApplyEngineObservation = (
 					observation.state,
 					input.occurred_at,
 				);
-				return yield* UpsertTurn(
+				yield* UpsertTurn(
 					transaction,
 					input.thread_id,
 					turn_base(turn_id, input, observation.state, observation.observation_id),
+					source,
+				);
+				return yield* UpsertItem(
+					transaction,
+					input.thread_id,
+					{
+						...item_base(
+							`work:${turn_id}`,
+							turn_id,
+							input,
+							observation.state,
+							observation.observation_id,
+						),
+						...(observation.state === "completed" ||
+						observation.state === "cancelled" ||
+						observation.state === "failed"
+							? { ended_at: input.occurred_at }
+							: {}),
+						...(observation.state === "failed"
+							? { failure: terminal_failure(observation.error_ref) }
+							: {}),
+						started_at: input.occurred_at,
+						status: lifecycle(observation.state),
+						title: "Agent work",
+						type: "work_session",
+					},
 					source,
 				);
 			case "approval":

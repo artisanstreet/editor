@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 
 import { conversation_body_text_limit } from "@artisan/protocol";
+import type { ConversationErrorRef } from "@artisan/protocol";
+import type { EngineErrorRef } from "@artisan/engines";
 
 export class ConversationProjectionError extends Error {
 	readonly _tag = "ConversationProjectionError";
@@ -58,6 +60,26 @@ export const optional_text = (value: string | undefined) => {
 
 	return normalized ? text(normalized) : undefined;
 };
+
+const renderer_safe_terminal_details = new Set([
+	"Artisan could not finish preparing the engine run.",
+	"Engine startup was interrupted before the native session became ready.",
+	"The engine did not become ready before the startup deadline.",
+	"The engine failed before its native session became ready.",
+	"The engine stopped before the run could finish.",
+	"The engine could not deliver observations fast enough to continue safely.",
+]);
+
+/**
+ * Projects only fixed Artisan terminal wording. Provider diagnostics and
+ * arbitrary failure text remain private raw provenance rather than UI detail.
+ */
+export const terminal_failure = (error_ref: EngineErrorRef | undefined): ConversationErrorRef => ({
+	code: error_ref?.artisan_code ?? "AE-RUN-301",
+	...(error_ref?.detail !== undefined && renderer_safe_terminal_details.has(error_ref.detail)
+		? { detail: error_ref.detail }
+		: {}),
+});
 
 /** Keeps provider-native compaction identities out of renderer-visible item ids. */
 export const compaction_item_id = (

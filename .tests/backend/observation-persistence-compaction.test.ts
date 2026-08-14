@@ -1,14 +1,19 @@
 import { describe, expect, it } from "vitest";
+import { Cause, Effect, Exit } from "effect";
 
 import type { EngineObservation } from "@artisan/engines";
 
-import { CompactObservationBatch } from "../../modules/backend/src/orchestration/observation-persistence";
+import {
+	CompactObservationBatch,
+	MakeObservationPersistence,
+} from "../../modules/backend/src/orchestration/observation-persistence";
+import { OrchestrationFailure } from "../../modules/backend/src/persistence/orchestration/contracts";
 
 const Delta = (
 	sequence: number,
 	delta = "x",
 	phase: "commentary" | "final" | "unspecified" = "unspecified",
-): EngineObservation => ({
+): Extract<EngineObservation, { readonly _tag: "agent_message_delta" }> => ({
 	_tag: "agent_message_delta",
 	artisan_run_id: "run_1",
 	delta,
@@ -21,6 +26,111 @@ const Delta = (
 });
 
 describe("observation persistence compaction", () => {
+	it("preserves an interrupt-only batch failure", async () => {
+		const persistence = MakeObservationPersistence({
+			continuation_repository: {
+				RecordObservationMetadata: () => Effect.void,
+				RecordObservationsMetadata: () => Effect.void,
+			},
+			graph_repository: {
+				RecordObservedSubagent: () => Effect.succeed([]),
+				ReconcileObservedRoot: () => Effect.succeed([]),
+			},
+			repository: {
+				RecordObservation: () => Effect.die("individual fallback must not run"),
+				RecordObservations: () => Effect.interrupt,
+			},
+		});
+
+		const exit = await Effect.runPromiseExit(
+			persistence.PersistCompactedBatch({ run_id: "run_1" }, [Delta(1)]),
+		);
+
+		expect(Exit.isFailure(exit)).toBe(true);
+		if (Exit.isFailure(exit)) expect(Cause.hasInterruptsOnly(exit.cause)).toBe(true);
+	});
+
+	it("fails rather than silently succeeding when individual fallback also fails", async () => {
+		const persisted: Array<number> = [];
+		const persistence = MakeObservationPersistence({
+			continuation_repository: {
+				RecordObservationMetadata: () => Effect.void,
+				RecordObservationsMetadata: () => Effect.void,
+			},
+			graph_repository: {
+				RecordObservedSubagent: () => Effect.succeed([]),
+				ReconcileObservedRoot: () => Effect.succeed([]),
+			},
+			repository: {
+				RecordObservation: (observation) =>
+					Effect.sync(() => {
+						persisted.push(observation.sequence);
+					}).pipe(
+						Effect.andThen(
+							observation.sequence === 2
+								? Effect.fail(
+										new OrchestrationFailure({
+											cause: new Error("individual persistence failed"),
+										}),
+									)
+								: Effect.succeed([]),
+						),
+					),
+				RecordObservations: () =>
+					Effect.fail(
+						new OrchestrationFailure({ cause: new Error("batch persistence failed") }),
+					),
+			},
+		});
+
+		await expect(
+			Effect.runPromise(
+				persistence.PersistCompactedBatch({ run_id: "run_1" }, [
+					{ ...Delta(1), phase: "commentary" },
+					{ ...Delta(2), phase: "final" },
+					Delta(3),
+				]),
+			),
+		).rejects.toMatchObject({
+			_tag: "OrchestrationFailure",
+			cause: expect.objectContaining({ message: "individual persistence failed" }),
+		});
+		expect(persisted).toEqual([1, 2]);
+	});
+
+	it("preserves ordered individual fallback when every observation succeeds", async () => {
+		const persisted: Array<number> = [];
+		const persistence = MakeObservationPersistence({
+			continuation_repository: {
+				RecordObservationMetadata: () => Effect.void,
+				RecordObservationsMetadata: () => Effect.void,
+			},
+			graph_repository: {
+				RecordObservedSubagent: () => Effect.succeed([]),
+				ReconcileObservedRoot: () => Effect.succeed([]),
+			},
+			repository: {
+				RecordObservation: (observation) =>
+					Effect.sync(() => {
+						persisted.push(observation.sequence);
+					}).pipe(Effect.as([])),
+				RecordObservations: () =>
+					Effect.fail(
+						new OrchestrationFailure({ cause: new Error("batch persistence failed") }),
+					),
+			},
+		});
+
+		await Effect.runPromise(
+			persistence.PersistCompactedBatch({ run_id: "run_1" }, [
+				{ ...Delta(1), phase: "commentary" },
+				{ ...Delta(2), phase: "final" },
+				Delta(3),
+			]),
+		);
+		expect(persisted).toEqual([1, 2, 3]);
+	});
+
 	it("turns token-frequency text into one render-cadence durable update", () => {
 		const compacted = CompactObservationBatch(
 			Array.from({ length: 256 }, (_, index) => Delta(index + 1)),
@@ -94,5 +204,49 @@ describe("observation persistence compaction", () => {
 			input_tokens: 128,
 		});
 		expect(compacted[1]).not.toHaveProperty("output_tokens");
+	});
+
+	it("coalesces adjacent native noise but retains classified native failures", () => {
+		const compacted = CompactObservationBatch([
+			{
+				_tag: "native_action",
+				action: "item/reasoning/textDelta",
+				artisan_run_id: "run_1",
+				detail: "Reasoning privately",
+				observation_id: "private_reasoning",
+				raw: { engine_id: "codex", frame: {}, transport: "test" },
+				sequence: 1,
+			},
+			{
+				_tag: "native_action",
+				action: "item/reasoning/textDelta",
+				artisan_run_id: "run_1",
+				detail: "Reasoning privately",
+				observation_id: "private_reasoning_repeated",
+				raw: { engine_id: "codex", frame: {}, transport: "test" },
+				sequence: 2,
+			},
+			{
+				_tag: "native_action",
+				action: "error",
+				artisan_run_id: "run_1",
+				error_ref: { artisan_code: "AE-PROVIDER-201" },
+				observation_id: "classified_failure",
+				raw: { engine_id: "codex", frame: {}, transport: "test" },
+				sequence: 3,
+			},
+		] satisfies ReadonlyArray<EngineObservation>);
+
+		expect(compacted).toEqual([
+			expect.objectContaining({
+				_tag: "native_action",
+				observation_id: "private_reasoning_repeated",
+			}),
+			expect.objectContaining({
+				_tag: "native_action",
+				error_ref: { artisan_code: "AE-PROVIDER-201" },
+				observation_id: "classified_failure",
+			}),
+		]);
 	});
 });

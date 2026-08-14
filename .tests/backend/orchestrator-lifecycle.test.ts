@@ -333,7 +333,7 @@ describe("agent orchestrator lifecycle supervision", () => {
 			expect(failed_snapshot.snapshot.items).toContainEqual(
 				expect.objectContaining({
 					severity: "error",
-					summary: "Engine startup failed before the native session became ready.",
+					summary: "The engine failed before its native session became ready.",
 					type: "native_event",
 				}),
 			);
@@ -727,6 +727,26 @@ describe("agent orchestrator lifecycle supervision", () => {
 			await new Promise((resolve) => setTimeout(resolve, 50));
 
 			expect(failed_open.instrumentation.opened()).toBe(1);
+			const failed_snapshot = await runtime.runPromise(
+				Effect.gen(function* () {
+					const conversations = yield* ConversationReadModel;
+
+					return yield* conversations.ReadSnapshot("thread_1");
+				}),
+			);
+			expect(failed_snapshot.status).toBe("available");
+			if (failed_snapshot.status !== "available") {
+				throw new Error("Expected a failed startup conversation snapshot");
+			}
+			expect(
+				failed_snapshot.snapshot.items.find((item) => item.type === "work_session"),
+			).toMatchObject({
+				failure: {
+					code: "AE-CLIENT_STATE-105",
+					detail: "The engine failed before its native session became ready.",
+				},
+				status: "failed",
+			});
 		} finally {
 			await runtime.dispose();
 		}

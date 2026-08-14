@@ -819,6 +819,40 @@ function handle_request(request: FixtureRecord) {
 			}, 5);
 		}
 
+		if (process.env.FAKE_APP_SERVER_SCENARIO === "private-reasoning-flood") {
+			setTimeout(() => {
+				for (let index = 0; index < 1_200; index += 1) {
+					write_frame({
+						method: "item/reasoning/textDelta",
+						params: {
+							contentIndex: index,
+							delta: "private",
+							itemId: "reasoning-flood",
+							threadId: request.params.threadId,
+							turnId: active_turn_id,
+						},
+					});
+				}
+				write_frame({
+					method: "item/reasoning/summaryTextDelta",
+					params: {
+						delta: "Public summary",
+						itemId: "reasoning-flood",
+						summaryIndex: 0,
+						threadId: request.params.threadId,
+						turnId: active_turn_id,
+					},
+				});
+				write_frame({
+					method: "turn/completed",
+					params: {
+						threadId: request.params.threadId,
+						turn: make_turn(active_turn_id, "completed"),
+					},
+				});
+			}, 5);
+		}
+
 		return;
 	}
 

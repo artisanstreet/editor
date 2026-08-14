@@ -382,7 +382,19 @@ describe("conversation trace", () => {
 		]);
 	});
 
-	it("always surfaces diagnostics for failed work, overriding the preference", () => {
+	it("keeps an unclassified historical diagnostic out of visible severity groups", () => {
+		const historical_diagnostic = {
+			...base,
+			id: "diagnostic_unclassified",
+			lifecycle: "completed",
+			summary: "Persisted before diagnostic severity existed",
+			type: "native_event",
+		} satisfies Extract<ConversationItem, { type: "native_event" }>;
+
+		expect(make_conversation_trace_segments([historical_diagnostic], true)).toEqual([]);
+	});
+
+	it("keeps unclassified provider stderr out of failed conversations", () => {
 		const failure_diagnostic = item({
 			...base,
 			id: "diagnostic_failure",
@@ -396,13 +408,17 @@ describe("conversation trace", () => {
 		const surfaced = make_conversation_trace_segments([failure_diagnostic], false, true);
 
 		expect(hidden).toEqual([]);
-		expect(surfaced).toEqual([
-			expect.objectContaining({
-				items: [expect.objectContaining({ id: "diagnostic_failure" })],
-				severity: "error",
-				type: "diagnostic_group",
-			}),
-		]);
+		expect(surfaced).toEqual([]);
+		const leaked_protocol_lifecycle = item({
+			...base,
+			id: "diagnostic_protocol_lifecycle",
+			severity: "info",
+			summary: "Item reasoning started",
+			type: "native_event",
+		});
+		expect(make_conversation_trace_segments([leaked_protocol_lifecycle], false, true)).toEqual(
+			[],
+		);
 	});
 
 	it("renders failed work as an unmissable failure in the workspace", () => {
@@ -431,6 +447,7 @@ describe("conversation trace", () => {
 		expect(trace).toContain('failed && segment.severity === "error"');
 		expect(trace).toContain('role={alerting ? "alert" : undefined}');
 		/** Cancellation is the user's own act; only failed work re-skins the trace. */
-		expect(workspace).toContain('failed={block.session.status === "failed"}');
+		expect(workspace).toContain("{#snippet details(session_failed: boolean)}");
+		expect(workspace).toContain("failed={session_failed}");
 	});
 });

@@ -23,6 +23,7 @@ import {
 } from "../tables";
 import { RuntimeMetadata } from "../../runtime/metadata";
 import { ApplyEngineObservation } from "../../conversation/index.ts";
+import { terminal_failure } from "../../conversation/projection/domain";
 import { PersistSurfaceProjection } from "../../surfaces/surface-projection";
 import { ReconcileRootThreadLiveStatus } from "./thread-lifecycle-status";
 import { RecordUsageInterruptionInTransaction } from "../usage-interruption/record";
@@ -249,6 +250,13 @@ export function make_observation_recording(
 									} satisfies EventPayload)
 								: observation._tag === "run_terminal"
 									? ({
+											...(observation.state === "failed"
+												? {
+														failure: terminal_failure(
+															observation.error_ref,
+														),
+													}
+												: {}),
 											state: observation.state,
 											type: "run.lifecycle",
 											working_directory: run.working_directory,

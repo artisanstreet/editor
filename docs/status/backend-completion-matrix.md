@@ -1,6 +1,6 @@
 # Artisan Editor Completion Matrix
 
-Scope: the V1 prototype described by [`artisan-editor-v1.md`](../prds/artisan-editor-v1.md), including the backend, desktop shell, renderer, and release harness. Status is verified implementation status as of 2026-08-11, not design intent. Codex and Claude are production adapters over the user's external provider executables; Forge and Editor contain only Artisan-owned runtime code. Embedded browsers/WebViews and broad Git mutation commands remain deliberately outside this prototype rather than incomplete hidden scope.
+Scope: the V1 prototype described by [`artisan-editor-v1.md`](../prds/artisan-editor-v1.md), including the backend, desktop shell, renderer, and release harness. Status is verified implementation status as of 2026-08-14, not design intent. Codex and Claude are production adapters over the user's external provider executables; Forge and Editor contain only Artisan-owned runtime code. Embedded browsers/WebViews and broad Git mutation commands remain deliberately outside this prototype rather than incomplete hidden scope.
 
 Verification snapshot: on 2026-08-10, the integrated worktree's `pnpm run validate` passed formatting, lint, root TypeScript, static production frontend and Forge builds, 374 passing Vitest files plus 3 skipped files, 2,571 passing tests plus 6 explicit skips, the dev-TUI Bun smoke test, native formatting/clippy, and 73 Rust tests. The exact staged Bazel milestone passed `//:forge_sea`, TypeScript, frontend, Forge, native, and 30 focused tests with one skip; the release target emitted only the 386,274,304-byte `Artisan Forge.exe`. Full staged `//:test` reached Vitest but reported seven existing baseline assertions outside this slice.
 
@@ -27,6 +27,20 @@ build and scoped lint/format checks pass, and independent re-review is clean. Th
 aggregate frontend and backend gates stop at unrelated protected formatting files;
 root TypeScript retains only the existing steering, provider-management, and
 agent-graph baselines.
+
+Installed 0.2.61 run failures were traced to five saturated engine delivery buffers,
+three recovered runs with no durable post-resume progress, and eight follow-up launches
+that failed while preparing continuation state. Private Codex reasoning deltas now
+validate without entering the public observation path; adjacent identical unclassified
+native actions compact before a finite four-batch persistence cushion. Durable writes
+stay serial and retry the same batch under paced backpressure, while failed fallback
+writes and interruptions propagate their original Effect cause instead of silently
+draining evidence. Every failed terminal, startup failure, and recovery-liveness failure
+now carries a fixed renderer-safe error reference through journal replay into a visible
+work-session error card beside exact-run Retry. Eight focused engine/backend/frontend
+files pass 113 tests; scoped format/lint/diff checks and independent post-fix review pass.
+Root TypeScript retains only the unrelated steering, engine-installation, and agent-graph
+baselines, and the area gates still stop on unrelated protected formatting files.
 
 On 2026-07-27, the Windows distribution artifact, hermetic lifecycle, and real
 isolated packaged-bootstrap gates passed alongside root TypeScript. This

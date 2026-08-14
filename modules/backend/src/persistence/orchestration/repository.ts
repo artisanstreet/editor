@@ -515,6 +515,10 @@ export const OrchestrationRepositoryLive = Layer.effect(
 							causation_id: `resume_observation_timeout:${run_id}`,
 							correlation_id: run_id,
 							payload: {
+								failure: {
+									code: "AE-RUN-301",
+									detail: "The session resumed but made no provider progress before the recovery check expired.",
+								},
 								state: "failed",
 								type: "run.lifecycle",
 								working_directory: run.working_directory,

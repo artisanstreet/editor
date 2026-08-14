@@ -1,5 +1,6 @@
 <script lang="ts" effect>
 	import type { ConversationItem } from "@artisan/protocol";
+	import { artisan_error_codes } from "@artisan/catalog";
 	import Refresh from "@tabler/icons-svelte/icons/refresh";
 	import ChevronRight from "@tabler/icons-svelte/icons/chevron-right";
 	import { Effect } from "effect";
@@ -18,6 +19,7 @@
 	import { ShimmerText } from "$lib/components/ui/shimmer-text";
 	import { Button } from "$lib/components/ui/button";
 	import ConversationStatus from "./conversation-status.svelte";
+	import ConversationErrorCard from "./conversation-error-card.svelte";
 
 	let {
 		engine_id,
@@ -47,7 +49,8 @@
 		/** Settled traces stay unmounted until disclosure, so the header needs this hint. */
 		has_details?: boolean;
 		item: Extract<ConversationItem, { type: "work_session" }>;
-		details?: Snippet;
+		/** Receives this session's authority-aware failure verdict for its nested trace. */
+		details?: Snippet<[failed: boolean]>;
 		duration_kind?: "thought" | "worked";
 		onretry?: (
 			run_id: string,
@@ -139,6 +142,12 @@
 	);
 	const ended_at = $derived(settlement?.ended_at);
 	const is_failed = $derived(item.status === "failed" || settlement?.presumed_failed === true);
+	const failure = $derived(
+		item.failure ?? {
+			code: artisan_error_codes.run_failed,
+			detail: "No detailed reason was recorded for this failed run.",
+		},
+	);
 	const retry_available = $derived(is_failed && item.run_id !== undefined && onretry !== undefined);
 	let retrying = $state(false);
 	let retry_failed = $state(false);
@@ -406,10 +415,15 @@
 		</div>
 	{/if}
 
+	{#if is_failed}
+		<!-- This must survive a closed trace: it is the run's explanation, not debug detail. -->
+		<ConversationErrorCard error={failure} />
+	{/if}
+
 	{#if disclosure.details_mounted && details !== undefined}
 		<div class="t-acc-panel" hidden={disclosure.details_hidden}>
 			<div class="t-acc-panel-inner" use:observe_details>
-				{@render details()}
+				{@render details(is_failed)}
 			</div>
 		</div>
 	{/if}

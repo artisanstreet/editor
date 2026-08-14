@@ -8,6 +8,7 @@ import {
 	Option,
 	PubSub,
 	Ref,
+	Schedule,
 	Scope,
 	Semaphore,
 	Stream,
@@ -48,7 +49,7 @@ import {
 	type StartFailure,
 } from "./internal/agent-orchestrator-start-failure";
 import { IntakePolicy } from "./intake-policy";
-import { MakeObservationPersistence } from "./observation-persistence";
+import { CompactObservationBatch, MakeObservationPersistence } from "./observation-persistence";
 import { ProductInstructions } from "./product-instructions";
 import { UsageInterruptionService } from "../persistence/usage-interruption/service";
 import {
@@ -72,6 +73,12 @@ interface LiveRun {
 	readonly scope: Scope.Scope;
 	readonly thread_id: string;
 }
+
+/** Keeps a short, lossless cushion between stream compaction and SQLite persistence. */
+const observation_persistence_prefetch_capacity = 4;
+
+/** Prevents a failed durable write from turning into either data loss or a hot retry loop. */
+const observation_persistence_retry_schedule = Schedule.spaced("250 millis");
 
 type DispatchState = "idle" | "running" | "pending";
 
@@ -273,6 +280,24 @@ export const AgentOrchestratorLive = Layer.effect(
 
 		const MarkStartFailure = (work: PendingWork, failure: StartFailure) =>
 			Effect.gen(function* () {
+				/**
+				 * Startup causes can contain provider output and host paths. The durable
+				 * terminal keeps only Artisan-owned wording plus the adapter's stable code;
+				 * exact cause evidence remains in the private Forge log below.
+				 */
+				const public_message =
+					failure.kind === "configuration"
+						? "Artisan could not finish preparing the engine run."
+						: failure.kind === "timeout"
+							? "The engine did not become ready before the startup deadline."
+							: failure.kind === "interrupted"
+								? "Engine startup was interrupted before the native session became ready."
+								: "The engine failed before its native session became ready.";
+				const terminal_error_ref = {
+					artisan_code:
+						failure.error_ref?.artisan_code ?? artisan_error_codes.engine_start_failed,
+					detail: public_message,
+				};
 				yield* usage_interruptions.MarkTargetFailed(work.run_id).pipe(Effect.ignore);
 				// Pre-provider validation can fail before the ordinary running transition.
 				// Settling it first keeps the canonical run lifecycle from remaining queued.
@@ -286,11 +311,9 @@ export const AgentOrchestratorLive = Layer.effect(
 					.RecordObservation({
 						_tag: "process_diagnostic",
 						artisan_run_id: work.run_id,
-						...(failure.error_ref === undefined
-							? {}
-							: { error_ref: failure.error_ref }),
+						error_ref: terminal_error_ref,
 						level: "error",
-						message: failure.message,
+						message: public_message,
 						observation_id: `open_diagnostic:${work.command_id}`,
 						raw: {
 							engine_id: work.engine_id,
@@ -304,6 +327,7 @@ export const AgentOrchestratorLive = Layer.effect(
 					.RecordObservation({
 						_tag: "run_terminal",
 						artisan_run_id: work.run_id,
+						error_ref: terminal_error_ref,
 						observation_id: `open_failed:${work.command_id}`,
 						raw: {
 							engine_id: work.engine_id,
@@ -347,8 +371,29 @@ export const AgentOrchestratorLive = Layer.effect(
 				 * invisible next to render cadence.
 				 */
 				Stream.groupedWithin(256, "100 millis"),
+				Stream.map(CompactObservationBatch),
+				Stream.filter((observations) => observations.length > 0),
+				/**
+				 * Preserve ordered, lossless persistence while allowing one small set of
+				 * already-compacted batches to drain the engine buffer during a SQLite
+				 * commit. A finite suspend queue retains backpressure under sustained
+				 * storage failure instead of converting it into unbounded memory growth.
+				 */
+				Stream.buffer({
+					capacity: observation_persistence_prefetch_capacity,
+					strategy: "suspend",
+				}),
 				Stream.runForEach((observations) =>
-					observation_persistence.PersistBatch(work, observations.map(PublicObservation)),
+					observation_persistence
+						.PersistCompactedBatch(work, observations.map(PublicObservation))
+						.pipe(
+							/**
+							 * Keep ownership of the same ordered batch until it is durable. The
+							 * finite stream buffer then propagates sustained storage pressure back
+							 * to the engine instead of silently advancing past missing evidence.
+							 */
+							Effect.retry({ schedule: observation_persistence_retry_schedule }),
+						),
 				),
 			).pipe(
 				Effect.andThen(live.run.Closed),

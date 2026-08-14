@@ -946,6 +946,45 @@ describe("Codex engine run", () => {
 		expect(terminals(result.events)).toEqual([expect.objectContaining({ state: "completed" })]);
 	});
 
+	it("keeps 1,200 private reasoning deltas outside the bounded event buffer", async () => {
+		process.env.FAKE_APP_SERVER_SCENARIO = "private-reasoning-flood";
+
+		const result = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const engine = yield* CodexEngine;
+					const run = yield* engine.Open({
+						_tag: "start",
+						artisan_run_id: "run-private-reasoning-flood",
+						initial_text: "Flood private reasoning",
+						working_directory: "C:\\workspace",
+					});
+					const events = yield* run.Events.pipe(
+						Stream.mapEffect((event) => Effect.sleep(1).pipe(Effect.as(event))),
+						Stream.runCollect,
+					);
+
+					return { events: [...events], terminal: yield* run.Closed };
+				}),
+			).pipe(Effect.provide(make_layer({ event_capacity: 4 }))),
+		);
+
+		expect(result.terminal).toBe("completed");
+		expect(
+			result.events.filter(
+				(event) =>
+					event._tag === "native_action" && event.action === "item/reasoning/textDelta",
+			),
+		).toHaveLength(0);
+		expect(result.events).toContainEqual(
+			expect.objectContaining({
+				_tag: "reasoning_summary_delta",
+				delta: "Public summary",
+			}),
+		);
+		expect(terminals(result.events)).toEqual([expect.objectContaining({ state: "completed" })]);
+	});
+
 	it.each([
 		["cancel", "cancelled"],
 		["close", "closed"],

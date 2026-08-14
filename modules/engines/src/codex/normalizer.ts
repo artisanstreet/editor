@@ -509,12 +509,12 @@ export function normalise_codex_notification(
 			);
 		case "item/reasoning/textDelta":
 			/**
-			 * Private reasoning is never surfaced. The row exists to account for the
-			 * frame, so it says what happened rather than where the text was kept.
+			 * Private reasoning is never surfaced or durably projected. Retaining one
+			 * native action per token would only let a provider burst occupy the
+			 * bounded run delivery path; the public summary and completion frames are
+			 * the canonical evidence for this item.
 			 */
-			return decode_known(input, PrivateReasoningDeltaSchema, () => [
-				native_action(input, "Reasoning privately"),
-			]);
+			return decode_known(input, PrivateReasoningDeltaSchema, () => []);
 		case "turn/plan/updated":
 			return decode_known(input, PlanSchema, (value) => [
 				{

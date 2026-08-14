@@ -203,6 +203,8 @@ export const ConversationItem = Schema.Union([
 	Schema.Struct({
 		...ConversationItemFields,
 		ended_at: Schema.optional(IsoDateTime),
+		/** The durable, catalog-backed explanation for a failed work session. */
+		failure: Schema.optional(ConversationErrorRef),
 		/** When the provider accepted the turn and began producing run activity. */
 		responded_at: Schema.optional(IsoDateTime),
 		started_at: IsoDateTime,

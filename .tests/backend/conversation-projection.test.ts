@@ -590,6 +590,14 @@ describe("conversation projection", () => {
 							message_id,
 							origin: "backend",
 							payload: {
+								...(state === "failed"
+									? {
+											failure: {
+												code: "AE-RUN-301",
+												detail: "The engine stopped before the run could finish.",
+											},
+										}
+									: {}),
 								state,
 								type: "run.lifecycle",
 								working_directory: "C:\\workspace",
@@ -635,6 +643,10 @@ describe("conversation projection", () => {
 			expect(availability.snapshot.items).toEqual([
 				expect.objectContaining({
 					ended_at: "2026-07-24T00:00:03.000Z",
+					failure: {
+						code: "AE-RUN-301",
+						detail: "The engine stopped before the run could finish.",
+					},
 					id: "work:run:run_1",
 					lifecycle: "failed",
 					started_at: "2026-07-24T00:00:01.000Z",
@@ -642,6 +654,92 @@ describe("conversation projection", () => {
 					type: "work_session",
 				}),
 			]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("projects a terminal failure explanation onto its durable work session", async () => {
+		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
+		try {
+			const availability = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const read_model = yield* ConversationReadModel;
+					yield* database.client.insert(Threads).values({
+						created_at: "2026-07-24T00:00:00.000Z",
+						last_activity_at: "2026-07-24T00:00:00.000Z",
+						thread_id: "thread_1",
+						title: "Conversation",
+						updated_at: "2026-07-24T00:00:00.000Z",
+					});
+					const context = {
+						occurred_at: "2026-07-24T00:00:01.000Z",
+						run_id: "run_1",
+						thread_id: "thread_1",
+					};
+					yield* database.client.transaction((transaction) =>
+						Effect.gen(function* () {
+							yield* ApplyEngineObservation(
+								transaction,
+								{
+									_tag: "turn_state",
+									artisan_run_id: "run_1",
+									observation_id: "turn_started",
+									raw: { engine_id: "codex", frame: {}, transport: "test" },
+									sequence: 0,
+									state: "started",
+									turn_id: "provider_turn_1",
+								},
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
+							yield* ApplyEngineObservation(
+								transaction,
+								{
+									_tag: "turn_state",
+									artisan_run_id: "run_1",
+									observation_id: "turn_failed",
+									raw: { engine_id: "codex", frame: {}, transport: "test" },
+									sequence: 1,
+									state: "failed",
+									turn_id: "provider_turn_1",
+								},
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
+							yield* ApplyEngineObservation(
+								transaction,
+								{
+									_tag: "run_terminal",
+									artisan_run_id: "run_1",
+									error_ref: {
+										artisan_code: "AE-RUN-301",
+										detail: "The engine stopped before the run could finish.",
+									},
+									observation_id: "run_failed",
+									raw: { engine_id: "codex", frame: {}, transport: "test" },
+									sequence: 2,
+									state: "failed",
+								},
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
+						}),
+					);
+					return yield* read_model.ReadSnapshot("thread_1");
+				}),
+			);
+
+			expect(availability.status).toBe("available");
+			if (availability.status !== "available") return;
+			expect(
+				availability.snapshot.items.find((item) => item.type === "work_session"),
+			).toMatchObject({
+				failure: {
+					code: "AE-RUN-301",
+					detail: "The engine stopped before the run could finish.",
+				},
+				status: "failed",
+				type: "work_session",
+			});
 		} finally {
 			await runtime.dispose();
 		}
@@ -1037,7 +1135,7 @@ describe("conversation projection", () => {
 		}
 	});
 
-	it("summarizes a native event from detail, falling back to action, and caps its length", async () => {
+	it("does not project provider protocol lifecycle as visible native events", async () => {
 		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
 		try {
 			const overlong_detail = "x".repeat(5_000);
@@ -1105,23 +1203,66 @@ describe("conversation projection", () => {
 
 			expect(availability.status).toBe("available");
 			if (availability.status !== "available") return;
-			const native_events = availability.snapshot.items.filter(
-				(item) => item.type === "native_event",
+			expect(availability.snapshot.items).not.toContainEqual(
+				expect.objectContaining({ type: "native_event" }),
 			);
-			expect(
-				native_events.find((item) => item.id === "native:observation_native_detail"),
-			).toMatchObject({ severity: "info", summary: "Provider quota narrowed to safe mode" });
-			expect(
-				native_events.find((item) => item.id === "native:observation_native_no_detail"),
-			).toMatchObject({ severity: "info", summary: "claude_event" });
-			const overlong_item = native_events.find(
-				(item) => item.id === "native:observation_native_overlong",
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("keeps classified native failures free of provider diagnostic output", async () => {
+		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
+		try {
+			const availability = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const read_model = yield* ConversationReadModel;
+					yield* database.client.insert(Threads).values({
+						created_at: "2026-07-24T00:00:00.000Z",
+						last_activity_at: "2026-07-24T00:00:00.000Z",
+						thread_id: "thread_1",
+						title: "Conversation",
+						updated_at: "2026-07-24T00:00:00.000Z",
+					});
+					yield* database.client.transaction(
+						(transaction) =>
+							ApplyEngineObservation(
+								transaction,
+								{
+									_tag: "native_action",
+									action: "tool_router_error",
+									artisan_run_id: "run_1",
+									detail: "\\u001b[31mERROR\\u001b[0m private Forge diagnostics",
+									error_ref: {
+										artisan_code: "AE-UNKNOWN-000",
+										detail: "private Forge diagnostics",
+									},
+									observation_id: "observation_native_failure",
+									raw: { engine_id: "codex", frame: {}, transport: "test" },
+									sequence: 1,
+								},
+								{
+									occurred_at: "2026-07-24T00:00:01.000Z",
+									run_id: "run_1",
+									thread_id: "thread_1",
+								},
+							) as Effect.Effect<unknown, unknown, never>,
+					);
+					return yield* read_model.ReadSnapshot("thread_1");
+				}),
 			);
-			expect(overlong_item).toBeDefined();
-			if (overlong_item?.type === "native_event") {
-				expect(overlong_item.summary.length).toBe(4_096);
-				expect(overlong_item.summary).toBe(overlong_detail.slice(0, 4_096));
-			}
+
+			expect(availability.status).toBe("available");
+			if (availability.status !== "available") return;
+			const native = availability.snapshot.items.find((item) => item.type === "native_event");
+			expect(native).toMatchObject({
+				error: { code: "AE-UNKNOWN-000" },
+				summary: "tool_router_error",
+				type: "native_event",
+			});
+			expect(JSON.stringify(native)).not.toContain("private Forge diagnostics");
+			expect(JSON.stringify(native)).not.toContain("\\u001b");
 		} finally {
 			await runtime.dispose();
 		}

@@ -2,6 +2,7 @@ import { Cause, Deferred, Effect, Queue, Ref, Semaphore, Stream } from "effect";
 
 import {
 	type EngineObservation,
+	type EngineErrorRef,
 	type EngineRunTerminalObservation,
 	type EngineRunTerminalState,
 	EngineBackpressureError,
@@ -22,6 +23,7 @@ export interface EngineEventBufferOptions {
 	readonly make_terminal_observation: (
 		terminal_state: EngineRunTerminalState,
 		sequence: number,
+		error_ref?: EngineErrorRef,
 	) => EngineRunTerminalObservation;
 }
 
@@ -41,6 +43,12 @@ type EmitReservation =
 
 const default_backpressure_timeout_ms = 30_000;
 
+/** Never let a failed run reach persistence without a reader-safe explanation. */
+const generic_failed_run_error: EngineErrorRef = {
+	artisan_code: "AE-RUN-301",
+	detail: "The engine stopped before the run could finish.",
+};
+
 /** Owns bounded observations, contiguous sequencing, and exact-one terminal closure. @since 0.4.0 */
 export function MakeEngineEventBuffer(options: EngineEventBufferOptions) {
 	return Effect.gen(function* () {
@@ -56,7 +64,10 @@ export function MakeEngineEventBuffer(options: EngineEventBufferOptions) {
 			next_sequence: 0,
 		});
 
-		const BeginFinishUnlocked = (terminal_state: EngineRunTerminalState) =>
+		const BeginFinishUnlocked = (
+			terminal_state: EngineRunTerminalState,
+			error_ref?: EngineErrorRef,
+		) =>
 			Effect.gen(function* () {
 				const sequence = yield* Ref.modify(state, (current) =>
 					current.closed
@@ -73,8 +84,15 @@ export function MakeEngineEventBuffer(options: EngineEventBufferOptions) {
 
 				if (sequence === undefined) return false;
 
+				const failure =
+					terminal_state === "failed"
+						? (error_ref ?? generic_failed_run_error)
+						: undefined;
 				yield* Queue.offer(events, {
-					event: options.make_terminal_observation(terminal_state, sequence),
+					event: {
+						...options.make_terminal_observation(terminal_state, sequence, failure),
+						...(failure === undefined ? {} : { error_ref: failure }),
+					},
 					releases_slot: false,
 				});
 				yield* Deferred.succeed(closed, terminal_state);
@@ -105,7 +123,7 @@ export function MakeEngineEventBuffer(options: EngineEventBufferOptions) {
 						_tag: "process_diagnostic",
 						artisan_run_id: options.artisan_run_id,
 						level: "error",
-						message: `Engine event buffer remained full for ${backpressure_timeout_ms}ms (capacity ${options.capacity})`,
+						message: "Engine event buffer remained full and the run was stopped.",
 						observation_id: `${options.artisan_run_id}:event-buffer-backpressure:${diagnostic_sequence}`,
 						raw: {
 							engine_id: "event-buffer",
@@ -120,8 +138,15 @@ export function MakeEngineEventBuffer(options: EngineEventBufferOptions) {
 					},
 					releases_slot: false,
 				});
+				const failure: EngineErrorRef = {
+					artisan_code: "AE-RUN-301",
+					detail: "The engine could not deliver observations fast enough to continue safely.",
+				};
 				yield* Queue.offer(events, {
-					event: options.make_terminal_observation("failed", terminal_sequence),
+					event: {
+						...options.make_terminal_observation("failed", terminal_sequence, failure),
+						error_ref: failure,
+					},
 					releases_slot: false,
 				});
 				yield* Deferred.succeed(closed, "failed");
@@ -129,11 +154,11 @@ export function MakeEngineEventBuffer(options: EngineEventBufferOptions) {
 
 				return true;
 			});
-		const Finish = (terminal_state: EngineRunTerminalState) =>
+		const Finish = (terminal_state: EngineRunTerminalState, error_ref?: EngineErrorRef) =>
 			Effect.gen(function* () {
 				yield* options.BeforeFinish ?? Effect.void;
 				const should_close = yield* Semaphore.withPermit(lock)(
-					BeginFinishUnlocked(terminal_state),
+					BeginFinishUnlocked(terminal_state, error_ref),
 				);
 				if (should_close) yield* options.CloseResource;
 			}).pipe(Effect.uninterruptible);

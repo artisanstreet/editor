@@ -743,10 +743,10 @@
 										transition={block.transition}
 										waiting_for_activity={conversation_waiting_for_activity(block.details)}
 									>
-										{#snippet details()}
+										{#snippet details(session_failed: boolean)}
 											<!-- Stopping is the user's own act, not a failure the trace must explain. -->
 											<ConversationTrace
-												failed={block.session.status === "failed"}
+												failed={session_failed}
 												items={block.details}
 												work_active={block.session.ended_at === undefined &&
 													session_authority === "active"}

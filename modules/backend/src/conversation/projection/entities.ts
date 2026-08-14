@@ -40,6 +40,20 @@ export interface ProjectionEntityInput {
 	readonly [key: string]: unknown;
 }
 
+/**
+ * A provider may report turn failure before its terminal run receipt. The only
+ * permitted write after that terminal work item is the receipt's previously
+ * missing failure explanation; no lifecycle or ordinary work-session field may
+ * be revised after settlement.
+ */
+const is_failure_enrichment = (prior: typeof ConversationItem.Type, item: ProjectionEntityInput) =>
+	prior.type === "work_session" &&
+	prior.lifecycle === "failed" &&
+	prior.failure === undefined &&
+	item.type === "work_session" &&
+	item.lifecycle === "failed" &&
+	item.failure !== undefined;
+
 /** Patches bridge a live subscription after its snapshot; they are not history. */
 export const conversation_patch_retention_limit = 256;
 
@@ -269,15 +283,21 @@ export const UpsertItem = (
 			existing.entity_json,
 			"stored conversation item",
 		);
-		if (["completed", "failed", "cancelled"].includes(prior.lifecycle)) return prior;
+		const failure_enrichment = is_failure_enrichment(prior, item);
+		if (["completed", "failed", "cancelled"].includes(prior.lifecycle) && !failure_enrichment)
+			return prior;
 		const entity = yield* Decode(
 			ConversationItem,
 			{
-				...prior,
-				...item,
-				...(prior.type === "work_session" && item.type === "work_session"
-					? { started_at: prior.started_at }
-					: {}),
+				...(failure_enrichment
+					? { ...prior, failure: item.failure }
+					: {
+							...prior,
+							...item,
+							...(prior.type === "work_session" && item.type === "work_session"
+								? { started_at: prior.started_at }
+								: {}),
+						}),
 				ordinal: prior.ordinal,
 				turn_id: prior.turn_id,
 				revision: prior.revision + 1,

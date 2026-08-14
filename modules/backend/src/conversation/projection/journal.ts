@@ -126,6 +126,9 @@ export const ApplyJournalEvent = (transaction: DatabaseClient, event: EventEnvel
 					...(state === "completed" || state === "failed" || state === "cancelled"
 						? { ended_at: event.sent_at }
 						: {}),
+					...(state === "failed" && payload.failure !== undefined
+						? { failure: payload.failure }
+						: {}),
 					started_at: event.sent_at,
 					status: state,
 					title: "Agent work",

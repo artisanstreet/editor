@@ -85,6 +85,19 @@ const MergeObservation = (
 			content: { ...current.content, delta: prior.content.delta + current.content.delta },
 		};
 	}
+	if (
+		prior._tag === "native_action" &&
+		current._tag === "native_action" &&
+		prior.error_ref === undefined &&
+		current.error_ref === undefined &&
+		prior.action === current.action &&
+		prior.detail === current.detail &&
+		prior.diagnostic === current.diagnostic &&
+		prior.artisan_run_id === current.artisan_run_id &&
+		prior.native_thread_id === current.native_thread_id
+	) {
+		return current;
+	}
 	return undefined;
 };
 
@@ -149,47 +162,63 @@ export const CompactObservationBatch = (
  * commit in one transaction pair; a failed batch degrades to per-observation
  * writes so one poison observation cannot discard its siblings.
  */
-export const MakeObservationPersistence = (input: {
-	readonly continuation_repository: typeof ThreadContinuationRepository.Service;
-	readonly repository: typeof OrchestrationRepository.Service;
-	readonly graph_repository: typeof AgentGraphRepository.Service;
-}) => {
+interface ObservationPersistenceDependencies {
+	readonly continuation_repository: Pick<
+		typeof ThreadContinuationRepository.Service,
+		"RecordObservationMetadata" | "RecordObservationsMetadata"
+	>;
+	readonly repository: Pick<
+		typeof OrchestrationRepository.Service,
+		"RecordObservation" | "RecordObservations"
+	>;
+	readonly graph_repository: Pick<
+		typeof AgentGraphRepository.Service,
+		"RecordObservedSubagent" | "ReconcileObservedRoot"
+	>;
+}
+
+export const MakeObservationPersistence = (input: ObservationPersistenceDependencies) => {
 	const PersistIndividually = (
 		work: Pick<PendingWork, "run_id">,
 		batch: ReadonlyArray<EngineObservation>,
 	) =>
-		Effect.forEach(batch, (observation) =>
-			input.repository.RecordObservation(observation).pipe(
-				Effect.andThen(
-					observation._tag === "subagent" || observation._tag === "subagent_transcript"
-						? input.graph_repository.RecordObservedSubagent(observation)
-						: Effect.void,
+		Effect.forEach(
+			batch,
+			(observation) =>
+				input.repository.RecordObservation(observation).pipe(
+					Effect.andThen(
+						observation._tag === "subagent" ||
+							observation._tag === "subagent_transcript"
+							? input.graph_repository.RecordObservedSubagent(observation)
+							: Effect.void,
+					),
+					Effect.andThen(
+						input.graph_repository.ReconcileObservedRoot(observation.artisan_run_id),
+					),
+					Effect.andThen(
+						input.continuation_repository.RecordObservationMetadata(observation),
+					),
+					Effect.asVoid,
+					Effect.catchCause((cause) =>
+						Effect.sync(() => {
+							console.error("Artisan continuation observation metadata failed", {
+								failure_kind: Cause.hasInterruptsOnly(cause)
+									? "interrupted"
+									: "persistence",
+								run_id: work.run_id,
+							});
+						}).pipe(Effect.andThen(Effect.failCause(cause))),
+					),
 				),
-				Effect.andThen(
-					input.graph_repository.ReconcileObservedRoot(observation.artisan_run_id),
-				),
-				Effect.andThen(
-					input.continuation_repository.RecordObservationMetadata(observation),
-				),
-				Effect.asVoid,
-				Effect.catchCause((cause) =>
-					Effect.sync(() => {
-						console.error("Artisan continuation observation metadata failed", {
-							failure_kind: Cause.hasInterruptsOnly(cause)
-								? "interrupted"
-								: "persistence",
-							run_id: work.run_id,
-						});
-					}),
-				),
-			),
+			{ concurrency: 1 },
 		);
 
-	const PersistBatch = (
+	const PersistCompactedBatch = (
 		work: Pick<PendingWork, "run_id">,
-		batch: ReadonlyArray<EngineObservation>,
+		compacted: ReadonlyArray<EngineObservation>,
 	) => {
-		const compacted = CompactObservationBatch(batch);
+		if (compacted.length === 0) return Effect.void;
+
 		return input.repository.RecordObservations(compacted).pipe(
 			Effect.andThen(
 				Effect.forEach(compacted, (observation) =>
@@ -217,7 +246,7 @@ export const MakeObservationPersistence = (input: {
 						});
 					});
 
-					if (interrupted) return;
+					if (interrupted) return yield* Effect.failCause(cause);
 
 					yield* PersistIndividually(work, compacted);
 				}),
@@ -225,5 +254,5 @@ export const MakeObservationPersistence = (input: {
 		);
 	};
 
-	return { PersistBatch };
+	return { PersistCompactedBatch };
 };

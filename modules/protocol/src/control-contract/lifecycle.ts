@@ -26,6 +26,8 @@ import {
 	GlobalGuidanceSelectionRequiredEvent,
 } from "../guidance";
 
+import { ConversationErrorRef } from "../conversation";
+
 import { MarketplaceLedgerEvent } from "../marketplace";
 
 import {
@@ -242,6 +244,7 @@ export type ThreadSessionSnapshot = typeof ThreadSessionSnapshot.Type;
 
 /** Records an authoritative lifecycle state for one durable run. */
 export const RunLifecycleEvent = Schema.Struct({
+	failure: Schema.optional(ConversationErrorRef),
 	type: Schema.Literal("run.lifecycle"),
 	working_directory: Schema.NonEmptyString,
 	state: Schema.Literals([

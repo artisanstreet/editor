@@ -168,7 +168,12 @@ export const make_conversation_trace_segments = (
 	/** Do not retain or classify hidden native diagnostics at all. */
 	if (diagnostics_by_severity !== undefined) {
 		for (const item of items) {
-			if (item.type === "native_event" && item.severity !== undefined) {
+			if (
+				item.type === "native_event" &&
+				item.severity !== undefined &&
+				(diagnostics_enabled ||
+					(failure_visible && item.severity === "error" && item.error !== undefined))
+			) {
 				diagnostics_by_severity[item.severity].push(item);
 			}
 		}

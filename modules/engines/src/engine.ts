@@ -509,6 +509,12 @@ export interface EnginePlanObservation extends EngineObservationBase {
 /** Reports the sole terminal outcome emitted by a run. @since 0.2.0 */
 export interface EngineRunTerminalObservation extends EngineObservationBase {
 	readonly _tag: "run_terminal";
+	/**
+	 * The renderer-safe explanation for a failed terminal result. This is
+	 * Artisan-owned, catalog-backed evidence; adapters keep their raw provider
+	 * failure in `raw` rather than placing it here.
+	 */
+	readonly error_ref?: EngineErrorRef;
 	readonly state: EngineRunTerminalState;
 }
 

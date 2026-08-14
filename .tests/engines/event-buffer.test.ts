@@ -264,9 +264,51 @@ describe("shared engine event buffer", () => {
 		expect(result.events.slice(-2)).toMatchObject([
 			{
 				_tag: "process_diagnostic",
-				message: "Engine event buffer remained full for 10ms (capacity 1)",
+				message: "Engine event buffer remained full and the run was stopped.",
 			},
-			{ _tag: "run_terminal", state: "failed" },
+			{
+				_tag: "run_terminal",
+				error_ref: {
+					artisan_code: "AE-RUN-301",
+					detail: "The engine could not deliver observations fast enough to continue safely.",
+				},
+				state: "failed",
+			},
+		]);
+	});
+
+	it("attaches a generic safe explanation to every otherwise-bare failed finish", async () => {
+		const events = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const buffer = yield* MakeEngineEventBuffer({
+						artisan_run_id: "run",
+						capacity: 1,
+						CloseResource: Effect.void,
+						make_terminal_observation: (state, sequence) => ({
+							_tag: "run_terminal",
+							artisan_run_id: "run",
+							observation_id: "terminal",
+							raw: { engine_id: "test", frame: state, transport: "test" },
+							sequence,
+							state,
+						}),
+					});
+					yield* buffer.Finish("failed");
+					return yield* buffer.Events.pipe(Stream.runCollect);
+				}),
+			),
+		);
+
+		expect(events).toMatchObject([
+			{
+				_tag: "run_terminal",
+				error_ref: {
+					artisan_code: "AE-RUN-301",
+					detail: "The engine stopped before the run could finish.",
+				},
+				state: "failed",
+			},
 		]);
 	});
 
