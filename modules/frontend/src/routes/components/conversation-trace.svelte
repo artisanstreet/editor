@@ -386,7 +386,7 @@
 							<div class="relative flex flex-col gap-1 pl-6">
 								<div
 									aria-hidden="true"
-									class="pointer-events-none absolute inset-y-0 left-0 w-4 after:absolute after:inset-y-0 after:left-1/2 after:w-[2px] after:bg-border/60"
+									class="pointer-events-none absolute inset-y-0 left-0 w-4 after:absolute after:inset-y-0 after:left-1/2 after:w-[2px] after:-translate-x-1/2 after:bg-border/60"
 								></div>
 							{#each segment.items as activity (activity.id)}
 								{@const ActivityIcon = CategoryIcon(
