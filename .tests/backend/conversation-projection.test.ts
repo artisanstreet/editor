@@ -826,7 +826,7 @@ describe("conversation projection", () => {
 		}
 	});
 
-	it("completes a reasoning summary streamed by delta and emits an item_lifecycle patch", async () => {
+	it("replaces streamed reasoning with its late authoritative final summary", async () => {
 		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
 		try {
 			const result = await runtime.runPromise(
@@ -865,12 +865,25 @@ describe("conversation projection", () => {
 							yield* ApplyEngineObservation(
 								transaction,
 								{
+									_tag: "run_terminal",
+									artisan_run_id: "run_1",
+									observation_id: "observation_run_completed",
+									raw: { engine_id: "codex", frame: {}, transport: "test" },
+									sequence: 2,
+									state: "completed",
+								},
+								context,
+							) as Effect.Effect<unknown, unknown, never>;
+							yield* ApplyEngineObservation(
+								transaction,
+								{
 									_tag: "reasoning_summary_completed",
 									artisan_run_id: "run_1",
 									item_id: "reasoning_1",
 									observation_id: "observation_reasoning_completed",
 									raw: { engine_id: "codex", frame: {}, transport: "test" },
-									sequence: 2,
+									sequence: 3,
+									text: "The authoritative final summary",
 									turn_id: "turn_1",
 								},
 								context,
@@ -891,15 +904,80 @@ describe("conversation projection", () => {
 			).toMatchObject({
 				id: "reasoning_1",
 				lifecycle: "completed",
-				text: "Weighing the options",
+				text: "The authoritative final summary",
 				type: "reasoning_summary",
 			});
 			expect(
 				result.patches.some(
 					(patch) =>
-						patch.type === "item_lifecycle" &&
-						patch.item_id === "reasoning_1" &&
-						patch.lifecycle === "completed",
+						patch.type === "item_upsert" &&
+						patch.item.type === "reasoning_summary" &&
+						patch.item.id === "reasoning_1" &&
+						patch.item.text === "The authoritative final summary",
+				),
+			).toBe(true);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("creates a completed reasoning summary from an authoritative final-only observation", async () => {
+		const runtime = make_backend_runtime({ database_path: await MakePath(), migrations_path });
+		try {
+			const result = await runtime.runPromise(
+				Effect.gen(function* () {
+					const database = yield* Database;
+					const read_model = yield* ConversationReadModel;
+					yield* database.client.insert(Threads).values({
+						created_at: "2026-07-24T00:00:00.000Z",
+						last_activity_at: "2026-07-24T00:00:00.000Z",
+						thread_id: "thread_1",
+						title: "Conversation",
+						updated_at: "2026-07-24T00:00:00.000Z",
+					});
+					const context = {
+						occurred_at: "2026-07-24T00:00:01.000Z",
+						run_id: "run_1",
+						thread_id: "thread_1",
+					};
+					yield* database.client.transaction(
+						(transaction) =>
+							ApplyEngineObservation(
+								transaction,
+								{
+									_tag: "reasoning_summary_completed",
+									artisan_run_id: "run_1",
+									item_id: "reasoning_final_only",
+									observation_id: "observation_reasoning_final_only",
+									raw: { engine_id: "codex", frame: {}, transport: "test" },
+									sequence: 1,
+									text: "A provider-authored public summary",
+									turn_id: "turn_1",
+								},
+								context,
+							) as Effect.Effect<unknown, unknown, never>,
+					);
+					return {
+						patches: yield* read_model.ReadPatches("thread_1", 0),
+						snapshot: yield* read_model.ReadSnapshot("thread_1"),
+					};
+				}),
+			);
+
+			expect(result.snapshot.status).toBe("available");
+			if (result.snapshot.status !== "available") return;
+			expect(
+				result.snapshot.snapshot.items.find((item) => item.id === "reasoning_final_only"),
+			).toMatchObject({
+				id: "reasoning_final_only",
+				lifecycle: "completed",
+				text: "A provider-authored public summary",
+				type: "reasoning_summary",
+			});
+			expect(
+				result.patches.some(
+					(patch) =>
+						patch.type === "item_upsert" && patch.item.id === "reasoning_final_only",
 				),
 			).toBe(true);
 		} finally {

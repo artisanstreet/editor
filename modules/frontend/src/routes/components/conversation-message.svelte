@@ -221,6 +221,7 @@
 	<article class="max-w-(--prose-body-width)" aria-label={item.type === "reasoning_summary" ? "Reasoning summary" : "Assistant message"}>
 		{#if item.type === "reasoning_summary"}
 			<ShimmerText
+				active={item.lifecycle === "active" || item.lifecycle === "streaming"}
 				class="whitespace-pre-wrap text-base leading-7 text-muted-foreground"
 				delay={0}
 				duration={2}

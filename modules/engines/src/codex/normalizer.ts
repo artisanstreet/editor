@@ -15,6 +15,7 @@ import type {
 	EngineObservation,
 	EnginePlanObservation,
 	EngineProtocolDiagnosticObservation,
+	EngineReasoningSummaryCompletedObservation,
 	EngineQuestionObservation,
 	EngineRawProvenance,
 	EngineReasoningSummaryDeltaObservation,
@@ -179,14 +180,19 @@ function is_collab_agent_tool_call_item(item: unknown): item is CollabAgentToolC
 	return Schema.is(CollabAgentToolCallItemSchema)(item);
 }
 /**
- * Items Codex reports but Artisan renders from its own stream: reasoning
- * arrives as summary deltas, and the user's own message is already in the
- * transcript that produced this turn. Modelled so their envelopes decode —
- * an unmodelled item type fails the whole frame, not just itself.
+ * The user's own message is already in the transcript that produced this
+ * turn. Model it so its envelope decodes — an unmodelled item type fails the
+ * whole frame, not just itself.
  */
 const OpaqueItemSchema = Schema.Struct({
 	id: Schema.String,
-	type: Schema.Literals(["reasoning", "userMessage"]),
+	type: Schema.Literal("userMessage"),
+});
+/** The completed item is the authoritative public summary, never its raw content. */
+const ReasoningItemSchema = Schema.Struct({
+	id: Schema.String,
+	summary: Schema.Array(Schema.String),
+	type: Schema.Literal("reasoning"),
 });
 const ContextCompactionItemSchema = Schema.Struct({
 	id: Schema.String,
@@ -204,6 +210,7 @@ const ItemEnvelopeSchema = Schema.Struct({
 		SubagentItemSchema,
 		CollabAgentToolCallItemSchema,
 		ContextCompactionItemSchema,
+		ReasoningItemSchema,
 		OpaqueItemSchema,
 	]),
 	threadId: Schema.String,
@@ -224,6 +231,13 @@ const McpProgressSchema = Schema.Struct({
 });
 const ReasoningSummaryDeltaSchema = Schema.Struct({
 	delta: Schema.String,
+	itemId: Schema.String,
+	summaryIndex: Schema.Int,
+	threadId: Schema.String,
+	turnId: Schema.String,
+});
+/** A structural separator between public reasoning-summary sections. */
+const ReasoningSummaryPartAddedSchema = Schema.Struct({
 	itemId: Schema.String,
 	summaryIndex: Schema.Int,
 	threadId: Schema.String,
@@ -472,6 +486,27 @@ export function normalise_codex_notification(
 					turn_id: value.turnId,
 				} satisfies EngineReasoningSummaryDeltaObservation,
 			]);
+		case "item/reasoning/summaryPartAdded":
+			return decode_known(input, ReasoningSummaryPartAddedSchema, (value) =>
+				/**
+				 * Codex announces section zero before its first public text. Later
+				 * boundaries have no text of their own, but preserve readable
+				 * paragraph separation for the deltas that follow.
+				 */
+				value.summaryIndex === 0
+					? []
+					: [
+							{
+								...base,
+								_tag: "reasoning_summary_delta",
+								delta: "\n\n",
+								item_id: value.itemId,
+								sequence: 0,
+								summary_index: value.summaryIndex,
+								turn_id: value.turnId,
+							} satisfies EngineReasoningSummaryDeltaObservation,
+						],
+			);
 		case "item/reasoning/textDelta":
 			/**
 			 * Private reasoning is never surfaced. The row exists to account for the
@@ -755,6 +790,20 @@ export function normalise_codex_notification(
 							} satisfies EngineFileObservation;
 						});
 					case "reasoning":
+						return started
+							? []
+							: [
+									{
+										...base,
+										_tag: "reasoning_summary_completed",
+										item_id: value.item.id,
+										sequence: 0,
+										...(value.item.summary.length === 0
+											? {}
+											: { text: value.item.summary.join("\n\n") }),
+										turn_id: value.turnId,
+									} satisfies EngineReasoningSummaryCompletedObservation,
+								];
 					case "userMessage":
 						/** Carried by their own streams; the envelope only needs to decode. */
 						return [

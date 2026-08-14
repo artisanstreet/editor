@@ -705,7 +705,10 @@
 										stays collapsible, while diagnostics remain hidden unless the trace
 										explicitly exposes them.
 									-->
-									<ConversationTrace items={block.items} work_active={run_active} />
+									<ConversationTrace
+										items={block.items}
+										work_active={run_active && block.turn_id === `run:${active_run_id}`}
+									/>
 								{:else if block.type === "item"}
 									<ConversationItem
 										{image_sources}

@@ -45,7 +45,8 @@ export const ApplyEngineObservation = (
 		const source = { observed_at: input.occurred_at };
 		const is_body_delta =
 			observation._tag === "agent_message_delta" ||
-			observation._tag === "reasoning_summary_delta";
+			observation._tag === "reasoning_summary_delta" ||
+			(observation._tag === "reasoning_summary_completed" && observation.text !== undefined);
 		yield* (is_body_delta ? EnsureTurn : UpsertTurn)(
 			transaction,
 			input.thread_id,
@@ -100,7 +101,10 @@ export const ApplyEngineObservation = (
 					transaction,
 					input.thread_id,
 					observation.item_id,
-					input.occurred_at,
+					turn_id,
+					input,
+					observation.observation_id,
+					observation.text,
 				);
 			case "turn_state":
 				yield* UpsertTurn(

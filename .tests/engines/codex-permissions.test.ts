@@ -25,6 +25,7 @@ describe("Codex permission mapping", () => {
 
 		expect(app_server).toEqual({
 			approvalPolicy: "never",
+			config: { model_reasoning_summary: "auto" },
 			cwd: "C:\\workspace",
 			sandbox: "danger-full-access",
 		});
@@ -39,7 +40,33 @@ describe("Codex permission mapping", () => {
 		);
 
 		expect(app_server).toMatchObject({
-			config: { model_reasoning_effort: "ultra" },
+			config: {
+				model_reasoning_effort: "ultra",
+				model_reasoning_summary: "auto",
+			},
+		});
+	});
+
+	it("preserves network and effort configuration while always requesting public summaries", async () => {
+		const app_server = await Effect.runPromise(
+			MakeCodexAppServerThreadOptions({
+				...full_access_input,
+				permission_policy: {
+					approval: "never",
+					edit_scope: "workspace",
+					network_access: true,
+					write_access: true,
+				},
+				provider_options: { "codex.reasoning_effort": "high" },
+			}),
+		);
+
+		expect(app_server).toMatchObject({
+			config: {
+				model_reasoning_effort: "high",
+				model_reasoning_summary: "auto",
+				sandbox_workspace_write: { network_access: true },
+			},
 		});
 	});
 

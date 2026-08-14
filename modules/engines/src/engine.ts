@@ -325,7 +325,11 @@ export const EngineSubagentTranscriptContent = Schema.Union([
 		item_id: Schema.String,
 		summary_index: Schema.Int,
 	}),
-	Schema.Struct({ _tag: Schema.Literal("reasoning_summary_completed"), item_id: Schema.String }),
+	Schema.Struct({
+		_tag: Schema.Literal("reasoning_summary_completed"),
+		item_id: Schema.String,
+		text: Schema.optional(Schema.String),
+	}),
 	Schema.Struct({
 		_tag: Schema.Literal("terminal_activity"),
 		activity_id: Schema.String,
@@ -399,7 +403,11 @@ export function MakeEngineSubagentTranscriptObservation(input: {
 					summary_index: observation.summary_index,
 				};
 			case "reasoning_summary_completed":
-				return { _tag: observation._tag, item_id: observation.item_id };
+				return {
+					_tag: observation._tag,
+					item_id: observation.item_id,
+					...(observation.text === undefined ? {} : { text: observation.text }),
+				};
 			case "terminal_activity":
 				return {
 					_tag: observation._tag,
@@ -670,13 +678,16 @@ export interface EngineReasoningSummaryDeltaObservation extends EngineObservatio
  * Closes a reasoning phase for one turn. Providers whose reasoning display is
  * suppressed (for example Claude models with omitted thinking display) may
  * complete a phase that streamed no delta at all, so consumers must settle
- * reasoning state on this observation rather than on delta arrival.
+ * reasoning state on this observation rather than on delta arrival. When a
+ * provider supplies `text`, it is the authoritative public summary and may
+ * replace previously streamed public deltas.
  *
  * @since 0.6.0
  */
 export interface EngineReasoningSummaryCompletedObservation extends EngineObservationBase {
 	readonly _tag: "reasoning_summary_completed";
 	readonly item_id: string;
+	readonly text?: string | undefined;
 	readonly turn_id: string;
 }
 

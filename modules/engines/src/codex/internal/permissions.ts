@@ -150,6 +150,7 @@ export function MakeCodexAppServerThreadOptions(input: EngineOpenInput) {
 		Effect.andThen(ResolveCodexPermissions(input)),
 		Effect.map((permissions) => {
 			const developer_instructions = make_developer_instructions(input);
+			const reasoning_effort = input.provider_options?.["codex.reasoning_effort"];
 
 			return {
 				...(permissions.approval_policy === undefined
@@ -163,31 +164,21 @@ export function MakeCodexAppServerThreadOptions(input: EngineOpenInput) {
 				...(input.provider_options?.["codex.service_tier"] === "fast"
 					? { serviceTier: "fast" }
 					: {}),
-				...(permissions.network_access === undefined
-					? {}
-					: {
-							config: {
+				...(permissions.sandbox === undefined ? {} : { sandbox: permissions.sandbox }),
+				/** Request only Codex's public summaries; raw reasoning stays private. */
+				config: {
+					model_reasoning_summary: "auto",
+					...(reasoning_effort === undefined
+						? {}
+						: { model_reasoning_effort: reasoning_effort }),
+					...(permissions.network_access === undefined
+						? {}
+						: {
 								sandbox_workspace_write: {
 									network_access: permissions.network_access,
 								},
-							},
-						}),
-				...(permissions.sandbox === undefined ? {} : { sandbox: permissions.sandbox }),
-				...(input.provider_options?.["codex.reasoning_effort"] === undefined
-					? {}
-					: {
-							config: {
-								...(permissions.network_access === undefined
-									? {}
-									: {
-											sandbox_workspace_write: {
-												network_access: permissions.network_access,
-											},
-										}),
-								model_reasoning_effort:
-									input.provider_options["codex.reasoning_effort"],
-							},
-						}),
+							}),
+				},
 			};
 		}),
 	);

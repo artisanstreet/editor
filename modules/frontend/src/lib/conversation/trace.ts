@@ -39,16 +39,13 @@ export type ConversationTraceSegment =
 			readonly type: "item";
 	  };
 
-export type ConversationTraceRenderSegment = ConversationTraceSegment & {
-	/** Present reasoning closes in place before its last DOM is retired. */
-	readonly retirement: "present" | "retiring";
-};
-
 export type ConversationTraceRenderBlock =
 	| ConversationRenderBlock
 	| {
 			readonly id: string;
-			readonly items: ReadonlyArray<ConversationActivityItem | ConversationDiagnosticItem>;
+			readonly items: ReadonlyArray<
+				ConversationActivityItem | ConversationDiagnosticItem | ConversationReasoningItem
+			>;
 			readonly turn_id: string;
 			readonly type: "trace_group";
 	  };
@@ -57,7 +54,9 @@ type ConversationTraceRenderBlockBuilder =
 	| Exclude<ConversationTraceRenderBlock, { readonly type: "trace_group" }>
 	| {
 			readonly id: string;
-			readonly items: Array<ConversationActivityItem | ConversationDiagnosticItem>;
+			readonly items: Array<
+				ConversationActivityItem | ConversationDiagnosticItem | ConversationReasoningItem
+			>;
 			readonly turn_id: string;
 			readonly type: "trace_group";
 	  };
@@ -77,7 +76,9 @@ export const group_conversation_trace_blocks = (
 	for (const block of blocks) {
 		if (
 			block.type !== "item" ||
-			(block.item.type !== "activity" && block.item.type !== "native_event")
+			(block.item.type !== "activity" &&
+				block.item.type !== "native_event" &&
+				block.item.type !== "reasoning_summary")
 		) {
 			grouped.push(block);
 			continue;
@@ -123,23 +124,6 @@ type ConversationTraceSegmentBuilder =
 	| Exclude<ConversationTraceSegment, { readonly type: "activity_group" | "reasoning_group" }>;
 
 /**
- * Which reasoning summaries the trace shows.
- *
- * Completion is the wrong retirement signal on its own: a provider closes the
- * reasoning item when the assistant message carrying it ends, which is mid-run
- * whenever tool calls follow, so keying on it deleted thinking the reader was
- * still reading while the same run kept working. The owning work session is the
- * honest boundary — reasoning stands for as long as that work runs, and the
- * whole set retires together once it settles.
- */
-const reasoning_is_visible = (
-	item: ConversationItem,
-	work_active: boolean,
-): item is Extract<ConversationItem, { type: "reasoning_summary" }> =>
-	item.type === "reasoning_summary" &&
-	(work_active || item.lifecycle === "active" || item.lifecycle === "streaming");
-
-/**
  * Whether a text item has anything for the reader to see.
  *
  * A streamed item exists from its first delta, so between that delta and the
@@ -160,9 +144,6 @@ const item_renders_nothing = (item: ConversationItem): boolean =>
  * work failed, its diagnostics are the explanation and must never be silenced
  * by a developer toggle.
  *
- * `work_active` is the owning session's liveness, which alone decides whether
- * already-settled reasoning still belongs on screen.
- *
  * Activities chain while they are adjacent, and anything the agent actually said
  * starts a new one. Splitting had looked over-eager only because an item that
  * rendered nothing still counted as something between them; with those gone, a
@@ -174,7 +155,6 @@ export const make_conversation_trace_segments = (
 	items: ReadonlyArray<ConversationItem>,
 	diagnostics_enabled: boolean,
 	failure_visible = false,
-	work_active = false,
 ): ReadonlyArray<ConversationTraceSegment> => {
 	const diagnostics_visible = diagnostics_enabled || failure_visible;
 	const diagnostics_by_severity = diagnostics_visible
@@ -214,10 +194,7 @@ export const make_conversation_trace_segments = (
 			}
 			continue;
 		}
-		if (
-			item_renders_nothing(item) ||
-			(item.type === "reasoning_summary" && !reasoning_is_visible(item, work_active))
-		) {
+		if (item_renders_nothing(item)) {
 			continue;
 		}
 		if (item.type === "reasoning_summary") {
@@ -252,41 +229,4 @@ export const make_conversation_trace_segments = (
 	}
 
 	return segments;
-};
-
-/**
- * Reconciles the durable trace projection with its short visual exit state.
- *
- * Reasoning normally disappears from the projection the instant its owning run
- * settles. An open summary gets one extra render as `retiring`, preserving its
- * prior position while the accordion closes; the transition-end handler then
- * removes it. A summary the reader already closed needs no exit frame.
- */
-export const reconcile_conversation_trace_render_segments = (
-	previous: ReadonlyArray<ConversationTraceRenderSegment>,
-	projected: ReadonlyArray<ConversationTraceSegment>,
-	closed_reasoning_ids: ReadonlySet<string>,
-): ReadonlyArray<ConversationTraceRenderSegment> => {
-	const projected_ids = new Set(projected.map((segment) => segment.id));
-	const reconciled: Array<ConversationTraceRenderSegment> = projected.map((segment) => ({
-		...segment,
-		retirement: "present" as const,
-	}));
-
-	for (const [index, segment] of previous.entries()) {
-		if (
-			projected_ids.has(segment.id) ||
-			segment.type !== "reasoning_group" ||
-			(segment.retirement === "present" && closed_reasoning_ids.has(segment.id))
-		) {
-			continue;
-		}
-
-		reconciled.splice(Math.min(index, reconciled.length), 0, {
-			...segment,
-			retirement: "retiring",
-		});
-	}
-
-	return reconciled;
 };

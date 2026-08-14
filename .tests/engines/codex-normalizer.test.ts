@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { Effect } from "effect";
 
-import { normalise_codex_notification } from "@artisan/engines";
+import {
+	MakeEngineSubagentTranscriptObservation,
+	normalise_codex_notification,
+} from "@artisan/engines";
 
 function make_turn(id: string, status = "inProgress") {
 	return {
@@ -425,6 +428,115 @@ describe("Codex normalizer", () => {
 			{ _tag: "compaction", compaction_id: "compact-1", state: "completed" },
 		]);
 		expect(flattened[1]).not.toHaveProperty("delta");
+	});
+
+	it("keeps public reasoning boundaries and authoritative completion separate from private content", async () => {
+		const observations = await Effect.runPromise(
+			Effect.all([
+				normalise("item/reasoning/summaryPartAdded", {
+					itemId: "reasoning-1",
+					summaryIndex: 0,
+					threadId: "thread-1",
+					turnId: "turn-1",
+				}),
+				normalise("item/reasoning/summaryTextDelta", {
+					delta: "Inspecting the existing path",
+					itemId: "reasoning-1",
+					summaryIndex: 0,
+					threadId: "thread-1",
+					turnId: "turn-1",
+				}),
+				normalise("item/reasoning/summaryPartAdded", {
+					itemId: "reasoning-1",
+					summaryIndex: 1,
+					threadId: "thread-1",
+					turnId: "turn-1",
+				}),
+				normalise("item/completed", {
+					item: {
+						content: ["private chain of thought"],
+						id: "reasoning-1",
+						summary: ["Inspecting the existing path", "Applying the narrow fix"],
+						type: "reasoning",
+					},
+					threadId: "thread-1",
+					turnId: "turn-1",
+				}),
+			]),
+		);
+		const flattened = observations.flat();
+
+		expect(flattened).toMatchObject([
+			{
+				_tag: "reasoning_summary_delta",
+				delta: "Inspecting the existing path",
+				summary_index: 0,
+			},
+			{
+				_tag: "reasoning_summary_delta",
+				delta: "\n\n",
+				summary_index: 1,
+			},
+			{
+				_tag: "reasoning_summary_completed",
+				item_id: "reasoning-1",
+				text: "Inspecting the existing path\n\nApplying the narrow fix",
+			},
+		]);
+		expect(flattened.filter(({ _tag }) => _tag === "reasoning_summary_completed")).toHaveLength(
+			1,
+		);
+		const completed = flattened.find(({ _tag }) => _tag === "reasoning_summary_completed");
+		expect(completed).not.toHaveProperty("content");
+		expect(completed).not.toHaveProperty("delta");
+		if (completed?._tag !== "reasoning_summary_completed") return;
+		expect(
+			MakeEngineSubagentTranscriptObservation({
+				agent_native_thread_id: "child-thread",
+				observation: completed,
+				parent_native_thread_id: "parent-thread",
+			}),
+		).toMatchObject({
+			content: {
+				_tag: "reasoning_summary_completed",
+				text: "Inspecting the existing path\n\nApplying the narrow fix",
+			},
+		});
+	});
+
+	it("rejects malformed authoritative reasoning summaries without projecting content", async () => {
+		const [observation] = await Effect.runPromise(
+			normalise("item/completed", {
+				item: {
+					id: "reasoning-1",
+					summary: ["public", 2],
+					type: "reasoning",
+				},
+				threadId: "thread-1",
+				turnId: "turn-1",
+			}),
+		);
+
+		expect(observation).toMatchObject({
+			_tag: "native_action",
+			detail: "Malformed known Codex payload",
+		});
+	});
+
+	it("settles an empty public reasoning item without manufacturing visible text", async () => {
+		const [observation] = await Effect.runPromise(
+			normalise("item/completed", {
+				item: { id: "reasoning-empty", summary: [], type: "reasoning" },
+				threadId: "thread-1",
+				turnId: "turn-1",
+			}),
+		);
+
+		expect(observation).toMatchObject({
+			_tag: "reasoning_summary_completed",
+			item_id: "reasoning-empty",
+		});
+		expect(observation).not.toHaveProperty("text");
 	});
 
 	it("keeps each assistant item's delta and completion identity stable within one turn", async () => {

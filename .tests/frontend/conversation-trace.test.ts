@@ -113,10 +113,15 @@ describe("conversation trace", () => {
 			false,
 		);
 
-		expect(segments).toEqual([expect.objectContaining({ id: "reasoning_1", type: "item" })]);
+		expect(segments).toEqual([
+			expect.objectContaining({
+				id: "reasoning:reasoning_1",
+				type: "reasoning_group",
+			}),
+		]);
 	});
 
-	it("keeps reasoning visible for the whole live run and retires it once work settles", () => {
+	it("retains non-empty public reasoning summaries after their work settles", () => {
 		const activity = item({
 			...base,
 			id: "activity_1",
@@ -142,7 +147,7 @@ describe("conversation trace", () => {
 		);
 		expect(streaming).toEqual([
 			expect.objectContaining({ type: "activity_group" }),
-			expect.objectContaining({ id: "reasoning_1", type: "item" }),
+			expect.objectContaining({ id: "reasoning:reasoning_1", type: "reasoning_group" }),
 		]);
 
 		/**
@@ -154,15 +159,83 @@ describe("conversation trace", () => {
 			[activity, reasoning("completed")],
 			false,
 			false,
-			true,
 		);
 		expect(completed_mid_run).toEqual([
 			expect.objectContaining({ type: "activity_group" }),
-			expect.objectContaining({ id: "reasoning_1", type: "item" }),
+			expect.objectContaining({ id: "reasoning:reasoning_1", type: "reasoning_group" }),
 		]);
 
 		const settled = make_conversation_trace_segments([activity, reasoning("completed")], false);
-		expect(settled).toEqual([expect.objectContaining({ type: "activity_group" })]);
+		expect(settled).toEqual([
+			expect.objectContaining({ type: "activity_group" }),
+			expect.objectContaining({ id: "reasoning:reasoning_1", type: "reasoning_group" }),
+		]);
+	});
+
+	it("renders live reasoning open and shimmering, then keeps settled history collapsible", () => {
+		const reasoning = ReadSource(
+			"modules/frontend/src/routes/components/conversation-reasoning-summary.svelte",
+		);
+		const trace = ReadSource(
+			"modules/frontend/src/routes/components/conversation-trace.svelte",
+		);
+		const message = ReadSource(
+			"modules/frontend/src/routes/components/conversation-message.svelte",
+		);
+		const workspace = ReadSource(
+			"modules/frontend/src/routes/components/thread-workspace.svelte",
+		);
+
+		expect(reasoning).toContain('class="reasoning-acc flex');
+		expect(reasoning).toContain("data-open={open}");
+		expect(reasoning).toContain("{#each items as summary (summary.id)}");
+		expect(reasoning).toContain("border-l border-border/60");
+		expect(reasoning).toContain("<ShimmerText active={live}");
+		expect(reasoning).toContain("onclick={yield* ontoggle()}");
+		expect(reasoning).toContain(".reasoning-acc-panel");
+		expect(reasoning).toContain("@media (prefers-reduced-motion: reduce)");
+		expect(reasoning).not.toContain("ontransitionend=");
+		expect(reasoning).not.toContain("onretired");
+		expect(trace).toContain("open_groups[segment.id] ?? work_active");
+		expect(trace).toContain("live={work_active}");
+		expect(trace).not.toContain("rendered_segments");
+		expect(trace).not.toContain("retirement");
+		expect(message).toContain(
+			'active={item.lifecycle === "active" || item.lifecycle === "streaming"}',
+		);
+		expect(workspace).toContain(
+			"work_active={run_active && block.turn_id === `run:${active_run_id}`}",
+		);
+	});
+
+	it("groups adjacent reasoning summaries under one stable disclosure", () => {
+		const summary = (id: string, ordinal: number, text: string) =>
+			item({
+				...base,
+				id,
+				lifecycle: "streaming",
+				ordinal,
+				text,
+				type: "reasoning_summary",
+			});
+		const segments = make_conversation_trace_segments(
+			[
+				summary("reasoning_1", 1, "Checking the request"),
+				summary("reasoning_2", 2, "Comparing the result"),
+			],
+			false,
+		);
+
+		expect(segments).toEqual([
+			expect.objectContaining({
+				id: "reasoning:reasoning_1",
+				items: [
+					expect.objectContaining({ id: "reasoning_1" }),
+					expect.objectContaining({ id: "reasoning_2" }),
+				],
+				type: "reasoning_group",
+			}),
+		]);
 	});
 
 	/**
@@ -195,7 +268,6 @@ describe("conversation trace", () => {
 			[activity("activity_1", 1), empty_reasoning, activity("activity_2", 3)],
 			false,
 			false,
-			true,
 		);
 
 		expect(segments).toEqual([
@@ -240,7 +312,7 @@ describe("conversation trace", () => {
 
 		expect(segments.map((segment) => segment.type)).toEqual([
 			"activity_group",
-			"item",
+			"reasoning_group",
 			"activity_group",
 		]);
 		const chains = segments.flatMap((segment) =>

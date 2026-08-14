@@ -29,6 +29,7 @@
 	} from "$lib/conversation/trace";
 	import ConversationErrorCard from "./conversation-error-card.svelte";
 	import ConversationItemView from "./conversation-item.svelte";
+	import ConversationReasoningSummary from "./conversation-reasoning-summary.svelte";
 
 	let {
 		failed = false,
@@ -39,21 +40,15 @@
 		failed?: boolean;
 		items: ReadonlyArray<ConversationItem>;
 		/**
-		 * A stale provider item cannot keep animating after its owning work has
-		 * settled, and reasoning outlives its own completion only while that work
-		 * still runs.
+		 * Owning work controls the live presentation only: summaries auto-open and
+		 * shimmer while it runs, then remain as settled history after it ends.
 		 */
 		work_active?: boolean;
 	} = $props();
 	let open_groups = $state<Record<string, boolean>>({});
 
 	const segments = $derived(
-		make_conversation_trace_segments(
-			items,
-			$conversation_diagnostics_enabled,
-			failed,
-			work_active,
-		),
+		make_conversation_trace_segments(items, $conversation_diagnostics_enabled, failed),
 	);
 
 	/**
@@ -323,6 +318,15 @@
 		{#each segments as segment (segment.id)}
 			{#if segment.type === "item"}
 				<ConversationItemView item={segment.item} />
+			{:else if segment.type === "reasoning_group"}
+				<!-- Live summaries open themselves; completed history remains available but quiet. -->
+				{@const open = open_groups[segment.id] ?? work_active}
+				<ConversationReasoningSummary
+					items={segment.items}
+					live={work_active}
+					{open}
+					ontoggle={() => ToggleGroup(segment.id)}
+				/>
 			{:else if segment.type === "activity_group"}
 				{@const open = open_groups[segment.id] ?? false}
 				{@const live = GroupIsLive(segment.items)}

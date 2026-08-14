@@ -296,6 +296,7 @@ describe("Codex engine run", () => {
 						approvalPolicy: "never",
 						config: {
 							model_reasoning_effort: "high",
+							model_reasoning_summary: "auto",
 							sandbox_workspace_write: { network_access: true },
 						},
 						cwd: "C:\\workspace",
@@ -317,6 +318,7 @@ describe("Codex engine run", () => {
 					method: "thread/resume",
 					params: {
 						approvalPolicy: "on-request",
+						config: { model_reasoning_summary: "auto" },
 						cwd: "C:\\workspace",
 						developerInstructions: "Use project guidance.",
 						sandbox: "read-only",
@@ -385,6 +387,7 @@ describe("Codex engine run", () => {
 				method: "thread/start",
 				params: {
 					approvalPolicy: "never",
+					config: { model_reasoning_summary: "auto" },
 					cwd: "C:\\workspace",
 					sandbox: "danger-full-access",
 				},

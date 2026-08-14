@@ -10,7 +10,7 @@ import {
 import type { DatabaseClient } from "../../persistence/database";
 import { ConversationItems } from "../../persistence/tables";
 import type { ConversationObservationContext } from "./domain";
-import { body_text, ConversationProjectionError } from "./domain";
+import { body_text, ConversationProjectionError, item_base } from "./domain";
 import { Decode, DecodeJson, Emit, UpsertItem } from "./entities";
 
 /** Stored entities stay opaque on the hot path; only consumed fields are decoded. */
@@ -186,14 +186,18 @@ export const AppendText = (
 	});
 
 /**
- * Settles a displayed reasoning summary. A missing item means reasoning display
- * was suppressed, so completion remains a no-op.
+ * Settles a displayed reasoning summary. An authoritative final public summary
+ * replaces streamed deltas and can create a completed item when no delta arrived.
+ * A completion without text remains a no-op when display was suppressed.
  */
 export const CompleteReasoningSummary = (
 	transaction: DatabaseClient,
 	thread_id: string,
 	item_id: string,
-	occurred_at: string,
+	turn_id: string,
+	input: ConversationObservationContext,
+	reference: string,
+	text?: string,
 ) =>
 	Effect.gen(function* () {
 		const rows = yield* transaction
@@ -202,33 +206,53 @@ export const CompleteReasoningSummary = (
 			.where(eq(ConversationItems.item_id, item_id))
 			.limit(1);
 		const existing = rows.at(0);
-		if (existing === undefined) return;
+		if (existing === undefined) {
+			if (text === undefined) return;
+			return yield* UpsertItem(
+				transaction,
+				thread_id,
+				{
+					...item_base(item_id, turn_id, input, "completed", reference),
+					type: "reasoning_summary",
+					text: body_text(text),
+				},
+				{ observed_at: input.occurred_at },
+			);
+		}
 		const prior = yield* DecodeJson(
 			ConversationItem,
 			existing.entity_json,
 			"stored conversation item",
 		);
-		if (
-			prior.type !== "reasoning_summary" ||
-			["completed", "failed", "cancelled"].includes(prior.lifecycle)
-		)
+		if (prior.type !== "reasoning_summary") return prior;
+		const final_text = text === undefined ? undefined : body_text(text);
+		const already_terminal = ["completed", "failed", "cancelled"].includes(prior.lifecycle);
+		if (already_terminal && (final_text === undefined || prior.text === final_text))
 			return prior;
 		const revision = prior.revision + 1;
 		const entity = yield* Decode(
 			ConversationItem,
-			{ ...prior, lifecycle: "completed", revision, updated_at: occurred_at },
+			{
+				...prior,
+				...(final_text === undefined ? {} : { text: final_text }),
+				...(already_terminal ? {} : { lifecycle: "completed" }),
+				revision,
+				updated_at: input.occurred_at,
+			},
 			"completed reasoning summary",
 		);
 		yield* transaction
 			.update(ConversationItems)
 			.set({ entity_json: JSON.stringify(entity) })
 			.where(eq(ConversationItems.item_id, item_id));
-		yield* Emit(transaction, thread_id, occurred_at, {
-			type: "item_lifecycle",
-			item_id,
-			lifecycle: "completed",
-			revision,
-		});
+		yield* Emit(
+			transaction,
+			thread_id,
+			input.occurred_at,
+			final_text === undefined
+				? { type: "item_lifecycle", item_id, lifecycle: "completed", revision }
+				: { type: "item_upsert", item: entity },
+		);
 		return entity;
 	});
 
