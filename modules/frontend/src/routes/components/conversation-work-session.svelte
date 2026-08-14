@@ -1,5 +1,6 @@
 <script lang="ts" effect>
 	import type { ConversationItem } from "@artisan/protocol";
+	import Refresh from "@tabler/icons-svelte/icons/refresh";
 	import ChevronRight from "@tabler/icons-svelte/icons/chevron-right";
 	import { Effect } from "effect";
 	import { untrack } from "svelte";
@@ -15,6 +16,7 @@
 	import { MakeScopedAttachmentRunner } from "$lib/lifecycle/scoped-attachment-runner";
 	import { RunBrowserDom } from "$lib/browser/dom";
 	import { ShimmerText } from "$lib/components/ui/shimmer-text";
+	import { Button } from "$lib/components/ui/button";
 	import ConversationStatus from "./conversation-status.svelte";
 
 	let {
@@ -24,6 +26,7 @@
 		item,
 		details,
 		duration_kind,
+		onretry,
 		run_authority = "settled",
 		transition,
 		waiting_for_activity = false,
@@ -46,6 +49,9 @@
 		item: Extract<ConversationItem, { type: "work_session" }>;
 		details?: Snippet;
 		duration_kind?: "thought" | "worked";
+		onretry?: (
+			run_id: string,
+		) => Effect.Effect<void, { readonly message: string }>;
 		/**
 		 * The durable work item's verdict on this session's run. The authority on
 		 * liveness is that item plus run identity, not this session's own
@@ -133,6 +139,29 @@
 	);
 	const ended_at = $derived(settlement?.ended_at);
 	const is_failed = $derived(item.status === "failed" || settlement?.presumed_failed === true);
+	const retry_available = $derived(is_failed && item.run_id !== undefined && onretry !== undefined);
+	let retrying = $state(false);
+	let retry_failed = $state(false);
+	const Retry = Effect.gen(function* () {
+		const retry = onretry;
+		const run_id = item.run_id;
+		if (retry === undefined || run_id === undefined || retrying) return;
+		retrying = true;
+		retry_failed = false;
+		yield* retry(run_id).pipe(
+			Effect.matchEffect({
+				onFailure: () =>
+					Effect.gen(function* () {
+						retrying = false;
+						retry_failed = true;
+					}),
+				onSuccess: () =>
+					Effect.gen(function* () {
+						retrying = false;
+					}),
+			}),
+		);
+	});
 	/** The user's own act reads as a stop, not as the run being cancelled on it. */
 	const is_stopped = $derived(item.status === "cancelled");
 	const label = $derived(
@@ -318,8 +347,27 @@
 					aria-hidden="true"
 				/>
 			</button>
-			{#if transition !== undefined}
-				<ConversationStatus item={transition} size="base" />
+			{#if retry_available || transition !== undefined}
+				<div class="flex shrink-0 items-center gap-2">
+					{#if retry_available}
+						<Button
+							variant="ghost"
+							size="sm"
+							class="h-7 gap-1.5 px-2 text-muted-foreground hover:text-foreground"
+							disabled={retrying}
+							onclick={yield* Retry}
+						>
+							<Refresh
+								class={`size-3.5 ${retrying ? "animate-spin motion-reduce:animate-none" : ""}`}
+								aria-hidden="true"
+							/>
+							{retrying ? "Retrying…" : retry_failed ? "Retry again" : "Retry"}
+						</Button>
+					{/if}
+					{#if transition !== undefined}
+						<ConversationStatus item={transition} size="base" />
+					{/if}
+				</div>
 			{/if}
 		</div>
 	{:else if !is_working}
@@ -333,8 +381,27 @@
 			>
 				{label}
 			</span>
-			{#if transition !== undefined}
-				<ConversationStatus item={transition} size="base" />
+			{#if retry_available || transition !== undefined}
+				<div class="flex shrink-0 items-center gap-2">
+					{#if retry_available}
+						<Button
+							variant="ghost"
+							size="sm"
+							class="h-7 gap-1.5 px-2 text-muted-foreground hover:text-foreground"
+							disabled={retrying}
+							onclick={yield* Retry}
+						>
+							<Refresh
+								class={`size-3.5 ${retrying ? "animate-spin motion-reduce:animate-none" : ""}`}
+								aria-hidden="true"
+							/>
+							{retrying ? "Retrying…" : retry_failed ? "Retry again" : "Retry"}
+						</Button>
+					{/if}
+					{#if transition !== undefined}
+						<ConversationStatus item={transition} size="base" />
+					{/if}
+				</div>
 			{/if}
 		</div>
 	{/if}

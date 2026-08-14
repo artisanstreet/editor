@@ -1,7 +1,11 @@
 import { Effect } from "effect";
 import { describe, expect, it } from "vitest";
 
-import { DecodeInboundControlEnvelope, DecodeOutboundControlEnvelope } from "@artisan/protocol";
+import {
+	DecodeCommandEnvelope,
+	DecodeInboundControlEnvelope,
+	DecodeOutboundControlEnvelope,
+} from "@artisan/protocol";
 
 const timestamp = "2026-07-18T08:00:00.000Z";
 
@@ -27,6 +31,15 @@ const backend = (kind: string, correlation_id: string, payload: unknown) => ({
 });
 
 describe("tool control-plane protocol codec", () => {
+	it("decodes an explicit failed-run retry command", async () => {
+		const command = {
+			...frontend("command", { run_id: "run_failed", type: "run.retry" }),
+			thread_id: "thread_1",
+		};
+
+		await expect(Effect.runPromise(DecodeCommandEnvelope(command))).resolves.toEqual(command);
+	});
+
 	it("decodes all built-in registry, invocation, approval, and editor capability requests", async () => {
 		const envelopes = [
 			frontend("artisan.tool.registry.list.query", {

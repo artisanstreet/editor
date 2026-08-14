@@ -177,6 +177,14 @@ export const BuildThreadMessageCommand = (
 			},
 		};
 	}
+	if (context.work?.status === "queued") {
+		return {
+			_tag: "invalid",
+			error: new ThreadInteractionError({
+				message: "The current run is still starting. Wait before sending another message.",
+			}),
+		};
+	}
 
 	const project = context.thread?.primary_project;
 	if (project === undefined) {
@@ -187,15 +195,19 @@ export const BuildThreadMessageCommand = (
 			}),
 		};
 	}
+	const steerable_work =
+		context.work?.status === "running" || context.work?.status === "waiting"
+			? context.work
+			: undefined;
 
 	return {
 		_tag: "ready",
 		command: {
-			...(context.work === undefined
+			...(steerable_work === undefined
 				? {}
-				: { agent_id: context.work.agent_id, run_id: context.work.run_id }),
+				: { agent_id: steerable_work.agent_id, run_id: steerable_work.run_id }),
 			payload: {
-				engine_id: context.work?.engine_id ?? context.session.policy.engine_id,
+				engine_id: steerable_work?.engine_id ?? context.session.policy.engine_id,
 				attachments: submission.attachments.map((attachment) => ({
 					bytes: Uint8Array.from(
 						globalThis.atob(attachment.content_base64),

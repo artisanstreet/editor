@@ -22,6 +22,8 @@ import {
 	ProtocolServer,
 } from "@artisan/backend";
 import { ConversationReadModel } from "../../modules/backend/src/conversation";
+import { Database } from "../../modules/backend/src/persistence/database";
+import { JournalEvents } from "../../modules/backend/src/persistence/tables";
 
 const migrations_path = fileURLToPath(new URL("../../modules/backend/drizzle", import.meta.url));
 const temporary_directories: Array<string> = [];
@@ -353,6 +355,126 @@ describe("agent orchestrator lifecycle supervision", () => {
 			await expect
 				.poll(() => instrumented.instrumentation.events_consumed(), { timeout: 2_000 })
 				.toBe(1);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("explicitly retries a failed root through Engine.Open without duplicating its user turn", async () => {
+		const instrumented = make_engine({ die_open_attempts: 1 });
+		const original_image = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			engines: [instrumented.engine],
+			migrations_path,
+		});
+
+		try {
+			const connection = await open_connection(runtime);
+			await runtime.runPromise(
+				connection.Receive(
+					make_command("failed_root", {
+						attachments: [
+							{
+								bytes: original_image,
+								id: "image_1",
+								media_type: "image/png",
+								name: "original.png",
+							},
+						],
+						content: [
+							{ text: "Retry the original request", type: "text" },
+							{ attachment_id: "image_1", type: "image" },
+							{ text: "with this image", type: "text" },
+						],
+						engine_id: "instrumented",
+						text: "Retry the original request",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			await expect
+				.poll(() => instrumented.instrumentation.opened(), { timeout: 2_000 })
+				.toBe(1);
+			const failed_run_id = instrumented.instrumentation.open_inputs()[0]?.artisan_run_id;
+			if (!failed_run_id) throw new Error("Expected the failed root run id");
+
+			await runtime.runPromise(
+				connection.Receive(
+					make_command("retry_failed_root", {
+						run_id: failed_run_id,
+						type: "run.retry",
+					}),
+				),
+			);
+			await expect
+				.poll(() => instrumented.instrumentation.opened(), { timeout: 2_000 })
+				.toBe(2);
+			await expect
+				.poll(() => instrumented.instrumentation.events_consumed(), { timeout: 2_000 })
+				.toBe(1);
+
+			const retry_open = instrumented.instrumentation.open_inputs()[1];
+			if (retry_open?._tag !== "start") {
+				throw new Error("Expected retry to open as a fresh portable start");
+			}
+			expect(retry_open).toMatchObject({
+				_tag: "start",
+				initial_text: "Retry the original request",
+				working_directory: "C:/work",
+			});
+			expect(retry_open?.initial_content?.slice(-3)).toEqual([
+				{ text: "Retry the original request", type: "text" },
+				{
+					bytes: original_image,
+					id: "image_1",
+					media_type: "image/png",
+					name: "original.png",
+					type: "image",
+				},
+				{ text: "with this image", type: "text" },
+			]);
+			const { snapshot, public_message_events } = await runtime.runPromise(
+				Effect.gen(function* () {
+					const conversations = yield* ConversationReadModel;
+					const database = yield* Database;
+
+					return {
+						snapshot: yield* conversations.ReadSnapshot("thread_1"),
+						public_message_events: (yield* database.client
+							.select({ payload_json: JournalEvents.payload_json })
+							.from(JournalEvents)).filter(
+							(event) =>
+								JSON.parse(event.payload_json).type === "thread.message_queued",
+						),
+					};
+				}),
+			);
+
+			expect(public_message_events).toHaveLength(1);
+			expect(snapshot.status).toBe("available");
+			if (snapshot.status !== "available") {
+				throw new Error("Expected a durable conversation snapshot");
+			}
+			expect(snapshot.snapshot.items.filter((item) => item.type === "user_message")).toEqual([
+				expect.objectContaining({
+					attachments: [
+						{
+							id: "image_1",
+							media_type: "image/png",
+							name: "original.png",
+							size_bytes: original_image.byteLength,
+						},
+					],
+					content: [
+						{ text: "Retry the original request", type: "text" },
+						{ attachment_id: "image_1", type: "image" },
+						{ text: "with this image", type: "text" },
+					],
+					text: "Retry the original request",
+				}),
+			]);
 		} finally {
 			await runtime.dispose();
 		}

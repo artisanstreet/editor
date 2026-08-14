@@ -55,6 +55,7 @@
 		onnewthread,
 		onpolicychange,
 		onquestion,
+		onretry,
 		onusageinterruptionresolve,
 		onimagevisibilitychange,
 		onsubmit,
@@ -84,6 +85,9 @@
 		onquestion?: (
 			question_id: string,
 			answer: string,
+		) => Effect.Effect<void, { readonly message: string }>;
+		onretry?: (
+			run_id: string,
 		) => Effect.Effect<void, { readonly message: string }>;
 		onusageinterruptionresolve?: (
 			interruption_id: string,
@@ -732,6 +736,10 @@
 										has_live_reply={conversation_reply_is_live(block.details)}
 										item={block.session}
 										run_authority={session_authority}
+										onretry={active_run_status === "failed" &&
+										active_run_id === block.session.run_id
+											? onretry
+											: undefined}
 										transition={block.transition}
 										waiting_for_activity={conversation_waiting_for_activity(block.details)}
 									>
@@ -783,7 +791,9 @@
 		onjumptolatest={JumpToLatest}
 		{onnewthread}
 		{onpolicychange}
-		onsubmit={onsubmit === undefined ? undefined : SubmitMessage}
+		onsubmit={onsubmit === undefined || active_run_status === "queued"
+			? undefined
+			: SubmitMessage}
 		{policy}
 		{run_active}
 		show_jump_to_latest={!following && !anchor_scroll_active}

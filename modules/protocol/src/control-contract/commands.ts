@@ -415,6 +415,14 @@ export const RunSteerCommand = Schema.Struct({
 	text: Schema.NonEmptyString,
 });
 
+/** Queues one explicit retry of the coordinator's current failed root run. */
+export const RunRetryCommand = Schema.Struct({
+	type: Schema.Literal("run.retry"),
+	run_id: Identifier,
+});
+
+export type RunRetryCommand = typeof RunRetryCommand.Type;
+
 /** Requests cancellation of the currently active run. */
 export const RunCancelCommand = Schema.Struct({ type: Schema.Literal("run.cancel") });
 
@@ -472,6 +480,7 @@ export const CommandPayload = Schema.Union([
 	AssignmentResumeCommand,
 	AssignmentRetryCommand,
 	RunSteerCommand,
+	RunRetryCommand,
 	RunCancelCommand,
 	RunCloseCommand,
 	RunRespondApprovalCommand,

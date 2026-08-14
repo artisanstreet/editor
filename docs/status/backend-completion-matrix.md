@@ -15,6 +15,19 @@ lines from `{1,3-5}` metadata; raw HTML stays inert and directive-supplied pre
 styles are discarded. Parser, renderer, presentation-drift, provider, recovery,
 and non-leak tests cover the boundary.
 
+Failed coordinator runs now expose one explicit, idempotent `run.retry` action on
+their exact current work session. Forge authorizes only the current failed root,
+creates a fresh queued run, and reuses the original durable start payload—including
+ordered rich content and hydrated images—without projecting another user message.
+The renderer holds submit ownership through its authoritative work refresh, treats
+queued work as busy, and both the command builder and backend reject a distinct
+ordinary send while that root is still queued, closing the duplicate-root race.
+Five focused frontend/protocol/backend files pass 58 tests, the production frontend
+build and scoped lint/format checks pass, and independent re-review is clean. The
+aggregate frontend and backend gates stop at unrelated protected formatting files;
+root TypeScript retains only the existing steering, provider-management, and
+agent-graph baselines.
+
 On 2026-07-27, the Windows distribution artifact, hermetic lifecycle, and real
 isolated packaged-bootstrap gates passed alongside root TypeScript. This
 verifies the Windows x64 first implementation only; it is not npm publication,

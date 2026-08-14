@@ -81,7 +81,12 @@ describe("thread interaction commands", () => {
 			BuildThreadMessageCommand(
 				{
 					...Context,
-					work: { agent_id: "agent-1", engine_id: "codex", run_id: "run-1" } as never,
+					work: {
+						agent_id: "agent-1",
+						engine_id: "codex",
+						run_id: "run-1",
+						status: "running",
+					} as never,
 				},
 				Submission("Keep going"),
 			),
@@ -90,6 +95,57 @@ describe("thread interaction commands", () => {
 			command: { agent_id: "agent-1", run_id: "run-1" },
 		});
 	});
+
+	it("rejects a second ordinary message while the current root is queued", () => {
+		expect(
+			BuildThreadMessageCommand(
+				{
+					...Context,
+					work: {
+						agent_id: "agent-1",
+						engine_id: "codex",
+						run_id: "run-1",
+						status: "queued",
+					} as never,
+				},
+				Submission("Do not double send"),
+			),
+		).toMatchObject({
+			_tag: "invalid",
+			error: { message: expect.stringContaining("still starting") },
+		});
+	});
+
+	it.each(["interrupted", "completed", "cancelled", "failed", "closed"] as const)(
+		"keeps a %s coordinator run out of an ordinary follow-up",
+		(status) => {
+			const result = BuildThreadMessageCommand(
+				{
+					...Context,
+					session: {
+						...Context.session,
+						policy: { ...Context.session.policy, engine_id: "claude" },
+					},
+					work: {
+						agent_id: "agent-1",
+						engine_id: "codex",
+						run_id: "run-1",
+						status,
+					} as never,
+				},
+				Submission("New follow-up"),
+			);
+
+			expect(result).toMatchObject({
+				_tag: "ready",
+				command: { payload: { engine_id: "claude" } },
+			});
+			if (result._tag === "ready") {
+				expect(result.command).not.toHaveProperty("agent_id");
+				expect(result.command).not.toHaveProperty("run_id");
+			}
+		},
+	);
 
 	it("does not invent a project working directory", () => {
 		expect(

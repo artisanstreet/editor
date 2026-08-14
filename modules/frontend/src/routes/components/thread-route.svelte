@@ -119,7 +119,7 @@
 	let thread = $state.raw<ThreadListItem | undefined>(initial_thread);
 	let work = $state.raw<ThreadWorkItem | undefined>(thread_open.work);
 	const run_active = $derived(
-		work?.status === "running" || work?.status === "waiting",
+		work?.status === "queued" || work?.status === "running" || work?.status === "waiting",
 	);
 	let context_usage = $state.raw<SurfaceUsageAggregate | undefined>(undefined);
 	const ApplyRunUsage = (state: RunUsageState) =>
@@ -360,10 +360,12 @@
 						yield* ReconcileAcceptedUserMessage(receipt.command_id);
 					}),
 			);
-			yield* Effect.forkIn(
-				RefreshInteractionContext.pipe(Effect.ignore),
-				thread_scope,
-			);
+			/**
+			 * Keep the composer locked through the authoritative work refresh. A
+			 * successfully accepted command is queued before the event subscription
+			 * necessarily observes it; returning earlier briefly exposed a second send.
+			 */
+			yield* RefreshInteractionContext.pipe(Effect.ignore);
 			return {
 				expects_user_message,
 				...(expects_user_message
@@ -455,6 +457,13 @@
 			yield* client.Command({ payload: { type: "run.cancel" }, thread_id });
 			yield* RefreshInteractionContext;
 		});
+
+	/** Replays one exact failed request without manufacturing another user turn. */
+	const RetryRun = (run_id: string) =>
+		SubmitDurableCommand(
+			client.Command({ payload: { run_id, type: "run.retry" }, thread_id }),
+			() => RefreshInteractionContext,
+		).pipe(Effect.asVoid);
 
 	/**
 	 * Carries a draft typed during an active run into a brand-new thread in the
@@ -683,6 +692,7 @@
 	onapproval={RespondApproval}
 	onnewthread={StartThreadWithPrompt}
 	onquestion={RespondQuestion}
+	onretry={RetryRun}
 	onusageinterruptionresolve={ResolveUsageInterruption}
 	onimagevisibilitychange={UpdateImageAttachmentVisibility}
 	onpolicychange={PersistSessionPolicy}

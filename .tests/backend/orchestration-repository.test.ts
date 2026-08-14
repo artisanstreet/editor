@@ -19,6 +19,7 @@ import {
 	JournalCommands,
 	JournalEvents,
 	MessageImageAttachments,
+	OrchestrationMessages,
 	OrchestrationOutbox,
 	OrchestrationIntake,
 	OrchestrationInteractions,
@@ -146,6 +147,56 @@ describe("orchestration repository hardening", () => {
 			expect(accepted.status).toBe("accepted");
 			expect(attachments).toEqual([]);
 			expect(thread).toMatchObject({ live_status: "Working" });
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("rejects a distinct message while the coordinator root is still queued", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			migrations_path,
+		});
+		try {
+			await runtime.runPromise(SetupThread("thread_1"));
+			const first = make_command("message_1", "thread_1", {
+				engine_id: "engine_1",
+				text: "First request",
+				type: "thread.send_message",
+				working_directory: "C:/work",
+			});
+			const accepted = await runtime.runPromise(Accept(first));
+			const rejected = await runtime.runPromiseExit(
+				Accept(
+					make_command("message_2", "thread_1", {
+						engine_id: "engine_1",
+						text: "Second request",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			const persisted = await runtime.runPromise(
+				Read((database) =>
+					Effect.all({
+						events: database.select().from(JournalEvents),
+						messages: database.select().from(OrchestrationMessages),
+						outbox: database.select().from(OrchestrationOutbox),
+						runs: database.select().from(OrchestrationRuns),
+					}),
+				),
+			);
+
+			expect(accepted.status).toBe("accepted");
+			expect(rejected._tag).toBe("Failure");
+			expect(persisted.runs).toMatchObject([{ run_id: accepted.run_id, status: "queued" }]);
+			expect(persisted.outbox).toHaveLength(1);
+			expect(persisted.messages).toHaveLength(1);
+			expect(
+				persisted.events.filter(
+					(event) => JSON.parse(event.payload_json).type === "thread.message_queued",
+				),
+			).toHaveLength(1);
 		} finally {
 			await runtime.dispose();
 		}
@@ -745,6 +796,141 @@ describe("orchestration repository hardening", () => {
 				{ run_id: accepted.run_id, status: "queued" },
 			]);
 			expect(thread).toMatchObject({ live_status: "Working" });
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("retries the exact failed root payload once without replaying its user message", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_database_path(),
+			migrations_path,
+		});
+
+		try {
+			await runtime.runPromise(SetupThread("thread_1"));
+			const failed = await runtime.runPromise(
+				Accept(
+					make_command("send_1", "thread_1", {
+						content: [{ text: "Retry this exact request", type: "text" }],
+						engine_id: "engine_1",
+						mentioned_projects: [
+							{
+								display_name: "Workspace",
+								project_id: "project_1",
+								root_path: "C:/work",
+							},
+						],
+						text: "Retry this exact request",
+						type: "thread.send_message",
+						working_directory: "C:/work",
+					}),
+				),
+			);
+			await runtime.runPromise(
+				Effect.gen(function* () {
+					const repository = yield* OrchestrationRepository;
+
+					yield* repository.RecordObservation({
+						_tag: "run_terminal",
+						artisan_run_id: failed.run_id,
+						observation_id: "failed_1",
+						raw: { engine_id: "engine_1", frame: null, transport: "fixture" },
+						sequence: 1,
+						state: "failed",
+					});
+				}),
+			);
+			const retry = make_command("retry_1", "thread_1", {
+				run_id: failed.run_id,
+				type: "run.retry",
+			});
+			const accepted = await runtime.runPromise(Accept(retry));
+			const duplicate = await runtime.runPromise(Accept(retry));
+			const persisted = await runtime.runPromise(
+				Read((database) =>
+					Effect.all({
+						events: database.select().from(JournalEvents),
+						messages: database.select().from(OrchestrationMessages),
+						outbox: database.select().from(OrchestrationOutbox),
+						runs: database.select().from(OrchestrationRuns),
+						threads: database.select().from(Threads),
+					}),
+				),
+			);
+			const source_outbox = persisted.outbox.find((entry) => entry.command_id === "send_1");
+			const retry_outbox = persisted.outbox.find((entry) => entry.command_id === "retry_1");
+
+			expect(accepted).toMatchObject({ status: "accepted" });
+			expect(duplicate).toMatchObject({ run_id: accepted.run_id, status: "duplicate" });
+			expect(persisted.runs).toMatchObject([
+				{ run_id: failed.run_id, status: "failed" },
+				{
+					engine_id: "engine_1",
+					model_id: null,
+					run_id: accepted.run_id,
+					status: "queued",
+					working_directory: "C:/work",
+				},
+			]);
+			expect(retry_outbox).toMatchObject({
+				kind: "start",
+				run_id: accepted.run_id,
+				status: "pending",
+			});
+			expect(retry_outbox?.payload_json).toBe(source_outbox?.payload_json);
+			expect(persisted.messages).toMatchObject([
+				{ command_id: "send_1", delivery: "queued", message_id: "send_1" },
+				{
+					command_id: "retry_1",
+					delivery: "queued",
+					message_id: "retry_1",
+					run_id: accepted.run_id,
+					text: "Retry this exact request",
+				},
+			]);
+			expect(
+				persisted.events.filter(
+					(event) => JSON.parse(event.payload_json).type === "thread.message_queued",
+				),
+			).toHaveLength(1);
+			expect(
+				persisted.events.filter((event) => event.correlation_id === "retry_1"),
+			).toMatchObject([{ payload_json: expect.stringContaining('"type":"run.lifecycle"') }]);
+			expect(
+				persisted.threads.find((thread) => thread.thread_id === "thread_1"),
+			).toMatchObject({
+				live_status: "Working",
+			});
+
+			const stale = await runtime.runPromiseExit(
+				Accept(
+					make_command("retry_stale", "thread_1", {
+						run_id: failed.run_id,
+						type: "run.retry",
+					}),
+				),
+			);
+			const nonfailed = await runtime.runPromiseExit(
+				Accept(
+					make_command("retry_queued", "thread_1", {
+						run_id: accepted.run_id,
+						type: "run.retry",
+					}),
+				),
+			);
+			const unknown = await runtime.runPromiseExit(
+				Accept(
+					make_command("retry_missing", "thread_1", {
+						run_id: "run_missing",
+						type: "run.retry",
+					}),
+				),
+			);
+
+			expect(stale._tag).toBe("Failure");
+			expect(nonfailed._tag).toBe("Failure");
+			expect(unknown._tag).toBe("Failure");
 		} finally {
 			await runtime.dispose();
 		}

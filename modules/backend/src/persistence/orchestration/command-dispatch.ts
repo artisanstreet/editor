@@ -1,5 +1,5 @@
 import { and, desc, eq } from "drizzle-orm";
-import { Context, Effect } from "effect";
+import { Context, Effect, Schema } from "effect";
 
 import type { EventEnvelope, ThreadMessageRoutedEvent } from "@artisan/protocol";
 
@@ -24,8 +24,10 @@ import type {
 	AuthoritativePayload,
 	InboundOrAuthoritativeCommandEnvelope,
 } from "./message-command";
+import { AuthoritativeThreadSendMessageCommand } from "./message-command";
 import {
 	DecodePersistedJson,
+	PersistedJsonValue,
 	PersistedMentionedProjects,
 	PersistedRawOrigin,
 } from "./storage-codec";
@@ -424,6 +426,130 @@ export const MakeCommandDispatcher = Effect.gen(function* () {
 				});
 			}
 
+			if (payload.type === "run.retry") {
+				if (
+					!coordinator ||
+					!current_run ||
+					current_run.run_id !== payload.run_id ||
+					current_run.thread_id !== command.thread_id ||
+					current_run.status !== "failed"
+				) {
+					return yield* new OrchestrationNotFound({
+						id: payload.run_id,
+						resource: "run",
+					});
+				}
+
+				const [source_start] = yield* transaction
+					.select({ payload_json: OrchestrationOutbox.payload_json })
+					.from(OrchestrationOutbox)
+					.where(
+						and(
+							eq(OrchestrationOutbox.kind, "start"),
+							eq(OrchestrationOutbox.run_id, payload.run_id),
+							eq(OrchestrationOutbox.thread_id, command.thread_id),
+						),
+					)
+					.limit(1);
+				if (!source_start) {
+					return yield* new OrchestrationNotFound({
+						id: payload.run_id,
+						resource: "run",
+					});
+				}
+				const source_payload = yield* DecodePersistedJson(
+					PersistedJsonValue,
+					source_start.payload_json,
+				).pipe(
+					Effect.flatMap(
+						Schema.decodeUnknownEffect(AuthoritativeThreadSendMessageCommand),
+					),
+					Effect.mapError((cause) => new OrchestrationFailure({ cause })),
+				);
+
+				const run_id = yield* metadata.MakeId("run");
+				yield* transaction.insert(JournalCommands).values({
+					accepted_at,
+					agent_id: command.agent_id ?? null,
+					causation_id: command.causation_id ?? null,
+					message_id: command.message_id,
+					origin: command.origin,
+					payload_json,
+					payload_type: payload.type,
+					raw_origin_json,
+					assigned_run_id: run_id,
+					run_id: command.run_id ?? null,
+					schema_version: command.schema_version,
+					sent_at: command.sent_at,
+					status: "accepted",
+					thread_id: command.thread_id,
+				});
+				yield* transaction.insert(OrchestrationRuns).values({
+					agent_id: current_run.agent_id,
+					created_at: accepted_at,
+					engine_id: current_run.engine_id,
+					model_id: current_run.model_id,
+					native_resume_json: null,
+					native_thread_id: null,
+					run_id,
+					status: "queued",
+					thread_id: command.thread_id,
+					updated_at: accepted_at,
+					working_directory: current_run.working_directory,
+				});
+				yield* transaction
+					.update(OrchestrationCoordinators)
+					.set({
+						active_run_id: run_id,
+						engine_id: current_run.engine_id,
+						updated_at: accepted_at,
+					})
+					.where(eq(OrchestrationCoordinators.thread_id, command.thread_id));
+				yield* ReconcileRootThreadLiveStatus(transaction, command.thread_id, accepted_at);
+				/** Required launch evidence only; retry deliberately does not project a second user turn. */
+				yield* transaction.insert(OrchestrationMessages).values({
+					agent_id: current_run.agent_id,
+					command_id: command.message_id,
+					created_at: accepted_at,
+					delivery: "queued",
+					message_id: command.message_id,
+					run_id,
+					text: source_payload.text,
+					thread_id: command.thread_id,
+				});
+				yield* transaction.insert(OrchestrationOutbox).values({
+					agent_id: current_run.agent_id,
+					command_id: command.message_id,
+					created_at: accepted_at,
+					kind: "start",
+					payload_json: source_start.payload_json,
+					run_id,
+					status: "pending",
+					thread_id: command.thread_id,
+					updated_at: accepted_at,
+				});
+				const event = yield* AppendEvent({
+					agent_id: current_run.agent_id,
+					causation_id: command.message_id,
+					correlation_id: command.message_id,
+					payload: {
+						state: "queued",
+						type: "run.lifecycle",
+						working_directory: current_run.working_directory,
+					},
+					...(command.raw_origin ? { raw_origin: command.raw_origin } : {}),
+					run_id,
+					thread_id: command.thread_id,
+				});
+
+				return {
+					events: [event],
+					journal_sequence: event.journal_sequence,
+					run_id,
+					status: "accepted" as const,
+				};
+			}
+
 			const send_message = payload.type === "thread.send_message";
 			if (send_message && intake?.resolution === "question") {
 				const question_id = yield* metadata.MakeId("message");
@@ -503,6 +629,11 @@ export const MakeCommandDispatcher = Effect.gen(function* () {
 					run_id: intake_id,
 					status: "accepted" as const,
 				};
+			}
+			if (send_message && current_run?.status === "queued") {
+				return yield* new OrchestrationFailure({
+					cause: new Error("A queued root run already owns this thread"),
+				});
 			}
 			const requested_engine_id = "engine_id" in payload ? payload.engine_id : undefined;
 			const steer =

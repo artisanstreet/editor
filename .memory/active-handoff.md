@@ -90,6 +90,13 @@ Last updated: 2026-08-11. Branch continuity only; durable verified status is in 
 - Reasoning disclosure passes 12 focused tests, lint, client/SSR build, SER scans,
   and final review. The aggregate frontend gate has five unrelated stale assertions.
 - Storage/native integration passed 43 focused tests; backend checks and root types pass.
+- Failed-root retry is integrated: the exact current failed session exposes idempotent
+  `run.retry`, which launches from the original durable rich/image payload without another
+  public user turn. Submit remains locked through authoritative refresh; composer, command
+  builder, and backend fence ordinary sends while the root is queued. Five files / 58 tests,
+  scoped format/lint/diff, exact staged frontend build, and independent re-review pass.
+  Area gates stop on 3 unrelated protected formatting files each; root TypeScript retains
+  only the steering, provider-management, and agent-graph baselines.
 
 ## Dirty-Tree Integration Notes
 
