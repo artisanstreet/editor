@@ -953,6 +953,12 @@ export const AgentOrchestratorLive = Layer.effect(
 						| "unsupported"
 						| "ambiguous_target";
 			  };
+		/**
+		 * Experimental steer capability routes like supported; only an unsupported
+		 * engine queues. This matches the agent-graph control path and the engine
+		 * lifecycle contract, which both require steer delivery whenever the
+		 * capability is not unsupported.
+		 */
 		const CanSteer = (
 			command: InboundOrAuthoritativeCommandEnvelope,
 		): Effect.Effect<RoutingDecision, OrchestrationError> =>
@@ -971,13 +977,13 @@ export const AgentOrchestratorLive = Layer.effect(
 				if (work.engine_id !== requested_engine_id) {
 					return { can_steer: false, reason: "ambiguous_target" } as const;
 				}
-				const supported = yield* engines.Get(work.engine_id).pipe(
+				const steerable = yield* engines.Get(work.engine_id).pipe(
 					Effect.map(
-						(engine) => engine.Descriptor.capabilities.steer.state === "supported",
+						(engine) => engine.Descriptor.capabilities.steer.state !== "unsupported",
 					),
 					Effect.catch(() => Effect.succeed(false)),
 				);
-				return supported
+				return steerable
 					? ({ can_steer: true } as const)
 					: ({ can_steer: false, reason: "unsupported" } as const);
 			});

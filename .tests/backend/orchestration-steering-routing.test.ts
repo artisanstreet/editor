@@ -393,17 +393,11 @@ describe("thread follow-up steering routing", () => {
 		}
 	});
 
-	it("queues disabled, unsupported, experimental, and engine-mismatched follow-ups", async () => {
+	it("queues disabled, unsupported, and engine-mismatched follow-ups", async () => {
 		for (const scenario of [
 			{ state: "supported" as const, disable: true, requested: "active", reason: "disabled" },
 			{
 				state: "unsupported" as const,
-				disable: false,
-				requested: "active",
-				reason: "unsupported",
-			},
-			{
-				state: "experimental" as const,
 				disable: false,
 				requested: "active",
 				reason: "unsupported",
@@ -445,6 +439,41 @@ describe("thread follow-up steering routing", () => {
 			} finally {
 				await context.runtime.dispose();
 			}
+		}
+	});
+
+	it("steers an experimental-capability active run like a supported one", async () => {
+		const experimental = make_engine("experimental", "experimental");
+		const context = await setup([experimental.engine], undefined, "thread_experimental_steer");
+		try {
+			await start(context, "experimental");
+			await wait_for(() => experimental.opened.length === 1);
+			await follow_up(context, "experimental", "experimental_follow_up");
+			await wait_for(() => experimental.commands.length === 1);
+			await wait_for(async () =>
+				(
+					await context.runtime.runPromise(
+						context.journal.ReadCorrelatedEvents("experimental_follow_up"),
+					)
+				).some((event) => event.payload.type === "thread.message_routed"),
+			);
+			const events = await context.runtime.runPromise(
+				context.journal.ReadCorrelatedEvents("experimental_follow_up"),
+			);
+			expect(routed(events)).toMatchObject({
+				outcome: "steered",
+				type: "thread.message_routed",
+			});
+			expect(experimental.commands).toEqual([
+				{
+					_tag: "steer",
+					command_id: "experimental_follow_up",
+					text: "Also include the verification evidence",
+				},
+			]);
+			expect(experimental.opened).toHaveLength(1);
+		} finally {
+			await context.runtime.dispose();
 		}
 	});
 
