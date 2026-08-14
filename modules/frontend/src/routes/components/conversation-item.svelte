@@ -7,6 +7,7 @@
 	import ConversationMessage from "./conversation-message.svelte";
 	import ConversationPrompt from "./conversation-prompt.svelte";
 	import ConversationStatus from "./conversation-status.svelte";
+	import ConversationUsageInterruptionCard from "./conversation-usage-interruption-card.svelte";
 	import ConversationWorkSession from "./conversation-work-session.svelte";
 	import type { Snippet } from "svelte";
 
@@ -16,6 +17,7 @@
 		onapproval,
 		onimagevisibilitychange,
 		onquestion,
+		onusageinterruptionresolve,
 		trailing,
 	}: {
 		item: ConversationItem;
@@ -31,6 +33,18 @@
 		onquestion?: (
 			question_id: string,
 			answer: string,
+		) => Effect.Effect<void, { readonly message: string }>;
+		onusageinterruptionresolve?: (
+			interruption_id: string,
+			expected_revision: number,
+			action:
+				| { readonly type: "set_auto_continue"; readonly enabled: boolean }
+				| {
+						readonly type: "continue";
+						readonly target_engine_id: string;
+						readonly target_model_id?: string;
+				  }
+				| { readonly type: "cancel" },
 		) => Effect.Effect<void, { readonly message: string }>;
 		trailing?: Snippet;
 	} = $props();
@@ -48,6 +62,11 @@
 	<ConversationApproval {item} {onapproval} />
 {:else if item.type === "plan" || item.type === "question"}
 	<ConversationPrompt {item} {onquestion} />
+{:else if item.type === "usage_interruption"}
+	<ConversationUsageInterruptionCard
+		interruption={item.interruption}
+		onresolve={onusageinterruptionresolve}
+	/>
 {:else}
 	<ConversationStatus {item} {trailing} />
 {/if}

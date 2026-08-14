@@ -6,6 +6,7 @@
 	import { Input } from "$lib/components/ui/input";
 	import { Switch } from "$lib/components/ui/switch";
 	import Row from "./row.svelte";
+	import UsageRecovery from "./usage-recovery.svelte";
 
 	const client = yield* ArtisanClient;
 	const banner = yield* BannerService;
@@ -171,3 +172,5 @@
 		</div>
 	</div>
 </section>
+
+<UsageRecovery />

@@ -409,6 +409,47 @@
 			yield* RefreshInteractionContext;
 		});
 
+	/**
+	 * A usage interruption is a durable recovery decision, not a retry of the
+	 * failed provider attempt. The revision makes competing renderer tabs and
+	 * Forge's scheduler converge on one winner; any rejection is reconciled from
+	 * the authoritative conversation rather than retried optimistically.
+	 */
+	const ResolveUsageInterruption = (
+		interruption_id: string,
+		expected_revision: number,
+		action:
+			| { readonly type: "set_auto_continue"; readonly enabled: boolean }
+			| {
+					readonly type: "continue";
+					readonly target_engine_id: string;
+					readonly target_model_id?: string;
+			  }
+			| { readonly type: "cancel" },
+	) =>
+		Effect.gen(function* () {
+			yield* client.Command({
+				payload: {
+					action,
+					expected_revision,
+					interruption_id,
+					type: "usage.interruption.resolve",
+				},
+				thread_id,
+			}).pipe(
+				Effect.catch((error) =>
+					Effect.gen(function* () {
+						/** A stale revision is expected under multi-client/scheduler races. */
+						yield* Resync.pipe(Effect.ignore);
+						yield* RefreshInteractionContext.pipe(Effect.ignore);
+						return yield* Effect.fail(error);
+					}),
+				),
+			);
+			yield* Resync;
+			yield* RefreshInteractionContext;
+		});
+
 	const CancelRun = () =>
 		Effect.gen(function* () {
 			yield* client.Command({ payload: { type: "run.cancel" }, thread_id });
@@ -642,6 +683,7 @@
 	onapproval={RespondApproval}
 	onnewthread={StartThreadWithPrompt}
 	onquestion={RespondQuestion}
+	onusageinterruptionresolve={ResolveUsageInterruption}
 	onimagevisibilitychange={UpdateImageAttachmentVisibility}
 	onpolicychange={PersistSessionPolicy}
 	onsubmit={SendMessage}

@@ -34,7 +34,11 @@ export interface SaveCompactionDefaultsInput {
 	readonly selection: CompactionSelection;
 }
 
-const EmptyDefaults: SessionDefaults = { models: [], permission: "supervised" };
+const EmptyDefaults: SessionDefaults = {
+	auto_continue_usage_limits: true,
+	models: [],
+	permission: "supervised",
+};
 
 export const CompactionSelectionFromDefaults = (defaults: SessionDefaults): CompactionSelection =>
 	defaults.compaction_model === undefined
@@ -73,6 +77,10 @@ export class SessionDefaultsController extends Context.Service<
 		readonly SetFavorite: (
 			model_id: string,
 			favorite: boolean,
+		) => Effect.Effect<SessionDefaultsState, ArtisanClientError>;
+		/** Default captured by newly created provider-usage interruptions. */
+		readonly SetAutoContinueUsageLimits: (
+			auto_continue_usage_limits: boolean,
 		) => Effect.Effect<SessionDefaultsState, ArtisanClientError>;
 	}
 >()("Artisan/SessionDefaultsController") {}
@@ -146,6 +154,9 @@ export const SessionDefaultsControllerLive = Layer.effect(
 				);
 			});
 
+		const SetAutoContinueUsageLimits = (auto_continue_usage_limits: boolean) =>
+			SaveDefaults({ auto_continue_usage_limits });
+
 		const RememberPolicyDefaults = (policy: ThreadSessionPolicy) =>
 			Effect.gen(function* () {
 				const current = yield* Current;
@@ -185,6 +196,7 @@ export const SessionDefaultsControllerLive = Layer.effect(
 			RememberPolicyDefaults,
 			SaveCompactionDefaults,
 			SetEngineEnabled,
+			SetAutoContinueUsageLimits,
 			SetFavorite,
 		});
 	}),

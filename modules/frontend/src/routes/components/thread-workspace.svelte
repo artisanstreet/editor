@@ -55,6 +55,7 @@
 		onnewthread,
 		onpolicychange,
 		onquestion,
+		onusageinterruptionresolve,
 		onimagevisibilitychange,
 		onsubmit,
 		policy,
@@ -83,6 +84,18 @@
 		onquestion?: (
 			question_id: string,
 			answer: string,
+		) => Effect.Effect<void, { readonly message: string }>;
+		onusageinterruptionresolve?: (
+			interruption_id: string,
+			expected_revision: number,
+			action:
+				| { readonly type: "set_auto_continue"; readonly enabled: boolean }
+				| {
+						readonly type: "continue";
+						readonly target_engine_id: string;
+						readonly target_model_id?: string;
+				  }
+				| { readonly type: "cancel" },
 		) => Effect.Effect<void, { readonly message: string }>;
 		onimagevisibilitychange?: (
 			attachments: ReadonlyArray<ImageAttachmentReference>,
@@ -700,6 +713,7 @@
 										{onapproval}
 										{onimagevisibilitychange}
 										{onquestion}
+										{onusageinterruptionresolve}
 									/>
 								{:else if block.type === "work_group"}
 									{@const session_authority = work_session_run_authority({

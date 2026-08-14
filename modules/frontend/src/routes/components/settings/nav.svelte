@@ -43,7 +43,10 @@
 			label: "Models",
 		},
 		{
-			anchors: [{ hash: "retention", label: "Retention" }],
+			anchors: [
+				{ hash: "retention", label: "Retention" },
+				{ hash: "usage-recovery", label: "Usage recovery" },
+			],
 			href: "/settings/threads",
 			label: "Threads",
 		},
