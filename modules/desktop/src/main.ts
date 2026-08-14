@@ -1,8 +1,11 @@
 import { join, normalize } from "node:path";
 
+import { AttentionCountFromTitle } from "@artisan/protocol";
 import { BrowserWindow, app, contentTracing, protocol, session, shell } from "electron";
 import { Effect, Layer, Option } from "effect";
 
+import { AttentionOverlayDescription } from "./badge/catalog";
+import { AttentionOverlayImage } from "./badge/overlay";
 import {
 	DesktopForgeLifecycle,
 	DesktopRenderer,
@@ -179,7 +182,29 @@ export const StartDesktop = Effect.gen(function* () {
 		},
 		width: 1440,
 	});
-	editor_window.on("page-title-updated", (event) => event.preventDefault());
+	/**
+	 * The renderer owns the document title; the window keeps its fixed name.
+	 * That pinned title is also the shell's only renderer-owned signal — there
+	 * is no preload and no IPC — so the needs-attention marker the renderer
+	 * embeds in it becomes the taskbar badge here: a numbered overlay where
+	 * Windows wants an image, the native dock badge everywhere else.
+	 */
+	editor_window.on("page-title-updated", (event, title) => {
+		event.preventDefault();
+		const attention_count = AttentionCountFromTitle(title) ?? 0;
+		if (process.platform === "win32") {
+			if (attention_count === 0) {
+				editor_window.setOverlayIcon(null, "");
+			} else {
+				editor_window.setOverlayIcon(
+					AttentionOverlayImage(attention_count),
+					AttentionOverlayDescription(attention_count),
+				);
+			}
+			return;
+		}
+		app.setBadgeCount(attention_count);
+	});
 	editor_window.once("ready-to-show", () => editor_window.show());
 	/** The renderer never opens child windows; external links go to the OS browser. */
 	editor_window.webContents.setWindowOpenHandler(({ url }) => {

@@ -1,3 +1,10 @@
+export {
+	AttentionOverlayDescription,
+	AttentionOverlayLabelFor,
+	attention_overlay_labels,
+	attention_overlay_sources,
+} from "./badge/catalog";
+export type { AttentionOverlayLabel, AttentionOverlaySource } from "./badge/catalog";
 export { resolve_desktop_paths } from "./paths";
 export type { ResolvedDesktopPaths } from "./paths";
 export {

@@ -1,6 +1,7 @@
 export * from "./codec";
 export * from "./artisan-tools";
 export * from "./attachments";
+export * from "./attention-title";
 export * from "./common";
 export * from "./conversation";
 export * from "./conversation-activity";

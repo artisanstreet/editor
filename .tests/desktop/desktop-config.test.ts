@@ -76,9 +76,14 @@ describe("desktop packaging configuration", () => {
 		expect(main).toContain("nodeIntegration: false");
 		expect(main).toContain("sandbox: true");
 		expect(main).toContain('title: "Artisan Editor"');
-		expect(main).toContain(
-			'editor_window.on("page-title-updated", (event) => event.preventDefault())',
-		);
+		/** The pinned window title doubles as the IPC-free badge channel. */
+		expect(main).toContain('editor_window.on("page-title-updated", (event, title) => {');
+		expect(main).toContain("event.preventDefault()");
+		expect(main).toContain("AttentionCountFromTitle(title)");
+		expect(main).toContain("AttentionOverlayImage(attention_count)");
+		expect(main).toContain("AttentionOverlayDescription(attention_count)");
+		expect(main).toContain('editor_window.setOverlayIcon(null, "")');
+		expect(main).toContain("app.setBadgeCount(attention_count)");
 		expect(main).not.toContain("preload:");
 		expect(main).not.toContain("ipcMain");
 		/** Freeze diagnosis remains opt-in and does not add a renderer bridge. */
