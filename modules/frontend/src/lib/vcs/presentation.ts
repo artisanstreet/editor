@@ -17,12 +17,28 @@ export interface RepositoryMark {
 	/** Marks a single-color logo that must invert with the theme. */
 	readonly monochrome: boolean;
 	/**
-	 * The host's brand color, painting the chip behind an always-white mark.
-	 * GitLab deliberately keeps the recognizable orange over the deeper brand
-	 * red; its 2.86:1 white-on-orange is the one sub-3:1 chip in the row.
+	 * Classes painting the chip face in the host's brand color. Brand-colored
+	 * faces stay fixed across themes; GitLab deliberately keeps the
+	 * recognizable orange over the deeper brand red, its 2.86:1 white-on-orange
+	 * being the one sub-3:1 chip in the row. Near-black brands (GitHub,
+	 * Sourcehut) instead oppose the theme — brand black by day, white by night
+	 * — so the chip never sinks into matching chrome.
 	 */
-	readonly background: string;
+	readonly chip: string;
+	/**
+	 * Filter classes keeping the mark legible on that face. The brightness
+	 * floor plus inversion is the only whitening that reaches per-path fills
+	 * and gradients (GitLab's tri-tone tanuki, Azure's gradient), which a
+	 * `fill` override cannot touch.
+	 */
+	readonly chip_mark: string;
 }
+
+/** Whitens any mark for a fixed brand-colored face. */
+const white_mark = "brightness-0 invert";
+
+/** Flips with a theme-opposing face: white mark by day, black by night. */
+const opposing_mark = "brightness-0 invert dark:invert-0";
 
 /**
  * A host with no logo of its own falls back to the plain Git mark rather than
@@ -32,7 +48,8 @@ export interface RepositoryMark {
 const plain_git: RepositoryMark = {
 	icon: SvglGitLogo,
 	monochrome: false,
-	background: "#DE4C36",
+	chip: "bg-[#DE4C36]",
+	chip_mark: white_mark,
 };
 
 /**
@@ -41,14 +58,44 @@ const plain_git: RepositoryMark = {
  * primary brand hex from the same curated set.
  */
 const repository_marks: Readonly<Record<RepositoryHost, RepositoryMark>> = {
-	azure: { icon: SvglMicrosoftAzureLogo, monochrome: false, background: "#0078D4" },
-	bitbucket: { icon: BitbucketMark, monochrome: false, background: "#0052CC" },
-	codeberg: { icon: CodebergMark, monochrome: false, background: "#2185D0" },
-	gitea: { icon: GiteaMark, monochrome: false, background: "#609926" },
-	github: { icon: SvglGitHubLogo, monochrome: true, background: "#181717" },
-	gitlab: { icon: SvglGitLabLogo, monochrome: false, background: "#FC6D26" },
+	azure: {
+		icon: SvglMicrosoftAzureLogo,
+		monochrome: false,
+		chip: "bg-[#0078D4]",
+		chip_mark: white_mark,
+	},
+	bitbucket: {
+		icon: BitbucketMark,
+		monochrome: false,
+		chip: "bg-[#0052CC]",
+		chip_mark: white_mark,
+	},
+	codeberg: {
+		icon: CodebergMark,
+		monochrome: false,
+		chip: "bg-[#2185D0]",
+		chip_mark: white_mark,
+	},
+	gitea: { icon: GiteaMark, monochrome: false, chip: "bg-[#609926]", chip_mark: white_mark },
+	github: {
+		icon: SvglGitHubLogo,
+		monochrome: true,
+		chip: "bg-[#181717] dark:bg-white",
+		chip_mark: opposing_mark,
+	},
+	gitlab: {
+		icon: SvglGitLabLogo,
+		monochrome: false,
+		chip: "bg-[#FC6D26]",
+		chip_mark: white_mark,
+	},
 	other: plain_git,
-	sourcehut: { icon: SourcehutMark, monochrome: false, background: "#000000" },
+	sourcehut: {
+		icon: SourcehutMark,
+		monochrome: false,
+		chip: "bg-black dark:bg-white",
+		chip_mark: opposing_mark,
+	},
 	unknown: plain_git,
 };
 
@@ -60,10 +107,6 @@ export const RepositoryMarkFor = (host: RepositoryHost | undefined): RepositoryM
 export const RepositoryMarkClass = (mark: RepositoryMark, size = "size-4") =>
 	mark.monochrome ? `${size} shrink-0 dark:invert` : `${size} shrink-0`;
 
-/**
- * Names the classes that render a host mark white on its brand chip in both
- * themes. The brightness floor plus inversion is the only whitening that
- * reaches per-path fills and gradients (GitLab's tri-tone tanuki, Azure's
- * gradient), which a `fill` override cannot touch.
- */
-export const RepositoryChipMarkClass = (size = "size-4") => `${size} shrink-0 brightness-0 invert`;
+/** Names the classes that size a host mark and keep it legible on its chip. */
+export const RepositoryChipMarkClass = (mark: RepositoryMark, size = "size-4") =>
+	`${size} shrink-0 ${mark.chip_mark}`;
