@@ -4,6 +4,7 @@ import { ArtisanErrorCode } from "@artisan/catalog";
 
 import { Identifier, IsoDateTime, JournalSequence, SchemaVersion } from "./common";
 import { ImageAttachmentReference, UserMessageContentPart } from "./attachments";
+import { UsageInterruption } from "./usage-interruption";
 
 /** A lifecycle shared by canonical turns and items. Terminal values never transition again. */
 export const ConversationLifecycle = Schema.Literals([
@@ -87,8 +88,12 @@ export const ConversationSafeBodyText = ConversationBodyText.check(
  * does not recognize and fall back to the catalog's unknown definition.
  */
 export const ConversationErrorRef = Schema.Struct({
+	affected_model_id: Schema.optional(ConversationSafeText),
 	code: ArtisanErrorCode,
 	detail: Schema.optional(ConversationSafeText),
+	limit_id: Schema.optional(ConversationSafeText),
+	limit_label: Schema.optional(ConversationSafeText),
+	limit_scope: Schema.optional(Schema.Literals(["shared", "model", "unknown"])),
 	provider_code: Schema.optional(ConversationSafeText),
 	/** When a limit-class failure clears, so the card can say so. */
 	resets_at: Schema.optional(IsoDateTime),
@@ -159,6 +164,11 @@ export type ConversationApprovalRequest = typeof ConversationApprovalRequest.Typ
 
 /** A normalized, renderer-ready entity. Its `type` is a domain discriminator, not a UI label. */
 export const ConversationItem = Schema.Union([
+	Schema.Struct({
+		...ConversationItemFields,
+		interruption: UsageInterruption,
+		type: Schema.Literal("usage_interruption"),
+	}),
 	Schema.Struct({
 		attachments: Schema.optional(Schema.Array(ImageAttachmentReference)),
 		content: Schema.optional(Schema.Array(UserMessageContentPart)),

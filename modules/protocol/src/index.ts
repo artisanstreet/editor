@@ -8,6 +8,7 @@ export * from "./control";
 export * from "./control-rpc";
 export * from "./desktop-handoff";
 export * from "./thread-usage-series";
+export * from "./usage-interruption";
 export * from "./engine-usage";
 export * from "./forge-launch-request";
 export * from "./guidance";

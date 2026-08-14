@@ -50,6 +50,7 @@ import {
 import { IntakePolicy } from "./intake-policy";
 import { MakeObservationPersistence } from "./observation-persistence";
 import { ProductInstructions } from "./product-instructions";
+import { UsageInterruptionService } from "../persistence/usage-interruption/service";
 import {
 	render_portable_checkpoint_context,
 	render_portable_checkpoint_prompt,
@@ -178,6 +179,9 @@ export class AgentOrchestrator extends Context.Service<
 		readonly HandleInbound: (
 			command: CommandEnvelope,
 		) => Effect.Effect<AcceptedOrchestrationCommand, OrchestrationError>;
+		readonly HandleUsageInterruption: (
+			command: CommandEnvelope,
+		) => Effect.Effect<AcceptedOrchestrationCommand, OrchestrationError>;
 		readonly DrainForShutdown: Effect.Effect<void>;
 		readonly Recover: Effect.Effect<void, OrchestrationError>;
 		readonly QuiesceThread: (thread_id: string) => Effect.Effect<void>;
@@ -195,6 +199,7 @@ export const AgentOrchestratorLive = Layer.effect(
 		const graph_repository = yield* AgentGraphRepository;
 		const continuation = yield* ThreadContinuationService;
 		const continuation_repository = yield* ThreadContinuationRepository;
+		const usage_interruptions = yield* UsageInterruptionService;
 		const suspend_monitor = yield* HostSuspendMonitor;
 		const host_resumes = yield* suspend_monitor.Subscribe;
 		const service_scope = yield* Scope.make();
@@ -268,6 +273,7 @@ export const AgentOrchestratorLive = Layer.effect(
 
 		const MarkStartFailure = (work: PendingWork, failure: StartFailure) =>
 			Effect.gen(function* () {
+				yield* usage_interruptions.MarkTargetFailed(work.run_id).pipe(Effect.ignore);
 				// Pre-provider validation can fail before the ordinary running transition.
 				// Settling it first keeps the canonical run lifecycle from remaining queued.
 				yield* repository
@@ -574,6 +580,9 @@ export const AgentOrchestratorLive = Layer.effect(
 							});
 							return;
 						}
+						yield* usage_interruptions
+							.MarkTargetContinued(work.run_id)
+							.pipe(Effect.ignore);
 
 						const done = yield* Deferred.make<void>();
 						const live = {
@@ -1015,6 +1024,11 @@ export const AgentOrchestratorLive = Layer.effect(
 								intake,
 								"reason" in routing ? routing.reason : undefined,
 							);
+					if (command.payload.type === "thread.send_message") {
+						yield* usage_interruptions
+							.CancelSuperseded(command.thread_id, accepted.run_id)
+							.pipe(Effect.ignore);
+					}
 
 					yield* WakeDispatcher;
 
@@ -1023,6 +1037,18 @@ export const AgentOrchestratorLive = Layer.effect(
 			);
 		const Handle = (command: AuthoritativeCommandEnvelope) => HandleCommand(command, false);
 		const HandleInbound = (command: CommandEnvelope) => HandleCommand(command, true);
+		const HandleUsageInterruption = (command: CommandEnvelope) =>
+			admission_gate.withPermits(1)(
+				Effect.gen(function* () {
+					if (yield* IsDraining)
+						return yield* new OrchestrationFailure({
+							cause: new Error("The orchestrator is draining for shutdown."),
+						});
+					const accepted = yield* usage_interruptions.Resolve(command);
+					yield* WakeDispatcher;
+					return accepted;
+				}),
+			);
 
 		const Recover = Effect.gen(function* () {
 			if (yield* IsDraining) return;
@@ -1040,6 +1066,8 @@ export const AgentOrchestratorLive = Layer.effect(
 				return;
 			}
 
+			yield* usage_interruptions.RefreshPendingEvidence;
+			yield* usage_interruptions.ScanDue;
 			yield* continuation_repository
 				.ReconcileStranded()
 				.pipe(Effect.mapError((cause) => new OrchestrationFailure({ cause })));
@@ -1174,7 +1202,19 @@ export const AgentOrchestratorLive = Layer.effect(
 				yield* Effect.logInfo("Re-driving dispatch after a host suspend", {
 					suspended_ms: resume.suspended_ms,
 				});
+				yield* usage_interruptions.RefreshPendingEvidence;
+				yield* usage_interruptions.ScanDue;
 				yield* WakeDispatcher;
+			}
+		});
+		const WatchUsageInterruptions = Effect.gen(function* () {
+			while (true) {
+				yield* Effect.sleep("30 seconds");
+				yield* usage_interruptions.RefreshPendingEvidence.pipe(Effect.ignore);
+				const launched = yield* usage_interruptions.ScanDue.pipe(
+					Effect.catch(() => Effect.succeed(false)),
+				);
+				if (launched) yield* WakeDispatcher;
 			}
 		});
 
@@ -1185,14 +1225,25 @@ export const AgentOrchestratorLive = Layer.effect(
 				yield* Effect.forEach(
 					scopes,
 					(scope) => Scope.close(scope, Exit.succeed(undefined)),
-					{ concurrency: "unbounded", discard: true },
+					{
+						concurrency: "unbounded",
+						discard: true,
+					},
 				);
 				yield* Scope.close(service_scope, Exit.succeed(undefined));
 			}),
 		);
 		yield* Effect.forkIn(WatchHostResumes, service_scope);
+		yield* Effect.forkIn(WatchUsageInterruptions, service_scope);
 		yield* Recover;
 
-		return { DrainForShutdown, Handle, HandleInbound, QuiesceThread, Recover };
+		return {
+			DrainForShutdown,
+			Handle,
+			HandleInbound,
+			HandleUsageInterruption,
+			QuiesceThread,
+			Recover,
+		};
 	}),
 );

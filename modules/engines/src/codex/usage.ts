@@ -59,6 +59,13 @@ function clamp_percent_used(used_percent: number | undefined): number {
 	return Math.min(100, Math.max(0, used_percent));
 }
 
+function codex_reset_at(resets_at: number | undefined | null): string | undefined {
+	if (resets_at === undefined || resets_at === null || !Number.isFinite(resets_at))
+		return undefined;
+	const reset = new Date(resets_at * 1_000);
+	return Number.isFinite(reset.getTime()) ? reset.toISOString() : undefined;
+}
+
 function classify_codex_quota_window_kind(
 	window_minutes: number | undefined,
 ): EngineQuotaWindowKind {
@@ -113,17 +120,17 @@ export function map_codex_rate_limits_to_quota_windows(
 				continue;
 			}
 
+			const resets_at = codex_reset_at(window.resetsAt);
 			windows.push({
 				id: `${bucket_id}:${slot}`,
 				kind: classify_codex_quota_window_kind(window.windowDurationMins ?? undefined),
 				...(label === undefined ? {} : { label }),
 				percent_used: clamp_percent_used(window.usedPercent),
-				...(window.resetsAt === undefined || window.resetsAt === null
-					? {}
-					: { resets_at: new Date(window.resetsAt * 1_000).toISOString() }),
+				...(resets_at === undefined ? {} : { resets_at }),
 				...(window.windowDurationMins === undefined || window.windowDurationMins === null
 					? {}
 					: { window_minutes: window.windowDurationMins }),
+				scope: bucket_id === "codex" || label === undefined ? "unknown" : "model",
 			});
 		}
 	}

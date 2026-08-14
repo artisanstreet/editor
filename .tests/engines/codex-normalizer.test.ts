@@ -545,6 +545,89 @@ describe("Codex normalizer", () => {
 		]);
 	});
 
+	it("adds terminal usage-limit evidence without replacing the retry observation", async () => {
+		const payload = {
+			error: { message: "You have insufficient quota for this request" },
+			threadId: "thread-1",
+			turnId: "turn-1",
+			willRetry: false,
+		};
+		const observations = await Effect.runPromise(
+			normalise("error", payload, { frame_sequence: 28 }),
+		);
+
+		expect(observations).toMatchObject([
+			{
+				_tag: "retry",
+				attempt_state: "terminal",
+				message: payload.error.message,
+				will_retry: false,
+			},
+			{
+				_tag: "native_action",
+				detail: payload.error.message,
+				error_ref: {
+					artisan_code: "AE-PROVIDER-201",
+					limit_scope: "unknown",
+				},
+			},
+		]);
+		expect(observations.map(({ observation_id }) => observation_id)).toEqual([
+			"normalizer-run:native:28",
+			"normalizer-run:native:28:usage_limit",
+		]);
+		const usage_action = observations.find(({ _tag }) => _tag === "native_action");
+		if (usage_action?._tag !== "native_action") throw new Error("Expected usage action");
+		expect(usage_action.raw).toMatchObject({ frame: payload, frame_sequence: 28 });
+		expect(usage_action.error_ref).not.toHaveProperty("affected_model_id");
+		expect(usage_action.error_ref).not.toHaveProperty("limit_id");
+		expect(usage_action.error_ref).not.toHaveProperty("limit_label");
+		expect(usage_action.error_ref).not.toHaveProperty("resets_at");
+
+		for (const message of ["Rate limit exceeded", "Your usage-limit was reached"]) {
+			const classified = await Effect.runPromise(
+				normalise("error", {
+					error: { message },
+					threadId: "thread-1",
+					turnId: "turn-1",
+					willRetry: false,
+				}),
+			);
+			expect(classified, message).toHaveLength(2);
+			expect(classified[1]).toMatchObject({
+				_tag: "native_action",
+				error_ref: { artisan_code: "AE-PROVIDER-201" },
+			});
+		}
+	});
+
+	it("does not promote retrying, overload, billing, or request errors into quota evidence", async () => {
+		const cases = [
+			{ message: "Rate limit exceeded", willRetry: true },
+			{ message: "Provider is overloaded", willRetry: false },
+			{ message: "Billing limit reached", willRetry: false },
+			{ message: "Invalid request", willRetry: false },
+		];
+
+		for (const [index, error_case] of cases.entries()) {
+			const observations = await Effect.runPromise(
+				normalise(
+					"error",
+					{
+						error: { message: error_case.message },
+						threadId: "thread-1",
+						turnId: "turn-1",
+						willRetry: error_case.willRetry,
+					},
+					{ frame_sequence: 40 + index },
+				),
+			);
+
+			expect(observations, error_case.message).toHaveLength(1);
+			expect(observations[0]).toMatchObject({ _tag: "retry" });
+		}
+	});
+
 	it("preserves unknown and malformed known frames without inventing canonical facts", async () => {
 		const observations = await Effect.runPromise(
 			Effect.all([

@@ -10,6 +10,7 @@ import {
 	ThreadErasureClaims,
 	ThreadTombstones,
 	Threads,
+	UsageInterruptions,
 } from "../tables";
 import {
 	ThreadContinuationLaunches,
@@ -216,9 +217,27 @@ export const MakePreparationOperations = Effect.gen(function* () {
 											token.native_thread_id === source.native_thread_id,
 									),
 								);
+					const [usage_interruption_authority] =
+						launch._tag !== "native" || source === undefined
+							? []
+							: yield* transaction
+									.select({ interruption_id: UsageInterruptions.interruption_id })
+									.from(UsageInterruptions)
+									.where(
+										and(
+											eq(UsageInterruptions.source_run_id, source.run_id),
+											eq(UsageInterruptions.target_run_id, target.run_id),
+											eq(UsageInterruptions.state, "launching"),
+										),
+									)
+									.limit(1);
 					if (
 						launch._tag === "native" &&
-						(source?.status !== "completed" ||
+						((source?.status !== "completed" &&
+							!(
+								source?.status === "failed" &&
+								usage_interruption_authority !== undefined
+							)) ||
 							source.engine_id !== target.engine_id ||
 							Option.isNone(source_resume))
 					)

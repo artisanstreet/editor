@@ -86,8 +86,18 @@ export const CommandRouterLive = Layer.effect(
 
 				return [receipt, ...accepted.events];
 			});
-		const Dispatch = (command: CommandEnvelope) =>
-			command.payload.type === "thread.create"
+		const Dispatch = (command: CommandEnvelope) => {
+			if (command.payload.type === "usage.interruption.resolve") {
+				return orchestrator
+					.HandleUsageInterruption(command)
+					.pipe(
+						Effect.flatMap((accepted) =>
+							AcceptedReceipt(command, accepted, accepted.run_id),
+						),
+					);
+			}
+
+			return command.payload.type === "thread.create"
 				? thread_commands.HandleCreate(command)
 				: command.payload.type === "thread.retention.update"
 					? thread_commands.HandleRetentionPolicy(command)
@@ -138,6 +148,7 @@ export const CommandRouterLive = Layer.effect(
 														),
 													),
 												);
+		};
 
 		return {
 			Dispatch,

@@ -69,6 +69,7 @@ describe("map_codex_rate_limits_to_quota_windows", () => {
 				kind: "session",
 				percent_used: 42.5,
 				resets_at: new Date(1_800_000_000 * 1_000).toISOString(),
+				scope: "unknown",
 				window_minutes: 300,
 			},
 			{
@@ -76,6 +77,7 @@ describe("map_codex_rate_limits_to_quota_windows", () => {
 				kind: "weekly",
 				percent_used: 10,
 				resets_at: new Date(1_800_500_000 * 1_000).toISOString(),
+				scope: "unknown",
 				window_minutes: 10_080,
 			},
 			{
@@ -83,6 +85,7 @@ describe("map_codex_rate_limits_to_quota_windows", () => {
 				kind: "monthly",
 				label: "GPT-5.3-Codex-Spark",
 				percent_used: 5,
+				scope: "model",
 				window_minutes: 43_200,
 			},
 		]);
@@ -105,6 +108,7 @@ describe("map_codex_rate_limits_to_quota_windows", () => {
 				kind: "weekly",
 				percent_used: 87,
 				resets_at: new Date(1_700_000_000 * 1_000).toISOString(),
+				scope: "unknown",
 				window_minutes: 10_080,
 			},
 		]);
@@ -128,15 +132,25 @@ describe("map_codex_rate_limits_to_quota_windows", () => {
 				kind: "unknown",
 				percent_used: 100,
 				resets_at: "1970-01-01T00:16:40.000Z",
+				scope: "unknown",
 			},
 			{
 				id: "codex:secondary",
 				kind: "unknown",
 				percent_used: 0,
+				scope: "unknown",
 				window_minutes: 999,
 			},
 		]);
 		expect(windows[0]!.resets_at).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?Z$/);
+		expect(
+			map_codex_rate_limits_to_quota_windows({
+				rateLimits: {
+					limitId: "codex",
+					primary: { resetsAt: 1e100, usedPercent: 100 },
+				},
+			})[0],
+		).not.toHaveProperty("resets_at");
 	});
 
 	it("emits nothing when neither rateLimits nor rateLimitsByLimitId is present", () => {
@@ -175,6 +189,7 @@ describe("MakeCodexUsage ACP account usage", () => {
 					label: "Codex",
 					percent_used: 25,
 					resets_at: new Date(1_800_000_000 * 1_000).toISOString(),
+					scope: "unknown",
 					window_minutes: 300,
 				},
 			],

@@ -37,6 +37,39 @@ export const ApplyJournalEvent = (transaction: DatabaseClient, event: EventEnvel
 				journal_sequence: event.journal_sequence,
 			});
 
+		if (payload.type === "usage.interruption.updated") {
+			const interruption = payload.interruption;
+			const item_lifecycle =
+				interruption.state === "continued"
+					? "completed"
+					: interruption.state === "cancelled" || interruption.state === "failed"
+						? interruption.state
+						: "active";
+			yield* UpsertItem(
+				transaction,
+				event.thread_id,
+				{
+					...item_base(
+						`usage-interruption:${interruption.interruption_id}`,
+						`run:${interruption.source_run_id}`,
+						{
+							agent_id: interruption.source_agent_id,
+							occurred_at: event.sent_at,
+							run_id: interruption.source_run_id,
+							thread_id: event.thread_id,
+						},
+						item_lifecycle,
+						event.message_id,
+					),
+					interruption,
+					source_refs: event_source_refs(interruption.interruption_id),
+					type: "usage_interruption",
+				},
+				source,
+			);
+			return;
+		}
+
 		if (payload.type === "thread.model_transition") {
 			const transition_state = payload.state ?? "completed";
 			yield* UpsertItem(

@@ -141,8 +141,9 @@ const OpaqueContentDeltaSchema = Schema.Struct({
 const RateLimitSchema = Schema.Struct({
 	type: Schema.Literal("rate_limit_event"),
 	rate_limit_info: Schema.Struct({
-		status: Schema.optional(Schema.String),
+		rateLimitType: Schema.optional(Schema.String),
 		resetsAt: Schema.optional(Schema.Number),
+		status: Schema.optional(Schema.String),
 	}),
 });
 const TextSchema = Schema.Struct({ type: Schema.Literal("text"), text: Schema.String });
@@ -237,10 +238,13 @@ export function classify_claude_semantic_failure(payload: unknown) {
 	const event = decode(EventSchema, payload);
 	const result = decode(ResultSchema, payload);
 	const assistant_error = decode(AssistantErrorSchema, payload);
+	const rate_limit = decode(RateLimitSchema, payload);
 
 	return (
 		event?.type === "error" ||
 		assistant_error !== undefined ||
+		rate_limit?.rate_limit_info.status === "rejected" ||
+		rate_limit?.rate_limit_info.status === "exceeded" ||
 		(result !== undefined && (result.subtype !== "success" || result.is_error === true))
 	);
 }
@@ -789,12 +793,15 @@ export function normalize_claude_event(
 						input,
 						`Claude rate limit ${rate_limit.rate_limit_info.status ?? "status unknown"}`,
 						/**
-						 * Only an outright rejection is a failure in Artisan custody;
-						 * a warning is provenance the reader may notice, not an error
-						 * card.
+						 * Rejected and exceeded are terminal usage evidence. Warnings
+						 * remain provenance the reader may notice, not error cards.
 						 */
-						rate_limit.rate_limit_info.status === "rejected"
-							? classify_claude_rate_limit(rate_limit.rate_limit_info.resetsAt)
+						rate_limit.rate_limit_info.status === "rejected" ||
+							rate_limit.rate_limit_info.status === "exceeded"
+							? classify_claude_rate_limit(
+									rate_limit.rate_limit_info.resetsAt,
+									rate_limit.rate_limit_info.rateLimitType,
+								)
 							: undefined,
 					),
 				];

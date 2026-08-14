@@ -9,6 +9,7 @@ import type {
 	EngineAssistantMessagePhase,
 	EngineApprovalObservation,
 	EngineCompactionObservation,
+	EngineErrorRef,
 	EngineFileObservation,
 	EngineNativeActionObservation,
 	EngineObservation,
@@ -344,16 +345,34 @@ function native_action(
 	input: CodexNormalizationInput,
 	detail?: string,
 	diagnostic = false,
+	error_ref?: EngineErrorRef,
+	observation_suffix?: string,
 ): EngineNativeActionObservation {
 	return {
-		...make_base(input),
+		...make_base(input, observation_suffix),
 		_tag: "native_action",
 		action: input.method,
 		...(detail ? { detail } : {}),
 		...(diagnostic ? { diagnostic: true } : {}),
+		...(error_ref === undefined ? {} : { error_ref }),
 		sequence: 0,
 	};
 }
+
+/**
+ * Codex's run-error notification carries no stable provider code or quota
+ * bucket. Only explicit usage-limit phrases are promoted; generic overload,
+ * billing, and request failures retain their ordinary terminal retry evidence.
+ */
+const is_explicit_codex_usage_limit = (message: string): boolean =>
+	/(?:\brate[\s_-]+limit\b|\busage[\s_-]+limit\b|\binsufficient[\s_-]+quota\b|\bquota[\s_-]+(?:depleted|exceeded|exhausted|reached)\b)/iu.test(
+		message,
+	);
+
+const codex_usage_limit_error = (): EngineErrorRef => ({
+	artisan_code: "AE-PROVIDER-201",
+	limit_scope: "unknown",
+});
 
 function decode_known<S extends Schema.Constraint>(
 	input: CodexNormalizationInput,
@@ -553,8 +572,8 @@ export function normalise_codex_notification(
 				} satisfies EngineCompactionObservation,
 			]);
 		case "error":
-			return decode_known(input, ErrorSchema, (value) => [
-				{
+			return decode_known(input, ErrorSchema, (value) => {
+				const retry = {
 					...base,
 					_tag: "retry",
 					attempt_state: value.willRetry ? "retrying" : "terminal",
@@ -562,8 +581,23 @@ export function normalise_codex_notification(
 					sequence: 0,
 					turn_id: value.turnId,
 					will_retry: value.willRetry,
-				} satisfies EngineRetryObservation,
-			]);
+				} satisfies EngineRetryObservation;
+
+				if (value.willRetry || !is_explicit_codex_usage_limit(value.error.message)) {
+					return [retry];
+				}
+
+				return [
+					retry,
+					native_action(
+						input,
+						value.error.message,
+						false,
+						codex_usage_limit_error(),
+						"usage_limit",
+					),
+				];
+			});
 		case "warning":
 			return decode_known(input, WarningSchema, (value) => [
 				{

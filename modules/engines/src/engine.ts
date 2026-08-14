@@ -577,7 +577,15 @@ export interface EngineSearchObservation extends EngineObservationBase {
  */
 export interface EngineErrorRef {
 	readonly artisan_code: string;
+	/** The exact provider model whose independent allowance was depleted, when disclosed. */
+	readonly affected_model_id?: string;
 	readonly detail?: string;
+	/** The provider's stable quota-bucket identifier, when disclosed. */
+	readonly limit_id?: string;
+	/** The provider's human-readable quota-bucket label, when disclosed. */
+	readonly limit_label?: string;
+	/** Whether the depleted allowance is shared, model-specific, or not disclosed. */
+	readonly limit_scope?: "shared" | "model" | "unknown";
 	readonly provider_code?: string;
 	/** When a limit-class failure clears, as an ISO timestamp the UI can show. */
 	readonly resets_at?: string;
@@ -947,6 +955,8 @@ export interface EngineQuotaWindow {
 	readonly label?: string;
 	readonly percent_used: number;
 	readonly resets_at?: string;
+	/** Provider-backed scope evidence used to distinguish shared gates from independent model pools. */
+	readonly scope?: "shared" | "model" | "unknown";
 	readonly window_minutes?: number;
 }
 

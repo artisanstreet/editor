@@ -67,6 +67,10 @@ export type SessionModelDefaultsUpdate = typeof SessionModelDefaultsUpdate.Type;
 
 /** Projects every default a draft reads when it opens. */
 export const SessionDefaults = Schema.Struct({
+	auto_continue_usage_limits: Schema.Boolean.pipe(
+		Schema.optional,
+		Schema.withDecodingDefault(Effect.succeed(true)),
+	),
 	agent_name_dataset: Schema.optional(AgentNameDataset),
 	/**
 	 * How handoff compaction picks its summarizer. Absent means Curated: each
@@ -102,6 +106,7 @@ export type SessionDefaults = typeof SessionDefaults.Type;
  * @since 0.8.0
  */
 export const SessionDefaultsUpdateInput = Schema.Struct({
+	auto_continue_usage_limits: Schema.optional(Schema.Boolean),
 	agent_name_dataset: Schema.optional(AgentNameDataset),
 	/** `null` restores Curated: each harness's cost-effective catalog default. */
 	compaction_model: Schema.optional(Schema.NullOr(Schema.NonEmptyString)),

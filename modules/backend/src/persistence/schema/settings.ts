@@ -16,6 +16,9 @@ export const ModelFavorites = sqliteTable("model_favorites", {
  */
 export const SessionDefaults = sqliteTable("session_defaults", {
 	agent_name_dataset: text("agent_name_dataset").notNull().default("norwegian"),
+	auto_continue_usage_limits: integer("auto_continue_usage_limits", { mode: "boolean" })
+		.notNull()
+		.default(true),
 	/**
 	 * The protocol's `compaction_model` selection: `"inherited"` or a catalog
 	 * model id. NULL means the curated per-harness default. The column keeps

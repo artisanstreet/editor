@@ -52,6 +52,7 @@ import {
 	ThreadErasureClaims,
 	Threads,
 	ThreadTombstones,
+	UsageInterruptions,
 	WorkspaceChangeOperations,
 	WorkspaceChangeDiffs,
 	WorkspaceChanges,
@@ -411,6 +412,9 @@ export const ThreadErasureLive = Layer.effect(
 						yield* transaction
 							.delete(ThreadRunContinuationState)
 							.where(eq(ThreadRunContinuationState.thread_id, thread_id));
+						yield* transaction
+							.delete(UsageInterruptions)
+							.where(eq(UsageInterruptions.thread_id, thread_id));
 						yield* transaction
 							.delete(OrchestrationOutbox)
 							.where(eq(OrchestrationOutbox.thread_id, thread_id));

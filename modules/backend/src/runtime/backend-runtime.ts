@@ -45,6 +45,7 @@ import { JournalNotifierLive } from "../persistence/journal-notifier";
 import { JournalStoreLive } from "../persistence/journal-store";
 import { OrchestrationRepositoryLive } from "../persistence/orchestration/repository";
 import { ThreadContinuationRepositoryLive } from "../persistence/thread-continuation/repository";
+import { UsageInterruptionServiceLive } from "../persistence/usage-interruption/service";
 import { ThreadReadModelLive } from "../persistence/thread-read-model";
 import {
 	ProjectionRebuildBarrierLive,
@@ -434,6 +435,11 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(NodeCrypto.layer),
 		Layer.provideMerge(infrastructure),
 	);
+	const usage_interruptions = UsageInterruptionServiceLive.pipe(
+		Layer.provideMerge(persistence),
+		Layer.provideMerge(engine_registry),
+		Layer.provideMerge(runtime_catalog),
+	);
 	const agent_name_catalog = AgentNameCatalogLive.pipe(Layer.provideMerge(session_defaults));
 	const graph_persistence = AgentGraphRepositoryLive.pipe(
 		Layer.provideMerge(agent_name_catalog),
@@ -443,6 +449,7 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provide(graph_persistence),
 		Layer.provideMerge(persistence),
 		Layer.provideMerge(continuation),
+		Layer.provideMerge(usage_interruptions),
 		Layer.provideMerge(engine_registry),
 		Layer.provideMerge(guidance),
 		Layer.provideMerge(IntakePolicyLive),

@@ -38,6 +38,7 @@ import { ModelFavoritesUpdatedEvent } from "../model-favorites";
 import { PreviewInspectionSessionUpdatedEvent, PreviewTargetUpdatedEvent } from "../preview";
 
 import { SessionDefaultsUpdatedEvent } from "../session-defaults";
+import { UsageInterruptionUpdatedEvent } from "../usage-interruption";
 
 import {
 	ProjectRef,
@@ -661,6 +662,7 @@ export const EventPayload = Schema.Union([
 	ThreadRetentionPolicyUpdatedEvent,
 	ModelFavoritesUpdatedEvent,
 	SessionDefaultsUpdatedEvent,
+	UsageInterruptionUpdatedEvent,
 	GlobalGuidanceCanonicalUpdatedEvent,
 	GlobalGuidanceSelectionRequiredEvent,
 	GlobalGuidanceProviderReconciledEvent,

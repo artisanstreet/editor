@@ -98,6 +98,53 @@ export const OrchestrationRuns = sqliteTable(
 	],
 );
 
+/** One durable recovery decision for an exact provider usage-limit failure. */
+export const UsageInterruptions = sqliteTable(
+	"usage_interruptions",
+	{
+		affected_model_id: text("affected_model_id"),
+		alternatives_json: text("alternatives_json").notNull().default("[]"),
+		auto_continue: integer("auto_continue", { mode: "boolean" }).notNull(),
+		cancelled_at: text("cancelled_at"),
+		continuation_command_id: text("continuation_command_id"),
+		continued_at: text("continued_at"),
+		created_at: text("created_at").notNull(),
+		evidence_refreshed_at: text("evidence_refreshed_at"),
+		failed_at: text("failed_at"),
+		interruption_id: text("interruption_id").primaryKey(),
+		limit_id: text("limit_id"),
+		limit_label: text("limit_label"),
+		limit_scope: text("limit_scope").notNull(),
+		provider_code: text("provider_code"),
+		resets_at: text("resets_at"),
+		resume_not_before: text("resume_not_before"),
+		revision: integer("revision").notNull().default(0),
+		source_agent_id: text("source_agent_id").notNull(),
+		source_engine_id: text("source_engine_id").notNull(),
+		source_model_id: text("source_model_id"),
+		source_run_id: text("source_run_id").notNull(),
+		state: text("state").notNull(),
+		target_engine_id: text("target_engine_id"),
+		target_model_id: text("target_model_id"),
+		target_run_id: text("target_run_id"),
+		thread_id: text("thread_id").notNull(),
+		updated_at: text("updated_at").notNull(),
+	},
+	(table) => [
+		uniqueIndex("usage_interruptions_source_run_unique").on(table.source_run_id),
+		index("usage_interruptions_due_index").on(table.state, table.resume_not_before),
+		index("usage_interruptions_thread_index").on(table.thread_id),
+		check(
+			"usage_interruptions_limit_scope_check",
+			sql`${table.limit_scope} IN ('shared', 'model', 'unknown')`,
+		),
+		check(
+			"usage_interruptions_state_check",
+			sql`${table.state} IN ('scheduled', 'awaiting_decision', 'launching', 'continued', 'cancelled', 'failed')`,
+		),
+	],
+);
+
 export const OrchestrationMessages = sqliteTable("orchestration_messages", {
 	message_id: text("message_id").primaryKey(),
 	command_id: text("command_id").notNull(),

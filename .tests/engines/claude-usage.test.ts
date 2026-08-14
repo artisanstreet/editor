@@ -97,6 +97,7 @@ describe("Claude CLI usage", () => {
 				kind: "session",
 				percent_used: 17,
 				resets_at: "2026-07-29T05:50:00.000Z",
+				scope: "shared",
 				window_minutes: 300,
 			},
 			{
@@ -104,6 +105,7 @@ describe("Claude CLI usage", () => {
 				kind: "weekly",
 				percent_used: 3,
 				resets_at: "2026-08-04T22:00:00.000Z",
+				scope: "shared",
 				window_minutes: 10_080,
 			},
 		]);
@@ -114,13 +116,20 @@ describe("Claude CLI usage", () => {
 				Date.parse("2026-07-28T12:00:00.000Z"),
 			),
 		).toEqual([
-			{ id: "five_hour", kind: "session", percent_used: 17, window_minutes: 300 },
+			{
+				id: "five_hour",
+				kind: "session",
+				percent_used: 17,
+				scope: "shared",
+				window_minutes: 300,
+			},
 			{
 				id: "seven_day:fable",
 				kind: "weekly",
 				label: "Fable",
 				percent_used: 5,
 				resets_at: "2026-08-04T22:00:00.000Z",
+				scope: "model",
 				window_minutes: 10_080,
 			},
 		]);

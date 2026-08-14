@@ -137,6 +137,7 @@ export const SessionDefaultsServiceLive = Layer.effect(
 				const [shared] = yield* client
 					.select({
 						agent_name_dataset: SessionDefaults.agent_name_dataset,
+						auto_continue_usage_limits: SessionDefaults.auto_continue_usage_limits,
 						compaction_model_id: SessionDefaults.compaction_model_id,
 						last_model_id: SessionDefaults.last_model_id,
 						permission: SessionDefaults.permission,
@@ -162,6 +163,7 @@ export const SessionDefaultsServiceLive = Layer.effect(
 					agent_name_dataset: yield* Schema.decodeUnknownEffect(AgentNameDataset)(
 						shared?.agent_name_dataset ?? DefaultAgentNameDatasetId,
 					),
+					auto_continue_usage_limits: shared?.auto_continue_usage_limits ?? true,
 					...(disabled.length > 0
 						? { disabled_engines: disabled.map((row) => row.engine_id) }
 						: {}),
@@ -232,6 +234,7 @@ export const SessionDefaultsServiceLive = Layer.effect(
 						 */
 						if (
 							payload.agent_name_dataset !== undefined ||
+							payload.auto_continue_usage_limits !== undefined ||
 							payload.permission !== undefined ||
 							payload.last_model_id !== undefined ||
 							payload.compaction_model !== undefined
@@ -239,6 +242,8 @@ export const SessionDefaultsServiceLive = Layer.effect(
 							const [current] = yield* transaction
 								.select({
 									agent_name_dataset: SessionDefaults.agent_name_dataset,
+									auto_continue_usage_limits:
+										SessionDefaults.auto_continue_usage_limits,
 									compaction_model_id: SessionDefaults.compaction_model_id,
 									last_model_id: SessionDefaults.last_model_id,
 									permission: SessionDefaults.permission,
@@ -256,6 +261,10 @@ export const SessionDefaultsServiceLive = Layer.effect(
 									payload.agent_name_dataset ??
 									current?.agent_name_dataset ??
 									DefaultAgentNameDatasetId,
+								auto_continue_usage_limits:
+									payload.auto_continue_usage_limits ??
+									current?.auto_continue_usage_limits ??
+									true,
 								compaction_model_id,
 								last_model_id:
 									payload.last_model_id ?? current?.last_model_id ?? null,

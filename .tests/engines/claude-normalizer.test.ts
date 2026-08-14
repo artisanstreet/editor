@@ -597,6 +597,20 @@ describe("Claude normalization", () => {
 		expect(classify_claude_semantic_failure({ type: "assistant", error: "rate_limit" })).toBe(
 			true,
 		);
+		for (const status of ["rejected", "exceeded"]) {
+			expect(
+				classify_claude_semantic_failure({
+					type: "rate_limit_event",
+					rate_limit_info: { status },
+				}),
+			).toBe(true);
+		}
+		expect(
+			classify_claude_semantic_failure({
+				type: "rate_limit_event",
+				rate_limit_info: { status: "allowed_warning" },
+			}),
+		).toBe(false);
 		expect(
 			classify_claude_semantic_failure({ type: "result", subtype: "error_max_turns" }),
 		).toBe(true);
@@ -675,14 +689,18 @@ describe("Claude normalization", () => {
 		);
 	});
 
-	it("classifies a rejected rate limit with its reset instant and leaves warnings quiet", () => {
+	it("classifies terminal rate limits with exact provider evidence and leaves warnings quiet", () => {
 		const resets_at_seconds = 1_786_075_592;
 
 		expect(
 			normalize_claude_event(
 				input({
 					type: "rate_limit_event",
-					rate_limit_info: { status: "rejected", resetsAt: resets_at_seconds },
+					rate_limit_info: {
+						rateLimitType: "five_hour",
+						resetsAt: resets_at_seconds,
+						status: "rejected",
+					},
 				}),
 			),
 		).toEqual([
@@ -690,7 +708,27 @@ describe("Claude normalization", () => {
 				_tag: "native_action",
 				error_ref: expect.objectContaining({
 					artisan_code: artisan_error_codes.usage_limit_reached,
+					limit_id: "five_hour",
+					limit_scope: "unknown",
 					resets_at: new Date(resets_at_seconds * 1_000).toISOString(),
+				}),
+			}),
+		]);
+
+		expect(
+			normalize_claude_event(
+				input({
+					type: "rate_limit_event",
+					rate_limit_info: { rateLimitType: "seven_day", status: "exceeded" },
+				}),
+			),
+		).toEqual([
+			expect.objectContaining({
+				_tag: "native_action",
+				error_ref: expect.objectContaining({
+					artisan_code: artisan_error_codes.usage_limit_reached,
+					limit_id: "seven_day",
+					limit_scope: "unknown",
 				}),
 			}),
 		]);
@@ -705,6 +743,22 @@ describe("Claude normalization", () => {
 		expect(
 			warning !== undefined && "error_ref" in warning ? warning.error_ref : undefined,
 		).toBeUndefined();
+
+		const invalid_reset = normalize_claude_event(
+			input({
+				type: "rate_limit_event",
+				rate_limit_info: { resetsAt: 1e100, status: "rejected" },
+			}),
+		)[0];
+		expect(invalid_reset).toMatchObject({
+			_tag: "native_action",
+			error_ref: { artisan_code: artisan_error_codes.usage_limit_reached },
+		});
+		expect(
+			invalid_reset !== undefined && "error_ref" in invalid_reset
+				? invalid_reset.error_ref
+				: undefined,
+		).not.toHaveProperty("resets_at");
 	});
 
 	it("retains API retry progress as a native action instead of a canonical retry", () => {

@@ -195,6 +195,11 @@ describe("claude stream-json normalization", () => {
 			expect.objectContaining({
 				_tag: "native_action",
 				detail: "Claude rate limit exceeded",
+				error_ref: expect.objectContaining({
+					artisan_code: "AE-PROVIDER-201",
+					limit_id: "five_hour",
+					limit_scope: "unknown",
+				}),
 			}),
 		]);
 	});

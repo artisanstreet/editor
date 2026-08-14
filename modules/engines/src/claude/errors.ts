@@ -53,6 +53,7 @@ const result_failure_codes: Readonly<Record<string, string>> = {
 /** Classifies a typed assistant-message error into Artisan custody. @since 0.9.0 */
 export const classify_claude_assistant_error = (provider_code: string): EngineErrorRef => ({
 	artisan_code: assistant_error_codes[provider_code] ?? claude_artisan_error_codes.unknown,
+	...(provider_code === "rate_limit" ? { limit_scope: "unknown" as const } : {}),
 	provider_code,
 });
 
@@ -71,18 +72,31 @@ export const classify_claude_terminal_failure = (
 });
 
 /**
- * Classifies a rejected rate-limit event, carrying the reset instant when the
- * provider stream disclosed one. Claude reports epoch seconds; anything already in
- * milliseconds is recognized by magnitude rather than trusted blindly.
+ * Classifies a terminal rate-limit event, carrying exact bucket and reset
+ * evidence when the provider stream disclosed them. Claude reports epoch
+ * seconds; anything already in milliseconds is recognized by magnitude rather
+ * than trusted blindly. `rateLimitType` identifies a provider bucket but does
+ * not itself prove whether the bucket is shared or model-specific.
  */
-export const classify_claude_rate_limit = (resets_at?: number): EngineErrorRef => ({
-	artisan_code: claude_artisan_error_codes.usage_limit_reached,
-	provider_code: "rate_limit",
-	...(resets_at === undefined || !Number.isFinite(resets_at)
-		? {}
-		: {
-				resets_at: new Date(
-					resets_at > 1_000_000_000_000 ? resets_at : resets_at * 1_000,
-				).toISOString(),
-			}),
-});
+export const classify_claude_rate_limit = (
+	resets_at?: number,
+	rate_limit_type?: string,
+): EngineErrorRef => {
+	const reset_date =
+		resets_at === undefined || !Number.isFinite(resets_at)
+			? undefined
+			: new Date(resets_at > 1_000_000_000_000 ? resets_at : resets_at * 1_000);
+	const reset_milliseconds = reset_date?.getTime();
+
+	return {
+		artisan_code: claude_artisan_error_codes.usage_limit_reached,
+		...(rate_limit_type === undefined || rate_limit_type.length === 0
+			? {}
+			: { limit_id: rate_limit_type }),
+		limit_scope: "unknown",
+		provider_code: "rate_limit",
+		...(reset_date === undefined || !Number.isFinite(reset_milliseconds)
+			? {}
+			: { resets_at: reset_date.toISOString() }),
+	};
+};

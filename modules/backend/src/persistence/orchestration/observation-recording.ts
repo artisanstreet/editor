@@ -25,6 +25,7 @@ import { RuntimeMetadata } from "../../runtime/metadata";
 import { ApplyEngineObservation } from "../../conversation/index.ts";
 import { PersistSurfaceProjection } from "../../surfaces/surface-projection";
 import { ReconcileRootThreadLiveStatus } from "./thread-lifecycle-status";
+import { RecordUsageInterruptionInTransaction } from "../usage-interruption/record";
 
 interface JournalNotifier {
 	readonly Publish: (journal_sequence: number) => Effect.Effect<void>;
@@ -185,6 +186,17 @@ export function make_observation_recording(
 			}
 
 			const projected_at = yield* metadata.Now;
+			const usage_interruption_event =
+				(observation._tag === "native_action" ||
+					observation._tag === "process_diagnostic") &&
+				observation.error_ref?.artisan_code === "AE-PROVIDER-201"
+					? yield* RecordUsageInterruptionInTransaction(
+							transaction,
+							metadata,
+							run,
+							observation.error_ref,
+						)
+					: undefined;
 			yield* PersistSurfaceProjection(transaction, observation, {
 				agent_id: run.agent_id,
 				occurred_at: projected_at,
@@ -244,7 +256,7 @@ export function make_observation_recording(
 									: undefined;
 
 			if (!payload) {
-				return [];
+				return usage_interruption_event === undefined ? [] : [usage_interruption_event];
 			}
 
 			const status = payload.type === "run.lifecycle" ? payload.state : undefined;
@@ -343,6 +355,7 @@ export function make_observation_recording(
 			}
 
 			return [
+				...(usage_interruption_event === undefined ? [] : [usage_interruption_event]),
 				yield* AppendEvent(transaction, {
 					agent_id: run.agent_id,
 					causation_id: observation.observation_id,

@@ -9,6 +9,7 @@ import { Identifier, IsoDateTime, PositiveInt } from "../common";
 import { ModelFavoriteUpdateCommand } from "../model-favorites";
 
 import { SessionDefaultsUpdateCommand } from "../session-defaults";
+import { UsageInterruptionResolveCommand } from "../usage-interruption";
 
 import {
 	ThreadActivityRecordCommand,
@@ -449,6 +450,7 @@ export const CommandPayload = Schema.Union([
 	ThreadRetentionUpdateCommand,
 	ModelFavoriteUpdateCommand,
 	SessionDefaultsUpdateCommand,
+	UsageInterruptionResolveCommand,
 	ThreadSendMessageCommand,
 	ThreadAutoSteerUpdateCommand,
 	ThreadSessionPolicyUpdateCommand,

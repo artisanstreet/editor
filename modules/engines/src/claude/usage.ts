@@ -147,6 +147,7 @@ export function parse_claude_cli_usage_windows(
 				kind: "session",
 				percent_used: clamp_percent(Number(session_percent)),
 				...(resets_at === undefined ? {} : { resets_at }),
+				scope: "shared",
 				window_minutes: 300,
 			});
 			continue;
@@ -159,6 +160,7 @@ export function parse_claude_cli_usage_windows(
 				kind: "weekly",
 				percent_used: clamp_percent(Number(weekly_all_percent)),
 				...(resets_at === undefined ? {} : { resets_at }),
+				scope: "shared",
 				window_minutes: 10_080,
 			});
 			continue;
@@ -174,6 +176,7 @@ export function parse_claude_cli_usage_windows(
 				label,
 				percent_used: clamp_percent(Number(weekly_labeled_percent)),
 				...(resets_at === undefined ? {} : { resets_at }),
+				scope: "model",
 				window_minutes: 10_080,
 			});
 		}
