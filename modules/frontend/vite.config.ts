@@ -74,6 +74,10 @@ const development_only_surfaces = () => {
 			source: "<!-- development-only surface -->",
 			suffix: "/routes/debug/overlay/+page.svelte",
 		},
+		{
+			source: "<!-- development-only surface -->",
+			suffix: "/routes/debug/components/+page.svelte",
+		},
 	];
 
 	return {

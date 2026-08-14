@@ -28,6 +28,7 @@ const { transform_svelte_effect } = (await import(
  * it, a malformed development page is discovered only by opening it.
  */
 const development_only_surfaces = [
+	"modules/frontend/src/routes/debug/components/+page.svelte",
 	"modules/frontend/src/routes/debug/emulator/+page.svelte",
 	"modules/frontend/src/routes/debug/overlay/+page.svelte",
 ];
