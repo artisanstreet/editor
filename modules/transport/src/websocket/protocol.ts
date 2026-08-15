@@ -96,7 +96,12 @@ const MakeWebSocketMultiplexer = (
 	options: MessagePortAdapterOptions = {},
 	accepted_channel?: WebSocketChannel,
 ) => {
-	const incoming_capacity = options.incoming_capacity ?? 256;
+	/**
+	 * A reconnect can legally deliver a 256-event replay window plus replay
+	 * completion and concurrent control/startup frames; an equal default would
+	 * self-overflow before the client can drain the logical channel.
+	 */
+	const incoming_capacity = options.incoming_capacity ?? 512;
 
 	return Effect.gen(function* () {
 		if (!Number.isSafeInteger(incoming_capacity) || incoming_capacity <= 0) {

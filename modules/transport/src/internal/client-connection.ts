@@ -642,9 +642,6 @@ export const make_client_connection_lifecycle = (
 							stream_ticket: welcome.payload.stream_ticket,
 						};
 						yield* handlers.requests.ResetConnection;
-						yield* handlers.subscriptions.Retry((envelope) =>
-							send_active(active, envelope),
-						);
 
 						const control_loop = Effect.forever(
 							ports.control_port.Receive.pipe(
@@ -677,7 +674,18 @@ export const make_client_connection_lifecycle = (
 							ports.stream_port.Closed,
 							Deferred.await(disposed_signal),
 						]);
-						const session_fiber = yield* Effect.forkScoped(session);
+						/**
+						 * A reconnect may already have queued a full journal replay after the
+						 * welcome, and resubscribing can synchronously add control and snapshot
+						 * frames. Start both readers before replaying subscriptions so neither
+						 * channel accumulates while the requests are being issued.
+						 */
+						const session_fiber = yield* Effect.forkScoped(session, {
+							startImmediately: true,
+						});
+						yield* handlers.subscriptions.Retry((envelope) =>
+							send_active(active, envelope),
+						);
 						yield* Effect.raceFirst(
 							handlers.subscriptions.AwaitReady,
 							Fiber.join(session_fiber).pipe(

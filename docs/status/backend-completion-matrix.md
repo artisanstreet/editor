@@ -26,6 +26,19 @@ lines from `{1,3-5}` metadata; raw HTML stays inert and directive-supplied pre
 styles are discarded. Parser, renderer, presentation-drift, provider, recovery,
 and non-leak tests cover the boundary.
 
+On 2026-08-15, rapid installed false disconnects were traced to WebSocket ingress
+overflow while Forge remained healthy, not renderer background throttling (which is
+already disabled). The prior 256-frame logical default exactly matched Forge's replay
+event limit, leaving no room for `welcome`, `replay.complete`, or concurrent startup
+control frames; installed `forge.log` contains 388 matching control-channel overflows.
+The WebSocket default is now a still-finite 512 logical / 1024 raw frames, explicit
+caller capacities and overflow-close behavior are unchanged, and the client starts its
+scoped control/stream readers before resubscribing. The exact 258-frame regression was
+red before the capacity fix. Five focused transport files pass 18 tests, touched
+formatting/lint and independent reviews pass; `validate:transport` reaches the global
+TypeScript stage before unrelated dirty guidance-startup test errors, while the full
+transport run is 149/153 against four backend-dependent dirty integration failures.
+
 Failed coordinator runs now expose one explicit, idempotent `run.retry` action on
 their exact current work session. Forge authorizes only the current failed root,
 creates a fresh queued run, and reuses the original durable start payload—including

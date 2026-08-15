@@ -30,6 +30,17 @@ Last updated: 2026-08-11. Branch continuity only; durable verified status is in 
 
 ## Active Work
 
+- Rapid installed disconnects are caused by bounded WebSocket ingress overflow, not Electron
+  background throttling. `%LOCALAPPDATA%\\Artisan\\forge.log` contains 388 logical control-channel
+  overflows while Forge remains ready. The old 256-frame default equalled the backend replay limit,
+  so a legal welcome + 256 events + `replay.complete` startup burst could close a healthy socket and
+  consume all eight retry attempts; the client also started its readers only after resubscription.
+  The fix keeps finite overflow-close semantics while raising only the WebSocket default to
+  512 logical / 1024 raw frames and starts both scoped readers before subscription retry. The exact
+  258-frame regression was red before the capacity change; the focused lifecycle/transport set is
+  18/18 and touched format/lint plus independent reviews pass. `validate:transport` reaches the
+  global TypeScript step, then stops only on dirty `guidance-startup-loading` backend test errors.
+
 - Renderer banners/toaster and `svelte-sonner` are gone; host notifications remain.
   Typography is `{ text, code }`, safely maps legacy records, and drops Lora.
   Rich-link favicons win scoped prose margins; focused checks and review pass.
