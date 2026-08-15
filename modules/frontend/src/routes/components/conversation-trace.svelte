@@ -40,8 +40,8 @@
 		failed?: boolean;
 		items: ReadonlyArray<ConversationItem>;
 		/**
-		 * Owning work controls the live presentation only: summaries auto-open and
-		 * shimmer while it runs, then remain as settled history after it ends.
+		 * Owning work controls the live presentation only. The workspace removes
+		 * retired reasoning before this trace is grouped.
 		 */
 		work_active?: boolean;
 	} = $props();
@@ -319,14 +319,7 @@
 			{#if segment.type === "item"}
 				<ConversationItemView item={segment.item} />
 			{:else if segment.type === "reasoning_group"}
-				<!-- Live summaries open themselves; completed history remains available but quiet. -->
-				{@const open = open_groups[segment.id] ?? work_active}
-				<ConversationReasoningSummary
-					items={segment.items}
-					live={work_active}
-					{open}
-					ontoggle={() => ToggleGroup(segment.id)}
-				/>
+				<ConversationReasoningSummary items={segment.items} live={work_active} />
 			{:else if segment.type === "activity_group"}
 				{@const open = open_groups[segment.id] ?? false}
 				{@const live = GroupIsLive(segment.items)}

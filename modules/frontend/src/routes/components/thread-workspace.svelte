@@ -20,6 +20,8 @@
 		work_session_run_authority,
 	} from "$lib/conversation/activity-status";
 	import {
+		conversation_latest_reasoning_item_ids,
+		filter_conversation_trace_reasoning,
 		group_conversation_trace_blocks,
 		type ConversationTraceRenderBlock,
 	} from "$lib/conversation/trace";
@@ -179,6 +181,9 @@
 		group_conversation_trace_blocks(
 			fold_resolved_approvals_into_work(render_window.blocks),
 		),
+	);
+	const visible_reasoning_item_ids = $derived(
+		conversation_latest_reasoning_item_ids(render_blocks, active_run_id, run_active),
 	);
 	/**
 	 * The transcript's freshest session, which the durable work item may not
@@ -704,14 +709,19 @@
 						<section class="turn-hover-region group/turn relative flex flex-col gap-8">
 							{#each render_group.blocks as block (block.id)}
 								{#if block.type === "trace_group"}
+									{@const visible_trace_items = filter_conversation_trace_reasoning(
+										block.items,
+										visible_reasoning_item_ids,
+									)}
 									<!--
 										Post-steer trace material keeps the same policy boundary: activity
 										stays collapsible, while diagnostics remain hidden unless the trace
 										explicitly exposes them.
 									-->
 									<ConversationTrace
-										items={block.items}
-										work_active={run_active && block.turn_id === `run:${active_run_id}`}
+										items={visible_trace_items}
+										work_active={run_active &&
+											block.items.some((item) => item.run_id === active_run_id)}
 									/>
 								{:else if block.type === "item"}
 									<ConversationItem
@@ -729,10 +739,14 @@
 										newest_session_run_id,
 										session_run_id: block.session.run_id,
 									})}
+									{@const visible_details = filter_conversation_trace_reasoning(
+										block.details,
+										visible_reasoning_item_ids,
+									)}
 									<ConversationWorkSession
 										duration_kind={block.duration_kind}
 										engine_id={policy?.engine_id}
-										has_details={block.details.length > 0}
+										has_details={visible_details.length > 0}
 										has_live_reply={conversation_reply_is_live(block.details)}
 										item={block.session}
 										run_authority={session_authority}
@@ -747,7 +761,7 @@
 											<!-- Stopping is the user's own act, not a failure the trace must explain. -->
 											<ConversationTrace
 												failed={session_failed}
-												items={block.details}
+												items={visible_details}
 												work_active={block.session.ended_at === undefined &&
 													session_authority === "active"}
 											/>

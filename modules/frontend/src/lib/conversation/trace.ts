@@ -102,6 +102,70 @@ export const group_conversation_trace_blocks = (
 };
 
 /**
+ * Finds the one reasoning run that is still useful at the transcript tail.
+ *
+ * Reasoning is presentation-only progress, not durable transcript content. Walk
+ * the same block order the workspace renders and retain only consecutive,
+ * non-empty summaries at the visible tail of the active run. Native diagnostics
+ * are metadata rather than transcript prose, so they neither become the latest
+ * item nor split an otherwise consecutive reasoning run.
+ */
+export const conversation_latest_reasoning_item_ids = (
+	blocks: ReadonlyArray<ConversationTraceRenderBlock>,
+	active_run_id: string | undefined,
+	run_active: boolean,
+): ReadonlySet<string> => {
+	const visible_ids = new Set<string>();
+	if (!run_active || active_run_id === undefined) return visible_ids;
+
+	const display_order: Array<ConversationItem | null> = [];
+	for (const block of blocks) {
+		if (block.type === "trace_group") {
+			display_order.push(...block.items);
+			continue;
+		}
+		if (block.type === "item") {
+			display_order.push(block.item);
+			continue;
+		}
+		if (block.type === "work_group") {
+			display_order.push(block.session, ...block.details);
+			continue;
+		}
+
+		/** Changes and the turn footer are visible boundaries without source items. */
+		display_order.push(null);
+	}
+
+	for (let index = display_order.length - 1; index >= 0; index -= 1) {
+		const item = display_order[index];
+		if (item === null || item === undefined) break;
+		if (item.type === "native_event") continue;
+		if (
+			(item.type === "assistant_message" || item.type === "reasoning_summary") &&
+			item.text.trim().length === 0
+		)
+			continue;
+		if (item.type !== "reasoning_summary" || item.run_id !== active_run_id) break;
+		visible_ids.add(item.id);
+	}
+
+	return visible_ids;
+};
+
+/**
+ * Removes transcript-noise reasoning before segment grouping. Filtering here
+ * lets activities on either side of a retired summary form one honest chain.
+ */
+export const filter_conversation_trace_reasoning = (
+	items: ReadonlyArray<ConversationItem>,
+	visible_reasoning_item_ids: ReadonlySet<string>,
+): ReadonlyArray<ConversationItem> =>
+	items.filter(
+		(item) => item.type !== "reasoning_summary" || visible_reasoning_item_ids.has(item.id),
+	);
+
+/**
  * Activity groups are assembled privately before becoming readonly trace
  * segments. Keeping their array mutable during one projection avoids copying
  * the entire chain for every streamed activity update.

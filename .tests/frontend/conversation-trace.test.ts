@@ -87,7 +87,7 @@ describe("conversation trace", () => {
 		);
 		expect(workspace).toContain("group_conversation_trace_blocks(");
 		expect(workspace).toContain(
-			"<ConversationTrace items={block.items} work_active={run_active} />",
+			"conversation_latest_reasoning_item_ids(render_blocks, active_run_id, run_active)",
 		);
 		expect(workspace).not.toContain("<ConversationTrace items={[block.item]}");
 	});
@@ -121,7 +121,7 @@ describe("conversation trace", () => {
 		]);
 	});
 
-	it("retains non-empty public reasoning summaries after their work settles", () => {
+	it("keeps reasoning grouping lifecycle-neutral before presentation filtering", () => {
 		const activity = item({
 			...base,
 			id: "activity_1",
@@ -150,11 +150,8 @@ describe("conversation trace", () => {
 			expect.objectContaining({ id: "reasoning:reasoning_1", type: "reasoning_group" }),
 		]);
 
-		/**
-		 * A provider closes the reasoning item when the assistant message carrying
-		 * it ends — mid-run whenever more tool calls follow. Thinking the reader is
-		 * still reading must not vanish underneath them while the run continues.
-		 */
+		/** Lifecycle does not alter grouping; the workspace's rendered-order
+		 * projection decides whether a grouped summary is still the visible tail. */
 		const completed_mid_run = make_conversation_trace_segments(
 			[activity, reasoning("completed")],
 			false,
@@ -165,50 +162,40 @@ describe("conversation trace", () => {
 			expect.objectContaining({ id: "reasoning:reasoning_1", type: "reasoning_group" }),
 		]);
 
-		const settled = make_conversation_trace_segments([activity, reasoning("completed")], false);
-		expect(settled).toEqual([
+		const grouped = make_conversation_trace_segments([activity, reasoning("completed")], false);
+		expect(grouped).toEqual([
 			expect.objectContaining({ type: "activity_group" }),
 			expect.objectContaining({ id: "reasoning:reasoning_1", type: "reasoning_group" }),
 		]);
 	});
 
-	it("renders live reasoning open and shimmering, then keeps settled history collapsible", () => {
+	it("renders only live tail reasoning without a nested disclosure", () => {
 		const reasoning = ReadSource(
 			"modules/frontend/src/routes/components/conversation-reasoning-summary.svelte",
 		);
 		const trace = ReadSource(
 			"modules/frontend/src/routes/components/conversation-trace.svelte",
 		);
-		const message = ReadSource(
-			"modules/frontend/src/routes/components/conversation-message.svelte",
-		);
 		const workspace = ReadSource(
 			"modules/frontend/src/routes/components/thread-workspace.svelte",
 		);
 
-		expect(reasoning).toContain('class="reasoning-acc flex');
-		expect(reasoning).toContain("data-open={open}");
-		expect(reasoning).toContain("{#each items as summary (summary.id)}");
-		expect(reasoning).toContain("border-l border-border/60");
+		expect(reasoning).toContain("const trace_items = $derived(items.slice(1));");
+		expect(reasoning).toContain("markdown={single_item.text}");
+		expect(reasoning).toContain("{#each trace_items as summary, index (summary.id)}");
 		expect(reasoning).toContain("<ShimmerText active={live}");
-		expect(reasoning).toContain("onclick={yield* ontoggle()}");
-		expect(reasoning).toContain(".reasoning-acc-panel");
+		expect(reasoning).not.toContain("aria-expanded");
+		expect(reasoning).not.toContain("ontoggle");
 		expect(reasoning).toContain("@media (prefers-reduced-motion: reduce)");
-		expect(reasoning).not.toContain("ontransitionend=");
-		expect(reasoning).not.toContain("onretired");
-		expect(trace).toContain("open_groups[segment.id] ?? work_active");
+		expect(trace).not.toContain("open_groups[segment.id] ?? work_active");
 		expect(trace).toContain("live={work_active}");
-		expect(trace).not.toContain("rendered_segments");
-		expect(trace).not.toContain("retirement");
-		expect(message).toContain(
-			'active={item.lifecycle === "active" || item.lifecycle === "streaming"}',
-		);
 		expect(workspace).toContain(
-			"work_active={run_active && block.turn_id === `run:${active_run_id}`}",
+			"conversation_latest_reasoning_item_ids(render_blocks, active_run_id, run_active)",
 		);
+		expect(workspace).toContain("has_details={visible_details.length > 0}");
 	});
 
-	it("groups adjacent reasoning summaries under one stable disclosure", () => {
+	it("groups adjacent reasoning summaries into one stable trace", () => {
 		const summary = (id: string, ordinal: number, text: string) =>
 			item({
 				...base,

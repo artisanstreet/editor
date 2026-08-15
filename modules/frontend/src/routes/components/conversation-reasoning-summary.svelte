@@ -1,101 +1,127 @@
 <script lang="ts" effect>
-	import ChevronRight from "@tabler/icons-svelte/icons/chevron-right";
-	import type { Effect } from "effect";
+	import { Comark } from "@comark/svelte";
 	import { thinking_word_for } from "$lib/conversation/activity-status";
 	import { ShimmerText } from "$lib/components/ui/shimmer-text";
+	import { conversation_parse_options } from "$lib/components/markdown/parsing";
 	import type { ConversationReasoningItem } from "$lib/conversation/trace";
 
 	let {
 		items,
 		live,
-		ontoggle,
-		open,
 	}: {
 		items: ReadonlyArray<ConversationReasoningItem>;
 		live: boolean;
-		ontoggle: () => Effect.Effect<void>;
-		open: boolean;
 	} = $props();
 
 	const thinking_word = $derived(thinking_word_for(items[0]?.run_id ?? "reasoning"));
+	const single_item = $derived(items.length === 1 ? items[0] : undefined);
+	const trace_items = $derived(items.slice(1));
+
+	/** Replay the entrance when this compact, live group mounts without a timer. */
+	const reveal = (node: HTMLElement) => {
+		node.classList.remove("is-hiding");
+		node.classList.remove("is-shown");
+		void node.offsetHeight;
+		node.classList.add("is-shown");
+
+		return {
+			destroy: () => node.classList.remove("is-shown", "is-hiding"),
+		};
+	};
 </script>
 
-<article
-	class="reasoning-acc flex max-w-(--prose-body-width) flex-col"
-	data-open={open}
-	data-state={open ? "open" : "closed"}
-	aria-label={`${thinking_word} reasoning summary`}
->
-	<button
-		type="button"
-		class="t-acc-head flex w-fit max-w-full cursor-pointer items-center gap-1 py-0.5 text-left text-base text-muted-foreground transition-colors duration-150 hover:text-foreground disabled:pointer-events-none motion-reduce:transition-none"
-		aria-expanded={open}
-		onclick={yield* ontoggle()}
-	>
-		<!-- Keep this node stable: lifecycle changes stop the shimmer without remounting history. -->
-		<ShimmerText active={live} class="min-w-0 truncate text-inherit">
-			{thinking_word}
-		</ShimmerText>
-		<span
-			class="reasoning-acc-chevron flex shrink-0"
-		>
-			<ChevronRight class="size-3.5" aria-hidden="true" />
-		</span>
-	</button>
-
-	<div class="reasoning-acc-panel">
-		<div class="reasoning-acc-panel-inner pt-1">
-			<div class="ml-2 flex flex-col gap-2 border-l border-border/60 py-0.5 pl-4">
-				{#each items as summary (summary.id)}
-					<p class="whitespace-pre-wrap text-base leading-7 text-muted-foreground">
-						{summary.text}
-					</p>
-				{/each}
-			</div>
+{#if single_item !== undefined}
+	<div class="t-stagger max-w-(--prose-body-width)" use:reveal>
+		<div class="t-stagger-line">
+			<Comark
+				class="prose conversation-reasoning text-base leading-7 text-muted-foreground"
+				markdown={single_item.text}
+				options={conversation_parse_options}
+			/>
 		</div>
 	</div>
-</article>
+{:else if items.length > 1}
+	<article
+		class="relative max-w-(--prose-body-width) pl-6"
+		aria-label={`${thinking_word} reasoning trace`}
+	>
+		<div
+			class="pointer-events-none absolute inset-y-0 left-0 w-4 after:absolute after:inset-y-0 after:left-1/2 after:w-px after:-translate-x-1/2 after:bg-border/60"
+			aria-hidden="true"
+		></div>
+		<div class="flex flex-col gap-1">
+			<div class="t-stagger" use:reveal>
+				<div class="t-stagger-line">
+					<ShimmerText active={live} class="text-base text-muted-foreground">
+						{thinking_word}
+					</ShimmerText>
+				</div>
+			</div>
+			{#each trace_items as summary, index (summary.id)}
+				<div class="t-stagger" use:reveal>
+					<div
+						class="t-stagger-line"
+						class:t-stagger-line--2={index === 0}
+						style={`transition-delay: calc(var(--stagger-stagger) * ${index + 1});`}
+					>
+						<Comark
+							class="prose conversation-reasoning text-base leading-7 text-muted-foreground"
+							markdown={summary.text}
+							options={conversation_parse_options}
+						/>
+					</div>
+				</div>
+			{/each}
+		</div>
+	</article>
+{/if}
 
 <style>
-	.reasoning-acc-panel {
-		display: grid;
-		grid-template-rows: 0fr;
-		transition: grid-template-rows 250ms cubic-bezier(0.22, 1, 0.36, 1);
+	:global(:root) {
+		--stagger-dur: 500ms;
+		--stagger-distance: 12px;
+		--stagger-stagger: 40ms;
+		--stagger-blur: 3px;
+		--stagger-ease: cubic-bezier(0.22, 1, 0.36, 1);
 	}
 
-	.reasoning-acc[data-open="true"] .reasoning-acc-panel {
-		grid-template-rows: 1fr;
-	}
-
-	.reasoning-acc-panel-inner {
-		overflow: hidden;
+	/* Lines start translated down + blurred + invisible; .is-shown
+	   on the parent flips them to their resting state. The second
+	   line's transition-delay holds it back by --stagger-stagger
+	   so the eye lands on the headline first. */
+	.t-stagger-line {
+		display: block;
 		opacity: 0;
-		filter: blur(2px);
+		transform: translateY(var(--stagger-distance));
+		filter: blur(var(--stagger-blur));
 		transition:
-			opacity 250ms cubic-bezier(0.22, 1, 0.36, 1),
-			filter 250ms cubic-bezier(0.22, 1, 0.36, 1);
+			opacity   var(--stagger-dur) var(--stagger-ease),
+			transform var(--stagger-dur) var(--stagger-ease),
+			filter    var(--stagger-dur) var(--stagger-ease);
+		will-change: transform, opacity, filter;
 	}
+	.t-stagger-line--2 { transition-delay: var(--stagger-stagger); }
 
-	.reasoning-acc[data-open="true"] .reasoning-acc-panel-inner {
+	.t-stagger:global(.is-shown) .t-stagger-line {
 		opacity: 1;
+		transform: translateY(0);
 		filter: blur(0);
 	}
-
-	.reasoning-acc-chevron {
-		transform: rotate(0deg);
-		transform-origin: center;
-		transition: transform 250ms cubic-bezier(0.22, 1, 0.36, 1);
-	}
-
-	.reasoning-acc[data-open="true"] .reasoning-acc-chevron {
-		transform: rotate(90deg);
+	/* Exit decouples from the stagger: same fade for every line,
+	   no Y return, no blur — so the disappearance reads as a
+	   single quiet fade instead of a reverse reveal. */
+	.t-stagger:global(.is-hiding) .t-stagger-line {
+		opacity: 0;
+		transform: translateY(0);
+		filter: blur(0);
+		transition:
+			opacity 200ms ease,
+			transform 0s linear,
+			filter 0s linear;
+		transition-delay: 0s;
 	}
 
 	@media (prefers-reduced-motion: reduce) {
-		.reasoning-acc-panel,
-		.reasoning-acc-panel-inner,
-		.reasoning-acc-chevron {
-			transition: none !important;
-		}
+		.t-stagger-line { transition: none !important; }
 	}
 </style>

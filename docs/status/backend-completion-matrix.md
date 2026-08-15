@@ -260,13 +260,16 @@ frontend and Forge builds, native checks/73 tests, SER policy scans, and indepen
 review. The full frontend suite reaches 680/681 tests; its one failure is an existing
 stale source assertion for the protected turn-segment key.
 
-Live reasoning summaries now project adjacent updates into one automatically open,
-reader-collapsible verb disclosure with a single vertical rail. When the owning run
-settles, an open disclosure is retained for the shared accordion's upward close and
-unmounted on its grid transition; a disclosure the reader already closed retires
-immediately. Reduced motion uses the global one-millisecond transition policy so the
-same transition-end lifecycle remains deterministic. Twelve focused tests, frontend
-lint, client/SSR production builds, SER policy scans, and independent review pass.
+On 2026-08-15, the renderer began projecting only the active run's consecutive,
+non-empty reasoning summaries at the latest meaningful visible position across nested
+and post-steer blocks. Later prose/activity or settlement retires them without changing
+durable grouping. One summary renders directly through the safe shared Markdown parser;
+two or more replace the first with a deterministic thinking verb and reveal the remaining
+Markdown rows on a visual-only rail using the transitions.dev text stagger. Every new row
+has the same reduced-motion-aware reveal and reasoning has no disclosure. Post-steer
+liveness is owned by source-item run identity rather than the acknowledged user turn id.
+Focused renderer coverage (4 files / 28 tests), frontend lint, client/SSR production
+builds, SER scans, and independent integration review pass.
 
 On 2026-08-09, Codex app-server and Claude CLI child lifecycles and
 renderer-safe transcripts gained one provider-neutral adapter contract. Child
