@@ -5,13 +5,14 @@ Last updated: 2026-08-17. Branch continuity only; durable verified product statu
 
 ## Working State
 
-- Repository `C:\Users\sander\Desktop\artisan-editor`; work directly on `master`. The stability
-  implementation is pushed through commit `25a54741aee38a1cccd3f283a65fe9a0b6a7e106`.
+- Repository `C:\Users\sander\Desktop\artisan-editor`; work directly on `master`. Stability fixes
+  `68c2ebb3` / `25a54741` and verified status `e3db47ce` are pushed.
 - A large renderer/backend/provider milestone remains intentionally dirty (200+ paths). Preserve
   unrelated frontend, protocol, transport, migration, lockfile, documentation, and test hunks. Do
   not stage shared files wholesale.
-- Stability incident closure covers first-message preservation on new-thread creation and installed
-  desktop recovery from renderer process loss; only the status commit/final audit remains.
+- Stability incident closure is complete: first-message preservation, installed desktop recovery,
+  focused regressions, affected gates, installed artifact inspection, live renderer replacement,
+  durable status, clean index, and remote `master` alignment all passed the final audit.
 - Repository-required `sanders-skill` governs Effect architecture, validation, Git safety, and
   subagent workflow. Workers use Terra/medium, own disjoint files, preserve dirty work, and do not
   spawn further workers.
