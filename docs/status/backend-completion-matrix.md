@@ -1,6 +1,6 @@
 # Artisan Editor Completion Matrix
 
-Scope: the V1 prototype described by [`artisan-editor-v1.md`](../prds/artisan-editor-v1.md), including the backend, desktop shell, renderer, and release harness. Status is verified implementation status as of 2026-08-14, not design intent. Codex and Claude are production adapters over the user's external provider executables; Forge and Editor contain only Artisan-owned runtime code. Embedded browsers/WebViews and broad Git mutation commands remain deliberately outside this prototype rather than incomplete hidden scope.
+Scope: the V1 prototype described by [`artisan-editor-v1.md`](../prds/artisan-editor-v1.md), including the backend, desktop shell, renderer, and release harness. Status is verified implementation status as of 2026-08-17, not design intent. Codex and Claude are production adapters over the user's external provider executables; Forge and Editor contain only Artisan-owned runtime code. Embedded browsers/WebViews and broad Git mutation commands remain deliberately outside this prototype rather than incomplete hidden scope.
 
 Verification snapshot: on 2026-08-10, the integrated worktree's `pnpm run validate` passed formatting, lint, root TypeScript, static production frontend and Forge builds, 374 passing Vitest files plus 3 skipped files, 2,571 passing tests plus 6 explicit skips, the dev-TUI Bun smoke test, native formatting/clippy, and 73 Rust tests. The exact staged Bazel milestone passed `//:forge_sea`, TypeScript, frontend, Forge, native, and 30 focused tests with one skip; the release target emitted only the 386,274,304-byte `Artisan Forge.exe`. Full staged `//:test` reached Vitest but reported seven existing baseline assertions outside this slice.
 
@@ -14,6 +14,21 @@ installed shortcuts retained `ae.exe open`; Forge became ready after 20.54 secon
 first Editor handoff established loopback transport after 20.03 seconds without a second
 open command. `validate:desktop` passes 46 tests, `validate:native` passes 33 installer plus
 45 CLI tests, and independent lifecycle/path/security review is clean.
+
+On 2026-08-17, installed diagnostics proved the unreloadable black window was renderer
+process loss: 0.2.74 and 0.2.77 exited for OOM, while 0.2.76 crashed. The desktop now
+defers and coalesces an authenticated renderer replacement after `render-process-gone`,
+rejects recovery during shutdown, and awaits cancellation before Forge cleanup. Installed
+0.2.78 contains the recovery in `app.asar`; a controlled renderer loss kept desktop main
+PID 7372 alive and replaced renderer PID 13744 with PID 18400 in 1.6 seconds, with the
+diagnostic trace completing from the replacement. The OOM allocator source remains
+unproven; this milestone is verified containment, not a root-cause claim. Separately, the
+new-thread controller now installs the retained first-submission release in the route scope
+under `Effect.uninterruptibleMask` before publishing the claim, so route replacement cannot
+silently strand and erase the first message. Exact scope-handoff regressions pass; the
+post-change desktop gate passes 13 files / 52 tests plus the production build, and the
+focused frontend controller/route cluster passes 3 files / 8 tests. Independent lifecycle
+review is clean. The fixes are pushed on `master` in `68c2ebb3` and `25a54741`.
 
 Artisan-owned presentation instructions are resolved through an immutable Effect
 Service for every ordinary, recovered, and graph engine run. Codex app-server
