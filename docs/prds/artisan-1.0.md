@@ -76,13 +76,13 @@ renaming anything.
 | Editor web app (includes attach approval and fleet UI) | `editor.artisan.st` |
 | Editor control-plane API (attach, directory, sync) | `editor.api.artisan.st` |
 | Editor relay (WSS) | `editor.relay.artisan.st` (regional `<region>.editor.relay.artisan.st` later) |
-| Ecosystem identity (sign-in ceremony, tokens, passkeys) | `id.artisan.st` |
+| Ecosystem auth (magic-link sign-in, tokens) | `auth.api.artisan.st` |
 | Account and org console (members, licenses, billing) | `account.artisan.st` |
 | Install transports | `artisan.st/editor/windows`, `artisan.st/editor/unix`, `artisan.st/forge` |
 
 Identity is deliberately not under `editor.*`: accounts and orgs are
 ecosystem-level. Product backends never mint identities — they consume
-`id.artisan.st` tokens and check entitlements.
+`auth.api.artisan.st` tokens and check entitlements.
 
 ## What Changes From Today
 
@@ -142,12 +142,15 @@ enrollment.
    TTL 15 minutes, single use. The CLI prints the URL + code and opens the
    browser if the host has one.
 3. The user signs in at the verification URL (`editor.artisan.st/attach`,
-   any device; sign-in redirects through `id.artisan.st`). The approval page
-   shows the pending host: name, platform, key fingerprint, requesting IP,
-   and the credential-sync opt-in checkbox.
-4. On approval, an owner-key-holding context (the approving browser session
-   via passkey-PRF, or an owner device relaying through Sync) wraps the fleet
-   keys to the host's public key and posts the sealed enrollment.
+   any device; magic-link sign-in via `auth.api.artisan.st`). The approval
+   page shows the pending host: name, platform, key fingerprint, requesting
+   IP, and the credential-sync opt-in checkbox.
+4. On approval, fleet keys are wrapped to the host's public key by an owner
+   device: an online signed-in Editor performs the wrap automatically, or
+   the approval page derives keys from a recovery code, or — for the very
+   first host on an account — the host bootstraps the fleet keys itself.
+   The sealed enrollment is posted either way; sign-in alone never holds
+   key material.
 5. The host, polling `attach/poll`, receives: host record, relay credentials
    (token bound to its key), and the sealed enrollment it alone can open. It
    connects outbound to Relay and appears in the fleet.
@@ -160,13 +163,18 @@ inverse; both end in the same revocation path.
 
 ## Identity and Security Model
 
-- **Authentication:** passkeys (WebAuthn, resident keys) as primary; email
-  OTP as fallback and for account creation. Sessions are short-lived tokens
-  refreshed by key possession. No passwords at 1.0.
-- **Key hierarchy:** an Account Root Key wrapped by (a) passkey PRF outputs
-  per owner device and (b) recovery codes → Fleet Key → per-blob content keys.
-  Hosts hold their own device keypairs; owner approval wraps the Fleet Key to
-  enrolled host keys. All wrapping is client-side.
+- **Authentication:** email magic links, exclusively. No passwords, no
+  passkeys, no OTP codes at 1.0 — one mechanism, boring and universal.
+  Links are single-use, 15-minute TTL, bound to the requesting context.
+  Sessions are short-lived tokens with refresh. Sign-in authorizes API
+  access only; it never by itself unlocks sealed data (below), so an email
+  compromise cannot read the fleet's secrets.
+- **Key hierarchy:** the Account Root Key is generated on the first owner
+  device (never derived from sign-in), wrapped to recovery codes, and
+  transferred to new owner devices only through device-approval →
+  Fleet Key → per-blob content keys. Hosts hold their own device keypairs;
+  owner approval wraps the Fleet Key to enrolled host keys. All wrapping is
+  client-side.
 - **Sealed blobs:** preferences, settings subset, harness credential bundles,
   and fleet metadata labels are E2E-encrypted. The Directory stores only what
   routing operationally requires in plaintext: account id, host public keys,
@@ -210,7 +218,7 @@ pure Gleam.
 
 Two deployables plus Postgres and object storage:
 
-1. **`street-id`** — identity + entitlements (`id.artisan.st`,
+1. **`street-auth`** — identity + entitlements (`auth.api.artisan.st`,
    `account.artisan.st`). Product-agnostic by construction.
 2. **`street-editor`** — the Editor control plane + relay
    (`editor.api.artisan.st`, `editor.relay.artisan.st`). One OTP release;
@@ -231,8 +239,8 @@ product backends on every session. Editor is the first consumer, never a
 special case: `street-id` contains no Editor tables, and adding a future
 product is a new license id, not a schema change.
 
-Scope: account creation, passkey registration/assertion, email OTP fallback,
-sessions and token issuance (OIDC-shaped so future products and third-party
+Scope: account creation, magic-link email sign-in, sessions and token
+issuance (OIDC-shaped internally so future products and third-party
 integrations are standard), org membership, license records, owner-device
 registry, recovery codes, audit. Storage: Postgres.
 
@@ -261,7 +269,7 @@ reserved for later. Storage: Postgres + object storage for large payloads.
 
 Two, with distinct owners:
 
-- **`account.artisan.st`** (part of `street-id`): ecosystem console — orgs,
+- **`account.artisan.st`** (part of `street-auth`): ecosystem console — orgs,
   members, licenses, sessions, owner devices, recovery codes, audit, data
   export/delete. Billing lives here later.
 - **Fleet UI inside `editor.artisan.st`**: the Editor web app itself hosts
@@ -339,10 +347,10 @@ teams/multi-user fleets; self-hosted Street delivery; NAT hole-punching
 
 ### M1 — Street foundation
 
-`street-id` + account console: account creation, personal orgs, licenses,
-passkeys, OTP fallback, sessions, recovery codes, owner devices. Accepted
-when: a fresh browser can
-create an account, register a passkey, sign out, recover via code; audit
+`street-auth` + account console: account creation, personal orgs, licenses,
+magic-link sign-in, sessions, recovery codes, owner devices. Accepted when:
+a fresh browser can create an account and sign in via emailed link, sign
+out, recover via code; links are provably single-use and expiring; audit
 events recorded; rate limits enforced; staging deployed with backups.
 
 ### M2 — Fleet: Directory, Relay, attach
@@ -396,6 +404,6 @@ and only then, 1.0 ships.
    host records).
 5. Exact contract-generation pipeline (Effect Schema → OpenAPI → Gleam
    contract tests) and where the generated artifacts live.
-6. Whether `street-id` should expose full OIDC for third parties at 1.0 or
+6. Whether `street-auth` should expose full OIDC for third parties at 1.0 or
    only first-party token issuance (recommendation: first-party only,
    OIDC-shaped internally so opening it later is configuration).
