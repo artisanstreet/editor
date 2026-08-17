@@ -1,4 +1,4 @@
-import { Context, Data, Effect, Layer, Ref, Semaphore, Stream, SubscriptionRef } from "effect";
+import { Context, Data, Effect, Layer, Ref, Scope, Semaphore, Stream, SubscriptionRef } from "effect";
 
 import { SnowflakeId, type Project, type ThreadSessionPolicy } from "@artisan/protocol";
 import { ArtisanClient, type ArtisanClientError } from "@artisan/transport/client";
@@ -42,12 +42,9 @@ export class DraftThreadController extends Context.Service<
 	DraftThreadController,
 	{
 		readonly Changes: Stream.Stream<DraftThreadState>;
-		readonly ClaimPendingSubmission: (
-			thread_id: string,
-		) => Effect.Effect<DraftSubmissionClaim | undefined>;
 		readonly AwaitPendingSubmissionClaim: (
 			thread_id: string,
-		) => Effect.Effect<DraftSubmissionClaim | undefined>;
+		) => Effect.Effect<DraftSubmissionClaim | undefined, never, Scope.Scope>;
 		readonly Current: Effect.Effect<DraftThreadState>;
 		readonly Initialize: (
 			project: Project | undefined,
@@ -223,7 +220,8 @@ export const DraftThreadControllerLive = Layer.effect(
 					: undefined;
 			});
 
-		const ClaimPendingSubmission = (thread_id: string) =>
+		/** Takes the controller lock only; callers must use the scoped waiting boundary below. */
+		const TryClaimPendingSubmission = (thread_id: string) =>
 			Effect.gen(function* () {
 				return yield* submit_lock.withPermit(
 					Effect.gen(function* () {
@@ -277,18 +275,32 @@ export const DraftThreadControllerLive = Layer.effect(
 		 * this route is itself replaced.
 		 */
 		const AwaitPendingSubmissionClaim = (thread_id: string) =>
-			Effect.gen(function* () {
-				while ((yield* PendingSubmission(thread_id)) !== undefined) {
-					const claim = yield* ClaimPendingSubmission(thread_id);
-					if (claim !== undefined) return claim;
-					yield* Effect.sleep("10 millis");
-				}
-				return undefined;
-			});
+			Effect.uninterruptibleMask((restore) =>
+				Effect.gen(function* () {
+					/** Waiting belongs to the route lifetime and must remain interruptible. */
+					const claim = yield* restore(
+						Effect.gen(function* () {
+							while ((yield* PendingSubmission(thread_id)) !== undefined) {
+								const candidate = yield* TryClaimPendingSubmission(thread_id);
+								if (candidate !== undefined) return candidate;
+								yield* Effect.sleep("10 millis");
+							}
+							return undefined;
+						}),
+					);
+					if (claim === undefined) return undefined;
+					/**
+					 * A route may be replaced immediately after acquisition. Install its
+					 * release in that route's scope before publishing the claim to it, so
+					 * interruption cannot strand the retained first submission.
+					 */
+					yield* Effect.addFinalizer(() => claim.Release);
+					return claim;
+				}),
+			);
 
 		return DraftThreadController.of({
 			AwaitPendingSubmissionClaim,
-			ClaimPendingSubmission,
 			Changes: SubscriptionRef.changes(state),
 			Current: Effect.gen(function* () {
 				return yield* SubscriptionRef.get(state);

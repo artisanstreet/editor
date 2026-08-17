@@ -1,4 +1,4 @@
-import { Effect, Layer, Queue, Ref, Stream } from "effect";
+import { Effect, Exit, Layer, Option, Queue, Ref, Scope, Stream } from "effect";
 import { describe, expect, it } from "vitest";
 
 import { MakeSnowflakeIdLive } from "@artisan/protocol";
@@ -70,38 +70,43 @@ describe("frontend controller hostile races", () => {
 				const retried = yield* controller.Retry;
 				expect(retried.command_id).toBe(after_failure.command_id);
 
-				const [first_owner, second_owner] = yield* Effect.all(
-					[
-						controller.ClaimPendingSubmission(retried.thread_id),
-						controller.ClaimPendingSubmission(retried.thread_id),
-					],
-					{ concurrency: "unbounded" },
-				);
-				expect(
-					[first_owner, second_owner].filter((claim) => claim !== undefined),
-				).toHaveLength(1);
-
-				const owner = first_owner ?? second_owner;
+				const first_route_scope = yield* Scope.make();
+				const owner = yield* controller
+					.AwaitPendingSubmissionClaim(retried.thread_id)
+					.pipe(Scope.provide(first_route_scope));
 				if (owner === undefined) return yield* Effect.die("no claim owner");
-				/** The replacement route waits for the old scope instead of exposing a dead retry. */
-				const [remounted_owner] = yield* Effect.all(
-					[
-						controller.AwaitPendingSubmissionClaim(retried.thread_id),
-						Effect.gen(function* () {
-							/** Simulates unmount after Forge accepted the command but before claim completion. */
-							yield* Effect.sleep("1 millis");
-							yield* owner.Release;
-						}),
-					],
-					{ concurrency: "unbounded" },
-				);
+
+				const replacement_route_scope = yield* Scope.make();
+				const blocked_replacement = yield* controller
+					.AwaitPendingSubmissionClaim(retried.thread_id)
+					.pipe(
+						Scope.provide(replacement_route_scope),
+						Effect.timeoutOption("20 millis"),
+					);
+				expect(Option.isNone(blocked_replacement)).toBe(true);
+
+				/** Closing the outgoing route triggers the claim's controller-owned finalizer. */
+				yield* Scope.close(first_route_scope, Exit.void);
+				const remounted_owner = yield* controller
+					.AwaitPendingSubmissionClaim(retried.thread_id)
+					.pipe(Scope.provide(replacement_route_scope));
 				expect(remounted_owner?.command_id).toBe(owner.command_id);
 				if (remounted_owner === undefined) return yield* Effect.die("remount lost claim");
-				/** A duplicated stale finalizer cannot release the remounted owner. */
-				yield* owner.Release;
-				expect(yield* controller.ClaimPendingSubmission(retried.thread_id)).toBeUndefined();
+
+				/** A stale duplicate route close cannot release the replacement claim. */
+				yield* Scope.close(first_route_scope, Exit.void);
+				const contender_route_scope = yield* Scope.make();
+				const blocked_contender = yield* controller
+					.AwaitPendingSubmissionClaim(retried.thread_id)
+					.pipe(
+						Scope.provide(contender_route_scope),
+						Effect.timeoutOption("20 millis"),
+					);
+				yield* Scope.close(contender_route_scope, Exit.void);
+				expect(Option.isNone(blocked_contender)).toBe(true);
 
 				yield* remounted_owner.Complete;
+				yield* Scope.close(replacement_route_scope, Exit.void);
 				expect((yield* controller.Current)._tag).toBe("Uninitialized");
 			}).pipe(
 				Effect.provide(DraftThreadControllerLive),

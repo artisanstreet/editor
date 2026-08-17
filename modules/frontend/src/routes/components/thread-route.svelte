@@ -665,12 +665,6 @@
 		);
 	});
 	yield* ClaimPendingFirstSubmission;
-	yield* Effect.addFinalizer(() =>
-		Effect.gen(function* () {
-			const claimed = pending_first_submission;
-			if (claimed !== undefined) yield* claimed.Release;
-		}),
-	);
 	if (pending_first_submission !== undefined) {
 		yield* RetryPendingFirstSubmission;
 	}
