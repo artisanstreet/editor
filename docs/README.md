@@ -21,6 +21,7 @@ used as a product-history archive.
 
 - [Frontend checkpoints](./engineering/frontend-checkpoints.md)
 - [Disk I/O safety](./engineering/disk-io-safety.md)
+- [WSL support](./engineering/wsl-support.md)
 - [Barekey design-language inspection](./design/barekey-design-language.md)
 - [Agent engine I/O research](./research/agent-engine-io.md)
 - [Portable engine handoff through compaction](./research/portable-engine-handoff.md)
