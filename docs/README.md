@@ -2,6 +2,7 @@
 
 ## Product requirements
 
+- [Artisan 1.0 — the Artisan Street ecosystem](./prds/artisan-1.0.md)
 - [Artisan Editor V1](./prds/artisan-editor-v1.md)
 - [Artisan Cowork](./prds/artisan-cowork-prd.md)
 - [Artisan distribution and first-time setup](./prds/artisan-distribution-prd.md)
