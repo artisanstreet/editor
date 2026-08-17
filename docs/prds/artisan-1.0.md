@@ -185,14 +185,28 @@ inverse; both end in the same revocation path.
 
 ## Street Services (infrastructure to build)
 
-The Street backend is written in **Elixir** (Phoenix, Ecto/Postgres, OTP
-releases). Rationale: the relay — huge numbers of long-lived WSS connections,
-per-connection isolation, presence, fan-out — is precisely the BEAM's native
-workload, and identity is where library maturity is a security property
-(mature WebAuthn, auth, and job tooling exist in Elixir). Gleam was
-considered and rejected for 1.0: the type system is attractive but the
-auth/WebAuthn ecosystem is too thin for an identity service; raw Erlang costs
-too much product velocity. One language, one runtime, supervised.
+The Street backend is written in **Gleam on the BEAM** (Wisp + Mist for
+HTTP/WSS, `gleam_otp` actors, Postgres via typed bindings, OTP releases).
+Two constraints force this intersection and only Gleam satisfies both:
+
+1. **The runtime must be the BEAM.** The relay and attach flows are huge
+   numbers of long-lived, stateful, isolated connections with polling storms
+   and presence fan-out — per-process heaps, preemptive scheduling, and
+   supervision trees are the product's survivability story.
+2. **The language must be statically typed.** Street is built agent-first,
+   and the compiler is the agent's tightest verification loop; a sound type
+   system with exhaustive matching and fast compiles is the primary QA
+   instrument, not a comfort.
+
+Haskell was seriously considered (excellent types, capable green-thread
+runtime) and rejected on operational grounds: one failure domain, global GC
+tails on long-lived connections, space-leak pathology, slow compiles in the
+agent loop. Elixir was rejected as the application language for lacking
+static types, but remains the substrate for **typed FFI**: security-critical
+ceremonies use battle-tested Erlang/Elixir libraries (WebAuthn via Wax,
+supervisors where `gleam_otp` is young) behind narrow, audited, typed Gleam
+boundaries. The FFI surface is enumerated and reviewed; application logic is
+pure Gleam.
 
 Two deployables plus Postgres and object storage:
 
@@ -205,7 +219,7 @@ Two deployables plus Postgres and object storage:
 Contracts between the TypeScript clients and the Elixir services are a single
 generated boundary: schemas defined once (Effect Schema in a shared contracts
 package, as the repo already does for its own protocol), OpenAPI emitted from
-them, and the Elixir side verified against the spec with contract tests in
+them, and the Gleam side verified against the spec with contract tests in
 CI. No hand-maintained duplicate types.
 
 ### 1. Identity and Entitlements (ecosystem)
@@ -268,9 +282,9 @@ Two, with distinct owners:
 - **Abuse:** per-IP and per-account rate limits on attach and OTP; disposable
   fleet quotas.
 - **Repo:** sibling repository in the GitHub org (`artisanstreet/street`),
-  Elixir umbrella or two apps; the shared contracts package is published from
-  this repository (or a small `artisanstreet/contracts` repo) and consumed by
-  both sides.
+  two Gleam applications sharing internal packages; the shared contracts
+  package is published from this repository (or a small
+  `artisanstreet/contracts` repo) and consumed by both sides.
 
 ## Client-Side Work
 
@@ -380,7 +394,7 @@ and only then, 1.0 ships.
 4. Whether WSL distros appear as distinct fleet hosts or nested under their
    Windows host in the dropdown (recommendation: nested visual, distinct
    host records).
-5. Exact contract-generation pipeline (Effect Schema → OpenAPI → Elixir
+5. Exact contract-generation pipeline (Effect Schema → OpenAPI → Gleam
    contract tests) and where the generated artifacts live.
 6. Whether `street-id` should expose full OIDC for third parties at 1.0 or
    only first-party token issuance (recommendation: first-party only,
