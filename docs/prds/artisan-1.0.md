@@ -14,7 +14,7 @@ pairing links, IPs, port forwarding, SSH, or any third-party network product:
 
 ```sh
 # On any host, no Editor required:
-curl -fsSL https://artisan.street/forge | sh
+curl -fsSL https://artisan.st/forge | sh
 ae attach
 # → opens (or prints) a link: "Sign in to your Artisan Street Account
 #    to attach DESKTOP-96USC6J to your fleet."
@@ -57,10 +57,32 @@ hardening them is in scope for 1.0 and gates the release.
 | Owner device | A device holding account keys (an Editor the user signed into). |
 | Forge | The autonomous backend on every host (unchanged role). |
 | Editor | The stateless client (Electron or browser). |
-| Street services | First-party cloud: Identity, Directory, Relay, Sync, Console. |
+| Street services | First-party cloud: Identity/Entitlements, Directory, Relay, Sync. |
+| Organization | The owner of product licenses; every account gets a personal org. |
+| License | An org's entitlement to a product plan, e.g. `{product: "editor", plan: "free"}`. |
 | Attach flow | The `ae attach` device-authorization sign-in that enrolls a host. |
 | Harness | An installed agent engine (Claude, Codex, future native harness). |
 | Sealed blob | An E2E-encrypted payload stored or routed by Street services. |
+
+## Domains
+
+The apex is `artisan.st`. Products live as subdomains; each product's backend
+lives under `<product>.api.` so the ecosystem scales past the Editor without
+renaming anything.
+
+| Surface | URL |
+| --- | --- |
+| Landing / product pages | `artisan.st` (Editor page at `artisan.st/editor`) |
+| Editor web app (includes attach approval and fleet UI) | `editor.artisan.st` |
+| Editor control-plane API (attach, directory, sync) | `editor.api.artisan.st` |
+| Editor relay (WSS) | `editor.relay.artisan.st` (regional `<region>.editor.relay.artisan.st` later) |
+| Ecosystem identity (sign-in ceremony, tokens, passkeys) | `id.artisan.st` |
+| Account and org console (members, licenses, billing) | `account.artisan.st` |
+| Install transports | `artisan.st/editor/windows`, `artisan.st/editor/unix`, `artisan.st/forge` |
+
+Identity is deliberately not under `editor.*`: accounts and orgs are
+ecosystem-level. Product backends never mint identities — they consume
+`id.artisan.st` tokens and check entitlements.
 
 ## What Changes From Today
 
@@ -99,7 +121,7 @@ identity layer around the verified architecture.
    on all hosts". Credential sync is per-host opt-in, visible at attach time
    and editable later. Credentials travel as sealed blobs between devices;
    Street never holds plaintext.
-6. **Revocation.** From any Editor or the web Console: remove a host → its
+6. **Revocation.** From any Editor or `account.artisan.st`: remove a host → its
    device key is dropped fleet-wide, its relay session is terminated, its
    sealed-blob access ends. Removing an owner device additionally rotates
    wrapped fleet keys.
@@ -119,9 +141,10 @@ enrollment.
 2. Response: `{verification_url, user_code, device_code, interval, expires_in}`.
    TTL 15 minutes, single use. The CLI prints the URL + code and opens the
    browser if the host has one.
-3. The user signs in at the verification URL (any device). The Console shows
-   the pending host: name, platform, key fingerprint, requesting IP, and the
-   credential-sync opt-in checkbox.
+3. The user signs in at the verification URL (`editor.artisan.st/attach`,
+   any device; sign-in redirects through `id.artisan.st`). The approval page
+   shows the pending host: name, platform, key fingerprint, requesting IP,
+   and the credential-sync opt-in checkbox.
 4. On approval, an owner-key-holding context (the approving browser session
    via passkey-PRF, or an owner device relaying through Sync) wraps the fleet
    keys to the host's public key and posts the sealed enrollment.
@@ -162,17 +185,42 @@ inverse; both end in the same revocation path.
 
 ## Street Services (infrastructure to build)
 
-All services are TypeScript/Effect, sharing schema contracts with the product
-repo (`modules/protocol` conventions; a new shared contracts package).
-Deployment starts as **one deployable** ("street monoservice") plus Postgres
-and object storage, split later only under real load. Rationale: one
-maintainer, shared Effect idioms, minimal operational surface at launch.
+The Street backend is written in **Elixir** (Phoenix, Ecto/Postgres, OTP
+releases). Rationale: the relay — huge numbers of long-lived WSS connections,
+per-connection isolation, presence, fan-out — is precisely the BEAM's native
+workload, and identity is where library maturity is a security property
+(mature WebAuthn, auth, and job tooling exist in Elixir). Gleam was
+considered and rejected for 1.0: the type system is attractive but the
+auth/WebAuthn ecosystem is too thin for an identity service; raw Erlang costs
+too much product velocity. One language, one runtime, supervised.
 
-### 1. Identity
+Two deployables plus Postgres and object storage:
 
-Accounts, passkey registration/assertion, email OTP, sessions, owner-device
-records, recovery codes. Storage: Postgres. Public surface:
-`accounts.artisan.street` (final domain TBD).
+1. **`street-id`** — identity + entitlements (`id.artisan.st`,
+   `account.artisan.st`). Product-agnostic by construction.
+2. **`street-editor`** — the Editor control plane + relay
+   (`editor.api.artisan.st`, `editor.relay.artisan.st`). One OTP release;
+   the relay can split out under real load without an API change.
+
+Contracts between the TypeScript clients and the Elixir services are a single
+generated boundary: schemas defined once (Effect Schema in a shared contracts
+package, as the repo already does for its own protocol), OpenAPI emitted from
+them, and the Elixir side verified against the spec with contract tests in
+CI. No hand-maintained duplicate types.
+
+### 1. Identity and Entitlements (ecosystem)
+
+Accounts belong to people; **organizations own licenses**. Every account gets
+a personal org at creation; teams come later on the same shape. A license is
+a typed entitlement — `{product: "editor", plan: "free"}` — checked by
+product backends on every session. Editor is the first consumer, never a
+special case: `street-id` contains no Editor tables, and adding a future
+product is a new license id, not a schema change.
+
+Scope: account creation, passkey registration/assertion, email OTP fallback,
+sessions and token issuance (OIDC-shaped so future products and third-party
+integrations are standard), org membership, license records, owner-device
+registry, recovery codes, audit. Storage: Postgres.
 
 ### 2. Directory
 
@@ -195,11 +243,17 @@ preferences, settings subset, harness credential bundles, fleet labels.
 Conflict policy: last-writer-wins per blob at 1.0 with version vectors
 reserved for later. Storage: Postgres + object storage for large payloads.
 
-### 5. Console
+### 5. Web surfaces
 
-Web app (SvelteKit, shared design language with the Editor): sign-in, fleet
-management, pending-attach approvals, owner devices, sessions, audit log,
-recovery codes, data export/delete. This is also where billing lives later.
+Two, with distinct owners:
+
+- **`account.artisan.st`** (part of `street-id`): ecosystem console — orgs,
+  members, licenses, sessions, owner devices, recovery codes, audit, data
+  export/delete. Billing lives here later.
+- **Fleet UI inside `editor.artisan.st`**: the Editor web app itself hosts
+  attach approvals (`editor.artisan.st/attach`, the URL `ae attach` prints),
+  host management, and sync policy. No separate console product; the Editor
+  is the console for its own fleet.
 
 ### Cross-cutting
 
@@ -213,8 +267,10 @@ recovery codes, data export/delete. This is also where billing lives later.
   (sealed blobs are exported as-is; deletion is real).
 - **Abuse:** per-IP and per-account rate limits on attach and OTP; disposable
   fleet quotas.
-- **Repo:** `street/` — its own workspace in this repository or a sibling
-  repository sharing the contracts package. Decision at M1 kickoff.
+- **Repo:** sibling repository in the GitHub org (`artisanstreet/street`),
+  Elixir umbrella or two apps; the shared contracts package is published from
+  this repository (or a small `artisanstreet/contracts` repo) and consumed by
+  both sides.
 
 ## Client-Side Work
 
@@ -269,8 +325,9 @@ teams/multi-user fleets; self-hosted Street delivery; NAT hole-punching
 
 ### M1 — Street foundation
 
-Identity + Console sign-in: account creation, passkeys, OTP fallback,
-sessions, recovery codes, owner devices. Accepted when: a fresh browser can
+`street-id` + account console: account creation, personal orgs, licenses,
+passkeys, OTP fallback, sessions, recovery codes, owner devices. Accepted
+when: a fresh browser can
 create an account, register a passkey, sign out, recover via code; audit
 events recorded; rate limits enforced; staging deployed with backups.
 
@@ -318,10 +375,13 @@ and only then, 1.0 ships.
 
 1. Visibility of the local-only mode in first-run UX (recommendation: one
    quiet link, never a wall).
-2. Final domains and naming (`artisan.street` assumed throughout).
-3. Email provider for OTP and the sender identity.
-4. Street repo location: workspace in this monorepo vs. sibling repo.
-5. Relay regionalization order after single-region launch.
-6. Whether WSL distros appear as distinct fleet hosts or nested under their
+2. Email provider for OTP and the sender identity (`no-reply@artisan.st`).
+3. Relay regionalization order after single-region launch.
+4. Whether WSL distros appear as distinct fleet hosts or nested under their
    Windows host in the dropdown (recommendation: nested visual, distinct
    host records).
+5. Exact contract-generation pipeline (Effect Schema → OpenAPI → Elixir
+   contract tests) and where the generated artifacts live.
+6. Whether `street-id` should expose full OIDC for third parties at 1.0 or
+   only first-party token issuance (recommendation: first-party only,
+   OIDC-shaped internally so opening it later is configuration).
