@@ -13,6 +13,7 @@ import {
 	make_node_forge_handoff_process_layer,
 } from "./forge-handoff";
 import { resolve_desktop_paths } from "./paths";
+import { make_renderer_death_recovery } from "./renderer-death-recovery";
 import { CreateRendererDiagnosticLog } from "./renderer-diagnostics";
 import { app_host, app_scheme, ServeRendererAsset } from "./renderer-host";
 
@@ -446,8 +447,26 @@ export const StartDesktop = Effect.gen(function* () {
 		Effect.provide(make_node_forge_handoff_process_layer),
 	);
 	let cleanup: Promise<void> | undefined;
-	const Cleanup = () => (cleanup ??= Effect.runPromise(desktop_lifecycle.Cleanup()));
 	let quitting = false;
+	const renderer_death_recovery = make_renderer_death_recovery({
+		IsAvailable: () =>
+			!quitting && !editor_window.isDestroyed() && !editor_window.webContents.isDestroyed(),
+		Reconnect: desktop_lifecycle.Reconnect,
+		ReportFailure: () =>
+			console.error(
+				JSON.stringify({
+					kind: "artisan:renderer-recovery",
+					message: "Renderer recovery handoff failed.",
+					ok: false,
+				}),
+			),
+	});
+	/** Recovery is deferred by the controller; synchronous navigation here can crash Electron. */
+	editor_window.webContents.on("render-process-gone", () => renderer_death_recovery.Request());
+	const Cleanup = () =>
+		(cleanup ??= Effect.runPromise(
+			renderer_death_recovery.Close().pipe(Effect.andThen(desktop_lifecycle.Cleanup())),
+		));
 	app.on("before-quit", (event) => {
 		if (quitting) return;
 		event.preventDefault();
