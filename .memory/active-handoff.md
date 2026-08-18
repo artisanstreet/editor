@@ -1,6 +1,6 @@
 # Active Branch Handoff
 
-Last updated: 2026-08-17. Branch continuity only; durable verified product status belongs in
+Last updated: 2026-08-18. Branch continuity only; durable verified product status belongs in
 [`docs/status/backend-completion-matrix.md`](../docs/status/backend-completion-matrix.md).
 
 ## Working State
@@ -10,59 +10,42 @@ Last updated: 2026-08-17. Branch continuity only; durable verified product statu
 - A large renderer/backend/provider milestone remains intentionally dirty (200+ paths). Preserve
   unrelated frontend, protocol, transport, migration, lockfile, documentation, and test hunks. Do
   not stage shared files wholesale.
-- Stability incident closure is complete: first-message preservation, installed desktop recovery,
-  focused regressions, affected gates, installed artifact inspection, live renderer replacement,
-  durable status, clean index, and remote `master` alignment all passed the final audit.
 - Repository-required `sanders-skill` governs Effect architecture, validation, Git safety, and
   subagent workflow. Workers use Terra/medium, own disjoint files, preserve dirty work, and do not
   spawn further workers.
 
-## Active Stability Incident
+## Active First-Message Incident
 
-- Installed diagnostics prove the black window is a dead Chromium renderer, not an overlay or
-  navigation failure. Version 0.2.74 logged `render-process-gone` reason `oom` (exit -536870904) at
-  2026-08-17 09:56:11Z; 0.2.76 logged reason `crashed` (exit -2147483645 / 0x80000003) at
-  11:38:59Z. While the fix was being isolated, installed 0.2.77 logged another OOM at 11:57:59Z
-  and preserved a 373 MB trace. `main.ts` only logs/captures this event; it never recovers, so
-  Ctrl+R has no renderer process to reload. Add deferred, coalesced
-  `DesktopForgeLifecycle.Reconnect()` recovery guarded against shutdown/destruction; do not
-  synchronously navigate inside `render-process-gone`.
-- Desktop containment is committed and pushed in `25a54741`: a deferred, coalesced, closeable recovery
-  controller invokes the existing authenticated `DesktopForgeLifecycle.Reconnect()` exactly once
-  per renderer-loss event and catches typed failures and defects. Focused desktop coverage passes
-  6/6; the post-restart `validate:desktop` passes 13 files / 52 tests plus the production build.
-- `pnpm run build` installed 0.2.78 and intentionally replaced the running 0.2.77 window. All live
-  Editor/Forge processes now resolve under `versions/0.2.78`; its 9,648,886-byte `app.asar` reports
-  version 0.2.78 and contains `artisan:renderer-recovery` in `main.js` plus the scoped draft claim
-  implementation in the production frontend chunks. Its initial session contained no unplanned
-  renderer loss before the controlled smoke test below.
-- The installed recovery smoke test is complete. The sole renderer PID 13744 was terminated after
-  exact executable/type/parent validation; desktop main PID 7372 survived and created replacement
-  renderer PID 18400 under the same main in 1.6 seconds. The 0.2.78 diagnostic recorded the loss and
-  finished its trace from PID 18400. A three-second persistence check found both processes healthy.
-- The OOM is real but its allocator-level cause is not yet proven. The crash trace shows the
-  renderer producing frames until termination and GPU task memory around 262 MiB, with no
-  unresponsive or GPU-watchdog event. Treat automatic recovery as required containment and keep
-  pressure/root-cause work evidence-driven.
-- First-message loss is a route handoff race in the committed baseline: the thread route acquires
-  the retained draft claim before registering its release finalizer. Route replacement in that
-  window strands `active_claim`; the new route waits forever, while thread creation already cleared
-  the composer and the ordinary second message succeeds. The current dirty tree contains the right
-  Effect structure: register cleanup first, atomically claim/publish with `uninterruptibleMask`,
-  deliver via the explicit thread scope, and supersede an impossible stale claim for another thread.
-  The controller now registers `claim.Release` in the caller's Effect scope before publishing the
-  claim, and the route consumes that invariant. The exact route-scope replacement regression plus
-  five integration files pass 36/36. `validate:frontend` passes format, lint, type-aware checking,
-  and the production build; its suite stops only on the documented unrelated approval wording and
-  composer 595-vs-560 line-budget mirrors. Independent review found the scoped lifecycle clean.
-  The isolated milestone is committed and pushed in `68c2ebb3`; the post-restart focused controller,
-  route-source, and exact regression cluster passes 3 files / 8 tests.
-- Independent desktop review found and drove closure of a shutdown race: the controller now retains
-  the recovery Fiber, `Close()` awaits its interruption, and the memoized desktop cleanup composes
-  that cancellation before Forge cleanup. Close-during-reconnect coverage passes; the final desktop
-  gate passes 13 files / 52 tests plus the production build. Follow-up review also caught and closed
-  a synchronous `runFork` self-reference hazard; Fiber-observer settlement is now approved clean.
-- No dev server was started.
+- Installed 0.2.85 SQLite evidence identifies the exact failed thread `21880101192863744`:
+  `thread.create` was accepted at 09:03:42Z and attention was acknowledged at 09:03:48Z, proving
+  the route mounted, but there is no `thread.send_message`, orchestration message, run, or
+  conversation item. The next new thread sent normally 10.8 seconds after creation.
+- The installed bundle contains the earlier route-scope claim fix. Its emitted SER output exposed
+  a second race: asynchronous claim acquisition and the intentionally untracked delivery check
+  compiled as independent one-shot reactive sites. On a cold mount, launch could observe no claim
+  before acquisition finished, never rerun, and leave the composer blocked without throwing.
+- `thread-route.svelte` now performs claim and thread-scope delivery launch inside one sequential
+  Effect startup boundary. The controller still owns route-scope claim cleanup; delivery remains
+  in `thread_scope`; retry retains its submit gate. The new transform regression asserts that SER
+  emits one startup site and no standalone claim site.
+- Focused controller/draft/open/route coverage passes 6 files / 26 tests. Exact touched formatting,
+  lint, and diff checks pass. The current full `validate:frontend` run passed formatting, lint,
+  type-aware production SSR/client builds, and 164/165 test files (962/963 tests); it stopped only
+  on the protected unrelated composer line-budget assertion (603 versus 560).
+- Independent lifecycle review is clean: interruption between claim and fork releases safely,
+  route teardown interrupts thread-owned delivery, and retry cannot duplicate a live delivery.
+  Review notes only that coverage is transform/source-contract based rather than a mounted delayed
+  claim simulation. No development server was started. Installed 0.2.85 still predates this source
+  fix; no installed replay has been claimed.
+
+## Renderer-Loss Containment
+
+- Installed diagnostics proved prior unreloadable black windows were dead Chromium renderers:
+  versions 0.2.74 and 0.2.77 exited for OOM; 0.2.76 crashed. The allocator source remains unproven.
+- `25a54741` defers and coalesces authenticated renderer replacement, rejects shutdown-time
+  recovery, and awaits cancellation before Forge cleanup. `validate:desktop` passed 13 files / 52
+  tests plus production build. Installed 0.2.78 replacement smoke kept desktop main alive and
+  replaced its killed renderer in 1.6 seconds.
 
 ## Protected Dirty Integration
 
@@ -85,15 +68,15 @@ Last updated: 2026-08-17. Branch continuity only; durable verified product statu
 
 ## Next Order
 
-1. Observe 0.2.78 during normal use; any later renderer loss should reload in place and remain in the
-   same diagnostic session rather than leaving an unrecoverable black window.
-2. Continue renderer memory-pressure analysis separately if captured evidence identifies a bounded
-   source; do not claim the OOM root cause from queue topology alone.
+1. On the next intentional package build, replay a cold new-thread first submission against the
+   installed artifact before claiming installed closure; 0.2.85 still contains the reproduced race.
+2. Continue renderer memory-pressure analysis separately only if captured evidence identifies a
+   bounded source; do not infer the OOM root cause from queue topology.
 
 ## Known Baselines Outside This Incident
 
-- Root TypeScript previously retained unrelated recovery-test/Guidance errors. Full frontend
-  previously retained unrelated approval/composer and dirty UI/loading mirror failures. Use affected
-  gates and report exact current blockers rather than broad claims.
+- Root TypeScript previously retained unrelated recovery-test/Guidance errors. Full frontend has
+  the protected composer line-budget mirror above. Use affected gates and report exact current
+  blockers rather than broad claims.
 - Query handlers still collapse projection decode causes to `ProjectionUnavailable`; durable-row
   failures should eventually log thread/item identity without exposing content.

@@ -630,8 +630,10 @@
 	let first_submission_blocked = $state(false);
 	const first_submission_gate = yield* MakeSubmitGate;
 	const ClaimPendingFirstSubmission = Effect.gen(function* () {
-		pending_first_submission = yield* draft_thread.AwaitPendingSubmissionClaim(thread_id);
-		first_submission_blocked = pending_first_submission !== undefined;
+		const claim = yield* draft_thread.AwaitPendingSubmissionClaim(thread_id);
+		pending_first_submission = claim;
+		first_submission_blocked = claim !== undefined;
+		return claim;
 	});
 	const DeliverPendingFirstSubmission = Effect.gen(function* () {
 		if (pending_first_submission === undefined) yield* ClaimPendingFirstSubmission;
@@ -642,6 +644,17 @@
 		pending_first_submission = undefined;
 		first_submission_blocked = false;
 	});
+	const DeliverClaimedFirstSubmission = DeliverPendingFirstSubmission.pipe(
+		Effect.catch((error) =>
+			Effect.gen(function* () {
+				const claimed = pending_first_submission;
+				if (claimed !== undefined) yield* claimed.Release;
+				pending_first_submission = undefined;
+				pending_first_submission_error = error.message;
+				first_submission_blocked = true;
+			}),
+		),
+	);
 	const RetryPendingFirstSubmission = Effect.gen(function* () {
 		if (!(yield* first_submission_gate.Acquire)) return;
 		first_submission_attempting = true;
@@ -664,10 +677,18 @@
 			),
 		);
 	});
-	yield* ClaimPendingFirstSubmission;
-	if (pending_first_submission !== undefined) {
-		yield* RetryPendingFirstSubmission;
-	}
+	/**
+	 * Claim and launch are one ordered Effect boundary. Separate top-level yields
+	 * compile into independent SER sites: on a cold mount, the one-shot launch
+	 * could observe no claim before asynchronous acquisition finished, then never
+	 * rerun because that observation was intentionally untracked.
+	 */
+	const ClaimAndDeliverInitialFirstSubmission = Effect.gen(function* () {
+		const claim = yield* ClaimPendingFirstSubmission;
+		if (claim === undefined) return;
+		yield* Effect.forkIn(DeliverClaimedFirstSubmission, thread_scope);
+	});
+	yield* ClaimAndDeliverInitialFirstSubmission;
 </script>
 
 <svelte:head>

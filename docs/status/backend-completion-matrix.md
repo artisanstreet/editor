@@ -1,6 +1,6 @@
 # Artisan Editor Completion Matrix
 
-Scope: the V1 prototype described by [`artisan-editor-v1.md`](../prds/artisan-editor-v1.md), including the backend, desktop shell, renderer, and release harness. Status is verified implementation status as of 2026-08-17, not design intent. Codex and Claude are production adapters over the user's external provider executables; Forge and Editor contain only Artisan-owned runtime code. Embedded browsers/WebViews and broad Git mutation commands remain deliberately outside this prototype rather than incomplete hidden scope.
+Scope: the V1 prototype described by [`artisan-editor-v1.md`](../prds/artisan-editor-v1.md), including the backend, desktop shell, renderer, and release harness. Status is verified implementation status as of 2026-08-18, not design intent. Codex and Claude are production adapters over the user's external provider executables; Forge and Editor contain only Artisan-owned runtime code. Embedded browsers/WebViews and broad Git mutation commands remain deliberately outside this prototype rather than incomplete hidden scope.
 
 Verification snapshot: on 2026-08-10, the integrated worktree's `pnpm run validate` passed formatting, lint, root TypeScript, static production frontend and Forge builds, 374 passing Vitest files plus 3 skipped files, 2,571 passing tests plus 6 explicit skips, the dev-TUI Bun smoke test, native formatting/clippy, and 73 Rust tests. The exact staged Bazel milestone passed `//:forge_sea`, TypeScript, frontend, Forge, native, and 30 focused tests with one skip; the release target emitted only the 386,274,304-byte `Artisan Forge.exe`. Full staged `//:test` reached Vitest but reported seven existing baseline assertions outside this slice.
 
@@ -29,6 +29,20 @@ silently strand and erase the first message. Exact scope-handoff regressions pas
 post-change desktop gate passes 13 files / 52 tests plus the production build, and the
 focused frontend controller/route cluster passes 3 files / 8 tests. Independent lifecycle
 review is clean. The fixes are pushed on `master` in `68c2ebb3` and `25a54741`.
+
+On 2026-08-18, installed 0.2.85 durable evidence showed a second first-submission
+failure after the earlier claim-lifetime repair: the failed thread accepted creation
+and later acknowledged attention, but never accepted `thread.send_message` and created
+no run or conversation item. Emitted SER output showed asynchronous claim acquisition
+and the untracked delivery launch as independent one-shot reactive sites; launch could
+observe no claim before acquisition completed and never rerun, leaving the composer
+blocked without an exception. The route now sequences claim and thread-scoped launch
+inside one Effect startup boundary. A transform regression proves there is one emitted
+startup site and no standalone claim site; the focused controller/draft/open/route
+cluster passes 6 files / 26 tests, touched formatting and lint pass, and independent
+lifecycle review is clean. The full frontend gate passed formatting, lint, and both
+production builds; 962/963 tests passed, with only the protected unrelated composer
+line-budget assertion remaining. Installed 0.2.85 predates this source fix.
 
 Artisan-owned presentation instructions are resolved through an immutable Effect
 Service for every ordinary, recovered, and graph engine run. Codex app-server
