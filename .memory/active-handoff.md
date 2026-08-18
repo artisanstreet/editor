@@ -7,7 +7,7 @@ Last updated: 2026-08-18. Branch continuity only; durable verified product statu
 
 - Repository `C:\Users\sander\Desktop\artisan-editor`; work directly on `master`. Stability fixes
   `68c2ebb3` / `25a54741`, verified status `e3db47ce`, and ordered first-message startup fix
-  `3e15801e` are pushed.
+  `3e15801e` plus lifecycle closure `aecb2c64` are pushed.
 - A large renderer/backend/provider milestone remains intentionally dirty (200+ paths). Preserve
   unrelated frontend, protocol, transport, migration, lockfile, documentation, and test hunks. Do
   not stage shared files wholesale.
