@@ -644,17 +644,6 @@
 		pending_first_submission = undefined;
 		first_submission_blocked = false;
 	});
-	const DeliverClaimedFirstSubmission = DeliverPendingFirstSubmission.pipe(
-		Effect.catch((error) =>
-			Effect.gen(function* () {
-				const claimed = pending_first_submission;
-				if (claimed !== undefined) yield* claimed.Release;
-				pending_first_submission = undefined;
-				pending_first_submission_error = error.message;
-				first_submission_blocked = true;
-			}),
-		),
-	);
 	const RetryPendingFirstSubmission = Effect.gen(function* () {
 		if (!(yield* first_submission_gate.Acquire)) return;
 		first_submission_attempting = true;
@@ -686,7 +675,7 @@
 	const ClaimAndDeliverInitialFirstSubmission = Effect.gen(function* () {
 		const claim = yield* ClaimPendingFirstSubmission;
 		if (claim === undefined) return;
-		yield* Effect.forkIn(DeliverClaimedFirstSubmission, thread_scope);
+		yield* Effect.forkIn(RetryPendingFirstSubmission, thread_scope);
 	});
 	yield* ClaimAndDeliverInitialFirstSubmission;
 </script>

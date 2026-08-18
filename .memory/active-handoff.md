@@ -35,9 +35,12 @@ Last updated: 2026-08-18. Branch continuity only; durable verified product statu
   on the protected unrelated composer line-budget assertion (603 versus 560).
 - Independent lifecycle review is clean: interruption between claim and fork releases safely,
   route teardown interrupts thread-owned delivery, and retry cannot duplicate a live delivery.
-  Review notes only that coverage is transform/source-contract based rather than a mounted delayed
-  claim simulation. No development server was started. Installed 0.2.85 still predates this source
-  fix; no installed replay has been claimed.
+  Final clean-baseline audit also preserved submit-gate ownership while its older UI exposes retry
+  during delivery, and made successful completion clear the retained draft even if route release
+  raced first without clearing a newer claim. The release-then-complete regression passes and the
+  independent re-review has no high or medium findings. Coverage remains transform/source-contract
+  based rather than a mounted delayed-claim simulation. No development server was started.
+  Installed 0.2.85 still predates this source fix; no installed replay has been claimed.
 
 ## Renderer-Loss Containment
 

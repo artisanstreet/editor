@@ -251,15 +251,21 @@ export const DraftThreadControllerLive = Layer.effect(
 						const Complete = Effect.gen(function* () {
 							yield* submit_lock.withPermit(
 								Effect.gen(function* () {
-									const active = yield* Ref.get(active_claim);
-									if (active?.claim_id !== claim_id) return;
+									/**
+									 * Delivery having succeeded is a fact about the draft, not
+									 * about this claim still being current. A release racing in
+									 * first must not retain a message that already landed.
+									 */
 									yield* SubscriptionRef.update(state, (candidate) =>
 										candidate._tag === "Created" &&
 										candidate.thread_id === thread_id
 											? ({ _tag: "Uninitialized" } as const)
 											: candidate,
 									);
-									yield* Ref.set(active_claim, undefined);
+									const active = yield* Ref.get(active_claim);
+									if (active?.claim_id === claim_id) {
+										yield* Ref.set(active_claim, undefined);
+									}
 								}),
 							);
 						});

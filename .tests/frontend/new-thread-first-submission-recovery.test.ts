@@ -66,4 +66,32 @@ describe("new-thread first submission recovery", () => {
 		expect(result.replacement?.submission).toEqual(submission);
 		expect(result.settled).toEqual({ _tag: "Uninitialized" });
 	});
+
+	it("completes a delivered submission even after its claim was released", async () => {
+		const result = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const controller = yield* DraftThreadController;
+					yield* controller.Initialize(fixture_project, policy);
+					const created = yield* controller.Submit(submission);
+
+					const route_scope = yield* Scope.make();
+					const claim = yield* controller
+						.AwaitPendingSubmissionClaim(created.thread_id)
+						.pipe(Scope.provide(route_scope));
+					yield* Scope.close(route_scope, Exit.void);
+					if (claim !== undefined) yield* claim.Complete;
+
+					return { claim, settled: yield* controller.Current };
+				}).pipe(
+					Effect.provide(DraftThreadControllerLive),
+					Effect.provide(MakeSnowflakeIdLive(29).pipe(Layer.orDie)),
+					Effect.provide(Layer.succeed(ArtisanClient, FixtureArtisanClientService)),
+				),
+			),
+		);
+
+		expect(result.claim?.submission).toEqual(submission);
+		expect(result.settled).toEqual({ _tag: "Uninitialized" });
+	});
 });
