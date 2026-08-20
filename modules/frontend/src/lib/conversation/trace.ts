@@ -216,18 +216,108 @@ export const conversation_live_reasoning_text = (
 	return undefined;
 };
 
-/** One run of a summary body: prose, or a backticked identifier within it. */
+/** One run of a summary body: prose, or a marked inline run within it. */
 export interface ReasoningSummaryFragment {
 	readonly code: boolean;
+	readonly em?: boolean;
+	readonly strike?: boolean;
+	readonly strong?: boolean;
 	readonly text: string;
 }
 
 const inline_code = /`([^`\n]+)`/gu;
 
 /**
- * Splits one line of summary prose into plain and code runs on its backticks,
- * so a model naming a file or a symbol has it set in the face that says so
- * rather than in prose wearing two stray marks.
+ * Block furniture a one-line rendering has no block to hang it on: headings,
+ * quote marks, and list markers (including a model's occasional `*- ` double
+ * mark) at a line's start. Bounded repetition instead of a loop, because a
+ * quote can hold a list.
+ */
+const leading_block_marks = /^[ \t]*(?:(?:#{1,6}|>|[-*+]{1,2}|\d{1,3}[.)])[ \t]+)+/u;
+
+const StripBlockMarks = (text: string): string =>
+	text
+		.split("\n")
+		.map((line) => line.replace(leading_block_marks, ""))
+		.join("\n");
+
+type EmphasisFlag = "em" | "strike" | "strong";
+
+/** Longest marks first, so `**` is never read as two `*`. */
+const emphasis_marks: ReadonlyArray<{ readonly flag: EmphasisFlag; readonly mark: string }> = [
+	{ flag: "strong", mark: "**" },
+	{ flag: "strong", mark: "__" },
+	{ flag: "strike", mark: "~~" },
+	{ flag: "em", mark: "*" },
+	{ flag: "em", mark: "_" },
+];
+
+const word_character = /[\p{L}\p{N}]/u;
+
+/**
+ * Underscores open and close only at word edges — `inspection_types` is an
+ * identifier, not an emphasis — while asterisks follow the lighter rule that
+ * an opener touches its word and a closer is touched by one, which is what
+ * keeps `2 * 3` prose.
+ */
+const OpensEmphasis = (text: string, index: number, mark: string): boolean => {
+	const next = text[index + mark.length];
+	if (next === undefined || /\s/u.test(next)) return false;
+	if (!mark.startsWith("_")) return true;
+	const previous = text[index - 1];
+	return previous === undefined || !word_character.test(previous);
+};
+
+const ClosesEmphasis = (text: string, index: number, mark: string): boolean => {
+	const previous = text[index - 1];
+	if (previous === undefined || /\s/u.test(previous)) return false;
+	if (!mark.startsWith("_")) return true;
+	const next = text[index + mark.length];
+	return next === undefined || !word_character.test(next);
+};
+
+const FindEmphasisClose = (text: string, from: number, mark: string): number => {
+	/** From one past the opener: an empty emphasis is two literal marks, not a pair. */
+	for (let index = from + 1; index <= text.length - mark.length; index += 1) {
+		if (text.startsWith(mark, index) && ClosesEmphasis(text, index, mark)) return index;
+	}
+	return -1;
+};
+
+type EmphasisTone = { readonly em?: boolean; readonly strike?: boolean; readonly strong?: boolean };
+
+/**
+ * Splits one prose run on its matched emphasis pairs. Only pairs count: a
+ * mark whose partner never arrives stays literal, because hiding it would
+ * bet on a closer a streaming sentence may never send, and prose full of
+ * arithmetic asterisks must survive unstyled.
+ */
+const EmphasisFragments = (
+	text: string,
+	tone: EmphasisTone,
+): ReadonlyArray<ReasoningSummaryFragment> => {
+	for (let index = 0; index < text.length; index += 1) {
+		for (const { flag, mark } of emphasis_marks) {
+			if (!text.startsWith(mark, index)) continue;
+			if (!OpensEmphasis(text, index, mark)) continue;
+			const close = FindEmphasisClose(text, index + mark.length, mark);
+			if (close === -1) continue;
+			const inner = text.slice(index + mark.length, close);
+			return [
+				...(index > 0 ? [{ code: false, ...tone, text: text.slice(0, index) }] : []),
+				...EmphasisFragments(inner, { ...tone, [flag]: true }),
+				...EmphasisFragments(text.slice(close + mark.length), tone),
+			];
+		}
+	}
+	return text.length > 0 ? [{ code: false, ...tone, text }] : [];
+};
+
+/**
+ * Splits one line of model prose into plain, emphasised, and code runs, so a
+ * model naming a file or a symbol has it set in the face it meant — instead
+ * of prose wearing stray `**` and backtick marks — while block furniture a
+ * single line cannot honour is stripped rather than shown.
  *
  * A span whose closing backtick has not arrived yet is treated as code from
  * its opening mark. Rendering it literally instead would show a bare backtick
@@ -235,15 +325,19 @@ const inline_code = /`([^`\n]+)`/gu;
  * closed — the same churn the one-line summary was just taught to avoid.
  */
 export const conversation_summary_fragments = (
-	text: string,
+	raw: string,
 ): ReadonlyArray<ReasoningSummaryFragment> => {
+	const text = StripBlockMarks(raw);
 	const fragments: Array<ReasoningSummaryFragment> = [];
 	let consumed = 0;
+	const PushProse = (prose: string) => {
+		if (prose.length > 0) fragments.push(...EmphasisFragments(prose, {}));
+	};
 	for (const match of text.matchAll(inline_code)) {
 		const start = match.index;
 		const body = match[1];
 		if (body === undefined) continue;
-		if (start > consumed) fragments.push({ code: false, text: text.slice(consumed, start) });
+		if (start > consumed) PushProse(text.slice(consumed, start));
 		fragments.push({ code: true, text: body });
 		consumed = start + match[0].length;
 	}
@@ -251,10 +345,10 @@ export const conversation_summary_fragments = (
 	const tail = text.slice(consumed);
 	const opened = tail.indexOf("`");
 	if (opened === -1) {
-		if (tail.length > 0) fragments.push({ code: false, text: tail });
+		PushProse(tail);
 		return fragments;
 	}
-	if (opened > 0) fragments.push({ code: false, text: tail.slice(0, opened) });
+	if (opened > 0) PushProse(tail.slice(0, opened));
 	const arriving = tail.slice(opened + 1);
 	if (arriving.length > 0) fragments.push({ code: true, text: arriving });
 	return fragments;

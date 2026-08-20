@@ -11,6 +11,7 @@ import {
 import {
 	conversation_live_reasoning_summary,
 	conversation_live_reasoning_text,
+	conversation_summary_fragments,
 	conversation_summary_line,
 	group_conversation_trace_blocks,
 	make_conversation_trace_segments,
@@ -282,6 +283,73 @@ describe("live thinking line", () => {
 		expect(workspace).toContain("block.session.run_id === active_run_id");
 		expect(workspace).toContain("strip_conversation_trace_reasoning(block.details)");
 		expect(workspace).toContain("has_details={visible_details.length > 0}");
+	});
+});
+
+describe("inline summary fragments", () => {
+	it("sets backticked runs in the code face, streaming tail included", () => {
+		expect(conversation_summary_fragments("run `svelte-check` now")).toEqual([
+			{ code: false, text: "run " },
+			{ code: true, text: "svelte-check" },
+			{ code: false, text: " now" },
+		]);
+		/** An unterminated span reads as code from its opening mark. */
+		expect(conversation_summary_fragments("reading `wire")).toEqual([
+			{ code: false, text: "reading " },
+			{ code: true, text: "wire" },
+		]);
+	});
+
+	it("honours matched emphasis pairs without leaking their marks", () => {
+		expect(
+			conversation_summary_fragments("**Filtering is in.** Control groups carry `types`"),
+		).toEqual([
+			{ code: false, strong: true, text: "Filtering is in." },
+			{ code: false, text: " Control groups carry " },
+			{ code: true, text: "types" },
+		]);
+		expect(conversation_summary_fragments("__dunder__ and _slant_ and ~~gone~~")).toEqual([
+			{ code: false, strong: true, text: "dunder" },
+			{ code: false, text: " and " },
+			{ code: false, em: true, text: "slant" },
+			{ code: false, text: " and " },
+			{ code: false, strike: true, text: "gone" },
+		]);
+		/** Nesting composes: the inner run carries both tones. */
+		expect(conversation_summary_fragments("**bold _inside_**")).toEqual([
+			{ code: false, strong: true, text: "bold " },
+			{ code: false, em: true, strong: true, text: "inside" },
+		]);
+	});
+
+	it("leaves identifiers, arithmetic, and unmatched marks as literal prose", () => {
+		/** Underscores never open or close inside a word. */
+		expect(conversation_summary_fragments("foo_bar and baz_qux")).toEqual([
+			{ code: false, text: "foo_bar and baz_qux" },
+		]);
+		/** Space-flanked asterisks are multiplication, not emphasis. */
+		expect(conversation_summary_fragments("2 * 3 * 4 stays prose")).toEqual([
+			{ code: false, text: "2 * 3 * 4 stays prose" },
+		]);
+		/** A mark whose partner never arrives stays visible rather than guessed. */
+		expect(conversation_summary_fragments("**Filtering is")).toEqual([
+			{ code: false, text: "**Filtering is" },
+		]);
+	});
+
+	it("strips block furniture a one-line rendering cannot honour", () => {
+		expect(conversation_summary_fragments("- Done.")).toEqual([{ code: false, text: "Done." }]);
+		expect(conversation_summary_fragments("*- item one")).toEqual([
+			{ code: false, text: "item one" },
+		]);
+		expect(conversation_summary_fragments("## Heading\n> quoted")).toEqual([
+			{ code: false, text: "Heading\nquoted" },
+		]);
+		/** A line-opening bold is emphasis, not a pair of list markers. */
+		expect(conversation_summary_fragments("**Done.** next")).toEqual([
+			{ code: false, strong: true, text: "Done." },
+			{ code: false, text: " next" },
+		]);
 	});
 });
 
