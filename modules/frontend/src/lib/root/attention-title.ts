@@ -7,7 +7,7 @@ import { dev_title_marker } from "./dev-instance";
  * happens to begin with plain parenthesised digits — a thread named
  * `(3) fix the build` — carries no U+2060 and is left untouched.
  */
-const attention_marker_prefix = /^\(\d{1,4}\)\u2060 /u;
+const attention_marker_prefix = /^\((?:\d{1,4}\??|\?)\)\u2060 /u;
 
 const dev_prefix = `${dev_title_marker} `;
 
@@ -28,6 +28,8 @@ export const AttentionMarkedTitle = (
 	 * erasing the other's work.
 	 */
 	requests_forge_repair = false,
+	/** True while any thread holds a question open for the reader. */
+	awaiting_answer = false,
 ): string => {
 	const marked_for_development = title.startsWith(dev_prefix);
 	const prefix = marked_for_development ? dev_prefix : "";
@@ -39,5 +41,5 @@ export const AttentionMarkedTitle = (
 
 	return count === undefined
 		? `${prefix}${bare}${suffix}`
-		: `${prefix}${AttentionTitleMarkerFor(count)} ${bare}${suffix}`;
+		: `${prefix}${AttentionTitleMarkerFor(count, awaiting_answer)} ${bare}${suffix}`;
 };

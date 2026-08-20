@@ -91,6 +91,11 @@ describe("desktop packaging configuration", () => {
 		expect(main).toContain("AttentionOverlayDescription(attention_count)");
 		expect(main).toContain('editor_window.setOverlayIcon(null, "")');
 		expect(main).toContain("app.setBadgeCount(attention_count)");
+		/** A waiting question outranks the count on the one-glyph overlay. */
+		expect(main).toContain("TitleSignalsAwaitingAnswer(title)");
+		expect(main).toContain(
+			"editor_window.setOverlayIcon(QuestionOverlayImage(), question_overlay_description)",
+		);
 		/**
 		 * The same channel carries the renderer's ask for a live Forge. The
 		 * endpoint reaches a document once, in its launch fragment, so a Forge

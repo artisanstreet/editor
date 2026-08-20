@@ -1,11 +1,15 @@
 import { join, normalize } from "node:path";
 
-import { AttentionCountFromTitle, TitleRequestsForgeRepair } from "@artisan/protocol";
+import {
+	AttentionCountFromTitle,
+	TitleRequestsForgeRepair,
+	TitleSignalsAwaitingAnswer,
+} from "@artisan/protocol";
 import { BrowserWindow, app, contentTracing, protocol, session, shell } from "electron";
 import { Effect, Layer, Option } from "effect";
 
-import { AttentionOverlayDescription } from "./badge/catalog";
-import { AttentionOverlayImage } from "./badge/overlay";
+import { AttentionOverlayDescription, question_overlay_description } from "./badge/catalog";
+import { AttentionOverlayImage, QuestionOverlayImage } from "./badge/overlay";
 import {
 	DesktopForgeLifecycle,
 	DesktopRenderer,
@@ -173,7 +177,15 @@ export const StartDesktop = Effect.gen(function* () {
 		}
 		const attention_count = AttentionCountFromTitle(title) ?? 0;
 		if (process.platform === "win32") {
-			if (attention_count === 0) {
+			/**
+			 * A waiting question outranks the count: the finished threads behind
+			 * the number can wait, while the question is blocking a run right now.
+			 * The overlay has room for exactly one glyph, so the more urgent one
+			 * is the one it shows.
+			 */
+			if (TitleSignalsAwaitingAnswer(title)) {
+				editor_window.setOverlayIcon(QuestionOverlayImage(), question_overlay_description);
+			} else if (attention_count === 0) {
 				editor_window.setOverlayIcon(null, "");
 			} else {
 				editor_window.setOverlayIcon(

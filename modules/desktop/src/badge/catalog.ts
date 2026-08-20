@@ -86,6 +86,19 @@ export const attention_overlay_sources: Record<AttentionOverlayLabel, AttentionO
 };
 
 /**
+ * The question badge: the same circle in purple — the tone the thread rail's
+ * waiting dot carries — with a white Segoe UI Bold question mark, rendered by
+ * the same GDI+ rasterizer at the same three scales. It outranks the count
+ * because a question is blocking a run right now, while finished threads can
+ * wait for the reader to come around.
+ */
+export const question_overlay_source: AttentionOverlaySource = {
+	x1: "iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAEkSURBVDhPY2DAA6aYvjSYbPzaAUSjy+EEk4xfa0w2erV+svGr/1jw9olGLyzQ9cDBJKOXCZOMXn3HohEVG71qn29/nwNF82TjFxkYCvHgSUavpiNsNn6tgc3mxYFv/6+Mefd/hu1rDAMg+LUDxACjV/vRJa9u+P7//cM/YAwCIMPQ1Uw2fnWfAeQXLBL/txR+ANMgF4DAgc7PGGpAmAEUquiCMAxy+rlFX/G54D/ewAPZik8z2ICJhi890AWRDTg+9QuGOIoB/frvBdAFYRjkBXy2gw2ApIFX99ElQBgUE/i8AIp6sAG4vAGKCZAhuNLBJOOXFfDENNn41Xx0BQTwcbhmEICGxXYsCrHh4/36zxVQDIABUIaabPzyPRZNYD+jOBsIAECCNoof63/LAAAAAElFTkSuQmCC",
+	x1_5: "iVBORw0KGgoAAAANSUhEUgAAABgAAAAYCAYAAADgdz34AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAGhSURBVEhLpZaxTsMwEIY9MjIy8gZFNpVYEGyssDEwMKGOsPEGiCmqUwQTHRgQCyzMlK1jnwBlI4kDFIlKIJagcxvX+u2mSfmlb/E5v31nn1vGKqrNk41QZNs2OKe2xqaqG4p0GAqVI5Krb8mzWymSXfy2VJ1muhJy9YCGZUiuep1muoZejmjXkqsYDapAGYXr8T56Go1r635YG98iQSNeXXTnCGXilGteze8OPjTXO29OzIfkajA1LynN/dEwR708/eRXm5kzF5E8PdQL0FXDYMHz+Zc2fR38agrROM710GfdrWhJn74b1FAGdlmKRSoukBfN5AR83Oy9mwzoPDDug1EX4qCPx5NPY05ZYXwWLBRJCwd9FKIsMFYGo6bAQR90cwgcn0fpFbWha1m17jYsaAyXcRAh80L9i5ETL2PSB6qHARv79tQsUzTp5PkHTfeezGsdMldn5rmgt8OZ8A/o4aQmNgtUPeyqmHfIVpsnxzhxEToiC9DbSIr0FD+og+TqEj0dUbnq//jQH4OkhV4zpV/ZcTaRazaFNkIloX5CD9If588DWo0eHoAAAAAASUVORK5CYII=",
+	x2: "iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAYAAABzenr0AAAAAXNSR0IArs4c6QAAAARnQU1BAACxjwv8YQUAAAAJcEhZcwAADsMAAA7DAcdvqGQAAAIiSURBVFhHtZc9LARBFMe3VCqVSh2ZoRQ6LZ1CoRIlnVKrupg9icolFKJBIdGhu45KVHLRuJtZrAQ5EcnJf2/vsvtmP2Z210t+zb6ZeW/eezPz1nEKisu9eUpjrjVCx1UmgnsTgsstwdSdy1UvFSYf6tyr1WfkFF2jkNQm2+OCeceaIQMEU9elHHG53BZMdenCtiAiVumpTfqjLlNndKGSNOszcoza0gTGc/NcnBZSSm3GxOXqMmFiZWBzqelAzumEf6JBbTuo1ioKzhxvPuaAbdHtz3q9k5W3gIOFF02fB1IR2z0dkMbR0mvv8eq7R8V/+g2coeOzELyz2N+9Re5vdj6o7ZhYRqNfC7g+E5SJRB1AJJ7vfmIONPc+tTnpSB/hH9MV6Zyu+Vqo78+7MafonCzCV01X2BCNil0E4MB0e5l+tAGnAQU4EBqdPByXd9bpR1NgPFoDt4df2pg8HMHkKv1oSlnjoHANXGy+lzYOgk6HfjQhWni2eY8yuIh8qsgDxxFHDuB2pHoT8PaEDqgGVZqAW6/M7tGyBQ7gTqbKPKI1gGKkejM668MHybYLit5+EKrPQzDVjjUmtlHAHYDqRw2gHqg+j13W2RgaHzpRsP0uQJPaDiTohrlqJUyoEOlnNqb9e8H+WJrQb/lIK5YkYYdUcSSwKQPjAwn/D671hezBCcsMe5aEz3XBaEg/sdptBec1fLaNflqwYxhGFOlaVP4AP1vjTv8AsDAAAAAASUVORK5CYII=",
+};
+
+/**
  * What the badge can actually say. A 16-pixel overlay has room for one glyph
  * and a little more, so double digits collapse to `9+` — the badge's job is
  * "several things finished", and the thread rail is where several becomes a
@@ -97,3 +110,6 @@ export const AttentionOverlayLabelFor = (count: number): AttentionOverlayLabel =
 /** Read by assistive technology in place of the pixels. */
 export const AttentionOverlayDescription = (count: number): string =>
 	count === 1 ? "1 thread needs attention" : `${count} threads need attention`;
+
+/** Read by assistive technology in place of the question mark. */
+export const question_overlay_description = "A thread is waiting for your answer";

@@ -7,7 +7,7 @@
 	import { MakeScopedAttachmentRunner } from "$lib/lifecycle/scoped-attachment-runner";
 	import { AttentionMarkedTitle } from "$lib/root/attention-title";
 	import { forge_repair_request } from "$lib/root/forge-repair-request.svelte";
-	import { ThreadNeedsAttention } from "$lib/root/thread-navigation";
+	import { ThreadIsAwaitingAnswer, ThreadNeedsAttention } from "$lib/root/thread-navigation";
 
 	let {
 		threads,
@@ -27,6 +27,13 @@
 	);
 
 	const attention_count = $derived(threads.filter(ThreadNeedsAttention).length);
+	/**
+	 * A question outranks a count: finished threads can wait, an open question
+	 * is blocking a run right now. It rides the same marker as a flag, which
+	 * the shell turns into the question badge and a browser tab shows as
+	 * `(3?)` — or `(?)` when the question is the only thing waiting.
+	 */
+	const awaiting_answer = $derived(threads.some(ThreadIsAwaitingAnswer));
 
 	/**
 	 * The desktop shell always carries a marker — zero included. Its window
@@ -36,7 +43,9 @@
 	 * needs attention" or "this title predates the marker". A browser tab
 	 * shows its title, so it only carries a marker worth showing.
 	 */
-	const marker_count = $derived(desktop || attention_count > 0 ? attention_count : undefined);
+	const marker_count = $derived(
+		desktop || attention_count > 0 || awaiting_answer ? attention_count : undefined,
+	);
 
 	/**
 	 * Repair can be proven (the poll gave up on the paired Forge) or requested
@@ -45,10 +54,10 @@
 	 */
 	const repair_wanted = $derived(forge_unreachable || forge_repair_request.requested);
 
-	const MarkTitle = (count: number | undefined, requests_repair: boolean) =>
+	const MarkTitle = (count: number | undefined, requests_repair: boolean, awaiting: boolean) =>
 		Effect.gen(function* () {
 			yield* RunBrowserDom(() => {
-				const marked = AttentionMarkedTitle(document.title, count, requests_repair);
+				const marked = AttentionMarkedTitle(document.title, count, requests_repair, awaiting);
 				if (document.title !== marked) document.title = marked;
 			});
 		});
@@ -67,7 +76,9 @@
 			yield* Effect.gen(function* () {
 				while (true) {
 					yield* Queue.take(marks);
-					yield* MarkTitle(marker_count, repair_wanted).pipe(Effect.ignore);
+					yield* MarkTitle(marker_count, repair_wanted, awaiting_answer).pipe(
+						Effect.ignore,
+					);
 				}
 			}).pipe(Effect.forkScoped);
 			yield* Queue.offer(marks, undefined);
@@ -96,5 +107,5 @@
 	 * server rendering there is no document, and a marker that cannot be
 	 * written is a marker the next rewrite catches up on.
 	 */
-	yield* MarkTitle(marker_count, repair_wanted).pipe(Effect.ignore);
+	yield* MarkTitle(marker_count, repair_wanted, awaiting_answer).pipe(Effect.ignore);
 </script>

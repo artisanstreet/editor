@@ -13,12 +13,22 @@
  * joiner-terminated form and nothing else.
  */
 
-/** Markers carry at most four digits; a count beyond that is already "many". */
-const attention_marker = /\((\d{1,4})\)\u2060/u;
+/**
+ * Markers carry at most four digits; a count beyond that is already "many".
+ * A trailing question mark says a thread is holding a question open for the
+ * reader: `(3?)` reads naturally in a browser tab, and `(?)` stands alone
+ * when the question is the only thing waiting.
+ */
+const attention_marker = /\((\d{1,4}(\?)?|(\?))\)\u2060/u;
 
 /** The marker a renderer embeds in its document title for `count` threads. */
-export const AttentionTitleMarkerFor = (count: number): string =>
-	`(${Math.max(0, Math.trunc(count))})\u2060`;
+export const AttentionTitleMarkerFor = (count: number, awaiting_answer = false): string => {
+	const digits = Math.max(0, Math.trunc(count));
+
+	return digits === 0 && awaiting_answer
+		? "(?)\u2060"
+		: `(${digits}${awaiting_answer ? "?" : ""})\u2060`;
+};
 
 /**
  * The count a title's marker carries, or `undefined` when the title carries
@@ -27,10 +37,16 @@ export const AttentionTitleMarkerFor = (count: number): string =>
  * what makes the match trustworthy.
  */
 export const AttentionCountFromTitle = (title: string): number | undefined => {
-	const digits = attention_marker.exec(title)?.[1];
+	const marker = attention_marker.exec(title)?.[1];
+	if (marker === undefined) return undefined;
+	const digits = marker.replace("?", "");
 
-	return digits === undefined ? undefined : Number.parseInt(digits, 10);
+	return digits === "" ? 0 : Number.parseInt(digits, 10);
 };
+
+/** Whether a title's marker says a thread is waiting on the reader's answer. */
+export const TitleSignalsAwaitingAnswer = (title: string): boolean =>
+	attention_marker.exec(title)?.[1]?.includes("?") ?? false;
 
 /**
  * The marker a renderer embeds once it has given up reaching the Forge it was

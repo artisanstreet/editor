@@ -35,4 +35,19 @@ describe("attention marked titles", () => {
 			"(2)\u2060 (3) fix the build › Artisan Editor",
 		);
 	});
+
+	it("rides the awaiting-answer flag on the same rewrite", () => {
+		expect(AttentionMarkedTitle("Thread › Artisan Editor", 2, false, true)).toBe(
+			"(2?)\u2060 Thread › Artisan Editor",
+		);
+		expect(AttentionMarkedTitle("(2?)\u2060 Thread › Artisan Editor", 0, false, true)).toBe(
+			"(?)\u2060 Thread › Artisan Editor",
+		);
+		expect(AttentionMarkedTitle("(?)\u2060 Thread › Artisan Editor", 2, false, false)).toBe(
+			"(2)\u2060 Thread › Artisan Editor",
+		);
+		expect(AttentionMarkedTitle("(2?)\u2060 Thread › Artisan Editor", undefined)).toBe(
+			"Thread › Artisan Editor",
+		);
+	});
 });
