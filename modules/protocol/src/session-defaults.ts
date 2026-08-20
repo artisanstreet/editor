@@ -1,4 +1,4 @@
-import { Effect, Schema } from "effect";
+import { Effect, Schema, SchemaGetter } from "effect";
 
 import { Identifier } from "./common";
 
@@ -21,15 +21,19 @@ const session_defaults_maximum_models = 512;
 export const inherited_compaction_model = "inherited";
 
 /** Stable public ids for the curated agent-name banks bundled by the data module. */
-export const AgentNameDatasetIds = ["norwegian", "playful"] as const;
+export const AgentNameDatasetIds = ["norwegian", "british"] as const;
 export type AgentNameDatasetId = (typeof AgentNameDatasetIds)[number];
 export const DefaultAgentNameDatasetId: AgentNameDatasetId = "norwegian";
 export const AgentNameDatasets = [
 	{ description: "Norwegian feminine given names.", id: "norwegian", label: "Norwegian" },
-	{ description: "The familiar playful Artisan names.", id: "playful", label: "Playful" },
+	{ description: "British feminine given names.", id: "british", label: "British" },
 ] as const;
 
-export const AgentNameDataset = Schema.Literals(AgentNameDatasetIds).pipe(
+export const AgentNameDataset = Schema.Literals(["norwegian", "british", "playful"]).pipe(
+	Schema.decodeTo(Schema.Literals(AgentNameDatasetIds), {
+		decode: SchemaGetter.transform((dataset) => (dataset === "playful" ? "british" : dataset)),
+		encode: SchemaGetter.transform((dataset) => dataset),
+	}),
 	Schema.withDecodingDefault(Effect.succeed(DefaultAgentNameDatasetId)),
 );
 

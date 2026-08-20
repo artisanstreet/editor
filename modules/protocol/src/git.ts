@@ -14,9 +14,6 @@ export const git_workspace_maximum_worktrees = 4_096;
 /** Defines the maximum number of exact paths accepted by one index mutation. */
 export const git_mutation_maximum_paths = 10_000;
 
-/** Defines the maximum number of unresolved mutations returned with a workspace query. */
-export const git_workspace_maximum_pending_mutations = 10_000;
-
 /** Defines the maximum UTF-8 size of one ephemeral Git unified diff. */
 export const git_diff_maximum_bytes = 16 * 1024 * 1024;
 
@@ -498,9 +495,7 @@ export type GitWorkspaceQuery = typeof GitWorkspaceQuery.Type;
 
 const GitWorkspaceQueryResultBase = Schema.Struct({
 	journal_sequence: JournalSequence,
-	pending_mutations: Schema.Array(GitMutationProjection).check(
-		Schema.isMaxLength(git_workspace_maximum_pending_mutations),
-	),
+	pending_mutations: Schema.Array(GitMutationProjection),
 	workspace: GitWorkspaceProjection,
 });
 

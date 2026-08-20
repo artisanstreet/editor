@@ -265,6 +265,22 @@ describe("Git protocol codec", () => {
 		}
 	});
 
+	it("decodes every unresolved Git mutation without a queue-cardinality ceiling", async () => {
+		const pending_mutations = Array.from({ length: 10_001 }, (_, index) => ({
+			...mutation(),
+			mutation_id: `mutation_${String(index)}`,
+		}));
+		const envelope = backend_envelope("git.workspace.query.result", {
+			journal_sequence: 8,
+			pending_mutations,
+			workspace: repository(),
+		});
+
+		await expect(Effect.runPromise(DecodeOutboundControlEnvelope(envelope))).resolves.toEqual(
+			envelope,
+		);
+	});
+
 	it.each([
 		{ name: "feature/codec", type: "attached" } as const,
 		{ type: "detached" } as const,

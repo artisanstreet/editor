@@ -30,6 +30,26 @@ describe("conversation activity presentation", () => {
 		expect(Present("web_search", "active")).toBe("Searching the web");
 	});
 
+	it("uses the durable subagent name for individual lifecycle rows", () => {
+		const subagent = { agent_id: "agent-randi", display_name: "Randi" };
+		expect(
+			GetConversationActivityPresentation({
+				kind: "subagent",
+				label: "Talked to subagent",
+				status: "active",
+				subagent,
+			}).label,
+		).toBe("Talking to Randi");
+		expect(
+			GetConversationActivityPresentation({
+				kind: "subagent",
+				label: "Talked to subagent",
+				status: "completed",
+				subagent,
+			}).label,
+		).toBe("Talked to Randi");
+	});
+
 	it("preserves a safe normalized label for unknown future semantics", () => {
 		expect(Present("future.provider.action")).toBe("Provider fallback");
 	});
@@ -46,7 +66,11 @@ describe("conversation activity presentation", () => {
 		expect(Counted("workspace.edit", 1)).toBe("edited a file");
 		expect(Counted("workspace.edit", 2)).toBe("edited 2 files");
 		expect(Counted("search", 1)).toBe("searched the web");
-		expect(Counted("search", 3)).toBe("searched the web 3 times");
+		expect(Counted("search", 3)).toBe("ran 3 web searches");
+		expect(Counted("workspace.search", 1)).toBe("searched files");
+		expect(Counted("workspace.search", 5)).toBe("searched 5 files");
+		expect(Counted("test.run", 3)).toBe("ran 3 test runs");
+		expect(Counted("typecheck", 2)).toBe("ran 2 type checks");
 		expect(Counted("future.provider.action", 5)).toBe("used 5 tools");
 	});
 

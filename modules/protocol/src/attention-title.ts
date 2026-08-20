@@ -31,3 +31,23 @@ export const AttentionCountFromTitle = (title: string): number | undefined => {
 
 	return digits === undefined ? undefined : Number.parseInt(digits, 10);
 };
+
+/**
+ * The marker a renderer embeds once it has given up reaching the Forge it was
+ * paired with.
+ *
+ * The endpoint arrives exactly once, in the handoff fragment, so a Forge that
+ * died and came back on a different port is unreachable to the renderer no
+ * matter how long it retries — only the shell can ask `ae` for a new one. This
+ * is the renderer asking it to.
+ *
+ * Two joiners rather than one: the sequence is invisible in a browser tab,
+ * which shows its title, and no route-owned title contains even a single
+ * joiner, so it cannot be forged by naming a thread. Written as escapes because
+ * the literal characters are invisible in an editor.
+ */
+export const forge_repair_title_marker = "\u2060\u2060";
+
+/** Whether a title is asking the shell to pair the renderer with a live Forge. */
+export const TitleRequestsForgeRepair = (title: string): boolean =>
+	title.includes(forge_repair_title_marker);

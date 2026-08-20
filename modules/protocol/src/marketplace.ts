@@ -299,9 +299,6 @@ export const McpTransport = Schema.Union([
 		max_message_bytes: Schema.optional(
 			Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 16 * 1024 * 1024 })),
 		),
-		max_pending_requests: Schema.optional(
-			Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 1_024 })),
-		),
 		max_stderr_bytes: Schema.optional(
 			Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 16 * 1024 * 1024 })),
 		),

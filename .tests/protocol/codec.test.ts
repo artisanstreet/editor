@@ -69,6 +69,36 @@ describe("protocol codec", () => {
 		);
 	});
 
+	it("decodes an optional initial session policy with thread creation", async () => {
+		const input = {
+			kind: "thread.create.request",
+			message_id: "message_create_policy",
+			origin: "frontend",
+			payload: {
+				policy: {
+					engine_id: "codex",
+					permission_mode: "on_request",
+					reasoning_effort: "medium",
+					sandbox_mode: "workspace_write",
+					strict_clarification: false,
+					web_search_enabled: false,
+				},
+				title: "Atomic policy",
+			},
+			protocol_version: 1,
+			schema_version: 1,
+			sent_at: "2026-07-10T08:00:00.000Z",
+		};
+
+		await expect(Effect.runPromise(DecodeInboundControlEnvelope(input))).resolves.toMatchObject(
+			{
+				payload: {
+					policy: { permission: "supervised", service_tier: "standard" },
+				},
+			},
+		);
+	});
+
 	it("decodes a valid command envelope", async () => {
 		const input = make_input();
 

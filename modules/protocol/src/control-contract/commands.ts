@@ -26,7 +26,10 @@ import {
 	ThreadUnpinCommand,
 } from "../thread";
 
-import { Effect, Schema } from "effect";
+import { Schema } from "effect";
+
+export { SessionPolicyPermission, ThreadSessionPolicy } from "../thread-session-policy";
+import { ThreadSessionPolicy } from "../thread-session-policy";
 
 const EnvironmentVariableName = Schema.String.check(
 	Schema.makeFilter<string>((name) =>
@@ -49,59 +52,25 @@ export const ThreadSendMessageCommand = Schema.Struct({
 
 export type ThreadSendMessageCommand = typeof ThreadSendMessageCommand.Type;
 
+/**
+ * Withdraws one queued steering message before its engine takes it up. The
+ * command names the send it recalls by that send's own command id — the one
+ * identity both sides already hold. Withdrawal is only possible while the
+ * steer still sits undispatched in the outbox; once delivery begins the
+ * message belongs to the run and the withdrawal is refused.
+ */
+export const ThreadWithdrawMessageCommand = Schema.Struct({
+	type: Schema.Literal("thread.withdraw_message"),
+	command_id: Identifier,
+});
+
+export type ThreadWithdrawMessageCommand = typeof ThreadWithdrawMessageCommand.Type;
+
 /** Updates the thread-local default for routing follow-ups to an active run. */
 export const ThreadAutoSteerUpdateCommand = Schema.Struct({
 	type: Schema.Literal("thread.auto_steer.update"),
 	enabled: Schema.Boolean,
 });
-
-/** The durable, provider-neutral launch policy selected for one thread. */
-export const ThreadSessionPolicy = Schema.Struct({
-	/** Any engine identifier decodes; the runtime catalog rejects unregistered engines. */
-	engine_id: Identifier,
-	model: Schema.optional(Schema.NonEmptyString),
-	/**
-	 * The native context-window suffix appended to the model id (for example
-	 * Claude Code's `[1m]`). Absent means the harness resolves the bare model
-	 * id itself, which lands on the catalog capability's default option — for
-	 * Claude 5 that is the extended window, not the 200K base one.
-	 */
-	context_window: Schema.optional(Schema.NonEmptyString),
-	reasoning_effort: Schema.Literals(["low", "medium", "high", "xhigh", "max", "ultra"]),
-	/**
-	 * The harness-neutral permission option id from the catalog manifest, and
-	 * the authoritative permission choice. `permission_mode` and `sandbox_mode`
-	 * are the two coarse axes derived from it for sandbox and tool gating; they
-	 * cannot express every harness option (Claude alone has five), so nothing
-	 * may reconstruct the option id from them.
-	 */
-	permission: Identifier.pipe(
-		Schema.optional,
-		Schema.withDecodingDefault(Effect.succeed("supervised")),
-	),
-	permission_mode: Schema.Literals(["never", "on_request"]),
-	sandbox_mode: Schema.Literals(["read_only", "workspace_write"]),
-	service_tier: Schema.NonEmptyString.pipe(
-		Schema.optional,
-		Schema.withDecodingDefault(Effect.succeed("standard")),
-	),
-	web_search_enabled: Schema.Boolean,
-	strict_clarification: Schema.Boolean,
-});
-export type ThreadSessionPolicy = typeof ThreadSessionPolicy.Type;
-
-/**
- * Reads the neutral permission option id a policy stands for. Policies written
- * before the field existed carry only the two coarse axes, so they resolve to
- * the neutral option those axes described.
- */
-export const SessionPolicyPermission = (policy: ThreadSessionPolicy) =>
-	policy.permission ??
-	(policy.sandbox_mode === "read_only"
-		? "restricted"
-		: policy.permission_mode === "never"
-			? "autonomous"
-			: "supervised");
 
 /** Replaces the complete policy atomically, so retries have one exact intent. */
 export const ThreadSessionPolicyUpdateCommand = Schema.Struct({
@@ -460,6 +429,7 @@ export const CommandPayload = Schema.Union([
 	SessionDefaultsUpdateCommand,
 	UsageInterruptionResolveCommand,
 	ThreadSendMessageCommand,
+	ThreadWithdrawMessageCommand,
 	ThreadAutoSteerUpdateCommand,
 	ThreadSessionPolicyUpdateCommand,
 	IntakeRespondQuestionCommand,

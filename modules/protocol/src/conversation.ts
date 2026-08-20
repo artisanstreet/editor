@@ -6,7 +6,16 @@ import { Identifier, IsoDateTime, JournalSequence, SchemaVersion } from "./commo
 import { ImageAttachmentReference, UserMessageContentPart } from "./attachments";
 import { UsageInterruption } from "./usage-interruption";
 
-/** A lifecycle shared by canonical turns and items. Terminal values never transition again. */
+/**
+ * A lifecycle shared by canonical turns and items. Terminal values never
+ * transition again.
+ *
+ * `interrupted` is terminal but distinct from `failed`: the run was ended by
+ * something outside itself — a host restart, a shutdown, an externally killed
+ * engine — rather than by anything going wrong with the work. Folding the two
+ * together spends a reader's alarm on an event that is not an error, and loses
+ * the one distinction that decides whether the turn can be picked back up.
+ */
 export const ConversationLifecycle = Schema.Literals([
 	"pending",
 	"streaming",
@@ -14,10 +23,15 @@ export const ConversationLifecycle = Schema.Literals([
 	"waiting",
 	"completed",
 	"failed",
+	"interrupted",
 	"cancelled",
 ]);
 export type ConversationLifecycle = typeof ConversationLifecycle.Type;
 
+/**
+ * Sealed outcomes only. `interrupted` is deliberately absent: it is settled but
+ * still resumable, so it must stay reachable by a later transition.
+ */
 export const ConversationTerminalLifecycle = Schema.Literals(["completed", "failed", "cancelled"]);
 export type ConversationTerminalLifecycle = typeof ConversationTerminalLifecycle.Type;
 
@@ -162,6 +176,20 @@ export const ConversationApprovalRequest = Schema.Union([
 ]);
 export type ConversationApprovalRequest = typeof ConversationApprovalRequest.Type;
 
+/**
+ * Bounds an enumerated answer set. A provider that offers choices offers a
+ * handful; anything past this is a free-form question wearing a list, and the
+ * renderer falls back to typed text for it.
+ */
+export const conversation_question_option_limit = 16;
+
+/** One offered answer to a question the provider enumerated. */
+export const ConversationQuestionOption = Schema.Struct({
+	description: Schema.optional(ConversationSafeText),
+	label: ConversationSafeText,
+});
+export type ConversationQuestionOption = typeof ConversationQuestionOption.Type;
+
 /** A normalized, renderer-ready entity. Its `type` is a domain discriminator, not a UI label. */
 export const ConversationItem = Schema.Union([
 	Schema.Struct({
@@ -197,7 +225,21 @@ export const ConversationItem = Schema.Union([
 	}),
 	Schema.Struct({
 		...ConversationItemFields,
+		/** Preserves the visible chat cut when one reasoning stream spans a steer. */
+		steering_fragment_boundaries: Schema.optional(
+			Schema.Array(ConversationSteeringFragmentBoundary).check(
+				Schema.isMaxLength(conversation_maximum_steering_fragment_boundaries),
+			),
+		),
 		text: ConversationBodyText,
+		/**
+		 * How much reasoning this phase has done, when the engine counts it but
+		 * withholds the reasoning. Claude Code is that case: it encrypts thinking
+		 * and publishes only a running estimate, so this is what the row has to
+		 * show instead of the summary it has no way to obtain. Durable rows carry
+		 * it, so it stays optional here even for engines that never count.
+		 */
+		thinking_tokens: Schema.optional(NonNegativeInt),
 		type: Schema.Literal("reasoning_summary"),
 	}),
 	Schema.Struct({
@@ -207,6 +249,12 @@ export const ConversationItem = Schema.Union([
 		failure: Schema.optional(ConversationErrorRef),
 		/** When the provider accepted the turn and began producing run activity. */
 		responded_at: Schema.optional(IsoDateTime),
+		/**
+		 * True when this session ended without finishing and the durable record
+		 * still holds enough to pick it back up. Offered rather than acted on:
+		 * resuming spends the reader's tokens, so the decision stays theirs.
+		 */
+		resumable: Schema.optional(Schema.Boolean),
 		started_at: IsoDateTime,
 		status: ConversationLifecycle,
 		title: ConversationSafeText,
@@ -217,6 +265,8 @@ export const ConversationItem = Schema.Union([
 		detail: Schema.optional(ConversationSafeText),
 		kind: Identifier,
 		label: ConversationSafeText,
+		/** Bounded, display-safe terminal output retained beneath its owning activity. */
+		output: Schema.optional(ConversationSafeText),
 		result_ref: Schema.optional(Identifier),
 		status: ConversationLifecycle,
 		/** Present only when this row describes delegation to one Artisan-owned worker. */
@@ -271,7 +321,25 @@ export const ConversationItem = Schema.Union([
 	}),
 	Schema.Struct({
 		...ConversationItemFields,
+		/** A short category label shown beside the question, when the provider names one. */
+		header: Schema.optional(ConversationSafeText),
 		interaction_id: Identifier,
+		/** Whether more than one option may be chosen at once. */
+		multi_select: Schema.optional(Schema.Boolean),
+		/**
+		 * Offered answers. Absent for a free-form question; present when the
+		 * provider enumerated choices, which the renderer presents for selection
+		 * instead of asking the user to retype one of them.
+		 */
+		options: Schema.optional(
+			Schema.Array(ConversationQuestionOption).check(
+				Schema.makeFilter<ReadonlyArray<ConversationQuestionOption>>((value) =>
+					value.length <= conversation_question_option_limit
+						? undefined
+						: `Expected at most ${conversation_question_option_limit} options`,
+				),
+			),
+		),
 		prompt: ConversationSafeText,
 		requested_at: IsoDateTime,
 		resolution: Schema.optional(ConversationSafeText),
@@ -295,6 +363,16 @@ export const ConversationItem = Schema.Union([
 	}),
 	Schema.Struct({
 		...ConversationItemFields,
+		/**
+		 * How long the compaction held the turn, when the engine reports it.
+		 *
+		 * Worth carrying because a compaction is the one event that can stall a
+		 * transcript for minutes while emitting nothing, and an engine that only
+		 * announces the boundary after the fact leaves the reader with a silence
+		 * to explain. Optional: no engine is obliged to measure it, and rows
+		 * written before the field existed must still decode.
+		 */
+		duration_ms: Schema.optional(NonNegativeInt),
 		portability: Schema.Literals(["portable", "provider_bound", "unknown"]),
 		state: Schema.Literals(["started", "completed", "failed"]),
 		summary: Schema.optional(ConversationSafeText),
@@ -516,16 +594,31 @@ const invariant_error = (
 const entity_is_terminal = (entity: ConversationEntityBase) =>
 	terminal_lifecycles.has(entity.lifecycle);
 
+/**
+ * `interrupted` is the one settled state that may reopen. A resume reattaches
+ * to the very run the host ended, so the same session continues rather than a
+ * second card appearing beside it — which is what "picks up where it left off"
+ * has to mean for the reader.
+ */
 const legal_lifecycle_transitions: Readonly<
 	Record<ConversationLifecycle, ReadonlySet<ConversationLifecycle>>
 > = {
-	active: new Set(["waiting", "completed", "failed", "cancelled"]),
+	active: new Set(["waiting", "completed", "failed", "interrupted", "cancelled"]),
 	cancelled: new Set(),
 	completed: new Set(),
 	failed: new Set(),
-	pending: new Set(["streaming", "active", "waiting", "completed", "failed", "cancelled"]),
-	streaming: new Set(["active", "waiting", "completed", "failed", "cancelled"]),
-	waiting: new Set(["active", "streaming", "completed", "failed", "cancelled"]),
+	interrupted: new Set(["streaming", "active", "waiting", "completed", "failed", "cancelled"]),
+	pending: new Set([
+		"streaming",
+		"active",
+		"waiting",
+		"completed",
+		"failed",
+		"interrupted",
+		"cancelled",
+	]),
+	streaming: new Set(["active", "waiting", "completed", "failed", "interrupted", "cancelled"]),
+	waiting: new Set(["active", "streaming", "completed", "failed", "interrupted", "cancelled"]),
 };
 
 const lifecycle_transition_is_legal = (from: ConversationLifecycle, to: ConversationLifecycle) =>

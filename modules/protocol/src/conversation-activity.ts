@@ -4,6 +4,7 @@ export interface ConversationActivityPresentationInput {
 	readonly kind: string;
 	readonly label: string;
 	readonly status: ConversationLifecycle;
+	readonly subagent?: ConversationActivitySubagent;
 }
 
 export interface ConversationActivityPresentation {
@@ -24,8 +25,9 @@ export interface ConversationActivityGroupPresentation {
 
 type ActivityState = "active" | "completed" | "failed";
 
+/** `interrupted` joins `cancelled`: stopped without completing, and not still running. */
 const ActivityState = (status: ConversationLifecycle): ActivityState =>
-	status === "failed" || status === "cancelled"
+	status === "failed" || status === "cancelled" || status === "interrupted"
 		? "failed"
 		: status === "completed"
 			? "completed"
@@ -56,6 +58,30 @@ export type ConversationActivityCategory =
 	| "tool"
 	| "typecheck"
 	| "web_search";
+
+const activity_category_labels: Record<ConversationActivityCategory, string> = {
+	app_inspect: "App",
+	command: "Command",
+	database: "Database",
+	diff: "Changes",
+	file_delete: "Files",
+	file_edit: "Files",
+	file_read: "Files",
+	file_search: "Files",
+	git_status: "Git",
+	integration: "Integrations",
+	other: "Tools",
+	subagent: "Subagents",
+	test: "Tests",
+	tool: "Tools",
+	typecheck: "Types",
+	web_search: "Web",
+};
+
+/** Stable foreground category copy shared by collapsed and expanded activity rows. */
+export const GetConversationActivityCategoryLabel = (
+	category: ConversationActivityCategory,
+): string => activity_category_labels[category];
 
 /** Provider kinds arrive in several shapes; compare them in one normalized form. */
 const normalized_kind = (kind: string) =>
@@ -123,13 +149,11 @@ interface ActivityCopy {
 const plural = (count: number, singular: string, many: string) =>
 	count === 1 ? singular : `${count} ${many}`;
 
-const repeated = (count: number, once: string) => (count === 1 ? once : `${once} ${count} times`);
-
 const activity_copy: Record<ConversationActivityCategory, ActivityCopy> = {
 	app_inspect: {
 		active: "Inspecting the app",
 		completed: "Inspected the app",
-		counted: (count) => repeated(count, "inspected the app"),
+		counted: (count) => (count === 1 ? "inspected the app" : `ran ${count} app inspections`),
 		failed: "App inspection failed",
 	},
 	command: {
@@ -141,13 +165,14 @@ const activity_copy: Record<ConversationActivityCategory, ActivityCopy> = {
 	database: {
 		active: "Inspecting the database",
 		completed: "Inspected the database",
-		counted: (count) => repeated(count, "inspected the database"),
+		counted: (count) =>
+			count === 1 ? "inspected the database" : `ran ${count} database inspections`,
 		failed: "Database inspection failed",
 	},
 	diff: {
 		active: "Reviewing changes",
 		completed: "Reviewed changes",
-		counted: (count) => repeated(count, "reviewed changes"),
+		counted: (count) => (count === 1 ? "reviewed changes" : `reviewed ${count} diffs`),
 		failed: "Change review failed",
 	},
 	file_delete: {
@@ -171,13 +196,13 @@ const activity_copy: Record<ConversationActivityCategory, ActivityCopy> = {
 	file_search: {
 		active: "Searching files",
 		completed: "Searched files",
-		counted: (count) => repeated(count, "searched files"),
+		counted: (count) => (count === 1 ? "searched files" : `searched ${count} files`),
 		failed: "File search failed",
 	},
 	git_status: {
 		active: "Checking Git status",
 		completed: "Checked Git status",
-		counted: (count) => repeated(count, "checked Git status"),
+		counted: (count) => (count === 1 ? "checked Git status" : `ran ${count} Git status checks`),
 		failed: "Git status failed",
 	},
 	integration: {
@@ -201,7 +226,7 @@ const activity_copy: Record<ConversationActivityCategory, ActivityCopy> = {
 	test: {
 		active: "Running tests",
 		completed: "Ran tests",
-		counted: (count) => repeated(count, "ran tests"),
+		counted: (count) => (count === 1 ? "ran tests" : `ran ${count} test runs`),
 		failed: "Tests failed",
 	},
 	tool: {
@@ -213,13 +238,13 @@ const activity_copy: Record<ConversationActivityCategory, ActivityCopy> = {
 	typecheck: {
 		active: "Checking types",
 		completed: "Checked types",
-		counted: (count) => repeated(count, "checked types"),
+		counted: (count) => (count === 1 ? "checked types" : `ran ${count} type checks`),
 		failed: "Type check failed",
 	},
 	web_search: {
 		active: "Searching the web",
 		completed: "Searched the web",
-		counted: (count) => repeated(count, "searched the web"),
+		counted: (count) => (count === 1 ? "searched the web" : `ran ${count} web searches`),
 		failed: "Web search failed",
 	},
 };
@@ -282,6 +307,17 @@ export const GetConversationActivityPresentation = (
 ): ConversationActivityPresentation => {
 	const category = GetConversationActivityCategory(activity.kind);
 	if (category === "other") return { label: activity.label };
+	if (category === "subagent" && activity.subagent !== undefined) {
+		const name = activity.subagent.display_name;
+		return {
+			label:
+				activity.status === "failed" || activity.status === "cancelled"
+					? `${name}'s work failed`
+					: activity.status === "completed"
+						? `Talked to ${name}`
+						: `Talking to ${name}`,
+		};
+	}
 
 	return { label: activity_copy[category][ActivityState(activity.status)] };
 };

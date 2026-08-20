@@ -7,8 +7,21 @@ import { ThreadListItem } from "../thread";
 
 import { ThreadUsageSeries, ThreadUsageSeriesQuery } from "../thread-usage-series";
 import { EngineUsageQuery, EngineUsageSnapshot } from "../engine-usage";
+import {
+	EngineAuthenticationRequest,
+	EngineInstallationMutationResult,
+	EngineInstallationQuery,
+	EngineInstallationSnapshot,
+	EngineInstallRequest,
+	EngineRollbackRequest,
+} from "../engine-installation";
 
-import { HostIdentitySnapshot } from "../host-identity";
+import {
+	HostIdentitySnapshot,
+	HostMachineConnectOutcome,
+	HostMachineConnectRequest,
+	HostMachinesSnapshot,
+} from "../host-identity";
 
 import {
 	OrchestrationGroupListQuery,
@@ -463,6 +476,36 @@ export const HostIdentityQueryResultEnvelope = Schema.Struct({
 });
 export type HostIdentityQueryResultEnvelope = typeof HostIdentityQueryResultEnvelope.Type;
 
+/** Requests the machines available to execute threads on this Forge host. */
+export const HostMachinesQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("host.machines.query"),
+	payload: Schema.Struct({}),
+});
+export type HostMachinesQueryEnvelope = typeof HostMachinesQueryEnvelope.Type;
+export const HostMachinesQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("host.machines.query.result"),
+	payload: HostMachinesSnapshot,
+});
+export type HostMachinesQueryResultEnvelope = typeof HostMachinesQueryResultEnvelope.Type;
+
+/** Starts and pairs the named machine's Forge, returning a pairable endpoint. */
+export const HostMachineConnectRequestEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("host.machines.connect.request"),
+	payload: HostMachineConnectRequest,
+});
+export type HostMachineConnectRequestEnvelope = typeof HostMachineConnectRequestEnvelope.Type;
+export const HostMachineConnectResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("host.machines.connect.result"),
+	payload: HostMachineConnectOutcome,
+});
+export type HostMachineConnectResultEnvelope = typeof HostMachineConnectResultEnvelope.Type;
+
 /** Requests repository identity for projects Forge already owns. */
 export const ProjectRepositoryQueryEnvelope = Schema.Struct({
 	...NegotiatedFrontendTraceMetadata,
@@ -507,6 +550,60 @@ export const EngineUsageQueryResultEnvelope = Schema.Struct({
 	payload: EngineUsageSnapshot,
 });
 export type EngineUsageQueryResultEnvelope = typeof EngineUsageQueryResultEnvelope.Type;
+
+/**
+ * Requests Artisan-owned installation state for registered engines. The
+ * service-scoped state is authoritative for the current Forge lifecycle, so
+ * clients poll this query; installation work is intentionally not journaled.
+ */
+export const EngineInstallationQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("engine.installation.query"),
+	payload: EngineInstallationQuery,
+});
+export type EngineInstallationQueryEnvelope = typeof EngineInstallationQueryEnvelope.Type;
+export const EngineInstallationQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("engine.installation.query.result"),
+	payload: EngineInstallationSnapshot,
+});
+export type EngineInstallationQueryResultEnvelope =
+	typeof EngineInstallationQueryResultEnvelope.Type;
+
+/** Starts a managed engine install or update in the background. */
+export const EngineInstallRequestEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("engine.install.request"),
+	payload: EngineInstallRequest,
+});
+export type EngineInstallRequestEnvelope = typeof EngineInstallRequestEnvelope.Type;
+
+/** Starts authentication for Artisan's owned engine config home. */
+export const EngineAuthenticationRequestEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("engine.authentication.request"),
+	payload: EngineAuthenticationRequest,
+});
+export type EngineAuthenticationRequestEnvelope = typeof EngineAuthenticationRequestEnvelope.Type;
+
+/** Restores the previously active managed engine version. */
+export const EngineRollbackRequestEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("engine.rollback.request"),
+	payload: EngineRollbackRequest,
+});
+export type EngineRollbackRequestEnvelope = typeof EngineRollbackRequestEnvelope.Type;
+
+/** Settles an engine installation mutation without touching the journal. */
+export const EngineInstallationMutationResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("engine.installation.mutation.result"),
+	payload: EngineInstallationMutationResult,
+});
+export type EngineInstallationMutationResultEnvelope =
+	typeof EngineInstallationMutationResultEnvelope.Type;
 
 /** Requests the per-turn token series for one thread's current context window. */
 export const ThreadUsageSeriesQueryEnvelope = Schema.Struct({

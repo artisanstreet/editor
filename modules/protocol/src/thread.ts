@@ -1,6 +1,7 @@
 import { Schema } from "effect";
 
 import { Identifier, IsoDateTime, StreamSequence } from "./common";
+import { ThreadSessionPolicy } from "./thread-session-policy";
 
 /** Enumerates meaningful actions that advance thread retention activity. */
 export const ThreadActivityKind = Schema.Literals([
@@ -136,6 +137,8 @@ export type ThreadListItem = typeof ThreadListItem.Type;
 
 /** Describes client intent for Forge-owned thread creation. */
 export const ThreadCreateInput = Schema.Struct({
+	/** Applied atomically with creation when the user chose a launch policy. */
+	policy: Schema.optional(ThreadSessionPolicy),
 	project_id: Schema.optional(Identifier),
 	title: Schema.NonEmptyString,
 });
@@ -144,6 +147,7 @@ export type ThreadCreateInput = typeof ThreadCreateInput.Type;
 
 /** Creates a durable thread with an initial auto-managed identity. */
 export const ThreadCreateCommand = Schema.Struct({
+	policy: Schema.optional(ThreadSessionPolicy),
 	project_id: Schema.optional(Identifier),
 	type: Schema.Literal("thread.create"),
 	title: Schema.NonEmptyString,

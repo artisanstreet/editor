@@ -262,6 +262,16 @@ export const ControlRpcGroup = RpcGroup.make(
 		Control.HostIdentityQueryResultEnvelope,
 	),
 	ControlRpc(
+		"host.machines.query",
+		Control.HostMachinesQueryEnvelope,
+		Control.HostMachinesQueryResultEnvelope,
+	),
+	ControlRpc(
+		"host.machines.connect.request",
+		Control.HostMachineConnectRequestEnvelope,
+		Control.HostMachineConnectResultEnvelope,
+	),
+	ControlRpc(
 		"project.repository.query",
 		Control.ProjectRepositoryQueryEnvelope,
 		Control.ProjectRepositoryQueryResultEnvelope,
@@ -280,6 +290,26 @@ export const ControlRpcGroup = RpcGroup.make(
 		"engine.usage.query",
 		Control.EngineUsageQueryEnvelope,
 		Control.EngineUsageQueryResultEnvelope,
+	),
+	ControlRpc(
+		"engine.installation.query",
+		Control.EngineInstallationQueryEnvelope,
+		Control.EngineInstallationQueryResultEnvelope,
+	),
+	ControlRpc(
+		"engine.install.request",
+		Control.EngineInstallRequestEnvelope,
+		Control.EngineInstallationMutationResultEnvelope,
+	),
+	ControlRpc(
+		"engine.authentication.request",
+		Control.EngineAuthenticationRequestEnvelope,
+		Control.EngineInstallationMutationResultEnvelope,
+	),
+	ControlRpc(
+		"engine.rollback.request",
+		Control.EngineRollbackRequestEnvelope,
+		Control.EngineInstallationMutationResultEnvelope,
 	),
 	ControlRpc(
 		"thread.usage.series.query",
