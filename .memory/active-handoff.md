@@ -3,6 +3,18 @@
 Last updated: 2026-08-20. Branch continuity only; durable verified product status belongs in
 [`docs/status/backend-completion-matrix.md`](../docs/status/backend-completion-matrix.md).
 
+## Live Work Disclosure (verified 2026-08-20)
+
+- Unfinished work sessions now preserve their initially-open state even when mounted after reply
+  prose has already begun. Disclosure automation observes the newest visible durable ordinal as
+  `none | reply | work`: later work reopens the trace, later prose folds it, and successful
+  settlement folds a reply that arrived in the same projection batch. User disclosure remains
+  authoritative; failed/cancelled/interrupted settlement is not auto-folded.
+- Focused frontend disclosure/status/source contracts pass 6 files / 106 tests. Frontend format,
+  lint, and production build pass; the aggregate test phase reaches 994/996, with only the
+  protected composer line budget (636 > 560) and concurrent thread-title source assertion
+  failing. Do not stage unrelated concurrent new-thread, title, backend, engine, or settings work.
+
 ## Desync Layer Three: Conversation Delivery Starvation (found and fixed 2026-08-20)
 
 - The remaining "toast fires, rail shows finished, open transcript frozen" class — the socket

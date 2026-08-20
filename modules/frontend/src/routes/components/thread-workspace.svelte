@@ -16,6 +16,7 @@
 	import { Button } from "$lib/components/ui/button";
 	import {
 		conversation_background_agent_names,
+		conversation_progress_phase,
 		conversation_reply_is_live,
 		conversation_waiting_for_activity,
 		work_session_is_settled,
@@ -1008,6 +1009,7 @@
 										has_live_reply={conversation_reply_is_live(block.details)}
 										item={block.session}
 										onretry={block.session.status === "failed" ? onretry : undefined}
+										progress_phase={conversation_progress_phase(block.details)}
 										reasoning_summary={block.session.run_id === active_run_id
 											? live_reasoning_summary
 											: undefined}

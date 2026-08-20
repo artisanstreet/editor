@@ -461,6 +461,14 @@ frontend and Forge builds, native checks/73 tests, SER policy scans, and indepen
 review. The full frontend suite reaches 680/681 tests; its one failure is an existing
 stale source assertion for the protected turn-segment key.
 
+On 2026-08-20, live work disclosure preserved that initially-open contract even when a
+session mounts after reply prose has begun. The newest visible durable ordinal identifies
+reply versus work phases: later work reopens the trace, later prose folds it, and successful
+settlement also folds final prose delivered in the settlement batch; an explicit reader
+choice remains authoritative. Six focused frontend files pass 106 tests, frontend format,
+lint, and the production build pass, and the aggregate test phase reaches 994/996 with only
+the protected composer line budget and concurrent thread-title source assertion failing.
+
 On 2026-08-12, installed Editor freeze diagnosis became durable and bounded. A
 home-scoped `profiling-enabled` marker makes every managed launch persist a per-session
 JSONL timeline and run Chromium continuous sampling; an unresponsive renderer flushes

@@ -5,6 +5,7 @@ import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
 
 import { ConversationItem } from "@artisan/protocol";
+import { conversation_progress_phase } from "../../modules/frontend/src/lib/conversation/activity-status";
 import {
 	group_conversation_trace_blocks,
 	make_conversation_trace_segments,
@@ -505,20 +506,84 @@ describe("conversation trace", () => {
 	 * moment the model starts writing below it, unfolds if the model goes back
 	 * to work, and never fights a disclosure the reader chose themselves.
 	 */
-	it("folds the live trace once the reply starts and unfolds it if work resumes", () => {
+	it("starts unfinished traces open and folds only on an observed reply phase", () => {
 		const work_session = ReadSource(
 			"modules/frontend/src/routes/components/conversation-work-session.svelte",
 		);
+		const workspace = ReadSource(
+			"modules/frontend/src/routes/components/thread-workspace.svelte",
+		);
 
-		expect(work_session).toContain("const reply_started = reply_live && !previous_reply_live;");
+		/** Mounting mid-reply preserves the live session's initially-open state. */
 		expect(work_session).toContain(
-			"const work_resumed = activity_wait && !previous_waiting_for_activity;",
+			"let previous_progress_phase = untrack(() => progress_phase);",
 		);
-		expect(work_session).toContain("if (!working || user_chose_disclosure) return;");
-		expect(work_session).toContain("if (work_resumed) open = true;");
-		expect(work_session).toContain("else if (reply_started) open = false;");
+		expect(work_session).toContain("let previous_working = untrack(");
+		expect(work_session).toContain("const phase_changed = phase !== previous_progress_phase;");
+		expect(work_session).toContain("const settled = previous_working && !working;");
+		expect(work_session).toContain('if (phase === "work" && working) open = true;');
 		expect(work_session).toContain(
-			"yield* ReconcileReplyDisclosure(has_live_reply, waiting_for_activity, is_working);",
+			'else if (phase === "reply" && (phase_changed || settled)) open = false;',
 		);
+		expect(work_session).toContain(
+			"yield* ReconcileReplyDisclosure(progress_phase, is_working, item.status);",
+		);
+		expect(workspace).toContain("progress_phase={conversation_progress_phase(block.details)}");
+	});
+
+	it("reads resumed work off ordinals, not off a text lifecycle an engine may dangle", () => {
+		const message = (ordinal: number, text: string) =>
+			item({
+				...base,
+				id: `assistant_${ordinal}`,
+				lifecycle: "streaming",
+				ordinal,
+				phase: "commentary",
+				text,
+				type: "assistant_message",
+			});
+		const running = (ordinal: number) =>
+			item({
+				...base,
+				id: `activity_${ordinal}`,
+				kind: "terminal_activity",
+				label: "Ran a command",
+				lifecycle: "streaming",
+				ordinal,
+				status: "active",
+				type: "activity",
+			});
+		const thinking = (ordinal: number) =>
+			item({
+				...base,
+				id: `reasoning_${ordinal}`,
+				lifecycle: "streaming",
+				ordinal,
+				text: "Weighing the options",
+				type: "reasoning_summary",
+			});
+
+		/** Prose is the newest thing: the fold stands. */
+		expect(conversation_progress_phase([running(1), message(2, "So far…")])).toBe("reply");
+		/** A newer activity or a newer reasoning phase both mean work resumed. */
+		expect(conversation_progress_phase([message(1, "So far…"), running(2)])).toBe("work");
+		expect(conversation_progress_phase([message(1, "So far…"), thinking(2)])).toBe("work");
+		/** No prose yet: nothing to fold for, so nothing to resume from. */
+		expect(conversation_progress_phase([running(1), thinking(2)])).toBe("work");
+		expect(conversation_progress_phase([message(1, "   "), running(2)])).toBe("work");
+		expect(
+			conversation_progress_phase([
+				message(1, "So far…"),
+				item({
+					...base,
+					id: "reasoning_empty",
+					lifecycle: "streaming",
+					ordinal: 2,
+					text: "   ",
+					type: "reasoning_summary",
+				}),
+			]),
+		).toBe("reply");
+		expect(conversation_progress_phase([message(1, "   ")])).toBe("none");
 	});
 });

@@ -270,6 +270,35 @@ export const conversation_background_agent_names = (
 	return [...new Set(names)];
 };
 
+export type ConversationProgressPhase = "none" | "reply" | "work";
+
+/**
+ * The newest visible kind of progress in a work session. Durable ordinals,
+ * rather than item lifecycles, decide whether prose has retired the tool chain
+ * or work has resumed after prose: engines can leave a mid-turn message
+ * streaming for the rest of the run, and a completed final paragraph can
+ * arrive in the same projection batch as settlement.
+ */
+export const conversation_progress_phase = (
+	items: ReadonlyArray<ConversationItem>,
+): ConversationProgressPhase => {
+	let newest_reply_ordinal = -1;
+	let newest_work_ordinal = -1;
+	for (const item of items) {
+		if (item.type === "assistant_message" && item.text.trim().length > 0) {
+			newest_reply_ordinal = Math.max(newest_reply_ordinal, item.ordinal);
+		}
+		if (
+			item.type === "activity" ||
+			(item.type === "reasoning_summary" && item.text.trim().length > 0)
+		) {
+			newest_work_ordinal = Math.max(newest_work_ordinal, item.ordinal);
+		}
+	}
+	if (newest_reply_ordinal === -1 && newest_work_ordinal === -1) return "none";
+	return newest_reply_ordinal > newest_work_ordinal ? "reply" : "work";
+};
+
 /**
  * True while the assistant's own prose is arriving and has something to show.
  * A reply speaks for itself, so it takes over as the status.

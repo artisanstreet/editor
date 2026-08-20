@@ -6,6 +6,7 @@
 	import { Clock, Effect } from "effect";
 	import { untrack } from "svelte";
 	import type { Snippet } from "svelte";
+	import type { ConversationProgressPhase } from "$lib/conversation/activity-status";
 	import {
 		active_work_label_for,
 		thinking_word_for,
@@ -40,6 +41,7 @@
 		superseded = false,
 		transition,
 		waiting_for_activity = false,
+		progress_phase = "none",
 	}: {
 		/**
 		 * True when the thread's own context reading says the engine must compact
@@ -97,6 +99,8 @@
 		transition?: Extract<ConversationItem, { type: "model_transition" }>;
 		/** True while the visible tool chain already communicates this turn's progress. */
 		waiting_for_activity?: boolean;
+		/** The newest visible reply-or-work phase in this session's durable order. */
+		progress_phase?: ConversationProgressPhase;
 	} = $props();
 	/**
 	 * Settled work history arrives collapsed even when it has details or failed.
@@ -308,32 +312,35 @@
 		});
 	yield* ReconcileStatus(item.status);
 
-	let previous_reply_live = untrack(() => has_live_reply);
-	let previous_waiting_for_activity = untrack(() => waiting_for_activity);
+	let previous_progress_phase = untrack(() => progress_phase);
+	let previous_working = untrack(() => item.ended_at === undefined);
 	/**
-	 * The reply retires the history it came from. Once the model starts writing
-	 * below, the chain above is context the reader is done with, so it folds on
-	 * its own; if the model then goes back to work — a live activity newer than
-	 * its text — the chain is the progress again and unfolds. Both movements are
-	 * edges, not states, so a reader's own toggle mid-reply is never fought, and
-	 * an explicit choice ends the automation for the session's whole life. The
-	 * activity edge wins a simultaneous batch because it is the newer fact.
+	 * The reply retires the history it came from. Every unfinished session still
+	 * starts open, including one mounted after prose has already begun; only a
+	 * later reply phase or successful settlement may fold it. If activity or
+	 * reasoning moves past prose, the chain is the progress again and opens. The
+	 * durable cross-item order also catches completed prose batched with settlement
+	 * and engines that leave an earlier text item streaming. Work wins whenever it
+	 * is the newest visible phase.
+	 * A reader's explicit toggle ends the automation for the session's whole life,
+	 * and a failure still forces the trace open through the status reconcile above.
 	 */
 	const ReconcileReplyDisclosure = (
-		reply_live: boolean,
-		activity_wait: boolean,
+		phase: ConversationProgressPhase,
 		working: boolean,
+		status: typeof item.status,
 	) =>
 		Effect.gen(function* () {
-			const reply_started = reply_live && !previous_reply_live;
-			const work_resumed = activity_wait && !previous_waiting_for_activity;
-			previous_reply_live = reply_live;
-			previous_waiting_for_activity = activity_wait;
-			if (!working || user_chose_disclosure) return;
-			if (work_resumed) open = true;
-			else if (reply_started) open = false;
+			const phase_changed = phase !== previous_progress_phase;
+			const settled = previous_working && !working;
+			previous_progress_phase = phase;
+			previous_working = working;
+			if (user_chose_disclosure) return;
+			if (status === "failed" || status === "cancelled" || status === "interrupted") return;
+			if (phase === "work" && working) open = true;
+			else if (phase === "reply" && (phase_changed || settled)) open = false;
 		});
-	yield* ReconcileReplyDisclosure(has_live_reply, waiting_for_activity, is_working);
+	yield* ReconcileReplyDisclosure(progress_phase, is_working, item.status);
 
 	/**
 	 * A quiet-status line earns a new word only after it was actually removed
