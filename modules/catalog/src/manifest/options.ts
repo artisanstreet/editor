@@ -229,11 +229,18 @@ export const exceptional = (id: ThinkingOption["id"], native_value: string) =>
 /**
  * Codex Ultra coordinates parallel subagents at the harness level rather than
  * selecting another step in the model's reasoning budget.
+ *
+ * Carries the same advisory as the extended context window, and for the same
+ * reason: both multiply what a single turn costs without saying so anywhere
+ * the reader would look. Ultra's multiplier is the subagent fan-out — each one
+ * is a full model run with its own context, so a turn is billed as many, and
+ * the count is decided by the harness rather than by the person choosing it.
  */
 export const harness_orchestration = (id: "ultra", native_value: string) =>
 	Schema.decodeUnknownSync(ThinkingOption)({
+		advisory: "Not recommended.",
 		description:
-			"Ultra lets Codex coordinate multiple subagents in parallel and synthesize their results. It works best when complex work splits cleanly into independent tasks.",
+			"Ultra lets Codex coordinate multiple subagents in parallel and synthesize their results. Each subagent is a separate model run with its own context, so one Ultra turn can cost several times an ordinary one — and how many it spawns is Codex's decision, not yours. It earns that only when complex work splits cleanly into genuinely independent tasks; on work that does not split, it pays the fan-out and synthesizes very little.",
 		economics: "harness-orchestration",
 		id,
 		native_value,
@@ -270,6 +277,43 @@ export const anthropic_context_window = Schema.decodeUnknownSync(ContextWindowCa
 			label: "1M",
 			native_suffix: "[1m]",
 			tokens: 1000000,
+		},
+	],
+});
+
+/**
+ * Codex takes its window as configuration, not as part of the model id.
+ *
+ * Every GPT-5 model resolves to 272K in Codex's own model cache, and the
+ * larger window is reached by overriding `model_context_window` rather than by
+ * naming a different model — so these options carry `native_config` and no
+ * suffix. Codex then compacts at nine tenths of whatever it resolved, which is
+ * how the extended option moves compaction from ~245K to ~945K.
+ *
+ * Standard is the default, and unlike Anthropic's the premium here is real:
+ * input past 272K bills at roughly double, which is why the extended option
+ * opens by saying so rather than by advertising the extra room.
+ */
+export const openai_context_window = Schema.decodeUnknownSync(ContextWindowCapability)({
+	availability: "configurable",
+	default: "standard",
+	options: [
+		{
+			description: "What Codex resolves for every GPT-5 model. Compacts near 245K.",
+			id: "standard",
+			label: "272K",
+			native_suffix: "",
+			tokens: 272000,
+		},
+		{
+			advisory: "Not recommended.",
+			description:
+				"Input past 272K bills at about twice the standard rate, and it is the whole conversation that is re-sent on every turn — so the premium applies again to the same tokens with each message, not once. Compaction moving to ~945K means far more context is carried into far more turns. Reach for it only when a task genuinely cannot be split, and expect a turn near the ceiling to cost multiples of the same turn under 272K.",
+			id: "extended",
+			label: "1M",
+			native_config: { model_context_window: 1050000 },
+			native_suffix: "1m",
+			tokens: 1050000,
 		},
 	],
 });

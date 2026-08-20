@@ -49,6 +49,7 @@ export const artisan_error_codes = {
 	engine_unavailable: "AE-CLIENT_STATE-104",
 	engine_start_failed: "AE-CLIENT_STATE-105",
 	engine_start_timeout: "AE-CLIENT_STATE-106",
+	working_directory_missing: "AE-CLIENT_STATE-107",
 	usage_limit_reached: "AE-PROVIDER-201",
 	provider_overloaded: "AE-PROVIDER-202",
 	provider_billing_problem: "AE-PROVIDER-203",
@@ -110,6 +111,19 @@ const definitions: ReadonlyArray<ArtisanErrorDefinition> = [
 		retryable: true,
 		summary: "The engine did not become ready within the startup deadline.",
 		title: "Engine startup timed out",
+	},
+	{
+		code: artisan_error_codes.working_directory_missing,
+		docs_slug: "working-directory-missing",
+		/**
+		 * Retrying re-launches into the same missing folder, so the offer would
+		 * only replay the failure. The remedy is restoring the folder or pointing
+		 * the thread at a project that exists, and only the user can do either.
+		 */
+		retryable: false,
+		summary:
+			"The thread's working directory no longer exists on this machine. Restore the folder — or move the project back — then send the message again.",
+		title: "Working directory missing",
 	},
 	{
 		code: artisan_error_codes.usage_limit_reached,

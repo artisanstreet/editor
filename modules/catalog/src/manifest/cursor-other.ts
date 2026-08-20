@@ -75,6 +75,8 @@ export const cursor_other_models = [
 					exceptional("max", "max"),
 				],
 			},
+			/** Kimi publishes its raw thinking rather than a written summary of it. */
+			reasoning_display: "trace",
 			speed_options: [cursor_native_speed("Kimi K3", false)],
 			image_input: false,
 			local_tools: true,
@@ -103,6 +105,8 @@ export const cursor_other_models = [
 					exceptional("max", "max"),
 				],
 			},
+			/** GLM streams raw chain-of-thought, with no summary layer over it. */
+			reasoning_display: "trace",
 			speed_options: [cursor_native_speed("GLM 5.2", false)],
 			image_input: false,
 			local_tools: true,

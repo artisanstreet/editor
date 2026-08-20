@@ -119,13 +119,20 @@ describe("model catalog", () => {
 		).toMatchObject([
 			{ economics: "diminishing-returns", id: "max", presentation_group: "special" },
 			{
-				description:
-					"Ultra lets Codex coordinate multiple subagents in parallel and synthesize their results. It works best when complex work splits cleanly into independent tasks.",
+				/**
+				 * Ultra bills as many model runs rather than one, and how many is
+				 * the harness's decision — so the picker has to say so before the
+				 * choice, in the tone a cost warrants.
+				 */
+				advisory: "Not recommended.",
 				economics: "harness-orchestration",
 				id: "ultra",
 				presentation_group: "special",
 			},
 		]);
+		expect(sol_thinking.options.find((option) => option.id === "ultra")?.description).toContain(
+			"Each subagent is a separate model run with its own context",
+		);
 	});
 
 	it("lists every first-party model exposed by the supported coding harnesses", () => {

@@ -34,6 +34,12 @@ export const thinking_level_order = Schema.decodeUnknownSync(Schema.Array(Thinki
 const thinking_rank = new Map(thinking_level_order.map((level, index) => [level, index]));
 
 export const ThinkingOption = Schema.Struct({
+	/**
+	 * The part of the caveat the reader has to see before choosing, carried
+	 * apart from the description so the picker can present it as the warning it
+	 * is rather than as the first sentence of a paragraph.
+	 */
+	advisory: Schema.optional(Schema.NonEmptyString),
 	/** Optional picker caveat for modes whose behavior is not implied by rank. */
 	description: Schema.optional(Schema.NonEmptyString),
 	economics: ThinkingEconomics,
@@ -93,10 +99,26 @@ export const ThinkingCapability = Schema.Union([
 export type ThinkingCapability = typeof ThinkingCapability.Type;
 
 export const ContextWindowOption = Schema.Struct({
+	/** The warning the reader has to see before choosing. @see ThinkingOption */
+	advisory: Schema.optional(Schema.NonEmptyString),
 	/** What the window buys and what it costs, in the picker's own words. */
 	description: Schema.NonEmptyString,
 	id: Schema.NonEmptyString,
 	label: Schema.NonEmptyString,
+	/**
+	 * Harness configuration that selects this window, for harnesses that treat
+	 * the window as a setting rather than as part of the model's identity.
+	 *
+	 * Its presence is also what stops `native_suffix` being appended: an option
+	 * configured this way still needs a token to be stored and selected by, but
+	 * that token names the option and is not part of any model id. Codex is the
+	 * case in hand — it resolves every GPT-5 model to 272K and takes a larger
+	 * window as `model_context_window`, so a suffix would produce a model id its
+	 * catalog does not have.
+	 */
+	native_config: Schema.optional(
+		Schema.Struct({ model_context_window: Schema.Int.check(Schema.isGreaterThan(0)) }),
+	),
 	/** Appended verbatim to the native model id; empty for the base window. */
 	native_suffix: Schema.String,
 	tokens: Schema.Int.check(Schema.isGreaterThan(0)),
@@ -272,16 +294,34 @@ export const PermissionCapability = Schema.Struct({
 );
 export type PermissionCapability = typeof PermissionCapability.Type;
 
+export const ReasoningDisplay = Schema.Literals(["summary", "trace"]);
+export type ReasoningDisplay = typeof ReasoningDisplay.Type;
+
 export const ModelCapabilities = Schema.Struct({
 	context_window: Schema.optional(ContextWindowCapability),
 	image_input: Schema.Boolean,
 	local_tools: Schema.Boolean,
 	mcp: Schema.Boolean,
+	/** Absent reads as `summary`; see {@link ReasoningDisplay}. */
+	reasoning_display: Schema.optional(ReasoningDisplay),
 	speed_options: SpeedOptions,
 	thinking: ThinkingCapability,
 	web_search: Schema.Boolean,
 });
 export type ModelCapabilities = typeof ModelCapabilities.Type;
+
+/**
+ * What a model's reasoning stream is safe to show, which is a property of the
+ * model rather than of the harness carrying it.
+ *
+ * `summary` models publish provider-authored summaries of their own thinking —
+ * prose written to be read — so the live thinking line can say the latest one
+ * verbatim. `trace` models stream raw chain-of-thought instead: it is neither
+ * written for a reader nor a summary of anything, so those turns keep a
+ * content-free thinking verb.
+ */
+export const model_reasoning_display = (model: ModelDefinition): ReasoningDisplay =>
+	model.capabilities.reasoning_display ?? "summary";
 
 export const ProviderDefinition = Schema.Struct({ id: ProviderId, label: Schema.String });
 export type ProviderDefinition = typeof ProviderDefinition.Type;
