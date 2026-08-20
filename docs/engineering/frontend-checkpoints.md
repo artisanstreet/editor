@@ -105,7 +105,7 @@ This is the build order for the Artisan renderer, not a list of screens to mock 
 - [ ] Render approvals and questions as first-class accessible actions, not terminal transcript fragments.
 - [ ] Add rich markdown, code, tool activity, citations, and link cards against typed fixtures while keeping raw HTML off by default.
 - [ ] Keep engine, model, reasoning, sandbox, and web controls out of message bubbles.
-- [ ] Hold streaming token UI behind a defined bounded stream contract; do not infer deltas from native engine events.
+- [ ] Hold streaming token UI behind a defined ordered, lossless stream contract; do not infer deltas from native engine events.
 
 **Exit gate:** public-protocol tests cover send, duplicate retry, queued/steered outcome, approval, question response, cancel, completed assistant output, reconnect, and a fixture contract for history and streaming gaps.
 
@@ -174,7 +174,7 @@ This is the build order for the Artisan renderer, not a list of screens to mock 
 - [ ] Add rich-link metadata, cache, redirect, fallback, private-network blocking, favicon, and asset states; `OpenAsset` is usable only after a public projection supplies an asset ID.
 - [ ] Keep native file, Markdown, image, and diff previews in the main pane; do not embed application WebViews.
 
-**Exit gate:** real MessagePort tests prove stream ordering, overflow/gap behavior, reconnect, input, resize, restart, kill, and control responsiveness under output load; preview controls stay disabled until backend health and launch contracts are live.
+**Exit gate:** real MessagePort tests prove stream ordering across bursts, gap behavior, reconnect, input, resize, restart, kill, and control responsiveness under output load; preview controls stay disabled until backend health and launch contracts are live.
 
 ## Checkpoint 12 — Build Guidance and Curated Settings
 

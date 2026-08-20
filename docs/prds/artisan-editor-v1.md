@@ -625,10 +625,10 @@ V1 should preserve two logical traffic classes:
   process output.
 
 The WebSocket adapter multiplexes those classes without changing their
-independent sequence and bounded-buffer contracts. Separating control and stream traffic prevents terminal or model output from
+independent sequence and lossless-delivery contracts. Separating control and stream traffic prevents terminal or model output from
 delaying cancel, approve, steer, or other latency-sensitive actions. Stream
-chunks should use sequence numbers, batching, and bounded buffering, but should
-not each require durable journal writes or individual ACK round trips.
+chunks should use sequence numbers, batching, and lossless in-process queueing,
+but should not each require durable journal writes or individual ACK round trips.
 
 Connection startup should negotiate a supported protocol version and include
 the frontend's last applied cursor. The backend should respond with the selected
@@ -2370,7 +2370,7 @@ Verification:
   instances there. `node-pty` is not thread-safe, so PTY ownership should not
   be distributed across worker threads. Individual terminals remain scoped
   Effect resources even though one backend process owns the native library.
-- Terminal bytes should flow over the dedicated bounded stream MessagePort.
+- Terminal bytes should flow over the dedicated lossless stream MessagePort.
   Terminal lifecycle and meaningful state transitions belong in the durable
   ledger, but individual output chunks and keystrokes do not.
 - Filesystem access should be a root-capability service. Public operations use
@@ -2611,8 +2611,9 @@ Verification:
   envelopes, and confirm that frontend/backend types do not depend on Electron
   or Drizzle implementation types.
 - Transport load tests should verify that sustained terminal or model streaming
-  cannot delay control-port cancel, approve, or steer commands, and that stream
-  batching and bounded buffering preserve ordering without unbounded memory use.
+  cannot delay control-port cancel, approve, or steer commands, and that lossless
+  stream queueing preserves order across bursts beyond former capacities. Sustained
+  backlog growth must be fixed at producer/consumer ownership, never by dropping work.
 - Persistence tests should verify transactional command acceptance, duplicate
   command replay, event ordering, projection consistency, WAL restart recovery,
   migration behavior, and reconstruction of projections from the ledger.
@@ -2980,11 +2981,11 @@ Verification:
 - 2026-07-10: The shell-neutral MessagePort layer now owns version bootstrap,
   connection fencing, request correlation, exact-envelope retries, event ACKs,
   cursor replay, projection subscriptions, heartbeat recovery, and isolated
-  binary stream backpressure. Renderer-safe entry points cannot import backend,
+  lossless binary stream delivery. Renderer-safe entry points cannot import backend,
   Node, or Electron runtime modules.
 - 2026-07-10: Concurrency tests should synchronize on observable protocol or
   lifecycle events rather than fixed sleeps. Interrupted requests retain a
-  bounded correlation tombstone until their late response is consumed; stale
+  correlation tombstone until their late response is consumed; stale
   turn tests wait for both the replacement turn and stale completion.
 - 2026-07-11: Thread identity is a versioned durable projection. Automatic
   refinements carry activity/metadata basis versions, stale refinements are

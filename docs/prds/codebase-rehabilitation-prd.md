@@ -131,7 +131,7 @@ registry:
   Effect Schema.
 - `modules/transport/src/wire.ts` adds versioning, connection fencing, control
   and stream channels, stream sequencing, and `Uint8Array` chunks.
-- `modules/transport/src/message-port.ts` owns the portable bounded-queue and
+- `modules/transport/src/message-port.ts` owns portable lossless-queue and
   scoped-lifetime semantics.
 - `modules/transport/src/websocket/protocol.ts` accepts text frames only,
   serializes with JSON, and recursively wraps `Uint8Array` as base64.
@@ -225,9 +225,9 @@ existing:
 - durable replay and ACK behavior;
 - cursor resume and gap detection;
 - subscription snapshots and patches;
-- stream tickets, ordering, cancellation, and close-on-overflow behavior;
+- stream tickets, ordering, cancellation, and failure/shutdown behavior;
 - trace/authentication metadata; and
-- bounded queues and scoped cleanup.
+- unbounded lossless queues and scoped cleanup.
 
 If it cannot, the contract registry may remain Artisan-owned while still
 deriving both client and server surfaces from one declaration.

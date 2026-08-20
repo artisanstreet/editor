@@ -1,7 +1,125 @@
 # Active Branch Handoff
 
-Last updated: 2026-08-18. Branch continuity only; durable verified product status belongs in
+Last updated: 2026-08-19. Branch continuity only; durable verified product status belongs in
 [`docs/status/backend-completion-matrix.md`](../docs/status/backend-completion-matrix.md).
+
+## Thread Loading Surface (2026-08-19)
+
+- `thread-route-gate.svelte`'s loading state is now a single centred `FadeArc` spinner —
+  no skeleton bars, no known-thread title/preview text, no mocked composer card (all removed
+  at the user's direction; the catalog wiring that fed the known-thread header went with it).
+  The retained-snapshot path still paints the real route immediately; `aria-label="Loading
+  thread"`, the snapshot read, and the forked `Load` that `thread-open-performance.test.ts`
+  pins are unchanged and the test passes. Verified live via CDP: 39 sampled loading frames
+  show spinner only (0 skeletons, empty text, centred), then the full route paints.
+
+## Hover-Card Entrances (2026-08-19)
+
+- The floating surfaces now share one entrance grammar (transitions.dev tooltip): `--tt-*`
+  tokens in theme.css, `t-tt` / `t-tt-presence` utilities in utilities.css, `t-tt-in`
+  keyframes and reduced-motion durations in animations.css. The thread rail's hover card
+  (`thread-hover-rail.svelte`) enters by animation rather than transition because its first
+  engagement mounts the card already shown — a transition has no earlier frame there and
+  popped (pre-existing); `backwards` fill is what holds the 450ms dwell. The context-window
+  gauge card (`context-usage-gauge.svelte`) had no entrance at all; it now wears
+  `t-tt-presence`, keyed on bits-ui's `data-starting-style`/`data-ending-style`, plus the
+  middleware's transform origin.
+- vendor.css: the `.t-dropdown` popover enter never played — the open rule won the first
+  painted frame — fixed with a `data-starting-style` rule after it, and the dropdown now
+  grows from `--bits-floating-transform-origin` (the wrapper publishes it; nothing applied it).
+- Verified empirically via headless CDP against the dev app: dropdown enter shows
+  starting-style frames then a smooth 0.97→1 scale+fade; the rail card holds opacity 0
+  through the dwell, fades over ~150ms, rests at `transform: none` (glass stays sampled),
+  conceals in ~50ms. The gauge card itself was not mountable on the dev landing route (no
+  usage aggregate) — its mechanism is the one the dropdown probe proved.
+- Gates: shell-source-layout, sidebar-identity-and-thread-rail, context-gauge-tone,
+  context-window, ser-effect-discipline (5 files / 80 tests) and oxfmt pass. The
+  conversation turn navigator still reveals with only a backdrop fade — untouched.
+
+## Prose Rendering Overhaul (2026-08-19)
+
+- Streaming markdown was O(N²): every 12–40ms word tick re-parsed the whole message
+  (`@comark/svelte`'s `parse()` builds a fresh parser per call and never engages comark's
+  incremental streaming mode) and `wrap_streaming_words` rebuilt every word node of the
+  whole tree, so the renderer re-rendered everything per tick. `content.svelte` now owns
+  one `createParse` per message and parses with `{ streaming: true }`; append-only ticks
+  re-parse only the tail, and the words plugin wraps only nodes past
+  `state.reusableNodes.length` so the settled prefix keeps node identity. Reveal pacing
+  is frame-floored (≥16ms) and drains backlog by revealing more words per tick
+  (`get_streaming_word_pacing`).
+- Shiki now highlights each fence once, the moment it closes mid-stream, instead of
+  queueing every block for the settle frame: `MakeConversationFenceHighlightPlugin`
+  (settled-highlighting.ts) is a synchronous post hook — SER discipline forbids
+  async/await outside `Effect.tryPromise` — that substitutes from a shared token cache,
+  records misses as pending, and skips the one unterminated fence. The rendering workers
+  drain pending between two cheap tail parses. The settle parse and reopened threads
+  reuse cached tokens; `TryResidentConversationSettledMarkdownPlugins` lets a settled
+  mount with resident grammars parse exactly once. Comark strips one trailing newline
+  from fence bodies — `WarmConversationFenceTokens` mirrors that when pre-tokenizing.
+- Mermaid diagrams gained a zoom overlay (`mermaid-renderer.svelte`): click to open,
+  fit-to-screen, wheel zoom around the pointer, drag pan, double-click refit, Esc /
+  backdrop close. Styles in prose.css (`docs-mermaid-zoom-*`).
+- Coverage: `conversation-fence-highlight.test.ts` (tokens, cache identity, open-fence
+  skip, pending flow, nested fences), updated `conversation-streaming-words`,
+  `conversation-markdown`, `conversation-rich-markdown`, `conversation-fence-info`
+  contracts. Full frontend suite 973/974 (only the protected composer line-budget
+  mirror), typecheck and production build clean.
+
+## Desync Layer Two: Zombie Connections (found and fixed 2026-08-19, after 0.2.93)
+
+- A freeze recurred on installed 0.2.93 — which already contains the skip-ahead fix — with
+  the transcript stopped mid-stream while the sidebar showed newer activity. Forge log for the
+  window: `artisan:forge-session-failed … WebSocket closed`, plus a 16-minute host suspend
+  earlier and historical fatal 4GB OOMs from pre-fix Forge instances (current Forge is stable
+  at ~140MB). The failure class is a connection that dies without a close event reaching the
+  renderer: the server heartbeats and kills silent peers, but the client had no equivalent, so
+  a zombie socket waited forever while every surface froze silently.
+- Fix one (`modules/transport/src/internal/client-connection.ts`): an inbound-liveness
+  watchdog per session. The welcome advertises the heartbeat cadence; a healthy session never
+  goes `interval*2 + timeout` without an inbound frame (idle peers get pinged), so silence
+  past that limit fails the session into the reconnect supervisor — whose budget a once-ready
+  session does not spend. Production detection is within ~75s; suspend resumes reconnect
+  immediately.
+- Fix two (`+layout.svelte`): an exhausted supervisor no longer waits solely for the overlay's
+  manual retry — the shell re-arms `client.RetryConnection` every 15 seconds while the phase
+  stays exhausted and immediately on window focus.
+- Coverage: `artisan-client-reconnect.test.ts` "reconnects a session whose inbound frames
+  silently stop" (new `mute_current_connection` harness fault: frames vanish, ports stay
+  open); fake-protocol welcome heartbeats are now configurable (generous defaults so ordinary
+  tests never trip the watchdog; establishment-deadline tests declare huge values because
+  their TestClock jumps are not silence). Transport suite 27 files / 161 tests green.
+- Unrelated: `steering-stages.ts` currently fails `tsc` (`Fiber.RuntimeFiber` missing) from a
+  concurrent in-flight session's edits — not part of this work.
+
+## Desync: Mutation Skip-Ahead (root cause found and fixed 2026-08-19)
+
+- The recurring "thread freezes mid-stream, OS notification still arrives, Ctrl+R heals" desync
+  reproduced against installed 0.2.91, which does contain the snapshot-storm fixes. Root cause is
+  older code: mutation handlers (`HandleCommand`, `HandleThreadCreate`, settings) delivered only
+  their own routed events, and admission advanced `delivered_journal_sequence` to their maximum —
+  skipping every event run fibers journaled since the last notifier wake. The handler holds
+  `event_delivery_lock` for its whole execution, so a slow mutation widens the window; when the
+  skipped window holds a run's final stretch, nothing ever wakes the thread again. The OS
+  notification still arrives because the desktop shell notifies from its own connection.
+- Fix: `ReadyConnectionRuntime` now exposes only `DeliverCommittedTail` (reads
+  `journal.ReadTrustedTail` from the connection cursor; server.ts implements it; the git mutation
+  path already did this and now shares it). Regression contract:
+  `.tests/backend/ready-mutation-tail-delivery.test.ts`.
+- Hardening, same failure shape: each subscription's projection delivery and every delivery
+  phase (`IsolateDeliveryPhase`) is isolated, so one poisoned projection read can no longer
+  starve conversation patch delivery on every wake after admission advanced the cursor. The
+  growth pushed `live-events.ts` past the 550-line decomposition cap (it was already over), so
+  the per-event projection loop now lives in `subscriptions/projection-patches.ts` and the
+  event-affects predicates in `patch-selection.ts`; `journal-trusted-tail-performance` pins the
+  shared `DeliverCommittedTail` operation instead of per-site `ReadTrustedTail` calls.
+- Renderer self-heal: `thread-route.svelte` runs `WatchConversationLiveness` — while durable work
+  reports an active run and the conversation stream has been silent for 30 s, it runs one
+  `ReconcileConversationAndInteraction` probe. Source contract:
+  `.tests/frontend/thread-route-liveness.test.ts`.
+- Completed two WIP tests from the dirty wave that predated the claim lifecycle and guidance
+  anchor: `live-event-delivery-performance.test.ts` (registers `subscription_claims`) and
+  `protocol-ack-window-capacity.test.ts` (welcome head is 4 with the anchor journaled after the
+  three seeds).
 
 ## Working State
 

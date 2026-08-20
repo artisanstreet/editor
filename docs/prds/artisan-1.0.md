@@ -49,20 +49,20 @@ hardening them is in scope for 1.0 and gates the release.
 
 ## Terminology
 
-| Term | Meaning |
-| --- | --- |
-| Account | An Artisan Street Account; the root of identity and ownership. |
-| Fleet | The set of hosts attached to one account. |
-| Host | A machine running Forge and enrolled in a fleet. |
-| Owner device | A device holding account keys (an Editor the user signed into). |
-| Forge | The autonomous backend on every host (unchanged role). |
-| Editor | The stateless client (Electron or browser). |
-| Street services | First-party cloud: Identity/Entitlements, Directory, Relay, Sync. |
-| Organization | The owner of product licenses; every account gets a personal org. |
-| License | An org's entitlement to a product plan, e.g. `{product: "editor", plan: "free"}`. |
-| Attach flow | The `ae attach` device-authorization sign-in that enrolls a host. |
-| Harness | An installed agent engine (Claude, Codex, future native harness). |
-| Sealed blob | An E2E-encrypted payload stored or routed by Street services. |
+| Term            | Meaning                                                                           |
+| --------------- | --------------------------------------------------------------------------------- |
+| Account         | An Artisan Street Account; the root of identity and ownership.                    |
+| Fleet           | The set of hosts attached to one account.                                         |
+| Host            | A machine running Forge and enrolled in a fleet.                                  |
+| Owner device    | A device holding account keys (an Editor the user signed into).                   |
+| Forge           | The autonomous backend on every host (unchanged role).                            |
+| Editor          | The stateless client (Electron or browser).                                       |
+| Street services | First-party cloud: Identity/Entitlements, Directory, Relay, Sync.                 |
+| Organization    | The owner of product licenses; every account gets a personal org.                 |
+| License         | An org's entitlement to a product plan, e.g. `{product: "editor", plan: "free"}`. |
+| Attach flow     | The `ae attach` device-authorization sign-in that enrolls a host.                 |
+| Harness         | An installed agent engine (Claude, Codex, future native harness).                 |
+| Sealed blob     | An E2E-encrypted payload stored or routed by Street services.                     |
 
 ## Domains
 
@@ -70,15 +70,15 @@ The apex is `artisan.st`. Products live as subdomains; each product's backend
 lives under `<product>.api.` so the ecosystem scales past the Editor without
 renaming anything.
 
-| Surface | URL |
-| --- | --- |
-| Landing / product pages | `artisan.st` (Editor page at `artisan.st/editor`) |
-| Editor web app (includes attach approval and fleet UI) | `editor.artisan.st` |
-| Editor control-plane API (attach, directory, sync) | `editor.api.artisan.st` |
-| Editor relay (WSS) | `editor.relay.artisan.st` (regional `<region>.editor.relay.artisan.st` later) |
-| Ecosystem auth (magic-link sign-in, tokens) | `auth.api.artisan.st` |
-| Account and org console (members, licenses, billing) | `account.artisan.st` |
-| Install transports | `artisan.st/editor/windows`, `artisan.st/editor/unix`, `artisan.st/forge` |
+| Surface                                                | URL                                                                           |
+| ------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| Landing / product pages                                | `artisan.st` (Editor page at `artisan.st/editor`)                             |
+| Editor web app (includes attach approval and fleet UI) | `editor.artisan.st`                                                           |
+| Editor control-plane API (attach, directory, sync)     | `editor.api.artisan.st`                                                       |
+| Editor relay (WSS)                                     | `editor.relay.artisan.st` (regional `<region>.editor.relay.artisan.st` later) |
+| Ecosystem auth (magic-link sign-in, tokens)            | `auth.api.artisan.st`                                                         |
+| Account and org console (members, licenses, billing)   | `account.artisan.st`                                                          |
+| Install transports                                     | `artisan.st/editor/windows`, `artisan.st/editor/unix`, `artisan.st/forge`     |
 
 Identity is deliberately not under `editor.*`: accounts and orgs are
 ecosystem-level. Product backends never mint identities — they consume
@@ -86,14 +86,14 @@ ecosystem-level. Product backends never mint identities — they consume
 
 ## What Changes From Today
 
-| Today (verified prototype) | 1.0 |
-| --- | --- |
-| Pairing links / codes as the user-facing trust bootstrap | Removed from the product surface. Sign-in is the only user-facing trust act. |
-| "Master Forge" holds canonical prefs/credentials, movable role | Role dissolves into the account. Canonical state is sealed blobs in Sync. |
-| Machine added via link-code paste | `ae attach` + browser sign-in + approval. |
-| Renderer pairs to local Forge via `ae open --handoff` | Unchanged, but internal-only: it is the machine-local bootstrap, never shown to users as a concept. |
-| Loopback-only Forge listeners and gates | Unchanged. Remote reachability is exclusively via the host's outbound relay connection. |
-| WSL distros brokered by the local Forge | Unchanged mechanically; discovered distros auto-enroll as hosts under the signed-in account. |
+| Today (verified prototype)                                     | 1.0                                                                                                 |
+| -------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| Pairing links / codes as the user-facing trust bootstrap       | Removed from the product surface. Sign-in is the only user-facing trust act.                        |
+| "Master Forge" holds canonical prefs/credentials, movable role | Role dissolves into the account. Canonical state is sealed blobs in Sync.                           |
+| Machine added via link-code paste                              | `ae attach` + browser sign-in + approval.                                                           |
+| Renderer pairs to local Forge via `ae open --handoff`          | Unchanged, but internal-only: it is the machine-local bootstrap, never shown to users as a concept. |
+| Loopback-only Forge listeners and gates                        | Unchanged. Remote reachability is exclusively via the host's outbound relay connection.             |
+| WSL distros brokered by the local Forge                        | Unchanged mechanically; discovered distros auto-enroll as hosts under the signed-in account.        |
 
 Nothing in `modules/protocol` data-plane, `modules/transport` framing, or the
 renderer's conversation runtime changes. The 1.0 work adds a control plane and
