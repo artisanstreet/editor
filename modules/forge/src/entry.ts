@@ -5,6 +5,7 @@ import { decode_forge_config } from "./config";
 import { StartForge } from "./forge-host";
 import { ResolveInstanceRegistryRoot } from "./instance-registry";
 import { MaintainBoundedForgeLog } from "./log-retention";
+import { WatchForgeMemory } from "./memory-telemetry";
 import { RemoveForgeState, WriteForgeState } from "./state";
 
 const ForgeParentMessage = Schema.Struct({
@@ -109,6 +110,13 @@ export const StartForgeFromEnvironment = Effect.gen(function* () {
 					pid: process.pid,
 				}),
 			);
+
+			/**
+			 * Left on permanently. Forge has died of memory exhaustion repeatedly
+			 * with nothing in the log to say what it was holding, and every
+			 * diagnosis so far has been inference from the outside.
+			 */
+			yield* Effect.forkScoped(WatchForgeMemory);
 
 			return host;
 		}),

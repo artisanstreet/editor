@@ -6,6 +6,8 @@ import { Clock, Duration, Effect, Exit, FileSystem, Layer, Path, Scope } from "e
 import {
 	AgentGraphOrchestrator,
 	AgentOrchestrator,
+	CodexModelBehaviourExecutableUnavailable,
+	make_codex_model_behaviour_executable_layer,
 	make_desktop_backend_layer,
 	RichLinkAssetStoreLive,
 	ThreadMetadataRefinementCoordinator,
@@ -14,8 +16,12 @@ import {
 	ClaudeEngine,
 	CodexEngine,
 	CodexProcessFactoryLive,
+	EngineProcessError,
+	EngineToolchain,
 	make_claude_engine_layer,
 	make_codex_engine_layer,
+	make_engine_toolchain_layer,
+	NodeToolchainReleaseHttpLive,
 } from "@artisan/engines";
 import {
 	make_backend_message_port_transport_server_layer,
@@ -77,8 +83,8 @@ const MakeForgeHost = (config: ForgeConfig, transport_binding: ForgeTransportBin
 		const orchestrator = yield* AgentOrchestrator;
 		const graph_orchestrator = yield* AgentGraphOrchestrator;
 		const metadata_refinement = yield* ThreadMetadataRefinementCoordinator;
-		/** Repair missed automatic metadata before the first browser can observe stale titles. */
-		yield* metadata_refinement.WaitForIdle;
+		/** Resolve the scoped coordinator so its durable watcher stays owned by this host. */
+		void metadata_refinement;
 		const authority = yield* ForgeControlAuthority;
 		const http = yield* Effect.acquireRelease(start_forge_http(config, authority), (server) =>
 			server.Close.pipe(Effect.ignore),
@@ -137,20 +143,69 @@ const MakeForgeHost = (config: ForgeConfig, transport_binding: ForgeTransportBin
 	}).pipe(Effect.onError(() => Effect.logError("Artisan Forge host acquisition failed")));
 
 const MakeForgeRuntime = (config: ForgeConfig) => {
-	const engine_layer = Layer.mergeAll(make_codex_engine_layer(), make_claude_engine_layer()).pipe(
+	const toolchain_root = join(dirname(config.database_path), "toolchain");
+	const codex_home = join(toolchain_root, "codex", "home");
+	const claude_home = join(toolchain_root, "claude", "home");
+	/**
+	 * One toolchain instance serves both the engine spawn overrides and the
+	 * protocol handlers; layer memoization by reference keeps the install
+	 * activity every consumer observes in a single place.
+	 */
+	const toolchain_layer = make_engine_toolchain_layer({
+		root: toolchain_root,
+	}).pipe(
+		Layer.provide(NodeToolchainReleaseHttpLive),
 		Layer.provide(CodexProcessFactoryLive),
+		Layer.provide(NodeFileSystem.layer),
+		Layer.provide(NodePath.layer),
 	);
+	const engine_layer = Layer.unwrap(
+		Effect.gen(function* () {
+			const toolchain = yield* EngineToolchain;
+			const ManagedSpawn =
+				(engine_id: string) =>
+				(profile_id?: string) =>
+					toolchain
+						.ResolveSpawn(engine_id, profile_id)
+						.pipe(
+							Effect.mapError(
+								(cause) => new EngineProcessError({ cause, operation: "spawn" }),
+							),
+						);
+			return Layer.mergeAll(
+				make_codex_engine_layer({
+					ResolveSpawnOverride: ManagedSpawn("codex"),
+				}),
+				make_claude_engine_layer({
+					ResolveSpawnOverride: ManagedSpawn("claude"),
+				}),
+			);
+		}),
+	).pipe(Layer.provide(toolchain_layer), Layer.provide(CodexProcessFactoryLive));
 	const backend_layer = Layer.unwrap(
 		Effect.gen(function* () {
 			const codex_engine = yield* CodexEngine;
 			const claude_engine = yield* ClaudeEngine;
+			const toolchain = yield* EngineToolchain;
+			const codex_executable = make_codex_model_behaviour_executable_layer(
+				toolchain.ResolveSpawn("codex").pipe(
+					Effect.map((spawn) => spawn.executable),
+					Effect.mapError(
+						(cause) => new CodexModelBehaviourExecutableUnavailable({ cause }),
+					),
+				),
+			);
 			return make_desktop_backend_layer({
 				database_path: config.database_path,
+				engine_toolchain: toolchain_layer,
 				engines: [codex_engine, claude_engine],
+				guidance_platform: { codex_home },
+				harness_config_platform: { claude_home, codex_home },
 				migrations_path: config.migrations_path,
+				model_behaviour_platform: { codex_executable, codex_home },
 			});
 		}),
-	).pipe(Layer.provide(engine_layer));
+	).pipe(Layer.provide(engine_layer), Layer.provide(toolchain_layer));
 	const transport_layer = make_backend_message_port_transport_server_layer().pipe(
 		Layer.provideMerge(backend_layer),
 		Layer.provideMerge(RichLinkAssetStoreLive),

@@ -17,26 +17,59 @@ export class ForgeWebSocketFailure extends Data.TaggedError("ForgeWebSocketFailu
 const is_loopback = (address: string | undefined) =>
 	address === "127.0.0.1" || address === "::1" || address === "::ffff:127.0.0.1";
 
-const websocket_endpoint = (socket: WebSocket): WebSocketEndpoint => ({
-	add_close_listener: (listener) => {
-		socket.on("close", listener);
+/**
+ * The unsent backlog a socket has to reach before it is worth saying so.
+ *
+ * `send` is fire-and-forget — the protocol layer above hands frames over
+ * without being told whether the last one left — so a peer that reads slower
+ * than Forge writes accumulates here with nothing to notice it. 8 MiB is far
+ * above any legitimate burst of projection frames and far below the scale at
+ * which this stopped being survivable, which makes it a usable alarm rather
+ * than a limit: the frame is still sent, and the report is what turns a
+ * process quietly climbing into a symptom with a cause attached.
+ */
+const socket_backlog_warning_bytes = 8 * 1024 * 1024;
 
-		return () => socket.off("close", listener);
-	},
-	add_error_listener: (listener) => {
-		socket.on("error", listener);
+const websocket_endpoint = (socket: WebSocket): WebSocketEndpoint => {
+	let reported_backlog = false;
 
-		return () => socket.off("error", listener);
-	},
-	add_message_listener: (listener) => {
-		const on_message = (data: RawData) => listener(data);
-		socket.on("message", on_message);
+	return {
+		add_close_listener: (listener) => {
+			socket.on("close", listener);
 
-		return () => socket.off("message", on_message);
-	},
-	close: () => socket.close(),
-	send: (data) => socket.send(data),
-});
+			return () => socket.off("close", listener);
+		},
+		add_error_listener: (listener) => {
+			socket.on("error", listener);
+
+			return () => socket.off("error", listener);
+		},
+		add_message_listener: (listener) => {
+			const on_message = (data: RawData) => listener(data);
+			socket.on("message", on_message);
+
+			return () => socket.off("message", on_message);
+		},
+		close: () => socket.close(),
+		send: (data) => {
+			socket.send(data);
+			if (socket.bufferedAmount < socket_backlog_warning_bytes) {
+				reported_backlog = false;
+				return;
+			}
+			/** Once per excursion: a backed-up socket would otherwise report per frame. */
+			if (reported_backlog) return;
+			reported_backlog = true;
+			console.error(
+				JSON.stringify({
+					buffered_bytes: socket.bufferedAmount,
+					event: "forge.websocket.backlog",
+					message: "A transport socket is not draining as fast as Forge is writing",
+				}),
+			);
+		},
+	};
+};
 
 const request_url = (request: IncomingMessage) =>
 	new URL(request.url ?? "/", "http://artisan.invalid");
@@ -94,17 +127,28 @@ export const BindForgeWebSocket = (
 					maxPayload: 16 * 1024 * 1024,
 					noServer: true,
 					/**
-					 * Context takeover is deliberately left enabled. Projection and
-					 * event frames repeat near-identical schema keys and snowflake
-					 * ids, so the sliding window is where most of the saving comes
-					 * from; the listener is loopback-only, which bounds how many
-					 * zlib contexts can exist at once.
+					 * Compression is off, and the loopback-only rule this listener
+					 * already enforces is the reason it can be.
+					 *
+					 * The bandwidth it bought was never real: every accepted socket
+					 * comes from `127.0.0.1` — the upgrade handler rejects anything
+					 * else with 403 — so the frames it shrank were about to be
+					 * memcpy'd between two processes on the same machine. What it
+					 * cost was: a zlib context per socket held open by context
+					 * takeover, a compression pass over every frame above the
+					 * threshold, and a queue in front of that pass.
+					 *
+					 * That queue is what makes this a correctness matter and not a
+					 * tuning one. `concurrencyLimit` bounds how many frames compress
+					 * at once, not how many wait, and `send` below hands frames over
+					 * without ever asking whether the last one left. A projection
+					 * burst that outruns zlib therefore accumulates compressed
+					 * copies in native memory, where no heap limit and no collector
+					 * can see them — which is the shape Forge kept growing into:
+					 * 39 GB of private bytes in the one process that owns this
+					 * server, spending CPU on compression the whole way up.
 					 */
-					perMessageDeflate: {
-						concurrencyLimit: 10,
-						threshold: 1024,
-						zlibDeflateOptions: { level: 6 },
-					},
+					perMessageDeflate: false,
 				});
 				const sockets = new Set<WebSocket>();
 				const pending_upgrades = new Set<import("node:stream").Duplex>();

@@ -188,6 +188,12 @@ export const CreateForgeRolldownConfig = (options: ForgeRolldownOptions = {}) =>
 		],
 		resolve: {
 			alias: ForgeAliases,
+			/**
+			 * The watcher must rebuild against live module source; a production
+			 * bundle resolves the built `@artisan/*` artifacts like every other
+			 * packaged-editor build does.
+			 */
+			...(watching ? { conditionNames: ["development", "node", "import", "default"] } : {}),
 		},
 		output: {
 			cleanDir: !watching,
