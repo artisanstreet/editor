@@ -24,7 +24,6 @@ import { EngineInstallationsControllerLive } from "../settings/engine-installati
 import { SessionDefaultsControllerLive } from "../settings/session-defaults-controller";
 import { ThreadRetentionPolicyControllerLive } from "../settings/thread-retention-policy-controller";
 import { ThreadTerminalsControllerLive } from "../terminal/thread-terminals-controller";
-import { ThreadScrollMemoryLive } from "../conversation/scroll-memory";
 import { ThreadOpenControllerLive } from "../thread-interaction/thread-open-controller";
 import { ThreadSessionProjectionLive } from "../thread-interaction/session-projection";
 import { ProjectRepositoryControllerLive } from "../workspace/project-repository-controller";
@@ -51,7 +50,6 @@ const FrontendControllersLive = Layer.mergeAll(
 	ThreadRetentionPolicyControllerLive,
 	ThreadTerminalsControllerLive,
 	ThreadOpenControllerLive,
-	ThreadScrollMemoryLive,
 	ThreadSessionProjectionLive,
 	ThreadChecklistLive,
 	ThreadOrchestrationRosterLive,

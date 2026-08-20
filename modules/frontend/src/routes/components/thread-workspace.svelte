@@ -34,11 +34,6 @@
 	} from "$lib/conversation/turn-navigator";
 	import { policy_reasoning_display } from "$lib/engine/reasoning-display";
 	import {
-		ThreadScrollMemory,
-		conversation_content_stamp,
-		thread_scroll_position_is_current,
-	} from "$lib/conversation/scroll-memory";
-	import {
 		ConversationAlignedScrollTop,
 		ConversationBaseEndSpacePixels,
 		ConversationBottomScrollTop,
@@ -394,36 +389,12 @@
 		Queue.offerUnsafe(anchor_layout_wake, undefined);
 	};
 
-	const scroll_memory = yield* ThreadScrollMemory;
 	/**
-	 * The content the reader is currently positioned against. Derived so the
-	 * scroll handler reads a cached value instead of walking the items on every
-	 * scroll event.
-	 */
-	const content_stamp = $derived(conversation_content_stamp(snapshot.items));
-	/**
-	 * True once this mount has placed the reader — restored their spot or
-	 * assigned the bottom. Until then every scroll the viewport emits is the
-	 * mount's own: the transcript renders empty and grows as the view state
-	 * arrives, and the follow pin drags through that growth to the bottom.
-	 * Remembering those frames overwrote the reader's place with "bottom" on
-	 * every open, which is why no position ever survived a reopen.
+	 * True once this mount has placed the reader at the latest content. The
+	 * viewport binds before the view state arrives, so placement waits for the
+	 * rendered transcript and runs exactly once.
 	 */
 	let positioned = $state(false);
-	/**
-	 * Records the reading position from the scroll handler, which is a DOM
-	 * callback rather than an Effect site — so the write is forked into the
-	 * component's own scope instead of being yielded from a listener.
-	 */
-	const RememberScrollPosition = (scroll_top: number) => {
-		if (!positioned) return;
-		Effect.runFork(
-			scroll_memory.Remember(snapshot.thread_id, {
-				content_stamp,
-				scroll_top,
-			}),
-		);
-	};
 
 	/** Reads follow state back from wherever the viewport actually settled. */
 	const SyncFollowing = (element: HTMLElement) => {
@@ -696,42 +667,28 @@
 	});
 
 	/**
-	 * Opens the thread where the reader left it, or at the latest when the
-	 * transcript has moved on since.
-	 *
-	 * Both destinations are assignments rather than scrolls: a thread being
-	 * entered has no position to animate away from, and animating one would
-	 * show the reader a journey through history they did not ask to take.
+	 * Every thread opens at its latest content. This is an assignment rather
+	 * than a scroll: a thread being entered has no position to animate away
+	 * from, and animating would show a journey through history nobody requested.
 	 *
 	 * Takes the view state as its argument for the same reason ReconcileAnchor
 	 * takes the transcript: the statement below must rerun when it arrives.
 	 * The viewport binds while the view state is still undefined and the
 	 * transcript is rendered from the view state, so positioning at bind time
-	 * measured an empty scroller — the restore clamped into nothing and the
-	 * follow pin then owned wherever the growth ended.
+	 * would measure an empty scroller and land before the content exists.
 	 */
 	const PositionLoadedThread = (view_state: ConversationViewState | undefined) =>
 		Effect.gen(function* () {
 			if (view_state === undefined) return;
 			yield* Effect.promise(() => tick());
 			if (viewport === null || positioned) return;
-			/**
-			 * Placed before the assignment on purpose: the landing produces the
-			 * first scroll event this mount is allowed to remember.
-			 */
-			positioned = true;
-			const remembered = yield* scroll_memory.Recall(snapshot.thread_id);
-			const restore = thread_scroll_position_is_current(remembered, content_stamp)
-				? remembered.scroll_top
-				: undefined;
 			yield* RunBrowserDom(() => {
-				const bottom = ConversationBottomScrollTop(
+				viewport.scrollTop = ConversationBottomScrollTop(
 					viewport.scrollHeight,
 					viewport.clientHeight,
 				);
-				/** A remembered offset can outlive the height that made it reachable. */
-				viewport.scrollTop = restore === undefined ? bottom : Math.min(restore, bottom);
 			});
+			positioned = true;
 		});
 	if (viewport !== null && !positioned) {
 		yield* PositionLoadedThread(conversation_view_state);
@@ -884,12 +841,6 @@
 						const on_scroll = () => {
 							SyncFollowing(current_viewport);
 							SyncActiveTurn();
-							/**
-							 * Stamped with the content the reader was looking at, so
-							 * reopening can tell a thread that sat still from one that
-							 * moved on while they were away.
-							 */
-							RememberScrollPosition(current_viewport.scrollTop);
 						};
 						/** `scrollend` is what releases the anchor guard once its animation settles. */
 						const on_scroll_end = () => release_anchor_scroll(current_viewport);

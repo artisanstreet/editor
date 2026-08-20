@@ -3,6 +3,17 @@
 Last updated: 2026-08-20. Branch continuity only; durable verified product status belongs in
 [`docs/status/backend-completion-matrix.md`](../docs/status/backend-completion-matrix.md).
 
+## Thread Navigation Scroll (verified 2026-08-20)
+
+- Per-thread scroll memory is removed completely: its Effect service, browser runtime layer,
+  content stamps, restore decision, scroll-event recording, and dedicated memory tests are gone.
+- `PositionLoadedThread` still waits for the rendered view state and a Svelte tick, then assigns
+  `scrollTop` directly to the current bottom exactly once. Its latch flips only after the DOM
+  assignment so the reactive state write cannot interrupt the initial placement.
+- The send-anchor, follow pin, jump-to-latest, pagination preservation, and reduced-motion paths
+  remain intact. Five focused frontend files pass 44 tests. Frontend format, lint, and production
+  build pass; aggregate tests reach 991/992 with only the protected composer line budget failing.
+
 ## Live Work Disclosure (verified 2026-08-20)
 
 - Unfinished work sessions now preserve their initially-open state even when mounted after reply

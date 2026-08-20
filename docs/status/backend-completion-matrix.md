@@ -371,6 +371,14 @@ On 2026-07-25/26, the standalone-daemon milestone superseded the Electron utilit
 
 On 2026-07-27, Forge thread creation moved from `thread_<snowflake>` to the bare Snowflake decimal while idempotent replay preserves every previously stored identity. Public routes canonicalize both generations to bare URL segments and resolve historical prefixed records through the authoritative thread list. Thread navigation now positions the transcript at its bottom without animation; accepted local user-message projections smoothly align to a 16px top inset exactly once, with a shrinking end spacer that lets streamed assistant output grow below the anchor without forcing later scrolls. Focused protocol/backend/transport/frontend tests, TypeScript, and frontend lint pass; the product build was intentionally not repeated during this UI milestone.
 
+On 2026-08-20, thread navigation removed per-thread scroll restoration entirely. The
+renderer waits for the conversation view state and one render tick, assigns the viewport
+directly to the current bottom once, and records no subsequent reading position. The
+separate accepted-message anchor remains smooth, while follow, jump-to-latest, and older
+history pagination retain their existing behavior. Five focused frontend files pass 44
+tests; frontend format, lint, and the production build pass, and the aggregate test phase
+reaches 991/992 with only the protected composer line-budget assertion failing.
+
 On 2026-07-31, workspace-scoped surface identity was restored: canonical
 conversation URLs use `/t/:workspace/:thread`, canonical editor URLs use
 `/e/:workspace/:thread`, and optional editor file identity remains in `?file=`.
