@@ -44,10 +44,19 @@ import type {
 	ThreadWorkItem,
 	RuntimeCatalog,
 	HostIdentitySnapshot,
+	HostMachineConnectOutcome,
+	HostMachineConnectRequest,
+	HostMachinesSnapshot,
 	ThreadUsageSeries,
 	ThreadUsageSeriesQuery,
 	EngineUsageQuery,
 	EngineUsageSnapshot,
+	EngineInstallationMutationResult,
+	EngineInstallationQuery,
+	EngineInstallationSnapshot,
+	EngineInstallRequest,
+	EngineAuthenticationRequest,
+	EngineRollbackRequest,
 	ProjectDiffQueryResult,
 	ProjectRepositoryQueryResult,
 	SessionDefaults,
@@ -259,9 +268,30 @@ export class ArtisanClient extends Context.Service<
 		readonly ListProjects: Effect.Effect<ProjectCatalogSnapshot, ArtisanClientError>;
 		readonly GetRuntimeCatalog: Effect.Effect<RuntimeCatalog, ArtisanClientError>;
 		readonly GetHostIdentity: Effect.Effect<HostIdentitySnapshot, ArtisanClientError>;
+		readonly GetHostMachines: Effect.Effect<HostMachinesSnapshot, ArtisanClientError>;
+		/** Starts and pairs the named machine's Forge; the outcome is terminal, never thrown. */
+		readonly ConnectHostMachine: (
+			input: HostMachineConnectRequest,
+		) => Effect.Effect<HostMachineConnectOutcome, ArtisanClientError>;
 		readonly GetEngineUsage: (
 			input?: EngineUsageQuery,
 		) => Effect.Effect<EngineUsageSnapshot, ArtisanClientError>;
+		/** Polls managed-install state; it is authoritative only for this Forge lifecycle. */
+		readonly GetEngineInstallations: (
+			input?: EngineInstallationQuery,
+		) => Effect.Effect<EngineInstallationSnapshot, ArtisanClientError>;
+		/** Returns accepted or rejected installation state as a normal mutation result. */
+		readonly InstallEngine: (
+			input: EngineInstallRequest,
+		) => Effect.Effect<EngineInstallationMutationResult, ArtisanClientError>;
+		/** Starts provider sign-in inside Artisan's owned config home. */
+		readonly AuthenticateEngine: (
+			input: EngineAuthenticationRequest,
+		) => Effect.Effect<EngineInstallationMutationResult, ArtisanClientError>;
+		/** Returns accepted or rejected rollback state as a normal mutation result. */
+		readonly RollbackEngine: (
+			input: EngineRollbackRequest,
+		) => Effect.Effect<EngineInstallationMutationResult, ArtisanClientError>;
 		/**
 		 * Reads one thread's per-turn token series for the context window it is
 		 * currently in. Cut at the last compaction rather than spanning the thread.

@@ -29,7 +29,7 @@ describe("client diagnostics journal", () => {
 	it("stamps recorded events and keeps them oldest first", async () => {
 		const snapshot = await Effect.runPromise(
 			Effect.gen(function* () {
-				const diagnostics = yield* make_client_diagnostics(8, make_fixed_runtime());
+				const diagnostics = yield* make_client_diagnostics(make_fixed_runtime());
 
 				yield* diagnostics.Record({ kind: "session.attempt", ordinal: 1 });
 				yield* diagnostics.Record({ kind: "supervisor.retry_released" });
@@ -38,7 +38,6 @@ describe("client diagnostics journal", () => {
 			}),
 		);
 
-		expect(snapshot.dropped).toBe(0);
 		expect(snapshot.events.map((event) => event.kind)).toEqual([
 			"session.attempt",
 			"supervisor.retry_released",
@@ -47,10 +46,10 @@ describe("client diagnostics journal", () => {
 		expect(first !== undefined && second !== undefined && first.at < second.at).toBe(true);
 	});
 
-	it("evicts the oldest events beyond capacity and counts them", async () => {
+	it("retains every recorded event", async () => {
 		const snapshot = await Effect.runPromise(
 			Effect.gen(function* () {
-				const diagnostics = yield* make_client_diagnostics(2, make_fixed_runtime());
+				const diagnostics = yield* make_client_diagnostics(make_fixed_runtime());
 
 				yield* diagnostics.Record({ kind: "session.attempt", ordinal: 1 });
 				yield* diagnostics.Record({ kind: "session.attempt", ordinal: 2 });
@@ -60,16 +59,15 @@ describe("client diagnostics journal", () => {
 			}),
 		);
 
-		expect(snapshot.dropped).toBe(1);
 		expect(
 			snapshot.events.map((event) => (event.kind === "session.attempt" ? event.ordinal : -1)),
-		).toEqual([2, 3]);
+		).toEqual([1, 2, 3]);
 	});
 
 	it("feeds live observers every recorded event", async () => {
 		const events = await Effect.runPromise(
 			Effect.gen(function* () {
-				const diagnostics = yield* make_client_diagnostics(8, make_fixed_runtime());
+				const diagnostics = yield* make_client_diagnostics(make_fixed_runtime());
 
 				yield* diagnostics.Record({ kind: "session.attempt", ordinal: 1 });
 				yield* diagnostics.Record({ kind: "client.disposed" });

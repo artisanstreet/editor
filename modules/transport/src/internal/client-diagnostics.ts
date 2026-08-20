@@ -11,7 +11,7 @@ export type TransportDiagnosticEventInput = TransportDiagnosticEvent extends inf
 	: never;
 
 /**
- * Records the transport client's execution history: a bounded journal for
+ * Records the transport client's execution history: a complete journal for
  * after-the-fact reads plus a live feed for continuous observers. Recording
  * never fails and never blocks the connection work being observed.
  */
@@ -23,7 +23,6 @@ export interface ClientDiagnostics {
 }
 
 interface JournalState {
-	readonly dropped: number;
 	readonly events: ReadonlyArray<TransportDiagnosticEvent>;
 }
 
@@ -47,37 +46,24 @@ export function describe_diagnostic_cause(cause: unknown): string {
 	}
 }
 
-/** Creates one journal bounded to `capacity` events; older entries are evicted. */
-export const make_client_diagnostics = (
-	capacity: number,
-	runtime: typeof TransportRuntime.Service,
-) =>
+/** Creates one lossless journal of transport events. */
+export const make_client_diagnostics = (runtime: typeof TransportRuntime.Service) =>
 	Effect.gen(function* () {
-		const journal = yield* Ref.make<JournalState>({ dropped: 0, events: [] });
-		const live = yield* Queue.dropping<TransportDiagnosticEvent, Cause.Done<void>>(capacity);
+		const journal = yield* Ref.make<JournalState>({ events: [] });
+		const live = yield* Queue.unbounded<TransportDiagnosticEvent, Cause.Done<void>>();
 
 		const record = (input: TransportDiagnosticEventInput) =>
 			Effect.gen(function* () {
 				const at = yield* runtime.Now;
 				const event = { ...input, at } as TransportDiagnosticEvent;
 
-				yield* Ref.update(journal, (state) =>
-					state.events.length < capacity
-						? { ...state, events: [...state.events, event] }
-						: {
-								dropped: state.dropped + 1,
-								events: [...state.events.slice(1), event],
-							},
-				);
+				yield* Ref.update(journal, (state) => ({ events: [...state.events, event] }));
 				Queue.offerUnsafe(live, event);
 			});
 
 		const snapshot = Ref.get(journal).pipe(
 			Effect.map(
-				(state): TransportDiagnosticsSnapshot => ({
-					dropped: state.dropped,
-					events: state.events,
-				}),
+				(state): TransportDiagnosticsSnapshot => ({ dropped: 0, events: state.events }),
 			),
 		);
 

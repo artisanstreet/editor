@@ -122,7 +122,7 @@ describe("Artisan client WebSocket bootstrap", () => {
 							});
 						}),
 					};
-					const diagnostics = yield* make_client_diagnostics(16, runtime);
+					const diagnostics = yield* make_client_diagnostics(runtime);
 					const lifecycle = yield* make_client_connection_lifecycle(
 						0,
 						1,

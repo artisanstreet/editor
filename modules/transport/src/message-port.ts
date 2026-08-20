@@ -1,14 +1,9 @@
 import { Cause, Data, Deferred, Effect, Queue } from "effect";
 
 /** Identifies a normalized MessagePort adapter failure. */
-export type MessagePortErrorCode =
-	| "closed"
-	| "configuration"
-	| "message_error"
-	| "overflow"
-	| "send";
+export type MessagePortErrorCode = "closed" | "message_error" | "send";
 
-/** Reports a bounded, shell-neutral MessagePort failure. */
+/** Reports a normalized, shell-neutral MessagePort failure. */
 export class MessagePortError extends Data.TaggedError("MessagePortError")<{
 	readonly cause: unknown;
 	readonly code: MessagePortErrorCode;
@@ -17,13 +12,8 @@ export class MessagePortError extends Data.TaggedError("MessagePortError")<{
 
 /** Describes why a normalized MessagePort stopped accepting work. */
 export interface MessagePortClose {
-	readonly code: "closed" | "message_error" | "overflow";
+	readonly code: "closed" | "message_error";
 	readonly dropped_messages: number;
-}
-
-/** Configures the native callback buffer owned by one adapted port. */
-export interface MessagePortAdapterOptions {
-	readonly incoming_capacity?: number;
 }
 
 /** Supplies the native operations required by the deep MessagePort adapter. */
@@ -37,9 +27,8 @@ export interface MessagePortAdapterHooks {
 }
 
 /**
- * Hides native event-emitter and event-target differences behind one bounded
- * Effect interface. A MessagePort is reliable while open; overflow therefore
- * closes the port as an explicit gap instead of inventing packet acknowledgements.
+ * Hides native event-emitter and event-target differences behind one scoped
+ * Effect interface.
  */
 export interface MessagePortLike {
 	readonly Close: Effect.Effect<void>;
@@ -55,30 +44,11 @@ function port_error(code: MessagePortErrorCode, cause: unknown, dropped_messages
 	return new MessagePortError({ cause, code, dropped_messages });
 }
 
-function validate_capacity(capacity: number) {
-	return Number.isSafeInteger(capacity) && capacity > 0;
-}
-
 /** Builds a scope-owned MessagePortLike from shell-specific listener hooks. */
-export function make_message_port_like(
-	hooks: MessagePortAdapterHooks,
-	options: MessagePortAdapterOptions = {},
-) {
-	const incoming_capacity = options.incoming_capacity ?? 256;
-
+export function make_message_port_like(hooks: MessagePortAdapterHooks) {
 	return Effect.gen(function* () {
-		if (!validate_capacity(incoming_capacity)) {
-			return yield* Effect.fail(
-				port_error(
-					"configuration",
-					new Error("incoming_capacity must be a positive safe integer"),
-					0,
-				),
-			);
-		}
-
 		const incoming = yield* Effect.acquireRelease(
-			Queue.dropping<unknown, MessagePortError>(incoming_capacity),
+			Queue.unbounded<unknown, MessagePortError>(),
 			Queue.shutdown,
 		);
 		const closed = yield* Deferred.make<MessagePortClose>();
@@ -120,24 +90,7 @@ export function make_message_port_like(
 				return;
 			}
 
-			if (Queue.offerUnsafe(incoming, message)) {
-				return;
-			}
-
-			const state: MessagePortClose = {
-				code: "overflow",
-				dropped_messages: 1,
-			};
-
-			finish(
-				state,
-				port_error(
-					"overflow",
-					new Error("incoming MessagePort buffer overflowed"),
-					state.dropped_messages,
-				),
-			);
-			close_native();
+			Queue.offerUnsafe(incoming, message);
 		};
 		const on_close = () => {
 			finish({ code: "closed", dropped_messages: 0 });

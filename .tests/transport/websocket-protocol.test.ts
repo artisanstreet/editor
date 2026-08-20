@@ -129,9 +129,76 @@ describe("WebSocket transport framing", () => {
 		);
 	});
 
-	it("retains a legal bootstrap control burst until its sequential receiver starts", async () => {
+	it("retains a control and stream burst until receivers drain both channels", async () => {
 		const [, right] = make_pair();
-		const count = 258;
+		const control_count = 258;
+		const control_frames = await Promise.all(
+			Array.from({ length: control_count }, (_, index) =>
+				Effect.runPromise(
+					EncodeWebSocketTransportFrame("control", {
+						...hello,
+						attempt_id: `attempt_${index}`,
+					}),
+				),
+			),
+		);
+		const stream_frame = await Effect.runPromise(
+			EncodeWebSocketTransportFrame("stream", {
+				connection_id: "connection_1",
+				frame: {
+					channel_id: "channel_1",
+					channel_sequence: 1,
+					data: Uint8Array.of(1, 2, 3),
+					kind: "stream.chunk",
+					stream_id: "stream_1",
+				},
+				kind: "transport.stream",
+				transport_version: 1,
+			}),
+		);
+		const received = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const right_connection = yield* MakeWebSocketConnection(right.endpoint);
+					expect(right.message_listener_count()).toBe(1);
+					for (const frame of control_frames) right.receive(frame);
+					right.receive(stream_frame);
+					/** Let the decoder receive the complete burst before consumers start. */
+					yield* Effect.forEach(
+						Array.from({ length: control_count + 1 }),
+						() => Effect.yieldNow,
+						{
+							discard: true,
+						},
+					);
+					expect(right.close_count()).toBe(0);
+
+					const controls = yield* Effect.forEach(
+						Array.from({ length: control_count }),
+						() => right_connection.control_port.Receive,
+					).pipe(Effect.forkScoped({ startImmediately: true }));
+
+					const controls_received = yield* Fiber.join(controls);
+					const stream = yield* right_connection.stream_port.Receive;
+					expect(right.close_count()).toBe(0);
+
+					return { controls: controls_received, stream };
+				}),
+			),
+		);
+
+		expect(received.controls).toHaveLength(control_count);
+		expect((received.controls.at(-1) as { attempt_id: string }).attempt_id).toBe(
+			`attempt_${control_count - 1}`,
+		);
+		expect(Array.from((received.stream as { frame: { data: Uint8Array } }).frame.data)).toEqual(
+			[1, 2, 3],
+		);
+	});
+
+	it("retains raw ingress when no decoder consumer starts immediately", async () => {
+		const [, right] = make_pair();
+		const count = 9;
 		const frames = await Promise.all(
 			Array.from({ length: count }, (_, index) =>
 				Effect.runPromise(
@@ -146,61 +213,22 @@ describe("WebSocket transport framing", () => {
 			Effect.scoped(
 				Effect.gen(function* () {
 					const right_connection = yield* MakeWebSocketConnection(right.endpoint);
-					expect(right.message_listener_count()).toBe(1);
+
 					for (const frame of frames) right.receive(frame);
+
 					yield* Effect.forEach(Array.from({ length: count }), () => Effect.yieldNow, {
 						discard: true,
 					});
-
-					const controls = yield* Effect.forEach(
+					expect(right.close_count()).toBe(0);
+					return yield* Effect.forEach(
 						Array.from({ length: count }),
 						() => right_connection.control_port.Receive,
-					).pipe(Effect.forkScoped({ startImmediately: true }));
-
-					const controls_received = yield* Fiber.join(controls);
-					expect(right.close_count()).toBe(0);
-
-					return controls_received;
+					);
 				}),
 			),
 		);
 
 		expect(received).toHaveLength(count);
-		expect((received.at(-1) as { attempt_id: string }).attempt_id).toBe(`attempt_${count - 1}`);
-	});
-
-	it("closes exactly once when a synchronous control burst has no consumer", async () => {
-		const [, right] = make_pair();
-		const capacity = 4;
-		const count = capacity * 2 + 1;
-		const frames = await Promise.all(
-			Array.from({ length: count }, (_, index) =>
-				Effect.runPromise(
-					EncodeWebSocketTransportFrame("control", {
-						...hello,
-						attempt_id: `attempt_${index}`,
-					}),
-				),
-			),
-		);
-		const closed = await Effect.runPromise(
-			Effect.scoped(
-				Effect.gen(function* () {
-					const right_connection = yield* MakeWebSocketConnection(right.endpoint, {
-						incoming_capacity: capacity,
-					});
-
-					for (const frame of frames) right.receive(frame);
-
-					const close = yield* right_connection.control_port.Closed;
-					yield* Effect.yieldNow;
-					expect(right.close_count()).toBe(1);
-					return close;
-				}),
-			),
-		);
-
-		expect(closed).toEqual({ code: "overflow", dropped_messages: 1 });
 	});
 
 	it("closes a shared socket exactly once when either logical port closes", async () => {

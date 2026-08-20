@@ -37,7 +37,8 @@ export const offer_projection_update = (
 							type: "remove",
 						};
 
-		return Queue.offerUnsafe(subscription.queue, update) ? "offered" : "overflow";
+		Queue.offerUnsafe(subscription.queue, update);
+		return "offered";
 	}
 
 	if (
@@ -48,7 +49,8 @@ export const offer_projection_update = (
 			snapshot: envelope.payload,
 			type: envelope.kind === "project.list.snapshot" ? "snapshot" : "replacement",
 		};
-		return Queue.offerUnsafe(subscription.queue, update) ? "offered" : "overflow";
+		Queue.offerUnsafe(subscription.queue, update);
+		return "offered";
 	}
 
 	if (
@@ -62,7 +64,8 @@ export const offer_projection_update = (
 			type: envelope.kind === "orchestration.graph.snapshot" ? "snapshot" : "patch",
 		};
 
-		return Queue.offerUnsafe(subscription.queue, update) ? "offered" : "overflow";
+		Queue.offerUnsafe(subscription.queue, update);
+		return "offered";
 	}
 
 	if (
@@ -82,7 +85,8 @@ export const offer_projection_update = (
 						journal_sequence: envelope.journal_sequence,
 						entries: envelope.payload.entries,
 					};
-		return Queue.offerUnsafe(subscription.queue, update) ? "offered" : "overflow";
+		Queue.offerUnsafe(subscription.queue, update);
+		return "offered";
 	}
 
 	if (
@@ -94,7 +98,8 @@ export const offer_projection_update = (
 				? { type: "snapshot", snapshot: envelope.payload }
 				: { type: "patch", batch: envelope.payload };
 
-		return Queue.offerUnsafe(subscription.queue, update) ? "offered" : "overflow";
+		Queue.offerUnsafe(subscription.queue, update);
+		return "offered";
 	}
 
 	if (
@@ -102,50 +107,45 @@ export const offer_projection_update = (
 		(envelope.kind === "orchestration.group.list.snapshot" ||
 			envelope.kind === "orchestration.group.list.patch")
 	) {
-		return Queue.offerUnsafe(subscription.queue, {
+		Queue.offerUnsafe(subscription.queue, {
 			type: envelope.kind === "orchestration.group.list.snapshot" ? "snapshot" : "patch",
 			snapshot: envelope.payload,
-		})
-			? "offered"
-			: "overflow";
+		});
+		return "offered";
 	}
 	if (subscription._tag === "thread.session" && envelope.kind === "thread.session.snapshot") {
-		return Queue.offerUnsafe(subscription.queue, {
+		Queue.offerUnsafe(subscription.queue, {
 			type: "snapshot",
 			snapshot: envelope.payload,
-		})
-			? "offered"
-			: "overflow";
+		});
+		return "offered";
 	}
 	if (subscription._tag === "surface.list" && envelope.kind === "surface.list.snapshot") {
-		return Queue.offerUnsafe(subscription.queue, {
+		Queue.offerUnsafe(subscription.queue, {
 			type: "snapshot",
 			snapshot: envelope.payload,
-		})
-			? "offered"
-			: "overflow";
+		});
+		return "offered";
 	}
 	if (
 		subscription._tag === "surface.usage.aggregate" &&
 		envelope.kind === "surface.usage.aggregate.snapshot"
 	) {
-		return Queue.offerUnsafe(subscription.queue, {
+		Queue.offerUnsafe(subscription.queue, {
 			type: "snapshot",
 			snapshot: envelope.payload,
-		})
-			? "offered"
-			: "overflow";
+		});
+		return "offered";
 	}
 	if (
 		subscription._tag === "workspace.conflict.list" &&
 		envelope.kind === "workspace.conflict.list.snapshot"
 	) {
-		return Queue.offerUnsafe(subscription.queue, {
+		Queue.offerUnsafe(subscription.queue, {
 			type: "snapshot",
 			snapshot: envelope.payload,
-		})
-			? "offered"
-			: "overflow";
+		});
+		return "offered";
 	}
 
 	return "mismatch";

@@ -4,14 +4,12 @@ import {
 	SubscriptionContext,
 	SubscriptionErrorReporter,
 	SubscriptionIdentity,
-	SubscriptionOptions,
 	SubscriptionProtocol,
 } from "./context";
 import type { SubscriptionState } from "./model";
 import { MakeClientSubscriptionCoordinator } from "./registry";
 
 export const make_client_subscription_coordinator = Effect.gen(function* () {
-	const { event_capacity, subscription_capacity } = yield* SubscriptionOptions;
 	const { make_id, make_trace } = yield* SubscriptionIdentity;
 	const { send_current } = yield* SubscriptionProtocol;
 	const { publish_error } = yield* SubscriptionErrorReporter;
@@ -27,13 +25,11 @@ export const make_client_subscription_coordinator = Effect.gen(function* () {
 	});
 	return yield* MakeClientSubscriptionCoordinator.pipe(
 		Effect.provideService(SubscriptionContext, {
-			event_capacity,
 			make_id,
 			make_trace,
 			publish_error,
 			send_current,
 			state,
-			subscription_capacity,
 		}),
 	);
 });

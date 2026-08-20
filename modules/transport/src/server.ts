@@ -21,7 +21,6 @@ export function make_message_port_transport_server_layer(
 ) {
 	const options: Required<MessagePortTransportServerOptions> = {
 		max_active_streams: input_options.max_active_streams ?? 16,
-		stream_outbound_capacity: input_options.stream_outbound_capacity ?? 64,
 	};
 
 	return Layer.effect(
@@ -31,7 +30,7 @@ export function make_message_port_transport_server_layer(
 			: Effect.fail(
 					server_error(
 						"configuration",
-						new Error("transport server limits must be positive safe integers"),
+						new Error("transport server concurrency must be a positive safe integer"),
 					),
 				),
 	);

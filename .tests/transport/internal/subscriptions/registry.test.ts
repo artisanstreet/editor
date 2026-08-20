@@ -1,4 +1,5 @@
-import { Effect, Exit, Fiber, Layer } from "effect";
+import { Cause, Effect, Exit, Fiber, Layer } from "effect";
+import { TestClock } from "effect/testing";
 import { describe, expect, it } from "vitest";
 
 import type { InboundControlEnvelope, OutboundControlEnvelope } from "@artisan/protocol";
@@ -6,7 +7,6 @@ import type { InboundControlEnvelope, OutboundControlEnvelope } from "@artisan/p
 import {
 	SubscriptionErrorReporter,
 	SubscriptionIdentity,
-	SubscriptionOptions,
 	SubscriptionProtocol,
 } from "../../../../modules/transport/src/internal/subscriptions/context";
 import { make_client_subscription_coordinator } from "../../../../modules/transport/src/internal/subscriptions/coordinator";
@@ -16,7 +16,6 @@ const make_test_context = () => {
 	let tick = 0;
 
 	const layer = Layer.mergeAll(
-		Layer.succeed(SubscriptionOptions, { event_capacity: 16, subscription_capacity: 16 }),
 		Layer.succeed(SubscriptionIdentity, {
 			make_id: (prefix: string) =>
 				Effect.sync(() => {
@@ -239,6 +238,51 @@ describe("client subscription registry connection reset", () => {
 					yield* Fiber.join(subscriber).pipe(Effect.timeout("2 seconds"));
 				}),
 			),
+		);
+	});
+
+	/**
+	 * The backend can accept a subscribe and answer nothing at all — a refused
+	 * registration used to return without sending `subscription.started` or an
+	 * error. Parking on that answer forever is invisible to the caller's retry
+	 * schedule, which only fires on failure, so the projection stayed empty
+	 * until the window was reloaded.
+	 */
+	it("fails an unanswered subscribe at its deadline so the caller can retry", async () => {
+		const context = make_test_context();
+
+		await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const coordinator = yield* make_client_subscription_coordinator.pipe(
+						Effect.provide(context.layer),
+					);
+					const subscriber = yield* coordinator.SubscribeThreadList.pipe(
+						Effect.exit,
+						Effect.forkScoped,
+					);
+
+					/** Lets the forked subscriber send before any budget is spent. */
+					yield* TestClock.adjust("1 milli");
+
+					expect(context.sent_subscribe(0).kind).toBe("subscribe");
+
+					/** The backend never answers. Only time passes. */
+					yield* TestClock.adjust("15 seconds");
+
+					const outcome = yield* Fiber.join(subscriber);
+
+					expect(Exit.isFailure(outcome)).toBe(true);
+					const failure = Exit.isFailure(outcome)
+						? Cause.squash(outcome.cause)
+						: undefined;
+
+					expect(failure).toMatchObject({
+						protocol_code: "subscription.timeout",
+						retryable: true,
+					});
+				}),
+			).pipe(Effect.provide(TestClock.layer())),
 		);
 	});
 

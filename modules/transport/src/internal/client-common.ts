@@ -98,24 +98,12 @@ export function cursors_to_record(
 	) as Readonly<Record<string, number>>;
 }
 
-/** Validates all client limits before any scoped fibers or queues are acquired. */
+/** Validates client reconnect timing before any scoped fibers are acquired. */
 export function validate_client_options(options: Required<ArtisanClientOptions>) {
 	return (
-		Number.isSafeInteger(options.diagnostic_capacity) &&
-		options.diagnostic_capacity > 0 &&
-		Number.isSafeInteger(options.error_capacity) &&
-		options.error_capacity > 0 &&
-		Number.isSafeInteger(options.event_capacity) &&
-		options.event_capacity > 0 &&
-		Number.isSafeInteger(options.max_pending_requests) &&
-		options.max_pending_requests > 0 &&
 		Number.isSafeInteger(options.reconnect_attempts) &&
 		options.reconnect_attempts > 0 &&
 		Number.isSafeInteger(options.reconnect_delay_ms) &&
-		options.reconnect_delay_ms >= 0 &&
-		Number.isSafeInteger(options.stream_capacity) &&
-		options.stream_capacity > 0 &&
-		Number.isSafeInteger(options.subscription_capacity) &&
-		options.subscription_capacity > 0
+		options.reconnect_delay_ms >= 0
 	);
 }

@@ -62,6 +62,7 @@ export interface TransportTestHarness {
 	readonly connector_snapshot: () => MessageChannelConnectorSnapshot;
 	readonly dispose: () => Promise<void>;
 	readonly erase_thread: (thread_id: string) => Effect.Effect<void>;
+	readonly mute_current_connection: () => void;
 	readonly protocol_snapshot: () => FakeProtocolSnapshot;
 	readonly server: typeof MessagePortTransportServer.Service;
 	readonly wipe_journal: Effect.Effect<void>;
@@ -131,6 +132,8 @@ function make_message_channel_connector(
 	drop_first_command_receipt: boolean,
 ) {
 	const active_sessions = new Set<NativeSession>();
+	/** Sessions whose backend-to-client frames vanish while every port stays open. */
+	const muted_sessions = new Set<NativeSession>();
 	let connections = 0;
 	let dropped_command_receipts = 0;
 	let server_failures = 0;
@@ -160,6 +163,7 @@ function make_message_channel_connector(
 			...raw_server_control,
 			Send: (message, transfer) =>
 				Effect.gen(function* () {
+					if (muted_sessions.has(native_session)) return;
 					const should_drop =
 						drop_first_command_receipt && dropped_command_receipts === 0
 							? yield* is_command_receipt(message)
@@ -175,9 +179,17 @@ function make_message_channel_connector(
 					yield* raw_server_control.Send(message, transfer);
 				}),
 		};
+		const muted_server_stream: MessagePortLike = {
+			...server_stream,
+			Send: (message, transfer) =>
+				Effect.gen(function* () {
+					if (muted_sessions.has(native_session)) return;
+					yield* server_stream.Send(message, transfer);
+				}),
+		};
 		const server_ports: MessagePortConnection = {
 			control_port: server_control,
-			stream_port: server_stream,
+			stream_port: muted_server_stream,
 		};
 
 		yield* server.Serve(server_ports).pipe(
@@ -216,6 +228,14 @@ function make_message_channel_connector(
 			close_native_session(current);
 		}
 	};
+	/** Simulates a zombie socket: frames stop without any close event firing. */
+	const mute_current_connection = () => {
+		const current = [...active_sessions].at(-1);
+
+		if (current) {
+			muted_sessions.add(current);
+		}
+	};
 	const snapshot = (): MessageChannelConnectorSnapshot => ({
 		active_sessions: active_sessions.size,
 		connections,
@@ -223,7 +243,7 @@ function make_message_channel_connector(
 		server_failures,
 	});
 
-	return { close_current_connection, layer, snapshot };
+	return { close_current_connection, layer, mute_current_connection, snapshot };
 }
 
 async function make_transport_stack(
@@ -269,6 +289,7 @@ async function make_transport_stack(
 		close_current_connection: connector.close_current_connection,
 		connector_snapshot: connector.snapshot,
 		dispose,
+		mute_current_connection: connector.mute_current_connection,
 		server,
 	};
 }

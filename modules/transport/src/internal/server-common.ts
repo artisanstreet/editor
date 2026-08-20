@@ -15,12 +15,7 @@ export function map_server_port_error(cause: MessagePortError) {
 	return server_error("port", cause);
 }
 
-/** Validates server stream limits before opening protocol or native resources. */
+/** Validates server stream concurrency before opening protocol or native resources. */
 export function validate_server_options(options: Required<MessagePortTransportServerOptions>) {
-	return (
-		Number.isSafeInteger(options.max_active_streams) &&
-		options.max_active_streams > 0 &&
-		Number.isSafeInteger(options.stream_outbound_capacity) &&
-		options.stream_outbound_capacity > 0
-	);
+	return Number.isSafeInteger(options.max_active_streams) && options.max_active_streams > 0;
 }

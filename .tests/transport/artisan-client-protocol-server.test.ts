@@ -1327,9 +1327,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 		const runtime = make_backend_runtime({ database_path, migrations_path });
 		const protocol_server = await runtime.runPromise(ProtocolServer);
 		const journal = await runtime.runPromise(JournalStore);
-		const harness = await make_transport_test_harness_with_protocol_server(protocol_server, {
-			client: { event_capacity: 1_000 },
-		});
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
 		try {
 			const created_thread_transcript = await Effect.runPromise(
 				harness.client.CreateThread({ title: "Transcript" }),
@@ -1595,9 +1593,7 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 		const runtime = make_backend_runtime({ database_path, migrations_path });
 		const protocol_server = await runtime.runPromise(ProtocolServer);
 		const journal = await runtime.runPromise(JournalStore);
-		const harness = await make_transport_test_harness_with_protocol_server(protocol_server, {
-			client: { event_capacity: 1_000 },
-		});
+		const harness = await make_transport_test_harness_with_protocol_server(protocol_server);
 		try {
 			const created_thread_history = await Effect.runPromise(
 				harness.client.CreateThread({ title: "History" }),
@@ -2616,6 +2612,11 @@ describe("ArtisanClient with the backend ProtocolServer", () => {
 			);
 			const serialized_replay = JSON.stringify(replayed_threads);
 
+			/**
+			 * Journal sequence 1 is the canonical guidance commit, replayed inside
+			 * the connection handshake — before any `Events` observer can exist.
+			 * Per the hot-observation contract above it is deliberately absent.
+			 */
 			expect(output.events.map((event) => event.journal_sequence)).toEqual([
 				2, 3, 4, 5, 6, 7, 8,
 			]);

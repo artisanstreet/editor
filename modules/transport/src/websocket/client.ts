@@ -14,7 +14,6 @@ export interface BrowserWebSocket {
 
 export interface WebSocketClientOptions {
 	readonly create_socket?: (url: string) => BrowserWebSocket;
-	readonly incoming_capacity?: number;
 	readonly url: string | (() => string);
 }
 
@@ -80,10 +79,6 @@ const AwaitOpen = (socket: BrowserWebSocket) =>
 /** Provides the existing reconnecting client with fresh two-channel connections over one socket. */
 export const make_websocket_connector_layer = (options: WebSocketClientOptions) => {
 	const create_socket = options.create_socket ?? ((url: string) => new WebSocket(url));
-	const port_options =
-		options.incoming_capacity === undefined
-			? {}
-			: { incoming_capacity: options.incoming_capacity };
 	const Connect = Effect.gen(function* () {
 		const url = typeof options.url === "function" ? options.url() : options.url;
 		const socket = yield* Effect.try({
@@ -92,10 +87,9 @@ export const make_websocket_connector_layer = (options: WebSocketClientOptions) 
 		});
 
 		yield* AwaitOpen(socket);
-		const connection = yield* MakeWebSocketConnection(
-			browser_endpoint(socket),
-			port_options,
-		).pipe(Effect.mapError((cause) => new MessagePortConnectorError({ cause })));
+		const connection = yield* MakeWebSocketConnection(browser_endpoint(socket)).pipe(
+			Effect.mapError((cause) => new MessagePortConnectorError({ cause })),
+		);
 		yield* Effect.addFinalizer(() => connection.control_port.Close);
 
 		return connection;

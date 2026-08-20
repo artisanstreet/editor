@@ -16,7 +16,6 @@ export class WebSocketAuthenticationError extends Data.TaggedError("WebSocketAut
 /** Lets a host apply loopback and token policy before protocol bytes are accepted. */
 export interface WebSocketServerOptions {
 	readonly authenticate?: (peer: WebSocketPeer) => Effect.Effect<void, unknown>;
-	readonly incoming_capacity?: number;
 	readonly require_loopback?: boolean;
 }
 
@@ -42,11 +41,7 @@ export const MakeWebSocketServerSession = (
 				.pipe(Effect.mapError((cause) => new WebSocketAuthenticationError({ cause })));
 		}
 
-		const port_options =
-			options.incoming_capacity === undefined
-				? {}
-				: { incoming_capacity: options.incoming_capacity };
-		const connection = yield* MakeWebSocketConnection(endpoint, port_options);
+		const connection = yield* MakeWebSocketConnection(endpoint);
 
 		return yield* serve(connection);
 	});

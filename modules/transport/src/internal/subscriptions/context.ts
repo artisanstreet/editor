@@ -4,17 +4,6 @@ import type { ArtisanClientError } from "../../client-api/service";
 import type { MakeTrace, SendCurrent } from "../client-common";
 import type { SubscriptionState } from "./model";
 
-export interface SubscriptionOptionsShape {
-	readonly event_capacity: number;
-	readonly subscription_capacity: number;
-}
-
-/** Bounded queue configuration for one subscription coordinator. */
-export class SubscriptionOptions extends Context.Service<
-	SubscriptionOptions,
-	SubscriptionOptionsShape
->()("@artisan/transport/internal/SubscriptionOptions") {}
-
 export interface SubscriptionIdentityShape {
 	readonly make_id: (prefix: string) => Effect.Effect<string>;
 	readonly make_trace: MakeTrace;
@@ -47,13 +36,11 @@ export class SubscriptionErrorReporter extends Context.Service<
 >()("@artisan/transport/internal/SubscriptionErrorReporter") {}
 
 export interface SubscriptionContextShape {
-	readonly event_capacity: number;
 	readonly make_id: (prefix: string) => Effect.Effect<string>;
 	readonly make_trace: MakeTrace;
 	readonly publish_error: (error: ArtisanClientError) => Effect.Effect<void>;
 	readonly send_current: SendCurrent;
 	readonly state: Ref.Ref<SubscriptionState>;
-	readonly subscription_capacity: number;
 }
 
 /** Supplies one connection's capabilities and mutable subscription state. */

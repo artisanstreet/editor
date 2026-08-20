@@ -86,11 +86,32 @@ describe("transport package boundaries", () => {
 	it("exports explicit client, connector, wire, and backend-only server entries", () => {
 		const manifest = JSON.parse(readFileSync(join(package_root, "package.json"), "utf8"));
 
+		/**
+		 * Source remains the type and `development` target; the bundle is what
+		 * anything resolving normally loads. Both halves belong to the boundary,
+		 * so an entry that lost either would be a hole in it.
+		 */
 		expect(manifest.exports).toMatchObject({
-			"./client": "./src/client.ts",
-			"./connector": "./src/connector.ts",
-			"./server": "./src/server.ts",
-			"./wire": "./src/wire.ts",
+			"./client": {
+				default: "./.dist/client.mjs",
+				development: "./src/client.ts",
+				types: "./src/client.ts",
+			},
+			"./connector": {
+				default: "./.dist/connector.mjs",
+				development: "./src/connector.ts",
+				types: "./src/connector.ts",
+			},
+			"./server": {
+				default: "./.dist/server.mjs",
+				development: "./src/server.ts",
+				types: "./src/server.ts",
+			},
+			"./wire": {
+				default: "./.dist/wire.mjs",
+				development: "./src/wire.ts",
+				types: "./src/wire.ts",
+			},
 		});
 	});
 

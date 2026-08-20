@@ -73,7 +73,11 @@ import type {
 } from "@artisan/protocol";
 import type { ProjectCatalogSnapshot } from "@artisan/protocol";
 
-/** Identifies a typed frontend client failure. */
+/**
+ * Identifies a typed frontend client failure. The V1 `event_overflow` and
+ * `stream_overflow` names remain for public/peer compatibility; neither is
+ * emitted by a bounded local queue.
+ */
 export type ArtisanClientErrorCode =
 	| "configuration"
 	| "connection"
@@ -82,12 +86,10 @@ export type ArtisanClientErrorCode =
 	| "event_overflow"
 	| "malformed"
 	| "protocol"
-	| "request_overflow"
 	| "stream_closed"
 	| "stream_gap"
 	| "stream_not_found"
-	| "stream_overflow"
-	| "subscription_overflow";
+	| "stream_overflow";
 
 /** Reports a transport, protocol, request, subscription, or stream client failure. */
 export class ArtisanClientError extends Data.TaggedError("ArtisanClientError")<{
@@ -523,12 +525,8 @@ export type WorkspaceConflictListUpdate = {
 	readonly snapshot: WorkspaceConflictListQueryResult;
 };
 
-/** Configures bounded client queues, reconnect timing, and request concurrency. */
+/** Configures client reconnect timing. */
 export interface ArtisanClientOptions {
-	readonly diagnostic_capacity?: number;
-	readonly error_capacity?: number;
-	readonly event_capacity?: number;
-	readonly max_pending_requests?: number;
 	/**
 	 * Bounds *consecutive* attempts that fail before reaching ready. A session
 	 * that becomes ready restores the full budget when it eventually dies, so
@@ -537,8 +535,6 @@ export interface ArtisanClientOptions {
 	readonly reconnect_attempts?: number;
 	/** Base backoff between failed attempts; growth is capped at 16× the base. */
 	readonly reconnect_delay_ms?: number;
-	readonly stream_capacity?: number;
-	readonly subscription_capacity?: number;
 }
 
 export type ArtisanConnectionState =
@@ -618,10 +614,10 @@ export type TransportDiagnosticEvent =
 	  }
 	| { readonly at: string; readonly kind: "client.disposed" };
 
-/** The bounded journal of recent transport events, oldest first. */
+/** The complete journal of transport events, oldest first. */
 export interface TransportDiagnosticsSnapshot {
-	/** How many older events the bounded journal has already evicted. */
-	readonly dropped: number;
+	/** Retained for wire compatibility; a lossless journal always reports zero. */
+	readonly dropped: 0;
 	readonly events: ReadonlyArray<TransportDiagnosticEvent>;
 }
 

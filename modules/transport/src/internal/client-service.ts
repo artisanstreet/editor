@@ -29,20 +29,13 @@ import { make_client_subscription_coordinator } from "./subscriptions/coordinato
 import {
 	SubscriptionErrorReporter,
 	SubscriptionIdentity,
-	SubscriptionOptions,
 	SubscriptionProtocol,
 } from "./subscriptions/context";
 
 export function make_artisan_client_layer(input_options: ArtisanClientOptions = {}) {
 	const options: Required<ArtisanClientOptions> = {
-		diagnostic_capacity: input_options.diagnostic_capacity ?? 256,
-		error_capacity: input_options.error_capacity ?? 64,
-		event_capacity: input_options.event_capacity ?? 256,
-		max_pending_requests: input_options.max_pending_requests ?? 128,
 		reconnect_attempts: input_options.reconnect_attempts ?? 5,
 		reconnect_delay_ms: input_options.reconnect_delay_ms ?? 50,
-		stream_capacity: input_options.stream_capacity ?? 64,
-		subscription_capacity: input_options.subscription_capacity ?? 64,
 	};
 
 	return Layer.effect(
@@ -52,22 +45,19 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				return yield* Effect.fail(
 					client_error(
 						"configuration",
-						"Artisan client limits are invalid.",
-						new Error("client limits must be bounded safe integers"),
+						"Artisan client reconnect timing is invalid.",
+						new Error("client reconnect timing must be safe integers"),
 					),
 				);
 			}
 
 			const runtime = yield* TransportRuntime;
 			const errors = yield* Effect.acquireRelease(
-				Queue.dropping<ArtisanClientError, Cause.Done<void>>(options.error_capacity),
+				Queue.unbounded<ArtisanClientError, Cause.Done<void>>(),
 				Queue.shutdown,
 			);
 			const disposed = yield* Ref.make(false);
-			const diagnostics = yield* make_client_diagnostics(
-				options.diagnostic_capacity,
-				runtime,
-			);
+			const diagnostics = yield* make_client_diagnostics(runtime);
 			const connection = yield* make_client_connection_lifecycle(
 				options.reconnect_delay_ms,
 				options.reconnect_attempts,
@@ -87,15 +77,8 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 						}),
 					),
 				);
-			const requests = yield* make_client_request_coordinator(
-				options.max_pending_requests,
-				connection.SendRequest,
-			);
+			const requests = yield* make_client_request_coordinator(connection.SendRequest);
 			const subscription_layer = Layer.mergeAll(
-				Layer.succeed(SubscriptionOptions, {
-					event_capacity: options.event_capacity,
-					subscription_capacity: options.subscription_capacity,
-				}),
 				Layer.succeed(SubscriptionIdentity, {
 					make_id: runtime.MakeId,
 					make_trace: connection.MakeTrace,
@@ -111,7 +94,6 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				Effect.provide(subscription_layer),
 			);
 			const streams = yield* make_client_stream_channel(
-				options.stream_capacity,
 				runtime.MakeId,
 				connection.AwaitActive,
 				connection.Current,
@@ -200,10 +182,14 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 			const {
 				create_project_directory,
 				create_thread,
+				authenticate_engine,
 				detach_project,
 				get_thread_usage_series,
 				get_engine_usage,
+				get_engine_installations,
+				connect_host_machine,
 				get_host_identity,
+				get_host_machines,
 				get_project_diffs,
 				get_project_repositories,
 				get_runtime_catalog,
@@ -213,7 +199,9 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				list_project_directories,
 				list_projects,
 				list_threads,
+				install_engine,
 				pick_project_directory,
+				rollback_engine,
 				select_project_directory,
 			} = query_api;
 
@@ -292,6 +280,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				GetThreadRetentionPolicy: thread_operations_api.get_thread_retention_policy,
 				GetThreadWork: thread_operations_api.get_thread_work,
 				CreateThread: create_thread,
+				AuthenticateEngine: authenticate_engine,
 				GetWorkspaceChangeDiff: workspace_api.get_workspace_change_diff,
 				GetWorkspaceLanguageCapabilities: workspace_api.get_workspace_language_capabilities,
 				ListWorkspaceChanges: workspace_api.list_workspace_changes,
@@ -302,8 +291,12 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				ListProjects: list_projects,
 				GetRuntimeCatalog: get_runtime_catalog,
 				GetHostIdentity: get_host_identity,
+				GetHostMachines: get_host_machines,
+				ConnectHostMachine: connect_host_machine,
 				GetThreadUsageSeries: get_thread_usage_series,
 				GetEngineUsage: get_engine_usage,
+				GetEngineInstallations: get_engine_installations,
+				InstallEngine: install_engine,
 				GetProjectDiffs: get_project_diffs,
 				GetProjectRepositories: get_project_repositories,
 				GetSessionDefaults: thread_operations_api.get_session_defaults,
@@ -332,6 +325,7 @@ export function make_artisan_client_layer(input_options: ArtisanClientOptions = 
 				ResolveArtisanApproval: tool_mutation_api.resolve_artisan_approval,
 				ResolveModelBehaviourDrift: guidance_api.resolve_model_behaviour_drift,
 				ResolveRichLink: preview_api.resolve_rich_link,
+				RollbackEngine: rollback_engine,
 
 				PreviewRoutineInstall: routine_api.preview_routine_install,
 				RequestRoutineInstall: routine_api.request_routine_install,

@@ -54,6 +54,39 @@ describe("Artisan client reconnect policy", () => {
 		}
 	});
 
+	it("reconnects a session whose inbound frames silently stop", async () => {
+		const harness = await make_transport_test_harness({
+			client: { reconnect_delay_ms: 5 },
+			protocol: { heartbeat_interval_ms: 50, heartbeat_timeout_ms: 150 },
+		});
+
+		try {
+			await Effect.runPromise(harness.client.ListThreads.pipe(Effect.timeout("2 seconds")));
+
+			/**
+			 * A zombie socket delivers nothing and never fires a close event —
+			 * the shape a host suspend or a killed backend leaves behind. Only
+			 * the inbound-liveness watchdog can notice, by the advertised
+			 * heartbeat cadence going silent, and hand the session to the
+			 * supervisor for a replacement connection.
+			 */
+			harness.mute_current_connection();
+			await wait_for(() => harness.connector_snapshot().connections >= 2, 5_000);
+			await Effect.runPromise(await_phase(harness.client, "ready"));
+			await Effect.runPromise(harness.client.ListThreads.pipe(Effect.timeout("2 seconds")));
+
+			const snapshot = await Effect.runPromise(harness.client.Diagnostics);
+			const silence_endings = events_of_kind(snapshot.events, "session.ended").filter(
+				(event) => event.message.includes("silent past its heartbeat window"),
+			);
+
+			expect(silence_endings.length).toBeGreaterThanOrEqual(1);
+			expect(events_of_kind(snapshot.events, "supervisor.exhausted")).toHaveLength(0);
+		} finally {
+			await harness.dispose();
+		}
+	});
+
 	it("survives a session that dies inside its readiness window", async () => {
 		const harness = await make_transport_test_harness({
 			client: { reconnect_delay_ms: 5 },

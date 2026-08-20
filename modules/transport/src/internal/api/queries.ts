@@ -1,4 +1,4 @@
-import { Effect } from "effect";
+import { Effect, Schedule } from "effect";
 
 import {
 	type ArtisanApprovalListQueryEnvelope,
@@ -8,7 +8,18 @@ import {
 	type ThreadUsageSeriesQueryEnvelope,
 	type EngineUsageQuery,
 	type EngineUsageQueryEnvelope,
+	type EngineInstallationQuery,
+	type EngineInstallationQueryEnvelope,
+	type EngineInstallRequest,
+	type EngineInstallRequestEnvelope,
+	type EngineAuthenticationRequest,
+	type EngineAuthenticationRequestEnvelope,
+	type EngineRollbackRequest,
+	type EngineRollbackRequestEnvelope,
 	type HostIdentityQueryEnvelope,
+	type HostMachineConnectRequest,
+	type HostMachineConnectRequestEnvelope,
+	type HostMachinesQueryEnvelope,
 	type ProjectDetachEnvelope,
 	type ProjectDiffQueryEnvelope,
 	type ProjectDirectoryListInput,
@@ -28,10 +39,46 @@ import {
 
 import type {
 	ArtisanApprovalListInput,
+	ArtisanClientError,
 	ArtisanToolInvocationListInput,
 	ArtisanToolRegistryListInput,
 } from "../../client-api/service";
 import { ClientApiContext } from "./context";
+
+/**
+ * Bounds the one read the suite renders for every engine at once.
+ *
+ * The engine menu lays out Codex, Claude, Grok and Cursor from a *single*
+ * `engine.usage.query` — the backend already isolates per-engine failure
+ * behind its own 15s timeout and a last-good cache, so one provider being
+ * slow or broken costs that provider's row and nothing else. What it cannot
+ * absorb is losing the reply itself: an unanswered request has no per-engine
+ * detail to fall back to, so all four rows render the same deadline text and
+ * a wedged local broker reads as every provider going down at once.
+ *
+ * Retrying is safe here in a way it is not for a command. This is a read, and
+ * the backend coalesces concurrent probes for the same engine onto one
+ * in-flight run, so a second attempt neither re-spawns a provider CLI that is
+ * still running nor manufactures a fresh answer — it usually returns the
+ * reports the abandoned attempt had already gathered and cached.
+ *
+ * Kept short and few: a dropped connection fails fast and recovers within a
+ * second or so, and a miss that survives three attempts is a broker that is
+ * genuinely not answering, which the caller should see rather than sit behind
+ * a spinner for.
+ */
+const engine_usage_retry_schedule = Schedule.exponential("300 millis").pipe(
+	Schedule.jittered,
+	Schedule.upTo({ times: 2 }),
+);
+
+/**
+ * Retries only the failures that mean nothing answered — a deadline miss or a
+ * dropped connection. A protocol rejection is the backend having decided, and
+ * a decision stands; repeating it just asks the same question twice.
+ */
+const engine_usage_failure_is_transient = (error: ArtisanClientError) =>
+	error.retryable && error.code === "connection";
 
 /** Constructs thread, project, runtime, and tool read operations. */
 export const MakeQueryApi = Effect.gen(function* () {
@@ -139,6 +186,29 @@ export const MakeQueryApi = Effect.gen(function* () {
 			? result.payload
 			: yield* Effect.die("host identity response narrowed incorrectly");
 	});
+	const get_host_machines = Effect.gen(function* () {
+		const trace = yield* context.MakeTrace;
+		const result = yield* context.Request({
+			...trace,
+			kind: "host.machines.query",
+			payload: {},
+		} satisfies HostMachinesQueryEnvelope);
+		return result.kind === "host.machines.query.result"
+			? result.payload
+			: yield* Effect.die("host machines response narrowed incorrectly");
+	});
+	const connect_host_machine = (input: HostMachineConnectRequest) =>
+		Effect.gen(function* () {
+			const trace = yield* context.MakeTrace;
+			const result = yield* context.Request({
+				...trace,
+				kind: "host.machines.connect.request",
+				payload: input,
+			} satisfies HostMachineConnectRequestEnvelope);
+			return result.kind === "host.machines.connect.result"
+				? result.payload
+				: yield* Effect.die("host machine connect response narrowed incorrectly");
+		});
 	const get_project_repositories = (project_ids: ReadonlyArray<string> = []) =>
 		Effect.gen(function* () {
 			const trace = yield* context.MakeTrace;
@@ -165,6 +235,13 @@ export const MakeQueryApi = Effect.gen(function* () {
 		});
 	const get_engine_usage = (input?: EngineUsageQuery) =>
 		Effect.gen(function* () {
+			/**
+			 * Inside the retried region on purpose: every attempt has to carry a
+			 * fresh `message_id`. The request coordinator refuses an id it already
+			 * holds or has tombstoned, so a schedule that resent one completed
+			 * envelope would turn each retry into a correlation conflict instead
+			 * of a second ask.
+			 */
 			const trace = yield* context.MakeTrace;
 			const result = yield* context.Request({
 				...trace,
@@ -174,6 +251,59 @@ export const MakeQueryApi = Effect.gen(function* () {
 			return result.kind === "engine.usage.query.result"
 				? result.payload
 				: yield* Effect.die("engine usage response narrowed incorrectly");
+		}).pipe(
+			Effect.retry({
+				schedule: engine_usage_retry_schedule,
+				while: engine_usage_failure_is_transient,
+			}),
+		);
+	const get_engine_installations = (input?: EngineInstallationQuery) =>
+		Effect.gen(function* () {
+			const trace = yield* context.MakeTrace;
+			const result = yield* context.Request({
+				...trace,
+				kind: "engine.installation.query",
+				payload: input ?? {},
+			} satisfies EngineInstallationQueryEnvelope);
+			return result.kind === "engine.installation.query.result"
+				? result.payload
+				: yield* Effect.die("engine installation response narrowed incorrectly");
+		});
+	const install_engine = (input: EngineInstallRequest) =>
+		Effect.gen(function* () {
+			const trace = yield* context.MakeTrace;
+			const result = yield* context.Request({
+				...trace,
+				kind: "engine.install.request",
+				payload: input,
+			} satisfies EngineInstallRequestEnvelope);
+			return result.kind === "engine.installation.mutation.result"
+				? result.payload
+				: yield* Effect.die("engine install response narrowed incorrectly");
+		});
+	const authenticate_engine = (input: EngineAuthenticationRequest) =>
+		Effect.gen(function* () {
+			const trace = yield* context.MakeTrace;
+			const result = yield* context.Request({
+				...trace,
+				kind: "engine.authentication.request",
+				payload: input,
+			} satisfies EngineAuthenticationRequestEnvelope);
+			return result.kind === "engine.installation.mutation.result"
+				? result.payload
+				: yield* Effect.die("engine authentication response narrowed incorrectly");
+		});
+	const rollback_engine = (input: EngineRollbackRequest) =>
+		Effect.gen(function* () {
+			const trace = yield* context.MakeTrace;
+			const result = yield* context.Request({
+				...trace,
+				kind: "engine.rollback.request",
+				payload: input,
+			} satisfies EngineRollbackRequestEnvelope);
+			return result.kind === "engine.installation.mutation.result"
+				? result.payload
+				: yield* Effect.die("engine rollback response narrowed incorrectly");
 		});
 	const get_thread_usage_series = (input: ThreadUsageSeriesQuery) =>
 		Effect.gen(function* () {
@@ -239,10 +369,14 @@ export const MakeQueryApi = Effect.gen(function* () {
 	return {
 		create_project_directory,
 		create_thread,
+		authenticate_engine,
 		detach_project,
 		get_thread_usage_series,
 		get_engine_usage,
+		get_engine_installations,
+		connect_host_machine,
 		get_host_identity,
+		get_host_machines,
 		get_project_diffs,
 		get_project_repositories,
 		get_runtime_catalog,
@@ -252,7 +386,9 @@ export const MakeQueryApi = Effect.gen(function* () {
 		list_project_directories,
 		list_projects,
 		list_threads,
+		install_engine,
 		pick_project_directory,
+		rollback_engine,
 		select_project_directory,
 	};
 });

@@ -11,6 +11,7 @@ import {
 	client_error,
 	protocol_client_error,
 	RequestDelivered,
+	RequestHeld,
 	type PendingRequestEnvelope,
 	type PendingResultEnvelope,
 	type RequestDelivery,
@@ -18,6 +19,8 @@ import {
 } from "./client-common";
 
 interface PendingRequest {
+	/** The caller stopped waiting while a reconnect resend still owned the envelope. */
+	readonly abandoned: boolean;
 	readonly deferred: Deferred.Deferred<PendingResultEnvelope, ArtisanClientError>;
 	/**
 	 * Whether a session may already hold this envelope, and so whether the
@@ -28,6 +31,8 @@ interface PendingRequest {
 	readonly delivery: RequestDelivery;
 	readonly envelope: PendingRequestEnvelope;
 	readonly accepts: (envelope: PendingResultEnvelope) => boolean;
+	/** A reconnect fiber has atomically claimed this exact registration for resend. */
+	readonly retrying: boolean;
 }
 
 interface RequestState {
@@ -46,7 +51,6 @@ interface RequestState {
 type RequestRegistration =
 	| { readonly _tag: "Conflict" }
 	| { readonly _tag: "Disposed" }
-	| { readonly _tag: "Overflow" }
 	| { readonly _tag: "Parked"; readonly error: ArtisanClientError }
 	| { readonly _tag: "Registered" };
 
@@ -54,6 +58,138 @@ type PendingMatch =
 	| { readonly _tag: "Found"; readonly pending: PendingRequest }
 	| { readonly _tag: "Ignored" }
 	| { readonly _tag: "Missing" };
+
+export type RequestDeadline = (kind: PendingRequestEnvelope["kind"]) => number;
+
+/**
+ * Bounds every control request. Local projection and settings RPCs must answer
+ * promptly; operations that intentionally cross a filesystem, process, network,
+ * or human boundary receive a larger fail-safe while their UI remains detached.
+ */
+export const request_deadline_ms_for: RequestDeadline = (kind) => {
+	if (kind === "project.directory.pick") {
+		return 30 * 60_000;
+	}
+
+	/**
+	 * A command is the one request whose deadline is not a fail-safe.
+	 *
+	 * Every other kind here is a read: abandoning one costs a retry. Abandoning a
+	 * command decides nothing — Forge may still accept it — so the caller is left
+	 * holding a message it cannot say was sent, which is how a send that landed
+	 * came back as "did not answer before its deadline" and stayed invisible
+	 * until a reload. It carries attachment bytes and a durable journal write, so
+	 * it is given room to finish rather than the 2s a local projection read gets.
+	 * A dead connection still fails it immediately, through parking rather than
+	 * through this.
+	 */
+	/**
+	 * Thread creation is the same kind of thing, and losing it is worse.
+	 *
+	 * It was on the 2s read default, which is a deadline for the *reply* rather
+	 * than for the work: Forge accepts a `thread.create` in 2ms at the median and
+	 * 233ms at its worst, so every failure here is the answer being late, never
+	 * the thread being unmade. Abandoning it therefore leaves a thread that
+	 * exists, is listed, and is titled "New thread" — while the caller drops the
+	 * first message it was created to carry, with nothing to retry from and
+	 * nothing on screen to say so.
+	 *
+	 * That the reply can be that late is not hypothetical: commands on this same
+	 * socket record 17.5s and 20.3s round trips in this database. A read that
+	 * misses its deadline costs a retry; this one costs the message.
+	 */
+	if (kind === "command" || kind === "thread.create.request") {
+		return 30_000;
+	}
+
+	if (kind === "engine.authentication.request") {
+		return 10 * 60_000;
+	}
+
+	/**
+	 * A machine connect may cold-boot a WSL distribution and start a fresh
+	 * Forge before the handoff prints. The backend bounds itself at two
+	 * minutes; staying above that budget keeps its bounded failure the one
+	 * that surfaces.
+	 */
+	if (kind === "host.machines.connect.request") {
+		return 150_000;
+	}
+
+	/** Enumerating machines may pay a one-time WSL service spin-up. */
+	if (kind === "host.machines.query") {
+		return 15_000;
+	}
+
+	/**
+	 * Provider-boundary reads. The backend spawns or probes an external CLI to
+	 * answer these and bounds itself at 15 seconds — a usage lookup runs the
+	 * provider's own `auth`/`usage` commands, and a cold behaviour read runs the
+	 * Codex probe.
+	 *
+	 * A deadline shorter than the server's own budget cannot report anything
+	 * true: it abandons a request that is still legitimately running and calls
+	 * it a deadline miss. On the 2s local-read default that made every Claude
+	 * usage row read as a timeout while Forge was still asking the provider.
+	 * Kept above the server's budget so the server's bounded, meaningful
+	 * failure is what surfaces instead of a guess made here.
+	 */
+	if (kind === "engine.usage.query" || kind === "model_behaviour.query") {
+		return 20_000;
+	}
+
+	if (
+		kind === "engine.install.request" ||
+		kind === "engine.rollback.request" ||
+		kind === "marketplace.capability.connect.request" ||
+		kind === "marketplace.capability.invoke.request" ||
+		kind === "marketplace.capability.oauth.begin" ||
+		kind === "marketplace.capability.oauth.complete" ||
+		kind === "marketplace.capability.oauth.refresh" ||
+		kind === "marketplace.npx_skills.discover" ||
+		kind === "marketplace.npx_skills.import.request" ||
+		kind === "marketplace.routine.install.request" ||
+		kind === "marketplace.routine.invoke"
+	) {
+		return 2 * 60_000;
+	}
+
+	/**
+	 * The thread-route gate blocks navigation on this read. On a cold or
+	 * reconnecting session it is issued before the transport is ready, and the
+	 * 2s local-read default expired while the request was still legitimately
+	 * held — which surfaced as a failed handoff into a thread that had just
+	 * been created.
+	 */
+	if (kind === "thread.open.query") {
+		return 15_000;
+	}
+
+	if (
+		kind.startsWith("git.") ||
+		kind.startsWith("workspace.") ||
+		kind === "message.image_attachment.query" ||
+		kind === "preview.asset.metadata.query" ||
+		kind === "preview.browser.launch" ||
+		kind === "preview.rich_link.resolve.query" ||
+		kind === "preview.target.probe" ||
+		kind === "project.diff.query" ||
+		kind === "project.directory.create" ||
+		/**
+		 * Listing crosses the filesystem exactly like create/select: a large
+		 * home directory with cloud placeholders can honestly take longer than
+		 * the local-read default, and the abandoned answer made directory rows
+		 * silently do nothing.
+		 */
+		kind === "project.directory.list.query" ||
+		kind === "project.directory.select" ||
+		kind === "project.repository.query"
+	) {
+		return 15_000;
+	}
+
+	return 2_000;
+};
 
 /** Owns exact request envelopes until one durable or correlated result completes. */
 export interface ClientRequestCoordinator {
@@ -76,8 +212,8 @@ export interface ClientRequestCoordinator {
 
 /** Builds the exact-envelope retry and correlation coordinator. */
 export const make_client_request_coordinator = (
-	max_pending_requests: number,
 	send_request: SendRequest,
+	request_deadline: RequestDeadline = request_deadline_ms_for,
 ) =>
 	Effect.gen(function* () {
 		const state = yield* Ref.make<RequestState>({
@@ -102,13 +238,6 @@ export const make_client_request_coordinator = (
 					current.ignored_correlations.has(request.envelope.message_id)
 				) {
 					return [{ _tag: "Conflict" }, current];
-				}
-
-				if (
-					current.pending.size + current.ignored_correlations.size >=
-					max_pending_requests
-				) {
-					return [{ _tag: "Overflow" }, current];
 				}
 
 				return [
@@ -182,6 +311,11 @@ export const make_client_request_coordinator = (
 
 				const pending = new Map(current.pending);
 
+				if (found.retrying) {
+					pending.set(request.envelope.message_id, { ...found, abandoned: true });
+					return { ...current, pending };
+				}
+
 				pending.delete(request.envelope.message_id);
 
 				if (found.delivery._tag === "Held") {
@@ -201,9 +335,11 @@ export const make_client_request_coordinator = (
 				const rpc = GetControlRpc(envelope.kind);
 				const pending = {
 					accepts: Schema.is(rpc.successSchema),
+					abandoned: false,
 					deferred,
 					delivery: RequestDelivered,
 					envelope,
+					retrying: false,
 				};
 				const registration = yield* register(pending);
 
@@ -226,14 +362,6 @@ export const make_client_request_coordinator = (
 								new Error("request id collision"),
 							),
 						);
-					case "Overflow":
-						return yield* Effect.fail(
-							client_error(
-								"request_overflow",
-								"The pending request limit was reached.",
-								new Error("pending request capacity reached"),
-							),
-						);
 					case "Registered":
 						/**
 						 * The send and the wait are one interruptible region: a
@@ -251,6 +379,19 @@ export const make_client_request_coordinator = (
 									Effect.onInterrupt(() => abandon(pending)),
 								),
 							),
+							Effect.timeoutOrElse({
+								duration: request_deadline(envelope.kind),
+								orElse: () =>
+									Effect.fail(
+										client_error(
+											"connection",
+											`Artisan Forge did not answer the ${envelope.kind} request before its deadline.`,
+											new Error("request deadline exceeded"),
+											true,
+											"request.timeout",
+										),
+									),
+							}),
 						)) as ControlRpcSuccessFor<Request>;
 				}
 			});
@@ -273,12 +414,14 @@ export const make_client_request_coordinator = (
 					}
 
 					const next = new Map(current.pending);
+					const ignored_correlations = new Set(current.ignored_correlations);
 
 					next.delete(envelope.correlation_id);
+					if (pending.retrying) ignored_correlations.add(envelope.correlation_id);
 
 					return [
 						{ _tag: "Found", pending },
-						{ ...current, pending: next },
+						{ ...current, ignored_correlations, pending: next },
 					];
 				});
 
@@ -329,12 +472,14 @@ export const make_client_request_coordinator = (
 					}
 
 					const next = new Map(current.pending);
+					const ignored_correlations = new Set(current.ignored_correlations);
 
 					next.delete(correlation_id);
+					if (found.retrying) ignored_correlations.add(correlation_id);
 
 					return [
 						{ _tag: "Found", pending: found },
-						{ ...current, pending: next },
+						{ ...current, ignored_correlations, pending: next },
 					];
 				});
 
@@ -351,7 +496,61 @@ export const make_client_request_coordinator = (
 		const reset_connection = Ref.update(state, (current) => ({
 			...current,
 			ignored_correlations: new Set<string>(),
+			pending: new Map(
+				[...current.pending].map(([correlation_id, pending]) => [
+					correlation_id,
+					pending.retrying ? pending : { ...pending, delivery: RequestHeld },
+				]),
+			),
 		}));
+
+		/** Claims an exact still-pending registration before carrying it again. */
+		const claim_retry = (request: PendingRequest) =>
+			Ref.modify(state, (current) => {
+				const found = held_by(current, request);
+				if (found === undefined || found.retrying) return [false, current] as const;
+
+				return [
+					true,
+					{
+						...current,
+						pending: new Map(current.pending).set(request.envelope.message_id, {
+							...found,
+							/** Pessimistic until send reports otherwise. */
+							delivery: RequestDelivered,
+							retrying: true,
+						}),
+					},
+				] as const;
+			});
+
+		/**
+		 * Settles resend ownership even when the resend fiber is interrupted. An
+		 * abandoned caller is forgotten only when no session carried the retry;
+		 * otherwise its correlation remains as a one-result tombstone.
+		 */
+		const finish_retry = (request: PendingRequest, delivery: RequestDelivery) =>
+			Ref.update(state, (current) => {
+				const found = held_by(current, request);
+				if (found === undefined || !found.retrying) return current;
+
+				const pending = new Map(current.pending);
+				if (!found.abandoned) {
+					pending.set(request.envelope.message_id, {
+						...found,
+						delivery,
+						retrying: false,
+					});
+					return { ...current, pending };
+				}
+
+				pending.delete(request.envelope.message_id);
+				if (delivery._tag === "Held") return { ...current, pending };
+
+				const ignored_correlations = new Set(current.ignored_correlations);
+				ignored_correlations.add(request.envelope.message_id);
+				return { ...current, ignored_correlations, pending };
+			});
 
 		/**
 		 * A held request becomes an answered one here, so each resend reports
@@ -363,9 +562,17 @@ export const make_client_request_coordinator = (
 				Effect.forEach(
 					current.pending.values(),
 					(pending) =>
-						send_request(pending.envelope).pipe(
-							Effect.flatMap((delivery) => record_delivery(pending, delivery)),
-						),
+						Effect.gen(function* () {
+							if (!(yield* claim_retry(pending))) return;
+							yield* send_request(pending.envelope).pipe(
+								Effect.onExit((exit) =>
+									finish_retry(
+										pending,
+										exit._tag === "Success" ? exit.value : RequestHeld,
+									),
+								),
+							);
+						}),
 					{ discard: true },
 				),
 			),

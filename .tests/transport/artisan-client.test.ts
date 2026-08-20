@@ -1,4 +1,4 @@
-import { Cause, Deferred, Effect, Fiber, Option, Schedule, Stream } from "effect";
+import { Cause, Deferred, Effect, Fiber, Option, Stream } from "effect";
 import { describe, expect, it } from "vitest";
 
 import { ArtisanClientError } from "@artisan/transport";
@@ -978,9 +978,8 @@ describe("ArtisanClient over MessagePorts", () => {
 		}
 	});
 
-	it("forgets interrupted query correlations and does not poison later responses", async () => {
+	it("allows later requests after an interrupted query without a cardinality rejection", async () => {
 		const harness = await make_transport_test_harness({
-			client: { max_pending_requests: 1 },
 			protocol: { query_delay_ms: 50 },
 		});
 
@@ -1004,25 +1003,12 @@ describe("ArtisanClient over MessagePorts", () => {
 					}),
 				),
 			);
-			const bounded_failure = await Effect.runPromise(
-				harness.client.ListThreads.pipe(Effect.flip),
-			);
-
-			expect(bounded_failure).toMatchObject({ code: "request_overflow" });
+			const threads = await Effect.runPromise(harness.client.ListThreads);
 			await wait_for(
 				() =>
 					harness
 						.protocol_snapshot()
-						.received_kinds.filter((kind) => kind === "thread.list.query").length === 1,
-			);
-			const threads = await Effect.runPromise(
-				harness.client.ListThreads.pipe(
-					Effect.retry({
-						schedule: Schedule.spaced("5 millis"),
-						while: (error) => error.code === "request_overflow",
-					}),
-					Effect.timeout("1 second"),
-				),
+						.received_kinds.filter((kind) => kind === "thread.list.query").length === 2,
 			);
 
 			expect(threads).toEqual([]);
@@ -1069,34 +1055,22 @@ describe("ArtisanClient over MessagePorts", () => {
 		}
 	});
 
-	it("closes only an overflowing projection subscription and unsubscribes it", async () => {
-		const harness = await make_transport_test_harness({
-			client: { subscription_capacity: 1 },
-		});
+	it("retains projection updates for a delayed subscriber", async () => {
+		const harness = await make_transport_test_harness();
 
 		try {
 			const output = await Effect.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
 						const updates = yield* harness.client.SubscribeThreadList;
-						const error_fiber = yield* harness.client.Errors.pipe(
-							Stream.take(1),
-							Stream.runCollect,
-							Effect.forkScoped,
-						);
-
 						yield* harness.client.CreateThread({ title: "Overflow projection" });
 
-						return {
-							errors: [...(yield* Fiber.join(error_fiber))],
-							updates_exit: yield* updates.pipe(Stream.runCollect, Effect.exit),
-						};
+						return yield* updates.pipe(Stream.take(2), Stream.runCollect);
 					}),
 				),
 			);
 
-			expect(output.errors).toMatchObject([{ code: "subscription_overflow" }]);
-			expect(output.updates_exit._tag).toBe("Failure");
+			expect([...output]).toHaveLength(2);
 			await wait_for(() => harness.protocol_snapshot().active_subscriptions === 0);
 			expect(harness.connector_snapshot().connections).toBe(1);
 		} finally {
@@ -1104,10 +1078,8 @@ describe("ArtisanClient over MessagePorts", () => {
 		}
 	});
 
-	it("slides a stalled Events observer without holding durable ingress or other observers", async () => {
-		const harness = await make_transport_test_harness({
-			client: { event_capacity: 1 },
-		});
+	it("retains every event for a stalled observer without holding durable ingress", async () => {
+		const harness = await make_transport_test_harness();
 
 		try {
 			const output = await Effect.runPromise(
@@ -1117,7 +1089,7 @@ describe("ArtisanClient over MessagePorts", () => {
 						const started = yield* Deferred.make<void>();
 						let first = true;
 						const held_observer = yield* harness.client.Events.pipe(
-							Stream.take(2),
+							Stream.take(4),
 							Stream.tap(() => {
 								if (!first) return Effect.void;
 								first = false;
@@ -1199,6 +1171,8 @@ describe("ArtisanClient over MessagePorts", () => {
 			expect([...output.fast_events]).toHaveLength(4);
 			expect([...output.held_events]).toMatchObject([
 				{ journal_sequence: 1 },
+				{ journal_sequence: 2 },
+				{ journal_sequence: 3 },
 				{ journal_sequence: 4 },
 			]);
 			expect([...output.new_events]).toMatchObject([
@@ -1211,9 +1185,7 @@ describe("ArtisanClient over MessagePorts", () => {
 	});
 
 	it("keeps transport live when no Events observer is attached", async () => {
-		const harness = await make_transport_test_harness({
-			client: { event_capacity: 1 },
-		});
+		const harness = await make_transport_test_harness();
 
 		try {
 			for (const index of [1, 2]) {
@@ -1255,23 +1227,21 @@ describe("ArtisanClient over MessagePorts", () => {
 		}
 	});
 
-	it("keeps control responsive while the isolated server logical stream queue saturates", async () => {
+	it("keeps control responsive while a lossless binary stream drains", async () => {
 		const flood = Array.from({ length: 128 }, (_, index) => Uint8Array.of(index % 256));
 		const harness = await make_transport_test_harness({
 			binary_streams: { "asset:flood": flood },
-			client: { stream_capacity: 1 },
-			server: { stream_outbound_capacity: 1 },
 		});
 
 		try {
 			const output = await Effect.runPromise(
 				Effect.scoped(
 					Effect.gen(function* () {
-						const stream_exit = yield* Effect.gen(function* () {
+						const stream = yield* Effect.gen(function* () {
 							const stream = yield* harness.client.OpenAsset("flood");
 
 							return yield* stream.pipe(Stream.runCollect);
-						}).pipe(Effect.timeout("1 second"), Effect.exit, Effect.forkScoped);
+						}).pipe(Effect.timeout("1 second"), Effect.forkScoped);
 						const receipt = yield* harness.client
 							.Command({
 								command_id: "control_during_flood",
@@ -1285,7 +1255,7 @@ describe("ArtisanClient over MessagePorts", () => {
 
 						return {
 							receipt,
-							stream_exit: yield* Fiber.join(stream_exit),
+							chunks: yield* Fiber.join(stream),
 							threads,
 						};
 					}),
@@ -1294,15 +1264,7 @@ describe("ArtisanClient over MessagePorts", () => {
 
 			expect(output.receipt.status).toBe("accepted");
 			expect(output.threads).toHaveLength(1);
-			expect(output.stream_exit._tag).toBe("Failure");
-
-			if (output.stream_exit._tag === "Failure") {
-				const failure = Cause.findErrorOption(output.stream_exit.cause);
-
-				expect(Option.isSome(failure) ? failure.value : undefined).toMatchObject({
-					code: expect.stringMatching(/^stream_(?:gap|overflow)$/),
-				});
-			}
+			expect([...output.chunks]).toHaveLength(flood.length);
 
 			await new Promise((resolve) => setTimeout(resolve, 20));
 

@@ -3,6 +3,7 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const source_root = join(process.cwd(), "modules", "transport", "src", "internal");
+const transport_root = join(source_root, "..");
 
 describe("transport client source structure", () => {
 	it("keeps the public client facade distinct from its implementation directory", () => {
@@ -15,9 +16,6 @@ describe("transport client source structure", () => {
 		const client_source = readFileSync(join(source_root, "client-service.ts"), "utf8");
 		const client_lines = client_source.split(/\r?\n/u).length;
 		expect(client_lines).toBeLessThan(900);
-		expect(client_source).not.toMatch(
-			/make_client_subscription_coordinator\s*\(\s*options\.event_capacity/u,
-		);
 
 		for (const entry of readdirSync(join(source_root, "api"), {
 			withFileTypes: true,
@@ -41,10 +39,6 @@ describe("transport client source structure", () => {
 		).split(/\r?\n/u).length;
 
 		expect(coordinator_lines).toBeLessThan(500);
-		expect(coordinator_source).not.toMatch(
-			/make_client_subscription_coordinator\s*=\s*\(\s*event_capacity/u,
-		);
-		expect(coordinator_source).toContain("yield* SubscriptionOptions");
 		expect(coordinator_source).toContain("yield* SubscriptionIdentity");
 		expect(coordinator_source).toContain("yield* SubscriptionProtocol");
 		expect(coordinator_source).toContain("yield* SubscriptionErrorReporter");
@@ -62,5 +56,13 @@ describe("transport client source structure", () => {
 			expect(lines, entry.name).toBeLessThan(700);
 			expect(source, entry.name).not.toContain("as unknown as");
 		}
+	});
+
+	it("terminates raw and logical WebSocket ingress together", () => {
+		const source = readFileSync(join(transport_root, "websocket", "protocol.ts"), "utf8");
+
+		expect(source).toContain("Queue.failCauseUnsafe(raw_frames, cause);");
+		expect(source).toContain("Queue.failCauseUnsafe(control_incoming, cause);");
+		expect(source).toContain("Queue.failCauseUnsafe(stream_incoming, cause);");
 	});
 });

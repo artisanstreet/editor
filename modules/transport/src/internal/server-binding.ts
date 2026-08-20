@@ -99,7 +99,6 @@ export const make_server_binding = (options: Required<MessagePortTransportServer
 						stream_source,
 						stream_ticket,
 						options.max_active_streams,
-						options.stream_outbound_capacity,
 					);
 
 					yield* Effect.addFinalizer(() =>

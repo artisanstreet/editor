@@ -87,6 +87,14 @@ export interface FakeProtocolOptions {
 	readonly baseline_journal_sequence?: number;
 	readonly duplicate_query_result?: boolean;
 	readonly heartbeat_after_welcome?: boolean;
+	/**
+	 * Advertised in the welcome; the client's inbound-liveness watchdog derives
+	 * its silence limit from these. The defaults stay generous so ordinary
+	 * tests never trip the watchdog under a loaded runner; a zombie-socket test
+	 * passes tight values to observe detection quickly.
+	 */
+	readonly heartbeat_interval_ms?: number;
+	readonly heartbeat_timeout_ms?: number;
 	readonly query_delay_ms?: number;
 	/**
 	 * Delays `subscription.started` per subscription type, so a test can hold a
@@ -546,8 +554,8 @@ export function make_fake_protocol_server(options: FakeProtocolOptions = {}): Fa
 					payload: {
 						connection_id: next_id("protocol_connection"),
 						current_event_cursors: current_cursors,
-						heartbeat_interval_ms: 100,
-						heartbeat_timeout_ms: 500,
+						heartbeat_interval_ms: options.heartbeat_interval_ms ?? 2_000,
+						heartbeat_timeout_ms: options.heartbeat_timeout_ms ?? 6_000,
 						journal_sequence,
 						stream_ticket: next_id("stream_ticket"),
 					},

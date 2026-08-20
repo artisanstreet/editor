@@ -19,6 +19,7 @@ import {
 	ProtocolServer,
 	ThreadErasure,
 } from "@artisan/backend";
+import type { OutboundControlEnvelope } from "@artisan/protocol";
 import { make_transport_test_harness_with_protocol_server } from "./message-channel-harness";
 import { Database } from "../../modules/backend/src/persistence/database";
 import { ThreadErasureClaims } from "../../modules/backend/src/persistence/tables";
@@ -36,6 +37,28 @@ const preview_inspection_connector = Layer.succeed(PreviewInspectionConnector, {
 		}),
 	Open: () => Effect.succeed({} as PreviewInspectionConnectorHandle),
 });
+const TakeExactReply = (
+	connection: { readonly Outbound: Stream.Stream<OutboundControlEnvelope> },
+	message_id: string,
+	kind: "preview.browser.launch.result" | "protocol.error",
+) =>
+	connection.Outbound.pipe(
+		Stream.takeUntil(
+			(envelope) =>
+				envelope.kind === kind &&
+				"correlation_id" in envelope &&
+				envelope.correlation_id === message_id,
+		),
+		Stream.runCollect,
+		Effect.map((outbound) => {
+			const observed = Array.from(outbound);
+
+			return {
+				interleaved_events: observed.filter((envelope) => envelope.kind === "event"),
+				reply: observed.at(-1),
+			};
+		}),
+	);
 const RawLaunchTwice = (
 	server: typeof ProtocolServer.Service,
 	message_id: string,
@@ -70,10 +93,10 @@ const RawLaunchTwice = (
 				sent_at: "2026-07-18T20:00:01.000Z",
 			};
 			yield* connection.Receive(launch);
-			const first = yield* connection.Outbound.pipe(Stream.take(1), Stream.runCollect);
+			const first = yield* TakeExactReply(connection, message_id, "protocol.error");
 			yield* connection.Receive(launch);
-			const replay = yield* connection.Outbound.pipe(Stream.take(1), Stream.runCollect);
-			return { first: Array.from(first)[0], replay: Array.from(replay)[0] };
+			const replay = yield* TakeExactReply(connection, message_id, "protocol.error");
+			return { first, replay };
 		}),
 	);
 afterEach(async () =>
@@ -223,7 +246,7 @@ describe("preview public MessagePort protocol", () => {
 			);
 
 			expect(launches).toBe(1);
-			expect(result.first).toMatchObject({
+			expect(result.first.reply).toMatchObject({
 				kind: "protocol.error",
 				payload: {
 					code: "preview.browser_unavailable",
@@ -231,10 +254,16 @@ describe("preview public MessagePort protocol", () => {
 					retryable: true,
 				},
 			});
-			expect(result.replay).toMatchObject({
+			expect(result.replay.reply).toMatchObject({
 				kind: "protocol.error",
-				payload: result.first?.payload,
+				payload: result.first.reply?.payload,
 			});
+			expect(result.replay.interleaved_events).toContainEqual(
+				expect.objectContaining({
+					kind: "event",
+					payload: expect.objectContaining({ type: "preview.target.updated" }),
+				}),
+			);
 			expect(
 				await Effect.runPromise(
 					harness.client.GetPreviewTarget({ target_id: "preview-failed-launch-target" }),
@@ -1120,27 +1149,35 @@ describe("preview public MessagePort protocol", () => {
 							sent_at: "2026-07-18T20:00:01.000Z",
 						};
 						yield* connection.Receive(launch);
-						const first = yield* connection.Outbound.pipe(
-							Stream.take(1),
-							Stream.runCollect,
+						const first = yield* TakeExactReply(
+							connection,
+							launch.message_id,
+							"preview.browser.launch.result",
 						);
 						yield* connection.Receive(launch);
-						const replay = yield* connection.Outbound.pipe(
-							Stream.take(1),
-							Stream.runCollect,
+						const replay = yield* TakeExactReply(
+							connection,
+							launch.message_id,
+							"preview.browser.launch.result",
 						);
-						return { first: Array.from(first)[0], replay: Array.from(replay)[0] };
+						return { first, replay };
 					}),
 				),
 			);
-			expect(exact_launch.first).toMatchObject({
+			expect(exact_launch.first.reply).toMatchObject({
 				kind: "preview.browser.launch.result",
 				payload: { target_id: "preview-target" },
 			});
-			expect(exact_launch.replay).toMatchObject({
+			expect(exact_launch.replay.reply).toMatchObject({
 				kind: "preview.browser.launch.result",
-				payload: exact_launch.first?.payload,
+				payload: exact_launch.first.reply?.payload,
 			});
+			expect(exact_launch.replay.interleaved_events).toContainEqual(
+				expect.objectContaining({
+					kind: "event",
+					payload: expect.objectContaining({ type: "preview.target.updated" }),
+				}),
+			);
 			expect(browser_launches).toBe(1);
 			expect(
 				await Effect.runPromise(

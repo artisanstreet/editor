@@ -63,7 +63,12 @@ describe("Artisan client establishment deadline", () => {
 
 	it.effect("keeps a ready session alive past the establishment deadline", () =>
 		Effect.gen(function* () {
-			const harness = yield* Effect.tryPromise(() => make_transport_test_harness());
+			const harness = yield* Effect.tryPromise(() =>
+				make_transport_test_harness({
+					/** Virtual-clock jumps here must not read as heartbeat silence. */
+					protocol: { heartbeat_interval_ms: 60_000, heartbeat_timeout_ms: 600_000 },
+				}),
+			);
 			yield* Effect.addFinalizer(() => Effect.promise(() => harness.dispose()));
 			const fixture = yield* MakeReadyThenStalledConnector(harness.server);
 			const client_layer = make_artisan_client_layer({
@@ -84,7 +89,12 @@ describe("Artisan client establishment deadline", () => {
 
 	it.effect("parks a send when its ready MessagePort session falls into stalled reconnects", () =>
 		Effect.gen(function* () {
-			const harness = yield* Effect.tryPromise(() => make_transport_test_harness());
+			const harness = yield* Effect.tryPromise(() =>
+				make_transport_test_harness({
+					/** Virtual-clock jumps here must not read as heartbeat silence. */
+					protocol: { heartbeat_interval_ms: 60_000, heartbeat_timeout_ms: 600_000 },
+				}),
+			);
 			yield* Effect.addFinalizer(() => Effect.promise(() => harness.dispose()));
 			const fixture = yield* MakeReadyThenStalledConnector(harness.server);
 			const client_layer = make_artisan_client_layer({

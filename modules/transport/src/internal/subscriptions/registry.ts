@@ -1,7 +1,6 @@
 import { Cause, Deferred, Effect, Option, Queue, Ref, Scope, Stream } from "effect";
 
 import type {
-	EventEnvelope,
 	OutboundControlEnvelope,
 	ProtocolErrorDetail,
 	SubscribeEnvelope,
@@ -28,7 +27,6 @@ import { MakeEventIngress } from "./ingress";
 import type { ClientSubscriptionCoordinator } from "./contract";
 import type {
 	ConversationSubscription,
-	EventTerminal,
 	OrchestrationGraphSubscription,
 	OrchestrationGroupListSubscription,
 	ProjectCatalogSubscription,
@@ -47,17 +45,20 @@ import type {
 } from "./model";
 import { offer_projection_update } from "./offers";
 
-/** Builds bounded subscription delivery and ACK cursor state. */
+/**
+ * How long a subscribe may go unanswered before it is treated as lost.
+ *
+ * Registering a subscription is local backend work — it claims an id and sends
+ * a snapshot — so an honest answer is immediate. The budget is generous anyway
+ * because the only cost of waiting is latency on an already-degraded
+ * connection, whereas expiring a subscribe the backend was about to start
+ * would churn the retry loop against a healthy server.
+ */
+const subscribe_deadline = "15 seconds";
+
+/** Builds lossless subscription delivery and ACK cursor state. */
 export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
-	const {
-		event_capacity,
-		make_id,
-		make_trace,
-		publish_error,
-		send_current,
-		state,
-		subscription_capacity,
-	} = yield* SubscriptionContext;
+	const { make_id, make_trace, publish_error, send_current, state } = yield* SubscriptionContext;
 
 	const ingress = yield* MakeEventIngress;
 	const handle_started = (
@@ -219,13 +220,13 @@ export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
 
 			const offer = offer_projection_update(subscription, envelope);
 
-			if (offer !== "offered") {
+			if (offer === "mismatch") {
 				const subscriptions = new Map(current.subscriptions);
 
 				subscriptions.delete(envelope.subscription_id);
 
 				return [
-					{ _tag: offer === "overflow" ? "Overflow" : "Gap", subscription },
+					{ _tag: "Gap", subscription },
 					{ ...current, subscriptions },
 				];
 			}
@@ -247,15 +248,13 @@ export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
 			];
 		}).pipe(
 			Effect.flatMap((delivery) => {
-				if (delivery._tag !== "Gap" && delivery._tag !== "Overflow") {
+				if (delivery._tag !== "Gap") {
 					return Effect.void;
 				}
 
 				const error = client_error(
-					delivery._tag === "Gap" ? "stream_gap" : "subscription_overflow",
-					delivery._tag === "Gap"
-						? "The projection subscription sequence contained a gap."
-						: "The projection subscription queue overflowed.",
+					"stream_gap",
+					"The projection subscription sequence contained a gap.",
 					new Error("projection subscription could not remain contiguous"),
 				);
 
@@ -388,12 +387,38 @@ export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
 			yield* Option.getOrElse(registered.value, () => send_current)(subscription.envelope);
 			yield* Deferred.await(subscription.started).pipe(
 				Effect.onInterrupt(() => remove(subscription.envelope.subscription_id)),
+				/**
+				 * Every other request this client makes is answered or times out;
+				 * a subscribe was the one that could do neither. Waiting on the
+				 * `started` deferred forever turns a lost or refused subscribe into
+				 * a park, and a park is invisible to `Effect.retry` — the caller's
+				 * schedule only fires on failure. A projection that never arrives
+				 * then renders as an empty one, which is how the thread list came
+				 * up blank until the window was reloaded.
+				 *
+				 * The bound is deliberately far above any honest answer so it only
+				 * ever converts silence into the retryable failure the caller was
+				 * already written to handle.
+				 */
+				Effect.timeoutOrElse({
+					duration: subscribe_deadline,
+					orElse: () =>
+						Effect.fail(
+							client_error(
+								"connection",
+								"Artisan Forge did not start the subscription before its deadline.",
+								new Error("subscribe deadline exceeded"),
+								true,
+								"subscription.timeout",
+							),
+						),
+				}),
 			);
 		});
 
 	/**
 	 * One factory owns every projection subscription lifecycle: trace, id,
-	 * bounded queue, start registration, and stream exposure. Each kind supplies
+	 * lossless queue, start registration, and stream exposure. Each kind supplies
 	 * only its typed identity through the builder, whose annotation ties the
 	 * queue element type to the subscription tag — the pairing the previous
 	 * hand-written copies re-stated six times and the old generic asserted with
@@ -414,9 +439,7 @@ export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
 			const trace = yield* make_trace;
 			const subscription_id = yield* make_id(id_prefix);
 			const queue = yield* Effect.acquireRelease(
-				Queue.dropping<Update, ArtisanClientError | Cause.Done<void>>(
-					subscription_capacity,
-				),
+				Queue.unbounded<Update, ArtisanClientError | Cause.Done<void>>(),
 				Queue.shutdown,
 			);
 			const started = yield* Deferred.make<void, ArtisanClientError>();
@@ -602,49 +625,7 @@ export const MakeClientSubscriptionCoordinator = Effect.gen(function* () {
 		Cursors: ingress.Cursors,
 		Dispose: dispose,
 		DropResumeState: ingress.DropCursors,
-		Events: Stream.scoped(
-			Stream.unwrap(
-				Effect.gen(function* () {
-					const observer_id = yield* make_id("event_observer");
-					const observer = yield* Effect.acquireRelease(
-						Queue.sliding<EventEnvelope, ArtisanClientError | Cause.Done<void>>(
-							event_capacity,
-						),
-						Queue.shutdown,
-					);
-					const terminal = yield* Ref.modify<SubscriptionState, EventTerminal>(
-						state,
-						(current) => {
-							if (current.event_terminal._tag !== "active") {
-								return [current.event_terminal, current];
-							}
-							return [
-								current.event_terminal,
-								{
-									...current,
-									event_observers: new Map(current.event_observers).set(
-										observer_id,
-										observer,
-									),
-								},
-							];
-						},
-					);
-					yield* Effect.addFinalizer(() =>
-						Ref.update(state, (current) => {
-							const event_observers = new Map(current.event_observers);
-							event_observers.delete(observer_id);
-							return { ...current, event_observers };
-						}),
-					);
-					return terminal._tag === "active"
-						? Stream.fromQueue(observer)
-						: terminal._tag === "ended"
-							? Stream.empty
-							: Stream.fail(terminal.error);
-				}),
-			),
-		),
+		Events: ingress.Events,
 		HandleStarted: handle_started,
 		HandleUpdate: handle_update,
 		Reject: reject,

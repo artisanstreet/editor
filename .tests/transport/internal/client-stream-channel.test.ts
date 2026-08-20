@@ -2,7 +2,6 @@ import { Deferred, Effect, Fiber, Option, Schema, Stream } from "effect";
 import { describe, expect, it } from "vitest";
 
 import {
-	ArtisanClientError,
 	DecodeMessagePortStreamFrame,
 	DecodeTransportFrame,
 	MessagePortStreamEndFrame,
@@ -52,7 +51,7 @@ describe("client stream channel", () => {
 		expect(frame).toMatchObject({ frame: { kind: "stream.end", reason: "not_found" } });
 	});
 
-	it("fails a full client queue and cancels its exact logical stream", async () => {
+	it("retains queued chunks and cancels its exact logical stream on scope close", async () => {
 		const sent: Array<unknown> = [];
 		const result = await Effect.runPromise(
 			Effect.scoped(
@@ -73,7 +72,6 @@ describe("client stream channel", () => {
 						stream_ticket: "stream_ticket_1",
 					};
 					const channel = yield* make_client_stream_channel(
-						1,
 						() => Effect.succeed("binary_stream_1"),
 						Effect.succeed(active),
 						Effect.succeed(Option.some(active)),
@@ -104,13 +102,13 @@ describe("client stream channel", () => {
 						stream_id: "asset_1",
 					});
 
-					return yield* stream.pipe(Stream.runCollect, Effect.flip);
+					return yield* stream.pipe(Stream.take(2), Stream.runCollect);
 				}),
 			),
 		);
 
-		expect(result).toBeInstanceOf(ArtisanClientError);
-		expect(result).toMatchObject({ code: "stream_overflow", retryable: false });
+		expect(Array.from(result[0] ?? [])).toEqual([1]);
+		expect(Array.from(result[1] ?? [])).toEqual([2]);
 		expect(sent).toEqual([
 			{
 				connection_id: "connection_1",

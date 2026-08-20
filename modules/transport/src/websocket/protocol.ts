@@ -1,12 +1,7 @@
 import { Cause, Deferred, Effect, Queue, Schema } from "effect";
 import { RpcSerialization } from "effect/unstable/rpc";
 
-import type {
-	MessagePortAdapterOptions,
-	MessagePortClose,
-	MessagePortError,
-	MessagePortLike,
-} from "../message-port";
+import type { MessagePortClose, MessagePortError, MessagePortLike } from "../message-port";
 import { MessagePortError as MessagePortFailure } from "../message-port";
 import type { MessagePortConnection } from "../connector";
 import { DecodeTransportFrame } from "../wire";
@@ -90,48 +85,29 @@ export const EncodeWebSocketTransportFrame = (channel: WebSocketChannel, input: 
 		),
 	);
 
-/** Adapts one channel on a shared socket into the established bounded MessagePort contract. */
+/** Adapts one channel on a shared socket into the established MessagePort contract. */
 const MakeWebSocketMultiplexer = (
 	endpoint: WebSocketEndpoint,
-	options: MessagePortAdapterOptions = {},
 	accepted_channel?: WebSocketChannel,
 ) => {
-	/**
-	 * A reconnect can legally deliver a 256-event replay window plus replay
-	 * completion and concurrent control/startup frames; an equal default would
-	 * self-overflow before the client can drain the logical channel.
-	 */
-	const incoming_capacity = options.incoming_capacity ?? 512;
-
 	return Effect.gen(function* () {
-		if (!Number.isSafeInteger(incoming_capacity) || incoming_capacity <= 0) {
-			return yield* Effect.fail(
-				new MessagePortFailure({
-					cause: new Error("incoming_capacity must be a positive safe integer"),
-					code: "configuration",
-					dropped_messages: 0,
-				}),
-			);
-		}
-
-		const raw_capacity = Math.min(Number.MAX_SAFE_INTEGER, incoming_capacity * 2);
 		const raw_frames = yield* Effect.acquireRelease(
-			Queue.dropping<unknown, MessagePortError>(raw_capacity),
+			Queue.unbounded<unknown, MessagePortError>(),
 			Queue.shutdown,
 		);
 		const control_incoming = yield* Effect.acquireRelease(
-			Queue.dropping<unknown, MessagePortError>(incoming_capacity),
+			Queue.unbounded<unknown, MessagePortError>(),
 			Queue.shutdown,
 		);
 		const stream_incoming = yield* Effect.acquireRelease(
-			Queue.dropping<unknown, MessagePortError>(incoming_capacity),
+			Queue.unbounded<unknown, MessagePortError>(),
 			Queue.shutdown,
 		);
 		const closed = yield* Deferred.make<MessagePortClose>();
 		let close_state: MessagePortClose | undefined;
 		let socket_closed = false;
-		const Fail = (code: "message_error" | "overflow", cause: unknown) =>
-			new MessagePortFailure({ cause, code, dropped_messages: code === "overflow" ? 1 : 0 });
+		const Fail = (code: "message_error", cause: unknown) =>
+			new MessagePortFailure({ cause, code, dropped_messages: 0 });
 		const close_socket = () => {
 			if (!socket_closed) {
 				socket_closed = true;
@@ -161,6 +137,7 @@ const MakeWebSocketMultiplexer = (
 					dropped_messages: state.dropped_messages,
 				});
 			const cause = Cause.fail(queue_failure);
+			Queue.failCauseUnsafe(raw_frames, cause);
 			Queue.failCauseUnsafe(control_incoming, cause);
 			Queue.failCauseUnsafe(stream_incoming, cause);
 
@@ -170,13 +147,7 @@ const MakeWebSocketMultiplexer = (
 		};
 
 		const remove_message = endpoint.add_message_listener((raw) => {
-			if (!close_state && !Queue.offerUnsafe(raw_frames, raw)) {
-				const failure = Fail(
-					"overflow",
-					new Error("WebSocket physical frame buffer overflowed"),
-				);
-				finish({ code: "overflow", dropped_messages: 1 }, failure, true);
-			}
+			if (!close_state) Queue.offerUnsafe(raw_frames, raw);
 		});
 		const remove_error = endpoint.add_error_listener((cause) => {
 			const failure = Fail("message_error", cause);
@@ -198,24 +169,16 @@ const MakeWebSocketMultiplexer = (
 			Queue.take(raw_frames).pipe(
 				Effect.flatMap(DecodeWebSocketEnvelope),
 				Effect.flatMap((envelope) =>
-					Effect.sync(() => {
+					Effect.suspend(() => {
 						if (
 							accepted_channel !== undefined &&
 							envelope.channel !== accepted_channel
 						) {
-							return;
+							return Effect.void;
 						}
 						const incoming =
 							envelope.channel === "control" ? control_incoming : stream_incoming;
-						if (!Queue.offerUnsafe(incoming, envelope.payload)) {
-							const failure = Fail(
-								"overflow",
-								new Error(
-									`WebSocket ${envelope.channel} channel buffer overflowed`,
-								),
-							);
-							finish({ code: "overflow", dropped_messages: 1 }, failure, true);
-						}
+						return Queue.offer(incoming, envelope.payload).pipe(Effect.asVoid);
 					}),
 				),
 			),
@@ -281,15 +244,14 @@ const MakeWebSocketMultiplexer = (
 };
 
 /**
- * Adapts one channel on a socket into the established bounded MessagePort contract.
+ * Adapts one channel on a socket into the established MessagePort contract.
  * A socket requiring both channels must use MakeWebSocketConnection so it has one owner.
  */
 export const make_websocket_message_port = (
 	endpoint: WebSocketEndpoint,
 	channel: WebSocketChannel,
-	options: MessagePortAdapterOptions = {},
 ) =>
-	MakeWebSocketMultiplexer(endpoint, options, channel).pipe(
+	MakeWebSocketMultiplexer(endpoint, channel).pipe(
 		Effect.map((connection) =>
 			channel === "control" ? connection.control_port : connection.stream_port,
 		),
@@ -298,6 +260,5 @@ export const make_websocket_message_port = (
 /** Opens the two existing logical transport ports over one shared WebSocket endpoint. */
 export const MakeWebSocketConnection = (
 	endpoint: WebSocketEndpoint,
-	options: MessagePortAdapterOptions = {},
 ): Effect.Effect<MessagePortConnection, MessagePortError, import("effect").Scope.Scope> =>
-	MakeWebSocketMultiplexer(endpoint, options);
+	MakeWebSocketMultiplexer(endpoint);

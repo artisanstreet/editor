@@ -76,59 +76,23 @@ describe("MessagePort adapters", () => {
 		});
 	});
 
-	it("closes with an explicit gap when the native callback buffer overflows", async () => {
-		const closed = await Effect.runPromise(
+	it("retains native callback bursts until a receiver drains them", async () => {
+		const received = await Effect.runPromise(
 			Effect.scoped(
 				Effect.gen(function* () {
 					const channel = new MessageChannel();
 					const sender = yield* adapt_node_message_port(channel.port1);
-					const receiver = yield* adapt_node_message_port(channel.port2, {
-						incoming_capacity: 1,
-					});
+					const receiver = yield* adapt_node_message_port(channel.port2);
 
 					yield* sender.Send("first");
 					yield* sender.Send("second");
 
-					return yield* receiver.Closed;
+					return yield* Effect.all([receiver.Receive, receiver.Receive]);
 				}),
 			),
 		);
 
-		expect(closed).toEqual({ code: "overflow", dropped_messages: 1 });
-	});
-
-	it("validates buffer limits before registering native listeners", async () => {
-		let listener_registrations = 0;
-		const failure = await Effect.runPromise(
-			Effect.scoped(
-				make_message_port_like(
-					{
-						add_close_listener: () => {
-							listener_registrations += 1;
-
-							return () => undefined;
-						},
-						add_message_error_listener: () => {
-							listener_registrations += 1;
-
-							return () => undefined;
-						},
-						add_message_listener: () => {
-							listener_registrations += 1;
-
-							return () => undefined;
-						},
-						close: () => undefined,
-						post_message: () => undefined,
-						start: () => undefined,
-					},
-					{ incoming_capacity: 0 },
-				).pipe(Effect.flip),
-			),
-		);
-
-		expect(failure).toMatchObject({ code: "configuration" });
-		expect(listener_registrations).toBe(0);
+		expect(received).toEqual(["first", "second"]);
 	});
 
 	it("unwinds partial listener registration when a native hook throws", async () => {

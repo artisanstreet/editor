@@ -134,7 +134,7 @@ export type SubscriptionDelivery =
 	| { readonly _tag: "Delivered" }
 	| { readonly _tag: "Ignored" }
 	| {
-			readonly _tag: "Gap" | "Overflow";
+			readonly _tag: "Gap";
 			readonly subscription: ProjectionSubscription;
 	  };
 
@@ -145,4 +145,4 @@ export type SubscriptionStart =
 	| { readonly _tag: "Missing" };
 
 export type SubscriptionRejection = Exclude<SubscriptionStart, { readonly _tag: "Duplicate" }>;
-export type ProjectionOffer = "mismatch" | "offered" | "overflow";
+export type ProjectionOffer = "mismatch" | "offered";

@@ -40,9 +40,8 @@ export interface ClientStreamChannel {
 	>;
 }
 
-/** Builds bounded terminal and asset stream delivery with explicit gap closure. */
+/** Builds lossless terminal and asset stream delivery with explicit gap closure. */
 export const make_client_stream_channel = (
-	stream_capacity: number,
 	make_id: (prefix: string) => Effect.Effect<string>,
 	await_active: AwaitActive,
 	current_active: Effect.Effect<Option.Option<ActiveClientSession>>,
@@ -203,24 +202,7 @@ export const make_client_stream_channel = (
 						return;
 					}
 
-					if (!Queue.offerUnsafe(channel.queue, frame.data.slice())) {
-						const error = client_error(
-							"stream_overflow",
-							"The binary stream consumer queue overflowed.",
-							new Error("binary stream queue overflow"),
-						);
-
-						yield* fail_channel(frame.channel_id, error, true);
-						yield* send_stream(active, {
-							channel_id: frame.channel_id,
-							channel_sequence: 1,
-							kind: "stream.end",
-							reason: "cancelled",
-							stream_id: frame.stream_id,
-						}).pipe(Effect.ignore);
-
-						return;
-					}
+					Queue.offerUnsafe(channel.queue, frame.data.slice());
 
 					yield* update_sequence(frame.channel_id, frame.channel_sequence);
 
@@ -252,7 +234,7 @@ export const make_client_stream_channel = (
 					client_error(
 						code,
 						frame.reason === "overflow"
-							? "The backend stream queue overflowed."
+							? "The backend could not admit the binary stream."
 							: missing_asset && exact_end
 								? "The requested binary stream was not found."
 								: source_unavailable && exact_end
@@ -294,9 +276,7 @@ export const make_client_stream_channel = (
 				const active = yield* await_active;
 				const channel_id = yield* make_id("binary_stream");
 				const queue = yield* Effect.acquireRelease(
-					Queue.dropping<Uint8Array, ArtisanClientError | Cause.Done<void>>(
-						stream_capacity,
-					),
+					Queue.unbounded<Uint8Array, ArtisanClientError | Cause.Done<void>>(),
 					Queue.shutdown,
 				);
 				const ready = yield* Deferred.make<void, ArtisanClientError>();

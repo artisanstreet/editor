@@ -118,8 +118,20 @@ export const make_client_connection_lifecycle = (
 			SubscriptionRef.set(connection_state, next);
 
 		const retry_connection = Effect.gen(function* () {
+			const lifecycle = yield* Ref.get(state);
+			if (lifecycle.disposed) return;
+
 			const current = yield* SubscriptionRef.get(connection_state);
-			if (current.phase !== "exhausted") return;
+			if (current.phase === "ready") return;
+
+			/**
+			 * Resume can arrive while the browser was suspended in the middle of
+			 * its bounded connection epoch. Keep that one recovery authorization
+			 * on the epoch's gate so exhaustion consumes it immediately, instead of
+			 * dropping the signal before the supervisor begins awaiting the gate.
+			 * A ready connection intentionally does not pre-authorize a future
+			 * outage.
+			 */
 			yield* diagnostics.Record({ kind: "supervisor.retry_released" });
 			yield* Ref.get(retry_gate).pipe(
 				Effect.flatMap((gate) => Deferred.succeed(gate, undefined)),
@@ -643,15 +655,59 @@ export const make_client_connection_lifecycle = (
 						};
 						yield* handlers.requests.ResetConnection;
 
+						/**
+						 * The backend heartbeats an idle peer every interval and closes
+						 * it after a further timeout of silence, so a healthy session
+						 * never goes a full ping cycle past that window without one
+						 * inbound frame. Silence beyond it means the socket died with
+						 * no close event — a host suspend, a killed backend, a
+						 * half-open pipe — and `Closed` will never fire. Failing the
+						 * session hands the zombie to the reconnect supervisor, whose
+						 * budget a once-ready session does not spend.
+						 */
+						const inbound_silence_limit_ms =
+							welcome.payload.heartbeat_interval_ms * 2 +
+							welcome.payload.heartbeat_timeout_ms;
+						const last_inbound_at = yield* Ref.make(yield* runtime.Now);
+						const observe_inbound = <A, E, R>(
+							receive: Effect.Effect<A, E, R>,
+						): Effect.Effect<A, E, R> =>
+							receive.pipe(
+								Effect.tap(() =>
+									runtime.Now.pipe(
+										Effect.flatMap((now) => Ref.set(last_inbound_at, now)),
+									),
+								),
+							);
+						const inbound_liveness = Effect.forever(
+							Effect.gen(function* () {
+								yield* Effect.sleep(
+									Math.max(250, Math.floor(inbound_silence_limit_ms / 4)),
+								);
+								const now = yield* runtime.Now;
+								const last = yield* Ref.get(last_inbound_at);
+								if (Date.parse(now) - Date.parse(last) <= inbound_silence_limit_ms)
+									return;
+								return yield* Effect.fail(
+									client_error(
+										"connection",
+										"The transport went silent past its heartbeat window.",
+										new Error("transport heartbeat silence"),
+										true,
+									),
+								);
+							}),
+						);
+
 						const control_loop = Effect.forever(
-							ports.control_port.Receive.pipe(
+							observe_inbound(ports.control_port.Receive).pipe(
 								Effect.mapError(map_port_error),
 								Effect.flatMap((raw) => decode_control(raw, active.connection_id)),
 								Effect.flatMap((envelope) => handle_control(active, envelope)),
 							),
 						);
 						const stream_loop = Effect.forever(
-							ports.stream_port.Receive.pipe(
+							observe_inbound(ports.stream_port.Receive).pipe(
 								Effect.mapError(map_port_error),
 								Effect.flatMap((raw) => decode_stream(raw, active.connection_id)),
 								Effect.flatMap((frame) =>
@@ -670,6 +726,7 @@ export const make_client_connection_lifecycle = (
 						const session = Effect.raceAllFirst([
 							control_loop,
 							stream_loop,
+							inbound_liveness,
 							ports.control_port.Closed,
 							ports.stream_port.Closed,
 							Deferred.await(disposed_signal),

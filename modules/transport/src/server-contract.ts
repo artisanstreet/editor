@@ -9,8 +9,7 @@ export type MessagePortTransportServerErrorCode =
 	| "correlation_conflict"
 	| "malformed"
 	| "port"
-	| "stale_connection"
-	| "stream_overflow";
+	| "stale_connection";
 
 /** Reports a typed failure while one port pair serves a protocol connection. */
 export class MessagePortTransportServerError extends Data.TaggedError(
@@ -20,10 +19,9 @@ export class MessagePortTransportServerError extends Data.TaggedError(
 	readonly code: MessagePortTransportServerErrorCode;
 }> {}
 
-/** Configures logical stream concurrency and per-stream outbound buffering. */
+/** Configures logical stream concurrency. */
 export interface MessagePortTransportServerOptions {
 	readonly max_active_streams?: number;
-	readonly stream_outbound_capacity?: number;
 }
 
 /** Binds one control port and one isolated binary port to a ProtocolConnection. */

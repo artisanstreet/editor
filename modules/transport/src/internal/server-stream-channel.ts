@@ -48,7 +48,6 @@ export const make_server_stream_channel = (
 	stream_source: BinaryStreamSourceShape,
 	stream_ticket: Ref.Ref<Option.Option<string>>,
 	max_active_streams: number,
-	stream_outbound_capacity: number,
 ) =>
 	Effect.gen(function* () {
 		const active_streams = yield* Ref.make(new Map<string, ActiveBinaryStream>());
@@ -71,7 +70,7 @@ export const make_server_stream_channel = (
 			Effect.scoped(
 				Effect.gen(function* () {
 					const queue = yield* Effect.acquireRelease(
-						Queue.dropping<MessagePortStreamFrame>(stream_outbound_capacity),
+						Queue.unbounded<MessagePortStreamFrame>(),
 						Queue.shutdown,
 					);
 					const end_sent = yield* Deferred.make<void>();
@@ -107,50 +106,22 @@ export const make_server_stream_channel = (
 					const enqueue_end = (reason: MessagePortStreamEndFrame["reason"]) =>
 						Effect.gen(function* () {
 							sequence += 1;
-							const offered = yield* Queue.offer(
-								queue,
-								stream_end(channel_id, sequence, stream_id, reason),
-							);
-
-							if (offered) {
-								return;
-							}
-
-							yield* Queue.takeAll(queue);
 							yield* Queue.offer(
 								queue,
-								stream_end(channel_id, sequence, stream_id, "overflow"),
+								stream_end(channel_id, sequence, stream_id, reason),
 							);
 						});
 
 					const enqueue_chunk = (data: Uint8Array) =>
 						Effect.gen(function* () {
 							sequence += 1;
-							const offered = yield* Queue.offer(queue, {
+							yield* Queue.offer(queue, {
 								channel_id,
 								channel_sequence: sequence,
 								data: data.slice(),
 								kind: "stream.chunk",
 								stream_id,
 							});
-
-							if (offered) {
-								return;
-							}
-
-							yield* Queue.takeAll(queue);
-							sequence += 1;
-							yield* Queue.offer(
-								queue,
-								stream_end(channel_id, sequence, stream_id, "overflow"),
-							);
-
-							return yield* Effect.fail(
-								server_error(
-									"stream_overflow",
-									new Error("logical stream outbound queue overflowed"),
-								),
-							);
 						});
 
 					const exit = yield* Effect.exit(output.pipe(Stream.runForEach(enqueue_chunk)));
@@ -159,19 +130,12 @@ export const make_server_stream_channel = (
 						yield* enqueue_end("completed");
 					} else {
 						const failure = Cause.findErrorOption(exit.cause);
-						const overflowed =
+						yield* enqueue_end(
 							Option.isSome(failure) &&
-							failure.value._tag === "MessagePortTransportServerError" &&
-							failure.value.code === "stream_overflow";
-
-						if (!overflowed) {
-							yield* enqueue_end(
-								Option.isSome(failure) &&
-									failure.value._tag === "BinaryStreamSourceError"
-									? source_end_reason(failure.value)
-									: "source_error",
-							);
-						}
+								failure.value._tag === "BinaryStreamSourceError"
+								? source_end_reason(failure.value)
+								: "source_error",
+						);
 					}
 
 					yield* Deferred.await(end_sent);
@@ -213,6 +177,7 @@ export const make_server_stream_channel = (
 				}
 
 				if (active.size >= max_active_streams) {
+					/** V1 calls this `overflow`; it is active-stream concurrency, never queued work. */
 					yield* send(stream_end(frame.channel_id, 0, frame.stream_id, "overflow"));
 
 					return;
