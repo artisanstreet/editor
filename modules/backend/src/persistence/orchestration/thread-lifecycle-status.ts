@@ -2,12 +2,42 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 import { Effect } from "effect";
 
 import type { DatabaseClient } from "../database";
-import { OrchestrationCoordinators, OrchestrationRuns, Threads } from "../tables";
+import {
+	OrchestrationCoordinators,
+	OrchestrationInteractions,
+	OrchestrationRuns,
+	Threads,
+} from "../tables";
 
 const active_statuses = new Set(["queued", "running", "waiting"]);
 
 const live_status_from_terminal_run = (status: string) =>
 	status === "failed" ? "Failed to complete" : "Complete";
+
+/**
+ * Whether one live run is holding a question open for the reader.
+ *
+ * The question interaction is the durable, engine-neutral form of "the model
+ * asked and nobody has answered": recorded when the ask arrives, resolved by
+ * the answer, cancelled when the run dies. Only questions count — an approval
+ * is also a wait, but it has its own card and its own urgency, and the rail's
+ * answer-waiting treatment is promised specifically to questions.
+ */
+const RunAwaitsAnswer = (transaction: DatabaseClient, run_id: string) =>
+	Effect.gen(function* () {
+		const [waiting] = yield* transaction
+			.select({ interaction_id: OrchestrationInteractions.interaction_id })
+			.from(OrchestrationInteractions)
+			.where(
+				and(
+					eq(OrchestrationInteractions.run_id, run_id),
+					eq(OrchestrationInteractions.kind, "question"),
+					eq(OrchestrationInteractions.state, "requested"),
+				),
+			)
+			.limit(1);
+		return waiting !== undefined;
+	});
 
 /**
  * Reads the presentation status for one thread's root work.
@@ -49,7 +79,11 @@ export const ReadRootThreadLiveStatus = (transaction: DatabaseClient, thread_id:
 					)
 					.limit(1)
 			: [];
-		if (live) return "Working";
+		if (live) {
+			return (yield* RunAwaitsAnswer(transaction, live.run_id))
+				? "Waiting for answer"
+				: "Working";
+		}
 
 		const [run] = coordinator?.active_run_id
 			? yield* transaction
@@ -70,11 +104,12 @@ export const ReadRootThreadLiveStatus = (transaction: DatabaseClient, thread_id:
 		 * replace this one, and treating it as a replacement would report
 		 * `Complete` for a live run the lookup happened to miss.
 		 */
-		return active_statuses.has(run?.status ?? "")
-			? "Working"
-			: run
-				? live_status_from_terminal_run(run.status)
-				: "Idle";
+		if (active_statuses.has(run?.status ?? "") && coordinator?.active_run_id) {
+			return (yield* RunAwaitsAnswer(transaction, coordinator.active_run_id))
+				? "Waiting for answer"
+				: "Working";
+		}
+		return run ? live_status_from_terminal_run(run.status) : "Idle";
 	});
 
 /**
@@ -142,7 +177,20 @@ export const ReconcileRootThreadLiveStatuses = (transaction: DatabaseClient, upd
 			)
 			AND ${OrchestrationRuns.status} IN ('queued', 'running', 'waiting')
 		)`;
+		/** The same "is a question open on live root work" `RunAwaitsAnswer` asks. */
+		const root_run_awaits_answer = sql<number>`EXISTS (
+			SELECT 1
+			FROM ${OrchestrationInteractions}
+			INNER JOIN ${OrchestrationRuns}
+				ON ${OrchestrationRuns.run_id} = ${OrchestrationInteractions.run_id}
+			WHERE ${OrchestrationRuns.thread_id} = ${Threads.thread_id}
+			AND ${OrchestrationRuns.status} IN ('queued', 'running', 'waiting')
+			AND ${OrchestrationInteractions.kind} = 'question'
+			AND ${OrchestrationInteractions.state} = 'requested'
+		)`;
 		const desired_live_status = sql<string>`CASE
+			WHEN (${root_run_live} OR ${root_run_status} IN ('queued', 'running', 'waiting'))
+				AND ${root_run_awaits_answer} THEN 'Waiting for answer'
 			WHEN ${root_run_live} THEN 'Working'
 			WHEN ${root_run_status} IN ('queued', 'running', 'waiting') THEN 'Working'
 			WHEN ${root_run_status} = 'failed' THEN 'Failed to complete'

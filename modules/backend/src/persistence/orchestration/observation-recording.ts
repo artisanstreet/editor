@@ -378,6 +378,16 @@ export function make_observation_recording(
 						return { events: [], projection_changed } satisfies RecordedObservation;
 					}
 				}
+
+				/**
+				 * An open question is what turns the thread's `Working` into
+				 * `Waiting for answer`, and the answer is what turns it back — both
+				 * movements happen here, on the interaction row, without any
+				 * run-lifecycle payload to ride the reconcile that status changes get.
+				 */
+				if (observation._tag === "question") {
+					yield* ReconcileRootThreadLiveStatus(transaction, run.thread_id, updated_at);
+				}
 			}
 
 			return {

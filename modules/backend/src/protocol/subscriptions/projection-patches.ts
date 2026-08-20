@@ -99,6 +99,12 @@ export const MakeConnectionProjectionPatches = Effect.gen(function* () {
 				thread_patch?._tag !== "Remove" &&
 				(thread_patch !== undefined ||
 					event.payload.type === "thread.session_policy.updated" ||
+					/**
+					 * A question opening or closing flips the thread's live status
+					 * between `Working` and `Waiting for answer` without being
+					 * retention activity, so the list re-reads on it explicitly.
+					 */
+					event.payload.type === "interaction.question" ||
 					thread_activity_kind_from_event(event.payload) !== undefined)
 			) {
 				const embedded = thread_patch;
