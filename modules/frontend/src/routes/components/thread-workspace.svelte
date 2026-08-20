@@ -42,6 +42,7 @@
 		ConversationUserMessageWithSourceReference,
 	} from "$lib/conversation/scroll-position";
 	import {
+		ConversationOlderGroupCountForItem,
 		MakeParticipantConversationRenderWindow,
 		type ConversationRenderBlock,
 		type ConversationViewState,
@@ -497,9 +498,33 @@
 		active_turn_id = ActiveConversationTurn(offsets);
 	};
 
+	const FindConversationItem = (item_id: string) =>
+		Effect.gen(function* () {
+			return yield* RunBrowserDom(() =>
+				[...(viewport?.querySelectorAll<HTMLElement>("[data-conversation-item-id]") ?? [])]
+					.find((element) => element.dataset.conversationItemId === item_id),
+			);
+		});
+
 	const SelectTurn = (marker: ConversationTurnMarker) =>
 		Effect.gen(function* () {
-			const item = yield* FindConversationItem(marker.id);
+			let item = yield* FindConversationItem(marker.id);
+			if (item === undefined && conversation_view_state !== undefined) {
+				const required_older_groups = ConversationOlderGroupCountForItem(
+					conversation_view_state,
+					inspection?.agent_id,
+					ConversationTurnPageSize,
+					marker.id,
+				);
+				if (
+					required_older_groups !== undefined &&
+					required_older_groups > older_render_group_count
+				) {
+					older_render_group_count = required_older_groups;
+					yield* Effect.promise(() => tick());
+					item = yield* FindConversationItem(marker.id);
+				}
+			}
 			if (item === undefined) return;
 			/**
 			 * Jumping is the reader taking control of where they are, so it also
@@ -510,14 +535,6 @@
 				item.scrollIntoView({ behavior: "smooth", block: "start" });
 			});
 			active_turn_id = marker.id;
-		});
-
-	const FindConversationItem = (item_id: string) =>
-		Effect.gen(function* () {
-			return yield* RunBrowserDom(() =>
-				[...(viewport?.querySelectorAll<HTMLElement>("[data-conversation-item-id]") ?? [])]
-					.find((element) => element.dataset.conversationItemId === item_id),
-			);
 		});
 
 	const UpdateAnchorLayout = (smooth: boolean) => Effect.gen(function* () {

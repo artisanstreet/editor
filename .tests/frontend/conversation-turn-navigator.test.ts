@@ -189,6 +189,9 @@ describe("conversation turn navigator surface", () => {
 		expect(workspace).toContain("ConversationTurnMarkers(snapshot.items)");
 		expect(workspace).toContain("ActiveConversationTurn(offsets)");
 		expect(workspace).toContain("const SelectTurn = (marker: ConversationTurnMarker)");
+		expect(workspace).toContain("ConversationOlderGroupCountForItem(");
+		expect(workspace).toContain("older_render_group_count = required_older_groups;");
+		expect(workspace).toContain("yield* Effect.promise(() => tick());");
 		expect(workspace).toContain('item.scrollIntoView({ behavior: "smooth", block: "start" })');
 		expect(workspace).toContain("following = false;");
 		/** Position is measured from the transcript, not tracked alongside it. */

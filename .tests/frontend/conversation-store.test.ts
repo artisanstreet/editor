@@ -4,6 +4,7 @@ import { ConversationPatch, ConversationSnapshot } from "@artisan/protocol";
 import {
 	ApplyConversationViewPatch,
 	CanReplaceConversationSnapshot,
+	ConversationOlderGroupCountForItem,
 	MakeConversationRenderBlocks,
 	MakeConversationRenderWindow,
 	MakeParticipantConversationRenderWindow,
@@ -184,6 +185,20 @@ describe("conversation view store", () => {
 		expect(paged.blocks).toHaveLength(96);
 		expect(paged.blocks.at(0)).toMatchObject({ turn_id: "turn-window-52" });
 		expect(paged.blocks.at(-1)).toMatchObject({ turn_id: "turn-window-99" });
+
+		/** A navigator click reveals only the prefix needed to mount its target. */
+		expect(
+			ConversationOlderGroupCountForItem(initialized.state, undefined, 24, "item-window-76"),
+		).toBe(0);
+		expect(
+			ConversationOlderGroupCountForItem(initialized.state, undefined, 24, "item-window-52"),
+		).toBe(24);
+		expect(
+			ConversationOlderGroupCountForItem(initialized.state, undefined, 24, "item-window-0"),
+		).toBe(76);
+		expect(
+			ConversationOlderGroupCountForItem(initialized.state, undefined, 24, "missing"),
+		).toBeUndefined();
 	});
 
 	it("preserves item identity while keeping ordinal ordering", () => {

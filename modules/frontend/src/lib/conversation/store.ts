@@ -930,6 +930,32 @@ export const MakeConversationRenderWindow = (
 };
 
 /**
+ * The extra history window required to mount the group containing an item.
+ *
+ * Turn navigation is built from the complete durable snapshot, while the DOM
+ * deliberately keeps only a bounded tail mounted. Returning an absolute older
+ * count lets a caller reveal exactly the missing prefix before looking for the
+ * item's element, without paging one screen at a time or mounting all history.
+ */
+export const ConversationOlderGroupCountForItem = (
+	state: ConversationViewState,
+	participant_agent_id: string | undefined,
+	group_limit: number,
+	item_id: string,
+): number | undefined => {
+	const group_id = state.projection.group_id_by_item.get(item_id);
+	if (group_id === undefined) return undefined;
+	const group_ids =
+		participant_agent_id === undefined
+			? state.projection.root_group_ids
+			: (state.projection.group_ids_by_participant_agent_id.get(participant_agent_id) ?? []);
+	const group_index = group_ids.indexOf(group_id);
+	if (group_index < 0) return undefined;
+
+	return Math.max(0, group_ids.length - Math.max(1, group_limit) - group_index);
+};
+
+/**
  * Keeps one shared conversation subscription while rendering a participant's
  * own turns. Root turns are parentless; adopted workers are parented and carry
  * their durable agent identity, so no provider identity leaks into the view.
