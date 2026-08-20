@@ -11,6 +11,16 @@ import {
 
 /** Project presentation and host/provider identity fixture projections. */
 export const FixtureProjectIdentityQueries = {
+	GetProjectIdentities: () =>
+		Effect.succeed({
+			identities: [
+				{
+					host: "github" as const,
+					kind: "repository" as const,
+					project_id: fixture_project.project_id,
+				},
+			],
+		}),
 	GetProjectRepositories: () =>
 		Effect.gen(function* () {
 			return {
@@ -325,6 +335,7 @@ export const FixtureProjectIdentityQueries = {
 		}),
 } satisfies Pick<
 	typeof ArtisanClient.Service,
+	| "GetProjectIdentities"
 	| "GetProjectRepositories"
 	| "GetProjectDiffs"
 	| "GetHostIdentity"

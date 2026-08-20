@@ -33,8 +33,26 @@ describe("short project path", () => {
 		expect(ShortProjectPath("D:\\work\\repos\\artisan", "artisan")).toBe("D:/work/repos");
 	});
 
-	it("reports nothing when the project sits directly in the home directory", () => {
-		expect(ShortProjectPath("/home/sander/artisan", "artisan")).toBeUndefined();
+	it("keeps an ordinary UNC server and share while normalizing its separators", () => {
+		expect(ShortProjectPath("\\\\server\\share\\team\\artisan", "artisan")).toBe(
+			"//server/share/team",
+		);
+	});
+
+	it("keeps a WSL distribution while collapsing its Linux home directory", () => {
+		expect(
+			ShortProjectPath("\\\\wsl.localhost\\Ubuntu\\home\\sander\\code\\artisan", "artisan"),
+		).toBe("~/code · Ubuntu (WSL)");
+	});
+
+	it("recognises WSL's legacy UNC hostname too", () => {
+		expect(ShortProjectPath("\\\\wsl$\\Ubuntu\\home\\sander\\code\\artisan", "artisan")).toBe(
+			"~/code · Ubuntu (WSL)",
+		);
+	});
+
+	it("keeps a home marker when the project sits directly in the home directory", () => {
+		expect(ShortProjectPath("/home/sander/artisan", "artisan")).toBe("~/");
 	});
 
 	it("ignores a trailing separator", () => {

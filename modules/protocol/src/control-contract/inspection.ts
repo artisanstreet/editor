@@ -55,6 +55,8 @@ import {
 	ProjectRepositoryQueryResult,
 } from "../repository";
 
+import { ProjectIdentityQuery, ProjectIdentityQueryResult } from "../project-identity";
+
 import {
 	SurfaceListQuery,
 	SurfaceSnapshot,
@@ -520,6 +522,21 @@ export const ProjectRepositoryQueryResultEnvelope = Schema.Struct({
 	payload: ProjectRepositoryQueryResult,
 });
 export type ProjectRepositoryQueryResultEnvelope = typeof ProjectRepositoryQueryResultEnvelope.Type;
+
+/** Requests visual identities for projects Forge already owns. */
+export const ProjectIdentityQueryEnvelope = Schema.Struct({
+	...NegotiatedFrontendTraceMetadata,
+	kind: Schema.Literal("project.identity.query"),
+	payload: ProjectIdentityQuery,
+});
+export type ProjectIdentityQueryEnvelope = typeof ProjectIdentityQueryEnvelope.Type;
+export const ProjectIdentityQueryResultEnvelope = Schema.Struct({
+	...NegotiatedBackendTraceMetadata,
+	correlation_id: Identifier,
+	kind: Schema.Literal("project.identity.query.result"),
+	payload: ProjectIdentityQueryResult,
+});
+export type ProjectIdentityQueryResultEnvelope = typeof ProjectIdentityQueryResultEnvelope.Type;
 
 /** Requests uncommitted diff summaries for projects Forge already owns. */
 export const ProjectDiffQueryEnvelope = Schema.Struct({

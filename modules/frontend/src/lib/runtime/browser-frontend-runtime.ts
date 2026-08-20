@@ -19,6 +19,7 @@ import { ImageInspectionStoreLive } from "../images/inspection-store";
 import { SystemNotificationsLive } from "../notifications/service";
 import { WebSystemNotificationPresenterLive } from "../notifications/web-presenter";
 import { DraftThreadControllerLive } from "../root/draft-thread";
+import { ProjectIdentityControllerLive } from "../root/project-identity-controller";
 import { WorkspaceCatalogControllerLive } from "../root/workspace-catalog-controller";
 import { EngineInstallationsControllerLive } from "../settings/engine-installations-controller";
 import { SessionDefaultsControllerLive } from "../settings/session-defaults-controller";
@@ -39,6 +40,7 @@ const FrontendControllersLive = Layer.mergeAll(
 	RichLinkAssetControllerLive,
 	RichLinkMetadataControllerLive,
 	DraftThreadControllerLive,
+	ProjectIdentityControllerLive,
 	WorkspaceCatalogControllerLive,
 	ImageInspectionStoreLive,
 	RunUsageControllerLive,

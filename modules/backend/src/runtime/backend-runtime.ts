@@ -86,10 +86,7 @@ import {
 	ThreadMetadataRefinerLive,
 } from "../threads/thread-metadata-refiner";
 import { make_node_project_locator_layer, ProjectLocator } from "../threads/project-locator";
-import {
-	make_project_directory_service_layer,
-	ProjectDirectoryService,
-} from "../projects/project-directory-service";
+import { make_project_directory_service_layer } from "../projects/project-directory-service";
 import {
 	NativeDirectoryPicker,
 	NativeDirectoryPickerUnavailable,
@@ -791,8 +788,7 @@ export function make_backend_layer(options: BackendOptions) {
 					Layer.provideMerge(infrastructure),
 				);
 	const surfaces = SurfaceServiceLive.pipe(Layer.provideMerge(infrastructure));
-
-	const protocol_foundation = make_protocol_server_layer(protocol_options).pipe(
+	const protocol_foundation_base = make_protocol_server_layer(protocol_options).pipe(
 		Layer.provideMerge(options.engine_toolchain ?? EngineToolchainDisabled),
 		Layer.provideMerge(routing),
 		Layer.provideMerge(retention_policy),
@@ -813,6 +809,9 @@ export function make_backend_layer(options: BackendOptions) {
 		Layer.provideMerge(workspace_files),
 		Layer.provideMerge(workspace_changes),
 		Layer.provideMerge(workspace_diffs),
+	);
+	const protocol_foundation = protocol_foundation_base.pipe(
+		Layer.provideMerge(preview_rich_links),
 	);
 	const protocol = protocol_foundation.pipe(
 		Layer.provideMerge(surfaces),

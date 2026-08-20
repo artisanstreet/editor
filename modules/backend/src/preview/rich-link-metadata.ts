@@ -1,5 +1,7 @@
 import { Context, Data, Effect, Option } from "effect";
 
+import type { RichLinkAssetMetadata } from "./rich-link-asset-store";
+
 /** Identifies the boundary that rejected or failed a rich-link request. */
 export type RichLinkMetadataErrorCode =
 	| "asset_store"
@@ -151,6 +153,10 @@ export interface RichLinkMetadataResult extends RichLinkMetadataDocument {
 export class RichLinkMetadata extends Context.Service<
 	RichLinkMetadata,
 	{
+		/** Fetches and retains one bounded, signature-verified external image. */
+		readonly ResolveImage: (
+			url: string,
+		) => Effect.Effect<RichLinkAssetMetadata, RichLinkMetadataError>;
 		readonly Resolve: (
 			url: string,
 		) => Effect.Effect<RichLinkMetadataResult, RichLinkMetadataError>;

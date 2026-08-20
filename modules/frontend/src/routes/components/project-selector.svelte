@@ -1,22 +1,31 @@
 <script lang="ts" effect>
 	/**
-	 * The project, as a word in a sentence.
+	 * The project the surface is pointed at, and the switch between them.
 	 *
-	 * It is underlined the way a form field is underlined rather than the way a
-	 * link is — dotted, and in the sentence's own colour — because pressing it
-	 * does not take you anywhere: it changes the word. Everything below the
-	 * trigger wears the effort selector's dropdown exactly, so a menu opened
-	 * from prose and a menu opened from the composer's control row are visibly
-	 * the same object.
+	 * It reads as a row rather than a control: the project's identity mark,
+	 * the name, and the chevron that says there are others. Pressing it does not
+	 * take you anywhere — it repoints the surface you are already on — so it
+	 * stays a quiet foot to its pane instead of a primary button. Everything
+	 * below the trigger wears the effort selector's dropdown exactly, so a menu
+	 * opened here and one opened from the composer's control row are visibly the
+	 * same object.
 	 */
 	import Check from "@tabler/icons-svelte/icons/check";
+	import ChevronDown from "@tabler/icons-svelte/icons/chevron-down";
 	import FolderPlus from "@tabler/icons-svelte/icons/folder-plus";
-	import { Effect } from "effect";
-	import type { Project } from "@artisan/protocol";
+	import { Effect, Stream } from "effect";
+	import type { Snippet } from "svelte";
+	import {
+		ProjectIdentityMaximumProjects,
+		type Project,
+		type ProjectIdentitySource,
+	} from "@artisan/protocol";
 	import { Popover, PopoverContent, PopoverTrigger } from "$lib/components/ui/popover";
-	import { GradientAvatarColorFor } from "$lib/identity/gradient-avatar";
-	import { ProjectMonogram, type RecentProject } from "$lib/root/project-catalog";
+	import { ProjectIdentityController } from "$lib/root/project-identity-controller";
+	import { type RecentProject } from "$lib/root/project-catalog";
+	import { ShortProjectPath } from "$lib/root/project-path";
 	import DropdownHoverSurface from "./dropdown-hover-surface.svelte";
+	import ProjectIdentityMark from "./project-identity-mark.svelte";
 	import ShaderGlassSurface from "./shader-glass-surface.svelte";
 
 	let {
@@ -25,25 +34,57 @@
 		onselect,
 		project,
 		projects,
+		trigger,
+		trigger_label,
 	}: {
 		disabled?: boolean;
 		/** Attaching a folder, which the surface owns because it owns the dialog. */
 		onnewproject: Effect.Effect<void>;
 		onselect: (project: Project) => Effect.Effect<void>;
-		/** The project the sentence currently names, if the catalog has one to name. */
+		/** The project the surface currently points at, if the catalog has one. */
 		project?: Project;
 		/** The attached catalog, freshest first. */
 		projects: ReadonlyArray<RecentProject>;
+		/**
+		 * A caller-shaped face for the same menu. The menu is one object wherever
+		 * it opens; only what you press to open it belongs to the surface it sits
+		 * on, so a caller that is not a quiet row hands its own in.
+		 */
+		trigger?: Snippet;
+		/** The accessible name a custom trigger answers to. */
+		trigger_label?: string;
 	} = $props();
 
 	let open = $state(false);
+	const identity_controller = yield* ProjectIdentityController;
+	let identities = $state.raw<ReadonlyMap<string, ProjectIdentitySource>>(
+		yield* identity_controller.Current,
+	);
+	const ApplyIdentities = (next: ReadonlyMap<string, ProjectIdentitySource>) =>
+		Effect.sync(() => {
+			identities = next;
+		});
+	yield* identity_controller.Changes.pipe(
+		Stream.runForEach(ApplyIdentities),
+		Effect.forkScoped,
+	);
+	yield* identity_controller
+		.Refresh(
+			projects
+				.slice(0, ProjectIdentityMaximumProjects)
+				.map(({ project: recent }) => recent.project_id),
+		)
+		.pipe(Effect.ignore, Effect.forkScoped);
 
 	/**
-	 * The word itself. With nothing attached it stays a noun rather than becoming
-	 * a button labelled "None": the sentence still reads, and pressing it offers
-	 * the only thing that can be done about it.
+	 * With nothing attached this stays an invitation rather than a button
+	 * labelled "None": the row still reads, and pressing it offers the only
+	 * thing that can be done about it.
 	 */
-	const label = $derived(project?.display_name ?? "a project");
+	const label = $derived(project?.display_name ?? "Choose a project");
+	const identity = $derived(
+		project === undefined ? undefined : identities.get(project.project_id),
+	);
 
 	const Choose = (next: Project) =>
 		Effect.gen(function* () {
@@ -61,20 +102,32 @@
 <Popover bind:open>
 	<PopoverTrigger
 		{disabled}
-		aria-label={`Project: ${label}`}
-		class="rounded-sm text-foreground-extra underline decoration-muted-foreground decoration-dotted decoration-1 underline-offset-[0.28em] outline-none transition-colors duration-(--duration-fast) ease-in-out hover:decoration-foreground-extra focus-visible:ring-2 focus-visible:ring-ring/50 disabled:pointer-events-none motion-reduce:transition-none data-[state=open]:decoration-foreground-extra"
+		aria-label={trigger === undefined ? `Project: ${label}` : (trigger_label ?? label)}
+		class={trigger === undefined
+			? "group/project flex w-full min-w-0 items-center gap-2.5 rounded-lg px-2 py-2 text-left text-sm outline-none transition-colors duration-(--duration-fast) ease-in-out hover:bg-surface-875/60 focus-visible:ring-2 focus-visible:ring-ring/50 disabled:pointer-events-none motion-reduce:transition-none data-[state=open]:bg-surface-875/60"
+			: "w-full rounded-lg outline-none focus-visible:ring-2 focus-visible:ring-ring/50 disabled:pointer-events-none"}
 	>
-		{label}
+		{#if trigger !== undefined}
+			{@render trigger()}
+		{:else}
+			<ProjectIdentityMark {identity} />
+			<span class="min-w-0 flex-1 truncate text-foreground">{label}</span>
+			<ChevronDown
+				class="size-4 shrink-0 text-muted-foreground transition-transform duration-(--duration-fast) ease-in-out group-data-[state=open]/project:rotate-180 motion-reduce:transition-none"
+				aria-hidden="true"
+			/>
+		{/if}
 	</PopoverTrigger>
 
 	<!--
-		Anchored to the word's leading edge: the names differ in length, so a
-		centred card would step sideways every time the sentence changed.
+		Opens upward off its leading edge: the trigger is the foot of its pane, so
+		a menu dropped below it would have nowhere to go, and the names differ in
+		length, which would step a centred card sideways on every switch.
 	-->
 	<PopoverContent
 		variant="bare"
 		align="start"
-		side="bottom"
+		side="top"
 		sideOffset={10}
 		class="t-dropdown w-[min(20rem,calc(100vw-2rem))] rounded-2xl animate-none!"
 	>
@@ -83,8 +136,12 @@
 				{#snippet children({ move_hover })}
 					<div class="flex min-w-0 flex-col">
 						{#each projects as recent (recent.project.project_id)}
-							{@const tone = GradientAvatarColorFor(recent.project.project_id)}
 							{@const chosen = recent.project.project_id === project?.project_id}
+							{@const recent_identity = identities.get(recent.project.project_id)}
+							{@const compact_path = ShortProjectPath(
+								recent.project.root_path,
+								recent.project.display_name,
+							)}
 							<button
 								type="button"
 								class="relative flex min-w-0 items-center gap-2.5 rounded-xl px-2 py-1.5 text-left text-sm outline-none"
@@ -93,22 +150,19 @@
 								onfocusin={move_hover}
 								onclick={yield* Choose(recent.project)}
 							>
-								<!-- The same square the workspace wears, at the size a row can hold. -->
-								<span
-									aria-hidden="true"
-									class="grid size-6 shrink-0 place-items-center rounded-lg text-[0.625rem] font-medium tracking-wide text-foreground-extra"
-									style:background={`linear-gradient(160deg, oklch(from ${tone.from} l c h / 24%), oklch(from ${tone.to} l c h / 7%)), var(--surface-875)`}
-									style:box-shadow={`inset 0 0 0 0.5px oklch(from ${tone.to} l c h / 24%)`}
-								>
-									{ProjectMonogram(recent.project.display_name)}
-								</span>
+								<ProjectIdentityMark identity={recent_identity} />
 								<span class="flex min-w-0 flex-1 flex-col">
 									<span class="min-w-0 truncate text-foreground">
 										{recent.project.display_name}
 									</span>
-									<span class="min-w-0 truncate font-mono text-[0.6875rem] text-surface-600">
-										{recent.project.root_path}
-									</span>
+									{#if compact_path !== undefined}
+										<span
+											class="min-w-0 truncate font-mono text-[0.6875rem] text-muted-foreground"
+											title={recent.project.root_path}
+										>
+											{compact_path}
+										</span>
+									{/if}
 								</span>
 								{#if chosen}
 									<Check class="size-4 shrink-0 text-muted-foreground" aria-hidden="true" />
@@ -122,10 +176,8 @@
 							one goes and makes one. Same hairline the effort selector's own
 							groups are parted by.
 						-->
-						{#if projects.length > 0}
-							<span class="pointer-events-none -mx-1 my-1 h-px bg-border/50" aria-hidden="true"
-							></span>
-						{/if}
+						<span class="pointer-events-none -mx-1 my-1 h-px bg-border/50" aria-hidden="true"
+						></span>
 
 						<button
 							type="button"

@@ -1,5 +1,20 @@
 /** `C:\Users\sander`, `/home/sander`, `/Users/sander` — the conventional home roots. */
-const HOME_ROOT = /^(?:[A-Za-z]:)?[\\/](?:Users|home)[\\/][^\\/]+(?=[\\/]|$)/;
+const HOME_ROOT = /^(?:[A-Za-z]:)?\/(?:Users|home)\/[^/]+(?=\/|$)/iu;
+
+/** Windows' two spellings for a mounted WSL distribution. */
+const WSL_UNC_ROOT = /^\/\/wsl(?:\$|\.localhost)\/([^/]+)(\/.*)?$/iu;
+
+const CompactPath = (root_path: string, display_name?: string): string | undefined => {
+	const shortened = root_path.replace(HOME_ROOT, "~");
+	const segments = shortened.split("/");
+
+	if (display_name !== undefined && segments.length > 1 && segments.at(-1) === display_name) {
+		segments.pop();
+	}
+
+	const trimmed = segments.join("/");
+	return trimmed === "" ? undefined : trimmed === "~" ? "~/" : trimmed;
+};
 
 /**
  * Shortens a project's root path for display: the home directory collapses to
@@ -10,16 +25,14 @@ const HOME_ROOT = /^(?:[A-Za-z]:)?[\\/](?:Users|home)[\\/][^\\/]+(?=[\\/]|$)/;
  *
  * @param root_path - The absolute path the backend reports for the project.
  * @param display_name - The project's name, shown separately from the path.
- * @returns A compact path, or `undefined` when nothing meaningful is left.
+ * @returns A compact path, or `undefined` when the input carries no path.
  */
 export const ShortProjectPath = (root_path: string, display_name?: string): string | undefined => {
-	const shortened = root_path.replace(HOME_ROOT, "~").replaceAll("\\", "/").replace(/\/+$/, "");
-	const segments = shortened.split("/");
+	const normalized = root_path.replaceAll("\\", "/").replace(/\/+$/, "");
+	const wsl = WSL_UNC_ROOT.exec(normalized);
+	if (wsl === null) return CompactPath(normalized, display_name);
 
-	if (display_name !== undefined && segments.length > 1 && segments.at(-1) === display_name) {
-		segments.pop();
-	}
-
-	const trimmed = segments.join("/");
-	return trimmed === "" || trimmed === "~" ? undefined : trimmed;
+	const distro = wsl[1]!;
+	const compact = CompactPath(wsl[2] ?? "/", display_name);
+	return compact === undefined ? `${distro} (WSL)` : `${compact} · ${distro} (WSL)`;
 };

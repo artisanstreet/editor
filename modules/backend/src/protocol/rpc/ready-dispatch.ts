@@ -81,6 +81,7 @@ export const IsReadyConnectionReadEnvelope = (
 		case "project.directory.list.query":
 		case "project.directory.pick":
 		case "project.list.query":
+		case "project.identity.query":
 		case "project.repository.query":
 		case "project.diff.query":
 		case "session.defaults.query":
@@ -260,6 +261,7 @@ export const MakeReadyEnvelopeDispatch = Effect.gen(function* () {
 			case "project.directory.select":
 			case "project.directory.create":
 			case "project.list.query":
+			case "project.identity.query":
 			case "project.repository.query":
 			case "project.diff.query":
 			case "session.defaults.query":

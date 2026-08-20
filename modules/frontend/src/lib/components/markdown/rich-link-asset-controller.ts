@@ -1,6 +1,6 @@
 import { Context, Deferred, Effect, Layer, Ref, Stream } from "effect";
 
-import type { RichLinkFavicon } from "@artisan/protocol";
+import type { RichLinkAssetMetadata } from "@artisan/protocol";
 import { ArtisanClient, type ArtisanClientError } from "@artisan/transport/client";
 
 /** Favicons are deliberately small; retain enough for repeated transcript links, not an image cache. */
@@ -42,7 +42,7 @@ const AppendAssetChunk = (bytes: Uint8Array, chunk: Uint8Array): Uint8Array => {
 };
 
 /**
- * Deduplicates and bounds immutable rich-link favicon bytes for the application
+ * Deduplicates and bounds immutable rich-link asset bytes for the application
  * lifetime. Object URLs are intentionally not retained here: their browser
  * lifetime belongs to the anchor that created them.
  */
@@ -50,7 +50,7 @@ export class RichLinkAssetController extends Context.Service<
 	RichLinkAssetController,
 	{
 		readonly Load: (
-			favicon: RichLinkFavicon,
+			favicon: RichLinkAssetMetadata,
 		) => Effect.Effect<RichLinkAsset | undefined, ArtisanClientError>;
 	}
 >()("Artisan/RichLinkAssetController") {}
@@ -87,7 +87,7 @@ export const RichLinkAssetControllerLive = Layer.effect(
 				return { ...current, entries, bytes };
 			});
 
-		const ReadAsset = (favicon: RichLinkFavicon) =>
+		const ReadAsset = (favicon: RichLinkAssetMetadata) =>
 			Effect.scoped(
 				client
 					.OpenAsset(favicon.asset_id)
@@ -109,7 +109,7 @@ export const RichLinkAssetControllerLive = Layer.effect(
 				}),
 			);
 
-		const Complete = (favicon: RichLinkFavicon, deferred: RichLinkAssetFlight) =>
+		const Complete = (favicon: RichLinkAssetMetadata, deferred: RichLinkAssetFlight) =>
 			ReadAsset(favicon).pipe(
 				Effect.tap((asset) =>
 					asset === undefined ? Effect.void : Retain(favicon.asset_id, asset),
@@ -130,7 +130,7 @@ export const RichLinkAssetControllerLive = Layer.effect(
 				Effect.asVoid,
 			);
 
-		const Load = (favicon: RichLinkFavicon) =>
+		const Load = (favicon: RichLinkAssetMetadata) =>
 			Effect.uninterruptibleMask((restore) =>
 				Effect.gen(function* () {
 					const candidate = yield* Deferred.make<

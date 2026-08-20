@@ -277,6 +277,11 @@ export const ControlRpcGroup = RpcGroup.make(
 		Control.ProjectRepositoryQueryResultEnvelope,
 	),
 	ControlRpc(
+		"project.identity.query",
+		Control.ProjectIdentityQueryEnvelope,
+		Control.ProjectIdentityQueryResultEnvelope,
+	),
+	ControlRpc(
 		"project.diff.query",
 		Control.ProjectDiffQueryEnvelope,
 		Control.ProjectDiffQueryResultEnvelope,

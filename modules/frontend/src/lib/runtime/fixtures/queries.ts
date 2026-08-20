@@ -477,6 +477,7 @@ export const FixtureClientQueries = {
 	| "GetSessionDefaults"
 	| "UpdateSessionDefaults"
 	| "GetProjectRepositories"
+	| "GetProjectIdentities"
 	| "GetProjectDiffs"
 	| "GetHostIdentity"
 	| "GetHostMachines"

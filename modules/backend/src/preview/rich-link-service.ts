@@ -469,6 +469,38 @@ export function make_rich_link_metadata_layer(options: RichLinkMetadataOptions =
 					return Option.none<RichLinkFavicon>();
 				});
 
+			const resolve_image = (input: string) =>
+				Effect.gen(function* () {
+					const requested_url = yield* parse_http_url(input);
+					const fetched = yield* fetch_resource(
+						requested_url,
+						limits.max_favicon_bytes,
+						"image/*",
+						favicon_content_types,
+					);
+
+					if (!is_valid_favicon(fetched.content_type, fetched.response.body)) {
+						return yield* Effect.fail(
+							metadata_error(
+								fetched.url.href,
+								"content_type",
+								new Error("response bytes do not match the declared image type"),
+							),
+						);
+					}
+
+					return yield* asset_store
+						.Put({
+							body: fetched.response.body,
+							content_type: fetched.content_type,
+						})
+						.pipe(
+							Effect.mapError((cause) =>
+								metadata_error(fetched.url.href, "asset_store", cause),
+							),
+						);
+				});
+
 			const fetch_document = (requested_url: URL) =>
 				Effect.gen(function* () {
 					const page = yield* fetch_resource(
@@ -631,7 +663,7 @@ export function make_rich_link_metadata_layer(options: RichLinkMetadataOptions =
 					return yield* resolve_cold(cache_key);
 				});
 
-			return { Resolve: resolve };
+			return { Resolve: resolve, ResolveImage: resolve_image };
 		}),
 	);
 }

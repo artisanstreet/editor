@@ -36,6 +36,11 @@ interface RichLinkTestHarness {
 	readonly get_asset: (asset_id: string) => Promise<Option.Option<RichLinkAsset>>;
 	readonly requests: Array<RichLinkHttpRequest>;
 	readonly resolve: (url: string) => Promise<RichLinkMetadataResult>;
+	readonly resolve_image: (url: string) => Promise<{
+		readonly asset_id: string;
+		readonly bytes: number;
+		readonly content_type: string;
+	}>;
 	readonly resolve_with_signal: (
 		url: string,
 		signal: AbortSignal,
@@ -161,6 +166,7 @@ async function make_harness(options: RichLinkTestOptions): Promise<RichLinkTestH
 		get_asset: (asset_id) => Effect.runPromise(services.asset_store.Get(asset_id)),
 		requests,
 		resolve: (url) => Effect.runPromise(services.metadata.Resolve(url)),
+		resolve_image: (url) => Effect.runPromise(services.metadata.ResolveImage(url)),
 		resolve_with_signal: (url, signal) =>
 			Effect.runPromise(services.metadata.Resolve(url), { signal }),
 	};
@@ -175,6 +181,33 @@ async function make_asset_store(options: RichLinkAssetStoreOptions) {
 }
 
 describe("RichLinkMetadata", () => {
+	it("retains a bounded, signature-verified image through the safe fetch boundary", async () => {
+		const url = "https://avatars.example.com/project.png";
+		const harness = await make_harness({
+			routes: new Map([[url, response(200, png_bytes, { "content-type": "image/png" })]]),
+		});
+
+		const image = await harness.resolve_image(url);
+		expect(image).toMatchObject({ bytes: png_bytes.byteLength, content_type: "image/png" });
+		const retained = await harness.get_asset(image.asset_id);
+		expect(Option.getOrUndefined(retained)?.body).toEqual(png_bytes);
+		expect(harness.requests[0]?.accept).toBe("image/*");
+	});
+
+	it("rejects image responses whose bytes do not match their declared media type", async () => {
+		const url = "https://avatars.example.com/not-really.png";
+		const harness = await make_harness({
+			routes: new Map([
+				[url, response(200, "not an image", { "content-type": "image/png" })],
+			]),
+		});
+
+		await expect(harness.resolve_image(url)).rejects.toMatchObject({
+			code: "content_type",
+			url,
+		});
+	});
+
 	it("applies title, Open Graph, site, and favicon precedence after redirects", async () => {
 		const routes = new Map<string, RichLinkHttpResponse>([
 			["https://example.com/start", response(302, "", { location: "/articles/final" })],

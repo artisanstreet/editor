@@ -58,6 +58,7 @@ import type {
 	EngineAuthenticationRequest,
 	EngineRollbackRequest,
 	ProjectDiffQueryResult,
+	ProjectIdentityQueryResult,
 	ProjectRepositoryQueryResult,
 	SessionDefaults,
 	SessionDefaultsUpdateInput,
@@ -308,6 +309,10 @@ export class ArtisanClient extends Context.Service<
 		readonly GetProjectRepositories: (
 			project_ids?: ReadonlyArray<string>,
 		) => Effect.Effect<ProjectRepositoryQueryResult, ArtisanClientError>;
+		/** Reads presentation identities for named projects, or all of them when empty. */
+		readonly GetProjectIdentities: (
+			project_ids?: ReadonlyArray<string>,
+		) => Effect.Effect<ProjectIdentityQueryResult, ArtisanClientError>;
 		/** Reads uncommitted diff summaries for the named projects, or all of them when empty. */
 		readonly GetProjectDiffs: (
 			project_ids?: ReadonlyArray<string>,

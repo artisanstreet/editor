@@ -2,6 +2,7 @@ import { Context, Effect, Schema } from "effect";
 
 import {
 	ProjectDiffMaximumProjects,
+	ProjectIdentityMaximumProjects,
 	OutboundControlEnvelope,
 	type ProjectDetachEnvelope,
 	type ProjectDiffQueryEnvelope,
@@ -9,6 +10,7 @@ import {
 	type ProjectDirectoryListQueryEnvelope,
 	type ProjectDirectoryPickEnvelope,
 	type ProjectDirectorySelectEnvelope,
+	type ProjectIdentityQueryEnvelope,
 	type ProjectListQueryEnvelope,
 	type ProjectRepositoryQueryEnvelope,
 	type RuntimeCatalogQueryEnvelope,
@@ -18,6 +20,7 @@ import {
 import { RepositoryService } from "../../../git/repository-service";
 import { ProjectCatalog } from "../../../projects/project-catalog";
 import { ProjectDirectoryService } from "../../../projects/project-directory-service";
+import { ProjectIdentityService } from "../../../projects/project-identity-service";
 import { RuntimeCatalogService } from "../../../runtime/catalog";
 import { RuntimeMetadata } from "../../../runtime/metadata";
 import { SessionDefaultsService } from "../../../settings/session-defaults-service";
@@ -30,6 +33,7 @@ export type ProjectQueryEnvelope =
 	| ProjectDirectoryListQueryEnvelope
 	| ProjectDirectoryPickEnvelope
 	| ProjectDirectorySelectEnvelope
+	| ProjectIdentityQueryEnvelope
 	| ProjectListQueryEnvelope
 	| ProjectRepositoryQueryEnvelope
 	| RuntimeCatalogQueryEnvelope
@@ -54,6 +58,7 @@ const literal = <Value extends string>(value: Value): Value => value;
 export const MakeProjectQueryHandler = Effect.gen(function* () {
 	const directories = yield* ProjectDirectoryService;
 	const projects = yield* ProjectCatalog;
+	const identities = yield* ProjectIdentityService;
 	const repositories = yield* RepositoryService;
 	const defaults = yield* SessionDefaultsService;
 	const runtime = yield* RuntimeCatalogService;
@@ -178,12 +183,13 @@ export const MakeProjectQueryHandler = Effect.gen(function* () {
 			projects.Snapshot.pipe(
 				Effect.flatMap((catalog) => {
 					const requested = new Set(query.payload.project_ids);
-					const selected =
+					const selected = (
 						requested.size === 0
 							? catalog.projects
 							: catalog.projects.filter((project) =>
 									requested.has(project.project_id),
-								);
+								)
+					).slice(0, ProjectIdentityMaximumProjects);
 
 					return Effect.forEach(
 						selected,
@@ -207,6 +213,35 @@ export const MakeProjectQueryHandler = Effect.gen(function* () {
 					Respond(query, {
 						kind: "project.repository.query.result",
 						payload: { repositories },
+					}),
+				),
+				Effect.catchCause(() =>
+					Recover(
+						query,
+						current,
+						"project_catalog.unavailable",
+						"The Forge project catalog could not be read.",
+						true,
+					),
+				),
+			),
+		"project.identity.query": (query: ProjectIdentityQueryEnvelope, current: ReadyState) =>
+			projects.Snapshot.pipe(
+				Effect.flatMap((catalog) => {
+					const requested = new Set(query.payload.project_ids);
+					const selected =
+						requested.size === 0
+							? catalog.projects
+							: catalog.projects.filter((project) =>
+									requested.has(project.project_id),
+								);
+
+					return Effect.forEach(selected, identities.Resolve, { concurrency: 4 });
+				}),
+				Effect.flatMap((resolved) =>
+					Respond(query, {
+						kind: "project.identity.query.result",
+						payload: { identities: resolved },
 					}),
 				),
 				Effect.catchCause(() =>
@@ -322,6 +357,8 @@ export const MakeProjectQueryHandler = Effect.gen(function* () {
 				return handlers["project.directory.create"](query, current);
 			case "project.list.query":
 				return handlers["project.list.query"](query, current);
+			case "project.identity.query":
+				return handlers["project.identity.query"](query, current);
 			case "project.repository.query":
 				return handlers["project.repository.query"](query, current);
 			case "project.diff.query":

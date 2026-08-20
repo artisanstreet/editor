@@ -28,6 +28,10 @@ import {
 
 import { ProjectDirectoryService } from "../projects/project-directory-service";
 import { ProjectCatalog } from "../projects/project-catalog";
+import {
+	ProjectIdentityService,
+	ProjectIdentityServiceLive,
+} from "../projects/project-identity-service";
 import { NodeGitCommandExecutorLive } from "../git/executor";
 import { RepositoryService, RepositoryServiceLive } from "../git/repository-service";
 import { CapabilityRepository } from "../marketplace/capabilities/repository";
@@ -137,6 +141,7 @@ export function make_protocol_server_layer(
 			const conversation_read_model = yield* ConversationReadModel;
 			const project_catalog = yield* ProjectCatalog;
 			const project_directories = yield* ProjectDirectoryService;
+			const project_identity_service = yield* ProjectIdentityService;
 			const repository_service = yield* RepositoryService;
 			const session_defaults = yield* SessionDefaultsService;
 			const runtime_catalog = yield* RuntimeCatalogService;
@@ -406,6 +411,7 @@ export function make_protocol_server_layer(
 					Effect.provideService(PreviewCoordinator, previews),
 					Effect.provideService(ProjectCatalog, project_catalog),
 					Effect.provideService(ProjectDirectoryService, project_directories),
+					Effect.provideService(ProjectIdentityService, project_identity_service),
 					Effect.provideService(RepositoryService, repository_service),
 					Effect.provideService(RoutineRepository, routine_repository),
 					Effect.provideService(RoutineService, routines),
@@ -894,6 +900,12 @@ export function make_protocol_server_layer(
 		Layer.provide(HostMachinesLive),
 		Layer.provide(HostMachineBrokerLive),
 		/** Repository reads run their own bounded Git process; no workspace registration. */
-		Layer.provide(RepositoryServiceLive.pipe(Layer.provide(NodeGitCommandExecutorLive))),
+		Layer.provide(
+			ProjectIdentityServiceLive.pipe(
+				Layer.provideMerge(
+					RepositoryServiceLive.pipe(Layer.provide(NodeGitCommandExecutorLive)),
+				),
+			),
+		),
 	);
 }

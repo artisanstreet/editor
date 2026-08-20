@@ -22,6 +22,7 @@ import {
 	type HostMachinesQueryEnvelope,
 	type ProjectDetachEnvelope,
 	type ProjectDiffQueryEnvelope,
+	type ProjectIdentityQueryEnvelope,
 	type ProjectDirectoryListInput,
 	type ProjectDirectoryListQueryEnvelope,
 	type ProjectDirectoryPickEnvelope,
@@ -221,6 +222,18 @@ export const MakeQueryApi = Effect.gen(function* () {
 				? result.payload
 				: yield* Effect.die("project repository response narrowed incorrectly");
 		});
+	const get_project_identities = (project_ids: ReadonlyArray<string> = []) =>
+		Effect.gen(function* () {
+			const trace = yield* context.MakeTrace;
+			const result = yield* context.Request({
+				...trace,
+				kind: "project.identity.query",
+				payload: { project_ids },
+			} satisfies ProjectIdentityQueryEnvelope);
+			return result.kind === "project.identity.query.result"
+				? result.payload
+				: yield* Effect.die("project identity response narrowed incorrectly");
+		});
 	const get_project_diffs = (project_ids: ReadonlyArray<string> = []) =>
 		Effect.gen(function* () {
 			const trace = yield* context.MakeTrace;
@@ -378,6 +391,7 @@ export const MakeQueryApi = Effect.gen(function* () {
 		get_host_identity,
 		get_host_machines,
 		get_project_diffs,
+		get_project_identities,
 		get_project_repositories,
 		get_runtime_catalog,
 		list_artisan_approvals,

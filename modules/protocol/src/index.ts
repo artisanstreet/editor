@@ -24,6 +24,7 @@ export * from "./marketplace";
 export * from "./orchestration-groups";
 export * from "./preview";
 export * from "./project";
+export * from "./project-identity";
 export * from "./runtime-catalog";
 export * from "./session-defaults";
 export * from "./project-directory";

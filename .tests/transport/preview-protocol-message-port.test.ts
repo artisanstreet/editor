@@ -132,6 +132,7 @@ describe("preview public MessagePort protocol", () => {
 					Put: () => Effect.die("unused fixture asset store"),
 				}),
 				Layer.succeed(RichLinkMetadata, {
+					ResolveImage: () => Effect.die("not used"),
 					Resolve: () =>
 						Effect.succeed({
 							cache: {
@@ -996,6 +997,7 @@ describe("preview public MessagePort protocol", () => {
 					Put: () => Effect.die("unused fixture asset store"),
 				}),
 				Layer.succeed(RichLinkMetadata, {
+					ResolveImage: () => Effect.die("unused fixture image"),
 					Resolve: () => Effect.die("unused fixture metadata"),
 				}),
 			),
