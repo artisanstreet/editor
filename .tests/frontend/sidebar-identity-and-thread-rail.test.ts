@@ -373,9 +373,9 @@ describe("sidebar identity and thread rail regressions", () => {
 
 		/** Ellipsis, not a mask: a title that ends in "…" ended, one that fades ran off. */
 		expect(rail).not.toContain("mask-r-from-85%");
-		expect(rail).toContain('<span class="min-w-0 flex-1 truncate">{thread.title}</span>');
+		expect(rail).toContain(">{thread_display_title(thread, $thread_title_mode)}</span");
 		expect(rail).toMatch(
-			/<span class="min-w-0 truncate text-foreground"\s*>\{thread\.title\}/u,
+			/<span class="min-w-0 truncate text-foreground"\s*>\{thread_display_title\(thread, \$thread_title_mode\)\}/u,
 		);
 	});
 

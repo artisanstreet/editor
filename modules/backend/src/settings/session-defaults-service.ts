@@ -7,7 +7,12 @@ import type {
 	SessionDefaults as SessionDefaultsSnapshot,
 	SessionDefaultsUpdatedEvent,
 } from "@artisan/protocol";
-import { AgentNameDataset, DefaultAgentNameDatasetId } from "@artisan/protocol";
+import {
+	AgentNameDataset,
+	DefaultAgentNameDatasetId,
+	DefaultThreadTitleMode,
+	ThreadTitleMode,
+} from "@artisan/protocol";
 
 import { settings_scope_id, settings_stream_id } from "./internal-scope";
 
@@ -103,6 +108,7 @@ function normalize_error(error: unknown): JournalStoreError {
 
 const ReasoningEfforts = new Set(["low", "medium", "high", "xhigh", "max", "ultra"]);
 const is_service_tier = Schema.is(Schema.NonEmptyString);
+const is_thread_title_mode = Schema.is(ThreadTitleMode);
 
 /** Rows are decoded defensively: retired or malformed controls are dropped. */
 const ModelRow = (row: {
@@ -141,6 +147,7 @@ export const SessionDefaultsServiceLive = Layer.effect(
 						compaction_model_id: SessionDefaults.compaction_model_id,
 						last_model_id: SessionDefaults.last_model_id,
 						permission: SessionDefaults.permission,
+						thread_title_mode: SessionDefaults.thread_title_mode,
 					})
 					.from(SessionDefaults)
 					.where(eq(SessionDefaults.defaults_id, defaults_row_id))
@@ -158,6 +165,7 @@ export const SessionDefaultsServiceLive = Layer.effect(
 					.select({ engine_id: DisabledEngines.engine_id })
 					.from(DisabledEngines)
 					.orderBy(asc(DisabledEngines.engine_id));
+				const stored_thread_title_mode = shared?.thread_title_mode;
 
 				return {
 					agent_name_dataset: yield* Schema.decodeUnknownEffect(AgentNameDataset)(
@@ -173,6 +181,9 @@ export const SessionDefaultsServiceLive = Layer.effect(
 					...(shared?.last_model_id ? { last_model_id: shared.last_model_id } : {}),
 					models: models.map(ModelRow),
 					permission: shared?.permission ?? initial_permission,
+					thread_title_mode: is_thread_title_mode(stored_thread_title_mode)
+						? stored_thread_title_mode
+						: DefaultThreadTitleMode,
 				} satisfies SessionDefaultsSnapshot;
 			});
 
@@ -237,7 +248,8 @@ export const SessionDefaultsServiceLive = Layer.effect(
 							payload.auto_continue_usage_limits !== undefined ||
 							payload.permission !== undefined ||
 							payload.last_model_id !== undefined ||
-							payload.compaction_model !== undefined
+							payload.compaction_model !== undefined ||
+							payload.thread_title_mode !== undefined
 						) {
 							const [current] = yield* transaction
 								.select({
@@ -247,6 +259,7 @@ export const SessionDefaultsServiceLive = Layer.effect(
 									compaction_model_id: SessionDefaults.compaction_model_id,
 									last_model_id: SessionDefaults.last_model_id,
 									permission: SessionDefaults.permission,
+									thread_title_mode: SessionDefaults.thread_title_mode,
 								})
 								.from(SessionDefaults)
 								.where(eq(SessionDefaults.defaults_id, defaults_row_id))
@@ -270,6 +283,10 @@ export const SessionDefaultsServiceLive = Layer.effect(
 									payload.last_model_id ?? current?.last_model_id ?? null,
 								permission:
 									payload.permission ?? current?.permission ?? initial_permission,
+								thread_title_mode:
+									payload.thread_title_mode ??
+									current?.thread_title_mode ??
+									DefaultThreadTitleMode,
 								updated_at: accepted_at,
 							};
 

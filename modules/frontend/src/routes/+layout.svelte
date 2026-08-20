@@ -59,6 +59,7 @@
 	} from "$lib/runtime/appearance-preferences";
 	import { AttemptDevelopmentSelfPair } from "$lib/runtime/pairing";
 	import { SessionDefaultsController } from "$lib/settings/session-defaults-controller";
+	import { thread_display_title, thread_title_mode } from "$lib/threads/title";
 	import AttentionTitleMarker from "./components/attention-title-marker.svelte";
 	import DevInstanceBadge from "./components/dev-instance-badge.svelte";
 	import ForgeConnectionOverlay from "./components/forge-connection-overlay.svelte";
@@ -75,6 +76,17 @@
 	let forge_unreachable = $state(false);
 	const client = yield* ArtisanClient;
 	const session_defaults = yield* SessionDefaultsController;
+	/**
+	 * Fed here for the same reason the appearance stores are: every surface
+	 * that names a thread is an ordinary component reading a store while it
+	 * renders, and the shell is the one place already holding the defaults.
+	 */
+	yield* session_defaults.Changes.pipe(
+		Stream.runForEach((next) =>
+			Effect.sync(() => thread_title_mode.set(next.defaults.thread_title_mode)),
+		),
+		Effect.forkScoped,
+	);
 	const workspace_catalog = yield* WorkspaceCatalogController;
 	let catalog_state = $state.raw<WorkspaceCatalogState>(yield* workspace_catalog.Current);
 	const threads = $derived(catalog_state.threads);
@@ -349,7 +361,10 @@
 				 * notification; clicking it opens the workspace rather than nothing.
 				 */
 				route_path: thread === undefined ? "/" : ThreadRoutePathFor(thread),
-				thread_title: thread?.title,
+				thread_title:
+					thread === undefined
+						? undefined
+						: thread_display_title(thread, $thread_title_mode),
 			});
 		});
 
@@ -463,7 +478,12 @@
 {/snippet}
 
 {#snippet workspace_header()}
-	<WorkspaceHeader project={header_project} thread_title={active_thread?.title} />
+	<WorkspaceHeader
+		project={header_project}
+		thread_title={active_thread === undefined
+			? undefined
+			: thread_display_title(active_thread, $thread_title_mode)}
+	/>
 {/snippet}
 
 <div class="flex h-dvh min-h-0 flex-col bg-background" data-prose-width={$prose_width}>

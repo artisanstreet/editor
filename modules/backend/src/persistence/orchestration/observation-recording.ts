@@ -1,4 +1,4 @@
-import { and, eq, inArray, lt, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { Effect } from "effect";
 
 import { type EventEnvelope, type EventPayload } from "@artisan/protocol";
@@ -20,6 +20,7 @@ import {
 	ConversationSources,
 	OrchestrationInteractions,
 	OrchestrationRuns,
+	Threads,
 } from "../tables";
 import { RuntimeMetadata } from "../../runtime/metadata";
 import { ApplyEngineObservationWithChange } from "../../conversation/projection/observation";
@@ -271,6 +272,9 @@ export function make_observation_recording(
 														),
 													}
 												: {}),
+											...(observation.summary_title === undefined
+												? {}
+												: { summary_title: observation.summary_title }),
 											state: observation.state,
 											type: "run.lifecycle",
 											working_directory: run.working_directory,
@@ -320,6 +324,31 @@ export function make_observation_recording(
 							eq(OrchestrationInteractions.state, "requested"),
 						),
 					);
+
+				/**
+				 * The harness's own session title, refreshed as it evolves. Stored
+				 * beside `title` rather than replacing it: the reader's title-mode
+				 * preference and any manual rename resolve at display time, so this
+				 * write never competes with the lock. Guarded on change so an
+				 * unchanged title does not bump the metadata version every settle.
+				 */
+				if (observation.summary_title !== undefined) {
+					yield* transaction
+						.update(Threads)
+						.set({
+							metadata_version: sql`${Threads.metadata_version} + 1`,
+							summary_title: observation.summary_title,
+						})
+						.where(
+							and(
+								eq(Threads.thread_id, run.thread_id),
+								or(
+									isNull(Threads.summary_title),
+									ne(Threads.summary_title, observation.summary_title),
+								),
+							),
+						);
+				}
 			}
 
 			if (observation._tag === "approval" || observation._tag === "question") {

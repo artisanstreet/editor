@@ -39,6 +39,19 @@ export const AgentNameDataset = Schema.Literals(["norwegian", "british", "playfu
 
 export type AgentNameDataset = typeof AgentNameDataset.Type;
 
+/**
+ * How thread rows are titled. `"summary"` shows the harness's own generated
+ * session title when one exists and falls back to the latest user message;
+ * `"latest_message"` always shows the latest user message. A manual rename
+ * outranks both.
+ */
+export const ThreadTitleModes = ["summary", "latest_message"] as const;
+export const ThreadTitleMode = Schema.Literals(ThreadTitleModes);
+
+export type ThreadTitleMode = typeof ThreadTitleMode.Type;
+
+export const DefaultThreadTitleMode: ThreadTitleMode = "summary";
+
 /** Records the controls one catalog model was last configured with. */
 export const SessionModelDefaults = Schema.Struct({
 	/** The native context-window suffix, absent for the model's base window. */
@@ -98,6 +111,10 @@ export const SessionDefaults = Schema.Struct({
 	),
 	/** The harness-neutral permission option id, shared across all models. */
 	permission: Identifier,
+	thread_title_mode: ThreadTitleMode.pipe(
+		Schema.optional,
+		Schema.withDecodingDefault(Effect.succeed(DefaultThreadTitleMode)),
+	),
 });
 
 export type SessionDefaults = typeof SessionDefaults.Type;
@@ -124,6 +141,7 @@ export const SessionDefaultsUpdateInput = Schema.Struct({
 	last_model_id: Schema.optional(Schema.NonEmptyString),
 	model: Schema.optional(SessionModelDefaultsUpdate),
 	permission: Schema.optional(Identifier),
+	thread_title_mode: Schema.optional(ThreadTitleMode),
 });
 
 export type SessionDefaultsUpdateInput = typeof SessionDefaultsUpdateInput.Type;

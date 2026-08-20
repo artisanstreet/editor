@@ -616,6 +616,42 @@ describe("session defaults controller", () => {
 		]);
 	});
 
+	it("starts in summary-title mode and patches an explicit latest-message choice", async () => {
+		const result = await Effect.runPromise(
+			Effect.scoped(
+				Effect.gen(function* () {
+					const captured = yield* Ref.make<ReadonlyArray<SessionDefaultsUpdateInput>>([]);
+					const client_layer = Layer.succeed(ArtisanClient, {
+						...FixtureArtisanClientService,
+						UpdateSessionDefaults: (input) =>
+							Ref.update(captured, (current) => [...current, input]).pipe(
+								Effect.andThen(FixtureArtisanClientService.UpdateSessionDefaults()),
+							),
+					});
+					const services = yield* Layer.build(
+						Layer.provide(SessionDefaultsControllerLive, client_layer),
+					);
+					return yield* Effect.gen(function* () {
+						const controller = yield* SessionDefaultsController;
+						const initial = yield* controller.Current;
+						const updated = yield* controller.SetThreadTitleMode("latest_message");
+						return {
+							captured: yield* Ref.get(captured),
+							initial: initial.defaults.thread_title_mode,
+							updated: updated.defaults.thread_title_mode,
+						};
+					}).pipe(Effect.provide(services));
+				}),
+			),
+		);
+
+		expect(result).toEqual({
+			captured: [{ thread_title_mode: "latest_message" }],
+			initial: "summary",
+			updated: "latest_message",
+		});
+	});
+
 	it("keeps rapid context and reasoning changes as independent model patches", async () => {
 		const updates = await Effect.runPromise(
 			Effect.scoped(

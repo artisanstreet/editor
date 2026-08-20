@@ -520,6 +520,35 @@ describe("Claude direct CLI transport", () => {
 		}
 	});
 
+	it("uses one managed home for the run and harvests a title written after the result frame", async () => {
+		const directory = mkdtempSync(join(tmpdir(), "artisan-claude-title-run-"));
+		let resolve_count = 0;
+		try {
+			process.env.FAKE_CLAUDE_SCENARIO = "immediate-summary-title";
+			const events = await Collect(StartInput({ artisan_run_id: "cli-summary-title" }), {
+				ResolveSpawnOverride: () =>
+					Effect.sync(() => {
+						resolve_count += 1;
+						return {
+							environment: {
+								CLAUDE_CONFIG_DIR: join(directory, `home-${resolve_count}`),
+							},
+							executable: process.execPath,
+						};
+					}),
+			});
+
+			expect(resolve_count).toBe(3);
+			expect(events.at(-1)).toMatchObject({
+				_tag: "run_terminal",
+				state: "completed",
+				summary_title: "Late fixture summary",
+			});
+		} finally {
+			rmSync(directory, { force: true, recursive: true });
+		}
+	});
+
 	it("retries a healing authentication probe before starting the real process", async () => {
 		const directory = mkdtempSync(join(tmpdir(), "artisan-claude-auth-"));
 		try {

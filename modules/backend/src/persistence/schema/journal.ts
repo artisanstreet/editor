@@ -108,6 +108,8 @@ export const Threads = sqliteTable(
 		title: text("title").notNull(),
 		title_source: text("title_source").notNull().default("initial"),
 		title_locked: integer("title_locked", { mode: "boolean" }).notNull().default(false),
+		/** The harness's own generated session title; NULL until an engine reports one. */
+		summary_title: text("summary_title"),
 		live_status: text("live_status").notNull().default("Idle"),
 		current_goal: text("current_goal"),
 		last_assistant_message: text("last_assistant_message"),

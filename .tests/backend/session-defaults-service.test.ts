@@ -7,7 +7,7 @@ import { Effect } from "effect";
 import { afterEach, describe, expect, it } from "vitest";
 
 import { make_backend_runtime } from "@artisan/backend";
-import type { SessionModelDefaultsUpdate } from "@artisan/protocol";
+import type { SessionDefaultsUpdateInput, SessionModelDefaultsUpdate } from "@artisan/protocol";
 
 import {
 	SessionDefaultsService,
@@ -72,6 +72,45 @@ describe("session defaults service", () => {
 			expect(defaults.models).toEqual([
 				{ model_id: "codex-sol", reasoning_effort: "high", service_tier: "fast" },
 			]);
+		} finally {
+			await runtime.dispose();
+		}
+	});
+
+	it("defaults thread titling to summaries and persists an explicit mode without disturbing other patches", async () => {
+		const runtime = make_backend_runtime({
+			database_path: await make_path(),
+			migrations_path,
+		});
+		try {
+			const readings = await runtime.runPromise(
+				Effect.gen(function* () {
+					const settings = yield* SessionDefaultsService;
+					const Update = (message_id: string, payload: SessionDefaultsUpdateInput) =>
+						settings.Update({
+							kind: "command",
+							message_id,
+							origin: "frontend",
+							payload: { type: "session.defaults.update", ...payload },
+							protocol_version: 1,
+							schema_version: 1,
+							sent_at: "2026-08-20T12:00:00.000Z",
+							thread_id: session_defaults_thread_id,
+						});
+
+					const initial = yield* settings.Read;
+					yield* Update("title-mode-latest", { thread_title_mode: "latest_message" });
+					const explicit = yield* settings.Read;
+					yield* Update("title-mode-unrelated", { auto_continue_usage_limits: false });
+					const untouched = yield* settings.Read;
+					return { explicit, initial, untouched };
+				}),
+			);
+
+			expect(readings.initial.thread_title_mode).toBe("summary");
+			expect(readings.explicit.thread_title_mode).toBe("latest_message");
+			expect(readings.untouched.thread_title_mode).toBe("latest_message");
+			expect(readings.untouched.auto_continue_usage_limits).toBe(false);
 		} finally {
 			await runtime.dispose();
 		}

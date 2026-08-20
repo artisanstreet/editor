@@ -467,7 +467,21 @@ reply versus work phases: later work reopens the trace, later prose folds it, an
 settlement also folds final prose delivered in the settlement batch; an explicit reader
 choice remains authoritative. Six focused frontend files pass 106 tests, frontend format,
 lint, and the production build pass, and the aggregate test phase reaches 994/996 with only
-the protected composer line budget and concurrent thread-title source assertion failing.
+the protected composer line budget and occupied-port Markdown test failing.
+
+On 2026-08-20, thread titles gained a persisted `summary | latest_message` setting, defaulting
+to summary. Manual renames remain authoritative; engines without a native summary fall back to
+the latest-message title. Claude reads the newest transcript `ai-title` after process output
+closes, using one managed-home resolution for both spawn and lookup. Lifecycle observations,
+live projection writes, and projection rebuilds preserve identical summary/version state, while
+the renderer resolves the selected title across the rail, hover card, command menu, document and
+workspace titles, and notifications. Independent post-fix review is clean. Claude coverage
+passes 2 files/25 tests, frontend title coverage passes 5 files/60 tests, backend recording and
+defaults pass, and the exact rebuild regression passes. Frontend format, lint, and production
+build pass; its aggregate suite reaches 994/996 with only the existing composer line-budget and
+occupied-port Markdown baselines. Backend format/lint pass; root TypeScript stops only on the
+unrelated protected `steering-stages.ts` `RuntimeFiber` errors, and the broader rebuild file
+retains its unrelated overlapping-runtime/vacuum timeout.
 
 On 2026-08-12, installed Editor freeze diagnosis became durable and bounded. A
 home-scoped `profiling-enabled` marker makes every managed launch persist a per-session

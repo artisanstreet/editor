@@ -10,6 +10,7 @@
 	import Header from "./header.svelte";
 	import Row from "./row.svelte";
 	import Section from "./section.svelte";
+	import ThreadTitles from "./thread-titles.svelte";
 	import UsageRecovery from "./usage-recovery.svelte";
 
 	const retention_controller = yield* ThreadRetentionPolicyController;
@@ -168,5 +169,6 @@
 	{/if}
 </Section>
 
+<ThreadTitles />
 <UsageRecovery />
 <AgentNames />

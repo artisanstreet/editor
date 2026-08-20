@@ -166,6 +166,7 @@ function Seed(database: Database["Service"]) {
 				origin: "backend",
 				payload_json: JSON.stringify({
 					state: "running",
+					summary_title: "Harness summary",
 					type: "run.lifecycle",
 					working_directory: "C:/workspace",
 				}),
@@ -286,6 +287,8 @@ describe("ProjectionRebuildService", () => {
 			expect(result.stored_thread).toMatchObject({
 				activity_version: 1,
 				last_activity_at: "2026-07-18T12:01:00.000Z",
+				metadata_version: 1,
+				summary_title: "Harness summary",
 			});
 			expect(result.stored_change?.path).toBe(change.path);
 			expect(result.diffs).toHaveLength(1);

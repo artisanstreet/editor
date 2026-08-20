@@ -1,6 +1,7 @@
 import { Context, Deferred, Effect, Layer, Ref, Semaphore, Stream, SubscriptionRef } from "effect";
 
 import {
+	DefaultThreadTitleMode,
 	inherited_compaction_model,
 	SessionPolicyPermission,
 	type AgentNameDataset,
@@ -9,6 +10,7 @@ import {
 	type SessionDefaultsUpdateInput,
 	type SessionModelDefaultsUpdate,
 	type ThreadSessionPolicy,
+	type ThreadTitleMode,
 } from "@artisan/protocol";
 import { ArtisanClient, type ArtisanClientError } from "@artisan/transport/client";
 import {
@@ -56,6 +58,7 @@ const EmptyDefaults: SessionDefaults = {
 	auto_continue_usage_limits: true,
 	models: [],
 	permission: "supervised",
+	thread_title_mode: DefaultThreadTitleMode,
 };
 
 export const CompactionSelectionFromDefaults = (defaults: SessionDefaults): CompactionSelection =>
@@ -102,6 +105,10 @@ export class SessionDefaultsController extends Context.Service<
 		/** Default captured by newly created provider-usage interruptions. */
 		readonly SetAutoContinueUsageLimits: (
 			auto_continue_usage_limits: boolean,
+		) => Effect.Effect<SessionDefaultsState, ArtisanClientError>;
+		/** How thread rows are titled: harness summary or latest user message. */
+		readonly SetThreadTitleMode: (
+			thread_title_mode: ThreadTitleMode,
 		) => Effect.Effect<SessionDefaultsState, ArtisanClientError>;
 	}
 >()("Artisan/SessionDefaultsController") {}
@@ -220,6 +227,9 @@ export const SessionDefaultsControllerLive = Layer.effect(
 					: { last_model_id: update.last_model_id }),
 				models,
 				...(update.permission === undefined ? {} : { permission: update.permission }),
+				...(update.thread_title_mode === undefined
+					? {}
+					: { thread_title_mode: update.thread_title_mode }),
 			} satisfies SessionDefaults;
 		};
 
@@ -448,6 +458,9 @@ export const SessionDefaultsControllerLive = Layer.effect(
 		const SetAutoContinueUsageLimits = (auto_continue_usage_limits: boolean) =>
 			SaveDefaults({ auto_continue_usage_limits });
 
+		const SetThreadTitleMode = (thread_title_mode: ThreadTitleMode) =>
+			SaveDefaults({ thread_title_mode });
+
 		const RememberPolicyDefaults = (policy: ThreadSessionPolicy) =>
 			Effect.gen(function* () {
 				const current = yield* Current;
@@ -493,6 +506,7 @@ export const SessionDefaultsControllerLive = Layer.effect(
 			SetAgentNameDataset,
 			SetAutoContinueUsageLimits,
 			SetFavorite,
+			SetThreadTitleMode,
 		});
 	}),
 );

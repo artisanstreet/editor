@@ -245,6 +245,12 @@ export type ThreadSessionSnapshot = typeof ThreadSessionSnapshot.Type;
 /** Records an authoritative lifecycle state for one durable run. */
 export const RunLifecycleEvent = Schema.Struct({
 	failure: Schema.optional(ConversationErrorRef),
+	/**
+	 * The harness's own generated session title as of this settle. Carried on
+	 * the event so the thread's `summary_title` projection stays derivable from
+	 * the journal alone; absent for engines that do not auto-name sessions.
+	 */
+	summary_title: Schema.optional(Schema.NonEmptyString),
 	type: Schema.Literal("run.lifecycle"),
 	working_directory: Schema.NonEmptyString,
 	state: Schema.Literals([

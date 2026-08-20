@@ -120,8 +120,9 @@ describe("Barekey docs shell reset", () => {
 		expect(thread).not.toContain("<svelte:head>");
 		expect(thread).toContain("{#key `${page.params.workspace}:${thread_id}`}");
 		expect(thread).toContain("<ThreadRouteGate {thread_id} />");
+		/** The window names the thread the way the rail does: mode-resolved, rename first. */
 		expect(thread_route).toContain(
-			'<title>{thread?.title ?? "Thread"} › Artisan Editor</title>',
+			'{thread === undefined ? "Thread" : thread_display_title(thread, $thread_title_mode)}',
 		);
 		expect(thread_route).toContain("<ThreadWorkspace");
 		expect(thread_panel).not.toContain("<ModelSelector");

@@ -71,7 +71,7 @@ describe("workspace header", () => {
 		/** Workspace context never competes with the thread title for truncation. */
 		expect(header).not.toContain('class="truncate text-(--banner-info)');
 		expect(header).not.toContain('class="truncate">{project.display_name}</span>');
-		expect(layout).toContain("thread_title={active_thread?.title}");
+		expect(layout).toContain("thread_display_title(active_thread, $thread_title_mode)");
 		/** The remote link must escape the titlebar drag region to stay clickable. */
 		expect(header).toContain("[-webkit-app-region:no-drag]");
 	});

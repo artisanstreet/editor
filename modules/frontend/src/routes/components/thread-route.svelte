@@ -39,6 +39,7 @@
 	} from "$lib/thread-interaction/commands";
 	import { ThreadSessionProjection } from "$lib/thread-interaction/session-projection";
 	import { ThreadOpenController } from "$lib/thread-interaction/thread-open-controller";
+	import { thread_display_title, thread_title_mode } from "$lib/threads/title";
 	import { ConversationUserMessageWithSourceReference } from "$lib/conversation/scroll-position";
 	import { ConversationSteeringAcknowledged } from "$lib/conversation/steering";
 	import type { ComposerSubmission } from "$lib/composer/image-attachments";
@@ -1171,7 +1172,10 @@
 </script>
 
 <svelte:head>
-	<title>{thread?.title ?? "Thread"} › Artisan Editor</title>
+	<title
+		>{thread === undefined ? "Thread" : thread_display_title(thread, $thread_title_mode)} ›
+		Artisan Editor</title
+	>
 </svelte:head>
 
 <ThreadWorkspace

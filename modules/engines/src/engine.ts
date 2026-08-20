@@ -516,6 +516,12 @@ export interface EngineRunTerminalObservation extends EngineObservationBase {
 	 */
 	readonly error_ref?: EngineErrorRef;
 	readonly state: EngineRunTerminalState;
+	/**
+	 * The harness's own generated session title, when the engine produced one
+	 * by the time the run settled. Absent for engines that do not auto-name
+	 * their sessions and for runs that ended before a title was generated.
+	 */
+	readonly summary_title?: string;
 }
 
 /**

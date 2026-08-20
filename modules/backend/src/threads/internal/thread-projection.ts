@@ -123,6 +123,7 @@ export const DecodeThreadProjection = (
 				? {}
 				: { rename_suggestion: thread.rename_suggestion }),
 			...(rehome_suggestion === undefined ? {} : { rehome_suggestion }),
+			...(thread.summary_title === null ? {} : { summary_title: thread.summary_title }),
 		}).pipe(
 			Effect.mapError(
 				() =>

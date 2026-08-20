@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 
 type FixtureEvent = Record<string, unknown>;
 
@@ -301,6 +302,22 @@ if (args.includes("--version")) {
 				session_id,
 				usage: { input_tokens: 1, output_tokens: 1 },
 			});
+		if (scenario_suffix === "summary-title") {
+			setTimeout(() => {
+				const claude_home = process.env.CLAUDE_CONFIG_DIR;
+				if (claude_home === undefined)
+					throw new Error("summary-title requires a Claude config home");
+				const project = process.cwd().replace(/[^A-Za-z0-9]/gu, "-");
+				const directory = join(claude_home, "projects", project);
+				mkdirSync(directory, { recursive: true });
+				writeFileSync(
+					join(directory, `${session_id}.jsonl`),
+					`${JSON.stringify({ aiTitle: "Late fixture summary", type: "ai-title" })}\n`,
+				);
+				process.exit(0);
+			}, 10);
+			return;
+		}
 		setTimeout(() => process.exit(scenario_suffix === "nonzero" ? 7 : 0), 10);
 	};
 	if (scenario === "immediate-empty-resume") setImmediate(immediate);

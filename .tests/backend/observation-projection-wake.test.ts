@@ -281,4 +281,94 @@ describe("observation projection wakes", () => {
 			await runtime.dispose();
 		}
 	});
+
+	it("stores an engine's summary title at run settle and bumps metadata only when it changes", async () => {
+		const Terminal = (
+			run_id: string,
+			observation_id: string,
+			summary_title?: string,
+		): EngineObservation => ({
+			_tag: "run_terminal",
+			artisan_run_id: run_id,
+			observation_id,
+			raw: { engine_id: "engine_wake", frame: {}, transport: "test" },
+			sequence: 1,
+			state: "completed",
+			...(summary_title === undefined ? {} : { summary_title }),
+		});
+		const runtime = make_runtime(await make_database_path());
+		try {
+			const readings = await runtime.runPromise(
+				Effect.scoped(
+					Effect.gen(function* () {
+						yield* Seed;
+						const database = yield* Database;
+						const metadata = yield* RuntimeMetadata;
+						const recorder = make_observation_recording(database.client, metadata, {
+							Publish: () => Effect.void,
+						});
+						const AddRun = (run_id: string) =>
+							database.client.insert(OrchestrationRuns).values({
+								agent_id: "agent_wake",
+								created_at: "2026-08-15T00:00:00.000Z",
+								engine_id: "engine_wake",
+								run_id,
+								status: "running",
+								thread_id: "thread_wake",
+								updated_at: "2026-08-15T00:00:00.000Z",
+								working_directory: "C:/wake",
+							});
+						const ReadThread = Effect.gen(function* () {
+							const [thread] = yield* database.client
+								.select({
+									metadata_version: Threads.metadata_version,
+									summary_title: Threads.summary_title,
+								})
+								.from(Threads);
+							return thread;
+						});
+
+						yield* recorder.RecordObservation(
+							Terminal("run_wake", "terminal_titled", "Harness session title"),
+						);
+						const titled = yield* ReadThread;
+						yield* AddRun("run_wake_repeat");
+						yield* recorder.RecordObservation(
+							Terminal("run_wake_repeat", "terminal_repeat", "Harness session title"),
+						);
+						const repeated = yield* ReadThread;
+						yield* AddRun("run_wake_refined");
+						yield* recorder.RecordObservation(
+							Terminal("run_wake_refined", "terminal_refined", "Refined title"),
+						);
+						const refined = yield* ReadThread;
+						yield* AddRun("run_wake_untitled");
+						yield* recorder.RecordObservation(
+							Terminal("run_wake_untitled", "terminal_untitled"),
+						);
+						const untouched = yield* ReadThread;
+						return { refined, repeated, titled, untouched };
+					}),
+				),
+			);
+			expect(readings.titled).toEqual({
+				metadata_version: 1,
+				summary_title: "Harness session title",
+			});
+			expect(readings.repeated).toEqual({
+				metadata_version: 1,
+				summary_title: "Harness session title",
+			});
+			expect(readings.refined).toEqual({
+				metadata_version: 2,
+				summary_title: "Refined title",
+			});
+			expect(readings.untouched).toEqual({
+				metadata_version: 2,
+				summary_title: "Refined title",
+			});
+		} finally {
+			await runtime.dispose();
+		}
+	});
 });

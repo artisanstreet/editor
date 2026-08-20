@@ -35,6 +35,7 @@
 		AdvanceThreadReadTracking,
 		type ThreadReadTrackingState,
 	} from "$lib/root/thread-read-tracker";
+	import { thread_display_title, thread_title_mode } from "$lib/threads/title";
 	import { RepositoryQualifiedLabel } from "$lib/vcs/labels";
 	import { RepositoryMarkClass, RepositoryMarkFor } from "$lib/vcs/presentation";
 	import { ThreadOpenController } from "$lib/thread-interaction/thread-open-controller";
@@ -477,7 +478,9 @@
 				>
 					<!-- The rail names the same thing the list does: what the thread runs on. -->
 					<ThreadMark class={EngineMarkClass(thread_mark, "size-4 shrink-0")} />
-					<span class="min-w-0 flex-1 truncate">{thread.title}</span>
+					<span class="min-w-0 flex-1 truncate"
+						>{thread_display_title(thread, $thread_title_mode)}</span
+					>
 					<span class="shrink-0 whitespace-nowrap text-xs text-muted-foreground @max-[13rem]:hidden">
 						{FormatRecentThreadTime(thread.last_activity_at, now_ms)}
 					</span>
@@ -601,7 +604,7 @@
 															<span class="flex min-w-0 flex-1 flex-col">
 																<!-- Ellipsis, not a fade: the two rail cards are one surface. -->
 																<span class="min-w-0 truncate text-foreground"
-																	>{thread.title}</span
+																	>{thread_display_title(thread, $thread_title_mode)}</span
 																>
 																	<span class="truncate text-xs text-muted-foreground">
 																		{thread.primary_project?.display_name ?? "No project"}
@@ -776,7 +779,7 @@
 						<span
 							class="line-clamp-2 min-w-0 text-sm font-semibold text-pretty break-words text-foreground"
 						>
-							<InlineCodeText text={card_thread.title} />
+							<InlineCodeText text={thread_display_title(card_thread, $thread_title_mode)} />
 						</span>
 					</div>
 					{#if card_awaiting}

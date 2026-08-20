@@ -14,6 +14,7 @@
 	} from "$lib/components/ui/command";
 	import { RunBrowserDom } from "$lib/browser/dom";
 	import { RouteNavigation } from "$lib/browser/route-navigation";
+	import { thread_display_title, thread_title_mode } from "$lib/threads/title";
 	import {
 		PrepareNewThreadDraft,
 		is_unmodified_primary_activation,
@@ -91,10 +92,12 @@
 			{@const project = group.type === "project" ? group.project : undefined}
 			<CommandGroup heading={project?.display_name ?? "Unassigned"}>
 				{#each group.threads as thread (thread.thread_id)}
+					{@const display_title = thread_display_title(thread, $thread_title_mode)}
+					<!-- Both titles stay searchable: the reader remembers whichever they last saw. -->
 					<CommandItem
-						value={`${thread.title} ${thread.thread_id}`}
+						value={`${display_title} ${thread.title} ${thread.thread_id}`}
 					>
-						<a href={ThreadRoutePathFor(thread)} class="flex min-w-0 grow items-center gap-2"><MessageCircle /><span class="truncate">{thread.title}</span></a>
+						<a href={ThreadRoutePathFor(thread)} class="flex min-w-0 grow items-center gap-2"><MessageCircle /><span class="truncate">{display_title}</span></a>
 					</CommandItem>
 				{/each}
 			</CommandGroup>

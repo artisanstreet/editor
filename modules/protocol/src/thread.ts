@@ -126,6 +126,12 @@ export const ThreadListItem = Schema.Struct({
 	rename_suggestion: Schema.optional(Schema.NonEmptyString),
 	rehome_suggestion: Schema.optional(ThreadProjectRehomeSuggestion),
 	linked_projects: Schema.Array(ProjectRef),
+	/**
+	 * The harness's own generated session title, when the engine produced one.
+	 * Carried beside `title` rather than replacing it so the reader's title-mode
+	 * preference resolves at display time and flips without a re-projection.
+	 */
+	summary_title: Schema.optional(Schema.NonEmptyString),
 	thread_id: Identifier,
 	title: Schema.NonEmptyString,
 	title_locked: Schema.Boolean,

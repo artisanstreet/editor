@@ -152,6 +152,7 @@ const thread_row = (thread: ThreadListItem): RebuiltThread => ({
 		? JSON.stringify(thread.rehome_suggestion)
 		: null,
 	rename_suggestion: thread.rename_suggestion ?? null,
+	summary_title: thread.summary_title ?? null,
 	thread_id: thread.thread_id,
 	title: thread.title,
 	title_locked: thread.title_locked,
@@ -404,6 +405,21 @@ export const ProjectionRebuildServiceLive = Layer.effect(
 									workspace_changes.delete(change_id);
 							}
 							break;
+						case "run.lifecycle": {
+							const thread = threads.get(event.thread_id);
+							if (
+								thread !== undefined &&
+								payload.summary_title !== undefined &&
+								thread.summary_title !== payload.summary_title
+							) {
+								threads.set(event.thread_id, {
+									...thread,
+									metadata_version: (thread.metadata_version ?? 0) + 1,
+									summary_title: payload.summary_title,
+								});
+							}
+							break;
+						}
 						case "workspace.change.updated":
 							if (!erased_threads.has(payload.change.thread_id)) {
 								const has_diff = available_diffs.has(payload.change.change_id);

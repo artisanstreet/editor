@@ -1,5 +1,9 @@
 import { Buffer } from "node:buffer";
 import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+import { NodeFileSystem } from "@effect/platform-node-shared";
 
 import {
 	Clock,
@@ -8,6 +12,7 @@ import {
 	Effect,
 	Encoding,
 	Exit,
+	FileSystem,
 	Layer,
 	Option,
 	Ref,
@@ -75,6 +80,7 @@ import {
 	MakeClaudeProbe,
 	ReadClaudeAuthentication,
 } from "./probe";
+import { claude_session_transcript_path, ReadClaudeSessionTitle } from "./session-title";
 import { AdvanceClaudeTaskLineage, EmptyClaudeTaskLineage } from "./task-lineage";
 import { MakeClaudeUsage } from "./usage";
 
@@ -463,11 +469,20 @@ export const make_claude_engine_layer = (
 		max_stdout_bytes: input.max_stdout_bytes ?? defaults.max_stdout_bytes,
 		version_timeout_ms: input.version_timeout_ms ?? defaults.version_timeout_ms,
 	};
+	/**
+	 * Hoisted because `Open` shadows the layer's `input` with the run input;
+	 * the override is also what knows the managed config home the transcript
+	 * reader needs. A run resolves it once and uses that same value for both
+	 * process spawn and transcript lookup; probes and usage keep the generic
+	 * per-spawn wrapper.
+	 */
+	const resolve_spawn_override = input.ResolveSpawnOverride;
 	return Layer.effect(
 		ClaudeEngine,
 		Effect.gen(function* () {
 			const base_factory = yield* EngineProcessFactory;
-			const factory =
+			const file_system = yield* FileSystem.FileSystem;
+			const probe_factory =
 				input.ResolveSpawnOverride === undefined
 					? base_factory
 					: with_engine_spawn_override(base_factory, input.ResolveSpawnOverride);
@@ -475,7 +490,7 @@ export const make_claude_engine_layer = (
 			const Probe: Engine["Probe"] = () =>
 				validated().pipe(
 					Effect.andThen(
-						MakeClaudeProbe(factory, {
+						MakeClaudeProbe(probe_factory, {
 							auth_timeout_ms: options.auth_timeout_ms,
 							descriptor: ClaudeEngineDescriptor,
 							executable: options.executable,
@@ -547,6 +562,33 @@ export const make_claude_engine_layer = (
 						input._tag === "resume"
 							? input.resume_token.native_thread_id
 							: randomUUID();
+					/**
+					 * Where the CLI will write this session's transcript — the only
+					 * surface that carries its generated title. The managed override
+					 * names the config home; a hand-configured engine falls back to
+					 * the same resolution the CLI itself uses. A managed override
+					 * failure remains a spawn failure instead of falling back to an
+					 * ambient executable or home.
+					 */
+					const spawn_override =
+						resolve_spawn_override === undefined
+							? undefined
+							: yield* resolve_spawn_override();
+					const claude_home =
+						spawn_override?.environment["CLAUDE_CONFIG_DIR"] ??
+						process.env["CLAUDE_CONFIG_DIR"] ??
+						join(homedir(), ".claude");
+					const transcript_path = claude_session_transcript_path(
+						claude_home,
+						input.working_directory,
+						session_id,
+					);
+					/**
+					 * Bridges the transcript read into the buffer's synchronous
+					 * terminal factory: refreshed in Effect context at the terminal
+					 * fence, read as a plain value when the observation is assembled.
+					 */
+					let latest_summary_title: string | undefined = undefined;
 					const args = [
 						...options.executable_args,
 						...(input._tag === "resume"
@@ -599,12 +641,12 @@ export const make_claude_engine_layer = (
 							? []
 							: ["--append-system-prompt", resolved.product_instructions]),
 					];
-					const handle = yield* factory
+					const handle = yield* base_factory
 						.Spawn({
-							command: options.executable,
+							command: spawn_override?.executable ?? options.executable,
 							args,
 							cwd: input.working_directory,
-							env: { ...process.env },
+							env: { ...process.env, ...spawn_override?.environment },
 						})
 						.pipe(Scope.provide(run_scope));
 					yield* Scope.addFinalizer(run_scope, handle.Close);
@@ -618,8 +660,20 @@ export const make_claude_engine_layer = (
 								`${JSON.stringify(ToUserMessage(session_id, first_text ?? "", first_content))}\n`,
 							),
 						);
+					const RefreshSummaryTitle = ReadClaudeSessionTitle(transcript_path).pipe(
+						Effect.provideService(FileSystem.FileSystem, file_system),
+						Effect.map((summary_title) => {
+							if (summary_title !== undefined) latest_summary_title = summary_title;
+						}),
+					);
 					const events = yield* MakeEngineEventBuffer({
 						artisan_run_id: input.artisan_run_id,
+						/**
+						 * Claude writes the transcript independently from stdout. Reading at
+						 * the exact terminal fence catches a title flushed after `result` but
+						 * before process exit, and also covers cancellation/closure.
+						 */
+						BeforeFinish: RefreshSummaryTitle,
 						CloseResource: handle.Close,
 						make_terminal_observation: (state, sequence) => ({
 							_tag: "run_terminal",
@@ -633,6 +687,9 @@ export const make_claude_engine_layer = (
 							},
 							sequence,
 							state,
+							...(latest_summary_title === undefined
+								? {}
+								: { summary_title: latest_summary_title }),
 						}),
 					});
 					const state = yield* Ref.make({
@@ -1227,7 +1284,7 @@ export const make_claude_engine_layer = (
 			 * version string this path never reads. Every engine refreshes usage
 			 * concurrently against one deadline, so that spawn was pure risk.
 			 */
-			const Usage: Required<Engine>["Usage"] = ReadClaudeAuthentication(factory, {
+			const Usage: Required<Engine>["Usage"] = ReadClaudeAuthentication(probe_factory, {
 				auth_timeout_ms: options.auth_timeout_ms,
 				descriptor: ClaudeEngineDescriptor,
 				executable: options.executable,
@@ -1241,7 +1298,7 @@ export const make_claude_engine_layer = (
 						? MakeClaudeUsage({
 								executable: options.executable,
 								executable_args: options.executable_args,
-								factory,
+								factory: probe_factory,
 							})
 						: Effect.succeed({ authentication, windows: [] }),
 				),
@@ -1265,7 +1322,7 @@ export const make_claude_engine_layer = (
 				Usage,
 			};
 		}),
-	);
+	).pipe(Layer.provideMerge(NodeFileSystem.layer));
 };
 
 /** Explicit transport aliases retained for focused adapter tests. */
