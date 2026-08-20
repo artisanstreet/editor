@@ -499,4 +499,26 @@ describe("conversation trace", () => {
 		expect(workspace).toContain("{#snippet details(session_failed: boolean)}");
 		expect(workspace).toContain("failed={session_failed}");
 	});
+
+	/**
+	 * The reply retires the history it came from: the trace folds itself the
+	 * moment the model starts writing below it, unfolds if the model goes back
+	 * to work, and never fights a disclosure the reader chose themselves.
+	 */
+	it("folds the live trace once the reply starts and unfolds it if work resumes", () => {
+		const work_session = ReadSource(
+			"modules/frontend/src/routes/components/conversation-work-session.svelte",
+		);
+
+		expect(work_session).toContain("const reply_started = reply_live && !previous_reply_live;");
+		expect(work_session).toContain(
+			"const work_resumed = activity_wait && !previous_waiting_for_activity;",
+		);
+		expect(work_session).toContain("if (!working || user_chose_disclosure) return;");
+		expect(work_session).toContain("if (work_resumed) open = true;");
+		expect(work_session).toContain("else if (reply_started) open = false;");
+		expect(work_session).toContain(
+			"yield* ReconcileReplyDisclosure(has_live_reply, waiting_for_activity, is_working);",
+		);
+	});
 });

@@ -308,6 +308,33 @@
 		});
 	yield* ReconcileStatus(item.status);
 
+	let previous_reply_live = untrack(() => has_live_reply);
+	let previous_waiting_for_activity = untrack(() => waiting_for_activity);
+	/**
+	 * The reply retires the history it came from. Once the model starts writing
+	 * below, the chain above is context the reader is done with, so it folds on
+	 * its own; if the model then goes back to work — a live activity newer than
+	 * its text — the chain is the progress again and unfolds. Both movements are
+	 * edges, not states, so a reader's own toggle mid-reply is never fought, and
+	 * an explicit choice ends the automation for the session's whole life. The
+	 * activity edge wins a simultaneous batch because it is the newer fact.
+	 */
+	const ReconcileReplyDisclosure = (
+		reply_live: boolean,
+		activity_wait: boolean,
+		working: boolean,
+	) =>
+		Effect.gen(function* () {
+			const reply_started = reply_live && !previous_reply_live;
+			const work_resumed = activity_wait && !previous_waiting_for_activity;
+			previous_reply_live = reply_live;
+			previous_waiting_for_activity = activity_wait;
+			if (!working || user_chose_disclosure) return;
+			if (work_resumed) open = true;
+			else if (reply_started) open = false;
+		});
+	yield* ReconcileReplyDisclosure(has_live_reply, waiting_for_activity, is_working);
+
 	/**
 	 * A quiet-status line earns a new word only after it was actually removed
 	 * from the render tree for live detail. This reactive Effect is rerun by SER
