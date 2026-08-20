@@ -1,7 +1,49 @@
 # Active Branch Handoff
 
-Last updated: 2026-08-19. Branch continuity only; durable verified product status belongs in
+Last updated: 2026-08-20. Branch continuity only; durable verified product status belongs in
 [`docs/status/backend-completion-matrix.md`](../docs/status/backend-completion-matrix.md).
+
+## Desync Layer Three: Conversation Delivery Starvation (found and fixed 2026-08-20)
+
+- The remaining "toast fires, rail shows finished, open transcript frozen" class — the socket
+  provably healthy — was per-subscription starvation in the backend delivery loop, two holes:
+  1. `EventAffectsConversation` (patch-selection.ts) gated conversation delivery on an event
+     predicate, but conversation patches are written by projection transactions *outside* the
+     journal, so no predicate can prove a wake carried none. At least six native-subagent
+     writers (`native-subagents.ts` graph actions like "provider observed subagent",
+     `run-transitions.ts` "retry_queued", `join-evaluation.ts` "aggregate_updated") wrote
+     patches and then journaled events the predicate rejected. Thread.list re-reads on any
+     graph lifecycle (rail updates), the raw event stream delivers (toast fires), conversation
+     is skipped, and if it was the run's last wake nothing is ever owed again.
+  2. `live-events.ts` discarded positive wakes with an empty trusted tail, but
+     `native-subagent-transcripts.ts` publishes its group's *stored* journal watermark after
+     writing patches — an already-delivered sequence, so the wake carrying those patches was
+     dropped as a duplicate.
+- Fix: conversation delivery is now unconditionally cursor-driven — every wake (duplicates
+  included) drains every subscribed conversation from its own `patch_sequence`; the predicate
+  and the empty-tail early return are gone. One indexed read per open conversation per wake,
+  returning nothing when nothing is pending. Also: `conversation-delivery.ts` no longer
+  advances `patch_sequence`/`sequence` when `PublishClaim` refused the publication (a lost
+  claim used to make the skipped window unreachable forever).
+- Renderer self-heal is now deterministic, not just the 30 s probe: on a run-lifecycle push
+  (the same one that raises the toast), `thread-route.svelte` compares the refreshed durable
+  work item against the transcript's own work_session; a settled run whose session never
+  settled on screen gets one `Resync` after a 2 s grace (`EnsureTranscriptSettled`). The 30 s
+  `WatchConversationLiveness` gate changed from `work === undefined` to `WorkIsActive()` —
+  `GetThreadWork` returns the pointer run in whatever state it settled, so the old gate was
+  reconciling every open settled thread forever.
+- Coverage: `conversation-delivery-performance.test.ts` (global drain + claim-refusal cursor
+  guard), `live-event-delivery-performance.test.ts` (conversation consulted on every wake,
+  empty/duplicate wakes included; surfaces stay predicate-gated),
+  `thread-route-liveness.test.ts` (active-gate + settle cross-check contracts).
+- Known holes deliberately left for later hardening (mapped, with file:line, in this session's
+  investigation): transport client silently ignores updates when `stream_id` is None
+  (`registry.ts:202-208`); `Queue.offerUnsafe` result discarded while `expected_sequence`
+  advances (`offers.ts`); `subscription.stopped` unhandled (`client-connection.ts:508`);
+  `reset_connection` read-then-update window can keep a stale completed `started`
+  (`registry.ts:487-503`); a poisoned `ConversationPatches` row fails `ReadPatches` for that
+  thread forever (`conversation/projection/read.ts:96-102` — snapshot fallback would heal);
+  registration refusal swallowed by the outer `PublishClaim` gate (`runtime.ts:91-146`).
 
 ## Thread Loading Surface (2026-08-19)
 

@@ -876,6 +876,49 @@
 		(patch.type === "turn_lifecycle" && settled_lifecycles.has(patch.lifecycle)) ||
 		(patch.type === "turn_upsert" && settled_lifecycles.has(patch.turn.lifecycle));
 
+	const active_work_statuses = new Set(["queued", "running", "waiting"]);
+	const WorkIsActive = () => work !== undefined && active_work_statuses.has(work.status);
+
+	/**
+	 * Whether the transcript has caught up with a settled run. The durable work
+	 * item and the transcript settle through different channels — the work item
+	 * through lifecycle events, the transcript through conversation patches —
+	 * so this is the one comparison that can prove the patch stream lost its
+	 * tail: the run is over everywhere else while the transcript's session for
+	 * it still claims to be live, or never appeared at all.
+	 */
+	const TranscriptReflectsSettledWork = () => {
+		const settled_work = work;
+		if (settled_work === undefined || active_work_statuses.has(settled_work.status)) {
+			return true;
+		}
+		const session = snapshot.items.findLast(
+			(item) => item.type === "work_session" && item.run_id === settled_work.run_id,
+		);
+		return (
+			session !== undefined &&
+			session.type === "work_session" &&
+			settled_lifecycles.has(session.status)
+		);
+	};
+
+	/**
+	 * Converges the transcript when a run's settlement provably never reached
+	 * it. Triggered by the same lifecycle push that raises the finish toast and
+	 * lights the rail — not a poll — and resyncing only after a grace beat,
+	 * because the settle patches usually ride the very wake that delivered the
+	 * event and merely have not applied yet.
+	 */
+	const EnsureTranscriptSettled = Effect.gen(function* () {
+		if (TranscriptReflectsSettledWork()) return;
+		yield* Effect.sleep("2 seconds");
+		if (TranscriptReflectsSettledWork()) return;
+		yield* Effect.logWarning("Transcript missed a settled run's tail; resyncing", {
+			thread_id,
+		});
+		yield* Resync;
+	});
+
 	/**
 	 * A conversation stream that has gone silent is indistinguishable from a
 	 * healthy idle one: the runner only recovers on stream end or error, and
@@ -998,7 +1041,15 @@
 					Stream.debounce("50 millis"),
 				);
 			}),
-			() => RefreshInteractionContext,
+			() =>
+				Effect.gen(function* () {
+					yield* RefreshInteractionContext;
+					/**
+					 * After the refresh, `work` is current: if it settled while the
+					 * transcript did not, the patch stream lost the run's tail.
+					 */
+					yield* Effect.forkIn(EnsureTranscriptSettled, thread_scope);
+				}),
 			RefreshInteractionContext,
 		),
 		thread_scope,
@@ -1007,8 +1058,14 @@
 		for (;;) {
 			yield* Effect.sleep(conversation_liveness_interval_ms);
 			const now = yield* Clock.currentTimeMillis;
-			/** An idle thread owes no deliveries; keep the probe armed from run start. */
-			if (work === undefined) {
+			/**
+			 * Only genuinely active work owes deliveries. Gating on the work item
+			 * existing was not that: `GetThreadWork` returns the pointer run in
+			 * whatever state it settled, so every open settled thread was being
+			 * reconciled on this interval forever — steady polling wearing a
+			 * watchdog's clothes.
+			 */
+			if (!WorkIsActive()) {
 				last_conversation_delivery_ms = now;
 				continue;
 			}
