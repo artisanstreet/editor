@@ -401,11 +401,21 @@
 	 */
 	const content_stamp = $derived(conversation_content_stamp(snapshot.items));
 	/**
+	 * True once this mount has placed the reader — restored their spot or
+	 * assigned the bottom. Until then every scroll the viewport emits is the
+	 * mount's own: the transcript renders empty and grows as the view state
+	 * arrives, and the follow pin drags through that growth to the bottom.
+	 * Remembering those frames overwrote the reader's place with "bottom" on
+	 * every open, which is why no position ever survived a reopen.
+	 */
+	let positioned = $state(false);
+	/**
 	 * Records the reading position from the scroll handler, which is a DOM
 	 * callback rather than an Effect site — so the write is forked into the
 	 * component's own scope instead of being yielded from a listener.
 	 */
 	const RememberScrollPosition = (scroll_top: number) => {
+		if (!positioned) return;
 		Effect.runFork(
 			scroll_memory.Remember(snapshot.thread_id, {
 				content_stamp,
@@ -691,24 +701,40 @@
 	 * Both destinations are assignments rather than scrolls: a thread being
 	 * entered has no position to animate away from, and animating one would
 	 * show the reader a journey through history they did not ask to take.
+	 *
+	 * Takes the view state as its argument for the same reason ReconcileAnchor
+	 * takes the transcript: the statement below must rerun when it arrives.
+	 * The viewport binds while the view state is still undefined and the
+	 * transcript is rendered from the view state, so positioning at bind time
+	 * measured an empty scroller — the restore clamped into nothing and the
+	 * follow pin then owned wherever the growth ended.
 	 */
-	const PositionLoadedThread = Effect.gen(function* () {
-		yield* Effect.promise(() => tick());
-		if (viewport === null) return;
-		const remembered = yield* scroll_memory.Recall(snapshot.thread_id);
-		const restore = thread_scroll_position_is_current(remembered, content_stamp)
-			? remembered.scroll_top
-			: undefined;
-		yield* RunBrowserDom(() => {
-			const bottom = ConversationBottomScrollTop(
-				viewport.scrollHeight,
-				viewport.clientHeight,
-			);
-			/** A remembered offset can outlive the height that made it reachable. */
-			viewport.scrollTop = restore === undefined ? bottom : Math.min(restore, bottom);
+	const PositionLoadedThread = (view_state: ConversationViewState | undefined) =>
+		Effect.gen(function* () {
+			if (view_state === undefined) return;
+			yield* Effect.promise(() => tick());
+			if (viewport === null || positioned) return;
+			/**
+			 * Placed before the assignment on purpose: the landing produces the
+			 * first scroll event this mount is allowed to remember.
+			 */
+			positioned = true;
+			const remembered = yield* scroll_memory.Recall(snapshot.thread_id);
+			const restore = thread_scroll_position_is_current(remembered, content_stamp)
+				? remembered.scroll_top
+				: undefined;
+			yield* RunBrowserDom(() => {
+				const bottom = ConversationBottomScrollTop(
+					viewport.scrollHeight,
+					viewport.clientHeight,
+				);
+				/** A remembered offset can outlive the height that made it reachable. */
+				viewport.scrollTop = restore === undefined ? bottom : Math.min(restore, bottom);
+			});
 		});
-	});
-	if (viewport !== null) yield* PositionLoadedThread;
+	if (viewport !== null && !positioned) {
+		yield* PositionLoadedThread(conversation_view_state);
+	}
 	yield* Effect.addFinalizer(() =>
 		Effect.gen(function* () {
 			yield* RunBrowserDom(() => cancelAnimationFrame(anchor_layout_frame));

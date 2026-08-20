@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
 import { ConversationItem } from "@artisan/protocol";
 import { Effect, Layer, Schema } from "effect";
 import { describe, expect, it } from "vitest";
@@ -179,5 +182,32 @@ describe("thread scroll memory", () => {
 		expect(conversation_content_stamp([session, reply, running("1 passed")])).not.toBe(
 			conversation_content_stamp([session, reply, running("1 passed\n2 passed")]),
 		);
+	});
+
+	/**
+	 * The mount order that broke restoring: the viewport binds while the view
+	 * state is still undefined, the transcript renders empty and grows, and the
+	 * follow pin drags through that growth to the bottom. Positioning must wait
+	 * for the view state, and nothing the viewport does before the reader has
+	 * been placed may overwrite what the memory holds.
+	 */
+	it("places the reader only after the transcript renders, and remembers only after placing", () => {
+		const workspace = readFileSync(
+			resolve(
+				import.meta.dirname,
+				"../..",
+				"modules/frontend/src/routes/components/thread-workspace.svelte",
+			),
+			"utf8",
+		);
+
+		expect(workspace).toContain(
+			"const PositionLoadedThread = (view_state: ConversationViewState | undefined) =>",
+		);
+		expect(workspace).toContain("if (view_state === undefined) return;");
+		expect(workspace).toContain("if (viewport === null || positioned) return;");
+		expect(workspace).toContain("yield* PositionLoadedThread(conversation_view_state);");
+		/** The memory gate inside the scroll handler's recorder. */
+		expect(workspace).toContain("if (!positioned) return;");
 	});
 });

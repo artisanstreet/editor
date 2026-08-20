@@ -300,7 +300,9 @@ describe("Barekey docs shell reset", () => {
 		const message = Read("modules/frontend/src/routes/components/conversation-message.svelte");
 
 		expect(workspace).toContain("bind:viewportRef={viewport}");
-		expect(workspace).toContain("const PositionLoadedThread = Effect.gen(function* ()");
+		expect(workspace).toContain(
+			"const PositionLoadedThread = (view_state: ConversationViewState | undefined) =>",
+		);
 		expect(workspace).toContain("Effect.promise(() => tick())");
 		expect(workspace).toContain("if (anchor_layout_revision > 0) yield* UpdateAnchorLayout");
 		expect(workspace).toContain("ConversationBottomScrollTop(");
